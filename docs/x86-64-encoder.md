@@ -121,7 +121,8 @@ the immediate (4 bytes; a 64-bit one continues in the displacement), the
 displacement (memory, or a branch's relative one), `reg`, `rm` (or the base, or
 the `+r` register), `index` (a general register, or a gather's or scatter's
 vector one, of its VSIB operand's class), `mode` (register direct, or a memory
-operand with base/index/RIP flags and the scale), the form (plus
+operand with base/index/RIP flags and the scale, plus `BUSTER_X86_MODE_DISP32`
+for a forced four-byte displacement after a base in a 32- or 64-bit address), the form (plus
 `BUSTER_X86_FORM_FS` or `BUSTER_X86_FORM_GS` for a segment override, and
 `BUSTER_X86_FORM_FIXUP` for an instruction with a symbolic operand: see
 "Fixups"), `vvvv` (VEX.vvvv and EVEX.V'vvvv's register) and `decorations`

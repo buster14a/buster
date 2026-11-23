@@ -4723,6 +4723,45 @@ static uint32_t tier1_select_result_parts(AbiReturn result, uint32_t size, Tier1
     return count;
 }
 
+// Whether a part of `bytes` in a vector register is wider than its xmm register (#2830): a whole ymm or zmm register's,
+// whose bits above 127 a vzeroupper would zero.
+static bool tier1_select_part_wide(Tier1SelectPart part)
+{
+    return (part.reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR && tier1_select_part_width(part.bytes) > 16;
+}
+
+// Whether a call passes an argument wider than 16 bytes in a vector register (#2830): an aggregate's whole ymm or zmm part
+// (#141), live in its register at the call, which no vzeroupper may then precede.
+static bool tier1_select_call_wide(const IrFunction* function, const IrCall* call)
+{
+    bool wide = false;
+    for (uint32_t argument = 0; call->abi != 0 && argument < call->argument_count; argument += 1)
+    {
+        const IrPassed* record = tier1_select_argument_record(function, call, argument);
+        Tier1SelectPart parts[2];
+        const uint32_t count = tier1_select_location_whole(record->location) ? 0 : tier1_select_location_parts(record->location, record->size, parts);
+        for (uint32_t k = 0; k < count; k += 1)
+        {
+            wide = wide || tier1_select_part_wide(parts[k]);
+        }
+    }
+    return wide;
+}
+
+// Whether the function returns a part wider than 16 bytes in a vector register (#2830): a vector's whole ymm or zmm register
+// (#141, #1624), live at each ret, which no vzeroupper may then precede.
+static bool tier1_select_result_wide(const IrFunction* function)
+{
+    Tier1SelectPart parts[BUSTER_TIER1_SELECT_RESULT_PARTS];
+    const uint32_t count = function->result_size != 0 ? tier1_select_result_parts(function->result_abi, function->result_size, parts) : 0;
+    bool wide = false;
+    for (uint32_t k = 0; k < count; k += 1)
+    {
+        wide = wide || tier1_select_part_wide(parts[k]);
+    }
+    return wide;
+}
+
 // The first red-zone staging slot of result part k (#1624): the slots of the staged parts before it, each an eightbyte's
 // one (tier1_select_part_slots), past those loaded straight from the result's address (#1847, tier1_select_part_direct),
 // which take none. Of k = the part count, the slots they all take, which BUSTER_TIER1_SELECT_RED_ZONE_SLOTS bounds

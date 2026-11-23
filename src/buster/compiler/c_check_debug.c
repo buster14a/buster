@@ -295,47 +295,6 @@ static bool check_debug_rows_protocol(const uint32_t* entry_records, const uint3
     return valid;
 }
 
-// The history runs that start at or before output token `output`: pp_history_at's search, whose origin is the last one's.
-static uint32_t check_debug_runs_at_most(const Preprocessor* pp, uint32_t output)
-{
-    uint32_t low = 0;
-    uint32_t high = pp->history_run_count;
-    while (low < high)
-    {
-        const uint32_t middle = low + (high - low) / 2;
-        if (pp->history_runs[middle].token <= output)
-        {
-            low = middle + 1;
-        }
-        else
-        {
-            high = middle;
-        }
-    }
-    return low;
-}
-
-// The line of offset `offset` in a file whose line starts are `lines` (`count` of them, the first 0): the line starts at
-// or before it, as pp_line_of counts them.
-static uint32_t check_debug_line_at(const uint32_t* lines, uint32_t count, uint32_t offset)
-{
-    uint32_t low = 1;
-    uint32_t high = count;
-    while (low < high)
-    {
-        const uint32_t middle = low + (high - low) / 2;
-        if (lines[middle] <= offset)
-        {
-            low = middle + 1;
-        }
-        else
-        {
-            high = middle;
-        }
-    }
-    return low;
-}
-
 // A file key's name: a PPFile's path, or a #line's.
 static String8 check_debug_file_name(const Preprocessor* pp, uint32_t key)
 {
@@ -360,6 +319,11 @@ struct CheckDebugSource
     uint32_t* directives;
     uint32_t* file_keys;
     uint32_t* directive_keys;
+    // The history runs' index, as the files' line index (pp_line_index): for each 64 output tokens, a bit at each run's
+    // first and how many runs start before them. Null where two runs start at one token, whose rows then take the exact
+    // path.
+    uint64_t* run_bits;
+    uint32_t* runs_before;
 };
 
 // The key of name `name` (check_debug_source's table of `capacity` slots, a power of two, of keys or
@@ -439,6 +403,30 @@ static bool check_debug_source(CheckDebugSource* source, Preprocessor* pp, const
     {
         source->first[pp->range_count] = count;
     }
+    // The runs' index, where the runs start at increasing tokens; one past the last output token's block has room for
+    // a run at the output's end.
+    const uint32_t blocks = pp->output.count / 64 + 1;
+    uint64_t* bits = valid ? BUSTER_ARENA_PUSH_ARRAY(arena, uint64_t, blocks) : NULL;
+    uint32_t* before = bits != NULL ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, blocks) : NULL;
+    bool increasing = before != NULL;
+    if (increasing)
+    {
+        memset(bits, 0, (uint64_t)blocks * sizeof(uint64_t));
+    }
+    for (uint32_t run = 0; increasing && run < pp->history_run_count; run += 1)
+    {
+        const uint32_t token = pp->history_runs[run].token;
+        increasing = run == 0 || pp->history_runs[run - 1].token < token;
+        bits[token < pp->output.count ? token / 64 : blocks - 1] |= token < pp->output.count ? 1ull << (token % 64) : 0;
+    }
+    uint32_t started = 0;
+    for (uint32_t block = 0; increasing && block < blocks; block += 1)
+    {
+        before[block] = started;
+        started += (uint32_t)__builtin_popcountll(bits[block]);
+    }
+    source->run_bits = increasing ? bits : NULL;
+    source->runs_before = increasing ? before : NULL;
     return valid;
 }
 
@@ -479,8 +467,11 @@ static void check_debug_line_scalar(const CheckDebugSource* source, uint32_t tok
     *line = 0;
     if (range != BUSTER_PP_NONE && pp->ranges[range].file != BUSTER_PP_NONE)
     {
-        pp_diagnostic_lines(pp, range);
-        uint32_t presumed = pp_line_of(pp, range, location, 0);
+        PPFileData* data = &pp->datas[pp->files[pp->ranges[range].file].data];
+        pp_line_index(pp, data);
+        // The line as pp_line_of counts it, from the line index where there is room for one.
+        uint32_t presumed = data->line_end_bits != 0 ? pp_line_indexed(data, location - pp->ranges[range].base < data->length ? location - pp->ranges[range].base : data->length) :
+                                                       pp_line_of(pp, range, location, 0);
         uint32_t file = source->file_keys[pp->ranges[range].file];
         // The range's last #line at or before the place.
         const uint32_t before = check_debug_directive(source, range, location);
@@ -497,23 +488,19 @@ static void check_debug_line_scalar(const CheckDebugSource* source, uint32_t tok
 
 // The vector path's bounds for one function's rows (check_debug_lines). Its rows' tokens are among those from its
 // declaration to its closing brace, whose output tokens are `first_output` and `last_output` and whose places, `begin`
-// and `end`, are in one file's range (`base`, its file's line starts `lines`), with no #line between them. A row whose
-// output token and place are between those then has its history run in [first_run, end_run) (the runs before
-// first_run start at or before first_output, and the one at end_run after last_output), its line in [first_line,
-// end_line), and the #line's `delta` and the file `key` of every such row.
+// and `end`, are in one file's range (`base`, its file's line index `line_end_bits` and `line_ends_before`), with no
+// #line between them. A row whose output token and place are between those then has the #line's `delta` and the file
+// `key` of every such row.
 typedef struct CheckDebugSpan CheckDebugSpan;
 struct CheckDebugSpan
 {
     uint32_t first_output;
     uint32_t last_output;
-    uint32_t first_run;
-    uint32_t end_run;
     uint32_t begin;
     uint32_t end;
     uint32_t base;
-    const uint32_t* lines;
-    uint32_t first_line;
-    uint32_t end_line;
+    const uint64_t* line_end_bits;
+    const uint32_t* line_ends_before;
     uint32_t delta;
     uint32_t key;
 };
@@ -524,7 +511,7 @@ static bool check_debug_span(const CheckDebugSource* source, uint32_t declaratio
 {
     Preprocessor* pp = source->pp;
     const Parser* parser = source->parser;
-    bool valid = declaration < parser->tokens.count && closing < parser->tokens.count;
+    bool valid = declaration < parser->tokens.count && closing < parser->tokens.count && source->run_bits != NULL;
     const uint32_t first = valid ? parse_source_index(&parser->tokens, declaration) : 0;
     const uint32_t last = valid ? parse_source_index(&parser->tokens, closing) : 0;
     valid = valid && first <= last && last < pp->output.count;
@@ -534,10 +521,10 @@ static bool check_debug_span(const CheckDebugSource* source, uint32_t declaratio
     valid = range != BUSTER_PP_NONE && pp_find_range(pp, end) == range && pp->ranges[range].file != BUSTER_PP_NONE;
     if (valid)
     {
-        pp_diagnostic_lines(pp, range);
         const PPRange* record = &pp->ranges[range];
-        const PPFileData* data = &pp->datas[pp->files[record->file].data];
-        valid = data->diagnostic_lines != 0 && end - record->base < data->length;
+        PPFileData* data = &pp->datas[pp->files[record->file].data];
+        pp_line_index(pp, data);
+        valid = data->line_end_bits != 0 && end - record->base < data->length;
         // The #line in force at the declaration, which must still be in force at the closing brace.
         const uint32_t before = check_debug_directive(source, range, begin);
         const uint32_t applies = before != 0 ? source->directives[source->first[range] + before - 1] : BUSTER_PP_NONE;
@@ -548,20 +535,35 @@ static bool check_debug_span(const CheckDebugSource* source, uint32_t declaratio
             *span = (CheckDebugSpan){
                 .first_output = first,
                 .last_output = last,
-                .first_run = check_debug_runs_at_most(pp, first),
-                .end_run = check_debug_runs_at_most(pp, last),
                 .begin = begin,
                 .end = end,
                 .base = record->base,
-                .lines = data->diagnostic_lines,
-                .first_line = check_debug_line_at(data->diagnostic_lines, data->diagnostic_line_count, begin - record->base),
-                .end_line = check_debug_line_at(data->diagnostic_lines, data->diagnostic_line_count, end - record->base),
+                .line_end_bits = data->line_end_bits,
+                .line_ends_before = data->line_ends_before,
                 .delta = applies != BUSTER_PP_NONE ? (uint32_t)pp->line_directives[applies].delta : 0,
                 .key = named ? source->directive_keys[applies] : source->file_keys[record->file],
             };
         }
     }
     return valid;
+}
+
+// For each lane of `active`, how many of an index's marks (a bit per position, 64 positions a block, and the marks before
+// each block) come before position `at` and its first `below` bits in its block: the marks before its block and those
+// among them; 0 in the other lanes. `below` is at most 64.
+static __m512i check_debug_indexed_count(const uint64_t* bits, const uint32_t* before, __m512i at, __m512i below, __mmask16 active)
+{
+    const __m512i zero = _mm512_setzero_si512();
+    const __m512i block = _mm512_srli_epi32(at, 6);
+    const __m512i prior = _mm512_mask_i32gather_epi32(zero, active, block, before, 4);
+    const __m512i ones = _mm512_set1_epi64(-1);
+    const __m512i low_bits = _mm512_mask_i32gather_epi64(zero, (__mmask8)active, _mm512_castsi512_si256(block), bits, 8);
+    const __m512i high_bits = _mm512_mask_i32gather_epi64(zero, (__mmask8)(active >> 8), _mm512_extracti64x4_epi64(block, 1), bits, 8);
+    // Each lane's bits below its count: the shift of all ones by 64 is 0, which keeps them all.
+    const __m512i low_kept = _mm512_andnot_si512(_mm512_sllv_epi64(ones, _mm512_cvtepu32_epi64(_mm512_castsi512_si256(below))), low_bits);
+    const __m512i high_kept = _mm512_andnot_si512(_mm512_sllv_epi64(ones, _mm512_cvtepu32_epi64(_mm512_extracti64x4_epi64(below, 1))), high_bits);
+    const __m512i counts = _mm512_inserti64x4(_mm512_castsi256_si512(_mm512_cvtepi64_epi32(_mm512_popcnt_epi64(low_kept))), _mm512_cvtepi64_epi32(_mm512_popcnt_epi64(high_kept)), 1);
+    return _mm512_maskz_add_epi32(active, prior, counts);
 }
 
 // The file keys and lines of `count` rows' tokens of the function whose declaration and closing brace are `declaration`
@@ -590,19 +592,8 @@ static void check_debug_lines(const CheckDebugSource* source, uint32_t declarati
             const __m512i output = parse_source_gather(&parser->tokens, token, known);
             __mmask16 inside = _mm512_mask_cmpge_epu32_mask(known, output, _mm512_set1_epi32((int)span.first_output)) &
                                _mm512_cmple_epu32_mask(output, _mm512_set1_epi32((int)span.last_output));
-            // The history run: the runs at or before the output token, within the function's.
-            __m512i low = _mm512_set1_epi32((int)span.first_run);
-            __m512i high = _mm512_set1_epi32((int)span.end_run);
-            __mmask16 active = _mm512_mask_cmplt_epu32_mask(inside, low, high);
-            while (active != 0)
-            {
-                const __m512i middle = _mm512_add_epi32(low, _mm512_srli_epi32(_mm512_sub_epi32(high, low), 1));
-                const __m512i start = _mm512_mask_i32gather_epi32(zero, active, _mm512_slli_epi32(middle, 1), pp->history_runs, 4);
-                const __mmask16 after = _mm512_mask_cmple_epu32_mask(active, start, output);
-                low = _mm512_mask_add_epi32(low, after, middle, one);
-                high = _mm512_mask_mov_epi32(high, active & ~after, middle);
-                active = _mm512_mask_cmplt_epu32_mask(inside, low, high);
-            }
+            // The history run: the runs at or before the output token, by the runs' index (through the token itself).
+            const __m512i low = check_debug_indexed_count(source->run_bits, source->runs_before, output, _mm512_add_epi32(_mm512_and_si512(output, _mm512_set1_epi32(63)), one), inside);
             const __mmask16 run = _mm512_mask_cmpneq_epu32_mask(inside, low, zero);
             __m512i origin = _mm512_mask_i32gather_epi32(zero, run, _mm512_sub_epi32(_mm512_slli_epi32(low, 1), one), pp->history_runs, 4);
             __m512i location = _mm512_mask_i32gather_epi32(zero, inside, output, pp->output.locations, 4);
@@ -638,21 +629,10 @@ static void check_debug_lines(const CheckDebugSource* source, uint32_t declarati
             }
             const __mmask16 fast = (inside & ~walking) & _mm512_cmpge_epu32_mask(location, _mm512_set1_epi32((int)span.begin)) &
                                    _mm512_cmple_epu32_mask(location, _mm512_set1_epi32((int)span.end));
-            // The line: the function's line starts at or before the place's offset in its file.
+            // The line: 1 and the file's line ends before the place's offset in it, by its line index.
             const __m512i offset = _mm512_sub_epi32(location, _mm512_set1_epi32((int)span.base));
-            low = _mm512_set1_epi32((int)span.first_line);
-            high = _mm512_set1_epi32((int)span.end_line);
-            active = _mm512_mask_cmplt_epu32_mask(fast, low, high);
-            while (active != 0)
-            {
-                const __m512i middle = _mm512_add_epi32(low, _mm512_srli_epi32(_mm512_sub_epi32(high, low), 1));
-                const __m512i start = _mm512_mask_i32gather_epi32(zero, active, middle, span.lines, 4);
-                const __mmask16 after = _mm512_mask_cmple_epu32_mask(active, start, offset);
-                low = _mm512_mask_add_epi32(low, after, middle, one);
-                high = _mm512_mask_mov_epi32(high, active & ~after, middle);
-                active = _mm512_mask_cmplt_epu32_mask(fast, low, high);
-            }
-            _mm512_mask_storeu_epi32(lines + i, fast, _mm512_add_epi32(low, _mm512_set1_epi32((int)span.delta)));
+            const __m512i line = check_debug_indexed_count(span.line_end_bits, span.line_ends_before, offset, _mm512_and_si512(offset, _mm512_set1_epi32(63)), fast);
+            _mm512_mask_storeu_epi32(lines + i, fast, _mm512_add_epi32(_mm512_add_epi32(line, one), _mm512_set1_epi32((int)span.delta)));
             _mm512_mask_storeu_epi32(keys + i, fast, _mm512_set1_epi32((int)span.key));
             for (uint32_t rest = valid & ~fast; rest != 0; rest &= rest - 1)
             {

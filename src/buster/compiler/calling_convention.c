@@ -42,15 +42,15 @@
 // arguments are at increasing offsets from rsp at the call, each aligned to 8 or to its alignment if larger. Where
 // clang's count runs ahead of the registers LLVM gives (after an UNCOUNTED one, a PAIR LLVM put on the stack, a
 // LOW_GENERAL one or a DEMOTED result), what clang leaves to LLVM as a value, a scalar or a small aggregate passed as an
-// integer, takes the register LLVM still has (abi_assign_call); one that needs two may be split (SPLIT).
+// integer, takes the register LLVM still has (abi_assign_lanes); one that needs two may be split (SPLIT).
 //
 // Entry points: abi_initialize (the table, with the builtin types classified), abi_classify_all (every complete type
 // not yet classified, in levels whose types depend only on earlier ones) and abi_classify (one such level: the vector
 // path); abi_assign (many calls' arguments and results: the vector path, 16 arguments at a time across calls);
 // abi_classes and abi_va_arg (va_arg's plan for a type). The classification has one implementation, the vector fold,
-// which needs no memory but the stack, as do abi_classify_levels' scans (#2957). The assignment keeps a fallback until
-// it is vectorized (#2924's phase D, #2958), which gives the same results: abi_assign_scalar, the per-call assignment
-// (abi_assign_call), for the calls the vector path leaves and when its columns have no room.
+// which needs no memory but the stack, as do abi_classify_levels' scans (#2957). The assignment is the prefix sums for
+// most calls and a per-call kernel, a call's arguments 16 at a time, for those the sums can't place, with no memory but
+// the stack either (#2958, #3375).
 //
 // Who writes what: the table is the code generator's, which classifies after the front end has made the types (the
 // type table's columns never change once written, but a tag's at its completion, after which abi_classify_all
@@ -82,8 +82,9 @@
 //     abi_members_classified, abi_dependencies_classified, abi_is_larger_root, abi_schedule_wide, abi_unclassified,
 //     AbiCensus, abi_census, AbiScanned, abi_classify_scan, abi_classify_pending, abi_classify_levels, abi_classify_all
 //     and abi_classes.
-//   - Assignment: abi_stack_place, abi_assign_call (the fallback, one call), abi_assign_scalar, the vector path's AbiScan,
-//     abi_scan, abi_scan_add, abi_scan_or and abi_assign.
+//   - Assignment: abi_stack_place (the interpreter's), the prefix sums' AbiScan, abi_scan, abi_scan_add and abi_scan_or,
+//     the per-call kernel (AbiLanesArguments, AbiLanesDecision, abi_lanes_decide, abi_lanes_sum, abi_lanes_sum64,
+//     abi_lanes_place, abi_assign_lanes), abi_assign_deferred and abi_assign.
 //   - va_arg: abi_va_arg.
 
 #include <stdint.h>
@@ -477,9 +478,8 @@ static __attribute__((unused)) AbiClasses abi_classes(const AbiTable* abi, TypeI
 // Each call's arguments' locations (`locations`, as `arguments` is indexed) and its totals and result (`calls`). Every
 // argument's and result's type must be classified, and its pass bits not UNSUPPORTED, nor its stack bytes UINT32_MAX:
 // the code generator refuses those first. The vector path takes 16 arguments at a time across calls, and gives the
-// calls it can't decide exactly to its fallback, which takes one call at a time.
+// calls it can't decide exactly to its per-call kernel, which takes a call's arguments 16 at a time.
 static __attribute__((unused)) void abi_assign(const AbiTable* abi, AbiSignatures signatures, AbiLocation* locations, AbiCall* calls);
-static __attribute__((unused)) void abi_assign_scalar(const AbiTable* abi, AbiSignatures signatures, AbiLocation* locations, AbiCall* calls);
 // va_arg's plan for a classified type, after the default argument promotions.
 static __attribute__((unused)) AbiVaArg abi_va_arg(const AbiTable* abi, const TypeTable* table, TypeId type);
 
@@ -2184,7 +2184,12 @@ __attribute__((cold, noinline)) static AbiRare abi_finish_rare(AbiTable* abi, co
 // else gives the union's bytes their own byval slot; or of an
 // aggregate member in memory, which clang passes as the member (getIndirectResult of it: byval at its alignment, the
 // union's bytes, or as an integer of its size where it has 8 bytes or less, aligned to 8 or less, and clang no general
-// register left). Another member keeps its refusal (check_lower_transparent_passed).
+// register left). A member in memory may be LARGER (#3400: an _Atomic of a type of no size, or a record holding one,
+// which is in memory for it): getIndirectResult reads the member's C size and alignment, never its copy's, and the slot
+// is the union's, which is never LARGER (clang lays a union out in its own bytes), so a GROWN member is an integer of its
+// size where clang has no general register left, as it is alone, and its copy's bytes are none of the union's. Every
+// union of a GROWN member differs: its stack bytes are 8 where its member's are 16 or more, unless its own alignment of
+// 16 or more sets them, which differs from the member's. Another member keeps its refusal (check_lower_transparent_passed).
 static uint32_t abi_finish_transparent(const AbiTable* abi, const TypeTable* table, uint32_t index)
 {
     uint32_t result = 0;
@@ -2192,11 +2197,13 @@ static uint32_t abi_finish_transparent(const AbiTable* abi, const TypeTable* tab
     {
         const uint32_t tag = table->types.index[index];
         const uint32_t member = table->tags.member_count[tag] != 0 ? table->members.type[table->tags.member_begin[tag]] >> BUSTER_TYPE_INDEX_SHIFT : 0;
-        const uint32_t refused = BUSTER_ABI_PASS_WIDE | BUSTER_ABI_PASS_UNCOUNTED | BUSTER_ABI_PASS_IGNORE |
-                                 BUSTER_ABI_PASS_LARGER | BUSTER_ABI_PASS_GROWN | BUSTER_ABI_PASS_UNSUPPORTED | BUSTER_ABI_PASS_EMPTY | BUSTER_ABI_PASS_END_MEMORY;
+        const uint32_t refused = BUSTER_ABI_PASS_WIDE | BUSTER_ABI_PASS_UNCOUNTED | BUSTER_ABI_PASS_IGNORE | BUSTER_ABI_PASS_UNSUPPORTED | BUSTER_ABI_PASS_EMPTY |
+                                 BUSTER_ABI_PASS_END_MEMORY;
+        const uint32_t larger = BUSTER_ABI_PASS_LARGER | BUSTER_ABI_PASS_GROWN;
         const uint32_t pass = member != 0 && member < abi->capacity ? abi->pass[member] : 0;
         const bool in_memory = (pass & BUSTER_ABI_PASS_MEMORY) != 0;
-        const bool simple = (pass & BUSTER_ABI_PASS_CLASSIFIED) != 0 && (pass & refused) == 0 && (!in_memory || (pass & BUSTER_ABI_PASS_AGGREGATE) != 0);
+        const bool placed = in_memory ? (pass & BUSTER_ABI_PASS_AGGREGATE) != 0 : (pass & larger) == 0;
+        const bool simple = (pass & BUSTER_ABI_PASS_CLASSIFIED) != 0 && (pass & refused) == 0 && placed;
         const bool differs = simple && (abi->stack_bytes[index] != abi->stack_bytes[member] || abi->alignment_log2[index] != abi->alignment_log2[member]);
         result = differs ? member : 0;
     }
@@ -3333,264 +3340,15 @@ static AbiClasses abi_classes(const AbiTable* abi, TypeId type, bool named)
 // ---------------------------------------------------------------------------------------------------------------------
 // Assignment
 
-// The argument area's next slot of `bytes` bytes, aligned to 2^alignment_log2: its offset; the area grows past it, and
-// its alignment to the slot's.
-static uint32_t abi_stack_place(uint64_t* stack, uint8_t* area_alignment_log2, uint64_t bytes, uint32_t alignment_log2)
+// A stack slot of `bytes` aligned to 2^alignment_log2 after the area's `stack` bytes: its offset, the area's end past
+// it, and the area's alignment the largest (abi_lanes_place takes 16 at once; the interpreter, one).
+static __attribute__((unused)) uint32_t abi_stack_place(uint64_t* stack, uint8_t* area_alignment_log2, uint64_t bytes, uint32_t alignment_log2)
 {
     const uint64_t alignment = 1ull << alignment_log2;
     const uint64_t offset = (*stack + alignment - 1) & ~(alignment - 1);
     *stack = offset + bytes;
     *area_alignment_log2 = alignment_log2 > *area_alignment_log2 ? (uint8_t)alignment_log2 : *area_alignment_log2;
     return (uint32_t)offset;
-}
-
-// One call, as clang and LLVM assign it (the vector path's fallback): clang decides from its count of free registers
-// whether an argument's eightbytes go to registers; LLVM then gives each value it gets the next register of its kind
-// or, once there is none, a stack slot of its own. The two counts differ where clang counts otherwise than LLVM
-// assigns: LLVM uses registers clang doesn't count for an UNCOUNTED argument, a DEMOTED result's hidden pointer and a
-// LOW_GENERAL low eightbyte (counted as SSE), so that an eightbyte clang meant for a register can land on the stack
-// (SPLIT); and clang counts registers LLVM doesn't use for a named WIDE vector of a variadic call and a PAIR on the
-// stack, which LLVM then gives to the values clang sends to memory after them.
-static AbiCall abi_assign_call(const AbiTable* abi, const TypeId* arguments, uint32_t count, uint32_t named, bool variadic, TypeId result, AbiLocation* locations)
-{
-    AbiCall call = {
-        .stack_bytes = 0,
-        .stack_alignment_log2 = BUSTER_ABI_STACK_ALIGNMENT_LOG2,
-        .integer_registers = 0,
-        .vector_registers = 0,
-        .padding = 0,
-        .result = abi->results[result >> BUSTER_TYPE_INDEX_SHIFT],
-    };
-    // The free registers as clang counts them, and the used ones as LLVM assigns them.
-    uint32_t clang_integers = BUSTER_ABI_INTEGER_ARGUMENTS;
-    uint32_t clang_vectors = BUSTER_ABI_VECTOR_ARGUMENTS;
-    uint32_t integers = 0;
-    uint32_t vectors = 0;
-    uint64_t stack = 0;
-    if (call.result.kind == BUSTER_ABI_RESULT_MEMORY)
-    {
-        clang_integers -= (call.result.flags & BUSTER_ABI_FLAG_DEMOTED) != 0 ? 0u : 1u;
-        integers = 1;
-    }
-    for (uint32_t i = 0; i < count; i += 1)
-    {
-        // A transparent union of a slot of its own (AbiTable.transparent) passes as its first member, but for its byval
-        // slot where clang has no register for it.
-        const uint32_t own = arguments[i] >> BUSTER_TYPE_INDEX_SHIFT;
-        const uint32_t member = abi->transparent[own];
-        const uint32_t index = member != 0 ? member : own;
-        // Whether the argument takes the union's own byval slot (getIndirectResult of it, or of its member in memory).
-        bool own_slot = false;
-        const uint32_t pass = abi->pass[index];
-        const uint32_t bytes = abi->stack_bytes[index];
-        const uint32_t alignment_log2 = (pass & BUSTER_ABI_PASS_ALIGNMENT) >> BUSTER_ABI_PASS_ALIGNMENT_SHIFT;
-        const bool unnamed = i >= named;
-        const bool in_memory = (pass & BUSTER_ABI_PASS_MEMORY) != 0 || ((pass & BUSTER_ABI_PASS_WIDE) != 0 && unnamed);
-        const uint32_t need_integers = ((pass & BUSTER_ABI_PASS_LOW_INTEGER) != 0 ? 1u : 0u) + ((pass & BUSTER_ABI_PASS_HIGH_INTEGER) != 0 ? 1u : 0u);
-        const uint32_t need_vectors = ((pass & BUSTER_ABI_PASS_LOW_SSE) != 0 ? 1u : 0u) + ((pass & BUSTER_ABI_PASS_HIGH_SSE) != 0 ? 1u : 0u);
-        AbiLocation location = {
-            .stack_offset = 0,
-            .registers = {
-                BUSTER_ABI_REGISTER_NONE,
-                BUSTER_ABI_REGISTER_NONE,
-            },
-            .kind = BUSTER_ABI_LOCATION_IGNORE,
-            .flags = (uint8_t)((pass >> 10) & (BUSTER_ABI_FLAG_SIGN | BUSTER_ABI_FLAG_ZERO)),
-        };
-        if ((pass & BUSTER_ABI_PASS_IGNORE) != 0)
-        {
-        }
-        else if (in_memory && (pass & BUSTER_ABI_PASS_UNCOUNTED) != 0)
-        {
-            const uint32_t value = (pass & BUSTER_ABI_PASS_VALUE) >> BUSTER_ABI_PASS_VALUE_SHIFT;
-            location.kind = BUSTER_ABI_LOCATION_REGISTERS;
-            if (value == BUSTER_ABI_VALUE_GENERAL && integers < BUSTER_ABI_INTEGER_ARGUMENTS)
-            {
-                location.registers[0] = abi_integer_arguments[integers];
-                integers += 1;
-            }
-            else if (value == BUSTER_ABI_VALUE_PAIR && integers + 2 <= BUSTER_ABI_INTEGER_ARGUMENTS)
-            {
-                location.registers[0] = abi_integer_arguments[integers];
-                location.registers[1] = abi_integer_arguments[integers + 1];
-                integers += 2;
-            }
-            else if (value == BUSTER_ABI_VALUE_VECTOR && vectors < BUSTER_ABI_VECTOR_ARGUMENTS && (!variadic || bytes <= BUSTER_ABI_REGISTER_BYTES))
-            {
-                location.registers[0] = (uint8_t)(BUSTER_ABI_REGISTER_VECTOR | vectors);
-                vectors += 1;
-            }
-            else if (value == BUSTER_ABI_VALUE_HALVES)
-            {
-                uint32_t stacked = 0;
-                for (uint32_t half = 0; half < 2; half += 1)
-                {
-                    const bool in_register = integers < BUSTER_ABI_INTEGER_ARGUMENTS;
-                    const uint32_t slot = in_register ? 0 : abi_stack_place(&stack, &call.stack_alignment_log2, BUSTER_ABI_SLOT_BYTES, BUSTER_ABI_SLOT_LOG2);
-                    location.registers[half] = in_register ? abi_integer_arguments[integers] : location.registers[half];
-                    location.stack_offset = !in_register && stacked == 0 ? slot : location.stack_offset;
-                    integers += in_register ? 1 : 0;
-                    stacked += in_register ? 0 : 1;
-                }
-                location.kind = stacked == 0 ? BUSTER_ABI_LOCATION_REGISTERS : stacked == 2 ? BUSTER_ABI_LOCATION_STACK : BUSTER_ABI_LOCATION_SPLIT;
-            }
-            else
-            {
-                location.kind = BUSTER_ABI_LOCATION_STACK;
-                location.stack_offset = abi_stack_place(&stack, &call.stack_alignment_log2, bytes, alignment_log2);
-            }
-        }
-        else if (!in_memory && (pass & BUSTER_ABI_PASS_AGGREGATE) == 0 && need_integers == 0 && clang_vectors < need_vectors && vectors < BUSTER_ABI_VECTOR_ARGUMENTS &&
-                 !((pass & BUSTER_ABI_PASS_WIDE) != 0 && variadic))
-        {
-            // A scalar or a vector clang finds no vector register for, after named WIDE vectors of a variadic call that
-            // clang counted and LLVM put on the stack: clang leaves it to LLVM as a value (getIndirectResult), which
-            // gives it the register it has.
-            location.kind = BUSTER_ABI_LOCATION_REGISTERS;
-            location.registers[0] = (uint8_t)(BUSTER_ABI_REGISTER_VECTOR | vectors);
-            vectors += 1;
-        }
-        else if (!in_memory && (pass & (BUSTER_ABI_PASS_AGGREGATE | BUSTER_ABI_PASS_PAIR)) == 0 && need_vectors == 0 && need_integers == 1 &&
-                 clang_integers == 0 && integers < BUSTER_ABI_INTEGER_ARGUMENTS)
-        {
-            // The same for a general register, after a PAIR that clang counted two for and LLVM put on the stack.
-            location.kind = BUSTER_ABI_LOCATION_REGISTERS;
-            location.registers[0] = abi_integer_arguments[integers];
-            integers += 1;
-        }
-        else if (in_memory || clang_integers < need_integers || clang_vectors < need_vectors)
-        {
-            // With no general register free, clang passes an aggregate of 8 bytes or less, aligned to 8 or less, as an
-            // integer of its size (getIndirectResult), MEMORY or not: LLVM gives it a general register if it has one
-            // left (after a count of clang's that LLVM's runs behind), else 8 bytes of the stack, as a copy would take
-            // (a GROWN one's copy takes more: MEMORY, 8 bytes or less in C and aligned to 8 or less, it is never of no
-            // size); one of no size is an i0, which takes none (EMPTY).
-            // A transparent union of a slot of its own (AbiTable.transparent) is the union to getIndirectResult where clang
-            // has no register for its member (its own bytes and alignment), and the member where the member is in memory
-            // (the member's size and alignment, the union's bytes); an integer of 8 bytes is the low eightbyte alone of
-            // a union larger than it (LOW).
-            const bool grown = (pass & BUSTER_ABI_PASS_GROWN) != 0;
-            const bool own_union = member != 0 && !in_memory;
-            const uint32_t own_log2 = abi->alignment_log2[own] > BUSTER_ABI_SLOT_LOG2 ? abi->alignment_log2[own] : BUSTER_ABI_SLOT_LOG2;
-            const uint32_t slot_log2 = own_union ? own_log2 : alignment_log2;
-            const uint32_t indirect_bytes = own_union ? abi->stack_bytes[own] : bytes;
-            const bool aggregate = member != 0 || (pass & BUSTER_ABI_PASS_AGGREGATE) != 0;
-            const bool integer = grown && member == 0 ? clang_integers == 0
-                                                      : aggregate && indirect_bytes == BUSTER_ABI_SLOT_BYTES && slot_log2 == BUSTER_ABI_SLOT_LOG2 && clang_integers == 0;
-            const bool vanishes = integer && (pass & BUSTER_ABI_PASS_EMPTY) != 0;
-            const bool in_register = integer && !vanishes && integers < BUSTER_ABI_INTEGER_ARGUMENTS;
-            const uint32_t slot_bytes = integer ? BUSTER_ABI_SLOT_BYTES : member != 0 ? abi->stack_bytes[own] : bytes;
-            location.kind = vanishes ? BUSTER_ABI_LOCATION_IGNORE : in_register ? BUSTER_ABI_LOCATION_REGISTERS : BUSTER_ABI_LOCATION_STACK;
-            location.registers[0] = in_register ? abi_integer_arguments[integers] : BUSTER_ABI_REGISTER_NONE;
-            location.flags |= integer && !in_register && member != 0 && abi->stack_bytes[own] > BUSTER_ABI_SLOT_BYTES ? BUSTER_ABI_FLAG_LOW : 0;
-            own_slot = member != 0 && !integer;
-            integers += in_register ? 1 : 0;
-            location.stack_offset = vanishes || in_register ? 0 : abi_stack_place(&stack, &call.stack_alignment_log2, slot_bytes, slot_log2);
-        }
-        else if ((pass & (BUSTER_ABI_PASS_VECTOR | BUSTER_ABI_PASS_PAIR)) != 0)
-        {
-            // One value: a vector register, or two general ones; LLVM puts it on the stack whole if it hasn't them, and a
-            // vector wider than 16 bytes in a variadic call always (its slot aligned to its size), clang having counted a
-            // register for it all the same (LLVM's FIXME on CCIfNotVarArg: the psABI, and GCC, pass a named one in a
-            // register).
-            const bool wide_on_stack = (pass & BUSTER_ABI_PASS_WIDE) != 0 && variadic;
-            clang_integers -= need_integers;
-            clang_vectors -= need_vectors;
-            location.kind = BUSTER_ABI_LOCATION_REGISTERS;
-            if ((pass & BUSTER_ABI_PASS_VECTOR) != 0 && !wide_on_stack && vectors < BUSTER_ABI_VECTOR_ARGUMENTS)
-            {
-                location.registers[0] = (uint8_t)(BUSTER_ABI_REGISTER_VECTOR | vectors);
-                vectors += 1;
-            }
-            else if ((pass & BUSTER_ABI_PASS_PAIR) != 0 && integers + 2 <= BUSTER_ABI_INTEGER_ARGUMENTS)
-            {
-                location.registers[0] = abi_integer_arguments[integers];
-                location.registers[1] = abi_integer_arguments[integers + 1];
-                integers += 2;
-            }
-            else if ((pass & BUSTER_ABI_PASS_PAIR) != 0)
-            {
-                // A PAIR LLVM puts on the stack as an i128, aligned to 16 whatever the record's alignment.
-                const uint32_t pair_log2 = alignment_log2 < 4 ? 4 : alignment_log2;
-                location.kind = BUSTER_ABI_LOCATION_STACK;
-                location.stack_offset = abi_stack_place(&stack, &call.stack_alignment_log2, bytes, pair_log2);
-            }
-            else
-            {
-                // A vector LLVM puts on the stack as its value (CCAssignToStack): a slot of its register's width, aligned
-                // to it, which holds its payload alone (#2113: a record's <size / 8 x double>, its result's part_bytes;
-                // a vector's all, which a vector of _BitInt(128)s returned in memory has no result's part_bytes for),
-                // PAYLOAD where the C type's bytes run past it.
-                const AbiReturn returned = abi->results[index];
-                const bool held = returned.kind == BUSTER_ABI_RESULT_REGISTERS && returned.registers[0] == BUSTER_ABI_REGISTER_VECTOR &&
-                                  returned.registers[1] == BUSTER_ABI_REGISTER_NONE && returned.part_bytes >= BUSTER_ABI_REGISTER_BYTES;
-                const uint32_t payload = held ? returned.part_bytes : bytes;
-                const uint32_t width = abi_vector_register_bytes(payload);
-                location.kind = BUSTER_ABI_LOCATION_STACK;
-                location.flags |= payload < bytes ? BUSTER_ABI_FLAG_PAYLOAD : 0;
-                location.stack_offset = abi_stack_place(&stack, &call.stack_alignment_log2, width, (uint32_t)__builtin_ctz(width));
-            }
-        }
-        else
-        {
-            // An eightbyte at a time, the low one (unless it is padding) then the high one, each a value of its own.
-            clang_integers -= need_integers;
-            clang_vectors -= need_vectors;
-            const uint32_t classes[2] = {
-                (pass & (BUSTER_ABI_PASS_LOW_INTEGER | BUSTER_ABI_PASS_LOW_GENERAL)) != 0 ? 1u : (pass & BUSTER_ABI_PASS_LOW_SSE) != 0 ? 2u : 0u,
-                (pass & BUSTER_ABI_PASS_HIGH_INTEGER) != 0 ? 1u : (pass & BUSTER_ABI_PASS_HIGH_SSE) != 0 ? 2u : 0u,
-            };
-            uint32_t parts = 0;
-            uint32_t stacked = 0;
-            for (uint32_t half = 0; half < 2; half += 1)
-            {
-                if (classes[half] == 1 && integers < BUSTER_ABI_INTEGER_ARGUMENTS)
-                {
-                    location.registers[parts] = abi_integer_arguments[integers];
-                    integers += 1;
-                }
-                else if (classes[half] == 2 && vectors < BUSTER_ABI_VECTOR_ARGUMENTS)
-                {
-                    location.registers[parts] = (uint8_t)(BUSTER_ABI_REGISTER_VECTOR | vectors);
-                    vectors += 1;
-                }
-                else if (classes[half] != 0)
-                {
-                    const uint32_t slot = abi_stack_place(&stack, &call.stack_alignment_log2, BUSTER_ABI_SLOT_BYTES, BUSTER_ABI_SLOT_LOG2);
-                    location.stack_offset = stacked == 0 ? slot : location.stack_offset;
-                    stacked += 1;
-                }
-                parts += classes[half] != 0 ? 1 : 0;
-            }
-            location.flags |= classes[0] == 0 ? BUSTER_ABI_FLAG_HIGH : 0;
-            // The low eightbyte alone in its slot, of a value larger than it: 8 bytes, the next argument's slot after them
-            // (a transparent union's, of its own size, AbiTable.transparent).
-            const uint32_t value_bytes = member != 0 ? abi->stack_bytes[own] : bytes;
-            location.flags |= classes[1] == 0 && stacked != 0 && value_bytes > BUSTER_ABI_SLOT_BYTES ? BUSTER_ABI_FLAG_LOW : 0;
-            location.kind = stacked == 0 ? BUSTER_ABI_LOCATION_REGISTERS : stacked == parts ? BUSTER_ABI_LOCATION_STACK : BUSTER_ABI_LOCATION_SPLIT;
-        }
-        // A transparent union past 16 bytes in its member's registers, eightbytes' slots or value's slot (a PAIR's i128, a
-        // vector's 16 bytes, where LLVM has no register left): those of its first 16 bytes.
-        const bool member_parts = location.kind != BUSTER_ABI_LOCATION_IGNORE && !own_slot;
-        location.flags |= member != 0 && abi->stack_bytes[own] > BUSTER_ABI_REGISTER_BYTES && member_parts ? BUSTER_ABI_FLAG_FIRST : 0;
-        locations[i] = location;
-    }
-    call.stack_bytes = (uint32_t)stack;
-    call.integer_registers = (uint8_t)integers;
-    call.vector_registers = (uint8_t)vectors;
-    return call;
-}
-
-static void abi_assign_scalar(const AbiTable* abi, AbiSignatures signatures, AbiLocation* locations, AbiCall* calls)
-{
-    uint64_t first = 0;
-    for (uint32_t c = 0; c < signatures.count; c += 1)
-    {
-        const uint32_t count = signatures.counts[c];
-        const uint32_t named = signatures.named[c] < count ? signatures.named[c] : count;
-        calls[c] = abi_assign_call(abi, signatures.arguments + first, count, named, signatures.variadic[c] != 0, signatures.results[c], locations + first);
-        first += count;
-    }
 }
 
 // The vector path's marks, which its setup writes per call: at the call's first argument START, HIDDEN if its result
@@ -3606,10 +3364,10 @@ static void abi_assign_scalar(const AbiTable* abi, AbiSignatures signatures, Abi
 
 // The most arguments a call may have for the vector path to assign it: each class's prefix sum of registers has 16 bits
 // of a lane, and an argument needs at most two registers of a class, the hidden pointer one more (2 * 32,767 + 1 =
-// 65,535). A longer call goes to the fallback: past it, the general registers' sum would carry into the vector ones'.
+// 65,535). A longer call goes to the per-call kernel: past it, the general registers' sum would carry into the vector ones'.
 #define BUSTER_ABI_COUNTED_ARGUMENTS 32767u
 #define BUSTER_ABI_LANES 16
-// The bit of a call's ORed slot alignments (every one 8 or more) that says the fallback must assign the call.
+// The bit of a call's ORed slot alignments (every one 8 or more) that says the per-call kernel must assign the call.
 #define BUSTER_ABI_LANE_DEFERRED 0x01
 
 // A segmented scan's windows: steps[k] holds the lanes that add the lane 2^k below them (no segment starts between),
@@ -3658,13 +3416,452 @@ static __m512i abi_scan_or(__m512i values, AbiScan scan, __m512i carry)
     return _mm512_mask_or_epi32(result, scan.continuing, result, carry);
 }
 
+// The per-call kernel takes a call's arguments 16 at a time, one per 32-bit lane (#3375). An argument's location
+// depends on the arguments before it only through four register counts, clang's and LLVM's of each class (the stack
+// slots before it set its offset alone, and nothing decides by them), and on those only through a few thresholds. Each
+// lane's counts are a byte each of one 32-bit word, its counts word: the general and the vector registers LLVM has
+// used (bytes 0 and 1: units of BUSTER_ABI_LANES_ONE and BUSTER_ABI_LANES_LLVM_VECTOR), and those clang has
+// counted as used (bytes 2 and 3: six or eight less the ones it counts as free).
+#define BUSTER_ABI_LANES_LLVM_VECTOR (1u << 8)
+#define BUSTER_ABI_LANES_CLANG_INTEGER (1u << 16)
+#define BUSTER_ABI_LANES_ONE 1u
+
+// What the kernel's rules read of 16 arguments that doesn't depend on the counts before them, worked out once per 16
+// arguments: the lanes each rule may take (the counts decide which do) and what clang counts for an argument it gives
+// registers (`need`, its classes' registers in bytes 2 and 3).
+typedef struct AbiLanesArguments AbiLanesArguments;
+struct AbiLanesArguments
+{
+    __m512i need_integers;
+    __m512i need_vectors;
+    __m512i need;
+    __mmask16 counted;
+    __mmask16 in_memory;
+    __mmask16 value_general;
+    __mmask16 value_pair;
+    __mmask16 value_vector;
+    __mmask16 value_halves;
+    __mmask16 late_vector;
+    __mmask16 late_general;
+    __mmask16 integer;
+    __mmask16 integer_register;
+    __mmask16 wholes;
+    __mmask16 whole_vector;
+    __mmask16 pair;
+    __mmask16 low_general;
+    __mmask16 low_vector;
+    __mmask16 high_general;
+    __mmask16 high_vector;
+};
+
+// Which rule takes each lane, given the counts before it (`counts`, a counts word per lane), and what the lane adds to
+// them (`delta`).
+typedef struct AbiLanesDecision AbiLanesDecision;
+struct AbiLanesDecision
+{
+    __m512i delta;
+    __mmask16 value_general;
+    __mmask16 value_pair;
+    __mmask16 value_vector;
+    __mmask16 value_low;
+    __mmask16 value_high;
+    __mmask16 late_vector;
+    __mmask16 late_general;
+    __mmask16 memory;
+    __mmask16 integer;
+    __mmask16 in_register;
+    __mmask16 whole;
+    __mmask16 in_vector;
+    __mmask16 in_pair;
+    __mmask16 halves;
+    __mmask16 low_in_general;
+    __mmask16 low_in_vector;
+    __mmask16 high_in_general;
+    __mmask16 high_in_vector;
+};
+
+// clang's and LLVM's assignment of an argument, each of their rules a mask over the lanes, from the counts before each
+// lane. clang decides from its count of free registers whether an argument's eightbytes go to registers; LLVM then gives
+// each value it gets the next register of its kind or, once there is none, a stack slot of its own. The two counts
+// differ where clang counts otherwise than LLVM assigns: LLVM uses registers clang doesn't count for an UNCOUNTED
+// argument, a DEMOTED result's hidden pointer and a LOW_GENERAL low eightbyte (counted as SSE), so that an eightbyte
+// clang meant for a register can land on the stack (SPLIT); and clang counts registers LLVM doesn't use for a named
+// WIDE vector of a variadic call and a PAIR on the stack, which LLVM then gives to the values clang sends to memory
+// after them.
+static AbiLanesDecision abi_lanes_decide(const AbiLanesArguments* arguments, __m512i counts)
+{
+    const __m512i byte = _mm512_set1_epi32(0xff);
+    const __m512i integers = _mm512_and_si512(counts, byte);
+    const __m512i vectors = _mm512_and_si512(_mm512_srli_epi32(counts, 8), byte);
+    const __m512i clang_integers = _mm512_and_si512(_mm512_srli_epi32(counts, 16), byte);
+    const __m512i clang_vectors = _mm512_srli_epi32(counts, 24);
+    // LLVM's registers left (a general one, two; a vector one, two) and clang's (too few for the argument; no general one).
+    const __mmask16 integers_free = _mm512_cmplt_epu32_mask(integers, _mm512_set1_epi32(BUSTER_ABI_INTEGER_ARGUMENTS));
+    const __mmask16 pair_free = _mm512_cmplt_epu32_mask(integers, _mm512_set1_epi32(BUSTER_ABI_INTEGER_ARGUMENTS - 1));
+    const __mmask16 vectors_free = _mm512_cmplt_epu32_mask(vectors, _mm512_set1_epi32(BUSTER_ABI_VECTOR_ARGUMENTS));
+    const __mmask16 two_vectors_free = _mm512_cmplt_epu32_mask(vectors, _mm512_set1_epi32(BUSTER_ABI_VECTOR_ARGUMENTS - 1));
+    const __mmask16 clang_short_integers = _mm512_cmpgt_epu32_mask(_mm512_add_epi32(clang_integers, arguments->need_integers), _mm512_set1_epi32(BUSTER_ABI_INTEGER_ARGUMENTS));
+    const __mmask16 clang_short_vectors = _mm512_cmpgt_epu32_mask(_mm512_add_epi32(clang_vectors, arguments->need_vectors), _mm512_set1_epi32(BUSTER_ABI_VECTOR_ARGUMENTS));
+    const __mmask16 clang_none = _mm512_cmpge_epu32_mask(clang_integers, _mm512_set1_epi32(BUSTER_ABI_INTEGER_ARGUMENTS));
+    AbiLanesDecision result;
+    // UNCOUNTED in memory: the value LLVM gets, in the registers it has (HALVES: each half a general register while one
+    // is left).
+    result.value_general = arguments->value_general & integers_free;
+    result.value_pair = arguments->value_pair & pair_free;
+    result.value_vector = arguments->value_vector & vectors_free;
+    result.value_low = arguments->value_halves & integers_free;
+    result.value_high = arguments->value_halves & pair_free;
+    // A scalar or a vector clang finds no vector register for, after named WIDE vectors of a variadic call that clang
+    // counted and LLVM put on the stack: clang leaves it to LLVM as a value, which gives it the register it has. The same
+    // for a general register, after a PAIR that clang counted two for and LLVM put on the stack.
+    result.late_vector = arguments->late_vector & clang_short_vectors & vectors_free;
+    result.late_general = arguments->late_general & clang_none & integers_free;
+    const __mmask16 rest = arguments->counted & (__mmask16)~(result.late_vector | result.late_general);
+    // In memory, or with too few registers as clang counts them; else what clang counts registers for: one value (a
+    // vector register, or two general ones) or an eightbyte at a time.
+    result.memory = rest & (arguments->in_memory | clang_short_integers | clang_short_vectors);
+    const __mmask16 taken = rest & (__mmask16)~result.memory;
+    result.whole = taken & arguments->wholes;
+    result.halves = taken & (__mmask16)~arguments->wholes;
+    // With no general register free as clang counts them, an integer (getIndirectResult) in the general register LLVM
+    // has left.
+    result.integer = result.memory & clang_none & arguments->integer;
+    result.in_register = result.integer & arguments->integer_register & integers_free;
+    // One value, in its vector register or its two general ones if LLVM has them.
+    result.in_vector = result.whole & arguments->whole_vector & vectors_free;
+    result.in_pair = result.whole & (__mmask16)~result.in_vector & arguments->pair & pair_free;
+    // An eightbyte at a time: the low one, then the high one in the next register LLVM has of its class.
+    result.low_in_general = result.halves & arguments->low_general & integers_free;
+    result.low_in_vector = result.halves & arguments->low_vector & vectors_free;
+    result.high_in_general = result.halves & arguments->high_general & ((arguments->low_general & pair_free) | ((__mmask16)~arguments->low_general & integers_free));
+    result.high_in_vector = result.halves & arguments->high_vector & ((arguments->low_vector & two_vectors_free) | ((__mmask16)~arguments->low_vector & vectors_free));
+    // What each lane adds to the counts: a general register LLVM uses, a second one, a vector one, a second one, and
+    // clang's count of what it gave registers.
+    const __mmask16 first_integer = result.value_general | result.value_pair | result.value_low | result.late_general | result.in_register | result.in_pair | result.low_in_general;
+    const __mmask16 second_integer = result.value_pair | result.value_high | result.in_pair | result.high_in_general;
+    const __mmask16 first_vector = result.value_vector | result.late_vector | result.in_vector | result.low_in_vector;
+    __m512i delta = _mm512_maskz_mov_epi32(taken, arguments->need);
+    delta = _mm512_mask_add_epi32(delta, first_integer, delta, _mm512_set1_epi32(BUSTER_ABI_LANES_ONE));
+    delta = _mm512_mask_add_epi32(delta, second_integer, delta, _mm512_set1_epi32(BUSTER_ABI_LANES_ONE));
+    delta = _mm512_mask_add_epi32(delta, first_vector, delta, _mm512_set1_epi32(BUSTER_ABI_LANES_LLVM_VECTOR));
+    result.delta = _mm512_mask_add_epi32(delta, result.high_in_vector, delta, _mm512_set1_epi32(BUSTER_ABI_LANES_LLVM_VECTOR));
+    return result;
+}
+
+// Inclusive sums of 16 lanes, from `carry`.
+static __m512i abi_lanes_sum(__m512i values, __m512i carry)
+{
+    const __m512i zero = _mm512_setzero_si512();
+    __m512i result = _mm512_add_epi32(values, _mm512_alignr_epi32(values, zero, 15));
+    result = _mm512_add_epi32(result, _mm512_alignr_epi32(result, zero, 14));
+    result = _mm512_add_epi32(result, _mm512_alignr_epi32(result, zero, 12));
+    result = _mm512_add_epi32(result, _mm512_alignr_epi32(result, zero, 8));
+    return _mm512_add_epi32(result, carry);
+}
+
+// Inclusive sums of 8 64-bit lanes, from `carry`.
+static __m512i abi_lanes_sum64(__m512i values, __m512i carry)
+{
+    const __m512i zero = _mm512_setzero_si512();
+    __m512i result = _mm512_add_epi64(values, _mm512_alignr_epi64(values, zero, 7));
+    result = _mm512_add_epi64(result, _mm512_alignr_epi64(result, zero, 6));
+    result = _mm512_add_epi64(result, _mm512_alignr_epi64(result, zero, 4));
+    return _mm512_add_epi64(result, carry);
+}
+
+// Each lane of `placed` takes a stack slot of `bytes` aligned to 2^log2, in lane order, as abi_stack_place takes one:
+// its offset (the low 8 lanes' in `low`, the high ones' in `high`), the area's end past them (`*stack`) and its
+// alignment the largest (`*area`). The offsets are the slots' sums, from `*stack`, until a lane's isn't aligned: the
+// lanes from the first such one move up by its padding, and so on (64-bit lanes: an alignment may be 2^32 or more, and
+// the offsets as many bytes).
+static void abi_lanes_place(__mmask16 placed, __m512i bytes, __m512i log2, uint64_t* stack, uint32_t* area, __m512i* low, __m512i* high)
+{
+    const __m512i one = _mm512_set1_epi64(1);
+    const __m512i placed_bytes = _mm512_maskz_mov_epi32(placed, bytes);
+    const __m512i low_bytes = _mm512_cvtepu32_epi64(_mm512_castsi512_si256(placed_bytes));
+    const __m512i high_bytes = _mm512_cvtepu32_epi64(_mm512_extracti64x4_epi64(placed_bytes, 1));
+    const __m512i low_below = _mm512_sub_epi64(_mm512_sllv_epi64(one, _mm512_cvtepu32_epi64(_mm512_castsi512_si256(log2))), one);
+    const __m512i high_below = _mm512_sub_epi64(_mm512_sllv_epi64(one, _mm512_cvtepu32_epi64(_mm512_extracti64x4_epi64(log2, 1))), one);
+    const __mmask8 low_placed = (__mmask8)placed;
+    const __mmask8 high_placed = (__mmask8)(placed >> 8);
+    const __m512i low_inclusive = abi_lanes_sum64(low_bytes, _mm512_set1_epi64((long long)*stack));
+    __m512i low_offsets = _mm512_sub_epi64(low_inclusive, low_bytes);
+    __m512i high_offsets = _mm512_sub_epi64(abi_lanes_sum64(high_bytes, _mm512_permutexvar_epi64(_mm512_set1_epi64(7), low_inclusive)), high_bytes);
+    __mmask16 misaligned = (__mmask16)(_mm512_mask_test_epi64_mask(low_placed, low_offsets, low_below) | (uint32_t)_mm512_mask_test_epi64_mask(high_placed, high_offsets, high_below) << 8);
+    while (misaligned != 0)
+    {
+        const uint32_t lane = (uint32_t)__builtin_ctz(misaligned);
+        const __m512i low_padding = _mm512_and_si512(_mm512_sub_epi64(_mm512_setzero_si512(), low_offsets), low_below);
+        const __m512i high_padding = _mm512_and_si512(_mm512_sub_epi64(_mm512_setzero_si512(), high_offsets), high_below);
+        const __m512i padding = _mm512_permutex2var_epi64(low_padding, _mm512_set1_epi64(lane), high_padding);
+        const uint32_t from = 0xffffu << lane;
+        low_offsets = _mm512_mask_add_epi64(low_offsets, (__mmask8)from, low_offsets, padding);
+        high_offsets = _mm512_mask_add_epi64(high_offsets, (__mmask8)(from >> 8), high_offsets, padding);
+        misaligned = (__mmask16)(_mm512_mask_test_epi64_mask(low_placed, low_offsets, low_below) | (uint32_t)_mm512_mask_test_epi64_mask(high_placed, high_offsets, high_below) << 8);
+    }
+    *stack = (uint64_t)_mm_cvtsi128_si64(_mm512_castsi512_si128(_mm512_permutexvar_epi64(_mm512_set1_epi64(7), _mm512_add_epi64(high_offsets, high_bytes))));
+    const uint32_t largest = _mm512_mask_reduce_max_epu32(placed, log2);
+    *area = largest > *area ? largest : *area;
+    *low = _mm512_maskz_mov_epi64(low_placed, low_offsets);
+    *high = _mm512_maskz_mov_epi64(high_placed, high_offsets);
+}
+
+// A call the prefix sums can't assign (`call`, its first argument at `first`), its arguments 16 at a time: each lane's
+// counts are the sums of what the lanes before it add, which abi_lanes_decide works out from those counts, so the
+// rules decide again from the sums of their last decisions until those are the same. A lane's counts are right once
+// every lane's before it are, so this takes at most 17 rounds and almost always 1 to 3, the decisions of the lanes after
+// a rule that changes the counts all changing in the same round. Then each lane's registers come from its counts, and
+// its stack slot, if any, from the sums of the slots before it (abi_lanes_place).
+static void abi_assign_lanes(const AbiTable* abi, AbiSignatures signatures, uint32_t call, uint64_t first, AbiLocation* locations, AbiCall* calls)
+{
+    const uint32_t count = signatures.counts[call];
+    const uint32_t named = signatures.named[call] < count ? signatures.named[call] : count;
+    const bool variadic = signatures.variadic[call] != 0;
+    const AbiReturn result = abi->results[signatures.results[call] >> BUSTER_TYPE_INDEX_SHIFT];
+    const bool hidden = result.kind == BUSTER_ABI_RESULT_MEMORY;
+    const bool demoted = hidden && (result.flags & BUSTER_ABI_FLAG_DEMOTED) != 0;
+    // The hidden pointer takes rdi, which clang counts unless LLVM demoted the result.
+    uint32_t counts = (hidden ? BUSTER_ABI_LANES_ONE : 0) | (hidden && !demoted ? BUSTER_ABI_LANES_CLANG_INTEGER : 0);
+    uint64_t stack = 0;
+    uint32_t area = BUSTER_ABI_STACK_ALIGNMENT_LOG2;
+    const __m512i zero = _mm512_setzero_si512();
+    const __m512i one = _mm512_set1_epi32(1);
+    const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+    const __m512i general = _mm512_setr_epi32(BUSTER_ABI_RDI, BUSTER_ABI_RSI, BUSTER_ABI_RDX, BUSTER_ABI_RCX, BUSTER_ABI_R8, BUSTER_ABI_R9, BUSTER_ABI_REGISTER_NONE,
+                                              BUSTER_ABI_REGISTER_NONE, BUSTER_ABI_REGISTER_NONE, BUSTER_ABI_REGISTER_NONE, BUSTER_ABI_REGISTER_NONE, BUSTER_ABI_REGISTER_NONE,
+                                              BUSTER_ABI_REGISTER_NONE, BUSTER_ABI_REGISTER_NONE, BUSTER_ABI_REGISTER_NONE, BUSTER_ABI_REGISTER_NONE);
+    const __m512i none = _mm512_set1_epi32(BUSTER_ABI_REGISTER_NONE);
+    const __m512i vector_register = _mm512_set1_epi32(BUSTER_ABI_REGISTER_VECTOR);
+    const __m512i slot_bytes = _mm512_set1_epi32(BUSTER_ABI_SLOT_BYTES);
+    const __m512i slot_log2 = _mm512_set1_epi32(BUSTER_ABI_SLOT_LOG2);
+    const __m512i interleave_low = _mm512_setr_epi32(0, 16, 1, 17, 2, 18, 3, 19, 4, 20, 5, 21, 6, 22, 7, 23);
+    const __m512i interleave_high = _mm512_setr_epi32(8, 24, 9, 25, 10, 26, 11, 27, 12, 28, 13, 29, 14, 30, 15, 31);
+#define BUSTER_ABI_LANES_TEST(value, bits) _mm512_test_epi32_mask((value), _mm512_set1_epi32((int)(bits)))
+    for (uint32_t base = 0; base < count; base += BUSTER_ABI_LANES)
+    {
+        const uint32_t remaining = count - base;
+        const __mmask16 valid = remaining >= BUSTER_ABI_LANES ? (__mmask16)0xffff : (__mmask16)((1u << remaining) - 1);
+        // A transparent union of a slot of its own (AbiTable.transparent) passes as its first member, but for its byval
+        // slot where clang has no register for it. The three gathers don't wait for one another: each lane's own type's
+        // columns, then the member's for the lanes that have one (rare), with the union's own alignment (a byte of its
+        // column: the 32 bits from it, the rest of the column's room past it).
+        const __m512i own = _mm512_srli_epi32(_mm512_maskz_loadu_epi32(valid, signatures.arguments + first + base), BUSTER_TYPE_INDEX_SHIFT);
+        const __m512i member = _mm512_mask_i32gather_epi32(zero, valid, own, abi->transparent, 4);
+        __m512i pass = _mm512_mask_i32gather_epi32(zero, valid, own, abi->pass, 4);
+        __m512i bytes = _mm512_mask_i32gather_epi32(zero, valid, own, abi->stack_bytes, 4);
+        const __mmask16 transparent = _mm512_test_epi32_mask(member, member);
+        const __m512i index = _mm512_mask_mov_epi32(own, transparent, member);
+        // The union's own bytes: 0 but in a transparent union's lanes, so that the rules comparing them hold there alone.
+        const __m512i own_bytes = _mm512_maskz_mov_epi32(transparent, bytes);
+        __m512i own_alignment = zero;
+        if (transparent != 0)
+        {
+            pass = _mm512_mask_i32gather_epi32(pass, transparent, member, abi->pass, 4);
+            bytes = _mm512_mask_i32gather_epi32(bytes, transparent, member, abi->stack_bytes, 4);
+            own_alignment = _mm512_and_si512(_mm512_mask_i32gather_epi32(zero, transparent, own, (const void*)abi->alignment_log2, 1), _mm512_set1_epi32(0xff));
+        }
+        const __m512i alignment_log2 = _mm512_srli_epi32(_mm512_and_si512(pass, _mm512_set1_epi32((int)BUSTER_ABI_PASS_ALIGNMENT)), BUSTER_ABI_PASS_ALIGNMENT_SHIFT);
+        const __mmask16 unnamed = _mm512_cmpge_epu32_mask(_mm512_add_epi32(lanes, _mm512_set1_epi32((int)base)), _mm512_set1_epi32((int)named));
+        const __mmask16 wide = BUSTER_ABI_LANES_TEST(pass, BUSTER_ABI_PASS_WIDE);
+        const __mmask16 wide_variadic = variadic ? wide : 0;
+        const __mmask16 aggregate = BUSTER_ABI_LANES_TEST(pass, BUSTER_ABI_PASS_AGGREGATE);
+        const __mmask16 pair = BUSTER_ABI_LANES_TEST(pass, BUSTER_ABI_PASS_PAIR);
+        const __mmask16 vector = BUSTER_ABI_LANES_TEST(pass, BUSTER_ABI_PASS_VECTOR);
+        const __mmask16 in_memory = BUSTER_ABI_LANES_TEST(pass, BUSTER_ABI_PASS_MEMORY) | (wide & unnamed);
+        const __mmask16 passed = valid & (__mmask16)~BUSTER_ABI_LANES_TEST(pass, BUSTER_ABI_PASS_IGNORE);
+        const __mmask16 uncounted = passed & in_memory & BUSTER_ABI_LANES_TEST(pass, BUSTER_ABI_PASS_UNCOUNTED);
+        const __mmask16 counted = passed & (__mmask16)~uncounted;
+        const __m512i value = _mm512_srli_epi32(_mm512_and_si512(pass, _mm512_set1_epi32((int)BUSTER_ABI_PASS_VALUE)), BUSTER_ABI_PASS_VALUE_SHIFT);
+        const __mmask16 small = _mm512_cmple_epu32_mask(bytes, _mm512_set1_epi32(BUSTER_ABI_REGISTER_BYTES));
+        const __m512i need_integers = _mm512_add_epi32(_mm512_and_si512(pass, one), _mm512_and_si512(_mm512_srli_epi32(pass, 2), one));
+        const __m512i need_vectors = _mm512_add_epi32(_mm512_and_si512(_mm512_srli_epi32(pass, 1), one), _mm512_and_si512(_mm512_srli_epi32(pass, 3), one));
+        const __mmask16 no_integers = _mm512_cmpeq_epi32_mask(need_integers, zero);
+        const __mmask16 no_vectors = _mm512_cmpeq_epi32_mask(need_vectors, zero);
+        // A transparent union of a slot of its own is the union to getIndirectResult where clang has no register for its
+        // member (its own bytes and alignment), and the member where the member is in memory (the member's size and
+        // alignment, the union's bytes).
+        const __mmask16 own_union = transparent & (__mmask16)~in_memory;
+        const __m512i place_log2 = _mm512_mask_mov_epi32(alignment_log2, own_union, _mm512_max_epu32(own_alignment, slot_log2));
+        const __m512i indirect_bytes = _mm512_mask_mov_epi32(bytes, own_union, own_bytes);
+        const __mmask16 word = (transparent | aggregate) & _mm512_cmpeq_epi32_mask(indirect_bytes, slot_bytes) & _mm512_cmpeq_epi32_mask(place_log2, slot_log2);
+        AbiLanesArguments arguments;
+        arguments.need_integers = need_integers;
+        arguments.need_vectors = need_vectors;
+        arguments.need = _mm512_or_si512(_mm512_slli_epi32(need_integers, 16), _mm512_slli_epi32(need_vectors, 24));
+        arguments.counted = counted;
+        arguments.in_memory = in_memory;
+        arguments.value_general = uncounted & _mm512_cmpeq_epi32_mask(value, _mm512_set1_epi32(BUSTER_ABI_VALUE_GENERAL));
+        arguments.value_pair = uncounted & _mm512_cmpeq_epi32_mask(value, _mm512_set1_epi32(BUSTER_ABI_VALUE_PAIR));
+        arguments.value_vector = uncounted & _mm512_cmpeq_epi32_mask(value, _mm512_set1_epi32(BUSTER_ABI_VALUE_VECTOR)) & (variadic ? small : (__mmask16)0xffff);
+        arguments.value_halves = uncounted & _mm512_cmpeq_epi32_mask(value, _mm512_set1_epi32(BUSTER_ABI_VALUE_HALVES));
+        arguments.late_vector = counted & (__mmask16)~in_memory & (__mmask16)~aggregate & no_integers & (__mmask16)~wide_variadic;
+        arguments.late_general = counted & (__mmask16)~in_memory & (__mmask16)~(aggregate | pair) & no_vectors & _mm512_cmpeq_epi32_mask(need_integers, one);
+        // With no general register free, clang passes an aggregate of 8 bytes or less, aligned to 8 or less, as an
+        // integer of its size, MEMORY or not (a GROWN one's copy takes more, a transparent union's GROWN member's too,
+        // #3400); one of no size is an i0, which takes none (EMPTY).
+        arguments.integer = BUSTER_ABI_LANES_TEST(pass, BUSTER_ABI_PASS_GROWN) | word;
+        arguments.integer_register = (__mmask16)~BUSTER_ABI_LANES_TEST(pass, BUSTER_ABI_PASS_EMPTY);
+        arguments.wholes = vector | pair;
+        arguments.whole_vector = vector & (__mmask16)~wide_variadic;
+        arguments.pair = pair;
+        arguments.low_general = BUSTER_ABI_LANES_TEST(pass, BUSTER_ABI_PASS_LOW_INTEGER | BUSTER_ABI_PASS_LOW_GENERAL);
+        arguments.low_vector = (__mmask16)~arguments.low_general & BUSTER_ABI_LANES_TEST(pass, BUSTER_ABI_PASS_LOW_SSE);
+        arguments.high_general = BUSTER_ABI_LANES_TEST(pass, BUSTER_ABI_PASS_HIGH_INTEGER);
+        arguments.high_vector = (__mmask16)~arguments.high_general & BUSTER_ABI_LANES_TEST(pass, BUSTER_ABI_PASS_HIGH_SSE);
+        // The rules decide from the sums of their last decisions until those are the same, starting from what the
+        // prefix sums would take: every argument not in memory its registers, an UNCOUNTED one its value's.
+        const __m512i carry = _mm512_set1_epi32((int)counts);
+        const __m512i registers_need = _mm512_or_si512(_mm512_or_si512(arguments.need, need_integers), _mm512_slli_epi32(need_vectors, 8));
+        __m512i delta = _mm512_maskz_mov_epi32(counted & (__mmask16)~in_memory, registers_need);
+        delta = _mm512_mask_add_epi32(delta, arguments.value_general | arguments.value_pair | arguments.value_halves, delta, one);
+        delta = _mm512_mask_add_epi32(delta, arguments.value_pair | arguments.value_halves, delta, one);
+        delta = _mm512_mask_add_epi32(delta, arguments.value_vector, delta, _mm512_set1_epi32(BUSTER_ABI_LANES_LLVM_VECTOR));
+        __m512i before;
+        AbiLanesDecision decision;
+        __mmask16 changed;
+        do
+        {
+            before = _mm512_sub_epi32(abi_lanes_sum(delta, carry), delta);
+            decision = abi_lanes_decide(&arguments, before);
+            changed = _mm512_cmpneq_epi32_mask(decision.delta, delta);
+            delta = decision.delta;
+        } while (changed != 0);
+        counts = (uint32_t)_mm_cvtsi128_si32(_mm512_castsi512_si128(_mm512_permutexvar_epi32(_mm512_set1_epi32(BUSTER_ABI_LANES - 1), _mm512_add_epi32(before, delta))));
+        // The registers: LLVM's next general ones and vector ones at each lane.
+        const __m512i integers = _mm512_and_si512(before, _mm512_set1_epi32(0xff));
+        const __m512i vectors = _mm512_and_si512(_mm512_srli_epi32(before, 8), _mm512_set1_epi32(0xff));
+        const __m512i first_general = _mm512_permutexvar_epi32(integers, general);
+        const __m512i second_general = _mm512_permutexvar_epi32(_mm512_add_epi32(integers, one), general);
+        const __m512i first_vector = _mm512_or_si512(vectors, vector_register);
+        const __m512i second_vector = _mm512_or_si512(_mm512_add_epi32(vectors, one), vector_register);
+        // An eightbyte at a time: its low one (unless it is padding), then its high one.
+        const __mmask16 halves = decision.halves;
+        const __mmask16 low = halves & (arguments.low_general | arguments.low_vector);
+        const __mmask16 high = halves & (arguments.high_general | arguments.high_vector);
+        const __mmask16 low_out = low & (__mmask16)~(decision.low_in_general | decision.low_in_vector);
+        const __mmask16 high_in = decision.high_in_general | decision.high_in_vector;
+        const __mmask16 high_out = high & (__mmask16)~high_in;
+        const __mmask16 stacked = low_out | high_out;
+        const __mmask16 all_stacked = (low_out | (__mmask16)~low) & (high_out | (__mmask16)~high);
+        __m512i first_register = none;
+        __m512i second_register = none;
+        first_register = _mm512_mask_mov_epi32(first_register,
+                                               decision.value_general | decision.value_pair | decision.value_low | decision.late_general | decision.in_register | decision.in_pair |
+                                                   decision.low_in_general | (decision.high_in_general & (__mmask16)~low),
+                                               first_general);
+        first_register = _mm512_mask_mov_epi32(first_register,
+                                               decision.value_vector | decision.late_vector | decision.in_vector | decision.low_in_vector | (decision.high_in_vector & (__mmask16)~low),
+                                               first_vector);
+        // The high eightbyte after a low one, in the register after the low one's if that took one of its class.
+        second_register = _mm512_mask_mov_epi32(second_register, decision.value_pair | decision.value_high | decision.in_pair | (decision.high_in_general & low & decision.low_in_general),
+                                                second_general);
+        second_register = _mm512_mask_mov_epi32(second_register, decision.high_in_general & low & (__mmask16)~decision.low_in_general, first_general);
+        second_register = _mm512_mask_mov_epi32(second_register, decision.high_in_vector & low & decision.low_in_vector, second_vector);
+        second_register = _mm512_mask_mov_epi32(second_register, decision.high_in_vector & low & (__mmask16)~decision.low_in_vector, first_vector);
+        // The stack slots: the lanes LLVM puts there, each one slot (an UNCOUNTED value's HALVES and an eightbyte at a
+        // time's two take 8 bytes each, one after the other).
+        const __mmask16 value_stack = uncounted & (__mmask16)~(decision.value_general | decision.value_pair | decision.value_vector | arguments.value_halves);
+        const __mmask16 value_out = arguments.value_halves & (__mmask16)~decision.value_high;
+        const __mmask16 vanishes = decision.integer & (__mmask16)~arguments.integer_register;
+        const __mmask16 memory_stacked = decision.memory & (__mmask16)~(vanishes | decision.in_register);
+        const __mmask16 whole_registers = decision.in_vector | decision.in_pair;
+        const __mmask16 pair_stack = decision.whole & (__mmask16)~whole_registers & pair;
+        const __mmask16 vector_stack = decision.whole & (__mmask16)~(whole_registers | pair_stack);
+        // A vector LLVM puts on the stack as its value: a slot of its register's width, aligned to it, which holds its
+        // payload alone (a record's <size / 8 x double>, its result's part_bytes), PAYLOAD where the C type's bytes run
+        // past it.
+        __m512i payload = bytes;
+        if (vector_stack != 0)
+        {
+            const __m512i entries = _mm512_slli_epi32(index, 1);
+            const __m512i returned = _mm512_mask_i32gather_epi32(zero, vector_stack, entries, (const void*)abi->results, 4);
+            const __m512i returned_high = _mm512_mask_i32gather_epi32(zero, vector_stack, entries, (const void*)((const uint8_t*)abi->results + 4), 4);
+            const __m512i part_bytes = _mm512_and_si512(_mm512_srli_epi32(returned, 16), _mm512_set1_epi32(0xff));
+            const __mmask16 held = _mm512_cmpeq_epi32_mask(_mm512_and_si512(returned, _mm512_set1_epi32((int)0xff0000ffu)), _mm512_set1_epi32((int)(BUSTER_ABI_RESULT_REGISTERS | (uint32_t)BUSTER_ABI_REGISTER_VECTOR << 24))) &
+                                   _mm512_cmpeq_epi32_mask(_mm512_and_si512(returned_high, _mm512_set1_epi32(0xff)), _mm512_set1_epi32(BUSTER_ABI_REGISTER_NONE)) &
+                                   _mm512_cmpge_epu32_mask(part_bytes, _mm512_set1_epi32(BUSTER_ABI_REGISTER_BYTES));
+            payload = _mm512_mask_mov_epi32(bytes, held, part_bytes);
+        }
+        const __mmask16 within_16 = _mm512_cmple_epu32_mask(payload, _mm512_set1_epi32(BUSTER_ABI_REGISTER_BYTES));
+        const __mmask16 within_32 = _mm512_cmple_epu32_mask(payload, _mm512_set1_epi32(2 * BUSTER_ABI_REGISTER_BYTES));
+        const __m512i width_log2 = _mm512_mask_mov_epi32(_mm512_mask_mov_epi32(_mm512_set1_epi32(6), within_32, _mm512_set1_epi32(5)), within_16, _mm512_set1_epi32(4));
+        const __m512i width = _mm512_sllv_epi32(one, width_log2);
+        // Each slot's bytes and alignment, by the rule that placed it.
+        const __m512i memory_bytes = _mm512_mask_mov_epi32(_mm512_mask_mov_epi32(bytes, transparent, own_bytes), decision.integer, slot_bytes);
+        __m512i slot = _mm512_mask_mov_epi32(bytes, value_out, _mm512_mask_mov_epi32(slot_bytes, (__mmask16)~decision.value_low, _mm512_set1_epi32(2 * BUSTER_ABI_SLOT_BYTES)));
+        slot = _mm512_mask_mov_epi32(slot, memory_stacked, memory_bytes);
+        slot = _mm512_mask_mov_epi32(slot, vector_stack, width);
+        slot = _mm512_mask_mov_epi32(slot, halves, _mm512_add_epi32(_mm512_maskz_mov_epi32(low_out, slot_bytes), _mm512_maskz_mov_epi32(high_out, slot_bytes)));
+        __m512i log2 = _mm512_mask_mov_epi32(alignment_log2, value_out | halves, slot_log2);
+        log2 = _mm512_mask_mov_epi32(log2, memory_stacked, place_log2);
+        // A PAIR LLVM puts on the stack as an i128, aligned to 16 whatever the record's alignment.
+        log2 = _mm512_mask_mov_epi32(log2, pair_stack, _mm512_max_epu32(alignment_log2, _mm512_set1_epi32(4)));
+        log2 = _mm512_mask_mov_epi32(log2, vector_stack, width_log2);
+        const __mmask16 placed = value_stack | value_out | memory_stacked | pair_stack | vector_stack | (halves & stacked);
+        __m512i low_offsets;
+        __m512i high_offsets;
+        abi_lanes_place(placed, slot, log2, &stack, &area, &low_offsets, &high_offsets);
+        // The kinds.
+        const __m512i registers_kind = _mm512_set1_epi32(BUSTER_ABI_LOCATION_REGISTERS);
+        const __m512i stack_kind = _mm512_set1_epi32(BUSTER_ABI_LOCATION_STACK);
+        const __m512i split_kind = _mm512_set1_epi32(BUSTER_ABI_LOCATION_SPLIT);
+        const __mmask16 split = (decision.value_low & (__mmask16)~decision.value_high) | (halves & stacked & (__mmask16)~all_stacked);
+        const __mmask16 on_stack = placed & (__mmask16)~split;
+        const __mmask16 in_registers = passed & (__mmask16)~(placed | vanishes);
+        __m512i kind = _mm512_maskz_mov_epi32(in_registers, registers_kind);
+        kind = _mm512_mask_mov_epi32(kind, on_stack, stack_kind);
+        kind = _mm512_mask_mov_epi32(kind, split, split_kind);
+        // The flags: the extension, then LOW (an integer of 8 bytes, the low eightbyte alone of a transparent union larger
+        // than it, or the low eightbyte alone in its slot, of a value larger than it), PAYLOAD, HIGH and FIRST (a
+        // transparent union past 16 bytes in its member's registers, eightbytes' slots or value's slot: those of its
+        // first 16 bytes).
+        const __m512i value_bytes = _mm512_mask_mov_epi32(bytes, transparent, own_bytes);
+        const __mmask16 integer_low = decision.integer & (__mmask16)~decision.in_register & _mm512_cmpgt_epu32_mask(own_bytes, slot_bytes);
+        const __mmask16 halves_low = halves & (__mmask16)~high & stacked & _mm512_cmpgt_epu32_mask(value_bytes, slot_bytes);
+        const __mmask16 own_slot = decision.memory & (__mmask16)~decision.integer;
+        const __mmask16 first_bytes = (in_registers | placed) & (__mmask16)~own_slot & _mm512_cmpgt_epu32_mask(own_bytes, _mm512_set1_epi32(BUSTER_ABI_REGISTER_BYTES));
+        __m512i flags = _mm512_and_si512(_mm512_srli_epi32(pass, 10), _mm512_set1_epi32(BUSTER_ABI_FLAG_SIGN | BUSTER_ABI_FLAG_ZERO));
+        flags = _mm512_mask_or_epi32(flags, integer_low | halves_low, flags, _mm512_set1_epi32(BUSTER_ABI_FLAG_LOW));
+        flags = _mm512_mask_or_epi32(flags, vector_stack & _mm512_cmplt_epu32_mask(payload, bytes), flags, _mm512_set1_epi32(BUSTER_ABI_FLAG_PAYLOAD));
+        flags = _mm512_mask_or_epi32(flags, halves & (__mmask16)~low, flags, _mm512_set1_epi32(BUSTER_ABI_FLAG_HIGH));
+        flags = _mm512_mask_or_epi32(flags, first_bytes, flags, _mm512_set1_epi32(BUSTER_ABI_FLAG_FIRST));
+        // The locations: the offset, then the registers, kind and flags, a byte each.
+        const __m512i fields = _mm512_or_si512(_mm512_or_si512(first_register, _mm512_slli_epi32(second_register, 8)), _mm512_or_si512(_mm512_slli_epi32(kind, 16), _mm512_slli_epi32(flags, 24)));
+        const __m512i offsets = _mm512_inserti64x4(_mm512_castsi256_si512(_mm512_cvtepi64_epi32(low_offsets)), _mm512_cvtepi64_epi32(high_offsets), 1);
+        _mm512_mask_storeu_epi64(locations + first + base, (__mmask8)valid, _mm512_permutex2var_epi32(offsets, interleave_low, fields));
+        _mm512_mask_storeu_epi64(locations + first + base + 8, (__mmask8)(valid >> 8), _mm512_permutex2var_epi32(offsets, interleave_high, fields));
+    }
+#undef BUSTER_ABI_LANES_TEST
+    AbiCall* totals = calls + call;
+    totals->stack_bytes = (uint32_t)stack;
+    totals->stack_alignment_log2 = (uint8_t)area;
+    totals->integer_registers = (uint8_t)(counts & 0xff);
+    totals->vector_registers = (uint8_t)(counts >> 8 & 0xff);
+}
+
+// The arguments abi_assign marks at a time, on its stack, and the calls it leaves to abi_assign_lanes at a time.
+#define BUSTER_ABI_ASSIGN_WINDOW 1024
+#define BUSTER_ABI_ASSIGN_DEFERRED 64
+// The byte past a window's marks and the START after them, which no lane's loads reach.
+#define BUSTER_ABI_ASSIGN_SPARE (BUSTER_ABI_ASSIGN_WINDOW + BUSTER_ABI_LANES + 1)
+
+// The deferred calls, one at a time.
+static void abi_assign_deferred(const AbiTable* abi, AbiSignatures signatures, const uint32_t* deferred, const uint64_t* firsts, uint32_t count, AbiLocation* locations,
+                                AbiCall* calls)
+{
+    for (uint32_t d = 0; d < count; d += 1)
+    {
+        abi_assign_lanes(abi, signatures, deferred[d], firsts[d], locations, calls);
+    }
+}
+
 // The vector path: every call's arguments in order, 16 at a time whatever call they belong to. Within each call's
 // segment, prefix sums of the registers each argument needs (general ones in a lane's low half, vector ones in its
 // high half, the hidden pointer's at the call's first lane) give each argument its first register of each class, and
 // prefix sums of the slot sizes of those on the stack their offsets. That is exactly the assignment unless:
 //   - an argument doesn't fit while a register it needs is still free (a two-eightbyte one with one free, or one of
 //     both classes with one class full), which the sums count as used though it stays free for the arguments after;
-//   - a stack argument's alignment doesn't divide the offset the sums give it, so the fallback would pad before it, or is
+//   - a stack argument's alignment doesn't divide the offset the sums give it, so the per-call rules would pad before it, or is
 //     more than 32 bits hold;
 //   - an argument is UNCOUNTED, whose registers clang doesn't count but LLVM does, or a named WIDE one of a variadic
 //     call, the reverse;
@@ -3672,43 +3869,67 @@ static __m512i abi_scan_or(__m512i values, AbiScan scan, __m512i carry)
 //     eightbyte clang counts as SSE and LLVM puts in a general register, or the result is one LLVM demotes to a hidden
 //     pointer, which clang doesn't count (DEMOTED);
 //   - the call has more than BUSTER_ABI_COUNTED_ARGUMENTS arguments, whose sums 16 bits a class can't hold;
-// and the calls with one of those (rare in compiled code) go to the fallback, which assigns them one argument at a time.
+// and the calls with one of those (rare in compiled code) go to the per-call kernel, abi_assign_lanes, which assigns such
+// a call's arguments 16 at a time.
 // No loop goes over a call's arguments: the setup marks each call's first argument and its first unnamed one, and the
 // lanes take their call's marks with a segmented OR scan; a call ends where the next argument starts one, and there the
 // scans' inclusive values are its totals, which a last pass over the calls reads.
 static void abi_assign(const AbiTable* abi, AbiSignatures signatures, AbiLocation* locations, AbiCall* calls)
 {
-    Scratch scratch = scratch_begin(0);
     uint64_t total = 0;
     for (uint32_t c = 0; c < signatures.count; c += 1)
     {
         total += signatures.counts[c];
     }
-    // Per argument, its marks (and past the last one a START), and at each call's last one the call's register counts,
-    // stack bytes and ORed alignments; and each call's first argument.
-    uint8_t* marks = arena_push(scratch.arena, total + BUSTER_ABI_LANES + 1, 64);
-    uint32_t* end_registers = marks != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, total + BUSTER_ABI_LANES) : 0;
-    uint32_t* end_stack = end_registers != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, total + BUSTER_ABI_LANES) : 0;
-    uint32_t* end_alignment = end_stack != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint32_t, total + BUSTER_ABI_LANES) : 0;
-    uint64_t* firsts = end_alignment != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, signatures.count) : 0;
-    if (firsts == 0)
+    // A window's marks (and past its last argument a START where a call starts there), and at each call's last argument
+    // in it the call's register counts, stack bytes and ORed alignments; and the calls left to abi_assign_lanes.
+    _Alignas(64) uint8_t marks[BUSTER_ABI_ASSIGN_SPARE + 1];
+    _Alignas(64) uint32_t end_registers[BUSTER_ABI_ASSIGN_WINDOW + BUSTER_ABI_LANES];
+    _Alignas(64) uint32_t end_stack[BUSTER_ABI_ASSIGN_WINDOW + BUSTER_ABI_LANES];
+    _Alignas(64) uint32_t end_alignment[BUSTER_ABI_ASSIGN_WINDOW + BUSTER_ABI_LANES];
+    uint32_t deferred[BUSTER_ABI_ASSIGN_DEFERRED];
+    uint64_t deferred_firsts[BUSTER_ABI_ASSIGN_DEFERRED];
+    uint32_t deferred_count = 0;
+    // The next call to set up and its first argument, the unnamed mark of one that started in an earlier window, and the
+    // next call whose totals come and its first argument.
+    uint32_t setup = 0;
+    uint64_t setup_first = 0;
+    uint64_t pending_unnamed = UINT64_MAX;
+    uint32_t ending = 0;
+    uint64_t ending_first = 0;
+    const __m512i zero = _mm512_setzero_si512();
+    const __m512i general = _mm512_setr_epi32(BUSTER_ABI_RDI, BUSTER_ABI_RSI, BUSTER_ABI_RDX, BUSTER_ABI_RCX, BUSTER_ABI_R8, BUSTER_ABI_R9, BUSTER_ABI_REGISTER_NONE,
+                                              BUSTER_ABI_REGISTER_NONE, BUSTER_ABI_REGISTER_NONE, BUSTER_ABI_REGISTER_NONE, BUSTER_ABI_REGISTER_NONE, BUSTER_ABI_REGISTER_NONE,
+                                              BUSTER_ABI_REGISTER_NONE, BUSTER_ABI_REGISTER_NONE, BUSTER_ABI_REGISTER_NONE, BUSTER_ABI_REGISTER_NONE);
+    const __m512i low_halves = _mm512_set1_epi32(0xffff);
+    const __m512i last_lane = _mm512_set1_epi32(BUSTER_ABI_LANES - 1);
+    const __m512i interleave_low = _mm512_setr_epi32(0, 16, 1, 17, 2, 18, 3, 19, 4, 20, 5, 21, 6, 22, 7, 23);
+    const __m512i interleave_high = _mm512_setr_epi32(8, 24, 9, 25, 10, 26, 11, 27, 12, 28, 13, 29, 14, 30, 15, 31);
+    const __m512i none = _mm512_set1_epi32(BUSTER_ABI_REGISTER_NONE);
+    __m512i carry_marks = zero;
+    __m512i carry_registers = zero;
+    __m512i carry_stack = zero;
+    __m512i carry_alignment = zero;
+    for (uint64_t window = 0; window < total; window += BUSTER_ABI_ASSIGN_WINDOW)
     {
-        abi_assign_scalar(abi, signatures, locations, calls);
-    }
-    else
-    {
-        // The setup: each call's result and starting totals, its first argument and its marks. A call without arguments
-        // marks nothing (its first argument is the next call's, or past the last).
-        memset(marks, 0, total + BUSTER_ABI_LANES + 1);
-        uint64_t first = 0;
-        for (uint32_t c = 0; c < signatures.count; c += 1)
+        const uint64_t window_end = total - window > BUSTER_ABI_ASSIGN_WINDOW ? window + BUSTER_ABI_ASSIGN_WINDOW : total;
+        // The setup of the calls that start in the window: each call's result and starting totals and its marks. A call
+        // without arguments marks nothing (its first argument is the next call's, or past the last).
+        // Only the window's marks and the START past them: a single call clears a few bytes, not the whole window.
+        memset(marks, 0, window_end - window + BUSTER_ABI_LANES + 1);
+        if (pending_unnamed < window_end)
         {
-            const uint32_t count = signatures.counts[c];
-            const uint32_t named = signatures.named[c] < count ? signatures.named[c] : count;
-            const AbiReturn result = abi->results[signatures.results[c] >> BUSTER_TYPE_INDEX_SHIFT];
+            marks[pending_unnamed - window] |= BUSTER_ABI_LANE_UNNAMED;
+            pending_unnamed = UINT64_MAX;
+        }
+        for (; setup < signatures.count && setup_first < window_end; setup += 1)
+        {
+            const uint32_t count = signatures.counts[setup];
+            const uint32_t named = signatures.named[setup] < count ? signatures.named[setup] : count;
+            const AbiReturn result = abi->results[signatures.results[setup] >> BUSTER_TYPE_INDEX_SHIFT];
             const bool hidden = result.kind == BUSTER_ABI_RESULT_MEMORY;
             const bool demoted = hidden && (result.flags & BUSTER_ABI_FLAG_DEMOTED) != 0;
-            calls[c] = (AbiCall){
+            calls[setup] = (AbiCall){
                 .stack_bytes = 0,
                 .stack_alignment_log2 = BUSTER_ABI_STACK_ALIGNMENT_LOG2,
                 .integer_registers = hidden ? 1 : 0,
@@ -3716,40 +3937,33 @@ static void abi_assign(const AbiTable* abi, AbiSignatures signatures, AbiLocatio
                 .padding = 0,
                 .result = result,
             };
-            firsts[c] = first;
             const uint32_t starting = BUSTER_ABI_LANE_START | (hidden ? BUSTER_ABI_LANE_HIDDEN : 0) | (demoted ? BUSTER_ABI_LANE_DEMOTED : 0) |
-                                      (signatures.variadic[c] != 0 ? BUSTER_ABI_LANE_VARIADIC : 0) | (count > BUSTER_ABI_COUNTED_ARGUMENTS ? BUSTER_ABI_LANE_LONG : 0);
-            marks[first] |= (uint8_t)(count != 0 ? starting : 0);
-            marks[first + named] |= (uint8_t)(named < count ? BUSTER_ABI_LANE_UNNAMED : 0);
-            first += count;
+                                      (signatures.variadic[setup] != 0 ? BUSTER_ABI_LANE_VARIADIC : 0) | (count > BUSTER_ABI_COUNTED_ARGUMENTS ? BUSTER_ABI_LANE_LONG : 0);
+            marks[setup_first - window] |= (uint8_t)(count != 0 ? starting : 0);
+            const uint64_t unnamed = setup_first + named;
+            // Without a branch, which a quarter of the calls (variadic, at random) mispredict: an unnamed mark outside
+            // the window waits, and a call without one marks the spare byte past the window's marks, which no lane reads.
+            const bool has_unnamed = named < count;
+            const bool here = has_unnamed && unnamed < window_end;
+            marks[here ? unnamed - window : BUSTER_ABI_ASSIGN_SPARE] |= BUSTER_ABI_LANE_UNNAMED;
+            pending_unnamed = has_unnamed && !here ? unnamed : pending_unnamed;
+            setup_first += count;
         }
-        marks[total] = BUSTER_ABI_LANE_START;
-        const __m512i zero = _mm512_setzero_si512();
-        const __m512i general = _mm512_setr_epi32(BUSTER_ABI_RDI, BUSTER_ABI_RSI, BUSTER_ABI_RDX, BUSTER_ABI_RCX, BUSTER_ABI_R8, BUSTER_ABI_R9, BUSTER_ABI_REGISTER_NONE,
-                                                  BUSTER_ABI_REGISTER_NONE, BUSTER_ABI_REGISTER_NONE, BUSTER_ABI_REGISTER_NONE, BUSTER_ABI_REGISTER_NONE,
-                                                  BUSTER_ABI_REGISTER_NONE, BUSTER_ABI_REGISTER_NONE, BUSTER_ABI_REGISTER_NONE, BUSTER_ABI_REGISTER_NONE,
-                                                  BUSTER_ABI_REGISTER_NONE);
-        const __m512i low_halves = _mm512_set1_epi32(0xffff);
-        const __m512i last_lane = _mm512_set1_epi32(BUSTER_ABI_LANES - 1);
-        const __m512i interleave_low = _mm512_setr_epi32(0, 16, 1, 17, 2, 18, 3, 19, 4, 20, 5, 21, 6, 22, 7, 23);
-        const __m512i interleave_high = _mm512_setr_epi32(8, 24, 9, 25, 10, 26, 11, 27, 12, 28, 13, 29, 14, 30, 15, 31);
-        const __m512i none = _mm512_set1_epi32(BUSTER_ABI_REGISTER_NONE);
-        __m512i carry_marks = zero;
-        __m512i carry_registers = zero;
-        __m512i carry_stack = zero;
-        __m512i carry_alignment = zero;
-        for (uint64_t base = 0; base < total; base += BUSTER_ABI_LANES)
+        // Past the window's last argument, a START where a call starts there (or the arguments end).
+        marks[window_end - window] |= (uint8_t)(window_end == total || setup_first == window_end ? BUSTER_ABI_LANE_START : 0);
+        for (uint64_t base = window; base < window_end; base += BUSTER_ABI_LANES)
         {
-            const uint64_t remaining = total - base;
+            const uint8_t* lane_mark = marks + (base - window);
+            const uint64_t remaining = window_end - base;
             const __mmask16 valid = remaining >= BUSTER_ABI_LANES ? (__mmask16)0xffff : (__mmask16)((1u << remaining) - 1);
             const __m512i indices = _mm512_srli_epi32(_mm512_maskz_loadu_epi32(valid, signatures.arguments + base), BUSTER_TYPE_INDEX_SHIFT);
             const __m512i pass = _mm512_mask_i32gather_epi32(zero, valid, indices, abi->pass, 4);
             const __m512i bytes = _mm512_mask_i32gather_epi32(zero, valid, indices, abi->stack_bytes, 4);
             // Each lane's marks, its call's (the segment's, from its first lane), and the lanes whose next argument
             // starts a call: the calls' last ones.
-            const __m512i lane_marks = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(valid, marks + base));
+            const __m512i lane_marks = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(valid, lane_mark));
             const __mmask16 starts = _mm512_test_epi32_mask(lane_marks, _mm512_set1_epi32(BUSTER_ABI_LANE_START));
-            const __mmask16 ends = _mm512_test_epi32_mask(_mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(valid, marks + base + 1)), _mm512_set1_epi32(BUSTER_ABI_LANE_START));
+            const __mmask16 ends = _mm512_test_epi32_mask(_mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(valid, lane_mark + 1)), _mm512_set1_epi32(BUSTER_ABI_LANE_START));
             const AbiScan scan = abi_scan(starts);
             const __m512i call_marks = abi_scan_or(_mm512_and_si512(lane_marks, _mm512_set1_epi32(BUSTER_ABI_LANE_UNNAMED | BUSTER_ABI_LANE_VARIADIC)), scan, carry_marks);
             carry_marks = _mm512_permutexvar_epi32(last_lane, call_marks);
@@ -3775,7 +3989,7 @@ static void abi_assign(const AbiTable* abi, AbiSignatures signatures, AbiLocatio
             const __m512i exclusive_integers = _mm512_and_si512(exclusive, low_halves);
             const __m512i exclusive_vectors = _mm512_srli_epi32(exclusive, 16);
             // Each class only where the argument needs it: a long fits after nine doubles, whose sum is past 8 (the
-            // benchmark found the vector path left 23% of its arguments to the fallback before, and 5% so).
+            // benchmark found the vector path left 23% of its arguments to the per-call path before, and 5% so).
             const __mmask16 integers_fit = (__mmask16)~_mm512_test_epi32_mask(need_integers, need_integers) |
                                            _mm512_cmple_epu32_mask(_mm512_add_epi32(exclusive_integers, need_integers), _mm512_set1_epi32(BUSTER_ABI_INTEGER_ARGUMENTS));
             const __mmask16 vectors_fit = (__mmask16)~_mm512_test_epi32_mask(need_vectors, need_vectors) |
@@ -3804,11 +4018,11 @@ static void abi_assign(const AbiTable* abi, AbiSignatures signatures, AbiLocatio
             // DEMOTED and LONG mark a call's first lane, and its ORed alignments take them to its last.
             const __mmask16 demoted = _mm512_test_epi32_mask(lane_marks, _mm512_set1_epi32(BUSTER_ABI_LANE_DEMOTED));
             const __mmask16 long_call = _mm512_test_epi32_mask(lane_marks, _mm512_set1_epi32(BUSTER_ABI_LANE_LONG));
-            // A transparent union of a slot of its own (AbiTable.transparent): its member's classes, the fallback's.
+            // A transparent union of a slot of its own (AbiTable.transparent): its member's classes, the per-call kernel's.
             const __m512i transparent = _mm512_mask_i32gather_epi32(zero, valid, indices, abi->transparent, 4);
             const __mmask16 transparent_lanes = _mm512_test_epi32_mask(transparent, transparent);
             const __mmask16 deferred_lanes = valid & (uncounted | inexact | padded | huge | wide_named | empty | general_low | demoted | long_call | transparent_lanes);
-            // The alignments ORed (the highest bit is the largest), with DEFERRED for a lane the fallback must assign.
+            // The alignments ORed (the highest bit is the largest), with DEFERRED for a lane the per-call kernel must assign.
             const __m512i stacked_alignment = _mm512_maskz_mov_epi32(on_stack, slot_alignment);
             const __m512i alignments = _mm512_mask_or_epi32(stacked_alignment, deferred_lanes, stacked_alignment, _mm512_set1_epi32(BUSTER_ABI_LANE_DEFERRED));
             const __m512i alignment_inclusive = abi_scan_or(alignments, scan, carry_alignment);
@@ -3836,36 +4050,58 @@ static void abi_assign(const AbiTable* abi, AbiSignatures signatures, AbiLocatio
             const __m512i offset = _mm512_maskz_mov_epi32(on_stack, stack_exclusive);
             _mm512_mask_storeu_epi64(locations + base, (__mmask8)valid, _mm512_permutex2var_epi32(offset, interleave_low, word));
             _mm512_mask_storeu_epi64(locations + base + 8, (__mmask8)(valid >> 8), _mm512_permutex2var_epi32(offset, interleave_high, word));
-            // The totals of the calls that end here.
-            _mm512_mask_storeu_epi32(end_registers + base, ends, inclusive);
-            _mm512_mask_storeu_epi32(end_stack + base, ends, stack_inclusive);
-            _mm512_mask_storeu_epi32(end_alignment + base, ends, alignment_inclusive);
+            // The totals of the calls that end here, at their last arguments, which the pass over the window's calls
+            // reads (stored in place, not compressed: a compressing store's loads right after it wait on it, and a loop
+            // over a vector's calls mispredicts its count, together 25% per argument on the 9700X).
+            _mm512_mask_storeu_epi32(end_registers + (base - window), ends, inclusive);
+            _mm512_mask_storeu_epi32(end_stack + (base - window), ends, stack_inclusive);
+            _mm512_mask_storeu_epi32(end_alignment + (base - window), ends, alignment_inclusive);
         }
-        // Each call's totals from its last argument (a call without arguments keeps its starting ones), and the calls
-        // with a deferred argument by the fallback.
-        for (uint32_t c = 0; c < signatures.count; c += 1)
+        // Each call that ends in the window, its totals from its last argument (a call without arguments keeps its
+        // starting ones), and the calls with a deferred argument to abi_assign_lanes. A call without arguments at the
+        // window's end waits for the setup of the next window, or for the last pass.
+        while (ending < setup && ending_first + signatures.counts[ending] <= window_end)
         {
-            const uint32_t count = signatures.counts[c];
+            const uint32_t count = signatures.counts[ending];
             const bool has = count != 0;
-            const uint64_t last = has ? firsts[c] + count - 1 : 0;
+            const uint64_t last = has ? ending_first + count - 1 - window : 0;
             const uint32_t registers = end_registers[last];
             const uint32_t alignment = end_alignment[last];
             const uint32_t integers = registers & 0xffff;
             const uint32_t vectors = registers >> 16;
             const uint32_t largest = 31 - (uint32_t)__builtin_clz(alignment | 1);
-            AbiCall* call = calls + c;
+            AbiCall* call = calls + ending;
             call->stack_bytes = has ? end_stack[last] : 0;
             call->stack_alignment_log2 = (uint8_t)(has && largest > BUSTER_ABI_STACK_ALIGNMENT_LOG2 ? largest : BUSTER_ABI_STACK_ALIGNMENT_LOG2);
             call->integer_registers = has ? (uint8_t)(integers < BUSTER_ABI_INTEGER_ARGUMENTS ? integers : BUSTER_ABI_INTEGER_ARGUMENTS) : call->integer_registers;
             call->vector_registers = has ? (uint8_t)(vectors < BUSTER_ABI_VECTOR_ARGUMENTS ? vectors : BUSTER_ABI_VECTOR_ARGUMENTS) : 0;
-            if (has && (alignment & BUSTER_ABI_LANE_DEFERRED) != 0)
+            deferred[deferred_count] = ending;
+            deferred_firsts[deferred_count] = ending_first;
+            deferred_count += has && (alignment & BUSTER_ABI_LANE_DEFERRED) != 0 ? 1 : 0;
+            ending_first += count;
+            ending += 1;
+            if (deferred_count == BUSTER_ABI_ASSIGN_DEFERRED)
             {
-                const uint32_t named = signatures.named[c] < count ? signatures.named[c] : count;
-                calls[c] = abi_assign_call(abi, signatures.arguments + firsts[c], count, named, signatures.variadic[c] != 0, signatures.results[c], locations + firsts[c]);
+                abi_assign_deferred(abi, signatures, deferred, deferred_firsts, deferred_count, locations, calls);
+                deferred_count = 0;
             }
         }
     }
-    scratch_end(scratch);
+    abi_assign_deferred(abi, signatures, deferred, deferred_firsts, deferred_count, locations, calls);
+    // The calls past the last argument, which have none.
+    for (; setup < signatures.count; setup += 1)
+    {
+        const AbiReturn result = abi->results[signatures.results[setup] >> BUSTER_TYPE_INDEX_SHIFT];
+        const bool hidden = result.kind == BUSTER_ABI_RESULT_MEMORY;
+        calls[setup] = (AbiCall){
+            .stack_bytes = 0,
+            .stack_alignment_log2 = BUSTER_ABI_STACK_ALIGNMENT_LOG2,
+            .integer_registers = hidden ? 1 : 0,
+            .vector_registers = 0,
+            .padding = 0,
+            .result = result,
+        };
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

@@ -1486,6 +1486,14 @@ static void check_warning_graph_generics(CheckInputReader* reader)
     }
 }
 
+// Whether an operator can only give 0 or 1: a comparison, a `!`, a logical operator, a condition's truth. What
+// -Wconstant-logical-operand warns of is a right operand that is an integer constant other than those two.
+static inline bool check_warning_logical_boolean(CheckOp op)
+{
+    return (op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL) || op == CHECK_OP_NOT || op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR ||
+           op == CHECK_OP_CONDITION;
+}
+
 static bool check_input_warning_graph(CheckInput* input, const Parser* parser, TypeTable* types, const CheckStream* stream, Arena* output, Arena* scratch)
 {
     const uint64_t mark = output->length;
@@ -1568,18 +1576,41 @@ static bool check_input_warning_graph(CheckInput* input, const Parser* parser, T
                 {
                     const TypeId left = check_stream_type(stream, graph->operand0[node]);
                     const TypeId right = check_stream_type(stream, graph->operand1[node]);
+                    // A right operand whose own operator can only give 0 or 1 (#2850): the warning is of an integer
+                    // constant that is neither (check_warning_constant_logical_event), so the operand is not replayed and
+                    // the event is not asked. (The node machine's test of this warning has the same rule,
+                    // node_census_constant_logical.)
+                    const bool boolean = check_warning_logical_boolean(graph->ops[graph->operand1[node]]);
                     if (check_action_is_integer(types, left) && check_action_is_integer(types, right) &&
                         type_unqualified(type_strip_aligned(types, left)) != BUSTER_TYPE_BOOL &&
                         !check_warning_graph_macro(parser, token) &&
                         !check_input_logical_enumerator(&staged, parser, token != 0 ? token - 1 : BUSTER_CHECK_NONE, token) &&
                         !check_input_logical_enumerator(&staged, parser, token + 1, token))
                     {
-                        CheckAction action;
-                        check_graph_action(graph, stream, node, NULL, &action);
-                        action.node = token;
-                        action.operands[1] = check_warning_logical_constant(&reader, stream, graph->operand1[node], completion, &logical_constants);
-                        const CheckActionResult checked = { 0 };
-                        check_input_constant_logical_warning(&reader, &action, &checked, completion);
+                        if (!boolean)
+                        {
+                            CheckAction action;
+                            check_graph_action(graph, stream, node, NULL, &action);
+                            action.node = token;
+                            action.operands[1] = check_warning_logical_constant(&reader, stream, graph->operand1[node], completion, &logical_constants);
+                            const CheckActionResult checked = { 0 };
+                            check_input_constant_logical_warning(&reader, &action, &checked, completion);
+                        }
+                        else if (__builtin_expect(input->default_path_counts != NULL, 0))
+                        {
+                            // A test's switch: the operand is replayed all the same, and gives no event and makes no type.
+                            const uint32_t types_before = types->types.count;
+                            CheckAction action;
+                            check_graph_action(graph, stream, node, NULL, &action);
+                            action.node = token;
+                            action.operands[1] = check_warning_logical_constant(&reader, stream, graph->operand1[node], completion, &logical_constants);
+                            const CheckActionResult checked = { 0 };
+                            CheckWarningEvent event;
+                            check_default_path_count(input->default_path_counts, CHECK_DEFAULT_PATH_LOGICAL_SKIPPED, 1);
+                            check_default_path_count(input->default_path_counts, CHECK_DEFAULT_PATH_LOGICAL_EVENTS,
+                                                     check_warning_constant_logical_event(types, &action, &checked, token, completion, &event));
+                            check_default_path_count(input->default_path_counts, CHECK_DEFAULT_PATH_LOGICAL_TYPES, types->types.count != types_before);
+                        }
                     }
                 }
                 else if (op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE || op == CHECK_OP_CONVERT)

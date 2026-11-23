@@ -8087,7 +8087,13 @@ is not read; a body is left at the chunk in which a root of it is first lost
 or refused; and the machine's chunk has one run, which keeps what it makes of
 a root (its records' place, its verdicts, its tape and what is beside it) with
 no digest and no count. Nothing of a root is then compared with the walk's:
-what is compared is what the producer decided.
+what is compared is what the producer decided. The first six are asked of
+every body before any is read (`node_alone_begin`), and the machine's graph,
+its results by node, the tapes' store and the tests' columns are made for the
+positions of the bodies they leave, not for the unit's nodes
+([`commands/lowering.md`](commands/lowering.md), "Compiling with the bodies
+taken"): a body's records are at most its positions, and one the graph has no
+room for is refused.
 
 **Against the set the comparisons give.** After the pipeline each lowered
 body's verdict is read beside the set of the section above (the scan and the

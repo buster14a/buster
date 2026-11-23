@@ -851,7 +851,9 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
         "void d(int n) {\n    while (n);\n    nope;\n    { n++; }\n}\n"
         "void e(int n) {\n    while (n);\n        n();\n}\n"
         "void f(int n) {\n    while (n);\n    absent + (n / 0);\n}\n"
-        "void g(int n) {\n    while (n);\n        n + absent;\n}\n";
+        "void g(int n) {\n    while (n);\n        n + absent;\n}\n"
+        "void h(int n) {\n    while (n);\n        if (n) absent; else n++;\n}\n"
+        "void i(int n) {\n    while (n);\n        if (n) absent;\n}\n";
     // #1339: the statement's invocation starts at the loop's column even when its body is defined farther right.
     // Keep quiet cases in their own unit: an earlier positive diagnostic would already have replayed the history.
     static const char empty_macro_bodies[] =

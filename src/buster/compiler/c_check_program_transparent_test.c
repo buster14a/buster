@@ -152,6 +152,40 @@ static const char check_test_program_transparent_own_pairs[] =
     "h^=external_own_pairs_variadic(3,ow,ov,oc,ow,ov,oc,ow,ov,oc)^mine_variadic(3,ow,ov,oc,ow,ov,oc,ow,ov,oc);"
     "h^=external_own_pairs_variadic_apply(mine_variadic,n);return (int)(h%1000003);}";
 
+// Unions of a LARGER first member in memory (#3400, BUSTER_CHECK_TEST_TRANSPARENT_GROWN_UNIONS), which pass as clang's
+// code passes the member: the harness's clang functions called with the members' and the unions' values, in a byval
+// slot of the union's bytes where clang has a general register, and as the GROWN member's integer where it has none, in
+// r9 and in 8-byte slots (FIRST and LOW past 8 and 16 bytes); the program's own definitions, called by the program and
+// by the harness through pointers; and as unnamed arguments, read with va_arg, both ways.
+static const char check_test_program_transparent_grown[] =
+    BUSTER_CHECK_TEST_TRANSPARENT_GROWN_UNIONS
+    "unsigned long external_grown(int,ExternalGA,ExternalGB,ExternalGP,ExternalGK,ExternalGE);"
+    "unsigned long external_grown_tight(long,long,long,long,_Atomic long,__int128,ExternalGB,ExternalGA,long);"
+    "unsigned long external_grown_late(long,long,long,long,long,long,long,int,ExternalGA,ExternalGB,ExternalGP,ExternalGK,ExternalGE);"
+    "unsigned long external_grown_apply(unsigned long(*)(int,ExternalGA,ExternalGB,ExternalGP,ExternalGK,ExternalGE),"
+    "unsigned long(*)(long,long,long,long,_Atomic long,__int128,ExternalGB,ExternalGA,long),"
+    "unsigned long(*)(long,long,long,long,long,long,long,int,ExternalGA,ExternalGB,ExternalGP,ExternalGK,ExternalGE),int);"
+    "unsigned long external_grown_variadic(int,...);unsigned long external_grown_variadic_apply(unsigned long(*)(int,...),int);"
+    "static unsigned long fold(unsigned long h,unsigned long v){return (h^v)*1099511628211UL;}"
+    "unsigned long mine(int k,ExternalGA a,ExternalGB b,ExternalGP p,ExternalGK q,ExternalGE e){"
+    "return external_grown(k,a,b,p,q,e)*3+(unsigned long)(a.g.i+b.g.s+p.g.i*5+q.g.s+e.e.l);}"
+    "unsigned long mine_tight(long l0,long l1,long l2,long l3,_Atomic long u,__int128 w,ExternalGB b,ExternalGA a,long z){"
+    "return external_grown_tight(l0,l1,l2,l3,u,w,b,a,z)+(unsigned long)(b.g.i*7+a.g.s);}"
+    "unsigned long mine_late(long l0,long l1,long l2,long l3,long l4,long l5,long l6,int k,ExternalGA a,ExternalGB b,ExternalGP p,ExternalGK q,ExternalGE e){"
+    "return external_grown_late(l0,l1,l2,l3,l4,l5,l6,k,a,b,p,q,e)+(unsigned long)(a.g.s*7+b.g.i+p.g.s+q.g.i*3+e.e.l);}"
+    "unsigned long mine_variadic(int count,...){__builtin_va_list a;__builtin_va_start(a,count);unsigned long h=(unsigned long)count;"
+    "for(int i=0;i<count;i++){ExternalGP p=__builtin_va_arg(a,ExternalGP);ExternalGK q=__builtin_va_arg(a,ExternalGK);ExternalGA r=__builtin_va_arg(a,ExternalGA);"
+    "h=fold(h,(unsigned long)(p.g.i+p.g.s*7));h=fold(h,(unsigned long)(q.g.i*9+q.g.s));h=fold(h,(unsigned long)(r.g.i+r.g.s*3));}__builtin_va_end(a);return h;}"
+    "int tested(int n){struct external_gr r={n,(short)(n*3)};struct external_ge e={(long)n*77};ExternalGA ga={.g={n*5,2}};ExternalGB gb={.g=r};"
+    "ExternalGP gp={.g={-n,7}};ExternalGK gk={.g={n,1}};ExternalGE ge={.e=e};"
+    "unsigned long h=external_grown(0,r,r,r,r,e)^external_grown(1,ga,gb,gp,gk,ge);"
+    "h^=external_grown_tight(1,2,3,n,(long)n*9,(__int128)n*77,r,r,n*13)^external_grown_tight(1,2,n,4,5,0,gb,ga,3);"
+    "h^=external_grown_late(1,2,3,4,5,6,n,0,r,r,r,r,e)^external_grown_late(1,2,3,4,5,n,7,1,ga,gb,gp,gk,ge);"
+    "h^=mine(0,r,r,r,r,e)+mine_tight(1,2,3,n,5,(__int128)n<<64,gb,ga,n)+mine_late(1,2,3,4,5,6,n,2,ga,gb,gp,gk,ge);"
+    "h^=external_grown_apply(mine,mine_tight,mine_late,n);"
+    "h^=external_grown_variadic(2,gp,gk,ga,gp,gk,ga)^mine_variadic(2,gp,gk,ga,gp,gk,ga)^external_grown_variadic_apply(mine_variadic,n);"
+    "return (int)(h%1000003);}";
+
 // The reason the lowering refuses a union made transparent after clang's code may have classified a function's type.
 static const char check_test_program_transparent_late[] =
     "unions made transparent after a function definition or an initializer naming a function, whose first members pass otherwise";
@@ -241,6 +275,7 @@ static void check_test_program_transparent(CheckTest* test, const char* clang)
     check_test_program_source(test, check_test_program_transparent_own, "transparent-union-own-slots", clang);
     check_test_program_source(test, check_test_program_transparent_own_variadic, "transparent-union-own-slots-variadic", clang);
     check_test_program_source(test, check_test_program_transparent_own_pairs, "transparent-union-own-slots-pairs", clang);
+    check_test_program_source(test, check_test_program_transparent_grown, "transparent-union-own-slots-larger", clang);
     // A member of an _Atomic type, which clang passes uncounted, keeps its refusal.
     check_test_program_boundary_reason(test,
         "typedef union __attribute__((transparent_union,aligned(32))){_Atomic long w;_Atomic long v;}A;int take(A);int tested(int n){return take(n);}",

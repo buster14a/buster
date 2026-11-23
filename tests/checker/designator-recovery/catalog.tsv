@@ -1,0 +1,11 @@
+buster-fixtures v1 checker-warnings
+# #1842: a designator that names no member is clang's error, and the walk goes on from the list's place before it.
+later-lists.c	0	8	0	later values after a failed designator take members from the list's place
+arrays.c	0	5	0	a failed member designator after an array designator leaves the array's place
+counted.c	0	9	10	counted_by lists after a failed designator, filled in only by braces without the error
+leftovers.c	0	7	0	leftover values in a list with a failed designator, or around it, give no excess warning
+local.c	1	8	0	automatic objects, an old-style designator and designator chains after the failed name
+elided.c	0	5	0	a failed designator ends a brace elision: later values take the members after the elided one
+unions.c	1	4	1	a union list with a failed designator has its member: later values are left over
+vectors.c	0	4	0	a static vector value that is no constant, in a list with a failed designator, is no error
+strings.c	2	2	0	an overlong string and a later sibling list still warn beside a failed designator

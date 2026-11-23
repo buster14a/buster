@@ -1065,8 +1065,14 @@ static void check_test_driver_checks_attributes(CheckTest* test, const char* cla
     const uint32_t optioned = plain + BUSTER_ARRAY_LENGTH(flagged) * BUSTER_ARRAY_LENGTH(options);
     const uint32_t kr = optioned + BUSTER_ARRAY_LENGTH(implicit);
     const uint32_t total = kr + BUSTER_ARRAY_LENGTH(kr89);
-    for (uint32_t unit = 0; expected_lines != NULL && actual_lines != NULL && unit < total; unit += 1)
+    for (uint32_t unit = 0; unit < total; unit += 1)
     {
+        // Each unit is a unit of test-checker-driver's deal (check_test_driver_takes), dealt whatever the buffers'
+        // allocation: whole, the sweep took 22 s on a 4-CPU Xeon VM (#3399).
+        if (!check_test_driver_takes() || expected_lines == NULL || actual_lines == NULL)
+        {
+            continue;
+        }
         const uint32_t flag = unit - plain;
         const char* text = unit < plain ? units[unit] : unit < optioned ? flagged[flag % BUSTER_ARRAY_LENGTH(flagged)] :
                            unit < kr ? implicit[unit - optioned] : kr89[unit - kr];

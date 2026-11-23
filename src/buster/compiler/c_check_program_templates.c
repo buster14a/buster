@@ -254,9 +254,10 @@ static CheckLowerTemplateUse check_lower_template_classify(const CheckLowerWrite
     else if (op == CHECK_OP_STATEMENT_VALUE || (!address && value->category == CHECK_LVALUE && (facts & BUSTER_CHECK_LOWER_TYPE_ATOMIC) != 0))
     {
     }
-    else if (!address && value->category == CHECK_LVALUE && check_lower_volatile(class, value->type))
+    else if (!address && value->category == CHECK_LVALUE && (check_lower_volatile(class, value->type) || (value->flags & BUSTER_CHECK_VOLATILE_PART) != 0))
     {
-        // A volatile lvalue's read (#3310), whose access the tasks mark (check_lower_access).
+        // A volatile lvalue's read (#3310), or a volatile complex object's part's (#3329), whose access the tasks mark
+        // (check_lower_access, check_lower_element_segment).
     }
     else if (address && (value->flags & BUSTER_CHECK_BIT_FIELD) != 0)
     {
@@ -390,7 +391,7 @@ static CheckLowerTemplateUse check_lower_template_classify(const CheckLowerWrite
         const uint32_t destination_facts = a < stream->count ? check_lower_facts(writer, check_stream_type(stream, a)) : 0;
         const bool bit_field = op == CHECK_OP_ASSIGN && a < stream->count && (check_stream_flags(stream, a) & BUSTER_CHECK_BIT_FIELD) != 0;
         // A volatile destination's store (#3310) is the tasks', which mark it.
-        const bool marked = op == CHECK_OP_ASSIGN && a < stream->count && check_lower_volatile(class, check_stream_type(stream, a));
+        const bool marked = op == CHECK_OP_ASSIGN && a < stream->count && class != BUSTER_TYPED_CLASS_VOID && check_lower_node_volatile(writer, a);
         if ((destination_facts & BUSTER_CHECK_LOWER_TYPE_ATOMIC) == 0 && !bit_field && !marked)
         {
             const uint32_t declaration = op == CHECK_OP_INITIALIZE ? check_lower_initializer_of(writer, node) : BUSTER_CHECK_NONE;
@@ -894,7 +895,8 @@ static CheckLowerTemplateFast check_lower_template_fast(const CheckLowerWriter* 
     const bool known = object != 0 && object < program->object_count;
     // An atomic lvalue's read and a volatile one's (#3310) are the tasks'.
     const bool ordinary = (facts & (BUSTER_CHECK_LOWER_TYPE_BIT_INT | BUSTER_CHECK_LOWER_TYPE_COMPLEX)) == 0 &&
-                          (address || category != CHECK_LVALUE || ((facts & BUSTER_CHECK_LOWER_TYPE_ATOMIC) == 0 && !check_lower_volatile(class, type)));
+                          (address || category != CHECK_LVALUE ||
+                           ((facts & BUSTER_CHECK_LOWER_TYPE_ATOMIC) == 0 && !check_lower_volatile(class, type) && (flags & BUSTER_CHECK_VOLATILE_PART) == 0));
     const bool reads = !address && !address_value;
     const bool compound = op == CHECK_OP_VALUE && known && check_input_bit(program->input->declaration_bits, object - 1, BUSTER_CHECK_BITS_COMPOUND) && !check_input_bit(program->input->declaration_bits, object - 1, BUSTER_CHECK_BITS_STATIC);
     // The payload row's parts the rules read: an overload (which no template takes), a fault, an integer and an offset.
@@ -1014,7 +1016,7 @@ static CheckLowerTemplateFast check_lower_template_fast(const CheckLowerWriter* 
         const uint32_t a = graph->operand0[node];
         const uint32_t destination_facts = a < stream->count ? check_lower_facts(writer, check_stream_type(stream, a)) : 0;
         const bool bit_field = op == CHECK_OP_ASSIGN && a < stream->count && (check_stream_flags(stream, a) & BUSTER_CHECK_BIT_FIELD) != 0;
-        const bool marked = op == CHECK_OP_ASSIGN && a < stream->count && check_lower_volatile(class, check_stream_type(stream, a));
+        const bool marked = op == CHECK_OP_ASSIGN && a < stream->count && class != BUSTER_TYPED_CLASS_VOID && check_lower_node_volatile(writer, a);
         if ((destination_facts & BUSTER_CHECK_LOWER_TYPE_ATOMIC) == 0 && !bit_field && !marked)
         {
             const uint32_t declaration = op == CHECK_OP_INITIALIZE ? check_lower_initializer_of(writer, node) : BUSTER_CHECK_NONE;

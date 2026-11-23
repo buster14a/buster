@@ -475,6 +475,11 @@ static bool ir_dataflow_test_function(const IrFunction* f, Arena* output, Arena*
         const uint64_t vector_iterations = ir_dataflow_solve(&vector);
         const uint64_t again_iterations = ir_dataflow_solve(&again);
         uint64_t expected_iterations = 0;
+        // The sweep search reads the backward order, which the solve builds only when the postorder alone is slow.
+        if (vector.flow.block_count != 0)
+        {
+            dataflow_backward(&vector.flow);
+        }
         ir_dataflow_expect(tests, dataflow_test_sweeps(&vector.flow, scratch, &expected_iterations) && expected_iterations == vector_iterations,
             "the sweep search's live pairs or count disagree");
         ir_dataflow_expect(tests, again_iterations == vector_iterations && ir_dataflow_test_equal(&vector, &again),

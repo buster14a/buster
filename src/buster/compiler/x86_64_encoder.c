@@ -163,6 +163,8 @@ typedef enum X86Register
 // address), without a scale, and a 16-bit displacement. Without a memory operand, the addresses the instruction makes
 // itself (a string instruction's, xlat's, jcxz's and loop's, and the others' of x86_form_has_implicit_address).
 #define BUSTER_X86_MODE_ADDRESS_SIZE 0x40
+// Keep a four-byte displacement after a base even when zero or a scaled disp8 would fit ({disp32}).
+#define BUSTER_X86_MODE_DISP32 0x80
 
 // One instruction: 16 bytes, so a ZMM register holds 4. Operands the form doesn't have must be zero.
 typedef struct X86Instruction X86Instruction;
@@ -4998,8 +5000,8 @@ typedef enum X86FixupField
 // field is the symbol's addend minus this too: -4 for call f and lea rax, [rip + x], -5 for cmp byte ptr [rip + x], 1
 // and -8 for mov dword ptr [rip + x], imm32. The displacement and the immediate are the last fields, in that order. A
 // memory operand's displacement field is 32-bit when it is RIP-relative, absolute or index-only; after a base, only when
-// the displacement doesn't fit in 8 bits (in units of an EVEX form's N), so a symbolic one there needs a placeholder that
-// doesn't, such as INT32_MIN (and the fixup overwrites it).
+// requested by BUSTER_X86_MODE_DISP32 or when the displacement doesn't fit in 8 bits in units of an EVEX form's N.
+// A symbolic operand may use INT32_MIN as its placeholder to reserve the field.
 static __attribute__((unused)) uint32_t x86_fixup_distance(uint32_t form, X86FixupField field)
 {
     const X86FormDescription* description = x86_form_description(form);
@@ -6375,7 +6377,7 @@ static bool instruction_is_valid(const X86Instruction* instruction, X86EncoderMo
         else
         {
             const uint8_t known = BUSTER_X86_MODE_SCALE | BUSTER_X86_MODE_MEMORY | BUSTER_X86_MODE_BASE | BUSTER_X86_MODE_INDEX | BUSTER_X86_MODE_RIP |
-                                  (legacy ? BUSTER_X86_MODE_ADDRESS_SIZE : 0);
+                                  (legacy ? BUSTER_X86_MODE_ADDRESS_SIZE : 0) | (base && !address16 ? BUSTER_X86_MODE_DISP32 : 0);
             result = result && has_modrm && (form->rm & BUSTER_X86_OPERAND_MEMORY);
             result = result && (mode & ~known) == 0;
             result = result && !(rip && (base || index)) && !(legacy && rip);
@@ -6833,7 +6835,12 @@ static uint32_t encode_one(const X86Instruction* instruction, uint8_t* out, X86E
                 const int32_t scaled = instruction->displacement / scale;
                 rm_field = (index || (rm & 7) == 4) ? 4 : (rm & 7);
                 sib = index || (rm & 7) == 4;
-                if (instruction->displacement == 0 && (rm & 7) != 5)
+                if (mode & BUSTER_X86_MODE_DISP32)
+                {
+                    mod = 2;
+                    displacement_bytes = 4;
+                }
+                else if (instruction->displacement == 0 && (rm & 7) != 5)
                 {
                     mod = 0;
                 }
@@ -7183,7 +7190,8 @@ BUSTER_INLINE X86Fields compute_fields(__m512i operands, __m512i displacement, _
     const __m512i too_long = _mm512_srlv_epi32(BUSTER_X86_SPLAT(0x01ffffff), _mm512_lzcnt_epi32(magnitude));
     const __m512i compressible = _mm512_ternarylogic_epi32(sized_displacement, _mm512_sub_epi32(sized_displacement, one), too_long, BUSTER_X86_A_XOR_B_AND_NOT_C);
     const __m512i scale = _mm512_srli_epi32(flags, BUSTER_X86_TEMPLATE_DISP8_SCALE);
-    const __m512i fits8 = _mm512_srai_epi32(_mm512_rorv_epi32(compressible, scale), 31);
+    // The rotated sign bit selects the short encoding unless the mode's high bit requests disp32.
+    const __m512i fits8 = _mm512_srai_epi32(_mm512_andnot_epi32(operands, _mm512_rorv_epi32(compressible, scale)), 31);
     // ModRM.mod: 01 for an 8-bit displacement, 10 for a 32-bit one after a base.
     const __m512i canonical8 = _mm512_ternarylogic_epi32(register_fields, base_displacement, BUSTER_X86_SPLAT(0x40), BUSTER_X86_A_OR_B_AND_C);
     const __m512i canonical32 = _mm512_ternarylogic_epi32(register_fields, base, BUSTER_X86_SPLAT(0x80), BUSTER_X86_A_OR_B_AND_C);
