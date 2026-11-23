@@ -5128,6 +5128,11 @@ static int run_checker_tests(int argc, char** argv)
                check_stream_digests.matched, check_stream_digests.unlisted, (unsigned long long)check_stream_digest_flips);
         check_test_expect(&test, check_stream_digest_flips != 0, "the stream digests' byte flips reach what the stream comparison compares");
     }
+    if (check_test_program_expansions[0] + check_test_program_expansions[1] != 0)
+    {
+        printf("test-checker: the source rows' lowering compared with %u program fixtures' lowering, refused %u for room\n", check_test_program_expansions[0],
+               check_test_program_expansions[1]);
+    }
     printf("test-checker: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
     const int returned = test.failures != 0;
     check_test_part.test = 0;

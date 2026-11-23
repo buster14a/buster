@@ -720,6 +720,8 @@ static void check_test_program_body_columns(CheckTest* test, const char* source,
 
 static void check_test_program_source(CheckTest* test, const char* source, const char* name, const char* clang);
 static bool check_test_program_function(const Tier0Function* a, const Tier0Function* b);
+// The program fixtures whose lowering the source rows' lowering compared (0) and refused for room (1).
+static uint32_t check_test_program_expansions[2];
 static void check_test_constant_conversion_lowered(CheckTest* test, const char* name, const CheckProgramLowered lowered[2], const CheckProgram* program, Arena* output,
                                                    Arena* scratch);
 static void check_test_branch_condition_lowered(CheckTest* test, const char* name, const CheckProgramLowered lowered[2], const CheckProgram* program, Arena* output,
@@ -2417,6 +2419,24 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
             check_test_expect(test, check_test_program_function(lower[0].functions + b, lower[1].functions + b),
                               "complete typed function and ABI locations agree across unit batches");
         }
+        // The lowering's fast paths (the plain expressions, the batched fragments and the types' templates) against the
+        // general expansion, which the source rows' lowering (-g's) takes alone: every function's entries the same. A few
+        // large vector fixtures exceed the source rows' lowering's room (CHECK_PROGRAM_RESOURCE), and are counted apart.
+        CheckProgramLowered expanded = { 0 };
+        Arena expanded_output = arena_reserve(plan_room);
+        Arena expanded_scratch = arena_reserve(plan_room);
+        const bool expansion = lowered && expanded_output.base != NULL && expanded_scratch.base != NULL &&
+                               check_program_lower_sources(&expanded, &program, path == 0, &expanded_output, &expanded_scratch);
+        snprintf(description, sizeof(description), "%s: the source rows' lowering takes every body, or refuses it for room alone", name);
+        check_test_expect(test, !lowered || (expansion && expanded.count == lower[1].count) || (!expansion && expanded.status == CHECK_PROGRAM_RESOURCE), description);
+        check_test_program_expansions[expansion ? 0 : 1] += lowered && path == 1;
+        for (uint32_t b = 0; expansion && expanded.count == lower[1].count && b < program.body_count; b += 1)
+        {
+            snprintf(description, sizeof(description), "%s: function %u's entries by the fast paths are the general expansion's", name, b);
+            check_test_expect(test, check_test_program_function(expanded.functions + b, lower[1].functions + b), description);
+        }
+        arena_release(&expanded_output);
+        arena_release(&expanded_scratch);
         CheckProgramCode code = { 0 };
         CheckDataResult emission = { 0 };
         // Every atom in place, the aliases' and ifuncs' symbols at their definitions (#147; -c's check_program_sections).
@@ -2775,7 +2795,34 @@ static void check_test_lower_opening_owner(CheckTest* test)
                       "local ownership finds the original selected body and skips omitted openings");
 }
 
-// The branches' targets (check_lower_resolve_labels): by 64 kinds at a time as by its scalar twin, the same targets
+// Every type's class and facts by their definition, the rules (check_lower_type_class and check_lower_type_facts), one
+// type at a time, `count` of each from index 0: what check_lower_classify_types' columns are checked against.
+static void check_test_classify_types_definition(const TypeTable* types, uint32_t count, uint8_t* classes, uint8_t* facts)
+{
+    for (uint32_t index = 0; index < count; index += 1)
+    {
+        const TypeId type = (TypeId)index << BUSTER_TYPE_INDEX_SHIFT;
+        classes[index] = check_lower_type_class(types, type);
+        facts[index] = check_lower_type_facts(types, type);
+    }
+}
+
+// The branches' targets by their definition: each entry in order whose kind is one of the four branches' takes its
+// label's entry, until the first whose label is out of `label_count` or has no entry, which stays as it was.
+static bool check_test_resolve_labels_definition(const uint8_t* kinds, uint64_t* values, uint32_t count, const uint32_t* labels, uint32_t label_count)
+{
+    bool valid = true;
+    for (uint32_t i = 0; valid && i < count; i += 1)
+    {
+        const bool branch = kinds[i] == BUSTER_TYPED_BRANCH_FALSE || kinds[i] == BUSTER_TYPED_BRANCH_FALSE + 1 || kinds[i] == BUSTER_TYPED_BRANCH_FALSE + 2 ||
+                            kinds[i] == BUSTER_TYPED_JUMP_VALUE;
+        valid = !branch || (values[i] < label_count && labels[values[i]] != BUSTER_CHECK_NONE);
+        values[i] = branch && valid ? labels[values[i]] : values[i];
+    }
+    return valid;
+}
+
+// The branches' targets (check_lower_resolve_labels): by 64 kinds at a time as by their definition, the same targets
 // and the same first failure, for counts across the masks' tails, the kinds at a page's end, the four branch kinds among
 // the kinds beside them, and every label with an entry, or some out of range or without one.
 static void check_test_program_resolve_labels(CheckTest* test)
@@ -2786,6 +2833,7 @@ static void check_test_program_resolve_labels(CheckTest* test)
     check_test_expect(test, ready, "the branches' kinds have a protected tail");
     uint64_t values[200];
     uint64_t twin_values[200];
+    uint64_t defined_values[200];
     uint32_t labels[16];
     bool same = true;
     uint32_t resolved = 0;
@@ -2807,13 +2855,16 @@ static void check_test_program_resolve_labels(CheckTest* test)
             values[i] = check_test_random(test) % (whole ? label_count : label_count + 2);
         }
         memcpy(twin_values, values, (uint64_t)count * sizeof(uint64_t));
+        memcpy(defined_values, values, (uint64_t)count * sizeof(uint64_t));
         const bool twin = check_lower_resolve_labels_scalar(kinds, twin_values, count, labels, label_count);
+        const bool defined = check_test_resolve_labels_definition(kinds, defined_values, count, labels, label_count);
         const bool vector = check_lower_resolve_labels(kinds, values, count, labels, label_count);
         same &= twin == vector && memcmp(values, twin_values, (uint64_t)count * sizeof(uint64_t)) == 0;
+        same &= defined == vector && memcmp(values, defined_values, (uint64_t)count * sizeof(uint64_t)) == 0;
         resolved += twin;
         failed += !twin;
     }
-    check_test_expect(test, same && resolved != 0 && failed != 0, "the branches' targets by 64 kinds at a time are their scalar twin's, and so is the first failure");
+    check_test_expect(test, same && resolved != 0 && failed != 0, "the branches' targets by 64 kinds at a time are their definition's and their scalar twin's, and so is the first failure");
     if (mapping != MAP_FAILED && mapping != 0)
     {
         munmap(mapping, page * 2);
@@ -3182,7 +3233,7 @@ static void check_test_program_sparse_switches(CheckTest* test)
     check_test_expect(test, ready, "sparse-switch planner fixture storage");
     if (ready)
     {
-        check_lower_classify_types_scalar(&types.table, type_count, type_classes, type_facts);
+        check_test_classify_types_definition(&types.table, type_count, type_classes, type_facts);
     }
     const uint64_t scratch_mark = scratch.length;
     const TypeId builtin_types[] = { BUSTER_TYPE_INT, BUSTER_TYPE_UINT, BUSTER_TYPE_LONG, BUSTER_TYPE_ULONG };
@@ -3443,7 +3494,7 @@ static __attribute__((noinline)) void check_test_program_type_facts(CheckTest* t
             uint8_t* columns = malloc(4 * ((uint64_t)count + 1));
             check_test_expect(test, columns != 0 && count > 300, "the world's types and their columns");
             // In both char modes: the vector path copies the builtins' rows, plain char's class by the mode, which the
-            // twin classifies by the rules (#442).
+            // definition classifies by the rules (#442).
             for (uint32_t mode = 0; columns != 0 && mode < 2; mode += 1)
             {
                 TypeTable flipped = *table;
@@ -3456,12 +3507,12 @@ static __attribute__((noinline)) void check_test_program_type_facts(CheckTest* t
                     uint8_t* vector_facts = columns + 3 * ((uint64_t)count + 1);
                     memset(vector_classes, 0xa5, prefix + 1);
                     memset(vector_facts, 0xa5, prefix + 1);
-                    check_lower_classify_types_scalar(&flipped, prefix, scalar_classes, scalar_facts);
+                    check_test_classify_types_definition(&flipped, prefix, scalar_classes, scalar_facts);
                     check_lower_classify_types(&flipped, prefix, vector_classes, vector_facts);
                     const bool same = memcmp(scalar_classes, vector_classes, prefix) == 0 && memcmp(scalar_facts, vector_facts, prefix) == 0 &&
                                       vector_classes[prefix] == 0xa5 && vector_facts[prefix] == 0xa5;
                     char description[192];
-                    snprintf(description, sizeof(description), "the first %u of world %u's %u types, plain char %s: their classes and facts by both paths", prefix,
+                    snprintf(description, sizeof(description), "the first %u of world %u's %u types, plain char %s: their classes and facts by the vector path and the rules", prefix,
                              round, count, mode != 0 ? "unsigned" : "signed");
                     check_test_expect(test, same, description);
                 }
@@ -3475,7 +3526,7 @@ static __attribute__((noinline)) void check_test_program_type_facts(CheckTest* t
                 copy.types.kind = kinds;
                 uint8_t* classes = mappings[1] + page - prefix;
                 uint8_t* facts = mappings[2] + page - prefix;
-                check_lower_classify_types_scalar(table, prefix, columns, columns + count + 1);
+                check_test_classify_types_definition(table, prefix, columns, columns + count + 1);
                 check_lower_classify_types(&copy, prefix, classes, facts);
                 char description[160];
                 snprintf(description, sizeof(description), "world %u's first %u types' classes and facts, at a page's end", round, prefix);
@@ -3485,9 +3536,10 @@ static __attribute__((noinline)) void check_test_program_type_facts(CheckTest* t
             abi_test_world_close(&world);
         }
     }
-    // A function's memory classes from its entries' classes (check_lower_entry_classes) against its twin's: columns of
-    // every count to 200 ending at the guard page, of random classes but F80, I128 and U128, with one of those at a random
-    // place in one column of four, and none in the others.
+    // A function's memory classes from its entries' classes (check_lower_entry_classes) against their definition's and
+    // its twin's: columns of every count to 200 ending at the guard page, of random classes below F80, with one of F80,
+    // I128, U128 and VECTOR at a random place in three columns of four, and none in the others.
+    uint32_t found = 0;
     for (uint32_t count = 0; guarded && count <= 200; count += 1)
     {
         for (uint32_t round = 0; round < 8; round += 1)
@@ -3497,20 +3549,30 @@ static __attribute__((noinline)) void check_test_program_type_facts(CheckTest* t
             {
                 classes[i] = (uint8_t)(check_test_random(test) % BUSTER_TYPED_CLASS_F80);
             }
-            const uint8_t memory[3] = { BUSTER_TYPED_CLASS_F80, BUSTER_TYPED_CLASS_I128, BUSTER_TYPED_CLASS_U128 };
+            const uint8_t memory[4] = { BUSTER_TYPED_CLASS_F80, BUSTER_TYPED_CLASS_I128, BUSTER_TYPED_CLASS_U128, BUSTER_TYPED_CLASS_VECTOR };
             if (count != 0 && round % 4 != 0)
             {
-                classes[check_test_random(test) % count] = memory[round % 3];
+                classes[check_test_random(test) % count] = memory[(round + round / 4) % 4];
             }
             const uint32_t vector = check_lower_entry_classes(classes, count);
             const uint32_t scalar = check_lower_entry_classes_scalar(classes, count);
-            const uint32_t expected = count == 0 || round % 4 == 0 ? 0 : round % 3 == 0 ? BUSTER_CHECK_LOWER_ENTRIES_X87 : BUSTER_CHECK_LOWER_ENTRIES_WIDE;
+            // The definition: each class of the entries in turn.
+            uint32_t expected = 0;
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                expected |= classes[i] == BUSTER_TYPED_CLASS_F80 ? BUSTER_CHECK_LOWER_ENTRIES_X87 : 0;
+                expected |= classes[i] == BUSTER_TYPED_CLASS_I128 || classes[i] == BUSTER_TYPED_CLASS_U128 ? BUSTER_CHECK_LOWER_ENTRIES_WIDE : 0;
+                expected |= classes[i] == BUSTER_TYPED_CLASS_VECTOR ? BUSTER_CHECK_LOWER_ENTRIES_VECTOR : 0;
+            }
+            found |= expected;
             char description[160];
             snprintf(description, sizeof(description), "the memory classes of %u entries' classes, round %u: %u by the vector path, %u by the scalar one, for %u", count,
                      round, vector, scalar, expected);
             check_test_expect(test, vector == expected && scalar == expected, description);
         }
     }
+    check_test_expect(test, !guarded || found == (BUSTER_CHECK_LOWER_ENTRIES_X87 | BUSTER_CHECK_LOWER_ENTRIES_WIDE | BUSTER_CHECK_LOWER_ENTRIES_VECTOR),
+                      "the entries' classes take each memory class");
     for (uint32_t i = 0; i < 3; i += 1)
     {
         if (mappings[i] != MAP_FAILED && mappings[i] != 0)
