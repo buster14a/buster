@@ -1990,6 +1990,9 @@ typedef enum PPDiagnosticPhase
     // A function's CFG observer's warnings (#2990, check_common_cfg_tautologies): clang builds the CFG at the body's end
     // before it gives the body's queued runtime warnings.
     PP_DIAGNOSTIC_CFG,
+    // An initializer list's walk's diagnostics (#2914, clang's InitListChecker: its subobjects' conversion errors, excess
+    // elements, overrides) precede the completed initializer's conversion warnings at the same declarator end.
+    PP_DIAGNOSTIC_INITIALIZER,
     PP_DIAGNOSTIC_DEFERRED,
     PP_DIAGNOSTIC_RETURN,
     // A declarator's completed type precedes declaration-attribute checks at the same parser boundary.

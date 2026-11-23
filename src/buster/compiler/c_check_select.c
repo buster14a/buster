@@ -131,7 +131,22 @@ static bool check_input_selection_type(CheckInputReader* reader, uint32_t first)
     return valid;
 }
 
-static bool check_input_selection_generic(CheckInputReader* reader, uint32_t separator, uint32_t close, const CheckValue* control)
+// A selection that no association's type matches and that has no default (#2914, CHECK_INPUT_GENERIC_NO_MATCH), its
+// control in [first, separator): at the control's first token, its type after the lvalue conversion, with the
+// typedef its operand is written with where that conversion kept the type (`P q`'s 'P', not `const CI c`'s 'int').
+static void check_input_generic_no_match(CheckInputReader* reader, uint32_t first, uint32_t separator, const CheckValue* control, TypeId control_type)
+{
+    const Parser* parser = reader->parser;
+    const uint32_t root = check_input_range_root(reader, first, separator);
+    const uint32_t before = reader->output->report_count;
+    check_input_report_typed(reader, first, CHECK_INPUT_GENERIC_NO_MATCH, control_type, BUSTER_CHECK_NONE, 0);
+    if (reader->output->report_count > before && root < parser->tokens.count && control_type == control->type)
+    {
+        reader->output->reports[before].type_spelling = check_input_token_type_spelling(reader->output, parser, root, parser->tree.roles[root] == PARSE_ROLE_CLOSE_CAST);
+    }
+}
+
+static bool check_input_selection_generic(CheckInputReader* reader, uint32_t first, uint32_t separator, uint32_t close, const CheckValue* control)
 {
     const Parser* parser = reader->parser;
     const uint64_t mark = reader->scratch->length;
@@ -175,6 +190,10 @@ static bool check_input_selection_generic(CheckInputReader* reader, uint32_t sep
         association = after + 1;
     }
     chosen = chosen != BUSTER_CHECK_NONE ? chosen : fallback;
+    if (valid && chosen == BUSTER_CHECK_NONE)
+    {
+        check_input_generic_no_match(reader, first, separator, control, control_type);
+    }
     valid &= chosen != BUSTER_CHECK_NONE;
     if (valid)
     {
@@ -210,11 +229,12 @@ static bool check_input_selection(CheckInputReader* reader, uint32_t close)
     {
         const uint32_t first = keyword + 2;
         const uint32_t separator = check_constant_punctuation(parser, first, close, PARSE_KIND_COMMA);
+        const uint32_t reports = reader->output->report_count;
         CheckValue control = { 0 };
         bool selected = first < separator && separator < close && check_input_evaluate_cached(reader, first, separator, &control);
         if (selected && name == C_NAME_GENERIC)
         {
-            selected = check_input_selection_generic(reader, separator, close, &control);
+            selected = check_input_selection_generic(reader, first, separator, close, &control);
             check_input_warning_suppress(reader, first, separator, check_constant_unevaluated_warnings());
         }
         else if (selected)
@@ -232,7 +252,7 @@ static bool check_input_selection(CheckInputReader* reader, uint32_t close)
                 check_input_warning_suppress(reader, condition ? next + 1 : separator + 1, condition ? close : next, CHECK_WARNING_INTEGER_OVERFLOW);
             }
         }
-        if (!selected)
+        if (!selected && reader->output->report_count == reports)
         {
             check_input_report(reader, keyword, CHECK_INPUT_DECLARATION);
         }

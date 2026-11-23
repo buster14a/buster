@@ -194,6 +194,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_LABEL_AMBIGUOUS: result = "reference to label is ambiguous"; break;
         case CHECK_INPUT_AUTO_TYPE_INITIALIZER: result = "declaration with deduced type '__auto_type' requires an initializer"; break;
         case CHECK_INPUT_AUTO_ATOMIC_POINTER: result = "variable with atomic deduced pointee has incompatible initializer"; break;
+        case CHECK_INPUT_GENERIC_NO_MATCH: result = "controlling expression type not compatible with any generic association type"; break;
         case CHECK_INPUT_AUTO_TYPE_SELF: result = "variable declared with deduced type '__auto_type' cannot appear in its own initializer"; break;
         case CHECK_INPUT_AUTO_TYPE_CONTEXT: result = "'__auto_type' not allowed here"; break;
         case CHECK_INPUT_AUTO_TYPE_LIST: result = "cannot use '__auto_type' with initializer list in C"; break;
@@ -1987,6 +1988,23 @@ static bool check_driver_literal(Preprocessor* pp, const Parser* parser, uint32_
 // any lane compiles a unit.
 static bool tier1_select_initialize(void);
 
+// The order among a declaration's diagnostics of one its initializer list's walk gives at `token` (#2914): clang's
+// InitListChecker gives a list's subobjects' conversion errors, excess elements and overrides as it walks the list, in
+// source order, before the completed initializer's conversion warnings (-Wliteral-conversion's, which keep no suborder
+// and so follow).
+static uint64_t check_driver_initializer_suborder(const Parser* parser, uint32_t token)
+{
+    return token < parser->tokens.count ? (uint64_t)parse_source_index(&parser->tokens, token) + 1u : 0;
+}
+
+// The records published since `previous`, the walk's at `token`, in its order (check_driver_initializer_suborder) and
+// phase (PP_DIAGNOSTIC_INITIALIZER).
+static void check_driver_initializer_order(const Parser* parser, Preprocessor* pp, const PPDiagnosticRecord* previous, uint32_t token)
+{
+    pp_diagnostic_suborder(pp, previous, check_driver_initializer_suborder(parser, token));
+    pp_diagnostic_phase(pp, previous, PP_DIAGNOSTIC_INITIALIZER);
+}
+
 // The old excess-element sink and policy remain available to other consumers. Its sparse MESSAGE witness only
 // preserves initializer semantic order alongside new facts; the generic sparse renderer still ignores MESSAGE.
 // The initializers' walk's warnings, and its unavailable members' errors (CHECK_WARNING_EVENT_UNAVAILABLE_USE, #147), which
@@ -2024,7 +2042,7 @@ static bool check_driver_initializer_warning_events(const Parser* parser, Prepro
                     const PPDiagnosticRecord* previous = pp->diagnostic_last;
                     pp_diagnose_output_at(pp, disposition, parse_source_index(&parser->tokens, event->token), publication, "%s [%s-Wexcess-initializers]",
                                           message, check_driver_warning_error_prefix(severity == CHECK_WARNING_ERROR));
-                    pp_diagnostic_suborder(pp, previous, (uint64_t)parse_source_index(&parser->tokens, event->token) + 1u);
+                    check_driver_initializer_order(parser, pp, previous, event->token);
                     valid = !pp->diagnostic_collection_failed;
                 }
             }
@@ -2054,7 +2072,12 @@ static bool check_driver_initializer_warning_events(const Parser* parser, Prepro
         else if (shown)
         {
             const CheckWarningEvents one = { .events = event, .count = 1, .notes = view->notes, .note_count = view->note_count };
+            const PPDiagnosticRecord* previous = pp->diagnostic_last;
             valid = check_driver_warning_events(parser, pp, input, types, &one, repair, scratch);
+            if (event->kind == CHECK_WARNING_EVENT_INITIALIZER_OVERRIDES || event->kind == CHECK_WARNING_EVENT_MANY_SCALAR_BRACES)
+            {
+                check_driver_initializer_order(parser, pp, previous, event->token);
+            }
         }
     }
     return valid;
@@ -3401,6 +3424,16 @@ static bool check_driver_report_default_error(const Parser* parser, const CheckS
         uint32_t parameter_count = 0;
         const TypeId* parameters = function != 0 && type_kind(types, function) == BUSTER_TYPE_KIND_FUNCTION ? type_parameters(types, function, &parameter_count) : NULL;
         target = parameters != NULL && index < parameter_count ? parameters[index] : 0;
+    }
+    else if (incompatible && op == CHECK_OP_BUILTIN_MISC && graph->members[node] != CBUILTIN_DUMP_STRUCT && graph->argument_counts != NULL &&
+             graph->argument_offsets != NULL && stream->argument_conversions != NULL && stream->diagnostic_operands[node] < graph->argument_counts[node])
+    {
+        // A builtin's argument's (#2914, check_driver_builtin_conversion's): clang makes the call, of the builtin's result
+        // type, whose own conversion it then checks (`long *l = __builtin_expect(p, 0);`'s second error).
+        const uint32_t at = graph->argument_offsets[node] + stream->diagnostic_operands[node];
+        const CheckConversion conversion = stream->argument_conversions[at];
+        source = conversion.flags == BUSTER_CHECK_CONVERT_FAILED ? graph->argument_nodes[at] : BUSTER_CHECK_NONE;
+        target = conversion.flags == BUSTER_CHECK_CONVERT_FAILED ? conversion.type : 0;
     }
     const TypeId value = source < stream->count ? check_driver_conversion_source(types, stream, source) : 0;
     const bool converted = incompatible && !void_return && value != 0 && target != 0 &&
@@ -5352,6 +5385,8 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                               check_driver_shift_message(parser, pp, input, stream, types, &spell, token, warning_flag, scratch) :
                                               warning_flag == CHECK_WARNING_INTEGER_OVERFLOW ?
                                               check_driver_overflow_message(parser, pp, input, stream, types, &spell, token, scratch) :
+                                              warning_flag == CHECK_WARNING_DISTINCT_POINTER_COMPARE || warning_flag == CHECK_WARNING_POINTER_INTEGER_COMPARE ?
+                                              check_driver_comparison_message(parser, pp, input, stream, types, &spell, token, warning_flag, scratch) :
                                               check_diagnostic_message(warning_flag);
                         const uint32_t node = input->token_nodes != NULL && token < input->token_count ? input->token_nodes[token] : BUSTER_CHECK_NONE;
                         const bool stashed = shifts != NULL && shifts->records != NULL && phase == PP_DIAGNOSTIC_DEFERRED &&
@@ -5565,7 +5600,8 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                         x86_message = check_driver_conversion_error(parser, pp, input, stream, types, &spell, stream->reports + index, &x86_location,
                                                                     &conversion_note_token, &conversion_note, &conversion_argument, scratch);
                     }
-                    const uint32_t argument_first = x86_message != NULL && conversion_argument < stream->count ? x86_location : BUSTER_CHECK_NONE;
+                    // (A builtin's argument's too, #2914: clang checks it as it builds the call, before the call's parents.)
+                    const uint32_t argument_first = x86_message != NULL && (conversion_argument < stream->count || builtin_converted) ? x86_location : BUSTER_CHECK_NONE;
                     if (x86_message == NULL && phase == 1)
                     {
                         x86_message = check_driver_call_count(parser, pp, input, stream, types, stream->reports + index, &x86_location, &conversion_note_token,
@@ -6358,6 +6394,18 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                                  "unknown builtin", (int)intern_length(pp->table, name), intern_bytes(pp->table, name),
                                                  kind == CHECK_INPUT_UNDECLARED ? "" : " [-Wimplicit-function-declaration]");
                         }
+                        else if (phase == 0 && kind == CHECK_INPUT_CLEANUP_TYPE && named && input->reports[index].type != 0 && (TypeId)input->reports[index].value != 0)
+                        {
+                            // clang's handleCleanupAttr names the argument and both types (#1844): the parameter's, as its
+                            // function's type has it, and a pointer to the variable's.
+                            const CheckInputReport* report = input->reports + index;
+                            const uint32_t name = parser->tokens.names[token];
+                            const String8 parameter = check_driver_warning_type(parser, pp, input, types, &spell, scratch, report->type, report->type_spelling);
+                            const String8 pointer = check_driver_warning_type(parser, pp, input, types, &spell, scratch, (TypeId)report->value, (uint32_t)(report->value >> 32));
+                            pp_diagnose_output_at(pp, PP_SEVERITY_ERROR, source, publication, "'cleanup' function '%.*s' parameter has type %.*s which is incompatible with type %.*s",
+                                                 (int)intern_length(pp->table, name), intern_bytes(pp->table, name), (int)parameter.length, parameter.pointer,
+                                                 (int)pointer.length, pointer.pointer);
+                        }
                         else if ((kind == CHECK_INPUT_CLEANUP_FUNCTION || kind == CHECK_INPUT_CLEANUP_PARAMETERS || kind == CHECK_INPUT_CLEANUP_TYPE) && named)
                         {
                             // clang's handleCleanupAttr names the argument; of the parameter's type it says what its other
@@ -7033,6 +7081,10 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                         pp_diagnostic_suborder(pp, previous, phase == 0 ? input->reports[index].suborder :
                                                              phase == 2 ? extra[index].suborder :
                                                              argument_first < count ? (uint64_t)parse_source_index(&parser->tokens, argument_first) + 1u : 0);
+                        if (phase == 2 && extra[index].suborder != 0)
+                        {
+                            pp_diagnostic_phase(pp, previous, PP_DIAGNOSTIC_INITIALIZER);
+                        }
                     }
                     else
                     {

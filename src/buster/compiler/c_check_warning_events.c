@@ -277,18 +277,21 @@ enum
     // A character literal added to a character pointer (#2406, clang's diagnoseStringPlusChar): on by default,
     // independently of -Wstring-plus-int, which can also diagnose the same addition.
     CHECK_WARNING_ID_STRING_PLUS_CHAR = 171,
+    // A cleanup function's pointer parameter more aligned than its variable's type (#1844, clang's CheckArgAlignment in
+    // handleCleanupAttr): -Walign-mismatch, on by default.
+    CHECK_WARNING_ID_ALIGN_MISMATCH = 172,
     // An integer converted implicitly to a real floating type whose significand its likely range is wider than (#3339,
     // clang's CheckImplicitConversion with TryGetExprRange's approximate range): "implicit conversion from 'int' to 'float'
     // may lose precision", -Wimplicit-int-float-conversion's, off by default, under -Wimplicit-float-conversion; and an
     // integer constant expression that changes value there, "implicit conversion from 'int' to 'float' changes value from
     // 16777217 to 16777216", -Wimplicit-const-int-float-conversion's, on by default, under it in turn.
-    CHECK_WARNING_ID_IMPLICIT_INT_FLOAT_CONVERSION = 172,
-    CHECK_WARNING_ID_IMPLICIT_CONST_INT_FLOAT_CONVERSION = 173,
+    CHECK_WARNING_ID_IMPLICIT_INT_FLOAT_CONVERSION = 173,
+    CHECK_WARNING_ID_IMPLICIT_CONST_INT_FLOAT_CONVERSION = 174,
     // A floating value converted implicitly to a floating type of a higher rank (#3339, CheckImplicitConversion's
     // warn_impcast_double_promotion): "implicit conversion increases floating-point precision", every implicit conversion
     // (the usual arithmetic conversions' operands and the default argument promotions too), off by default, in no group but
     // -Weverything.
-    CHECK_WARNING_ID_DOUBLE_PROMOTION = 174,
+    CHECK_WARNING_ID_DOUBLE_PROMOTION = 175,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -659,6 +662,9 @@ typedef enum CheckWarningEventKind
     CHECK_WARNING_EVENT_NON_PROTOTYPE_REDECLARATION,
     // payload.data is 0 for &&, 1 for ||. The source adapter retains the operator's construction boundary.
     CHECK_WARNING_EVENT_CONSTANT_LOGICAL_OPERAND,
+    // payload.data the argument's alignment's log2 in its low byte and the parameter's above it; payload.name the cleanup
+    // function's name.
+    CHECK_WARNING_EVENT_ALIGN_MISMATCH,
     CHECK_WARNING_EVENT_KIND_COUNT,
 } CheckWarningEventKind;
 

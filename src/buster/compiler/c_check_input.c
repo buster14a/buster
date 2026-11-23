@@ -418,6 +418,9 @@ typedef enum CheckInputMessage
     // An _Atomic __auto_type pointee is never compatible with its initializer (#1844). The pointer placeholder's
     // type and the initializer's unconverted type (value's low half; typedef spelling in its high half) survive recovery.
     CHECK_INPUT_AUTO_ATOMIC_POINTER,
+    // A _Generic selection whose controlling type (its lvalue conversion's) matches no association and which has no
+    // default (#2914): clang's err_generic_sel_no_match at the controlling expression's first token, with that type.
+    CHECK_INPUT_GENERIC_NO_MATCH,
 } CheckInputMessage;
 
 // CHECK_INPUT_DIRECT_INITIALIZER_ARRAY's detail: the literal the element takes besides a list, in clang's words.
@@ -595,6 +598,7 @@ static const char* const check_input_messages[] =
     [CHECK_INPUT_ENUM_INVALID_BASE] = "non-integral type is an invalid underlying type",
     [CHECK_INPUT_ENUM_VALUE_TYPE] = "integer constant expression must have integer type",
     [CHECK_INPUT_AUTO_ATOMIC_POINTER] = "variable with atomic deduced pointee has incompatible initializer",
+    [CHECK_INPUT_GENERIC_NO_MATCH] = "controlling expression type not compatible with any generic association type",
 };
 
 // The type/action tables currently describe one C LP64 model: 32-bit wchar_t, x87 long double stored in 16 bytes, and
