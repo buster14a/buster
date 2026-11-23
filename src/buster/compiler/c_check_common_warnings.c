@@ -5803,16 +5803,37 @@ static uint32_t check_common_expansion_point(const Parser* parser, Preprocessor*
     return result;
 }
 
-// A `;` that a recovery view kept after deleting a malformed statement's tokens before it, such as an orphan `)`'s
-// (#2406). Clang made that statement a StmtError, which is neither a null body nor the statement after a loop.
-static bool check_common_recovered_semi(const Parser* parser, uint32_t token)
+// Whether the statement that starts at `token` was clang's StmtError: a recovery view's `;` that ends a statement the
+// repair deleted whole (BUSTER_PARSE_DROPPED_STATEMENT, #2406), or a for or while loop whose body is one, as clang's
+// ParseForStatement and ParseWhileStatement drop a loop whose body is invalid. Such a statement is neither an empty
+// body nor the statement after a loop, and ActOnForStmt never sees its loop.
+static bool check_common_dropped_statement(const Parser* parser, uint32_t token)
 {
+    const uint32_t count = parser->tokens.count;
     bool result = false;
-    if (!parser->tokens.identity_sources && token != 0 && token < parser->tokens.count && parser->tokens.kinds[token] == PARSE_KIND_SEMI)
+    bool walking = true;
+    uint32_t at = token;
+    while (walking && at < count)
     {
-        const uint32_t source = parse_source_index(&parser->tokens, token);
-        const uint32_t before = parse_source_index(&parser->tokens, token - 1);
-        result = before < source && before + 1 != source;
+        const uint8_t kind = parser->tokens.kinds[at];
+        result = kind == PARSE_KIND_SEMI && parser->tree.roles[at] == PARSE_ROLE_TERMINATOR &&
+                 (parser->tokens.flags[at] & BUSTER_PARSE_DROPPED_STATEMENT) != 0;
+        // A loop's head: step past its parenthesized group to its body.
+        const bool loop = !result && (kind == PARSE_KIND_FOR || kind == PARSE_KIND_WHILE) && at + 1 < count &&
+                          parser->tokens.kinds[at + 1] == PARSE_KIND_L_PAREN;
+        uint32_t depth = 0;
+        uint32_t close = at + 1;
+        bool scanning = loop;
+        while (scanning && close < count)
+        {
+            const uint8_t inner = parser->tokens.kinds[close];
+            depth += inner == PARSE_KIND_L_PAREN;
+            depth -= inner == PARSE_KIND_R_PAREN && depth != 0;
+            scanning = depth != 0;
+            close += scanning ? 1u : 0u;
+        }
+        walking = loop && close < count && (parser->tree.roles[close] == PARSE_ROLE_CLOSE_FOR || parser->tree.roles[close] == PARSE_ROLE_CLOSE_CONDITION);
+        at = close + 1;
     }
     return result;
 }
@@ -5844,7 +5865,7 @@ static void check_common_empty_bodies(const Parser* parser, Preprocessor* pp, co
             // The `;` must spell on the `)`'s line: `while (x)\n;` is quiet, as is a `;` a macro's body
             // provides (its spelling line is its definition's).
             bool warn = (kind == PARSE_KIND_IF || kind == PARSE_KIND_WHILE || kind == PARSE_KIND_FOR ||
-                         kind == PARSE_KIND_SWITCH) && !check_common_recovered_semi(parser, token);
+                         kind == PARSE_KIND_SWITCH) && !check_common_dropped_statement(parser, token);
             warn = warn && !has_else && check_common_severity(pp, parser, input, token, CHECK_WARNING_ID_EMPTY_BODY, false) != CHECK_WARNING_IGNORE &&
                    check_common_spelling_line(parser, pp, token) != 0 &&
                    check_common_spelling_line(parser, pp, token) == check_common_expansion_point(parser, pp, parent, 0);
@@ -5861,7 +5882,7 @@ static void check_common_empty_bodies(const Parser* parser, Preprocessor* pp, co
                 uint32_t sibling = BUSTER_CHECK_NONE;
                 for (uint32_t t = warn ? token + 1 : owner; t < owner; t += 1)
                 {
-                    if (parser->tree.parents[t] == owner && !check_common_recovered_semi(parser, t))
+                    if (parser->tree.parents[t] == owner && !check_common_dropped_statement(parser, check_common_subtree_start(parser, t)))
                     {
                         sibling = t;
                         break;
@@ -12608,14 +12629,14 @@ static __attribute__((noinline)) void check_common_for_loops(const Parser* parse
         {
             end += 1;
         }
-        // A loop whose body a recovery view reduced to its `;` was clang's StmtError: ActOnForStmt never saw it (#2406).
-        if (semis[1] == BUSTER_CHECK_NONE || open >= close || check_common_recovered_semi(parser, close + 1))
+        // A loop whose body was clang's StmtError was dropped with it: ActOnForStmt never saw it (#2406).
+        if (semis[1] == BUSTER_CHECK_NONE || open >= close || check_common_dropped_statement(parser, close + 1))
         {
             continue;
         }
-        // Clang's ActOnForStmt runs before the next statement parses: where the view deleted that statement's tokens
-        // before a kept `;`, publish before the error its first token had (#2406).
-        const uint32_t publication = check_common_recovered_semi(parser, end + 1) ? end : end + 1;
+        // Clang's ActOnForStmt runs before the next statement parses: where the view deleted that statement whole,
+        // publish before the error its first token had (#2406).
+        const uint32_t publication = check_common_dropped_statement(parser, end + 1) ? end : end + 1;
         // The condition, clang's Second: its truth test's operand, the root a token of it climbs to that is the test (a
         // statement expression's statements and a static selection's other operands are roots of their own). Clang skips
         // it where the warning is ignored at its first token.

@@ -5117,6 +5117,7 @@ static void parse_scalar_reset(ParseScalar* parser)
     parser->error_resume_closers = 0;
     parser->error_resume_follow = 0;
     parser->error_resume_attribute = false;
+    parser->error_resume_statement = false;
     parser->error_resume_colon = false;
     parser->error_probe = false;
 }
@@ -5510,6 +5511,8 @@ static uint32_t parse_scalar_resume_orphan_closer(ParseScalar* parser)
         parser->error_resume_delete = !missing_semi;
         parser->error_resume_begin = missing_semi ? 0 : at;
         parser->error_resume_end = missing_semi ? 0 : end;
+        // A statement that starts at the orphan `)` is deleted whole; an expression's tail keeps its statement.
+        parser->error_resume_statement = empty;
         parser->error_probe = false;
         // ExpectAndConsumeSemi leaves this ')' to start the next statement. Inserting the semicolon lets the next
         // recovery round discover that second expected-expression diagnostic before discarding its malformed tail.
@@ -5554,6 +5557,7 @@ static uint32_t parse_scalar_recover(ParseScalar* parser, uint32_t stopped)
             .resume_closers = parser->error_resume_closers,
             .resume_follow = parser->error_resume_follow,
             .resume_attribute = parser->error_resume_attribute,
+            .resume_statement = parser->error_resume_statement,
             .resume_colon = parser->error_resume_colon,
             .probe = parser->error_probe,
             .call_statement = call_statement,

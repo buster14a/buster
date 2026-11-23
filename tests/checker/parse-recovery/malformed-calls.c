@@ -534,4 +534,73 @@ void check(void)
     fprintf(int);
     after_recovered_library;
 }
+#elif BUSTER_CASE == 71
+void check(int c)
+{
+    for (; c;)
+#pragma GCC diagnostic push
+        ;
+}
+void later(void)
+{
+    after_pragma_for_body;
+}
+#elif BUSTER_CASE == 72
+void check(int c)
+{
+    if (c) _Pragma("GCC diagnostic push") ;
+}
+void later(void)
+{
+    after_pragma_if_body;
+}
+#elif BUSTER_CASE == 73
+void check(int c)
+{
+    while (c);
+#pragma GCC diagnostic push
+        ;
+}
+void later(void)
+{
+    after_pragma_following;
+}
+#elif BUSTER_CASE == 74
+void check(int c)
+{
+    while (c);
+        c ) ;
+}
+void later(void)
+{
+    after_kept_tail;
+}
+#elif BUSTER_CASE == 75
+void check(int c)
+{
+    while (c);
+    c ) ;
+        (void)c;
+}
+void later(void)
+{
+    after_kept_unindented;
+}
+#elif BUSTER_CASE == 76
+void check(int c, int d)
+{
+    for (; c;) for (; d;) );
+    after_nested_loops;
+}
+#elif BUSTER_CASE == 77
+void check(int c, int d)
+{
+    while (c);
+        for (; d;) );
+    (void)d;
+}
+void later(void)
+{
+    after_dropped_loop;
+}
 #endif

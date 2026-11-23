@@ -918,7 +918,10 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
                                                           current->tokens.kinds[at - 1] == PARSE_KIND_R_SQUARE &&
                                                           current->tokens.kinds[at - 2] == PARSE_KIND_R_SQUARE &&
                                                           diagnostic->resume_end < count && current->tokens.kinds[diagnostic->resume_end] == PARSE_KIND_SEMI;
-                        dropped_declarator = attribute_declarator ? diagnostic->resume_end : dropped_declarator;
+                        // A statement deleted whole marks its kept `;` the same way (BUSTER_PARSE_DROPPED_STATEMENT, #2406).
+                        const bool statement = diagnostic->resume_statement && diagnostic->resume_delete && diagnostic->resume_end < count &&
+                                               current->tokens.kinds[diagnostic->resume_end] == PARSE_KIND_SEMI;
+                        dropped_declarator = attribute_declarator || statement ? diagnostic->resume_end : dropped_declarator;
                         if (diagnostic->resume_call)
                         {
                             const uint32_t attributes = check_prefix_call_attributes(diagnostic);
