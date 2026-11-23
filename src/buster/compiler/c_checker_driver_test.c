@@ -78,6 +78,14 @@ static bool check_test_driver_takes(void)
     return check_test_driver_takes_weighing(BUSTER_CHECK_DRIVER_UNIT_WEIGHT);
 }
 
+// A check that is a unit of its own, and its weight (CheckDriverPart).
+typedef struct CheckDriverSweep CheckDriverSweep;
+struct CheckDriverSweep
+{
+    void (*check)(CheckTest* test, const char* clang, const char* executable, const char* directory);
+    uint32_t weight;
+};
+
 // #2071: the checks' compiler runs without a process each. With --in-process, buster's source commands (an option
 // first, as main_driver routes to main_source_command) run as this process's main_source_command_reusable, with the
 // captured stream in a memfd. With --clang-server PATH, the oracle clang's runs (arguments[0] --clang's name) go to a
@@ -11306,65 +11314,213 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_format_bitints(&test, clang, executable, directory);
             check_test_driver_shift_counts(&test, clang, executable, directory);
         }
-        // Each of these checks is a unit of its own. Grouped in two units, the warnings' sweeps (one added with each
-        // warning) made one part the driver's longest by far, past parallel's 600 s on the slowest hosted runners.
-        static void (*const sweeps[])(CheckTest* test, const char* clang, const char* executable, const char* directory) =
+        // Each of these checks is a unit of its own, of the weight it took on a 4-CPU Xeon VM (#3399). Grouped in two units,
+        // the warnings' sweeps (one added with each warning) made one part the driver's longest by far, past parallel's
+        // 600 s on the slowest hosted runners.
+        static const CheckDriverSweep sweeps[] =
         {
-            check_test_driver_int_in_bool,
-            check_test_driver_bitfields,
-            check_test_driver_registers,
-            check_test_driver_enum_arithmetic,
-            check_test_driver_vla_fold,
-            check_test_driver_for_loops,
-            check_test_driver_enum_casts,
-            check_test_driver_unevaluated,
-            check_test_driver_pointer_casts,
-            check_test_driver_unsequenced,
-            check_test_driver_conditions,
-            check_test_driver_unused_labels,
-            check_test_driver_implicit_values,
-            check_test_driver_chained_comparisons,
-            check_test_driver_builtin_pointer_sign,
-            check_test_driver_shift_op_parentheses,
-            check_test_driver_unused_local_typedef,
-            check_test_driver_alignment_builtins,
-            check_test_driver_lvalue_casts,
-            check_test_driver_operand_diagnostics,
-            check_test_driver_default_errors,
-            check_test_driver_shift_sign_overflow,
-            check_test_driver_assign_enum,
-            check_test_driver_string_plus_int,
-            check_test_driver_asm_label_auto,
-            check_test_driver_assert_const,
-            check_test_driver_assert_bool,
-            check_test_driver_node_bodies,
-            check_test_driver_node_gate,
-            check_test_driver_constant_logical,
-            check_test_driver_query_bool,
-            check_test_driver_ident,
-            check_test_driver_c23_attributes,
-            check_test_driver_empty_unit,
-            check_test_driver_reserved_macro,
-            check_test_driver_unused_macros,
-            check_test_driver_gnu_line_marker,
-            check_test_driver_integer_overflow,
-            check_test_driver_gnu_empty_struct,
-            check_test_driver_record_extensions,
-            check_test_driver_unused_but_set,
-            check_test_driver_out_of_range,
-            check_test_driver_conditional_mismatches,
-            check_test_driver_generic_attributes,
-            check_test_driver_unused_results,
-            check_test_driver_unused_comparisons,
-            check_test_driver_address_spaces,
-            check_test_driver_auto_qualifiers,
-            check_test_driver_sizeof_array_decay,
+            {
+                .check = check_test_driver_int_in_bool,
+                .weight = 280,
+            },
+            {
+                .check = check_test_driver_bitfields,
+                .weight = 460,
+            },
+            {
+                .check = check_test_driver_registers,
+                .weight = 70,
+            },
+            {
+                .check = check_test_driver_enum_arithmetic,
+                .weight = 520,
+            },
+            {
+                .check = check_test_driver_vla_fold,
+                .weight = 1200,
+            },
+            {
+                .check = check_test_driver_for_loops,
+                .weight = 360,
+            },
+            {
+                .check = check_test_driver_enum_casts,
+                .weight = 640,
+            },
+            {
+                .check = check_test_driver_unevaluated,
+                .weight = 320,
+            },
+            {
+                .check = check_test_driver_pointer_casts,
+                .weight = 160,
+            },
+            {
+                .check = check_test_driver_unsequenced,
+                .weight = 170,
+            },
+            {
+                .check = check_test_driver_conditions,
+                .weight = 2500,
+            },
+            {
+                .check = check_test_driver_unused_labels,
+                .weight = 120,
+            },
+            {
+                .check = check_test_driver_implicit_values,
+                .weight = 65,
+            },
+            {
+                .check = check_test_driver_chained_comparisons,
+                .weight = 39,
+            },
+            {
+                .check = check_test_driver_builtin_pointer_sign,
+                .weight = 140,
+            },
+            {
+                .check = check_test_driver_shift_op_parentheses,
+                .weight = 49,
+            },
+            {
+                .check = check_test_driver_unused_local_typedef,
+                .weight = 150,
+            },
+            {
+                .check = check_test_driver_alignment_builtins,
+                .weight = 120,
+            },
+            {
+                .check = check_test_driver_lvalue_casts,
+                .weight = 23,
+            },
+            {
+                .check = check_test_driver_operand_diagnostics,
+                .weight = 780,
+            },
+            {
+                .check = check_test_driver_default_errors,
+                .weight = 260,
+            },
+            {
+                .check = check_test_driver_shift_sign_overflow,
+                .weight = 97,
+            },
+            {
+                .check = check_test_driver_assign_enum,
+                .weight = 100,
+            },
+            {
+                .check = check_test_driver_string_plus_int,
+                .weight = 48,
+            },
+            {
+                .check = check_test_driver_asm_label_auto,
+                .weight = 69,
+            },
+            {
+                .check = check_test_driver_assert_const,
+                .weight = 500,
+            },
+            {
+                .check = check_test_driver_assert_bool,
+                .weight = 690,
+            },
+            {
+                .check = check_test_driver_node_bodies,
+                .weight = 40,
+            },
+            {
+                .check = check_test_driver_node_gate,
+                .weight = 3,
+            },
+            {
+                .check = check_test_driver_constant_logical,
+                .weight = 970,
+            },
+            {
+                .check = check_test_driver_query_bool,
+                .weight = 1400,
+            },
+            {
+                .check = check_test_driver_ident,
+                .weight = 37,
+            },
+            {
+                .check = check_test_driver_c23_attributes,
+                .weight = 57,
+            },
+            {
+                .check = check_test_driver_empty_unit,
+                .weight = 73,
+            },
+            {
+                .check = check_test_driver_reserved_macro,
+                .weight = 93,
+            },
+            {
+                .check = check_test_driver_unused_macros,
+                .weight = 140,
+            },
+            {
+                .check = check_test_driver_gnu_line_marker,
+                .weight = 80,
+            },
+            {
+                .check = check_test_driver_integer_overflow,
+                .weight = 58,
+            },
+            {
+                .check = check_test_driver_gnu_empty_struct,
+                .weight = 59,
+            },
+            {
+                .check = check_test_driver_record_extensions,
+                .weight = 910,
+            },
+            {
+                .check = check_test_driver_unused_but_set,
+                .weight = 100,
+            },
+            {
+                .check = check_test_driver_out_of_range,
+                .weight = 110,
+            },
+            {
+                .check = check_test_driver_conditional_mismatches,
+                .weight = 46,
+            },
+            {
+                .check = check_test_driver_generic_attributes,
+                .weight = 22,
+            },
+            {
+                .check = check_test_driver_unused_results,
+                .weight = 2000,
+            },
+            {
+                .check = check_test_driver_unused_comparisons,
+                .weight = 430,
+            },
+            {
+                .check = check_test_driver_address_spaces,
+                .weight = 1600,
+            },
+            {
+                .check = check_test_driver_auto_qualifiers,
+                .weight = 730,
+            },
+            {
+                .check = check_test_driver_sizeof_array_decay,
+                .weight = 47,
+            },
         };
         for (uint32_t s = 0; !lazy && s < BUSTER_ARRAY_LENGTH(sweeps); s += 1)
         {
-            if (check_test_driver_takes())
+            if (check_test_driver_takes_weighing(sweeps[s].weight))
             {
-                sweeps[s](&test, clang, executable, directory);
+                sweeps[s].check(&test, clang, executable, directory);
             }
         }
         if (!lazy && check_test_driver_takes())
