@@ -596,6 +596,12 @@ struct CheckProgram
     // (#1282, c_check_tier1_inline.c) expands the calls of a defined function of internal linkage with the first and not
     // the second: the x86 intrinsics' wrappers.
     uint8_t* object_inline;
+    // By node, nonzero where check_program_const_integer has answered no (#2850: the controls, the references, the
+    // selection, the lowering and the target features' pass ask it of the same nodes, 2.6 times a node on sqlite3.c,
+    // and each time it walked to the first leaf that is no constant). Null in a unit without a constant's receipt, where
+    // the question has no walk, and in a program check_program_begin did not make. Its bytes are read and written with
+    // relaxed atomics: the passes of a unit may run on several lanes.
+    uint8_t* const_refused;
     // Whether any declaration of a function has returns_twice. Whole-object call initializers (#1549) use this to
     // retain their separate result object in bodies that may reenter them. Null where no declaration has it.
     uint8_t* object_returns_twice;
@@ -6460,6 +6466,13 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
              (options.prepared_data->declaration_count == 0 || options.prepared_data->declaration_keys != NULL)));
     program->object_count = count + 1;
     program->status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_INVALID;
+    // (Without room for it the question is answered by its walk each time, as without it.)
+    const bool receipts = input->graph.const_values != NULL && (input->graph.const_values->count != 0 || input->graph.const_values->prefix != NULL);
+    program->const_refused = valid && receipts && node_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, node_count) : NULL;
+    if (program->const_refused != NULL)
+    {
+        memset(program->const_refused, 0, node_count);
+    }
     uint32_t exit_capacity = 0;
     const uint64_t cleanup_room = valid ? check_program_cleanup_room(parser, input, &exit_capacity) : 0;
     // The exits through cleanups' chains, their records' plans and their dispatches' destinations (#1370).
