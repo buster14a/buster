@@ -1487,7 +1487,7 @@ static Tier1EmitError tier1_emit_cfg_frame(const Tier1SelectPlan* plan, const Ti
             .used_callee_saved = emitted->callee_used | prepared->asm_callee,
             .flags = tier1_emit_cfg_frame_flags(plan->function, options, prepared->call_count + prepared->asm_count != 0),
         };
-        const Tier1FrameError framed = BUSTER_VECTOR_PATH(options->vector) ? tier1_frame_plan(&request, output, scratch, &emitted->frame) : tier1_frame_plan_scalar(&request, output, scratch, &emitted->frame);
+        const Tier1FrameError framed = tier1_frame_plan(&request, output, scratch, &emitted->frame);
         tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_FRAME, framed);
         error = framed == TIER1_FRAME_OK ? TIER1_EMIT_OK : framed == TIER1_FRAME_CAPACITY ? TIER1_EMIT_MEMORY : framed == TIER1_FRAME_OVERFLOW ? TIER1_EMIT_LIMIT : TIER1_EMIT_FRAME;
     }
@@ -4038,6 +4038,14 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
         // A block whose only predecessor is the one before it continues that block's run of slot stamps (tier1_emit_phase).
         const bool run = b != 0 && only == b - 1;
         transitions.stamp = run ? transitions.stamp : b + 1;
+        // And the slots that hold their values at the block's start whatever the edge into it (tier1_cfg_current_slots,
+        // #2553), whose stores are left out too.
+        const uint32_t current_first = cfg->current_slot_offsets != 0 ? cfg->current_slot_offsets[b] : 0;
+        const uint32_t current_end = cfg->current_slot_offsets != 0 ? cfg->current_slot_offsets[b + 1] : 0;
+        for (uint32_t k = current_first; k < current_end; k += 1)
+        {
+            transitions.slot_stamps[emitted->value_nodes[cfg->current_slots[k]]] = transitions.stamp;
+        }
         // The single incoming edge's moves, where tier1_cfg placed them at this block's start.
         if (only != UINT32_MAX)
         {
@@ -4065,8 +4073,9 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
             {
                 transitions.owners[location] = node;
             }
-            // A slot the run carries in holds the value too: its store may be left out in this block (#2870).
-            if (emitted->entry_slots != 0 && held && run && transitions.slot_stamps[node] == transitions.stamp)
+            // A slot the run carries in (#2870), or one current at the block's start (#2553), holds the value too: its
+            // store may be left out in this block. Each stamp of the block's run is the run's or this block's.
+            if (emitted->entry_slots != 0 && error == TIER1_EMIT_OK && kind != BUSTER_TIER1_ALLOCATE_SPILL && transitions.slot_stamps[node] == transitions.stamp)
             {
                 emitted->entry_slots[slot_count] = v;
                 slot_count += 1;

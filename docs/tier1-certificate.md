@@ -209,6 +209,9 @@ incarnation, a strict subset of the fast checker's surviving-base cases.
   - **Block entries.** Each block's certificate is where the allocation keeps
     each value its intervals carry into the block, at
     `tier1_cfg_entry_location`. A value recomputed there gets a recipe fact.
+    Each slot the allocation asserts current at the block's start
+    (`Tier1CfgAllocation.current_slots`, #2553), whose stores its edges leave
+    out, is one more fact, which every edge into the block must prove.
   - **Shape.** Every column is in range, intervals and fragments are in order,
     and each edge's placement agrees with its moves and degrees (an edge its
     consumer copies along, `Tier1CfgInput.edge_copies`, is placed without
@@ -727,7 +730,11 @@ The decoding:
   the decoding asserts each one's slot as one more fact at the value's width.
   Like the entry rows, these are untrusted: the edge from the run's previous
   block must prove each from its records. `tests/driver/tier1_patterns.c`'s
-  `patterns_sector` is the shape.
+  `patterns_sector` is the shape. Since #2553 the list also has the slots the
+  allocation finds current at a block's start on every path
+  (`tier1_cfg_current_slots`), for each such value held in a register or as
+  its recipe there, at blocks of any number of predecessors: every edge into
+  the block proves each.
 - **The frame protocol.** The prologue and each epilogue are decoded record by
   record by rsp's offset from its value at entry, each record exactly its form's
   (`push`, the frame pointer's `mov`, `sub`; `add`, the reset from rbp, `pop`),

@@ -1329,7 +1329,7 @@ static uint32_t tier0_test_vector_encode(Tier0TestTally* tally, const char* name
         uint8_t* allowed_forms = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, X86_FORM_COUNT);
         if (allowed_forms != NULL)
         {
-            x86_target_forms_scalar(&target, allowed_forms);
+            x86_target_forms(&target, allowed_forms);
         }
         ready = tier0_test_expect(tally, allowed_forms != NULL && x86_target_validate(allowed_forms, scalar.records, scalar.count) == scalar.count,
                                   "vectors", "%s: target-illegal emitted instruction", name);

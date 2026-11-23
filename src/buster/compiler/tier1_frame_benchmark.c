@@ -6,8 +6,7 @@
 // rows isolate those same phases and do not stand for total time. The generator itself and native emission are outside
 // the measured path. These are planner measurements, not C compilation or generated-program performance evidence.
 //
-// Twenty-one samples alternate paths; --only separates them, --after-scalar MS conditions every vector sample with
-// the corresponding scalar phase. Run separate processes on the locked 9700X, pinned to CPU 2. CPU cycles are read
+// Twenty-one samples a phase, their median reported. Run on the locked 9700X, pinned to CPU 2. CPU cycles are read
 // from perf_event_open where permitted, otherwise explicitly unavailable. All timing/counter helpers are original.
 
 #include "host_isa.h"
@@ -108,7 +107,7 @@ static void tier1_frame_benchmark_sort(double* samples)
 }
 
 static __attribute__((noinline, aligned(64))) Tier1FrameError tier1_frame_benchmark_repeat(const Tier1FrameRequest* request, Tier1FrameWork* prepared,
-    Arena* output, Arena* scratch, Tier1FrameBenchmarkPhase phase, bool scalar, uint32_t repeats)
+    Arena* output, Arena* scratch, Tier1FrameBenchmarkPhase phase, uint32_t repeats)
 {
     Tier1FrameError error = TIER1_FRAME_OK;
     const uint64_t output_mark = output->length;
@@ -121,7 +120,7 @@ static __attribute__((noinline, aligned(64))) Tier1FrameError tier1_frame_benchm
         {
             case TIER1_FRAME_BENCHMARK_PREPARE:
             {
-                error = tier1_frame_prepare(request, scratch, scalar, &temporary);
+                error = tier1_frame_prepare(request, scratch, &temporary);
                 __asm__ volatile("" : : "r"(&temporary) : "memory");
             } break;
             case TIER1_FRAME_BENCHMARK_COLOR:
@@ -131,12 +130,12 @@ static __attribute__((noinline, aligned(64))) Tier1FrameError tier1_frame_benchm
             } break;
             case TIER1_FRAME_BENCHMARK_LAYOUT:
             {
-                error = tier1_frame_layout(request, prepared, output, scalar, &frame);
+                error = tier1_frame_layout(request, prepared, output, &frame);
                 __asm__ volatile("" : : "r"(&frame) : "memory");
             } break;
             case TIER1_FRAME_BENCHMARK_TOTAL:
             {
-                error = scalar ? tier1_frame_plan_scalar(request, output, scratch, &frame) : tier1_frame_plan(request, output, scratch, &frame);
+                error = tier1_frame_plan(request, output, scratch, &frame);
                 __asm__ volatile("" : : "r"(&frame) : "memory");
             } break;
             default:
@@ -152,21 +151,13 @@ static __attribute__((noinline, aligned(64))) Tier1FrameError tier1_frame_benchm
 
 int run_tier1_frame_benchmark(int argc, char** argv)
 {
-    int only = -1;
     int selected_phase = -1;
-    uint32_t after_ms = 0;
     uint32_t selected_count = 0;
     uint64_t seed = 177;
     bool passed = true;
     for (int i = 1; passed && i < argc; i += 1)
     {
-        if (strcmp(argv[i], "--only") == 0 && i + 1 < argc)
-        {
-            i += 1;
-            only = strcmp(argv[i], "scalar") == 0 ? 0 : (strcmp(argv[i], "vector") == 0 ? 1 : -1);
-            passed = only >= 0;
-        }
-        else if (strcmp(argv[i], "--phase") == 0 && i + 1 < argc)
+        if (strcmp(argv[i], "--phase") == 0 && i + 1 < argc)
         {
             i += 1;
             selected_phase = -1;
@@ -179,21 +170,15 @@ int run_tier1_frame_benchmark(int argc, char** argv)
             }
             passed = selected_phase >= 0;
         }
-        else if ((strcmp(argv[i], "--after-scalar") == 0 || strcmp(argv[i], "--count") == 0 || strcmp(argv[i], "--seed") == 0) && i + 1 < argc)
+        else if ((strcmp(argv[i], "--count") == 0 || strcmp(argv[i], "--seed") == 0) && i + 1 < argc)
         {
-            const bool after = strcmp(argv[i], "--after-scalar") == 0;
             const bool count = strcmp(argv[i], "--count") == 0;
             i += 1;
             char* end;
             errno = 0;
             const uint64_t value = strtoull(argv[i], &end, 10);
             passed = errno == 0 && *argv[i] != 0 && *end == 0 && *argv[i] != '-';
-            if (after)
-            {
-                passed &= value <= 1000;
-                after_ms = (uint32_t)value;
-            }
-            else if (count)
+            if (count)
             {
                 passed &= value != 0 && value <= (1u << 20);
                 selected_count = (uint32_t)value;
@@ -211,7 +196,7 @@ int run_tier1_frame_benchmark(int argc, char** argv)
     }
     if (!passed)
     {
-        fprintf(stderr, "benchmark-tier1-frame: [--only scalar|vector] [--phase prepare|color|layout|total] [--count 1..1048576] [--seed N] [--after-scalar 0..1000]\n");
+        fprintf(stderr, "benchmark-tier1-frame: [--phase prepare|color|layout|total] [--count 1..1048576] [--seed N]\n");
     }
     Arena prepared_arena = arena_reserve(BUSTER_TIER1_FRAME_BENCHMARK_ARENA_BYTES);
     Arena scratch = arena_reserve(BUSTER_TIER1_FRAME_BENCHMARK_ARENA_BYTES);
@@ -256,26 +241,19 @@ int run_tier1_frame_benchmark(int argc, char** argv)
                 columns[count * 3 + i] = shape == 3 ? 1u << (3 + (random >> 8) % 4) : 8;
                 columns[count * 4 + i] = count - i - 1;
             }
-            Tier1Frame frames[2];
-            const Tier1FrameError scalar_error = tier1_frame_plan_scalar(&request, &output, &scratch, &frames[0]);
-            const Tier1FrameError vector_error = tier1_frame_plan(&request, &output, &scratch, &frames[1]);
-            passed = scalar_error == TIER1_FRAME_OK && vector_error == TIER1_FRAME_OK;
-            if (passed)
-            {
-                passed = frames[0].slot_count == frames[1].slot_count && frames[0].object_bytes == frames[1].object_bytes &&
-                    frames[0].stack_adjust_bytes == frames[1].stack_adjust_bytes;
-            }
+            Tier1Frame planned;
+            passed = tier1_frame_plan(&request, &output, &scratch, &planned) == TIER1_FRAME_OK;
             Tier1FrameWork prepared;
             if (passed)
             {
-                passed = tier1_frame_prepare(&request, &prepared_arena, false, &prepared) == TIER1_FRAME_OK;
+                passed = tier1_frame_prepare(&request, &prepared_arena, &prepared) == TIER1_FRAME_OK;
             }
             if (passed)
             {
                 tier1_frame_color(&prepared);
                 printf("tier1-frame shape=%s objects=%u indexed=%u seed=%" PRIu64 " slots=%u object_bytes=%u stack_adjust=%u input_bytes=%" PRIu64
                     " scratch_bytes=%" PRIu64 " output_bytes=%" PRIu64 " plan_bytes=%zu\n", shapes[shape], count, request.slots.indices != 0, seed,
-                    frames[1].slot_count, frames[1].object_bytes, frames[1].stack_adjust_bytes, (uint64_t)count * (request.slots.indices != 0 ? 20 : 16),
+                    planned.slot_count, planned.object_bytes, planned.stack_adjust_bytes, (uint64_t)count * (request.slots.indices != 0 ? 20 : 16),
                     prepared_arena.length, (uint64_t)count * 8, sizeof(Tier1Frame));
             }
             arena_pop_to(&output, 0);
@@ -283,67 +261,46 @@ int run_tier1_frame_benchmark(int argc, char** argv)
             {
                 if (selected_phase < 0 || selected_phase == (int)phase)
                 {
-                    uint32_t repeats[2] = {1, 1};
-                    for (uint32_t path = 0; passed && path < 2; path += 1)
+                    uint32_t repeats = 1;
+                    uint64_t elapsed = 0;
+                    while (passed && elapsed < 2000000 && repeats < (1u << 20))
                     {
-                        uint64_t elapsed = 0;
-                        while (passed && elapsed < 2000000 && repeats[path] < (1u << 20))
+                        const uint64_t before = tier1_frame_benchmark_now();
+                        passed = tier1_frame_benchmark_repeat(&request, &prepared, &output, &scratch, (Tier1FrameBenchmarkPhase)phase, repeats) == TIER1_FRAME_OK;
+                        elapsed = tier1_frame_benchmark_now() - before;
+                        if (elapsed < 2000000)
                         {
-                            const uint64_t before = tier1_frame_benchmark_now();
-                            passed = tier1_frame_benchmark_repeat(&request, &prepared, &output, &scratch, (Tier1FrameBenchmarkPhase)phase, path == 0, repeats[path]) == TIER1_FRAME_OK;
-                            elapsed = tier1_frame_benchmark_now() - before;
-                            if (elapsed < 2000000)
-                            {
-                                repeats[path] *= 2;
-                            }
+                            repeats *= 2;
                         }
                     }
-                    double nanoseconds[2][BUSTER_TIER1_FRAME_BENCHMARK_PASSES];
-                    double cycles[2][BUSTER_TIER1_FRAME_BENCHMARK_PASSES];
+                    double nanoseconds[BUSTER_TIER1_FRAME_BENCHMARK_PASSES];
+                    double cycles[BUSTER_TIER1_FRAME_BENCHMARK_PASSES];
                     for (uint32_t pass = 0; passed && pass < BUSTER_TIER1_FRAME_BENCHMARK_PASSES; pass += 1)
                     {
-                        for (uint32_t order = 0; passed && order < 2; order += 1)
-                        {
-                            const uint32_t path = order ^ (pass & 1);
-                            if (only < 0 || only == (int)path)
-                            {
-                                if (path == 1 && after_ms != 0)
-                                {
-                                    const uint64_t until = tier1_frame_benchmark_now() + (uint64_t)after_ms * 1000000;
-                                    while (passed && tier1_frame_benchmark_now() < until)
-                                    {
-                                        passed = tier1_frame_benchmark_repeat(&request, &prepared, &output, &scratch, (Tier1FrameBenchmarkPhase)phase, true, 1) == TIER1_FRAME_OK;
-                                    }
-                                }
-                                const uint64_t before = tier1_frame_benchmark_now();
-                                const uint64_t cycle_before = tier1_frame_benchmark_cycles(counter);
-                                passed = passed && tier1_frame_benchmark_repeat(&request, &prepared, &output, &scratch, (Tier1FrameBenchmarkPhase)phase, path == 0, repeats[path]) == TIER1_FRAME_OK;
-                                const uint64_t cycle_after = tier1_frame_benchmark_cycles(counter);
-                                const uint64_t elapsed = tier1_frame_benchmark_now() - before;
-                                const double objects = (double)count * repeats[path];
-                                nanoseconds[path][pass] = elapsed / objects;
-                                cycles[path][pass] = (cycle_after - cycle_before) / objects;
-                            }
-                        }
+                        const uint64_t before = tier1_frame_benchmark_now();
+                        const uint64_t cycle_before = tier1_frame_benchmark_cycles(counter);
+                        passed = tier1_frame_benchmark_repeat(&request, &prepared, &output, &scratch, (Tier1FrameBenchmarkPhase)phase, repeats) == TIER1_FRAME_OK;
+                        const uint64_t cycle_after = tier1_frame_benchmark_cycles(counter);
+                        const uint64_t spent = tier1_frame_benchmark_now() - before;
+                        const double objects = (double)count * repeats;
+                        nanoseconds[pass] = spent / objects;
+                        cycles[pass] = (cycle_after - cycle_before) / objects;
                     }
-                    for (uint32_t path = 0; passed && path < 2; path += 1)
+                    if (passed)
                     {
-                        if (only < 0 || only == (int)path)
+                        tier1_frame_benchmark_sort(nanoseconds);
+                        tier1_frame_benchmark_sort(cycles);
+                        const double median = nanoseconds[BUSTER_TIER1_FRAME_BENCHMARK_PASSES / 2];
+                        printf("  phase=%s ns/object=%.3f ns/function=%.1f objects/s=%.0f", tier1_frame_benchmark_phases[phase], median, median * count, 1e9 / median);
+                        if (counter >= 0)
                         {
-                            tier1_frame_benchmark_sort(nanoseconds[path]);
-                            tier1_frame_benchmark_sort(cycles[path]);
-                            const double median = nanoseconds[path][BUSTER_TIER1_FRAME_BENCHMARK_PASSES / 2];
-                            printf("  phase=%s path=%s ns/object=%.3f ns/function=%.1f objects/s=%.0f", tier1_frame_benchmark_phases[phase], path == 0 ? "scalar" : "vector", median, median * count, 1e9 / median);
-                            if (counter >= 0)
-                            {
-                                printf(" cycles/object=%.3f", cycles[path][BUSTER_TIER1_FRAME_BENCHMARK_PASSES / 2]);
-                            }
-                            else
-                            {
-                                printf(" cycles=unavailable");
-                            }
-                            printf(" samples=%u after_scalar_ms=%u\n", BUSTER_TIER1_FRAME_BENCHMARK_PASSES, path == 1 ? after_ms : 0);
+                            printf(" cycles/object=%.3f", cycles[BUSTER_TIER1_FRAME_BENCHMARK_PASSES / 2]);
                         }
+                        else
+                        {
+                            printf(" cycles=unavailable");
+                        }
+                        printf(" samples=%u\n", BUSTER_TIER1_FRAME_BENCHMARK_PASSES);
                     }
                 }
             }
@@ -362,7 +319,7 @@ int run_tier1_frame_benchmark(int argc, char** argv)
     arena_release(&prepared_arena);
     if (!passed)
     {
-        fprintf(stderr, "benchmark-tier1-frame: invalid options, allocation failure or frame mismatch; no incomplete timing accepted\n");
+        fprintf(stderr, "benchmark-tier1-frame: invalid options, allocation failure or refused frame; no incomplete timing accepted\n");
     }
     return passed ? 0 : 1;
 }

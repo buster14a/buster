@@ -1404,7 +1404,6 @@ static void tier1_pipeline_supported(Tier1PipelineTest* test)
                     .certify = true,
                     .register_mask = (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RCX) | (1u << X86_REGISTER_RDX) | (1u << X86_REGISTER_RSI) | (1u << X86_REGISTER_RDI),
                     .frame_flags = remat != 0 ? BUSTER_TIER1_FRAME_KEEP_POINTER | BUSTER_TIER1_FRAME_NO_RED_ZONE : 0,
-                    .vector = test->vector,
                     .rematerialize = test->rematerialize,
                 };
                 Tier1EmitResult bodies[BUSTER_TIER1_PIPELINE_FUNCTIONS];

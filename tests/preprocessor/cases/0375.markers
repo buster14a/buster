@@ -1,0 +1,7 @@
+# 1 "%d/case.c"
+# 1 "%d/sys.h" 1
+unsigned char a[] = {
+# 3 "%d/sys.h" 3
+72, 300 };
+# 2 "%d/case.c" 2
+int after;

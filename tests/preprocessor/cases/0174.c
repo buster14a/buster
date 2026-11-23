@@ -1,0 +1,2 @@
+#warning R"bad
+after

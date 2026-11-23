@@ -1,0 +1,4 @@
+#if RAW_QUERY(<R"(x>)
+once
+#endif
+#pragma once

@@ -101,7 +101,6 @@ static void tier1_induction_inclusive(Tier1EmitTest* test, const Tier1InclusiveI
                 .register_mask = tier1_liveness_register_mask(),
                 .certify = true,
                 .rematerialize = true,
-                .vector = true,
             };
             Tier1EmitResult emitted;
             const Tier1EmitError error = tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &failed);
@@ -316,7 +315,6 @@ static void tier1_induction_tests(Tier1EmitTest* test)
                     const Tier1EmitOptions options = {
                         .certify = true,
                         .register_mask = pressure == 0 ? (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI) : tier1_liveness_register_mask(),
-                        .vector = true,
                         .rematerialize = pressure != 0,
                     };
                     Tier1EmitResult emitted;

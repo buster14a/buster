@@ -28,9 +28,9 @@ static bool ir_pass_benchmark_once(const IrFunction* input, Arena* output, Arena
     }
     else if (pass == 1)
     {
-        IrLicmOptions options = ir_licm_options();
-        options.scalar = scalar;
+        // LICM has one path (#2924): its scalar and vector runs time the same code, a control of the harness's spread.
         IrLicmResult run = { 0 };
+        const IrLicmOptions options = ir_licm_options();
         check = ir_optimize_licm(input, output, scratch, options, &run);
         candidate.function = run.function;
         candidate.analysis_bytes = run.scratch_bytes;

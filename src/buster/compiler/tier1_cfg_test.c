@@ -93,6 +93,11 @@ struct Tier1CfgTestTally
     uint64_t carried_entries;
     uint64_t carried_mutants;
     uint64_t carried_killed;
+    // #2553: the current slots the allocations assert, and slots asserted current where an edge doesn't bring them.
+    uint64_t current_slots;
+    uint64_t current_mutants;
+    uint64_t current_killed;
+    uint64_t current_refused;
     uint64_t carried_refused;
     // #2611: CFGs whose anchors and chosen predecessors were compared with those read from a given dominator tree, as is
     // and with an entry added before it, and their blocks with a latch among their predecessors.
@@ -1162,6 +1167,39 @@ static bool tier1_cfg_test_continuations(const Tier1CfgInput* input, const Tier1
     return same;
 }
 
+// Whether `value` is among block b's current slots (tier1_cfg_current_slots).
+static bool tier1_cfg_test_slot_listed(const Tier1CfgAllocation* result, uint32_t block, uint32_t value)
+{
+    bool listed = false;
+    for (uint32_t k = result->current_slot_offsets != 0 ? result->current_slot_offsets[block] : 0; result->current_slot_offsets != 0 && k < result->current_slot_offsets[block + 1]; k += 1)
+    {
+        listed = listed || result->current_slots[k] == value;
+    }
+    return listed;
+}
+
+// The result's current slots with `value` taken out of block `block`'s (`add` false) or put first into them (`add` true),
+// into `offsets` (blocks + 1) and `slots` (one more than the result's).
+static void tier1_cfg_test_slots_edited(const Tier1CfgAllocation* result, uint32_t blocks, uint32_t block, uint32_t value, bool add, uint32_t* offsets, uint32_t* slots)
+{
+    uint32_t count = 0;
+    for (uint32_t c = 0; c < blocks; c += 1)
+    {
+        offsets[c] = count;
+        if (add && c == block)
+        {
+            slots[count] = value;
+            count += 1;
+        }
+        for (uint32_t k = result->current_slot_offsets[c]; k < result->current_slot_offsets[c + 1]; k += 1)
+        {
+            slots[count] = result->current_slots[k];
+            count += add || c != block || result->current_slots[k] != value;
+        }
+    }
+    offsets[blocks] = count;
+}
+
 static void tier1_cfg_test_case(Tier1CfgTestTally* tally, const Tier1CfgInput* input, Arena* output, Arena* scratch, const char* name, bool mutate, uint8_t temp_slots, uint32_t split_moves, bool must_allocate)
 {
     const uint64_t output_saved = output->length;
@@ -1185,6 +1223,7 @@ static void tier1_cfg_test_case(Tier1CfgTestTally* tally, const Tier1CfgInput* i
             tally->shared_slots += result.allocation.spill_ids[v] != UINT32_MAX;
         }
         tally->shared_slots -= result.allocation.spill_count;
+        tally->current_slots += result.current_slot_offsets != 0 ? result.current_slot_offsets[input->block_count] : 0;
         Tier1CfgCheck check;
         const bool verified = tier1_cfg_verify(input, &result, scratch, &check);
         if (!verified && tally->failures < 20)
@@ -1329,6 +1368,40 @@ static void tier1_cfg_test_case(Tier1CfgTestTally* tally, const Tier1CfgInput* i
                     tally->carried_mutants += 1;
                     tally->carried_killed += rejected;
                     tried += 1;
+                }
+            }
+            // #2553: a slot asserted current at a block's start that an edge into it doesn't bring: a value live into the
+            // block in a register there, with a slot, outside the block's current slots. tier1_cfg_current_slots' solution is
+            // the greatest: some predecessor's exit then holds the value in a register alone.
+            tried = 0;
+            for (uint32_t b = 1; result.current_slot_offsets != 0 && tried < 4 && b < input->block_count; b += 1)
+            {
+                const uint32_t entry = input->block_starts[b];
+                const bool reached = input->predecessor_offsets[b] != input->predecessor_offsets[b + 1];
+                for (uint32_t v = 0; reached && tried < 4 && v < input->value_count; v += 1)
+                {
+                    uint32_t location = 0;
+                    uint8_t kind = 0;
+                    const bool chosen = input->definitions[v] < entry && allocation->spill_ids[v] != UINT32_MAX && tier1_cfg_entry_location_oracle(&result, v, entry, &location, &kind) &&
+                                        kind == BUSTER_TIER1_ALLOCATE_REGISTER && !tier1_cfg_test_slot_listed(&result, b, v);
+                    const uint64_t scratch_mark = scratch->length;
+                    uint32_t* offsets = chosen ? arena_push_array(scratch, (uint64_t)input->block_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+                    uint32_t* slots = chosen ? arena_push_array(scratch, (uint64_t)result.current_slot_offsets[input->block_count] + 2, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+                    if (offsets != 0 && slots != 0)
+                    {
+                        tier1_cfg_test_slots_edited(&result, input->block_count, b, v, true, offsets, slots);
+                        uint32_t* const kept_offsets = result.current_slot_offsets;
+                        uint32_t* const kept_slots = result.current_slots;
+                        result.current_slot_offsets = offsets;
+                        result.current_slots = slots;
+                        const bool rejected = tier1_cfg_test_mutant(tally, input, &result, output, scratch, &tally->current_refused);
+                        result.current_slot_offsets = kept_offsets;
+                        result.current_slots = kept_slots;
+                        tally->current_mutants += 1;
+                        tally->current_killed += rejected;
+                        tried += 1;
+                    }
+                    arena_pop_to(scratch, scratch_mark);
                 }
             }
             // Order: a move run before one that reads what it writes, where that location is written once on the
@@ -2264,6 +2337,374 @@ static void tier1_cfg_test_phi_storage(Tier1CfgTestTally* tally, Arena* output, 
                 {
                     tier1_cfg_test_case(tally, &input, output, scratch, "wide phi operand semantics", true, 0, 0, true);
                 }
+            }
+        }
+        arena_pop_to(output, saved);
+    }
+}
+
+// Whether `prepared`'s live-in and live-out lists hold exactly each global value's blocks, found by walking back from its
+// uses to its home, one value at a time (the liveness equations' least solution, as the checker finds it): a use in
+// another block, or a phi operand passed by a block other than its home, makes the value live into that block; a value
+// live into a block is live out of each predecessor, and into it too unless it is the value's home. A phi operand is
+// live out of the block that passes it, its home included. Values with neither, edge-local ones among them, have no
+// entries. Each block's lists must ascend.
+static bool tier1_cfg_test_live_lists(const Tier1CfgInput* input, const Tier1CfgPrepared* prepared, Arena* scratch, uint64_t* entries)
+{
+    const uint64_t mark = scratch->length;
+    const uint32_t blocks = input->block_count;
+    const uint32_t values = input->value_count;
+    const Tier1CfgLiveSets* live = &prepared->live;
+    uint32_t* home = arena_push_array(scratch, (uint64_t)values + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* phi_offsets = arena_push_array(scratch, (uint64_t)values + 2, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* phi_sources = arena_push_array(scratch, (uint64_t)input->phi_operand_offsets[input->phi_count] + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* in_stamps = arena_push_array(scratch, (uint64_t)blocks + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* out_stamps = arena_push_array(scratch, (uint64_t)blocks + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* in_cursors = arena_push_array(scratch, (uint64_t)blocks + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* out_cursors = arena_push_array(scratch, (uint64_t)blocks + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* stack = arena_push_array(scratch, (uint64_t)blocks + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    bool same = home != 0 && phi_offsets != 0 && phi_sources != 0 && in_stamps != 0 && out_stamps != 0 && in_cursors != 0 && out_cursors != 0 && stack != 0;
+    uint64_t count = 0;
+    if (same)
+    {
+        memset(phi_offsets, 0, ((uint64_t)values + 2) * sizeof(uint32_t));
+        memset(in_stamps, 0, ((uint64_t)blocks + 1) * sizeof(uint32_t));
+        memset(out_stamps, 0, ((uint64_t)blocks + 1) * sizeof(uint32_t));
+        for (uint32_t v = 0; v < values; v += 1)
+        {
+            home[v] = tier1_cfg_block_of(input, input->definitions[v]);
+        }
+        for (uint32_t b = 0; b < blocks; b += 1)
+        {
+            in_cursors[b] = live->in_offsets[b];
+            out_cursors[b] = live->out_offsets[b];
+            for (uint32_t x = live->in_offsets[b] + 1; x < live->in_offsets[b + 1]; x += 1)
+            {
+                same = same && live->in_values[x - 1] < live->in_values[x];
+            }
+            for (uint32_t x = live->out_offsets[b] + 1; x < live->out_offsets[b + 1]; x += 1)
+            {
+                same = same && live->out_values[x - 1] < live->out_values[x];
+            }
+        }
+        // Each value's phi occurrences by the blocks that pass them, counted then filled.
+        for (uint32_t o = 0; o < input->phi_operand_offsets[input->phi_count]; o += 1)
+        {
+            if (input->phi_operands[o] != BUSTER_TIER1_CFG_NONE)
+            {
+                phi_offsets[input->phi_operands[o] + 2] += 1;
+            }
+        }
+        for (uint32_t v = 0; v < values; v += 1)
+        {
+            phi_offsets[v + 2] += phi_offsets[v + 1];
+        }
+        for (uint32_t b = 0; b < blocks; b += 1)
+        {
+            for (uint32_t k = input->phi_offsets[b]; k < input->phi_offsets[b + 1]; k += 1)
+            {
+                for (uint32_t j = 0; j < input->phi_operand_offsets[k + 1] - input->phi_operand_offsets[k]; j += 1)
+                {
+                    const uint32_t operand = input->phi_operands[input->phi_operand_offsets[k] + j];
+                    if (operand != BUSTER_TIER1_CFG_NONE)
+                    {
+                        phi_sources[phi_offsets[operand + 1]] = input->predecessors[input->predecessor_offsets[b] + j];
+                        phi_offsets[operand + 1] += 1;
+                    }
+                }
+            }
+        }
+    }
+    for (uint32_t v = 0; same && v < values; v += 1)
+    {
+        const uint32_t stamp = v + 1;
+        bool global = false;
+        for (uint32_t u = input->use_offsets[v]; u < input->use_offsets[v + 1]; u += 1)
+        {
+            global = global || tier1_cfg_block_of(input, input->use_positions[u]) != home[v];
+        }
+        for (uint32_t k = phi_offsets[v]; k < phi_offsets[v + 1]; k += 1)
+        {
+            global = global || phi_sources[k] != home[v];
+        }
+        uint32_t depth = 0;
+        for (uint32_t u = input->use_offsets[v]; global && u < input->use_offsets[v + 1]; u += 1)
+        {
+            const uint32_t b = tier1_cfg_block_of(input, input->use_positions[u]);
+            if (b != home[v] && in_stamps[b] != stamp)
+            {
+                in_stamps[b] = stamp;
+                stack[depth] = b;
+                depth += 1;
+            }
+        }
+        for (uint32_t k = phi_offsets[v]; global && k < phi_offsets[v + 1]; k += 1)
+        {
+            const uint32_t p = phi_sources[k];
+            if (out_stamps[p] != stamp)
+            {
+                out_stamps[p] = stamp;
+                same = same && out_cursors[p] < live->out_offsets[p + 1] && live->out_values[out_cursors[p]] == v;
+                out_cursors[p] += 1;
+                count += 1;
+            }
+            if (p != home[v] && in_stamps[p] != stamp)
+            {
+                in_stamps[p] = stamp;
+                stack[depth] = p;
+                depth += 1;
+            }
+        }
+        while (same && depth != 0)
+        {
+            depth -= 1;
+            const uint32_t b = stack[depth];
+            same = same && b != 0 && in_cursors[b] < live->in_offsets[b + 1] && live->in_values[in_cursors[b]] == v;
+            in_cursors[b] += 1;
+            count += 1;
+            for (uint32_t p = input->predecessor_offsets[b]; p < input->predecessor_offsets[b + 1]; p += 1)
+            {
+                const uint32_t q = input->predecessors[p];
+                if (out_stamps[q] != stamp)
+                {
+                    out_stamps[q] = stamp;
+                    same = same && out_cursors[q] < live->out_offsets[q + 1] && live->out_values[out_cursors[q]] == v;
+                    out_cursors[q] += 1;
+                    count += 1;
+                }
+                if (q != home[v] && in_stamps[q] != stamp)
+                {
+                    in_stamps[q] = stamp;
+                    stack[depth] = q;
+                    depth += 1;
+                }
+            }
+        }
+    }
+    for (uint32_t b = 0; same && b < blocks; b += 1)
+    {
+        same = in_cursors[b] == live->in_offsets[b + 1] && out_cursors[b] == live->out_offsets[b + 1];
+    }
+    *entries = count;
+    arena_pop_to(scratch, mark);
+    return same;
+}
+
+// A case's live lists against tier1_cfg_test_live_lists' walk, for the generated cases: loops, irreducible regions,
+// self-phis and undefined operands. An input the preparation refuses is the allocation's to report.
+static void tier1_cfg_test_lists_case(Tier1CfgTestTally* tally, const Tier1CfgInput* input, Arena* output, Arena* scratch)
+{
+    const uint64_t output_mark = output->length;
+    const uint64_t scratch_mark = scratch->length;
+    Tier1CfgPrepared prepared = { 0 };
+    if (tier1_cfg_prepare(input, output, scratch, &prepared) == TIER1_CFG_OK)
+    {
+        uint64_t entries = 0;
+        tier1_cfg_test_expect(tally, tier1_cfg_test_live_lists(input, &prepared, scratch, &entries), "a generated case's live lists are each value's walk back to its home");
+        tier1_cfg_test_expect(tally, prepared.candidate.live_entries == entries, "a generated case's live lists hold its realized memberships");
+        tier1_cfg_release(&prepared, scratch);
+    }
+    tier1_cfg_test_expect(tally, scratch->length == scratch_mark, "the list check restores scratch");
+    arena_pop_to(output, output_mark);
+}
+
+// #1384's genuinely nonlocal values: a ladder of n rungs, block 2i defining t_i and branching to 2i + 1 and 2i + 2, block
+// 2i + 1 using t_{i - d} for a pseudo-random d up to 3 and a, defined in block 0, and going on to 2i + 2 (and, every fifth
+// rung, around itself), and block 2i + 2 opening with p_i = phi(t_i or a from 2i, t_i from 2i + 1). Every t_i and a are
+// global: n + 1 values, against blocks * 64 bytes of one group's rows. With more than 512 the old matrices grew with
+// both. Each size's preparation must fit a bounded scratch arena, take one group's matrices, and give live lists equal
+// to tier1_cfg_test_live_lists' walk; the smaller sizes, around the group boundary and across three groups, then run
+// as a whole case through the checker, the certificate and the mutants.
+static void tier1_cfg_test_nonlocal_storage(Tier1CfgTestTally* tally, Arena* output, Arena* scratch)
+{
+    const uint32_t rungs[] = {
+        255,
+        511,
+        512,
+        1100,
+        20000,
+    };
+    const uint64_t allowance = 32ull << 20;
+    for (uint32_t size = 0; size < BUSTER_ARRAY_LENGTH(rungs); size += 1)
+    {
+        const uint64_t saved = output->length;
+        const uint32_t n = rungs[size];
+        const uint32_t blocks = 2 * n + 1;
+        const uint32_t loops = (n + 1) / 5;
+        const uint32_t edges = 3 * n + loops;
+        const uint32_t values = 2 * n + 1;
+        const uint32_t uses = 2 * n + 2;
+        uint32_t* starts = arena_push_array(output, blocks + 1, sizeof(uint32_t), _Alignof(uint32_t));
+        uint32_t* successor_offsets = arena_push_array(output, blocks + 1, sizeof(uint32_t), _Alignof(uint32_t));
+        uint32_t* successors = arena_push_array(output, edges + 1, sizeof(uint32_t), _Alignof(uint32_t));
+        uint32_t* predecessor_offsets = arena_push_array(output, blocks + 1, sizeof(uint32_t), _Alignof(uint32_t));
+        uint32_t* predecessors = arena_push_array(output, edges + 1, sizeof(uint32_t), _Alignof(uint32_t));
+        uint8_t* classes = arena_push(output, values, 1);
+        uint32_t* allowed = arena_push_array(output, values, sizeof(uint32_t), _Alignof(uint32_t));
+        uint32_t* definitions = arena_push_array(output, values, sizeof(uint32_t), _Alignof(uint32_t));
+        uint32_t* use_offsets = arena_push_array(output, values + 1, sizeof(uint32_t), _Alignof(uint32_t));
+        uint32_t* use_positions = arena_push_array(output, uses, sizeof(uint32_t), _Alignof(uint32_t));
+        uint32_t* phi_offsets = arena_push_array(output, blocks + 1, sizeof(uint32_t), _Alignof(uint32_t));
+        uint32_t* phi_values = arena_push_array(output, n, sizeof(uint32_t), _Alignof(uint32_t));
+        uint32_t* phi_operand_offsets = arena_push_array(output, n + 1, sizeof(uint32_t), _Alignof(uint32_t));
+        uint32_t* operands = arena_push_array(output, 2 * n, sizeof(uint32_t), _Alignof(uint32_t));
+        uint32_t* reader = arena_push_array(output, n, sizeof(uint32_t), _Alignof(uint32_t));
+        const bool built = starts != 0 && successor_offsets != 0 && successors != 0 && predecessor_offsets != 0 && predecessors != 0 && classes != 0 && allowed != 0 && definitions != 0 && use_offsets != 0 &&
+                           use_positions != 0 && phi_offsets != 0 && phi_values != 0 && phi_operand_offsets != 0 && operands != 0 && reader != 0;
+        tier1_cfg_test_expect(tally, built, "nonlocal ladder fixture memory");
+        if (built)
+        {
+            // Rung i's reader: t_{i - d} is read in block 2i + 1, which every path from 2(i - d) reaches through.
+            uint64_t state = 0x1384u + n;
+            for (uint32_t i = 0; i < n; i += 1)
+            {
+                const uint32_t d = (uint32_t)(tier1_cfg_test_random(&state) % 4);
+                reader[i] = i >= d ? i - d : i;
+            }
+            uint32_t s = 0;
+            uint32_t p = 0;
+            for (uint32_t b = 0; b < blocks; b += 1)
+            {
+                const uint32_t i = b / 2;
+                starts[b] = 4 * b;
+                successor_offsets[b] = s;
+                predecessor_offsets[b] = p;
+                // Blocks 2, 4, ..., 2n each open with one phi: those before b.
+                phi_offsets[b] = b <= 2 ? 0 : (b - 1) / 2;
+                if (b + 1 < blocks && (b & 1) == 0)
+                {
+                    successors[s] = b + 1;
+                    successors[s + 1] = b + 2;
+                    s += 2;
+                }
+                else if (b + 1 < blocks)
+                {
+                    const bool loop = i % 5 == 3;
+                    successors[s] = b + 1;
+                    successors[s + 1] = b;
+                    s += loop ? 2 : 1;
+                }
+                // Block 2i + 2's predecessors are 2i, then 2i + 1, in its phi's operand order; block 2i + 1's are 2i and,
+                // every fifth rung, itself.
+                if (b != 0 && (b & 1) == 0)
+                {
+                    predecessors[p] = b - 2;
+                    predecessors[p + 1] = b - 1;
+                    p += 2;
+                }
+                else if (b != 0)
+                {
+                    predecessors[p] = b - 1;
+                    predecessors[p + 1] = b;
+                    p += i % 5 == 3 ? 2 : 1;
+                }
+            }
+            starts[blocks] = 4 * blocks;
+            successor_offsets[blocks] = s;
+            predecessor_offsets[blocks] = p;
+            phi_offsets[blocks] = n;
+            tier1_cfg_test_expect(tally, s == edges && p == edges, "nonlocal ladder edge count");
+            // Values: a = 0 at block 0, t_i = 1 + i at block 2i, p_i = 1 + n + i at block 2i + 2's start.
+            for (uint32_t v = 0; v < values; v += 1)
+            {
+                classes[v] = BUSTER_TIER1_ALLOCATE_GPR;
+                allowed[v] = 0xf;
+            }
+            definitions[0] = 1;
+            uint32_t u = 0;
+            use_offsets[0] = 0;
+            for (uint32_t i = 0; i < n; i += 1)
+            {
+                use_positions[u] = starts[2 * i + 1] + 1;
+                u += 1;
+            }
+            use_positions[u] = starts[2 * n] + 1;
+            u += 1;
+            for (uint32_t i = 0; i < n; i += 1)
+            {
+                definitions[1 + i] = starts[2 * i] + 2;
+                use_offsets[1 + i] = u;
+                // t_i's readers: the rungs whose reader is i, ascending.
+                for (uint32_t r = i; r < n && r <= i + 3; r += 1)
+                {
+                    if (reader[r] == i)
+                    {
+                        use_positions[u] = starts[2 * r + 1] + 2;
+                        u += 1;
+                    }
+                }
+            }
+            for (uint32_t i = 0; i < n; i += 1)
+            {
+                definitions[1 + n + i] = starts[2 * i + 2];
+                use_offsets[1 + n + i] = u;
+                phi_values[i] = 1 + n + i;
+                phi_operand_offsets[i] = 2 * i;
+                operands[2 * i] = (i & 1) == 0 ? 0 : 1 + i;
+                operands[2 * i + 1] = 1 + i;
+            }
+            phi_operand_offsets[n] = 2 * n;
+            // The last phi is read in the exit, its own block.
+            use_positions[u] = starts[2 * n] + 2;
+            u += 1;
+            use_offsets[values] = u;
+            const Tier1CfgInput input =
+            {
+                .block_starts = starts,
+                .successor_offsets = successor_offsets,
+                .successors = successors,
+                .predecessor_offsets = predecessor_offsets,
+                .predecessors = predecessors,
+                .classes = classes,
+                .allowed_registers = allowed,
+                .definitions = definitions,
+                .use_offsets = use_offsets,
+                .use_positions = use_positions,
+                .phi_offsets = phi_offsets,
+                .phi_values = phi_values,
+                .phi_operand_offsets = phi_operand_offsets,
+                .phi_operands = operands,
+                .block_count = blocks,
+                .edge_count = edges,
+                .value_count = values,
+                .use_count = u,
+                .phi_count = n,
+                .position_count = starts[blocks],
+                .registers = {
+                    0xf,
+                    0,
+                    0,
+                },
+                .scratch_registers = {
+                    11,
+                    15,
+                    0,
+                },
+            };
+            tier1_cfg_test_expect(tally, u <= uses, "nonlocal ladder use count");
+            const uint64_t mark = output->length;
+            Arena bounded = *scratch;
+            bounded.capacity = bounded.length + allowance < bounded.capacity ? bounded.length + allowance : bounded.capacity;
+            Tier1CfgPrepared prepared = { 0 };
+            const Tier1CfgError error = tier1_cfg_prepare(&input, output, &bounded, &prepared);
+            tier1_cfg_test_expect(tally, error == TIER1_CFG_OK, "nonlocal ladder preparation fits bounded scratch");
+            if (error == TIER1_CFG_OK)
+            {
+                const Tier1CfgAllocation* result = &prepared.candidate;
+                const uint32_t groups = (n + 1 + 511) / 512;
+                tier1_cfg_test_expect(tally, result->cross_block_values == n + 1 && result->edge_local_values == 0, "every ladder rung's value is global");
+                tier1_cfg_test_expect(tally, result->liveness_bytes == (uint64_t)blocks * 256, "global values take one group's matrices, 256 bytes a block");
+                tier1_cfg_test_expect(tally, result->liveness_iterations >= groups, "each group of global values is solved");
+                uint64_t entries = 0;
+                tier1_cfg_test_expect(tally, tier1_cfg_test_live_lists(&input, &prepared, &bounded, &entries), "the groups' live lists are each value's walk back to its home");
+                tier1_cfg_test_expect(tally, result->live_entries == entries && entries < 16 * (uint64_t)blocks, "the live lists hold the realized memberships alone");
+                tier1_cfg_release(&prepared, &bounded);
+            }
+            tier1_cfg_test_expect(tally, bounded.length == scratch->length, "bounded preparation restores scratch");
+            arena_pop_to(output, mark);
+            if (n <= 1100)
+            {
+                tier1_cfg_test_case(tally, &input, output, scratch, "nonlocal ladder", n == 511, 0, 0, true);
             }
         }
         arena_pop_to(output, saved);
@@ -3495,6 +3936,7 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
             tier1_cfg_test_argument_exclusions(&tally, &output, &scratch, false);
             tier1_cfg_test_argument_exclusions(&tally, &output, &scratch, true);
             tier1_cfg_test_phi_storage(&tally, &output, &scratch);
+            tier1_cfg_test_nonlocal_storage(&tally, &output, &scratch);
             tier1_cfg_test_current_slots(&tally, &output, &scratch);
             tier1_cfg_test_edge_views(&tally, &scratch);
             tier1_cfg_test_wide_edges(&tally, &output, &scratch);
@@ -3516,6 +3958,7 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
                     tally.oracle_mutants = sample % (oracle_every * 4) == 0;
                     tier1_cfg_test_case(&tally, &input, &output, &scratch, "generated case", sample % 8 == 0, 0, 0, false);
                     tier1_cfg_test_given_tree(&tally, &input, &output, &scratch);
+                    tier1_cfg_test_lists_case(&tally, &input, &output, &scratch);
                 }
                 arena_pop_to(&output, output_saved);
                 arena_pop_to(&work, work_saved);
@@ -3534,6 +3977,7 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
         tier1_cfg_test_expect(&tally, count < 500 || (tally.avoiding_ranges != 0 && tally.reading_ranges != 0), "the cases reach ranges that avoid fixed sequences' registers and readers across their sequences");
         tier1_cfg_test_expect(&tally, tally.carried_killed == tally.carried_mutants && (count < 500 || (tally.carried_entries != 0 && tally.carried_mutants != 0)),
                               "the cases reach entries the carried proof takes and ones it refuses, and every refused one marked fails the checker");
+        tier1_cfg_test_expect(&tally, tally.current_killed == tally.current_mutants && (count < 500 || (tally.current_slots != 0 && tally.current_mutants != 0)), "every slot asserted current that an edge doesn't bring is refused, and the allocations assert some");
         // #939: every allocation's certificate proved, and the oracle reached some of them.
         tier1_cfg_test_expect(&tally, tally.certificates == tally.allocations && tally.oracle_certificates != 0, "every allocation's certificate is proved, the oracle's share among them");
         // A mutant that moves a value wrongly must fail the certificate too: every order, definition and split
@@ -3541,7 +3985,7 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
         // names of equal contents in one register at a block's start, a mask in k0 for a fragment nothing reads), and
         // the certificate never refuses what the verifier accepts.
         tier1_cfg_test_expect(&tally, tally.order_refused == tally.order_mutants && tally.definition_refused == tally.definition_mutants && tally.destination_refused == tally.destination_mutants, "every order, definition and split destination mutant fails the certificate");
-        tier1_cfg_test_expect(&tally, tally.certificate_only == 0 && tally.verifier_only == (tally.interference_mutants - tally.interference_refused) + (tally.k0_mutants - tally.k0_refused) + (tally.slot_mutants - tally.slot_refused) + (tally.carried_mutants - tally.carried_refused), "the certificate refuses no mutant the verifier accepts");
+        tier1_cfg_test_expect(&tally, tally.certificate_only == 0 && tally.verifier_only == (tally.interference_mutants - tally.interference_refused) + (tally.k0_mutants - tally.k0_refused) + (tally.slot_mutants - tally.slot_refused) + (tally.carried_mutants - tally.carried_refused) + (tally.current_mutants - tally.current_refused), "the certificate refuses no mutant the verifier accepts");
         // #2538: the one-call order reaches a taken preference, a refused one, a constraint that frees the definitions and a
         // case with fixed ranges.
         tier1_cfg_test_expect(&tally, count < 500 || (tally.two_taken != 0 && tally.two_refused != 0 && tally.two_freed != 0 && tally.two_fixed != 0), "two problems reach every outcome");
@@ -3549,7 +3993,7 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
         tier1_cfg_test_expect(&tally, count < 500 || tally.column_widest > 16, "the column's set checks reach a second step of values");
         // A malformed shape must fail both, before either reads through it (#1142's review).
         tier1_cfg_test_expect(&tally, tally.shape_mutants != 0 && tally.shape_killed == tally.shape_mutants && tally.shape_refused == tally.shape_mutants, "every malformed shape fails both checkers");
-        printf("test-tier1-cfg: %" PRIu64 " checks, %" PRIu64 " failures; %" PRIu64 " allocations, %" PRIu64 " constraint refusals; %" PRIu64 " moves, %" PRIu64 " at splits, %" PRIu64 " through the scratch register, %" PRIu64 " split edges, %" PRIu64 " spilled values, %" PRIu64 " allocations with a temporary slot; %" PRIu64 " mask moves, %" PRIu64 " at splits, %" PRIu64 " spilled masks; mutants rejected: %" PRIu64 " of %" PRIu64 " interference, %" PRIu64 " of %" PRIu64 " order, %" PRIu64 " of %" PRIu64 " definition, %" PRIu64 " of %" PRIu64 " split destination, %" PRIu64 " of %" PRIu64 " k0, %" PRIu64 " of %" PRIu64 " shared slot; %" PRIu64 " values in a phi web's slot, %" PRIu64 " entries left to their recipes, %" PRIu64 " carried, %" PRIu64 " of %" PRIu64 " carried mutants rejected (seed=%" PRIu64 ", count=%" PRIu64 ")\n", tally.checks, tally.failures, tally.allocations, tally.constraints, tally.moves, tally.split_moves, tally.scratch_moves, tally.split_edges, tally.spills, tally.temp_slot_cases, tally.mask_moves, tally.mask_split_moves, tally.mask_spills, tally.interference_killed, tally.interference_mutants, tally.order_killed, tally.order_mutants, tally.definition_killed, tally.definition_mutants, tally.destination_killed, tally.destination_mutants, tally.k0_killed, tally.k0_mutants, tally.slot_killed, tally.slot_mutants, tally.shared_slots, tally.unread_entries, tally.carried_entries, tally.carried_killed, tally.carried_mutants, seed, count);
+        printf("test-tier1-cfg: %" PRIu64 " checks, %" PRIu64 " failures; %" PRIu64 " allocations, %" PRIu64 " constraint refusals; %" PRIu64 " moves, %" PRIu64 " at splits, %" PRIu64 " through the scratch register, %" PRIu64 " split edges, %" PRIu64 " spilled values, %" PRIu64 " allocations with a temporary slot; %" PRIu64 " mask moves, %" PRIu64 " at splits, %" PRIu64 " spilled masks; mutants rejected: %" PRIu64 " of %" PRIu64 " interference, %" PRIu64 " of %" PRIu64 " order, %" PRIu64 " of %" PRIu64 " definition, %" PRIu64 " of %" PRIu64 " split destination, %" PRIu64 " of %" PRIu64 " k0, %" PRIu64 " of %" PRIu64 " shared slot; %" PRIu64 " values in a phi web's slot, %" PRIu64 " entries left to their recipes, %" PRIu64 " carried, %" PRIu64 " of %" PRIu64 " carried mutants rejected; %" PRIu64 " current slots, %" PRIu64 " of %" PRIu64 " current-slot mutants rejected (seed=%" PRIu64 ", count=%" PRIu64 ")\n", tally.checks, tally.failures, tally.allocations, tally.constraints, tally.moves, tally.split_moves, tally.scratch_moves, tally.split_edges, tally.spills, tally.temp_slot_cases, tally.mask_moves, tally.mask_split_moves, tally.mask_spills, tally.interference_killed, tally.interference_mutants, tally.order_killed, tally.order_mutants, tally.definition_killed, tally.definition_mutants, tally.destination_killed, tally.destination_mutants, tally.k0_killed, tally.k0_mutants, tally.slot_killed, tally.slot_mutants, tally.shared_slots, tally.unread_entries, tally.carried_entries, tally.carried_killed, tally.carried_mutants, tally.current_slots, tally.current_killed, tally.current_mutants, seed, count);
         printf("test-tier1-cfg: certificates: %" PRIu64 " proved (%" PRIu64 " by the oracle too), %" PRIu64 " facts, %" PRIu64 " edits, %" PRIu64 " operands, %" PRIu64 " renames; mutants refused: %" PRIu64 " interference, %" PRIu64 " order, %" PRIu64 " definition, %" PRIu64 " split destination, %" PRIu64 " k0, %" PRIu64 " shared slot, %" PRIu64 " of %" PRIu64 " shape; %" PRIu64 " refused by the certificate alone, %" PRIu64 " by the verifier alone\n", tally.certificates, tally.oracle_certificates, tally.certificate_facts, tally.certificate_edits, tally.certificate_operands, tally.certificate_renames, tally.interference_refused, tally.order_refused, tally.definition_refused, tally.destination_refused, tally.k0_refused, tally.slot_refused, tally.shape_refused, tally.shape_mutants, tally.certificate_only, tally.verifier_only);
         printf("test-tier1-cfg: given dominator trees (#2611): %" PRIu64 " CFGs' anchors the same with and without an added entry, %" PRIu64 " blocks anchored at a latch\n", tally.given_trees, tally.given_latches);
         tier1_cfg_test_expect(&tally, tally.given_latches != 0, "some given tree's block takes a latch laid out before it (#2611)");

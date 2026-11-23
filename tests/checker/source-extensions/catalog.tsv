@@ -1,0 +1,262 @@
+buster-fixtures v1 checker-sources
+# check_test_source_extensions's source fixtures (c_check_source_test.c; #2053): ID, FILE, FLAGS, NAME, tab-separated.
+0001	0001.c	-	double evaluation widens expressions and preserves conversion barriers
+0002	0002.c	-	extended evaluation widens scalar and complex operands without changing vector elements
+0003	0003.c	-	evaluation method restores nested compounds and float control stack
+0004	0004.c	-	implicit translation evaluation permits default-method-only typedef uses
+0005	0005.c	-	generic controls use intrinsic result types
+0006	0006.c	-	generic intrinsic controls retain narrow types and nested calls
+0007	0007.c	-	generic intrinsic controls select vector and void results
+0008	0008.c	gnu23	C23 generic intrinsic controls preserve declared types
+0009	0009.c	-	intrinsic generic types are available in declaration bounds
+0010	0010.c	-	intrinsic generic types are available in raw attribute queries
+0011	0011.c	-	intrinsic generic types respect an ordinary shadowing declaration
+# The enum job captures the call, then yields to read S and its nested enum. Resuming the job must
+# use the earlier prototype even though the nested enumerator has since hidden that spelling.
+0012	0012.c	-	suspended enum query retains an intrinsic captured before a shadow
+0013	0013.c	-	cached typeof queries preserve call identities across a closed shadowing scope
+0014	0014.c	rejected	generic intrinsic control rejects an extra argument
+0015	0015.c	rejected	generic intrinsic control rejects a missing argument
+0016	0016.c	rejected	generic intrinsic control rejects an incompatible argument
+0017	0017.c	rejected	generic intrinsic control retains immediate constraints
+0018	0018.c	rejected	generic declaration bound retains intrinsic immediate constraints
+0019	0019.c	rejected	generic intrinsic control retains hard SAE constraints
+0020	0020.c	-	exact intrinsic prototypes preserve distinct result and argument types
+0021	0021.c	rejected	exact intrinsic prototype rejects an extra argument
+0022	0022.c	-	intrinsic immediate boundary accepts its maximum
+0023	0023.c	-	intrinsic immediate range error remains a suppressible deferred diagnostic
+0024	0024.c	rejected	intrinsic immediate rejects a runtime integer
+0025	0025.c	-	intrinsic immediate retains its source constant evaluation proof
+0026	0026.c	-	intrinsic rounding argument accepts its defined encoding
+0027	0027.c	rejected	intrinsic rounding argument rejects an undefined encoding
+0028	0028.c	-	void intrinsic result can be returned from a void function
+0029	0029.c	rejected	void function cannot return a nonvoid intrinsic result
+0030	0030.c	-	transparent union converts scalar arguments through its first member
+0031	0031.c	-	record transparent union annotation accepts each compatible pointer member
+0032	0032.c	-	transparent union remains a distinct ordinary type
+0033	0033.c	-	transparent union composite declaration preserves the visible pointer parameter
+0034	0034.c	-	transparent union composite in reverse order preserves the visible pointer parameter
+0035	0035.c	-	transparent union definition retains its written local parameter type
+0036	0036.c	rejected	transparent union composite narrows subsequent calls
+0037	0037.c	rejected	transparent union pointer selection does not discard qualifiers
+0038	0038.c	rejected	later transparent union attribute does not change an earlier call
+0039	0039.c	-	completed typedef transparent union attribute permits later calls
+0040	0040.c	rejected	later transparent union attribute does not change an earlier function pointer initializer
+0041	0041.c	-	transparent union history permits a later compatible function pointer initializer
+0042	0042.c	rejected	incomplete transparent union attribute remains ignored after completion
+0043	0043.c	rejected	floating first member prevents transparent union argument conversion
+0044	0044.c	rejected	unequal member layout prevents transparent union argument conversion
+0045	0045.c	-	complex range permission restores lexical state
+0046	0046.c	-	unknown floating pragma states warn and leave the setting unchanged
+0047	0047.c	rejected	complex range late block setting is rejected
+0048	0048.c	rejected	complex range setting cannot split a declaration
+0049	0049.c	rejected	recognized floating setting with trailing token is rejected
+0050	0050.c	rejected	recognized complex range setting with trailing token is rejected
+0051	0051.c	rejected	typedef redefinition requires identical enum type
+0052	0052.c	rejected	typedef pointer redefinition keeps enum identity
+0053	0053.c	rejected	typedef array redefinition cannot supply a different bound
+0054	0054.c	rejected	typedef function redefinition cannot add a prototype
+0055	0055.c	-	typedef canonical identity ignores nested alignment attributes
+0056	0056.c	-	floating environment lexical scopes
+0057	0057.c	rejected	floating environment pragma requires compound beginning
+0058	0058.c	rejected	floating environment pragma cannot split file declaration
+0059	0059.c	rejected	floating environment pragma cannot split file initializer
+0060	0060.c	rejected	floating environment pragma cannot split parameter declaration
+0061	0061.c	-	empty record member declarations retain layout
+0062	0062.c	rejected	incomplete record member reports its own declaration
+0063	0063.c	rejected	invalid bit-field width reports its own declaration
+0064	0064.c	rejected	nonfinal flexible member reports its own declaration
+0065	0065.c	rejected	expanded anonymous member collision reports the later member
+0066	0066.c	-	duplicate declaration modifiers retain warning-only semantics
+0067	0067.c	rejected	conflicting sign specifiers remain invalid
+0068	0068.c	rejected	invalid third long reports its specifier line
+0069	0069.c	rejected	incompatible floating specifier reports its own line
+0070	0070.c	-	GNU extension prefix preserves operand category
+0071	0071.c	-	predefined function names retain static array types
+0072	0072.c	rejected	predefined function names are const arrays
+0073	0073.c	rejected	predefined function name is not an array initializer literal
+0074	0074.c	-	typeof statement expression local declarations
+0075	0075.c	rejected	typeof statement expression retains scope
+0076	0076.c	rejected	typeof statement expression final declaration is void
+0077	0077.c	-	string subobject bounds are source constants
+0078	0078.c	rejected	string whole object maximum is not a source constant
+0079	0079.c	rejected	string whole object minimum is not a source constant
+0080	0080.c	-	builtin expect source constant evaluation
+0081	0081.c	-	builtin string and object witnesses
+0082	0082.c	-	floating builtin constants and classify
+0083	0083.c	rejected	builtin expect rejects wrong arity
+0084	0084.c	rejected	builtin expect still checks discarded constant argument type
+0085	0085.c	rejected	object size rejects invalid mode
+0086	0086.c	-	pointer array strings infer object count
+0087	0087.c	-	calling convention between pointer and name
+0088	0088.c	-	conditional middle operand comma
+0089	0089.c	rejected	goto cannot enter statement expression
+0090	0090.c	rejected	switch cannot enter statement expression
+0091	0091.c	-	goto within and out of nested statement expressions
+0092	0092.c	rejected	goto cannot enter sibling statement expression
+0093	0093.c	-	switch inside statement expression owns its own cases
+0094	0094.c	rejected	switch cannot enter a nested statement expression
+0095	0095.c	-	statement expression pure folded assertion
+0096	0096.c	rejected	condition statement expression cannot break its pending loop
+0097	0097.c	-	varargs list and type operands
+0098	0098.c	rejected	varargs start requires variadic function
+0099	0099.c	rejected	varargs rejects unrelated list
+0100	0100.c	-	parameter array pointer qualifiers
+0101	0101.c	rejected	parameter array qualifier applies to local pointer
+0102	0102.c	rejected	parameter array star cannot define function
+0103	0103.c	rejected	inner array qualifier is invalid
+0104	0104.c	-	attribute prefixed cast type
+0105	0105.c	-	attribute inside grouped abstract declarator
+0106	0106.c	-	final record member without semicolon
+0107	0107.c	-	thread local declaration identity
+0108	0108.c	rejected	thread local redeclaration mismatch
+0109	0109.c	rejected	block thread local requires storage
+0110	0110.c	-	concatenated and wide strings
+0111	0111.c	-	sparse local inferred array
+0112	0112.c	-	anonymous member lookup
+0113	0113.c	rejected	anonymous member duplicate
+0114	0114.c	-	named nested records keep independent namespaces and layout
+0115	0115.c	-	anonymous names grow beyond the direct member count
+0116	0116.c	rejected	anonymous duplicate after hash growth reports the later declaration
+0117	0117.c	rejected	earlier direct name conflicts with a later anonymous path
+0118	0118.c	-	anonymous member supports flexible successor
+0119	0119.c	-	compound scalar lvalue
+0120	0120.c	-	compound array extent
+0121	0121.c	-	function labels separate from objects
+0122	0122.c	rejected	duplicate function label
+0123	0123.c	rejected	missing function label
+0124	0124.c	-	nested switch does not leak expression values
+0125	0125.c	-	typeof preserves pointed qualifiers
+0126	0126.c	-	unsigned bit precise declaration
+0127	0127.c	-	callback parameter
+0128	0128.c	-	function parameter adjustment
+0129	0129.c	-	function returning callback
+0130	0130.c	-	array of callbacks
+0131	0131.c	gnu89	K&R missing declarations default to int in C89
+0132	0132.c	-	K&R parenthesized atomic type starts its declaration list
+0133	0133.c	-	K&R nested atomic type names retain typedef and typeof lookup
+0134	0134.c	-	K&R atomic aggregate retains its complete type
+0135	0135.c	rejected	K&R parenthesized atomic rejects a qualified inner type
+0136	0136.c	rejected	K&R parenthesized atomic rejects an array inner type
+0137	0137.c	rejected	K&R parenthesized atomic rejects a function inner type
+0138	0138.c	rejected	K&R parenthesized atomic rejects an already atomic inner type
+0139	0139.c	-	K&R header tag is complete in later parameter declarations
+0140	0140.c	-	K&R header tag completes an earlier header reference
+0141	0141.c	-	K&R nested member tags share the declaration list scope
+0142	0142.c	-	K&R anonymous record parameter types remain complete
+0143	0143.c	-	K&R repeated header tag definitions retain separate parameter types
+0144	0144.c	-	K&R enumerators are visible in later header array bounds
+0145	0145.c	-	K&R header tags restore the outer tag before the body
+0146	0146.c	-	K&R header enumerators restore outer ordinary names before the body
+0147	0147.c	rejected	K&R header tag names are absent from the body
+0148	0148.c	rejected	K&R header tags are absent after the function
+0149	0149.c	rejected	K&R header enumerators are absent from the body
+0150	0150.c	rejected	K&R header enumerators are absent after the function
+0151	0151.c	rejected	K&R header enumerator conflicts with its parameter declaration
+0152	0152.c	rejected	K&R header enumerator conflicts with a later parameter
+0153	0153.c	rejected	K&R header enumerator conflicts with an earlier parameter
+0154	0154.c	rejected,gnu89	K&R implicit C89 parameter conflicts with a header enumerator
+0155	0155.c	-	K&R mixed tag and atomic declarations retain their header scope
+0156	0156.c	rejected	K&R invalid header record diagnoses its member
+0157	0157.c	-	K&R tag preparation after an invalid header starts with fresh scope
+0158	0158.c	gnu89	K&R all implicit parameters in C89
+0159	0159.c	rejected,gnu99	K&R undeclared parameter is an error in C99
+0160	0160.c	rejected	K&R undeclared parameter is an error in C17
+0161	0161.c	rejected,gnu23	K&R identifier lists are rejected in C23
+0162	0162.c	-	K&R direct and addressed calls warn about arity without rejecting
+0163	0163.c	-	K&R indirect designators retain no prototype
+0164	0164.c	rejected	K&R direct arguments retain known assignment constraints
+0165	0165.c	-	K&R prior prototype does not turn its definition into a prototype
+0166	0166.c	rejected	K&R later prototype restores hard arity checking
+0167	0167.c	rejected	K&R initializer does not erase a function pointer prototype
+0168	0168.c	-	K&R typeof observes the no-prototype expression type
+0169	0169.c	rejected	K&R calls in type queries keep known argument constraints
+0170	0170.c	rejected	K&R parameter rejects a leading _Noreturn keyword
+0171	0171.c	rejected	K&R parameter rejects an interleaved _Noreturn keyword
+0172	0172.c	-	K&R parameter retains register and ignored noreturn attributes
+0173	0173.c	-	callback static initializer
+0174	0174.c	-	parenthesized declarator
+0175	0175.c	-	abstract callback array
+0176	0176.c	-	array pointer binding
+0177	0177.c	-	ordered typedef declarators
+0178	0178.c	-	ordered initializer declarators
+0179	0179.c	-	compatible block function redeclaration
+0180	0180.c	-	builtin System V variadic list type
+0181	0181.c	-	builtin Microsoft variadic list type
+0182	0182.c	-	builtin integer typedefs
+0183	0183.c	rejected	conflicting builtin typedef
+0184	0184.c	-	block extern uses file object
+0185	0185.c	-	block extern before file definition
+0186	0186.c	-	repeated block extern
+0187	0187.c	rejected	block extern conflicting linked type
+0188	0188.c	rejected	block extern initializer rejected
+0189	0189.c	rejected	conflicting block function redeclaration
+0190	0190.c	rejected	linked object and block function conflict
+0191	0191.c	-	compatible disjoint block prototypes
+0192	0192.c	rejected	incompatible disjoint block prototypes
+0193	0193.c	rejected	block prototype before conflicting file declaration
+0194	0194.c	rejected	conflicting prototypes in different functions
+0195	0195.c	rejected	local shadow preserves linked conflict
+0196	0196.c	-	expired prototype does not strengthen later declaration
+0197	0197.c	-	inner prototype does not strengthen outer declaration
+0198	0198.c	rejected	hidden prototype conflicts with parameterless definition
+0199	0199.c	-	GNU17 prototype after parameterless definition
+0200	0200.c	rejected	nested duplicate parameter
+0201	0201.c	rejected	const callback parameter
+0202	0202.c	rejected	invalid callback argument
+0203	0203.c	rejected	function cannot return array
+0204	0204.c	-	declaration ICE bounds
+0205	0205.c	-	declaration ICE unevaluated fault
+0206	0206.c	rejected	invalid negative bound
+0207	0207.c	-	enum arithmetic and bounds
+0208	0208.c	-	enum scope restoration
+0209	0209.c	rejected	duplicate enumerator
+0210	0210.c	rejected	enum is not assignable
+0211	0211.c	-	record member access
+0212	0212.c	-	record forward completion
+0213	0213.c	-	record recursion
+0214	0214.c	-	nested record layout
+0215	0215.c	-	union layout
+0216	0216.c	-	record assignment and return
+0217	0217.c	-	record tag shadow
+0218	0218.c	rejected	duplicate member across nested tag
+0219	0219.c	rejected	tag kind mismatch
+0220	0220.c	rejected	missing record member
+0221	0221.c	rejected	record const member assignment
+0222	0222.c	rejected	incomplete by-value member
+0223	0223.c	rejected	incomplete tentative object
+0224	0224.c	rejected	sizeof before completion
+0225	0225.c	-	pointer comparison before record completion
+0226	0226.c	-	flexible member
+# A GNU extension clang takes (a warning under -pedantic alone), with clang's layouts: unnamed bit-fields
+# before it are no named member, and so it is the struct's only one.
+0227	0227.c	-	sole flexible member GNU extension
+0228	0228.c	-	unnamed zero-width field before a sole flexible member
+0229	0229.c	-	unnamed bitfield before a sole flexible member
+0230	0230.c	-	flexible member after named field and unnamed padding
+# GNU's extension, which clang takes: a union's flexible array members anywhere among its members, each of size
+# 0 and its element's alignment.
+0231	0231.c	-	union flexible members, GNU's extension
+0232	0232.c	rejected	flexible member must be last
+0233	0233.c	rejected	named zero-width bitfield
+0234	0234.c	-	bitfield update
+0235	0235.c	rejected	bitfield has no address
+0236	0236.c	-	all compound operators
+0237	0237.c	-	prefix and postfix updates
+0238	0238.c	-	mixed compound assignment
+0239	0239.c	-	narrow compound assignment
+0240	0240.c	-	pointer updates
+0241	0241.c	rejected	invalid pointer compound difference
+0242	0242.c	rejected	invalid const update
+0243	0243.c	rejected	invalid rvalue update
+0244	0244.c	rejected	invalid array update
+0245	0245.c	-	for declaration scope
+0246	0246.c	-	empty for condition
+0247	0247.c	-	comma for condition
+0248	0248.c	rejected	for scope expires
+0249	0249.c	rejected	record condition rejected
+0250	0250.c	-	while and do controls
+0251	0251.c	rejected	earlier binding error survives a later retained pragma
+0252	0252.c	-	retained pragma follows prepared attributed declarations
+0253	0253.c	-	record captures packing at its opening brace
+0254	0254.c	-	retained packing pragma changes record layout

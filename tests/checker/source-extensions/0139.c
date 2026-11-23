@@ -1,0 +1,1 @@
+int f(x,y)struct S{int a;}x;struct S*y;{return x.a+y->a;}

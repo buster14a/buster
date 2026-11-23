@@ -1,0 +1,2 @@
+#define E \N{LATIN SMALL LETTER E WITH ACUTE}
+E E

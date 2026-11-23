@@ -87,9 +87,13 @@ global variable is described where the unit defines it. The DIEs are base and
 pointer types, fixed and incomplete arrays, records and unions (with byte or
 bit offsets), enums and enumerators, function signatures, qualifiers, and
 declaration-scoped typedef names. A bounded worklist handles recursive
-records without recursion. Two passes measure and then write CU-relative
-`DW_FORM_ref4` references, including forward references; these references need
-no relocation when units are concatenated.
+records without recursion. The types' DIEs come first and are measured alone,
+which fixes their CU-relative `DW_FORM_ref4` offsets, forward references among
+them included; then every DIE and list is written once, into sections that grow,
+and the few references to an abstract instance written later (an inline
+instance's callee defined after its caller) are patched once every DIE is
+written (#2542). These references need no relocation when units are
+concatenated.
 
 Named parameters and locals retain their source declarations through lowering.
 Only parameters owned by a function definition contribute named values and
@@ -112,7 +116,7 @@ nested shadowed names stop being visible on leaving their scope. Only a scope
 that declares an object or a typedef of its own has a block, as clang's do:
 LLVM drops a scope without children and gives the children of one that holds
 only scopes to its parent, and so does `check_debug_value_own_blocks` (#2543),
-which marks those blocks once per function before the writer's two passes. A
+which marks those blocks over each function before the writer's walk. A
 block that declared nothing cost a DIE, a range list and an object's relocation
 and told a debugger nothing: `-c -g sqlite3.c` wrote 24,839 blocks and now
 writes 2,139 (clang -O0's 2,120), its object 20% smaller, with 17,397

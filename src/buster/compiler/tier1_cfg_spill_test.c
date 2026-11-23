@@ -205,9 +205,115 @@ static void tier1_cfg_test_spill_pressure(Tier1CfgTestTally* tally, Arena* outpu
     }
 }
 
+// Both checkers on the result with its current slots edited (tier1_cfg_test_slots_edited): whether both refuse it.
+static bool tier1_cfg_test_slots_refused(Tier1CfgTestTally* tally, const Tier1CfgInput* input, Tier1CfgAllocation* result, uint32_t block, uint32_t value, bool add, Arena* output, Arena* scratch)
+{
+    const uint64_t saved = scratch->length;
+    const uint32_t blocks = input->block_count;
+    uint32_t* offsets = arena_push_array(scratch, (uint64_t)blocks + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* slots = arena_push_array(scratch, (uint64_t)result->current_slot_offsets[blocks] + 2, sizeof(uint32_t), _Alignof(uint32_t));
+    bool refused = false;
+    if (offsets != 0 && slots != 0)
+    {
+        tier1_cfg_test_slots_edited(result, blocks, block, value, add, offsets, slots);
+        uint32_t* const kept_offsets = result->current_slot_offsets;
+        uint32_t* const kept_slots = result->current_slots;
+        result->current_slot_offsets = offsets;
+        result->current_slots = slots;
+        Tier1CfgCheck check;
+        const bool verified = tier1_cfg_verify(input, result, scratch, &check);
+        const bool certified = tier1_cfg_test_certify(tally, input, result, output, scratch, false);
+        refused = !verified && !certified;
+        result->current_slot_offsets = kept_offsets;
+        result->current_slots = kept_slots;
+    }
+    arena_pop_to(scratch, saved);
+    return refused;
+}
+
+// #2553: a slot current across blocks. With one register, `a` is stored where `b` is defined, and the loop's header,
+// which reads `b` and then `a`, takes `a` in its slot and reloads it, storing `b`; the body continues the header's
+// ranges, reading `a` in its register. The back edge returns `a` to the header's place for it, its slot, which still
+// holds it: every path to the body went through the header's start with `a` there. The predecessor's own proof
+// (tier1_cfg_slot_current) sees no store of `a` in the body, and before tier1_cfg_current_slots the back edge stored it
+// on every iteration. Both checkers refuse the allocation once the body's assertion is taken back (the back edge still
+// leaves the store out), and once `b`'s slot, which the entry doesn't store, is asserted current at the header.
+static void tier1_cfg_test_spill_across(Tier1CfgTestTally* tally, Arena* output, Arena* scratch)
+{
+    static Tier1CfgTestBuilder builder;
+    for (uint8_t class = 0; class < BUSTER_TIER1_ALLOCATE_CLASSES; class += 1)
+    {
+        memset(&builder, 0, sizeof(builder));
+        builder.block_count = 4;
+        builder.instructions[0] = 2;
+        builder.instructions[1] = 2;
+        builder.instructions[2] = 1;
+        builder.instructions[3] = 1;
+        builder.scratch[0] = 11;
+        builder.scratch[1] = 15;
+        builder.registers[class] = class == BUSTER_TIER1_ALLOCATE_MASK ? 2 : 1;
+        tier1_cfg_test_edge(&builder, 0, 1);
+        tier1_cfg_test_edge(&builder, 1, 2);
+        tier1_cfg_test_edge(&builder, 1, 3);
+        tier1_cfg_test_edge(&builder, 2, 1);
+        const uint32_t a = tier1_cfg_test_value(&builder, 0, 0, class, builder.registers[class]);
+        const uint32_t b = tier1_cfg_test_value(&builder, 0, 1, class, builder.registers[class]);
+        tier1_cfg_test_definition_use(&builder, a);
+        tier1_cfg_test_definition_use(&builder, b);
+        tier1_cfg_test_use(&builder, b, 1, 0, true);
+        tier1_cfg_test_use(&builder, a, 1, 1, true);
+        tier1_cfg_test_use(&builder, a, 2, 0, true);
+        tier1_cfg_test_use(&builder, a, 3, 0, true);
+        const uint64_t saved = output->length;
+        Tier1CfgInput input;
+        const bool built = tier1_cfg_test_build(&builder, output, &input);
+        tier1_cfg_test_expect(tally, built, "the slot-across-blocks loop builds");
+        if (built)
+        {
+            tier1_cfg_test_case(tally, &input, output, scratch, "a slot current across blocks", false, 0, 0, true);
+            const uint64_t mark = output->length;
+            const uint64_t scratch_mark = scratch->length;
+            Tier1CfgAllocation result = { 0 };
+            const Tier1CfgError error = tier1_cfg_allocate(&input, output, scratch, &result);
+            tier1_cfg_test_expect(tally, error == TIER1_CFG_OK && result.current_slot_offsets != 0, "the slot-across-blocks loop allocates, with current slots");
+            uint32_t* spill_ends = error == TIER1_CFG_OK ? arena_push_array(scratch, (uint64_t)result.allocation.fragment_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+            if (error == TIER1_CFG_OK && result.current_slot_offsets != 0 && spill_ends != 0)
+            {
+                uint32_t location = 0;
+                uint8_t kind = 0;
+                const uint32_t exit = input.block_starts[3] - 1;
+                const bool header = tier1_cfg_entry_location(&result, a, input.block_starts[1], &location, &kind) && kind == BUSTER_TIER1_ALLOCATE_SPILL;
+                const bool body = tier1_cfg_location(&result, a, input.block_starts[2], &location, &kind) && kind == BUSTER_TIER1_ALLOCATE_REGISTER;
+                const bool leaving = tier1_cfg_location(&result, a, exit, &location, &kind) && kind == BUSTER_TIER1_ALLOCATE_REGISTER;
+                tier1_cfg_test_expect(tally, header && body && leaving, "`a` enters the header in its slot and the body in its register, and leaves it there");
+                tier1_cfg_spill_prefix(&result, spill_ends);
+                tier1_cfg_test_expect(tally, !tier1_cfg_slot_current(&result, spill_ends, a, exit, input.block_starts[2]), "the body itself doesn't store `a`");
+                const uint32_t slot = BUSTER_TIER1_CFG_SPILL + result.allocation.spill_ids[a];
+                // The back edge is the successor CSR's last: blocks 0 and 1's edges come before it.
+                const uint32_t back = input.edge_count - 1;
+                bool stored = false;
+                for (uint32_t m = result.edge_move_offsets[back]; m < result.edge_move_offsets[back + 1]; m += 1)
+                {
+                    stored = stored || result.move_destinations[m] == slot;
+                }
+                tier1_cfg_test_expect(tally, input.successors[back] == 1 && !stored, "the back edge leaves out `a`'s store into its current slot");
+                tier1_cfg_test_expect(tally, tier1_cfg_test_slot_listed(&result, 2, a), "`a`'s slot is current at the body's start");
+                tier1_cfg_test_expect(tally, tier1_cfg_test_slots_refused(tally, &input, &result, 2, a, false, output, scratch), "both checkers refuse a store left out without its current slot");
+                const bool in_register = tier1_cfg_entry_location(&result, b, input.block_starts[1], &location, &kind) && kind == BUSTER_TIER1_ALLOCATE_REGISTER;
+                tier1_cfg_test_expect(tally, in_register && result.allocation.spill_ids[b] != UINT32_MAX && !tier1_cfg_test_slot_listed(&result, 1, b), "`b` enters the header in its register, its slot not current");
+                tier1_cfg_test_expect(tally, tier1_cfg_test_slots_refused(tally, &input, &result, 1, b, true, output, scratch), "both checkers refuse a slot asserted current that no store gives");
+            }
+            arena_pop_to(scratch, scratch_mark);
+            arena_pop_to(output, mark);
+        }
+        arena_pop_to(output, saved);
+    }
+}
+
 static void tier1_cfg_test_current_slots(Tier1CfgTestTally* tally, Arena* output, Arena* scratch)
 {
     tier1_cfg_test_spill_prefix(tally);
     tier1_cfg_test_spill_edges(tally, output, scratch);
     tier1_cfg_test_spill_pressure(tally, output, scratch);
+    tier1_cfg_test_spill_across(tally, output, scratch);
 }

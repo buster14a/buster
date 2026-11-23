@@ -1,0 +1,2 @@
+a
+#embed "hi.txt" limit(1)

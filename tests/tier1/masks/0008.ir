@@ -1,0 +1,49 @@
+function (ptr) -> void {
+  slot $0 size=16 align=8 type=void flags=0x01
+b0:
+  %0 = param.ptr 0
+  %1 = load.m8 %0 align=1
+  %2 = address.ptr %0 offset=2
+  %3 = load.m16 %2 align=2
+  %4 = address.ptr %0 offset=4
+  %5 = load.m32 %4 align=4
+  %6 = address.ptr %0 offset=8
+  %7 = load.m64 %6 align=8
+  %8 = stack_addr.ptr $0
+  %9 = store.void %8, %7 align=8
+  %10 = stack_addr.ptr $0
+  %11 = address.ptr %10 offset=8
+  %12 = store.void %11, %1 align=1
+  %13 = stack_addr.ptr $0
+  %14 = address.ptr %13 offset=10
+  %15 = store.void %14, %3 align=2
+  %16 = stack_addr.ptr $0
+  %17 = address.ptr %16 offset=12
+  %18 = store.void %17, %5 align=4
+  %19 = stack_addr.ptr $0
+  %20 = load.m64 %19 align=8
+  %21 = stack_addr.ptr $0
+  %22 = address.ptr %21 offset=8
+  %23 = load.m8 %22 align=1
+  %24 = stack_addr.ptr $0
+  %25 = address.ptr %24 offset=10
+  %26 = load.m16 %25 align=2
+  %27 = stack_addr.ptr $0
+  %28 = address.ptr %27 offset=12
+  %29 = load.m32 %28 align=4
+  %30 = not.m64 %20
+  %31 = xor.m8 %23, %1
+  %32 = not.m16 %26
+  %33 = xor.m32 %29, %5
+  %34 = address.ptr %0 offset=128
+  %35 = store.void %34, %30 align=8
+  %36 = address.ptr %0 offset=136
+  %37 = store.void %36, %31 align=1
+  %38 = address.ptr %0 offset=138
+  %39 = store.void %38, %32 align=2
+  %40 = address.ptr %0 offset=140
+  %41 = store.void %40, %33 align=4
+  %42 = address.ptr %0 offset=144
+  %43 = store.void %42, %26 align=2
+  %44 = ret.void
+}

@@ -2012,6 +2012,12 @@ struct NightlyState
     uint64_t admitted_run;
     uint32_t admitted_attempt;
     uint32_t failures;
+    // The coordinator's hosted preparations of it (its `defer` requests) that ended with no plain verdict, and the
+    // latest of them: a state whose own revision can't produce its plain rows (#2308's merge fails its selector's
+    // self-test) would otherwise be prepared again every five minutes all evening.
+    uint32_t unprepared;
+    uint64_t unprepared_run;
+    uint32_t unprepared_attempt;
     bool admit_in_flight;
     bool defer_in_flight;
     uint64_t admit_run;
@@ -2351,6 +2357,18 @@ static void nightly_fold(const NightlyPlanInput* input, NightlyCycleState* cycle
             }
             const bool nightly = row->purpose == NIGHTLY_PURPOSE_BACKLOG || row->purpose == NIGHTLY_PURPOSE_SNAPSHOT;
             state->failures += nightly && admitted && (row->outcome == NIGHTLY_OUTCOME_FAILED || row->outcome == NIGHTLY_OUTCOME_INTERRUPTED);
+            // A preparation that ended with no plain verdict: a job its plain rows need failed, or they were cancelled
+            // or skipped. Each attempt counts, as an admitted failure's does.
+            bool requested_admit = true;
+            char requested[11] = { 0 };
+            const bool preparation = nightly && nightly_request(row->request, requested, &requested_admit) && !requested_admit;
+            const bool unprepared = preparation && !admitted && row->plain == NIGHTLY_PLAIN_NONE;
+            state->unprepared += unprepared;
+            if (unprepared && nightly_later(row->run, row->attempt, state->unprepared_run, state->unprepared_attempt))
+            {
+                state->unprepared_run = row->run;
+                state->unprepared_attempt = row->attempt;
+            }
         }
         if (this_cycle && row->purpose == NIGHTLY_PURPOSE_SNAPSHOT)
         {
@@ -2449,6 +2467,12 @@ static void nightly_fold(const NightlyPlanInput* input, NightlyCycleState* cycle
         else if (state->defer_in_flight)
         {
             status = NIGHTLY_STATUS_PREPARING;
+        }
+        else if (state->unprepared >= input->attempts)
+        {
+            // Its preparations can't qualify it: reported and skipped, as a failed plain row is. A later conclusive pass
+            // of its plain rows (a person's dispatch) still makes it ready.
+            status = NIGHTLY_STATUS_BLOCKED_HOSTED;
         }
         state->status = status;
     }
@@ -2639,12 +2663,19 @@ static void nightly_report(const NightlyPlanInput* input, const NightlyCycleStat
     for (int64_t i = scope; i >= 0 && listed < 40; i -= 1)
     {
         const NightlyState* state = &states->items[i];
-        const uint64_t run = state->status == NIGHTLY_STATUS_COMPLETE ? (state->source != 0 ? state->source : state->complete_run) : state->status == NIGHTLY_STATUS_BLOCKED_NATIVE ? state->blocked_run : state->status == NIGHTLY_STATUS_BLOCKED_HOSTED ? state->plain_run : 0;
+        // A state blocked by its preparations has no failed plain row: its latest preparation is the evidence.
+        const bool unprepared = state->status == NIGHTLY_STATUS_BLOCKED_HOSTED && state->plain != NIGHTLY_PLAIN_FAILED;
+        const uint64_t run = state->status == NIGHTLY_STATUS_COMPLETE ? (state->source != 0 ? state->source : state->complete_run) : state->status == NIGHTLY_STATUS_BLOCKED_NATIVE ? state->blocked_run : unprepared ? state->unprepared_run : state->status == NIGHTLY_STATUS_BLOCKED_HOSTED ? state->plain_run : 0;
         if (run != 0)
         {
             char url[128];
+            char why[96] = { 0 };
             nightly_run_url(url, sizeof(url), run);
-            fprintf(report, "- `%.12s` %s%s: %s\n", state->sha, nightly_status_names[state->status], state->source != 0 && state->status == NIGHTLY_STATUS_COMPLETE ? " (its pull request's run)" : "", url);
+            if (unprepared)
+            {
+                snprintf(why, sizeof(why), " (%u hosted preparations ended with no plain verdict)", state->unprepared);
+            }
+            fprintf(report, "- `%.12s` %s%s%s: %s\n", state->sha, nightly_status_names[state->status], state->source != 0 && state->status == NIGHTLY_STATUS_COMPLETE ? " (its pull request's run)" : "", why, url);
             listed += 1;
         }
     }
@@ -2837,14 +2868,15 @@ static void nightly_plan(const NightlyPlanInput* input, FILE* output, FILE* repo
             if (snapshot_pending)
             {
                 const bool blocked_window = !nightly_worker_later(input, &cycle, snapshot, now, input->snapshot_bound);
-                const bool blocked = snapshot->plain == NIGHTLY_PLAIN_FAILED || snapshot->blocked_native || snapshot->status == NIGHTLY_STATUS_FAILED || snapshot->refused || blocked_window;
+                const bool unprepared = snapshot->status == NIGHTLY_STATUS_BLOCKED_HOSTED && snapshot->plain != NIGHTLY_PLAIN_FAILED;
+                const bool blocked = snapshot->plain == NIGHTLY_PLAIN_FAILED || unprepared || snapshot->blocked_native || snapshot->status == NIGHTLY_STATUS_FAILED || snapshot->refused || blocked_window;
                 if (snapshot->plain == NIGHTLY_PLAIN_OK && !blocked)
                 {
                     target = cycle.snapshot;
                 }
                 else if (blocked)
                 {
-                    cycle.substitute_reason = snapshot->refused ? "its nightly branch could not be created or used" : snapshot->plain == NIGHTLY_PLAIN_FAILED ? "its plain hosted rows failed" : snapshot->blocked_native ? "its native correctness failed on the 9700X" : snapshot->status == NIGHTLY_STATUS_FAILED ? "its measurements failed repeatedly" : !snapshot->worker_window_valid ? "its worker window is unknown" : "its comprehensive run no longer fits its worker window";
+                    cycle.substitute_reason = snapshot->refused ? "its nightly branch could not be created or used" : snapshot->plain == NIGHTLY_PLAIN_FAILED ? "its plain hosted rows failed" : unprepared ? "its hosted preparations ended with no plain verdict" : snapshot->blocked_native ? "its native correctness failed on the 9700X" : snapshot->status == NIGHTLY_STATUS_FAILED ? "its measurements failed repeatedly" : !snapshot->worker_window_valid ? "its worker window is unknown" : "its comprehensive run no longer fits its worker window";
                     int64_t later = -1;
                     for (int64_t i = cycle.snapshot - 1; i >= 0 && target < 0; i -= 1)
                     {
@@ -4145,6 +4177,69 @@ static void nightly_test_plan(NightlyTest* test)
     snprintf(line, sizeof(line), "dispatch\tbacklog\tdefer\t%s\t", scenario->states.items[2].sha);
     nightly_expect(test, nightly_has(scenario, line) && strstr(scenario->report, "| not-required | 1 |") != NULL, "a documentation-only state is never dispatched");
     nightly_scenario_free(scenario);
+
+    // A state whose preparations end with no plain verdict (#2308's merge fails its own selector's self-test, so its
+    // plain rows never run) was prepared again every five minutes until the cycle's 40 were spent, each night. Each
+    // such preparation counts toward the attempts; at three the state is blocked-hosted, reported with the latest.
+    for (uint32_t prepared = 2; prepared <= 3; prepared += 1)
+    {
+        scenario = nightly_scenario(4, committed);
+        nightly_scenario_cycle(scenario, "2026-11-04", 3);
+        nightly_scenario_flying(scenario, 400, "snapshot", "defer", 3, "20261104.900.1.defer", evening - 60);
+        static const char* const requests[] = { "20261102.900.2.defer", "20261103.900.2.defer", "20261103.900.3.defer" };
+        for (uint32_t k = 0; k < prepared; k += 1)
+        {
+            nightly_scenario_row(scenario, 201 + k, 0, NIGHTLY_PURPOSE_BACKLOG, requests[k], NIGHTLY_PLAIN_NONE, NIGHTLY_HARDWARE_SKIP, NIGHTLY_COVERAGE_TARGETED, NIGHTLY_OUTCOME_DEFERRED);
+        }
+        nightly_scenario_plan(scenario, evening);
+        snprintf(line, sizeof(line), "dispatch\tbacklog\tdefer\t%s\t", scenario->states.items[0].sha);
+        const bool again = nightly_has(scenario, line);
+        snprintf(line, sizeof(line), "dispatch\tbacklog\tdefer\t%s\t", scenario->states.items[2].sha);
+        if (prepared < 3)
+        {
+            nightly_expect(test, again && strstr(scenario->report, "| blocked-hosted | 0 |") != NULL, "two preparations with no plain verdict: the state is prepared again");
+        }
+        else
+        {
+            nightly_expect(test, !again && nightly_has(scenario, line) && nightly_count(scenario, "dispatch\tbacklog\tdefer") == 2, "the third ends its preparations: later states take the slots");
+            nightly_expect(test, strstr(scenario->report, "| blocked-hosted | 1 |") != NULL && strstr(scenario->report, "| needs-preparation | 0 |") != NULL, "it is blocked-hosted, not pending");
+            snprintf(line, sizeof(line), "- `%.12s` blocked-hosted (3 hosted preparations ended with no plain verdict): https://github.com/buster14a/buster/actions/runs/203\n", scenario->states.items[0].sha);
+            nightly_expect(test, strstr(scenario->report, line) != NULL, "the report links its latest preparation");
+            snprintf(line, sizeof(line), "the oldest is `%s`", scenario->states.items[1].sha);
+            nightly_expect(test, strstr(scenario->report, line) != NULL, "and it no longer stays the oldest pending state");
+        }
+        nightly_scenario_free(scenario);
+    }
+    // Only preparations count: admission requests skipped by the window reuse plain rows and run none, and a later
+    // conclusive pass of the plain rows (a person's dispatch) makes the state ready again.
+    for (uint32_t passed = 0; passed < 2; passed += 1)
+    {
+        static const char* const preparations[] = { "20261102.900.2.defer", "20261103.900.2.defer", "20261103.900.3.defer" };
+        static const char* const admissions[] = { "20261103.900.10001.admit", "20261103.900.10002.admit", "20261103.900.10003.admit" };
+        scenario = nightly_scenario(4, committed);
+        nightly_scenario_cycle(scenario, "2026-11-04", 3);
+        nightly_scenario_flying(scenario, 400, "snapshot", "defer", 3, "20261104.900.1.defer", evening - 60);
+        for (uint32_t k = 0; k < 3; k += 1)
+        {
+            nightly_scenario_row(scenario, 201 + k, 0, NIGHTLY_PURPOSE_BACKLOG, passed ? preparations[k] : admissions[k], NIGHTLY_PLAIN_NONE, NIGHTLY_HARDWARE_SKIP, NIGHTLY_COVERAGE_TARGETED, NIGHTLY_OUTCOME_DEFERRED);
+        }
+        if (passed)
+        {
+            nightly_scenario_row(scenario, 210, 0, NIGHTLY_PURPOSE_FULL, "", NIGHTLY_PLAIN_OK, NIGHTLY_HARDWARE_SKIP, NIGHTLY_COVERAGE_NONE, NIGHTLY_OUTCOME_DEFERRED);
+        }
+        nightly_scenario_plan(scenario, evening);
+        snprintf(line, sizeof(line), "dispatch\tbacklog\tdefer\t%s\t", scenario->states.items[0].sha);
+        const bool prepared = nightly_has(scenario, line);
+        if (passed)
+        {
+            nightly_expect(test, !prepared && strstr(scenario->report, "| ready | 1 |") != NULL && strstr(scenario->report, "| blocked-hosted | 0 |") != NULL, "a later pass of its plain rows makes it ready");
+        }
+        else
+        {
+            nightly_expect(test, prepared && strstr(scenario->report, "| blocked-hosted | 0 |") != NULL, "admission requests with no plain verdict don't end its preparations");
+        }
+        nightly_scenario_free(scenario);
+    }
 
     // A state whose nightly/SHA branch the workflow token couldn't create (on 2026-11-05, every merge whose pull
     // request's head lacked main's workflow changes) is skipped for the rest of the job, reported: it neither keeps a

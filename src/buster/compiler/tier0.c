@@ -816,7 +816,7 @@ static bool tier0_asm_bodies_valid(const Tier0Function* function);
 // valid-input precondition; these checks also let both compile paths refuse malformed optional frame metadata: the
 // parameters' locations, where an incoming variadic area bounds them or objects may be among them
 // (tier0_parameters_valid), and the aggregates' (tier0_aggregates_valid). Out of line: the compile paths call it once
-// per function, and inline it changed clang's code for their shared passes (tier0_generate) whenever it changed.
+// per function, and inline it changed clang's code for their shared passes (tier0_job_select) whenever it changed.
 static __attribute__((noinline)) bool tier0_frame_input_valid(const Tier0Function* function)
 {
     bool valid = function->local_count <= BUSTER_TIER0_MAX_LOCALS && function->parameter_count <= function->local_count;
@@ -976,6 +976,9 @@ static __attribute__((unused)) bool tier0_initialize(void);
 // Compiles a function that tier0_validate accepts: the vector path. The records and columns come from `output`; the
 // passes' columns from the thread's scratch arenas. Returns the code, or an error with nothing kept in `output`.
 static __attribute__((unused)) Tier0Code tier0_compile(const Tier0Function* function, Arena* output);
+// Compiles `count` functions, codes[i] the code tier0_compile gives functions[i], each pass over a batch of them before
+// the next pass (#2874). A function that fails may leave what it pushed in `output`.
+static __attribute__((unused)) void tier0_compile_batch(const Tier0Function* const* functions, uint32_t count, Arena* output, Tier0Code* codes);
 // The same, an entry at a time: the twin and oracle, with identical results.
 static __attribute__((unused)) Tier0Code tier0_compile_scalar(const Tier0Function* function, Arena* output);
 // Whether the function keeps the typed stream's rules (the kinds, classes and values, operands and depths, targets and
@@ -4046,7 +4049,7 @@ struct Tier0Entries
     uint32_t* deferred_entries;
     uint32_t deferred_count;
     // The deferred entries' references as emission writes them (a call's), before it merges them with the templates' by
-    // instruction (#2874): room for every reference, which tier0_generate pushes after measuring.
+    // instruction (#2874): room for every reference, which tier0_job_measure pushes after measuring.
     LinkReference* deferred_references;
 };
 
@@ -12004,103 +12007,181 @@ static void tier0_x87_transfers(const Tier0Function* function, const Tier0Entrie
     }
 }
 
-static Tier0Error tier0_generate(const Tier0Function* function, const uint8_t* segments, Tier0Entries* entries, Arena* scratch, Arena* output, Tier0Code* code,
-                                 bool vector)
+// A function's compile in progress: what its passes hand one another, from its entries' columns to its code (#2874). A
+// pass takes a job and leaves it for the next: selection (tier0_job_select), the homes and the frame (tier0_job_homes),
+// measuring and the output's room (tier0_job_measure), emission (tier0_job_emit), then the immediates' forms and what
+// the code keeps (tier0_job_finish). A pass does nothing for a job whose `error` an earlier one set. The vector path runs
+// each pass over every job of a batch before the next pass (tier0_run_jobs), so that a pass's code and tables serve one
+// function after another; the scalar path runs them a function at a time.
+typedef struct Tier0Job Tier0Job;
+struct Tier0Job
+{
+    const Tier0Function* function;
+    // The function's segment overrides (tier0_apply_segments; 0 without them).
+    const uint8_t* segments;
+    Tier0Entries entries;
+    Tier0Frame frame;
+    // The locals' homes and references' counts, from the scratch arena.
+    Tier0Home* homes;
+    uint32_t* references;
+    Tier0Choices choices;
+    Tier0Code code;
+    Tier0Error error;
+    // The output arena's length when the job began, which a compile of one function pops it to on an error.
+    uint64_t output_length;
+    // Its place among the functions of the batch it came with (tier0_compile_batch).
+    uint32_t index;
+};
+
+// A job for `function`, before its first pass.
+static void tier0_job_begin(Tier0Job* job, const Tier0Function* function, const uint8_t* segments, const Arena* output)
+{
+    job->function = function;
+    job->segments = segments;
+    job->homes = 0;
+    job->references = 0;
+    memset(&job->choices, 0, sizeof(job->choices));
+    memset(&job->code, 0, sizeof(job->code));
+    job->error = TIER0_OK;
+    job->output_length = output->length;
+    job->index = 0;
+}
+
+// Selection, from the entries' columns: the frame's alignment, each entry's template or its deferral, the depths reached
+// and what the body touches (tier0_select_vector, tier0_select), the deep entries where the depths run out
+// (tier0_select_deep), and the frame's kinds of slots.
+static inline __attribute__((always_inline)) void tier0_job_select(Tier0Job* job, Arena* scratch, bool vector)
 {
     (void)vector;
 
-    Tier0Frame frame;
-    memset(&frame, 0, sizeof(frame));
-    // Stack-clash protection's probes (#177): the prologue's and ALLOCA's.
-    frame.probe = function->probe_stack;
-    Tier0Error error = tier0_frame_input_valid(function) ? TIER0_OK : TIER0_ERROR_UNSUPPORTED;
-    // The frame's alignment past 16 bytes, if it needs one, which the integer depths the selections leave depend on.
-    frame.alignment_log2 = error == TIER0_OK ? (uint8_t)(BUSTER_VECTOR_PATH(vector) ? tier0_frame_alignment_vector(function) : tier0_frame_alignment(function)) : 0;
-    const uint32_t unsupported = error == TIER0_OK ? (BUSTER_VECTOR_PATH(vector) ? tier0_select_vector(function, entries, &frame, &error) : tier0_select(function, entries, &frame, &error)) : function->count;
-    if (error == TIER0_ERROR_DEPTH && unsupported == function->count)
+    const Tier0Function* function = job->function;
+    Tier0Entries* entries = &job->entries;
+    Tier0Frame* frame = &job->frame;
+    Tier0Code* code = &job->code;
+    if (job->error == TIER0_OK)
     {
-        error = tier0_select_deep(function, entries, &frame, scratch, BUSTER_VECTOR_PATH(vector), &code->deep);
-    }
-    if (error == TIER0_OK && unsupported == function->count && function->asm_body_count != 0)
-    {
-        error = tier0_asm_direct(function, entries, scratch);
-    }
-    // The memory classes' slots, a function with their values' (whose long double result, if one, leaves st0 from slot 0),
-    // and the vectors'.
-    frame.memory = tier0_memory_function(function);
-    frame.memory_slots = function->x87 || function->int128;
-    frame.vectors = function->vectors && (BUSTER_VECTOR_PATH(vector) ? tier0_vector_slots_vector(function) : tier0_vector_slots(function));
-    frame.x87_result = function->x87 && tier0_x87_returns(function);
-    // The masks' slots: one per depth the mask stack reaches, and at least one per register, which a deep row's
-    // borrowing saves (tier0_emit_operation).
-    frame.masks = function->masks;
-    frame.mask_slots = function->masks ? (entries->mask_top > BUSTER_TIER0_MASK_DEPTHS ? entries->mask_top : BUSTER_TIER0_MASK_DEPTHS) : 0;
-    if (unsupported != function->count)
-    {
-        error = TIER0_ERROR_UNSUPPORTED;
-        code->node = unsupported;
-    }
-    const uint32_t locals = function->local_count;
-    // The homes and the references' counts in one push (tier0_column).
-    const uint64_t home_bytes = tier0_column_bytes(((uint64_t)locals + 1) * sizeof(Tier0Home));
-    const uint64_t count_bytes = tier0_column_bytes(((uint64_t)locals + 1) * sizeof(uint32_t));
-    uint8_t* local_columns = arena_push(scratch, home_bytes + count_bytes, 64);
-    uint64_t local_offset = 0;
-    Tier0Home* homes = tier0_column(local_columns, &local_offset, home_bytes);
-    uint32_t* references = tier0_column(local_columns, &local_offset, count_bytes);
-    uint32_t order[2 * BUSTER_TIER0_HOME_CANDIDATES];
-    if (error == TIER0_OK && (homes == 0 || references == 0))
-    {
-        error = TIER0_ERROR_MEMORY;
-    }
-    Tier0Choices choices;
-    memset(&choices, 0, sizeof(choices));
-    if (error == TIER0_OK)
-    {
-        if (BUSTER_VECTOR_PATH(vector))
+        memset(frame, 0, sizeof(*frame));
+        // Stack-clash protection's probes (#177): the prologue's and ALLOCA's.
+        frame->probe = function->probe_stack;
+        Tier0Error error = tier0_frame_input_valid(function) ? TIER0_OK : TIER0_ERROR_UNSUPPORTED;
+        // The frame's alignment past 16 bytes, if it needs one, which the integer depths the selections leave depend on.
+        frame->alignment_log2 = error == TIER0_OK ? (uint8_t)(BUSTER_VECTOR_PATH(vector) ? tier0_frame_alignment_vector(function) : tier0_frame_alignment(function)) : 0;
+        const uint32_t unsupported = error == TIER0_OK ? (BUSTER_VECTOR_PATH(vector) ? tier0_select_vector(function, entries, frame, &error) : tier0_select(function, entries, frame, &error)) : function->count;
+        if (error == TIER0_ERROR_DEPTH && unsupported == function->count)
         {
-            tier0_count_references_vector(function, references);
+            error = tier0_select_deep(function, entries, frame, scratch, BUSTER_VECTOR_PATH(vector), &code->deep);
         }
-        else
+        if (error == TIER0_OK && unsupported == function->count && function->asm_body_count != 0)
         {
-            tier0_count_references(function, references);
+            error = tier0_asm_direct(function, entries, scratch);
         }
-        if (entries->direct != 0)
+        // The memory classes' slots, a function with their values' (whose long double result, if one, leaves st0 from slot 0),
+        // and the vectors'.
+        frame->memory = tier0_memory_function(function);
+        frame->memory_slots = function->x87 || function->int128;
+        frame->vectors = function->vectors && (BUSTER_VECTOR_PATH(vector) ? tier0_vector_slots_vector(function) : tier0_vector_slots(function));
+        frame->x87_result = function->x87 && tier0_x87_returns(function);
+        // The masks' slots: one per depth the mask stack reaches, and at least one per register, which a deep row's
+        // borrowing saves (tier0_emit_operation).
+        frame->masks = function->masks;
+        frame->mask_slots = function->masks ? (entries->mask_top > BUSTER_TIER0_MASK_DEPTHS ? entries->mask_top : BUSTER_TIER0_MASK_DEPTHS) : 0;
+        if (unsupported != function->count)
         {
-            tier0_direct_references(function, entries, references);
+            error = TIER0_ERROR_UNSUPPORTED;
+            code->node = unsupported;
         }
-        frame.object_parameters = tier0_object_parameters(function);
-        tier0_assign_homes(function, &frame, homes, references, order, BUSTER_VECTOR_PATH(vector));
-        error = tier0_layout_frame(function, &frame, homes, references, BUSTER_VECTOR_PATH(vector)) ? TIER0_OK : TIER0_ERROR_UNSUPPORTED;
-        entries->tail_finish = error == TIER0_OK && function->call_tails != 0 ? tier0_count_tail_finish(function, &frame, homes, false) : 0;
-        entries->eh_finish = error == TIER0_OK && function->call_tails != 0 && frame.eh_return ? tier0_count_tail_finish(function, &frame, homes, true) : 0;
-        entries->snapshot_words = error == TIER0_OK && frame.snapshot_depths != 0 ? frame.snapshot_masks / (8 * frame.snapshot_depths) : 0;
-        entries->snapshot_depths = error == TIER0_OK ? frame.snapshot_depths : 0;
-        entries->snapshot = error == TIER0_OK && frame.snapshot_bytes != 0;
+        job->error = error;
     }
-    if (error == TIER0_OK)
+}
+
+// The homes and the frame, after selection: the locals' references counted, each local's home (tier0_assign_homes), the
+// frame's layout (tier0_layout_frame), and what measuring takes of the frame for the tail calls and a setjmp's snapshots.
+static inline __attribute__((always_inline)) void tier0_job_homes(Tier0Job* job, Arena* scratch, bool vector)
+{
+    (void)vector;
+
+    const Tier0Function* function = job->function;
+    Tier0Entries* entries = &job->entries;
+    Tier0Frame* frame = &job->frame;
+    if (job->error == TIER0_OK)
     {
+        const uint32_t locals = function->local_count;
+        // The homes and the references' counts in one push (tier0_column).
+        const uint64_t home_bytes = tier0_column_bytes(((uint64_t)locals + 1) * sizeof(Tier0Home));
+        const uint64_t count_bytes = tier0_column_bytes(((uint64_t)locals + 1) * sizeof(uint32_t));
+        uint8_t* local_columns = arena_push(scratch, home_bytes + count_bytes, 64);
+        uint64_t local_offset = 0;
+        Tier0Home* homes = tier0_column(local_columns, &local_offset, home_bytes);
+        uint32_t* references = tier0_column(local_columns, &local_offset, count_bytes);
+        uint32_t order[2 * BUSTER_TIER0_HOME_CANDIDATES];
+        Tier0Error error = homes == 0 || references == 0 ? TIER0_ERROR_MEMORY : TIER0_OK;
+        if (error == TIER0_OK)
+        {
+            if (BUSTER_VECTOR_PATH(vector))
+            {
+                tier0_count_references_vector(function, references);
+            }
+            else
+            {
+                tier0_count_references(function, references);
+            }
+            if (entries->direct != 0)
+            {
+                tier0_direct_references(function, entries, references);
+            }
+            frame->object_parameters = tier0_object_parameters(function);
+            tier0_assign_homes(function, frame, homes, references, order, BUSTER_VECTOR_PATH(vector));
+            error = tier0_layout_frame(function, frame, homes, references, BUSTER_VECTOR_PATH(vector)) ? TIER0_OK : TIER0_ERROR_UNSUPPORTED;
+            entries->tail_finish = error == TIER0_OK && function->call_tails != 0 ? tier0_count_tail_finish(function, frame, homes, false) : 0;
+            entries->eh_finish = error == TIER0_OK && function->call_tails != 0 && frame->eh_return ? tier0_count_tail_finish(function, frame, homes, true) : 0;
+            entries->snapshot_words = error == TIER0_OK && frame->snapshot_depths != 0 ? frame->snapshot_masks / (8 * frame->snapshot_depths) : 0;
+            entries->snapshot_depths = error == TIER0_OK ? frame->snapshot_depths : 0;
+            entries->snapshot = error == TIER0_OK && frame->snapshot_bytes != 0;
+        }
+        job->homes = homes;
+        job->references = references;
+        job->error = error;
+    }
+}
+
+// Measuring, after the homes: every entry's records counted and placed (tier0_measure_vector, tier0_measure), the
+// prologue's and the epilogue's, then the room for the choice requests (from the scratch arena) and for the code's
+// columns (from `output`).
+static inline __attribute__((always_inline)) void tier0_job_measure(Tier0Job* job, Arena* scratch, Arena* output, bool vector)
+{
+    (void)vector;
+
+    const Tier0Function* function = job->function;
+    Tier0Entries* entries = &job->entries;
+    Tier0Frame* frame = &job->frame;
+    Tier0Code* code = &job->code;
+    Tier0Choices* choices = &job->choices;
+    const Tier0Home* homes = job->homes;
+    const uint32_t* references = job->references;
+    if (job->error == TIER0_OK)
+    {
+        Tier0Error error = TIER0_OK;
         Tier0Counts counts;
         uint32_t epilogue = 0;
         if (BUSTER_VECTOR_PATH(vector))
         {
             // The calls' entries in the thread's table (tier0_call_memo_find), where the function's calls can take it.
-            entries->call_slots = tier0_call_memo_function(function, entries, &frame) ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)function->count + 64) : 0;
-            counts = tier0_measure_vector(function, entries, homes, tier0_count_prologue(function, &frame, homes, references), frame.memory);
-            epilogue = tier0_count_epilogue(function, &frame);
+            entries->call_slots = tier0_call_memo_function(function, entries, frame) ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)function->count + 64) : 0;
+            counts = tier0_measure_vector(function, entries, homes, tier0_count_prologue(function, frame, homes, references), frame->memory);
+            epilogue = tier0_count_epilogue(function, frame);
             // The prologue's branches: a probe's loop's (#177).
-            counts.branches += tier0_prologue_branches(&frame);
+            counts.branches += tier0_prologue_branches(frame);
         }
         else
         {
             Tier0Writer counter = { 0, 0, 0, 0 };
-            tier0_emit_prologue(function, &frame, homes, references, &counter);
+            tier0_emit_prologue(function, frame, homes, references, &counter);
             const uint32_t prologue_branches = counter.branch_count;
-            counts = tier0_measure(function, entries, &frame, homes);
+            counts = tier0_measure(function, entries, frame, homes);
             counts.branches += prologue_branches;
             tier0_positions_scalar(function, entries, counter.count);
             counter.count = 0;
-            tier0_emit_epilogue(function, &frame, &counter);
+            tier0_emit_epilogue(function, frame, &counter);
             epilogue = counter.count;
         }
         // The requests' columns, with room for the vector path's last compressed store of 8, and the vector path's deferred
@@ -12112,11 +12193,11 @@ static Tier0Error tier0_generate(const Tier0Function* function, const uint8_t* s
         const uint64_t side_bytes = BUSTER_VECTOR_PATH(vector) ? tier0_column_bytes(((uint64_t)counts.references + 1) * sizeof(LinkReference)) : 0;
         uint8_t* request_columns = arena_push(scratch, request_dwords + 3 * request_halves + request_qwords + side_bytes, 64);
         uint64_t request_offset = 0;
-        choices.records = tier0_column(request_columns, &request_offset, request_dwords);
-        choices.rows = tier0_column(request_columns, &request_offset, request_halves);
-        choices.values = tier0_column(request_columns, &request_offset, request_qwords);
-        choices.contexts = tier0_column(request_columns, &request_offset, request_halves);
-        choices.forms = tier0_column(request_columns, &request_offset, request_halves);
+        choices->records = tier0_column(request_columns, &request_offset, request_dwords);
+        choices->rows = tier0_column(request_columns, &request_offset, request_halves);
+        choices->values = tier0_column(request_columns, &request_offset, request_qwords);
+        choices->contexts = tier0_column(request_columns, &request_offset, request_halves);
+        choices->forms = tier0_column(request_columns, &request_offset, request_halves);
         entries->deferred_references = BUSTER_VECTOR_PATH(vector) ? tier0_column(request_columns, &request_offset, side_bytes) : 0;
         const bool room = request_columns != 0;
         if (!room || !tier0_push_output(code, output, entries->record_count + epilogue, counts, function->entry_records ? entries->positions : 0,
@@ -12134,46 +12215,72 @@ static Tier0Error tier0_generate(const Tier0Function* function, const uint8_t* s
         {
             error = tier0_push_asm_labels(function, asm_labels, output, code) ? error : TIER0_ERROR_MEMORY;
         }
+        job->error = error;
     }
-    if (error == TIER0_OK)
+}
+
+// Emission, into the room measuring made: the prologue, every entry's records at its place, the epilogue, and the
+// immediates' choice requests (tier0_emit_vector, tier0_emit_body).
+static inline __attribute__((always_inline)) void tier0_job_emit(Tier0Job* job, bool vector)
+{
+    (void)vector;
+
+    if (job->error == TIER0_OK)
     {
         if (BUSTER_VECTOR_PATH(vector))
         {
-            tier0_emit_vector(function, entries, &frame, homes, references, code, &choices);
-            error = function->choice_requests && !tier0_copy_choices(code, output, &choices) ? TIER0_ERROR_MEMORY : error;
-            x86_choose_forms(choices.rows, choices.values, choices.contexts, choices.count, choices.forms);
+            tier0_emit_vector(job->function, &job->entries, &job->frame, job->homes, job->references, &job->code, &job->choices);
         }
         else
         {
-            tier0_emit_body(function, entries, &frame, homes, references, code, &choices);
-            error = function->choice_requests && !tier0_copy_choices(code, output, &choices) ? TIER0_ERROR_MEMORY : error;
-            x86_choose_forms_scalar(choices.rows, choices.values, choices.contexts, choices.count, choices.forms);
+            tier0_emit_body(job->function, &job->entries, &job->frame, job->homes, job->references, &job->code, &job->choices);
         }
+    }
+}
+
+// What ends a function's code, after emission: the immediates' forms chosen and applied (x86_choose_forms), its segment
+// overrides, the x87 transfers, the locals' homes when the producer asks for the entries' records, and the frame the
+// prologue made, for the unwind tables.
+static inline __attribute__((always_inline)) void tier0_job_finish(Tier0Job* job, Arena* scratch, Arena* output, bool vector)
+{
+    (void)vector;
+
+    const Tier0Function* function = job->function;
+    Tier0Entries* entries = &job->entries;
+    const Tier0Frame* frame = &job->frame;
+    Tier0Code* code = &job->code;
+    Tier0Choices* choices = &job->choices;
+    if (job->error == TIER0_OK)
+    {
+        Tier0Error error = function->choice_requests && !tier0_copy_choices(code, output, choices) ? TIER0_ERROR_MEMORY : TIER0_OK;
         if (BUSTER_VECTOR_PATH(vector))
         {
-            tier0_apply_choices_vector(code->records, &choices);
+            x86_choose_forms(choices->rows, choices->values, choices->contexts, choices->count, choices->forms);
+            tier0_apply_choices_vector(code->records, choices);
         }
         else
         {
-            for (uint32_t q = 0; q < choices.count; q += 1)
+            x86_choose_forms_scalar(choices->rows, choices->values, choices->contexts, choices->count, choices->forms);
+            for (uint32_t q = 0; q < choices->count; q += 1)
             {
-                tier0_apply_choice(&code->records[choices.records[q]], choices.forms[q], choices.values[q]);
+                tier0_apply_choice(&code->records[choices->records[q]], choices->forms[q], choices->values[q]);
             }
         }
-        if (__builtin_expect(segments != 0, 0))
+        if (__builtin_expect(job->segments != 0, 0))
         {
-            error = !tier0_apply_segments(code->records, entries->positions, function->count, segments, &frame) && error == TIER0_OK ? TIER0_ERROR_UNSUPPORTED : error;
+            error = !tier0_apply_segments(code->records, entries->positions, function->count, job->segments, frame) && error == TIER0_OK ? TIER0_ERROR_UNSUPPORTED : error;
         }
         if (error == TIER0_OK)
         {
-            tier0_x87_transfers(function, entries, &frame, code, scratch, BUSTER_VECTOR_PATH(vector));
+            tier0_x87_transfers(function, entries, frame, code, scratch, BUSTER_VECTOR_PATH(vector));
         }
         if (function->entry_records)
         {
+            const uint32_t locals = function->local_count;
             Tier0Home* kept = BUSTER_ARENA_PUSH_ARRAY(output, Tier0Home, (uint64_t)locals + 1);
             if (kept != NULL)
             {
-                memcpy(kept, homes, (uint64_t)locals * sizeof(Tier0Home));
+                memcpy(kept, job->homes, (uint64_t)locals * sizeof(Tier0Home));
                 code->local_homes = kept;
                 code->local_count = locals;
             }
@@ -12182,24 +12289,24 @@ static Tier0Error tier0_generate(const Tier0Function* function, const uint8_t* s
                 error = TIER0_ERROR_MEMORY;
             }
         }
-        code->frame_saved = frame.saved;
-        code->frame_size = frame.size;
-        code->frame_pointer = frame.pointer;
-        code->frame_alignment_log2 = frame.alignment_log2;
-        code->frame_base = frame.based;
-        code->frame_probe = frame.probe;
-        code->frame_moves = frame.moves;
-        code->frame_eh_return = frame.eh_return;
-        code->frame_preserved = frame.preserved;
-        code->frame_preserve_vectors = frame.preserve_bytes != 0 ? tier0_preserved_vectors(function) : 0;
-        code->frame_preserve_vector_bytes = frame.preserve_bytes != 0 ? function->preserve_vector_bytes : 0;
-        code->frame_preserve_mask_bytes = frame.preserve_bytes != 0 ? function->preserve_mask_bytes : 0;
-        code->frame_interrupt = frame.interrupt;
+        code->frame_saved = frame->saved;
+        code->frame_size = frame->size;
+        code->frame_pointer = frame->pointer;
+        code->frame_alignment_log2 = frame->alignment_log2;
+        code->frame_base = frame->based;
+        code->frame_probe = frame->probe;
+        code->frame_moves = frame->moves;
+        code->frame_eh_return = frame->eh_return;
+        code->frame_preserved = frame->preserved;
+        code->frame_preserve_vectors = frame->preserve_bytes != 0 ? tier0_preserved_vectors(function) : 0;
+        code->frame_preserve_vector_bytes = frame->preserve_bytes != 0 ? function->preserve_vector_bytes : 0;
+        code->frame_preserve_mask_bytes = frame->preserve_bytes != 0 ? function->preserve_mask_bytes : 0;
+        code->frame_interrupt = frame->interrupt;
+        job->error = error;
     }
-    return error;
 }
 
-// Each label's first record (Tier0Code.label_records), from the positions both paths give, after tier0_generate.
+// Each label's first record (Tier0Code.label_records), from the positions both paths give, after the job's other passes.
 static Tier0Error tier0_label_records(const Tier0Function* function, const Tier0Entries* entries, Arena* output, Tier0Code* code)
 {
     Tier0Error error = TIER0_OK;
@@ -12217,7 +12324,7 @@ static Tier0Error tier0_label_records(const Tier0Function* function, const Tier0
 }
 
 // Each tail call's jump (Tier0Code.tail_records), its entry's last record, from the positions both paths give, after
-// tier0_generate: a pass over the kinds for a function with tail calls alone.
+// the job's other passes: a pass over the kinds for a function with tail calls alone.
 static Tier0Error tier0_tail_records(const Tier0Function* function, const Tier0Entries* entries, Arena* output, Tier0Code* code)
 {
     Tier0Error error = TIER0_OK;
@@ -12258,42 +12365,54 @@ static Tier0Code tier0_conclude(Tier0Code code, Tier0Error error, Arena* output,
     return code;
 }
 
-// tier0_compile_scalar's body, with a function's segment overrides (tier0_apply_segments; 0 without them).
+// The last of a job's passes: the labels' records and the tail calls' (tier0_label_records, tier0_tail_records), from
+// the positions measuring gave.
+static void tier0_job_records(Tier0Job* job, Arena* output)
+{
+    job->error = job->error == TIER0_OK ? tier0_label_records(job->function, &job->entries, output, &job->code) : job->error;
+    job->error = job->error == TIER0_OK ? tier0_tail_records(job->function, &job->entries, output, &job->code) : job->error;
+}
+
+// tier0_compile_scalar's body, with a function's segment overrides (tier0_apply_segments; 0 without them): its job's
+// passes, one after another.
 static Tier0Code tier0_compile_scalar_entries(const Tier0Function* function, const uint8_t* segments, Arena* output)
 {
-    Tier0Code code;
-    memset(&code, 0, sizeof(code));
-    const uint64_t output_length = output->length;
     Scratch scratch = scratch_begin(output);
-    Tier0Entries entries;
+    Tier0Job job;
+    tier0_job_begin(&job, function, segments, output);
+    Tier0Entries* entries = &job.entries;
     const uint32_t count = function->count;
     uint64_t* labels = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, (uint64_t)count / 64 + 2);
-    Tier0Error error = labels != 0 && tier0_push_entries(&entries, scratch.arena, count) ? TIER0_OK : TIER0_ERROR_MEMORY;
+    Tier0Error error = labels != 0 && tier0_push_entries(entries, scratch.arena, count) ? TIER0_OK : TIER0_ERROR_MEMORY;
     if (error == TIER0_OK)
     {
         memset(labels, 0, ((uint64_t)count / 64 + 2) * sizeof(uint64_t));
         tier0_labels(function, labels);
-        entries.labels = labels;
-        tier0_fuse_scalar(function, labels, &entries);
+        entries->labels = labels;
+        tier0_fuse_scalar(function, labels, entries);
         if (function->vectors)
         {
-            tier0_operation_effects(function, &entries);
+            tier0_operation_effects(function, entries);
         }
-        tier0_depths_scalar(function, &entries);
+        tier0_depths_scalar(function, entries);
         if (function->masks)
         {
-            entries.mask_depths = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint8_t, (uint64_t)count + 64);
-            error = entries.mask_depths != 0 ? TIER0_OK : TIER0_ERROR_MEMORY;
+            entries->mask_depths = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint8_t, (uint64_t)count + 64);
+            error = entries->mask_depths != 0 ? TIER0_OK : TIER0_ERROR_MEMORY;
         }
         if (error == TIER0_OK && function->masks)
         {
-            error = tier0_mask_depths_scalar(function, &entries);
+            error = tier0_mask_depths_scalar(function, entries);
         }
-        error = error == TIER0_OK ? tier0_generate(function, segments, &entries, scratch.arena, output, &code, false) : error;
-        error = error == TIER0_OK ? tier0_label_records(function, &entries, output, &code) : error;
-        error = error == TIER0_OK ? tier0_tail_records(function, &entries, output, &code) : error;
     }
-    code = tier0_conclude(code, error, output, output_length);
+    job.error = error;
+    tier0_job_select(&job, scratch.arena, false);
+    tier0_job_homes(&job, scratch.arena, false);
+    tier0_job_measure(&job, scratch.arena, output, false);
+    tier0_job_emit(&job, false);
+    tier0_job_finish(&job, scratch.arena, output, false);
+    tier0_job_records(&job, output);
+    const Tier0Code code = tier0_conclude(job.code, job.error, output, job.output_length);
     scratch_end(scratch);
     return code;
 }
@@ -15428,14 +15547,12 @@ static void tier0_emit_vector(const Tier0Function* function, const Tier0Entries*
     }
 }
 
-// tier0_compile's body, with a function's segment overrides (tier0_apply_segments; 0 without them).
-static Tier0Code tier0_compile_entries(const Tier0Function* function, const uint8_t* segments, Arena* output)
+// The vector path's first pass over a job: its entries' columns and the fusion's bitsets (from the scratch arena), the
+// labels, the values' predicates (P0), the fusions (P1 to P3) and the depths (P4), then selection (tier0_job_select).
+static inline __attribute__((always_inline)) void tier0_job_front(Tier0Job* job, Arena* scratch)
 {
-    Tier0Code code;
-    memset(&code, 0, sizeof(code));
-    const uint64_t output_length = output->length;
-    Scratch scratch = scratch_begin(output);
-    Tier0Entries entries;
+    const Tier0Function* function = job->function;
+    Tier0Entries* entries = &job->entries;
     const uint32_t count = function->count;
     const uint32_t blocks = (count + 63) / 64;
     Tier0Bits bits;
@@ -15443,10 +15560,10 @@ static Tier0Code tier0_compile_entries(const Tier0Function* function, const uint
     bits.blocks = blocks;
     uint64_t** columns[] = { &bits.fits, &bits.count, &bits.zero, &bits.size, &bits.product, &bits.same, &bits.sib, &bits.sequential, &bits.labels, &bits.leaf,
                              &bits.home_const, &bits.one, &bits.two, &bits.rmw };
-    bool pushed = tier0_push_entries(&entries, scratch.arena, count);
+    bool pushed = tier0_push_entries(entries, scratch, count);
     // A word past the blocks for the labels' target past the last entry (the function's end).
     const uint64_t words = (uint64_t)blocks + 2;
-    uint64_t* column_words = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, words * BUSTER_ARRAY_LENGTH(columns));
+    uint64_t* column_words = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, words * BUSTER_ARRAY_LENGTH(columns));
     pushed = pushed && column_words != 0;
     if (column_words != 0)
     {
@@ -15456,33 +15573,95 @@ static Tier0Code tier0_compile_entries(const Tier0Function* function, const uint
             *columns[c] = column_words + words * c;
         }
     }
-    bits.sib_log2 = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint8_t, (uint64_t)blocks * 64 + 64);
+    bits.sib_log2 = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)blocks * 64 + 64);
     Tier0Error error = pushed && bits.sib_log2 != 0 ? TIER0_OK : TIER0_ERROR_MEMORY;
     if (error == TIER0_OK)
     {
-        tier0_vector_labels(function, entries.deferred_entries, bits.labels);
-        entries.labels = bits.labels;
+        tier0_vector_labels(function, entries->deferred_entries, bits.labels);
+        entries->labels = bits.labels;
         tier0_vector_values(function, &bits);
-        tier0_vector_fuse(function, &bits, &entries);
+        tier0_vector_fuse(function, &bits, entries);
         if (function->vectors)
         {
-            tier0_operation_effects(function, &entries);
+            tier0_operation_effects(function, entries);
         }
-        tier0_vector_depths(function, &bits, &entries);
+        tier0_vector_depths(function, &bits, entries);
         if (function->masks)
         {
-            entries.mask_depths = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint8_t, (uint64_t)count + 64);
-            error = entries.mask_depths != 0 ? TIER0_OK : TIER0_ERROR_MEMORY;
+            entries->mask_depths = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 64);
+            error = entries->mask_depths != 0 ? TIER0_OK : TIER0_ERROR_MEMORY;
         }
         if (error == TIER0_OK && function->masks)
         {
-            error = tier0_vector_mask_depths(function, &entries);
+            error = tier0_vector_mask_depths(function, entries);
         }
-        error = error == TIER0_OK ? tier0_generate(function, segments, &entries, scratch.arena, output, &code, true) : error;
-        error = error == TIER0_OK ? tier0_label_records(function, &entries, output, &code) : error;
-        error = error == TIER0_OK ? tier0_tail_records(function, &entries, output, &code) : error;
     }
-    code = tier0_conclude(code, error, output, output_length);
+    job->error = error;
+    tier0_job_select(job, scratch, true);
+}
+
+// The vector path's passes, each over every job of `jobs` before the next (#2874): a function's compile is a dozen
+// passes of several kilobytes of code each, more together than the first-level instruction cache holds, so that a
+// function at a time, each pass's code was fetched and decoded again for every function (on the 9700X a third of Tier
+// 0's cycles on `sqlite3.c` had no instruction to run). Out of line each, so that a pass's code is one stretch.
+static __attribute__((noinline)) void tier0_jobs_front(Tier0Job* jobs, uint32_t count, Arena* scratch)
+{
+    for (uint32_t j = 0; j < count; j += 1)
+    {
+        tier0_job_front(&jobs[j], scratch);
+    }
+}
+
+static __attribute__((noinline)) void tier0_jobs_homes(Tier0Job* jobs, uint32_t count, Arena* scratch)
+{
+    for (uint32_t j = 0; j < count; j += 1)
+    {
+        tier0_job_homes(&jobs[j], scratch, true);
+    }
+}
+
+static __attribute__((noinline)) void tier0_jobs_measure(Tier0Job* jobs, uint32_t count, Arena* scratch, Arena* output)
+{
+    for (uint32_t j = 0; j < count; j += 1)
+    {
+        tier0_job_measure(&jobs[j], scratch, output, true);
+    }
+}
+
+static __attribute__((noinline)) void tier0_jobs_emit(Tier0Job* jobs, uint32_t count)
+{
+    for (uint32_t j = 0; j < count; j += 1)
+    {
+        tier0_job_emit(&jobs[j], true);
+    }
+}
+
+static __attribute__((noinline)) void tier0_jobs_finish(Tier0Job* jobs, uint32_t count, Arena* scratch, Arena* output)
+{
+    for (uint32_t j = 0; j < count; j += 1)
+    {
+        tier0_job_finish(&jobs[j], scratch, output, true);
+        tier0_job_records(&jobs[j], output);
+    }
+}
+
+static void tier0_run_jobs(Tier0Job* jobs, uint32_t count, Arena* scratch, Arena* output)
+{
+    tier0_jobs_front(jobs, count, scratch);
+    tier0_jobs_homes(jobs, count, scratch);
+    tier0_jobs_measure(jobs, count, scratch, output);
+    tier0_jobs_emit(jobs, count);
+    tier0_jobs_finish(jobs, count, scratch, output);
+}
+
+// tier0_compile's body, with a function's segment overrides (tier0_apply_segments; 0 without them): a batch of one job.
+static Tier0Code tier0_compile_entries(const Tier0Function* function, const uint8_t* segments, Arena* output)
+{
+    Scratch scratch = scratch_begin(output);
+    Tier0Job job;
+    tier0_job_begin(&job, function, segments, output);
+    tier0_run_jobs(&job, 1, scratch.arena, output);
+    const Tier0Code code = tier0_conclude(job.code, job.error, output, job.output_length);
     scratch_end(scratch);
     return code;
 }
@@ -15637,6 +15816,80 @@ static Tier0Code tier0_compile_scalar(const Tier0Function* function, Arena* outp
 static Tier0Code tier0_compile(const Tier0Function* function, Arena* output)
 {
     return tier0_compile_upper(function, output, true);
+}
+
+// The functions the passes of a batch run over together (tier0_compile_batch): at most BUSTER_TIER0_BATCH_JOBS, and no
+// more once they hold BUSTER_TIER0_BATCH_ENTRIES typed entries, so that a batch's columns stay in the first cache levels
+// from one pass to the next.
+#define BUSTER_TIER0_BATCH_JOBS 32
+#define BUSTER_TIER0_BATCH_ENTRIES 2048
+
+// A job's code as its passes left it: on an error, only the error and its entry.
+static Tier0Code tier0_job_code(const Tier0Job* job)
+{
+    Tier0Code code = job->code;
+    if (job->error != TIER0_OK)
+    {
+        const uint32_t node = code.node;
+        memset(&code, 0, sizeof(code));
+        code.node = node;
+    }
+    code.error = job->error;
+    return code;
+}
+
+// Compiles `count` functions: codes[i] is functions[i]'s code, as tier0_compile makes it. The functions go a batch at a
+// time, each pass over every function of the batch before the next pass (tier0_run_jobs, #2874), but one compiled twice
+// over (tier0_compile_upper) or from a stripped copy (tier0_compile_segments), which takes tier0_compile's path alone:
+// they are rare. A function that fails in a batch leaves what it pushed to `output` there, since the others' columns
+// come after its own, where tier0_compile pops it.
+static void tier0_compile_batch(const Tier0Function* const* functions, uint32_t count, Arena* output, Tier0Code* codes)
+{
+    uint32_t first = 0;
+    while (first < count)
+    {
+        Scratch scratch = scratch_begin(output);
+        const uint32_t room = count - first < BUSTER_TIER0_BATCH_JOBS ? count - first : BUSTER_TIER0_BATCH_JOBS;
+        Tier0Job* jobs = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, Tier0Job, room);
+        uint32_t taken = 0;
+        uint32_t job_count = 0;
+        uint64_t entries = 0;
+        while (taken < room && (taken == 0 || entries < BUSTER_TIER0_BATCH_ENTRIES))
+        {
+            const Tier0Function* function = functions[first + taken];
+            const bool alone = tier0_upper_possible(function) || function->segments || function->volatiles;
+            if (jobs == 0)
+            {
+                memset(&codes[first + taken], 0, sizeof(Tier0Code));
+                codes[first + taken].error = TIER0_ERROR_MEMORY;
+            }
+            else if (__builtin_expect(alone, 0))
+            {
+                codes[first + taken] = tier0_compile(function, output);
+            }
+            else
+            {
+                tier0_job_begin(&jobs[job_count], function, 0, output);
+                jobs[job_count].index = first + taken;
+                job_count += 1;
+                entries += function->count;
+            }
+            taken += 1;
+        }
+        tier0_run_jobs(jobs, job_count, scratch.arena, output);
+        for (uint32_t j = 0; j < job_count; j += 1)
+        {
+            const Tier0Job* job = &jobs[j];
+            Tier0Code code = tier0_job_code(job);
+            if (code.error == TIER0_OK && job->function->avx)
+            {
+                tier0_vex(job->function, &code);
+            }
+            codes[job->index] = code;
+        }
+        scratch_end(scratch);
+        first += taken;
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

@@ -762,8 +762,7 @@ jobs:
             if [ "$sample" != 1 ]; then
               taskset -c "$cpu" ./build/compiler benchmark-x86-zen5
             fi
-            taskset -c "$cpu" ./build/compiler benchmark-x86-zen5 --only vector
-            taskset -c "$cpu" ./build/compiler benchmark-x86-zen5 --only vector --after-scalar 200
+            taskset -c "$cpu" ./build/compiler benchmark-x86-zen5 --after-scalar 200
           done
 
       - name: Benchmark x86-64 disassembly

@@ -1,0 +1,1 @@
+int f(x,y)union U{struct S{int a;}s;long b;}x;struct S*y;{return x.s.a+y->a;}

@@ -493,7 +493,7 @@ static void tier1_narrow_compile(Tier1EmitTest* test, Tier1NarrowFixture* fixtur
     tier1_emit_test_expect(test, ready, "original narrow fixture verifies as semantic IR");
     ready = ready && tier1_narrow_expected(fixture, &expected);
     tier1_emit_test_expect(test, ready, "freeze independent input, per-node, memory and result oracles before selection");
-    for (uint32_t vector = 0; ready && vector < 2; vector += 1)
+    if (ready)
     {
         uint32_t ordinary_spills = 0;
         for (uint32_t remat = 0; remat < 2; remat += 1)
@@ -508,7 +508,6 @@ static void tier1_narrow_compile(Tier1EmitTest* test, Tier1NarrowFixture* fixtur
                     .certify = true,
                     .register_mask = (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RCX) | (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI),
                     .frame_flags = remat ? BUSTER_TIER1_FRAME_KEEP_POINTER : 0,
-                    .vector = vector != 0,
                     .rematerialize = remat != 0,
                 };
                 Tier1EmitResult emitted;
@@ -518,7 +517,7 @@ static void tier1_narrow_compile(Tier1EmitTest* test, Tier1NarrowFixture* fixtur
                 tier1_emit_test_expect(test, test->scratch.length == scratch_mark, "narrow emission restores scratch");
                 if (error != TIER1_EMIT_OK && test->failures < 20)
                 {
-                    fprintf(stderr, "  narrow error=%u node=%u kind=%u source=%u result=%u vector=%u remat=%u\n", error, node, fixture->kind, fixture->input_type, fixture->result_type, vector, remat);
+                    fprintf(stderr, "  narrow error=%u node=%u kind=%u source=%u result=%u remat=%u\n", error, node, fixture->kind, fixture->input_type, fixture->result_type, remat);
                 }
                 if (error == TIER1_EMIT_OK)
                 {
@@ -591,7 +590,6 @@ static void tier1_narrow_failures(Tier1EmitTest* test)
             const Tier1EmitOptions options = {
                 .certify = true,
                 .register_mask = tier1_liveness_register_mask(),
-                .vector = true,
             };
             Tier1EmitResult emitted;
             ready = tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node) == TIER1_EMIT_OK;
@@ -713,7 +711,7 @@ static void tier1_narrow_failures(Tier1EmitTest* test)
             ready = count <= sizes.instruction_count && ir_verify(&function, &test->scratch, 0).error == IR_OK;
             tier1_emit_test_expect(test, ready, "unsupported narrow ABI/arithmetic/conversion fixture is valid IR");
         }
-        for (uint32_t vector = 0; ready && vector < 2; vector += 1)
+        if (ready)
         {
             Tier1SelectPlan result;
             Tier1SelectPlan before;

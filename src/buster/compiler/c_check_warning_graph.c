@@ -1042,6 +1042,179 @@ static void check_warning_graph_void_dereferences(CheckInputReader* reader, cons
     }
 }
 
+// An absolute value function's kind of value for `type` (clang's getAbsoluteValueKind): 0 an integer's (an enumeration's
+// and a _BitInt's too), 1 a real floating type's, 2 a complex type's, 3 any other type's.
+static uint32_t check_warning_absolute_kind(const TypeTable* types, TypeId type)
+{
+    const uint8_t kind = type != 0 ? type_kind(types, type_unqualified(type_strip_aligned(types, type))) : BUSTER_TYPE_KIND_NONE;
+    return kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_ENUM || kind == BUSTER_TYPE_KIND_BIT_INT ? 0u :
+           kind == BUSTER_TYPE_KIND_FLOATING ? 1u : kind == BUSTER_TYPE_KIND_COMPLEX ? 2u : 3u;
+}
+
+// The absolute value function of `family` (0 integer, 1 floating, 2 complex) best for an argument of `type`, from rank
+// `first` up (clang's getBestAbsFunction): the first whose parameter is at least as large, or a larger one whose parameter
+// is the argument's own type; BUSTER_ARRAY_LENGTH(check_absolute_functions) for none.
+static uint32_t check_warning_absolute_best(const TypeTable* types, TypeId type, uint32_t family, uint32_t first)
+{
+    const uint64_t size = type_size(types, type);
+    const TypeId plain = type_strip_aligned(types, type);
+    uint32_t best = BUSTER_ARRAY_LENGTH(check_absolute_functions);
+    bool same = false;
+    for (uint32_t rank = first; !same && rank < 3; rank += 1)
+    {
+        const uint32_t index = family * 3 + rank;
+        const TypeId parameter = check_absolute_functions[index].parameter;
+        const bool fits = type_size(types, parameter) >= size;
+        same = fits && best != BUSTER_ARRAY_LENGTH(check_absolute_functions) && plain == parameter;
+        best = fits && (best == BUSTER_ARRAY_LENGTH(check_absolute_functions) || same) ? index : best;
+    }
+    return best;
+}
+
+// The absolute value function a call `node` makes, as check_absolute_functions numbers it with BUSTER_CHECK_ABSOLUTE_BUILTIN
+// for its __builtin_ spelling (#2914, clang's getAbsoluteValueFunctionKind): a library builtin's node (CHECK_OP_BUILTIN_X86,
+// by its name), a floating builtin's (CHECK_OP_BUILTIN_FLOAT, fabsf to fabsl), or a call of a function's own name whose
+// declaration is the library's function (CheckInput.absolute_names, external linkage, its prototype). UINT32_MAX for any
+// other call.
+static uint32_t check_warning_absolute_function(const CheckInput* input, const Parser* parser, const TypeTable* types, const CheckStream* stream, uint32_t node)
+{
+    const CheckGraph* graph = &input->graph;
+    const CheckOp op = graph->ops[node];
+    uint32_t result = UINT32_MAX;
+    if (op == CHECK_OP_BUILTIN_FLOAT)
+    {
+        const uint32_t member = graph->members != NULL ? graph->members[node] : 0;
+        result = member == CBUILTIN_FABSF ? 3u | BUSTER_CHECK_ABSOLUTE_BUILTIN : member == CBUILTIN_FABS ? 4u | BUSTER_CHECK_ABSOLUTE_BUILTIN :
+                 member == CBUILTIN_FABSL ? 5u | BUSTER_CHECK_ABSOLUTE_BUILTIN : UINT32_MAX;
+    }
+    for (uint32_t i = 0; op == CHECK_OP_BUILTIN_X86 && i < graph->x86_count; i += 1)
+    {
+        const CheckX86Call* call = graph->x86_calls + i;
+        for (uint32_t f = 0; call->node == node && call->info != NULL && f < BUSTER_ARRAY_LENGTH(check_absolute_functions); f += 1)
+        {
+            const char* name = check_absolute_functions[f].builtin;
+            result = call->info->name_length == strlen(name) && memcmp(call->info->name, name, call->info->name_length) == 0 ? f | BUSTER_CHECK_ABSOLUTE_BUILTIN : result;
+        }
+    }
+    const uint32_t callee = op == CHECK_OP_CALL ? graph->operand0[node] : BUSTER_CHECK_NONE;
+    const uint32_t token = callee < graph->count && graph->ops[callee] == CHECK_OP_VALUE ? graph->tokens[callee] : BUSTER_CHECK_NONE;
+    const uint32_t declaration = token < input->token_count && input->declarations != NULL ? input->declarations[token] : BUSTER_CHECK_NONE;
+    const IdentId name = declaration < input->token_count ? parser->tokens.names[declaration] : 0;
+    for (uint32_t f = 0; name != 0 && f < BUSTER_ARRAY_LENGTH(check_absolute_functions); f += 1)
+    {
+        const bool library = input->absolute_names[f] == name && input->declaration_kinds[declaration] == C_BINDING_FUNCTION &&
+                             check_input_linkage(input->declaration_bits, declaration) == 2 &&
+                             check_absolute_prototype(types, check_stream_type(stream, callee), f);
+        result = library ? f : result;
+    }
+    return result;
+}
+
+// -Wabsolute-value (#2914, clang's CheckAbsoluteValueFunction) of call `node` of an absolute value function
+// (check_warning_absolute_function) with one argument, at the call's first token, as clang checks it once the call is made
+// (a default error's argument too: `abs(p)`'s -Wint-conversion): an unsigned argument's ("remove the call"); a pointer's,
+// a function's or an array's; an argument of the parameter's kind larger than it, with the best larger function to use
+// (check_warning_absolute_best); or one of another kind, with that kind's best function, where there is one. The argument's
+// type is its expression's, before its conversion (IgnoreParenImpCasts), its typedef's spelling kept.
+static void check_warning_graph_absolute(CheckInputReader* reader, const CheckStream* stream, uint32_t node)
+{
+    const CheckGraph* graph = &reader->output->graph;
+    const Parser* parser = reader->parser;
+    const TypeTable* types = reader->types;
+    const uint32_t function = graph->argument_counts != NULL && graph->argument_counts[node] == 1 ? check_warning_absolute_function(reader->output, parser, types, stream, node) : UINT32_MAX;
+    const uint32_t index = function & BUSTER_CHECK_ABSOLUTE_FUNCTION;
+    const bool builtin = (function & BUSTER_CHECK_ABSOLUTE_BUILTIN) != 0;
+    const uint32_t argument = function != UINT32_MAX ? graph->argument_nodes[graph->argument_offsets[node]] : BUSTER_CHECK_NONE;
+    const TypeId written = argument < graph->count && stream->diagnostics[argument] == CHECK_DIAG_NONE ? check_stream_type(stream, argument) : 0;
+    const TypeId plain = written != 0 ? type_unqualified(type_strip_aligned(types, written)) : 0;
+    const uint8_t kind = plain != 0 ? type_kind(types, plain) : BUSTER_TYPE_KIND_NONE;
+    const uint32_t parameter_kind = index < BUSTER_ARRAY_LENGTH(check_absolute_functions) ? index / 3 : 3;
+    // (A pointer's, a function's or an array's argument is a default error's, -Wint-conversion's, whose warning the driver
+    // gives after it, check_driver_absolute_pointer: the graph's pass reads calls without a diagnostic.)
+    // (A rejected unit's view casts a default error's source, `(long)(p)`, whose tokens all take that source's place
+    // (check_driver_rejected_view): no argument clang reads, whose error's warning the driver gives,
+    // check_driver_absolute_pointer.)
+    const uint32_t cast_close = written != 0 && graph->ops[argument] == CHECK_OP_CAST ? graph->tokens[argument] : BUSTER_CHECK_NONE;
+    const uint32_t cast_open = cast_close < parser->tokens.count ? check_warning_graph_void_opener(parser, cast_close) : BUSTER_CHECK_NONE;
+    const bool synthetic = cast_open < parser->tokens.count && parse_source_index(&parser->tokens, cast_open) == parse_source_index(&parser->tokens, cast_close);
+    const bool made = written != 0 && stream->diagnostics[node] == CHECK_DIAG_NONE && !synthetic;
+    const bool pointer = kind == BUSTER_TYPE_KIND_POINTER || kind == BUSTER_TYPE_KIND_FUNCTION || type_kind_is_array(kind);
+    uint32_t width = 0;
+    bool is_signed = true;
+    const bool unsigned_argument = made && check_action_integer_type(types, plain, &width, &is_signed) && !is_signed;
+    const uint32_t argument_kind = made ? check_warning_absolute_kind(types, written) : 3;
+    uint32_t form = UINT32_MAX;
+    uint32_t replacement = BUSTER_ARRAY_LENGTH(check_absolute_functions);
+    if (unsigned_argument)
+    {
+        form = BUSTER_CHECK_ABSOLUTE_UNSIGNED;
+    }
+    else if (made && pointer)
+    {
+        form = kind == BUSTER_TYPE_KIND_FUNCTION ? BUSTER_CHECK_ABSOLUTE_FUNCTION_TYPE : type_kind_is_array(kind) ? BUSTER_CHECK_ABSOLUTE_ARRAY : BUSTER_CHECK_ABSOLUTE_POINTER;
+    }
+    else if (made && argument_kind < 3 && argument_kind == parameter_kind)
+    {
+        const bool larger = type_size(types, written) > type_size(types, check_absolute_functions[index].parameter);
+        form = larger ? BUSTER_CHECK_ABSOLUTE_TOO_SMALL : UINT32_MAX;
+        replacement = larger ? check_warning_absolute_best(types, written, parameter_kind, index % 3) : replacement;
+    }
+    else if (made && argument_kind < 3)
+    {
+        // (No function of the argument's kind is large enough: clang gives nothing.)
+        replacement = check_warning_absolute_best(types, written, argument_kind, 0);
+        form = replacement < BUSTER_ARRAY_LENGTH(check_absolute_functions) ? BUSTER_CHECK_ABSOLUTE_WRONG_KIND : UINT32_MAX;
+    }
+    if (form != UINT32_MAX)
+    {
+        // (A builtin's node is at its `)`: the call begins at its name, before the `(` it closes.)
+        const uint32_t close = graph->tokens[node];
+        uint32_t open = close;
+        while (graph->ops[node] != CHECK_OP_CALL && open != 0 && !(parser->tokens.kinds[open] == PARSE_KIND_L_PAREN && parser->tree.parents[open] == close))
+        {
+            open -= 1;
+        }
+        const uint32_t first = graph->ops[node] == CHECK_OP_CALL ? check_warning_graph_first(graph, parser, node) : open != 0 ? open - 1 : close;
+        const uint32_t completion = graph->source_positions[node];
+        const uint32_t spelled = builtin ? BUSTER_CHECK_ABSOLUTE_BUILTIN : 0;
+        const CheckWarningEvent event =
+        {
+            .id = CHECK_WARNING_ID_ABSOLUTE_VALUE,
+            .kind = CHECK_WARNING_EVENT_ABSOLUTE_VALUE,
+            .token = first,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+            .completion = completion > first ? completion : graph->tokens[node] + 1,
+            .payload = { .first_type = written, .second_type = check_absolute_functions[index].parameter, .token = BUSTER_CHECK_WARNING_NO_SOURCE,
+                         .name = check_input_operand_spelling(reader, argument),
+                         .data = index | spelled | form << BUSTER_CHECK_ABSOLUTE_FORM_SHIFT | parameter_kind << BUSTER_CHECK_ABSOLUTE_PARAMETER_SHIFT |
+                                 argument_kind << BUSTER_CHECK_ABSOLUTE_ARGUMENT_SHIFT },
+        };
+        const bool replaced = replacement < BUSTER_ARRAY_LENGTH(check_absolute_functions);
+        const CheckWarningNote notes[2] =
+        {
+            {
+                .kind = form == BUSTER_CHECK_ABSOLUTE_UNSIGNED ? CHECK_WARNING_NOTE_ABSOLUTE_REMOVE : CHECK_WARNING_NOTE_ABSOLUTE_REPLACE,
+                .token = first,
+                .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE, .data = (form == BUSTER_CHECK_ABSOLUTE_UNSIGNED ? index : replacement) | spelled },
+            },
+            {
+                .kind = CHECK_WARNING_NOTE_ABSOLUTE_HEADER,
+                .token = first,
+                .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE, .data = replacement },
+            },
+        };
+        const uint32_t note_count = form == BUSTER_CHECK_ABSOLUTE_UNSIGNED ? 1u : !replaced ? 0u : builtin ? 1u : 2u;
+        const uint64_t key = (uint64_t)event.kind << 32 | ((uint64_t)first + 1);
+        if (!check_warning_set_contains(&reader->source_warning_keys, key) && check_warning_set_add(&reader->source_warning_keys, key))
+        {
+            check_input_warning_event(reader, &event, notes, note_count);
+        }
+    }
+}
+
 // A C-style cast from a pointer (an array or a function decayed to one too) to an integer type narrower than it, not
 // _Bool (#1943, clang's CheckCStyleCast: C 6.3.2.3p6 makes the result undefined where it can't be represented): at the
 // cast's `(` as soon as it is read, in an unevaluated operand too: -Wpointer-to-int-cast, or -Wpointer-to-enum-cast to an
@@ -1089,6 +1262,51 @@ static void check_warning_graph_pointer_cast(CheckInputReader* reader, const Che
             .payload = { .first_type = source, .second_type = target, .token = BUSTER_CHECK_WARNING_NO_SOURCE,
                          .name = source == written ? check_input_operand_spelling(reader, operand) : 0,
                          .data = check_input_operand_spelling(reader, node) },
+        };
+        check_input_warning_once(reader, &event);
+    }
+}
+
+// A C-style cast to a pointer (an _Atomic one's value type too) from an integer type narrower than it, no bool's or
+// enumeration's, whose operand is no integer constant expression (#2914, clang's checkIntToPointerCast): at the cast's
+// `(` as soon as it is read, in an unevaluated operand too: -Wint-to-pointer-cast, or -Wint-to-void-pointer-cast to a
+// pointer to void. The target prints without its own qualifiers, as CheckCStyleCast's type has none; the operand after its
+// lvalue conversion, a typedef's sugar kept.
+static void check_warning_graph_int_pointer_cast(CheckInputReader* reader, const CheckStream* stream, uint32_t node)
+{
+    const CheckGraph* graph = &reader->output->graph;
+    const Parser* parser = reader->parser;
+    const TypeTable* types = reader->types;
+    const uint32_t operand = graph->operand0[node];
+    const uint32_t close = graph->tokens[node];
+    const TypeId written = operand < graph->count ? type_unqualified(check_stream_type(stream, operand)) : 0;
+    const TypeId integer = written != 0 ? type_unqualified(type_strip_aligned(types, written)) : 0;
+    const uint8_t kind = integer != 0 ? type_kind(types, integer) : BUSTER_TYPE_KIND_NONE;
+    const bool narrow = (kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_BIT_INT) && integer != BUSTER_TYPE_BOOL && type_size(types, integer) < 8;
+    const bool ice = narrow && check_stream_constant_kind(stream, operand) == CHECK_CONSTANT_INTEGER && (check_stream_flags(stream, operand) & BUSTER_CHECK_ICE) != 0;
+    const TypeId target = check_stream_type(stream, node);
+    const TypeId stripped = target != 0 ? type_unqualified(type_strip_aligned(types, target)) : 0;
+    const bool atomic = stripped != 0 && type_kind(types, stripped) == BUSTER_TYPE_KIND_ATOMIC;
+    const TypeId pointer = atomic ? type_unqualified(type_conversion_operand(types, stripped)) : stripped;
+    const bool to_pointer = pointer != 0 && type_kind(types, type_strip_aligned(types, pointer)) == BUSTER_TYPE_KIND_POINTER;
+    const uint32_t open = narrow && !ice && to_pointer && close < parser->tokens.count && parser->tree.roles[close] == PARSE_ROLE_CLOSE_CAST ?
+                          check_warning_graph_void_opener(parser, close) : BUSTER_CHECK_NONE;
+    if (open < parser->tokens.count)
+    {
+        const TypeId pointee = type_unqualified(type_strip_aligned(types, type_element(types, type_strip_aligned(types, pointer))));
+        const bool to_void = type_kind(types, pointee) == BUSTER_TYPE_KIND_VOID;
+        const uint32_t completion = graph->source_positions[node];
+        const CheckWarningEvent event =
+        {
+            .id = to_void ? CHECK_WARNING_ID_INT_TO_VOID_POINTER_CAST : CHECK_WARNING_ID_INT_TO_POINTER_CAST,
+            .kind = CHECK_WARNING_EVENT_INT_TO_POINTER_CAST,
+            .token = open,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+            .completion = completion > open ? completion : close + 1,
+            .payload = { .first_type = written, .second_type = pointer, .token = BUSTER_CHECK_WARNING_NO_SOURCE,
+                         .name = check_input_operand_spelling(reader, operand),
+                         .data = atomic ? 0 : check_input_operand_spelling(reader, node) },
         };
         check_input_warning_once(reader, &event);
     }
@@ -1547,7 +1765,9 @@ static bool check_input_warning_graph(CheckInput* input, const Parser* parser, T
                     _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_ALIGNOF)) |
                     _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_LOGICAL_AND)) |
                     _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_LOGICAL_OR)) |
-                    _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_CAST));
+                    _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_CAST)) |
+                    _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_BUILTIN_X86)) |
+                    _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_BUILTIN_FLOAT));
         for (; valid && selected != 0; selected &= selected - 1)
         {
             const uint32_t node = first + (uint32_t)__builtin_ctz(selected);
@@ -1657,11 +1877,17 @@ static bool check_input_warning_graph(CheckInput* input, const Parser* parser, T
                 else if (op == CHECK_OP_CAST)
                 {
                     check_warning_graph_pointer_cast(&reader, stream, node);
+                    check_warning_graph_int_pointer_cast(&reader, stream, node);
                     check_warning_graph_union_cast(&reader, stream, node);
                     check_warning_graph_nonscalar_cast(&reader, stream, node);
                 }
+                else if (op == CHECK_OP_BUILTIN_X86 || op == CHECK_OP_BUILTIN_FLOAT)
+                {
+                    check_warning_graph_absolute(&reader, stream, node);
+                }
                 else if (op == CHECK_OP_CALL)
                 {
+                    check_warning_graph_absolute(&reader, stream, node);
                     // diagnose_if's and enable_if's conditions at the call (#1447, c_check_condition_graph.c).
                     if (input->condition_declaration_count != 0)
                     {

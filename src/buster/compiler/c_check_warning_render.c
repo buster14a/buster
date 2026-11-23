@@ -2396,6 +2396,43 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
                      "function with attribute 'no_caller_saved_registers' should only call a function with attribute 'no_caller_saved_registers' or be compiled with "
                      "'-mgeneral-regs-only'";
             break;
+        case CHECK_WARNING_EVENT_ABSOLUTE_VALUE:
+        {
+            // -Wabsolute-value's four messages (#2914, clang's CheckAbsoluteValueFunction, check_warning_graph_absolute).
+            static const char* const kinds[] = { "integer", "floating point", "complex", "" };
+            static const char* const pointers[] = { "pointer", "function", "array" };
+            const uint32_t data = payload->data;
+            const uint32_t index = data & BUSTER_CHECK_ABSOLUTE_FUNCTION;
+            const uint32_t form = (data >> BUSTER_CHECK_ABSOLUTE_FORM_SHIFT) & 0xfu;
+            const char* function = index >= BUSTER_ARRAY_LENGTH(check_absolute_functions) ? NULL :
+                                   (data & BUSTER_CHECK_ABSOLUTE_BUILTIN) != 0 ? check_absolute_functions[index].builtin : check_absolute_functions[index].name;
+            const String8 argument = check_driver_warning_type(parser, pp, input, types, spell, scratch, payload->first_type, payload->name);
+            const String8 parameter = form == BUSTER_CHECK_ABSOLUTE_TOO_SMALL ? check_driver_warning_type(parser, pp, input, types, spell, scratch, payload->second_type, 0) :
+                                      (String8){ "", 0 };
+            const bool spelled = function != NULL && argument.length != 0 && (form != BUSTER_CHECK_ABSOLUTE_TOO_SMALL || parameter.length != 0);
+            result = !spelled ? NULL :
+                     form == BUSTER_CHECK_ABSOLUTE_UNSIGNED ?
+                     check_warning_text(scratch, "taking the absolute value of unsigned type %.*s has no effect", (int)argument.length, argument.pointer) :
+                     form >= BUSTER_CHECK_ABSOLUTE_POINTER && form <= BUSTER_CHECK_ABSOLUTE_ARRAY ?
+                     check_warning_text(scratch, "taking the absolute value of %s type %.*s is suspicious", pointers[form - BUSTER_CHECK_ABSOLUTE_POINTER],
+                                        (int)argument.length, argument.pointer) :
+                     form == BUSTER_CHECK_ABSOLUTE_TOO_SMALL ?
+                     check_warning_text(scratch, "absolute value function '%s' given an argument of type %.*s but has parameter of type %.*s which may cause truncation of value",
+                                        function, (int)argument.length, argument.pointer, (int)parameter.length, parameter.pointer) :
+                     form == BUSTER_CHECK_ABSOLUTE_WRONG_KIND ?
+                     check_warning_text(scratch, "using %s absolute value function '%s' when argument is of %s type", kinds[(data >> BUSTER_CHECK_ABSOLUTE_PARAMETER_SHIFT) & 3u],
+                                        function, kinds[(data >> BUSTER_CHECK_ABSOLUTE_ARGUMENT_SHIFT) & 3u]) : NULL;
+            break;
+        }
+        case CHECK_WARNING_EVENT_INT_TO_POINTER_CAST:
+        {
+            const String8 target = check_driver_warning_type(parser, pp, input, types, spell, scratch, payload->second_type, payload->data);
+            const String8 source = check_driver_warning_type(parser, pp, input, types, spell, scratch, payload->first_type, payload->name);
+            result = target.length != 0 && source.length != 0 ?
+                     check_warning_text(scratch, "cast to %.*s from smaller integer type %.*s", (int)target.length, target.pointer, (int)source.length, source.pointer) :
+                     NULL;
+            break;
+        }
         case CHECK_WARNING_EVENT_POINTER_TO_INT_CAST:
         {
             const String8 target = check_driver_warning_type(parser, pp, input, types, spell, scratch, payload->second_type, payload->data);
@@ -2857,6 +2894,27 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
     return result;
 }
 
+// Whether absolute value function `index`'s library name (check_absolute_functions) is declared before `before`, as clang's
+// emitReplacement looks it up (#2914): 0 not at all; 1 its latest declaration there is the library's function (a library
+// builtin of the unit, with external linkage and its prototype); 2 another declaration. In C a block's function declaration
+// is the unit's and so counts too.
+static uint32_t check_driver_absolute_declared(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types, uint32_t index,
+                                               uint32_t before)
+{
+    const uint8_t* name = (const uint8_t*)check_absolute_functions[index].name;
+    const uint32_t length = (uint32_t)strlen(check_absolute_functions[index].name);
+    const IdentId identifier = intern_find_hashed(pp->table, name, length, intern_hash_bytes(name, length));
+    uint32_t latest = BUSTER_CHECK_NONE;
+    for (uint32_t token = 0; identifier != 0 && input->declarations != NULL && token < before && token < input->token_count; token += 1)
+    {
+        latest = parser->tokens.names[token] == identifier && input->declarations[token] == token ? token : latest;
+    }
+    const bool library = latest < input->token_count && input->declaration_kinds[latest] == C_BINDING_FUNCTION &&
+                         check_input_linkage(input->declaration_bits, latest) == 2 && pp_library_builtin(&pp->options, name, length) &&
+                         check_absolute_prototype(types, input->declared_types[latest], index);
+    return latest >= input->token_count ? 0u : library ? 1u : 2u;
+}
+
 static const char* check_driver_warning_note(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
                                              CheckWarningSpelling* spell, const CheckWarningNote* note, Arena* scratch)
 {
@@ -2881,6 +2939,25 @@ static const char* check_driver_warning_note(const Parser* parser, Preprocessor*
         case CHECK_WARNING_NOTE_LOGICAL_REMOVE_CONSTANT:
             result = "remove constant to silence this warning";
             break;
+        case CHECK_WARNING_NOTE_ABSOLUTE_REMOVE:
+        case CHECK_WARNING_NOTE_ABSOLUTE_REPLACE:
+        case CHECK_WARNING_NOTE_ABSOLUTE_HEADER:
+        {
+            // -Wabsolute-value's notes (#2914): a library function's replacement as clang's emitReplacement looks it up
+            // (check_driver_absolute_declared): undeclared, "use function" and the header's note; declared as the library's
+            // function, "use function" alone; declared otherwise, neither (an empty text drops a note).
+            const uint32_t index = note->payload.data & BUSTER_CHECK_ABSOLUTE_FUNCTION;
+            const bool builtin = (note->payload.data & BUSTER_CHECK_ABSOLUTE_BUILTIN) != 0;
+            const CheckAbsoluteFunction* function = index < BUSTER_ARRAY_LENGTH(check_absolute_functions) ? check_absolute_functions + index : NULL;
+            const uint32_t declared = function != NULL && !builtin && note->kind != CHECK_WARNING_NOTE_ABSOLUTE_REMOVE ?
+                                      check_driver_absolute_declared(parser, pp, input, types, index, note->token) : 1u;
+            const char* name = function == NULL ? NULL : builtin ? function->builtin : function->name;
+            result = name == NULL ? NULL :
+                     note->kind == CHECK_WARNING_NOTE_ABSOLUTE_REMOVE ? check_warning_text(scratch, "remove the call to '%s' since unsigned values cannot be negative", name) :
+                     note->kind == CHECK_WARNING_NOTE_ABSOLUTE_REPLACE ? (declared == 2 ? "" : check_warning_text(scratch, "use function '%s' instead", name)) :
+                     declared != 0 ? "" : check_warning_text(scratch, "include the header <%s> or explicitly provide a declaration for '%s'", function->header, name);
+            break;
+        }
         case CHECK_WARNING_NOTE_CONFLICTING_PROTOTYPE: result = "conflicting prototype is here"; break;
         case CHECK_WARNING_NOTE_PREVIOUS_DEFINITION: result = "previous definition is here"; break;
         case CHECK_WARNING_NOTE_CONFLICTING_ATTRIBUTE: result = "conflicting attribute is here"; break;
@@ -3057,15 +3134,19 @@ static bool check_driver_warning_events_from(const Parser* parser, Preprocessor*
                 const char* message = check_driver_warning_message(parser, pp, input, types, &spell, event, scratch);
                 PPOutputDiagnosticNote* notes = event->note_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, PPOutputDiagnosticNote, event->note_count) : NULL;
                 valid = message != NULL && (event->note_count == 0 || notes != NULL);
+                // (A note whose text is empty is one its event doesn't give here: -Wabsolute-value's header note where the
+                // replacement is declared, #2914.)
+                uint32_t note_total = 0;
                 for (uint32_t n = 0; valid && n < event->note_count; n += 1)
                 {
                     const CheckWarningNote* note = view->notes + event->note_first + n;
                     const bool located = note->token < parser->tokens.count && (note->source == BUSTER_CHECK_WARNING_NO_SOURCE || note->source < pp->output.count);
                     const char* text = located ? check_driver_warning_note(parser, pp, input, types, &spell, note, scratch) : NULL;
                     valid = text != NULL;
-                    if (valid)
+                    if (valid && text[0] != 0)
                     {
-                        notes[n] = (PPOutputDiagnosticNote){ .token = note->source != BUSTER_CHECK_WARNING_NO_SOURCE ? note->source : parse_source_index(&parser->tokens, note->token), .message = text };
+                        notes[note_total] = (PPOutputDiagnosticNote){ .token = note->source != BUSTER_CHECK_WARNING_NO_SOURCE ? note->source : parse_source_index(&parser->tokens, note->token), .message = text };
+                        note_total += 1;
                     }
                 }
                 // A grouped diagnose_if's option is its group's; one that is an error by default has no -Werror (#1447).
@@ -3095,7 +3176,7 @@ static bool check_driver_warning_events_from(const Parser* parser, Preprocessor*
                     if (event->kind == CHECK_WARNING_EVENT_CLANG_MACRO_SCOPE || event->kind == CHECK_WARNING_EVENT_BIT_INT_SUFFIX)
                     {
                         // A literal suffix is diagnosed before its enclosing semantic action at the same boundary.
-                        pp_diagnose_output_notes_phase(pp, disposition, source, boundary, PP_DIAGNOSTIC_LEXICAL, notes, event->note_count, "%s%s", message, suffix);
+                        pp_diagnose_output_notes_phase(pp, disposition, source, boundary, PP_DIAGNOSTIC_LEXICAL, notes, note_total, "%s%s", message, suffix);
                     }
                     else if (event->kind == CHECK_WARNING_EVENT_PRAGMA)
                     {
@@ -3197,7 +3278,7 @@ static bool check_driver_warning_events_from(const Parser* parser, Preprocessor*
                     else if ((event->flags & BUSTER_CHECK_WARNING_UNLOCATED) != 0)
                     {
                         // An implicit attribute's warning, which clang gives no location (#147: interrupt's used).
-                        pp_diagnose_unlocated_notes(pp, disposition, boundary, notes, event->note_count, "%s%s", message, suffix);
+                        pp_diagnose_unlocated_notes(pp, disposition, boundary, notes, note_total, "%s%s", message, suffix);
                     }
                     else if (event->kind == CHECK_WARNING_EVENT_OBJC_POINTER_TYPE || event->kind == CHECK_WARNING_EVENT_OBJC_OBJECT_TYPE ||
                              event->kind == CHECK_WARNING_EVENT_OBJC_WEAK_TYPE)
@@ -3207,14 +3288,14 @@ static bool check_driver_warning_events_from(const Parser* parser, Preprocessor*
                         uint32_t location = 0;
                         uint32_t origin = 0;
                         (void)check_warning_objc_macro(parser, pp, event, &location, &origin);
-                        pp_diagnose_placed_notes_phase(pp, disposition, location, origin, boundary, PP_DIAGNOSTIC_TYPE, notes, event->note_count, "%s%s", message, suffix);
+                        pp_diagnose_placed_notes_phase(pp, disposition, location, origin, boundary, PP_DIAGNOSTIC_TYPE, notes, note_total, "%s%s", message, suffix);
                     }
                     else if (event->kind == CHECK_WARNING_EVENT_FUNCTION_TYPE_ATTRIBUTE || event->kind == CHECK_WARNING_EVENT_CONVENTION_UNSUPPORTED ||
                              event->kind == CHECK_WARNING_EVENT_OBJC_UNSUPPORTED || event->kind == CHECK_WARNING_EVENT_NON_PROTOTYPE_REDECLARATION)
                     {
                         // A prototype merge warning precedes a conflicting-types error at the same declarator's completion.
                         // A declarator's type's warnings precede its declaration's attributes' checks at the same boundary.
-                        pp_diagnose_output_notes_phase(pp, disposition, source, boundary, PP_DIAGNOSTIC_TYPE, notes, event->note_count, "%s%s", message, suffix);
+                        pp_diagnose_output_notes_phase(pp, disposition, source, boundary, PP_DIAGNOSTIC_TYPE, notes, note_total, "%s%s", message, suffix);
                     }
                     else if ((event->kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE || event->kind == CHECK_WARNING_EVENT_UNUSED_PARAMETER ||
                               event->kind == CHECK_WARNING_EVENT_UNUSED_LABEL) &&
@@ -3224,7 +3305,7 @@ static bool check_driver_warning_events_from(const Parser* parser, Preprocessor*
                         // body's deferred diagnostics at that boundary. At the translation unit's end the
                         // scope rule no longer applies — every unused warning shares one boundary, and a
                         // lexical phase would order file-scope objects ahead of earlier declarations.
-                        pp_diagnose_output_notes_phase(pp, disposition, source, boundary, PP_DIAGNOSTIC_LEXICAL, notes, event->note_count, "%s%s", message, suffix);
+                        pp_diagnose_output_notes_phase(pp, disposition, source, boundary, PP_DIAGNOSTIC_LEXICAL, notes, note_total, "%s%s", message, suffix);
                     }
                     else if (event->kind == CHECK_WARNING_EVENT_UNUSED_RESULT && event->completion_kind == CHECK_WARNING_COMPLETE_AT_TOKEN &&
                              event->completion > event->token + 1)
@@ -3232,7 +3313,7 @@ static bool check_driver_warning_events_from(const Parser* parser, Preprocessor*
                         // A constant bound's comma in a function body (#2202, check_input_unused_completion): with the body's
                         // queued runtime diagnostics, at its end, in source order among them as clang queues it (#2252), though
                         // the reader finds it before them.
-                        pp_diagnose_output_notes_phase(pp, disposition, source, boundary, PP_DIAGNOSTIC_DEFERRED, notes, event->note_count, "%s%s", message, suffix);
+                        pp_diagnose_output_notes_phase(pp, disposition, source, boundary, PP_DIAGNOSTIC_DEFERRED, notes, note_total, "%s%s", message, suffix);
                         pp_diagnostic_source_order(pp, previous);
                     }
                     else if (event->kind == CHECK_WARNING_EVENT_ZERO_LENGTH_ARRAY)
@@ -3241,7 +3322,7 @@ static bool check_driver_warning_events_from(const Parser* parser, Preprocessor*
                         // single token is silent, including an object-like macro that expands to one zero.
                         const bool arguments = pp->diagnostic_arguments;
                         pp->diagnostic_arguments |= event->payload.data != 0;
-                        pp_diagnose_output_notes_at(pp, disposition, source, boundary, notes, event->note_count, "%s%s", message, suffix);
+                        pp_diagnose_output_notes_at(pp, disposition, source, boundary, notes, note_total, "%s%s", message, suffix);
                         pp->diagnostic_arguments = arguments;
                     }
                     else if (event->kind == CHECK_WARNING_EVENT_CONSTANT_LOGICAL_OPERAND)
@@ -3249,12 +3330,12 @@ static bool check_driver_warning_events_from(const Parser* parser, Preprocessor*
                         // Construction precedes the completed expression's boolean-conversion checks, which use
                         // the deferred phase at the same boundary. The event's suborder keeps its notes together
                         // ahead of those checks and of an enclosing assertion failure.
-                        pp_diagnose_output_notes_phase(pp, disposition, source, boundary, PP_DIAGNOSTIC_DEFERRED, notes, event->note_count, "%s%s", message, suffix);
+                        pp_diagnose_output_notes_phase(pp, disposition, source, boundary, PP_DIAGNOSTIC_DEFERRED, notes, note_total, "%s%s", message, suffix);
                     }
                     else
                     {
                         check_warning_event_ranges(parser, pp, input, event);
-                        pp_diagnose_output_notes_at(pp, disposition, source, boundary, notes, event->note_count, "%s%s", message, suffix);
+                        pp_diagnose_output_notes_at(pp, disposition, source, boundary, notes, note_total, "%s%s", message, suffix);
                         pp_diagnostic_ranges_clear(pp);
                     }
                     pp_diagnostic_suborder(pp, previous, event->suborder);

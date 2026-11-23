@@ -1,0 +1,86 @@
+buster-fixtures v1 preprocessor-trees
+# The files test-preprocessor's cases write beside case.c (c_preprocessor_test.c; #2053): TREE, KIND, SOURCE, PATH,
+# tab-separated, a tree's files in order. PATH is where the case's directory has it. KIND text writes SOURCE's bytes, a
+# file here; symlink makes a symbolic link to SOURCE as written; hard a hard link to the tree's earlier PATH SOURCE.
+include-next	text	include-next-01	first/wrapper.h
+include-next	text	include-next-02	second/wrapper.h
+# -dI's includes (#1380): an #include_next from the first -I directory's header to the second's.
+dumped-includes	text	dumped-includes-01	first/wrapper.h
+dumped-includes	text	dumped-includes-02	second/wrapper.h
+renamed	text	renamed-01	inc.h
+collecting-exit	text	collecting-exit-01	outer.h
+collecting-return	text	collecting-return-01	outer.h
+stack	text	stack-01	a.h
+stack	text	stack-02	b.h
+stack	text	stack-03	sys/s.h
+stack	text	stack-04	p.h
+conversion-system	text	conversion-system-01	sys/conversion.h
+# A file whose name is what a header name taken from the raw string literal R"(other.h)" would be.
+raw-header	text	raw-header-01	"(other.h)
+# Angle header bytes that resemble an unterminated raw literal must not consume following source.
+opaque-raw	text	opaque-raw-01	R"(x
+opaque-raw	text	opaque-raw-02	a\>R"(x
+# Runtime header queries may get their identity through a macro. Raw-looking header bytes remain header bytes;
+# earlier and later macro definitions keep the prepared view that supplied their token indexes.
+raw-query	text	raw-query-01	R"(x
+raw-query	text	raw-query-02	raw-plain.h
+raw-query	text	raw-query-03	raw-view.h
+raw-query	text	raw-query-04	raw-once.h
+raw-query	text	raw-query-05	raw-import.h
+raw-query	text	raw-query-06	raw-guard.h
+# #embed's resources: text, bytes of every kind (a zero, 255, the edges of one, two and three digits), every value in
+# turn, nothing, and headers that end with an #embed, with and without a newline after it.
+# #252's review's #embed files: a resource in a directory of its own, for a name with "//" (and one whose name starts
+# with '*', for "/*"), and a header that becomes a system header before it embeds one.
+embed-review	text	embed-review-01	dir/bytes.bin
+embed-review	text	embed-review-02	dir/*x.bin
+embed-review	text	embed-review-03	hi.txt
+embed-review	text	embed-review-04	sys.h
+embed-review	text	embed-review-05	sys_indent.h
+embed-review	text	embed-review-06	sys_blank.h
+embed	text	embed-01	hi.txt
+embed	text	embed-02	bin.dat
+embed	text	embed-03	bytes.dat
+embed	text	embed-04	empty.txt
+embed	text	embed-05	embedlast.h
+embed	text	embed-06	embedlast_nonl.h
+embed	text	embed-07	tail.h
+# --embed-dir's resource, and headers in a directory of their own that embed one beside them, first thing and after
+# blank lines and a comment.
+embed-directories	text	embed-directories-01	dir/x.bin
+embed-directories	text	embed-directories-02	sub/inc.h
+embed-directories	text	embed-directories-03	sub/late.h
+embed-directories	text	embed-directories-04	sub/y.bin
+# #119's header names and search: names with "//", "/*...*/" and a backslash written out, the file a comment that runs
+# on to the next line makes a name of ("a b.h"), a computed name's file, #include_next through three directories, a
+# header that includes itself, and one file reached through a symbolic link and a hard link, with #pragma once and
+# with a guard. Then #254's review's: the file a header name too long for a path would name if its identifier were
+# expanded, headers named " x.h" and "  x.h", each alone in a directory, and a header that includes itself to the depth
+# limit and there includes another three times.
+includes	text	includes-01	a/b.h
+includes	text	includes-02	dir/*x.h
+includes	text	includes-03	dir/*x.bin
+includes	text	includes-04	a/*x*/b.h
+includes	text	includes-05	a\b.h
+includes	text	includes-06	a b.h
+includes	text	includes-07	c.h
+includes	text	includes-08	d1/n.h
+includes	text	includes-09	d2/n.h
+includes	text	includes-10	d3/n.h
+includes	text	includes-11	self.h
+includes	text	includes-12	real.h
+includes	symlink	real.h	sym.h
+includes	hard	real.h	hard.h
+includes	text	includes-15	guarded.h
+includes	symlink	guarded.h	gsym.h
+includes	text	includes-17	local.h
+includes	text	includes-18	short.h
+includes	text	includes-19	one/ x.h
+includes	text	includes-20	two/  x.h
+includes	text	includes-21	loop.h
+includes	text	includes-22	leaf.h
+# #254's second review's headers: a name with a backslash before a '>', and one reached through "//".
+header-tails	text	header-tails-01	a\>b.h
+header-tails	text	header-tails-02	 x.h
+header-tails	text	header-tails-03	x.h
+header-tails	text	header-tails-04	dir/x.h

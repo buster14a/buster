@@ -377,6 +377,10 @@ static const uint8_t node_census_warning_classes[CHECK_WARNING_ID_COUNT] = {
     [CHECK_WARNING_ID_IMPLICIT_CONST_INT_FLOAT_CONVERSION] = NODE_CENSUS_WARNING_TESTED,
     // Any floating conversion to a higher rank (#3339), off by default: refused whole.
     [CHECK_WARNING_ID_DOUBLE_PROMOTION] = NODE_CENSUS_WARNING_WHOLE,
+    // (Only at a library call, which NODE_CENSUS_CALLEE refuses, or a builtin's node, which NODE_CENSUS_OPERATOR does, #2914.)
+    [CHECK_WARNING_ID_ABSOLUTE_VALUE] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_INT_TO_POINTER_CAST] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_INT_TO_VOID_POINTER_CAST] = NODE_CENSUS_WARNING_TESTED,
 };
 
 // Which of the warnings the silence tests stand for the unit enables anywhere (check_common_enabled): the actions' warning
@@ -389,6 +393,8 @@ struct NodeCensusPolicy
     bool enums;
     bool sign_compare;
     bool pointer_casts;
+    // -Wint-to-pointer-cast or -Wint-to-void-pointer-cast (#2914, node_census_int_pointer_cast).
+    bool int_pointer_casts;
     // An ordered comparison of a pointer with an integer (CHECK_WARNING_ID_ORDERED_POINTER_INTEGER, #3201).
     bool ordered;
     bool void_dereference;
@@ -527,6 +533,9 @@ struct NodeCensusScratch
     // Whether a call may be left out of the loop's list: not in a unit whose calls' test has something for each
     // (-Wtype-safety's type tags).
     bool own_calls_quiet;
+    // Whether a cast to a pointer of an operand that is no pointer once converted goes to its test (#2914,
+    // node_census_int_pointer_cast): with -Wint-to-pointer-cast or -Wint-to-void-pointer-cast.
+    bool own_int_pointer_casts;
     // With the reader's verify, the operators the loop left out of the expression at hand's list for their constants, as
     // its lists' words are; else null. And whether each record the tree's tests read that no listed operator has as
     // an operand has its test run all the same.
@@ -637,6 +646,8 @@ static NodeCensusPolicy node_census_policy(const Preprocessor* pp, const CheckIn
                    check_common_enabled(pp, input, CHECK_WARNING_ID_ANON_ENUM_ENUM_CONVERSION, false) ||
                    check_common_enabled(pp, input, CHECK_WARNING_ID_IMPLICIT_ENUM_ENUM_CAST, false);
     policy.sign_compare = check_common_enabled(pp, input, CHECK_WARNING_ID_SIGN_COMPARE, true);
+    policy.int_pointer_casts = check_common_enabled(pp, input, CHECK_WARNING_ID_INT_TO_POINTER_CAST, false) ||
+                               check_common_enabled(pp, input, CHECK_WARNING_ID_INT_TO_VOID_POINTER_CAST, false);
     policy.pointer_casts = check_common_enabled(pp, input, CHECK_WARNING_ID_POINTER_TO_INT_CAST, false) ||
                            check_common_enabled(pp, input, CHECK_WARNING_ID_VOID_POINTER_TO_INT_CAST, false) ||
                            check_common_enabled(pp, input, CHECK_WARNING_ID_POINTER_TO_ENUM_CAST, false) ||
@@ -1518,6 +1529,24 @@ static bool node_census_system(const NodeCensusScratch* s, uint32_t token)
 }
 
 // Whether `op` has a code of the machine's (docs/node-machine.md, "T: bind and type").
+// -Wint-to-pointer-cast's and -Wint-to-void-pointer-cast's test (#2914, check_warning_graph_int_pointer_cast's): a cast
+// `node` to a pointer (an _Atomic one's value type too) of an operand of an integer type narrower than a pointer, no
+// bool's or enumeration's, that is no integer constant expression.
+static bool node_census_int_pointer_cast(const NodeCensusScratch* s, uint32_t node)
+{
+    const CheckGraph* graph = &s->program->input->graph;
+    const TypeTable* types = s->program->types;
+    const uint32_t operand = graph->operand0[node];
+    const TypeId target = node_view_type(s, node);
+    const TypeId pointer = target != 0 ? type_conversion_operand(types, type_unqualified(type_strip_aligned(types, target))) : 0;
+    const TypeId source = operand < graph->count ? node_view_type(s, operand) : 0;
+    const TypeId integer = source != 0 ? type_unqualified(type_strip_aligned(types, source)) : 0;
+    const uint8_t kind = integer != 0 ? type_kind(types, integer) : BUSTER_TYPE_KIND_NONE;
+    const bool narrow = (kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_BIT_INT) && integer != BUSTER_TYPE_BOOL && type_size(types, integer) < 8;
+    const bool ice = narrow && node_view_constant_kind(s, operand) == CHECK_CONSTANT_INTEGER && (node_view_flags(s, operand) & BUSTER_CHECK_ICE) != 0;
+    return pointer != 0 && type_kind(types, type_strip_aligned(types, pointer)) == BUSTER_TYPE_KIND_POINTER && narrow && !ice;
+}
+
 static bool node_census_coded(CheckOp op)
 {
     const bool result = op <= CHECK_OP_CONDITION || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN);
@@ -2135,6 +2164,8 @@ static uint64_t node_census_node(NodeCensusScratch* s, uint32_t node, uint32_t r
         const bool narrow = node_census_integer(types, type, &width, &sign) && width < 64;
         tests |= narrow || (type_bits & BUSTER_NODE_CENSUS_TYPE_ENUM) != 0 ? UINT64_C(1) << NODE_CENSUS_POINTER_CAST : 0;
     }
+    // A cast to a pointer of an integer narrower than it (#2914).
+    tests |= op == CHECK_OP_CAST && policy->int_pointer_casts && node_census_int_pointer_cast(s, node) ? UINT64_C(1) << NODE_CENSUS_POINTER_CAST : 0;
     // (A pointer's own type: a function's byte has the pointer's bit and the void pointee's too.)
     if ((op == CHECK_OP_DEREFERENCE || op == CHECK_OP_SUBSCRIPT) && policy->void_dereference && (node_census_type_bits(s, a_type) & BUSTER_NODE_CENSUS_TYPE_VOID_POINTEE) != 0 &&
         node_census_kind(types, a_type) == BUSTER_TYPE_KIND_POINTER)
@@ -2954,6 +2985,7 @@ static void node_tests_tables(NodeCensusScratch* s, const TypeTable* types)
         s->own_roots[code] = (uint8_t)node_census_root_kind(op);
     }
     s->own_calls_quiet = !policy->type_safety;
+    s->own_int_pointer_casts = policy->int_pointer_casts;
 }
 
 // The parser's tree's tests of a record (operator `op`, at `token` of role `role`), as node_census_node reads them: a
@@ -3104,6 +3136,8 @@ static __attribute__((noinline)) uint64_t node_tests_operator(const NodeCensusSc
             const uint32_t width = node_tests_ranges(s, columns->value_types[r]) & 0x7fu;
             tests |= (width != 0 && width < 64) || (own & BUSTER_NODE_CENSUS_TYPE_ENUM) != 0 ? UINT64_C(1) << NODE_CENSUS_POINTER_CAST : 0;
         }
+        // A cast to a pointer of an integer narrower than it (#2914), which the casts' rule sends here.
+        tests |= op == CHECK_OP_CAST && policy->int_pointer_casts && node_census_int_pointer_cast(s, node) ? UINT64_C(1) << NODE_CENSUS_POINTER_CAST : 0;
         if (program->types->atomic_records && (op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW))
         {
             trigger = NODE_TESTS_TRIGGER_ATOMIC_MEMBER;
@@ -4473,6 +4507,7 @@ static inline __attribute__((always_inline)) void node_tests_window_loop_by(Node
     const NodeCensusScratch* s = &tests->scratch;
     const __m512i quiet_pairs = _mm512_loadu_si512(s->own_quiet_pairs);
     const __mmask64 calls_rule = _cvtu64_mask64(s->own_calls_quiet ? UINT64_MAX : 0);
+    const __mmask64 int_pointer_rule = _cvtu64_mask64(s->own_int_pointer_casts ? UINT64_MAX : 0);
     // A line's byte's bit of a plain function. No bit, where no call of the unit's may be plain at all: one of its
     // functions is unknown from a declaration on (check_program_return_unknowns' table), which a call's rule asks by
     // its use.
@@ -4619,7 +4654,12 @@ static inline __attribute__((always_inline)) void node_tests_window_loop_by(Node
         // table's), and that test asks whether its own type is an integer narrower than a pointer or an enumeration:
         // none where its own type is void (a statement's discard of a pointer's top) or a pointer. A cast to an
         // integer stays listed, whatever its width: the byte says none.
-        const __mmask64 quiet_casts = casts & _mm512_test_epi8_mask(sends, operands) &
+        // With -Wint-to-pointer-cast's switches (#2914), a cast to a pointer of an operand that is no pointer once converted
+        // goes to its test too, which asks whether the operand is a narrow integer and no integer constant expression
+        // (node_census_int_pointer_cast): a byte says neither, a constant's being any constant's.
+        const __mmask64 int_pointer_casts = int_pointer_rule & casts & _mm512_test_epi8_mask(own, _mm512_set1_epi8((char)BUSTER_NODE_CENSUS_TYPE_POINTER)) &
+                                            ~_mm512_test_epi8_mask(operands, converts);
+        const __mmask64 quiet_casts = casts & _mm512_test_epi8_mask(sends, operands) & ~int_pointer_casts &
                                       _mm512_test_epi8_mask(own, _mm512_set1_epi8((char)(BUSTER_NODE_TESTS_TYPE_VOID | BUSTER_NODE_CENSUS_TYPE_POINTER)));
         // The orders' rule (#3201): an ordered comparison is sent to its test by an operand that is a pointer once
         // converted (the table's, under the warning), and that test asks for exactly one such operand: none where both
@@ -4638,7 +4678,7 @@ static inline __attribute__((always_inline)) void node_tests_window_loop_by(Node
         _mm512_storeu_si512(tests->window_asks + ask_total, _mm512_maskz_compress_epi16((__mmask32)(asks >> 32), _mm512_add_epi16(numbers, _mm512_set1_epi16(32))));
         ask_total += (uint32_t)_mm_popcnt_u32((uint32_t)(asks >> 32));
         // The block's masks.
-        const __mmask64 sent = always | _mm512_test_epi8_mask(sends, operands);
+        const __mmask64 sent = always | _mm512_test_epi8_mask(sends, operands) | int_pointer_casts;
         uint64_t* masks = tests->window_masks + BUSTER_NODE_TESTS_MASKS * (uint64_t)(x / 64);
         masks[BUSTER_NODE_TESTS_MASK_TREE] = tree_first | _mm512_test_epi8_mask(tree_sends, operands);
         masks[BUSTER_NODE_TESTS_MASK_QUIET] = quiet | quiet_calls | quiet_casts | quiet_orders;
