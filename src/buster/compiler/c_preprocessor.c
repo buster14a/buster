@@ -1107,6 +1107,10 @@ struct PPMacro
     uint8_t builtin;
     // Nonzero while its expansion is being rescanned.
     uint8_t disabled;
+    // -Wunused-macros (#2222, pp_unused_macro_track): 0, or clang's WarnIfUnused for a definition in the main file where
+    // the warning is given, its severity there plus 1 (BUSTER_PP_UNUSED_SEVERITY), and BUSTER_PP_UNUSED_USED once clang
+    // would have marked it used: expanded, or named by a #ifdef, #ifndef or a live `defined`.
+    uint8_t unused;
     uint16_t parameter_count; // With the variadic one.
     // A BUSTER_PP_MACRO_IN_ORDER macro's: how many parameters its arguments are expanded for, listed after its items.
     uint16_t order_count;
@@ -1611,6 +1615,8 @@ struct PPDiagnosticRecord
     bool arguments;
     // Ordered among its position's other records by its token, not by discovery (pp_diagnostic_source_order, #2252).
     bool source_ordered;
+    // The line notes its place is presumed under plus 1 (Preprocessor.presumed_note_limit), or 0 for all of them.
+    uint32_t line_notes;
     // Its highlighted ranges (Preprocessor.diagnostic_ranges).
     PPDiagnosticRange ranges[BUSTER_PP_DIAGNOSTIC_RANGES];
     uint32_t range_count;
@@ -1818,6 +1824,27 @@ struct Preprocessor
     // path that reaches a warning off by default at every directive (-Wreserved-macro-identifier's) tests its bit first.
     uint8_t warning_commands[32];
     uint32_t warnings_possible;
+    // A diagnostic given while `diagnostic_line_notes` is nonzero is rendered with its place presumed under the first
+    // diagnostic_line_notes - 1 line notes alone, those that clang, which prints it at once, had then (#2222: a line
+    // marker's -Wgnu-line-marker, given before its own note); PPDiagnosticRecord.line_notes keeps it, and rendering a
+    // record sets `presumed_note_limit` (pp_presumed, pp_line_note_at), 0 for all.
+    uint32_t diagnostic_line_notes;
+    uint32_t presumed_note_limit;
+    // -Wunused-macros (#2222): clang's WarnUnusedMacroLocs, a SmallDenseSet of the definitions' places that iterates in
+    // its buckets' order, which is the order the warnings left at the main file's end are given in (pp_unused_insert):
+    // `unused_buckets` keys (clang's raw source locations, empty as LLVM's) and each one's macro, and the entries.
+    // `unused_tracking` is set by the unit's first tracked definition: from then on
+    // each expansion marks its macro used (pp_macro_used). And the live `defined` operands of the #if line being
+    // read whose macros are tracked: their answers' indices in pp->captures, which the evaluation marks used where it
+    // reads them live (pp_defined_live).
+    uint32_t* unused_keys;
+    PPMacroId* unused_macros;
+    uint32_t unused_buckets;
+    uint32_t unused_entries;
+    bool unused_tracking;
+    uint32_t defined_use_count;
+    uint32_t defined_use_indices[64];
+    PPMacroId defined_use_macros[64];
     // Where the open #pragma clang assume_nonnull, arc_cf_code_audited and unsafe_buffer_usage regions begin, or 0.
     uint32_t region_locations[3];
     // #pragma GCC poison's names, by IdentId, and how many there are (pp_check_poison).
@@ -5289,7 +5316,8 @@ static uint32_t pp_presumed(Preprocessor* pp, uint32_t location, const char** na
         const PPFile* file = &pp->files[pp->ranges[range].file];
         *name = file->path;
         *name_length = file->path_length;
-        for (uint32_t i = pp->line_directive_count; i > 0; i -= 1)
+        const uint32_t notes = pp->presumed_note_limit != 0 && pp->presumed_note_limit - 1 < pp->line_directive_count ? pp->presumed_note_limit - 1 : pp->line_directive_count;
+        for (uint32_t i = notes; i > 0; i -= 1)
         {
             const PPLineDirective* line = &pp->line_directives[i - 1];
             if (line->range == range && line->location <= location)

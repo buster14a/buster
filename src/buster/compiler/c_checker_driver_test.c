@@ -10060,6 +10060,8 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 #include "c_check_c23_attributes_driver_test.c"
 #include "c_check_empty_unit_driver_test.c"
 #include "c_check_reserved_macro_driver_test.c"
+#include "c_check_unused_macros_driver_test.c"
+#include "c_check_gnu_line_marker_driver_test.c"
 #include "c_check_integer_overflow_driver_test.c"
 #include "c_check_gnu_empty_struct_driver_test.c"
 #include "c_check_unused_but_set_driver_test.c"
@@ -11292,6 +11294,8 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_c23_attributes,
             check_test_driver_empty_unit,
             check_test_driver_reserved_macro,
+            check_test_driver_unused_macros,
+            check_test_driver_gnu_line_marker,
             check_test_driver_integer_overflow,
             check_test_driver_gnu_empty_struct,
             check_test_driver_record_extensions,

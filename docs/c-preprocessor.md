@@ -3701,8 +3701,23 @@ spellings alone would miss this change (#272).
   unit's first `#define` or `#undef` learns that no location can give it and
   clears the bit, which each `#pragma clang diagnostic` push, pop or mapping
   sets again, so the name, the table and the options are read only where it may
-  be given (`c_preprocessor_warning_possible_test.c`). Not given yet (#2222): `-Wgnu-line-marker`, whose place clang
-  reads under the numbering before the marker, and `-Wunused-macros`. Not clang's yet, for `\N` as for `\u`: the error of a basic
+  be given (`c_preprocessor_warning_possible_test.c`). A `#define` in the main file itself, which nothing expands and
+  no `#ifdef`, `#ifndef` or live `defined` names, is clang's "macro is not used" (`-Wunused-macros`, off by default,
+  #2222, `pp_unused_macro_track`, clang's WarnIfUnused): at the macro's name, where its `#undef` or its redefinition
+  outside a system header replaces it while it is unused, else at the main file's end, in the order of clang's set of
+  the definitions' places (`pp_unused_insert`, clang's WarnUnusedMacroLocs, a `SmallDenseSet` whose buckets that order
+  follows: the key is the place's raw source location, its hash the key times 37, the probe linear and a deletion's
+  shift backward, as clang 23's LLVM has them). A `#pragma pop_macro` that replaces a definition takes its place out
+  without a warning. Only the main file's own definitions are tracked, not a header's nor those after a line marker
+  that enters a file, and the warning keeps the severity its place gave it, which clang reads at the end too. Off by
+  default, it costs a compile nothing more than #2547's bit at a `#define` and a test of one flag an expansion
+  (`Preprocessor.unused_tracking`, clear until the unit's first tracked definition). A GNU line marker is clang's
+  "this style of line directive is a GNU extension" (`-Wgnu-line-marker`, an extension off by default, in `-Wgnu` and
+  `-Wpedantic`, #2222, `pp_gnu_line_marker`): at its file name, or at its line's end without one, under the numbering
+  *before* its own note, which clang has because it prints the warning as it reads the marker. A diagnostic given
+  while `Preprocessor.diagnostic_line_notes` is set keeps that count (`PPDiagnosticRecord.line_notes`), and its
+  rendering presumes its place under those notes alone (`Preprocessor.presumed_note_limit`, `pp_presumed`,
+  `pp_line_note_at`), so a collected diagnostic reads the numbering its own run had. Not clang's yet, for `\N` as for `\u`: the error of a basic
   or control character's UCN in a skipped group, which clang gives; a UCN of a
   character no identifier may have within one ("character <U+2603> not allowed
   in an identifier"), which clang reads into the identifier after that error.
