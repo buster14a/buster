@@ -886,16 +886,28 @@ static void check_attested_list_body(CheckAttestedListing* listing, uint32_t beg
     const uint64_t owner = listing->body_stamp << 8;
     uint64_t* const marks = listing->body_marks;
     uint32_t kept = listing->names_count;
-    for (uint32_t n = listing->names_count; n < count; n += 1)
+    // 64 entries at a time: which to keep, by their marks, then those compressed down in registers. No entry moves
+    // while the marks are read, so no load waits on a store whose place the last mark decided.
+    for (uint32_t n = listing->names_count; n < count; n += 64)
     {
-        const uint32_t entry = listing->name_entries[n];
-        const uint32_t key = entry & BUSTER_ATTESTED_KEY_MASK;
-        const uint64_t mark = marks[key];
-        const uint64_t seen = (mark & ~UINT64_C(0xff)) == owner ? mark & 0xff : 0;
-        const uint64_t bit = UINT64_C(1) << (entry >> BUSTER_ATTESTED_CLASS_SHIFT);
-        listing->name_entries[kept] = entry;
-        kept += (seen & bit) == 0 ? 1u : 0u;
-        marks[key] = owner | seen | bit;
+        const uint32_t length = count - n < 64 ? count - n : 64;
+        uint64_t keeps = 0;
+        for (uint32_t k = 0; k < length; k += 1)
+        {
+            const uint32_t entry = listing->name_entries[n + k];
+            const uint32_t key = entry & BUSTER_ATTESTED_KEY_MASK;
+            const uint64_t mark = marks[key];
+            const uint64_t seen = (mark & ~UINT64_C(0xff)) == owner ? mark & 0xff : 0;
+            const uint64_t bit = UINT64_C(1) << (entry >> BUSTER_ATTESTED_CLASS_SHIFT);
+            keeps |= (seen & bit) == 0 ? UINT64_C(1) << k : 0;
+            marks[key] = owner | seen | bit;
+        }
+        for (uint32_t g = 0; g < length; g += 16)
+        {
+            const __mmask16 lanes = (__mmask16)_bzhi_u32(0xffffu, length - g < 16 ? length - g : 16);
+            const __m512i entries = _mm512_maskz_loadu_epi32(lanes, listing->name_entries + n + g);
+            kept += check_attested_compress_words(listing->name_entries + kept, (__mmask16)(keeps >> g) & lanes, entries);
+        }
     }
     listing->names_count = kept;
     listing->declared_count = declared;
