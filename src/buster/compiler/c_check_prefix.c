@@ -582,6 +582,7 @@ static ParseDiagnostic check_prefix_original_diagnostic(const ParseDiagnostic* d
     result.resume_call_tail = 0;
     result.resume_operand = false;
     result.resume_colon = false;
+    result.resume_terminate = false;
     return result;
 }
 
@@ -837,6 +838,7 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
             ordered &= !taken || begin > last;
             last = taken ? (diagnostic->resume_end != 0 ? diagnostic->resume_end - 1 : at) : last;
             insert += taken && !diagnostic->resume_delete ? (diagnostic->resume_closers != 0 ? diagnostic->resume_closers : 1u) + (diagnostic->resume_follow != 0) : 0u;
+            insert += taken && diagnostic->resume_delete ? diagnostic->resume_closers + diagnostic->resume_terminate : 0u;
             following += taken && diagnostic->resume_follow;
             const uint32_t attributes = taken ? check_prefix_call_attributes(diagnostic) : 0;
             insert += (attributes != 0) + (taken && diagnostic->resume_call_semi);
@@ -997,6 +999,21 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
                                     view->tokens.flags[written] |= BUSTER_PARSE_RECOVERY_ARGUMENT;
                                 }
                                 next_origin[written] = origin != NULL ? origin[token] : token;
+                                written += 1;
+                            }
+                        }
+                        else if ((diagnostic->resume_closers != 0 || diagnostic->resume_terminate) && diagnostic->resume_delete)
+                        {
+                            // A deletion that closes the groups it cuts: a GNU attribute list's entries kept before a
+                            // stray argument's attribute (#2914); and ends its declaration, where it reached the unit's
+                            // end. The tokens borrow the first deleted token's source.
+                            for (uint32_t c = 0; c < diagnostic->resume_closers + diagnostic->resume_terminate; c += 1)
+                            {
+                                view->tokens.kinds[written] = c < diagnostic->resume_closers ? PARSE_KIND_R_PAREN : PARSE_KIND_SEMI;
+                                view->tokens.names[written] = 0;
+                                view->tokens.sources[written] = parse_source_index(&current->tokens, to);
+                                view->tokens.flags[written] = 0;
+                                next_origin[written] = origin != 0 ? origin[to] : to;
                                 written += 1;
                             }
                         }

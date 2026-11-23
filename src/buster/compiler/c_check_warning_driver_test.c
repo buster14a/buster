@@ -3190,6 +3190,36 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .c23 = true,
     },
     {
+        // On functions (#2914): the body's error by the declarator's derivation, after its other attributes too, not a function
+        // pointer's, not after an asm label or a later declarator; a definition's skip to the next `;` leaves `kept` undeclared.
+        .name = "attributes' stray argument tokens on functions",
+        .source =
+                  "void f(void) __attribute__((unused)) __attribute__((aligned(8 8))) { } int kept; int *p = &kept; int y __attribute__((aligned(8 8))), z;\n"
+                  "int (*q)(void) __attribute__((aligned(8 8)));\n"
+                  "int r(void) __asm__(\"r\") __attribute__((aligned(8 8)));\n"
+                  "int s, t(void) __attribute__((aligned(8 8)));\n",
+        .errors = 16,
+        .c23 = true,
+    },
+    {
+        // The list's attributes before the failed one stay (#2914): the declarator's deprecation is warned of at its uses.
+        .name = "attributes' stray argument tokens after kept attributes",
+        .source =
+                  "int old __attribute__((deprecated, aligned(8 8))), skipped; int read_old(void) { return old; }\n"
+                  "int g(void) { int older __attribute__((deprecated, aligned(8 8))), skipped2; return older; }\n",
+        .warnings = 2,
+        .errors = 6,
+        .notes = 2,
+        .c23 = true,
+    },
+    {
+        // A definition at the unit's end, without a `;` to skip to (#2914).
+        .name = "attributes' stray argument tokens at the unit's end",
+        .source = "int x = 1; void f(void) __attribute__((unused, aligned(8 8))) {}\n",
+        .errors = 3,
+        .c23 = true,
+    },
+    {
         .name = "unit end unused declarations alone",
         .source = "static int unused(void) { return 0; }\nstatic int unused_var;\nint main(void) { return 0; }\n",
         .options = { "-Wall" },

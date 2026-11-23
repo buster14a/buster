@@ -907,6 +907,9 @@ struct ParseDiagnostic
     uint32_t resume_at;
     // A missing C23 attribute-list end needs one or two brackets. Zero keeps the ordinary single-token insertion.
     uint8_t resume_closers;
+    // With resume_delete, resume_closers counts the `)`s put after the deletion instead (a GNU attribute list's entries
+    // kept before a stray argument's attribute, #2914); this puts a `;` after them, where the deletion reached the end.
+    bool resume_terminate;
     // A C23 list that consumes the rest of a block still needs a statement, or a declaration's semicolon, at its
     // original '}'. This is that ParseMessage, or zero. The private view supplies ';' and retains the error separately.
     uint8_t resume_follow;
