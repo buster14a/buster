@@ -136,11 +136,7 @@ static CheckWarningSeverity check_common_severity(Preprocessor* pp, const Parser
     CheckWarningSeverity severity = command.quiet && !default_error ? CHECK_WARNING_IGNORE :
         check_diagnostic_severity_id_from(input, token, BUSTER_CHECK_NONE, id, mapped);
     severity = command.quiet && severity < CHECK_WARNING_ERROR ? CHECK_WARNING_IGNORE : severity;
-    bool system = check_graph_system_token(&input->graph, token);
-    if (!system && pp->output.locations != NULL && parser != NULL && token < parser->tokens.count && parse_source_index(&parser->tokens, token) < pp->output.count)
-    {
-        system = pp_system_level_at(pp, pp->output.locations[parse_source_index(&parser->tokens, token)]) != BUSTER_PP_USER_FILE;
-    }
+    const bool system = check_graph_system_token(&input->graph, token);
     if (severity != CHECK_WARNING_IGNORE && !command.system_headers && system)
     {
         severity = CHECK_WARNING_IGNORE;
@@ -1030,9 +1026,13 @@ static void check_common_report_comma_left(const Parser* parser, Preprocessor* p
     const uint32_t boundary = check_common_function_boundary(parser, token);
     const uint32_t declarator = boundary == token ? check_driver_file_initializer_end(parser, input, token) : BUSTER_CHECK_NONE;
     const PPDiagnosticRecord* previous = pp->diagnostic_last;
+    // A left operand a macro's argument gives keeps that macro's note, as clang shows it (Preprocessor.diagnostic_spans).
+    const bool spans = pp->diagnostic_spans;
+    pp->diagnostic_spans = true;
     check_common_report_evaluated(parser, pp, input, token, declarator != BUSTER_CHECK_NONE ? declarator : boundary,
                                   declarator != BUSTER_CHECK_NONE ? PP_DIAGNOSTIC_RUNTIME : PP_DIAGNOSTIC_DEFERRED, CHECK_WARNING_ID_UNUSED_VALUE, false,
                                   "left operand of comma operator has no effect", NULL, 0, scratch);
+    pp->diagnostic_spans = spans;
     if (declarator != BUSTER_CHECK_NONE && comma < input->graph.count && input->graph.source_positions != NULL)
     {
         pp_diagnostic_suborder(pp, previous, (uint64_t)input->graph.source_positions[comma] + 1);
@@ -1957,6 +1957,7 @@ static void check_common_sign_scan(CheckCommonEmission* emission, uint32_t node)
 }
 
 static void check_common_comma_marker(CheckCommonEmission* emission, uint32_t node);
+static bool check_common_conversion_system(const Parser* parser, const Preprocessor* pp, uint32_t token);
 static void check_common_comma_end(CheckCommonEmission* emission, uint32_t node);
 
 static bool check_common_emit_evaluated(const CheckCommonEmission* emission, uint32_t node)
@@ -3127,7 +3128,9 @@ static __attribute__((noinline)) void check_common_enum_cast(const Parser* parse
             const uint32_t spelling = enumerator ? 0 : check_common_operand_spelling(parser, input, graph, stream, types, leaf);
             const String8 source_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, coerced, spelling);
             const String8 plain = check_driver_warning_type(parser, pp, input, types, spell, scratch, leaf_enum, 0);
-            if (source_name.length != 0 && memmem(plain.pointer, plain.length, "(unnamed", 8) == NULL)
+            // (None where its context is in a system header's macro: CheckImplicitConversion's isInSystemMacro(CC), #3338.)
+            if (source_name.length != 0 && memmem(plain.pointer, plain.length, "(unnamed", 8) == NULL &&
+                !check_common_conversion_system(parser, pp, check_common_enum_cast_location(parser, graph, leaf)))
             {
                 const char* message = check_warning_text(scratch, "implicit conversion from enumeration type %.*s to different enumeration type %.*s",
                                                           (int)source_name.length, source_name.pointer, (int)target_name.length, target_name.pointer);
@@ -3896,6 +3899,26 @@ static void check_common_self_assigns(const Parser* parser, Preprocessor* pp, co
     }
 }
 
+// The file range `token` is spelled in (pp_find_range of its spelling location), or BUSTER_PP_NONE.
+static uint32_t check_common_spelling_range(const Parser* parser, const Preprocessor* pp, uint32_t token)
+{
+    const uint32_t source = token < parser->tokens.count ? parse_source_index(&parser->tokens, token) : BUSTER_PP_NONE;
+    const uint32_t location = source < pp->output.count && pp->output.locations != NULL ? pp->output.locations[source] : 0;
+    const uint32_t result = location != 0 ? pp_find_range(pp, location) : BUSTER_PP_NONE;
+    return result;
+}
+
+// Whether a subscript past its array's end is quiet as clang's CheckArrayAccess leaves it (#3338): its `]` is spelled in a
+// system header and its index in the same file, both a system macro's.
+static bool check_common_bounds_system(const Parser* parser, const Preprocessor* pp, uint32_t bracket, uint32_t index)
+{
+    const uint32_t source = bracket < parser->tokens.count ? parse_source_index(&parser->tokens, bracket) : BUSTER_PP_NONE;
+    const uint32_t location = source < pp->output.count && pp->output.locations != NULL ? pp->output.locations[source] : 0;
+    const uint32_t range = location != 0 && pp_system_level_at(pp, location) != BUSTER_PP_USER_FILE ? pp_find_range(pp, location) : BUSTER_PP_NONE;
+    const bool result = range != BUSTER_PP_NONE && range == check_common_spelling_range(parser, pp, index);
+    return result;
+}
+
 // Whether the subscript `node` is a value of a brace initializer or a compound literal (a part of its plan) that no operator
 // checks (#2252): clang's CheckArrayAccess of the full expression sees the initializer list, which it doesn't look into, so
 // only an operator that checks its operand does (`-a[5]`, `f(a[5])`, a comma's right operand). Its climb takes an array's
@@ -4029,7 +4052,8 @@ static void check_common_own(CheckCommonEmission* emission, uint32_t node)
                         }
                     }
                     checked = checked && (emission->parents == NULL || !check_common_brace_element(emission, node));
-                    const bool past = checked && value >= 0 && (relaxed ? (unsigned __int128)value > extent : (unsigned __int128)value >= extent);
+                    const bool past = checked && value >= 0 && (relaxed ? (unsigned __int128)value > extent : (unsigned __int128)value >= extent) &&
+                                      !check_common_bounds_system(parser, pp, graph->tokens[node], graph->tokens[index]);
                     const bool before = checked && value < 0;
                     if (past || before)
                     {
@@ -4083,8 +4107,44 @@ struct CheckCommonUnused
 {
     uint32_t node;
     bool call;
+    // Whether the discarded expression is written in a macro's body or a system header's macro, where clang drops any
+    // warning of it but a call's (DiagnoseUnusedExprResult's ShouldSuppress, check_common_unused_quiet).
+    bool quiet;
     CheckCommonIgnoredResult found;
 };
+
+// Where clang's DiagnoseUnusedExprResult looks for a discarded expression's macro (its getExprLoc past parentheses and
+// implicit conversions): an operator's own token, a conditional's first token, a cast's `(`, a member's name, a value's
+// token.
+static uint32_t check_common_unused_place(CheckCommonEmission* emission, uint32_t node)
+{
+    const CheckGraph* graph = &emission->input->graph;
+    const Parser* parser = emission->parser;
+    const uint32_t count = parser->tokens.count;
+    uint32_t top = node;
+    for (uint32_t steps = 0; top < graph->count && graph->ops[top] == CHECK_OP_CONVERT && steps < graph->count; steps += 1)
+    {
+        top = graph->operand0[top];
+    }
+    const uint32_t token = top < graph->count ? graph->tokens[top] : BUSTER_CHECK_NONE;
+    const uint8_t role = token < count ? parser->tree.roles[token] : PARSE_ROLE_NONE;
+    const uint32_t opener = role == PARSE_ROLE_CLOSE_CAST ? check_common_cast_opener(parser, token) : BUSTER_CHECK_NONE;
+    const uint32_t result = token >= count ? BUSTER_CHECK_NONE :
+                            graph->ops[top] == CHECK_OP_CONDITIONAL ? check_common_emission_subtree_start(emission, token) :
+                            opener != BUSTER_CHECK_NONE ? opener :
+                            role == PARSE_ROLE_MEMBER_OPERATOR && token + 1 < count ? token + 1 : token;
+    return result;
+}
+
+// Whether a discarded expression's warning is dropped as clang's ShouldSuppress drops it (#3338): its place
+// (check_common_unused_place) is a macro's body's token, or a system header's macro's (check_common_ignored_macro). The
+// system test is the token's spelling, as clang's isInSystemMacro is, not the expansion the generic suppression reads.
+static bool check_common_unused_quiet(CheckCommonEmission* emission, uint32_t node)
+{
+    const uint32_t place = check_common_unused_place(emission, node);
+    const bool result = place != BUSTER_CHECK_NONE && check_common_ignored_macro(emission->parser, emission->pp, place);
+    return result;
+}
 
 // Whether `node` reads a volatile object (not an array's): clang's lvalue conversion of a volatile glvalue, a side effect
 // a discarded value keeps.
@@ -4227,6 +4287,7 @@ static __attribute__((noinline)) CheckCommonUnused check_common_unused_of(CheckC
     const CheckOp top_op = result.call && top < graph->count ? graph->ops[top] : CHECK_OP_COUNT;
     result.found.macro = top_op == CHECK_OP_COMMA ? graph->tokens[top] :
                          top_op == CHECK_OP_CONDITIONAL ? check_common_emission_subtree_start(emission, graph->tokens[top]) : result.found.macro;
+    result.quiet = result.node != BUSTER_CHECK_NONE && !result.call && check_common_unused_quiet(emission, node);
     return result;
 }
 
@@ -4246,7 +4307,7 @@ static __attribute__((noinline)) void check_common_unused_report(CheckCommonEmis
     {
         check_common_ignored_report(emission, &unused->found);
     }
-    else if (token < count && !(cast && check_common_void_cast(parser, emission->pp, emission->input, emission->stream, emission->types, token)))
+    else if (token < count && !unused->quiet && !(cast && check_common_void_cast(parser, emission->pp, emission->input, emission->stream, emission->types, token)))
     {
         const uint32_t opener = cast ? check_common_cast_opener(parser, token) :
                                 role == PARSE_ROLE_CLOSE_KEYWORD ? check_common_ignored_opener(parser, token) : BUSTER_CHECK_NONE;
@@ -4338,7 +4399,7 @@ static void check_common_comma_marker(CheckCommonEmission* emission, uint32_t no
         // A call's result the left operand drops (#1447).
         check_common_ignored_report(emission, &unused.found);
     }
-    else if (left_start < comma && !left_effect)
+    else if (left_start < comma && !left_effect && !unused.quiet)
     {
         uint32_t report = left_result < graph->count && graph->tokens[left_result] < count ? graph->tokens[left_result] : left;
         uint8_t report_role = report < count ? parser->tree.roles[report] : PARSE_ROLE_NONE;
@@ -4490,12 +4551,14 @@ static void check_common_stmt_marker(CheckCommonEmission* emission, uint32_t nod
     const uint8_t parent_role = parent < count ? parser->tree.roles[parent] : PARSE_ROLE_NONE;
     const bool discarded = check_common_discarded_place(parser, token);
     const CheckOp op = graph->ops[node];
+    // A value a macro's body writes is quiet (check_common_unused_quiet); a call's own warnings decide for themselves.
+    const bool quiet = discarded && op != CHECK_OP_CALL && check_common_unused_quiet(emission, node);
     if (discarded && op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL)
     {
         // An indirect comparison takes the generic marker; a direct one already reported as a comparison, but a discarded
         // statement expression's value, whose warning is clang's DiagnoseUnusedExprResult's of the statement expression
         // (#1447).
-        if (parent_role != PARSE_ROLE_TERMINATOR || check_common_statement_value(parser, parent))
+        if (!quiet && (parent_role != PARSE_ROLE_TERMINATOR || check_common_statement_value(parser, parent)))
         {
             check_common_report_unused(parser, emission->pp, emission->input, token, emission->parents, node, CHECK_WARNING_ID_UNUSED_VALUE,
                                        "expression result unused", NULL, 0, emission->scratch);
@@ -4513,7 +4576,7 @@ static void check_common_stmt_marker(CheckCommonEmission* emission, uint32_t nod
     {
         check_common_selected_marker(emission, node);
     }
-    else if (discarded && op != CHECK_OP_INITIALIZE && op != CHECK_OP_CONVERT && op != CHECK_OP_CONDITION &&
+    else if (discarded && !quiet && op != CHECK_OP_INITIALIZE && op != CHECK_OP_CONVERT && op != CHECK_OP_CONDITION &&
              check_common_effect_role(role) && role != PARSE_ROLE_ASSIGN && role != PARSE_ROLE_EQUALITY &&
              role != PARSE_ROLE_RELATIONAL &&
              !(role == PARSE_ROLE_CLOSE_CAST && check_common_void_cast(parser, emission->pp, emission->input, emission->stream, emission->types, token)) &&
@@ -5544,7 +5607,9 @@ static void check_common_parentheses(const Parser* parser, Preprocessor* pp, con
                                                      parser->tokens.kinds[token] == PARSE_KIND_EXCLAIMEQUAL ? "use '|=' to turn this inequality comparison into an or-assignment" : "" };
             const bool suggest = equality && check_common_comparison_lvalue(input, stream, token);
             // (A statement expression's value is the walk's, as the statement expression's discarded value, #1447.)
-            if (!check_common_statement_value(parser, parent))
+            // None where a macro's body writes the operator (DiagnoseUnusedComparison), nor in a system header's macro,
+            // where the unused value's own warning is dropped too (check_common_ignored_macro).
+            if (!check_common_statement_value(parser, parent) && !check_common_ignored_macro(parser, pp, token))
             {
                 check_common_report_discarded(parser, pp, input, token, CHECK_WARNING_ID_UNUSED_COMPARISON, message,
                                               suggest ? &note : NULL, suggest ? 1u : 0u, scratch);
@@ -6560,6 +6625,116 @@ static bool check_common_character_type(const TypeTable* types, TypeId type)
 // -Wliteral-conversion a builtin target alone (DiagnoseFloatingImpCast reads a BuiltinType), so not an enumeration, whose
 // integer type check_common_integer reads, but -Wconstant-conversion an enumeration too, by its integer type's range. An
 // _Atomic type takes neither. (An _Atomic destination's conversion is to its value type: BUSTER_CHECK_CONVERT_ATOMIC.)
+// Whether `token` is written in a system header's macro: clang's SourceManager::isInSystemMacro, a token a macro gave
+// whose spelling is in a system header (#3338). The generic suppression reads a token's expansion instead
+// (check_common_severity); only the checks clang gives this test of their own read it.
+static bool check_common_system_macro(const Parser* parser, const Preprocessor* pp, uint32_t token)
+{
+    const uint32_t source = token < parser->tokens.count ? parse_source_index(&parser->tokens, token) : BUSTER_PP_NONE;
+    const bool macro = source < pp->output.count && pp->output.flags != NULL && pp->output.locations != NULL &&
+                       (pp->output.flags[source] & BUSTER_PP_FROM_MACRO) != 0;
+    const bool result = macro && pp->output.locations[source] != 0 && pp_system_level_at(pp, pp->output.locations[source]) != BUSTER_PP_USER_FILE;
+    return result;
+}
+
+// Whether `=` at `token` is a declarator's: its parent, past a declaration's commas, is the declaration's specifier.
+static bool check_common_declarator_assign(const Parser* parser, uint32_t token)
+{
+    const uint32_t count = parser->tokens.count;
+    uint32_t at = token < count ? parser->tree.parents[token] : count;
+    for (uint32_t steps = 0; at < count && parser->tree.roles[at] == PARSE_ROLE_COMMA && steps < count; steps += 1)
+    {
+        const uint32_t up = parser->tree.parents[at];
+        at = up != at ? up : count;
+    }
+    const bool result = at < count && (parser->tree.roles[at] == PARSE_ROLE_SPECIFIER || parser->tree.roles[at] == PARSE_ROLE_TAG);
+    return result;
+}
+
+// The context location clang's CheckImplicitConversion receives for the converted expression at `token` (its CC): the
+// nearest enclosing assignment's `=` or initialized declarator's name, comma operator, `return`, call (its callee's first token, the
+// call's getExprLoc) or brace initializer (its `{`), past groups, casts' operands, conditional arms and operators. Its
+// conversion value warnings are dropped where that place is in a system header's macro (check_common_system_macro).
+static uint32_t check_common_conversion_context(const Parser* parser, uint32_t token)
+{
+    const uint32_t count = parser->tokens.count;
+    uint32_t result = BUSTER_CHECK_NONE;
+    uint32_t at = token < count ? parser->tree.parents[token] : BUSTER_CHECK_NONE;
+    for (uint32_t steps = 0; result == BUSTER_CHECK_NONE && at < count && steps < count; steps += 1)
+    {
+        const uint8_t role = parser->tree.roles[at];
+        if (role == PARSE_ROLE_ASSIGN && check_common_declarator_assign(parser, at))
+        {
+            // A declarator's `=`, whose left is no operand of it: the declarator's name (the declaration's location), the
+            // last identifier before it outside its array bounds.
+            uint32_t depth = 0;
+            for (uint32_t back = at; result == BUSTER_CHECK_NONE && back-- > 0;)
+            {
+                const uint8_t kind = parser->tokens.kinds[back];
+                depth += kind == PARSE_KIND_R_SQUARE ? 1u : 0u;
+                depth -= kind == PARSE_KIND_L_SQUARE && depth != 0 ? 1u : 0u;
+                result = depth == 0 && kind == PARSE_KIND_IDENTIFIER ? back : BUSTER_CHECK_NONE;
+                back = kind == PARSE_KIND_SEMI || kind == PARSE_KIND_L_BRACE || kind == PARSE_KIND_R_BRACE ? 0 : back;
+            }
+            result = result == BUSTER_CHECK_NONE ? at : result;
+        }
+        else if (role == PARSE_ROLE_ASSIGN || role == PARSE_ROLE_RETURN || role == PARSE_ROLE_COMMA)
+        {
+            result = at;
+        }
+        else if (role == PARSE_ROLE_CLOSE_CALL)
+        {
+            result = check_common_subtree_start(parser, at);
+        }
+        else if (role == PARSE_ROLE_CLOSE_INITIALIZER)
+        {
+            const uint32_t opener = check_common_opener(parser, at);
+            result = opener < count ? opener : at;
+        }
+        else if (role == PARSE_ROLE_TERMINATOR || role == PARSE_ROLE_CLOSE_CONDITION || role == PARSE_ROLE_CLOSE_FOR || role == PARSE_ROLE_SEPARATOR ||
+                 role == PARSE_ROLE_CLOSE_BLOCK || role == PARSE_ROLE_CLOSE_BODY)
+        {
+            at = count;
+        }
+        const uint32_t up = result == BUSTER_CHECK_NONE && at < count ? parser->tree.parents[at] : count;
+        at = up != at ? up : count;
+    }
+    return result;
+}
+
+// Whether a conversion's value warning at `token` is dropped as clang drops it where its context is in a system header's
+// macro (CheckImplicitConversion's isInSystemMacro(CC), check_common_conversion_context).
+static bool check_common_conversion_system(const Parser* parser, const Preprocessor* pp, uint32_t token)
+{
+    const uint32_t context = check_common_conversion_context(parser, token);
+    const bool result = context != BUSTER_CHECK_NONE && check_common_system_macro(parser, pp, context);
+    return result;
+}
+
+// The conversion warning's second highlighted range, its context's token (clang's SourceRange(CC)), set before the
+// warning and cleared after it (check_common_conversion_range_end). A value a macro's argument gives keeps that macro's
+// note where the context is outside the argument (Preprocessor.diagnostic_spans, check_common_argument_occurrence), as
+// clang's rangesInsideSameMacroArgExpansion decides. Returns the spans flag to restore.
+static bool check_common_conversion_range(const Parser* parser, Preprocessor* pp, uint32_t token)
+{
+    const bool spans = pp->diagnostic_spans;
+    const uint32_t context = check_common_conversion_context(parser, token);
+    if (context < parser->tokens.count)
+    {
+        const uint32_t source = parse_source_index(&parser->tokens, context);
+        pp_diagnostic_range_tokens(pp, source, source);
+        const uint64_t occurrence = check_common_argument_occurrence(parser, pp, token);
+        pp->diagnostic_spans |= occurrence != 0 && check_common_argument_occurrence(parser, pp, context) != occurrence;
+    }
+    return spans;
+}
+
+static void check_common_conversion_range_end(Preprocessor* pp, bool spans)
+{
+    pp_diagnostic_ranges_clear(pp);
+    pp->diagnostic_spans = spans;
+}
+
 static bool check_common_conversion_target(const TypeTable* types, TypeId target, bool floating)
 {
     const TypeId bare = target != 0 ? type_unqualified(type_strip_aligned(types, target)) : 0;
@@ -6577,7 +6752,7 @@ static void check_common_floating_conversion(const Parser* parser, Preprocessor*
 {
     uint32_t width = 0;
     bool is_signed = false;
-    if (check_common_integer(types, target, &width, &is_signed))
+    if (check_common_integer(types, target, &width, &is_signed) && !check_common_conversion_system(parser, pp, token))
     {
         CheckValue changed = *value;
         changed.flags &= ~BUSTER_CHECK_GNU_FLOAT_RANGE;
@@ -6622,6 +6797,7 @@ static void check_common_floating_conversion(const Parser* parser, Preprocessor*
                 message = check_warning_text(scratch, "implicit conversion from %.*s to %.*s changes value from %s to %s",
                                              (int)source_name.length, source_name.pointer, (int)target_name.length, target_name.pointer, original, converted_text);
             }
+            const bool spans = check_common_conversion_range(parser, pp, token);
             if (construction)
             {
                 check_common_report_constructed(parser, pp, input, token, publication, CHECK_WARNING_ID_LITERAL_CONVERSION, false, message, scratch);
@@ -6631,6 +6807,7 @@ static void check_common_floating_conversion(const Parser* parser, Preprocessor*
                 check_common_report_evaluated(parser, pp, input, token, publication, PP_DIAGNOSTIC_DEFERRED,
                                              CHECK_WARNING_ID_LITERAL_CONVERSION, false, message, NULL, 0, scratch);
             }
+            check_common_conversion_range_end(pp, spans);
         }
     }
 }
@@ -6643,6 +6820,7 @@ static void check_common_conversion_leaf(const Parser* parser, Preprocessor* pp,
     // An assignment's or an increment's value, which the stream may hold as its stored constant, is none to clang's
     // evaluator (#1447: `char c = x = 1000;`, `{ x = 300 }`), so its conversion warns of nothing.
     const CheckOp op = source < input->graph.count ? input->graph.ops[source] : CHECK_OP_COUNT;
+    const uint32_t graph_token = source < input->graph.count ? input->graph.tokens[source] : BUSTER_CHECK_NONE;
     const bool written = op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN);
     const bool plain = !written && check_common_conversion_target(types, target, false);
     const bool width = plain && value->constant_kind == CHECK_CONSTANT_INTEGER && check_common_same_width(types, value, target);
@@ -6653,7 +6831,8 @@ static void check_common_conversion_leaf(const Parser* parser, Preprocessor* pp,
     bool wide = false;
     const bool wide_changes = candidate && check_common_integer_kind_wide(types, value->type, target) && check_wide_conversion_changes(types, value, target, &wide);
     if (candidate && (wide ? wide_changes : check_common_conversion_changes(types, value->type, target, value->integer, &converted)) &&
-        !check_common_nondecimal_literal(parser, pp, &input->graph, types, source, value, target, scratch))
+        !check_common_nondecimal_literal(parser, pp, &input->graph, types, source, value, target, scratch) &&
+        !check_common_conversion_system(parser, pp, graph_token))
     {
         const String8 source_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, value->type, 0);
         const String8 target_name = check_driver_warning_type(parser, pp, input, types, spell, scratch, target, 0);
@@ -6690,8 +6869,10 @@ static void check_common_conversion_leaf(const Parser* parser, Preprocessor* pp,
             const uint32_t publication = body ? check_common_function_boundary(parser, token) :
                                          at_once != BUSTER_CHECK_NONE ? at_once : check_common_full_expression_end(parser, graph, parents, source);
             const PPDiagnosticRecord* previous = pp->diagnostic_last;
+            const bool spans = check_common_conversion_range(parser, pp, graph_token);
             check_common_report_evaluated(parser, pp, input, token, publication, body || width ? PP_DIAGNOSTIC_DEFERRED : PP_DIAGNOSTIC_RUNTIME,
                                         CHECK_WARNING_ID_CONSTANT_CONVERSION, false, message, NULL, 0, scratch);
+            check_common_conversion_range_end(pp, spans);
             // A body's, queued as its full expression completes (#2252).
             if (body)
             {
@@ -7552,16 +7733,37 @@ static bool check_common_bitfield_truncates(const CheckGraph* graph, const Check
 // The bit-field truncation's warning (check_common_bitfield_truncates) at `token`, published at `publication`: clang's
 // Diag, as an assignment's full expression completes, but in an unevaluated operand, or, in an unevaluated operand too, as
 // an `initialization` is checked. The constant's type is spelled as written, its typedef's name and all.
+// Whether `token` is a system header's macro's that a macro named `true` gave (clang's isInSystemMacro and
+// findMacroSpelling(..., "true")): <stdbool.h>'s `true`, which a one-bit bit-field takes without a warning (#3338).
+static bool check_common_system_true(const Parser* parser, Preprocessor* pp, uint32_t token)
+{
+    bool result = false;
+    if (check_common_system_macro(parser, pp, token) && pp_history_ensure(pp))
+    {
+        uint32_t origin = pp_history_at(pp, parse_source_index(&parser->tokens, token));
+        for (uint32_t steps = 0; !result && origin != 0 && steps < 256; steps += 1)
+        {
+            const uint32_t index = (origin & BUSTER_PP_ORIGIN_INDEX) - 1;
+            const uint32_t kind = origin & ~BUSTER_PP_ORIGIN_INDEX;
+            result = kind == 0 && pp->history[index].name == C_NAME_TRUE;
+            origin = kind == 0 ? pp->history[index].parent : kind == BUSTER_PP_ORIGIN_ARGUMENT ? pp->substitutions[index].source : 0;
+        }
+    }
+    return result;
+}
+
 static void check_common_bitfield_warning(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                           TypeTable* types, CheckWarningSpelling* spell, uint32_t source, uint32_t bit_width,
                                           __int128 original, __int128 truncated, uint32_t token, uint32_t publication, bool initialization,
                                           Arena* scratch)
 {
-    const String8 name = check_driver_warning_type(parser, pp, input, types, spell, scratch, check_stream_type(stream, source),
-                                                   check_input_operand_type_spelling(input, parser, source));
+    const bool single = bit_width == 1 && original == 1;
+    const uint32_t value = source < input->graph.count ? input->graph.tokens[source] : BUSTER_CHECK_NONE;
+    const bool quiet = single && value < parser->tokens.count && check_common_system_true(parser, pp, check_common_subtree_start(parser, value));
+    const String8 name = quiet ? (String8){ 0 } : check_driver_warning_type(parser, pp, input, types, spell, scratch, check_stream_type(stream, source),
+                                                                           check_input_operand_type_spelling(input, parser, source));
     if (name.length != 0)
     {
-        const bool single = bit_width == 1 && original == 1;
         char from[48];
         char to[48];
         check_common_number(from, sizeof(from), original);
@@ -9821,12 +10023,15 @@ static void check_common_format(const Parser* parser, Preprocessor* pp, const Ch
                     }
                 }
             }
-            if (data_count != 0 && !all_covered && max_uncovered != BUSTER_CHECK_NONE)
+            const uint32_t extra_node = data_count != 0 && !all_covered && max_uncovered != BUSTER_CHECK_NONE ?
+                                        graph->argument_nodes[offset + first_argument + max_uncovered] : BUSTER_CHECK_NONE;
+            // None where the extra argument begins in a system header's macro (CheckFormatArguments' isInSystemMacro, #3338).
+            if (data_count != 0 && !all_covered && max_uncovered != BUSTER_CHECK_NONE &&
+                !(extra_node < graph->count && check_common_system_macro(parser, pp, check_common_subtree_start(parser, graph->tokens[extra_node]))))
             {
                 // The extra argument is the first index no finished literal covered — an invalid
                 // specifier may mark an index without advancing past it, so plain and positional
                 // styles share the scan.
-                const uint32_t extra_node = graph->argument_nodes[offset + first_argument + max_uncovered];
                 const uint32_t extra_token = extra_node < graph->count ? graph->tokens[extra_node] : graph->tokens[format_node];
                 const uint32_t natural = extra_token < parser->tokens.count ? parse_source_index(&parser->tokens, extra_token) : order;
                 order = natural > order ? natural : order;

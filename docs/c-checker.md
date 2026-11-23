@@ -7056,9 +7056,17 @@ assignment writes and no read uses.
 
 Each uses the shared warning policy, so a default or group option, a
 `#pragma clang diagnostic` change and `-Werror` promotion behave as the other
-sparse warnings do. A token from a system-header macro is suppressed by its
-spelling location, as `assert`'s empty `if` is, unless `-Wsystem-headers` asks
-for it. The `-Wswitch` check needs a named enum's source definition and literal
+sparse warnings do. A warning in a system header is suppressed, unless
+`-Wsystem-headers` asks for it, by its token's expansion location, as clang's
+DiagnosticsEngine does: a system header's macro expanded in user code warns
+there, with its "expanded from macro" note (#3338). The checks whose clang code
+tests `isInSystemMacro` itself test the token's spelling: a value conversion's
+context (CheckImplicitConversion's CC: the assignment's operator, the
+declarator's name, the `return`, the call, the brace), a discarded value's
+expression, which a macro's body silences too (DiagnoseUnusedExprResult), a
+format call's extra argument, and an array index whose `]` and index a system
+header spells; `assert`'s empty `if` is quiet because its `;` is on another
+line. The `-Wswitch` check needs a named enum's source definition and literal
 enumerator `case` labels; it compares the enumerators' checked values, so
 aliases (`A = 1, B = 1`) that a case handles are not reported missing. A
 computed case leaves the switch to a full constant evaluator.
