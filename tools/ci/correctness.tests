@@ -860,6 +860,13 @@ errors=$(mktemp)
 directory=$(mktemp -d)
 if "$BUSTER_COMPILER" measure-tier1-programs --runs 1 > /dev/null 2> "$errors"; then exit 1; fi
 grep -q '^usage: measure-tier1-programs --clang PATH' "$errors"
+# #138: --compiles takes a count of rounds, and the timed compiles have nothing to build with --sizes-only.
+if "$BUSTER_COMPILER" measure-tier1-programs --compiles 0 --clang clang --sqlite "$directory/none" --speedtest "$directory/none" --lua "$directory/none" \
+    --scripts "$directory/none" --directory "$directory" > /dev/null 2> "$errors"; then exit 1; fi
+grep -q '^usage: measure-tier1-programs --clang PATH' "$errors"
+if "$BUSTER_COMPILER" measure-tier1-programs --sizes-only --compiles 1 --clang clang --sqlite "$directory/none" --lua "$directory/none" \
+    --directory "$directory" > /dev/null 2> "$errors"; then exit 1; fi
+grep -q '^usage: measure-tier1-programs --clang PATH' "$errors"
 if "$BUSTER_COMPILER" measure-tier1-programs --runs 1 --clang clang --sqlite "$directory/none" --speedtest "$directory/none" --lua "$directory/none" \
     --scripts "$directory/none" --directory "$directory" > "$errors" 2>&1; then exit 1; fi
 grep -q "^measure-tier1-programs: Tier 0's builds FAILED$" "$errors"
