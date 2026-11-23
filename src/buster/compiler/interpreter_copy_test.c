@@ -95,7 +95,7 @@ static void interpreter_test_copy_ranges(InterpreterTestTally* tally)
         interpreter_test_expect(tally, status == INTERPRETER_MEMORY, "COPY destination bounds checked before host writes");
     }
     interpreter_test_expect(tally, interpreter_typed_copy(&runtime, to, from, 0) == INTERPRETER_INVALID &&
-                            interpreter_typed_copy(&runtime, to, from, (uint64_t)BUSTER_TIER0_MAX_COPY_BYTES + 1) == INTERPRETER_INVALID, "COPY byte-count contract");
+                            interpreter_typed_copy(&runtime, to, from, (uint64_t)BUSTER_TIER0_MAX_COPY_VALUE + 1) == INTERPRETER_INVALID, "COPY byte-count contract");
     runtime.check_memory = false;
     interpreter_test_expect(tally, interpreter_typed_copy(&runtime, to + 12, from, 8) == INTERPRETER_MEMORY &&
                             interpreter_typed_copy(&runtime, to, from + 12, 8) == INTERPRETER_MEMORY, "unchecked COPY cannot escape a known allocation");
@@ -209,7 +209,7 @@ static void interpreter_test_copy_dispatch(InterpreterTestTally* tally, Arena* s
         }
         const uint64_t invalid_sizes[] = {
             0,
-            (uint64_t)BUSTER_TIER0_MAX_COPY_BYTES + 1,
+            (uint64_t)BUSTER_TIER0_MAX_COPY_VALUE + 1,
             UINT64_MAX,
         };
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(invalid_sizes); i += 1)

@@ -706,10 +706,10 @@ static void check_test_library_run(CheckTest* test, const char* clang, const cha
     "printf(\"%llx %llx %llx %llx\\n\",bits(fmax(n,z)),bits(fmin(z,n)),bits(fmax(v,1.0)),bits(fmin(1.0,v)));return 0;}\n"
 
 // The unit's own definitions of memcpy, memmove, abs, labs, fabs and copysign, which count their calls (#1373): clang's
-// code computes a call of a declaration that is the builtin in its place, memcpy's and memmove's of a constant size of at
-// most 32 bytes, so that the counts tell computed calls from called ones; memcpy of 33 bytes and of a size that is no
-// constant, and memmove of one, call the definitions. memset stays out: clang -O0's code calls it whatever its size, where
-// this compiler stores a small one's bytes.
+// code computes a call of a declaration that is the builtin in its place, memcpy's of a constant size of at most 32 bytes
+// and memmove's of at most 128 (8 of x86-64's 16-byte vectors), so that the counts tell computed calls from called ones;
+// memcpy of 33 bytes, memmove of 129, and either of a size that is no constant call the definitions. memset stays out:
+// clang -O0's code calls it whatever its size, where this compiler stores a small one's bytes.
 #define BUSTER_CHECK_TEST_COMPUTED_PROGRAM \
     "int printf(const char*,...);typedef unsigned long size_t;static int calls;\n" \
     "void*memcpy(void*d,const void*s,size_t n){calls+=1;char*a=d;const char*b=s;while(n--)*a++=*b++;return d;}\n" \
@@ -718,7 +718,25 @@ static void check_test_library_run(CheckTest* test, const char* clang, const cha
     "double fabs(double x){calls+=10000;return x<0?-x:x;}double copysign(double x,double y){calls+=100000;return (y<0)!=(x<0)?-x:x;}\n" \
     "int main(void){char a[48],b[48];for(int i=0;i<48;i++){a[i]=(char)('a'+i%26);b[i]='.';}volatile size_t n=4;volatile int v=-3;volatile double d=-2.5;\n" \
     "memcpy(b,a,8);memcpy(b+8,a,n);memcpy(b+12,a+5,33);memmove(b+1,b,12);memmove(b+30,b+29,n);memmove(b+3,b+4,32);\n" \
-    "int r=abs(v)+(int)labs(v)*10;double f=fabs(d)+copysign(1.0,d);printf(\"%d %d %.1f %.45s\\n\",calls,r,f,b);return 0;}\n"
+    "char c[160];for(int i=0;i<160;i++)c[i]=(char)('A'+i%23);memmove(c+1,c,64);memmove(c+3,c+4,128);memmove(c+5,c+2,33);memmove(c+2,c+7,129);\n" \
+    "int r=abs(v)+(int)labs(v)*10;double f=fabs(d)+copysign(1.0,d);printf(\"%d %d %.1f %.45s %.150s\\n\",calls,r,f,b,c);return 0;}\n"
+
+// The unit's own memmove, counting its calls, called from functions whose tuning or size attribute bounds the moves clang's
+// code inlines (#1373): 8 stores of 16 bytes at x86-64's tuning, of 8 where it has unaligned 16-byte accesses slow
+// (core2's) and the target has no SSE4.2, 4 stores with minsize, so 128, 64 and 32 bytes; each function moves 32, 33, 64,
+// 65, 128 and 129 bytes.
+#define BUSTER_CHECK_TEST_MOVE_TUNING_PROGRAM \
+    "int printf(const char*,...);typedef unsigned long size_t;static int calls;\n" \
+    "void*memmove(void*d,const void*s,size_t n){calls+=1;char*a=d;const char*b=s;if(a<b)while(n--)*a++=*b++;else while(n--)a[n]=b[n];return d;}\n" \
+    "#define MOVES(c) memmove(c+1,c,32);memmove(c+2,c,33);memmove(c+1,c+3,64);memmove(c+4,c,65);memmove(c,c+5,128);memmove(c+2,c+1,129);\n" \
+    "static int plain(char*c){int before=calls;MOVES(c)return calls-before;}\n" \
+    "__attribute__((minsize)) static int small(char*c){int before=calls;MOVES(c)return calls-before;}\n" \
+    "__attribute__((target(\"arch=core2\"))) static int arch(char*c){int before=calls;MOVES(c)return calls-before;}\n" \
+    "__attribute__((target(\"tune=core2\"))) static int tune(char*c){int before=calls;MOVES(c)return calls-before;}\n" \
+    "__attribute__((minsize,target(\"tune=core2\"))) static int both(char*c){int before=calls;MOVES(c)return calls-before;}\n" \
+    "__attribute__((target(\"tune=x86-64\"))) static int generic(char*c){int before=calls;MOVES(c)return calls-before;}\n" \
+    "int main(void){char c[160];for(int i=0;i<160;i++)c[i]=(char)('a'+i%26);\n" \
+    "printf(\"%d %d %d %d %d %d \",plain(c),small(c),arch(c),tune(c),both(c),generic(c));printf(\"%.150s\\n\",c);return 0;}\n"
 
 static void check_test_library_runs(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
@@ -862,6 +880,42 @@ static void check_test_library_runs(CheckTest* test, const char* clang, const ch
             BUSTER_CHECK_TEST_COMPUTED_PROGRAM,
             "-std=gnu17",
             "-ffreestanding",
+        },
+        {
+            "a memmove's inline bytes follow the function's tuning and minsize, as clang's code's (#1373)",
+            BUSTER_CHECK_TEST_MOVE_TUNING_PROGRAM,
+            "-std=gnu17",
+            NULL,
+        },
+        {
+            "-march=core2's tuning inlines a memmove of at most 64 bytes, but a function's tune=x86-64",
+            BUSTER_CHECK_TEST_MOVE_TUNING_PROGRAM,
+            "-std=gnu17",
+            "-march=core2",
+        },
+        {
+            "-mtune=core2 inlines a memmove of at most 64 bytes",
+            BUSTER_CHECK_TEST_MOVE_TUNING_PROGRAM,
+            "-std=gnu17",
+            "-mtune=core2",
+        },
+        {
+            "-march=x86-64-v2's SSE4.2 makes a function's tune=core2 inline a memmove of 128 bytes",
+            BUSTER_CHECK_TEST_MOVE_TUNING_PROGRAM,
+            "-std=gnu17",
+            "-march=x86-64-v2",
+        },
+        {
+            "-march=nehalem's tuning inlines a memmove of 128 bytes",
+            BUSTER_CHECK_TEST_MOVE_TUNING_PROGRAM,
+            "-std=gnu17",
+            "-march=nehalem",
+        },
+        {
+            "-march=core2 keeps a plain declaration's memmove past 64 bytes a call",
+            BUSTER_CHECK_TEST_COMPUTED_PROGRAM,
+            "-std=gnu17",
+            "-march=core2",
         },
         {
             "no_builtin keeps every plain library builtin's call a call, but its __builtin_ form's",

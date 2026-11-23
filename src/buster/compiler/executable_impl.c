@@ -6313,13 +6313,39 @@ static void executable_lane_fail_write(ExecutableLaneError* error, int system_er
     }
 }
 
+// Whether a piece in [begin, end) of the file has its bytes in the `borrowed_bytes` from `borrowed`
+// (ExecutableOptions.borrowed): two pieces a vector, their offsets in lanes 0 and 4 and their bytes in lanes 2 and 6.
+static bool executable_chunk_borrows(const ExecutablePiece* pieces, uint64_t piece_count, uint64_t begin, uint64_t end, const uint8_t* borrowed,
+                                     uint64_t borrowed_bytes)
+{
+    const __m512i base = _mm512_set1_epi64((long long)(uintptr_t)borrowed);
+    const __m512i size = _mm512_set1_epi64((long long)borrowed_bytes);
+    const __m512i limit = _mm512_set1_epi64((long long)end);
+    bool result = false;
+    bool more = borrowed_bytes != 0;
+    for (uint64_t i = borrowed_bytes != 0 ? executable_piece_after(pieces, piece_count, begin) : piece_count; more && i < piece_count; i += 2)
+    {
+        const __mmask8 lanes = piece_count - i >= 2 ? 0xff : 0x0f;
+        const __m512i records = _mm512_maskz_loadu_epi64(lanes, pieces + i);
+        // A piece is in the chunk when its offset is below `end` (the first is, by executable_piece_after, and the
+        // pieces are in file order); its bytes are borrowed when their distance from `borrowed` is below the size.
+        const __mmask8 within = _mm512_mask_cmplt_epu64_mask(lanes & 0x11, records, limit);
+        const __mmask8 inside = _mm512_mask_cmplt_epu64_mask(lanes & 0x44, _mm512_sub_epi64(records, base), size);
+        result = (inside & (__mmask8)(within << 2)) != 0;
+        more = !result && within == (lanes & 0x11);
+    }
+    return result;
+}
+
 // Patches and hashes chunk `chunk`, and writes it while it is in L2, unless `file` is -1: patched in place and written
-// from its pieces, or with `staged`, copied into the lane's scratch, patched, hashed and written from there.
+// from its pieces, or staged (with ExecutableOptions.stage, or a piece of ExecutableOptions.borrowed's in the chunk),
+// copied into the lane's scratch, patched, hashed and written from there.
 static void executable_chunk(Link* link, ExecutableShared* shared, const ExecutableLayout* layout, const ExecutablePatch* patch, uint64_t chunk, int file,
-                             bool staged, ExecutableLaneError* error)
+                             const ExecutableOptions* options, ExecutableLaneError* error)
 {
     const uint64_t begin = shared->boundaries[chunk];
     const uint64_t end = shared->boundaries[chunk + 1];
+    const bool staged = file >= 0 && (options->stage || executable_chunk_borrows(shared->pieces, layout->piece_count, begin, end, options->borrowed, options->borrowed_bytes));
     Scratch scratch = scratch_begin(0);
     uint8_t* staged_bytes = staged ? arena_push(scratch.arena, end - begin, 64) : 0;
     const FixupId failed = staged ? (staged_bytes != 0 ? executable_stage_chunk(link, layout, patch, shared->pieces, layout->piece_count, begin, end, staged_bytes) : 0)
@@ -6381,8 +6407,8 @@ static int executable_write_in_order(int file, const ExecutableLayout* layout, c
 }
 
 // Patches, hashes and writes the chunks of the parts this lane takes, each staged or not (executable_chunk).
-static void executable_chunks(Link* link, ExecutableShared* shared, const ExecutableLayout* layout, const ExecutablePatch* patch, int file, bool staged, uint32_t lane,
-                              uint32_t lanes)
+static void executable_chunks(Link* link, ExecutableShared* shared, const ExecutableLayout* layout, const ExecutablePatch* patch, int file, const ExecutableOptions* options,
+                              uint32_t lane, uint32_t lanes)
 {
     uint32_t* order = shared->orders + lane * BUSTER_LANE_PARTS_PER_LANE * (uint64_t)lanes;
     const uint64_t parts = lane_parts_by_cost(shared->boundaries + 1, layout->chunk_count, shared->part_boundaries, order);
@@ -6391,7 +6417,7 @@ static void executable_chunks(Link* link, ExecutableShared* shared, const Execut
         const uint32_t part = order[taken];
         for (uint64_t chunk = shared->part_boundaries[part]; chunk < shared->part_boundaries[part + 1]; chunk += 1)
         {
-            executable_chunk(link, shared, layout, patch, chunk, file, staged, executable_error(shared, EXECUTABLE_PHASE_CHUNKS, lane, lanes));
+            executable_chunk(link, shared, layout, patch, chunk, file, options, executable_error(shared, EXECUTABLE_PHASE_CHUNKS, lane, lanes));
         }
     }
 }
@@ -7399,7 +7425,7 @@ BUSTER_LINKER_ENTRY bool executable_write(Link* link, const ExecutableOptions* o
     };
     if (ok)
     {
-        executable_chunks(link, shared, layout, &patch, sequential ? -1 : descriptor, options->stage && !sequential, lane, lanes);
+        executable_chunks(link, shared, layout, &patch, sequential ? -1 : descriptor, options, lane, lanes);
     }
     lane_sync();
     const bool patched = ok && !executable_any_failed(shared, EXECUTABLE_PHASE_CHUNKS, lanes);

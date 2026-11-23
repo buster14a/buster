@@ -47,7 +47,19 @@ struct NodeAlone
     uint32_t* body_openings;
     uint32_t body_count;
     uint32_t next_body;
+    // The producer of a body's function without the walk (c_check_node_bodies.c, BUSTER_NODE_READER_PRODUCE), which decides
+    // each body here; and whether it runs as a compile would (BUSTER_NODE_READER_PRODUCE_LEAN).
+    struct NodeProducer* producer;
+    bool lean;
 };
+
+static struct NodeProducer* node_producer_begin(struct NodeAlone* alone, CheckInputReader* reader, uint32_t bodies);
+static void node_producer_enums(const struct NodeProducer* producer, NodeMachine* machine);
+static uint8_t node_producer_before(struct NodeProducer* producer, const NodeMachineReader* typer, const CheckInputReader* reader, uint32_t opening, uint8_t* detail, int* scan,
+                                    uint64_t* read);
+static uint8_t node_producer_after(struct NodeProducer* producer, const struct NodeAlone* alone, const CheckInputReader* reader, uint32_t opening, uint8_t reason, uint8_t verdict,
+                                   uint8_t* detail);
+static void node_producer_keep(struct NodeProducer* producer, NodeFrontShadow* shadow, uint32_t slot, uint8_t reason, uint8_t detail);
 
 // The census's tests' state reading `input` for the reader's output (c_check_node_census.c).
 static void node_census_reader_input(struct NodeCensusReader* tests, const CheckInput* input);
@@ -203,8 +215,9 @@ static inline uint64_t node_alone_lost(const NodeFrontShadow* report)
 }
 
 // One body, postorder positions `first` to `end` - 1, read whole before the walk acts at it. `typer` is the unit's
-// machine at reader time, which runs here with the graph and the results of this file for its own.
-static void node_alone_body(struct NodeAlone* alone, NodeMachineReader* typer, CheckInputReader* reader, uint32_t first, uint32_t end, uint32_t opening)
+// machine at reader time, which runs here with the graph and the results of this file for its own. `scan` is what the
+// scan of its tokens found where the producer has run it already (0 or 1), -1 where it is run here.
+static void node_alone_body(struct NodeAlone* alone, NodeMachineReader* typer, CheckInputReader* reader, uint32_t first, uint32_t end, uint32_t opening, int scan)
 {
     NodeFront* front = alone->front;
     // The roots the front loses of the body, counted from its report before and after: a root's token left (a statement's
@@ -253,13 +266,15 @@ static void node_alone_body(struct NodeAlone* alone, NodeMachineReader* typer, C
     typer->facts = NULL;
     typer->machine.reader_library = alone->types->library;
     typer->alone = true;
+    typer->keeps = alone->lean;
     const uint32_t dropped = BUSTER_CHECK_EXPRESSION_ACTS | CHECK_INPUT_CODE_DROP << BUSTER_CHECK_EXPRESSION_CODE_SHIFT;
     uint32_t tokens[BUSTER_CHECK_EXPRESSION_CHUNK];
     uint32_t classes[BUSTER_CHECK_EXPRESSION_CHUNK];
     CheckInputIdentifiers identifiers;
     CheckInputLiterals literals;
     bool room = true;
-    for (uint32_t position = first; room && position < end; position += BUSTER_CHECK_EXPRESSION_CHUNK)
+    // (As a compile would run it, a body is left at the chunk in which it is first stopped.)
+    for (uint32_t position = first; room && position < end && (!alone->lean || stopped_at == UINT64_MAX); position += BUSTER_CHECK_EXPRESSION_CHUNK)
     {
         const uint32_t stop = end - position < BUSTER_CHECK_EXPRESSION_CHUNK ? end : position + BUSTER_CHECK_EXPRESSION_CHUNK;
         const uint64_t start = __rdtsc();
@@ -372,9 +387,9 @@ static void node_alone_body(struct NodeAlone* alone, NodeMachineReader* typer, C
         const uint64_t reading = alone->shadow->alone_prepare_ticks + alone->shadow->alone_front_ticks + alone->shadow->alone_write_ticks - reading_before;
         const uint64_t machine = alone->types->ticks - machine_before;
         const uint32_t slot = alone->shadow->alone_body_count;
-        const uint64_t scan = __rdtsc();
-        const bool scanned = node_alone_scan(reader, opening, &alone->shadow->alone_scan_tokens);
-        alone->shadow->alone_scan_ticks += __rdtsc() - scan;
+        const uint64_t scanning = __rdtsc();
+        const bool scanned = scan < 0 ? node_alone_scan(reader, opening, &alone->shadow->alone_scan_tokens) : scan != 0;
+        alone->shadow->alone_scan_ticks += scan < 0 ? __rdtsc() - scanning : 0;
         alone->shadow->alone_body_reading[slot] = reading;
         alone->shadow->alone_body_machine[slot] = machine;
         alone->shadow->alone_body_before[slot] = stopped_at != UINT64_MAX ? stopped_at : reading + machine;
@@ -393,6 +408,7 @@ static void node_alone_body(struct NodeAlone* alone, NodeMachineReader* typer, C
     typer->facts = facts;
     typer->machine.reader_library = library;
     typer->alone = false;
+    typer->keeps = false;
 }
 
 static __attribute__((noinline)) void node_alone_bodies(struct NodeAlone* alone, NodeFront* front, CheckInputReader* reader, uint32_t first, uint32_t end)
@@ -406,7 +422,48 @@ static __attribute__((noinline)) void node_alone_bodies(struct NodeAlone* alone,
         alone->next_body += 1;
         if (alone->body_firsts[body] >= first)
         {
-            node_alone_body(alone, front->typer, reader, alone->body_firsts[body], alone->body_ends[body], alone->body_openings[body]);
+            const uint32_t opening = alone->body_openings[body];
+            struct NodeProducer* producer = alone->producer;
+            NodeFrontShadow* shadow = alone->shadow;
+            uint8_t reason = 0;
+            uint8_t detail = 0;
+            int scan = -1;
+            if (producer != NULL)
+            {
+                // What the producer asks before any reading: the scan among it, where it gets to it.
+                const uint64_t before = __rdtsc();
+                reason = node_producer_before(producer, front->typer, reader, opening, &detail, &scan, &shadow->alone_scan_tokens);
+                shadow->produced_before_ticks += __rdtsc() - before;
+            }
+            if (producer != NULL && alone->lean && reason != 0)
+            {
+                // As a compile would run it: a body refused before any reading is not read. Its place in the list is kept,
+                // its verdict a root the machine did not run on.
+                const uint32_t slot = shadow->alone_body_count;
+                const uint32_t closing = reader->parser->tree.parents[opening];
+                shadow->alone_body_openings[slot] = opening;
+                shadow->alone_body_verdicts[slot] = BUSTER_NODE_ALONE_BODY_UNRUN;
+                shadow->alone_body_reading[slot] = 0;
+                shadow->alone_body_machine[slot] = 0;
+                shadow->alone_body_before[slot] = 0;
+                shadow->alone_body_scanned[slot] = scan > 0;
+                shadow->alone_body_count += 1;
+                shadow->produced_unread += 1;
+                shadow->produced_unread_tokens += closing > opening ? (uint64_t)closing - opening + 1 : 0;
+                node_producer_keep(producer, shadow, slot, reason, detail);
+            }
+            else
+            {
+                node_alone_body(alone, front->typer, reader, alone->body_firsts[body], alone->body_ends[body], opening, scan);
+                if (producer != NULL)
+                {
+                    const uint32_t slot = shadow->alone_body_count - 1;
+                    const uint64_t after = __rdtsc();
+                    reason = node_producer_after(producer, alone, reader, opening, reason, shadow->alone_body_verdicts[slot], &detail);
+                    node_producer_keep(producer, shadow, slot, reason, detail);
+                    shadow->produced_after_ticks += __rdtsc() - after;
+                }
+            }
         }
         else
         {
@@ -493,7 +550,9 @@ static NodeFrontTypes* node_alone_results(CheckInputReader* reader, const NodeFr
         types->declarations = arena_push_array(arena, capacity, sizeof(uint32_t), _Alignof(uint32_t));
         // What a splice reads beside a tape: a root's, and the stores, a place a node at most.
         uint32_t** sides[] = { &types->side_label_firsts, &types->side_label_counts, &types->side_call_firsts, &types->side_call_counts, &types->side_temporaries,
-                               &types->side_labels,       &types->side_call_targets, &types->side_call_argument_counts, &types->side_call_argument_firsts };
+                               &types->side_labels,       &types->side_call_targets, &types->side_call_argument_counts, &types->side_call_argument_firsts,
+                               &types->side_call_types,   &types->side_call_results, &types->side_argument_types };
+        _Static_assert(sizeof(TypeId) == sizeof(uint32_t), "the side stores' types are words");
         bool sided = true;
         for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(sides); c += 1)
         {
@@ -669,6 +728,16 @@ static struct NodeAlone* node_alone_begin(NodeFront* front, CheckInputReader* re
         shadow->alone_chains = chains;
         shadow->alone_root_tokens = root_tokens;
         shadow->alone_control_roots = control_roots;
+        if ((reader->pp->options.node_reader & BUSTER_NODE_READER_PRODUCE) != 0)
+        {
+            alone->lean = (reader->pp->options.node_reader & BUSTER_NODE_READER_PRODUCE_LEAN) != 0;
+            alone->producer = node_producer_begin(alone, reader, bodies);
+            room = alone->producer != NULL;
+            if (room)
+            {
+                node_producer_enums(alone->producer, &typer->machine);
+            }
+        }
     }
     return room ? alone : NULL;
 }

@@ -154,11 +154,15 @@ struct CheckProgramBody
 // check_program_select_wrappers): clang's AlwaysInliner expands every call of a body it has, an `extern inline`
 // gnu_inline one too (glibc's __fortify_function wrappers), where the unit emits none of its own. Its body is one
 // statement: `return E;` (`node` E with its conversion to the result) or, in a void function, `E;`; E's nodes are
-// `first` to `node`. Its parameters' objects are CheckProgram.wrapper_parameters' `parameter_count` from
-// `parameter_first`, 0 for an unnamed one, and their pass_object_size attributes `sizes` (CheckInputAttributes'
-// object_sizes: a mode plus 1, a dynamic one's plus 5; 0 for none).
-// A wrapper's parameters at most: glibc's take five.
+// `first` to `node`. Or, with a result, the shape of glibc's longer wrappers (fgets's, wcscpy's, realpath's): scalar
+// locals with an initializer each (`local_count`, their plans `plans`, CheckInitializers'), then `guard_count` guards
+// `if (C) return E;` (`guards`' C, the branch's condition, and E), then `return E;`, or for the last guard an `else return E;`. Its parameters' objects are CheckProgram.wrapper_parameters'
+// `parameter_count` from `parameter_first`, 0 for an unnamed one, then its locals'; and its parameters' pass_object_size
+// attributes `sizes` (CheckInputAttributes' object_sizes: a mode plus 1, a dynamic one's plus 5; 0 for none).
+// A wrapper's parameters and locals at most: glibc's take seven (recvfrom's six and its bound).
 #define BUSTER_CHECK_WRAPPER_PARAMETERS 8u
+// A wrapper's guards at most: glibc's take two.
+#define BUSTER_CHECK_WRAPPER_GUARDS 4u
 
 typedef struct CheckProgramWrapper CheckProgramWrapper;
 struct CheckProgramWrapper
@@ -168,6 +172,10 @@ struct CheckProgramWrapper
     uint32_t first;
     uint32_t parameter_first;
     uint32_t parameter_count;
+    uint32_t local_count;
+    uint32_t guard_count;
+    uint32_t plans[BUSTER_CHECK_WRAPPER_PARAMETERS];
+    uint32_t guards[BUSTER_CHECK_WRAPPER_GUARDS][2];
     uint8_t sizes[BUSTER_CHECK_WRAPPER_PARAMETERS];
 };
 
@@ -274,6 +282,9 @@ struct CheckProgramOptions
     // variable-length arrays' objects and bounds to their statements pass (check_program_statement), at most two.
     uint64_t* region_target_work;
     uint64_t* statement_walk_work;
+    // And the tokens check_control_enterable passes (#2995): its walks' steps, its scans' tokens and the subtree facts'
+    // nodes, which the facts keep at about one a token where statements nest deep.
+    uint64_t* enterable_work;
     // The selection census (#2536's step 2.1, --selection-census): each body's candidates' references besides its own, by
     // a walk from every expression root of the body and by scans of the graph's VALUE nodes (check_program_census_walk and
     // _scan), into CheckProgram's census_walk, census_scan and census_arms.
@@ -588,6 +599,12 @@ struct CheckProgram
     // Whether any declaration of a function has returns_twice. Whole-object call initializers (#1549) use this to
     // retain their separate result object in bodies that may reenter them. Null where no declaration has it.
     uint8_t* object_returns_twice;
+    // Per function object, what check_program_move_bytes reads of it (#1373), BUSTER_CHECK_PROGRAM_MOVE_*: a declaration's
+    // minsize attribute, not ignored, with which clang's code inlines a constant memmove in 4 stores of its pieces, not 8;
+    // and the instruction set and tuning of its first declaration's target attribute (AVX's pieces are 32 bytes, a slow
+    // unaligned 16-byte access's tuning's 8). Made before the references' pass (check_program_move_objects), in a unit that
+    // spells minsize or target alone; null where no declaration has either.
+    uint8_t* object_move;
     // Per object, whether a declaration of it has an asm label, not ignored: clang's code calls a library builtin's
     // declaration of one by its label rather than compute it (#1373, check_program_call_computed). Made before the
     // references' pass (check_program_labelled_objects); null where no declaration has one.
@@ -824,6 +841,26 @@ struct CheckControlTask
     uint8_t unentered;
 };
 
+// check_control_enterable's subtree facts (#2995), for a body whose statements nest so deep, or hold so many tokens, that
+// walking an arm's first and last children and scanning its tokens again for each of its enclosing statements would be
+// quadratic (switches nested 16,000 deep took 2.3 s): by token, from the body's opening `body`, each statement's first and
+// last tokens and the least and greatest key of its subtree's tokens (a label's 0, a case's switch, BUSTER_CHECK_NONE for
+// none), each node's computed once (check_control_enterable_facts). The parse tree's subtrees are runs of tokens, so these
+// are exactly what the walk and the scan find (check_control_extent, check_control_labeled). In an arena of their own,
+// reserved by the first such body and released with the program's run; a body that finds no room walks as before.
+typedef struct CheckControlExtents CheckControlExtents;
+struct CheckControlExtents
+{
+    Arena arena;
+    uint32_t* low;
+    uint32_t* high;
+    uint32_t* key_low;
+    uint32_t* key_high;
+    uint32_t* stack;
+    uint32_t* order;
+    uint32_t body;
+};
+
 typedef struct CheckControlWriter CheckControlWriter;
 struct CheckControlWriter
 {
@@ -867,6 +904,10 @@ struct CheckControlWriter
     const uint32_t* case_map;
     // Only LABEL and CLOSE_CASE tokens receive a number.
     uint32_t* source_labels;
+    // The program's run's subtree facts (check_control_enterable_facts), or null, which walks every arm.
+    CheckControlExtents* extents;
+    // CheckProgramOptions.enterable_work, or null.
+    uint64_t* enterable_work;
     // Ordinary breaks and continues carry their destinations on the statement worklist. Only a lifetime, VLA,
     // cleanup or statement expression can query these token-indexed destinations while walking ancestors.
     bool all_loop_targets;
@@ -1263,7 +1304,8 @@ static bool check_program_runtime_truth(const CheckProgram* program, uint32_t no
     const bool known = candidate && available && (runtime || ((value->flags & BUSTER_CHECK_FP_ENVIRONMENT) == 0 &&
                                    !(environment && check_action_floating_type(program->types, value->type)))) &&
                        value->fault == CHECK_FAULT_NONE &&
-                       check_action_truth(program->types, value, truth);
+                       check_action_truth(program->types, value, truth) &&
+                       ((value->flags & BUSTER_CHECK_MODIFICATION) == 0 || check_graph_evaluable(program->types, graph, program->stream, condition));
     return known;
 }
 
@@ -1279,17 +1321,17 @@ static bool check_program_branch_cast(const CheckProgram* program, uint32_t node
     return !unproved;
 }
 
-// A branch condition's truth as clang's CFG builder prunes its edges (#1447, CFGBuilder::tryEvaluateBool, whose
-// EvaluateAsBooleanCondition ignores side effects), which the -Wreturn-type walk and the runtime warnings' reachability
-// (check_common_body_reached) model: a known value's (check_program_runtime_truth), and a logical operator's that one
-// operand decides though the other isn't known, `0 && x` and `1 || x` by the left and `x && 0` and `x || 1` by the right,
-// or both together, through the condition's own node, conversions, casts and `!`. A conversion keeps the truth of the
+// An expression's truth as clang's evaluator folds a condition (#1447, EvaluateAsBooleanCondition, which ignores side
+// effects), the part of clang's CFG builder's branch pruning that reads values (c_check_program_cfg.c has the rest): a
+// known value's (check_program_runtime_truth), and a logical operator's that one operand decides though the other isn't
+// known, `0 && x` and `1 || x` by the left and `x && 0` and `x || 1` by the right, or both together, through the
+// expression's own node, conversions, casts and `!`. A conversion keeps the truth of the
 // 0 or 1 such an operator gives, the one value it isn't already known for. A post-order walk on an explicit stack (the
 // call graph's no-recursion rule), BUSTER_CHECK_BRANCH_TRUTH_DEPTH operands deep at most: each frame's node, its depth and
 // whether its operands are pushed, and each value 0 (false), 1 (true) or 2 (unknown), the left operand's first.
 #define BUSTER_CHECK_BRANCH_TRUTH_DEPTH 64u
 #define BUSTER_CHECK_BRANCH_TRUTH_FRAMES (2u * BUSTER_CHECK_BRANCH_TRUTH_DEPTH + 2u)
-static bool check_program_branch_truth(const CheckProgram* program, uint32_t node, uint32_t condition, bool* truth)
+static bool check_program_fold_truth(const CheckProgram* program, uint32_t node, uint32_t condition, bool* truth)
 {
     const CheckGraph* graph = &program->input->graph;
     uint32_t frames[BUSTER_CHECK_BRANCH_TRUTH_FRAMES];
@@ -1363,6 +1405,8 @@ static bool check_program_branch_truth(const CheckProgram* program, uint32_t nod
     *truth = values[0] == 1u;
     return values[0] != 2u;
 }
+
+#include "c_check_program_cfg.c"
 
 // A switch's controlling type: an integer type, of up to 128 bits (check_action_integer_type) or a _BitInt past them
 // (#2220, check_wide_type).
@@ -2040,14 +2084,147 @@ static bool check_control_labeled(const CheckControlWriter* writer, uint32_t low
     return labeled;
 }
 
+// A walk down an arm's first or last children past this many steps, or an arm of more tokens than
+// BUSTER_CHECK_CONTROL_ENTERABLE_TOKENS, is answered from the body's subtree facts (#2995).
+#define BUSTER_CHECK_CONTROL_ENTERABLE_STEPS 64u
+#define BUSTER_CHECK_CONTROL_ENTERABLE_TOKENS 4096u
+
+// Whether the statement `arm`, a token of the body being written, holds a label or a case of a switch outside it, from the
+// body's subtree facts (CheckControlExtents), which this computes for the nodes of `arm`'s subtree that don't have them
+// yet: their preorder by a stack, then each node from its own token and its children's facts, in reverse, so that a node
+// comes after its children. Each node of the body is computed once. False in `*answered` where there was no room.
+static bool check_control_enterable_facts(const CheckControlWriter* writer, uint32_t arm, bool* answered)
+{
+    CheckControlExtents* facts = writer->extents;
+    const uint32_t opening = writer->opening;
+    const uint64_t extent = (uint64_t)writer->closing - opening + 1;
+    if (facts->body != opening)
+    {
+        facts->body = BUSTER_CHECK_NONE;
+        if (facts->arena.base == 0)
+        {
+            facts->arena = arena_reserve(6 * ((uint64_t)writer->parser->tokens.count + 1) * sizeof(uint32_t) + 6 * 64);
+        }
+        arena_pop_to(&facts->arena, 0);
+        facts->low = facts->arena.base != 0 ? BUSTER_ARENA_PUSH_ARRAY(&facts->arena, uint32_t, extent) : NULL;
+        facts->high = facts->low != NULL ? BUSTER_ARENA_PUSH_ARRAY(&facts->arena, uint32_t, extent) : NULL;
+        facts->key_low = facts->high != NULL ? BUSTER_ARENA_PUSH_ARRAY(&facts->arena, uint32_t, extent) : NULL;
+        facts->key_high = facts->key_low != NULL ? BUSTER_ARENA_PUSH_ARRAY(&facts->arena, uint32_t, extent) : NULL;
+        facts->stack = facts->key_high != NULL ? BUSTER_ARENA_PUSH_ARRAY(&facts->arena, uint32_t, extent) : NULL;
+        facts->order = facts->stack != NULL ? BUSTER_ARENA_PUSH_ARRAY(&facts->arena, uint32_t, extent) : NULL;
+        if (facts->order != NULL)
+        {
+            // (A node without facts has `low` BUSTER_CHECK_NONE.)
+            memset(facts->low, 0xff, extent * sizeof(uint32_t));
+            facts->body = opening;
+        }
+    }
+    *answered = facts->body == opening;
+    bool result = false;
+    if (*answered)
+    {
+        const uint8_t* roles = writer->parser->tree.roles;
+        const CheckSparseColumn owners = writer->program->input->control_owners;
+        uint32_t depth = 0;
+        uint32_t count = 0;
+        facts->stack[depth] = arm;
+        depth += facts->low[arm - opening] == BUSTER_CHECK_NONE ? 1u : 0u;
+        while (depth != 0)
+        {
+            depth -= 1;
+            const uint32_t node = facts->stack[depth];
+            facts->order[count] = node;
+            count += 1;
+            for (uint32_t child = writer->first[node]; child != BUSTER_CHECK_NONE; child = writer->next[child])
+            {
+                facts->stack[depth] = child;
+                depth += facts->low[child - opening] == BUSTER_CHECK_NONE ? 1u : 0u;
+            }
+        }
+        if (writer->enterable_work != NULL)
+        {
+            *writer->enterable_work += count;
+        }
+        for (uint32_t i = count; i-- > 0;)
+        {
+            const uint32_t node = facts->order[i];
+            const uint8_t role = roles[node];
+            const uint32_t owner = role == PARSE_ROLE_CLOSE_CASE ? check_sparse_get(owners, node) : BUSTER_CHECK_NONE;
+            uint32_t low = node;
+            uint32_t high = node;
+            uint32_t key_low = role == PARSE_ROLE_LABEL ? 0 : owner;
+            uint32_t key_high = role == PARSE_ROLE_LABEL ? 0 : role == PARSE_ROLE_CLOSE_CASE ? owner : 0;
+            for (uint32_t child = writer->first[node]; child != BUSTER_CHECK_NONE; child = writer->next[child])
+            {
+                const uint32_t at = child - opening;
+                low = facts->low[at] < low ? facts->low[at] : low;
+                high = facts->high[at] > high ? facts->high[at] : high;
+                key_low = facts->key_low[at] < key_low ? facts->key_low[at] : key_low;
+                key_high = facts->key_high[at] > key_high ? facts->key_high[at] : key_high;
+            }
+            const uint32_t at = node - opening;
+            facts->low[at] = low;
+            facts->high[at] = high;
+            facts->key_low[at] = key_low;
+            facts->key_high[at] = key_high;
+        }
+        // check_control_labeled's test on the subtree's run of tokens: a label's key is 0, below any statement's first
+        // token, and a case's is its switch, outside the run where the switch is.
+        const uint32_t at = arm - opening;
+        result = facts->key_low[at] < facts->low[at] || facts->key_high[at] > facts->high[at];
+    }
+    return result;
+}
+
 // Whether a jump can enter the statement `arm` (none for BUSTER_CHECK_NONE) other than at its start: it holds a label,
-// or a case of a switch outside it (check_control_labeled).
+// or a case of a switch outside it (check_control_labeled). A deep or long arm takes its body's subtree facts
+// (check_control_enterable_facts), so that statements nested N deep cost the body's tokens once, not N times (#2995).
 static bool check_control_enterable(const CheckControlWriter* writer, uint32_t arm)
 {
-    uint32_t low = 0;
-    uint32_t high = 0;
-    check_control_extent(writer, arm, &low, &high);
-    return arm != BUSTER_CHECK_NONE && check_control_labeled(writer, low, high);
+    bool result = false;
+    const CheckControlExtents* facts = writer->extents;
+    // An arm the body's facts hold already, a deeper one's, answers from them.
+    const bool known = arm != BUSTER_CHECK_NONE && facts != NULL && facts->body == writer->opening && facts->low[arm - writer->opening] != BUSTER_CHECK_NONE;
+    if (known)
+    {
+        const uint32_t at = arm - writer->opening;
+        result = facts->key_low[at] < facts->low[at] || facts->key_high[at] > facts->high[at];
+    }
+    else if (arm != BUSTER_CHECK_NONE)
+    {
+        uint32_t low = arm;
+        uint32_t high = arm;
+        uint32_t token = arm;
+        uint32_t steps = 0;
+        for (; token != BUSTER_CHECK_NONE && steps < BUSTER_CHECK_CONTROL_ENTERABLE_STEPS; token = writer->first[token])
+        {
+            low = token < low ? token : low;
+            steps += 1;
+        }
+        bool deep = token != BUSTER_CHECK_NONE;
+        token = arm;
+        uint32_t last_steps = 0;
+        for (; token != BUSTER_CHECK_NONE && last_steps < BUSTER_CHECK_CONTROL_ENTERABLE_STEPS; token = writer->last[token])
+        {
+            high = token > high ? token : high;
+            last_steps += 1;
+        }
+        deep |= token != BUSTER_CHECK_NONE || high - low > BUSTER_CHECK_CONTROL_ENTERABLE_TOKENS;
+        bool answered = false;
+        result = deep && facts != NULL ? check_control_enterable_facts(writer, arm, &answered) : false;
+        uint64_t work = (uint64_t)steps + last_steps;
+        if (!answered)
+        {
+            check_control_extent(writer, arm, &low, &high);
+            result = check_control_labeled(writer, low, high);
+            work += (uint64_t)high - low + 1;
+        }
+        if (writer->enterable_work != NULL)
+        {
+            *writer->enterable_work += work;
+        }
+    }
+    return result;
 }
 
 // Pushes `node` on the fold walk's stack (check_control_foldable), which takes a node a visit: whether it had room.
@@ -3868,6 +4045,77 @@ static bool check_program_constant_operand(const CheckGraph* graph, const CheckS
     return constant;
 }
 
+// CheckProgram.object_move's bits.
+#define BUSTER_CHECK_PROGRAM_MOVE_MINSIZE 1u
+#define BUSTER_CHECK_PROGRAM_MOVE_TARGET 2u
+#define BUSTER_CHECK_PROGRAM_MOVE_AVX 4u
+#define BUSTER_CHECK_PROGRAM_MOVE_SLOW 8u
+
+// CheckProgram.object_move: each function's minsize attribute and its first declaration's target attribute's instruction
+// set and tuning (predefines_function_target's, as check_program_targets resolves its body's), by one scan of the tokens
+// with attributes, in a unit whose identifiers spell minsize or target alone; false where the column has no room.
+static bool check_program_move_objects(CheckProgram* program, const CheckProgramOptions* options, Arena* output)
+{
+    const CheckInput* input = program->input;
+    const uint32_t count = input->token_count;
+    const InternTable* identifiers = program->identifiers;
+    const IdentId minsize = identifiers != NULL ? intern_find(identifiers, (const uint8_t*)"minsize", 7) : 0;
+    const IdentId target = identifiers != NULL ? intern_find(identifiers, (const uint8_t*)"target", 6) : 0;
+    bool room = true;
+    for (uint32_t first = minsize != 0 || target != 0 ? check_input_attributed_next(input->attributes, 0, count) : count; room && first < count;
+         first = check_input_attributed_next(input->attributes, first + 16, count))
+    {
+        const uint32_t lanes = check_input_attributed_group(input->attributes, first, count);
+        for (uint32_t selected = lanes; room && selected != 0; selected &= selected - 1)
+        {
+            const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
+            const uint32_t object = input->objects[token];
+            const bool function = object != 0 && object <= count && input->declarations[token] == token && input->declaration_kinds[token] == C_BINDING_FUNCTION;
+            const CheckInputAttributes* attributes = function ? check_input_attributes_at(input, token) : NULL;
+            uint8_t facts = 0;
+            for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
+            {
+                const CheckInputAttribute* attribute = attributes->records + i;
+                const bool kept = !attribute->ignored && !attribute->subject_ignored;
+                facts |= kept && attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword && attribute->name == minsize && minsize != 0 ?
+                             BUSTER_CHECK_PROGRAM_MOVE_MINSIZE : 0;
+                int32_t cpu = -1;
+                const bool version = kept && attribute->kind == CHECK_ATTRIBUTE_TARGET && options->predefines != NULL && attribute->text.length < UINT32_MAX &&
+                                     (facts & BUSTER_CHECK_PROGRAM_MOVE_TARGET) == 0 &&
+                                     (program->object_move == NULL || (program->object_move[object] & BUSTER_CHECK_PROGRAM_MOVE_TARGET) == 0) &&
+                                     predefines_target_attribute(attribute->text.pointer, (uint32_t)attribute->text.length, &cpu) == PREDEFINES_TARGET_ATTRIBUTE_VERSION;
+                if (version)
+                {
+                    if (!program->host_read)
+                    {
+                        program->host = predefines_host_of(options->predefines);
+                        program->host_read = true;
+                    }
+                    const X86Target own = predefines_function_target(options->predefines, &program->host, program->target, attribute->text.pointer,
+                                                                     (uint32_t)attribute->text.length, cpu);
+                    const bool slow = own.slow_unaligned_16 && (own.features & BUSTER_X86_FEATURE(SSE42)) == 0;
+                    facts |= BUSTER_CHECK_PROGRAM_MOVE_TARGET | ((own.features & BUSTER_X86_FEATURE(AVX)) != 0 ? BUSTER_CHECK_PROGRAM_MOVE_AVX : 0) |
+                             (slow ? BUSTER_CHECK_PROGRAM_MOVE_SLOW : 0);
+                }
+            }
+            if (facts != 0 && program->object_move == NULL)
+            {
+                program->object_move = BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, (uint64_t)count + 1);
+                room = program->object_move != NULL;
+                if (room)
+                {
+                    memset(program->object_move, 0, (uint64_t)count + 1);
+                }
+            }
+            if (facts != 0 && room)
+            {
+                program->object_move[object] |= facts;
+            }
+        }
+    }
+    return room;
+}
+
 // Collect accepted asm labels from declaration attributes. Both an asm keyword and an applied
 // #pragma redefine_extname can supply one. Allocate the column on the first label.
 static bool check_program_labelled_objects(CheckProgram* program, Arena* output)
@@ -3906,11 +4154,32 @@ static bool check_program_labelled_objects(CheckProgram* program, Arena* output)
 
 static uint32_t check_program_token_body(const CheckProgram* program, uint32_t token);
 
+// The largest constant memmove that call `node` computes in place, as clang's code moves it inline at -O0 (#1373): 8
+// stores of its widest piece, 4 in a function with minsize (MaxStoresPerMemmove and its OptSize twin), the piece 32 bytes
+// with AVX, else 8 where the function's tuning has unaligned 16-byte accesses slow (X86Target.slow_unaligned_16) and its
+// instruction set has no SSE4.2 (with which LLVM takes them as fast: -march=x86-64-v2 -mtune=core2 inlines 128), else
+// 16; at most BUSTER_CBUILTIN_LIBRARY_MOVE_INLINE_BYTES, COPY's move form's. So 128 bytes at x86-64, 64 for core2's
+// tuning or with minsize, 32 for both. The function's facts are CheckProgram.object_move's, which the references' pass
+// and the lowering read alike; its target attribute's, else the unit's target.
+static uint64_t check_program_move_bytes(const CheckProgram* program, uint32_t node)
+{
+    const uint32_t body = check_program_token_body(program, program->input->graph.tokens[node]);
+    const uint32_t declaration = body != 0 ? program->bodies[body - 1].declaration : BUSTER_CHECK_NONE;
+    const uint32_t object = declaration < program->input->token_count ? program->input->objects[declaration] : 0;
+    const uint8_t facts = program->object_move != NULL && object != 0 && object <= program->input->token_count ? program->object_move[object] : 0;
+    const bool own = (facts & BUSTER_CHECK_PROGRAM_MOVE_TARGET) != 0;
+    const bool avx = own ? (facts & BUSTER_CHECK_PROGRAM_MOVE_AVX) != 0 : (program->target.features & BUSTER_X86_FEATURE(AVX)) != 0;
+    const bool slow = own ? (facts & BUSTER_CHECK_PROGRAM_MOVE_SLOW) != 0 : program->target.slow_unaligned_16 && (program->target.features & BUSTER_X86_FEATURE(SSE42)) == 0;
+    const uint64_t piece = avx ? 32 : slow ? 8 : 16;
+    const uint64_t bytes = piece * ((facts & BUSTER_CHECK_PROGRAM_MOVE_MINSIZE) != 0 ? 4 : 8);
+    return bytes < BUSTER_CBUILTIN_LIBRARY_MOVE_INLINE_BYTES ? bytes : BUSTER_CBUILTIN_LIBRARY_MOVE_INLINE_BYTES;
+}
+
 // The plain library builtin a call computes inline as clang -O0's code computes its intrinsic (#967, #1373), its row of
 // cbuiltin_library_plain_folds, or BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS: a call of the unit's declaration of one that clang
 // makes the builtin (the reader's mark, BUSTER_CHECK_LIBRARY_CALL) whose row computes it (CBuiltinLibraryComputed), with
-// its prototype's arguments, memcpy, memmove and memset with a constant size of at most
-// BUSTER_CBUILTIN_LIBRARY_INLINE_BYTES; but of one with an asm label on a declaration, which clang's code calls by its
+// its prototype's arguments, memcpy, memmove and memset with a constant size of at most cbuiltin_library_inline_bytes's;
+// but of one with an asm label on a declaration, which clang's code calls by its
 // label (EmitBuiltinExpr's BuiltinIDIfNoAsmLabel is 0 for it): CheckProgram.object_labelled. The references' pass and
 // the lowering ask for every call, so it reads no token: a search of the unit's declarations for each computed memcpy
 // took sqlite3.c's -c from 126 to 187 ms on the 9700X.
@@ -3929,7 +4198,9 @@ static __attribute__((noinline)) uint32_t check_program_call_marked(const CheckP
     if (marked && memory)
     {
         const uint32_t size_node = graph->argument_nodes[graph->argument_offsets[node] + 2];
-        marked = check_program_constant_operand(graph, program->stream, size_node, &size) && size <= BUSTER_CBUILTIN_LIBRARY_INLINE_BYTES;
+        marked = check_program_constant_operand(graph, program->stream, size_node, &size) && size <= cbuiltin_library_inline_bytes(computed);
+        // A memmove past 32 bytes, as far as the function's tuning and minsize let clang's code inline it.
+        marked = marked && (computed != CBUILTIN_LIBRARY_COMPUTED_MOVE || size <= BUSTER_CBUILTIN_LIBRARY_INLINE_BYTES || size <= check_program_move_bytes(program, node));
     }
     const uint32_t callee = marked && program->object_labelled != NULL ? graph->operand0[node] : BUSTER_CHECK_NONE;
     const uint32_t object = callee < graph->count ? check_stream_value(program->stream, callee).object : 0;
@@ -4221,8 +4492,9 @@ static uint32_t check_program_openings(const CheckInput* input, uint32_t* openin
     {
         for (uint32_t token = 0; token < input->token_count; token += 1)
         {
+            // (--node-bodies: a body its producer took is masked and still the program's, CheckInput.node_bodies.)
             if (check_sparse_get(input->body_declarations, token) != BUSTER_CHECK_NONE &&
-                (input->deferred_tokens == NULL || input->deferred_tokens[token] == 0))
+                (input->deferred_tokens == NULL || input->deferred_tokens[token] == 0 || input->node_bodies))
             {
                 openings[count++] = token;
             }
@@ -4231,7 +4503,7 @@ static uint32_t check_program_openings(const CheckInput* input, uint32_t* openin
     else
     {
         count = check_sparse_entries(input->body_declarations, 0, input->token_count, openings);
-        if (input->deferred_tokens != NULL)
+        if (input->deferred_tokens != NULL && !input->node_bodies)
         {
             uint32_t kept = 0;
             for (uint32_t i = 0; i < count; i += 1)
@@ -6096,6 +6368,8 @@ struct CheckProgramRun
     Arena* output;
     Arena* scratch;
     Arena controls;
+    // The writer's subtree facts (#2995), whose arena the run releases with its controls'.
+    CheckControlExtents extents;
     CheckControlWriter writer;
     CheckProgramTargetEvents target_events;
     CheckReturnFacts return_facts;
@@ -6163,6 +6437,10 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
     if (options.statement_walk_work != NULL)
     {
         *options.statement_walk_work = 0;
+    }
+    if (options.enterable_work != NULL)
+    {
+        *options.enterable_work = 0;
     }
     const uint64_t mark = output->length;
     const uint64_t temporary = scratch->length;
@@ -6255,9 +6533,11 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
     uint32_t* stack = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)node_count * (regions ? 2 : 1) + 2) : 0;
     uint32_t* nodes = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)node_count + 1) : 0;
     uint32_t* seen = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
-    // A body's references: its nodes', and its cleanups' functions.
-    uint64_t* reference_items = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)node_count + input->cleanup_count + 1) : 0;
-    uint64_t* reference_sort = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)node_count + input->cleanup_count + 1) : 0;
+    // A body's references: its nodes', and its cleanups' functions. (--node-bodies: a body the producer took has no node,
+    // and its references are its kept tapes' entries' and calls' at most.)
+    const uint64_t taken_references = valid && input->node_bodies ? input->node_front->alone_types->tape_count + input->node_front->alone_types->side_call_count : 0;
+    uint64_t* reference_items = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)node_count + input->cleanup_count + 1 + taken_references) : 0;
+    uint64_t* reference_sort = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)node_count + input->cleanup_count + 1 + taken_references) : 0;
     uint32_t* cleanup_parents = valid && input->cleanup_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, input->cleanup_count) : 0;
     uint32_t* cleanup_tops = valid && input->cleanup_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, input->cleanup_count) : 0;
     uint32_t* cleanup_scope_last = valid && input->cleanup_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
@@ -6586,6 +6866,7 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
         .case_next = case_next,
         .case_map = case_map,
         .source_labels = source_labels,
+        .enterable_work = options.enterable_work,
         .all_loop_targets = all_loop_targets,
         .scalar_children = options.scalar,
         .stops = stops,
@@ -6621,6 +6902,8 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
     valid = valid && program->status == CHECK_PROGRAM_OK;
     // The labelled library declarations, which a computed call's test reads in the references' pass below.
     valid = valid && check_program_labelled_objects(program, output);
+    // The functions' minsize and target attributes, which a computed memmove's test reads there too (#1373).
+    valid = valid && check_program_move_objects(program, &options, output);
     // The candidates as the pass before the bodies' controls finds them (#2536's step 2.2, census_pass): the constant ifs'
     // left-out tokens (check_program_constant_arms), then the pruned scan without them, timed together.
     if (valid && (options.selection_census || options.candidates) && program->status == CHECK_PROGRAM_OK)
@@ -6698,11 +6981,60 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
         .body_count = body_count,
         .valid = valid,
     };
+    run->extents.body = BUSTER_CHECK_NONE;
+    run->writer.extents = &run->extents;
     // The rooms the loop writes in, for a lowering that reads no control total (CheckProgram.control_capacity), from the
     // run's writer, after the setup's passes.
     program->control_capacity = run->writer.capacity;
     program->chain_stop_capacity = run->writer.exit_capacity;
     return valid;
+}
+
+// The root (a node of the kept columns', NodeFrontTypes) of the expression of a taken body's control at `token`:
+// UINT32_MAX for a control without one.
+static inline __attribute__((unused)) uint32_t node_bodies_control_root(const NodeFrontShadow* supply, const NodeTwinControl* control)
+{
+    const bool rooted = control->valued || control->kind == CHECK_CONTROL_INITIALIZE;
+    const uint32_t found = rooted ? supply->alone_control_roots[control->token] : 0;
+    return found != 0 && found != UINT32_MAX ? found - 1 : UINT32_MAX;
+}
+
+// --node-bodies (#2850): the references of the body at `slot` of the producer's verdicts (node_bodies_slot), which the
+// compile takes: the objects its kept tapes name, a global's entry's and a direct call's callee's, each once, marked
+// needed and kept as check_program_references keeps a checked body's (`epoch` its stamp in `seen`). How many.
+static uint32_t check_program_taken_references(CheckProgram* program, uint32_t slot, uint32_t epoch, uint32_t* seen, uint64_t* references, uint8_t* needed)
+{
+    const NodeFrontShadow* supply = program->input->node_front;
+    const NodeFrontTypes* kept = supply->alone_types;
+    uint32_t reference_count = 0;
+    for (uint32_t c = 0; c < supply->produced_counts[slot]; c += 1)
+    {
+        const uint32_t root = node_bodies_control_root(supply, supply->produced_controls + supply->produced_firsts[slot] + c);
+        if (root == UINT32_MAX)
+        {
+            continue;
+        }
+        const uint64_t first = kept->tape_firsts[root];
+        const uint32_t entries = kept->tape_counts[root] != UINT32_MAX ? kept->tape_counts[root] : 0;
+        const uint32_t calls = kept->side_call_counts[root];
+        for (uint32_t i = 0; i < entries + calls; i += 1)
+        {
+            const uint8_t kind = i < entries ? kept->tape_kinds[first + i] : BUSTER_TYPED_GLOBAL;
+            const bool global = kind == BUSTER_TYPED_GLOBAL || kind == BUSTER_TYPED_GLOBAL_ADDRESS || kind == BUSTER_TYPED_STORE_GLOBAL || kind == BUSTER_TYPED_SET_GLOBAL;
+            const uint64_t object = i < entries ? kept->tape_values[first + i] : kept->side_call_targets[kept->side_call_firsts[root] + (i - entries)];
+            if (global && object != 0 && object < program->object_count && seen[object] != epoch)
+            {
+                seen[object] = epoch;
+                needed[object] = 1;
+                references[reference_count++] = object << 32;
+            }
+            else if (global && object >= program->object_count)
+            {
+                check_program_fail(program, CHECK_PROGRAM_INVALID, supply->alone_body_openings[slot]);
+            }
+        }
+    }
+    return reference_count;
 }
 
 // check_program's loop (#2536's step 2.2c.1): the bodies from the run's next to `end`, each's controls, return flow,
@@ -6732,6 +7064,31 @@ static void check_program_bodies(CheckProgramRun* run, uint32_t end)
         const uint32_t label_first = writer->label_position_count;
         const uint32_t exit_start = writer->exit_count;
         writer->body = b;
+        CheckProgramBody* body = &program->bodies[b];
+        const uint32_t taken = __builtin_expect(program->input->node_bodies, 0) ? node_bodies_slot(program->input, token) : UINT32_MAX;
+        const uint64_t references_start = options->selection_census ? __rdtsc() : 0;
+        if (taken == UINT32_MAX && program->input->node_bodies && program->input->deferred_tokens[token] != 0)
+        {
+            // (A masked body is one of the producer's: it has a place among its verdicts.)
+            check_program_fail(program, CHECK_PROGRAM_INVALID, token);
+        }
+        else if (taken != UINT32_MAX)
+        {
+            // --node-bodies (#2850): a body the producer took before the reader's walk has no control here, and its return
+            // flow is proved silent there; its references are the objects its kept tapes name, which the symbols'
+            // numbering and the selection read as they read a checked body's.
+            body->first = start;
+            body->count = 0;
+            body->entry_count = 0;
+            body->reference_first = reference_count;
+            body->label_first = label_first;
+            body->label_count = 0;
+            body->cleanup_first = writer->cleanup_first;
+            body->cleanup_count = 0;
+            body->reference_count = check_program_taken_references(program, taken, b + 1, seen, reference_items, needed);
+        }
+        else
+        {
         check_control_build(writer, token);
         // Its source labels' places, from their numbers, before check_program_return_flow takes the writer's labels.
         for (uint32_t l = label_first; l < writer->label_position_count; l += 1)
@@ -6740,7 +7097,6 @@ static void check_program_bodies(CheckProgramRun* run, uint32_t end)
             writer->label_positions[l] = label < writer->label_count ? writer->labels[label] : BUSTER_CHECK_NONE;
         }
         // Its own fields the setup wrote (check_program_begin); the controls' and the references' here.
-        CheckProgramBody* body = &program->bodies[b];
         body->first = start;
         body->count = writer->count - start;
         body->entry_count = writer->entry_count;
@@ -6755,8 +7111,8 @@ static void check_program_bodies(CheckProgramRun* run, uint32_t end)
         {
             check_program_chains(writer, body, exit_start, scratch);
         }
-        const uint64_t references_start = options->selection_census ? __rdtsc() : 0;
         body->reference_count = check_program_references(program, entries + start, body->entry_count, b + 1, seen, nodes, stack, reference_items, needed);
+        }
         if (body->reference_count > UINT32_MAX - reference_count)
         {
             check_program_fail(program, CHECK_PROGRAM_RESOURCE, token);
@@ -7030,6 +7386,7 @@ static bool check_program_finish(CheckProgramRun* run)
         arena_pop_to(scratch, temporary);
     }
     arena_release(&run->return_facts.storage);
+    arena_release(&run->extents.arena);
     arena_release(&controls);
     return valid;
 }

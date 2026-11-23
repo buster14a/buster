@@ -553,6 +553,9 @@ static CheckRequestReceipt check_request_receipt(const Preprocessor* pp, const c
     uint64_t digest = check_request_mix_word(0, 1, target.features);
     digest = check_request_mix_word(digest, 2, target.extensions);
     digest = check_request_mix_word(digest, 3, (uint64_t)target.architecture << 1 | (target.native_znver5 ? 1u : 0u));
+    // A tuning with slow unaligned 16-byte accesses (#1373, X86Target.slow_unaligned_16), which bounds the memmoves the code
+    // computes: mixed in where it is set alone, so that every other request's digest stays what it was.
+    digest = target.slow_unaligned_16 ? check_request_mix_word(digest, 40, 1) : digest;
     digest = check_request_mix_word(digest, 4, (uint64_t)language.standard << 32 | (uint64_t)language.gnu << 16 | (uint64_t)language.gnu_keywords << 8 | language.digraphs);
     const uint64_t lexical = (uint64_t)options->freestanding | (uint64_t)options->no_builtin << 1 | (uint64_t)options->undefine << 2 | (uint64_t)options->trigraphs << 3 |
                              (uint64_t)options->assembly << 4 | (uint64_t)options->clang_features << 5 | (uint64_t)options->no_standard_includes << 6 |

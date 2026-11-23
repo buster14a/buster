@@ -1680,6 +1680,34 @@ static bool predefines_test_target(void)
         printf("predefines target: -mavx2, -march=znver5 -mno-avx512f, -march=skylake or -mtune give the wrong target\n");
     }
     result &= switches;
+    // The tuning's slow unaligned 16-byte accesses (#1373, X86Target.slow_unaligned_16): -mtune's CPU, else -march's.
+    static const struct
+    {
+        const char* march;
+        const char* mtune;
+        bool slow;
+    } tunings[] = {
+        { NULL, NULL, false },
+        { "core2", NULL, true },
+        { "k8", NULL, true },
+        { "nehalem", NULL, false },
+        { "x86-64-v2", NULL, false },
+        { NULL, "core2", true },
+        { "core2", "x86-64", false },
+        { "x86-64-v3", "core2", true },
+        { NULL, "generic", false },
+    };
+    bool tuned = true;
+    for (uint32_t t = 0; t < BUSTER_ARRAY_LENGTH(tunings); t += 1)
+    {
+        const PredefinesOptions options = { .march = tunings[t].march, .mtune = tunings[t].mtune };
+        tuned &= predefines_target(&options, &target, &tune) && target.slow_unaligned_16 == tunings[t].slow;
+    }
+    if (!tuned)
+    {
+        printf("predefines target: a tuning's slow unaligned 16-byte accesses are wrong\n");
+    }
+    result &= tuned;
     printf("predefines target: %s (x86_target.c's features, its six profiles, -m switches, other CPUs and -mtune)\n", result ? "as expected" : "WRONG");
     return result;
 }

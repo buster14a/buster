@@ -38,7 +38,8 @@ static uint32_t check_value_source_flags(CheckOp op, uint32_t flags)
     return result;
 }
 
-// A receipt proves the initialized value, never a source literal, null-pointer syntax, or standard ICE.
+// A receipt proves the initialized value, never a source literal, null-pointer syntax, or standard ICE. An invalid
+// operation used to initialize it is not performed again by this read, so INVALID_CONSTANT does not pass through.
 // Symbolic pointer identity and its later-read restrictions survive; an integer payload inherits none of them.
 static uint32_t check_value_receipt_flags(const CheckValue* value)
 {
@@ -70,7 +71,7 @@ static void check_action_set_fault(CheckValue* value, CheckFault fault, uint32_t
 }
 
 // The flags an evaluated operand passes to its operator's value (check_action_inherit): its effects and provenance.
-#define BUSTER_CHECK_INHERITED (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_GNU_CONSTANT | BUSTER_CHECK_FP_ENVIRONMENT | BUSTER_CHECK_GNU_DIVISION | BUSTER_CHECK_GNU_FLOAT_RANGE | BUSTER_CHECK_GNU_OBJECT_READ | BUSTER_CHECK_INACTIVE_UNION_READ | BUSTER_CHECK_MODIFICATION | BUSTER_CHECK_DISCARDED_UNEVALUABLE)
+#define BUSTER_CHECK_INHERITED (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_GNU_CONSTANT | BUSTER_CHECK_FP_ENVIRONMENT | BUSTER_CHECK_GNU_DIVISION | BUSTER_CHECK_GNU_FLOAT_RANGE | BUSTER_CHECK_GNU_OBJECT_READ | BUSTER_CHECK_INACTIVE_UNION_READ | BUSTER_CHECK_MODIFICATION | BUSTER_CHECK_DISCARDED_UNEVALUABLE | BUSTER_CHECK_INVALID_CONSTANT)
 
 static void check_action_inherit(CheckValue* value, const CheckValue* operand)
 {
@@ -147,8 +148,14 @@ static void check_action_comma_provenance(const TypeTable* table, CheckValue* va
     check_action_inherit(value, left);
     if (constant_evaluated)
     {
+        // A left operand that folded undefined behavior (a GNU constant that no const object's read gave: `(1 << 44, 3)`,
+        // `((void)(2147483647 + 1), 3)`) is one clang's evaluator fails on where it discards it, as it does on a division's
+        // overflow anywhere (#2264): an array bound that holds it is a variable one, which file scope refuses, and an
+        // `aligned` argument no constant. Its enumerator, case label, bit-field width and static initializer still fold.
+        const bool undefined = (left->flags & (BUSTER_CHECK_GNU_CONSTANT | BUSTER_CHECK_GNU_OBJECT_READ)) == BUSTER_CHECK_GNU_CONSTANT;
         value->flags = (value->flags & ~BUSTER_CHECK_MODIFICATION) | (right->flags & BUSTER_CHECK_MODIFICATION) |
-                       (check_action_discard_evaluable(table, left) ? 0 : BUSTER_CHECK_DISCARDED_UNEVALUABLE);
+                       (check_action_discard_evaluable(table, left) ? 0 : BUSTER_CHECK_DISCARDED_UNEVALUABLE) |
+                       (undefined ? BUSTER_CHECK_GNU_DIVISION : 0);
     }
 }
 
