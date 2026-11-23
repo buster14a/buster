@@ -12880,6 +12880,14 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
     bool driver_fatal = false;
     Arena type_arena = { 0 };
     Arena index_arena = { 0 };
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+    // #2850's producer against the unit's diagnostics, where a test asks for it (BUSTER_TEST_NODE_BODIES_LOG, which the
+    // command read: its options then have the producer's switch).
+    if (__builtin_expect((command->options.node_reader & BUSTER_NODE_READER_PRODUCE_LEAN) != 0, 0))
+    {
+        (void)node_bodies_check_begin(path);
+    }
+#endif
     // The thread's last arena failure as the unit starts, against which its end tells a commit the unit was refused.
     const ArenaFailure failure_before = arena_failure;
     // #2531's attested declarations: the lane's state where the unit is one of a command's several (none for the census's).
@@ -13157,9 +13165,21 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             }
             else
             {
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+                if (__builtin_expect(node_bodies_checking, 0) && (repairing || prefix_only || checking != parser || selected != NULL))
+                {
+                    // #2850's producer runs in a unit's ordinary read of its whole parse alone: not in a repaired parse's,
+                    // a prefix's or a view's, which are read where the unit has failed already.
+                    checking_pp->options.node_front = 0;
+                    checking_pp->options.node_reader = 0;
+                }
+#endif
                 input_valid = check_input_compile(&input, checking, checking_pp, &types, arena, scratch, !prefix_only,
                                                   repairing ? repair.original_end : checking->tokens.count, selected);
             }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+            node_bodies_check_read(&input, checking);
+#endif
             // A statement start's typo correction that clang's parser reads the statement again with (#1447,
             // check_driver_typo_edits): the original's tokens with the corrections, recovered and read again.
             // (Not for a unit's view, whose token indices aren't its parse's: an error makes it read again whole,
@@ -13242,6 +13262,14 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     {
                         checking->typo_sources = typo_edits.sources;
                         checking->typo_count = typo_edits.source_count;
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+                        if (__builtin_expect(node_bodies_checking, 0))
+                        {
+                            // (Nor in a read made again for a typo's correction: what the first read decided stands.)
+                            checking_pp->options.node_front = 0;
+                            checking_pp->options.node_reader = 0;
+                        }
+#endif
                         input_valid = check_input_compile(&input, checking, checking_pp, &types, arena, scratch, false,
                                                           repairing ? repair.original_end : checking->tokens.count, NULL);
                     }
@@ -14342,6 +14370,9 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
     }
     // What follows the last stage (a dump, diagnostics after a failed parse) is charged to the release.
     check_clock_mark(stage_clock, CHECK_STAGE_RELEASE);
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+    node_bodies_check_end(pp);
+#endif
     pp_diagnostic_publish(pp);
     pp_diagnostic_summary(pp);
     result = pp->errors != 0 || driver_fatal ? 1 : result;
@@ -15436,6 +15467,16 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     options.published_unused_only = (emit_object || link) && !dump && !dump_static && attested_memo == NULL && attested != CHECK_ATTESTED_MODE_VERIFY;
     options.statement_controls = (emit_object || link) && !scalar && !dump && !dump_static &&
                                  !node_window && !node_window_constants && !source_rows;
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+    if (getenv("BUSTER_TEST_NODE_BODIES_LOG") != NULL)
+    {
+        // #2850's producer of the bodies' functions, run beside each unit's ordinary read as a compile would run it and
+        // nothing masked: a test's switch (c_check_node_bodies.c's node_bodies_check_end reads what it decided against
+        // the unit's diagnostics).
+        options.node_front = BUSTER_NODE_FRONT_TYPES | BUSTER_NODE_FRONT_SWEEPS | BUSTER_NODE_FRONT_AFTER;
+        options.node_reader = BUSTER_NODE_READER_TESTS | BUSTER_NODE_READER_ALONE | BUSTER_NODE_READER_ALONE_FIRST | BUSTER_NODE_READER_PRODUCE | BUSTER_NODE_READER_PRODUCE_LEAN;
+    }
+#endif
     const CheckDriverCommand command = {
         .options = options,
         .scalar = scalar,

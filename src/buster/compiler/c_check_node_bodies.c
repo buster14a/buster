@@ -1,7 +1,10 @@
 // A function body's controls from its tokens, without a node of the walk's (#2850; docs/node-machine.md, "The same
 // comparison before the walk"): what a producer of a body's lowered function has to make where the program's builder
-// reads the walk's nodes. No compile takes it: measure-node-machine --shadow --bodies makes them after the pipeline and
-// compares them with the program's (c_check_node_census.c).
+// reads the walk's nodes. And the producer's decision ("The producer, deciding before the walk"): what says, before the
+// expressions' walk reads a body, that the machine with no node of the walk's takes it, and what is kept of a body it
+// takes. No compile takes either: measure-node-machine --shadow --bodies makes the controls after the pipeline and
+// compares them with the program's, and with --produce runs the producer at reader time and compares what it decided
+// (c_check_node_census.c).
 //
 // Include after c_check_node_machine_alone.c.
 #ifndef BUSTER_C_CHECK_NODE_BODIES_INCLUDED
@@ -436,9 +439,14 @@ static void node_twin_gates(NodeTwin* twin, uint32_t opening)
             node_twin_fail(twin, NODE_TWIN_VARIABLE);
         }
     }
+    // A variably modified declaration of the body's, or of its function's parameters (a prototype's, or an old-style
+    // definition's declarations before the brace): the function's entry evaluates a parameter's bounds, in controls the
+    // program makes before the body's first.
+    const uint32_t function = check_sparse_get(input->body_declarations, opening);
+    const uint32_t declared_from = function < opening ? function : opening;
     for (uint32_t v = 0; v < input->vla_count && twin->reason == NODE_TWIN_ATTEMPTED; v += 1)
     {
-        if (input->vlas[v].declaration > opening && input->vlas[v].declaration < closing)
+        if (input->vlas[v].declaration > declared_from && input->vlas[v].declaration < closing)
         {
             node_twin_fail(twin, NODE_TWIN_VARIABLE);
         }
@@ -854,6 +862,747 @@ static bool node_twin_silent(NodeTwin* twin, uint32_t declaration, bool is_main)
         silent = twin->seen[twin->count - 1] == 0;
     }
     return silent;
+}
+
+// Why the producer does not take a body (NodeFrontShadow.produced_reasons), in the order it asks; 0 for one it takes.
+typedef enum NodeProducerReason
+{
+    NODE_PRODUCER_TAKEN,
+    // The unit's own (BUSTER_NODE_PRODUCER_UNIT_*): a warning option or a diagnostic pragma (the passes after the walk
+    // say more of a body under other warnings than the producer proves absent), a symbol's pragma, a target or an
+    // interrupt attribute, a report before the walk.
+    NODE_PRODUCER_UNIT,
+    // A pass before the walk has said something at one of its tokens: a report, or a warning's event.
+    NODE_PRODUCER_SAID,
+    // The scan of its tokens finds one the front would lose a root at (node_alone_scan).
+    NODE_PRODUCER_SCAN,
+    // A token of it, by its kind or its role alone: a `switch`, a `case` or a `default`, an `asm`, a _Static_assert, a
+    // typeof, a braced initializer; a null statement that is a condition's or a for's whole body; an else whose `if` is
+    // another condition's whole statement.
+    NODE_PRODUCER_TOKEN,
+    // What the controls' twin leaves out by the tokens and the reader's columns (node_twin_gates; the detail is its
+    // reason): a block's static or extern declaration, a variable-length array, a cleanup, a statement expression.
+    NODE_PRODUCER_GATE,
+    // Its function: no type, parameters without a prototype, a result that is neither void nor a scalar of a class I8
+    // to F64, a naked one, or one a declaration gives always_inline.
+    NODE_PRODUCER_FUNCTION,
+    // After the reading. The machine does not take every root of it (the detail is its verdict of the body).
+    NODE_PRODUCER_MACHINE,
+    // The twin does not make its controls (the detail is its reason).
+    NODE_PRODUCER_CONTROLS,
+    // A control with an expression whose root the machine did not keep.
+    NODE_PRODUCER_UNKEPT,
+    // An initialization that is not a scalar's of one value, or of a declaration with an assembler label, or of an
+    // object aligned past 8 bytes.
+    NODE_PRODUCER_INITIALIZER,
+    // A return without a value in a function with a result, or with one in a function without.
+    NODE_PRODUCER_RETURN,
+    // An `if` whose condition's root is a constant: the program may fold it.
+    NODE_PRODUCER_CONSTANT,
+    // The return flow's silence is not proved (node_twin_silent).
+    NODE_PRODUCER_FLOW,
+    // A root whose records may have a warning that neither T's rules nor the census's tests stand for before the walk
+    // (node_machine_root_loud): two enumerations meeting, or a conditional's constant arm that its conversion changes.
+    NODE_PRODUCER_LOUD,
+    NODE_PRODUCER_ROOM,
+    NODE_PRODUCER_REASONS,
+} NodeProducerReason;
+
+static const char* const node_producer_reason_names[NODE_PRODUCER_REASONS] = {
+    "taken", "its-unit", "something-said-of-it-before-the-walk", "the-scan", "a-token's-kind", "a-gate-of-the-controls'", "its-function", "a-root-the-machine-does-not-take",
+    "controls-the-twin-does-not-make", "a-control's-root-not-kept", "an-initialization-of-another-form", "a-return-of-another-form", "a-condition-that-is-a-constant",
+    "its-return-flow-not-proved-silent", "a-root-that-may-be-warned-of", "no-room",
+};
+
+#define BUSTER_NODE_PRODUCER_UNIT_WARNINGS 1u
+#define BUSTER_NODE_PRODUCER_UNIT_PRAGMAS 2u
+#define BUSTER_NODE_PRODUCER_UNIT_SYMBOLS 3u
+#define BUSTER_NODE_PRODUCER_UNIT_ATTRIBUTES 4u
+#define BUSTER_NODE_PRODUCER_UNIT_REPORTS 5u
+// A member marked deprecated or unavailable, or one with an attribute of the counted_by family: a use of it is warned of
+// or refused after the walk (check_input_member_uses, the counted_by family's checks).
+#define BUSTER_NODE_PRODUCER_UNIT_MEMBERS 6u
+// A const, pure, warn_unused_result or nodiscard attribute on what is no function's declaration (a type's, an object's):
+// a discarded call's result is then warned of by its type or its callee's (c_check_ignored_result.c), which the census's
+// test of a callee's declaration does not read.
+#define BUSTER_NODE_PRODUCER_UNIT_RESULTS 7u
+#define BUSTER_NODE_PRODUCER_UNITS 8u
+
+static const char* const node_producer_unit_names[BUSTER_NODE_PRODUCER_UNITS] = {
+    "none", "a-warning-option", "a-diagnostic-pragma", "a-symbol's-pragma", "a-function's-attribute-of-its-code", "an-error-before-the-walk",
+    "a-marked-or-a-counted-member", "a-result's-attribute-on-no-function",
+};
+
+struct NodeProducer
+{
+    NodeTwin twin;
+    // The tokens a pass before the walk has said something at (a report's, a warning's event's), in order.
+    uint32_t* said;
+    uint32_t said_count;
+    // A bit a token: a function's first declaration (its object's number less one, CheckInput.objects) that the unit
+    // defines. A body that names a function with internal linkage that has no bit is not taken: the unit's end warns of
+    // the function, with a note at its first use.
+    uint64_t* defined;
+    // The unit's enumerations' definitions as the tags' columns have them before the walk (NodeMachine.reader_enums).
+    CheckInputEnumDefinition* enums;
+    uint32_t enum_count;
+    // The unit's own reason (BUSTER_NODE_PRODUCER_UNIT_*), 0 where it has none.
+    uint8_t unit;
+    bool lean;
+};
+
+static bool node_census_aggregate(const TypeTable* types, TypeId type);
+static uint8_t node_census_kind(const TypeTable* types, TypeId type);
+static bool node_census_labelled(const CheckInput* input, const Parser* parser, uint32_t declaration);
+
+// The producer's state for a unit, made where the machine with no node of the walk's is (node_alone_begin): the twin's
+// columns for the unit's largest body, the tokens something was said at, the unit's own reason, and the verdicts' and
+// the kept controls' room for `bodies` bodies. Null without room.
+static struct NodeProducer* node_producer_begin(struct NodeAlone* alone, CheckInputReader* reader, uint32_t bodies)
+{
+    const Parser* parser = reader->parser;
+    const CheckInput* input = reader->output;
+    const uint32_t count = parser->tokens.count;
+    NodeFrontShadow* shadow = alone->shadow;
+    // The largest body's tokens: the twin's columns and its tasks have a place a token of the body at hand, and two more.
+    uint32_t largest = 0;
+    uint64_t inside = 0;
+    for (uint32_t token = 0; token < count; token += 1)
+    {
+        const uint32_t closing = parser->tree.roles[token] == PARSE_ROLE_OPEN_BODY ? parser->tree.parents[token] : count;
+        const uint32_t extent = closing < count && closing > token ? closing - token + 1 : 0;
+        largest = extent > largest ? extent : largest;
+        inside += extent;
+    }
+    const uint64_t room = (uint64_t)largest + 2;
+    // What has been said so far: the reader's reports and its warnings' events, and the diagnostics published already
+    // (the preprocessor's, the parser's, and what the reader published as it resolved the names).
+    uint64_t published = 0;
+    for (const PPDiagnosticRecord* record = reader->pp->diagnostic_first; record != NULL; record = record->next)
+    {
+        published += 1;
+    }
+    const uint64_t said_room = (uint64_t)input->report_count + reader->warning_events.count + published + 1;
+    struct NodeProducer* producer = arena_push_array(reader->scratch, 1, sizeof(struct NodeProducer), _Alignof(struct NodeProducer));
+    bool valid = producer != NULL;
+    if (valid)
+    {
+        memset(producer, 0, sizeof(*producer));
+        NodeTwin* twin = &producer->twin;
+        twin->capacity = (uint32_t)room;
+        uint32_t** columns[] = { &twin->first, &twin->last, &twin->next, &twin->previous, &twin->source_labels, &twin->plan_first, &twin->plan_last, &twin->plan_next, &twin->labels,
+                                 &twin->queue };
+        for (uint32_t c = 0; valid && c < BUSTER_ARRAY_LENGTH(columns); c += 1)
+        {
+            *columns[c] = arena_push_array(reader->scratch, room, sizeof(uint32_t), _Alignof(uint32_t));
+            valid = *columns[c] != NULL;
+        }
+        twin->tasks = valid ? arena_push_array(reader->scratch, room, sizeof(NodeTwinTask), _Alignof(NodeTwinTask)) : NULL;
+        twin->reach = valid ? arena_push_array(reader->scratch, room, sizeof(NodeTwinReach), _Alignof(NodeTwinReach)) : NULL;
+        twin->entries = valid ? arena_push_array(reader->scratch, room, sizeof(NodeTwinControl), _Alignof(NodeTwinControl)) : NULL;
+        twin->seen = valid ? arena_push_array(reader->scratch, room, sizeof(uint8_t), 1) : NULL;
+        producer->said = valid ? arena_push_array(reader->scratch, said_room, sizeof(uint32_t), _Alignof(uint32_t)) : NULL;
+        producer->defined = valid ? arena_push_array(reader->scratch, (uint64_t)count / 64 + 2, sizeof(uint64_t), _Alignof(uint64_t)) : NULL;
+        // A control a token of a body at most: the kept controls' room is the bodies' tokens.
+        shadow->produced_reasons = arena_push_array(reader->arena, (uint64_t)bodies + 1, sizeof(uint8_t), 1);
+        shadow->produced_details = arena_push_array(reader->arena, (uint64_t)bodies + 1, sizeof(uint8_t), 1);
+        shadow->produced_firsts = arena_push_array(reader->arena, (uint64_t)bodies + 1, sizeof(uint32_t), _Alignof(uint32_t));
+        shadow->produced_counts = arena_push_array(reader->arena, (uint64_t)bodies + 1, sizeof(uint32_t), _Alignof(uint32_t));
+        shadow->produced_controls = arena_push_array(reader->arena, inside + 1, sizeof(NodeTwinControl), _Alignof(NodeTwinControl));
+        shadow->produced_control_capacity = inside < UINT32_MAX ? (uint32_t)inside : UINT32_MAX;
+        shadow->produced_control_count = 0;
+        valid = valid && twin->tasks != NULL && twin->reach != NULL && twin->entries != NULL && twin->seen != NULL && producer->said != NULL && producer->defined != NULL &&
+                shadow->produced_reasons != NULL &&
+                shadow->produced_details != NULL && shadow->produced_firsts != NULL && shadow->produced_counts != NULL && shadow->produced_controls != NULL;
+    }
+    if (valid)
+    {
+        NodeTwin* twin = &producer->twin;
+        twin->parser = parser;
+        twin->input = input;
+        twin->types = reader->types;
+        twin->roots = shadow->alone_control_roots;
+        twin->kept = alone->types;
+        producer->lean = (reader->pp->options.node_reader & BUSTER_NODE_READER_PRODUCE_LEAN) != 0;
+        // What the passes before the walk have said, by its token's place in the preprocessor's output (which a published
+        // diagnostic's token is, and whose order the parser's tokens keep, a view's too), in order: the reports are few
+        // and the events are nearly in order, an insertion each.
+        const PPDiagnosticRecord* record = reader->pp->diagnostic_first;
+        for (uint32_t source = 0; source < 3; source += 1)
+        {
+            const uint64_t said = source == 0 ? input->report_count : source == 1 ? reader->warning_events.count : published;
+            for (uint64_t i = 0; i < said; i += 1)
+            {
+                const uint32_t own = source == 0 ? input->reports[i].token : source == 1 ? reader->warning_events.events[i].token : 0;
+                uint32_t token = source < 2 ? (own < count ? parse_source_index(&parser->tokens, own) : UINT32_MAX) :
+                                 record->token != 0 ? record->token - 1 : (uint32_t)(record->position / PP_DIAGNOSTIC_PHASE_COUNT);
+                record = source == 2 ? record->next : record;
+                uint32_t at = producer->said_count;
+                while (at != 0 && producer->said[at - 1] > token)
+                {
+                    producer->said[at] = producer->said[at - 1];
+                    at -= 1;
+                }
+                producer->said[at] = token;
+                producer->said_count += 1;
+            }
+        }
+        // The functions the unit defines, by their first declarations.
+        memset(producer->defined, 0, ((uint64_t)count / 64 + 2) * sizeof(uint64_t));
+        for (uint32_t token = 0; token < count; token += 1)
+        {
+            const uint32_t declaration = parser->tree.roles[token] == PARSE_ROLE_OPEN_BODY ? check_sparse_get(input->body_declarations, token) : BUSTER_CHECK_NONE;
+            const uint32_t object = declaration < input->token_count && input->objects != NULL ? input->objects[declaration] : 0;
+            if (object != 0 && object <= count)
+            {
+                producer->defined[(object - 1) / 64] |= UINT64_C(1) << ((object - 1) % 64);
+            }
+        }
+        // The unit's enumerations' definitions (check_input_enum_records' list, which the reader makes at its end): one
+        // pass counts them and one writes them.
+        for (uint32_t pass = 0; valid && pass < 2; pass += 1)
+        {
+            uint32_t at = 0;
+            for (uint32_t token = 0; token < count; token += 1)
+            {
+                const uint32_t brace = parser->tokens.kinds[token] == PARSE_KIND_ENUM ? check_input_enum_opening(reader, token) : BUSTER_CHECK_NONE;
+                if (brace != BUSTER_CHECK_NONE)
+                {
+                    if (pass == 1)
+                    {
+                        producer->enums[at] = (CheckInputEnumDefinition){ .type = reader->tag_types[token], .open = brace, .close = parser->tree.parents[brace] };
+                    }
+                    at += 1;
+                }
+            }
+            if (pass == 0)
+            {
+                producer->enums = arena_push_array(reader->scratch, (uint64_t)at + 1, sizeof(CheckInputEnumDefinition), _Alignof(CheckInputEnumDefinition));
+                producer->enum_count = at;
+                valid = producer->enums != NULL;
+            }
+        }
+        // And whether a member of a record has an attribute of the counted_by family, by the types' members' flags.
+        bool counted_member = false;
+        for (uint32_t member = 1; member < reader->types->members.count; member += 1)
+        {
+            counted_member |= (reader->types->members.flags[member] & BUSTER_TYPE_MEMBER_COUNT_MASK) != 0;
+        }
+        // The unit's own reason. Of its attributes, by the tokens that have some: a function's whose code they change or
+        // choose (a target, its clones, an interrupt's, a processor's dispatch, internal linkage); and a result's on what is
+        // no function's declaration.
+        bool attributed = false;
+        bool results = false;
+        const uint32_t attributed_end = count < input->token_count ? count : input->token_count;
+        for (uint32_t first = check_input_attributed_next(input->attributes, 0, attributed_end); first < attributed_end;
+             first = check_input_attributed_next(input->attributes, first + 16, attributed_end))
+        {
+            for (uint32_t selected = check_input_attributed_group(input->attributes, first, attributed_end); selected != 0; selected &= selected - 1)
+            {
+                const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
+                const CheckInputAttributes* attributes = check_input_attributes_at(input, token);
+                const bool function = parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER && input->declaration_kinds != NULL && input->declaration_kinds[token] == C_BINDING_FUNCTION;
+                results |= attributes != NULL && attributes->results && !function;
+                for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
+                {
+                    const uint32_t kind = attributes->records[i].kind;
+                    attributed |= kind == CHECK_ATTRIBUTE_TARGET || kind == CHECK_ATTRIBUTE_TARGET_CLONES || kind == CHECK_ATTRIBUTE_INTERRUPT || kind == CHECK_ATTRIBUTE_CPU_SPECIFIC ||
+                                  kind == CHECK_ATTRIBUTE_CPU_DISPATCH || kind == CHECK_ATTRIBUTE_INTERNAL_LINKAGE;
+                }
+            }
+        }
+        // (An error the reader recovers from is moved off its reports so that it reads on, CheckInput.recovered_reports: the
+        // unit fails all the same.)
+        producer->unit = input->report_count != 0 || input->recovered_count != 0 || parser->errors != 0 || reader->pp->errors != 0 ? BUSTER_NODE_PRODUCER_UNIT_REPORTS :
+                         reader->pp->options.semantic_warning_option_count != 0 ? BUSTER_NODE_PRODUCER_UNIT_WARNINGS :
+                         input->diagnostic_pragmas != NULL && input->diagnostic_pragmas->count != 0 ? BUSTER_NODE_PRODUCER_UNIT_PRAGMAS :
+                         input->symbol_pragmas != NULL && input->symbol_pragmas->count != 0 ? BUSTER_NODE_PRODUCER_UNIT_SYMBOLS :
+                         attributed ? BUSTER_NODE_PRODUCER_UNIT_ATTRIBUTES :
+                         counted_member || input->marked_member_count != 0 ? BUSTER_NODE_PRODUCER_UNIT_MEMBERS :
+                         results ? BUSTER_NODE_PRODUCER_UNIT_RESULTS : 0;
+        shadow->produced_unit = producer->unit;
+        shadow->produced_ran = true;
+        shadow->produced_reports_before = input->report_count;
+        shadow->produced_events_before = reader->warning_events.count;
+        shadow->produced_reports_walked = UINT32_MAX;
+        shadow->produced_events_walked = UINT32_MAX;
+    }
+    return valid ? producer : NULL;
+}
+
+// The unit's enumerations' definitions for the machine `machine` (NodeMachine.reader_enums).
+static void node_producer_enums(const struct NodeProducer* producer, NodeMachine* machine)
+{
+    machine->reader_enums = producer->enums;
+    machine->reader_enum_count = producer->enum_count;
+}
+
+// What the producer asks of the body whose opening brace is `opening` before any of it is read: its reason not to take
+// it (NODE_PRODUCER_TAKEN where it has none yet), with what the reason was found at in *detail. *scan is what the scan of
+// its tokens found (1: a token the front would lose a root at; 0: none), or -1 where an earlier reason left it unrun; it
+// adds the tokens it read to *read.
+static uint8_t node_producer_before(struct NodeProducer* producer, const NodeMachineReader* typer, const CheckInputReader* reader, uint32_t opening, uint8_t* detail, int* scan,
+                                    uint64_t* read)
+{
+    const Parser* parser = reader->parser;
+    const CheckInput* input = reader->output;
+    const TypeTable* types = reader->types;
+    const uint32_t count = parser->tokens.count;
+    const uint32_t closing = parser->tree.parents[opening];
+    uint8_t reason = NODE_PRODUCER_TAKEN;
+    *detail = 0;
+    if (producer->unit != 0)
+    {
+        reason = NODE_PRODUCER_UNIT;
+        *detail = producer->unit;
+    }
+    if (reason == NODE_PRODUCER_TAKEN)
+    {
+        // The first token something was said at that is not before the body: whether it is in it. (By the tokens' places
+        // in the preprocessor's output.)
+        const uint32_t first = parse_source_index(&parser->tokens, opening);
+        const uint32_t last = parse_source_index(&parser->tokens, closing);
+        uint32_t low = 0;
+        uint32_t high = producer->said_count;
+        while (low < high)
+        {
+            const uint32_t middle = low + (high - low) / 2;
+            const bool before = producer->said[middle] < first;
+            low = before ? middle + 1 : low;
+            high = before ? high : middle;
+        }
+        reason = low < producer->said_count && producer->said[low] <= last ? NODE_PRODUCER_SAID : reason;
+    }
+    *scan = -1;
+    if (reason == NODE_PRODUCER_TAKEN)
+    {
+        *scan = node_alone_scan(reader, opening, read);
+        reason = *scan != 0 ? NODE_PRODUCER_SCAN : reason;
+    }
+    if (reason == NODE_PRODUCER_TAKEN)
+    {
+        // A pragma in the body, whatever it is: one the compiler ignores is warned of where it stands, after the walk.
+        // (The parser keeps each pragma with the token it comes before.)
+        uint32_t low = 0;
+        uint32_t high = parser->tokens.pragma_count;
+        while (low < high)
+        {
+            const uint32_t middle = low + (high - low) / 2;
+            const bool before = parser->tokens.pragma_positions[middle] <= opening;
+            low = before ? middle + 1 : low;
+            high = before ? high : middle;
+        }
+        if (low < parser->tokens.pragma_count && parser->tokens.pragma_positions[low] <= closing)
+        {
+            reason = NODE_PRODUCER_TOKEN;
+            *detail = PARSE_KIND_UNKNOWN;
+        }
+    }
+    for (uint32_t token = opening + 1; reason == NODE_PRODUCER_TAKEN && token < closing && token < count; token += 1)
+    {
+        const uint8_t kind = parser->tokens.kinds[token];
+        const uint8_t role = parser->tree.roles[token];
+        if (kind == PARSE_KIND_SWITCH || kind == PARSE_KIND_CASE || kind == PARSE_KIND_DEFAULT || kind == PARSE_KIND_ASM || kind == PARSE_KIND_STATIC_ASSERT ||
+            kind == PARSE_KIND_TYPEOF)
+        {
+            reason = NODE_PRODUCER_TOKEN;
+            *detail = kind;
+        }
+        else if (kind == PARSE_KIND_IDENTIFIER && token < input->token_count && input->declarations[token] < input->token_count &&
+                 input->declaration_kinds[input->declarations[token]] == C_BINDING_FUNCTION &&
+                 check_input_linkage(input->declaration_bits, input->declarations[token]) == 1)
+        {
+            // A function with internal linkage that the unit does not define, named here: the unit's end warns of it, with
+            // a note at its first use.
+            const uint32_t object = input->objects[input->declarations[token]];
+            const bool defined = object != 0 && object <= count && (producer->defined[(object - 1) / 64] >> ((object - 1) % 64) & 1) != 0;
+            if (!defined)
+            {
+                reason = NODE_PRODUCER_TOKEN;
+                *detail = PARSE_KIND_STORAGE;
+            }
+        }
+        else if (role == PARSE_ROLE_OPEN_INITIALIZER)
+        {
+            reason = NODE_PRODUCER_TOKEN;
+            *detail = PARSE_KIND_L_BRACE;
+        }
+        else if (kind == PARSE_KIND_SEMI && role == PARSE_ROLE_TERMINATOR && parser->tree.parents[token] == token - 1 &&
+                 (parser->tree.roles[token - 1] == PARSE_ROLE_CLOSE_CONDITION || parser->tree.roles[token - 1] == PARSE_ROLE_CLOSE_FOR))
+        {
+            // A null statement for an `if`'s, a loop's or a `switch`'s whole body, which the common warnings' pass after the
+            // reader may warn of (check_common_empty_bodies, by the lines the tokens are spelled on).
+            reason = NODE_PRODUCER_TOKEN;
+            *detail = PARSE_KIND_SEMI;
+        }
+        else if (role == PARSE_ROLE_ELSE && parser->tree.parents[token] < count && parser->tree.roles[parser->tree.parents[token]] == PARSE_ROLE_CLOSE_CONDITION &&
+                 parser->tree.parents[parser->tree.parents[token]] < count &&
+                 parser->tree.roles[parser->tree.parents[parser->tree.parents[token]]] == PARSE_ROLE_CLOSE_CONDITION)
+        {
+            // An else whose `if` is another condition's whole statement, which the same pass may warn of
+            // (check_common_dangling_else, where the outer one is an `if` without an else of its own).
+            reason = NODE_PRODUCER_TOKEN;
+            *detail = PARSE_KIND_ELSE;
+        }
+    }
+    if (reason == NODE_PRODUCER_TAKEN)
+    {
+        NodeTwin* twin = &producer->twin;
+        twin->reason = NODE_TWIN_ATTEMPTED;
+        node_twin_gates(twin, opening);
+        if (twin->reason != NODE_TWIN_ATTEMPTED)
+        {
+            reason = NODE_PRODUCER_GATE;
+            *detail = twin->reason;
+        }
+    }
+    if (reason == NODE_PRODUCER_TAKEN)
+    {
+        // Its function, as the bodies' comparison asks it of the lowered one (node_bodies_begin): a prototype or no
+        // parameter, and a result that is void or a scalar's. And no naked one: a pass after the walk reports each of
+        // its statements that is no asm and each use of a parameter, in the body (check_input_naked_finish).
+        const uint32_t declaration = check_sparse_get(input->body_declarations, opening);
+        const TypeId type = declaration < input->token_count ? input->declared_types[declaration] : 0;
+        const bool function = type != 0 && type_kind(types, type_strip_aligned(types, type)) == BUSTER_TYPE_KIND_FUNCTION;
+        const TypeId result = function ? type_return(types, type) : 0;
+        const bool none = result == BUSTER_TYPE_VOID;
+        const uint8_t class = function && !none ? node_machine_class(&typer->machine, result) : BUSTER_TYPED_CLASS_VOID;
+        const bool unprototyped = function && (types->types.flags[type_index(type)] & BUSTER_TYPE_FLAG_PROTOTYPE) == 0 &&
+                                  check_sparse_get(input->parameters, opening) != BUSTER_CHECK_NONE;
+        const bool naked = declaration < input->token_count && input->function_flags != NULL && (input->function_flags[declaration] & CHECK_INPUT_FUNCTION_NAKED) != 0;
+        // Nor one a declaration gives always_inline: the lowering expands a direct call of its inline-only definition from
+        // the body's own nodes (#2983, check_program_select_wrappers), which a taken body has none of.
+        const uint32_t object = declaration < input->token_count ? input->objects[declaration] : 0;
+        const bool inlined = object != 0 && object < typer->machine.reader_objects && (typer->machine.reader_facts[object] & BUSTER_NODE_MACHINE_OBJECT_INLINED) != 0;
+        if (!function || unprototyped || (!none && (class < BUSTER_TYPED_CLASS_I8 || class > BUSTER_TYPED_CLASS_F64)) || naked || inlined)
+        {
+            reason = NODE_PRODUCER_FUNCTION;
+            *detail = !function ? 1 : unprototyped ? 2 : naked ? 4 : inlined ? 5 : 3;
+        }
+    }
+    return reason;
+}
+
+// What it asks after the machine has read the body (`verdict`, its verdict of it): its controls from the tokens, each
+// control's expression's root kept, the forms of its initializations and its returns, no constant `if`, and the return
+// flow's silence. `reason` is what it had before the reading. Returns the reason, 0 for a body it takes, whose controls
+// are then in the twin's entries.
+static uint8_t node_producer_after(struct NodeProducer* producer, const struct NodeAlone* alone, const CheckInputReader* reader, uint32_t opening, uint8_t reason, uint8_t verdict,
+                                   uint8_t* detail)
+{
+    const Parser* parser = reader->parser;
+    const CheckInput* input = reader->output;
+    const TypeTable* types = reader->types;
+    const NodeFrontTypes* kept = alone->types;
+    const uint32_t* roots = alone->shadow->alone_control_roots;
+    const uint32_t count = parser->tokens.count;
+    const uint32_t closing = parser->tree.parents[opening];
+    NodeTwin* twin = &producer->twin;
+    if (reason == NODE_PRODUCER_TAKEN && verdict != BUSTER_NODE_ALONE_BODY_WHOLE)
+    {
+        reason = NODE_PRODUCER_MACHINE;
+        *detail = verdict;
+    }
+    if (reason == NODE_PRODUCER_TAKEN)
+    {
+        twin->reason = NODE_TWIN_ATTEMPTED;
+        if (!node_twin_build(twin, opening))
+        {
+            reason = NODE_PRODUCER_CONTROLS;
+            *detail = twin->reason;
+        }
+    }
+    const uint32_t declaration = reason == NODE_PRODUCER_TAKEN ? check_sparse_get(input->body_declarations, opening) : BUSTER_CHECK_NONE;
+    const bool valued = declaration < input->token_count && type_return(types, input->declared_types[declaration]) != BUSTER_TYPE_VOID;
+    for (uint32_t i = 0; reason == NODE_PRODUCER_TAKEN && i < twin->count; i += 1)
+    {
+        const NodeTwinControl* entry = twin->entries + i;
+        const bool initialization = entry->kind == CHECK_CONTROL_INITIALIZE;
+        if (entry->valued || initialization)
+        {
+            // Its expression's root: taken, swept, and kept with what is beside its tape.
+            const uint32_t slot = entry->token < count ? roots[entry->token] : 0;
+            const uint32_t root = slot - 1;
+            const bool found = slot != 0 && slot != UINT32_MAX && root < kept->node_capacity && (kept->refusals[root] & BUSTER_NODE_FRONT_TYPED_SWEPT) != 0 &&
+                               kept->sweep_refusals[root] == NODE_MACHINE_TAKEN && kept->tape_counts[root] != UINT32_MAX && kept->side_label_firsts[root] != UINT32_MAX;
+            reason = !found ? NODE_PRODUCER_UNKEPT : (kept->side_facts[root] & BUSTER_NODE_FRONT_SIDE_LOUD) != 0 ? NODE_PRODUCER_LOUD : reason;
+        }
+        if (reason == NODE_PRODUCER_TAKEN && initialization)
+        {
+            // A scalar's, of one value that converts to the declared type as a direct assignment's source does without a
+            // diagnostic: the walk checks an initialization's conversion at its token, which no root holds.
+            const TypeId declared = entry->token < input->token_count ? input->declared_types[entry->token] : 0;
+            const bool scalar = declared != 0 && !node_census_aggregate(types, declared) && !type_kind_is_array(node_census_kind(types, declared));
+            const uint32_t root = roots[entry->token] - 1;
+            const bool converts = (kept->side_facts[root] & BUSTER_NODE_FRONT_SIDE_CONVERTS) != 0;
+            // And of an object whose local the lowering makes a plain one of its class (check_lower_part_body's own test of a
+            // declaration): one aligned past 8 bytes, by its attribute or by its type, is a frame object, which its
+            // initialization writes through its address.
+            const CheckInputAttributes* attributes = scalar ? check_input_attributes_at(input, entry->token) : NULL;
+            const bool plain = scalar && (attributes == NULL || attributes->alignment_log2 == 0) && type_alignment_log2(types, declared) <= 3;
+            reason = scalar && converts && plain && !node_census_labelled(input, parser, entry->token) ? reason : NODE_PRODUCER_INITIALIZER;
+            *detail = scalar && !converts ? 1 : scalar && !plain ? 2 : 0;
+        }
+        if (reason == NODE_PRODUCER_TAKEN && entry->kind == CHECK_CONTROL_RETURN && entry->valued != valued)
+        {
+            reason = NODE_PRODUCER_RETURN;
+        }
+    }
+    // An `if` whose condition's root is a constant, by the tokens: the program's controls have no such condition where it
+    // folded it.
+    for (uint32_t token = opening + 1; reason == NODE_PRODUCER_TAKEN && token < closing && token < count; token += 1)
+    {
+        const uint32_t close = parser->tree.parents[token];
+        if (parser->tokens.kinds[token] == PARSE_KIND_IF && close < count && parser->tree.roles[close] == PARSE_ROLE_CLOSE_CONDITION)
+        {
+            const uint32_t slot = roots[close];
+            const bool constant = slot != 0 && slot != UINT32_MAX && slot - 1 < kept->node_capacity && kept->side_label_firsts[slot - 1] != UINT32_MAX &&
+                                  (kept->side_facts[slot - 1] & BUSTER_NODE_FRONT_SIDE_CONSTANT) != 0;
+            reason = constant ? NODE_PRODUCER_CONSTANT : reason;
+        }
+    }
+    if (reason == NODE_PRODUCER_TAKEN)
+    {
+        // main, where the unit is hosted: the reader's own test of it (check_input_resolve_range's).
+        const IdentId name = parser->tokens.names[declaration];
+        const bool is_main = !reader->pp->options.freestanding && intern_length(reader->pp->table, name) == 4 && memcmp(intern_bytes(reader->pp->table, name), "main", 4) == 0;
+        reason = node_twin_silent(twin, declaration, is_main) ? reason : NODE_PRODUCER_FLOW;
+    }
+    return reason;
+}
+
+// The producer's verdict of the body at `slot` of the machine's list, kept: its reason, and a taken body's controls.
+static void node_producer_keep(struct NodeProducer* producer, NodeFrontShadow* shadow, uint32_t slot, uint8_t reason, uint8_t detail)
+{
+    const NodeTwin* twin = &producer->twin;
+    if (reason == NODE_PRODUCER_TAKEN && twin->count > shadow->produced_control_capacity - shadow->produced_control_count)
+    {
+        reason = NODE_PRODUCER_ROOM;
+    }
+    shadow->produced_reasons[slot] = reason;
+    shadow->produced_details[slot] = detail;
+    shadow->produced_firsts[slot] = shadow->produced_control_count;
+    shadow->produced_counts[slot] = reason == NODE_PRODUCER_TAKEN ? twin->count : 0;
+    if (reason == NODE_PRODUCER_TAKEN)
+    {
+        memcpy(shadow->produced_controls + shadow->produced_control_count, twin->entries, (uint64_t)twin->count * sizeof(NodeTwinControl));
+        shadow->produced_control_count += twin->count;
+    }
+}
+
+// The producer's verdicts against every diagnostic of a unit (#2850's P1, against the diagnostics): with
+// BUSTER_TEST_NODE_BODIES_LOG set to a path, the driver runs the producer beside each unit's ordinary read, nothing
+// masked, and each diagnostic at a token of a body the producer takes is a line of that file, with a line a unit for
+// what was looked at. A taken body may have no diagnostic of any stage: every phase after the mask would skip it. The
+// tokens are the original parse's (parse_origin), which the diagnostics' positions are in.
+struct NodeBodiesCheck
+{
+    const char* log;
+    const char* path;
+    // The taken bodies' opening and closing tokens, in their order: by the original parse's tokens, and by their places in
+    // the preprocessor's output, which a published diagnostic's token is.
+    uint32_t* openings;
+    uint32_t* closings;
+    uint32_t* output_openings;
+    uint32_t* output_closings;
+    uint32_t count;
+    uint32_t capacity;
+    // The bodies the producer had a verdict of, the diagnostics looked at, and those in a taken body.
+    uint32_t bodies;
+    uint32_t looked;
+    uint32_t found;
+    // The reader's reports and its warnings' events: as the producer decided, as the walk ended, and at the reader's end.
+    uint32_t reports[3];
+    uint32_t events[3];
+    uint8_t unit;
+    bool read;
+};
+
+static _Thread_local struct NodeBodiesCheck node_bodies_check;
+
+// Whether the unit is checked so: the variable's path, read once a unit.
+static bool node_bodies_check_begin(const char* path)
+{
+    struct NodeBodiesCheck* check = &node_bodies_check;
+    const char* log = getenv("BUSTER_TEST_NODE_BODIES_LOG");
+    check->log = log != NULL && log[0] != 0 ? log : NULL;
+    check->path = path;
+    check->count = 0;
+    check->bodies = 0;
+    check->looked = 0;
+    check->found = 0;
+    check->read = false;
+    check->unit = 0;
+    memset(check->reports, 0, sizeof(check->reports));
+    memset(check->events, 0, sizeof(check->events));
+    node_bodies_checking = check->log != NULL;
+    return check->log != NULL;
+}
+
+// The producer's verdicts of the unit's bodies, as the reader's output has them: the taken ones' tokens kept.
+static void node_bodies_check_read(const CheckInput* input, const Parser* parser)
+{
+    struct NodeBodiesCheck* check = &node_bodies_check;
+    const NodeFrontShadow* report = check->log != NULL && !check->read && input != NULL ? input->node_front : NULL;
+    if (report != NULL && report->produced_reasons != NULL)
+    {
+        check->read = true;
+        check->bodies = report->alone_body_count;
+        check->unit = report->produced_unit;
+        check->reports[0] = report->produced_reports_before;
+        check->reports[1] = report->produced_reports_walked;
+        check->reports[2] = input->report_count;
+        check->events[0] = report->produced_events_before;
+        check->events[1] = report->produced_events_walked;
+        check->events[2] = input->warning_events.count;
+        if (report->alone_body_count > check->capacity)
+        {
+            free(check->openings);
+            free(check->closings);
+            free(check->output_openings);
+            free(check->output_closings);
+            check->capacity = report->alone_body_count;
+            check->openings = malloc((size_t)check->capacity * sizeof(uint32_t));
+            check->closings = malloc((size_t)check->capacity * sizeof(uint32_t));
+            check->output_openings = malloc((size_t)check->capacity * sizeof(uint32_t));
+            check->output_closings = malloc((size_t)check->capacity * sizeof(uint32_t));
+        }
+        const bool room = check->openings != NULL && check->closings != NULL && check->output_openings != NULL && check->output_closings != NULL;
+        for (uint32_t b = 0; b < report->alone_body_count && room; b += 1)
+        {
+            const uint32_t opening = report->alone_body_openings[b];
+            if (report->produced_reasons[b] == NODE_PRODUCER_TAKEN && opening < parser->tokens.count)
+            {
+                check->openings[check->count] = parse_origin(parser, opening);
+                check->closings[check->count] = parse_origin(parser, parser->tree.parents[opening]);
+                check->output_openings[check->count] = parse_source_index(&parser->tokens, opening);
+                check->output_closings[check->count] = parse_source_index(&parser->tokens, parser->tree.parents[opening]);
+                check->count += 1;
+            }
+        }
+        // The reader's own reports and its warnings' events at a token of a taken body, each with when it was said: before
+        // the producer decided (which refuses the body, so none may be), by the walk, or by the reader's passes after it.
+        for (uint32_t source = 0; source < 2; source += 1)
+        {
+            const uint32_t said = source == 0 ? input->report_count : input->warning_events.count;
+            const uint32_t before = source == 0 ? report->produced_reports_before : report->produced_events_before;
+            const uint32_t walked = source == 0 ? report->produced_reports_walked : report->produced_events_walked;
+            for (uint32_t i = 0; i < said; i += 1)
+            {
+                const uint32_t token = source == 0 ? input->reports[i].token : input->warning_events.events[i].token;
+                const uint32_t message = source == 0 ? (uint32_t)input->reports[i].message : input->warning_events.events[i].id;
+                const char* text = source == 0 && message < BUSTER_ARRAY_LENGTH(check_input_messages) ? check_input_messages[message] : NULL;
+                char numbered[32];
+                snprintf(numbered, sizeof(numbered), "id %u", message);
+                if (token < parser->tokens.count)
+                {
+                    node_bodies_check_token(parse_origin(parser, token),
+                                            i < before ? (source == 0 ? "a-report-before-the-producer" : "an-event-before-the-producer") :
+                                            i < walked ? (source == 0 ? "a-report-of-the-walk's" : "an-event-of-the-walk's") :
+                                                         (source == 0 ? "a-report-after-the-walk" : "an-event-after-the-walk"),
+                                            text != NULL ? text : numbered);
+                }
+            }
+        }
+    }
+}
+
+// A diagnostic at `token` (`what` names where it was found, `message` is its text or null): a line of the log where a
+// taken body holds the token. `token` is the original parse's, or with `output` its place in the preprocessor's output.
+static void node_bodies_check_place(uint32_t token, bool output, const char* what, const char* message)
+{
+    struct NodeBodiesCheck* check = &node_bodies_check;
+    if (check->log != NULL && check->read)
+    {
+        const uint32_t* openings = output ? check->output_openings : check->openings;
+        const uint32_t* closings = output ? check->output_closings : check->closings;
+        uint32_t low = 0;
+        uint32_t high = check->count;
+        while (low < high)
+        {
+            const uint32_t middle = low + (high - low) / 2;
+            const bool before = closings[middle] < token;
+            low = before ? middle + 1 : low;
+            high = before ? high : middle;
+        }
+        check->looked += 1;
+        if (low < check->count && openings[low] <= token)
+        {
+            check->found += 1;
+            FILE* file = fopen(check->log, "a");
+            if (file != NULL)
+            {
+                fprintf(file, "IN-A-TAKEN-BODY unit=%s %s=%u body=%u..%u from=%s message=%.120s\n", check->path != NULL ? check->path : "?", output ? "output" : "token", token,
+                        openings[low], closings[low], what, message != NULL ? message : "-");
+                fclose(file);
+            }
+        }
+    }
+}
+
+static void node_bodies_check_token(uint32_t token, const char* what, const char* message)
+{
+    node_bodies_check_place(token, false, what, message);
+}
+
+// The unit's end: each published diagnostic's position, and the unit's line.
+static void node_bodies_check_end(const Preprocessor* pp)
+{
+    struct NodeBodiesCheck* check = &node_bodies_check;
+    if (check->log != NULL)
+    {
+        for (const PPDiagnosticRecord* record = pp->diagnostic_first; record != NULL && check->read; record = record->next)
+        {
+            // The token it is at; or, for one at a place of its own, where it is published. (A declaration's diagnostic may be
+            // published where its definition ends, in its body or past it: its token says what it is about.)
+            if (record->token != 0)
+            {
+                node_bodies_check_place(record->token - 1, true, "a-published-diagnostic's-token", record->message);
+            }
+            else
+            {
+                node_bodies_check_place((uint32_t)(record->position / PP_DIAGNOSTIC_PHASE_COUNT), true, "a-published-diagnostic's-position", record->message);
+            }
+        }
+        FILE* file = fopen(check->log, "a");
+        if (file != NULL)
+        {
+            fprintf(file, "unit=%s producer-ran=%d bodies=%u taken=%u diagnostics-looked-at=%u in-a-taken-body=%u its-unit's-reason=%u reports=%u,%u,%u events=%u,%u,%u\n",
+                    check->path != NULL ? check->path : "?", check->read, check->bodies, check->count, check->looked, check->found, check->unit, check->reports[0],
+                    check->read ? check->reports[1] : 0, check->reports[2], check->events[0], check->read ? check->events[1] : 0, check->events[2]);
+            fclose(file);
+        }
+        // A unit with such a diagnostic is kept beside the log (the tests' units are temporary files), named by its bytes'
+        // hash and its own name: each distinct unit once.
+        const char* name = check->found != 0 && check->path != NULL ? strrchr(check->path, '/') : NULL;
+        FILE* source = check->found != 0 && check->path != NULL ? fopen(check->path, "rb") : NULL;
+        char block[4096];
+        uint64_t hash = UINT64_C(0xcbf29ce484222325);
+        for (size_t read = source != NULL ? fread(block, 1, sizeof(block), source) : 0; read != 0; read = fread(block, 1, sizeof(block), source))
+        {
+            for (size_t i = 0; i < read; i += 1)
+            {
+                hash = (hash ^ (uint8_t)block[i]) * UINT64_C(0x100000001b3);
+            }
+        }
+        char kept[1024];
+        const int length = source != NULL ? snprintf(kept, sizeof(kept), "%s.units/%016" PRIx64 "-%s", check->log, hash, name != NULL ? name + 1 : check->path) : 0;
+        FILE* copy = length > 0 && (size_t)length < sizeof(kept) && access(kept, F_OK) != 0 && fseek(source, 0, SEEK_SET) == 0 ? fopen(kept, "wb") : NULL;
+        for (size_t read = copy != NULL ? fread(block, 1, sizeof(block), source) : 0; read != 0; read = fread(block, 1, sizeof(block), source))
+        {
+            (void)fwrite(block, 1, read, copy);
+        }
+        if (copy != NULL)
+        {
+            fclose(copy);
+        }
+        if (source != NULL)
+        {
+            fclose(source);
+        }
+        check->log = NULL;
+        node_bodies_checking = false;
+    }
 }
 
 #endif

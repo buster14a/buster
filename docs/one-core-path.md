@@ -3609,6 +3609,75 @@ after the pipeline, 472 with their address taken), a volatile local's left to th
 - **What is still not a producer's:** the body's own reasons are read from the program's controls and plans, and the
   twin's gates from the reader's columns as they stand after the walk. A producer decides before the walk.
 
+## The redesign's sixth piece: the producer, deciding before the walk
+
+The fifth piece's two sets were the oracle's: read after the walk, from the program's controls and the lowered
+functions. A compile that takes a body has to decide before the walk reads it, and a taken body may have no diagnostic
+of any stage, since every phase after the mask would skip it. This piece is the producer that decides there
+([`node-machine.md`](node-machine.md), "The producer, deciding before the walk"), still in the shadow: no compile
+changes.
+
+### What it measured
+
+Develop builds on this session's machine (counts), Release on the 9700X (ticks, 3,792.9 MHz);
+[the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/takeover-2850-2026-11-22):
+
+| the default warnings | `sqlite3.c` | Lua | the compiler's own source | musl |
+| --- | ---: | ---: | ---: | ---: |
+| lowered bodies | 2,668 | 1,096 | 1,516 | 2,756 |
+| the set the comparisons give: bodies; of the body tokens | 1,760; 30.89% | 547; 21.48% | 179; 2.32% | 1,176; 17.67% |
+| the producer takes, before the walk: bodies; of the body tokens | 1,747; 30.65% | 545; 21.42% | 0 | 1,096; 16.09% |
+| of them outside the set; whose kept controls differ from the program's | 0; 0 | 0; 0 | 0; 0 | 0; 0 |
+| bodies it does not read, as a compile would run it, of every body of the units | 610 of 2,674 | 354 of 1,096 | all 8,739 | 13,693 of 18,584 |
+
+As a compile would run it on `sqlite3.c` (three rounds, medians, at `00ef81d5f`: before main's merge and the rules
+added since, with 1,753 bodies taken): the bodies' reading 45.46 M ticks (11.99 ms), of
+which the producer's own passes are 7.56 M before any reading and 7.43 M after it, the compaction and the entries
+6.59 M, the front 10.28 M and its graph's writing 11.14 M; and the reference machine's one run 65.08 M (17.16 ms) for
+258,955 positions, 251 ticks each. **110.54 M ticks in all, 29.14 ms.**
+
+### Against its gates
+
+- **P1, sound against the oracle: met.** On the four corpora, read as the walk reads them, as `-c` reads a unit and as
+  a compile would run the producer: every body it takes is in the comparisons' set and its kept controls are the
+  program's (twenty runs, each status 0); with `-Wall -Wextra` it takes none.
+- **P1, sound against the diagnostics: met for what a log by location can see.** With the producer run beside every
+  unit's ordinary read and nothing masked: 111,906 units of the checker's and the driver's tests, 74,783 of them
+  with the producer run, 36,393 of 1,956,140 bodies taken, 1,191,188 diagnostics looked at, none at a token of a
+  taken body; and none on the corpora (1,753, 545, 0 and 4,442 bodies taken). What it cannot see (a
+  diagnostic reported outside the body that causes it, the object, a body another function's lowering reads) the next
+  piece found three cases of by compiling small units with the bodies taken and without, and main's merge a fourth; each
+  has a rule and a fixture here.
+- **P2, counted:** the table above, with what it leaves by its reason in [`node-machine.md`](node-machine.md).
+- **P3, its ticks:** above, three rounds on the 9700X at `00ef81d5f`, before main's merge and the rules added since,
+  which leave six more of `sqlite3.c`'s bodies (1,753 taken then, 1,747 now).
+- **P4, nothing else moves: not read.** No compile runs the piece. Its pair on the 9700X was queued with the next
+  piece's and never ran: this session's forty-one build trees had filled that machine's disk, the build of the commit
+  to time failed, and the job took the lock twelve times for runs that stopped at once. The trees are removed
+  (47 GB) and the pairs run again on the merged heads.
+- **P5, the next piece's price, said again:** about 16 ms slower than without the option, below.
+- **Single faults:** 55 of 56 fail a fixture; the one that does not is in a form no path of this piece runs
+  ([`node-machine.md`](node-machine.md), "Against the diagnostics").
+
+### What it means
+
+- **A producer can decide before the walk what the oracle decides after it.** It takes 1,747 of the 1,760 bodies of
+  `sqlite3.c`'s set, 545 of Lua's 547 and 1,096 of musl's 1,176; what it leaves is a rule's doing, each a refusal that
+  stands for a diagnostic of a later pass and refuses more than is warned of.
+- **Its price is the reference machine's.** When it was timed it read and swept 2,065 of `sqlite3.c`'s 2,674 bodies
+  to take 1,759; the program lowers 1,753 of those, with 175,797 tokens, which are worth 13.04 ms at the 74.2 ns a
+  taken token saves (the other six are static functions nothing names). Against 29.14 ms, the first compile
+  that takes its bodies is predicted about 16 ms slower than without them, where [the
+  specification](https://github.com/buster14a/buster/issues/2850#issuecomment-7085227363) said 8 to 10 from the
+  oracle's sets. The whole bodies alone cost 334 ticks a token to read and sweep (88 ns) against the 74.2 ns one saves:
+  with the reference machine no coverage pays, and what pays first is its cost a position.
+- **The corpora and the tests' units were not enough to find what it must refuse.** The compile built on it found
+  three more things by compiling small units of one body each with the bodies taken and without, and this piece's
+  rules have them since: a target that fuses a product and a sum, a naked function, and an `always_inline` wrapper.
+  Main's merge brought a fourth, a volatile access, which the lowering's templates leave to its tasks since #3310.
+  The machine is the lowering's mirror, and each change of the lowering's is a change it owes: the oracle on the
+  corpora is what says so, and it has to be run on main's head before each piece lands.
+
 ## Step 5's allocation, and its kept rows in the compile
 
 [#2873](https://github.com/buster14a/buster/issues/2873). After the census,
