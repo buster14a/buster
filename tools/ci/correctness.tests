@@ -552,8 +552,7 @@ test "${#flags[@]}" -gt 0
 objects=$(mktemp -d)
 "$BUSTER_COMPILER" --lanes 1 --verify -c "${flags[@]}" -o "$objects/selected.o" -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c
 "$BUSTER_COMPILER" --lanes 1 --verify --lower-all -c "${flags[@]}" -o "$objects/all.o" -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c
-"$BUSTER_COMPILER" --scalar --lanes 1 --verify --lower-all -c "${flags[@]}" -o "$objects/all-scalar.o" -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c
-cmp "$objects/all.o" "$objects/all-scalar.o"
+"$BUSTER_COMPILER" test-lowering-templates "${flags[@]}" -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c
 rm -r "$objects"
 else
 printf 'SKIP: main.c -c compiles (the TSan/MSan rows run them alone after the suite; docs/ci.md)\n'
