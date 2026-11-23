@@ -566,6 +566,12 @@ static void check_test_program_asm(CheckTest* test, const char* clang)
         "long r;__asm__ volatile(\"syscall\" : \"=a\"(r) : \"0\"(39L) : \"rcx\", \"r11\", \"memory\");"
         "return (int)(s^(unsigned)t^(unsigned)u^(unsigned)(r>0));}",
         "asm-bodies", clang);
+    // hlt, musl's a_crash (#2351's survey), an asm body that writes nothing: on a path the inputs never take, beside a
+    // loop of live values.
+    check_test_program_source(test,
+        "static void crash(void){__asm__ volatile(\"hlt\" ::: \"memory\");}"
+        "int tested(int n){long a=n,b=n+1,c=n+2;int s=0;for(int i=0;i<4;i++){if(n==123456789)crash();s+=(int)(a*b+c)+i;a+=1;}return s;}",
+        "asm-hlt-body", clang);
     // Asm bodies of templates with their own labels and branches (#1839): a backward loop (decl and jnz), a forward jmp over a store, a template whose branches go to its end (the stores), and a byte copy's loop of
     // two pointers, each in a loop of live values, against clang's build.
     check_test_program_source(test,

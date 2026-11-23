@@ -1801,6 +1801,9 @@ static const CheckAsmImplicit check_asm_implicit[] = {
     { X86_FORM_EMMS, 0 },
     { X86_FORM_CLFLUSH_M8, 0 },
     { X86_FORM_SERIALIZE, 0 },
+    // hlt writes nothing: in user mode it faults (#GP, delivered as SIGSEGV), which is what musl's a_crash wants of it
+    // (#2351's survey: the only form of the corpora's templates whose effects kept its helper).
+    { X86_FORM_HLT, 0 },
     { X86_FORM_XSETBV, 0 },
     { X86_FORM_VZEROUPPER, BUSTER_TIER0_XMM_ALL },
     { X86_FORM_VZEROALL, BUSTER_TIER0_XMM_ALL },

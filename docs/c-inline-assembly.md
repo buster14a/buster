@@ -1434,6 +1434,16 @@ label of a template of no instructions is Tier 0's. The
 code's certificate (`--verify`) certifies a function with asm bodies
 ([the certificate guide](tier1-certificate.md)'s "Asm bodies").
 
+The corpora's templates (#2351's survey, 2026-11-23): `-c` of the checker
+corpus's musl (its 1,355 units, with its build's options) and SQLite 3.53.2
+(`sqlite3.c` for `-march=znver5`) kept 7 helpers, all musl's, which a `-c`
+object names `.Lbuster_asm_N`. Six were `a_crash`'s `hlt`, whose effects
+`x86_semantics.c`'s tables don't record; `check_asm_implicit` now takes it as
+writing nothing, and it is an asm body. The seventh is `__unmapself`'s `movq %1,
+%%rsp; jmp *%0`, which switches stacks and jumps through a register: a template
+of control flow and rsp, which keeps its helper. SQLite's `rdtsc` statements are
+asm bodies.
+
 What the lowering still refuses of what GCC and clang take:
 
 - a template that returns and has a named label, or keeps its helper for
