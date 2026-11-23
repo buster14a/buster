@@ -4276,14 +4276,26 @@ What the lowering covers past scalars (#145's programs):
   bit-field access reads its member's, the one its name finds
   (`check_lower_bit_unit_place`). A constant address of a field's lvalue
   (a local's or a global's, the checker's of the field's first byte) is its
-  unit's too (`check_lower_bit_constant_address`). A union's bit-fields, an
-  `ms_struct` record's (clang's discrete units), a unit of more than 8 bytes,
-  initializer parts with a bit width and `__builtin_dump_struct`'s reads take
-  the bytes that hold the field's bits. A packed field of up to 64 bits off a
-  byte boundary may lie in 9 bytes (#2999): its read and its store take the
-  first 8 as an integer and the ninth as a byte, joined by shifts on a read and
-  split on a store, as clang's -O0 code does its `i72` (`check_lower_bit_wide`,
-  out of line, apart from the tasks' always-inlined store). A field wider than
+  unit's too (`check_lower_bit_constant_address`). A union's bit-field's unit
+  is at 0, the integer of its width rounded up to a power of two bytes, no more
+  than the union's bytes (`getUIntNType`: `unsigned x : 17` an `i32`, an `i24`
+  in a packed union of 3 bytes). An `ms_struct` record's are clang's discrete
+  units: a run's declared type at its first field, which the fields after it
+  share while they start before its end (`{ unsigned x : 3, y : 7; unsigned
+  short z : 5; }` an `i32` at 0 and an `i16` at 4), and an `ms_struct` union's
+  its declared type. A unit of 9 to 16 bytes (a packed run's `i72` to `i128`)
+  is its first 8 bytes and the rest's pieces, as clang's -O0 code moves it: a
+  field in one of the two takes that part alone, where clang's code moves both,
+  and a field across them both (a packed field of up to 64 bits off a byte
+  boundary in 9 bytes of its own is one, #2999) takes both, joined by shifts
+  on a read and split on a store (`check_lower_bit_wide`, out of line, apart
+  from the tasks' always-inlined store). A local's initializer stores a field
+  through its member's unit too, found by going down the object's elements and
+  members to it (`check_lower_bit_init_unit`), after the object's zeros, as
+  clang's initialization does, but in an object with a volatile part, whose
+  stores are its plan's. A unit wider than 16 bytes, an initializer's cleared
+  bits and `__builtin_dump_struct`'s reads take the bytes that hold the
+  field's bits. A field wider than
   64 bits (a `_BitInt`'s) is refused. `c_check_program_bit_unit_test.c`
   checks each fixture's loads and stores against clang's units and runs them
   against clang's code.
