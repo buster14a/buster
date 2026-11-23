@@ -8,12 +8,16 @@ for #134, and natural-loop membership for #139 and #140. These consumers must
 explicitly integrate the interface; the existence of this module does not
 establish their acceptance or source-corpus coverage.
 
-The implementation and fixtures are original. The solver is SEMI-NCA,
-as Georgiadis, Tarjan and Werneck describe it in
-[Finding Dominators in Practice](https://jgaa.info/index.php/jgaa/article/view/paper119)
-(JGAA 10(1), 2006): Lengauer and Tarjan's semidominators, from
-[A Fast Algorithm for Finding Dominators in a Flowgraph](https://doi.org/10.1145/357062.357071)
-(TOPLAS 1(1), 1979), followed by a nearest-common-ancestor step.
+The implementation and fixtures are original. The tree solver is one sweep
+over reverse postorder with 64-bit dominator windows ("Algorithms and bounded
+storage" below). It replaced SEMI-NCA, as Georgiadis, Tarjan and Werneck
+describe it in [Finding Dominators in Practice](https://jgaa.info/index.php/jgaa/article/view/paper119)
+(JGAA 10(1), 2006), in #2953. Where its first pass doesn't settle an
+irreducible region, it iterates as Cooper, Harvey and Kennedy's
+[A Simple, Fast Dominance Algorithm](https://www.cs.tufts.edu/comp/150FP/archive/keith-cooper/dom14.pdf)
+(2001) does, and its far meets climb Myers's skew-binary jump pointers
+("An applicative random-access stack", Information Processing Letters 17(5),
+1983).
 The loop definitions agree with the published
 [Cornell compiler notes](https://www.cs.cornell.edu/courses/cs412/2008sp/lectures/lec29.pdf)
 and [LLVM's loop terminology](https://llvm.org/docs/LoopTerminology.html).
@@ -66,8 +70,7 @@ there is no incremental maintenance or stale-result detection.
 `dominators_options()` requests frontiers and loops, and limits simultaneously
 live bitset storage to 64 MiB. Callers may request
 only `BUSTER_DOMINATOR_FRONTIERS`, only `BUSTER_DOMINATOR_LOOPS`, both, or zero
-for tree-only analysis. Tree-only SEMI-NCA storage is linear in blocks and
-edges. The two quadratic output families are optional; a large sparse CFG
+for tree-only analysis. Tree-only storage is linear in blocks and edges. The two quadratic output families are optional; a large sparse CFG
 never silently allocates an unlimited frontier or loop-body matrix.
 
 `max_matrix_bytes` is a memory limit, **not a measured performance threshold**.
@@ -82,7 +85,8 @@ tail bits are zero. The padding is allocated, readable and writable, separate
 from the logical block count. No kernel reads past the row. Matrices are
 disjoint; consumers must preserve their zero tails. Empty outputs have null
 matrix pointers and zero rows. The layout lets consumers read whole rows with
-512-bit loads; the analysis itself is scalar ("Why it is scalar" below).
+512-bit loads. The tree solver works 64 dominators to a word; the rest of the
+analysis is scalar ("What is data-parallel" below).
 
 ## Results
 
@@ -127,21 +131,35 @@ membership/parents to group reducible loops, and retain RPO in flagged regions.
 
 ## Algorithms and bounded storage
 
-An iterative DFS from entry produces RPO, DFS ancestry intervals, and each
-preorder number's block and DFS parent. SEMI-NCA works in preorder numbers. It
-computes semidominators in decreasing order: a predecessor numbered below the
-block is a candidate itself, and one above contributes the least semidominator
-on its path through the forest of already-processed vertices, which an
-explicit stack compresses toward that forest's unprocessed root. Each immediate
-dominator is then, in increasing order, the nearest common dominator-tree
-ancestor of the DFS parent and the semidominator, found by walking up the
-finished part of the tree from the parent. Compression bounds
-the semidominators by O(E log B). The walk costs the depth between the parent
-and the immediate dominator: a step or two on goto ladders, nested ifs and `?:`
-chains, but O(B²) in total when a deep block has many DFS
-children each also reachable from far above it, which Cooper–Harvey–Kennedy's
-intersection walks too. Its scratch is two u32 columns from the DFS plus
-12 bytes per reachable block.
+An iterative DFS from entry, in successor order, produces RPO and its
+inverse. An edge retreats in RPO exactly when its target is its source's DFS
+ancestor, which the SCC pass below uses in place of DFS intervals.
+
+The tree solver sweeps RPO once (`dominators_sweep`). Dominators precede what
+they dominate in RPO, so a block's dominators among the 64 numbers above it
+fit a u64 window, bit k for the number k above. Each forward predecessor's
+window, shifted by its distance, ANDs to the dominators all of them share
+there. The lowest set bit is the nearest, the immediate dominator, and that
+set with the block's own bit is the block's window: a shift and an AND per
+predecessor. On sqlite3.c's CFGs, 2.4% of blocks share no dominator within 64
+numbers above. For those, `dominators_meet` meets the predecessors pairwise:
+by their windows when two are within 64 numbers of each other, and otherwise
+by depth and Myers's skew-binary jump pointers, which the first such meet fills
+for the numbers it climbs through. A meet takes O(log depth) steps whatever
+the tree's depth, and each number's jump pointer is filled once.
+
+Retreating predecessors are skipped and kept. The sweep's tree is then the
+dominator tree of the graph without them, which is the whole graph's exactly
+when each retreating edge's target's immediate dominator dominates its source:
+that predecessor's dominators then hold the others' common ones, so it changes
+no intersection. Every reducible graph passes, as all of sqlite3.c's CFGs do;
+`dominators_settled` checks the finished tree's intervals. Where an irreducible
+region fails, `dominators_settle` iterates as Cooper, Harvey and Kennedy do,
+from the sweep's tree, which holds every true dominator. Each pass is the
+sweep again, with each retreating predecessor met by walks up the current tree,
+until a pass changes nothing; then the tree is built again. The walks cost the
+depth between a retreating predecessor and the meeting point. The solver's
+scratch is one push of 24 bytes per reachable block and 8 per edge.
 
 Counting, prefix sums and filling produce the children CSR. An explicit tree
 stack assigns intervals for constant-time dominance queries. Frontier

@@ -27,6 +27,7 @@
 #define BUSTER_DOMINATOR_VECTOR_WORDS 8
 #define BUSTER_DOMINATOR_VECTOR_BITS 512
 #define BUSTER_DOMINATOR_VECTOR_BYTES 64
+#define BUSTER_DOMINATOR_WINDOW_BITS 64
 #define BUSTER_DOMINATOR_DEFAULT_MATRIX_BYTES (64ull << 20)
 #define BUSTER_DOMINATOR_FRONTIERS 1u
 #define BUSTER_DOMINATOR_LOOPS 2u
@@ -98,13 +99,36 @@ struct DominatorFrame
     uint32_t next;
 };
 
-// SEMI-NCA's virtual forest, indexed by DFS preorder number: a processed vertex's ancestor link, compressed toward
-// its tree's unprocessed root, and the least semidominator number on the path up to, excluding, that root.
-typedef struct DominatorLink DominatorLink;
-struct DominatorLink
+// A reachable retreating edge, by reverse-postorder number, kept for the check once the tree has its intervals.
+typedef struct DominatorEdge DominatorEdge;
+struct DominatorEdge
 {
-    uint32_t ancestor;
-    uint32_t least;
+    uint32_t source;
+    uint32_t target;
+};
+
+// Myers's skew-binary jump pointer of a solved reverse-postorder number, and its depth in the dominator tree.
+typedef struct DominatorJump DominatorJump;
+struct DominatorJump
+{
+    uint32_t depth;
+    uint32_t jump;
+};
+
+// The tree solver's state, all by reverse-postorder number: each solved number's immediate dominator and dominator
+// window (bit k: number - k dominates it), the jump pointers filled on first use, their fill stack, and the reachable
+// retreating edges.
+typedef struct DominatorSweep DominatorSweep;
+struct DominatorSweep
+{
+    uint64_t* windows;
+    uint32_t* idom;
+    DominatorJump* jumps;
+    uint32_t* stack;
+    DominatorEdge* retreating;
+    uint32_t retreating_count;
+    // Jump pointers below this number are filled or marked unfilled; above it they are not yet initialized.
+    uint32_t jumps_limit;
 };
 
 static __attribute__((unused)) DominatorOptions dominators_options(void);
@@ -226,20 +250,17 @@ static DominatorStatus dominators_validate(const DominatorCfg* cfg, Arena* scrat
     return status;
 }
 
-// One DFS from entry: each block's preorder number (dfs_begin) and subtree end, each number's block and DFS parent
-// number, and RPO.
-static void dominators_order(const DominatorCfg* cfg, Dominators* result, DominatorFrame* stack, uint32_t* dfs_begin, uint32_t* dfs_end, uint32_t* vertices, uint32_t* parents)
+// One DFS from entry, in successor order: RPO and its inverse. A block is marked discovered in rpo_index until the
+// numbering at the end. An edge retreats in RPO exactly when the DFS reached its target first and is still inside it:
+// its target is its source's DFS ancestor.
+static void dominators_order(const DominatorCfg* cfg, Dominators* result, DominatorFrame* stack)
 {
     const uint32_t count = cfg->block_count;
-    memset(result->rpo_index, 0xff, (uint64_t)count * sizeof(uint32_t));
-    memset(dfs_begin, 0xff, (uint64_t)count * sizeof(uint32_t));
-    memset(dfs_end, 0xff, (uint64_t)count * sizeof(uint32_t));
-    uint32_t entered = 1;
+    uint32_t* rpo_index = result->rpo_index;
+    memset(rpo_index, 0xff, (uint64_t)count * sizeof(uint32_t));
     uint32_t finished = 0;
     uint64_t depth = 1;
-    dfs_begin[cfg->entry] = 0;
-    vertices[0] = cfg->entry;
-    parents[0] = 0;
+    rpo_index[cfg->entry] = 0;
     stack[0] = (DominatorFrame){
         .block = cfg->entry,
         .next = cfg->successor_offsets[cfg->entry],
@@ -251,12 +272,9 @@ static void dominators_order(const DominatorCfg* cfg, Dominators* result, Domina
         {
             const uint32_t target = cfg->successors[frame->next];
             frame->next += 1;
-            if (dfs_begin[target] == BUSTER_DOMINATOR_NONE)
+            if (rpo_index[target] == BUSTER_DOMINATOR_NONE)
             {
-                vertices[entered] = target;
-                parents[entered] = dfs_begin[frame->block];
-                dfs_begin[target] = entered;
-                entered += 1;
+                rpo_index[target] = 0;
                 stack[depth] = (DominatorFrame){
                     .block = target,
                     .next = cfg->successor_offsets[target],
@@ -268,7 +286,6 @@ static void dominators_order(const DominatorCfg* cfg, Dominators* result, Domina
         {
             result->rpo[finished] = frame->block;
             finished += 1;
-            dfs_end[frame->block] = entered;
             depth -= 1;
         }
     }
@@ -290,77 +307,247 @@ static void dominators_order(const DominatorCfg* cfg, Dominators* result, Domina
     }
 }
 
-// The least semidominator number on number's processed path, up to and excluding the first ancestor numbered below
-// processed. Compression points every vertex on that path at the excluded ancestor, carrying the path's minimum.
-static uint32_t dominators_evaluate(DominatorLink* links, uint32_t* stack, uint32_t number, uint32_t processed)
+// Fill the jump pointers of number and of its unfilled tree ancestors, top down. A number's jump is its idom's jump's
+// jump when the idom's two jump spans are equal, else its idom (Myers, "An applicative random-access stack", 1983), so
+// a climb by jumps takes O(log depth) steps. Each number is filled once per sweep.
+static void dominators_fill_jumps(DominatorSweep* sweep, uint32_t number)
 {
-    uint32_t result = links[number].least;
-    if (links[number].ancestor >= processed)
+    DominatorJump* jumps = sweep->jumps;
+    const uint32_t* idom = sweep->idom;
+    uint32_t* stack = sweep->stack;
+    uint64_t depth = 0;
+    uint32_t top = number;
+    while (jumps[top].depth == BUSTER_DOMINATOR_NONE)
     {
-        uint64_t depth = 0;
-        uint32_t top = number;
-        do
+        stack[depth] = top;
+        depth += 1;
+        top = idom[top];
+    }
+    while (depth != 0)
+    {
+        depth -= 1;
+        const uint32_t vertex = stack[depth];
+        const uint32_t parent = idom[vertex];
+        const DominatorJump up = jumps[parent];
+        const DominatorJump over = jumps[up.jump];
+        const bool equal = up.depth - over.depth == over.depth - jumps[over.jump].depth;
+        jumps[vertex] = (DominatorJump){
+            .depth = up.depth + 1,
+            .jump = equal ? over.jump : parent,
+        };
+    }
+}
+
+// The nearest common dominator of two solved reverse-postorder numbers. Within 64 numbers of each other, their windows'
+// intersection usually holds it; otherwise depth and jump pointers find it in O(log depth), whatever the tree's depth.
+// Out of line: the sweep calls it for 2.4% of blocks, and inlined it would crowd the sweep loop's registers.
+static __attribute__((noinline)) uint32_t dominators_meet(DominatorSweep* sweep, uint32_t a, uint32_t b)
+{
+    const uint32_t high = a > b ? a : b;
+    const uint32_t low = a > b ? b : a;
+    const uint32_t distance = high - low;
+    uint64_t common = 0;
+    if (distance < BUSTER_DOMINATOR_WINDOW_BITS)
+    {
+        common = sweep->windows[high] & (sweep->windows[low] << distance);
+    }
+    uint32_t result = low;
+    if (common != 0)
+    {
+        result = high - (uint32_t)__builtin_ctzll(common);
+    }
+    else if (low != 0)
+    {
+        DominatorJump* jumps = sweep->jumps;
+        const uint32_t* idom = sweep->idom;
+        const uint32_t limit = sweep->jumps_limit;
+        if (high >= limit)
         {
-            stack[depth] = top;
-            depth += 1;
-            top = links[top].ancestor;
-        } while (links[top].ancestor >= processed);
-        const uint32_t root = links[top].ancestor;
-        uint32_t least = links[top].least;
-        do
+            // Mark the numbers solved since the last climb unfilled; entry is the root.
+            memset(jumps + limit, 0xff, ((uint64_t)high + 1 - limit) * sizeof(DominatorJump));
+            jumps[0] = (DominatorJump){
+                .depth = 0,
+                .jump = 0,
+            };
+            sweep->jumps_limit = high + 1;
+        }
+        dominators_fill_jumps(sweep, high);
+        dominators_fill_jumps(sweep, low);
+        uint32_t deep = jumps[high].depth >= jumps[low].depth ? high : low;
+        uint32_t other = deep == high ? low : high;
+        const uint32_t level = jumps[other].depth;
+        while (jumps[deep].depth > level)
         {
-            depth -= 1;
-            DominatorLink* link = &links[stack[depth]];
-            link->ancestor = root;
-            least = link->least < least ? link->least : least;
-            link->least = least;
-        } while (depth != 0);
-        result = least;
+            const uint32_t jump = jumps[deep].jump;
+            deep = jumps[jump].depth >= level ? jump : idom[deep];
+        }
+        // Equal depths have equal jump spans, so the two climbs stay level.
+        while (deep != other)
+        {
+            const bool apart = jumps[deep].jump != jumps[other].jump;
+            deep = apart ? jumps[deep].jump : idom[deep];
+            other = apart ? jumps[other].jump : idom[other];
+        }
+        result = deep;
     }
     return result;
 }
 
-// SEMI-NCA in DFS preorder numbers: semidominators in decreasing order through the compressed forest of processed
-// vertices, then each idom is the nearest common dominator-tree ancestor of its DFS parent and semidominator, by a
-// walk up the finished tree that is short unless a deep block has many DFS children dominated from far above it.
-// One pass; parents is overwritten by the idom numbers.
-static void dominators_semi_nca(const DominatorCfg* cfg, Dominators* result, const uint32_t* dfs_begin, const uint32_t* vertices, uint32_t* parents, uint32_t* semi, DominatorLink* links, uint32_t* stack)
+// The tree solver: one sweep in reverse postorder, where a block's forward predecessors are solved before it.
+// Dominators precede what they dominate in RPO, so a number's dominators within the 64 numbers above it fit a u64
+// window, bit k for number - k. Each forward predecessor's window, shifted by the distance, ANDs to the dominators
+// common to all of them there; the lowest set bit is the nearest, the immediate dominator, and that set with the
+// number's own bit is its window. Where no common dominator is that close (2.4% of sqlite3.c's blocks),
+// dominators_meet climbs to it. Retreating predecessors are skipped and kept: the result is the dominator tree of the
+// graph without them, which is the whole graph's when each one's target's idom dominates its source
+// (dominators_settled).
+static __attribute__((noinline)) void dominators_sweep(const DominatorCfg* cfg, const Dominators* result, DominatorSweep* sweep)
 {
     const uint32_t reachable = result->reachable_count;
-    for (uint32_t number = 0; number < reachable; number += 1)
-    {
-        links[number] = (DominatorLink){
-            .ancestor = parents[number],
-            .least = number,
-        };
-    }
-    for (uint32_t number = reachable - 1; number != 0; number -= 1)
-    {
-        const uint32_t block = vertices[number];
-        uint32_t least = parents[number];
-        for (uint32_t edge = cfg->predecessor_offsets[block]; edge < cfg->predecessor_offsets[(uint64_t)block + 1]; edge += 1)
-        {
-            const uint32_t source = dfs_begin[cfg->predecessors[edge]];
-            if (source != BUSTER_DOMINATOR_NONE)
-            {
-                const uint32_t candidate = source <= number ? source : dominators_evaluate(links, stack, source, number + 1);
-                least = candidate < least ? candidate : least;
-            }
-        }
-        semi[number] = least;
-        links[number].least = least;
-    }
-    memset(result->idom, 0xff, (uint64_t)cfg->block_count * sizeof(uint32_t));
-    result->idom[cfg->entry] = cfg->entry;
+    const uint32_t* rpo = result->rpo;
+    const uint32_t* rpo_index = result->rpo_index;
+    const uint32_t* offsets = cfg->predecessor_offsets;
+    const uint32_t* predecessors = cfg->predecessors;
+    uint64_t* windows = sweep->windows;
+    uint32_t* idom = sweep->idom;
+    DominatorEdge* retreating = sweep->retreating;
+    windows[0] = 1;
+    idom[0] = 0;
+    sweep->jumps_limit = 0;
     for (uint32_t number = 1; number < reachable; number += 1)
     {
-        uint32_t candidate = parents[number];
-        while (candidate > semi[number])
+        const uint32_t block = rpo[number];
+        const uint32_t first = offsets[block];
+        const uint32_t end = offsets[(uint64_t)block + 1];
+        uint64_t common = UINT64_MAX;
+        uint32_t parent = BUSTER_DOMINATOR_NONE;
+        // Most blocks have one or two predecessors: unrolling only adds remainder code and register pressure.
+#pragma clang loop unroll(disable)
+        for (uint32_t edge = first; edge < end; edge += 1)
         {
-            candidate = parents[candidate];
+            const uint32_t source = rpo_index[predecessors[edge]];
+            if (source < number)
+            {
+                const uint32_t distance = number - source;
+                common &= distance < BUSTER_DOMINATOR_WINDOW_BITS ? windows[source] << distance : 0;
+                parent = source;
+            }
+            else if (source != BUSTER_DOMINATOR_NONE)
+            {
+                *retreating = (DominatorEdge){
+                    .source = source,
+                    .target = number,
+                };
+                retreating += 1;
+            }
         }
-        parents[number] = candidate;
-        result->idom[vertices[number]] = vertices[candidate];
+        uint64_t window = common | 1;
+        if (common != 0)
+        {
+            parent = number - (uint32_t)__builtin_ctzll(common);
+        }
+        else
+        {
+            for (uint32_t edge = first; edge < end; edge += 1)
+            {
+                const uint32_t source = rpo_index[predecessors[edge]];
+                if (source < number)
+                {
+                    parent = dominators_meet(sweep, parent, source);
+                }
+            }
+            const uint32_t distance = number - parent;
+            window = distance < BUSTER_DOMINATOR_WINDOW_BITS ? windows[parent] << distance | 1 : 1;
+        }
+        windows[number] = window;
+        idom[number] = parent;
+    }
+    sweep->retreating_count = (uint32_t)(retreating - sweep->retreating);
+}
+
+// Whether the sweep's tree is the whole graph's: each retreating edge's target's idom dominates its source, by the
+// tree's intervals. Then each block's retreating predecessors' dominators hold its forward ones' common dominators,
+// so they change no intersection. A reducible graph always passes: there each retreating edge's target dominates
+// its source.
+static bool dominators_settled(const Dominators* result, const DominatorSweep* sweep)
+{
+    bool settled = true;
+    for (uint32_t edge = 0; settled && edge < sweep->retreating_count; edge += 1)
+    {
+        const DominatorEdge retreating = sweep->retreating[edge];
+        settled = dominators_dominates(result, result->rpo[sweep->idom[retreating.target]], result->rpo[retreating.source]);
+    }
+    return settled;
+}
+
+// An irreducible region the sweep didn't settle: Cooper, Harvey and Kennedy's iteration ("A Simple, Fast Dominance
+// Algorithm", 2001) from the sweep's tree, until a pass changes no idom. Each pass is the sweep again, but meets a
+// block's forward dominator with each retreating predecessor by walking both up the current tree, as their
+// algorithm does. The sweep's tree holds every true dominator, so the passes only remove them. The walks cost the
+// depth between a retreating predecessor and the meeting point; sqlite3.c has no graph that takes this path.
+static void dominators_settle(const DominatorCfg* cfg, const Dominators* result, DominatorSweep* sweep)
+{
+    const uint32_t reachable = result->reachable_count;
+    const uint32_t* rpo = result->rpo;
+    const uint32_t* rpo_index = result->rpo_index;
+    const uint32_t* offsets = cfg->predecessor_offsets;
+    const uint32_t* predecessors = cfg->predecessors;
+    uint64_t* windows = sweep->windows;
+    uint32_t* idom = sweep->idom;
+    bool changed = true;
+    while (changed)
+    {
+        changed = false;
+        // The jump pointers describe the previous pass's tree.
+        sweep->jumps_limit = 0;
+        for (uint32_t number = 1; number < reachable; number += 1)
+        {
+            const uint32_t block = rpo[number];
+            const uint32_t first = offsets[block];
+            const uint32_t end = offsets[(uint64_t)block + 1];
+            uint64_t common = UINT64_MAX;
+            uint32_t parent = BUSTER_DOMINATOR_NONE;
+            for (uint32_t edge = first; edge < end; edge += 1)
+            {
+                const uint32_t source = rpo_index[predecessors[edge]];
+                if (source < number)
+                {
+                    const uint32_t distance = number - source;
+                    common &= distance < BUSTER_DOMINATOR_WINDOW_BITS ? windows[source] << distance : 0;
+                    parent = source;
+                }
+            }
+            if (common != 0)
+            {
+                parent = number - (uint32_t)__builtin_ctzll(common);
+            }
+            for (uint32_t edge = first; edge < end; edge += 1)
+            {
+                uint32_t source = rpo_index[predecessors[edge]];
+                if (common == 0 && source < number)
+                {
+                    parent = dominators_meet(sweep, parent, source);
+                }
+                else if (source != BUSTER_DOMINATOR_NONE && source >= number)
+                {
+                    while (parent != source)
+                    {
+                        while (parent > source)
+                        {
+                            parent = idom[parent];
+                        }
+                        while (source > parent)
+                        {
+                            source = idom[source];
+                        }
+                    }
+                }
+            }
+            const uint32_t distance = number - parent;
+            windows[number] = distance < BUSTER_DOMINATOR_WINDOW_BITS ? windows[parent] << distance | 1 : 1;
+            changed |= parent != idom[number];
+            idom[number] = parent;
+        }
     }
 }
 
@@ -374,16 +561,23 @@ static void dominators_set(uint64_t* row, uint32_t bit)
     row[bit / 64] |= UINT64_C(1) << (bit % 64);
 }
 
-static void dominators_tree(Dominators* result, DominatorFrame* stack, uint32_t* cursors)
+// The solver's tree, by reverse-postorder number, in block IDs (unreachable blocks have none, entry is its own), its
+// children CSR and its intervals.
+static void dominators_tree(Dominators* result, const uint32_t* rpo_idom, DominatorFrame* stack, uint32_t* cursors)
 {
     const uint32_t count = result->block_count;
+    const uint32_t* rpo = result->rpo;
     memset(result->tree_offsets, 0, ((uint64_t)count + 1) * sizeof(uint32_t));
     // Empty intervals for unreachable blocks are directly consumable by IrDominance's enter/leave view.
     memset(result->preorder, 0, (uint64_t)count * sizeof(uint32_t));
     memset(result->subtree_end, 0, (uint64_t)count * sizeof(uint32_t));
+    memset(result->idom, 0xff, (uint64_t)count * sizeof(uint32_t));
+    result->idom[result->entry] = result->entry;
     for (uint32_t order = 1; order < result->reachable_count; order += 1)
     {
-        result->tree_offsets[(uint64_t)result->idom[result->rpo[order]] + 1] += 1;
+        const uint32_t parent = rpo[rpo_idom[order]];
+        result->idom[rpo[order]] = parent;
+        result->tree_offsets[(uint64_t)parent + 1] += 1;
     }
     for (uint32_t block = 0; block < count; block += 1)
     {
@@ -468,7 +662,7 @@ static void dominators_frontiers(const DominatorCfg* cfg, Dominators* result)
 }
 
 // Kosaraju's reverse walk, followed by DFS-ancestor edge tests. Mark whole SCCs, a conservative LICM boundary.
-static void dominators_components(const DominatorCfg* cfg, Dominators* result, uint32_t* component, uint32_t* stack, uint8_t* flags, const uint32_t* dfs_begin, const uint32_t* dfs_end)
+static void dominators_components(const DominatorCfg* cfg, Dominators* result, uint32_t* component, uint32_t* stack, uint8_t* flags)
 {
     memset(component, 0xff, (uint64_t)cfg->block_count * sizeof(uint32_t));
     memset(flags, 0, cfg->block_count);
@@ -505,7 +699,8 @@ static void dominators_components(const DominatorCfg* cfg, Dominators* result, u
         for (uint32_t edge = cfg->successor_offsets[block]; edge < cfg->successor_offsets[(uint64_t)block + 1]; edge += 1)
         {
             const uint32_t target = cfg->successors[edge];
-            const bool ancestor = dfs_begin[target] <= dfs_begin[block] && dfs_begin[block] < dfs_end[target];
+            // A retreating edge's target is its source's DFS ancestor (dominators_order).
+            const bool ancestor = result->rpo_index[target] <= order;
             if (ancestor && !dominators_dominates(result, target, block))
             {
                 flags[component[block]] = 1;
@@ -550,7 +745,7 @@ static void dominators_loop_body(const DominatorCfg* cfg, const Dominators* resu
     }
 }
 
-static DominatorStatus dominators_loops(Arena* arena, Arena* scratch, const DominatorCfg* cfg, DominatorOptions options, Dominators* result, uint32_t* workspace, const uint32_t* dfs_begin, const uint32_t* dfs_end, uint64_t scratch_start)
+static DominatorStatus dominators_loops(Arena* arena, Arena* scratch, const DominatorCfg* cfg, DominatorOptions options, Dominators* result, uint32_t* workspace, uint64_t scratch_start)
 {
     const uint32_t count = cfg->block_count;
     const uint64_t row_bytes = result->row_words * sizeof(uint64_t);
@@ -565,7 +760,7 @@ static DominatorStatus dominators_loops(Arena* arena, Arena* scratch, const Domi
     DominatorStatus status = result->loop_depth != 0 && result->block_loop != 0 && result->irreducible != 0 && stack != 0 && flags != 0 ? DOMINATOR_OK : DOMINATOR_NO_MEMORY;
     if (status == DOMINATOR_OK)
     {
-        dominators_components(cfg, result, workspace, stack, flags, dfs_begin, dfs_end);
+        dominators_components(cfg, result, workspace, stack, flags);
         memset(flags, 0, count);
         for (uint32_t order = 0; order < result->reachable_count; order += 1)
         {
@@ -698,11 +893,7 @@ static DominatorStatus dominators_analyze(Arena* arena, Arena* scratch, const Do
             status = DOMINATOR_MATRIX_LIMIT;
         }
         DominatorFrame* frames = 0;
-        uint32_t* dfs_begin = 0;
-        uint32_t* dfs_end = 0;
         uint32_t* workspace = 0;
-        uint32_t* dfs_vertex = 0;
-        uint32_t* dfs_parent = 0;
         if (status == DOMINATOR_OK && count != 0)
         {
             candidate.idom = arena_push_array(arena, count, sizeof(uint32_t), _Alignof(uint32_t));
@@ -713,36 +904,47 @@ static DominatorStatus dominators_analyze(Arena* arena, Arena* scratch, const Do
             candidate.preorder = arena_push_array(arena, count, sizeof(uint32_t), _Alignof(uint32_t));
             candidate.subtree_end = arena_push_array(arena, count, sizeof(uint32_t), _Alignof(uint32_t));
             frames = arena_push_array(scratch, count, sizeof(DominatorFrame), _Alignof(DominatorFrame));
-            dfs_begin = arena_push_array(scratch, count, sizeof(uint32_t), _Alignof(uint32_t));
-            dfs_end = arena_push_array(scratch, count, sizeof(uint32_t), _Alignof(uint32_t));
             workspace = arena_push_array(scratch, count, sizeof(uint32_t), _Alignof(uint32_t));
-            dfs_vertex = arena_push_array(scratch, count, sizeof(uint32_t), _Alignof(uint32_t));
-            dfs_parent = arena_push_array(scratch, count, sizeof(uint32_t), _Alignof(uint32_t));
-            if (candidate.idom == 0 || candidate.rpo == 0 || candidate.rpo_index == 0 || candidate.tree_offsets == 0 || candidate.tree_children == 0 || candidate.preorder == 0 || candidate.subtree_end == 0 || frames == 0 || dfs_begin == 0 || dfs_end == 0 || workspace == 0 || dfs_vertex == 0 || dfs_parent == 0)
+            if (candidate.idom == 0 || candidate.rpo == 0 || candidate.rpo_index == 0 || candidate.tree_offsets == 0 || candidate.tree_children == 0 || candidate.preorder == 0 || candidate.subtree_end == 0 || frames == 0 || workspace == 0)
             {
                 status = DOMINATOR_NO_MEMORY;
             }
         }
         if (status == DOMINATOR_OK && count != 0)
         {
-            dominators_order(cfg, &candidate, frames, dfs_begin, dfs_end, dfs_vertex, dfs_parent);
+            dominators_order(cfg, &candidate, frames);
             const uint64_t phase_start = scratch->length;
-            DominatorLink* links = arena_push_array(scratch, candidate.reachable_count, sizeof(DominatorLink), _Alignof(DominatorLink));
-            uint32_t* stack = arena_push_array(scratch, candidate.reachable_count, sizeof(uint32_t), _Alignof(uint32_t));
-            if (links == 0 || stack == 0)
+            const uint32_t reachable = candidate.reachable_count;
+            // One push for the solver's columns: windows and jumps (8-byte elements), then idom, the jump stack and the
+            // retreating edges (4-byte elements). Tiny CFGs pay for each push.
+            const uint64_t column_bytes = (uint64_t)reachable * (sizeof(uint64_t) + sizeof(DominatorJump) + 2 * sizeof(uint32_t));
+            uint8_t* columns = arena_push(scratch, column_bytes + (uint64_t)cfg->edge_count * sizeof(DominatorEdge), _Alignof(uint64_t));
+            if (columns == 0)
             {
                 status = DOMINATOR_NO_MEMORY;
             }
             else
             {
-                dominators_semi_nca(cfg, &candidate, dfs_begin, dfs_vertex, dfs_parent, workspace, links, stack);
+                DominatorSweep sweep = {
+                    .windows = (uint64_t*)columns,
+                    .jumps = (DominatorJump*)(columns + (uint64_t)reachable * sizeof(uint64_t)),
+                    .idom = (uint32_t*)(columns + (uint64_t)reachable * (sizeof(uint64_t) + sizeof(DominatorJump))),
+                    .stack = (uint32_t*)(columns + (uint64_t)reachable * (sizeof(uint64_t) + sizeof(DominatorJump) + sizeof(uint32_t))),
+                    .retreating = (DominatorEdge*)(columns + column_bytes),
+                };
+                dominators_sweep(cfg, &candidate, &sweep);
+                dominators_tree(&candidate, sweep.idom, frames, workspace);
+                if (!dominators_settled(&candidate, &sweep))
+                {
+                    dominators_settle(cfg, &candidate, &sweep);
+                    dominators_tree(&candidate, sweep.idom, frames, workspace);
+                }
             }
             dominators_record_scratch(&candidate, scratch, scratch_start);
             arena_pop_to(scratch, phase_start);
         }
         if (status == DOMINATOR_OK && count != 0)
         {
-            dominators_tree(&candidate, frames, workspace);
             if ((options.outputs & BUSTER_DOMINATOR_FRONTIERS) != 0)
             {
                 candidate.frontiers = arena_push(arena, matrix_bytes, BUSTER_DOMINATOR_VECTOR_BYTES);
@@ -761,7 +963,7 @@ static DominatorStatus dominators_analyze(Arena* arena, Arena* scratch, const Do
             }
             if (status == DOMINATOR_OK && (options.outputs & BUSTER_DOMINATOR_LOOPS) != 0)
             {
-                status = dominators_loops(arena, scratch, cfg, options, &candidate, workspace, dfs_begin, dfs_end, scratch_start);
+                status = dominators_loops(arena, scratch, cfg, options, &candidate, workspace, scratch_start);
             }
         }
         dominators_record_scratch(&candidate, scratch, scratch_start);
