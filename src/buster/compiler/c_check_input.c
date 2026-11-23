@@ -14555,7 +14555,19 @@ static inline __attribute__((always_inline)) void check_input_resolve_name(Check
         const uint32_t close = parser->tree.parents[end];
         const bool call = close < parser->tokens.count && parser->tree.roles[close] == PARSE_ROLE_CLOSE_CALL &&
                           end + 1 < close && parser->tree.roles[end + 1] == PARSE_ROLE_OPEN_CALL;
-        if (call && builtin == CBUILTIN_INVOKE)
+        const bool malformed = call && __builtin_expect(parser->invalid_call_count != 0, 0) &&
+                               check_input_invalid_call_index(parser, i) < parser->invalid_call_count;
+        if (malformed)
+        {
+            // The private view keeps lookup and independent argument diagnostics, not a builtin call (#2406).
+            // In particular invoke must not turn the first surviving argument into a callee, and vararg preparation
+            // must not infer a context or count from the remaining arguments. The later silent report cuts the call.
+            for (uint32_t t = group; t <= end; t += 1)
+            {
+                reader->ignored[t] = true;
+            }
+        }
+        else if (call && builtin == CBUILTIN_INVOKE)
         {
             // __builtin_invoke(f, a...) is the call f(a...) in C (#148), as clang's Sema builds it: the name goes, with
             // its parentheses, and the call's first operand is its callee, its others its arguments. With none,
@@ -14611,7 +14623,12 @@ static inline __attribute__((always_inline)) void check_input_resolve_name(Check
         {
             check_input_implicit_function(reader, i);
         }
-        if (intrinsic == CHECK_INPUT_INTRINSIC_PREPARED)
+        if (intrinsic == CHECK_INPUT_INTRINSIC_INVALID_CALL)
+        {
+            // Its declaration was classified, but its recovered argument list cannot create an intrinsic action.
+            reader->ignored[i] = true;
+        }
+        else if (intrinsic == CHECK_INPUT_INTRINSIC_PREPARED)
         {
             const uint32_t close = parser->tree.parents[i];
             const CheckInputIntrinsicCall* call = reader->output->intrinsic_calls + reader->output->intrinsic_ids[close] - 1;

@@ -51,6 +51,17 @@ static void check_test_warning_policy(CheckTest* test)
         { CHECK_WARNING_ID_STATIC_LOCAL_INLINE, "-Wno-static-in-inline", NULL, CHECK_WARNING_WARNING },
         { CHECK_WARNING_ID_LITERAL_RANGE, "-w", "-Werror=literal-range", CHECK_WARNING_IGNORE },
         { CHECK_WARNING_ID_PLAIN_COMPLEX, "-Wno-everything", "-Werror=pedantic", CHECK_WARNING_IGNORE },
+        // The two string-addition warnings are independent, even when both diagnose one operator (#2406).
+        { CHECK_WARNING_ID_STRING_PLUS_CHAR, "-Wno-string-plus-int", NULL, CHECK_WARNING_WARNING },
+        { CHECK_WARNING_ID_STRING_PLUS_INT, "-Wno-string-plus-char", NULL, CHECK_WARNING_WARNING },
+        { CHECK_WARNING_ID_STRING_PLUS_CHAR, "-Wno-string-plus-char", "-Wstring-plus-int", CHECK_WARNING_IGNORE },
+        { CHECK_WARNING_ID_STRING_PLUS_CHAR, "-Wstring-plus-int", "-Wno-string-plus-char", CHECK_WARNING_IGNORE },
+        { CHECK_WARNING_ID_STRING_PLUS_INT, "-Wno-string-plus-int", "-Wstring-plus-char", CHECK_WARNING_IGNORE },
+        { CHECK_WARNING_ID_STRING_PLUS_INT, "-Wstring-plus-char", "-Wno-string-plus-int", CHECK_WARNING_IGNORE },
+        { CHECK_WARNING_ID_STRING_PLUS_CHAR, "-Werror=string-plus-char", "-Wno-error=string-plus-int", CHECK_WARNING_ERROR },
+        { CHECK_WARNING_ID_STRING_PLUS_CHAR, "-Wno-error=string-plus-int", "-Werror=string-plus-char", CHECK_WARNING_ERROR },
+        { CHECK_WARNING_ID_STRING_PLUS_INT, "-Werror=string-plus-char", "-Wno-error=string-plus-int", CHECK_WARNING_WARNING },
+        { CHECK_WARNING_ID_STRING_PLUS_INT, "-Wno-error=string-plus-int", "-Werror=string-plus-char", CHECK_WARNING_WARNING },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
     {

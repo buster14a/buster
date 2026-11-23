@@ -578,6 +578,10 @@ static __attribute__((noinline)) BranchSizing branch_sizing_benchmark_through(X8
         {
             if (result.rounds >= round_limit && !listed)
             {
+                if (result.rounds == 1)
+                {
+                    memset(columns.prefix[1], 0, (branch_count + 1) * sizeof(uint32_t));
+                }
                 result.evaluations = branch_sizing_worklist(branch_count, &columns, current);
                 branch_sizing_prefix_vector(branch_count, &columns, current ^ 1);
                 current ^= 1;
@@ -599,14 +603,22 @@ static __attribute__((noinline)) BranchSizing branch_sizing_benchmark_through(X8
             branch_sizing_benchmark_long_branches(branch_count, &columns, current);
         }
     }
-    if (result.error == BRANCH_SIZING_OK && stop >= BRANCH_SIZING_BENCHMARK_OFFSETS)
+    if (result.error == BRANCH_SIZING_OK && stop >= BRANCH_SIZING_BENCHMARK_OFFSETS && result.rounds > 1)
     {
         branch_sizing_offsets_vector(count, branches, branch_count, offsets, &columns, current);
     }
     if (result.error == BRANCH_SIZING_OK && stop >= BRANCH_SIZING_BENCHMARK_WRITE)
     {
-        result.length = length + columns.prefix[current][branch_count];
-        result.long_branches = branch_sizing_write(records, branches, branch_count, &columns);
+        if (result.rounds > 1)
+        {
+            result.length = length + columns.prefix[current][branch_count];
+            result.long_branches = branch_sizing_write(records, branches, branch_count, &columns, columns.displacement);
+        }
+        else
+        {
+            result.length = length;
+            result.long_branches = branch_sizing_write(records, branches, branch_count, &columns, columns.displacement0);
+        }
     }
     scratch_end(scratch);
     return result;
