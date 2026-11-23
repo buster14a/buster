@@ -11311,7 +11311,13 @@ static int run_checker_driver_tests(int argc, char** argv)
         if (!lazy && check_test_driver_takes())
         {
             check_test_driver_logical_unused(&test, clang, executable, directory);
+        }
+        if (!lazy && check_test_driver_takes())
+        {
             check_test_driver_format_bitints(&test, clang, executable, directory);
+        }
+        if (!lazy && check_test_driver_takes())
+        {
             check_test_driver_shift_counts(&test, clang, executable, directory);
         }
         // Each of these checks is a unit of its own, of the weight it took on a 4-CPU Xeon VM (#3399). Grouped in two units,
@@ -11636,6 +11642,15 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_weak_aliases(&test, clang, executable, directory);
+            }
+            // A long sweep that deals its own fixtures.
+            if (!lazy)
+            {
+                check_test_driver_weak_alias_diagnostics(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_weak_alias_common(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {
