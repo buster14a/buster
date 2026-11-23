@@ -11927,6 +11927,9 @@ struct CheckDriverCommand
 {
     // The preprocessor's, from -E's options on the command line, for every unit.
     PPOptions options;
+    // #2850's default path's rule against what it replaces, where a test asks (BUSTER_TEST_DEFAULT_PATH_LOG): the
+    // command's counts, which each unit's pass adds to (CheckInput.default_path_counts). Null in every other run.
+    uint64_t* default_path_counts;
     // --scalar, --verify, --dump-typed, --dump-static, -w, -flazy-system-headers and --lower-all.
     bool scalar;
     bool verify;
@@ -13497,6 +13500,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     stage_clock->transition_entries += stream.statistics.transition_entries;
                 }
                 ready = ready && check_input_packed_finalize(&input, checking, &types, &stream, scratch);
+                input.default_path_counts = command->default_path_counts;
                 ready = ready && check_input_warning_graph(&input, checking, &types, &stream, output_arena, scratch);
                 check_clock_mark(stage_clock, CHECK_STAGE_CHECK_EXPRESSIONS);
                 if (ready && input.recovered_published != 0)
@@ -15675,8 +15679,14 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     // (The option is the checker's unit's: elsewhere it is read and does nothing.)
     (void)node_bodies;
 #endif
+    // #2850's default path's rule against what it replaces, where a test asks: the command's counts, and a line of them
+    // in the test's file at the command's end (CheckDefaultPathCount's names say what each is).
+    uint64_t default_path_counts[CHECK_DEFAULT_PATH_COUNTS] = { 0 };
+    const char* default_path_log = getenv("BUSTER_TEST_DEFAULT_PATH_LOG");
+    const bool default_path_checked = default_path_log != NULL && default_path_log[0] != 0;
     const CheckDriverCommand command = {
         .options = options,
+        .default_path_counts = default_path_checked ? default_path_counts : NULL,
         .scalar = scalar,
         .verify = verify,
         .check_transitions = check_transitions,
@@ -15853,6 +15863,17 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         arena_release(&arena);
     }
     check_clock_mark(stage_clock, CHECK_STAGE_RELEASE);
+    if (default_path_checked)
+    {
+        FILE* file = fopen(default_path_log, "a");
+        if (file != NULL)
+        {
+            fprintf(file, "default-path: logical-operands-not-replayed=%" PRIu64 " of-them-an-event=%" PRIu64 " of-them-a-type-made=%" PRIu64 "\n",
+                    default_path_counts[CHECK_DEFAULT_PATH_LOGICAL_SKIPPED], default_path_counts[CHECK_DEFAULT_PATH_LOGICAL_EVENTS],
+                    default_path_counts[CHECK_DEFAULT_PATH_LOGICAL_TYPES]);
+            fclose(file);
+        }
+    }
     if (stage_clock != NULL)
     {
         check_clock_report(stage_clock, pp_ticks, PP_PHASE_COUNT, stderr);

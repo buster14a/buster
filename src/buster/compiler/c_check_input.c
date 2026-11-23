@@ -770,6 +770,26 @@ struct CheckInputKrDiagnostic
 #define BUSTER_CHECK_EXPRESSION_PART_VISITS 3u
 #define BUSTER_CHECK_EXPRESSION_PARTS 4u
 
+// #2850's default path: a rule that answers early what a longer way answered, against that way. A logical operator's right
+// operand that can only be 0 or 1 is not replayed for -Wconstant-logical-operand (c_check_warning_graph.c). With a
+// test's switch (BUSTER_TEST_DEFAULT_PATH_LOG, a file's path) it is replayed all the same, and the command writes one
+// line of these counts at its end: the events and the types stay 0.
+typedef enum CheckDefaultPathCount
+{
+    // Right operands the warning's pass did not replay; of them, those whose replay gives the warning's event; and those
+    // whose replay makes a type the table did not have.
+    CHECK_DEFAULT_PATH_LOGICAL_SKIPPED,
+    CHECK_DEFAULT_PATH_LOGICAL_EVENTS,
+    CHECK_DEFAULT_PATH_LOGICAL_TYPES,
+    CHECK_DEFAULT_PATH_COUNTS,
+} CheckDefaultPathCount;
+
+// (The passes of a unit may run on several lanes.)
+static inline __attribute__((unused)) void check_default_path_count(uint64_t* counts, CheckDefaultPathCount which, uint64_t by)
+{
+    __atomic_fetch_add(counts + which, by, __ATOMIC_RELAXED);
+}
+
 typedef struct CheckInput CheckInput;
 typedef struct CheckInputEnumValue CheckInputEnumValue;
 struct CheckInputEnumValue
@@ -1273,6 +1293,9 @@ struct CheckInput
     // program keeps it with no control of its own, and the lowering writes its function from what `node_front` keeps of
     // it (its controls, each control's root's tape and what is beside it).
     bool node_bodies;
+    // The default path's rule against what it replaces (#2850), where a test asks (BUSTER_TEST_DEFAULT_PATH_LOG): the
+    // command's counts (CHECK_DEFAULT_PATH_*), which the unit's pass adds to. Null in every other run.
+    uint64_t* default_path_counts;
     // Explicit sizeof operand folds and their input tokens; regression tests bound the preparation work (#822).
     uint32_t sizeof_queries;
     uint64_t sizeof_query_tokens;
