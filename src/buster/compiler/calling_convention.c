@@ -3752,6 +3752,8 @@ static void abi_assign_lanes(const AbiTable* abi, AbiSignatures signatures, cons
 // The arguments abi_assign marks at a time, on its stack, and the calls it leaves to abi_assign_lanes at a time.
 #define BUSTER_ABI_ASSIGN_WINDOW 1024
 #define BUSTER_ABI_ASSIGN_DEFERRED 64
+// The byte past a window's marks and the START after them, which no lane's loads reach.
+#define BUSTER_ABI_ASSIGN_SPARE (BUSTER_ABI_ASSIGN_WINDOW + BUSTER_ABI_LANES + 1)
 
 // The deferred calls, eight at a time.
 static void abi_assign_deferred(const AbiTable* abi, AbiSignatures signatures, const uint32_t* deferred, const uint64_t* firsts, uint32_t count, AbiLocation* locations,
@@ -3791,7 +3793,7 @@ static void abi_assign(const AbiTable* abi, AbiSignatures signatures, AbiLocatio
     }
     // A window's marks (and past its last argument a START where a call starts there), and at each call's last argument
     // in it the call's register counts, stack bytes and ORed alignments; and the calls left to abi_assign_lanes.
-    _Alignas(64) uint8_t marks[BUSTER_ABI_ASSIGN_WINDOW + BUSTER_ABI_LANES + 1];
+    _Alignas(64) uint8_t marks[BUSTER_ABI_ASSIGN_SPARE + 1];
     _Alignas(64) uint32_t end_registers[BUSTER_ABI_ASSIGN_WINDOW + BUSTER_ABI_LANES];
     _Alignas(64) uint32_t end_stack[BUSTER_ABI_ASSIGN_WINDOW + BUSTER_ABI_LANES];
     _Alignas(64) uint32_t end_alignment[BUSTER_ABI_ASSIGN_WINDOW + BUSTER_ABI_LANES];
@@ -3849,14 +3851,12 @@ static void abi_assign(const AbiTable* abi, AbiSignatures signatures, AbiLocatio
                                       (signatures.variadic[setup] != 0 ? BUSTER_ABI_LANE_VARIADIC : 0) | (count > BUSTER_ABI_COUNTED_ARGUMENTS ? BUSTER_ABI_LANE_LONG : 0);
             marks[setup_first - window] |= (uint8_t)(count != 0 ? starting : 0);
             const uint64_t unnamed = setup_first + named;
-            if (named < count && unnamed < window_end)
-            {
-                marks[unnamed - window] |= BUSTER_ABI_LANE_UNNAMED;
-            }
-            else if (named < count)
-            {
-                pending_unnamed = unnamed;
-            }
+            // Without a branch, which a quarter of the calls (variadic, at random) mispredict: an unnamed mark outside
+            // the window waits, and a call without one marks the spare byte past the window's marks, which no lane reads.
+            const bool has_unnamed = named < count;
+            const bool here = has_unnamed && unnamed < window_end;
+            marks[here ? unnamed - window : BUSTER_ABI_ASSIGN_SPARE] |= BUSTER_ABI_LANE_UNNAMED;
+            pending_unnamed = has_unnamed && !here ? unnamed : pending_unnamed;
             setup_first += count;
         }
         // Past the window's last argument, a START where a call starts there (or the arguments end).
