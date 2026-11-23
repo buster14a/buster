@@ -1584,7 +1584,7 @@ frame whose save area is at rsp + 0. Every call with the key then writes the kep
 (`tier0_call_memo_write`), and puts in their saves and restores (its first and last ones) the frame's base and the
 area's offset and bias, and in its call record's reference its callee. The records are the emitter's either way. A call
 with no key, or a full table, takes `tier0_count_deferred` and `tier0_emit_deferred` as before. On `sqlite3.c` the
-table takes `tier0` from 4.780 to 4.578 ms on the 9700X, every object byte for byte the same ([the
+table takes `tier0` from 5.032 to 4.774 ms on the 9700X, every object byte for byte the same ([the
 record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier0-calls-memo-2874-2026-11-23)).
 
 ## The two paths
