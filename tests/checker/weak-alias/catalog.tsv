@@ -76,3 +76,8 @@ early-object-function	early-object-function.c	rejected	a function declaration af
 early-mixed-reference	early-mixed-reference.c	rejected	a declaration after mixed function and object clones notes the newest and the reference lists both
 early-object-unused	early-object-unused.c	rejected	a declaration after two object clones is a different kind of symbol without a reference
 early-function-run	early-function-run.c	-	calls through an early clone set name the first clone's weak alias
+pragma-only	pragma-only.c	-	pragma-only function and array aliases keep their types and identities through later declarations and local shadows
+pragma-only-overload	pragma-only-overload.c	-	pragma-only function overloads retain their source-order lookup sets
+pragma-only-ambiguous	pragma-only-ambiguous.c	rejected	pragma-only mixed lookup is ambiguous and identical pending clones contribute one candidate
+pragma-only-source-order	pragma-only-source-order.c	rejected	a forward pragma does not expose the name until its target is declared
+pragma-only-prototype	pragma-only-prototype.c	rejected	a pragma-only function has the cloned prototype and its diagnostic points to the pragma

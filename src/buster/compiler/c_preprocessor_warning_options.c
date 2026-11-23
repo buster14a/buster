@@ -277,7 +277,6 @@ static const char* const pp_warning_unimplemented[] =
     "strict-prototypes",
     "switch-enum",
     "undef",
-    "unused-macros",
     "vla",
 };
 

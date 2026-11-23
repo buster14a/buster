@@ -4882,7 +4882,7 @@ static uint32_t check_driver_weak_alias_candidates(const Parser* parser, const C
     {
         const CheckInputSymbolPragma* record = history->records + i;
         const uint32_t made = record->token > record->alias_declaration ? record->token : record->alias_declaration;
-        clones += record->kind == CHECK_SYMBOL_PRAGMA_ALIAS && record->name == name && record->alias_declaration < count && made < token;
+        clones += record->kind == CHECK_SYMBOL_PRAGMA_ALIAS && record->name == name && record->alias_declaration < count && made <= token && !check_input_symbol_pending_duplicate(history, i);
     }
     uint64_t capacity = (uint64_t)clones + 1;
     for (uint32_t r = 0; clones != 0 && r < input->report_count; r += 1)
@@ -4898,7 +4898,7 @@ static uint32_t check_driver_weak_alias_candidates(const Parser* parser, const C
     {
         const CheckInputSymbolPragma* record = history->records + i;
         const uint32_t made = record->token > record->alias_declaration ? record->token : record->alias_declaration;
-        if (record->kind == CHECK_SYMBOL_PRAGMA_ALIAS && record->name == name && record->alias_declaration < count && made < token)
+        if (record->kind == CHECK_SYMBOL_PRAGMA_ALIAS && record->name == name && record->alias_declaration < count && made <= token && !check_input_symbol_pending_duplicate(history, i))
         {
             order[listed_count++] = (uint64_t)made << 32 | i;
         }
@@ -4976,6 +4976,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
         if (show_warnings && construction)
         {
             check_common_conditional_conversions(parser, pp, input, stream, types, &spell, repair, from, scratch);
+            check_common_float_comparisons(parser, pp, input, stream, types, &spell, repair, from, scratch);
         }
         for (uint32_t i = 0; i < completion_count; i += 1)
         {
@@ -6955,7 +6956,9 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                         }
                         else if (x86_message != NULL && x86_location < count && conversion_note != NULL && conversion_note_token < count)
                         {
-                            const PPOutputDiagnosticNote note = { .token = parse_source_index(&parser->tokens, conversion_note_token), .message = conversion_note };
+                            const CheckInputSymbolPragma* clone = check_input_symbol_first_use(input->symbol_pragmas, conversion_note_token);
+                            const uint32_t source = clone != NULL ? clone->source + 3 : parse_source_index(&parser->tokens, conversion_note_token);
+                            const PPOutputDiagnosticNote note = { .token = source, .message = conversion_note };
                             pp_diagnose_output_notes_at(pp, PP_SEVERITY_ERROR, parse_source_index(&parser->tokens, x86_location), publication, &note, 1, "%s", x86_message);
                         }
                         else if (x86_message != NULL && x86_location < count)
@@ -11992,8 +11995,8 @@ struct CheckDriverDeferred
 };
 
 // --tier1-passes='s list (#139's measurement): comma-separated items, each + or - and then a pass's name (sccp, dce, cfg,
-// merge, licm, sroa, memory, vectorize, unroll, vectors, tables, gvn or inline) or all, applied in turn to the passes the earlier
-// options left on: the default pipeline's (SCCP, dead-code removal, CFG cleanup, its merges, the inlining and vectors), with
+// merge, licm, sroa, memory, vectorize, unroll, vectors, tables, storemotion, gvn or inline) or all, applied in turn to the passes the earlier
+// options left on: the default pipeline's (SCCP, dead-code removal, CFG cleanup, its merges, the inlining, vectors and tables), with
 // --tier1-gvn's and --tier1-no-inline's changes where they came first. `toggled` holds the BUSTER_CHECK_TIER1_PASS_* bits that differ from the default; `gvn` and `no_inline` are
 // the two passes with options of their own. Returns false, and leaves all three as they were, for an empty list or item,
 // an item without its sign, or an unknown name.
@@ -12001,7 +12004,7 @@ struct CheckDriverDeferred
 #define BUSTER_CHECK_DRIVER_PASS_INLINE 1024u
 static bool check_driver_tier1_passes(const char* list, uint16_t* toggled, bool* gvn, bool* no_inline)
 {
-    static const char* const names[] = { "sccp", "dce", "cfg", "merge", "licm", "sroa", "memory", "vectorize", "unroll", "vectors", "tables", "gvn", "inline", "all" };
+    static const char* const names[] = { "sccp", "dce", "cfg", "merge", "licm", "sroa", "memory", "vectorize", "unroll", "vectors", "tables", "storemotion", "gvn", "inline", "all" };
     static const uint32_t bits[] = {
         BUSTER_CHECK_TIER1_PASS_SCCP,
         BUSTER_CHECK_TIER1_PASS_DCE,
@@ -12014,6 +12017,7 @@ static bool check_driver_tier1_passes(const char* list, uint16_t* toggled, bool*
         BUSTER_CHECK_TIER1_PASS_UNROLL,
         BUSTER_CHECK_TIER1_PASS_VECTORS,
         BUSTER_CHECK_TIER1_PASS_TABLES,
+        BUSTER_CHECK_TIER1_PASS_STORE_MOTION,
         BUSTER_CHECK_DRIVER_PASS_GVN,
         BUSTER_CHECK_DRIVER_PASS_INLINE,
         BUSTER_CHECK_TIER1_PASSES_ALL | BUSTER_CHECK_DRIVER_PASS_GVN | BUSTER_CHECK_DRIVER_PASS_INLINE,
@@ -13680,7 +13684,9 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                                     .repeated = after_counted,
                                     .default_source = default_error ? failure.failed_source : 0,
                                     .default_target = default_error ? failure.failed_type : 0,
-                                    .suborder = failure.failed_source != 0 && failure.token < tokens ? (uint64_t)parse_source_index(&checking->tokens, failure.token) + 1u : 0,
+                                    // (A designator that names no member too, which the walk recovers from among the conversions, #1842.)
+                                    .suborder = (failure.failed_source != 0 || failure.status == CHECK_INIT_MEMBER) && failure.token < tokens ?
+                                                    (uint64_t)parse_source_index(&checking->tokens, failure.token) + 1u : 0,
                                 };
                                 // A static object's braced subobject whose conversion clang warns of and makes, where its value is
                                 // then no constant: clang's second error at it (check_init_value_nonconstant, #147).
@@ -13691,6 +13697,14 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                                 for (uint32_t d = 0; conversion != NULL && d < additional_count; d += 1)
                                 {
                                     given_before |= additional[d].repeated && additional[d].token == place && additional[d].message == nonconstant;
+                                }
+                                // Nor where a designator in the same initializer named no member (#1842): clang's list then has
+                                // an error, and its initializer isn't checked for constants.
+                                for (uint32_t g = 0; conversion != NULL && g < failure_total; g += 1)
+                                {
+                                    const CheckInitFailure* sibling = g != 0 ? earlier.failures + (g - 1) : NULL;
+                                    given_before |= sibling != NULL ? sibling->status == CHECK_INIT_MEMBER && sibling->failed_declaration == failure.failed_declaration :
+                                                    earlier.status == CHECK_INIT_MEMBER && earlier.failed_declaration == failure.failed_declaration;
                                 }
                                 if (conversion != NULL && !given_before && failure.recovered_type == 0 && failure.failed_source != 0 && failure.failed_declaration < input.token_count &&
                                     check_input_bit(input.declaration_bits, failure.failed_declaration, BUSTER_CHECK_BITS_STATIC) != 0 &&
@@ -15211,7 +15225,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             tier1_passes_seen = true;
             if (!known)
             {
-                fprintf(stderr, "error: --tier1-passes= takes a comma-separated list of +NAME and -NAME, NAME being sccp, dce, cfg, merge, licm, sroa, vectorize, unroll, vectors, gvn, inline or all\n");
+                fprintf(stderr, "error: --tier1-passes= takes a comma-separated list of +NAME and -NAME, NAME being sccp, dce, cfg, merge, licm, sroa, memory, vectorize, unroll, vectors, tables, storemotion, gvn, inline or all\n");
             }
             invalid_tier1_passes |= !known;
         }

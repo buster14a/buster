@@ -1248,6 +1248,56 @@ static __attribute__((no_sanitize("function"))) void tier0_test_vector_run_body(
     body(shared->in, shared->ints, shared->floats, shared->out);
 }
 
+// The functions tier0_test_vector_encode compiled with a clean upper state and with a dirty one (#3335).
+static uint32_t tier0_test_vector_dirty[2];
+
+// #3335: where a function's code at a target with AVX has its vzeroupper records, as clang's VZeroUpperInsertion places
+// them: where its records name ymm0 to ymm15 or zmm0 to zmm15 (x86_upper_dirty), right before each call but one passing
+// an argument in a whole ymm or zmm register (tier0_call_wide), and right before the epilogue's teardown (its release and
+// pops before the ret) but where the result is in one (tier0_result_wide); nowhere else, and nowhere in a clean function.
+// Its calls' records are its CALL entries' in their order (tier0_emit_callee's). Returns the first record that breaks
+// that (one past the records for a vzeroupper missing before the teardown), or the count; *dirty whether it names one.
+static uint32_t tier0_test_vector_upper(const Tier0Function* function, const Tier0Code* code, bool* dirty)
+{
+    const X86Instruction* records = code->records;
+    *dirty = x86_upper_dirty(records, code->count);
+    uint32_t wrong = code->count;
+    uint32_t entry = 0;
+    uint32_t expected = 0;
+    uint32_t seen = 0;
+    for (uint32_t r = 0; r < code->count; r += 1)
+    {
+        const uint32_t form = records[r].form & BUSTER_X86_FORM_NUMBER;
+        seen += form == X86_FORM_VZEROUPPER ? 1 : 0;
+        if (form == X86_FORM_CALL_REL32 || form == X86_FORM_CALL_RM64)
+        {
+            while (entry < function->count && function->kinds[entry] != BUSTER_TYPED_CALL)
+            {
+                entry += 1;
+            }
+            const bool clears = entry < function->count && *dirty && !tier0_call_wide(function, (uint32_t)function->values[entry]);
+            const bool cleared = r > 0 && (records[r - 1].form & BUSTER_X86_FORM_NUMBER) == X86_FORM_VZEROUPPER;
+            wrong = wrong == code->count && (entry == function->count || clears != cleared) ? r : wrong;
+            expected += clears ? 1 : 0;
+            entry += 1;
+        }
+    }
+    // The epilogue's teardown, back from its ret: the pops, then the release.
+    uint32_t r = code->count != 0 ? code->count - 1 : 0;
+    while (r > 0 && (records[r - 1].form == X86_FORM_POP_R64 ||
+                     ((records[r - 1].form == X86_FORM_ADD_RM64_IMM8 || records[r - 1].form == X86_FORM_ADD_RM64_IMM32) && records[r - 1].rm == X86_REGISTER_RSP) ||
+                     (records[r - 1].form == X86_FORM_LEA_R64_M && records[r - 1].reg == X86_REGISTER_RSP) ||
+                     (records[r - 1].form == X86_FORM_MOV_RM64_R64 && records[r - 1].rm == X86_REGISTER_RSP)))
+    {
+        r -= 1;
+    }
+    const bool clears = *dirty && !tier0_result_wide(function);
+    const bool cleared = r > 0 && records[r - 1].form == X86_FORM_VZEROUPPER;
+    wrong = wrong == code->count && clears != cleared ? (cleared ? r - 1 : code->count + 1) : wrong;
+    expected += clears ? 1 : 0;
+    return wrong == code->count && seen != expected ? 0 : wrong;
+}
+
 // A function compiled by both paths, which must agree (and tier0_validate take it), its records valid, its branches
 // sized, and encoded by the encoder into `image`. Returns the code's length, 0 for a failure or a refusal, and in *error
 // Tier 0's error: only `allowed` may refuse it (TIER0_ERROR_DEPTH where the depths may pass the tables), and every other
@@ -1255,6 +1305,11 @@ static __attribute__((no_sanitize("function"))) void tier0_test_vector_run_body(
 static uint32_t tier0_test_vector_encode(Tier0TestTally* tally, const char* name, const Tier0Function* function, Arena* arena, uint8_t* image, Tier0Error allowed,
                                          Tier0Error* error)
 {
+    // At its target (#3335): one with AVX but for the SSE2 transport's, whose legacy SSE records become their VEX twins and
+    // whose dirty upper state a vzeroupper clears on the way out (tier0_test_vector_upper).
+    Tier0Function targeted = *function;
+    targeted.avx = function->vector_bytes != 16;
+    function = &targeted;
     const Tier0Check check = tier0_validate(function);
     const Tier0Code scalar = tier0_compile_scalar(function, arena);
     const Tier0Code vector = tier0_compile(function, arena);
@@ -1280,6 +1335,10 @@ static uint32_t tier0_test_vector_encode(Tier0TestTally* tally, const char* name
                                   "vectors", "%s: target-illegal emitted instruction", name);
     }
     ready = ready && tier0_test_covered(tally, "vectors", name, &scalar);
+    bool dirty = false;
+    const uint32_t upper = ready && function->asm_body_count == 0 ? tier0_test_vector_upper(function, &scalar, &dirty) : scalar.count;
+    ready = ready && tier0_test_expect(tally, upper == scalar.count, "vectors", "%s: record %u has a vzeroupper where clang's code has none, or lacks one (#3335)", name, upper);
+    tier0_test_vector_dirty[dirty ? 1 : 0] += ready ? 1 : 0;
     uint32_t* offsets = ready ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)scalar.count + 1) : 0;
     const BranchSizing sizing = offsets != 0 ? size_branches(scalar.records, scalar.count, scalar.branches, scalar.targets, scalar.branch_count, offsets) : (BranchSizing){ 0 };
     ready = ready && tier0_test_expect(tally, offsets != 0 && sizing.error == BRANCH_SIZING_OK, "vectors", "%s: the branches can't be sized", name);
@@ -2584,6 +2643,8 @@ static void tier0_test_vector_rules(Tier0TestTally* tally)
 // The vectors check: the rules, the placements, the aggregates, then `count` random programs.
 static void tier0_test_vectors(Tier0TestTally* tally, Tier0Tables* tables, uint64_t seed, uint32_t count, uint32_t* too_deep, uint64_t* entries)
 {
+    tier0_test_vector_dirty[0] = 0;
+    tier0_test_vector_dirty[1] = 0;
     tier0_test_vector_build_rows();
     Tier0TestVectorAbi abi;
     Tier0TestVectorShared* shared = mmap(0, sizeof(Tier0TestVectorShared), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
@@ -2599,6 +2660,10 @@ static void tier0_test_vectors(Tier0TestTally* tally, Tier0Tables* tables, uint6
         tier0_test_vector_placement(tally, seed, shared);
         tier0_test_vector_aggregates(tally, &abi, shared, seed);
         tier0_test_vector_programs(tally, seed, count, shared, too_deep, entries);
+        printf("  vectors: %u functions' code named ymm0 to zmm15, each with a vzeroupper before its calls and its ret, %u didn't and had none (#3335)\n",
+               tier0_test_vector_dirty[1], tier0_test_vector_dirty[0]);
+        tier0_test_expect(tally, count < BUSTER_TIER0_TEST_VECTOR_PROGRAMS || (tier0_test_vector_dirty[0] != 0 && tier0_test_vector_dirty[1] != 0), "vectors",
+                          "the functions don't reach both a dirty and a clean upper state (#3335)");
     }
     if (shared != MAP_FAILED)
     {

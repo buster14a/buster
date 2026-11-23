@@ -224,6 +224,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
     [CHECK_WARNING_ID_TAUTOLOGICAL_NEGATION_COMPARE] = { "-Wtautological-negation-compare", "-Wtautological-compare",
                                                          "'&&' of a value and its negation always evaluates to false" },
     [CHECK_WARNING_ID_CONSTANT_LOGICAL_OPERAND] = { "-Wconstant-logical-operand", NULL, "use of logical operator with constant operand" },
+    [CHECK_WARNING_ID_IMPLICIT_FLOAT_CONVERSION] = { "-Wimplicit-float-conversion", "-Wconversion", "implicit conversion loses floating-point precision" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");

@@ -230,6 +230,10 @@ static void asm_section_directive(AsmParser* parser, uint32_t token, uint32_t en
                 {
                     object.type = SHT_NOTE;
                 }
+                else if (asm_is(parser, parser->at, "unwind"))
+                {
+                    object.type = SHT_X86_64_UNWIND;
+                }
                 else if (asm_is(parser, parser->at, "init_array"))
                 {
                     object.type = SHT_INIT_ARRAY;
@@ -313,6 +317,7 @@ static void asm_section_directive(AsmParser* parser, uint32_t token, uint32_t en
     object.entry_size = array && (object.flags & SHF_MERGE) == 0 ? 8 : object.entry_size;
     if (name.length == 0 || (zero && (executable || (object.flags & SHF_MERGE) != 0)) ||
         ((object.flags & SHF_STRINGS) != 0 && ((object.flags & SHF_MERGE) == 0 || !characters)) ||
+        (object.type == SHT_X86_64_UNWIND && (object.flags & ~SHF_GROUP) != SHF_ALLOC) ||
         (array && (object.flags & (SHF_EXECINSTR | SHF_TLS | SHF_MERGE | SHF_STRINGS)) != 0))
     {
         asm_fail(parser, location, "unsupported section attributes");
@@ -320,7 +325,10 @@ static void asm_section_directive(AsmParser* parser, uint32_t token, uint32_t en
     if (id != 0 && attributes && (parser->sections[id].declared || id < BUSTER_LINK_CLASS_COUNT))
     {
         const ObjectAtomSection* old = &parser->sections[id].object;
-        if (old->type != object.type || old->flags != object.flags || old->entry_size != object.entry_size)
+        // The assembler defaults .eh_frame to PROGBITS. The C assembly writer explicitly
+        // declares it as @unwind; the first declaration fixes its type for later visits.
+        const bool first_unwind = id == BUSTER_LINK_CLASS_EH_FRAME && !parser->sections[id].declared && object.type == SHT_X86_64_UNWIND;
+        if ((old->type != object.type && !first_unwind) || old->flags != object.flags || old->entry_size != object.entry_size)
         {
             asm_fail(parser, location, "section attributes changed after declaration");
         }
@@ -345,6 +353,7 @@ static void asm_section_directive(AsmParser* parser, uint32_t token, uint32_t en
         // An array of constructors or destructors is its class's, whatever its name and flags, so that the direct path
         // runs its entries as an executable's linker does (#1848).
         section->class = zero ? (tls ? BUSTER_LINK_CLASS_TBSS : BUSTER_LINK_CLASS_BSS) :
+                         object.type == SHT_X86_64_UNWIND ? BUSTER_LINK_CLASS_EH_FRAME :
                          object.type == SHT_INIT_ARRAY ? BUSTER_LINK_CLASS_INIT_ARRAY : object.type == SHT_FINI_ARRAY ? BUSTER_LINK_CLASS_FINI_ARRAY :
                          executable ? BUSTER_LINK_CLASS_TEXT : tls ? BUSTER_LINK_CLASS_TDATA :
                          (object.flags & SHF_WRITE) != 0 ? BUSTER_LINK_CLASS_DATA :

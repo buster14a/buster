@@ -19,7 +19,7 @@
 //     14 and a few of 15 to 22, one in four variadic, whose arguments are integers and pointers mostly, then
 //     floating types, records that pass in registers and in memory, and now and then long double, __int128, a complex
 //     type or a vector (abi_benchmark_named_type and abi_benchmark_unnamed_type have the mix); by abi_assign, per
-//     argument, with the share of arguments abi_assign left to its per-call fallback, abi_assign_call. Then the same
+//     argument, with the share of arguments abi_assign left to its per-call kernel, abi_assign_lanes. Then the same
 //     calls' shapes with integers, pointers and doubles alone (assign-simple), each of which needs one register of one
 //     class.
 // Every run takes the whole table or every call once, and the defaults are more types and arguments than Zen 5's
@@ -95,6 +95,8 @@ struct String8
 #define BUSTER_ABI_BENCHMARK_CLASSIFY_ALL 0
 #define BUSTER_ABI_BENCHMARK_BATCHES 1
 #define BUSTER_ABI_BENCHMARK_ASSIGN 2
+// Each call of `signatures` assigned alone, a call of abi_assign each.
+#define BUSTER_ABI_BENCHMARK_ASSIGN_ALONE 3
 
 static const uint32_t abi_benchmark_widths[] = {
     16,
@@ -564,6 +566,25 @@ static __attribute__((noinline, aligned(64))) void abi_benchmark_assign_vector(c
     abi_assign(abi, signatures, locations, calls);
 }
 
+// Each call alone, as a code generator assigns a single signature (a function's entry, va_start's named parameters).
+static __attribute__((noinline, aligned(64))) void abi_benchmark_assign_alone(const AbiTable* abi, AbiSignatures signatures, AbiLocation* locations, AbiCall* calls)
+{
+    uint64_t first = 0;
+    for (uint32_t c = 0; c < signatures.count; c += 1)
+    {
+        const AbiSignatures one = {
+            .results = signatures.results + c,
+            .counts = signatures.counts + c,
+            .named = signatures.named + c,
+            .variadic = signatures.variadic + c,
+            .count = 1,
+            .arguments = signatures.arguments + first,
+        };
+        abi_assign(abi, one, locations + first, calls + c);
+        first += signatures.counts[c];
+    }
+}
+
 // Readies a run, outside the time: classify-all starts its table again, with only the builtin types classified.
 // Returns false if abi_initialize fails.
 static bool abi_benchmark_prepare(const AbiBenchmarkCase* benchmark)
@@ -593,6 +614,10 @@ static bool abi_benchmark_execute(const AbiBenchmarkCase* benchmark)
     else if (benchmark->kind == BUSTER_ABI_BENCHMARK_BATCHES)
     {
         abi_benchmark_batches_vector(abi, benchmark->table, benchmark->types, benchmark->starts, benchmark->batch_count);
+    }
+    else if (benchmark->kind == BUSTER_ABI_BENCHMARK_ASSIGN_ALONE)
+    {
+        abi_benchmark_assign_alone(abi, benchmark->signatures, benchmark->locations, benchmark->calls);
     }
     else
     {
@@ -1428,7 +1453,7 @@ static bool abi_benchmark_calls(AbiBenchmarkCalls* calls, const AbiBenchmarkPool
     return result;
 }
 
-// What abi_assign leaves to its per-call fallback, abi_assign_call, and why (a call may have several reasons).
+// What abi_assign leaves to its per-call kernel, abi_assign_lanes, and why (a call may have several reasons).
 typedef struct AbiBenchmarkDeferred AbiBenchmarkDeferred;
 struct AbiBenchmarkDeferred
 {
@@ -1444,9 +1469,9 @@ struct AbiBenchmarkDeferred
     uint32_t long_calls;
 };
 
-// abi_assign's rules for which calls go to abi_assign_call, mirrored here a call at a time (keep them in step with
-// abi_assign's deferred_lanes), since its results don't tell: the fallback's are the same. The prefix sums of a call's
-// registers and stack slots count every argument that needs a register as using it, so a call goes to the fallback when an
+// abi_assign's rules for which calls go to abi_assign_lanes, mirrored here a call at a time (keep them in step with
+// abi_assign's deferred_lanes), since its results don't tell: the kernel's are the same. The prefix sums of a call's
+// registers and stack slots count every argument that needs a register as using it, so a call goes to the kernel when an
 // argument is UNCOUNTED, doesn't fit (the sum of a class it needs past the registers) while a register it needs is
 // still free (inexact), goes to the stack at an offset its alignment doesn't divide or aligned to more than 32 bits hold
 // (padded), is a named WIDE vector of a variadic call, is on the stack with a slot that depends on clang's count (EMPTY,
@@ -1603,11 +1628,73 @@ static bool abi_benchmark_assign_mix(const AbiTable* abi, const TypeTable* table
                    benchmark.name, BUSTER_ABI_BENCHMARK_BASE_VECTOR_BYTES, calls.count, calls.variadic_count, calls.argument_count, arguments / calls.count,
                    100.0 * kinds[BUSTER_ABI_LOCATION_REGISTERS] / arguments, 100.0 * kinds[BUSTER_ABI_LOCATION_STACK] / arguments,
                    100.0 * kinds[BUSTER_ABI_LOCATION_SPLIT] / arguments, 100.0 * kinds[BUSTER_ABI_LOCATION_IGNORE] / arguments);
-            printf("%s: the vector path left %.2f%% of the arguments (%u calls, %.2f%%) to abi_assign_call: %u calls uncounted, %u inexact, %u padded, %u named wide, "
+            printf("%s: the vector path left %.2f%% of the arguments (%u calls, %.2f%%) to abi_assign_lanes: %u calls uncounted, %u inexact, %u padded, %u named wide, "
                    "%u empty, %u general low, %u demoted, %u long\n",
                    benchmark.name, 100.0 * (double)deferred.arguments / arguments, deferred.calls, 100.0 * deferred.calls / calls.count, deferred.uncounted, deferred.inexact,
                    deferred.padded, deferred.wide_named, deferred.empty, deferred.general_low, deferred.demoted, deferred.long_calls);
             abi_benchmark_print(benchmark.name, &samples, "argument", 0, 0);
+        }
+        // The same calls, each assigned alone; and for the mix, only the calls the prefix sums leave to the per-call
+        // kernel, each alone (single signatures whose kernel runs one lane of eight).
+        AbiBenchmarkCase alone_case = benchmark;
+        alone_case.kind = BUSTER_ABI_BENCHMARK_ASSIGN_ALONE;
+        alone_case.name = simple ? "simple-alone" : "assign-alone";
+        valid = valid && abi_benchmark_measure(&alone_case, counters, &samples);
+        if (valid)
+        {
+            abi_benchmark_print(alone_case.name, &samples, "argument", 0, 0);
+        }
+        if (valid && !simple && deferred.calls != 0)
+        {
+            // The deferred calls' columns, gathered: each call alone through abi_benchmark_deferred.
+            TypeId* kept_results = BUSTER_ARENA_PUSH_ARRAY(arena, TypeId, deferred.calls);
+            uint32_t* kept_counts = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, deferred.calls);
+            uint32_t* kept_named = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, deferred.calls);
+            uint8_t* kept_variadic = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, deferred.calls);
+            TypeId* kept_arguments = BUSTER_ARENA_PUSH_ARRAY(arena, TypeId, deferred.arguments + 1);
+            valid = kept_results != 0 && kept_counts != 0 && kept_named != 0 && kept_variadic != 0 && kept_arguments != 0;
+            uint32_t kept = 0;
+            uint64_t kept_total = 0;
+            uint64_t first = 0;
+            for (uint32_t c = 0; valid && c < signatures.count; c += 1)
+            {
+                const AbiSignatures one = {
+                    .results = signatures.results + c,
+                    .counts = signatures.counts + c,
+                    .named = signatures.named + c,
+                    .variadic = signatures.variadic + c,
+                    .count = 1,
+                    .arguments = signatures.arguments + first,
+                };
+                if (abi_benchmark_deferred(abi, one).calls != 0)
+                {
+                    kept_results[kept] = signatures.results[c];
+                    kept_counts[kept] = signatures.counts[c];
+                    kept_named[kept] = signatures.named[c];
+                    kept_variadic[kept] = signatures.variadic[c];
+                    memcpy(kept_arguments + kept_total, signatures.arguments + first, signatures.counts[c] * sizeof(TypeId));
+                    kept_total += signatures.counts[c];
+                    kept += 1;
+                }
+                first += signatures.counts[c];
+            }
+            AbiBenchmarkCase deferred_case = alone_case;
+            deferred_case.name = "deferred-alone";
+            deferred_case.items = kept_total;
+            deferred_case.signatures = (AbiSignatures){
+                .results = kept_results,
+                .counts = kept_counts,
+                .named = kept_named,
+                .variadic = kept_variadic,
+                .count = kept,
+                .arguments = kept_arguments,
+            };
+            valid = valid && kept_total != 0 && abi_benchmark_measure(&deferred_case, counters, &samples);
+            if (valid)
+            {
+                printf("deferred-alone: the %u calls (%" PRIu64 " arguments) the prefix sums leave, each alone\n", kept, kept_total);
+                abi_benchmark_print(deferred_case.name, &samples, "argument", 0, 0);
+            }
         }
     }
     if (!valid)

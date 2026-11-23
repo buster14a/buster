@@ -35,18 +35,23 @@ struct IrVectorizeTest
     bool killed[BUSTER_IR_VECTORIZE_MUTATIONS];
     const char* print;
     // An FNV-1a digest of every fixture's result and counts at every target, in order (#2924): frozen where the pass's
-    // vector path and its scalar twin agreed. The fixtures don't depend on the seed, which picks execution inputs alone.
+    // vector path and its scalar twin agreed, then refrozen when refuse-width's bytes compared into a 64-bit count became
+    // a count (#2808) and the fixture a sum of bytes into a 64-bit total instead, every other fixture's part unchanged. The
+    // fixtures don't depend on the seed, which picks execution inputs alone.
     uint64_t digest;
 };
 
-#define BUSTER_IR_VECTORIZE_TEST_DIGEST UINT64_C(0x06750f862900fb32)
+#define BUSTER_IR_VECTORIZE_TEST_DIGEST UINT64_C(0x3a88bba4da93aa12)
 
 typedef struct IrVectorizeTestFixture IrVectorizeTestFixture;
 struct IrVectorizeTestFixture
 {
     const char* name;
     // A role per parameter: 'p' a pointer into the shared buffer, 'n' the loop's bound, 'm' a signed bound (negative too),
-    // 'r' a count of rows (0 to 4), 's' a start below the bound, 'o' a small offset, 'k' any scalar.
+    // 'r' a count of rows (0 to 4), 's' a start below the bound, 'o' a small offset, 'k' any scalar; and for a 32-bit
+    // index that wraps (#2808), 'w' 0xfffffff8 (a wrap within the first 64-byte vector of 4-byte lanes) and 'q' a pointer that many 4-byte elements before one into the buffer;
+    // and 'z' a pointer to the bound's elements 64 bytes apart whose last 8 bytes end the buffer (#2808: a strided
+    // load's bytes past the last element would be outside it).
     const char* roles;
     // The loops vectorized at 64, 32 and 16 bytes (and at 64 without masked moves).
     uint32_t vectorized[3];
@@ -57,6 +62,13 @@ struct IrVectorizeTestFixture
     bool floating;
     // Its integer loops of 8 lanes or fewer at 64 bytes (a lane of 8 bytes), whose mask is a byte's (#2807).
     uint32_t byte_masks;
+    // Its counts (#2808), reductions whose masked tail needs no select.
+    uint32_t counts;
+    // Whether a load is strided (#2808): its tail is the scalar loop's.
+    bool strided;
+    // Whether some trials fault (#2808: a 32-bit index's wrap): the input and the result must fault alike, leaving the
+    // same bytes.
+    bool faults;
 };
 
 static const IrVectorizeTestFixture ir_vectorize_test_fixtures[] = {
@@ -181,11 +193,20 @@ static uint32_t ir_vectorize_test_arguments(IrVectorizeTest* test, const IrFunct
     {
         const uint32_t type = function->parameter_types[k];
         uint64_t value = 0;
-        if (roles[k] == 'p')
+        if (roles[k] == 'p' || roles[k] == 'q')
         {
             const uint64_t place = first == 0 ? 3072 + ir_vectorize_test_next(test) % 4096 : first + (uint64_t)deltas[ir_vectorize_test_next(test) % BUSTER_ARRAY_LENGTH(deltas)];
             first = first == 0 ? place : first;
-            value = (uint64_t)(uintptr_t)(buffer + place);
+            value = (uint64_t)(uintptr_t)(buffer + place) - (roles[k] == 'q' ? UINT64_C(0xfffffff8) * 4 : 0);
+        }
+        else if (roles[k] == 'w')
+        {
+            value = UINT64_C(0xfffffff8);
+        }
+        else if (roles[k] == 'z')
+        {
+            const uint64_t span = length > 0 ? (uint64_t)(length - 1) * 64 + 8 : 64;
+            value = (uint64_t)(uintptr_t)(buffer + BUSTER_IR_VECTORIZE_TEST_BUFFER - span);
         }
         else if (roles[k] == 'n')
         {
@@ -233,7 +254,7 @@ static bool ir_vectorize_test_agree(IrVectorizeTest* test, const IrVectorizeTest
         // The same places in the other buffer.
         for (uint32_t k = 0; k < count; k += 1)
         {
-            const bool pointer = fixture->roles[k] == 'p';
+            const bool pointer = fixture->roles[k] == 'p' || fixture->roles[k] == 'q' || fixture->roles[k] == 'z';
             moved[k] = arguments[k];
             moved[k].low = pointer ? arguments[k].low - (uint64_t)(uintptr_t)left + (uint64_t)(uintptr_t)right : arguments[k].low;
         }
@@ -241,8 +262,10 @@ static bool ir_vectorize_test_agree(IrVectorizeTest* test, const IrVectorizeTest
         memcpy(right, initial, BUSTER_IR_VECTORIZE_TEST_BUFFER);
         const InterpreterResult a = ir_vectorize_test_run(before, left, arguments, count, execution);
         const InterpreterResult b = ir_vectorize_test_run(after, right, moved, count, execution);
-        // A returned pointer would differ by the buffers' distance: no fixture returns one.
-        agree = a.status == INTERPRETER_OK && a.status == b.status && a.value.low == b.value.low && a.value.high == b.value.high && memcmp(left, right, BUSTER_IR_VECTORIZE_TEST_BUFFER) == 0;
+        // A returned pointer would differ by the buffers' distance: no fixture returns one. A fault's value is none.
+        const bool ok = a.status == INTERPRETER_OK;
+        const bool value = !ok || (a.value.low == b.value.low && a.value.high == b.value.high);
+        agree = (ok || fixture->faults) && a.status == b.status && value && memcmp(left, right, BUSTER_IR_VECTORIZE_TEST_BUFFER) == 0;
     }
     return agree;
 }
@@ -306,8 +329,10 @@ static void ir_vectorize_test_fixture(IrVectorizeTest* test, const IrVectorizeTe
         // selects of 32- and 64-bit lanes, a loop's with no reduction alone, whose accumulators need one (no fixture
         // has two loops with reductions: each reduction is then one loop's); without masks of 8 lanes or fewer from a
         // general register, a loop's of more lanes alone.
-        const uint32_t reducing = a.reductions < a.vectorized ? a.reductions : a.vectorized;
-        const uint32_t masked = t == 3 || fixture->floating ? 0 : t == 4 ? a.vectorized - reducing : t == 5 ? expected - fixture->byte_masks : expected;
+        // A count (#2808) needs no select; a strided load keeps the scalar tail.
+        const uint32_t selecting = a.reductions - (fixture->counts < a.reductions ? fixture->counts : a.reductions);
+        const uint32_t reducing = selecting < a.vectorized ? selecting : a.vectorized;
+        const uint32_t masked = t == 3 || fixture->floating || fixture->strided ? 0 : t == 4 ? a.vectorized - reducing : t == 5 ? expected - fixture->byte_masks : expected;
         snprintf(what, sizeof(what), "%u masked tails at %u bytes, %u expected", a.masked, bytes, masked);
         ir_vectorize_test_expect(test, ac.error == IR_OK && a.masked == masked, fixture->name, what);
         if (fixture->refusal != IR_VECTORIZE_REFUSALS && t == 0)
@@ -455,13 +480,28 @@ static __attribute__((unused)) int run_ir_vectorize_tests(int argc, char** argv)
             { .name = "minmax-select", .roles = "pnk", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS },
             { .name = "refuse-minmax-clobber", .roles = "pnk", .refusal = IR_VECTORIZE_REFUSE_SHAPE },
             { .name = "refuse-minmax-partial", .roles = "ppnk", .refusal = IR_VECTORIZE_REFUSE_USE },
+            // #2808: counts of comparisons (bytes compared as bytes, into a 64-bit count; an int's into an int), strided
+            // loads (#2743's array-of-structs sum, RGB to gray through 32-bit indices, pairs, a stride of eight bytes),
+            // and a 32-bit index that wraps.
+            { .name = "count-u8", .roles = "pnk", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .counts = 1 },
+            { .name = "count-i32", .roles = "pnkk", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .counts = 1 },
+            { .name = "aos-sum", .roles = "pn", .vectorized = { 1, 1, 0 }, .refusal = IR_VECTORIZE_REFUSALS, .strided = true },
+            { .name = "rgb-gray", .roles = "ppm", .vectorized = { 1, 0, 0 }, .refusal = IR_VECTORIZE_REFUSALS, .strided = true },
+            { .name = "strided-pairs-i16", .roles = "ppn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .strided = true },
+            { .name = "stride8-u8", .roles = "pn", .vectorized = { 1, 0, 0 }, .refusal = IR_VECTORIZE_REFUSALS, .strided = true },
+            // Elements 64 bytes apart, the last ending the buffer (past 255 of them, its start is before the buffer: both fault):
+            // 2 lanes of 8 bytes at 16 bytes take 5 loads, not 8.
+            { .name = "stride8-i64", .roles = "zn", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .strided = true, .faults = true },
+            { .name = "narrow-wrap", .roles = "qnw", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .faults = true },
         };
         for (uint32_t k = 0; ready && k < BUSTER_ARRAY_LENGTH(minmax); k += 1)
         {
             ir_vectorize_test_fixture(&test, &minmax[k], &source, &input, &vector, &cleanup, &scratch, &execution, buffers);
         }
         ir_vectorize_test_scans(&test);
-        static const char* const mutants[BUSTER_IR_VECTORIZE_MUTATIONS] = { "none", "no overlap test", "an unrounded tail", "a reduction's identity", "the lanes' width", "a masked tail's lane more" };
+        static const char* const mutants[BUSTER_IR_VECTORIZE_MUTATIONS] = {
+            "none", "no overlap test", "an unrounded tail", "a reduction's identity", "the lanes' width", "a masked tail's lane more", "no 32-bit index wrap test", "a strided load's lane",
+        };
         for (uint32_t mutation = 1; ready && mutation < BUSTER_IR_VECTORIZE_MUTATIONS; mutation += 1)
         {
             char what[128];

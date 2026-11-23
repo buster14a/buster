@@ -12,10 +12,10 @@ requirements. [Command index](README.md).
   four at a time in vectors with no memory but the stack (#2957); arguments'
   and results' registers and stack
   slots as clang and LLVM's `CC_X86_64_C` give them, by prefix sums 16
-  arguments at a time, with a per-call fallback (`abi_assign_call`) for the
-  calls the sums can't place; and `va_arg`'s plan. The scalar twins went in
-  #2924, and the scalar classification in #2957; the per-call assignment stays
-  until it is vectorized (#2958).
+  arguments at a time, with a per-call vector kernel (`abi_assign_lanes`,
+  eight calls at a time) for the calls the sums can't place; and `va_arg`'s plan. The scalar twins went in
+  #2924, the scalar classification in #2957 and the per-call assignment in
+  #2958.
   `calling_convention_test.c` holds its tests (`main.c` includes both;
   `./build/compiler test-calling-convention` runs them) and
   `calling_convention_benchmark.c` provides `benchmark-calling-convention`.
@@ -107,8 +107,9 @@ own and never against the other, at 16-, 32- and 64-byte vectors:
   clang lay one out apart, and clang's worlds from the same seeds, which must
   hold some;
 - assignment: random calls over a world's types, named and variadic, by the
-  vector path and by its fallback (`abi_assign` with every scratch arena
-  exhausted, which assigns each call alone), each checked alone: seed 1's
+  vector path and by its per-call kernel over every call
+  (`abi_assign_lanes`, with every scratch arena exhausted), each checked
+  alone: seed 1's
   locations and totals against frozen digests, every call within the
   registers there are with its stack arguments in order, and a call assigned
   again alone as in its batch; the vector path with its columns ending at a
@@ -116,7 +117,7 @@ own and never against the other, at 16-, 32- and 64-byte vectors:
   65,542 `long`s and of 32,767 and 32,768 two-register arguments, around the
   most the vector path's 16-bit register sums count
   (`BUSTER_ABI_COUNTED_ARGUMENTS`), past which it leaves a call to
-  `abi_assign_call`.
+  `abi_assign_lanes`.
 
 With `--cross-check`, two fixtures first check #2113's SSE/SSEUP records of
 sizes no vector register has against clang in both directions, with Tier 0
@@ -248,7 +249,7 @@ gave it:
 - assignment: `--count` calls over those types at 16 bytes, most of 0 to 6
   arguments, some of 4 to 14 and a few of 15 to 22, one in four variadic, by
   `abi_assign` per argument, with the share of arguments the vector path left
-  to `abi_assign_call` and why (from a mirror of its rules,
+  to the per-call kernel (`abi_assign_lanes`) and why (from a mirror of its rules,
   `abi_benchmark_deferred`, to keep in step with `abi_assign`); then the same
   shapes with integers, pointers and doubles alone (`assign-simple`).
 

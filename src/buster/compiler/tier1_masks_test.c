@@ -55,6 +55,8 @@ struct Tier1MasksTest
 {
     uint64_t checks;
     uint64_t failures;
+    // #2830: the functions whose code named ymm0 to zmm15, so a vzeroupper before their calls and rets.
+    uint64_t upper_dirty;
     uint64_t random;
     uint8_t* v4;
     // x86-64-v3's forms (#1281): AVX2's and F16C's, no AVX-512, which the fixtures marked `v3` are emitted for.
@@ -3270,6 +3272,51 @@ static __attribute__((no_sanitize("function"))) bool tier1_masks_test_call_seede
     return (state[2] & 0x3fu) == 0;
 }
 
+// #2830: the upper state at the function's exits. Code that names ymm0 to ymm15 or zmm0 to zmm15 (x86_upper_dirty)
+// has a vzeroupper right before each call, where no call passes a ymm or zmm argument (tier1_select_call_wide), and
+// before each ret's epilogue (its pops, rsp's add and the frame pointer's reset), where the result isn't a ymm or zmm
+// register's (tier1_select_result_wide); code that doesn't has none, but a machine row's own. No legacy SSE record is
+// left at a target with AVX (tier1_emit_vex).
+static void tier1_masks_test_upper(Tier1MasksTest* test, const Tier1SelectPlan* plan, const Tier1EmitResult* emitted, const uint8_t* forms)
+{
+    const IrFunction* function = plan->function;
+    const Tier1SelectCode* code = &emitted->code;
+    const bool dirty = x86_upper_dirty(code->records, code->count);
+    bool wide_calls = false;
+    bool rows = false;
+    bool body = false;
+    for (uint32_t node = 0; node < function->instruction_count; node += 1)
+    {
+        wide_calls = wide_calls || (tier1_select_function_call(function, node) && tier1_select_call_wide(function, &function->calls[function->b[node]]));
+        rows = rows || (function->op[node] == IR_CALL && function->calls[function->b[node]].row != 0);
+        body = body || tier1_select_body_call(function, node);
+    }
+    const bool result_wide = tier1_select_result_wide(function);
+    const bool avx = x86_target_form_allowed(forms, X86_FORM_VADDSS_X_X_XM32);
+    bool cleared = emitted->zero_upper == (dirty && x86_target_form_allowed(forms, X86_FORM_VZEROUPPER));
+    uint32_t zeroes = 0;
+    uint32_t legacy = 0;
+    for (uint32_t r = 0; r < code->count; r += 1)
+    {
+        const uint32_t form = code->records[r].form & BUSTER_X86_FORM_NUMBER;
+        zeroes += form == X86_FORM_VZEROUPPER;
+        legacy += avx && !body && x86_vex_forms[form % X86_FORM_COUNT] != 0;
+        const bool call = form == X86_FORM_CALL_REL32 || form == X86_FORM_CALL_RM64;
+        cleared = cleared && (!call || !emitted->zero_upper || wide_calls || (r != 0 && code->records[r - 1].form == X86_FORM_VZEROUPPER));
+        uint32_t before = r;
+        while (form == X86_FORM_RET && before != 0 &&
+               (code->records[before - 1].form == X86_FORM_POP_R64 || code->records[before - 1].form == X86_FORM_ADD_RM64_IMM8 || code->records[before - 1].form == X86_FORM_ADD_RM64_IMM32 ||
+                code->records[before - 1].form == X86_FORM_LEA_R64_M || code->records[before - 1].form == X86_FORM_MOV_RM64_R64))
+        {
+            before -= 1;
+        }
+        cleared = cleared && (form != X86_FORM_RET || !emitted->zero_upper || result_wide || (before != 0 && code->records[before - 1].form == X86_FORM_VZEROUPPER));
+    }
+    tier1_masks_test_expect(test, cleared && (emitted->zero_upper || rows || zeroes == 0), "a vzeroupper before each call and ret of a function that names ymm0 to zmm15, and none elsewhere (#2830)");
+    tier1_masks_test_expect(test, legacy == 0, "no legacy SSE record at a target with AVX (#2830)");
+    test->upper_dirty += emitted->zero_upper;
+}
+
 // The emitted function's records, sized, encoded by both encoders (which must agree) with the helper after them, its
 // calls resolved to the helper, in an executable mapping; MAP_FAILED, the failure reported, otherwise.
 static uint8_t* tier1_masks_test_load(Tier1MasksTest* test, Tier1EmitResult* emitted, uint64_t* mapped)
@@ -3417,6 +3464,10 @@ static uint8_t* tier1_masks_test_mxcsr_code(Tier1MasksTest* test, uint32_t op, u
         Tier1EmitResult emitted = { 0 };
         const Tier1EmitError error = ok ? tier1_emit_function(&plan, &options, test->v4, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
         ok = tier1_masks_test_expect(test, error == TIER1_EMIT_OK, "emit MXCSR fixture");
+        if (ok)
+        {
+            tier1_masks_test_upper(test, &plan, &emitted, test->v4);
+        }
         code = ok ? tier1_masks_test_load(test, &emitted, mapped) : MAP_FAILED;
     }
     return code;
@@ -4166,6 +4217,10 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
     if (test->print && ok)
     {
         printf("test-tier1-masks: %s:\n", fixture->name);
+    }
+    if (ok)
+    {
+        tier1_masks_test_upper(test, &plan, &emitted, test->forms);
     }
     uint8_t* machine = ok ? tier1_masks_test_load(test, &emitted, &mapped) : MAP_FAILED;
     test->print = print;
@@ -9462,6 +9517,7 @@ static __attribute__((unused)) int run_tier1_mask_tests(int argc, char** argv)
                                 "the asm bodies' code is certified, and their mutants include masks' reloads left out and records changed (#1839)");
         printf("test-tier1-masks: asm bodies' code certified %u times; mutants refused: masks' reloads after a body left out %u of %u, a body's records changed %u of %u\n", test.asm_certified,
                test.asm_reloads_refused, test.asm_reloads, test.asm_records_refused, test.asm_records);
+        printf("test-tier1-masks: %" PRIu64 " functions' code named ymm0 to zmm15, each with a vzeroupper before its calls and rets (#2830)\n", test.upper_dirty);
         printf("test-tier1-masks: %" PRIu64 " checks, %" PRIu64 " failures; %s: %" PRIu64 " runs against the interpreter; %" PRIu64 " records, %" PRIu64 " mask moves, %" PRIu64 " through k0, %" PRIu64 " mask spills, %" PRIu64 " reloads, %" PRIu64 " masks saved around calls, %" PRIu64 " through frame objects, %" PRIu64 " general values recomputed beside them; %u refusals (seed=%" PRIu64 ")\n",
                test.checks, test.failures, test.native ? "native" : "no AVX-512 here, compiled only", test.native_runs, test.records, test.mask_moves, test.scratch_moves, test.mask_stores, test.mask_loads, test.call_saves, test.frame_accesses,
                test.recomputed, test.refused, seed);

@@ -798,8 +798,13 @@ static void emitted_test_tier0(EmittedTest* test, uint64_t seed, uint32_t rounds
             emitted_test_expect(test, generated, "typed program generation", id);
             for (uint32_t f = 0; generated && f < functions->count; f += 1)
             {
-                // Every other round's programs probe their frames and allocations (#177, -fstack-clash-protection).
+                // Every other round's programs probe their frames and allocations (#177, -fstack-clash-protection). Every
+                // third round's are at a target with AVX, their code a dirty function's (#3335, Tier0Function.zero_upper): a
+                // vzeroupper before each call, and before each musttail call's and the epilogue's teardown, which the
+                // unwind tables' reader and the frame's verifier then take.
                 functions->functions[f].probe_stack = round % 2 == 1;
+                functions->functions[f].avx = round % 3 == 2;
+                functions->functions[f].zero_upper = round % 3 == 2;
                 emitted_test_tier0_function(test, &functions->functions[f], id * 64 + f);
             }
             test->programs += generated;

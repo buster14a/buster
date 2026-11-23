@@ -41,7 +41,7 @@
 // in sizeof's operand, or alignof of an expression; a narrowing conversion that changes a constant, a division by zero, a
 // shift by a constant out of range or of a negative constant, a null pointer dereferenced, a constant subscript outside
 // its array (its end allowed under `&`), a comparison with a constant outside its other operand's range in their common
-// type or at a bound by an ordering, a non-literal null; parentheses (an assignment as a condition, a comparison in a
+// type or at a bound by an ordering, an equality of a floating constant and a floating operand, a non-literal null; parentheses (an assignment as a condition, a comparison in a
 // bitwise operator, a `!` before a comparison, a shift of a sum, a chained comparison, a shift in a truth context); a
 // discarded value without an effect, or a discarded call whose callee asks for its result (warn_unused_result, const,
 // pure, or a const or pure builtin's name); a self-assignment; a return of a local's address or array; a for
@@ -367,6 +367,8 @@ static const uint8_t node_census_warning_classes[CHECK_WARNING_ID_COUNT] = {
     [CHECK_WARNING_ID_TAUTOLOGICAL_NEGATION_COMPARE] = NODE_CENSUS_WARNING_TESTED,
     [CHECK_WARNING_ID_CONSTANT_LOGICAL_OPERAND] = NODE_CENSUS_WARNING_TESTED,
     [CHECK_WARNING_ID_STRING_PLUS_CHAR] = NODE_CENSUS_WARNING_TESTED,
+    // Any floating conversion to a lower rank, constant or not (#1875), off by default: a unit that enables it is refused whole.
+    [CHECK_WARNING_ID_IMPLICIT_FLOAT_CONVERSION] = NODE_CENSUS_WARNING_WHOLE,
 };
 
 // Which of the warnings the silence tests stand for the unit enables anywhere (check_common_enabled): the actions' warning
@@ -397,6 +399,8 @@ struct NodeCensusPolicy
     bool null_dereference;
     bool array_bounds;
     bool tautological;
+    // -Wliteral-range's floating comparison with a literal (#1875), on by default.
+    bool literal_range;
     bool non_literal_null;
     bool parentheses;
     bool logical_not;
@@ -652,6 +656,7 @@ static NodeCensusPolicy node_census_policy(const Preprocessor* pp, const CheckIn
     policy.tautological = check_common_enabled(pp, input, CHECK_WARNING_ID_TAUTOLOGICAL_CONSTANT_COMPARE, false) ||
                           check_common_enabled(pp, input, CHECK_WARNING_ID_TAUTOLOGICAL_OUT_OF_RANGE_COMPARE, false);
     policy.non_literal_null = check_common_enabled(pp, input, CHECK_WARNING_ID_NON_LITERAL_NULL, false);
+    policy.literal_range = check_common_enabled(pp, input, CHECK_WARNING_ID_LITERAL_RANGE, false);
     policy.parentheses = check_common_enabled(pp, input, CHECK_WARNING_ID_PARENTHESES, false);
     policy.logical_not = check_common_enabled(pp, input, CHECK_WARNING_ID_LOGICAL_NOT_PARENTHESES, false);
     policy.shift_parentheses = check_common_enabled(pp, input, CHECK_WARNING_ID_SHIFT_OP_PARENTHESES, false);
@@ -1775,6 +1780,15 @@ static bool node_census_constant_tests(const NodeCensusScratch* s, uint32_t node
         const bool addressed = s->parents[node] != BUSTER_CHECK_NONE && graph->ops[s->parents[node]] == CHECK_OP_ADDRESS;
         result = sized && node_census_integer_constant(s, index, &value) && (value < 0 || value > (__int128)length || (value == (__int128)length && !addressed));
     }
+    // -Wliteral-range's floating comparison (#1875, check_common_float_comparisons): an equality of a floating constant and a
+    // floating operand, whatever its value (the literal's form and its exactness are the warning's own tests).
+    for (uint32_t side = 0; policy->literal_range && (op == CHECK_OP_EQUAL || op == CHECK_OP_NOT_EQUAL) && side < 2 && !result; side += 1)
+    {
+        const uint32_t constant = side == 0 ? a : b;
+        const uint32_t other = side == 0 ? b : a;
+        result = constant < graph->count && other < graph->count && node_view_constant_kind(s, constant) == CHECK_CONSTANT_FLOATING &&
+                 node_census_kind(types, node_view_type(s, other)) == BUSTER_TYPE_KIND_FLOATING;
+    }
     if (policy->tautological && node_census_comparison(op) && !result)
     {
         for (uint32_t side = 0; side < 2 && !result; side += 1)
@@ -2696,6 +2710,10 @@ static inline NodeTestsTrigger node_tests_constants(const NodeCensusScratch* s, 
             const bool none = asked && !known && !wide;
             trigger = asked && !inside && !none ? NODE_TESTS_TRIGGER_COMPARISON : trigger;
         }
+        // An equality with a floating constant, -Wliteral-range's (#1875): the census's code's.
+        const bool equality = op == CHECK_OP_EQUAL || op == CHECK_OP_NOT_EQUAL;
+        trigger = policy->literal_range && equality && (kinds[0] == CHECK_CONSTANT_FLOATING || kinds[1] == CHECK_CONSTANT_FLOATING) ?
+                  NODE_TESTS_TRIGGER_COMPARISON : trigger;
     }
     else if (op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE || op == CHECK_OP_CONVERT)
     {

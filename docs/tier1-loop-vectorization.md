@@ -64,6 +64,8 @@ a min/max reduction diamond. The induction is an `i32` or
 branch sense) against an invariant `n`. Every other header phi must be an
 integer reduction: one wrapping `add`, `mul`, `and`, `or` or `xor` of the phi
 and another value at `i32` or `i64`, or a signed or unsigned `i32` min/max.
+A count, `c += (x < y)` at either width (the comparison's `zext` from `i1`, then any extensions of that 0 or 1), is a
+reduction too (#2808, "Counts, strided loads and 32-bit indices" below).
 The reduction's partial value must be private to its update. For min/max, the
 vectorizer matches the two operands of an ordered comparison to the values
 selected by a scalar `select` or the join of a one- or two-armed conditional.
@@ -77,14 +79,18 @@ Each needed row of the body is then, in order:
   is admitted only in a loop without stores; a uniform floating operation never.
 - **an index:** the induction, `sext`/`zext` of an `i32` induction (no wrap where
   the exit test bounds it), or 64-bit `add`, `sub`, `mul`/`shl` by a constant of
-  an index and a uniform: affine modulo 2^64, as the address is.
+  an index and a uniform: affine modulo 2^64, as the address is; the same 32-bit
+  arithmetic of an `i32` induction, whose `sext`/`zext` to 64 bits G tests for a
+  wrap (#2808).
 - **a pointer:** an `address` of a uniform base and an index, or of a pointer and
   a uniform, and their integer conversions, advancing by a constant number of
   bytes per iteration.
-- **a vector:** a load or store whose pointer advances by its access's bytes;
+- **a vector:** a load or store whose pointer advances by its access's bytes, or
+  a load whose pointer advances by 2 to 8 times them (strided, #2808);
   element-wise integer `add` to `ashr` (not divisions) and floating `fadd` to
   `fdiv` and `fma`, of vectors and uniforms (splatted); `sitofp`, `uitofp`,
-  `fptosi` and `fptoui` between i32 and f32 or i64 and f64; `icmp` into a mask;
+  `fptosi` and `fptoui` between i32 and f32 or i64 and f64; `icmp` into a mask
+  (of two extensions alike from one narrower type, at that type, #2808);
   `select` on one; `zext`/`sext` of a mask (a `vselect` of 1 or -1 and 0);
   `zext`, `sext` and `trunc` between integer lanes (`extend`, `truncate`);
   `popcnt` of each lane (`lane_unary`).
@@ -92,8 +98,8 @@ Each needed row of the body is then, in order:
 Anything else refuses the loop, counted by reason: `shape` (unmatched control
 flow in the body, no dedicated preheader, an outer loop), `induction`, `phi` (a recurrence
 that isn't a reduction, a float sum), `operation` (a call, a division, a fence,
-a volatile or atomic access), `address` (a strided or gathered
-access), `use` (the induction as data, a reduction's partial value),
+a volatile or atomic access), `address` (a strided store, a load of a larger or
+negative stride, a gathered access), `use` (the induction as data, a reduction's partial value),
 `dependence` and `width`.
 
 **Dependences.** A load of the store's own address is in place, element by
@@ -144,6 +150,58 @@ appends G, P, VB, T, TM and TX:
   at the trip's end, whose exit test fails at once.
 
 `IrVectorizeResult.masked` counts these loops (`test-ir-vectorize` checks it).
+
+**Counts, strided loads and 32-bit indices (#2808).** Three rules take the rest of
+#2743's kernels:
+
+- **A count** (`count_eq_u8`'s `c += a[i] == v`, a `size_t` total of bytes'
+  comparisons) keeps a scalar accumulator, starting at the incoming value: each
+  iteration adds the population count of the comparison's mask's bits (`kmov`
+  to a general register, `popcnt`), so the lanes are the comparison's, not the
+  total's 8 bytes, and VX reduces nothing. The masked tail ANDs the bits with
+  its mask's (`IrVectorizeTarget.count`: the mask's move to a general register
+  and `popcnt`). A comparison of two extensions alike from one narrower type
+  compares the sources at that type (a zero extension's signed predicate
+  becomes the sources' unsigned one), so the bytes promoted to `int` compare as
+  64 lanes of bytes, not 16 of doublewords.
+- **A strided load** (`aos_sum`'s `p[i].x`, 16 bytes apart; `rgb_to_gray`'s
+  `rgb[3 * i + k]`) of k = 2 to 8 elements per iteration covers the bytes from
+  lane 0's element to the last lane's, never past them: with 64-byte loads where
+  the target permutes and moves them and the lanes are narrower, else loads of
+  the lanes' width, as many as those bytes take, the last ending at their end
+  (one 64-byte load of fewer bytes is masked to them). Permutes of two tables
+  (`vpermt2b` to `vpermt2q`, `IrVectorizeTarget.permute2`), whose index vectors
+  G holds (`IR_VCONST`), fold the loads into the lanes, one fewer than the
+  loads (a single load is permuted with itself), and the lanes' part of a
+  64-byte result is extracted. At znver5 `aos_sum`'s two fields are two 64-byte
+  loads and one `vpermt2d` each, `rgb_to_gray`'s three channels one masked
+  64-byte load and one `vpermt2b` each. Each access loads its own vectors: the
+  members of one structure aren't grouped. Its overlap test's range is its
+  stride's bytes per iteration, and its tail is the scalar loop's.
+- **A 32-bit index** (`3 * i + 1` of an `int` i, then `sext`): its 64-bit
+  extension is affine where the 32-bit value doesn't wrap over the vector
+  iterations. G clones the index's chain at the first and the last vector
+  iteration's induction and requires their extensions' difference to be the
+  coefficient times their distance: the 32-bit value is the exact affine one
+  modulo 2^32, so the extension is that less a multiple of 2^32 that can only
+  move one way with the induction, and equal at both ends it is the same
+  between them.
+
+Below AVX-512 the counts and permutes are EVEX's alone, so x86-64 to x86-64-v3
+keep these loops scalar; x86-64-v4 takes all but `rgb_to_gray`, whose byte
+permute is VBMI's.
+
+On the 9700X at znver5
+([the record](https://github.com/buster14a/buster-performance/tree/49570f32f/docs/measurements/tier1-vectorizer-strided-2808-2026-11-23),
+main `1b9821af` against #3321's merged head), the three rules take the
+vectorized kernels from 16 to 19 and the 19 loops' geometric mean from 2.05 to
+1.30 times clang -O2's time as linked (1.96 to 1.28 at the best placement);
+the controls stay at 1.09. `count_eq_u8` runs at 0.19 times clang's time
+(clang widens the bytes into vector accumulators), `aos_sum` at 1.57 and
+`rgb_to_gray` at 1.41, from 12.9, 6.5 and 16.2 without the rules; most of the
+last two's remainder is that each member loads its own vectors. Compiling sqlite3.c
+with the option costs 0.06% more user cycles and 0.11% more instructions than
+main's pass.
 
 **Widths.** The lanes per iteration are the widest whose vectors are all 16 to
 64 bytes and at which every row's operation is the target's.

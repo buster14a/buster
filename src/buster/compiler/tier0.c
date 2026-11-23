@@ -78,6 +78,8 @@
 #include "host_isa.h"
 #include "baked.h"
 #include "x87_transfer.c"
+// The dirty-state scan and the VEX twins (#3335), which Tier 1 shares.
+#include "x86_upper_state.c"
 
 // OS-dependent includes
 #include <sys/mman.h>
@@ -775,6 +777,15 @@ struct Tier0Function
     // code of another ABI, may leave rsp misaligned. Its objects are then aligned whatever rsp was; its incoming stack
     // arguments stay where the caller put them, read through rbp.
     bool realign_stack;
+    // Whether the function's target has AVX (#3335), which a front end gives from its target's features: its code then
+    // has the VEX forms of Tier 0's legacy SSE records (tier0_vex, x86_vex_forms_tier0), and a vzeroupper before each
+    // call, each tail call's teardown and the epilogue's where it names ymm0 to ymm15 or zmm0 to zmm15 (`zero_upper`).
+    bool avx;
+    // Tier 0's own (#3335): set by tier0_compile on its copy of the function, never by a front end. Whether the code
+    // names a ymm or zmm register below 16, which leaves the upper state dirty, so that a vzeroupper precedes each call but
+    // an asm body's, each musttail call's teardown and the epilogue's, but where a ymm or zmm argument or result is live
+    // there (tier0_call_wide, tier0_parameters_wide, tier0_result_wide), as clang's VZeroUpperInsertion places them.
+    bool zero_upper;
 };
 
 #define BUSTER_TIER0_INTERRUPT_HANDLER 1
@@ -1562,6 +1573,57 @@ static uint32_t tier0_result_parts(AbiReturn result, uint32_t size, Tier0Part* p
     }
     const bool eightbytes = elements == 0 && split == 0 && result.kind == BUSTER_ABI_RESULT_REGISTERS;
     return eightbytes ? tier0_parts_of(result.registers, (result.flags & BUSTER_ABI_FLAG_HIGH) != 0, false, false, size, parts) : elements != 0 ? elements : split;
+}
+
+// Whether one of `parts` is a vector register's part wider than its xmm register (#3335): a whole ymm's or zmm's, whose
+// bits above 127 a vzeroupper would zero.
+static bool tier0_parts_wide(const Tier0Part* parts, uint32_t count)
+{
+    bool wide = false;
+    for (uint32_t k = 0; k < count; k += 1)
+    {
+        wide = wide || (parts[k].reg >= BUSTER_TIER0_XMM(0) && parts[k].reg < BUSTER_TIER0_XMM(32) && parts[k].bytes > 16);
+    }
+    return wide;
+}
+
+// Whether call `call` passes an argument wider than 16 bytes in a vector register (#3335): an aggregate's (a vector's)
+// whole ymm or zmm part, live in its register at the call, which no vzeroupper may then precede.
+static bool tier0_call_wide(const Tier0Function* function, uint32_t call)
+{
+    const uint32_t first = function->call_first[call];
+    bool wide = false;
+    for (uint32_t a = 0; function->argument_sizes != 0 && a < function->call_argument_counts[call]; a += 1)
+    {
+        const uint32_t size = function->argument_sizes[first + a];
+        Tier0Part parts[2];
+        const uint32_t count = size != 0 ? tier0_location_parts(function->argument_locations[first + a], size, parts) : 0;
+        wide = wide || tier0_parts_wide(parts, count);
+    }
+    return wide;
+}
+
+// Whether a parameter arrives wider than 16 bytes in a vector register (#3335): its musttail calls, whose arguments are its
+// own parameters' (tier0_tail_call_valid), pass it so, and no vzeroupper may precede their jumps.
+static bool tier0_parameters_wide(const Tier0Function* function)
+{
+    bool wide = false;
+    for (uint32_t p = 0; function->local_sizes != 0 && p < function->parameter_count; p += 1)
+    {
+        Tier0Part parts[2];
+        const uint32_t count = function->local_sizes[p] != 0 ? tier0_location_parts(function->parameters[p], function->local_sizes[p], parts) : 0;
+        wide = wide || tier0_parts_wide(parts, count);
+    }
+    return wide;
+}
+
+// Whether the function returns a part wider than 16 bytes in a vector register (#3335): a vector's whole ymm or zmm
+// register, live at its ret, which no vzeroupper may then precede.
+static bool tier0_result_wide(const Tier0Function* function)
+{
+    Tier0Part parts[BUSTER_ABI_RESULT_PARTS];
+    const uint32_t count = function->result_size != 0 ? tier0_result_parts(function->result, function->result_size, parts) : 0;
+    return tier0_parts_wide(parts, count);
 }
 
 // ABI register `reg`'s bit in a register set when it is one of `allowed` (BUSTER_TIER0_ARGUMENT_REGISTERS or
@@ -6701,6 +6763,14 @@ static uint32_t tier0_count_teardown(const Tier0Frame* frame)
     return (frame->size != 0 || frame->pointer ? 1 : 0) + frame->pushes - (frame->eh_return ? BUSTER_TIER0_EH_PUSHES : 0);
 }
 
+// Whether a dirty function's musttail calls (Tier0Function.zero_upper) clear the upper state before their teardowns
+// (#3335): all of them or none, as their arguments are the function's own parameters (tier0_parameters_wide).
+// __builtin_eh_return's jump to its handler clears nothing.
+static bool tier0_tail_zeroes_upper(const Tier0Function* function)
+{
+    return __builtin_expect(function->zero_upper, 0) && !tier0_parameters_wide(function);
+}
+
 // The records a function's tail calls end with besides their stack arguments' copy (tier0_emit_tail's): the hidden
 // pointer's move or load into rdi where the function's result goes through one (none where parameter 0 stays in rdi),
 // the teardown and the jump. The same for every musttail call of a function, whose results are all its own, and for
@@ -6712,7 +6782,8 @@ static uint32_t tier0_count_tail_finish(const Tier0Function* function, const Tie
                         !(homes[0].is_register && homes[0].reg == X86_REGISTER_RDI);
     // __builtin_eh_return's (Tier0Frame.eh_return): the CFA's lea, the teardown with rax's and rdx's pops, rsp's mov and
     // the jump (tier0_emit_tail).
-    return eh ? 1 + tier0_count_teardown(frame) + BUSTER_TIER0_EH_PUSHES + 2 : (hidden ? 1 : 0) + tier0_count_teardown(frame) + 1;
+    return eh ? 1 + tier0_count_teardown(frame) + BUSTER_TIER0_EH_PUSHES + 2 :
+                (hidden ? 1 : 0) + (tier0_tail_zeroes_upper(function) ? 1 : 0) + tier0_count_teardown(frame) + 1;
 }
 
 // The records call `call`'s tail ends with besides its stack arguments' copy (Tier0Entries.tail_finish or eh_finish).
@@ -6764,6 +6835,12 @@ static void tier0_emit_tail_jump(const Tier0Function* function, const Tier0Frame
         const uint8_t base = frame->pointer ? X86_REGISTER_RBP : X86_REGISTER_RSP;
         const int32_t incoming = frame->pointer ? 16 : frame->incoming;
         tier0_copy(writer, base, incoming, X86_REGISTER_RSP, 0, bytes, X86_REGISTER_RAX, 15, false);
+    }
+    // A dirty upper state cleared before the teardown (#3335), so that the unwind tables still find it right before the
+    // jump, but where an argument is live in a ymm or zmm register.
+    if (tier0_tail_zeroes_upper(function))
+    {
+        tier0_put(writer, tier0_instruction(X86_FORM_VZEROUPPER, 0, 0, 0, 0, 0));
     }
     tier0_emit_teardown(frame, false, writer);
     if (function->call_targets[call] == 0)
@@ -7110,6 +7187,15 @@ static X86Instruction tier0_body_record(const Tier0AsmBody* body, const Tier0Hom
     return record;
 }
 
+// Whether call `call`'s record follows a vzeroupper (#3335): a dirty function's (Tier0Function.zero_upper) call of a
+// function, but where an argument is live in a ymm or zmm register (tier0_call_wide); none before an asm body's records.
+static bool tier0_call_zeroes_upper(const Tier0Function* function, uint32_t call)
+{
+    return __builtin_expect(function->zero_upper, 0) && tier0_call_body(function, call) == 0 && !tier0_call_wide(function, call);
+}
+
+static void tier0_emit_callee(const Tier0Function* function, uint32_t call, Tier0Writer* writer);
+
 // The call itself: the callee's `call` (a direct one's reference, or through r11), or an asm body's records in its place,
 // each that addresses the operand block (BUSTER_TIER0_ASM_BLOCK) addressing the block's home. A direct asm goto's body
 // (#2351) stops at its exits, and its jumps to its labels go to the labels' entries, the dispatch's BRANCH_TRUEs' targets.
@@ -7176,7 +7262,22 @@ static void tier0_emit_call_record(const Tier0Function* function, const Tier0Ent
             tier0_put(writer, tier0_instruction(X86_FORM_JMP_REL8, 0, 0, 0, 0, 0));
         }
     }
-    else if (function->call_targets[call] == 0)
+    else
+    {
+        // A dirty upper state cleared before the callee, which may run legacy SSE code (#3335), after al, but where an
+        // argument is live in a ymm or zmm register.
+        if (tier0_call_zeroes_upper(function, call))
+        {
+            tier0_put(writer, tier0_instruction(X86_FORM_VZEROUPPER, 0, 0, 0, 0, 0));
+        }
+        tier0_emit_callee(function, call, writer);
+    }
+}
+
+// A call's own record (tier0_emit_call_record's): through r11 for an indirect one, else a call of its symbol.
+static void tier0_emit_callee(const Tier0Function* function, uint32_t call, Tier0Writer* writer)
+{
+    if (function->call_targets[call] == 0)
     {
         tier0_put(writer, tier0_instruction(X86_FORM_CALL_RM64, 0, X86_REGISTER_R11, BUSTER_X86_REGISTER_DIRECT, 0, 0));
     }
@@ -7218,7 +7319,7 @@ static uint32_t tier0_count_call_record(const Tier0Function* function, const Tie
     const uint32_t call = (uint32_t)function->values[i];
     const Tier0AsmBody* body = tier0_call_body(function, call);
     *references += body == 0 && function->call_targets[call] != 0 ? 1 : 0;
-    return body != 0 ? tier0_body_records(entries, body, i) : 1;
+    return body != 0 ? tier0_body_records(entries, body, i) : tier0_call_zeroes_upper(function, call) ? 2 : 1;
 }
 
 // A call: the depths below its arguments (and an indirect call's callee) saved, the stack arguments stored, the register
@@ -10495,6 +10596,13 @@ static bool tier0_x87_returns(const Tier0Function* function)
     return function->result_size == 0 && tier0_x87_parts(function->result) != 0;
 }
 
+// Whether a dirty function's epilogue (Tier0Function.zero_upper) clears the upper state (#3335): but where its result is
+// live in a ymm or zmm register (tier0_result_wide).
+static bool tier0_epilogue_zeroes_upper(const Tier0Function* function)
+{
+    return __builtin_expect(function->zero_upper, 0) && !tier0_result_wide(function);
+}
+
 // The epilogue: an aggregate result's registers loaded (tier0_load_result), or a long double's st0 from slot 0, while the
 // frame they may be in (and what the body allocated) is still there; a preserving function's vector and mask registers
 // loaded back (tier0_emit_preserve); then the frame released (with a frame pointer, rsp
@@ -10514,6 +10622,12 @@ static void tier0_emit_epilogue(const Tier0Function* function, const Tier0Frame*
     {
         tier0_emit_preserve(function, frame, false, writer);
     }
+    // A dirty upper state cleared before the teardown (#3335), so that the unwind tables still find it right before the
+    // ret, but where the result is live in a ymm or zmm register.
+    if (tier0_epilogue_zeroes_upper(function))
+    {
+        tier0_put(writer, tier0_instruction(X86_FORM_VZEROUPPER, 0, 0, 0, 0, 0));
+    }
     tier0_emit_teardown(frame, false, writer);
     // An interrupt service routine's (#147): the error code stepped over, then iretq.
     if (frame->interrupt == BUSTER_TIER0_INTERRUPT_ERROR_CODE)
@@ -10530,7 +10644,7 @@ static void tier0_emit_epilogue(const Tier0Function* function, const Tier0Frame*
 static uint32_t tier0_count_epilogue(const Tier0Function* function, const Tier0Frame* frame)
 {
     const uint32_t records = tier0_count_teardown(frame) + 1 + tier0_preserve_records(function, false) +
-                             (frame->interrupt == BUSTER_TIER0_INTERRUPT_ERROR_CODE ? 1 : 0);
+                             (frame->interrupt == BUSTER_TIER0_INTERRUPT_ERROR_CODE ? 1 : 0) + (tier0_epilogue_zeroes_upper(function) ? 1 : 0);
     return records + (function->result_size != 0 ? tier0_result_records(function) : frame->x87_result ? 1 : 0);
 }
 
@@ -14922,14 +15036,107 @@ static __attribute__((noinline)) Tier0Code tier0_compile_segments(const Tier0Fun
     return code;
 }
 
+// One compilation of a function on the scalar path or the vector one, as Tier0Function.zero_upper has it.
+static Tier0Code tier0_compile_once(const Tier0Function* function, Arena* output, bool vector)
+{
+    const bool stripped = __builtin_expect(function->segments || function->volatiles, 0);
+    return stripped ? tier0_compile_segments(function, output, vector) :
+           vector   ? tier0_compile_entries(function, 0, output) :
+                      tier0_compile_scalar_entries(function, 0, output);
+}
+
+// Rewrites a function's legacy SSE records as their VEX twins (x86_vex_forms_tier0, #3335), for a target with AVX
+// (Tier0Function.avx), but in a function with an asm body, whose records are the program's own. One record for one, so
+// that every index into the records (branches, references, entries, labels, tail calls, the frame's) stays. Sixteen
+// records a step: their forms gathered, each one's entry gathered from the table by its row (x86_vex_lookup), the records
+// with an entry rewritten one by one. Each twin computes its legacy form's low 128 bits and zeroes the rest, which no
+// later record of Tier 0's reads (test-tier1-emit runs each pair natively, and test-tier0 Tier 0's programs).
+static void tier0_vex(const Tier0Function* function, Tier0Code* code)
+{
+    for (uint32_t first = 0; function->asm_body_count == 0 && first < code->count; first += 16)
+    {
+        uint32_t found = x86_vex_lookup(code->records + first, code->count - first, x86_vex_forms_tier0);
+        while (found != 0)
+        {
+            const uint32_t r = first + (uint32_t)__builtin_ctz(found);
+            found &= found - 1;
+            const X86Instruction record = code->records[r];
+            const uint32_t legacy = record.form & BUSTER_X86_FORM_NUMBER;
+            const uint32_t segment = legacy - (legacy % X86_FORM_COUNT);
+            code->records[r] = x86_vex_record(record, x86_vex_forms_tier0[legacy - segment], segment);
+        }
+    }
+}
+
+// Whether a function's code may name a ymm or zmm register below 16 (#3335), which only its vector values' records (a
+// function with `vectors`) and its asm bodies' do; at a target with AVX, and but in a preserving function's (#147), whose
+// frame keeps the upper halves for its caller, as clang's VZeroUpperInsertion leaves a function that preserves them.
+static bool tier0_upper_possible(const Tier0Function* function)
+{
+    return function->avx && (function->vectors || function->asm_body_count != 0) && !tier0_preserving(function);
+}
+
+// Whether a function's code likely names a ymm or zmm register below 16 (#3335): one of its machine operations (an X86
+// entry's row, Tier0Operation) takes or gives a vector of 32 or 64 bytes, which its row's records keep in such a register.
+// Tier 0's own moves of its vectors' slots go through zmm16 and past on the EVEX path, which leave the state clean, and an
+// asm body may name one without such a row, which tier0_compile_upper finds in its code and compiles it again for.
+static bool tier0_upper_likely(const Tier0Function* function)
+{
+    bool wide = false;
+    for (uint32_t k = 0; function->vectors && k < function->operation_count; k += 1)
+    {
+        const Tier0Operation* operation = &function->operations[k];
+        wide = wide || operation->result_bytes > 16;
+        for (uint32_t o = 0; o < operation->operand_count; o += 1)
+        {
+            wide = wide || operation->operand_bytes[o] > 16;
+        }
+    }
+    return wide;
+}
+
+// A function compiled (#140) with a vzeroupper before each call, tail call and ret where its code names ymm0 to ymm15 or
+// zmm0 to zmm15 (Tier0Function.zero_upper, #3335), as clang's code has, then at a target with AVX with the VEX forms of
+// its legacy SSE records (tier0_vex). Whether its code will is predicted (tier0_upper_likely, at a target with AVX) and
+// checked on its records (x86_upper_dirty): a wrong prediction compiles it again, as the code says, so that only a
+// mispredicted function, which has vector values or an asm body, pays a second compilation; any other function compiles
+// once, as the front end gave it.
+static Tier0Code tier0_compile_upper(const Tier0Function* function, Arena* output, bool vector)
+{
+    Tier0Code code;
+    if (__builtin_expect(tier0_upper_possible(function), 0))
+    {
+        Tier0Function predicted = *function;
+        predicted.zero_upper = tier0_upper_likely(function);
+        const uint64_t mark = output->length;
+        code = tier0_compile_once(&predicted, output, vector);
+        const bool dirty = code.error == TIER0_OK && x86_upper_dirty(code.records, code.count);
+        if (code.error == TIER0_OK && dirty != predicted.zero_upper)
+        {
+            arena_pop_to(output, mark);
+            predicted.zero_upper = dirty;
+            code = tier0_compile_once(&predicted, output, vector);
+        }
+    }
+    else
+    {
+        code = tier0_compile_once(function, output, vector);
+    }
+    if (code.error == TIER0_OK && function->avx)
+    {
+        tier0_vex(function, &code);
+    }
+    return code;
+}
+
 static Tier0Code tier0_compile_scalar(const Tier0Function* function, Arena* output)
 {
-    return __builtin_expect(function->segments || function->volatiles, 0) ? tier0_compile_segments(function, output, false) : tier0_compile_scalar_entries(function, 0, output);
+    return tier0_compile_upper(function, output, false);
 }
 
 static Tier0Code tier0_compile(const Tier0Function* function, Arena* output)
 {
-    return __builtin_expect(function->segments || function->volatiles, 0) ? tier0_compile_segments(function, output, true) : tier0_compile_entries(function, 0, output);
+    return tier0_compile_upper(function, output, true);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

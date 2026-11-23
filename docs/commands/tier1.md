@@ -87,6 +87,11 @@ requirements. [Command index](README.md).
   guide](../../docs/tier1-selection.md)). `measure-mask-spills` times a mask's spill and
   reload, to memory against to a general register (`mask_spill_measure.c`, #179's
   measured choice; the 9700X job runs it, `test-mask-spills` checks its programs).
+  A function whose code names ymm0 to zmm15 gets a `vzeroupper` before its
+  calls and its returns' epilogues, and at an AVX target the legacy SSE records
+  become their VEX twins (#2830, [the Tier 1 guide](../tier1.md)'s "The upper
+  vector state"). `test-tier1-emit` runs each twin against its legacy record
+  natively, and `test-tier1-masks` checks the placement.
   `test-tier1-model` checks the emitted-case measurement reader;
   `measure-tier1-model --manifest PATH --verify` constructs its eligible
   experiments without reporting timings. See [the Tier 1 guide](../../docs/tier1.md)
@@ -322,29 +327,40 @@ each removed where it is made:
   reach one block). The truth rewrite then runs again, so a copied
   `icmp ne (zext c), 0` is `c`, the branch's own comparison. The block's values
   must be read only by itself and by its successors' phis on its edges, but for
-  one case (#2608): a phi read past the block, where one successor other than
-  the entry has the block as its only predecessor and dominates every reader (an
-  instruction's block, or a phi entry's predecessor). Lua's `tonumberns` is a
-  `?:` whose join's phis are the truth value and the number it set, which the
-  arithmetic reads after the test. That successor then starts with a phi that
-  merges the number again from each predecessor that now reaches it (and from
-  the block, where the block stays), and the readers read it: SSA repair over
-  the successor's dominance subtree. The repair is a truth value's: the block's
-  test reads none of the phis read past it, and is a constant on the edge of the
-  first constant input of the first phi it reads. A data select's join is left
-  to if-conversion: in `long y = x < lo ? lo : x; return y > hi ? hi : y;` no
-  edge decides the test, and a clamp to a constant (`y > 255`) tests the value
-  it clamps. Threading either made the driver's if-conversion test's `if_clamp`
-  three conditional branches where main has two cmovs. A value of the chain
-  still may not be read past the block, and a block that looks like a loop's
-  header in block order (a predecessor past it, or a phi input at or past its
-  start) isn't repaired, since threading it would rotate the loop; a header laid
-  out after its body with no such input is threaded, which rotates the loop
-  exactly. Whether a successor dominates a reader is a walk back over
-  predecessors from the reader's block that stops at the successors the block
-  alone enters: the reader is dominated by the one it meets where it neither
-  meets both nor reaches the block itself (through its other successor), and a
-  walk past 64 blocks refuses the repair. These tests are cheap and come first,
+  one case (#2608): a phi read past the block, where each reader (an
+  instruction's block, or a phi entry's predecessor) is dominated by a successor
+  other than the entry that has the block as its only predecessor. Lua's
+  `tonumberns` is a `?:` whose join's phis are the truth value and the number it
+  set, which the arithmetic reads after the test. That successor then starts
+  with a phi that merges the number again from each predecessor that now reaches
+  it (and from the block, where the block stays), and the readers read it: SSA
+  repair over the successor's dominance subtree. Both successors may merge one
+  phi, each for the readers it dominates: `lua_geti` and `lua_seti` test
+  `luaV_fastgeti`'s `?:`, whose slot the true successor copies and the false one
+  passes to `luaV_finishget` or `luaV_finishset`. The repair is a truth value's:
+  the block's test reads none of the phis read past it, and the first phi it
+  reads is a constant on an edge that decides the test, or an extended
+  comparison on one. `op_orderI`'s `docondjump` compares `cond`, a setcc on its
+  integer and float paths, with the instruction's k bit, which no edge decides;
+  each path's copy then branches on its own comparison, and the `pc++` successor
+  merges `trap` again for the fetch. Shifts by a constant below the width are
+  chain operations (`GETARG_k(i)`), and a copy's limit of four operations leaves
+  out its constants. A data select's join is left to if-conversion: in
+  `long y = x < lo ? lo : x; return y > hi ? hi : y;` no edge decides the test
+  and no input is a comparison, and a clamp to a constant (`y > 255`) tests the
+  value it clamps. Threading either made the driver's if-conversion test's
+  `if_clamp` three conditional branches where main has two cmovs. A value of the
+  chain still may not be read past the block, and a block that looks like a
+  loop's header in block order (a predecessor past it) isn't repaired, since
+  threading it would rotate the loop; a header laid out after its body is
+  threaded, which rotates the loop exactly. A phi input from a block laid out
+  past the join doesn't refuse the repair: each of `luaV_execute`'s handlers
+  takes `trap` from its dispatch, laid out last. Whether a successor dominates a
+  reader is a walk back over predecessors from the reader's block that stops at
+  the successors the block alone enters: the reader is dominated by the one it
+  meets where it neither meets both nor reaches the block itself (through its
+  other successor), and a walk past 64 blocks refuses the repair. The rewrite
+  walks again for a reader of a phi that both successors merge. These tests are cheap and come first,
   and no dominator tree is built: #2608's first form built one in each round
   with a block to repair, 1,153 of them on sqlite3.c (160,053 blocks in all),
   where the walks now visit 1,294 blocks (320 on Lua's 33 sources). A successor
@@ -363,12 +379,15 @@ each removed where it is made:
   in #2608's first form such rounds were 82 of the 92 it added on sqlite3.c,
   each a CFG and an escape scan of the whole function, and Lua's 33 repairs are
   the same without them. A block no reachable predecessor reaches any more is
-  left an `unreachable` alone. `test-ir-optimize` runs fifty-five IR text
+  left an `unreachable` alone. `test-ir-optimize` runs fifty-eight IR text
   fixtures (`ir_thread_test.c`): `&&`, `||` with `!`, a loop's found flag, a
   truth value read past its test (left alone: the test reads it), a switch's
   kept edge with mapped successor phis, a collapse, `a && b && c`, a label's
   block and a self-loop; and #2608's `tonumberns`, `tonumberns && tonumberns`
-  and `tonumberns && x < y` (two rounds each), readers through the successor's
+  and `tonumberns && x < y` (two rounds each), `lua_geti`'s slot read in both
+  successors (both merge it), `op_orderI`'s `cond != GETARG_k(i)` (three
+  copies, `trap` merged) and the same with the k bit's shift by a variable
+  amount (no candidate: the shift may pass the width), readers through the successor's
   subtree and on an edge out of it, a chain value read past the test, readers
   where both successors' paths meet, a successor with a second predecessor, a
   loop's header (beside a `?:` join that is threaded), a kept edge, a merge in
@@ -388,13 +407,13 @@ each removed where it is made:
   the other successor merges the number, or the block is left alone), a block of
   70 phis, past a 64-byte mask, the driver's `if_clamp`, a clamp to constants, a
   truth value that no edge decides and one compared with a value from outside
-  the block, a number's join whose test reads none of its phis (a comparison of
+  the block (both threaded: comparisons on their edges), a number's join whose test reads none of its phis (a comparison of
   values from outside it, and one of constants alone, which every edge decides),
   a number read where both successors meet (each left alone), one read two
   blocks into the false successor's subtree, two repairs in one round whose
   second block's number is its first phi, a loop's header refused for its later
   back edge alone, another whose back edge is its 18th predecessor, a `?:` join
-  refused for a phi input from a later block (the cheap test's false refusal), a
+  with a phi input from a later block (threaded: not a header), a
   header laid out after its body (threaded: the loop rotated), and a number read
   63 and 64 blocks of jumps past the successor, the second also on an edge from
   it (the walk's bound: merged, then left alone twice). #2608's fixtures draw
