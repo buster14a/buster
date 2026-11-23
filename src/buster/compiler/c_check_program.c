@@ -154,11 +154,15 @@ struct CheckProgramBody
 // check_program_select_wrappers): clang's AlwaysInliner expands every call of a body it has, an `extern inline`
 // gnu_inline one too (glibc's __fortify_function wrappers), where the unit emits none of its own. Its body is one
 // statement: `return E;` (`node` E with its conversion to the result) or, in a void function, `E;`; E's nodes are
-// `first` to `node`. Its parameters' objects are CheckProgram.wrapper_parameters' `parameter_count` from
-// `parameter_first`, 0 for an unnamed one, and their pass_object_size attributes `sizes` (CheckInputAttributes'
-// object_sizes: a mode plus 1, a dynamic one's plus 5; 0 for none).
-// A wrapper's parameters at most: glibc's take five.
+// `first` to `node`. Or, with a result, the shape of glibc's longer wrappers (fgets's, wcscpy's, realpath's): scalar
+// locals with an initializer each (`local_count`, their plans `plans`, CheckInitializers'), then `guard_count` guards
+// `if (C) return E;` (`guards`' C, the branch's condition, and E), then `return E;`, or for the last guard an `else return E;`. Its parameters' objects are CheckProgram.wrapper_parameters'
+// `parameter_count` from `parameter_first`, 0 for an unnamed one, then its locals'; and its parameters' pass_object_size
+// attributes `sizes` (CheckInputAttributes' object_sizes: a mode plus 1, a dynamic one's plus 5; 0 for none).
+// A wrapper's parameters and locals at most: glibc's take seven (recvfrom's six and its bound).
 #define BUSTER_CHECK_WRAPPER_PARAMETERS 8u
+// A wrapper's guards at most: glibc's take two.
+#define BUSTER_CHECK_WRAPPER_GUARDS 4u
 
 typedef struct CheckProgramWrapper CheckProgramWrapper;
 struct CheckProgramWrapper
@@ -168,6 +172,10 @@ struct CheckProgramWrapper
     uint32_t first;
     uint32_t parameter_first;
     uint32_t parameter_count;
+    uint32_t local_count;
+    uint32_t guard_count;
+    uint32_t plans[BUSTER_CHECK_WRAPPER_PARAMETERS];
+    uint32_t guards[BUSTER_CHECK_WRAPPER_GUARDS][2];
     uint8_t sizes[BUSTER_CHECK_WRAPPER_PARAMETERS];
 };
 
@@ -274,6 +282,9 @@ struct CheckProgramOptions
     // variable-length arrays' objects and bounds to their statements pass (check_program_statement), at most two.
     uint64_t* region_target_work;
     uint64_t* statement_walk_work;
+    // And the tokens check_control_enterable passes (#2995): its walks' steps, its scans' tokens and the subtree facts'
+    // nodes, which the facts keep at about one a token where statements nest deep.
+    uint64_t* enterable_work;
     // The selection census (#2536's step 2.1, --selection-census): each body's candidates' references besides its own, by
     // a walk from every expression root of the body and by scans of the graph's VALUE nodes (check_program_census_walk and
     // _scan), into CheckProgram's census_walk, census_scan and census_arms.
@@ -824,6 +835,26 @@ struct CheckControlTask
     uint8_t unentered;
 };
 
+// check_control_enterable's subtree facts (#2995), for a body whose statements nest so deep, or hold so many tokens, that
+// walking an arm's first and last children and scanning its tokens again for each of its enclosing statements would be
+// quadratic (switches nested 16,000 deep took 2.3 s): by token, from the body's opening `body`, each statement's first and
+// last tokens and the least and greatest key of its subtree's tokens (a label's 0, a case's switch, BUSTER_CHECK_NONE for
+// none), each node's computed once (check_control_enterable_facts). The parse tree's subtrees are runs of tokens, so these
+// are exactly what the walk and the scan find (check_control_extent, check_control_labeled). In an arena of their own,
+// reserved by the first such body and released with the program's run; a body that finds no room walks as before.
+typedef struct CheckControlExtents CheckControlExtents;
+struct CheckControlExtents
+{
+    Arena arena;
+    uint32_t* low;
+    uint32_t* high;
+    uint32_t* key_low;
+    uint32_t* key_high;
+    uint32_t* stack;
+    uint32_t* order;
+    uint32_t body;
+};
+
 typedef struct CheckControlWriter CheckControlWriter;
 struct CheckControlWriter
 {
@@ -867,6 +898,10 @@ struct CheckControlWriter
     const uint32_t* case_map;
     // Only LABEL and CLOSE_CASE tokens receive a number.
     uint32_t* source_labels;
+    // The program's run's subtree facts (check_control_enterable_facts), or null, which walks every arm.
+    CheckControlExtents* extents;
+    // CheckProgramOptions.enterable_work, or null.
+    uint64_t* enterable_work;
     // Ordinary breaks and continues carry their destinations on the statement worklist. Only a lifetime, VLA,
     // cleanup or statement expression can query these token-indexed destinations while walking ancestors.
     bool all_loop_targets;
@@ -1263,7 +1298,8 @@ static bool check_program_runtime_truth(const CheckProgram* program, uint32_t no
     const bool known = candidate && available && (runtime || ((value->flags & BUSTER_CHECK_FP_ENVIRONMENT) == 0 &&
                                    !(environment && check_action_floating_type(program->types, value->type)))) &&
                        value->fault == CHECK_FAULT_NONE &&
-                       check_action_truth(program->types, value, truth);
+                       check_action_truth(program->types, value, truth) &&
+                       ((value->flags & BUSTER_CHECK_MODIFICATION) == 0 || check_graph_evaluable(program->types, graph, program->stream, condition));
     return known;
 }
 
@@ -1279,17 +1315,17 @@ static bool check_program_branch_cast(const CheckProgram* program, uint32_t node
     return !unproved;
 }
 
-// A branch condition's truth as clang's CFG builder prunes its edges (#1447, CFGBuilder::tryEvaluateBool, whose
-// EvaluateAsBooleanCondition ignores side effects), which the -Wreturn-type walk and the runtime warnings' reachability
-// (check_common_body_reached) model: a known value's (check_program_runtime_truth), and a logical operator's that one
-// operand decides though the other isn't known, `0 && x` and `1 || x` by the left and `x && 0` and `x || 1` by the right,
-// or both together, through the condition's own node, conversions, casts and `!`. A conversion keeps the truth of the
+// An expression's truth as clang's evaluator folds a condition (#1447, EvaluateAsBooleanCondition, which ignores side
+// effects), the part of clang's CFG builder's branch pruning that reads values (c_check_program_cfg.c has the rest): a
+// known value's (check_program_runtime_truth), and a logical operator's that one operand decides though the other isn't
+// known, `0 && x` and `1 || x` by the left and `x && 0` and `x || 1` by the right, or both together, through the
+// expression's own node, conversions, casts and `!`. A conversion keeps the truth of the
 // 0 or 1 such an operator gives, the one value it isn't already known for. A post-order walk on an explicit stack (the
 // call graph's no-recursion rule), BUSTER_CHECK_BRANCH_TRUTH_DEPTH operands deep at most: each frame's node, its depth and
 // whether its operands are pushed, and each value 0 (false), 1 (true) or 2 (unknown), the left operand's first.
 #define BUSTER_CHECK_BRANCH_TRUTH_DEPTH 64u
 #define BUSTER_CHECK_BRANCH_TRUTH_FRAMES (2u * BUSTER_CHECK_BRANCH_TRUTH_DEPTH + 2u)
-static bool check_program_branch_truth(const CheckProgram* program, uint32_t node, uint32_t condition, bool* truth)
+static bool check_program_fold_truth(const CheckProgram* program, uint32_t node, uint32_t condition, bool* truth)
 {
     const CheckGraph* graph = &program->input->graph;
     uint32_t frames[BUSTER_CHECK_BRANCH_TRUTH_FRAMES];
@@ -1363,6 +1399,8 @@ static bool check_program_branch_truth(const CheckProgram* program, uint32_t nod
     *truth = values[0] == 1u;
     return values[0] != 2u;
 }
+
+#include "c_check_program_cfg.c"
 
 // A switch's controlling type: an integer type, of up to 128 bits (check_action_integer_type) or a _BitInt past them
 // (#2220, check_wide_type).
@@ -2040,14 +2078,147 @@ static bool check_control_labeled(const CheckControlWriter* writer, uint32_t low
     return labeled;
 }
 
+// A walk down an arm's first or last children past this many steps, or an arm of more tokens than
+// BUSTER_CHECK_CONTROL_ENTERABLE_TOKENS, is answered from the body's subtree facts (#2995).
+#define BUSTER_CHECK_CONTROL_ENTERABLE_STEPS 64u
+#define BUSTER_CHECK_CONTROL_ENTERABLE_TOKENS 4096u
+
+// Whether the statement `arm`, a token of the body being written, holds a label or a case of a switch outside it, from the
+// body's subtree facts (CheckControlExtents), which this computes for the nodes of `arm`'s subtree that don't have them
+// yet: their preorder by a stack, then each node from its own token and its children's facts, in reverse, so that a node
+// comes after its children. Each node of the body is computed once. False in `*answered` where there was no room.
+static bool check_control_enterable_facts(const CheckControlWriter* writer, uint32_t arm, bool* answered)
+{
+    CheckControlExtents* facts = writer->extents;
+    const uint32_t opening = writer->opening;
+    const uint64_t extent = (uint64_t)writer->closing - opening + 1;
+    if (facts->body != opening)
+    {
+        facts->body = BUSTER_CHECK_NONE;
+        if (facts->arena.base == 0)
+        {
+            facts->arena = arena_reserve(6 * ((uint64_t)writer->parser->tokens.count + 1) * sizeof(uint32_t) + 6 * 64);
+        }
+        arena_pop_to(&facts->arena, 0);
+        facts->low = facts->arena.base != 0 ? BUSTER_ARENA_PUSH_ARRAY(&facts->arena, uint32_t, extent) : NULL;
+        facts->high = facts->low != NULL ? BUSTER_ARENA_PUSH_ARRAY(&facts->arena, uint32_t, extent) : NULL;
+        facts->key_low = facts->high != NULL ? BUSTER_ARENA_PUSH_ARRAY(&facts->arena, uint32_t, extent) : NULL;
+        facts->key_high = facts->key_low != NULL ? BUSTER_ARENA_PUSH_ARRAY(&facts->arena, uint32_t, extent) : NULL;
+        facts->stack = facts->key_high != NULL ? BUSTER_ARENA_PUSH_ARRAY(&facts->arena, uint32_t, extent) : NULL;
+        facts->order = facts->stack != NULL ? BUSTER_ARENA_PUSH_ARRAY(&facts->arena, uint32_t, extent) : NULL;
+        if (facts->order != NULL)
+        {
+            // (A node without facts has `low` BUSTER_CHECK_NONE.)
+            memset(facts->low, 0xff, extent * sizeof(uint32_t));
+            facts->body = opening;
+        }
+    }
+    *answered = facts->body == opening;
+    bool result = false;
+    if (*answered)
+    {
+        const uint8_t* roles = writer->parser->tree.roles;
+        const CheckSparseColumn owners = writer->program->input->control_owners;
+        uint32_t depth = 0;
+        uint32_t count = 0;
+        facts->stack[depth] = arm;
+        depth += facts->low[arm - opening] == BUSTER_CHECK_NONE ? 1u : 0u;
+        while (depth != 0)
+        {
+            depth -= 1;
+            const uint32_t node = facts->stack[depth];
+            facts->order[count] = node;
+            count += 1;
+            for (uint32_t child = writer->first[node]; child != BUSTER_CHECK_NONE; child = writer->next[child])
+            {
+                facts->stack[depth] = child;
+                depth += facts->low[child - opening] == BUSTER_CHECK_NONE ? 1u : 0u;
+            }
+        }
+        if (writer->enterable_work != NULL)
+        {
+            *writer->enterable_work += count;
+        }
+        for (uint32_t i = count; i-- > 0;)
+        {
+            const uint32_t node = facts->order[i];
+            const uint8_t role = roles[node];
+            const uint32_t owner = role == PARSE_ROLE_CLOSE_CASE ? check_sparse_get(owners, node) : BUSTER_CHECK_NONE;
+            uint32_t low = node;
+            uint32_t high = node;
+            uint32_t key_low = role == PARSE_ROLE_LABEL ? 0 : owner;
+            uint32_t key_high = role == PARSE_ROLE_LABEL ? 0 : role == PARSE_ROLE_CLOSE_CASE ? owner : 0;
+            for (uint32_t child = writer->first[node]; child != BUSTER_CHECK_NONE; child = writer->next[child])
+            {
+                const uint32_t at = child - opening;
+                low = facts->low[at] < low ? facts->low[at] : low;
+                high = facts->high[at] > high ? facts->high[at] : high;
+                key_low = facts->key_low[at] < key_low ? facts->key_low[at] : key_low;
+                key_high = facts->key_high[at] > key_high ? facts->key_high[at] : key_high;
+            }
+            const uint32_t at = node - opening;
+            facts->low[at] = low;
+            facts->high[at] = high;
+            facts->key_low[at] = key_low;
+            facts->key_high[at] = key_high;
+        }
+        // check_control_labeled's test on the subtree's run of tokens: a label's key is 0, below any statement's first
+        // token, and a case's is its switch, outside the run where the switch is.
+        const uint32_t at = arm - opening;
+        result = facts->key_low[at] < facts->low[at] || facts->key_high[at] > facts->high[at];
+    }
+    return result;
+}
+
 // Whether a jump can enter the statement `arm` (none for BUSTER_CHECK_NONE) other than at its start: it holds a label,
-// or a case of a switch outside it (check_control_labeled).
+// or a case of a switch outside it (check_control_labeled). A deep or long arm takes its body's subtree facts
+// (check_control_enterable_facts), so that statements nested N deep cost the body's tokens once, not N times (#2995).
 static bool check_control_enterable(const CheckControlWriter* writer, uint32_t arm)
 {
-    uint32_t low = 0;
-    uint32_t high = 0;
-    check_control_extent(writer, arm, &low, &high);
-    return arm != BUSTER_CHECK_NONE && check_control_labeled(writer, low, high);
+    bool result = false;
+    const CheckControlExtents* facts = writer->extents;
+    // An arm the body's facts hold already, a deeper one's, answers from them.
+    const bool known = arm != BUSTER_CHECK_NONE && facts != NULL && facts->body == writer->opening && facts->low[arm - writer->opening] != BUSTER_CHECK_NONE;
+    if (known)
+    {
+        const uint32_t at = arm - writer->opening;
+        result = facts->key_low[at] < facts->low[at] || facts->key_high[at] > facts->high[at];
+    }
+    else if (arm != BUSTER_CHECK_NONE)
+    {
+        uint32_t low = arm;
+        uint32_t high = arm;
+        uint32_t token = arm;
+        uint32_t steps = 0;
+        for (; token != BUSTER_CHECK_NONE && steps < BUSTER_CHECK_CONTROL_ENTERABLE_STEPS; token = writer->first[token])
+        {
+            low = token < low ? token : low;
+            steps += 1;
+        }
+        bool deep = token != BUSTER_CHECK_NONE;
+        token = arm;
+        uint32_t last_steps = 0;
+        for (; token != BUSTER_CHECK_NONE && last_steps < BUSTER_CHECK_CONTROL_ENTERABLE_STEPS; token = writer->last[token])
+        {
+            high = token > high ? token : high;
+            last_steps += 1;
+        }
+        deep |= token != BUSTER_CHECK_NONE || high - low > BUSTER_CHECK_CONTROL_ENTERABLE_TOKENS;
+        bool answered = false;
+        result = deep && facts != NULL ? check_control_enterable_facts(writer, arm, &answered) : false;
+        uint64_t work = (uint64_t)steps + last_steps;
+        if (!answered)
+        {
+            check_control_extent(writer, arm, &low, &high);
+            result = check_control_labeled(writer, low, high);
+            work += (uint64_t)high - low + 1;
+        }
+        if (writer->enterable_work != NULL)
+        {
+            *writer->enterable_work += work;
+        }
+    }
+    return result;
 }
 
 // Pushes `node` on the fold walk's stack (check_control_foldable), which takes a node a visit: whether it had room.
@@ -3909,8 +4080,8 @@ static uint32_t check_program_token_body(const CheckProgram* program, uint32_t t
 // The plain library builtin a call computes inline as clang -O0's code computes its intrinsic (#967, #1373), its row of
 // cbuiltin_library_plain_folds, or BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS: a call of the unit's declaration of one that clang
 // makes the builtin (the reader's mark, BUSTER_CHECK_LIBRARY_CALL) whose row computes it (CBuiltinLibraryComputed), with
-// its prototype's arguments, memcpy, memmove and memset with a constant size of at most
-// BUSTER_CBUILTIN_LIBRARY_INLINE_BYTES; but of one with an asm label on a declaration, which clang's code calls by its
+// its prototype's arguments, memcpy, memmove and memset with a constant size of at most cbuiltin_library_inline_bytes's;
+// but of one with an asm label on a declaration, which clang's code calls by its
 // label (EmitBuiltinExpr's BuiltinIDIfNoAsmLabel is 0 for it): CheckProgram.object_labelled. The references' pass and
 // the lowering ask for every call, so it reads no token: a search of the unit's declarations for each computed memcpy
 // took sqlite3.c's -c from 126 to 187 ms on the 9700X.
@@ -3929,7 +4100,7 @@ static __attribute__((noinline)) uint32_t check_program_call_marked(const CheckP
     if (marked && memory)
     {
         const uint32_t size_node = graph->argument_nodes[graph->argument_offsets[node] + 2];
-        marked = check_program_constant_operand(graph, program->stream, size_node, &size) && size <= BUSTER_CBUILTIN_LIBRARY_INLINE_BYTES;
+        marked = check_program_constant_operand(graph, program->stream, size_node, &size) && size <= cbuiltin_library_inline_bytes(computed);
     }
     const uint32_t callee = marked && program->object_labelled != NULL ? graph->operand0[node] : BUSTER_CHECK_NONE;
     const uint32_t object = callee < graph->count ? check_stream_value(program->stream, callee).object : 0;
@@ -6096,6 +6267,8 @@ struct CheckProgramRun
     Arena* output;
     Arena* scratch;
     Arena controls;
+    // The writer's subtree facts (#2995), whose arena the run releases with its controls'.
+    CheckControlExtents extents;
     CheckControlWriter writer;
     CheckProgramTargetEvents target_events;
     CheckReturnFacts return_facts;
@@ -6163,6 +6336,10 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
     if (options.statement_walk_work != NULL)
     {
         *options.statement_walk_work = 0;
+    }
+    if (options.enterable_work != NULL)
+    {
+        *options.enterable_work = 0;
     }
     const uint64_t mark = output->length;
     const uint64_t temporary = scratch->length;
@@ -6586,6 +6763,7 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
         .case_next = case_next,
         .case_map = case_map,
         .source_labels = source_labels,
+        .enterable_work = options.enterable_work,
         .all_loop_targets = all_loop_targets,
         .scalar_children = options.scalar,
         .stops = stops,
@@ -6698,6 +6876,8 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
         .body_count = body_count,
         .valid = valid,
     };
+    run->extents.body = BUSTER_CHECK_NONE;
+    run->writer.extents = &run->extents;
     // The rooms the loop writes in, for a lowering that reads no control total (CheckProgram.control_capacity), from the
     // run's writer, after the setup's passes.
     program->control_capacity = run->writer.capacity;
@@ -7030,6 +7210,7 @@ static bool check_program_finish(CheckProgramRun* run)
         arena_pop_to(scratch, temporary);
     }
     arena_release(&run->return_facts.storage);
+    arena_release(&run->extents.arena);
     arena_release(&controls);
     return valid;
 }

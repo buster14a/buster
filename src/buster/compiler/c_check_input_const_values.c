@@ -79,6 +79,7 @@ static void check_input_initializer_const(CheckInputReader* reader, uint32_t dec
         direct_end -= 1;
     }
     const uint32_t assignment = check_input_bit(reader->output->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND) ? declaration : begin - 1;
+    const bool require_defined = reader->parser->language.standard >= 2023 && BUSTER_CHECK_RARE(reader, static_initializers, assignment);
     const bool static_read = valid && count == 1 && BUSTER_CHECK_RARE(reader, static_initializers, assignment) && direct + 1 == direct_end &&
                              reader->parser->tokens.kinds[direct] == PARSE_KIND_IDENTIFIER && values[0].category == CHECK_LVALUE &&
                              !check_init_aggregate(reader->types, values[0].type);
@@ -139,7 +140,11 @@ static void check_input_initializer_const(CheckInputReader* reader, uint32_t dec
         valid = check_initializer_part_bits(reader->types, part, &bits) == CHECK_INIT_OK;
         if (part->kind == CHECK_INIT_VALUE)
         {
+            // C23 does not expose a static-storage object's value when any live initializer needs undefined GNU
+            // folding. Automatic const objects still expose their stored value; receipt loads start a new evaluation.
+            const bool defined = !require_defined || (part->value.flags & BUSTER_CHECK_INVALID_CONSTANT) == 0;
             valid = valid && part->value.constant_kind != CHECK_CONSTANT_NONE && part->value.fault == CHECK_FAULT_NONE &&
+                    defined &&
                     (part->value.flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_INACTIVE_UNION_READ | BUSTER_CHECK_DISCARDED_UNEVALUABLE)) == 0 &&
                     (part->value.constant_kind != CHECK_CONSTANT_ADDRESS || part->value.object == 0 ||
                      (part->value.flags & BUSTER_CHECK_STATIC_OBJECT) != 0);

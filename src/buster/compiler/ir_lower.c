@@ -2400,6 +2400,28 @@ static IrType ir_typed_vector_whole(AbiLocation location, uint64_t size, uint8_t
     return whole && width < 3 && ((allowed >> width) & 1) != 0 ? types[width] : IR_VOID;
 }
 
+// COPY's move form (#1373, tier0_copy_moves): `bytes` (BUSTER_TIER0_COPY_NARROW_BYTES + 1 to BUSTER_TIER0_MAX_MOVE_BYTES)
+// whose ranges may overlap either way, as memmove's, by 16-byte pieces (IR_V4I32), the last ending at the end, every one
+// loaded before the first is stored, as Tier 0's tier0_copy_move holds them in its registers and clang's code moves
+// llvm.memmove's bytes. Their alignment is unknown, as LOAD's is.
+static void ir_typed_move(IrTypedSink* sink, uint32_t destination_bits, uint32_t source_bits, uint32_t bytes)
+{
+    const uint32_t destination = ir_typed_emit(sink, IR_INTTOPTR, IR_PTR, destination_bits, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+    const uint32_t source = ir_typed_emit(sink, IR_INTTOPTR, IR_PTR, source_bits, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+    const uint32_t pieces = tier0_move_pieces(bytes);
+    uint32_t loaded[BUSTER_TIER0_MAX_MOVE_BYTES / 16] = { 0 };
+    for (uint32_t p = 0; p < pieces; p += 1)
+    {
+        const uint64_t at = p + 1 < pieces ? 16 * (uint64_t)p : bytes - 16;
+        loaded[p] = ir_typed_emit(sink, IR_LOAD, IR_V4I32, ir_typed_offset(sink, source, at), BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+    }
+    for (uint32_t p = 0; p < pieces; p += 1)
+    {
+        const uint64_t at = p + 1 < pieces ? 16 * (uint64_t)p : bytes - 16;
+        ir_typed_emit(sink, IR_STORE, IR_VOID, ir_typed_offset(sink, destination, at), loaded[p], BUSTER_IR_NONE, 0);
+    }
+}
+
 static __attribute__((always_inline)) inline void ir_typed_copy(IrTypedSink* sink, uint32_t destination_bits, uint32_t source_bits, uint64_t bytes, bool wide)
 {
     const uint32_t destination = ir_typed_emit(sink, IR_INTTOPTR, IR_PTR, destination_bits, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
@@ -3218,8 +3240,9 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
     bool leaves = false;
     for (uint32_t k = 0; check.error == IR_OK && k < input->asm_body_count && input->asm_bodies != 0; k += 1)
     {
-        // A body's labels (#1839), which the IR's body call doesn't carry, are Tier 0's too.
-        leaves |= input->asm_bodies[k].leaves || input->asm_bodies[k].label_count != 0;
+        // A body's labels (#1839), which the IR's body call doesn't carry, are Tier 0's too, and so is a body call's result
+        // in its body's register (#2144, Tier0AsmBody.result), which only a lowering for Tier 0 makes.
+        leaves |= input->asm_bodies[k].leaves || input->asm_bodies[k].label_count != 0 || input->asm_bodies[k].result != 0;
     }
     if (check.error == IR_OK && (input->unwind_init || input->returns_twice || tier0_preserving(input) || input->realign_stack || leaves))
     {

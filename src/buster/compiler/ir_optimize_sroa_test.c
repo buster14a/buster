@@ -188,6 +188,7 @@ static void ir_sroa_test_guards(IrOptimizeTest* test)
         {
             IrSroaUseBatch batch = { .count = count };
             uint16_t expected = 0;
+            uint16_t returned_expected = 0;
             for (uint32_t lane = 0; lane < count; lane += 1)
             {
                 batch.op[lane] = ir_optimize_test_random(test) % IR_OP_COUNT;
@@ -200,13 +201,20 @@ static void ir_sroa_test_guards(IrOptimizeTest* test)
                                      (batch.op[lane] == IR_COPY || batch.op[lane] == IR_BITCAST || batch.op[lane] == IR_ADDRESS || batch.op[lane] == IR_PTRTOINT || batch.op[lane] == IR_INTTOPTR) &&
                                      batch.forwarded[lane] != 0;
                 const bool escaped = (!memory && !forward) || (memory && (batch.flags[lane] & BUSTER_IR_VOLATILE) != 0);
+                // #3311: with `returns`, a ret's operand is no escape but a return.
+                const bool ret = batch.position[lane] == 0 && batch.op[lane] == IR_RET;
                 expected |= (uint16_t)escaped << lane;
+                returned_expected |= (uint16_t)ret << lane;
             }
-            ir_optimize_test_expect(test, ir_sroa_escape_mask(&batch) == expected, "SROA exact scalar/vector escape masks for every packet tail");
+            uint16_t returning = UINT16_MAX;
+            ir_optimize_test_expect(test, ir_sroa_escape_mask(&batch, false, &returning) == expected && returning == 0, "SROA exact scalar/vector escape masks for every packet tail");
+            ir_optimize_test_expect(test, ir_sroa_escape_mask(&batch, true, &returning) == (expected & (uint16_t)~returned_expected) && returning == returned_expected,
+                                    "SROA's returns (#3311): a ret's operand is a return, not an escape");
         }
     }
     const IrSroaUseBatch invalid = { .count = 17 };
-    ir_optimize_test_expect(test, ir_sroa_escape_mask(&invalid) == 0, "SROA invalid packet count refuses without column access");
+    uint16_t invalid_returning = 0;
+    ir_optimize_test_expect(test, ir_sroa_escape_mask(&invalid, true, &invalid_returning) == 0 && invalid_returning == 0, "SROA invalid packet count refuses without column access");
     const long page = sysconf(_SC_PAGESIZE);
     void* mapping = page > 0 ? mmap(0, (uint64_t)page * 8, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) : MAP_FAILED;
     bool ready = mapping != MAP_FAILED;
