@@ -390,6 +390,33 @@ static __attribute__((unused)) uint32_t check_sparse_wide_next(CheckSparseWide c
     return slot << BUSTER_CHECK_SPARSE_SHIFT;
 }
 
+// The directory slots of the wide `column` below `end` that have a block, in order into `slots` (room for one per 16
+// tokens): how many, 16 entries a load, each one's values prefetched as it is found, so that the misses of a scan's
+// groups (check_sparse_wide_group) are in flight together rather than one after another (#3393).
+static __attribute__((unused)) uint32_t check_sparse_wide_slots(CheckSparseWide column, uint32_t end, uint32_t* slots)
+{
+    const uint32_t last = (uint32_t)(((uint64_t)end + BUSTER_CHECK_SPARSE_TOKENS - 1) >> BUSTER_CHECK_SPARSE_SHIFT);
+    const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+    uint32_t count = 0;
+    for (uint32_t slot = 0; slot < last; slot += 16)
+    {
+        const uint32_t entries = last - slot < 16 ? last - slot : 16;
+        const __mmask16 present = (__mmask16)(entries == 16 ? 0xffffu : (1u << entries) - 1);
+        const __m512i blocks = _mm512_maskz_loadu_epi32(present, column.directory + slot);
+        const __mmask16 taken = _mm512_mask_test_epi32_mask(present, blocks, _mm512_set1_epi32((int)~BUSTER_CHECK_SPARSE_CLAIMED));
+        _mm512_mask_compressstoreu_epi32(slots + count, taken, _mm512_add_epi32(lanes, _mm512_set1_epi32((int)slot)));
+        for (uint32_t found = taken; found != 0; found &= found - 1)
+        {
+            const uint32_t block = column.directory[slot + (uint32_t)__builtin_ctz(found)] & ~BUSTER_CHECK_SPARSE_CLAIMED;
+            const uint32_t* values = column.blocks + ((uint64_t)block << BUSTER_CHECK_SPARSE_SHIFT);
+            __builtin_prefetch(values);
+            __builtin_prefetch(values + 16);
+        }
+        count += (uint32_t)__builtin_popcount(taken);
+    }
+    return count;
+}
+
 // Of the 16 tokens from `first`, a multiple of 16, below `end`, those whose values in the wide `column` aren't NONE, a
 // bit each: it tests their block pair's values 8 at a time, block 0's where they have none.
 static __attribute__((unused)) uint32_t check_sparse_wide_group(CheckSparseWide column, uint32_t first, uint32_t end)

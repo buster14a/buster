@@ -309,6 +309,29 @@ static bool check_program_emit_makes_name(const CheckInput* input, uint32_t decl
            (renamed.length == 0 && check_sparse_get(input->declaration_bodies, declaration) != BUSTER_CHECK_NONE && check_input_linkage(input->declaration_bits, declaration) == 0);
 }
 
+// The symbols' passes over their declarations (check_program_emit_timed's names and symbols) read columns at each
+// symbol's declaration, a token anywhere in the unit's: each pass prefetches a symbol's declaration 16 symbols ahead and
+// what it reads at its declaration 8 ahead, so that the misses of several symbols are in flight at once (#3393).
+#define BUSTER_CHECK_EMIT_SYMBOL_AHEAD 8u
+static void check_program_emit_prefetch_symbol(const CheckProgram* program, const Parser* parser, uint32_t s)
+{
+    const uint32_t far = s + 2 * BUSTER_CHECK_EMIT_SYMBOL_AHEAD;
+    const uint32_t near = s + BUSTER_CHECK_EMIT_SYMBOL_AHEAD;
+    if (far < program->symbol_count)
+    {
+        __builtin_prefetch(program->object_declarations + program->symbol_objects[far]);
+    }
+    const uint32_t declaration = near < program->symbol_count ? program->object_declarations[program->symbol_objects[near]] : BUSTER_CHECK_NONE;
+    if (declaration != BUSTER_CHECK_NONE)
+    {
+        const CheckInput* input = program->input;
+        __builtin_prefetch(input->declaration_bits + declaration);
+        __builtin_prefetch(input->declaration_kinds + declaration);
+        __builtin_prefetch(parser->tokens.names + declaration);
+        __builtin_prefetch(input->declaration_bodies.directory + (declaration >> BUSTER_CHECK_SPARSE_SHIFT));
+    }
+}
+
 // Adds `base`, or the first of its ".N" spellings no name of `names` has, to the link's names: its NameId, or 0 when the
 // link or scratch has no room.
 static NameId check_program_emit_made_name(Link* link, CheckProgramNames* names, const uint8_t* base, uint32_t base_length, Arena* scratch)
@@ -1123,17 +1146,24 @@ static bool check_program_attributed(const CheckInput* input, Arena* arena, Chec
     const uint32_t* declarations = input->declarations;
     const CheckSparseWide attributes = input->attributes;
     const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
-    uint32_t count = 0;
-    for (uint32_t first = result->tokens != 0 ? check_input_attributed_next(attributes, 0, tokens) : tokens; first < tokens;
-         first = check_input_attributed_next(attributes, first + 16, tokens))
+    // The slots with attributes (one for each 16 tokens at most), the values of each prefetched, and its declarations.
+    uint32_t* listed = result->tokens != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)tokens / BUSTER_CHECK_SPARSE_TOKENS + 2) : 0;
+    const uint32_t slots = listed != 0 ? check_sparse_wide_slots(attributes, tokens, listed) : 0;
+    for (uint32_t k = 0; k < slots; k += 1)
     {
+        __builtin_prefetch(declarations + ((uint64_t)listed[k] << BUSTER_CHECK_SPARSE_SHIFT));
+    }
+    uint32_t count = 0;
+    for (uint32_t k = 0; k < slots; k += 1)
+    {
+        const uint32_t first = listed[k] << BUSTER_CHECK_SPARSE_SHIFT;
         const __mmask16 attributed = (__mmask16)check_input_attributed_group(attributes, first, tokens);
         const __m512i group = _mm512_add_epi32(lanes, _mm512_set1_epi32((int)first));
         const __mmask16 declaring = _mm512_mask_cmpeq_epi32_mask(attributed, _mm512_maskz_loadu_epi32(attributed, declarations + first), group);
         _mm512_mask_compressstoreu_epi32(result->tokens + count, declaring, group);
         count += (uint32_t)__builtin_popcount(declaring);
     }
-    result->bits = result->tokens != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)count + 16) : 0;
+    result->bits = listed != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)count + 16) : 0;
     const CheckInputAttributes** records = result->bits != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, const CheckInputAttributes*, (uint64_t)count + BUSTER_CHECK_ATTRIBUTED_AHEAD) : 0;
     const bool valid = records != 0;
     for (uint32_t d = 0; valid && d < count; d += 1)
@@ -3805,23 +3835,26 @@ static void check_program_object_access(const CheckProgram* program, uint8_t* ac
     {
         defined[program->bodies[b].object] = 1;
     }
-    // The static objects' defining declarations: of each 64 tokens, those with the static bit, then of each 16 of them
-    // the ones that declare themselves, an object's, defined or tentative, by masked loads and compares (#3393).
+    // The static objects' defining declarations: of each 64 tokens, those with the static bit and a definition's or a
+    // tentative one's, an object's, by two masked byte loads and compares; then of the few found, by 16, those that declare
+    // themselves (#3393).
     const __m512i lanes16 = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
-    const __m128i definitions = _mm_set1_epi8((char)(BUSTER_CHECK_BITS_DEFINED | BUSTER_CHECK_BITS_TENTATIVE));
     for (uint32_t first = 0; first < input->token_count; first += 64)
     {
-        const uint64_t statics = check_input_scan_bit(input->declaration_bits, first, input->token_count, BUSTER_CHECK_BITS_STATIC);
-        for (uint32_t part = 0; statics != 0 && part < 64; part += 16)
+        const __mmask64 present = _bzhi_u64(~0ull, input->token_count - first < 64 ? input->token_count - first : 64);
+        const __m512i bits = _mm512_maskz_loadu_epi8(present, input->declaration_bits + first);
+        const __m512i kinds = _mm512_maskz_loadu_epi8(present, input->declaration_kinds + first);
+        const __mmask64 statics = _mm512_mask_test_epi8_mask(present, bits, _mm512_set1_epi8((char)BUSTER_CHECK_BITS_STATIC));
+        const __mmask64 defining = _mm512_mask_test_epi8_mask(statics, bits, _mm512_set1_epi8((char)(BUSTER_CHECK_BITS_DEFINED | BUSTER_CHECK_BITS_TENTATIVE)));
+        const uint64_t candidates = _mm512_mask_cmpeq_epi8_mask(defining, kinds, _mm512_set1_epi8((char)C_BINDING_OBJECT));
+        for (uint32_t part = 0; candidates != 0 && part < 64; part += 16)
         {
-            const __mmask16 lanes = (__mmask16)(statics >> part);
+            const __mmask16 lanes = (__mmask16)(candidates >> part);
             const uint32_t base = first + part;
             const __m512i tokens = _mm512_add_epi32(lanes16, _mm512_set1_epi32((int)base));
             const __mmask16 own = _mm512_mask_cmpeq_epi32_mask(lanes, _mm512_maskz_loadu_epi32(lanes, input->declarations + base), tokens);
-            const __mmask16 object_kind = _mm_mask_cmpeq_epi8_mask(own, _mm_maskz_loadu_epi8(own, input->declaration_kinds + base), _mm_set1_epi8((char)C_BINDING_OBJECT));
-            const __mmask16 defining = _mm_mask_test_epi8_mask(object_kind, _mm_maskz_loadu_epi8(object_kind, input->declaration_bits + base), definitions);
-            const __m512i objects = _mm512_maskz_loadu_epi32(defining, input->objects + base);
-            const __mmask16 found = _mm512_mask_cmplt_epu32_mask(defining, objects, _mm512_set1_epi32((int)program->object_count));
+            const __m512i objects = _mm512_maskz_loadu_epi32(own, input->objects + base);
+            const __mmask16 found = _mm512_mask_cmplt_epu32_mask(own, objects, _mm512_set1_epi32((int)program->object_count));
             for (uint32_t selected = found; selected != 0; selected &= selected - 1)
             {
                 defined[input->objects[base + (uint32_t)__builtin_ctz(selected)]] = 1;
@@ -5326,6 +5359,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     uint32_t given_count = 0;
     for (uint32_t s = 0; valid && s < named_symbols; s += 1)
     {
+        check_program_emit_prefetch_symbol(program, parser, s);
         const uint32_t declaration = program->object_declarations[program->symbol_objects[s]];
         const String8 renamed = symbol_names[s + 1];
         const bool named = declaration != BUSTER_CHECK_NONE;
@@ -5337,6 +5371,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         if (listed_name)
         {
             spellings[given_count] = renamed.length != 0 ? (const uint8_t*)renamed.pointer : intern_bytes(identifiers, identifier);
+            __builtin_prefetch(spellings[given_count]);
             spelling_lengths[given_count] = renamed.length != 0 ? (uint32_t)renamed.length : intern_length(identifiers, identifier);
             given_count += 1;
         }
@@ -5379,6 +5414,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     }
     for (uint32_t s = 0; valid && s < program->symbol_count; s += 1)
     {
+        check_program_emit_prefetch_symbol(program, parser, s);
         const uint32_t object = program->symbol_objects[s];
         const uint32_t declaration = program->object_declarations[object];
         NameId name = 0;
