@@ -44,8 +44,9 @@ three schedules (at the end, streamed, streamed by a writer lane):
   empty `.text`'s terminal handoff, the partial last chunk with `.text`'s size,
   and a failure's handoff, each published once;
 - a writer lane asleep on the word (`StreamOptions.sleeping_writer`: lane 0
-  waits for its futex bit before the terminal handoff) is woken by it, once,
-  and writes the reference's bytes, which run;
+  waits for its futex bit before the terminal handoff) is woken by it
+  (`StreamResult.terminal_wake`; earlier handoffs may wake it too where CPUs
+  are shared) and writes the reference's bytes, which run;
 - a failed write ends every schedule with the file's error and `EFBIG`: a file
   size limit (`RLIMIT_FSIZE`, `SIGXFSZ` ignored) before `.data`'s end fails
   lane 0's write before any handoff, and one past the first 4 KB chunk fails a

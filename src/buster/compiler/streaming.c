@@ -141,8 +141,8 @@ struct StreamOptions
 
 // What a write did, and when (CLOCK_MONOTONIC nanoseconds): its start, the last function compiled, .text's last chunk
 // and the last pairs written (`flushed`, the writer lane's chunks aside), the tail built and written, the headers
-// written, and the file closed. With a writer lane, the ready word's publications (#3150): every one, and those that
-// found lane 1 asleep on the word and woke it.
+// written, and the file closed. With a writer lane, the ready word's publications (#3150): every one, those that found
+// lane 1 asleep on the word and woke it, and whether the terminal handoff was one of them.
 typedef struct StreamResult StreamResult;
 struct StreamResult
 {
@@ -165,6 +165,7 @@ struct StreamResult
     uint64_t records;
     uint64_t publications;
     uint64_t wakes;
+    bool terminal_wake;
     uint8_t build_id[BUSTER_EXECUTABLE_BUILD_ID_BYTES];
 };
 
@@ -1051,6 +1052,7 @@ static void stream_publish(StreamWrite* write, uint64_t ready, bool done)
         write->published = word;
         write->result->publications += 1;
         write->result->wakes += asleep;
+        write->result->terminal_wake = done && asleep;
     }
 }
 

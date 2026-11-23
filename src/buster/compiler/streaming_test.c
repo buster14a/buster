@@ -499,7 +499,9 @@ static void stream_test_sleeping_writer(StreamTestTally* tally, const char* dire
     const bool read = wrote && arena.base != 0 && stream_test_read(path, &arena, &bytes);
     char detail[PATH_MAX + 96];
     snprintf(detail, sizeof(detail), "%s (error %d, %" PRIu64 " publications, %" PRIu64 " wakes)", path, (int)result.error, result.publications, result.wakes);
-    stream_test_expect(tally, wrote && result.wakes == 1, "the terminal handoff wakes a sleeping writer", detail);
+    // (Earlier handoffs can find it asleep too, where the CPUs are shared; the terminal one must.)
+    stream_test_expect(tally, wrote && result.terminal_wake && result.wakes >= 1 && result.wakes <= result.publications,
+                       "the terminal handoff wakes a sleeping writer", detail);
     stream_test_expect(tally, read && stream_test_same(bytes, reference), "a sleeping writer's file is the reference's", path);
     stream_test_expect(tally, wrote && stream_test_run(directory, path, expected), "a sleeping writer's file runs", path);
     arena_release(&arena);
