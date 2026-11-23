@@ -121,6 +121,37 @@ static const char check_test_program_transparent_own_variadic[] =
     "unsigned long h=external_own_variadic(3,l,m,p,d,l,m,p,d,l,m,p,d);h^=mine_variadic(3,l,m,p,d,l,m,p,d,l,m,p,d);"
     "h^=external_own_variadic_apply(mine_variadic,n);return (int)(h%1000003);}";
 
+// Unions of a stack slot of their own of a pair's and a vector's members (#1844, BUSTER_CHECK_TEST_TRANSPARENT_OWN_UNIONS):
+// a 128-bit integer's in a union of 32 and in a packed one, a 16-byte vector's struct and a complex long, passed to the
+// harness's clang functions with the members' and the unions' values, in registers and after 5 longs and 8 doubles, and
+// the program's own definitions called by the harness through pointers; and as unnamed arguments, read with va_arg.
+static const char check_test_program_transparent_own_pairs[] =
+    BUSTER_CHECK_TEST_TRANSPARENT_UNIONS
+    BUSTER_CHECK_TEST_TRANSPARENT_OWN_UNIONS
+    "unsigned long external_own_pairs(int,ExternalOW,ExternalOV,ExternalOC,ExternalOX);"
+    "unsigned long external_own_pairs_late(long,long,long,long,long,double,double,double,double,double,double,double,double,int,ExternalOW,ExternalOV,"
+    "ExternalOC,ExternalOX);"
+    "unsigned long external_own_pairs_apply(unsigned long(*)(int,ExternalOW,ExternalOV,ExternalOC,ExternalOX),"
+    "unsigned long(*)(long,long,long,long,long,double,double,double,double,double,double,double,double,int,ExternalOW,ExternalOV,ExternalOC,ExternalOX),int);"
+    "unsigned long external_own_pairs_variadic(int,...);unsigned long external_own_pairs_variadic_apply(unsigned long(*)(int,...),int);"
+    "static unsigned long fold(unsigned long h,unsigned long v){return (h^v)*1099511628211UL;}"
+    "unsigned long mine(int k,ExternalOW w,ExternalOV v,ExternalOC c,ExternalOX x){"
+    "return external_own_pairs(k,w,v,c,x)*3+(unsigned long)w.w+(unsigned long)v.v.x[1]+(unsigned long)__imag__ c.c+(unsigned long)(x.w>>64);}"
+    "unsigned long mine_late(long l0,long l1,long l2,long l3,long l4,double d0,double d1,double d2,double d3,double d4,double d5,double d6,double d7,"
+    "int k,ExternalOW w,ExternalOV v,ExternalOC c,ExternalOX x){"
+    "return external_own_pairs_late(l0,l1,l2,l3,l4,d0,d1,d2,d3,d4,d5,d6,d7,k,w,v,c,x)+(unsigned long)(w.w>>64)*7+(unsigned long)v.v.x[2]+(unsigned long)x.w;}"
+    "unsigned long mine_variadic(int count,...){__builtin_va_list a;__builtin_va_start(a,count);unsigned long h=(unsigned long)count;"
+    "for(int i=0;i<count;i++){ExternalOW w=__builtin_va_arg(a,ExternalOW);ExternalOV v=__builtin_va_arg(a,ExternalOV);ExternalOC c=__builtin_va_arg(a,ExternalOC);"
+    "h=fold(h,(unsigned long)w.w^(unsigned long)(w.w>>64));h=fold(h,(unsigned long)(v.v.x[0]+v.v.x[3]*7));"
+    "h=fold(h,(unsigned long)(__real__ c.c+__imag__ c.c*9));}__builtin_va_end(a);return h;}"
+    "int tested(int n){__int128 w=((__int128)n<<64)|(unsigned)(n*5+1);struct external_v v={{n,-3,n*n,9}};_Complex long c=n*3;__imag__ c=-n;"
+    "ExternalOW ow={.w=w};ExternalOV ov={.v=v};ExternalOC oc={.c=c};ExternalOX ox={.w=w+1};"
+    "unsigned long h=external_own_pairs(0,w,v,c,w)^external_own_pairs(1,ow,ov,oc,ox);"
+    "h^=external_own_pairs_late(1,2,3,4,n,0.5,1,2,3,4,5,6,n*0.5,0,w,v,c,w)^external_own_pairs_late(1,2,3,4,n,0.5,1,2,3,4,5,6,n*0.5,1,ow,ov,oc,ox);"
+    "h^=mine(0,w,v,c,w)+mine_late(1,2,3,4,n,0.5,1,2,3,4,5,6,n*0.5,1,ow,ov,oc,ox);h^=external_own_pairs_apply(mine,mine_late,n);"
+    "h^=external_own_pairs_variadic(3,ow,ov,oc,ow,ov,oc,ow,ov,oc)^mine_variadic(3,ow,ov,oc,ow,ov,oc,ow,ov,oc);"
+    "h^=external_own_pairs_variadic_apply(mine_variadic,n);return (int)(h%1000003);}";
+
 // The reason the lowering refuses a union made transparent after clang's code may have classified a function's type.
 static const char check_test_program_transparent_late[] =
     "unions made transparent after a function definition or an initializer naming a function, whose first members pass otherwise";
@@ -204,13 +235,15 @@ static void check_test_program_transparent(CheckTest* test, const char* clang)
         "long h=take(&n)+take_late(1,2,3,4,5,6,&z,n,&z,9)*3+through(n,2,3,4,5,6,a,n*2,&n,n)*5;"
         "I i1={.i=n},i2={.i=2};A b={.p=&n};h+=pick(5,a,i1,b,i2,a,i1,b,i2,a,i1);return (int)(h%1000003);}",
         "transparent-union-aligned", clang);
-    // Past two eightbytes, of a first member clang passes as an aggregate, in registers or in memory, of any size
-    // (#1844): the harness's clang code calls and is called with each, in registers, on the stack, through pointers and
+    // Past two eightbytes, of a first member clang passes as an aggregate, in registers or in memory, a pair or a 16-byte
+    // vector, of any size (#1844): the harness's clang code calls and is called with each, in registers, on the stack, through pointers and
     // as unnamed arguments, and a member's value converted to the union passes from a zeroed object of the union's size.
     check_test_program_source(test, check_test_program_transparent_own, "transparent-union-own-slots", clang);
     check_test_program_source(test, check_test_program_transparent_own_variadic, "transparent-union-own-slots-variadic", clang);
-    // A member of a pair's classes keeps its refusal.
+    check_test_program_source(test, check_test_program_transparent_own_pairs, "transparent-union-own-slots-pairs", clang);
+    // A member of an _Atomic type, which clang passes uncounted, keeps its refusal.
     check_test_program_boundary_reason(test,
-        "typedef union __attribute__((transparent_union,aligned(32))){__int128 w;__int128 v;}A;int take(A);int tested(int n){return take((__int128)n);}",
-        "transparent-union-aligned-pair", true, false, 1, 0, "transparent unions sized or aligned otherwise than their first member, a pair, a vector or a scalar in memory");
+        "typedef union __attribute__((transparent_union,aligned(32))){_Atomic long w;_Atomic long v;}A;int take(A);int tested(int n){return take(n);}",
+        "transparent-union-aligned-atomic", true, false, 1, 0,
+        "transparent unions sized or aligned otherwise than their first member, a vector wider than 16 bytes or an _Atomic value");
 }

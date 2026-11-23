@@ -2368,6 +2368,54 @@ static void check_lanes_test_driver_deferred(CheckLanesTestTally* tally, const c
                             section_reported && section_lanes == 0 && strcmp(section_merged, "#pragma clang section") == 0 &&
                                 check_test_driver_same_files(object, sectioned_object),
                             "the driver reads a unit with #pragma clang section in source order, before its top level's walk", detail);
+    // A unit with a dominant body (#1668): one body of 384 blocks beside one of 288 and fourteen of 19, whose tokens beyond
+    // the critical path pay the rule's four lanes and more but are less than half the unit's (check_deferred_dominant). By
+    // the session's lanes the driver reads it in source order and says why; by --lanes 8, which forces the lanes, it reads
+    // the bodies apart. Both give source order's object.
+    char dominant[PATH_MAX];
+    char dominant_object[PATH_MAX];
+    snprintf(dominant, sizeof(dominant), "%s/deferred_dominant.c", directory);
+    snprintf(dominant_object, sizeof(dominant_object), "%s/deferred_dominant_source_order.o", directory);
+    FILE* dominant_file = fopen(dominant, "w");
+    bool dominant_written = dominant_file != NULL && fprintf(dominant_file, "struct P { int a; long b; };\n") > 0;
+    for (uint32_t f = 0; dominant_written && f < 16; f += 1)
+    {
+        const uint32_t blocks = f == 0 ? 384 : f == 1 ? 288 : 19;
+        dominant_written = fprintf(dominant_file, "int d%u(int x, int s)\n{\n", f) > 0;
+        for (uint32_t b = 0; dominant_written && b < blocks; b += 1)
+        {
+            dominant_written = fprintf(dominant_file, "    { int v = x * %u + s; struct P p = { v, (long)x }; if (p.a > %u) x += (int)p.b; else x -= v; }\n", b + 3,
+                                       f + 7) > 0;
+        }
+        dominant_written = dominant_written && fprintf(dominant_file, "    return x;\n}\n") > 0;
+    }
+    if (dominant_file != NULL)
+    {
+        dominant_written = fclose(dominant_file) == 0 && dominant_written;
+    }
+    char* dominant_order[] = { (char*)executable, (char*)"-c", (char*)"-o", dominant_object, dominant, NULL };
+    char* dominant_session[] = { (char*)"env", (char*)"MAKEFLAGS=", (char*)executable, (char*)"--deferred-bodies", (char*)"--time-stages", (char*)"-c", (char*)"-o", object,
+                                 dominant, NULL };
+    uint32_t dominant_lanes = 0;
+    char dominant_merged[128] = { 0 };
+    const bool dominant_compiled = dominant_written && check_lanes_test_run(dominant_order, report) == 0 && check_lanes_test_run(dominant_session, report) == 0;
+    const bool dominant_reported = dominant_compiled && check_lanes_test_report_deferred(report, &dominant_lanes, dominant_merged, sizeof(dominant_merged));
+    snprintf(detail, sizeof(detail), "%s on %u CPUs: %u lanes, merged: %s", dominant, cpus, dominant_lanes, dominant_reported ? dominant_merged : "(no report)");
+    check_lanes_test_expect(tally,
+                            dominant_reported && dominant_lanes == 0 &&
+                                (strcmp(dominant_merged, "a dominant body") == 0 || (cpus < 2 && strcmp(dominant_merged, "one lane") == 0)) &&
+                                check_test_driver_same_files(object, dominant_object),
+                            "the driver reads a unit with a dominant body in source order, and says why", detail);
+    char* dominant_forced[] = { (char*)executable, (char*)"--deferred-bodies", (char*)"--lanes=8", (char*)"--time-stages", (char*)"-c", (char*)"-o", object, dominant, NULL };
+    uint32_t forced_lanes = 0;
+    char forced_merged[128] = { 0 };
+    const bool forced_reported = dominant_compiled && check_lanes_test_run(dominant_forced, report) == 0 &&
+                                 check_lanes_test_report_deferred(report, &forced_lanes, forced_merged, sizeof(forced_merged));
+    snprintf(detail, sizeof(detail), "%s by --lanes 8 on %u CPUs: %u lanes, merged: %s", dominant, cpus, forced_lanes, forced_reported ? forced_merged : "(no report)");
+    check_lanes_test_expect(tally,
+                            forced_reported && (cpus < 2 || (forced_lanes > 1 && strcmp(forced_merged, "yes") == 0)) &&
+                                check_test_driver_same_files(object, dominant_object),
+                            "the driver reads a unit with a dominant body apart where --lanes N forces the lanes", detail);
     // The target's 16-byte atomics (cx16), which the lock-free queries read from the caller's table after the merge
     // (check_input_target_table, #1403's review): a unit whose eight bodies ask for 16 bytes' lock-freedom, by -mcx16 on
     // 8 lanes, source order's object; and by -mno-cx16 another, so that the queries' answers reach the object.

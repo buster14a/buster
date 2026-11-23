@@ -70,6 +70,8 @@ typedef enum CheckFault
 #define BUSTER_CHECK_FP_ENVIRONMENT 0x800u
 #define BUSTER_CHECK_VECTOR_ELEMENT 0x1000u
 #define BUSTER_CHECK_VECTOR_DUPLICATE 0x2000u
+// A GNU constant that a strict fold fails on: a division's overflow, or a comma's discarded left operand that folded
+// undefined behavior (#2264, check_action_comma_provenance). An array bound or an `aligned` argument is no constant.
 #define BUSTER_CHECK_GNU_DIVISION 0x4000u
 // A floating value converted to an integer type outside its range, which clang's folding saturates (a NaN to 0): a GNU
 // constant where an integer constant expression is required, and a static initializer's value, but no array bound's.
