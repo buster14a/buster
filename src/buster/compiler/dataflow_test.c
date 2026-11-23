@@ -392,10 +392,40 @@ static bool dataflow_test_order(const Dataflow* graph, Arena* scratch)
     return result;
 }
 
+// dataflow_postorder again, in an arena of exactly dataflow_postorder_scratch_bytes from a 64-byte boundary: it must
+// succeed there, take no more than the bound, and rebuild the same two orders.
+static bool dataflow_test_postorder_bound(Dataflow* graph, Arena* scratch)
+{
+    const uint64_t mark = scratch->length;
+    const uint64_t bound = dataflow_postorder_scratch_bytes(graph->block_count, graph->edge_count);
+    const uint64_t order_bytes = (uint64_t)graph->block_count * sizeof(uint32_t);
+    uint8_t* bytes = arena_push(scratch, bound + 2 * order_bytes, 64);
+    bool result = bytes != 0;
+    if (result)
+    {
+        uint32_t* postorder = (uint32_t*)(bytes + bound);
+        uint32_t* backward = postorder + graph->block_count;
+        if (order_bytes != 0)
+        {
+            memcpy(postorder, graph->postorder, order_bytes);
+            memcpy(backward, graph->backward, order_bytes);
+        }
+        Arena bounded = {
+            .base = bytes,
+            .capacity = bound,
+        };
+        result = dataflow_postorder(graph, &bounded) && bounded.length == 0 && bounded.peak <= bound;
+        result = result && (order_bytes == 0 || (memcmp(postorder, graph->postorder, order_bytes) == 0 && memcmp(backward, graph->backward, order_bytes) == 0));
+    }
+    arena_pop_to(scratch, mark);
+    return result;
+}
+
 // One solve, checked without a second solver. Afterwards the graph holds that solve's rows and the count is returned.
 static uint64_t dataflow_test_solve(DataflowTestTally* tally, Dataflow* graph, Arena* scratch, bool reachability)
 {
     dataflow_test_expect(tally, dataflow_test_order(graph, scratch), "an order does not visit every block once");
+    dataflow_test_expect(tally, dataflow_test_postorder_bound(graph, scratch), "dataflow_postorder exceeds its scratch bound");
     const uint64_t iterations = dataflow_liveness(graph);
     uint64_t expected_iterations = 0;
     dataflow_test_expect(tally, iterations != 0, "a solve counted no sweep");

@@ -59,6 +59,8 @@ struct __attribute__((aligned(64))) Dataflow
 static __attribute__((unused)) bool dataflow_create(Arena* arena, uint32_t block_count, uint32_t value_count, uint32_t edge_count, Dataflow* result);
 // Failure leaves both orders unchanged. Scratch memory is returned to its original length on either outcome.
 static __attribute__((unused)) bool dataflow_postorder(Dataflow* dataflow, Arena* scratch);
+// An upper bound on the scratch bytes dataflow_postorder takes for a CFG of this size, alignment gaps included.
+static __attribute__((unused)) uint64_t dataflow_postorder_scratch_bytes(uint32_t block_count, uint32_t edge_count);
 static __attribute__((unused, noinline, aligned(64))) uint64_t dataflow_liveness_vector_one(Dataflow* dataflow);
 static __attribute__((unused, noinline, aligned(64))) uint64_t dataflow_liveness_vector_rows(Dataflow* dataflow);
 static __attribute__((unused)) uint64_t dataflow_liveness(Dataflow* dataflow);
@@ -223,6 +225,15 @@ static void dataflow_backward(Dataflow* dataflow, uint8_t* visited, DataflowVisi
     {
         dataflow->backward[position] = finished[block_count - 1 - position];
     }
+}
+
+// visited, the visit stack, predecessor_offsets and finished per block, predecessors per edge, and at most one alignment
+// gap before each of the pushes that can have one (the stack's and the first uint32_t column's).
+static uint64_t dataflow_postorder_scratch_bytes(uint32_t block_count, uint32_t edge_count)
+{
+    const uint64_t blocks = (uint64_t)block_count * (sizeof(uint8_t) + sizeof(DataflowVisit) + 2 * sizeof(uint32_t)) + sizeof(uint32_t);
+    const uint64_t edges = (uint64_t)edge_count * sizeof(uint32_t);
+    return blocks + edges + _Alignof(DataflowVisit) + _Alignof(uint32_t);
 }
 
 static bool dataflow_postorder(Dataflow* dataflow, Arena* scratch)

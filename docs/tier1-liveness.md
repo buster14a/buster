@@ -123,8 +123,10 @@ textual use.
 
 `cross_block_values`, `iterations`, `matrix_bytes`, `retained_bytes` and
 `scratch_bytes` make the representation cost visible. `scratch_bytes` is a
-bounded storage estimate including the postorder visit stack and alignment
-allowance, not an RSS reading. CFG, dense maps, construction buffers and all
+bounded storage estimate including `dataflow_postorder`'s scratch (its visit
+stack and both orders' columns, `dataflow_postorder_scratch_bytes`) and
+alignment allowance, not an RSS reading; `test-dataflow` runs the postorder in
+exactly that bound. CFG, dense maps, construction buffers and all
 four matrices are discarded. Only intervals and exact selected-use CSR survive
 for allocation. Dense grouping, transpose construction, validation and envelope
 publication belong in any measurement of this producer-to-consumer path.
