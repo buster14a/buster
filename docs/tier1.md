@@ -180,7 +180,8 @@ LICM on vector and mask values alone), `vectorize` (#2743's loop vectorizer,
 [its guide](tier1-loop-vectorization.md)), `unroll` (#2755's [loop
 unrolling](tier1-loop-unrolling.md)), `tables` (#3298's switches of
 constants as loads of their jump tables' values, [the optimization
-guide](ir-optimization.md#switches-of-constants-3298)), `gvn` (as
+guide](ir-optimization.md#switches-of-constants-3298)), `storemotion` (#3309's
+[loop store motion](tier1-store-motion.md), before promotion), `gvn` (as
 `--tier1-gvn`), `inline` (`-inline` as `--tier1-no-inline`), or `all`. The
 default is SCCP, dead-code removal, CFG cleanup, its merges, the inlining,
 `vectors` and `tables`. The restricted
@@ -210,7 +211,13 @@ loop was seen: the natural loops (`loops`), how many were `unrolled`, each
 refusal's count by its name (`outer`, `irreducible`, `preheader`, `latch`,
 `exit`, `call`, `control`, `stack`, `test`, `predicate`, `bound`, `induction`,
 `size`, `growth`), and the main loops' `copies`, the `reductions` they split
-and the instructions they `added`.
+and the instructions they `added`. With `+storemotion`, a `tier1-store-motion`
+line follows wherever the pass looked at a loop: the loops that store to one of
+the unit's distinct objects (`loops`), each outcome's count (`moved`,
+`irreducible`, `barrier`, `preheader`, `unknown-store`, `many`, `no-key`), the
+`keys` moved and the stored keys left by refusal (`key.met`, `key.bounds`,
+`key.type`, `key.unread`, `key.limit`, `key.chain`), the `loads` that read a
+slot, the `stores` a slot takes too and the instructions `added`.
 
 CFG cleanup's merges join a block to its predecessor when that predecessor is
 its only one and it is the predecessor's only executable successor. The block
@@ -526,6 +533,53 @@ A select of a vector's lanes less than zero is one `vpblendvb`, `vblendvps` or
 `vblendvpd` where the comparison is its alone (#2780,
 `BUSTER_TIER1_VECTOR_BLENDV`).
 
+### The upper vector state (#2830)
+
+A legacy SSE instruction keeps its destination's bits above 127. While the upper
+state is dirty, the 9700X makes it wait for the register's old value: #2755's
+saxpy body ran at 6.0 cycles an element after a 512-bit instruction, against 1.07
+after `vzeroupper` ([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier1-unroll-2755-2026-11-15),
+`9700x/forms/`). Tier 1 keeps the state clean in two ways, as clang does:
+
+- **`vzeroupper` on the way out.** `tier1_emit_function` predicts from the
+  function's value types whether its code will name a ymm or zmm register below
+  16 (`tier1_emit_upper_likely`: a 32- or 64-byte vector value), and emits it
+  with `Tier1EmitResult.zero_upper` if so. It then checks the code
+  (`tier1_emit_upper_dirty`, sixteen records at a time, each form's operand
+  classes gathered from the form table) and emits the function again only where
+  the prediction was wrong. Emitting every such function twice instead cost
+  `main.c`'s `--tier1 -march=znver5` compile 5.7% on the 9700X. A `vzeroupper` then goes right before each call,
+  after its `al`. Another goes before each return's epilogue, so the unwind
+  reader still finds the epilogue right before the `ret`. Neither goes where a
+  ymm or zmm argument (`tier1_select_call_wide`) or result
+  (`tier1_select_result_wide`) is live. zmm16 to zmm31 don't count: no legacy
+  instruction reaches them, and `vzeroupper` leaves them alone. The code's
+  certificate regenerates the call's `vzeroupper` and accepts the epilogue's.
+  The placement is one per call and ret, not clang's per-block analysis: a
+  function that is dirty anywhere clears the state at every exit.
+- **VEX forms.** At a target with AVX, `tier1_emit_vex` rewrites the finished
+  code's legacy SSE records as their VEX twins, one record for one, so that no
+  index into the records changes. The pairs are the `BUSTER_TIER1_VEX_TWINS`
+  list: `addss x, y` becomes `vaddss x, x, y`, a register merge `movss x, y`
+  becomes `vmovss x, x, y`, `movaps` becomes `vmovaps`, and so on. Each twin
+  computes its legacy form's low 128 bits and zeroes the rest. `test-tier1-emit`
+  runs every pair natively on random state and compares the registers, flags,
+  MXCSR and memory. A function with an asm body keeps its legacy records: the
+  body's are the program's own.
+  Each emission pass rewrites the records before the code's certificate and the
+  debug definitions read them, so `--verify` and `-g` check the final code. They
+  decode and compare records through `tier1_emit_vex_canonical`, which maps a
+  twin back to its legacy record. That is sound because the certificate's
+  register cells never read a register's upper bytes apart from its low ones. The
+  debug locations' parameter copies (`check_tier1_debug_transfer`) read twins the
+  same way, so a parameter's location follows a `vmovaps` or `vmovss x, x, y` copy
+  as it follows `movaps` or `movss`.
+
+The per-unit helpers (`c_check_program_helpers.c`) write no ymm or zmm register,
+so they leave the state as they find it, and Tier 1 clears it before calling them.
+`test-tier1-masks` checks each compiled function's placement, and that no legacy
+SSE record is left at an AVX target. Tier 0 has neither change yet (#3335).
+
 ### Inlining (#1282, #2541)
 
 Between the lowering and SSA promotion, `--tier1` expands a body's calls of the
@@ -764,7 +818,12 @@ blocks keep their numbers and a block's phis stay first:
   no count reaches 64), and selects on its bit 6;
 - a comparison: equality from the halves' `xor`s, `or`ed; an order from the high
   halves' (strict, of the predicate's signedness) where they differ, else the
-  low halves' (unsigned);
+  low halves' (unsigned); of two sign extensions, or two zero extensions, from
+  the same 32- or 64-bit type (C's `(__int128)a < b` of two longs, #3035), the
+  sources' own comparison, by the predicate for sign extensions (which keep
+  both orders) and by its unsigned twin for zero extensions (whose values are
+  never negative), one `cmp` and `setcc` where the halves' took three compares
+  and a `cmov`; mixed extensions and any other operands keep the general form;
 - an extension: the value as the low half (a 64-bit one itself) and zero or its
   sign as the high half; a truncation, the low half (to 64 bits the half
   itself); a pointer's conversions, through the low half;

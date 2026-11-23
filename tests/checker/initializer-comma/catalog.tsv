@@ -18,3 +18,30 @@ braced-valid.c	0	0	0	accepted nested and designated initializers retain complete
 braced-compound.c	4	4	0	a compound literal diagnoses each incompatible element of its own initializer
 braced-range.c	6	6	0	GNU range repetitions retain one diagnostic per source conversion
 braced-excess.c	7	7	0	recovered incompatible elements suppress trailing excess warnings and keep earlier warnings
+braced-later-excess.c	12	11	0	later valid nested lists and string subobjects retain their excess warnings
+braced-later-commas.c	14	4	0	ignored excess values retain comma warnings after rejected sibling conversions
+braced-excess-policy.c	8	0	0	excess initializer warnings honor command line promotion and suppression
+braced-range-excess.c	3	2	0	GNU range lists retain repeated excess warnings and later independent conversions
+braced-range-strings.c	6	1	0	GNU ranges repeat excess-list warnings but diagnose each overlong string once
+braced-recoverable-excess.c	5	6	0	recoverable pointer conversions retain excess warnings while atomic rvalues suppress them
+braced-excess-scopes.c	2	1	0	source warning scopes override excess promotion and restore the command line policy
+braced-static-order.c	1	4	0	static constant validation follows conversion errors and excess warnings
+atomic-conditional.c	0	9	0	atomic conditional initialization preserves matching typedef spelling
+atomic-conditional-warnings.c	6	2	0	atomic conditional initializer errors retain comma warnings
+atomic-conditional-recovery.c	0	2	0	rejected atomic deductions suppress invalid binding cascades
+atomic-conditional-valid.c	0	0	0	valid atomic conditional deductions retain complete output
+compound-boundary.c	0	2	0	invalid compound literals suppress derivative enclosing initializer errors
+compound-dependencies.c	6	9	0	invalid literal dependencies retain independent comma warnings
+compound-expressions.c	0	8	0	invalid compound values suppress derivative expression errors
+compound-statements.c	2	12	0	statement expressions retain independent initializer errors and recover empty values
+compound-valid-dependencies.c	0	4	0	valid compound literals permit independent enclosing conversions
+compound-independent-statements.c	0	10	0	independent statement errors do not poison a later usable compound value
+compound-call-branches.c	0	4	0	invalid compound call arguments retain errors in independent arguments
+compound-storage.c	0	3	0	static compound failures suppress dependent conversions and retain independent declarations
+compound-accepted.c	0	0	0	accepted compound dependencies retain complete executable output
+compound-empty-elements.c	2	19	0	empty compound statement values retain independent braced conversions
+compound-empty-static.c	0	8	0	recovered void conversions add no derivative static constant errors
+compound-excess-dependencies.c	4	4	0	accepted compounds in discarded excess values retain their own comma warnings
+compound-relaxed-dependencies.c	0	8	0	recoverable literal-body conversions retain independent enclosing conversions
+compound-relaxed-accepted.c	0	2	0	recoverable compound conversions retain executable values when demoted
+compound-static-relaxed.c	0	4	0	nonconstant static literal conversions poison dependencies while automatic values remain usable

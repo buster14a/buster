@@ -620,6 +620,13 @@ struct ExecutableOptions
     // place, each page of a mapped file would be copied on its first write. An output written in order (a FIFO) is
     // patched in place still.
     bool stage;
+    // For a link whose runtime atoms' bytes are borrowed from a runtime snapshot's mapping (bind_begin_borrowed), the
+    // mapping, or null: a chunk with a piece whose bytes are in it is staged, as with `stage`, and the others patched in
+    // place, so that the snapshot is only read and a large program's own bytes are copied no more than before. An output
+    // written in order patches the borrowed bytes in place, in the process's private copy of the snapshot's pages,
+    // which the runtime that maps them must then not bind again.
+    const uint8_t* borrowed;
+    uint64_t borrowed_bytes;
     // For the tests, or null: room for `boundary_capacity` of the chunks' boundaries, which lane 0 copies there (as many
     // as fit, of ExecutableResult.chunks + 1).
     uint64_t* boundaries;

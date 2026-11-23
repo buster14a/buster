@@ -12,10 +12,19 @@
 // and perf: readelf reads every file without a warning; llvm-dwarfdump verifies its DWARF, a unit per 256 functions;
 // gdb stops in the program's functions, unwinds through them to _start with its .eh_frame and gives each frame its
 // function's line in streamed.c from the DWARF; and perf's samples, with DWARF call graphs, name the program's
-// functions, reach _start and give the functions' lines.
+// functions, reach _start and give the functions' lines. The writer lane's handoffs (#3150): the ready word is published
+// only where more chunks are ready, and once at the end (an empty .text's, a partial last chunk's, a failure's), so that
+// a write publishes at most once per chunk it streamed and once more; a writer asleep on the word is woken by the
+// terminal handoff; and a failed write, of a chunk or before any, ends every schedule with the file's error.
 // main.c includes this file after tier0_test.c (its interpreter), unwind_native_test.c and streaming.c.
 
 #include "buster/compiler/test_paths.h"
+
+// OS-dependent includes
+#include <errno.h>
+#include <signal.h>
+#include <sys/resource.h>
+#include <unistd.h>
 typedef struct StreamTestTally StreamTestTally;
 struct StreamTestTally
 {
@@ -396,6 +405,149 @@ static bool stream_test_same(String8 left, String8 right)
     return left.pointer != 0 && right.pointer != 0 && left.length == right.length && memcmp(left.pointer, right.pointer, left.length) == 0;
 }
 
+// The writer lane's handoffs on a write of no lanes and no file (#3150): .text grows by `stream_flush`es, and the ready
+// word must change only where a whole chunk is newly ready, then once with the done bit; an empty .text's terminal
+// handoff and a failure's after one are published once.
+static void stream_test_handoffs(StreamTestTally* tally)
+{
+    const StreamOptions options = {
+        .schedule = STREAM_SCHEDULE_WRITER,
+    };
+    // .text's sizes after each function, in 4 KB chunks: 1000 bytes, then 3 functions that leave the chunk partial, the
+    // first chunk whole, 2 more within the second, two chunks more at once, and a partial last one.
+    static const uint64_t sizes[] = { 1000, 2000, 3000, 4000, 4096, 5000, 6000, 12288, 13000 };
+    static const uint32_t words[] = { 0, 0, 0, 0, 2, 2, 2, 6, 6 };
+    StreamResult result;
+    memset(&result, 0, sizeof(result));
+    StreamWrite write;
+    memset(&write, 0, sizeof(write));
+    write.options = &options;
+    write.result = &result;
+    write.layout.chunk_bytes = 4096;
+    bool same = true;
+    for (uint32_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i += 1)
+    {
+        write.code.text_size = sizes[i];
+        stream_flush(&write, false);
+        same = same && __atomic_load_n(&write.ready, __ATOMIC_RELAXED) == words[i];
+    }
+    stream_test_expect(tally, same, "the ready word follows the whole chunks", 0);
+    stream_test_expect(tally, result.publications == 2, "a function that readies no chunk publishes nothing", 0);
+    stream_flush(&write, true);
+    stream_test_expect(tally, __atomic_load_n(&write.ready, __ATOMIC_RELAXED) == (8u | BUSTER_STREAM_READY_DONE) && write.final_text_size == 13000,
+                       "the terminal handoff has the partial last chunk and .text's size", 0);
+    stream_publish(&write, write.flushed, true);
+    stream_test_expect(tally, result.publications == 3, "the terminal handoff is published once", 0);
+    // A field that waits holds the boundary: no chunk is ready past it until it is patched.
+    uint32_t fields[1] = { 100 };
+    uint8_t patched[1] = { 0 };
+    memset(&result, 0, sizeof(result));
+    memset(&write, 0, sizeof(write));
+    write.options = &options;
+    write.result = &result;
+    write.layout.chunk_bytes = 4096;
+    write.code.fields = fields;
+    write.code.patched = patched;
+    write.code.fixup_count = 1;
+    for (uint64_t size = 4096; size <= 40960; size += 4096)
+    {
+        write.code.text_size = size;
+        stream_flush(&write, false);
+    }
+    stream_test_expect(tally, result.publications == 0 && __atomic_load_n(&write.ready, __ATOMIC_RELAXED) == 0, "a pending field publishes nothing", 0);
+    patched[0] = 1;
+    stream_flush(&write, false);
+    stream_test_expect(tally, result.publications == 1 && __atomic_load_n(&write.ready, __ATOMIC_RELAXED) == 20, "its patch publishes every chunk at once", 0);
+    // An empty .text: one terminal handoff of no chunks.
+    memset(&result, 0, sizeof(result));
+    memset(&write, 0, sizeof(write));
+    write.options = &options;
+    write.result = &result;
+    write.layout.chunk_bytes = 4096;
+    stream_flush(&write, false);
+    stream_flush(&write, true);
+    stream_test_expect(tally, result.publications == 1 && __atomic_load_n(&write.ready, __ATOMIC_RELAXED) == BUSTER_STREAM_READY_DONE,
+                       "an empty .text's terminal handoff", 0);
+    // A failure before any chunk: the error path's terminal handoff, once.
+    memset(&result, 0, sizeof(result));
+    memset(&write, 0, sizeof(write));
+    write.options = &options;
+    write.result = &result;
+    stream_publish(&write, write.flushed, true);
+    stream_publish(&write, write.flushed, true);
+    stream_test_expect(tally, result.publications == 1 && __atomic_load_n(&write.ready, __ATOMIC_RELAXED) == BUSTER_STREAM_READY_DONE,
+                       "a failure's terminal handoff", 0);
+}
+
+// A writer lane asleep on the ready word (StreamOptions.sleeping_writer): the terminal handoff wakes it, and the file is
+// the reference's.
+static void stream_test_sleeping_writer(StreamTestTally* tally, const char* directory, const StreamProgram* program, String8 reference, uint64_t expected)
+{
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/stream-sleeping-writer", directory);
+    const StreamOptions options = {
+        .path = { .pointer = path, .length = strlen(path) },
+        .schedule = STREAM_SCHEDULE_WRITER,
+        .order = STREAM_ORDER_CALLEES,
+        .chunk_bytes = 4096,
+        .sleeping_writer = true,
+    };
+    StreamResult result;
+    const bool wrote = stream_write(program, &options, &result);
+    Arena arena = arena_reserve(1ull << 32);
+    String8 bytes = { 0 };
+    const bool read = wrote && arena.base != 0 && stream_test_read(path, &arena, &bytes);
+    char detail[PATH_MAX + 96];
+    snprintf(detail, sizeof(detail), "%s (error %d, %" PRIu64 " publications, %" PRIu64 " wakes)", path, (int)result.error, result.publications, result.wakes);
+    // (Earlier handoffs can find it asleep too, where the CPUs are shared; the terminal one must.)
+    stream_test_expect(tally, wrote && result.terminal_wake && result.wakes >= 1 && result.wakes <= result.publications,
+                       "the terminal handoff wakes a sleeping writer", detail);
+    stream_test_expect(tally, read && stream_test_same(bytes, reference), "a sleeping writer's file is the reference's", path);
+    stream_test_expect(tally, wrote && stream_test_run(directory, path, expected), "a sleeping writer's file runs", path);
+    arena_release(&arena);
+}
+
+// Failed writes, each schedule's: a file size limit (RLIMIT_FSIZE, its SIGXFSZ ignored) before .data's end fails lane
+// 0's own write, before any handoff; one past .text's first 4 KB chunk fails a chunk's, the writer lane's with one.
+// Either way the write ends, with the file's error and EFBIG.
+static void stream_test_write_failures(StreamTestTally* tally, const char* directory, const StreamProgram* program)
+{
+    static const char* const schedules[STREAM_SCHEDULES] = { "end", "stream", "writer" };
+    const StreamLayout layout = stream_layout_begin(program, 4096);
+    const uint64_t limits[2] = { layout.data_offset + 1, layout.text_offset + 4096 };
+    struct rlimit saved;
+    const bool limited = getrlimit(RLIMIT_FSIZE, &saved) == 0;
+    void (*handler)(int) = signal(SIGXFSZ, SIG_IGN);
+    for (uint32_t l = 0; limited && l < 2; l += 1)
+    {
+        for (uint32_t schedule = 0; schedule < STREAM_SCHEDULES; schedule += 1)
+        {
+            char path[PATH_MAX];
+            char detail[PATH_MAX + 64];
+            snprintf(path, sizeof(path), "%s/stream-failure-%u-%s", directory, l, schedules[schedule]);
+            unlink(path);
+            const StreamOptions options = {
+                .path = { .pointer = path, .length = strlen(path) },
+                .schedule = (StreamSchedule)schedule,
+                .order = STREAM_ORDER_CALLERS,
+                .chunk_bytes = 4096,
+            };
+            struct rlimit limit = { .rlim_cur = limits[l], .rlim_max = saved.rlim_max };
+            const bool set = setrlimit(RLIMIT_FSIZE, &limit) == 0;
+            StreamResult result;
+            const bool wrote = set && stream_write(program, &options, &result);
+            setrlimit(RLIMIT_FSIZE, &saved);
+            snprintf(detail, sizeof(detail), "%s (error %d, errno %d)", path, set ? (int)result.error : -1, set ? result.system_error : -1);
+            stream_test_expect(tally, set && !wrote && result.error == STREAM_ERROR_FILE && result.system_error == EFBIG, "a failed write is the file's error",
+                               detail);
+            const bool handed = l == 0 ? result.publications == 1 : result.publications >= 1 && result.publications <= result.chunks_streamed + 1;
+            stream_test_expect(tally, !set || schedule != STREAM_SCHEDULE_WRITER || handed, "a failed write's terminal handoff", detail);
+            unlink(path);
+        }
+    }
+    signal(SIGXFSZ, handler);
+}
+
 // One program, in both orders, with `chunk_bytes`: every schedule's file, the direct path's, and their runs.
 static void stream_test_program(StreamTestTally* tally, const char* directory, const StreamProgram* program, uint64_t chunk_bytes, bool cross_check, Arena* arena)
 {
@@ -441,6 +593,13 @@ static void stream_test_program(StreamTestTally* tally, const char* directory, c
                     // Streaming happened: a chunk was written before the last function compiled, when there are several.
                     stream_test_expect(tally, result.chunks < 3 || result.chunks_streamed != 0, "chunks were written while the program compiled", path);
                 }
+                // The writer lane's handoffs (#3150): one per advance of the chunks made ready, each at least a chunk,
+                // and the terminal one; the other schedules publish none.
+                snprintf(detail, sizeof(detail), "%s (%" PRIu64 " publications, %" PRIu64 " chunks streamed, %u functions)", path, result.publications,
+                         result.chunks_streamed, program->function_count);
+                stream_test_expect(tally, schedule == STREAM_SCHEDULE_WRITER ? result.publications >= 1 + (result.chunks_streamed != 0) &&
+                                                                               result.publications <= result.chunks_streamed + 1 : result.publications == 0,
+                                   "the ready word is published once per advance and once at the end", detail);
                 stream_test_expect(tally, order == STREAM_ORDER_CALLEES ? result.forward_fixups == 0 || schedule == STREAM_SCHEDULE_END :
                                                                          result.forward_fixups != 0 || schedule == STREAM_SCHEDULE_END,
                                    "forward fields only in the callers' order", path);
@@ -461,6 +620,14 @@ static void stream_test_program(StreamTestTally* tally, const char* directory, c
             stream_test_expect(tally, wrote, "the direct path writes the same code", detail);
             stream_test_expect(tally, wrote && stream_test_run(directory, path, expected), "the direct path's file runs and prints the interpreter's fold", path);
         }
+        if (order == STREAM_ORDER_CALLEES && chunk_bytes == 4096)
+        {
+            stream_test_sleeping_writer(tally, directory, program, reference, expected);
+        }
+    }
+    if (predicted && chunk_bytes == 4096)
+    {
+        stream_test_write_failures(tally, directory, program);
     }
 }
 
@@ -498,6 +665,7 @@ static int run_streaming_tests(int argc, char** argv)
     StreamTestTally tally = { 0 };
     stream_benchmark_test_cpus(&tally);
     stream_test_profile_contract(&tally);
+    stream_test_handoffs(&tally);
     char directory[PATH_MAX];
     const char* temporary = oracle_temporary_directory();
     snprintf(directory, sizeof(directory), "%s/buster-streaming-XXXXXX", temporary);

@@ -2020,7 +2020,10 @@ object p points to, as clang's `PaddingClearer` does.
     - a cast's type name, or a call's result: an array that a pointer there
       points to is always written with sugar (a declarator's parentheses, a
       typedef or `typeof`), so clang keeps it; an element subscripted out of
-      it, it clears.
+      it, it clears, unless the cast's typedef specifier writes that level
+      (an array of a typedef's arrays, `&(*(R (*)[2])p)[1]` with
+      `typedef struct S R[3]`), whose own declaration answers below it
+      (`check_lower_padding_cast_typedef`, #1842).
   - **The sugar** (`check_lower_padding_sugared`):
     - a group's `PAREN` node, which the reader makes over an array in a unit
       that names the builtin (`docs/c-types.md`'s "Type sugar");
@@ -2031,9 +2034,10 @@ object p points to, as clang's `PaddingClearer` does.
   - **The walk:** a frame's `opaque` count makes the array it reaches all
     occupied (`check_lower_padding_entries`).
 
-  **Still cleared:** an array of a typedef's arrays subscripted out of a cast's
-  pointer (`(R (*)[2])p` with `typedef struct S R[3]`, `&(*q)[1]`), whose
-  typedef no type name's sugar records here.
+  **Still cleared:** an array of a `typeof` specifier's arrays subscripted out
+  of a cast's pointer (`&(*(__typeof__(r) (*)[2])p)[1]`), and of a call's
+  result's (`&(*f())[1]` with `R (*f(void))[2]`), whose specifier this
+  doesn't read.
 
 `__builtin_invoke(f, a...)` (0x455, #148) is the call `f(a...)` in C, as
 clang's Sema builds it.
@@ -3501,10 +3505,19 @@ function, and an asm label, `-fno-builtin`, `-fno-builtin-NAME`,
   those pieces of its value's byte repeated, a constant value's computed by the
   compiler. The value is the destination. A larger size, or one that is no
   constant, calls the library's function, as clang's code calls `memcpy` past
-  32 bytes. clang's `memmove` stores up to 8 of its widest vectors inline (128
-  bytes at x86-64, 256 at x86-64-v3 and x86-64-v4, 512 at znver5, which prefers
-  512-bit vectors), so this code calls `memmove` of 129 to 512 bytes where
-  clang's doesn't at those targets; and clang's `memset` calls the library
+  32 bytes. clang's `memmove` stores up to 8 of its widest pieces inline, 4 in
+  a function with `minsize` (`MaxStoresPerMemmove` and its `OptSize` twin): 32
+  bytes with AVX (256 at x86-64-v3 and x86-64-v4, 512 at znver5, which prefers
+  512-bit vectors); 8 where the function's tuning CPU has `TuningSlowUAMem16`
+  (`-mtune`'s, else `-march`'s, or a `target` attribute's `tune=`, else its
+  `arch=`: core2, penryn, nocona, bonnell, k8 and the older CPUs,
+  `predefines_slow_unaligned`) and its instruction set has no SSE4.2, which
+  makes LLVM take unaligned 16-byte accesses as fast; else 16. So this code
+  moves up to 128 bytes inline at x86-64, 64 for core2's tuning or with
+  `minsize`, 32 for both (`check_program_move_bytes`, from
+  `X86Target.slow_unaligned_16` and `CheckProgram.object_move`, which the
+  references' pass and the lowering read alike), and calls `memmove` of 129 to
+  512 bytes where clang's doesn't with AVX. clang's `memset` calls the library
   whatever the size, so this code stores a small `memset`'s bytes where
   clang's code calls it.
 - `COPY`'s move form (`tier0_copy_moves`, `BUSTER_TIER0_MOVE_VALUE`): a value
@@ -3535,7 +3548,10 @@ function, and an asm label, `-fno-builtin`, `-fno-builtin-NAME`,
 
 `memcmp` stays a call, as clang's code makes it. The node machine and its
 census leave a computed call to the pipeline, and take a marked one that stays a
-call as any call (`check_program_call_library`). `test-checker
+call as any call (`check_program_call_library`). At reader time the node
+machine sees no function's tuning or `minsize`, so its shadow counts a
+`memmove` of 33 to 128 bytes that those keep a call as a difference
+(`node_machine_reader_call_library`). `test-checker
 --program-library`'s `library-computed-inline` program runs each size to 33,
 overlapping both ways, `memmove` of each size from 34 to 129 between unaligned
 ranges that overlap by up to 65 bytes both ways, and the signs of the harness's
@@ -3543,7 +3559,11 @@ special values, through the plain names and `__builtin_copysign`,
 `__builtin_copysignf` and `__builtin_copysignl`, against clang -O0's build; and
 `test-checker-driver`'s library runs define `memcpy`, `memmove`, `abs`, `labs`,
 `fabs` and `copysign` in the unit, counting their calls (`memmove` of 64, 128
-and 129 bytes among them), which must be clang's under each option.
+and 129 bytes among them), which must be clang's under each option; and the
+tuning program's functions, plain, `minsize`, `target("arch=core2")`,
+`target("tune=core2")`, both and `target("tune=x86-64")`, move 32 to 129 bytes
+under the default target, `-march=core2`, `-mtune=core2`, `-march=x86-64-v2`
+and `-march=nehalem`, counting the calls against clang's.
 
 **Folds.** The rows with attribute `E` that clang's constant evaluator folds,
 this folds too, in constant contexts (static initializers, `_Static_assert`,

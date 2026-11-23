@@ -1265,6 +1265,10 @@ struct CheckInput
     // Under PPOptions.node_front alone, the node machine's front's report (c_check_node_machine_front.c, #2524): null in
     // every other run.
     struct NodeFrontShadow* node_front;
+    // --node-bodies (#2850): the mask in `deferred_tokens` is the producer's. A masked body is still the unit's: the
+    // program keeps it with no control of its own, and the lowering writes its function from what `node_front` keeps of
+    // it (its controls, each control's root's tape and what is beside it).
+    bool node_bodies;
     // Explicit sizeof operand folds and their input tokens; regression tests bound the preparation work (#822).
     uint32_t sizeof_queries;
     uint64_t sizeof_query_tokens;
@@ -10126,7 +10130,7 @@ static void check_input_mark_member(CheckInputReader* reader, uint32_t index, co
     }
 }
 
-static bool check_input_fallthrough_noreturn_object(const CheckInputReader* reader, uint32_t declaration);
+static bool check_input_fallthrough_noreturn_object(const CheckInput* input, const Parser* parser, uint32_t declaration);
 
 // A completed record's member `index` (#1844), declared at `token` of type `type`: recorded in CheckInput.noreturn_members
 // where its type is a function pointer's (or an array's of them) that GNU's noreturn marks: on the member's own declaration
@@ -10142,7 +10146,7 @@ static void check_input_noreturn_member_add(CheckInputReader* reader, uint32_t i
     const bool pointer = type_kind(types, level) == BUSTER_TYPE_KIND_POINTER &&
                          type_kind(types, type_strip_aligned(types, type_element(types, level))) == BUSTER_TYPE_KIND_FUNCTION;
     CheckInput* input = reader->output;
-    if (pointer && (marked || (token < reader->parser->tokens.count && check_input_fallthrough_noreturn_object(reader, token))) && !input->resource)
+    if (pointer && (marked || (token < reader->parser->tokens.count && check_input_fallthrough_noreturn_object(reader->output, reader->parser, token))) && !input->resource)
     {
         if (input->noreturn_member_count == input->noreturn_member_capacity)
         {
@@ -11067,11 +11071,20 @@ static TypeId check_input_declarator(CheckInputReader* reader, TypeId base, uint
         if (query < parser->tokens.count && parser->tokens.names[query] == C_NAME_SIZEOF && !check_input_warning_unevaluated(reader, query))
         {
             const uint32_t at = check_input_vla_initializer_element(reader, query);
-            if (at < parser->tokens.count && reader->output->report_count == 0 && !reader->output->resource)
+            // Once per initializer element: an earlier runtime-sized query of the same element recovered its report.
+            const CheckInput* output = reader->output;
+            const bool reported = output->recovered_count != 0 && output->recovered_reports[output->recovered_count - 1].token == at &&
+                                  output->recovered_reports[output->recovered_count - 1].message == CHECK_INPUT_CONSTANT_INITIALIZER;
+            if (at < parser->tokens.count && reader->output->report_count == 0 && !reader->output->resource && !reported)
             {
                 check_input_report(reader, at, CHECK_INPUT_CONSTANT_INITIALIZER);
             }
-            result = 0;
+            // clang goes on past the error (#2252): the query reads as an int's size, so the initializer's later commas
+            // and the unit's later declarations keep their diagnostics.
+            const bool eligible = reported || (reader->output->report_count == 1 && reader->output->reports[0].token == at);
+            check_input_lane_refuse(reader, eligible && reader->lane, "an invalid initializer's later diagnostics are in source order");
+            const bool recovered = eligible && !reader->lane && (reported || check_input_recover_reports(reader, 0));
+            result = recovered ? BUSTER_TYPE_INT : 0;
         }
     }
     return result;
@@ -13883,6 +13896,19 @@ static void check_input_bind_checked(CheckInputReader* reader, uint32_t token, u
                 }
             }
         }
+        else if (__builtin_expect(reader->output->symbol_pragmas != NULL && reader->output->symbol_pragmas->has_referenced_clone, 0))
+        {
+            // A reference before the first ordinary declaration may already have named the pragma clone's symbol.
+            const CheckInputSymbolPragmas* history = reader->output->symbol_pragmas;
+            for (uint32_t i = 0; i < history->count; i += 1)
+            {
+                const CheckInputSymbolPragma* record = history->records + i;
+                if (record->name == name && record->first_use != 0)
+                {
+                    reader->objects[token] = reader->objects[record->first_use - 1];
+                }
+            }
+        }
         if (!dropped && !kept_invalid && (linked == 0 || !check_input_bit(reader->declaration_bits, linked - 1, BUSTER_CHECK_BITS_DEFINED)))
         {
             reader->linked_declarations[name] = token + 1;
@@ -14493,6 +14519,7 @@ static inline __attribute__((always_inline)) void check_input_resolve_name(Check
 {
     const Parser* parser = reader->parser;
     const uint32_t identifier = parser->tokens.names[i];
+    bool pragma_name = false;
     if (__builtin_expect(reader->name_hooks, 0))
     {
         const uint32_t handle = c_bindings_lookup(&reader->bindings, C_BINDING_ORDINARY, identifier);
@@ -14502,7 +14529,14 @@ static inline __attribute__((always_inline)) void check_input_resolve_name(Check
         }
         if (__builtin_expect(reader->output->symbol_pragmas != NULL, 0))
         {
-            check_input_symbol_overload_use(reader, i, handle != 0 ? reader->bindings.declaration[handle - 1] : BUSTER_CHECK_NONE);
+            if (handle == 0 && role == PARSE_ROLE_OPERAND)
+            {
+                pragma_name = check_input_symbol_unbound_use(reader, i);
+            }
+            else if (handle != 0)
+            {
+                check_input_symbol_overload_use(reader, i, reader->bindings.declaration[handle - 1]);
+            }
         }
     }
     const uint16_t builtin = check_input_builtin_id(reader, i);
@@ -14512,7 +14546,7 @@ static inline __attribute__((always_inline)) void check_input_resolve_name(Check
     // In a function whose no_builtin names the function, its call is the declaration's (#1958).
     const bool claimed = cbuiltin_stdc_library(builtin) ? check_input_stdc_library_call(reader, i, bound, builtin) && !check_input_no_builtin(reader, identifier, i) :
                          bound == 0 || (check_input_builtin_kept(reader, bound, builtin) && !check_input_no_builtin(reader, identifier, i));
-    if (__builtin_expect(builtin != CBUILTIN_NONE, 0) && role == PARSE_ROLE_OPERAND && claimed)
+    if (__builtin_expect(builtin != CBUILTIN_NONE, 0) && role == PARSE_ROLE_OPERAND && claimed && !pragma_name)
     {
         // The callee may be the name in parentheses, which clang's call looks through (check_input_callee_end): they
         // are dropped with it.
@@ -14570,7 +14604,7 @@ static inline __attribute__((always_inline)) void check_input_resolve_name(Check
             }
         }
     }
-    else if (reader->output->declarations[i] == BUSTER_CHECK_NONE)
+    else if (!pragma_name && reader->output->declarations[i] == BUSTER_CHECK_NONE)
     {
         const CheckInputIntrinsicStatus intrinsic = check_input_intrinsic_prepare(reader, i);
         if (intrinsic == CHECK_INPUT_INTRINSIC_NOT_FOUND && role == PARSE_ROLE_OPERAND)
@@ -18200,11 +18234,12 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         }
         check_input_intrinsic_initialize(&reader);
         const uint32_t pragma_aliases = check_input_symbol_alias_count(input->symbol_pragmas);
-        const bool overload_capacity = pragma_aliases <= UINT32_MAX - counts.operands;
+        // A clone can participate in two immutable chains, before and after the first ordinary declaration.
+        const bool overload_capacity = pragma_aliases <= (UINT32_MAX - counts.operands) / 2;
         input->resource |= !overload_capacity;
         if (overload_capacity)
         {
-            check_input_overload_initialize(&reader, counts.groups[CHECK_INPUT_COUNT_OVERLOADABLE] != 0, counts.operands + pragma_aliases, counts.calls,
+            check_input_overload_initialize(&reader, counts.groups[CHECK_INPUT_COUNT_OVERLOADABLE] != 0, counts.operands + pragma_aliases * 2, counts.calls,
                                             reader.scratch);
         }
         if (!check_input_target_supported(&pp->options))

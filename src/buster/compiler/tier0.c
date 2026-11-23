@@ -322,11 +322,11 @@
 // takes it (another kind's value is its own whole: a constant's top bits are its own).
 #define BUSTER_TYPED_ACCESS_SEGMENT_SHIFT 62
 #define BUSTER_TYPED_ACCESS_SEGMENT (UINT64_C(3) << BUSTER_TYPED_ACCESS_SEGMENT_SHIFT)
-// A LOAD's, STORE's or SET's volatile access (#3310): one of a volatile-qualified lvalue, below the segment's bits, on a
-// scalar class's (an integer's, a floating value's or a 128-bit integer's, whose `value` holds nothing else but an atomic
-// marker and the segment). A function with one says so (Tier0Function.volatiles). Tier 0 emits every access anyway and
-// strips the bit out of line (tier0_segments_strip); the IR keeps it as BUSTER_IR_VOLATILE, which no pass removes,
-// merges or forwards (BUSTER_IR_OBSERVABLE).
+// A LOAD's, STORE's or SET's volatile access (#3310): one of a volatile-qualified lvalue, below the segment's bits, past
+// what any class's value holds (an atomic marker and its order, a vector's or a mask's bytes, #3329); and a COPY's of a
+// volatile aggregate, past its bytes. A function with one says so (Tier0Function.volatiles). Tier 0 emits every access
+// anyway and strips the bit out of line (tier0_segments_strip); the IR keeps it as BUSTER_IR_VOLATILE, on a copy's every
+// piece, which no pass removes, merges or forwards (BUSTER_IR_OBSERVABLE).
 #define BUSTER_TYPED_ACCESS_VOLATILE (UINT64_C(1) << 61)
 #define BUSTER_TYPED_SEGMENT_FS 1
 #define BUSTER_TYPED_SEGMENT_GS 2
@@ -483,6 +483,9 @@ struct Tier0AsmBody
     // through a copy of the stores of its own where the body has stores (tier0_emit_call_record).
     uint32_t exits;
     uint32_t goto_labels;
+    // The general register its call row's result is in (#2144: an asm statement's register output, which the body then
+    // doesn't store), plus one; 0 for a row of no result or an asm goto's exit in eax.
+    uint8_t result;
     // Whether the template returns (#1839): its `ret`, and the records on the straight way to it (`leave`, `pop`), leave
     // the function as clang's object does, past the epilogue. Its function keeps no local and no value in a
     // callee-saved register, as one that calls __builtin_setjmp keeps none (tier0_leaves_callee_saved), so that the way
@@ -6962,8 +6965,17 @@ static __attribute__((noinline, cold)) bool tier0_asm_bodies_check(const Tier0Fu
         const uint32_t kind = function->kinds[i];
         const bool row = kind == BUSTER_TYPED_CALL || kind == BUSTER_TYPED_TAIL_CALL;
         const bool body = row && function->values[i] < function->call_count && function->call_asm[function->values[i]] != 0;
-        // Void, or an asm goto's exit number (#1839's item 2), an int the body leaves in eax as a call's result.
-        valid = !body || (kind == BUSTER_TYPED_CALL && (function->classes[i] == BUSTER_TYPED_CLASS_VOID || function->classes[i] == BUSTER_TYPED_CLASS_I32));
+        // Void, or an asm goto's exit number (#1839's item 2), an int the body leaves in eax as a call's result, or an output
+        // of 4 or 8 bytes in its body's result register (#2144).
+        const Tier0AsmBody* asm_body = body && function->call_asm[function->values[i]] <= function->asm_body_count ?
+                                           &function->asm_bodies[function->call_asm[function->values[i]] - 1] : 0;
+        const uint32_t class = function->classes[i];
+        const bool returned = asm_body != 0 && asm_body->result != 0;
+        valid = !body || (kind == BUSTER_TYPED_CALL && asm_body != 0 &&
+                          (returned ? asm_body->result <= 16 && asm_body->result - 1 != X86_REGISTER_RSP && asm_body->exits == 0 &&
+                                          ((asm_body->touched >> (asm_body->result - 1)) & 1) != 0 &&
+                                          (class == BUSTER_TYPED_CLASS_I32 || class == BUSTER_TYPED_CLASS_U32 || class == BUSTER_TYPED_CLASS_I64 || class == BUSTER_TYPED_CLASS_U64) :
+                                      (class == BUSTER_TYPED_CLASS_VOID || class == BUSTER_TYPED_CLASS_I32)));
     }
     return valid;
 }
@@ -6971,6 +6983,13 @@ static __attribute__((noinline, cold)) bool tier0_asm_bodies_check(const Tier0Fu
 static bool tier0_asm_bodies_valid(const Tier0Function* function)
 {
     return (function->call_asm == 0 && function->asm_body_count == 0) || tier0_asm_bodies_check(function);
+}
+
+// The register call row `call`'s integer result is in: rax, or an asm body's own (#2144, Tier0AsmBody.result).
+static uint8_t tier0_call_result_register(const Tier0Function* function, uint32_t call)
+{
+    const Tier0AsmBody* body = tier0_call_body(function, call);
+    return body != 0 && body->result != 0 ? (uint8_t)(body->result - 1) : X86_REGISTER_RAX;
 }
 
 // How many of the `below` integer depths under call row `call`'s operands it saves around itself: those in caller-saved
@@ -7357,9 +7376,10 @@ static inline __attribute__((always_inline)) void tier0_emit_call(const Tier0Fun
             // A long double result from st0 into its depth's slot.
             tier0_put(writer, tier0_memory_slot(X86_FORM_FSTP_M80, frame, below, 0));
         }
-        else if (result == 1 && below != 0)
+        else if (result == 1 && below < BUSTER_TIER0_INTEGER_DEPTHS && tier0_integer_depths[below] != tier0_call_result_register(function, call))
         {
-            tier0_move(writer, tier0_integer_depths[below], X86_REGISTER_RAX);
+            // An asm body's result is in its own register (#2144, Tier0AsmBody.result), a call's in rax.
+            tier0_move(writer, tier0_integer_depths[below], tier0_call_result_register(function, call));
         }
         else if (result == 2 && floating_below != 0)
         {
@@ -9634,8 +9654,10 @@ static void tier0_emit_deep_call(const Tier0Function* function, const Tier0Entri
         }
         else if (result != 0)
         {
+            // An integer result from its register: rax, or an asm body's own (#2144).
             const uint32_t stack = result - 1;
-            tier0_spill(writer, frame, tier0_stack_register(stack, 0), tier0_deep_slot(frame, stack, stack == 0 ? below : floating_below), false);
+            const uint8_t from = stack == 0 ? tier0_call_result_register(function, call) : (uint8_t)tier0_stack_register(stack, 0);
+            tier0_spill(writer, frame, from, tier0_deep_slot(frame, stack, stack == 0 ? below : floating_below), false);
         }
     }
     for (uint32_t d = 0; d < masks; d += 1)
@@ -9998,7 +10020,9 @@ static inline __attribute__((always_inline)) uint32_t tier0_count_call(const Tie
     count += object != 0 ? tier0_result_object_records(function->calls[call].result) : 0;
     // A long double's result is stored into its slot at every depth.
     const uint32_t result = tier0_stack(function->classes[i]);
-    count += !stored && ((result == 1 && (below != 0 || (memory && tier0_class_x87(function->classes[i])))) || (result == 2 && floating_below != 0)) ? 1 : 0;
+    // An integer result is moved from its register (rax, or an asm body's own: #2144) where its depth's register is another.
+    const bool moved = below < BUSTER_TIER0_INTEGER_DEPTHS && tier0_integer_depths[below] != tier0_call_result_register(function, call);
+    count += !stored && ((result == 1 && (moved || (memory && tier0_class_x87(function->classes[i])))) || (result == 2 && floating_below != 0)) ? 1 : 0;
     *references += tail && !indirect ? 1 : 0;
     return count;
 }
@@ -14853,8 +14877,8 @@ static Tier0Code tier0_compile_entries(const Tier0Function* function, const uint
 
 // A function with segment overrides (#1447, Tier0Function.segments) or volatile accesses (#3310, Tier0Function.volatiles),
 // out of line: its values without them, in a copy of its values column (`values`), and each entry's override
-// (`segments`), from a LOAD's, STORE's, SET's, ATOMIC_RMW's or ATOMIC_CAS's value. Another kind's value is its own whole
-// (a constant's top bits are its own).
+// (`segments`), from a LOAD's, STORE's, SET's, ATOMIC_RMW's or ATOMIC_CAS's value; a COPY's volatile mark goes too.
+// Another kind's value is its own whole (a constant's top bits are its own).
 static void tier0_segments_strip(const Tier0Function* function, uint64_t* values, uint8_t* segments)
 {
     for (uint32_t i = 0; i < function->count; i += 1)
@@ -14864,8 +14888,8 @@ static void tier0_segments_strip(const Tier0Function* function, uint64_t* values
         const uint32_t segment = (uint32_t)(value >> BUSTER_TYPED_ACCESS_SEGMENT_SHIFT);
         const bool access = kind == BUSTER_TYPED_LOAD || kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET || kind == BUSTER_TYPED_ATOMIC_RMW ||
                             kind == BUSTER_TYPED_ATOMIC_CAS;
-        const bool marked = kind == BUSTER_TYPED_LOAD || kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET;
-        values[i] = access ? value & ~(BUSTER_TYPED_ACCESS_SEGMENT | (marked ? BUSTER_TYPED_ACCESS_VOLATILE : 0)) : value;
+        const bool marked = kind == BUSTER_TYPED_LOAD || kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET || kind == BUSTER_TYPED_COPY;
+        values[i] = access ? value & ~(BUSTER_TYPED_ACCESS_SEGMENT | BUSTER_TYPED_ACCESS_VOLATILE) : marked ? value & ~BUSTER_TYPED_ACCESS_VOLATILE : value;
         segments[i] = access ? (uint8_t)segment : 0;
     }
 }
