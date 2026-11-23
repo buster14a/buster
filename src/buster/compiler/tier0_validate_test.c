@@ -807,6 +807,32 @@ static void tier0_test_scan_groups(Tier0TestTally* tally, Tier0TestStream* strea
                                     taken);
         }
     }
+    // 256 and 271 arrivals that bring depth 0 alone, which the end checks 16 at a time: a lane mask from a remaining
+    // count past 255 must keep every lane, so the one that reaches a target at depth 1, the first or the sixteenth, is
+    // refused (#3394's review); and the same with its target at depth 0.
+    static const uint32_t zero_leads[] = { 0, 15 };
+    static const uint32_t zero_counts[] = { 256, 271 };
+    for (uint32_t z = 0; z < BUSTER_ARRAY_LENGTH(zero_counts); z += 1)
+    {
+        for (uint32_t way = 0; way < 2; way += 1)
+        {
+            stream->count = 0;
+            for (uint32_t j = 0; j < zero_leads[z]; j += 1)
+            {
+                tier0_test_stream_add(stream, BUSTER_TYPED_JUMP, BUSTER_TYPED_CLASS_VOID, stream->count + 1);
+            }
+            tier0_test_stream_add(stream, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_I32, 0);
+            tier0_test_stream_add(stream, BUSTER_TYPED_BRANCH_FALSE, BUSTER_TYPED_CLASS_I32, stream->count + 1 + way);
+            tier0_test_stream_add(stream, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, 1);
+            tier0_test_stream_add(stream, BUSTER_TYPED_DISCARD, BUSTER_TYPED_CLASS_I32, 0);
+            for (uint32_t j = zero_leads[z] + 1; j < zero_counts[z]; j += 1)
+            {
+                tier0_test_stream_add(stream, BUSTER_TYPED_JUMP, BUSTER_TYPED_CLASS_VOID, stream->count + 1);
+            }
+            tier0_test_stream_check(tally, way == 0 ? "arrivals of depth 0 past 255" : "arrivals of depth 0 past 255, one at a target at depth 1", stream, false, way == 0, false,
+                                    0, taken);
+        }
+    }
 }
 
 // Interacting malformed entries must defer before byte depths become producer indices or classes become shifts.
@@ -1026,7 +1052,13 @@ static void tier0_test_scan_large(Tier0TestTally* tally, Tier0TestStream* stream
                 large.argument_classes[argument - 65] = BUSTER_TYPED_CLASS_I64;
                 // The 64-argument call's ninth argument in rdi, past the first vector of 8 its arguments are checked in:
                 // taken; and its first one in rdi too: no register two arguments take (tier0_scan_arguments' `taken`).
-                const AbiLocation in_rdi = { .registers = { BUSTER_ABI_RDI, BUSTER_ABI_REGISTER_NONE }, .kind = BUSTER_ABI_LOCATION_REGISTERS };
+                const AbiLocation in_rdi = {
+                    .registers = {
+                        BUSTER_ABI_RDI,
+                        BUSTER_ABI_REGISTER_NONE,
+                    },
+                    .kind = BUSTER_ABI_LOCATION_REGISTERS,
+                };
                 const AbiLocation first_kept = large.argument_locations[argument - 64];
                 const AbiLocation ninth_kept = large.argument_locations[argument - 56];
                 large.argument_locations[argument - 56] = in_rdi;

@@ -1677,13 +1677,6 @@ vector path's cheaper setup has since moved past).
 other stream to the scalar validator, which then gives the verdict and the rule. It reads 64 entries at a time in byte
 lanes, as Tier 0's own passes do:
 
-The blocks go in groups of 16 (`BUSTER_TIER0_SCAN_GROUP`), in two passes (#3394). The first takes each block's work that
-needs nothing of the blocks before it, steps 1 and 2 and the rules that read no operand, every block of the group in
-turn: no block's result waits on another's, so the processor overlaps them, where one pass a block was bound by its
-chain of dependent searches and checks rather than by its instructions. The second takes the group's blocks in order
-with what the blocks before leave: the carried stack's operands, the depths from the function's start, the operands'
-rules, the arrivals and the values each block leaves (`Tier0ScanBlock` holds what the first pass leaves the second).
-
 1. **Depths.** Each entry's pops and pushes come from tables by kind; a call's operands come from a per-function table
    of its calls, by `vpermi2b`, or by a gather past 128 calls. The depths are their prefix sums, and an entry's floor is
    its depth after its pops.
@@ -1702,15 +1695,23 @@ rules, the arrivals and the values each block leaves (`Tier0ScanBlock` holds wha
    the call, and the values the block left above it, in order, a call at a time. A call's own class comes from its
    table too, by its result (`tier0_scan_results`).
 4. **Arrivals.** The targets of the arrivals that bring only depth 0 (a statement's) are kept in the blocks' order, and
-   the end checks each one's depth, 16 at a time by a gather of the depths the blocks stored. Any other arrival brings its depth, the producer
-   just below what it may differ in, and the class of a JUMP_VALUE's value. It is checked against the target's own
-   where the same block holds the target. Otherwise it is checked against the first forward arrival's, and the target's
+   the end checks each one's depth, 16 at a time by a gather of the depths the blocks stored. Any other arrival brings
+   its depth, the producer just below what it may differ in, and the class of a JUMP_VALUE's value. It is checked
+   against the target's own where the same block holds the target. Otherwise it is checked against the first forward arrival's, and the target's
    block checks that one against its own. Code no path reaches, after a jump or a return and before a target, is at
    depth 0.
-5. **Tables.** A plain function's locals are checked 64 at a time, its calls' own rules 16 at a time, where the blocks'
-   call tables are made from the same loads (`tier0_scan_call_pass`), and each call's arguments eight at a time, no
-   register two of them take by `vpconflictq` (`tier0_scan_arguments`) (`tier0_scan_tables`). A function with aggregates' metadata, an incoming variadic area, or vectors' constants and
-   operations takes the scalar helpers instead.
+5. **Tables** (`tier0_scan_tables`). A plain function's locals are checked 64 at a time and its calls' own rules 16 at
+   a time, where the blocks' call tables are made from the same loads (`tier0_scan_call_pass`). Each call's arguments
+   are checked eight at a time, no register taken by two of them, by `vpconflictq` (`tier0_scan_arguments`). A function
+   with aggregates' metadata, an incoming variadic area, or vectors' constants and operations takes the scalar helpers
+   instead.
+
+The blocks go in groups of 16 (`BUSTER_TIER0_SCAN_GROUP`), in two passes (#3394). The first takes each block's work that
+needs nothing of the blocks before it, steps 1 and 2 and the rules that read no operand, every block of the group in
+turn: no block's result waits on another's, so the processor overlaps them, where one pass a block was bound by its
+chain of dependent searches and checks rather than by its instructions. The second takes the group's blocks in order
+with what the blocks before leave: the carried stack's operands, the depths from the function's start, the operands'
+rules, the arrivals and the values each block leaves (`Tier0ScanBlock` holds what the first pass leaves the second).
 
 The vector path leaves these to the scalar validator:
 

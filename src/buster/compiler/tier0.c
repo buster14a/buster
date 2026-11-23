@@ -15821,8 +15821,18 @@ static bool tier0_scan_call_pass(const Tier0Function* function, bool check, Tier
     const uint32_t call_count = function->call_count;
     const __m512i zero = _mm512_setzero_si512();
     const __m512i arguments = _mm512_set1_epi32((int)function->argument_count);
-    __m512i half_words[4] = { zero, zero, zero, zero };
-    __m512i half_bases[4] = { zero, zero, zero, zero };
+    __m512i half_words[4] = {
+        zero,
+        zero,
+        zero,
+        zero,
+    };
+    __m512i half_bases[4] = {
+        zero,
+        zero,
+        zero,
+        zero,
+    };
     bool valid = true;
     for (uint32_t c = 0; valid && c < call_count; c += 16)
     {
@@ -16073,8 +16083,26 @@ static __attribute__((noinline)) bool tier0_validate_accepts(const Tier0Function
     __m512i local_low[2] = { _mm512_setzero_si512(), _mm512_setzero_si512() };
     __m512i local_high[2] = { _mm512_setzero_si512(), _mm512_setzero_si512() };
     const __m512i zero = _mm512_setzero_si512();
-    Tier0ScanCalls call_tables[2] = { { zero, zero, zero, zero, zero }, { zero, zero, zero, zero, zero } };
-    __m512i argument_tables[2] = { zero, zero };
+    Tier0ScanCalls call_tables[2] = {
+        {
+            .operands = zero,
+            .results_low = zero,
+            .results_high = zero,
+            .indirect = zero,
+            .bases = zero,
+        },
+        {
+            .operands = zero,
+            .results_low = zero,
+            .results_high = zero,
+            .indirect = zero,
+            .bases = zero,
+        },
+    };
+    __m512i argument_tables[2] = {
+        zero,
+        zero,
+    };
     for (uint32_t h = 0; valid && h < 2 && few_locals && 64 * h < local_count; h += 1)
     {
         tier0_scan_locals(function, 64 * h, &local_low[h], &local_high[h]);
@@ -16540,8 +16568,9 @@ static __attribute__((noinline)) bool tier0_validate_accepts(const Tier0Function
                 failed |= below != (uint32_t)brought || (brings != 0 && top_lanes[lane] != (uint8_t)(brought >> 40));
             }
             // With more than 128 calls or arguments, the short calls' operands by gathers: each call's base (call_bases),
-            // and its operands' classes (argument_words).
-            for (uint32_t q = 0; !few_operands && q < 4; q += 1)
+            // and its operands' classes (argument_words), once the block's kinds, classes, values and depths passed (the
+            // gathers' indices are its calls' numbers).
+            for (uint32_t q = 0; valid && !few_operands && q < 4; q += 1)
             {
                 const __mmask16 quarter = (__mmask16)(block->short_calls >> (16 * q));
                 if (quarter != 0)
@@ -16635,7 +16664,8 @@ static __attribute__((noinline)) bool tier0_validate_accepts(const Tier0Function
     bool ended = false;
     for (uint32_t k = 0; valid && k < zero_count; k += 16)
     {
-        const __mmask16 quarter = (__mmask16)_bzhi_u32(0xffff, zero_count - k);
+        // A remaining count past 255 keeps every lane (_bzhi_u32 reads its index's low byte alone).
+        const __mmask16 quarter = zero_count - k >= 16 ? (__mmask16)0xffff : (__mmask16)_bzhi_u32(0xffff, zero_count - k);
         const __m512i targets = _mm512_maskz_loadu_epi32(quarter, (const void*)(zero_targets + k));
         const __mmask16 end = quarter & _mm512_cmpeq_epi32_mask(targets, _mm512_set1_epi32((int)count));
         // A dword at each target's depth (depths has 64 bytes past the last entry), its low byte the depth.

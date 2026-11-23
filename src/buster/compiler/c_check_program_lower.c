@@ -22523,7 +22523,8 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             const uint32_t count = k == 0 ? abi->argument_count : abi->count;
             for (uint32_t i = 0; i < count; i += 16)
             {
-                const __mmask16 lanes = (__mmask16)_bzhi_u32(0xffff, count - i);
+                // A remaining count past 255 keeps every lane (_bzhi_u32 reads its index's low byte alone).
+                const __mmask16 lanes = count - i >= 16 ? (__mmask16)0xffff : (__mmask16)_bzhi_u32(0xffff, count - i);
                 _Static_assert(sizeof(TypeId) == 4, "a type is a dword");
                 const __m512i indices = _mm512_srli_epi32(_mm512_maskz_loadu_epi32(lanes, (const void*)(types + i)), BUSTER_TYPE_INDEX_SHIFT);
                 const __m512i pass = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), lanes, indices, (const void*)table->pass, 4);
