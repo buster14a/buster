@@ -406,7 +406,12 @@ struct PPOptions
     // c_check_node_machine_reader.c): 1, the census's set and silence tests after T; 2, T's rows and rules checked against
     // the action there. Off in every compile; measure-node-machine --shadow sets it for --front-tests and, with --verify,
     // for the check.
-    uint16_t node_reader;
+    uint32_t node_reader;
+    // --node-bodies under a test's switch (BUSTER_TEST_NODE_BODIES=N:K): of the bodies the producer takes, the compile
+    // takes those whose place among them, modulo `node_bodies_modulus`, is `node_bodies_residue`; every one where the
+    // modulus is 0.
+    uint32_t node_bodies_modulus;
+    uint32_t node_bodies_residue;
     // Keep where the expansions that can start a line start in the output (PPExpansionStart), which -E's line markers
     // need to place them: the printer can't print markers for a run without them.
     bool expansion_starts;

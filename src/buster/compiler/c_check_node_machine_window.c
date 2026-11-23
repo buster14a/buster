@@ -521,6 +521,9 @@ static __attribute__((noinline, aligned(64))) void node_contexts_window_loop(str
     // Whether the unit's type table has extended qualifiers, an address space among them: no type of a table without
     // any is in a segment's space (type_object_qualifiers, which check_lower_segment_override reads).
     const bool extended = state->facts.machine->types->extended;
+    // Where the unit's target fuses a product and a sum (NodeMachine.fuses), every sum is listed and no update is made,
+    // which lists it too: C's rule there is by the sum's class or the update's calculation's, the reference's to ask.
+    const __mmask64 fuses = state->facts.machine->fuses ? ~UINT64_C(0) : 0;
     // The far lanes' bytes, a row a column: written a byte a lane where a block has any, and read by one masked load a
     // column. Each selected byte is written under the same lane mask before the load.
     _Alignas(64) uint8_t far_bytes[BUSTER_NODE_CONTEXTS_FAR_ROWS][64];
@@ -919,7 +922,7 @@ static __attribute__((noinline, aligned(64))) void node_contexts_window_loop(str
                 spaced |= (uint64_t)(check_lower_segment_override(state->facts.machine->types, stored) != 0 ? 1 : 0) << lane;
             }
         }
-        const __mmask64 made_update = _cvtu64_mask64(update_masked & ~spaced & (~(uint64_t)left_pointer | pointed));
+        const __mmask64 made_update = _cvtu64_mask64(update_masked & ~spaced & (~(uint64_t)left_pointer | pointed)) & ~fuses;
         updates += (uint64_t)_mm_popcnt_u64(update_asked);
         updates_taken += (uint64_t)_mm_popcnt_u64(made_update);
         branched_count += (uint64_t)_mm_popcnt_u64(placed & made_branches);
@@ -948,7 +951,7 @@ static __attribute__((noinline, aligned(64))) void node_contexts_window_loop(str
         valued_count += (uint64_t)_mm_popcnt_u64(placed & made_valued);
         comma_count += (uint64_t)_mm_popcnt_u64(made_comma);
         const __mmask64 listed = placed & (is_uncased | (is_wrap & union_type) | divisor | wide | odd_leaf | (is_call & ~converted_call) | (called & ~is_value) |
-                                           (update_asked & ~made_update) | unbranched | (is_conditional & ~open_conditional) | uncommaed);
+                                           (update_asked & ~made_update) | unbranched | (is_conditional & ~open_conditional) | uncommaed | (fuses & is_sum));
         // A template's number is four bits: each bit's records, one mask a bit. A comma's is a wrapper's.
         const __mmask64 passed = made_pass | made_comma;
         const __mmask64 bit0 = made_constant | made_global | made_dereference | made_unary | made_binary | made_store_local | made_store;

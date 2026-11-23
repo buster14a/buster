@@ -199,11 +199,25 @@ calls the plain `read`. glibc's intent, which
 GCC's build follows and glibc 2.40's Clang overloads restore, is
 `__read_chk`'s abort, and so is buster's. The longer wrappers are the same:
 with glibc 2.39, clang's build of an overflowing `fgets`, `fread`, `recv`,
-`mbstowcs` or `wcscpy` runs on, and GCC's and buster's abort. Buster's
-`__builtin_constant_p` of a wrapper's parameter or local answers false, as in
-the body, so where GCC's build folds a guard to the plain call or to the
-`_chk_warn` alias (the same `__*_chk` symbol), buster's calls `__*_chk` with
-the bound, which checks the same lengths at run time.
+`mbstowcs` or `wcscpy` runs on, and GCC's and buster's abort.
+
+The longer wrappers' guards test `__builtin_constant_p` of their length and
+bound (`__glibc_safe_or_unknown_len`, `__glibc_unsafe_len`), which the body's
+own checking answers false. The expansion decides them as the caller's code
+does (`check_lower_wrapper_guards`): it evaluates the wrapper's nodes in the
+caller's context, where a parameter is its argument's constant, a local its
+initializer's value, an object-size query of a parameter its argument's bound
+and `__builtin_constant_p` whether its operand is constant there. A guard
+whose condition is constant is no test: a false one is left out, and a true
+one's return ends the expansion. So a constant length that fits, or an unknown
+bound, reaches the plain call, as GCC's build does. That matters beyond speed:
+glibc's `__fgets_chk` returns NULL for a length of 1 and leaves the buffer,
+where `fgets` writes `""` and returns it (#3325's regression). A length known
+only at run time, into an object of known size, calls `__fgets_chk` in GCC's
+build and in buster's; clang's build with glibc 2.39 calls `fgets`. Where a
+guard stays a run's test and some `__builtin_constant_p` answers true in the
+caller's context, the body's lowering of the guard can't follow, and the call
+stays a call.
 
 ## Validation
 

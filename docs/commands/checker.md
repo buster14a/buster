@@ -83,7 +83,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   `test-checker-driver --executable ./build/compiler [--part K/N]
   [--lazy-system-headers | --cpu-dispatch-only | --pic-only | --target-versions-only | --type-sugar-only |
   --asm-definitions-only | --call-counts-only | --fp-contract-only | --imaginary-bit-int-only | --operand-diagnostics-only | --label-attributes-only |
-  --attribute-recovery-only | --malformed-calls-only | --assert-bool-only | --assert-diagnostics-only | --query-bool-only | --constant-logical-only | --unused-comparison-only |
+  --attribute-recovery-only | --initializer-diagnostics-only | --malformed-calls-only | --assert-bool-only | --assert-diagnostics-only | --query-bool-only | --constant-logical-only | --unused-comparison-only |
   --record-extensions-only | --auto-qualifiers-only |
   --run-modes-only] [--in-process] [--clang-server PATH]
   [--differential] [--carets | --carets-all]` and `test-checker-asm`
@@ -224,6 +224,17 @@ unused-warning fixtures also check exact scope-completion tokens.
   controls, direct and nested flexible members, macros, source pragmas and system headers.
   The shared harness checks suppression/promotion, scalar/default readers, one/three
   requested lanes, syntax/object modes, rejected-output preservation and accepted object twins.
+  `--initializer-diagnostics-only` runs the runtime `tests/checker/initializer-comma/`
+  catalogue alone in GNU17 and C23 (#2441). It compares complete Clang diagnostics
+  and exit status for multiple incompatible elements, independent nested excess
+  warnings, invalid compound-literal dependencies and atomic conditional deduction.
+  The cases retain comma-warning order, matching conditional-arm typedefs,
+  later independent errors and accepted sibling values. Command-line and scoped
+  warning policies, both readers, one/three requested lanes, syntax/object modes,
+  rejected-output preservation and accepted object twins use the shared warning
+  harness; `--in-process --differential` also compares the child route. Compound
+  dependency checks operate on the complete retained expression graph; they do
+  not extend the reader's recovery of malformed GNU syntax or failed deduction.
   `--semantic-recovery-only` runs
   `c_check_semantic_recovery_driver_test.c`, `c_check_statement_recovery_driver_test.c`,
   `c_check_attribute_call_recovery_driver_test.c`, `c_check_malformed_call_driver_test.c`,
@@ -240,8 +251,9 @@ unused-warning fixtures also check exact scope-completion tokens.
   preserve rejected outputs, and require ELF output for accepted controls. The full
   weak-alias section additionally checks common-target refusal and defined alias
   symbols under `-fcommon`/`-fno-common`, plus linked programs on both readers and
-  requested deferred lanes. The initializer suite also preserves the separately frozen
-  compound-literal dependency boundary, which does not claim Clang parity. Its runtime `suppress_label_order.c`
+  requested deferred lanes. Its GNU17 initializer catalogue includes the
+  former compound-literal boundary as a complete Clang comparison; the focused
+  initializer option above also runs that catalogue in C23. Its runtime `suppress_label_order.c`
   cases compare parser errors before label-subject errors under both language
   modes, warning policies and a one-error limit, with macros, split lists,
   valid controls, later errors and old-output preservation. The adjacent
@@ -559,9 +571,14 @@ unused-warning fixtures also check exact scope-completion tokens.
   its modifications; `check_unseq_repeats`, 16 nodes at a time, a superset of the walk's usages) can't report and
   isn't walked, as most aren't; the walk is scalar, an ordered tree walk with a union-find. A random
   differential of 21,000 full expressions over three variables, without constant first operands, matches clang
-  23.1.6 exactly. Differences left: buster's evaluation facts take an assignment's or a statement expression's value
-  as a constant condition, which clang's CFG doesn't (`(y = 0) ? 1 / 0 : 2` misses `-Wdivision-by-zero` too), so a
-  warning there can be dropped; a brace initializer's constant conversions come after its list's warnings, where
+  23.1.6 exactly. A condition whose value a modification gives (`(y = 0)`, `({ y = 0; })`, `!(y = 0)`) is no constant
+  to the evaluation facts, as clang's CFG builder's EvaluateAsBooleanCondition fails on it (#2264): the statements'
+  edges (`check_program_branch_truth`), the operators' evaluated operands (`check_common_operand_mask`), the stream's
+  and the constant reader's unselected arms and a conditional's converted arms all ask `check_graph_evaluable`, which
+  walks the `BUSTER_CHECK_MODIFICATION` value path past a comma's left operand, a statement expression's earlier
+  statements, a decided logical operator's other operand and a constant conditional's other arm, which only discard
+  one. `tests/checker/division-by-zero`'s `assigned-*` and `discarded-modifications` rows compare those with clang.
+  Differences left: a brace initializer's constant conversions come after its list's warnings, where
   clang gives them first; and a function holding a statement expression keeps its unreachable code's warnings, as
   every runtime warning does (#1447).
   `c_check_unsequenced_driver_test.c` compares it with complete pinned-Clang output at each policy, both paths and one
@@ -613,11 +630,23 @@ unused-warning fixtures also check exact scope-completion tokens.
   In a file-scope initializer clang's `DiagRuntimeBehavior` queues the comma's warning to the declarator's end, as it
   does a folded shift count's (`check_driver_file_initializer_end`, #1943): both are published there, ordered by their
   nodes' ends (the records' suborder), so that each comes in the order clang builds it (`int z = (1 << 40, 3);`'s
-  count first) and the declarator's constant conversions after them. A comma's static initializer is syntax-only,
-  as `-c` can't compile one yet. A brace initializer's values walk their roots in initializer order, after
+  count first) and the declarator's constant conversions after them. A comma's static initializer compiles at `-c` as
+  clang's does in GNU modes (#2264; clang 23's C23 mode refuses it, so that fixture stays syntax-only). A brace initializer's values walk their roots in initializer order, after
   the plan's literal conversions and before its constant ones (`check_common_initializer_conversions`), as clang
-  queues their runtime warnings while it parses them. Still separate: a comma in a file-scope array bound, which
-  clang refuses as a variable array at file scope and the checker folds.
+  queues their runtime warnings while it parses them. A comma whose discarded left operand folds undefined behavior
+  (`(1 << 44, 3)`, `((void)(2147483647 + 1), 3)`) makes clang's array-bound fold fail as a division's overflow does
+  (#2264): `check_action_comma_provenance` passes `BUSTER_CHECK_GNU_DIVISION` on in a constant evaluation, so such a
+  bound is variable (refused at file scope, in a member and in a block's static object), while an enumerator, a case
+  label, a bit-field width, a static assertion and a static initializer still fold it. A const object's read
+  (`GNU_OBJECT_READ`) hides whether its fold also overflowed, so `(c + (1 << 44), 2)` still folds. A variable bound at
+  file scope drops the bound's shift and overflow warnings, as clang's constant-evaluated bound does, and its error is
+  published after the declarator's last `]` (its report's `sort`), after every bound's comma warning. A file-scope
+  `sizeof` of a runtime-sized type name is refused once per initializer element and recovers (#2252): its query reads as
+  an `int`'s size, so the initializer's later commas and the unit's later declarations keep their diagnostics. A compound
+  literal's bound folds wherever it is (`check_input_vla_compound`), in a body too, its warning at the literal's `(`.
+  A brace initializer's or a compound literal's element gets `-Warray-bounds` only from an operator above its subscript
+  (`-a[5]`, `f(a[5])`, a comma's right operand): clang's CheckArrayAccess of the full expression sees the initializer
+  list and doesn't look into it (`check_common_brace_element`, #2252).
   A statement expression's statements are roots of their own, ahead of its enclosing expression's in node order: the
   arithmetic scan takes each one's whole visit (`check_common_inner_roots`, a `ROOT` frame) where it enters the statement
   expression, so they warn between what the enclosing expression built before it and after it, as clang builds them, a
@@ -731,11 +760,13 @@ unused-warning fixtures also check exact scope-completion tokens.
   `c_check_return_flow.c` supplies source return-warning facts for checked graphs. Ordinary direct calls no longer
   suppress a function's `-Wreturn-type` warning; a proven direct `noreturn` call or terminating builtin ends only its
   own warning-flow edge. Short circuit, conditional and unevaluated operands retain their execution rules, and
-  emission reachability is unchanged. Indirect calls (including GNU `noreturn` pointer/typedef contracts), overloads,
-  analyzer annotations, semantic queries, conditional classifier contracts and library-policy contracts remain
-  conservative until their retained facts are available here (#1393 remains open). Indirect calls in automatic
-  initializer value parts share that conservative boundary, including ordinary pointers whose Clang warning is
-  currently suppressed here; GNU noreturn pointer/typedef initializers need it until callable-type facts are retained.
+  emission reachability is unchanged. A call through a pointer object's name returns unless its type is noreturn, as
+  clang's CFG reads the callee's type (#1393, `check_program_return_indirect`: GNU `noreturn` on its declaration or the
+  typedefs and typeofs its specifiers name; the node machine's lines answer the same, `node_tests_window_returns`). The
+  query builtins return: `__builtin_constant_p`'s operand is visited, the object size queries' left out. Overloads,
+  analyzer annotations, conditional classifier contracts, library-policy contracts (`-ffreestanding`, `-fno-builtin`,
+  `jmp_buf`) and other indirect callees (a member, an element, a cast, a conditional, a comma, a call's result, whose
+  types the node machine's window can't answer yet) remain conservative.
   `c_check_return_call_driver_test.c` exercises direct-call fall-off,
   path-local termination, initializer/comma operands, warning flags and those conservative boundaries through the
   ordinary, scalar and deferred readers against Clang, with independent warning counts.
@@ -889,6 +920,13 @@ the evaluator; and, under a pragma that enables `-Wtautological-compare`, the
 builder's observer's `-Wtautological-bitwise-compare`,
 `-Wtautological-overlap-compare` and `-Wtautological-negation-compare` in its
 order (`c_check_common_cfg.c`).
+
+`tests/checker/return-calls` (#1393) is one too: `-Wreturn-type` past calls
+(`c_check_return_flow.c`), a direct call's by its declaration, a call through
+a pointer object's name by its type's noreturn (GNU's attribute through its
+declaration, typedefs and typeofs), and the query builtins, which return
+(`__builtin_constant_p`'s operand visited, the object size queries' left
+out).
 
 A table's comments are `#` lines of its catalog, above the cases they described.
 The other test files' tables stay C for now: they build their sources when they
