@@ -97,7 +97,7 @@ requirements. [Command index](README.md).
   experiments without reporting timings. See [the Tier 1 guide](../../docs/tier1.md)
   for supported inputs and the complete C-source acceptance still pending.
 - `measure-tier1-programs --clang PATH [--tcc PATH] --sqlite DIR --speedtest DIR
-  --lua DIR --scripts DIR [--runs N] [--warmups N] [--directory DIR] [--keep]
+  --lua DIR --scripts DIR [--runs N] [--compiles N] [--warmups N] [--directory DIR] [--keep]
   [--uncounted] [--variant OPTION]... [--check-code-size[=lua|sqlite|all]] [--sizes-only]`
   (`tier1_programs_measure.c`, #138, #1189 and #1116) builds the
   programs Tier 1 is measured by against clang -O2: speedtest1 (DIR/sqlite3.c,
@@ -131,6 +131,20 @@ requirements. [Command index](README.md).
   with OPTION after its options, named `--tier1 OPTION`, checked and timed as
   every build is, with its medians against `--tier1`'s in the table (#172's
   `--variant --tier1-schedule=post`: [the scheduling guide](../tier1-scheduling.md)).
+  `--compiles N` (#138's compile time) also times the same builds: before the
+  runs, N rounds (after `--warmups`), each in a Williams design's order, of
+  every build's speedtest1 (clang's two objects and their link, the others' one
+  command) and Lua (one command of its 33 sources and the link). Each command
+  runs as a whole process, timed as a run is: clang and tcc are looked up on
+  `PATH`, and the outputs go to a `compiles` directory of their own, so the
+  checked executables are never replaced. Each pair's wall times, user cycles
+  and instructions are summed into a `tier1-programs-compile` line. After the
+  runs' table, it prints every pair's medians and a table of the builds by
+  compiler, with `--tier1` against clang -O2 and -O0. It isn't allowed with
+  `--sizes-only`. The caller's pinning applies, so on one CPU this compiler
+  compiles with one lane, as clang and tcc do. The 9700X job passes
+  `--compiles 3` on its dispatched runs (the nightly's), not on a pull
+  request's, whose job it would lengthen by about 40 s.
 - The same command reports **function sizes** separately for SQLite's
   `sqlite3.c` and all **34 Lua sources**, including `luac.c` and its `PrintCode`.
   Each source is compiled to a relocatable object by Tier 1 and Clang `-O0`

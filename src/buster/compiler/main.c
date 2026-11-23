@@ -1076,8 +1076,8 @@ int run_tier1_model_measure_tests(int argc, char** argv);
 #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
 #include "buster/compiler/c_check_units_benchmark.c"
 #endif
-// measure-tier1-programs (#138, #1189): speedtest1 and Lua's scripts by both tiers, clang -O0 and -O2 and tcc, as whole
-// processes in a Williams design's order, against each other.
+// measure-tier1-programs (#138, #1189): speedtest1 and Lua's scripts by both tiers, clang -O0 and -O2 and tcc, their runs
+// and (--compiles) their builds' compiles timed as whole processes in a Williams design's order, against each other.
 #if BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER)
 #include "buster/compiler/tier1_code_size.c"
 #include "buster/compiler/tier1_code_size_test.c"
