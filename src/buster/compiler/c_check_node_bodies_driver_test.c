@@ -263,6 +263,25 @@ static void check_test_driver_node_bodies(CheckTest* test, const char* clang, co
         free(unit_taken_text);
         free(unit_timed_text);
     }
+    // A unit with a reason of its own to take no body (here a diagnostic pragma) has no front in a compile: the producer
+    // decides none of its bodies, and its object is the ordinary compile's.
+    static const char reasoned[] = "#pragma GCC diagnostic ignored \"-Wunused\"\nint f(int a) { return a + 1; }\nint beside(int a) { return a + 2; }\n";
+    char* reasoned_plain_text = NULL;
+    char* reasoned_timed_text = NULL;
+    unlink(plain);
+    unlink(taken);
+    const bool reasoned_written = parse_test_write(source, reasoned, sizeof(reasoned) - 1);
+    const int reasoned_plain_status = reasoned_written ? check_test_driver_node_bodies_compile(executable, source, plain, NULL, 0, &reasoned_plain_text) : -1;
+    const int reasoned_timed_status = reasoned_written ? check_test_driver_node_bodies_compile(executable, source, taken, timed, 2, &reasoned_timed_text) : -1;
+    const char* reasoned_line = reasoned_timed_text != NULL ? strstr(reasoned_timed_text, "node-bodies: bodies=") : NULL;
+    unsigned reasoned_bodies = 1;
+    unsigned reasoned_took = 1;
+    const bool reasoned_counted = reasoned_line != NULL && sscanf(reasoned_line, "node-bodies: bodies=%u taken=%u", &reasoned_bodies, &reasoned_took) == 2;
+    check_test_expect(test, reasoned_plain_status == 0 && reasoned_timed_status == 0 && reasoned_counted && reasoned_bodies == 0 && reasoned_took == 0 &&
+                            check_test_driver_node_bodies_same(plain, taken),
+                      "node-bodies: a unit with a reason of its own has no body decided, and its object is the ordinary compile's");
+    free(reasoned_plain_text);
+    free(reasoned_timed_text);
     if (restored != NULL)
     {
         setenv("BUSTER_TEST_NODE_BODIES", restored, 1);

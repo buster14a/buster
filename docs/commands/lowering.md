@@ -2926,6 +2926,17 @@ For a body it takes:
   error (a root not kept, a local without a place, a callee without a symbol):
   nothing is guessed.
 
+**A unit that takes no body pays nothing.** The producer has reasons of a
+unit's own to take none of its bodies (a `-W` option, a diagnostic pragma, an
+error before the walk, and the others of its list). A compile asks that first
+(`node_producer_unit`, which reads what the reader has before its expressions'
+walk and nothing of the machine), and a unit with one has no front: neither
+machine is begun for it, and the walk acts as without the option. Its
+`--time-stages` line then reads `bodies=0 taken=0`. Before this the compiler's
+own source, which takes none for its diagnostic pragma, was 18.5 ms slower
+with the option on the 9700X, and `sqlite3.c` with `-Wall -Wextra` 5.8 ms; they
+are -0.67 ms and +0.29 ms now, paired, five rounds each.
+
 With `--time-stages` the unit prints `node-bodies: bodies=N taken=M tokens=T
 graph-nodes=G`: the bodies the producer decided, those the compile took, their
 tokens, and the nodes the walk made of what is left.
