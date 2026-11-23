@@ -5224,9 +5224,11 @@ static void check_common_parentheses(const Parser* parser, Preprocessor* pp, con
                                                      parser->tokens.kinds[token] == PARSE_KIND_EXCLAIMEQUAL ? "use '|=' to turn this inequality comparison into an or-assignment" : "" };
             const bool suggest = equality && check_common_comparison_lvalue(input, stream, token);
             // (A statement expression's value is the walk's, as the statement expression's discarded value, #1447.)
+            // Published at the statement's end (#2914): clang's DiagnoseUnusedExprResult runs once the full expression is
+            // built, after the comparison's own warnings (an ordered comparison of a pointer and an integer).
             if (!check_common_statement_value(parser, parent))
             {
-                check_common_report_discarded(parser, pp, input, token, CHECK_WARNING_ID_UNUSED_COMPARISON, message,
+                check_common_report_evaluated(parser, pp, input, token, parent, PP_DIAGNOSTIC_SEMANTIC, CHECK_WARNING_ID_UNUSED_COMPARISON, false, message,
                                               suggest ? &note : NULL, suggest ? 1u : 0u, scratch);
             }
         }

@@ -194,6 +194,7 @@ static const char* check_driver_input_message(CheckInputMessage message)
         case CHECK_INPUT_LABEL_AMBIGUOUS: result = "reference to label is ambiguous"; break;
         case CHECK_INPUT_AUTO_TYPE_INITIALIZER: result = "declaration with deduced type '__auto_type' requires an initializer"; break;
         case CHECK_INPUT_AUTO_ATOMIC_POINTER: result = "variable with atomic deduced pointee has incompatible initializer"; break;
+        case CHECK_INPUT_GENERIC_NO_MATCH: result = "controlling expression type not compatible with any generic association type"; break;
         case CHECK_INPUT_AUTO_TYPE_SELF: result = "variable declared with deduced type '__auto_type' cannot appear in its own initializer"; break;
         case CHECK_INPUT_AUTO_TYPE_CONTEXT: result = "'__auto_type' not allowed here"; break;
         case CHECK_INPUT_AUTO_TYPE_LIST: result = "cannot use '__auto_type' with initializer list in C"; break;
@@ -989,6 +990,10 @@ struct CheckDriverDiagnostic
     // Notes beside it, where `notes` isn't null: a counted_by pointer's initialization's two (#1842's 3d).
     const PPOutputDiagnosticNote* notes;
     uint32_t note_count;
+    // Its order among the diagnostics at its publication (pp_diagnostic_suborder), where nonzero: an initializer list's
+    // subobject's failure is its InitListChecker's, in walk order among the list's warnings (#2914,
+    // check_driver_initializer_suborder).
+    uint64_t suborder;
 };
 
 // A conversion clang warns of with an error by default and makes (#1969, check_driver_report_default_error), whose source a
@@ -1985,6 +1990,25 @@ static bool check_driver_literal(Preprocessor* pp, const Parser* parser, uint32_
 // any lane compiles a unit.
 static bool tier1_select_initialize(void);
 
+static CheckWarningSeverity check_driver_legacy_severity(Preprocessor* pp, const CheckInput* input, uint32_t token, uint32_t warning, bool default_ignored);
+
+// The order among a declaration's diagnostics of one its initializer list's walk gives at `token` (#2914): clang's
+// InitListChecker gives a list's subobjects' conversion errors, excess elements and overrides as it walks the list, in
+// source order, before the completed initializer's conversion warnings (-Wliteral-conversion's, which keep no suborder
+// and so follow).
+static uint64_t check_driver_initializer_suborder(const Parser* parser, uint32_t token)
+{
+    return token < parser->tokens.count ? (uint64_t)parse_source_index(&parser->tokens, token) + 1u : 0;
+}
+
+// The records published since `previous`, the walk's at `token`, in its order (check_driver_initializer_suborder) and
+// phase (PP_DIAGNOSTIC_INITIALIZER).
+static void check_driver_initializer_order(const Parser* parser, Preprocessor* pp, const PPDiagnosticRecord* previous, uint32_t token)
+{
+    pp_diagnostic_suborder(pp, previous, check_driver_initializer_suborder(parser, token));
+    pp_diagnostic_phase(pp, previous, PP_DIAGNOSTIC_INITIALIZER);
+}
+
 // The old excess-element sink and policy remain available to other consumers. Its sparse MESSAGE witness only
 // preserves initializer semantic order alongside new facts; the generic sparse renderer still ignores MESSAGE.
 // The initializers' walk's warnings, and its unavailable members' errors (CHECK_WARNING_EVENT_UNAVAILABLE_USE, #147), which
@@ -2003,7 +2027,9 @@ static bool check_driver_initializer_warning_events(const Parser* parser, Prepro
                     (event->payload.data & 0xffff) == CHECK_WARNING_EXCESS_INITIALIZERS;
             if (valid && (repair == NULL || check_repair_warning_token(repair, event->token)))
             {
-                const CheckWarningSeverity severity = check_diagnostic_severity(input, event->token, CHECK_WARNING_EXCESS_INITIALIZERS);
+                // The command line's policy too (-Werror, -Wno-excess-initializers), as the unit's clean path's: a list
+                // whose conversions only default to errors keeps its excess elements' warnings (#2914).
+                const CheckWarningSeverity severity = check_driver_legacy_severity(pp, input, event->token, CHECK_WARNING_EXCESS_INITIALIZERS, false);
                 if (severity != CHECK_WARNING_IGNORE)
                 {
                     const bool source_error = pp->options.fatal_errors && severity == CHECK_WARNING_ERROR;
@@ -2019,8 +2045,10 @@ static bool check_driver_initializer_warning_events(const Parser* parser, Prepro
                     const char* message = string ? "initializer-string for char array is too long" :
                                           object != 0 ? check_warning_text(scratch, "excess elements in %s initializer", subject) :
                                           check_diagnostic_message(CHECK_WARNING_EXCESS_INITIALIZERS);
-                    pp_diagnose_output_at(pp, disposition, parse_source_index(&parser->tokens, event->token), publication, "%s [-W%sexcess-initializers]",
-                                          message, severity >= CHECK_WARNING_ERROR ? "error," : "");
+                    const PPDiagnosticRecord* previous = pp->diagnostic_last;
+                    pp_diagnose_output_at(pp, disposition, parse_source_index(&parser->tokens, event->token), publication, "%s [%s-Wexcess-initializers]",
+                                          message, severity >= CHECK_WARNING_ERROR ? "-Werror," : "");
+                    check_driver_initializer_order(parser, pp, previous, event->token);
                     valid = !pp->diagnostic_collection_failed;
                 }
             }
@@ -2050,7 +2078,12 @@ static bool check_driver_initializer_warning_events(const Parser* parser, Prepro
         else if (shown)
         {
             const CheckWarningEvents one = { .events = event, .count = 1, .notes = view->notes, .note_count = view->note_count };
+            const PPDiagnosticRecord* previous = pp->diagnostic_last;
             valid = check_driver_warning_events(parser, pp, input, types, &one, repair, scratch);
+            if (event->kind == CHECK_WARNING_EVENT_INITIALIZER_OVERRIDES || event->kind == CHECK_WARNING_EVENT_MANY_SCALAR_BRACES)
+            {
+                check_driver_initializer_order(parser, pp, previous, event->token);
+            }
         }
     }
     return valid;
@@ -3352,6 +3385,14 @@ static CheckDriverConversion check_driver_conversion_kind(const TypeTable* types
            CHECK_DRIVER_CONVERSION_INCOMPATIBLE;
 }
 
+// Whether an initializer's failed conversion of `node` to `target` is one of clang's warnings that default to errors
+// (#2914), as the driver's initializer failures take it: not to an array, nor clang's incompatible one.
+static bool check_driver_conversion_default_error(const TypeTable* types, const CheckStream* stream, TypeId target, uint32_t node)
+{
+    return !type_kind_is_array(type_kind(types, type_strip_aligned(types, target))) &&
+           check_driver_conversion_kind(types, target, check_driver_conversion_source(types, stream, node)) != CHECK_DRIVER_CONVERSION_INCOMPATIBLE;
+}
+
 // Whether a graph's report is one of clang's warnings that default to errors (#1969): a failed simple assignment's
 // conversion between an integer and a pointer (-Wint-conversion) or between pointers (-Wincompatible-pointer-types,
 // -Wincompatible-function-pointer-types), as check_driver_conversion_error words it, or a value returned from a void
@@ -3397,6 +3438,16 @@ static bool check_driver_report_default_error(const Parser* parser, const CheckS
         uint32_t parameter_count = 0;
         const TypeId* parameters = function != 0 && type_kind(types, function) == BUSTER_TYPE_KIND_FUNCTION ? type_parameters(types, function, &parameter_count) : NULL;
         target = parameters != NULL && index < parameter_count ? parameters[index] : 0;
+    }
+    else if (incompatible && op == CHECK_OP_BUILTIN_MISC && graph->members[node] != CBUILTIN_DUMP_STRUCT && graph->argument_counts != NULL &&
+             graph->argument_offsets != NULL && stream->argument_conversions != NULL && stream->diagnostic_operands[node] < graph->argument_counts[node])
+    {
+        // A builtin's argument's (#2914, check_driver_builtin_conversion's): clang makes the call, of the builtin's result
+        // type, whose own conversion it then checks (`long *l = __builtin_expect(p, 0);`'s second error).
+        const uint32_t at = graph->argument_offsets[node] + stream->diagnostic_operands[node];
+        const CheckConversion conversion = stream->argument_conversions[at];
+        source = conversion.flags == BUSTER_CHECK_CONVERT_FAILED ? graph->argument_nodes[at] : BUSTER_CHECK_NONE;
+        target = conversion.flags == BUSTER_CHECK_CONVERT_FAILED ? conversion.type : 0;
     }
     const TypeId value = source < stream->count ? check_driver_conversion_source(types, stream, source) : 0;
     const bool converted = incompatible && !void_return && value != 0 && target != 0 &&
@@ -5347,6 +5398,8 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                                               check_driver_shift_message(parser, pp, input, stream, types, &spell, token, warning_flag, scratch) :
                                               warning_flag == CHECK_WARNING_INTEGER_OVERFLOW ?
                                               check_driver_overflow_message(parser, pp, input, stream, types, &spell, token, scratch) :
+                                              warning_flag == CHECK_WARNING_DISTINCT_POINTER_COMPARE || warning_flag == CHECK_WARNING_POINTER_INTEGER_COMPARE ?
+                                              check_driver_comparison_message(parser, pp, input, stream, types, &spell, token, warning_flag, scratch) :
                                               check_diagnostic_message(warning_flag);
                         const uint32_t node = input->token_nodes != NULL && token < input->token_count ? input->token_nodes[token] : BUSTER_CHECK_NONE;
                         const bool stashed = shifts != NULL && shifts->records != NULL && phase == PP_DIAGNOSTIC_DEFERRED &&
@@ -5560,7 +5613,8 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                         x86_message = check_driver_conversion_error(parser, pp, input, stream, types, &spell, stream->reports + index, &x86_location,
                                                                     &conversion_note_token, &conversion_note, &conversion_argument, scratch);
                     }
-                    const uint32_t argument_first = x86_message != NULL && conversion_argument < stream->count ? x86_location : BUSTER_CHECK_NONE;
+                    // (A builtin's argument's too, #2914: clang checks it as it builds the call, before the call's parents.)
+                    const uint32_t argument_first = x86_message != NULL && (conversion_argument < stream->count || builtin_converted) ? x86_location : BUSTER_CHECK_NONE;
                     if (x86_message == NULL && phase == 1)
                     {
                         x86_message = check_driver_call_count(parser, pp, input, stream, types, stream->reports + index, &x86_location, &conversion_note_token,
@@ -7017,7 +7071,12 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
                             pp->diagnostic_arguments = arguments;
                         }
                         pp_diagnostic_suborder(pp, previous, phase == 0 ? input->reports[index].suborder :
+                                                             phase == 2 && extra[index].suborder != 0 ? extra[index].suborder :
                                                              argument_first < count ? (uint64_t)parse_source_index(&parser->tokens, argument_first) + 1u : 0);
+                        if (phase == 2 && extra[index].suborder != 0)
+                        {
+                            pp_diagnostic_phase(pp, previous, PP_DIAGNOSTIC_INITIALIZER);
+                        }
                     }
                     else
                     {
@@ -13511,8 +13570,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                                 place = conversion != NULL ? place : outermost ? failure.failed_declaration : failure.token;
                                 const TypeId converted = conversion != NULL && failure.failed_source != 0 && failure.failed_source - 1 < stream.count ?
                                     check_driver_conversion_source(&types, &stream, failure.failed_source - 1) : 0;
-                                const bool default_error = converted != 0 && !type_kind_is_array(type_kind(&types, type_strip_aligned(&types, failure.failed_type))) &&
-                                    check_driver_conversion_kind(&types, failure.failed_type, converted) != CHECK_DRIVER_CONVERSION_INCOMPATIBLE;
+                                const bool default_error = converted != 0 && check_driver_conversion_default_error(&types, &stream, failure.failed_type, failure.failed_source - 1);
                                 if (!repairing && conversion != NULL && !default_error && failure.failed_source != 0 && failure.failed_source - 1 < input.graph.count &&
                                     stream.diagnostics[failure.failed_source - 1] == CHECK_DIAG_NONE)
                                 {
@@ -13549,6 +13607,9 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                                     .repeated = after_counted,
                                     .default_source = default_error ? failure.failed_source : 0,
                                     .default_target = default_error ? failure.failed_type : 0,
+                                    .suborder = failure.status != CHECK_INIT_NON_CONSTANT && failure.status != CHECK_INIT_RESOURCE &&
+                                                failure.status != CHECK_INIT_UNSUPPORTED && failure.status != CHECK_INIT_CHECK_FAILED ?
+                                                check_driver_initializer_suborder(checking, place) : 0,
                                 };
                                 // A static object's braced subobject whose conversion clang warns of and makes, where its value is
                                 // then no constant: clang's second error at it (check_init_value_nonconstant, #147).

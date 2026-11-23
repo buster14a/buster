@@ -379,6 +379,10 @@ struct CheckInitWalker
     CheckInitializer* result;
     CheckInitFailureSink* failures;
     CheckInitFailure first_failure;
+    // Whether a recovered failure is a hard error's, which marks clang's list invalid (#2914): not a conversion clang
+    // only warns of by default as an error (-Wint-conversion, -Wincompatible-pointer-types), after which its
+    // InitListChecker goes on and warns of excess elements.
+    bool hard_failure;
     // The counted members' trace (#1842's 3d), only in a diagnostic walk of a unit that has them.
     CheckInitCounted* counted;
 };
@@ -473,12 +477,16 @@ static void check_init_fail(CheckInitWalker* walker, CheckInitStatus status, uin
 
 // A subobject's conversion that failed (#147): CHECK_INIT_INVALID at `token` (or its resource failure), its target `type` and
 // its source `node` kept where it is the first failure and an incompatible conversion, for clang's words of it.
+static bool check_driver_conversion_default_error(const TypeTable* types, const CheckStream* stream, TypeId target, uint32_t node);
+
 static void check_init_fail_conversion(CheckInitWalker* walker, CheckDiagnostic diagnostic, uint32_t token, TypeId type, uint32_t node, uint64_t offset)
 {
     CheckInitFailureSink* failures = walker->failures;
     const bool recover = failures != NULL && walker->result->status == CHECK_INIT_OK && diagnostic == CHECK_DIAG_INCOMPATIBLE;
     if (recover)
     {
+        walker->hard_failure |= walker->stream == NULL || node >= walker->stream->count ||
+                                !check_driver_conversion_default_error(walker->types, walker->stream, type, node);
         const CheckInitFailure failure = {
             .status = CHECK_INIT_INVALID,
             .failed_type = type,
@@ -646,9 +654,10 @@ static bool check_init_semantic_publish(CheckInitWalker* walker)
 static void check_init_warning(CheckInitWalker* walker, uint32_t token, TypeId object_type, bool string)
 {
     // Conversion recovery visits elements the strict walk never reached (#2441). Keep its excess-warning
-    // frontier: a rejected list must not acquire a trailing excess warning. Later valid nested lists still
-    // need their own error state and interleaved publication before their excess warnings can be recovered.
-    if (walker->first_failure.failed_source == 0)
+    // frontier: a list a hard error rejected must not acquire a trailing excess warning; one whose only failures are
+    // default errors keeps them, as clang's does (#2914). Later valid nested lists still need their own error state
+    // and interleaved publication before their excess warnings can be recovered.
+    if (!walker->hard_failure)
     {
         if (walker->result->warning_count == 0)
         {
