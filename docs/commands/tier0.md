@@ -418,7 +418,7 @@ token.
 ## Backend benchmark
 
 `./build/compiler benchmark-backend [--entries N] [--seed N] [--only
-vector|sizing|encode|validate|validate-scalar|choose|choose-scalar]
+vector|sizing|encode|validate|validate-scalar|choose]
 [--after-scalar MS]` (about 4 s) generates programs
 until their functions hold `--entries` typed entries (262,144), checks that
 every function compiles, then reports 21-pass
@@ -426,7 +426,7 @@ medians, per typed entry and per record, of `tier0_compile` (`vector`),
 `size_branches` on their records, `x86_encode` of the
 sized records, `tier0_validate` and `tier0_validate_scalar` (#569), and the
 immediates' form choice on each function's own requests as Tier 0 makes them
-(`x86_choose_forms` and `x86_choose_forms_scalar`, #221, from
+(`x86_choose_forms`, #221, from
 `Tier0Function.choice_requests`, which copies them into the code: read from
 there, colder than in `tier0_compile`'s own call): nanoseconds, cycles,
 instructions, IPC and the throttle (PMCx1A0's umask 0x08, #199), with the share
@@ -434,13 +434,13 @@ of entries deferred, the functions the validation's vector path takes alone,
 and the choice's requests (per entry, the share whose form it kept, gave another
 encoding of the instruction or another instruction, and the bytes it saved
 against each template's imm32 form). `--only` runs one variant alone, and
-`--after-scalar MS` runs the scalar twin for MS ms before each pass of the
+`--after-scalar MS` runs the scalar validator for MS ms before each pass of the
 validation and of the choice. Run it under the 9700X's lock with `taskset -c 2`.
 `docs/tier0.md` has the numbers. The default 9700X job runs it after the tests,
 pinned to one allowed CPU; like the others, its measurements are informational.
 
 `./build/compiler benchmark-backend-source [--only
-vector|sizing|encode|validate|validate-scalar|choose|choose-scalar]
+vector|sizing|encode|validate|validate-scalar|choose]
 [--after-scalar MS] [preprocessor options] file...` (about 1 s for `sqlite3.c`)
 measures the same variants on real C. Each file is checked as the driver checks
 it, and the definitions `-c` lowers are lowered and emitted for the target its

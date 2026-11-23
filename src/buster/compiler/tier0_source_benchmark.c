@@ -5,7 +5,7 @@
 // Tier 0's compile, branch sizing, encoding, the validation and the immediates' form choice (#221),
 // on checked functions' typed streams. Include after c_lowering_source_benchmark.c.
 //
-//   build/compiler benchmark-backend-source [--only vector|sizing|encode|validate|validate-scalar|choose|choose-scalar]
+//   build/compiler benchmark-backend-source [--only vector|sizing|encode|validate|validate-scalar|choose]
 //                                           [--after-scalar MS] [preprocessor options] file...
 //
 // Each file is prepared as -c prepares it (check_source_prepare, #1057: its options read and refused as the driver
@@ -234,7 +234,7 @@ static int run_backend_source_benchmark(int count, char** arguments)
     valid = valid && backend_source_files(&source, files, file_count, options, option_count, only, after_scalar, (BackendSourceFault){ 0 });
     if (!valid)
     {
-        fprintf(stderr, "usage: compiler benchmark-backend-source [--only vector|sizing|encode|validate|validate-scalar|choose|choose-scalar] [--after-scalar MS] [preprocessor options] file...\n");
+        fprintf(stderr, "usage: compiler benchmark-backend-source [--only vector|sizing|encode|validate|validate-scalar|choose] [--after-scalar MS] [preprocessor options] file...\n");
     }
     free(files);
     free(options);
