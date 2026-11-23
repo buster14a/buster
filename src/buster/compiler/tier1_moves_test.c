@@ -186,7 +186,9 @@ static void tier1_move_test_failures(Tier1AllocationTestTally* tally)
     uint8_t bytes[2048] __attribute__((aligned(64)));
     memset(bytes, 0x5a, sizeof(bytes));
     bool valid = true;
-    for (uint32_t capacity = 7; capacity <= 8 + 44 * 17; capacity += 1)
+    // The wide form at 17 moves: 16 bytes a move of output, 24 of keys and temporary keys, 8 of writers and reader
+    // counts, and three bitset words (tier1_resolve_moves_wide), from the 8-aligned start past 7 bytes.
+    for (uint32_t capacity = 7; capacity <= 8 + 40 * 17 + 24; capacity += 1)
     {
         Arena arena = {
             .base = bytes,
@@ -199,7 +201,7 @@ static void tier1_move_test_failures(Tier1AllocationTestTally* tally)
             .count = 123,
         };
         const Tier1AllocationError error = tier1_resolve_moves(&input, &arena, &output);
-        if (capacity < 8 + 44 * 17)
+        if (capacity < 8 + 40 * 17 + 24)
         {
             valid = valid && error == TIER1_ALLOCATION_CAPACITY && arena.length == 7 && output.sources == sources && output.destinations == destinations && output.count == 123;
         }
@@ -233,6 +235,40 @@ static void tier1_move_test_failures(Tier1AllocationTestTally* tally)
         valid = tier1_resolve_moves(&input, &arena, &output) == TIER1_ALLOCATION_INVALID && arena.length == 7 && output.sources == sources && output.destinations == destinations && output.count == 123;
         tier1_allocation_test_expect(tally, valid, "invalid moves reject scratch, duplicates, excessive counts and missing columns transactionally");
     }
+}
+
+// A duplicate destination is refused wherever the pair falls: with the last move in every lane of the register form
+// (16 moves) and of the wide form, and as the largest destination, the wide form's last sorted pair.
+static void tier1_move_test_duplicates(Tier1AllocationTestTally* tally, Arena* arena)
+{
+    const uint32_t counts[] = { 2, 15, 16, 17, 32, 33 };
+    uint32_t sources[33];
+    uint32_t destinations[33];
+    bool refused = true;
+    for (uint32_t c = 0; c < sizeof(counts) / sizeof(counts[0]); c += 1)
+    {
+        const uint32_t count = counts[c];
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            sources[i] = (i + 1) % count * 3 + 1;
+            destinations[i] = i * 3 + 1;
+        }
+        const Tier1ParallelMoves input = {
+            .sources = sources,
+            .destinations = destinations,
+            .count = count,
+            .scratch = 1000,
+        };
+        for (uint32_t k = 0; k + 1 < count; k += 1)
+        {
+            const uint64_t saved = arena->length;
+            Tier1ResolvedMoves output = { 0 };
+            destinations[count - 1] = destinations[k];
+            refused = refused && tier1_resolve_moves(&input, arena, &output) == TIER1_ALLOCATION_INVALID && arena->length == saved;
+            destinations[count - 1] = (count - 1) * 3 + 1;
+        }
+    }
+    tier1_allocation_test_expect(tally, refused, "a duplicate destination is refused in every lane and as the largest");
 }
 
 static void tier1_move_test_guarded(Tier1AllocationTestTally* tally, Arena* arena)
@@ -285,6 +321,7 @@ static void tier1_allocation_test_move_scaling(Tier1AllocationTestTally* tally)
         }
         tier1_move_test_shape(tally, &arena, BUSTER_TIER1_ALLOCATE_MAX_INTERVALS, 0);
         tier1_move_test_failures(tally);
+        tier1_move_test_duplicates(tally, &arena);
         tier1_move_test_guarded(tally, &arena);
     }
     arena_release(&arena);

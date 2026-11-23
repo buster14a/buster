@@ -328,35 +328,52 @@ placement and critical-edge splitting are not done by this routine.
 
 The deterministic policy is unchanged: emit the lowest input index whose
 destination has no remaining source users; when none is ready, save the lowest
-pending destination to scratch. Up to eight moves use the independent scan
-implementation, `tier1_resolve_moves_scalar`. The only current production caller
-is `tier1_emit_call`, bounded by the six SysV integer argument registers; the
-general API keeps its full 2^20-move limit and opaque location domain.
+pending destination to scratch. Two vector forms implement it, each the only
+code for its range (#3450, phase D of #2924; they replaced a scalar scan up to
+eight moves and a merge-sort-and-heap path beyond, which gave the same order):
 
-Larger sets use `tier1_resolve_moves_indexed`. Eight-wide masked initialization
-validates scratch exclusion, marks identities and constructs packed
-`(destination, input index)` keys. A nonrecursive merge sort detects duplicate
-destinations; binary searches map each source to its destination owner. Source
-use counts and a minimum heap replace repeated pending-move scans. Each emitted
-move updates only its source owner's count, and each move enters the ready
-heap once. A monotonically advancing cursor finds the first pending move when
-breaking cycles. Sorting, lookup and heap work are O(N log N), with O(N) storage,
-including adversarial opaque ids and fan-out.
+- **Up to 16 moves** (`tier1_resolve_moves_register`): every set the census
+  found (sqlite3.c, Lua and musl under `--tier1`: 41,188 sets, at most 12
+  moves, 596 with a cycle). Sources and destinations are one register each.
+  Broadcast compares give each destination's readers as a 16-bit mask and find
+  duplicate destinations; the 16 masks are one register of words, so each step
+  tests every row against the pending mask at once and takes the lowest ready
+  lane by `tzcnt`. A cycle saves the lowest pending destination, its readers
+  read scratch and its row empties. Nothing but the output is pushed.
+- **More than 16, up to 2^20** (`tier1_resolve_moves_wide`). Masked 16-lane
+  steps validate scratch exclusion and pack `(destination, identity bit 31 |
+  input index)` keys; a vector radix sort (conflict masks rank lanes within a
+  bucket, only the digits that differ) orders them by destination, and adjacent
+  equal destinations are invalid. Each pending move's writer, the move whose
+  destination is its source, is a 16-lane branchless lower bound by gathers;
+  reader counts add up by conflict masks. The ready moves are a three-level
+  bitset, so the lowest is three `tzcnt`s below the first nonzero top word, and
+  the cycle cursor advances 16 moves a step.
 
-When the ready heap is empty, every remaining destination has at least one
+When no move is ready, every remaining destination has at least one
 source user. There are at most as many source edges as remaining moves, so
 every remaining destination has exactly one user: the residual graph is a set
 of disjoint cycles. Saving one destination makes its move ready; its sole
 remaining consumer reads scratch instead. That cycle drains before another
-save can reuse scratch. The algorithm needs neither repeated source rewriting
-nor a scan for that consumer.
+save can reuse scratch.
 
-Both paths retain at most 16*N bytes for output columns. The indexed path uses
-28*N temporary bytes (two u64 key arrays and three u32 dependency/count/heap
-arrays), plus alignment; the small scan uses 5*N temporary bytes. Inputs remain
-immutable, errors restore the entry arena length and preserve the result, and
-success discards all temporary arrays. Sorting requires temporary capacity, so
-capacity exhaustion can precede duplicate-destination diagnosis.
+The emission itself stays an ordered loop: each choice depends on the moves
+emitted before it, and the order is the objects' (every caller's move
+sequence), so it can't be a different data-parallel order without changing
+code. Its steps are word operations on bitsets and masks. On the 9700X the two
+forms take @@MOVES@@ of the old routes' time at every count from 0 to 2^20,
+real sets replayed and random sets by count (buster-performance's
+`docs/measurements/scalar-paths-removal-2924-2026-11-17/tier1-moves/`).
+
+Both forms retain 16*N bytes for output columns. The register form pushes
+nothing else; the wide form uses 24*N temporary bytes (two u64 key arrays and
+the u32 writers and reader counts) and the bitset's words, plus alignment.
+Inputs remain immutable, errors restore the entry arena length and preserve the
+result, and success discards all temporary arrays. The wide form allocates
+before it validates, so capacity exhaustion can precede an invalid input's
+diagnosis there. `test-tier1-allocation` checks every order against
+`tier1_move_test_definition`, the policy as a plain cubic scan, at every
+shape up to 1,024 moves and 256 random sets of 0 to 32 moves.
 
 ### Resolver measurements (#608)
 
