@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
-// Original direct-call return-flow regressions. Expected return-warning counts are independent of the implementation;
-// Clang supplies the reference for the ordinary cases and identifies the explicitly retained conservative boundaries.
+// Original return-flow regressions of calls (#1393). Expected return-warning counts are independent of the
+// implementation; Clang supplies the reference for the ordinary cases and identifies the explicitly retained
+// conservative boundaries.
 
 static uint32_t check_test_return_call_count(const char* text)
 {
@@ -61,13 +62,13 @@ static void check_test_driver_return_calls(CheckTest* test, const char* clang, c
         { "terminating builtin", "int f(void){__builtin_trap();}\n", 0, 0 },
         { "unreachable builtin", "int f(void){__builtin_unreachable();}\n", 0, 0 },
         { "builtin stop on one branch", "int f(int x){if(x)__builtin_trap();}\n", 1, 1 },
-        { "conservative query contract", "_Noreturn int die(void); int f(void){(void)__builtin_constant_p(die());}\n", 0, 0 },
-        { "ordinary indirect call remains conservative", "void (*p)(void); int f(void){p();}\n", 0, 1 },
-        { "ordinary indirect initializer remains conservative", "int (*p)(void); int f(void){int n=p();(void)n;}\n", 0, 1 },
-        { "qualified indirect initializer remains conservative", "int (*p)(void) __attribute__((noreturn)); int f(void){int n=p();(void)n;}\n", 0, 0 },
-        { "qualified typedef initializer remains conservative", "typedef int (*NR)(void) __attribute__((noreturn)); NR p; int f(void){int n=p();(void)n;}\n", 0, 0 },
-        { "qualified indirect call remains conservative", "void (*p)(void) __attribute__((noreturn)); int f(void){p();}\n", 0, 0 },
-        { "qualified typedef call remains conservative", "typedef void (*NR)(void) __attribute__((noreturn)); NR p; int f(void){p();}\n", 0, 0 },
+        { "constant_p operand noreturn call ends the path", "_Noreturn int die(void); int f(void){(void)__builtin_constant_p(die());}\n", 0, 0 },
+        { "ordinary indirect call returns", "void (*p)(void); int f(void){p();}\n", 1, 1 },
+        { "ordinary indirect initializer returns", "int (*p)(void); int f(void){int n=p();(void)n;}\n", 1, 1 },
+        { "qualified indirect initializer stops", "int (*p)(void) __attribute__((noreturn)); int f(void){int n=p();(void)n;}\n", 0, 0 },
+        { "qualified typedef initializer stops", "typedef int (*NR)(void) __attribute__((noreturn)); NR p; int f(void){int n=p();(void)n;}\n", 0, 0 },
+        { "qualified indirect call stops", "void (*p)(void) __attribute__((noreturn)); int f(void){p();}\n", 0, 0 },
+        { "qualified typedef call stops", "typedef void (*NR)(void) __attribute__((noreturn)); NR p; int f(void){p();}\n", 0, 0 },
         { "analyzer noreturn remains conservative", "void die(void) __attribute__((analyzer_noreturn)); int f(void){die();}\n", 0, 0 },
         { "inherited analyzer contract remains conservative", "void die(void) __attribute__((analyzer_noreturn)); void die(void); int f(void){die();}\n", 0, 0 },
         { "wrapped analyzer contract remains conservative", "void die(void) __attribute__((__analyzer_noreturn__)); int f(void){die();}\n", 0, 0 },

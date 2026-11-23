@@ -13,6 +13,12 @@ struct CheckRegionValues
     const bool* valid;
     const uint32_t* indices;
     size_t stride;
+    // Optional sparse values override the stream: power-of-two capacity, node+1 keys (zero empty), multiplicative
+    // hash 2654435761 and linear probing. Keys and values share stride; indices/valid are absent in this view.
+    const uint32_t* keys;
+    uint32_t capacity;
+    const CheckConstValues* const_values;
+    bool constant_evaluated;
 };
 
 typedef struct CheckRegionResult CheckRegionResult;
@@ -46,25 +52,50 @@ static const CheckRegionProof* check_graph_region_proof(const CheckGraph* graph,
 static CheckValue check_region_value(const CheckRegionValues* values, uint32_t node)
 {
     const uint32_t index = values->indices != NULL ? values->indices[node] : node;
-    return values->stream != NULL ? check_stream_value(values->stream, index) : *(const CheckValue*)((const uint8_t*)values->values + (size_t)index * values->stride);
+    CheckValue result;
+    bool found = false;
+    if (values->keys != NULL && values->capacity != 0)
+    {
+        uint32_t slot = (node * UINT32_C(2654435761)) & (values->capacity - 1);
+        uint32_t key = *(const uint32_t*)((const uint8_t*)values->keys + (size_t)slot * values->stride);
+        while (key != 0 && key != node + 1)
+        {
+            slot = (slot + 1) & (values->capacity - 1);
+            key = *(const uint32_t*)((const uint8_t*)values->keys + (size_t)slot * values->stride);
+        }
+        found = key != 0;
+        if (found)
+        {
+            result = *(const CheckValue*)((const uint8_t*)values->values + (size_t)slot * values->stride);
+        }
+    }
+    if (!found)
+    {
+        result = values->stream != NULL ? check_stream_value(values->stream, index) : *(const CheckValue*)((const uint8_t*)values->values + (size_t)index * values->stride);
+    }
+    return result;
 }
 
 static CheckValue check_region_operand(TypeTable* types, const CheckGraph* graph, const CheckRegionValues* values,
                                        uint32_t node, bool runtime, CheckDiagnostic* diagnostic)
 {
-    const CheckAction action = {
+    CheckAction action = {
         .op = CHECK_OP_VALUE,
         .node = node,
         .operands = { check_region_value(values, node) },
-        .context = check_graph_context(graph, node, false),
+        .context = check_graph_context(graph, node, values->constant_evaluated),
     };
+    if (values->const_values != NULL)
+    {
+        action.context.const_values = values->const_values;
+    }
     CheckActionResult checked = { 0 };
     CheckValue value = check_action_operand(types, &action, &checked, 0);
     if (*diagnostic == CHECK_DIAG_NONE)
     {
         *diagnostic = checked.diagnostic;
     }
-    if (runtime && graph->ops[node] == CHECK_OP_INITIALIZE && graph->types != NULL &&
+    if ((runtime || values->constant_evaluated) && graph->ops[node] == CHECK_OP_INITIALIZE && graph->types != NULL &&
         ((type_qualifiers(graph->types[node]) & BUSTER_TYPE_VOLATILE) != 0 || check_action_kind(types, graph->types[node]) == BUSTER_TYPE_KIND_ATOMIC))
     {
         value.flags |= BUSTER_CHECK_SIDE_EFFECT;
@@ -138,6 +169,7 @@ static bool check_region_walk(TypeTable* types, const CheckGraph* graph, const C
                 check_action_inherit(&result->effects, &value);
                 result->constant &= value.fault == CHECK_FAULT_NONE && (value.flags & BUSTER_CHECK_SIDE_EFFECT) == 0 &&
                                     (value.constant_kind != CHECK_CONSTANT_NONE || check_action_kind(types, value.type) == BUSTER_TYPE_KIND_VOID);
+                result->constant &= !values->constant_evaluated || (value.flags & BUSTER_CHECK_DISCARDED_UNEVALUABLE) == 0;
                 if (step->op == CHECK_REGION_EVAL)
                 {
                     // A discarded statement's conversion to void doesn't make what it discards constant. Clang

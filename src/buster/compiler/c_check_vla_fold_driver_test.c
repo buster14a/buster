@@ -463,6 +463,53 @@ static const char check_driver_vla_body_member_comparisons_source[] =
     "    union U { char n[(5 == 5, 1)]; int v : (6 >= 7, 2); };\n"
     "}\n";
 
+// A comma whose discarded left operand folds undefined behavior fails clang's array-bound fold, as a division's overflow
+// does anywhere (#2264): its bound is variable, which file scope, a static or extern object, a typedef and a pointer's
+// pointee refuse, after the declarator's commas' -Wunused-value and without the bound's shift or overflow warnings. An
+// unselected or short-circuited operand's, a const object's read and a shift that keeps its bits fold; an enumerator, a
+// bit-field width, a case label, a static assertion and a static initializer fold the same comma.
+static const char check_driver_vla_discarded_undefined_source[] =
+    "int a1[(1 << 44, 3)];\n"
+    "int a2[((-2147483647 - 1) / -1, 3)];\n"
+    "int a3[(2147483647 + 1, 3)];\n"
+    "int a4[((void)(1 << 44), 3)];\n"
+    "static int a5[(-1 << 2, 3)];\n"
+    "extern int a6[(1u << 44, 3)];\n"
+    "typedef int T7[(1 >> 44, 3)];\n"
+    "int (*p8)[(1 << 44, 3)];\n"
+    "int a9[(1 << 44, 3)], a10[(5, 2)];\n"
+    "int b1[(0 ? 1 << 44 : 1, 3)];\n"
+    "int b2[(0 && (1 << 44), 3)];\n"
+    "const int c = 3;\n"
+    "int b3[(c, 2)];\n"
+    "int b4[(1 << 31, 3)];\n"
+    "enum { E = (1 << 44, 3) };\n"
+    "struct B { int b : (1 << 44, 3); };\n"
+    "int g(int x) { switch (x) { case (1 << 44, 3): return 1; } return 0; }\n"
+    "_Static_assert((1 << 44, 3), \"\");\n"
+    "int ini = (1 << 44, 3);\n";
+
+// A file-scope sizeof's runtime-sized type name is refused once per initializer, and the reading goes on (#2252): the
+// initializer's later commas and the unit's later declarations keep their diagnostics.
+static const char check_driver_vla_sizeof_recovery_source[] =
+    "int b = sizeof(int[(6, 2)]) + sizeof(int[(7, 3)]);\n"
+    "int c = (1, 2);\n"
+    "int d = sizeof(int[(8, 2)]), e = (9, 4);\n"
+    "int f[(1 << 44, 3)];\n"
+    "int g = (10, 5);\n";
+
+// A compound literal can't have a variable array's type, so clang folds its bound, in a body too, with its warning at the
+// compound literal's `(` (#2252).
+static const char check_driver_vla_compound_fold_source[] =
+    "int *g = (int[(1, 2)]){ 3, 4 };\n"
+    "int f(int n)\n"
+    "{\n"
+    "    int *p = (int[(1, 2)]){ 5, 6 };\n"
+    "    int *r = (int[2][(1, 1)]){ { 7 }, { 8 } }[1];\n"
+    "    return p[0] + p[1] + r[0] + g[1] + n + (int)sizeof((int[(1, 3)]){ 0 });\n"
+    "}\n"
+    "int main(void) { return f(1) == 5 + 6 + 8 + 4 + 1 + 12 ? 0 : 1; }\n";
+
 static const CheckDriverDefaultWarningFixture check_driver_vla_fold_fixtures[] =
 {
     {
@@ -778,6 +825,23 @@ static const CheckDriverDefaultWarningFixture check_driver_vla_fold_fixtures[] =
         .name = "a parenthesized pointer to a variable-length array at file scope, a variably modified type",
         .source = check_driver_vla_place_source_16,
         .errors = 1,
+    },
+    {
+        .name = "a comma's discarded undefined behavior makes its bound variable",
+        .source = check_driver_vla_discarded_undefined_source,
+        .warnings = 24,
+        .errors = 9,
+    },
+    {
+        .name = "a file-scope sizeof's runtime-sized type name recovers",
+        .source = check_driver_vla_sizeof_recovery_source,
+        .warnings = 7,
+        .errors = 3,
+    },
+    {
+        .name = "compound literals' bounds fold, in a body too",
+        .source = check_driver_vla_compound_fold_source,
+        .warnings = 8,
     },
 };
 
