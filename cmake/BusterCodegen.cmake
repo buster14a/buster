@@ -277,8 +277,9 @@ function(buster_codegen_merges output)
     endif()
 endfunction()
 
-# The unit's object for the link: in Develop (and Release in parts), the joined parts of a unit in parts; in Release,
-# those of a unit split after the optimizer; else its object.
+# The unit's object for the link: in Develop, the previous stage's of a unit BUSTER_SELF_BUILT names (buster_self_built,
+# CMakeLists.txt's buster_self_unit); in Develop (and Release in parts), the joined parts of a unit in parts; in
+# Release, those of a unit split after the optimizer; else its object.
 function(buster_native_object output name)
     buster_codegen_split_unit("${name}" split)
     buster_unit_partitions("${name}" parts)
@@ -289,6 +290,9 @@ function(buster_native_object output name)
     endif()
     if(NOT parts EQUAL 0)
         set(object "$<IF:${in_parts},${CMAKE_BINARY_DIR}/$<CONFIG>/parts/${name}/native.o,${object}>")
+    endif()
+    if("${name}.c" IN_LIST buster_self_built)
+        set(object "$<IF:$<CONFIG:Develop>,${CMAKE_BINARY_DIR}/Develop/self/${name}.c.o,${object}>")
     endif()
     set(${output} "${object}" PARENT_SCOPE)
 endfunction()
