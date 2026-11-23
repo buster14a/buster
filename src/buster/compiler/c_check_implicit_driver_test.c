@@ -611,6 +611,18 @@ static void check_test_driver_unknown_builtins(CheckTest* test, const char* clan
         "void d(void) { __builtin_arm_nop(); int n = sizeof(__builtin_qux(1)); }\n",
         "void g(int n, ...) { __builtin_va_list ap; __builtin_c23_va_start(ap, 1, 2); }\n"
         "void h(int n, ...) { __builtin_va_list ap; __builtin_c23_va_start(ap); __builtin_c23_va_start(ap, n); int x = __builtin_c23_va_start; }\n",
+        // Without FILE the explicit spelling uses the same implicit declaration policy as any unknown builtin.
+        // A call in a later scope can diagnose the declaration again. The missing-header warning occurs once per name.
+        "void a(void* p) { fprintf(p, \"x\"); __builtin_fprintf(p, \"y\"); __builtin_fprintf(p, \"z\"); }\n"
+        "int b(void* p) { return sizeof(__builtin_fprintf(p, \"x\")); }\n"
+        "typedef struct Stream FILE;\n"
+        "int c(FILE* p) { return __builtin_fprintf(p, \"x\"); }\n",
+        // In C23 a missing FILE builtin never became a declaration that could correct a later name.
+        "void a(void* p) { __builtin_fprintf(p, \"x\"); }\n"
+        "void b(void* p) { __builtin_fwrite(\"x\", 1, 1, p); }\n"
+        "typedef struct Stream FILE;\n"
+        "void c(FILE* p) { __builtin_fprintf(p, \"x\"); }\n"
+        "void d(FILE* p) { __builtin_fprintg(p, \"x\"); }\n",
     };
     static const char* const options[][2] =
     {
@@ -619,6 +631,8 @@ static void check_test_driver_unknown_builtins(CheckTest* test, const char* clan
         { "-std=gnu23", NULL },
         { "-std=gnu17", "-Wno-implicit-function-declaration" },
         { "-std=gnu89", "-Wno-error=implicit-function-declaration" },
+        { "-std=gnu89", "-Wimplicit-function-declaration" },
+        { "-std=gnu17", "-Wno-builtin-requires-header" },
         { "-std=gnu17", "-Werror" },
         { "-std=gnu89", "-w" },
     };
@@ -830,6 +844,16 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
         "int h(int x)\n{\n    while (x) ;\n}\n"
         "int i(int x)\n{\n    while (x) ;\n      if (x) ;\n    return 0;\n}\n"
         "int j(int x)\n{\n    switch (x) {\n    case 1:\n        while (x) ;\n        break;\n    }\n    return 0;\n}\n";
+    static const char empty_recovery[] =
+        "void a(int c) {\n    for (; c;);\n    missing;\n}\n"
+        "void b(int c) {\n    while (c);\n    ((bad));\n    c++;\n}\n"
+        "void c(int n) {\n    for (; n;);\n    absent;\n        n++;\n}\n"
+        "void d(int n) {\n    while (n);\n    nope;\n    { n++; }\n}\n"
+        "void e(int n) {\n    while (n);\n        n();\n}\n"
+        "void f(int n) {\n    while (n);\n    absent + (n / 0);\n}\n"
+        "void g(int n) {\n    while (n);\n        n + absent;\n}\n"
+        "void h(int n) {\n    while (n);\n        if (n) absent; else n++;\n}\n"
+        "void i(int n) {\n    while (n);\n        if (n) absent;\n}\n";
     // #1339: the statement's invocation starts at the loop's column even when its body is defined farther right.
     // Keep quiet cases in their own unit: an earlier positive diagnostic would already have replayed the history.
     static const char empty_macro_bodies[] =
@@ -1294,6 +1318,7 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
         { self_initialization, { "-Wall", NULL, NULL, NULL } },
         { unused_but_set_parameters, { "-Wextra", NULL, NULL, NULL } },
         { empty_else_body, { "-Wall", NULL, NULL, NULL } },
+        { empty_recovery, { "-Wempty-body", NULL, NULL, NULL } },
         { empty_bodies, { "-Wall", NULL, NULL, NULL } },
         {
             empty_macro_bodies,

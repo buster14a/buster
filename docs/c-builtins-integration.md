@@ -3693,12 +3693,14 @@ The signaling NaNs and the `_Float128` and
 functions too, whose prototypes take the unit's `FILE` (clang's prototype code
 `P`): the type of the last typedef named `FILE` at file scope before the call,
 as clang's `ASTContext` keeps it (`setFILEDecl`), whatever its type
-(`check_input_file_type`, `BuiltinIntrinsicTypeInput.file_type`). A local
-object named `FILE` doesn't hide it, and a block-scope typedef of the name is
-none; a unit without one refuses the call, as clang does ("use of unknown
-builtin"). A deferred body's lane leaves a call of one to source order, as its
-bindings hold only the names the body spells. Their plain names (`fopen`,
-`fprintf`, `fread`, `fscanf`, `fwrite`, `vfprintf` and `vfscanf`) are plain
+(`check_input_file_type`, `BuiltinIntrinsicTypeInput.file_type`). Only a
+file-scope typedef supplies this type. Before C23, a direct call made before
+that typedef uses an implicit function declaration under its written name.
+`-Wimplicit-function-declaration` controls the unknown-builtin diagnostic.
+The first implicit declaration also warns that the builtin needs `<stdio.h>`.
+In C23 the undeclared name is an error. A deferred body's lane leaves such
+calls to source order because its bindings hold only the names the body spells.
+Their plain names (`fopen`, `fprintf`, `fread`, `fscanf`, `fwrite`, `vfprintf` and `vfscanf`) are plain
 library builtins too, of the implicit declarations' rules: undeclared, a call
 declares the function with its row's prototype where the unit has a `FILE`
 (C99's error, C89's warning), and warns that it needs `<stdio.h>` where it

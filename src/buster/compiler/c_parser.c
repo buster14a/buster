@@ -344,8 +344,7 @@ static const char* const parse_predeclared_typedefs[] =
 // preprocessor's printing flag before either recovery uses it.
 #define BUSTER_PARSE_RECOVERED_TYPE 0x40u
 #define BUSTER_PARSE_DROPPED_DECLARATOR BUSTER_PARSE_RECOVERED_TYPE
-// The same private bit on a recovery view's `;` that ends a statement the repair deleted whole (#2406): clang's
-// StmtError, which is neither an empty body nor a statement after a loop (ParseDiagnostic.resume_statement).
+// A recovery view marks the `;` or opening brace that stands in for a discarded statement.
 #define BUSTER_PARSE_DROPPED_STATEMENT BUSTER_PARSE_RECOVERED_TYPE
 _Static_assert(BUSTER_PARSE_RECOVERED_TYPE == BUSTER_PP_NAME_LINE, "private parser flag cleared during preprocessing-token conversion");
 // Private recovery views mark an inserted suppress argument ')' when clang dropped the attribute. Its original
