@@ -38,6 +38,41 @@ static const char check_driver_node_bodies_text[] =
     "int aligned(int c) { int x __attribute__((aligned(16))) = c; return x; }\n"
     "__thread int tls;\nint threaded(int a) { tls += a; return tls; }\n";
 
+// Units that say something, each with the body `beside` that says nothing: with --node-bodies each one's diagnostics
+// and status are the ordinary compile's, and where it compiles its object too, with `taken` of its bodies taken. What is
+// said is of a stage each: before the walk (a break outside a loop); by the walk (a division by zero, a result not
+// used, a deprecated function's call); by the reader's passes after it (a naked function's statement, a packed member's
+// address, a type that is available only in the default evaluation method, used in a body the producer takes and
+// reported at its typedef); by the common warnings' pass (an empty body); by the program (a function that may not
+// return a value, an enumeration's value a switch does not handle); by the initializers (excess elements); at the
+// unit's end (a function with internal linkage that is not defined); and by code generation's check (a vector
+// parameter wider than the target's registers, reported at the parameter, its body taken). The last has an
+// always_inline wrapper, which says nothing: the lowering expands its call from the wrapper's own body, and neither
+// that body nor its caller's is taken.
+static const struct
+{
+    const char* name;
+    const char* text;
+    const char* option;
+    int taken;
+} check_driver_node_bodies_units[] = {
+    { "said", "void f(void) { break; }\nint beside(int a) { return a + 2; }\n", NULL, -1 },
+    { "zero", "int f(int a) { return a / 0; }\nint beside(int a) { return a + 2; }\n", NULL, 1 },
+    { "result", "__attribute__((warn_unused_result)) int must(void);\nvoid f(void) { must(); }\nint beside(int a) { return a + 2; }\n", NULL, 1 },
+    { "deprecated", "__attribute__((deprecated)) void old(void);\nvoid f(void) { old(); }\nint beside(int a) { return a + 2; }\n", NULL, 1 },
+    { "naked", "int g;\n__attribute__((naked)) void f(void) { g = 1; }\nint beside(int a) { return a + 2; }\n", NULL, -1 },
+    { "packed", "struct __attribute__((packed)) P { char c; int i; } gpk;\nint *f(void) { return &gpk.i; }\nint beside(int a) { return a + 2; }\n", NULL, 1 },
+    { "eval", "typedef float T __attribute__((available_only_in_default_eval_method));\n#pragma float_control(push)\n#pragma clang fp eval_method(double)\n"
+              "#pragma float_control(pop)\nvoid inner(void) { T value; (void)value; }\n", "-ffp-eval-method=source", -1 },
+    { "empty", "int g;\nvoid f(int a) { if (a); g = 1; }\nint beside(int a) { return a + 2; }\n", NULL, 1 },
+    { "flow", "int f(int a) { if (a) return 1; }\nint beside(int a) { return a + 2; }\n", NULL, 1 },
+    { "switched", "enum E { A, B };\nint f(enum E e) { switch (e) { case A: return 1; } return 0; }\nint beside(int a) { return a + 2; }\n", NULL, 1 },
+    { "initialized", "void f(void) { int a[1] = { 1, 2 }; (void)a; }\nint beside(int a) { return a + 2; }\n", NULL, 1 },
+    { "undefined", "static int und(void);\nint f(void) { return und(); }\nint beside(int a) { return a + 2; }\n", NULL, 1 },
+    { "vector", "typedef float V8 __attribute__((vector_size(32)));\nint g;\nvoid f(V8 v) { g = 1; }\nint beside(int a) { return a + 2; }\n", NULL, 2 },
+    { "inlined", "__attribute__((always_inline)) inline int wrap(int a) { return a + 1; }\nint f(int a) { return wrap(a); }\nint beside(int a) { return a + 2; }\n", NULL, 1 },
+};
+
 // Whether the files at `left` and `right` hold the same bytes, and some.
 static bool check_test_driver_node_bodies_same(const char* left, const char* right)
 {
@@ -183,6 +218,50 @@ static void check_test_driver_node_bodies(CheckTest* test, const char* clang, co
     free(fused_text);
     free(fused_taken_text);
     free(fused_timed_text);
+    // The units that say something: as loud with the option as without.
+    for (uint32_t u = 0; u < BUSTER_ARRAY_LENGTH(check_driver_node_bodies_units) && written; u += 1)
+    {
+        const char* text = check_driver_node_bodies_units[u].text;
+        const char* option = check_driver_node_bodies_units[u].option;
+        const int expected = check_driver_node_bodies_units[u].taken;
+        const char* unit_options[3] = { 0 };
+        uint32_t unit_option_count = 0;
+        if (option != NULL)
+        {
+            unit_options[unit_option_count++] = option;
+        }
+        char* unit_plain_text = NULL;
+        char* unit_taken_text = NULL;
+        char* unit_timed_text = NULL;
+        unlink(plain);
+        unlink(taken);
+        const bool unit_written = parse_test_write(source, text, strlen(text));
+        const int unit_plain_status = unit_written ? check_test_driver_node_bodies_compile(executable, source, plain, unit_options, unit_option_count, &unit_plain_text) : -1;
+        unit_options[unit_option_count++] = "--node-bodies";
+        const int unit_taken_status = unit_written ? check_test_driver_node_bodies_compile(executable, source, taken, unit_options, unit_option_count, &unit_taken_text) : -2;
+        bool same = unit_written && unit_plain_status == unit_taken_status && unit_plain_text != NULL && unit_taken_text != NULL && strcmp(unit_plain_text, unit_taken_text) == 0 &&
+                    (unit_plain_status != 0 || check_test_driver_node_bodies_same(plain, taken)) && (expected < 0) == (unit_plain_status != 0);
+        unsigned unit_bodies = 0;
+        unsigned unit_took = 0;
+        if (same && expected >= 0)
+        {
+            unit_options[unit_option_count++] = "--time-stages";
+            const int unit_timed_status = check_test_driver_node_bodies_compile(executable, source, taken, unit_options, unit_option_count, &unit_timed_text);
+            const char* unit_line = unit_timed_text != NULL ? strstr(unit_timed_text, "node-bodies: bodies=") : NULL;
+            same = unit_timed_status == 0 && unit_line != NULL && sscanf(unit_line, "node-bodies: bodies=%u taken=%u", &unit_bodies, &unit_took) == 2 &&
+                   unit_took == (unsigned)expected && check_test_driver_node_bodies_same(plain, taken);
+        }
+        check_test_expect(test, same, "node-bodies: a unit that says something says the same with --node-bodies, and compiles to the same object");
+        if (!same)
+        {
+            fprintf(stderr, "test-checker-driver: node-bodies: unit %s: status %d and %d with the option, bodies %u, taken %u (%d expected)\n%s----\n%s",
+                    check_driver_node_bodies_units[u].name, unit_plain_status, unit_taken_status, unit_bodies, unit_took, expected,
+                    unit_plain_text != NULL ? unit_plain_text : "", unit_taken_text != NULL ? unit_taken_text : "");
+        }
+        free(unit_plain_text);
+        free(unit_taken_text);
+        free(unit_timed_text);
+    }
     if (restored != NULL)
     {
         setenv("BUSTER_TEST_NODE_BODIES", restored, 1);
