@@ -317,8 +317,11 @@ forwarding. Tier 1 now takes them in three steps, all in
 - **The optimizer's identities** take what the eightbytes leave: an `and` of a
   zero extension and a mask that keeps its bits, a bitcast of a bitcast and a
   truncation of an extension back to the first value's type, and an `undef`
-  as zero (an `and` absorbed by it, an `or`, `xor` or `add` of it the other
-  operand), as Tier 1 selects it.
+  as zero where it is an operand: an `or`, `xor` or `add` of it is the other
+  operand, and SCCP folds an `and` of it to zero, as LLVM does. The `and`
+  isn't the `undef` itself (#3424): its other operand clears bits, and an
+  `undef` that reaches a phi has no definition, so the phi's register held
+  whatever it held, a struct field left zero among it.
 
 Tier 1 runs the widening SROA on every function with its own ABI records
 (`check_tier1_compile`, and `check_tier1_inline_expand` where the expansion
