@@ -659,7 +659,7 @@ static bool check_tier1_inline_expand(CheckTier1Lane* lane, const CheckTier1Inli
         // The unit: the caller and its callees, by symbol (a radix sort of the keys, as the bindings' are).
         keys[count] = (uint64_t)own << 32 | UINT32_MAX;
         const uint32_t members = count + 1;
-        const uint64_t* sorted = ordered && previous <= own ? keys : c_bindings_sort(keys, sorting, members, !BUSTER_SCALAR_PATH(scalar), varying);
+        const uint64_t* sorted = ordered && previous <= own ? keys : c_bindings_sort(keys, sorting, members, varying);
         // The unit's columns precede the inliner's output (steps[4]), whose unused tail its inputs mustn't share, as they
         // mustn't its scratch.
         Arena* columns = &lane->steps[4];

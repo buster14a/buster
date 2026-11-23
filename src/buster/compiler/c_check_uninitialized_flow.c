@@ -608,7 +608,7 @@ static bool check_common_uninitialized_flow(const Parser* parser, const CheckInp
             valid = temporary != NULL;
             if (valid)
             {
-                candidates = c_bindings_sort(candidates, temporary, candidates_count, true, UINT32_MAX);
+                candidates = c_bindings_sort(candidates, temporary, candidates_count, UINT32_MAX);
             }
         }
         uint32_t body = 0;

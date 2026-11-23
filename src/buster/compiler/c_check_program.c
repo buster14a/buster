@@ -4969,7 +4969,7 @@ static bool check_program_targets(CheckProgram* program, const CheckProgramOptio
         {
             varying |= (uint32_t)((keys[0] ^ keys[e]) >> 32);
         }
-        keys = valid ? c_bindings_sort(keys, temporary, count, !BUSTER_SCALAR_PATH(options->scalar), varying) : keys;
+        keys = valid ? c_bindings_sort(keys, temporary, count, varying) : keys;
     }
     // The strings of the targets made so far, in their order.
     String8* texts = valid && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, String8, count) : 0;
@@ -5127,7 +5127,7 @@ __attribute__((noinline)) static bool check_program_attribute_keys(CheckProgram*
             {
                 varying |= (uint32_t)((keys[0] ^ keys[e]) >> 32);
             }
-            const uint64_t* sorted = c_bindings_sort(keys, temporary, (uint32_t)total, !scalar, varying);
+            const uint64_t* sorted = c_bindings_sort(keys, temporary, (uint32_t)total, varying);
             if (sorted != keys)
             {
                 memcpy(keys, sorted, total * sizeof(uint64_t));
@@ -5159,7 +5159,7 @@ __attribute__((noinline)) static bool check_program_patchable_keys(CheckProgram*
             {
                 varying |= (uint32_t)((keys[0] ^ keys[e]) >> 32);
             }
-            const uint64_t* sorted = c_bindings_sort(keys, temporary, total, !scalar, varying);
+            const uint64_t* sorted = c_bindings_sort(keys, temporary, total, varying);
             if (sorted != keys)
             {
                 memcpy(keys, sorted, (uint64_t)total * sizeof(uint64_t));
@@ -5439,7 +5439,7 @@ static bool check_program_census_walk(CheckProgram* program, const Parser* parse
         {
             varying |= (uint32_t)((reference_items[0] ^ reference_items[r]) >> 32);
         }
-        const uint64_t* sorted = c_bindings_sort(reference_items, reference_sort, found, !BUSTER_SCALAR_PATH(scalar), varying);
+        const uint64_t* sorted = c_bindings_sort(reference_items, reference_sort, found, varying);
         valid = check_program_census_store(census, b, sorted, found, &total, output);
     }
     if (region_reached != NULL)
@@ -6144,7 +6144,7 @@ static bool check_program_census_scan(CheckProgram* program, CheckProgramCensus*
             {
                 varying |= (uint32_t)((reference_items[0] ^ reference_items[r]) >> 32);
             }
-            sorted = c_bindings_sort(reference_items, reference_sort, found, !BUSTER_SCALAR_PATH(scalar), varying);
+            sorted = c_bindings_sort(reference_items, reference_sort, found, varying);
         }
         uint32_t kept = 0;
         for (uint32_t r = 0; r < found; r += 1)
@@ -6287,7 +6287,7 @@ static uint32_t check_program_constant_arms(CheckControlWriter* writer, const ui
     {
         varying |= (uint32_t)((keys[0] ^ keys[i]) >> 32);
     }
-    const uint64_t* ordered = c_bindings_sort(keys, sort, key_count, !BUSTER_SCALAR_PATH(scalar), varying);
+    const uint64_t* ordered = c_bindings_sort(keys, sort, key_count, varying);
     uint32_t arm_count = 0;
     uint32_t b = 0;
     uint32_t prepared = BUSTER_CHECK_NONE;
@@ -6340,7 +6340,7 @@ static uint32_t check_program_constant_arms(CheckControlWriter* writer, const ui
     {
         varying |= (uint32_t)((arms[0] ^ arms[i]) >> 32);
     }
-    const uint64_t* sorted = c_bindings_sort(arms, sort, arm_count, !BUSTER_SCALAR_PATH(scalar), varying);
+    const uint64_t* sorted = c_bindings_sort(arms, sort, arm_count, varying);
     uint32_t joined = 0;
     for (uint32_t i = 0; i < arm_count; i += 1)
     {
@@ -7126,7 +7126,7 @@ static void check_program_bodies(CheckProgramRun* run, uint32_t end)
             }
             // The existing bounded radix kernel sorts high 32-bit keys. Reuse its scalar/vector twins, keeping
             // this body's canonical object IDs compact instead of rescanning the entire translation unit.
-            uint64_t* sorted = c_bindings_sort(reference_items, reference_sort, body->reference_count, !BUSTER_SCALAR_PATH(options->scalar), varying);
+            uint64_t* sorted = c_bindings_sort(reference_items, reference_sort, body->reference_count, varying);
             uint32_t* output_references = body->reference_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, body->reference_count) : 0;
             if (body->reference_count != 0 && output_references == 0)
             {
@@ -7290,7 +7290,7 @@ static bool check_program_finish(CheckProgramRun* run)
             {
                 varying |= (uint32_t)((arm_keys[0] ^ arm_keys[i]) >> 32);
             }
-            arms = c_bindings_sort(arm_keys, arm_keys + arm_count, arm_count, !BUSTER_SCALAR_PATH(options.scalar), varying);
+            arms = c_bindings_sort(arm_keys, arm_keys + arm_count, arm_count, varying);
         }
         const uint64_t arms_start = __rdtsc();
         valid = valid && (!scanned || check_program_census_scan(program, &program->census_arms, parser, openings, program->body_count, arms, arm_count, true, false, NULL,
@@ -7321,7 +7321,7 @@ static bool check_program_finish(CheckProgramRun* run)
         {
             varying |= (uint32_t)((dropped_ranges[0] ^ dropped_ranges[i]) >> 32);
         }
-        const uint64_t* sorted = c_bindings_sort(dropped_ranges, dropped_sort, dropped_count, !BUSTER_SCALAR_PATH(options.scalar), varying);
+        const uint64_t* sorted = c_bindings_sort(dropped_ranges, dropped_sort, dropped_count, varying);
         memcpy(program->dropped_ranges, sorted, (uint64_t)dropped_count * sizeof(uint64_t));
         program->dropped_range_count = dropped_count;
     }

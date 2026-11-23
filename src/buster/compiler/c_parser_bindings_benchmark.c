@@ -159,7 +159,7 @@ static bool parse_binding_benchmark_file(const char* path, const PPOptions* opti
                 }
                 else if (valid && which == PARSE_BINDING_TIMED_SORT)
                 {
-                    valid = c_bindings_sorted(&bindings.events, &scratch, &keys, &key_count, true);
+                    valid = c_bindings_sorted(&bindings.events, &scratch, &keys, &key_count);
                 }
                 const uint64_t elapsed = c_binding_benchmark_time() - begin;
                 uint64_t counts[3] = { 0 };

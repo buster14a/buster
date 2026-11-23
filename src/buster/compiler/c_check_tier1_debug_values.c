@@ -587,7 +587,7 @@ static bool check_tier1_debug_values(const Tier0Function* function, const IrFunc
     }
     if (valid && instance_events != 0)
     {
-        instance_keys = c_bindings_sort(instance_keys, instance_sorting, instance_events, true, UINT32_MAX);
+        instance_keys = c_bindings_sort(instance_keys, instance_sorting, instance_events, UINT32_MAX);
         for (uint32_t k = 0; k < instance_events; k += 1)
         {
             proof.instance_events[k] = (uint32_t)instance_keys[k];

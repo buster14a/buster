@@ -3481,8 +3481,8 @@ static int run_checker_corpus(int count, char** arguments)
                 }
                 else if (strcmp(argument, "--deferred-bindings") == 0)
                 {
-                    deferred_bindings = strcmp(text, "stacks") == 0 ? CHECK_INPUT_BINDINGS_STACKS : strcmp(text, "batch") == 0 ? CHECK_INPUT_BINDINGS_BATCH :
-                                        strcmp(text, "direct") == 0 ? CHECK_INPUT_BINDINGS_DIRECT : CHECK_INPUT_BINDINGS_DEFAULT;
+                    deferred_bindings = strcmp(text, "batch") == 0 ? CHECK_INPUT_BINDINGS_BATCH : strcmp(text, "direct") == 0 ? CHECK_INPUT_BINDINGS_DIRECT :
+                                                                                                         CHECK_INPUT_BINDINGS_DEFAULT;
                     valid = deferred_bindings != CHECK_INPUT_BINDINGS_DEFAULT;
                 }
                 else
@@ -3705,7 +3705,7 @@ static int run_checker_corpus(int count, char** arguments)
     }
     else if (!valid)
     {
-        fprintf(stderr, "usage: test-checker-corpus [--clang PATH] [--report NEW.tsv] [--select-accepted NEW.list | --semantic-rejections NEW.list] [--files-from LIST --root DIR] [--reports N] [--limit N] [--random N] [--mutations N] [--semantic-mutations N [--minimize N]] [--deferred LANES [--deferred-bindings stacks|batch|direct]] [--symbols] [--symbols-minimum N] [--id-order N] [--seed N] [--keep] [preprocessor options] file-or-directory...\n"
+        fprintf(stderr, "usage: test-checker-corpus [--clang PATH] [--report NEW.tsv] [--select-accepted NEW.list | --semantic-rejections NEW.list] [--files-from LIST --root DIR] [--reports N] [--limit N] [--random N] [--mutations N] [--semantic-mutations N [--minimize N]] [--deferred LANES [--deferred-bindings batch|direct]] [--symbols] [--symbols-minimum N] [--id-order N] [--seed N] [--keep] [preprocessor options] file-or-directory...\n"
                 "       test-checker-corpus [--clang PATH] --minimize-mutant FILE... [preprocessor options]\n");
     }
     if (report != 0)

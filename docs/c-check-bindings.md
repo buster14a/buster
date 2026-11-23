@@ -82,28 +82,27 @@ at that point and its reports:
 | Mode | Answers from | Extra work | Extra memory |
 | --- | --- | --- | --- |
 | `direct` (default) | each use's retained `previous` | none | none |
-| `stacks` (`--scalar`) | `c_bindings_scalar`'s replay of the events, which reads neither `previous` nor the heads | one pass over the events | replay heads (3 × names × 4 bytes) and 3 × events × 4 bytes |
 | `batch` | `c_bindings_batch`'s radix sort and scan | sort and scan | sort keys and scan columns |
-| `parser-stacks`, `parser-batch` | #128's `ParseBindings`: the scalar grammar replayed with a trace, its events resolved, and its declaration column mapped onto the reader's uses (with the tag column checked against the reader's tags) | a second parse of the unit, a resolution and the mapping | the parser's events and columns, in the output arena until the handoff ends, and the trace in scratch |
+| `parser-batch` | #128's `ParseBindings`: the scalar grammar replayed with a trace, its events resolved, and its declaration column mapped onto the reader's uses (with the tag column checked against the reader's tags) | a second parse of the unit, a resolution and the mapping | the parser's events and columns, in the output arena until the handoff ends, and the trace in scratch |
 
-`check_input` and its wrappers take `CHECK_INPUT_BINDINGS_DEFAULT`: `direct`,
-or `stacks` when the parser was asked for its scalar twin. The other modes are
-reached only through `check_input_bindings_mode`, which the tests and the
-benchmark use. Before #336, the default was `parser-batch` and `--scalar` was
-`parser-stacks`.
+`check_input` and its wrappers take `CHECK_INPUT_BINDINGS_DEFAULT`: `direct`.
+The other modes are reached only through `check_input_bindings_mode`, which the
+tests and the benchmark use. Before #336, the default was `parser-batch` and
+`--scalar` was `parser-stacks`; until #2924, `--scalar` took `stacks`,
+`c_bindings_scalar`'s replay of the events, and `parser-stacks` resolved the
+parser's events with it too.
 
-The direct answers aren't a vector path; they are no path at all. The stack
-replay stays as the scalar twin because it is independent: it rebuilds every
-answer from the events alone, and the source tests require it to agree with
-the direct answers, the batch sort and the parser's replay on every token.
+The direct answers aren't a vector path; they are no path at all. The source
+tests require them to agree with the batch sort, which rebuilds every answer
+from the events alone, and with the parser's replay on every token.
 
 ## Ownership, lifetime and errors
 
 - The events, their heads and `previous` live in the reader's scratch for the
   call. `check_environment_publish` copies the events (without `previous`, the
   heads or the undo log) into the output arena as `CheckInput.environment`,
-  #113's semantic history, which the binding tests replay with both resolvers.
-- `stacks` and `batch` take their results and work arrays from scratch and pop
+  #113's semantic history, which the binding tests resolve again with the batch sort.
+- `batch` takes their results and work arrays from scratch and pop
   them before returning. The parser modes borrow the parser through a local
   view whose scratch is the checker's, and pop everything they pushed.
 - The events are in source order. A use the reader reaches after later tokens'
@@ -159,9 +158,8 @@ because it decides which bodies to check before the reader runs.
   the parser mode's allocation failures, which leave the parser
   and both arenas as they were.
 
-`test-checker-corpus` compares the two default paths, now `stacks` and
-`direct`, with each other and their acceptance and first diagnostics with
-Clang's.
+`test-checker-corpus` compares the default path, now `direct`, and its
+acceptance and first diagnostics with Clang's.
 
 ## Benchmark
 
@@ -193,8 +191,9 @@ as one untimed-process observation, with no repeated-performance claim.
 
 The modes differ only in the handoff, so their differences are its cost.
 `--only MODE` times one mode back to back, and `--after-scalar MS` runs the
-scalar twin's reader (`stacks`, without parsing or expression checking) for
-MS ms before each sample, in either scope.
+batch sort's reader (`batch`, without parsing or expression checking) for MS ms
+before each sample, in either scope (until #2924 it ran the scalar twin's,
+`stacks`).
 
 It reports:
 
@@ -211,8 +210,9 @@ It reports:
   before release, while poisoned written-byte probes are unavailable
   (`written_bytes_available=0`, rather than interpreting their zeros as no
   memory written);
-- isolated pieces on the run's retained events: the reader's stack replay and
-  batch sort, the parser's grammar replay, and its two resolutions, each with
+- isolated pieces on the run's retained events: the reader's stack replay (the
+  batch sort's fallback) and batch sort, the parser's grammar replay, and its
+  resolution, each with
   its own footprint past its arenas' lengths (exact for what it writes);
 - on the plain run alone (not `--only`, `--after-scalar` or `--pipeline`), the
   expressions' walk by class, from runs of `direct` of their own after the

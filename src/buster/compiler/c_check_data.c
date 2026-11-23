@@ -602,7 +602,7 @@ static uint64_t* check_data_sort_boundaries(uint64_t* keys, uint64_t* temporary,
         uint64_t* sorted = keys;
         if (scalar || varying != 0)
         {
-            sorted = c_bindings_sort(keys, temporary, count, !scalar && count >= BUSTER_CHECK_DATA_VECTOR_BOUNDARIES, varying);
+            sorted = c_bindings_sort(keys, temporary, count, varying);
         }
         temporary = sorted == keys ? temporary : keys;
         keys = sorted;

@@ -171,7 +171,7 @@ static bool check_tier1_debug_value_regions(CheckTier1DebugValues* proof, const 
     }
     if (valid && needed)
     {
-        phi_keys = c_bindings_sort(phi_keys, phi_sorting, phi_count, true, UINT32_MAX);
+        phi_keys = c_bindings_sort(phi_keys, phi_sorting, phi_count, UINT32_MAX);
         uint32_t writers[32];
         memset(writers, 0xff, sizeof(writers));
         uint32_t cursor = 0;
@@ -305,7 +305,7 @@ static bool check_tier1_debug_value_regions(CheckTier1DebugValues* proof, const 
     }
     if (valid && regions != 0)
     {
-        proof->region_events = c_bindings_sort(events, sorting, proof->region_event_count, true, UINT32_MAX);
+        proof->region_events = c_bindings_sort(events, sorting, proof->region_event_count, UINT32_MAX);
         // The other sort buffer holds the previous event of each dense local, plus one (zero for its first).
         // The value-range walk uses it to visit each local once per crossed interval, in first-occurrence order.
         proof->region_previous = (uint32_t*)(proof->region_events == events ? sorting : events);

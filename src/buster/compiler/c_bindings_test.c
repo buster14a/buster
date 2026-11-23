@@ -53,7 +53,7 @@ static void c_binding_test_compare(CBindingTest* test, const CBindings* bindings
         c_binding_test_check(test, !require_fallback || statistics.fallback_uses != 0, "long candidate chain did not use bounded fallback");
         uint64_t* keys = 0;
         uint32_t count = 0;
-        valid = c_bindings_sorted(bindings, scratch, &keys, &count, true);
+        valid = c_bindings_sorted(bindings, scratch, &keys, &count);
         c_binding_test_check(test, valid, "sort allocation");
         for (uint32_t i = 1; valid && i < count; i += 1)
         {
@@ -224,8 +224,6 @@ static void c_binding_test_sort_edges(CBindingTest* test)
     c_binding_test_check(test, mapped, "guard page allocation");
     if (mapped)
     {
-        uint64_t twin[128];
-        uint64_t twin_temporary[128];
         uint64_t original[128];
         for (uint32_t length = 0; length <= 96; length += 1)
         {
@@ -252,15 +250,12 @@ static void c_binding_test_sort_edges(CBindingTest* test)
                     first = i == 0 ? key : first;
                     varying |= key ^ first;
                     keys[i] = ((uint64_t)key << 32) | i;
-                    twin[i] = keys[i];
                     original[i] = keys[i];
                 }
-                const uint64_t* sorted = c_bindings_sort(keys, temporary, length, true, varying);
-                c_bindings_sort(twin, twin_temporary, length, false, UINT32_MAX);
+                const uint64_t* sorted = c_bindings_sort(keys, temporary, length, varying);
                 c_binding_test_check(test, sorted == keys || sorted == temporary, "sort returned an unowned buffer");
-                c_binding_test_check(test, memcmp(sorted, twin, (uint64_t)length * 8) == 0, "guarded sort differs from scalar twin");
-                // Every key came in at the position its low half names (twin holds them as they came in), and they come
-                // out strictly ascending: a permutation, sorted by the high half, stable among equal ones.
+                // Every key came in at the position its low half names (`original` holds them as they came in), and they
+                // come out strictly ascending: a permutation, sorted by the high half, stable among equal ones.
                 for (uint32_t i = 0; i < length; i += 1)
                 {
                     const uint32_t position = (uint32_t)sorted[i];

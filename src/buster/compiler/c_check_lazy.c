@@ -231,7 +231,7 @@ static bool check_lazy_replay(CheckLazy* result, const Parser* parser, const Pre
     Parser replay = valid ? *parser : (Parser){ 0 };
     replay.scratch = *scratch;
     valid = valid && parse_bindings_build(&bindings, &replay, output) && bindings.body_count == body_count &&
-            parse_bindings_resolve(&bindings, BUSTER_SCALAR_PATH(scalar), scratch);
+            parse_bindings_resolve(&bindings, scratch);
     uint32_t* owners = valid ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, slots) : 0;
     uint32_t* firsts = owners != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, slots) : 0;
     uint32_t* targets = firsts != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, names) : 0;

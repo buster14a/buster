@@ -373,32 +373,29 @@ static void parse_binding_test_columns(ParseBindingTest* test, const char* path,
     {
         memcpy(direct, bindings->declarations, (uint64_t)bindings->count * sizeof(uint32_t));
         memcpy(kinds, bindings->kinds, bindings->count);
-        for (uint32_t mode = 0; mode < 2; mode += 1)
+        const bool resolved = parse_bindings_resolve(bindings, scratch);
+        parse_binding_test_check(test, resolved, path, "batch resolution failed", 0);
+        for (uint32_t t = 0; resolved && t < bindings->count; t += 1)
         {
-            const bool resolved = parse_bindings_resolve(bindings, mode == 0, scratch);
-            parse_binding_test_check(test, resolved, path, mode == 0 ? "scalar replay failed" : "batch resolution failed", 0);
-            for (uint32_t t = 0; resolved && t < bindings->count; t += 1)
+            parse_binding_test_check(test, bindings->declarations[t] == direct[t], path,
+                                     "batch differs from source producer", t);
+            const uint32_t event = bindings->token_events[t];
+            const bool index_valid = event == 0 || event <= bindings->events.count;
+            parse_binding_test_check(test, index_valid, path, "token event is outside the stream", t);
+            bool metadata = bindings->kinds[t] == kinds[t];
+            if (event == 0)
             {
-                parse_binding_test_check(test, bindings->declarations[t] == direct[t], path,
-                                         mode == 0 ? "scalar replay differs from source producer" : "batch differs from source producer", t);
-                const uint32_t event = bindings->token_events[t];
-                const bool index_valid = event == 0 || event <= bindings->events.count;
-                parse_binding_test_check(test, index_valid, path, "token event is outside the stream", t);
-                bool metadata = bindings->kinds[t] == kinds[t];
-                if (event == 0)
-                {
-                    metadata &= bindings->namespaces[t] == UINT8_MAX && bindings->kinds[t] == UINT8_MAX && bindings->declarations[t] == UINT32_MAX;
-                }
-                else if (index_valid)
-                {
-                    const uint32_t space = bindings->events.key[event - 1] / bindings->events.name_capacity;
-                    metadata &= space == bindings->namespaces[t] && space < C_BINDING_NAMESPACES && bindings->kinds[t] < C_BINDING_KINDS;
-                }
-                parse_binding_test_check(test, metadata, path, "binding namespace/kind metadata differs", t);
-                if (mode == 1 && event != 0)
-                {
-                    test->identifiers += 1;
-                }
+                metadata &= bindings->namespaces[t] == UINT8_MAX && bindings->kinds[t] == UINT8_MAX && bindings->declarations[t] == UINT32_MAX;
+            }
+            else if (index_valid)
+            {
+                const uint32_t space = bindings->events.key[event - 1] / bindings->events.name_capacity;
+                metadata &= space == bindings->namespaces[t] && space < C_BINDING_NAMESPACES && bindings->kinds[t] < C_BINDING_KINDS;
+            }
+            parse_binding_test_check(test, metadata, path, "binding namespace/kind metadata differs", t);
+            if (event != 0)
+            {
+                test->identifiers += 1;
             }
         }
         test->walks += bindings->statistics.walks;
@@ -713,13 +710,10 @@ static void parse_binding_test_limits(ParseBindingTest* test, const char* direct
         if (saved != 0)
         {
             memcpy(saved, bindings.declarations, (uint64_t)bindings.count * sizeof(uint32_t));
-            for (uint32_t mode = 0; mode < 2; mode += 1)
-            {
-                const bool resolved = parse_bindings_resolve(&bindings, mode == 0, &unavailable);
-                parse_binding_test_check(test, !resolved && bindings.valid && unavailable.length == 0 &&
-                                         memcmp(saved, bindings.declarations, (uint64_t)bindings.count * sizeof(uint32_t)) == 0,
-                                         path, "failed resolution changed valid output", mode);
-            }
+            const bool resolved = parse_bindings_resolve(&bindings, &unavailable);
+            parse_binding_test_check(test, !resolved && bindings.valid && unavailable.length == 0 &&
+                                     memcmp(saved, bindings.declarations, (uint64_t)bindings.count * sizeof(uint32_t)) == 0,
+                                     path, "failed resolution changed valid output", 0);
             ParseBindings recovered = { 0 };
             const bool recovered_ok = parse_bindings_build(&recovered, &parser, &arena);
             parse_binding_test_check(test, recovered_ok && recovered.count == bindings.count &&

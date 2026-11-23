@@ -158,7 +158,7 @@ static bool check_data_string_pool(const TypeTable* types, const CheckDataObject
         {
             check_data_string_hashes(objects, indices, batch, scalar, keys + written);
         }
-        uint64_t* sorted = valid ? c_bindings_sort(keys, temporary, strings, !BUSTER_SCALAR_PATH(scalar), UINT32_MAX) : NULL;
+        uint64_t* sorted = valid ? c_bindings_sort(keys, temporary, strings, UINT32_MAX) : NULL;
         uint64_t* other = sorted == keys ? temporary : keys;
         for (uint32_t first = 0; valid && first < strings;)
         {

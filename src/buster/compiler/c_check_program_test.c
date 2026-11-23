@@ -2023,7 +2023,7 @@ static bool check_test_program_sparse(const CheckProgram* program, const CheckDa
     {
         uint64_t* temporary = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, events[path].count);
         same = temporary != NULL;
-        sorted[path] = same ? c_bindings_sort(events[path].keys, temporary, events[path].count, false, UINT32_MAX) : NULL;
+        sorted[path] = same ? c_bindings_sort(events[path].keys, temporary, events[path].count, UINT32_MAX) : NULL;
     }
     same = same && rooms[0] == rooms[1] && memcmp(needs[0], needs[1], (uint64_t)count + 1) == 0 &&
            memcmp(reduced[0].object_declarations, reduced[1].object_declarations, ((uint64_t)count + 1) * sizeof(uint32_t)) == 0 &&

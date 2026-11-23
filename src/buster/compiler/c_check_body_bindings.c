@@ -3,7 +3,7 @@
 //
 // Independent per-body name resolution over CheckInput's retained history (#113). Include after
 // c_check_environment.c. c_body_bindings_spans prepares body event slices and undo-bases once; workers then call
-// c_body_bindings_resolve with private arenas and (for scalar replay) a private reusable CBindingReplay. All source
+// c_body_bindings_resolve with private arenas. All source
 // arrays and the file index stay immutable. A missing local binding falls back at the original use's token position.
 //
 // Body-entry parameters, the tags and enumeration constants their list declared, and labels are reactivated at
@@ -11,7 +11,7 @@
 // Original undo marks differ from private marks by preceding file activations. Exit restores may occur at the closing
 // token or afterward, or be omitted when empty. The translation-unit cleanup stays outside the slice. Preserve
 // contiguous events and borrow their other columns.
-// Two bounded SIMD passes count/classify events and translate undo/end columns; there are exact scalar twins.
+// Two bounded SIMD passes count/classify events and translate undo/end columns.
 //
 // This consumes already elaborated source events and declaration TypeIds. It does not defer declaration/type
 // elaboration, create private types, reconcile linkage effects or check expression/statement semantics. Those
@@ -68,48 +68,31 @@ static uint32_t c_body_bindings_bound(const CBindings* bindings, uint32_t point,
 }
 
 // Classify one bounded range. A sentinel point permits arbitrary file declarations in a preceding prefix; body
-// ranges permit file declarations only at their opening boundary. Neither path reads inactive depth entries.
-static bool c_body_bindings_counts(const CBindings* source, uint32_t first, uint32_t end, uint32_t point, bool scalar,
+// ranges permit file declarations only at their opening boundary. No inactive depth entry is read.
+static bool c_body_bindings_counts(const CBindings* source, uint32_t first, uint32_t end, uint32_t point,
                                     uint32_t* file_count, uint32_t* declaration_count, uint32_t* use_count)
 {
-    (void)scalar;
-
     bool valid = first <= end && end <= source->count;
     uint32_t file = 0;
     uint32_t declarations = 0;
     uint32_t uses = 0;
-    if (BUSTER_SCALAR_PATH(scalar))
+    for (uint64_t block = first; valid && block < end; block += 16)
     {
-        for (uint32_t event = first; valid && event < end; event += 1)
+        const uint32_t live = end - block < 16 ? (uint32_t)(end - block) : 16;
+        const __mmask16 mask = (__mmask16)((1u << live) - 1);
+        const __m128i operations = _mm_maskz_loadu_epi8(mask, source->operation + block);
+        const __mmask16 declared = _mm_mask_cmpeq_epi8_mask(mask, operations, _mm_set1_epi8(C_BINDING_DECLARE));
+        const __mmask16 used = _mm_mask_cmpeq_epi8_mask(mask, operations, _mm_set1_epi8(C_BINDING_USE));
+        const __m512i depth = _mm512_maskz_loadu_epi32(declared, source->depth + block);
+        const __mmask16 global = _mm512_mask_cmpeq_epi32_mask(declared, depth, _mm512_setzero_si512());
+        if (point != BUSTER_C_BINDING_NONE)
         {
-            const bool declaration = source->operation[event] == C_BINDING_DECLARE;
-            const bool global = declaration && source->depth[event] == 0;
-            declarations += declaration;
-            uses += source->operation[event] == C_BINDING_USE;
-            file += global;
-            valid &= !global || point == BUSTER_C_BINDING_NONE || source->point[event] == point;
+            const __m512i points = _mm512_maskz_loadu_epi32(global, source->point + block);
+            valid &= _mm512_mask_cmpneq_epu32_mask(global, points, _mm512_set1_epi32((int)point)) == 0;
         }
-    }
-    else
-    {
-        for (uint64_t block = first; valid && block < end; block += 16)
-        {
-            const uint32_t live = end - block < 16 ? (uint32_t)(end - block) : 16;
-            const __mmask16 mask = (__mmask16)((1u << live) - 1);
-            const __m128i operations = _mm_maskz_loadu_epi8(mask, source->operation + block);
-            const __mmask16 declared = _mm_mask_cmpeq_epi8_mask(mask, operations, _mm_set1_epi8(C_BINDING_DECLARE));
-            const __mmask16 used = _mm_mask_cmpeq_epi8_mask(mask, operations, _mm_set1_epi8(C_BINDING_USE));
-            const __m512i depth = _mm512_maskz_loadu_epi32(declared, source->depth + block);
-            const __mmask16 global = _mm512_mask_cmpeq_epi32_mask(declared, depth, _mm512_setzero_si512());
-            if (point != BUSTER_C_BINDING_NONE)
-            {
-                const __m512i points = _mm512_maskz_loadu_epi32(global, source->point + block);
-                valid &= _mm512_mask_cmpneq_epu32_mask(global, points, _mm512_set1_epi32((int)point)) == 0;
-            }
-            declarations += (uint32_t)__builtin_popcount((uint32_t)declared);
-            uses += (uint32_t)__builtin_popcount((uint32_t)used);
-            file += (uint32_t)__builtin_popcount((uint32_t)global);
-        }
+        declarations += (uint32_t)__builtin_popcount((uint32_t)declared);
+        uses += (uint32_t)__builtin_popcount((uint32_t)used);
+        file += (uint32_t)__builtin_popcount((uint32_t)global);
     }
     *file_count = file;
     *declaration_count = declarations;
@@ -118,10 +101,8 @@ static bool c_body_bindings_counts(const CBindings* source, uint32_t first, uint
 }
 
 static bool c_body_bindings_finish_span(CBodyBindingSpan* span, const CheckEnvironment* environment, uint32_t slot, uint32_t first,
-                                        uint32_t base, bool scalar, uint32_t* file_count)
+                                        uint32_t base, uint32_t* file_count)
 {
-    (void)scalar;
-
     *span = (CBodyBindingSpan){ 0 };
     const CBindings* source = environment->bindings;
     const CBodyRange body = environment->bodies[slot];
@@ -129,7 +110,7 @@ static bool c_body_bindings_finish_span(CBodyBindingSpan* span, const CheckEnvir
     uint32_t file = 0;
     uint32_t declarations = 0;
     uint32_t uses = 0;
-    bool valid = c_body_bindings_counts(source, first, end, body.begin, BUSTER_SCALAR_PATH(scalar), &file, &declarations, &uses);
+    bool valid = c_body_bindings_counts(source, first, end, body.begin, &file, &declarations, &uses);
     valid = valid && base <= source->count - file;
     const uint32_t mark = base + file;
     // Readers may restore at the closing token or immediately afterward, and may omit empty restores. Include
@@ -157,10 +138,8 @@ static bool c_body_bindings_finish_span(CBodyBindingSpan* span, const CheckEnvir
 
 // One-off convenience. Scheduling clients use c_body_bindings_spans so preceding file events are counted once
 // for the whole unit instead of rescanning the prefix separately for every body.
-static bool c_body_bindings_span(CBodyBindingSpan* span, const CheckEnvironment* environment, uint32_t slot, bool scalar)
+static bool c_body_bindings_span(CBodyBindingSpan* span, const CheckEnvironment* environment, uint32_t slot)
 {
-    (void)scalar;
-
     *span = (CBodyBindingSpan){ 0 };
     const CBindings* source = environment->bindings;
     bool valid = environment->valid && source != 0 && source->valid && slot < environment->body_count;
@@ -171,17 +150,15 @@ static bool c_body_bindings_span(CBodyBindingSpan* span, const CheckEnvironment*
     uint32_t declarations = 0;
     uint32_t uses = 0;
     uint32_t inside = 0;
-    valid = valid && c_body_bindings_counts(source, 0, first, BUSTER_C_BINDING_NONE, BUSTER_SCALAR_PATH(scalar), &file, &declarations, &uses);
-    valid = valid && c_body_bindings_finish_span(span, environment, slot, first, file, BUSTER_SCALAR_PATH(scalar), &inside);
+    valid = valid && c_body_bindings_counts(source, 0, first, BUSTER_C_BINDING_NONE, &file, &declarations, &uses);
+    valid = valid && c_body_bindings_finish_span(span, environment, slot, first, file, &inside);
     return valid;
 }
 
 // Output has body_count slots, no padding; capacity may be zero for an empty unit. On failure discard all spans.
 // Each source event's classification contributes to exactly one prefix/body range. Metadata is O(body_count).
-static bool c_body_bindings_spans(CBodyBindingSpan* spans, uint32_t capacity, const CheckEnvironment* environment, bool scalar, uint32_t* maximum)
+static bool c_body_bindings_spans(CBodyBindingSpan* spans, uint32_t capacity, const CheckEnvironment* environment, uint32_t* maximum)
 {
-    (void)scalar;
-
     const CBindings* source = environment->bindings;
     bool valid = environment->valid && source != 0 && source->valid && capacity >= environment->body_count;
     uint32_t cursor = 0;
@@ -195,10 +172,10 @@ static bool c_body_bindings_spans(CBodyBindingSpan* spans, uint32_t capacity, co
         uint32_t added = 0;
         uint32_t declarations = 0;
         uint32_t uses = 0;
-        valid = valid && cursor <= first && c_body_bindings_counts(source, cursor, first, BUSTER_C_BINDING_NONE, BUSTER_SCALAR_PATH(scalar), &added, &declarations, &uses);
+        valid = valid && cursor <= first && c_body_bindings_counts(source, cursor, first, BUSTER_C_BINDING_NONE, &added, &declarations, &uses);
         file += added;
         uint32_t inside = 0;
-        valid = valid && c_body_bindings_finish_span(spans + slot, environment, slot, first, file, BUSTER_SCALAR_PATH(scalar), &inside);
+        valid = valid && c_body_bindings_finish_span(spans + slot, environment, slot, first, file, &inside);
         if (valid)
         {
             // File declarations in a body interval can only activate at its opening boundary.
@@ -215,10 +192,8 @@ static bool c_body_bindings_spans(CBodyBindingSpan* spans, uint32_t capacity, co
 // Borrow key/point/operation/kind/depth directly. Only restore payloads and declaration-end event indexes need
 // translation into the private slice. Ends beyond the slice become unbounded within this view. Never read the
 // unspecified end entries of use/restore events.
-static bool c_body_bindings_view(CBindings* view, const CBindings* source, const CBodyBindingSpan* span, Arena* scratch, bool scalar)
+static bool c_body_bindings_view(CBindings* view, const CBindings* source, const CBodyBindingSpan* span, Arena* scratch)
 {
-    (void)scalar;
-
     const uint32_t count = span->end - span->begin;
     *view = (CBindings)
     {
@@ -234,64 +209,34 @@ static bool c_body_bindings_view(CBindings* view, const CBindings* source, const
     view->declaration = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, count) : 0;
     view->end = view->declaration != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, count) : 0;
     bool valid = count == 0 || view->end != 0;
-    if (BUSTER_SCALAR_PATH(scalar))
+    for (uint64_t block = 0; valid && block < count; block += 16)
     {
-        for (uint32_t event = 0; valid && event < count; event += 1)
-        {
-            const uint32_t original = span->begin + event;
-            const uint8_t operation = source->operation[original];
-            const uint32_t declaration = source->declaration[original];
-            const uint32_t end = operation == C_BINDING_DECLARE ? source->end[original] : BUSTER_C_BINDING_NONE;
-            valid &= operation != C_BINDING_RESTORE || declaration >= span->base;
-            valid &= end == BUSTER_C_BINDING_NONE || end >= span->begin;
-            view->declaration[event] = operation == C_BINDING_RESTORE ? declaration - span->base : declaration;
-            view->end[event] = end == BUSTER_C_BINDING_NONE || end >= span->end ? BUSTER_C_BINDING_NONE : end - span->begin;
-        }
-    }
-    else
-    {
-        for (uint64_t block = 0; valid && block < count; block += 16)
-        {
-            const uint32_t live = count - block < 16 ? (uint32_t)(count - block) : 16;
-            const __mmask16 mask = (__mmask16)((1u << live) - 1);
-            const uint64_t original = span->begin + block;
-            const __m128i operations = _mm_maskz_loadu_epi8(mask, source->operation + original);
-            const __mmask16 restored = _mm_mask_cmpeq_epi8_mask(mask, operations, _mm_set1_epi8(C_BINDING_RESTORE));
-            const __mmask16 declared = _mm_mask_cmpeq_epi8_mask(mask, operations, _mm_set1_epi8(C_BINDING_DECLARE));
-            const __m512i declaration = _mm512_maskz_loadu_epi32(mask, source->declaration + original);
-            const __m512i base = _mm512_set1_epi32((int)span->base);
-            valid &= _mm512_mask_cmplt_epu32_mask(restored, declaration, base) == 0;
-            _mm512_mask_storeu_epi32(view->declaration + block, mask, _mm512_mask_sub_epi32(declaration, restored, declaration, base));
-            const __m512i ends = _mm512_mask_loadu_epi32(_mm512_set1_epi32(-1), declared, source->end + original);
-            const __mmask16 known = _mm512_mask_cmpneq_epu32_mask(declared, ends, _mm512_set1_epi32(-1));
-            const __m512i first = _mm512_set1_epi32((int)span->begin);
-            valid &= _mm512_mask_cmplt_epu32_mask(known, ends, first) == 0;
-            const __mmask16 within = _mm512_mask_cmplt_epu32_mask(known, ends, _mm512_set1_epi32((int)span->end));
-            _mm512_mask_storeu_epi32(view->end + block, mask, _mm512_mask_sub_epi32(_mm512_set1_epi32(-1), within, ends, first));
-        }
+        const uint32_t live = count - block < 16 ? (uint32_t)(count - block) : 16;
+        const __mmask16 mask = (__mmask16)((1u << live) - 1);
+        const uint64_t original = span->begin + block;
+        const __m128i operations = _mm_maskz_loadu_epi8(mask, source->operation + original);
+        const __mmask16 restored = _mm_mask_cmpeq_epi8_mask(mask, operations, _mm_set1_epi8(C_BINDING_RESTORE));
+        const __mmask16 declared = _mm_mask_cmpeq_epi8_mask(mask, operations, _mm_set1_epi8(C_BINDING_DECLARE));
+        const __m512i declaration = _mm512_maskz_loadu_epi32(mask, source->declaration + original);
+        const __m512i base = _mm512_set1_epi32((int)span->base);
+        valid &= _mm512_mask_cmplt_epu32_mask(restored, declaration, base) == 0;
+        _mm512_mask_storeu_epi32(view->declaration + block, mask, _mm512_mask_sub_epi32(declaration, restored, declaration, base));
+        const __m512i ends = _mm512_mask_loadu_epi32(_mm512_set1_epi32(-1), declared, source->end + original);
+        const __mmask16 known = _mm512_mask_cmpneq_epu32_mask(declared, ends, _mm512_set1_epi32(-1));
+        const __m512i first = _mm512_set1_epi32((int)span->begin);
+        valid &= _mm512_mask_cmplt_epu32_mask(known, ends, first) == 0;
+        const __mmask16 within = _mm512_mask_cmplt_epu32_mask(known, ends, _mm512_set1_epi32((int)span->end));
+        _mm512_mask_storeu_epi32(view->end + block, mask, _mm512_mask_sub_epi32(_mm512_set1_epi32(-1), within, ends, first));
     }
     view->valid = valid;
     return valid;
 }
 
 static bool c_body_bindings_globals(const CheckEnvironment* environment, const uint32_t* keys, const uint32_t* points,
-                                    const uint32_t* destinations, uint32_t count, bool scalar, uint32_t* output_handles)
+                                    const uint32_t* destinations, uint32_t count, uint32_t* output_handles)
 {
-    (void)scalar;
-
     uint32_t handles[16];
-    bool valid = true;
-    if (BUSTER_SCALAR_PATH(scalar))
-    {
-        for (uint32_t i = 0; i < count; i += 1)
-        {
-            handles[i] = c_environment_lookup_key(&environment->file, keys[i], points[i]);
-        }
-    }
-    else
-    {
-        valid = c_environment_lookup_batch(&environment->file, keys, points, count, handles);
-    }
+    bool valid = c_environment_lookup_batch(&environment->file, keys, points, count, handles);
     for (uint32_t i = 0; valid && i < count; i += 1)
     {
         valid = handles[i] != 0;
@@ -303,15 +248,14 @@ static bool c_body_bindings_globals(const CheckEnvironment* environment, const u
     return valid;
 }
 
-// `span` must come from c_body_bindings_span(s) for this unchanged environment. Scalar workers initialize one replay
-// with this name capacity and the maximum span event count before calling; it is empty again after every call.
-// Replay storage and all input columns precede the scratch/output entry marks. Arenas are distinct and private to
+// `span` must come from c_body_bindings_span(s) for this unchanged environment. All input columns precede the
+// scratch/output entry marks. Arenas are distinct and private to
 // the worker. Results own exactly count source tokens/original activation handles in use-event order, without
 // padding. Handles map through the source declaration/kind columns, preserving source-less builtin identities.
 // Allocation failure rolls back output; all calls release temporary views/results. A missing source binding fails
 // closed because the published successful reader had resolved all these uses. No worker changes shared state.
 static bool c_body_bindings_resolve(CBodyBindings* output, const CheckEnvironment* environment, const CBodyBindingSpan* span,
-                                    bool scalar, CBindingReplay* replay, Arena* arena, Arena* scratch)
+                                    Arena* arena, Arena* scratch)
 {
     *output = (CBodyBindings){ 0 };
     const uint64_t mark = arena->length;
@@ -320,13 +264,12 @@ static bool c_body_bindings_resolve(CBodyBindings* output, const CheckEnvironmen
     bool valid = arena != scratch && environment->valid && source != 0 && source->valid && span->slot < environment->body_count &&
                  span->valid && span->base <= source->count && span->begin <= span->end && span->end <= source->count;
     const uint32_t count = valid ? span->end - span->begin : 0;
-    valid = valid && (!scalar || (replay != 0 && replay->heads != 0 && replay->name_capacity == source->name_capacity && replay->capacity >= count));
     CBodyBindingStatus status = C_BODY_BINDINGS_INVALID;
     CBindings view;
     if (valid)
     {
         status = C_BODY_BINDINGS_RESOURCE;
-        valid = c_body_bindings_view(&view, source, span, scratch, BUSTER_SCALAR_PATH(scalar));
+        valid = c_body_bindings_view(&view, source, span, scratch);
         if (!valid && view.end != 0)
         {
             status = C_BODY_BINDINGS_INVALID;
@@ -336,12 +279,7 @@ static bool c_body_bindings_resolve(CBodyBindings* output, const CheckEnvironmen
     valid = valid && (count == 0 || resolved != 0);
     if (valid)
     {
-        valid = scalar ? c_bindings_replay(&view, replay, resolved) : c_bindings_batch(&view, resolved, scratch, &output->statistics);
-        if (scalar)
-        {
-            output->statistics.identifiers = (uint64_t)span->uses + span->declarations;
-            output->statistics.declarations = span->declarations;
-        }
+        valid = c_bindings_batch(&view, resolved, scratch, &output->statistics);
     }
     output->tokens = valid && span->uses != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, span->uses) : 0;
     output->handles = valid && span->uses != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, span->uses) : 0;
@@ -380,13 +318,13 @@ static bool c_body_bindings_resolve(CBodyBindings* output, const CheckEnvironmen
         }
         if (valid && pending == 16)
         {
-            valid = c_body_bindings_globals(environment, keys, points, destinations, pending, BUSTER_SCALAR_PATH(scalar), output->handles);
+            valid = c_body_bindings_globals(environment, keys, points, destinations, pending, output->handles);
             pending = 0;
         }
     }
     if (valid && pending != 0)
     {
-        valid = c_body_bindings_globals(environment, keys, points, destinations, pending, BUSTER_SCALAR_PATH(scalar), output->handles);
+        valid = c_body_bindings_globals(environment, keys, points, destinations, pending, output->handles);
     }
     valid = valid && written == span->uses;
     if (valid)

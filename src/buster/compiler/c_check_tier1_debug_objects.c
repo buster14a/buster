@@ -210,8 +210,8 @@ static bool check_tier1_debug_object_clips(const Tier0Function* function, const 
     }
     if (valid && prove && event_count != 0)
     {
-        keys = c_bindings_sort(keys, sorting, key_count, true, UINT32_MAX);
-        events = c_bindings_sort(events, event_sorting, event_count, true, UINT32_MAX);
+        keys = c_bindings_sort(keys, sorting, key_count, UINT32_MAX);
+        events = c_bindings_sort(events, event_sorting, event_count, UINT32_MAX);
         memset(owners, 0xff, (uint64_t)frame->slot_count * 4);
         uint32_t event = 0;
         for (uint32_t r = 0; valid && r < count; r += 1)
