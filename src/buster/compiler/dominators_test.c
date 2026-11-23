@@ -2,8 +2,8 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // Original CFG fixtures and definition oracles. Include after dominators.c; run_dominator_tests is the command.
-// Dominance is checked by deleting each possible dominator and testing reachability, never by the solver's windows or
-// tree. Loop membership uses forward reachability to a latch with its header deleted; irreducibility
+// Dominance is checked by deleting each possible dominator and testing reachability, never by SEMI-NCA's
+// semidominators. Loop membership uses forward reachability to a latch with its header deleted; irreducibility
 // uses the acyclicity of the graph after deleting every dominance backedge. Guard mappings bound all CSR columns.
 // The default seed's largest generated graphs, past the loop oracle's sizes, are also checked against frozen digests.
 // The small generator is also included by dominators_benchmark.c, outside its timed region.
@@ -887,13 +887,13 @@ static void dominator_test_irreducible_regions(DominatorTestTally* tally, Arena*
     arena_pop_to(memory, saved);
 }
 
-// Two 6-block graphs whose block IDs are their DFS preorder, added by #2924's mutation check as SEMI-NCA's hard paths
-// (its semidominator climb and its compressed links) and kept for the window sweep.
-// - The cycle 2 -> 3 -> 4 -> 5 -> 2 is entered at 2 from 1 and at 3 from 0: irreducible. The sweep's first pass leaves
-//   it unsettled (5 -> 2's target's idom, 1, doesn't dominate 5), so it takes dominators_settle, which makes 2's
-//   immediate dominator 0, not its DFS parent 1.
-// - Acyclic: 2 and 3 join paths through 1 and through 4 and 5, so 0 is the immediate dominator of 1, 2 and 3.
-static void dominator_test_settle_paths(DominatorTestTally* tally, Arena* memory, Arena* scratch)
+// SEMI-NCA's path evaluation on two 6-block graphs whose DFS numbers are their block IDs. No generated shape had
+// either path.
+// - The climb passes the vertex numbered right after the one being processed: 2's predecessor 5 reaches, through 4
+//   and 3, the semidominator 0 that 3's edge from 0 gives it, so 2's immediate dominator is 0, not its DFS parent 1.
+// - A compressed link carries its path's least semidominator: processing 3 links 5 past 4, whose semidominator is 0;
+//   processing 2 then reads 5's link alone, and 2's immediate dominator is 0, not 1.
+static void dominator_test_semi_nca_paths(DominatorTestTally* tally, Arena* memory, Arena* scratch)
 {
     const uint64_t saved = memory->length;
     const DominatorTestEdge through[] = {
@@ -991,13 +991,13 @@ static void dominator_test_settle_paths(DominatorTestTally* tally, Arena* memory
     {
         DominatorCfg cfg;
         const bool built = dominator_test_cfg(memory, 6, 0, graphs[graph], edge_counts[graph], &cfg);
-        dominator_test_expect(tally, built, "settle path fixture");
+        dominator_test_expect(tally, built, "SEMI-NCA path fixture");
         if (built)
         {
             dominator_test_case(tally, memory, scratch, &cfg, true, 0);
             Dominators analysis;
             const DominatorStatus status = dominators_analyze(memory, scratch, &cfg, dominators_options(), &analysis);
-            dominator_test_expect(tally, status == DOMINATOR_OK && memcmp(analysis.idom, expected[graph], sizeof(expected[graph])) == 0, "immediate dominators of an irreducible region the sweep leaves unsettled");
+            dominator_test_expect(tally, status == DOMINATOR_OK && memcmp(analysis.idom, expected[graph], sizeof(expected[graph])) == 0, "SEMI-NCA's semidominators through the processed forest");
         }
         arena_pop_to(memory, saved);
     }
@@ -1039,91 +1039,6 @@ static void dominator_test_cross_edge(DominatorTestTally* tally, Arena* memory, 
         dominator_test_expect(tally, !flagged && analysis.loop_count == 0, "a cross edge to a finished subtree is not irreducible");
     }
     arena_pop_to(memory, saved);
-}
-
-// The window sweep's boundary and its far meets, on graphs whose immediate dominators their shapes fix. Each is a
-// chain from entry with branches that rejoin; DFS follows each block's first edge, so the numbering is planned.
-// - An edge skipping 63, 64 or 65 blocks: the join's immediate dominator is bit 63 of its window, or one or two
-//   numbers past it, where dominators_meet finds it in a predecessor's window or by jump pointers.
-// - Two chains of 150 and 100 blocks from block 10 to one join: the meet climbs the deeper side to the other's depth,
-//   then both together, by jump pointers.
-// - Two chains of 40 blocks from block 100 to one join: 40 numbers apart, their windows share no dominator, so the meet
-//   climbs by jump pointers.
-static void dominator_test_windows(DominatorTestTally* tally, Arena* memory, Arena* scratch)
-{
-    const uint32_t skips[] = {
-        63,
-        64,
-        65,
-    };
-    // Each graph: blocks, the chain's last block before the branches (or the skip's source), and the two branch lengths.
-    for (uint32_t graph = 0; graph < 5; graph += 1)
-    {
-        const uint64_t saved = memory->length;
-        const bool skip = graph < 3;
-        const uint32_t stem = skip ? 1 : graph == 3 ? 10 : 100;
-        const uint32_t first_length = skip ? skips[graph] - 1 : graph == 3 ? 150 : 40;
-        const uint32_t second_length = skip ? 0 : graph == 3 ? 100 : 40;
-        // The skip graphs: 0 .. stem chain, then stem -> stem + 1 .. stem + skip chain, plus stem -> stem + skip, then
-        // one more block. The branch graphs: 0 .. stem, the first and second branches, then their join.
-        const uint32_t join = stem + first_length + second_length + 1;
-        const uint32_t count = join + 1 + (skip ? 1 : 0);
-        DominatorTestEdge* edges = arena_push_array(memory, (uint64_t)count * 2, sizeof(DominatorTestEdge), _Alignof(DominatorTestEdge));
-        uint32_t* expected = arena_push_array(memory, count, sizeof(uint32_t), _Alignof(uint32_t));
-        bool built = edges != 0 && expected != 0;
-        uint32_t edge_count = 0;
-        for (uint32_t block = 0; built && block < count; block += 1)
-        {
-            expected[block] = block == 0 ? 0 : block - 1;
-            const bool first_end = block == stem + first_length;
-            const bool second_end = !skip && block == join - 1;
-            if (block + 1 < count && !(skip ? false : first_end))
-            {
-                edges[edge_count] = (DominatorTestEdge){
-                    .source = block,
-                    .target = second_end ? join : block + 1,
-                };
-                edge_count += 1;
-            }
-            if (block == stem)
-            {
-                edges[edge_count] = (DominatorTestEdge){
-                    .source = block,
-                    .target = skip ? join : stem + first_length + 1,
-                };
-                edge_count += 1;
-            }
-            if (!skip && first_end)
-            {
-                edges[edge_count] = (DominatorTestEdge){
-                    .source = block,
-                    .target = join,
-                };
-                edge_count += 1;
-            }
-        }
-        if (built)
-        {
-            expected[join] = stem;
-            if (!skip)
-            {
-                expected[stem + first_length + 1] = stem;
-            }
-        }
-        DominatorCfg cfg;
-        built = built && dominator_test_cfg(memory, count, 0, edges, edge_count, &cfg);
-        tally->blocks = count;
-        dominator_test_expect(tally, built, "window fixture");
-        if (built)
-        {
-            dominator_test_case(tally, memory, scratch, &cfg, true, 0);
-            Dominators analysis;
-            const DominatorStatus status = dominators_analyze(memory, scratch, &cfg, dominators_options(), &analysis);
-            const bool equal = status == DOMINATOR_OK && memcmp(analysis.idom, expected, (uint64_t)count * sizeof(uint32_t)) == 0;
-            dominator_test_expect(tally, equal, "immediate dominators at and past the window's edge");
-        }
-        arena_pop_to(memory, saved);
-    }
 }
 
 static void dominator_test_deep(DominatorTestTally* tally, Arena* memory, Arena* scratch)
@@ -1534,8 +1449,7 @@ static __attribute__((unused)) int run_dominator_tests(int argc, char** argv)
             };
             // The default seed's complete results (dominator_test_digest) for the last four sizes, by shape, frozen
             // from main at 295417ae7. There SEMI-NCA and the AVX-512 bit-matrix solver gave equal complete results on
-            // every generated graph, and every one passed the whole definition, loop bodies included; the window sweep
-            // that replaced SEMI-NCA (#2953) gives the same digests.
+            // every generated graph, and every one passed the whole definition, loop bodies included.
             static const uint64_t frozen[BUSTER_DOMINATOR_TEST_SHAPES * BUSTER_DOMINATOR_TEST_FROZEN_SIZES] = {
                 UINT64_C(0x016c903ce81b4b57),
                 UINT64_C(0x5ae75e8dd84c2c35),
@@ -1657,9 +1571,8 @@ static __attribute__((unused)) int run_dominator_tests(int argc, char** argv)
                 tally.blocks = 4;
                 dominator_test_case(&tally, &memory, &scratch, &special, true, 0);
             }
-            dominator_test_settle_paths(&tally, &memory, &scratch);
+            dominator_test_semi_nca_paths(&tally, &memory, &scratch);
             dominator_test_cross_edge(&tally, &memory, &scratch);
-            dominator_test_windows(&tally, &memory, &scratch);
             dominator_test_deep(&tally, &memory, &scratch);
             dominator_test_export(&tally, &memory, &scratch);
         }

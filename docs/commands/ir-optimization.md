@@ -467,8 +467,8 @@ nested clamp's outer test and those of an unproven load and a division.
 
 The AUTO transformation heuristic still chooses scalar SCCP/DCE/CFG kernels
 for small or branchy functions. The dominator analysis they prepare and verify
-with has one path, the window sweep and the scalar loop bodies, whatever the
-heuristic or the scalar control ([what is data-parallel](../dominators.md#what-is-data-parallel)).
+with has one path, SEMI-NCA and the scalar loop bodies, whatever the heuristic
+or the scalar control ([why it is scalar](../dominators.md#why-it-is-scalar)).
 Other internal preparation callers retain their scalar argument's meaning.
 
 The 64 MiB matrix budget bounds the frontier rows and the loop bodies; it is a

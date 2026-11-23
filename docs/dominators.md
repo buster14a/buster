@@ -8,16 +8,12 @@ for #134, and natural-loop membership for #139 and #140. These consumers must
 explicitly integrate the interface; the existence of this module does not
 establish their acceptance or source-corpus coverage.
 
-The implementation and fixtures are original. The tree solver is one sweep
-over reverse postorder with 64-bit dominator windows ("Algorithms and bounded
-storage" below). It replaced SEMI-NCA, as Georgiadis, Tarjan and Werneck
-describe it in [Finding Dominators in Practice](https://jgaa.info/index.php/jgaa/article/view/paper119)
-(JGAA 10(1), 2006), in #2953. Where its first pass doesn't settle an
-irreducible region, it iterates as Cooper, Harvey and Kennedy's
-[A Simple, Fast Dominance Algorithm](https://www.cs.tufts.edu/comp/150FP/archive/keith-cooper/dom14.pdf)
-(2001) does, and its far meets climb Myers's skew-binary jump pointers
-("An applicative random-access stack", Information Processing Letters 17(5),
-1983).
+The implementation and fixtures are original. The solver is SEMI-NCA,
+as Georgiadis, Tarjan and Werneck describe it in
+[Finding Dominators in Practice](https://jgaa.info/index.php/jgaa/article/view/paper119)
+(JGAA 10(1), 2006): Lengauer and Tarjan's semidominators, from
+[A Fast Algorithm for Finding Dominators in a Flowgraph](https://doi.org/10.1145/357062.357071)
+(TOPLAS 1(1), 1979), followed by a nearest-common-ancestor step.
 The loop definitions agree with the published
 [Cornell compiler notes](https://www.cs.cornell.edu/courses/cs412/2008sp/lectures/lec29.pdf)
 and [LLVM's loop terminology](https://llvm.org/docs/LoopTerminology.html).
@@ -70,7 +66,8 @@ there is no incremental maintenance or stale-result detection.
 `dominators_options()` requests frontiers and loops, and limits simultaneously
 live bitset storage to 64 MiB. Callers may request
 only `BUSTER_DOMINATOR_FRONTIERS`, only `BUSTER_DOMINATOR_LOOPS`, both, or zero
-for tree-only analysis. Tree-only storage is linear in blocks and edges. The two quadratic output families are optional; a large sparse CFG
+for tree-only analysis. Tree-only SEMI-NCA storage is linear in blocks and
+edges. The two quadratic output families are optional; a large sparse CFG
 never silently allocates an unlimited frontier or loop-body matrix.
 
 `max_matrix_bytes` is a memory limit, **not a measured performance threshold**.
@@ -85,8 +82,7 @@ tail bits are zero. The padding is allocated, readable and writable, separate
 from the logical block count. No kernel reads past the row. Matrices are
 disjoint; consumers must preserve their zero tails. Empty outputs have null
 matrix pointers and zero rows. The layout lets consumers read whole rows with
-512-bit loads. The tree solver works 64 dominators to a word; the rest of the
-analysis is scalar ("What is data-parallel" below).
+512-bit loads; the analysis itself is scalar ("Why it is scalar" below).
 
 ## Results
 
@@ -131,37 +127,21 @@ membership/parents to group reducible loops, and retain RPO in flagged regions.
 
 ## Algorithms and bounded storage
 
-An iterative DFS from entry, in successor order, produces RPO and its
-inverse. An edge retreats in RPO exactly when its target is its source's DFS
-ancestor, which the SCC pass below uses in place of DFS intervals.
-
-The tree solver sweeps RPO once (`dominators_sweep`). Dominators precede what
-they dominate in RPO, so a block's dominators among the 64 numbers above it
-fit a u64 window, bit k for the number k above. Each forward predecessor's
-window, shifted by its distance, ANDs to the dominators all of them share
-there. The lowest set bit is the nearest, the immediate dominator, and that
-set with the block's own bit is the block's window: a shift and an AND per
-predecessor. On sqlite3.c's CFGs, 2.4% of blocks share no dominator within 64
-numbers above. For those, `dominators_meet` meets the predecessors pairwise:
-by their windows when two are within 64 numbers of each other, and otherwise
-by depth and Myers's skew-binary jump pointers, which the first such meet fills
-for the numbers it climbs through. A meet takes O(log depth) steps whatever
-the tree's depth, and each number's jump pointer is filled once.
-
-Retreating predecessors are skipped and kept. The sweep's tree is then the
-dominator tree of the graph without them, which is the whole graph's exactly
-when each retreating edge's target's immediate dominator dominates its source:
-that predecessor's dominators then hold the others' common ones, so it changes
-no intersection. Every reducible graph passes, as all of sqlite3.c's CFGs do;
-`dominators_settled` checks the finished tree's intervals. Where an irreducible
-region fails, `dominators_settle` iterates as Cooper, Harvey and Kennedy do,
-from the sweep's tree, which holds every true dominator. Each pass is the
-sweep again, with each retreating predecessor met by walks up the current tree,
-until a pass changes nothing; then the tree is built again. The walks cost the
-depth between a retreating predecessor and the meeting point. The solver's
-scratch is one push of 24 bytes per reachable block; its retreating edges, up
-to 8 bytes per edge, share the DFS stack's push, since the loop pass reads them
-again.
+An iterative DFS from entry produces RPO, DFS ancestry intervals, and each
+preorder number's block and DFS parent. SEMI-NCA works in preorder numbers. It
+computes semidominators in decreasing order: a predecessor numbered below the
+block is a candidate itself, and one above contributes the least semidominator
+on its path through the forest of already-processed vertices, which an
+explicit stack compresses toward that forest's unprocessed root. Each immediate
+dominator is then, in increasing order, the nearest common dominator-tree
+ancestor of the DFS parent and the semidominator, found by walking up the
+finished part of the tree from the parent. Compression bounds
+the semidominators by O(E log B). The walk costs the depth between the parent
+and the immediate dominator: a step or two on goto ladders, nested ifs and `?:`
+chains, but O(B²) in total when a deep block has many DFS
+children each also reachable from far above it, which Cooper–Harvey–Kennedy's
+intersection walks too. Its scratch is two u32 columns from the DFS plus
+12 bytes per reachable block.
 
 Counting, prefix sums and filling produce the children CSR. An explicit tree
 stack assigns intervals for constant-time dominance queries. Frontier
@@ -174,27 +154,15 @@ walks then cost the frontiers' total size plus the edges; without the stop, a
 join of many predecessors under a deep chain, as a `?:` chain's, made them
 O(E × depth). A goto ladder's frontiers are themselves quadratic in size.
 
-Backedges are edges whose target dominates their source. Such a target is
-its source's DFS ancestor, so the edge retreats: the loop pass finds backedges,
-and the SCC pass below irreducibility, among the sweep's retreating edges
-alone. All latches at one header contribute to one natural loop.
+Backedges are edges whose target dominates their source. All latches at one
+header contribute to one natural loop. Its body is walked over predecessor CSR
+with a mark-before-push worklist, stopping at the header.
 
-Loops sharing a header are merged first; natural loops with different headers
-are nested or disjoint, and an outer loop's header dominates its inner loops'.
-`dominators_discover` therefore finds loops innermost first, by decreasing
-dominator-tree preorder of their headers. Each walks back from its latches over
-predecessor CSR and stops at its header. A block no loop has claimed becomes
-this loop's own: its innermost loop, one bit in its body row. A block that a loop
-found before claimed brings that loop's outermost discovered loop, by
-union-find, and this loop absorbs it whole: it becomes that loop's parent, the
-smallest strict containing natural loop; ORs that loop's body row into its own
-with 512-bit ORs; adds its size and irreducible flag; and walks on from its
-header. A walk leaves a natural loop only through its header, so each block is
-claimed once and each header's predecessors are read at most twice: the walks
-cost O(E α) and the bodies O(loops × row) vector ORs. One walk per loop, as
-before #2953, cost the bodies' total size, quadratic in nesting depth, and a
-parent scan quadratic in the number of loops. Depths follow the loop forest top
-down. There is no recursion and no stack grows past the block count.
+The smallest strict containing natural loop is the parent. Loops sharing a
+header are merged first; natural loops with different headers are nested or
+disjoint. Membership counts give per-block depth. There is no recursion and
+no stack grows past the block count. The loop-parent scan is quadratic in the
+number of headers; the measurements must include that cost.
 
 A reverse DFS walk assigns SCCs. A DFS retreating edge whose target does not
 dominate its source proves irreducibility; the module conservatively flags
@@ -207,36 +175,21 @@ The public `output_bytes` and `scratch_peak_bytes` include alignment padding;
 `matrix_peak_bytes` counts only bitset payload: the frontier rows and the loop
 bodies.
 
-### What is data-parallel
+### Why it is scalar
 
-The tree solver works a word at a time: a shift and an AND bring a block 64
-candidate dominators from each predecessor, and the lowest set bit picks the
-immediate one. Its order is RPO's, the order every dominator algorithm
-follows, since a block needs its forward predecessors' dominators first; within
-it, a block costs O(1) words per edge whatever the graph's size or depth, and a
-far meet O(log depth). The dense bit matrix that #2924 deleted had neither
-property: each of its sweeps cost B²/512 vector operations, and choosing the
-immediate dominators enumerated every set bit, O(B × depth). The window sweep
-also needs no DFS preorder, parents or intervals, which SEMI-NCA's
-semidominators did, so the DFS records RPO alone.
+DFS/RPO, SEMI-NCA, the frontier walks, SCC traversal, the loop-body worklist
+and sparse bit enumeration are scalar. Until #2924 the module also had an
+AVX-512 path. Its bit-matrix solver started every reachable nonentry row at the
+reachable set and swept in RPO until stable, intersecting predecessor rows with
+`vpandq`; vector popcounts then made each block's largest strict dominator its
+immediate one. Its loop-body sweep ORed reachable predecessor rows into a
+frontier. Both lost to the scalar code at every measured size, and #2924
+deleted them. The matrix is dense: each sweep costs B²/512 vector operations
+and choosing the immediate dominators enumerates every set bit, O(B × depth),
+where SEMI-NCA's semidominators cost O(E log B) and its tree walks are short.
 
-The loop bodies are built by 512-bit ORs of whole rows, each inner loop's row
-into its parent's once, where the worklist set every body bit of every loop it
-walked; the walk that claims each block for its innermost loop is a scalar
-union-find over predecessor CSR. The vector loop-body sweep that #2924 deleted
-ORed every reachable predecessor's row until stable, and lost to the worklist by
-5% over all of sqlite3.c's CFGs and 10–15% above 128 blocks.
-
-The DFS, the frontier walks, the SCC traversal and the loops' walk stay scalar:
-each follows edges one block at a time, and the DFS fixes RPO, which the frozen
-digests and the tree's contract pin.
-
-Until #2924 the module had an AVX-512 path. Its bit-matrix solver started every
-reachable nonentry row at the reachable set and swept in RPO until stable,
-intersecting predecessor rows with `vpandq`; vector popcounts then made each
-block's largest strict dominator its immediate one. Re-measured on main
-`aa09d1a04` before its deletion (`znver5` Release build, CPU 2, the whole
-analysis per block, median of three processes):
+Re-measured on main `aa09d1a04` before the deletion (`znver5` Release build,
+CPU 2, the whole analysis per block, median of three processes):
 
 - **sqlite3.c's 7,806 exported CFGs, tree only:** the matrix took 1.27–1.37×
   SEMI-NCA's time for 2–8 blocks, 1.35–1.94× for 8–128, 2.0× for 128–512, 2.7× for 512–1,024
@@ -253,7 +206,8 @@ analysis per block, median of three processes):
 
 #1352's measurements, when SEMI-NCA replaced Cooper–Harvey–Kennedy, agree.
 Cooper–Harvey–Kennedy was also faster than the matrix everywhere on sqlite3.c,
-but quadratic in tree depth. Raw logs:
+but quadratic in tree depth. A data-parallel solver that beats SEMI-NCA at every
+size must be another design than a dense matrix; #2953 tracks it. Raw logs:
 [the re-measurement](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/scalar-paths-removal-2924-2026-11-17/c-dominators-gate)
 and [#1352's](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/dominators-semi-nca-1352-2026-11-07).
 
@@ -284,28 +238,16 @@ On the default seed, the 36 generated graphs of 511 blocks and more must also
 match frozen digests of their complete results. They were taken from main at
 295417ae7, where SEMI-NCA and the bit-matrix solver gave equal results on every
 generated graph and every one passed the whole definition, loop bodies
-included; the window sweep gives the same digests. Another seed checks those
-graphs by the definitions alone.
+included. Another seed checks those graphs by the definitions alone.
 
 Fixtures cover several latches, repeated/self edges, entry incoming edges,
 an unreachable predecessor of reachable code, and natural self-loops inside a
 two-entry SCC. They verify its conservative flags exclude exits and unreachable
 cycles. #2924's mutation check added three paths no generated shape takes: two
-6-block graphs on which SEMI-NCA's evaluation had to climb through the vertex
+6-block graphs on which SEMI-NCA's evaluation must climb through the vertex
 numbered right after the one being processed, and carry a compressed link's
 least semidominator; and a 3-block acyclic graph whose cross edge into a
-just-finished DFS subtree the SCC pass must not flag. The first 6-block graph
-is irreducible, and the window sweep's first pass leaves it to
-`dominators_settle`. #2953 added the sweep's own edges: joins whose immediate
-dominator is 63, 64 and 65 numbers above them in RPO, at the window's last bit
-and past it; two chains of 150 and 100 blocks rejoining, whose meet climbs
-unequal depths by jump pointers; and two chains of 40 blocks under a 100-block
-stem, whose windows overlap without a common dominator. Its mutation check
-shifted windows one bit short, admitted a 64-number shift, dropped a window's
-own bit, skipped the jump climb or one side of it, skipped the settle check or
-its walks, dropped entry's incoming edges or the retreating edges' irreducibility
-test, skipped an absorbed loop's OR or its parent, found outer loops first, or
-took every predecessor of a header for a latch: each fails `test-dominators`. CSR arrays end at
+just-finished DFS subtree the SCC pass must not flag. CSR arrays end at
 inaccessible pages. Malformed columns, mismatched CSR views, invalid IDs, arena
 exhaustion at every allocation, and matrix budgets one byte short of the
 frontiers alone, or of the frontiers and loop bodies, check rollback. These are

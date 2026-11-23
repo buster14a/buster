@@ -7,9 +7,8 @@ requirements. [Command index](README.md).
 ## Module overview
 
 - `dominators.c` analyzes borrowed CFG columns into dominance intervals,
-  optional frontier bitsets and natural loops; its tree solver sweeps reverse
-  postorder with 64-bit dominator windows ([what is
-  data-parallel](../../docs/dominators.md#what-is-data-parallel)). `test-dominators` checks
+  optional frontier bitsets and natural loops, by scalar SEMI-NCA ([why
+  scalar](../../docs/dominators.md#why-it-is-scalar)). `test-dominators` checks
   it against independent graph definitions and, on the default seed, frozen
   digests of its largest graphs; `benchmark-dominators` includes analysis and
   synthetic producer/consumer measurements. [The dominator
