@@ -10,15 +10,15 @@
 // main.c includes this file after calling_convention.c, c_types_test.c (whose tables, random numbers, worlds of types
 // and C spellings it uses), link_program.c (its instruction builders) and object_writer.c, and calls
 // run_calling_convention_tests. The checks, in this order:
-//   - Merge: clang's merge and post-merge, written again here as clang writes them, against the module's on every pair
-//     of classes and both kinds of size.
-//   - Builtin projection: every column against fresh scalar classification, both char modes and all vector widths,
+//   - Merge: clang's merge and post-merge, written again here as clang writes them, against the module's merge, its
+//     merge table and the fold's vector merge and post-merge on every pair of classes and both kinds of size.
+//   - Builtin projection: every column against a fresh classification, both char modes and all vector widths,
 //     bounded logical prefixes, small/reserved capacities, poisoned padding/tails and first-derived scheduling.
 //   - Fixtures: types whose classes, passing, slots and results clang's IR and LLVM's fixed stack objects show
 //     (abi_test_fixtures says which; abi_test_build_atomics the LARGER, GROWN and refused _Atomic types and what holds
 //     them; abi_test_build_units structs' bit-fields in clang's access units, each with its LLVM type as the module
 //     keeps it, abi_test_llvm; abi_test_build_split_vectors the vectors LLVM breaks up or packs that aren't _Atomic,
-//     and records of them), at each target vector width, by the vector path and by its fallback; calls whose locations
+//     and records of them), at each target vector width, by abi_classify_all and by its scan alone; calls whose locations
 //     clang and LLVM give (an UNCOUNTED argument's shift, the LARGER copies' slots, a SMALLER one's, a DEMOTED result
 //     and two that access units decide among them); the levels across calls (abi_test_ordering); the walk without
 //     scratch memory for its stack (abi_test_short_scratch); a chain of records against the table's order, by the
@@ -28,7 +28,7 @@
 //   - Worlds: random worlds of types (abi_test_world_build: scalars, vectors, complex types, _BitInts, _Atomic and
 //     aligned types, _Atomics of structs of no size, and records and unions of them, small ones mostly, with
 //     bit-fields, arrays, nesting, packing and alignment, and zero-length arrays of large records), classified by the
-//     vector path in one table and by its fallback, the scalar classification, in another (abi_test_world_table), each
+//     vector path in one table and by its scan alone in another (abi_test_world_table), each
 //     alone: every classifiable type classified, each type at each offset it can be at against the oracle (clang's
 //     classify transcribed as clang has it, its recursion over members as a stack of frames, from the type table alone,
 //     no rows), and seed 1's tables against digests frozen from main, where the vector path and its twin agreed. Then
@@ -156,10 +156,10 @@ static uint64_t abi_test_table_digest(const AbiTable* abi, uint32_t count)
     return hash;
 }
 
-// The fallbacks the vector paths keep until they are vectorized (#2924), checked as the vector paths are and never
-// against them: abi_assign with every scratch arena of the thread exhausted takes the per-call assignment; the scalar
-// classification, which abi_classify takes when its fold has no room (and which needs scratch of its own, for
-// abi_wide_alignment's walk), is driven here as abi_classify_all's scan drives it.
+// The routes the vector paths take without scratch, checked as the default ones are and never against them: abi_assign
+// with every scratch arena of the thread exhausted takes the per-call assignment; abi_classify_all's scan, which takes
+// every level when scratch can't hold the levels' columns (abi_classify_scan; abi_wide_alignment's walk needs scratch of
+// its own), is driven here alone.
 typedef struct AbiTestStarved AbiTestStarved;
 struct AbiTestStarved
 {
@@ -187,41 +187,24 @@ static void abi_test_feed(AbiTestStarved starved)
     }
 }
 
-// Every classifiable type below the table's rows by the scalar classification, a batch at a time of the types whose
-// dependencies are classified, as abi_classify_all's scan takes them. Returns the types classified.
+// Every classifiable type below the table's rows by abi_classify_all's scan alone (abi_classify_scan, from its census),
+// as abi_classify_all takes them when scratch can't hold its levels' columns: a scan at a time while one classifies a
+// type. Returns the types classified.
 static uint32_t abi_test_classify_all_fallback(AbiTable* abi, const TypeTable* table)
 {
     const uint32_t count = table->types.count < abi->capacity ? table->types.count : abi->capacity;
-    TypeId* ready = malloc(sizeof(TypeId) * (count + 1));
-    bool all = abi->larger != 0;
-    for (uint32_t index = 1; index < count; index += 1)
-    {
-        all = all || ((abi->pass[index] & BUSTER_ABI_PASS_CLASSIFIED) == 0 && abi_classifiable(table, index) && abi_is_larger_root(table, index));
-    }
+    const AbiCensus census = abi_census(abi, table, count);
     uint32_t classified = 0;
-    bool progress = ready != 0;
-    while (progress)
+    AbiScanned scanned = {
+        .classified = 1,
+        .waiting = 0,
+    };
+    while (scanned.classified != 0)
     {
-        uint32_t ready_count = 0;
-        for (uint32_t index = 1; index < count; index += 1)
-        {
-            if ((abi->pass[index] & BUSTER_ABI_PASS_CLASSIFIED) == 0 && abi_classifiable(table, index) && abi_dependencies_classified(abi, table, index, all))
-            {
-                ready[ready_count] = (TypeId)index << BUSTER_TYPE_INDEX_SHIFT;
-                ready_count += 1;
-            }
-        }
-        abi_classify_scalar(abi, table, ready, ready_count);
-        classified += ready_count;
-        progress = ready_count != 0;
+        scanned = abi_classify_scan(abi, table, count, census.all);
+        classified += scanned.classified;
     }
-    free(ready);
     return classified;
-}
-
-static void abi_test_classify_fallback(AbiTable* abi, const TypeTable* table, const TypeId* types, uint32_t count)
-{
-    abi_classify_scalar(abi, table, types, count);
 }
 
 static void abi_test_assign_starved(const AbiTable* abi, AbiSignatures signatures, AbiLocation* locations, AbiCall* calls)
@@ -342,22 +325,33 @@ static bool abi_test_merge(void)
 {
     AbiTestTally tally = { 0 };
     char detail[128];
+    const __m512i merge = _mm512_loadu_si512((const void*)abi_builtin_rows.merge);
     for (uint8_t accumulated = 0; accumulated < BUSTER_ABI_CLASS_COUNT; accumulated += 1)
     {
         for (uint8_t field = 0; field < BUSTER_ABI_CLASS_COUNT; field += 1)
         {
             // clang stops merging at MEMORY, which the module makes absorbing on either side.
             const uint8_t expected = accumulated == BUSTER_ABI_MEMORY ? BUSTER_ABI_MEMORY : abi_test_clang_merge(accumulated, field);
-            snprintf(detail, sizeof(detail), "merge(%u, %u) is %u, not %u", accumulated, field, abi_merge_class(accumulated, field), expected);
-            abi_test_expect(&tally, abi_merge_class(accumulated, field) == expected, "merge", detail);
+            // The fold's merge, of both halves of every byte.
+            const __m512i merged = abi_merge_vector(merge, _mm512_set1_epi8((char)BUSTER_ABI_CLASSES(accumulated, field)), _mm512_set1_epi8((char)BUSTER_ABI_CLASSES(field, accumulated)));
+            const uint8_t low = (uint8_t)_mm_cvtsi128_si32(_mm512_castsi512_si128(merged));
+            const uint8_t mirrored = accumulated == BUSTER_ABI_MEMORY || field == BUSTER_ABI_MEMORY ? BUSTER_ABI_MEMORY : abi_test_clang_merge(field, accumulated);
+            const bool same = abi_merge_class(accumulated, field) == expected && abi_builtin_rows.merge[accumulated * BUSTER_ABI_CLASS_COUNT + field] == expected &&
+                              _mm512_cmpneq_epi8_mask(merged, _mm512_set1_epi8((char)low)) == 0 && low == BUSTER_ABI_CLASSES(expected, mirrored);
+            snprintf(detail, sizeof(detail), "merge(%u, %u) is %u (table %u, vector %02x), not %u", accumulated, field, abi_merge_class(accumulated, field),
+                     abi_builtin_rows.merge[accumulated * BUSTER_ABI_CLASS_COUNT + field], low, expected);
+            abi_test_expect(&tally, same, "merge", detail);
             for (uint32_t big = 0; big < 2; big += 1)
             {
-                uint8_t low = accumulated;
-                uint8_t high = field;
-                abi_test_clang_post_merge(big != 0 ? 256 : 128, &low, &high);
-                const AbiClasses got = abi_post_merge(big != 0 ? 32 : 16, BUSTER_ABI_CLASSES(accumulated, field));
+                uint8_t post_low = accumulated;
+                uint8_t post_high = field;
+                abi_test_clang_post_merge(big != 0 ? 256 : 128, &post_low, &post_high);
+                const __m512i posted = abi_post_merge_vector(_mm512_set1_epi8((char)BUSTER_ABI_CLASSES(accumulated, field)), big != 0 ? ~0ull : 0, 0);
+                const uint8_t got = (uint8_t)_mm_cvtsi128_si32(_mm512_castsi512_si128(posted));
+                const __m512i forced = abi_post_merge_vector(_mm512_set1_epi8((char)BUSTER_ABI_CLASSES(accumulated, field)), big != 0 ? ~0ull : 0, ~0ull);
                 snprintf(detail, sizeof(detail), "post-merge of (%u, %u), %s", accumulated, field, big != 0 ? "32 bytes" : "16 bytes");
-                abi_test_expect(&tally, got == abi_canonical(low, high), "merge", detail);
+                abi_test_expect(&tally, got == abi_canonical(post_low, post_high) && _mm512_cmpneq_epi8_mask(posted, _mm512_set1_epi8((char)got)) == 0 &&
+                                _mm512_cmpneq_epi8_mask(forced, _mm512_set1_epi8((char)BUSTER_ABI_IN_MEMORY)) == 0, "merge", detail);
             }
         }
     }
@@ -3813,8 +3807,8 @@ static void abi_test_atomic_vector_overflow(AbiTestTally* tally, AbiTestTables* 
     }
 }
 
-// Recompute the builtin facts from the TypeTable, without reading the generated rows. The scalar classification
-// and finishing rules are independent of the immutable projection and catch stale facts when either module changes.
+// Recompute the builtin facts from the TypeTable, without reading the generated rows. The classification and finishing
+// rules are independent of the immutable projection and catch stale facts when either module changes.
 static void abi_test_builtin_recompute(AbiTable* abi, const TypeTable* types)
 {
     const uint32_t builtins = types->types.count < BUSTER_TYPE_BUILTIN_COUNT ? types->types.count : BUSTER_TYPE_BUILTIN_COUNT;
@@ -3838,11 +3832,8 @@ static void abi_test_builtin_recompute(AbiTable* abi, const TypeTable* types)
     {
         if (types->types.kind[index] != BUSTER_TYPE_KIND_NONE)
         {
-            for (uint32_t offset = 0; offset < BUSTER_ABI_ROW_BYTES; offset += 1)
-            {
-                abi->rows[(uint64_t)index * BUSTER_ABI_ROW_BYTES + offset] = abi_row_entry(abi, types, index, offset);
-            }
-            abi_finish(abi, types, index);
+            const TypeId type = (TypeId)index << BUSTER_TYPE_INDEX_SHIFT;
+            abi_classify(abi, types, &type, 1);
         }
     }
 }
@@ -3910,7 +3901,7 @@ static bool abi_test_builtin_rows(void)
                             bounds = bounds && abi_test_builtin_range(&actual, got.field, bytes); \
                             if (bounds) \
                             { \
-                                abi_test_expect(&tally, memcmp(got.field, oracle.field, bytes) == 0, "builtins", #field " matches fresh scalar classification"); \
+                                abi_test_expect(&tally, memcmp(got.field, oracle.field, bytes) == 0, "builtins", #field " matches a fresh classification"); \
                                 memcpy(expected.base + ((uint8_t*)got.field - actual.base), oracle.field, bytes); \
                             }
                             BUSTER_ABI_TEST_BUILTIN(rows, (uint64_t)prefix * BUSTER_ABI_ROW_BYTES);
@@ -5145,8 +5136,8 @@ static uint64_t abi_test_world_table(AbiTestTally* tally, AbiTestWorld* world, c
 // A table classified again, every type at once with all it reads classified, must not change: the levels take a type
 // only when what it reads is classified (a zero-length array of a large record waits for every type
 // abi_wide_alignment reads). Only the rootless world shows a missing wait: in the others every record waits for its
-// members anyway. For the fallback's table, the classification again is the fallback's too.
-static void abi_test_world_again(AbiTestTally* tally, AbiTable* abi, const TypeTable* table, bool fallback, const char* route)
+// members anyway.
+static void abi_test_world_again(AbiTestTally* tally, AbiTable* abi, const TypeTable* table, const char* route)
 {
     const uint64_t before = abi_test_table_digest(abi, table->types.count);
     TypeId* again = malloc(sizeof(TypeId) * table->types.count);
@@ -5159,14 +5150,7 @@ static void abi_test_world_again(AbiTestTally* tally, AbiTable* abi, const TypeT
     abi_test_expect(tally, again != 0, "worlds", "no memory to classify again");
     if (again != 0)
     {
-        if (fallback)
-        {
-            abi_test_classify_fallback(abi, table, again, again_count);
-        }
-        else
-        {
-            abi_classify(abi, table, again, again_count);
-        }
+        abi_classify(abi, table, again, again_count);
         char detail[160];
         snprintf(detail, sizeof(detail), "%s: the table changed when classified again", route);
         abi_test_expect(tally, abi_test_table_digest(abi, table->types.count) == before, "worlds", detail);
@@ -5236,8 +5220,8 @@ static bool abi_test_worlds(uint64_t seed, uint32_t count)
                 const uint64_t* frozen = seed == 1 && count == BUSTER_ABI_TEST_DEFAULT_COUNT ? &abi_test_world_digests[round] : 0;
                 compared += abi_test_world_table(&tally, &world, &vector, width, frames, frozen, "vector");
                 compared += abi_test_world_table(&tally, &world, &fallback, width, frames, frozen, "fallback");
-                abi_test_world_again(&tally, &vector, table, false, "vector");
-                abi_test_world_again(&tally, &fallback, table, true, "fallback");
+                abi_test_world_again(&tally, &vector, table, "vector");
+                abi_test_world_again(&tally, &fallback, table, "fallback");
                 // Types made after the table of the types alone are past its rows: classifying again leaves them to a table
                 // with room for them, and touches nothing past its own rows, while the whole table classifies them.
                 const uint32_t before = table->types.count;

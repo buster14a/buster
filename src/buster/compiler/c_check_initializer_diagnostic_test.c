@@ -161,13 +161,11 @@ static void check_init_test_diagnostic_source(CheckTest* test, const char* sourc
     intern_release(&identifiers);
 }
 
-static void check_init_test_diagnostic_capacity(CheckTest* test)
+static void check_init_test_diagnostic_capacity(CheckTest* test, const char* source, uint32_t failures, bool compounds)
 {
     // More than one failed element retains a failure array as well as the rejected roots. A prior declaration
-    // and the accepted first element also publish warnings before either retained allocation can fail.
-    const char* source = "struct Value{int field;};void f(struct Value value){\n"
-                         "int excess[1]={1,2};\n"
-                         "int *values[9]={{{1-1}},value,value,value,value,value,value,value,value};\n}\n";
+    // publishes a warning before those retained allocations can fail. Compound dependencies additionally retain
+    // a private invalid-node mask; neither diagnosis nor any failed allocation may change the canonical graph.
     static InternTable identifiers;
     static Preprocessor pp;
     static Parser parser;
@@ -183,6 +181,7 @@ static void check_init_test_diagnostic_capacity(CheckTest* test)
         Arena output = arena_reserve(UINT64_C(1) << 20);
         Arena scratch = arena_reserve(UINT64_C(1) << 22);
         Arena semantic_arena = arena_reserve(UINT64_C(1) << 20);
+        Arena snapshot = arena_reserve(UINT64_C(1) << 23);
         const ParseOptions parsing = { .scalar = path == 0 };
         const CheckOptions checking = { 0 };
         CheckInput input = { 0 };
@@ -193,6 +192,34 @@ static void check_init_test_diagnostic_capacity(CheckTest* test)
                      check_graph_run(&types.table, &input.graph, &stream_arena, &scratch, &checking, &stream) && stream.report_count == 0;
         uint8_t* prefix = ready ? BUSTER_ARENA_PUSH_ARRAY(&output, uint8_t, 64) : NULL;
         uint8_t* scratch_prefix = ready ? BUSTER_ARENA_PUSH_ARRAY(&scratch, uint8_t, 64) : NULL;
+        const void* columns[] = {
+            input.token_nodes,
+            input.graph.ops,
+            input.graph.tokens,
+            input.graph.operand0,
+            input.graph.operand1,
+            input.graph.operand2,
+            stream.diagnostics,
+        };
+        const uint64_t lengths[] = {
+            (uint64_t)input.token_count * sizeof(uint32_t),
+            (uint64_t)stream.count * sizeof(CheckOp),
+            (uint64_t)stream.count * sizeof(uint32_t),
+            (uint64_t)stream.count * sizeof(uint32_t),
+            (uint64_t)stream.count * sizeof(uint32_t),
+            (uint64_t)stream.count * sizeof(uint32_t),
+            (uint64_t)stream.count * sizeof(CheckDiagnostic),
+        };
+        uint8_t* copies[BUSTER_ARRAY_LENGTH(columns)] = { 0 };
+        for (uint32_t c = 0; ready && c < BUSTER_ARRAY_LENGTH(columns); c += 1)
+        {
+            copies[c] = BUSTER_ARENA_PUSH_ARRAY(&snapshot, uint8_t, lengths[c]);
+            ready = copies[c] != NULL;
+            if (ready)
+            {
+                memcpy(copies[c], columns[c], lengths[c]);
+            }
+        }
         CheckWarningBuffer events = { .arena = &semantic_arena };
         const CheckWarningEvent sentinel = {
             .id = CHECK_WARNING_ID_INTEGER_OVERFLOW,
@@ -212,12 +239,13 @@ static void check_init_test_diagnostic_capacity(CheckTest* test)
             const uint64_t input_mark = input_arena.length;
             const uint64_t stream_mark = stream_arena.length;
             const CheckStream stream_before = stream;
+            const CheckGraph graph_before = input.graph;
             bool exhausted = false;
             bool retained = false;
             bool restored = true;
             uint64_t first_failure = 0;
             // Sweep logical capacities instead of relying on the sizes or alignment of private records. This
-            // includes exhaustion after the failure array fits but before the rejected-root array can fit.
+            // includes exhaustion after the failure array fits but before the dependency mask or roots can fit.
             for (uint64_t capacity = 64; capacity <= 4096; capacity += 16)
             {
                 output.capacity = capacity;
@@ -232,8 +260,13 @@ static void check_init_test_diagnostic_capacity(CheckTest* test)
                 const bool diagnosed = check_initializers_diagnose_warnings(&diagnostic, &input, &stream, &parser, &types.table,
                                                                              BUSTER_CHECK_NONE, &output, &scratch, &warnings);
                 bool intact = scratch.length == 64 && input_arena.length == input_mark && stream_arena.length == stream_mark &&
-                              memcmp(&stream, &stream_before, sizeof(stream)) == 0 && warning_tokens[0] == 0 &&
+                              memcmp(&stream, &stream_before, sizeof(stream)) == 0 && memcmp(&input.graph, &graph_before, sizeof(input.graph)) == 0 &&
+                              warning_tokens[0] == 0 &&
                               events_before.events[0].payload.data == 0x6217;
+                for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(columns); c += 1)
+                {
+                    intact &= memcmp(copies[c], columns[c], lengths[c]) == 0;
+                }
                 for (uint32_t i = 0; i < 64; i += 1)
                 {
                     intact = intact && prefix[i] == 0xa5 && scratch_prefix[i] == 0x5a;
@@ -241,15 +274,16 @@ static void check_init_test_diagnostic_capacity(CheckTest* test)
                 if (diagnosed)
                 {
                     retained = true;
-                    intact = intact && diagnostic.status == CHECK_INIT_INVALID && diagnostic.failure_count == 8 &&
+                    intact = intact && diagnostic.status == CHECK_INIT_INVALID && diagnostic.failure_count == failures &&
                              diagnostic.failures != NULL && diagnostic.rejected_roots != NULL && output.length > 64 &&
+                             (diagnostic.invalid_nodes != NULL) == compounds &&
                              diagnostic.warning_count == 1 && warnings.count == 2 && events.count > events_before.count;
                 }
                 else
                 {
                     exhausted = true;
                     intact = intact && diagnostic.status == CHECK_INIT_RESOURCE && diagnostic.failure_count == 0 &&
-                             diagnostic.failures == NULL && diagnostic.rejected_roots == NULL && diagnostic.recovered_type == 0 &&
+                             diagnostic.failures == NULL && diagnostic.rejected_roots == NULL && diagnostic.invalid_nodes == NULL && diagnostic.recovered_type == 0 &&
                              diagnostic.warning_count == 0 && diagnostic.warning_token == BUSTER_CHECK_NONE && warnings.count == 1 &&
                              output.length == 64 && semantic_arena.length == semantic_mark &&
                              memcmp(&events, &events_before, sizeof(events)) == 0;
@@ -266,10 +300,11 @@ static void check_init_test_diagnostic_capacity(CheckTest* test)
             }
             output.capacity = output_capacity;
             char description[224];
-            snprintf(description, sizeof(description), "initializer capacity rollback clears retained pointers/counts and preserves arena/warning prefixes on %s path (first failure %llu)",
-                     path == 0 ? "scalar" : "vector", (unsigned long long)first_failure);
+            snprintf(description, sizeof(description), "%s initializer capacity rollback preserves the graph, arena/warning prefixes and cleared failure metadata on %s path (first failure %llu)",
+                     compounds ? "compound" : "ordinary", path == 0 ? "scalar" : "vector", (unsigned long long)first_failure);
             check_test_expect(test, exhausted && retained && restored, description);
         }
+        arena_release(&snapshot);
         arena_release(&semantic_arena);
         arena_release(&scratch);
         arena_release(&output);
@@ -284,7 +319,13 @@ static void check_init_test_diagnostic_capacity(CheckTest* test)
 
 static void check_init_test_diagnostics(CheckTest* test, const char* clang)
 {
-    check_init_test_diagnostic_capacity(test);
+    check_init_test_diagnostic_capacity(test, "struct Value{int field;};void f(struct Value value){\n"
+                                             "int excess[1]={1,2};\n"
+                                             "int *values[9]={{{1-1}},value,value,value,value,value,value,value,value};\n}\n", 8, false);
+    check_init_test_diagnostic_capacity(test, "struct Value{int field;};void f(struct Value value){\n"
+                                             "int excess[1]={1,2};\n"
+                                             "int *values[2]={(int){value},(0,value)};int *after[1]={value};\n"
+                                             "int *empty[2]={({(int){value};}),value};\n}\n", 5, true);
     check_init_test_diagnostic_source(test, "int a[1]={1,2};\nint f(void){return *1;}\n", BUSTER_CHECK_NONE, false, true);
     check_init_test_diagnostic_source(test, "char a[1]=\"long\";\nint f(void){return *1;}\n", BUSTER_CHECK_NONE, false, true);
     check_init_test_diagnostic_source(test, "struct S{int *p;} a={3};\nint f(void){return *1;}\n", 1, false, false);

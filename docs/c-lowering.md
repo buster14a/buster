@@ -234,6 +234,17 @@ definition. Its flags and edges:
   keep normal dispatch. Complete retained blocks keep their scope exits;
   terminal breaks use the ordinary cleanup, VLA-restore and lifetime machinery.
   Dropped regions and block-scope statics introduce no selection roots.
+
+  Ordinary `if` and `switch` conditions, the left operand of `&&` and `||`,
+  and the condition of `?:` can also read a completed nonvolatile const
+  integer initializer (#2987). The value may come from a file- or block-scope
+  object, a record member or an in-bounds array element. Emission follows
+  integer promotions and short-circuit evaluation, so `off && f()` drops the
+  call when `off` is zero. Reference selection and target-feature checking use
+  the same decision. A runtime read, an inactive union member or a label that
+  can enter the skipped code keeps the ordinary control flow. The regression
+  in `tests/checker/const-selection.c` compares emitted symbols and executable
+  results with Clang.
 - **Statements no control reaches (#2987):** a block's statements are walked
   in source order (`c_check_program_reach.c`). One that follows a `return`,
   `break`, `continue`, `goto` or `__builtin_unreachable()`, and that holds no

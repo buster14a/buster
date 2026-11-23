@@ -201,9 +201,9 @@ table. The kinds are:
   read from its local's home, a register or a frame slot, into a register). `ir_lower`
   refuses a function with the flag (`IR_ERROR_UNSUPPORTED`), so that Tier 1 falls back to Tier 0, and the typed
   interpreter refuses it.
-- A `LOAD`, `STORE` or `SET` of a scalar class (an integer's, a floating value's or a 128-bit integer's, not a
-  vector's or a mask's) may also carry `BUSTER_TYPED_ACCESS_VOLATILE` (#3310, bit 61, below the segment's bits): an
-  access of a volatile-qualified lvalue, which the C lowering marks where it marks a segment's override
+- A `LOAD`, `STORE` or `SET` of any class (#3329: a vector's and a mask's too, whose bytes stay in the value's low
+  bits) may also carry `BUSTER_TYPED_ACCESS_VOLATILE` (#3310, bit 61, below the segment's bits), and so may a `COPY` of
+  a volatile aggregate (past its bytes, on each of the copy's pieces): an access of a volatile-qualified lvalue, which the C lowering marks where it marks a segment's override
   (`check_lower_access`, and a bit-field unit's loads and stores, `check_lower_bit_override`), sending a volatile
   global through its address and a `LOAD` or `STORE` rather than `GLOBAL` and `STORE_GLOBAL`. A function with one says
   so (`Tier0Function.volatiles`, which the inliner propagates); validation and both compile paths strip the bit out of

@@ -13,7 +13,8 @@
 //     builtin types aside) by abi_classify_all at each target vector width (16, 32 and 64 bytes), per type and per
 //     record member; then, at 16 bytes, by abi_classify in the batches a front end hands it as it completes records:
 //     windows of the 1, 4 or 16 types it made since its last call, each in levels of types that depend only on earlier
-//     ones, a call per level.
+//     ones, a call per level; then by abi_classify_all with no scratch (no-scratch: its first scratch arena of no room),
+//     and a chain of 1,024 records against the table's order, with scratch and without (chain, chain-starved).
 //   - assignment: --count calls (32,768) over the table's types, at 16 bytes: most of 0 to 6 arguments, some of 4 to
 //     14 and a few of 15 to 22, one in four variadic, whose arguments are integers and pointers mostly, then
 //     floating types, records that pass in registers and in memory, and now and then long double, __int128, a complex
@@ -505,6 +506,8 @@ struct AbiBenchmarkCase
     AbiSignatures signatures;
     AbiLocation* locations;
     AbiCall* calls;
+    // An arena of no room that classify-all runs with as the thread's first scratch arena, or 0.
+    Arena* starved;
 };
 
 typedef struct AbiBenchmarkOptions AbiBenchmarkOptions;
@@ -534,6 +537,17 @@ struct AbiBenchmarkSamples
 static __attribute__((noinline, aligned(64))) uint32_t abi_benchmark_classify_all_vector(AbiTable* abi, const TypeTable* table)
 {
     return abi_classify_all(abi, table);
+}
+
+// classify-all with `starved`, an arena of no room, as the thread's first scratch arena, the one abi_classify_all's
+// scratch comes from.
+static __attribute__((noinline, aligned(64))) uint32_t abi_benchmark_classify_all_starved(AbiTable* abi, const TypeTable* table, Arena* starved)
+{
+    const Arena saved = thread_context.scratch[0];
+    thread_context.scratch[0] = *starved;
+    const uint32_t result = abi_classify_all(abi, table);
+    thread_context.scratch[0] = saved;
+    return result;
 }
 
 static __attribute__((noinline, aligned(64))) void abi_benchmark_batches_vector(AbiTable* abi, const TypeTable* table, const TypeId* types, const uint32_t* starts,
@@ -568,7 +582,11 @@ static bool abi_benchmark_execute(const AbiBenchmarkCase* benchmark)
 {
     AbiTable* abi = benchmark->abi;
     bool result = true;
-    if (benchmark->kind == BUSTER_ABI_BENCHMARK_CLASSIFY_ALL)
+    if (benchmark->kind == BUSTER_ABI_BENCHMARK_CLASSIFY_ALL && benchmark->starved != 0)
+    {
+        result = abi_benchmark_classify_all_starved(abi, benchmark->table, benchmark->starved) == benchmark->classified;
+    }
+    else if (benchmark->kind == BUSTER_ABI_BENCHMARK_CLASSIFY_ALL)
     {
         result = abi_benchmark_classify_all_vector(abi, benchmark->table) == benchmark->classified;
     }
@@ -1012,6 +1030,137 @@ static bool abi_benchmark_batches(const AbiBenchmarkWorld* world, AbiBenchmarkTa
     return valid;
 }
 
+// An arena of no room, which a starved run puts in place of the thread's first scratch arena.
+static Arena abi_benchmark_starved_arena(void)
+{
+    Arena result = arena_reserve(4096);
+    result.capacity = result.length;
+    return result;
+}
+
+// classify-all with no scratch at all (abi_benchmark_classify_all_starved), at the base width: into the timed table,
+// which must match what classify-all with its scratch classified, then timed.
+static bool abi_benchmark_classify_starved(const AbiBenchmarkWorld* world, AbiBenchmarkTables* tables, uint32_t classified, AbiBenchmarkCounters counters)
+{
+    const TypeTable* table = &world->table;
+    AbiTable* abi = &tables->abi[BUSTER_ABI_BENCHMARK_TIMED];
+    static AbiBenchmarkSamples samples;
+    Arena starved = abi_benchmark_starved_arena();
+    bool valid = starved.base != 0 && abi_benchmark_tables_start(tables, BUSTER_ABI_BENCHMARK_REFERENCE, table, BUSTER_ABI_BENCHMARK_BASE_VECTOR_BYTES) &&
+                 abi_classify_all(&tables->abi[BUSTER_ABI_BENCHMARK_REFERENCE], table) == classified;
+    valid = valid && abi_benchmark_tables_start(tables, BUSTER_ABI_BENCHMARK_TIMED, table, BUSTER_ABI_BENCHMARK_BASE_VECTOR_BYTES) &&
+            abi_benchmark_classify_all_starved(abi, table, &starved) == classified;
+    valid = valid && abi_benchmark_same_tables(abi, &tables->abi[BUSTER_ABI_BENCHMARK_REFERENCE], table->types.count, "classify-all with no scratch");
+    const AbiBenchmarkCase benchmark = {
+        .kind = BUSTER_ABI_BENCHMARK_CLASSIFY_ALL,
+        .name = "no-scratch",
+        .table = table,
+        .abi = abi,
+        .arena = &tables->arena[BUSTER_ABI_BENCHMARK_TIMED],
+        .vector_bytes = BUSTER_ABI_BENCHMARK_BASE_VECTOR_BYTES,
+        .items = classified,
+        .classified = classified,
+        .starved = &starved,
+    };
+    valid = valid && abi_benchmark_measure(&benchmark, counters, &samples);
+    if (valid)
+    {
+        printf("classify-all with no scratch, %u-byte vectors\n", BUSTER_ABI_BENCHMARK_BASE_VECTOR_BYTES);
+        abi_benchmark_print(benchmark.name, &samples, "type", 0, 0);
+    }
+    else
+    {
+        fprintf(stderr, "benchmark-calling-convention: classify-all with no scratch failed or classified otherwise\n");
+    }
+    arena_release(&starved);
+    return valid;
+}
+
+// The links of the reversed chain.
+#define BUSTER_ABI_BENCHMARK_CHAIN_LINKS 1024
+
+// A chain of records against the table's order: tags R0 to R1023 made first, then completed from the last, R1023 {int}
+// and Ri {Ri+1}, so that each needs the one after it. classify-all takes it by its levels after its scans, and with no
+// scratch by its scans alone, a scan per link. Every link must be classified, and be what {int} is.
+static bool abi_benchmark_chain(Arena* arena, AbiBenchmarkCounters counters)
+{
+    static AbiBenchmarkSamples samples;
+    const uint32_t links = BUSTER_ABI_BENCHMARK_CHAIN_LINKS;
+    const TypeCapacity capacity = {
+        .types = links + BUSTER_ABI_BENCHMARK_SLACK_TYPES,
+        .parameters = 1,
+        .tags = links,
+        .members = links,
+    };
+    const uint64_t length = arena->length;
+    TypeTable table;
+    Arena type_arena = arena_reserve(type_capacity_bytes(capacity));
+    Arena index_arena = arena_reserve(type_index_capacity_bytes(capacity));
+    Arena starved = abi_benchmark_starved_arena();
+    TypeId* chain = BUSTER_ARENA_PUSH_ARRAY(arena, TypeId, links);
+    bool valid = chain != 0 && starved.base != 0 && type_initialize(&table, &type_arena, &index_arena, capacity);
+    Arena abi_arena = arena_reserve(valid ? abi_capacity_bytes(table.types.capacity) : 0);
+    for (uint32_t i = 0; valid && i < links; i += 1)
+    {
+        chain[i] = type_tag(&table, BUSTER_TYPE_KIND_STRUCT, i + 1);
+        valid = chain[i] != 0;
+    }
+    const TypeRecordAttributes attributes = {
+        .packed = false,
+        .pack_log2 = 0,
+        .alignment_log2 = 0,
+    };
+    for (uint32_t i = links; valid && i > 0; i -= 1)
+    {
+        const TypeMember member = {
+            .name = 1,
+            .type = i == links ? BUSTER_TYPE_INT : chain[i],
+            .bit_width = BUSTER_TYPE_NOT_BIT_FIELD,
+            .alignment_log2 = 0,
+            .packed = false,
+        };
+        valid = type_complete_record(&table, chain[i - 1], &member, 1, attributes);
+    }
+    AbiTable abi;
+    for (uint32_t route = 0; valid && route < 2; route += 1)
+    {
+        const AbiBenchmarkCase benchmark = {
+            .kind = BUSTER_ABI_BENCHMARK_CLASSIFY_ALL,
+            .name = route == 0 ? "chain" : "chain-starved",
+            .table = &table,
+            .abi = &abi,
+            .arena = &abi_arena,
+            .vector_bytes = BUSTER_ABI_BENCHMARK_BASE_VECTOR_BYTES,
+            .items = links,
+            .classified = links,
+            .starved = route == 0 ? 0 : &starved,
+        };
+        valid = abi_benchmark_prepare(&benchmark) && abi_benchmark_execute(&benchmark);
+        for (uint32_t i = 0; valid && i < links; i += 1)
+        {
+            const uint32_t index = chain[i] >> BUSTER_TYPE_INDEX_SHIFT;
+            const uint32_t integer = BUSTER_TYPE_INT >> BUSTER_TYPE_INDEX_SHIFT;
+            valid = abi.rows[(uint64_t)index * BUSTER_ABI_ROW_BYTES] == abi.rows[(uint64_t)integer * BUSTER_ABI_ROW_BYTES] && abi.stack_bytes[index] == 8;
+        }
+        valid = valid && abi_benchmark_measure(&benchmark, counters, &samples);
+        if (valid)
+        {
+            printf("a chain of %u records against the table's order, %s\n", links, route == 0 ? "with scratch" : "with no scratch");
+            abi_benchmark_print(benchmark.name, &samples, "type", 0, 0);
+        }
+    }
+    if (!valid)
+    {
+        fprintf(stderr, "benchmark-calling-convention: the reversed chain failed or classified otherwise than {int}\n");
+    }
+    arena_release(&starved);
+    arena_release(&abi_arena);
+    arena_release(&index_arena);
+    arena_release(&type_arena);
+    arena_pop_to(arena, length);
+    return valid;
+}
+
 static bool abi_benchmark_classification(const AbiBenchmarkWorld* world, Arena* arena, AbiBenchmarkOptions options, AbiBenchmarkCounters counters)
 {
     const TypeTable* table = &world->table;
@@ -1029,6 +1178,8 @@ static bool abi_benchmark_classification(const AbiBenchmarkWorld* world, Arena* 
             valid = abi_benchmark_classify_all(world, &tables, w, classified, options, counters);
         }
         valid = valid && abi_benchmark_batches(world, &tables, types, classified, arena, counters);
+        valid = valid && abi_benchmark_classify_starved(world, &tables, classified, counters);
+        valid = valid && abi_benchmark_chain(arena, counters);
     }
     abi_benchmark_tables_close(&tables);
     arena_pop_to(arena, length);

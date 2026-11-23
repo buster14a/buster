@@ -60,3 +60,19 @@ later-alias-attribute	later-alias-attribute.c	rejected	a later alias attribute o
 later-object-alias-attribute	later-object-alias-attribute.c	rejected	a later alias attribute on an object clone's name redefines the clone, noted at the target
 later-ifunc-attribute	later-ifunc-attribute.c	rejected	a later ifunc attribute on a clone's name redefines the clone
 declared-later-alias-attribute	declared-later-alias-attribute.c	rejected	a later alias attribute redefines the clone where the name was declared before the pragma
+early-function-call	early-function-call.c	rejected	a declaration after two function clones merges with the newer and leaves the older a candidate
+early-function-signatures	early-function-signatures.c	-	calls select the older clone or the declaration that merged with the newer one by argument type
+early-function-unused	early-function-unused.c	-	a declaration after two function clones carries the first clone's alias without a use
+early-function-address	early-function-address.c	rejected	an address of an early clone set lists the declaration before the older clone
+early-function-conflict	early-function-conflict.c	rejected	a declaration conflicting with the newest early clone drops out of the candidates
+early-function-later-clone	early-function-later-clone.c	rejected	a clone after the declaration heads the early clones and the declaration
+early-function-redeclared	early-function-redeclared.c	rejected	the latest declaration is the early clone set's declaration candidate
+early-function-forward	early-function-forward.c	rejected	early clones made at forward targets keep the pragma as their candidate location
+early-function-three	early-function-three.c	rejected	three early clones leave two older candidates beside the declaration
+early-function-definition	early-function-definition.c	rejected	a definition after early clones redefines the newest and stays a candidate
+early-object-reference	early-object-reference.c	rejected	a declaration after two object clones is a different kind of symbol and later references are ambiguous
+early-object-redeclared	early-object-redeclared.c	rejected	repeated declarations after object clones alternate the lookup's representative
+early-object-function	early-object-function.c	rejected	a function declaration after object clones is a different kind of symbol
+early-mixed-reference	early-mixed-reference.c	rejected	a declaration after mixed function and object clones notes the newest and the reference lists both
+early-object-unused	early-object-unused.c	rejected	a declaration after two object clones is a different kind of symbol without a reference
+early-function-run	early-function-run.c	-	calls through an early clone set name the first clone's weak alias
