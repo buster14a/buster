@@ -3517,7 +3517,7 @@ function, and an asm label, `-fno-builtin`, `-fno-builtin-NAME`,
   the typed interpreter moves the bytes and their definedness as `memmove`
   does. Held in the stack's vector slots or in vector locals instead, Tier 0's
   pieces each took a store and a load more, which made a chain of overlapping
-  moves 1.6 to 2.8 times as slow as the library's call on the 9700X, and eight
+  moves 1.6 to 3.6 times as slow as the library's call on the 9700X, and eight
   addresses on the integer stack spilled all fifteen registers
   (buster-performance's `memmove-copysign-1373-2026-11-22`).
 - `abs`, `labs` and `llabs`, and their `__builtin_` forms, which were calls
