@@ -720,6 +720,10 @@ struct PPFileData
     // Built on the first diagnostic in this file, then shared by all of its inclusions.
     uint32_t* diagnostic_lines;
     uint32_t diagnostic_line_count;
+    // The line index (pp_line_index, -g's rows): for each 64 bytes, a bit at each line end among them, as pp_count_lines
+    // counts them, and how many line ends come before them; length / 64 + 1 of each. Null until made.
+    uint64_t* line_end_bits;
+    uint32_t* line_ends_before;
 };
 
 // A path to a file, as found: what __FILE__, line markers and the quoted includes it holds go by.
@@ -4043,6 +4047,43 @@ static void pp_diagnostic_lines(Preprocessor* pp, uint32_t range)
         }
         // Allocation failure keeps the existing cursor-based location lookup available.
     }
+}
+
+// The line index of `data` (PPFileData.line_end_bits and line_ends_before), in one pass over its bytes, 64 at a time;
+// an allocation failure leaves it null.
+static __attribute__((unused)) void pp_line_index(Preprocessor* pp, PPFileData* data)
+{
+    if (data->line_end_bits == 0)
+    {
+        const uint32_t blocks = data->length / 64 + 1;
+        uint64_t* bits = arena_push_array(&pp->arena, blocks, sizeof(uint64_t), 64);
+        uint32_t* before = bits != 0 ? arena_push_array(&pp->arena, blocks, sizeof(uint32_t), 64) : 0;
+        uint32_t count = 0;
+        for (uint32_t block = 0; before != 0 && block < blocks; block += 1)
+        {
+            const uint32_t i = block * 64;
+            const uint32_t remaining = data->length - i;
+            const __mmask64 valid = _bzhi_u64(~0ull, remaining < 64 ? remaining : 64);
+            const __m512i bytes = _mm512_maskz_loadu_epi8(valid, data->bytes + i);
+            const uint64_t nl = _mm512_cmpeq_epi8_mask(bytes, _mm512_set1_epi8('\n'));
+            const uint64_t cr = _mm512_cmpeq_epi8_mask(bytes, _mm512_set1_epi8('\r'));
+            const uint64_t next = remaining > 64 && data->bytes[i + 64] == '\n';
+            const uint64_t ends = (nl | (cr & ~((nl >> 1) | (next << 63)))) & valid;
+            bits[block] = ends;
+            before[block] = count;
+            count += (uint32_t)__builtin_popcountll(ends);
+        }
+        data->line_end_bits = before != 0 ? bits : 0;
+        data->line_ends_before = before;
+    }
+}
+
+// The line of byte `offset` (at most the file's length) of a file with a line index: 1 and the line ends before it, as
+// pp_line_of counts it.
+static __attribute__((unused)) uint32_t pp_line_indexed(const PPFileData* data, uint32_t offset)
+{
+    const uint32_t block = offset / 64;
+    return 1 + data->line_ends_before[block] + (uint32_t)__builtin_popcountll(_bzhi_u64(data->line_end_bits[block], offset % 64));
 }
 
 // The line of byte `offset` of a file with line pages (PPFileData.line_pages): its page's count, then the line ends from
