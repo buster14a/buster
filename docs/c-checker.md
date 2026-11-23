@@ -8807,6 +8807,28 @@ compile and run the deep checker sources (`quadratic-statement-expressions.c`,
 `quadratic-vla-bounds.c`), whose walks pass 717 parents in 1,744 tokens and 856
 in 1,005 (22,673 and 21,099 without kept answers, which fail those bounds).
 
+Whether a jump can enter a statement other than at its start (a label, or a
+case of a switch outside it, in its tokens: `check_control_enterable`, clang's
+`ContainsLabel`) is asked of each statement a switch's arms, a constant `if`'s
+dropped arm or a sequence after a jump leaves; walking the statement's first and
+last children and scanning its tokens made switches nested N deep cost about
+N²/2 tokens. Where that walk passes 64
+steps or the statement 4,096 tokens, the body's subtree facts answer
+(`check_control_enterable_facts`, `CheckControlExtents`): each node's first and
+last tokens and the least and greatest key of its subtree (a label's 0, a case's
+switch), computed once a node in reverse preorder, which are exactly what the
+walk and the scan find because the parse tree's subtrees are runs of tokens. A
+statement they hold answers from them at once. They are in an arena of their
+own, reserved by the first body that needs them and released with the program's
+run, so ordinary units, whose walks stay short, touch nothing new. Switches
+nested 16,000 deep took 2.15 s at `-fsyntax-only` and take 0.050 s (a Develop
+build in a 4-CPU cloud container, not the 9700X). `CheckProgramOptions.enterable_work` tallies the
+walks' steps, the scans' tokens and the facts' nodes; the program fixture
+`quadratic-switches.c` (switches, a constant switch whose dropped arms a label
+keeps and blocks that hold an outer switch's case, each nested 200 deep) takes
+at most two a token (976,488 steps for 5,161 tokens without the facts, which
+fails that bound).
+
 A goto's or a case's refusal reads as clang's jump scope checker words it
 (#1942): "cannot jump from this goto statement to its label" or "cannot jump
 from switch statement to this case label", with the note "jump enters a

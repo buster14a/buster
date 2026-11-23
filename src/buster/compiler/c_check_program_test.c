@@ -2044,6 +2044,7 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
         uint64_t return_flow_work = 0;
         uint64_t region_target_work = 0;
         uint64_t statement_walk_work = 0;
+        uint64_t enterable_work = 0;
         const CheckProgramOptions program_options = {
             .initializers = &initializers,
             .asms = &asms,
@@ -2055,6 +2056,7 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
             .return_flow_work = &return_flow_work,
             .region_target_work = &region_target_work,
             .statement_walk_work = &statement_walk_work,
+            .enterable_work = &enterable_work,
             .target = pp_options.target,
             .predefines = &predefines,
         };
@@ -2080,6 +2082,14 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
                               region_target_work <= input.token_count && statement_walk_work <= 2 * (uint64_t)input.token_count &&
                                   (!regions || region_target_work != 0) && (!statements || statement_walk_work != 0),
                               walks);
+            // check_control_enterable's subtree facts: statements nested 200 deep pass their tokens about once, where
+            // walking and scanning each arm again passed tens of times as many.
+            if (strcmp(name, "quadratic-switches") == 0)
+            {
+                snprintf(walks, sizeof(walks), "%s: %s enterable arms take %llu steps for %u tokens", name, path == 0 ? "scalar" : "vector",
+                         (unsigned long long)enterable_work, input.token_count);
+                check_test_expect(test, enterable_work != 0 && enterable_work <= 2 * (uint64_t)input.token_count, walks);
+            }
         }
         char description[256];
         snprintf(description, sizeof(description), "%s: %s source produces checked executable control and static-data plans", name, path == 0 ? "scalar" : "vector");
@@ -5490,6 +5500,7 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
         // a while condition, as above.
         check_test_program_checker_source(test, "quadratic-statement-expressions", "gcc");
         check_test_program_checker_source(test, "quadratic-vla-bounds", clang);
+        check_test_program_checker_source(test, "quadratic-switches", clang);
         check_test_program_source(test,
             "int tested(int n){int x=0;double z=0.5+({double y=n+0.25;x++;y;});return (int)(z*4)+x;}", "statement-region-floating-pending-value", clang);
         check_test_program_source(test,
