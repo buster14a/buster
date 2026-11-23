@@ -205,35 +205,12 @@ static __attribute__((noinline)) bool check_program_const_expression(const Check
     return known && loaded;
 }
 
-// Whether node `node` is an integer the walk above proves from constants' receipts, into *value. A no is kept by node
-// (CheckProgram.const_refused, #2850) and answered from there the next time: the walk reads the graph, the checked
-// stream and the receipts, none of which changes while the program stands. (With a test's switch a kept no is walked
-// again and the two are compared, CheckInput.default_path_counts.)
 static bool check_program_const_integer(const CheckProgram* program, uint32_t node, CheckValue* value)
 {
     const CheckGraph* graph = &program->input->graph;
     const CheckConstValues* receipts = graph->const_values;
-    bool result = false;
-    if (node < graph->count && receipts != NULL && (receipts->count != 0 || receipts->prefix != NULL))
-    {
-        uint8_t* const refused = program->const_refused;
-        uint64_t* const counts = program->input->default_path_counts;
-        const bool kept = refused != NULL && __atomic_load_n(refused + node, __ATOMIC_RELAXED) != 0;
-        if (!kept || __builtin_expect(counts != NULL, 0))
-        {
-            result = check_program_const_expression(program, node, value);
-            if (kept)
-            {
-                check_default_path_count(counts, CHECK_DEFAULT_PATH_CONSTANTS_KEPT, 1);
-                check_default_path_count(counts, CHECK_DEFAULT_PATH_CONSTANTS_DIFFERENT, result);
-            }
-            else if (!result && refused != NULL)
-            {
-                __atomic_store_n(refused + node, 1, __ATOMIC_RELAXED);
-            }
-        }
-    }
-    return result;
+    return node < graph->count && receipts != NULL && (receipts->count != 0 || receipts->prefix != NULL) &&
+           check_program_const_expression(program, node, value);
 }
 
 typedef enum CheckEmissionTruth
