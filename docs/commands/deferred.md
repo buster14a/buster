@@ -26,8 +26,10 @@ the post-merge rounds below
 are rounds of the command's flow (`CheckDeferred.flow`, `CheckDeferredFlow`),
 on the session's lanes, as the emission's are, of no more lanes than the grant
 gives (the session's and the worker budget's) before the top level's walk; a
-unit whose bodies take one lane, a prefix, a repair and `-flazy-system-headers`'
-selection are read in source order. [docs/function-lanes.md](../../docs/function-lanes.md)'s
+unit whose bodies take fewer than four lanes (two with `--lanes N`), one whose
+bodies beyond their critical path are less than half its tokens (a dominant
+body, #1668, but with `--lanes N`), a prefix, a repair and
+`-flazy-system-headers`' selection are read in source order. [docs/function-lanes.md](../../docs/function-lanes.md)'s
 "The checker's bodies on lanes" has the measurements and the default.
 
 After a successful merge where the bodies took `BUSTER_CHECK_DEFERRED_POST_LANES`

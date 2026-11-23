@@ -208,13 +208,54 @@ static uint32_t check_lower_padding_member(const CheckProgram* program, uint32_t
     return token != 0 ? check_lower_padding_opaque(program, token, 0) : UINT32_MAX;
 }
 
+// The typedef a cast's type name (its `)` at `close`) writes as its specifier, before its abstract declarator, with
+// `*level` the level of the cast's type that the typedef's type is (as check_lower_padding_sugared counts levels); 0 for
+// none (no typedef, or one whose type isn't a level of the cast's).
+static uint32_t check_lower_padding_cast_typedef(const CheckProgram* program, uint32_t close, TypeId cast, uint32_t* level)
+{
+    const CheckInput* input = program->input;
+    const Parser* parser = program->parser;
+    const TypeTable* types = program->types;
+    uint32_t result = 0;
+    *level = 0;
+    if (close < parser->tokens.count && parser->tree.roles[close] == PARSE_ROLE_CLOSE_CAST && input->declarations != NULL && input->declared_types != NULL)
+    {
+        uint32_t open = close;
+        while (open != 0 && !(parser->tokens.kinds[open] == PARSE_KIND_L_PAREN && parser->tree.parents[open] == close))
+        {
+            open -= 1;
+        }
+        // The specifiers: the tokens before the abstract declarator's first `*`, `(` or `[`.
+        bool specifiers = open != 0;
+        for (uint32_t token = open + 1; specifiers && token < close; token += 1)
+        {
+            const uint8_t kind = parser->tokens.kinds[token];
+            specifiers = kind != PARSE_KIND_STAR && kind != PARSE_KIND_L_PAREN && kind != PARSE_KIND_L_SQUARE;
+            const uint32_t resolved = specifiers && kind == PARSE_KIND_IDENTIFIER && token < input->token_count ? input->declarations[token] : 0;
+            result = resolved != 0 && resolved < input->token_count && input->declaration_kinds[resolved] == C_BINDING_TYPEDEF ? resolved : result;
+        }
+        const TypeId written = result != 0 ? type_unqualified(type_strip_aligned(types, input->declared_types[result])) : 0;
+        TypeId at = type_strip_aligned(types, cast);
+        uint32_t levels = 0;
+        for (; written != 0 && levels < 64 && at != 0 && type_is_valid(types, at) && type_unqualified(at) != written; levels += 1)
+        {
+            const uint8_t kind = type_kind(types, at);
+            at = kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) ? type_strip_aligned(types, type_element(types, at)) : 0;
+        }
+        const bool found = written != 0 && at != 0 && type_is_valid(types, at) && type_unqualified(at) == written;
+        result = found ? result : 0;
+        *level = found ? levels : 0;
+    }
+    return result;
+}
+
 // The sugar of the arrays a __builtin_clear_padding argument points to (#1842's 1b), as check_lower_padding_opaque counts
 // it, UINT32_MAX for none: through implicit conversions (an array's decay keeps the level), `&` (one less), `*` and
 // subscripts (one more), to
 // - a declared name, or a member (`.` or `->`) of a record, whose declarator's sugar it reads at its level;
 // - a cast's type name, or a call's result, whose array that is a pointer's pointee is always written with sugar (a
-//   declarator's parentheses, a typedef or typeof), and an element of an array not (an array of a typedef's arrays is
-//   the exception this doesn't see).
+//   declarator's parentheses, a typedef or typeof), and an element of an array not, unless a cast's typedef specifier
+//   writes it (an array of a typedef's arrays, #1842), whose own declaration answers below it.
 static uint32_t check_lower_padding_argument(const CheckProgram* program, uint32_t node)
 {
     const CheckGraph* graph = &program->input->graph;
@@ -267,7 +308,8 @@ static uint32_t check_lower_padding_argument(const CheckProgram* program, uint32
     else if (depth != UINT32_MAX && depth != 0 && (op == CHECK_OP_CAST || op == CHECK_OP_CALL) && program->stream != NULL && node < program->stream->count)
     {
         // The type's level `depth`, and whether a pointer, not an array, has it: the array there is written with sugar.
-        TypeId at = type_strip_aligned(types, check_stream_type(program->stream, node));
+        const TypeId type = type_strip_aligned(types, check_stream_type(program->stream, node));
+        TypeId at = type;
         bool pointed = false;
         for (uint32_t k = 0; k < depth && at != 0 && type_is_valid(types, at); k += 1)
         {
@@ -276,6 +318,15 @@ static uint32_t check_lower_padding_argument(const CheckProgram* program, uint32
             at = kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(kind) ? type_strip_aligned(types, type_element(types, at)) : 0;
         }
         result = at != 0 && pointed && type_kind_is_array(type_kind(types, at)) ? 0 : UINT32_MAX;
+        // Else, through the arrays from there, a cast's typedef specifier's level and its declaration's below it.
+        uint32_t level = 0;
+        const uint32_t spelled = result == UINT32_MAX && op == CHECK_OP_CAST ? check_lower_padding_cast_typedef(program, graph->tokens[node], type, &level) : 0;
+        for (uint32_t k = 0; spelled != 0 && result == UINT32_MAX && k < 64 && at != 0 && type_is_valid(types, at) && type_kind_is_array(type_kind(types, at)); k += 1)
+        {
+            const bool sugared = depth + k == level || (depth + k > level && check_lower_padding_sugared(program, spelled, depth + k - level));
+            result = sugared ? k : UINT32_MAX;
+            at = type_strip_aligned(types, type_element(types, at));
+        }
     }
     return result;
 }

@@ -75,6 +75,12 @@
 // allocation's own certificate (tier1_certificate_cfg.c) still covers them. Canonical 32-bit storage (a 4-byte value's upper half zero) is the selection's contract and isn't
 // checked: a 4-byte value is its low 4 bytes.
 //
+// Every record, emitted or regenerated, is read as its canonical form (tier1_emit_vex_canonical, #2830). At an AVX
+// target the final code holds the VEX twins of the selection's legacy SSE records (tier1_emit_vex), and each one is read
+// as its legacy record. A register location is always the register's low bytes, so the twin's zeroing of the bytes
+// above 127, which the legacy form keeps, is never what a read finds. A dirty function's vzeroupper (Tier1EmitResult.
+// zero_upper) is a call's record, regenerated, or its epilogue's first, where no result is wider than 16 bytes.
+//
 // Inputs are borrowed. The program is pushed onto `output`; `scratch` is restored. On failure both are restored.
 
 #include <stdbool.h>
@@ -489,6 +495,8 @@ static bool tier1_cert_emitted_frame_operand(const Tier1CertEmittedBuild* build,
     return record.mode == BUSTER_X86_MEMORY_BASE && tier1_cert_emitted_place(build, record.rm, record.displacement, at, entry);
 }
 
+static bool tier1_cert_emitted_exactly(X86Instruction record, X86Instruction expected);
+
 static bool tier1_cert_emitted_take_reference(Tier1CertEmittedBuild* build, uint32_t record, const LinkReference* expected)
 {
     const uint32_t index = build->references[record];
@@ -576,7 +584,7 @@ static bool tier1_cert_emitted_recomputed(Tier1CertEmittedBuild* build, uint32_t
     for (uint32_t k = 0; recipe && !valid && k < 2; k += 1)
     {
         Tier1Rematerialized copy = { 0 };
-        if (candidates[k] < 16 && tier1_rematerialize(&emitted->prepared.recipes, node, candidates[k], build->base, BUSTER_TIER1_EMIT_BOUNDARY_FLAGS, &copy) && memcmp(&copy.instruction, &record, sizeof(record)) == 0)
+        if (candidates[k] < 16 && tier1_rematerialize(&emitted->prepared.recipes, node, candidates[k], build->base, BUSTER_TIER1_EMIT_BOUNDARY_FLAGS, &copy) && tier1_cert_emitted_exactly(record, copy.instruction))
         {
             const LinkReference expected = {
                 .field = X86_FIXUP_DISPLACEMENT,
@@ -789,7 +797,6 @@ static bool tier1_cert_emitted_add_use(Tier1CertEmittedKernel* kernel, uint32_t 
 // selection's, trusted as a kernel's sequence is. A whole aggregate's bytes in the outgoing area are values of 64 bytes
 // each; a part's padding (an eightbyte's bytes past the aggregate's) is the callee's to ignore, as the ABI says.
 
-static bool tier1_cert_emitted_exactly(X86Instruction record, X86Instruction expected);
 static bool tier1_cert_emitted_original(Tier1CertEmittedBuild* build, uint32_t node, uint32_t kind, uint32_t chunk, Tier1CertSource** record, Tier1CertInstruction** instruction);
 static bool tier1_cert_emitted_originals(Tier1CertEmittedBuild* build, uint32_t node, const Tier1CertEmittedKernel* kernel, const X86Instruction* records, uint32_t count);
 
@@ -1383,6 +1390,12 @@ static bool tier1_cert_emitted_call(Tier1CertEmittedBuild* build, uint32_t node,
     {
         kernel->records[kernel->count++] = vector_count == 0 ? (X86Instruction){ .form = X86_FORM_XOR_R32_RM32, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_RAX }
                                                              : (X86Instruction){ .form = X86_FORM_MOV_R32_IMM32, .rm = X86_REGISTER_RAX, .immediate = (int32_t)vector_count };
+    }
+    // A dirty function's vzeroupper (#2830, tier1_emit_call's): the arguments it reads are below bit 128, but where one is
+    // live in a ymm or zmm register, which then has none.
+    if (valid && emitted->zero_upper && !tier1_select_call_wide(function, call))
+    {
+        kernel->records[kernel->count++] = (X86Instruction){ .form = X86_FORM_VZEROUPPER };
     }
     if (valid && indirect)
     {
@@ -2084,9 +2097,13 @@ static bool tier1_cert_emitted_walk(Tier1CertEmittedBuild* build, uint32_t b, ui
 }
 
 // Whether `record` is exactly `expected`: a frame record's every field its decoding's, the rest zero.
+// Whether a record is exactly the one expected, as their canonical forms (tier1_emit_vex_canonical, #2830): a VEX twin of
+// a legacy SSE record is that record.
 static bool tier1_cert_emitted_exactly(X86Instruction record, X86Instruction expected)
 {
-    return memcmp(&record, &expected, sizeof(record)) == 0;
+    const X86Instruction a = tier1_emit_vex_canonical(record);
+    const X86Instruction b = tier1_emit_vex_canonical(expected);
+    return memcmp(&a, &b, sizeof(a)) == 0;
 }
 
 // An immediate's form for the frame's add and sub: its imm8 one where the value fits it, else its imm32 one.
@@ -2253,6 +2270,12 @@ static bool tier1_cert_emitted_epilogue(Tier1CertEmittedBuild* build, uint32_t f
         else if (valid && frame_pointer != INT64_MIN && tier1_cert_emitted_exactly(record, (X86Instruction){ .form = X86_FORM_MOV_RM64_R64, .reg = X86_REGISTER_RBP, .rm = X86_REGISTER_RSP }))
         {
             build->sp = frame_pointer;
+        }
+        else if (valid && record.form == X86_FORM_VZEROUPPER && r == first && emitted->zero_upper && !tier1_select_result_wide(build->plan->function) &&
+                 tier1_cert_emitted_exactly(record, (X86Instruction){ .form = X86_FORM_VZEROUPPER }))
+        {
+            // A dirty function's vzeroupper (#2830), first: no value lives past the ret above bit 128 of xmm0 to xmm15,
+            // where its result isn't a ymm or zmm register's, and it writes no general register, flag or memory.
         }
         else if (valid && known && record.form == X86_FORM_POP_R64 && record.rm < 16 && record.rm != X86_REGISTER_RSP && tier1_cert_emitted_exactly(record, (X86Instruction){ .form = X86_FORM_POP_R64, .rm = record.rm }))
         {
@@ -3073,7 +3096,11 @@ static bool tier1_cert_emitted_run(Tier1CertEmittedBuild* build, uint32_t node, 
             more = false;
         }
     }
-    valid = valid && found_count == kernel.count && memcmp(found, kernel.records, (uint64_t)found_count * sizeof(X86Instruction)) == 0;
+    valid = valid && found_count == kernel.count;
+    for (uint32_t k = 0; valid && k < found_count; k += 1)
+    {
+        valid = tier1_cert_emitted_exactly(found[k], kernel.records[k]);
+    }
     valid = valid || tier1_cert_emitted_refuse(build, TIER1_CERT_EMITTED_KERNEL, r);
     if (returns)
     {
@@ -3268,8 +3295,8 @@ static bool tier1_cert_emitted_entry(Tier1CertEmittedBuild* build, uint32_t r)
     return valid || tier1_cert_emitted_refuse(build, TIER1_CERT_EMITTED_DECODE, r);
 }
 
-static Tier1CertEmittedReason tier1_certificate_emitted_debug(const Tier1SelectPlan* plan, const Tier1EmitResult* emitted, Arena* output, Arena* scratch,
-                                                            Tier1DebugDefinition* definitions, Tier1DebugPhi* phis, Tier1CertProgram* program, Tier1CertEmittedStats* stats)
+static Tier1CertEmittedReason tier1_certificate_emitted_records(const Tier1SelectPlan* plan, const Tier1EmitResult* emitted, Arena* output, Arena* scratch,
+                                                              Tier1DebugDefinition* definitions, Tier1DebugPhi* phis, Tier1CertProgram* program, Tier1CertEmittedStats* stats)
 {
     const uint64_t output_saved = output->length;
     const uint64_t scratch_saved = scratch->length;
@@ -4185,6 +4212,48 @@ static Tier1CertEmittedReason tier1_certificate_emitted_debug(const Tier1SelectP
         *stats = tally;
     }
     return tally.reason;
+}
+
+// The code's certificate of `emitted`'s records as their canonical forms (tier1_emit_vex_canonical, #2830): a function's
+// VEX twins of legacy SSE records (tier1_emit_vex) decoded as those records, on a copy of them on `scratch`, which the
+// comparisons with the records the certificate regenerates read canonical too (tier1_cert_emitted_exactly). Sixteen
+// records a step find those of a form with a canonical entry (tier1_emit_vex_lookup); a function without any is read as
+// it is.
+static Tier1CertEmittedReason tier1_certificate_emitted_debug(const Tier1SelectPlan* plan, const Tier1EmitResult* emitted, Arena* output, Arena* scratch,
+                                                            Tier1DebugDefinition* definitions, Tier1DebugPhi* phis, Tier1CertProgram* program, Tier1CertEmittedStats* stats)
+{
+    const uint64_t scratch_saved = scratch->length;
+    const Tier1SelectCode* code = &emitted->code;
+    X86Instruction* canonical = 0;
+    bool room = true;
+    for (uint32_t first = 0; room && first < code->count; first += 16)
+    {
+        uint32_t found = tier1_emit_vex_lookup(code->records + first, code->count - first, tier1_emit_vex_legacy);
+        while (room && found != 0)
+        {
+            const uint32_t r = first + (uint32_t)__builtin_ctz(found);
+            found &= found - 1;
+            const X86Instruction record = tier1_emit_vex_canonical(code->records[r]);
+            if (canonical == 0 && memcmp(&record, &code->records[r], sizeof(record)) != 0)
+            {
+                canonical = arena_push(scratch, (uint64_t)code->count * sizeof(X86Instruction), 64);
+                room = canonical != 0;
+                if (room)
+                {
+                    memcpy(canonical, code->records, (uint64_t)code->count * sizeof(X86Instruction));
+                }
+            }
+            if (canonical != 0)
+            {
+                canonical[r] = record;
+            }
+        }
+    }
+    Tier1EmitResult view = *emitted;
+    view.code.records = canonical != 0 ? canonical : code->records;
+    const Tier1CertEmittedReason reason = room ? tier1_certificate_emitted_records(plan, &view, output, scratch, definitions, phis, program, stats) : TIER1_CERT_EMITTED_CAPACITY;
+    arena_pop_to(scratch, scratch_saved);
+    return reason;
 }
 
 static Tier1CertEmittedReason tier1_certificate_emitted(const Tier1SelectPlan* plan, const Tier1EmitResult* emitted, Arena* output, Arena* scratch,

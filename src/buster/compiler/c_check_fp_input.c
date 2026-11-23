@@ -550,8 +550,10 @@ static void check_input_fp_types(CheckInputReader* reader)
                 marked[token] |= 4;
             }
         }
+        // (--node-bodies: a body the node machine's producer took is masked from the walk and still the unit's: its tokens'
+        // uses are uses, CheckInput.node_bodies.)
         if (declaration < count && declaration != token && (marked[declaration] & 4) != 0 &&
-            (input->deferred_tokens == NULL || input->deferred_tokens[token] == 0) &&
+            (input->deferred_tokens == NULL || input->node_bodies || input->deferred_tokens[token] == 0) &&
             (environment & BUSTER_CHECK_FP_EVAL_PRAGMA) != 0 && (environment & BUSTER_CHECK_FP_EVAL_LAST_MASK) != baseline)
         {
             const uint32_t before = input->report_count;

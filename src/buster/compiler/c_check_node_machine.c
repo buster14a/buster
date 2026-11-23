@@ -75,6 +75,8 @@
 
 // The most records an expression the machine takes has (docs/node-machine.md, "The records and the tapes").
 #define BUSTER_NODE_MACHINE_MOST 4096u
+// The target features with which the lowering fuses a product and a sum (check_lower_contract_plan's): NodeMachine.fuses.
+#define BUSTER_NODE_MACHINE_FUSED (BUSTER_X86_FEATURE(FMA) | BUSTER_X86_FEATURE(AVX512F))
 // The most entries one record's row writes: its own and its conversion's (BUSTER_CHECK_LOWER_TEMPLATE_MOST).
 #define BUSTER_NODE_MACHINE_ROW_MOST 8u
 // The most entries a segment after a record's row writes (node_machine_hook): a test of its value and a branch.
@@ -107,12 +109,8 @@
 // statement's CONDITION over one. It makes no value; its target and its sense are kept as a tested value's are.
 #define BUSTER_NODE_MACHINE_BRANCHED 0x40u
 #define BUSTER_NODE_MACHINE_NO_OWNER UINT32_MAX
-// A temporary's entry on the tape (an update's of an address, after its postfix): its number among the expression's
-// temporaries, in the order X makes them, with this bit. The lowering's are locals it adds (check_lower_temporary).
-#define BUSTER_NODE_MACHINE_TEMPORARY (UINT64_C(1) << 63)
-// A branch's entry on the tape whose target is its control's (a statement's condition that is branches): a label
-// outside the expression, which the lowering's control numbered before the expression's own and step 2's splice gives.
-#define BUSTER_NODE_MACHINE_CONTROL_LABEL (UINT64_C(1) << 62)
+// (BUSTER_NODE_MACHINE_TEMPORARY and BUSTER_NODE_MACHINE_CONTROL_LABEL, a tape's two marks, are
+// c_check_node_machine_front.c's, where the lowering's splice reads them.)
 // The root's context past the lowering's own bits (BUSTER_CHECK_LOWER_TEMPLATE_ADDRESS and _DISCARD), a statement's
 // CONDITION's alone: its control branches where the condition holds (a do statement's, CHECK_CONTROL_BRANCH_TRUE), not
 // where it doesn't. C reads it where the condition is branches, and keeps it out of the root's context.
@@ -468,6 +466,23 @@ struct NodeMachine
     // two columns are the caller's (node_machine_begin_reader).
     const CheckInput* input;
     const Parser* parser;
+    // The unit's enumerations' definitions before the walk, as the tags' columns have them (the reader lists them in its
+    // output at its end, CheckInput.enum_definitions): node_producer_begin's, for node_machine_root_loud. None otherwise.
+    const CheckInputEnumDefinition* reader_enums;
+    uint32_t reader_enum_count;
+    // Whether the unit's target, or one of its functions' own, fuses a product and a sum (FMA or AVX-512F): the lowering
+    // contracts a floating sum with its product operand there (check_lower_contract_plan), for which C has no template,
+    // so C refuses a sum or a compound sum of a float's or a double's class there, whatever its operands are
+    // (node_machine_classify, node_machine_update_plan), and the window's C lists every sum and every update
+    // (node_contexts_window_loop). At reader time, where no attribute's target is read, it is the options' target's, or
+    // true in a unit with a function of a target of its own, whatever that names (node_machine_begin_reader).
+    bool fuses;
+    // Whether C leaves a volatile lvalue's read, its store and its update to the lowering's tasks, which mark each access
+    // (#3310, check_lower_volatile; a local's by name has no mark and keeps its row). True for the pipeline's machine and
+    // for the reader's, but not where the window's forms run (BUSTER_NODE_READER_WINDOW): their records have no bit for
+    // a volatile access, C on the window takes one as before #3310, and so does its reference there, both then
+    // differing from the lowering's entries for it. No compile and no producer runs those forms.
+    bool marks;
     uint32_t* reader_declarations;
     uint8_t* reader_facts;
     uint32_t reader_objects;
@@ -494,6 +509,8 @@ struct NodeMachine
 #define BUSTER_NODE_MACHINE_OBJECT_LABELLED 0x02u
 #define BUSTER_NODE_MACHINE_OBJECT_DECLARED 0x04u
 #define BUSTER_NODE_MACHINE_OBJECT_DEFINED 0x08u
+// A declaration of the function has always_inline (CheckProgram.object_inline's BUSTER_CHECK_PROGRAM_INLINE_ALWAYS).
+#define BUSTER_NODE_MACHINE_OBJECT_INLINED 0x10u
 
 // Forgets the unit's call answers, the types' pointers and the argument memo, as a unit starts without them:
 // node_machine_begin, and the shadow's timing before each pass (c_check_node_census.c's node_shadow_time), so that each
@@ -643,6 +660,12 @@ static bool node_machine_begin(NodeMachine* machine, const CheckProgram* program
         .declaration_bits = program->input->declaration_bits,
         .object_count = program->object_count,
     };
+    uint64_t features = program->target.features;
+    for (uint32_t t = 0; t < program->target_count; t += 1)
+    {
+        features |= program->targets[t].features;
+    }
+    machine->fuses = (features & BUSTER_NODE_MACHINE_FUSED) != 0;
     const bool room = node_machine_setup(machine, (TypeTable*)program->types, &program->input->graph, program->types->types.count, scalar, verify, arena);
     machine->overloads = node_machine_overloads(program->input, &program->input->graph);
     machine->renames = node_machine_renames(program->input);
@@ -1044,7 +1067,8 @@ static inline bool node_machine_symbolled(const NodeMachine* machine, uint32_t o
 }
 
 // What T's callee refusal asks of a directly called object (node_machine_callee_refused): its declaration's name, and
-// whether a declaration gives it returns_twice; of the program's columns, or at reader time of the reader's.
+// whether a declaration gives it returns_twice or always_inline; of the program's columns, or at reader time of the
+// reader's.
 static inline IdentId node_machine_object_name(const NodeMachine* machine, uint32_t object)
 {
     const CheckProgram* program = machine->program;
@@ -1060,6 +1084,15 @@ static inline bool node_machine_object_twice(const NodeMachine* machine, uint32_
     const CheckProgram* program = machine->program;
     return program != NULL ? program->object_returns_twice != NULL && program->object_returns_twice[object] != 0 :
                              (machine->reader_facts[object] & BUSTER_NODE_MACHINE_OBJECT_TWICE) != 0;
+}
+
+// Whether a declaration gives it always_inline: the lowering expands a direct call of such a function's inline-only
+// definition in its caller (#2983, check_program_select_wrappers), and the machine has a call's row alone.
+static inline bool node_machine_object_inlined(const NodeMachine* machine, uint32_t object)
+{
+    const CheckProgram* program = machine->program;
+    return program != NULL ? program->object_inline != NULL && (program->object_inline[object] & BUSTER_CHECK_PROGRAM_INLINE_ALWAYS) != 0 :
+                             (machine->reader_facts[object] & BUSTER_NODE_MACHINE_OBJECT_INLINED) != 0;
 }
 
 // Whether call node `node`, record `r`, has a plain library builtin's semantics of its own (check_program_call_library):

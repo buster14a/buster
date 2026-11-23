@@ -2282,6 +2282,12 @@ static long double check_input_fallthrough_half(long double value)
     return check_action_half_value(CHECK_HALF_IEEE, check_action_half_bits(CHECK_HALF_IEEE, value));
 }
 
+// A value rounded to __bf16, as check_input_fallthrough_half rounds to _Float16.
+static long double check_input_fallthrough_brain(long double value)
+{
+    return check_action_half_value(CHECK_HALF_BRAIN, check_action_half_bits(CHECK_HALF_BRAIN, value));
+}
+
 // One comparison of a tautology's: its variable's tokens, its operator as `variable OP constant` (flipped where the
 // constant is on the left: tryNormalizeBinaryOperator), and its constant as clang's evaluator gives NumExpr: a literal's
 // converted to the comparison's type (its implicit IntegralCast or IntegralToFloating, which a literal inside parentheses
@@ -2298,6 +2304,8 @@ struct CheckFallthroughComparison
     TypeId type;
     uint64_t bits;
     long double real;
+    // A __float128 constant's value (#1844: the evaluator keeps its exact bits, c_check_quad.c).
+    __float128 quad;
     uint8_t kind;
     uint8_t constant;
     bool floating;
@@ -2353,6 +2361,9 @@ static bool check_input_fallthrough_comparison(CheckInputReader* reader, uint32_
     const bool integer = found != CHECK_FALLTHROUGH_NONE && !(found == CHECK_FALLTHROUGH_LITERAL && floating) &&
                          check_action_integer_type(types, valued, &width, &is_signed) && width <= 64;
     long double real = constant.floating;
+    __float128 quad = constant.constant_kind == CHECK_CONSTANT_FLOATING && type_unqualified(type_strip_aligned(types, constant.type)) == BUSTER_TYPE_FLOAT128
+                          ? check_quad_host(constant.integer)
+                          : (__float128)real;
     if (found == CHECK_FALLTHROUGH_LITERAL && floating && constant.constant_kind == CHECK_CONSTANT_INTEGER)
     {
         uint32_t literal_width = 0;
@@ -2362,8 +2373,11 @@ static bool check_input_fallthrough_comparison(CheckInputReader* reader, uint32_
         const uint32_t shift = literal_width != 0 && literal_width <= 64 ? 64 - literal_width : 0;
         const uint64_t bits = (uint64_t)constant.integer << shift;
         const long double wide = literal_signed ? (long double)((int64_t)bits >> shift) : (long double)(bits >> shift);
-        real = common == BUSTER_TYPE_FLOAT16 ? check_input_fallthrough_half(wide) : common == BUSTER_TYPE_FLOAT ? (long double)(float)wide :
+        real = common == BUSTER_TYPE_FLOAT16 ? check_input_fallthrough_half(wide) : common == BUSTER_TYPE_BF16 ? check_input_fallthrough_brain(wide) :
+               common == BUSTER_TYPE_FLOAT ? (long double)(float)wide :
                common == BUSTER_TYPE_DOUBLE ? (long double)(double)wide : wide;
+        // An integer of 64 bits or less is exact in binary128.
+        quad = literal_signed ? (__float128)((int64_t)bits >> shift) : (__float128)(bits >> shift);
         found = literal_width <= 64 ? found : CHECK_FALLTHROUGH_NONE;
     }
     const uint32_t variable_first = right ? first : root + 1;
@@ -2377,6 +2391,7 @@ static bool check_input_fallthrough_comparison(CheckInputReader* reader, uint32_
         .type = common,
         .bits = integer ? (uint64_t)constant.integer & (width == 64 ? UINT64_MAX : (UINT64_C(1) << width) - 1) : 0,
         .real = real,
+        .quad = quad,
         .kind = kind,
         .constant = found,
         .floating = found == CHECK_FALLTHROUGH_LITERAL && floating,
@@ -2387,58 +2402,72 @@ static bool check_input_fallthrough_comparison(CheckInputReader* reader, uint32_
 
 // A floating comparison of a value with a constant, by a comparison's token kind (APFloat's operators: an unordered
 // one is false but for !=).
-static bool check_input_fallthrough_compare_real(uint8_t kind, long double left, long double right)
+static bool check_input_fallthrough_compare_real(uint8_t kind, __float128 left, __float128 right)
 {
     return kind == PARSE_KIND_EQUALEQUAL ? left == right : kind == PARSE_KIND_EXCLAIMEQUAL ? left != right : kind == PARSE_KIND_LESS ? left < right :
            kind == PARSE_KIND_LESSEQUAL ? left <= right : kind == PARSE_KIND_GREATER ? left > right : left >= right;
 }
 
 // checkIncorrectLogicOperator's floating case (`d > 5.0 && d < 3.0`): both constants in the wider of their types
-// (_Float16, float, double or long double; __bf16's and __float128's are unknown), and the value the same at the smallest negative subnormal, each constant,
+// (_Float16, float, double, long double or __float128, which binary128 holds exactly, #1844; __bf16's of two __bf16
+// constants, whose format is no other's part), and the value the same at the smallest negative subnormal, each constant,
 // their mean (computed in that type) and the largest finite value, as clang's APFloat values are; 1, 0 or 2 for unknown.
 static uint32_t check_input_fallthrough_real_tautology(bool either, const CheckFallthroughComparison* one, const CheckFallthroughComparison* two)
 {
     const uint32_t rank_one = one->type == BUSTER_TYPE_FLOAT16 ? 1 : one->type == BUSTER_TYPE_FLOAT ? 2 : one->type == BUSTER_TYPE_DOUBLE ? 3 :
-                              one->type == BUSTER_TYPE_LONG_DOUBLE ? 4 : 0;
+                              one->type == BUSTER_TYPE_LONG_DOUBLE ? 4 : one->type == BUSTER_TYPE_FLOAT128 ? 5 : one->type == BUSTER_TYPE_BF16 ? 6 : 0;
     const uint32_t rank_two = two->type == BUSTER_TYPE_FLOAT16 ? 1 : two->type == BUSTER_TYPE_FLOAT ? 2 : two->type == BUSTER_TYPE_DOUBLE ? 3 :
-                              two->type == BUSTER_TYPE_LONG_DOUBLE ? 4 : 0;
+                              two->type == BUSTER_TYPE_LONG_DOUBLE ? 4 : two->type == BUSTER_TYPE_FLOAT128 ? 5 : two->type == BUSTER_TYPE_BF16 ? 6 : 0;
     const uint32_t rank = rank_one > rank_two ? rank_one : rank_two;
     uint32_t result = 2;
-    if (rank_one != 0 && rank_two != 0)
+    if (rank_one != 0 && rank_two != 0 && (rank != 6 || rank_one == rank_two))
     {
-        const long double first = one->real;
-        const long double second = two->real;
-        long double mean = 0;
-        long double smallest = 0;
-        long double largest = 0;
+        // Each value's comparisons in binary128, which holds every narrower format's values exactly.
+        const __float128 first = rank == 5 ? one->quad : (__float128)one->real;
+        const __float128 second = rank == 5 ? two->quad : (__float128)two->real;
+        __float128 mean = 0;
+        __float128 smallest = 0;
+        __float128 largest = 0;
         if (rank == 1)
         {
             // Two _Float16 values' sum and half of one are exact in long double, and each is rounded once.
-            mean = check_input_fallthrough_half(check_input_fallthrough_half(first + second) / 2.0L);
+            mean = check_input_fallthrough_half(check_input_fallthrough_half(one->real + two->real) / 2.0L);
             smallest = -0x1p-24L;
             largest = 65504.0L;
         }
+        else if (rank == 6)
+        {
+            mean = check_input_fallthrough_brain(check_input_fallthrough_brain(one->real + two->real) / 2.0L);
+            smallest = -0x1p-133L;
+            largest = 0x1.fep127L;
+        }
         else if (rank == 2)
         {
-            const float sum = (float)first + (float)second;
+            const float sum = (float)one->real + (float)two->real;
             mean = sum / 2.0f;
             smallest = -0x1p-149L;
             largest = 0x1.fffffep127L;
         }
         else if (rank == 3)
         {
-            const double sum = (double)first + (double)second;
+            const double sum = (double)one->real + (double)two->real;
             mean = sum / 2.0;
             smallest = -0x1p-1074L;
             largest = 0x1.fffffffffffffp1023L;
         }
-        else
+        else if (rank == 4)
         {
-            mean = (first + second) / 2.0L;
+            mean = (one->real + two->real) / 2.0L;
             smallest = -0x1p-16445L;
             largest = 0x1.fffffffffffffffep16383L;
         }
-        const long double values[5] = { smallest, first, mean, second, largest };
+        else
+        {
+            mean = (first + second) / 2;
+            smallest = -0x1p-16494Q;
+            largest = 0x1.ffffffffffffffffffffffffffffp16383Q;
+        }
+        const __float128 values[5] = { smallest, first, mean, second, largest };
         bool always_true = true;
         bool always_false = true;
         for (uint32_t i = 0; i < 5; i += 1)
@@ -2984,10 +3013,8 @@ static bool check_input_fallthrough_noreturn_type(const CheckInputAttributes* at
 // that typedef's name in turn (`typedef void (*N)(void) __attribute__((noreturn)); N p;`), or through a typeof of a name
 // its specifiers spell (#1844): of a function its GNU attribute marks (`__typeof__(die) *p`, `__typeof__(&die) p`; C11's
 // _Noreturn is its declaration's, not its type's), or of an object or a typedef, whose own walk goes on; a bounded walk.
-static bool check_input_fallthrough_noreturn_object(const CheckInputReader* reader, uint32_t declaration)
+static bool check_input_fallthrough_noreturn_object(const CheckInput* input, const Parser* parser, uint32_t declaration)
 {
-    const CheckInput* input = reader->output;
-    const Parser* parser = reader->parser;
     const uint32_t count = parser->tokens.count;
     bool noreturn = false;
     uint32_t at = declaration;
@@ -3001,7 +3028,7 @@ static bool check_input_fallthrough_noreturn_object(const CheckInputReader* read
         const uint32_t name = close < count && keyword + 3 == close ? keyword + 2 :
                               close < count && keyword + 4 == close && parser->tokens.kinds[keyword + 2] == PARSE_KIND_AMP ? keyword + 3 : count;
         const uint32_t named = name < count && parser->tokens.kinds[name] == PARSE_KIND_IDENTIFIER && input->declarations != NULL ? input->declarations[name] : 0;
-        const bool function = named != 0 && named < count && reader->declaration_kinds[named] == C_BINDING_FUNCTION;
+        const bool function = named != 0 && named < count && input->declaration_kinds[named] == C_BINDING_FUNCTION;
         noreturn = noreturn || (function && check_input_fallthrough_noreturn_type(check_input_attributes_at(input, named)));
         next = next != 0 ? next : named != 0 && named < count && !function ? named : 0;
         at = next;
@@ -3034,8 +3061,8 @@ static bool check_input_fallthrough_noreturn_name(CheckInputReader* reader, uint
     const bool cast = callee < count && parser->tree.roles[callee] == PARSE_ROLE_CLOSE_CAST;
     const uint32_t cast_type = cast ? check_input_token_type_spelling(reader->output, parser, callee, true) : 0;
     return declared || builtin || check_input_fallthrough_trap(reader, callee) ||
-           (!cast && declaration < count && !function && check_input_fallthrough_noreturn_object(reader, declaration)) ||
-           (cast_type != 0 && check_input_fallthrough_noreturn_object(reader, cast_type));
+           (!cast && declaration < count && !function && check_input_fallthrough_noreturn_object(reader->output, parser, declaration)) ||
+           (cast_type != 0 && check_input_fallthrough_noreturn_object(reader->output, parser, cast_type));
 }
 
 // Whether member access `operator` (its `.` or `->`) names a member that GNU's noreturn marks (CheckInput.noreturn_members,

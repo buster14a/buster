@@ -1,0 +1,4 @@
+buster-fixtures v1 checker-warnings
+direct.c	8	0	0	#1393: a falling path after a direct call warns, a noreturn callee does not
+indirect.c	6	0	0	#1393: a call through a pointer object returns unless its type is noreturn
+queries.c	8	0	0	#1393: query builtins return; constant_p visits its operand, object_size does not

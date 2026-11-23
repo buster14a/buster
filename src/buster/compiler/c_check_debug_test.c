@@ -557,6 +557,12 @@ static void check_debug_test_lowering(CheckDebugTestTally* tally, CheckDebugTest
 
 // Each row's file and line by both paths, and the exact path's against pp_presumed; each function's rows within its
 // declaration's and closing brace's lines when its span holds (nothing between them moves a line). Returns the rows.
+// The line of byte `offset` of a span's file, by its line index (pp_line_indexed's count).
+static uint32_t check_debug_test_span_line(const CheckDebugSpan* span, uint32_t offset)
+{
+    return 1 + span->line_ends_before[offset / 64] + (uint32_t)__builtin_popcountll(_bzhi_u64(span->line_end_bits[offset / 64], offset % 64));
+}
+
 static uint64_t check_debug_test_lines(CheckDebugTestTally* tally, CheckDebugTestUnit* unit, Preprocessor* pp, const Parser* parser, const char* what)
 {
     const CheckProgram* program = &unit->selected.program;
@@ -602,9 +608,11 @@ static uint64_t check_debug_test_lines(CheckDebugTestTally* tally, CheckDebugTes
         {
             // Rows from the span's tokens keep within its lines (a row from a file the body includes has another key).
             bool within = true;
+            const uint32_t first_line = check_debug_test_span_line(&span, span.begin - span.base);
+            const uint32_t end_line = check_debug_test_span_line(&span, span.end - span.base);
             for (uint32_t r = first; within && r < first + count; r += 1)
             {
-                within = keys[0][r] != span.key || (lines[0][r] >= span.first_line + span.delta && lines[0][r] <= span.end_line + span.delta);
+                within = keys[0][r] != span.key || (lines[0][r] >= first_line + span.delta && lines[0][r] <= end_line + span.delta);
             }
             check_debug_test_expect(tally, within, "the rows in the function's file are within its lines", detail);
         }
@@ -1478,6 +1486,7 @@ static int run_check_debug_tests(int argc, char** argv)
             check_debug_tier1_inline_test(&tally, directory, &arena);
             check_debug_tier1_header_test(&tally, directory, &arena);
             check_debug_tier1_loop_test(&tally, directory, &arena);
+            check_debug_tier1_vex_test(&tally, directory, &arena);
             check_debug_test_library_main(&tally, directory, &arena);
             check_unwind_test_driver(&tally, directory, &arena);
         }

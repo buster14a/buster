@@ -689,6 +689,37 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .warnings = 2,
     },
     {
+        // A brace initializer's or a compound literal's element is checked for -Warray-bounds only by an operator above
+        // its subscript, as clang's CheckArrayAccess of the full expression sees the initializer list (#2252).
+        .name = "brace elements' array bounds only under an operator",
+        .source =
+            "int a[2]; int fn(int);\n"
+            "struct P { int x, y; };\n"
+            "void f(int i) {\n"
+            "  int x1[2] = { a[5], 0 };\n"
+            "  int x2[2] = { (a[5]), 0 };\n"
+            "  int x3[2] = { -a[5], 0 };\n"
+            "  int x4[2] = { fn(a[5]), 0 };\n"
+            "  int x5[2] = { a[5] ? 1 : 2, 0 };\n"
+            "  int x6[2] = { (char)a[5], 0 };\n"
+            "  int *x7[2] = { &a[5], 0 };\n"
+            "  int x8[2] = { [1] = a[5] };\n"
+            "  int x9[1][1] = { { a[5] } };\n"
+            "  struct P x10 = { a[5], i };\n"
+            "  int x11 = { a[5] };\n"
+            "  int *x12 = (int[]){ a[5] };\n"
+            "  int x13[2] = { a[i ? 5 : 6] };\n"
+            "  int x14[2] = { a[5] , a[6] };\n"
+            "  int x15[2] = { i, a[5] = 1 };\n"
+            "  int x16[2] = { (i, a[5]) };\n"
+            "  static int s = 0; (void)s;\n"
+            "  (void)x1;(void)x2;(void)x3;(void)x4;(void)x5;(void)x6;(void)x7;(void)x8;(void)x9;(void)x10;(void)x11;(void)x12;(void)x13;(void)x14;(void)x15;(void)x16;\n"
+            "}\n"
+            "int g1[2] = { 0 };\n",
+        .warnings = 5,
+        .notes = 4,
+    },
+    {
         .name = "reverse conversions precede source ordered bounds and unused results",
         .source = "int f(int);void h(void){int a[1];(f(1.5)+a[2]),(f(2.5)+a[3]);}\n",
         .warnings = 6,
@@ -1071,8 +1102,6 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
                   "    static int k = (1 << 45, 3); (void)k; int q = (1 << 46, 2); (void)q; }\n",
         .options = { "-Wall" },
         .warnings = 34,
-        // (-c can't compile a comma's static initializer yet.)
-        .syntax_only = true,
     },
     {
         .name = "comma warnings in initializers in clang's order without shift counts",
@@ -1088,6 +1117,7 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .options = { "-Wno-shift-count-overflow" },
         .warnings = 24,
         .c23 = true,
+        // (clang 23's C23 mode can't compile these static initializers: "cannot compile this static initializer yet".)
         .syntax_only = true,
     },
     {
@@ -3336,8 +3366,8 @@ static void check_test_driver_warning_fixtures(CheckTest* test, const char* clan
 
 // Original diagnostic regressions kept as runtime data. Each catalog row is FILE, WARNINGS, ERRORS, NOTES, NAME,
 // separated by tabs; source files and the catalog live together below the checker fixture root.
-static void check_test_driver_warning_catalog(CheckTest* test, const char* clang, const char* executable, const char* directory,
-                                              const char* suite)
+static void check_test_driver_warning_catalog_language(CheckTest* test, const char* clang, const char* executable, const char* directory,
+                                                       const char* suite, bool c23)
 {
     CheckTestFixtures storage = { .storage = arena_reserve(UINT64_C(1) << 26) };
     char path[PATH_MAX];
@@ -3360,7 +3390,7 @@ static void check_test_driver_warning_catalog(CheckTest* test, const char* clang
             {
                 char file[128];
                 char name[512];
-                CheckDriverDefaultWarningFixture fixture = { 0 };
+                CheckDriverDefaultWarningFixture fixture = { .c23 = c23 };
                 int consumed = 0;
                 valid = sscanf(cursor, "%127[^\t]\t%u\t%u\t%u\t%511[^\n]%n", file, &fixture.warnings, &fixture.errors,
                                &fixture.notes, name, &consumed) == 5 && cursor[consumed] == 0 && check_test_fixture_word(file, 127);
@@ -3385,6 +3415,12 @@ static void check_test_driver_warning_catalog(CheckTest* test, const char* clang
     }
     check_test_expect(test, valid && cases != 0, "runtime warning catalog is complete and nonempty");
     arena_release(&storage.storage);
+}
+
+static void check_test_driver_warning_catalog(CheckTest* test, const char* clang, const char* executable, const char* directory,
+                                              const char* suite)
+{
+    check_test_driver_warning_catalog_language(test, clang, executable, directory, suite, false);
 }
 
 // The default warnings' sweep, the driver's longest: a long sweep, one unit per fixture, which its caller doesn't deal.

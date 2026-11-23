@@ -1953,6 +1953,9 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
     const char* result = event->id < BUSTER_ARRAY_LENGTH(check_warning_descriptions) ? check_warning_descriptions[event->id].message : NULL;
     switch (event->kind)
     {
+        case CHECK_WARNING_EVENT_CONSTANT_LOGICAL_OPERAND:
+            result = payload->data != 0 ? "use of logical '||' with constant operand" : "use of logical '&&' with constant operand";
+            break;
         case CHECK_WARNING_EVENT_DUPLICATE_DECLSPEC:
             // _Complex is "complex" in clang's words (DeclSpec::getSpecifierName), as its other errors name it.
             result = payload->name == C_NAME_COMPLEX_C99 ? "duplicate 'complex' declaration specifier" :
@@ -2862,6 +2865,12 @@ static const char* check_driver_warning_note(const Parser* parser, Preprocessor*
             result = check_warning_text(scratch, "use 'static' to give inline function '%.*s' internal linkage", (int)name.length, name.pointer);
             break;
         case CHECK_WARNING_NOTE_USED_HERE: result = "used here"; break;
+        case CHECK_WARNING_NOTE_LOGICAL_BITWISE:
+            result = note->payload.data != 0 ? "use '|' for a bitwise operation" : "use '&' for a bitwise operation";
+            break;
+        case CHECK_WARNING_NOTE_LOGICAL_REMOVE_CONSTANT:
+            result = "remove constant to silence this warning";
+            break;
         case CHECK_WARNING_NOTE_CONFLICTING_PROTOTYPE: result = "conflicting prototype is here"; break;
         case CHECK_WARNING_NOTE_PREVIOUS_DEFINITION: result = "previous definition is here"; break;
         case CHECK_WARNING_NOTE_CONFLICTING_ATTRIBUTE: result = "conflicting attribute is here"; break;
@@ -2951,6 +2960,28 @@ static bool check_driver_warning_events_from(const Parser* parser, Preprocessor*
     {
         return valid;
     }
+#if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
+    // #2850's producer against the diagnostics (BUSTER_TEST_NODE_BODIES_LOG): a warning's place among the diagnostics may
+    // be the unit's end, so its event's token and its notes' say where it is.
+    for (uint32_t i = 0; __builtin_expect(node_bodies_checking, 0) && i < view->count; i += 1)
+    {
+        const CheckWarningEvent* event = view->events + i;
+        char named[48];
+        snprintf(named, sizeof(named), "event id %u kind %u", event->id, event->kind);
+        if (event->token < parser->tokens.count)
+        {
+            node_bodies_check_token(parse_origin(parser, event->token), "a-warning's-event", named);
+        }
+        for (uint32_t n = 0; n < event->note_count && event->note_first + n < view->note_count; n += 1)
+        {
+            const uint32_t note_token = view->notes[event->note_first + n].token;
+            if (note_token < parser->tokens.count)
+            {
+                node_bodies_check_token(parse_origin(parser, note_token), "a-warning's-note", named);
+            }
+        }
+    }
+#endif
     // Only these facts render a type (#992, and #147's function-type attributes); a pass of typeless messages, pragmas or
     // notes needs no spelling rows at all.
     bool renders = false;
@@ -3201,6 +3232,13 @@ static bool check_driver_warning_events_from(const Parser* parser, Preprocessor*
                         pp->diagnostic_arguments |= event->payload.data != 0;
                         pp_diagnose_output_notes_at(pp, disposition, source, boundary, notes, event->note_count, "%s%s", message, suffix);
                         pp->diagnostic_arguments = arguments;
+                    }
+                    else if (event->kind == CHECK_WARNING_EVENT_CONSTANT_LOGICAL_OPERAND)
+                    {
+                        // Construction precedes the completed expression's boolean-conversion checks, which use
+                        // the deferred phase at the same boundary. The event's suborder keeps its notes together
+                        // ahead of those checks and of an enclosing assertion failure.
+                        pp_diagnose_output_notes_phase(pp, disposition, source, boundary, PP_DIAGNOSTIC_DEFERRED, notes, event->note_count, "%s%s", message, suffix);
                     }
                     else
                     {

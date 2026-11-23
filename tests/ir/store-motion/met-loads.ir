@@ -1,0 +1,45 @@
+function (i64) -> i64 {
+b0:
+  %0 = param.i64 0
+  %1 = const.i64 0x00000000000000000000000000000000
+  %2 = br.void b1
+b1:
+  %3 = phi.i64 [%1, b0], [%30, b2]
+  %4 = icmp.i1 %3, %0 ult
+  %5 = cbr.void %4, b2, b3
+b2:
+  %6 = const.i64 0x00000000000000000000000000000003
+  %7 = and.i64 %3, %6
+  %8 = symbol_addr.ptr @3
+  %9 = address.ptr %8 + %7 * 8 offset=0
+  %10 = load.i64 %9 align=8
+  %11 = symbol_addr.ptr @3
+  %12 = address.ptr %11 offset=16
+  %13 = load.i64 %12 align=8
+  %14 = symbol_addr.ptr @3
+  %15 = address.ptr %14 offset=16
+  %16 = add.i64 %13, %10
+  %17 = store.void %15, %16 align=8
+  %18 = symbol_addr.ptr @1
+  %19 = address.ptr %18 offset=4
+  %20 = load.i32 %19 align=4
+  %21 = symbol_addr.ptr @1
+  %22 = load.i64 %21 align=8
+  %23 = symbol_addr.ptr @1
+  %24 = const.i64 0x00000000000000000000000100000003
+  %25 = mul.i64 %22, %24
+  %26 = zext.i64 %20
+  %27 = add.i64 %25, %26
+  %28 = store.void %23, %27 align=8
+  %29 = const.i64 0x00000000000000000000000000000001
+  %30 = add.i64 %3, %29
+  %31 = br.void b1
+b3:
+  %32 = symbol_addr.ptr @1
+  %33 = load.i64 %32 align=8
+  %34 = symbol_addr.ptr @3
+  %35 = address.ptr %34 offset=16
+  %36 = load.i64 %35 align=8
+  %37 = xor.i64 %33, %36
+  %38 = ret.void %37
+}
