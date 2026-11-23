@@ -508,27 +508,33 @@ static void executable_benchmark_unwind(Link* link, Arena* arena)
         const bool entries = way >= 2;
         uint64_t times[BUSTER_EXECUTABLE_BENCHMARK_RUNS];
         uint64_t found = 0;
+        // Each run passes over the atoms enough times for about 4,096 FDEs, so that a small program's few take longer than
+        // the clock's resolution.
+        const uint64_t repeats = fdes != 0 && fdes < 4096 ? 4096 / fdes : 1;
         for (uint32_t run = 0; run < BUSTER_EXECUTABLE_BENCHMARK_RUNS; run += 1)
         {
-            found = 0;
             const uint64_t begin = executable_now();
-            for (AtomId atom = 1; atom < link->atoms.count; atom += 1)
+            for (uint64_t repeat = 0; repeat < repeats; repeat += 1)
             {
-                if (link->atoms.class[atom] == BUSTER_LINK_CLASS_EH_FRAME)
+                found = 0;
+                for (AtomId atom = 1; atom < link->atoms.count; atom += 1)
                 {
-                    // The count either way; then the entries, from the fixups of an atom the vector path reads (all of a
-                    // generated program's), or by the walk.
-                    const uint64_t address = link->atoms.address[atom];
-                    bool walked = false;
-                    const uint32_t count = !entries ? executable_eh_frame(link, atom, exact, &walked)
-                                           : !exact ? (executable_eh_frame_entries(link, atom, table + 2 * found, 0, address) ? link->atoms.fixup_count[atom] : 0)
-                                                    : executable_eh_frame_walk(link, atom, table + 2 * found, 0, address);
-                    found += count != UINT32_MAX ? count : 0;
+                    if (link->atoms.class[atom] == BUSTER_LINK_CLASS_EH_FRAME)
+                    {
+                        // The count either way; then the entries, from the fixups of an atom the vector path reads (all of a
+                        // generated program's), or by the walk.
+                        const uint64_t address = link->atoms.address[atom];
+                        bool walked = false;
+                        const uint32_t count = !entries ? executable_eh_frame(link, atom, exact, &walked)
+                                               : !exact ? (executable_eh_frame_entries(link, atom, table + 2 * found, 0, address) ? link->atoms.fixup_count[atom] : 0)
+                                                        : executable_eh_frame_walk(link, atom, table + 2 * found, 0, address);
+                        found += count != UINT32_MAX ? count : 0;
+                    }
                 }
             }
             times[run] = executable_now() - begin;
         }
-        printf("  unwind tables, %-16s %8.3f ns per FDE (%llu FDEs in %llu atoms)%s\n", names[way], executable_benchmark_median(times, BUSTER_EXECUTABLE_BENCHMARK_RUNS) / (double)fdes,
+        printf("  unwind tables, %-16s %8.3f ns per FDE (%llu FDEs in %llu atoms)%s\n", names[way], executable_benchmark_median(times, BUSTER_EXECUTABLE_BENCHMARK_RUNS) / (double)(fdes * repeats),
                (unsigned long long)fdes, (unsigned long long)frame_atoms, found == fdes ? "" : "  A DIFFERENT COUNT");
     }
     for (uint32_t exact = 0; table != 0 && exact < 2; exact += 1)
