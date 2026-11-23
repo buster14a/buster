@@ -270,25 +270,23 @@ static void check_data_test_string_boundaries(CheckTest* test, TypeTable* types)
     check_test_expect(test, ready, "literal pooling guarded input tails");
     for (uint32_t count = 0; ready && count <= COUNT; count += 1)
     {
+        uint32_t* canonical = NULL;
+        bool matches = check_data_string_pool(types, objects, count, map, BUSTER_ARRAY_LENGTH(map), &fixture.link, &fixture.scratch, &canonical);
+        for (uint32_t i = 0; matches && i < count; i += 1)
         {
-            uint32_t* canonical = NULL;
-            bool matches = check_data_string_pool(types, objects, count, map, BUSTER_ARRAY_LENGTH(map), &fixture.link, &fixture.scratch, &canonical);
-            for (uint32_t i = 0; matches && i < count; i += 1)
+            uint32_t first = i;
+            for (uint32_t j = 0; objects[i].mergeable_string && first == i && j < i; j += 1)
             {
-                uint32_t first = i;
-                for (uint32_t j = 0; objects[i].mergeable_string && first == i && j < i; j += 1)
+                if (objects[j].mergeable_string && objects[j].type == objects[i].type && objects[j].alignment_log2 == objects[i].alignment_log2 &&
+                    objects[j].literal_size == objects[i].literal_size && memcmp(objects[j].literal_bytes, objects[i].literal_bytes, objects[i].literal_size) == 0)
                 {
-                    if (objects[j].mergeable_string && objects[j].type == objects[i].type && objects[j].alignment_log2 == objects[i].alignment_log2 &&
-                        objects[j].literal_size == objects[i].literal_size && memcmp(objects[j].literal_bytes, objects[i].literal_bytes, objects[i].literal_size) == 0)
-                    {
-                        first = j;
-                    }
+                    first = j;
                 }
-                matches = (canonical != NULL ? canonical[i] : i) == first;
             }
-            check_test_expect(test, matches, "pooling matches the independent first-equal oracle at every batch tail, length and alignment");
-            arena_pop_to(&fixture.scratch, 0);
+            matches = (canonical != NULL ? canonical[i] : i) == first;
         }
+        check_test_expect(test, matches, "pooling matches the independent first-equal oracle at every batch tail, length and alignment");
+        arena_pop_to(&fixture.scratch, 0);
     }
     if (ready)
     {

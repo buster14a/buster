@@ -15,8 +15,9 @@ requirements. [Command index](README.md).
   `unwind_tier0_frame_tails` with a function's tail calls' teardowns, #147,
   each remembered and restored around its jump, and Tier 1's early returns'
   as such teardowns before their rets, #177);
-  `unwind.c` emits original CIE/FDE contributions with scalar/vector
-  twins, a pair per function or with `UnwindOutput.shared` one CIE for the
+  `unwind.c` emits original CIE/FDE contributions, by the vector writer and
+  the exact one for the lanes it leaves (a frame pointer, tail calls, open frames
+  and row programs), a pair per function or with `UnwindOutput.shared` one CIE for the
   batch, and for Tier 1's open frames (`UnwindFunction.open`, #177) no epilogue
   at the end, each return a tail, and row programs (#1056: resolved frame rows,
   `unwind_rows_scalar`, the fixed writer's bytes for a fixed shape's rows).

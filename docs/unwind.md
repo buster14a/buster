@@ -259,8 +259,8 @@ pairs of more functions), and an executable's index takes one CIE and its FDEs
 in its vector path. A shared batch is the pairs' less 40 bytes per function but
 the first.
 
-The scalar writer appends the CIE and instructions independently. The vector
-writer classifies eight descriptors, forms CFA LEB bytes and expands original
+The exact writer appends a function's instructions one by one after the CIE's
+bytes (`unwind_cie`, which every path copies). The vector writer classifies eight descriptors, forms CFA LEB bytes and expands original
 templates of FDEs with byte permutations. Its 384 shapes cover 64 save masks
 and no allocation or one of five CFA LEB widths. The advance opcodes, deltas,
 FDE length, CIE pointer, function range and CFA bytes fill the templates' holes.

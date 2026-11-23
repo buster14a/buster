@@ -107,11 +107,10 @@ static int run_unwind_benchmark(int argc, char** argv)
     Arena input = arena_reserve(1ull << 32);
     Arena temporary = arena_reserve(64ull << 20);
     Tier0Function* functions = BUSTER_ARENA_PUSH_ARRAY(&input, Tier0Function, count);
-    // The vector path's descriptions and pairs, the published path's with one CIE, and a third output the published
-    // path's descriptions take.
-    UnwindFunction* descriptions[3];
-    UnwindOutput output[3] = { 0 };
-    for (uint32_t way = 0; way < 3; way += 1)
+    // The vector path's descriptions and pairs, and the published path's with one CIE.
+    UnwindFunction* descriptions[2];
+    UnwindOutput output[2] = { 0 };
+    for (uint32_t way = 0; way < 2; way += 1)
     {
         descriptions[way] = BUSTER_ARENA_PUSH_ARRAY(&input, UnwindFunction, count);
         output[way].capacity = (uint64_t)count * 192;

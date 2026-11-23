@@ -66,7 +66,7 @@ static bool emitted_test_expect(EmittedTest* test, bool condition, const char* c
     return condition;
 }
 
-// A descriptor's FDE written alone by the exact writer (`shared` with one CIE), into `bytes`: its size, 0 if refused.
+// A descriptor's FDE written alone by unwind_write (`shared` with one CIE), into `bytes`: its size, 0 if refused.
 static uint64_t emitted_test_write(const UnwindFunction* function, bool shared, uint8_t* bytes, uint64_t capacity)
 {
     uint32_t location = 0;

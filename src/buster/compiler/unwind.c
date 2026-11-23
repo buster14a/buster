@@ -19,7 +19,8 @@
 // keep the whole batch as one EH_FRAME atom (an object's .eh_frame holds its atoms as one section, whose CIEs a linker's
 // walk would otherwise count by the function). No terminator is added.
 //
-// The exact writer independently appends the CIE and CFI. The vector path gathers eight descriptors, forms their CFA
+// The exact writer appends a function's CFI instruction by instruction, after the CIE's bytes (unwind_cie). The vector
+// path gathers eight descriptors, forms their CFA
 // ULEBs and shape indices in lanes, then expands original templates of FDEs with byte permutations. Fourteen PC
 // deltas and their smallest-form opcodes, the FDE length, function range, CIE pointer and five CFA bytes are the holes.
 // Byte compaction drops each advance's unused operand bytes; the CIE is the same bytes for every function (unwind_cie).

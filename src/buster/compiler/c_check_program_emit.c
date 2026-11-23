@@ -3873,7 +3873,7 @@ static UnwindError check_asm_unit_frame(uint32_t saved, uint32_t frame, uint32_t
 // check_data_prepare selects them), its aliases and ifuncs (#147), its literals and whatever has no external linkage
 // but a weakref's own symbol, a weak reference to another's name (check_program_alias_external). The emission's column
 // (check_program_emit_lanes) and check_program_access's share it. The objects it defines are found among the tokens
-// that define or tentatively define, few of a unit's (#592), 64 at a time (the scalar path, `scalar`, takes every token).
+// that define or tentatively define, few of a unit's (#592), 64 at a time.
 static void check_program_object_access(const CheckProgram* program, uint8_t* access, uint8_t* defined)
 {
     const CheckInput* input = program->input;
