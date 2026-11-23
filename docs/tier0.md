@@ -1377,9 +1377,10 @@ code reaches it (`BUSTER_TIER0_ACCESS_*`):
 - **How:** fusion keys an entry of a symbol that isn't direct by one of Tier 0's own kinds, past the stream's
   (`BUSTER_TIER0_KIND_GOT`, `_LOCAL_EXEC` and `_INITIAL_EXEC`, four each, in the global kinds' order:
   `tier0_access_kind`). Their templates load the slot into R0, the register free above the operand (beside a floating
-  one too), then make the access through it. The vector path finds a block's global entries by compares, reads their
-  symbols' accesses from the column (they are few, as the calls are), and keys each access's lanes by a `vpermb` of its
-  table; without the column it does nothing. A template's reference kind and field are in its summary (`fixup_kind`,
+  one too), then make the access through it. The vector path lists the global entries of each 64 by compares, reads
+  their symbols' accesses from the column an entry at a time in a loop of their own before fusion's blocks
+  (`tier0_vector_global_accesses`, #2874), and keys each access's lanes in a block by a `vpermb` of its table; without
+  the column it does nothing. A template's reference kind and field are in its summary (`fixup_kind`,
   `fixup_field`), so a thread-local's address takes its `TPOFF32` in an immediate.
 - **No fusions:** these kinds take no fused local or constant, whose value would need a second free register. A constant
   stored through the GOT could be an immediate, but its properties would be a row past the vector fusion's sixteen,
@@ -2396,8 +2397,8 @@ instructions and instructions per cycle medians of 3 rounds under `perf stat`:
   - inline assembly, `setjmp` and atomics;
   - `switch` needs no entry of its own: the checker's lowering dispatches it by compares or, where clang -O0 would,
     through a jump table and `JUMP_INDIRECT` to its cases' labels (`docs/c-checker.md`, "Switches").
-- **The access column's lookups** are an entry at a time for the global entries of a block. A gather from a column
-  padded for it would take a block's at once, if real code shows them to cost.
+- **The access column's lookups** are an entry at a time for the listed global entries, in a loop of their own (#2874).
+  A gather from a column padded for it would take a block's at once, if real code shows them to cost.
 - **The rest of the time:** emission, which is about at its design's cost (a line, a `vpermb`, a blend and a store
   per entry); the call emitter, an entry at a time; and selection's gather from a table larger than L1.
 - **The immediates' choice** costs about 7 cycles per entry: the application about 5 (its loads of the records more
