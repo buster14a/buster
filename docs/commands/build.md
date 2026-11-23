@@ -124,6 +124,8 @@ date. Release is for the product and every timing, Develop for edits and tests
   the edit loop's configuration. Its executable runs the compile path about 1%
   to 2% slower than Release's, writes the same outputs, and has lines, not
   variables, for a debugger. The bake and the canary check run on it too.
+  With `BUSTER_SELF_BUILT`, the units it names are the previous stage's,
+  compiled by the compiler itself ([Self-built units](#self-built-units)).
 
 The flags differ from a direct clang command only in the build's mechanics:
 CMake's depfile options, `CMAKE_INTDIR`, a definition no source reads, the
@@ -253,6 +255,8 @@ a preset's tree with `cmake --fresh --preset NAME`, or build it with
 | `BUSTER_TOOLCHAIN` | `ci` | `build.sh`'s alone: `ci` builds with CI's clang, CMake and Ninja ([The toolchain](#the-toolchain)), staged once where `PATH` hasn't them; `path` with `PATH`'s as found |
 | `BUSTER_PARALLEL_CODEGEN` | `auto` | CHECKER's and BACKEND's Release native code (a sanitizer build's too), and Develop's `main.c` units, in parallel parts (below): `auto` where the tools are, `1` requires them, `0` never |
 | `BUSTER_RELEASE_PARTS` | `0` | `1` builds Release's `main.c` units in parts before the optimizer, as Develop's, for a short edit with Release's optimization: a `-parts` tree, outside the 9700X job's floor ([Release in parts](#release-in-parts)) |
+| `BUSTER_SELF_BUILT` | none | `tests`, or units' file names: Develop compiles them with the previous stage, at Tier 1 ([Self-built units](#self-built-units), #2630); Release and Debug stay clang's |
+| `BUSTER_SELF_COMPILER` | the tree's Release executable | `BUSTER_SELF_BUILT`'s previous stage, an absolute path; never the Develop executable the build makes |
 
 An empty value is the default, but for `BUSTER_DEBUG_INFO` and `BUSTER_LINKER`,
 which reject it; the incompatible combinations fail as they always have
@@ -632,7 +636,10 @@ guarded. A root that is also preprocessed as a standalone input must keep its
 complete source when `BUSTER_UNIT` is undefined.
 
 The build regression's `--ownership-only [COMPILER]` mode reads all active
-repository paths in the selected compiler's Ninja graph. Test/benchmark/measure
+repository paths in the selected compiler's Ninja graph: each unit's record is
+that of the object the configuration's link takes, its object library's
+compile or, for a unit `BUSTER_SELF_BUILT` names, the previous stage's
+(`Develop/self/NAME.c.o`, [Self-built units](#self-built-units)). Test/benchmark/measure
 names, fixture names and explicit nonstandard roots seed a literal quoted-include
 closure. Every active descendant is checked regardless of suffix, extension or
 directory, including headers, `.inc` files and generated fixture data. The
@@ -1242,6 +1249,94 @@ there the stand-in's symbol is checked), that both executables write the same ob
 function appended to `c_check_input.c` optimizes one part of the checker's unit
 and one before its first line a few, that a header's time alone optimizes none,
 and that the executable after those edits is a clean build's, byte for byte.
+
+## Self-built units
+
+`BUSTER_SELF_BUILT` has Develop compile the units it names with the compiler
+itself (#2630, [A faster stage 1 build](../stage1-build-design.md)'s lever 6):
+a previous stage, a clang-built executable, compiles them at Tier 1 in place
+of clang's front end, optimizer and parts. It is for the units whose speed a
+compile doesn't depend on:
+
+- **`tests`** names them (`BUSTER_SELF_BUILT_TESTS` in
+  `cmake/BusterSettings.cmake`). They are `main.c`'s units of the tests and
+  tools (the backend's, the check builtins', the types', the x86's, the
+  assembler's, the link's and the executable's), and `floors_benchmark.c`,
+  `tier1_model_measure.c` and the two test units.
+  - **No compile runs their code.** The driver's, the front end's, the dynamic
+    PIEs' (the linker's home) and the checker's units call into them only for
+    their own commands (`main_unit_x86` and the others, and the test units'
+    entry points), as the Release objects' symbols show.
+  - **Their commands** are the tests, the benchmarks Develop keeps, the
+    measurements and the tools (`assemble`, `link-foreign`, `interpret-c`,
+    `reduce-ir`).
+- **Other units** by their file names, separated by spaces or commas, `tests`
+  among them: any unit Develop builds, but not the benchmark units it leaves
+  out. The compile path's units are allowed too. The design measured the
+  checker's unit self-built as the fastest edit loop (1.75 s for the unit),
+  for a compile path 3.4 times slower.
+- **Where it applies:** Develop alone. Release and Debug compile every unit
+  with clang, so the product that the 9700X job builds and measures, a
+  `BUSTER_PGO` tree (Release alone) and every timing stay clang's. A
+  sanitizer or fuzzing tree, whose Develop is instrumented, refuses the
+  setting, as configuring does an unknown name.
+
+**The previous stage** is `BUSTER_SELF_COMPILER`, an absolute path, or by
+default the tree's own Release executable,
+`build/cmake/VARIANT/Release/compiler`. It is never the Develop executable the
+build makes: `build.sh` refuses that, so that a wrong edit can't compile the
+next build.
+
+- **Develop's graph reads the file but has no rule for it.** `build.sh` builds
+  Release first where it is missing. An edit's units are then compiled by the
+  Release built before the edit, and a new Release (`./build.sh --config
+  Release`) compiles them again at the next Develop build.
+- **A failing test of a self-built unit can be the previous stage's code** and
+  not the edit. Run it again on a clang-built executable (Release, or Develop
+  with the setting off) before believing it. #3424, a Tier 1 miscompile of a
+  struct field, was found this way.
+
+**How they compile** (`CMakeLists.txt`'s `buster_self_unit`): the previous
+stage's `--tier1 -c` of each unit into `Develop/self/NAME.c.o`, which
+Develop's link takes in place of the unit's clang object or parts.
+
+- **The flags** are the units' less clang's warnings (`-Wall -Werror`, which
+  Release and CI keep checking), the start order's `-ffunction-sections` and
+  the debug information.
+- **Absolute paths**, which its dependency file names for Ninja. So `__FILE__`,
+  which `assert` reads, is absolute, where clang's `-fmacro-prefix-map` makes
+  it relative: the compiler doesn't follow that option.
+- **The headers of the clang that builds the tree:** `BUSTER_CLANG_RESOURCE_DIR`
+  is its resource directory, where the compiler would take `/usr/lib/clang`'s
+  newest version.
+- **That clang's predefined macros** for the units' flags and `-O3`
+  (`Develop/self/predefines.h`, passed as `--predefines`). The compiler's own
+  differ in clang's patch release (`__clang_patchlevel__`) and in
+  `__BUSTER__`, and the integer builtins' tests compare the macros they were
+  compiled with to their clang oracle's (#2630's step 1).
+- **Each compile waits for its own inputs alone** (CMake 3.27's
+  `DEPENDS_EXPLICIT_ONLY`), not for clang's units, and takes the previous
+  stage's lanes as its bodies pay for them.
+
+The configure step names the units and the previous stage (`Develop's units by
+the previous stage (PATH): ...`), and `build.sh`'s report counts them among
+the units compiled. Develop's compile commands (`build/compile_commands.json`)
+have no entry for them, as for the benchmark units Develop leaves out.
+
+**Checks.** `build-regression --self-built-only` (and the full regression)
+builds Develop with `BUSTER_SELF_BUILT=tests` beside Release and checks that:
+
+- every unit the configuration names is compiled by the previous stage, and the
+  backend's unit has no parts;
+- Release's executable doesn't change, and both executables write the same
+  objects at both tiers;
+- `test-link`, `test-types` and `test-emission-metadata` pass on the hybrid,
+  and so does the ownership check, by the previous stage's dependency records;
+- a build with nothing changed runs nothing, `differential.c`'s time
+  recompiles the backend's unit alone, and a new previous stage recompiles
+  every unit;
+- the Develop executable can't be its own previous stage, and a name Develop
+  doesn't build fails configuring.
 
 ## A profile-guided build
 

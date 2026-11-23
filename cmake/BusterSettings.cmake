@@ -289,6 +289,41 @@ function(buster_settings_normalize)
         buster_settings_fail("BUSTER_RELEASE_PARTS=1 requires the units in parts: BUSTER_PARALLEL_CODEGEN not 0, and no sanitizer, fuzzing, PGO or BUSTER_BUILD_DEFINES")
     endif()
 
+    # The units Develop compiles with a previous stage of the compiler (#2630; docs/commands/build.md, "Self-built
+    # units"): none by default; `tests`, BUSTER_SELF_BUILT_TESTS's; or the file names of the units Develop builds,
+    # separated by spaces or commas, `tests` among them. Release and Debug stay clang's. A sanitizer tree's Develop
+    # compiles every unit instrumented, which the previous stage's objects wouldn't be, and a BUSTER_PGO tree has no
+    # Develop. BUSTER_SELF_COMPILER is the previous stage: an absolute path, or empty for the tree's own Release
+    # executable, which CMakeLists.txt names.
+    string(REGEX MATCHALL "[^ \t\r\n,]+" self_entries "${BUSTER_SELF_BUILT}")
+    set(self_names "")
+    foreach(source IN LISTS BUSTER_SOURCES)
+        get_filename_component(name "${source}" NAME)
+        list(APPEND self_names "${name}")
+    endforeach()
+    set(self_built "")
+    foreach(entry IN LISTS self_entries)
+        if(entry STREQUAL "tests")
+            list(APPEND self_built ${BUSTER_SELF_BUILT_TESTS})
+        elseif(NOT entry STREQUAL "none")
+            if(NOT entry IN_LIST self_names OR entry IN_LIST BUSTER_DEVELOP_ON_DEMAND)
+                buster_settings_fail("BUSTER_SELF_BUILT's ${entry} isn't `tests`, `none` or the file name of a unit Develop builds")
+            endif()
+            list(APPEND self_built "${entry}")
+        endif()
+    endforeach()
+    list(REMOVE_DUPLICATES self_built)
+    if(self_built AND (NOT sanitizer STREQUAL "none" OR fuzz OR pgo))
+        buster_settings_fail("BUSTER_SELF_BUILT builds Develop's units with the previous stage, which a sanitizer, fuzzing or BUSTER_PGO tree doesn't take")
+    endif()
+    set(self_compiler "${BUSTER_SELF_COMPILER}")
+    if(NOT self_compiler STREQUAL "")
+        buster_settings_plain("${self_compiler}" plain)
+        if(NOT self_compiler MATCHES "^/" OR NOT plain)
+            buster_settings_fail("BUSTER_SELF_COMPILER must be an absolute path without quotes, backslashes, newlines or semicolons")
+        endif()
+    endif()
+
     set(bake 1)
     if("${BUSTER_BAKE}" STREQUAL "0")
         set(bake 0)
@@ -326,6 +361,8 @@ function(buster_settings_normalize)
     set(buster_parallel_codegen ${parallel_codegen} PARENT_SCOPE)
     set(buster_parallel_codegen_required ${parallel_codegen_required} PARENT_SCOPE)
     set(buster_release_parts_required ${release_parts} PARENT_SCOPE)
+    set(buster_self_built ${self_built} PARENT_SCOPE)
+    set(buster_self_compiler "${self_compiler}" PARENT_SCOPE)
     set(buster_variant "${variant}" PARENT_SCOPE)
 endfunction()
 
@@ -505,6 +542,15 @@ set(BUSTER_DEVELOP_ON_DEMAND
 # build's unit time (387.4 of 1,324.0 s with 4 jobs), which the vector rows' builders and the fuzz jobs wait for.
 set(BUSTER_SANITIZER_ON_DEMAND ${BUSTER_DEVELOP_ON_DEMAND})
 list(REMOVE_ITEM BUSTER_SANITIZER_ON_DEMAND c_lexer_benchmark.c)
+
+# BUSTER_SELF_BUILT=tests (#2630): the units Develop builds whose code no compile runs. main.c's units that are the
+# homes of what a compile calls (the driver's, the front end's, the dynamic PIEs' linker and the checker's) aren't
+# among them; these hold the tests, the benchmarks Develop keeps, the measurements and the tools (assemble,
+# link-foreign, interpret-c, reduce-ir), whose code the previous stage then compiles.
+set(BUSTER_SELF_BUILT_TESTS
+    main_unit_backend.c main_unit_check_builtins.c main_unit_types.c main_unit_x86.c main_unit_assembler.c
+    main_unit_link.c main_unit_executable.c floors_benchmark.c tier1_model_measure.c emission_metadata_test.c
+    c_check_target_feature_emission_test.c)
 
 # The linker for the executable's link alone (compilation and IR capture keep their flags), from BUSTER_LINKER, into
 # buster_linker_flags (--ld-path=PATH, or none for clang's default) and buster_linker (its description).
