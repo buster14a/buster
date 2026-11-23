@@ -137,8 +137,8 @@ function must verify with dominance.
 
 ## Loop store motion (#3309)
 
-`ir_store_motion.c` is the pass `--tier1`'s `storemotion` item runs on the
-lowered function, before promotion: a loop's loads of one of the unit's own
+`ir_store_motion.c` is the pass `--tier1-passes=+storemotion` runs on the
+lowered function, before promotion (off by default): a loop's loads of one of the unit's own
 globals read a private slot that the preheader fills and each of the loop's
 stores of the global also writes, and promotion makes the slot a register's
 value. Every store stays where it was. [The design](../tier1-store-motion.md)

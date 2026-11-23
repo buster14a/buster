@@ -533,13 +533,15 @@ struct CheckEmitGrowth
 // Value numbering with memory (#2718, ir_optimize_memory.c), off by default; past the driver's own bits
 // (c_checker_driver.c's BUSTER_CHECK_DRIVER_PASS_GVN and INLINE).
 #define BUSTER_CHECK_TIER1_PASS_MEMORY 2048u
-// Loop store motion (#3309, ir_store_motion.c): a loop's globals read from registers, before promotion; on by default.
+// Loop store motion (#3309, ir_store_motion.c): a loop's globals read from registers, before promotion; off by default
+// (docs/tier1-store-motion.md's MEASUREMENTS: it changes no code of sqlite3.c's, Lua's or musl's, and costs a --tier1
+// compile of sqlite3.c 0.27% more instructions).
 #define BUSTER_CHECK_TIER1_PASS_STORE_MOTION 4096u
 #define BUSTER_CHECK_TIER1_PASSES_DEFAULT \
-    (BUSTER_CHECK_TIER1_PASS_SCCP | BUSTER_CHECK_TIER1_PASS_DCE | BUSTER_CHECK_TIER1_PASS_CFG | BUSTER_CHECK_TIER1_PASS_MERGE | BUSTER_CHECK_TIER1_PASS_VECTORS | BUSTER_CHECK_TIER1_PASS_STORE_MOTION)
+    (BUSTER_CHECK_TIER1_PASS_SCCP | BUSTER_CHECK_TIER1_PASS_DCE | BUSTER_CHECK_TIER1_PASS_CFG | BUSTER_CHECK_TIER1_PASS_MERGE | BUSTER_CHECK_TIER1_PASS_VECTORS)
 #define BUSTER_CHECK_TIER1_PASSES_ALL                                                                                                                                  \
     (BUSTER_CHECK_TIER1_PASSES_DEFAULT | BUSTER_CHECK_TIER1_PASS_LICM | BUSTER_CHECK_TIER1_PASS_SROA | BUSTER_CHECK_TIER1_PASS_VECTORIZE | BUSTER_CHECK_TIER1_PASS_UNROLL | \
-     BUSTER_CHECK_TIER1_PASS_MEMORY)
+     BUSTER_CHECK_TIER1_PASS_MEMORY | BUSTER_CHECK_TIER1_PASS_STORE_MOTION)
 // The loop vectorizer's counts (--tier1-report), IrVectorizeResult's: the innermost loops examined, those vectorized,
 // by their widest vector (16, 32 and 64 bytes), their reductions and run-time overlap tests, then the refused loops by
 // IrVectorizeRefusal.

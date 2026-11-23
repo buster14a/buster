@@ -3,10 +3,12 @@
 //
 // Loop store motion (#3309). Include after ir.c, dominators.c and ir_optimize_unroll.c.
 //
-// A loop that updates a global keeps it in memory: each iteration loads what the last one stored, so the loop runs at
-// the store's forwarding latency, whatever its arithmetic costs (`g_a += i; g_b ^= g_a;` took 5.8 cycles an iteration
-// by either tier). This pass runs on the lowered function, before SSA promotion, and gives each such global's bytes (a
-// key: a symbol, a constant offset and a scalar type) a private stack slot of the function for the loop:
+// A loop that updates a global keeps it in memory: each iteration loads what the last one stored. Where the processor
+// doesn't forward that store for nothing, the loop runs at the forwarding's latency whatever its arithmetic costs: a
+// double's on the 9700X (`g_x = g_x * c + d` took 15.6 cycles an iteration, and 6.6 with the pass), and an integer's
+// on the Xeon the issue was found on, though not on the 9700X. This pass runs on the lowered function, before SSA
+// promotion, and gives each such global's bytes (a key: a symbol, a constant offset and a scalar type) a private stack
+// slot of the function for the loop:
 // - the loop's preheader loads the key and stores the value in the slot;
 // - each of the loop's loads of the key reads the slot instead;
 // - each of the loop's stores of the key stays as it is, and the value is stored in the slot too.
@@ -35,8 +37,9 @@
 //
 // Loads through other addresses need no rule: memory is always current. That is why the stores stay. Sinking them to
 // the loop's exits would also need every load in the loop to be of a known object, an exit block for each edge and a
-// flag for the paths that stored nothing (a store the source didn't make is a data race the compiler added);
-// docs/tier1-store-motion.md has the measurement that decided against it.
+// flag for the paths that stored nothing (a store the source didn't make is a data race the compiler added). It is a
+// follow-up for the loops whose every access is known: docs/tier1-store-motion.md's MEASUREMENTS has what the stores
+// cost on the 9700X, and why the pass is off by default.
 //
 // The scans over every instruction are vector code: the symbols' filter, which lets a function that names no listed
 // symbol go after one pass over its opcodes, and the classification, which compresses the loads, stores and barriers

@@ -181,7 +181,7 @@ LICM on vector and mask values alone), `vectorize` (#2743's loop vectorizer,
 unrolling](tier1-loop-unrolling.md)), `storemotion` (#3309's [loop store
 motion](tier1-store-motion.md), before promotion), `gvn` (as `--tier1-gvn`),
 `inline` (`-inline` as `--tier1-no-inline`), or `all`. The default is SCCP, dead-code
-removal, CFG cleanup, its merges, the inlining, `vectors` and `storemotion`. The restricted
+removal, CFG cleanup, its merges, the inlining and `vectors`. The restricted
 value numbering runs before promotion; LICM runs after if-conversion, before
 the optimizer, which cleans up after it, then the loop vectorizer, then the
 unroller. Explicit `+gvn` or `+licm` runs that pass on every value instead of
@@ -207,7 +207,7 @@ loop was seen: the natural loops (`loops`), how many were `unrolled`, each
 refusal's count by its name (`outer`, `irreducible`, `preheader`, `latch`,
 `exit`, `call`, `control`, `stack`, `test`, `predicate`, `bound`, `induction`,
 `size`, `growth`), and the main loops' `copies`, the `reductions` they split
-and the instructions they `added`. With `storemotion`, a `tier1-store-motion`
+and the instructions they `added`. With `+storemotion`, a `tier1-store-motion`
 line follows wherever the pass looked at a loop: the loops that store to one of
 the unit's distinct objects (`loops`), each outcome's count (`moved`,
 `irreducible`, `barrier`, `preheader`, `unknown-store`, `many`, `no-key`), the

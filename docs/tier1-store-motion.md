@@ -1,22 +1,27 @@
 # Tier 1 loop store motion (#3309)
 
-Status: implemented, `src/buster/compiler/ir_store_motion.c`, and part of
-`--tier1`'s default pipeline; `--tier1-passes=-storemotion` turns it off. `test-ir-store-motion` and
-`tests/driver/tier1_store_motion.c` are its tests
+Status: implemented, `src/buster/compiler/ir_store_motion.c`, and **off by
+default**: `--tier1-passes=+storemotion` turns it on, and so does `+all`.
+`test-ir-store-motion` and `tests/driver/tier1_store_motion.c` are its tests
 ([the IR optimization guide](commands/ir-optimization.md#loop-store-motion-3309)).
 The issue is [#3309](https://github.com/buster14a/buster/issues/3309).
 MEASUREMENTS below has the 9700X's record and what it decided.
 
-**In one paragraph.** A loop that updates a global kept it in memory under
-`--tier1`: each iteration loaded what the last one stored, so the loop ran at
-the store's forwarding latency whatever its arithmetic cost, and Tier 1 gained
-nothing over Tier 0 on it. This pass runs on the lowered function, before SSA
-promotion. For each such global it adds one load before the loop and a private
-stack slot: the loop's loads of the global read the slot, and each of its
-stores also stores its value in the slot. Promotion then turns the slot into
-values and phis, as it does a local variable's. The loop's loads are gone, and
-its stores write a register's value. Every store the source makes still
-happens where it did, so memory is never stale and no store is added.
+**In one paragraph.** A loop that updates a global keeps it in memory under
+`--tier1`: each iteration loads what the last one stored. This pass runs on
+the lowered function, before SSA promotion. For each such global it adds one
+load before the loop and a private stack slot: the loop's loads of the global
+read the slot, and each of its stores also stores its value in the slot.
+Promotion then turns the slot into values and phis, as it does a local
+variable's. The loop's loads are gone, and its stores write a register's
+value. Every store the source makes still happens where it did, so memory is
+never stale and no store is added. On the 9700X a loop over a `double` global
+runs 2.4 times as fast with it. A loop over integer globals runs as it did,
+because there the trip through memory was costing nothing: the issue's 7 times
+was a cloud Xeon's. And of `sqlite3.c`'s, Lua's and musl's loops the pass
+changes one, which runs once at start-up: their loops over globals call
+functions. A `--tier1` compile of `sqlite3.c` costs 0.4% more with it. So it
+is opt-in.
 
 ## What a loop keeps in memory, and why the stores stay
 
@@ -39,9 +44,11 @@ cmp    %edi,%eax
 jl     ...
 ```
 
-On the left each iteration's `add` waits for the store before it to forward:
-the dependency goes through memory. On the right it is `add` and `xor` on
-registers, and the two stores are off the dependency chain.
+On the left each iteration's `add` reads what the store before it wrote: the
+dependency goes through memory. On the right it is `add` and `xor` on
+registers, and the two stores are off the dependency chain. What that is worth
+depends on the processor and on the value's type (MEASUREMENTS): nothing for
+these integers on the 9700X, 2.4 times for a `double`.
 
 clang -O2 also removes the stores: it loads before the loop and stores once
 after it. This pass doesn't, for three reasons.
@@ -58,7 +65,8 @@ after it. This pass doesn't, for three reasons.
   or a compare for each key at each exit.
 - **The exits are left alone.** No block is added and no phi's entries change.
 
-What the stores cost is in MEASUREMENTS. A follow-up can sink them where every
+What the stores cost is in MEASUREMENTS: on the 9700X they are what is left of
+the gap to clang on the integer kernel. A follow-up can sink them where every
 access in the loop is known; this pass's keys and slots are what it would
 start from.
 
@@ -241,8 +249,9 @@ time) and a loop's keys (its accesses of listed symbols, a few).
   definitions on random columns at every length to 200, and the entry point
   with arenas of every short size.
 - **`tests/driver/tier1_store_motion.c`**: 21 functions of loops over
-  globals (23 loops that store to one, with `main`'s), compiled by clang -O0 and by `--tier1 --tier1-strict --verify` with the pass
-  and without it on both host paths; the programs print the same lines. The
+  globals (23 loops that store to one, with `main`'s), compiled by clang -O0
+  and by `--tier1 --tier1-strict --verify` with the pass (`+storemotion`) and
+  without it on both host paths; the programs print the same lines. The
   report's counts are pinned, and `objdump` finds the issue's kernel with four
   references to its two globals with the pass and five without. Then 29
   declarations, each in a unit whose one loop updates the object: the list
@@ -256,7 +265,120 @@ time) and a loop's keys (its accesses of listed symbols, a few).
 
 ## MEASUREMENTS
 
-Pending: the 9700X's record goes here with the pull request.
+On the 9700X under the lock, 2026-11-23: a Release build of `f16b0523a`, the
+pull request's head at the time, with the pass on by default as it then was.
+"Without the pass" is that compiler with `--tier1-passes=-storemotion`. The
+record, with every run, script and log, is buster-performance's
+[`store-motion-3309-2026-11-22`](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/store-motion-3309-2026-11-22).
+
+### Four kernels
+
+Each is one `noinline` function of one loop, run 200,000,000 times, with its
+state in globals:
+
+- **k1**, the issue's: `g_a += i; g_b ^= g_a;` (two `long`s);
+- **k2**: k1 and `g_arr[i & 15] += 1;`
+- **k3**: `g_sum += p[i & 1023]; g_hash = g_hash * 31 + p[i & 1023];`, with
+  `p` a parameter, which a pass that sinks the stores must refuse;
+- **k4**: `g_x = g_x * 1.0000001 + 0.5; g_y += g_x; s_n += i & 3;` (two
+  `double`s and a static `long`).
+
+Each of the compiler's builds was linked at four placements: 0, 16, 32 and 48
+bytes of padding before the function, the places a 16-aligned function takes
+in a 64-byte line. Placement alone moved k1's loop from 1.36 to 2.00 cycles an
+iteration, more than the pass does, so one placement's reading decides
+nothing. The table has cycles an iteration: the least and the most of the four
+placements' medians (5 rounds each, CPU 2, `perf stat`'s user cycles), or the
+one figure where they agree to three decimals.
+
+| Build | k1 | k2 | k3 | k4 |
+| --- | ---: | ---: | ---: | ---: |
+| Tier 0 | 2.001 to 3.001 | 3.001 | 4.002 | 15.002 |
+| `--tier1` without the pass | 1.364 to 2.001 | 2.185 | 4.001 | 15.597 to 15.605 |
+| `--tier1` with it | 1.365 to 1.408 | 2.147 | 4.001 | 6.571 to 6.587 |
+| `--tier1 --tier1-passes=+all` | 1.275 to 1.276 | 1.950 | 4.001 | 6.001 |
+| clang -O2 | 1.877 | 1.516 | 3.001 | 6.001 |
+| clang -O2 without unrolling or vectors | 1.001 | 1.473 | 3.003 | 6.001 |
+| Instructions an iteration, without the pass and with it | 9 and 7 | 15 and 13 | 14 and 12 | 17 and 16 |
+
+- **Integers: the trip through memory costs the 9700X nothing.** k3 takes 4.0
+  cycles an iteration by every build of this compiler, Tier 0's included,
+  with the pass or without it: the store and the load between one iteration's
+  multiply and addition and the next's add nothing a build without them
+  saves. With the pass k1's time is unchanged at three placements (without it
+  over with it: 1.002, 0.983 and 0.999) and k2's is 1.8% less. At the fourth
+  placement k1's loop took 2.00 cycles without the pass and 1.37 with it; the
+  shorter loop has no such placement among the four. What the pass removes
+  from these loops is 2 of their 9 to 15 instructions.
+- **Doubles: 2.37 times.** k4 goes from 15.6 cycles an iteration to between
+  6.57 and 6.59, against 6.00 for clang and for `+all`. A `double`'s
+  store is not forwarded to its load for nothing: without the pass the trip
+  adds nine and a half cycles to a chain of six.
+- **What the stores cost.** With the loads gone k1 takes 1.365 cycles an
+  iteration, and clang's build that stores once after the loop 1.001; k4
+  takes 6.57 against 6.00. The store-sinking variant of this pass that
+  another session measured on k1 read 200.2M cycles, the same 1.001
+  ([its record on the issue](https://github.com/buster14a/buster/issues/3309#issuecomment-7087516036)).
+- **The issue's figures were a cloud Xeon's**: 5.8 cycles an iteration by
+  either tier against clang's 0.8. In this work's cloud container (a Xeon at
+  2.3 GHz, not the record) the pass took k1 from 424 ms to between 92 and 97.
+  The pass is worth to generated code what the processor charges for a store
+  and a load of the same bytes, and Zen 5 charges nothing for an integer's.
+
+### The corpora
+
+**The code it changes.** By `--tier1` with the pass and without it, 33 of 34
+objects are the same bytes: Lua's 33 units, where 2 loops store to a listed
+object and both call a function, against speedtest1's unit (`sqlite3.c` and
+`speedtest1.c` as one). There 68 loops store to a listed object: 66 call a
+function, 1 stores through a pointer and 1 is moved, a loop of
+`memsys5Init`, which runs once and is the one function of the unit's 1,422
+whose code differs. In a cloud container, the frozen `sqlite3.c` alone has 28
+such loops and none moved, and musl's 1,355 units have 4, all with a call. A
+loop that keeps its state in globals and calls nothing is the kernels' shape,
+not these programs'.
+
+**What it costs a compile.** `--tier1 --lanes 1 -c` of the frozen
+`sqlite3.c`, 11 runs each, medians:
+
+| | With the pass | Without it | With over without |
+| --- | ---: | ---: | ---: |
+| Instructions | 8,020,707,614 | 7,998,769,414 | 1.0027 |
+| User cycles | 3,265,293,627 | 3,251,386,846 | 1.0043 |
+| Wall, ms | 607.901 | 604.853 | 1.0050 |
+| Peak memory, KiB | 326,996 | 324,884 | 1.0065 |
+
+The pass alone on the 2,602 lowered functions, every symbol listed
+(`benchmark-ir-source --passes --only store-motion`), takes 0.476 ms, 0.85 ns
+an instruction. The compile's cost is more than that because the pass runs
+after inlining, on larger functions, and for a callee's summary as well as
+for the function. Counters added for the measurement (a cloud container, the
+proportions only) say where it goes: 949 function bodies name a listed symbol,
+with 773,538 instructions among them; 169 of those have a store to a listed
+symbol's constant offset, and 95 of those a loop. Of the pass's time, 46% is
+the first of those steps (the scan and the walk of every store's address, in
+949 functions), 37% is the dominator analysis for the loops and 8% the CFG
+before it (169 functions), and 7% the loops' rules.
+
+### What it decided
+
+**Off by default.** A default pass has to pay for itself on programs, and
+this one changes none of the corpora's code that runs more than once, while
+it adds 0.27% instructions and 0.43% cycles to a `--tier1` compile of
+`sqlite3.c`. Where a program's loops do have this shape it is worth turning
+on: 2.37 times on the `double` kernel on the 9700X, and on processors that
+don't forward an integer's store for nothing, as much as the issue found.
+
+Two things would change the decision, and both are follow-ups:
+
+- **Sinking the stores**, for the loops whose every access is known. That is
+  where the 9700X's time is on the integer kernel (1.365 cycles an iteration
+  against 1.001).
+- **A cheaper refusal.** Nine tenths of the pass's time on `sqlite3.c` is
+  spent before any loop's rule is applied. A store's address needs its walk
+  only where the walk can end at a listed symbol, and a loop with a call
+  needs no dominator analysis: a candidate store's block that is on no cycle
+  of call-free blocks is in no loop the pass can take.
 
 ## Algorithm sources and provenance
 
