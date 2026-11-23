@@ -11975,7 +11975,7 @@ struct CheckDriverDeferred
 };
 
 // --tier1-passes='s list (#139's measurement): comma-separated items, each + or - and then a pass's name (sccp, dce, cfg,
-// merge, licm, sroa, memory, vectorize, unroll, vectors, gvn or inline) or all, applied in turn to the passes the earlier
+// merge, licm, sroa, memory, vectorize, unroll, vectors, tables, gvn or inline) or all, applied in turn to the passes the earlier
 // options left on: the default pipeline's (SCCP, dead-code removal, CFG cleanup, its merges, the inlining and vectors), with
 // --tier1-gvn's and --tier1-no-inline's changes where they came first. `toggled` holds the BUSTER_CHECK_TIER1_PASS_* bits that differ from the default; `gvn` and `no_inline` are
 // the two passes with options of their own. Returns false, and leaves all three as they were, for an empty list or item,
@@ -11984,7 +11984,7 @@ struct CheckDriverDeferred
 #define BUSTER_CHECK_DRIVER_PASS_INLINE 1024u
 static bool check_driver_tier1_passes(const char* list, uint16_t* toggled, bool* gvn, bool* no_inline)
 {
-    static const char* const names[] = { "sccp", "dce", "cfg", "merge", "licm", "sroa", "memory", "vectorize", "unroll", "vectors", "gvn", "inline", "all" };
+    static const char* const names[] = { "sccp", "dce", "cfg", "merge", "licm", "sroa", "memory", "vectorize", "unroll", "vectors", "tables", "gvn", "inline", "all" };
     static const uint32_t bits[] = {
         BUSTER_CHECK_TIER1_PASS_SCCP,
         BUSTER_CHECK_TIER1_PASS_DCE,
@@ -11996,6 +11996,7 @@ static bool check_driver_tier1_passes(const char* list, uint16_t* toggled, bool*
         BUSTER_CHECK_TIER1_PASS_VECTORIZE,
         BUSTER_CHECK_TIER1_PASS_UNROLL,
         BUSTER_CHECK_TIER1_PASS_VECTORS,
+        BUSTER_CHECK_TIER1_PASS_TABLES,
         BUSTER_CHECK_DRIVER_PASS_GVN,
         BUSTER_CHECK_DRIVER_PASS_INLINE,
         BUSTER_CHECK_TIER1_PASSES_ALL | BUSTER_CHECK_DRIVER_PASS_GVN | BUSTER_CHECK_DRIVER_PASS_INLINE,

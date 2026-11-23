@@ -55,6 +55,24 @@ requirements. [Command index](README.md).
   [The optimization guide](../../docs/ir-optimization.md) records supported inputs,
   the pass order and #139's measurements.
 
+## Switches of constants (#3298)
+
+`ir_switch_table.c` turns a jump-table switch whose arms only give a constant to
+one value (returned, or one phi's) into a load of the jump table's values,
+which the emission writes in place of the labels' offsets; Tier 1's `tables`
+pass item, on by default (`--tier1-passes=-tables` turns it off), and
+`--tier1-report`'s `value_tables` counts them. `test-ir-optimize` runs
+`ir_switch_table_test.c`: generated text fixtures of the C lowering's dispatch
+(returns and phis of i8 to i64, i32 and i64 selectors, negative lowest cases,
+holes, the join among the arms) converted, verified, and run on the
+independent executor with the table's bytes at every selector around the table
+and the type's extremes, before and after the optimizer, against the value the
+fixture's description gives; and the refusals (a store in an arm, an i64 past
+32 bits, an arm's variable, a retyped load read twice, an arm branching
+elsewhere, two dispatches of one table), which must borrow the input
+unchanged. `test-checker-driver`'s value tables unit runs a C fixture's
+`--tier1` builds against clang -O0's. [The design](../ir-optimization.md#switches-of-constants-3298).
+
 ## Loop vectorization (#2743)
 
 `test-ir-vectorize [--seed N] [--print NAME]` (`ir_vectorize_loops_test.c`) runs
