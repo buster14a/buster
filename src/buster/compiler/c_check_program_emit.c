@@ -521,9 +521,9 @@ struct CheckEmitGrowth
 #define BUSTER_CHECK_TIER1_SCHEDULE_POST 1
 #define BUSTER_CHECK_TIER1_SCHEDULE_PRE 2
 // --tier1-passes= (#139): the passes of Tier 1's pipeline whose default the option turns over, a bit each, so that 0 is
-// the default pipeline, which runs SCCP, dead-code removal, CFG cleanup and its merges and loop store motion (#3309),
-// and neither LICM, SROA nor value numbering with memory (#2718: the 9700X measured no run time it gains for its
-// compile time) on every function. SCCP's,
+// the default pipeline, which runs SCCP, dead-code removal, CFG cleanup and its merges, and neither LICM, SROA, value
+// numbering with memory (#2718: the 9700X measured no run time it gains for its compile time) nor loop store motion
+// (#3309) on every function. SCCP's,
 // dead-code removal's, CFG cleanup's and the merges' bits are ir_optimize.c's BUSTER_IR_OPTIMIZE_SCCP, DCE, CFG and MERGE;
 // value numbering with memory's maps to its BUSTER_IR_OPTIMIZE_MEMORY. #866's solver and the inlining keep their own
 // options (--tier1-gvn, --tier1-no-inline), which the option's list sets too. VECTORS (#2781, on by default) is the
@@ -550,8 +550,8 @@ struct CheckEmitGrowth
     (BUSTER_CHECK_TIER1_PASS_SCCP | BUSTER_CHECK_TIER1_PASS_DCE | BUSTER_CHECK_TIER1_PASS_CFG | BUSTER_CHECK_TIER1_PASS_MERGE | BUSTER_CHECK_TIER1_PASS_VECTORS | \
      BUSTER_CHECK_TIER1_PASS_TABLES)
 // Loop store motion (#3309, ir_store_motion.c): a loop's globals read from registers, before promotion; off by default
-// (docs/tier1-store-motion.md's MEASUREMENTS: it changes no code of sqlite3.c's, Lua's or musl's, and costs a --tier1
-// compile of sqlite3.c 0.27% more instructions).
+// (docs/tier1-store-motion.md's MEASUREMENTS: of speedtest1's and Lua's code it changes one start-up loop, sqlite3.c's
+// memsys5Init, and it costs a --tier1 compile of sqlite3.c 0.27% more instructions).
 #define BUSTER_CHECK_TIER1_PASS_STORE_MOTION 8192u
 #define BUSTER_CHECK_TIER1_PASSES_ALL                                                                                                                                  \
     (BUSTER_CHECK_TIER1_PASSES_DEFAULT | BUSTER_CHECK_TIER1_PASS_LICM | BUSTER_CHECK_TIER1_PASS_SROA | BUSTER_CHECK_TIER1_PASS_VECTORIZE | BUSTER_CHECK_TIER1_PASS_UNROLL | \
