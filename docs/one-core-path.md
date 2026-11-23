@@ -3914,6 +3914,87 @@ Cycles a token on `sqlite3.c`:
   removed 1,093 of the reader's faults, mostly zero-page reads, for about 1 M
   kernel cycles, where the census's samples gave them about 2.8 M.
 
+## The default path since `e9cbc3d72`: a warning's replay of what can only be 0 or 1
+
+The redesign's pieces above are behind an option; this one is on the path every compile takes. Main compiled the
+frozen `sqlite3.c` in 113.1 ms at `e9cbc3d72` and in 117.6 at `89362fd0f`, 24 merges later. Paired on the 9700X, each
+merge against its parent ([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/takeover-2850-2026-11-22)):
+[#3296](https://github.com/buster14a/buster/pull/3296), which folds a condition that reads a `const` object, +0.868 ms;
+[#3324](https://github.com/buster14a/buster/pull/3324), the CFG builder's heuristics, +1.785; and the ten merges after it
++2.415, where [#2937](https://github.com/buster14a/buster/pull/2937), `-Wconstant-logical-operand`, is the one that adds
+work to a default compile. Each is right. A build with counters says what each does on a unit that has none of what it
+looks for:
+
+| on `sqlite3.c` | calls | that answer |
+| --- | ---: | ---: |
+| the logical operand's replay, its right operand a comparison, a `!`, a `&&`, a `\|\|` or a condition | 2,524 | 0 |
+| the same, any other right operand | 441 | 71 a literal |
+| `check_program_branch_truth` | 16,964, of 16,573 conditions | 61 |
+| its equality's check; its relational's | 15,347; 5,734 | 0; 0 |
+| `check_program_const_integer` | 37,686, of 14,350 nodes | 0 |
+
+Three cuts were specified, built and paired, a commit each, and one is kept.
+
+- **R1, kept.** The warning's pass does not replay a right operand whose own operator can only give 0 or 1
+  (`check_warning_logical_boolean`, [`c-checker.md`](c-checker.md)): the warning is of an integer constant that is
+  neither. `BUSTER_TEST_DEFAULT_PATH_LOG=FILE` is the tests' switch for it: the operand is replayed all the same, and
+  the command writes a line to the file of how many, and of them how many give the warning's event or make a type.
+- **R2, reverted.** The CFG's equality and relational checks asking first whether an operand is a literal with a `&`, a
+  `|` or a boolean value beside it, before they work out the operands' common type: 19,134 of the 21,081 comparisons
+  answered without it, and 1.7 M instructions of 1,276 fewer.
+- **R3, reverted.** `check_program_const_integer`'s no kept by node, a byte each: 23,336 of its 37,686 walks not
+  walked, 3.2 M instructions fewer.
+
+### What it measured
+
+The 9700X, Release, CPU 2, paired; each cut against its parent on `sqlite3.c`, seven rounds, with what its
+specification predicted and the line it named as refuting it:
+
+| | predicted, ms | refuted under | paired; its least and most | lower | instructions, M |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| R1, `96fac43e0` to `0e446262f` | -1.3 | -0.7 | -1.742; -1.869, -0.928 | 7/7 | -11.477 |
+| R2, to `c24e2a52d` | -0.6 | -0.3 | **-0.122; -0.501, +0.160** | 5/7 | -1.700 |
+| R3, to `e61c039fc` | -0.5 | -0.25 | **+0.415; -0.023, +1.411** | 1/7 | -3.234 |
+| the three, `96fac43e0` to `e61c039fc` | -2.4 | -1.3 | -1.460; -1.819, -1.085 | 7/7 | -16.411 |
+
+**R2 and R3 are refuted, and reverted.** R2 took 1.7 M of 1,276 M instructions away, and 0.12 ms; R3 took 3.2 M away
+and ran 1.643 M more cycles, one of seven rounds lower. The three together read 0.28 ms worse than R1 alone.
+The predictions came from a build with a clock's read around each call, which overstates a call made tens of thousands
+of times for a few hundred ticks (R2's, R3's) beside one made 2,524 times for 3,776 (R1's): the next piece's are to
+come from instructions or a profile without them.
+
+The head, R1 alone (`0db36d75e`; the commit after it adds a line to a test's list), against main `96fac43e0`:
+
+| | rounds | paired, ms; its least and most | lower | instructions, M |
+| --- | ---: | ---: | ---: | ---: |
+| `sqlite3.c` | 7 | -1.500; -17.143, -1.204 | 7/7 | -11.478 of 1,287.8 |
+| `sqlite3.c -Wall -Wextra` | 5 | -1.738; -2.117, -1.025 | 5/5 | -11.478 of 1,427.4 |
+| the compiler's own source | 5 | -10.050; -89.676, -7.411 | 5/5 | -50.347 of 9,152.2 |
+| Lua | 5 | -0.061; -0.274, +0.004 | 3/5 | -1.270 of 744.2 |
+| musl | 5 | -0.432; -0.915, +0.691 | 3/5 | -4.668 of 6,707.2 |
+
+Main compiles the frozen `sqlite3.c` in 115.6 ms there where it took 117.4, and its own source in 616.7 where it took
+628.7. Of the 5 ms this section began with, 1.5 are back; the CFG's heuristics' 1.8 and the constant conditions' 0.9
+stand, and the two cuts that were to take from them did not.
+
+### Against its gates
+
+- **E1, exact: met.** The four corpora by main's compiler and by this one, plain and with `-Wall -Wextra`: every
+  object, every diagnostic and every status the same (1,372 units; 251 of musl's say something plain, 858 with the
+  warnings). The whole inventory, where no block fails that passes on main's own build; the memory and the address rows
+  on the 34 blocks, no report; the driver's eight parts; main.c compiled by itself; the no-recursion rule.
+- **E2, the rule against what it replaces: met.** With the switch the pass replays what it would not: 14,891 operands
+  over the corpora and 243,095 over the whole inventory's 111,863 commands. None gives the warning's event and none
+  makes a type.
+- **E3, its price:** R1 inside what was predicted; R2 and R3 refuted (above).
+- **E4, single faults:** the rule inverted, asked of the left operand's operator, and widened by a sum: each fails the
+  driver's test.
+
+One block of the inventory failed on the branch and not on main, and was the branch's: the test that every field of the
+reader's state has a class did not know the counts' field. The rule's test is not a section of its own in the driver's
+test: it runs in the warning's, so that the parts are dealt as on main
+([#2263](https://github.com/buster14a/buster/issues/2263)).
+
 ## Related
 
 - [#2850](https://github.com/buster14a/buster/issues/2850): the design, its

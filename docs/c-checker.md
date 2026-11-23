@@ -7427,6 +7427,11 @@ erased and successful-expression conversions of
 `-Wconstant-logical-operand` (#2900) is reported as each logical expression
 is built, in ordinary expressions and assertions alike, before an assertion's
 failure (`--constant-logical-only`, [the checker guide](commands/checker.md)).
+The graph's pass replays a right operand to learn whether it is an integer
+constant other than 0 and 1, and only where it can be one: a comparison's, a
+`!`'s, a logical operator's and a condition's value is 0 or 1 whatever it is,
+and the pass asks nothing of those (`check_warning_logical_boolean`, #2850:
+2,524 of the 2,965 operands it replayed on `sqlite3.c`).
 The ordinary equality emitter's extra assignment-suggestion note for a
 nonassignable left operand is tracked in
 [#2906](https://github.com/buster14a/buster/issues/2906).
