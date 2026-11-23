@@ -991,6 +991,26 @@ static bool tier0_test_build(Tier0TestTally* tally, const Tier0Functions* functi
     bool result = true;
     code->size = 0;
     code->fixup_count = 0;
+    // The batch (#2874): the program's functions compiled together, each pass over every one of them before the next
+    // (tier0_compile_batch), and the list taken again until it is past a batch's functions, so that the batches are cut
+    // by their functions and by their entries. Each one's code must be its own compile's (below).
+    const uint64_t batch_mark = arena->length;
+    const uint32_t batch_repeats = functions->count != 0 ? BUSTER_TIER0_BATCH_JOBS / functions->count + 2 : 0;
+    const uint32_t batch_count = batch_repeats * functions->count;
+    Tier0Function* batch_functions = BUSTER_ARENA_PUSH_ARRAY(arena, Tier0Function, (uint64_t)batch_count + 1);
+    const Tier0Function** batch_list = BUSTER_ARENA_PUSH_ARRAY(arena, const Tier0Function*, (uint64_t)batch_count + 1);
+    Tier0Code* batch_codes = BUSTER_ARENA_PUSH_ARRAY(arena, Tier0Code, (uint64_t)batch_count + 1);
+    result = tier0_test_expect(tally, batch_functions != 0 && batch_list != 0 && batch_codes != 0, "batch", "seed %" PRIu64 ": no room for the batch", seed);
+    for (uint32_t k = 0; result && k < batch_count; k += 1)
+    {
+        batch_functions[k] = functions->functions[k % functions->count];
+        batch_functions[k].entry_records = true;
+        batch_list[k] = &batch_functions[k];
+    }
+    if (result)
+    {
+        tier0_compile_batch(batch_list, batch_count, arena, batch_codes);
+    }
     for (uint32_t f = 0; f < functions->count && result; f += 1)
     {
         const Tier0Function* function = &functions->functions[f];
@@ -1019,6 +1039,11 @@ static bool tier0_test_build(Tier0TestTally* tally, const Tier0Functions* functi
         result = result && tier0_test_expect(tally, scalar.error == TIER0_OK, "compile", "seed %" PRIu64 " function %u: error %d at entry %u", seed, f, scalar.error,
                                              scalar.node);
         result = result && tier0_test_expect(tally, tier0_test_same_code(&scalar, &vector), "twins", "seed %" PRIu64 " function %u: the paths differ", seed, f);
+        for (uint32_t r = 0; result && r < batch_repeats; r += 1)
+        {
+            result = tier0_test_expect(tally, tier0_test_same_code(&batch_codes[r * functions->count + f], &vector), "batch",
+                                       "seed %" PRIu64 " function %u: its code in a batch of %u (copy %u) isn't its own compile's", seed, f, batch_count, r);
+        }
         // The calls' memo (#2874): the same code with an empty table, whatever the thread's held from the functions and
         // programs compiled before this one.
         const Tier0CallMemo thread_memo = tier0_call_memo_swap((Tier0CallMemo){ 0 });
@@ -1140,6 +1165,7 @@ static bool tier0_test_build(Tier0TestTally* tally, const Tier0Functions* functi
         }
         arena_pop_to(arena, mark);
     }
+    arena_pop_to(arena, batch_mark);
     return result;
 }
 
