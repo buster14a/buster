@@ -21,23 +21,6 @@ struct CheckLowerContract
     bool negative_addend;
 };
 
-// Read only completed, nonvolatile constant initializer receipts. Weak objects keep their runtime load even when
-// this translation unit provides an initializer, so require the source reader's nonnull (non-weak) address proof.
-static bool check_lower_contract_constant(const CheckProgram* program, uint32_t node, CheckValue* loaded)
-{
-    const CheckGraph* graph = &program->input->graph;
-    const CheckValue value = check_stream_value(program->stream, node);
-    const uint32_t restricted = BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_VOLATILE_PART | BUSTER_CHECK_INACTIVE_UNION_READ | BUSTER_CHECK_CONST_READ_RESTRICTED;
-    const uint32_t position = graph->source_positions != NULL ? graph->source_positions[node] : BUSTER_CHECK_NONE;
-    const bool known = value.category == CHECK_LVALUE && value.fault == CHECK_FAULT_NONE && value.constant_kind == CHECK_CONSTANT_ADDRESS &&
-                       (value.flags & restricted) == 0 && (value.flags & BUSTER_CHECK_NONNULL_ADDRESS) != 0 &&
-                       (type_qualifiers(value.type) & BUSTER_TYPE_VOLATILE) == 0 &&
-                       check_const_load(program->types, graph->const_values, value.object, value.offset, value.object_bit_offset,
-                                        value.bit_width, value.type, position, loaded) &&
-                       (loaded->constant_kind == CHECK_CONSTANT_FLOATING || loaded->constant_kind == CHECK_CONSTANT_INTEGER);
-    return known;
-}
-
 // Clang removes a conditional's join only when its controlling value is known without runtime effects. The runtime
 // checker's ordinary truth query deliberately does not read constant lvalues; its initializer receipt can still
 // prove this source-emission decision. Floating environment accesses retain the ordinary conditional boundary.
@@ -52,7 +35,7 @@ static bool check_lower_contract_truth(const CheckProgram* program, uint32_t nod
         if (!known)
         {
             CheckValue loaded = { 0 };
-            known = check_lower_contract_constant(program, condition, &loaded) &&
+            known = check_program_constant_load(program, condition, &loaded) &&
                     !(environment && check_action_floating_type(program->types, loaded.type)) &&
                     check_action_truth(program->types, &loaded, truth);
         }
@@ -94,7 +77,7 @@ static bool check_lower_contract_runtime_product(const CheckLowerWriter* writer,
             CheckValue loaded = { 0 };
             const bool compound = value.object != 0 && value.object < program->object_count &&
                                   check_input_bit(program->input->declaration_bits, value.object - 1, BUSTER_CHECK_BITS_COMPOUND);
-            runtime = compound || !check_lower_contract_constant(program, node, &loaded);
+            runtime = compound || !check_program_constant_load(program, node, &loaded);
         }
         else if (op == CHECK_OP_CAST || op == CHECK_OP_CONVERT || op == CHECK_OP_SELECT || op == CHECK_OP_POSITIVE || op == CHECK_OP_NEGATIVE ||
                  op == CHECK_OP_REAL || op == CHECK_OP_BIT_NOT || op == CHECK_OP_NOT || op == CHECK_OP_CONDITION)

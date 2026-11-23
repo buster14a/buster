@@ -108,6 +108,7 @@ typedef enum NodeCensusTest
     NODE_CENSUS_REGION,
     NODE_CENSUS_UNMODELED,
     NODE_CENSUS_ORDER,
+    NODE_CENSUS_TAUTOLOGY,
     NODE_CENSUS_TESTS,
 } NodeCensusTest;
 
@@ -146,6 +147,7 @@ static const char* const node_census_test_names[NODE_CENSUS_TESTS] = {
     [NODE_CENSUS_REGION] = "region",
     [NODE_CENSUS_UNMODELED] = "unmodeled-warning",
     [NODE_CENSUS_ORDER] = "pointer-integer-order",
+    [NODE_CENSUS_TAUTOLOGY] = "cfg-tautology",
 };
 
 // The roots by the control that pushed them.
@@ -358,6 +360,11 @@ static const uint8_t node_census_warning_classes[CHECK_WARNING_ID_COUNT] = {
     [CHECK_WARNING_ID_ATOMIC_ACCESS] = NODE_CENSUS_WARNING_TESTED,
     [CHECK_WARNING_ID_CXX_ZERO_SIZE_RECORD] = NODE_CENSUS_WARNING_OUTSIDE,
     [CHECK_WARNING_ID_ZERO_LENGTH_ARRAY] = NODE_CENSUS_WARNING_OUTSIDE,
+    // The CFG builder's observer's (#2990): the operators its rules may decide (node_census_tautology).
+    [CHECK_WARNING_ID_TAUTOLOGICAL_BITWISE_COMPARE] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_TAUTOLOGICAL_OVERLAP_COMPARE] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_TAUTOLOGICAL_NEGATION_COMPARE] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_CONSTANT_LOGICAL_OPERAND] = NODE_CENSUS_WARNING_TESTED,
 };
 
 // Which of the warnings the silence tests stand for the unit enables anywhere (check_common_enabled): the actions' warning
@@ -374,11 +381,14 @@ struct NodeCensusPolicy
     bool ordered;
     bool void_dereference;
     bool string_plus_int;
+    // Any of the CFG builder's observer's three (#2990).
+    bool tautology;
     bool packed_member;
     bool unevaluated;
     bool alignof_expression;
     bool sizeof_decay;
     bool constant_conversion;
+    bool constant_logical;
     bool division;
     bool shifts;
     bool null_dereference;
@@ -619,12 +629,16 @@ static NodeCensusPolicy node_census_policy(const Preprocessor* pp, const CheckIn
     policy.ordered = check_common_enabled(pp, input, CHECK_WARNING_ID_ORDERED_POINTER_INTEGER, false);
     policy.void_dereference = check_common_enabled(pp, input, CHECK_WARNING_ID_VOID_PTR_DEREFERENCE, false);
     policy.string_plus_int = check_common_enabled(pp, input, CHECK_WARNING_ID_STRING_PLUS_INT, false);
+    policy.tautology = check_common_enabled(pp, input, CHECK_WARNING_ID_TAUTOLOGICAL_BITWISE_COMPARE, true) ||
+                       check_common_enabled(pp, input, CHECK_WARNING_ID_TAUTOLOGICAL_OVERLAP_COMPARE, true) ||
+                       check_common_enabled(pp, input, CHECK_WARNING_ID_TAUTOLOGICAL_NEGATION_COMPARE, true);
     policy.packed_member = check_common_enabled(pp, input, CHECK_WARNING_ID_ADDRESS_OF_PACKED_MEMBER, false);
     policy.unevaluated = check_common_enabled(pp, input, CHECK_WARNING_ID_UNEVALUATED_EXPRESSION, false);
     policy.alignof_expression = check_common_enabled(pp, input, CHECK_WARNING_ID_GNU_ALIGNOF_EXPRESSION, false);
     policy.sizeof_decay = check_common_enabled(pp, input, CHECK_WARNING_ID_SIZEOF_ARRAY_DECAY, false);
     policy.constant_conversion = check_common_enabled(pp, input, CHECK_WARNING_ID_CONSTANT_CONVERSION, false) ||
                                  check_common_enabled(pp, input, CHECK_WARNING_ID_LITERAL_CONVERSION, false);
+    policy.constant_logical = check_common_enabled(pp, input, CHECK_WARNING_ID_CONSTANT_LOGICAL_OPERAND, false);
     policy.division = check_common_enabled(pp, input, CHECK_WARNING_ID_DIVISION_BY_ZERO, false);
     policy.shifts = check_common_enabled(pp, input, CHECK_WARNING_ID_SHIFT_COUNT_NEGATIVE, false) ||
                     check_common_enabled(pp, input, CHECK_WARNING_ID_SHIFT_COUNT_OVERFLOW, false) ||
@@ -1309,6 +1323,135 @@ static bool node_census_comparison(CheckOp op)
     return op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL;
 }
 
+// Whether operand `node` may be a constant clang's checkIncorrectBitwiseOrOperator reads: a literal (a number or a
+// character, one that `-` takes, or a cast's of either) or an enumerator's name.
+static bool node_census_literal(const CheckProgram* program, uint32_t node)
+{
+    const CheckGraph* graph = &program->input->graph;
+    const CheckInput* input = program->input;
+    uint32_t at = node < graph->count && graph->ops[node] == CHECK_OP_CAST ? graph->operand0[node] : node;
+    at = at < graph->count && graph->ops[at] == CHECK_OP_NEGATIVE ? graph->operand0[at] : at;
+    const uint32_t token = at < graph->count && graph->ops[at] == CHECK_OP_VALUE ? graph->tokens[at] : BUSTER_CHECK_NONE;
+    const uint8_t kind = token < program->parser->tokens.count ? program->parser->tokens.kinds[token] : 0;
+    const uint32_t declaration = node_census_declaration(program, token);
+    return kind == PARSE_KIND_NUMBER || kind == PARSE_KIND_CHARACTER ||
+           (declaration < input->token_count && input->declaration_kinds[declaration] == C_BINDING_ENUMERATOR);
+}
+
+// Whether two operands may be the same to clang's isSameComparisonOperand, by their operators and names alone: two names
+// of one declaration, or two members or two elements (whose bases and indices it compares too).
+static bool node_census_same_operand(const CheckProgram* program, uint32_t one, uint32_t two)
+{
+    const CheckGraph* graph = &program->input->graph;
+    const CheckOp first = one < graph->count ? graph->ops[one] : CHECK_OP_COUNT;
+    const CheckOp second = two < graph->count ? graph->ops[two] : CHECK_OP_COUNT;
+    const uint32_t name_one = first == CHECK_OP_VALUE ? node_census_declaration(program, graph->tokens[one]) : BUSTER_CHECK_NONE;
+    const uint32_t name_two = second == CHECK_OP_VALUE ? node_census_declaration(program, graph->tokens[two]) : BUSTER_CHECK_NONE;
+    const bool member_one = first == CHECK_OP_MEMBER || first == CHECK_OP_ARROW;
+    const bool member_two = second == CHECK_OP_MEMBER || second == CHECK_OP_ARROW;
+    return (name_one != BUSTER_CHECK_NONE && name_one == name_two) || (member_one && member_two) || (first == CHECK_OP_SUBSCRIPT && second == CHECK_OP_SUBSCRIPT);
+}
+
+// A comparison of an operand with a literal or an enumerator (node_census_literal), one of its operands alone, as clang's
+// tryNormalizeBinaryOperator finds one: that operand, or BUSTER_CHECK_NONE for another node.
+static uint32_t node_census_compared(const CheckProgram* program, uint32_t node)
+{
+    const CheckGraph* graph = &program->input->graph;
+    const bool comparison = node < graph->count && node_census_comparison(graph->ops[node]);
+    const bool left = comparison && node_census_literal(program, graph->operand0[node]);
+    const bool right = comparison && node_census_literal(program, graph->operand1[node]);
+    return left != right ? (left ? graph->operand1[node] : graph->operand0[node]) : BUSTER_CHECK_NONE;
+}
+
+// One comparison node_census_compared takes, as checkIncorrectLogicOperator reads it (check_cfg_normalize's): its
+// operator as `variable OP constant`, and its constant converted to the comparison's type (an enumerator's in its own),
+// by the census's view of the node's types and values. False where the census can't tell (a floating comparison, a
+// constant it doesn't know), which its caller takes as one that may decide.
+static bool node_census_constant_pair(const NodeCensusScratch* s, uint32_t node, CheckCfgComparison* comparison, bool* enumerator)
+{
+    const CheckProgram* program = s->program;
+    const CheckGraph* graph = &program->input->graph;
+    const TypeTable* types = program->types;
+    const uint32_t a = graph->operand0[node];
+    const uint32_t b = graph->operand1[node];
+    const bool left = node_census_literal(program, a);
+    const uint32_t constant = left ? a : b;
+    const CheckOp op = graph->ops[node];
+    const TypeId one = type_unqualified(type_strip_aligned(types, node_view_type(s, a)));
+    const TypeId two = type_unqualified(type_strip_aligned(types, node_view_type(s, b)));
+    const bool integers = (type_kind(types, one) == BUSTER_TYPE_KIND_INTEGER || type_kind(types, one) == BUSTER_TYPE_KIND_ENUM) &&
+                          (type_kind(types, two) == BUSTER_TYPE_KIND_INTEGER || type_kind(types, two) == BUSTER_TYPE_KIND_ENUM);
+    // (The usual arithmetic conversions of two integer types make no type: the table is only read.)
+    const TypeId common = integers ? type_unqualified(type_usual_arithmetic((TypeTable*)types, one, two)) : 0;
+    const uint32_t token = graph->ops[constant] == CHECK_OP_VALUE ? graph->tokens[constant] : BUSTER_CHECK_NONE;
+    const uint32_t declaration = node_census_declaration(program, token);
+    *enumerator = declaration < program->input->token_count && program->input->declaration_kinds[declaration] == C_BINDING_ENUMERATOR;
+    const TypeId valued = *enumerator ? type_unqualified(type_strip_aligned(types, node_view_type(s, constant))) : common;
+    __int128 value = 0;
+    uint32_t width = 0;
+    bool sign = false;
+    const bool known = common != 0 && node_census_integer_constant(s, constant, &value) && node_census_integer(types, valued, &width, &sign) && width != 0;
+    *comparison = (CheckCfgComparison){
+        .op = !left ? op : op == CHECK_OP_GREATER ? CHECK_OP_LESS : op == CHECK_OP_GREATER_EQUAL ? CHECK_OP_LESS_EQUAL : op == CHECK_OP_LESS ? CHECK_OP_GREATER :
+                           op == CHECK_OP_LESS_EQUAL ? CHECK_OP_GREATER_EQUAL : op,
+        .width = width,
+        .is_signed = sign,
+        .bits = known ? (unsigned __int128)value & check_action_mask(width) : 0,
+    };
+    return known;
+}
+
+// Whether checkIncorrectLogicOperator may decide a logical operator of two comparisons of one operand with constants
+// (`either` an `||`): both constants of one kind, width and signedness, whose five values decide it (check_cfg_analyze),
+// or ones the census can't tell.
+static bool node_census_overlap(const NodeCensusScratch* s, uint32_t first, uint32_t second, bool either)
+{
+    CheckCfgComparison one = { 0 };
+    CheckCfgComparison two = { 0 };
+    bool enumerator_one = false;
+    bool enumerator_two = false;
+    const bool known = node_census_constant_pair(s, first, &one, &enumerator_one) && node_census_constant_pair(s, second, &two, &enumerator_two);
+    bool result = !known;
+    if (known && enumerator_one == enumerator_two && one.width == two.width && one.is_signed == two.is_signed)
+    {
+        const uint32_t width = one.width;
+        const unsigned __int128 mask = check_action_mask(width);
+        const unsigned __int128 smallest = one.is_signed ? ((unsigned __int128)1 << (width - 1)) & mask : 0;
+        const unsigned __int128 largest = one.is_signed ? mask >> 1 : mask;
+        const unsigned __int128 lower = check_cfg_compare(CHECK_OP_LESS, one.bits, two.bits, width, one.is_signed) ? one.bits : two.bits;
+        const unsigned __int128 values[5] = { smallest, one.bits, (lower + 1) & mask, two.bits, largest };
+        bool reported = false;
+        result = check_cfg_analyze(either, &one, &two, values, NULL, &reported) != BUSTER_CHECK_CFG_UNKNOWN;
+    }
+    return result;
+}
+
+// Whether node `node` is an operator clang's CFG builder's observer may hear of (#2990, c_check_common_cfg.c), by its
+// operators, names and constants: an equality of a bitwise `&` or `|`, a `|` of one literal or enumerator
+// (node_census_literal), and a logical operator of a value and its negation or of two comparisons of one operand with
+// constants that decide it (node_census_overlap), where the operands may be the same (node_census_same_operand).
+static bool node_census_tautology(const NodeCensusScratch* s, uint32_t node)
+{
+    const CheckProgram* program = s->program;
+    const CheckGraph* graph = &program->input->graph;
+    const CheckOp op = node < graph->count ? graph->ops[node] : CHECK_OP_COUNT;
+    const uint32_t a = op != CHECK_OP_COUNT ? graph->operand0[node] : BUSTER_CHECK_NONE;
+    const uint32_t b = op != CHECK_OP_COUNT ? graph->operand1[node] : BUSTER_CHECK_NONE;
+    const CheckOp first = a < graph->count ? graph->ops[a] : CHECK_OP_COUNT;
+    const CheckOp second = b < graph->count ? graph->ops[b] : CHECK_OP_COUNT;
+    const bool bitwise = first == CHECK_OP_BIT_AND || first == CHECK_OP_BIT_OR || second == CHECK_OP_BIT_AND || second == CHECK_OP_BIT_OR;
+    const bool equality = (op == CHECK_OP_EQUAL || op == CHECK_OP_NOT_EQUAL) && bitwise;
+    const bool bitwise_or = op == CHECK_OP_BIT_OR && node_census_literal(program, a) != node_census_literal(program, b);
+    const bool logical_op = op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR;
+    const uint32_t negated = logical_op && first == CHECK_OP_NOT ? graph->operand0[a] : logical_op && second == CHECK_OP_NOT ? graph->operand0[b] : BUSTER_CHECK_NONE;
+    const uint32_t compared_one = logical_op ? node_census_compared(program, a) : BUSTER_CHECK_NONE;
+    const uint32_t compared_two = logical_op ? node_census_compared(program, b) : BUSTER_CHECK_NONE;
+    const bool logical = (negated != BUSTER_CHECK_NONE && node_census_same_operand(program, negated, first == CHECK_OP_NOT ? b : a)) ||
+                         (compared_one != BUSTER_CHECK_NONE && compared_two != BUSTER_CHECK_NONE && node_census_same_operand(program, compared_one, compared_two) &&
+                          node_census_overlap(s, a, b, op == CHECK_OP_LOGICAL_OR));
+    return equality || bitwise_or || logical;
+}
+
 // Whether an ordered comparison of the nodes `a` and `b` is one of a pointer with an integer, which the compiler warns of
 // after the graph's run (check_warning_ordered_event, #3201): its test, of the operands as the action converts them
 // (check_action_operand_value: an array's and a function's value is a pointer). Exactly one is a pointer, and the other
@@ -1679,6 +1822,124 @@ static bool node_census_constants(const NodeCensusScratch* s, uint32_t node)
     return constant && node_census_constant_tests(s, node);
 }
 
+// A scalar's existing value with a completed const-object receipt read at the logical expression's source cut.
+// This is the lvalue conversion's proof alone: no folding, allocation or type interning. In particular a mutable
+// named object is not a constant merely because its designator has a known address.
+static CheckValue node_census_logical_value(const NodeCensusScratch* s, uint32_t node, uint32_t completion)
+{
+    const TypeTable* types = s->program->types;
+    CheckValue value = node_view_value(s, node);
+    if (value.category == CHECK_LVALUE)
+    {
+        CheckValue loaded = { 0 };
+        const bool volatile_read = (type_qualifiers(value.type) & BUSTER_TYPE_VOLATILE) != 0 || (value.flags & BUSTER_CHECK_VOLATILE_PART) != 0;
+        const bool known = !volatile_read && value.fault == CHECK_FAULT_NONE &&
+                           (value.flags & (BUSTER_CHECK_INACTIVE_UNION_READ | BUSTER_CHECK_CONST_READ_RESTRICTED)) == 0 &&
+                           (value.constant_kind == CHECK_CONSTANT_ADDRESS || (value.flags & BUSTER_CHECK_BIT_FIELD) != 0) &&
+                           check_const_load(types, &s->program->input->const_values, value.object, value.offset, value.object_bit_offset,
+                                            value.bit_width, value.type, completion, &loaded);
+        if (known)
+        {
+            check_action_inherit(&loaded, &value);
+            value = loaded;
+        }
+        else if (volatile_read || value.constant_kind == CHECK_CONSTANT_ADDRESS || (value.flags & BUSTER_CHECK_ICE) == 0)
+        {
+            value.constant_kind = CHECK_CONSTANT_NONE;
+        }
+    }
+    return value;
+}
+
+// A required runtime operand proves that this integer expression cannot be an independently evaluated constant.
+// Only ordinary calls, writes and scalar leaves prove that fact; arithmetic and casts require their operands, a
+// conditional requires its condition, and a comma requires its discarded value too. Never descend through an
+// address, sizeof or a short-circuit operator. Unknown shapes and a proof past this bounded frontier refuse below.
+static bool node_census_logical_runtime(const NodeCensusScratch* s, uint32_t root, uint32_t completion)
+{
+    const CheckGraph* graph = &s->program->input->graph;
+    uint32_t pending[BUSTER_NODE_CENSUS_FOLLOWED];
+    uint32_t count = 0;
+    uint32_t visited = 0;
+    bool result = false;
+    pending[count++] = root;
+    while (count != 0 && visited < BUSTER_NODE_CENSUS_FOLLOWED && !result)
+    {
+        const uint32_t node = pending[--count];
+        visited += 1;
+        const CheckOp op = graph->ops[node];
+        if (op == CHECK_OP_VALUE && check_action_is_scalar(s->program->types, node_view_type(s, node)))
+        {
+            const CheckValue value = node_census_logical_value(s, node, completion);
+            result = !check_value_evaluated_constant(&value) || (value.flags & BUSTER_CHECK_INVALID_CONSTANT) != 0;
+        }
+        else if (node_census_modifies(op) || (op == CHECK_OP_CALL &&
+                 (graph->members == NULL || (graph->members[node] & BUSTER_CHECK_LIBRARY_CALL) == 0)))
+        {
+            result = true;
+        }
+        else
+        {
+            const bool unary = op == CHECK_OP_POSITIVE || op == CHECK_OP_NEGATIVE || op == CHECK_OP_NOT || op == CHECK_OP_BIT_NOT ||
+                               op == CHECK_OP_CAST || op == CHECK_OP_CONVERT || op == CHECK_OP_CONDITION || op == CHECK_OP_CONDITIONAL ||
+                               op == CHECK_OP_DEREFERENCE || op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW;
+            const bool binary = (op >= CHECK_OP_ADD && op <= CHECK_OP_BIT_XOR) || op == CHECK_OP_COMMA || op == CHECK_OP_SUBSCRIPT;
+            const uint32_t operands[] = { graph->operand0[node], graph->operand1[node] };
+            for (uint32_t i = 0; i < (binary ? 2u : unary ? 1u : 0u) && count < BUSTER_NODE_CENSUS_FOLLOWED; i += 1)
+            {
+                if (operands[i] < node && node_view_has(s, operands[i]))
+                {
+                    pending[count++] = operands[i];
+                }
+            }
+        }
+    }
+    return result;
+}
+
+// -Wconstant-logical-operand is produced after the reader-time census. Source exclusions and Boolean right operands
+// prove silence immediately; so does a required runtime operand. Other integer expressions may become constants
+// only when the warning pass replays const-object reads, and are conservatively refused by the constant test.
+// Both census forms call this one predicate, including when neither runtime operand has a constant payload.
+static bool node_census_constant_logical(const NodeCensusScratch* s, uint32_t node)
+{
+    const CheckInput* input = s->program->input;
+    const CheckGraph* graph = &input->graph;
+    const Parser* parser = s->program->parser;
+    const TypeTable* types = s->program->types;
+    const CheckOp op = graph->ops[node];
+    const uint32_t a = graph->operand0[node];
+    const uint32_t b = graph->operand1[node];
+    const uint32_t token = graph->tokens[node];
+    bool result = false;
+    if (s->policy.constant_logical && (op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR) &&
+        a < graph->count && b < graph->count && node_view_has(s, a) && node_view_has(s, b) && token < parser->tokens.count)
+    {
+        const TypeId left = node_view_type(s, a);
+        const TypeId right = node_view_type(s, b);
+        const bool integers = check_action_is_integer(types, left) && check_action_is_integer(types, right);
+        const bool boolean_type = type_unqualified(type_strip_aligned(types, left)) == BUSTER_TYPE_BOOL ||
+                                  type_unqualified(type_strip_aligned(types, right)) == BUSTER_TYPE_BOOL;
+        const bool macro = parser->tokens.flags != NULL && (parser->tokens.flags[token] & BUSTER_PP_FROM_MACRO) != 0;
+        const bool enumerator = check_input_logical_enumerator(input, parser, token != 0 ? token - 1 : BUSTER_CHECK_NONE, token) ||
+                                check_input_logical_enumerator(input, parser, token + 1, token);
+        const CheckOp inner = graph->ops[b];
+        const bool boolean_op = node_census_comparison(inner) || inner == CHECK_OP_NOT || inner == CHECK_OP_LOGICAL_AND ||
+                                inner == CHECK_OP_LOGICAL_OR || inner == CHECK_OP_CONDITION;
+        if (integers && !boolean_type && !macro && !enumerator && !boolean_op)
+        {
+            const uint32_t completion = graph->source_positions != NULL && graph->source_positions[node] != 0 ? graph->source_positions[node] : token + 1;
+            const CheckValue value = node_census_logical_value(s, b, completion);
+            uint32_t width = 0;
+            bool sign = false;
+            const bool boolean_value = value.constant_kind == CHECK_CONSTANT_INTEGER && node_census_integer(types, right, &width, &sign) &&
+                                       (value.integer == 0 || value.integer == 1);
+            result = !boolean_value && !node_census_logical_runtime(s, b, completion);
+        }
+    }
+    return result;
+}
+
 // check_common_atomic_member's test of member access `node`, with its operand's type read through the view: whether
 // the operand is an atomic struct or union (an arrow's pointer after its lvalue conversion).
 static bool node_view_atomic_member(const NodeCensusScratch* s, uint32_t node)
@@ -1795,7 +2056,13 @@ static uint64_t node_census_node(NodeCensusScratch* s, uint32_t node, uint32_t r
         const bool a_safe = node_census_integer_constant(s, a, &value) && value >= 0;
         const bool b_safe = node_census_integer_constant(s, b, &value) && value >= 0;
         const bool mixed = (a_wide && bs && !b_safe) || (b_wide && as && !a_safe);
-        tests |= integers && mixed ? UINT64_C(1) << NODE_CENSUS_SIGN_COMPARE : 0;
+        bool warn = integers && mixed;
+        if (warn && (flags & BUSTER_CHECK_ICE) != 0)
+        {
+            const CheckValue comparison = node_view_value(s, node);
+            warn = !check_action_integer_constant(&comparison, 0);
+        }
+        tests |= warn ? UINT64_C(1) << NODE_CENSUS_SIGN_COMPARE : 0;
     }
     if (policy->ordered && op >= CHECK_OP_LESS && op <= CHECK_OP_GREATER_EQUAL && binary)
     {
@@ -1821,6 +2088,7 @@ static uint64_t node_census_node(NodeCensusScratch* s, uint32_t node, uint32_t r
     {
         tests |= UINT64_C(1) << NODE_CENSUS_STRING_PLUS_INT;
     }
+    tests |= policy->tautology && node_census_tautology(s, node) ? UINT64_C(1) << NODE_CENSUS_TAUTOLOGY : 0;
     const bool packed = s->records != NULL ? s->packed_unit : token < parser->tokens.count && s->packed[token] != 0;
     tests |= op == CHECK_OP_ADDRESS && policy->packed_member && packed ? UINT64_C(1) << NODE_CENSUS_PACKED_MEMBER : 0;
     if ((op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF) && a < graph->count)
@@ -1838,7 +2106,7 @@ static uint64_t node_census_node(NodeCensusScratch* s, uint32_t node, uint32_t r
         }
         tests |= effect || expression_alignof || decays ? UINT64_C(1) << NODE_CENSUS_UNEVALUATED : 0;
     }
-    tests |= op != CHECK_OP_VALUE && node_census_constants(s, node) ? UINT64_C(1) << NODE_CENSUS_CONSTANT : 0;
+    tests |= op != CHECK_OP_VALUE && (node_census_constants(s, node) || node_census_constant_logical(s, node)) ? UINT64_C(1) << NODE_CENSUS_CONSTANT : 0;
     // The parser's tree: parentheses.
     const uint32_t count = parser->tokens.count;
     const uint8_t role = token < count ? parser->tree.roles[token] : PARSE_ROLE_NONE;
@@ -2578,9 +2846,13 @@ static void node_tests_tables(NodeCensusScratch* s, const TypeTable* types)
         // A call's callee and arguments and a comma's discard are read at each, and the third operand of a conditional
         // (or of an operator outside the set); a member's record only in a unit with an atomic one, a comparison's
         // operands' signs and an assignment's names only under their warnings.
+        // The operators the CFG builder's observer may hear of (node_census_tautology) under its warnings.
+        const bool tautology = op == CHECK_OP_EQUAL || op == CHECK_OP_NOT_EQUAL || op == CHECK_OP_BIT_OR || op == CHECK_OP_LOGICAL_AND ||
+                               op == CHECK_OP_LOGICAL_OR;
         const bool always = op == CHECK_OP_CALL || op == CHECK_OP_CONDITIONAL || op == CHECK_OP_COMMA ||
                             !node_census_coded(op) || (types->atomic_records && (op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW)) ||
-                            (policy->sign_compare && comparison) || (policy->self_assign && op == CHECK_OP_ASSIGN);
+                            (policy->sign_compare && comparison) || (policy->self_assign && op == CHECK_OP_ASSIGN) || (policy->tautology && tautology) ||
+                            (policy->constant_logical && (op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR));
         s->own_classes[code] = (uint8_t)((!node_census_coded(op) ? BUSTER_NODE_TESTS_CLASS_UNCODED : 0) | (op == CHECK_OP_ADDRESS ? BUSTER_NODE_TESTS_CLASS_ADDRESS : 0) |
                                          (copies ? BUSTER_NODE_TESTS_CLASS_COPIES : 0) | (node_census_modifies(op) ? BUSTER_NODE_TESTS_CLASS_WRITE : 0) |
                                          (order && policy->ordered && !always ? BUSTER_NODE_TESTS_CLASS_QUIET_ORDER : 0) | (!leaf && always ? BUSTER_NODE_TESTS_CLASS_ALWAYS : 0));
@@ -2756,6 +3028,7 @@ static __attribute__((noinline)) uint64_t node_tests_operator(const NodeCensusSc
                            ((first_property & BUSTER_NODE_TESTS_OPERAND_CONVERTS) != 0) != ((second_property & BUSTER_NODE_TESTS_OPERAND_CONVERTS) != 0);
         tests |= op == CHECK_OP_ADD && policy->string_plus_int && binary && (node_census_string(program, graph->operand0[node]) || node_census_string(program, graph->operand1[node])) ?
                  UINT64_C(1) << NODE_CENSUS_STRING_PLUS_INT : 0;
+        tests |= policy->tautology && node_census_tautology(s, node) ? UINT64_C(1) << NODE_CENSUS_TAUTOLOGY : 0;
         // A cast of a pointer, or of what a cast converts to one, to an integer narrower than it, or to an enumeration.
         if (op == CHECK_OP_CAST && policy->pointer_casts && (first_bits & BUSTER_NODE_CENSUS_TYPE_CONVERTS) != 0)
         {
@@ -2804,7 +3077,7 @@ static __attribute__((noinline)) uint64_t node_tests_operator(const NodeCensusSc
             trigger = node_tests_constants(s, r, node, op, o, &fires);
         }
     }
-    tests |= fires ? UINT64_C(1) << NODE_CENSUS_CONSTANT : 0;
+    tests |= fires || node_census_constant_logical(s, node) ? UINT64_C(1) << NODE_CENSUS_CONSTANT : 0;
     if (trigger != NODE_TESTS_TRIGGERS)
     {
         node_tests_send(r, trigger, visit, visits, counts);

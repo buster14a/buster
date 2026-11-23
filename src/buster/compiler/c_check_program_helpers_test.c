@@ -117,29 +117,37 @@ static void check_test_program_math_helpers(CheckTest* test)
         };
         CheckProgramHelpers helpers;
         const bool planned = check_program_helpers(&helpers, &program, &output, &scratch);
-        check_test_expect(test, planned && helpers.count == 14 && helpers.use_count == 15 && helpers.uses[14].helper == 2 && scratch.length == 0,
-                          "all fourteen math helper signatures deduplicate and folded copysign has no runtime helper");
+        // copysign and copysignf, runtime or folded, plan no helper: the lowering computes them in place (#1373).
+        bool uses_ordered = planned;
+        for (uint32_t u = 0; planned && u < helpers.use_count; u += 1)
+        {
+            const uint32_t node = u < 2 ? u : u + 2;
+            uses_ordered &= helpers.uses[u].node == node && helpers.uses[u].helper == u;
+        }
+        check_test_expect(test, planned && helpers.count == 12 && helpers.use_count == 12 && uses_ordered && scratch.length == 0,
+                          "the twelve math helper signatures but copysign's are planned, and no copysign has a runtime helper");
         for (uint32_t i = 0; planned && i < helpers.count; i += 1)
         {
             const CheckProgramHelper* helper = helpers.items + i;
-            const bool square_root = i < 2;
-            const bool copy = i == 2 || i == 3;
-            const TypeId floating = (i & 1) != 0 ? BUSTER_TYPE_FLOAT : BUSTER_TYPE_DOUBLE;
-            check_test_expect(test, helper->id == ids[i] && helper->symbol == 5 + i && helper->floating_type == floating &&
-                                   helper->math_kind == (CheckBuiltinMathKind)(CHECK_BUILTIN_MATH_SQRT + i / 2) &&
-                                   helper->result_type == BUSTER_TYPE_ULONG && helper->parameter_count == (square_root || copy ? 2 : 1) &&
+            const uint32_t row = i < 2 ? i : i + 2;
+            const bool square_root = row < 2;
+            const TypeId floating = (row & 1) != 0 ? BUSTER_TYPE_FLOAT : BUSTER_TYPE_DOUBLE;
+            check_test_expect(test, helper->id == ids[row] && helper->symbol == 5 + i && helper->floating_type == floating &&
+                                   helper->math_kind == (CheckBuiltinMathKind)(CHECK_BUILTIN_MATH_SQRT + row / 2) &&
+                                   helper->result_type == BUSTER_TYPE_ULONG && helper->parameter_count == (square_root ? 2 : 1) &&
                                    helper->parameter_types[0] == BUSTER_TYPE_ULONG &&
-                                   helper->parameter_types[1] == (square_root || copy ? BUSTER_TYPE_ULONG : BUSTER_TYPE_VOID) &&
+                                   helper->parameter_types[1] == (square_root ? BUSTER_TYPE_ULONG : BUSTER_TYPE_VOID) &&
                                    helper->requires_errno_address == square_root && helper->compiler_barrier &&
-                                   helper->reads_fp_environment == (i != 3) && helper->may_raise_fp_exceptions == (i != 3) &&
-                                   helper->may_raise_inexact == (i < 2 || i >= 12) && helper->code.count != 0 &&
+                                   helper->reads_fp_environment && helper->may_raise_fp_exceptions &&
+                                   helper->may_raise_inexact == (row < 2 || row >= 12) && helper->code.count != 0 &&
                                    helper->code.reference_count == 0 && !helper->terminates,
                               "math helper keeps floating semantics separate from its raw integer bit transport ABI");
         }
         const uint64_t full = output.length;
         arena_pop_to(&output, 0);
         const CheckBuiltinFloatEffect saved = effects[0];
-        for (uint32_t mutation = 0; mutation < 8; mutation += 1)
+        const CheckBuiltinFloatEffect saved_copy = effects[2];
+        for (uint32_t mutation = 0; mutation < 9; mutation += 1)
         {
             Arena bounded = output;
             CheckProgramStatus expected = CHECK_PROGRAM_INVALID;
@@ -161,12 +169,14 @@ static void check_test_program_math_helpers(CheckTest* test)
                     bounded.capacity = full - 1;
                     expected = CHECK_PROGRAM_RESOURCE;
                 } break;
+                case 8: effects[2].converted_arguments[1].type = BUSTER_TYPE_FLOAT; break;
             }
             CheckProgramHelpers rejected;
             check_test_expect(test, !check_program_helpers(&rejected, &program, &bounded, &scratch) && rejected.status == expected &&
                                    rejected.count == 0 && rejected.items == NULL && rejected.uses == NULL && bounded.length == 0 && scratch.length == 0,
                               "math planner rejects malformed obligations or short output without publishing a partial unit");
             effects[0] = saved;
+            effects[2] = saved_copy;
         }
     }
     check_test_types_close(&types);

@@ -2237,8 +2237,11 @@ static Tier1EmitError tier1_emit_cfg_aggregate_result(const IrFunction* function
         const int32_t staged = tier1_emit_staging_part(tier1_select_result_slot(parts, k), parts[k].bytes);
         error = tier1_select_part_direct(parts[k]) || tier1_emit_copy_bytes(buffer, BUSTER_TIER1_SELECT_SCRATCH, X86_REGISTER_RSP, staged, source, parts[k].offset, parts[k].bytes) ? error : TIER1_EMIT_MEMORY;
     }
-    for (uint32_t k = 0; error == TIER1_EMIT_OK && k < part_count; k += 1)
+    // Then each part's register, a general register's loaded straight from `source` into `source` itself last
+    // (tier1_select_result_order).
+    for (uint32_t ordered = 0; error == TIER1_EMIT_OK && ordered < part_count; ordered += 1)
     {
+        const uint32_t k = tier1_select_result_order(parts, part_count, source, ordered);
         const bool vector_part = (parts[k].reg & 0xe0) == BUSTER_ABI_REGISTER_VECTOR;
         const bool direct = tier1_select_part_direct(parts[k]);
         X86Instruction loads[3] = {

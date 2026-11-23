@@ -225,9 +225,16 @@ Every body is parsed and checked by default. `-flazy-system-headers` optionally
 skips semantic checking of provably unreferenced static and nonemitting inline
 bodies defined in system headers, identified by `-isystem` or system-header
 pragmas. Declarations, ordinary-source bodies, referenced bodies and all syntax
-are still checked. This mode intentionally accepts a system header whose only
-semantic error is in a deferred body; it departs from standard C diagnostics
-and from Clang's default behavior, as authorized in
+are still checked, with one exception: where the tree planner proves that no
+token outside a deferred body names a deferred definition but its own
+declarator, and that definition's header declares no tag (no `struct`, `union`
+or `enum` keyword and no brace) and holds no assembly or static assertion, its
+whole header is skipped with its body (#3307). Its specifiers, declarator and
+attributes are then not read, so nothing is declared and no diagnostic is given
+for them; `<immintrin.h>`'s 4,806 intrinsics are such definitions. This mode
+intentionally accepts a system header whose only semantic error is in a
+deferred body or such a header; it departs from standard C diagnostics and from
+Clang's default behavior, as authorized in
 [#155](https://github.com/buster14a/buster/issues/155).
 The unit's end has its warnings in both modes: an internal function used and
 never defined is reported from the tokens that were read, so that a use only a
@@ -256,7 +263,7 @@ An allocation failure is a resource failure, not an admission failure.
 The ordinary eager path does not run either planner. The selected reader still
 checks headers and demanded bodies in original source order, and emission
 still follows the checked semantic references. With `--time-stages`, a
-`time-lazy` row reports the route (`eager`, `tree` or `bindings`), scalar-replay token count, body selection,
+`time-lazy` row reports the route (`eager`, `tree` or `bindings`), scalar-replay token count, body selection, skipped headers,
 references and retained bytes; planning remains charged to `check-input`.
 Use those counters to distinguish an admitted tree plan from a grammar fallback
 when measuring a workload. The new planner's performance requires the approved
@@ -2795,9 +2802,23 @@ What the lowering covers past scalars (#145's programs):
   slot of the union's size and alignment (`getIndirectResult`;
   `abi_finish_transparent` records the union in the ABI table's `transparent`
   column, which `abi_assign`'s vector path and `abi_assign_call` read), and `va_arg` reads
-  the member from a slot of the union's size and alignment. Such a union past
-  two eightbytes, or whose first member passes as an aggregate, a pair, a
-  vector or in memory, is refused by name. And a union made transparent, by a
+  the member from a slot of the union's size and alignment. Since #1844 the
+  member may be an aggregate, of eightbytes or in memory, and the union of any
+  size. An aggregate in memory passes as clang's `getIndirectResult` of the
+  member gives it: a byval slot of the union's bytes at the member's alignment,
+  or an integer of 8 bytes (a register LLVM has, else the low eightbyte alone
+  in an 8-byte slot, `LOW`) for a member of 8 bytes or less aligned to 8 or
+  less where clang has no general register left, and so does the union in the
+  same case. Past 16 bytes, the member's registers or eightbytes' slots carry
+  the union's first 16 bytes alone (`BUSTER_ABI_FLAG_FIRST`, which Tier 0's
+  location helpers, Tier 1's parts and `va_arg`'s register plan read; Tier 1
+  leaves a function with such a location on the stack whole to Tier 0). A
+  member's value converted to such a union, of a member passed by its bytes,
+  goes through a zeroed object of the union's size and alignment, as clang's
+  code's memset and memcpy make it (`check_lower_transparent_value`), so that
+  the union's slot is never copied from past the member. A first member that
+  passes as a pair, a vector or a scalar in memory is still refused by name,
+  and so is a printer's such union of `__builtin_dump_struct`. And a union made transparent, by a
   later declaration's attribute, after a function definition or a static
   object's initializer that names a function, whose first member passes
   otherwise than the union does (its registers, its stack or its extension):
@@ -2815,7 +2836,9 @@ What the lowering covers past scalars (#145's programs):
   another type, is refused so too, though clang's code would pass it as its
   member. `test-checker`'s programs
   (`c_check_program_transparent_test.c`) run each kind of member value, union
-  values, unnamed arguments and `va_arg`, in registers and on the stack,
+  values, unnamed arguments and `va_arg`, in registers and on the stack, and
+  unions of a slot of their own of each such member
+  (`BUSTER_CHECK_TEST_TRANSPARENT_OWN_UNIONS`),
   against clang -O0's build of the same source, calling the harness's clang
   functions and called by them through pointers, with the registers a
   `short`, an `unsigned short` and a `_Bool` arrive in read as 32 bits; and
@@ -7316,8 +7339,9 @@ printing and member-recovery checks. Clang is the external behavioral oracle;
 the fixtures and implementation are original. `--query-bool-only` checks the
 erased and successful-expression conversions of
 [#2899](https://github.com/buster14a/buster/issues/2899).
-`-Wconstant-logical-operand`, absent from ordinary expressions too, is tracked
-in [#2900](https://github.com/buster14a/buster/issues/2900).
+`-Wconstant-logical-operand` (#2900) is reported as each logical expression
+is built, in ordinary expressions and assertions alike, before an assertion's
+failure (`--constant-logical-only`, [the checker guide](commands/checker.md)).
 The ordinary equality emitter's extra assignment-suggestion note for a
 nonassignable left operand is tracked in
 [#2906](https://github.com/buster14a/buster/issues/2906).
@@ -8783,6 +8807,28 @@ every program fixture's tokens and twice them, and its program fixtures
 compile and run the deep checker sources (`quadratic-statement-expressions.c`,
 `quadratic-vla-bounds.c`), whose walks pass 717 parents in 1,744 tokens and 856
 in 1,005 (22,673 and 21,099 without kept answers, which fail those bounds).
+
+Whether a jump can enter a statement other than at its start (a label, or a
+case of a switch outside it, in its tokens: `check_control_enterable`, clang's
+`ContainsLabel`) is asked of each statement a switch's arms, a constant `if`'s
+dropped arm or a sequence after a jump leaves; walking the statement's first and
+last children and scanning its tokens made switches nested N deep cost about
+N²/2 tokens. Where that walk passes 64
+steps or the statement 4,096 tokens, the body's subtree facts answer
+(`check_control_enterable_facts`, `CheckControlExtents`): each node's first and
+last tokens and the least and greatest key of its subtree (a label's 0, a case's
+switch), computed once a node in reverse preorder, which are exactly what the
+walk and the scan find because the parse tree's subtrees are runs of tokens. A
+statement they hold answers from them at once. They are in an arena of their
+own, reserved by the first body that needs them and released with the program's
+run, so ordinary units, whose walks stay short, touch nothing new. Switches
+nested 16,000 deep took 2.15 s at `-fsyntax-only` and take 0.050 s (a Develop
+build in a 4-CPU cloud container, not the 9700X). `CheckProgramOptions.enterable_work` tallies the
+walks' steps, the scans' tokens and the facts' nodes; the program fixture
+`quadratic-switches.c` (switches, a constant switch whose dropped arms a label
+keeps and blocks that hold an outer switch's case, each nested 200 deep) takes
+at most two a token (976,488 steps for 5,161 tokens without the facts, which
+fails that bound).
 
 A goto's or a case's refusal reads as clang's jump scope checker words it
 (#1942): "cannot jump from this goto statement to its label" or "cannot jump
@@ -11814,6 +11860,36 @@ which can disable it (`<= 8`, `!= (size_t)-1`).
   isn't constant).
   `-Wreturn-type`'s walk takes the same truth, so `if (n || 1) return 1;` ends
   a function without the warning.
+- **The CFG builder's heuristics** (#2990, `c_check_program_cfg.c`). Clang's
+  `tryEvaluateBool` also decides some conditions that aren't constants, from
+  the condition's top node: `x * 0` and `x & 0` (an integer constant 0
+  operand) are false; an equality of a bitwise `&` or `|` with an integer
+  literal it can't give (`(x & 8) == 4`), or of a boolean value with a literal
+  other than 0 and 1 (`(x < y) == 10`), and a relational comparison of a
+  boolean value with such a literal (`2 < (x == 1)`) are decided; a `|` with one
+  nonzero literal constant (`x | 1`) is true; and an `&&` or `||` of two
+  unknown operands that are a value and its negation (`x && !x`) or two
+  comparisons of one operand with constants that always give one value
+  (`x == 1 && x == 2`, `x < 5 || x > 3`, sampled at five values) is decided.
+  Parentheses, a `!` or a cast at the top stop them (`if ((x * 0))`), and a
+  literal with an implicit conversion is none to them; a logical condition's
+  operands are read past their parentheses (VisitLogicalOperator), and a do
+  statement's condition is read whole. `check_program_branch_truth` applies
+  them, so the runtime warnings, `-Wreturn-type` and the uninitialized flow
+  prune as clang does. The same rules' hits are clang's
+  `-Wtautological-bitwise-compare`, `-Wtautological-overlap-compare` and
+  `-Wtautological-negation-compare` (`-Wtautological-compare`'s, so `-Wmost`'s
+  and `-Wall`'s): `check_common_cfg_tautologies` (`c_check_common_cfg.c`) calls
+  the rules where the builder calls `tryEvaluateBool`, in its order (statements
+  last first, an operator's right operand first, a comparison's own call before
+  its operands'), with its cache (a logical operator's and an equality's once,
+  a `|`'s each time: `x | 1 || y` warns twice), drops a rule's warning whose
+  expression has a macro's token (`HasMacroID`), and publishes them at the
+  body's end before its deferred runtime warnings (`PP_DIAGNOSTIC_CFG`). A body
+  clang ends after the unit's first error gets none. Not yet modeled: a for
+  statement's increment, which the builder visits before the body, and a
+  statement expression's statements, which it visits where the expression
+  stands, take the order of their roots.
 - **Const assignment** (#1447). clang's `DiagnoseConstAssignment`
   (`check_semantic_const_assignment`) walks an assignment's lvalue through
   members, subscripts and vector elements to a variable or a direct call. It
@@ -12116,6 +12192,24 @@ later independent errors, including repeated invalid redeclarations. A
 the merged weak attribute after the redeclaration. These
 paths share the existing declaration-recovery and overload machinery.
 
+Clones made before any declaration of ALIAS (#2934) are pushed unchecked, so
+ALIAS's first declaration looks the name up among them: only the newest is the
+one it merges with (or conflicts with, or redefines), and the older ones stay
+in its lookup (`check_input_symbol_clones_before`). Function clones with a
+function declaration form an overload set: a compatible declaration replaces
+the newest clone and heads the older ones as an overload candidate of its own
+(`CheckInputSymbolPragma.early`, `check_input_symbol_overload_use`), so calls
+select by argument type and a typed address is `'<overloaded function type>'`
+with the declaration's note first; a conflicting one drops out, leaving the
+clones. A set holding an object, or an object declaration against function
+clones, is ambiguous: the declaration is "redefinition of 'A' as different
+kind of symbol" against the lookup's representative, and each later reference
+to an object set is ambiguous, listing the clones and the invalid
+redeclarations without an earlier declaration. A reference to function clones
+after an object declaration, clang's `'<overloaded function type>'` operand,
+remains refused by name. Without a use, the declaration carries the first
+clone's alias and the later records attach nothing.
+
 Compatible declarations carry the weak alias through
 `check_input_symbol_alias`, which `check_input_symbol_finish` runs in the order
 clang creates the clones (where each TARGET becomes visible, then by
@@ -12131,7 +12225,8 @@ retain deferred checking; function clone overload sets use the existing
 source-ordered overload path. This remains separate from ordinary weak binding.
 The clone can supply an ELF symbol where the unit never declares ALIAS; this
 does not add a synthetic parser declaration for C expression references to
-such an otherwise undeclared name.
+such an otherwise undeclared name (#2934's first shape: clang accepts such a
+reference, which buster still reports as an undeclared function or identifier).
 
 A declared target without an emitted definition is accepted by syntax checking
 and diagnosed at object generation with "alias must point to a defined variable
