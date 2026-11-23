@@ -414,6 +414,19 @@ static __attribute__((noinline)) void dominators_sweep(const DominatorCfg* cfg, 
     windows[0] = 1;
     idom[0] = 0;
     sweep->jumps_limit = 0;
+    // Every reachable edge into entry retreats; the loop pass reads them as entry's backedges.
+    for (uint32_t edge = offsets[cfg->entry]; edge < offsets[(uint64_t)cfg->entry + 1]; edge += 1)
+    {
+        const uint32_t source = rpo_index[predecessors[edge]];
+        if (source != BUSTER_DOMINATOR_NONE)
+        {
+            *retreating = (DominatorEdge){
+                .source = source,
+                .target = 0,
+            };
+            retreating += 1;
+        }
+    }
     for (uint32_t number = 1; number < reachable; number += 1)
     {
         const uint32_t block = rpo[number];
@@ -662,7 +675,7 @@ static void dominators_frontiers(const DominatorCfg* cfg, Dominators* result)
 }
 
 // Kosaraju's reverse walk, followed by DFS-ancestor edge tests. Mark whole SCCs, a conservative LICM boundary.
-static void dominators_components(const DominatorCfg* cfg, Dominators* result, uint32_t* component, uint32_t* stack, uint8_t* flags)
+static void dominators_components(const DominatorCfg* cfg, Dominators* result, uint32_t* component, uint32_t* stack, uint8_t* flags, const DominatorEdge* retreating, uint32_t retreating_count)
 {
     memset(component, 0xff, (uint64_t)cfg->block_count * sizeof(uint32_t));
     memset(flags, 0, cfg->block_count);
@@ -693,18 +706,13 @@ static void dominators_components(const DominatorCfg* cfg, Dominators* result, u
             components += 1;
         }
     }
-    for (uint32_t order = 0; order < result->reachable_count; order += 1)
+    // The DFS retreating edges are the sweep's: their targets are their sources' DFS ancestors (dominators_order).
+    for (uint32_t edge = 0; edge < retreating_count; edge += 1)
     {
-        const uint32_t block = result->rpo[order];
-        for (uint32_t edge = cfg->successor_offsets[block]; edge < cfg->successor_offsets[(uint64_t)block + 1]; edge += 1)
+        const uint32_t block = result->rpo[retreating[edge].source];
+        if (!dominators_dominates(result, result->rpo[retreating[edge].target], block))
         {
-            const uint32_t target = cfg->successors[edge];
-            // A retreating edge's target is its source's DFS ancestor (dominators_order).
-            const bool ancestor = result->rpo_index[target] <= order;
-            if (ancestor && !dominators_dominates(result, target, block))
-            {
-                flags[component[block]] = 1;
-            }
+            flags[component[block]] = 1;
         }
     }
     for (uint32_t block = 0; block < cfg->block_count; block += 1)
@@ -745,7 +753,7 @@ static void dominators_loop_body(const DominatorCfg* cfg, const Dominators* resu
     }
 }
 
-static DominatorStatus dominators_loops(Arena* arena, Arena* scratch, const DominatorCfg* cfg, DominatorOptions options, Dominators* result, uint32_t* workspace, uint64_t scratch_start)
+static DominatorStatus dominators_loops(Arena* arena, Arena* scratch, const DominatorCfg* cfg, DominatorOptions options, Dominators* result, uint32_t* workspace, const DominatorEdge* retreating, uint32_t retreating_count, uint64_t scratch_start)
 {
     const uint32_t count = cfg->block_count;
     const uint64_t row_bytes = result->row_words * sizeof(uint64_t);
@@ -760,16 +768,13 @@ static DominatorStatus dominators_loops(Arena* arena, Arena* scratch, const Domi
     DominatorStatus status = result->loop_depth != 0 && result->block_loop != 0 && result->irreducible != 0 && stack != 0 && flags != 0 ? DOMINATOR_OK : DOMINATOR_NO_MEMORY;
     if (status == DOMINATOR_OK)
     {
-        dominators_components(cfg, result, workspace, stack, flags);
+        dominators_components(cfg, result, workspace, stack, flags, retreating, retreating_count);
         memset(flags, 0, count);
-        for (uint32_t order = 0; order < result->reachable_count; order += 1)
+        // A backedge's target dominates its source, so it is a DFS ancestor: the edge retreats.
+        for (uint32_t edge = 0; edge < retreating_count; edge += 1)
         {
-            const uint32_t block = result->rpo[order];
-            for (uint32_t edge = cfg->successor_offsets[block]; edge < cfg->successor_offsets[(uint64_t)block + 1]; edge += 1)
-            {
-                const uint32_t target = cfg->successors[edge];
-                flags[target] |= dominators_dominates(result, target, block);
-            }
+            const uint32_t target = result->rpo[retreating[edge].target];
+            flags[target] |= dominators_dominates(result, target, result->rpo[retreating[edge].source]);
         }
         for (uint32_t block = 0; block < count; block += 1)
         {
@@ -894,6 +899,8 @@ static DominatorStatus dominators_analyze(Arena* arena, Arena* scratch, const Do
         }
         DominatorFrame* frames = 0;
         uint32_t* workspace = 0;
+        DominatorEdge* retreating = 0;
+        uint32_t retreating_count = 0;
         if (status == DOMINATOR_OK && count != 0)
         {
             candidate.idom = arena_push_array(arena, count, sizeof(uint32_t), _Alignof(uint32_t));
@@ -903,11 +910,20 @@ static DominatorStatus dominators_analyze(Arena* arena, Arena* scratch, const Do
             candidate.tree_children = arena_push_array(arena, count, sizeof(uint32_t), _Alignof(uint32_t));
             candidate.preorder = arena_push_array(arena, count, sizeof(uint32_t), _Alignof(uint32_t));
             candidate.subtree_end = arena_push_array(arena, count, sizeof(uint32_t), _Alignof(uint32_t));
-            frames = arena_push_array(scratch, count, sizeof(DominatorFrame), _Alignof(DominatorFrame));
-            workspace = arena_push_array(scratch, count, sizeof(uint32_t), _Alignof(uint32_t));
-            if (candidate.idom == 0 || candidate.rpo == 0 || candidate.rpo_index == 0 || candidate.tree_offsets == 0 || candidate.tree_children == 0 || candidate.preorder == 0 || candidate.subtree_end == 0 || frames == 0 || workspace == 0)
+            // One push for the analysis-long scratch: the DFS and tree stack, a block column the tree and the SCC pass
+            // reuse, and the sweep's retreating edges, which the loop pass reads again. Tiny CFGs pay for each push.
+            const uint64_t frame_bytes = (uint64_t)count * sizeof(DominatorFrame);
+            const uint64_t workspace_bytes = (uint64_t)count * sizeof(uint32_t);
+            uint8_t* columns = arena_push(scratch, frame_bytes + workspace_bytes + (uint64_t)cfg->edge_count * sizeof(DominatorEdge), _Alignof(DominatorFrame));
+            if (candidate.idom == 0 || candidate.rpo == 0 || candidate.rpo_index == 0 || candidate.tree_offsets == 0 || candidate.tree_children == 0 || candidate.preorder == 0 || candidate.subtree_end == 0 || columns == 0)
             {
                 status = DOMINATOR_NO_MEMORY;
+            }
+            else
+            {
+                frames = (DominatorFrame*)columns;
+                workspace = (uint32_t*)(columns + frame_bytes);
+                retreating = (DominatorEdge*)(columns + frame_bytes + workspace_bytes);
             }
         }
         if (status == DOMINATOR_OK && count != 0)
@@ -915,10 +931,8 @@ static DominatorStatus dominators_analyze(Arena* arena, Arena* scratch, const Do
             dominators_order(cfg, &candidate, frames);
             const uint64_t phase_start = scratch->length;
             const uint32_t reachable = candidate.reachable_count;
-            // One push for the solver's columns: windows and jumps (8-byte elements), then idom, the jump stack and the
-            // retreating edges (4-byte elements). Tiny CFGs pay for each push.
-            const uint64_t column_bytes = (uint64_t)reachable * (sizeof(uint64_t) + sizeof(DominatorJump) + 2 * sizeof(uint32_t));
-            uint8_t* columns = arena_push(scratch, column_bytes + (uint64_t)cfg->edge_count * sizeof(DominatorEdge), _Alignof(uint64_t));
+            // One push for the solver's columns: windows and jumps (8-byte elements), then idom and the jump stack.
+            uint8_t* columns = arena_push(scratch, (uint64_t)reachable * (sizeof(uint64_t) + sizeof(DominatorJump) + 2 * sizeof(uint32_t)), _Alignof(uint64_t));
             if (columns == 0)
             {
                 status = DOMINATOR_NO_MEMORY;
@@ -930,9 +944,10 @@ static DominatorStatus dominators_analyze(Arena* arena, Arena* scratch, const Do
                     .jumps = (DominatorJump*)(columns + (uint64_t)reachable * sizeof(uint64_t)),
                     .idom = (uint32_t*)(columns + (uint64_t)reachable * (sizeof(uint64_t) + sizeof(DominatorJump))),
                     .stack = (uint32_t*)(columns + (uint64_t)reachable * (sizeof(uint64_t) + sizeof(DominatorJump) + sizeof(uint32_t))),
-                    .retreating = (DominatorEdge*)(columns + column_bytes),
+                    .retreating = retreating,
                 };
                 dominators_sweep(cfg, &candidate, &sweep);
+                retreating_count = sweep.retreating_count;
                 dominators_tree(&candidate, sweep.idom, frames, workspace);
                 if (!dominators_settled(&candidate, &sweep))
                 {
@@ -963,7 +978,7 @@ static DominatorStatus dominators_analyze(Arena* arena, Arena* scratch, const Do
             }
             if (status == DOMINATOR_OK && (options.outputs & BUSTER_DOMINATOR_LOOPS) != 0)
             {
-                status = dominators_loops(arena, scratch, cfg, options, &candidate, workspace, scratch_start);
+                status = dominators_loops(arena, scratch, cfg, options, &candidate, workspace, retreating, retreating_count, scratch_start);
             }
         }
         dominators_record_scratch(&candidate, scratch, scratch_start);
