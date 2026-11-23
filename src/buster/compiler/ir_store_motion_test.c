@@ -9,8 +9,10 @@
 // fixture the pass changed: the input, the result, the result promoted (ssa_ir.c, whose own verification takes it)
 // and the promoted one optimized run in the shared interpreter on equal memory, with a pointer parameter at @1's
 // bytes, in @3's or in a buffer of its own, at bounds from zero up, and must leave the same bytes, return the same
-// value and end with the same status. The promoted result has no slot the input's promotion hasn't, and its loads are
-// the input's less those the pass gave a slot, plus one a key. Every fault (BUSTER_IR_STORE_MOTION_MUTATE_*) must be
+// value and end with the same status. A quarter of the trials bind the symbols read-only (#3346): the input that stores
+// nothing runs, and so must the result, which then may store nothing to a symbol either, not even the value it holds. The
+// promoted result has no slot the input's promotion hasn't but the sunk keys' dummy, and its loads are the input's less
+// those the pass gave a slot, plus one a key and one a write-back. Every fault (BUSTER_IR_STORE_MOTION_MUTATE_*) must be
 // rejected by the verification or the oracle on some fixture. The scans (the symbols' filter and the classification)
 // are checked against their definitions on random columns at every length, and the entry point's contract with arenas
 // of every short size. --print prints a fixture's result. Include after ir_store_motion.c, ir_optimize_text_test.c
@@ -26,8 +28,8 @@
 #define BUSTER_IR_STORE_MOTION_TEST_ENTRY 8u
 #define BUSTER_IR_STORE_MOTION_TEST_CALLEE 9u
 #define BUSTER_IR_STORE_MOTION_TEST_BUFFER_SYMBOL 10u
-#define BUSTER_IR_STORE_MOTION_TEST_MUTANTS 6u
-#define BUSTER_IR_STORE_MOTION_TEST_DIGEST UINT64_C(0x201413c5e9423416)
+#define BUSTER_IR_STORE_MOTION_TEST_MUTANTS 9u
+#define BUSTER_IR_STORE_MOTION_TEST_DIGEST UINT64_C(0x3b4137df7ebe8689)
 
 // The options' list: the bytes of the test's distinct objects, by symbol.
 static const uint32_t ir_store_motion_test_bytes[BUSTER_IR_STORE_MOTION_TEST_SYMBOLS] = { 0, 8, 8, 64, 0, 0, 4, 16 };
@@ -51,50 +53,68 @@ struct IrStoreMotionTestFixture
     // A role per parameter: 'p' a pointer (at @1's bytes, in @3's, or in the buffer), 'n' the loop's bound, 'r' a count
     // of rows (0 to 3), 'k' a small scalar.
     const char* roles;
-    // The loops it moves keys in, the keys, the loads that read a slot and the stores a slot takes too.
+    // The loops it moves keys in, the keys, the loads that read a slot and the stores a slot takes, and the keys whose
+    // stores sink (#3346).
     uint32_t moved;
     uint32_t keys;
     uint32_t loads;
     uint32_t stores;
+    uint32_t sunk;
     // The outcome some loop of it has, or IR_STORE_MOTION_OUTCOME_COUNT; the refusal some key of it has, or
     // IR_STORE_MOTION_KEY_COUNT.
     uint32_t outcome;
     uint32_t refusal;
+    // Why some moved key's stores stayed, or IR_STORE_MOTION_SINK_COUNT where every moved key's sank.
+    uint32_t sink;
 };
 
 static const IrStoreMotionTestFixture ir_store_motion_test_fixtures[] = {
-    { .name = "basic", .roles = "n", .moved = 1, .keys = 2, .loads = 3, .stores = 2, .outcome = IR_STORE_MOTION_MOVED, .refusal = IR_STORE_MOTION_KEY_MOVED },
-    { .name = "conditional", .roles = "n", .moved = 1, .keys = 2, .loads = 3, .stores = 2, .outcome = IR_STORE_MOTION_MOVED, .refusal = IR_STORE_MOTION_KEY_MOVED },
+    { .name = "basic", .roles = "n", .moved = 1, .keys = 2, .loads = 3, .stores = 2, .sunk = 2, .outcome = IR_STORE_MOTION_MOVED, .refusal = IR_STORE_MOTION_KEY_MOVED, .sink = IR_STORE_MOTION_SINK_COUNT },
+    { .name = "conditional", .roles = "n", .moved = 1, .keys = 2, .loads = 3, .stores = 2, .sunk = 2, .outcome = IR_STORE_MOTION_MOVED, .refusal = IR_STORE_MOTION_KEY_MOVED, .sink = IR_STORE_MOTION_SINK_COUNT },
     // The outer loop takes both keys, the inner loop's accesses with them; the inner loop then has none.
-    { .name = "nested", .roles = "rn", .moved = 1, .keys = 2, .loads = 3, .stores = 2, .outcome = IR_STORE_MOTION_NO_KEY, .refusal = IR_STORE_MOTION_KEY_MOVED },
+    { .name = "nested", .roles = "rn", .moved = 1, .keys = 2, .loads = 3, .stores = 2, .sunk = 2, .outcome = IR_STORE_MOTION_NO_KEY, .refusal = IR_STORE_MOTION_KEY_MOVED, .sink = IR_STORE_MOTION_SINK_COUNT },
     // The outer loop calls; the inner one takes its key, from a preheader inside the outer loop.
-    { .name = "nested-call", .roles = "rn", .moved = 1, .keys = 1, .loads = 1, .stores = 1, .outcome = IR_STORE_MOTION_BARRIER, .refusal = IR_STORE_MOTION_KEY_MOVED },
-    { .name = "fields", .roles = "n", .moved = 1, .keys = 3, .loads = 4, .stores = 3, .outcome = IR_STORE_MOTION_MOVED, .refusal = IR_STORE_MOTION_KEY_MOVED },
-    { .name = "types", .roles = "n", .moved = 1, .keys = 4, .loads = 4, .stores = 4, .outcome = IR_STORE_MOTION_MOVED, .refusal = IR_STORE_MOTION_KEY_LIMIT },
-    { .name = "unknown-load", .roles = "pn", .moved = 1, .keys = 1, .loads = 1, .stores = 1, .outcome = IR_STORE_MOTION_MOVED, .refusal = IR_STORE_MOTION_KEY_MOVED },
-    { .name = "two-exits", .roles = "nk", .moved = 1, .keys = 2, .loads = 4, .stores = 2, .outcome = IR_STORE_MOTION_MOVED, .refusal = IR_STORE_MOTION_KEY_MOVED },
-    { .name = "do-while", .roles = "n", .moved = 1, .keys = 2, .loads = 3, .stores = 2, .outcome = IR_STORE_MOTION_MOVED, .refusal = IR_STORE_MOTION_KEY_MOVED },
-    { .name = "key-limit", .roles = "n", .moved = 1, .keys = 4, .loads = 4, .stores = 4, .outcome = IR_STORE_MOTION_MOVED, .refusal = IR_STORE_MOTION_KEY_LIMIT },
-    { .name = "slots", .roles = "n", .moved = 1, .keys = 2, .loads = 3, .stores = 2, .outcome = IR_STORE_MOTION_MOVED, .refusal = IR_STORE_MOTION_KEY_MOVED },
-    { .name = "unread", .roles = "n", .moved = 1, .keys = 1, .loads = 1, .stores = 1, .outcome = IR_STORE_MOTION_MOVED, .refusal = IR_STORE_MOTION_KEY_UNREAD },
-    { .name = "other-symbols", .roles = "n", .moved = 1, .keys = 1, .loads = 2, .stores = 1, .outcome = IR_STORE_MOTION_MOVED, .refusal = IR_STORE_MOTION_KEY_MOVED },
+    { .name = "nested-call", .roles = "rn", .moved = 1, .keys = 1, .loads = 1, .stores = 1, .sunk = 1, .outcome = IR_STORE_MOTION_BARRIER, .refusal = IR_STORE_MOTION_KEY_MOVED, .sink = IR_STORE_MOTION_SINK_COUNT },
+    { .name = "fields", .roles = "n", .moved = 1, .keys = 3, .loads = 4, .stores = 3, .sunk = 3, .outcome = IR_STORE_MOTION_MOVED, .refusal = IR_STORE_MOTION_KEY_MOVED, .sink = IR_STORE_MOTION_SINK_COUNT },
+    { .name = "types", .roles = "n", .moved = 1, .keys = 4, .loads = 4, .stores = 4, .sunk = 4, .outcome = IR_STORE_MOTION_MOVED, .refusal = IR_STORE_MOTION_KEY_LIMIT, .sink = IR_STORE_MOTION_SINK_COUNT },
+    { .name = "unknown-load", .roles = "pn", .moved = 1, .keys = 1, .loads = 1, .stores = 1, .outcome = IR_STORE_MOTION_MOVED, .refusal = IR_STORE_MOTION_KEY_MOVED, .sink = IR_STORE_MOTION_SINK_LOAD },
+    { .name = "two-exits", .roles = "nk", .moved = 1, .keys = 2, .loads = 4, .stores = 2, .sunk = 2, .outcome = IR_STORE_MOTION_MOVED, .refusal = IR_STORE_MOTION_KEY_MOVED, .sink = IR_STORE_MOTION_SINK_COUNT },
+    { .name = "do-while", .roles = "n", .moved = 1, .keys = 2, .loads = 3, .stores = 2, .sunk = 2, .outcome = IR_STORE_MOTION_MOVED, .refusal = IR_STORE_MOTION_KEY_MOVED, .sink = IR_STORE_MOTION_SINK_COUNT },
+    { .name = "key-limit", .roles = "n", .moved = 1, .keys = 4, .loads = 4, .stores = 4, .sunk = 4, .outcome = IR_STORE_MOTION_MOVED, .refusal = IR_STORE_MOTION_KEY_LIMIT, .sink = IR_STORE_MOTION_SINK_COUNT },
+    { .name = "slots", .roles = "n", .moved = 1, .keys = 2, .loads = 3, .stores = 2, .sunk = 2, .outcome = IR_STORE_MOTION_MOVED, .refusal = IR_STORE_MOTION_KEY_MOVED, .sink = IR_STORE_MOTION_SINK_COUNT },
+    { .name = "unread", .roles = "n", .moved = 1, .keys = 2, .loads = 1, .stores = 2, .sunk = 2, .outcome = IR_STORE_MOTION_MOVED, .refusal = IR_STORE_MOTION_KEY_MOVED, .sink = IR_STORE_MOTION_SINK_COUNT },
+    { .name = "other-symbols", .roles = "n", .moved = 1, .keys = 1, .loads = 2, .stores = 1, .sunk = 1, .outcome = IR_STORE_MOTION_MOVED, .refusal = IR_STORE_MOTION_KEY_MOVED, .sink = IR_STORE_MOTION_SINK_COUNT },
     // An indexed load of @3 and a load of half of @1 beside their keys: only a store that meets a key refuses it.
-    { .name = "met-loads", .roles = "n", .moved = 1, .keys = 2, .loads = 2, .stores = 2, .outcome = IR_STORE_MOTION_MOVED, .refusal = IR_STORE_MOTION_KEY_MOVED },
-    { .name = "refuse-call", .roles = "n", .outcome = IR_STORE_MOTION_BARRIER, .refusal = IR_STORE_MOTION_KEY_COUNT },
-    { .name = "refuse-volatile", .roles = "n", .outcome = IR_STORE_MOTION_BARRIER, .refusal = IR_STORE_MOTION_KEY_COUNT },
-    { .name = "refuse-fence", .roles = "n", .outcome = IR_STORE_MOTION_BARRIER, .refusal = IR_STORE_MOTION_KEY_COUNT },
-    { .name = "refuse-unknown-store", .roles = "pn", .outcome = IR_STORE_MOTION_UNKNOWN_STORE, .refusal = IR_STORE_MOTION_KEY_COUNT },
-    { .name = "refuse-indexed", .roles = "n", .outcome = IR_STORE_MOTION_NO_KEY, .refusal = IR_STORE_MOTION_KEY_MET },
-    { .name = "refuse-overlap", .roles = "n", .outcome = IR_STORE_MOTION_NO_KEY, .refusal = IR_STORE_MOTION_KEY_MET },
-    { .name = "refuse-bounds", .roles = "n", .outcome = IR_STORE_MOTION_NO_KEY, .refusal = IR_STORE_MOTION_KEY_BOUNDS },
-    { .name = "refuse-preheader", .roles = "nk", .outcome = IR_STORE_MOTION_PREHEADER, .refusal = IR_STORE_MOTION_KEY_COUNT },
-    { .name = "refuse-irreducible", .roles = "nk", .outcome = IR_STORE_MOTION_IRREDUCIBLE, .refusal = IR_STORE_MOTION_KEY_COUNT },
-    { .name = "refuse-type", .roles = "n", .outcome = IR_STORE_MOTION_NO_KEY, .refusal = IR_STORE_MOTION_KEY_TYPE },
+    { .name = "met-loads", .roles = "n", .moved = 1, .keys = 2, .loads = 2, .stores = 2, .outcome = IR_STORE_MOTION_MOVED, .refusal = IR_STORE_MOTION_KEY_MOVED, .sink = IR_STORE_MOTION_SINK_MET },
+    { .name = "refuse-call", .roles = "n", .outcome = IR_STORE_MOTION_BARRIER, .refusal = IR_STORE_MOTION_KEY_COUNT, .sink = IR_STORE_MOTION_SINK_COUNT },
+    { .name = "refuse-volatile", .roles = "n", .outcome = IR_STORE_MOTION_BARRIER, .refusal = IR_STORE_MOTION_KEY_COUNT, .sink = IR_STORE_MOTION_SINK_COUNT },
+    { .name = "refuse-fence", .roles = "n", .outcome = IR_STORE_MOTION_BARRIER, .refusal = IR_STORE_MOTION_KEY_COUNT, .sink = IR_STORE_MOTION_SINK_COUNT },
+    { .name = "refuse-unknown-store", .roles = "pn", .outcome = IR_STORE_MOTION_UNKNOWN_STORE, .refusal = IR_STORE_MOTION_KEY_COUNT, .sink = IR_STORE_MOTION_SINK_COUNT },
+    { .name = "refuse-indexed", .roles = "n", .outcome = IR_STORE_MOTION_NO_KEY, .refusal = IR_STORE_MOTION_KEY_MET, .sink = IR_STORE_MOTION_SINK_COUNT },
+    { .name = "refuse-overlap", .roles = "n", .outcome = IR_STORE_MOTION_NO_KEY, .refusal = IR_STORE_MOTION_KEY_MET, .sink = IR_STORE_MOTION_SINK_COUNT },
+    { .name = "refuse-bounds", .roles = "n", .outcome = IR_STORE_MOTION_NO_KEY, .refusal = IR_STORE_MOTION_KEY_BOUNDS, .sink = IR_STORE_MOTION_SINK_COUNT },
+    { .name = "refuse-preheader", .roles = "nk", .outcome = IR_STORE_MOTION_PREHEADER, .refusal = IR_STORE_MOTION_KEY_COUNT, .sink = IR_STORE_MOTION_SINK_COUNT },
+    { .name = "refuse-irreducible", .roles = "nk", .outcome = IR_STORE_MOTION_IRREDUCIBLE, .refusal = IR_STORE_MOTION_KEY_COUNT, .sink = IR_STORE_MOTION_SINK_COUNT },
+    { .name = "refuse-type", .roles = "n", .outcome = IR_STORE_MOTION_NO_KEY, .refusal = IR_STORE_MOTION_KEY_TYPE, .sink = IR_STORE_MOTION_SINK_COUNT },
     // No listed symbol is named: the pass looks at no loop.
-    { .name = "refuse-unlisted", .roles = "n", .outcome = IR_STORE_MOTION_OUTCOME_COUNT, .refusal = IR_STORE_MOTION_KEY_COUNT },
-    { .name = "refuse-many", .roles = "n", .outcome = IR_STORE_MOTION_MANY, .refusal = IR_STORE_MOTION_KEY_COUNT },
+    { .name = "refuse-unlisted", .roles = "n", .outcome = IR_STORE_MOTION_OUTCOME_COUNT, .refusal = IR_STORE_MOTION_KEY_COUNT, .sink = IR_STORE_MOTION_SINK_COUNT },
+    { .name = "refuse-many", .roles = "n", .outcome = IR_STORE_MOTION_MANY, .refusal = IR_STORE_MOTION_KEY_COUNT, .sink = IR_STORE_MOTION_SINK_COUNT },
     // An address past the walk's steps is unknown, and its store may be any key's.
-    { .name = "refuse-chain", .roles = "n", .outcome = IR_STORE_MOTION_OUTCOME_COUNT, .refusal = IR_STORE_MOTION_KEY_COUNT },
+    { .name = "refuse-chain", .roles = "n", .outcome = IR_STORE_MOTION_OUTCOME_COUNT, .refusal = IR_STORE_MOTION_KEY_COUNT, .sink = IR_STORE_MOTION_SINK_COUNT },
+    // #3346: a key's stores sink to exits by a break, a return and a goto out of the loop, and through each exit block's
+    // phis; one of them stores to the other key, which must have been written back first.
+    { .name = "sink-exits", .roles = "nk", .moved = 1, .keys = 2, .loads = 4, .stores = 2, .sunk = 2, .outcome = IR_STORE_MOTION_MOVED, .refusal = IR_STORE_MOTION_KEY_MOVED, .sink = IR_STORE_MOTION_SINK_COUNT },
+    // The exit block is also reached from before the loop: the exit edges, a `cbr`'s each, are split through blocks of
+    // their own for the write-backs.
+    { .name = "sink-shared-exit", .roles = "nk", .moved = 1, .keys = 1, .loads = 1, .stores = 1, .sunk = 1, .outcome = IR_STORE_MOTION_MOVED, .refusal = IR_STORE_MOTION_KEY_MOVED, .sink = IR_STORE_MOTION_SINK_COUNT },
+    // The same with a switch's edge to it, which isn't split: the stores stay.
+    { .name = "refuse-sink-switch", .roles = "nk", .moved = 1, .keys = 1, .loads = 1, .stores = 1, .outcome = IR_STORE_MOTION_MOVED, .refusal = IR_STORE_MOTION_KEY_MOVED, .sink = IR_STORE_MOTION_SINK_EXIT },
+    // The first loop's exit block is the second's preheader, which loads the key the first writes back.
+    { .name = "sink-sequence", .roles = "n", .moved = 2, .keys = 2, .loads = 2, .stores = 2, .sunk = 2, .outcome = IR_STORE_MOTION_MOVED, .refusal = IR_STORE_MOTION_KEY_MOVED, .sink = IR_STORE_MOTION_SINK_COUNT },
+    // A double's and a float's, compared by their bits.
+    { .name = "sink-float", .roles = "n", .moved = 1, .keys = 2, .loads = 2, .stores = 2, .sunk = 2, .outcome = IR_STORE_MOTION_MOVED, .refusal = IR_STORE_MOTION_KEY_MOVED, .sink = IR_STORE_MOTION_SINK_COUNT },
+    // unread's loop with a load through a pointer: the stores stay, and a key the loop only stores gains nothing.
+    { .name = "refuse-unread", .roles = "pn", .moved = 1, .keys = 1, .loads = 1, .stores = 1, .outcome = IR_STORE_MOTION_MOVED, .refusal = IR_STORE_MOTION_KEY_UNREAD, .sink = IR_STORE_MOTION_SINK_LOAD },
 };
 
 static void ir_store_motion_test_expect(IrStoreMotionTest* test, bool condition, const char* name, const char* what)
@@ -128,12 +148,12 @@ static IrStoreMotionOptions ir_store_motion_test_options(uint32_t mutate)
 
 // One run of `function` on `image`: each symbol bound to its bytes there (@6 to its object's 4 alone, so that an access
 // past them fails), the buffer after them, and the callee beside it.
-static InterpreterResult ir_store_motion_test_run(const IrStoreMotionTest* test, const IrFunction* function, uint8_t* image, const InterpreterValue* arguments, uint32_t count, Arena* execution)
+static InterpreterResult ir_store_motion_test_run(const IrStoreMotionTest* test, const IrFunction* function, uint8_t* image, const InterpreterValue* arguments, uint32_t count, bool fixed, Arena* execution)
 {
     InterpreterBinding bindings[BUSTER_IR_STORE_MOTION_TEST_SYMBOLS];
     for (uint32_t s = 1; s < BUSTER_IR_STORE_MOTION_TEST_SYMBOLS; s += 1)
     {
-        bindings[s - 1] = (InterpreterBinding){ .symbol = s, .bytes = image + (uint64_t)(s - 1) * BUSTER_IR_STORE_MOTION_TEST_OBJECT, .size = s == 6 ? 4 : BUSTER_IR_STORE_MOTION_TEST_OBJECT, .writable = true };
+        bindings[s - 1] = (InterpreterBinding){ .symbol = s, .bytes = image + (uint64_t)(s - 1) * BUSTER_IR_STORE_MOTION_TEST_OBJECT, .size = s == 6 ? 4 : BUSTER_IR_STORE_MOTION_TEST_OBJECT, .writable = !fixed };
     }
     bindings[BUSTER_IR_STORE_MOTION_TEST_SYMBOLS - 1] = (InterpreterBinding){
         .symbol = BUSTER_IR_STORE_MOTION_TEST_BUFFER_SYMBOL,
@@ -200,8 +220,10 @@ static bool ir_store_motion_test_agree(IrStoreMotionTest* test, const IrStoreMot
         held = (uint64_t)(uintptr_t)(right + BUSTER_IR_STORE_MOTION_TEST_SYMBOLS * BUSTER_IR_STORE_MOTION_TEST_OBJECT);
         memcpy(initial + 2 * BUSTER_IR_STORE_MOTION_TEST_OBJECT + 48, &held, 8);
         memcpy(right, initial, BUSTER_IR_STORE_MOTION_TEST_IMAGE);
-        const InterpreterResult a = ir_store_motion_test_run(test, before, left, arguments, count, execution);
-        const InterpreterResult b = ir_store_motion_test_run(test, after, right, moved, count, execution);
+        // Every fourth trial binds the symbols read-only: a store to one, the source's or one the pass added, fails.
+        const bool fixed = trial % 4 == 3;
+        const InterpreterResult a = ir_store_motion_test_run(test, before, left, arguments, count, fixed, execution);
+        const InterpreterResult b = ir_store_motion_test_run(test, after, right, moved, count, fixed, execution);
         // The pointer @3 holds differs by the images' distance, as it did at the start.
         uint64_t pointers[2] = { 0, 0 };
         memcpy(&pointers[0], left + 2 * BUSTER_IR_STORE_MOTION_TEST_OBJECT + 48, 8);
@@ -210,20 +232,27 @@ static bool ir_store_motion_test_agree(IrStoreMotionTest* test, const IrStoreMot
         memset(left + 2 * BUSTER_IR_STORE_MOTION_TEST_OBJECT + 48, 0, 8);
         memset(right + 2 * BUSTER_IR_STORE_MOTION_TEST_OBJECT + 48, 0, 8);
         const bool ran = a.status == INTERPRETER_OK;
-        agree = ran ? b.status == INTERPRETER_OK && a.value.low == b.value.low && a.value.high == b.value.high && stepped && memcmp(left, right, BUSTER_IR_STORE_MOTION_TEST_IMAGE) == 0 :
-                      b.status != INTERPRETER_OK;
+        // Where the input stored to a read-only symbol, the result may have skipped a store of the value it held.
+        agree = ran   ? b.status == INTERPRETER_OK && a.value.low == b.value.low && a.value.high == b.value.high && stepped && memcmp(left, right, BUSTER_IR_STORE_MOTION_TEST_IMAGE) == 0 :
+                fixed ? true :
+                        b.status != INTERPRETER_OK;
     }
     return agree;
 }
 
-static uint32_t ir_store_motion_test_loads(const IrFunction* f)
+static uint32_t ir_store_motion_test_count(const IrFunction* f, uint32_t op)
 {
-    uint32_t loads = 0;
+    uint32_t count = 0;
     for (uint32_t i = 0; i < f->instruction_count; i += 1)
     {
-        loads += f->op[i] == IR_LOAD;
+        count += f->op[i] == op;
     }
-    return loads;
+    return count;
+}
+
+static uint32_t ir_store_motion_test_loads(const IrFunction* f)
+{
+    return ir_store_motion_test_count(f, IR_LOAD);
 }
 
 // One fixture: the pass, its counts, the digest, and the oracle on its result as it is, promoted and optimized; then
@@ -263,11 +292,27 @@ static void ir_store_motion_test_fixture(IrStoreMotionTest* test, const IrStoreM
             ir_optimize_test_fold(&test->digest, moved.loads);
             ir_optimize_test_fold(&test->digest, moved.stores);
             ir_optimize_test_fold(&test->digest, moved.added);
+            for (uint32_t k = 0; k < IR_STORE_MOTION_SINK_COUNT; k += 1)
+            {
+                ir_optimize_test_fold(&test->digest, moved.sinks[k]);
+            }
+            ir_optimize_test_fold(&test->digest, moved.write_backs);
+            ir_optimize_test_fold(&test->digest, moved.blocks);
         }
-        snprintf(what, sizeof(what), "%u loops moved, %u keys, %u loads and %u stores; %u, %u, %u and %u expected", moved.outcomes[IR_STORE_MOTION_MOVED], moved.keys[IR_STORE_MOTION_KEY_MOVED],
-                 moved.loads, moved.stores, fixture->moved, fixture->keys, fixture->loads, fixture->stores);
+        snprintf(what, sizeof(what), "%u loops moved, %u keys, %u loads, %u stores and %u sunk; %u, %u, %u, %u and %u expected", moved.outcomes[IR_STORE_MOTION_MOVED],
+                 moved.keys[IR_STORE_MOTION_KEY_MOVED], moved.loads, moved.stores, moved.sinks[IR_STORE_MOTION_SINK_SUNK], fixture->moved, fixture->keys, fixture->loads, fixture->stores, fixture->sunk);
         ir_store_motion_test_expect(test, check.error == IR_OK && moved.outcomes[IR_STORE_MOTION_MOVED] == fixture->moved && moved.keys[IR_STORE_MOTION_KEY_MOVED] == fixture->keys &&
-                                              moved.loads == fixture->loads && moved.stores == fixture->stores && changed == (fixture->keys != 0), fixture->name, what);
+                                              moved.loads == fixture->loads && moved.stores == fixture->stores && moved.sinks[IR_STORE_MOTION_SINK_SUNK] == fixture->sunk && changed == (fixture->keys != 0),
+                                    fixture->name, what);
+        if (fixture->sink != IR_STORE_MOTION_SINK_COUNT)
+        {
+            snprintf(what, sizeof(what), "a moved key of it keeps its stores for %s", ir_store_motion_sink_names[fixture->sink]);
+            ir_store_motion_test_expect(test, check.error == IR_OK && moved.sinks[fixture->sink] != 0, fixture->name, what);
+        }
+        else
+        {
+            ir_store_motion_test_expect(test, check.error == IR_OK && moved.sinks[IR_STORE_MOTION_SINK_SUNK] == moved.keys[IR_STORE_MOTION_KEY_MOVED], fixture->name, "every moved key's stores sink");
+        }
         uint32_t looked = 0;
         for (uint32_t k = 0; k < IR_STORE_MOTION_OUTCOME_COUNT; k += 1)
         {
@@ -287,11 +332,15 @@ static void ir_store_motion_test_fixture(IrStoreMotionTest* test, const IrStoreM
             snprintf(what, sizeof(what), "a key of it has the refusal %s", ir_store_motion_key_names[fixture->refusal]);
             ir_store_motion_test_expect(test, check.error == IR_OK && moved.keys[fixture->refusal] != 0, fixture->name, what);
         }
-        // What it added: a load, a slot's address and a store a key, with the address's chain, and a store a taken store.
-        ir_store_motion_test_expect(test, check.error != IR_OK || (moved.added >= 3 * moved.keys[IR_STORE_MOTION_KEY_MOVED] + moved.stores &&
+        // What it added: a load, a slot's address and a store a key, with the address's chain, a store a kept store and
+        // six instructions a write-back at least; a slot a key, and the dummy where a key sank.
+        const uint32_t sunk = moved.sinks[IR_STORE_MOTION_SINK_SUNK];
+        ir_store_motion_test_expect(test, check.error != IR_OK || (moved.added >= 3 * moved.keys[IR_STORE_MOTION_KEY_MOVED] + 6 * moved.write_backs &&
                                                                     moved.function.instruction_count == function.instruction_count + moved.added &&
-                                                                    moved.function.slot_count == function.slot_count + moved.keys[IR_STORE_MOTION_KEY_MOVED]),
-                                    fixture->name, "its added instructions and slots are its keys' and its stores'");
+                                                                    moved.function.block_count == function.block_count + moved.blocks &&
+                                                                    moved.slots == moved.keys[IR_STORE_MOTION_KEY_MOVED] + (moved.write_backs != 0) &&
+                                                                    moved.function.slot_count == function.slot_count + moved.slots && (sunk == 0) == (moved.write_backs == 0)),
+                                    fixture->name, "its added instructions and slots are its keys', its stores' and its write-backs'");
         if (check.error == IR_OK && !changed)
         {
             ir_store_motion_test_expect(test, moved.function.op == function.op && moved.function.a == function.a && output->length == om, fixture->name, "an unchanged function is the input's, and nothing is written");
@@ -313,10 +362,11 @@ static void ir_store_motion_test_fixture(IrStoreMotionTest* test, const IrStoreM
             snprintf(what, sizeof(what), "promotion takes the result (error %u at %u)", pc.error, pc.instruction);
             ir_store_motion_test_expect(test, pc.error == IR_OK && rc.error == IR_OK, fixture->name, what);
             const bool both = pc.error == IR_OK && rc.error == IR_OK;
-            snprintf(what, sizeof(what), "the promoted result has %u slots and %u loads; the input's %u and %u, %u keys and %u loads moved", promoted.slot_count, ir_store_motion_test_loads(&promoted),
-                     reference.slot_count, ir_store_motion_test_loads(&reference), moved.keys[IR_STORE_MOTION_KEY_MOVED], moved.loads);
-            ir_store_motion_test_expect(test, both && promoted.slot_count == reference.slot_count &&
-                                                  ir_store_motion_test_loads(&promoted) + moved.loads == ir_store_motion_test_loads(&reference) + moved.keys[IR_STORE_MOTION_KEY_MOVED],
+            snprintf(what, sizeof(what), "the promoted result has %u slots and %u loads; the input's %u and %u, %u keys, %u loads moved and %u write-backs", promoted.slot_count,
+                     ir_store_motion_test_loads(&promoted), reference.slot_count, ir_store_motion_test_loads(&reference), moved.keys[IR_STORE_MOTION_KEY_MOVED], moved.loads, moved.write_backs);
+            ir_store_motion_test_expect(test, both && promoted.slot_count == reference.slot_count + (moved.write_backs != 0) &&
+                                                  ir_store_motion_test_loads(&promoted) + moved.loads ==
+                                                      ir_store_motion_test_loads(&reference) + moved.keys[IR_STORE_MOTION_KEY_MOVED] + moved.write_backs,
                                         fixture->name, what);
             IrOptimizeOptions optimize = ir_optimize_options();
             optimize.passes |= BUSTER_IR_OPTIMIZE_MERGE;
@@ -365,6 +415,7 @@ static void ir_store_motion_test_scans(IrStoreMotionTest* test, Arena* scratch)
     bool classified = true;
     uint32_t found = 0;
     uint32_t stopped = 0;
+    uint32_t opaque = 0;
     for (uint32_t round = 0; round < 24; round += 1)
     {
         ir_optimize_test_scan_fill(&columns, &scan);
@@ -392,17 +443,20 @@ static void ir_store_motion_test_scans(IrStoreMotionTest* test, Arena* scratch)
             // A sentinel past each list: the compressing stores write the selected lanes alone.
             work.accesses = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)length + 1);
             work.barriers = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)length + 1);
-            bool same = work.accesses != NULL && work.barriers != NULL;
+            work.opaque = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)length + 1);
+            bool same = work.accesses != NULL && work.barriers != NULL && work.opaque != NULL;
             if (same)
             {
                 for (uint32_t i = 0; i <= length; i += 1)
                 {
                     work.accesses[i] = 0xa5a5a5a5u;
                     work.barriers[i] = 0xa5a5a5a5u;
+                    work.opaque[i] = 0xa5a5a5a5u;
                 }
                 ir_store_motion_classify(&work);
                 uint32_t accesses = 0;
                 uint32_t barriers = 0;
+                uint32_t reads = 0;
                 for (uint32_t i = 0; i < length; i += 1)
                 {
                     const uint32_t kind = ir_store_motion_kinds[f.op[i]];
@@ -418,16 +472,23 @@ static void ir_store_motion_test_scans(IrStoreMotionTest* test, Arena* scratch)
                         same = same && barriers < work.barrier_count && work.barriers[barriers] == i;
                         barriers += 1;
                     }
+                    else if (kind == BUSTER_IR_STORE_MOTION_OPAQUE)
+                    {
+                        same = same && reads < work.opaque_count && work.opaque[reads] == i;
+                        reads += 1;
+                    }
                 }
-                same = same && accesses == work.access_count && barriers == work.barrier_count && work.accesses[accesses] == 0xa5a5a5a5u && work.barriers[barriers] == 0xa5a5a5a5u;
+                same = same && accesses == work.access_count && barriers == work.barrier_count && reads == work.opaque_count && work.accesses[accesses] == 0xa5a5a5a5u &&
+                       work.barriers[barriers] == 0xa5a5a5a5u && work.opaque[reads] == 0xa5a5a5a5u;
                 stopped += barriers;
+                opaque += reads;
             }
             classified = classified && same;
             arena_pop_to(scratch, mark);
         }
     }
     ir_store_motion_test_expect(test, filtered && found != 0, "scans", "the symbols' filter, against its definition");
-    ir_store_motion_test_expect(test, classified && stopped != 0, "scans", "the classification's lists, against their definition");
+    ir_store_motion_test_expect(test, classified && stopped != 0 && opaque != 0, "scans", "the classification's lists, against their definition");
 }
 
 // The entry point's contract: one arena for both is refused; an output or a scratch too small for the work fails as
@@ -560,6 +621,9 @@ static __attribute__((unused)) int run_ir_store_motion_tests(int argc, char** ar
             "a key beside an overlapping one",
             "a store the slot doesn't get",
             "a key past its object's bytes",
+            "a key sunk past a load it can't place",
+            "an exit given no write-back",
+            "a write-back to a key its loop didn't change",
         };
         for (uint32_t mutant = 0; called && mutant < BUSTER_IR_STORE_MOTION_TEST_MUTANTS; mutant += 1)
         {

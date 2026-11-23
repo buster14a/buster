@@ -1,0 +1,55 @@
+function (i64, i64) -> i64 {
+b0:
+  %0 = param.i64 0
+  %1 = param.i64 1
+  %2 = const.i64 0x00000000000000000000000000000000
+  %3 = br.void b1
+b1:
+  %4 = phi.i64 [%2, b0], [%28, b4]
+  %5 = icmp.i1 %4, %0 ult
+  %6 = cbr.void %5, b2, b5
+b2:
+  %7 = symbol_addr.ptr @1
+  %8 = load.i64 %7 align=8
+  %9 = add.i64 %8, %4
+  %10 = symbol_addr.ptr @1
+  %11 = store.void %10, %9 align=8
+  %12 = symbol_addr.ptr @1
+  %13 = load.i64 %12 align=8
+  %14 = icmp.i1 %13, %1 ugt
+  %15 = cbr.void %14, b6, b3
+b3:
+  %16 = symbol_addr.ptr @2
+  %17 = load.i64 %16 align=8
+  %18 = symbol_addr.ptr @1
+  %19 = load.i64 %18 align=8
+  %20 = xor.i64 %17, %19
+  %21 = symbol_addr.ptr @2
+  %22 = store.void %21, %20 align=8
+  %23 = const.i64 0x00000000000000000000000000000003
+  %24 = and.i64 %4, %23
+  %25 = icmp.i1 %24, %23 ne
+  %26 = cbr.void %25, b4, b7
+b4:
+  %27 = const.i64 0x00000000000000000000000000000001
+  %28 = add.i64 %4, %27
+  %29 = br.void b1
+b5:
+  %30 = symbol_addr.ptr @1
+  %31 = load.i64 %30 align=8
+  %32 = symbol_addr.ptr @2
+  %33 = load.i64 %32 align=8
+  %34 = xor.i64 %31, %33
+  %35 = ret.void %34
+b6:
+  %36 = symbol_addr.ptr @2
+  %37 = load.i64 %36 align=8
+  %38 = ret.void %37
+b7:
+  %39 = symbol_addr.ptr @2
+  %40 = const.i64 0x00000000000000000000000000000009
+  %41 = store.void %39, %40 align=8
+  %42 = symbol_addr.ptr @1
+  %43 = load.i64 %42 align=8
+  %44 = ret.void %43
+}
