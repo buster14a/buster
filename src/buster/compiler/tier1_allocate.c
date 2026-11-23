@@ -1680,9 +1680,9 @@ struct Tier1ResolvedMoves
     uint32_t count;
 };
 
-// The most moves the register form resolves (tier1_resolve_moves_register): one lane each of a 16-lane register.
+// The most moves the register form resolves (tier1_resolve_moves_register): one lane each of two 16-lane registers.
 // Every set of sqlite3.c's, Lua's and musl's --tier1 compiles has at most 12 (#3450's census).
-#define BUSTER_TIER1_MOVE_REGISTER_COUNT 16
+#define BUSTER_TIER1_MOVE_REGISTER_COUNT 32
 
 // The checks both forms share before any storage: the columns, the count and the output's room.
 static bool tier1_resolve_moves_accepts(const Tier1ParallelMoves* input, const Arena* arena, const Tier1ResolvedMoves* result)
@@ -1691,31 +1691,47 @@ static bool tier1_resolve_moves_accepts(const Tier1ParallelMoves* input, const A
         (input->count == 0 || (input->sources != 0 && input->destinations != 0));
 }
 
-// Up to 16 moves in one register each of sources and destinations. A destination's readers are a 16-bit mask (the
-// moves whose source it is), all 16 in one register of words; each step tests every row against the pending mask at
-// once and takes the lowest ready move, or saves the lowest pending destination when none is ready. Nothing
+// The 32-bit mask of a comparison over two 16-lane halves.
+static uint32_t tier1_move_mask(__mmask16 low, __mmask16 high)
+{
+    return (uint32_t)low | (uint32_t)high << 16;
+}
+
+// Up to 32 moves in two registers each of sources and destinations. A destination's readers are a 32-bit row (the
+// moves whose source it is), the 32 rows in two registers of dwords; each step tests every row against the pending
+// mask at once and takes the lowest ready move, or saves the lowest pending destination when none is ready. Nothing
 // but the output is pushed.
 static Tier1AllocationError tier1_resolve_moves_register(const Tier1ParallelMoves* input, Arena* arena, Tier1ResolvedMoves* result)
 {
     const uint64_t saved = arena->length;
     const uint32_t count = input->count;
-    const __mmask16 live = (__mmask16)((1u << count) - 1);
-    const __m512i sources = _mm512_maskz_loadu_epi32(live, input->sources);
-    const __m512i destinations = _mm512_maskz_loadu_epi32(live, input->destinations);
+    const uint32_t live = (uint32_t)((UINT64_C(1) << count) - 1);
+    const __mmask16 live_low = (__mmask16)live;
+    const __mmask16 live_high = (__mmask16)(live >> 16);
+    const __m512i sources_low = _mm512_maskz_loadu_epi32(live_low, input->sources);
+    // The upper half's address only where it has a lane: past a shorter column, or from a null one, none is formed.
+    const uint32_t* const sources_upper = live_high != 0 ? input->sources + 16 : input->sources;
+    const uint32_t* const destinations_upper = live_high != 0 ? input->destinations + 16 : input->destinations;
+    const __m512i sources_high = _mm512_maskz_loadu_epi32(live_high, sources_upper);
+    const __m512i destinations_low = _mm512_maskz_loadu_epi32(live_low, input->destinations);
+    const __m512i destinations_high = _mm512_maskz_loadu_epi32(live_high, destinations_upper);
     const __m512i scratch = _mm512_set1_epi32((int)input->scratch);
-    __mmask16 invalid = (__mmask16)((_mm512_cmpeq_epi32_mask(sources, scratch) | _mm512_cmpeq_epi32_mask(destinations, scratch)) & live);
-    uint32_t pending = (uint32_t)_mm512_mask_cmpneq_epi32_mask(live, sources, destinations);
-    uint16_t rows[16] __attribute__((aligned(32))) = { 0 };
-    uint32_t source[16];
-    uint32_t destination[16];
-    _mm512_storeu_si512(source, sources);
-    _mm512_storeu_si512(destination, destinations);
+    uint32_t invalid = tier1_move_mask(_mm512_cmpeq_epi32_mask(sources_low, scratch) | _mm512_cmpeq_epi32_mask(destinations_low, scratch),
+        _mm512_cmpeq_epi32_mask(sources_high, scratch) | _mm512_cmpeq_epi32_mask(destinations_high, scratch)) & live;
+    uint32_t pending = tier1_move_mask(_mm512_cmpneq_epi32_mask(sources_low, destinations_low), _mm512_cmpneq_epi32_mask(sources_high, destinations_high)) & live;
+    uint32_t rows[32] __attribute__((aligned(64))) = { 0 };
+    uint32_t source[32];
+    uint32_t destination[32];
+    _mm512_storeu_si512(source, sources_low);
+    _mm512_storeu_si512(source + 16, sources_high);
+    _mm512_storeu_si512(destination, destinations_low);
+    _mm512_storeu_si512(destination + 16, destinations_high);
     for (uint32_t j = 0; j < count; j += 1)
     {
         const __m512i written = _mm512_set1_epi32((int)destination[j]);
-        // A second move to the same destination is invalid; a pending move reading it is one of its row.
-        invalid |= (__mmask16)(_mm512_mask_cmpeq_epi32_mask(live, destinations, written) & ~(1u << j));
-        rows[j] = (uint16_t)_mm512_cmpeq_epi32_mask(sources, written);
+        // A second move to the same destination is invalid; a move reading it is one of its row.
+        invalid |= tier1_move_mask(_mm512_cmpeq_epi32_mask(destinations_low, written), _mm512_cmpeq_epi32_mask(destinations_high, written)) & live & ~(UINT32_C(1) << j);
+        rows[j] = tier1_move_mask(_mm512_cmpeq_epi32_mask(sources_low, written), _mm512_cmpeq_epi32_mask(sources_high, written));
     }
     Tier1AllocationError error = invalid != 0 ? TIER1_ALLOCATION_INVALID : TIER1_ALLOCATION_OK;
     Tier1ResolvedMoves output = { 0 };
@@ -1727,18 +1743,20 @@ static Tier1AllocationError tier1_resolve_moves_register(const Tier1ParallelMove
     }
     if (error == TIER1_ALLOCATION_OK)
     {
-        __m256i readers = _mm256_load_si256((const __m256i*)rows);
+        __m512i readers_low = _mm512_load_si512(rows);
+        __m512i readers_high = _mm512_load_si512(rows + 16);
         while (pending != 0)
         {
             // A row with a pending reader is a destination still read; the lowest pending move outside them is ready.
-            const uint32_t read = (uint32_t)_mm256_mask_test_epi16_mask((__mmask16)pending, readers, _mm256_set1_epi16((short)pending));
+            const __m512i reading = _mm512_set1_epi32((int)pending);
+            const uint32_t read = tier1_move_mask(_mm512_test_epi32_mask(readers_low, reading), _mm512_test_epi32_mask(readers_high, reading));
             const uint32_t ready = pending & ~read;
             if (ready != 0)
             {
                 const uint32_t chosen = (uint32_t)__builtin_ctz(ready);
                 output.sources[output.count] = source[chosen];
                 output.destinations[output.count] = destination[chosen];
-                pending &= ~(1u << chosen);
+                pending &= ~(UINT32_C(1) << chosen);
             }
             else
             {
@@ -1753,7 +1771,9 @@ static Tier1AllocationError tier1_resolve_moves_register(const Tier1ParallelMove
                     source[__builtin_ctz(moved)] = input->scratch;
                     moved &= moved - 1;
                 }
-                readers = _mm256_mask_mov_epi16(readers, (__mmask16)(1u << first), _mm256_setzero_si256());
+                const uint32_t emptied = UINT32_C(1) << first;
+                readers_low = _mm512_mask_mov_epi32(readers_low, (__mmask16)emptied, _mm512_setzero_si512());
+                readers_high = _mm512_mask_mov_epi32(readers_high, (__mmask16)(emptied >> 16), _mm512_setzero_si512());
             }
             output.count += 1;
         }
@@ -1866,7 +1886,7 @@ static uint32_t tier1_move_ready_take(Tier1MoveReady* ready)
     return move;
 }
 
-// More than 16 moves, up to 2^20. Masked 16-lane steps validate and pack (destination, identity bit 31 | input index)
+// More than 32 moves, up to 2^20. Masked 16-lane steps validate and pack (destination, identity bit 31 | input index)
 // keys, which a vector radix sort orders by destination (only the digits that differ). Adjacent equal destinations
 // are invalid. Each pending move's writer, the move whose destination is its source, is a 16-lane branchless binary
 // search of the sorted destinations by gathers; its writer's reader count takes it by conflict masks. The ready moves
@@ -2067,7 +2087,7 @@ static Tier1AllocationError tier1_resolve_moves_wide(const Tier1ParallelMoves* i
     return error;
 }
 
-// Sequentializes a parallel assignment (docs/tier1-allocation.md): the register form up to 16 moves, the wide form
+// Sequentializes a parallel assignment (docs/tier1-allocation.md): the register form up to 32 moves, the wide form
 // beyond; each is the only code for its range, and both give the policy's one order.
 static __attribute__((unused)) Tier1AllocationError tier1_resolve_moves(const Tier1ParallelMoves* input, Arena* arena, Tier1ResolvedMoves* result)
 {

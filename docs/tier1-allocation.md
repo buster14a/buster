@@ -332,15 +332,16 @@ pending destination to scratch. Two vector forms implement it, each the only
 code for its range (#3450, phase D of #2924; they replaced a scalar scan up to
 eight moves and a merge-sort-and-heap path beyond, which gave the same order):
 
-- **Up to 16 moves** (`tier1_resolve_moves_register`): every set the census
+- **Up to 32 moves** (`tier1_resolve_moves_register`): every set the census
   found (sqlite3.c, Lua and musl under `--tier1`: 41,188 sets, at most 12
-  moves, 596 with a cycle). Sources and destinations are one register each.
-  Broadcast compares give each destination's readers as a 16-bit mask and find
-  duplicate destinations; the 16 masks are one register of words, so each step
+  moves, 596 with a cycle). Sources and destinations are two registers each.
+  Broadcast compares give each destination's readers as a 32-bit row and find
+  duplicate destinations; the 32 rows are two registers of dwords, so each step
   tests every row against the pending mask at once and takes the lowest ready
-  lane by `tzcnt`. A cycle saves the lowest pending destination, its readers
+  lane by `tzcnt`. (A first version stopped at 16 moves, and the wide form then
+  read 0.96 to 0.98 of the old path's time at 17.) A cycle saves the lowest pending destination, its readers
   read scratch and its row empties. Nothing but the output is pushed.
-- **More than 16, up to 2^20** (`tier1_resolve_moves_wide`). Masked 16-lane
+- **More than 32, up to 2^20** (`tier1_resolve_moves_wide`). Masked 16-lane
   steps validate scratch exclusion and pack `(destination, identity bit 31 |
   input index)` keys; a vector radix sort (conflict masks rank lanes within a
   bucket, only the digits that differ) orders them by destination, and adjacent
@@ -361,8 +362,8 @@ The emission itself stays an ordered loop: each choice depends on the moves
 emitted before it, and the order is the objects' (every caller's move
 sequence), so it can't be a different data-parallel order without changing
 code. Its steps are word operations on bitsets and masks. On the 9700X the two
-forms take @@MOVES@@ of the old routes' time at every count from 0 to 2^20,
-real sets replayed and random sets by count (buster-performance's
+forms take 0.12 to 0.89 of the old routes' time at every count from 0 to
+2^20, real sets replayed (0.58 over all of them) and random sets by count (buster-performance's
 `docs/measurements/scalar-paths-removal-2924-2026-11-17/tier1-moves/`).
 
 Both forms retain 16*N bytes for output columns. The register form pushes
@@ -373,7 +374,9 @@ result, and success discards all temporary arrays. The wide form allocates
 before it validates, so capacity exhaustion can precede an invalid input's
 diagnosis there. `test-tier1-allocation` checks every order against
 `tier1_move_test_definition`, the policy as a plain cubic scan, at every
-shape up to 1,024 moves and 256 random sets of 0 to 32 moves.
+shape up to 1,024 moves, 256 random sets of 0 to 32 moves and 256 of 33 to
+64 (identity moves, fan-out and cycles), and refuses a duplicate destination
+in every lane of both forms.
 
 ### Resolver measurements (#608)
 

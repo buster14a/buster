@@ -170,9 +170,9 @@ static void tier1_move_test_shape(Tier1AllocationTestTally* tally, Arena* arena,
 
 static void tier1_move_test_failures(Tier1AllocationTestTally* tally)
 {
-    uint32_t sources[17];
-    uint32_t destinations[17];
-    for (uint32_t i = 0; i < 17; i += 1)
+    uint32_t sources[33];
+    uint32_t destinations[33];
+    for (uint32_t i = 0; i < 33; i += 1)
     {
         sources[i] = i;
         destinations[i] = i + 1;
@@ -180,70 +180,139 @@ static void tier1_move_test_failures(Tier1AllocationTestTally* tally)
     Tier1ParallelMoves input = {
         .sources = sources,
         .destinations = destinations,
-        .count = 17,
-        .scratch = 32,
+        .scratch = 100,
     };
     uint8_t bytes[2048] __attribute__((aligned(64)));
     memset(bytes, 0x5a, sizeof(bytes));
-    bool valid = true;
-    // The wide form at 17 moves: 16 bytes a move of output, 24 of keys and temporary keys, 8 of writers and reader
-    // counts, and three bitset words (tier1_resolve_moves_wide), from the 8-aligned start past 7 bytes.
-    for (uint32_t capacity = 7; capacity <= 8 + 40 * 17 + 24; capacity += 1)
+    // Each form's exact need from the 8-aligned start past 7 bytes: the register form's 17 moves only their output,
+    // 16 bytes a move; the wide form's 33 also 24 bytes a move of keys and temporary keys, 8 of writers and reader
+    // counts, and three bitset words (tier1_resolve_moves_wide).
+    const uint32_t counts[2] = { 17, 33 };
+    const uint32_t needs[2] = { 8 + 16 * 17, 8 + 40 * 33 + 24 };
+    for (uint32_t form = 0; form < 2; form += 1)
     {
-        Arena arena = {
-            .base = bytes,
-            .length = 7,
-            .capacity = capacity,
-        };
-        Tier1ResolvedMoves output = {
-            .sources = sources,
-            .destinations = destinations,
-            .count = 123,
-        };
-        const Tier1AllocationError error = tier1_resolve_moves(&input, &arena, &output);
-        if (capacity < 8 + 40 * 17 + 24)
+        bool valid = true;
+        input.count = counts[form];
+        for (uint32_t capacity = 7; capacity <= needs[form]; capacity += 1)
         {
-            valid = valid && error == TIER1_ALLOCATION_CAPACITY && arena.length == 7 && output.sources == sources && output.destinations == destinations && output.count == 123;
+            Arena arena = {
+                .base = bytes,
+                .length = 7,
+                .capacity = capacity,
+            };
+            Tier1ResolvedMoves output = {
+                .sources = sources,
+                .destinations = destinations,
+                .count = 123,
+            };
+            const Tier1AllocationError error = tier1_resolve_moves(&input, &arena, &output);
+            if (capacity < needs[form])
+            {
+                valid = valid && error == TIER1_ALLOCATION_CAPACITY && arena.length == 7 && output.sources == sources && output.destinations == destinations && output.count == 123;
+            }
+            else
+            {
+                valid = valid && error == TIER1_ALLOCATION_OK && arena.length == 8 + 16 * counts[form] && output.count == counts[form];
+            }
+            for (uint32_t i = 0; i < 7; i += 1)
+            {
+                valid = valid && bytes[i] == 0x5a;
+            }
         }
-        else
+        tier1_allocation_test_expect(tally, valid, "move capacity sweep rolls back and retains only output, preserving prior arena data");
+        for (uint32_t kind = 0; kind < 6; kind += 1)
         {
-            valid = valid && error == TIER1_ALLOCATION_OK && arena.length == 8 + 16 * 17 && output.count == 17;
+            Arena arena = {
+                .base = bytes,
+                .length = 7,
+                .capacity = sizeof(bytes),
+            };
+            sources[8] = kind == 0 ? input.scratch : 8;
+            destinations[8] = kind == 1 ? input.scratch : kind == 2 ? destinations[0] : 9;
+            input.count = kind == 3 ? BUSTER_TIER1_ALLOCATE_MAX_INTERVALS + 1 : counts[form];
+            input.sources = kind == 4 ? 0 : sources;
+            input.destinations = kind == 5 ? 0 : destinations;
+            Tier1ResolvedMoves output = {
+                .sources = sources,
+                .destinations = destinations,
+                .count = 123,
+            };
+            valid = tier1_resolve_moves(&input, &arena, &output) == TIER1_ALLOCATION_INVALID && arena.length == 7 && output.sources == sources && output.destinations == destinations && output.count == 123;
+            tier1_allocation_test_expect(tally, valid, "invalid moves reject scratch, duplicates, excessive counts and missing columns transactionally");
         }
-        for (uint32_t i = 0; i < 7; i += 1)
-        {
-            valid = valid && bytes[i] == 0x5a;
-        }
-    }
-    tier1_allocation_test_expect(tally, valid, "move capacity sweep rolls back and retains only output, preserving prior arena data");
-    for (uint32_t kind = 0; kind < 6; kind += 1)
-    {
-        Arena arena = {
-            .base = bytes,
-            .length = 7,
-            .capacity = sizeof(bytes),
-        };
-        sources[8] = kind == 0 ? input.scratch : 8;
-        destinations[8] = kind == 1 ? input.scratch : kind == 2 ? destinations[0] : 9;
-        input.count = kind == 3 ? BUSTER_TIER1_ALLOCATE_MAX_INTERVALS + 1 : 17;
-        input.sources = kind == 4 ? 0 : sources;
-        input.destinations = kind == 5 ? 0 : destinations;
-        Tier1ResolvedMoves output = {
-            .sources = sources,
-            .destinations = destinations,
-            .count = 123,
-        };
-        valid = tier1_resolve_moves(&input, &arena, &output) == TIER1_ALLOCATION_INVALID && arena.length == 7 && output.sources == sources && output.destinations == destinations && output.count == 123;
-        tier1_allocation_test_expect(tally, valid, "invalid moves reject scratch, duplicates, excessive counts and missing columns transactionally");
+        input.sources = sources;
+        input.destinations = destinations;
+        sources[8] = 8;
+        destinations[8] = 9;
     }
 }
 
+// Random sets past the register form (33 to 64 moves): identity moves, moves reading an identity move's destination,
+// fan-out, cycles and sources from outside, each in the definition's order and run as a snapshot.
+static void tier1_move_test_random(Tier1AllocationTestTally* tally, Arena* arena)
+{
+    uint64_t seed = 3450;
+    uint32_t sources[64];
+    uint32_t destinations[64];
+    uint64_t values[257];
+    bool valid = true;
+    for (uint32_t count = 33; count <= 64; count += 1)
+    {
+        for (uint32_t trial = 0; trial < 8; trial += 1)
+        {
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                destinations[i] = i * 2;
+            }
+            for (uint32_t i = count; i > 1; i -= 1)
+            {
+                const uint32_t other = tier1_allocation_test_random(&seed) % i;
+                const uint32_t swap = destinations[i - 1];
+                destinations[i - 1] = destinations[other];
+                destinations[other] = swap;
+            }
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                const uint32_t kind = tier1_allocation_test_random(&seed) % 8;
+                sources[i] = kind == 0 ? destinations[i] : kind == 1 ? count * 2 + 1 + tier1_allocation_test_random(&seed) % count :
+                    destinations[tier1_allocation_test_random(&seed) % count];
+            }
+            const Tier1ParallelMoves input = {
+                .sources = sources,
+                .destinations = destinations,
+                .count = count,
+                .scratch = 256,
+            };
+            const uint64_t saved = arena->length;
+            Tier1ResolvedMoves output = { 0 };
+            valid = valid && tier1_resolve_moves(&input, arena, &output) == TIER1_ALLOCATION_OK && tier1_move_test_defined(&input, &output);
+            for (uint32_t i = 0; i < 257; i += 1)
+            {
+                values[i] = UINT64_C(0x9e3779b97f4a7c15) * (i + 1);
+            }
+            for (uint32_t i = 0; valid && i < output.count; i += 1)
+            {
+                valid = output.sources[i] < 257 && output.destinations[i] < 257;
+                values[output.destinations[i] % 257] = values[output.sources[i] % 257];
+            }
+            for (uint32_t i = 0; valid && i < count; i += 1)
+            {
+                valid = values[destinations[i]] == UINT64_C(0x9e3779b97f4a7c15) * (sources[i] + 1);
+            }
+            arena_pop_to(arena, saved);
+        }
+    }
+    tier1_allocation_test_expect(tally, valid, "random wide sets: identities, fan-out and cycles in the definition's order and as a snapshot");
+}
+
 // A duplicate destination is refused wherever the pair falls: with the last move in every lane of the register form
-// (16 moves) and of the wide form, and as the largest destination, the wide form's last sorted pair.
+// (its two halves, up to 32 moves) and of the wide form, and as the largest destination, the wide form's last sorted
+// pair.
 static void tier1_move_test_duplicates(Tier1AllocationTestTally* tally, Arena* arena)
 {
-    const uint32_t counts[] = { 2, 15, 16, 17, 32, 33 };
-    uint32_t sources[33];
-    uint32_t destinations[33];
+    const uint32_t counts[] = { 2, 15, 16, 17, 31, 32, 33, 48 };
+    uint32_t sources[48];
+    uint32_t destinations[48];
     bool refused = true;
     for (uint32_t c = 0; c < sizeof(counts) / sizeof(counts[0]); c += 1)
     {
@@ -311,7 +380,7 @@ static void tier1_allocation_test_move_scaling(Tier1AllocationTestTally* tally)
     tier1_allocation_test_expect(tally, arena.base != 0, "move scalability arena");
     if (arena.base != 0)
     {
-        const uint32_t counts[] = { 0, 1, 2, 7, 8, 9, 15, 16, 17, 31, 32, 64, 128, 256, 512, 1024 };
+        const uint32_t counts[] = { 0, 1, 2, 7, 8, 9, 15, 16, 17, 31, 32, 33, 64, 128, 256, 512, 1024 };
         for (uint32_t shape = 0; shape < 7; shape += 1)
         {
             for (uint32_t i = 0; i < sizeof(counts) / sizeof(counts[0]); i += 1)
@@ -322,6 +391,7 @@ static void tier1_allocation_test_move_scaling(Tier1AllocationTestTally* tally)
         tier1_move_test_shape(tally, &arena, BUSTER_TIER1_ALLOCATE_MAX_INTERVALS, 0);
         tier1_move_test_failures(tally);
         tier1_move_test_duplicates(tally, &arena);
+        tier1_move_test_random(tally, &arena);
         tier1_move_test_guarded(tally, &arena);
     }
     arena_release(&arena);
