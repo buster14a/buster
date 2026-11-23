@@ -252,7 +252,71 @@ static void check_test_program_plan_cache(CheckTest* test)
     arena_release(&arena);
 }
 
-// #530's scans in check_program against their exact twins, their `scalar` paths: at every count to 129 tokens, each column
+// The definitions #530's scans are checked against, a token or a node at a time by the same per-item tests: the bodies'
+// openings (the definitions' bodies, but deferred ones that no node producer took), in token order.
+static uint32_t check_test_program_openings_definition(const CheckInput* input, uint32_t* openings)
+{
+    uint32_t count = 0;
+    for (uint32_t token = 0; token < input->token_count; token += 1)
+    {
+        if (check_sparse_get(input->body_declarations, token) != BUSTER_CHECK_NONE &&
+            (input->deferred_tokens == NULL || input->deferred_tokens[token] == 0 || input->node_bodies))
+        {
+            openings[count++] = token;
+        }
+    }
+    return count;
+}
+
+// The variable-length arrays' objects (check_program_runtime_object), each one's allocation from the last token back.
+static void check_test_program_allocations_definition(CheckProgram* program, const Parser* parser, const TypeTable* types, uint32_t* allocation_first,
+                                                      uint32_t* allocation_next, uint32_t* vla_blocks, uint32_t* vla_saves,
+                                                      const CheckProgramStatements* statements)
+{
+    for (uint32_t token = program->input->token_count; token != 0;)
+    {
+        token -= 1;
+        if (check_program_runtime_object(program->input, types, token))
+        {
+            check_program_allocation(program, parser, token, allocation_first, allocation_next, vla_blocks, vla_saves, statements);
+        }
+    }
+}
+
+// The reached builtins' nodes, in node order, listed where `listed` has room for them: their count.
+static uint32_t check_test_program_builtins_definition(const CheckGraph* graph, const uint32_t* nodes, uint32_t* listed)
+{
+    uint32_t found = 0;
+    for (uint32_t node = 0; node < graph->count; node += 1)
+    {
+        if (nodes[node] != 0 && check_program_builtin_op(graph->ops[node]))
+        {
+            if (listed != NULL)
+            {
+                listed[found] = node;
+            }
+            found += 1;
+        }
+    }
+    return found;
+}
+
+// The static declarations (each its own declaration, with the static bit), each one's object in token order.
+static bool check_test_program_static_objects_definition(CheckProgram* program, uint8_t* needed, Arena* output, CheckProgramTargetEvents* events)
+{
+    const CheckInput* input = program->input;
+    bool room = true;
+    for (uint32_t token = 0; token < input->token_count; token += 1)
+    {
+        if (input->declarations[token] == token && check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC))
+        {
+            room = check_program_static_object(program, needed, token, output, room, events);
+        }
+    }
+    return room;
+}
+
+// #530's scans in check_program against their definitions (above) and their `scalar` twins: at every count to 129 tokens, each column
 // they read ending at a PROT_NONE page, random columns around the values each test separates. The bodies' openings and the
 // initializers' storage durations; the initializer plans' statements (check_test_program_plans, #877); the
 // variable-length arrays' declarations; the reached builtins; the static objects' declarations,
@@ -389,6 +453,8 @@ static void check_test_program_scans(CheckTest* test)
             const uint32_t words = (node_count + 64) / 64;
             uint64_t* statics = (uint64_t*)(mappings[16] + page - (uint64_t)words * sizeof(uint64_t));
             const uint32_t scalar_openings = check_program_openings(&input, openings[0], true);
+            uint32_t defined[BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+            const uint32_t defined_openings = check_test_program_openings_definition(&input, defined);
             const uint32_t vector_openings = check_program_openings(&input, openings[1], false);
             memset(statics, 0xa5, (uint64_t)words * sizeof(uint64_t));
             check_program_static_initializers(&input, statics);
@@ -402,23 +468,24 @@ static void check_test_program_scans(CheckTest* test)
                 }
                 marked &= check_program_bit(statics, node) == (last != BUSTER_CHECK_NONE && check_input_bit(declaration_bits, last, BUSTER_CHECK_BITS_STATIC));
             }
-            check_test_expect(test, scalar_openings == vector_openings && memcmp(openings[0], openings[1], scalar_openings * sizeof(uint32_t)) == 0 && marked,
+            check_test_expect(test, scalar_openings == vector_openings && memcmp(openings[0], openings[1], scalar_openings * sizeof(uint32_t)) == 0 && marked &&
+                                   defined_openings == vector_openings && memcmp(defined, openings[1], defined_openings * sizeof(uint32_t)) == 0,
                               "the openings agree at every guarded tail and each initializer has its last declaration's static bit");
             Parser parser = { 0 };
             parser.tree.roles = roles;
             parser.tree.parents = parents;
             parser.tokens.kinds = kinds;
             parser.tokens.count = count;
-            uint32_t allocation_first[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
-            uint32_t allocation_next[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
-            uint32_t vla_blocks[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
-            uint32_t vla_saves[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+            uint32_t allocation_first[3][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+            uint32_t allocation_next[3][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+            uint32_t vla_blocks[3][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+            uint32_t vla_saves[3][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
             // Each path's walks to the statements keep their own answers (check_program_statement, #2995).
-            uint32_t statement_ends[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
-            uint32_t statement_keys[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
-            uint64_t statement_known[2][(BUSTER_CHECK_TEST_SCAN_TOKENS + 64) / 64];
-            CheckProgram programs[2] = { 0 };
-            for (uint32_t path = 0; path < 2; path += 1)
+            uint32_t statement_ends[3][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+            uint32_t statement_keys[3][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+            uint64_t statement_known[3][(BUSTER_CHECK_TEST_SCAN_TOKENS + 64) / 64];
+            CheckProgram programs[3] = { 0 };
+            for (uint32_t path = 0; path < 3; path += 1)
             {
                 programs[path] = (CheckProgram){ .input = &input, .types = &types.table, .status = CHECK_PROGRAM_OK, .token = BUSTER_CHECK_NONE };
                 memset(allocation_first[path], 0xff, sizeof(allocation_first[path]));
@@ -431,9 +498,22 @@ static void check_test_program_scans(CheckTest* test)
                     .keys = statement_keys[path],
                     .known = statement_known[path],
                 };
-                check_program_allocations(&programs[path], &parser, &types.table, allocation_first[path], allocation_next[path], vla_blocks[path], vla_saves[path],
-                                          &statements, path == 0);
+                if (path == 2)
+                {
+                    check_test_program_allocations_definition(&programs[path], &parser, &types.table, allocation_first[path], allocation_next[path], vla_blocks[path],
+                                                              vla_saves[path], &statements);
+                }
+                else
+                {
+                    check_program_allocations(&programs[path], &parser, &types.table, allocation_first[path], allocation_next[path], vla_blocks[path], vla_saves[path],
+                                              &statements, path == 0);
+                }
             }
+            check_test_expect(test, programs[2].status == programs[1].status && programs[2].token == programs[1].token &&
+                                   memcmp(allocation_first[2], allocation_first[1], sizeof(allocation_first[1])) == 0 &&
+                                   memcmp(allocation_next[2], allocation_next[1], sizeof(allocation_next[1])) == 0 &&
+                                   memcmp(vla_blocks[2], vla_blocks[1], sizeof(vla_blocks[1])) == 0 && memcmp(vla_saves[2], vla_saves[1], sizeof(vla_saves[1])) == 0,
+                              "check_program's variable-length array declarations are their definition's at every guarded tail");
             check_test_expect(test, programs[0].status == programs[1].status && programs[0].token == programs[1].token &&
                                    memcmp(allocation_first[0], allocation_first[1], sizeof(allocation_first[0])) == 0 &&
                                    memcmp(allocation_next[0], allocation_next[1], sizeof(allocation_next[0])) == 0 &&
@@ -443,8 +523,9 @@ static void check_test_program_scans(CheckTest* test)
             check_test_program_plans(test, &input, &parser, mappings + 18, page, count / 3, true);
             check_test_program_plans(test, &input, &parser, mappings + 18, page, 0, false);
             const CheckGraph graph = { .ops = ops, .count = node_count };
-            uint32_t builtins[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
-            uint32_t builtin_counts[2];
+            uint32_t builtins[3][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+            uint32_t builtin_counts[3];
+            builtin_counts[2] = check_test_program_builtins_definition(&graph, reached, builtins[2]);
             for (uint32_t path = 0; path < 2; path += 1)
             {
                 builtin_counts[path] = check_program_builtins(&graph, reached, NULL, path == 0);
@@ -453,15 +534,17 @@ static void check_test_program_scans(CheckTest* test)
             }
             check_test_expect(test, builtin_counts[0] == builtin_counts[1] && memcmp(builtins[0], builtins[1], builtin_counts[0] * sizeof(uint32_t)) == 0,
                               "check_program's reached builtins agree with their scalar twin at every guarded tail");
-            uint8_t needed[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
-            uint32_t object_declarations[2][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
-            bool rooms[2];
+            check_test_expect(test, builtin_counts[1] == builtin_counts[2] && memcmp(builtins[1], builtins[2], builtin_counts[1] * sizeof(uint32_t)) == 0,
+                              "check_program's reached builtins are their definition's at every guarded tail");
+            uint8_t needed[3][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+            uint32_t object_declarations[3][BUSTER_CHECK_TEST_SCAN_TOKENS + 1];
+            bool rooms[3];
             // The naked column in an arena of its own, every other time one with no room for it; and the target attributes'
             // keys in one of their own, which grows them by doubling, every other time one with no room.
-            _Alignas(64) uint8_t naked_bytes[2][(BUSTER_CHECK_TEST_SCAN_TOKENS + 1) * sizeof(uint32_t) + 64];
-            _Alignas(64) uint8_t event_bytes[2][4 * (BUSTER_CHECK_TEST_SCAN_TOKENS + 64) * sizeof(uint64_t)];
-            CheckProgramTargetEvents events[2];
-            for (uint32_t path = 0; path < 2; path += 1)
+            _Alignas(64) uint8_t naked_bytes[3][(BUSTER_CHECK_TEST_SCAN_TOKENS + 1) * sizeof(uint32_t) + 64];
+            _Alignas(64) uint8_t event_bytes[3][4 * (BUSTER_CHECK_TEST_SCAN_TOKENS + 64) * sizeof(uint64_t)];
+            CheckProgramTargetEvents events[3];
+            for (uint32_t path = 0; path < 3; path += 1)
             {
                 Arena naked = {
                     .base = naked_bytes[path],
@@ -476,7 +559,8 @@ static void check_test_program_scans(CheckTest* test)
                 memset(needed[path], 0, sizeof(needed[path]));
                 memset(object_declarations[path], 0xff, sizeof(object_declarations[path]));
                 needed[path][count / 2] = (uint8_t)(count % 2);
-                rooms[path] = check_program_static_objects(&programs[path], needed[path], &naked, path == 0, &events[path]);
+                rooms[path] = path == 2 ? check_test_program_static_objects_definition(&programs[path], needed[path], &naked, &events[path]) :
+                                          check_program_static_objects(&programs[path], needed[path], &naked, path == 0, &events[path]);
                 events[path].scratch = NULL;
             }
             const bool naked_same = (programs[0].object_naked == 0) == (programs[1].object_naked == 0) &&
@@ -501,6 +585,15 @@ static void check_test_program_scans(CheckTest* test)
             check_test_expect(test, memcmp(needed[0], needed[1], sizeof(needed[0])) == 0 && memcmp(object_declarations[0], object_declarations[1], sizeof(object_declarations[0])) == 0 &&
                                    rooms[0] == rooms[1] && naked_same && events_same && events_right,
                               "check_program's static objects, naked functions and target attributes agree with their scalar twin at every guarded tail");
+            const bool defined_naked = (programs[2].object_naked == 0) == (programs[1].object_naked == 0) &&
+                                       (programs[2].object_naked == 0 ||
+                                        memcmp(programs[2].object_naked, programs[1].object_naked, ((uint64_t)count + 1) * sizeof(uint32_t)) == 0);
+            const bool defined_events = events[2].room == events[1].room && events[2].count == events[1].count &&
+                                        (events[2].count == 0 || memcmp(events[2].keys, events[1].keys, events[2].count * sizeof(uint64_t)) == 0);
+            check_test_expect(test, memcmp(needed[2], needed[1], sizeof(needed[1])) == 0 &&
+                                   memcmp(object_declarations[2], object_declarations[1], sizeof(object_declarations[1])) == 0 && rooms[2] == rooms[1] &&
+                                   defined_naked && defined_events,
+                              "check_program's static objects, naked functions and target attributes are their definition's at every guarded tail");
             for (uint32_t block = 0; count % 64 == 0 && block < count; block += 64)
             {
                 uint64_t cases = 0;
