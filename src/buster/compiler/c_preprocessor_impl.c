@@ -198,6 +198,8 @@ typedef enum PPWarning
     PP_WARNING_EMPTY_TRANSLATION_UNIT,
     // A #define's or #undef's name reserved in every context (#2222), off by default.
     PP_WARNING_RESERVED_MACRO_IDENTIFIER,
+    PP_WARNING_UNUSED_MACROS,
+    PP_WARNING_GNU_LINE_MARKER,
     // A warning of no group (poisoning an existing macro, a character constant too long for its type), and an extension
     // of no group (a C90 macro name with no whitespace after it before a character outside its basic set): only -w,
     // -Wno-everything, -Werror and an extension's -pedantic-errors map it, its flag "[-Werror]" where promoted.
@@ -249,6 +251,8 @@ static const PPWarningKind pp_warnings[BUSTER_PP_WARNINGS] =
     { "invalid-source-encoding", NULL, NULL, true, true, false, false },
     { "empty-translation-unit", NULL, NULL, true, false, false, false },
     { "reserved-macro-identifier", NULL, "reserved-identifier", false, false, false, false },
+    { "unused-macros", NULL, NULL, false, false, false, false },
+    { "gnu-line-marker", NULL, "gnu pedantic", true, false, false, false },
     { NULL, NULL, NULL, false, true, false, false },
     { NULL, NULL, NULL, true, true, false, false },
 };
@@ -360,10 +364,10 @@ static PPSeverity pp_warning_severity(Preprocessor* pp, PPWarning warning, uint3
 // The severity a warning of `warning` at `location` is given with (pp_warning_severity), PP_SEVERITY_WARNING_ALWAYS for a
 // warning seen in system headers too, and its flag as clang prints it after the message, into `flag`: " [-Wgroup]", or
 // " [-Werror,-Wgroup]" where promoted; for one of no group " [-Werror]" where promoted, else nothing, as for an ignored one.
-static PPSeverity pp_warning_flag(Preprocessor* pp, PPWarning warning, uint32_t location, char flag[BUSTER_PP_WARNING_FLAG_BYTES])
+// The flag a warning of `warning` given with `severity` has, as pp_warning_flag writes it.
+static void pp_warning_flag_text(PPWarning warning, PPSeverity severity, char flag[BUSTER_PP_WARNING_FLAG_BYTES])
 {
     const PPWarningKind* kind = pp_warnings + warning;
-    const PPSeverity severity = pp_warning_severity(pp, warning, location);
     const bool promoted = severity == PP_SEVERITY_ERROR || severity == PP_SEVERITY_MAPPED_ERROR;
     flag[0] = 0;
     if (severity != BUSTER_PP_IGNORED && kind->name != NULL)
@@ -374,7 +378,13 @@ static PPSeverity pp_warning_flag(Preprocessor* pp, PPWarning warning, uint32_t 
     {
         snprintf(flag, BUSTER_PP_WARNING_FLAG_BYTES, " [-Werror]");
     }
-    return severity == PP_SEVERITY_WARNING && kind->system ? PP_SEVERITY_WARNING_ALWAYS : severity;
+}
+
+static PPSeverity pp_warning_flag(Preprocessor* pp, PPWarning warning, uint32_t location, char flag[BUSTER_PP_WARNING_FLAG_BYTES])
+{
+    const PPSeverity severity = pp_warning_severity(pp, warning, location);
+    pp_warning_flag_text(warning, severity, flag);
+    return severity == PP_SEVERITY_WARNING && pp_warnings[warning].system ? PP_SEVERITY_WARNING_ALWAYS : severity;
 }
 
 // A warning of `warning` (pp_warning_flag) at `location`, the `length` bytes of its message at `message` with its flag.
@@ -1966,6 +1976,261 @@ BUSTER_INLINE void pp_reserved_macro_name(Preprocessor* pp, const PPFileData* da
     }
 }
 
+// -Wunused-macros (#2222), as clang has it (Preprocessor::HandleDefineDirective, markMacroAsUsed, HandleUndefDirective,
+// HandlePragmaPopMacro, HandleEndOfFile): a #define in the main file itself (not in an inclusion, nor after a line
+// marker that enters a file) where the warning isn't ignored is tracked, its place put in clang's WarnUnusedMacroLocs.
+// Expanding it, or a #ifdef's, #ifndef's or live `defined`'s naming it, marks it used and takes it out. Its #undef, or
+// its redefinition outside a system header, while it is unused warns at it then; its redefinition anywhere and a
+// #pragma pop_macro that replaces it take it out. Those left at the main file's end warn at it there, in the set's
+// order. A definition's warning has the severity its place gives it, which clang reads there at the end too.
+#define BUSTER_PP_UNUSED_SEVERITY 0x0F
+#define BUSTER_PP_UNUSED_USED 0x80
+// LLVM's DenseMapInfo<SourceLocation>'s empty key.
+#define BUSTER_PP_UNUSED_EMPTY UINT32_MAX
+// The SmallDenseSet's inline buckets (SmallDenseSet<SourceLocation, 32>).
+#define BUSTER_PP_UNUSED_INLINE 32u
+
+// The key clang's set has for a definition at `location` in the main file: its raw source location, the file's offset
+// plus 2, where clang's source manager puts the main file (after its invalid entry 0), the first file it loads.
+static uint32_t pp_unused_key(const Preprocessor* pp, uint32_t location)
+{
+    const uint32_t range = pp_find_range(pp, location);
+    return location - pp->ranges[range].base + 2;
+}
+
+// The home bucket of `key` in clang 23's LLVM DenseMap: its hash, the key times 37.
+static uint32_t pp_unused_home(const Preprocessor* pp, uint32_t key)
+{
+    return (key * 37u) & (pp->unused_buckets - 1);
+}
+
+// DenseMap's lookup as clang 23's LLVM has it, linear probing from the home bucket: the bucket of `key` and whether it is
+// there, else the empty bucket an insertion takes. (Its order of 1000 definitions, and of definitions and #undefs mixed,
+// is this one's, with pp_unused_erase's backward shift; quadratic probing and tombstones give others.)
+static bool pp_unused_find(const Preprocessor* pp, uint32_t key, uint32_t* bucket)
+{
+    const uint32_t mask = pp->unused_buckets - 1;
+    uint32_t at = pp_unused_home(pp, key);
+    while (pp->unused_keys[at] != key && pp->unused_keys[at] != BUSTER_PP_UNUSED_EMPTY)
+    {
+        at = (at + 1) & mask;
+    }
+    *bucket = at;
+    return pp->unused_keys[at] == key;
+}
+
+// SmallDenseMap::grow: `buckets` buckets (at least 64 past the inline ones, a power of 2), the old entries put in again
+// in their buckets' order. Returns false, after a fatal error, without memory.
+static bool pp_unused_grow(Preprocessor* pp, uint32_t buckets)
+{
+    const uint32_t count = buckets <= BUSTER_PP_UNUSED_INLINE ? BUSTER_PP_UNUSED_INLINE : buckets < 64 ? 64 : buckets;
+    uint32_t* keys = arena_push(&pp->arena, (uint64_t)count * sizeof(uint32_t), _Alignof(uint32_t));
+    PPMacroId* macros = arena_push(&pp->arena, (uint64_t)count * sizeof(PPMacroId), _Alignof(PPMacroId));
+    const bool result = keys != 0 && macros != 0;
+    if (result)
+    {
+        const uint32_t* old_keys = pp->unused_keys;
+        const PPMacroId* old_macros = pp->unused_macros;
+        const uint32_t old_count = pp->unused_buckets;
+        memset(keys, 0xFF, (uint64_t)count * sizeof(uint32_t));
+        pp->unused_keys = keys;
+        pp->unused_macros = macros;
+        pp->unused_buckets = count;
+        for (uint32_t i = 0; i < old_count; i += 1)
+        {
+            if (old_keys[i] != BUSTER_PP_UNUSED_EMPTY)
+            {
+                uint32_t bucket;
+                pp_unused_find(pp, old_keys[i], &bucket);
+                keys[bucket] = old_keys[i];
+                macros[bucket] = old_macros[i];
+            }
+        }
+    }
+    else
+    {
+        pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "out of memory for -Wunused-macros' definitions");
+    }
+    return result;
+}
+
+// DenseMap's insertion of `key`, macro `id`'s: grown to twice its buckets first where the entries would fill three
+// quarters.
+static void pp_unused_insert(Preprocessor* pp, uint32_t key, PPMacroId id)
+{
+    bool valid = pp->unused_buckets != 0 || pp_unused_grow(pp, BUSTER_PP_UNUSED_INLINE);
+    uint32_t bucket = 0;
+    valid = valid && !pp_unused_find(pp, key, &bucket);
+    if (valid && (pp->unused_entries + 1) * 4 >= pp->unused_buckets * 3)
+    {
+        valid = pp_unused_grow(pp, pp->unused_buckets * 2);
+        valid = valid && !pp_unused_find(pp, key, &bucket);
+    }
+    if (valid)
+    {
+        pp->unused_keys[bucket] = key;
+        pp->unused_macros[bucket] = id;
+        pp->unused_entries += 1;
+    }
+}
+
+// Takes macro `id`'s place out of the set, if it is there: the entries after it in its run move back into the hole when
+// their home bucket allows it (backward-shift deletion).
+static void pp_unused_erase(Preprocessor* pp, PPMacroId id)
+{
+    uint32_t hole;
+    if (pp->unused_buckets != 0 && pp_unused_find(pp, pp_unused_key(pp, pp->macros[id].location), &hole))
+    {
+        const uint32_t mask = pp->unused_buckets - 1;
+        pp->unused_keys[hole] = BUSTER_PP_UNUSED_EMPTY;
+        pp->unused_entries -= 1;
+        for (uint32_t at = (hole + 1) & mask; pp->unused_keys[at] != BUSTER_PP_UNUSED_EMPTY; at = (at + 1) & mask)
+        {
+            // An entry moves back when the hole is between its home bucket and it.
+            const uint32_t home = pp_unused_home(pp, pp->unused_keys[at]);
+            if (((at - home) & mask) >= ((at - hole) & mask))
+            {
+                pp->unused_keys[hole] = pp->unused_keys[at];
+                pp->unused_macros[hole] = pp->unused_macros[at];
+                pp->unused_keys[at] = BUSTER_PP_UNUSED_EMPTY;
+                hole = at;
+            }
+        }
+    }
+}
+
+// The warning of tracked macro `id`, at its name, with the severity its place gave it.
+static void pp_unused_warn(Preprocessor* pp, PPMacroId id)
+{
+    const PPMacro* macro = &pp->macros[id];
+    const PPSeverity severity = (PPSeverity)((macro->unused & BUSTER_PP_UNUSED_SEVERITY) - 1);
+    char flag[BUSTER_PP_WARNING_FLAG_BYTES];
+    pp_warning_flag_text(PP_WARNING_UNUSED_MACROS, severity, flag);
+    // Its place was found visible where it was defined (a warning there isn't checked again).
+    pp_diagnose(pp, severity == PP_SEVERITY_WARNING ? PP_SEVERITY_WARNING_ALWAYS : severity, macro->location, "macro is not used%s", flag);
+}
+
+// A #define of macro `id` (stored) where -Wunused-macros may be given: tracked if its place is in the main file itself
+// and gives the warning.
+static __attribute__((noinline, cold)) void pp_unused_macro_track(Preprocessor* pp, PPMacroId id)
+{
+    if (pp_warning_possible(pp, PP_WARNING_UNUSED_MACROS))
+    {
+        PPMacro* macro = &pp->macros[id];
+        const uint32_t range = pp_find_range(pp, macro->location);
+        const uint32_t note = range != BUSTER_PP_NONE ? pp_line_note_at(pp, range, macro->location) : BUSTER_PP_NONE;
+        const bool main = range != BUSTER_PP_NONE && pp->main_file != BUSTER_PP_NONE && pp->ranges[range].file == pp->main_file &&
+                          pp->ranges[range].parent == BUSTER_PP_NONE && (note == BUSTER_PP_NONE || pp->line_directives[note].include_location == BUSTER_PP_NONE);
+        const PPSeverity severity = main ? pp_warning_severity(pp, PP_WARNING_UNUSED_MACROS, macro->location) : BUSTER_PP_IGNORED;
+        if (severity != BUSTER_PP_IGNORED)
+        {
+            macro->unused = (uint8_t)(severity + 1);
+            pp->unused_tracking = true;
+            pp_unused_insert(pp, pp_unused_key(pp, macro->location), id);
+        }
+    }
+}
+
+BUSTER_INLINE void pp_unused_macro_define(Preprocessor* pp, PPMacroId id)
+{
+    if (((pp->warnings_possible >> PP_WARNING_UNUSED_MACROS) & 1u) != 0)
+    {
+        pp_unused_macro_track(pp, id);
+    }
+}
+
+// Tracked macro `id` is replaced: by a #define at `location` (its warning first, while unused, unless that #define is
+// in a system header), by an #undef (its warning while unused), or by a #pragma pop_macro (none). Its place is taken out.
+static __attribute__((noinline, cold)) void pp_unused_macro_replaced(Preprocessor* pp, PPMacroId id, uint32_t location, bool warns)
+{
+    const PPMacro* macro = &pp->macros[id];
+    if (warns && !(macro->unused & BUSTER_PP_UNUSED_USED) && (location == 0 || pp_diagnostic_warning_visible(pp, location, 0)))
+    {
+        pp_unused_warn(pp, id);
+    }
+    pp_unused_erase(pp, id);
+}
+
+// Macro `id` is used (clang's markMacroAsUsed): a tracked macro's place is taken out the first time.
+static __attribute__((noinline, cold)) void pp_macro_used_slow(Preprocessor* pp, PPMacroId id)
+{
+    PPMacro* macro = &pp->macros[id];
+    if (macro->unused != 0 && !(macro->unused & BUSTER_PP_UNUSED_USED))
+    {
+        macro->unused |= BUSTER_PP_UNUSED_USED;
+        pp_unused_erase(pp, id);
+    }
+}
+
+// Each expansion of macro `id`: nothing to do until the unit tracks a definition.
+BUSTER_INLINE void pp_macro_used(Preprocessor* pp, PPMacroId id)
+{
+    if (BUSTER_UNLIKELY(pp->unused_tracking))
+    {
+        pp_macro_used_slow(pp, id);
+    }
+}
+
+// The main file's end: the warnings of the places left, in the set's buckets' order.
+static __attribute__((noinline, cold)) void pp_unused_macros_end(Preprocessor* pp)
+{
+    for (uint32_t i = 0; i < pp->unused_buckets; i += 1)
+    {
+        if (pp->unused_keys[i] != BUSTER_PP_UNUSED_EMPTY)
+        {
+            pp_unused_warn(pp, pp->unused_macros[i]);
+        }
+    }
+}
+
+// A `defined X` answer in a #if line, at index `index` of pp->captures, of a tracked macro `id` not yet used: marked used
+// when the evaluation reads it live (pp_defined_live), as clang's EvaluateDefined marks it.
+static __attribute__((noinline, cold)) void pp_defined_use(Preprocessor* pp, PPMacroId id, uint32_t index)
+{
+    if (pp->defined_use_count < BUSTER_ARRAY_LENGTH(pp->defined_use_indices))
+    {
+        pp->defined_use_indices[pp->defined_use_count] = index;
+        pp->defined_use_macros[pp->defined_use_count] = id;
+        pp->defined_use_count += 1;
+    }
+    else
+    {
+        pp_macro_used_slow(pp, id);
+    }
+}
+
+BUSTER_INLINE void pp_defined_answer(Preprocessor* pp, IdentId name, const PPTokens* target, uint32_t index)
+{
+    if (BUSTER_UNLIKELY(pp->unused_tracking))
+    {
+        const PPMacroId id = pp->macro_of[name];
+        const uint8_t unused = pp->macros[id].unused;
+        if (id != 0 && unused != 0 && !(unused & BUSTER_PP_UNUSED_USED))
+        {
+            if (target == &pp->captures)
+            {
+                pp_defined_use(pp, id, index);
+            }
+            else
+            {
+                pp_macro_used_slow(pp, id);
+            }
+        }
+    }
+}
+
+// The evaluation read the operand at index `index` of pp->captures live: a `defined` answer there marks its macro used.
+static __attribute__((noinline, cold)) void pp_defined_live(Preprocessor* pp, uint32_t index)
+{
+    for (uint32_t i = 0; i < pp->defined_use_count; i += 1)
+    {
+        if (pp->defined_use_indices[i] == index)
+        {
+            pp_macro_used_slow(pp, pp->defined_use_macros[i]);
+        }
+    }
+}
+
 // #define, on the line [begin, end) of a file's tokens (the name's token first), read in the range at `base`. Its
 // constraints (C 6.10.4) are checked as clang checks them, in its order, and reported where and as it reports them.
 static void pp_define(Preprocessor* pp, uint32_t data_index, uint32_t base, uint32_t begin, uint32_t end)
@@ -2059,6 +2324,10 @@ static void pp_define(Preprocessor* pp, uint32_t data_index, uint32_t base, uint
         if (valid)
         {
             const PPMacroId previous = pp_is_defined(pp, name) ? pp->macro_of[name] : 0;
+            if (previous != 0 && pp->macros[previous].unused != 0)
+            {
+                pp_unused_macro_replaced(pp, previous, location, true);
+            }
             if (previous != 0 && pp_language_defined(pp, &pp->macros[previous]))
             {
                 pp_diagnose_group(pp, PP_WARNING_BUILTIN_MACRO_REDEFINED, location, "redefining builtin macro");
@@ -2086,6 +2355,7 @@ static void pp_define(Preprocessor* pp, uint32_t data_index, uint32_t base, uint
                 {
                     pp_output_event(pp, PP_OUTPUT_DEFINE, location, id, 0, false, 0);
                 }
+                pp_unused_macro_define(pp, id);
             }
         }
         if (parameters != 0)
@@ -2892,6 +3162,10 @@ BUSTER_INLINE void pp_pop_context(Preprocessor* pp)
         }
         pp->include_depth -= pp->include_depth != 0;
         pp_end_regions(pp, context->file == pp->main_file);
+        if (pp->unused_entries != 0 && context->file == pp->main_file && pp->context_count == 1)
+        {
+            pp_unused_macros_end(pp);
+        }
         pp->datas[pp->files[context->file].data].guarded |= context->guard_taken;
     }
     pp->context_count -= 1;
@@ -3104,6 +3378,7 @@ static uint32_t pp_copy_file_text_vector(Preprocessor* pp, const PPFileData* dat
             const PPFileData* body = &pp->datas[macro->data];
             const uint32_t b = macro->body_begin;
             const uint32_t expansion = pp_history_expansion(pp, id, base + data->starts[p + lane], 0);
+            pp_macro_used(pp, id);
             const uint8_t kind = body->kinds[b] & 0x7F;
             out->kinds[at] = kind;
             out->flags[at] = (uint8_t)((out->flags[at] & (BUSTER_PP_SPACE | BUSTER_PP_START_OF_LINE)) | BUSTER_PP_FROM_MACRO | BUSTER_PP_NAME_SPACE);
@@ -4749,6 +5024,7 @@ static void pp_close_invocation(Preprocessor* pp, bool closed)
         }
         if (valid && (macro->flags & BUSTER_PP_MACRO_COMPILED))
         {
+            pp_macro_used(pp, invocation->macro);
             pp_continue_invocation(pp);
         }
         else
@@ -5641,6 +5917,7 @@ static void pp_emit_simple_write(Preprocessor* pp, const PPInvocation* invocatio
                     flags = out->count == begin ? (uint8_t)((flags & ~name_clear) | name_flags | BUSTER_PP_NAME_SPACE) : flags;
                     const PPMacro* nested = &pp->macros[names[name].expands];
                     const uint32_t expansion = history ? pp_history_expansion(pp, names[name].expands, macro->base + data->starts[stop], invocation->history) : 0;
+                    pp_macro_used(pp, names[name].expands);
                     const uint32_t at_body = out->count;
                     pp_emit_body_run(pp, &pp->datas[nested->data], nested->base, nested->body_begin, nested->body_end, expansion, &previous);
                     pp_emit_flags(pp, at_body, name_clear, (uint8_t)((flags & name_clear) | BUSTER_PP_NAME_SPACE));
@@ -6106,6 +6383,11 @@ BUSTER_INLINE void pp_template_write(Preprocessor* pp, const PPInvocation* invoc
 {
     const __m128i lanes8 = _mm_set_epi8(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
     const __m512i lanes32 = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+    // The names whose bodies go straight in are expanded (-Wunused-macros' use).
+    for (uint32_t bits = BUSTER_UNLIKELY(pp->unused_tracking) ? expanding : 0; bits != 0; bits &= bits - 1)
+    {
+        pp_macro_used(pp, template->nested[__builtin_ctz(bits)]);
+    }
     const __m128i template_kinds = _mm_loadu_si128((const __m128i*)template->kinds);
     const __m128i template_flags = _mm_loadu_si128((const __m128i*)template->flags);
     const __m128i template_painted = _mm_mask_mov_epi8(template_flags, (__mmask16)painted, _mm_or_si128(template_flags, _mm_set1_epi8(BUSTER_PP_NO_EXPAND)));
@@ -6480,6 +6762,7 @@ static bool pp_expand_nested(Preprocessor* pp, PPNested* nested, PPToken name, u
     const bool result = pp_room(pp, out, BUSTER_PP_TEMPLATE_TOKENS);
     if (result)
     {
+        pp_macro_used(pp, nested->macro);
         memcpy(&pp->argument_records[base], nested->records, (uint64_t)given * sizeof(PPArgument));
         pp->argument_record_count = base + given;
         const PPInvocation invocation = {
@@ -6620,6 +6903,7 @@ static bool pp_expand_argument_in_place(Preprocessor* pp, PPArgument* argument)
             {
                 const uint32_t saved_history = pp->history_current;
                 pp->history_current = pp_history_expansion(pp, id, token.location, token.origin);
+                pp_macro_used(pp, id);
                 const uint32_t at = out->count;
                 result = result && pp_append_file_tokens(pp, out, &pp->datas[macro->data], macro->base, macro->body_begin, macro->body_end, true);
                 pp->history_current = saved_history;
@@ -6877,6 +7161,7 @@ static bool pp_invoke_file(Preprocessor* pp, PPContext* context, const PPFileDat
             // pp_invoke's record of the expansion, its ')' as pp_collect_arguments records it.
             const uint32_t location = base + data->starts[position];
             invocation.history = pp_history_expansion(pp, id, location, 0);
+            pp_macro_used(pp, id);
             if (invocation.history != 0)
             {
                 pp->history[invocation.history - 1].end = base + data->starts[close];
@@ -6978,6 +7263,10 @@ static void pp_invoke(Preprocessor* pp, PPMacroId id, PPToken name)
                            (pp_collect_argument_slice(pp, &invocation, variadic, macro->parameter_count) ||
                             pp_collect_arguments(pp, &invocation, variadic, macro->parameter_count));
     const bool finished = collected && pp_finish_simple(pp, &invocation);
+    if (finished)
+    {
+        pp_macro_used(pp, id);
+    }
     valid = valid && !finished;
     if (valid && !collected)
     {
@@ -7005,6 +7294,7 @@ static void pp_expand_object(Preprocessor* pp, PPMacroId id, PPToken name, uint3
 {
     const uint32_t saved_history = pp->history_current;
     pp->history_current = pp_history_expansion(pp, id, name.location, name.origin);
+    pp_macro_used(pp, id);
     PPMacro* macro = &pp->macros[id];
     const PPFileData* data = &pp->datas[macro->data];
     // Straight into the target, when nothing in the body expands (but while a stream is open, which reads a token at a
@@ -8251,6 +8541,11 @@ static void pp_expand_builtin(Preprocessor* pp, PPMacroId id, PPToken name, uint
                 valid = parenthesized ? pp_read_token(pp, &token, &end) : valid;
                 valid = valid && token.kind == C_TOKEN_RAW_IDENTIFIER;
                 const bool defined = valid && pp_is_defined(pp, token.value);
+                if (defined)
+                {
+                    const PPTokens* target = pp_target(pp);
+                    pp_defined_answer(pp, token.value, target, target->count);
+                }
                 PPToken close;
                 if (valid && parenthesized)
                 {
@@ -8416,6 +8711,7 @@ static bool pp_expand_file_direct(Preprocessor* pp, PPContext* context, const PP
         const uint32_t location = base + data->starts[position];
         const uint32_t saved_history = pp->history_current;
         pp->history_current = pp_history_expansion(pp, id, location, 0);
+        pp_macro_used(pp, id);
         const uint32_t begin = target->count;
         // The name's leading space and line start go to the first token (pp_expand_object).
         const uint8_t name_flags = (uint8_t)((pp_file_space(data, position) ? BUSTER_PP_SPACE : 0) | ((data->kinds[position] & BUSTER_C_TOKEN_START_OF_LINE) ? BUSTER_PP_START_OF_LINE : 0));
@@ -9282,6 +9578,7 @@ static bool pp_condition_direct(Preprocessor* pp, PPContext* context, uint32_t d
                 pp->history_current = record;
                 const PPToken answer = pp_number_token(pp, pp_is_defined(pp, operand), name_flags);
                 pp->history_current = saved_history;
+                pp_defined_answer(pp, operand, captures, count);
                 captures->kinds[count] = answer.kind;
                 captures->flags[count] = answer.flags;
                 captures->values[count] = answer.value;
@@ -9311,6 +9608,7 @@ static bool pp_condition_direct(Preprocessor* pp, PPContext* context, uint32_t d
                     const uint32_t b = link->body_begin;
                     const uint8_t body_kind = body->kinds[b] & 0x7F;
                     const uint32_t record = pp_history_expansion(pp, next, place, parent);
+                    pp_macro_used(pp, next);
                     const PPMacroId after = body_kind == C_TOKEN_RAW_IDENTIFIER ? pp->macro_of[body->values[b]] : 0;
                     if (after != 0)
                     {
@@ -9501,6 +9799,10 @@ static void pp_conditional(Preprocessor* pp, PPContext* context, uint32_t d, uin
                 pp_diagnose_group(pp, PP_WARNING_EXTRA_TOKENS, pp_token_location(pp, context, data, hash + 3), "extra tokens at end of #%s directive", kind == PP_DIRECTIVE_IFDEF ? "ifdef" : "ifndef");
             }
             const bool defined = named && pp_is_defined(pp, data->values[hash + 2]);
+            if (defined)
+            {
+                pp_macro_used(pp, pp->macro_of[data->values[hash + 2]]);
+            }
             pp_apply_condition(pp, context, d, kind, named && (kind == PP_DIRECTIVE_IFDEF ? defined : !defined));
             break;
         }
@@ -10094,8 +10396,10 @@ static uint32_t pp_lexed_start(const Preprocessor* pp, uint32_t location)
 static uint32_t pp_line_note_at(const Preprocessor* pp, uint32_t range, uint32_t location)
 {
     uint32_t result = BUSTER_PP_NONE;
-    for (uint32_t i = range != BUSTER_PP_NONE ? pp->ranges[range].first_line_directive : BUSTER_PP_NONE; i != BUSTER_PP_NONE && pp->line_directives[i].location <= location;
-         i = pp->line_directives[i].next_in_range)
+    // A note made after a diagnostic being rendered was given is left out (Preprocessor.presumed_note_limit).
+    const uint32_t limit = pp->presumed_note_limit != 0 ? pp->presumed_note_limit - 1 : UINT32_MAX;
+    for (uint32_t i = range != BUSTER_PP_NONE ? pp->ranges[range].first_line_directive : BUSTER_PP_NONE;
+         i != BUSTER_PP_NONE && i < limit && pp->line_directives[i].location <= location; i = pp->line_directives[i].next_in_range)
     {
         result = i;
     }
@@ -10171,6 +10475,28 @@ static bool pp_line_value(Preprocessor* pp, const PPTokens* tokens, uint32_t i, 
     scratch_end(scratch);
     *number = value;
     return result;
+}
+
+// A line marker at directive d, its tokens [begin, stop) of `tokens` read and its flags valid: clang's -Wgnu-line-marker
+// extension (#2222, Preprocessor::HandleDigitDirective), "this style of line directive is a GNU extension", at its file
+// name, or at its line's end without one. Clang gives it before the marker's line note, and prints it at once, so its
+// place is presumed under the notes before that one (Preprocessor.diagnostic_line_notes), which a warning at the
+// marker's own line would otherwise number after.
+static __attribute__((noinline, cold)) void pp_gnu_line_marker(Preprocessor* pp, const PPContext* context, uint32_t d, const PPTokens* tokens, uint32_t begin,
+                                                               uint32_t stop)
+{
+    if (pp_warning_possible(pp, PP_WARNING_GNU_LINE_MARKER))
+    {
+        const PPFileData* data = &pp->datas[context->data];
+        const bool named = begin + 1 < stop;
+        const uint32_t saved_origin = pp->diagnostic_origin;
+        pp->diagnostic_origin = named && tokens->origins != 0 ? tokens->origins[begin + 1] : 0;
+        const uint32_t location = named ? tokens->locations[begin + 1] : pp_line_end_location(pp, data, pp->ranges[context->range].base, data->directive_end[d] - 1);
+        pp->diagnostic_line_notes = pp->line_directive_count + 1;
+        pp_diagnose_group(pp, PP_WARNING_GNU_LINE_MARKER, location, "this style of line directive is a GNU extension");
+        pp->diagnostic_line_notes = 0;
+        pp->diagnostic_origin = saved_origin;
+    }
 }
 
 // The lines a #line or a line marker at directive d numbers, from its tokens [begin, stop) of `tokens` (expanded, for
@@ -10249,6 +10575,10 @@ static void pp_apply_line(Preprocessor* pp, PPContext* context, uint32_t d, cons
     }
     else if (valid)
     {
+        if (marker && ((pp->warnings_possible >> PP_WARNING_GNU_LINE_MARKER) & 1u) != 0)
+        {
+            pp_gnu_line_marker(pp, context, d, tokens, begin, stop);
+        }
         pp->ranges[context->range].marker_entries += entered;
         pp->ranges[context->range].marker_entries -= left;
         // The line after the number token's is `number`, as clang counts, and its line note starts at that token
@@ -10822,6 +11152,10 @@ static void pp_pragma_push_pop(Preprocessor* pp, PPPragmaKind kind, const PPToke
         {
             if (pp->pushed_names[i - 1] == name)
             {
+                if (pp->macro_of[name] != 0 && pp->macros[pp->macro_of[name]].unused != 0)
+                {
+                    pp_unused_macro_replaced(pp, pp->macro_of[name], 0, false);
+                }
                 pp_set_macro(pp, name, pp->pushed_macros[i - 1]);
                 memmove(pp->pushed_names + i - 1, pp->pushed_names + i, (pp->pushed_count - i) * sizeof(IdentId));
                 memmove(pp->pushed_macros + i - 1, pp->pushed_macros + i, (pp->pushed_count - i) * sizeof(PPMacroId));
@@ -11257,6 +11591,10 @@ static void pp_prepared_directive(Preprocessor* pp, PPContext* context)
                         pp_diagnose_group(pp, PP_WARNING_EXTRA_TOKENS, pp_define_location(pp, data, base, hash + 3, end), "extra tokens at end of #undef directive");
                     }
                     const PPMacroId previous = pp->macro_of[name];
+                    if (previous != 0 && pp->macros[previous].unused != 0)
+                    {
+                        pp_unused_macro_replaced(pp, previous, 0, true);
+                    }
                     if (previous != 0 && pp_language_defined(pp, &pp->macros[previous]))
                     {
                         pp_diagnose_group(pp, PP_WARNING_BUILTIN_MACRO_REDEFINED, name_location, "undefining builtin macro");
@@ -12134,6 +12472,10 @@ static bool pp_evaluate_value(Preprocessor* pp, const PPTokens* tokens, uint32_t
             }
             else if (kind == C_TOKEN_NUMERIC_CONSTANT || kind == BUSTER_PP_KIND_INTEGER)
             {
+                if (BUSTER_UNLIKELY(pp->defined_use_count != 0) && live && tokens == &pp->captures)
+                {
+                    pp_defined_live(pp, i);
+                }
                 uint8_t buffer[256];
                 const uint8_t* spelling;
                 const uint32_t length = tokens->values[i] - token_location;
@@ -12318,7 +12660,9 @@ static bool pp_evaluate_value(Preprocessor* pp, const PPTokens* tokens, uint32_t
 static bool pp_evaluate(Preprocessor* pp, const PPTokens* tokens, uint32_t begin, uint32_t end, uint32_t location)
 {
     PPValue value;
-    return pp_evaluate_value(pp, tokens, begin, end, location, &value) && value.bits != 0;
+    const bool result = pp_evaluate_value(pp, tokens, begin, end, location, &value) && value.bits != 0;
+    pp->defined_use_count = 0;
+    return result;
 }
 
 static const char* const pp_embed_parameter_names[BUSTER_PP_EMBED_UNKNOWN] = { "limit", "prefix", "suffix", "if_empty", "clang::offset" };
