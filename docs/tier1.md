@@ -522,6 +522,47 @@ A select of a vector's lanes less than zero is one `vpblendvb`, `vblendvps` or
 `vblendvpd` where the comparison is its alone (#2780,
 `BUSTER_TIER1_VECTOR_BLENDV`).
 
+### The upper vector state (#2830)
+
+A legacy SSE instruction keeps its destination's bits above 127. While the upper
+state is dirty, the 9700X makes it wait for the register's old value: #2755's
+saxpy body ran at 6.0 cycles an element after a 512-bit instruction, against 1.07
+after `vzeroupper` ([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier1-unroll-2755-2026-11-15),
+`9700x/forms/`). Tier 1 keeps the state clean in two ways, as clang does:
+
+- **`vzeroupper` on the way out.** `tier1_emit_function` emits the function, then
+  scans its records (`tier1_emit_upper_dirty`, sixteen at a time, each form's
+  operand classes gathered from the form table). If any record names a ymm or
+  zmm register below 16, the function is emitted again with
+  `Tier1EmitResult.zero_upper`. A `vzeroupper` then goes right before each call,
+  after its `al`. Another goes before each return's epilogue, so the unwind
+  reader still finds the epilogue right before the `ret`. Neither goes where a
+  ymm or zmm argument (`tier1_select_call_wide`) or result
+  (`tier1_select_result_wide`) is live. zmm16 to zmm31 don't count: no legacy
+  instruction reaches them, and `vzeroupper` leaves them alone. Only a function
+  that names such a register pays for the second emission. The code's
+  certificate regenerates the call's `vzeroupper` and accepts the epilogue's.
+  The placement is one per call and ret, not clang's per-block analysis: a
+  function that is dirty anywhere clears the state at every exit.
+- **VEX forms.** At a target with AVX, `tier1_emit_vex` rewrites the finished
+  code's legacy SSE records as their VEX twins, one record for one, so that no
+  index into the records changes. The pairs are the `BUSTER_TIER1_VEX_TWINS`
+  list: `addss x, y` becomes `vaddss x, x, y`, a register merge `movss x, y`
+  becomes `vmovss x, x, y`, `movaps` becomes `vmovaps`, and so on. Each twin
+  computes its legacy form's low 128 bits and zeroes the rest. `test-tier1-emit`
+  runs every pair natively on random state and compares the registers, flags,
+  MXCSR and memory. A function with an asm body keeps its legacy records: the
+  body's are the program's own.
+  The certificate decodes and compares records through
+  `tier1_emit_vex_canonical`, which maps a twin back to its legacy record. That
+  is sound because its register cells never read a register's upper bytes apart
+  from its low ones.
+
+The per-unit helpers (`c_check_program_helpers.c`) write no ymm or zmm register,
+so they leave the state as they find it, and Tier 1 clears it before calling them.
+`test-tier1-masks` checks each compiled function's placement, and that no legacy
+SSE record is left at an AVX target. Tier 0 has neither change yet (#3335).
+
 ### Inlining (#1282, #2541)
 
 Between the lowering and SSA promotion, `--tier1` expands a body's calls of the

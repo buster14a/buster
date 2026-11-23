@@ -75,6 +75,12 @@
 // allocation's own certificate (tier1_certificate_cfg.c) still covers them. Canonical 32-bit storage (a 4-byte value's upper half zero) is the selection's contract and isn't
 // checked: a 4-byte value is its low 4 bytes.
 //
+// Every record, emitted or regenerated, is read as its canonical form (tier1_emit_vex_canonical, #2830). At an AVX
+// target the final code holds the VEX twins of the selection's legacy SSE records (tier1_emit_vex), and each one is read
+// as its legacy record. A register location is always the register's low bytes, so the twin's zeroing of the bytes
+// above 127, which the legacy form keeps, is never what a read finds. A dirty function's vzeroupper (Tier1EmitResult.
+// zero_upper) is a call's record, regenerated, or its epilogue's first, where no result is wider than 16 bytes.
+//
 // Inputs are borrowed. The program is pushed onto `output`; `scratch` is restored. On failure both are restored.
 
 #include <stdbool.h>
