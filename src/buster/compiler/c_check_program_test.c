@@ -1034,7 +1034,8 @@ static bool check_test_program_daz(void)
 // alignment, or the member's where the member is in memory: an aggregate of 8 bytes in a union of 32, one of two floats
 // and two ints in a union of 32, 24 bytes in memory in a union of 32, a pointer beside a long and a struct of a double in
 // unions of 32, and a packed struct of 5 bytes, in memory, in unions of 16 and 32, which clang passes as an integer
-// where it has no general register left. After BUSTER_CHECK_TEST_TRANSPARENT_UNIONS, whose structs it takes.
+// where it has no general register left; and members of a pair's or a vector's classes: a 128-bit integer in a union of
+// 32 and in a packed one, a struct of a 16-byte vector and a complex long, in unions of 32. After BUSTER_CHECK_TEST_TRANSPARENT_UNIONS, whose structs it takes.
 #define BUSTER_CHECK_TEST_TRANSPARENT_OWN_UNIONS                                                                                                                      \
     "struct external_l{long a;};struct external_mix{int a,b;float c,d;};struct __attribute__((packed)) external_pk{char c;int i;};"                                \
     "typedef union __attribute__((transparent_union,aligned(32))){struct external_l s;long l;}ExternalOL;"                                                          \
@@ -1043,7 +1044,12 @@ static bool check_test_program_daz(void)
     "typedef union __attribute__((transparent_union,aligned(32))){long*p;long l;}ExternalOP;"                                                                       \
     "typedef union __attribute__((transparent_union,aligned(32))){struct external_dv s;long l;}ExternalOD;"                                                        \
     "typedef union __attribute__((transparent_union,aligned(16))){struct external_pk p;struct external_pk q;}ExternalOK;"                                          \
-    "typedef union __attribute__((transparent_union,aligned(32))){struct external_pk p;struct external_pk q;}ExternalOQ;"
+    "typedef union __attribute__((transparent_union,aligned(32))){struct external_pk p;struct external_pk q;}ExternalOQ;"                                          \
+    "typedef int external_v4 __attribute__((vector_size(16)));struct external_v{external_v4 x;};"                                                                    \
+    "typedef union __attribute__((transparent_union,aligned(32))){__int128 w;__int128 v;}ExternalOW;"                                                              \
+    "typedef union __attribute__((transparent_union,aligned(32))){struct external_v v;struct external_v u;}ExternalOV;"                                            \
+    "typedef union __attribute__((transparent_union,aligned(32))){_Complex long c;_Complex long d;}ExternalOC;"                                                    \
+    "typedef union __attribute__((transparent_union,packed)){__int128 w;__int128 v;}ExternalOX;"
 
 // The program every checked object and its oracle are linked with: it runs both on the same inputs.
 static const char check_test_program_harness[] =
@@ -1244,6 +1250,25 @@ static const char check_test_program_harness[] =
     "h=external_fold(h,(unsigned long)p.l);h=external_fold(h,(unsigned long)(long)(d.s.v*4));}va_end(a);return h;}\n"
     "unsigned long external_own_variadic_apply(unsigned long(*f)(int,...),int n){ExternalOL l={.s={n}};ExternalOM m={.m={n,-n,0.5f,n*0.25f}};"
     "ExternalOP p={.l=n*9L};ExternalOD d={.s={n*1.5}};return f(3,l,m,p,d,l,m,p,d,l,m,p,d);}\n"
+    // The pairs' and the vector's unions of a stack slot of their own (#1844), in registers, after 5 longs and 8 doubles,
+    // where every one takes the stack, through a pointer and with va_arg.
+    "static unsigned long external_pair_fold(unsigned long h,int k,ExternalOW w,ExternalOV v,ExternalOC c,ExternalOX x){"
+    "h=external_fold(external_fold(h,(unsigned long)k),(unsigned long)w.w^(unsigned long)(w.w>>64));h=external_fold(h,(unsigned long)(v.v.x[0]+v.v.x[3]*7));"
+    "h=external_fold(h,(unsigned long)(__real__ c.c+__imag__ c.c*9));return external_fold(h,(unsigned long)x.w^(unsigned long)(x.w>>64));}\n"
+    "unsigned long external_own_pairs(int k,ExternalOW w,ExternalOV v,ExternalOC c,ExternalOX x){return external_pair_fold(0,k,w,v,c,x);}\n"
+    "unsigned long external_own_pairs_late(long l0,long l1,long l2,long l3,long l4,double d0,double d1,double d2,double d3,double d4,double d5,double d6,"
+    "double d7,int k,ExternalOW w,ExternalOV v,ExternalOC c,ExternalOX x){"
+    "return external_pair_fold((unsigned long)(l0+l1+l2+l3+l4*3)+(unsigned long)(long)(d0+d1+d2+d3+d4+d5+d6+d7*3),k,w,v,c,x);}\n"
+    "unsigned long external_own_pairs_apply(unsigned long(*f)(int,ExternalOW,ExternalOV,ExternalOC,ExternalOX),"
+    "unsigned long(*g)(long,long,long,long,long,double,double,double,double,double,double,double,double,int,ExternalOW,ExternalOV,ExternalOC,ExternalOX),int n){"
+    "__int128 w=((__int128)n<<64)|(unsigned)(n*3);struct external_v v={{n,2,3,n*4}};_Complex long c=n;__imag__ c=n*2;ExternalOW ow={.w=w};"
+    "return f(0,w,v,c,w)^f(1,ow,v,c,(__int128)n)^g(1,2,3,4,n,0.5,1,2,3,4,5,6,n*0.5,2,w,v,c,w);}\n"
+    "unsigned long external_own_pairs_variadic(int count,...){va_list a;va_start(a,count);unsigned long h=(unsigned long)count;"
+    "for(int i=0;i<count;i++){ExternalOW w=va_arg(a,ExternalOW);ExternalOV v=va_arg(a,ExternalOV);ExternalOC c=va_arg(a,ExternalOC);"
+    "h=external_fold(h,(unsigned long)w.w^(unsigned long)(w.w>>64));h=external_fold(h,(unsigned long)(v.v.x[0]+v.v.x[3]*7));"
+    "h=external_fold(h,(unsigned long)(__real__ c.c+__imag__ c.c*9));}va_end(a);return h;}\n"
+    "unsigned long external_own_pairs_variadic_apply(unsigned long(*f)(int,...),int n){ExternalOW w={.w=(__int128)n*5};"
+    "ExternalOV v={.v={{n,-n,7,n*2}}};ExternalOC c={.c=n};return f(4,w,v,c,w,v,c,w,v,c,w,v,c);}\n"
     // After 6 longs and 8 doubles, every union on the stack.
     "unsigned long external_transparent_late(long l0,long l1,long l2,long l3,long l4,long l5,double d0,double d1,double d2,double d3,double d4,double d5,"
     "double d6,double d7,ExternalTF f,ExternalTS s,ExternalTP p,ExternalTD d,ExternalTW w,ExternalTA a,ExternalTB b){"

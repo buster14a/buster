@@ -2816,8 +2816,14 @@ What the lowering covers past scalars (#145's programs):
   member's value converted to such a union, of a member passed by its bytes,
   goes through a zeroed object of the union's size and alignment, as clang's
   code's memset and memcpy make it (`check_lower_transparent_value`), so that
-  the union's slot is never copied from past the member. A first member that
-  passes as a pair, a vector or a scalar in memory is still refused by name,
+  the union's slot is never copied from past the member. A pair's member (a
+  128-bit integer, a struct of one, a complex long) and a 16-byte vector's
+  (a struct of one) pass so too, in their two general registers or xmm
+  register, and on the stack as clang's code puts them there: the union's
+  slot where clang has no register for them, or the member's value's i128 or
+  vector slot where LLVM has none (`FIRST` past 16 bytes). A first member
+  that passes as a vector wider than 16 bytes or as an `_Atomic` value in
+  memory (which clang passes uncounted) is still refused by name,
   and so is a printer's such union of `__builtin_dump_struct`. And a union made transparent, by a
   later declaration's attribute, after a function definition or a static
   object's initializer that names a function, whose first member passes

@@ -2282,8 +2282,8 @@ static bool check_lower_transparent_late(CheckLowerWriter* writer, TypeId type)
 // passes as itself). A transparent union passes so where it has that member's size and alignment; one that an aligned
 // or packed attribute of its own sizes or aligns otherwise passes as clang's code passes it, its registers the member's
 // and its stack slot the union's (getIndirectResult, AbiTable.transparent, #1844), where the member is a scalar or an
-// aggregate of eightbytes or an aggregate in memory, of any size, and is refused for another member (a pair, a vector, a
-// scalar in memory: abi_finish_transparent). And where the union
+// aggregate of eightbytes, a pair, a vector of 16 bytes or an aggregate in memory, of any size, and is refused for
+// another member (a vector wider than 16 bytes, an _Atomic value in memory: abi_finish_transparent). And where the union
 // was made transparent after clang's code may have classified a function's type (check_lower_transparent_late) and its
 // first member passes otherwise than it (its registers, its stack or its extension), clang's code may pass it as either.
 // Out of line: only aggregates ask.
@@ -2299,7 +2299,7 @@ static __attribute__((noinline)) const char* check_lower_transparent_passed(Chec
     const char* feature = NULL;
     if (!own_slot && (table->stack_bytes[own] != table->stack_bytes[first] || table->alignment_log2[own] != table->alignment_log2[first]))
     {
-        feature = "transparent unions sized or aligned otherwise than their first member, a pair, a vector or a scalar in memory";
+        feature = "transparent unions sized or aligned otherwise than their first member, a vector wider than 16 bytes or an _Atomic value";
     }
     else if (own_slot && check_lower_transparent_late(writer, type))
     {
