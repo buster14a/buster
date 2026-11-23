@@ -11690,11 +11690,10 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
             arena_report_failure(stderr, "linking", UINT64_C(1) << 36);
         }
         check_clock_mark(stage_clock, CHECK_STAGE_RUNTIME);
-        // The units' links merged report their own failures (check_units_merge), but binding's: on the units' lanes by the
-        // vector path (#778), a round of their flow on those the worker budget gives (#905), and by its twin on one lane
-        // or the scalar path.
+        // The units' links merged report their own failures (check_units_merge), but binding's: on the units' lanes (#778),
+        // a round of their flow on those the worker budget gives (#905), and on one lane where there is one.
         WorkerBudgetLease merge_lease = { .control = -1, .reply = -1, .child = -1 };
-        const uint32_t merge_lanes = valid && units != NULL && lanes->units_flow != NULL && lanes->lanes > 1 && !BUSTER_SCALAR_PATH(scalar) ?
+        const uint32_t merge_lanes = valid && units != NULL && lanes->units_flow != NULL && lanes->lanes > 1 ?
                                          check_units_slots(lanes->budget, lanes->lanes, &merge_lease) : 1;
         const bool emitted = !valid || (merge_lanes > 1   ? check_units_merge_lanes(&code.link, units, unit_count, &binding, debug ? &dwarf.attach : NULL, &output, &bytes,
                                                                                     scratch, merge_lanes, lanes->units_flow, &merge_lease) :
@@ -11819,7 +11818,7 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
         if (valid)
         {
             // Several units' bound link is checked on their lanes (#778).
-            const LinkError checked = check_driver_link_check(&code.link, lanes, units != NULL && !BUSTER_SCALAR_PATH(scalar) ? lanes->lanes : 1);
+            const LinkError checked = check_driver_link_check(&code.link, lanes, units != NULL ? lanes->lanes : 1);
             valid = checked == LINK_ERROR_NONE;
             if (valid && runtime_kind == RUNTIME_KIND_STATIC)
             {

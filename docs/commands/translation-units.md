@@ -78,8 +78,9 @@ two units define an error) before `check_driver_executable` binds and writes
 it as it does one unit's; on more than one lane the vector path merges them on
 the units' lanes into the same link (`check_units_merge_lanes`, #778: rule 4's
 exchange of the global names by their hashes' partitions, then the records
-copied at places that prefix sums give), whose exact twin `check_units_merge`
-is, and checks the bound link on them (`link_check_lanes`); with `-g`, each
+copied at places that prefix sums give; `check_units_merge` merges them on
+one lane, which `test-check-units` compares by `--lanes` 1 against 2, 3 and 8),
+and checks the bound link on them (`link_check_lanes`); with `-g`, each
 unit keeps its DWARF as `-c -g` writes it, and the merge joins them
 (`check_units_merge_debug`, #779). `--id-order N` primes each unit's lane-owned
 intern table before its real compile; the output must match an unprimed run.
