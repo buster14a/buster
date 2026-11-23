@@ -512,4 +512,37 @@ void check(void)
     known(int x; 0; 1 + missing_tail_operand) skipped_tail;
     after_invalid_binary;
 }
+#elif BUSTER_CASE == 68
+int check(int n)
+{
+    int s = 0;
+    "before" + n;
+    foo (int i = 0; i < n; i++) s += i;
+    s == 1;
+    return s;
+}
+int later(void)
+{
+    "later" + 1;
+    return 0;
+}
+#elif BUSTER_CASE == 69
+int check(int n)
+{
+    "before" + n;
+    foo (int i = 0; i < n; i++) { "loop" + i; }
+    after_corrected_loop;
+    "after" + n;
+    return n;
+}
+#elif BUSTER_CASE == 70
+void check(int n)
+{
+    whil ("condition" + n != (void*)0) n--;
+}
+#elif BUSTER_CASE == 71
+int check(void)
+{
+    retrn;
+}
 #endif

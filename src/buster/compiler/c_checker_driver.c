@@ -979,7 +979,7 @@ struct CheckDriverDiagnostic
     TypeId default_target;
     // A predefined typedef's declaration has no source location (#2250).
     bool unlocated_note;
-    // A reread builtin typo precedes the corrected expression's own diagnostic, even at the same token.
+    // A reread name that now checks as its replacement. Its typo precedes any diagnostic on the replacement.
     bool corrected;
     // A duplicate case/default makes clang discard that switch before its jump-scope check (#2498).
     bool switch_conflict;
@@ -4983,8 +4983,8 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
         }
         const uint64_t* completions = completion_count != 0 ? c_bindings_sort(completion_keys, completion_sorting, completion_count, !scalar, varying) : NULL;
         uint32_t report_total = 0;
-        // A builtin typo is corrected before the reread expression is checked (#2250). Stable token sorting keeps
-        // this name error before an argument or direct-call error at the same token.
+        // A name is corrected before its replacement is checked. Stable sorting keeps the typo before any error
+        // the corrected expression or statement has at the same token.
         for (uint32_t i = 0; i < extra_count; i += 1)
         {
             if (extra[i].corrected)
@@ -8141,8 +8141,8 @@ static bool check_driver_rejected_top_known(const Parser* parser, const uint32_t
 // Whether the first reading's errors at `token` all leave their declaration valid (check_driver_report_keeps_valid,
 // #1835): no other error is there. A typo's correction (#1447, CHECK_INPUT_UNDECLARED_CORRECTED) does in a body too
 // (`bodied`): the reading corrects it again, its use bound as clang's, whose warnings (an array index's) stay. Only a
-// rejected unit's rounds call it. A builtin corrected by a driver name edit (#2250) has the same recovered status in
-// the extra diagnostics; an independent expression error at its token still rejects the expression.
+// rejected unit's rounds call it. A driver name edit can also leave the corrected expression or statement valid;
+// an independent error at its token still rejects it.
 static bool check_driver_rejected_recovered(const Parser* parser, const CheckInput* input, const CheckDriverDiagnostic* extra, uint32_t extra_count, uint32_t token, bool bodied)
 {
     bool recovered = false;
@@ -12843,7 +12843,9 @@ static uint32_t check_driver_typo_errors(const CheckDriverTypoEdits* edits, cons
                     .note_token = declared,
                     .note = note,
                     .unlocated_note = predefined,
-                    .corrected = builtin,
+                    // A reparsed statement keyword is usable in the warning pass, even when the original call
+                    // could not be parsed (#3369). A later repair may have removed the replacement.
+                    .corrected = builtin || (!edits->parameters[e] && keyword != 0 && checking->tokens.kinds[token] == edit->kind),
                     .parameter_correction = edits->parameters[e],
                 };
                 result += 1;

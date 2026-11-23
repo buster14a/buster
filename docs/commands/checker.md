@@ -304,7 +304,9 @@ unused-warning fixtures also check exact scope-completion tokens.
   arguments and nested calls retain their original parse errors through successive
   rounds, without duplicating earlier arguments' diagnostics. Block expression
   calls also recover at their first outer semicolon, checking subsequent clauses
-  as statements and preserving Clang's C23 loop-typo correction. Builtin controls
+  as statements and preserving Clang's C23 loop-typo correction. The keyword-typo
+  cases check warnings before, inside and after a corrected loop, plus independent
+  errors in the same body and at the corrected keyword (#3369). Builtin controls
   keep lookup/header diagnostics and independent arguments without imposing
   intrinsic constraints on the synthetic call. Boundary controls exclude empty
   later arguments, mismatched delimiters, member callees and semicolon crossings
