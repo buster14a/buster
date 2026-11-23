@@ -125,8 +125,8 @@ struct CheckInitializer
     uint64_t failed_offset;
     uint32_t warning_count;
     uint32_t warning_token;
-    // A value part whose source is floating (#147): the only plans whose literal conversions the common warnings read
-    // (check_common_initializer_roots), so that they never visit the others' parts.
+    // A value part whose source is floating, or complex (#147, #1875): the only plans whose literal conversions and floating
+    // precision the common warnings read (check_common_initializer_roots), so that they never visit the others' parts.
     bool floating_values;
     // A value part whose integer constant its integer target holds as neither a signed nor an unsigned value, or whose
     // conditional or comma may carry one (#1447, check_init_changed_integer): the other plans the common warnings read, for
@@ -793,8 +793,9 @@ static void check_init_append(CheckInitWalker* walker, const CheckInitPart* part
             }
             *slot = *part;
             walker->result->count += 1;
-            walker->result->floating_values |= part->kind == CHECK_INIT_VALUE && walker->stream != NULL && part->node < walker->stream->count &&
-                                               check_action_kind(walker->types, check_stream_type(walker->stream, part->node)) == BUSTER_TYPE_KIND_FLOATING;
+            const uint8_t value_kind = part->kind == CHECK_INIT_VALUE && walker->stream != NULL && part->node < walker->stream->count ?
+                                       check_action_kind(walker->types, check_stream_type(walker->stream, part->node)) : BUSTER_TYPE_KIND_VOID;
+            walker->result->floating_values |= value_kind == BUSTER_TYPE_KIND_FLOATING || value_kind == BUSTER_TYPE_KIND_COMPLEX;
             walker->result->changed_integers |= check_init_changed_integer(walker, part);
             const uint8_t target_kind = part->kind == CHECK_INIT_VALUE ? type_kind(walker->types, part->conversion.type) : BUSTER_TYPE_KIND_VOID;
             walker->result->enum_values |= target_kind == BUSTER_TYPE_KIND_ENUM || target_kind == BUSTER_TYPE_KIND_ALIGNED;

@@ -10077,6 +10077,7 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 #include "c_check_bitfield_driver_test.c"
 #include "c_check_register_driver_test.c"
 #include "c_check_enum_arithmetic_driver_test.c"
+#include "c_check_float_precision_driver_test.c"
 #include "c_check_vla_fold_driver_test.c"
 #include "c_check_for_loop_driver_test.c"
 #include "c_check_enum_cast_driver_test.c"
@@ -10318,6 +10319,8 @@ static int run_checker_driver_tests(int argc, char** argv)
     bool assert_diagnostics_only = false;
     // --unused-comparison-only: discarded comparisons' assignment-note eligibility (#2906).
     bool unused_comparison_only = false;
+    // --float-precision-only: -Wimplicit-float-conversion's and -Wliteral-range's floating comparisons (#1875).
+    bool float_precision_only = false;
     // --record-extensions-only: zero-length arrays and zero-size records, their policies and output preservation.
     bool record_extensions_only = false;
     // --auto-qualifiers-only: qualified __auto_type declarations and recovered atomic pointees (#1844).
@@ -10403,6 +10406,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             unused_comparison_only = true;
         }
+        else if (strcmp(argv[i], "--float-precision-only") == 0)
+        {
+            float_precision_only = true;
+        }
         else if (strcmp(argv[i], "--record-extensions-only") == 0)
         {
             record_extensions_only = true;
@@ -10479,6 +10486,7 @@ static int run_checker_driver_tests(int argc, char** argv)
                              (uint32_t)operand_diagnostics_only + (uint32_t)label_attributes_only + (uint32_t)attribute_recovery_only + (uint32_t)assert_bool_only +
                              (uint32_t)malformed_calls_only + (uint32_t)record_extensions_only + (uint32_t)auto_qualifiers_only + (uint32_t)query_bool_only +
                              (uint32_t)run_modes_only + (uint32_t)correctness_edges_only + (uint32_t)imaginary_bit_int_only + (uint32_t)unused_comparison_only + (uint32_t)assert_diagnostics_only +
+                             (uint32_t)float_precision_only +
                              (uint32_t)pic_only;
     options &= focuses <= 1 && (focuses == 0 || (!lazy && check_driver_part.count == 1));
     // One focused section's alone: the others' gates take `focused` as --sign-compare-only's did.
@@ -11050,6 +11058,10 @@ static int run_checker_driver_tests(int argc, char** argv)
     {
         check_test_driver_unused_comparisons(&test, clang, executable, directory);
     }
+    if (temporary && float_precision_only)
+    {
+        check_test_driver_float_precision(&test, clang, executable, directory);
+    }
     if (temporary && record_extensions_only)
     {
         check_test_driver_gnu_empty_struct(&test, clang, executable, directory);
@@ -11264,6 +11276,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_bitfields,
             check_test_driver_registers,
             check_test_driver_enum_arithmetic,
+            check_test_driver_float_precision,
             check_test_driver_vla_fold,
             check_test_driver_for_loops,
             check_test_driver_enum_casts,

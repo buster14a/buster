@@ -653,6 +653,195 @@ static TypeId check_constant_enum_operand(const CheckConstantInput* input, uint3
     return result;
 }
 
+// A real floating type's place in clang's getFloatingTypeSemanticOrder (#1875): its getFloatingRank, __bf16, _Float16,
+// float, double, long double, __float128, where _Float16 and __fp16 share IEEE half's semantics and so compare equal;
+// -1 for any other type. `type` is unqualified and past its aligned typedefs.
+static int32_t check_float_rank(TypeId type)
+{
+    const int32_t result = type == BUSTER_TYPE_BF16 ? 0 : type == BUSTER_TYPE_FLOAT16 || type == BUSTER_TYPE_HALF ? 1 : type == BUSTER_TYPE_FLOAT ? 2 :
+                           type == BUSTER_TYPE_DOUBLE ? 3 : type == BUSTER_TYPE_LONG_DOUBLE ? 4 : type == BUSTER_TYPE_FLOAT128 ? 5 : -1;
+    return result;
+}
+
+// The real floating type `type` is, or a complex floating type's element (`complex` set), unqualified, past aligned
+// typedefs; 0 for any other type. Clang's CheckImplicitConversion strips a complex type on both sides alike.
+static TypeId check_float_element(const TypeTable* types, TypeId type, bool* complex)
+{
+    const TypeId bare = type != 0 ? type_unqualified(type_strip_aligned(types, type)) : 0;
+    const uint8_t kind = bare != 0 ? type_kind(types, bare) : BUSTER_TYPE_KIND_NONE;
+    const TypeId element = kind == BUSTER_TYPE_KIND_COMPLEX ? type_unqualified(type_strip_aligned(types, type_element(types, bare))) : bare;
+    *complex = kind == BUSTER_TYPE_KIND_COMPLEX;
+    const bool floating = (kind == BUSTER_TYPE_KIND_FLOATING || kind == BUSTER_TYPE_KIND_COMPLEX) && check_float_rank(element) >= 0;
+    return floating ? element : 0;
+}
+
+// Whether a conversion from `source` to `target` loses floating-point precision (#1875, clang's
+// getFloatingTypeSemanticOrder above zero): both real floating, or both complex floating, the source's of a higher rank.
+static bool check_float_narrows(const TypeTable* types, TypeId source, TypeId target)
+{
+    bool source_complex = false;
+    bool target_complex = false;
+    const TypeId from = check_float_element(types, source, &source_complex);
+    const TypeId to = from != 0 ? check_float_element(types, target, &target_complex) : 0;
+    return to != 0 && source_complex == target_complex && check_float_rank(from) > check_float_rank(to);
+}
+
+// One floating value as an integer significand and a power of two (value = mantissa * 2^exponent), or a zero, an infinity,
+// or a NaN, whose fraction is kept left-aligned in 112 bits.
+typedef struct CheckFloatParts CheckFloatParts;
+struct CheckFloatParts
+{
+    unsigned __int128 mantissa;
+    int32_t exponent;
+    bool zero;
+    bool infinite;
+    bool nan;
+};
+
+// A long double's parts: x87's 64-bit significand, its integer bit explicit.
+static CheckFloatParts check_float_parts(long double value)
+{
+    CheckFloatParts parts = { 0 };
+    parts.nan = isnan(value);
+    parts.infinite = isinf(value);
+    parts.zero = value == 0;
+    if (parts.nan)
+    {
+        uint64_t significand = 0;
+        memcpy(&significand, &value, sizeof(significand));
+        parts.mantissa = (unsigned __int128)(significand & (UINT64_MAX >> 1)) << 49;
+    }
+    else if (!parts.infinite && !parts.zero)
+    {
+        int exponent = 0;
+        const long double fraction = frexpl(fabsl(value), &exponent);
+        parts.mantissa = (unsigned __int128)(uint64_t)ldexpl(fraction, 64);
+        parts.exponent = exponent - 64;
+    }
+    return parts;
+}
+
+// A __float128's parts from its bits (c_check_quad.c keeps them in CheckValue.integer).
+static CheckFloatParts check_float_quad_parts(unsigned __int128 bits)
+{
+    CheckFloatParts parts = { 0 };
+    const uint32_t biased = (uint32_t)(bits >> 112) & 0x7fffu;
+    const unsigned __int128 fraction = bits & (((unsigned __int128)1 << 112) - 1);
+    parts.nan = biased == 0x7fffu && fraction != 0;
+    parts.infinite = biased == 0x7fffu && fraction == 0;
+    parts.zero = biased == 0 && fraction == 0;
+    parts.mantissa = parts.nan ? fraction : biased == 0 ? fraction : fraction | (unsigned __int128)1 << 112;
+    parts.exponent = biased == 0 ? -16382 - 112 : (int32_t)biased - 16383 - 112;
+    return parts;
+}
+
+// Whether `parts` converts to the real floating type `format` exactly (clang's APFloat::convert without losing
+// information, and IsSameFloatAfterCast's round trip): its significant bits fit the format's precision at its exponent,
+// subnormal ones too, and its exponent its range; a quiet NaN's fraction loses no bit.
+static bool check_float_fits(TypeId format, CheckFloatParts parts)
+{
+    const int32_t precision = format == BUSTER_TYPE_BF16 ? 8 : format == BUSTER_TYPE_FLOAT16 || format == BUSTER_TYPE_HALF ? 11 : format == BUSTER_TYPE_FLOAT ? 24 :
+                              format == BUSTER_TYPE_DOUBLE ? 53 : format == BUSTER_TYPE_LONG_DOUBLE ? 64 : 113;
+    const int32_t largest = format == BUSTER_TYPE_FLOAT16 || format == BUSTER_TYPE_HALF ? 15 : format == BUSTER_TYPE_BF16 || format == BUSTER_TYPE_FLOAT ? 127 :
+                            format == BUSTER_TYPE_DOUBLE ? 1023 : 16383;
+    const int32_t smallest = 1 - largest;
+    bool result = parts.zero || parts.infinite;
+    if (parts.nan)
+    {
+        // (The NaN's fraction bits past the format's own, precision - 1 of them, are dropped, and a signaling one, its quiet
+        // bit clear, comes back quiet.)
+        const uint32_t dropped = 112u - (uint32_t)(precision - 1);
+        result = (parts.mantissa & (((unsigned __int128)1 << dropped) - 1)) == 0 && (parts.mantissa >> 111) != 0;
+    }
+    else if (!result && parts.mantissa != 0)
+    {
+        const uint64_t high = (uint64_t)(parts.mantissa >> 64);
+        const uint64_t low = (uint64_t)parts.mantissa;
+        const int32_t trailing = low != 0 ? __builtin_ctzll(low) : 64 + __builtin_ctzll(high);
+        const unsigned __int128 odd = parts.mantissa >> trailing;
+        const uint64_t odd_high = (uint64_t)(odd >> 64);
+        const int32_t length = odd_high != 0 ? 128 - __builtin_clzll(odd_high) : 64 - __builtin_clzll((uint64_t)odd);
+        const int32_t bottom = parts.exponent + trailing;
+        const int32_t top = bottom + length - 1;
+        const int32_t floor = top - (precision - 1) > smallest - (precision - 1) ? top - (precision - 1) : smallest - (precision - 1);
+        result = top <= largest && bottom >= floor;
+    }
+    return result;
+}
+
+// The constant reader's operand `value` as CheckFloatComparison sees it beside a literal of the type `literal` (#1875): a
+// cast, which an implicit conversion to that type, an lvalue's read or an explicit cast is, and its operand's type into
+// `source`. An explicit cast's value is at its `)`, its operand's at the operand's first token.
+static bool check_constant_float_cast(const CheckConstantInput* input, const CheckValue* operand, uint32_t value, TypeId literal, TypeId* source)
+{
+    const CheckInputReader* reader = input->reader;
+    const Parser* parser = reader->parser;
+    const TypeTable* types = reader->types;
+    const uint32_t leaf = value != BUSTER_CHECK_NONE ? check_constant_enum_leaf(input, value) : BUSTER_CHECK_NONE;
+    const TypeId type = type_is_valid(types, operand->type) ? type_unqualified(type_strip_aligned(types, operand->type)) : 0;
+    const bool converted = type != 0 && type != literal;
+    const bool cast = !converted && leaf >= input->first && leaf < input->end && parser->tree.roles[leaf] == PARSE_ROLE_CLOSE_CAST;
+    uint32_t child = cast ? reader->first_child[leaf] : BUSTER_CHECK_NONE;
+    while (child != BUSTER_CHECK_NONE && (child < input->first || child >= input->end || input->first_value[child - input->first] == BUSTER_CHECK_NONE))
+    {
+        child = reader->next_child[child];
+    }
+    const uint32_t inner = child != BUSTER_CHECK_NONE ? input->first_value[child - input->first] : BUSTER_CHECK_NONE;
+    const TypeId cast_source = inner != BUSTER_CHECK_NONE && type_is_valid(types, input->values[inner - input->first].type) ?
+                               type_unqualified(type_strip_aligned(types, input->values[inner - input->first].type)) : 0;
+    *source = converted ? type : cast ? cast_source : type;
+    return converted || (cast && cast_source != 0) || (type != 0 && operand->category == CHECK_LVALUE);
+}
+
+// Clang's -Wliteral-range comparison for the constant reader's `==` or `!=` at `token` (#1875, CheckFloatComparison): its
+// left operand a floating literal its comparison doesn't convert and its right one a cast, or else the other way round,
+// the cast's operand of a real floating type that can't hold the literal exactly. A CHECK_WARNING_EVENT_FLOAT_COMPARE
+// keeps it, payload.first_type that type, for check_common_float_comparisons, which reports those no graph node holds
+// (an array bound's, an enumerator's, a bit-field width's). Kept out of its caller's hot loop, as check_constant_enum_mix.
+static __attribute__((noinline)) void check_constant_float_compare(CheckConstantInput* input, const CheckAction* action, uint32_t first, uint32_t token)
+{
+    CheckInputReader* reader = input->reader;
+    const Parser* parser = reader->parser;
+    const TypeTable* types = reader->types;
+    uint32_t values[2] = { first, BUSTER_CHECK_NONE };
+    values[1] = first >= input->first && first < input->end ? input->next_value[first - input->first] : BUSTER_CHECK_NONE;
+    bool matched = false;
+    TypeId source = 0;
+    CheckFloatParts parts = { 0 };
+    for (uint32_t side = 0; side < 2 && !matched && values[1] != BUSTER_CHECK_NONE; side += 1)
+    {
+        const CheckValue* literal = action->operands + side;
+        const CheckValue* other = action->operands + 1 - side;
+        const uint32_t leaf = check_constant_enum_leaf(input, values[side]);
+        bool complex = false;
+        const TypeId literal_type = type_is_valid(types, literal->type) ? check_float_element(types, literal->type, &complex) : 0;
+        bool other_complex = false;
+        const TypeId other_type = type_is_valid(types, other->type) ? check_float_element(types, other->type, &other_complex) : 0;
+        // (Unconverted: the comparison's type is its own, which a wider floating or a complex operand would change.)
+        const bool unconverted = literal_type != 0 && !complex && !other_complex && (other_type == 0 || check_float_rank(other_type) <= check_float_rank(literal_type));
+        const bool written = unconverted && leaf < parser->tokens.count && parser->tokens.kinds[leaf] == PARSE_KIND_NUMBER &&
+                             literal->constant_kind == CHECK_CONSTANT_FLOATING;
+        matched = written && check_constant_float_cast(input, other, values[1 - side], type_unqualified(type_strip_aligned(types, literal->type)), &source);
+        parts = matched ? (literal_type == BUSTER_TYPE_FLOAT128 ? check_float_quad_parts(literal->integer) : check_float_parts(literal->floating)) : parts;
+    }
+    bool source_complex = false;
+    const TypeId format = matched ? check_float_element(types, source, &source_complex) : 0;
+    if (format != 0 && !source_complex && !check_float_fits(format, parts))
+    {
+        const CheckWarningEvent event =
+        {
+            .id = CHECK_WARNING_ID_LITERAL_RANGE,
+            .kind = CHECK_WARNING_EVENT_FLOAT_COMPARE,
+            .token = token,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+            .completion = token + 1,
+            .payload = { .first_type = format, .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+        };
+        check_input_warning_once(reader, &event);
+    }
+}
+
 // Clang's checkEnumArithmeticConversions for the constant reader's operator at `token` (#1447): a binary or conditional
 // operator whose operands are enumerations of different types, or an enumeration and a floating type, as clang coerces
 // them, holds a possible mix, which a CHECK_WARNING_EVENT_ENUM_MIX keeps for check_common_enum_arithmetic. The
@@ -3852,6 +4041,12 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                      (op >= CHECK_OP_BIT_AND && op <= CHECK_OP_BIT_XOR) || op == CHECK_OP_CONDITIONAL))
                 {
                     check_constant_enum_mix(input, &action, first, count, token);
+                }
+                // (A floating constant operand is rare: the comparison with a literal, -Wliteral-range's, is tested past it.)
+                if (checked.diagnostic == CHECK_DIAG_NONE && (op == CHECK_OP_EQUAL || op == CHECK_OP_NOT_EQUAL) && count == 2 &&
+                    __builtin_expect(action.operands[0].constant_kind == CHECK_CONSTANT_FLOATING || action.operands[1].constant_kind == CHECK_CONSTANT_FLOATING, 0))
+                {
+                    check_constant_float_compare(input, &action, first, token);
                 }
                 if (checked.diagnostic == CHECK_DIAG_NONE && op == CHECK_OP_SHIFT_LEFT && count == 2)
                 {
