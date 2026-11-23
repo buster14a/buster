@@ -488,6 +488,49 @@ static uint64_t ssa_ir_test_hash(const IrFunction* function)
     return hash;
 }
 
+// A function's printed IR folded into an FNV-1a digest, or into *text when `text` isn't null (freed by the caller).
+static uint64_t ssa_ir_test_text_digest(uint64_t hash, const IrFunction* function, Arena* scratch, char** text)
+{
+    char* printed = 0;
+    size_t length = 0;
+    FILE* stream = open_memstream(&printed, &length);
+    bool ok = stream != NULL;
+    if (ok)
+    {
+        ok = ir_print(function, scratch, stream) == IR_OK;
+        ok = fclose(stream) == 0 && ok;
+    }
+    for (size_t i = 0; ok && i < length; i += 1)
+    {
+        hash = (hash ^ (uint8_t)printed[i]) * UINT64_C(1099511628211);
+    }
+    hash = ok ? hash : 0;
+    if (text != NULL && ok)
+    {
+        *text = printed;
+    }
+    else
+    {
+        free(printed);
+    }
+    return hash;
+}
+
+// A promoted function's printed IR against the text recorded for it, which every promotion path gave (#2924's
+// tests commit: it replaces comparing the paths with each other).
+static bool ssa_ir_test_text(const IrFunction* function, const char* expected, Arena* scratch)
+{
+    char* text = 0;
+    ssa_ir_test_text_digest(0, function, scratch, &text);
+    const bool same = text != 0 && strcmp(text, expected) == 0;
+    if (!same)
+    {
+        fprintf(stderr, "  promoted IR differs from the recorded text:\n%s\n", text != 0 ? text : "(unprinted)");
+    }
+    free(text);
+    return same;
+}
+
 // A serialized comparison checks logical columns and side tables without comparing arena pointers or padding.
 // In particular it exposes different phi order or value numbering after independent construction (#1395).
 static bool ssa_ir_test_identical(const IrFunction* first, const IrFunction* second, Arena* scratch)
@@ -557,6 +600,9 @@ static bool ssa_ir_test_promote(SsaIrTestTally* tally, const IrFunction* input, 
 // Generated programs executed as typed streams, all-memory IR and both promoted forms. With `objects`, the generator
 // adds frame objects (arrays and structs, some of twin layouts) and COPY between them, which stay memory through
 // promotion while the locals around them are promoted.
+#define BUSTER_SSA_IR_TEST_DIGEST UINT64_C(0x2cce058d55e482b7)
+#define BUSTER_SSA_IR_TEST_DIGEST_OBJECTS UINT64_C(0x213503e404c13fa4)
+
 static void ssa_ir_test_programs(SsaIrTestTally* tally, uint64_t seed, uint32_t count, bool objects)
 {
     Tier0Tables tables = {0};
@@ -574,6 +620,8 @@ static void ssa_ir_test_programs(SsaIrTestTally* tally, uint64_t seed, uint32_t 
     uint64_t slots_before = 0;
     uint64_t slots_after = 0;
     uint64_t phis = 0;
+    // Every promoted function's printed IR, by each path (#2924's tests commit).
+    uint64_t digests[2] = { UINT64_C(14695981039346656037), UINT64_C(14695981039346656037) };
     for (uint32_t p = 0; ready && p < count; p += 1)
     {
         tally->seed = seed + p;
@@ -616,6 +664,8 @@ static void ssa_ir_test_programs(SsaIrTestTally* tally, uint64_t seed, uint32_t 
                 slots_before += memory[f].slot_count;
                 slots_after += promoted[f].slot_count;
                 phis += ssa_ir_test_count(&promoted[f], IR_PHI);
+                digests[0] = ssa_ir_test_text_digest(digests[0], &promoted[f], &scratch, NULL);
+                digests[1] = ssa_ir_test_text_digest(digests[1], &twin[f], &scratch, NULL);
             }
         }
         if (ok)
@@ -654,6 +704,14 @@ static void ssa_ir_test_programs(SsaIrTestTally* tally, uint64_t seed, uint32_t 
         arena_pop_to(&twin_output, 0);
     }
     ssa_ir_test_expect(tally, functions_seen == (uint64_t)count * 8 && slots_after < slots_before && phis != 0, "generated path actually promotes locals and constructs phis");
+    // Recorded on #2924's tests commit, where the vector constructor and Braun's scalar construction printed the same
+    // IR for every function: the default seed and count's digests, without and with objects.
+    const uint64_t recorded = objects ? BUSTER_SSA_IR_TEST_DIGEST_OBJECTS : BUSTER_SSA_IR_TEST_DIGEST;
+    printf("SSA IR generated programs%s: promoted IR digest 0x%016" PRIx64 " (twin 0x%016" PRIx64 ")\n", objects ? " with objects" : "", digests[0], digests[1]);
+    if (seed == 134 && count == 16)
+    {
+        ssa_ir_test_expect(tally, digests[0] == recorded && digests[1] == recorded, "promoted IR matches its recorded digest");
+    }
     printf("SSA IR generated programs%s: %" PRIu64 " functions, instructions %" PRIu64 " -> %" PRIu64 ", slots %" PRIu64 " -> %" PRIu64 ", %" PRIu64 " phis\n", objects ? " with objects" : "", functions_seen, before, after,
            slots_before, slots_after, phis);
     tier0_tables_close(&tables);
@@ -1825,6 +1883,72 @@ static void ssa_ir_test_lifetimes(SsaIrTestTally* tally)
     Arena scratch = arena_reserve(1ull << 24);
     Arena execution = arena_reserve(1ull << 24);
     uint32_t header_phis[2] = { 0, 0 };
+    // The promoted text of each pass, recorded where the vector constructor and Braun's construction printed the same.
+    static const char* const recorded[2] = {
+        "function (i64) -> i64 {\n"
+        "b0:\n"
+        "  %0 = undef.i64\n"
+        "  %1 = param.i64 0\n"
+        "  %2 = const.i64 0x00000000000000000000000000000000\n"
+        "  %3 = br.void b1\n"
+        "b1:\n"
+        "  %4 = phi.i64 [%2, b0], [%17, b6]\n"
+        "  %5 = phi.i64 [%2, b0], [%18, b6]\n"
+        "  %6 = icmp.i1 %5, %1 ult\n"
+        "  %7 = cbr.void %6, b2, b7\n"
+        "b2:\n"
+        "  %8 = const.i64 0x00000000000000000000000000000001\n"
+        "  %9 = and.i64 %5, %8\n"
+        "  %10 = icmp.i1 %9, %2 ne\n"
+        "  %11 = cbr.void %10, b3, b4\n"
+        "b3:\n"
+        "  %12 = br.void b4\n"
+        "b4:\n"
+        "  %13 = phi.i64 [%0, b2], [%5, b3]\n"
+        "  %14 = cbr.void %10, b5, b6\n"
+        "b5:\n"
+        "  %15 = add.i64 %4, %13\n"
+        "  %16 = br.void b6\n"
+        "b6:\n"
+        "  %17 = phi.i64 [%4, b4], [%15, b5]\n"
+        "  %18 = add.i64 %5, %8\n"
+        "  %19 = br.void b1\n"
+        "b7:\n"
+        "  %20 = ret.void %4\n"
+        "}\n",
+        "function (i64) -> i64 {\n"
+        "b0:\n"
+        "  %0 = undef.i64\n"
+        "  %1 = param.i64 0\n"
+        "  %2 = const.i64 0x00000000000000000000000000000000\n"
+        "  %3 = br.void b1\n"
+        "b1:\n"
+        "  %4 = phi.i64 [%0, b0], [%14, b6]\n"
+        "  %5 = phi.i64 [%2, b0], [%18, b6]\n"
+        "  %6 = phi.i64 [%2, b0], [%19, b6]\n"
+        "  %7 = icmp.i1 %6, %1 ult\n"
+        "  %8 = cbr.void %7, b2, b7\n"
+        "b2:\n"
+        "  %9 = const.i64 0x00000000000000000000000000000001\n"
+        "  %10 = and.i64 %6, %9\n"
+        "  %11 = icmp.i1 %10, %2 ne\n"
+        "  %12 = cbr.void %11, b3, b4\n"
+        "b3:\n"
+        "  %13 = br.void b4\n"
+        "b4:\n"
+        "  %14 = phi.i64 [%4, b2], [%6, b3]\n"
+        "  %15 = cbr.void %11, b5, b6\n"
+        "b5:\n"
+        "  %16 = add.i64 %5, %14\n"
+        "  %17 = br.void b6\n"
+        "b6:\n"
+        "  %18 = phi.i64 [%5, b4], [%16, b5]\n"
+        "  %19 = add.i64 %6, %9\n"
+        "  %20 = br.void b1\n"
+        "b7:\n"
+        "  %21 = ret.void %5\n"
+        "}\n",
+    };
     for (uint32_t pass = 0; pass < 2; pass += 1)
     {
         // The second pass's text has the start's line as a lifetime end, which writes nothing.
@@ -1846,7 +1970,8 @@ static void ssa_ir_test_lifetimes(SsaIrTestTally* tally)
         {
             // The counter (slot 2) is read before the sum (slot 1) and the scoped value (slot 0): discovery order
             // differs between constructors, but the published phis and every rewritten operand must be identical.
-            ssa_ir_test_expect(tally, ssa_ir_test_identical(&promoted, &twin, &scratch), "independent promotion publishes identical loop phi order and value IDs");
+            ssa_ir_test_expect(tally, ssa_ir_test_text(&promoted, recorded[pass], &scratch) && ssa_ir_test_text(&twin, recorded[pass], &scratch),
+                               "promotion publishes the loop's phis in local order with canonical value IDs");
             for (uint32_t form = 0; form < 2; form += 1)
             {
                 const IrFunction* function = form == 0 ? &promoted : &twin;
