@@ -370,6 +370,19 @@ rows: the objects of `sqlite3.c`, speedtest1 and Lua's 34 files at Tier 0 and
 `main` and this change (Tier 0's `inc` and `dec` still cost no more than `add`
 and `sub`, and every rematerialized copy still costs no more than its reload).
 
+[#2830](https://github.com/buster14a/buster/issues/2830) added 63 rows: `vzeroupper`, and
+the VEX twins of the legacy SSE forms Tier 1 selects (`tier1_emit_vex`): `vmovss`, `vmovsd`
+and `vmovaps` stores, the scalar arithmetic, `vucomis*`, `vcmps*`, the conversions, `vmovd`
+and `vmovq` between register files, and `vpaddq`, each at its legacy form's operand kinds.
+They were measured by one `--missing --table` process on the 9700X (CPU 2, under the lock,
+built `BUSTER_HOST_ARCH=znver5 BUSTER_DEBUG_INFO=0` at the change). Each twin has its legacy form's
+latency and throughput but `vmovd` and `vmovq` into an xmm register: 2.5 cycles and one
+macro-op, against the legacy forms' 4.5 cycles and two. The arithmetic's memory forms block
+fewer pipes, and the scalar loads' address path is 4.5 cycles rather than 4. `vzeroupper`
+has a throughput of one per cycle and one macro-op. The same process printed every other row as committed. The 2,084 rows share
+218 IDs. [The record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier1-upper-state-2830-2026-11-23)
+has the process's output.
+
 ## Consumers
 
 - **Tier 0** asks the form choice for `inc` and `dec` where they cost no more
