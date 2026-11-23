@@ -11879,6 +11879,12 @@ static int run_checker_driver_tests(int argc, char** argv)
             {
                 check_test_driver_warning_catalog(&test, clang, executable, directory, "checker/system-macros");
             }
+            // Integers converted to floating types and floating promotions (#3339): -Wimplicit-const-int-float-conversion,
+            // -Wimplicit-int-float-conversion and -Wdouble-promotion, whole, in each policy, mode, lane request and reader.
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_warning_catalog(&test, clang, executable, directory, "checker/int-float-conversions");
+            }
             if (check_test_driver_takes_weighing(200))
             {
                 check_test_driver_kr_policy(&test, clang, executable, directory, lazy);

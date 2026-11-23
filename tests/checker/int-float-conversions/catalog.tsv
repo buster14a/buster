@@ -1,0 +1,4 @@
+buster-fixtures v1 checker-warnings
+constants.c	25	0	0	#3339: integer constants a floating type cannot hold, at a body's end and a file-scope declarator's, as APFloat prints them
+ranges.c	22	0	0	#3339: integers whose likely range is wider than the floating significand, at every implicit conversion in clang's order
+promotions.c	21	0	1	#3339: floating conversions to a higher rank, their targets as written, quiet where a system macro writes the context

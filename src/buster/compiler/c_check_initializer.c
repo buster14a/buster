@@ -134,6 +134,9 @@ struct CheckInitializer
     // conditional or comma may carry one (#1447, check_init_changed_integer): the other plans the common warnings read, for
     // their constant conversions.
     bool changed_integers;
+    // A value part whose integer source converts to a floating target (#3339): the plans whose integer-to-floating and
+    // floating promotion warnings the common warnings read too (check_common_scan_conversion).
+    bool integer_floats;
     // A value part whose target is an enumeration (#1447): the plans the common warnings read for a conversion between
     // enumerations (check_common_enum_cast).
     bool enum_values;
@@ -840,6 +843,9 @@ static void check_init_append(CheckInitWalker* walker, const CheckInitPart* part
                                        check_action_kind(walker->types, check_stream_type(walker->stream, part->node)) : BUSTER_TYPE_KIND_VOID;
             walker->result->floating_values |= value_kind == BUSTER_TYPE_KIND_FLOATING || value_kind == BUSTER_TYPE_KIND_COMPLEX;
             walker->result->changed_integers |= check_init_changed_integer(walker, part);
+            const uint8_t converted_kind = part->kind == CHECK_INIT_VALUE ? check_action_kind(walker->types, part->conversion.type) : BUSTER_TYPE_KIND_VOID;
+            walker->result->integer_floats |= value_kind == BUSTER_TYPE_KIND_INTEGER &&
+                                              (converted_kind == BUSTER_TYPE_KIND_FLOATING || converted_kind == BUSTER_TYPE_KIND_COMPLEX);
             const uint8_t target_kind = part->kind == CHECK_INIT_VALUE ? type_kind(walker->types, part->conversion.type) : BUSTER_TYPE_KIND_VOID;
             walker->result->enum_values |= target_kind == BUSTER_TYPE_KIND_ENUM || target_kind == BUSTER_TYPE_KIND_ALIGNED;
             walker->result->label_differences |= part->kind == CHECK_INIT_VALUE && part->value.constant_kind == CHECK_CONSTANT_LABEL_DIFFERENCE;

@@ -371,6 +371,12 @@ static const uint8_t node_census_warning_classes[CHECK_WARNING_ID_COUNT] = {
     [CHECK_WARNING_ID_IMPLICIT_FLOAT_CONVERSION] = NODE_CENSUS_WARNING_WHOLE,
     // A declaration's cleanup attribute's, the reader's (c_check_cleanup_input.c).
     [CHECK_WARNING_ID_ALIGN_MISMATCH] = NODE_CENSUS_WARNING_OUTSIDE,
+    // Any integer conversion to a floating type (#3339), off by default: a unit that enables it is refused whole. Its
+    // constant's change, on by default, is the constant tests' (node_census_constant_changes).
+    [CHECK_WARNING_ID_IMPLICIT_INT_FLOAT_CONVERSION] = NODE_CENSUS_WARNING_WHOLE,
+    [CHECK_WARNING_ID_IMPLICIT_CONST_INT_FLOAT_CONVERSION] = NODE_CENSUS_WARNING_TESTED,
+    // Any floating conversion to a higher rank (#3339), off by default: refused whole.
+    [CHECK_WARNING_ID_DOUBLE_PROMOTION] = NODE_CENSUS_WARNING_WHOLE,
 };
 
 // Which of the warnings the silence tests stand for the unit enables anywhere (check_common_enabled): the actions' warning
@@ -647,7 +653,8 @@ static NodeCensusPolicy node_census_policy(const Preprocessor* pp, const CheckIn
     policy.alignof_expression = check_common_enabled(pp, input, CHECK_WARNING_ID_GNU_ALIGNOF_EXPRESSION, false);
     policy.sizeof_decay = check_common_enabled(pp, input, CHECK_WARNING_ID_SIZEOF_ARRAY_DECAY, false);
     policy.constant_conversion = check_common_enabled(pp, input, CHECK_WARNING_ID_CONSTANT_CONVERSION, false) ||
-                                 check_common_enabled(pp, input, CHECK_WARNING_ID_LITERAL_CONVERSION, false);
+                                 check_common_enabled(pp, input, CHECK_WARNING_ID_LITERAL_CONVERSION, false) ||
+                                 check_common_enabled(pp, input, CHECK_WARNING_ID_IMPLICIT_CONST_INT_FLOAT_CONVERSION, false);
     policy.constant_logical = check_common_enabled(pp, input, CHECK_WARNING_ID_CONSTANT_LOGICAL_OPERAND, false);
     policy.division = check_common_enabled(pp, input, CHECK_WARNING_ID_DIVISION_BY_ZERO, false);
     policy.shifts = check_common_enabled(pp, input, CHECK_WARNING_ID_SHIFT_COUNT_NEGATIVE, false) ||
@@ -1681,12 +1688,19 @@ static bool node_census_constant_changes(const NodeCensusScratch* s, uint32_t op
     }
     else if (!result && target != 0 && kind == CHECK_CONSTANT_INTEGER && node_census_floating(types, target))
     {
-        // Exact where its significant bits fit the type's significand: float's 24, double's 53, long double's 64.
+        // Exact where its significant bits fit the type's significand: __bf16's 8, _Float16's and __fp16's 11, float's 24,
+        // double's 53, long double's 64, __float128's 113 (-Wimplicit-const-int-float-conversion, #3339).
         const TypeId base = node_census_base(types, target);
-        const uint32_t precision = base == BUSTER_TYPE_BUILTIN(BUSTER_TYPE_CODE_FLOAT) ? 24 : base == BUSTER_TYPE_BUILTIN(BUSTER_TYPE_CODE_DOUBLE) ? 53 : 64;
+        const uint32_t precision = base == BUSTER_TYPE_BF16 ? 8 : base == BUSTER_TYPE_FLOAT16 || base == BUSTER_TYPE_HALF ? 11 :
+                                   base == BUSTER_TYPE_BUILTIN(BUSTER_TYPE_CODE_FLOAT) ? 24 : base == BUSTER_TYPE_BUILTIN(BUSTER_TYPE_CODE_DOUBLE) ? 53 :
+                                   base == BUSTER_TYPE_FLOAT128 ? 113 : 64;
         const bool known = node_census_integer_constant(s, operand, &value);
-        const uint64_t magnitude = value < 0 ? (uint64_t)(-value) : (uint64_t)value;
-        const uint32_t span = magnitude != 0 ? 64 - (uint32_t)__builtin_clzll(magnitude) - (uint32_t)__builtin_ctzll(magnitude) : 0;
+        const unsigned __int128 magnitude = value < 0 ? -(unsigned __int128)value : (unsigned __int128)value;
+        const uint64_t high = (uint64_t)(magnitude >> 64);
+        const uint64_t low = (uint64_t)magnitude;
+        const uint32_t top = high != 0 ? 128 - (uint32_t)__builtin_clzll(high) : low != 0 ? 64 - (uint32_t)__builtin_clzll(low) : 0;
+        const uint32_t bottom = low != 0 ? (uint32_t)__builtin_ctzll(low) : high != 0 ? 64 + (uint32_t)__builtin_ctzll(high) : 0;
+        const uint32_t span = magnitude != 0 ? top - bottom : 0;
         result = !known || span > precision;
     }
     return result;

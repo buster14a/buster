@@ -7697,10 +7697,9 @@ expression completes, in unreachable code and short-circuited operands too,
 but not in `sizeof`'s operand; an `_Atomic` target takes neither. Only a unit
 where the warning may report pays for its candidates
 (`CheckCommonEnabled.float_precision`): the compound assignments join the
-walk's reach operators then. Not given: its child
-`-Wimplicit-int-float-conversion`'s integer conversions, which need clang's
-approximate expression ranges, and `-Wdouble-promotion`, its opposite (#3339);
-`-Wconversion` itself stays refused (#1365).
+walk's reach operators then. Its context in a system header's macro
+(CheckImplicitConversion's `isInSystemMacro(CC)`, `check_common_conversion_system`)
+silences it; `-Wconversion` itself stays refused (#1365).
 
 `-Wliteral-range`'s floating comparison (on by default) is clang's
 `CheckFloatComparison`: an `==` or `!=` whose left operand, past parentheses
@@ -7726,10 +7725,59 @@ The original driver fixtures (`c_check_float_precision_driver_test.c`,
 at the default flags, `-Wall`, `-Wimplicit-float-conversion`, `-Weverything`,
 `-Wno-`, `-Werror=`, `-Werror`, `-w` and diagnostic pragmas, in gnu17 and C23,
 through both readers and one and three lanes, at `-fsyntax-only` and `-c`,
-with controls that must not warn. A system header's macro's literal (`M_PI`) is
-still suppressed by the common warnings' system-token test, which reads the
-token's spelling place where clang reads its expansion's; `-Wliteral-conversion`
-shares that gap (#3338).
+with controls that must not warn. A system header's macro's literal (`M_PI`)
+expanded in user code warns, as clang's expansion-location test lets it (#3338).
+
+### Integer-to-floating conversions and floating promotions (#3339)
+
+Three more of `CheckImplicitConversion`'s cases are checked where clang's
+`AnalyzeImplicitConversions` reaches each implicit conversion, by the comparison
+walk (`check_common_sign_scan`, which is that traversal): each operand's and
+argument's conversion edge as the walk pops it, before its subtree
+(`BUSTER_CHECK_EMIT_CONVERSION_EDGE`, `check_common_scan_edge`), a comma's result
+against the comma's target (CheckCommaOperand's extra check), and each
+conditional arm against its context's target after the arm's subtree
+(`BUSTER_CHECK_EMIT_CONVERSION_ARM`, CheckConditionalOperand); a brace
+initializer's parts in reverse. No edge of a cast, a comma's or conditional's
+operands, a logical operator's, an assignment's left operand or a compound
+assignment's computation is one. `check_common_scan_conversion` decides:
+
+- `-Wdouble-promotion` (off by default, no group but `-Weverything`): a floating
+  value converted to a higher rank, both real or both complex, "implicit
+  conversion increases floating-point precision: 'float' to 'double'": the usual
+  arithmetic conversions' operands, default argument promotions, assignments,
+  returns, arguments, conditional arms; unreachable code too (its literal
+  context), quiet where its context (`check_common_scan_context`: an operator's
+  token, a call's callee, a declarator's name) is a system header's macro.
+- `-Wimplicit-int-float-conversion` (off, under `-Wimplicit-float-conversion`):
+  an integer of a builtin type converted to a real floating type whose
+  significand is narrower than its likely range, clang's approximate
+  `TryGetExprRange` (`check_common_int_range`, an explicit stack): a constant's
+  value's bits, a bit-field's width, an implicit integer cast's narrower range,
+  `&`'s infimum, a right shift or a division by a constant less those bits, a
+  remainder's smaller operand, a comparison's or logical operator's one bit,
+  any other arithmetic's join, a negation's sign bit, otherwise its type's.
+  "implicit conversion from 'int' to 'float' may lose precision".
+- `-Wimplicit-const-int-float-conversion` (on by default, under it): such an
+  integer constant expression whose value changes (round to nearest even, past
+  the largest exponent an infinity), "implicit conversion from 'int' to 'float'
+  changes value from 16777217 to 16777216", the result as APFloat's `toString`
+  prints it at the target's precision (`check_common_float_text`: `+Inf`,
+  `1.26765060022822940149670E+30`); clang's DiagRuntimeBehavior, at a body's end
+  and in reached code alone, at a file-scope declarator's end.
+
+Each names the source's type as written (an assignment's its left operand's)
+and the target's (a destination's sugar, or the other operand's type where an
+arithmetic operand converts to it). `tests/checker/int-float-conversions`
+compares them whole with clang. Known gap: in a brace initializer whose
+elements hold several promotions (musl's `CMPLXF`), clang visits each element's
+subtree right after its conversion; the walk checks the parts' conversions
+first, so the order of those lines can differ. And `-Wimplicit-float-conversion`
+turns on `-Wimplicit-int-float-conversion` too, but its own precision warnings
+(#1875, #3371) are reported by the conversions walk, before the comparison
+walk's: in one expression holding both, clang's order can interleave them
+(`fm(d, f, n)` gives `n`'s before `d`'s), where the checker gives the expression's
+precision lines first. The counts and texts match.
 
 ## The constraint catalogue
 
