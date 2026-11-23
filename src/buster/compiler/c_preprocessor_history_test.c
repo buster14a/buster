@@ -1161,6 +1161,29 @@ static bool pp_test_history(const char* directory, bool with_clang)
             .source = "#define H \"history.h\"\n#include H\n",
             .header = "#include H\n",
         },
+        // -Wunused-macros (#2222), which a pragma enables: the main file's unused definitions at its end, in clang's set's
+        // order, an #undef's at it; none for a header's, or for a definition used only in a #if line or by #ifdef.
+        {
+            .name = "unused macros, preprocessed",
+            .source = "#pragma clang diagnostic warning \"-Wunused-macros\"\n#include \"history.h\"\n#define A 1\n#define B A\n"
+                      "#define C 3\n#undef C\n#define D 4\n#if D\n#endif\n#define E 5\n#ifdef E\n#endif\n#define F(x) x\nF\n"
+                      "#undef HEADER\n#define G 7\n#define H 8\n#error stop\n",
+            .header = "#define HEADER 1\n#define HEADER_UNUSED 2\n",
+        },
+        // -Wgnu-line-marker (#2222), which a pragma enables: at a marker's name, or its line's end, numbered as before its
+        // own marker; in a header too.
+        {
+            .name = "gnu line markers, preprocessed",
+            .source = "#pragma clang diagnostic warning \"-Wgnu-line-marker\"\n#include \"history.h\"\n# 5\n# 10 \"history.c\"\n"
+                      "# 20 \"other.c\" 1\n#error stop\n",
+            .header = "# 7 \"history.h\"\nint h;\n",
+        },
+        {
+            .name = "unused macros: defined, push_macro and pop_macro, preprocessed",
+            .source = "#pragma clang diagnostic warning \"-Wunused-macros\"\n#define A 1\n#define B 2\n#if 0 && defined(A)\n#elif defined(B)\n"
+                      "#endif\n#define P 1\n#pragma push_macro(\"P\")\n#undef P\n#pragma pop_macro(\"P\")\n#define V 1\n"
+                      "#pragma push_macro(\"V\")\n#pragma pop_macro(\"V\")\n#error stop\n",
+        },
     };
     uint32_t failures = 0;
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)

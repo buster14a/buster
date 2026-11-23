@@ -1290,6 +1290,59 @@ the error code below them. There is no call's return address. So:
   Every register must come back, and the direction flag set again. The handlers record the frame's rip, rsp and cs, the
   error code, and a cleared direction flag. They also make calls, use floating point, realign their frame and allocate.
 
+## The upper vector state (#3335)
+
+A legacy SSE instruction keeps its destination's bits above 127, and while the
+upper state is dirty the 9700X makes it wait for the register's old value:
+#2755's record measured 6.0 cycles an element against 1.07 in a clean state
+(docs/tier1.md's "The upper vector state", #2830). At a target with AVX
+(`Tier0Function.avx`, which the lowering gives from its target's features)
+Tier 0 keeps the state clean as clang's code does, with Tier 1's pieces
+(`x86_upper_state.c`):
+
+- **`vzeroupper` on the way out.** Where a function's code names ymm0 to ymm15
+  or zmm0 to zmm15 (`x86_upper_dirty`), `Tier0Function.zero_upper` puts a
+  `vzeroupper` right before each call (after `al`; none before an asm body's
+  records), before each musttail call's teardown and before the epilogue's,
+  so that the unwind tables still find the teardown right before the `ret` or
+  the jump (`unwind_tier0_frame_tails`). None goes where a ymm or zmm argument
+  (`tier0_call_wide`; a musttail call's are its function's parameters,
+  `tier0_parameters_wide`) or result (`tier0_result_wide`) is live, and none
+  in a preserving function (#147), whose frame keeps the upper halves for its
+  caller. Each emitter counts its `vzeroupper` with its records, so that both
+  paths' measures stay exact. Only a function with vector values or an asm body
+  can be dirty (`tier0_upper_possible`): Tier 0's own vector moves go through
+  zmm16 and past on the EVEX path, and its scalar records name xmm registers
+  alone. `tier0_compile` predicts it from the operation rows (one that takes
+  or gives a 32- or 64-byte vector, `tier0_upper_likely`), checks the
+  prediction on the records and compiles again only where it was wrong; any
+  other function compiles once, as before.
+- **VEX forms.** `tier0_vex` rewrites the finished records' legacy SSE forms
+  as their VEX twins, one record for one, so that no index into the records
+  changes: Tier 1's pairs (`BUSTER_X86_VEX_TWINS`) and Tier 0's own past them
+  (`BUSTER_X86_VEX_TWINS_TIER0`: its copies' `movq` both ways and the halves'
+  `movhps`). A function with an asm body keeps its legacy records. Each twin
+  computes its legacy form's low 128 bits and zeroes the rest, which no later
+  record of Tier 0's reads; `test-tier1-emit` runs each pair natively.
+
+The issue's kernel at `-march=znver5`:
+
+```
+sum16:   … {evex} vaddss %xmm2, %xmm0, %xmm0; vzeroupper; mov %rbp, %rsp; pop %rbp; ret
+callit:  … vmovss %xmm0, 968(%rsp); vzeroupper; call ext@PLT; vmovss 968(%rsp), %xmm0; vzeroupper; …
+pass256: (returns __m256 in ymm0) no vzeroupper
+callwide: (passes __m256 in ymm0) no vzeroupper before the call, one before the ret
+```
+
+`test-tier0` compiles half its generated programs at an AVX target (on a host with it),
+runs them natively against its interpreter and checks that no legacy record
+with a twin is left, and half of those with `zero_upper` forced (a
+`vzeroupper` at every exit); its vectors check compiles every function at its
+transport's target (AVX but for the SSE2 transport's) and checks each
+`vzeroupper`'s place against that rule (`tier0_test_vector_upper`);
+`test-emitted-code` verifies the frames of every third round's programs with
+`zero_upper` forced.
+
 ## Symbols outside the image
 
 `GLOBAL`, `GLOBAL_ADDRESS`, `STORE_GLOBAL` and `SET_GLOBAL` name a symbol, and `Tier0Function.symbol_access` says how the
@@ -2307,8 +2360,8 @@ instructions and instructions per cycle medians of 3 rounds under `perf stat`:
   loads the deep slots of its operands in their own slots, which it doesn't read.
 - **Uncovered entries:** these are refused (`TIER0_ERROR_UNSUPPORTED`) or not yet in the stream:
   - bit-fields need no entry of their own: the checker's lowering reads and writes a field's access unit, clang's
-    (#1372), as pieces of 8, 4, 2 and 1 bytes, with shifts and masks, and a packed field in 9 bytes as its first 8 and
-    its ninth (#2999; `docs/c-checker.md`, "Bit-fields"). It refuses a field wider than 64 bits, with
+    (#1372), as pieces of 8, 4, 2 and 1 bytes, with shifts and masks, and a field across a unit of 9 to 16 bytes as
+    its first 8 and the rest's pieces (#2999; `docs/c-checker.md`, "Bit-fields"). It refuses a field wider than 64 bits, with
     `CHECK_PROGRAM_UNSUPPORTED`;
   - complex values need no entry of their own: the checker's lowering takes them as aggregates of their two parts and
     computes each part, libgcc's functions their products and quotients (`docs/c-checker.md`, "Complex values");

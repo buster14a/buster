@@ -1314,6 +1314,7 @@ static void pp_collect_diagnostic(Preprocessor* pp, PPSeverity severity, uint64_
                 .severity = (uint8_t)severity,
                 .spans = pp->diagnostic_spans,
                 .arguments = pp->diagnostic_arguments,
+                .line_notes = pp->diagnostic_line_notes,
                 .range_count = pp->diagnostic_range_count < BUSTER_PP_DIAGNOSTIC_RANGES ? pp->diagnostic_range_count : BUSTER_PP_DIAGNOSTIC_RANGES,
             };
             memcpy(record->ranges, pp->diagnostic_ranges, sizeof(record->ranges));
@@ -1555,8 +1556,10 @@ BUSTER_PREPROCESSOR_ENTRY void pp_diagnostic_publish(Preprocessor* pp)
                     owner->render_spans = record->spans;
                     owner->render_ranges = record->ranges;
                     owner->render_range_count = record->range_count;
+                    owner->presumed_note_limit = record->line_notes;
                     pp_render_message(owner, severity, record->location, record->origin,
                                       record->note_message != NULL || record->note_macro != 0 ? &note : NULL, "%s", record->message);
+                    owner->presumed_note_limit = 0;
                     owner->render_spans = false;
                     owner->render_ranges = NULL;
                     owner->render_range_count = 0;

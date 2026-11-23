@@ -41,7 +41,10 @@ requirements. [Command index](README.md).
   register and it is free), which the random inputs and their reference model
   too; avoided registers (#2767: `avoided_registers`, a range live across a fixed
   register's sequence) have their traces on the scan and the common path and their
-  random properties in `tier1_allocate_avoided_test.c`, and a leaf's callee-saved
+  random properties in `tier1_allocate_avoided_test.c`, a call's argument that
+  nothing else hints avoids the registers its call reads the other arguments in,
+  as does its tie's operand (#2823: `tier1_cfg_argument_avoidance`), with
+  `test-tier1-cfg`'s call-arguments and argument-exclusions fixtures and reference, and a leaf's callee-saved
   registers, which every range of a looping leaf that spills avoids in its second
   allocation (#2819: `Tier1CfgInput.avoided_general`, `tier1_emit_cfg_leaf`), have
   `test-checker-driver`'s leaf fixture and `test-tier1-pipeline`'s loop past five

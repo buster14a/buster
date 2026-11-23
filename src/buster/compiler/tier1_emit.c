@@ -26,9 +26,12 @@
 // unused capacity. The arenas are disjoint. Failure restores both lengths and preserves the result. All retained
 // columns have their exact logical length, without required padding. The existing encoder owns its output padding.
 
+#include <stddef.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
+// The dirty-state scan and the VEX twins (#2830), which Tier 0 shares (#3335).
+#include "x86_upper_state.c"
 
 _Static_assert(BUSTER_TIER1_SELECT_MAX_OBJECT_ALIGNMENT == BUSTER_TIER1_FRAME_MAX_ALIGNMENT, "selector and frame alignment bounds agree");
 
@@ -328,6 +331,11 @@ struct Tier1EmitResult
     uint32_t row_moves;
     uint64_t retained_bytes;
     uint64_t transition_scratch_bytes;
+    // #2830: the code names ymm0 to ymm15 or zmm0 to zmm15 (x86_upper_dirty), so a vzeroupper precedes each call
+    // and each return's epilogue, but a call's whose arguments or a return's whose result are live in such a register
+    // (tier1_select_call_wide, tier1_select_result_wide). tier1_emit_function predicts it from the values' types and emits
+    // the function again where its code says otherwise; the certificate regenerates the same records from it.
+    bool zero_upper;
     // A function the straight-line consumer doesn't take goes through tier1_emit_cfg.c, which leaves `liveness` and
     // `prepared.allocation` empty: its CFG's allocation problem (values numbered densely, value_nodes[v] their nodes,
     // node_values the inverse, BUSTER_TIER1_CFG_NONE for a node without one), tier1_cfg's result, whose allocation
@@ -1534,6 +1542,12 @@ static Tier1EmitError tier1_emit_call(const Tier1SelectPlan* plan, uint32_t node
                                                        : (X86Instruction){ .form = X86_FORM_MOV_R32_IMM32, .rm = X86_REGISTER_RAX, .immediate = (int32_t)vector_count };
         error = tier1_emit_append(buffer, count) ? error : TIER1_EMIT_MEMORY;
     }
+    // A dirty function's upper state cleared before the callee, which may run legacy SSE code (#2830), but where an argument
+    // is live in a ymm or zmm register.
+    if (error == TIER1_EMIT_OK && result->zero_upper && !tier1_select_call_wide(function, call))
+    {
+        error = tier1_emit_append(buffer, (X86Instruction){ .form = X86_FORM_VZEROUPPER }) ? error : TIER1_EMIT_MEMORY;
+    }
     if (error == TIER1_EMIT_OK && indirect)
     {
         error = tier1_emit_append(buffer, (X86Instruction){ .form = X86_FORM_CALL_RM64, .rm = callee }) ? error : TIER1_EMIT_MEMORY;
@@ -1822,7 +1836,14 @@ static Tier1EmitError tier1_emit_records(const Tier1SelectPlan* plan, const uint
             const uint32_t first = buffer.count;
             for (uint32_t r = 0; error == TIER1_EMIT_OK && r < selected.count; r += 1)
             {
-                if (returns && r + 1 == selected.count && tier1_frame_emit(&result->frame, true, &buffer) != TIER1_FRAME_EMIT_OK)
+                // A dirty function's upper state cleared before its epilogue (#2830), but where its result is live in a ymm
+                // or zmm register.
+                if (returns && r + 1 == selected.count && result->zero_upper && !tier1_select_result_wide(plan->function) &&
+                    !tier1_emit_append(&buffer, (X86Instruction){ .form = X86_FORM_VZEROUPPER }))
+                {
+                    error = TIER1_EMIT_MEMORY;
+                }
+                else if (returns && r + 1 == selected.count && tier1_frame_emit(&result->frame, true, &buffer) != TIER1_FRAME_EMIT_OK)
                 {
                     error = TIER1_EMIT_FRAME;
                 }
@@ -1964,16 +1985,57 @@ static __attribute__((unused)) bool tier1_emit_place_literals(const Tier1EmitRes
 }
 
 #include "tier1_emit_cfg.c"
+// Rewrites a function's legacy SSE records as their VEX twins (x86_vex_forms, #2830), for a target that allows
+// them, but in a function with an asm body, whose records are the program's own; each rewritten record's Zen 5 case
+// again. One record for one, so that every index into the records (branches, references, origins, the frame's events
+// and the debug definitions) stays. Sixteen records a step: their forms gathered, each one's entry gathered from the
+// table by its row (its number less its segment override's rows, FS's and GS's, which every row has), the records with
+// an entry rewritten one by one. Before the code's certificate and the debug definitions, which read each twin as its
+// legacy record (x86_vex_canonical): each twin computes its legacy form's low 128 bits (test-tier1-emit runs each
+// pair natively).
+static void tier1_emit_vex(const Tier1SelectPlan* plan, const uint8_t* allowed_forms, Tier1SelectCode* code)
+{
+    const bool avx = x86_target_form_allowed(allowed_forms, X86_FORM_VADDSS_X_X_XM32) && x86_target_form_allowed(allowed_forms, X86_FORM_VMOVQ_X_RM64);
+    bool body = false;
+    for (uint32_t node = 0; avx && node < plan->function->instruction_count; node += 1)
+    {
+        body = body || tier1_select_body_call(plan->function, node);
+    }
+    for (uint32_t first = 0; avx && !body && first < code->count; first += 16)
+    {
+        uint32_t found = x86_vex_lookup(code->records + first, code->count - first, x86_vex_forms);
+        while (found != 0)
+        {
+            const uint32_t lane = (uint32_t)__builtin_ctz(found);
+            found &= found - 1;
+            const uint32_t r = first + lane;
+            const X86Instruction record = code->records[r];
+            const uint32_t legacy = record.form & BUSTER_X86_FORM_NUMBER;
+            const uint32_t segment = legacy - (legacy % X86_FORM_COUNT);
+            const uint32_t entry = x86_vex_forms[legacy - segment];
+            const X86Instruction twin = x86_vex_record(record, entry, segment);
+            if (x86_target_form_allowed(allowed_forms, twin.form))
+            {
+                code->records[r] = twin;
+                const uint8_t id = x86_zen5_id(&twin);
+                code->unknown_costs += (id == 0) - (code->cost_ids[r] == 0);
+                code->cost_ids[r] = id;
+            }
+        }
+    }
+}
+
 #include "tier1_certificate_emitted.c"
 #include "tier1_debug_straight.c"
 
-static __attribute__((unused)) Tier1EmitError tier1_emit_function(const Tier1SelectPlan* plan, const Tier1EmitOptions* options, const uint8_t* allowed_forms, Arena* output, Arena* scratch, Tier1EmitResult* result, uint32_t* error_node)
+static Tier1EmitError tier1_emit_function_pass(const Tier1SelectPlan* plan, const Tier1EmitOptions* options, const uint8_t* allowed_forms, Arena* output, Arena* scratch, Tier1EmitResult* result, uint32_t* error_node,
+                                               bool zero_upper)
 {
     const bool arguments = plan && plan->function && options && allowed_forms && output && scratch && output != scratch && output->base != scratch->base && result;
     Tier1EmitError error = arguments ? TIER1_EMIT_OK : TIER1_EMIT_INVALID;
     const uint64_t output_mark = arguments ? output->length : 0;
     const uint64_t scratch_mark = arguments ? scratch->length : 0;
-    Tier1EmitResult emitted = {0};
+    Tier1EmitResult emitted = { .zero_upper = zero_upper };
     if (options != NULL && options->diagnostic != NULL)
     {
         *options->diagnostic = (Tier1EmitDiagnostic){ 0 };
@@ -2025,7 +2087,7 @@ static __attribute__((unused)) Tier1EmitError tier1_emit_function(const Tier1Sel
     {
         arena_pop_to(output, output_mark);
         arena_pop_to(scratch, scratch_mark);
-        emitted = (Tier1EmitResult){ 0 };
+        emitted = (Tier1EmitResult){ .zero_upper = zero_upper };
         if (options->diagnostic != NULL)
         {
             *options->diagnostic = (Tier1EmitDiagnostic){ 0 };
@@ -2107,6 +2169,10 @@ static __attribute__((unused)) Tier1EmitError tier1_emit_function(const Tier1Sel
     {
         error = tier1_emit_records(plan, allowed_forms, options->sources, output, scratch, &emitted, error_node);
     }
+    if (error == TIER1_EMIT_OK)
+    {
+        tier1_emit_vex(plan, allowed_forms, &emitted.code);
+    }
     if (error == TIER1_EMIT_OK && chain && options->sources)
     {
         error = tier1_debug_straight(plan, options, output, &emitted);
@@ -2146,6 +2212,46 @@ static __attribute__((unused)) Tier1EmitError tier1_emit_function(const Tier1Sel
         {
             arena_pop_to(output, output_mark);
         }
+    }
+    return error;
+}
+
+// Whether a function likely leaves the upper state dirty (#2830): one of its values is a 32- or 64-byte vector, which
+// Tier 1 keeps in a ymm or zmm register. Sixty-four types a step, by masked loads that stay inside the type column. A
+// machine row or an asm body may name such a register without one, and a function with one may not, which
+// tier1_emit_function then finds in its code and emits it again for.
+static bool tier1_emit_upper_likely(const IrFunction* function)
+{
+    const __m512i wide = _mm512_set1_epi8((char)IR_V8I32);
+    const __m512i widest = _mm512_set1_epi8((char)IR_V16I32);
+    uint64_t found = 0;
+    for (uint32_t first = 0; found == 0 && first < function->instruction_count; first += 64)
+    {
+        const uint32_t left = function->instruction_count - first;
+        const __mmask64 live = left >= 64 ? ~(__mmask64)0 : (((__mmask64)1 << left) - 1);
+        const __m512i types = _mm512_maskz_loadu_epi8(live, function->type + first);
+        found = (_mm512_cmpeq_epi8_mask(types, wide) | _mm512_cmpeq_epi8_mask(types, widest)) & live;
+    }
+    return found != 0;
+}
+
+// Emits a function (#140) with a vzeroupper before each call and each return's epilogue where its code names a ymm or
+// zmm register below 16 (Tier1EmitResult.zero_upper, #2830), as clang's code has. Whether it will is predicted from its
+// values' types (tier1_emit_upper_likely) and checked on its code (x86_upper_dirty): a wrong prediction emits the
+// function again, as the code says, so that only a mispredicted function pays a second emission (one emission of every
+// function that names such a register cost main.c's compile 5.7% at -march=znver5 on the 9700X). Each pass, at a target
+// with AVX, makes its legacy SSE records their VEX twins (tier1_emit_vex) before certifying them.
+static __attribute__((unused)) Tier1EmitError tier1_emit_function(const Tier1SelectPlan* plan, const Tier1EmitOptions* options, const uint8_t* allowed_forms, Arena* output, Arena* scratch, Tier1EmitResult* result, uint32_t* error_node)
+{
+    const uint64_t output_mark = output != 0 ? output->length : 0;
+    const bool clears = allowed_forms != 0 && x86_target_form_allowed(allowed_forms, X86_FORM_VZEROUPPER);
+    const bool predicted = clears && plan != 0 && plan->function != 0 && tier1_emit_upper_likely(plan->function);
+    Tier1EmitError error = tier1_emit_function_pass(plan, options, allowed_forms, output, scratch, result, error_node, predicted);
+    const bool dirty = error == TIER1_EMIT_OK && clears && x86_upper_dirty(result->code.records, result->code.count);
+    if (error == TIER1_EMIT_OK && dirty != predicted)
+    {
+        arena_pop_to(output, output_mark);
+        error = tier1_emit_function_pass(plan, options, allowed_forms, output, scratch, result, error_node, dirty);
     }
     return error;
 }

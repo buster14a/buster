@@ -2586,7 +2586,38 @@ static bool asm_vector_operands(const AsmParser* parser, uint32_t end)
     return found;
 }
 
-static void asm_instruction(AsmParser* parser, uint32_t end)
+// GNU as takes the last prefix in each group. The writer can combine an encoding family
+// and a ModRM direction on one instruction; neither group changes the operand order.
+static uint32_t asm_encoding_prefixes(AsmParser* parser, uint32_t end)
+{
+    uint32_t encoding = 0;
+    while (parser->at + 2 < end && parser->tokens[parser->at].kind == '{' && parser->tokens[parser->at + 2].kind == '}')
+    {
+        const uint32_t name = parser->at + 1;
+        if (asm_is(parser, name, "load") || asm_is(parser, name, "store"))
+        {
+            encoding &= ~(BUSTER_X86_MATCH_LOAD | BUSTER_X86_MATCH_STORE);
+            encoding |= asm_is(parser, name, "load") ? BUSTER_X86_MATCH_LOAD : BUSTER_X86_MATCH_STORE;
+        }
+        else if (asm_is(parser, name, "vex") || asm_is(parser, name, "evex"))
+        {
+            encoding &= ~(BUSTER_X86_MATCH_VEX | BUSTER_X86_MATCH_EVEX);
+            encoding |= asm_is(parser, name, "vex") ? BUSTER_X86_MATCH_VEX : BUSTER_X86_MATCH_EVEX;
+        }
+        else if (asm_is(parser, name, "disp32"))
+        {
+            encoding |= BUSTER_X86_MATCH_REL32;
+        }
+        else
+        {
+            break;
+        }
+        parser->at += 3;
+    }
+    return encoding;
+}
+
+static void asm_instruction(AsmParser* parser, uint32_t end, uint32_t encoding)
 {
     const uint32_t location = parser->tokens[parser->at].start;
     if (parser->instruction_count >= parser->instruction_capacity || object_class_is_zero_fill(parser->sections[parser->section].class))
@@ -2597,6 +2628,7 @@ static void asm_instruction(AsmParser* parser, uint32_t end)
     {
         AsmInstruction* instruction = &parser->instructions[parser->instruction_count++];
         *instruction = (AsmInstruction){.location = location};
+        instruction->request.encoding = encoding;
         instruction->request.mnemonic = asm_token_text(parser, parser->at++);
         String8* name = &instruction->request.mnemonic;
         asm_lock_mnemonic(parser, name, end);
@@ -2751,7 +2783,7 @@ static void asm_instruction(AsmParser* parser, uint32_t end)
         // An exchange of two general registers is commutative: with the accumulator first (Intel's order), its operands
         // swap, so that the accumulator's one-byte form (90+r) can take it, as GNU as encodes `xchg rax, rcx` (#1134).
         X86Operand* exchanged = instruction->request.operands;
-        if (x86_match_name(*name, "xchg") && instruction->request.count == 2 && exchanged[0].kind == X86_OPERAND_REGISTER && exchanged[1].kind == X86_OPERAND_REGISTER &&
+        if (encoding == 0 && x86_match_name(*name, "xchg") && instruction->request.count == 2 && exchanged[0].kind == X86_OPERAND_REGISTER && exchanged[1].kind == X86_OPERAND_REGISTER &&
             exchanged[0].class >= BUSTER_X86_CLASS_GPR16 && exchanged[0].class <= BUSTER_X86_CLASS_GPR64 && exchanged[1].class == exchanged[0].class && exchanged[0].reg == 0 &&
             exchanged[1].reg != 0)
         {
@@ -3873,7 +3905,12 @@ static void asm_parse(AsmParser* parser)
         }
         if (parser->at < end && parser->result.error == 0)
         {
-            if (parser->tokens[parser->at].kind != BUSTER_ASM_WORD)
+            const uint32_t encoding = parser->tokens[parser->at].kind == '{' ? asm_encoding_prefixes(parser, end) : 0;
+            if (encoding != 0 && (parser->at == end || parser->tokens[parser->at].kind != BUSTER_ASM_WORD || asm_token_text(parser, parser->at).pointer[0] == '.'))
+            {
+                asm_fail(parser, parser->tokens[parser->at].start, "encoding prefix requires an instruction");
+            }
+            else if (parser->tokens[parser->at].kind != BUSTER_ASM_WORD)
             {
                 asm_fail(parser, parser->tokens[parser->at].start, "expected mnemonic, directive or label");
             }
@@ -3883,10 +3920,13 @@ static void asm_parse(AsmParser* parser)
             }
             else
             {
-                asm_prefix_statements(parser, end);
+                if (encoding == 0)
+                {
+                    asm_prefix_statements(parser, end);
+                }
                 if (parser->at < end && parser->result.error == 0)
                 {
-                    asm_instruction(parser, end);
+                    asm_instruction(parser, end, encoding);
                 }
             }
         }

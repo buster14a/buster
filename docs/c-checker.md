@@ -2801,7 +2801,7 @@ What the lowering covers past scalars (#145's programs):
   code passes it: its registers from the member, and where none is left a stack
   slot of the union's size and alignment (`getIndirectResult`;
   `abi_finish_transparent` records the union in the ABI table's `transparent`
-  column, which `abi_assign`'s vector path and `abi_assign_call` read), and `va_arg` reads
+  column, which `abi_assign`'s prefix sums and per-call kernel read), and `va_arg` reads
   the member from a slot of the union's size and alignment. Since #1844 the
   member may be an aggregate, of eightbytes or in memory, and the union of any
   size. An aggregate in memory passes as clang's `getIndirectResult` of the
@@ -4276,14 +4276,26 @@ What the lowering covers past scalars (#145's programs):
   bit-field access reads its member's, the one its name finds
   (`check_lower_bit_unit_place`). A constant address of a field's lvalue
   (a local's or a global's, the checker's of the field's first byte) is its
-  unit's too (`check_lower_bit_constant_address`). A union's bit-fields, an
-  `ms_struct` record's (clang's discrete units), a unit of more than 8 bytes,
-  initializer parts with a bit width and `__builtin_dump_struct`'s reads take
-  the bytes that hold the field's bits. A packed field of up to 64 bits off a
-  byte boundary may lie in 9 bytes (#2999): its read and its store take the
-  first 8 as an integer and the ninth as a byte, joined by shifts on a read and
-  split on a store, as clang's -O0 code does its `i72` (`check_lower_bit_wide`,
-  out of line, apart from the tasks' always-inlined store). A field wider than
+  unit's too (`check_lower_bit_constant_address`). A union's bit-field's unit
+  is at 0, the integer of its width rounded up to a power of two bytes, no more
+  than the union's bytes (`getUIntNType`: `unsigned x : 17` an `i32`, an `i24`
+  in a packed union of 3 bytes). An `ms_struct` record's are clang's discrete
+  units: a run's declared type at its first field, which the fields after it
+  share while they start before its end (`{ unsigned x : 3, y : 7; unsigned
+  short z : 5; }` an `i32` at 0 and an `i16` at 4), and an `ms_struct` union's
+  its declared type. A unit of 9 to 16 bytes (a packed run's `i72` to `i128`)
+  is its first 8 bytes and the rest's pieces, as clang's -O0 code moves it: a
+  field in one of the two takes that part alone, where clang's code moves both,
+  and a field across them both (a packed field of up to 64 bits off a byte
+  boundary in 9 bytes of its own is one, #2999) takes both, joined by shifts
+  on a read and split on a store (`check_lower_bit_wide`, out of line, apart
+  from the tasks' always-inlined store). A local's initializer stores a field
+  through its member's unit too, found by going down the object's elements and
+  members to it (`check_lower_bit_init_unit`), after the object's zeros, as
+  clang's initialization does, but in an object with a volatile part, whose
+  stores are its plan's. A unit wider than 16 bytes, an initializer's cleared
+  bits and `__builtin_dump_struct`'s reads take the bytes that hold the
+  field's bits. A field wider than
   64 bits (a `_BitInt`'s) is refused. `c_check_program_bit_unit_test.c`
   checks each fixture's loads and stores against clang's units and runs them
   against clang's code.
@@ -6411,6 +6423,51 @@ The later phases are left:
   a left-out tag's definition or label (`struct S { int m; } s[sizeof(k())];`),
   is still lost.
 
+#### A designator that names no member (#1842)
+
+A field designator that names no member of its record is clang's error, and a
+diagnostic walk of the initializer (one with a failure sink, the source path's)
+goes on as clang's InitListChecker does, whose `CheckDesignatedInitializer`
+returns before it moves the list's next member (`check_init_skip_member`):
+
+- the error joins the walk's other recovered failures, in source order, and the
+  declaration is rejected;
+- the designation's later designators and its value are skipped
+  (`check_init_skip_value`), and the list's next element is the one before
+  the designation, an array's index too: `{ .nope = 1, { 1, 2 } }` gives the
+  braces to the record's first member;
+- the lists open there have the error: their leftover values give no excess
+  warning (`CheckInitFrame.failed`, the bit #2441's hard conversions set, so an
+  overlong string still warns), and their braces fill in no `counted_by` list
+  as they close (`CheckInitFrame.member_failed`; clang's "cannot implicitly
+  initialize"), while braces that follow the error, for later members, fill
+  theirs and warn of their own excess;
+- a designation that ends a brace elision's list resumes past the elided
+  member (`{ 1, 2, 3, [2].nope = 4, 5 }` gives 5 to `t[2].x`), and one in a
+  union's list counts as the union's member, so later values are left over
+  (clang's `InitializedSomething`);
+- a conversion's second error, clang's "initializer element is not a
+  compile-time constant", isn't given in the same initializer, whose list
+  clang leaves invalid; a static vector member's value that is no constant
+  waits for the walk's end for the same reason
+  (`CheckInitWalker.nonconstant_pending`);
+- the error sorts among the list's conversions and warnings by its token, as
+  #2916 sorts the conversions.
+
+A designator chain whose earlier designators named members (`.b.nope`) keeps
+what they selected as used, so later braces for that member get clang's
+`-Winitializer-overrides`. A GNU range in the designation (`[0 ... 2].nope`), or
+a walk without a sink, still stops at the error. `tests/checker/designator-recovery`
+is a warning catalog of `test-checker-driver`'s, run where `initializer-comma`
+is (`check_test_driver_warning_catalog`).
+
+Differences left:
+- clang's typo correction (`.xvl` "did you mean 'xval'?" and its note), after
+  which clang initializes the corrected member;
+- an override warning of braces that have a hard error of their own, which
+  clang leaves out (also without a failed designator:
+  `struct P a[2] = { [1] = { 0 }, [1] = { 1, gp } };`).
+
 ### What the lowering costs (#531)
 
 On the 9700X, the lowering (`check_lower_prepare`, then the bodies'
@@ -6999,9 +7056,17 @@ assignment writes and no read uses.
 
 Each uses the shared warning policy, so a default or group option, a
 `#pragma clang diagnostic` change and `-Werror` promotion behave as the other
-sparse warnings do. A token from a system-header macro is suppressed by its
-spelling location, as `assert`'s empty `if` is, unless `-Wsystem-headers` asks
-for it. The `-Wswitch` check needs a named enum's source definition and literal
+sparse warnings do. A warning in a system header is suppressed, unless
+`-Wsystem-headers` asks for it, by its token's expansion location, as clang's
+DiagnosticsEngine does: a system header's macro expanded in user code warns
+there, with its "expanded from macro" note (#3338). The checks whose clang code
+tests `isInSystemMacro` itself test the token's spelling: a value conversion's
+context (CheckImplicitConversion's CC: the assignment's operator, the
+declarator's name, the `return`, the call, the brace), a discarded value's
+expression, which a macro's body silences too (DiagnoseUnusedExprResult), a
+format call's extra argument, and an array index whose `]` and index a system
+header spells; `assert`'s empty `if` is quiet because its `;` is on another
+line. The `-Wswitch` check needs a named enum's source definition and literal
 enumerator `case` labels; it compares the enumerators' checked values, so
 aliases (`A = 1, B = 1`) that a case handles are not reported missing. A
 computed case leaves the switch to a full constant evaluator.
@@ -7532,6 +7597,80 @@ each common-warning scratch allocation in turn and requires the capacity error,
 then the unconstrained output once the index passes the last. The semantics are also covered by
 `test-checker`'s existing warning and constraint fixtures, and by
 `test-diagnostics` for their ordering.
+
+### Floating precision and floating comparisons (#1875)
+
+`-Wimplicit-float-conversion` (off by default, under `-Wconversion`) is the
+floating case of clang's `CheckImplicitConversion`: an implicit conversion of a
+floating value to a floating type of lower rank (`getFloatingTypeSemanticOrder`:
+`__bf16`, `_Float16` and `__fp16` alike, `float`, `double`, `long double`,
+`__float128`; complex types by their elements, complex to complex alone) warns
+"implicit conversion loses floating-point precision: 'double' to 'float'", at the
+converted expression past its implicit conversions (`check_common_float_location`:
+an operator's at its operator, a call's at its callee's name, a builtin's too),
+its type as written, an lvalue's qualifiers included (`'const double'`), to the
+target's, its typedef spelled as clang does (`'F' (aka 'float')`). It follows
+the enumerations' carriers (`check_common_float_precision`, as
+`check_common_enum_cast`): initializations, brace initializers' parts
+(designated, nested, file scope), assignments, returns, a prototype's
+arguments (not yet a prototyped builtin's, #3371), a conditional's arms (both, the true one first) and a root comma's
+result. A constant that converts exactly is exempt, as clang's
+`IsSameFloatAfterCast` decides: a folded value or a read of a const object
+whose initializer completed (`CheckInput.const_values`), whose significant bits
+fit the target's precision at its exponent and range (`check_float_fits`,
+subnormals too; a quiet NaN whose payload fits; never a signaling one); an
+assignment's or an increment's value is no constant, nor is one computed from
+it (`-(d = 0.5)`, BUSTER_CHECK_MODIFICATION) or a comma's whose right operand is
+one (the evaluator ignores a comma's left operand). A compound
+assignment whose computation's type has a higher rank than its left operand's
+warns, whatever its value, "implicit conversion when assigning computation
+result loses floating-point precision", from the computation's type (the right
+operand's own, sugar too, an `_Atomic` one's value type's, where it isn't
+converted) to the left one's, at the
+right operand (`check_common_float_result_precision`, clang's
+`AnalyzeCompoundAssignment`). The computation is clang's, not the checker's own
+(`check_common_float_computation`): the left operand unpromoted, the right one
+after its unary promotion (`__fp16` to `float`) and `#pragma clang fp
+eval_method`'s widening, by `getFloatingRank` (where `__fp16` ranks above
+`_Float16`), and an `__fp16` left operand against an integer as `float`; so
+`h *= f16` doesn't warn and `h += 1` warns "'float' to '__fp16'". Both are plain Diags, published as the full
+expression completes, in unreachable code and short-circuited operands too,
+but not in `sizeof`'s operand; an `_Atomic` target takes neither. Only a unit
+where the warning may report pays for its candidates
+(`CheckCommonEnabled.float_precision`): the compound assignments join the
+walk's reach operators then. Not given: its child
+`-Wimplicit-int-float-conversion`'s integer conversions, which need clang's
+approximate expression ranges, and `-Wdouble-promotion`, its opposite (#3339);
+`-Wconversion` itself stays refused (#1365).
+
+`-Wliteral-range`'s floating comparison (on by default) is clang's
+`CheckFloatComparison`: an `==` or `!=` whose left operand, past parentheses
+and static selections, is a floating literal its comparison doesn't convert and
+whose right one is a cast (an implicit conversion, an lvalue's read or an
+explicit cast), or else the other way round, warns where the cast's operand's
+real floating type (an `_Atomic` one's value type) can't hold the literal exactly: "floating-point comparison
+is always false" for `==`, "true" for `!=`, "constant cannot be represented
+exactly in type 'float'", that type's canonical name, at the operator
+(`check_common_float_comparisons`). A sign, an integer operand, an ordering, a
+complex type or a literal converted to a wider type (by the other operand, or by
+`#pragma clang fp eval_method`, which the constant reader reads from its
+action's FP environment) is none of these. It is a
+plain Diag Sema gives as it builds the comparison, so it reports in
+unevaluated operands (`sizeof`, `typeof`, `_Generic`'s controlling
+expression) and unreachable code too. The constant reader's comparisons that
+no graph node holds (an array bound's, an enumerator's, a bit-field width's)
+are kept as `CHECK_WARNING_EVENT_FLOAT_COMPARE` events
+(`check_constant_float_compare`) and reported among them.
+
+The original driver fixtures (`c_check_float_precision_driver_test.c`,
+`test-checker-driver --float-precision-only`) compare clang's complete output
+at the default flags, `-Wall`, `-Wimplicit-float-conversion`, `-Weverything`,
+`-Wno-`, `-Werror=`, `-Werror`, `-w` and diagnostic pragmas, in gnu17 and C23,
+through both readers and one and three lanes, at `-fsyntax-only` and `-c`,
+with controls that must not warn. A system header's macro's literal (`M_PI`) is
+still suppressed by the common warnings' system-token test, which reads the
+token's spelling place where clang reads its expansion's; `-Wliteral-conversion`
+shares that gap (#3338).
 
 ## The constraint catalogue
 
@@ -12257,10 +12396,11 @@ keep the first emitted alias, ordered by when each target becomes visible,
 including targets declared after their directives. Ordinary object aliases
 retain deferred checking; function clone overload sets use the existing
 source-ordered overload path. This remains separate from ordinary weak binding.
-The clone can supply an ELF symbol where the unit never declares ALIAS; this
-does not add a synthetic parser declaration for C expression references to
-such an otherwise undeclared name (#2934's first shape: clang accepts such a
-reference, which buster still reports as an undeclared function or identifier).
+Where the unit never declares ALIAS, the pragma introduces the name when
+TARGET is visible. A later C reference uses the clone's type and weak ELF
+symbol, so a strong definition of ALIAS in another object can override it.
+Local declarations shadow it. Repeated function clones participate in overload
+resolution, and a lookup set containing an object reports ambiguity (#2934).
 
 A declared target without an emitted definition is accepted by syntax checking
 and diagnosed at object generation with "alias must point to a defined variable
