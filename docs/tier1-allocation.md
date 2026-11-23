@@ -514,8 +514,8 @@ through r11 into the dispatch join's places. #138's measurement put edge moves,
 spills and reloads at 7.4% and 10.0% of speedtest1's and Lua's executed
 instructions.
 
-`tier1_cfg_anchors` takes the CFG's dominator tree (`dominators.c`'s SEMI-NCA,
-one analysis per function) and gives each block:
+`tier1_cfg_anchors` takes the CFG's dominator tree (`dominators.c`'s window
+sweep, one analysis per function) and gives each block:
 
 - a chosen predecessor: one laid out before it that it dominates (a latch of a
   loop whose header is laid out after its body, whose back edge runs every

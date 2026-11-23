@@ -91,9 +91,9 @@ exhaustion and ID-space exhaustion return errors instead of truncating data.
 
 1. Classify promotion eligibility and discover addresses 64 entries at a time.
 2. Build a complete predecessor CSR, preserving duplicate edges, and run the
-   shared dominator analysis. Its SEMI-NCA solver supplies immediate
+   shared dominator analysis. Its window sweep supplies immediate
    dominators, reachability, subtree intervals and dominance-frontier bitsets
-   ([why it is scalar](dominators.md#why-it-is-scalar)). Compact
+   ([what is data-parallel](dominators.md#what-is-data-parallel)). Compact
    unreachable-source edges out of the SSA predecessor result afterward.
 3. Collect each block's final writes and upward-exposed reads. Reuse
    `dataflow.c`'s AVX-512 liveness equations over dense promoted-local IDs.

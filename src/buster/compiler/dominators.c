@@ -4,8 +4,9 @@
 // Entry-rooted dominators, frontiers and natural loops for a borrowed CSR CFG. Include after lane.c.
 // dominators_analyze validates both CSR views, computes reachable reverse postorder, solves the tree in one sweep of it
 // with 64-bit dominator windows, a block's dominators among the 64 numbers above it ANDed from its predecessors'
-// (dominators_sweep; it replaced SEMI-NCA in #2953), then builds the tree and the requested frontier/loop sets. The
-// DFS, the frontier walks, the SCC pass and the loop-body walk are scalar (docs/dominators.md, "What is data-parallel").
+// (dominators_sweep; it replaced SEMI-NCA in #2953), then builds the tree and the requested frontier/loop sets. Loops are
+// found innermost first and absorb their inner loops' body rows by 512-bit ORs (dominators_discover). The DFS, the
+// frontier walks, the SCC pass and the loops' union-find walk are scalar (docs/dominators.md, "What is data-parallel").
 // All input-dependent walks use explicit stacks. No source or implementation from another compiler is copied.
 //
 // The caller owns the input arrays throughout the call; each offsets array has block_count + 1 u32 elements,
@@ -18,7 +19,7 @@
 //
 // Layout: dominators_validate; dominators_order; the tree solver (dominators_fill_jumps, dominators_meet,
 // dominators_sweep, dominators_settled, dominators_settle); dominators_tree/frontiers; dominators_components;
-// dominators_loop_body/loops; dominators_analyze; the consumer query helpers.
+// dominators_outermost/discover/loops; dominators_analyze; the consumer query helpers.
 
 #include <immintrin.h>
 #include <stdbool.h>
@@ -311,7 +312,7 @@ static void dominators_order(const DominatorCfg* cfg, Dominators* result, Domina
 
 // Fill the jump pointers of number and of its unfilled tree ancestors, top down. A number's jump is its idom's jump's
 // jump when the idom's two jump spans are equal, else its idom (Myers, "An applicative random-access stack", 1983), so
-// a climb by jumps takes O(log depth) steps. Each number is filled once per sweep.
+// a climb by jumps takes O(log depth) steps. Each number is filled once per pass.
 static void dominators_fill_jumps(DominatorSweep* sweep, uint32_t number)
 {
     DominatorJump* jumps = sweep->jumps;
