@@ -712,8 +712,54 @@ struct Tier0TestCode
     // The conditions tested against zero that are their compare's jump (#2877), by how the compare takes its operands
     // (both on the stack, a constant, a local, a local and a constant, two locals), behind one test and then two.
     uint64_t tested[BUSTER_TIER0_TEST_TESTED_WAYS];
+    // The functions' code, folded in order (tier0_test_fold_code) by tier0_test_build.
+    uint64_t digest;
 };
 #endif
+// The random programs' code (tier0_test_programs, every shape in turn), folded in order by tier0_test_fold_code: with the
+// default seed and count it must give BUSTER_TIER0_TEST_DIGEST. Frozen where tier0_compile and its scalar twin gave the
+// same code for every function (#2972); a change to Tier 0's code or to the generator moves it, and a run reports its own.
+#define BUSTER_TIER0_TEST_DIGEST UINT64_C(0xea441cc3cbf308b2)
+#define BUSTER_TIER0_TEST_DIGEST_BASIS UINT64_C(0xcbf29ce484222325)
+
+// `size` bytes folded into `digest` (FNV-1a).
+static uint64_t tier0_test_fold(uint64_t digest, const void* bytes, uint64_t size)
+{
+    const uint8_t* at = bytes;
+    uint64_t folded = digest;
+    for (uint64_t i = 0; i < size; i += 1)
+    {
+        folded = (folded ^ at[i]) * UINT64_C(0x100000001b3);
+    }
+    return folded;
+}
+
+// A function's code folded into `digest`: its records, branch columns, references (field by field: the struct has
+// padding), the entries' first records, and the frame.
+static uint64_t tier0_test_fold_code(uint64_t digest, const Tier0Code* code)
+{
+    uint64_t folded = tier0_test_fold(digest, &code->count, sizeof(code->count));
+    folded = tier0_test_fold(folded, code->records, (uint64_t)code->count * sizeof(X86Instruction));
+    folded = tier0_test_fold(folded, &code->branch_count, sizeof(code->branch_count));
+    folded = tier0_test_fold(folded, code->branches, (uint64_t)code->branch_count * sizeof(uint32_t));
+    folded = tier0_test_fold(folded, code->targets, (uint64_t)code->branch_count * sizeof(uint32_t));
+    folded = tier0_test_fold(folded, &code->reference_count, sizeof(code->reference_count));
+    for (uint32_t r = 0; r < code->reference_count; r += 1)
+    {
+        const LinkReference* reference = &code->references[r];
+        folded = tier0_test_fold(folded, &reference->instruction, sizeof(reference->instruction));
+        folded = tier0_test_fold(folded, &reference->field, sizeof(reference->field));
+        folded = tier0_test_fold(folded, &reference->kind, sizeof(reference->kind));
+        folded = tier0_test_fold(folded, &reference->target, sizeof(reference->target));
+        folded = tier0_test_fold(folded, &reference->addend, sizeof(reference->addend));
+    }
+    folded = tier0_test_fold(folded, &code->entry_count, sizeof(code->entry_count));
+    folded = tier0_test_fold(folded, code->entry_records, code->entry_records != 0 ? ((uint64_t)code->entry_count + 1) * sizeof(uint32_t) : 0);
+    const uint32_t frame[] = { code->frame_saved, code->frame_size, code->frame_pointer, code->frame_alignment_log2, code->frame_base };
+    folded = tier0_test_fold(folded, frame, sizeof(frame));
+    return folded;
+}
+
 // Whether two compilations of a function made the same code: records, branch columns, references, labels' records and
 // the entries' first records.
 static bool tier0_test_same_code(const Tier0Code* a, const Tier0Code* b)
@@ -1019,6 +1065,7 @@ static bool tier0_test_build(Tier0TestTally* tally, const Tier0Functions* functi
         result = result && tier0_test_expect(tally, scalar.error == TIER0_OK, "compile", "seed %" PRIu64 " function %u: error %d at entry %u", seed, f, scalar.error,
                                              scalar.node);
         result = result && tier0_test_expect(tally, tier0_test_same_code(&scalar, &vector), "twins", "seed %" PRIu64 " function %u: the paths differ", seed, f);
+        code->digest = result ? tier0_test_fold_code(code->digest, &vector) : code->digest;
         // The calls' memo (#2874): the same code with an empty table, whatever the thread's held from the functions and
         // programs compiled before this one.
         const Tier0CallMemo thread_memo = tier0_call_memo_swap((Tier0CallMemo){ 0 });
@@ -1382,7 +1429,7 @@ static void tier0_test_coverage(const Tier0Functions* functions, uint64_t* cover
 }
 
 static void tier0_test_programs(Tier0TestTally* tally, Tier0Tables* tables, uint64_t seed, uint32_t count, Tier0ProgramOptions options, uint64_t* records,
-                                uint64_t* entries, uint64_t* deferred, uint64_t* deep, uint64_t* frames, uint64_t* tested, uint64_t* coverage)
+                                uint64_t* entries, uint64_t* deferred, uint64_t* deep, uint64_t* frames, uint64_t* tested, uint64_t* coverage, uint64_t* digest)
 {
     Arena arena = arena_reserve(1ull << 32);
     Tier0TestCode* code = BUSTER_ARENA_PUSH_ARRAY(&arena, Tier0TestCode, 1);
@@ -1391,6 +1438,7 @@ static void tier0_test_programs(Tier0TestTally* tally, Tier0Tables* tables, uint
     if (tier0_test_expect(tally, code != 0 && code_bytes != 0 && globals != 0, "programs", "no memory"))
     {
         code->code = code_bytes;
+        code->digest = *digest;
         for (uint32_t p = 0; p < count; p += 1)
         {
             const uint64_t program_seed = seed + p;
@@ -1476,6 +1524,7 @@ static void tier0_test_programs(Tier0TestTally* tally, Tier0Tables* tables, uint
             }
             arena_pop_to(&arena, mark);
         }
+        *digest = code->digest;
     }
     arena_release(&arena);
 }
@@ -7101,6 +7150,7 @@ static int run_tier0_tests(int argc, char** argv)
                 total.checks += tally.checks;
                 total.failures += tally.failures;
             }
+            uint64_t digest = BUSTER_TIER0_TEST_DIGEST_BASIS;
             for (uint32_t s = 0; s < 8; s += 1)
             {
                 Tier0TestTally tally = { 0, 0 };
@@ -7112,7 +7162,7 @@ static int run_tier0_tests(int argc, char** argv)
                 uint64_t fused[BUSTER_TIER0_TEST_TESTED_WAYS] = { 0 };
                 uint64_t coverage[BUSTER_TIER0_TEST_COVERAGE] = { 0 };
                 tier0_test_programs(&tally, &tables, seed + s * 1000003ull, count, s < 4 ? shapes[s] : s == 4 ? records : s == 5 ? deep : s == 6 ? aligned : tested,
-                                    &instructions, &entries, &deferred, &deep_entries, frames, fused, coverage);
+                                    &instructions, &entries, &deferred, &deep_entries, frames, fused, coverage, &digest);
                 if (s == 4 || s == 5)
                 {
                     // With the default count, every kind of part, location and result the catalog can make shows: the
@@ -7154,6 +7204,16 @@ static int run_tier0_tests(int argc, char** argv)
                                   tally);
                 printf("    %" PRIu64 " entries, %" PRIu64 " records, %" PRIu64 " deferred, %" PRIu64 " deep, %" PRIu64 " realigned frames (%" PRIu64 " with a base)\n",
                        entries, instructions, deferred, deep_entries, frames[0], frames[1]);
+                total.checks += tally.checks;
+                total.failures += tally.failures;
+            }
+            {
+                // The programs' code against its frozen digest, with the default seed and count.
+                Tier0TestTally tally = { 0, 0 };
+                tier0_test_expect(&tally, seed != 1 || count != 300 || digest == BUSTER_TIER0_TEST_DIGEST, "digest",
+                                  "the programs' code folds to %016" PRIx64 ", not the frozen %016" PRIx64, digest, BUSTER_TIER0_TEST_DIGEST);
+                tier0_test_report("programs: digest", tally);
+                printf("    %016" PRIx64 "\n", digest);
                 total.checks += tally.checks;
                 total.failures += tally.failures;
             }
