@@ -2455,8 +2455,10 @@ survey of those passes, what it measured and its gates.
   is asked its own fact a record at a time (`node_rows_summary_call`, the
   flow's `check_program_return_call` by the callee's record's byte: a stop
   where it is the leaf of a function declared noreturn, none where it is a
-  plain function's, and an unknown for any other: a call through a value,
-  or of a library's name the flow leaves unknown). The flow reads a callee
+  plain function's; for a pointer object's leaf a stop where its function
+  type is noreturn and none otherwise (#1393, `node_tests_window_returns`);
+  and an unknown for any other: a call through another value, or of a
+  library's name the flow leaves unknown). The flow reads a callee
   through `*` and `&` to a function's name; C lists an expression that
   calls `*f` or `&f` of one, so the window asks no such call. An
   expression's fact is its calls' facts together, but where a call stops
