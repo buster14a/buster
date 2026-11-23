@@ -3652,6 +3652,51 @@ static void check_common_self_assigns(const Parser* parser, Preprocessor* pp, co
     }
 }
 
+// Whether the subscript `node` is a value of a brace initializer or a compound literal (a part of its plan) that no operator
+// checks (#2252): clang's CheckArrayAccess of the full expression sees the initializer list, which it doesn't look into, so
+// only an operator that checks its operand does (`-a[5]`, `f(a[5])`, a comma's right operand). Its climb takes an array's
+// spine, conversions, casts, a conditional's arms, `&` and `*`, which leave it to the root.
+static bool check_common_brace_element(const CheckCommonEmission* emission, uint32_t node)
+{
+    const Parser* parser = emission->parser;
+    const CheckInput* input = emission->input;
+    const CheckGraph* graph = &input->graph;
+    uint32_t root = node;
+    bool rooted = false;
+    for (uint32_t steps = 0; !rooted && root < graph->count && steps < graph->count; steps += 1)
+    {
+        const uint32_t parent = emission->parents[root];
+        const CheckOp op = parent < graph->count ? graph->ops[parent] : CHECK_OP_COUNT;
+        const bool spine = (op == CHECK_OP_SUBSCRIPT || op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW) && graph->operand0[parent] == root;
+        const bool through = spine || op == CHECK_OP_CONVERT || op == CHECK_OP_CAST || op == CHECK_OP_ADDRESS || op == CHECK_OP_DEREFERENCE ||
+                             (op == CHECK_OP_CONDITIONAL && graph->operand0[parent] != root);
+        rooted = parent >= graph->count;
+        root = rooted ? root : through ? parent : BUSTER_CHECK_NONE;
+    }
+    const CheckInitializers* initializers = rooted && emission->program != NULL ? emission->program->initializers : NULL;
+    bool element = false;
+    for (uint32_t index = 0; initializers != NULL && !element && index < initializers->count; index += 1)
+    {
+        const CheckInitializer* plan = initializers->plans + index;
+        const uint32_t declaration = initializers->declaration_tokens[index];
+        const uint8_t role = declaration < parser->tokens.count ? parser->tree.roles[declaration] : PARSE_ROLE_NONE;
+        const bool compound = role == PARSE_ROLE_OPEN_COMPOUND || role == PARSE_ROLE_CLOSE_COMPOUND || role == PARSE_ROLE_OPEN_COMPOUND_BODY;
+        const uint32_t begin = check_sparse_get(input->initializer_begins, declaration);
+        const bool brace = compound || (begin < parser->tokens.count && parser->tokens.kinds[begin] == PARSE_KIND_L_BRACE);
+        for (uint32_t p = 0; brace && !element && p < plan->count; p += 1)
+        {
+            // The part's value is a node of the climb (the root's, or one under its conversion).
+            const uint32_t part = plan->parts[p].kind == CHECK_INIT_VALUE ? plan->parts[p].node : BUSTER_CHECK_NONE;
+            for (uint32_t at = node, steps = 0; part < graph->count && !element && at < graph->count && steps < graph->count; steps += 1)
+            {
+                element = at == part;
+                at = at == root ? BUSTER_CHECK_NONE : emission->parents[at];
+            }
+        }
+    }
+    return element;
+}
+
 // A runtime warning at a node's own root: a constant subscript past its bound.
 // A conditional has no warning of its own — its arms report at its slot instead.
 static void check_common_own(CheckCommonEmission* emission, uint32_t node)
@@ -3739,6 +3784,7 @@ static void check_common_own(CheckCommonEmission* emission, uint32_t node)
                             }
                         }
                     }
+                    checked = checked && (emission->parents == NULL || !check_common_brace_element(emission, node));
                     const bool past = checked && value >= 0 && (relaxed ? (unsigned __int128)value > extent : (unsigned __int128)value >= extent);
                     const bool before = checked && value < 0;
                     if (past || before)
@@ -4337,7 +4383,11 @@ static void check_common_emit_run(CheckCommonEmission* emission)
                         const uint32_t condition = graph->operand0[node];
                         const CheckValue condition_value = condition < graph->count ? check_stream_value(emission->stream, condition) : (CheckValue){ 0 };
                         bool truth = false;
-                        const bool known = condition < graph->count && check_action_truth(emission->types, &condition_value, &truth);
+                        // A modification's value, `(y = 0)`, is the program's to know (#2264), past a discarded one.
+                        const bool modified = (condition_value.flags & BUSTER_CHECK_MODIFICATION) != 0;
+                        const bool known = condition < graph->count &&
+                                           (modified ? emission->program != NULL && check_program_branch_truth(emission->program, node, condition, &truth) :
+                                                       check_action_truth(emission->types, &condition_value, &truth));
                         const bool true_reached = reached && (!known || truth);
                         const bool false_reached = reached && (!known || !truth);
                         check_common_emit_arm(emission, graph->operand2[node], false_reached ? BUSTER_CHECK_EMIT_ARM : BUSTER_CHECK_EMIT_ARM_PRUNED, owner);
@@ -10798,7 +10848,8 @@ static uint32_t check_common_operand_mask(const CheckGraph* graph, const CheckSt
         const uint32_t condition = graph->operand0[node];
         const CheckValue condition_value = condition < graph->count ? check_stream_value(stream, condition) : (CheckValue){ 0 };
         bool truth = false;
-        bool known = condition < graph->count && check_action_truth(types, &condition_value, &truth);
+        // A value a modification gives, `(y = 0)`, is clang's to know only past a discarded one (#2264): the program's.
+        bool known = condition < graph->count && (condition_value.flags & BUSTER_CHECK_MODIFICATION) == 0 && check_action_truth(types, &condition_value, &truth);
         if (!known && program != NULL && condition < graph->count)
         {
             known = check_program_branch_truth(program, node, condition, &truth);
