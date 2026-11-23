@@ -1,0 +1,2 @@
+typedef int other_t;
+other_t x;

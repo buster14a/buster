@@ -1,0 +1,638 @@
+buster-fixtures v1 preprocessor-cases
+# test-preprocessor's built-in cases (c_preprocessor_test.c; #2053): ID, STANDARD, FLAGS, OPTIONS, NAME, tab-separated.
+# ID.c is the case's source and ID.expected its expected output; FLAGS other and markers add ID.other.h and ID.markers,
+# and files=TREE the files of trees/catalog.tsv's TREE. OPTIONS, or -, are both sides' options, %d the case's directory.
+# Negative-to-unsigned conversions (#1291): all converting operators on both sides, live contexts, and
+# controls. Both kernels check the warning counts; --clang checks the values and warning-policy outcomes.
+0001	c17	warnings=28	-	#if negative conversions for each arithmetic, comparison and bitwise operator
+0002	c17	-	-	#if signed, nonnegative and already unsigned controls
+0003	c17	-	-	#if conditional common type without a conversion warning
+0004	c17	-	-	#if conversions in unevaluated operands stay silent
+0005	c17	warnings=12	-	#if conversion liveness restored across precedence and conditional nesting
+0006	c17	fails,errors=2	-Werror	#if negative conversions become errors
+0007	c17	-	-w -Werror	#if negative conversion warnings are suppressed by -w
+0008	c17	warnings=2	-Werror -Wno-error	#if negative conversion warnings can be demoted
+0009	c17	files=conversion-system	-Werror -isystem %d/sys	#if promoted conversion in a system header is suppressed
+0010	c17	fails,errors=1,files=conversion-system	-Werror -Wsystem-headers -isystem %d/sys	#if promoted conversion with system warnings enabled
+0011	c17	warnings=2	-Wno-sign-compare -Wno-sign-conversion	#if negative conversions are not sign-compare warnings
+0012	c17	warnings=3	-	#if conversion macros and evaluated #elif
+0013	c17	fails	-	#if dead conversion operand still checks syntax
+# The topics of C 6.10.4.5's examples, in cases of our own: rescanning and redefinitions, # and ## with indirection,
+# placemarkers, and variadic macros (the expected text is clang's output).
+0014	c17	-	-	rescanning, redefinitions and painting
+0015	c17	-	-	# and ## with indirection
+0016	c17	-	-	placemarkers
+0017	c17	-	-	variadic macros
+# The cases the notes probed with GCC and clang (preprocessor-logical-spacing, preprocessor-expansion-boundaries).
+0018	c17	-	-	splice makes a function-like macro
+0019	c17	-	-	comment makes an object-like macro
+0020	c17	-	-	stringize across a splice and a comment
+0021	c17	warnings=1	-	redefinition with other spacing
+0022	c17	-	-	a disabled macro's last token
+# M's template finds N painted while N's expansion is under way, which it mustn't keep (pp_template_names) for the
+# M(2) after it, whose N expands.
+0023	c17	-	-	a name painted while its macro is disabled, then expanded
+# Templates of a few tokens whose names' bodies make their expansions longer than a template writes: past 16 tokens,
+# exactly 16 and 17 (pp_template_size).
+0024	c17	-	-	expansions past a template's tokens
+# An empty expansion of a template with a space between its tokens leaves that space before the next token.
+0025	c17	-	-	an empty expansion's spaces
+# One template's names found again after each change of the macros' table (Preprocessor.macro_epoch): its direct
+# object redefined longer, pushed, redefined, popped and undefined, invoked in a file's text and collected.
+0026	c17	-	-	a template's names across #define, #undef, push_macro and pop_macro
+# Chains of one to three operands with every operand empty or not, in a file's text (pp_invoke_file) and collected from
+# an expansion (pp_finish_simple), where the arguments are the same: the same tokens and spaces either way.
+0027	c17	-	-	pastes from a template in a file's text and collected
+# A template's chains between body tokens, parameters and #, each chain's first operand a body token or a parameter,
+# and a chain's body token that names a macro whose body would go straight in (it doesn't: its paste is the token).
+0028	c17	-	-	pastes with body tokens and other items
+# Numbers pasted onto names and names onto numbers, numbers first, and __LINE__'s integer (expanded by the wrapper's
+# arguments first).
+0029	c17	-	-	pastes of numbers
+# Operands the templates don't paste: of two tokens or more, punctuators, literals, '$', and a GNU comma and __VA_OPT__,
+# which have no template.
+0030	c17	-	-	pastes the templates leave to pp_substitute
+# Names a paste makes: a macro's that expands (rescanned, from the expansions), the invoked macro's and a disabled
+# macro's (painted where the expansion goes out).
+0031	c17	-	-	pasted names that expand, painted and rescanned
+# The variadic parameter on the left of ##, given and omitted, and a function-like macro without parameters.
+0032	c17	-	-	pastes of a variadic argument and without parameters
+# # in a template, in a collected invocation, and in a file's text (which the templates leave to pp_invoke).
+0033	c17	-	-	stringizing from a template
+# Arguments that start a line, placed first, moved past an empty operand and pasted, from a file's text and from an
+# expansion, where a token that started a line inside an argument has BUSTER_PP_LINE_SPACE.
+0034	c17	-	-	pastes on new lines
+# A chain that makes no token leaves the space pending before it to the next token, which starts a run, and at the
+# end to the token after the expansion.
+0035	c17	-	-	pastes that make nothing among other tokens
+# A template's expansion longer than it writes, left to pp_substitute: 16 tokens and 17.
+0036	c17	-	-	an expansion of a template with ## past 16 tokens
+# Arguments whose names of macros are all direct objects (pp_argument_in_place), expanded in place before the template
+# or pp_substitute_simple takes them: alone, beside other tokens, twice in one argument, in two arguments; and the
+# ones left to the main loop, an empty object, an object whose body invokes a macro, and an invocation with one of each.
+0037	c17	-	-	arguments of direct objects, expanded in place
+# A direct object that starts a line in an argument (BUSTER_PP_START_OF_LINE in a file's text, BUSTER_PP_LINE_SPACE
+# in an expansion's), and that ends one, from a file's text and from an expansion, with clang's line markers.
+0038	c17	markers	-	arguments of direct objects on new lines
+# A disabled macro's name beside a direct object in an argument: painted as the main loop paints it, so that it doesn't
+# expand when the expansion is rescanned before '('.
+0039	c17	-	-	arguments of direct objects beside a disabled macro's name
+# An argument expanded in place used twice, beside one used as it is, from a file's text and from an expansion.
+0040	c17	-	-	arguments of direct objects used twice
+# Invocations in arguments expanded in place (pp_nested_invocation): pastes, a simple template, #, no parameters, a
+# variadic argument left out and given, beside other invocations and direct objects; and the ones left to the main
+# loop, a paste that makes a macro's name and an invocation whose argument names a direct object.
+0041	c17	-	-	invocations in arguments, expanded in place
+# An invocation that makes nothing, between other tokens, alone, first and last (the space it leaves pending), and
+# invocations next to each other and to a token.
+0042	c17	-	-	empty and adjacent invocations in arguments
+# The invoked macro's name in its own expansion, and a disabled macro's in an invocation's argument: painted, so
+# that neither expands before the '(' after it once the outer expansion is rescanned.
+0043	c17	-	-	invocations in arguments beside painted names
+# Invocations in arguments that start and end lines, from a file's text and from an expansion, with clang's line
+# markers.
+0044	c17	markers	-	invocations in arguments on new lines
+# Eight invocations in one invocation's arguments, the most pp_finish_simple plans (BUSTER_PP_NESTED_PLANS), and nine.
+0045	c17	-	-	invocations in arguments past the plans kept
+# The outer body requires rescan rather than painting its arguments on direct output. An inner self name must
+# already be painted when the later invocation supplies its parentheses.
+0046	c17	-	-	invocations in arguments retain paint through outer rescan
+# An empty invocation leaves name-space pending. A plain run consumes it before another invocation, then a later
+# stringification observes the space between 'a' and 'b', even though no source space follows the empty call.
+0047	c17	-	-	invocations in arguments pass pending space to an intervening run
+# A plain argument does not authorize in-place expansion when the nested body's name itself still expands.
+0048	c17	-	-	invocations in arguments leave expanding body names to rescan
+# A poisoned name a paste makes, at the end of a chain and in its middle, collected (a file's text with a poisoned
+# name takes the main loop's path).
+0049	c17	fails	-	poisoned names a template pastes
+0050	c17	-	-	an alias's invocation
+0051	c17	-	-	adjacent tokens don't paste
+0052	c17	-	-	an unused argument isn't expanded
+0053	c17	-	-	a stringized argument isn't expanded
+0054	c17	-	-	defined function-like and bare names in conditions
+0055	c23	-	-	undefined calls in skipped conditional groups remain skipped
+0056	c23	fails,errors=3	-	C23 keyword spellings before parentheses are undefined macro calls
+0057	c23	fails,errors=1,other	-	embed limit diagnoses an undefined function-like name
+0058	c17	fails	-	a dead arm's macros still expand
+0059	c17	-	-	a dead arm's division isn't evaluated
+0060	c17	-	-	a dead arm's division skips an #error
+0061	c17	-	-	a pp-number without exponent digits in a skipped group
+# 1e+ stays one pp-number: the error ("exponent has no digits") is the parser's.
+0062	c17	-	-	a pp-number without exponent digits
+# Redefinitions are compared by spelling (1 and 01, [ and <:, parameter names) and whitespace, after splices: GCC
+# and clang warn about A, B and C only.
+0063	c17	warnings=3	-	redefinitions with other spellings
+0064	c17	-	-	true in C17
+0065	c23	-	-	true in C23
+0066	c23	-	-	__VA_OPT__ of an argument that expands to nothing
+# Probes of clang (docs/c-preprocessor.md).
+0067	c23	-	-	GNU comma and __VA_OPT__
+0068	c17	-	-	pastes
+0069	c17	-	-	stringize spacing and escapes
+0070	c17	-	-	a function-like name without arguments
+0071	c17	other	-	builtins
+0072	c17	other	-	include guard and #pragma once
+0073	c17	warnings=2	-	pragmas
+0074	c23	warnings=2	-	#if arithmetic
+0075	c23	-	-	#elif chains and nesting
+# Argument scanning past its fast path's limits: an argument across two 64-token blocks, parentheses nested 70 deep,
+# 70 arguments, and a variadic argument of 69 commas.
+0076	c17	-	-	an argument across blocks
+0077	c17	-	-	parentheses nested 70 deep
+0078	c17	-	-	70 arguments
+# Conditional pairing across 32-directive blocks: 40 nested groups, and a group with 100 directives inside.
+0079	c17	-	-	conditionals nested 40 deep
+0080	c17	-	-	a group around 50 others
+# Unbalanced groups, which the vectorized pairing leaves to the stack.
+0081	c17	fails	-	an #endif too many
+0082	c17	fails	-	an #elif after #else
+0083	c17	fails	-	an unterminated group
+# The main loop's frames: directives among a macro's arguments (a #if line expanded there, a #define), which the main
+# loop collects a token at a time; builtins' operands from other contexts, and a #define in one; _Pragma from a
+# macro; a computed #include; #line with a macro, and a line marker.
+0084	c17	other	-	directives among a macro's arguments
+0085	c17	warnings=1,other	-	builtins' operands, a computed #include and #line
+0086	c17	fails	-	unterminated invocation
+# An identifier is printed as it is interned (a UCN as UTF-8), but stringized as written, without its splices.
+0087	c17	-	-	identifiers written with UCNs and splices
+# Review fixes (#193): a missing header by absolute path, as __has_include asks and as #include and -include name it
+# (an error, not a crash).
+0088	c17	-	-	a missing absolute header
+# __VA_OPT__ on either side of ## (C 6.10.5.2): a placemarker when it gives no tokens, else its first or last token
+# pasted; an empty argument at an end of its content is a placemarker there (P1, P2), and content of placemarkers
+# alone gives none (P4(, , 1): clang's ab, where GCC gives a b).
+0089	c23	-	-	__VA_OPT__ next to ##
+# An empty expansion's or empty argument's leading space goes to the next token, as clang does.
+0090	c23	-	-	spaces through empty expansions
+# #if and #elif lines that pp_condition_direct evaluates without a capture: names through chains of object-like
+# macros to numbers and to names of no macro, defined X and defined(X), C23's true through a macro, and a
+# self-referential name, which it leaves to the capture.
+0091	c23	-	-	#if lines without a capture
+# Names on such lines that pp_condition_direct leaves to the capture without reading their bodies (#410's review): an
+# empty object-like macro, one defined at the end of an included file (its body begins at the file's last token), a
+# builtin, a function-like macro and one that pastes; and an empty one alone, an error.
+0092	c17	other	-	#if lines of macros without a body of one token
+0093	c17	fails,errors=1	-	#if of an empty macro
+# Invocations read from a file's text whose names have no space before them: an empty expansion's trailing space, and
+# a nonempty one's, go to the next token (pp_invoke_file's, as pp_finish_simple's).
+0094	c17	-	-	spaces after invocations in a file's text
+0095	c17	other	-	__has_include in a macro's argument in #if
+0096	c17	other	-I %d	header names with line splices
+0097	c17	files=include-next	-I %d/first -I %d/first -I %d/second -I %d/first	a repeated -I and #include_next
+0098	c17	-	-	_Pragma of a macro
+0099	c17	-	-	#line without a file name
+0100	gnu17	-	-	__is_identifier
+0101	c23	-	-	__is_identifier in C23
+# GNU's keywords follow the last -f[no-]gnu-keywords, or else the last of GCC's -f[no-]asm, or else the mode (#281).
+0102	gnu89	-	-fno-gnu-keywords	-fno-gnu-keywords
+0103	c89	-	-fasm	-fasm in c89
+0104	c17	-	-fgnu-keywords -fno-asm	-fgnu-keywords before -fno-asm
+0105	c23	-	-fasm -fno-gnu-keywords	-fno-gnu-keywords in C23
+# '$' is punctuation in C with -fno-dollars-in-identifiers, as in assembly, which -fdollars-in-identifiers gives
+# identifiers with '$' (#281).
+0106	c17	-	-fno-dollars-in-identifiers	-fno-dollars-in-identifiers
+0107	c17	fails	-fdollars-in-identifiers -fno-dollars-in-identifiers	pasting '$' as punctuation
+0108	gnu17	-	-x assembler-with-cpp -fdollars-in-identifiers	-fdollars-in-identifiers in assembly
+# What follows a '$' joins the tokens after it as clang lexes them (#283's review): a literal's prefix (u8'x' only
+# from C23), and a pp-number's continuation; and a quote C23's digit separators free, which takes the rest of the line.
+0109	c17	-	-fno-dollars-in-identifiers	'$' before prefixed literals and pp-numbers
+0110	c23	-	-fno-dollars-in-identifiers	'$' before prefixed literals in C23
+0111	gnu17	-	-x assembler-with-cpp	'$' before prefixed literals in assembly
+0112	c17	-	-fno-dollars-in-identifiers	'$' before a prefixed literal across a line splice
+0113	gnu17	-	-x assembler-with-cpp	'$' before a prefixed literal across a line splice in assembly
+0114	c23	-	-fno-dollars-in-identifiers	a quote after '$' that a digit separator frees
+# Character constants in #if are unsigned with -funsigned-char (or -fno-signed-char), and a multi-character one's
+# first byte isn't sign-extended (#281).
+0115	c17	warnings=1	-fsigned-char -fno-signed-char	-funsigned-char in #if
+0116	c17	warnings=3	-funsigned-char -fno-unsigned-char	signed char in #if
+# Raw string literals (#285): R and LR ones in GNU modes from C99 on, u8R, uR and UR ones from C11 (whose prefixes
+# they need), in any mode with -fraw-string-literals and in none with -fno-raw-string-literals, in skipped groups
+# too; their spellings as written after the opening quote (line splices and trigraphs kept), pasted, stringized
+# (line breaks as \n), as _Pragma's operand (the body) and #line's and a line marker's file name (the body);
+# neither a header name nor (from a string) __has_warning's name, but its body; after '$' where '$' is punctuation;
+# and -E's lines, which count the line breaks in an unknown token (including an invalid raw delimiter) and in no other.
+0117	gnu17	markers	-	raw string literals in a GNU mode
+0118	gnu99	-	-	raw string literals in gnu99
+0119	c17	-	-	no raw string literals in an ISO mode
+0120	c17	-	-fraw-string-literals	-fraw-string-literals in an ISO mode
+0121	gnu17	-	-fno-raw-string-literals	-fno-raw-string-literals in a GNU mode
+0122	gnu17	-	-	raw string literals over lines and directives
+0123	c17	-	-fraw-string-literals	raw string literals keep their splices and trigraphs
+0124	gnu17	-	-	raw string literals pasted and stringized
+0125	gnu17	warnings=1	-	raw string literals in _Pragma, #line and a line marker
+0126	gnu17	-	-	raw string literals in __has_warning
+0127	gnu17	fails,files=raw-header	-	a raw string literal isn't a header name
+0128	gnu17	fails,other	-	a raw string literal isn't an #include's header name
+0129	gnu17	-	-fno-dollars-in-identifiers	raw string literals after '$' as punctuation
+0130	gnu17	-	-x assembler-with-cpp	raw string literals after '$' in assembly
+0131	gnu17	fails,markers	-	line breaks in an unknown token and in a raw string literal
+0132	gnu17	fails,markers	-	invalid raw delimiter keeps its line splice
+0133	gnu17	fails,errors=5	-	invalid raw delimiters at active file scope
+0134	gnu17	fails,errors=1	-	unterminated raw literal
+0135	gnu17	fails,errors=1	-	invalid raw prefix with phase two splice
+0136	gnu17	fails,errors=1	-	unused invalid raw macro diagnoses once
+0137	gnu17	fails,errors=1	-	unused invalid raw macro argument diagnoses
+0138	gnu17	fails,errors=1	-	invalid raw in a condition diagnoses after expansion
+0139	gnu17	-	-	skipped invalid raw literals suppress diagnostics
+0140	gnu17	fails,errors=1	-	an untaken elif still diagnoses invalid raw literals
+0141	gnu17	-	-fno-raw-string-literals	invalid raw syntax is ordinary text with raw disabled
+0142	c89	fails,errors=1	-fraw-string-literals	invalid raw syntax with forced C89 raw literals
+0143	gnu17	fails,errors=1	-x assembler-with-cpp	invalid raw syntax in assembly
+# Named UCNs (#1447) are their characters where the lexer reads one in a token (pp_test_named_ucns has their errors),
+# and never read in a skipped group (but a basic or control character's name, which clang diagnoses there), a literal
+# or a comment, whose text clang's -E keeps as written.
+0144	gnu17	-	-	named UCNs in skipped groups, literals and comments
+0145	gnu17	-	-	a named UCN in an identifier
+0146	gnu17	-	-	named UCNs of aliases and names made by rule
+0147	gnu17	-	-	a named UCN in a macro
+0148	gnu17	-	-	a named UCN names a macro
+0149	gnu17	-	-	a named UCN in an unused macro argument
+0150	gnu17	-	-	a named UCN in #if
+0151	gnu17	-	-	a named UCN in #if's character constant
+0152	gnu17	fails,errors=1	-	a misspelled named UCN in #if's character constant
+0153	gnu17	fails,errors=1	-	a basic character's named UCN in #if's character constant
+0154	c23	-	-	a basic character's named UCN in C23's #if
+0155	gnu17	fails,errors=1	-	named UCNs a line splice splits
+0156	gnu17	fails,errors=2	-	names no character has
+0157	gnu17	-	-	opaque raw-looking query with no lexical overlap
+0158	gnu17	files=opaque-raw	-I%d	raw-looking direct angle header preserves following source
+0159	gnu17	warnings=1,files=opaque-raw	-I%d	raw strings resume after an opaque direct header
+0160	gnu17	files=opaque-raw	-I%d	escaped greater in a raw-looking direct header
+0161	gnu17	files=opaque-raw	-I%d	spliced raw-looking direct angle header
+0162	gnu17	warnings=1	-	raw-looking warning text preserves following source
+0163	gnu17	fails	-	raw-looking error text preserves following source
+0164	gnu17	files=opaque-raw	-I%d	repeated raw-looking direct headers use one recovery
+0165	gnu17	files=raw-query	-I%d	a macro-named raw header query restores later source
+0166	gnu17	files=raw-query	-I%d	successive raw header queries in one condition
+0167	gnu17	files=raw-query	-I%d	a raw header query with a splice
+0168	gnu23	files=raw-query	--embed-dir=%d	a macro-named raw embed query restores later source
+0169	gnu17	-	-	a multiline raw macro argument remains opaque
+0170	gnu17	files=raw-query	-I%d	raw query private views preserve recursive macro snapshots
+0171	gnu17	files=raw-query	-I%d	raw query private views retain once, import and guard identity
+0172	gnu17	fails,files=raw-query	-I%d	an excluded raw-looking direct header stays ordinary text
+0173	gnu17	fails	-	an excluded raw-looking diagnostic stays ordinary text
+0174	gnu17	warnings=1	-	a malformed raw-looking active diagnostic is opaque
+0175	gnu17	fails	-	a malformed raw-looking excluded diagnostic stays ordinary text
+# c89 lexes neither digraphs nor "//" comments, as clang's -E has it: "%:define" is no directive, a digraph is two
+# punctuators ("<%=" is '<' and "%=", and "<::>" '<', "::" and '>'), and "//" two slashes, of which the second starts
+# a block comment before a '*'. Pasting a digraph's characters or "//" forms no token (#288).
+0176	c89	-	-	c89 without digraphs or // comments
+0177	c89	fails	-	pasting a digraph's characters in c89
+0178	c89	fails	-	pasting // in c89
+0179	c89	fails	-	pasting %: and %: in c89
+# C94 (iso9899:199409) is c89 with digraphs, and __STDC_VERSION__ 199409L (#288).
+0180	iso9899:199409	-	-	C94's digraphs without // comments
+# The last -f[no-]digraphs wins over the mode: c89 with -fdigraphs is C94, C94 with -fno-digraphs is c89 (no
+# __STDC_VERSION__), and any other mode has no digraphs with -fno-digraphs, but its "//" comments (#288).
+0181	c89	-	-fno-digraphs -fdigraphs	-fdigraphs in c89
+0182	iso9899:199409	-	-fdigraphs -fno-digraphs	-fno-digraphs in C94
+0183	gnu17	-	-fno-digraphs	-fno-digraphs
+0184	gnu89	-	-fno-digraphs	-fno-digraphs in gnu89
+0185	c17	-	-fno-short-wchar -fshort-wchar	short wchar in #if
+0186	c17	-	-fshort-wchar -fno-short-wchar	default wchar after short wchar in #if
+0187	c99	-	-	true in C99
+# Where clang and GCC differ, clang's answer: a #line continued on the next line counts from the line of its # (GCC
+# gives 100), and __BASE_FILE__ in a forced include is <built-in> (GCC gives the main file).
+0188	c17	-	-	#line continued on the next line
+0189	c17	other	-include %d/other.h	__BASE_FILE__ in a forced include
+# #193's re-review: a directory under both -iquote and -I (#include_next goes on from the directory this inclusion
+# was found in, not the file's first), spliced string literals from macros, pending spaces in #__VA_OPT__,
+# __BASE_FILE__ after #line (the presumed root, as clang walks to it), and #line continued with its number indented
+# (clang counts from the line it lexes the number on).
+0190	c17	files=include-next	-iquote %d/first -I %d/first -I %d/second	#include_next through -iquote and -I
+0191	c17	other	-	computed header names with line splices
+0192	c23	-	-	#__VA_OPT__ after empty arguments
+0193	c17	other	-	__BASE_FILE__ after #line
+0194	c17	-	-	#line continued, its number indented
+# #193's third review: -E's line markers give the presumed positions, as clang's do: #line's numbers and names in
+# the main file and in an included one, a line that starts with a macro on the line of its name (also when the
+# invocation spans lines), the line after a _Pragma's pragma, flag 1 and 2 for each file the stack goes into and
+# back to, 3 for system headers (from -isystem, and after #pragma GCC system_header) on every marker, and names
+# escaped as clang writes them.
+0195	c17	markers,files=renamed	-	line markers: #line in the main file and in an included one
+0196	c17	markers	-	line markers: lines that start with macros, and the line after _Pragma
+0197	c17	markers,files=stack	-isystem %d/sys	line markers: the include stack, system headers and escaped names
+# #193's third review: GNU comma elision when a variadic macro's only argument is omitted (C17 keeps the comma),
+# the space before a stringized __VA_OPT__ (outside the string), a definition checked where it is made, the
+# signedness of UTF-16, UTF-32 and (C23) UTF-8 character constants in #if, the standard features each mode has,
+# and #line's number and file name read without their line splices, with the file name's escapes decoded (clang
+# rejects numeric ones).
+0198	gnu17	-	-	comma elision with an omitted sole variadic argument (GNU)
+0199	c17	-	-	comma elision with an omitted sole variadic argument (C17)
+0200	c23	-	-	the space before a stringized __VA_OPT__
+0201	c17	fails	-	an unused definition whose # names no parameter
+0202	gnu17	warnings=2	-	UTF-16, UTF-32 and wide character constants' signedness in #if
+0203	c23	warnings=1	-	UTF-8 character constants' signedness in #if (C23)
+0204	c99	-	-	standard features in C99
+0205	gnu17	-	-	standard features in GNU17
+0206	c23	-	-	standard features in C23
+0207	c17	-	-	#line's operands as phase 2 leaves them
+0208	c17	fails	-	#line with a numeric escape in its file name
+# Lexing by the language mode, as clang lexes: the u, U and u8 prefixes are C11's (u8 on a character constant C23's),
+# so before them each is an identifier and the literal after it, a paste that would form one isn't a token, and
+# trigraphs are replaced in the ISO modes before C23. And the directives clang rejects among a macro's arguments.
+0209	c99	-	-	literal prefixes before C11
+0210	gnu17	-	-	u8 character constants before C23
+0211	c23	-	-	literal prefixes in C23
+0212	gnu17	fails	-	a paste that forms u8'a' before C23
+0213	c17	fails	-	#pragma among a macro's arguments
+0214	c17	fails,other	-	#include among a macro's arguments
+# Clang's flag for a macro's arguments is one flag, not a depth: an invocation with arguments in a directive among
+# them clears it, and #pragma and #include are taken after it, the arguments going on past the included file's end
+# (#109's seed 2106).
+# #370: FileChanged leaves a header while arguments are collected, before the expansion reaches the printer.
+# Keep the expansion's presumed line, in the file the callback selected, without changing the actual origins.
+0215	c17	other,markers	-	line markers: an invocation crosses an included file's end
+0216	c17	other	-	line markers: an invocation after output crosses an included file's end
+0217	c17	other,files=collecting-exit	-	line markers: argument collection exits two included files
+0218	c17	other,files=collecting-return	-	line markers: argument collection returns to an included file
+0219	c17	other	-	line markers: crossed files keep builtin and presumed locations
+0220	c17	other	-	line markers: an empty expansion crosses an included file's end
+0221	c17	other,markers	-	line markers: an empty expansion crossing an include leaves no output
+0222	c17	other	-isystem %d	line markers: a system include ends while collecting arguments
+0223	c17	other	-	line markers: a crossed invocation spans printer batches
+0224	c17	other	-	an invocation in a #if among a macro's arguments clears clang's flag
+0225	c17	fails	-	an object-like macro in a #if among a macro's arguments keeps clang's flag
+0226	c17	-	-	#pragma lines among a macro's arguments after an invocation in a #if
+0227	c17	other	-	a file twice by #include among a macro's arguments
+0228	c23	-	-	fuzzing, seed 2106 case 190642: #pragma among arguments after an invocation in a #elif
+0229	c17	-	-	trigraphs in the ISO modes before C23
+0230	gnu17	-	-	trigraphs ignored in the GNU modes
+# #202's review: the split prefix's identifier ends before a line splice that comes before the quote, and a stringized
+# string is final (with trigraphs on, its "??=" stays), while a paste is lexed again, as clang lexes it.
+0231	c99	-	-	a line splice before the quote of a split literal
+0232	c17	-	-	a line splice before the quote of u8'a' before C23
+0233	c17	-	-	a trigraph that a stringized argument spells, and one a paste forms
+0234	c17	fails	-	#include of a missing absolute path
+0235	c17	fails	-include /buster-missing-directory/absent.h	-include of a missing absolute path
+# #109's differential fuzzing against clang: a case for each difference it found (minimized) and for each that
+# probing around one found, with clang's -P text, which test-preprocessor --clang checks again.
+0236	c23	-	-undef	-undef
+# Assembly's language macro stays with -undef, as the standard ones do: a header shared with C keeps its C apart.
+0237	c17	-	-undef -x assembler-with-cpp	-undef in assembly
+0238	c23	-	-	feature answers' spelling
+0239	c17	-	-	__has_warning
+0240	c23	warnings=1	-	__VA_OPT__ without variadic parameters
+0241	c17	warnings=2	-	a stringized trailing backslash
+0242	c17	fails	-	an unterminated comment
+0243	c17	warnings=1	-	a warning's comment text preserves following source
+0244	c17	fails	-	an error's comment text preserves following source
+0245	c17	warnings=1	-	a warning's quote is text
+0246	c17	warnings=1	-	a warning's comment ends at its logical newline
+0247	c17	warnings=1	-	a warning's spliced name and text
+0248	c17	warnings=2,other	-	a warning in a repeated include
+0249	c17	warnings=1	-	a warning preserves macro snapshots
+0250	c17	fails	-	a skipped warning is still lexed raw
+0251	c17	fails	-	a skipped error is still lexed raw
+0252	c17	fails	-	a comma in #if
+0253	c17	-	-	digit separators before C23
+0254	c23	-	-	digit separators in C23
+0255	c17	-	--target=x86_64-pc-linux-gnu	target queries
+0256	c17	-	--target=x86_64-unknown-linux-gnu	unknown target vendor
+0257	c17	-	-	UCNs pasted and stringized
+0258	c17	-	-	UCNs in pragma lines
+0259	c17	-	-	_Pragma in an expanded argument
+0260	c17	fails	-	a _Pragma's unterminated comment
+0261	c17	fails	-	pasting a comment's start
+0262	c23	-	-	arguments expanded in order of use
+0263	c17	warnings=7	-	#pragma message's forms
+0264	c17	fails	-	#pragma GCC error
+0265	c17	fails,warnings=4	-	diagnostic pragmas
+0266	c17	-	-	omp pragmas expand
+0267	c17	warnings=2	-	silent pragmas
+0268	c17	-	-	push_macro and pop_macro
+0269	c17	fails	-	push_macro malformed
+0270	c17	fails	-	GCC poison
+0271	c17	fails	-	GCC poison used
+0272	c17	other	-	GCC dependency
+0273	c17	fails	-	GCC dependency missing
+0274	c17	-	-	assume_nonnull regions
+0275	c17	fails	-	an assume_nonnull region left open
+0276	c17	-	-	macro notes
+0277	c17	fails	-	macro notes malformed
+0278	c17	warnings=1	-	#ident and #sccs
+0279	c17	fails	-	#ident malformed
+0280	c23	other	-	__has_embed
+0281	c23	fails	-	__has_embed outside #if
+0282	c17	-	-	UCN identifiers stringized
+0283	c17	-	-	#pragma GCC poison's uses
+0284	c17	fails	-	a poisoned name read from the file
+0285	c17	fails	-	a poisoned name in #ifdef
+0286	c17	fails	-	a poisoned name among arguments
+0287	c17	fails	-	a poisoned name from a paste
+0288	c17	fails	-	a poisoned name in _Pragma's text
+0289	c17	fails,warnings=1	-	poisoning a macro
+0290	c17	-	-	poisoning defined
+0291	c17	fails	-	two ## in a row
+0292	c17	-	-	two ## and an empty argument
+0293	c17	-	-	GNU's comma paste after an argument
+0294	c23	-	-	#line with digit separators
+0295	c17	-	-	line marker flags
+0296	c17	fails	-	a line marker's flag 2 without 1
+0297	c17	fails	-	a line marker's invalid flags
+0298	c17	warnings=2,other	-	#include with extra tokens
+0299	c23	warnings=5	-	extra tokens after directives
+0300	c23	fails	-	#elifdef without a name
+0301	c17	-	-	#ifdef defined
+0302	c17	-	-	defined from macros in #if
+0303	c17	fails	-	defined from an argument that expands
+0304	c23	-	-	an inactive __VA_OPT__'s spacing
+0305	c23	-	-	an empty __VA_OPT__ expands nothing
+0306	c23	-	-	__VA_ARGS__ as a parameter
+0307	c17	fails	-	#__VA_ARGS__ in a named variadic macro
+0308	c23	-	-	right shifts in #if
+0309	c17	-	-	push_macro allows a redefinition
+0310	c17	warnings=2	-	#pragma once with extra tokens
+# An attribute query reads its operand expanded, a token at a time, to the ')' that closes it, wherever that comes
+# from; and its scope (for __has_c_attribute) after a name it reads as it is.
+0311	c23	-	-	an attribute query's operand read expanded
+0312	c17	-	-	an attribute query's operand across a directive
+0313	c17	fails	-	an attribute query's operand nested
+0314	c23	fails	-	a scope only in __has_c_attribute
+0315	c23	fails	-	a macro after __has_c_attribute's name
+0316	c17	fails	-	an attribute query's operand unterminated
+0317	c23	fails	-	a scoped attribute query's operand at the end of the file
+# A _Pragma in a directive's line runs, as clang reads the line: its pragma line comes first.
+0318	c17	warnings=1	-	_Pragma in directives' lines
+# Spaces in a substitution are clang's NextTokGetsSpace: none after ##, and __VA_OPT__'s tokens and ')' give the next
+# token one even when the __VA_OPT__ gives nothing.
+0319	c23	-	-	spaces around __VA_OPT__
+0320	c17	-	-	GNU's comma paste's spaces and placemarkers
+0321	c23	fails	-	GNU's comma paste with ## after __VA_ARGS__
+# GNU's comma before __VA_OPT__ whose variadic argument follows empty arguments pasted onto it: clang drops their
+# placemarkers with their ##, and the comma stays apart (seed 54's case 566182, C23).
+0322	c23	-	-	GNU's comma before __VA_OPT__ past empty arguments
+# There the variadic argument keeps its first token's own space, which a string shows (seed 70's case 208758, C17).
+0323	c17	-	-	GNU's comma before __VA_OPT__ past empty arguments, stringized
+# The campaigns' differences (docs/preprocessor-fuzz.md): a function-like macro without parameters substitutes
+# nothing, so its __VA_OPT__ and a # before it stay tokens (TokenLexer::Init).
+0324	c23	warnings=3	-	__VA_OPT__ in a macro without parameters
+# A token right after a line splice starts at the splice for clang's lexer: an expansion's ')' or name there gives
+# __LINE__ the splice's line, and so does a #line's number.
+0325	c17	-	-	__LINE__ at a ')' that starts at a line splice
+0326	c17	warnings=1	-	#line's number after a _Pragma and an empty macro
+0327	c17	-	-	__LINE__ at a ')' that starts at a trigraph's line splice
+# A line marker's tokens after its digits are read expanded (Preprocessor::HandleDigitDirective's Lex).
+0328	c17	-	-	a line marker's name and flags from macros
+# A _Pragma's text gets a newline after it (prepare_PragmaString), which splices away a `\` that ends it.
+0329	c17	-	-	a _Pragma's text that ends in a backslash
+# Character constants in #if as clang's CharLiteralParser reads them.
+0330	c17	warnings=3	-	character constants' values
+0331	c17	fails	-	a character constant's UCN past ASCII
+0332	c23	-	-	UCNs of basic characters in C23 character constants
+0333	c17	fails	-	a UCN of a basic character before C23
+0334	c17	fails	-	several characters in a wide character constant
+0335	c17	fails	-	an octal escape out of range
+# _Pragma reads its '(', string literal and ')' expanded, a token at a time (Preprocessor::Handle_Pragma).
+0336	c17	-	-	_Pragma's operand read expanded
+0337	c17	fails	-	_Pragma without its operand
+# A __VA_OPT__'s content pastes left to right with a ## before it, as clang's TokenLexer does: (.5 e) .5, and GNU's
+# comma before `__VA_ARGS__ ##` in it (VaArgsPseudoPaste).
+0338	c23	-	-	__VA_OPT__'s content pasted left to right
+# A prefix the mode doesn't have before an empty character constant is an identifier before C23 (`u8` and `''`), so
+# pasting them forms two tokens there, and one in C23.
+0339	c17	fails	-	a prefix pasted onto an empty character constant before C23
+0340	c23	-	-	a prefix pasted onto an empty character constant in C23
+# An unknown token that such a prefix starts (an empty character constant, or an unterminated literal) is the prefix
+# and an unknown token from the quote too, as clang lexes it (pp_splits_unknown), alone in a file or after a literal
+# the mode splits.
+0341	c99	-	-	unknown tokens that a prefix C99 doesn't have starts
+0342	c17	-	-	unknown tokens that u8 starts before C23
+# -E's space between a pp-number and a + or - after it (pp_separation_table): without it, an exponent's sign joins
+# the number (1e+1 is one pp-number), where the two tokens came from different places.
+0343	c17	-	-	a pp-number before a + or - that an exponent would take
+# Among a macro's arguments clang's macro expansion is off, and only #if and #elif turn it back on: #line's and
+# #ident's operands stay as written.
+0344	c17	fails	-	#line among a macro's arguments, unexpanded
+0345	c17	-	-	#line among a macro's arguments
+0346	c17	fails	-	#ident among a macro's arguments, unexpanded
+# After a _Pragma that prints nothing, clang's lexer starts a line, which its printer moves to when the next token
+# is on another one.
+0347	c17	warnings=2	-	the token after a _Pragma that prints nothing
+# A name of a macro whose expansion an argument is read from is painted there: the expansion ends at the ')' after
+# it, before the argument expands (Preprocessor::ReadMacroCallArgumentList).
+0348	c17	-	-	a disabled macro's name among its arguments
+# A token that started a line among a macro's arguments (but the first) starts one in clang's printer too, which
+# moves to the expansion's line when that is another one: the name's, after a line splice.
+0349	c17	markers	-	line markers: a line among a macro's arguments
+# A paste's result takes its left operand's line start among the arguments, as clang's TokenLexer::pasteTokens
+# gives it the left one's flags, so the printer moves to the expansion's line at the result, not at the token
+# after it (seed 14's case 452, C23).
+0350	c17	markers	-	line markers: a paste of a line among a macro's arguments
+# A token moved past an empty ## operand loses its line start, including one that an outer expansion retained
+# as LINE_SPACE (#476). The first call leaves the output on a line before the second call's name: a retained line
+# start would move the token to that name's line. Check both positions in a chain, pastes and a first output token.
+0351	c17	markers	-	line markers: moved argument tokens after empty paste operands
+# Directives that read only part of their line expanded, and the rest as it is (Preprocessor::CheckEndOfDirective):
+# #ident its string, #line its number, its name and one token more, a computed #include its header name and one token
+# more, and push_macro and pop_macro their '(', string and ')'. What comes after never expands.
+0352	c17	warnings=3	-	#ident's string read expanded, and the rest as it is
+0353	c17	warnings=2	-	#line's operands read expanded, and the rest as it is
+0354	c17	warnings=1,other	-	a computed #include's name read expanded, and the rest as it is
+0355	c17	-	-	push_macro's and pop_macro's operands read expanded, and the rest as it is
+# A pragma line that a directive among a macro's arguments gives while a _Pragma waits for its '(' stays before the
+# expansion, where the _Pragma has read it (seed 45's case 610823 crashed reading past it).
+0356	c17	fails	-	a pragma line among a macro's arguments while a _Pragma waits
+0357	gnu17	-	-	builtin and feature names are raw, attribute names may expand
+0358	gnu17	-	-	__has_constexpr_builtin's name is raw, a macro's too
+0359	gnu17	-	-	the oracle recognizes ext_vector_type with either attribute spelling
+0360	gnu17	-	-	assume_nonnull end uses the printer's current line
+0361	gnu17	-	-	assume_nonnull end after a presumed-file change
+# #embed (C23 6.10.3), as clang 23 has it: the data, one token that -E prints as its values; the parameters, read
+# expanded, with clang's errors; the files found as clang finds them; and where -E prints it all: no token of an
+# #embed starts a line, a line starts at a file change before them, and the next token of the file joins their line
+# when no newline outside comments is between them.
+0362	c23	files=embed	-	#embed: data, limit, clang::offset, prefix, suffix and if_empty
+0363	c23	files=embed	-	#embed: every byte's value, in pieces of every length
+0364	c23	files=embed	-	#embed: the next token joins the data's line
+0365	c23	files=embed	-	#embed: a file change before it starts a line
+0366	c23	files=embed	-	#embed: computed names and macros among the parameters
+0367	c23	files=embed-directories	--embed-dir=%d/dir	#embed: --embed-dir, angled names and the including file's directory
+0368	c17	warnings=1,files=embed	-	#embed before C23, an extension
+0369	c23	fails,files=embed	-	#embed: the parameters' errors drop the directive
+0370	c23	fails,files=embed	-	#embed: a file that isn't there
+0371	c23	fails,files=embed	-	#embed: an angled name without --embed-dir
+0372	c23	-	-	#embed in a skipped group
+# #252's review, against clang 23: an #embed's parameters past an angled name in which "//" began a comment for the
+# file's tokens, so that the line is lexed again from the '>', and the errors of a token the name's
+# '>' starts; an #embed after #pragma GCC system_header, which starts its line where the system header's line marker
+# puts it; and comment delimiters that a line splice splits, after an #embed and in a #line's comment.
+0373	c23	files=embed-review	--embed-dir=%d	#252's review: an #embed's parameters past an angled name with "//"
+0374	c23	fails,files=embed-review	--embed-dir=%d	#252's review: a token an #embed name's '>' starts
+0375	c23	markers,files=embed-review	-	#252's review: an #embed after #pragma GCC system_header
+# #252's second review, against clang 23: the line lexed again past a "//" name runs on through a block comment's
+# newlines, as clang's does, and the file goes on after it (a #define in that comment is none, and the next token
+# joins the data's line); a gap of line splices alone in it isn't a space (STR(a\ +b) is "a+b"); and the system
+# header's note starts where the printer resumes after #pragma GCC system_header, before an #embed indented or after
+# a blank line.
+0376	c23	files=embed-review	--embed-dir=%d	#252's second review: an #embed's line past a "//" name, through a block comment's newlines
+0377	c23	markers,files=embed-review	-	#252's second review: an #embed after #pragma GCC system_header, indented or after a blank line
+0378	c23	files=embed-review	-	#252's review: comment delimiters a line splice splits, after an #embed and in a #line's comment
+# #252's third review, against clang 23, on lines lexed again past a name with "//" (or "/*"): a block comment right
+# after the name carries the line on (the file's tokens had nothing past the name to differ); directives that a
+# comment in such a line hides, which the file's conditional pairing counted (an #endif there leaves the #else, #elif
+# and #elifdef after it to a count of the nesting, through #if, #ifdef, #ifndef and #elifndef); poisoned names in it,
+# each an error once, and none in its comments, where the file's tokens may have them; an unterminated block comment
+# at its end (clang's error); comments that end and begin again on its lines, each piece lexed once; and the file's
+# next token, which joins the data's line from where the line lexed again ends (`// */` is in its comment).
+0379	c23	files=embed-review	--embed-dir=%d	#252's third review: a block comment right after an #embed's "//" name
+0380	c23	files=embed-review	--embed-dir=%d	#252's third review: directives hidden in an #embed's line lexed again
+0381	c23	fails,errors=4,files=embed-review	--embed-dir=%d	#252's third review: poisoned names in an #embed's line lexed again
+0382	c23	files=embed-review	--embed-dir=%d	#252's third review: poisoned names in comments of an #embed's line lexed again
+0383	c23	fails,errors=1,files=embed-review	--embed-dir=%d	#252's third review: an unterminated block comment in an #embed's line lexed again
+0384	c23	files=embed-review	--embed-dir=%d	#252's third review: comments that end and begin again in an #embed's line lexed again
+0385	c23	markers,files=embed-review	--embed-dir=%d	#252's third review: the token after an #embed's line lexed again
+0386	c23	files=embed	-	__has_embed: clang's limit and clang::offset
+# #119's done-when checks, against clang 23: header names written out ("//" and "/*...*/" are part of the name,
+# and a comment that runs on to the next line makes clang join the line's tokens), computed ones, #include_next
+# through three directories, an inactive group's includes, a cycle stopped at clang's depth limit (an error, after
+# which the file isn't entered again), one record through links, clang's recoveries (an angled name found as a
+# quoted one, a name found without what it starts and ends with besides letters and digits), and the diagnostics'
+# places.
+0387	c17	files=includes	-I%d	#119: header names written out, a comment that runs on to the next line among them
+0388	c17	fails,warnings=1,files=includes	-I%d	#119: computed names, joined as clang joins them
+0389	c17	files=includes	-I%d/d1 -I%d/d2 -I%d/d3	#119: #include_next through three directories
+0390	c17	files=includes	-	#119: an inactive group's includes aren't looked for
+0391	c17	fails,files=includes	-	#119: an include cycle stops at clang's depth limit
+0392	c17	files=includes	-	#119: one file through a symbolic link and a hard link
+0393	c17	fails,warnings=2,files=includes	-	#119: clang's recoveries from a name not found
+0394	c17	fails,warnings=1,files=includes	-I%d	#119: an include's diagnostics, at clang's places
+# #254's review, against clang 23: a header name written out that is too long for any path is one still, refused
+# (clang's fatal error about the path, which the history cases compare), and never a computed one whose identifier
+# expands to another header's name, nor is an #embed's longer than the buffer it reads into; __has_include's and
+# __has_embed's operands written in their #if line are read as the line writes them, and the same operands from a
+# macro or an argument joined from their tokens; and a header that the depth limit refused is included as clang
+# marks it: three #includes of it give one error, and an #include after the cycle unwinds doesn't enter it.
+0395	c17	fails,files=includes	-I%d	#254's review: a header name written out, too long for a path
+0396	c23	fails,files=includes	--embed-dir=%d	#254's review: an #embed name written out, longer than its buffer
+0397	c23	files=includes	-I%d/one --embed-dir=%d/one	#254's review: __has_include's and __has_embed's operands as their line writes them, " x.h" alone
+0398	c23	files=includes	-I%d/two --embed-dir=%d/two	#254's review: __has_include's and __has_embed's operands as their line writes them, "  x.h" alone
+0399	c17	files=header-tails	-fno-dollars-in-identifiers -I%d	header-query continuation retains dollar punctuation and wide literal prefixes
+# #254's second review, against clang 23: a backslash in a header name written out takes the character after it into
+# the name, a '>' too, as clang's LexAngledStringLiteral reads it; and the rest of the line past such a name is what
+# clang lexes on from its '>', where the file's tokens ran past it: a "//" in the name began a comment there (the
+# #if line's `&& 0` and `|| defined(NOPE)` count, an #include's `junk` is a warning and __has_embed's parameters are
+# read, also on past a block comment's newlines, and the file goes on after that line), or a token the '>' starts
+# ("x.h>>", "x.h>=", "x.h>>=") stays in the operand, an error.
+0400	c17	files=header-tails	-I%d	#254's second review: a backslash in a header name written out escapes its '>'
+0401	c23	warnings=1,files=header-tails	-I%d --embed-dir=%d	#254's second review: the rest of a line past a header name with "//"
+0402	c17	warnings=1,files=header-tails	-I%d	#254's second review: a "//" name's line, through a block comment's newlines
+0403	c17	fails,files=header-tails	-I%d	#254's second review: a token a header query's '>' starts stays in its operand
+0404	c17	fails,files=includes	-	#254's review: a header refused at the depth limit is included
+0405	gnu17	warnings=1	-DUNICODE=2 -municode	-municode's UNICODE is <command line>'s first macro, before -D and -U
+0406	gnu17	-	-UUNICODE -municodeX	-municode is a joined option, and a -U before it undefines its UNICODE
+0407	c17	files=header-tails	-I%d	#254's third review: condition links ignore directives hidden by a raw query's comment
+# An ordinary comment delimiter belongs to an opaque header name too. Its original file token must not hide the
+# source after the name or report a comment error; a real comment after the name must still be diagnosed.
+0408	c17	files=includes	-I%d	opaque header: an unclosed comment delimiter in an include name
+0409	c23	files=embed-review	--embed-dir=%d	opaque header: an unclosed comment delimiter in an embed name
+0410	c23	files=includes	-I%d --embed-dir=%d	opaque header: an unclosed comment delimiter in a query name
+0411	c17	fails,errors=1,files=includes	-I%d	opaque header: a real unclosed comment after an opaque name
+0412	c23	files=header-tails	-I%d --embed-dir=%d	#254's third review: later queries retain raw names in a re-lexed suffix
+0413	gnu17	other,markers	-E -C	-C (#1380): comments are tokens outside directives, not in a macro's arguments, and a comment before '#' makes text
+0414	gnu17	markers	-E -C	-C (#1380): a comment before #endif in a skipped group leaves the group open
+0415	gnu17	markers	-E -CC	-CC (#1380): replacement lists' and arguments' comments, a // one a block comment there, stringized and pasted
+0416	gnu17	other,markers	-dD -undef	-dD (#1380): each #define and #undef on its line, defined or not, a redefinition too
+0417	gnu17	other,markers,files=dumped-includes	-dI -I%d/first -I%d/second	-dI (#1380): each include before what it enters, a guarded one, a computed one and #include_next
+0418	gnu17	other,markers	-E -dD -dI -CC -undef	-dD -dI -CC (#1380): directives, comments and the replacement lists' comments together
+0419	gnu17	warnings=1	-dN	-dN (#1380): taken, and reported unused, as clang's driver does

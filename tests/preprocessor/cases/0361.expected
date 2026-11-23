@@ -1,0 +1,4 @@
+#pragma clang assume_nonnull begin
+int *pointer;
+#pragma clang assume_nonnull end
+int after = 503;

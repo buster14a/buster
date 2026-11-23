@@ -1,0 +1,3 @@
+#if RAW_QUERY(<R"(x>)
+imported
+#endif

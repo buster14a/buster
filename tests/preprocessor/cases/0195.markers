@@ -1,0 +1,12 @@
+# 1 "%d/case.c"
+# 100 "logical.c"
+int x;
+int y;
+# 7 "logical.c"
+int z;
+# 1 "%d/inc.h" 1
+int in_header;
+# 50 "renamed.h"
+int after;
+# 9 "logical.c" 2
+int w;

@@ -1,0 +1,17 @@
+# 1 "%d/case.c"
+
+
+int a;
+int a;
+
+int a;
+int b;
+
+c;
+# 21 "%d/case.c"
+int a;
+d;
+#pragma bar
+# 23 "%d/case.c"
+t
+u

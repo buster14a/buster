@@ -1,0 +1,11 @@
+#define S(x) #x
+#define E(x) S(x)
+#define F(x, ...) a x#__VA_OPT__(b)
+E(F(, 1))
+#define G(x, ...) a x#__VA_OPT__()
+E(G(, 1))
+#define H(x, ...) a x#__VA_OPT__(b c)
+E(H(, 1))
+#define K(x, ...) a x #__VA_OPT__(b)
+E(K(, 1))
+E(F(, ))

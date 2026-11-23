@@ -1,0 +1,1 @@
+unsigned char b[] = { 72, 300 }; unsigned char c[] = { 72, 300 }; int after;

@@ -1821,6 +1821,11 @@ static const ChangesFixture changes_fixtures[] = {
         .outputs_true = "code",
     },
     {
+        .name = "the preprocessor's runtime cases, trees and catalogs are code",
+        .files = "tests/preprocessor/cases/catalog.tsv tests/preprocessor/cases/0001.expected tests/preprocessor/trees/embed-02",
+        .outputs_true = "code",
+    },
+    {
         .name = "a Markdown file under tests/ is documentation, so no fixture or catalog is one",
         .files = "tests/checker/sources/README.md",
         .outputs_false = "code",
