@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// #658's bounded file-scope integer and float/double tables, and block-scope statics' (#1383). Prove the complete literal/comma grammar and every warning-free
+// #658's bounded file-scope integer and float/double tables, and block-scope statics', rows and records' (#1383). Prove the complete literal/comma grammar and every warning-free
 // conversion before changing reader state. One retained bytes part replaces the elements' graph and plans.
 // Unsupported syntax, formats, widths, excess elements and conversions keep the ordinary source path exactly.
 // The SIMD grammar reads bounded 64-token blocks; small literals decode 16 spellings and stores narrow 8 values.
 // Source records and payloads belong to the input arena. Failed candidates roll back its suffix and scratch.
+
+#include "c_check_constant_bytes.c"
 
 #define BUSTER_CHECK_LITERAL_TABLE_MINIMUM 128u
 #define BUSTER_CHECK_LITERAL_TABLE_BATCH 16u
@@ -51,16 +53,19 @@ static uint64_t check_literal_table_parity(uint64_t bits, bool carry)
     return carry ? ~parity : parity;
 }
 
-// A table of rows (#1383): one or more `{ list }` of check_literal_table_shape's grammar, each holding exactly `columns`
-// numbers, separated by commas with one trailing comma allowed, and nothing deeper; returns the numbers' count, or 0.
-// A short row (zeros after it), an elided or excess one, a deeper brace and anything else is ineligible. The SIMD form
-// reads 64 token kinds a block: each kind's predecessor (carried from the block before) and brace depth, the lanes after
-// an odd count of braces (check_literal_table_parity, its carry the depth). A `{` must be at depth 0 and a `}` at 1, so
-// depth stays 0 or 1 and its parity is it; each `}`'s numbers before it, from the table's start, are its rows' columns.
-static uint32_t check_literal_table_rows(const uint8_t* kinds, uint32_t begin, uint32_t end, uint64_t columns)
+// A table of rows (#1383): one or more `{ list }` of check_literal_table_shape's grammar, separated by commas with one
+// trailing comma allowed, and nothing deeper; returns the numbers' count, or 0, and the rows' count in `rows_found`. With
+// `exact` every row holds exactly `columns` numbers (a record's members); without, from 1 to `columns`, the rest of a short
+// row being zeros. An empty, elided or excess row, a deeper brace and anything else is ineligible. The SIMD form reads 64
+// token kinds a block: each kind's predecessor (carried from the block before) and brace depth, the lanes after an odd
+// count of braces (check_literal_table_parity, its carry the depth). A `{` must be at depth 0 and a `}` at 1, so depth
+// stays 0 or 1 and its parity is it. Each brace's numbers before it, from the table's start, are a popcount: a `}`'s less
+// its `{`'s (kept across blocks) are its row's.
+static uint32_t check_literal_table_rows(const uint8_t* kinds, uint32_t begin, uint32_t end, uint64_t columns, bool exact, uint64_t* rows_found)
 {
     uint64_t count = 0;
     uint64_t rows = 0;
+    uint64_t row_begin = 0;
     uint32_t previous = PARSE_KIND_COMMA;
     bool inside = false;
     bool valid = begin < end && columns != 0;
@@ -86,18 +91,22 @@ static uint32_t check_literal_table_rows(const uint8_t* kinds, uint32_t begin, u
                 (closes & ~before) == 0 && (numbers & ~(comma_before | minus_before | open_before)) == 0 &&
                 (minus & ~(comma_before | open_before)) == 0 && (commas & ~(number_before | close_before)) == 0 &&
                 (opens & ~comma_before) == 0 && (closes & ~(number_before | comma_before)) == 0;
-        for (uint64_t pending = closes; valid && pending != 0; pending &= pending - 1)
+        for (uint64_t pending = opens | closes; valid && pending != 0; pending &= pending - 1)
         {
-            const uint64_t below = (pending & (0 - pending)) - 1;
-            rows += 1;
-            valid = count + (uint64_t)__builtin_popcountll(numbers & below) == rows * columns;
+            const uint64_t bit = pending & (0 - pending);
+            const uint64_t at = count + (uint64_t)__builtin_popcountll(numbers & (bit - 1));
+            const bool close = (closes & bit) != 0;
+            rows += close;
+            valid = !close || (at - row_begin != 0 && (exact ? at - row_begin == columns : at - row_begin <= columns));
+            row_begin = close ? row_begin : at;
         }
         count += (uint64_t)__builtin_popcountll(numbers);
         inside = (after >> (take - 1) & 1) != 0;
         previous = kinds[first + take - 1];
         first += take;
     }
-    valid = valid && !inside && (previous == PARSE_KIND_R_BRACE || previous == PARSE_KIND_COMMA) && count == rows * columns && count <= UINT32_MAX;
+    valid = valid && !inside && (previous == PARSE_KIND_R_BRACE || previous == PARSE_KIND_COMMA) && count <= UINT32_MAX;
+    *rows_found = valid ? rows : 0;
     return valid ? (uint32_t)count : 0;
 }
 
@@ -257,7 +266,9 @@ static bool check_literal_table_batch(CheckInputReader* reader, const uint32_t* 
 // so `float t[] = { 0.1, ... }` stays compact. An integer must convert exactly, since clang warns by default when
 // one changes value: test it in the host's exact 64-bit-significand format, not after rounding it to double.
 // Range warnings, imaginary/bit-precise constants and malformed spellings retain dense checking.
-static bool check_literal_table_floating_value(CheckInputReader* reader, const uint8_t* spelling, uint32_t length, bool negative, TypeId element, uint64_t* bits)
+// The value in `element`'s format (float, double or long double), as the ordinary path's constant holds it.
+static bool check_literal_table_floating_number(CheckInputReader* reader, const uint8_t* spelling, uint32_t length, bool negative, TypeId element,
+                                                long double* result_number)
 {
     CheckLiteral literal = { 0 };
     check_literal_number(spelling, length, reader->scratch, &literal);
@@ -318,6 +329,15 @@ static bool check_literal_table_floating_value(CheckInputReader* reader, const u
             number = result.value.floating;
         }
     }
+    *result_number = number;
+    return valid;
+}
+
+// check_literal_table_floating_number's float or double value's bits.
+static bool check_literal_table_floating_value(CheckInputReader* reader, const uint8_t* spelling, uint32_t length, bool negative, TypeId element, uint64_t* bits)
+{
+    long double number = 0;
+    const bool valid = check_literal_table_floating_number(reader, spelling, length, negative, element, &number);
     if (valid)
     {
         *bits = 0;
@@ -758,9 +778,16 @@ static bool check_literal_table_floating(CheckInputReader* reader, uint32_t begi
     return valid;
 }
 
+// Whether a record member's type is a floating one the table holds: float, double or x87 long double.
+static bool check_literal_table_member_floating(TypeId member)
+{
+    const TypeId base = type_unqualified(member);
+    return base == BUSTER_TYPE_FLOAT || base == BUSTER_TYPE_DOUBLE || base == BUSTER_TYPE_LONG_DOUBLE;
+}
+
 // A table of records (#1383): a struct whose members are all non-bit-field integers (not _Bool) of 8, 16, 32 or 64 bits,
-// itself and they not volatile, so that each element's brace holds one number a member, in member order. Its first
-// member's index in the type table and its member count, or false.
+// or float, double or long double, itself and they not volatile, so that each element's brace holds one number a member,
+// in member order. Its first member's index in the type table and its member count, or false.
 static bool check_literal_table_record(TypeTable* types, TypeId record, uint32_t* first, uint32_t* count)
 {
     const TypeId bare = type_is_valid(types, record) ? type_unqualified(type_strip_aligned(types, record)) : 0;
@@ -776,18 +803,68 @@ static bool check_literal_table_record(TypeTable* types, TypeId record, uint32_t
         uint32_t width = 0;
         bool is_signed = false;
         valid = (types->members.flags[begin + m] & BUSTER_TYPE_MEMBER_BIT_FIELD) == 0 && type_is_valid(types, member) &&
-                (type_qualifiers(member) & BUSTER_TYPE_VOLATILE) == 0 && type_kind(types, member) == BUSTER_TYPE_KIND_INTEGER &&
-                type_unqualified(member) != BUSTER_TYPE_BOOL && check_action_integer_type(types, member, &width, &is_signed) &&
-                (width == 8 || width == 16 || width == 32 || width == 64);
+                (type_qualifiers(member) & BUSTER_TYPE_VOLATILE) == 0 &&
+                (check_literal_table_member_floating(member) ||
+                 (type_kind(types, member) == BUSTER_TYPE_KIND_INTEGER && type_unqualified(member) != BUSTER_TYPE_BOOL &&
+                  check_action_integer_type(types, member, &width, &is_signed) && (width == 8 || width == 16 || width == 32 || width == 64)));
     }
     *first = begin;
     *count = members;
     return valid;
 }
 
+// A floating member's column of a table of records: `elements` numbers, member `m` of each `members` in `numbers`, each
+// spelled in place (check_literal_table_element) and converted 16 at a time, float and double by the floating table's
+// batch (check_literal_table_floating_batch), long double by its value's x87 bytes (check_data_float_bytes, its six
+// padding bytes zero, as the static writer leaves them), then stored at `offset` in its element's `size` bytes.
+static bool check_literal_table_record_floating(CheckInputReader* reader, CheckLiteralTableSource* source, const uint32_t* numbers, uint32_t elements,
+                                                uint32_t members, uint32_t m, TypeId type, uint64_t size, uint64_t offset, uint8_t* payload)
+{
+    const uint8_t* kinds = reader->parser->tokens.kinds;
+    const TypeId base = type_unqualified(type);
+    const uint32_t unit = base == BUSTER_TYPE_FLOAT ? 4 : base == BUSTER_TYPE_DOUBLE ? 8 : 16;
+    const uint32_t width = base == BUSTER_TYPE_FLOAT ? 32 : 64;
+    uint32_t tokens[BUSTER_CHECK_LITERAL_TABLE_BATCH];
+    const uint8_t* spellings[BUSTER_CHECK_LITERAL_TABLE_BATCH];
+    uint32_t lengths[BUSTER_CHECK_LITERAL_TABLE_BATCH];
+    uint8_t values[BUSTER_CHECK_LITERAL_TABLE_BATCH * 16];
+    bool valid = offset <= size && unit <= size - offset;
+    for (uint32_t element = 0; valid && element < elements; element += BUSTER_CHECK_LITERAL_TABLE_BATCH)
+    {
+        const uint32_t batch = elements - element < BUSTER_CHECK_LITERAL_TABLE_BATCH ? elements - element : BUSTER_CHECK_LITERAL_TABLE_BATCH;
+        const uint64_t mark = reader->scratch->length;
+        for (uint32_t k = 0; valid && k < batch; k += 1)
+        {
+            uint32_t category = 0;
+            tokens[k] = numbers[(uint64_t)(element + k) * members + m];
+            valid = check_literal_table_element(reader, source, tokens[k], width, false, &spellings[k], &lengths[k], &category);
+        }
+        if (valid && base != BUSTER_TYPE_LONG_DOUBLE)
+        {
+            valid = check_literal_table_floating_batch(reader, tokens, spellings, lengths, 0, batch, type, width, values);
+        }
+        for (uint32_t k = 0; valid && base == BUSTER_TYPE_LONG_DOUBLE && k < batch; k += 1)
+        {
+            long double number = 0;
+            const uint64_t value_mark = reader->scratch->length;
+            valid = check_literal_table_floating_number(reader, spellings[k], lengths[k], kinds[tokens[k] - 1] == PARSE_KIND_MINUS, type, &number);
+            arena_pop_to(reader->scratch, value_mark);
+            memset(values + (uint64_t)k * unit, 0, unit);
+            check_data_float_bytes(values + (uint64_t)k * unit, BUSTER_TYPE_LONG_DOUBLE, number);
+        }
+        for (uint32_t k = 0; valid && k < batch; k += 1)
+        {
+            memcpy(payload + (uint64_t)(element + k) * size + offset, values + (uint64_t)k * unit, unit);
+        }
+        arena_pop_to(reader->scratch, mark);
+    }
+    return valid;
+}
+
 // A table of records' payload: the `count` numbers of [begin, end), `members` an element, each converted at its member's
-// width and signedness and stored at its member's offset in its element's `size` bytes; the padding stays zero. One member
-// at a time, its numbers gathered across elements into the batches the scalar table converts (check_literal_table_batch).
+// type and stored at its member's offset in its element's `size` bytes; the padding stays zero. One member at a time, its
+// numbers gathered across elements into the batches the scalar tables convert: an integer's check_literal_table_batch, a
+// floating one's check_literal_table_record_floating.
 static bool check_literal_table_records_fill(CheckInputReader* reader, uint32_t begin, uint32_t end, uint32_t count, uint32_t first, uint32_t members,
                                              uint64_t size, uint8_t* payload)
 {
@@ -797,6 +874,7 @@ static bool check_literal_table_records_fill(CheckInputReader* reader, uint32_t 
     reader->output->resource |= numbers == NULL;
     bool valid = numbers != NULL;
     uint32_t found = 0;
+    bool any_floating = false;
     for (uint32_t token = begin; valid && token < end; token += 1)
     {
         if (parser->tokens.kinds[token] == PARSE_KIND_NUMBER)
@@ -807,6 +885,16 @@ static bool check_literal_table_records_fill(CheckInputReader* reader, uint32_t 
         }
     }
     valid = valid && found == count && count % members == 0;
+    for (uint32_t m = 0; valid && m < members; m += 1)
+    {
+        any_floating = any_floating || check_literal_table_member_floating(reader->types->members.type[first + m]);
+    }
+    // The floating columns' source ranges, found once for the table (check_literal_table_span).
+    CheckLiteralTableSource source = { 0 };
+    if (valid && any_floating)
+    {
+        source = check_literal_table_span(reader, begin, end);
+    }
     const uint32_t elements = valid ? count / members : 0;
     for (uint32_t m = 0; valid && m < members; m += 1)
     {
@@ -816,10 +904,17 @@ static bool check_literal_table_records_fill(CheckInputReader* reader, uint32_t 
         const uint64_t offset = bits / 8;
         uint32_t width = 0;
         bool is_signed = false;
-        valid = bits % 8 == 0 && check_action_integer_type(reader->types, type, &width, &is_signed) && offset <= size && width / 8 <= size - offset;
+        if (check_literal_table_member_floating(type))
+        {
+            valid = bits % 8 == 0 && check_literal_table_record_floating(reader, &source, numbers, elements, members, m, type, size, offset, payload);
+        }
+        else
+        {
+            valid = bits % 8 == 0 && check_action_integer_type(reader->types, type, &width, &is_signed) && offset <= size && width / 8 <= size - offset;
+        }
         uint32_t tokens[BUSTER_CHECK_LITERAL_TABLE_BATCH];
         uint8_t values[BUSTER_CHECK_LITERAL_TABLE_BATCH * 8];
-        for (uint32_t element = 0; valid && element < elements; element += BUSTER_CHECK_LITERAL_TABLE_BATCH)
+        for (uint32_t element = 0; valid && width != 0 && element < elements; element += BUSTER_CHECK_LITERAL_TABLE_BATCH)
         {
             const uint32_t batch = elements - element < BUSTER_CHECK_LITERAL_TABLE_BATCH ? elements - element : BUSTER_CHECK_LITERAL_TABLE_BATCH;
             for (uint32_t k = 0; k < batch; k += 1)
@@ -835,6 +930,27 @@ static bool check_literal_table_records_fill(CheckInputReader* reader, uint32_t 
     }
     arena_pop_to(reader->scratch, mark);
     return valid;
+}
+
+// A table of short rows' payload (#1383): the `count` numbers' values, converted densely into `dense` `unit` bytes each,
+// copied row by row to their rows' starts, `columns` elements apart, in the zeroed `payload`, whose short rows' tails stay
+// zero. Each row's numbers are those between its braces (check_literal_table_rows has proven the grammar).
+static void check_literal_table_rows_spread(const uint8_t* kinds, uint32_t begin, uint32_t end, uint64_t columns, uint32_t unit, const uint8_t* dense, uint8_t* payload)
+{
+    uint64_t at = 0;
+    uint64_t row = 0;
+    uint64_t row_begin = 0;
+    for (uint32_t token = begin; token < end; token += 1)
+    {
+        const uint8_t kind = kinds[token];
+        row_begin = kind == PARSE_KIND_L_BRACE ? at : row_begin;
+        at += kind == PARSE_KIND_NUMBER;
+        if (kind == PARSE_KIND_R_BRACE)
+        {
+            memcpy(payload + row * columns * unit, dense + row_begin * unit, (at - row_begin) * unit);
+            row += 1;
+        }
+    }
 }
 
 static bool check_input_literal_table_prepare(CheckInputReader* reader, uint32_t assignment)
@@ -862,7 +978,8 @@ static bool check_input_literal_table_prepare(CheckInputReader* reader, uint32_t
     const TypeId row = eligible ? type_element(reader->types, type) : 0;
     // An array of rows (#1383): its element a complete array of a scalar the table holds, `columns` of them each.
     const bool rows = row != 0 && type_kind(reader->types, row) == BUSTER_TYPE_KIND_ARRAY;
-    // An array of records (#1383): its element a struct of integer members (check_literal_table_record), a row of them each.
+    // An array of records (#1383): its element a struct of integer and floating members (check_literal_table_record), a row
+    // of them each.
     uint32_t record_first = 0;
     uint32_t record_members = 0;
     const bool records = row != 0 && !rows && check_literal_table_record(reader->types, row, &record_first, &record_members);
@@ -881,24 +998,35 @@ static bool check_input_literal_table_prepare(CheckInputReader* reader, uint32_t
                    (floating || (type_kind(reader->types, element) == BUSTER_TYPE_KIND_INTEGER && type_unqualified(element) != BUSTER_TYPE_BOOL &&
                     check_action_integer_type(reader->types, element, &width, &is_signed) && (width == 8 || width == 16 || width == 32 || width == 64)));
     }
+    // The outer array's elements: rows or records, or the flat table's numbers.
+    uint64_t outer = 0;
     const uint32_t count = !eligible        ? 0 :
-                           rows || records ? check_literal_table_rows(parser->tokens.kinds, begin + 1, end - 1, columns) :
+                           rows || records ? check_literal_table_rows(parser->tokens.kinds, begin + 1, end - 1, columns, records, &outer) :
                                              check_literal_table_shape(parser->tokens.kinds, begin + 1, end - 1);
+    outer = rows || records ? outer : count;
     eligible = eligible && count >= BUSTER_CHECK_LITERAL_TABLE_MINIMUM &&
-               (kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY || count / columns <= reader->types->types.extent[type_index(type)]);
+               (kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY || outer <= reader->types->types.extent[type_index(type)]);
+    // Short rows (#1383) spread their densely converted values to their rows' starts; their tails, and records' padding,
+    // are the zeroed payload's. Rows at most a quarter full keep the ordinary path, so that the payload is at most four
+    // times the values.
+    const bool spread = rows && (columns > count || (uint64_t)count != outer * columns);
+    eligible = eligible && (!spread || (columns <= count && outer * columns / 4 <= count));
     const uint64_t mark = reader->arena->length;
     const uint64_t record_size = records ? type_size(reader->types, row) : 0;
-    eligible = eligible && (!records || count / columns <= UINT64_MAX / record_size);
-    const uint64_t bytes = records ? (uint64_t)(count / columns) * record_size : (uint64_t)count * (width / 8);
+    eligible = eligible && (!records || outer <= UINT64_MAX / record_size);
+    const uint64_t bytes = records ? outer * record_size : rows ? outer * columns * (width / 8) : (uint64_t)count * (width / 8);
     uint8_t* payload = eligible ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint8_t, bytes) : NULL;
     input->resource |= eligible && payload == NULL;
-    if (records && payload != NULL)
+    if ((records || spread) && payload != NULL)
     {
         memset(payload, 0, bytes);
     }
-    bool accepted = eligible && payload != NULL &&
+    const uint64_t dense_mark = reader->scratch->length;
+    uint8_t* dense = spread && payload != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, (uint64_t)count * (width / 8)) : payload;
+    input->resource |= payload != NULL && dense == NULL;
+    bool accepted = eligible && dense != NULL &&
                     (records    ? check_literal_table_records_fill(reader, begin + 1, end - 1, count, record_first, record_members, record_size, payload) :
-                     !floating || check_literal_table_floating(reader, begin + 1, end - 1, count, element, width, payload));
+                     !floating || check_literal_table_floating(reader, begin + 1, end - 1, count, element, width, dense));
     uint32_t tokens[BUSTER_CHECK_LITERAL_TABLE_BATCH];
     uint32_t batch = 0;
     uint32_t written = 0;
@@ -910,19 +1038,24 @@ static bool check_input_literal_table_prepare(CheckInputReader* reader, uint32_t
             batch += 1;
             if (batch == BUSTER_CHECK_LITERAL_TABLE_BATCH || written + batch == count)
             {
-                uint8_t* destination = payload + (uint64_t)written * (width / 8);
+                uint8_t* destination = dense + (uint64_t)written * (width / 8);
                 accepted = check_literal_table_batch(reader, tokens, batch, width, is_signed, destination);
                 written += batch;
                 batch = 0;
             }
         }
     }
+    if (accepted && spread)
+    {
+        check_literal_table_rows_spread(parser->tokens.kinds, begin + 1, end - 1, columns, width / 8, dense, payload);
+    }
+    arena_pop_to(reader->scratch, dense_mark);
     CheckInputLiteralTable* table = accepted ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputLiteralTable, 1) : NULL;
     input->resource |= accepted && table == NULL;
     accepted = accepted && table != NULL;
     if (accepted && kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY)
     {
-        type = check_input_type_result(reader, type_array(reader->types, type_element(reader->types, type), count / columns));
+        type = check_input_type_result(reader, type_array(reader->types, type_element(reader->types, type), outer));
         accepted = type != 0;
     }
     if (accepted)

@@ -523,8 +523,97 @@ static void check_test_literal_floating_elements(CheckTest* test)
     }
 }
 
+// A table of `rows` records of floating and integer members (#1383), each member's spellings cycling through its format's
+// list above (`last` replaces the last float). Form 0 is file scope and sized, 1 a block-scope static, 2 packed, 3 has a
+// bit-field beside the floats and 4 a volatile double, both of which keep the ordinary path. With `tested` (always, for
+// form 1), a function returns a hash of element n's bytes, the long double's 10 significant ones.
+static bool check_test_literal_floating_records_source(char* source, uint64_t capacity, uint32_t rows, uint32_t form, const char* last, bool tested)
+{
+    static const char* const extended[] = {
+        "0.1L", "-0.0L", "0x1p-16445L", "1.18973149535723176502e+4932L", "3.6e-4951L", "0.1", "-5", "1e-310",
+        "0x1.23p+1000L", "0", "-0", "0.1f", "1e300", "075", "0x1p63", "18446744073709551615ULL",
+    };
+    static const char* const records[] = {
+        "struct F{float f;double d;int i;long double l;unsigned char c;};",
+        "struct F{float f;double d;int i;long double l;unsigned char c;};",
+        "struct __attribute__((packed)) F{float f;double d;int i;long double l;unsigned char c;};",
+        "struct F{float f;double d;int i:12;long double l;unsigned char c;};",
+        "struct F{float f;volatile double d;int i;long double l;unsigned char c;};",
+    };
+    static const char* const single[] = {
+        "0.1f", "-0.0f", "0.0f", "0", "-0", "-13", "0xffU", "1.25", "0x1p-149f", "0x1.fffffep127f", "1.5L", "075", "3.0e-4f", "0x1p24",
+        "16777216U", "0.1", "1e300", "-0.1L", "1e-45f", "0x1p-126f",
+    };
+    static const char* const wide[] = {
+        "0.1", "-0.0", "0.0", "0", "-0", "-13", "0xffU", "0.1f", "0x1p-1074", "0x1.fffffffffffffp1023", "1.5L", "075", "3.0e-200",
+        "9007199254740992ULL", "0x1p53", "0.1L", "-1e4000L", "4.9e-324", "2.2250738585072009e-308",
+    };
+    int used = snprintf(source, capacity, "%s%s%sF table[%s]={", records[form], form == 1 ? "int tested(int n){static const struct " : "const struct ",
+                        "", form == 1 ? "" : "40");
+    for (uint32_t i = 0; i < rows && used > 0 && (uint64_t)used < capacity; i += 1)
+    {
+        const char* f = last != NULL && i + 1 == rows ? last : single[i % BUSTER_ARRAY_LENGTH(single)];
+        used += snprintf(source + used, capacity - (uint64_t)used, "{%s,%s%s,%d,%s,%u}%s", f, i % 4 == 1 && wide[i % BUSTER_ARRAY_LENGTH(wide)][0] != '-' ? "-" : "", wide[i % BUSTER_ARRAY_LENGTH(wide)],
+                         (int)(i * 37) - 600, extended[i % BUSTER_ARRAY_LENGTH(extended)], i * 7 & 255, i + 1 < rows || i % 2 == 0 ? "," : "");
+    }
+    if (used > 0 && (uint64_t)used < capacity)
+    {
+        used += snprintf(source + used, capacity - (uint64_t)used, "};%s", form == 1 ? "" : tested ? "int tested(int n)" : "\n");
+    }
+    if ((tested || form == 1) && used > 0 && (uint64_t)used < capacity)
+    {
+        used += snprintf(source + used, capacity - (uint64_t)used,
+                         "{const struct F*r;const unsigned char*b;unsigned h;unsigned k;r=&table[(unsigned)n%%%u];h=(unsigned)sizeof table;"
+                         "b=(const unsigned char*)&r->f;for(k=0;k<sizeof r->f;k++)h=h*31+b[k];"
+                         "b=(const unsigned char*)&r->d;for(k=0;k<sizeof r->d;k++)h=h*31+b[k];"
+                         "b=(const unsigned char*)&r->l;for(k=0;k<10;k++)h=h*31+b[k];"
+                         "return (int)(h+(unsigned)r->c+(unsigned)r->i);}%s\n", rows, form == 1 ? "}" : "");
+    }
+    return used > 0 && (uint64_t)used < capacity;
+}
+
+// Records of float, double and long double members beside integers (#1383): zero signs, subnormals, extremes, rounding
+// sources and integer sources, at file scope, as block-scope statics and packed, compact and equal to the full graph's
+// bytes; a bit-field or a volatile member, or a late integer that a float can't hold, keeps the ordinary path. The
+// runnable forms run against clang's build.
+static void check_test_literal_floating_records(CheckTest* test, const char* clang)
+{
+    char source[32768];
+    for (uint32_t form = 0; form < 5; form += 1)
+    {
+        const bool made = check_test_literal_floating_records_source(source, sizeof(source), 33, form, NULL, true);
+        check_test_expect(test, made, "floating record table source fits");
+        if (made)
+        {
+            check_test_literal_table_case(test, source, form < 3, false);
+        }
+        if (made && form != 4)
+        {
+            check_test_program_source(test, source, "literal-floating-records", clang);
+        }
+    }
+    bool made = check_test_literal_floating_records_source(source, sizeof(source), 33, 0, "16777217", false);
+    check_test_expect(test, made, "floating record late precision-loss source fits");
+    if (made)
+    {
+        check_test_literal_table_case(test, source, false, false);
+    }
+    made = check_test_literal_floating_records_source(source, sizeof(source), 26, 0, NULL, false);
+    check_test_expect(test, made, "floating record threshold source fits");
+    if (made)
+    {
+        check_test_literal_table_case(test, source, true, false);
+    }
+    made = check_test_literal_floating_records_source(source, sizeof(source), 25, 0, NULL, false);
+    if (made)
+    {
+        check_test_literal_table_case(test, source, false, false);
+    }
+}
+
 static void check_test_literal_floating_tables(CheckTest* test, const char* clang)
 {
+    check_test_literal_floating_records(test, clang);
     check_test_literal_floating_values(test);
     check_test_literal_floating_integer_spellings(test);
     check_test_literal_floating_radix(test);
