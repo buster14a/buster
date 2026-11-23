@@ -1108,40 +1108,61 @@ static const uint8_t check_program_attributed_kinds[CHECK_ATTRIBUTE_ADDRESS_SPAC
     [CHECK_ATTRIBUTE_LOADER_UNINITIALIZED] = BUSTER_CHECK_ATTRIBUTED_SYMBOL,
 };
 
-// The attributed declarations of `input` (CheckProgramAttributed), in `arena`: false without room.
+// The attributed declarations of `input` (CheckProgramAttributed), in `arena`: false without room. Three passes, as the
+// records are a chain of loads each that misses (the column's value, the attributes, their records: 2,577 declarations
+// took 215 cycles each on sqlite3.c as one loop): the declaring tokens of each 16 with attributes, compressed from a
+// compare of their declarations with themselves; then each one's attributes, prefetched as they are found; then their
+// records' bits, each declaration's records prefetched 8 ahead.
+#define BUSTER_CHECK_ATTRIBUTED_AHEAD 8u
 static bool check_program_attributed(const CheckInput* input, Arena* arena, CheckProgramAttributed* result)
 {
     const uint32_t tokens = input->token_count;
     *result = (CheckProgramAttributed){
         .tokens = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)tokens + 16),
-        .bits = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)tokens + 16),
     };
-    const bool valid = result->tokens != 0 && result->bits != 0;
     const uint32_t* declarations = input->declarations;
     const CheckSparseWide attributes = input->attributes;
+    const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
     uint32_t count = 0;
-    for (uint32_t first = valid ? check_input_attributed_next(attributes, 0, tokens) : tokens; first < tokens; first = check_input_attributed_next(attributes, first + 16, tokens))
+    for (uint32_t first = result->tokens != 0 ? check_input_attributed_next(attributes, 0, tokens) : tokens; first < tokens;
+         first = check_input_attributed_next(attributes, first + 16, tokens))
     {
-        for (uint32_t selected = check_input_attributed_group(attributes, first, tokens); selected != 0; selected &= selected - 1)
-        {
-            const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
-            if (declarations[token] == token)
-            {
-                const CheckInputAttributes* records = check_input_attributes_at(input, token);
-                uint32_t bits = records != 0 && records->alignment_log2 != 0 ? BUSTER_CHECK_ATTRIBUTED_SYMBOL : 0;
-                for (uint32_t i = 0; records != 0 && i < records->count; i += 1)
-                {
-                    const CheckInputAttribute* attribute = &records->records[i];
-                    const uint32_t kind = (uint32_t)attribute->kind;
-                    bits |= attribute->ignored || kind > CHECK_ATTRIBUTE_ADDRESS_SPACE ? 0 : check_program_attributed_kinds[kind];
-                }
-                result->tokens[count] = token;
-                result->bits[count] = (uint8_t)bits;
-                count += 1;
-            }
-        }
+        const __mmask16 attributed = (__mmask16)check_input_attributed_group(attributes, first, tokens);
+        const __m512i group = _mm512_add_epi32(lanes, _mm512_set1_epi32((int)first));
+        const __mmask16 declaring = _mm512_mask_cmpeq_epi32_mask(attributed, _mm512_maskz_loadu_epi32(attributed, declarations + first), group);
+        _mm512_mask_compressstoreu_epi32(result->tokens + count, declaring, group);
+        count += (uint32_t)__builtin_popcount(declaring);
     }
-    result->count = count;
+    result->bits = result->tokens != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, (uint64_t)count + 16) : 0;
+    const CheckInputAttributes** records = result->bits != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, const CheckInputAttributes*, (uint64_t)count + BUSTER_CHECK_ATTRIBUTED_AHEAD) : 0;
+    const bool valid = records != 0;
+    for (uint32_t d = 0; valid && d < count; d += 1)
+    {
+        records[d] = check_input_attributes_at(input, result->tokens[d]);
+        __builtin_prefetch(records[d]);
+    }
+    for (uint32_t d = count; valid && d < count + BUSTER_CHECK_ATTRIBUTED_AHEAD; d += 1)
+    {
+        records[d] = NULL;
+    }
+    for (uint32_t d = 0; valid && d < count; d += 1)
+    {
+        const CheckInputAttributes* ahead = records[d + BUSTER_CHECK_ATTRIBUTED_AHEAD];
+        if (ahead != NULL)
+        {
+            __builtin_prefetch(ahead->records);
+        }
+        const CheckInputAttributes* listed = records[d];
+        uint32_t bits = listed != 0 && listed->alignment_log2 != 0 ? BUSTER_CHECK_ATTRIBUTED_SYMBOL : 0;
+        for (uint32_t i = 0; listed != 0 && i < listed->count; i += 1)
+        {
+            const CheckInputAttribute* attribute = &listed->records[i];
+            const uint32_t kind = (uint32_t)attribute->kind;
+            bits |= attribute->ignored || kind > CHECK_ATTRIBUTE_ADDRESS_SPACE ? 0 : check_program_attributed_kinds[kind];
+        }
+        result->bits[d] = (uint8_t)bits;
+    }
+    result->count = valid ? count : 0;
     return valid;
 }
 
@@ -3784,18 +3805,26 @@ static void check_program_object_access(const CheckProgram* program, uint8_t* ac
     {
         defined[program->bodies[b].object] = 1;
     }
+    // The static objects' defining declarations: of each 64 tokens, those with the static bit, then of each 16 of them
+    // the ones that declare themselves, an object's, defined or tentative, by masked loads and compares (#3393).
+    const __m512i lanes16 = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+    const __m128i definitions = _mm_set1_epi8((char)(BUSTER_CHECK_BITS_DEFINED | BUSTER_CHECK_BITS_TENTATIVE));
     for (uint32_t first = 0; first < input->token_count; first += 64)
     {
-        const uint64_t lanes = BUSTER_SCALAR_PATH(scalar) ? check_input_scan_all(first, input->token_count) :
-                                        check_input_scan_bit(input->declaration_bits, first, input->token_count, BUSTER_CHECK_BITS_STATIC);
-        for (uint64_t selected = lanes; selected != 0; selected &= selected - 1)
+        const uint64_t statics = check_input_scan_bit(input->declaration_bits, first, input->token_count, BUSTER_CHECK_BITS_STATIC);
+        for (uint32_t part = 0; statics != 0 && part < 64; part += 16)
         {
-            const uint32_t token = first + (uint32_t)__builtin_ctzll(selected);
-            const uint32_t object = input->objects[token];
-            if (check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_STATIC) && input->declarations[token] == token && object < program->object_count && input->declaration_kinds[token] == C_BINDING_OBJECT &&
-                (check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_DEFINED) || check_input_bit(input->declaration_bits, token, BUSTER_CHECK_BITS_TENTATIVE)))
+            const __mmask16 lanes = (__mmask16)(statics >> part);
+            const uint32_t base = first + part;
+            const __m512i tokens = _mm512_add_epi32(lanes16, _mm512_set1_epi32((int)base));
+            const __mmask16 own = _mm512_mask_cmpeq_epi32_mask(lanes, _mm512_maskz_loadu_epi32(lanes, input->declarations + base), tokens);
+            const __mmask16 object_kind = _mm_mask_cmpeq_epi8_mask(own, _mm_maskz_loadu_epi8(own, input->declaration_kinds + base), _mm_set1_epi8((char)C_BINDING_OBJECT));
+            const __mmask16 defining = _mm_mask_test_epi8_mask(object_kind, _mm_maskz_loadu_epi8(object_kind, input->declaration_bits + base), definitions);
+            const __m512i objects = _mm512_maskz_loadu_epi32(defining, input->objects + base);
+            const __mmask16 found = _mm512_mask_cmplt_epu32_mask(defining, objects, _mm512_set1_epi32((int)program->object_count));
+            for (uint32_t selected = found; selected != 0; selected &= selected - 1)
             {
-                defined[object] = 1;
+                defined[input->objects[base + (uint32_t)__builtin_ctz(selected)]] = 1;
             }
         }
     }

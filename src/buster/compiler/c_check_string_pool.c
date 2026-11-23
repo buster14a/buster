@@ -120,15 +120,18 @@ static bool check_data_string_pool(const TypeTable* types, const CheckDataObject
                                    bool scalar, Arena* scratch, uint32_t** canonical)
 {
     *canonical = NULL;
+    // Each record's candidacy, found once (#3393): the count's pass and the hashes' read it.
+    const uint64_t mark = scratch->length;
+    uint8_t* candidates = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, count) : NULL;
+    bool valid = count == 0 || candidates != NULL;
     uint32_t strings = 0;
-    for (uint32_t i = 0; i < count; i += 1)
+    for (uint32_t i = 0; valid && i < count; i += 1)
     {
-        strings += check_data_string_candidate(types, objects + i, object_symbols, object_count, link);
+        candidates[i] = check_data_string_candidate(types, objects + i, object_symbols, object_count, link);
+        strings += candidates[i];
     }
-    bool valid = true;
-    if (strings > 1)
+    if (valid && strings > 1)
     {
-        const uint64_t mark = scratch->length;
         uint32_t* mapping = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, count);
         const uint64_t retained = scratch->length;
         uint64_t* keys = mapping != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, strings) : NULL;
@@ -140,7 +143,7 @@ static bool check_data_string_pool(const TypeTable* types, const CheckDataObject
         for (uint32_t i = 0; valid && i < count; i += 1)
         {
             mapping[i] = i;
-            if (check_data_string_candidate(types, objects + i, object_symbols, object_count, link))
+            if (candidates[i] != 0)
             {
                 indices[batch++] = i;
                 if (batch == BUSTER_LINK_HASH_BATCH)
@@ -191,6 +194,10 @@ static bool check_data_string_pool(const TypeTable* types, const CheckDataObject
         }
         *canonical = valid ? mapping : NULL;
         arena_pop_to(scratch, valid ? retained : mark);
+    }
+    else
+    {
+        arena_pop_to(scratch, mark);
     }
     return valid;
 }
