@@ -10114,6 +10114,7 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 #include "c_check_bitfield_driver_test.c"
 #include "c_check_register_driver_test.c"
 #include "c_check_enum_arithmetic_driver_test.c"
+#include "c_check_float_precision_driver_test.c"
 #include "c_check_vla_fold_driver_test.c"
 #include "c_check_for_loop_driver_test.c"
 #include "c_check_enum_cast_driver_test.c"
@@ -10357,6 +10358,8 @@ static int run_checker_driver_tests(int argc, char** argv)
     bool assert_diagnostics_only = false;
     // --unused-comparison-only: discarded comparisons' assignment-note eligibility (#2906).
     bool unused_comparison_only = false;
+    // --float-precision-only: -Wimplicit-float-conversion's and -Wliteral-range's floating comparisons (#1875).
+    bool float_precision_only = false;
     // --constant-logical-only: logical constant diagnostics and their construction-time policy (#2900).
     bool constant_logical_only = false;
     // --record-extensions-only: zero-length arrays and zero-size records, their policies and output preservation.
@@ -10448,6 +10451,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             unused_comparison_only = true;
         }
+        else if (strcmp(argv[i], "--float-precision-only") == 0)
+        {
+            float_precision_only = true;
+        }
         else if (strcmp(argv[i], "--constant-logical-only") == 0)
         {
             constant_logical_only = true;
@@ -10528,6 +10535,7 @@ static int run_checker_driver_tests(int argc, char** argv)
                              (uint32_t)operand_diagnostics_only + (uint32_t)label_attributes_only + (uint32_t)attribute_recovery_only + (uint32_t)assert_bool_only +
                              (uint32_t)malformed_calls_only + (uint32_t)record_extensions_only + (uint32_t)auto_qualifiers_only + (uint32_t)query_bool_only +
                              (uint32_t)run_modes_only + (uint32_t)correctness_edges_only + (uint32_t)imaginary_bit_int_only + (uint32_t)unused_comparison_only + (uint32_t)assert_diagnostics_only +
+                             (uint32_t)float_precision_only +
                              (uint32_t)constant_logical_only + (uint32_t)pic_only + (uint32_t)initializer_diagnostics_only;
     options &= focuses <= 1 && (focuses == 0 || (!lazy && check_driver_part.count == 1));
     // One focused section's alone: the others' gates take `focused` as --sign-compare-only's did.
@@ -11105,6 +11113,10 @@ static int run_checker_driver_tests(int argc, char** argv)
     {
         check_test_driver_unused_comparisons(&test, clang, executable, directory);
     }
+    if (temporary && float_precision_only)
+    {
+        check_test_driver_float_precision(&test, clang, executable, directory);
+    }
     if (temporary && constant_logical_only)
     {
         check_test_driver_constant_logical(&test, clang, executable, directory);
@@ -11346,6 +11358,10 @@ static int run_checker_driver_tests(int argc, char** argv)
                 .weight = 520,
             },
             {
+                .check = check_test_driver_float_precision,
+                .weight = 450,
+            },
+            {
                 .check = check_test_driver_vla_fold,
                 .weight = 1200,
             },
@@ -11430,16 +11446,8 @@ static int run_checker_driver_tests(int argc, char** argv)
                 .weight = 500,
             },
             {
-                .check = check_test_driver_assert_bool,
-                .weight = 690,
-            },
-            {
-                .check = check_test_driver_node_bodies,
-                .weight = 40,
-            },
-            {
-                .check = check_test_driver_node_gate,
-                .weight = 3,
+                .check = check_test_driver_assert_bool_and_node,
+                .weight = 730,
             },
             {
                 .check = check_test_driver_constant_logical,
@@ -11817,6 +11825,13 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_warning_catalog(&test, clang, executable, directory, "checker/attribute-uses");
+            }
+            // A common warning at a system header's macro expanded in user code (#3338): suppressed by its expansion, as clang's
+            // DiagnosticsEngine suppresses it, and dropped where the check's own isInSystemMacro test or a macro's body says
+            // so, whole, in each policy, mode, lane request and reader.
+            if (!lazy && check_test_driver_takes())
+            {
+                check_test_driver_warning_catalog(&test, clang, executable, directory, "checker/system-macros");
             }
             if (check_test_driver_takes_weighing(200))
             {

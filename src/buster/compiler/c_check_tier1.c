@@ -185,7 +185,7 @@ static void check_tier1_lane_release(CheckTier1Lane* lane)
 }
 
 _Static_assert(BUSTER_CHECK_TIER1_VECTORIZE_COUNTS == 7 + IR_VECTORIZE_REFUSALS, "the report keeps every vectorizer count");
-_Static_assert(BUSTER_CHECK_TIER1_STORE_MOTION_COUNTS == IR_STORE_MOTION_OUTCOME_COUNT + IR_STORE_MOTION_KEY_COUNT + 3, "the report keeps every store motion count");
+_Static_assert(BUSTER_CHECK_TIER1_STORE_MOTION_COUNTS == IR_STORE_MOTION_OUTCOME_COUNT + IR_STORE_MOTION_KEY_COUNT + 3 + IR_STORE_MOTION_SINK_COUNT + 1, "the report keeps every store motion count");
 _Static_assert(BUSTER_CHECK_TIER1_PASS_SCCP == BUSTER_IR_OPTIMIZE_SCCP && BUSTER_CHECK_TIER1_PASS_DCE == BUSTER_IR_OPTIMIZE_DCE &&
                    BUSTER_CHECK_TIER1_PASS_CFG == BUSTER_IR_OPTIMIZE_CFG && BUSTER_CHECK_TIER1_PASS_MERGE == BUSTER_IR_OPTIMIZE_MERGE,
                "--tier1-passes= passes the optimizer's own bits");
@@ -563,6 +563,11 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
         passes->store_motion[at++] = moved ? motion.loads : 0;
         passes->store_motion[at++] = moved ? motion.stores : 0;
         passes->store_motion[at++] = moved ? motion.added : 0;
+        for (uint32_t k = 0; k < IR_STORE_MOTION_SINK_COUNT; k += 1)
+        {
+            passes->store_motion[at++] = moved ? motion.sinks[k] : 0;
+        }
+        passes->store_motion[at++] = moved ? motion.write_backs : 0;
         // An expansion promotion refuses or finds past its limits keeps the function's calls: the lowering is promoted
         // instead, so that inlining is never a refusal. Any other error is the expansion's.
         passes->unexpanded = input->unexpanded != NULL && (check.error == IR_ERROR_UNSUPPORTED || check.error == IR_ERROR_LIMIT);
@@ -1446,6 +1451,13 @@ static void check_tier1_print_report(FILE* stream, const CheckTier1Report* repor
             fprintf(stream, "\tkey.%s=%" PRIu64, ir_store_motion_key_names[k], report->store_motion[IR_STORE_MOTION_OUTCOME_COUNT + k]);
         }
         const uint32_t tail = IR_STORE_MOTION_OUTCOME_COUNT + IR_STORE_MOTION_KEY_COUNT;
-        fprintf(stream, "\tloads=%" PRIu64 "\tstores=%" PRIu64 "\tadded=%" PRIu64 "\n", report->store_motion[tail], report->store_motion[tail + 1], report->store_motion[tail + 2]);
+        fprintf(stream, "\tloads=%" PRIu64 "\tstores=%" PRIu64 "\tadded=%" PRIu64, report->store_motion[tail], report->store_motion[tail + 1], report->store_motion[tail + 2]);
+        // #3346: the moved keys whose stores sank, those whose stores stayed by why, and the sunk keys' write-backs.
+        fprintf(stream, "\tsunk=%" PRIu64, report->store_motion[tail + 3 + IR_STORE_MOTION_SINK_SUNK]);
+        for (uint32_t k = 1; k < IR_STORE_MOTION_SINK_COUNT; k += 1)
+        {
+            fprintf(stream, "\tsink.%s=%" PRIu64, ir_store_motion_sink_names[k], report->store_motion[tail + 3 + k]);
+        }
+        fprintf(stream, "\twrite-backs=%" PRIu64 "\n", report->store_motion[tail + 3 + IR_STORE_MOTION_SINK_COUNT]);
     }
 }

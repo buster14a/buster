@@ -38,6 +38,8 @@
 //     check take the function where only x86_validate refuses it.
 //   - Chains: forward and backward chains (branch_sizing_chain) of 1 to 1,000 links, which take a round per link: the
 //     rounds must be the links' plus one up to BUSTER_BRANCH_SIZING_ROUNDS, and past it the worklist must finish.
+//   - Small functions: every count up to 96 records past the ranks' register build's limit, a branch every 1 to 4
+//     records with far targets, each the reference's (#2946).
 //   - Page edges: the records, the branch columns and the offsets each ending at a PROT_NONE page, for every count up
 //     to 70 records with branches at every density, and every branch count up to 40, checked by the branch columns'
 //     check and sized, with the result sizing gives away from the edges: a read or write past an end faults, and the fault handler names the case and
@@ -923,6 +925,54 @@ static bool branch_sizing_test_chains(Arena* arena, uint64_t seed)
     return branch_sizing_test_report(&tally);
 }
 
+// Small functions (#2946): every record count up to BUSTER_BRANCH_SIZING_TEST_SMALL_RECORDS, whose ranks' tables
+// branch_sizing_ranks_register builds in registers below BUSTER_BRANCH_SIZING_REGISTER_RECORDS records and
+// branch_sizing_ranks_table in memory from there, with a branch every 1 to 4 records (up to 8 branches a pass of the
+// register build, and of the write, which aims the lanes past the last branch at a record of scratch memory) and far
+// targets, so that most of them grow: each must be the reference's. The counts around the register build's limit get
+// every period and both shapes.
+#define BUSTER_BRANCH_SIZING_TEST_SMALL_RECORDS (BUSTER_BRANCH_SIZING_REGISTER_RECORDS + 96)
+
+static bool branch_sizing_test_small(Arena* arena, uint64_t seed)
+{
+    BranchSizingTestTally tally = {
+        .check = "small functions: the ranks' table in registers and in memory, and the write's passes",
+    };
+    uint64_t state = seed;
+    BranchSizingTestFunction function = branch_sizing_test_function(arena, BUSTER_BRANCH_SIZING_TEST_SMALL_RECORDS);
+    uint64_t grown = 0;
+    for (uint64_t count = 1; count <= BUSTER_BRANCH_SIZING_TEST_SMALL_RECORDS; count += 1)
+    {
+        const bool edge = count + 32 >= BUSTER_BRANCH_SIZING_REGISTER_RECORDS && count <= BUSTER_BRANCH_SIZING_REGISTER_RECORDS + 32;
+        for (uint32_t period = 1; period <= 4; period += 1)
+        {
+            for (uint32_t compiler_like = 0; compiler_like < 2; compiler_like += 1)
+            {
+                if (edge || (count + period + compiler_like) % 4 == 0)
+                {
+                    const uint64_t mark = arena->length;
+                    const BranchSizingShape shape = {
+                        .count = count,
+                        .branch_period = period,
+                        .near = 1 + branch_sizing_below(&state, 100),
+                        .far_per_mille = 200 + branch_sizing_below(&state, 400),
+                        .jmp_per_mille = branch_sizing_below(&state, 1001),
+                        .backward_per_mille = branch_sizing_below(&state, 1001),
+                        .compiler_like = compiler_like != 0,
+                    };
+                    function.count = count;
+                    function.branch_count = branch_sizing_generate(&state, &shape, function.records, function.branches, function.targets);
+                    const BranchSizingTestOutcome outcome = branch_sizing_test_all(&tally, arena, &function, count);
+                    grown += outcome.result.long_branches != 0;
+                    arena_pop_to(arena, mark);
+                }
+            }
+        }
+    }
+    branch_sizing_test_expect(&tally, grown != 0, "some small functions have long branches", grown);
+    return branch_sizing_test_report(&tally);
+}
+
 // The page-edge check's case, for the fault handler: the records, the branches, and whether it was checking the branch
 // columns (branch_sizing_validate_branches) or sizing.
 static volatile uint64_t branch_sizing_test_edge_count;
@@ -1424,6 +1474,7 @@ static int run_branch_sizing_tests(int argc, char** argv)
         passed = branch_sizing_test_random(&arena, seed, functions) && passed;
         passed = branch_sizing_test_columns_random(&arena, seed) && passed;
         passed = branch_sizing_test_chains(&arena, seed) && passed;
+        passed = branch_sizing_test_small(&arena, seed) && passed;
         passed = branch_sizing_test_page_edges(&arena, seed) && passed;
         passed = branch_sizing_test_memory(&arena, seed) && passed;
         if (cross_check)

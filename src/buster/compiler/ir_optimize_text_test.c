@@ -57,6 +57,7 @@ static const IrOptimizeTextFixture ir_optimize_text_fixtures[] = {
     { .name = "memory-blocks", .pass = IR_OPTIMIZE_TEXT_MEMORY, .effects = true },
     { .name = "memory-addresses", .pass = IR_OPTIMIZE_TEXT_MEMORY, .effects = true },
     { .name = "memory-volatile", .pass = IR_OPTIMIZE_TEXT_MEMORY, .effects = true },
+    { .name = "memory-symbols", .pass = IR_OPTIMIZE_TEXT_MEMORY, .effects = true },
     { .name = "unroll-loops", .pass = IR_OPTIMIZE_TEXT_UNROLL, .effects = true },
     { .name = "sroa-widen", .pass = IR_OPTIMIZE_TEXT_SROA_WIDEN, .effects = false },
 };
