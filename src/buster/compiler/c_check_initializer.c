@@ -1786,7 +1786,7 @@ static void check_init_designator_kind(CheckInitWalker* walker, CheckInitStatus 
 static bool check_init_skip_member(CheckInitWalker* walker, uint32_t name_token, TypeId record, bool ranged)
 {
     CheckInitFailureSink* failures = walker->failures;
-    const bool recover = failures != NULL && walker->result->status == CHECK_INIT_OK && !ranged && walker->repeat == 0 &&
+    const bool recover = failures != NULL && !walker->infer && walker->result->status == CHECK_INIT_OK && !ranged && walker->repeat == 0 &&
                          name_token < failures->token_count && (failures->seen[name_token] || failures->count < failures->capacity);
     if (recover)
     {

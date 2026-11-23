@@ -326,7 +326,7 @@ static __attribute__((noinline)) void check_test_generic_builtin_programs(CheckT
         "static void bytes(const void* p,unsigned long n){for(unsigned long i=0;i<n;i++)mix(((const unsigned char*)p)[i]);}\n"
         "#define C(arg) do{memset((void*)g,0xff,sizeof(g));__builtin_clear_padding(arg);bytes((const void*)g,sizeof(g));}while(0)\n"
         "int tested(int n){h=(unsigned)n;void* p=g;C(&(*(R (*)[2])p)[1]);C(&(*(R (*)[2])p)[1][2]);C(&(*(T (*)[2])p)[1]);\n"
-        "C(&(*(T (*)[2])p)[1][1]);C(&(*(T (*)[2])p)[1][1][2]);C(&(*(const R (*)[2])p)[0]);C(&((R (*)[2])p)[1][0]);\n"
+        "C(&(*(T (*)[2])p)[1][1]);C(&(*(T (*)[2])p)[1][1][2]);C(&(*(volatile R (*)[2])p)[0]);C(&((R (*)[2])p)[1][0]);\n"
         "C(&(*(U (*)[2][3])p)[1]);C(&(*(struct S (*)[2][3])p)[1]);C(&((R *)p)[1]);R (*q)[2]=p;C(&(*q)[1]);\n"
         "return (int)(h^(h>>32));}\n",
         "generic-clear-padding-cast-typedef", clang);
