@@ -10057,8 +10057,8 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 #include "c_check_assert_bool_driver_test.c"
 #include "c_check_node_bodies_driver_test.c"
 #include "c_check_node_gate_driver_test.c"
-#include "c_check_default_path_driver_test.c"
 #include "c_check_constant_logical_driver_test.c"
+#include "c_check_default_path_driver_test.c"
 #include "c_check_query_bool_driver_test.c"
 #include "c_check_ident_driver_test.c"
 #include "c_check_c23_attributes_driver_test.c"
@@ -11314,8 +11314,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_assert_bool,
             check_test_driver_node_bodies,
             check_test_driver_node_gate,
-            check_test_driver_default_path,
-            check_test_driver_constant_logical,
+            check_test_driver_constant_logical_sections,
             check_test_driver_query_bool,
             check_test_driver_ident,
             check_test_driver_c23_attributes,

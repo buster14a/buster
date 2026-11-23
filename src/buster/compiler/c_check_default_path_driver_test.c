@@ -1,17 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// #2850's default path: three rules answer early what a longer way answered (CheckDefaultPathCount, c_check_input.c). A
-// logical operator's right operand that can only be 0 or 1 is not replayed for -Wconstant-logical-operand; a comparison
-// no check of the CFG's can decide is answered before its operands' common type is worked out; a constant's read of a
-// const object keeps its no by node. With BUSTER_TEST_DEFAULT_PATH_LOG set to a path each early answer is also worked
-// out the long way where it is given, and the command writes a line of counts there.
+// #2850's default path: -Wconstant-logical-operand's pass does not replay a logical operator's right operand that can
+// only be 0 or 1 (c_check_warning_graph.c). With BUSTER_TEST_DEFAULT_PATH_LOG set to a path it is replayed all the same,
+// and the command writes a line of counts there (CheckDefaultPathCount, c_check_input.c).
 //
-// The unit below has each rule's cases and the cases beside them that the rule must leave: the line's counts of what
-// differs are 0, its object and its diagnostics are those of a compile without the switch, and the warning is still
-// given where the right operand is a constant that is neither 0 nor 1.
+// The unit below has the rule's cases and the cases beside them that it must leave: the line counts three operands not
+// replayed, none of which gives the warning's event or makes a type; the object and the diagnostics are those of a
+// compile without the switch; and the warning is still given where the right operand is a constant that is neither 0
+// nor 1.
 static const char check_driver_default_path_unit[] =
-    "static const int limit = 3;\n"
     "int f(int a, int b, int c)\n"
     "{\n"
     "    int r = 0;\n"
@@ -19,22 +17,10 @@ static const char check_driver_default_path_unit[] =
     "    if (a && b < c) { r += 1; }\n"
     "    if (a || !b) { r += 2; }\n"
     "    if (a && (b || c)) { r += 4; }\n"
-    // A plain value, and a sum of two literals: replayed, and the second is warned of.
+    // A plain value, a difference of two values and a sum of two literals: replayed, and the last is warned of.
     "    if (a && b) { r += 8; }\n"
-    "    if (a && (1 + 1)) { r += 16; }\n"
-    // A comparison no check can decide, by each check; and four that one decides: the equality's by a `&` and by a known
-    // boolean beside a literal over 1, the relational's by the same, each with the literal on either side.
-    "    if (a == 3) { r += 32; }\n"
-    "    if (b > 10) { r += 64; }\n"
-    "    if ((a & 8) == 4) { r += 128; }\n"
-    "    if ((a < b) == 2) { r += 256; }\n"
-    "    if (2 == (a < b)) { r += 512; }\n"
-    "    if ((a < b) > 2) { r += 1024; }\n"
-    "    if (2 < (a < b)) { r += 2048; }\n"
-    // A condition that is no constant, which each pass asks again; and a const object's read, which is one.
-    "    if (c) { r += 4096; }\n"
-    "    if (limit) { r += 8192; }\n"
-    "    if (limit == 3 && c) { r += 16384; }\n"
+    "    if (a && b - c) { r += 16; }\n"
+    "    if (a && (1 + 1)) { r += 32; }\n"
     "    return r;\n"
     "}\n";
 
@@ -70,8 +56,7 @@ static void check_test_driver_default_path(CheckTest* test, const char* clang, c
     const bool same = plain_status == 0 && checked_status == 0 && check_test_driver_node_bodies_same(plain, checked) && plain_text != NULL && checked_text != NULL &&
                       strcmp(plain_text, checked_text) == 0;
     check_test_expect(test, same, "default-path: with the test's switch the object and the diagnostics are the same");
-    // The line: three operands not replayed, none an event and none a type's maker; comparisons answered early and none
-    // of them otherwise by its check; kept answers read and none of them otherwise by the walk.
+    // The line: three operands not replayed, none of them an event's and none a type's maker.
     char line[1024] = { 0 };
     FILE* file = written ? fopen(log, "rb") : NULL;
     const size_t length = file != NULL ? fread(line, 1, sizeof(line) - 1, file) : 0;
@@ -83,16 +68,9 @@ static void check_test_driver_default_path(CheckTest* test, const char* clang, c
     unsigned long long skipped = 0;
     unsigned long long events = 1;
     unsigned long long made = 1;
-    unsigned long long early = 0;
-    unsigned long long early_different = 1;
-    unsigned long long kept = 0;
-    unsigned long long kept_different = 1;
-    const bool counted = sscanf(line,
-                                "default-path: logical-operands-not-replayed=%llu of-them-an-event=%llu of-them-a-type-made=%llu comparisons-answered-early=%llu "
-                                "of-them-different=%llu constants'-kept-answers-read=%llu of-them-different=%llu",
-                                &skipped, &events, &made, &early, &early_different, &kept, &kept_different) == 7;
-    const bool held = counted && skipped == 3 && events == 0 && made == 0 && early >= 2 && early_different == 0 && kept >= 1 && kept_different == 0;
-    check_test_expect(test, held, "default-path: each rule's early answers are the long way's");
+    const bool counted = sscanf(line, "default-path: logical-operands-not-replayed=%llu of-them-an-event=%llu of-them-a-type-made=%llu", &skipped, &events, &made) == 3;
+    const bool held = counted && skipped == 3 && events == 0 && made == 0;
+    check_test_expect(test, held, "default-path: the three operands that can only be 0 or 1 are not replayed, and replayed they give no event");
     if (!(plain_status == 0 && once) || !same || !held)
     {
         fprintf(stderr, "test-checker-driver: default-path: status %d and %d with the switch\n%s%s----\n%s", plain_status, checked_status, line,
@@ -109,4 +87,12 @@ static void check_test_driver_default_path(CheckTest* test, const char* clang, c
     unlink(plain);
     unlink(checked);
     unlink(log);
+}
+
+// -Wconstant-logical-operand's fixtures and its pass's rule above, as one of the driver test's sections: the parts are
+// dealt a section at a time, and a section of its own would move every later one to the next part.
+static void check_test_driver_constant_logical_sections(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    check_test_driver_constant_logical(test, clang, executable, directory);
+    check_test_driver_default_path(test, clang, executable, directory);
 }

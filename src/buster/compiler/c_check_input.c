@@ -766,13 +766,10 @@ struct CheckInputKrDiagnostic
 #define BUSTER_CHECK_EXPRESSION_PART_VISITS 3u
 #define BUSTER_CHECK_EXPRESSION_PARTS 4u
 
-// #2850's default path. Three rules answer early what a longer way answered: a logical operator's right operand that
-// can only be 0 or 1 is not replayed for -Wconstant-logical-operand (c_check_warning_graph.c); a comparison no check of
-// the CFG's can decide is answered before its operands' common type is worked out (c_check_program_cfg.c); a
-// constant's read of a const object is kept by node (c_check_program_fold.c). With a test's switch
-// (BUSTER_TEST_DEFAULT_PATH_LOG, a file's path) each early answer is also worked out the long way where it is given, the
-// two are compared, and the command writes one line of these counts at its end: the ones named `different`, the
-// events and the types stay 0.
+// #2850's default path: a rule that answers early what a longer way answered, against that way. A logical operator's right
+// operand that can only be 0 or 1 is not replayed for -Wconstant-logical-operand (c_check_warning_graph.c). With a
+// test's switch (BUSTER_TEST_DEFAULT_PATH_LOG, a file's path) it is replayed all the same, and the command writes one
+// line of these counts at its end: the events and the types stay 0.
 typedef enum CheckDefaultPathCount
 {
     // Right operands the warning's pass did not replay; of them, those whose replay gives the warning's event; and those
@@ -780,12 +777,6 @@ typedef enum CheckDefaultPathCount
     CHECK_DEFAULT_PATH_LOGICAL_SKIPPED,
     CHECK_DEFAULT_PATH_LOGICAL_EVENTS,
     CHECK_DEFAULT_PATH_LOGICAL_TYPES,
-    // Comparisons the CFG's checks answered early; of them, those the long way answers otherwise.
-    CHECK_DEFAULT_PATH_COMPARISONS_EARLY,
-    CHECK_DEFAULT_PATH_COMPARISONS_DIFFERENT,
-    // Kept answers of a constant's read that were read; of them, those the walk answers otherwise.
-    CHECK_DEFAULT_PATH_CONSTANTS_KEPT,
-    CHECK_DEFAULT_PATH_CONSTANTS_DIFFERENT,
     CHECK_DEFAULT_PATH_COUNTS,
 } CheckDefaultPathCount;
 
@@ -1298,8 +1289,8 @@ struct CheckInput
     // program keeps it with no control of its own, and the lowering writes its function from what `node_front` keeps of
     // it (its controls, each control's root's tape and what is beside it).
     bool node_bodies;
-    // The default path's rules against what they replace (#2850), where a test asks (BUSTER_TEST_DEFAULT_PATH_LOG): the
-    // command's counts (CHECK_DEFAULT_PATH_*), which the unit's passes add to. Null in every other run.
+    // The default path's rule against what it replaces (#2850), where a test asks (BUSTER_TEST_DEFAULT_PATH_LOG): the
+    // command's counts (CHECK_DEFAULT_PATH_*), which the unit's pass adds to. Null in every other run.
     uint64_t* default_path_counts;
     // Explicit sizeof operand folds and their input tokens; regression tests bound the preparation work (#822).
     uint32_t sizeof_queries;
