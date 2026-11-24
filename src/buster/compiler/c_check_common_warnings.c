@@ -1638,12 +1638,13 @@ typedef struct CheckCommonEmission
     bool promotion;
     bool int_float;
     bool const_int_float;
+    bool unique_edges;
     // The deferred-emission worklist. Each (kind, node) frame stands in for a recursive call the
     // no-recursion rule forbids; push order is the calls' reverse so popping replays them exactly. A
     // full worklist fails the translation rather than dropping warnings.
     uint32_t* work_nodes;
     uint8_t* work_kinds;
-    // The conversion a frame's arm belongs to (BUSTER_CHECK_EMIT_ARM, BUSTER_CHECK_EMIT_ARM_LEAF), else BUSTER_CHECK_NONE.
+    // An arm's owner, or a conversion edge's target type when the parent column identifies its unique reader.
     uint32_t* work_owners;
     uint32_t work_capacity;
     uint32_t work_count;
@@ -1798,7 +1799,7 @@ static uint32_t check_common_emission_subtree_start(CheckCommonEmission* emissio
 
 static void check_common_emit_push(CheckCommonEmission* emission, uint32_t node, uint8_t kind);
 static void check_common_emit_run(CheckCommonEmission* emission);
-static void check_common_scan_edge(CheckCommonEmission* emission, uint32_t parent, uint32_t child);
+static void check_common_scan_edge(CheckCommonEmission* emission, uint32_t owner, uint32_t child);
 static void check_common_emit_arm(CheckCommonEmission* emission, uint32_t node, uint8_t kind, uint32_t owner);
 static void check_common_scan_arm(CheckCommonEmission* emission, uint32_t conditional, uint32_t arm);
 static inline __attribute__((always_inline)) void check_common_root_frames(CheckCommonEmission* emission, uint32_t node);
@@ -2021,15 +2022,32 @@ static bool check_common_edges_reach(const CheckGraph* graph, const CheckStream*
 
 // The comparison walk's frame for the implicit conversion edge into `child` from its reader `parent` (#3339), pushed after
 // the child's own frame so that it pops first, where its conversion may warn.
-static void check_common_emit_edge(CheckCommonEmission* emission, uint32_t parent, uint32_t child, uint32_t slot)
+static void check_common_emit_edge(CheckCommonEmission* emission, uint32_t parent, uint32_t child, uint32_t slot, bool argument)
 {
     const CheckGraph* graph = &emission->input->graph;
+    const CheckStream* stream = emission->stream;
     const bool edges = emission->promotion || emission->int_float || emission->const_int_float;
-    if (edges && child < graph->count && check_common_edge_slot(graph->ops[parent], slot) &&
-        check_common_edge_wanted(graph, emission->stream, emission->types, check_common_edge(graph, emission->stream, parent, child), child, emission->promotion,
-                                 emission->int_float, emission->const_int_float))
+    if (edges && child < graph->count && check_common_edge_slot(graph->ops[parent], argument ? 3 : slot))
     {
-        check_common_emit_arm(emission, child, BUSTER_CHECK_EMIT_CONVERSION_EDGE, parent);
+        // On the validated tree each child has exactly one edge. Its slot is already in hand, and its reader can
+        // be recovered from parents when the frame runs. A shared child retains the lookup's first-edge ordering.
+        CheckConversion edge = { 0 };
+        if (!emission->unique_edges)
+        {
+            edge = check_common_edge(graph, stream, parent, child);
+        }
+        else if (argument && stream->argument_conversions != NULL)
+        {
+            edge = stream->argument_conversions[slot];
+        }
+        else if (!argument && stream->conversions != NULL)
+        {
+            edge = stream->conversions[parent].operands[slot];
+        }
+        if (check_common_edge_wanted(graph, stream, emission->types, edge, child, emission->promotion, emission->int_float, emission->const_int_float))
+        {
+            check_common_emit_arm(emission, child, BUSTER_CHECK_EMIT_CONVERSION_EDGE, emission->unique_edges ? edge.type : parent);
+        }
     }
 }
 
@@ -2057,15 +2075,15 @@ static void check_common_sign_scan(CheckCommonEmission* emission, uint32_t node,
             check_common_emit_arm(emission, graph->operand2[node], BUSTER_CHECK_EMIT_CONVERSION_ARM, node);
         }
         check_common_emit_reach(emission, graph->operand2[node], BUSTER_CHECK_EMIT_SIGN_SCAN, BUSTER_CHECK_REACH_SIGN);
-        check_common_emit_edge(emission, node, graph->operand2[node], 2);
+        check_common_emit_edge(emission, node, graph->operand2[node], 2, false);
         if (arms && graph->operand1[node] < graph->count)
         {
             check_common_emit_arm(emission, graph->operand1[node], BUSTER_CHECK_EMIT_CONVERSION_ARM, node);
         }
         check_common_emit_reach(emission, repeated ? BUSTER_CHECK_NONE : graph->operand1[node], BUSTER_CHECK_EMIT_SIGN_SCAN, BUSTER_CHECK_REACH_SIGN);
-        check_common_emit_edge(emission, node, repeated ? BUSTER_CHECK_NONE : graph->operand1[node], 1);
+        check_common_emit_edge(emission, node, repeated ? BUSTER_CHECK_NONE : graph->operand1[node], 1, false);
         check_common_emit_reach(emission, graph->operand0[node], BUSTER_CHECK_EMIT_SIGN_SCAN, BUSTER_CHECK_REACH_SIGN);
-        check_common_emit_edge(emission, node, graph->operand0[node], 0);
+        check_common_emit_edge(emission, node, graph->operand0[node], 0, false);
         if (reached && op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL)
         {
             check_common_emit_push(emission, node, BUSTER_CHECK_EMIT_SIGN_OWN);
@@ -2077,7 +2095,7 @@ static void check_common_sign_scan(CheckCommonEmission* emission, uint32_t node,
         {
             const uint32_t child = i == 0 ? graph->operand0[node] : i == 1 ? graph->operand1[node] : graph->operand2[node];
             check_common_emit_reach(emission, child, BUSTER_CHECK_EMIT_SIGN_SCAN, BUSTER_CHECK_REACH_SIGN);
-            check_common_emit_edge(emission, node, child, i);
+            check_common_emit_edge(emission, node, child, i, false);
         }
         if (check_graph_has_arguments(op) && graph->argument_offsets != NULL && graph->argument_counts != NULL)
         {
@@ -2085,7 +2103,7 @@ static void check_common_sign_scan(CheckCommonEmission* emission, uint32_t node,
             {
                 const uint32_t argument = graph->argument_nodes[graph->argument_offsets[node] + i];
                 check_common_emit_reach(emission, argument, BUSTER_CHECK_EMIT_SIGN_SCAN, BUSTER_CHECK_REACH_SIGN);
-                check_common_emit_edge(emission, node, argument, 3);
+                check_common_emit_edge(emission, node, argument, graph->argument_offsets[node] + i, true);
             }
         }
     }
@@ -4238,11 +4256,12 @@ static __attribute__((noinline)) void check_common_scan_conversion(CheckCommonEm
 // A conversion edge's frame (BUSTER_CHECK_EMIT_CONVERSION_EDGE, #3339): the edge into `child` from `parent` checked as
 // AnalyzeImplicitConversions pops it; a comma's result checked against the edge's target instead (CheckCommaOperand's
 // extra check, its context the comma's operator), and a conditional left to its arms' frames.
-static void check_common_scan_edge(CheckCommonEmission* emission, uint32_t parent, uint32_t child)
+static void check_common_scan_edge(CheckCommonEmission* emission, uint32_t owner, uint32_t child)
 {
     const CheckGraph* graph = &emission->input->graph;
     const CheckStream* stream = emission->stream;
-    const CheckConversion edge = parent < graph->count && child < graph->count ? check_common_edge(graph, stream, parent, child) : (CheckConversion){ 0 };
+    const uint32_t parent = emission->unique_edges ? emission->parents[child] : owner;
+    const TypeId target = emission->unique_edges ? owner : check_common_edge(graph, stream, parent, child).type;
     uint32_t source = child;
     for (uint32_t steps = 0; source < graph->count && graph->ops[source] == CHECK_OP_SELECT && steps < graph->count; steps += 1)
     {
@@ -4251,13 +4270,13 @@ static void check_common_scan_edge(CheckCommonEmission* emission, uint32_t paren
     const CheckOp op = source < graph->count ? graph->ops[source] : CHECK_OP_COUNT;
     const uint32_t result = op == CHECK_OP_COMMA ? graph->operand1[source] : BUSTER_CHECK_NONE;
     const TypeId result_type = result < graph->count ? check_float_value_type(emission->types, check_stream_type(stream, result)) : 0;
-    if (edge.type != 0 && op == CHECK_OP_COMMA && result_type != check_float_value_type(emission->types, edge.type))
+    if (target != 0 && op == CHECK_OP_COMMA && result_type != check_float_value_type(emission->types, target))
     {
-        check_common_scan_conversion(emission, result, edge.type, source, parent, child, NULL);
+        check_common_scan_conversion(emission, result, target, source, parent, child, NULL);
     }
-    else if (edge.type != 0 && op != CHECK_OP_COMMA && op != CHECK_OP_CONDITIONAL && op != CHECK_OP_COUNT)
+    else if (target != 0 && op != CHECK_OP_COMMA && op != CHECK_OP_CONDITIONAL && op != CHECK_OP_COUNT)
     {
-        check_common_scan_conversion(emission, child, edge.type, parent, parent, child, NULL);
+        check_common_scan_conversion(emission, child, target, parent, parent, child, NULL);
     }
 }
 
@@ -9661,6 +9680,7 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
             .shift_extras = &shift_extras,
             .evaluated = evaluated,
             .parents = parents,
+            .unique_edges = facts->roots != NULL,
             .float_precision = float_precision,
             .flushed = facts->flushed,
             .emitted = emitted,
