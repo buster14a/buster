@@ -1879,8 +1879,16 @@ static void check_test_driver_parse_tiles(CheckTest* test, const char* executabl
     static const char error[] = "int a(void) { return 1; }\n"
                                 "int b(void) { return 2 }\n"
                                 "int c(void) { return 3; }\n";
-    static const char* const sources[] = { names, old_style, cut_short, error };
-    static const char* const labels[] = { "type names from tile to tile", "an old-style definition", "a declaration cut short", "a syntax error" };
+    // By tiles of 16 tokens the second tile declares a predeclared type's name and is refused for its old-style
+    // definition; the unit as one, which its last declaration sends to the scalar parser, then reads the cast in the
+    // first tile by the name's meaning before any tile ran.
+    static const char refused[] = "int f(int b) { return (int)(__int128_t)(b); }\n"
+                                  "typedef __int128 __int128_t;\n"
+                                  "int g(a) int a; { return a; }\n"
+                                  "__attribute__((unused)) typedef int W;\n";
+    static const char* const sources[] = { names, old_style, cut_short, error, refused };
+    static const char* const labels[] = { "type names from tile to tile", "an old-style definition", "a declaration cut short", "a syntax error",
+                                          "a refused tile that declared a predeclared type's name" };
     static const char* const tiles[] = { "--parse-tile=1", "--parse-tile=16", "--parse-tile=4096" };
     char source[256];
     char object[256];
