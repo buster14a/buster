@@ -24,6 +24,19 @@ _Thread_local char oracle_temporary_buffer[BUSTER_TEST_TEMPORARY_BYTES];
 extern _Thread_local char oracle_temporary_buffer[BUSTER_TEST_TEMPORARY_BYTES];
 #endif
 
+// Older capture configurations used the checker-specific name for the same directory.
+static inline __attribute__((unused)) const char* test_profile_directory(const char** variable)
+{
+    *variable = "BUSTER_TEST_PROFILE_DIR";
+    const char* path = getenv(*variable);
+    if (path == 0 || *path == 0)
+    {
+        *variable = "BUSTER_CHECKER_PROFILE_DIR";
+        path = getenv(*variable);
+    }
+    return path != 0 && *path != 0 ? path : 0;
+}
+
 static inline __attribute__((unused)) const char* oracle_temporary_directory(void)
 {
     char* directory = oracle_temporary_buffer;

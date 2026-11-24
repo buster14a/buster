@@ -384,11 +384,12 @@ unused-warning fixtures also check exact scope-completion tokens.
   `--part K/N` runs the K-th of N parts that the default run's sections and `check_test_programs`' programs are dealt
   to in turn (`CheckTestPart`); part 1 also runs the sections that share the run's type table and graph arenas.
   `--program-selection` selects the emission-selection, constant-if and constant-switch regressions alone.
-  Set `BUSTER_CHECKER_PROFILE_DIR` to an existing writable absolute directory when profiling the native checker
+  Set `BUSTER_TEST_PROFILE_DIR` to an existing writable absolute directory when profiling the native checker
   oracles. `test-checker` leaves each executed `run` ELF at its original path under that directory, so a profiler
   can open it after the child exits. Set the variable in the profiler's launch environment when running the tests
   through `compiler parallel`; the checker shards inherit it. Use a fresh directory per capture and remove it
   after the profiler has processed the capture. Failed fixtures keep their usual diagnostic files.
+  The older `BUSTER_CHECKER_PROFILE_DIR` name also works.
   The switch fixtures (#1192, `c_check_program_switch_test.c`) cover matching/default/no-match dispatch,
   fallthrough, converted values, range ordering, label/declaration/inner-break fallbacks, nonfoldable selectors,
   nested scopes, cleanups, VLAs and dropped statics. The constant-if fixtures include #1194's
