@@ -8,7 +8,7 @@
 //
 // main.c includes this file after executable.c and calls run_executable_tests for the command. Executables are written
 // into a directory of their own under --directory (TMPDIR, or /tmp, by default), which the tests remove unless --keep
-// says to leave it and the last executables there. The checks, in this order:
+// says to leave it and the executed fixtures there. The checks, in this order:
 //   - Programs: link_program_generate with the sets of options test-link uses (link_test_program_options), and one of
 //     50,000 workers in 38 chunks, several for each of 8 lanes to write. Each is written by executable_write with
 //     groups of 1, 2, 3 and 8 lanes (lane_run), each time from zeroed fields over the last file scribbled over
@@ -67,6 +67,9 @@
 #include <poll.h>
 #include <sys/inotify.h>
 #include <sys/mman.h>
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE
+#include <sys/sendfile.h>
+#endif
 #include <sys/stat.h>
 #include <sys/wait.h>
 
@@ -207,6 +210,60 @@ static bool executable_test_runs(const char* path, const uint8_t* expected, uint
     int status = -1;
     const bool ran = executable_test_run(path, output, &length, &status);
     return ran && WIFEXITED(status) && WEXITSTATUS(status) == 0 && length == expected_length && memcmp(output, expected, length) == 0;
+}
+#endif
+#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE
+// With --keep, run a private copy. The working output can then be overwritten or removed without changing the image
+// that a profiler reads by pathname. Use a different inode because some writer tests require a singly linked output.
+static const char* executable_test_fixture_path(const ExecutableTestDirectory* directory, const char* path, char* copy)
+{
+    const char* result = path;
+    if (directory->keep)
+    {
+        const char* basename = strrchr(path, '/');
+        const int length = snprintf(copy, BUSTER_EXECUTABLE_TEST_PATH_BYTES, "%s/run-%.32s-XXXXXX", directory->path, basename != 0 ? basename + 1 : path);
+        const int source = length > 0 && length < BUSTER_EXECUTABLE_TEST_PATH_BYTES ? open(path, O_RDONLY | O_CLOEXEC) : -1;
+        struct stat status;
+        const bool readable = source >= 0 && fstat(source, &status) == 0 && S_ISREG(status.st_mode);
+        const int destination = readable ? mkstemp(copy) : -1;
+        bool retained = destination >= 0;
+        if (retained)
+        {
+            off_t offset = 0;
+            while (retained && offset < status.st_size)
+            {
+                const ssize_t copied = sendfile(destination, source, &offset, (size_t)(status.st_size - offset));
+                retained = copied > 0 || (copied < 0 && errno == EINTR);
+            }
+            const struct timespec timestamps[] = {
+                status.st_atim,
+                status.st_mtim,
+            };
+            const bool metadata = retained && fchmod(destination, status.st_mode & 0777) == 0 && futimens(destination, timestamps) == 0;
+            retained = close(destination) == 0 && metadata;
+            if (!retained)
+            {
+                unlink(copy);
+            }
+        }
+        if (source >= 0)
+        {
+            close(source);
+        }
+        if (!retained)
+        {
+            fprintf(stderr, "test-executable: could not retain image %s\n", path);
+        }
+        result = retained ? copy : 0;
+    }
+    return result;
+}
+
+static bool executable_test_runs_fixture(const ExecutableTestDirectory* directory, const char* path, const uint8_t* expected, uint64_t expected_length)
+{
+    char copy[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+    const char* image = executable_test_fixture_path(directory, path, copy);
+    return image != 0 && executable_test_runs(image, expected, expected_length);
 }
 #endif
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC || BUSTER_UNIT == BUSTER_UNIT_BACKEND
@@ -1586,7 +1643,7 @@ static bool executable_test_programs(const ExecutableTestDirectory* directory, u
             }
             executable_test_expect(&tally, written, "executable_write", i * 10 + lanes);
             const String8 file = written ? executable_test_read(scratch.arena, path.pointer) : (String8){ 0 };
-            const bool ran = written && executable_test_runs(path.pointer, program.output, BUSTER_LINK_PROGRAM_OUTPUT_BYTES);
+            const bool ran = written && executable_test_runs_fixture(directory, path.pointer, program.output, BUSTER_LINK_PROGRAM_OUTPUT_BYTES);
             executable_test_expect(&tally, ran, "the program runs and prints its checksum", i * 10 + lanes);
             if (l == 0)
             {
@@ -1641,7 +1698,9 @@ static bool executable_test_programs(const ExecutableTestDirectory* directory, u
             program.link.fixups.addend[broken] += 8;
             ExecutableResult result;
             const bool written = executable_test_write(&program.link, program.entry, path, 1, &result, 0, 0);
-            executable_test_expect(&tally, broken != 0 && written && !executable_test_runs(path.pointer, program.output, BUSTER_LINK_PROGRAM_OUTPUT_BYTES),
+            char copy[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+            const char* image = written ? executable_test_fixture_path(directory, path.pointer, copy) : 0;
+            executable_test_expect(&tally, broken != 0 && image != 0 && !executable_test_runs(image, program.output, BUSTER_LINK_PROGRAM_OUTPUT_BYTES),
                                    "a broken fixup changes the output", broken);
             executable_test_expect(&tally, written && memcmp(result.build_id, first_result.build_id, BUSTER_EXECUTABLE_BUILD_ID_BYTES) != 0, "another build ID", broken);
         }
@@ -1948,7 +2007,7 @@ static bool executable_test_chunks(const ExecutableTestDirectory* directory)
             const bool written = executable_test_write(&straddle.test.link, straddle.start, path, executable_test_lane_counts[l], &result, boundaries,
                                                        BUSTER_EXECUTABLE_TEST_MAX_BOUNDARIES);
             const String8 file = written ? executable_test_read(scratch.arena, path.pointer) : (String8){ 0 };
-            const bool ran = written && executable_test_runs(path.pointer, (const uint8_t*)executable_test_message, sizeof(executable_test_message) - 1);
+            const bool ran = written && executable_test_runs_fixture(directory, path.pointer, (const uint8_t*)executable_test_message, sizeof(executable_test_message) - 1);
             executable_test_expect(&tally, ran, "the program runs through both fields", before * 10 + l);
             executable_test_expect(&tally, written && executable_test_boundaries(&straddle.test.link, file, boundaries, result.chunks), "no boundary splits a field",
                                    before * 10 + l);
@@ -2200,17 +2259,17 @@ static bool executable_test_files(const ExecutableTestDirectory* directory, uint
         unlink(path.pointer);
         bool written = executable_test_write(&large.link, large.entry, path, 1, &result, 0, 0);
         executable_test_expect(&tally, written && result.write == EXECUTABLE_WRITE_CREATED, "a new file", 0);
-        executable_test_expect(&tally, written && executable_test_runs(path.pointer, large.output, BUSTER_LINK_PROGRAM_OUTPUT_BYTES), "the new file runs", 0);
+        executable_test_expect(&tally, written && executable_test_runs_fixture(directory, path.pointer, large.output, BUSTER_LINK_PROGRAM_OUTPUT_BYTES), "the new file runs", 0);
         written = executable_test_write(&small.link, small.entry, path, 1, &result, 0, 0);
         executable_test_expect(&tally, written && result.write == EXECUTABLE_WRITE_IN_PLACE, "in place", 0);
         executable_test_expect(&tally, written && stat(path.pointer, &status) == 0 && (uint64_t)status.st_size == result.file_size, "truncated to its size", 0);
-        executable_test_expect(&tally, written && executable_test_runs(path.pointer, small.output, BUSTER_LINK_PROGRAM_OUTPUT_BYTES), "the smaller file runs", 0);
+        executable_test_expect(&tally, written && executable_test_runs_fixture(directory, path.pointer, small.output, BUSTER_LINK_PROGRAM_OUTPUT_BYTES), "the smaller file runs", 0);
         chmod(path.pointer, 0600);
         written = executable_test_write(&large.link, large.entry, path, 1, &result, 0, 0);
         executable_test_expect(&tally, written && result.write == EXECUTABLE_WRITE_IN_PLACE && stat(path.pointer, &status) == 0 &&
                                            (status.st_mode & 07777) == (0777 & ~mask),
                                "in place, with its mode back", 0);
-        executable_test_expect(&tally, written && executable_test_runs(path.pointer, large.output, BUSTER_LINK_PROGRAM_OUTPUT_BYTES), "the larger file runs", 0);
+        executable_test_expect(&tally, written && executable_test_runs_fixture(directory, path.pointer, large.output, BUSTER_LINK_PROGRAM_OUTPUT_BYTES), "the larger file runs", 0);
 
         // Another link to it: written beside it and renamed over it, and the other link keeps what it had.
         const String8 before = executable_test_read(scratch.arena, path.pointer);
@@ -2220,7 +2279,7 @@ static bool executable_test_files(const ExecutableTestDirectory* directory, uint
         executable_test_expect(&tally, written && result.write == EXECUTABLE_WRITE_RENAMED, "renamed, with another link", 0);
         executable_test_expect(&tally, written && executable_test_same_file(scratch.arena, other.pointer, before), "the other link keeps its bytes", 0);
         executable_test_expect(&tally, written && stat(path.pointer, &status) == 0 && status.st_nlink == 1 &&
-                                           executable_test_runs(path.pointer, small.output, BUSTER_LINK_PROGRAM_OUTPUT_BYTES),
+                                           executable_test_runs_fixture(directory, path.pointer, small.output, BUSTER_LINK_PROGRAM_OUTPUT_BYTES),
                                "the renamed file runs", 0);
 
         // A symbolic link: replaced by the file, and what it pointed at keeps its bytes.
@@ -2230,28 +2289,37 @@ static bool executable_test_files(const ExecutableTestDirectory* directory, uint
         executable_test_expect(&tally, written && result.write == EXECUTABLE_WRITE_RENAMED && lstat(path.pointer, &status) == 0 && S_ISREG(status.st_mode),
                                "a symbolic link replaced", 0);
         executable_test_expect(&tally, written && executable_test_same_file(scratch.arena, other.pointer, before), "the link's target keeps its bytes", 0);
-        executable_test_expect(&tally, written && executable_test_runs(path.pointer, large.output, BUSTER_LINK_PROGRAM_OUTPUT_BYTES), "the file runs", 0);
+        executable_test_expect(&tally, written && executable_test_runs_fixture(directory, path.pointer, large.output, BUSTER_LINK_PROGRAM_OUTPUT_BYTES), "the file runs", 0);
 
         // A running program: renamed over, and the process runs on.
+        char running_bytes[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+        char saved_running_bytes[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+        const String8 running_path = directory->keep ? executable_test_path(directory, "running", running_bytes) : path;
         ExecutableTestLink pause;
         SymbolId pause_start = 0;
-        const bool paused = executable_test_pause(&pause, &pause_start) && executable_test_write(&pause.link, pause_start, path, 1, &result, 0, 0);
+        const bool pause_written = executable_test_pause(&pause, &pause_start) && executable_test_write(&pause.link, pause_start, running_path, 1, &result, 0, 0);
+        const char* saved_running = pause_written ? executable_test_fixture_path(directory, running_path.pointer, saved_running_bytes) : 0;
+        const bool paused = saved_running != 0;
         executable_test_expect(&tally, paused, "the pausing program", 0);
         fflush(stdout);
         const pid_t child = paused ? fork() : -1;
         if (child == 0)
         {
-            char* arguments[] = { path_bytes, 0 };
+            char* arguments[] = { running_path.pointer, 0 };
             char* environment[] = { 0 };
             alarm(BUSTER_EXECUTABLE_TEST_RUN_SECONDS);
-            execve(path_bytes, arguments, environment);
+            execve(running_path.pointer, arguments, environment);
             _exit(127);
         }
-        const bool running = child > 0 && executable_test_running(path.pointer, child);
+        const bool running = child > 0 && executable_test_running(running_path.pointer, child);
         executable_test_expect(&tally, running, "the program runs", 0);
-        written = running && executable_test_write(&large.link, large.entry, path, 2, &result, 0, 0);
+        written = running && executable_test_write(&large.link, large.entry, running_path, 2, &result, 0, 0);
         executable_test_expect(&tally, written && result.write == EXECUTABLE_WRITE_RENAMED, "renamed over a running program", 0);
-        executable_test_expect(&tally, written && executable_test_runs(path.pointer, large.output, BUSTER_LINK_PROGRAM_OUTPUT_BYTES), "the new file runs", 0);
+        char replacement_bytes[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+        const char* replacement = written ? executable_test_fixture_path(directory, running_path.pointer, replacement_bytes) : 0;
+        // Restore the mapped bytes at the recorded path after checking the real replacement.
+        executable_test_expect(&tally, !directory->keep || !paused || rename(saved_running, running_path.pointer) == 0, "the mapped image was retained", 0);
+        executable_test_expect(&tally, replacement != 0 && executable_test_runs(replacement, large.output, BUSTER_LINK_PROGRAM_OUTPUT_BYTES), "the new file runs", 0);
         executable_test_expect(&tally, running && kill(child, 0) == 0, "the old one runs on", 0);
         if (child > 0)
         {
@@ -2279,7 +2347,7 @@ static bool executable_test_files(const ExecutableTestDirectory* directory, uint
         // The same fixup, fitting: the program runs.
         built = executable_test_failing(&failing, &failing_start, BUSTER_LINK_FIXUP_ABS32, 0, false);
         written = built && executable_test_write(&failing.link, failing_start, path, 1, &result, 0, 0);
-        executable_test_expect(&tally, written && result.write == EXECUTABLE_WRITE_CREATED && executable_test_runs(path.pointer, (const uint8_t*)"", 0), "the fitting one", 0);
+        executable_test_expect(&tally, written && result.write == EXECUTABLE_WRITE_CREATED && executable_test_runs_fixture(directory, path.pointer, (const uint8_t*)"", 0), "the fitting one", 0);
         executable_test_link_end(&failing);
         // A PC32 from the table back to _start with INT32_MIN for its addend: S - P is negative, so S + A - P is below
         // int32's range, which only the checked path sees, since the addend's magnitude rules the fast path out.
@@ -2311,7 +2379,7 @@ static bool executable_test_files(const ExecutableTestDirectory* directory, uint
         }
         written = executable_test_write(&small.link, small.entry, path, 1, &result, 0, 0);
         executable_test_expect(&tally, stale_file >= 0 && written && result.write == EXECUTABLE_WRITE_RENAMED &&
-                                           executable_test_runs(path.pointer, small.output, BUSTER_LINK_PROGRAM_OUTPUT_BYTES),
+                                           executable_test_runs_fixture(directory, path.pointer, small.output, BUSTER_LINK_PROGRAM_OUTPUT_BYTES),
                                "a file a killed link left beside the output", 0);
         unlink(stale);
         unlink(other.pointer);
@@ -2332,7 +2400,7 @@ static bool executable_test_files(const ExecutableTestDirectory* directory, uint
             const String8 kept_bytes = linked ? executable_test_read(scratch.arena, other.pointer) : (String8){ 0 };
             written = linked && executable_test_write(&large.link, large.entry, longest, 2, &result, 0, 0);
             executable_test_expect(&tally, written && result.write == EXECUTABLE_WRITE_RENAMED && executable_test_same_file(scratch.arena, other.pointer, kept_bytes) &&
-                                               executable_test_runs(longest_bytes, large.output, BUSTER_LINK_PROGRAM_OUTPUT_BYTES),
+                                               executable_test_runs_fixture(directory, longest_bytes, large.output, BUSTER_LINK_PROGRAM_OUTPUT_BYTES),
                                    "a name of NAME_MAX bytes with another link", 0);
             unlink(longest_bytes);
             unlink(other.pointer);
@@ -2348,7 +2416,7 @@ static bool executable_test_files(const ExecutableTestDirectory* directory, uint
         {
             written = executable_test_write(&large.link, large.entry, path, 1, &result, 0, 0);
             executable_test_expect(&tally, written && result.write == EXECUTABLE_WRITE_RENAMED && stat(path.pointer, &status) == 0 && status.st_uid == geteuid() &&
-                                               executable_test_runs(path.pointer, large.output, BUSTER_LINK_PROGRAM_OUTPUT_BYTES),
+                                               executable_test_runs_fixture(directory, path.pointer, large.output, BUSTER_LINK_PROGRAM_OUTPUT_BYTES),
                                    "someone else's file renamed over", 0);
         }
 
@@ -2709,7 +2777,7 @@ static bool executable_test_limits(const ExecutableTestDirectory* directory, uin
     {
         executable_test_fields(&tally, &absent.link, file, 0);
     }
-    executable_test_expect(&tally, written && executable_test_runs(path.pointer, (const uint8_t*)"", 0), "its program runs", 0);
+    executable_test_expect(&tally, written && executable_test_runs_fixture(directory, path.pointer, (const uint8_t*)"", 0), "its program runs", 0);
     executable_test_link_end(&absent);
 
     // TLS blocks: exactly 2 GB fits, and more doesn't, from atoms of at most 2 GB each; nor does one .tbss atom over
@@ -2749,7 +2817,7 @@ static bool executable_test_limits(const ExecutableTestDirectory* directory, uin
             written = executable_test_write(&zero_fill.link, zero_fill_start, path, executable_test_lane_counts[l], &result, 0, 0);
             const String8 file = written ? executable_test_read(scratch.arena, path.pointer) : (String8){ 0 };
             expected = expected && written && file.pointer != 0 && executable_test_zero_fill_file(&zero_fill.link, file, total, cases[c].class == BUSTER_LINK_CLASS_TBSS) &&
-                       executable_test_runs(path.pointer, (const uint8_t*)"", 0);
+                       executable_test_runs_fixture(directory, path.pointer, (const uint8_t*)"", 0);
         }
         if (cases[c].fits)
         {
@@ -2786,7 +2854,7 @@ static bool executable_test_limits(const ExecutableTestDirectory* directory, uin
     {
         unlink(path.pointer);
         const bool written = executable_test_write(&far_linker.link, far_start, path, executable_test_lane_counts[l], &result, 0, 0);
-        far_near = far_near && written && executable_test_runs(path.pointer, (const uint8_t*)"", 0);
+        far_near = far_near && written && executable_test_runs_fixture(directory, path.pointer, (const uint8_t*)"", 0);
     }
     executable_test_expect(&tally, far_near, "a PC32 whose distance reaches a target past 2 GiB links and runs", 0);
     executable_test_link_end(&far_linker);
@@ -2897,7 +2965,7 @@ static bool executable_test_limits(const ExecutableTestDirectory* directory, uin
             wrong = !clean && wrong == UINT64_MAX ? room : wrong;
         }
         executable_test_expect(&tally, wrong == UINT64_MAX, "a lane short of memory fails the link with no output", wrong);
-        executable_test_expect(&tally, succeeded && executable_test_runs(path.pointer, program.output, BUSTER_LINK_PROGRAM_OUTPUT_BYTES), "then succeeds with room enough",
+        executable_test_expect(&tally, succeeded && executable_test_runs_fixture(directory, path.pointer, program.output, BUSTER_LINK_PROGRAM_OUTPUT_BYTES), "then succeeds with room enough",
                                lanes);
     }
     if (generated)
@@ -3628,7 +3696,7 @@ static bool executable_test_unwind_small(ExecutableTestLink* test, SymbolId* sta
 // Writes `link` with every lane count, each from zeroed fields over the last file
 // scribbled over: whether every write succeeded into the same file, which runs, and whose unwind tables keep
 // executable_test_unwind's rules (with the functions of units below `units`). *result gets the first write's.
-static bool executable_test_unwind_writes(ExecutableTestTally* tally, Link* link, SymbolId entry, String8 path, uint32_t units, const char* what, ExecutableResult* result)
+static bool executable_test_unwind_writes(const ExecutableTestDirectory* directory, ExecutableTestTally* tally, Link* link, SymbolId entry, String8 path, uint32_t units, const char* what, ExecutableResult* result)
 {
     Scratch scratch = scratch_begin(0);
     String8 first = { 0 };
@@ -3656,7 +3724,7 @@ static bool executable_test_unwind_writes(ExecutableTestTally* tally, Link* link
     executable_test_expect(tally, same, what, 0);
     const char* failed = first.pointer != 0 ? executable_test_unwind(link, first, BUSTER_EXECUTABLE_BASE, units, result) : "the first write";
     executable_test_expect(tally, failed == 0, failed != 0 ? failed : what, 0);
-    const bool ran = first.pointer != 0 && executable_test_runs(path.pointer, (const uint8_t*)"", 0);
+    const bool ran = first.pointer != 0 && executable_test_runs_fixture(directory, path.pointer, (const uint8_t*)"", 0);
     executable_test_expect(tally, ran, "the program runs", 0);
     scratch_end(scratch);
     return same && failed == 0 && ran;
@@ -3703,7 +3771,7 @@ static bool executable_test_load_layout(const ExecutableTestDirectory* directory
                                "requested writable segments are present and all others absent", mask);
         executable_test_expect(&tally, wrote && executable_test_load_gaps(file, BUSTER_EXECUTABLE_BASE) &&
                                executable_test_build_id(scratch.arena, file, boundaries, written.chunks), "mapping gaps participate in the build ID", mask);
-        executable_test_expect(&tally, built && executable_test_unwind_writes(&tally, &test.link, start, path, 0, "poisoned lane identity", &written),
+        executable_test_expect(&tally, built && executable_test_unwind_writes(directory, &tally, &test.link, start, path, 0, "poisoned lane identity", &written),
                                "present and absent writable segments", mask);
         executable_test_link_end(&test);
     }
@@ -3735,7 +3803,7 @@ static bool executable_test_unwind_links(const ExecutableTestDirectory* director
     executable_test_expect(&tally, built, "the functions' program", 0);
     if (built)
     {
-        executable_test_unwind_writes(&tally, &test.link, start, path, UINT32_MAX, "functions out of their FDEs' order", &result);
+        executable_test_unwind_writes(directory, &tally, &test.link, start, path, UINT32_MAX, "functions out of their FDEs' order", &result);
         executable_test_expect(&tally, result.fdes == BUSTER_EXECUTABLE_TEST_UNWIND_FUNCTIONS + 1 && !result.fdes_in_order, "every FDE, out of order", result.fdes);
         printf("  functions out of their FDEs' order: %llu FDEs in %u atoms, %s\n", (unsigned long long)result.fdes, BUSTER_EXECUTABLE_TEST_UNWIND_ATOMS,
                result.fdes_in_order ? "in order" : "sorted");
@@ -3750,7 +3818,7 @@ static bool executable_test_unwind_links(const ExecutableTestDirectory* director
     // function are, which the addend doesn't change.
     AtomId frame_atom = 0;
     built = frames != 0 && executable_test_unwind_small(&test, &start, frames, 0, false, &frame_atom);
-    const bool learned = built && executable_test_unwind_writes(&tally, &test.link, start, path, UINT32_MAX, "an FDE for each function", &result);
+    const bool learned = built && executable_test_unwind_writes(directory, &tally, &test.link, start, path, UINT32_MAX, "an FDE for each function", &result);
     String8 file = learned ? executable_test_read(scratch.arena, path.pointer) : (String8){ 0 };
     const ExecutableTestImage image = executable_test_image(file);
     const Elf64_Shdr* header = executable_test_section(&image, ".eh_frame_hdr");
@@ -3768,7 +3836,7 @@ static bool executable_test_unwind_links(const ExecutableTestDirectory* director
     {
         const int64_t at_limit = (int64_t)INT32_MAX + (int64_t)header->sh_addr - function;
         built = executable_test_unwind_small(&test, &start, frames, at_limit, false, &frame_atom);
-        executable_test_expect(&tally, built && executable_test_unwind_writes(&tally, &test.link, start, path, 0, "an initial location at INT32_MAX", &result), "at INT32_MAX", 0);
+        executable_test_expect(&tally, built && executable_test_unwind_writes(directory, &tally, &test.link, start, path, 0, "an initial location at INT32_MAX", &result), "at INT32_MAX", 0);
         executable_test_link_end(&test);
         built = executable_test_unwind_small(&test, &start, frames, at_limit + 1, false, &frame_atom);
         if (built)
@@ -3778,7 +3846,7 @@ static bool executable_test_unwind_links(const ExecutableTestDirectory* director
         executable_test_link_end(&test);
         built = executable_test_unwind_small(&test, &start, frames, (int64_t)INT32_MIN - 1, false, &frame_atom);
         executable_test_expect(&tally, built && test.link.fixups.wide_count > 1, "a wide addend", 0);
-        executable_test_expect(&tally, built && executable_test_unwind_writes(&tally, &test.link, start, path, 0, "an initial location from a wide addend", &result),
+        executable_test_expect(&tally, built && executable_test_unwind_writes(directory, &tally, &test.link, start, path, 0, "an initial location from a wide addend", &result),
                                "from a wide addend", 0);
         executable_test_link_end(&test);
     }
@@ -3976,7 +4044,7 @@ static bool executable_test_blocks(const ExecutableTestDirectory* directory, uin
             ExecutableResult result;
             if (built)
             {
-                executable_test_unwind_writes(&tally, &test.link, start, path, 0, "every lane count writes the same file", &result);
+                executable_test_unwind_writes(directory, &tally, &test.link, start, path, 0, "every lane count writes the same file", &result);
             }
             executable_test_link_end(&test);
         }
@@ -4193,10 +4261,13 @@ static bool executable_test_bound_sections(const ExecutableTestDirectory* direct
         executable_test_expect(&tally, written && link->symbols.reference[starts[3]] == (uint32_t)(0 - BUSTER_EXECUTABLE_BASE) &&
                                            link->symbols.source[starts[3]] == BUSTER_LINK_SOURCE_NONE,
                                "a weak reference to a missing section is 0", lanes);
-        executable_test_expect(&tally, written && executable_test_runs(path.pointer, (const uint8_t*)"", 0), "the executable runs", lanes);
+        executable_test_expect(&tally, written && executable_test_runs_fixture(directory, path.pointer, (const uint8_t*)"", 0), "the executable runs", lanes);
     }
     scratch_end(scratch);
-    unlink(path.pointer);
+    if (!directory->keep)
+    {
+        unlink(path.pointer);
+    }
     executable_test_link_end(&test);
     return executable_test_report(&tally);
 }
@@ -4244,8 +4315,10 @@ static int run_executable_tests(int argc, char** argv)
     uint64_t seed = 1;
     uint64_t id_order = 153;
     uint64_t functions = BUSTER_EXECUTABLE_TEST_DEFAULT_FUNCTIONS;
-    const char* parent = oracle_temporary_directory();
-    bool keep = false;
+    const char* profile_variable;
+    const char* profile_directory = test_profile_directory(&profile_variable);
+    const char* parent = profile_directory != 0 ? profile_directory : oracle_temporary_directory();
+    bool keep = profile_directory != 0;
     bool valid = true;
     for (int i = 0; i < argc; i += 1)
     {
@@ -4286,6 +4359,10 @@ static int run_executable_tests(int argc, char** argv)
     if (!valid)
     {
         fprintf(stderr, "usage: test-executable [--seed N] [--id-order N] [--functions N] [--directory PATH] [--keep]\n");
+    }
+    else if (profile_directory != 0 && profile_directory[0] != '/')
+    {
+        fprintf(stderr, "test-executable: %s must be an existing writable absolute directory: %s\n", profile_variable, profile_directory);
     }
     else if (length <= 0 || (uint64_t)length + 64 >= sizeof(directory.path) || mkdtemp(directory.path) == 0)
     {
