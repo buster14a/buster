@@ -711,6 +711,14 @@ collector always upload those ledgers as
 `vector-OOPT-ATTEMPT-rest-collect-LEVEL`. The verdict totals this attempt's
 ledgers, checks that completed draw/assignment records have ledgers, enforces
 the first-attempt ceiling and reports the before/after header observations.
+A ledger is its job's last upload, and the verdict job starts as the last job
+ends, sooner than the run's listing names what that job uploaded: on
+2026-11-24 a merge-queue verdict's download listed 31 of the fuzz row's 32
+records, all but the last candidate's ledger, and failed. So before its
+download the verdict job waits (`vector-draw.sh settle`, through the runtime
+action, listing every 2 s for at most 180 s) until the listing names every
+ledger the verdict requires of the records it lists; past that it warns, and
+the verdict fails what is still missing.
 The local request count is exact; the header delta includes other workflows
 sharing the token. If the quota window changed, it reports both observations
 without claiming a comparable delta.
@@ -780,8 +788,9 @@ assigned. Its control round uploads one name from every racer at once and
 reports how many succeeded. `bash tests/ci/vector-draw.sh` tests the script's
 collector, candidates (reruns among them), a pool's order, the product waits
 (an earlier attempt's product, a rerun builder's, a builder that ended without
-one, an item 1 no draw can assign), request budgets, quota guards, back-off and
-the verdict against fake runtime and REST services. The PR's `evidence` job
+one, an item 1 no draw can assign), request budgets, quota guards, back-off,
+the verdict's wait for the listing and the verdict against fake runtime and
+REST services. The PR's `evidence` job
 runs it and `node tests/ci/vector-runtime.cjs`, which verifies the runtime
 wire contract, duplicate/all-attempt semantics, malformed responses,
 completeness bound, secret-safe errors and shell action hand-off.
