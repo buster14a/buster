@@ -281,7 +281,7 @@ median from 40.59 to 15.52 ms. The campaign used three balanced rounds on
 CPU 2 with the original issue inputs. The three controls took the opaque
 route. On the intrinsic workload, one of 14,837 user-cycle samples in the
 compiler fell on the sparse macro-run search.
-[9700X timings, controls and profile](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/lazy-system-headers-1364-2026-11-24).
+[9700X timings, controls and profile](https://github.com/buster14a/buster-performance/tree/dd263b0b017f3a5d9969ffc0d80a5a0acca51289/docs/measurements/lazy-system-headers-1364-2026-11-24).
 
 Unsupported source constructs produce an explicit diagnostic. `-c` also
 requires the checked program to be representable by the current backend; a

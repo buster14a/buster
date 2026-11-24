@@ -8314,7 +8314,17 @@ static void check_test_driver_lazy(CheckTest* test, const char* clang, const cha
         check_test_expect(test, ready && oracle.rejected == fixtures[fixture].rejected, fixtures[fixture].name);
         if (ready && executable != NULL && fixtures[fixture].history_row != NULL)
         {
-            char* timed[] = { (char*)executable, "-std=gnu17", "-w", "-flazy-system-headers", "-fsyntax-only", "--time-stages", source, NULL };
+            char* timed[] =
+            {
+                (char*)executable,
+                "-std=gnu17",
+                "-w",
+                "-flazy-system-headers",
+                "-fsyntax-only",
+                "--time-stages",
+                source,
+                NULL,
+            };
             char* text = NULL;
             const int status = check_test_driver_spawn(timed, &text);
             check_test_expect(test, status == 0 && text != NULL && strstr(text, fixtures[fixture].history_row) != NULL, fixtures[fixture].name);
