@@ -1458,7 +1458,7 @@ sources/multiversioning: cpu_specific versions and their dispatcher (#1447)@bbe3
 sources/multiversioning: inline nonnull beside target default@a81bbb1a	bef5d3882461c335
 sources/multiversioning: nothrow beside target default@36b3e01a	a33908e89e264cd1
 sources/multiversioning: used beside target default@b0891195	a33908e89e264cd1
-sources/musttail: GNU's noreturn and C11's _Noreturn callees@076492f9	baeab23722ca80d3
+sources/musttail: GNU's noreturn and C11's _Noreturn callees@076492f9	6cbefc8e49a7f1db
 sources/musttail: GNU's other spelling@fd05112f	68e3b69ff7ff7610
 sources/musttail: _Generic's call@ce0664a1	0082c4d53133fbc7
 sources/musttail: __extension__'s call@9b1bc428	9ac03feba258ec1d

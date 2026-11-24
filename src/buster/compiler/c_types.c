@@ -246,7 +246,10 @@ _Static_assert(BUSTER_TYPE_KIND_QUALIFIED == BUSTER_TYPE_KIND_ALIGNED + 1 && BUS
 // almost every function, has neither the bit nor the words, and is hashed, stored and compared as it was when the
 // convention was three flag bits, all of whose values were taken (#1447).
 #define BUSTER_TYPE_FLAG_FUNCTION_INFO 0x20
-#define BUSTER_TYPE_FLAG_FUNCTION_KEY (BUSTER_TYPE_FLAG_KEY | BUSTER_TYPE_FLAG_FUNCTION_INFO)
+// GNU noreturn is part of a function type. The same bit on a record denotes a flexible member.
+#define BUSTER_TYPE_FLAG_NORETURN 0x40
+#define BUSTER_TYPE_FUNCTION_FLAGS (BUSTER_TYPE_FLAG_KEY | BUSTER_TYPE_FLAG_NORETURN)
+#define BUSTER_TYPE_FLAG_FUNCTION_KEY (BUSTER_TYPE_FUNCTION_FLAGS | BUSTER_TYPE_FLAG_FUNCTION_INFO)
 #define BUSTER_TYPE_FUNCTION_ABI_MASK 0xffu
 #define BUSTER_TYPE_FUNCTION_PARAMETER_ABIS 0x100u
 // A prototype's cfi_salt (#1447, clang's FunctionProtoType CFI salt, part of its type's identity): an id of the salt's
@@ -2940,7 +2943,7 @@ static TypeId type_function_full(TypeTable* table, TypeId result_type, const Typ
     }
     // (The convention in the low byte, a prototype's cfi_salt above BUSTER_TYPE_FUNCTION_SALT_SHIFT, #1447.)
     const uint32_t salt = (uint32_t)abi >> BUSTER_TYPE_FUNCTION_SALT_SHIFT;
-    const bool valid = (flags & ~BUSTER_TYPE_FLAG_KEY) == 0 && type_function_abi_valid((uint32_t)abi & BUSTER_TYPE_FUNCTION_ABI_MASK) &&
+    const bool valid = (flags & ~BUSTER_TYPE_FUNCTION_FLAGS) == 0 && type_function_abi_valid((uint32_t)abi & BUSTER_TYPE_FUNCTION_ABI_MASK) &&
                        ((uint32_t)abi & BUSTER_TYPE_FUNCTION_PARAMETER_ABIS) == 0 && (salt == 0 || (flags & BUSTER_TYPE_FLAG_PROTOTYPE) != 0) &&
                        (count == 0 || parameters != 0) && abis_valid;
     const bool info = abi != TYPE_FUNCTION_ABI_SYSV || any;
@@ -3038,6 +3041,31 @@ static TypeId type_function_like(TypeTable* table, TypeId result_type, const Typ
     else
     {
         result = type_function_full(table, result_type, parameters, count, flags, abi, 0);
+    }
+    return result;
+}
+
+// The call designator may still be a function lvalue or may have decayed to a pointer.
+static __attribute__((unused)) bool type_callee_noreturn(const TypeTable* table, TypeId type)
+{
+    TypeId function = type_strip_aligned(table, type);
+    if (type_kind(table, function) == BUSTER_TYPE_KIND_POINTER)
+    {
+        function = type_strip_aligned(table, type_element(table, function));
+    }
+    return type_kind(table, function) == BUSTER_TYPE_KIND_FUNCTION && (table->types.flags[type_index(function)] & BUSTER_TYPE_FLAG_NORETURN) != 0;
+}
+
+static __attribute__((unused)) TypeId type_function_set_noreturn(TypeTable* table, TypeId function, bool noreturn)
+{
+    const uint8_t flags = table->types.flags[type_index(function)] & BUSTER_TYPE_FUNCTION_FLAGS;
+    TypeId result = function;
+    if (((flags & BUSTER_TYPE_FLAG_NORETURN) != 0) != noreturn)
+    {
+        uint32_t count = 0;
+        const TypeId* parameters = type_parameters(table, function, &count);
+        const uint8_t changed = flags ^ BUSTER_TYPE_FLAG_NORETURN;
+        result = type_function_like(table, type_return(table, function), parameters, count, changed, type_function_abi_kind(table, function), function);
     }
     return result;
 }
@@ -5914,8 +5942,10 @@ static TypeId type_merge_finish(TypeTable* table, TypeId left, TypeId right, con
         const uint8_t right_flags = table->types.flags[type_index(r)];
         const bool left_prototype = (left_flags & BUSTER_TYPE_FLAG_PROTOTYPE) != 0;
         const bool right_prototype = (right_flags & BUSTER_TYPE_FLAG_PROTOTYPE) != 0;
-        bool all_left = type_answer_yes(type_canonical_compare(table, merged, table->types.base[type_index(l)], canonical, arena), &full);
-        bool all_right = !full && type_answer_yes(type_canonical_compare(table, merged, table->types.base[type_index(r)], canonical, arena), &full);
+        // A redeclaration inherits a noreturn function type in either order.
+        const uint8_t noreturn = (left_flags | right_flags) & BUSTER_TYPE_FLAG_NORETURN;
+        bool all_left = (left_flags & BUSTER_TYPE_FLAG_NORETURN) == noreturn && type_answer_yes(type_canonical_compare(table, merged, table->types.base[type_index(l)], canonical, arena), &full);
+        bool all_right = (right_flags & BUSTER_TYPE_FLAG_NORETURN) == noreturn && !full && type_answer_yes(type_canonical_compare(table, merged, table->types.base[type_index(r)], canonical, arena), &full);
         uint32_t count = 0;
         const TypeId* left_parameters = type_parameters(table, l, &count);
         const TypeId* right_parameters = type_parameters(table, r, &count);
@@ -5946,17 +5976,17 @@ static TypeId type_merge_finish(TypeTable* table, TypeId left, TypeId right, con
         }
         else if (left_prototype && right_prototype)
         {
-            result = type_function_like(table, merged, results + 1, count, left_flags & BUSTER_TYPE_FLAG_KEY, type_function_abi_kind(table, l), l);
+            result = type_function_like(table, merged, results + 1, count, (left_flags & BUSTER_TYPE_FLAG_KEY) | noreturn, type_function_abi_kind(table, l), l);
         }
         else if (left_prototype || right_prototype)
         {
             const TypeId prototype = left_prototype ? l : r;
             const TypeId* parameters = type_parameters(table, prototype, &count);
-            result = type_function_like(table, merged, parameters, count, table->types.flags[type_index(prototype)] & BUSTER_TYPE_FLAG_KEY, type_function_abi_kind(table, prototype), prototype);
+            result = type_function_like(table, merged, parameters, count, (table->types.flags[type_index(prototype)] & BUSTER_TYPE_FLAG_KEY) | noreturn, type_function_abi_kind(table, prototype), prototype);
         }
         else
         {
-            result = type_function_abi(table, merged, 0, 0, 0, type_function_abi_kind(table, l));
+            result = type_function_abi(table, merged, 0, 0, noreturn, type_function_abi_kind(table, l));
         }
     }
     if (full)

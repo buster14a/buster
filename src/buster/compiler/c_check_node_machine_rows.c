@@ -184,10 +184,7 @@ _Static_assert(BUSTER_NODE_ROWS_MASK_LISTED > BUSTER_NODE_CONTEXTS_MASK_WIDE && 
 _Static_assert((BUSTER_NODE_ROWS_SENSE_TOP & (BUSTER_NODE_ROWS_SENSE_TRUE | BUSTER_NODE_ROWS_SENSE_OWNED | BUSTER_NODE_ROWS_SENSE_JUMPED)) == 0 &&
                BUSTER_NODE_ROWS_SENSE_JUMPED == 4, "a record's sense's byte has a bit each, and the jump's is its third (node_rows_window_values)");
 
-// A name's leaf's declaration's line's byte (NodeFactsReader.window_x_lines, which the tests' sweep copies beside the
-// records' bytes: c_check_node_census.c's BUSTER_NODE_TESTS_LINE_*), as a summary's side facts read it, a function's
-// alone: a plain one, a call of whose name has no fact for the return flow; and one declared noreturn. A function
-// with neither is one whose name is a library's the flow leaves unknown. Another record's byte is zero.
+// Declaration contracts copied into NodeFactsReader.window_x_lines by the tests' sweep.
 #define BUSTER_NODE_ROWS_LINE_PLAIN 0x40u
 #define BUSTER_NODE_ROWS_LINE_STOPS 0x80u
 
@@ -1925,27 +1922,20 @@ struct NodeRowsSummaryCounts
     uint32_t reduced;
 };
 
-// The own return fact of the call at the window's record `call` (check_program_return_call, the flow's rule of a
-// call's node): its callee is a function's name's leaf whose line's byte has one of the two bits, or the call is
-// unknown: one through a value, or of a library's name the flow leaves so. A plain function's call has no fact, and a
-// call of one declared noreturn stops. And a function the unit leaves unknown from one of its declarations on (an
-// analyzer_noreturn, an ignored noreturn: check_program_return_unknowns' table) is unknown at a use after that
-// declaration. (The flow reads a callee through `*` and `&` to a function's name: C lists an expression that calls
-// `*f` or `&f` of one, and a name's leaf with no line lists its expression too. Such a call's fact is no one's.)
+// The window retains the callee's checked type for every taken expression. A name
+// additionally carries the declaration contracts used by check_program_return_call.
 static __attribute__((noinline)) uint8_t node_rows_summary_call(const struct NodeFactsReader* state, const NodeFront* front, uint32_t call)
 {
     const uint32_t callee = call - front->window_left[call];
     const uint8_t line = state->window_x_lines[callee];
-    const bool function = (line & (BUSTER_NODE_ROWS_LINE_PLAIN | BUSTER_NODE_ROWS_LINE_STOPS)) != 0;
-    const uint32_t* unknowns = state->types->return_unknowns;
-    const bool known = function && (__builtin_expect(unknowns == NULL, 1) || unknowns[(uint32_t)state->window_x_values[callee]] >= front->tokens[callee]);
-    return (uint8_t)(!known ? BUSTER_CHECK_RETURN_UNKNOWN : (line & BUSTER_NODE_ROWS_LINE_STOPS) != 0 ? BUSTER_CHECK_RETURN_STOPS : 0u);
+    const bool stops = (line & BUSTER_NODE_ROWS_LINE_STOPS) != 0 || type_callee_noreturn(state->reader->types, state->window_x_types[callee]);
+    return stops ? BUSTER_CHECK_RETURN_STOPS : 0;
 }
 
 // The return fact of the expression whose operand's records are the window's `first` to `last`, by the flow's
 // reduction (check_program_return_node), a record at a time up the postorder: a call's own fact and its operands'
-// joined; and an `&&`, an `||` or a `?:` keeps its condition's fact, an unknown of either arm, and a stop where both
-// arms of a `?:` stop. (A taken expression has no operand that is not evaluated for a known condition, which C lists;
+// joined; and an `&&`, an `||` or a `?:` keeps its condition's fact and the possible or guaranteed stop of its arms.
+// (A taken expression has no operand that is not evaluated for a known condition, which C lists;
 // and no `sizeof`, whose token the front leaves to the walk.) For the expressions with a call that stops and one of
 // those three operators alone: any other's fact is its calls' own facts together, since an unknown goes up through
 // every operator and a stop through every other one.
@@ -1964,8 +1954,7 @@ static __attribute__((noinline, cold)) uint8_t node_rows_summary_reduce(struct N
             const uint8_t condition = facts[x - front->window_left[x]];
             const uint8_t yes = facts[x - front->window_right[x]];
             const uint8_t no = third != 0 ? facts[x - third] : 0;
-            const uint8_t both = op == CHECK_OP_CONDITIONAL ? (uint8_t)(yes & no & BUSTER_CHECK_RETURN_STOPS) : 0;
-            fact = (uint8_t)(condition | ((yes | no) & BUSTER_CHECK_RETURN_UNKNOWN) | both);
+            fact = condition | check_return_alternatives(yes, no);
         }
         else
         {
