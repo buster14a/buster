@@ -17759,9 +17759,8 @@ static uint32_t check_input_rare_verify(const CheckInputReader* reader)
 typedef struct CheckAttested CheckAttested;
 static const uint64_t* check_attested_skips(const CheckAttested* attested);
 static const uint8_t* check_attested_token_levels(const CheckAttested* attested);
-static bool check_attested_tree_columns(CheckAttested* census, const uint32_t* parents, uint32_t count, uint32_t* last_children, uint32_t* before,
-                                        uint32_t* postorder, uint32_t* positions, uint32_t* ends, uint32_t* first_children, uint32_t* next_siblings,
-                                        uint32_t* starts, uint32_t* sizes, Arena* scratch);
+static bool check_attested_tree_columns(CheckAttested* census, const uint32_t* parents, uint32_t count, uint32_t* postorder, uint32_t* positions,
+                                        uint32_t* ends, uint32_t* first_children, uint32_t* next_siblings, uint32_t* sizes, Arena* scratch);
 static void check_attested_events(CheckAttested* census, Preprocessor* pp, const CBindings* bindings, const uint32_t* completions, const TypeTable* types, uint32_t count);
 
 // The tokens of the declarations that attested declarations skip (#2531, c_check_attested.c's marks: a bit a token, 64
@@ -18087,8 +18086,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     reader.warning_index = valid ? arena_push_array(scratch, (uint64_t)reader.warning_index_base * 2, sizeof(uint16_t), 64) : 0;
     valid &= reader.warning_index != 0;
     // The tree's traversal: the parser's where it derived it (parse_tree_columns), else the reader's own, in its scratch,
-    // derived below once the columns are reserved: five columns with room for parse_tree_columns' sentinel, and the
-    // passes' two temporaries, pushed last.
+    // derived below in five columns with room for the sentinel.
     const bool derived = parser->postorder != 0 && parser->positions != 0 && parser->ends != 0 && parser->first_children != 0 && parser->next_siblings != 0;
     const uint64_t slots = (uint64_t)count + 1;
     uint32_t* traversal = derived || !valid ? 0 : arena_push_array(scratch, 5 * slots, sizeof(uint32_t), 64);
@@ -18278,14 +18276,6 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
             memset(reader.transparent_unions, 0, (uint64_t)types->tags.capacity * sizeof(uint32_t));
         }
     }
-    // The traversal's temporaries, last on the scratch and popped once it is derived, so that the passes after it take
-    // their pages.
-    const uint64_t traversal_mark = scratch->length;
-    const uint64_t temporary_columns = (traversal != 0 ? 2u : 0u) + (sizes != 0 ? 1u : 0u);
-    uint32_t* const temporaries = temporary_columns != 0 && valid ? arena_push_array(scratch, temporary_columns * slots, sizeof(uint32_t), 64) : 0;
-    uint32_t* const starts = sizes != 0 && temporaries != 0 ? temporaries + (traversal != 0 ? 2 * slots : 0) : 0;
-    valid &= temporary_columns == 0 || temporaries != 0;
-
     if (valid && !output_zero)
     {
         // The output arena's columns whose empty value is zero, where its pages may hold what something wrote before.
@@ -18336,42 +18326,36 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         check_input_output_none(input, &reader, count);
         if (traversal != 0)
         {
-            // The views of c_check_prefix.c and c_check_repair.c bring their postorder, the rest is derived from it;
-            // otherwise, the C driver's tree_only parse, all of it in parse_tree_columns' three passes.
+            // The prefix and repair views bring their postorder. The ordinary tree_only parse needs all columns.
             if (parser->postorder != 0)
             {
-                if (parser->postorder == 0)
-                {
-                    parse_postorder(parser->tree.parents, count, temporaries, traversal);
-                }
                 parse_tree_links(parser->tree.parents, reader.postorder, count, traversal + slots, traversal + 2 * slots, traversal + 3 * slots, traversal + 4 * slots);
             }
             else if (attested == NULL ||
-                     !check_attested_tree_columns(attested, parser->tree.parents, count, temporaries, temporaries + slots, traversal, traversal + slots,
-                                                  traversal + 2 * slots, traversal + 3 * slots, traversal + 4 * slots, starts, sizes, scratch))
+                     !check_attested_tree_columns(attested, parser->tree.parents, count, traversal, traversal + slots,
+                                                  traversal + 2 * slots, traversal + 3 * slots, traversal + 4 * slots, sizes, scratch))
             {
                 // (Attested declarations' cache gives a cached declaration's columns, c_check_attested.c's
                 // check_attested_tree_columns, its own made as these are.)
-                parse_tree_columns(parser->tree.parents, count, temporaries, temporaries + slots, traversal, traversal + slots, traversal + 2 * slots,
-                                   traversal + 3 * slots, traversal + 4 * slots, starts, sizes);
+                parse_tree_columns(parser->tree.parents, count, traversal, traversal + slots, traversal + 2 * slots,
+                                   traversal + 3 * slots, traversal + 4 * slots, sizes);
             }
         }
         if (sizes != 0 && (traversal == 0 || parser->postorder != 0))
         {
-            // The prefix/repair traversal already exists. Source order gives an earlier first child's start before its
-            // parent, exactly as parse_tree_columns' size publication does.
+            // The prefix/repair traversal already exists. An earlier first child already published its size,
+            // so its end and size give the parent's start without another column.
             for (uint32_t token = 0; token < count; token += 1)
             {
                 const uint32_t first = reader.first_child[token];
-                starts[token] = first < token ? starts[first] : token;
-                sizes[reader.postorder_positions[token]] = reader.ends[token] - starts[token] + 1;
+                const uint32_t start = first < token ? reader.ends[first] + 1 - sizes[reader.postorder_positions[first]] : token;
+                sizes[reader.postorder_positions[token]] = reader.ends[token] - start + 1;
             }
         }
         if (sizes != 0)
         {
             sizes[count] = 0;
         }
-        arena_pop_to(scratch, traversal_mark);
         // The parser uses SEPARATOR for commas inside any parentheses. The enclosing delimiter distinguishes
         // expression commas from call/declaration separators; only separators inherit that fact from a parent.
         check_input_expression_commas(&reader);

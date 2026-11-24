@@ -1392,7 +1392,7 @@ static bool check_semantic_requirement_types(const Parser* parser, Preprocessor*
     valid &= !needed || (staged.constant_warnings != NULL && reader.builtin_names != NULL && reader.warning_index != NULL);
     if (needed && valid && (reader.first_child == NULL || reader.next_child == NULL || reader.ends == NULL))
     {
-        uint32_t* traversal = BUSTER_ARENA_PUSH_ARRAY(&storage, uint32_t, slots * 7);
+        uint32_t* traversal = BUSTER_ARENA_PUSH_ARRAY(&storage, uint32_t, slots * 5);
         valid = traversal != NULL;
         if (valid)
         {
@@ -1401,8 +1401,7 @@ static bool check_semantic_requirement_types(const Parser* parser, Preprocessor*
             reader.ends = traversal + 2 * slots;
             reader.first_child = traversal + 3 * slots;
             reader.next_child = traversal + 4 * slots;
-            parse_tree_columns(parser->tree.parents, count, traversal + 5 * slots, traversal + 6 * slots,
-                               traversal, traversal + slots, traversal + 2 * slots, traversal + 3 * slots, traversal + 4 * slots, NULL, NULL);
+            parse_tree_columns(parser->tree.parents, count, traversal, traversal + slots, traversal + 2 * slots, traversal + 3 * slots, traversal + 4 * slots, NULL);
         }
     }
     if (needed && valid)
