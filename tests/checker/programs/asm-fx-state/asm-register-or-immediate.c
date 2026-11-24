@@ -1,0 +1,1 @@
+int tested(int n){long p=n;int a,b=n,x=n,y=n;__asm__("leal %c1(%2), %0" : "=r"(a) : "rI"(31), "r"(p));__asm__("addl %1, %0" : "+r"(b) : "rI"(40));__asm__("shll %b1, %0" : "+r"(x) : "cI"(3));__asm__("shll %b1, %0" : "+r"(y) : "cI"(40));int c=n;__asm__("subl %1, %0" : "+r"(c) : "Kr"(-200));return a+b*3+x*5+y+c*7;}

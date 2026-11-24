@@ -1,0 +1,1 @@
+enum E { A=0xffffffff, B, C=_Generic(B,unsigned long:2,default:9) }; _Static_assert(B==4294967296UL && C==2,"successor"); _Static_assert(_Generic(A,unsigned long:1,default:0) && _Generic(C,unsigned long:1,default:0),"completed");

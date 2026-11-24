@@ -1,0 +1,1 @@
+static volatile int seen;static int touch(int n){seen+=(n&3);return seen;}int tested(int n){signed char a=n;unsigned short b=n+5;double d=(double)(n-3)*0.25;int v=((a^b)+(int)d)*3;v+=(n&&touch(n))+(n?touch(2):touch(3));v+=(int)((unsigned)n>>((n&7)+1));v+=(n%13)/((n&7)+1);return v+(_Bool)n;}

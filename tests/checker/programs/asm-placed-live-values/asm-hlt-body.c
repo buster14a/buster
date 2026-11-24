@@ -1,0 +1,1 @@
+static void crash(void){__asm__ volatile("hlt" ::: "memory");}int tested(int n){long a=n,b=n+1,c=n+2;int s=0;for(int i=0;i<4;i++){if(n==123456789)crash();s+=(int)(a*b+c)+i;a+=1;}return s;}

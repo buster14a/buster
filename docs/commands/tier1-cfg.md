@@ -46,6 +46,12 @@ requirements. [Command index](README.md).
 
 ## Liveness storage (#1384)
 
+The forward spill-slot analysis also groups up to 512 values. Its worklist
+propagates losses of current slots through the blocks each group touches.
+A 10,245-block fixture checks the exact sorted lists for 4,098 candidates,
+including loop joins with spills on one or both incoming arms. It gives the
+analysis 768 KiB of scratch and checks rollback on exhaustion.
+
 Phi operands passed only by their defining block, with no ordinary use outside
 it, are excluded from global liveness. Their intervals still reach that block's
 exit, and the forward boundary sweep retains their edge-move sources. Remote

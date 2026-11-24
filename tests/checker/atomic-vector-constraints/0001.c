@@ -1,0 +1,1 @@
+typedef int V __attribute__((vector_size(16)));_Atomic(V) make(V);int f(void){_Atomic(V) a=(V){1,2,3,4};V b=a;_Atomic(V) c=make(b);V d=c;return b[0]+d[0];}

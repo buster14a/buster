@@ -1,0 +1,1 @@
+static long both(long m, long double* x){__asm__("paddd %0, %0\n\tfsqrt" : "+y"(m), "+t"(*x));__asm__ volatile("emms");return m;}int tested(int n){long double x=(long double)(n*n);long m=both(n*3+1,&x);unsigned char b[10];__builtin_memcpy(b,&x,10);int s=0;for(int i=0;i<10;i++)s=s*31+b[i];return (int)m+s;}

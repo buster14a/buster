@@ -1,0 +1,5 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+long-double-classification-encodings	long-double-classification-encodings.c	-	long-double-classification-encodings
+long-double-fabsl-and-fpclassify-selectors	long-double-fabsl-and-fpclassify-selectors.c	-	long-double-fabsl-and-fpclassify-selectors
+long-double-fenv-classification-and-exceptions	long-double-fenv-classification-and-exceptions.c	-	long-double-fenv-classification-and-exceptions

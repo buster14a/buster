@@ -1,0 +1,12 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+asm-x87-named	asm-x87-named.c	-	asm-x87-named
+# A's operands (#1846): an __int128 in rdx:rax, mulq's product beside an "a" input that shares rax, a `+` pair, a
+# pair's input matching its output, and 64-bit and narrower values in rax, printed by their 64-bit names (an
+# unsigned zero-extended there, and a short's), a double's bits among them.
+asm-pair	asm-pair.c	-	asm-pair
+asm-pair-directives	asm-pair-directives.c	-	asm-pair-directives
+# MMX's operands (#1846): y's registers of a long, an unsigned, a short and a byte (zero-extended into the register,
+# its low bytes stored), a double's bits, an early-clobbered output, a matching input, MMX clobbers the
+# registers avoid, an MMX input into a general output, and a template of no instructions; emms before returning.
+asm-mmx	asm-mmx.c	-	asm-mmx

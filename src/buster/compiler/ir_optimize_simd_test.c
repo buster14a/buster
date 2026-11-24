@@ -528,23 +528,24 @@ static __attribute__((noinline)) uint64_t ir_optimize_test_float_hardware(uint32
             }
             break;
         case IR_FPTOSI:
+            // The integer result is written before the final MXCSR memory operands are used.
             if (single)
             {
-                __asm__ volatile("ldmxcsr %[control]\n\tcvttss2siq %[x], %[v]\n\tstmxcsr %[status]\n\tldmxcsr %[saved]" : [v] "=r"(integer), [status] "=m"(status) : [x] "x"(x), [control] "m"(control), [saved] "m"(saved));
+                __asm__ volatile("ldmxcsr %[control]\n\tcvttss2siq %[x], %[v]\n\tstmxcsr %[status]\n\tldmxcsr %[saved]" : [v] "=&r"(integer), [status] "=m"(status) : [x] "x"(x), [control] "m"(control), [saved] "m"(saved));
             }
             else
             {
-                __asm__ volatile("ldmxcsr %[control]\n\tcvttsd2siq %[x], %[v]\n\tstmxcsr %[status]\n\tldmxcsr %[saved]" : [v] "=r"(integer), [status] "=m"(status) : [x] "x"(x), [control] "m"(control), [saved] "m"(saved));
+                __asm__ volatile("ldmxcsr %[control]\n\tcvttsd2siq %[x], %[v]\n\tstmxcsr %[status]\n\tldmxcsr %[saved]" : [v] "=&r"(integer), [status] "=m"(status) : [x] "x"(x), [control] "m"(control), [saved] "m"(saved));
             }
             break;
         case IR_FPTOUI:
             if (single)
             {
-                __asm__ volatile("ldmxcsr %[control]\n\tvcvttss2usiq %[x], %[v]\n\tstmxcsr %[status]\n\tldmxcsr %[saved]" : [v] "=r"(integer), [status] "=m"(status) : [x] "x"(x), [control] "m"(control), [saved] "m"(saved));
+                __asm__ volatile("ldmxcsr %[control]\n\tvcvttss2usiq %[x], %[v]\n\tstmxcsr %[status]\n\tldmxcsr %[saved]" : [v] "=&r"(integer), [status] "=m"(status) : [x] "x"(x), [control] "m"(control), [saved] "m"(saved));
             }
             else
             {
-                __asm__ volatile("ldmxcsr %[control]\n\tvcvttsd2usiq %[x], %[v]\n\tstmxcsr %[status]\n\tldmxcsr %[saved]" : [v] "=r"(integer), [status] "=m"(status) : [x] "x"(x), [control] "m"(control), [saved] "m"(saved));
+                __asm__ volatile("ldmxcsr %[control]\n\tvcvttsd2usiq %[x], %[v]\n\tstmxcsr %[status]\n\tldmxcsr %[saved]" : [v] "=&r"(integer), [status] "=m"(status) : [x] "x"(x), [control] "m"(control), [saved] "m"(saved));
             }
             break;
         case IR_FEXT:

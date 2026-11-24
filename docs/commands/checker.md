@@ -66,6 +66,11 @@ unused-warning fixtures also check exact scope-completion tokens.
   does, at clang's places (#1127), and only a refusal runs them; a constant
   before a unit's first syntax error, which only the parse reached, is checked
   first, so that its error is clang's first (`c_checker_driver.c`);
+  after a missing statement terminator or a malformed record member, the
+  diagnostic reparse also retains completed expression operands, array bounds
+  and bit-field widths for lookup in their original scope (#1249). A misplaced
+  member bracket keeps its source location and is diagnosed after its bound.
+  The original parse failure still prevents object emission;
   its expression graph's walk has a vector path, the coded walk
   (`c_check_expression_input.c`, #1038), which acts at the compacted tokens by
   each one's class, numbers their nodes into a batch whose columns it writes 16
@@ -384,11 +389,12 @@ unused-warning fixtures also check exact scope-completion tokens.
   `--part K/N` runs the K-th of N parts that the default run's sections and `check_test_programs`' programs are dealt
   to in turn (`CheckTestPart`); part 1 also runs the sections that share the run's type table and graph arenas.
   `--program-selection` selects the emission-selection, constant-if and constant-switch regressions alone.
-  Set `BUSTER_CHECKER_PROFILE_DIR` to an existing writable absolute directory when profiling the native checker
+  Set `BUSTER_TEST_PROFILE_DIR` to an existing writable absolute directory when profiling the native checker
   oracles. `test-checker` leaves each executed `run` ELF at its original path under that directory, so a profiler
   can open it after the child exits. Set the variable in the profiler's launch environment when running the tests
   through `compiler parallel`; the checker shards inherit it. Use a fresh directory per capture and remove it
   after the profiler has processed the capture. Failed fixtures keep their usual diagnostic files.
+  The older `BUSTER_CHECKER_PROFILE_DIR` name also works.
   The switch fixtures (#1192, `c_check_program_switch_test.c`) cover matching/default/no-match dispatch,
   fallthrough, converted values, range ordering, label/declaration/inner-break fallbacks, nonfoldable selectors,
   nested scopes, cleanups, VLAs and dropped statics. The constant-if fixtures include #1194's
@@ -845,6 +851,23 @@ So must the longer wrappers' (`fgets`, `fread`, `wcscpy`, `wcsncat`, `strlcpy`,
 result depends on glibc's version. One program runs those wrappers within their
 objects, against clang too.
 
+## Generic association lookup
+
+Both `_Generic` readers use the same association set. Up to 16 associations fit inline.
+Larger sets index enum tags by identity and ordinary function prototypes by return
+shape, arity, variadic flag, and the shapes of the first and last parameters.
+The integer/enum lists also admit candidates of the other kind. Old-style
+functions and functions with a directly passed union at a sampled position keep a
+broader list. Each lookup checks candidates in source order with `type_compatible_at`
+at the selection's source position, including after an enum completes or a union
+acquires its transparent attribute.
+
+`test-checker` counts duplicate and control queries on families of up to 257
+associations, checks mixed lists against the exact predicate, and checks both
+readers against Clang. Types with indistinguishable shapes can still require
+pairwise comparisons. When the directory exceeds the available scratch space,
+the readers scan packed keys in source order.
+
 ## Runtime fixtures
 
 The default-warning driver sweeps read `tests/driver/warnings/SUITE/catalog.tsv`.
@@ -944,6 +967,32 @@ are no generated cases.
 | `transparent` | 8 | the end of `check_test_transparent_calls` (`c_check_transparent_test.c`) |
 | `transparent-types` | 17 | the end of `check_test_transparent_types` (`c_check_transparent_type_test.c`) |
 
+The following private oracles read the same case format at their original
+call sites. They retain their temporary filenames, diagnostic policies and
+scalar/vector comparisons.
+
+| Suite | Cases | Oracle detail |
+| --- | ---: | --- |
+| `constant-expressions` | 190 | Includes the full-width Clang/GCC probe and generated nested expressions |
+| `enum-sources` | 41 | Each case runs as `enum.c` |
+| `vla-sources` | 51 | Includes the generated repeated-size expression |
+| `const-objects` | 63 | The sparse-array probe retains its independent smaller Clang input |
+| `bit-builtins` | 30 | GNU17 Clang oracle per char signedness, with the recorded checker standard |
+| `stdc-bit-builtins` | 10 | Groups by GNU17 or GNU23 |
+| `typeof-compound` | 20 | Groups by GNU17 or GNU23 |
+| `function-name-semantics` | 10 | Retains the quiet Clang syntax check |
+| `integer-extension-sources` | 13 | Stages each source as `oracle.c` |
+| `context-selections` | 8 | Stages each source as `selection-N.c` |
+| `atomic-vector-constraints` | 2 | Individual Clang and checker runs |
+| `function-name-objects` | 20 | `FILE.c.expected` supplies the plain name and pretty signature on two newline-terminated lines |
+
+Add an ordinary regression by adding a catalog row and its files. In suites
+with generators or independently modeled inputs, the FILE column can also name
+a C-defined `@name`. Each binding must occur exactly once. Generated inputs
+stay at the catalog positions the original oracle used. The deep function-name
+case still follows the 20 ordinary cases. The integer fold operation/operand
+model and its generated expected bits remain in the integer checker.
+
 `tests/checker/overload-placeholders` (#2935) is a warning catalog of
 `test-checker-driver`'s (`check_test_driver_warning_catalog`, as
 `initializer-comma` is: `buster-fixtures v1 checker-warnings`, then FILE,
@@ -955,6 +1004,14 @@ programs that `check_test_constant_conversions`
 (`c_check_constant_conversion_test.c`) runs natively against clang by
 `check_test_program_source`, whose catalog names select the checks of their
 entries and code ([the lowering guide](lowering.md#node-templates-1048)).
+The ordinary native program groups in `tests/checker/programs/` use the
+checker-source catalog format and the `test-checker --fixtures` root. A
+catalog occupies one call site so its rows inherit the same feature gates,
+shard, and position relative to generated and structural checks. Append a
+program with its stable name and the flag `-` or `unsigned-char`. Each
+program runs through the native harness against Clang. Existing names also
+select the original per-program machine-code assertions.
+
 `tests/checker/branch-conditions` (#2883) is too: three programs that
 `check_test_branch_conditions` (`c_check_branch_condition_test.c`) runs the same
 way ([the lowering guide](lowering.md#conditions-as-branches-2883)), the third

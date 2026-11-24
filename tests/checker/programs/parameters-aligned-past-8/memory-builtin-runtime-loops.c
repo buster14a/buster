@@ -1,0 +1,1 @@
+char a[24]="abcdefghijklmnop";char b[24];int tested(int n){unsigned k=(unsigned)n%12;__builtin_memset(b,0,24);__builtin_memcpy(b,a,k);__builtin_memmove(b+2,b,k);return (int)__builtin_strlen(b)+(__builtin_memcmp(a,b,k)>0)-(__builtin_memcmp(a,b,k)<0)+b[2];}

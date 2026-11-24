@@ -38,7 +38,8 @@
 //     the arenas it releases for its next reservations, which take them zero-filled, their committed prefixes still
 //     writable unless commit charge is bounded, and their mappings perhaps larger than the capacity asked for.
 //     arena_reserve_tables lays out tables of fixed sizes that are reserved and released together in one arena, each
-//     in the pages an arena of its own would have.
+//     in the pages an arena of its own would have. arena_reserve_warm gives an arena whose pages are a file's, which
+//     the next process finds as this one left them (warm arenas, #2850).
 //   - The thread context: thread_context, which holds the thread's lane and its scratch arenas, and scratch_begin and
 //     scratch_end.
 //   - Lanes: Lane, LaneGroup, LaneSession, lane_index, lane_count, lane_sync, lane_broadcast, lane_from_task_index,
@@ -83,7 +84,10 @@
 #include <sys/prctl.h>
 #include <sys/resource.h>
 #include <sys/auxv.h>
+#include <sys/file.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/vfs.h>
 #include <sys/utsname.h>
 #include <elf.h>
 #include <linux/futex.h>
@@ -156,6 +160,9 @@ struct Arena
     // Whether the arena grows its mapping in place as its pushes reach past it (#1118: arena_reserve_growing), in a slot of
     // the address space that is its own: then its mapping_bytes are all writable but its first page, and equal committed.
     bool grows;
+    // For a warm arena (arena_reserve_warm), its slot's number and one; 0 for any other. Its bytes are never promised
+    // zero (arena_untouched), its pages are its file's to keep (arena_discard, arena_clear), and it is never pooled.
+    uint8_t warm;
     // The requested ceiling can exceed capacity after a constrained-address-space reservation.
     uint64_t requested_capacity;
     // For an owned mapping, the capacity it was laid out for, at least capacity (0 for borrowed storage, including
@@ -382,6 +389,102 @@ static __attribute__((unused)) void arena_discard_huge(Arena* arena);
 // length if that is further: for an arena whose next users push about `kept` bytes into it again, which they then find
 // resident rather than fault in again, cleared (#628: the C driver's scratch after the reader).
 static __attribute__((unused)) void arena_discard_past(Arena* arena, uint64_t kept, bool whole);
+// Warm arenas (#2850): arenas whose pages outlive the process. The kernel clears every page a process touches for the
+// first time, which is the first cost of a large unit's compile (sqlite3.c's writes 250 MB so); a file of a tmpfs
+// keeps its pages when the process that wrote them has gone, and the next process maps them as they are. On the 9700X,
+// 256 MB touched for the first time took 11.4 ms in fresh huge pages and 0.68 ms in a file of a tmpfs mounted
+// `huge=always`, which a previous process had written. A warm arena's memory is a part of such a file, mapped shared:
+//   - arena_warm_begin names the directory. The process claims the first file of it, `buster-arena-N` from N = 0, that
+//     no other process holds (a lock that doesn't wait: flock), up to BUSTER_ARENA_WARM_FILES of them, so that compiles
+//     that run at once take a file each and one that runs alone finds the file the last one left. A file is taken only
+//     if it is the user's own, closed to others, and a tmpfs's that gives it huge pages (mounted `huge=always`, which
+//     its block size says): a disk's file system would write the pages back, and a file's base pages cost more to map
+//     than the process's own huge pages cost to clear (BUSTER_ARENA_WARM_BASE_PAGES takes one all the same, for tests
+//     on a host without such a mount). Where none can be claimed, a warm reservation is an ordinary one. The claim is
+//     the command's that made it: arena_warm_end gives it up once the command's warm arenas are released, for a
+//     process that runs another command after it, and a process that a claimant forked takes none of the claimant's
+//     file, whose pages the two would share.
+//   - arena_reserve_warm maps its `slot` of the file, BUSTER_ARENA_WARM_SLOT_BYTES of file offsets that are its own,
+//     at an address congruent with its offset in the file by a huge page, which the kernel maps a file's huge pages at.
+//     The caller gives each of its arenas a slot, the same in every process, so that an arena finds the pages that
+//     arena's last use left.
+//   - What a warm arena holds past its length is what an earlier process wrote, never promised zero: arena_untouched is
+//     false of it, and what pushes into it clears for itself what it reads before it writes. The compiler's output
+//     depends on none of those bytes; BUSTER_ARENA_WARM_FILL has BUSTER_ARENA_WARM_PATTERN written over each warm
+//     arena's memory as it is committed, with or without a directory, for tests to find a byte that is read so.
+//   - A commit allocates its pages in the file first (fallocate, which finds those a previous process left and takes
+//     the others from the file system), and grows by a quarter where an ordinary arena's quadruples
+//     (BUSTER_ARENA_WARM_GROWTH), since what it allocates stays in the file. A file system without room refuses the
+//     allocation, where a first touch of an unallocated page would kill the process (SIGBUS): the arena's memory past
+//     what the file holds of it is then the process's own, as an ordinary arena's, for the rest of its use.
+//   - Release unmaps the arena, whose pages stay in the file; its discards (arena_discard) do nothing, and arena_clear
+//     clears its bytes in place. The file only grows, to the most its slots' arenas have committed, which is more than
+//     they wrote (sqlite3.c's command's arena and its output's commit 432 MB and write 130): the mount's size is what
+//     bounds the pool, and removing the files frees it.
+#define BUSTER_ARENA_WARM_SLOTS 8
+#define BUSTER_ARENA_WARM_SLOT_BYTES (1ull << 40)
+#define BUSTER_ARENA_WARM_FILES 64
+#define BUSTER_ARENA_WARM_GROWTH 4
+#define BUSTER_ARENA_WARM_PATTERN 0xa5
+// arena_warm_begin's flags.
+#define BUSTER_ARENA_WARM_FILL 1u
+#define BUSTER_ARENA_WARM_BASE_PAGES 2u
+// TMPFS_MAGIC (linux/magic.h).
+#define BUSTER_ARENA_WARM_TMPFS 0x01021994
+typedef struct ArenaWarmSlot ArenaWarmSlot;
+struct ArenaWarmSlot
+{
+    // The mapping of the slot's arena, null while the slot is free, and where its start is in the file.
+    uint8_t* mapping;
+    uint64_t bytes;
+    uint64_t place;
+    // How far from the mapping's start its pages are allocated in the file, and how far its commits were filled
+    // (BUSTER_ARENA_WARM_FILL): the slot's, not the arena's, so that a commit through a copy of the arena counts.
+    uint64_t allocated;
+    uint64_t filled;
+    // Whether its memory past `allocated` is the process's own: without a file, or once the file's file system refused
+    // an allocation.
+    bool own;
+};
+typedef struct ArenaWarm ArenaWarm;
+struct ArenaWarm
+{
+    // 0 before arena_warm_begin, 1 while it runs, then 2 where warm reservations are served (a file is claimed, or
+    // the fill asked for) or 3 where they are ordinary ones.
+    uint32_t state;
+    // The slots that hold an arena, a bit each.
+    uint32_t taken;
+    // The claimed file, or -1, and the process that claimed it: one it forked has the descriptor and not the claim.
+    int file;
+    pid_t pid;
+    bool fill;
+    ArenaWarmSlot slots[BUSTER_ARENA_WARM_SLOTS];
+};
+// The process's warm arenas. main.c's units share it, as an arena that one unit's code reserves is another's to commit
+// and release.
+#if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
+extern ArenaWarm arena_warm;
+#elif defined(BUSTER_UNIT)
+ArenaWarm arena_warm;
+#else
+static ArenaWarm arena_warm;
+#endif
+// Claims a file of `directory` for the process's warm arenas, if it is not null, and has their commits filled with
+// BUSTER_ARENA_WARM_FILL among `flags`. Returns whether this call began the process's warm arenas, which a call with
+// neither a directory nor the fill doesn't, nor one while an earlier call's stand: the caller it returns true to ends
+// them with arena_warm_end.
+static __attribute__((unused)) bool arena_warm_begin(const char* directory, uint32_t flags);
+// Ends what arena_warm_begin began, once the warm arenas reserved since are released (while one isn't, it does nothing):
+// the claimed file is closed, which frees it for another process, and the next arena_warm_begin begins anew.
+static __attribute__((unused)) void arena_warm_end(void);
+// arena_reserve whose memory is `slot`'s part of the process's claimed file, below BUSTER_ARENA_WARM_SLOTS; or an
+// ordinary arena where no file is claimed and no fill asked for, the slot holds an arena already, or the capacity is one
+// the address space cuts short or the base pages hold whole.
+static __attribute__((unused)) Arena arena_reserve_warm(uint64_t capacity, uint32_t slot);
+// Gives up the lock on the claimed file, whose pages the process's warm arenas no longer write: for a process to call
+// once its work is done, where its address space outlives it (lane_exit_helper_start), so that the next process finds
+// the file free.
+static __attribute__((unused)) void arena_warm_unlock(void);
 // Keeps the executable's .bss in base pages (#652), for a compile's commands to call first: it is 220 MB of statics, the
 // tests' and benchmarks' arrays among them, of which a compile writes 11 pages whatever its size (an empty file's -c as
 // sqlite3.c's: the C driver's state, the parser's tables), in three 2 MB stretches. With transparent huge pages `always`,
@@ -1491,6 +1594,14 @@ static void arena_release(Arena* arena)
         munmap(mapping, slot_bytes > arena->mapping_bytes ? slot_bytes : arena->mapping_bytes);
         __atomic_store_n(&arena_slots.bytes[slot], 0, __ATOMIC_RELEASE);
     }
+    else if (arena->base != 0 && arena->warm != 0)
+    {
+        // Unmapped, its pages left in the file, and its slot freed for the process's next reservation of it.
+        ArenaWarmSlot* slot = arena_warm.slots + (arena->warm - 1);
+        munmap(arena->base - arena->mapping_offset, arena->mapping_bytes);
+        __atomic_store_n(&slot->mapping, 0, __ATOMIC_RELEASE);
+        __atomic_fetch_and(&arena_warm.taken, ~(1u << (arena->warm - 1)), __ATOMIC_RELEASE);
+    }
     else if (arena->base != 0 && arena->mapping_bytes != 0)
     {
         ArenaPool* pool = arena_pool;
@@ -1599,6 +1710,223 @@ static void arena_unaccounted(Arena* arena, uint64_t at)
     arena->capacity = room < arena->capacity ? room : arena->capacity;
 }
 
+// Whether `bytes` are in a warm arena's mapping.
+static bool arena_warm_holds(const uint8_t* bytes)
+{
+    bool result = false;
+    for (uint32_t taken = __atomic_load_n(&arena_warm.taken, __ATOMIC_ACQUIRE); taken != 0; taken &= taken - 1)
+    {
+        const ArenaWarmSlot* slot = arena_warm.slots + __builtin_ctz(taken);
+        const uintptr_t mapping = (uintptr_t)__atomic_load_n(&slot->mapping, __ATOMIC_ACQUIRE);
+        result |= mapping != 0 && (uintptr_t)bytes - mapping < slot->bytes;
+    }
+    return result;
+}
+
+static bool arena_warm_begin(const char* directory, uint32_t flags)
+{
+    bool result = false;
+    const bool fill = (flags & BUSTER_ARENA_WARM_FILL) != 0;
+    // The block size a file must state: a huge page's on a tmpfs that gives the file huge pages.
+    const uint64_t block = (flags & BUSTER_ARENA_WARM_BASE_PAGES) != 0 ? BUSTER_ARENA_PAGE_BYTES : BUSTER_ARENA_HUGE_PAGE_BYTES;
+    uint32_t state = 0;
+    if ((directory != 0 || fill) && __atomic_compare_exchange_n(&arena_warm.state, &state, 1, false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+    {
+        const off_t size = (off_t)(BUSTER_ARENA_WARM_SLOTS * BUSTER_ARENA_WARM_SLOT_BYTES);
+        int file = -1;
+        // A file another process holds is passed over. One that can't be taken for another reason ends the search: the
+        // directory's others would be refused for it too.
+        bool held = true;
+        for (uint32_t i = 0; directory != 0 && file < 0 && held && i < BUSTER_ARENA_WARM_FILES; i += 1)
+        {
+            char path[PATH_MAX];
+            const int length = snprintf(path, sizeof(path), "%s/buster-arena-%u", directory, i);
+            const int opened = length > 0 && (size_t)length < sizeof(path) ? open(path, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600) : -1;
+            const bool locked = opened >= 0 && flock(opened, LOCK_EX | LOCK_NB) == 0;
+            held = opened >= 0 && !locked && errno == EWOULDBLOCK;
+            struct stat status;
+            struct statfs system;
+            const bool own = locked && fstat(opened, &status) == 0 && S_ISREG(status.st_mode) && status.st_uid == geteuid() && (status.st_mode & 077) == 0 &&
+                             (uint64_t)status.st_blksize >= block && fstatfs(opened, &system) == 0 && (uint64_t)system.f_type == BUSTER_ARENA_WARM_TMPFS;
+            // Every slot's offsets are in the file, which holds only the pages that are written.
+            const bool sized = own && (status.st_size == size || ftruncate(opened, size) == 0);
+            if (sized)
+            {
+                file = opened;
+            }
+            else if (opened >= 0)
+            {
+                close(opened);
+            }
+        }
+        arena_warm.file = file;
+        arena_warm.pid = getpid();
+        arena_warm.fill = fill;
+        __atomic_store_n(&arena_warm.state, file >= 0 || fill ? 2 : 3, __ATOMIC_RELEASE);
+        result = true;
+    }
+    return result;
+}
+
+static void arena_warm_end(void)
+{
+    uint32_t state = __atomic_load_n(&arena_warm.state, __ATOMIC_ACQUIRE);
+    if ((state == 2 || state == 3) && __atomic_load_n(&arena_warm.taken, __ATOMIC_ACQUIRE) == 0 &&
+        __atomic_compare_exchange_n(&arena_warm.state, &state, 1, false, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+    {
+        if (arena_warm.file >= 0)
+        {
+            close(arena_warm.file);
+        }
+        arena_warm.file = -1;
+        __atomic_store_n(&arena_warm.state, 0, __ATOMIC_RELEASE);
+    }
+}
+
+static void arena_warm_unlock(void)
+{
+    if (__atomic_load_n(&arena_warm.state, __ATOMIC_ACQUIRE) == 2 && arena_warm.file >= 0)
+    {
+        flock(arena_warm.file, LOCK_UN);
+    }
+}
+
+static Arena arena_reserve_warm(uint64_t capacity, uint32_t slot)
+{
+    Arena result = { 0 };
+    ArenaWarm* warm = &arena_warm;
+    // Not the file of a process that forked this one: its pages are that process's arenas' too.
+    const bool served = __atomic_load_n(&warm->state, __ATOMIC_ACQUIRE) == 2 && (warm->file < 0 || warm->pid == getpid()) && slot < BUSTER_ARENA_WARM_SLOTS &&
+                        capacity > BUSTER_ARENA_SMALL_BYTES && capacity <= arena_reservation_limit() &&
+                        capacity <= BUSTER_ARENA_WARM_SLOT_BYTES - BUSTER_ARENA_HUGE_PAGE_BYTES;
+    const uint32_t bit = served ? 1u << slot : 0;
+    const bool taken = served && (__atomic_fetch_or(&warm->taken, bit, __ATOMIC_ACQ_REL) & bit) == 0;
+    if (taken)
+    {
+        // Whole huge pages from a huge page's boundary, as the file's are from its slot's first offset: reserved with one
+        // to spare, cut to them, and then the file's in their place.
+        const uint64_t bytes = (capacity + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) & ~(BUSTER_ARENA_HUGE_PAGE_BYTES - 1);
+        const uint64_t place = (uint64_t)slot * BUSTER_ARENA_WARM_SLOT_BYTES;
+        const bool own = warm->file < 0;
+        uint8_t* region = mmap(0, bytes + BUSTER_ARENA_HUGE_PAGE_BYTES, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+        uint8_t* mapping = MAP_FAILED;
+        if (region != MAP_FAILED)
+        {
+            mapping = (uint8_t*)(((uintptr_t)region + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) & ~(uintptr_t)(BUSTER_ARENA_HUGE_PAGE_BYTES - 1));
+            const uint64_t before = (uint64_t)(mapping - region);
+            if (before != 0)
+            {
+                munmap(region, before);
+            }
+            munmap(mapping + bytes, BUSTER_ARENA_HUGE_PAGE_BYTES - before);
+            if (!own && mmap(mapping, bytes, PROT_NONE, MAP_SHARED | MAP_NORESERVE | MAP_FIXED, warm->file, (off_t)place) != mapping)
+            {
+                munmap(mapping, bytes);
+                mapping = MAP_FAILED;
+            }
+        }
+        if (mapping != MAP_FAILED)
+        {
+            // The file's pages are huge where its mount gives them, or gives them to a mapping that asks; the process's
+            // own follow its arenas' (arena_pages_busy, and arena_pages_medium's splits as they are committed).
+            if (!own || !arena_pages_busy)
+            {
+                madvise(mapping, bytes, MADV_HUGEPAGE);
+            }
+            warm->slots[slot] = (ArenaWarmSlot){
+                .bytes = bytes,
+                .place = place,
+                .own = own,
+            };
+            __atomic_store_n(&warm->slots[slot].mapping, mapping, __ATOMIC_RELEASE);
+            result = (Arena){
+                .base = mapping,
+                .capacity = capacity,
+                .small = BUSTER_ARENA_SMALL_BYTES,
+                .huge = true,
+                .mapping_bytes = bytes,
+                .warm = (uint8_t)(slot + 1),
+                .requested_capacity = capacity,
+                .reserved = capacity,
+            };
+        }
+        else
+        {
+            __atomic_fetch_and(&warm->taken, ~bit, __ATOMIC_RELEASE);
+        }
+    }
+    if (result.base == 0)
+    {
+        result = arena_reserve(capacity);
+    }
+    return result;
+}
+
+// A warm arena's commit (above): whole huge pages, a quarter more than are committed or what the push needs, allocated
+// in the file before they are made writable.
+static bool arena_warm_commit(Arena* arena, uint64_t end)
+{
+    ArenaWarm* warm = &arena_warm;
+    ArenaWarmSlot* slot = warm->slots + (arena->warm - 1);
+    uint8_t* mapping = arena->base - arena->mapping_offset;
+    const uint64_t offset = arena->mapping_offset;
+    const uint64_t committed = arena->committed;
+    const uint64_t used = committed > offset ? committed - offset : 0;
+    uint64_t grown = used + used / BUSTER_ARENA_WARM_GROWTH;
+    grown = grown > end ? grown : end;
+    uint64_t target = (offset + grown + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) & ~(BUSTER_ARENA_HUGE_PAGE_BYTES - 1);
+    target = target < arena->mapping_bytes ? target : arena->mapping_bytes;
+    bool result = true;
+    if (!slot->own && target > slot->allocated)
+    {
+        // (The system call itself: its wrapper is declared only with _GNU_SOURCE.)
+        long refused = 0;
+        do
+        {
+            refused = syscall(SYS_fallocate, warm->file, 0, (off_t)(slot->place + slot->allocated), (off_t)(target - slot->allocated));
+        } while (refused != 0 && errno == EINTR);
+        if (refused == 0)
+        {
+            slot->allocated = target;
+        }
+        else
+        {
+            // The file system has no room for them: from what the file holds of the arena on, the process's own pages
+            // take the file's place. No push has been given a byte there, since every commit allocates first.
+            uint8_t* own = mapping + slot->allocated;
+            const uint64_t own_bytes = slot->bytes - slot->allocated;
+            slot->own = true;
+            result = mmap(own, own_bytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE | MAP_FIXED, -1, 0) == own;
+            if (result && !arena_pages_busy)
+            {
+                madvise(own, own_bytes, MADV_HUGEPAGE);
+            }
+        }
+    }
+    result = result && mprotect(mapping + committed, target - committed, PROT_READ | PROT_WRITE) == 0;
+    if (result)
+    {
+        arena->committed = target;
+        // The process's own memory, past what the file holds of the arena, takes an ordinary arena's pages: on a busy
+        // host that gives medium pages (#2536), none of 2 MB. The file's are the mount's.
+        if (slot->own && arena_pages_medium)
+        {
+            arena_medium_split(mapping, committed > slot->allocated ? committed : slot->allocated, target);
+        }
+        if (warm->fill && target > slot->filled)
+        {
+            memset(mapping + slot->filled, BUSTER_ARENA_WARM_PATTERN, target - slot->filled);
+            slot->filled = target;
+        }
+    }
+    else
+    {
+        arena_failure = (ArenaFailure){ .bytes = target - committed, .error = errno, .commit = true };
+        arena_commit_refused = true;
+    }
+    return result;
+}
+
 // The most of an arena's base pages that its first commit makes writable at once where commit charge is unbounded, and
 // the factor its later commits grow by there (arena_commit).
 #define BUSTER_ARENA_COMMIT_BYTES (16ull << 20)
@@ -1627,6 +1955,10 @@ static bool arena_commit(Arena* arena, uint64_t end)
     if (arena->grows && needed > committed)
     {
         result = arena_grow(arena, end);
+    }
+    else if (arena->warm != 0 && needed > committed)
+    {
+        result = arena_warm_commit(arena, end);
     }
     else if (arena->mapping_bytes != 0 && needed > committed)
     {
@@ -1747,7 +2079,8 @@ static void arena_clear(uint8_t* bytes, uint64_t size)
     // The whole pages past the bytes cleared in place: given back, with the part of a page on each side of them cleared.
     const uintptr_t begin = ((uintptr_t)bytes + kept + BUSTER_ARENA_PAGE_BYTES - 1) & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1);
     const uintptr_t end = ((uintptr_t)bytes + size) & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1);
-    const bool discarded = size > kept && end > begin && madvise((void*)begin, end - begin, MADV_DONTNEED) == 0;
+    // A warm arena's pages are its file's, which the advice would leave as they are.
+    const bool discarded = size > kept && end > begin && !arena_warm_holds(bytes) && madvise((void*)begin, end - begin, MADV_DONTNEED) == 0;
     if (discarded)
     {
         memset(bytes, 0, begin - (uintptr_t)bytes);
@@ -1772,14 +2105,14 @@ static void arena_rewind(Arena* arena, uint64_t length)
 
 static bool arena_untouched(const Arena* arena)
 {
-    return arena->base != 0 && arena->mapping_bytes != 0 && !arena->unaccounted && arena->peak <= arena->length;
+    return arena->base != 0 && arena->mapping_bytes != 0 && !arena->unaccounted && arena->warm == 0 && arena->peak <= arena->length;
 }
 
 // The pages arena_discard gives back, past the length from the first huge page boundary past it: to the peak's page, or
 // with `whole` to the last huge page boundary at or below the peak (arena_discard_huge).
 static void arena_discard_to(Arena* arena, uint64_t from, bool whole)
 {
-    if (arena->base != 0 && arena->mapping_bytes != 0 && !arena->unaccounted)
+    if (arena->base != 0 && arena->mapping_bytes != 0 && !arena->unaccounted && arena->warm == 0)
     {
         const uintptr_t base = (uintptr_t)arena->base;
         const uint64_t kept = from > arena->length ? from : arena->length;
@@ -4300,6 +4633,8 @@ static void lane_exit_helper_start(void)
     if (wanted)
     {
         fflush(0);
+        // The helper shares the address space, in which a warm arena's mapping would hold its file's lock.
+        arena_warm_unlock();
         const bool closed = syscall(BUSTER_LANE_EXIT_SYS_CLOSE_RANGE, 0u, ~0u, 0u) == 0;
         lane_exit_caller = getpid();
         // What the helper looks at of the executable once this process has gone: nothing, where a huge page maps its code.

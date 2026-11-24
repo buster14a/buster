@@ -1,0 +1,13 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+switch-table-empty-ranges	switch-table-empty-ranges.c	-	switch-table-empty-ranges
+empty-gnu-case-range-is-warning-only	empty-gnu-case-range-is-warning-only.c	-	empty-gnu-case-range-is-warning-only
+nested-switch-continue	nested-switch-continue.c	-	nested-switch-continue
+forward-and-backward-goto	forward-and-backward-goto.c	-	forward-and-backward-goto
+function-address-data-reference	function-address-data-reference.c	-	function-address-data-reference
+body-used-string-object	body-used-string-object.c	-	body-used-string-object
+# The function names' arrays (__func__, __FUNCTION__, __PRETTY_FUNCTION__), private constants as a literal's are:
+# returned, indexed, taken whole, in a static's initializer and at file scope (an empty one). In static functions,
+# whose names the oracle's source keeps (it renames the global ones).
+function-name-arrays	function-name-arrays.c	-	function-name-arrays
+scalar-compound-evaluation	scalar-compound-evaluation.c	-	scalar-compound-evaluation

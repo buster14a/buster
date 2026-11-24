@@ -1,0 +1,1 @@
+int f(x,y)_Atomic int x;_Atomic short y;{x+=2;y+=3;return x+y;}int tested(int n){return f(n&127,(short)(n&63));}

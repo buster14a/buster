@@ -329,6 +329,7 @@ struct CheckProgramOptions
     // Tier 1's IR takes (the C driver's --tier1), whose body calls run asm bodies (IrCall.body) but which has no
     // operation for a statement's row. A function Tier 1 refuses falls back to Tier 0, which takes bodies as it does rows.
     bool asm_bodies;
+    bool assembly_text;
     // The helper families (a bit each, CheckProgramHelperFamily's) whose every operation takes its helper where it has a
     // direct form (#1059's paired measurements: the C driver's --helper-forms, measure-helpers): the fences', the atomic
     // accesses', the read/modify/writes' (compare-exchanges and fetch loops among them) builtins, and asm statements. An
@@ -704,6 +705,7 @@ struct CheckProgram
     bool unselected_operands;
     bool asm_helpers;
     bool asm_bodies;
+    bool assembly_text;
     uint32_t helper_forms;
     X86Target target;
     uint8_t frame_pointer;
@@ -6364,7 +6366,7 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
 {
     *program = (CheckProgram){ .input = input, .stream = stream, .types = types, .parser = parser, .identifiers = options.identifiers,
                                .initializers = options.initializers, .asms = options.asms, .unselected_operands = options.unselected_operands,
-                               .asm_helpers = options.asm_helpers, .asm_bodies = options.asm_bodies, .helper_forms = options.helper_forms, .target = options.target, .frame_pointer = options.frame_pointer,
+                               .asm_helpers = options.asm_helpers, .asm_bodies = options.asm_bodies, .assembly_text = options.assembly_text, .helper_forms = options.helper_forms, .target = options.target, .frame_pointer = options.frame_pointer,
                                .probe_stack = options.probe_stack, .pic = options.pic, .patchable_count = options.patchable_count, .patchable_offset = options.patchable_offset,
                                .patchable_section = options.patchable_section, .initializer_references = options.initializer_references,
                                .initializer_reference_count = options.initializer_reference_count, .token = BUSTER_CHECK_NONE,
@@ -6425,7 +6427,8 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
     // The blocks' objects' lifetimes, asked for (#177): each block's locals, the room their controls take, and the two
     // columns of the pass that finds the blocks a jump enters, the first of which then keeps the writer's chain of the
     // blocks with lifetimes (#1355, check_program_lifetime_entered).
-    const bool lifetimes = valid && options.lifetimes;
+    // A function body's own locals live for the whole function. Only a CLOSE_BLOCK can own lifetime entries.
+    const bool lifetimes = valid && options.lifetimes && count != 0 && memchr(parser->tree.roles, PARSE_ROLE_CLOSE_BLOCK, count) != NULL;
     uint32_t* lifetime_first = lifetimes ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* lifetime_next = lifetimes ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* lifetime_nearest = lifetimes ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;

@@ -81,24 +81,7 @@ static void check_test_power_divmod_signed(CheckTest* test, const char* clang)
     free(source);
     // The controls keep their division: negative divisors, the sign bit's (no positive power of two), a _BitInt's, a
     // divisor that isn't a constant, and element sizes that aren't powers of two, a variable-length array's among them.
-    check_test_program_source(test,
-        "int n16(int x){return x/-16;}int nr16(int x){return x%-16;}int mq(int x){return x/(-2147483647-1);}int mr(int x){return x%(-2147483647-1);}"
-        "long lq(long x){return x/(-9223372036854775807l-1);}long lr(long x){return x%(-9223372036854775807l-1);}"
-        "int t3(int x){return x/3;}int r3(int x){return x%3;}_BitInt(33) bq(_BitInt(33) x){return x/16;}_BitInt(33) br(_BitInt(33) x){return x%16;}"
-        "int hits;int sixteen(void){hits++;return 16;}int vq(int x,int d){return x/d;}"
-        "typedef struct{char b[3];}P3;typedef struct{int b[3];}P12;long d3(P3*a,P3*b){return a-b;}long d12(P12*a,P12*b){return a-b;}"
-        "long dv(int m,int i,int j){int a[8][m];return &a[i]-&a[j];}P3 c3[16];P12 c12[16];"
-        "int tested(int n){unsigned h=0;int bad=0;hits=0;volatile int sixteen_v=16;"
-        "int a[]={0,1,-1,15,-15,16,-16,17,-17,2147483647,-2147483647,-2147483647-1,n,-n};"
-        "for(unsigned i=0;i<sizeof(a)/sizeof(a[0]);i++){int x=a[i];long y=(long)x*4294967311l;"
-        "h=h*31u+(unsigned)n16(x);h=h*31u+(unsigned)nr16(x);h=h*31u+(unsigned)mq(x);h=h*31u+(unsigned)mr(x);"
-        "h=h*31u+(unsigned)lq(y);h=h*31u+(unsigned)lr(y);h=h*31u+(unsigned)t3(x);h=h*31u+(unsigned)r3(x);"
-        "h=h*31u+(unsigned)(long)bq((_BitInt(33))y);h=h*31u+(unsigned)(long)br((_BitInt(33))y);"
-        "h=h*31u+(unsigned)(x/(hits++,16));h=h*31u+(unsigned)(x%sixteen());h=h*31u+(unsigned)(x/sixteen_v);h=h*31u+(unsigned)vq(x,16);}"
-        "bad+=hits!=28;int j=n&15;for(int i=0;i<16;i++){bad+=d3(c3+i,c3+j)!=i-j;bad+=d12(c12+i,c12+j)!=i-j;"
-        "bad+=dv(1,i&7,j&7)!=(i&7)-(j&7);bad+=dv(4,i&7,j&7)!=(i&7)-(j&7);bad+=dv(3,i&7,j&7)!=(i&7)-(j&7);}"
-        "return bad?-bad:(int)(h&0x7fffffff);}",
-        "signed-power-two-controls", clang);
+    check_test_program_suite(test, "checker/programs/power-divmod-signed", clang);
 }
 
 static void check_test_power_divmod(CheckTest* test, const char* clang)
@@ -201,14 +184,5 @@ static void check_test_power_divmod(CheckTest* test, const char* clang)
     }
     free(source);
     check_test_power_divmod_signed(test, clang);
-    check_test_program_source(test,
-        "unsigned hits;unsigned touch(void){hits++;return 16u;}"
-        "unsigned q(unsigned x,unsigned d){return x/d;}unsigned r(unsigned x,unsigned d){return x%d;}"
-        "unsigned selected(unsigned x,int p){return x/(p?16u:32u);}"
-        "int tested(int n){unsigned x=(unsigned)n;hits=0;volatile unsigned divisor=16u;"
-        "unsigned a=x/(hits++,16u),b=x%touch(),c=x/divisor;"
-        "int bad=hits!=2u;bad+=a!=(x>>4);bad+=b!=(x&15u);bad+=c!=(x>>4);"
-        "bad+=q(x,10u)!=x/10u;bad+=r(x,10u)!=x%10u;bad+=selected(x,n&1)!=(x>>((n&1)?4:5));"
-        "int s=n/16,t=n%16;bad+=s*16+t!=n;return bad;}",
-        "power-two-signed-effects-variable-and-branch-controls", clang);
+    check_test_program_suite(test, "checker/programs/power-divmod", clang);
 }

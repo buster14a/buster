@@ -1,0 +1,1 @@
+struct S{long outer;};enum{A=19};int tags(x,p,q)enum E{A=3}x;struct S{char a;long b;}*p;union U{char a;long b;}*q;{struct S s={7};return x+(int)sizeof(*p)+(int)sizeof(*q)+(int)s.outer+A;}int tested(int n){return tags(n&127,0,0);}

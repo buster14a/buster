@@ -1,0 +1,10 @@
+_Static_assert(__builtin_popcountg(7u) == 3 && __builtin_clzg(1u, 5) == 31 && __builtin_clzg(0u, 5) == 5, "");
+_Static_assert(__builtin_ctzg((unsigned char)0, -1) == -1 && __builtin_stdc_bit_ceil(0x80000001u) == 0 && __builtin_stdc_bit_ceil(0u) == 1, "");
+_Static_assert(__builtin_stdc_rotate_left((unsigned char)1, -1) == 0x80 && __builtin_stdc_rotate_right(1u, 33) == 0x80000000u, "");
+_Static_assert(__builtin_bitreverse8(1) == 0x80 && __builtin_clrsb(-1) == 31 && __builtin_clrsbll(0) == 63, "");
+_Static_assert(__builtin_bswapg((unsigned short)0x1234) == 0x3412 && __builtin_bitreverseg((signed char)1) == -128, "");
+_Static_assert(__builtin_stdc_first_leading_zero((unsigned char)0xff) == 0 && __builtin_stdc_leading_ones((unsigned char)0xf0) == 4, "");
+_Static_assert(__builtin_popcountg((unsigned __int128)-1) == 128 && __builtin_clzg((unsigned _BitInt(100))1) == 99, "");
+int a[__builtin_clzs(1)];
+enum { E1 = __builtin_ctzs(8), E2 = __builtin_stdc_bit_width(5u) };
+static int s = __builtin_stdc_count_zeros((unsigned short)0x0f0f) + __builtin_ctzg(0u, 9);

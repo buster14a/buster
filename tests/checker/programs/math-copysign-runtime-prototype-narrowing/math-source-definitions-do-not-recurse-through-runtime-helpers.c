@@ -1,0 +1,1 @@
+double sqrt(double x){return __builtin_sqrt(x);}double ceil(double x){return __builtin_ceil(x);}int tested(int n){return (int)(sqrt((double)(n+4))+ceil((double)n+0.25));}

@@ -264,8 +264,10 @@ benchmarks, reusing one build and the existing shared lock. Pull requests never
 run it (#2055, the owner's choice on 2026-11-10): hosted correctness qualifies a
 pull request, and native correctness and measurements run on its merged
 first-parent state in the nightly window. The required aggregate passes a pull
-request on its hosted rows and says so. All correctness builds run
-the same suite inventory, `tools/ci/correctness.tests`. Failed, cancelled or
+request on its hosted rows and says so. Hosted rows and full native runs share `tools/ci/correctness.tests`.
+A backlog state reusing its exact merge-queue candidate's successful full vector
+contract runs `tools/ci/znver5-smoke.tests` on the measured binary. Snapshot and
+manual full runs exercise the complete native inventory. Failed, cancelled or
 skipped hosted tests cannot queue the hardware job; failed native tests cannot
 start benchmarks. A pull request's run stops at its first failure: its test rows
 fail fast, each shard stops at its first failing command (`parallel
@@ -356,9 +358,10 @@ there at a time, so everything takes one lock:
     passed, each built as the job builds it.
   - The file's count is this job's build's (`BUSTER_HOST_ARCH=znver5`) on this
     host. A toolchain's upgrade moves it, and states it the same way.
-- On a checker pull request, plain hosted vector shard 2 builds the PR's
-  base while shard 1 builds the merge revision. Shard 2 compiles the same
-  frozen `sqlite3.c` with both compilers and compares the objects (#1572).
+- On a checker pull request, plain hosted vector shard 2 builds the first
+  parent of the tested merge while shard 1 builds the merge revision. Shard 2
+  compiles the same frozen `sqlite3.c` with both compilers and compares the
+  objects (#1572).
   A change classified as diagnostic-only by `sqlite_stable` requires
   byte-identical objects. For other checker changes, a byte difference
   produces a GitHub warning with both file sizes. Growth or shrinkage

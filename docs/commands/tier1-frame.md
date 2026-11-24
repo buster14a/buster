@@ -62,6 +62,10 @@ requirements. [Command index](README.md).
 
 ## Lifetime planning on deep trees (#1355)
 
+Only a nested block can own lifetime entries. If the token roles contain no
+`PARSE_ROLE_CLOSE_BLOCK`, the checker skips the lifetime columns and walks.
+Parameters and locals in the function body's own scope live for the whole function.
+
 `check_program_lifetime_blocks` reads immutable parent/role columns and
 memoizes each token's nearest enclosing block, resetting at function bodies.
 It then links local declarations in token order. A second memoized pass counts

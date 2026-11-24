@@ -1,0 +1,14 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+fenv-strict-classification-exceptions-and-daz	fenv-strict-classification-exceptions-and-daz.c	-	fenv-strict-classification-exceptions-and-daz
+fenv-query-source-proof-and-runtime-value	fenv-query-source-proof-and-runtime-value.c	-	fenv-query-source-proof-and-runtime-value
+fenv-query-runtime-truth-keeps-effects-and-selected-references	fenv-query-runtime-truth-keeps-effects-and-selected-references.c	-	fenv-query-runtime-truth-keeps-effects-and-selected-references
+fenv-query-nonconstant-arguments-remain-unevaluated	fenv-query-nonconstant-arguments-remain-unevaluated.c	-	fenv-query-nonconstant-arguments-remain-unevaluated
+fenv-query-exact-inexact-and-dynamic-operands	fenv-query-exact-inexact-and-dynamic-operands.c	-	fenv-query-exact-inexact-and-dynamic-operands
+fenv-query-syntactic-effects-and-exact-selected-proof	fenv-query-syntactic-effects-and-exact-selected-proof.c	-	fenv-query-syntactic-effects-and-exact-selected-proof
+fenv-query-nested-runtime-proofs-comma-and-imaginary	fenv-query-nested-runtime-proofs-comma-and-imaginary.c	-	fenv-query-nested-runtime-proofs-comma-and-imaginary
+fenv-static-proof-scoped-policy-and-live-references	fenv-static-proof-scoped-policy-and-live-references.c	-	fenv-static-proof-scoped-policy-and-live-references
+math-fixed-rounding-raw-float-and-double-abi	math-fixed-rounding-raw-float-and-double-abi.c	-	math-fixed-rounding-raw-float-and-double-abi
+math-copysign-preserves-raw-representation	math-copysign-preserves-raw-representation.c	-	math-copysign-preserves-raw-representation
+math-sqrt-real-errno-address-and-exceptions	math-sqrt-real-errno-address-and-exceptions.c	-	math-sqrt-real-errno-address-and-exceptions
+math-current-rounding-nearbyint-and-rint-effects	math-current-rounding-nearbyint-and-rint-effects.c	-	math-current-rounding-nearbyint-and-rint-effects

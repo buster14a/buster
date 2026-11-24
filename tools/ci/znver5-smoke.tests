@@ -1,0 +1,10 @@
+# Nightly backlog states whose exact commit passed the full hosted vector gate (#2033).
+# The 9700X runs the measured compiler, using the same commands and CPU grants as correctness.tests.
+== Test the C lexer
+"$BUSTER_COMPILER" test-lexer
+== Test the backend's baked tables
+"$BUSTER_COMPILER" test-baked-tables
+== Test deferred function bodies against source order
+"$BUSTER_COMPILER" test-checker-deferred
+== Test the direct path's executables [8 CPUs]
+"$BUSTER_COMPILER" test-executable

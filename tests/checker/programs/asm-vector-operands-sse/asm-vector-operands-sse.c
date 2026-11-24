@@ -1,0 +1,1 @@
+typedef float v4sf __attribute__((vector_size(16)));static v4sf added(v4sf a,v4sf b){__asm__("addps %1, %0" : "+x"(a) : "x"(b));return a;}static v4sf fixed(v4sf a){register v4sf x __asm__("xmm9")=a;__asm__("mulps %0, %0" : "+x"(x));return x;}int tested(int n){v4sf a={(float)n,1.5f,2.0f,-4.0f};v4sf r=fixed(added(a,a));return (int)(r[0]+r[1]*3+r[2]*5+r[3]*7);}

@@ -1,0 +1,2 @@
+#define CPUID(l,s,a,b,c,d) __asm("  xchg{q|}  {%%|}rbx,%q1\n  cpuid\n  xchg{q|}  {%%|}rbx,%q1" : "=a"(a),"=r"(b),"=c"(c),"=d"(d) : "0"(l),"2"(s))
+int tested(int n){unsigned a,b,c,d;CPUID(0,0,a,b,c,d);unsigned w[4];CPUID(1,0,w[0],w[1],w[2],w[3]);return (int)((a^b^c^d)&0xfff)+(int)(w[0]&0xfff)+n;}

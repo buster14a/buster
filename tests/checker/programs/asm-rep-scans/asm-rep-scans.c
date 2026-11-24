@@ -1,0 +1,1 @@
+int tested(int n){unsigned x=(unsigned)n|256u,lo,hi;__asm__("rep bsfl %1,%0" : "=r"(lo) : "r"(x) : "cc");__asm__("rep bsrl %1,%0" : "=r"(hi) : "r"(x) : "cc");return (int)(lo+hi*32u);}

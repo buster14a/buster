@@ -1,0 +1,1 @@
+long double pick(long double a,long double b){return a?:b;}int tested(int n){long double a=n*0.75L;long double x=({long double t=a;t*=3;t;})+({long double s=-a;s+1;});long double y=pick(0.0L,a)+pick(n,2.5L);long double w=a*({long double q=x;q/=2;q;});return (int)(x*16)^(int)(y*8)^(int)(w*4);}

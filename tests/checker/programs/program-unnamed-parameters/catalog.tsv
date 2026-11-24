@@ -1,0 +1,11 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+unnamed-scalar-leading-middle-trailing-and-all	unnamed-scalar-leading-middle-trailing-and-all.c	-	unnamed-scalar-leading-middle-trailing-and-all
+unnamed-integer-sse-stack-and-memory-classes	unnamed-integer-sse-stack-and-memory-classes.c	-	unnamed-integer-sse-stack-and-memory-classes
+unnamed-aggregate-register-memory-and-hidden-result	unnamed-aggregate-register-memory-and-hidden-result.c	-	unnamed-aggregate-register-memory-and-hidden-result
+unnamed-aggregate-register-exhaustion-and-stack-offsets	unnamed-aggregate-register-exhaustion-and-stack-offsets.c	-	unnamed-aggregate-register-exhaustion-and-stack-offsets
+unnamed-adjusted-nested-declarators-and-addressed-locals	unnamed-adjusted-nested-declarators-and-addressed-locals.c	-	unnamed-adjusted-nested-declarators-and-addressed-locals
+unnamed-fixed-parameters-before-varargs	unnamed-fixed-parameters-before-varargs.c	-	unnamed-fixed-parameters-before-varargs
+# The harness is compiled by Clang and calls this buster-compiled definition through a function pointer, so the
+# caller and callee do not share lowering code that could hide the same parameter-index error on both sides.
+unnamed-parameters-from-clang-caller	unnamed-parameters-from-clang-caller.c	-	unnamed-parameters-from-clang-caller

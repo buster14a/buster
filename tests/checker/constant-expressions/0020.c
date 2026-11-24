@@ -1,0 +1,1 @@
+typedef int (__attribute__((ms_abi)) *M)(int); _Static_assert(__builtin_types_compatible_p(M,int __attribute__((ms_abi)) (*)(int)),"prefix"); typedef int (*N)(int) __attribute__((ms_abi)); _Static_assert(__builtin_types_compatible_p(M,N),"suffix"); _Static_assert(!__builtin_types_compatible_p(M,int(*)(int)),"distinct ABI");

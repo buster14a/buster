@@ -528,7 +528,7 @@ static bool check_repair_input_report(const CheckRepair* repair, const CheckInpu
             }
             result = ancestor < repair->original_end && view->tree.roles[ancestor] == PARSE_ROLE_CLOSE_BODY;
         }
-        result &= token < repair->record_begin;
+        result = (result && token < repair->record_begin) || report->member_operand;
         if (report->message == CHECK_INPUT_INCOMPLETE_MEMBER || report->message == CHECK_INPUT_INCOMPLETE_OBJECT)
         {
             uint32_t ancestor = token;

@@ -1,0 +1,9 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+structured-loops	structured-loops.c	-	structured-loops
+# Statements with attributes (#1844): a loop's and a switch's, whose breaks, continues and cases are theirs, and
+# jumps with attributes, which jump as without them; a switch's promoted condition of a signed char.
+attributed-statements	attributed-statements.c	-	attributed-statements
+short-circuit-updates	short-circuit-updates.c	-	short-circuit-updates
+stack-argument-calls	stack-argument-calls.c	-	stack-argument-calls
+floating-call-conversions	floating-call-conversions.c	-	floating-call-conversions

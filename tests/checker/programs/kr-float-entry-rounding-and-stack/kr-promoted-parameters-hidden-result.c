@@ -1,0 +1,1 @@
+struct R{long a,b,c;};struct R f(a,b,c,d,e,f,g)char a;float b;short c;_Bool d;int e;float f;short g;{struct R r={a+c+g,(long)(b+f),d+e};return r;}int tested(int n){struct R r=f(257,3.7,65539,n,5,7.9,32769);return (int)(r.a+r.b+r.c);}

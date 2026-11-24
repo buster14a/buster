@@ -3280,80 +3280,162 @@ static Tier1CfgError tier1_cfg_assign(const Tier1CfgInput* input, const Tier1Cfg
     return error;
 }
 
-// One group of tier1_cfg_current_slots' candidates, ranks [first, last), solved in `rows` (dataflow.c's, one vector a
-// block): LIVE_IN in `use`, SLOT in `def`, IN and OUT in theirs, bit r - first for rank r.
-static void tier1_cfg_current_group(const Tier1CfgInput* input, const Tier1CfgAllocation* result, const uint32_t* ranked, uint32_t first, uint32_t last, Dataflow* rows)
+// For one group of up to 512 values, allocate a row only where a value is live at entry or has a spill fragment.
+// held starts at LIVE_IN and descends to LIVE_IN & IN. A stored value is current at exit even if lost at entry.
+typedef struct Tier1CfgSlotRow Tier1CfgSlotRow;
+struct Tier1CfgSlotRow
+{
+    uint64_t held[BUSTER_DATAFLOW_VECTOR_WORDS];
+    uint64_t stored[BUSTER_DATAFLOW_VECTOR_WORDS];
+    __m512i pending;
+};
+
+typedef struct Tier1CfgSlotGroup Tier1CfgSlotGroup;
+struct Tier1CfgSlotGroup
+{
+    Tier1CfgSlotRow** rows;
+    uint32_t* touched;
+    uint32_t* work;
+    uint32_t count;
+};
+
+static Tier1CfgSlotRow* tier1_cfg_slot_row(Tier1CfgSlotGroup* group, uint32_t b, Arena* scratch)
+{
+    Tier1CfgSlotRow* row = group->rows[b];
+    if (row == 0)
+    {
+        row = BUSTER_ARENA_PUSH_ARRAY(scratch, Tier1CfgSlotRow, 1);
+        if (row != 0)
+        {
+            memset(row, 0, sizeof(*row));
+            group->rows[b] = row;
+            group->touched[group->count] = b;
+            group->count += 1;
+        }
+    }
+    return row;
+}
+
+// Remove unsupported entry facts. Only losses that change OUT need to reach successors. Nonempty pending bits
+// also mark membership in the worklist, so each block occupies at most one entry.
+static void tier1_cfg_slot_losses(Tier1CfgSlotGroup* group, uint32_t b, __m512i missing, uint32_t* work_count)
+{
+    Tier1CfgSlotRow* row = group->rows[b];
+    const __m512i held = _mm512_load_si512(row->held);
+    const __m512i lost = _mm512_and_si512(held, missing);
+    _mm512_store_si512(row->held, _mm512_andnot_si512(missing, held));
+    const __m512i leaving = _mm512_andnot_si512(_mm512_load_si512(row->stored), lost);
+    if (_mm512_test_epi64_mask(leaving, leaving) != 0)
+    {
+        const __m512i pending = row->pending;
+        if (_mm512_test_epi64_mask(pending, pending) == 0)
+        {
+            group->work[*work_count] = b;
+            *work_count += 1;
+        }
+        row->pending = _mm512_or_si512(pending, leaving);
+    }
+}
+
+static bool tier1_cfg_current_group(const Tier1CfgInput* input, const Tier1CfgAllocation* result, const uint32_t* ranked, uint32_t first, uint32_t last, Tier1CfgSlotGroup* group, Arena* scratch)
 {
     const uint32_t blocks = input->block_count;
     const Tier1Allocation* allocation = &result->allocation;
     const Tier1AllocationInput* intervals = &result->intervals;
-    for (uint32_t b = 0; b < blocks; b += 1)
-    {
-        _mm512_store_si512(rows->use + (uint64_t)b * BUSTER_DATAFLOW_VECTOR_WORDS, _mm512_setzero_si512());
-        _mm512_store_si512(rows->def + (uint64_t)b * BUSTER_DATAFLOW_VECTOR_WORDS, _mm512_setzero_si512());
-    }
-    for (uint32_t r = first; r < last; r += 1)
+    bool ready = true;
+    for (uint32_t r = first; ready && r < last; r += 1)
     {
         const uint32_t v = ranked[r];
-        // LIVE_IN: the blocks whose starts the value's intervals cover, but its definition's (tier1_cfg_current_slots).
         const uint32_t home = tier1_cfg_block_at(input, result, input->definitions[v]);
-        for (uint32_t k = result->value_interval_offsets[v]; k < result->value_interval_offsets[v + 1]; k += 1)
+        const uint32_t begin = result->value_interval_offsets[v];
+        const uint32_t end = result->value_interval_offsets[v + 1];
+        for (uint32_t k = begin; ready && k < end; k += 1)
         {
             uint32_t b = tier1_cfg_block_at(input, result, intervals->starts[k]);
             b += input->block_starts[b] < intervals->starts[k] ? 1 : 0;
-            for (; b < blocks && input->block_starts[b] < intervals->ends[k]; b += 1)
+            const uint32_t limit = intervals->ends[k];
+            for (; ready && b < blocks && input->block_starts[b] < limit; b += 1)
             {
                 if (b != home)
                 {
-                    tier1_cfg_set(rows->use + (uint64_t)b * BUSTER_DATAFLOW_VECTOR_WORDS, r - first);
+                    Tier1CfgSlotRow* row = tier1_cfg_slot_row(group, b, scratch);
+                    ready = row != 0;
+                    if (ready)
+                    {
+                        tier1_cfg_set(row->held, r - first);
+                    }
                 }
             }
         }
-        for (uint32_t f = allocation->fragment_offsets[result->value_interval_offsets[v]]; f < allocation->fragment_offsets[result->value_interval_offsets[v + 1]]; f += 1)
+        const uint32_t fragment_end = allocation->fragment_offsets[end];
+        for (uint32_t f = allocation->fragment_offsets[begin]; ready && f < fragment_end; f += 1)
         {
             if (allocation->kinds[f] == BUSTER_TIER1_ALLOCATE_SPILL)
             {
-                const uint32_t end = tier1_cfg_block_at(input, result, allocation->ends[f] - 1);
-                for (uint32_t b = tier1_cfg_block_at(input, result, allocation->starts[f]); b <= end; b += 1)
+                const uint32_t end_block = tier1_cfg_block_at(input, result, allocation->ends[f] - 1);
+                for (uint32_t b = tier1_cfg_block_at(input, result, allocation->starts[f]); ready && b <= end_block; b += 1)
                 {
-                    tier1_cfg_set(rows->def + (uint64_t)b * BUSTER_DATAFLOW_VECTOR_WORDS, r - first);
+                    Tier1CfgSlotRow* row = tier1_cfg_slot_row(group, b, scratch);
+                    ready = row != 0;
+                    if (ready)
+                    {
+                        tier1_cfg_set(row->stored, r - first);
+                    }
                 }
             }
         }
     }
-    for (uint32_t b = 0; b < blocks; b += 1)
+    // Seed losses with the predecessor meet, restricted to live entries. An absent row has empty OUT. Reading an
+    // already narrowed predecessor is sound: its pending losses can only remove the same bits a second time.
+    const uint32_t count = group->count;
+    Tier1CfgSlotRow** const rows = group->rows;
+    const uint32_t* const touched = group->touched;
+    const uint32_t* const predecessor_offsets = input->predecessor_offsets;
+    const uint32_t* const predecessors = input->predecessors;
+    const uint32_t* const successor_offsets = input->successor_offsets;
+    const uint32_t* const successors = input->successors;
+    uint32_t work_count = 0;
+    for (uint32_t i = 0; ready && i < count; i += 1)
     {
-        const uint64_t row = (uint64_t)b * BUSTER_DATAFLOW_VECTOR_WORDS;
-        const bool entered = b != 0 && input->predecessor_offsets[b + 1] != input->predecessor_offsets[b];
-        const __m512i full = entered ? _mm512_set1_epi64(-1) : _mm512_setzero_si512();
-        _mm512_store_si512(rows->in + row, full);
-        // (IN & LIVE_IN) | SLOT.
-        _mm512_store_si512(rows->out + row, _mm512_ternarylogic_epi64(full, _mm512_load_si512(rows->use + row), _mm512_load_si512(rows->def + row), 0xEA));
-    }
-    bool changed = true;
-    while (changed)
-    {
-        __m512i changes = _mm512_setzero_si512();
-        for (uint32_t k = blocks; k > 0; k -= 1)
+        const uint32_t b = touched[i];
+        const __m512i held = _mm512_load_si512(rows[b]->held);
+        if (_mm512_test_epi64_mask(held, held) != 0)
         {
-            const uint32_t b = rows->postorder[k - 1];
-            const uint32_t from = input->predecessor_offsets[b];
-            const uint32_t to = b != 0 ? input->predecessor_offsets[b + 1] : from;
-            if (from != to)
+            const uint32_t from = predecessor_offsets[b];
+            const uint32_t to = predecessor_offsets[b + 1];
+            __m512i meet = b != 0 && from != to ? held : _mm512_setzero_si512();
+            for (uint32_t e = from; b != 0 && e < to; e += 1)
             {
-                const uint64_t row = (uint64_t)b * BUSTER_DATAFLOW_VECTOR_WORDS;
-                __m512i meet = _mm512_set1_epi64(-1);
-                for (uint32_t e = from; e < to; e += 1)
+                const Tier1CfgSlotRow* pred = rows[predecessors[e]];
+                if (pred == 0)
                 {
-                    meet = _mm512_and_si512(meet, _mm512_load_si512(rows->out + (uint64_t)input->predecessors[e] * BUSTER_DATAFLOW_VECTOR_WORDS));
+                    meet = _mm512_setzero_si512();
+                    break;
                 }
-                changes = _mm512_or_si512(changes, _mm512_xor_si512(meet, _mm512_load_si512(rows->in + row)));
-                _mm512_store_si512(rows->in + row, meet);
-                _mm512_store_si512(rows->out + row, _mm512_ternarylogic_epi64(meet, _mm512_load_si512(rows->use + row), _mm512_load_si512(rows->def + row), 0xEA));
+                // meet & (pred->held | pred->stored).
+                meet = _mm512_ternarylogic_epi64(meet, _mm512_load_si512(pred->held), _mm512_load_si512(pred->stored), 0xE0);
+            }
+            tier1_cfg_slot_losses(group, b, _mm512_andnot_si512(meet, held), &work_count);
+        }
+    }
+    while (work_count != 0)
+    {
+        work_count -= 1;
+        const uint32_t b = group->work[work_count];
+        Tier1CfgSlotRow* row = rows[b];
+        const __m512i lost = row->pending;
+        row->pending = _mm512_setzero_si512();
+        const uint32_t end = successor_offsets[b + 1];
+        for (uint32_t e = successor_offsets[b]; e < end; e += 1)
+        {
+            const uint32_t to = successors[e];
+            if (rows[to] != 0)
+            {
+                tier1_cfg_slot_losses(group, to, lost, &work_count);
             }
         }
-        changed = _mm512_test_epi64_mask(changes, changes) != 0;
     }
+    return ready;
 }
 
 // Which values' slots hold them at each block's start, whatever place their ranges enter the block in (#2553): a forward
@@ -3369,18 +3451,15 @@ static void tier1_cfg_current_group(const Tier1CfgInput* input, const Tier1CfgAl
 // so a loop's earlier iteration proves nothing of the next. The candidates are the values with a slot that are live into
 // some block, read from their own intervals (each covers the start of every block its value is live into, but its
 // definition's), rather than from every block's live-in list, which holds every global value and was read twice. They
-// are solved, as the liveness is, in groups of BUSTER_DATAFLOW_VECTOR_BITS, each in
-// one vector row a block (dataflow.c's rows), so that the rows take blocks * 256 bytes however many values have slots
-// (#1384). A group keeps OUT beside IN, so that an edge is a load and an AND, starts every block's IN full but the
-// entry's and those without predecessors, and sweeps the blocks in reverse postorder (every block is in the postorder,
-// unreachable ones too) until none changes: in layout order, where a loop's header follows its body, sqlite3VdbeExec
-// took 7 sweeps. The result gets each block's values live into it whose slots hold them, ascending
+// are solved 512 at a time. Only blocks with live entries or spill fragments get rows. A forward worklist removes
+// unsupported bits until every live entry is justified on every predecessor. The result gets those entries in value order
 // (current_slot_offsets and current_slots, on `output`): counted, then filled, a group solved again for the fill where
 // there is more than one. An edge searches its predecessor's list where it would store a value into its own slot; a
 // store the block makes itself is the predecessor's own proof (tier1_cfg_slot_current). The scratch arena ends as it
 // began. False where an arena is short.
 static bool tier1_cfg_current_slots(const Tier1CfgInput* input, Tier1CfgAllocation* result, Arena* output, Arena* scratch)
 {
+    const uint64_t output_mark = output->length;
     const uint64_t mark = scratch->length;
     const uint32_t blocks = input->block_count;
     const uint32_t values = input->value_count;
@@ -3412,17 +3491,19 @@ static bool tier1_cfg_current_slots(const Tier1CfgInput* input, Tier1CfgAllocati
         }
     }
     const uint32_t groups = (uint32_t)(((uint64_t)count + BUSTER_DATAFLOW_VECTOR_BITS - 1) / BUSTER_DATAFLOW_VECTOR_BITS);
-    Dataflow rows = { 0 };
-    ready = ready && (groups == 0 || dataflow_create(scratch, blocks, count < BUSTER_DATAFLOW_VECTOR_BITS ? count : BUSTER_DATAFLOW_VECTOR_BITS, input->edge_count, &rows));
+    Tier1CfgSlotGroup group = { 0 };
     if (ready && groups != 0)
     {
-        memcpy(rows.successor_offsets, input->successor_offsets, ((uint64_t)blocks + 1) * sizeof(uint32_t));
-        if (input->edge_count != 0)
+        group.rows = BUSTER_ARENA_PUSH_ARRAY(scratch, Tier1CfgSlotRow*, blocks);
+        group.touched = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, blocks);
+        group.work = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, blocks);
+        ready = group.rows != 0 && group.touched != 0 && group.work != 0;
+        if (ready)
         {
-            memcpy(rows.successors, input->successors, (uint64_t)input->edge_count * sizeof(uint32_t));
+            memset(group.rows, 0, (uint64_t)blocks * sizeof(*group.rows));
         }
-        ready = dataflow_postorder(&rows, scratch);
     }
+    const uint64_t row_mark = scratch->length;
     uint32_t* slots = 0;
     for (uint32_t pass = 0; ready && pass < 2; pass += 1)
     {
@@ -3447,13 +3528,20 @@ static bool tier1_cfg_current_slots(const Tier1CfgInput* input, Tier1CfgAllocati
             const uint32_t last = count - first < BUSTER_DATAFLOW_VECTOR_BITS ? count : first + BUSTER_DATAFLOW_VECTOR_BITS;
             if (pass == 0 || groups > 1)
             {
-                tier1_cfg_current_group(input, result, ranked, first, last, &rows);
+                for (uint32_t i = 0; i < group.count; i += 1)
+                {
+                    group.rows[group.touched[i]] = 0;
+                }
+                arena_pop_to(scratch, row_mark);
+                group.count = 0;
+                ready = tier1_cfg_current_group(input, result, ranked, first, last, &group, scratch);
             }
-            for (uint32_t b = 0; b < blocks; b += 1)
+            const uint32_t touched = group.count;
+            for (uint32_t i = 0; ready && i < touched; i += 1)
             {
-                const uint64_t* in = rows.in + (uint64_t)b * BUSTER_DATAFLOW_VECTOR_WORDS;
-                const uint64_t* use = rows.use + (uint64_t)b * BUSTER_DATAFLOW_VECTOR_WORDS;
-                const __m512i held = _mm512_and_si512(_mm512_load_si512(in), _mm512_load_si512(use));
+                const uint32_t b = group.touched[i];
+                const uint64_t* current = group.rows[b]->held;
+                const __m512i held = _mm512_load_si512(current);
                 if (pass == 0)
                 {
                     offsets[b + 1] += (uint32_t)_mm512_reduce_add_epi64(_mm512_popcnt_epi64(held));
@@ -3461,7 +3549,7 @@ static bool tier1_cfg_current_slots(const Tier1CfgInput* input, Tier1CfgAllocati
                 for (uint32_t words = pass == 1 ? _mm512_test_epi64_mask(held, held) : 0; words != 0; words &= words - 1)
                 {
                     const uint32_t w = (uint32_t)__builtin_ctz(words);
-                    for (uint64_t bits = in[w] & use[w]; bits != 0; bits &= bits - 1)
+                    for (uint64_t bits = current[w]; bits != 0; bits &= bits - 1)
                     {
                         slots[cursors[b]] = ranked[first + w * 64 + (uint32_t)__builtin_ctzll(bits)];
                         cursors[b] += 1;
@@ -3474,6 +3562,10 @@ static bool tier1_cfg_current_slots(const Tier1CfgInput* input, Tier1CfgAllocati
     {
         result->current_slot_offsets = offsets;
         result->current_slots = slots;
+    }
+    else
+    {
+        arena_pop_to(output, output_mark);
     }
     arena_pop_to(scratch, mark);
     return ready;

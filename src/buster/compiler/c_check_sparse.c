@@ -277,6 +277,14 @@ static __attribute__((unused)) bool check_sparse_reserve_wide(Arena* arena, Chec
     return valid;
 }
 
+// Upper bound including the three pushes' alignment padding for non-shared narrow columns.
+static __attribute__((unused)) uint64_t check_sparse_bytes(uint32_t count, uint32_t columns)
+{
+    const uint64_t entries = check_sparse_slots(count) * columns;
+    return sizeof(CheckSparsePool) + _Alignof(CheckSparsePool) - 1 + entries * sizeof(uint32_t) + 63 +
+           (entries + 1) * BUSTER_CHECK_SPARSE_TOKENS * sizeof(uint32_t) + 63;
+}
+
 // Room for `columns` columns alone, as check_sparse_reserve_wide.
 static __attribute__((unused)) bool check_sparse_reserve(Arena* arena, CheckSparsePool** pool, CheckSparseColumn* column, uint32_t columns, uint32_t count, bool zero, bool shared)
 {
