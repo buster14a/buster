@@ -266,11 +266,13 @@ int run_x86_disassembler_benchmark(int argc, char** argv)
         const int cycles = x86_decode_benchmark_counter(PERF_COUNT_HW_CPU_CYCLES);
         const int instructions = x86_decode_benchmark_counter(PERF_COUNT_HW_INSTRUCTIONS);
         printf("disassembler stream=%s bytes=%u instructions=%llu passes=21 after-scalar=%ums fixed-iterations=%u\n", file != 0 ? file : vectors ? "synthetic-vector" : "synthetic-compiler", size, (unsigned long long)result.count, after_scalar, iterations);
-        const uint64_t table_bytes = sizeof(x86_decode_buckets) + x86_decode_storage_bytes + sizeof(x86_decode_indices) + (uint64_t)x86_decode_index_count * sizeof(*x86_decode_index_rows) +
-                                     sizeof(x86_decode_length_table) + sizeof(x86_decode_checks) + sizeof(x86_decode_simple) + sizeof(x86_disassembly_plans) + sizeof(x86_disassembly_registers);
-        printf("initialization=%.3fms (encoder64=%.3fms address32=%.3fms decoder+format=%.3fms) decoder-tables=%llu bytes entries=%u index-cells=%u\n", initialization_ns / 1000000.0,
+        const uint64_t table_bytes = sizeof(x86_decode_buckets) + x86_decode_storage_bytes + sizeof(x86_decode_lane_indices) + (uint64_t)x86_decode_cell_count * sizeof(*x86_decode_cells) +
+                                     (uint64_t)x86_decode_list_count * sizeof(*x86_decode_lists) + sizeof(x86_decode_tails) + sizeof(x86_decode_legacy_tails) + sizeof(x86_decode_vector_tails) +
+                                     sizeof(x86_decode_map_tails) + sizeof(x86_decode_checks) + sizeof(x86_decode_lane_forms) + sizeof(x86_decode_lane_rows) + sizeof(x86_disassembly_plans) +
+                                     sizeof(x86_disassembly_registers);
+        printf("initialization=%.3fms (encoder64=%.3fms address32=%.3fms decoder+format=%.3fms) decoder-tables=%llu bytes entries=%u lane-index-cells=%u\n", initialization_ns / 1000000.0,
                (normal_initialized - initialization_start) / 1000000.0, (addresses_initialized - normal_initialized) / 1000000.0, (initialization_ns - (addresses_initialized - initialization_start)) / 1000000.0,
-               (unsigned long long)table_bytes, x86_decode_entry_count, x86_decode_index_count);
+               (unsigned long long)table_bytes, x86_decode_entry_count, x86_decode_cell_count);
         for (uint32_t phase = only_phase < 0 ? 0 : (uint32_t)only_phase; phase < (only_phase < 0 ? 4 : (uint32_t)only_phase + 1); phase += 1)
         {
             double samples[3][BUSTER_X86_DECODE_BENCH_PASSES];

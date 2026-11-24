@@ -406,44 +406,98 @@ static bool x86_decode_test_objdump(uint64_t* state, uint32_t count, const char*
     return valid;
 }
 
-// The VEX and EVEX buckets' index against its definition, a scan of the bucket's signatures: for a key, the one
-// form whose signature matches, 0 when none does, UINT16_MAX when several do (or the bucket has no index). Keys are
-// each signature with random bits where its mask doesn't look, and random keys.
+// The lane index (x86_decode_lane_indices, x86_decode_cells, x86_decode_lists) against its definition, a scan of the
+// bucket's compact signatures (x86_decode_compact): for a key, the rows whose signatures match, in catalogue order;
+// none, one, or the cell's list. Keys are each signature with random bits where its mask doesn't look, and random keys.
 static uint64_t x86_decode_test_index(uint64_t* state)
 {
     uint64_t failures = 0;
     uint64_t checked = 0;
-    uint64_t indexed = 0;
-    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(x86_decode_indices); i += 1)
+    uint64_t listed = 0;
+    for (uint32_t b = 0; b < BUSTER_X86_DECODE_BUCKETS; b += 1)
     {
-        const uint32_t bucket_index = i + BUSTER_X86_DECODE_MAPS * 256;
-        const X86DecodeBucket bucket = x86_decode_buckets[bucket_index];
-        indexed += bucket.count != 0 && x86_decode_indices[i].first != UINT32_MAX;
+        const X86DecodeBucket bucket = x86_decode_buckets[b];
+        const X86DecodeLaneIndex* index = &x86_decode_lane_indices[b];
         for (uint32_t sample = 0; sample < bucket.count * 4 + (bucket.count != 0 ? 16 : 0); sample += 1)
         {
             const uint32_t entry = bucket.first + sample / 4;
-            const uint64_t noise = x86_test_random(state) ^ (x86_test_random(state) << 32);
-            const uint64_t key = sample < bucket.count * 4 ? x86_decode_keys[entry] | (noise & ~x86_decode_masks[entry]) : noise;
-            uint16_t expected = 0;
+            const uint32_t noise = (uint32_t)x86_test_random(state) & ((1u << 24) - 1);
+            const uint32_t key = sample < bucket.count * 4
+                                     ? x86_decode_compact(x86_decode_keys[entry], false) | (noise & ~x86_decode_compact(x86_decode_masks[entry], true))
+                                     : noise;
+            uint16_t expected[65];
+            uint32_t matches = 0;
             for (uint32_t j = 0; j < bucket.count; j += 1)
             {
                 const uint32_t candidate = bucket.first + j;
-                if ((key & x86_decode_masks[candidate]) == x86_decode_keys[candidate])
-                {
-                    expected = expected == 0 ? x86_decode_forms[candidate] : UINT16_MAX;
-                }
+                expected[matches] = x86_decode_forms[candidate];
+                matches += (key & x86_decode_compact(x86_decode_masks[candidate], true)) == x86_decode_compact(x86_decode_keys[candidate], false);
             }
-            expected = x86_decode_indices[i].first == UINT32_MAX ? UINT16_MAX : expected;
-            const uint16_t actual = x86_decode_index_row(bucket_index, key);
-            if (actual != expected && failures < 8)
+            expected[matches] = 0;
+            const bool common = (key & index->common_mask) == index->common_key;
+            const uint16_t cell = common ? x86_decode_cells[index->first + _pext_u32(key, index->varying)] : 0;
+            const bool list = (cell & BUSTER_X86_DECODE_LIST) != 0;
+            const uint16_t single[2] = { cell, 0 };
+            const uint16_t* actual = list ? x86_decode_lists + (cell & ~BUSTER_X86_DECODE_LIST) : single;
+            bool same = list == (matches > 1);
+            for (uint32_t k = 0; same && k <= matches; k += 1)
             {
-                fprintf(stderr, "disassembler index: bucket %u key %016llx names %u, its signatures %u\n", bucket_index, (unsigned long long)key, actual, expected);
+                same = actual[k] == expected[k];
             }
-            failures += actual != expected;
+            if (!same && failures < 8)
+            {
+                fprintf(stderr, "disassembler index: bucket %u key %06x gives %u (list %u), its signatures %u forms, the first %u\n", b, key, cell, list, matches, expected[0]);
+            }
+            failures += !same;
+            listed += list;
             checked += 1;
         }
     }
-    printf("disassembler index: %llu keys in %llu indexed buckets against their signatures, failures=%llu\n", (unsigned long long)checked, (unsigned long long)indexed, (unsigned long long)failures);
+    printf("disassembler index: %llu keys in every bucket against their signatures (%llu by a cell's list), failures=%llu\n", (unsigned long long)checked,
+           (unsigned long long)listed, (unsigned long long)failures);
+    return failures;
+}
+
+// The length pass's hints (x86_decode_lengths) at random instances of every supported form, in 64-bit and x32
+// addressing: an instruction's hint is its length, or none for a bucket the tails couldn't describe (0F 78's, whose
+// immediates differ between unprefixed and F2 forms); no other hint is wrong, and no other bucket has none.
+static uint64_t x86_decode_test_hints(uint64_t* state)
+{
+    uint64_t failures = x86_decode_tails_unknown != 1;
+    uint64_t checked = 0;
+    uint64_t unhinted = 0;
+    const X86EncoderMode saved = x86_test_mode;
+    for (uint32_t address32 = 0; address32 < 2; address32 += 1)
+    {
+        x86_test_mode = address32 ? X86_ENCODER_MODE_ADDRESS32 : X86_ENCODER_MODE_64;
+        for (uint32_t row = 1; row < X86_FORM_COUNT; row += 1)
+        {
+            for (uint32_t sample = 0; sample < 4 && x86_decode_form_supported(row) && !(address32 && x86_form_is_bound_memory(row)); sample += 1)
+            {
+                const X86Instruction instruction = x86_random_instruction(state, (uint16_t)row, false);
+                uint8_t bytes[128] = {0};
+                const uint32_t size = encode_one(&instruction, bytes, x86_test_mode);
+                uint8_t lengths[64];
+                X86DecodeWindow window;
+                x86_decode_lengths(bytes, size, lengths, &window);
+                const X86FormDescription* form = &x86_form_descriptions[row];
+                uint32_t opcode_index;
+                const uint32_t map = x86_decode_form_map(form, &opcode_index);
+                const bool known = x86_decode_tails[x86_decode_bucket(form->family, map, x86_opcode_byte(form, opcode_index))] != 0;
+                const bool right = known ? lengths[0] == size : lengths[0] == 0 || lengths[0] == size;
+                if (!right && failures < 8)
+                {
+                    fprintf(stderr, "disassembler hints: %s (%u bytes) hinted %u\n", form->mnemonic, size, lengths[0]);
+                }
+                failures += !right;
+                unhinted += lengths[0] == 0;
+                checked += 1;
+            }
+        }
+    }
+    x86_test_mode = saved;
+    printf("disassembler hints: %llu instances' lengths, %llu without a hint (buckets without one: %u), failures=%llu\n", (unsigned long long)checked,
+           (unsigned long long)unhinted, x86_decode_tails_unknown, (unsigned long long)failures);
     return failures;
 }
 
@@ -467,8 +521,8 @@ static uint64_t x86_decode_test_prefix_mask(const uint8_t* bytes, uint32_t lengt
 }
 
 // The decoder's own contract, checked without a second decoder (#2924). Records tile the consumed bytes from the
-// start, and the stop is explained. Each record decodes alone to itself: a one-instruction slice takes
-// x86_decode_one, never the lanes of a batch. Its text is the same at every capacity that holds it (the planned
+// start, and the stop is explained. Each record decodes alone to itself: a one-instruction slice is a window of one
+// lane, where the stream's record was one of up to 16. Its text is the same at every capacity that holds it (the planned
 // writer at a full buffer, the bounded writer at its exact length). The listing's address and byte columns are
 // the ones written here, and the record re-encodes to an instruction that decodes back to it. Bytes that stop the
 // decode decode alone to nothing, with the same status.
@@ -631,11 +685,17 @@ static uint64_t x86_decode_test_simple(uint64_t seed)
     bool present[X86_FORM_COUNT] = {0};
     uint16_t forms[X86_FORM_COUNT];
     uint32_t form_count = 0;
-    for (uint32_t entry = 0; entry < BUSTER_ARRAY_LENGTH(x86_decode_simple); entry += 1)
+    // The ordinary legacy forms (no prefix, a one-byte opcode or 0F's, general registers, the compact checks) whose
+    // opcode has a length hint: dense streams of them fill whole windows of lanes.
+    for (uint32_t row = 1; row < X86_FORM_COUNT; row += 1)
     {
-        const uint32_t metadata = x86_decode_simple[entry];
-        const uint16_t row = (uint16_t)metadata;
-        if (metadata != 0 && metadata != UINT32_MAX && x86_decode_length_table[entry >> 5] != 0 && !present[row])
+        const X86FormDescription* form = &x86_form_descriptions[row];
+        const uint8_t second = x86_opcode_byte(form, 1);
+        const uint32_t map = form->opcode_bytes == 1 ? 0 : form->opcode_bytes == 2 && x86_opcode_byte(form, 0) == 0x0f && second != 0x38 && second != 0x3a ? 1 : 2;
+        const bool ordinary = x86_decode_form_supported(row) && (x86_decode_checks[row].flags & 1) && form->family == BUSTER_X86_FAMILY_LEGACY && form->prefixes == 0 &&
+                              map < 2 && form->opcode != 0x9b && form->opcode != 0x90 && (form->reg & BUSTER_X86_OPERAND_CLASS) <= BUSTER_X86_CLASS_GPR64 &&
+                              (form->rm & BUSTER_X86_OPERAND_CLASS) <= BUSTER_X86_CLASS_GPR64;
+        if (ordinary && x86_decode_legacy_tails[map * 256 + (form->opcode & 0xff)] != 0x0f && !present[row])
         {
             present[row] = true;
             forms[form_count++] = row;
@@ -1160,6 +1220,7 @@ static int run_x86_disassembler_tests(int argc, char** argv)
         failures += x86_decode_test_simple(seed);
         failures += x86_decode_test_format_bounds(&state);
         failures += x86_decode_test_index(&state);
+        failures += x86_decode_test_hints(&state);
         failures += x86_decode_test_cli();
         uint8_t bytes[128];
         uint64_t classified = 0;
