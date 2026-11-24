@@ -1004,11 +1004,11 @@ static bool assembly_test_same_file(AssemblyTest* test, const char* path, const 
 }
 
 // -S of one c-testsuite program (#1362's stage 2 acceptance), by this executable (`compiler`) with `tier1` or not: its
-// text must assemble with GNU as into -c's object, but for the form contract's normalizations
-// (assembly_test_same_objects), and the program linked from GNU as's object must print the expected output and exit 0.
+// text must reassemble into -c's object, with the form contract's normalizations (assembly_test_same_objects).
+// The program linked from the reassembled object must print the expected output and exit 0.
 // Returns whether it passed, with the first failure in `error`.
-static bool assembly_test_c_program(AssemblyTest* test, const char* compiler, const char* source, const char* expected, const char* name, bool tier1, char* error,
-                                    uint64_t error_size)
+static bool assembly_test_c_program(AssemblyTest* test, const char* compiler, const char* source, const char* expected, const char* name, bool tier1,
+                                    bool own_assembler, char* error, uint64_t error_size)
 {
     char text_path[PATH_MAX];
     char object_path[PATH_MAX];
@@ -1027,15 +1027,25 @@ static bool assembly_test_c_program(AssemblyTest* test, const char* compiler, co
     assembly_test_compile_arguments(test, assembly, compiler, tier1, "-S", text_path, source);
     assembly_test_compile_arguments(test, object, compiler, tier1, "-c", object_path, source);
     char* assembler[] = { "as", "--64", "-o", reassembled_path, text_path, 0 };
+    char* buster[] = { (char*)compiler, "assemble", "-o", reassembled_path, text_path, 0 };
     // (Some of the programs call libm's functions, which the direct path's C link brings and an object's link names.)
     char* link[] = { (char*)compiler, "-o", program_path, reassembled_path, "-lm", 0 };
     char* program[] = { program_path, 0 };
     unlink(reassembled_path);
-    bool passed = object_test_run(assembly, output_path, errors_path) == 0;
     snprintf(error, error_size, "-S failed (see %s)", errors_path);
-    passed = passed && object_test_run(object, output_path, errors_path) == 0;
-    snprintf(error, error_size, passed ? "GNU as didn't assemble %s (see %s)" : "-c failed (see %s)", passed ? text_path : errors_path, errors_path);
-    passed = passed && oracle_epoch_file(text_path) && asm_test_tool(assembler, reassembled_path, output_path, errors_path) == 0;
+    bool passed = object_test_run(assembly, output_path, errors_path) == 0;
+    if (passed)
+    {
+        snprintf(error, error_size, "-c failed (see %s)", errors_path);
+        passed = object_test_run(object, output_path, errors_path) == 0;
+    }
+    if (passed)
+    {
+        const char* tool = own_assembler ? "Buster's assembler" : "GNU as";
+        snprintf(error, error_size, "%s didn't assemble %s (see %s)", tool, text_path, errors_path);
+        passed = own_assembler ? object_test_run(buster, output_path, errors_path) == 0 :
+                                 oracle_epoch_file(text_path) && asm_test_tool(assembler, reassembled_path, output_path, errors_path) == 0;
+    }
     if (passed)
     {
         const uint64_t mark = test->scratch.length;
@@ -1052,7 +1062,7 @@ static bool assembly_test_c_program(AssemblyTest* test, const char* compiler, co
     if (passed)
     {
         passed = assembly_test_run_in(program, test->directory, output_path, errors_path) == 0 && assembly_test_same_file(test, output_path, expected);
-        snprintf(error, error_size, "the program linked from GNU as's object didn't print %s and exit 0 (see %s)", expected, output_path);
+        snprintf(error, error_size, "the reassembled program didn't print %s and exit 0 (see %s)", expected, output_path);
     }
     if (passed && !test->keep)
     {
@@ -1074,7 +1084,7 @@ static void assembly_test_patchable(AssemblyTest* test)
         "__attribute__((noinline, patchable_function_entry(18,4))) int first(int x) { return x + 3; }\n"
         "__attribute__((noinline, patchable_function_entry(6,6), section(\".text.patchable\"))) int second(int x) { return first(x) + 1; }\n"
         "__attribute__((noinline, patchable_function_entry(3))) int third(int x) { return second(x) * 2; }\n"
-        "__attribute__((noinline, patchable_function_entry(7,1,\".custom.patch\"))) static int fourth(int x) { return third(x) + 2; }\n"
+        "__attribute__((noinline, patchable_function_entry(7,1,\"custom,patch\"))) static int fourth(int x) { return third(x) + 2; }\n"
         "int main(int argc, char** argv) { return fourth(argc) != 12; }\n";
     char compiler[PATH_MAX];
     const ssize_t length = readlink("/proc/self/exe", compiler, sizeof(compiler) - 1);
@@ -1090,9 +1100,15 @@ static void assembly_test_patchable(AssemblyTest* test)
     {
         char name[32];
         char error[512] = { 0 };
-        snprintf(name, sizeof(name), "patchable-tier%u", tier);
-        const bool same = assembly_test_c_program(test, compiler, source, expected, name, tier != 0, error, sizeof(error));
-        assembly_test_check(test, same, "patchable entry tables, code and symbols round-trip through GNU as", error);
+        snprintf(name, sizeof(name), "patchable-tier%u-buster", tier);
+        const bool buster = assembly_test_c_program(test, compiler, source, expected, name, tier != 0, true, error, sizeof(error));
+        assembly_test_check(test, buster, "patchable entry tables, code and symbols round-trip through Buster", error);
+        if (test->cross_check)
+        {
+            snprintf(name, sizeof(name), "patchable-tier%u-gnu", tier);
+            const bool gnu = assembly_test_c_program(test, compiler, source, expected, name, tier != 0, false, error, sizeof(error));
+            assembly_test_check(test, gnu, "patchable entry tables, code and symbols round-trip through GNU as", error);
+        }
     }
     if (!test->keep)
     {
@@ -1176,7 +1192,7 @@ static void assembly_test_c_testsuite(AssemblyTest* test, const char* directory,
                 char name[64];
                 snprintf(name, sizeof(name), "%s-tier%u", line, tier);
                 char error[512] = { 0 };
-                const bool ok = assembly_test_c_program(test, compiler, source, expected, name, tier == 1, error, sizeof(error));
+                const bool ok = assembly_test_c_program(test, compiler, source, expected, name, tier == 1, false, error, sizeof(error));
                 char detail[640];
                 snprintf(detail, sizeof(detail), "%s.c at Tier %u: %s", line, tier, error);
                 assembly_test_check(test, ok, "c-testsuite", detail);
@@ -1268,9 +1284,9 @@ static int run_assembly_output_tests(int count, char** arguments)
         assembly_test_refusal(&test, ASSEMBLY_TEST_TARGETLESS, ASSEMBLY_INVALID, "a relative branch without a target");
         assembly_test_refusal(&test, ASSEMBLY_TEST_TLS_FIXUP, ASSEMBLY_UNSUPPORTED, "thread-local storage");
         assembly_test_refusal(&test, ASSEMBLY_TEST_BND_CALL, ASSEMBLY_UNSUPPORTED, "GNU as encodes otherwise");
+        assembly_test_patchable(&test);
         if (test.cross_check)
         {
-            assembly_test_patchable(&test);
             assembly_test_forms(&test, 2);
         }
         if (c_testsuite != 0)

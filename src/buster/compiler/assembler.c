@@ -261,6 +261,9 @@ struct AsmSection
 {
     ObjectAtomSection object;
     uint32_t group;
+    uint32_t linked_symbol;
+    // The GNU unique ID plus one, so an omitted ID differs from `unique,0`.
+    uint64_t unique;
     uint32_t name_symbol;
     bool name_ambiguous;
     uint32_t size;
