@@ -379,8 +379,11 @@ static bool debug_test_units(void)
             digest = debug_test_digest(digest, &b.sections[section].size, sizeof(b.sections[section].size));
             digest = debug_test_digest(digest, b.sections[section].bytes, b.sections[section].size);
         }
+        // Each section refused for want of one byte, and the sections emitted again: every emit after a refusal must
+        // write what the first emit wrote.
         for (uint32_t section = 0; valid && section < BUSTER_DEBUG_SECTIONS; section += 1)
         {
+            valid &= a.sections[section].size == b.sections[section].size && memcmp(a.sections[section].bytes, b.sections[section].bytes, a.sections[section].size) == 0;
             const uint64_t capacity = b.sections[section].capacity;
             b.sections[section].capacity = b.sections[section].size - 1;
             memset(b_bytes, 0xa5, BUSTER_DEBUG_SECTIONS * BUSTER_DEBUG_TEST_BYTES);
@@ -393,6 +396,11 @@ static bool debug_test_units(void)
             b.sections[section].capacity = capacity;
             valid &= debug_emit(&plan, &b) == DEBUG_OK;
         }
+        valid &= memcmp(a_addresses, b_addresses, sizeof(a_addresses)) == 0 && memcmp(a.fields, b.fields, sizeof(a.fields)) == 0;
+        for (uint32_t section = 0; valid && section < BUSTER_DEBUG_SECTIONS; section += 1)
+        {
+            valid &= a.sections[section].size == b.sections[section].size && memcmp(a.sections[section].bytes, b.sections[section].bytes, a.sections[section].size) == 0;
+        }
         valid &= debug_finalize(&unit, &a, addresses) == DEBUG_OK && debug_test_decode(&unit, &a, addresses);
         const uint64_t invalid[] = { 0x401000, 0x204000, UINT64_MAX };
         valid &= debug_finalize(&unit, &b, invalid) == DEBUG_ERROR_ADDRESS;
@@ -400,6 +408,11 @@ static bool debug_test_units(void)
         memcpy(&first, b.sections[DEBUG_SECTION_ADDR].bytes + 8, 8);
         valid &= first == 0;
         valid &= debug_finalize(&unit, &b, addresses) == DEBUG_OK && debug_test_decode(&unit, &b, addresses);
+        // After a refused finalize, the valid one must patch what finalizing the first emit patched.
+        for (uint32_t section = 0; valid && section < BUSTER_DEBUG_SECTIONS; section += 1)
+        {
+            valid &= memcmp(a.sections[section].bytes, b.sections[section].bytes, a.sections[section].size) == 0;
+        }
         const uint64_t moved[] = { 0x701000, 0x804000, 0x200000000ull };
         valid &= debug_finalize(&unit, &a, moved) == DEBUG_OK && debug_test_decode(&unit, &a, moved);
         valid &= memcmp(a.sections[DEBUG_SECTION_INFO].bytes, b.sections[DEBUG_SECTION_INFO].bytes, a.sections[DEBUG_SECTION_INFO].size) == 0;

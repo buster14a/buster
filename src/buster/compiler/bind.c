@@ -1179,8 +1179,7 @@ static void bind_keep_imports(Bind* bind, const Link* link)
 // imports, keeping its export's type: GNU ld and lld write them so, OBJECT WEAK UND for _r_debug, lld demoting them in
 // demoteSymbolsAndComputeIsPreemptible. With one, every reference to its names is an import at its version, the weak
 // ones among them. An import is the library's by its version, whose index follows libc.so.6's and the other's
-// (runtime.c): their exports all have versions, as glibc's and GCC's do. A pass over the imports, which are tens,
-// shared by both paths.
+// (runtime.c): their exports all have versions, as glibc's and GCC's do. A pass over the imports, which are tens.
 static bool bind_keep_as_needed(Bind* bind, Link* link, const ImportLibrary* library, bool forced)
 {
     LinkSymbols* symbols = &link->symbols;
@@ -1526,7 +1525,7 @@ static uint32_t bind_libraries_loaded(const RuntimeLibraries* libraries, uint32_
 // versioned reference binds to (runtime_libraries_export_at): the first named library's at that version, whatever the
 // file, as GNU ld and lld bind it and the loader looks it up. Neither linker checks the needs, so that both link a
 // program the loader refuses ("version `V1' not found"): libA's foo@V1, which libA requires of libB.so, bound to libC's
-// foo@V1 against a libB that defines V2 alone. A scalar pass over the loaded libraries' few needs, shared by both paths,
+// foo@V1 against a libB that defines V2 alone. A scalar pass over the loaded libraries' few needs,
 // as the closure's rounds are: libm.so.6 has six, each a version of libc.so.6's or the loader's.
 static void bind_library_versions(Bind* bind, uint32_t needed)
 {
@@ -1592,7 +1591,7 @@ static uint32_t bind_runtime_covered(const Bind* bind, uint32_t needed)
 // and libmvec's 59 those and libm's, which its DT_NEEDED covers. With any, one scan of the link marks those its
 // definitions satisfy, and the closure goes again from the program's libraries over the others: every library it
 // reaches the first rounds reached, with every edge recorded. The rounds are a scalar pass over the needed libraries'
-// references, a few hundred for libm, shared by both paths, and the scan the paths' own.
+// references, a few hundred for libm, and the scan.
 static void bind_needed_libraries(Bind* bind, const Link* link)
 {
     const RuntimeLibraries* libraries = bind->libraries;
@@ -1676,7 +1675,7 @@ static void bind_needed_libraries(Bind* bind, const Link* link)
 // The imports from libraries named with -l that the link doesn't need, which only weak references bound to: as GNU ld
 // and lld take a library --as-needed, those are left to nothing, unversioned, keeping their export's type, as
 // bind_keep_loader leaves the loader's. An import is a library's when one exports its name, since binding looks in the
-// libraries first. A pass over the imports, which are tens, shared by both paths.
+// libraries first. A pass over the imports, which are tens.
 static void bind_keep_libraries(Bind* bind, Link* link)
 {
     LinkSymbols* symbols = &link->symbols;

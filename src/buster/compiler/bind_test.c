@@ -8,8 +8,8 @@
 //
 // main.c includes this file after bind.c, and after link_test.c, whose sets of programs (link_test_program_options) it
 // binds, the object writer's tests, whose way of running a tool (object_test_run, object_test_read_file) it shares, and
-// import_test.c (import_test_version_name). Every check binds against this system's runtime (runtime_import), by both
-// paths, which must make the same link, column by column, and the same imports, exports and members (bind_test_paths):
+// import_test.c (import_test_version_name). Every check binds against this system's runtime (runtime_import) and checks
+// the link, its imports, exports and members by the test's own rules (bind_test_bind_program):
 //   - Programs: test-link's two sets that call libc, each generated with room for the runtime, the runtime's first
 //     objects joined after its symbols, its atoms, then the rest (link_program_generate_begin, _atoms and _end, which
 //     runs link_check on the whole link). Then: one symbol per global name; every fixup's target defined, imported
@@ -57,8 +57,7 @@
 //     references with default visibility and the exports that binding found in readelf's .dynsym, and the members that
 //     lld's --why-extract lists, of either archive. Each of the linkers' cases' own objects, linked by cc with GNU ld
 //     and with lld, must link, or fail to, as binding did, and run with the case's status, as the bound link must.
-// Then the same against this system's static runtime (runtime_import_static), by both paths, which must make the same
-// link and join the same members:
+// Then the same against this system's static runtime (runtime_import_static):
 //   - Static programs: test-link's two sets that call libc. The members that join must be those GNU ld's archive scan
 //     loads, and no others: an oracle of the test's own (bind_test_static_expected) that scans the archives' symbol
 //     indices in the group's order until a pass loads nothing, rather than reading binding's references. Then
@@ -73,8 +72,8 @@
 //     a weak definition of __libc_start_main (crt1.o's reference takes it, and its member doesn't join); a weak
 //     absolute definition of data_start (crt1.o's, first in link order, takes its place: data_start is __data_start, as
 //     with GNU ld and lld); a reference to a name a member defines absolutely; and weak definitions of 4 and of 24 names
-//     the members refer to (none thread-local), which the vector path's closure compares with, or past
-//     BUSTER_BIND_BLOCKED leaves to the exact path's.
+//     the members refer to (none thread-local), which the closure compares with, or past
+//     BUSTER_BIND_BLOCKED leaves to its queue (bind_closure_queue).
 //   - With --cross-check: each static program's own objects linked by cc -static with GNU ld (its --trace given twice)
 //     and with lld (--why-extract), which must load the members that joined and no others, and run printing what the
 //     model predicts. And five C programs that cc compiles (hello, stdio, threads, jumps and weak-puts), each
@@ -83,15 +82,14 @@
 // Then, against a shared library's runtime (runtime_import_shared), the programs, rules (a reference to __morestack
 // bound to libgcc_s.so.1 as in a PIE, not left to the loader, and refused without it) and the room, and with
 // --cross-check its C libraries; and split-stack code (bind_test_split_stack): C compiled with -fsplit-stack as a
-// library and as a PIE, which binding must bind by both paths, morestack.o's _Unwind_Resume an import of
+// library and as a PIE, which binding must bind, morestack.o's _Unwind_Resume an import of
 // libgcc_s.so.1's, whose objects ld.lld and ld.bfd link with libgcc_s.so.1 as needed into a library that loads into a
 // harness that doesn't need it (dlopen, RTLD_NOW) and a PIE, which run; and refuse without libgcc_s.so.1, naming
 // _Unwind_Resume and libgcc.a(morestack.o); while cc's links with GNU ld and lld need libgcc_s.so.1, load into the
 // harness and run; and lld's link of the library with libgcc.a and libc but not libgcc_s.so.1, which leaves the
 // unwinder to the loader, must fail to load there.
 // Then the static programs, and with --cross-check the C programs (compiled with -fPIE), against this system's static
-// PIE's runtime (runtime_import_static_pie), by both paths, which must make the same link and join the same members,
-// checked as against the static runtime: the members the oracle loads, in which rcrt1.o, which doesn't define
+// PIE's runtime (runtime_import_static_pie), checked as against the static runtime: the members the oracle loads, in which rcrt1.o, which doesn't define
 // _dl_relocate_static_pie, makes libc.a's dl-reloc-static-pie.o join; _dl_relocate_static_pie that member's, its
 // _DYNAMIC the linker's, and __dso_handle crtbeginS.o's; and with --cross-check, each linked by cc -static-pie with GNU
 // ld and with lld, which must load the same members and run as the model predicts or with the program's status.
@@ -663,9 +661,8 @@ static void bind_test_dirty(BindTestTally* tally, const BindTestProgram* clean, 
     bind_test_release(&dirty);
 }
 
-// Binds the program by both paths, which must agree, and checks the vector path's link. The vector path's program is
-// left in `kept` for the cross-check, released by the caller.
-static void bind_test_paths(BindTestTally* tally, const Runtime* runtime, LinkProgramOptions options, const char* name, BindTestProgram* kept, Arena* arena)
+// Binds the program and checks its link. The program is left in `kept` for the cross-check, released by the caller.
+static void bind_test_bind_program(BindTestTally* tally, const Runtime* runtime, LinkProgramOptions options, const char* name, BindTestProgram* kept, Arena* arena)
 {
     const bool vector_bound = bind_test_program(kept, runtime, options);
     bind_test_expect(tally, vector_bound, name, kept->bind.error);
@@ -1468,8 +1465,7 @@ static bool bind_test_rules(const Runtime* runtime)
 // ---------------------------------------------------------------------------------------------------------------------
 // Libraries named with -l
 //
-// Links made by hand bound with this system's libm (runtime_libraries_import, -lm) by both paths, which must make the
-// same link: strong references to sin and to ldexp, which libc.so.6 exports too and which binds to libm's, before
+// Links made by hand bound with this system's libm (runtime_libraries_import, -lm): strong references to sin and to ldexp, which libc.so.6 exports too and which binds to libm's, before
 // libc.so.6 on the line; a weak one to cos, an import once libm is needed; one to write, libc.so.6's; and a definition
 // of cbrt, which libm exports too, which the executable exports. Then a weak reference alone, which doesn't make libm
 // needed and is left to nothing; and the import's refusals, on files of the test's own in `directory`.
@@ -1621,14 +1617,13 @@ static void bind_test_library_import_cases(BindTestTally* tally, const Runtime* 
 // Libraries a needed library refers to (#398's review), made by hand: libbuster_a.so and libbuster_c.so export a_func
 // and c_func and refer to b_func, which libbuster_b.so exports, without a DT_NEEDED entry for it (libbuster_a.so's names
 // libc.so.6, and it refers to weak_func weakly, which nothing defines); and libbuster_d.so exports d_func and refers to
-// b_func, its DT_NEEDED naming libbuster_missing.so, which no link has. Each link binds by both paths, which must make
-// the same link and fail alike:
+// b_func, its DT_NEEDED naming libbuster_missing.so, which no link has. Each link must bind or fail:
 //   - -lbuster_a -lbuster_c -lbuster_b, main referring to a_func and c_func. Without a definition of b_func, the link
 //     needs all three libraries, and so with a strong reference of main's to it, an import of libbuster_b.so's. With a
 //     definition the executable exports (global, weak, protected or absolute), which the loader binds the libraries'
 //     references to, as GNU ld and lld link it, it needs libbuster_a.so and libbuster_c.so alone and exports b_func;
 //     with a hidden one, which the loader can't see, all three, and b_func isn't exported. The global definition comes
-//     after 0 to 15 others, so that b_func comes at every lane of the vector path's batches;
+//     after 0 to 15 others, so that b_func comes at every lane of binding's batches;
 //   - -lbuster_a -lbuster_c, without libbuster_b.so: a needed library's reference to b_func that nothing defines is
 //     BIND_ERROR_LIBRARY_UNDEFINED, naming the library and its reference, as GNU ld and lld refuse it: libbuster_a.so's
 //     with main referring to both, libbuster_c.so's with main referring to c_func alone, and libbuster_a.so's too with a
@@ -1710,7 +1705,7 @@ static bool bind_test_write_library(const char* directory, const BindTestLibrary
 #endif
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 // The link: main's strong references to the functions `calls` names, `fillers` definitions of the program's, then
-// b_func as `dependency` has it, bound by `path` against `libraries`. Returns b_func's symbol (0 for none) in *b_func,
+// b_func as `dependency` has it, bound against `libraries`. Returns b_func's symbol (0 for none) in *b_func,
 // and whether the link bound.
 static bool bind_test_dependency_link(BindTestLink* test, const Runtime* runtime, const RuntimeLibraries* libraries, BindTestDependency dependency,
                                       uint32_t calls, uint32_t fillers, SymbolId* b_func)
@@ -1876,7 +1871,7 @@ static void bind_test_dependencies(BindTestTally* tally, const Runtime* runtime,
 // (n), to __tls_get_addr, which the loader alone exports (t), and weakly to _Unwind_Backtrace (w), and one that refers
 // to nothing with a DT_NEEDED entry for libgcc_s.so.1 (g). GNU ld's --as-needed keeps libgcc_s.so.1 or the loader for a
 // needed library's strong reference that no DT_NEEDED entry of a library the program loads covers, so that the program
-// loads: binding must need it (Bind.runtime_needed) exactly then, by both paths alike, and not for a library the link
+// loads: binding must need it (Bind.runtime_needed) exactly then, and not for a library the link
 // doesn't need, when g is needed beside u, in either order, nor when main's own definition, which the executable
 // exports, satisfies the reference.
 // On a system without libgcc_s.so.1, u's reference is one nothing defines, refused (BIND_ERROR_LIBRARY_UNDEFINED), and
@@ -1932,12 +1927,12 @@ static void bind_test_runtime_dependencies(BindTestTally* tally, const Runtime* 
         RuntimeLibraries libraries = { 0 };
         const RuntimeError imported = runtime_libraries_import(&libraries, runtime, names, name_count, directories, 1);
         bind_test_expect(tally, imported == RUNTIME_ERROR_NONE && libraries.count == name_count, "imported", c);
-        BindTestLink links[2];
-        bool bound[2] = { false, false };
-        SymbolId defined[2] = { 0, 0 };
-        for (uint32_t p = 0; imported == RUNTIME_ERROR_NONE && p < 2; p += 1)
+        BindTestLink link;
+        bool bound = false;
+        SymbolId defined = 0;
+        if (imported == RUNTIME_ERROR_NONE)
         {
-            BindTestLink* test = &links[p];
+            BindTestLink* test = &link;
             bool result = bind_test_link_begin(test, runtime, bind_test_room(runtime));
             const SymbolId main = result ? bind_test_symbol(test, "main", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, BUSTER_LINK_SOURCE_PROGRAM) : 0;
             result = main != 0;
@@ -1946,29 +1941,24 @@ static void bind_test_runtime_dependencies(BindTestTally* tally, const Runtime* 
                 result = (cases[c].calls & (1u << i)) == 0 ||
                          bind_test_symbol(test, files[cases[c].files[i]].export, BUSTER_LINK_SYMBOL_GLOBAL, BUSTER_LINK_SOURCE_NONE) != 0;
             }
-            defined[p] = result && cases[c].defines ? bind_test_symbol(test, "_Unwind_Backtrace", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, BUSTER_LINK_SOURCE_PROGRAM) : 0;
-            result = result && (!cases[c].defines || defined[p] != 0);
+            defined = result && cases[c].defines ? bind_test_symbol(test, "_Unwind_Backtrace", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, BUSTER_LINK_SOURCE_PROGRAM) : 0;
+            result = result && (!cases[c].defines || defined != 0);
             result = result && bind_begin(&test->bind, &test->link, runtime, &test->bytes, 1, &test->arena) &&
-                     bind_test_define(test, main) && (defined[p] == 0 || bind_test_define(test, defined[p]));
+                     bind_test_define(test, main) && (defined == 0 || bind_test_define(test, defined));
             test->bind.libraries = &libraries;
-            bound[p] = result && bind_end(&test->bind, &test->link);
-        }
-        if (imported == RUNTIME_ERROR_NONE)
-        {
-            const Bind* bind = &links[0].bind;
+            bound = result && bind_end(&test->bind, &test->link);
+            const Bind* bind = &link.bind;
             const uint32_t expected = unwinder ? cases[c].needed : cases[c].without;
-            const bool agree = bound[0] == bound[1] && bind_test_same_links(&links[0].link, &links[1].link) && bind_test_same_binds(&links[0].bind, &links[1].bind);
-            const bool outcome = expected == UINT32_MAX ? !bound[0] && bind->error == BIND_ERROR_LIBRARY_UNDEFINED
-                                                        : bound[0] && bind->runtime_needed == expected && bind->libraries_needed == cases[c].calls &&
-                                                              (defined[0] == 0 || bind_test_listed(bind, defined[0], true));
-            if (!agree || !outcome)
+            const bool outcome = expected == UINT32_MAX ? !bound && bind->error == BIND_ERROR_LIBRARY_UNDEFINED
+                                                        : bound && bind->runtime_needed == expected && bind->libraries_needed == cases[c].calls &&
+                                                              (defined == 0 || bind_test_listed(bind, defined, true));
+            if (!outcome)
             {
-                printf("  %s: bound %d and %d, paths agree %d, error %s, runtime needed %#x, libraries needed %#x\n", cases[c].name, bound[0], bound[1], agree,
-                       bind_test_errors[bind->error], bind->runtime_needed, bind->libraries_needed);
+                printf("  %s: bound %d, error %s, runtime needed %#x, libraries needed %#x\n", cases[c].name, bound, bind_test_errors[bind->error], bind->runtime_needed,
+                       bind->libraries_needed);
             }
-            bind_test_expect(tally, agree && outcome, cases[c].name, c);
-            bind_test_link_end(&links[0]);
-            bind_test_link_end(&links[1]);
+            bind_test_expect(tally, outcome, cases[c].name, c);
+            bind_test_link_end(&link);
         }
         runtime_libraries_release(&libraries);
     }
@@ -2193,20 +2183,14 @@ static bool bind_test_atexit_program(const Runtime* runtime)
     BindTestAtexit vector;
     bind_test_atexit(&vector, runtime, true);
     bind_test_atexit_checks(&tally, &vector, runtime);
-    // Each path again over binding's arena dirtied (bind_test_dirty), with the member that joins.
-    const BindTestAtexit* cleans[] = {
-        &vector,
-    };
-    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(cleans); c += 1)
-    {
-        BindTestAtexit dirty;
-        bind_test_atexit_dirtied(&dirty, runtime, true, bind_test_dirty_bytes(cleans[c]->test.arena.length));
-        bind_test_expect(&tally, dirty.bound == cleans[c]->bound && bind_test_same_links(&cleans[c]->test.link, &dirty.test.link) &&
-                                     bind_test_same_binds(&cleans[c]->test.bind, &dirty.test.bind),
-                         "the path over a dirty arena as over a clean one", c);
-        bind_test_expect(&tally, !dirty.bound || bind_test_kept_pattern(&dirty.test.bind, runtime), "the dirty arena's pattern in Bind.symbols", c);
-        bind_test_link_end(&dirty.test);
-    }
+    // Again over binding's arena dirtied (bind_test_dirty), with the member that joins.
+    BindTestAtexit dirty;
+    bind_test_atexit_dirtied(&dirty, runtime, true, bind_test_dirty_bytes(vector.test.arena.length));
+    bind_test_expect(&tally, dirty.bound == vector.bound && bind_test_same_links(&vector.test.link, &dirty.test.link) &&
+                                 bind_test_same_binds(&vector.test.bind, &dirty.test.bind),
+                     "binding over a dirty arena as over a clean one", 0);
+    bind_test_expect(&tally, !dirty.bound || bind_test_kept_pattern(&dirty.test.bind, runtime), "the dirty arena's pattern in Bind.symbols", 0);
+    bind_test_link_end(&dirty.test);
     bind_test_link_end(&vector.test);
     return bind_test_report(&tally);
 }
@@ -2430,20 +2414,14 @@ static bool bind_test_libgcc_program(const Runtime* runtime)
     BindTestLibgcc vector;
     bind_test_libgcc(&vector, runtime, true);
     bind_test_libgcc_checks(&tally, &vector, runtime);
-    // Each path again over binding's arena dirtied (bind_test_dirty), with the members that join, in one round.
-    const BindTestLibgcc* cleans[] = {
-        &vector,
-    };
-    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(cleans); c += 1)
-    {
-        BindTestLibgcc dirty;
-        bind_test_libgcc_dirtied(&dirty, runtime, true, bind_test_dirty_bytes(cleans[c]->test.arena.length));
-        bind_test_expect(&tally, dirty.bound == cleans[c]->bound && bind_test_same_links(&cleans[c]->test.link, &dirty.test.link) &&
-                                     bind_test_same_binds(&cleans[c]->test.bind, &dirty.test.bind),
-                         "the path over a dirty arena as over a clean one", c);
-        bind_test_expect(&tally, !dirty.bound || bind_test_kept_pattern(&dirty.test.bind, runtime), "the dirty arena's pattern in Bind.symbols", c);
-        bind_test_link_end(&dirty.test);
-    }
+    // Again over binding's arena dirtied (bind_test_dirty), with the members that join, in one round.
+    BindTestLibgcc dirty;
+    bind_test_libgcc_dirtied(&dirty, runtime, true, bind_test_dirty_bytes(vector.test.arena.length));
+    bind_test_expect(&tally, dirty.bound == vector.bound && bind_test_same_links(&vector.test.link, &dirty.test.link) &&
+                                 bind_test_same_binds(&vector.test.bind, &dirty.test.bind),
+                     "binding over a dirty arena as over a clean one", 0);
+    bind_test_expect(&tally, !dirty.bound || bind_test_kept_pattern(&dirty.test.bind, runtime), "the dirty arena's pattern in Bind.symbols", 0);
+    bind_test_link_end(&dirty.test);
     bind_test_link_end(&vector.test);
     return bind_test_report(&tally);
 }
@@ -2454,7 +2432,7 @@ static bool bind_test_libgcc_program(const Runtime* runtime)
 // bind_capacity_needed's bound, for a dynamic PIE's runtime and a shared library's: for each member of the archives
 // with a global name that no library exports before the members (libgcc_s.so.1's come after them:
 // runtime_export_after_members), a link of main and a strong reference to that name (the member's first among the
-// runtime's names), bound by the vector path with every member's room (bind_capacity), may add no more names, atoms,
+// runtime's names), bound with every member's room (bind_capacity), may add no more names, atoms,
 // symbols, fixups, wide addends, priorities, names' bytes and atoms' bytes than bind_capacity_needed counts for the
 // name, whether it binds or is refused (morestack.o's without libgcc_s.so.1, BIND_ERROR_MEMBER_UNDEFINED); and the
 // count is never more than bind_capacity's. A member joins only for such a reference, so these links reach every member
@@ -2944,8 +2922,7 @@ static void bind_test_against_lld(BindTestTally* tally, const Link* own, uint32_
 // Programs whose names bind by the rules that GNU ld and lld decide for themselves: a weak definition of the program's
 // meeting the runtime's (strong, and weak before it in link order), references with a visibility other than default to
 // a name only libc.so.6 defines, references to the names the linker defines, and to names only the loader exports,
-// which make it needed. Each is bound by both paths, which must
-// agree, and must bind or fail as `links` says. With --cross-check, the program's own objects, linked by cc as a PIE
+// which make it needed. Each must bind or fail as `links` says. With --cross-check, the program's own objects, linked by cc as a PIE
 // with GNU ld and with lld, must link or fail to alike and run with `status`; lld's .dynsym and --why-extract must have
 // what binding found (bind_test_against_lld); and the bound link's objects, linked by ld.lld and ld.bfd, must run with
 // `status` too.
@@ -3506,7 +3483,7 @@ static bool bind_test_programs(const Runtime* runtime, uint64_t seed, bool cross
         if (options[i].libc)
         {
             BindTestProgram bound;
-            bind_test_paths(&tally, runtime, options[i], link_test_program_names[i], &bound, arena);
+            bind_test_bind_program(&tally, runtime, options[i], link_test_program_names[i], &bound, arena);
             BindTestTally names = {
                 .check = "programs",
             };
@@ -4182,7 +4159,7 @@ static const BindTestStaticSource bind_test_static_sources[] = {
 };
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 // The C programs of bind_test_static_sources, each compiled by cc (with -fPIE for a static PIE's runtime), imported as
-// the program, bound by both paths against a static runtime (a static executable's or a static PIE's) and checked as
+// the program, bound against a static runtime (a static executable's or a static PIE's) and checked as
 // bind_test_static_structure does, with the members the oracle loads; then linked by GNU ld and lld with -static (or
 // -static-pie), which must load the same members and run with the program's status.
 static bool bind_test_static_compiled(const Runtime* runtime, const char* directory, bool keep, Arena* arena)
@@ -4276,7 +4253,7 @@ static bool bind_test_static_compiled(const Runtime* runtime, const char* direct
     return bind_test_report(&tally);
 }
 
-// The rules a static runtime adds, on links made by hand, each bound by both paths, which must make the same link, against
+// The rules a static runtime adds, on links made by hand, each bound against
 // a static executable's runtime and a static PIE's (whose start object, crt1.o's here, is rcrt1.o):
 //   - a strong reference to a name nothing defines: an error naming it;
 //   - strong and weak references to __tls_get_addr: bound, the strong one left undefined for the relaxation;
@@ -4293,8 +4270,8 @@ static bool bind_test_static_compiled(const Runtime* runtime, const char* direct
 //     so that data_start is __data_start, as with GNU ld and lld;
 //   - a strong reference to a name a member defines absolutely: the member joins, and the name is absolute;
 //   - weak definitions of 4 and of 24 names that the members of a link of main alone refer to (none thread-local),
-//     which the vector path's closure compares references with (BUSTER_BIND_BLOCKED) or, past 16, leaves to the exact
-//     path's: GNU ld's members.
+//     which the closure compares references with (BUSTER_BIND_BLOCKED) or, past 16, leaves to its queue
+//     (bind_closure_queue): GNU ld's members.
 typedef enum BindTestStaticRule
 {
     BIND_TEST_STATIC_NOWHERE,
@@ -4367,7 +4344,7 @@ static SymbolId bind_test_static_absolute(const Runtime* runtime)
     return result;
 }
 
-// Builds the rule's link (main and the rule's symbols), works out GNU ld's members for it, then binds it by `path`.
+// Builds the rule's link (main and the rule's symbols), works out GNU ld's members for it, then binds it.
 static void bind_test_static_rule_link(BindTestLink* test, const Runtime* runtime, BindTestStaticRule rule, uint64_t* expected, Arena* arena, SymbolId* symbols)
 {
     bool result = bind_test_link_begin(test, runtime, bind_test_room(runtime));
@@ -4549,8 +4526,7 @@ static bool bind_test_static_rules(const Runtime* runtime, Arena* arena)
 // ---------------------------------------------------------------------------------------------------------------------
 // Shared libraries
 //
-// A shared library's runtime (runtime_import_shared), against which each link binds by both paths, which must make the
-// same link and binding:
+// A shared library's runtime (runtime_import_shared), against which each link binds:
 //   - programs: test-link's two sets that call libc, bound as libraries (bind_test_shared_structure): link_check; no
 //     start object's _start; crti.o's _init and crtbeginS.o's __dso_handle, hidden; and the exports exactly the link's
 //     definitions with default or protected visibility, global or weak, in symbol order, main among them;
@@ -4675,7 +4651,7 @@ static const char* const bind_test_shared_rule_names[BIND_TEST_SHARED_RULES] = {
 // The most symbols a shared rule's link names.
 #define BUSTER_BIND_TEST_SHARED_SYMBOLS 4
 
-// Builds the rule's link, without main, and binds it by `path`: `symbols` gets the rule's symbols.
+// Builds the rule's link, without main, and binds it: `symbols` gets the rule's symbols.
 static void bind_test_shared_rule_link(BindTestLink* test, const Runtime* runtime, BindTestSharedRule rule, SymbolId* symbols)
 {
     static const char* const definitions[BUSTER_BIND_TEST_SHARED_SYMBOLS] = {
@@ -5004,14 +4980,14 @@ static bool bind_test_shared_compiled(const Runtime* runtime, const char* direct
 // libgcc_s.so.1, as needed (-lgcc_s_asneeded). The cross-check compiles a library and a PIE of such code (without
 // -fcf-protection's endbr64, which some distributions' GCC adds by default and before which lld can't adjust a
 // split-stack prologue that calls libc), then:
-//   - binds each against its runtime (the shared library's and the dynamic PIE's), by both paths, which must bind it
-//     alike, morestack.o joined and its _Unwind_Resume an import of libgcc_s.so.1's (bind_test_split_bound); the bound
+//   - binds each against its runtime (the shared library's and the dynamic PIE's), which must bind it,
+//     morestack.o joined and its _Unwind_Resume an import of libgcc_s.so.1's (bind_test_split_bound); the bound
 //     link's objects, linked by ld.lld and ld.bfd as GCC's driver links them (bind_test_link_arguments: libgcc_s.so.1
 //     as needed), must run, the PIE with status 0 and the library loaded into a harness that doesn't need
 //     libgcc_s.so.1 (dlopen with RTLD_NOW, as alone), split_entry returning 0. test-dynamic writes both itself (the
 //     PIE since #515, whose generic-morestack.o's general- and local-dynamic TLS accesses the writer relaxes);
-//   - binds each against the runtime without libgcc_s.so.1 (bind_test_without_gcc_s), by both paths, which must
-//     refuse it alike as BIND_ERROR_MEMBER_UNDEFINED naming _Unwind_Resume and libgcc.a's morestack.o;
+//   - binds each against the runtime without libgcc_s.so.1 (bind_test_without_gcc_s), which must
+//     refuse it as BIND_ERROR_MEMBER_UNDEFINED naming _Unwind_Resume and libgcc.a's morestack.o;
 //   - links the same objects by cc with GNU ld and with lld: each output must need libgcc_s.so.1, each library must
 //     load into the harness and return 0 from split_entry, and each PIE run with status 0;
 //   - and links the library by lld with libgcc.a and libc but not libgcc_s.so.1, which is what leaving the unwinder to
@@ -5058,8 +5034,8 @@ static bool bind_test_needs_libgcc_s(const char* path, const char* out, const ch
     return result;
 }
 
-// The object at `object_path`, compiled from split.c, bound against `runtime` by both paths, which must agree: with
-// libgcc_s.so.1, bound (bind_test_split_bound), and the vector path's link linked by ld.lld and ld.bfd and run, through
+// The object at `object_path`, compiled from split.c, bound against `runtime`: with
+// libgcc_s.so.1, bound (bind_test_split_bound), and its link linked by ld.lld and ld.bfd and run, through
 // `harness` for a library (bind_test_link_and_load), as `name` in `directory`; without, refused
 // (bind_test_split_refused).
 static void bind_test_split_bind(BindTestTally* tally, const Runtime* runtime, const char* object_path, const char* what, const char* name, const char* harness,
