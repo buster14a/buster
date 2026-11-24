@@ -625,20 +625,22 @@ static void ir_if_convert_test_guards(IrOptimizeTest* test)
     for (uint32_t count = 0; ready && count <= BUSTER_IR_IF_CONVERT_BATCH; count += 1)
     {
         uint8_t* operations = (uint8_t*)mapping + page - count;
+        uint8_t flags[BUSTER_IR_IF_CONVERT_BATCH] = { 0 };
         uint64_t expected = 0;
         for (uint32_t i = 0; i < count; i += 1)
         {
+            flags[i] = i % 2 == 0 ? BUSTER_IR_BRANCH_PREDICTABLE : 0;
             operations[i] = i % 3 == 0 ? IR_CBR : IR_ADD;
-            expected |= (uint64_t)(i % 3 == 0) << i;
+            expected |= (uint64_t)(i % 3 == 0 && flags[i] == 0) << i;
         }
-        ir_optimize_test_expect(test, ir_if_convert_candidates(operations, count) == expected,
+        ir_optimize_test_expect(test, ir_if_convert_candidates(operations, flags, count) == expected,
                                 "if-conversion candidate mask respects every guarded tail");
     }
     if (mapping != MAP_FAILED)
     {
         munmap(mapping, (uint64_t)page * 2);
     }
-    ir_optimize_test_expect(test, ir_if_convert_candidates(0, 0) == 0 && ir_if_convert_candidates(0, 65) == 0,
+    ir_optimize_test_expect(test, ir_if_convert_candidates(0, 0, 0) == 0 && ir_if_convert_candidates(0, 0, 65) == 0,
                             "if-conversion empty and invalid mask counts do not access columns");
 }
 
@@ -660,9 +662,9 @@ static void ir_if_convert_test_scans(IrOptimizeTest* test)
             uint64_t expected = 0;
             for (uint32_t lane = 0; lane < count; lane += 1)
             {
-                expected |= (uint64_t)(f->op[start + lane] == IR_CBR) << lane;
+                expected |= (uint64_t)(f->op[start + lane] == IR_CBR && (f->flags[start + lane] & BUSTER_IR_BRANCH_PREDICTABLE) == 0) << lane;
             }
-            candidates &= ir_if_convert_candidates(f->op + start, count) == expected;
+            candidates &= ir_if_convert_candidates(f->op + start, f->flags + start, count) == expected;
             uint64_t truncations = 0;
             for (uint32_t lane = 0; lane < count; lane += 1)
             {

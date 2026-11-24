@@ -1401,6 +1401,7 @@ static IrError ir_thread_rewrite(const IrThreadWork* work, Arena* output, Arena*
                 else if (i + 1 == end && work->actions[block] == BUSTER_IR_THREAD_COLLAPSE)
                 {
                     view.op[out] = IR_BR;
+                    view.flags[out] = 0;
                     view.a[out] = work->targets[block];
                     view.b[out] = BUSTER_IR_NONE;
                     view.c[out] = BUSTER_IR_NONE;
