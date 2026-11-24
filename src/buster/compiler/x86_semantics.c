@@ -43,7 +43,7 @@
 //     x86_effects_role.
 //   - The immediate's contract (x86_immediate_encodes, x86_immediate_field and x86_immediate_value) and the flags
 //     (x86_instruction_flags, X86FlagEffects, x86_flags_substitutable and x86_instruction_flags_substitutable).
-//   - Operand-resolved effects: BUSTER_X86_RESOURCE_*, x86_effects_block (the rare records' terms too) and
+//   - Operand-resolved effects: BUSTER_X86_RESOURCE_*, x86_effects_rare_lanes (the rare records' terms) and
 //     x86_instructions_effects.
 //   - Form choice: the classes and the context (BUSTER_X86_CHOICE_* and BUSTER_X86_CONTEXT_*), the rows
 //     (BUSTER_X86_CHOICE_SOURCES, X86ChoiceSource), X86ChoiceRow and its tables, x86_choice_row, x86_choice_classes,
@@ -148,12 +148,12 @@
 //     from the form's operands: kmov, kand, a compare's destination). A form whose roles have none takes K1 to K7 only
 //     as its record's opmask (X86Instruction.decorations), which reads it, and makes a vector destination merge into its
 //     old elements unless it zeroes them.
-//   - RARE: x86_effects_block computes the record's block again with its rare terms: it reads an
+//   - RARE: x86_effects_rare_lanes completes the record after its block (x86_effects_operands' byte): it reads an
 //     operand that no role names (an /is4 register, in the immediate's bits 7 to 4, or a VSIB memory operand's vector
 //     index, a gather's or a scatter's, which clears its opmask too), or writes a pair of opmask registers
 //     (vp2intersect's). The initialization's, from the form's operands.
 //   - IMPLICIT_VECTORS: reads or writes vector registers that no role names: Key Locker's XMM0 to XMM7, whose sets
-//     x86_implicit_vectors gives. x86_effects_block's rare terms add them, as RARE's operands.
+//     x86_implicit_vectors gives. x86_effects_rare_lanes adds them, as it does RARE's operands.
 #define BUSTER_X86_EFFECT_FAULT 0x0001
 #define BUSTER_X86_EFFECT_ZERO_IDIOM 0x0002
 #define BUSTER_X86_EFFECT_RARE 0x0004
@@ -2810,9 +2810,9 @@ BUSTER_X86_SHARED BUSTER_BAKED uint16_t x86_effects_by_form[BUSTER_X86_FORM_NUMB
 _Static_assert(BUSTER_X86_FORM_FS == X86_FORM_COUNT && BUSTER_X86_FORM_GS == 2 * X86_FORM_COUNT && BUSTER_X86_FORM_SS == 3 * X86_FORM_COUNT &&
                    BUSTER_X86_FORM_TEMPLATES == BUSTER_X86_FORM_NUMBER + 1,
                "x86_effects_by_form holds a form's record and its FS, GS and SS copies'");
-// Each record's operands that no role names, for x86_effects_block's rare lanes (BUSTER_X86_EFFECT_OPERAND_*): a VSIB
-// memory operand, a VEX form (whose gather's mask is vvvv), an /is4 register and an opmask pair (in reg). A covered form
-// has a record of its own, so a record's byte is its form's.
+// Each record's operands that no role names, for the rare records' terms (x86_effects_rare_lanes,
+// BUSTER_X86_EFFECT_OPERAND_*): a VSIB memory operand, a VEX form (whose gather's mask is vvvv), an /is4 register and an
+// opmask pair (in reg). A covered form has a record of its own, so a record's byte is its form's.
 #define BUSTER_X86_EFFECT_OPERAND_VSIB 0x01
 #define BUSTER_X86_EFFECT_OPERAND_VEX 0x02
 #define BUSTER_X86_EFFECT_OPERAND_IS4 0x04
@@ -3153,33 +3153,148 @@ static const uint64_t x86_rare_writes[8] = {
 #undef BUSTER_X86_RARE_WRITES
 
 // A register operand's resource: a general register (AH to BH are RAX to RBX's) or a vector one. The covered forms take
-// general registers 0 to 15, as x86_encode does. x86_effects_block computes it 8 lanes at a time; tests use it.
+// general registers 0 to 15, as x86_encode does. The effects compute it 8 lanes at a time; tests use it.
 static __attribute__((unused)) uint64_t x86_register_resource(uint8_t value, bool vector)
 {
     const uint32_t general = (value & BUSTER_X86_REGISTER_HIGH_BYTE) ? (value & 3) : (value & 15);
     return vector ? BUSTER_X86_RESOURCE_VECTOR(value & 31) : BUSTER_X86_RESOURCE_GPR(general);
 }
 
-// The rare records, which x86_effects_block computes again with its rare terms: a covered form's (with opmasks, or
-// without one that touches an opmask register) with an x87 property, vzeroupper's, RARE's operands or IMPLICIT_VECTORS'
-// registers. BUSTER_X86_EFFECTS_RARE is the test on the effects record's first 8 bytes (its properties in the upper
-// quarter).
+// The rare records, whose effects x86_effects_rare_lanes completes: a covered form's (with opmasks, or without one that
+// touches an opmask register) with an x87 property, vzeroupper's, RARE's operands or IMPLICIT_VECTORS' registers.
+// BUSTER_X86_EFFECTS_RARE is the test on the effects record's first 8 bytes (its properties in the upper quarter).
 #define BUSTER_X86_EFFECTS_RARE_PROPERTIES \
     (BUSTER_X86_EFFECT_X87 | BUSTER_X86_EFFECT_X87_CONTROL | BUSTER_X86_EFFECT_ZERO_UPPER | BUSTER_X86_EFFECT_RARE | BUSTER_X86_EFFECT_IMPLICIT_VECTORS)
 #define BUSTER_X86_EFFECTS_RARE ((uint64_t)BUSTER_X86_EFFECTS_RARE_PROPERTIES << 48)
 
-// One block of x86_instructions_effects: up to 8 records from `first` (one per 64-bit lane), the records and the outputs
-// read and written with masked loads and stores (so nothing past either array is touched). Each record's form gives its
-// effects record by a scalar lookup (its number's entry in x86_effects_by_form, then its 16 bytes into a quarter of a
-// ZMM register: Zen 5's gathers cost more than these loads), and then every lane computes its resolved effects with
-// masks for its branches: reg, rm and vvvv, an opmask role's register in `opmasks`' lane (or, without `opmasks`, a record
-// that reads or writes an opmask register an uncovered one). A block with a rare lane (BUSTER_X86_EFFECTS_RARE: an x87
-// form's, vzeroupper's, RARE's operands or IMPLICIT_VECTORS' registers) adds their terms under a branch that the common
-// block doesn't take: their operands that no role names come from x86_effects_operands, a byte a record. No call is
-// made, so the loop keeps its constants in registers (every ZMM register is caller-saved). Inlined into its two
-// callers, it is compiled with `opmasks` null and not, and the first has none of the opmasks' instructions.
-static __attribute__((always_inline)) inline void x86_effects_block(const X86Instruction* instructions, uint64_t first, uint64_t count, uint64_t* reads,
-                                                                     uint64_t* writes, uint16_t* opmasks)
+// The rare lanes of a block that x86_instructions_effects_lanes has stored (`rare`, from `first`), completed in place:
+// their terms that the block's common computation leaves out, a lane's vector over the 8. Their records and effects
+// facts are read again here, so that the common block keeps nothing for them:
+//   - the x87's state and control word, and vzeroupper's ZMM0 to ZMM15 (properties' bits 8 to 10, a register lookup);
+//   - an /is4 register (the immediate's bits 7 to 4, XMM0 to XMM15);
+//   - a VEX gather's mask, vvvv, which it reads and clears, and its destination, which keeps what the mask leaves;
+//   - a VSIB operand's index, a vector register, where the common computation took a general one: a VSIB form reads
+//     no general register but its base, so the index's is dropped and the base's kept;
+//   - Key Locker's vector registers that no role names (x86_implicit_vectors' sets);
+//   - with `opmasks`, vp2intersect's opmask pair (an even register and the next) and a gather's or a scatter's record
+//     opmask, which it clears.
+// A KEEP_UPPER form reads every vector register these add to its writes, as the common computation's do.
+static __attribute__((always_inline)) inline void x86_effects_rare_lanes(const X86Instruction* instructions, uint64_t first, __mmask8 rare, uint64_t* reads, uint64_t* writes,
+                                                                         uint16_t* opmasks)
+{
+    const __m512i one = _mm512_set1_epi64(1);
+    const __m512i vector_shift = _mm512_set1_epi64(BUSTER_X86_RESOURCE_VECTOR_SHIFT);
+    const __m512i fifteen = _mm512_set1_epi64(15);
+    // The rare lanes' effects facts and operand bytes, a lane at a time (a block has one or two).
+    uint64_t lane_facts[8] = { 0 };
+    uint64_t lane_details[8] = { 0 };
+    uint64_t packed = 0;
+    uint32_t lanes = rare;
+    while (lanes != 0)
+    {
+        const uint32_t lane = (uint32_t)__builtin_ctz(lanes);
+        const uint32_t index = x86_effects_by_form[instructions[first + lane].form & BUSTER_X86_FORM_NUMBER];
+        memcpy(&lane_facts[lane], &x86_effects_records[index], sizeof(uint64_t));
+        memcpy(&lane_details[lane], (const uint8_t*)&x86_effects_records[index] + sizeof(uint64_t), sizeof(uint64_t));
+        packed |= (uint64_t)x86_effects_operands[index] << (8 * lane);
+        lanes &= lanes - 1;
+    }
+    const __m512i facts = _mm512_loadu_si512(lane_facts);
+    const __m512i properties = _mm512_srli_epi64(facts, 48);
+    const __m512i details = _mm512_loadu_si512(lane_details);
+    const __mmask8 vsib = (__mmask8)_pext_u64(packed, 0x0101010101010101ull * BUSTER_X86_EFFECT_OPERAND_VSIB);
+    const __mmask8 vex_gather = vsib & (__mmask8)_pext_u64(packed, 0x0101010101010101ull * BUSTER_X86_EFFECT_OPERAND_VEX);
+    const __mmask8 is4 = (__mmask8)_pext_u64(packed, 0x0101010101010101ull * BUSTER_X86_EFFECT_OPERAND_IS4);
+    const __mmask8 pair = (__mmask8)_pext_u64(packed, 0x0101010101010101ull * BUSTER_X86_EFFECT_OPERAND_PAIR);
+    // The records' halves, as the block reads them: (immediate, displacement) and (reg, rm, index, mode, form, vvvv,
+    // decorations).
+    const uint32_t qwords = _pdep_u32(rare, 0x5555u) * 3u;
+    const __m512i head = _mm512_maskz_loadu_epi64((__mmask8)qwords, instructions + first);
+    const __m512i tail = _mm512_maskz_loadu_epi64((__mmask8)(qwords >> 8), instructions + first + 4);
+    const __m512i low = _mm512_permutex2var_epi64(head, _mm512_setr_epi64(0, 2, 4, 6, 8, 10, 12, 14), tail);
+    const __m512i high = _mm512_permutex2var_epi64(head, _mm512_setr_epi64(1, 3, 5, 7, 9, 11, 13, 15), tail);
+    const __m512i bytes = _mm512_set1_epi64(0xff);
+    const __m512i reg = _mm512_and_si512(high, bytes);
+    const __m512i rm = _mm512_and_si512(_mm512_srli_epi64(high, 8), bytes);
+    const __m512i index = _mm512_and_si512(_mm512_srli_epi64(high, 16), bytes);
+    const __m512i mode = _mm512_and_si512(_mm512_srli_epi64(high, 24), bytes);
+    const __m512i vvvv = _mm512_and_si512(_mm512_srli_epi64(high, 48), bytes);
+    const __m512i number = _mm512_and_si512(_mm512_srli_epi64(high, 32), _mm512_set1_epi64(BUSTER_X86_FORM_NUMBER));
+    __m512i read = _mm512_maskz_loadu_epi64(rare, reads + first);
+    __m512i write = _mm512_maskz_loadu_epi64(rare, writes + first);
+    // The x87's and vzeroupper's sets.
+    const __m512i rare_index = _mm512_and_si512(_mm512_srli_epi64(properties, 8), _mm512_set1_epi64(7));
+    __m512i added_read = _mm512_permutexvar_epi64(rare_index, _mm512_loadu_si512(x86_rare_reads));
+    __m512i added_write = _mm512_permutexvar_epi64(rare_index, _mm512_loadu_si512(x86_rare_writes));
+    // An /is4 register.
+    added_read = _mm512_mask_or_epi64(added_read, is4, added_read, _mm512_sllv_epi64(one, _mm512_add_epi64(_mm512_and_si512(_mm512_srli_epi64(low, 4), fifteen), vector_shift)));
+    // A VEX gather's mask and destination.
+    const __m512i mask_vector = _mm512_sllv_epi64(one, _mm512_add_epi64(_mm512_and_si512(vvvv, fifteen), vector_shift));
+    const __m512i destination = _mm512_sllv_epi64(one, _mm512_add_epi64(_mm512_and_si512(reg, fifteen), vector_shift));
+    added_read = _mm512_mask_or_epi64(added_read, vex_gather, added_read, _mm512_or_si512(mask_vector, destination));
+    added_write = _mm512_mask_or_epi64(added_write, vex_gather, added_write, mask_vector);
+    // Key Locker's implicit vector registers.
+    const __mmask8 implicit = _mm512_test_epi64_mask(properties, _mm512_set1_epi64(BUSTER_X86_EFFECT_IMPLICIT_VECTORS));
+    const __mmask8 wide = implicit & _mm512_cmpge_epu64_mask(number, _mm512_set1_epi64(X86_FORM_AESENCWIDE128KL_M384)) &
+                          _mm512_cmple_epu64_mask(number, _mm512_set1_epi64(X86_FORM_AESDECWIDE256KL_M512));
+    const __mmask8 key128 = implicit & _mm512_cmpeq_epi64_mask(number, _mm512_set1_epi64(X86_FORM_ENCODEKEY128_R32_R32));
+    const __mmask8 key256 = implicit & _mm512_cmpeq_epi64_mask(number, _mm512_set1_epi64(X86_FORM_ENCODEKEY256_R32_R32));
+    const __mmask8 integrity = implicit & _mm512_cmpeq_epi64_mask(number, _mm512_set1_epi64(X86_FORM_LOADIWKEY_X_X));
+    __m512i implicit_reads = _mm512_maskz_mov_epi64(wide, _mm512_set1_epi64(0xff));
+    implicit_reads = _mm512_mask_mov_epi64(implicit_reads, key256, _mm512_set1_epi64(0x03));
+    implicit_reads = _mm512_mask_mov_epi64(implicit_reads, key128 | integrity, _mm512_set1_epi64(0x01));
+    __m512i implicit_writes = _mm512_maskz_mov_epi64(wide, _mm512_set1_epi64(0xff));
+    implicit_writes = _mm512_mask_mov_epi64(implicit_writes, key256, _mm512_set1_epi64(0x7f));
+    implicit_writes = _mm512_mask_mov_epi64(implicit_writes, key128, _mm512_set1_epi64(0x77));
+    added_read = _mm512_or_si512(added_read, _mm512_slli_epi64(implicit_reads, BUSTER_X86_RESOURCE_VECTOR_SHIFT));
+    added_write = _mm512_or_si512(added_write, _mm512_slli_epi64(implicit_writes, BUSTER_X86_RESOURCE_VECTOR_SHIFT));
+    // A KEEP_UPPER form reads the vector registers it writes (the record's top bit spread over the lane).
+    added_read = _mm512_ternarylogic_epi64(added_read, _mm512_and_si512(added_write, _mm512_srai_epi64(facts, 63)), _mm512_set1_epi64((int64_t)BUSTER_X86_RESOURCE_VECTORS),
+                                           0xf8);
+    // A VSIB operand's index: its vector register for the general one, the base's general register kept, where the block
+    // took them (a memory operand it accesses or whose address it takes).
+    const __m512i role_rm = _mm512_srli_epi64(facts, 32 + BUSTER_X86_ROLE_BITS);
+    const __mmask8 accessed = _mm512_test_epi64_mask(mode, _mm512_set1_epi64(BUSTER_X86_MODE_MEMORY)) &
+                              (_mm512_test_epi64_mask(role_rm, _mm512_set1_epi64(BUSTER_X86_ROLE_READ | BUSTER_X86_ROLE_WRITE)) |
+                               _mm512_test_epi64_mask(details, _mm512_set1_epi64((int64_t)BUSTER_X86_MEMORY_EFFECT_ADDRESS << 24)));
+    const __mmask8 indexed = vsib & accessed & _mm512_test_epi64_mask(mode, _mm512_set1_epi64(BUSTER_X86_MODE_INDEX));
+    const __m512i base = _mm512_maskz_sllv_epi64(_mm512_test_epi64_mask(mode, _mm512_set1_epi64(BUSTER_X86_MODE_BASE)), one, _mm512_and_si512(rm, fifteen));
+    const __m512i general_index = _mm512_sllv_epi64(one, _mm512_and_si512(index, fifteen));
+    const __m512i vector_index = _mm512_sllv_epi64(one, _mm512_add_epi64(_mm512_and_si512(index, _mm512_set1_epi64(31)), vector_shift));
+    read = _mm512_mask_or_epi64(read, indexed, _mm512_andnot_si512(general_index, read), _mm512_or_si512(base, vector_index));
+    read = _mm512_or_si512(read, added_read);
+    write = _mm512_or_si512(write, added_write);
+    _mm512_mask_storeu_epi64(reads + first, rare, read);
+    _mm512_mask_storeu_epi64(writes + first, rare, write);
+    if (opmasks != 0)
+    {
+        // vp2intersect's pair (an opmask role in reg, which writes), and a gather's or a scatter's record opmask.
+        const __m512i role_reg = _mm512_and_si512(_mm512_srli_epi64(facts, 32), _mm512_set1_epi64((1u << BUSTER_X86_ROLE_BITS) - 1));
+        const __mmask8 opmask_reg = _mm512_test_epi64_mask(properties, _mm512_set1_epi64(BUSTER_X86_EFFECT_OPMASK_REG)) & pair;
+        const __m512i pair_registers = _mm512_sllv_epi64(_mm512_set1_epi64(3), _mm512_and_si512(reg, _mm512_set1_epi64(6)));
+        const __m512i mask_number = _mm512_and_si512(_mm512_srli_epi64(high, 56), _mm512_set1_epi64(BUSTER_X86_DECORATION_MASK));
+        const __mmask8 masked = _mm512_test_epi64_mask(mask_number, mask_number);
+        __m512i opmask = _mm512_cvtepu16_epi64(_mm_maskz_loadu_epi16(rare, opmasks + first));
+        opmask = _mm512_mask_or_epi64(opmask, opmask_reg & _mm512_test_epi64_mask(role_reg, _mm512_set1_epi64(BUSTER_X86_ROLE_READ)), opmask, pair_registers);
+        opmask = _mm512_mask_or_epi64(opmask, opmask_reg & _mm512_test_epi64_mask(role_reg, _mm512_set1_epi64(BUSTER_X86_ROLE_WRITE)), opmask,
+                                      _mm512_slli_epi64(pair_registers, 8));
+        opmask = _mm512_mask_or_epi64(opmask, masked & vsib, opmask, _mm512_slli_epi64(_mm512_sllv_epi64(one, mask_number), 8));
+        _mm512_mask_cvtepi64_storeu_epi16(opmasks + first, rare, opmask);
+    }
+}
+
+// The same 8 records at a time (one per 64-bit lane), the records and the outputs read and written with masked loads and
+// stores (so nothing past either array is touched). Each record's form gives its effects record by a scalar lookup (its
+// number's entry in x86_effects_by_form, then its 16 bytes into a quarter of a ZMM register: Zen 5's gathers cost more
+// than these loads), and then every lane computes its resolved effects with masks for its branches: reg, rm and vvvv, an
+// opmask role's register in `opmasks`' lane (or, without `opmasks`, a record that reads or writes an opmask register an
+// uncovered one). The records of the forms code generators emit rarely (BUSTER_X86_EFFECTS_RARE: an x87 form's,
+// vzeroupper's, RARE's and IMPLICIT_VECTORS') are completed after their block's stores by x86_effects_rare_lanes, under a
+// branch the common block doesn't take, inlined: a call would make the loop reload its vector constants (every ZMM
+// register is caller-saved), and what it reads it loads again, so that the common block keeps nothing for it. Inlined
+// into its two callers, it is compiled with `opmasks` null and not, and the first has none of the opmasks' instructions.
+static __attribute__((always_inline)) inline void x86_instructions_effects_lanes(const X86Instruction* instructions, uint64_t count, uint64_t* reads, uint64_t* writes,
+                                                                               uint16_t* opmasks)
 {
     const bool with_opmasks = opmasks != 0;
     const __m512i even = _mm512_setr_epi64(0, 2, 4, 6, 8, 10, 12, 14);
@@ -3188,242 +3303,176 @@ static __attribute__((always_inline)) inline void x86_effects_block(const X86Ins
     const __m512i words = _mm512_set1_epi64(0xffff);
     const __m512i one = _mm512_set1_epi64(1);
     const __m512i zero = _mm512_setzero_si512();
-    const uint64_t left = count - first;
-    const uint32_t lanes = left >= 8 ? 8 : (uint32_t)left;
-    const uint32_t qwords = (1u << (2 * lanes)) - 1;
-    const __mmask8 live = (__mmask8)((1u << lanes) - 1);
-    // The records' halves: (immediate, displacement) and (reg, rm, index, mode, form, vvvv, decorations).
-    const __m512i head = _mm512_maskz_loadu_epi64((__mmask8)qwords, instructions + first);
-    const __m512i tail = _mm512_maskz_loadu_epi64((__mmask8)(qwords >> 8), instructions + first + 4);
-    const __m512i low = _mm512_permutex2var_epi64(head, even, tail);
-    const __m512i high = _mm512_permutex2var_epi64(head, odd, tail);
-    // Each lane's effects record: (implicit reads and writes, operands, properties) and (flags, memory, operation,
-    // width, write_bytes, kinds). A lane past the count gets form 0's, the conservative record, and stores nothing.
-    __m128i records[8];
-    for (uint32_t lane = 0; lane < 8; lane += 1)
-    {
-        const uint32_t number = lane < lanes ? instructions[first + lane].form & BUSTER_X86_FORM_NUMBER : 0;
-        records[lane] = _mm_load_si128((const __m128i*)&x86_effects_records[x86_effects_by_form[number]]);
-    }
-    __m512i effects_head = _mm512_castsi128_si512(records[0]);
-    __m512i effects_tail = _mm512_castsi128_si512(records[4]);
-    effects_head = _mm512_inserti32x4(effects_head, records[1], 1);
-    effects_head = _mm512_inserti32x4(effects_head, records[2], 2);
-    effects_head = _mm512_inserti32x4(effects_head, records[3], 3);
-    effects_tail = _mm512_inserti32x4(effects_tail, records[5], 1);
-    effects_tail = _mm512_inserti32x4(effects_tail, records[6], 2);
-    effects_tail = _mm512_inserti32x4(effects_tail, records[7], 3);
-    const __m512i facts = _mm512_permutex2var_epi64(effects_head, even, effects_tail);
-    const __m512i details = _mm512_permutex2var_epi64(effects_head, odd, effects_tail);
-
-    const __m512i operands = _mm512_and_si512(_mm512_srli_epi64(facts, 32), words);
-    const __m512i properties = _mm512_srli_epi64(facts, 48);
-    const __m512i memory_effects = _mm512_and_si512(_mm512_srli_epi64(details, 24), bytes);
-    const __m512i width = _mm512_and_si512(_mm512_srli_epi64(details, 40), bytes);
-    const __m512i kinds = _mm512_srli_epi64(details, 56);
-    // A covered form's (its operation's byte); without `opmasks`, one that touches no opmask register: an opmask
-    // role's (the facts' properties) or the record's opmask (its last byte). The rare lanes are those of the facts'
-    // upper quarter's BUSTER_X86_EFFECTS_RARE bits.
-    const __m512i mask_number = _mm512_and_si512(_mm512_srli_epi64(high, 56), _mm512_set1_epi64(BUSTER_X86_DECORATION_MASK));
-    const __mmask8 masked = _mm512_test_epi64_mask(mask_number, mask_number);
-    const __mmask8 covered = _mm512_test_epi64_mask(details, _mm512_set1_epi64(0xffull << 32));
-    const __mmask8 known = with_opmasks ? covered : covered & ~masked & _mm512_testn_epi64_mask(facts, _mm512_set1_epi64((int64_t)BUSTER_X86_EFFECT_OPMASKS << 48));
-    const __m512i reg = _mm512_and_si512(high, bytes);
-    const __m512i rm = _mm512_and_si512(_mm512_srli_epi64(high, 8), bytes);
-    const __m512i index = _mm512_and_si512(_mm512_srli_epi64(high, 16), bytes);
-    const __m512i mode = _mm512_and_si512(_mm512_srli_epi64(high, 24), bytes);
-    const __m512i vvvv = _mm512_and_si512(_mm512_srli_epi64(high, 48), bytes);
-    const __mmask8 memory = _mm512_test_epi64_mask(mode, _mm512_set1_epi64(BUSTER_X86_MODE_MEMORY));
-    // The rare lanes, and their operands that no role names (x86_effects_operands): a VSIB operand (a gather's or a
-    // scatter's), a VEX one's mask register, an /is4 register and an opmask pair, a byte a lane, split by pext.
-    const __mmask8 rare = _mm512_mask_test_epi64_mask(known, facts, _mm512_set1_epi64((int64_t)BUSTER_X86_EFFECTS_RARE));
-    __mmask8 vsib = 0;
-    __mmask8 vex_gather = 0;
-    __mmask8 is4 = 0;
-    __mmask8 pair = 0;
-    if (BUSTER_UNLIKELY(rare != 0))
-    {
-        // The rare lanes' forms again (a rare block's alone, so that the common one keeps none).
-        uint64_t packed = 0;
-        uint32_t rare_lanes = rare;
-        while (rare_lanes != 0)
-        {
-            const uint32_t lane = (uint32_t)__builtin_ctz(rare_lanes);
-            packed |= (uint64_t)x86_effects_operands[x86_effects_by_form[instructions[first + lane].form & BUSTER_X86_FORM_NUMBER]] << (8 * lane);
-            rare_lanes &= rare_lanes - 1;
-        }
-        vsib = (__mmask8)_pext_u64(packed, 0x0101010101010101ull * BUSTER_X86_EFFECT_OPERAND_VSIB);
-        vex_gather = vsib & (__mmask8)_pext_u64(packed, 0x0101010101010101ull * BUSTER_X86_EFFECT_OPERAND_VEX);
-        is4 = (__mmask8)_pext_u64(packed, 0x0101010101010101ull * BUSTER_X86_EFFECT_OPERAND_IS4);
-        pair = (__mmask8)_pext_u64(packed, 0x0101010101010101ull * BUSTER_X86_EFFECT_OPERAND_PAIR);
-    }
-
-    // The flags, with a shift's immediate count: none read with a known count, and none written with a zero one.
-    __m512i flags_read = _mm512_and_si512(details, bytes);
-    __m512i flags_changed = _mm512_and_si512(_mm512_or_si512(_mm512_srli_epi64(details, 8), _mm512_srli_epi64(details, 16)), bytes);
-    const __mmask8 counted = _mm512_test_epi64_mask(properties, _mm512_set1_epi64(BUSTER_X86_EFFECT_COUNT)) &
-                             _mm512_cmpeq_epi64_mask(_mm512_and_si512(kinds, _mm512_set1_epi64(0x0f)), _mm512_set1_epi64(BUSTER_X86_IMMEDIATE_COUNT));
-    const __m512i count_mask = _mm512_mask_blend_epi64(_mm512_cmpge_epu64_mask(width, _mm512_set1_epi64(8)), _mm512_set1_epi64(31), _mm512_set1_epi64(63));
-    const __mmask8 zero_count = _mm512_testn_epi64_mask(_mm512_and_si512(low, count_mask), count_mask);
-    flags_read = _mm512_mask_andnot_epi64(flags_read, counted, _mm512_set1_epi64(BUSTER_X86_FLAGS_STATUS), flags_read);
-    flags_changed = _mm512_mask_mov_epi64(flags_changed, counted & zero_count, zero);
-    __m512i read = _mm512_or_si512(_mm512_and_si512(facts, words), _mm512_slli_epi64(flags_read, BUSTER_X86_RESOURCE_FLAGS_SHIFT));
-    __m512i write = _mm512_or_si512(_mm512_and_si512(_mm512_srli_epi64(facts, 16), words), _mm512_slli_epi64(flags_changed, BUSTER_X86_RESOURCE_FLAGS_SHIFT));
-    read = _mm512_mask_or_epi64(read, _mm512_test_epi64_mask(properties, _mm512_set1_epi64(BUSTER_X86_EFFECT_MXCSR)), read,
-                                _mm512_set1_epi64((int64_t)BUSTER_X86_RESOURCE_MXCSR));
-
-    // The registers of reg, rm and vvvv (a general register's number, AH to BH as RAX to RBX, or a vector register's;
-    // vvvv's are never AH to BH).
-    const __m512i role_bits = _mm512_set1_epi64((1u << BUSTER_X86_ROLE_BITS) - 1);
-    const __m512i role_reg = _mm512_and_si512(operands, role_bits);
-    const __m512i role_rm = _mm512_and_si512(_mm512_srli_epi64(operands, BUSTER_X86_ROLE_BITS), role_bits);
-    const __m512i role_vvvv = _mm512_and_si512(_mm512_srli_epi64(operands, 2 * BUSTER_X86_ROLE_BITS), role_bits);
-    const __m512i vector_shift = _mm512_set1_epi64(BUSTER_X86_RESOURCE_VECTOR_SHIFT);
-    const __m512i high_byte = _mm512_set1_epi64(BUSTER_X86_REGISTER_HIGH_BYTE);
-    const __m512i reg_general = _mm512_mask_and_epi64(_mm512_and_si512(reg, _mm512_set1_epi64(15)), _mm512_test_epi64_mask(reg, high_byte), reg,
-                                                      _mm512_set1_epi64(3));
-    const __m512i rm_general = _mm512_mask_and_epi64(_mm512_and_si512(rm, _mm512_set1_epi64(15)), _mm512_test_epi64_mask(rm, high_byte), rm,
-                                                     _mm512_set1_epi64(3));
-    const __m512i vector_bit = _mm512_set1_epi64(BUSTER_X86_ROLE_VECTOR);
-    const __mmask8 reg_vector = _mm512_test_epi64_mask(role_reg, vector_bit);
-    const __mmask8 rm_vector = _mm512_test_epi64_mask(role_rm, vector_bit);
-    const __mmask8 vvvv_vector = _mm512_test_epi64_mask(role_vvvv, vector_bit);
-    const __m512i reg_shift = _mm512_mask_add_epi64(reg_general, reg_vector, _mm512_and_si512(reg, _mm512_set1_epi64(31)), vector_shift);
-    const __m512i rm_shift = _mm512_mask_add_epi64(rm_general, rm_vector, _mm512_and_si512(rm, _mm512_set1_epi64(31)), vector_shift);
-    const __m512i vvvv_shift = _mm512_mask_add_epi64(_mm512_and_si512(vvvv, _mm512_set1_epi64(15)), vvvv_vector, _mm512_and_si512(vvvv, _mm512_set1_epi64(31)),
-                                                     vector_shift);
-    const __m512i reg_resource = _mm512_sllv_epi64(one, reg_shift);
-    const __m512i rm_resource = _mm512_sllv_epi64(one, rm_shift);
-    const __m512i vvvv_resource = _mm512_sllv_epi64(one, vvvv_shift);
-
-    // A register role reads its register when it reads the operand or writes part of it, and writes it when it writes.
-    const __m512i read_bit = _mm512_set1_epi64(BUSTER_X86_ROLE_READ);
-    const __m512i write_bit = _mm512_set1_epi64(BUSTER_X86_ROLE_WRITE);
-    const __m512i merge_bit = _mm512_set1_epi64(BUSTER_X86_REST_MERGE << BUSTER_X86_ROLE_REST_SHIFT);
-    const __m512i rest_bits = _mm512_set1_epi64(BUSTER_X86_ROLE_REST);
-    // movss's and movsd's loads (MERGE_IF_REGISTER) merge from a register source only.
-    const __mmask8 reg_loads = memory & _mm512_cmpeq_epi64_mask(_mm512_and_si512(role_reg, rest_bits), rest_bits);
-    const __mmask8 reg_reads = _mm512_test_epi64_mask(role_reg, read_bit) |
-                               (_mm512_test_epi64_mask(role_reg, write_bit) & _mm512_test_epi64_mask(role_reg, merge_bit) & ~reg_loads);
-    const __mmask8 rm_reads = _mm512_test_epi64_mask(role_rm, read_bit) |
-                              (_mm512_test_epi64_mask(role_rm, write_bit) & _mm512_test_epi64_mask(role_rm, merge_bit));
-    const __mmask8 vvvv_reads = _mm512_test_epi64_mask(role_vvvv, read_bit);
-    const __mmask8 reg_writes = _mm512_test_epi64_mask(role_reg, write_bit);
-    const __mmask8 rm_writes = _mm512_test_epi64_mask(role_rm, write_bit);
-    const __mmask8 vvvv_writes = _mm512_test_epi64_mask(role_vvvv, write_bit);
-    // An opmask role's register is in `opmasks`, not the sets.
-    const __mmask8 reg_opmask = with_opmasks ? _mm512_test_epi64_mask(properties, _mm512_set1_epi64(BUSTER_X86_EFFECT_OPMASK_REG)) : 0;
-    const __mmask8 rm_opmask = with_opmasks ? _mm512_test_epi64_mask(properties, _mm512_set1_epi64(BUSTER_X86_EFFECT_OPMASK_RM)) & ~memory : 0;
-    const __mmask8 vvvv_opmask = with_opmasks ? _mm512_test_epi64_mask(properties, _mm512_set1_epi64(BUSTER_X86_EFFECT_OPMASK_VVVV)) : 0;
-    // A zero idiom's sources (reg and rm, or vvvv and rm) are one register, which it doesn't read.
-    const __m512i source = _mm512_mask_mov_epi64(reg, vvvv_reads, vvvv);
-    const __mmask8 idiom = _mm512_test_epi64_mask(properties, _mm512_set1_epi64(BUSTER_X86_EFFECT_ZERO_IDIOM)) & ~memory & _mm512_cmpeq_epi64_mask(source, rm);
-    read = _mm512_mask_or_epi64(read, reg_reads & ~idiom & ~reg_opmask, read, reg_resource);
-    write = _mm512_mask_or_epi64(write, reg_writes & ~reg_opmask, write, reg_resource);
-    read = _mm512_mask_or_epi64(read, rm_reads & ~memory & ~idiom & ~rm_opmask, read, rm_resource);
-    write = _mm512_mask_or_epi64(write, rm_writes & ~memory & ~rm_opmask, write, rm_resource);
-    read = _mm512_mask_or_epi64(read, vvvv_reads & ~idiom & ~vvvv_opmask, read, vvvv_resource);
-    write = _mm512_mask_or_epi64(write, vvvv_writes & ~vvvv_opmask, write, vvvv_resource);
-    // A legacy SSE form reads every vector register it writes (which keeps its bits above 127), a zero idiom's too:
-    // write & vectors in the lanes of KEEP_UPPER, the record's top bit, spread over the lane by an arithmetic shift
-    // (0x80, all three). A mask register from vptestmq measured slower on the 9700X. It joins the reads at the end.
-    if (BUSTER_UNLIKELY(rare != 0))
-    {
-        // The x87's state and control word, and vzeroupper's vector registers: properties' bits 8 to 10, a register's
-        // lookup.
-        const __m512i rare_index = _mm512_and_si512(_mm512_srli_epi64(properties, 8), _mm512_set1_epi64(7));
-        read = _mm512_or_si512(read, _mm512_permutexvar_epi64(rare_index, _mm512_loadu_si512(x86_rare_reads)));
-        write = _mm512_or_si512(write, _mm512_permutexvar_epi64(rare_index, _mm512_loadu_si512(x86_rare_writes)));
-        // An /is4 register: the immediate's bits 7 to 4, one of XMM0 to XMM15.
-        const __m512i is4_shift = _mm512_add_epi64(_mm512_and_si512(_mm512_srli_epi64(low, 4), _mm512_set1_epi64(15)), vector_shift);
-        read = _mm512_mask_or_epi64(read, is4, read, _mm512_sllv_epi64(one, is4_shift));
-        // A VEX gather's mask is its vvvv register, which it reads and clears, and its destination keeps the elements the
-        // mask leaves.
-        const __m512i mask_vector = _mm512_sllv_epi64(one, _mm512_add_epi64(_mm512_and_si512(vvvv, _mm512_set1_epi64(15)), vector_shift));
-        const __m512i reg_vector_resource = _mm512_sllv_epi64(one, _mm512_add_epi64(_mm512_and_si512(reg, _mm512_set1_epi64(15)), vector_shift));
-        read = _mm512_mask_or_epi64(read, vex_gather, read, _mm512_or_si512(mask_vector, reg_vector_resource));
-        write = _mm512_mask_or_epi64(write, vex_gather, write, mask_vector);
-        // Key Locker's vector registers that no role names (x86_implicit_vectors): the wide forms' XMM0 to XMM7, and
-        // encodekey128's, encodekey256's and loadiwkey's.
-        // Each lane's form number, from its record's form field (bytes 12 and 13 of 16: the high qword's bits 32 to 47).
-        const __m512i number = _mm512_and_si512(_mm512_srli_epi64(high, 32), _mm512_set1_epi64(BUSTER_X86_FORM_NUMBER));
-        const __mmask8 implicit = _mm512_test_epi64_mask(properties, _mm512_set1_epi64(BUSTER_X86_EFFECT_IMPLICIT_VECTORS));
-        const __mmask8 wide = implicit & _mm512_cmpge_epu64_mask(number, _mm512_set1_epi64(X86_FORM_AESENCWIDE128KL_M384)) &
-                              _mm512_cmple_epu64_mask(number, _mm512_set1_epi64(X86_FORM_AESDECWIDE256KL_M512));
-        const __mmask8 key128 = implicit & _mm512_cmpeq_epi64_mask(number, _mm512_set1_epi64(X86_FORM_ENCODEKEY128_R32_R32));
-        const __mmask8 key256 = implicit & _mm512_cmpeq_epi64_mask(number, _mm512_set1_epi64(X86_FORM_ENCODEKEY256_R32_R32));
-        const __mmask8 integrity = implicit & _mm512_cmpeq_epi64_mask(number, _mm512_set1_epi64(X86_FORM_LOADIWKEY_X_X));
-        __m512i implicit_reads = _mm512_maskz_mov_epi64(wide, _mm512_set1_epi64(0xff));
-        implicit_reads = _mm512_mask_mov_epi64(implicit_reads, key256, _mm512_set1_epi64(0x03));
-        implicit_reads = _mm512_mask_mov_epi64(implicit_reads, key128 | integrity, _mm512_set1_epi64(0x01));
-        __m512i implicit_writes = _mm512_maskz_mov_epi64(wide, _mm512_set1_epi64(0xff));
-        implicit_writes = _mm512_mask_mov_epi64(implicit_writes, key256, _mm512_set1_epi64(0x7f));
-        implicit_writes = _mm512_mask_mov_epi64(implicit_writes, key128, _mm512_set1_epi64(0x77));
-        read = _mm512_or_si512(read, _mm512_slli_epi64(implicit_reads, BUSTER_X86_RESOURCE_VECTOR_SHIFT));
-        write = _mm512_or_si512(write, _mm512_slli_epi64(implicit_writes, BUSTER_X86_RESOURCE_VECTOR_SHIFT));
-    }
-    const __m512i kept = _mm512_ternarylogic_epi64(write, _mm512_srai_epi64(facts, 63), _mm512_set1_epi64((int64_t)BUSTER_X86_RESOURCE_VECTORS), 0x80);
-
-    // A memory operand: its base and index when it's accessed or its address taken, and the memory read or written.
-    const __mmask8 address = _mm512_test_epi64_mask(memory_effects, _mm512_set1_epi64(BUSTER_X86_MEMORY_EFFECT_ADDRESS));
-    const __mmask8 accessed = memory & (_mm512_test_epi64_mask(role_rm, _mm512_set1_epi64(BUSTER_X86_ROLE_READ | BUSTER_X86_ROLE_WRITE)) | address);
-    const __m512i base_resource = _mm512_maskz_sllv_epi64(_mm512_test_epi64_mask(mode, _mm512_set1_epi64(BUSTER_X86_MODE_BASE)), one,
-                                                          _mm512_and_si512(rm, _mm512_set1_epi64(15)));
-    // A VSIB operand's index is a vector register.
-    const __m512i index_shift = _mm512_mask_add_epi64(_mm512_and_si512(index, _mm512_set1_epi64(15)), vsib, _mm512_and_si512(index, _mm512_set1_epi64(31)), vector_shift);
-    const __m512i index_resource = _mm512_maskz_sllv_epi64(_mm512_test_epi64_mask(mode, _mm512_set1_epi64(BUSTER_X86_MODE_INDEX)), one, index_shift);
-    read = _mm512_mask_or_epi64(read, accessed, read, _mm512_or_si512(base_resource, index_resource));
-    const __m512i memory_resource = _mm512_set1_epi64((int64_t)BUSTER_X86_RESOURCE_MEMORY);
-    read = _mm512_mask_or_epi64(read, memory & _mm512_test_epi64_mask(role_rm, read_bit) & ~address, read, memory_resource);
-    write = _mm512_mask_or_epi64(write, memory & rm_writes, write, memory_resource);
-    read = _mm512_mask_or_epi64(read, _mm512_test_epi64_mask(memory_effects, _mm512_set1_epi64(BUSTER_X86_MEMORY_EFFECT_STACK_READ | BUSTER_X86_MEMORY_EFFECT_FENCE)), read,
-                                memory_resource);
-    write = _mm512_mask_or_epi64(write, _mm512_test_epi64_mask(memory_effects, _mm512_set1_epi64(BUSTER_X86_MEMORY_EFFECT_STACK_WRITE | BUSTER_X86_MEMORY_EFFECT_FENCE)), write,
-                                 memory_resource);
-
-    // Control, and an uncovered form's everything.
-    const __m512i control = _mm512_srli_epi64(kinds, 4);
-    write = _mm512_mask_or_epi64(write, _mm512_test_epi64_mask(control, control), write, _mm512_set1_epi64((int64_t)BUSTER_X86_RESOURCE_CONTROL));
-    write = _mm512_mask_or_epi64(write, _mm512_cmpeq_epi64_mask(control, _mm512_set1_epi64(BUSTER_X86_CONTROL_CALL)), write,
-                                 _mm512_set1_epi64((int64_t)BUSTER_X86_RESOURCE_CALL));
-    if (with_opmasks)
-    {
-        // The record's opmask, read; a vector destination of it (reg, rm's register or vvvv) merges into its old
-        // elements, but with zeroing (the decorations' top bit).
-        const __mmask8 merging = masked & _mm512_testn_epi64_mask(high, _mm512_set1_epi64((int64_t)BUSTER_X86_DECORATION_ZEROING << 56));
-        read = _mm512_mask_or_epi64(read, merging & reg_writes & reg_vector, read, reg_resource);
-        read = _mm512_mask_or_epi64(read, merging & rm_writes & rm_vector & ~memory, read, rm_resource);
-        read = _mm512_mask_or_epi64(read, merging & vvvv_writes & vvvv_vector, read, vvvv_resource);
-        const __m512i seven = _mm512_set1_epi64(7);
-        __m512i opmask_read = _mm512_maskz_sllv_epi64(masked, one, mask_number);
-        opmask_read = _mm512_mask_or_epi64(opmask_read, reg_opmask & reg_reads, opmask_read, _mm512_sllv_epi64(one, _mm512_and_si512(reg, seven)));
-        opmask_read = _mm512_mask_or_epi64(opmask_read, rm_opmask & rm_reads, opmask_read, _mm512_sllv_epi64(one, _mm512_and_si512(rm, seven)));
-        opmask_read = _mm512_mask_or_epi64(opmask_read, vvvv_opmask & vvvv_reads, opmask_read, _mm512_sllv_epi64(one, _mm512_and_si512(vvvv, seven)));
-        // vp2intersect writes an even opmask register and the next one (an opmask pair), and a gather or a scatter
-        // clears its record's opmask.
-        const __m512i reg_registers = _mm512_mask_sllv_epi64(_mm512_sllv_epi64(one, _mm512_and_si512(reg, seven)), pair, _mm512_set1_epi64(3),
-                                                             _mm512_and_si512(reg, _mm512_set1_epi64(6)));
-        opmask_read = _mm512_mask_or_epi64(opmask_read, reg_opmask & reg_reads & pair, opmask_read, reg_registers);
-        __m512i opmask_write = _mm512_maskz_mov_epi64(reg_opmask & reg_writes, reg_registers);
-        opmask_write = _mm512_mask_or_epi64(opmask_write, masked & vsib, opmask_write, _mm512_sllv_epi64(one, mask_number));
-        opmask_write = _mm512_mask_or_epi64(opmask_write, rm_opmask & rm_writes, opmask_write, _mm512_sllv_epi64(one, _mm512_and_si512(rm, seven)));
-        opmask_write = _mm512_mask_or_epi64(opmask_write, vvvv_opmask & vvvv_writes, opmask_write, _mm512_sllv_epi64(one, _mm512_and_si512(vvvv, seven)));
-        const __m512i opmask = _mm512_or_si512(opmask_read, _mm512_slli_epi64(opmask_write, 8));
-        _mm512_mask_cvtepi64_storeu_epi16(opmasks + first, live, _mm512_mask_mov_epi64(words, known, opmask));
-    }
-    read = _mm512_mask_or_epi64(_mm512_set1_epi64(-1), known, read, kept);
-    write = _mm512_mask_mov_epi64(_mm512_set1_epi64(-1), known, write);
-    _mm512_mask_storeu_epi64(reads + first, live, read);
-    _mm512_mask_storeu_epi64(writes + first, live, write);
-}
-
-// The records' resolved effects (BUSTER_X86_RESOURCE_*), 8 at a time (x86_effects_block).
-static __attribute__((always_inline)) inline void x86_instructions_effects_lanes(const X86Instruction* instructions, uint64_t count, uint64_t* reads, uint64_t* writes,
-                                                                               uint16_t* opmasks)
-{
     for (uint64_t first = 0; first < count; first += 8)
     {
-        x86_effects_block(instructions, first, count, reads, writes, opmasks);
+        const uint64_t left = count - first;
+        const uint32_t lanes = left >= 8 ? 8 : (uint32_t)left;
+        const uint32_t qwords = (1u << (2 * lanes)) - 1;
+        const __mmask8 live = (__mmask8)((1u << lanes) - 1);
+        // The records' halves: (immediate, displacement) and (reg, rm, index, mode, form, vvvv, decorations).
+        const __m512i head = _mm512_maskz_loadu_epi64((__mmask8)qwords, instructions + first);
+        const __m512i tail = _mm512_maskz_loadu_epi64((__mmask8)(qwords >> 8), instructions + first + 4);
+        const __m512i low = _mm512_permutex2var_epi64(head, even, tail);
+        const __m512i high = _mm512_permutex2var_epi64(head, odd, tail);
+        // Each lane's effects record: (implicit reads and writes, operands, properties) and (flags, memory, operation,
+        // width, write_bytes, kinds). A lane past the count gets form 0's, the conservative record, and stores nothing.
+        __m128i records[8];
+        for (uint32_t lane = 0; lane < 8; lane += 1)
+        {
+            const uint32_t number = lane < lanes ? instructions[first + lane].form & BUSTER_X86_FORM_NUMBER : 0;
+            records[lane] = _mm_load_si128((const __m128i*)&x86_effects_records[x86_effects_by_form[number]]);
+        }
+        __m512i effects_head = _mm512_castsi128_si512(records[0]);
+        __m512i effects_tail = _mm512_castsi128_si512(records[4]);
+        effects_head = _mm512_inserti32x4(effects_head, records[1], 1);
+        effects_head = _mm512_inserti32x4(effects_head, records[2], 2);
+        effects_head = _mm512_inserti32x4(effects_head, records[3], 3);
+        effects_tail = _mm512_inserti32x4(effects_tail, records[5], 1);
+        effects_tail = _mm512_inserti32x4(effects_tail, records[6], 2);
+        effects_tail = _mm512_inserti32x4(effects_tail, records[7], 3);
+        const __m512i facts = _mm512_permutex2var_epi64(effects_head, even, effects_tail);
+        const __m512i details = _mm512_permutex2var_epi64(effects_head, odd, effects_tail);
+
+        const __m512i operands = _mm512_and_si512(_mm512_srli_epi64(facts, 32), words);
+        const __m512i properties = _mm512_srli_epi64(facts, 48);
+        const __m512i memory_effects = _mm512_and_si512(_mm512_srli_epi64(details, 24), bytes);
+        const __m512i width = _mm512_and_si512(_mm512_srli_epi64(details, 40), bytes);
+        const __m512i kinds = _mm512_srli_epi64(details, 56);
+        // A covered form's (its operation's byte); without `opmasks`, one that touches no opmask register: an opmask
+        // role's (the facts' properties) or the record's opmask (its last byte). The rare lanes are those of the facts'
+        // upper quarter's BUSTER_X86_EFFECTS_RARE bits.
+        const __m512i mask_number = _mm512_and_si512(_mm512_srli_epi64(high, 56), _mm512_set1_epi64(BUSTER_X86_DECORATION_MASK));
+        const __mmask8 masked = _mm512_test_epi64_mask(mask_number, mask_number);
+        const __mmask8 covered = _mm512_test_epi64_mask(details, _mm512_set1_epi64(0xffull << 32));
+        const __mmask8 known = with_opmasks ? covered : covered & ~masked & _mm512_testn_epi64_mask(facts, _mm512_set1_epi64((int64_t)BUSTER_X86_EFFECT_OPMASKS << 48));
+        const __m512i reg = _mm512_and_si512(high, bytes);
+        const __m512i rm = _mm512_and_si512(_mm512_srli_epi64(high, 8), bytes);
+        const __m512i index = _mm512_and_si512(_mm512_srli_epi64(high, 16), bytes);
+        const __m512i mode = _mm512_and_si512(_mm512_srli_epi64(high, 24), bytes);
+        const __m512i vvvv = _mm512_and_si512(_mm512_srli_epi64(high, 48), bytes);
+        const __mmask8 memory = _mm512_test_epi64_mask(mode, _mm512_set1_epi64(BUSTER_X86_MODE_MEMORY));
+
+        // The flags, with a shift's immediate count: none read with a known count, and none written with a zero one.
+        __m512i flags_read = _mm512_and_si512(details, bytes);
+        __m512i flags_changed = _mm512_and_si512(_mm512_or_si512(_mm512_srli_epi64(details, 8), _mm512_srli_epi64(details, 16)), bytes);
+        const __mmask8 counted = _mm512_test_epi64_mask(properties, _mm512_set1_epi64(BUSTER_X86_EFFECT_COUNT)) &
+                                 _mm512_cmpeq_epi64_mask(_mm512_and_si512(kinds, _mm512_set1_epi64(0x0f)), _mm512_set1_epi64(BUSTER_X86_IMMEDIATE_COUNT));
+        const __m512i count_mask = _mm512_mask_blend_epi64(_mm512_cmpge_epu64_mask(width, _mm512_set1_epi64(8)), _mm512_set1_epi64(31), _mm512_set1_epi64(63));
+        const __mmask8 zero_count = _mm512_testn_epi64_mask(_mm512_and_si512(low, count_mask), count_mask);
+        flags_read = _mm512_mask_andnot_epi64(flags_read, counted, _mm512_set1_epi64(BUSTER_X86_FLAGS_STATUS), flags_read);
+        flags_changed = _mm512_mask_mov_epi64(flags_changed, counted & zero_count, zero);
+        __m512i read = _mm512_or_si512(_mm512_and_si512(facts, words), _mm512_slli_epi64(flags_read, BUSTER_X86_RESOURCE_FLAGS_SHIFT));
+        __m512i write = _mm512_or_si512(_mm512_and_si512(_mm512_srli_epi64(facts, 16), words), _mm512_slli_epi64(flags_changed, BUSTER_X86_RESOURCE_FLAGS_SHIFT));
+        read = _mm512_mask_or_epi64(read, _mm512_test_epi64_mask(properties, _mm512_set1_epi64(BUSTER_X86_EFFECT_MXCSR)), read,
+                                    _mm512_set1_epi64((int64_t)BUSTER_X86_RESOURCE_MXCSR));
+
+        // The registers of reg, rm and vvvv (a general register's number, AH to BH as RAX to RBX, or a vector register's;
+        // vvvv's are never AH to BH).
+        const __m512i role_bits = _mm512_set1_epi64((1u << BUSTER_X86_ROLE_BITS) - 1);
+        const __m512i role_reg = _mm512_and_si512(operands, role_bits);
+        const __m512i role_rm = _mm512_and_si512(_mm512_srli_epi64(operands, BUSTER_X86_ROLE_BITS), role_bits);
+        const __m512i role_vvvv = _mm512_and_si512(_mm512_srli_epi64(operands, 2 * BUSTER_X86_ROLE_BITS), role_bits);
+        const __m512i vector_shift = _mm512_set1_epi64(BUSTER_X86_RESOURCE_VECTOR_SHIFT);
+        const __m512i high_byte = _mm512_set1_epi64(BUSTER_X86_REGISTER_HIGH_BYTE);
+        const __m512i reg_general = _mm512_mask_and_epi64(_mm512_and_si512(reg, _mm512_set1_epi64(15)), _mm512_test_epi64_mask(reg, high_byte), reg,
+                                                          _mm512_set1_epi64(3));
+        const __m512i rm_general = _mm512_mask_and_epi64(_mm512_and_si512(rm, _mm512_set1_epi64(15)), _mm512_test_epi64_mask(rm, high_byte), rm,
+                                                         _mm512_set1_epi64(3));
+        const __m512i vector_bit = _mm512_set1_epi64(BUSTER_X86_ROLE_VECTOR);
+        const __mmask8 reg_vector = _mm512_test_epi64_mask(role_reg, vector_bit);
+        const __mmask8 rm_vector = _mm512_test_epi64_mask(role_rm, vector_bit);
+        const __mmask8 vvvv_vector = _mm512_test_epi64_mask(role_vvvv, vector_bit);
+        const __m512i reg_shift = _mm512_mask_add_epi64(reg_general, reg_vector, _mm512_and_si512(reg, _mm512_set1_epi64(31)), vector_shift);
+        const __m512i rm_shift = _mm512_mask_add_epi64(rm_general, rm_vector, _mm512_and_si512(rm, _mm512_set1_epi64(31)), vector_shift);
+        const __m512i vvvv_shift = _mm512_mask_add_epi64(_mm512_and_si512(vvvv, _mm512_set1_epi64(15)), vvvv_vector, _mm512_and_si512(vvvv, _mm512_set1_epi64(31)),
+                                                         vector_shift);
+        const __m512i reg_resource = _mm512_sllv_epi64(one, reg_shift);
+        const __m512i rm_resource = _mm512_sllv_epi64(one, rm_shift);
+        const __m512i vvvv_resource = _mm512_sllv_epi64(one, vvvv_shift);
+
+        // A register role reads its register when it reads the operand or writes part of it, and writes it when it writes.
+        const __m512i read_bit = _mm512_set1_epi64(BUSTER_X86_ROLE_READ);
+        const __m512i write_bit = _mm512_set1_epi64(BUSTER_X86_ROLE_WRITE);
+        const __m512i merge_bit = _mm512_set1_epi64(BUSTER_X86_REST_MERGE << BUSTER_X86_ROLE_REST_SHIFT);
+        const __m512i rest_bits = _mm512_set1_epi64(BUSTER_X86_ROLE_REST);
+        // movss's and movsd's loads (MERGE_IF_REGISTER) merge from a register source only.
+        const __mmask8 reg_loads = memory & _mm512_cmpeq_epi64_mask(_mm512_and_si512(role_reg, rest_bits), rest_bits);
+        const __mmask8 reg_reads = _mm512_test_epi64_mask(role_reg, read_bit) |
+                                   (_mm512_test_epi64_mask(role_reg, write_bit) & _mm512_test_epi64_mask(role_reg, merge_bit) & ~reg_loads);
+        const __mmask8 rm_reads = _mm512_test_epi64_mask(role_rm, read_bit) |
+                                  (_mm512_test_epi64_mask(role_rm, write_bit) & _mm512_test_epi64_mask(role_rm, merge_bit));
+        const __mmask8 vvvv_reads = _mm512_test_epi64_mask(role_vvvv, read_bit);
+        const __mmask8 reg_writes = _mm512_test_epi64_mask(role_reg, write_bit);
+        const __mmask8 rm_writes = _mm512_test_epi64_mask(role_rm, write_bit);
+        const __mmask8 vvvv_writes = _mm512_test_epi64_mask(role_vvvv, write_bit);
+        // An opmask role's register is in `opmasks`, not the sets.
+        const __mmask8 reg_opmask = with_opmasks ? _mm512_test_epi64_mask(properties, _mm512_set1_epi64(BUSTER_X86_EFFECT_OPMASK_REG)) : 0;
+        const __mmask8 rm_opmask = with_opmasks ? _mm512_test_epi64_mask(properties, _mm512_set1_epi64(BUSTER_X86_EFFECT_OPMASK_RM)) & ~memory : 0;
+        const __mmask8 vvvv_opmask = with_opmasks ? _mm512_test_epi64_mask(properties, _mm512_set1_epi64(BUSTER_X86_EFFECT_OPMASK_VVVV)) : 0;
+        // A zero idiom's sources (reg and rm, or vvvv and rm) are one register, which it doesn't read.
+        const __m512i source = _mm512_mask_mov_epi64(reg, vvvv_reads, vvvv);
+        const __mmask8 idiom = _mm512_test_epi64_mask(properties, _mm512_set1_epi64(BUSTER_X86_EFFECT_ZERO_IDIOM)) & ~memory & _mm512_cmpeq_epi64_mask(source, rm);
+        read = _mm512_mask_or_epi64(read, reg_reads & ~idiom & ~reg_opmask, read, reg_resource);
+        write = _mm512_mask_or_epi64(write, reg_writes & ~reg_opmask, write, reg_resource);
+        read = _mm512_mask_or_epi64(read, rm_reads & ~memory & ~idiom & ~rm_opmask, read, rm_resource);
+        write = _mm512_mask_or_epi64(write, rm_writes & ~memory & ~rm_opmask, write, rm_resource);
+        read = _mm512_mask_or_epi64(read, vvvv_reads & ~idiom & ~vvvv_opmask, read, vvvv_resource);
+        write = _mm512_mask_or_epi64(write, vvvv_writes & ~vvvv_opmask, write, vvvv_resource);
+        // A legacy SSE form reads every vector register it writes (which keeps its bits above 127), a zero idiom's too:
+        // write & vectors in the lanes of KEEP_UPPER, the record's top bit, spread over the lane by an arithmetic shift
+        // (0x80, all three). A mask register from vptestmq measured slower on the 9700X. It joins the reads at the end.
+        const __m512i kept = _mm512_ternarylogic_epi64(write, _mm512_srai_epi64(facts, 63), _mm512_set1_epi64((int64_t)BUSTER_X86_RESOURCE_VECTORS), 0x80);
+
+        // A memory operand: its base and index when it's accessed or its address taken, and the memory read or written.
+        const __mmask8 address = _mm512_test_epi64_mask(memory_effects, _mm512_set1_epi64(BUSTER_X86_MEMORY_EFFECT_ADDRESS));
+        const __mmask8 accessed = memory & (_mm512_test_epi64_mask(role_rm, _mm512_set1_epi64(BUSTER_X86_ROLE_READ | BUSTER_X86_ROLE_WRITE)) | address);
+        const __m512i base_resource = _mm512_maskz_sllv_epi64(_mm512_test_epi64_mask(mode, _mm512_set1_epi64(BUSTER_X86_MODE_BASE)), one,
+                                                              _mm512_and_si512(rm, _mm512_set1_epi64(15)));
+        const __m512i index_resource = _mm512_maskz_sllv_epi64(_mm512_test_epi64_mask(mode, _mm512_set1_epi64(BUSTER_X86_MODE_INDEX)), one,
+                                                               _mm512_and_si512(index, _mm512_set1_epi64(15)));
+        read = _mm512_mask_or_epi64(read, accessed, read, _mm512_or_si512(base_resource, index_resource));
+        const __m512i memory_resource = _mm512_set1_epi64((int64_t)BUSTER_X86_RESOURCE_MEMORY);
+        read = _mm512_mask_or_epi64(read, memory & _mm512_test_epi64_mask(role_rm, read_bit) & ~address, read, memory_resource);
+        write = _mm512_mask_or_epi64(write, memory & rm_writes, write, memory_resource);
+        read = _mm512_mask_or_epi64(read, _mm512_test_epi64_mask(memory_effects, _mm512_set1_epi64(BUSTER_X86_MEMORY_EFFECT_STACK_READ | BUSTER_X86_MEMORY_EFFECT_FENCE)), read,
+                                    memory_resource);
+        write = _mm512_mask_or_epi64(write, _mm512_test_epi64_mask(memory_effects, _mm512_set1_epi64(BUSTER_X86_MEMORY_EFFECT_STACK_WRITE | BUSTER_X86_MEMORY_EFFECT_FENCE)), write,
+                                     memory_resource);
+
+        // Control, and an uncovered form's everything.
+        const __m512i control = _mm512_srli_epi64(kinds, 4);
+        write = _mm512_mask_or_epi64(write, _mm512_test_epi64_mask(control, control), write, _mm512_set1_epi64((int64_t)BUSTER_X86_RESOURCE_CONTROL));
+        write = _mm512_mask_or_epi64(write, _mm512_cmpeq_epi64_mask(control, _mm512_set1_epi64(BUSTER_X86_CONTROL_CALL)), write,
+                                     _mm512_set1_epi64((int64_t)BUSTER_X86_RESOURCE_CALL));
+        if (with_opmasks)
+        {
+            // The record's opmask, read; a vector destination of it (reg, rm's register or vvvv) merges into its old
+            // elements, but with zeroing (the decorations' top bit).
+            const __mmask8 merging = masked & _mm512_testn_epi64_mask(high, _mm512_set1_epi64((int64_t)BUSTER_X86_DECORATION_ZEROING << 56));
+            read = _mm512_mask_or_epi64(read, merging & reg_writes & reg_vector, read, reg_resource);
+            read = _mm512_mask_or_epi64(read, merging & rm_writes & rm_vector & ~memory, read, rm_resource);
+            read = _mm512_mask_or_epi64(read, merging & vvvv_writes & vvvv_vector, read, vvvv_resource);
+            const __m512i seven = _mm512_set1_epi64(7);
+            __m512i opmask_read = _mm512_maskz_sllv_epi64(masked, one, mask_number);
+            opmask_read = _mm512_mask_or_epi64(opmask_read, reg_opmask & reg_reads, opmask_read, _mm512_sllv_epi64(one, _mm512_and_si512(reg, seven)));
+            opmask_read = _mm512_mask_or_epi64(opmask_read, rm_opmask & rm_reads, opmask_read, _mm512_sllv_epi64(one, _mm512_and_si512(rm, seven)));
+            opmask_read = _mm512_mask_or_epi64(opmask_read, vvvv_opmask & vvvv_reads, opmask_read, _mm512_sllv_epi64(one, _mm512_and_si512(vvvv, seven)));
+            __m512i opmask_write = _mm512_maskz_sllv_epi64(reg_opmask & reg_writes, one, _mm512_and_si512(reg, seven));
+            opmask_write = _mm512_mask_or_epi64(opmask_write, rm_opmask & rm_writes, opmask_write, _mm512_sllv_epi64(one, _mm512_and_si512(rm, seven)));
+            opmask_write = _mm512_mask_or_epi64(opmask_write, vvvv_opmask & vvvv_writes, opmask_write, _mm512_sllv_epi64(one, _mm512_and_si512(vvvv, seven)));
+            const __m512i opmask = _mm512_or_si512(opmask_read, _mm512_slli_epi64(opmask_write, 8));
+            _mm512_mask_cvtepi64_storeu_epi16(opmasks + first, live, _mm512_mask_mov_epi64(words, known, opmask));
+        }
+        read = _mm512_mask_or_epi64(_mm512_set1_epi64(-1), known, read, kept);
+        write = _mm512_mask_mov_epi64(_mm512_set1_epi64(-1), known, write);
+        _mm512_mask_storeu_epi64(reads + first, live, read);
+        _mm512_mask_storeu_epi64(writes + first, live, write);
+        // The rare lanes (BUSTER_X86_EFFECTS_RARE's properties, in the facts' upper quarter), completed in place.
+        const __mmask8 rare = _mm512_mask_test_epi64_mask(known, facts, _mm512_set1_epi64((int64_t)BUSTER_X86_EFFECTS_RARE));
+        if (BUSTER_UNLIKELY(rare != 0))
+        {
+            x86_effects_rare_lanes(instructions, first, rare, reads, writes, opmasks);
+        }
     }
 }
 
@@ -3885,7 +3934,7 @@ static uint32_t x86_effects_slots(uint8_t syntax, uint8_t* slots)
         slots[2] = BUSTER_X86_SLOT_RM;
         count = 3;
         break;
-    // The /is4 register (in the immediate's bits 7 to 4) is no role: x86_effects_block's rare terms read it (RARE).
+    // The /is4 register (in the immediate's bits 7 to 4) is no role: x86_effects_rare_lanes reads it (RARE).
     case X86_SYNTAX_REG_VVVV_RM_IMM:
     case X86_SYNTAX_REG_VVVV_RM_IS4:
         slots[0] = BUSTER_X86_SLOT_REG;
