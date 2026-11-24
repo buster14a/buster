@@ -13642,7 +13642,15 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             // what they and check_program push into it again (BUSTER_CHECK_DRIVER_SCRATCH_REUSE): the parse's tokens, so
             // that a unit read as its view (#2531) keeps what it would have kept read whole, which its next unit's parse
             // pushes as far again.
-            check_driver_discard_scratch(scratch, lanes, scratch->length + BUSTER_CHECK_DRIVER_SCRATCH_REUSE * (uint64_t)parser->tokens.count);
+            const uint64_t reuse = BUSTER_CHECK_DRIVER_SCRATCH_REUSE * (uint64_t)parser->tokens.count;
+            uint64_t scratch_kept = scratch->length + reuse;
+            if (!deferring && reuse >= BUSTER_ARENA_HUGE_PAGE_BYTES)
+            {
+                // Retain whole pages within the source reader's reuse allowance. arena_discard_past
+                // rounds its boundary up to avoid splitting a huge page and protects all live bytes.
+                scratch_kept -= ((uintptr_t)scratch->base + scratch_kept) & (BUSTER_ARENA_HUGE_PAGE_BYTES - 1);
+            }
+            check_driver_discard_scratch(scratch, lanes, scratch_kept);
             if (stage_clock != NULL && deferring)
             {
                 stage_clock->deferred = true;
