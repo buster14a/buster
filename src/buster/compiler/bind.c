@@ -395,8 +395,9 @@ static void bind_match_vector(Bind* bind, const Link* link, SymbolId first, Symb
         const __m128i flags = _mm_maskz_loadu_epi8(loaded, symbols->flags + batch);
         const __m512i name = _mm512_maskz_loadu_epi32(loaded, symbols->name + batch);
         const __mmask16 kept = _mm_test_epi8_mask(flags, _mm_set1_epi8(BUSTER_LINK_SYMBOL_BINDING)) & _mm512_test_epi32_mask(name, name);
-        const __mmask8 low = bind_match_filter(names, link, (__mmask8)kept, _mm512_castsi512_si256(name));
-        const __mmask8 high = bind_match_filter(names, link, (__mmask8)(kept >> 8), _mm512_extracti64x4_epi64(name, 1));
+        // A chain with no symbol to look up gathers nothing: a gather issues its loads' work whatever its mask.
+        const __mmask8 low = (__mmask8)kept != 0 ? bind_match_filter(names, link, (__mmask8)kept, _mm512_castsi512_si256(name)) : 0;
+        const __mmask8 high = kept >> 8 != 0 ? bind_match_filter(names, link, (__mmask8)(kept >> 8), _mm512_extracti64x4_epi64(name, 1)) : 0;
         uint32_t maybe = (uint32_t)low | (uint32_t)high << 8;
         while (maybe != 0)
         {
