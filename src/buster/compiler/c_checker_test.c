@@ -3408,8 +3408,8 @@ static const TypeCapacity* check_test_fixture_capacity(const char* name)
 }
 
 // The bytes of the file at `path`, NUL-terminated, in `storage`, and their count in `length`; null, with the reason in
-// `fixtures->problem`, when it can't be read, is larger than CHECK_TEST_FIXTURE_BYTES or holds a NUL.
-static char* check_test_fixture_read(CheckTestFixtures* fixtures, const char* path, uint64_t* length)
+// `fixtures->problem`, when it can't be read, is larger than CHECK_TEST_FIXTURE_BYTES or, for text, holds a NUL.
+static char* check_test_fixture_read_bytes(CheckTestFixtures* fixtures, const char* path, bool binary, uint64_t* length)
 {
     char* bytes = 0;
     const int file = open(path, O_RDONLY | O_CLOEXEC);
@@ -3438,7 +3438,7 @@ static char* check_test_fixture_read(CheckTestFixtures* fixtures, const char* pa
         {
             snprintf(fixtures->problem, sizeof(fixtures->problem), "can't read %s whole", path);
         }
-        else if (memchr(buffer, 0, size) != 0)
+        else if (!binary && memchr(buffer, 0, size) != 0)
         {
             snprintf(fixtures->problem, sizeof(fixtures->problem), "%s holds a NUL byte", path);
         }
@@ -3454,6 +3454,11 @@ static char* check_test_fixture_read(CheckTestFixtures* fixtures, const char* pa
         close(file);
     }
     return bytes;
+}
+
+static char* check_test_fixture_read(CheckTestFixtures* fixtures, const char* path, uint64_t* length)
+{
+    return check_test_fixture_read_bytes(fixtures, path, false, length);
 }
 
 // Whether `text` is 1 to `limit` letters, digits, '.', '_' and '-'.
