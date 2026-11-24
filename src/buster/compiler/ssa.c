@@ -1049,9 +1049,13 @@ static SsaError ssa_construct_vector(SsaWork* work, uint32_t frontier_budget)
     const uint64_t chunks = ((uint64_t)work->promoted_count + 15) / 16;
     uint32_t* written = arena_push(work->scratch, (chunks + 1) * 64, 64);
     uint32_t* def_offsets = ssa_allocate(work->scratch, (uint64_t)blocks + 1, sizeof(uint32_t));
-    uint32_t* def_chunks = ssa_allocate(work->scratch, (uint64_t)input->instruction_count + 1, sizeof(uint32_t));
-    uint32_t* def_masks = ssa_allocate(work->scratch, (uint64_t)input->instruction_count + 1, sizeof(uint32_t));
-    uint32_t* def_rows = arena_push(work->scratch, ((uint64_t)input->instruction_count + 1) * 64, 64);
+    // A block lists each chunk it writes in once, so there are no more of them than writes or than blocks times chunks:
+    // a narrow function's list is no wider than its rows.
+    const uint64_t cells = (uint64_t)blocks * chunks;
+    const uint64_t defs = (cells < input->instruction_count ? cells : input->instruction_count) + 1;
+    uint32_t* def_chunks = ssa_allocate(work->scratch, defs, sizeof(uint32_t));
+    uint32_t* def_masks = ssa_allocate(work->scratch, defs, sizeof(uint32_t));
+    uint32_t* def_rows = arena_push(work->scratch, defs * 64, 64);
     uint32_t* phi_first = ssa_allocate(work->scratch, (uint64_t)blocks + 1, sizeof(uint32_t));
     uint64_t* placed = arena_push(work->scratch, rows == 0 ? 64 : rows, 64);
     uint32_t* frontier_offsets = 0;
