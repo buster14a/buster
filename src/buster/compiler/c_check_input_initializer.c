@@ -197,8 +197,18 @@ static bool check_input_initializer_prepare_slow(CheckInputReader* reader, uint3
             item = false;
             if (kind == PARSE_KIND_STRING && initialize)
             {
-                valid = check_input_initializer_string(reader, token, rejected) != NULL;
-                string_refused = !valid;
+                const bool accepted = check_input_initializer_string(reader, token, rejected) != NULL;
+                string_refused |= !accepted;
+                valid = accepted || (rejected.first <= token && token < rejected.end && !reader->output->resource);
+                if (!accepted && valid)
+                {
+                    // Recovery consumed this concatenation. Prepare its siblings even though the object cannot finish.
+                    do
+                    {
+                        token += 1;
+                    } while (token < end && parser->tokens.kinds[token] == PARSE_KIND_STRING);
+                    continue;
+                }
             }
             if (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE)
             {
@@ -216,7 +226,7 @@ static bool check_input_initializer_prepare_slow(CheckInputReader* reader, uint3
     // An array whose initializer is parenthesized may be a compound literal's (GNU's, check_input_initializer_finish).
     const bool parenthesized = parser->tokens.kinds[begin] == PARSE_KIND_L_PAREN && type_kind_is_array(type_kind(reader->types, type_strip_aligned(reader->types, type)));
     // (A variable whose type tags register its initializer's value, #1447, c_check_type_safety_input.c, finishes too.)
-    if (valid && initialize && (incomplete || parenthesized || check_const_eligible(reader->types, type) || check_input_auto_type(reader->types, type) ||
+    if (valid && !string_refused && initialize && (incomplete || parenthesized || check_const_eligible(reader->types, type) || check_input_auto_type(reader->types, type) ||
                   (BUSTER_CHECK_RARE(reader, declaration_flags, declaration) & BUSTER_CHECK_DECLARATION_DEDUCED) != 0 ||
                   (reader->type_tag_attributes && check_type_tags_pending(reader->output, declaration) != NULL)))
     {
@@ -236,7 +246,7 @@ static bool check_input_initializer_prepare_slow(CheckInputReader* reader, uint3
     {
         check_input_report(reader, assignment, CHECK_INPUT_DECLARATION);
     }
-    return valid;
+    return valid && !string_refused;
 }
 
 static bool check_input_initializer_prepare(CheckInputReader* reader, uint32_t assignment, bool initialize, CheckInputRejectedInitializer rejected)

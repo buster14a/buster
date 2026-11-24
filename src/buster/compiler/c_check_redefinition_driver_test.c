@@ -142,9 +142,9 @@ static void check_test_driver_redefinitions(CheckTest* test, const char* clang, 
     const char* direct = diagnostics != NULL ? strstr(diagnostics, "error: redefinition of 'direct'") : NULL;
     const char* trailing = direct != NULL ? strstr(direct, "error: hex escape sequence out of range") : NULL;
     check_test_expect(test, string_status == 1 && trailing != NULL && later != NULL && trailing < later &&
-                      check_test_implicit_count(diagnostics, "error: hex escape sequence out of range") == 5 &&
+                      check_test_implicit_count(diagnostics, "error: hex escape sequence out of range") == 6 &&
                       check_test_implicit_count(diagnostics, "error: invalid universal character") == 1 &&
-                      check_test_implicit_count(diagnostics, ": error: ") == 12,
+                      check_test_implicit_count(diagnostics, ": error: ") == 14,
                       "rejected strings, including nested compound literals, are diagnosed once before the next redefinition");
     free(diagnostics);
 }
