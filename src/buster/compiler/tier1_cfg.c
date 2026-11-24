@@ -13,7 +13,9 @@
 // 1. Liveness is dataflow.c's, on values used in another block or passed by a phi edge from another block. A phi
 //    operand passed only from its home needs its home interval's tail, not a dense bit (#1384). For global values,
 //    each phi operand is a use on its edge: USE[b] = U[b] | (P[b] & ~D[b]), then OUT[b] |= P[b] after the solve.
-//    Two scans of the phi operands supply P directly, without another blocks-by-values matrix.
+//    Each value's phi occurrences supply P directly, without another blocks-by-values matrix. The global values are
+//    solved 512 at a time, one vector row per block, and each block's live-in and live-out values kept as ascending
+//    lists (tier1_cfg_live_sets), so that the rows take blocks * 256 bytes however many values are global (#1384).
 // 2. A value gets an interval per block it is defined in or live into, from its definition or the block's start to its
 //    last use or the block's end, and an unused definition one position. A block continues its layout predecessor's
 //    ranges when it has no phis and every value live into it leaves that predecessor live: then every value of its
@@ -23,7 +25,7 @@
 //    interval it overlaps, so the piece over it goes to memory and the pieces around it keep their registers, where
 //    the whole range couldn't have one for a use that needs it. Intervals are numbered by value, then position, so
 //    that each one's uses are a slice of the value's: the allocator borrows the input's use columns. Each value's
-//    blocks come from the liveness rows block by block, counted and then filled, so the cost is the live pairs', not
+//    blocks come from the live-in lists block by block, counted and then filled, so the cost is the live pairs', not
 //    values times blocks. Each range a value enters a block with is hinted to the register the value has at the exit of
 //    the block's anchor (#2553, tier1_cfg_anchors): its immediate dominator, or a latch laid out before it, of which
 //    every such value is live out at once; each phi to its operand's at the exit of a chosen predecessor; and a value
@@ -39,10 +41,13 @@
 //    sequence's consumer saves no value around it.
 // 3. tier1_allocate assigns the intervals.
 // 4. Each edge moves its successor's live-in values and phis from their locations at the predecessor's last position
-//    to their entry locations (tier1_cfg_entry_location). A store of the same value to its own slot is omitted where
-//    the predecessor block already establishes that slot (tier1_cfg_slot_current, #1216). A changed phi operand still
-//    writes it. Those boundary locations are one forward sweep of each value's intervals (#1399), not a binary search
-//    per live value per edge. Emission resolves a position from the first interval that overlaps its block, when that
+//    to their entry locations (tier1_cfg_entry_location). A store of a value to its own slot is omitted where the slot
+//    already holds it at the predecessor's exit: the predecessor block establishes it (tier1_cfg_slot_current, #1216),
+//    or every path to the block's start stored it and the block keeps it (tier1_cfg_current_slots, #2553, a forward
+//    must-analysis that the allocation publishes per block as assertions, for its checkers and the emitter). An operand
+//    of a phi whose slot it shares counts as the value: the slot is its own. A changed phi operand still writes it.
+//    Those boundary locations are one forward sweep of each value's intervals (#1399), not a binary search per live
+//    value per edge. Emission resolves a position from the first interval that overlaps its block, when that
 //    column fits. tier1_resolve_moves orders each class's moves, breaking a
 //    cycle with the class's scratch register or, where one of the class's moves goes slot to slot, with the class's
 //    temporary slot; a slot-to-slot move then goes through the scratch register, which holds nothing from one move to
@@ -74,7 +79,8 @@
 // cut inside a block finds its value where the piece keeps it once the split's moves have run (whether or not a use
 // reads it there), and that no write lands on another value the allocation still keeps there, and applies each edge's
 // moves in order to the predecessor's final state, which must then hold every live-in value and each phi's operand
-// where the successor expects them.
+// where the successor expects them. The slots the allocation asserts current at a block's start (current_slots, #2553)
+// it takes as more of the block's entry state, and checks each on every edge into the block, as it checks the places.
 //
 // Interval construction, move resolution and the verifier's search stay scalar, around the vector liveness solver and
 // the vector allocator. The boundary sweep is scalar too: each value's intervals are a variable-length run, and one
@@ -225,9 +231,13 @@ struct Tier1CfgAllocation
     uint32_t edge_local_values;
     // Bit c: a move uses class c's temporary slot, which the frame must then reserve.
     uint8_t temp_slots;
+    // dataflow_liveness's sweeps, over every group of global values (tier1_cfg_live_sets).
     uint64_t liveness_iterations;
-    // The four dense liveness matrices, excluding CFG columns and the allocator's other working state.
+    // The four liveness matrices of one group, at most 256 bytes a block, excluding CFG columns and the allocator's
+    // other working state.
     uint64_t liveness_bytes;
+    // The entries of the blocks' live-in and live-out lists, which hold the liveness the groups' matrices leave.
+    uint64_t live_entries;
     uint64_t retained_bytes;
     uint64_t scratch_bytes;
     // Position q's block, length position_count, or null when the column is not retained. The verifier does not read it.
@@ -243,6 +253,11 @@ struct Tier1CfgAllocation
     // Per interval, 1 where it enters its block as its recipe because no block it carries the value to reads its
     // register (tier1_cfg_carried_unread, #2734), or null for none.
     uint8_t* unread_entries;
+    // Per block, the values live into it whose slot holds them at its start whatever place their range enters it in
+    // (tier1_cfg_current_slots, #2553): block b's are current_slots[current_slot_offsets[b] .. current_slot_offsets[b + 1]).
+    // Null where no value has a slot, and in an allocation without them.
+    uint32_t* current_slot_offsets;
+    uint32_t* current_slots;
 };
 
 typedef enum Tier1CfgError
@@ -947,6 +962,10 @@ struct Tier1CfgEdge
     // Ordinary CFG edges only: each fragment's last spill end, and the predecessor's first position.
     const uint32_t* spill_ends;
     uint32_t block_start;
+    // Ordinary CFG edges only: the values whose slots hold them at the predecessor's start, besides their places
+    // (tier1_cfg_current_slots), each stamped `current_stamp`, or null.
+    const uint32_t* current_stamps;
+    uint32_t current_stamp;
 };
 
 static uint8_t tier1_cfg_kind_of_location(uint32_t location)
@@ -967,10 +986,14 @@ static uint8_t tier1_cfg_kind_of_location(uint32_t location)
 // recomputation. A matching pair, a rematerialized destination, or a slot the predecessor already holds, adds nothing.
 static void tier1_cfg_edge_place(const Tier1CfgInput* input, const Tier1CfgAllocation* result, Tier1CfgEdge* edge, uint32_t value, uint32_t carried, uint32_t from, uint8_t from_kind, uint32_t to, uint8_t to_kind, uint32_t exit)
 {
-    // A self-phi or an unchanged live-through value need not store a register back to its current slot. A different
-    // phi operand must still write it, even when the phi's old value is present there.
-    const bool current_slot = from_kind == BUSTER_TIER1_ALLOCATE_REGISTER && to_kind == BUSTER_TIER1_ALLOCATE_SPILL && value == carried &&
-                              edge->spill_ends != 0 && tier1_cfg_slot_current(result, edge->spill_ends, value, exit, edge->block_start);
+    // A self-phi, an unchanged live-through value, or an operand of a phi whose slot it shares, need not store a register
+    // back to its own slot where that slot already holds it at the predecessor's exit: current at its start and live
+    // through it (tier1_cfg_current_slots), or stored in it, which is the rest of the analysis' OUT for a value in a
+    // register there. A different phi operand must still write it, even when the phi's old value is present there.
+    const bool own_slot = from_kind == BUSTER_TIER1_ALLOCATE_REGISTER && to_kind == BUSTER_TIER1_ALLOCATE_SPILL && edge->spill_ends != 0 && result->allocation.spill_ids[carried] != UINT32_MAX &&
+                          to == BUSTER_TIER1_CFG_SPILL + result->allocation.spill_ids[carried];
+    const bool current = own_slot && edge->current_stamps != 0 && edge->current_stamps[carried] == edge->current_stamp;
+    const bool current_slot = own_slot && (current || tier1_cfg_slot_current(result, edge->spill_ends, carried, exit, edge->block_start));
     if (to_kind != BUSTER_TIER1_ALLOCATE_REMATERIALIZE && from != to && !current_slot)
     {
         if (from_kind == BUSTER_TIER1_ALLOCATE_REMATERIALIZE)
@@ -1616,14 +1639,289 @@ static bool tier1_cfg_share_slots(const Tier1CfgInput* input, Tier1CfgAllocation
     return ready;
 }
 
-// Locations at block boundaries, in live-bit order followed by each block's local phi tails at exits. The edge pass
-// indexes exit_at/exit_stamp by original value, including locals. A cursor per value moves only forward: blocks are
-// visited in layout order, and within a block the entry is at or before the exit. `ready` is false when the columns
-// do not fit, and the edge pass then searches.
+// Each block's global values live into it and live out of it (1. above), ascending: block b's are
+// in_values[in_offsets[b] .. in_offsets[b + 1]) and out_values[out_offsets[b] .. out_offsets[b + 1]). Live-out
+// includes the global phi operands the block passes on its edges; edge-local operands are in neither (#1384). And
+// what the readers would otherwise search the lists for, which the groups' rows give a vector at a time: for each
+// live-in entry, whether the value is live out of the block too; for each value, whether it is global and live out of
+// its home; and for each block after the first, whether every value live into it is live out of the block before.
+typedef struct Tier1CfgLiveSets Tier1CfgLiveSets;
+struct Tier1CfgLiveSets
+{
+    uint32_t* in_offsets;
+    uint32_t* in_values;
+    uint32_t* out_offsets;
+    uint32_t* out_values;
+    uint8_t* in_out;
+    uint8_t* home_out;
+    uint8_t* continues;
+};
+
+// One group's seeds, the dense ids [first, last): with `set`, each definition's bit in its home's def row, each
+// ordinary use in another block, and each phi occurrence passed from a block other than the operand's home, in the
+// use rows. Without it, the words those bits are in go back to zero, which leaves the rows clear for the next group:
+// a group's bits are its rows' only ones. `phi_offsets` and `phi_sources` list each dense id's phi occurrences by
+// their predecessors.
+static void tier1_cfg_live_seeds(const Tier1CfgInput* input, const uint32_t* home, const uint32_t* dense_values, const uint32_t* blocks_of, const uint32_t* phi_offsets, const uint32_t* phi_sources, uint32_t first, uint32_t last, Dataflow* liveness, bool set)
+{
+    const uint64_t words = liveness->row_words;
+    for (uint32_t i = first; i < last; i += 1)
+    {
+        const uint32_t v = dense_values[i];
+        const uint32_t bit = i - first;
+        const uint64_t word = bit >> 6;
+        const uint64_t mask = set ? UINT64_C(1) << (bit & 63) : 0;
+        uint64_t* def = liveness->def + (uint64_t)home[v] * words + word;
+        *def = set ? *def | mask : 0;
+        for (uint32_t u = input->use_offsets[v]; u < input->use_offsets[v + 1]; u += 1)
+        {
+            const uint32_t block = blocks_of != 0 ? blocks_of[input->use_positions[u]] : tier1_cfg_block_of(input, input->use_positions[u]);
+            if (block != home[v])
+            {
+                uint64_t* use = liveness->use + (uint64_t)block * words + word;
+                *use = set ? *use | mask : 0;
+            }
+        }
+        for (uint32_t k = phi_offsets[i]; k < phi_offsets[i + 1]; k += 1)
+        {
+            const uint32_t predecessor = phi_sources[k];
+            if (predecessor != home[v])
+            {
+                uint64_t* use = liveness->use + (uint64_t)predecessor * words + word;
+                *use = set ? *use | mask : 0;
+            }
+        }
+    }
+}
+
+// The global values' liveness in groups of BUSTER_DATAFLOW_VECTOR_BITS dense ids, each solved by dataflow_liveness in
+// one vector row per block, so that its four matrices take blocks * 256 bytes however many values are global (#1384):
+// a short-lived value used one block after its definition no longer widens every block's rows. Liveness is per value,
+// so a group's rows are exactly its values' columns of one solve over all of them. A function of up to 512 global
+// values is one group and one solve, as before. Each group's rows are counted per block, then filled into the
+// block-major lists, ascending since the groups go in dense id order, which is value order; with more than one group,
+// each is solved again for the fill rather than kept. A global phi operand joins its predecessor's use row unless that
+// block is its home, and its predecessor's out row after the solve, even where it is (the USE |= P & ~D, OUT |= P of
+// 1. above). A value live into the entry or into its own home is not SSA: INVALID. Failure restores the scratch arena.
+static Tier1CfgError tier1_cfg_live_sets(const Tier1CfgInput* input, const uint32_t* home, const uint32_t* dense, const uint32_t* dense_values, uint32_t dense_count, const uint32_t* blocks_of, Arena* scratch, Tier1CfgLiveSets* live, uint64_t* iterations, uint64_t* matrix_bytes)
+{
+    const uint64_t mark = scratch->length;
+    Tier1CfgError error = TIER1_CFG_CAPACITY;
+    const uint32_t blocks = input->block_count;
+    const uint32_t groups = (uint32_t)(((uint64_t)dense_count + BUSTER_DATAFLOW_VECTOR_BITS - 1) / BUSTER_DATAFLOW_VECTOR_BITS);
+    const uint32_t width = dense_count < BUSTER_DATAFLOW_VECTOR_BITS ? dense_count : BUSTER_DATAFLOW_VECTOR_BITS;
+    // Each dense id's phi occurrences, by their predecessors, counted then filled.
+    uint32_t* phi_offsets = arena_push_array(scratch, (uint64_t)dense_count + 2, sizeof(uint32_t), _Alignof(uint32_t));
+    bool ready = phi_offsets != 0;
+    if (ready)
+    {
+        memset(phi_offsets, 0, ((uint64_t)dense_count + 2) * sizeof(uint32_t));
+        for (uint32_t k = 0; k < input->phi_count; k += 1)
+        {
+            for (uint32_t o = input->phi_operand_offsets[k]; o < input->phi_operand_offsets[k + 1]; o += 1)
+            {
+                const uint32_t operand = input->phi_operands[o];
+                if (operand != BUSTER_TIER1_CFG_NONE && dense[operand] != BUSTER_TIER1_CFG_NONE)
+                {
+                    phi_offsets[dense[operand] + 2] += 1;
+                }
+            }
+        }
+        for (uint32_t i = 0; i < dense_count; i += 1)
+        {
+            phi_offsets[i + 2] += phi_offsets[i + 1];
+        }
+    }
+    uint32_t* phi_sources = ready ? arena_push_array(scratch, (uint64_t)phi_offsets[dense_count + 1] + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+    ready = ready && phi_sources != 0;
+    for (uint32_t b = 0; ready && b < blocks; b += 1)
+    {
+        const uint32_t first = input->predecessor_offsets[b];
+        for (uint32_t k = input->phi_offsets[b]; k < input->phi_offsets[b + 1]; k += 1)
+        {
+            const uint32_t from = input->phi_operand_offsets[k];
+            const uint32_t count = input->phi_operand_offsets[k + 1] - from;
+            for (uint32_t j = 0; j < count; j += 1)
+            {
+                const uint32_t operand = input->phi_operands[from + j];
+                if (operand != BUSTER_TIER1_CFG_NONE && dense[operand] != BUSTER_TIER1_CFG_NONE)
+                {
+                    phi_sources[phi_offsets[dense[operand] + 1]] = input->predecessors[first + j];
+                    phi_offsets[dense[operand] + 1] += 1;
+                }
+            }
+        }
+    }
+    // The fill advanced each id's start to the next's, so phi_offsets[i] .. phi_offsets[i + 1] is id i's.
+    uint32_t* in_offsets = ready ? arena_push_array(scratch, (uint64_t)blocks + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+    uint32_t* out_offsets = ready ? arena_push_array(scratch, (uint64_t)blocks + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+    uint32_t* in_cursors = ready ? arena_push_array(scratch, (uint64_t)blocks + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+    uint32_t* out_cursors = ready ? arena_push_array(scratch, (uint64_t)blocks + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+    uint8_t* home_out = ready ? arena_push(scratch, (uint64_t)input->value_count + 1, 1) : 0;
+    uint8_t* continues = ready ? arena_push(scratch, (uint64_t)blocks + 1, 1) : 0;
+    Dataflow liveness = { 0 };
+    ready = ready && in_offsets != 0 && out_offsets != 0 && in_cursors != 0 && out_cursors != 0 && home_out != 0 && continues != 0 && dataflow_create(scratch, blocks, width, input->edge_count, &liveness);
+    if (ready)
+    {
+        memset(in_offsets, 0, ((uint64_t)blocks + 1) * sizeof(uint32_t));
+        memset(out_offsets, 0, ((uint64_t)blocks + 1) * sizeof(uint32_t));
+        memset(home_out, 0, (uint64_t)input->value_count + 1);
+        memset(continues, 1, (uint64_t)blocks + 1);
+        memcpy(liveness.successor_offsets, input->successor_offsets, ((uint64_t)blocks + 1) * sizeof(uint32_t));
+        if (input->edge_count != 0)
+        {
+            memcpy(liveness.successors, input->successors, (uint64_t)input->edge_count * sizeof(uint32_t));
+        }
+        ready = dataflow_postorder(&liveness, scratch);
+    }
+    const uint64_t words = liveness.row_words;
+    // Without a global value there are no rows: the count is the one sweep that changes nothing (dataflow_liveness).
+    uint64_t sweeps = ready && groups == 0 ? dataflow_liveness(&liveness) : 0;
+    uint32_t* in_values = 0;
+    uint32_t* out_values = 0;
+    uint8_t* in_out = 0;
+    bool valid = true;
+    for (uint32_t pass = 0; ready && valid && pass < 2; pass += 1)
+    {
+        if (pass == 1)
+        {
+            uint64_t in_run = 0;
+            uint64_t out_run = 0;
+            for (uint32_t b = 0; b < blocks; b += 1)
+            {
+                const uint64_t in_here = in_offsets[b + 1];
+                const uint64_t out_here = out_offsets[b + 1];
+                in_offsets[b] = (uint32_t)in_run;
+                out_offsets[b] = (uint32_t)out_run;
+                in_cursors[b] = (uint32_t)in_run;
+                out_cursors[b] = (uint32_t)out_run;
+                in_run += in_here;
+                out_run += out_here;
+                ready = ready && in_run <= UINT32_MAX && out_run <= UINT32_MAX;
+            }
+            if (ready)
+            {
+                in_offsets[blocks] = (uint32_t)in_run;
+                out_offsets[blocks] = (uint32_t)out_run;
+            }
+            in_values = ready ? arena_push_array(scratch, in_run + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+            out_values = ready ? arena_push_array(scratch, out_run + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+            in_out = ready ? arena_push(scratch, in_run + 1, 1) : 0;
+            ready = ready && in_values != 0 && out_values != 0 && in_out != 0;
+        }
+        for (uint32_t g = 0; ready && valid && g < groups; g += 1)
+        {
+            const uint32_t first = g * BUSTER_DATAFLOW_VECTOR_BITS;
+            const uint32_t last = dense_count - first < BUSTER_DATAFLOW_VECTOR_BITS ? dense_count : first + BUSTER_DATAFLOW_VECTOR_BITS;
+            if (pass == 0 || groups > 1)
+            {
+                tier1_cfg_live_seeds(input, home, dense_values, blocks_of, phi_offsets, phi_sources, first, last, &liveness, true);
+                const uint64_t solved = dataflow_liveness(&liveness);
+                sweeps += pass == 0 ? solved : 0;
+                // The same edge uses join OUT even where their defining block kills propagation to IN.
+                for (uint32_t i = first; i < last; i += 1)
+                {
+                    for (uint32_t k = phi_offsets[i]; k < phi_offsets[i + 1]; k += 1)
+                    {
+                        tier1_cfg_set(liveness.out + (uint64_t)phi_sources[k] * words, i - first);
+                    }
+                }
+                // Only another solve, of the next group or of this one for the fill, reads the rows again.
+                if (groups > 1)
+                {
+                    tier1_cfg_live_seeds(input, home, dense_values, blocks_of, phi_offsets, phi_sources, first, last, &liveness, false);
+                }
+            }
+            for (uint32_t i = first; pass == 0 && i < last; i += 1)
+            {
+                const uint64_t* in_home = liveness.in + (uint64_t)home[dense_values[i]] * words;
+                valid = valid && !tier1_cfg_bit(liveness.in, i - first) && !tier1_cfg_bit(in_home, i - first);
+                home_out[dense_values[i]] = tier1_cfg_bit(liveness.out + (uint64_t)home[dense_values[i]] * words, i - first);
+            }
+            // A group's rows are one vector each (words is BUSTER_DATAFLOW_VECTOR_WORDS): counted a row at a time, with
+            // whether the block's live-in values are live out of the block before, and filled from its nonzero words.
+            __m512i previous_out = _mm512_setzero_si512();
+            for (uint32_t b = 0; valid && b < blocks; b += 1)
+            {
+                const uint64_t* in = liveness.in + (uint64_t)b * BUSTER_DATAFLOW_VECTOR_WORDS;
+                const uint64_t* out = liveness.out + (uint64_t)b * BUSTER_DATAFLOW_VECTOR_WORDS;
+                const __m512i in_row = _mm512_load_si512(in);
+                const __m512i out_row = _mm512_load_si512(out);
+                if (pass == 0)
+                {
+                    in_offsets[b + 1] += (uint32_t)_mm512_reduce_add_epi64(_mm512_popcnt_epi64(in_row));
+                    out_offsets[b + 1] += (uint32_t)_mm512_reduce_add_epi64(_mm512_popcnt_epi64(out_row));
+                    continues[b] = continues[b] && _mm512_test_epi64_mask(_mm512_andnot_si512(previous_out, in_row), _mm512_set1_epi64(-1)) == 0;
+                }
+                previous_out = out_row;
+                for (uint32_t words_in = pass == 1 ? _mm512_test_epi64_mask(in_row, in_row) : 0; words_in != 0; words_in &= words_in - 1)
+                {
+                    const uint32_t w = (uint32_t)__builtin_ctz(words_in);
+                    for (uint64_t bits = in[w]; bits != 0; bits &= bits - 1)
+                    {
+                        const uint32_t bit = (uint32_t)__builtin_ctzll(bits);
+                        in_values[in_cursors[b]] = dense_values[first + w * 64 + bit];
+                        in_out[in_cursors[b]] = (out[w] >> bit) & 1;
+                        in_cursors[b] += 1;
+                    }
+                }
+                for (uint32_t words_out = pass == 1 ? _mm512_test_epi64_mask(out_row, out_row) : 0; words_out != 0; words_out &= words_out - 1)
+                {
+                    const uint32_t w = (uint32_t)__builtin_ctz(words_out);
+                    for (uint64_t bits = out[w]; bits != 0; bits &= bits - 1)
+                    {
+                        out_values[out_cursors[b]] = dense_values[first + w * 64 + (uint32_t)__builtin_ctzll(bits)];
+                        out_cursors[b] += 1;
+                    }
+                }
+            }
+        }
+    }
+    if (ready && valid)
+    {
+        *live = (Tier1CfgLiveSets){
+            .in_offsets = in_offsets,
+            .in_values = in_values,
+            .out_offsets = out_offsets,
+            .out_values = out_values,
+            .in_out = in_out,
+            .home_out = home_out,
+            .continues = continues,
+        };
+        *iterations = sweeps;
+        *matrix_bytes = 4 * (uint64_t)blocks * words * sizeof(uint64_t);
+        error = TIER1_CFG_OK;
+    }
+    else
+    {
+        error = ready ? TIER1_CFG_INVALID : TIER1_CFG_CAPACITY;
+        arena_pop_to(scratch, mark);
+    }
+    return error;
+}
+
+// Whether `block` is among a value's blocks, list[begin .. end), ascending (tier1_cfg_prepare's).
+static bool tier1_cfg_listed(const uint32_t* list, uint32_t begin, uint32_t end, uint32_t block)
+{
+    const uint32_t limit = end;
+    while (begin < end)
+    {
+        const uint32_t middle = begin + (end - begin) / 2;
+        const bool below = list[middle] < block;
+        begin = below ? middle + 1 : begin;
+        end = below ? end : middle;
+    }
+    return begin < limit && list[begin] == block;
+}
+
+// Locations at block boundaries, in the live lists' order, followed by each block's local phi tails at exits. The edge
+// pass indexes exit_at/exit_stamp by original value, including locals. A cursor per value moves only forward: blocks
+// are visited in layout order, and within a block the entry is at or before the exit. `ready` is false when the
+// columns do not fit, and the edge pass then searches.
 typedef struct Tier1CfgBoundaries Tier1CfgBoundaries;
 struct Tier1CfgBoundaries
 {
-    uint32_t* in_offsets;
+    const uint32_t* in_offsets;
     uint32_t* out_offsets;
     uint32_t* entry_locations;
     uint32_t* exit_locations;
@@ -1681,38 +1979,32 @@ static uint32_t tier1_cfg_cursor_entry(const Tier1CfgAllocation* result, uint32_
     return location;
 }
 
-static Tier1CfgBoundaries tier1_cfg_boundaries(const Tier1CfgInput* input, const Tier1CfgAllocation* result, const Dataflow* liveness, const uint32_t* dense_values, const uint8_t* edge_local, const uint32_t* defined_offsets, const uint32_t* defined, Arena* scratch)
+static Tier1CfgBoundaries tier1_cfg_boundaries(const Tier1CfgInput* input, const Tier1CfgAllocation* result, const Tier1CfgLiveSets* live, const uint8_t* edge_local, const uint32_t* defined_offsets, const uint32_t* defined, Arena* scratch)
 {
     const uint64_t mark = scratch->length;
     const uint32_t blocks = input->block_count;
     const uint32_t values = input->value_count;
-    const uint64_t words = liveness->row_words;
     Tier1CfgBoundaries bounds = { 0 };
-    uint32_t* in_offsets = arena_push_array(scratch, (uint64_t)blocks + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    // Entries follow the live-in lists exactly; exits, the live-out lists and then the local tails.
+    const uint32_t* in_offsets = live->in_offsets;
     uint32_t* out_offsets = arena_push_array(scratch, (uint64_t)blocks + 1, sizeof(uint32_t), _Alignof(uint32_t));
     uint32_t* cursors = arena_push_array(scratch, (uint64_t)values + 1, sizeof(uint32_t), _Alignof(uint32_t));
     uint32_t* lasts = arena_push_array(scratch, (uint64_t)values + 1, sizeof(uint32_t), _Alignof(uint32_t));
-    bool ok = in_offsets != 0 && out_offsets != 0 && cursors != 0 && lasts != 0;
-    uint64_t in_run = 0;
+    bool ok = out_offsets != 0 && cursors != 0 && lasts != 0;
+    const uint64_t in_run = in_offsets[blocks];
     uint64_t out_run = 0;
     for (uint32_t b = 0; ok && b < blocks; b += 1)
     {
-        in_offsets[b] = (uint32_t)in_run;
         out_offsets[b] = (uint32_t)out_run;
-        for (uint64_t w = 0; w < words; w += 1)
-        {
-            in_run += (uint32_t)__builtin_popcountll(liveness->in[(uint64_t)b * words + w]);
-            out_run += (uint32_t)__builtin_popcountll(liveness->out[(uint64_t)b * words + w]);
-        }
+        out_run += live->out_offsets[b + 1] - live->out_offsets[b];
         for (uint32_t x = defined_offsets[b]; x < defined_offsets[b + 1]; x += 1)
         {
             out_run += edge_local[defined[x]] != 0;
         }
-        ok = in_run <= UINT32_MAX && out_run <= UINT32_MAX;
+        ok = out_run <= UINT32_MAX;
     }
     if (ok)
     {
-        in_offsets[blocks] = (uint32_t)in_run;
         out_offsets[blocks] = (uint32_t)out_run;
     }
     uint32_t* entry_locations = ok ? arena_push_array(scratch, in_run + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
@@ -1733,33 +2025,19 @@ static Tier1CfgBoundaries tier1_cfg_boundaries(const Tier1CfgInput* input, const
         {
             const uint32_t entry = input->block_starts[b];
             const uint32_t exit = input->block_starts[b + 1] - 1;
-            uint32_t rank = 0;
-            for (uint64_t w = 0; w < words; w += 1)
+            for (uint32_t x = in_offsets[b]; x < in_offsets[b + 1]; x += 1)
             {
-                uint64_t bits = liveness->in[(uint64_t)b * words + w];
-                while (bits != 0)
-                {
-                    const uint32_t v = dense_values[(uint32_t)(w * 64 + (uint64_t)__builtin_ctzll(bits))];
-                    bits &= bits - 1;
-                    entry_locations[in_offsets[b] + rank] = tier1_cfg_cursor_entry(result, cursors, lasts, v, entry);
-                    rank += 1;
-                }
+                entry_locations[x] = tier1_cfg_cursor_entry(result, cursors, lasts, live->in_values[x], entry);
             }
             for (uint32_t k = input->phi_offsets[b]; k < input->phi_offsets[b + 1]; k += 1)
             {
                 phi_locations[k] = tier1_cfg_cursor_entry(result, cursors, lasts, input->phi_values[k], entry);
             }
-            rank = 0;
-            for (uint64_t w = 0; w < words; w += 1)
+            uint32_t rank = 0;
+            for (uint32_t x = live->out_offsets[b]; x < live->out_offsets[b + 1]; x += 1)
             {
-                uint64_t bits = liveness->out[(uint64_t)b * words + w];
-                while (bits != 0)
-                {
-                    const uint32_t v = dense_values[(uint32_t)(w * 64 + (uint64_t)__builtin_ctzll(bits))];
-                    bits &= bits - 1;
-                    exit_locations[out_offsets[b] + rank] = tier1_cfg_cursor_where(result, cursors, lasts, v, exit);
-                    rank += 1;
-                }
+                exit_locations[out_offsets[b] + rank] = tier1_cfg_cursor_where(result, cursors, lasts, live->out_values[x], exit);
+                rank += 1;
             }
             // Local tails follow the global exits. The cursors are per value, so this preserves each one's forward
             // sweep without changing the live-in and phi order in which edges stage their moves.
@@ -2075,9 +2353,8 @@ struct Tier1CfgPrepared
     // The intervals and each value's run of them, the position column and liveness's counts; intervals.allowed_registers
     // is the input's own problem's column, the one the interval builder wrote.
     Tier1CfgAllocation candidate;
-    Dataflow liveness;
-    // The values used outside their definition's block, by dense id.
-    uint32_t* dense_values;
+    // Each block's global values live into it and out of it (tier1_cfg_live_sets).
+    Tier1CfgLiveSets live;
     // Excluded phi operands live through their home's exit. Reuse the definitions' home CSR for their boundaries.
     uint8_t* edge_local;
     uint32_t* defined_offsets;
@@ -2236,86 +2513,14 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
                 }
             }
         }
-        Dataflow liveness = { 0 };
-        ready = ready && dataflow_create(scratch, blocks, dense_count, input->edge_count, &liveness);
-        const uint64_t words = liveness.row_words;
-        const uint64_t matrix_words = (uint64_t)blocks * words;
+        Tier1CfgLiveSets live = { 0 };
         if (ready)
         {
-            memcpy(liveness.successor_offsets, input->successor_offsets, ((uint64_t)blocks + 1) * sizeof(uint32_t));
-            if (input->edge_count != 0)
-            {
-                memcpy(liveness.successors, input->successors, (uint64_t)input->edge_count * sizeof(uint32_t));
-            }
-            for (uint32_t i = 0; i < dense_count; i += 1)
-            {
-                const uint32_t v = dense_values[i];
-                tier1_cfg_set(liveness.def + (uint64_t)home[v] * words, i);
-                for (uint32_t u = input->use_offsets[v]; u < input->use_offsets[v + 1]; u += 1)
-                {
-                    const uint32_t block = blocks_of != 0 ? blocks_of[input->use_positions[u]] : tier1_cfg_block_of(input, input->use_positions[u]);
-                    if (block != home[v])
-                    {
-                        tier1_cfg_set(liveness.use + (uint64_t)block * words, i);
-                    }
-                }
-            }
-            for (uint32_t b = 0; b < blocks; b += 1)
-            {
-                const uint32_t first = predecessor_offsets[b];
-                const uint32_t phi_end = phi_offsets[b + 1];
-                for (uint32_t k = phi_offsets[b]; k < phi_end; k += 1)
-                {
-                    const uint32_t from = phi_operand_offsets[k];
-                    const uint32_t count = phi_operand_offsets[k + 1] - from;
-                    for (uint32_t j = 0; j < count; j += 1)
-                    {
-                        const uint32_t predecessor = predecessors[first + j];
-                        const uint32_t operand = phi_operands[from + j];
-                        if (operand != BUSTER_TIER1_CFG_NONE && home[operand] != predecessor)
-                        {
-                            tier1_cfg_set(liveness.use + (uint64_t)predecessor * words, dense[operand]);
-                        }
-                    }
-                }
-            }
-            ready = dataflow_postorder(&liveness, scratch);
-        }
-        if (ready)
-        {
-            candidate.liveness_iterations = dataflow_liveness(&liveness);
-            // The same edge uses contribute to OUT even when their defining block kills propagation to IN.
-            // Local operands have no dense id; their flag supplies the home tail during interval construction.
-            for (uint32_t b = 0; b < blocks; b += 1)
-            {
-                const uint32_t first = predecessor_offsets[b];
-                const uint32_t phi_end = phi_offsets[b + 1];
-                for (uint32_t k = phi_offsets[b]; k < phi_end; k += 1)
-                {
-                    const uint32_t from = phi_operand_offsets[k];
-                    const uint32_t count = phi_operand_offsets[k + 1] - from;
-                    for (uint32_t j = 0; j < count; j += 1)
-                    {
-                        const uint32_t operand = phi_operands[from + j];
-                        if (operand != BUSTER_TIER1_CFG_NONE && dense[operand] != BUSTER_TIER1_CFG_NONE)
-                        {
-                            const uint32_t predecessor = predecessors[first + j];
-                            tier1_cfg_set(liveness.out + (uint64_t)predecessor * words, dense[operand]);
-                        }
-                    }
-                }
-            }
+            const Tier1CfgError solved = tier1_cfg_live_sets(input, home, dense, dense_values, dense_count, blocks_of, scratch, &live, &candidate.liveness_iterations, &candidate.liveness_bytes);
+            ready = solved == TIER1_CFG_OK;
+            error = solved == TIER1_CFG_INVALID ? TIER1_CFG_INVALID : error;
             candidate.cross_block_values = dense_count;
-            candidate.liveness_bytes = 4 * matrix_words * sizeof(uint64_t);
-        }
-        // Only a value's own definition can define it: one live into the entry, or into its own block, isn't SSA.
-        for (uint32_t i = 0; ready && i < dense_count; i += 1)
-        {
-            if (tier1_cfg_bit(liveness.in, i) || tier1_cfg_bit(liveness.in + (uint64_t)home[dense_values[i]] * words, i))
-            {
-                ready = false;
-                error = TIER1_CFG_INVALID;
-            }
+            candidate.live_entries = ready ? (uint64_t)live.in_offsets[blocks] + live.out_offsets[blocks] : 0;
         }
         // Blocks whose entry state continues from their layout predecessor (see 2. above), and each block's entry
         // state's size, for the edges' moves.
@@ -2324,16 +2529,8 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
         ready = ready && merges != 0 && entering != 0;
         for (uint32_t b = 0; ready && b < blocks; b += 1)
         {
-            const uint64_t* in = liveness.in + (uint64_t)b * words;
-            bool merge = b != 0 && input->phi_offsets[b] == input->phi_offsets[b + 1];
-            uint32_t count = input->phi_offsets[b + 1] - input->phi_offsets[b];
-            for (uint64_t w = 0; w < words; w += 1)
-            {
-                merge = merge && (in[w] & ~liveness.out[((uint64_t)b - 1) * words + w]) == 0;
-                count += (uint32_t)__builtin_popcountll(in[w]);
-            }
-            merges[b] = merge;
-            entering[b] = count;
+            merges[b] = b != 0 && input->phi_offsets[b] == input->phi_offsets[b + 1] && live.continues[b] != 0;
+            entering[b] = input->phi_offsets[b + 1] - input->phi_offsets[b] + live.in_offsets[b + 1] - live.in_offsets[b];
         }
         // Each block's first successor in layout; and, for a block no earlier block reaches (a dispatch loop's handler,
         // its join laid out after them), the first of its predecessors' successors, a sibling whose entry it takes.
@@ -2393,15 +2590,9 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
                 list_offsets[v + 1] += 1;
                 defined_offsets[home[v] + 1] += 1;
             }
-            for (uint64_t w = 0; w < matrix_words; w += 1)
+            for (uint32_t x = 0; x < live.in_offsets[blocks]; x += 1)
             {
-                uint64_t bits = liveness.in[w];
-                while (bits != 0)
-                {
-                    const uint32_t i = (uint32_t)((w % words) * 64 + (uint64_t)__builtin_ctzll(bits));
-                    bits &= bits - 1;
-                    list_offsets[dense_values[i] + 1] += 1;
-                }
+                list_offsets[live.in_values[x] + 1] += 1;
             }
             for (uint32_t v = 0; v < values; v += 1)
             {
@@ -2418,8 +2609,10 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
                 cursors[home[v]] += 1;
             }
         }
+        // And whether the value is live out of each of its blocks, for a global value (tier1_cfg_live_sets' flags).
         uint32_t* list = ready ? arena_push_array(scratch, (uint64_t)list_offsets[values] + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
-        ready = ready && list != 0;
+        uint8_t* list_out = ready ? arena_push(scratch, (uint64_t)list_offsets[values] + 1, 1) : 0;
+        ready = ready && list != 0 && list_out != 0;
         if (ready)
         {
             for (uint32_t v = 0; v < values; v += 1)
@@ -2430,19 +2623,17 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
             {
                 for (uint32_t x = defined_offsets[b]; x < defined_offsets[b + 1]; x += 1)
                 {
-                    list[cursors[defined[x]]] = b;
-                    cursors[defined[x]] += 1;
+                    const uint32_t v = defined[x];
+                    list[cursors[v]] = b;
+                    list_out[cursors[v]] = live.home_out[v];
+                    cursors[v] += 1;
                 }
-                for (uint64_t w = 0; w < words; w += 1)
+                for (uint32_t x = live.in_offsets[b]; x < live.in_offsets[b + 1]; x += 1)
                 {
-                    uint64_t bits = liveness.in[(uint64_t)b * words + w];
-                    while (bits != 0)
-                    {
-                        const uint32_t v = dense_values[w * 64 + (uint64_t)__builtin_ctzll(bits)];
-                        bits &= bits - 1;
-                        list[cursors[v]] = b;
-                        cursors[v] += 1;
-                    }
+                    const uint32_t v = live.in_values[x];
+                    list[cursors[v]] = b;
+                    list_out[cursors[v]] = live.in_out[x];
+                    cursors[v] += 1;
                 }
             }
         }
@@ -2557,7 +2748,7 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
                 {
                     const uint32_t b = list[x];
                     const bool defined_here = b == home[v];
-                    const bool live_out = (defined_here && edge_local[v] != 0) || (dense[v] != BUSTER_TIER1_CFG_NONE && tier1_cfg_bit(liveness.out + (uint64_t)b * words, dense[v]));
+                    const bool live_out = (defined_here && edge_local[v] != 0) || list_out[x] != 0;
                     // A use before this block lies in no block the value is live in: not SSA.
                     while (use < use_end && input->use_positions[use] < input->block_starts[b])
                     {
@@ -2645,7 +2836,9 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
                         const uint32_t taken = entered & ~BUSTER_TIER1_CFG_LATER;
                         const bool later = entered != BUSTER_TIER1_CFG_NONE && (entered & BUSTER_TIER1_CFG_LATER) != 0;
                         const bool stamped = entered != BUSTER_TIER1_CFG_NONE && entry_stamps[taken] == v + 1 && home[v] != taken;
-                        const bool enters = stamped && (later ? dense[v] != BUSTER_TIER1_CFG_NONE && tier1_cfg_bit(liveness.in + (uint64_t)firsts[b] * words, dense[v]) : pieces.starts[entry_pieces[taken]] == input->block_starts[taken]);
+                        // Where the first successor comes later, the value must be live into it: among the value's blocks,
+                        // which hold its home besides those it is live into.
+                        const bool enters = stamped && (later ? dense[v] != BUSTER_TIER1_CFG_NONE && firsts[b] != home[v] && tier1_cfg_listed(list, list_offsets[v], list_offsets[v + 1], firsts[b]) : pieces.starts[entry_pieces[taken]] == input->block_starts[taken]);
                         if (enters)
                         {
                             pieces.continuations[pieces.count - 1] = entry_pieces[taken];
@@ -2750,8 +2943,7 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
         {
             *prepared = (Tier1CfgPrepared){
                 .candidate = candidate,
-                .liveness = liveness,
-                .dense_values = dense_values,
+                .live = live,
                 .edge_local = edge_local,
                 .defined_offsets = defined_offsets,
                 .defined = defined,
@@ -2810,6 +3002,193 @@ static Tier1CfgError tier1_cfg_assign(const Tier1CfgInput* input, const Tier1Cfg
     return error;
 }
 
+// One group of tier1_cfg_current_slots' candidates, ranks [first, last), solved in `rows` (dataflow.c's, one vector a
+// block): LIVE_IN in `use`, SLOT in `def`, IN and OUT in theirs, bit r - first for rank r.
+static void tier1_cfg_current_group(const Tier1CfgInput* input, const Tier1CfgLiveSets* live, const Tier1CfgAllocation* result, const uint32_t* ranks, const uint32_t* ranked, uint32_t first, uint32_t last, Dataflow* rows)
+{
+    const uint32_t blocks = input->block_count;
+    const Tier1Allocation* allocation = &result->allocation;
+    for (uint32_t b = 0; b < blocks; b += 1)
+    {
+        _mm512_store_si512(rows->use + (uint64_t)b * BUSTER_DATAFLOW_VECTOR_WORDS, _mm512_setzero_si512());
+        _mm512_store_si512(rows->def + (uint64_t)b * BUSTER_DATAFLOW_VECTOR_WORDS, _mm512_setzero_si512());
+        for (uint32_t k = live->in_offsets[b]; k < live->in_offsets[b + 1]; k += 1)
+        {
+            const uint32_t r = ranks[live->in_values[k]];
+            if (r >= first && r < last)
+            {
+                tier1_cfg_set(rows->use + (uint64_t)b * BUSTER_DATAFLOW_VECTOR_WORDS, r - first);
+            }
+        }
+    }
+    for (uint32_t r = first; r < last; r += 1)
+    {
+        const uint32_t v = ranked[r];
+        for (uint32_t f = allocation->fragment_offsets[result->value_interval_offsets[v]]; f < allocation->fragment_offsets[result->value_interval_offsets[v + 1]]; f += 1)
+        {
+            if (allocation->kinds[f] == BUSTER_TIER1_ALLOCATE_SPILL)
+            {
+                const uint32_t end = tier1_cfg_block_at(input, result, allocation->ends[f] - 1);
+                for (uint32_t b = tier1_cfg_block_at(input, result, allocation->starts[f]); b <= end; b += 1)
+                {
+                    tier1_cfg_set(rows->def + (uint64_t)b * BUSTER_DATAFLOW_VECTOR_WORDS, r - first);
+                }
+            }
+        }
+    }
+    for (uint32_t b = 0; b < blocks; b += 1)
+    {
+        const uint64_t row = (uint64_t)b * BUSTER_DATAFLOW_VECTOR_WORDS;
+        const bool entered = b != 0 && input->predecessor_offsets[b + 1] != input->predecessor_offsets[b];
+        const __m512i full = entered ? _mm512_set1_epi64(-1) : _mm512_setzero_si512();
+        _mm512_store_si512(rows->in + row, full);
+        // (IN & LIVE_IN) | SLOT.
+        _mm512_store_si512(rows->out + row, _mm512_ternarylogic_epi64(full, _mm512_load_si512(rows->use + row), _mm512_load_si512(rows->def + row), 0xEA));
+    }
+    bool changed = true;
+    while (changed)
+    {
+        __m512i changes = _mm512_setzero_si512();
+        for (uint32_t k = blocks; k > 0; k -= 1)
+        {
+            const uint32_t b = rows->postorder[k - 1];
+            const uint32_t from = input->predecessor_offsets[b];
+            const uint32_t to = b != 0 ? input->predecessor_offsets[b + 1] : from;
+            if (from != to)
+            {
+                const uint64_t row = (uint64_t)b * BUSTER_DATAFLOW_VECTOR_WORDS;
+                __m512i meet = _mm512_set1_epi64(-1);
+                for (uint32_t e = from; e < to; e += 1)
+                {
+                    meet = _mm512_and_si512(meet, _mm512_load_si512(rows->out + (uint64_t)input->predecessors[e] * BUSTER_DATAFLOW_VECTOR_WORDS));
+                }
+                changes = _mm512_or_si512(changes, _mm512_xor_si512(meet, _mm512_load_si512(rows->in + row)));
+                _mm512_store_si512(rows->in + row, meet);
+                _mm512_store_si512(rows->out + row, _mm512_ternarylogic_epi64(meet, _mm512_load_si512(rows->use + row), _mm512_load_si512(rows->def + row), 0xEA));
+            }
+        }
+        changed = _mm512_test_epi64_mask(changes, changes) != 0;
+    }
+}
+
+// Which values' slots hold them at each block's start, whatever place their ranges enter the block in (#2553): a forward
+// must-analysis. Once stored, a value's slot holds it while it lives: an SSA value never changes, and no other value
+// writes the slot meanwhile, since slots are shared only by values never live at once (tier1_cfg_share_slots). So a
+// value's slot holds it at a block's start where it does at the exit of every predecessor; and at a block's exit where
+// it does at the block's start and the value lives through the block, or where one of the value's fragments in the
+// block is its slot (an edge or a transition stored it there, or it rests there). With SLOT[b] those values:
+//
+//     IN[b] = AND over b's predecessors p of OUT[p]        OUT[b] = (IN[b] & LIVE_IN[b]) | SLOT[b]
+//
+// The entry's IN and that of a block without predecessors are empty. A value is live into no block its definition is in,
+// so a loop's earlier iteration proves nothing of the next. The candidates are the values with a slot that are live into
+// some block (tier1_cfg_live_sets' lists), solved, as the liveness is, in groups of BUSTER_DATAFLOW_VECTOR_BITS, each in
+// one vector row a block (dataflow.c's rows), so that the rows take blocks * 256 bytes however many values have slots
+// (#1384). A group keeps OUT beside IN, so that an edge is a load and an AND, starts every block's IN full but the
+// entry's and those without predecessors, and sweeps the blocks in reverse postorder (every block is in the postorder,
+// unreachable ones too) until none changes: in layout order, where a loop's header follows its body, sqlite3VdbeExec
+// took 7 sweeps. The result gets each block's values live into it whose slots hold them, ascending
+// (current_slot_offsets and current_slots, on `output`): counted, then filled, a group solved again for the fill where
+// there is more than one. The edges read them; a store a block makes itself is the predecessor's own proof
+// (tier1_cfg_slot_current). The scratch arena ends as it began. False where an arena is short.
+static bool tier1_cfg_current_slots(const Tier1CfgInput* input, const Tier1CfgPrepared* prepared, Tier1CfgAllocation* result, Arena* output, Arena* scratch)
+{
+    const uint64_t mark = scratch->length;
+    const uint32_t blocks = input->block_count;
+    const uint32_t values = input->value_count;
+    const Tier1CfgLiveSets* live = &prepared->live;
+    const uint32_t* spill_ids = result->allocation.spill_ids;
+    // Each candidate's rank, in value order, and each rank's value.
+    uint32_t* ranks = arena_push_array(scratch, (uint64_t)values + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* ranked = arena_push_array(scratch, (uint64_t)values + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* cursors = arena_push_array(scratch, (uint64_t)blocks + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* offsets = arena_push_array(output, (uint64_t)blocks + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    bool ready = ranks != 0 && ranked != 0 && cursors != 0 && offsets != 0;
+    uint32_t count = 0;
+    if (ready)
+    {
+        memset(ranks, 0xff, ((uint64_t)values + 1) * sizeof(uint32_t));
+        memset(offsets, 0, ((uint64_t)blocks + 1) * sizeof(uint32_t));
+        for (uint32_t k = 0; k < live->in_offsets[blocks]; k += 1)
+        {
+            const uint32_t v = live->in_values[k];
+            ranks[v] = spill_ids[v] != UINT32_MAX ? 0 : ranks[v];
+        }
+        for (uint32_t v = 0; v < values; v += 1)
+        {
+            ranked[count] = v;
+            count += ranks[v] == 0;
+            ranks[v] = ranks[v] == 0 ? count - 1 : UINT32_MAX;
+        }
+    }
+    const uint32_t groups = (uint32_t)(((uint64_t)count + BUSTER_DATAFLOW_VECTOR_BITS - 1) / BUSTER_DATAFLOW_VECTOR_BITS);
+    Dataflow rows = { 0 };
+    ready = ready && (groups == 0 || dataflow_create(scratch, blocks, count < BUSTER_DATAFLOW_VECTOR_BITS ? count : BUSTER_DATAFLOW_VECTOR_BITS, input->edge_count, &rows));
+    if (ready && groups != 0)
+    {
+        memcpy(rows.successor_offsets, input->successor_offsets, ((uint64_t)blocks + 1) * sizeof(uint32_t));
+        if (input->edge_count != 0)
+        {
+            memcpy(rows.successors, input->successors, (uint64_t)input->edge_count * sizeof(uint32_t));
+        }
+        ready = dataflow_postorder(&rows, scratch);
+    }
+    uint32_t* slots = 0;
+    for (uint32_t pass = 0; ready && pass < 2; pass += 1)
+    {
+        if (pass == 1)
+        {
+            uint64_t run = 0;
+            for (uint32_t b = 0; b < blocks; b += 1)
+            {
+                const uint64_t here = offsets[b + 1];
+                offsets[b] = (uint32_t)run;
+                cursors[b] = (uint32_t)run;
+                run += here;
+                ready = ready && run <= UINT32_MAX;
+            }
+            offsets[blocks] = (uint32_t)run;
+            slots = ready ? arena_push_array(output, run + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+            ready = slots != 0;
+        }
+        for (uint32_t g = 0; ready && g < groups; g += 1)
+        {
+            const uint32_t first = g * BUSTER_DATAFLOW_VECTOR_BITS;
+            const uint32_t last = count - first < BUSTER_DATAFLOW_VECTOR_BITS ? count : first + BUSTER_DATAFLOW_VECTOR_BITS;
+            if (pass == 0 || groups > 1)
+            {
+                tier1_cfg_current_group(input, live, result, ranks, ranked, first, last, &rows);
+            }
+            for (uint32_t b = 0; b < blocks; b += 1)
+            {
+                const uint64_t* in = rows.in + (uint64_t)b * BUSTER_DATAFLOW_VECTOR_WORDS;
+                const uint64_t* use = rows.use + (uint64_t)b * BUSTER_DATAFLOW_VECTOR_WORDS;
+                const __m512i held = _mm512_and_si512(_mm512_load_si512(in), _mm512_load_si512(use));
+                if (pass == 0)
+                {
+                    offsets[b + 1] += (uint32_t)_mm512_reduce_add_epi64(_mm512_popcnt_epi64(held));
+                }
+                for (uint32_t words = pass == 1 ? _mm512_test_epi64_mask(held, held) : 0; words != 0; words &= words - 1)
+                {
+                    const uint32_t w = (uint32_t)__builtin_ctz(words);
+                    for (uint64_t bits = in[w] & use[w]; bits != 0; bits &= bits - 1)
+                    {
+                        slots[cursors[b]] = ranked[first + w * 64 + (uint32_t)__builtin_ctzll(bits)];
+                        cursors[b] += 1;
+                    }
+                }
+            }
+        }
+    }
+    if (ready)
+    {
+        result->current_slot_offsets = offsets;
+        result->current_slots = slots;
+    }
+    arena_pop_to(scratch, mark);
+    return ready;
+}
+
 // Lookup columns, slot sharing, the splits' and the edges' moves (4. and 5. above) for an assignment of the prepared
 // intervals, `result` as tier1_cfg_assign left it, with `input` its problem. The scratch arena goes back to where this
 // found it, the preparation's state kept; failure restores the output arena too and leaves the result unchanged.
@@ -2820,9 +3199,7 @@ static Tier1CfgError tier1_cfg_finish(const Tier1CfgInput* input, const Tier1Cfg
     const uint64_t scratch_mark = scratch->length;
     Tier1CfgAllocation candidate = *result;
     const uint32_t blocks = input->block_count;
-    const Dataflow liveness = prepared->liveness;
-    const uint64_t words = liveness.row_words;
-    const uint32_t* dense_values = prepared->dense_values;
+    const Tier1CfgLiveSets* live = &prepared->live;
     const uint8_t* edge_local = prepared->edge_local;
     const uint32_t* defined_offsets = prepared->defined_offsets;
     const uint32_t* defined = prepared->defined;
@@ -2887,7 +3264,15 @@ static Tier1CfgError tier1_cfg_finish(const Tier1CfgInput* input, const Tier1Cfg
     {
         tier1_cfg_spill_prefix(&candidate, spill_ends);
     }
-    Tier1CfgEdge edge = { .spill_ends = spill_ends };
+    // The slots current at each block's start (#2553), each block's stamped as its edges are made.
+    ready = ready && (spills == 0 || tier1_cfg_current_slots(input, prepared, &candidate, output, scratch));
+    uint32_t* current_stamps = ready && spills != 0 ? arena_push_array(scratch, (uint64_t)input->value_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+    ready = ready && (spills == 0 || current_stamps != 0);
+    if (current_stamps != 0)
+    {
+        memset(current_stamps, 0, ((uint64_t)input->value_count + 1) * sizeof(uint32_t));
+    }
+    Tier1CfgEdge edge = { .spill_ends = spill_ends, .current_stamps = current_stamps };
     uint32_t* staged = ready ? arena_push_array(scratch, (bound + 2) * 3, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
     uint32_t* sources = ready ? arena_push_array(scratch, (uint64_t)widest + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
     uint32_t* destinations = ready ? arena_push_array(scratch, (uint64_t)widest + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
@@ -2911,27 +3296,28 @@ static Tier1CfgError tier1_cfg_finish(const Tier1CfgInput* input, const Tier1Cfg
     Tier1CfgBoundaries bounds = { 0 };
     if (ready)
     {
-        bounds = tier1_cfg_boundaries(input, &candidate, &liveness, dense_values, edge_local, defined_offsets, defined, scratch);
+        bounds = tier1_cfg_boundaries(input, &candidate, live, edge_local, defined_offsets, defined, scratch);
     }
     uint32_t staged_count = 0;
     for (uint32_t b = 0; ready && b < blocks; b += 1)
     {
         const uint32_t exit = input->block_starts[b + 1] - 1;
         edge.block_start = input->block_starts[b];
+        // The block's current slots (tier1_cfg_current_slots).
+        for (uint32_t k = current_stamps != 0 ? candidate.current_slot_offsets[b] : 0; current_stamps != 0 && k < candidate.current_slot_offsets[b + 1]; k += 1)
+        {
+            current_stamps[candidate.current_slots[k]] = b + 1;
+        }
+        edge.current_stamp = b + 1;
         if (bounds.ready)
         {
             uint32_t rank = 0;
-            for (uint64_t w = 0; w < words; w += 1)
+            for (uint32_t x = live->out_offsets[b]; x < live->out_offsets[b + 1]; x += 1)
             {
-                uint64_t bits = liveness.out[(uint64_t)b * words + w];
-                while (bits != 0)
-                {
-                    const uint32_t v = dense_values[(uint32_t)(w * 64 + (uint64_t)__builtin_ctzll(bits))];
-                    bits &= bits - 1;
-                    bounds.exit_at[v] = bounds.exit_locations[bounds.out_offsets[b] + rank];
-                    bounds.exit_stamp[v] = b + 1;
-                    rank += 1;
-                }
+                const uint32_t v = live->out_values[x];
+                bounds.exit_at[v] = bounds.exit_locations[bounds.out_offsets[b] + rank];
+                bounds.exit_stamp[v] = b + 1;
+                rank += 1;
             }
             for (uint32_t x = defined_offsets[b]; x < defined_offsets[b + 1]; x += 1)
             {
@@ -2956,26 +3342,17 @@ static Tier1CfgError tier1_cfg_finish(const Tier1CfgInput* input, const Tier1Cfg
                 edge.pending_count[c] = 0;
                 edge.memory_pair[c] = false;
             }
-            uint32_t rank = 0;
-            for (uint64_t w = 0; ready && w < words; w += 1)
+            for (uint32_t x = live->in_offsets[target]; ready && x < live->in_offsets[target + 1]; x += 1)
             {
-                uint64_t bits = liveness.in[(uint64_t)target * words + w];
-                while (ready && bits != 0)
+                const uint32_t v = live->in_values[x];
+                if (bounds.ready)
                 {
-                    const uint32_t i = (uint32_t)(w * 64 + (uint64_t)__builtin_ctzll(bits));
-                    const uint32_t v = dense_values[i];
-                    bits &= bits - 1;
-                    if (bounds.ready)
-                    {
-                        const uint32_t from = bounds.exit_stamp[v] == b + 1 ? bounds.exit_at[v] : BUSTER_TIER1_CFG_NONE;
-                        const uint32_t to = bounds.entry_locations[bounds.in_offsets[target] + rank];
-                        ready = tier1_cfg_edge_known(input, &candidate, &edge, v, v, from, to, exit);
-                    }
-                    else
-                    {
-                        ready = tier1_cfg_edge_value(input, &candidate, &edge, v, v, exit, entry);
-                    }
-                    rank += 1;
+                    const uint32_t from = bounds.exit_stamp[v] == b + 1 ? bounds.exit_at[v] : BUSTER_TIER1_CFG_NONE;
+                    ready = tier1_cfg_edge_known(input, &candidate, &edge, v, v, from, bounds.entry_locations[x], exit);
+                }
+                else
+                {
+                    ready = tier1_cfg_edge_value(input, &candidate, &edge, v, v, exit, entry);
                 }
             }
             const uint32_t j = prepared->edge_ordinals != 0 ? prepared->edge_ordinals[e] : 0;
@@ -3014,6 +3391,7 @@ static Tier1CfgError tier1_cfg_finish(const Tier1CfgInput* input, const Tier1Cfg
     }
     // Slot-current elision is for CFG edges only; keep the existing split-move contract unchanged.
     edge.spill_ends = 0;
+    edge.current_stamps = 0;
     // Each split's moves: from the value's location just before the position to its new piece's.
     for (uint32_t q = 0; ready && q < input->position_count; q += 1)
     {
@@ -3403,7 +3781,7 @@ static __attribute__((unused)) uint32_t tier1_cfg_differs(const Tier1CfgInput* i
     same = same && left->split_count == right->split_count && left->split_edges == right->split_edges && tier1_cfg_same_column(left->split_positions, right->split_positions, (uint64_t)left->split_count * 4) &&
            tier1_cfg_same_column(left->split_move_offsets, right->split_move_offsets, ((uint64_t)left->split_count + 1) * 4);
     differs = same || differs != 0 ? differs : 11;
-    same = same && left->cross_block_values == right->cross_block_values && left->edge_local_values == right->edge_local_values && left->liveness_bytes == right->liveness_bytes && left->temp_slots == right->temp_slots && left->liveness_iterations == right->liveness_iterations;
+    same = same && left->cross_block_values == right->cross_block_values && left->edge_local_values == right->edge_local_values && left->liveness_bytes == right->liveness_bytes && left->live_entries == right->live_entries && left->temp_slots == right->temp_slots && left->liveness_iterations == right->liveness_iterations;
     differs = same || differs != 0 ? differs : 12;
     // The block column's rows: one per value with a base.
     uint64_t rows = 0;
@@ -3856,6 +4234,22 @@ static __attribute__((unused)) bool tier1_cfg_verify(const Tier1CfgInput* input,
         memset(state.stamps, 0, (uint64_t)locations * sizeof(uint32_t));
         memset(edge.stamps, 0, (uint64_t)locations * sizeof(uint32_t));
     }
+    // The slots the allocation asserts current at each block's start (tier1_cfg_current_slots, #2553): each a value live
+    // into the block, in its own slot there, which every edge into the block must bring, and none at a block no edge
+    // enters. `entered` stamps the values live into the block being checked.
+    const uint32_t* current_offsets = result->current_slot_offsets;
+    uint32_t* entered = valid ? arena_push_array(scratch, (uint64_t)values + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+    valid = valid && (entered != 0 || tier1_cfg_fail(check, "checker memory", 0, 0, 0));
+    valid = valid && (current_offsets == 0 || (result->current_slots != 0 && current_offsets[0] == 0) || tier1_cfg_fail(check, "the current slots' columns", 0, 0, 0));
+    for (uint32_t b = 0; valid && current_offsets != 0 && b < blocks; b += 1)
+    {
+        const bool reached = b != 0 && input->predecessor_offsets[b] != input->predecessor_offsets[b + 1];
+        valid = (current_offsets[b] <= current_offsets[b + 1] && (reached || current_offsets[b] == current_offsets[b + 1])) || tier1_cfg_fail(check, "a current slot at a block no edge enters", b, 0, input->block_starts[b]);
+    }
+    if (valid)
+    {
+        memset(entered, 0, ((uint64_t)values + 1) * sizeof(uint32_t));
+    }
     uint32_t split = 0;
     for (uint32_t b = 0; valid && b < blocks; b += 1)
     {
@@ -3874,6 +4268,23 @@ static __attribute__((unused)) bool tier1_cfg_verify(const Tier1CfgInput* input,
             {
                 valid = tier1_cfg_state_get(&state, location) == BUSTER_TIER1_CFG_NONE || tier1_cfg_fail(check, "two values live in one location at a block's start", b, v, entry);
                 tier1_cfg_state_set(&state, location, v);
+            }
+            if (i < live_offsets[b + 1])
+            {
+                entered[v] = b + 1;
+            }
+            check->checks += 1;
+        }
+        for (uint32_t k = current_offsets != 0 ? current_offsets[b] : 0; valid && current_offsets != 0 && k < current_offsets[b + 1]; k += 1)
+        {
+            const uint32_t v = result->current_slots[k];
+            valid = (v < values && entered[v] == b + 1 && allocation->spill_ids[v] < allocation->spill_count) || tier1_cfg_fail(check, "a current slot of a value not live into its block", b, v, entry);
+            const uint32_t slot = valid ? BUSTER_TIER1_CFG_SPILL + allocation->spill_ids[v] : 0;
+            const uint32_t held = valid ? tier1_cfg_state_get(&state, slot) : BUSTER_TIER1_CFG_NONE;
+            valid = valid && ((held == BUSTER_TIER1_CFG_NONE || held == v) || tier1_cfg_fail(check, "two values live in one location at a block's start", b, v, entry));
+            if (valid)
+            {
+                tier1_cfg_state_set(&state, slot, v);
             }
             check->checks += 1;
         }
@@ -4031,6 +4442,13 @@ static __attribute__((unused)) bool tier1_cfg_verify(const Tier1CfgInput* input,
                 {
                     valid = undefined || tier1_cfg_state_get(&edge, location) == expected || tier1_cfg_fail(check, phi ? "an edge that doesn't bring a phi its operand" : "an edge that doesn't bring a live value", s, v, s_entry);
                 }
+                check->checks += 1;
+            }
+            for (uint32_t k = current_offsets != 0 ? current_offsets[s] : 0; valid && current_offsets != 0 && k < current_offsets[s + 1]; k += 1)
+            {
+                const uint32_t v = result->current_slots[k];
+                const bool slotted = v < values && allocation->spill_ids[v] < allocation->spill_count;
+                valid = (slotted && tier1_cfg_state_get(&edge, BUSTER_TIER1_CFG_SPILL + allocation->spill_ids[v]) == v) || tier1_cfg_fail(check, "an edge that doesn't bring a current slot", s, v, s_entry);
                 check->checks += 1;
             }
         }

@@ -852,6 +852,7 @@ static bool check_corpus_check_policy(CheckCorpusPath* path, Parser* parser, Pre
     path->phase = "parse";
     const ParseOptions parse_options = {
         .scalar = BUSTER_SCALAR_PATH(scalar),
+        .tile_tokens = BUSTER_PARSE_TILE_TOKENS,
     };
     bool ready = parse_initialize(parser, &parse_options, pp->options.language);
     if (ready)

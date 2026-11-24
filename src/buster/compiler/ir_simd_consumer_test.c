@@ -143,7 +143,7 @@ static void ir_simd_mask_consumer_test(IrTestTally* tally, Arena* input, Arena* 
             for (uint32_t scalar = 0; scalar < 2; scalar += 1)
             {
                 IrFunction promoted = { 0 };
-                IrCheck checked = scalar ? ssa_ir_promote_scalar(&function, output, scratch, &promoted) : ssa_ir_promote(&function, output, scratch, &promoted);
+                IrCheck checked = ssa_ir_promote(&function, output, scratch, &promoted);
                 ir_test_expect(tally, checked.error == IR_OK && promoted.instruction_count == function.instruction_count && scratch->length == 0,
                                "SSA promotion takes a function of masks alone");
                 IrOptimizeResult optimized = { 0 };
@@ -161,9 +161,7 @@ static void ir_simd_mask_consumer_test(IrTestTally* tally, Arena* input, Arena* 
                 ir_test_expect(tally, checked.error == IR_OK && gvn.function.instruction_count == function.instruction_count && scratch->length == 0, "GVN preserves mask loads and stores");
                 arena_pop_to(output, 0);
                 IrLicmResult licm = { .function.instruction_count = 123 };
-                IrLicmOptions licm_options = ir_licm_options();
-                licm_options.scalar = scalar != 0;
-                checked = ir_optimize_licm(&function, output, scratch, licm_options, &licm);
+                checked = ir_optimize_licm(&function, output, scratch, ir_licm_options(), &licm);
                 ir_test_expect(tally, checked.error == IR_OK && licm.function.instruction_count == function.instruction_count && scratch->length == 0, "LICM preserves mask loads and stores");
                 arena_pop_to(output, 0);
                 IrSroaResult sroa = { .function.instruction_count = 123 };
@@ -236,7 +234,7 @@ static void ir_simd_vector_consumer_test(IrTestTally* tally, Arena* input, Arena
             for (uint32_t scalar = 0; scalar < 2; scalar += 1)
             {
                 IrFunction promoted = { 0 };
-                IrCheck checked = scalar ? ssa_ir_promote_scalar(&function, output, scratch, &promoted) : ssa_ir_promote(&function, output, scratch, &promoted);
+                IrCheck checked = ssa_ir_promote(&function, output, scratch, &promoted);
                 uint32_t accesses = 0;
                 for (uint32_t i = 0; checked.error == IR_OK && i < promoted.instruction_count; i += 1)
                 {
@@ -366,7 +364,7 @@ static int run_ir_simd_tests(int argc, char** argv)
         {
             // Promotion and SCCP, dead code and CFG cleanup take vectors (#141), the constant's payload kept.
             IrFunction rewritten = { .instruction_count = 123 };
-            IrCheck checked = scalar ? ssa_ir_promote_scalar(&function, &output, &scratch, &rewritten) : ssa_ir_promote(&function, &output, &scratch, &rewritten);
+            IrCheck checked = ssa_ir_promote(&function, &output, &scratch, &rewritten);
             ir_test_expect(&tally, checked.error == IR_OK && rewritten.instruction_count == 2 && rewritten.vector_constant_count == 1 &&
                                        memcmp(rewritten.vector_constants, function.vector_constants, sizeof(IrSimdValue)) == 0 && scratch.length == 0,
                            "SSA promotion takes a vector constant's result, its payload kept");
@@ -387,9 +385,7 @@ static int run_ir_simd_tests(int argc, char** argv)
                            "GVN takes SIMD and preserves a vector constant's payload");
             arena_pop_to(&output, 0);
             IrLicmResult licm = { .function.instruction_count = 123 };
-            IrLicmOptions licm_options = ir_licm_options();
-            licm_options.scalar = scalar != 0;
-            checked = ir_optimize_licm(&function, &output, &scratch, licm_options, &licm);
+            checked = ir_optimize_licm(&function, &output, &scratch, ir_licm_options(), &licm);
             ir_test_expect(&tally, checked.error == IR_OK && licm.function.instruction_count == 2 && licm.function.vector_constant_count == 1 && scratch.length == 0,
                            "LICM takes SIMD and preserves a vector constant's payload");
             arena_pop_to(&output, 0);

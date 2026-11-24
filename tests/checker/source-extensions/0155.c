@@ -1,0 +1,1 @@
+int f(x,p)enum E{A=3}x;_Atomic(int*)p;{return x+*p;}int g(int *p){return f(2,p);}

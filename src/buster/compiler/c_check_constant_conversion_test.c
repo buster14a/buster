@@ -39,16 +39,14 @@ static void check_test_constant_conversion_code(CheckTest* test, const CheckProg
     {
         const Tier0Function* function = lowered->functions + f;
         const uint64_t mark = scratch->length;
-        const Tier0Code scalar = tier0_compile_scalar(function, scratch);
         const Tier0Code vector = tier0_compile(function, scratch);
-        const bool compiled = scalar.error == TIER0_OK && vector.error == TIER0_OK && scalar.count == vector.count &&
-                              memcmp(scalar.records, vector.records, (uint64_t)scalar.count * sizeof(X86Instruction)) == 0;
+        const bool compiled = vector.error == TIER0_OK && x86_validate(vector.records, vector.count) == vector.count;
         uint32_t extended = 0;
         uint32_t converted = 0;
         uint32_t immediate = 0;
-        for (uint32_t r = 0; compiled && r < scalar.count; r += 1)
+        for (uint32_t r = 0; compiled && r < vector.count; r += 1)
         {
-            const uint32_t form = scalar.records[r].form & BUSTER_X86_FORM_NUMBER;
+            const uint32_t form = vector.records[r].form & BUSTER_X86_FORM_NUMBER;
             extended += form == X86_FORM_MOVSXD_R64_RM32;
             converted += form == X86_FORM_CVTSI2SD_X_RM32 || form == X86_FORM_CVTSI2SD_X_RM64 || form == X86_FORM_CVTSI2SS_X_RM32 || form == X86_FORM_CVTSI2SS_X_RM64;
             immediate += f == 0 && (form == X86_FORM_INC_RM64 || form == X86_FORM_ADD_RM64_IMM8);

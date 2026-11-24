@@ -355,7 +355,7 @@ static bool unwind_test_consumer(bool keep, uint32_t frame, const TestTool* perf
     uint8_t* debug_bytes = arena_push(&arena, BUSTER_DEBUG_SECTIONS * BUSTER_DEBUG_TEST_BYTES, 8);
     uint32_t address_offsets[3];
     DebugOutput debug = debug_test_output(debug_bytes, address_offsets, 3);
-    valid = valid && debug_bytes != 0 && debug_write(&unit, &debug, false) == DEBUG_OK && debug_test_native_write(object, executable, &unit, &debug);
+    valid = valid && debug_bytes != 0 && debug_write(&unit, &debug) == DEBUG_OK && debug_test_native_write(object, executable, &unit, &debug);
     uint32_t* stops = valid ? BUSTER_ARENA_PUSH_ARRAY(&arena, uint32_t, native[1].code.count) : 0;
     const uint32_t stop_count = stops != 0 ? unwind_native_stops(&native[1], stops) : 0;
     valid = valid && stops != 0 && unwind_native_gdb_script(commands, stops, stop_count);

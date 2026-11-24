@@ -1,0 +1,8 @@
+int a = 1 + 0;
+int b = 1 + 1;
+#pragma message("hi")
+after
+typedef int other_t;
+int line = 100;
+int again = 50;
+both

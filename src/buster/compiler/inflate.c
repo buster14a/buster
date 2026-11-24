@@ -16,7 +16,7 @@
 // output has room for two literals, a longest match and a copy's overshoot: each step takes up to three literals or the
 // literals before a match and the match, checking neither the buffer's count nor the output's room, then a careful loop
 // for the rest. Matches are copied 16 or 8 bytes at a time where the distance and the room after them allow. The
-// Adler-32 is the data-parallel part, 64 bytes at a time (inflate_adler32_vector, with a twin a byte at a time). Every
+// Adler-32 is the data-parallel part, 64 bytes at a time (inflate_adler32_vector). Every
 // read stays within the input and every write within the output. A stream that doesn't decode into exactly the output's
 // size, ends before its input's last byte, or whose Adler-32 differs is an error; a preset dictionary (FDICT) is
 // refused.
@@ -528,26 +528,6 @@ static InflateError inflate_symbols(InflateBits* in, const InflateCode* literals
         }
     }
     return error;
-}
-
-// The Adler-32 of `bytes`, a byte at a time: inflate_adler32_vector's twin.
-static uint32_t inflate_adler32(const uint8_t* bytes, uint64_t length)
-{
-    uint64_t a = 1;
-    uint64_t b = 0;
-    // 5552 bytes keep b from overflowing 32 bits; in 64 bits a run could be longer, but the modulus is cheap.
-    for (uint64_t start = 0; start < length; start += 5552)
-    {
-        const uint64_t end = length - start > 5552 ? start + 5552 : length;
-        for (uint64_t i = start; i < end; i += 1)
-        {
-            a += bytes[i];
-            b += a;
-        }
-        a %= 65521;
-        b %= 65521;
-    }
-    return (uint32_t)(b << 16 | a);
 }
 
 // The Adler-32 of `bytes`, 64 bytes at a time. Over n bytes x_0 .. x_n-1 from a and b, a gains the bytes' sum and b

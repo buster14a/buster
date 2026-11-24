@@ -2415,7 +2415,8 @@ The issue's own figure for `0eca996a` stands: its build measured 59.39 ms in a s
 - The binding answers have 5.4 M more, 2.1 M of them `-Wunused-but-set-variable`'s marks (#2409).
 
 These are the tests and record fields of the new diagnostics' and recoveries' paths (#1447). They are spread over the
-steps, so no one of them is worth more than about 0.3 ms. #2694 tracks them, beside #1671's restructuring.
+steps, so no one of them is worth more than about 0.3 ms. #2694 tracked them, beside #1671's restructuring; the next
+section has where they stood ten days later.
 
 **The rare column.** The first 81 commits also took the stage from 4,171 page faults to 4,850. A profile of
 `page-faults` put 679 of them in `check_input_bind_checked`. #1453's `__private_extern__` test read
@@ -2442,6 +2443,48 @@ faster in time or cycles:
 
 The [measurement record](https://github.com/buster14a/buster-performance/tree/ecbcca3dcf12818d5b7319aec7faefdc376b258c/docs/measurements/check-input-1489-regrowth-2026-11-13)
 has the method, the receipts and the profiles.
+
+### Where it stood on 23 November, and a reading's set-up (#2694)
+
+By 23 November main was under both references again. The same builds and main, all built with the 9700X job's Clang
+23.1.4, measured in the same rounds (7 rounds, CPU 2, a lock grant a round):
+
+| build | `check-input` | cycles:u | instructions:u |
+| --- | ---: | ---: | ---: |
+| `aca9e53a`, before #1049 | 45.15 ms | 503.8 M | 1,155.6 M |
+| `829eb71a` (7 November) | 43.84 ms | 574.0 M | 1,279.9 M |
+| `b7a95eed` (13 November) | 46.18 ms | 602.5 M | 1,354.0 M |
+| main `968a085f` (23 November) | 41.57 ms | 554.7 M | 1,281.2 M |
+
+**What took it back.** By `instructions:u` profiles mapped to inlined frames, the input reader's functions run 371.4 M
+instructions at `829eb71a`, 415.6 M at `b7a95eed` and 361.9 M at main. The largest cuts since `b7a95eed`:
+
+- The binding answers' unused-name pass, 12 M under `829eb71a`'s: #3237 skips it where none of its diagnostics can be
+  published, as on a compile that asks for no `-Wunused` warning.
+- The intrinsics' set-up, 5.9 M under: #893's memo (#2653) and #2654's id-order fill and exact table (#2686).
+- The declarator step, 4.7 M under: #2850's named declarations (#3268) let 8,365 of sqlite3.c's 25,818 declarators
+  skip it, and 20,864 of its 44,092 specifier lists take `check_input_named_specifiers`.
+
+What stays above `829eb71a` in the declaration steps is `check_input_declaration`'s 4 M and the binding's 2.6 M
+(`check_input_bind`, `check_input_bind_checked`), spread as before.
+
+**A reading's set-up.** A constant expression's reading (`check_constant_input_initialize`) pushed its 17 columns one
+by one and filled them with 15 `memset`s, about 670 instructions a reading, where sqlite3.c's 5,113 readings average
+1.8 tokens. It now places them in one block of the scratch, each at 16 bytes as its push placed it, those that start
+all ones in one run and those that start zero in the next, and fills each run once. A declarator run's record, frames,
+parts and parameters take one push where they took four, at the same places. Against main, in 9 rounds, each
+round's compiles and `perf stat` runs in one lock grant:
+
+| | main | this change |
+| --- | ---: | ---: |
+| `check-input`, the 8 rounds in huge pages | 40.79 ms | 40.53 ms (0.39 ms less, paired; 8 of 8 lower) |
+| cycles:u | 556.6 M | 552.1 M (0.7% less, paired; 9 of 9 lower) |
+| instructions:u | 1,281.17 M | 1,275.35 M |
+| task-clock | 114.13 ms | 113.29 ms |
+
+The objects and the `-Wall -Wextra` diagnostics of sqlite3.c and of the compiler's own main.c are the same bytes.
+The [measurement record](https://github.com/buster14a/buster-performance/tree/ebf64cbf9f30a903f32d9698213e17b3d218937f/docs/measurements/check-input-2694-2026-11-23)
+has the rounds, the profiles and the counts.
 
 ## The compiler's own code and a profile (#880)
 

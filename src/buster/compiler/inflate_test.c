@@ -4,9 +4,9 @@
 //
 // test-inflate [--seed N] [--directory PATH] [--keep]: inflate.c against streams of the test's own making and of
 // gzip's.
-//   - Adler-32: the known values, and random inputs against a sum taken modulo at every byte, by bytes and by vectors;
-//     and the vector path against the byte path at every length to 300 and around its chunks and blocks, of random
-//     bytes and of 0xff, ending at a PROT_NONE page;
+//   - Adler-32: the known values, and inflate_adler32_vector against RFC 1950's definition (inflate_test_adler32, the
+//     sums taken modulo at every byte): random inputs, and every length to 300 and around its chunks and blocks, of
+//     random bytes and of 0xff, ending at a PROT_NONE page;
 //   - streams by hand, bit by bit: the empty stream, a stored block, fixed blocks with a literal and with a match, and
 //     each error the decoder reports: the header's (another method, a window past 32 KB, a check that fails, a preset
 //     dictionary), a block of type 3, a stored block whose lengths disagree, a dynamic block whose code length code is
@@ -66,11 +66,25 @@ static void inflate_test_code(InflateTestBits* bits, uint32_t code, uint32_t len
     }
 }
 
+// The Adler-32 of `bytes` by RFC 1950's definition: both sums taken modulo 65,521 at every byte. The test's oracle for
+// inflate_adler32_vector and the checksum of the streams it makes.
+static uint32_t inflate_test_adler32(const uint8_t* bytes, uint64_t length)
+{
+    uint32_t a = 1;
+    uint32_t b = 0;
+    for (uint64_t i = 0; i < length; i += 1)
+    {
+        a = (a + bytes[i]) % 65521;
+        b = (b + a) % 65521;
+    }
+    return b << 16 | a;
+}
+
 // A zlib stream of `data` (`length` bytes of DEFLATE data) with `header`'s two bytes and the Adler-32 of `output`'s
 // `size` bytes, into `stream`; its length.
 static uint64_t inflate_test_wrap(uint8_t* stream, const uint8_t header[2], const uint8_t* data, uint64_t length, const uint8_t* output, uint64_t size)
 {
-    const uint32_t adler = inflate_adler32(output, size);
+    const uint32_t adler = inflate_test_adler32(output, size);
     stream[0] = header[0];
     stream[1] = header[1];
     memcpy(stream + 2, data, length);
@@ -165,7 +179,7 @@ static void inflate_test_adler(InflateTestTally* tally, uint64_t seed)
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(known); i += 1)
     {
-        inflate_test_expect(tally, inflate_adler32((const uint8_t*)known[i].text, strlen(known[i].text)) == known[i].adler, "a known Adler-32", i);
+        inflate_test_expect(tally, inflate_test_adler32((const uint8_t*)known[i].text, strlen(known[i].text)) == known[i].adler, "a known Adler-32, by its definition", i);
         inflate_test_expect(tally, inflate_adler32_vector((const uint8_t*)known[i].text, strlen(known[i].text)) == known[i].adler, "a known Adler-32, by vectors", i);
     }
     uint64_t state = seed;
@@ -177,17 +191,9 @@ static void inflate_test_adler(InflateTestTally* tally, uint64_t seed)
         {
             bytes[i] = run & 1 ? 0xff : (uint8_t)inflate_test_next(&state);
         }
-        uint32_t a = 1;
-        uint32_t b = 0;
-        for (uint64_t i = 0; i < length; i += 1)
-        {
-            a = (a + bytes[i]) % 65521;
-            b = (b + a) % 65521;
-        }
-        inflate_test_expect(tally, inflate_adler32(bytes, length) == (b << 16 | a), "Adler-32 against the sum taken modulo at every byte", length);
-        inflate_test_expect(tally, inflate_adler32_vector(bytes, length) == (b << 16 | a), "Adler-32 by vectors against the sum taken modulo at every byte", length);
+        inflate_test_expect(tally, inflate_adler32_vector(bytes, length) == inflate_test_adler32(bytes, length), "Adler-32 by vectors against the sum taken modulo at every byte", length);
     }
-    // The vector path against its twin: every length to 300 and around the 64-byte chunks and the blocks of 4,096 of
+    // The vector path against the definition: every length to 300 and around the 64-byte chunks and the blocks of 4,096 of
     // them, of random bytes and of 0xff (the largest sums), each ending at a PROT_NONE page, where a read past the end
     // faults.
     const uint64_t block = 64 * 4096;
@@ -208,7 +214,7 @@ static void inflate_test_adler(InflateTestTally* tally, uint64_t seed)
             {
                 start[i] = fill != 0 ? 0xff : (uint8_t)inflate_test_next(&state);
             }
-            inflate_test_expect(tally, inflate_adler32_vector(start, size) == inflate_adler32(start, size), "Adler-32 by vectors as by bytes, at a page's end", size);
+            inflate_test_expect(tally, inflate_adler32_vector(start, size) == inflate_test_adler32(start, size), "Adler-32 by vectors against the definition, at a page's end", size);
         }
     }
     inflate_test_unguard(&guarded);

@@ -99,11 +99,9 @@ static void check_test_program_folds(CheckTest* test, const char* clang)
         static const char* const names[5] = { "g + g", "a value of g used twice", "g += 1", "a load, a store and a load through p", "an atomic increment" };
         for (uint32_t f = 0; ready && f < 5; f += 1)
         {
-            const Tier0Code scalar = tier0_compile_scalar(&code.lowered.functions[f], &scratch);
             const Tier0Code vector = tier0_compile(&code.lowered.functions[f], &scratch);
-            const bool compiled = scalar.error == TIER0_OK && vector.error == TIER0_OK && scalar.count == vector.count &&
-                                  memcmp(scalar.records, vector.records, (uint64_t)scalar.count * sizeof(X86Instruction)) == 0;
-            const CheckTestFolds folds = compiled ? check_test_folds_summary(&scalar, &scratch) : (CheckTestFolds){ { 0 }, 0, false };
+            const bool compiled = vector.error == TIER0_OK && x86_validate(vector.records, vector.count) == vector.count;
+            const CheckTestFolds folds = compiled ? check_test_folds_summary(&vector, &scratch) : (CheckTestFolds){ { 0 }, 0, false };
             bool expected = false;
             switch (f)
             {

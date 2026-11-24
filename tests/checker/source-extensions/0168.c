@@ -1,0 +1,1 @@
+int f(a)int a;{return a;}__typeof__(f)*p=f;int g(void){return p(1,2);}_Static_assert(__builtin_types_compatible_p(__typeof__(f),int(void)),"no prototype");

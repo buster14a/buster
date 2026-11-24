@@ -1,8 +1,9 @@
 # Tier 1 loop vectorization for array loops (#2743): design
 
-Status: the first implementation is `ir_vectorize_loops.c`, behind
-`--tier1-passes=+vectorize` ("The first implementation" below, with its 9700X
-results); the rest of this document is the design it follows. The ranking
+Status: the implementation is `ir_vectorize_loops.c`, which `--tier1` runs by
+default since #2743's stage 4 ("By default" below; `--tier1-passes=-vectorize`
+turns it off). "The first implementation" below has its rules and 9700X
+results; the rest of this document is the design it follows. The ranking
 measurements are main `c471f32f0136bbb21cfe083c9947f86346de2a0a` on the 9700X
 (Release, CPU 2, under the lock), except where the desktop's preliminary Zen 4
 result is named. The 9700X's x86-64 runs cover four builds at four placements.
@@ -40,8 +41,8 @@ the exact scalar twin that was their oracle).
 ## The first implementation
 
 `ir_vectorize_loops(function, options, output, scratch, result)` runs in
-Tier 1's pipeline after if-conversion and LICM, before the optimizer, with
-`--tier1-passes=+vectorize` (and `+all`), and gives `--tier1-report` its
+Tier 1's pipeline after if-conversion and LICM, before the optimizer, by
+default (`--tier1-passes=-vectorize` turns it off), and gives `--tier1-report` its
 `tier1-vectorize` line. It takes the IR as the passes before it leave it, not
 the optimizer's cleaned form: the lowering's `sext (const)` chains are
 evaluated as constants, `inttoptr`/`ptrtoint` pairs and copies are seen through,
@@ -50,7 +51,7 @@ are, and the body may be a chain of blocks. Its own verification is therefore
 structural; the optimizer that follows verifies dominance once it has removed
 the stubs, and `test-ir-vectorize` runs that optimizer on every result.
 
-The C typed stream still loses volatility on indirect loads. With `+vectorize`,
+The C typed stream still loses volatility on indirect loads. With the pass on,
 the driver conservatively skips a function containing a volatile-qualified
 expression and carries that decision through calls it actually inlines.
 Other functions in the same translation unit remain eligible.
@@ -271,6 +272,67 @@ pass running on inlined bodies and, at znver5, Tier 1's later stages on the
 64-byte loop that inlining copies into `sqlite3VdbeExec`, about 61 M
 instructions more than the same loop at 16 bytes (#2831).
 
+### By default (#2743's stage 4)
+
+`--tier1` runs the pass since #3421; `--tier1-passes=-vectorize` turns it off.
+Its objects are the ones `+vectorize` gave before: on the kernels, the
+branch's default objects are byte for byte main's `+vectorize` ones, and its
+`-vectorize` objects main's default ones, at znver5 and x86-64.
+
+**No vector motion out of a loop that holds a call.** The default needed one
+change elsewhere: the vector-only LICM policy (#2781, [the loop motion
+guide](ir-loop-motion.md)) now moves nothing out of a loop that holds a call,
+since every vector and mask register is caller-saved. On main `b7d0b5ed`,
+unit inlining copied the sorter's vectorized `nDiv *= 16` loop (six trips at
+most) into `sqlite3VdbeExec`, and LICM moved its two splats out of the
+interpreter's loop (#2831's localization). At znver5 the function grew from
+87,473 to 130,652 bytes, and the unit's stores around calls from 17,907 to
+19,695. On the 9700X that cost speedtest1 1.34% more instructions and 1.90%
+more cycles (`measure-tier1-programs --runs 11`, `-march=znver5` against
+`-march=znver5 --tier1-passes=+vectorize`). With the rule, the function is
+89,931 bytes and LICM moves nothing there. The rule also takes the compiler's
+own lexer, built by `--tier1` at znver5, from 3.725 to 3.289 cycles a byte in
+`c_tokenize` (`measure-tier1-rows --runs 11` against main), because the
+lexer's loops hold calls too. Its rows and scan programs don't change.
+
+**The record**
+([buster-performance](https://github.com/buster14a/buster-performance/tree/8d4254292/docs/measurements/tier1-vectorize-default-2743-2026-11-23)).
+This is the 9700X under the lock, CPU 2, Release builds of main `b7d0b5ed` and
+#3421's code (`d682e67a`). Every digest equals clang -O2's. On #2743's kernels,
+the geometric means of the time over clang -O2's, as linked and at each build's
+best of four placements, are:
+
+| | znver5: 19 loops | znver5: 6 controls | x86-64: 19 loops | x86-64: 6 controls |
+| --- | ---: | ---: | ---: | ---: |
+| `--tier1`, before | 15.27 / 15.68 | 1.09 / 1.09 | 3.27 / 3.26 | 1.08 / 1.08 |
+| `--tier1`, by default | 1.32 / 1.29 | 1.09 / 1.09 | 2.04 / 2.06 | 1.08 / 1.08 |
+
+At x86-64, 6 loops of the unit vectorize; at znver5, all 19.
+
+Short calls pay for the vector loop before it tests whether there is a
+vector's worth of work (#3479). At znver5, the 19 loops' time per call over
+main's is 1.40, 1.57 and 1.23 at 0, 1 and 4 elements. It is 0.99 at 7, 0.47
+at 16 and 0.20 at 64. At x86-64 it is 1.07, 1.05 and 1.00, then 0.84 at 16.
+Clang tests the trip count first.
+
+Compiling with the default, against main, in 11 alternating runs:
+
+| Unit | Target | Cycles | Instructions | `.text` |
+| --- | --- | ---: | ---: | ---: |
+| `sqlite3.c` | znver5 | +1.01% | +0.42% | +0.2% |
+| `sqlite3.c` | x86-64 | +0.63% | +0.24% | about the same |
+| the compiler's `main.c` | znver5 | +0.64% | −0.03% | −2.9% |
+
+`main.c` gets smaller because the LICM rule cuts its stores around calls from
+12,944 to 10,868.
+
+On speedtest1 and Lua's scripts (`measure-tier1-programs --runs 11`, the pass
+on against `-vectorize` in one executable), the default moves cycles within
+code placement's noise: speedtest1 0.9952 and Lua 1.0036 at x86-64, 1.0054 and
+0.9936 at znver5. Instructions change by at most +0.19% (speedtest1 at znver5).
+Both builds pass the code-size gate at x86-64. Few loops in those programs
+vectorize: one in Lua, and one or three in `sqlite3.c`.
+
 ## What the measurements rank
 
 The suite has 25 loops over 8 KB arrays, without `restrict`, intrinsics or
@@ -399,8 +461,9 @@ outside predecessor are refused, as they are for
 [LICM](ir-loop-motion.md). (The first implementation found that only its chain
 shape needs neither: see "Finding the loops" above.) The pass runs after if-conversion and LICM and before
 `ir_optimize_verified`, so ordinary cleanup sees both the vector and fallback
-forms. `--tier1-passes=+vectorize` first exposes it as a measurement option;
-making it a default is a later step with its own before/after evidence.
+forms. `--tier1-passes=+vectorize` first exposed it as a measurement option;
+making it a default was a later step with its own before/after evidence ("By
+default" above).
 
 The vector representation already exists. Vector types are 16-, 32- and
 64-byte containers, and each element operation names `i8`, `i16`, `i32`,
@@ -592,7 +655,7 @@ which loops improve.
    AVX-512 masked remainder (#2807, "The masked remainder" above). Each
    addition keeps the same oracle and target matrix.
 4. **Default and follow-ups:** enable only with the full 9700X result and
-   compile-cost record. Design unrolling on the resulting vector loops
+   compile-cost record (done: "By default" above). Design unrolling on the resulting vector loops
    separately (#2755). Keep #1344, #2676, #2718 and #2719 with their existing owners,
    and file placement or address-selection work only when the remaining
    znver5 evidence isolates it.

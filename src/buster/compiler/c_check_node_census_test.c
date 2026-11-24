@@ -7035,8 +7035,70 @@ static void node_window_test_void(CheckTest* test)
     lower_source_close(&plain);
 }
 
+// The producer's setup's scans on columns of this test's own (node_alone_tokens, node_alone_run), each against what a
+// token at a time finds: every count of tokens to three blocks of 64, the value at the blocks' edges and at every third
+// token, and at every token past the count, which no scan may read; and every run to 70 positions, in the range's
+// reversed order, with tokens outside the range around it, then with each position's token one below the range and one
+// above it.
+static void node_alone_test_scans(CheckTest* test)
+{
+    enum { TOKENS = 200, POSITIONS = 96, FIRST = 3 };
+    uint8_t column[TOKENS];
+    uint32_t found[TOKENS];
+    uint32_t expected[TOKENS];
+    bool counted = true;
+    bool listed = true;
+    for (uint32_t count = 0; count <= 192; count += 1)
+    {
+        uint32_t marks = 0;
+        for (uint32_t token = 0; token < TOKENS; token += 1)
+        {
+            const bool marked = token >= count || token % 3 == 0 || token % 64 == 63 || token % 64 == 0;
+            column[token] = marked ? 7 : (uint8_t)(token % 7);
+            if (marked && token < count)
+            {
+                expected[marks] = token;
+                marks += 1;
+            }
+            found[token] = UINT32_MAX;
+        }
+        counted = counted && node_alone_tokens(column, count, 7, NULL) == marks;
+        listed = listed && node_alone_tokens(column, count, 7, found) == marks && memcmp(found, expected, marks * sizeof(uint32_t)) == 0 && found[marks] == UINT32_MAX;
+    }
+    check_test_expect(test, counted, "node-alone: a scan counts a column's tokens of a value, to the count's last partial block");
+    check_test_expect(test, listed, "node-alone: and lists them in order, writing no place past their count");
+    uint32_t postorder[POSITIONS];
+    bool runs = true;
+    bool below = true;
+    bool above = true;
+    for (uint32_t size = 1; size <= 70; size += 1)
+    {
+        const uint32_t low = 100;
+        const uint32_t high = low + size - 1;
+        for (uint32_t position = 0; position < POSITIONS; position += 1)
+        {
+            const bool inside = position >= FIRST && position < FIRST + size;
+            postorder[position] = inside ? high - (position - FIRST) : position % 2 == 0 ? low - 1 : high + 1;
+        }
+        runs = runs && node_alone_run(postorder, FIRST, FIRST + size, low, high);
+        for (uint32_t position = FIRST; position < FIRST + size; position += 1)
+        {
+            const uint32_t token = postorder[position];
+            postorder[position] = low - 1;
+            below = below && !node_alone_run(postorder, FIRST, FIRST + size, low, high);
+            postorder[position] = high + 1;
+            above = above && !node_alone_run(postorder, FIRST, FIRST + size, low, high);
+            postorder[position] = token;
+        }
+    }
+    check_test_expect(test, runs, "node-alone: positions that hold a range's tokens alone are its run, whatever stands past them");
+    check_test_expect(test, below, "node-alone: a token below the range at any position is no run");
+    check_test_expect(test, above, "node-alone: nor is one above it");
+}
+
 static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
 {
+    node_alone_test_scans(test);
     node_window_test_compile(test, false, false);
     node_window_test_compile(test, false, true);
     node_window_test_compile(test, true, false);
@@ -7152,7 +7214,7 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     static const NodeTestsWindowed windowed_warnings = {
         .expressions = 50,
         .trees = 4,
-        .operators = 68,
+        .operators = 69,
         .sent = 26,
         .walks = 4,
         .quiet = 7,
@@ -7221,7 +7283,7 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     static const NodeTestsWindowed windowed_defaults = {
         .expressions = 475,
         .trees = 29,
-        .operators = 135,
+        .operators = 142,
         .sent = 51,
         .walks = 11,
         .far = 37,
@@ -7242,7 +7304,7 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     // (The loop leaves three ordered comparisons of two pointers out: `p < e`, `ga < p` and the `while`'s.)
     static const NodeTestsWindowed windowed_holes = {
         .expressions = 65,
-        .operators = 25,
+        .operators = 26,
         .sent = 13,
         .quiet = 11,
         .calls = 3,
@@ -7258,12 +7320,12 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     };
     static const NodeTestsWindowed windowed_segments = {
         .expressions = 11,
-        .operators = 2,
+        .operators = 3,
         .quiet = 1,
         .casts_left = 1,
         .values = 2,
         .spared = 9,
-        .direct = 8,
+        .direct = 7,
         .decided = 11,
     };
     static const NodeTestsWindowed windowed_interrupt = {
@@ -7357,6 +7419,8 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         .values = 1,
         .decided = 1,
     };
+    // (Their operators count each cast to a pointer of an operand that is no pointer once converted, which the casts' rule
+    // sends to its test for -Wint-to-pointer-cast's switches, #2914: one or a few a fixture.)
     // The same fixtures with the census's tests at reader time, after T there: the machine's verdict before the pipeline
     // is never a take the census refuses, and every test's bit is the census's.
     check_test_expect(test, ready && node_tests_test_fixture(directory, "warnings.c", node_census_test_warnings, loud, BUSTER_ARRAY_LENGTH(loud),
@@ -7984,6 +8048,13 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     check_test_expect(test, ready && node_producer_test_fixture(directory, node_producer_test_text, sizeof(node_producer_test_text) - 1, quiet, BUSTER_ARRAY_LENGTH(quiet), true,
                                                                  &produced_silent),
                       "node-producer: the same as a compile would run it, four bodies unread");
+    // The unit's last `enum` keyword a definition's, whose enumerator a body after it stores in a parameter of its own enumeration:
+    // the body is taken, where the definition unlisted would leave the store two enumerations' meeting.
+    static const char last_enumeration_text[] = "enum first { F0, F1 };\ntypedef enum last { L0, L1 } Last;\nLast keep(Last value)\n{\n    value = L1;\n    return value;\n}\n";
+    const NodeProducerExpected produced_last = { .reasons = { [NODE_PRODUCER_TAKEN] = 1 } };
+    check_test_expect(test, ready && node_producer_test_fixture(directory, last_enumeration_text, sizeof(last_enumeration_text) - 1, quiet, BUSTER_ARRAY_LENGTH(quiet), false,
+                                                                 &produced_last),
+                      "node-producer: an enumerator of the unit's last enumeration, stored in its own, is taken");
     const NodeProducerExpected produced_members = { .reasons = { [NODE_PRODUCER_UNIT] = 1 }, .unit = BUSTER_NODE_PRODUCER_UNIT_MEMBERS };
     const NodeProducerExpected produced_results = { .reasons = { [NODE_PRODUCER_UNIT] = 1 }, .unit = BUSTER_NODE_PRODUCER_UNIT_RESULTS };
     check_test_expect(test, ready && node_producer_test_fixture(directory, node_producer_test_members_text, sizeof(node_producer_test_members_text) - 1, quiet,

@@ -11,7 +11,7 @@
 // divisor in rax or rdx, or a shift's destination in rcx (z's, where its count left rcx free), went through the scratch
 // register. Each range live across a sequence now avoids its registers (Tier1CfgInput.sequences), and so do a
 // division's divisor and a shift's other operand and destination: no value is stored around either, no row is given for
-// one, and nothing moves into the scratch register. It runs natively against its oracle, by both paths, with every
+// one, and nothing moves into the scratch register. It runs natively against its oracle, with every
 // register and with the registers of the parameters, the sequences and two more alone, where the values crowd the
 // registers the sequences take.
 
@@ -90,7 +90,7 @@ static uint64_t tier1_sequences_oracle(uint64_t p0, uint64_t p1)
 }
 
 // f by the CFG consumer with the general registers `registers`; with `roomy`, it must save nothing around its sequences.
-static void tier1_sequences_compile(Tier1EmitTest* test, bool vector, uint32_t registers, bool roomy)
+static void tier1_sequences_compile(Tier1EmitTest* test, uint32_t registers, bool roomy)
 {
     IrFunction function;
     const bool created = tier1_sequences_function(&test->input, &function);
@@ -110,7 +110,7 @@ static void tier1_sequences_compile(Tier1EmitTest* test, bool vector, uint32_t r
         shifts += plan.covered[n] == 0 && plan.patterns[n].rule == TIER1_RULE_SHIFT;
     }
     tier1_emit_test_expect(test, !planned || (divisions == 2 && shifts == 3), "the fixture divides and shifts by registers");
-    const Tier1EmitOptions options = { .register_mask = registers, .vector = vector, .rematerialize = true, .certify = true };
+    const Tier1EmitOptions options = { .register_mask = registers, .rematerialize = true, .certify = true };
     Tier1EmitResult emitted;
     const Tier1EmitError error = planned ? tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
     tier1_emit_test_expect(test, error == TIER1_EMIT_OK && emitted.general, "the sequences' fixture emits through the CFG consumer");
@@ -120,7 +120,7 @@ static void tier1_sequences_compile(Tier1EmitTest* test, bool vector, uint32_t r
         tier1_emit_test_expect(test, !roomy || (emitted.call_stores == 0 && emitted.prepared.call_save_mask == 0), "no value is saved around a division or a shift, and none takes a row");
         if (roomy && emitted.call_stores != 0 && test->failures < 20)
         {
-            fprintf(stderr, "  sequences vector=%u: %u stores around the sequences, rows %#x\n", vector, emitted.call_stores, emitted.prepared.call_save_mask);
+            fprintf(stderr, "  sequences: %u stores around the sequences, rows %#x\n", emitted.call_stores, emitted.prepared.call_save_mask);
         }
         uint32_t scratch_moves = 0;
         for (uint32_t k = 0; k < emitted.code.count; k += 1)
@@ -134,7 +134,7 @@ static void tier1_sequences_compile(Tier1EmitTest* test, bool vector, uint32_t r
         uint64_t bytes = 0;
         if (tier1_emit_test_load(test, &emitted.code, &executable, &bytes))
         {
-            uint64_t random = UINT64_C(0x2767b7e151628aed) ^ (vector ? 1 : 0) ^ ((uint64_t)registers << 1);
+            uint64_t random = UINT64_C(0x2767b7e151628aec) ^ ((uint64_t)registers << 1);
             for (uint32_t sample = 0; sample < 48; sample += 1)
             {
                 const uint64_t a = sample == 0 ? UINT64_MAX : tier1_emit_test_random(&random);
@@ -143,7 +143,7 @@ static void tier1_sequences_compile(Tier1EmitTest* test, bool vector, uint32_t r
                 const uint64_t expected = tier1_sequences_oracle(a, b);
                 if (actual != expected && test->failures < 20)
                 {
-                    fprintf(stderr, "  sequences vector=%u registers=%#x a=%016" PRIx64 " b=%016" PRIx64 " actual=%016" PRIx64 " expected=%016" PRIx64 "\n", vector, registers, a, b, actual, expected);
+                    fprintf(stderr, "  sequences registers=%#x a=%016" PRIx64 " b=%016" PRIx64 " actual=%016" PRIx64 " expected=%016" PRIx64 "\n", registers, a, b, actual, expected);
                 }
                 tier1_emit_test_expect(test, actual == expected, "values live across a division and a shift keep their values");
             }
@@ -163,9 +163,6 @@ static void tier1_sequences_tests(Tier1EmitTest* test)
     // The parameters' registers, the sequences' and two more.
     const uint32_t tight = (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI) | (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDX) | (1u << X86_REGISTER_RCX) | (1u << X86_REGISTER_R8) |
                            (1u << X86_REGISTER_R9);
-    for (uint32_t vector = 0; vector < 2; vector += 1)
-    {
-        tier1_sequences_compile(test, vector != 0, tier1_liveness_register_mask(), true);
-        tier1_sequences_compile(test, vector != 0, tight, false);
-    }
+    tier1_sequences_compile(test, tier1_liveness_register_mask(), true);
+    tier1_sequences_compile(test, tight, false);
 }

@@ -141,6 +141,14 @@ tcl=$(bash tools/ci/tcl-config.sh) || exit $?
 # The heading is the parallel runner's scheduling budget, not an affinity mask: the command's children each take up
 # to eight lanes, so declaring two CPUs let the runner co-schedule other two-CPU commands on the same cores.
 "$BUSTER_COMPILER" test-check-units --corpus build/c-testsuite/tests/single-exec
+# #3070: the root image's units, which each leave the preprocessor's state another way (predefined macros changed,
+# undefined, pushed and poisoned, macros of their own by the hundred, headers read once, lines moved, a fatal include),
+# each after the others on one lane, from the lane's root image: every object and diagnostic its own alone, and under
+# --poison-arenas every byte the root keeps the image's after each unit. Then the units with syntax errors, one of
+# which the checker reads through a copy of the preprocessor (the root dropped and captured again), without attested
+# declarations, whose second reading of such a unit prints no parser's error.
+"$BUSTER_COMPILER" test-check-units --corpus tests/units/root-image --option --lanes --option 1
+"$BUSTER_COMPILER" test-check-units --corpus tests/units/root-image/errors --option --lanes --option 1 --option --attested=off
 == Test the driver's commands of several source files [8 CPUs]
 # #152: generated programs of several units, and one of synth's shape, compiled by one command into executables
 # that run as clang's builds of them do and define what cc's links of their units' objects do, at every lane count
@@ -475,9 +483,10 @@ musl="$corpus/libc/musl"
 == Run #139's passes by both versions on every function of c-testsuite's programs and the frozen SQLite and musl sources
 # #139: each function lowered and promoted as test-ir-source does, then SROA, #866's solver, the optimizer's SCCP, dead-code
 # removal and CFG cleanup alone and together (and with Tier 1's layout and identities), value numbering with memory (#2718)
-# alone and with Tier 1's set, LICM, and each caller's unit
+# alone and with Tier 1's set, and each caller's unit
 # inlining, each by its vector and scalar versions, which must agree: exactly, and the solver against its exact oracle
-# and, semantically, its scalar twin (ir_source_passes.c).
+# and, semantically, its scalar twin; and LICM, one path since #2924, whose result moves nothing more when given back to
+# it (#2979; ir_source_passes.c).
 unset CPATH C_INCLUDE_PATH
 export SOURCE_DATE_EPOCH=1792454400
 corpus=$BUSTER_CORPUS
@@ -793,6 +802,10 @@ if "$BUSTER_COMPILER" test-preprocessor --compare-clang tests/preprocessor-oracl
 "$BUSTER_COMPILER" test-x86-target
 == Test local SSA construction and its memory interpreter
 "$BUSTER_COMPILER" test-ssa
+# #2924: a function of 2,200 nested goto loops (labels H0 to H2199, then their backward gotos in reverse) lists about
+# 4.8 M dominance-frontier pairs, past the dense constructor's budget: its promotion takes the bounded construction.
+awk 'BEGIN { print "int ladder(int lim)\n{\n    int n = 0;\n    int m = 0;"; for (j = 0; j < 2200; j += 1) printf "H%d:\n    n += 1;\n", j; for (j = 2199; j >= 0; j -= 1) printf "    if (n < lim)\n    {\n        m ^= n;\n        goto H%d;\n    }\n", j; print "    return m;\n}" }' > build/ssa-ladder.c
+"$BUSTER_COMPILER" -c --tier1 --tier1-strict --verify -o build/ssa-ladder.o build/ssa-ladder.c
 == Test the independent preprocessor fuzz harness in C23
 "$BUSTER_COMPILER" test-preprocessor-fuzz --std c23
 == Test the x86 semantics
@@ -1107,7 +1120,7 @@ rm -r "$objects"
 "$BUSTER_COMPILER" test-ir-store-motion
 # #2743: the loop vectorizer's fixtures by both paths at 16, 32 and 64 bytes against the interpreter, and its mutants.
 "$BUSTER_COMPILER" test-ir-vectorize
-# #2805: compare the C reductions built by the opt-in Tier 1 vectorizer and Clang.
+# #2805: compare the C reductions built by the Tier 1 vectorizer and Clang.
 objects=$(mktemp -d)
 kernels=tests/ir/vectorize/minmax.c
 "$BUSTER_COMPILER" --tier1 --tier1-passes=+vectorize --tier1-strict --tier1-report --verify -march=x86-64-v4 -c "$kernels" -o "$objects/buster.o"
@@ -1139,11 +1152,14 @@ for symbol in max_volatile max_inline_volatile; do
     test "$(grep -c 'DWORD PTR' "$objects/$symbol.s")" -ge 2
     if grep -E '[[:space:]]call[[:space:]]' "$objects/$symbol.s"; then exit 1; fi
 done
-# The pass is opt-in, and the available horizontal reductions require EVEX.
-"$BUSTER_COMPILER" --tier1 --tier1-strict -march=x86-64-v4 -c "$kernels" -o "$objects/default.o"
-"$BUSTER_COMPILER" --tier1 --tier1-passes=+vectorize --tier1-strict -march=x86-64-v3 -c "$kernels" -o "$objects/v3.o"
-objdump -d "$objects/default.o" "$objects/v3.o" > "$objects/scalar.s"
+# -vectorize turns the pass off (#2743: on by default), and the available horizontal reductions require EVEX.
+"$BUSTER_COMPILER" --tier1 --tier1-passes=-vectorize --tier1-strict -march=x86-64-v4 -c "$kernels" -o "$objects/off.o"
+"$BUSTER_COMPILER" --tier1 --tier1-strict -march=x86-64-v3 -c "$kernels" -o "$objects/v3.o"
+objdump -d "$objects/off.o" "$objects/v3.o" > "$objects/scalar.s"
 if grep -E 'v?p(min|max)[su]d' "$objects/scalar.s"; then exit 1; fi
+# The default is the pass's: --tier1 alone gives +vectorize's object.
+"$BUSTER_COMPILER" --tier1 --tier1-strict -march=x86-64-v4 -c "$kernels" -o "$objects/default.o"
+cmp "$objects/buster.o" "$objects/default.o"
 rm -r "$objects"
 "$BUSTER_COMPILER" test-ir-inline
 == Test dataflow bitsets

@@ -1,0 +1,2 @@
+int é = 1;
+int f(void) { return é + é; }

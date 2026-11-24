@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Included after tier1_frame.c. Independent pairwise overlap/alignment and pressure checks validate both colorings;
-// a sparse abstract stack executes the planned prologue/epilogue and checks register restoration, including dynamic
-// realigned frames. This checks plans, not generated code, unwind PCs, Clang frame sizes or Tier 1 cross-linking.
+// Included after tier1_frame.c. Independent pairwise overlap/alignment and pressure checks validate each plan,
+// preparation's order is checked by its definition, the colors against pointer jumping's and the default run's plans
+// against a frozen digest; a sparse abstract stack executes the planned prologue/epilogue and checks register
+// restoration, including dynamic realigned frames. This checks plans, not generated code, unwind PCs, Clang frame sizes or Tier 1 cross-linking.
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,6 +13,9 @@
 #include <unistd.h>
 
 #define BUSTER_TIER1_FRAME_TEST_ARENA_BYTES (16u << 20)
+// tier1_frame_test_fold's digest of the default run (seed 177, 8 rounds), recorded on both paths before the scalar
+// twin's deletion (#2924).
+#define BUSTER_TIER1_FRAME_TEST_DIGEST 0x98e191af1dc9e33bull
 
 typedef struct Tier1FrameTest Tier1FrameTest;
 struct Tier1FrameTest
@@ -21,6 +25,8 @@ struct Tier1FrameTest
     uint64_t seed;
     uint32_t count;
     uint32_t shape;
+    // FNV-1a over every plan tier1_frame_test_case makes (tier1_frame_test_fold); the default run's is frozen.
+    uint64_t digest;
 };
 
 static void tier1_frame_test_expect(Tier1FrameTest* test, bool condition, const char* description)
@@ -429,56 +435,164 @@ static bool tier1_frame_test_color_jumping(const Tier1FrameWork* work, Arena* sc
     return ready;
 }
 
-// Both paths' preparations, colored by the planner's pass and by the oracle.
+// Preparation's class numbers and event order by their definition, independent of the planner's sorts (#2924 replaced
+// the twin comparison with this): an item's class is the count of distinct (alignment descending, stride ascending)
+// keys before its own, and the events are a permutation of every end (item * 2) and start (item * 2 + 1) in increasing
+// (class, position, end before start, item) order, the position an end's or a start's.
+static void tier1_frame_test_order(Tier1FrameTest* test, const Tier1FrameRequest* request, const Tier1FrameWork* work)
+{
+    const Tier1FrameSlots* input = &request->slots;
+    const uint32_t count = input->count;
+    bool classes = work->count == count;
+    uint32_t distinct = 0;
+    for (uint32_t i = 0; classes && i < count; i += 1)
+    {
+        const uint32_t row = input->indices != 0 ? input->indices[i] : i;
+        const uint64_t alignment = input->alignment[row];
+        const uint64_t stride = ((uint64_t)input->size[row] + alignment - 1) / alignment * alignment;
+        uint32_t below = 0;
+        bool first = true;
+        for (uint32_t j = 0; j < count; j += 1)
+        {
+            const uint32_t other = input->indices != 0 ? input->indices[j] : j;
+            const uint64_t other_alignment = input->alignment[other];
+            const uint64_t other_stride = ((uint64_t)input->size[other] + other_alignment - 1) / other_alignment * other_alignment;
+            const bool before = other_alignment > alignment || (other_alignment == alignment && other_stride < stride);
+            bool earlier_same = false;
+            for (uint32_t k = 0; before && k < j; k += 1)
+            {
+                const uint32_t seen = input->indices != 0 ? input->indices[k] : k;
+                const uint64_t seen_alignment = input->alignment[seen];
+                const uint64_t seen_stride = ((uint64_t)input->size[seen] + seen_alignment - 1) / seen_alignment * seen_alignment;
+                earlier_same |= seen_alignment == other_alignment && seen_stride == other_stride;
+            }
+            below += before && !earlier_same;
+            first &= j >= i || other_alignment != alignment || other_stride != stride;
+        }
+        distinct += first;
+        const uint32_t group = work->object_class[i];
+        classes = group == below && group < work->class_count && work->class_stride[group] == stride && work->class_alignment[group] == alignment;
+    }
+    tier1_frame_test_expect(test, classes && work->class_count == distinct, "classes numbered by (alignment descending, stride ascending)");
+    bool order = true;
+    uint64_t seen_events = 0;
+    uint64_t previous_high = 0;
+    uint64_t previous_low = 0;
+    for (uint32_t i = 0; order && i < count * 2; i += 1)
+    {
+        const uint32_t event = work->event[i];
+        const uint32_t item = event >> 1;
+        order = item < count;
+        if (order)
+        {
+            const uint32_t row = input->indices != 0 ? input->indices[item] : item;
+            const uint32_t position = (event & 1) != 0 ? input->start[row] : input->end[row];
+            // (class, position) then (kind, item), as two words.
+            const uint64_t high = (uint64_t)work->object_class[item] << 32 | position;
+            const uint64_t low = (uint64_t)(event & 1) << 32 | item;
+            order = i == 0 || previous_high < high || (previous_high == high && previous_low < low);
+            previous_high = high;
+            previous_low = low;
+            seen_events += (uint64_t)event + 1;
+        }
+    }
+    tier1_frame_test_expect(test, order && seen_events == (uint64_t)count * 2 * ((uint64_t)count * 2 + 1) / 2, "events in (class, position, end before start, item) order");
+}
+
+static void tier1_frame_test_fold_word(Tier1FrameTest* test, uint64_t word)
+{
+    for (uint32_t byte = 0; byte < 8; byte += 1)
+    {
+        test->digest = (test->digest ^ ((word >> (byte * 8)) & 255)) * 0x100000001b3ull;
+    }
+}
+
+// A plan's every field into the run's digest, field by field (no padding).
+static void tier1_frame_test_fold(Tier1FrameTest* test, const Tier1Frame* frame)
+{
+    const uint64_t fields[] = {
+        frame->count,
+        frame->slot_count,
+        frame->class_count,
+        frame->base_register,
+        frame->alignment,
+        frame->object_bytes,
+        frame->payload_bytes,
+        frame->stack_adjust_bytes,
+        frame->maximum_stack_bytes,
+        frame->red_zone_bytes,
+        frame->outgoing_bytes,
+        (uint64_t)frame->dynamic_outgoing | (uint64_t)frame->frame_pointer << 1 | (uint64_t)frame->realigned << 2 | (uint64_t)frame->red_zone << 3 |
+            (uint64_t)frame->variadic << 4 | (uint64_t)frame->probe_stack << 5,
+        (uint32_t)frame->variadic_offset,
+        frame->saved_registers,
+        frame->prologue_count,
+        frame->epilogue_count,
+    };
+    for (uint32_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i += 1)
+    {
+        tier1_frame_test_fold_word(test, fields[i]);
+    }
+    for (uint32_t reg = 0; reg < 16; reg += 1)
+    {
+        tier1_frame_test_fold_word(test, (frame->saved_registers & (1u << reg)) != 0 ? (uint32_t)frame->save_offset[reg] : 0);
+    }
+    for (uint32_t i = 0; i < frame->prologue_count + frame->epilogue_count; i += 1)
+    {
+        const Tier1FrameStep* step = i < frame->prologue_count ? &frame->prologue[i] : &frame->epilogue[i - frame->prologue_count];
+        tier1_frame_test_fold_word(test, (uint64_t)step->kind << 32 | step->reg);
+        tier1_frame_test_fold_word(test, (uint64_t)step->base << 32 | (uint32_t)step->offset);
+        tier1_frame_test_fold_word(test, step->amount);
+    }
+    for (uint32_t i = 0; i < frame->count; i += 1)
+    {
+        tier1_frame_test_fold_word(test, (uint64_t)frame->slot[i] << 32 | (uint32_t)frame->offset[i]);
+    }
+}
+
+// The preparation, checked by its definition, then colored by the planner's pass and by the oracle.
 static void tier1_frame_test_colors_agree(Tier1FrameTest* test, const Tier1FrameRequest* request, Arena* scratch)
 {
     const uint64_t mark = scratch->length;
-    for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+    Tier1FrameWork work;
+    const bool prepared = tier1_frame_prepare(request, scratch, &work) == TIER1_FRAME_OK;
+    uint32_t* const expected = prepared ? arena_push_array(scratch, (uint64_t)work.count + 1, 4, 4) : 0;
+    tier1_frame_test_expect(test, expected != 0, "prepared for the coloring oracle");
+    if (expected != 0)
     {
-        Tier1FrameWork work;
-        const bool prepared = tier1_frame_prepare(request, scratch, scalar != 0, &work) == TIER1_FRAME_OK;
-        uint32_t* const expected = prepared ? arena_push_array(scratch, (uint64_t)work.count + 1, 4, 4) : 0;
-        tier1_frame_test_expect(test, expected != 0, "prepared for the coloring oracle");
-        if (expected != 0)
-        {
-            tier1_frame_color(&work);
-            const bool jumped = tier1_frame_test_color_jumping(&work, scratch, expected);
-            tier1_frame_test_expect(test, jumped && (work.count == 0 || memcmp(work.color, expected, (uint64_t)work.count * 4) == 0), "the ordered pass's colors are the pointer-jumping oracle's");
-        }
-        arena_pop_to(scratch, mark);
+        tier1_frame_test_order(test, request, &work);
+        tier1_frame_color(&work);
+        const bool jumped = tier1_frame_test_color_jumping(&work, scratch, expected);
+        tier1_frame_test_expect(test, jumped && (work.count == 0 || memcmp(work.color, expected, (uint64_t)work.count * 4) == 0), "the ordered pass's colors are the pointer-jumping oracle's");
     }
+    arena_pop_to(scratch, mark);
 }
 
 static void tier1_frame_test_case(Tier1FrameTest* test, const Tier1FrameRequest* request, Arena* output, Arena* scratch, bool execute)
 {
     const uint64_t output_mark = output->length;
     const uint64_t scratch_mark = scratch->length;
-    Tier1Frame frame[2];
-    const Tier1FrameError vector_error = tier1_frame_plan(request, output, scratch, &frame[0]);
-    const Tier1FrameError scalar_error = tier1_frame_plan_scalar(request, output, scratch, &frame[1]);
-    tier1_frame_test_expect(test, vector_error == TIER1_FRAME_OK && scalar_error == TIER1_FRAME_OK, "both paths accept valid frame");
+    Tier1Frame frame;
+    const Tier1FrameError error = tier1_frame_plan(request, output, scratch, &frame);
+    tier1_frame_test_expect(test, error == TIER1_FRAME_OK, "valid frame accepted");
     tier1_frame_test_expect(test, scratch->length == scratch_mark, "scratch restored on success");
-    if (vector_error == TIER1_FRAME_OK && scalar_error == TIER1_FRAME_OK)
+    if (error == TIER1_FRAME_OK)
     {
-        tier1_frame_test_expect(test, tier1_frame_test_same_metadata(&frame[0], &frame[1]), "scalar and vector frame sizes and plans agree");
-        // The twins color alike, so a Tier 1 object doesn't depend on the host (#2606).
-        tier1_frame_test_expect(test, request->slots.count == 0 || (memcmp(frame[0].slot, frame[1].slot, request->slots.count * 4) == 0 &&
-            memcmp(frame[0].offset, frame[1].offset, request->slots.count * 4) == 0), "scalar and vector slot identities and offsets agree");
-        tier1_frame_test_valid(test, request, &frame[0]);
-        tier1_frame_test_valid(test, request, &frame[1]);
+        tier1_frame_test_valid(test, request, &frame);
+        tier1_frame_test_fold(test, &frame);
         tier1_frame_test_colors_agree(test, request, scratch);
         if (execute)
         {
-            tier1_frame_test_steps(test, request, &frame[0], 0);
-            tier1_frame_test_steps(test, request, &frame[1], 8);
+            tier1_frame_test_steps(test, request, &frame, 0);
+            tier1_frame_test_steps(test, request, &frame, 8);
         }
         Tier1Frame repeated;
         const Tier1FrameError repeated_error = tier1_frame_plan(request, output, scratch, &repeated);
-        tier1_frame_test_expect(test, repeated_error == TIER1_FRAME_OK && tier1_frame_test_same_metadata(&frame[0], &repeated), "repeatable plan metadata");
+        tier1_frame_test_expect(test, repeated_error == TIER1_FRAME_OK && tier1_frame_test_same_metadata(&frame, &repeated), "repeatable plan metadata");
         if (repeated_error == TIER1_FRAME_OK && request->slots.count != 0)
         {
-            tier1_frame_test_expect(test, memcmp(frame[0].slot, repeated.slot, request->slots.count * 4) == 0 &&
-                memcmp(frame[0].offset, repeated.offset, request->slots.count * 4) == 0, "repeatable slot identities and offsets");
+            tier1_frame_test_expect(test, memcmp(frame.slot, repeated.slot, request->slots.count * 4) == 0 &&
+                memcmp(frame.offset, repeated.offset, request->slots.count * 4) == 0, "repeatable slot identities and offsets");
         }
         if (request->slots.indices != 0 && request->slots.count == request->slots.column_count)
         {
@@ -486,7 +600,7 @@ static void tier1_frame_test_case(Tier1FrameTest* test, const Tier1FrameRequest*
             identity.slots.indices = 0;
             Tier1Frame reordered;
             const Tier1FrameError reordered_error = tier1_frame_plan(&identity, output, scratch, &reordered);
-            tier1_frame_test_expect(test, reordered_error == TIER1_FRAME_OK && tier1_frame_test_same_metadata(&frame[0], &reordered),
+            tier1_frame_test_expect(test, reordered_error == TIER1_FRAME_OK && tier1_frame_test_same_metadata(&frame, &reordered),
                 "legal input permutation preserves optimal frame extent");
         }
     }
@@ -495,18 +609,15 @@ static void tier1_frame_test_case(Tier1FrameTest* test, const Tier1FrameRequest*
 
 static void tier1_frame_test_refusal(Tier1FrameTest* test, const Tier1FrameRequest* request, Arena* output, Arena* scratch, Tier1FrameError expected)
 {
-    for (uint32_t scalar = 0; scalar < 2; scalar += 1)
-    {
-        Tier1Frame before;
-        memset(&before, 0xa5, sizeof(before));
-        Tier1Frame result = before;
-        const uint64_t output_mark = output->length;
-        const uint64_t scratch_mark = scratch->length;
-        const Tier1FrameError error = scalar ? tier1_frame_plan_scalar(request, output, scratch, &result) : tier1_frame_plan(request, output, scratch, &result);
-        tier1_frame_test_expect(test, error == expected, "expected refusal status");
-        tier1_frame_test_expect(test, memcmp(&before, &result, sizeof(result)) == 0, "refusal preserves result");
-        tier1_frame_test_expect(test, output_mark == output->length && scratch_mark == scratch->length, "refusal restores both arenas");
-    }
+    Tier1Frame before;
+    memset(&before, 0xa5, sizeof(before));
+    Tier1Frame result = before;
+    const uint64_t output_mark = output->length;
+    const uint64_t scratch_mark = scratch->length;
+    const Tier1FrameError error = tier1_frame_plan(request, output, scratch, &result);
+    tier1_frame_test_expect(test, error == expected, "expected refusal status");
+    tier1_frame_test_expect(test, memcmp(&before, &result, sizeof(result)) == 0, "refusal preserves result");
+    tier1_frame_test_expect(test, output_mark == output->length && scratch_mark == scratch->length, "refusal restores both arenas");
 }
 
 static void tier1_frame_test_limits(Tier1FrameTest* test, Arena* output, Arena* scratch)
@@ -625,6 +736,54 @@ static void tier1_frame_test_limits(Tier1FrameTest* test, Arena* output, Arena* 
     call.stack_bytes = 0;
     call.stack_alignment_log2 = 32;
     tier1_frame_test_refusal(test, &request, output, scratch, TIER1_FRAME_INVALID);
+    // The rows' last accepted values: an alignment of BUSTER_TIER1_FRAME_MAX_ALIGNMENT, and a stride of INT32_MAX (an
+    // odd size, alignment 1).
+    request.call_count = 0;
+    request.slots.indices = 0;
+    alignments[0] = BUSTER_TIER1_FRAME_MAX_ALIGNMENT;
+    tier1_frame_test_expect(test, tier1_frame_requirements(&request, &requirements) == TIER1_FRAME_OK && requirements.object_alignment == BUSTER_TIER1_FRAME_MAX_ALIGNMENT,
+        "the largest alignment is accepted");
+    alignments[0] = 1;
+    sizes[0] = INT32_MAX;
+    tier1_frame_test_expect(test, tier1_frame_requirements(&request, &requirements) == TIER1_FRAME_OK, "a stride of INT32_MAX is accepted");
+    sizes[0] = 8;
+    alignments[0] = 8;
+    // An invalid row in every lane of the rows' eight-row chunks, with and without indices.
+    uint32_t many[5][24];
+    for (uint32_t i = 0; i < 24; i += 1)
+    {
+        many[0][i] = i;
+        many[1][i] = i + 3;
+        many[2][i] = 8;
+        many[3][i] = 8;
+        many[4][i] = 23 - i;
+    }
+    Tier1FrameRequest lanes = {
+        .slots = {
+            .start = many[0],
+            .end = many[1],
+            .size = many[2],
+            .alignment = many[3],
+            .count = 24,
+            .column_count = 24,
+        },
+    };
+    for (uint32_t indexed = 0; indexed < 2; indexed += 1)
+    {
+        lanes.slots.indices = indexed != 0 ? many[4] : 0;
+        for (uint32_t lane = 0; lane < 24; lane += 1)
+        {
+            test->count = 24;
+            test->shape = lane;
+            const uint32_t row = indexed != 0 ? 23 - lane : lane;
+            many[1][row] = many[0][row];
+            tier1_frame_test_refusal(test, &lanes, output, scratch, TIER1_FRAME_INVALID);
+            many[1][row] = many[0][row] + 3;
+            many[2][row] = INT32_MAX;
+            tier1_frame_test_refusal(test, &lanes, output, scratch, TIER1_FRAME_OVERFLOW);
+            many[2][row] = 8;
+        }
+    }
 }
 
 static void tier1_frame_test_guards(Tier1FrameTest* test, Arena* output, Arena* scratch)
@@ -727,15 +886,12 @@ static void tier1_frame_test_colors(Tier1FrameTest* test, Arena* output, Arena* 
     test->count = 4;
     test->shape = 0;
     tier1_frame_test_case(test, &request, output, scratch, true);
-    for (uint32_t scalar = 0; scalar < 2; scalar += 1)
-    {
-        const uint64_t mark = output->length;
-        Tier1Frame frame;
-        const Tier1FrameError error = scalar ? tier1_frame_plan_scalar(&request, output, scratch, &frame) : tier1_frame_plan(&request, output, scratch, &frame);
-        tier1_frame_test_expect(test, error == TIER1_FRAME_OK && frame.slot_count == 3 && frame.slot[0] == 0 && frame.slot[1] == 1 && frame.slot[2] == 2 && frame.slot[3] == 2,
-                                "a start takes the slot freed last at its pressure");
-        arena_pop_to(output, mark);
-    }
+    const uint64_t mark = output->length;
+    Tier1Frame frame;
+    const Tier1FrameError error = tier1_frame_plan(&request, output, scratch, &frame);
+    tier1_frame_test_expect(test, error == TIER1_FRAME_OK && frame.slot_count == 3 && frame.slot[0] == 0 && frame.slot[1] == 1 && frame.slot[2] == 2 && frame.slot[3] == 2,
+                            "a start takes the slot freed last at its pressure");
+    arena_pop_to(output, mark);
 }
 
 static void tier1_frame_test_boundaries(Tier1FrameTest* test, Arena* output, Arena* scratch)
@@ -822,6 +978,7 @@ static int run_tier1_frame_tests(int argc, char** argv)
 {
     Tier1FrameTest test = {
         .seed = 177,
+        .digest = 0xcbf29ce484222325ull,
     };
     uint32_t rounds = 8;
     bool options = true;
@@ -913,9 +1070,15 @@ static int run_tier1_frame_tests(int argc, char** argv)
         tier1_frame_test_guards(&test, &output, &scratch);
         tier1_frame_test_boundaries(&test, &output, &scratch);
         tier1_frame_test_colors(&test, &output, &scratch);
+        // Every plan of the default run, frozen while the scalar twin still agreed with the vector path (#2924): the slots
+        // and offsets an object's bytes depend on, which the checks above leave free (any optimal coloring passes them).
+        if (test.seed == 177 && rounds == 8)
+        {
+            tier1_frame_test_expect(&test, test.digest == BUSTER_TIER1_FRAME_TEST_DIGEST, "the default run's plans are the frozen ones");
+        }
     }
     arena_release(&scratch);
     arena_release(&output);
-    fprintf(stderr, "tier1-frame: %" PRIu64 " checks, %" PRIu64 " failures (seed=%" PRIu64 ")\n", test.checks, test.failures, test.seed);
+    fprintf(stderr, "tier1-frame: %" PRIu64 " checks, %" PRIu64 " failures (seed=%" PRIu64 ", digest=0x%016" PRIx64 ")\n", test.checks, test.failures, test.seed, test.digest);
     return test.failures == 0 ? 0 : 1;
 }

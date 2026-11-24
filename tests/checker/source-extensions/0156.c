@@ -1,0 +1,1 @@
+int f(x)struct S{void member;}x;{return 0;}

@@ -1,0 +1,3 @@
+#define u8 [u8]
+u8'' u8'x
+u8"s" u8'a'

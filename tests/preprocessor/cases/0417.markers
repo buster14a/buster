@@ -1,0 +1,16 @@
+# 1 "%d/case.c"
+#include "other.h" /* clang -E -dI */
+# 3 "%d/other.h" 1
+int other;
+# 2 "%d/case.c" 2
+#include "other.h" /* clang -E -dI */
+
+#include <wrapper.h> /* clang -E -dI */
+# 1 "%d/first/wrapper.h" 1
+LAYER_ONE
+#include_next <wrapper.h> /* clang -E -dI */
+# 1 "%d/second/wrapper.h" 1
+LAYER_TWO
+# 3 "%d/first/wrapper.h" 2
+# 5 "%d/case.c" 2
+int y;

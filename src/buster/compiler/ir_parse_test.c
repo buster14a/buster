@@ -6,8 +6,11 @@
 // agree on every column and diagnostic, and roll back both arenas and the unpublished result on failure. Source slices
 // have no sentinel or readable padding. ir_parse_test_guards puts every prefix against a protected page.
 
+#include <dirent.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #define BUSTER_IR_PARSE_TEST_BYTES (16ull << 20)
@@ -221,6 +224,165 @@ static void ir_parse_test_fixture(IrParseTest* test, const char* path, Arena* so
         arena_pop_to(output, output_mark);
         arena_pop_to(twin_output, twin_mark);
     }
+    arena_pop_to(source_arena, source_mark);
+}
+
+// The canonical fixtures are runtime data (#2053): tests/ir/catalog.tsv under the fixture root (tests/ under the working
+// directory, or test-ir-parse's --fixtures DIR) names them, so that editing a fixture or adding one compiles, links and
+// bakes nothing. Its first line is `buster-fixtures v1 ir-parse`; each later line not starting with '#' is a case, three
+// tab-separated fields: its ID, unique, of letters, digits, '.', '_' and '-'; its FILE in the catalog's directory, unique,
+// of the same characters, ending in .ir; and its NAME. Every .ir file in the directory must be a case's (its C sources
+// and subdirectories are other commands' inputs). A missing or malformed catalog, a missing file, a repeated ID or file,
+// an .ir file no line names, or no case at all fails the run, and no case runs.
+static const char* ir_parse_test_fixture_root = "tests";
+static const char ir_parse_test_fixture_header[] = "buster-fixtures v1 ir-parse";
+#define BUSTER_IR_PARSE_TEST_CASES 1024
+
+// Whether `text` is 1 to 128 letters, digits, '.', '_' and '-'.
+static bool ir_parse_test_word(const char* text)
+{
+    const size_t length = strlen(text);
+    bool word = length != 0 && length <= 128;
+    for (size_t i = 0; word && i < length; i += 1)
+    {
+        const char c = text[i];
+        word = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '.' || c == '_' || c == '-';
+    }
+    return word;
+}
+
+// Whether every .ir file in `directory` is one of the catalog's `count` files; the first that isn't in `problem`.
+static bool ir_parse_test_orphans(const char* directory, char* const* files, uint32_t count, char* problem, size_t problem_size)
+{
+    DIR* listing = opendir(directory);
+    bool clean = listing != 0;
+    if (!clean)
+    {
+        snprintf(problem, problem_size, "can't list %s", directory);
+    }
+    for (struct dirent* entry = clean ? readdir(listing) : 0; clean && entry != 0; entry = readdir(listing))
+    {
+        const char* name = entry->d_name;
+        const size_t length = strlen(name);
+        bool named = length < 3 || strcmp(name + length - 3, ".ir") != 0;
+        for (uint32_t i = 0; !named && i < count; i += 1)
+        {
+            named = strcmp(files[i], name) == 0;
+        }
+        if (!named)
+        {
+            snprintf(problem, problem_size, "%s/%s is in no catalog line", directory, name);
+            clean = false;
+        }
+    }
+    if (listing != 0)
+    {
+        closedir(listing);
+    }
+    return clean;
+}
+
+// The catalog's cases, each through ir_parse_test_fixture, once the whole catalog and its files are found sound; else a
+// failure naming what isn't, and no case.
+static void ir_parse_test_catalog(IrParseTest* test, Arena* source_arena, Arena* output, Arena* twin_output, Arena* scratch)
+{
+    const uint64_t source_mark = source_arena->length;
+    char directory[PATH_MAX];
+    char path[PATH_MAX + 256];
+    char problem[PATH_MAX + 512];
+    problem[0] = 0;
+    snprintf(directory, sizeof(directory), "%s/ir", ir_parse_test_fixture_root);
+    snprintf(path, sizeof(path), "%s/catalog.tsv", directory);
+    String8 catalog = { 0 };
+    bool valid = ir_parse_test_read(path, source_arena, &catalog);
+    if (!valid)
+    {
+        snprintf(problem, sizeof(problem), "can't read %s", path);
+    }
+    else if (catalog.length == 0 || catalog.pointer[catalog.length - 1] != '\n')
+    {
+        snprintf(problem, sizeof(problem), "%s doesn't end with a newline", path);
+        valid = false;
+    }
+    char* identifiers[BUSTER_IR_PARSE_TEST_CASES];
+    char* files[BUSTER_IR_PARSE_TEST_CASES];
+    uint32_t count = 0;
+    uint32_t line = 0;
+    char* cursor = catalog.pointer;
+    while (valid && cursor < catalog.pointer + catalog.length)
+    {
+        char* end = memchr(cursor, '\n', (size_t)(catalog.pointer + catalog.length - cursor));
+        *end = 0;
+        line += 1;
+        const bool nul = memchr(cursor, 0, (size_t)(end - cursor)) != 0;
+        if (line == 1)
+        {
+            valid = !nul && strcmp(cursor, ir_parse_test_fixture_header) == 0;
+            if (!valid)
+            {
+                snprintf(problem, sizeof(problem), "%s's first line isn't '%s'", path, ir_parse_test_fixture_header);
+            }
+        }
+        else if (nul || cursor[0] != '#')
+        {
+            char* fields[3] = { cursor, 0, 0 };
+            uint32_t field_count = 1;
+            for (char* tab = nul ? 0 : strchr(cursor, '\t'); tab != 0 && field_count < 4; tab = strchr(tab + 1, '\t'))
+            {
+                *tab = 0;
+                if (field_count < 3)
+                {
+                    fields[field_count] = tab + 1;
+                }
+                field_count += 1;
+            }
+            const size_t file_length = field_count == 3 ? strlen(fields[1]) : 0;
+            valid = !nul && field_count == 3 && ir_parse_test_word(fields[0]) && ir_parse_test_word(fields[1]) && file_length > 3 &&
+                    strcmp(fields[1] + file_length - 3, ".ir") == 0 && fields[2][0] != 0 && count < BUSTER_IR_PARSE_TEST_CASES;
+            if (!valid)
+            {
+                snprintf(problem, sizeof(problem), "%s line %u isn't ID, FILE.ir and NAME, tab-separated", path, line);
+            }
+            for (uint32_t i = 0; valid && i < count; i += 1)
+            {
+                valid = strcmp(identifiers[i], fields[0]) != 0 && strcmp(files[i], fields[1]) != 0;
+                if (!valid)
+                {
+                    snprintf(problem, sizeof(problem), "%s line %u repeats an ID or a file", path, line);
+                }
+            }
+            struct stat status;
+            char case_path[PATH_MAX + 256];
+            snprintf(case_path, sizeof(case_path), "%s/%s", directory, valid ? fields[1] : "");
+            if (valid && (stat(case_path, &status) != 0 || !S_ISREG(status.st_mode)))
+            {
+                snprintf(problem, sizeof(problem), "can't read %s", case_path);
+                valid = false;
+            }
+            if (valid)
+            {
+                identifiers[count] = fields[0];
+                files[count] = fields[1];
+                count += 1;
+            }
+        }
+        cursor = end + 1;
+    }
+    if (valid && count == 0)
+    {
+        snprintf(problem, sizeof(problem), "%s names no case", path);
+        valid = false;
+    }
+    valid = valid && ir_parse_test_orphans(directory, files, count, problem, sizeof(problem));
+    char description[sizeof(problem) + 32];
+    snprintf(description, sizeof(description), "fixtures (#2053): %s", problem);
+    ir_parse_test_expect(test, valid, description);
+    for (uint32_t i = 0; valid && i < count; i += 1)
+    {
+        snprintf(path, sizeof(path), "%s/%s", directory, files[i]);
+        ir_parse_test_fixture(test, path, source_arena, output, twin_output, scratch);
+    }
+    fprintf(stderr, "IR parser: %u canonical fixtures from %s (#2053)\n", valid ? count : 0, directory);
     arena_pop_to(source_arena, source_mark);
 }
 
@@ -699,10 +861,14 @@ static void ir_parse_test_normalization(IrParseTest* test, Arena* output, Arena*
 static int run_ir_parse_tests(int argc, char** argv)
 {
     int result = 1;
+    if (argc == 2 && strcmp(argv[0], "--fixtures") == 0 && argv[1][0] != 0)
+    {
+        ir_parse_test_fixture_root = argv[1];
+        argc = 0;
+    }
     if (argc != 0)
     {
-        (void)argv;
-        fprintf(stderr, "usage: test-ir-parse\n");
+        fprintf(stderr, "usage: test-ir-parse [--fixtures DIRECTORY]\n");
     }
     else
     {
@@ -721,48 +887,7 @@ static int run_ir_parse_tests(int argc, char** argv)
             memset(output_prefix, 0xa5, 19);
             memset(twin_prefix, 0xa5, 19);
             memset(scratch_prefix, 0xa5, 19);
-            static const char* const fixtures[] = {
-                "tests/ir/arithmetic.ir",
-                "tests/ir/conversions.ir",
-                "tests/ir/control.ir",
-                "tests/ir/memory-calls.ir",
-                "tests/ir/dynamic-stack.ir",
-                "tests/ir/frame-address.ir",
-                "tests/ir/labels.ir",
-                "tests/ir/aggregates.ir",
-                "tests/ir/vector-mask.ir",
-                "tests/ir/vector-lanes.ir",
-                "tests/ir/empty.ir",
-                "tests/ir/tier0-add.ir",
-                "tests/ir/hello.ir",
-                "tests/ir/fences.ir",
-                "tests/ir/atomics.ir",
-                "tests/ir/segments.ir",
-                "tests/ir/wide.ir",
-                "tests/ir/intrinsics.ir",
-                "tests/ir/bit-intrinsics.ir",
-                "tests/ir/overflow-intrinsics.ir",
-                "tests/ir/splats.ir",
-                "tests/ir/widths.ir",
-                "tests/ir/rows.ir",
-                "tests/ir/carrier-rows.ir",
-                "tests/ir/masked-memory.ir",
-                "tests/ir/gathers.ir",
-                "tests/ir/fma.ir",
-                "tests/ir/lane-moves.ir",
-                "tests/ir/reductions.ir",
-                "tests/ir/lane-unary.ir",
-                "tests/ir/carriers.ir",
-                "tests/ir/bitshuffle.ir",
-                "tests/ir/quadword-op.ir",
-                "tests/ir/pairwise.ir",
-                "tests/ir/funnel.ir",
-                "tests/ir/fround.ir",
-            };
-            for (uint32_t i = 0; i < sizeof(fixtures) / sizeof(fixtures[0]); i += 1)
-            {
-                ir_parse_test_fixture(&test, fixtures[i], &source, &output, &twin_output, &scratch);
-            }
+            ir_parse_test_catalog(&test, &source, &output, &twin_output, &scratch);
             for (uint32_t op = IR_CONST; op < IR_OP_COUNT; op += 1)
             {
                 ir_parse_test_expect(&test, test.operations[op], "canonical fixture coverage omitted an opcode");

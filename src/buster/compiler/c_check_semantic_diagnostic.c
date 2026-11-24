@@ -489,6 +489,12 @@ static const char* check_semantic_input(const Parser* parser, Preprocessor* pp, 
                  check_warning_text(scratch, "type %.*s in generic association compatible with previously specified type %.*s", (int)type.length, type.pointer,
                                     (int)earlier.length, earlier.pointer);
     }
+    else if (report->message == CHECK_INPUT_AUTO_TYPE_NULLABILITY && report->type != 0 && name.length != 0)
+    {
+        const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, report->type, report->type_spelling);
+        result = type.length == 0 ? NULL : check_warning_text(scratch, "nullability specifier '%.*s' cannot be applied to non-pointer type %.*s",
+                                                              (int)name.length, name.pointer, (int)type.length, type.pointer);
+    }
     else if (report->message == CHECK_INPUT_AUTO_ATOMIC_POINTER && report->type != 0 && name.length != 0)
     {
         const String8 type = check_semantic_auto_type_spelling(parser, pp, input, types, spell, report->type, token, scratch);

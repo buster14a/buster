@@ -1,0 +1,1 @@
+int f(x,y,z)struct S{int a;}x;struct S{long b;}y;struct S*z;{return x.a+(int)y.b+z->a;}

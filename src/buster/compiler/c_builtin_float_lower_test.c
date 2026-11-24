@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// F32/F64/F80 runtime recipes against the host Clang's own classification and constant builtins. Each append path is
-// compiled by its corresponding Tier 0 path, compared record-for-record and executed in an alarm-bounded child.
+// F32/F64/F80 runtime recipes against the host Clang's own classification and constant builtins. Each append path's
+// stream is compiled by Tier 0, the two compared record-for-record and executed in an alarm-bounded child.
 // Raw patterns include both signs, signaling/quiet NaNs, subnormals, boundaries and randoms. A live stack prefix
 // survives each recipe. Constants are read back through their actual floating storage, never numerically converted.
 // Guard pages bound exact publication tails and snapshots require refusals to leave every output byte untouched.
@@ -373,7 +373,7 @@ static bool cbuiltin_float_lower_test_programs(CBuiltinFloatLowerTestTally* tall
         result &= cbuiltin_float_lower_test_expect(tally, checked.error == TIER0_OK, checked.rule != 0 ? checked.rule : "typed validation", call->id, checked.node);
         if (result)
         {
-            codes[path] = path == 0 ? tier0_compile_scalar(&function, arena) : tier0_compile(&function, arena);
+            codes[path] = tier0_compile(&function, arena);
             result &= cbuiltin_float_lower_test_expect(tally, codes[path].error == TIER0_OK, "Tier 0 compile", call->id, codes[path].node);
         }
     }
@@ -381,7 +381,7 @@ static bool cbuiltin_float_lower_test_programs(CBuiltinFloatLowerTestTally* tall
     {
         result &= cbuiltin_float_lower_test_expect(tally, codes[0].count == codes[1].count && codes[0].branch_count == 0 && codes[1].branch_count == 0 &&
             codes[0].reference_count == 0 && codes[1].reference_count == 0 && codes[0].deferred == codes[1].deferred &&
-            memcmp(codes[0].records, codes[1].records, codes[0].count * sizeof(X86Instruction)) == 0, "Tier 0 twins", call->id, 0);
+            memcmp(codes[0].records, codes[1].records, codes[0].count * sizeof(X86Instruction)) == 0, "both appends' Tier 0 code", call->id, 0);
     }
     for (uint32_t path = 0; result && path < 2; path += 1)
     {
@@ -756,7 +756,7 @@ static bool cbuiltin_float_lower_test_x87_program(CBuiltinFloatLowerTestTally* t
         result &= cbuiltin_float_lower_test_expect(tally, checked.error == TIER0_OK, checked.rule != 0 ? checked.rule : "long double typed validation", call->id, checked.node);
         if (result)
         {
-            codes[path] = path == 0 ? tier0_compile_scalar(&function, arena) : tier0_compile(&function, arena);
+            codes[path] = tier0_compile(&function, arena);
             result &= cbuiltin_float_lower_test_expect(tally, codes[path].error == TIER0_OK, "long double Tier 0 compile", call->id, codes[path].node);
         }
     }
@@ -764,7 +764,7 @@ static bool cbuiltin_float_lower_test_x87_program(CBuiltinFloatLowerTestTally* t
     {
         result &= cbuiltin_float_lower_test_expect(tally, codes[0].count == codes[1].count && codes[0].branch_count == 0 && codes[1].branch_count == 0 &&
             codes[0].reference_count == 0 && codes[1].reference_count == 0 && codes[0].deferred == codes[1].deferred &&
-            memcmp(codes[0].records, codes[1].records, codes[0].count * sizeof(X86Instruction)) == 0, "long double Tier 0 twins", call->id, 0);
+            memcmp(codes[0].records, codes[1].records, codes[0].count * sizeof(X86Instruction)) == 0, "both appends' long double Tier 0 code", call->id, 0);
     }
     for (uint32_t path = 0; result && path < 2; path += 1)
     {
