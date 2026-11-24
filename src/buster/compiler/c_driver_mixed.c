@@ -42,7 +42,7 @@ static int check_driver_assembly(const CheckDriverCommand* command, const PPOpti
     else
     {
         x86_match_initialize(index, &options.target);
-        const AsmOptions assembly = { .vectorized = !command->scalar, .intel = command->assembly_intel };
+        const AsmOptions assembly = { .intel = command->assembly_intel };
         AsmResult assembled = asm_assemble(source, index, assembly, &lane->arena);
         if (assembled.error != NULL)
         {

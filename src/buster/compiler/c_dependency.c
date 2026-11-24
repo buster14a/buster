@@ -11,19 +11,15 @@
 // output and written destinations must be disjoint from one another and from
 // the input records and strings, which stay immutable for sizing and emission. A null output with zero capacity is a size query.
 // The result is a byte slice, not a NUL-terminated string. No allocation or I/O is
-// hidden here. Filename classification has bounded AVX-512BW and scalar twins.
+// hidden here. Filename classification is one bounded AVX-512 scan (dependency_special: AVX-512BW, VBMI's vpermb
+// and BMI2's bzhi).
 
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 
-#if defined(__AVX512F__) && defined(__AVX512BW__)
 #include <immintrin.h>
-#define BUSTER_DEPENDENCY_VECTOR 1
-#else
-#define BUSTER_DEPENDENCY_VECTOR 0
-#endif
 
 typedef struct DependencyTarget DependencyTarget;
 struct DependencyTarget
@@ -51,7 +47,6 @@ struct DependencyRule
     uint32_t file_count;
     bool include_system;
     bool phony;
-    bool scalar;
     bool omit_source; // Stdin has no filesystem prerequisite; all other sources remain required.
 };
 
@@ -71,44 +66,19 @@ struct DependencySink
     DependencyStatus status;
 };
 
-// Classification alone reads the source; count is in [0, 64]. Bits beyond it are zero.
-static uint64_t dependency_special_scalar(const char* text, uint32_t count)
+// Which of `count` bytes of `text` (0 to 64) are special in a rule: NUL, CR and LF (refused), space, tab, '$', '#' and
+// '\\'. Classification alone reads the source; the bits past `count` are zero. One masked load, the bytes below 64 by a
+// table lookup (vpermb, 0x01 at the special ones) and '\\' by a compare: on the 9700X it beats a byte at a time from 2
+// bytes on, 2.9 times on musl's header paths, where eight compares per byte (the vector arm before #2924) lost on
+// paths of 1, 2 and 8 bytes.
+static uint64_t dependency_special(const char* text, uint32_t count)
 {
-    uint64_t mask = 0;
-    for (uint32_t i = 0; i < count; i += 1)
-    {
-        const unsigned char c = (unsigned char)text[i];
-        const bool special = c == 0 || c == '\r' || c == '\n' || c == ' ' || c == '\t' ||
-                             c == '$' || c == '#' || c == '\\';
-        mask |= (uint64_t)special << i;
-    }
-    return mask;
-}
-
-static uint64_t dependency_special(const char* text, uint32_t count, bool scalar)
-{
-    uint64_t mask;
-#if BUSTER_DEPENDENCY_VECTOR
-    if (!scalar && count != 0)
-    {
-        const uint64_t live = count == 64 ? UINT64_MAX : (UINT64_C(1) << count) - 1;
-        const __m512i bytes = _mm512_maskz_loadu_epi8((__mmask64)live, text);
-        mask = (uint64_t)(_mm512_cmpeq_epi8_mask(bytes, _mm512_setzero_si512()) |
-                          _mm512_cmpeq_epi8_mask(bytes, _mm512_set1_epi8('\r')) |
-                          _mm512_cmpeq_epi8_mask(bytes, _mm512_set1_epi8('\n')) |
-                          _mm512_cmpeq_epi8_mask(bytes, _mm512_set1_epi8(' ')) |
-                          _mm512_cmpeq_epi8_mask(bytes, _mm512_set1_epi8('\t')) |
-                          _mm512_cmpeq_epi8_mask(bytes, _mm512_set1_epi8('$')) |
-                          _mm512_cmpeq_epi8_mask(bytes, _mm512_set1_epi8('#')) |
-                          _mm512_cmpeq_epi8_mask(bytes, _mm512_set1_epi8('\\'))) & live;
-    }
-    else
-#endif
-    {
-        (void)scalar;
-        mask = dependency_special_scalar(text, count);
-    }
-    return mask;
+    const __mmask64 live = _bzhi_u64(~UINT64_C(0), count);
+    const __m512i bytes = _mm512_maskz_loadu_epi8(live, text);
+    const __m512i table = _mm512_set_epi64(0, 0, 0, INT64_C(0x0000000101000001), 0, 0, INT64_C(0x0000010000010100), INT64_C(0x01));
+    const __mmask64 low = _mm512_cmplt_epu8_mask(bytes, _mm512_set1_epi8(64));
+    const __mmask64 hit = _mm512_mask_test_epi8_mask(low, _mm512_permutexvar_epi8(bytes, table), _mm512_set1_epi8(1));
+    return (uint64_t)((hit | _mm512_cmpeq_epi8_mask(bytes, _mm512_set1_epi8('\\'))) & live);
 }
 
 static void dependency_append(DependencySink* sink, const char* text, uint64_t length)
@@ -154,7 +124,7 @@ static void dependency_backslashes(DependencySink* sink, uint64_t length)
 // GNU/Clang dependency quoting: double $, prefix # and whitespace with \, and
 // double any immediately preceding backslashes when escaping whitespace.
 // Verbatim -MT targets are only checked for bytes that would inject rule lines.
-static void dependency_text(DependencySink* sink, String8 text, bool quote, bool scalar, bool empty_allowed)
+static void dependency_text(DependencySink* sink, String8 text, bool quote, bool empty_allowed)
 {
     const uint64_t length = text.length;
     const char* const bytes = text.pointer;
@@ -167,7 +137,7 @@ static void dependency_text(DependencySink* sink, String8 text, bool quote, bool
     {
         const uint64_t remaining = length - offset;
         const uint32_t count = remaining < 64 ? (uint32_t)remaining : 64;
-        uint64_t mask = dependency_special(bytes + offset, count, scalar);
+        uint64_t mask = dependency_special(bytes + offset, count);
         uint32_t first = 0;
         while (mask != 0 && sink->status == DEPENDENCY_OK)
         {
@@ -223,7 +193,6 @@ static void dependency_emit(DependencySink* sink, const DependencyRule* rule)
     const DependencyTarget* const targets = rule->targets;
     const uint32_t file_count = rule->file_count;
     const DependencyFile* const files = rule->files;
-    const bool scalar = rule->scalar;
     const bool include_system = rule->include_system;
     const String8 source = rule->source;
     if ((target_count != 0 && targets == NULL) || (file_count != 0 && files == NULL))
@@ -232,7 +201,7 @@ static void dependency_emit(DependencySink* sink, const DependencyRule* rule)
     }
     if (target_count == 0)
     {
-        dependency_text(sink, rule->object, true, scalar, false);
+        dependency_text(sink, rule->object, true, false);
     }
     for (uint32_t i = 0; i < target_count && sink->status == DEPENDENCY_OK; i += 1)
     {
@@ -240,13 +209,13 @@ static void dependency_emit(DependencySink* sink, const DependencyRule* rule)
         {
             dependency_append(sink, " ", 1);
         }
-        dependency_text(sink, targets[i].text, targets[i].quote, scalar, true);
+        dependency_text(sink, targets[i].text, targets[i].quote, true);
     }
     dependency_append(sink, ":", 1);
     if (!rule->omit_source)
     {
         dependency_append(sink, " ", 1);
-        dependency_text(sink, source, true, scalar, false);
+        dependency_text(sink, source, true, false);
     }
     for (uint32_t i = 0; i < file_count && sink->status == DEPENDENCY_OK; i += 1)
     {
@@ -261,7 +230,7 @@ static void dependency_emit(DependencySink* sink, const DependencyRule* rule)
             else if (!dependency_same_path(file.path, source))
             {
                 dependency_append(sink, " ", 1);
-                dependency_text(sink, file.path, true, scalar, false);
+                dependency_text(sink, file.path, true, false);
             }
         }
     }
@@ -275,7 +244,7 @@ static void dependency_emit(DependencySink* sink, const DependencyRule* rule)
             const DependencyFile file = files[i];
             if (file.used && (include_system || !file.system) && !dependency_same_path(file.path, source))
             {
-                dependency_text(sink, file.path, true, scalar, false);
+                dependency_text(sink, file.path, true, false);
                 dependency_append(sink, ":\n", 2);
             }
         }

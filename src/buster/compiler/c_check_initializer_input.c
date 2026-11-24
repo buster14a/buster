@@ -309,9 +309,9 @@ static bool check_init_diagnostic_append(CheckInitDiagnostic* result, CheckInitF
 
 // A compound literal must be diagnosed before an enclosing initializer can decide whether its source exists.
 // Completion order is a postorder of the nested source spans; equal ends take the inner declaration first. The
-// existing stable scalar/vector radix kernel retains that tie order, supplied by reversing the declaration list.
+// bindings' stable radix sort (c_bindings_sort) retains that tie order, supplied by reversing the declaration list.
 // Initializers without a compound literal keep their original order and pay no extra allocation or sorting.
-static bool check_init_diagnostic_order(const CheckInput* input, uint32_t* declarations, uint32_t count, bool scalar, Arena* scratch, bool* compounds)
+static bool check_init_diagnostic_order(const CheckInput* input, uint32_t* declarations, uint32_t count, Arena* scratch, bool* compounds)
 {
     *compounds = false;
     for (uint32_t d = 0; !*compounds && d < count; d += 1)
@@ -336,7 +336,7 @@ static bool check_init_diagnostic_order(const CheckInput* input, uint32_t* decla
         }
         if (valid)
         {
-            const uint64_t* sorted = c_bindings_sort(keys, keys + count, count, !scalar, any ^ every);
+            const uint64_t* sorted = c_bindings_sort(keys, keys + count, count, any ^ every);
             for (uint32_t d = 0; d < count; d += 1)
             {
                 declarations[d] = (uint32_t)sorted[d];
@@ -735,7 +735,7 @@ static bool check_initializers_diagnose_walk(CheckInitDiagnostic* result, const 
         result->status = CHECK_INIT_RESOURCE;
     }
     bool compounds = false;
-    if (valid && !check_init_diagnostic_order(input, declarations, declaration_count, parser->options.scalar, scratch, &compounds))
+    if (valid && !check_init_diagnostic_order(input, declarations, declaration_count, scratch, &compounds))
     {
         valid = false;
         result->status = CHECK_INIT_RESOURCE;

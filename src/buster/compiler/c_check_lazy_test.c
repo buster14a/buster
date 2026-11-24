@@ -151,14 +151,12 @@ static void check_test_lazy_fixture(CheckTest* test, const CheckLazyFixture* fix
         snprintf(description, sizeof(description), "%s: %s grammar replay oracle", fixture->name, path == 0 ? "scalar" : "vector");
         check_test_expect(test, replayed && scratch.length == 0, description);
         check_test_lazy_path(test, replays + path, parsers[path].tokens.count, CHECK_LAZY_TEST_REPLAY, "replay oracle reports every grammar token");
-        uint32_t eager_selected[2] = { 0 };
-        const bool scalar_eager = check_lazy_eager(parsers + path, &pp, true, eager_selected);
-        const bool vector_eager = check_lazy_eager(parsers + path, &pp, false, eager_selected + 1);
+        uint32_t eager_selected = 0;
+        const bool eager = check_lazy_eager(parsers + path, &pp, &eager_selected);
         const bool opaque = replayed && replays[path].body_count != 0 && (replays[path].bodies[0].flags & BUSTER_CHECK_LAZY_OPAQUE) != 0;
         snprintf(description, sizeof(description), "%s: eager preflight agrees with the old opaque policy", fixture->name);
-        check_test_expect(test, replayed && scalar_eager == vector_eager && eager_selected[0] == eager_selected[1] &&
-                               (replays[path].body_count == 0 || scalar_eager == opaque) &&
-                               (!scalar_eager || (replays[path].deferred_count == 0 && eager_selected[0] == replays[path].body_count)), description);
+        check_test_expect(test, replayed && (replays[path].body_count == 0 || eager == opaque) &&
+                               (!eager || (replays[path].deferred_count == 0 && eager_selected == replays[path].body_count)), description);
     }
     for (uint32_t path = 0; ready && path < BUSTER_ARRAY_LENGTH(plans); path += 1)
     {
@@ -307,7 +305,7 @@ static void check_test_lazy_frontier(CheckTest* test)
         arena_reserve(1u << 24),
     };
     Arena scratch = arena_reserve(1u << 24);
-    CheckLazy plans[4] = { 0 };
+    CheckLazy plans[2] = { 0 };
     CheckLazy replays[2] = { 0 };
     bool ready = length < sizeof(source) && scratch.base != 0 && intern_initialize(&identifiers) && pp_initialize(&pp, &options, &identifiers) &&
                  pp_run_source(&pp, "frontier.c", (const uint8_t*)source, length);
@@ -325,13 +323,15 @@ static void check_test_lazy_frontier(CheckTest* test)
         check_test_expect(test, replayed && scratch.length == 0, "original 138-body demand graph has an independent grammar replay oracle");
         check_test_lazy_path(test, replays + path, parsers[path].tokens.count, CHECK_LAZY_TEST_REPLAY, "frontier replay reports every grammar token");
     }
+    // Each parse's plan against the frontier the fixture fixes (the first 71 bodies and the last selected), which no
+    // solver computes, and against its grammar replay (whose reachability is the same c_lowering_vector as the plan's).
     for (uint32_t path = 0; ready && path < BUSTER_ARRAY_LENGTH(plans); path += 1)
     {
-        const Parser* parser = parsers + path / 2;
-        const bool planned = check_lazy_plan(plans + path, parser, &pp, outputs + path, &scratch, (path & 1) == 0);
+        const Parser* parser = parsers + path;
+        const bool planned = check_lazy_plan(plans + path, parser, &pp, outputs + path, &scratch, path == 0);
         check_test_expect(test, planned && plans[path].body_count == 138 && plans[path].selected_count == 72 && plans[path].deferred_count == 66,
                           "demand crossing two bitset words retains 71-function chain and ordinary entry");
-        check_test_lazy_same(test, plans + path, replays + path / 2, "demand frontier agrees with the grammar replay on every body and token");
+        check_test_lazy_same(test, plans + path, replays + path, "demand frontier agrees with the grammar replay on every body and token");
         check_test_lazy_path(test, plans + path, parser->tokens.count, CHECK_LAZY_TEST_TREE, "ordinary prototype/function demand frontier needs no grammar replay");
         for (uint32_t body = 0; planned && body < plans[path].body_count; body += 1)
         {
@@ -342,7 +342,7 @@ static void check_test_lazy_frontier(CheckTest* test)
     }
     for (uint32_t path = 1; ready && path < BUSTER_ARRAY_LENGTH(plans); path += 1)
     {
-        check_test_lazy_same(test, plans + path, plans, "independent syntax parses and demand frontiers agree beyond bitset word boundaries");
+        check_test_lazy_same(test, plans + path, plans, "both syntax parses' demand frontiers agree beyond bitset word boundaries");
     }
     for (uint32_t path = 0; path < BUSTER_ARRAY_LENGTH(parsers); path += 1)
     {
@@ -438,14 +438,15 @@ static void check_test_lazy_masks(CheckTest* test)
                 parser.tokens.kinds = kinds;
                 parser.tokens.names = names;
                 parser.tree.roles = roles;
-                const uint64_t scalar = check_lazy_tree_mask(&parser, targets, limit, first, count, true);
-                const uint64_t vector = check_lazy_tree_mask(&parser, targets, limit, first, count, false);
+                // (The token-at-a-time mask is the fallback for a name count past the gathers' signed indices.)
+                const uint64_t scalar = check_lazy_tree_mask_scalar(&parser, targets, limit, first, count);
+                const uint64_t vector = check_lazy_tree_mask(&parser, targets, limit, first, count);
                 differences += scalar != expected || vector != expected;
                 cases += 1;
             }
         }
     }
-    check_test_expect(test, differences == 0 && cases == 1560, "lazy scalar/vector masks match independent keys and roles at every guarded tail");
+    check_test_expect(test, differences == 0 && cases == 1560, "lazy masks and their fallback match independent keys and roles at every guarded tail");
     for (uint32_t column = 0; column < COLUMNS; column += 1)
     {
         if (mappings[column] != MAP_FAILED)

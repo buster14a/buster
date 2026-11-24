@@ -264,7 +264,7 @@ static bool check_program_weak_late(CheckProgram* program, const CheckProgramTar
     uint32_t* points = sorting != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : NULL;
     uint8_t* late = points != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1) : NULL;
     bool valid = late != NULL;
-    const uint64_t* keys = valid && count > 1 ? c_bindings_sort(events->weak_keys, sorting, count, !scalar, UINT32_MAX) : events->weak_keys;
+    const uint64_t* keys = valid && count > 1 ? c_bindings_sort(events->weak_keys, sorting, count, UINT32_MAX) : events->weak_keys;
     for (uint32_t i = 0; valid && i < count; i += 1)
     {
         const uint32_t token = (uint32_t)keys[i];

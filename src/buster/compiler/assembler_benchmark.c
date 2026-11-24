@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
-// Included by main.c. Interleaved scalar/vector component timings and optional fresh-process comparisons. Source
+// Included by main.c. Component timings over repeated passes and optional fresh-process comparisons. Source
 // generation and correctness checks are outside the samples. Every process reads the same warm file and overwrites
 // the same output on the same filesystem; no preprocessing, pipes, disassembly or validation is timed for one side.
 
@@ -105,19 +105,18 @@ static bool asm_benchmark_external(String8 source)
         snprintf(output, sizeof(output), "%s/output.o", directory);
         snprintf(errors, sizeof(errors), "%s/errors", directory);
         okay = object_write_file(input, (const uint8_t*)source.pointer, source.length) == OBJECT_ERROR_NONE;
-        char* vector[] = {compiler, "assemble", "--isa=avx512f", "-o", output, input, 0};
-        char* scalar[] = {compiler, "assemble", "--scalar", "--isa=avx512f", "-o", output, input, 0};
+        char* buster[] = {compiler, "assemble", "--isa=avx512f", "-o", output, input, 0};
         char* gas[] = {"as", "--64", "-o", output, input, 0};
         char* llvm[] = {"clang", "-c", "-x", "assembler", "-o", output, input, 0};
-        char** commands[] = {vector, scalar, gas, llvm};
-        const char* names[] = {"buster-vector", "buster-scalar", "GNU-as", "clang-integrated"};
-        uint64_t samples[4][BUSTER_ASM_BENCHMARK_PASSES];
-        // Warm all four executables and input/output pages once, then rotate the first process in each sample.
+        char** commands[] = {buster, gas, llvm};
+        const char* names[] = {"buster", "GNU-as", "clang-integrated"};
+        uint64_t samples[3][BUSTER_ASM_BENCHMARK_PASSES];
+        // Warm all three executables and input/output pages once, then rotate the first process in each sample.
         for (uint32_t pass = 0; pass <= BUSTER_ASM_BENCHMARK_PASSES && okay; pass += 1)
         {
-            for (uint32_t order = 0; order < 4 && okay; order += 1)
+            for (uint32_t order = 0; order < 3 && okay; order += 1)
             {
-                const uint32_t row = (pass + order) % 4;
+                const uint32_t row = (pass + order) % 3;
                 const uint64_t start = asm_clock();
                 okay = asm_benchmark_process(commands[row], errors);
                 const uint64_t elapsed = asm_clock() - start;
@@ -133,7 +132,7 @@ static bool asm_benchmark_external(String8 source)
         }
         if (okay)
         {
-            for (uint32_t row = 0; row < 4; row += 1)
+            for (uint32_t row = 0; row < 3; row += 1)
             {
                 const uint64_t median = asm_benchmark_median(samples[row], BUSTER_ASM_BENCHMARK_PASSES);
                 printf("process %-17s %9.3f ms %8.2f MB/s\n", names[row], median / 1e6, source.length * 1000.0 / median);
@@ -153,8 +152,6 @@ static int run_assembler_benchmark(int count, char** arguments)
     const char* workload = "mixed";
     const char* input = 0;
     bool external = false;
-    uint32_t after_scalar = 0;
-    int only = -1;
     bool okay = true;
     for (int i = 0; i < count; i += 1)
     {
@@ -165,19 +162,6 @@ static int run_assembler_benchmark(int count, char** arguments)
         else if (strcmp(arguments[i], "--input") == 0 && i + 1 < count)
         {
             input = arguments[++i];
-        }
-        else if (strcmp(arguments[i], "--after-scalar") == 0 && i + 1 < count)
-        {
-            char* end;
-            const unsigned long n = strtoul(arguments[++i], &end, 10);
-            okay &= *end == 0 && n <= 1000;
-            after_scalar = n;
-        }
-        else if (strcmp(arguments[i], "--only") == 0 && i + 1 < count)
-        {
-            const char* name = arguments[++i];
-            only = strcmp(name, "vector") == 0 ? 1 : strcmp(name, "scalar") == 0 ? 0 : -1;
-            okay &= only != -1;
         }
         else if (strcmp(arguments[i], "--functions") == 0 && i + 1 < count)
         {
@@ -220,89 +204,60 @@ static int run_assembler_benchmark(int count, char** arguments)
         source = asm_benchmark_source(&source_arena, functions, workload);
     }
     okay &= source.pointer != 0;
-    uint64_t samples[2][8][BUSTER_ASM_BENCHMARK_PASSES];
+    uint64_t samples[8][BUSTER_ASM_BENCHMARK_PASSES];
     uint64_t memory = 0;
     uint32_t instructions = 0;
     uint8_t* reference = 0;
     uint64_t reference_size = 0;
+    // The first pass warms the caches and keeps the object every later pass must give again.
     for (uint32_t pass = 0; pass <= BUSTER_ASM_BENCHMARK_PASSES && okay; pass += 1)
     {
-        for (uint32_t order = 0; order < 2 && okay; order += 1)
+        work.length = 0;
+        const uint64_t start = asm_clock();
+        AsmResult result = asm_assemble(source, index, (AsmOptions){0}, &work);
+        const uint64_t assembled = asm_clock();
+        const Object object = asm_object(&result, BUSTER_S8("benchmark.s"), &work);
+        const uint64_t finished = asm_clock();
+        okay = result.error == 0 && object.error == OBJECT_ERROR_NONE;
+        if (okay && reference == 0)
         {
-            const uint32_t path = (pass + order) % 2;
-            if (pass != 0 && only >= 0 && path != (uint32_t)only)
+            reference_size = object.size;
+            reference = arena_push(&source_arena, object.size, 1);
+            okay = reference != 0;
+            if (okay)
             {
-                continue;
+                memcpy(reference, object.bytes, object.size);
             }
-            if (after_scalar != 0)
-            {
-                const uint64_t until = asm_clock() + (uint64_t)after_scalar * 1000000;
-                while (asm_clock() < until && okay)
-                {
-                    work.length = 0;
-                    const AsmResult warm = asm_assemble(source, index, (AsmOptions){0}, &work);
-                    okay = warm.error == 0;
-                }
-            }
-            work.length = 0;
-            const uint64_t start = asm_clock();
-            AsmResult result = asm_assemble(source, index, (AsmOptions){.vectorized = path != 0}, &work);
-            const uint64_t assembled = asm_clock();
-            const Object object = asm_object(&result, BUSTER_S8("benchmark.s"), &work);
-            const uint64_t finished = asm_clock();
-            okay = result.error == 0 && object.error == OBJECT_ERROR_NONE;
-            if (okay && reference == 0)
-            {
-                reference_size = object.size;
-                reference = arena_push(&source_arena, object.size, 1);
-                okay = reference != 0;
-                if (okay)
-                {
-                    memcpy(reference, object.bytes, object.size);
-                }
-            }
-            okay = okay && reference_size == object.size && memcmp(reference, object.bytes, object.size) == 0;
-            if (!okay)
-            {
-                fprintf(stderr, "assembler benchmark correctness failure: %s at %u\n", result.error != 0 ? result.error : "object or scalar/vector mismatch", result.location);
-            }
-            if (pass != 0)
-            {
-                samples[path][0][pass - 1] = result.lex_ns;
-                samples[path][1][pass - 1] = result.parse_ns;
-                samples[path][2][pass - 1] = result.match_ns;
-                samples[path][3][pass - 1] = result.layout_ns;
-                samples[path][4][pass - 1] = result.emit_ns;
-                samples[path][5][pass - 1] = finished - assembled;
-                samples[path][6][pass - 1] = finished - start;
-                samples[path][7][pass - 1] = result.cfi_ns;
-            }
-            memory = work.length;
-            instructions = result.instructions;
         }
+        okay = okay && reference_size == object.size && memcmp(reference, object.bytes, object.size) == 0;
+        if (!okay)
+        {
+            fprintf(stderr, "assembler benchmark correctness failure: %s at %u\n", result.error != 0 ? result.error : "the object differs between passes", result.location);
+        }
+        if (pass != 0)
+        {
+            samples[0][pass - 1] = result.lex_ns;
+            samples[1][pass - 1] = result.parse_ns;
+            samples[2][pass - 1] = result.match_ns;
+            samples[3][pass - 1] = result.layout_ns;
+            samples[4][pass - 1] = result.emit_ns;
+            samples[5][pass - 1] = finished - assembled;
+            samples[6][pass - 1] = finished - start;
+            samples[7][pass - 1] = result.cfi_ns;
+        }
+        memory = work.length;
+        instructions = result.instructions;
     }
     if (okay)
     {
-        printf("assembler %s: %u functions, %u instructions, %llu source bytes; %u interleaved passes\n", workload, functions, instructions, (unsigned long long)source.length, BUSTER_ASM_BENCHMARK_PASSES);
+        printf("assembler %s: %u functions, %u instructions, %llu source bytes; %u passes\n", workload, functions, instructions, (unsigned long long)source.length, BUSTER_ASM_BENCHMARK_PASSES);
         printf("init: %.3f ms; index: %llu bytes; work arena: %llu bytes; ELF: %llu bytes\n", initialization_ns / 1e6, (unsigned long long)sizeof(*index), (unsigned long long)memory, (unsigned long long)reference_size);
-        if (after_scalar != 0)
+        printf("       lex       parse       match      layout    encode/link  object      total       CFI (ms, included in encode/link)\n");
+        for (uint32_t phase = 0; phase < 8; phase += 1)
         {
-            printf("component samples follow %u ms of scalar assembly (outside the sample)\n", after_scalar);
+            printf(" %10.3f", asm_benchmark_median(samples[phase], BUSTER_ASM_BENCHMARK_PASSES) / 1e6);
         }
-        printf("path       lex       parse       match      layout    encode/link  object      total       CFI (ms, included in encode/link)\n");
-        for (uint32_t path = 0; path < 2; path += 1)
-        {
-            if (only >= 0 && path != (uint32_t)only)
-            {
-                continue;
-            }
-            printf("%-7s", path != 0 ? "vector" : "scalar");
-            for (uint32_t phase = 0; phase < 8; phase += 1)
-            {
-                printf(" %10.3f", asm_benchmark_median(samples[path][phase], BUSTER_ASM_BENCHMARK_PASSES) / 1e6);
-            }
-            printf("\n");
-        }
+        printf("\n");
         if (external)
         {
             okay = asm_benchmark_external(source);
@@ -310,7 +265,7 @@ static int run_assembler_benchmark(int count, char** arguments)
     }
     else if (!source.pointer)
     {
-        fprintf(stderr, "usage: compiler benchmark-assembler [--input FILE | --functions 1..2048 --workload mixed|registers|simd|att] [--only scalar|vector] [--after-scalar MS] [--external]\n");
+        fprintf(stderr, "usage: compiler benchmark-assembler [--input FILE | --functions 1..2048 --workload mixed|registers|simd|att] [--external]\n");
     }
     arena_release(&work);
     arena_release(&source_arena);

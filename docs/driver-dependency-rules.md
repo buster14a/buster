@@ -9,8 +9,8 @@ consumed-file observations (#1113), for `-M`, `-MM`, `-MD`, `-MMD`, `-MF`, `-MT`
 standard input, parallel units, publication and the remaining compatibility gaps.
 
 The standalone C tests live in `tests/driver/dependency_rule.c`. They are
-registered in `tools/ci/correctness.tests`, which builds scalar and native variants
-and runs both with `--oracle`. End-to-end cases in `c_driver_compatibility_test.c`
+registered in `tools/ci/correctness.tests`, which builds the native (AVX-512)
+variant and runs it with `--oracle`. End-to-end cases in `c_driver_compatibility_test.c`
 are called by `test-checker-driver`; they invoke the real compiler executable.
 
 ## Input ownership and collection contract
@@ -69,9 +69,14 @@ result, and all input records/strings must be disjoint and valid for their state
 lengths; inputs remain unchanged throughout both passes. The module does not
 open files, allocate memory, or itself provide atomic filesystem publication.
 
-Classification has a bounded AVX-512BW implementation and a scalar twin selected
-by `rule.scalar`. Masked tail loads read no byte beyond the slice. A build without
-AVX-512F/BW compiles only the scalar path. Repeated immutable descriptor fields
+Classification (`dependency_special`) is one bounded AVX-512 scan of up to 64
+bytes: a masked load, a `vpermb` lookup of the bytes below 64 and a compare for
+`\`. Masked tail loads read no byte beyond the slice. Since #2924 it is the only
+implementation: its scalar twin went after the 9700X timed both on rules of 200
+paths of 1 to 128 bytes and on musl's header paths (the twin took 2.9 times its
+cycles on the real paths, and from 2 bytes on at least as many; on paths of one
+byte, which a rule hardly has, the scan took about 1.5 cycles more of ~37 a path,
+where an identical-code control read 4% to 6% apart). Repeated immutable descriptor fields
 are cached in locals; no `restrict` assumptions or strict-aliasing changes are
 introduced. No throughput improvement is claimed without a representative 9700X
 measurement after integration.
@@ -84,8 +89,7 @@ compare short raw/quoted target rules against each compiler, using original C
 fixtures in a private temporary directory. The default tests need no external
 compiler execution.
 
-On an AVX-512 host (the compiler's only host since #2924; the baseline
-`-march=x86-64` build of the scalar classifier went with the scalar host):
+On an AVX-512 host (the compiler's only host since #2924):
 
 ```sh
 clang -std=c17 -O2 -march=native -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Wextra -Werror tests/driver/dependency_rule.c -o /tmp/buster-dependency-native && /tmp/buster-dependency-native --oracle

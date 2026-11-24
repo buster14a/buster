@@ -3,8 +3,9 @@
 //
 // Checked scalar definitions for the straight-line emitter (#1114). The allocation certificate bounds each value's
 // uninterrupted register placement. A separate owner sweep checks every actual selected operand, so shortened or
-// missing allocator intervals cannot invent value flow. This path regenerates each concrete kernel, resolves its
-// immediate choices with the scalar oracle, and checks its actual bytes and clobbers. No spill, reload, rematerialization,
+// missing allocator intervals cannot invent value flow. This path regenerates each concrete kernel, checks its
+// immediates' forms by x86_choose_forms a batch at a time (tier1_cert_emitted_choices), and checks its actual bytes and
+// clobbers. No spill, reload, rematerialization,
 // call-save, fixed-register sequence or hidden transition may be present. Those need the full transition proof;
 // their absence here yields no definition claims, preserving independently proved parameters and constants.
 
@@ -51,6 +52,9 @@ static Tier1EmitError tier1_debug_straight(const Tier1SelectPlan* plan, const Ti
     valid = valid && (!supported || (tier1_cert_emitted_prologue(&frame, &body) && body == emitted->body_record && code->node_first[0] == body));
     uint32_t owners[16];
     memset(owners, 0xff, sizeof(owners));
+    // The immediates' requests, checked byte by byte a batch at a time; a refusal there publishes nothing either.
+    Tier1CertEmittedChoices choices = { .canonical = false };
+    uint32_t failed = UINT32_MAX;
     for (uint32_t node = 0; supported && valid && node < nodes; node += 1)
     {
         const uint32_t first = code->node_first[node];
@@ -101,23 +105,29 @@ static Tier1EmitError tier1_debug_straight(const Tier1SelectPlan* plan, const Ti
                 const Tier1SelectHoles holes = tier1_select_holes(plan, allocation->value_registers, node);
                 Tier1SelectRecords selected = tier1_select_expand(&holes);
                 valid = !selected.overflowed && selected.count == end - first;
+                // The immediate's record is the code's, held with its request until the batch checks its form.
                 if (valid && selected.requested)
                 {
-                    uint16_t form = X86_FORM_NONE;
-                    x86_choose_forms_scalar(&selected.row, &selected.value, &selected.context, 1, &form);
-                    valid = form != X86_FORM_NONE && selected.request < selected.count;
+                    valid = selected.request < selected.count;
                     if (valid)
                     {
-                        selected.records[selected.request] = x86_choice_instruction(form, (X86Instruction){ .rm = selected.destination }, selected.value);
+                        selected.records[selected.request] = code->records[first + selected.request];
+                        valid = tier1_cert_emitted_choices_defer(&choices, selected.row, selected.value, selected.context, selected.destination,
+                                                                 selected.records[selected.request], first + selected.request, &failed);
                     }
                 }
                 valid = valid && memcmp(selected.records, code->records + first, (uint64_t)selected.count * sizeof(X86Instruction)) == 0;
                 const uint64_t allowed = BUSTER_X86_RESOURCE_GPR(BUSTER_TIER1_SELECT_SCRATCH) | (defined ? BUSTER_X86_RESOURCE_GPR(destination) : 0);
+                // The node's records' effects in one batch: the records are the expansion's (compared above).
+                uint64_t reads[BUSTER_TIER1_SELECT_RECORDS_PER_NODE];
+                uint64_t writes[BUSTER_TIER1_SELECT_RECORDS_PER_NODE];
+                if (valid)
+                {
+                    x86_instructions_effects(code->records + first, end - first, reads, writes);
+                }
                 for (uint32_t r = first; valid && r < end; r += 1)
                 {
-                    uint64_t read = 0;
-                    uint64_t written = 0;
-                    x86_instruction_effects_scalar(code->records + r, &read, &written);
+                    const uint64_t written = writes[r - first];
                     valid = (written & UINT64_C(0xffff) & ~allowed) == 0;
                     uint32_t killed = (uint32_t)written & UINT32_C(0xffff);
                     while (killed != 0)
@@ -151,6 +161,7 @@ static Tier1EmitError tier1_debug_straight(const Tier1SelectPlan* plan, const Ti
             }
         }
     }
+    valid = valid && (!supported || tier1_cert_emitted_choices_check(&choices, &failed));
     if (supported && valid)
     {
         emitted->debug_definitions = definitions;

@@ -2723,7 +2723,7 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
             units[u].bytes = units[u].kind != CHECK_DRIVER_INPUT_LINK ? size : 0;
             keys[u] = (uint64_t)(UINT32_MAX - cost) << 32 | u;
         }
-        const uint64_t* sorted = c_bindings_sort(keys, sorting, count, !command->scalar, UINT32_MAX);
+        const uint64_t* sorted = c_bindings_sort(keys, sorting, count, UINT32_MAX);
         for (uint32_t i = 0; i < count; i += 1)
         {
             order[i] = (uint32_t)sorted[i];

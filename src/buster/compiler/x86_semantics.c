@@ -16,11 +16,11 @@
 //   - The immediate's contract: a selector asks for a value (an integer of the operation's width), and a form's field
 //     holds bits that the form extends (x86_immediate_encodes, x86_immediate_field and x86_immediate_value). add rax, 200
 //     needs an imm32: an imm8 of 0xc8 encodes, but adds -56.
-//   - Operand-resolved effects (x86_instructions_effects, AVX-512, 8 records at a time, and its scalar twin
-//     x86_instructions_effects_scalar): each record's registers, flags and memory read and written, as two 64-bit sets
+//   - Operand-resolved effects (x86_instructions_effects, AVX-512, 8 records at a time; one record is a count of 1):
+//     each record's registers, flags and memory read and written, as two 64-bit sets
 //     (BUSTER_X86_RESOURCE_*), with what its operands decide: a memory operand's base and index, a zero idiom (xor eax,
 //     eax reads nothing), a shift by an immediate (by zero, the flags stay).
-//   - Form choice (x86_choose_forms, AVX-512, 32 requests at a time, and its scalar twin x86_choose_forms_scalar): for a
+//   - Form choice (x86_choose_forms, AVX-512, 32 requests at a time; one request is a count of 1): for a
 //     machine operation with an immediate (a row: the operation and its width), the first of the row's candidate forms
 //     whose conditions the request meets: the value's class (it fits a sign-extended imm8, an imm32, ...), the
 //     destination (a register, RAX) and the flags live after it. Encodings of the same instruction come shortest first;
@@ -29,8 +29,8 @@
 //     may use is #180's, and which sequence is faster #181's: the rows hold baseline forms only.
 // Entry points: x86_semantics_initialize (builds the tables; call it once), x86_effects, x86_effects_role,
 // x86_immediate_encodes, x86_immediate_field, x86_immediate_value, x86_instruction_flags, x86_flags_substitutable (and
-// x86_instruction_flags_substitutable), x86_instructions_effects (and _scalar), x86_choice_row, x86_choose_forms (and
-// _scalar) and x86_choice_instruction.
+// x86_instruction_flags_substitutable), x86_instructions_effects (and _opmasks), x86_choice_row, x86_choose_forms and
+// x86_choice_instruction.
 // docs/x86-semantics.md has the contract, the covered subset, how to add a form and the 9700X's numbers. Files that use
 // it include it after the encoder; every function in it is static.
 //
@@ -43,12 +43,11 @@
 //     x86_effects_role.
 //   - The immediate's contract (x86_immediate_encodes, x86_immediate_field and x86_immediate_value) and the flags
 //     (x86_instruction_flags, X86FlagEffects, x86_flags_substitutable and x86_instruction_flags_substitutable).
-//   - Operand-resolved effects: BUSTER_X86_RESOURCE_*, x86_instruction_effects_scalar, x86_instructions_effects_scalar
-//     and x86_instructions_effects.
+//   - Operand-resolved effects: BUSTER_X86_RESOURCE_*, x86_instruction_resolve (the rare records' route),
+//     x86_instruction_rare and x86_instructions_effects.
 //   - Form choice: the classes and the context (BUSTER_X86_CHOICE_* and BUSTER_X86_CONTEXT_*), the rows
-//     (BUSTER_X86_CHOICE_SOURCES, X86ChoiceSource), X86ChoiceRow and its tables, x86_choice_row, x86_choice_have (the
-//     scalar classification), x86_choose_forms_scalar, x86_choice_classes (the vector one), x86_choose_forms and
-//     x86_choice_instruction.
+//     (BUSTER_X86_CHOICE_SOURCES, X86ChoiceSource), X86ChoiceRow and its tables, x86_choice_row, x86_choice_classes,
+//     x86_choose_forms and x86_choice_instruction.
 //   - Initialization: x86_effects_slots, x86_effects_build, x86_choice_build and x86_semantics_initialize.
 
 #include "baked.h"
@@ -3153,7 +3152,8 @@ static uint64_t x86_register_resource(uint8_t value, bool vector)
     return vector ? BUSTER_X86_RESOURCE_VECTOR(value & 31) : BUSTER_X86_RESOURCE_GPR(general);
 }
 
-// What one record reads and writes (BUSTER_X86_RESOURCE_*), its operands resolved: a register operand's register; a
+// The rare records' route of x86_instructions_effects (x86_instruction_rare; phase D of #2924 vectorizes it): what one
+// record reads and writes (BUSTER_X86_RESOURCE_*), its operands resolved: a register operand's register; a
 // memory operand's base and index (read, as lea's are; a VSIB operand's index is a vector register) and the memory read
 // or written; a narrower write's register (which keeps the rest, so it is read), and a legacy SSE write's vector
 // register (which keeps its bits above 127); a zero idiom's register not read (but a legacy SSE one's, whose upper bits
@@ -3280,18 +3280,6 @@ static void x86_instruction_resolve(const X86Instruction* instruction, uint64_t*
     }
 }
 
-// What one record reads and writes, an opmask register's record as everything (x86_instruction_resolve without opmasks).
-static __attribute__((unused)) void x86_instruction_effects_scalar(const X86Instruction* instruction, uint64_t* reads, uint64_t* writes)
-{
-    x86_instruction_resolve(instruction, reads, writes, 0);
-}
-
-// The same, with the opmask registers it reads and writes.
-static __attribute__((unused)) void x86_instruction_effects_opmasks_scalar(const X86Instruction* instruction, uint64_t* reads, uint64_t* writes, uint16_t* opmasks)
-{
-    x86_instruction_resolve(instruction, reads, writes, opmasks);
-}
-
 // The records x86_instructions_effects leaves to x86_instruction_resolve: a covered form's (with opmasks, or without one
 // that touches an opmask register) with an x87 property, vzeroupper's, RARE's operands or IMPLICIT_VECTORS' registers.
 // BUSTER_X86_EFFECTS_RARE is the same test on the effects record's first 8 bytes (its properties in the upper quarter),
@@ -3305,25 +3293,6 @@ static __attribute__((unused)) bool x86_instruction_rare(const X86Instruction* i
     const bool touches = (instruction->decorations & BUSTER_X86_DECORATION_MASK) != 0 || (effects->properties & BUSTER_X86_EFFECT_OPMASKS) != 0;
     const bool known = effects->operation != X86_OPERATION_NONE && (opmasks || !touches);
     return known && (effects->properties & BUSTER_X86_EFFECTS_RARE_PROPERTIES) != 0;
-}
-
-// The scalar twin of x86_instructions_effects, one record at a time.
-static __attribute__((unused)) void x86_instructions_effects_scalar(const X86Instruction* instructions, uint64_t count, uint64_t* reads, uint64_t* writes)
-{
-    for (uint64_t i = 0; i < count; i += 1)
-    {
-        x86_instruction_resolve(&instructions[i], &reads[i], &writes[i], 0);
-    }
-}
-
-// The scalar twin of x86_instructions_effects_opmasks.
-static __attribute__((unused)) void x86_instructions_effects_opmasks_scalar(const X86Instruction* instructions, uint64_t count, uint64_t* reads, uint64_t* writes,
-                                                                            uint16_t* opmasks)
-{
-    for (uint64_t i = 0; i < count; i += 1)
-    {
-        x86_instruction_resolve(&instructions[i], &reads[i], &writes[i], &opmasks[i]);
-    }
 }
 
 // The same 8 records at a time (one per 64-bit lane), the records and the outputs read and written with masked loads and
@@ -3778,53 +3747,7 @@ static __attribute__((unused)) uint32_t x86_choice_row(X86Operation operation, u
     return known ? x86_choice_row_index[operation][log2] : BUSTER_X86_CHOICE_NO_ROW;
 }
 
-// The scalar classification: a request's classes and context (BUSTER_X86_CHOICE_*).
-static uint16_t x86_choice_have(uint32_t row, int64_t value, uint16_t context)
-{
-    const X86ChoiceRow* choice = &x86_choice_rows[row];
-    const uint32_t width = choice->width;
-    const uint64_t mask = x86_width_mask(width);
-    const uint64_t pattern = (uint64_t)value & mask;
-    const bool valid = choice->kind == BUSTER_X86_IMMEDIATE_COUNT ? (uint64_t)value <= x86_count_mask(width) : x86_value_fits_width(value, width);
-    const bool signed8 = ((uint64_t)(int64_t)(int8_t)(uint8_t)pattern & mask) == pattern;
-    const bool signed32 = ((uint64_t)(int64_t)(int32_t)(uint32_t)pattern & mask) == pattern;
-    const bool unsigned32 = pattern <= UINT32_MAX;
-    const bool nonnegative = (pattern >> (8 * width - 1)) == 0;
-    const uint32_t live = context & BUSTER_X86_CONTEXT_LIVE_FLAGS;
-    uint32_t have = context & BUSTER_X86_CONTEXT_GIVEN;
-    have |= signed8 ? BUSTER_X86_CHOICE_SIGNED8 : 0;
-    have |= signed32 ? BUSTER_X86_CHOICE_SIGNED32 : 0;
-    have |= unsigned32 ? BUSTER_X86_CHOICE_UNSIGNED32 : 0;
-    have |= nonnegative ? BUSTER_X86_CHOICE_NONNEGATIVE : 0;
-    have |= pattern == 0 ? BUSTER_X86_CHOICE_ZERO : 0;
-    have |= pattern == 1 ? BUSTER_X86_CHOICE_ONE : 0;
-    have |= pattern == mask ? BUSTER_X86_CHOICE_MINUS_ONE : 0;
-    have |= valid ? BUSTER_X86_CHOICE_VALID : 0;
-    have |= (live & BUSTER_X86_FLAG_CF) == 0 ? BUSTER_X86_CHOICE_CF_DEAD : 0;
-    have |= (live & BUSTER_X86_FLAG_AF) == 0 ? BUSTER_X86_CHOICE_AF_DEAD : 0;
-    have |= (live & BUSTER_X86_FLAG_SF) == 0 ? BUSTER_X86_CHOICE_SF_DEAD : 0;
-    have |= live == 0 ? BUSTER_X86_CHOICE_FLAGS_DEAD : 0;
-    return (uint16_t)have;
-}
-
-// The scalar twin of x86_choose_forms: each request's form, the first candidate of its row whose conditions it has, or 0
-// (X86_FORM_NONE) when none does: the value fits no immediate of the row (it needs a register) or the width at all.
-static __attribute__((unused)) void x86_choose_forms_scalar(const uint16_t* rows, const int64_t* values, const uint16_t* contexts, uint64_t count, uint16_t* forms)
-{
-    for (uint64_t i = 0; i < count; i += 1)
-    {
-        const X86ChoiceRow* choice = &x86_choice_rows[rows[i]];
-        const uint16_t have = x86_choice_have(rows[i], values[i], contexts[i]);
-        uint16_t form = X86_FORM_NONE;
-        for (uint32_t candidate = 0; candidate < BUSTER_X86_CHOICE_CANDIDATES && form == X86_FORM_NONE; candidate += 1)
-        {
-            form = (choice->conditions[candidate] & ~have) == 0 ? choice->forms[candidate] : X86_FORM_NONE;
-        }
-        forms[i] = form;
-    }
-}
-
-// The value classes of 8 requests (x86_choice_have's, without the context) in 64-bit lanes, from their values and their
+// The value classes of 8 requests (BUSTER_X86_CHOICE_*, without the context) in 64-bit lanes, from their values and their
 // rows' info (log2 of the width, and the count bit).
 static __m512i x86_choice_classes(__m512i value, __m512i info)
 {
@@ -3852,7 +3775,8 @@ static __m512i x86_choice_classes(__m512i value, __m512i info)
     return classes;
 }
 
-// Each request's form, as x86_choose_forms_scalar's, 32 requests at a time: the rows' info, the candidates' forms and
+// Each request's form, the first candidate of its row whose conditions it has, or 0 (X86_FORM_NONE) when none does (the
+// value fits no immediate of the row, so it needs a register, or not the width at all), 32 requests at a time: the rows' info, the candidates' forms and
 // conditions are looked up in registers (vpermi2w over a row's 64 words); the values are classified 8 at a time
 // (x86_choice_classes) and narrowed to the requests' words; the context's flags become the dead-flag bits; and each
 // candidate in turn takes the requests it fits that no earlier one took. The columns are read, and the forms written,
@@ -3874,9 +3798,19 @@ static __attribute__((unused)) void x86_choose_forms(const uint16_t* rows, const
         const __m512i value2 = _mm512_maskz_loadu_epi64((__mmask8)(lanes >> 16), values + first + 16);
         const __m512i value3 = _mm512_maskz_loadu_epi64((__mmask8)(lanes >> 24), values + first + 24);
         const __m128i narrowed0 = _mm512_cvtepi64_epi16(x86_choice_classes(value0, _mm512_cvtepu16_epi64(_mm512_extracti32x4_epi32(info, 0))));
-        const __m128i narrowed1 = _mm512_cvtepi64_epi16(x86_choice_classes(value1, _mm512_cvtepu16_epi64(_mm512_extracti32x4_epi32(info, 1))));
-        const __m128i narrowed2 = _mm512_cvtepi64_epi16(x86_choice_classes(value2, _mm512_cvtepu16_epi64(_mm512_extracti32x4_epi32(info, 2))));
-        const __m128i narrowed3 = _mm512_cvtepi64_epi16(x86_choice_classes(value3, _mm512_cvtepu16_epi64(_mm512_extracti32x4_epi32(info, 3))));
+        __m128i narrowed1 = _mm_setzero_si128();
+        __m128i narrowed2 = _mm_setzero_si128();
+        __m128i narrowed3 = _mm_setzero_si128();
+        // The quarters with no live request aren't classified: their lanes' forms aren't stored.
+        if (left > 8)
+        {
+            narrowed1 = _mm512_cvtepi64_epi16(x86_choice_classes(value1, _mm512_cvtepu16_epi64(_mm512_extracti32x4_epi32(info, 1))));
+            if (left > 16)
+            {
+                narrowed2 = _mm512_cvtepi64_epi16(x86_choice_classes(value2, _mm512_cvtepu16_epi64(_mm512_extracti32x4_epi32(info, 2))));
+                narrowed3 = _mm512_cvtepi64_epi16(x86_choice_classes(value3, _mm512_cvtepu16_epi64(_mm512_extracti32x4_epi32(info, 3))));
+            }
+        }
         const __m256i half_low = _mm256_inserti128_si256(_mm256_castsi128_si256(narrowed0), narrowed1, 1);
         const __m256i half_high = _mm256_inserti128_si256(_mm256_castsi128_si256(narrowed2), narrowed3, 1);
         __m512i have = _mm512_inserti64x4(_mm512_castsi256_si512(half_low), half_high, 1);
@@ -3890,7 +3824,10 @@ static __attribute__((unused)) void x86_choose_forms(const uint16_t* rows, const
         const __m512i missing = _mm512_xor_si512(have, _mm512_set1_epi16(-1));
         __m512i result = _mm512_setzero_si512();
         __mmask32 taken = 0;
-        for (uint32_t candidate = 0; candidate < BUSTER_X86_CHOICE_CANDIDATES; candidate += 1)
+        // Rolled: unrolled, clang hoists all eight candidates' tables out of the requests' loop and spills them, 2 KB that a
+        // call with a few requests pays in full; left once every live request has its form.
+        #pragma clang loop unroll(disable)
+        for (uint32_t candidate = 0; candidate < BUSTER_X86_CHOICE_CANDIDATES && (taken & lanes) != lanes; candidate += 1)
         {
             const uint16_t* conditions = x86_choice_conditions_by_candidate[candidate];
             const uint16_t* candidate_forms = x86_choice_forms_by_candidate[candidate];
@@ -4014,7 +3951,7 @@ static uint32_t x86_effects_slots(uint8_t syntax, uint8_t* slots)
         slots[2] = BUSTER_X86_SLOT_RM;
         count = 3;
         break;
-    // The /is4 register (in the immediate's bits 7 to 4) is no role: x86_instruction_effects_scalar reads it (RARE).
+    // The /is4 register (in the immediate's bits 7 to 4) is no role: x86_instruction_resolve reads it (RARE).
     case X86_SYNTAX_REG_VVVV_RM_IMM:
     case X86_SYNTAX_REG_VVVV_RM_IS4:
         slots[0] = BUSTER_X86_SLOT_REG;

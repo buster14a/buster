@@ -160,7 +160,7 @@ static void check_input_noderef_graph(CheckInputReader* reader, const CheckStrea
         {
             declaration_keys[index++] = (uint64_t)record->declaration << 32 | record->token;
         }
-        declaration_keys = c_bindings_sort(declaration_keys, declaration_keys + declaration_count, declaration_count, !parser->options.scalar, UINT32_MAX);
+        declaration_keys = c_bindings_sort(declaration_keys, declaration_keys + declaration_count, declaration_count, UINT32_MAX);
     }
     const uint64_t words = ((uint64_t)count + 63) / 64;
     uint64_t* marked_values = words != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, uint64_t, words) : NULL;

@@ -411,7 +411,7 @@ static uint32_t tier1_schedule_reaching(const uint64_t* writes, const uint16_t* 
     return writer;
 }
 
-// Independent scalar verifier: no graph, heights or scheduler-produced effects are trusted. Validates the complete
+// Independent verifier: no graph, heights or scheduler-produced effects are trusted (it resolves the effects itself). Validates the complete
 // permutation first, then from the inputs: every register and memory dependency in order (any two memory accesses
 // count as dependent), barriers and compare/branch adjacency; and for each flag, that every reader of it (a record that
 // may leave the block reads them all) sees the same writer as in the original order, and that the block's last writer
@@ -439,9 +439,9 @@ static __attribute__((unused)) bool tier1_schedule_verify(Tier1ScheduleInput inp
     }
     if (valid)
     {
+        x86_instructions_effects(input.instructions, input.count, reads, writes);
         for (uint32_t i = 0; i < input.count; i += 1)
         {
-            x86_instruction_effects_scalar(&input.instructions[i], &reads[i], &writes[i]);
             pins[i] = tier1_schedule_is_pinned(input, i, reads[i], writes[i]);
             identity[i] = (uint16_t)i;
         }

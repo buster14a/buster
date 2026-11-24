@@ -101,7 +101,7 @@ static void emitted_test_wide_rows(EmittedTest* test)
         .row_count = BUSTER_ARRAY_LENGTH(rows),
     };
     uint8_t bytes[256];
-    const uint64_t size = emitted_test_write(&program, false, true, bytes, sizeof(bytes));
+    const uint64_t size = emitted_test_write(&program, false, bytes, sizeof(bytes));
     const uint32_t instructions = BUSTER_UNWIND_CIE_BYTES + 17;
     // Four one-byte advances leave 26 instruction bytes: the 17-byte FDE header and those bytes align to 48.
     emitted_test_expect(test, size == BUSTER_UNWIND_CIE_BYTES + 48 && memcmp(bytes + instructions, expected, sizeof(expected)) == 0,
@@ -114,7 +114,7 @@ static void emitted_test_wide_rows(EmittedTest* test)
     const bool valid = unwind_rows_function(simple, BUSTER_ARRAY_LENGTH(simple), 3, &lowered) == UNWIND_OK;
     emitted_test_expect(test, valid && lowered.open == BUSTER_UNWIND_ROWS && lowered.frame_size == 0,
                         "a row beyond the imm32 allocation range is not narrowed into a fixed frame", 0);
-    const uint64_t large_size = valid ? emitted_test_write(&lowered, false, true, bytes, sizeof(bytes)) : 0;
+    const uint64_t large_size = valid ? emitted_test_write(&lowered, false, bytes, sizeof(bytes)) : 0;
     const uint8_t largest[] = {
         0x41, 0x0e, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f,
         0x41, 0x0e, 8,

@@ -18,9 +18,9 @@
 //
 // c_lowering_vector visits compact breadth-first source frontiers, filters eight targets together against a reached
 // bitset, and emits selected IDs with vector masks in source order. Sparse word reads/writes stay scalar: hardware
-// gathers/scatters are costly on Zen 5, and duplicate targets require merging rather than conflicting stores.
-// c_lowering_scalar is an independent byte-visited FIFO traversal and source-order collector. Neither recurses or
-// rescans all edges/bitset words in each round. Both visit each reached source's retained outgoing edges once.
+// gathers/scatters are costly on Zen 5, and duplicate targets require merging rather than conflicting stores. It
+// neither recurses nor rescans all edges/bitset words in each round, and visits each reached source's retained
+// outgoing edges once.
 //
 // Input columns have exactly their count's readable elements, each a uint32_t; no padding/alignment beyond their
 // element type is needed. Zero counts permit null columns. Inputs and the result struct cannot overlap newly
@@ -121,15 +121,13 @@ struct CLowering
     uint32_t* definition_flags;
     uint32_t* edge_offsets;
     uint32_t* edge_targets;
-    // Private reusable traversal storage. queue has definition_count slots, visited has definition_count bytes.
+    // Private reusable traversal storage: queue has definition_count slots.
     uint32_t* queue;
-    uint8_t* visited;
     bool prepared;
 };
 
 static __attribute__((unused)) CLoweringStatus c_lowering_prepare(Arena* arena, CLoweringInput input, CLowering* result);
 static __attribute__((unused)) CLoweringStatus c_lowering_vector(CLowering* plan, CLoweringMode mode);
-static __attribute__((unused)) CLoweringStatus c_lowering_scalar(CLowering* plan, CLoweringMode mode);
 
 static CLoweringStatus c_lowering_prepare(Arena* arena, CLoweringInput input, CLowering* result)
 {
@@ -183,8 +181,7 @@ static CLoweringStatus c_lowering_prepare(Arena* arena, CLoweringInput input, CL
             candidate.reached = candidate.edge_offsets != 0 ? arena_push_array(arena, candidate.word_count, sizeof(uint64_t), 64) : 0;
             candidate.selected = candidate.reached != 0 ? arena_push_array(arena, input.definition_count, sizeof(uint32_t), 64) : 0;
             candidate.queue = candidate.selected != 0 ? arena_push_array(arena, input.definition_count, sizeof(uint32_t), 64) : 0;
-            candidate.visited = candidate.queue != 0 ? arena_push_array(arena, input.definition_count, sizeof(uint8_t), 64) : 0;
-            valid = candidate.visited != 0;
+            valid = candidate.queue != 0;
             candidate.scratch_bytes = arena->length - scratch_mark;
         }
         if (valid && edges != 0)
@@ -292,8 +289,6 @@ static void c_lowering_collect_vector(CLowering* plan)
     plan->statistics.selected_objects = count - functions;
 }
 
-static CLoweringStatus c_lowering_scalar(CLowering* plan, CLoweringMode mode);
-
 static CLoweringStatus c_lowering_vector(CLowering* plan, CLoweringMode mode)
 {
     CLoweringStatus status = C_LOWERING_INVALID;
@@ -372,69 +367,5 @@ static CLoweringStatus c_lowering_vector(CLowering* plan, CLoweringMode mode)
     return status;
 }
 
-static CLoweringStatus c_lowering_scalar(CLowering* plan, CLoweringMode mode)
-{
-    CLoweringStatus status = C_LOWERING_INVALID;
-    if (plan != 0 && plan->prepared && (mode == C_LOWERING_REACHABLE || mode == C_LOWERING_ALL))
-    {
-        plan->statistics = (CLoweringStatistics){ 0 };
-        plan->selected_count = 0;
-        if (plan->word_count != 0)
-        {
-            memset(plan->reached, 0, plan->word_count * sizeof(uint64_t));
-        }
-        uint32_t tail = 0;
-        bool optional = false;
-        for (uint32_t definition = 0; definition < plan->definition_count; definition += 1)
-        {
-            const uint32_t flags = plan->definition_flags[definition];
-            const bool eligible = (flags & BUSTER_C_LOWERING_INLINE_ONLY) == 0;
-            const bool optional_one = eligible && (flags & BUSTER_C_LOWERING_OPTIONAL) != 0;
-            const bool root = eligible && !optional_one && (mode == C_LOWERING_ALL || (flags & BUSTER_C_LOWERING_ROOT_FLAGS) != 0);
-            optional = optional || optional_one;
-            plan->visited[definition] = root;
-            if (root)
-            {
-                plan->queue[tail++] = definition;
-            }
-        }
-        uint32_t begin = 0;
-        uint32_t end = mode == C_LOWERING_ALL && !optional ? 0 : tail;
-        while (begin < end)
-        {
-            plan->statistics.rounds += 1;
-            for (uint32_t position = begin; position < end; position += 1)
-            {
-                const uint32_t source = plan->queue[position];
-                const uint32_t edge_begin = plan->edge_offsets[source];
-                const uint32_t edge_end = plan->edge_offsets[(uint64_t)source + 1];
-                plan->statistics.visited_edges += edge_end - edge_begin;
-                for (uint32_t edge = edge_begin; edge < edge_end; edge += 1)
-                {
-                    const uint32_t target = plan->edge_targets[edge];
-                    if (plan->visited[target] == 0)
-                    {
-                        plan->visited[target] = 1;
-                        plan->queue[tail++] = target;
-                    }
-                }
-            }
-            begin = end;
-            end = tail;
-        }
-        for (uint32_t definition = 0; definition < plan->definition_count; definition += 1)
-        {
-            if (plan->visited[definition] != 0)
-            {
-                plan->reached[definition / BUSTER_C_LOWERING_WORD_BITS] |= UINT64_C(1) << (definition % BUSTER_C_LOWERING_WORD_BITS);
-                plan->selected[plan->selected_count++] = definition;
-                plan->statistics.selected_functions += (plan->definition_flags[definition] & BUSTER_C_LOWERING_FUNCTION) != 0;
-                plan->statistics.selected_objects += (plan->definition_flags[definition] & BUSTER_C_LOWERING_OBJECT) != 0;
-            }
-        }
-        status = C_LOWERING_OK;
-    }
-    return status;
-}
 
 #endif

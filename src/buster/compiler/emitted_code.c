@@ -881,7 +881,7 @@ static void emitted_transfer(const X86Instruction* record, EmittedState* state, 
         uint64_t writes = 0;
         // With the opmask column, so that a record of opmask registers (AVX-512's masks) writes only what it writes.
         uint16_t opmasks = 0;
-        x86_instruction_resolve(record, &reads, &writes, &opmasks);
+        x86_instructions_effects_opmasks(record, 1, &reads, &writes, &opmasks);
         const X86Effects* effects = x86_effects(record->form);
         state->unproven |= effects->operation == X86_OPERATION_NONE;
         const bool frame_store = (writes & BUSTER_X86_RESOURCE_MEMORY) != 0 && !direct && record->mode == BUSTER_X86_MEMORY_BASE && record->rm < 16;
