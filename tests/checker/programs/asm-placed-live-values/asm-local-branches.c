@@ -1,0 +1,1 @@
+int tested(int n){int r;__asm__("testl %1, %1\n\tjle .Lneg%=\n\tmovl $5, %0\n\tjmp .Lend%=\n.Lneg%=:\n\tmovl $7, %0\n.Lend%=:" : "=r"(r) : "r"(n));int s=0,k=(n&7)+1;__asm__("1:\n\taddl $2, %0\n\tdecl %1\n\tjnz 1b" : "+r"(s), "+r"(k));return r*100+s+n;}

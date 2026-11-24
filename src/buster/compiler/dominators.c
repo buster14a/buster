@@ -3,9 +3,10 @@
 //
 // Entry-rooted dominators, frontiers and natural loops for a borrowed CSR CFG. Include after lane.c.
 // dominators_analyze validates both CSR views, computes reachable reverse postorder and DFS preorder, solves by
-// SEMI-NCA, then builds the tree and the requested frontier/loop sets. SEMI-NCA and the loop-body walk are scalar:
-// on the 9700X they beat the AVX-512 bit-matrix solver and loop-body sweep they replaced at every measured size
-// (#1352, #2924; docs/dominators.md, "Why it is scalar").
+// SEMI-NCA, then builds the tree and the requested frontier/loop sets. Loops are found innermost first and absorb their
+// inner loops' body rows by 512-bit ORs (dominators_discover, #2953). SEMI-NCA and the loops' union-find walk are scalar:
+// on the 9700X SEMI-NCA beat the AVX-512 bit-matrix solver it replaced and the window sweep #2953 measured at the large
+// sizes (#1352, #2924, #2953; docs/dominators.md, "Why it is scalar").
 // All input-dependent walks use explicit stacks. No source or implementation from another compiler is copied.
 //
 // The caller owns the input arrays throughout the call; each offsets array has block_count + 1 u32 elements,
@@ -17,8 +18,9 @@
 // stays inside its allocated row. Recompute after any CFG mutation. See docs/dominators.md for the stage contract.
 //
 // Layout: dominators_validate; dominators_order; dominators_semi_nca; dominators_tree/frontiers;
-// dominators_components; dominators_loop_body/loops; dominators_analyze; the consumer query helpers.
+// dominators_components; dominators_outermost/discover/loops; dominators_analyze; the consumer query helpers.
 
+#include <immintrin.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
@@ -518,34 +520,103 @@ static void dominators_components(const DominatorCfg* cfg, Dominators* result, u
     }
 }
 
-// The natural loop of header: header, and every reachable block that reaches one of its latches without passing it.
-static void dominators_loop_body(const DominatorCfg* cfg, const Dominators* result, uint32_t header, uint64_t* body, uint32_t* stack)
+// The outermost discovered loop containing loop, by union-find with path compression.
+static uint32_t dominators_outermost(uint32_t* outer, uint32_t loop)
 {
-    dominators_set(body, header);
-    uint64_t depth = 0;
-    for (uint32_t edge = cfg->predecessor_offsets[header]; edge < cfg->predecessor_offsets[(uint64_t)header + 1]; edge += 1)
+    uint32_t root = loop;
+    while (outer[root] != root)
     {
-        const uint32_t latch = cfg->predecessors[edge];
-        if (dominators_dominates(result, header, latch) && !dominators_bit(body, latch))
-        {
-            dominators_set(body, latch);
-            stack[depth] = latch;
-            depth += 1;
-        }
+        root = outer[root];
     }
-    while (depth != 0)
+    uint32_t step = loop;
+    while (outer[step] != root)
     {
-        depth -= 1;
-        const uint32_t block = stack[depth];
-        for (uint32_t edge = cfg->predecessor_offsets[block]; edge < cfg->predecessor_offsets[(uint64_t)block + 1]; edge += 1)
+        const uint32_t next = outer[step];
+        outer[step] = root;
+        step = next;
+    }
+    return root;
+}
+
+// Natural loops innermost first: by decreasing dominator-tree preorder of their headers, since an outer loop's header
+// dominates its inner loops'. Each loop walks back from its latches and stops at its header. A block no loop has
+// claimed becomes this loop's own; a block in a loop found before is in that loop's outermost discovered loop, which
+// this one absorbs whole: it becomes that loop's parent, ORs that loop's body row into its own with 512-bit ORs, and
+// walks on from that loop's header. A walk leaves a natural loop only through its header, so each block is claimed
+// once and each header's predecessors are read at most twice: O(E α) to walk and O(loops × row) to OR the bodies,
+// where a walk per loop costs the bodies' total size. by_number holds each block's preorder number's block.
+static void dominators_discover(const DominatorCfg* cfg, Dominators* result, const uint32_t* by_number, const uint32_t* loop_of, uint32_t* outer, uint32_t* stack)
+{
+    const uint32_t* offsets = cfg->predecessor_offsets;
+    const uint32_t* predecessors = cfg->predecessors;
+    const uint32_t* rpo_index = result->rpo_index;
+    const uint64_t row_words = result->row_words;
+    uint32_t* block_loop = result->block_loop;
+    uint64_t* bodies = result->loop_bodies;
+    for (uint32_t number = result->reachable_count; number != 0; number -= 1)
+    {
+        const uint32_t header = by_number[number - 1];
+        const uint32_t loop = loop_of[header];
+        if (loop != BUSTER_DOMINATOR_NONE)
         {
-            const uint32_t source = cfg->predecessors[edge];
-            if (result->rpo_index[source] != BUSTER_DOMINATOR_NONE && !dominators_bit(body, source))
+            uint64_t* body = bodies + (uint64_t)loop * row_words;
+            uint32_t size = 1;
+            uint8_t irreducible = result->irreducible[header];
+            outer[loop] = loop;
+            block_loop[header] = loop;
+            dominators_set(body, header);
+            uint64_t depth = 0;
+            uint32_t walked = header;
+            bool latches = true;
+            while (latches || depth != 0)
             {
-                dominators_set(body, source);
-                stack[depth] = source;
-                depth += 1;
+                if (!latches)
+                {
+                    depth -= 1;
+                    walked = stack[depth];
+                }
+                for (uint32_t edge = offsets[walked]; edge < offsets[(uint64_t)walked + 1]; edge += 1)
+                {
+                    const uint32_t source = predecessors[edge];
+                    const bool reachable = rpo_index[source] != BUSTER_DOMINATOR_NONE;
+                    // From the header, only its latches: the predecessors it dominates.
+                    if (reachable && source != header && (!latches || dominators_dominates(result, header, source)))
+                    {
+                        const uint32_t claimed = block_loop[source];
+                        if (claimed == BUSTER_DOMINATOR_NONE)
+                        {
+                            block_loop[source] = loop;
+                            dominators_set(body, source);
+                            size += 1;
+                            irreducible |= result->irreducible[source];
+                            stack[depth] = source;
+                            depth += 1;
+                        }
+                        else
+                        {
+                            const uint32_t inner = dominators_outermost(outer, claimed);
+                            if (inner != loop)
+                            {
+                                outer[inner] = loop;
+                                result->loop_parent[inner] = loop;
+                                const uint64_t* inner_body = bodies + (uint64_t)inner * row_words;
+                                for (uint64_t word = 0; word < row_words; word += BUSTER_DOMINATOR_VECTOR_WORDS)
+                                {
+                                    const __m512i merged = _mm512_or_si512(_mm512_load_si512(body + word), _mm512_load_si512(inner_body + word));
+                                    _mm512_store_si512(body + word, merged);
+                                }
+                                size += result->loop_size[inner];
+                                irreducible |= result->loop_irreducible[inner];
+                                stack[depth] = result->loop_header[inner];
+                                depth += 1;
+                            }
+                        }
+                    }
+                }
+                latches = false;
             }
+            result->loop_size[loop] = size;
+            result->loop_irreducible[loop] = irreducible;
         }
     }
 }
@@ -604,65 +675,47 @@ static DominatorStatus dominators_loops(Arena* arena, Arena* scratch, const Domi
         {
             status = DOMINATOR_NO_MEMORY;
         }
+        uint32_t* by_number = arena_push_array(scratch, result->reachable_count, sizeof(uint32_t), _Alignof(uint32_t));
+        uint32_t* outer = arena_push_array(scratch, result->loop_count, sizeof(uint32_t), _Alignof(uint32_t));
+        if (by_number == 0 || outer == 0)
+        {
+            status = DOMINATOR_NO_MEMORY;
+        }
         if (status == DOMINATOR_OK)
         {
             memset(result->loop_bodies, 0, body_bytes);
+            memset(result->loop_parent, 0xff, (uint64_t)result->loop_count * sizeof(uint32_t));
+            // Loop IDs by ascending header block ID; the SCC pass is done with workspace.
+            uint32_t* loop_of = workspace;
             uint32_t loop = 0;
-            for (uint32_t header = 0; header < count; header += 1)
+            for (uint32_t block = 0; block < count; block += 1)
             {
-                if (flags[header] != 0)
+                loop_of[block] = flags[block] != 0 ? loop : BUSTER_DOMINATOR_NONE;
+                if (flags[block] != 0)
                 {
-                    result->loop_header[loop] = header;
-                    uint64_t* body = result->loop_bodies + (uint64_t)loop * result->row_words;
-                    dominators_loop_body(cfg, result, header, body, stack);
-                    uint32_t size = 0;
-                    uint8_t irreducible = 0;
-                    for (uint64_t word = 0; word < result->row_words; word += 1)
-                    {
-                        uint64_t bits = body[word];
-                        while (bits != 0)
-                        {
-                            const uint32_t block = (uint32_t)(word * 64 + __builtin_ctzll(bits));
-                            bits &= bits - 1;
-                            size += 1;
-                            result->loop_depth[block] += 1;
-                            irreducible |= result->irreducible[block];
-                        }
-                    }
-                    result->loop_size[loop] = size;
-                    result->loop_irreducible[loop] = irreducible;
+                    result->loop_header[loop] = block;
                     loop += 1;
                 }
+                if (result->rpo_index[block] != BUSTER_DOMINATOR_NONE)
+                {
+                    by_number[result->preorder[block]] = block;
+                }
             }
-            for (uint32_t inner = 0; inner < result->loop_count; inner += 1)
+            dominators_discover(cfg, result, by_number, loop_of, outer, stack);
+            // Depths top down: an outer loop's header has the lower preorder number. outer now holds each loop's depth.
+            for (uint32_t number = 0; number < result->reachable_count; number += 1)
             {
-                uint32_t parent = BUSTER_DOMINATOR_NONE;
-                uint32_t smallest = UINT32_MAX;
-                for (uint32_t outer = 0; outer < result->loop_count; outer += 1)
+                const uint32_t header_loop = loop_of[by_number[number]];
+                if (header_loop != BUSTER_DOMINATOR_NONE)
                 {
-                    const uint64_t* body = result->loop_bodies + (uint64_t)outer * result->row_words;
-                    if (inner != outer && result->loop_size[outer] > result->loop_size[inner] && (parent == BUSTER_DOMINATOR_NONE || result->loop_size[outer] < smallest) && dominators_bit(body, result->loop_header[inner]))
-                    {
-                        parent = outer;
-                        smallest = result->loop_size[outer];
-                    }
+                    const uint32_t parent = result->loop_parent[header_loop];
+                    outer[header_loop] = parent == BUSTER_DOMINATOR_NONE ? 1 : outer[parent] + 1;
                 }
-                result->loop_parent[inner] = parent;
-                const uint64_t* body = result->loop_bodies + (uint64_t)inner * result->row_words;
-                for (uint64_t word = 0; word < result->row_words; word += 1)
-                {
-                    uint64_t bits = body[word];
-                    while (bits != 0)
-                    {
-                        const uint32_t block = (uint32_t)(word * 64 + __builtin_ctzll(bits));
-                        bits &= bits - 1;
-                        const uint32_t previous = result->block_loop[block];
-                        if (previous == BUSTER_DOMINATOR_NONE || result->loop_size[inner] < result->loop_size[previous])
-                        {
-                            result->block_loop[block] = inner;
-                        }
-                    }
-                }
+            }
+            for (uint32_t block = 0; block < count; block += 1)
+            {
+                const uint32_t innermost = result->block_loop[block];
+                result->loop_depth[block] = innermost == BUSTER_DOMINATOR_NONE ? 0 : outer[innermost];
             }
         }
     }

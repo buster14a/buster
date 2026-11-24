@@ -206,17 +206,18 @@ static const char asm_test_kmov[] =
     "kmovd %k4,%k3\nkmovd 4(%rdi),%k5\nkmovd %k6,(%r12)\nkmovd %r10d,%k7\nkmovd %k0,%eax\n"
     "kmovq %k2,%k1\nkmovq 2240(%rdi),%k0\nkmovq %k0,2240(%rdi)\nkmovq %r11,%k3\nkmovq %k7,%r14\n";
 
-static bool asm_test_gnu_object(ObjectView* view, String8 bytes, Arena* scratch, char* error, uint64_t error_size)
+static bool asm_test_ordered_object(ObjectView* view, String8 bytes, bool foreign, Arena* scratch, char* error, uint64_t error_size)
 {
     // GAS appends relaxed branch relocations after ones made during parsing. ELF permits that order; the shared
-    // comparator expects offset order. Normalize only the GNU copy, using the importer's already tested sorter.
-    // Instruction bytes, relocation fields/targets/addends, and Buster's own relocation order remain checked.
+    // comparator expects offset order. The native DWARF writer groups .debug_info relocations by target kind.
+    // For a native object normalize only that section, preserving the order checks on instructions and data.
     ImportElf elf;
     bool valid = import_elf(&elf, bytes, ET_REL).error == IMPORT_ERROR_NONE;
     for (uint32_t index = 1; valid && index < elf.section_count; index += 1)
     {
         const Elf64_Shdr header = import_section_header(&elf, index);
-        if (header.sh_type == SHT_RELA)
+        String8 name;
+        if (header.sh_type == SHT_RELA && (foreign || (import_section_name(&elf, &header, &name) && import_equal(name, ".rela.debug_info"))))
         {
             uint64_t count = 0;
             valid = import_table(&header, sizeof(Elf64_Rela), &count) && count <= UINT32_MAX && import_within(bytes.length, header.sh_offset, header.sh_size);
@@ -235,9 +236,14 @@ static bool asm_test_gnu_object(ObjectView* view, String8 bytes, Arena* scratch,
     }
     if (!valid)
     {
-        snprintf(error, error_size, "cannot normalize GNU as relocation order");
+        snprintf(error, error_size, "cannot normalize relocation order");
     }
-    return valid && object_view_open(view, (const uint8_t*)bytes.pointer, bytes.length, true, error, error_size);
+    return valid && object_view_open(view, (const uint8_t*)bytes.pointer, bytes.length, foreign, error, error_size);
+}
+
+static bool asm_test_gnu_object(ObjectView* view, String8 bytes, Arena* scratch, char* error, uint64_t error_size)
+{
+    return asm_test_ordered_object(view, bytes, true, scratch, error, error_size);
 }
 
 static bool asm_test_oracle(AsmTest* test, const char* source, const char* directory, X86Architecture architecture)
@@ -1835,6 +1841,71 @@ static int run_assembler_tests(int count, char** arguments)
                 found |= named.link.atoms.size[a] == sizeof(difference) && memcmp(named.link.atoms.bytes[a], difference, sizeof(difference)) == 0;
             }
             asm_test_check(&test, found, "a label of 100 bytes with '.' and '9' past its first 64 is one name", named.error);
+        }
+        // The lexer's string and comment scans at their edges (asm_scan_string, asm_scan_block_comment), which read from the
+        // lexer's block, wherever that starts: each case is swept across every offset of a block. A run of backslashes
+        // escapes its last when odd, as a "\\" pair before the quote must not: runs of 1 to 4, and of 63 to 66 that span
+        // two blocks, end at every offset. And "/*/" opens a comment that only the "*/" after it closes, not its own
+        // '*' and the '/' after it, though its '/' be the block's last byte.
+        {
+            static const uint32_t runs[] = { 1, 2, 3, 4, 63, 64, 65, 66 };
+            char edge[512];
+            uint8_t expected[256];
+            uint32_t strings_wrong = 0;
+            for (uint32_t letters = 0; letters < 140; letters += 1)
+            {
+                for (uint32_t r = 0; r < BUSTER_ARRAY_LENGTH(runs); r += 1)
+                {
+                    const uint32_t run = runs[r];
+                    uint32_t length = (uint32_t)snprintf(edge, sizeof(edge), ".data\n.ascii \"");
+                    uint32_t count = 0;
+                    for (uint32_t k = 0; k < letters; k += 1)
+                    {
+                        edge[length++] = 'a';
+                        expected[count++] = 'a';
+                    }
+                    for (uint32_t k = 0; k < run; k += 1)
+                    {
+                        edge[length++] = '\\';
+                    }
+                    for (uint32_t k = 0; k < run / 2; k += 1)
+                    {
+                        expected[count++] = '\\';
+                    }
+                    // An odd run escapes the quote, which a 'B' and a quote of its own then follow.
+                    edge[length++] = '"';
+                    if (run % 2 != 0)
+                    {
+                        expected[count++] = '"';
+                        expected[count++] = 'B';
+                        edge[length++] = 'B';
+                        edge[length++] = '"';
+                    }
+                    edge[length++] = '\n';
+                    const AsmResult string = asm_assemble((String8){.pointer = edge, .length = length}, test.index, (AsmOptions){0}, &test.vector);
+                    bool found = false;
+                    for (uint32_t a = 1; string.error == 0 && a < string.link.atoms.count; a += 1)
+                    {
+                        found |= string.link.atoms.size[a] == count && memcmp(string.link.atoms.bytes[a], expected, count) == 0;
+                    }
+                    strings_wrong += !found;
+                }
+            }
+            asm_test_check(&test, strings_wrong == 0, "a string's backslash runs escape by their parity at every offset of the lexer's block", 0);
+            uint32_t comments_wrong = 0;
+            for (uint32_t spaces = 0; spaces < 141; spaces += 1)
+            {
+                uint32_t length = (uint32_t)snprintf(edge, sizeof(edge), ".text\n");
+                memset(edge + length, ' ', spaces);
+                length += spaces;
+                const uint32_t open = length;
+                length += (uint32_t)snprintf(edge + length, sizeof(edge) - length, "/*/ nop */ ret\n");
+                const AsmResult closed = asm_assemble((String8){.pointer = edge, .length = length}, test.index, (AsmOptions){0}, &test.vector);
+                comments_wrong += !(closed.error == 0 && closed.link.atoms.count == 2 && closed.link.atoms.size[1] == 1 && closed.link.atoms.bytes[1][0] == 0xc3);
+                const AsmResult unterminated = asm_assemble((String8){.pointer = edge, .length = open + 3}, test.index, (AsmOptions){0}, &test.vector);
+                comments_wrong += !(unterminated.error != 0 && strcmp(unterminated.error, "unterminated block comment") == 0 && unterminated.location == open);
+            }
+            asm_test_check(&test, comments_wrong == 0, "\"/*/\" leaves its comment open, closed or not, at every offset of the lexer's block", 0);
         }
         // A section past the 256 MiB layout limit, by fills of 128, 128 and 4 MiB between two labels: the first addresses
         // (asm_relax_first) name the fill that crosses it, the third.

@@ -1,11 +1,8 @@
-# Collecting checker-layout acceptance for #1175
+# Checker-layout acceptance for #1175
 
-The compiler change is already merged in [#1225](https://github.com/buster14a/buster/pull/1225).
-The remaining acceptance is measured taken branches and cycles over placements on the 9700X.
-Run that fixed historical comparison once through the existing
-[Tailscale access and shared host lock](https://github.com/buster14a/buster/blob/main/docs/commands/benchpress.md), then preserve and review its
-results. It does not need a dedicated Actions workflow, scheduled run, PR check or merge gate.
-Ordinary correctness, sanitizer, fuzz and native CI continue under their existing policy.
+The November 5 campaign verified that the checker changes merged in #1225 reduced both taken branches and
+user cycles at all four code placements on the 9700X. The procedure below records how the two historical
+revisions were compared using the shared host lock. [Compiler change](https://github.com/buster14a/buster/pull/1225) · [Measured results](compile-time.md#the-checkers-rare-tests-and-their-layout-1175) · [Host access](commands/benchpress.md)
 
 ## Fixed inputs and qualification
 
@@ -104,7 +101,7 @@ The campaign builds four checker placements per tree: skip/shift pairs 0/0, 688/
 object compilations. At each placement it collects three repetitions of each user-mode
 counter and runs `time-runs --runs 11 --warmups 1 --copies 2`.
 
-## Evidence and the remaining decision
+## Verifying the evidence
 
 Check the actual within-page displacements of `check_input_resolve_range` and `check_graph_run`
 against the checker skips, and of `main` against the shifts. Require 140 objects from each

@@ -258,30 +258,37 @@ Lua's run time beyond code placement's noise, and a compile cost that the pass
 pays only where it may act ("What it costs to compile" above). With that cut,
 Tier 1 runs it by default. On the 9700X (each run under the lock on one CPU;
 the logs are in `~/buster-fast-bench/2719-claude-default/` there), against
-`--tier1-passes=-hoist` of the same compiler:
+`--tier1-passes=-hoist` of the same compiler, on main at `747fbeff`, where the
+loop vectorizer (#2743) is on by default, and before it at `b7d0b5ed`:
 
-| | User cycles | Instructions |
+| User cycles, instructions | `747fbeff` | `b7d0b5ed` |
 | --- | ---: | ---: |
-| the 30 loop kernels (`time-runs --runs 11`) | 0.9358 | 0.8913 |
-| speedtest1 (`measure-tier1-programs --runs 11`) | 0.9983 | 0.9978 |
-| Lua's five scripts, one link order (the same run) | 1.0164 | 1.0006 |
-| Lua's five scripts, 8 link orders (paired mean) | 0.9977 | |
-| `sqlite3.c`'s `-c --tier1 --lanes 1` (`measure-compile --runs 11`) | 1.0188 | 1.0158 |
+| the 30 loop kernels (`time-runs --runs 11`) | 0.9772, 0.9526 | 0.9358, 0.8913 |
+| speedtest1 (`measure-tier1-programs --runs 11`) | 1.0024, 0.9978 | 0.9983, 0.9978 |
+| Lua's five scripts, one link order (the same run) | 1.0010, 1.0008 | 1.0164, 1.0006 |
+| Lua's five scripts, 8 link orders (paired mean of cycles) | 1.0038 | 0.9977 |
+| `sqlite3.c`'s `-c --tier1 --lanes 1` (`measure-compile --runs 11`) | 1.0189, 1.0157 | 1.0188, 1.0158 |
 
-Lua's one executable ran 1.6% more cycles at equal instructions, though
-`hoist` leaves its interpreter loop (`lvm.c`) as it was: it changes `ldo`,
-`lstring`, `ltm` and `lstrlib`, whose sizes move the code after them. So, as
-[the profiling guide](commands/profiling.md#comparing-generated-tier-1-code-over-layouts-1450)
+With the loop vectorizer on, the kernels take 18% fewer cycles without the
+motion (21.9 M against 26.7 M), and the motion takes less of what is left; which
+of their loops it still gains in wasn't attributed. At
+`b7d0b5ed` Lua's one executable ran 1.6% more cycles at equal instructions,
+though `hoist` leaves its interpreter loop (`lvm.c`) as it was: it changes
+`ldo`, `lstring`, `ltm` and `lstrlib`, whose sizes move the code after them.
+So, as [the profiling guide](commands/profiling.md#comparing-generated-tier-1-code-over-layouts-1450)
 says, both builds' objects were linked in the same 8 orders (Lua's Makefile
 order and seven shuffles of it by Python's `random.Random(2719)`, fixed before
 any timing), every executable's output checked against clang -O0's, and each
-script timed over all 16 placements: the five scripts' cycles came to −0.23%
-(a 95% interval of −0.98% to +0.52% over the paired layouts), each script's
-interval spanning zero but `arithmetic.lua`'s, +0.25% (+0.03% to +0.48%), whose
-code is unchanged. Before the cut, main's `+hoist` cost the same compile 3.2%
-to 3.4% of its cycles and 4.0% of its instructions; with it, Tier 1's default
-compile of `sqlite3.c` takes 1.6% to 1.8% more cycles and 1.4% more
-instructions than main's without the pass. A differential campaign of 20 Csmith
+script timed over all 16 placements. The five scripts' cycles came to −0.23%
+at `b7d0b5ed` (a 95% interval of −0.98% to +0.52% over the paired layouts) and
++0.38% at `747fbeff` (−0.30% to +1.07%); at `747fbeff` each script's interval
+spans zero, and at `b7d0b5ed` each but `arithmetic.lua`'s, +0.25% (+0.03% to
++0.48%), whose code is unchanged. Before the cut, main's `+hoist` cost the
+same compile 3.2% to 3.4% of its cycles and 4.0% of its instructions; with it,
+Tier 1's default compile of `sqlite3.c` takes 1.6% to 1.9% more cycles and
+1.4% more instructions than main's without the pass. Its `--tier1` objects of
+the frozen corpus's `sqlite3.c` and of Lua's sources are byte for byte main's
+`--tier1-passes=+hoist` ones at `747fbeff` too. A differential campaign of 20 Csmith
 and 20 YARPGen programs (seed 2719, both tiers, in a cloud container) passed
 all 30 that clang -O0 built and ran in time, with `hoist` on and again with
 `+numbering`.

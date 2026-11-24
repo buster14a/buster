@@ -1,0 +1,1 @@
+int tested(int n){double x=n<0?__builtin_nan(""):n==0?0.0:n==1?__builtin_inf():n==2?0x1p-1074:(double)n;return __builtin_isnan(x)*100+__builtin_isinf(x)*10+__builtin_isfinite(x)+__builtin_signbit(-x)*2;}

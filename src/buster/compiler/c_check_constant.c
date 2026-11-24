@@ -635,7 +635,7 @@ static TypeId check_constant_enum_operand(const CheckConstantInput* input, uint3
             }
             const bool found = opening != BUSTER_CHECK_NONE && parser->tokens.kinds[keyword] == PARSE_KIND_ENUM && check_input_enum_opening(reader, keyword) == opening;
             const uint32_t found_close = found ? close : BUSTER_CHECK_NONE;
-            const TypeId found_type = found ? reader->tag_types[keyword] : 0;
+            const TypeId found_type = found ? check_input_memo_get(&reader->tag_types, keyword) : 0;
             // (Only a found enumeration is kept: inside its own definition its tag may not be read yet.)
             reader->enum_keys[slot] = found ? declaration + 1 : reader->enum_keys[slot];
             reader->enum_closes[slot] = found ? found_close : reader->enum_closes[slot];
@@ -1213,11 +1213,11 @@ static TypeId check_constant_specifiers(CheckConstantInput* input, uint32_t* cur
             }
             else if (kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM)
             {
-                const TypeId selected = reader->tag_types[i];
+                const TypeId selected = check_input_memo_get(&reader->tag_types, i);
                 valid &= selected != 0 && base == 0;
                 base = selected;
                 named_type = true;
-                i = selected != 0 ? reader->tag_ends[i] - 1 : i;
+                i = selected != 0 ? check_input_memo_get(&reader->tag_ends, i) - 1 : i;
             }
             else if (kind == PARSE_KIND_TYPE)
             {
@@ -1340,7 +1340,8 @@ static TypeId check_constant_specifiers(CheckConstantInput* input, uint32_t* cur
         }
         else if (kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM)
         {
-            token = reader->tag_ends[token] > token ? reader->tag_ends[token] : token + 1;
+            const uint32_t end = check_input_memo_get(&reader->tag_ends, token);
+            token = end > token ? end : token + 1;
         }
         else if (kind == PARSE_KIND_L_PAREN && parser->tree.parents[token] > token && parser->tree.parents[token] < i)
         {
@@ -1803,7 +1804,7 @@ static uint32_t check_constant_punctuation(const Parser* parser, uint32_t first,
 // Sema none of the rest); or each association's type compatible with a later one's, for each association and then each
 // later one in order, the earlier's -Wunreachable-code-generic-assoc first (CreateGenericSelectionExpr's loop). Only an
 // invalid selection pays for this: its keys (check_generic_key) are compared 16 at a time and only a key's match asks
-// the exact compatibility, as the walk's set does. The association types are the expression reader's (selection_types)
+// the exact compatibility at the selection's source position. The association types are the expression reader's (selection_types)
 // or, with `input`, the constant reader's (check_constant_type).
 static void check_input_generic_duplicates(CheckInputReader* reader, CheckConstantInput* input, uint32_t separator, uint32_t close)
 {
@@ -2155,12 +2156,13 @@ static uint32_t check_constant_completed_tag(CheckConstantInput* input, uint32_t
     const Parser* parser = reader->parser;
     uint32_t end = token;
     const uint8_t kind = parser->tokens.kinds[token];
-    if (input->syntax[token - input->first] && (kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM) && reader->tag_types[token] != 0)
+    const TypeId tag = input->syntax[token - input->first] && (kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM) ? check_input_memo_get(&reader->tag_types, token) : 0;
+    if (tag != 0)
     {
         const uint32_t body = check_input_tag_body(parser, token, input->end);
         const uint32_t close = body < input->end && parser->tokens.kinds[body] == PARSE_KIND_L_BRACE ? parser->tree.parents[body] : input->end;
-        const uint32_t after = reader->tag_ends[token];
-        if (body < close && close < after && after <= input->end && type_is_complete(reader->types, reader->tag_types[token]))
+        const uint32_t after = check_input_memo_get(&reader->tag_ends, token);
+        if (body < close && close < after && after <= input->end && type_is_complete(reader->types, tag))
         {
             memset(input->syntax + token - input->first, 1, after - token);
             memset(input->attribute_syntax + token - input->first, 1, after - token);
@@ -2180,7 +2182,7 @@ static bool check_constant_tag_finish(CheckConstantInput* input, uint32_t positi
         const uint32_t token = next - 1;
         const bool definition = input->deferred_tags && position < input->end &&
                                 input->reader->parser->tokens.kinds[position] == PARSE_KIND_L_BRACE;
-        valid = (input->cached ? input->reader->tag_types[token] : check_input_tag_identity(input->reader, token, input->end, definition)) != 0;
+        valid = (input->cached ? check_input_memo_get(&input->reader->tag_types, token) : check_input_tag_identity(input->reader, token, input->end, definition)) != 0;
         if (valid && definition)
         {
             input->pending_tag = token;
@@ -2475,6 +2477,67 @@ static bool check_constant_name_reported(const CheckInput* output, uint32_t toke
     return reported;
 }
 
+// The diagnostic reparse marks the original delimiters of the member operand it kept. Match the constant
+// reader's exact slice, so a nested type or another constant in the same declaration cannot consume its error.
+static bool check_constant_recovered_member(const CheckConstantInput* input)
+{
+    const Parser* parser = input->reader->parser;
+    const uint32_t end = input->end;
+    const uint32_t open = input->first - 1;
+    bool member = false;
+    if (input->first != 0 && input->first < end && end < parser->tokens.count)
+    {
+        const bool marked = (parser->tokens.flags[end] & BUSTER_PARSE_MEMBER_RECOVERY) != 0;
+        const bool array = parser->tree.roles[open] == PARSE_ROLE_OPEN_SUBSCRIPT && parser->tree.parents[open] == end;
+        member = (array && (marked || (parser->tokens.flags[open] & BUSTER_PARSE_MEMBER_RECOVERY) != 0)) ||
+                 (marked && parser->tree.roles[open] == PARSE_ROLE_BITFIELD && parser->tokens.kinds[end] == PARSE_KIND_SEMI);
+    }
+    return member;
+}
+
+// Mark only this operand's dependent delimiter. A bad argument still leaves a recovery call, and a statement
+// expression can discard a bad statement. Their errors remain publishable in a repaired record either way.
+static void check_constant_member_error(CheckConstantInput* input, uint32_t report)
+{
+    CheckInput* output = input->reader->output;
+    if (report < output->report_count && !output->resource)
+    {
+        const Parser* parser = input->reader->parser;
+        output->reports[report].member_operand = true;
+        bool unusable = true;
+        for (uint32_t at = output->reports[report].token; unusable && at >= input->first && at < input->end; at = parser->tree.parents[at])
+        {
+            const uint8_t role = parser->tree.roles[at];
+            unusable = role != PARSE_ROLE_CLOSE_CALL && role != PARSE_ROLE_CLOSE_BLOCK;
+        }
+        if (unusable && output->invalid_member_operands == NULL)
+        {
+            output->invalid_member_operands = BUSTER_ARENA_PUSH_ARRAY(input->reader->arena, uint8_t, output->token_count);
+            output->resource |= output->invalid_member_operands == NULL;
+            if (!output->resource)
+            {
+                memset(output->invalid_member_operands, 0, output->token_count);
+            }
+        }
+        if (unusable && !output->resource)
+        {
+            output->invalid_member_operands[input->first] = 1;
+        }
+    }
+}
+
+static void check_constant_literal(CheckConstantInput* input, uint32_t token, CheckLiteral* literal)
+{
+    CheckInputReader* reader = input->reader;
+    check_input_literal(reader, token, literal);
+    if (!literal->valid && check_constant_recovered_member(input))
+    {
+        const uint32_t before = reader->output->report_count;
+        check_input_report(reader, token, check_input_literal_report(literal));
+        check_constant_member_error(input, before);
+    }
+}
+
 // An undeclared name at `token` that a declarator's constant binds (#1447): an enumerator's value, a bit-field's width,
 // an array's bound, a typeof's operand, a _BitInt's width or a designator's index. Its error is clang's, at the name, as
 // its parser gives it on reading the name (Sema::DiagnoseEmptyLookup), each in the expression's order. A typo's correction
@@ -2514,6 +2577,10 @@ static void check_constant_name(CheckConstantInput* input, uint32_t token)
         else if (reported)
         {
             check_typo_suggestion(reader, token, &output->reports[before].detail, &output->reports[before].subject);
+            if (check_constant_recovered_member(input))
+            {
+                check_constant_member_error(input, before);
+            }
         }
         reader->constant_named += reported ? 1u : 0u;
         reader->constant_missing += reported && !corrected ? 1u : 0u;
@@ -3797,7 +3864,7 @@ static bool check_constant_evaluate(CheckConstantInput* input)
         else if (role == PARSE_ROLE_OPERAND && ((kind == PARSE_KIND_NUMBER && !check_input_function_name_token(parser, token)) || kind == PARSE_KIND_CHARACTER))
         {
             CheckLiteral literal;
-            check_input_literal(reader, token, &literal);
+            check_constant_literal(input, token, &literal);
             valid = literal.valid;
             input->values[index] = check_input_literal_value(reader, token, literal);
             produced = true;
@@ -4271,10 +4338,9 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                     // Publish once, while this enclosing operand is folded. This is only the operand's type for
                     // VLA routing, not an explicit query type or a substitute for the graph's constraint checks.
                     const TypeId operand = action.type != 0 ? action.type : action.operands[0].type;
-                    if (BUSTER_CHECK_RARE(reader, sizeof_types, token) != operand)
+                    if (check_input_memo_get(&reader->sizeof_types, token) != operand)
                     {
-                        check_input_rare_claim(reader, &reader->sizeof_types[token]);
-                        reader->sizeof_types[token] = operand;
+                        check_input_memo_set(reader, &reader->sizeof_types, token, operand);
                     }
                 }
                 check_constant_warning_operands(input, &action, first, count);
@@ -4641,7 +4707,7 @@ static bool check_constant_raw_expression(CheckConstantInput* input, uint32_t fi
         if (operand && ((kind == PARSE_KIND_NUMBER && !check_input_function_name_token(parser, token)) || kind == PARSE_KIND_CHARACTER))
         {
             CheckLiteral literal;
-            check_input_literal(reader, token, &literal);
+            check_constant_literal(input, token, &literal);
             valid = literal.valid;
             ranges[value_count] = (CheckConstantRange){ .first = token, .end = token + 1 };
             values[value_count++] = check_input_literal_value(reader, token, literal);
@@ -5543,6 +5609,31 @@ static bool check_input_constant_job_step(CheckConstantInput* input, CheckValue*
     return valid;
 }
 
+// Clang points at the operand whose value a nonconstant bit-field width needed. Follow the evaluated
+// arithmetic through its recorded child values. A grouped lvalue is read at its opening parenthesis.
+static uint32_t check_constant_width_location(const CheckConstantInput* input, uint32_t root)
+{
+    const CheckInputReader* reader = input->reader;
+    uint32_t token = root;
+    uint32_t location = input->first;
+    while (token >= input->first && token < input->end)
+    {
+        const uint32_t index = token - input->first;
+        location = input->warning_begin[index];
+        const uint8_t role = reader->parser->tree.roles[token];
+        const bool arithmetic = role == PARSE_ROLE_CLOSE_GROUP || role == PARSE_ROLE_CLOSE_CAST || role == PARSE_ROLE_PREFIX ||
+                                (role >= PARSE_ROLE_MULTIPLICATIVE && role <= PARSE_ROLE_BITWISE_OR);
+        uint32_t child = arithmetic && input->values[index].category != CHECK_LVALUE ? reader->first_child[token] : BUSTER_CHECK_NONE;
+        while (child >= input->first && child < input->end &&
+               (!input->present[child - input->first] || input->values[child - input->first].constant_kind == CHECK_CONSTANT_INTEGER))
+        {
+            child = reader->next_child[child];
+        }
+        token = child;
+    }
+    return location;
+}
+
 static bool check_input_constant_read(CheckInputReader* reader, uint32_t first, uint32_t end, bool type_name, bool cached, bool scoped_names,
                                       CheckValue* value, TypeId* type, uint32_t* failed_token, CheckConstantFailure* diagnosed)
 {
@@ -5575,6 +5666,12 @@ static bool check_input_constant_read(CheckInputReader* reader, uint32_t first, 
     {
         valid = check_constant_range_value(&input, first, end, value) && check_constant_resolve(&input, value, 0, value);
         const uint32_t root = valid ? check_constant_range_root(&input, first, end) : BUSTER_CHECK_NONE;
+        if (input.diagnosed != NULL && input.diagnosed->diagnostic == CHECK_DIAG_NONE && !input.raw && root != BUSTER_CHECK_NONE &&
+            value->constant_kind != CHECK_CONSTANT_INTEGER && end < reader->parser->tokens.count && reader->parser->tokens.kinds[end] == PARSE_KIND_SEMI &&
+            check_constant_recovered_member(&input))
+        {
+            input.diagnosed->token = check_constant_width_location(&input, root);
+        }
         reader->constant_abi_origin = root != BUSTER_CHECK_NONE ? input.abi_origins[root - first] : 0;
         reader->constant_noderef = check_input_noderef_at(reader->output, root);
     }
@@ -5601,16 +5698,21 @@ static __attribute__((unused)) bool check_input_evaluate_cached_at(CheckInputRea
     return check_input_constant_read(reader, first, end, false, true, false, value, &unused, failed_token, NULL);
 }
 
+static bool check_input_constant_value(CheckInputReader* reader, uint32_t first, uint32_t end, int64_t* number, CheckValue* value)
+{
+    const bool valid = check_input_evaluate(reader, first, end, value) && check_input_const_rvalue(reader, end, value) && check_input_integer_constant(reader, value) &&
+                       check_action_i64(reader->types, value, number);
+    if (valid)
+    {
+        check_input_constant_warning(reader, first, end, value, true);
+    }
+    return valid;
+}
+
 static bool check_input_constant(CheckInputReader* reader, uint32_t first, uint32_t end, int64_t* number)
 {
     CheckValue value = { 0 };
-    const bool valid = check_input_evaluate(reader, first, end, &value) && check_input_const_rvalue(reader, end, &value) && check_input_integer_constant(reader, &value) &&
-                       check_action_i64(reader->types, &value, number);
-    if (valid)
-    {
-        check_input_constant_warning(reader, first, end, &value, true);
-    }
-    return valid;
+    return check_input_constant_value(reader, first, end, number, &value);
 }
 
 static __attribute__((unused)) bool check_input_constant_ice(CheckInputReader* reader, uint32_t first, uint32_t end, int64_t* number)

@@ -76,9 +76,14 @@ of those that ran at once, without what the runner kills after the shell ends;
 it is at least the runner's own peak, 10 MiB for a Develop build and 32 MiB for
 an ASan one, since the shell starts in the runner's memory, whose peak its
 `exec` records),
-then its output, in the list's order as soon as it and every command before it
-have ended; with `--github`, between `::group::` and `::endgroup::`, and an
-`::error::` annotation for each that failed. Then come a summary line, with the
+then a line such as `CPU time 32.7 s user, 7.4 s system`, followed by the
+command's output. Both figures come from the same `wait4` as the total and
+include children the shell or its descendants reaped. The runner prints the
+split even when it kills the command at its deadline, so a timeout before the
+command's own final report still shows where the accounted CPU time went.
+Reports appear in list order as soon as each command and those before it have
+ended. With `--github`, each report is between `::group::` and `::endgroup::`,
+with an `::error::` annotation for each failure. Then come a summary line, with the
 commands' CPU time and their passed, failed, skipped and not-started counts, and
 a line naming each command that failed. A command that exits with status 77
 (Automake's skip code) is reported as skipped and counted apart, and a test
@@ -160,8 +165,8 @@ report's first line names the shard: `parallel: shard K of N, M of T commands,
 at most J CPUs at once`. A shard may have no commands (N past the list's), which
 passes.
 
-The 9700X job's test step ("Run complete native vector correctness before benchmarks") runs every
-test through it, with `--timeout 600`, before the benchmarks, which run one at
+The 9700X job's “Run native vector correctness before benchmarks” step uses
+`--timeout 600` for both the full and smoke inventories. Benchmarks run one at
 a time and pinned. Its commands share CPUs 0 to 7 (`taskset`), one per core,
 and the runner holds them to those 8 CPUs together (#522). Tests such as
 test-lanes and test-files start lanes of their own and the call-graph check

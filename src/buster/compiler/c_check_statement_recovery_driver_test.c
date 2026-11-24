@@ -29,8 +29,9 @@ static void check_test_driver_parse_statement_recovery(CheckTest* test, const ch
         "tests/checker/parse-recovery/missing-declarator.c",
         "tests/checker/parse-recovery/mixed.c",
         "tests/checker/parse-recovery/operand-context.c",
+        "tests/checker/parse-recovery/member-operands.c",
     };
-    static const uint32_t later_errors[] = { 4, 6, 3, 4, 0 };
+    static const uint32_t later_errors[] = { 4, 6, 3, 4, 0, 1 };
     static const char* const standards[] = { "-std=gnu17", "-std=gnu23" };
     static const char* const policies[] = { "-Wall", "-w", "-ferror-limit=2" };
     enum { LINES = 16384 };

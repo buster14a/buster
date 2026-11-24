@@ -1,0 +1,1 @@
+static _Complex int value=(50000+0i)*(50000+0i); _Static_assert(__real__ ((50000+0i)*(50000+0i))==-1794967296,"wrapped real component"); _Static_assert(__imag__ ((50000+0i)*(50000+0i))==0,"imaginary component");

@@ -1,0 +1,1 @@
+enum E { A=7ULL, B=(unsigned _BitInt(33))8, C=_Generic(A,int:1,default:9)+_Generic(B,int:2,default:9) }; _Static_assert(C==3 && _Generic(A,int:1,default:0) && _Generic(B,int:1,default:0),"small values");

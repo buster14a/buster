@@ -1,0 +1,2 @@
+#if 0x1p2
+#endif

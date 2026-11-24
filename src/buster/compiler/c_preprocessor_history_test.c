@@ -924,273 +924,35 @@ static bool pp_test_diagnostic_collection(void)
     return failures == 0;
 }
 
+static bool pp_test_history_row(PPTestFixtures* table, const char* directory, char** fields, uint32_t line)
+{
+    (void)line;
+    PPHistoryCase* row = pp_test_fixture_row(table, fields[0]);
+    const bool header = strcmp(fields[1], "header") == 0 || strcmp(fields[1], "header,parser") == 0;
+    const bool parser = strcmp(fields[1], "parser") == 0 || strcmp(fields[1], "header,parser") == 0;
+    bool valid = row != NULL && (header || parser || strcmp(fields[1], "-") == 0);
+    if (valid)
+    {
+        row->name = fields[2];
+        row->parser = parser;
+        valid = pp_test_fixture_text(table, directory, fields[0], ".c", &row->source) &&
+                (!header || pp_test_fixture_text(table, directory, fields[0], ".h", &row->header));
+    }
+    return valid;
+}
+
 static bool pp_test_history(const char* directory, bool with_clang)
 {
-    static const PPHistoryCase cases[] = {
-        {
-            .name = "undefined function-like name",
-            .source = "#if IS_IN (libc)\n#endif\n",
-        },
-        {
-            .name = "undefined function-like name in elif",
-            .source = "#if 0\n#elif MISSING/**/(1) && 1\n#endif\n",
-        },
-        {
-            .name = "undefined function-like name in short-circuited operands",
-            .source = "#if 0 && MISSING(1)\n#endif\n#if 1 || UNKNOWN(2)\n#endif\n",
-        },
-        {
-            .name = "undefined function-like alias",
-            .source = "#define ALIAS MISSING\n#if ALIAS(1)\n#endif\n",
-        },
-        {
-            .name = "undefined function-like name in nested expansion",
-            .source = "#define INNER MISSING\n#define OUTER INNER\n#define ID(x) x\n#if ID(OUTER)(1)\n#endif\n",
-        },
-        {
-            .name = "undefined function-like self expansion",
-            .source = "#define SELF SELF\n#if SELF(1)\n#endif\n",
-        },
-        {
-            .name = "disabled function-like recursive expansion",
-            .source = "#define F(x) F\n#if F(1)(2)\n#endif\n",
-        },
-        {
-            .name = "undefined function-like Unicode name",
-            .source = "#if caf\\u00e9(1)\n#endif\n",
-        },
-        {
-            .name = "undefined function-like long name is not truncated",
-            .source = "#if UNDEFINED_FUNCTION_WITH_A_NAME_LONGER_THAN_SIXTY_FOUR_BYTES_FOR_FULL_DIAGNOSTIC_SPELLING(1)\n#endif\n",
-        },
-        {
-            .name = "undefined function-like name before a splice",
-            .source = "#if MISSING\\\n(1)\n#endif\n",
-        },
-        {
-            .name = "undefined function-like included name",
-            .source = "#line 40 \"caller.c\"\n#include \"history.h\"\n",
-            .header = "#define ALIAS UNKNOWN\n#line 70 \"renamed.h\"\n#if ALIAS(1)\n#endif\n",
-        },
-        {
-            .name = "number before parentheses keeps its operator diagnostic",
-            .source = "#define NUMBER 1\n#if NUMBER(2)\n#endif\n",
-        },
-        {
-            .name = "defined before parentheses keeps its operator diagnostic",
-            .source = "#if defined(X)(1)\n#endif\n",
-        },
-        {
-            .name = "name after a value keeps its operator diagnostic",
-            .source = "#if 1 MISSING(1)\n#endif\n",
-        },
-        {
-            .name = "parenthesized name keeps its operator diagnostic",
-            .source = "#if (MISSING)(1)\n#endif\n",
-        },
-        {
-            .name = "object",
-            .source = "#define OBJ \"bad\"\n#if OBJ\n#endif\n",
-        },
-        {
-            .name = "function",
-            .source = "#define FUN(x) \"bad\"\n#if FUN(1)\n#endif\n",
-        },
-        {
-            .name = "argument",
-            .source = "#define ID(x) x\n#if ID(\"bad\")\n#endif\n",
-        },
-        {
-            .name = "nested",
-            .source = "#define INNER \"bad\"\n#define OUT INNER\n#if OUT\n#endif\n",
-        },
-        {
-            .name = "argument prescan",
-            .source = "#define OBJ \"bad\"\n#define ID(x) x\n#define OUT(x) ID(x)\n#if OUT(OBJ)\n#endif\n",
-        },
-        {
-            .name = "paste",
-            .source = "#define CAT(a,b) a##b\n#if CAT(1,.2)\n#endif\n",
-        },
-        {
-            .name = "stringification",
-            .source = "#define S(x) #x\n#if S(a b)\n#endif\n",
-        },
-        {
-            .name = "invalid paste",
-            .source = "#define P(a,b) a##b\n#define OUT P(+,*)\nOUT\n",
-        },
-        {
-            .name = "arity",
-            .source = "#define BAD(x,y) x\n#define OUT BAD(1)\nOUT\n",
-        },
-        {
-            .name = "arity across contexts",
-            .source = "#define BAD(x,y) x\n#define NAME BAD\nNAME(1)\n",
-        },
-        {
-            .name = "extra arguments",
-            .source = "#define BAD(x) x\n#define OUT BAD(1,2)\nOUT\n",
-        },
-        {
-            .name = "line/include",
-            .source = "#line 30 \"caller.c\"\n#include \"history.h\"\n",
-            .header = "#define OBJ \"bad\"\n#line 70 \"renamed.h\"\n#if OBJ\n#endif\n",
-        },
-        {
-            .name = "output/redefinition",
-            .source = "#define OBJ missing\nint a=OBJ;\n#undef OBJ\n#define OBJ missing\nint b=OBJ;\n",
-            .parser = true,
-        },
-        {
-            .name = "output/nested",
-            .source = "#define OBJ missing\n#define OUT OBJ\nint a=OUT;\n",
-            .parser = true,
-        },
-        {
-            .name = "output/argument",
-            .source = "#define ID(x) x\n#define OBJ missing\nint a=ID(OBJ);\n",
-            .parser = true,
-        },
-        {
-            .name = "output/paste",
-            .source = "#define CAT(a,b) a##b\nint a=CAT(mis,sing);\n",
-            .parser = true,
-        },
-        {
-            .name = "empty paste left",
-            .source = "#define CAT(a,b) a##b\nint a=CAT(,missing);\n",
-            .parser = true,
-        },
-        {
-            .name = "empty paste right",
-            .source = "#define CAT(a,b) a##b\nint a=CAT(missing,);\n",
-            .parser = true,
-        },
-        {
-            .name = "cross-context invocation",
-            .source = "#define ALIAS F\n#define F(x) missing\nint a=ALIAS(1);\n",
-            .parser = true,
-        },
-        {
-            .name = "argument macro name",
-            .source = "#define CALL(f) f()\n#define F() missing\nint a=CALL(F);\n",
-            .parser = true,
-        },
-        {
-            .name = "forwarded function",
-            .source = "#define ID(x) x\n#define F(x) missing\nint a=ID(F)(1);\n",
-            .parser = true,
-        },
-        {
-            .name = "builtin",
-            .source = "#define FILE_NAME __FILE__\n#if FILE_NAME\n#endif\n",
-        },
-        {
-            .name = "empty stringification",
-            .source = "#define S(x) #x\n#if S()\n#endif\n",
-        },
-        {
-            .name = "header definition",
-            .source = "#include \"history.h\"\nint a=OBJ;\n",
-            .header = "#define OBJ missing\n",
-            .parser = true,
-        },
-        {
-            .name = "header errors",
-            .source = "#include \"history.h\"\n",
-            .header = "#define OBJ \"bad\"\n#if OBJ\n#endif\n#if OBJ\n#endif\n",
-        },
-        {
-            .name = "nested include stack",
-            .source = "#define STEP\n#include \"history.h\"\n",
-            .header = "#ifdef STEP\n#undef STEP\n#include \"history.h\"\n#else\n#define OBJ \"bad\"\n#if OBJ\n#endif\n#endif\n",
-        },
-        {
-            .name = "nested argument name",
-            .source = "#define CALL(f) f()\n#define OUT(x) CALL(x)\n#define F() missing\nint a=OUT(F);\n",
-            .parser = true,
-        },
-        {
-            .name = "CRLF",
-            .source = "#define OBJ \"bad\"\r\n#line 22 \"logical.c\"\r\n#if OBJ\r\n#endif\r\n",
-        },
-        // #254's review: header names written out that are too long for a path (clang's fatal error about the first
-        // path the search tries, and #embed's file not found), the header refused at the depth limit (one error, the
-        // includes of it after that left out: the main file includes itself to the limit), and the limit at a name a
-        // macro made (at its expansion, with the macro's note).
-        {
-            .name = "include: an angled name too long for a path",
-            .source = "#define " BUSTER_PP_TEST_A4096 " history.h\n#include <" BUSTER_PP_TEST_A4096 ">\n",
-            .header = "int found;\n",
-        },
-        {
-            .name = "include: a quoted name too long for a path",
-            .source = "#include \"" BUSTER_PP_TEST_A4096 "\"\n",
-        },
-        // A name with a part longer than a file name may be (NAME_MAX), in a path shorter than PATH_MAX: the open fails
-        // (ENAMETOOLONG), and the file cache's probe keeps the error for the search to report. And an absolute name too
-        // long for a path, which is the one place searched, not a name in the includer's directory.
-        {
-            .name = "include: a name with a part longer than NAME_MAX",
-            .source = "#include \"" BUSTER_PP_TEST_A512 ".h\"\n",
-        },
-        {
-            .name = "include: an absolute name too long for a path",
-            .source = "#include \"/" BUSTER_PP_TEST_A4096 "\"\n",
-        },
-        {
-            .name = "embed: an angled name too long for a path",
-            .source = "#define " BUSTER_PP_TEST_A4096 " history.h\n#embed <" BUSTER_PP_TEST_A4096 ">\n",
-            .header = "int found;\n",
-        },
-        // Extra tokens after a name written out are a warning at the first of them.
-        {
-            .name = "include: extra tokens after a name written out",
-            .source = "#include \"history.h\" junk\n#include <history.h> more junk\nint a = missing;\n",
-            .header = "int found;\n",
-            .parser = true,
-        },
-        {
-            .name = "include: the header refused at the depth limit",
-            .source = "#if __INCLUDE_LEVEL__ < 199\n#include \"history.c\"\n#else\n#include \"history.h\"\n#include \"history.h\"\n#endif\n#include \"history.h\"\n",
-            .header = "int leaf;\n",
-        },
-        {
-            .name = "include: the depth limit at a name a macro made",
-            .source = "#define H \"history.h\"\n#include H\n",
-            .header = "#include H\n",
-        },
-        // -Wunused-macros (#2222), which a pragma enables: the main file's unused definitions at its end, in clang's set's
-        // order, an #undef's at it; none for a header's, or for a definition used only in a #if line or by #ifdef.
-        {
-            .name = "unused macros, preprocessed",
-            .source = "#pragma clang diagnostic warning \"-Wunused-macros\"\n#include \"history.h\"\n#define A 1\n#define B A\n"
-                      "#define C 3\n#undef C\n#define D 4\n#if D\n#endif\n#define E 5\n#ifdef E\n#endif\n#define F(x) x\nF\n"
-                      "#undef HEADER\n#define G 7\n#define H 8\n#error stop\n",
-            .header = "#define HEADER 1\n#define HEADER_UNUSED 2\n",
-        },
-        // -Wgnu-line-marker (#2222), which a pragma enables: at a marker's name, or its line's end, numbered as before its
-        // own marker; in a header too.
-        {
-            .name = "gnu line markers, preprocessed",
-            .source = "#pragma clang diagnostic warning \"-Wgnu-line-marker\"\n#include \"history.h\"\n# 5\n# 10 \"history.c\"\n"
-                      "# 20 \"other.c\" 1\n#error stop\n",
-            .header = "# 7 \"history.h\"\nint h;\n",
-        },
-        {
-            .name = "unused macros: defined, push_macro and pop_macro, preprocessed",
-            .source = "#pragma clang diagnostic warning \"-Wunused-macros\"\n#define A 1\n#define B 2\n#if 0 && defined(A)\n#elif defined(B)\n"
-                      "#endif\n#define P 1\n#pragma push_macro(\"P\")\n#undef P\n#pragma pop_macro(\"P\")\n#define V 1\n"
-                      "#pragma push_macro(\"V\")\n#pragma pop_macro(\"V\")\n#error stop\n",
-        },
-    };
-    uint32_t failures = 0;
-    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(cases); i += 1)
+    PPTestFixtures table;
+    const bool loaded = pp_test_fixture_table(&table, "history", "buster-fixtures v1 preprocessor-history", 3, sizeof(PPHistoryCase), pp_test_history_row, NULL);
+    const PPHistoryCase* cases = (const PPHistoryCase*)table.rows;
+    uint32_t failures = !loaded;
+    for (uint32_t i = 0; i < table.count; i += 1)
     {
         failures += !pp_test_history_case(&cases[i], directory, with_clang);
     }
-    printf("history diagnostics: %u of %lu fail%s\n", failures, (unsigned long)BUSTER_ARRAY_LENGTH(cases), with_clang ? " (Clang oracle)" : "");
+    printf("history diagnostics: %u of %lu fail%s\n", failures, (unsigned long)table.count, with_clang ? " (Clang oracle)" : "");
+    arena_release(&table.storage);
     const bool runs = pp_test_history_runs();
     const bool copies = pp_test_history_copies();
     const bool lifetimes = pp_test_history_lifetimes(directory);

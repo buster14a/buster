@@ -529,7 +529,7 @@ static bool check_data_sort_fixups(CheckDataPlan* plan, Arena* scratch)
 }
 
 // Only bytes owned by this write are inspected. Bit-fields can begin/end inside a byte; the bulk is a bounded
-// byte slice with no readable padding, 64 bytes at a time, and a byte at a time past the last block.
+// byte slice with no readable padding, 64 bytes at a time, the last ones as one masked step.
 static bool check_data_nonzero_bits(const uint8_t* bytes, uint64_t begin, uint64_t end)
 {
     uint8_t nonzero = 0;
@@ -547,9 +547,10 @@ static bool check_data_nonzero_bits(const uint8_t* bytes, uint64_t begin, uint64
         nonzero = _mm512_test_epi64_mask(block, block) != 0;
         byte += 64;
     }
-    for (; nonzero == 0 && byte < byte_end; byte += 1)
+    if (nonzero == 0 && byte < byte_end)
     {
-        nonzero |= bytes[byte];
+        const __m512i block = _mm512_maskz_loadu_epi8(((__mmask64)1 << (byte_end - byte)) - 1, bytes + byte);
+        nonzero = _mm512_test_epi64_mask(block, block) != 0;
     }
     if (begin < end && (end % 8) != 0 && begin <= byte_end * 8)
     {

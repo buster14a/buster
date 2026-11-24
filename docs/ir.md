@@ -140,7 +140,7 @@ column comparisons deterministic.
 | `call`, `call_indirect` | `a` is a symbol or a pointer value; `b` indexes `calls`; `c` an aggregate result's destination (a `ptr`), or absent |
 | `phi` | `a` is an extra-word offset, `b` the incoming count; pairs are `(predecessor, value)` |
 | `br` | `a` is a block ID |
-| `cbr` | `a:i1`, `b` true block, `c` false block |
+| `cbr` | `a:i1`, `b` true block, `c` false block. Optional `predictable` flag keeps a strongly biased branch during if-conversion. |
 | `switch` | `a` integer value, `b` extra-word offset, `c` case count; words are `default_block, constant_id, target, ...` |
 | `ret` | Optional value in `a`, matching the function result; the instruction itself is `void` |
 | `unreachable` | No operands; a terminator |

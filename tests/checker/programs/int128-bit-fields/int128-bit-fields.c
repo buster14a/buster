@@ -1,0 +1,1 @@
+typedef __int128 i128;typedef unsigned __int128 u128;struct B{u128 a:20;i128 b:40;int k;u128 c:3;};struct B gb={5,-7,1,2};int tested(int n){struct B b={(u128)n,(i128)n*-1000,n,1};b.a+=7;b.b*=3;b.c=n;u128 old=b.a++;i128 x=--b.b;gb.b-=n;gb.a^=(u128)n<<5;return (int)(b.a+old)^(int)(x>>3)^(int)b.c^(int)gb.b^(int)gb.a^b.k;}

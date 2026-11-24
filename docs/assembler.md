@@ -695,8 +695,11 @@ Each step is vectorized:
 
 1. The lexer classifies 64 source bytes, computes word/token boundary masks,
    compresses starts/ends/kinds in registers and transposes them into 16-byte
-   token records. Masked tails respect the logical slice. Long words and
-   comments/strings have bounded rare paths, which the scalar lexer takes.
+   token records. Masked tails respect the logical slice. Strings, comments
+   and stray bytes leave the block loop for a rare path that scans 64 bytes at
+   a time too: a string's escapes come from its backslash bits in order (a
+   carry crosses blocks), and a block comment's close is a `*` mask ANDed with
+   the next byte's `/` mask, its newlines emitted as line tokens (#3452).
 2. Eight bounded register spellings are classified together and cached in the
    token's existing reserved field. Two 32-entry tables in ZMM registers resolve
    short names by hash and full-key comparison; vector arithmetic handles

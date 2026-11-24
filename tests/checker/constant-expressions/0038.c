@@ -1,0 +1,1 @@
+typedef int I4 __attribute__((vector_size(16))); typedef float F4 __attribute__((vector_size(16))); I4 a; typedef int T [[gnu::aligned(sizeof(__builtin_convertvector(a,F4)))]]; _Static_assert(_Alignof(T)==16, "raw convert destination");

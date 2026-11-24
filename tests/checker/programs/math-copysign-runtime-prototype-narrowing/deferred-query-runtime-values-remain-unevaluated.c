@@ -1,0 +1,1 @@
+int absent(void);int tested(int n){unsigned long a=__builtin_object_size("abc",0);unsigned long b=__builtin_object_size("abc",2);int ignored=__builtin_object_size((n++,(char*)0),0)==~0UL;return n+(int)(a*10+b)+ignored+__builtin_constant_p(absent());}

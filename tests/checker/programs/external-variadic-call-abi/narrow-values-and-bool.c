@@ -1,0 +1,1 @@
+int tested(int n){signed char a=(signed char)(n+125);unsigned char b=(unsigned char)(n+250);_Bool c=(_Bool)(n*256);return (int)a+(int)b*3+c*700;}

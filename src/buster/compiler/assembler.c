@@ -513,83 +513,142 @@ static uint32_t asm_word_length(const uint8_t* source, uint32_t length)
     return count;
 }
 
-static void asm_lex_scalar(AsmParser* parser)
+// The rare starts of a token, which asm_lex_vector's 64-byte classification leaves out: a string, a comment ('#', "//" or
+// a block), a lone '/', NUL and bytes from 0x80 up. Each is found by 64-byte scans; the token it makes is appended, and
+// the offset after it returned. A line comment ends before its '\n', which the next block takes. The scans read blocks
+// from `origin`, the block in which the lexer met the rare byte at `at` (origin <= at < origin + 64), with the bits below
+// where the token's scan starts cleared; that block's bytes are `first`, the lexer's own load of them, so a token that
+// ends in its block costs no load.
+
+// The first offset from `from` of a '\n', reading blocks from `origin` (origin <= from), or `length`.
+static uint32_t asm_scan_line_end(const uint8_t* source, uint32_t length, uint32_t origin, __m512i first, uint32_t from)
 {
-    const uint8_t* bytes = (const uint8_t*)parser->source.pointer;
-    const uint32_t length = parser->source.length;
-    uint32_t at = 0;
-    while (at < length && parser->result.error == 0)
+    uint32_t result = length;
+    uint32_t block = origin;
+    while (block < length && result == length)
     {
-        const uint32_t start = at;
-        const uint8_t byte = bytes[at++];
-        uint16_t kind = byte;
-        if (byte == ' ' || byte == '\t' || byte == '\r' || byte == '\v' || byte == '\f')
-        {
-            continue;
-        }
-        if (byte == '#' || (byte == '/' && at < length && bytes[at] == '/'))
-        {
-            while (at < length && bytes[at] != '\n')
-            {
-                at += 1;
-            }
-            continue;
-        }
-        if (byte == '/' && at < length && bytes[at] == '*')
-        {
-            at += 1;
-            while (at + 1 < length && !(bytes[at] == '*' && bytes[at + 1] == '/'))
-            {
-                // A block comment is whitespace; newlines still terminate assembly statements.
-                if (bytes[at] == '\n')
-                {
-                    parser->tokens[parser->token_count++] = (AsmToken){.start = at, .end = at + 1, .kind = '\n'};
-                }
-                at += 1;
-            }
-            if (at + 1 >= length)
-            {
-                asm_fail(parser, start, "unterminated block comment");
-            }
-            at += 2;
-            continue;
-        }
-        if (asm_word_byte(byte))
-        {
-            at = start + asm_word_length(bytes + start, length - start);
-            kind = BUSTER_ASM_WORD;
-        }
-        else if (byte == '"')
-        {
-            bool closed = false;
-            while (at < length && !closed && bytes[at] != '\n')
-            {
-                if (bytes[at] == '\\' && at + 1 < length)
-                {
-                    at += 2;
-                }
-                else
-                {
-                    closed = bytes[at++] == '"';
-                }
-            }
-            if (!closed)
-            {
-                asm_fail(parser, start, "unterminated string");
-            }
-            kind = BUSTER_ASM_STRING;
-        }
-        else if (byte == ';')
-        {
-            kind = '\n';
-        }
-        else if (byte == 0 || byte >= 128)
-        {
-            asm_fail(parser, start, "unsupported source byte");
-        }
-        parser->tokens[parser->token_count++] = (AsmToken){.start = start, .end = at, .kind = kind};
+        const uint32_t n = length - block < 64 ? length - block : 64;
+        const uint64_t below = from > block ? _bzhi_u64(~0ull, from - block) : 0;
+        const __m512i bytes = block == origin ? first : _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, n), source + block);
+        const uint64_t found = _mm512_mask_cmpeq_epi8_mask(_bzhi_u64(~0ull, n) & ~below, bytes, _mm512_set1_epi8('\n'));
+        result = found != 0 ? block + (uint32_t)__builtin_ctzll(found) : result;
+        block += n;
     }
-    parser->tokens[parser->token_count] = (AsmToken){.start = length, .end = length, .kind = 0};
+    return result;
+}
+
+// A string from its '"' at `at`: up to the first '"' or '\n' that no backslash escapes, a backslash escaping the byte
+// after it whatever it is (a line end too), as GNU as reads one. The escaped bytes of each 64 come from its runs of
+// backslashes by one addition (simdjson's method); a run that escapes past a block's end escapes the next block's
+// first byte. Returns the offset past the closing '"', or the '\n' or end that leaves it open.
+static uint32_t asm_scan_string(const uint8_t* source, uint32_t length, uint32_t origin, __m512i first, uint32_t at, bool* closed)
+{
+    uint32_t result = length;
+    uint32_t block = origin;
+    const uint32_t start = at + 1;
+    uint64_t carried = 0;
+    *closed = false;
+    while (block < length && result == length)
+    {
+        const uint32_t n = length - block < 64 ? length - block : 64;
+        // The bytes before the string's first, which reach past the lexer's block when the quote is its last byte.
+        const uint64_t below = start > block ? _bzhi_u64(~0ull, start - block) : 0;
+        const __mmask64 valid = _bzhi_u64(~0ull, n) & ~below;
+        const __m512i bytes = block == origin ? first : _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, n), source + block);
+        const uint64_t quotes = _mm512_mask_cmpeq_epi8_mask(valid, bytes, _mm512_set1_epi8('"'));
+        const uint64_t ends = quotes | _mm512_mask_cmpeq_epi8_mask(valid, bytes, _mm512_set1_epi8('\n'));
+        // A run of backslashes escapes the byte after it when the run, less a first backslash the previous block
+        // escaped, has odd length: adding each run's odd-position start to the backslashes carries through the run
+        // and leaves the bit after it set exactly when its start and length differ in parity from the even bits.
+        const uint64_t even = UINT64_C(0x5555555555555555);
+        const uint64_t backslashes = _mm512_mask_cmpeq_epi8_mask(valid, bytes, _mm512_set1_epi8('\\')) & ~carried;
+        const uint64_t follows = (backslashes << 1) | carried;
+        const uint64_t odd_starts = backslashes & ~even & ~follows;
+        uint64_t sum = 0;
+        carried = __builtin_add_overflow(odd_starts, backslashes, &sum) ? 1 : 0;
+        const uint64_t escaped = (even ^ (sum << 1)) & follows;
+        const uint64_t stop = ends & ~escaped;
+        result = stop != 0 ? block + (uint32_t)__builtin_ctzll(stop) : result;
+        // Whether the first stop is a quote, from the masks rather than a load of the byte at `result`.
+        *closed = (stop & (0 - stop) & quotes) != 0;
+        block += n;
+    }
+    return *closed ? result + 1 : result;
+}
+
+// A block comment from its "/*" at `at`: through the first "*/" from the byte after its '*' on, its line ends
+// appended as '\n' tokens (statements end at them). Returns the offset past the "*/", or `length` with *closed false.
+static uint32_t asm_scan_block_comment(AsmParser* parser, const uint8_t* source, uint32_t length, uint32_t origin, __m512i first, uint32_t at, bool* closed)
+{
+    uint32_t result = length;
+    uint32_t block = origin;
+    const uint32_t start = at + 2;
+    *closed = false;
+    while (block + 1 < length && !*closed)
+    {
+        const uint32_t n = length - 1 - block < 64 ? length - 1 - block : 64;
+        // The bytes before the comment's own "*/" may start, its "/*" included: they reach into the next block when
+        // the '/' is the lexer's block's last byte, whose '*' must not close it ("/*/").
+        const uint64_t below = start > block ? _bzhi_u64(~0ull, start - block) : 0;
+        const __mmask64 valid = _bzhi_u64(~0ull, n) & ~below;
+        const __m512i here = block == origin ? first : _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, n), source + block);
+        const __m512i next = _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, n), source + block + 1);
+        const uint64_t close = _mm512_mask_cmpeq_epi8_mask(valid, here, _mm512_set1_epi8('*')) & _mm512_mask_cmpeq_epi8_mask(valid, next, _mm512_set1_epi8('/'));
+        uint64_t lines = _mm512_mask_cmpeq_epi8_mask(valid, here, _mm512_set1_epi8('\n'));
+        lines &= close != 0 ? _bzhi_u64(~0ull, (uint32_t)__builtin_ctzll(close)) : ~0ull;
+        for (; lines != 0; lines &= lines - 1)
+        {
+            const uint32_t line = block + (uint32_t)__builtin_ctzll(lines);
+            parser->tokens[parser->token_count++] = (AsmToken){.start = line, .end = line + 1, .kind = '\n'};
+        }
+        *closed = close != 0;
+        result = close != 0 ? block + (uint32_t)__builtin_ctzll(close) + 2 : result;
+        block += n;
+    }
+    return result;
+}
+
+// Inlined into asm_lex_vector's block loop: a call there costs the loop its vector constants, which every ZMM register's
+// being caller-saved spills and reloads around it, and made a 1-byte string or comment a line lex 5-15% slower on the
+// 9700X than the scalar walk it replaced.
+static inline __attribute__((always_inline)) uint32_t asm_lex_rare(AsmParser* parser, const uint8_t* source, uint32_t length, uint32_t origin, __m512i first, uint32_t at)
+{
+    const uint8_t byte = source[at];
+    uint32_t end = at + 1;
+    if (byte == '"')
+    {
+        bool closed = false;
+        end = asm_scan_string(source, length, origin, first, at, &closed);
+        if (!closed)
+        {
+            asm_fail(parser, at, "unterminated string");
+        }
+        parser->tokens[parser->token_count++] = (AsmToken){.start = at, .end = end, .kind = BUSTER_ASM_STRING};
+    }
+    else if (byte == '#' || (byte == '/' && end < length && source[end] == '/'))
+    {
+        end = asm_scan_line_end(source, length, origin, first, at);
+    }
+    else if (byte == '/' && end < length && source[end] == '*')
+    {
+        bool closed = false;
+        end = asm_scan_block_comment(parser, source, length, origin, first, at, &closed);
+        if (!closed)
+        {
+            asm_fail(parser, at, "unterminated block comment");
+        }
+    }
+    else if (byte == '/')
+    {
+        parser->tokens[parser->token_count++] = (AsmToken){.start = at, .end = end, .kind = '/'};
+    }
+    else
+    {
+        // The byte's own token, as the lexer leaves it after the error.
+        asm_fail(parser, at, "unsupported source byte");
+        parser->tokens[parser->token_count++] = (AsmToken){.start = at, .end = end, .kind = byte};
+    }
+    return end;
 }
 
 // Transpose compacted columns into the parser's fixed 16-byte records, four records per store. The lexer computes
@@ -639,6 +698,7 @@ static void asm_lex_vector(AsmParser* parser)
         special |= _mm512_cmpeq_epi8_mask(bytes, _mm512_set1_epi8('/')) | _mm512_cmpeq_epi8_mask(bytes, _mm512_setzero_si512());
         special |= _mm512_movepi8_mask(bytes);
         special &= valid;
+        const uint32_t origin = at;
         if (special != 0)
         {
             n = __builtin_ctzll(special);
@@ -691,55 +751,17 @@ static void asm_lex_vector(AsmParser* parser)
             parser->token_count += start_count;
             at += n;
         }
-        else if (asm_word_byte(source[at]))
+        else if (special == 0)
         {
+            // A word as long as the block, which no special byte ends.
             const uint32_t end = at + asm_word_length(source + at, length - at);
             parser->tokens[parser->token_count++] = (AsmToken){.start = at, .end = end, .kind = BUSTER_ASM_WORD};
             at = end;
         }
-        else
+        // The rare byte that ended this block's tokens, or began the block, starts its own here, from the block at hand.
+        if (special != 0)
         {
-            uint32_t end = at + 1;
-            if (source[at] == '"')
-            {
-                while (end < length && source[end] != '"' && source[end] != '\n')
-                {
-                    end += source[end] == '\\' && end + 1 < length ? 2 : 1;
-                }
-                end += end < length && source[end] == '"';
-            }
-            else if (source[at] == '#' || (source[at] == '/' && end < length && source[end] == '/'))
-            {
-                while (end < length && source[end] != '\n')
-                {
-                    end += 1;
-                }
-            }
-            else if (source[at] == '/' && end < length && source[end] == '*')
-            {
-                end += 1;
-                while (end + 1 < length && !(source[end] == '*' && source[end + 1] == '/'))
-                {
-                    end += 1;
-                }
-                end = end + 1 < length ? end + 2 : length;
-            }
-            AsmParser rare = *parser;
-            rare.source = (String8){.pointer = parser->source.pointer + at, .length = end - at};
-            rare.tokens += parser->token_count;
-            rare.token_count = 0;
-            asm_lex_scalar(&rare);
-            for (uint32_t i = 0; i < rare.token_count; i += 1)
-            {
-                rare.tokens[i].start += at;
-                rare.tokens[i].end += at;
-            }
-            if (rare.result.error != 0)
-            {
-                asm_fail(parser, at + rare.result.location, rare.result.error);
-            }
-            parser->token_count += rare.token_count;
-            at = end;
+            at = asm_lex_rare(parser, source, length, origin, bytes, at);
         }
     }
     parser->tokens[parser->token_count] = (AsmToken){.start = length, .end = length, .kind = 0};

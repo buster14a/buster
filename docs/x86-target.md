@@ -68,12 +68,18 @@ change to the 16-byte `X86Instruction` or the encoder's templates. The rows that
 need a feature the 32-bit word doesn't project (AVX512BF16's, AVX512BITALG's,
 AVX512IFMA's, AVX512VBMI2's, AVX512VNNI's, AVX512VPOPCNTDQ's and AVX-VNNI's: 125,
 #760) are its rare case: `BUSTER_X86_TARGET_EXTENDED`'s rows, last in `x86_target_rows.c`, whose
-compact words carry a mark no target has, so that the vector loop denies them,
-and an exact pass over their full requirements then decides them.
+compact words carry a mark no target has, so that the vector loop denies them.
+Their rest words (`x86_target_rest_requirements`: the 31 features the compact
+word doesn't project, 0 for every other row) and a compile-time bitset of the
+blocks of 16 forms that hold one (`x86_target_extended_blocks`, 29 of 523) then
+decide them: after the loop, each such block's 16 lanes again, by both words
+(#3451, which replaced a scalar pass over their full requirements: 0.93 of its
+time on the 9700X; buster-performance's `phase-d-3451-target-forms/`). A branch
+inside the loop cost 31 to 36% more, and a rest word read in every block 23 to 43%.
 
 `x86_target_rows.c` is the single source for immutable policy data. The vector
-builder reads the compact32 table (33,408 bytes), and its exact pass the
-extended rows' full requirements and forms. The full requirements keep all 64
+builder reads the compact32 table (8,358 forms, 33,432 bytes), and for the extended
+blocks the rest32 table (33,432 bytes, all but the extended rows' words 0). The full requirements keep all 64
 feature bits densely for 3,480 classified rows (27,840 bytes), with their form
 indices (6,960 bytes).
 

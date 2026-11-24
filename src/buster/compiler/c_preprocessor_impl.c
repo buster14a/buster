@@ -72,11 +72,12 @@ static bool pp_diagnostic_begin(Preprocessor* pp, PPSeverity* severity, bool* li
     // A source pragma's error, or a command-line warning whose complete policy was already resolved, is MAPPED_ERROR
     // and keeps its ordinary error severity under -Wfatal-errors; every other error becomes fatal below. It has no
     // effect on warnings, and the error budget can't cut in first: the diagnostic is already fatal.
+    const bool probe = pp->probing_fortify && *severity != PP_SEVERITY_FATAL;
     const bool source_error = *severity == PP_SEVERITY_MAPPED_ERROR;
     *severity = (source_error || *severity == PP_SEVERITY_DEFERRED_ERROR) ? PP_SEVERITY_ERROR :
                 *severity == PP_SEVERITY_MAPPED_FATAL ? PP_SEVERITY_FATAL : *severity;
     *severity = pp->options.fatal_errors && *severity == PP_SEVERITY_ERROR && !source_error ? PP_SEVERITY_FATAL : *severity;
-    const bool accepted = !pp->fatal && !(*severity == PP_SEVERITY_WARNING && pp->options.suppress_warnings);
+    const bool accepted = !probe && !pp->fatal && !(*severity == PP_SEVERITY_WARNING && pp->options.suppress_warnings);
     *limited = accepted && !pp->options.collect_diagnostics && *severity == PP_SEVERITY_ERROR && pp->options.error_limit != 0 && pp->errors >= pp->options.error_limit;
     if (accepted)
     {
@@ -200,6 +201,7 @@ typedef enum PPWarning
     PP_WARNING_RESERVED_MACRO_IDENTIFIER,
     PP_WARNING_UNUSED_MACROS,
     PP_WARNING_GNU_LINE_MARKER,
+    PP_WARNING_FORTIFY_SOURCE,
     // A warning of no group (poisoning an existing macro, a character constant too long for its type), and an extension
     // of no group (a C90 macro name with no whitespace after it before a character outside its basic set): only -w,
     // -Wno-everything, -Werror and an extension's -pedantic-errors map it, its flag "[-Werror]" where promoted.
@@ -253,6 +255,7 @@ static const PPWarningKind pp_warnings[BUSTER_PP_WARNINGS] =
     { "reserved-macro-identifier", NULL, "reserved-identifier", false, false, false, false },
     { "unused-macros", NULL, NULL, false, false, false, false },
     { "gnu-line-marker", NULL, "gnu pedantic", true, false, false, false },
+    { "fortify-source", NULL, NULL, false, true, true, false },
     { NULL, NULL, NULL, false, true, false, false },
     { NULL, NULL, NULL, true, true, false, false },
 };
@@ -15238,12 +15241,89 @@ static bool pp_run_prelude(Preprocessor* pp)
     return result;
 }
 
+// glibc records the level it selected in features.h as a single digit. It still applies to the wrappers
+// if the source subsequently undefines or changes _FORTIFY_SOURCE.
+static uint32_t pp_glibc_fortify_location(const Preprocessor* pp)
+{
+    const IdentId name = intern_find(pp->table, (const uint8_t*)"__USE_FORTIFY_LEVEL", sizeof("__USE_FORTIFY_LEVEL") - 1);
+    const PPMacro* macro = name != 0 && pp_is_macro(pp, name) ? pp->macros + pp->macro_of[name] : NULL;
+    uint32_t location = 0;
+    if (macro != NULL && (macro->flags & (BUSTER_PP_MACRO_BUILTIN | BUSTER_PP_MACRO_FUNCTION)) == 0 && macro->body_end - macro->body_begin == 1)
+    {
+        const PPFileData* data = pp->datas + macro->data;
+        const uint32_t t = macro->body_begin;
+        const uint32_t start = data->starts[t];
+        if ((data->kinds[t] & 0x7f) == C_TOKEN_NUMERIC_CONSTANT && data->values[t] - start == 1 &&
+            data->bytes[start] >= '1' && data->bytes[start] <= '3')
+        {
+            location = macro->location;
+        }
+    }
+    return location;
+}
+
+// Read an object-like _FORTIFY_SOURCE as a preprocessor integer expression. Use the normal macro expansion
+// stack and #if evaluator for aliases, suffixes, arithmetic and signedness. The capture keeps these tokens
+// out of the C parser. This runs after the source and forced includes, so -D/-U and source overrides apply.
+static bool pp_positive_fortify(Preprocessor* pp, const PPMacro* macro)
+{
+    const uint32_t arguments = pp->arguments.count;
+    const uint32_t captures = pp->captures.count;
+    const uint32_t counter = pp->counter;
+    const PPToken token = { .kind = C_TOKEN_RAW_IDENTIFIER, .value = macro->name, .location = macro->location };
+    // Keep _Pragma in the capture as an ordinary identifier. Merely probing a definition cannot apply pragmas.
+    const PPMacroId pragma = pp->macro_of[C_NAME_PRAGMA_OPERATOR];
+    const bool disable_pragma = pragma != 0 && pp->macros[pragma].builtin == PP_BUILTIN_PRAGMA;
+    pp->macros[pragma].disabled += disable_pragma;
+    pp->probing_fortify = true;
+    PPValue value = { 0 };
+    if (pp_push_token(pp, &pp->arguments, token) && pp_push_capture(pp, BUSTER_PP_CAPTURE_CONDITION, 0, 0))
+    {
+        if (pp_push_buffer(pp, &pp->arguments, arguments, arguments + 1, 0, macro->location, false, false) != NULL)
+        {
+            pp_run_contexts(pp, 0);
+            if (!pp->fatal && pp->captures.count > captures)
+            {
+                pp_evaluate_value(pp, &pp->captures, captures, pp->captures.count, macro->location, &value);
+            }
+        }
+        pp->capture_count -= 1;
+    }
+    pp->probing_fortify = false;
+    pp->counter = counter;
+    pp->macros[pragma].disabled -= disable_pragma;
+    pp->captures.count = captures;
+    pp->arguments.count = arguments;
+    return value.is_unsigned ? value.bits != 0 : (int64_t)value.bits > 0;
+}
+
+static void pp_diagnose_fortify(Preprocessor* pp)
+{
+    const IdentId name = intern_find(pp->table, (const uint8_t*)"_FORTIFY_SOURCE", sizeof("_FORTIFY_SOURCE") - 1);
+    const PPMacro* macro = name != 0 && pp_is_macro(pp, name) ? pp->macros + pp->macro_of[name] : NULL;
+    uint32_t location = pp_glibc_fortify_location(pp);
+    if (location == 0 && macro != NULL && (macro->flags & (BUSTER_PP_MACRO_FUNCTION | BUSTER_PP_MACRO_BUILTIN)) == 0 &&
+        pp_warning_possible(pp, PP_WARNING_FORTIFY_SOURCE) && pp_positive_fortify(pp, macro))
+    {
+        location = macro->location;
+    }
+    if (location != 0)
+    {
+        pp_diagnose_group(pp, PP_WARNING_FORTIFY_SOURCE, macro != NULL ? macro->location : location,
+                          "_FORTIFY_SOURCE protection is incomplete for some libc wrappers (including fread_unlocked and GNU recvfrom) and for allocation and conditional pointer bounds");
+    }
+}
+
 static bool pp_run_main(Preprocessor* pp, uint32_t file)
 {
     pp->main_file = file;
     pp->include_depth = 0;
     pp->showing_includes = pp->options.show_includes && !pp->options.quiet;
     pp_run_file(pp, file);
+    if (pp->options.diagnose_fortify && pp->errors == 0 && !pp->fatal)
+    {
+        pp_diagnose_fortify(pp);
+    }
     pp_resolve_keywords(pp);
     return pp->errors == 0 && !pp->fatal;
 }

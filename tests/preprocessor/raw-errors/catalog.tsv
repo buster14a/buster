@@ -1,0 +1,16 @@
+buster-fixtures v1 preprocessor-directives
+# Original raw-string inputs; Clang is an external diagnostic/location oracle, including suppressed contexts.
+0001	gnu17	-	invalid delimiter character
+0002	gnu17	-	delimiter lookahead past the salvaged token
+0003	gnu17	-	delimiter newline
+0004	gnu17	-	delimiter too long
+0005	gnu17	-	unterminated
+0006	gnu17	-	spliced prefix
+0007	gnu17	-	macro definitions diagnose once
+0008	gnu17	-	discarded macro argument
+0009	gnu17	-	condition after expansion
+0010	gnu17	-	skipped body
+0011	gnu17	-	untaken elif is still lexed
+0012	gnu17	-	opaque diagnostic
+0013	gnu17	-	opaque query
+0014	gnu17	header	included file

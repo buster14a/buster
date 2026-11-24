@@ -1,0 +1,1 @@
+int tested(int n){long a,b,c,d;__asm__("movq %1, %0" : "=r"(a) : "Z"(0xffffffffu));__asm__("movq %1, %0" : "=r"(b) : "Z"(0x80000000u));__asm__("movq %1, %0" : "=r"(c) : "Z"((signed char)-1));__asm__("movl %1, %k0" : "=r"(d) : "Z"((unsigned long)0xffffffff));return n+(int)(a>>32)*3+(int)(b>>40)*5+(int)c*7+(int)(d>>8);}

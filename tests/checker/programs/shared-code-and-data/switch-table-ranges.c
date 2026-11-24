@@ -1,0 +1,1 @@
+static int ranged(int x){int r=0;switch(x){case -7 ... -5:r+=1;case -4:r+=2;break;default:r+=100;case -1:r+=4;break;case 0 ... 2:r+=8;break;case 4:r+=16;case 5:r+=32;break;}return r;}int tested(int n){unsigned s=0;for(int i=-10;i<10;i++)s=s*7+(unsigned)ranged(i+n-5);return (int)s;}

@@ -1,0 +1,1 @@
+int tested(int n){long a,b,c,d;int e=n;__asm__("leaq 1f(%%rip), %0\n\tleaq 2f(%%rip), %1\n1:\tnop\n2:\tsubq %0, %1" : "=&r"(a), "=&r"(b));__asm__("leaq .(%%rip), %0\n\tleaq .(%%rip), %1\n\tsubq %0, %1" : "=&r"(c), "=&r"(d));__asm__("movl $3, %%ecx\n1:\tincl %0\n\tloop 1b" : "+r"(e) : : "rcx");return (int)(b*1000+d*100)+e+(a!=0)+(c!=0);}

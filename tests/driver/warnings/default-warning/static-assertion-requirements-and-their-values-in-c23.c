@@ -1,0 +1,10 @@
+enum { A = 3 };
+_Static_assert((bool)A == false, "a");
+_Static_assert((_Bool)A == 0, "b");
+_Static_assert(1wb + A == 2uwb, "c");
+_Static_assert(1'000 * A == 18446744073709551615u, "d");
+_Static_assert(alignof(int) == sizeof 1 + 1, "e");
+_Static_assert(true && A == 4, "f");
+_Static_assert(u8'a' == 1.0e10, "g");
+_Static_assert((float)A / 3 == 2, "h");
+_Static_assert(false, "i");

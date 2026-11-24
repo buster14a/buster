@@ -1,0 +1,5 @@
+typedef _Complex __float128 CQ;typedef __float128 Q;typedef _BitInt(200) B;typedef __typeof__((_Complex char)0+(B)0) CB;static unsigned long fold(unsigned long h,Q q){unsigned long w[2];__builtin_memcpy(w,&q,16);return ((h^w[0])*1099511628211ul)^(w[1]*31u);}
+static unsigned long foldz(unsigned long h,CQ z){return fold(fold(h,__real__ z),__imag__ z);}
+static unsigned long foldb(unsigned long h,CB z){return ((h^(unsigned long)(__real__ z>>3))*1099511628211ul)^(unsigned long)(__imag__ z>>130)^(unsigned long)__imag__ z;}
+static CQ step(CQ*p){return (*p)++;}
+int tested(int n){unsigned long h=2166136261u;CQ a=n;__imag__ a=-0.0Q;CQ c=a/4,*p=&c;CQ b=a++;CQ d=++a;CQ e=c--;CQ f=--c;h=foldz(h,a);h=foldz(h,b);h=foldz(h,c);h=foldz(h,d);h=foldz(h,e);h=foldz(h,f);h=foldz(h,step(p));h=foldz(h,--*p);CB x=(B)n<<150;__imag__ x=-(B)n<<140;CB y=x--;CB z=++x;x++;CB w=x--;--x;h=foldb(h,x);h=foldb(h,y);h=foldb(h,z);h=foldb(h,w);return (int)(h%1000003)+(int)__real__ a;}

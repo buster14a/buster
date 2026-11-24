@@ -1,0 +1,16 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+complex-float128	complex-float128.c	-	complex-float128
+# The complex _BitInts past 128 bits that the usual arithmetic conversions make (#137), of 129, 200 and 300 bits: frame
+# objects of two _BitInts past 128 bits, each part's operation the element's, a product of complex values (ac - bd) +
+# (ad + bc)i and a quotient ((ac + bd) + (bc - ad)i) / (cc + dd) whatever the domains, as clang computes them;
+# equality, truth, conversions to and from the other complex and real types, compound assignments, a global and
+# calls, va_arg among them. clang stores a part as its width's bytes, leaving the bits past it as they were, so each
+# part folds its width alone. It is clean under clang's UBSan on every input.
+complex-bit-int-past-128-bits	complex-bit-int-past-128-bits.c	-	complex-bit-int-past-128-bits
+# A complex value's aggregate part read as a value (__real__ and __imag__ of a _Complex __float128 and of a complex
+# _BitInt past 128 bits, lvalues and calls' results): its address, which nothing loads through.
+complex-aggregate-parts	complex-aggregate-parts.c	-	complex-aggregate-parts
+# Conversions between unsigned long and float or double (Tier 0's tier0_emit_u64_convert): to them near 2^53, past
+# 2^63 where the halving's kept bit rounds, and near 2^64; back from values up to 2^64 less 4096, every one in range.
+unsigned-long-floating-conversions	unsigned-long-floating-conversions.c	-	unsigned-long-floating-conversions

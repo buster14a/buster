@@ -1,0 +1,21 @@
+buster-fixtures v1 preprocessor-guards
+0001	guard-0001	1	0	a guarded file included twice
+0002	guard-0002	1	0	#undef between the inclusions
+0003	guard-0003	1	0	#if !defined G
+0004	guard-0004	1	0	#if !defined(G)
+0005	guard-0005	1	0	parentheses and three '!'
+0006	guard-0006	0	0	two '!'
+0007	guard-0007	0	0	!defined G || 0
+0008	guard-0008	0	0	a guard with #else
+0009	guard-0009	0	0	a guard with #elif
+0010	guard-0010	0	0	a token before the #ifndef
+0011	guard-0011	0	0	a token after the #endif
+0012	guard-0012	0	0	a directive before the #ifndef
+0013	guard-0013	0	0	a directive after the #endif
+0014	guard-0014	1	0	comments and null directives around the group
+0015	guard-0015	1	0	extra tokens
+0016	guard-0016	0	0	the macro defined before the first inclusion
+0017	guard-0017	1	0	an inclusion from inside the file
+0018	guard-0018	1	0	an inclusion in a skipped group
+0019	guard-0019	0	3	#pragma once through a symbolic link and a hard link
+0020	guard-0020	0	2	#import

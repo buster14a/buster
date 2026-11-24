@@ -1,0 +1,8 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+overloadable-feature-query-native	overloadable-feature-query-native.c	-	overloadable-feature-query-native
+# A feature query is useful only if the selected layout reaches native code, including the scoped spelling.
+packed-attribute-feature-query	packed-attribute-feature-query.c	-	packed-attribute-feature-query
+aggregate-return-control-flow	aggregate-return-control-flow.c	-	aggregate-return-control-flow
+batch-ordinary-and-ordered-fallback	batch-ordinary-and-ordered-fallback.c	-	batch-ordinary-and-ordered-fallback
+batch-member-address-load-conversion-chains	batch-member-address-load-conversion-chains.c	-	batch-member-address-load-conversion-chains

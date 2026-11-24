@@ -1,0 +1,1 @@
+struct P{int x,y;};int add(a,b)int a;long b;{return a+(int)b;}char at(p,n)const char*p;int n;{return p[n];}int sum(r,q)register unsigned r;struct P q;{return q.x*10+q.y+(int)r;}int count();int count(){return 7;}int tested(int n){struct P q={n,3};return add(n,7)*3+at("abcdef",n&3)+sum((unsigned)n,q)+count()+add(n,(char)n);}

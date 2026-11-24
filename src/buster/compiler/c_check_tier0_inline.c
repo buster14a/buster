@@ -16,8 +16,8 @@
 // (#1398's review: a depth bound counted from whichever root a lane met first cached a cut expansion that later bodies
 // took). The graph's nodes are the callees tier0_inline_callee_valid accepts, and its edges their rows' calls of other
 // such callees whose targets theirs include (check_tier0_inline_row). A lane finds the graph's strongly connected
-// components, as far as a body's calls reach, by an iterative Tarjan search (check_tier0_inline_prepare): a callee in a
-// cycle is never inlined, and its own calls of the cycle stay calls, whichever member a lane met first. Every other
+// components, as far as a body's calls reach, by an iterative Tarjan search (check_tier0_inline_prepare). In a mutual
+// cycle, the calls kept by check_tier0_inline_cut break the cycle and bound the number of copies. Every other
 // callee is settled after the callees it calls (the search's postorder): its height is one more than the highest of
 // those that expand, and one past BUSTER_CHECK_TIER0_INLINE_DEPTH isn't inlined either (its own calls are); else it is
 // spliced with those callees and ready. A callee the splice refuses is ready as its own stream, its calls kept. Any
@@ -165,7 +165,7 @@ static void check_tier0_inline_visit(const CheckEmitRun* run, CheckTier0InlineLa
     }
 }
 
-// Callee `v`, alone in its component and every callee it calls settled: its height (one more than the highest of the
+// Callee `v`, with every callee it can expand settled: its height (one more than the highest of the
 // callees it calls that expand) and, within BUSTER_CHECK_TIER0_INLINE_DEPTH, its expansion, ready; past it, refused.
 static void check_tier0_inline_settle(const CheckEmitRun* run, CheckTier0InlineLane* lane, const CheckTier1Inline* table, uint32_t v)
 {
@@ -191,11 +191,51 @@ static void check_tier0_inline_settle(const CheckEmitRun* run, CheckTier0InlineL
     }
 }
 
+// Cut a completed component in a way that depends only on its internal call sites. Keep every member with two or
+// more incoming sites out of line, so its callers cannot recursively duplicate its body. This breaks every cycle:
+// a cycle inside a larger strongly connected component has an incoming edge from outside the cycle at some member,
+// in addition to that member's predecessor. If the whole component is a ring with one site per link, cut it at the
+// largest body index. The remaining graph is acyclic and the ordinary search can settle it in one more pass.
+static void check_tier0_inline_cut(const CheckEmitRun* run, CheckTier0InlineLane* lane, const CheckTier1Inline* table, const uint32_t* members, uint32_t count)
+{
+    // Tarjan has propagated the component's last low link. Reuse its low links for incoming sites, saturated at two.
+    uint32_t* incoming = lane->links;
+    uint32_t largest = 0;
+    for (uint32_t k = 0; k < count; k += 1)
+    {
+        const uint32_t v = members[k];
+        incoming[v] = 0;
+        largest = v > largest ? v : largest;
+    }
+    bool ring = true;
+    for (uint32_t k = 0; k < count; k += 1)
+    {
+        const uint32_t v = members[k];
+        const Tier0Function* function = &run->lowered->functions[v];
+        for (uint32_t c = 0; c < function->call_count; c += 1)
+        {
+            const uint32_t callee = check_tier0_inline_row(run, table, function, v, c);
+            // Every outgoing edge of a completed component already has a settled target.
+            if (callee != 0 && lane->states[callee - 1] == BUSTER_CHECK_TIER0_INLINE_PROGRESS)
+            {
+                const bool repeated = incoming[callee - 1] != 0;
+                incoming[callee - 1] = 1u + repeated;
+                ring &= !repeated;
+            }
+        }
+    }
+    for (uint32_t k = 0; k < count; k += 1)
+    {
+        const uint32_t v = members[k];
+        const bool keep_call = incoming[v] == 2 || (ring && v == largest);
+        lane->states[v] = keep_call ? BUSTER_CHECK_TIER0_INLINE_REFUSED : BUSTER_CHECK_TIER0_INLINE_UNPREPARED;
+    }
+}
+
 // Settles every callee that body `b`'s rows reach in the lane's cache (the file's comment), by Tarjan's search from each
 // one unmet, with explicit stacks: the search's (a callee and its next row each) and the components' (the callees in
-// progress, whose components aren't complete). A component of more than one callee is refused whole; one of one is
-// settled (check_tier0_inline_settle), after every callee it calls, which the search completed first. Body `b` is a node
-// only as another's callee: its own code splices it.
+// progress, whose components aren't complete). A singleton is settled directly. After cutting a cycle, retry its
+// entry if it can expand. Other members are prepared when a caller needs them.
 static void check_tier0_inline_prepare(const CheckEmitRun* run, CheckTier0InlineLane* lane, const CheckTier1Inline* table, uint32_t b)
 {
     const Tier0Function* root = &run->lowered->functions[b];
@@ -244,15 +284,19 @@ static void check_tier0_inline_prepare(const CheckEmitRun* run, CheckTier0Inline
                         first -= 1;
                     }
                     first -= 1;
-                    const bool alone = components - first == 1;
-                    for (uint32_t k = first; k < components; k += 1)
-                    {
-                        lane->states[lane->components[k]] = BUSTER_CHECK_TIER0_INLINE_REFUSED;
-                    }
+                    const uint32_t count = components - first;
                     components = first;
-                    if (alone)
+                    if (count == 1)
                     {
                         check_tier0_inline_settle(run, lane, table, v);
+                    }
+                    else
+                    {
+                        check_tier0_inline_cut(run, lane, table, lane->components + first, count);
+                        if (lane->states[v] == BUSTER_CHECK_TIER0_INLINE_UNPREPARED)
+                        {
+                            check_tier0_inline_visit(run, lane, v, &components, &depth);
+                        }
                     }
                 }
             }

@@ -389,9 +389,10 @@ BUSTER_INLINE void parse_scalar_error(ParseScalar* parser, uint32_t token, uint8
 // Whether a function's body is due at token `i`, as clang asks for one: after the first declarator of a declaration at
 // file scope when it declares a function, and its attributes, unless an asm label came after it (clang reads what
 // follows one as the declaration's rest).
-static bool parse_scalar_body_expected(const ParseScalar* parser, uint32_t i, const ParseFrame* frame)
+// (`mode`: the frame's, or the one it returns to from an attribute it is inside.)
+static bool parse_scalar_body_due(const ParseScalar* parser, uint32_t i, const ParseFrame* frame, uint8_t mode)
 {
-    bool result = frame->role == PARSE_ROLE_NONE && frame->mode == PARSE_MODE_AFTER_DECLARATOR && frame->derivation == PARSE_DERIVATION_FUNCTION &&
+    bool result = frame->role == PARSE_ROLE_NONE && mode == PARSE_MODE_AFTER_DECLARATOR && frame->derivation == PARSE_DERIVATION_FUNCTION &&
                   (frame->flags & BUSTER_PARSE_FRAME_LATER_DECLARATOR) == 0;
     // The declarator's attributes and asm label, back from the token before: each closer's group, then its keyword.
     int64_t before = (int64_t)i - 1;
@@ -408,6 +409,11 @@ static bool parse_scalar_body_expected(const ParseScalar* parser, uint32_t i, co
         before -= 1;
     }
     return result;
+}
+
+static bool parse_scalar_body_expected(const ParseScalar* parser, uint32_t i, const ParseFrame* frame)
+{
+    return parse_scalar_body_due(parser, i, frame, frame->mode);
 }
 
 // How many arguments of a keyword's group clang expects a `,` after (its ExpectAndConsume, after the token before):
@@ -3041,6 +3047,12 @@ static void parse_scalar_declarator(ParseScalar* parser, uint32_t i, ParseFrame*
     {
         parse_scalar_misplaced_brackets(parser, i);
     }
+    else if (kind == PARSE_KIND_L_SQUARE && frame->role == PARSE_ROLE_OPEN_STRUCT && (parser->flags[i] & BUSTER_PARSE_MEMBER_RECOVERY) != 0)
+    {
+        // The original parse already rejected this member. Read the abstract array declarator in its original scope.
+        frame->mode = PARSE_MODE_AFTER_DECLARATOR;
+        step->again = true;
+    }
     else if ((frame->flags & BUSTER_PARSE_FRAME_NAME_REQUIRED) && !(kind == PARSE_KIND_COLON && frame->role == PARSE_ROLE_OPEN_STRUCT))
     {
         parse_scalar_error(parser, i, frame->role == PARSE_ROLE_OPEN_STRUCT ? PARSE_MESSAGE_EXPECTED_MEMBER_NAME : PARSE_MESSAGE_EXPECTED_IDENTIFIER_OR_PAREN, BUSTER_PARSE_AT_TOKEN);
@@ -5457,39 +5469,49 @@ static void parse_scalar_resume_block_item(ParseScalar* parser)
     }
 }
 
-// A ')' orphaned at a block statement boundary, including after an invalid call stopped at an earlier semicolon
-// (#2406). Keep a complete preceding expression for semantic checking, and skip only the closer's malformed tail.
-// The driver suppresses the closer's diagnostics when an unresolved name made that expression unusable, as Clang's
-// expression-statement recovery skips to the semicolon before expecting one. Returns that expression's first token.
-static uint32_t parse_scalar_resume_orphan_closer(ParseScalar* parser)
+// Find an original synchronization token at the current grammar level. Nested groups must close with the
+// matching delimiter. An intervening semicolon or an unmatched closer leaves the original error in place.
+static uint32_t parse_scalar_recovery_delimiter(const ParseScalar* parser, uint32_t at, uint8_t delimiter)
 {
-    const uint32_t at = parser->error_token;
-    const uint32_t count = parser->count;
-    const ParseFrame* frame = parser->frame_count != 0 ? parser->frames + parser->frame_count - 1 : NULL;
-    const bool block = frame != NULL && parse_frame_is_block(frame) && frame->statement == PARSE_ITEM_EXPRESSION &&
-                       (frame->flags & BUSTER_PARSE_FRAME_DECLARATION) == 0 && at < count && parser->kinds[at] == PARSE_KIND_R_PAREN &&
-                       (!parser->error_resumed || parser->error_probe) && !parser->error_resume_colon;
-    const bool expression = block && frame->mode == PARSE_MODE_OPERATOR &&
-                            (parser->error_message == PARSE_MESSAGE_EXPECTED_SEMI_AFTER_EXPRESSION ||
-                             parser->error_message == PARSE_MESSAGE_EXTRANEOUS_BEFORE_SEMI);
-    const bool empty = block && frame->mode == PARSE_MODE_ITEM && parser->error_message == PARSE_MESSAGE_EXPECTED_EXPRESSION;
-    uint32_t end = at + 1;
-    bool balanced = expression || empty;
-    while (balanced && end < count && parser->kinds[end] != PARSE_KIND_SEMI)
+    uint32_t end = at;
+    bool balanced = true;
+    while (balanced && end < parser->count && parser->kinds[end] != delimiter)
     {
         const uint8_t kind = parser->kinds[end];
         if (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE)
         {
-            end = parse_scalar_skip_group(parser, end, &balanced);
+            end = parse_scalar_attribute_skip_group(parser, end, &balanced, false);
         }
         else
         {
-            balanced = !parse_kind_is_closer(kind) && kind != PARSE_KIND_END;
+            balanced = kind != PARSE_KIND_SEMI && !parse_kind_is_closer(kind);
             end += 1;
         }
     }
+    return balanced ? end : parser->count;
+}
+
+// An adjacent statement start or orphan ')' after a complete expression (#1249, #2406). Keep the expression
+// for checking. Clang skips its tail if lookup made its value unusable, and otherwise expects its semicolon.
+static uint32_t parse_scalar_resume_expression_statement(ParseScalar* parser, uint32_t* publication)
+{
+    const uint32_t at = parser->error_token;
+    const uint32_t count = parser->count;
+    const ParseFrame* frame = parser->frame_count != 0 ? parser->frames + parser->frame_count - 1 : NULL;
+    const bool block = frame != NULL && parse_frame_is_block(frame) &&
+                       (frame->statement == PARSE_ITEM_EXPRESSION || frame->statement == PARSE_ITEM_RETURN) && (frame->flags & BUSTER_PARSE_FRAME_DECLARATION) == 0 && at < count &&
+                       (!parser->error_resumed || parser->error_probe) && !parser->error_resume_colon;
+    const bool returned = block && frame->statement == PARSE_ITEM_RETURN && parser->error_message == PARSE_MESSAGE_EXPECTED_SEMI_AFTER_RETURN;
+    const bool orphan = block && frame->statement == PARSE_ITEM_EXPRESSION && parser->kinds[at] == PARSE_KIND_R_PAREN;
+    const bool adjacent = block && (parser->kinds[at] == PARSE_KIND_IDENTIFIER || parser->kinds[at] == PARSE_KIND_NUMBER ||
+                                    parser->kinds[at] == PARSE_KIND_FOR || parser->kinds[at] == PARSE_KIND_WHILE || parser->kinds[at] == PARSE_KIND_IF);
+    const bool expression = (orphan || (adjacent && !parser->error_probe)) && frame->mode == PARSE_MODE_OPERATOR &&
+                            (returned || parser->error_message == PARSE_MESSAGE_EXPECTED_SEMI_AFTER_EXPRESSION ||
+                             parser->error_message == PARSE_MESSAGE_EXTRANEOUS_BEFORE_SEMI);
+    const bool empty = orphan && frame->mode == PARSE_MODE_ITEM && parser->error_message == PARSE_MESSAGE_EXPECTED_EXPRESSION;
+    const uint32_t end = expression || empty ? parse_scalar_recovery_delimiter(parser, at + 1, PARSE_KIND_SEMI) : count;
     uint32_t begin = 0;
-    if (balanced && end < count && parser->kinds[end] == PARSE_KIND_SEMI)
+    if (end < count)
     {
         if (expression)
         {
@@ -5505,7 +5527,7 @@ static uint32_t parse_scalar_resume_orphan_closer(ParseScalar* parser)
                 const bool boundary = parser->depths[token] == depth &&
                                       (role == PARSE_ROLE_TERMINATOR || role == PARSE_ROLE_CLOSE_BLOCK || role == PARSE_ROLE_CLOSE_BODY ||
                                        role == PARSE_ROLE_CLOSE_CONDITION || role == PARSE_ROLE_CLOSE_FOR || role == PARSE_ROLE_ELSE ||
-                                       role == PARSE_ROLE_DO || role == PARSE_ROLE_LABEL || role == PARSE_ROLE_CLOSE_CASE);
+                                       role == PARSE_ROLE_DO || role == PARSE_ROLE_LABEL || role == PARSE_ROLE_CLOSE_CASE || (returned && role == PARSE_ROLE_RETURN));
                 begin -= !boundary;
                 seeking = !boundary && begin > frame->opener + 1;
             }
@@ -5518,8 +5540,62 @@ static uint32_t parse_scalar_resume_orphan_closer(ParseScalar* parser)
         // A statement that starts at the orphan `)` is deleted whole; an expression's tail keeps its statement.
         parser->error_resume_statement = empty;
         parser->error_probe = false;
-        // ExpectAndConsumeSemi leaves this ')' to start the next statement. Inserting the semicolon lets the next
-        // recovery round discover that second expected-expression diagnostic before discarding its malformed tail.
+        // A return's invalid continuation is skipped even when its operand was valid. The retained semicolon
+        // identifies the terminated subtree when the checker decides whether to publish the original error.
+        *publication = returned ? end : *publication;
+    }
+    return begin;
+}
+
+// Retain a completed member operand for the diagnostic reparse. The end of the rejected tail is an original
+// delimiter at this grammar level. The checker decides whether the operand made the delimiter diagnostic moot.
+static uint32_t parse_scalar_resume_member(ParseScalar* parser, const ParseFrame* frame, uint32_t* publication)
+{
+    const uint32_t at = parser->error_token;
+    uint32_t begin = 0;
+    if (frame != NULL && at < parser->count && frame->role == PARSE_ROLE_OPEN_STRUCT &&
+        parser->error_message == PARSE_MESSAGE_EXPECTED_MEMBER_NAME && parser->kinds[at] == PARSE_KIND_L_SQUARE &&
+        !parse_scalar_standard_attribute(parser, at))
+    {
+        bool balanced = true;
+        const uint32_t end = parse_scalar_attribute_skip_group(parser, at, &balanced, true);
+        if (balanced && end < parser->count && parser->kinds[end] == PARSE_KIND_SEMI)
+        {
+            parser->error_resumed = true;
+            *publication = end;
+        }
+    }
+    else if (frame != NULL && frame->mode == PARSE_MODE_OPERATOR && at < parser->count)
+    {
+        const bool bound = frame > parser->frames && frame[-1].role == PARSE_ROLE_OPEN_STRUCT &&
+                           frame->role == PARSE_ROLE_OPEN_SUBSCRIPT && (frame->flags & BUSTER_PARSE_FRAME_ARRAY_DECLARATOR) != 0 &&
+                           parser->error_message == PARSE_MESSAGE_EXPECTED_R_SQUARE;
+        const bool width = frame->role == PARSE_ROLE_OPEN_STRUCT && (frame->flags & BUSTER_PARSE_FRAME_CONDITIONAL) != 0 &&
+                           (frame->flags & BUSTER_PARSE_FRAME_AFTER_WIDTH) == 0 && parser->error_message == PARSE_MESSAGE_EXPECTED_SEMI_AT_END_OF_DECLARATION_LIST;
+        const uint32_t end = width || bound ? parse_scalar_recovery_delimiter(parser, at, bound ? PARSE_KIND_R_SQUARE : PARSE_KIND_SEMI) : parser->count;
+        if (end > at && end < parser->count)
+        {
+            begin = frame->opener + 1;
+            if (width)
+            {
+                begin = at;
+                while (begin > frame->opener + 1 && !(parser->roles[begin - 1] == PARSE_ROLE_BITFIELD &&
+                       parser->depths[begin - 1] == parser->frame_count - 1))
+                {
+                    begin -= 1;
+                }
+            }
+            if (!width || parser->roles[begin - 1] == PARSE_ROLE_BITFIELD)
+            {
+                parser->error_resumed = true;
+                parser->error_resume_delete = true;
+                parser->error_resume_end = end;
+            }
+            else
+            {
+                begin = 0;
+            }
+        }
     }
     return begin;
 }
@@ -5557,6 +5633,76 @@ static uint32_t parse_scalar_recover(ParseScalar* parser, uint32_t stopped)
             parser->error_resume_end = end;
         }
     }
+    // A GNU attribute's expression argument a stray token follows (#2914, `aligned(8 8)`), clang's ParseGNUAttributeArgs then
+    // ParseGNUAttributes: "expected ')'" twice at the argument's end, a third at the end of the attribute's `)` where more of
+    // the list follows it, the list skipped through its `)`; the specifier's last `)` is left over, the declaration's error
+    // at it: after a declarator "extraneous ')' before ';'" where its `;` follows, else clang's ParseDeclGroup's (a
+    // function's body, the top level's `;`, a block's, a member's), or before one "expected identifier or '('". The view
+    // drops the attribute and the rest of its list, `__attribute__(())`, where the `)` was extraneous or the attribute is
+    // among the specifiers; else the declarator's tail to its `;`, which clang skips (a function's body too), or to the unit's
+    // end, a `;` put there, keeping the list's attributes before the failed one, closed. (Not a counted_by family's or a
+    // type argument's group: their own recovery.)
+    const ParseFrame* list = call != NULL && call > parser->frames ? call - 1 : NULL;
+    const ParseFrame* specifier = list != NULL && list > parser->frames ? list - 1 : NULL;
+    const ParseFrame* outer = specifier != NULL && specifier > parser->frames ? specifier - 1 : NULL;
+    const bool stray = call != NULL && call->role == PARSE_ROLE_OPEN_CALL && parse_scalar_gnu_attribute_group(parser, call) &&
+                       (call->flags & BUSTER_PARSE_FRAME_DECLARATION) == 0 && parse_scalar_counted_attribute(parser, call) == 0 &&
+                       parser->error_message == PARSE_MESSAGE_EXPECTED_R_PAREN && at > call->opener + 1 && at < parser->count && !parser->error_resumed &&
+                       specifier != NULL && outer != NULL && specifier->opener > 0 &&
+                       (specifier->role == PARSE_ROLE_OPEN_ATTRIBUTE || specifier->role == PARSE_ROLE_OPEN_ATTRIBUTE_SPECIFIER) &&
+                       parser->kinds[specifier->opener - 1] == PARSE_KIND_ATTRIBUTE;
+    bool stray_balanced = stray;
+    const uint32_t stray_argument_end = stray ? parse_scalar_attribute_skip_group(parser, call->opener, &stray_balanced, false) : 0;
+    const uint32_t stray_list_end = stray_balanced ? parse_scalar_attribute_skip_group(parser, list->opener, &stray_balanced, false) : 0;
+    const uint32_t stray_end = stray_balanced ? parse_scalar_attribute_skip_group(parser, specifier->opener, &stray_balanced, false) : 0;
+    // (The specifier's last `)`, which clang leaves over; and the end of the declaration, its `;`.)
+    const uint32_t leftover = stray_balanced && stray_end > 0 ? stray_end - 1 : BUSTER_PARSE_NONE;
+    uint32_t semicolon = leftover;
+    bool stray_ended = leftover != BUSTER_PARSE_NONE;
+    while (stray_ended && semicolon < parser->count && parser->kinds[semicolon] != PARSE_KIND_SEMI)
+    {
+        const uint8_t kind = parser->kinds[semicolon];
+        if (semicolon != leftover && (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE))
+        {
+            semicolon = parse_scalar_attribute_skip_group(parser, semicolon, &stray_ended, false);
+        }
+        else
+        {
+            stray_ended = semicolon == leftover || !parse_kind_is_closer(kind);
+            semicolon += 1;
+        }
+    }
+    // (Or the unit's end, where clang's skip stops without one.)
+    stray_ended = stray_ended && (semicolon == parser->count || (semicolon < parser->count && parser->kinds[semicolon] == PARSE_KIND_SEMI));
+    const bool after_declarator = specifier != NULL && specifier->role == PARSE_ROLE_OPEN_ATTRIBUTE;
+    const bool member = outer != NULL && outer->role == PARSE_ROLE_OPEN_STRUCT;
+    const bool block = outer != NULL && parse_frame_is_block(outer);
+    const uint32_t keyword = specifier != NULL && specifier->opener > 0 ? specifier->opener - 1 : BUSTER_PARSE_NONE;
+    // (A function's body is due by the declarator's derivation, as after its other attributes: not a function pointer's.)
+    const bool function = after_declarator && !member && !block && keyword != BUSTER_PARSE_NONE && parse_scalar_body_due(parser, keyword, outer, specifier->continuation);
+    const bool extraneous = after_declarator && !member && !function && leftover != BUSTER_PARSE_NONE && leftover + 1 < parser->count &&
+                            parser->kinds[leftover + 1] == PARSE_KIND_SEMI;
+    // (An attribute among the specifiers is dropped alone too: its declaration may begin the unit, where a deletion from
+    // its keyword, token 0, would be none. Its declarator then stays declared, where clang's skip leaves it unread.)
+    const bool drop_attribute = extraneous || !after_declarator;
+    const bool stray_resumed = stray_ended && (drop_attribute || keyword != BUSTER_PARSE_NONE);
+    // (The list's entries before the attribute stay where its tail goes, from the `,` before it, the list closed again.)
+    const bool earlier = stray_resumed && !drop_attribute && call->opener >= 2 && call->opener - 2 > list->opener && parser->kinds[call->opener - 2] == PARSE_KIND_COMMA;
+    if (stray_resumed)
+    {
+        parser->error_resumed = true;
+        parser->error_resume_delete = true;
+        parser->error_resume_begin = drop_attribute ? call->opener - 1 : earlier ? call->opener - 2 : keyword;
+        parser->error_resume_end = drop_attribute ? stray_list_end - 1 : semicolon;
+        parser->error_resume_closers = earlier ? 2 : 0;
+    }
+    const uint8_t stray_message = !after_declarator ? PARSE_MESSAGE_EXPECTED_IDENTIFIER_OR_PAREN : member ? PARSE_MESSAGE_EXPECTED_SEMI_AT_END_OF_DECLARATION_LIST :
+                                  function ? PARSE_MESSAGE_EXPECTED_FUNCTION_BODY : extraneous ? PARSE_MESSAGE_EXTRANEOUS_BEFORE_SEMI :
+                                  block ? PARSE_MESSAGE_EXPECTED_SEMI_AT_END_OF_DECLARATION : PARSE_MESSAGE_EXPECTED_SEMI_AFTER_TOP_LEVEL_DECLARATOR;
+    const uint8_t stray_place = stray_message == PARSE_MESSAGE_EXPECTED_SEMI_AT_END_OF_DECLARATION_LIST || stray_message == PARSE_MESSAGE_EXPECTED_SEMI_AT_END_OF_DECLARATION ||
+                                stray_message == PARSE_MESSAGE_EXPECTED_SEMI_AFTER_TOP_LEVEL_DECLARATOR ? BUSTER_PARSE_AFTER_PREVIOUS : BUSTER_PARSE_AT_TOKEN;
+    // (The attribute's `)`, after which more of its list follows: the third "expected ')'".)
+    const uint32_t stray_third = stray_resumed && stray_argument_end < stray_list_end - 1 ? stray_argument_end : BUSTER_PARSE_NONE;
     if (call != NULL && call->role == PARSE_ROLE_OPEN_TERNARY && parser->error_message == PARSE_MESSAGE_EXPECTED_COLON &&
         at < parser->count && parse_argument_delimiter(parser->kinds[at]) && (parser->flags[at] & BUSTER_PARSE_RECOVERY_ARGUMENT) != 0)
     {
@@ -5564,7 +5710,9 @@ static uint32_t parse_scalar_recover(ParseScalar* parser, uint32_t stopped)
         parser->error_resume_colon = true;
         parser->error_note = call->opener;
     }
-    const uint32_t expression_begin = parse_scalar_resume_orphan_closer(parser);
+    uint32_t publication = 0;
+    const uint32_t member_begin = parse_scalar_resume_member(parser, call, &publication);
+    const uint32_t expression_begin = member_begin != 0 ? member_begin : parse_scalar_resume_expression_statement(parser, &publication);
     parse_scalar_resume_block_item(parser);
     const bool resumed = parser->error_resumed && parser->error_resume_end == 0 && parser->frame_count == 1 &&
                          stopped == parser->error_token && stopped > parser->item_begin;
@@ -5587,13 +5735,34 @@ static uint32_t parse_scalar_recover(ParseScalar* parser, uint32_t stopped)
             .resume_attribute = parser->error_resume_attribute,
             .resume_statement = parser->error_resume_statement,
             .resume_colon = parser->error_resume_colon,
+            .resume_terminate = stray_resumed && !drop_attribute && semicolon == parser->count,
             .probe = parser->error_probe,
             .call_statement = call_statement,
+            .publication = publication,
             .recovery_expression_begin = expression_begin,
         };
         parser->diagnostic_count += 1;
     }
     parser->errors += 1;
+    // A stray attribute argument's further errors (#2914): its second "expected ')'", the attribute's, and the declaration's.
+    const ParseDiagnostic stray_diagnostics[3] =
+    {
+        { .token = parser->error_token, .argument = BUSTER_PARSE_NONE, .message = PARSE_MESSAGE_EXPECTED_R_PAREN, .place = parser->error_place, .error = true,
+          .note = BUSTER_PARSE_NONE, .consequent = true },
+        { .token = stray_third, .argument = BUSTER_PARSE_NONE, .message = PARSE_MESSAGE_EXPECTED_R_PAREN, .place = BUSTER_PARSE_AFTER_PREVIOUS, .error = true,
+          .note = BUSTER_PARSE_NONE, .consequent = true },
+        { .token = leftover, .argument = extraneous ? leftover : BUSTER_PARSE_NONE, .message = stray_message, .place = stray_place, .error = true,
+          .note = BUSTER_PARSE_NONE, .consequent = true },
+    };
+    for (uint32_t d = 0; stray_resumed && d < 3; d += 1)
+    {
+        if (stray_diagnostics[d].token != BUSTER_PARSE_NONE && parser->diagnostic_count < parser->diagnostic_capacity)
+        {
+            parser->diagnostics[parser->diagnostic_count] = stray_diagnostics[d];
+            parser->diagnostic_count += 1;
+            parser->errors += 1;
+        }
+    }
     if (parser->error_follow_token != BUSTER_PARSE_NONE && parser->error_follow_paren != BUSTER_PARSE_NONE && parser->diagnostic_count < parser->diagnostic_capacity)
     {
         parser->diagnostics[parser->diagnostic_count] = (ParseDiagnostic){
@@ -12099,6 +12268,7 @@ BUSTER_PARSER_ENTRY void parse_print_diagnostics(const Parser* parser, Preproces
     for (uint32_t d = 0; d < parser->diagnostic_count; d += 1)
     {
         const ParseDiagnostic* diagnostic = &parser->diagnostics[d];
+        const PPDiagnosticRecord* previous_record = pp->diagnostic_last;
         char text[256];
         parse_diagnostic_message(parser, pp, diagnostic, text, sizeof(text));
         const uint32_t token = diagnostic->token;
@@ -12177,6 +12347,19 @@ BUSTER_PARSER_ENTRY void parse_print_diagnostics(const Parser* parser, Preproces
             pp_diagnose_note(pp, diagnostic->error ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING, parse_diagnostic_location(parser, pp, diagnostic),
                              opener_kind != PARSE_KIND_END ? &note : NULL, "%s", text);
             pp->diagnostic_position = saved;
+        }
+        if (diagnostic->message == PARSE_MESSAGE_EXPECTED_MEMBER_NAME && diagnostic->publication != 0)
+        {
+            // Diagnosed after the bound expression and before the completed array type's size constraints.
+            pp_diagnostic_phase(pp, previous_record, PP_DIAGNOSTIC_TYPE);
+        }
+        else if (diagnostic->recovery_expression_begin != 0 && diagnostic->message == PARSE_MESSAGE_EXPECTED_SEMI_AFTER_EXPRESSION &&
+            token < parser->tokens.count && parser->tokens.kinds[token] != PARSE_KIND_R_PAREN)
+        {
+            // At an inserted terminator the completed expression's checks precede the demand for its semicolon.
+            pp_diagnostic_phase(pp, previous_record, PP_DIAGNOSTIC_SEMANTIC);
+            pp_diagnostic_queued(pp, previous_record, parse_source_index(&parser->tokens, token));
+            pp_diagnostic_source_order(pp, previous_record);
         }
     }
     if (parser->fatal != PARSE_MESSAGE_NONE)

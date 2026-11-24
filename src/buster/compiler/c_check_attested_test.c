@@ -11,8 +11,9 @@
 // a tentative definition, a static declaration, an alias, a static assertion, an error in one unit only, an inline
 // definition whose later declaration makes it external, a later attribute of a called function, a library function's
 // prototype that a unit reaches only by its builtin, an enumerator a body names, a tag first mentioned in a
-// prototype's return type, and a declaration that warns, which every unit reports again. Include after
-// c_check_attested.c; test-checker calls this through its forward declaration.
+// prototype's return type, a tag completed after names were declared through it (#3494), and a declaration that warns,
+// which every unit reports again. Include after c_check_attested.c; test-checker calls this through its forward
+// declaration.
 #ifndef BUSTER_C_CHECK_ATTESTED_TEST_INCLUDED
 #define BUSTER_C_CHECK_ATTESTED_TEST_INCLUDED
 
@@ -84,6 +85,80 @@ static const char* const check_attested_test_system_units[] =
     "#include <s.h>\nint a(void) { return 1; }\n",
     "#include \"u.h\"\nint b(void) { return 2; }\n",
     "#include <s.h>\nint c(void) { return 3; }\n",
+};
+
+// A tag completed after names were declared through it (#3494): a typedef of it, a function that returns a pointer to
+// it, a typedef of that typedef, a struct with a member that points to it, an enum, a struct named after its attribute,
+// and a tag that a parameter list defines for itself before the file scope's is complete (which mustn't close the file
+// scope's: its prototype warns in every unit, a root that reaches the tag's declarations). Units 1 and 3 complete the
+// tags one way, units 2 and 4 (WIDE) the other. What is declared before the completions has one hash in every unit. Each
+// completion, and each assertion after them, has one hash a way of completing the tags, though an assertion's tokens are
+// the same in every unit and list only names declared through the tags: unit 2 reads its own, and reaches what they
+// name. An enum of a fixed type is complete where it is declared, with a body or without, whatever names its type. The
+// assertions under STRICT hold the first way only: the compile's, whose second unit must report them.
+static const char check_attested_test_completion_header[] =
+    "typedef struct shape Shape; // 1:learned 2:reached 3:skipped 4:skipped\n"
+    "Shape *make_shape(void); // 1:learned 2:reached 3:skipped 4:skipped\n"
+    "typedef Shape *Handle; // 1:learned 2:reached 3:skipped 4:skipped\n"
+    "struct list; // 1:learned 2:reached 3:skipped 4:skipped\n"
+    "struct item { struct list *owner; }; // 1:learned 2:reached 3:skipped 4:skipped\n"
+    "typedef struct item Item; // 1:learned 2:reached 3:skipped 4:skipped\n"
+    "enum level; // 1:learned 2:reached 3:skipped 4:skipped\n"
+    "typedef enum level Level; // 1:learned 2:reached 3:skipped 4:skipped\n"
+    "struct __attribute__((aligned(8))) late; // 1:learned 2:reached 3:skipped 4:skipped\n"
+    "typedef struct late Late; // 1:learned 2:reached 3:skipped 4:skipped\n"
+    "typedef short Base; // 1:learned 2:skipped 3:skipped 4:skipped\n"
+    "enum based : Base { B1 }; // 1:learned 2:skipped 3:skipped 4:skipped\n"
+    "enum bare : int; // 1:learned 2:skipped 3:skipped 4:skipped\n"
+    "struct ghost; // 1:learned 2:reached 3:reached 4:reached\n"
+    "void haunt(struct ghost { int x; } g); // 1:diagnostic 2:diagnostic 3:diagnostic 4:diagnostic\n"
+    "typedef struct ghost *Ghost; // 1:learned 2:reached 3:reached 4:reached\n"
+    "#ifdef WIDE\n"
+    "struct shape { long width; long height; }; // 2:learned 4:skipped\n"
+    "struct list { Item *first; long count; }; // 2:learned 4:skipped\n"
+    "enum level { LOW, HIGH = 0x100000000 }; // 2:learned 4:skipped\n"
+    "struct __attribute__((packed)) late { char c; long l; }; // 2:learned 4:skipped\n"
+    "struct ghost { long a; long b; }; // 2:learned 4:reached\n"
+    "#else\n"
+    "struct shape { int width; }; // 1:learned 3:skipped\n"
+    "struct list { Item *first; }; // 1:learned 3:skipped\n"
+    "enum level { LOW, HIGH }; // 1:learned 3:skipped\n"
+    "struct __attribute__((aligned(8))) late { char c; }; // 1:learned 3:skipped\n"
+    "struct ghost { int a; }; // 1:learned 3:reached\n"
+    "#endif\n"
+    "_Static_assert(sizeof(Shape) >= 4, \"shape\"); // 1:learned 2:learned 3:skipped 4:skipped\n"
+    "_Static_assert(sizeof(*make_shape()) >= 4, \"made\"); // 1:learned 2:learned 3:skipped 4:skipped\n"
+    "_Static_assert(sizeof(*(Handle)0) >= 4, \"handle\"); // 1:learned 2:learned 3:skipped 4:skipped\n"
+    "_Static_assert(sizeof(*((Item *)0)->owner) >= 8, \"owner\"); // 1:learned 2:learned 3:skipped 4:skipped\n"
+    "_Static_assert(sizeof(Level) >= 4, \"level\"); // 1:learned 2:learned 3:skipped 4:skipped\n"
+    "_Static_assert(sizeof(Late) >= 8, \"late\"); // 1:learned 2:learned 3:skipped 4:skipped\n"
+    "_Static_assert(sizeof(*(Ghost)0) >= 4, \"ghost\"); // 1:learned 2:learned 3:skipped 4:skipped\n"
+    "_Static_assert(sizeof(enum based) == 2 && sizeof(enum bare) == 4, \"fixed\"); // 1:learned 2:skipped 3:skipped 4:skipped\n"
+    "int plain_after(void); // 1:learned 2:skipped 3:skipped 4:skipped\n"
+    "#ifdef STRICT\n"
+    "_Static_assert(sizeof(Shape) == 4, \"shape\");\n"
+    "_Static_assert(sizeof(*make_shape()) == 4, \"made\");\n"
+    "_Static_assert(sizeof(*(Handle)0) == 4, \"handle\");\n"
+    "_Static_assert(sizeof(*((Item *)0)->owner) == 8, \"owner\");\n"
+    "_Static_assert(sizeof(Level) == 4, \"level\");\n"
+    "_Static_assert(sizeof(Late) == 8, \"late\");\n"
+    "_Static_assert(sizeof(*(Ghost)0) == 4, \"ghost\");\n"
+    "#endif\n";
+
+// Its units, and the compile's two: the second completes the tags the other way, where the strict assertions fail, which
+// a command that skipped them for the first unit's readings wouldn't report.
+static const char* const check_attested_test_completion_units[] =
+{
+    "#include \"c.h\"\nint a(void) { return 1; }\n",
+    "#define WIDE\n#include \"c.h\"\nint b(void) { return 2; }\n",
+    "#include \"c.h\"\nint c(void) { return 3; }\n",
+    "#define WIDE\n#include \"c.h\"\nint d(void) { return 4; }\n",
+};
+
+static const char* const check_attested_test_completion_failing_units[] =
+{
+    "#define STRICT\n#include \"c.h\"\nint a(void) { return 1; }\n",
+    "#define STRICT\n#define WIDE\n#include \"c.h\"\nint b(void) { return 2; }\n",
 };
 
 // The outcome named `name` of `length` bytes, or CHECK_ATTESTED_OUTCOMES.
@@ -299,12 +374,12 @@ static bool check_attested_test_same(const char* first, const char* second)
     return equal;
 }
 
-// The compile fixture's units [`first`, `first` + `count`) (written in `directory`, padded so that the first is the
-// costliest) compiled as one command with `options` and --attested=`mode`, in `directory`'s subdirectory `name`, its
+// Units [`first`, `first` + `count`) of `units`, each after `prefix` (written in `directory`, padded so that the first is
+// the costliest) compiled as one command with `options` and --attested=`mode`, in `directory`'s subdirectory `name`, its
 // diagnostics appended to diagnostics.err there: whether it ran with status `status`. The command's counts stay in
 // check_units_attested_last.
-static bool check_attested_test_unit_range(const char* directory, const char* name, const char* mode, const char* const* options, uint32_t option_count, uint32_t first,
-                                      uint32_t count, int status)
+static bool check_attested_test_units_range(const char* directory, const char* name, const char* mode, const char* const* options, uint32_t option_count,
+                                            const char* prefix, const char* const* units, uint32_t first, uint32_t count, int status)
 {
     char paths[8][24];
     char* arguments[24];
@@ -323,7 +398,7 @@ static bool check_attested_test_unit_range(const char* directory, const char* na
     {
         char text[4096];
         const int padding = (int)(count - u) * 256;
-        const int length = snprintf(text, sizeof(text), "/*%*s*/\n#include \"p.h\"\n%s", padding, "", check_attested_test_compile_units[u]);
+        const int length = snprintf(text, sizeof(text), "/*%*s*/\n%s%s", padding, "", prefix, units[u]);
         char path[640];
         snprintf(path, sizeof(path), "%s/unit%u.c", directory, u + 1);
         valid = length > 0 && (size_t)length < sizeof(text) && parse_test_write(path, text, (size_t)length);
@@ -361,6 +436,13 @@ static bool check_attested_test_unit_range(const char* directory, const char* na
         fprintf(stderr, "test-checker: attested: --attested=%s's command %s ended with status %d (expected %d)\n", mode, name, result, status);
     }
     return valid && result == status;
+}
+
+// The compile fixture's units [`first`, `first` + `count`) as one command (check_attested_test_units_range).
+static bool check_attested_test_unit_range(const char* directory, const char* name, const char* mode, const char* const* options, uint32_t option_count, uint32_t first,
+                                           uint32_t count, int status)
+{
+    return check_attested_test_units_range(directory, name, mode, options, option_count, "#include \"p.h\"\n", check_attested_test_compile_units, first, count, status);
 }
 
 // The compile fixture's first `count` units as one command (check_attested_test_unit_range), into a subdirectory `name` whose
@@ -880,6 +962,7 @@ static const CheckAttestedField check_attested_input_fields[] =
     { "sizeof_queries", CHECK_ATTESTED_FIELD_MEASURE },
     { "sizeof_query_tokens", CHECK_ATTESTED_FIELD_MEASURE },
     { "diagnostic_limits", CHECK_ATTESTED_FIELD_CONSEQUENCE },
+    { "invalid_member_operands", CHECK_ATTESTED_FIELD_CONSEQUENCE },
     { "diagnostic_report_count", CHECK_ATTESTED_FIELD_CONSEQUENCE },
     { "walk_end", CHECK_ATTESTED_FIELD_CONSEQUENCE },
     { "diagnostic_graph", CHECK_ATTESTED_FIELD_CONSEQUENCE },
@@ -938,6 +1021,7 @@ static const CheckAttestedField check_attested_reader_fields[] =
     { "declared_types", CHECK_ATTESTED_FIELD_OWN },
     { "query_types", CHECK_ATTESTED_FIELD_OWN },
     { "sizeof_types", CHECK_ATTESTED_FIELD_OWN },
+    { "memo_pool", CHECK_ATTESTED_FIELD_AMBIENT },
     { "sizeof_capture", CHECK_ATTESTED_FIELD_TRANSIENT },
     { "specifier_jobs", CHECK_ATTESTED_FIELD_TRANSIENT },
     { "specifier_finishes", CHECK_ATTESTED_FIELD_TRANSIENT },
@@ -1356,6 +1440,40 @@ static __attribute__((noinline)) void check_test_attested(CheckTest* test)
                          check_attested_test_command(&census, directory, "", check_attested_test_otherwise_units, "", 4, options, BUSTER_ARRAY_LENGTH(options), 0);
         check_test_expect(test, ran && check_attested_test_lines(&census, "q.h", check_attested_test_otherwise_header, 0xf),
                           "measure-attested: a declaration under another typedef or after #pragma pack is another hash");
+    }
+    unlink(header);
+    // A tag completed after names were declared through it (#3494).
+    snprintf(header, sizeof(header), "%s/c.h", directory);
+    written = ready && parse_test_write(header, check_attested_test_completion_header, strlen(check_attested_test_completion_header));
+    {
+        CheckAttested census = { .passes = 1, .twins = true, .records = records, .record_capacity = 1024 };
+        const char* options[] = { "-nostdinc", "-std=gnu17", "-c" };
+        const bool ran = written && records != NULL &&
+                         check_attested_test_command(&census, directory, "", check_attested_test_completion_units, "", 4, options, BUSTER_ARRAY_LENGTH(options), 0);
+        check_test_expect(test, ran && check_attested_test_lines(&census, "c.h", check_attested_test_completion_header, 0xf),
+                          "measure-attested: a declaration after a tag's completion has the hash of the completion its names were declared through");
+        check_test_expect(test, ran && census.completions != 0 && census.completion_names != 0 && census.listers != 0,
+                          "measure-attested: a tag's completion reaches the names declared through it by their listers");
+        // The compile: the second unit completes the tags the other way and expects the first one's sizes.
+        const char* compile[] = { "-nostdinc", "-std=gnu17", "--lanes", "1", "-c" };
+        char path[700];
+        snprintf(path, sizeof(path), "%s/off/diagnostics.err", directory);
+        unlink(path);
+        snprintf(path, sizeof(path), "%s/on/diagnostics.err", directory);
+        unlink(path);
+        const bool off = written && check_attested_test_units_range(directory, "off", "off", compile, BUSTER_ARRAY_LENGTH(compile), "",
+                                                                    check_attested_test_completion_failing_units, 0, 2, 1);
+        const bool on = written && check_attested_test_units_range(directory, "on", "on", compile, BUSTER_ARRAY_LENGTH(compile), "",
+                                                                   check_attested_test_completion_failing_units, 0, 2, 1);
+        check_test_expect(test, off && on && check_attested_test_compiled_same(directory, "on", "off", 1, true),
+                          "--attested=on reports the assertions that fail under another completion of a tag, as --attested=off does");
+        check_attested_test_compiled_remove(directory, "off", 2);
+        check_attested_test_compiled_remove(directory, "on", 2);
+        for (uint32_t u = 0; u < 2; u += 1)
+        {
+            snprintf(path, sizeof(path), "%s/unit%u.c", directory, u + 1);
+            unlink(path);
+        }
     }
     unlink(header);
     // A prototype in a system header and the same text in a user's.

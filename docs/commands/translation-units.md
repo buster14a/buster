@@ -153,7 +153,7 @@ missing and non-directory corpora. CI's inventory runs it on
 `tests/units/root-image` with `--option --lanes --option 1` (#3070): units
 that each leave the preprocessor's starting state another way, compiled one
 after another from one lane's root image, and those with syntax errors
-(`errors/`) with `--attested=off`. With `--generate DIR` it writes a program
+(`errors/`) with default attestation. With `--generate DIR` it writes a program
 of synth's shape (512 units of 200 functions by default) for measurements,
 and tests nothing.
 [docs/translation-units.md](../../docs/translation-units.md) has the design and the
@@ -317,7 +317,11 @@ sets, at two places: its reader's call and its unit's end.
   declaration's tokens of its kind, role, system level and name or literal at
   its place), the chain (each declaration's semantic hash from its own, the
   pragmas before it and the current hash of every name it lists; the memo's
-  probe; its declared names' new hashes), the reach and the marks. On the
+  probe; its declared names' new hashes; and at a tag's completion, which
+  the lists mark, the completed tag's hash into every name declared through
+  the tag, found by the listers the open names keep: #3494, the design's "A
+  tag's completion", whose counts the report's `completions=` line gives),
+  the reach and the marks. On the
   vector path the declarations' bounds go 64 tokens at a time, then the own
   hashes eight a register (a function definition's is zero, its body unread),
   then each declaration's list from the lane's cache by its own hash, or made

@@ -120,6 +120,14 @@ struct CheckBuiltinMiscAction
     TypeId ns_constant_string;
 };
 
+// A strong hint about equality to the builtin's converted second argument.
+typedef enum CheckExpectBias
+{
+    CHECK_EXPECT_UNKNOWN,
+    CHECK_EXPECT_FREQUENT,
+    CHECK_EXPECT_RARE,
+} CheckExpectBias;
+
 typedef struct CheckBuiltinMiscResult CheckBuiltinMiscResult;
 struct CheckBuiltinMiscResult
 {
@@ -146,6 +154,8 @@ struct CheckBuiltinMiscResult
     bool writes_memory;
     bool allocates_stack;
     bool alignment_offset_known;
+    uint8_t expect_bias;
+    uint64_t expected_value;
     // __builtin_cpu_supports's test, its word (0 __cpu_model.features[0], 1 to 3 __cpu_features2's) in the high 32 bits
     // and its bit's mask in the low ones, 0 for a feature clang doesn't know, whose call is 0; or __builtin_cpu_is's, its
     // field of __cpu_model (0 vendor, 1 type, 2 subtype) and the value it must have (c_builtin_cpu.inc).
@@ -339,7 +349,7 @@ static CheckValue check_builtin_misc_evaluated(TypeTable* table, const CheckBuil
 // or a call isn't), in [0, 1], which a NaN isn't. Clang evaluates it as a constant expression, so its value is the
 // evaluator's view (check_builtin_misc_evaluated), and a discarded operand that evaluator can't evaluate fails it too
 // (BUSTER_CHECK_DISCARDED_UNEVALUABLE: `(s, 0.75)`). It is never evaluated at run time.
-static bool check_builtin_misc_probability(TypeTable* table, const CheckBuiltinMiscAction* input, CheckBuiltinMiscResult* output, CheckValue* value)
+static bool check_builtin_misc_probability(TypeTable* table, const CheckBuiltinMiscAction* input, CheckBuiltinMiscResult* output, CheckValue* value, double* chance)
 {
     bool accepted = check_builtin_misc_convert(table, input, output, value, 2, BUSTER_TYPE_DOUBLE);
     const CheckValue probability = accepted ? check_builtin_misc_evaluated(table, input, value, 2, BUSTER_TYPE_DOUBLE) : *value;
@@ -358,6 +368,10 @@ static bool check_builtin_misc_probability(TypeTable* table, const CheckBuiltinM
         check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, 2);
         accepted = false;
     }
+    if (accepted)
+    {
+        *chance = (double)probability.floating;
+    }
     return accepted;
 }
 
@@ -371,7 +385,8 @@ static void check_builtin_misc_expect(TypeTable* table, const CheckBuiltinMiscAc
 {
     const bool first = check_builtin_misc_convert(table, input, output, values, 0, BUSTER_TYPE_LONG);
     const bool second = check_builtin_misc_convert(table, input, output, values + 1, 1, BUSTER_TYPE_LONG);
-    const bool probability = input->id != CBUILTIN_EXPECT_WITH_PROBABILITY || check_builtin_misc_probability(table, input, output, values + 2);
+    double chance = 0.9;
+    const bool probability = input->id != CBUILTIN_EXPECT_WITH_PROBABILITY || check_builtin_misc_probability(table, input, output, values + 2, &chance);
     // A pointer argument clang converts to its long with -Wint-conversion's error (#2914): it makes the call, which its
     // parents check (`long *l = __builtin_expect(p, 0);`'s initialization's own error), of a long's unknown value.
     // (Only the first's: where the second fails, clang's call may fold to a null pointer constant, which a diagnosed
@@ -411,6 +426,13 @@ static void check_builtin_misc_expect(TypeTable* table, const CheckBuiltinMiscAc
                 output->action.value.constant_kind = CHECK_CONSTANT_NONE;
             }
             output->evaluated_operands = 3;
+            const CheckValue expected = values[1].constant_kind == CHECK_CONSTANT_INTEGER ? values[1] :
+                                        check_builtin_misc_evaluated(table, input, values + 1, 1, BUSTER_TYPE_LONG);
+            if (expected.constant_kind == CHECK_CONSTANT_INTEGER && expected.fault == CHECK_FAULT_NONE && (expected.flags & BUSTER_CHECK_SIDE_EFFECT) == 0)
+            {
+                output->expect_bias = chance >= 0.9 ? CHECK_EXPECT_FREQUENT : chance <= 0.1 ? CHECK_EXPECT_RARE : CHECK_EXPECT_UNKNOWN;
+                output->expected_value = (uint64_t)expected.integer;
+            }
         }
         else
         {

@@ -1,0 +1,11 @@
+buster-fixtures v1 preprocessor-system-levels
+# A system header's macros, a paste and a stringification in it, invoked in the main file, and the main file's
+# macro in the header: each token is where its outermost invocation is.
+0001	exact	macros across a system header
+0002	exact	line markers
+0003	exact	an extern C header's line marker
+0004	exact	#pragma GCC system_header
+# A line marker read while the arguments of a system header's F are collected in the user's file: F's body is where
+# the invocation starts, before the marker, and its argument where it is read, after it; the runs would have both
+# after it, and the body's own place is the system header. The second F is all after the marker.
+0005	inexact	a line marker among an invocation's arguments
