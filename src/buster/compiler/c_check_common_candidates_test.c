@@ -500,7 +500,7 @@ static const unsigned __int128 check_test_reach_integers[] =
     (unsigned __int128)1 << 32, (unsigned __int128)1 << 63, ~(unsigned __int128)0, ~(unsigned __int128)1, ~(unsigned __int128)0 << 31,
 };
 
-// One generated graph of `count` nodes, audited under each of the 256 option sets, with its argument columns or, as a
+// One generated graph of `count` nodes, a tree in node order (check_common_parents), audited under each of the 256 option sets, with its argument columns or, as a
 // graph without calls' slices has them, without. Whether every run agreed with its expectations: no node lost, and the filter applied exactly where neither -Wdouble-promotion nor
 // -Wimplicit-int-float-conversion may report.
 static bool check_test_common_reach_case(uint64_t* state, uint32_t count, bool arguments, const TypeTable* types, const TypeId* pool, uint32_t pool_count, Arena* scratch,
@@ -516,7 +516,12 @@ static bool check_test_common_reach_case(uint64_t* state, uint32_t count, bool a
     // The nodes' argument counts first, so that the argument columns end at their protected pages too.
     uint32_t* argument_shape = malloc(((uint64_t)count + 1) * sizeof(uint32_t));
     CheckOp* drawn = malloc(((uint64_t)count + 1) * sizeof(CheckOp));
-    bool same = argument_shape != NULL && drawn != NULL;
+    // The nodes no node reads yet, and the facts' tree.
+    uint32_t* open = malloc(((uint64_t)count + 1) * sizeof(uint32_t));
+    uint32_t* parents = malloc(((uint64_t)count + 1) * sizeof(uint32_t));
+    uint64_t* roots = malloc((((uint64_t)count + 63) / 64 + 1) * sizeof(uint64_t));
+    uint32_t open_count = 0;
+    bool same = argument_shape != NULL && drawn != NULL && open != NULL && parents != NULL && roots != NULL;
     uint32_t argument_count = 0;
     uint32_t payload_capacity = 0;
     for (uint32_t node = 0; same && node < count; node += 1)
@@ -559,17 +564,28 @@ static bool check_test_common_reach_case(uint64_t* state, uint32_t count, bool a
     for (uint32_t node = 0; same && node < count; node += 1)
     {
         ops[node] = drawn[node];
-        uint32_t operands[3];
-        for (uint32_t slot = 0; slot < 3; slot += 1)
+        // A tree in node order, as the facts' walk needs: each operand is a node no other has taken, mostly the latest one
+        // (the node before, where it is free), sometimes any; a few are absent or name no node. The second operand is
+        // drawn first, so that it is the node before its reader as often as an evaluation order makes it.
+        uint32_t operands[3] = { BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE };
+        static const uint32_t order[3] = { 1, 0, 2 };
+        for (uint32_t turn = 0; turn < 3; turn += 1)
         {
+            const uint32_t slot = order[turn];
             const uint32_t draw = check_test_common_scan_draw(state);
             const uint32_t present = slot == 0 ? 90 : slot == 1 ? 65 : 15;
-            static const uint32_t strays[] = { 0, 1, 0x7fffffffu, 0x80000000u, 0xfffffffeu };
-            // Mostly an earlier node; a few absent, at or past the graph's end, or not earlier.
-            operands[slot] = draw % 100 >= present ? BUSTER_CHECK_NONE :
-                             draw / 100 % 64 == 0 ? count + strays[draw / 6400 % BUSTER_ARRAY_LENGTH(strays)] :
-                             draw / 100 % 64 == 1 ? draw / 6400 % count :
-                             node != 0 ? draw / 6400 % node : BUSTER_CHECK_NONE;
+            static const uint32_t strays[] = { 0, 1, 0x7fffffffu, 0xf0000000u };
+            if (draw % 100 < present && draw / 100 % 64 == 0)
+            {
+                operands[slot] = count + strays[draw / 6400 % BUSTER_ARRAY_LENGTH(strays)];
+            }
+            else if (draw % 100 < present && open_count != 0)
+            {
+                const uint32_t pick = draw / 100 % 4 != 0 ? open_count - 1 : draw / 6400 % open_count;
+                operands[slot] = open[pick];
+                open[pick] = open[open_count - 1];
+                open_count -= 1;
+            }
         }
         operand0[node] = operands[0];
         operand1[node] = operands[1];
@@ -627,11 +643,21 @@ static bool check_test_common_reach_case(uint64_t* state, uint32_t count, bool a
         for (uint32_t i = 0; i < argument_shape[node]; i += 1)
         {
             const uint32_t draw = check_test_common_scan_draw(state);
-            argument_nodes[argument_next] = draw % 40 == 0 ? count + draw / 40 % 3 : node != 0 ? draw / 40 % node : BUSTER_CHECK_NONE;
+            uint32_t argument = draw % 40 == 0 ? count + draw / 40 % 3 : BUSTER_CHECK_NONE;
+            if (draw % 40 != 0 && open_count != 0)
+            {
+                const uint32_t pick = draw / 40 % 3 != 0 ? open_count - 1 : draw / 120 % open_count;
+                argument = open[pick];
+                open[pick] = open[open_count - 1];
+                open_count -= 1;
+            }
+            argument_nodes[argument_next] = argument;
             argument_conversions[argument_next] = (CheckConversion){ .type = draw / 4096 % 5 == 0 ? 0 : pool[draw / 65536 % pool_count],
                                                                     .flags = conversion_flags[draw / 1048576 % BUSTER_ARRAY_LENGTH(conversion_flags)] };
             argument_next += 1;
         }
+        open[open_count] = node;
+        open_count += 1;
     }
     const CheckGraph graph =
     {
@@ -666,7 +692,7 @@ static bool check_test_common_reach_case(uint64_t* state, uint32_t count, bool a
     parser.tokens.count = TOKENS;
     const uint64_t mark = scratch->length;
     CheckCommonCandidates candidates = { 0 };
-    same = same && check_common_candidates_build(&graph, scratch, &candidates);
+    same = same && check_common_candidates_build(&graph, scratch, &candidates) && (count == 0 || check_common_parents(&graph, parents, roots));
     for (uint32_t set = 0; same && set < 256; set += 1)
     {
         const CheckCommonEnabled enabled =
@@ -682,7 +708,7 @@ static bool check_test_common_reach_case(uint64_t* state, uint32_t count, bool a
         };
         const uint64_t inner = scratch->length;
         CheckCommonReachFilter filter = { 0 };
-        same = check_common_reach_filter_build(&graph, &stream, types, &enabled, scratch, &filter) &&
+        same = check_common_reach_filter_build(&graph, &stream, types, &enabled, parents, scratch, &filter) &&
                (filter.traits != NULL) == (count != 0 && !enabled.promotion && !enabled.int_float);
         const uint64_t* kept = same && filter.traits != NULL ? check_common_reach_audit_kept(&graph, &stream, &candidates, &enabled, &filter, scratch) : NULL;
         same = same && (kept != NULL || filter.traits == NULL);
@@ -716,6 +742,9 @@ static bool check_test_common_reach_case(uint64_t* state, uint32_t count, bool a
     {
         check_test_selection_unmap(columns + i);
     }
+    free(roots);
+    free(parents);
+    free(open);
     free(drawn);
     free(argument_shape);
     return same;

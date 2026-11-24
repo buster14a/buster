@@ -13194,7 +13194,7 @@ static bool check_common_facts(const CheckInput* input, const CheckStream* strea
         // The candidates that may have a bit (check_common_reach_keep), where the filter applies; a test's audit lists
         // them all and asks each one the filter took out.
         CheckCommonReachFilter filter = { 0 };
-        filtered = check_common_reach_filter_build(graph, stream, types, enabled, scratch, &filter);
+        filtered = check_common_reach_filter_build(graph, stream, types, enabled, parents, scratch, &filter);
         const CheckCommonReachFilter* keep = filtered && filter.traits != NULL ? &filter : NULL;
         const uint64_t* audited = keep != NULL && check_common_reach_audit.enabled ? check_common_reach_audit_kept(graph, stream, candidates, enabled, keep, scratch) : NULL;
         CheckCommonReachCounts counts = { 0 };
