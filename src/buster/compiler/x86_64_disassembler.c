@@ -2064,32 +2064,46 @@ static uint32_t x86_decode_lanes(const X86DecodeWindow* window, uint64_t remaini
     refused &= ~wait;
     truncated &= ~wait;
     // In order: the lanes before the first failure, and none after a lane whose length isn't its hint.
-    uint32_t words[5][16];
-    _mm512_storeu_si512(words[0], done_immediate);
-    _mm512_storeu_si512(words[1], done_displacement);
-    _mm512_storeu_si512(words[2], done_registers);
-    _mm512_storeu_si512(words[3], done_tail);
-    _mm512_storeu_si512(words[4], done_length);
-    uint32_t written = 0;
-    bool more = true;
-    *status = X86_DECODE_OK;
-    for (uint32_t i = 0; i < count && more; i += 1)
+    const __m512i hint = x86_decode_lane_field(lane_starts, _mm512_loadu_si512(lengths));
+    const uint32_t failed = (uint32_t)(live & ~decoded) | (1u << count);
+    const uint32_t mismatched = (uint32_t)(decoded & _mm512_cmpneq_epi32_mask(hint, done_length)) | (1u << count);
+    const uint32_t first_failure = (uint32_t)__builtin_ctz(failed);
+    const uint32_t last = (uint32_t)__builtin_ctz(mismatched) + 1;
+    const uint32_t written = first_failure < last ? first_failure : last < count ? last : count;
+    *status = first_failure < count && first_failure < last ? (((truncated >> first_failure) & 1) != 0 ? X86_DECODE_TRUNCATED : X86_DECODE_UNSUPPORTED) : X86_DECODE_OK;
+    // The records' six dwords (X86Decoded) a lane, transposed into 24-byte records in lane order.
+    const __m512i where = _mm512_add_epi32(starts, _mm512_set1_epi32((int)start));
+    const __m512i sizes = _mm512_mask_or_epi32(done_length, done_address32, done_length, _mm512_set1_epi32(1 << 8));
+    const __m512i pairs[3][2] = {
+        { _mm512_unpacklo_epi32(done_immediate, done_displacement), _mm512_unpackhi_epi32(done_immediate, done_displacement) },
+        { _mm512_unpacklo_epi32(done_registers, done_tail), _mm512_unpackhi_epi32(done_registers, done_tail) },
+        { _mm512_unpacklo_epi32(where, sizes), _mm512_unpackhi_epi32(where, sizes) },
+    };
+    // unpacklo has lanes 0, 1, 4, 5, 8, 9, 12, 13 and unpackhi 2, 3, 6, 7, ...: back in order, 8 lanes a register.
+    const __m512i order_low = _mm512_set_epi64(11, 10, 3, 2, 9, 8, 1, 0);
+    const __m512i order_high = _mm512_set_epi64(15, 14, 7, 6, 13, 12, 5, 4);
+    __m512i words[3][2];
+    for (uint32_t f = 0; f < 3; f += 1)
     {
-        if (((decoded >> i) & 1) != 0)
+        words[f][0] = _mm512_permutex2var_epi64(pairs[f][0], order_low, pairs[f][1]);
+        words[f][1] = _mm512_permutex2var_epi64(pairs[f][0], order_high, pairs[f][1]);
+    }
+    // Eight lanes' 24 qwords, three registers: record r's qwords are A[r], B[r], C[r].
+    // (A from 0-7, B from 8-15; C's elements, by mask, from C.)
+    const __m512i ab[3] = { _mm512_set_epi64(10, 2, 0, 9, 1, 0, 8, 0), _mm512_set_epi64(5, 0, 12, 4, 0, 11, 3, 0), _mm512_set_epi64(0, 15, 7, 0, 14, 6, 0, 13) };
+    const __m512i c[3] = { _mm512_set_epi64(0, 0, 1, 0, 0, 0, 0, 0), _mm512_set_epi64(0, 4, 0, 0, 3, 0, 0, 2), _mm512_set_epi64(7, 0, 0, 6, 0, 0, 5, 0) };
+    const __mmask8 from_c[3] = { 0x24, 0x49, 0x92 };
+    uint8_t* bytes = (uint8_t*)output;
+    for (uint32_t half = 0; half < 2; half += 1)
+    {
+        for (uint32_t k = 0; k < 3; k += 1)
         {
-            X86Decoded lane = { .offset = (uint32_t)(start + offsets[i]), .length = (uint8_t)words[4][i], .address32 = (uint8_t)((done_address32 >> i) & 1) };
-            memcpy(&lane.instruction.immediate, &words[0][i], 4);
-            memcpy(&lane.instruction.displacement, &words[1][i], 4);
-            memcpy(&lane.instruction.reg, &words[2][i], 4);
-            memcpy(&lane.instruction.form, &words[3][i], 4);
-            output[written] = lane;
-            written += 1;
-            more = lengths[offsets[i]] == words[4][i];
-        }
-        else
-        {
-            *status = ((truncated >> i) & 1) != 0 ? X86_DECODE_TRUNCATED : X86_DECODE_UNSUPPORTED;
-            more = false;
+            const uint32_t qword = half * 24 + k * 8;
+            const uint32_t wanted = written * 3;
+            const __mmask8 store = (__mmask8)(qword >= wanted ? 0 : wanted - qword >= 8 ? 0xff : (1u << (wanted - qword)) - 1);
+            const __m512i merged = _mm512_permutex2var_epi64(words[0][half], ab[k], words[1][half]);
+            const __m512i record = _mm512_mask_permutexvar_epi64(merged, from_c[k], c[k], words[2][half]);
+            _mm512_mask_storeu_epi64(bytes + (uint64_t)qword * 8, store, record);
         }
     }
     return written;
