@@ -523,7 +523,7 @@ static bool check_tier1_debug_frame_base(const Tier1EmitResult* emitted, const u
         const bool plain = record.mode == BUSTER_X86_REGISTER_DIRECT && record.index == 0 && record.vvvv == 0 && record.decorations == 0 && record.displacement == 0;
         uint64_t read = 0;
         uint64_t written = 0;
-        x86_instructions_effects(&record, 1, &read, &written);
+        x86_instructions_effects(&records[old], 1, &read, &written);
         valid = x86_effects_control(x86_effects(record.form)) == BUSTER_X86_CONTROL_NONE;
         const bool push = plain && record.form == X86_FORM_PUSH_R64 && record.rm < 16 && record.immediate == 0;
         const bool move = plain && record.immediate == 0 && (record.form == X86_FORM_MOV_R64_RM64 || record.form == X86_FORM_MOV_RM64_R64);
@@ -585,7 +585,7 @@ static bool check_tier1_debug_frame_base(const Tier1EmitResult* emitted, const u
         const uint32_t control = x86_effects_control(x86_effects(record.form));
         uint64_t read = 0;
         uint64_t written = 0;
-        x86_instructions_effects(&record, 1, &read, &written);
+        x86_instructions_effects(&records[old], 1, &read, &written);
         const bool returns = tier1_cert_emitted_exactly(record, (X86Instruction){ .form = X86_FORM_RET });
         terminal = returns || (terminal && emitted->origins[old] == tier1_origin(TIER1_ORIGIN_FRAME, 1) && control == BUSTER_X86_CONTROL_NONE);
         // A call's architectural push is reflected in the callee's frame; the caller's resumed RSP is unchanged.

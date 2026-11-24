@@ -248,7 +248,7 @@ static bool check_tier1_debug_value_homes(const Tier1EmitResult* emitted, const 
 static CheckTier1DebugValueTransfer check_tier1_debug_value_transfer(const CheckTier1DebugValues* proof, const Tier1EmitResult* emitted, uint32_t old)
 {
     const X86Instruction record = emitted->code.records[old];
-    const CheckTier1DebugTransfer registers = check_tier1_debug_transfer(&record);
+    const CheckTier1DebugTransfer registers = check_tier1_debug_transfer(&emitted->code.records[old]);
     CheckTier1DebugValueTransfer result = {
         .killed = registers.killed,
         .from = registers.bytes != 0 ? registers.from : BUSTER_IR_NONE,
@@ -262,7 +262,7 @@ static CheckTier1DebugValueTransfer check_tier1_debug_value_transfer(const Check
     const bool body = old >= emitted->body_record && origin != TIER1_ORIGIN_FRAME && registers.control != BUSTER_X86_CONTROL_RETURN;
     uint64_t read = 0;
     uint64_t written = 0;
-    x86_instructions_effects(&record, 1, &read, &written);
+    x86_instructions_effects(&emitted->code.records[old], 1, &read, &written);
     const bool store = (written & BUSTER_X86_RESOURCE_MEMORY) != 0;
     const bool based = record.mode == BUSTER_X86_MEMORY_BASE && record.rm == emitted->frame.base_register && record.form < X86_FORM_COUNT;
     const bool frame_base = (record.mode & (BUSTER_X86_MODE_MEMORY | BUSTER_X86_MODE_BASE)) == (BUSTER_X86_MODE_MEMORY | BUSTER_X86_MODE_BASE) &&
