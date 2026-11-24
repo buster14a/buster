@@ -151,7 +151,10 @@ unused-warning fixtures also check exact scope-completion tokens.
   libraries against clang's, run by the same programs); `--stack-protector-only`
   runs the stack protector's section alone (#3558, `c_check_stack_protector_driver_test.c`:
   each option's guarded functions against clang `-O0`'s, and a smashed buffer of
-  each frame's shape aborting); `--target-versions-only` runs GNU multiversioning's `target` and
+  each frame's shape aborting); `--cf-protection-only` runs CET's section alone
+  (#3570, `c_check_cf_protection_driver_test.c`: each spelling's `endbr64` and
+  `notrack` marks per function and its note against clang `-O0`'s, a program
+  through the marks, and the refusals); `--target-versions-only` runs GNU multiversioning's `target` and
   `target_clones` section alone, #1838 (inline assembly in `target_clones` copies at both tiers among it, #2247); `--asm-definitions-only` runs what
   inline assembly defines against clang's objects alone, #1848; `--operand-diagnostics-only` runs
   the original runtime sources in `tests/driver/operand_diagnostics/` against Clang's complete
@@ -1205,11 +1208,12 @@ are refused by the semantic option admission boundary below. The resolved
 admitting either never admits a `-fsanitize-coverage-*` prefix. Negative flags
 are admitted only by an explicit owner or compatibility entry. Within these families, any unsupported request is an error
 even when a later option requests an inactive/default form; this is not
-Clang's last-option-wins policy. Unlike `-fcf-protection=*`, which is resolved
-separately and does honor a later disabling spelling, a later inactive spelling
+Clang's last-option-wins policy: a later inactive spelling
 cannot cancel an earlier request. `-fstack-protector`, `-fstack-protector-strong`,
 `-fstack-protector-all` and `-fno-stack-protector` are taken, the last
-deciding (#3558, [the checker's guide](../c-checker.md)'s "The stack protector").
+deciding (#3558, [the checker's guide](../c-checker.md)'s "The stack protector"),
+and so are `-fcf-protection` and its `=full`, `=branch`, `=return` and `=none`
+(#3570, "CET's protection" there).
 The diagnostic retains the first unsupported spelling from this refusal table
 (`check_request_codegen_option` in `c_check_request.c`, which every client
 that reads the driver's options shares).

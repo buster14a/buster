@@ -83,7 +83,7 @@ static void check_debug_tier1_values_locations(CheckDebugTestTally* tally)
         CheckProgramLowered lowered = { 0 };
         CheckEmitRun run = { .program = &program, .lowered = &lowered, .sources = true };
         const EmittedCode code = { 0 };
-        check_program_emit_patchable(&run, &body, &code, 0, bytes, sizeof(original), 8, prefix, NULL);
+        check_program_emit_patchable(&run, &body, &code, 0, bytes, sizeof(original), 8, prefix, 0, NULL);
         const uint32_t entry = 8 - prefix;
         check_debug_test_expect(tally, memcmp(bytes + 8, original, sizeof(original)) == 0 && body.sled == 8 && body.prefix == prefix &&
                                       body.body_offset == entry && locations[0].begin == entry && locations[0].end == 4 + entry &&

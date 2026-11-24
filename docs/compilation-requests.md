@@ -20,11 +20,13 @@ extends the existing contracts (`PPOptions`, `CheckProgramOptions`,
 
 - `check_request_scan` reads the command-line options that no `PPOptions`
   field decides: code generation the driver doesn't implement (`-pg`,
-  `--coverage`, the stack protector's options, `-fcf-protection`, ...) and the
+  `--coverage`, `-fstack-protector-explicit`, ...) and the
   ABI layouts the checker doesn't implement (`-fshort-enums`,
   `-fpack-struct`). Each family's option decides as clang's driver takes it:
-  the first code generation option, and the last stack protector,
-  `-fcf-protection`, `-f[no-]short-enums` and packing option. Its answer says
+  the first code generation option, and the last `-f[no-]short-enums` and
+  packing option. The stack protector's options and `-fcf-protection`'s,
+  which the code has (#3558, #3570), go on to `pp_parse_options`, the last of
+  each deciding. Its answer says
   whether the argument goes on to `pp_parse_options`. The driver's argument
   loop calls it, and so does every other client.
 - `check_request_refusal` says what the request asks for that the driver

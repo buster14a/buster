@@ -26,6 +26,11 @@ frame slots. There is no IR and no liveness analysis. `src/buster/compiler/tier0
 - **Stack-clash protection** (#177's `-fstack-clash-protection`, `Tier0Function.probe_stack`): a reservation of a page
   or more, a realigned frame's and each `ALLOCA` touch every page below rsp before rsp passes it, with Tier 1's records
   ([the frame guide](tier1-frame.md)'s "Stack-clash protection on request").
+- **Indirect branch tracking** (#3570's `-fcf-protection=branch`, `Tier0Function.branch_tracking`): after its passes,
+  `tier0_mark_branches` inserts an `endbr64` right after each direct call of a function that returns twice
+  (`twice_symbols`) and at each label whose address the code takes, and makes each jump table's jump `notrack jmp`;
+  every index into the records moves with them. The entry's `endbr64` is the emission's ([the checker
+  guide](c-checker.md)'s "CET's protection").
 - **Tail calls** (#147's musttail): a `TAIL_CALL` calls its row as the function's return, its arguments where the
   function's own arrived, the frame released before a jump ("Tail calls", below).
 - **Symbols reached otherwise than directly** (#136's item 4): through their GOT slots (a shared library's data, and a
