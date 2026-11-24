@@ -1127,6 +1127,40 @@ static uint64_t x86_decode_test_fixtures(void)
     return failures;
 }
 
+// A cramped form's 64-bit instance with a memory operand and 67 before it decodes to no instruction of that form with a
+// 32-bit address, in a process without the address32 templates, as every command but the tests is: only the cramped
+// forms' table refuses it there. Runs before the tests build those templates.
+static uint64_t x86_decode_test_cramped_decoding(uint64_t* state)
+{
+    uint64_t failures = x86_encoder_initialized_address32;
+    uint64_t checked = 0;
+    const X86EncoderMode saved = x86_test_mode;
+    x86_test_mode = X86_ENCODER_MODE_64;
+    for (uint32_t row = 1; row < X86_FORM_COUNT; row += 1)
+    {
+        const bool cramped = ((x86_decode_address32_cramped[row / 64] >> (row % 64)) & 1) != 0;
+        for (uint32_t sample = 0; cramped && x86_decode_form_supported(row) && sample < 16; sample += 1)
+        {
+            const X86Instruction instruction = x86_random_instruction(state, (uint16_t)row, false);
+            uint8_t bytes[32] = { 0x67 };
+            const uint32_t size = (instruction.mode & BUSTER_X86_MODE_MEMORY) != 0 ? encode_one(&instruction, bytes + 1, X86_ENCODER_MODE_64) : 0;
+            X86Decoded decoded[2];
+            const X86DecodeResult result = size != 0 && size < 15 ? x86_disassemble(bytes, size + 1, decoded, 2) : (X86DecodeResult){ 0 };
+            const bool accepted = result.count != 0 && decoded[0].address32 && (decoded[0].instruction.form & BUSTER_X86_FORM_NUMBER) % X86_FORM_COUNT == row;
+            if (accepted && failures < 8)
+            {
+                fprintf(stderr, "disassembler cramped: %s took a 32-bit address\n", x86_form_descriptions[row].mnemonic);
+            }
+            failures += accepted;
+            checked += size != 0 && size < 15;
+        }
+    }
+    x86_test_mode = saved;
+    failures += checked == 0;
+    printf("disassembler cramped decoding: %llu instances with 67, failures=%llu\n", (unsigned long long)checked, (unsigned long long)failures);
+    return failures;
+}
+
 // The forms whose address32 template has no room for a memory operand, as the disassembler keeps them, against the
 // templates' own test (x86_form_lacks_room, which needs the address32 templates built).
 static uint64_t x86_decode_test_cramped(void)
@@ -1230,7 +1264,10 @@ static int run_x86_disassembler_tests(int argc, char** argv)
     }
     // The tests encode with 32-bit addresses, whose templates the disassembler doesn't build (its tables are baked and
     // keep only what they need of them: x86_decode_address32_cramped, checked against the templates' test here).
-    bool initialized = arguments && x86_disassembler_initialize() && (x86_encoder_initialized_address32 || x86_encoder_initialize_address32());
+    bool initialized = arguments && x86_disassembler_initialize();
+    uint64_t cramped_state = seed;
+    failures += initialized ? x86_decode_test_cramped_decoding(&cramped_state) : 0;
+    initialized = initialized && (x86_encoder_initialized_address32 || x86_encoder_initialize_address32());
     if (initialized)
     {
         uint64_t state = seed;
