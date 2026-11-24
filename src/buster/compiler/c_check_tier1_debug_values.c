@@ -245,10 +245,11 @@ static bool check_tier1_debug_value_homes(const Tier1EmitResult* emitted, const 
     return valid;
 }
 
-static CheckTier1DebugValueTransfer check_tier1_debug_value_transfer(const CheckTier1DebugValues* proof, const Tier1EmitResult* emitted, uint32_t old)
+// `written`: the record's write set (check_tier1_debug_writes).
+static CheckTier1DebugValueTransfer check_tier1_debug_value_transfer(const CheckTier1DebugValues* proof, const Tier1EmitResult* emitted, uint32_t old, uint64_t written)
 {
     const X86Instruction record = emitted->code.records[old];
-    const CheckTier1DebugTransfer registers = check_tier1_debug_transfer(&record);
+    const CheckTier1DebugTransfer registers = check_tier1_debug_transfer(&emitted->code.records[old], written);
     CheckTier1DebugValueTransfer result = {
         .killed = registers.killed,
         .from = registers.bytes != 0 ? registers.from : BUSTER_IR_NONE,
@@ -260,9 +261,6 @@ static CheckTier1DebugValueTransfer check_tier1_debug_value_transfer(const Check
     };
     const uint32_t origin = emitted->origins[old] >> BUSTER_TIER1_ORIGIN_SHIFT;
     const bool body = old >= emitted->body_record && origin != TIER1_ORIGIN_FRAME && registers.control != BUSTER_X86_CONTROL_RETURN;
-    uint64_t read = 0;
-    uint64_t written = 0;
-    x86_instruction_effects_scalar(&record, &read, &written);
     const bool store = (written & BUSTER_X86_RESOURCE_MEMORY) != 0;
     const bool based = record.mode == BUSTER_X86_MEMORY_BASE && record.rm == emitted->frame.base_register && record.form < X86_FORM_COUNT;
     const bool frame_base = (record.mode & (BUSTER_X86_MODE_MEMORY | BUSTER_X86_MODE_BASE)) == (BUSTER_X86_MODE_MEMORY | BUSTER_X86_MODE_BASE) &&
@@ -641,6 +639,7 @@ static bool check_tier1_debug_values(const Tier0Function* function, const IrFunc
     uint32_t* targets = valid ? ir_allocate(scratch, (uint64_t)count + 1, 4, &valid) : NULL;
     uint32_t* block_of = valid ? ir_allocate(scratch, (uint64_t)count + 1, 4, &valid) : NULL;
     uint8_t* cuts = valid ? ir_allocate(scratch, (uint64_t)count + 1, 1, &valid) : NULL;
+    const uint64_t* record_writes = valid ? check_tier1_debug_writes(emitted, scratch, &valid) : NULL;
     if (valid)
     {
         memset(places, 0xff, ((uint64_t)count + 1) * 4);
@@ -657,7 +656,7 @@ static bool check_tier1_debug_values(const Tier0Function* function, const IrFunc
         if (valid)
         {
             places[old] = r;
-            proof.transfers[r] = check_tier1_debug_value_transfer(&proof, emitted, old);
+            proof.transfers[r] = check_tier1_debug_value_transfer(&proof, emitted, old, record_writes[old]);
         }
     }
     // The final order may interleave independent records. A checked result opens only after every dependency record

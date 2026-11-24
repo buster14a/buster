@@ -93,7 +93,7 @@ static bool unwind_tier0_test_keeps_rbp(const Tier0Code* code)
     {
         uint64_t reads = 0;
         uint64_t writes = 0;
-        x86_instruction_effects_scalar(&code->records[r], &reads, &writes);
+        x86_instructions_effects(&code->records[r], 1, &reads, &writes);
         keeps = (writes & BUSTER_X86_RESOURCE_GPR(X86_REGISTER_RBP)) == 0;
     }
     return keeps;
