@@ -6230,6 +6230,7 @@ static uint32_t check_common_next_op(const CheckGraph* graph, const CheckCommonO
 }
 
 #include "c_check_common_candidates.c"
+#include "c_check_common_reach_filter.c"
 
 // Standalone selection queries keep their direct operator scan. The unit's passes borrow the same immutable index
 // rather than rebuilding their operator masks at every consumer.
@@ -6276,9 +6277,10 @@ static void check_common_range_candidates(const CheckGraph* graph, const CheckSt
     }
 }
 
-// The other reach candidates, including comparisons when their signedness or an operand conversion needs a test.
+// The other reach candidates, including comparisons when their signedness or an operand conversion needs a test. With a
+// filter (check_common_reach_keep), only those of each block that may have a bit of their own.
 static uint32_t check_common_next_reach_op(const CheckGraph* graph, const CheckStream* stream, const CheckCommonCandidates* candidates, bool sign_compare, bool atomic_access,
-                                           bool float_precision, bool edges, CheckCommonScan* scan)
+                                           bool float_precision, bool edges, const CheckCommonReachFilter* filter, CheckCommonScan* scan)
 {
     const uint32_t count = graph->count;
     const uint32_t blocks = candidates->blocks;
@@ -6337,6 +6339,10 @@ static uint32_t check_common_next_reach_op(const CheckGraph* graph, const CheckS
                             _mm512_mask_cmple_epu32_mask(numeric, arithmetic, _mm512_set1_epi32(CHECK_OP_DIVIDE - CHECK_OP_ADD)) |
                             _mm512_mask_cmple_epu32_mask(lanes, compound, _mm512_set1_epi32(CHECK_OP_DIVIDE_ASSIGN - CHECK_OP_ADD_ASSIGN)) |
                             _mm512_mask_cmpge_epu32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_SELECT)) | compares;
+            }
+            if (filter != NULL && selected != 0)
+            {
+                selected = check_common_reach_keep(filter, first, (__mmask16)selected);
             }
             scan->next = first + live;
             check_common_scan_list(scan, first, (__mmask16)selected);
@@ -13069,6 +13075,81 @@ static void check_common_region_evaluation(const CheckInput* input, const Parser
     }
 }
 
+// What a unit's audit of the reach scan's filter counts (CheckCommonReachAudit).
+typedef struct CheckCommonReachCounts CheckCommonReachCounts;
+struct CheckCommonReachCounts
+{
+    // The candidates the operators' classes list, those of them the filter keeps, those with a bit of their own reach or
+    // a self-assignment's mark, and those with one that the filter took out, the first of them `node`.
+    uint32_t candidates;
+    uint32_t kept;
+    uint32_t found;
+    uint32_t lost;
+    uint32_t node;
+    uint32_t op;
+    uint8_t bits;
+};
+
+// The nodes the filter keeps, a bit each, for the audit: the filtered scan's whole list. Null where scratch can't hold
+// them, which the audit reports as its failure.
+static const uint64_t* check_common_reach_audit_kept(const CheckGraph* graph, const CheckStream* stream, const CheckCommonCandidates* candidates,
+                                                     const CheckCommonEnabled* enabled, const CheckCommonReachFilter* filter, Arena* scratch)
+{
+    const uint32_t count = graph->count;
+    const uint64_t words = ((uint64_t)count + 63) / 64;
+    uint64_t* kept = CHECK_COMMON_PUSH_ARRAY(scratch, uint64_t, words);
+    if (kept != NULL)
+    {
+        memset(kept, 0, words * sizeof(uint64_t));
+        const bool edges = enabled->promotion || enabled->int_float || enabled->const_int_float;
+        CheckCommonScan scan = { 0 };
+        for (uint32_t node = check_common_next_reach_op(graph, stream, candidates, enabled->sign_compare, enabled->atomic_access, enabled->float_precision, edges, filter, &scan);
+             node < count;
+             node = check_common_next_reach_op(graph, stream, candidates, enabled->sign_compare, enabled->atomic_access, enabled->float_precision, edges, filter, &scan))
+        {
+            kept[node >> 6] |= UINT64_C(1) << (node & 63);
+        }
+    }
+    return kept;
+}
+
+// One candidate's audit: counted, and remembered where the filter took it out although it has `bits` or is marked.
+static void check_common_reach_audit_node(const CheckGraph* graph, const uint64_t* kept, uint32_t node, uint8_t bits, bool self_assign, CheckCommonReachCounts* counts)
+{
+    const bool keeps = (kept[node >> 6] & (UINT64_C(1) << (node & 63))) != 0;
+    const bool found = bits != 0 || self_assign;
+    if (found && !keeps && counts->lost == 0)
+    {
+        counts->node = node;
+        counts->op = (uint32_t)graph->ops[node];
+        counts->bits = bits;
+    }
+    counts->candidates += 1;
+    counts->kept += keeps;
+    counts->found += found;
+    counts->lost += found && !keeps;
+}
+
+// The audit's verdict for a unit: false, with the first node lost on stderr, where the filter took out a node with a bit,
+// or where the audit couldn't run although the filter applied. The unit's counts go to the audit's file where it names
+// one (`applies`: whether the filter applied to the unit at all).
+static bool check_common_reach_audit_report(bool applies, bool audited, const CheckCommonReachCounts* counts)
+{
+    const bool result = (audited || !applies) && counts->lost == 0;
+    if (counts->lost != 0)
+    {
+        fprintf(stderr, "reach filter audit: %u nodes with a bit were taken out, the first node %u, operator %u, bits 0x%02x\n", counts->lost, counts->node, counts->op,
+                counts->bits);
+    }
+    FILE* file = check_common_reach_audit.path != NULL && check_common_reach_audit.path[0] == '/' ? fopen(check_common_reach_audit.path, "a") : NULL;
+    if (file != NULL)
+    {
+        fprintf(file, "applies=%u candidates=%u kept=%u found=%u lost=%u\n", applies ? 1u : 0u, counts->candidates, counts->kept, counts->found, counts->lost);
+        fclose(file);
+    }
+    return result;
+}
+
 // The graph's facts (CheckCommonFacts) into `facts`: each node's parent, whether its value is used (where -Wuninitialized
 // reads it) and its reach, then which nodes are evaluated. Where the graph is a tree in graph order
 // (check_common_facts_tree), only the nodes that may have a bit of their own reach are visited, each bit carried up to the
@@ -13089,6 +13170,7 @@ static bool check_common_facts(const CheckInput* input, const CheckStream* strea
     uint8_t* reach = count != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, count) : NULL;
     uint64_t* self_assigns = count != 0 && enabled->self_assign ? CHECK_COMMON_PUSH_ARRAY(scratch, uint64_t, ((uint64_t)count + 63) / 64) : NULL;
     uint8_t* evaluated = NULL;
+    bool filtered = true;
     const bool allocated = parents != NULL && roots != NULL && (used != NULL || !enabled->uninitialized) && reach != NULL &&
                            (self_assigns != NULL || !enabled->self_assign || count == 0);
     if (allocated && self_assigns != NULL)
@@ -13108,16 +13190,29 @@ static bool check_common_facts(const CheckInput* input, const CheckStream* strea
         {
             check_common_range_candidates(graph, stream, types, parents, reach, candidates);
         }
-        CheckCommonScan owners = { 0 };
         const bool edges = enabled->promotion || enabled->int_float || enabled->const_int_float;
-        for (uint32_t node = check_common_next_reach_op(graph, stream, candidates, enabled->sign_compare, enabled->atomic_access, enabled->float_precision, edges, &owners);
+        // The candidates that may have a bit (check_common_reach_keep), where the filter applies; a test's audit lists
+        // them all and asks each one the filter took out.
+        CheckCommonReachFilter filter = { 0 };
+        filtered = check_common_reach_filter_build(graph, stream, types, enabled, scratch, &filter);
+        const CheckCommonReachFilter* keep = filtered && filter.traits != NULL ? &filter : NULL;
+        const uint64_t* audited = keep != NULL && check_common_reach_audit.enabled ? check_common_reach_audit_kept(graph, stream, candidates, enabled, keep, scratch) : NULL;
+        CheckCommonReachCounts counts = { 0 };
+        CheckCommonScan owners = { 0 };
+        const CheckCommonReachFilter* listed = audited != NULL ? NULL : keep;
+        for (uint32_t node = check_common_next_reach_op(graph, stream, candidates, enabled->sign_compare, enabled->atomic_access, enabled->float_precision, edges, listed, &owners);
              node < count;
-             node = check_common_next_reach_op(graph, stream, candidates, enabled->sign_compare, enabled->atomic_access, enabled->float_precision, edges, &owners))
+             node = check_common_next_reach_op(graph, stream, candidates, enabled->sign_compare, enabled->atomic_access, enabled->float_precision, edges, listed, &owners))
         {
             uint8_t bits = check_common_own_reach(parser, graph, stream, types, node, &own);
-            if (self_assigns != NULL && check_common_self_assign_candidate(graph, node))
+            const bool self_assign = self_assigns != NULL && check_common_self_assign_candidate(graph, node);
+            if (self_assign)
             {
                 self_assigns[node >> 6] |= UINT64_C(1) << (node & 63);
+            }
+            if (audited != NULL)
+            {
+                check_common_reach_audit_node(graph, audited, node, bits, self_assign, &counts);
             }
             for (uint32_t at = node; bits != 0 && at < count; at = parents[at])
             {
@@ -13125,8 +13220,12 @@ static bool check_common_facts(const CheckInput* input, const CheckStream* strea
                 reach[at] |= bits;
             }
         }
+        if (check_common_reach_audit.enabled)
+        {
+            filtered = filtered && check_common_reach_audit_report(keep != NULL, audited != NULL, &counts);
+        }
         check_common_assertion_reach(graph, stream, reach);
-        evaluated = check_common_evaluated_tree(graph, stream, types, parser, program, roots, candidates, scratch);
+        evaluated = filtered ? check_common_evaluated_tree(graph, stream, types, parser, program, roots, candidates, scratch) : NULL;
     }
     else if (allocated)
     {
@@ -14876,6 +14975,8 @@ static void check_driver_common_warnings(const Parser* parser, Preprocessor* pp,
     {
         return;
     }
+    const char* audit = getenv("BUSTER_TEST_COMMON_REACH_AUDIT");
+    check_common_reach_audit = (CheckCommonReachAudit){ .path = audit, .enabled = audit != NULL };
     const char* fail_at = getenv("BUSTER_TEST_COMMON_WARNING_FAIL_AT");
     check_common_resources.fail_at = fail_at != NULL ? (uint32_t)strtoul(fail_at, NULL, 10) : UINT32_MAX;
     check_common_resources.pushes = 0;

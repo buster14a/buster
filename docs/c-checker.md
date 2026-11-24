@@ -7590,6 +7590,62 @@ and unevaluated scans with their definitions at every length to 300. The tree
 tests also compare the root bitmap with an independent edge walk on valid and
 rejected trees and verify cached and uncached root enumeration.
 
+The reach scan lists its candidates by operator, and most of them have no bit:
+on the frozen sqlite3.c, 78,286 nodes for 2,292. A filter
+(`c_check_common_reach_filter.c`, #1340) takes out of each block of 16
+candidates those whose bits can only be zero, before they are listed, so that
+`check_common_own_reach`, still the one implementation of a node's bits,
+visits 7,646. What the filter gives is a necessary condition of each family
+of that test, read off its code (the derivations are at
+`check_common_reach_keep`):
+
+- a trait byte a node, made 64 nodes at a time from its operator and constant
+  kind (an integer, floating or address constant; a conditional or a comma; a
+  `<<` or an implicit conversion; a selection; a cast; a leaf), which the
+  families gather at their operands;
+- a class byte a type, a byte permute of the type table's kinds (floating or
+  complex, enumeration, array, `nullptr_t`; a wrapper has every class);
+- an assignment's, an initialization's or a conversion's source is a
+  constant, a conditional, a comma, a `<<`, a conversion or a selection, or
+  its target is an enumeration's; an integer constant converted between
+  builtin integer types to one at least as wide is taken out, unless the
+  assignment stores to a bit-field;
+- a call has an argument slot that asks the same, against its parameter's
+  type and that type's default promotion: the slots are marked in one flat
+  pass and counted, and a call looks its slice up;
+- a subscript has a constant index and an array base; a truth context a
+  floating constant, a `<<`, a conditional, a conversion or a selection
+  operand; a division a constant, cast, converted or const object's divisor; a
+  dereference a constant, cast or converted operand or one of `nullptr_t`'s
+  type;
+- a conversion edge (`-Wimplicit-const-int-float-conversion`) needs a
+  constant, conditional, comma or selection operand whose target, in the
+  node's row of conversions, is a floating type's: only the nodes with such
+  an operand have their rows read.
+
+An operator without a derivation is kept. The options the exact test reads
+take their families' conditions away: `-Wsign-compare` keeps every comparison,
+`-Wimplicit-float-conversion` every assignment, initialization, conversion,
+compound assignment and call, and under `-Wdouble-promotion` or
+`-Wimplicit-int-float-conversion` the scan lists every candidate, as it does
+for a stream of whole values and in the fallback.
+
+A node wrongly taken out would lose a warning, so the filter has three checks.
+`test-checker-driver` (alone: `--reach-filter-only`, which prints its counts
+by operator) generates graphs and streams whose columns end at `PROT_NONE`
+pages and asserts, under each of the 256 sets of the options, that no node the
+filter takes out has a bit of its own reach, and that every family's
+operators have nodes with a bit and nodes taken out. The test hook
+`BUSTER_TEST_COMMON_REACH_AUDIT`, read once a unit in every build as
+`BUSTER_TEST_COMMON_WARNING_FAIL_AT` is, makes the facts list every candidate
+as before the filter, ask `check_common_own_reach` of each, and fail the unit
+(`common warning capacity exhausted`, after a line on stderr naming the first
+node) where one the filter took out has a bit; where it names an absolute
+path, each unit appends its counts to that file. The warning sweeps
+(`check_test_driver_warning_fixtures_dealt`) compile every default-warning
+fixture once more under it, with the fixture's own options, and expect the
+plain run's status and diagnostics.
+
 The expression walk starts at roots that reach a candidate or discard a value
 that may warn. The comparison pass uses the shared operator masks.
 `-Wsign-compare` takes every comparison. When it is off and

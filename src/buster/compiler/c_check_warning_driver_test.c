@@ -161,6 +161,21 @@ static void check_test_driver_warning_fixtures_dealt(CheckTest* test, const char
                                     status, oracle, actual != NULL ? actual : "<no output>\n", expected);
                             mismatch_printed = true;
                         }
+                        if (policy == 0 && lane == 0 && route == 0)
+                        {
+                            // The reach filter's audit (#1340, BUSTER_TEST_COMMON_REACH_AUDIT) on the fixture, under its own
+                            // options: the unit fails where a node the filter took out has a bit of its own reach.
+                            char* audited = NULL;
+                            arguments[7] = objects[2];
+                            unlink(objects[2]);
+                            const int audit = setenv("BUSTER_TEST_COMMON_REACH_AUDIT", "1", 1) == 0 ? check_test_driver_spawn(arguments, &audited) : -1;
+                            unsetenv("BUSTER_TEST_COMMON_REACH_AUDIT");
+                            unlink(objects[2]);
+                            arguments[7] = objects[route];
+                            snprintf(description, sizeof(description), "%s mode=%u: the reach filter takes out no node with a bit", fixture->name, mode);
+                            check_test_expect(test, audit == status && audited != NULL && actual != NULL && strcmp(audited, actual) == 0, description);
+                            free(audited);
+                        }
                         if (preserve)
                         {
                             FILE* retained = fopen(objects[route], "rb");
