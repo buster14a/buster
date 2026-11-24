@@ -11016,7 +11016,7 @@ static void check_driver_object_release(CheckDriverCode* state, CheckProgramLane
 // the static data, the sections, the debug information and the object, or the kept link.
 static bool check_driver_object_finish(CheckDriverCode* state, const CheckProgram* program, const CheckDataPrepared* data, const Parser* parser,
                                        Preprocessor* pp, TypeTable* types, const char* source_path, const char* output_path,
-                                       bool scalar, bool dump_static, bool debug, CheckProgramLanes* lanes, Arena* scratch,
+                                       bool dump_static, bool debug, CheckProgramLanes* lanes, Arena* scratch,
                                        CheckClock* stage_clock, FILE* errors, CheckUnitsKept* kept, bool foreign, bool* fatal)
 {
     // The link adds pragma alias names through &state->output. DWARF and section descriptors must advance the same arena.
@@ -11048,7 +11048,7 @@ static bool check_driver_object_finish(CheckDriverCode* state, const CheckProgra
     check_clock_mark(stage_clock, CHECK_STAGE_PUBLISH_DATA);
     if (valid && debug)
     {
-        valid = check_debug_build(&dwarf, program, &rows, parser, pp, BUSTER_SCALAR_PATH(scalar), &state->output, scratch);
+        valid = check_debug_build(&dwarf, program, &rows, parser, pp, &state->output, scratch);
         if (!valid)
         {
             fprintf(errors, "error: can't make the debug information: no memory, or a source name or file name DWARF can't hold\n");
@@ -11131,7 +11131,7 @@ static bool check_driver_object(const CheckProgram* program, const CheckDataPrep
 {
     CheckDriverCode state;
     check_driver_object_code(&state, program, data->capacity, parser, pp, scalar, verify, debug, unwind, lanes, scratch, stage_clock, kept, foreign);
-    return check_driver_object_finish(&state, program, data, parser, pp, types, source_path, output_path, scalar, dump_static, debug, lanes, scratch, stage_clock,
+    return check_driver_object_finish(&state, program, data, parser, pp, types, source_path, output_path, dump_static, debug, lanes, scratch, stage_clock,
                                       errors, kept, foreign, fatal);
 }
 
@@ -11690,11 +11690,10 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
             arena_report_failure(stderr, "linking", UINT64_C(1) << 36);
         }
         check_clock_mark(stage_clock, CHECK_STAGE_RUNTIME);
-        // The units' links merged report their own failures (check_units_merge), but binding's: on the units' lanes by the
-        // vector path (#778), a round of their flow on those the worker budget gives (#905), and by its twin on one lane
-        // or the scalar path.
+        // The units' links merged report their own failures (check_units_merge), but binding's: on the units' lanes (#778),
+        // a round of their flow on those the worker budget gives (#905), and on one lane where there is one.
         WorkerBudgetLease merge_lease = { .control = -1, .reply = -1, .child = -1 };
-        const uint32_t merge_lanes = valid && units != NULL && lanes->units_flow != NULL && lanes->lanes > 1 && !BUSTER_SCALAR_PATH(scalar) ?
+        const uint32_t merge_lanes = valid && units != NULL && lanes->units_flow != NULL && lanes->lanes > 1 ?
                                          check_units_slots(lanes->budget, lanes->lanes, &merge_lease) : 1;
         const bool emitted = !valid || (merge_lanes > 1   ? check_units_merge_lanes(&code.link, units, unit_count, &binding, debug ? &dwarf.attach : NULL, &output, &bytes,
                                                                                     scratch, merge_lanes, lanes->units_flow, &merge_lease) :
@@ -11742,7 +11741,7 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
         // The units' DWARF is in the merge's (check_units_merge_debug).
         if (valid && debug && units == NULL)
         {
-            valid = check_debug_build(&dwarf, program, &rows, parser, pp, BUSTER_SCALAR_PATH(scalar), &output, scratch);
+            valid = check_debug_build(&dwarf, program, &rows, parser, pp, &output, scratch);
             if (!valid)
             {
                 fprintf(stderr, "error: can't make the debug information: no memory, or a source name or file name DWARF can't hold\n");
@@ -11819,7 +11818,7 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
         if (valid)
         {
             // Several units' bound link is checked on their lanes (#778).
-            const LinkError checked = check_driver_link_check(&code.link, lanes, units != NULL && !BUSTER_SCALAR_PATH(scalar) ? lanes->lanes : 1);
+            const LinkError checked = check_driver_link_check(&code.link, lanes, units != NULL ? lanes->lanes : 1);
             valid = checked == LINK_ERROR_NONE;
             if (valid && runtime_kind == RUNTIME_KIND_STATIC)
             {
@@ -14621,7 +14620,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                             {
                                 windowed = object_path == 0;
                                 result = object_path != 0 && check_driver_object_finish(&windowed_code, &provisional.program, &selected.data, checking, pp, &types, path,
-                                                                                         object_path, scalar, dump_static, source_rows, lanes, scratch, stage_clock,
+                                                                                         object_path, dump_static, source_rows, lanes, scratch, stage_clock,
                                                                                          errors, kept, command->mixed_inputs, &driver_fatal) ? 0 : 1;
                             }
                             else

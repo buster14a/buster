@@ -3,15 +3,15 @@
 //
 // Source rows for compiled C code's DWARF (#395): where each typed entry's code starts, after branch sizing, and the
 // presumed line of its source token, which debug.c writes as each function's line program. Three passes, each a vector
-// path with an exact twin, which --scalar takes:
+// path; the first two leave what it can't take to an exact path:
 //
-// 1. Raw rows, in check_program_emit (check_debug_rows, twin check_debug_rows_scalar): entry e's first record's offset
+// 1. Raw rows, in check_program_emit (check_debug_rows; check_debug_rows_scalar for an origin column): entry e's first record's offset
 //    (Tier0Code.entry_records, through branch sizing's offsets) and its token (CheckProgramLowered.entry_tokens), kept
 //    where entry e + 1's offset differs: an entry fused into its consumer starts no code of its own, so the last entry at
 //    an offset is the one whose code starts there. Before them a row at offset 0 with the declaration's token, the
 //    prologue's, unless the first entry's code starts there; after them the epilogue's, with the closing brace's. 16
 //    entries at a time: a gather of their offsets, the next entry's by a lane shift, a compare and a compress.
-// 2. Lines, in the driver (check_debug_lines, twin check_debug_line_scalar): a row's token's presumed file and line as a
+// 2. Lines, in the driver (check_debug_lines; check_debug_line_scalar for the rows its span can't take): a row's token's presumed file and line as a
 //    debugger shows its code: where its outermost macro expansion was invoked, or where it was written, after #line, as
 //    the diagnostics place it (check_lazy_expansion_location, pp_line_of and the range's #line in force, which
 //    pp_presumed scans for and check_debug_source indexes by range). A function's rows come from the tokens between its
@@ -20,7 +20,7 @@
 //    its history run, its macro chain and its line by searches 16 rows at a time over just the function's runs and
 //    lines. The rest (a file the body includes, a #line inside it, a chain longer than BUSTER_CHECK_DEBUG_WALK) take the
 //    exact path, row by row.
-// 3. The rows kept (check_debug_keep, twin check_debug_keep_scalar): those in the function's file (debug.c's line
+// 3. The rows kept (check_debug_keep): those in the function's file (debug.c's line
 //    sequence has one) whose line differs from the kept row before's, and the row where the body starts, whatever its
 //    line, which the unit marks (DebugFunction.prologue_end) for a debugger's breakpoint on the function.
 //
@@ -567,14 +567,14 @@ static __m512i check_debug_indexed_count(const uint64_t* bits, const uint32_t* b
 }
 
 // The file keys and lines of `count` rows' tokens of the function whose declaration and closing brace are `declaration`
-// and `closing`: the rows inside its span 16 at a time, the rest (and every row, `exact`) by check_debug_line_scalar.
+// and `closing`: the rows inside its span 16 at a time, the rest by check_debug_line_scalar.
 static void check_debug_lines(const CheckDebugSource* source, uint32_t declaration, uint32_t closing, const uint32_t* tokens, uint32_t count, uint32_t* keys,
-                              uint32_t* lines, bool exact)
+                              uint32_t* lines)
 {
     const Preprocessor* pp = source->pp;
     const Parser* parser = source->parser;
     CheckDebugSpan span = { 0 };
-    const bool spanned = !exact && check_debug_span(source, declaration, closing, &span);
+    const bool spanned = check_debug_span(source, declaration, closing, &span);
     const __m512i zero = _mm512_setzero_si512();
     const __m512i one = _mm512_set1_epi32(1);
     for (uint32_t i = 0; i < count; i += spanned ? 16 : 1)
@@ -647,28 +647,8 @@ static void check_debug_lines(const CheckDebugSource* source, uint32_t declarati
 // (debug.c's limit) and whose file or line differs from the kept row before's, or that is at `body`, the body's start,
 // into kept_offsets, kept_lines and kept_keys (room for `count`, and the slack). Returns how many. A row in another file
 // than its function's is an expanded callee's (#2541), or a body's across an #include or a named #line.
-static uint32_t check_debug_keep_scalar(const uint32_t* offsets, const uint32_t* keys, const uint32_t* lines, uint32_t count, uint32_t body,
-                                        uint32_t* kept_offsets, uint32_t* kept_lines, uint32_t* kept_keys)
-{
-    uint32_t kept = 0;
-    uint32_t previous = UINT32_MAX;
-    uint32_t previous_key = BUSTER_CHECK_DEBUG_NO_FILE;
-    for (uint32_t i = 0; i < count; i += 1)
-    {
-        const bool keep = keys[i] != BUSTER_CHECK_DEBUG_NO_FILE && lines[i] <= INT32_MAX && (lines[i] != previous || keys[i] != previous_key || offsets[i] == body);
-        kept_offsets[kept] = offsets[i];
-        kept_lines[kept] = lines[i];
-        kept_keys[kept] = keys[i];
-        previous = keep ? lines[i] : previous;
-        previous_key = keep ? keys[i] : previous_key;
-        kept += keep ? 1 : 0;
-    }
-    return kept;
-}
-
-// The same, 16 rows at a time: the rows in a file compressed together, each kept where its file or line differs from
-// the one before it there (the block before's last for the first) or it is at the body's start, then compressed again.
-// check_debug_keep_scalar's twin.
+// 16 rows at a time: the rows in a file compressed together, each kept where its file or line differs from the one
+// before it there (the block before's last for the first) or it is at the body's start, then compressed again.
 static uint32_t check_debug_keep(const uint32_t* offsets, const uint32_t* keys, const uint32_t* lines, uint32_t count, uint32_t body, uint32_t* kept_offsets,
                                  uint32_t* kept_lines, uint32_t* kept_keys)
 {
@@ -748,7 +728,7 @@ static uint32_t check_debug_file(const Preprocessor* pp, uint32_t key, String8* 
 // attachments written into `arena`, which must last through executable_write or object_build. False when memory runs out
 // or debug.c refuses the unit (a name or a file debug.c can't write).
 static bool check_debug_build(CheckDebug* debug, const CheckProgram* program, const CheckProgramRows* rows, const Parser* parser, Preprocessor* pp,
-                              bool exact, Arena* arena, Arena* scratch)
+                              Arena* arena, Arena* scratch)
 {
     *debug = (CheckDebug){ .raw_rows = rows->count };
     const uint64_t mark = arena->length;
@@ -791,7 +771,7 @@ static bool check_debug_build(CheckDebug* debug, const CheckProgram* program, co
         // A dead body (CheckProgramRows.dead) has no rows; its name, file and line are its abstract instance's.
         const bool code = dead == NULL || dead[b] == 0;
         const uint32_t raw_count = code ? rows->counts[b] : 0;
-        check_debug_lines(&source, body->declaration, closing, rows->tokens + first, raw_count, keys + first, lines + first, exact);
+        check_debug_lines(&source, body->declaration, closing, rows->tokens + first, raw_count, keys + first, lines + first);
         uint32_t key = BUSTER_CHECK_DEBUG_NO_FILE;
         uint32_t line = 0;
         check_debug_line_scalar(&source, body->declaration, &key, &line);
@@ -811,10 +791,8 @@ static bool check_debug_build(CheckDebug* debug, const CheckProgram* program, co
             instance->call_line = instance->described ? call_line : 0;
         }
         const uint32_t start = rows->bodies[b];
-        const uint32_t row_count = exact ? check_debug_keep_scalar(rows->offsets + first, keys + first, lines + first, raw_count, start, kept_offsets + kept, kept_lines + kept,
-                                                                   kept_keys + kept) :
-                                           check_debug_keep(rows->offsets + first, keys + first, lines + first, raw_count, start, kept_offsets + kept, kept_lines + kept,
-                                                            kept_keys + kept);
+        const uint32_t row_count = check_debug_keep(rows->offsets + first, keys + first, lines + first, raw_count, start, kept_offsets + kept, kept_lines + kept,
+                                                    kept_keys + kept);
         for (uint32_t r = kept; r < kept + row_count; r += 1)
         {
             kept_files[r] = check_debug_file(pp, kept_keys[r], files, &file_count, by_file, by_directive);

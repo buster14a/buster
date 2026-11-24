@@ -54,7 +54,7 @@
 //   And the refusal of two units of one object's name in a child whose stack was filled with a mapping's address first
 //   (check_units_test_poison): it must exit with status 1 and its message, as with a clean stack, where a local the
 //   driver read before setting it would release an arena of that address and unmap the child's code.
-// - The merge on lanes (#778) against its twin, which one lane and the scalar path run: four units that define three
+// - The merge on lanes (#778) against one lane's merge (check_units_merge): four units that define three
 //   names twice, by --lanes 1, 2 and 8 and by the scalar path, refused with the same standard error, which names the
 //   first duplicate in the units' order (beta, which d3.c defines again, though alpha's first definition comes first)
 //   and the first definition's unit; and units of a pointer whose addend doesn't fit 32 bits (a wide addend) and of no
@@ -1206,7 +1206,7 @@ static void check_units_test_merge(CheckUnitsTestTally* tally, const char* execu
         written = parse_test_write(path, texts[f], strlen(texts[f]));
     }
     check_units_test_expect(tally, written, "write the merge's units", merge_directory);
-    // Each command's options before its units: one lane and the scalar path run the twin, the others the merge on lanes.
+    // Each command's options before its units: one lane runs check_units_merge, the others (the scalar path's too) the merge on lanes.
     static const char* const options[][5] = {
         { "--lanes", "1", NULL },
         { "--lanes", "2", NULL },
