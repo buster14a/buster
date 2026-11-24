@@ -2454,21 +2454,10 @@ survey of those passes, what it measured and its gates.
   other calls, those whose callee is no plain function's leaf in the block
   or the block before. The sweep lists the ones the kernel placed, and each
   is asked its own fact a record at a time (`node_rows_summary_call`, the
-  flow's `check_program_return_call` by the callee's record's byte: a stop
-  where it is the leaf of a function declared noreturn, none where it is a
-  plain function's; for a pointer object's leaf a stop where its function
-  type is noreturn and none otherwise (#1393, `node_tests_window_returns`);
-  and an unknown for any other: a call through another value, or of a
-  library's name the flow leaves unknown). The flow reads a callee
-  through `*` and `&` to a function's name; C lists an expression that
-  calls `*f` or `&f` of one, so the window asks no such call. An
-  expression's fact is its calls' facts together, but where a call stops
-  and the expression has an `&&`, an `||` or a `?:`: that expression has
-  the flow's reduction over its records (`node_rows_summary_reduce`). In a
-  unit with a function the flow leaves unknown from a declaration on
-  (`check_program_return_unknowns`, made at the reader's start) no call is
-  plain: each is asked a record at a time, and a call of such a function
-  after that declaration is unknown.
+  flow's `check_program_return_call`). A declaration line records direct noreturn and analyzer
+  contracts. The callee record's function type carries GNU noreturn for calls through pointer
+  expressions. When a call stops and its expression contains `&&`, `||` or `?:`, the window
+  reduces the expression's records with `node_rows_summary_reduce`.
 - **A condition's truth and a constant's fold** are a summary node's
   value's to answer, with nothing in the side record.
   `check_program_branch_truth` knows a branch's condition's truth where the
@@ -2540,7 +2529,7 @@ with an arm that stops (in chunks one after another: the reduction's bytes
 of one chunk's records are the next's to clear) and a call that stops; and
 calls whose callee is before the block before. A
 second (`node_summary_test_unknowns_source`) is a unit with a function
-unknown from a declaration on. `node_summary_test_fixture` pins each count
+marked analyzer_noreturn on a later declaration. `node_summary_test_fixture` pins each count
 (`NodeSummaryExpected`), asks that no fact differ and that the switch keep
 none with the same tapes, and runs the control
 (`BUSTER_NODE_READER_WINDOW_SUMMARY_FAULT`): reader time keeps each

@@ -1625,6 +1625,24 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .source = "#pragma clang diagnostic ignored \"-Winvalid-noreturn\"\n_Noreturn void f(void){}\n",
     },
     {
+        .name = "freestanding exit returns",
+        .source = "void exit(int);int f(void){exit(0);}",
+        .options = { "-ffreestanding" },
+        .warnings = 1,
+    },
+    {
+        .name = "disabled library builtins return",
+        .source = "void abort(void);int f(void){abort();}",
+        .options = { "-fno-builtin" },
+        .warnings = 1,
+    },
+    {
+        .name = "only the disabled library builtin returns",
+        .source = "void exit(int);void abort(void);int f(void){exit(0);}int g(void){abort();}",
+        .options = { "-fno-builtin-exit" },
+        .warnings = 1,
+    },
+    {
         .name = "scalar return fall off after ordinary call",
         .source = "void g(void);int f(void){g();}\n",
         .warnings = 1,

@@ -1,7 +1,4 @@
-// #1393: a call through a function pointer object's name returns, as clang's CFG reads the callee's type, unless that
-// type is noreturn: GNU's noreturn on the object's declaration, or on the typedefs and typeofs its specifiers name. A
-// call through `*p`, a member, an element, a cast, a conditional or a comma stays unknown to the return flow for now (the
-// node machine's window can't answer its type yet, #2850): those here are the ones clang doesn't warn of either.
+// #1393: indirect calls follow the function type of the complete callee expression.
 _Noreturn void die(void);
 __attribute__((noreturn)) void die2(void);
 void die3(void) __attribute__((noreturn));
@@ -52,3 +49,21 @@ int c31(int x) { void (*local)(void) = fp; if (x) return 1; local(); }
 int c32(int x) { static NP st; if (x) return 1; st(); }
 int c33(int x) { if (x) return 1; (x ? die3 : die2)(); }
 int c35(int x) { if (x) return 1; (x ? &die2 : &die3)(); }
+
+int element(int x) { if (x) return 1; parr[x](); }
+int member(int x) { if (x) return 1; ps->cb(); }
+int cast_plain(int x) { if (x) return 1; ((P)np)(); }
+int deref(int x) { if (x) return 1; (*fp)(); }
+int decl_only(int x) { if (x) return 1; (x ? die : die)(); }
+int mixed(int x) { if (x) return 1; (x ? die2 : plain)(); }
+int mixed_reverse(int x) { if (x) return 1; (x ? plain : die2)(); }
+int comma(int x) { if (x) return 1; ((void)x, die)(); }
+int result(int x) { if (x) return 1; get()(); }
+NP get_nr(void);
+int nr_result(int x) { if (x) return 1; get_nr()(); }
+int branch(int x) { if (x) ps->ncb(); else ps->cb(); }
+[[noreturn]] void standard(void);
+[[gnu::noreturn]] void extension(void);
+int c23_direct(void) { standard(); }
+int c23_pointer(int x) { (x ? standard : standard)(); }
+int gnu_pointer(int x) { (x ? extension : extension)(); }

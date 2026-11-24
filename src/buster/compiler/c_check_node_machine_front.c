@@ -538,8 +538,7 @@ struct NodeFrontTypes
     // their count, and its root's return fact (BUSTER_CHECK_RETURN_STOPS and _UNKNOWN). The store is the references'
     // objects, followed only for a switch by its selector's TypeId. `summary_count` counts all words stored,
     // of `summary_capacity`; an expression it had no room for keeps none
-    // (`summary_unkept`). And the unit's functions the return flow leaves unknown from a declaration on
-    // (check_program_return_unknowns' table, by object; null where the unit has none).
+    // (`summary_unkept`).
     uint32_t* summary_firsts;
     uint16_t* summary_counts;
     uint8_t* summary_facts;
@@ -547,7 +546,6 @@ struct NodeFrontTypes
     uint64_t summary_count;
     uint64_t summary_capacity;
     uint64_t summary_unkept;
-    const uint32_t* return_unknowns;
     // The expressions C and X ran on (those T took), by their refusal; their entries; and the tapes the store had no
     // room for. With them `ticks` is of T, C and X together.
     uint64_t swept;

@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
-// Source return-warning facts for a structurally and semantically checked graph. Ordinary direct declarations return
-// unless their retained contract proves otherwise, and a call through an object's name unless its function type is
-// noreturn (#1393). Overloaded calls, library policy not retained here and other indirect callees remain conservative. These facts affect only the warning walk, never emission or graph validity.
+// Source return-warning facts for a checked graph. Calls use the callee's function type and
+// any source-visible declaration contract. These facts are local to the warning CFG.
 
 #define BUSTER_CHECK_RETURN_STOPS 1u
 #define BUSTER_CHECK_RETURN_UNKNOWN 2u
@@ -10,157 +9,56 @@
 // The shared callee resolver is defined with the target-feature consumer later in c_check_program.c. It reads the
 // call's checked designator/overload, not the program's later-populated object-to-declaration table.
 static uint32_t check_target_feature_noreturn_object(const CheckProgram* program, uint32_t node, uint32_t* name);
-static bool check_target_feature_intrinsic_noreturn(const CheckProgram* program, uint32_t node);
 
-// analyzer_noreturn is accepted source metadata but does not set FUNCTION_NORETURN. An ignored noreturn annotation
-// can also have reached the flag before its placement was refused. Retain their first declaration per entity so a
-// redeclaration cannot hide uncertainty, and a later annotation cannot change an earlier call. Allocate only when
-// needed; no type-based guess can distinguish qualified function pointers yet. Only a token with attributes can have
-// either, so the walk visits the attributes column's tokens in order (check_input_attributed_next: the vector path skips
-// 256 tokens without attributes a load, the scalar path, its twin, visits every group).
-static bool check_program_return_unknowns(const CheckProgram* program, Arena* scratch, uint32_t** first)
+static const BuiltinIntrinsicInfo* check_program_intrinsic_info(const CheckProgram* program, uint32_t node)
 {
     const CheckInput* input = program->input;
-    const uint32_t count = input->token_count;
-    bool ready = true;
-    *first = NULL;
-    for (uint32_t group = program->identifiers != NULL && check_sparse_wide_present(input->attributes) ? check_input_attributed_next(input->attributes, 0, count) : count; ready && group < count;
-         group = check_input_attributed_next(input->attributes, group + 16, count))
+    const uint32_t closing = input->graph.tokens[node];
+    const uint32_t id = input->intrinsic_ids != NULL && closing < input->token_count ? input->intrinsic_ids[closing] : 0;
+    const CheckInputIntrinsicCall* call = id != 0 && id <= input->intrinsic_call_count ? input->intrinsic_calls + id - 1 : NULL;
+    return call != NULL && call->declaration < input->intrinsic_declaration_count ? input->intrinsic_declarations[call->declaration].info : NULL;
+}
+
+// Read only the declaration visible at the call. The binder carries inherited contracts
+// onto compatible redeclarations, including a selected overload's own declaration.
+static bool check_program_return_declared(const CheckInput* input, const InternTable* names, uint32_t declaration)
+{
+    bool stops = input->function_flags != NULL && (input->function_flags[declaration] & CHECK_INPUT_FUNCTION_NORETURN) != 0;
+    const CheckInputAttributes* attributes = !stops && check_sparse_wide_present(input->attributes) ? check_input_attributes_at(input, declaration) : NULL;
+    for (uint32_t i = 0; !stops && attributes != NULL && i < attributes->count; i += 1)
     {
-        for (uint32_t lanes = check_input_attributed_group(input->attributes, group, count); ready && lanes != 0; lanes &= lanes - 1)
-        {
-            const uint32_t token = group + (uint32_t)__builtin_ctz(lanes);
-            const CheckInputAttributes* attributes = input->declaration_kinds[token] == C_BINDING_FUNCTION ? check_input_attributes_at(input, token) : NULL;
-            for (uint32_t a = 0; ready && attributes != NULL && a < attributes->count; a += 1)
-            {
-                const CheckInputAttribute* attribute = attributes->records + a;
-                const String8 name = check_input_attribute_spelling(program->identifiers, attribute->name);
-                const uint32_t object = input->objects[token];
-                const bool analyzer = !attribute->ignored && !attribute->subject_ignored && check_input_attribute_equal(name, "analyzer_noreturn");
-                const bool ignored = attribute->kind == CHECK_ATTRIBUTE_NORETURN && (attribute->ignored || attribute->subject_ignored);
-                const bool unknown = (analyzer || ignored) && object != 0 && object <= count;
-                if (unknown && *first == NULL)
-                {
-                    *first = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1);
-                    ready = *first != NULL;
-                    if (ready)
-                    {
-                        memset(*first, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
-                    }
-                }
-                if (ready && unknown && (*first)[object] == BUSTER_CHECK_NONE)
-                {
-                    (*first)[object] = token;
-                }
-            }
-        }
+        stops = check_input_analyzer_noreturn(names, attributes->records + i);
     }
-    return ready;
+    return stops;
 }
 
-// Library noreturn depends on builtin options and named typedef visibility. Those policies are not the declaration's
-// FUNCTION_NORETURN bit, so a call to a declaration named as a catalogue entry with the 'r' attribute stays unknown
-// rather than guessed from its name. The answer depends on the interned name alone (#1709).
-// The answer without the table below, and its definition: a search of the catalogue by name.
-static uint8_t check_program_return_library_search(const InternTable* identifiers, uint32_t name)
-{
-    const BuiltinIntrinsicInfo* info = builtin_intrinsic_lookup((const char*)intern_bytes(identifiers, name), intern_length(identifiers, name));
-    const bool unknown = info != NULL && memchr(info->attributes, 'r', info->attributes_length) != NULL;
-    return unknown ? BUSTER_CHECK_RETURN_UNKNOWN : 0;
-}
-
-// The catalogue's entries with the 'r' attribute, in its order. test-checker's return marks check that these are all
-// of them, so a regenerated catalogue that changes the set fails there.
-static const BuiltinIntrinsicName check_program_return_library_entries[] =
-{
-#define BUSTER_CHECK_RETURN_NAME(n) { n, sizeof(n) - 1 },
-    BUSTER_CHECK_RETURN_NAME("_Exit")
-    BUSTER_CHECK_RETURN_NAME("__builtin_abort")
-    BUSTER_CHECK_RETURN_NAME("__builtin_eh_return")
-    BUSTER_CHECK_RETURN_NAME("__builtin_longjmp")
-    BUSTER_CHECK_RETURN_NAME("__builtin_trap")
-    BUSTER_CHECK_RETURN_NAME("__builtin_unreachable")
-    BUSTER_CHECK_RETURN_NAME("__builtin_verbose_trap")
-    BUSTER_CHECK_RETURN_NAME("__fastfail")
-    BUSTER_CHECK_RETURN_NAME("__int2c")
-    BUSTER_CHECK_RETURN_NAME("__ud2")
-    BUSTER_CHECK_RETURN_NAME("_exit")
-    BUSTER_CHECK_RETURN_NAME("_longjmp")
-    BUSTER_CHECK_RETURN_NAME("abort")
-    BUSTER_CHECK_RETURN_NAME("exit")
-    BUSTER_CHECK_RETURN_NAME("longjmp")
-    BUSTER_CHECK_RETURN_NAME("siglongjmp")
-#undef BUSTER_CHECK_RETURN_NAME
-};
-
-// One byte per id of `identifiers`: BUSTER_CHECK_RETURN_UNKNOWN at the ids that spell an entry above, zero elsewhere,
-// so a call reads its answer instead of searching the catalogue. NULL if the scratch arena has no room; the calls then
-// search, with the same answers.
-static uint8_t* check_program_return_library_names(const InternTable* identifiers, Arena* scratch)
-{
-    const uint32_t count = identifiers != NULL ? identifiers->count : 0;
-    uint8_t* names = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, count) : NULL;
-    if (names != NULL)
-    {
-        memset(names, 0, count);
-        for (uint32_t e = 0; e < BUSTER_ARRAY_LENGTH(check_program_return_library_entries); e += 1)
-        {
-            const BuiltinIntrinsicName* entry = check_program_return_library_entries + e;
-            const IdentId name = intern_find(identifiers, (const uint8_t*)entry->name, entry->length);
-            names[name] = name != 0 && name < count ? BUSTER_CHECK_RETURN_UNKNOWN : names[name];
-        }
-    }
-    return names;
-}
-
-// A call through callee expression `node` that names no function (#1393): whether it returns (0), never does
-// (BUSTER_CHECK_RETURN_STOPS) or is unknown, as clang's CFG reads the callee's type's noreturn (CFGBuilder::VisitCallExpr,
-// getFunctionExtInfo of the callee's type). An object's name: GNU's noreturn on its declaration or the
-// typedefs and typeofs its specifiers name (check_input_fallthrough_noreturn_object), which the node machine's lines
-// answer the same (node_tests_window_returns). Any other callee (`*p`, a member, an element, a conditional, a comma, a
-// cast, a call's result) stays unknown, as the node machine's window can't answer its type yet (#2850): no warning clang
-// wouldn't give is given.
-static uint8_t check_program_return_indirect(const CheckProgram* program, uint32_t node, const uint32_t* unknowns)
-{
-    const CheckGraph* graph = &program->input->graph;
-    const CheckInput* input = program->input;
-    const Parser* parser = program->parser;
-    const uint32_t at = node;
-    const uint32_t token = at < graph->count && graph->ops[at] == CHECK_OP_VALUE ? graph->tokens[at] : BUSTER_CHECK_NONE;
-    const uint32_t declaration = token < input->token_count && input->declarations != NULL && parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER ?
-                                 input->declarations[token] : BUSTER_CHECK_NONE;
-    const bool object = declaration < input->token_count && input->declaration_kinds != NULL && input->declaration_kinds[declaration] == C_BINDING_OBJECT;
-    // (An object an analyzer_noreturn or an ignored noreturn leaves unknown from a declaration on, as a function.)
-    const uint32_t number = object ? check_stream_object(program->stream, at) : 0;
-    const bool known = object && (unknowns == NULL || number >= program->object_count || unknowns[number] >= token);
-    return !known ? BUSTER_CHECK_RETURN_UNKNOWN : check_input_fallthrough_noreturn_object(input, parser, declaration) ? BUSTER_CHECK_RETURN_STOPS : 0;
-}
-
-static uint8_t check_program_return_call(const CheckProgram* program, uint32_t node, const uint32_t* unknowns, const uint8_t* names)
+static uint8_t check_program_return_call(const CheckProgram* program, uint32_t node)
 {
     const CheckInput* input = program->input;
     const CheckStream* stream = program->stream;
-    uint8_t result = BUSTER_CHECK_RETURN_UNKNOWN;
+    const uint32_t callee = input->graph.operand0[node];
     const uint32_t overload = check_program_builtin_index(stream->overloads, stream->overload_count, sizeof(CheckOverloadEffect), node);
+    const CheckOverloadResult* selected = overload != BUSTER_CHECK_NONE ? &stream->overloads[overload].selected : NULL;
+    const TypeId type = selected != NULL ? selected->type : callee < input->graph.count ? check_stream_type(stream, callee) : 0;
     uint32_t use = BUSTER_CHECK_NONE;
-    const uint32_t object = overload == BUSTER_CHECK_NONE ? check_target_feature_noreturn_object(program, node, &use) : 0;
-    const uint32_t declaration = input->declarations != NULL && use < input->token_count ? input->declarations[use] : BUSTER_CHECK_NONE;
-    const bool direct = object != 0 && declaration < input->token_count && input->objects[declaration] == object &&
-                        input->declaration_kinds[declaration] == C_BINDING_FUNCTION && input->function_flags != NULL;
-    const bool known = direct && (unknowns == NULL || unknowns[object] >= use);
-    if (known && (input->function_flags[declaration] & CHECK_INPUT_FUNCTION_NORETURN) != 0)
+    const uint32_t object = selected != NULL ? selected->object : check_target_feature_noreturn_object(program, node, &use);
+    const uint32_t declaration = selected != NULL ? selected->declaration :
+                                 input->declarations != NULL && use < input->token_count ? input->declarations[use] : BUSTER_CHECK_NONE;
+    uint8_t result = 0;
+    if (type != 0 && type_callee_noreturn(program->types, type))
     {
         result = BUSTER_CHECK_RETURN_STOPS;
     }
-    else if (known && program->identifiers != NULL)
+    else if (object != 0)
     {
-        const uint32_t name = program->parser->tokens.names[declaration];
-        result = names != NULL && name < program->identifiers->count ? names[name] : check_program_return_library_search(program->identifiers, name);
+        const bool bound = declaration < input->token_count && input->objects != NULL && input->objects[declaration] == object &&
+                           input->function_flags != NULL && input->declaration_kinds != NULL && input->declaration_kinds[declaration] == C_BINDING_FUNCTION;
+        result = !bound ? BUSTER_CHECK_RETURN_UNKNOWN :
+                 check_program_return_declared(input, program->identifiers, declaration) ? BUSTER_CHECK_RETURN_STOPS : 0;
     }
-    else if (overload == BUSTER_CHECK_NONE && object == 0)
+    else if (type == 0)
     {
-        // No function is named: the callee's type decides (#1393).
-        result = check_program_return_indirect(program, program->input->graph.operand0[node], unknowns);
+        result = BUSTER_CHECK_RETURN_UNKNOWN;
     }
     return result;
 }
@@ -174,21 +72,37 @@ static uint8_t check_program_return_fact(const uint8_t* facts, uint32_t count, u
 // and a possible unknown control contract. Conditional operands retain only executable arms; an unknown condition
 // guarantees a stop only if both alternatives stop. An operand or argument that doesn't precede the node counts for
 // nothing.
-static uint8_t check_program_return_node(CheckProgram* program, const uint8_t* facts, uint32_t node, const uint32_t* unknowns, const uint8_t* names)
+static uint8_t check_program_return_node(CheckProgram* program, const uint8_t* facts, uint32_t node)
 {
     const CheckGraph* graph = &program->input->graph;
     const CheckStream* stream = program->stream;
     const CheckOp op = graph->ops[node];
-    uint8_t result = op == CHECK_OP_CALL ? check_program_return_call(program, node, unknowns, names) : 0;
+    uint8_t result = op == CHECK_OP_CALL ? check_program_return_call(program, node) : 0;
+    bool omit_arguments = false;
     if (op == CHECK_OP_BUILTIN_MISC)
     {
         const uint32_t index = check_program_builtin_index(stream->misc, stream->misc_count, sizeof(CheckBuiltinMiscEffect), node);
         result = index == BUSTER_CHECK_NONE || graph->members[node] == CBUILTIN_CALL_WITH_STATIC_CHAIN ? BUSTER_CHECK_RETURN_UNKNOWN :
                  stream->misc[index].terminates ? BUSTER_CHECK_RETURN_STOPS : 0;
     }
-    else if (op == CHECK_OP_BUILTIN_X86 && check_target_feature_intrinsic_noreturn(program, node))
+    else if (op == CHECK_OP_BUILTIN_X86)
     {
-        result = BUSTER_CHECK_RETURN_STOPS;
+        const BuiltinIntrinsicInfo* info = check_program_intrinsic_info(program, node);
+        if (info != NULL && memchr(info->attributes, 'r', info->attributes_length) != NULL)
+        {
+            result = BUSTER_CHECK_RETURN_STOPS;
+        }
+        else if (info != NULL && graph->argument_counts[node] == 1 &&
+                 (strcmp(info->name, "__builtin_assume") == 0 || strcmp(info->name, "__assume") == 0))
+        {
+            const uint32_t argument = graph->argument_nodes[graph->argument_offsets[node]];
+            bool truth = false;
+            omit_arguments = argument < node && (check_stream_flags(stream, argument) & BUSTER_CHECK_SIDE_EFFECT) != 0;
+            if (argument < node && !omit_arguments && check_program_runtime_truth(program, node, argument, &truth) && !truth)
+            {
+                result = BUSTER_CHECK_RETURN_STOPS;
+            }
+        }
     }
     const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
     const bool selection = op == CHECK_OP_CONDITIONAL || op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR;
@@ -233,25 +147,17 @@ static uint8_t check_program_return_node(CheckProgram* program, const uint8_t* f
         if (check_graph_has_arguments(op))
         {
             const uint32_t arguments = check_program_argument_mask(program, node);
-            const uint32_t floating = op == CHECK_OP_BUILTIN_FLOAT ?
-                                          check_program_builtin_index(stream->floating, stream->floating_count, sizeof(CheckBuiltinFloatEffect), node) :
-                                          BUSTER_CHECK_NONE;
-            const uint32_t definite = floating != BUSTER_CHECK_NONE ? stream->floating[floating].definite_operands : arguments;
-            // A query returns (#1393), as clang's CFG takes a builtin's call. __builtin_constant_p's operand is visited
-            // whatever its runtime plan, so a call in it that doesn't return ends the edge; the object size queries'
-            // operands are left out (VisitCallExpr's OmitArguments).
+            // Clang's warning CFG visits every fpclassify selector and constant_p's
+            // operand, even when runtime evaluation would skip them.
+            const bool classifier = op == CHECK_OP_BUILTIN_FLOAT && graph->members[node] == CBUILTIN_FPCLASSIFY;
             const bool constant = op == CHECK_OP_BUILTIN_QUERY && graph->members[node] == CBUILTIN_CONSTANT_P;
-            const bool omitted = op == CHECK_OP_BUILTIN_QUERY && !constant;
-            for (uint32_t a = 0; !omitted && a < graph->argument_counts[node]; a += 1)
+            omit_arguments |= op == CHECK_OP_BUILTIN_QUERY && !constant;
+            for (uint32_t a = 0; !omit_arguments && a < graph->argument_counts[node]; a += 1)
             {
                 const uint32_t argument = graph->argument_nodes[graph->argument_offsets[node] + a];
-                const bool all = op == CHECK_OP_CALL || op == CHECK_OP_BUILTIN_X86 || constant;
+                const bool all = op == CHECK_OP_CALL || op == CHECK_OP_BUILTIN_X86 || classifier || constant;
                 const bool evaluated = all || (a < 32 && (arguments & (1u << a)) != 0);
-                const bool guaranteed = all || (a < 32 && (definite & (1u << a)) != 0);
-                const uint8_t fact = evaluated ? check_program_return_fact(facts, node, argument) : 0;
-                // fpclassify's possible selector union is not an execution schedule. A stop in a conditional
-                // selector remains uncertain here; only a definitely evaluated operand can end this edge.
-                result |= guaranteed ? fact : fact != 0 ? BUSTER_CHECK_RETURN_UNKNOWN : 0;
+                result |= evaluated ? check_program_return_fact(facts, node, argument) : 0;
             }
         }
     }
@@ -265,8 +171,7 @@ static uint8_t check_program_return_node(CheckProgram* program, const uint8_t* f
 // precede it has none yet, which check_program_return_node reads as none too. The sources are 16 operators at a time,
 // whose bits each block's nodes then take. Every other node's facts are zero, as check_program_return_node would make
 // them.
-static void check_program_return_sparse(CheckProgram* program, uint8_t* facts, uint32_t first, uint32_t end,
-                                        const uint32_t* unknowns, const uint8_t* names, uint64_t* work)
+static void check_program_return_sparse(CheckProgram* program, uint8_t* facts, uint32_t first, uint32_t end, uint64_t* work)
 {
     const CheckGraph* graph = &program->input->graph;
     const uint32_t count = graph->count;
@@ -303,7 +208,7 @@ static void check_program_return_sparse(CheckProgram* program, uint8_t* facts, u
             }
             if (any != 0)
             {
-                facts[node] = check_program_return_node(program, facts, node, unknowns, names);
+                facts[node] = check_program_return_node(program, facts, node);
                 if (work != NULL)
                 {
                     *work += 1;
@@ -319,8 +224,6 @@ struct CheckReturnFacts
 {
     Arena storage;
     uint8_t* facts;
-    uint32_t* unknowns;
-    const uint8_t* names;
     uint64_t* work;
     uint32_t computed;
 };
@@ -329,14 +232,13 @@ static bool check_program_return_prepare(CheckProgram* program, CheckReturnFacts
 {
     const uint64_t bytes = (uint64_t)program->input->graph.count + 1;
     cache->facts = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, bytes);
-    if (cache->facts == NULL || !check_program_return_unknowns(program, scratch, &cache->unknowns))
+    if (cache->facts == NULL)
     {
         check_program_fail(program, CHECK_PROGRAM_RESOURCE, 0);
         return false;
     }
     // This includes a zero sink for absent operands, and zeroes for forward references the checked walk may read.
     memset(cache->facts, 0, bytes);
-    cache->names = check_program_return_library_names(program->identifiers, scratch);
     return true;
 }
 
@@ -349,7 +251,7 @@ static __attribute__((unused)) uint8_t* check_program_return_facts(CheckProgram*
     {
         return NULL;
     }
-    check_program_return_sparse(program, cache.facts, 0, count, cache.unknowns, cache.names, work);
+    check_program_return_sparse(program, cache.facts, 0, count, work);
     return cache.facts;
 }
 
@@ -367,9 +269,7 @@ static uint8_t check_program_return_cached(CheckProgram* program, CheckReturnFac
         if (cache->facts == NULL)
         {
             // Body windows reuse their scratch, so this cache owns its storage until check_program_finish.
-            const uint64_t names = program->identifiers != NULL ? program->identifiers->count : 0;
-            const uint64_t tokens = (uint64_t)program->input->token_count + 1;
-            const uint64_t bytes = (uint64_t)count + 1 + tokens * sizeof(uint32_t) + names + _Alignof(uint32_t);
+            const uint64_t bytes = (uint64_t)count + 1;
             cache->storage = arena_reserve(bytes);
             if (!check_program_return_prepare(program, cache, &cache->storage))
             {
@@ -378,7 +278,7 @@ static uint8_t check_program_return_cached(CheckProgram* program, CheckReturnFac
         }
         const uint32_t block = root & ~15u;
         const uint32_t end = count - block <= 16 ? count : block + 16;
-        check_program_return_sparse(program, cache->facts, cache->computed, end, cache->unknowns, cache->names, cache->work);
+        check_program_return_sparse(program, cache->facts, cache->computed, end, cache->work);
         cache->computed = end;
     }
     return cache->facts[root];

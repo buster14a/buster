@@ -6942,18 +6942,12 @@ reading on the 9700X. So was a form that took the n-th end mark for the n-th
 expression: a batch's expressions are in the walk's order, an `if`'s
 condition after its body's, and not in the window's.
 
-**The return fact.** The flow gives a call its own fact
-(`check_program_return_call`): none where its callee, through `*` and `&`,
-is the name of a function, a stop where that function is declared noreturn;
-for a call through a pointer object's name, a stop where its function type is
-noreturn and none otherwise (#1393); and an unknown for a call through any
-other value or of a library's name the flow leaves unknown. Facts go up the tree; an `&&`, an `||` or a `?:` keeps its
-condition's, an unknown of either arm, and a stop where both arms of a `?:`
-stop. On the window:
+**The return fact.** A call stops if its checked callee type carries GNU noreturn or the
+visible declaration identifies a terminating function (#1393). Ordinary calls return.
+The window combines these facts according to the operands that execute.
 
 - **A plain call has none.** A function's declaration's line has two bits,
-  made with the line: a plain function's (not noreturn, no such name), and a
-  noreturn one's. The tests' sweep copies a name's leaf's line's byte beside
+  made with the line to identify plain and terminating calls. The tests' sweep copies a name's leaf's line's byte beside
   the records' bytes, and the tests' loop, which has each record's first
   operand's place at hand, gives each block a mask of the calls whose callee
   is no plain function's leaf in the block or the block before.
@@ -6968,10 +6962,8 @@ stop. On the window:
   `?:`, the flow's own reduction runs over its records
   (`node_rows_summary_reduce`): no expression of the three corpora and 18 of
   the compiler's own source.
-- **A unit with a function unknown from a declaration on** (an
-  `analyzer_noreturn`, an ignored `noreturn`:
-  `check_program_return_unknowns`' table, made at the reader's start) has no
-  plain call: each is asked, with its use's place.
+- **A direct analyzer_noreturn call stops** where the visible declaration carries the
+  attribute. The binder copies it onto compatible redeclarations.
 
 **A condition's truth and a constant's fold** need nothing in the side
 record. The original side-facts measurement listed two cases where the
@@ -7243,8 +7235,7 @@ earlier experiment read the sweep with no objects written at all -0.09
 
 What stays a record at a time:
 
-- **A call asked** (`node_rows_summary_call`, a byte of its callee's and, in
-  a unit with a function unknown from a declaration on, a table's entry):
+- **A call asked** (`node_rows_summary_call`, the callee's line and checked type):
   255, 127 and 99 calls, one record in 1,261, 719 and 3,810 of those swept.
   With none asked that experiment reads -0.02 (-0.29 to -0.01) and -0.04
   (-0.05 to -0.03). A call that says a fact (an unknown in 250, 15 and 64

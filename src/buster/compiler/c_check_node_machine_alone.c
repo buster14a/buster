@@ -615,7 +615,6 @@ static NodeFrontTypes* node_alone_results(CheckInputReader* reader, const NodeFr
         types->object_facts = from->object_facts;
         types->object_count = from->object_count;
         types->object_symbols = from->object_symbols;
-        types->return_unknowns = from->return_unknowns;
     }
     return room ? types : NULL;
 }

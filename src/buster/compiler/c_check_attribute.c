@@ -1482,33 +1482,42 @@ static bool check_input_attribute_copy(CheckInputReader* reader, const CheckInpu
     return valid;
 }
 
-static uint32_t check_input_inherited_contract(const CheckInputAttribute* attribute)
+// Clang's CFG also stops at a direct call to a function declared analyzer_noreturn.
+static bool check_input_analyzer_noreturn(const InternTable* names, const CheckInputAttribute* attribute)
+{
+    return attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->ignored && !attribute->subject_ignored &&
+           check_input_attribute_equal(check_input_attribute_spelling(names, attribute->name), "analyzer_noreturn");
+}
+
+static uint32_t check_input_inherited_contract(const InternTable* names, const CheckInputAttribute* attribute)
 {
     const uint32_t bit = attribute->kind == CHECK_ATTRIBUTE_FORMAT ? 1u :
                          attribute->kind == CHECK_ATTRIBUTE_CONST ? 2u :
                          attribute->kind == CHECK_ATTRIBUTE_PURE ? 4u :
-                         attribute->kind == CHECK_ATTRIBUTE_WARN_UNUSED_RESULT ? 8u : 0u;
+                         attribute->kind == CHECK_ATTRIBUTE_WARN_UNUSED_RESULT ? 8u :
+                         check_input_analyzer_noreturn(names, attribute) ? 16u : 0u;
     const uint32_t result = !attribute->ignored && !attribute->subject_ignored ? bit : 0u;
     return result;
 }
 
-// A compatible visible function redeclaration keeps its predecessor's format and value-discard contracts. Copy only those
+// A compatible visible function redeclaration keeps its predecessor's format, value-discard and analyzer contracts. Copy only those
 // records into a new accumulator: neither the predecessor nor already published declaration metadata is mutable.
 static void check_input_contract_inherit(CheckInputReader* reader, uint32_t token, uint32_t previous)
 {
     // Binding-only clients can omit the optional attribute column entirely.
     const CheckInputAttributes* prior = check_sparse_wide_present(reader->output->attributes) ?
                                         check_input_attributes_at(reader->output, previous) : NULL;
+    const InternTable* names = reader->pp != NULL ? reader->pp->table : NULL;
     uint32_t inherit = 0;
     for (uint32_t i = 0; prior != NULL && i < prior->count; i += 1)
     {
-        inherit |= check_input_inherited_contract(prior->records + i);
+        inherit |= check_input_inherited_contract(names, prior->records + i);
     }
     const CheckInputAttributes* own = inherit ? check_input_attributes_at(reader->output, token) : NULL;
     uint32_t annotated = 0;
     for (uint32_t i = 0; own != NULL && i < own->count; i += 1)
     {
-        annotated |= check_input_inherited_contract(own->records + i);
+        annotated |= check_input_inherited_contract(names, own->records + i);
     }
     const uint32_t missing = inherit & ~annotated;
     if (missing != 0)
@@ -1523,7 +1532,7 @@ static void check_input_contract_inherit(CheckInputReader* reader, uint32_t toke
         for (uint32_t i = 0; valid && i < prior->count; i += 1)
         {
             const CheckInputAttribute* attribute = prior->records + i;
-            if ((check_input_inherited_contract(attribute) & missing) != 0)
+            if ((check_input_inherited_contract(names, attribute) & missing) != 0)
             {
                 valid = check_input_attribute_append(reader, copy, *attribute);
             }
@@ -6267,7 +6276,21 @@ static void check_input_attribute_conventions(CheckInputReader* reader, CheckInp
     }
 }
 
-// Calling conventions attach to the first function inside a completed declarator, through its pointer, array and
+// Whether a function's declaration holds GNU's noreturn attribute (`__attribute__((noreturn))`, `[[gnu::noreturn]]`),
+// which clang makes its type's: not the _Noreturn keyword, nor C23's `[[noreturn]]` or `[[_Noreturn]]`, its declaration's.
+static bool check_input_attribute_noreturn_type(const CheckInputAttributes* attributes)
+{
+    bool noreturn = false;
+    for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
+    {
+        const CheckInputAttribute* attribute = &attributes->records[i];
+        noreturn |= attribute->kind == CHECK_ATTRIBUTE_NORETURN && !attribute->ignored && !attribute->subject_ignored && !attribute->keyword &&
+                    (!attribute->standard || attribute->name_token != attribute->first);
+    }
+    return noreturn;
+}
+
+// Calling conventions and GNU noreturn attach to the first function inside a completed declarator, through its pointer, array and
 // aligned-typedef wrappers. Preserve all those wrappers and their qualifiers; attributes on a scalar subject are
 // warning-only ignored metadata. A prefix caller waits for the full declarator before invoking this helper.
 // Always inlined (#880), as profile-guided builds do; hot callers: check_input_declarator_step and
@@ -6282,7 +6305,8 @@ static inline __attribute__((always_inline)) TypeId check_input_attribute_abi_wi
     }
     const TypeFunctionABI abi = check_input_attribute_requested_abi(attributes);
     const bool requested = abi != TYPE_FUNCTION_ABI_INVALID;
-    if (type != 0 && requested && attributes->error == CHECK_ATTRIBUTE_ERROR_NONE)
+    const bool noreturn = check_input_attribute_noreturn_type(attributes);
+    if (type != 0 && (requested || noreturn) && attributes->error == CHECK_ATTRIBUTE_ERROR_NONE)
     {
         const uint64_t mark = reader->scratch->length;
         TypeId function = type;
@@ -6325,10 +6349,10 @@ static inline __attribute__((always_inline)) TypeId check_input_attribute_abi_wi
             const CheckInputAttributes merged = {
                 .calling_convention = check_input_convention_merge((CheckInputCallingConvention)previous_call, (CheckInputCallingConvention)requested_call),
             };
-            const TypeFunctionABI kept = compatible ? check_input_attribute_requested_abi(&merged) : abi;
+            const TypeFunctionABI kept = !requested ? previous : compatible ? check_input_attribute_requested_abi(&merged) : abi;
             result = compatible || replace_wrapped_abi ?
                      type_function_like(reader->types, type_return(reader->types, function), parameters, count,
-                                        reader->types->types.flags[type_index(function)] & BUSTER_TYPE_FLAG_KEY, kept, function) : 0;
+                                        (reader->types->types.flags[type_index(function)] & BUSTER_TYPE_FUNCTION_FLAGS) | (noreturn ? BUSTER_TYPE_FLAG_NORETURN : 0), kept, function) : 0;
             if (compatible || replace_wrapped_abi)
             {
                 result = check_input_type_result(reader, result);
@@ -6343,7 +6367,7 @@ static inline __attribute__((always_inline)) TypeId check_input_attribute_abi_wi
                          kind == BUSTER_TYPE_KIND_ARRAY ? type_array(reader->types, result, extent) :
                          kind == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY ? type_incomplete_array(reader->types, result) :
                          kind == BUSTER_TYPE_KIND_VARIABLE_ARRAY ? type_variable_array(reader->types, result, (uint32_t)extent) :
-                         type_aligned(reader->types, result, (uint32_t)extent);
+                         kind == BUSTER_TYPE_KIND_QUALIFIED ? type_extend(reader->types, result, (uint32_t)extent) : type_aligned(reader->types, result, (uint32_t)extent);
                 result = check_input_type_result(reader, result);
                 if (result != 0)
                 {
