@@ -3,6 +3,12 @@
 // Assembly section identities survive layout as one atom each. The optional writer descriptors preserve their
 // original names/flags/entry widths without changing the shared Link classes or the writer's default grouping.
 
+static uint64_t asm_section_hash(String8 name, uint32_t group, uint32_t linked_symbol, uint64_t unique)
+{
+    return link_hash((const uint8_t*)name.pointer, name.length) ^ (group * UINT64_C(0x9e3779b97f4a7c15)) ^
+           (linked_symbol * UINT64_C(0xc2b2ae3d27d4eb4f)) ^ (unique * UINT64_C(0x165667b19e3779f9));
+}
+
 static void asm_section_index(AsmParser* parser, uint32_t id)
 {
     if (parser->section_count * 2 > parser->section_mask + 1)
@@ -18,8 +24,8 @@ static void asm_section_index(AsmParser* parser, uint32_t id)
             memset(slots, 0, count * sizeof(uint32_t));
             for (uint32_t i = 1; i < parser->section_count; i += 1)
             {
-                const String8 name = parser->sections[i].object.name;
-                uint32_t slot = (link_hash((const uint8_t*)name.pointer, name.length) ^ ((uint64_t)parser->sections[i].group * UINT64_C(0x9e3779b97f4a7c15))) & (count - 1);
+                const AsmSection* section = &parser->sections[i];
+                uint32_t slot = asm_section_hash(section->object.name, section->group, section->linked_symbol, section->unique) & (count - 1);
                 while (slots[slot] != 0)
                 {
                     slot = (slot + 1) & (count - 1);
@@ -32,17 +38,17 @@ static void asm_section_index(AsmParser* parser, uint32_t id)
     }
     else
     {
-        const String8 name = parser->sections[id].object.name;
-        uint32_t slot = (link_hash((const uint8_t*)name.pointer, name.length) ^ ((uint64_t)parser->sections[id].group * UINT64_C(0x9e3779b97f4a7c15))) & parser->section_mask;
+        const AsmSection* section = &parser->sections[id];
+        uint32_t slot = asm_section_hash(section->object.name, section->group, section->linked_symbol, section->unique) & parser->section_mask;
         while (parser->section_slots[slot] != 0)
         {
             slot = (slot + 1) & parser->section_mask;
         }
         parser->section_slots[slot] = id;
     }
-    // Grouped sections may repeat a name. Record the ambiguity for section-name expressions. Ordinary assembly
+    // Grouped and linked-order sections may repeat a name. Record the ambiguity for section-name expressions. Ordinary assembly
     // pays no extra table allocation.
-    if (parser->result.error == 0 && parser->group_count != 0)
+    if (parser->result.error == 0 && (parser->section_name_slots != 0 || parser->group_count != 0 || parser->sections[id].linked_symbol != 0))
     {
         const bool rebuild = parser->section_name_slots == 0 || parser->section_name_mask != parser->section_mask;
         if (rebuild)
@@ -62,15 +68,19 @@ static void asm_section_index(AsmParser* parser, uint32_t id)
         const uint32_t end = rebuild ? parser->section_count : id + 1;
         for (uint32_t i = begin; parser->result.error == 0 && i < end; i += 1)
         {
-            const String8 name = parser->sections[i].object.name;
+            AsmSection* section = &parser->sections[i];
+            const String8 name = section->object.name;
+            section->name_binds_section = section->linked_symbol == 0;
             uint32_t slot = link_hash((const uint8_t*)name.pointer, name.length) & parser->section_name_mask;
             while (parser->section_name_slots[slot] != 0)
             {
-                const String8 old = parser->sections[parser->section_name_slots[slot]].object.name;
+                AsmSection* previous = &parser->sections[parser->section_name_slots[slot]];
+                const String8 old = previous->object.name;
                 if (old.length == name.length && memcmp(old.pointer, name.pointer, name.length) == 0)
                 {
-                    parser->sections[parser->section_name_slots[slot]].name_ambiguous = true;
-                    parser->sections[i].name_ambiguous = true;
+                    section->name_binds_section |= previous->name_binds_section;
+                    previous->name_ambiguous = true;
+                    section->name_ambiguous = true;
                     break;
                 }
                 slot = (slot + 1) & parser->section_name_mask;
@@ -99,6 +109,36 @@ static uint32_t asm_find_latest_section(const AsmParser* parser, String8 name)
         }
     }
     return result;
+}
+
+// Resolve only the pending intersections. A later ordinary definition or directive can still claim its name.
+static void asm_resolve_linked_section_names(AsmParser* parser)
+{
+    for (uint32_t i = parser->pending_names; i != 0 && parser->result.error == 0; i = parser->symbols[i].pending_name_next - 1)
+    {
+        AsmSymbol* symbol = &parser->symbols[i];
+        if (!symbol->defined && !symbol->section_attributes && symbol->common == 0 && symbol->view == 0)
+        {
+            const uint32_t id = asm_name_section(parser, symbol->name);
+            if (id != 0)
+            {
+                if (parser->sections[id].name_ambiguous)
+                {
+                    asm_fail(parser, symbol->location, "ambiguous section name in expression");
+                }
+                else
+                {
+                    symbol->section_start = true;
+                    symbol->section_index = id;
+                    symbol->flags = BUSTER_LINK_SYMBOL_LOCAL;
+                }
+            }
+            else if (symbol->section_only)
+            {
+                asm_fail(parser, symbol->location, "invalid symbol name");
+            }
+        }
+    }
 }
 
 static void asm_sections_initialize(AsmParser* parser)
@@ -141,19 +181,52 @@ static bool asm_section_prefix(String8 name, const char* prefix)
     return name.length >= length && memcmp(name.pointer, prefix, length) == 0;
 }
 
-static uint32_t asm_find_section(const AsmParser* parser, String8 name, uint32_t group)
+static uint32_t asm_find_section_variant(const AsmParser* parser, String8 name, uint32_t group, uint32_t linked_symbol, uint64_t unique)
 {
-    uint32_t slot = (link_hash((const uint8_t*)name.pointer, name.length) ^ ((uint64_t)group * UINT64_C(0x9e3779b97f4a7c15))) & parser->section_mask;
+    uint32_t slot = asm_section_hash(name, group, linked_symbol, unique) & parser->section_mask;
     uint32_t result = parser->section_slots[slot];
     while (result != 0)
     {
-        const String8 candidate = parser->sections[result].object.name;
-        if (parser->sections[result].group == group && candidate.length == name.length && memcmp(candidate.pointer, name.pointer, name.length) == 0)
+        const AsmSection* candidate = &parser->sections[result];
+        const String8 candidate_name = candidate->object.name;
+        if (candidate->group == group && candidate->linked_symbol == linked_symbol && candidate->unique == unique &&
+            candidate_name.length == name.length && memcmp(candidate_name.pointer, name.pointer, name.length) == 0)
         {
             break;
         }
         slot = (slot + 1) & parser->section_mask;
         result = parser->section_slots[slot];
+    }
+    return result;
+}
+
+static uint32_t asm_find_section(const AsmParser* parser, String8 name, uint32_t group)
+{
+    return asm_find_section_variant(parser, name, group, 0, 0);
+}
+
+static uint32_t asm_section_link_target(AsmParser* parser, uint32_t end, uint32_t location)
+{
+    asm_expect(parser, ',', "linked-order section requires an associated symbol");
+    uint32_t result = 0;
+    if (parser->at >= end || !asm_name_token(parser, parser->at))
+    {
+        asm_fail(parser, location, "expected linked-order section symbol");
+    }
+    else if (parser->result.error == 0)
+    {
+        const uint32_t token = parser->at++;
+        const String8 name = asm_name_text(parser, token);
+        result = asm_symbol(parser, name, parser->tokens[token].start);
+        AsmSymbol* symbol = &parser->symbols[result];
+        // Section names and forward definitions bind as they do in an expression.
+        const uint32_t section = asm_find_section(parser, name, 0);
+        if (!symbol->defined && section != 0)
+        {
+            symbol->section_start = true;
+            symbol->section_index = section;
+        }
+        symbol->referenced = true;
     }
     return result;
 }
@@ -165,6 +238,8 @@ static void asm_section_directive(AsmParser* parser, uint32_t token, uint32_t en
     const uint32_t name_token = named ? parser->at++ : token;
     const String8 name = asm_name_text(parser, name_token);
     uint32_t group = 0;
+    uint32_t linked_symbol = 0;
+    uint64_t unique = 0;
     uint32_t id = asm_find_section(parser, name, group);
     ObjectAtomSection object = id != 0 ? parser->sections[id].object : (ObjectAtomSection){.name = name, .type = SHT_PROGBITS};
     if (id == 0)
@@ -203,12 +278,13 @@ static void asm_section_directive(AsmParser* parser, uint32_t token, uint32_t en
                 case 'S': object.flags |= SHF_STRINGS; break;
                 case 'T': object.flags |= SHF_TLS; break;
                 case 'G': object.flags |= SHF_GROUP; break;
+                case 'o': object.flags |= SHF_LINK_ORDER; break;
                 default: asm_fail(parser, location, "unsupported section flag"); break;
                 }
             }
             // A grouped section is independent of an ungrouped namesake. Preserve the
             // built-in entry size for ordinary sections such as .init_array.
-            if ((object.flags & SHF_GROUP) != 0)
+            if ((object.flags & (SHF_GROUP | SHF_LINK_ORDER)) != 0)
             {
                 object.entry_size = 0;
             }
@@ -258,7 +334,35 @@ static void asm_section_directive(AsmParser* parser, uint32_t token, uint32_t en
                 }
                 object.entry_size = (uint32_t)size;
             }
-            if ((object.flags & SHF_GROUP) != 0)
+            if ((object.flags & SHF_LINK_ORDER) != 0)
+            {
+                if (parser->code || parser->options.integrated || object.type != SHT_PROGBITS || object.flags != (SHF_ALLOC | SHF_WRITE | SHF_LINK_ORDER))
+                {
+                    asm_fail(parser, location, "only standalone writable linked-order progbits sections are supported");
+                }
+                else
+                {
+                    linked_symbol = asm_section_link_target(parser, end, location);
+                    if (asm_take(parser, ','))
+                    {
+                        const bool unique_keyword = asm_is(parser, parser->at, "unique");
+                        parser->at += unique_keyword;
+                        asm_expect(parser, ',', "expected unique section ID");
+                        __int128 number = 0;
+                        if (!unique_keyword || parser->at >= end || parser->tokens[parser->at].kind != BUSTER_ASM_WORD ||
+                            !asm_number(asm_token_text(parser, parser->at), &number) || number > UINT32_MAX)
+                        {
+                            asm_fail(parser, location, "expected unique section ID fitting 32 bits");
+                        }
+                        else
+                        {
+                            parser->at += 1;
+                            unique = (uint64_t)number + 1;
+                        }
+                    }
+                }
+            }
+            else if ((object.flags & SHF_GROUP) != 0)
             {
                 asm_expect(parser, ',', "grouped section requires a signature");
                 const uint32_t signature_token = parser->at;
@@ -283,7 +387,7 @@ static void asm_section_directive(AsmParser* parser, uint32_t token, uint32_t en
                     }
                     if (parser->result.error == 0)
                     {
-                        const uint32_t signature = asm_symbol_scoped(parser, signature_name, parser->tokens[signature_token].start, false);
+                        const uint32_t signature = asm_symbol_scoped(parser, signature_name, parser->tokens[signature_token].start, false, false);
                         AsmSymbol* symbol = &parser->symbols[signature];
                         if (symbol->group != 0 && symbol->group_flags != flags)
                         {
@@ -303,9 +407,8 @@ static void asm_section_directive(AsmParser* parser, uint32_t token, uint32_t en
             }
         }
     }
-    // A name alone selects the ungrouped section. Grouped instances, even conventional names such as .text, have
-    // independent metadata and layout; never inherit a different group's attributes.
-    id = asm_find_section(parser, name, group);
+    // A name alone selects the ordinary section. Group instances and linked-order variants keep independent layout.
+    id = asm_find_section_variant(parser, name, group, linked_symbol, unique);
     const bool executable = (object.flags & SHF_EXECINSTR) != 0;
     const bool zero = object.type == SHT_NOBITS;
     const bool tls = (object.flags & SHF_TLS) != 0;
@@ -348,6 +451,8 @@ static void asm_section_directive(AsmParser* parser, uint32_t token, uint32_t en
         AsmSection* section = &parser->sections[id];
         section->object = object;
         section->group = group;
+        section->linked_symbol = linked_symbol;
+        section->unique = unique;
         // The Link's string pools are of bytes: wider characters' strings are read-only data, as the importer classes
         // them, whose section keeps its merge flags and entry size (the object writer's descriptor).
         // An array of constructors or destructors is its class's, whatever its name and flags, so that the direct path
@@ -381,6 +486,12 @@ static bool asm_object_declares(const AsmSymbol* symbol)
            (!weak || symbol->used);
 }
 
+// A defined ordinary signature takes precedence over a linked-order section of the same name.
+static uint32_t asm_group_signature_section(const AsmParser* parser, const AsmSymbol* symbol)
+{
+    return symbol->defined ? asm_symbol_section(parser, symbol->name) : asm_name_section(parser, symbol->name);
+}
+
 static void asm_object_groups(AsmParser* parser)
 {
     Link* link = &parser->result.link;
@@ -392,7 +503,7 @@ static void asm_object_groups(AsmParser* parser)
             const AsmSymbol* symbol = &parser->symbols[i];
             if (symbol->group != 0)
             {
-                const uint32_t section = parser->section_name_slots != 0 ? asm_find_latest_section(parser, symbol->name) : asm_find_section(parser, symbol->name, 0);
+                const uint32_t section = asm_group_signature_section(parser, symbol);
                 if (section != 0 && parser->sections[section].atom == 0)
                 {
                     AsmSection* target = &parser->sections[section];
@@ -420,7 +531,7 @@ static void asm_object_groups(AsmParser* parser)
                     {
                         asm_fail(parser, symbol->location, "unsupported section group signature definition");
                     }
-                    const uint32_t section = parser->section_name_slots != 0 ? asm_find_latest_section(parser, symbol->name) : asm_find_section(parser, symbol->name, 0);
+                    const uint32_t section = asm_group_signature_section(parser, symbol);
                     const bool section_signature = section != 0;
                     if (section_signature && (parser->sections[section].name_ambiguous || symbol->explicit_binding || symbol->has_size || symbol->flags != 0))
                     {
@@ -469,9 +580,22 @@ static void asm_object_options(AsmParser* parser)
         memset(temporary, 0, link->symbols.count);
         for (uint32_t i = 1; i < parser->section_count; i += 1)
         {
-            if (parser->sections[i].atom != 0)
+            const AsmSection* section = &parser->sections[i];
+            if (section->atom != 0)
             {
-                sections[parser->sections[i].atom] = parser->sections[i].object;
+                ObjectAtomSection object = section->object;
+                if (section->linked_symbol != 0)
+                {
+                    const AsmSymbol* symbol = &parser->symbols[section->linked_symbol];
+                    const AtomId target = symbol->link != 0 ? link->symbols.atom[symbol->link] : 0;
+                    if (target == 0 || link->atoms.class[target] >= section->class)
+                    {
+                        asm_fail(parser, symbol->location, "linked-order section requires a defined symbol in an earlier section class");
+                    }
+                    object.link = target;
+                    object.identity = i;
+                }
+                sections[section->atom] = object;
             }
         }
         for (uint32_t i = 1; i < parser->symbol_count; i += 1)
