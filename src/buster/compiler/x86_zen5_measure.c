@@ -1176,6 +1176,15 @@ static void x86_zen5_x87_unit(const X86CostShape* shape, X86CostExperiment exper
             x86_zen5_push(builder, record);
             x86_zen5_helper(builder, pop);
             break;
+        case X86_FORM_FST_ST:
+            // The retained private store writes ST(0) to itself.
+            x86_zen5_push(builder, record);
+            break;
+        case X86_FORM_FXCH_ST:
+            // Exchange occupied registers, as at a retained private reload.
+            record.rm = (uint8_t)(1 + i % 4);
+            x86_zen5_push(builder, record);
+            break;
         case X86_FORM_FSTP_ST:
             x86_zen5_helper(builder, push);
             record.rm = (uint8_t)(k + 1);

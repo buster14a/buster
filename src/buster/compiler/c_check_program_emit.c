@@ -2458,6 +2458,17 @@ static void check_program_emit_code_half(CheckEmitRun* run, CheckEmitLane* lane,
                 step->batched = naked == 0;
                 if (step->batched)
                 {
+                    // Only the object pipeline places literal targets. Keep the published typed stream
+                    // usable by record-only consumers, including after an inline splice.
+                    if (step->source->x87_constant_count != 0)
+                    {
+                        if (!step->spliced)
+                        {
+                            step->inlined.function = *function;
+                        }
+                        step->inlined.function.pool_x87_constants = true;
+                        step->source = &step->inlined.function;
+                    }
                     step->slot = source_count;
                     sources[source_count] = step->source;
                     source_count += 1;
