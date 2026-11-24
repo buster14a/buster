@@ -435,6 +435,8 @@ struct PPOptions
     bool published_unused_only;
     // Ordinary native output may carry an implicit discard on the expression that produces its value.
     bool statement_controls;
+    // The C driver is emitting code. Report incomplete libc fortification once for this unit.
+    bool diagnose_fortify;
     // The same path for a reader whose output is not a compile's fresh one (measure-node-machine --shadow
     // --statement-controls: the shadow's pipeline reads a unit as -c does). No compile sets it.
     bool statement_controls_anywhere;
@@ -1939,6 +1941,8 @@ struct Preprocessor
     uint32_t diagnostic_run_first;
     bool diagnostic_collection_failed;
     bool diagnostic_source;
+    // An optional driver query of an unused macro must not diagnose its replacement list.
+    bool probing_fortify;
     // Whether a collected record is source-ordered (pp_diagnostic_source_order): only then does publication merge them.
     bool diagnostic_source_ordered;
     // Set by a caller around a literal's diagnostic at a character of its spelling (#1447): clang's StringLiteralParser and
