@@ -2481,7 +2481,7 @@ static void check_test_driver_tier1_passes(CheckTest* test, const char* clang, c
     static const char* const variants[] = {
         "--tier1-passes=-sccp", "--tier1-passes=-dce", "--tier1-passes=-cfg", "--tier1-passes=+licm", "--tier1-passes=+sroa",
         "--tier1-passes=+gvn", "--tier1-passes=-inline", "--tier1-passes=+all", "--tier1-passes=-all", "--tier1-passes=-merge", "--tier1-passes=+unroll",
-        "--tier1-passes=+memory", "--tier1-passes=+hoist", "--tier1-passes=+numbering",
+        "--tier1-passes=+memory", "--tier1-passes=-hoist", "--tier1-passes=+numbering",
     };
     for (uint32_t path = 0; ran && path < 2; path += 1)
     {
@@ -2492,11 +2492,12 @@ static void check_test_driver_tier1_passes(CheckTest* test, const char* clang, c
         char actual[256] = { 0 };
         check_test_expect(test, plain_built && check_test_driver_capture(output, actual, sizeof(actual)) && strcmp(actual, expected) == 0,
                           "the passes fixture's default --tier1 build prints clang's build's output, every function Tier 1's");
-        // By default every pass of the pipeline but LICM, SROA, the solver and value numbering with memory does something.
+        // By default every pass of the pipeline but SROA, the solver and value numbering with memory does something; LICM
+        // under #2719's pressure policy (hoist) moves the fixture's invariant product.
         check_test_expect(test, plain_built && plain.inlined != 0 && plain.folded != 0 && plain.removed_instructions != 0 && plain.removed_blocks != 0 &&
-                                    plain.merged_blocks != 0 && plain.licm_moved == 0 && plain.sroa_split == 0 && plain.gvn_removed == 0 && plain.unrolled == 0 &&
+                                    plain.merged_blocks != 0 && plain.licm_moved != 0 && plain.sroa_split == 0 && plain.gvn_removed == 0 && plain.unrolled == 0 &&
                                     plain.loads_forwarded == 0,
-                          "the default pipeline inlines, folds, removes and merges, and runs neither LICM, SROA, the solver, the unroller nor value numbering with memory");
+                          "the default pipeline inlines, folds, removes, merges and hoists, and runs neither SROA, the solver, the unroller nor value numbering with memory");
         printf("  Tier 1's passes, %s path: inlined %" PRIu64 ", folded %" PRIu64 ", removed %" PRIu64 " instructions and %" PRIu64 " blocks (%" PRIu64 " merged) by default\n",
                path == 0 ? "vector" : "scalar", plain.inlined, plain.folded, plain.removed_instructions, plain.removed_blocks, plain.merged_blocks);
         for (uint32_t v = 0; plain_built && v < BUSTER_ARRAY_LENGTH(variants); v += 1)
@@ -2519,7 +2520,7 @@ static void check_test_driver_tier1_passes(CheckTest* test, const char* clang, c
                                  v == 9   ? with.merged_blocks == 0 && with.removed_blocks < plain.removed_blocks :
                                  v == 10  ? with.unrolled != 0 :
                                  v == 11  ? with.loads_forwarded != 0 :
-                                 v == 12  ? with.licm_moved != 0 :
+                                 v == 12  ? with.licm_moved == 0 :
                                             with.gvn_removed != 0;
             check_test_expect(test, same, variants[v]);
             check_test_expect(test, built && reached, variants[v]);

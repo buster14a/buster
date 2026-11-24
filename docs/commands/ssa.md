@@ -7,30 +7,32 @@ requirements. [Command index](README.md).
 ## Module overview
 
 - `src/buster/compiler/ssa.c` promotes eligible locals over a completed CFG:
-  budgeted dominance/frontier analysis and segmented SIMD renaming, with a nonrecursive
-  predecessor-reading scalar twin and redundant-phi SCC cleanup. Large functions
+  a dense constructor that works a block's locals at a time (sparse frontiers,
+  liveness-pruned placement of every local at once, entry and exit rows in
+  reverse postorder) and redundant-phi SCC cleanup. Large functions
   use `ssa_bounded.c`'s reusable local workspace and actual retained phi extents;
   `ssa_verify.c` independently checks symbolic equations with bounded block rows.
-  `test-ssa` forces both bounded kernels on its fixtures and checks large sparse
-  CFGs under fixed scratch capacities, including a blocks-times-locals product
-  exceeding `u32`. It
-  checks both against an all-in-memory path interpreter and the SSA verifier;
-  `benchmark-ssa [--only scalar|vector] [--after-scalar MS]` measures synthetic
-  CFGs, including analysis and allocation. `docs/ssa.md` records the view's
+  `test-ssa` forces the bounded construction on its fixtures too, checks the
+  sparse frontiers against their definition, and checks large sparse CFGs under
+  fixed scratch capacities, including a blocks-times-locals product exceeding
+  `u32`. It checks both constructions against an all-in-memory path interpreter
+  and the SSA verifier; `benchmark-ssa [--seed N]` measures synthetic CFGs,
+  including analysis and allocation. `docs/ssa.md` records the view's
   contract. `ssa_ir.c` adapts shared IR slots, rebuilds every operand form and
   verifies the promoted IR. New phi prefixes use canonical local order
-  before assigning value IDs (#1395), independent of constructor discovery
-  order. `test-ssa-ir` compares typed-stream, all-memory IR and both promoted
-  forms, with and without frame objects and copies, and requires identical
-  serialized loop IR where first-read and local orders differ.
+  before assigning value IDs (#1395), independent of discovery order.
+  `test-ssa-ir` compares typed-stream, all-memory IR and promoted forms, with
+  and without frame objects and copies, checks the promoted IR of its generated
+  programs against recorded digests and a loop fixture against its recorded
+  text, where first-read and local orders differ.
   `test-ssa-source [--typed] [--generate N] [--seed N] [--clang PATH] [--timeout SECONDS]
   [--steps N] [--lifetimes] [--tier1] [--keep] [preprocessor options] [file...]`
   (`ssa_source_test.c`, #134) promotes every function `-c` compiles of C files,
   and of random programs of structured and unstructured control flow
-  (`ssa_source_generate.c`, each built by clang -O0 for its output), by both paths
-  with `ssa_verify`'s checks on each promotion (`ssa_ir_promote_verified`), then
-  runs each program with a main by the shared IR's interpreter in its three forms
-  (every local in memory, and each path's SSA), which must agree and give its
+  (`ssa_source_generate.c`, each built by clang -O0 for its output), with
+  `ssa_verify`'s checks on each promotion (`ssa_ir_promote_verified`), then
+  runs each program with a main by the shared IR's interpreter in its forms
+  (every local in memory, and its SSA), which must agree and give its
   expected output. With `--lifetimes`, the IR has the blocks' lifetime markers, as
   `--tier1`'s has, and promotion makes a block's locals undefined at each start
   of their block (#141: `ssa_ir_accesses`, the [SSA guide](../../docs/ssa.md)'s

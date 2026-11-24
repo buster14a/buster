@@ -14,8 +14,8 @@ compiler's production analysis or path-selection policy.
 
 The command retains the ordinary lowering, SSA promotion, dominance verification
 and text-roundtrip checks. For every function that the source preparation emits,
-it additionally checks each of three representations: lowered IR, vector-promoted
-IR and scalar-promoted IR. Their CFGs need not be identical; each is independently
+it additionally checks each of two representations: lowered IR and promoted IR
+(a scalar-promoted third went with promotion's twin, #2924). Their CFGs need not be identical; each is independently
 rebuilt with `ir_build_cfg` and checked on its own.
 
 The adapter borrows that producer's successor and predecessor CSR arrays directly.
@@ -38,8 +38,8 @@ newlines stay unambiguous.
 
 `benchmark-dominators --cfg FILE` reads the export back and refuses it whole
 unless it is exactly a complete corpus: each function's records must be its
-three forms — lowered, vector-promoted, scalar-promoted — in order under one
-file and function name, the function count must be those triplets' number, and
+two forms — lowered, promoted — in order under one file and function name, the
+function count must be those pairs' number, and
 the form count the records'. The file count stays producer-supplied metadata:
 files with no function of their own left no record to enumerate, so the reader
 only requires it not to fall below the file names the records carry, and the

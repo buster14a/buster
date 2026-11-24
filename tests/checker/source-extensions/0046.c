@@ -1,0 +1,6 @@
+#pragma STDC FENV_ACCESS UNKNOWN
+#pragma STDC CX_LIMITED_RANGE UNKNOWN
+int f(void){int x=1;
+#pragma STDC FENV_ACCESS BAD
+#pragma STDC CX_LIMITED_RANGE BAD
+return x;}

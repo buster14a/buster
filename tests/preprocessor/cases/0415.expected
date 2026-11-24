@@ -1,0 +1,5 @@
+int y = ((1) /* fc */ + 2 /* arg */) /* trailing*/;
+"5 /* str */ 6" /* only */ a b;
+((3) /* fc */ + // line
+4) /* trailing*/ end
+/* only */

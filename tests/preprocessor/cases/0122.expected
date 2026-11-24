@@ -1,0 +1,4 @@
+R"(
+#define X 1
+)" X
+after

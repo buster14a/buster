@@ -50,8 +50,7 @@ padding is assumed, including for vector tails.
 
 The C producer (`check_debug_build`) uses `debug_prepare` followed by
 `debug_emit`. Preparation validates and measures once into a stack-held
-`DebugPlan`: a copy of the unit descriptor, the five bases and sizes, and the
-scalar/vector encoder choice. It allocates no storage and retains no per-row
+`DebugPlan`: a copy of the unit descriptor and the five bases and sizes. It allocates no storage and retains no per-row
 encoding. After allocating the five sections from those sizes, emission checks
 their capacities and writes once. The plan and every borrowed name, file,
 function and row must stay unchanged until emission finishes; changes require
@@ -88,9 +87,13 @@ global variable is described where the unit defines it. The DIEs are base and
 pointer types, fixed and incomplete arrays, records and unions (with byte or
 bit offsets), enums and enumerators, function signatures, qualifiers, and
 declaration-scoped typedef names. A bounded worklist handles recursive
-records without recursion. Two passes measure and then write CU-relative
-`DW_FORM_ref4` references, including forward references; these references need
-no relocation when units are concatenated.
+records without recursion. The types' DIEs come first and are measured alone,
+which fixes their CU-relative `DW_FORM_ref4` offsets, forward references among
+them included; then every DIE and list is written once, into sections that grow,
+and the few references to an abstract instance written later (an inline
+instance's callee defined after its caller) are patched once every DIE is
+written (#2542). These references need no relocation when units are
+concatenated.
 
 Named parameters and locals retain their source declarations through lowering.
 Only parameters owned by a function definition contribute named values and
@@ -113,7 +116,7 @@ nested shadowed names stop being visible on leaving their scope. Only a scope
 that declares an object or a typedef of its own has a block, as clang's do:
 LLVM drops a scope without children and gives the children of one that holds
 only scopes to its parent, and so does `check_debug_value_own_blocks` (#2543),
-which marks those blocks once per function before the writer's two passes. A
+which marks those blocks over each function before the writer's walk. A
 block that declared nothing cost a DIE, a range list and an object's relocation
 and told a debugger nothing: `-c -g sqlite3.c` wrote 24,839 blocks and now
 writes 2,139 (clang -O0's 2,120), its object 20% smaller, with 17,397
@@ -542,14 +545,15 @@ writer can emit four such rows in one four-byte store. In a mixed group,
 leading-zero counts determine the remaining rows' LEB128 lengths,
 `vpmultishiftqb` spreads their seven-bit groups and `vpcompressb` packs
 the selected bytes of all four rows. The store writes exactly that count.
-The scalar writer uses the same encoding for partial groups, file changes
-and rows marked with `DW_LNS_set_prologue_end`.
+The rows the groups stop before (partial groups, file changes and rows marked
+with `DW_LNS_set_prologue_end`) are written one at a time in the same encoding.
+The writer had an exact twin that wrote every row alone; #2924 deleted it after
+`benchmark-debug` on the 9700X found the groups at least as fast at every row
+count (see the PR's record).
 
-`benchmark-debug [--functions N] [--rows N] [--only scalar|vector]
-[--after-scalar MS]` measures validation, size calculation, all five section
-writes, and final address patching together. It compares the complete outputs
-before timing. Its default is 4,096 functions with 64 rows each, 21 alternating
-passes, and reused caller-owned output buffers. It reports elapsed nanoseconds
+`benchmark-debug [--functions N] [--rows N]` measures validation, size calculation, all five section
+writes, and final address patching together. Its default is 4,096 functions
+with 64 rows each, 21 passes, and reused caller-owned output buffers. It reports elapsed nanoseconds
 per row, the range across passes, milliseconds per unit, output bytes, byte
 throughput and hardware user cycles per row. Denied or multiplexed cycle counts
 are reported as unavailable. The emitter needs no scratch buffer; caller-owned row columns cost
@@ -584,8 +588,8 @@ compiler's SHA-256 was
 
 ## Checks
 
-`test-debug` compares the scalar and vector bytes, independently decodes every
-line row, tests unsigned and signed seven-bit boundaries and integer extrema,
+`test-debug` holds the units' bytes to a digest frozen while the vector writer
+and its deleted exact twin agreed, independently decodes every line row, tests unsigned and signed seven-bit boundaries and integer extrema,
 checks every row count through 129, and puts both input columns and the output
 at protected page boundaries for counts through 65. It checks all section
 capacity failures, invalid row/file/string inputs, empty units and sequences,

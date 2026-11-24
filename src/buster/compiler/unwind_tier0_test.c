@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Tests of the native Tier 0 unwind proof, included after tier0_test.c. Actual typed programs exercise both producers
-// and both branch sizers before both analyzers consume their public records. Deep global expressions force every
+// Tests of the native Tier 0 unwind proof, included after tier0_test.c. Actual typed programs exercise the producer and
+// the branch sizer before the analyzer consumes their public records. Deep global expressions force every
 // nonvolatile register; generated programs add loops, alternate returns, calls (also through a register), floating
 // values, pointer stores and objects in the frame.
 // Original record fixtures cover all saved masks and isolate refusals, with poisoned output rollback and immutable
@@ -99,51 +99,42 @@ static bool unwind_tier0_test_keeps_rbp(const Tier0Code* code)
     return keeps;
 }
 
-// Both producers' code must describe the same final records, to the analyzer and as published. The test allocates exactly count
-// offsets: no sentinel element is offered to the analyzer. No function or code is executed by this helper.
+// The code's final records, to the analyzer and as published. The test allocates exactly count offsets: no sentinel
+// element is offered to the analyzer. No function or code is executed by this helper.
 static bool unwind_tier0_test_function(UnwindTier0Test* test, const Tier0Function* function, Arena* arena, uint64_t id, uint32_t expected_saved)
 {
     const uint64_t mark = arena->length;
     const Tier0Check checked = tier0_validate(function);
     bool valid = unwind_tier0_test_expect(test, checked.error == TIER0_OK, "typed input validates", id);
-    Tier0Code codes[2] = { 0 };
-    uint32_t* offsets[2] = { 0 };
-    uint32_t sizes[2] = { 0 };
+    Tier0Code code = { 0 };
+    uint32_t* offsets = 0;
+    uint32_t size = 0;
     if (valid)
     {
-        codes[0] = tier0_compile_scalar(function, arena);
-        codes[1] = tier0_compile(function, arena);
-        valid = unwind_tier0_test_expect(test, codes[0].error == TIER0_OK && codes[1].error == TIER0_OK &&
-                                                tier0_test_same_code(&codes[0], &codes[1]), "actual producer records agree", id);
+        code = tier0_compile(function, arena);
+        valid = unwind_tier0_test_expect(test, code.error == TIER0_OK, "actual producer records compile", id);
     }
-    for (uint32_t path = 0; valid && path < 2; path += 1)
+    if (valid)
     {
-        Tier0Code* code = &codes[path];
-        offsets[path] = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, code->count);
-        const BranchSizingCheck check = branch_sizing_validate(code->records, code->count, code->branches, code->targets, code->branch_count);
-        valid = unwind_tier0_test_expect(test, offsets[path] != 0 && check.error == BRANCH_SIZING_OK, "records and branch metadata validate", id);
+        offsets = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, code.count);
+        const BranchSizingCheck check = branch_sizing_validate(code.records, code.count, code.branches, code.targets, code.branch_count);
+        valid = unwind_tier0_test_expect(test, offsets != 0 && check.error == BRANCH_SIZING_OK, "records and branch metadata validate", id);
         if (valid)
         {
-            const BranchSizing sized = size_branches(code->records, code->count, code->branches, code->targets, code->branch_count, offsets[path]);
+            const BranchSizing sized = size_branches(code.records, code.count, code.branches, code.targets, code.branch_count, offsets);
             valid = unwind_tier0_test_expect(test, sized.error == BRANCH_SIZING_OK && sized.length <= INT32_MAX, "actual branch sizing succeeds", id);
-            sizes[path] = (uint32_t)sized.length;
+            size = (uint32_t)sized.length;
         }
     }
     UnwindFunction reference = { 0 };
+    const bool pointer = valid && code.frame_pointer;
     if (valid)
-    {
-        valid = unwind_tier0_test_expect(test, sizes[0] == sizes[1] && tier0_test_same_code(&codes[0], &codes[1]) &&
-                                                memcmp(offsets[0], offsets[1], (uint64_t)codes[0].count * sizeof(uint32_t)) == 0,
-                                        "final producer records and PCs agree", id);
-    }
-    const bool pointer = valid && codes[0].frame_pointer;
-    for (uint32_t producer = 0; valid && producer < 2; producer += 1)
     {
         UnwindFunction descriptor;
         memset(&descriptor, 0xa5, sizeof(descriptor));
         UnwindFunction sentinel;
         memcpy(&sentinel, &descriptor, sizeof(sentinel));
-        const UnwindError error = unwind_tier0(&codes[producer], offsets[producer], sizes[producer], &descriptor);
+        const UnwindError error = unwind_tier0(&code, offsets, size, &descriptor);
         bool accepted = false;
         if (pointer)
         {
@@ -158,35 +149,30 @@ static bool unwind_tier0_test_function(UnwindTier0Test* test, const Tier0Functio
         }
         if (accepted && !pointer)
         {
-            if (producer == 0)
-            {
-                reference = descriptor;
-            }
-            unwind_tier0_test_expect(test, memcmp(&descriptor, &reference, sizeof(descriptor)) == 0,
-                                    "the scalar and vector producers' descriptors agree", id);
+            reference = descriptor;
             unwind_tier0_test_expect(test, expected_saved == UINT32_MAX || descriptor.saved == expected_saved,
                                     "typed expression forces its expected saved registers", id);
         }
         valid = accepted && valid;
     }
-    // The frame each producer published (unwind_tier0_frame, the C driver's): the analyzer's descriptor wherever the
+    // The frame the code published (unwind_tier0_frame, the C driver's): the analyzer's descriptor wherever the
     // analyzer takes the function, and a frame pointer's as its prologue and epilogue lay it out.
-    for (uint32_t producer = 0; valid && producer < 2; producer += 1)
+    if (valid)
     {
         UnwindFunction framed;
         memset(&framed, 0xc3, sizeof(framed));
-        const UnwindError error = unwind_tier0_frame(&codes[producer], offsets[producer], sizes[producer], &framed);
-        const UnwindFunction expected = pointer ? unwind_tier0_test_pointer_frame(&codes[producer], offsets[producer], sizes[producer]) : reference;
+        const UnwindError error = unwind_tier0_frame(&code, offsets, size, &framed);
+        const UnwindFunction expected = pointer ? unwind_tier0_test_pointer_frame(&code, offsets, size) : reference;
         valid = unwind_tier0_test_expect(test, error == UNWIND_OK && unwind_check(&framed, 1) == UNWIND_OK && memcmp(&framed, &expected, sizeof(framed)) == 0,
                                          pointer ? "the published frame pointer's prologue and epilogue" : "the published frame gives the analyzer's descriptor", id);
     }
     if (valid && pointer)
     {
-        valid = unwind_tier0_test_expect(test, unwind_tier0_test_keeps_rbp(&codes[0]), "a frame pointer's body leaves rbp alone", id);
+        valid = unwind_tier0_test_expect(test, unwind_tier0_test_keeps_rbp(&code), "a frame pointer's body leaves rbp alone", id);
         test->framed += valid ? 1 : 0;
-        test->framed_masks |= valid ? 1ull << codes[0].frame_saved : 0;
-        test->realigned += valid && codes[0].frame_alignment_log2 != 0 ? 1 : 0;
-        test->based += valid && codes[0].frame_base ? 1 : 0;
+        test->framed_masks |= valid ? 1ull << code.frame_saved : 0;
+        test->realigned += valid && code.frame_alignment_log2 != 0 ? 1 : 0;
+        test->based += valid && code.frame_base ? 1 : 0;
     }
     if (valid)
     {
@@ -200,9 +186,9 @@ static bool unwind_tier0_test_function(UnwindTier0Test* test, const Tier0Functio
         }
         test->indirect_calls += indirect ? 1 : 0;
         test->objects += function->local_sizes != 0 ? 1 : 0;
-        for (uint32_t branch = 0; branch < codes[0].branch_count; branch += 1)
+        for (uint32_t branch = 0; branch < code.branch_count; branch += 1)
         {
-            test->loops += codes[0].targets[branch] < codes[0].branches[branch] ? 1 : 0;
+            test->loops += code.targets[branch] < code.branches[branch] ? 1 : 0;
         }
         uint32_t returns = 0;
         for (uint32_t i = 0; i < function->count; i += 1)

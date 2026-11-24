@@ -552,13 +552,14 @@ guide](tier1-store-motion.md)); promotion; the wide integers' halves and the wid
 pieces; truth simplification; threading; if-conversion; the switches of
 constants (`tables`, #3298); the value numbering of the promoted function
 (`+numbering`, #2719); LICM (`+licm`), its vector/mask-only form or its
-pressure policy (`hoist`, #2719); the unroller (`+unroll`, #2755); and the optimizer,
+pressure policy (`hoist`, #2719); the loop vectorizer (`vectorize`, #2743: [its
+guide](tier1-loop-vectorization.md)); the unroller (`+unroll`, #2755); and the optimizer,
 which runs SCCP, the identities, value numbering with memory (`+memory`,
 #2718), dead-code removal, CFG cleanup and its merges and layout, then the
 final verification that selection reads. `--tier1-passes=` turns each pass on
 or off ([the Tier 1 guide](tier1.md)). By default SCCP, dead-code removal, CFG
-cleanup, the merges, the inlining, the switches of constants and the
-vector/mask-only passes run; unrestricted LICM and its pressure policy
+cleanup, the merges, the inlining, the switches of constants, the
+vector/mask-only passes and the loop vectorizer run; unrestricted LICM and its pressure policy
 (`+hoist`, #2719), SROA, the unroller, loop store motion, the solver (before
 promotion or after, `+numbering`) and value numbering with memory don't, and
 none repeats. The measurements below decided this, and

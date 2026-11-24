@@ -1,0 +1,12 @@
+"_Pragma(\"ppf one\") a" [
+#pragma ppf one
+ a]
+#pragma ppf two
+ lr [
+#pragma ppf two
+ l]
+"_Pragma(\"ppf three\") b" [
+#pragma ppf three
+ b]
+#pragma ppf four
+#pragma ppf four

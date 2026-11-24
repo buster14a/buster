@@ -1680,323 +1680,421 @@ struct Tier1ResolvedMoves
     uint32_t count;
 };
 
-#define BUSTER_TIER1_MOVE_SMALL_COUNT 8
+// The most moves the register form resolves (tier1_resolve_moves_register): one lane each of two 16-lane registers.
+// Every set of sqlite3.c's, Lua's and musl's --tier1 compiles has at most 12 (#3450's census).
+#define BUSTER_TIER1_MOVE_REGISTER_COUNT 32
 
-// Independent small-set oracle, also used for the bounded argument-register shuffles (at most six moves).
-static __attribute__((unused)) Tier1AllocationError tier1_resolve_moves_scalar(const Tier1ParallelMoves* input, Arena* arena, Tier1ResolvedMoves* result)
+// The checks both forms share before any storage: the columns, the count and the output's room.
+static bool tier1_resolve_moves_accepts(const Tier1ParallelMoves* input, const Arena* arena, const Tier1ResolvedMoves* result)
 {
-    Tier1AllocationError error = TIER1_ALLOCATION_INVALID;
-    const uint64_t saved = arena != 0 ? arena->length : 0;
+    return input != 0 && arena != 0 && result != 0 && input->count <= BUSTER_TIER1_ALLOCATE_MAX_INTERVALS &&
+        (input->count == 0 || (input->sources != 0 && input->destinations != 0));
+}
+
+// The 32-bit mask of a comparison over two 16-lane halves.
+static uint32_t tier1_move_mask(__mmask16 low, __mmask16 high)
+{
+    return (uint32_t)low | (uint32_t)high << 16;
+}
+
+// Up to 32 moves in two registers each of sources and destinations. A destination's readers are a 32-bit row (the
+// moves whose source it is), the 32 rows in two registers of dwords; each step tests every row against the pending
+// mask at once and takes the lowest ready move, or saves the lowest pending destination when none is ready. Nothing
+// but the output is pushed.
+static Tier1AllocationError tier1_resolve_moves_register(const Tier1ParallelMoves* input, Arena* arena, Tier1ResolvedMoves* result)
+{
+    const uint64_t saved = arena->length;
+    const uint32_t count = input->count;
+    const uint32_t live = (uint32_t)((UINT64_C(1) << count) - 1);
+    const __mmask16 live_low = (__mmask16)live;
+    const __mmask16 live_high = (__mmask16)(live >> 16);
+    const __m512i sources_low = _mm512_maskz_loadu_epi32(live_low, input->sources);
+    // The upper half's address only where it has a lane: past a shorter column, or from a null one, none is formed.
+    const uint32_t* const sources_upper = live_high != 0 ? input->sources + 16 : input->sources;
+    const uint32_t* const destinations_upper = live_high != 0 ? input->destinations + 16 : input->destinations;
+    const __m512i sources_high = _mm512_maskz_loadu_epi32(live_high, sources_upper);
+    const __m512i destinations_low = _mm512_maskz_loadu_epi32(live_low, input->destinations);
+    const __m512i destinations_high = _mm512_maskz_loadu_epi32(live_high, destinations_upper);
+    const __m512i scratch = _mm512_set1_epi32((int)input->scratch);
+    uint32_t invalid = tier1_move_mask(_mm512_cmpeq_epi32_mask(sources_low, scratch) | _mm512_cmpeq_epi32_mask(destinations_low, scratch),
+        _mm512_cmpeq_epi32_mask(sources_high, scratch) | _mm512_cmpeq_epi32_mask(destinations_high, scratch)) & live;
+    uint32_t pending = tier1_move_mask(_mm512_cmpneq_epi32_mask(sources_low, destinations_low), _mm512_cmpneq_epi32_mask(sources_high, destinations_high)) & live;
+    uint32_t rows[32] __attribute__((aligned(64))) = { 0 };
+    uint32_t source[32];
+    uint32_t destination[32];
+    _mm512_storeu_si512(source, sources_low);
+    _mm512_storeu_si512(source + 16, sources_high);
+    _mm512_storeu_si512(destination, destinations_low);
+    _mm512_storeu_si512(destination + 16, destinations_high);
+    for (uint32_t j = 0; j < count; j += 1)
+    {
+        const __m512i written = _mm512_set1_epi32((int)destination[j]);
+        // A second move to the same destination is invalid; a move reading it is one of its row.
+        invalid |= tier1_move_mask(_mm512_cmpeq_epi32_mask(destinations_low, written), _mm512_cmpeq_epi32_mask(destinations_high, written)) & live & ~(UINT32_C(1) << j);
+        rows[j] = tier1_move_mask(_mm512_cmpeq_epi32_mask(sources_low, written), _mm512_cmpeq_epi32_mask(sources_high, written));
+    }
+    Tier1AllocationError error = invalid != 0 ? TIER1_ALLOCATION_INVALID : TIER1_ALLOCATION_OK;
     Tier1ResolvedMoves output = { 0 };
-    uint32_t* sources = 0;
-    uint8_t* pending = 0;
-    uint64_t retained = saved;
-    if (input != 0 && arena != 0 && result != 0 && input->count <= BUSTER_TIER1_ALLOCATE_MAX_INTERVALS && (input->count == 0 || (input->sources != 0 && input->destinations != 0)))
+    if (error == TIER1_ALLOCATION_OK)
     {
-        error = TIER1_ALLOCATION_OK;
-        for (uint32_t i = 0; error == TIER1_ALLOCATION_OK && i < input->count; i += 1)
-        {
-            if (input->sources[i] == input->scratch || input->destinations[i] == input->scratch)
-            {
-                error = TIER1_ALLOCATION_INVALID;
-            }
-            for (uint32_t j = 0; error == TIER1_ALLOCATION_OK && j < i; j += 1)
-            {
-                if (input->destinations[i] == input->destinations[j])
-                {
-                    error = TIER1_ALLOCATION_INVALID;
-                }
-            }
-        }
+        output.sources = arena_push_array(arena, (uint64_t)count * 2, sizeof(uint32_t), 4);
+        output.destinations = arena_push_array(arena, (uint64_t)count * 2, sizeof(uint32_t), 4);
+        error = output.sources == 0 || output.destinations == 0 ? TIER1_ALLOCATION_CAPACITY : TIER1_ALLOCATION_OK;
     }
     if (error == TIER1_ALLOCATION_OK)
     {
-        output.sources = arena_push_array(arena, (uint64_t)input->count * 2, sizeof(uint32_t), 4);
-        output.destinations = arena_push_array(arena, (uint64_t)input->count * 2, sizeof(uint32_t), 4);
-        retained = arena->length;
-        sources = arena_push_array(arena, input->count, sizeof(uint32_t), 4);
-        pending = arena_push_array(arena, input->count, sizeof(uint8_t), 1);
-        if (output.sources == 0 || output.destinations == 0 || sources == 0 || pending == 0)
+        __m512i readers_low = _mm512_load_si512(rows);
+        __m512i readers_high = _mm512_load_si512(rows + 16);
+        while (pending != 0)
         {
-            error = TIER1_ALLOCATION_CAPACITY;
-        }
-    }
-    if (error == TIER1_ALLOCATION_OK)
-    {
-        uint32_t remaining = 0;
-        for (uint32_t i = 0; i < input->count; i += 1)
-        {
-            sources[i] = input->sources[i];
-            pending[i] = input->sources[i] != input->destinations[i] ? 1 : 0;
-            remaining += pending[i];
-        }
-        while (remaining != 0)
-        {
-            uint32_t chosen = UINT32_MAX;
-            uint32_t first = UINT32_MAX;
-            for (uint32_t i = 0; chosen == UINT32_MAX && i < input->count; i += 1)
+            // A row with a pending reader is a destination still read; the lowest pending move outside them is ready.
+            const __m512i reading = _mm512_set1_epi32((int)pending);
+            const uint32_t read = tier1_move_mask(_mm512_test_epi32_mask(readers_low, reading), _mm512_test_epi32_mask(readers_high, reading));
+            const uint32_t ready = pending & ~read;
+            if (ready != 0)
             {
-                if (pending[i] != 0)
-                {
-                    first = first == UINT32_MAX ? i : first;
-                    bool used = false;
-                    for (uint32_t j = 0; j < input->count; j += 1)
-                    {
-                        used |= pending[j] != 0 && sources[j] == input->destinations[i];
-                    }
-                    if (!used)
-                    {
-                        chosen = i;
-                    }
-                }
-            }
-            if (chosen != UINT32_MAX)
-            {
-                output.sources[output.count] = sources[chosen];
-                output.destinations[output.count] = input->destinations[chosen];
-                output.count += 1;
-                pending[chosen] = 0;
-                remaining -= 1;
+                const uint32_t chosen = (uint32_t)__builtin_ctz(ready);
+                output.sources[output.count] = source[chosen];
+                output.destinations[output.count] = destination[chosen];
+                pending &= ~(UINT32_C(1) << chosen);
             }
             else
             {
-                const uint32_t preserved = input->destinations[first];
-                output.sources[output.count] = preserved;
+                // Every pending destination is read: disjoint cycles. Its readers read scratch from now on, which no
+                // destination is, so the saved destination's row empties.
+                const uint32_t first = (uint32_t)__builtin_ctz(pending);
+                output.sources[output.count] = destination[first];
                 output.destinations[output.count] = input->scratch;
-                output.count += 1;
-                for (uint32_t j = 0; j < input->count; j += 1)
+                uint32_t moved = rows[first] & pending;
+                while (moved != 0)
                 {
-                    if (pending[j] != 0 && sources[j] == preserved)
-                    {
-                        sources[j] = input->scratch;
-                    }
+                    source[__builtin_ctz(moved)] = input->scratch;
+                    moved &= moved - 1;
                 }
+                const uint32_t emptied = UINT32_C(1) << first;
+                readers_low = _mm512_mask_mov_epi32(readers_low, (__mmask16)emptied, _mm512_setzero_si512());
+                readers_high = _mm512_mask_mov_epi32(readers_high, (__mmask16)(emptied >> 16), _mm512_setzero_si512());
             }
+            output.count += 1;
         }
-        arena_pop_to(arena, retained);
         *result = output;
     }
-    else if (arena != 0)
+    else
     {
         arena_pop_to(arena, saved);
     }
     return error;
 }
 
-// Bottom-up merge sort of (opaque destination, original index). No location-sized table, hash collision worst
-// case, callback or input-dependent recursion. Each pass streams both runs and writes each key exactly once.
-static uint64_t* tier1_move_sort(uint64_t* keys, uint64_t* temporary, uint32_t count)
+// One stable radix pass of 8-bit digits over the keys' high halves, digit `shift` (32 to 56): conflict masks rank each
+// lane within its bucket, so only a bucket's last lane in a block moves its cursor, and stores use scalar addresses,
+// never Zen 5's slow scatter. Returns nothing; the caller swaps the buffers.
+static void tier1_move_radix_pass(const uint64_t* input, uint64_t* output, uint32_t count, uint32_t shift)
 {
-    for (uint32_t width = 1; width < count; width *= 2)
+    uint32_t histogram[256] = { 0 };
+    for (uint32_t phase = 0; phase < 2; phase += 1)
     {
-        for (uint32_t begin = 0; begin < count; begin += width * 2)
+        if (phase == 1)
         {
-            const uint32_t middle = begin + width < count ? begin + width : count;
-            const uint32_t end = middle + width < count ? middle + width : count;
-            uint32_t left = begin;
-            uint32_t right = middle;
-            for (uint32_t out = begin; out < end; out += 1)
+            uint32_t total = 0;
+            for (uint32_t bucket = 0; bucket < 256; bucket += 16)
             {
-                const bool take_left = right == end || (left < middle && keys[left] < keys[right]);
-                temporary[out] = take_left ? keys[left++] : keys[right++];
+                // A 16-bucket inclusive scan, then the running total.
+                __m512i counts = _mm512_loadu_si512(histogram + bucket);
+                counts = _mm512_add_epi32(counts, _mm512_maskz_permutexvar_epi32(0xfffe, _mm512_setr_epi32(0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14), counts));
+                counts = _mm512_add_epi32(counts, _mm512_maskz_permutexvar_epi32(0xfffc, _mm512_setr_epi32(0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13), counts));
+                counts = _mm512_add_epi32(counts, _mm512_maskz_permutexvar_epi32(0xfff0, _mm512_setr_epi32(0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11), counts));
+                counts = _mm512_add_epi32(counts, _mm512_maskz_permutexvar_epi32(0xff00, _mm512_setr_epi32(0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7), counts));
+                const __m512i exclusive = _mm512_sub_epi32(counts, _mm512_loadu_si512(histogram + bucket));
+                _mm512_storeu_si512(histogram + bucket, _mm512_add_epi32(exclusive, _mm512_set1_epi32((int)total)));
+                total += (uint32_t)_mm512_reduce_add_epi32(_mm512_sub_epi32(counts, exclusive));
             }
         }
-        uint64_t* swap = keys;
-        keys = temporary;
-        temporary = swap;
-    }
-    return keys;
-}
-
-// Only newly ready moves enter the minimum heap; removing a move updates the count of its one source.
-static void tier1_move_ready_push(uint32_t* ready, uint32_t* count, uint32_t move)
-{
-    uint32_t position = *count;
-    *count += 1;
-    while (position != 0 && ready[(position - 1) / 2] > move)
-    {
-        ready[position] = ready[(position - 1) / 2];
-        position = (position - 1) / 2;
-    }
-    ready[position] = move;
-}
-
-static uint32_t tier1_move_ready_pop(uint32_t* ready, uint32_t* count)
-{
-    const uint32_t result = ready[0];
-    *count -= 1;
-    const uint32_t last = ready[*count];
-    uint32_t position = 0;
-    bool placed = false;
-    while (!placed && position * 2 + 1 < *count)
-    {
-        uint32_t child = position * 2 + 1;
-        if (child + 1 < *count && ready[child + 1] < ready[child])
+        for (uint32_t begin = 0; begin < count; begin += 16)
         {
-            child += 1;
-        }
-        placed = last <= ready[child];
-        if (!placed)
-        {
-            ready[position] = ready[child];
-            position = child;
+            const uint32_t lanes = count - begin < 16 ? count - begin : 16;
+            const uint32_t first = lanes < 8 ? lanes : 8;
+            const uint32_t second = lanes > 8 ? lanes - 8 : 0;
+            const __mmask16 mask = (__mmask16)((1u << lanes) - 1);
+            const __m512i low = _mm512_maskz_loadu_epi64((__mmask8)((1u << first) - 1), input + begin);
+            const __m512i high = _mm512_maskz_loadu_epi64((__mmask8)((1u << second) - 1), input + begin + first);
+            const __m512i amount = _mm512_set1_epi64(shift);
+            const __m256i a = _mm512_cvtepi64_epi32(_mm512_srlv_epi64(low, amount));
+            const __m256i b = _mm512_cvtepi64_epi32(_mm512_srlv_epi64(high, amount));
+            const __m512i digits = _mm512_and_si512(_mm512_inserti64x4(_mm512_castsi256_si512(a), b, 1), _mm512_set1_epi32(255));
+            const __m512i conflicts = _mm512_maskz_conflict_epi32(mask, digits);
+            const __m512i ranks = _mm512_popcnt_epi32(conflicts);
+            const uint32_t earlier = (uint32_t)_mm512_reduce_or_epi32(conflicts);
+            uint32_t buckets[16];
+            uint32_t offsets[16];
+            _mm512_storeu_si512(buckets, digits);
+            _mm512_storeu_si512(offsets, ranks);
+            if (phase == 1)
+            {
+                for (uint32_t lane = 0; lane < lanes; lane += 1)
+                {
+                    output[histogram[buckets[lane]] + offsets[lane]] = input[begin + lane];
+                }
+            }
+            uint32_t last = (uint32_t)mask & ~earlier;
+            while (last != 0)
+            {
+                const uint32_t lane = (uint32_t)__builtin_ctz(last);
+                histogram[buckets[lane]] += offsets[lane] + 1;
+                last &= last - 1;
+            }
         }
     }
-    ready[position] = last;
-    return result;
 }
 
-static __attribute__((unused)) Tier1AllocationError tier1_resolve_moves_indexed(const Tier1ParallelMoves* input, Arena* arena, Tier1ResolvedMoves* result)
+// The ready moves as a three-level bitset: a word of level 1 has a bit for each nonzero word of level 0, and level 2
+// for level 1's. The lowest ready move is three tzcnts below the first nonzero top word, at most four for 2^20 moves.
+typedef struct Tier1MoveReady Tier1MoveReady;
+struct Tier1MoveReady
 {
-    Tier1AllocationError error = TIER1_ALLOCATION_INVALID;
-    const uint64_t saved = arena != 0 ? arena->length : 0;
+    uint64_t* level[3];
+    uint32_t words[3];
+};
+
+static void tier1_move_ready_set(Tier1MoveReady* ready, uint32_t move)
+{
+    ready->level[0][move >> 6] |= UINT64_C(1) << (move & 63);
+    ready->level[1][move >> 12] |= UINT64_C(1) << ((move >> 6) & 63);
+    ready->level[2][move >> 18] |= UINT64_C(1) << ((move >> 12) & 63);
+}
+
+// Takes the lowest ready move off; UINT32_MAX when none is ready.
+static uint32_t tier1_move_ready_take(Tier1MoveReady* ready)
+{
+    uint32_t top = 0;
+    while (top < ready->words[2] && ready->level[2][top] == 0)
+    {
+        top += 1;
+    }
+    uint32_t move = UINT32_MAX;
+    if (top < ready->words[2])
+    {
+        const uint32_t middle = top * 64 + (uint32_t)__builtin_ctzll(ready->level[2][top]);
+        const uint32_t word = middle * 64 + (uint32_t)__builtin_ctzll(ready->level[1][middle]);
+        move = word * 64 + (uint32_t)__builtin_ctzll(ready->level[0][word]);
+        ready->level[0][word] &= ready->level[0][word] - 1;
+        const uint64_t emptied1 = ready->level[0][word] == 0 ? UINT64_C(1) << (word & 63) : 0;
+        ready->level[1][middle] &= ~emptied1;
+        const uint64_t emptied2 = ready->level[1][middle] == 0 ? UINT64_C(1) << (middle & 63) : 0;
+        ready->level[2][top] &= ~emptied2;
+    }
+    return move;
+}
+
+// More than 32 moves, up to 2^20. Masked 16-lane steps validate and pack (destination, identity bit 31 | input index)
+// keys, which a vector radix sort orders by destination (only the digits that differ). Adjacent equal destinations
+// are invalid. Each pending move's writer, the move whose destination is its source, is a 16-lane branchless binary
+// search of the sorted destinations by gathers; its writer's reader count takes it by conflict masks. The ready moves
+// are a bitset (Tier1MoveReady), and the cycle cursor steps 16 moves at a time. The emission itself is the ordered
+// part: each choice depends on the one before (docs/tier1-allocation.md).
+static Tier1AllocationError tier1_resolve_moves_wide(const Tier1ParallelMoves* input, Arena* arena, Tier1ResolvedMoves* result)
+{
+    const uint64_t saved = arena->length;
+    const uint32_t count = input->count;
     Tier1ResolvedMoves output = { 0 };
-    uint64_t* keys = 0;
-    uint64_t* temporary = 0;
-    uint32_t* dependencies = 0;
-    uint32_t* uses = 0;
-    uint32_t* ready = 0;
-    uint64_t retained = saved;
-    if (input != 0 && arena != 0 && result != 0 && input->count <= BUSTER_TIER1_ALLOCATE_MAX_INTERVALS && (input->count == 0 || (input->sources != 0 && input->destinations != 0)))
+    output.sources = arena_push_array(arena, (uint64_t)count * 2, sizeof(uint32_t), 4);
+    output.destinations = arena_push_array(arena, (uint64_t)count * 2, sizeof(uint32_t), 4);
+    const uint64_t retained = arena->length;
+    const uint32_t words0 = (count + 63) / 64;
+    const uint32_t words1 = (words0 + 63) / 64;
+    const uint32_t words2 = (words1 + 63) / 64;
+    uint64_t* keys = arena_push_array(arena, count, sizeof(uint64_t), 8);
+    uint64_t* temporary = arena_push_array(arena, count, sizeof(uint64_t), 8);
+    uint32_t* writers = arena_push_array(arena, count, sizeof(uint32_t), 4);
+    uint32_t* uses = arena_push_array(arena, count, sizeof(uint32_t), 4);
+    uint64_t* bits = arena_push_array(arena, (uint64_t)words0 + words1 + words2, sizeof(uint64_t), 8);
+    Tier1AllocationError error = output.sources == 0 || output.destinations == 0 || keys == 0 || temporary == 0 || writers == 0 || uses == 0 || bits == 0 ?
+        TIER1_ALLOCATION_CAPACITY : TIER1_ALLOCATION_OK;
+    uint32_t varying = 0;
+    if (error == TIER1_ALLOCATION_OK)
     {
-        error = TIER1_ALLOCATION_OK;
-        output.sources = arena_push_array(arena, (uint64_t)input->count * 2, sizeof(uint32_t), 4);
-        output.destinations = arena_push_array(arena, (uint64_t)input->count * 2, sizeof(uint32_t), 4);
-        retained = arena->length;
-        keys = arena_push_array(arena, input->count, sizeof(uint64_t), 8);
-        temporary = arena_push_array(arena, input->count, sizeof(uint64_t), 8);
-        dependencies = arena_push_array(arena, input->count, sizeof(uint32_t), 4);
-        uses = arena_push_array(arena, input->count, sizeof(uint32_t), 4);
-        ready = arena_push_array(arena, input->count, sizeof(uint32_t), 4);
-        if (output.sources == 0 || output.destinations == 0 || keys == 0 || temporary == 0 || dependencies == 0 || uses == 0 || ready == 0)
+        const __m512i scratch = _mm512_set1_epi32((int)input->scratch);
+        const __m512i lane = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+        const __m512i first = _mm512_set1_epi32((int)input->destinations[0]);
+        __m512i differ = _mm512_setzero_si512();
+        __mmask16 invalid = 0;
+        for (uint32_t i = 0; i < count; i += 16)
         {
-            error = TIER1_ALLOCATION_CAPACITY;
+            const uint32_t left = count - i;
+            const __mmask16 mask = left >= 16 ? 0xffff : (__mmask16)((1u << left) - 1);
+            const __m512i sources = _mm512_maskz_loadu_epi32(mask, input->sources + i);
+            const __m512i destinations = _mm512_maskz_loadu_epi32(mask, input->destinations + i);
+            invalid |= (__mmask16)((_mm512_cmpeq_epi32_mask(sources, scratch) | _mm512_cmpeq_epi32_mask(destinations, scratch)) & mask);
+            const __mmask16 identity = _mm512_mask_cmpeq_epi32_mask(mask, sources, destinations);
+            differ = _mm512_or_si512(differ, _mm512_maskz_xor_epi32(mask, destinations, first));
+            // An identity move's reader count is UINT32_MAX: it is never pending.
+            _mm512_mask_storeu_epi32(uses + i, mask, _mm512_maskz_set1_epi32(identity, -1));
+            const __m512i places = _mm512_mask_or_epi32(_mm512_add_epi32(lane, _mm512_set1_epi32((int)i)), identity, _mm512_add_epi32(lane, _mm512_set1_epi32((int)i)), _mm512_set1_epi32(INT32_MIN));
+            const __m512i low = _mm512_unpacklo_epi32(places, destinations);
+            const __m512i high = _mm512_unpackhi_epi32(places, destinations);
+            // unpack interleaves within 128-bit lanes; put the eight keys of each half back in input order.
+            const __m512i ordered_low = _mm512_permutex2var_epi64(low, _mm512_setr_epi64(0, 1, 8, 9, 2, 3, 10, 11), high);
+            const __m512i ordered_high = _mm512_permutex2var_epi64(low, _mm512_setr_epi64(4, 5, 12, 13, 6, 7, 14, 15), high);
+            _mm512_mask_storeu_epi64(keys + i, (__mmask8)mask, ordered_low);
+            _mm512_mask_storeu_epi64(keys + i + 8, (__mmask8)(mask >> 8), ordered_high);
         }
+        varying = (uint32_t)_mm512_reduce_or_epi32(differ);
+        error = invalid != 0 ? TIER1_ALLOCATION_INVALID : TIER1_ALLOCATION_OK;
     }
     if (error == TIER1_ALLOCATION_OK)
     {
-        const __m256i scratch = _mm256_set1_epi32((int)input->scratch);
-        const __m512i indices = _mm512_setr_epi64(0, 1, 2, 3, 4, 5, 6, 7);
-        for (uint32_t i = 0; error == TIER1_ALLOCATION_OK && i < input->count; i += 8)
+        for (uint32_t pass = 0; pass < 4; pass += 1)
         {
-            const uint32_t left = input->count - i;
-            const __mmask8 mask = left >= 8 ? 0xff : (__mmask8)((1u << left) - 1);
-            const __m256i sources = _mm256_maskz_loadu_epi32(mask, input->sources + i);
-            const __m256i destinations = _mm256_maskz_loadu_epi32(mask, input->destinations + i);
-            const __mmask8 invalid = _mm256_cmpeq_epi32_mask(sources, scratch) | _mm256_cmpeq_epi32_mask(destinations, scratch);
-            if ((invalid & mask) != 0)
+            if (((varying >> (pass * 8)) & 255) != 0)
             {
-                error = TIER1_ALLOCATION_INVALID;
+                tier1_move_radix_pass(keys, temporary, count, 32 + pass * 8);
+                uint64_t* swap = keys;
+                keys = temporary;
+                temporary = swap;
             }
-            const __m256i pending = _mm256_maskz_set1_epi32(_mm256_cmpeq_epi32_mask(sources, destinations), -1);
-            _mm256_mask_storeu_epi32(uses + i, mask, pending);
-            const __m512i locations = _mm512_slli_epi64(_mm512_cvtepu32_epi64(destinations), 32);
-            const __m512i positions = _mm512_add_epi64(indices, _mm512_set1_epi64(i));
-            _mm512_mask_storeu_epi64(keys + i, mask, _mm512_or_si512(locations, positions));
         }
+        // Adjacent equal destinations.
+        __mmask8 duplicate = 0;
+        for (uint32_t i = 0; i + 1 < count; i += 8)
+        {
+            const uint32_t pairs = count - 1 - i < 8 ? count - 1 - i : 8;
+            const __mmask8 mask = (__mmask8)((1u << pairs) - 1);
+            const __m512i left = _mm512_srli_epi64(_mm512_maskz_loadu_epi64(mask, keys + i), 32);
+            const __m512i right = _mm512_srli_epi64(_mm512_maskz_loadu_epi64(mask, keys + i + 1), 32);
+            duplicate |= _mm512_mask_cmpeq_epi64_mask(mask, left, right);
+        }
+        error = duplicate != 0 ? TIER1_ALLOCATION_INVALID : TIER1_ALLOCATION_OK;
     }
     if (error == TIER1_ALLOCATION_OK)
     {
-        keys = tier1_move_sort(keys, temporary, input->count);
-        for (uint32_t i = 1; error == TIER1_ALLOCATION_OK && i < input->count; i += 1)
+        // Each pending move's writer by a lower bound over the sorted destinations, the keys' high dwords.
+        const int* const halves = (const int*)keys;
+        uint32_t steps[24];
+        uint32_t step_count = 0;
+        for (uint32_t length = count; length > 1; length -= length / 2)
         {
-            if ((keys[i - 1] >> 32) == (keys[i] >> 32))
+            steps[step_count++] = length / 2;
+        }
+        const __m512i last = _mm512_set1_epi32((int)count - 1);
+        for (uint32_t i = 0; i < count; i += 16)
+        {
+            const uint32_t left = count - i;
+            const __mmask16 mask = left >= 16 ? 0xffff : (__mmask16)((1u << left) - 1);
+            const __m512i sources = _mm512_maskz_loadu_epi32(mask, input->sources + i);
+            const __mmask16 pending = _mm512_mask_cmpneq_epi32_mask(mask, _mm512_maskz_loadu_epi32(mask, uses + i), _mm512_set1_epi32(-1));
+            __m512i base = _mm512_setzero_si512();
+            for (uint32_t s = 0; s < step_count; s += 1)
             {
-                error = TIER1_ALLOCATION_INVALID;
+                const __m512i probe = _mm512_add_epi32(base, _mm512_set1_epi32((int)steps[s]));
+                const __m512i value = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), pending, _mm512_add_epi32(_mm512_add_epi32(probe, probe), _mm512_set1_epi32(1)), halves, 4);
+                base = _mm512_mask_add_epi32(base, _mm512_cmplt_epu32_mask(value, sources), base, _mm512_set1_epi32((int)steps[s]));
+            }
+            const __m512i value = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), pending, _mm512_add_epi32(_mm512_add_epi32(base, base), _mm512_set1_epi32(1)), halves, 4);
+            base = _mm512_min_epu32(_mm512_mask_add_epi32(base, _mm512_cmplt_epu32_mask(value, sources), base, _mm512_set1_epi32(1)), last);
+            const __m512i found = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), pending, _mm512_add_epi32(base, base), halves, 4);
+            const __m512i at = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), pending, _mm512_add_epi32(_mm512_add_epi32(base, base), _mm512_set1_epi32(1)), halves, 4);
+            // A writer is a pending move (its key's bit 31 clear) whose destination is the source.
+            const __mmask16 owned = _mm512_mask_cmpeq_epi32_mask(pending, at, sources) & ~_mm512_movepi32_mask(found);
+            _mm512_mask_storeu_epi32(writers + i, mask, _mm512_mask_mov_epi32(_mm512_set1_epi32(-1), owned, found));
+        }
+        // Reader counts: a block's lanes naming one writer add together, through the last of them.
+        for (uint32_t i = 0; i < count; i += 16)
+        {
+            const uint32_t left = count - i;
+            const __mmask16 mask = left >= 16 ? 0xffff : (__mmask16)((1u << left) - 1);
+            const __m512i writer = _mm512_maskz_loadu_epi32(mask, writers + i);
+            const __mmask16 named = _mm512_mask_cmpneq_epi32_mask(mask, writer, _mm512_set1_epi32(-1));
+            const __m512i conflicts = _mm512_maskz_conflict_epi32(named, writer);
+            const uint32_t earlier = (uint32_t)_mm512_reduce_or_epi32(conflicts);
+            uint32_t targets[16];
+            uint32_t ranks[16];
+            _mm512_storeu_si512(targets, writer);
+            _mm512_storeu_si512(ranks, _mm512_popcnt_epi32(conflicts));
+            uint32_t lasts = (uint32_t)named & ~earlier;
+            while (lasts != 0)
+            {
+                const uint32_t l = (uint32_t)__builtin_ctz(lasts);
+                uses[targets[l]] += ranks[l] + 1;
+                lasts &= lasts - 1;
             }
         }
-    }
-    if (error == TIER1_ALLOCATION_OK)
-    {
-        for (uint32_t i = 0; i < input->count; i += 1)
-        {
-            uint32_t begin = 0;
-            uint32_t end = input->count;
-            const uint32_t source = input->sources[i];
-            while (begin < end)
-            {
-                const uint32_t middle = begin + (end - begin) / 2;
-                if ((keys[middle] >> 32) < source)
-                {
-                    begin = middle + 1;
-                }
-                else
-                {
-                    end = middle;
-                }
-            }
-            uint32_t dependency = begin < input->count && (keys[begin] >> 32) == source ? (uint32_t)keys[begin] : UINT32_MAX;
-            dependency = dependency != UINT32_MAX && uses[dependency] != UINT32_MAX ? dependency : UINT32_MAX;
-            dependencies[i] = dependency;
-            if (uses[i] != UINT32_MAX && dependency != UINT32_MAX)
-            {
-                uses[dependency] += 1;
-            }
-        }
-        uint32_t ready_count = 0;
+        Tier1MoveReady ready = {
+            .level = { bits, bits + words0, bits + words0 + words1 },
+            .words = { words0, words1, words2 },
+        };
+        memset(bits, 0, ((uint64_t)words0 + words1 + words2) * 8);
         uint32_t remaining = 0;
-        for (uint32_t i = 0; i < input->count; i += 1)
+        for (uint32_t i = 0; i < count; i += 16)
         {
-            remaining += uses[i] != UINT32_MAX;
-            if (uses[i] == 0)
+            const uint32_t left = count - i;
+            const __mmask16 mask = left >= 16 ? 0xffff : (__mmask16)((1u << left) - 1);
+            const __m512i counts = _mm512_maskz_loadu_epi32(mask, uses + i);
+            remaining += (uint32_t)__builtin_popcount(_mm512_mask_cmpneq_epi32_mask(mask, counts, _mm512_set1_epi32(-1)));
+            uint32_t zero = _mm512_mask_cmpeq_epi32_mask(mask, counts, _mm512_setzero_si512());
+            while (zero != 0)
             {
-                // Increasing input indices already form a minimum heap.
-                ready[ready_count++] = i;
+                tier1_move_ready_set(&ready, i + (uint32_t)__builtin_ctz(zero));
+                zero &= zero - 1;
             }
         }
-        uint32_t first = 0;
+        uint32_t cursor = 0;
         uint32_t preserved = UINT32_MAX;
         while (remaining != 0)
         {
-            if (ready_count == 0)
+            uint32_t chosen = tier1_move_ready_take(&ready);
+            if (chosen == UINT32_MAX)
             {
-                while (uses[first] == UINT32_MAX)
+                // Every residual destination has exactly one reader: disjoint cycles. Save the lowest pending one; its
+                // one reader reads scratch, and only that reader names it as writer from now on, so `preserved` needs
+                // no reset. The cursor only advances: moves before it are done.
+                uint32_t found = 0;
+                while (found == 0)
                 {
-                    first += 1;
+                    const uint32_t left = count - cursor;
+                    const __mmask16 mask = left >= 16 ? 0xffff : (__mmask16)((1u << left) - 1);
+                    found = _mm512_mask_cmpneq_epi32_mask(mask, _mm512_maskz_loadu_epi32(mask, uses + cursor), _mm512_set1_epi32(-1));
+                    cursor += found == 0 ? 16 : (uint32_t)__builtin_ctz(found);
                 }
-                // Every residual destination is used, and each move has one source. Thus every residual use count
-                // is exactly one: disjoint cycles, with fan-out already drained. Only one consumer needs scratch.
-                preserved = first;
-                output.sources[output.count] = input->destinations[first];
+                chosen = cursor;
+                preserved = chosen;
+                output.sources[output.count] = input->destinations[chosen];
                 output.destinations[output.count] = input->scratch;
                 output.count += 1;
-                uses[first] = 0;
-                tier1_move_ready_push(ready, &ready_count, first);
             }
-            const uint32_t chosen = tier1_move_ready_pop(ready, &ready_count);
-            const uint32_t dependency = dependencies[chosen];
-            const bool from_scratch = dependency != UINT32_MAX && dependency == preserved;
+            const uint32_t writer = writers[chosen];
+            const bool from_scratch = writer != UINT32_MAX && writer == preserved;
             output.sources[output.count] = from_scratch ? input->scratch : input->sources[chosen];
             output.destinations[output.count] = input->destinations[chosen];
             output.count += 1;
             uses[chosen] = UINT32_MAX;
             remaining -= 1;
-            if (from_scratch)
+            if (!from_scratch && writer != UINT32_MAX)
             {
-                preserved = UINT32_MAX;
-            }
-            else if (dependency != UINT32_MAX)
-            {
-                uses[dependency] -= 1;
-                if (uses[dependency] == 0)
+                uses[writer] -= 1;
+                if (uses[writer] == 0)
                 {
-                    tier1_move_ready_push(ready, &ready_count, dependency);
+                    tier1_move_ready_set(&ready, writer);
                 }
             }
         }
         arena_pop_to(arena, retained);
         *result = output;
     }
-    else if (arena != 0)
+    if (error != TIER1_ALLOCATION_OK)
     {
         arena_pop_to(arena, saved);
     }
     return error;
 }
 
+// Sequentializes a parallel assignment (docs/tier1-allocation.md): the register form up to 32 moves, the wide form
+// beyond; each is the only code for its range, and both give the policy's one order.
 static __attribute__((unused)) Tier1AllocationError tier1_resolve_moves(const Tier1ParallelMoves* input, Arena* arena, Tier1ResolvedMoves* result)
 {
-    const bool small = input != 0 && input->count <= BUSTER_TIER1_MOVE_SMALL_COUNT;
-    const Tier1AllocationError error = small ? tier1_resolve_moves_scalar(input, arena, result) : tier1_resolve_moves_indexed(input, arena, result);
+    Tier1AllocationError error = TIER1_ALLOCATION_INVALID;
+    if (tier1_resolve_moves_accepts(input, arena, result))
+    {
+        error = input->count <= BUSTER_TIER1_MOVE_REGISTER_COUNT ? tier1_resolve_moves_register(input, arena, result) : tier1_resolve_moves_wide(input, arena, result);
+    }
     return error;
 }

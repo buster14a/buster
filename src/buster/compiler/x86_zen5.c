@@ -15,7 +15,7 @@
 //   an absent or unmeasured value is BUSTER_X86_COST_UNKNOWN, never zero.
 // - Cases whose rows agree in every column and mask share one dense ID (x86_zen5_initialize). A record resolves to its
 //   ID once (x86_zen5_id); consumers carry the byte ID as a column and look up 32 at a time through eight ZMM
-//   registers (x86_zen5_lookup: four banks of 64 IDs, vpermi2w), with x86_zen5_lookup_scalar as the exact twin.
+//   registers (x86_zen5_lookup: four banks of 64 IDs, vpermi2w).
 // - An immediate's value, an EVEX zeroing opmask on registers or rounding decoration, a segment override and a fixup mark
 //   don't change a record's case (docs/x86-zen5.md has the measurements that support it); a merging opmask
 //   (X86_COST_MASKED) and any opmask on memory (X86_COST_MASKED_MEMORY) do.
@@ -297,18 +297,6 @@ static uint8_t x86_zen5_id(const X86Instruction* instruction)
     return id;
 }
 
-// Every byte indexes a slot; the slots past the rows are unknown. Inputs and outputs are disjoint bounded slices; zero
-// count touches neither. Columns must be one of X86CostColumn; keeping that invariant out of the loop is deliberate.
-static __attribute__((noinline, unused)) void x86_zen5_lookup_scalar(const uint8_t* restrict ids, uint64_t count, X86CostColumn column, uint16_t* restrict output)
-{
-    const uint16_t* table = x86_zen5_columns[column];
-    #pragma clang loop vectorize(disable) interleave(disable)
-    for (uint64_t i = 0; i < count; i += 1)
-    {
-        output[i] = table[ids[i]];
-    }
-}
-
 // 32 IDs: a 64-entry permute per bank (index bits 0 to 5), the banks chosen by bits 6 and 7.
 static inline __m512i x86_zen5_lookup_keys(__m512i keys, const __m512i* banks)
 {
@@ -323,6 +311,9 @@ static inline __m512i x86_zen5_lookup_keys(__m512i keys, const __m512i* banks)
     return _mm512_mask_blend_epi16(bit7, low, high);
 }
 
+// Each ID's entry of the column, 32 IDs at a time. Every byte indexes a slot; the slots past the rows are unknown. Inputs
+// and outputs are disjoint bounded slices, read and written with masked loads and stores past the last full 32; zero
+// count touches neither. Columns must be one of X86CostColumn; keeping that invariant out of the loop is deliberate.
 static __attribute__((noinline)) void x86_zen5_lookup(const uint8_t* restrict ids, uint64_t count, X86CostColumn column, uint16_t* restrict output)
 {
     __m512i banks[8];

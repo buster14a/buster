@@ -746,7 +746,7 @@ sources/classify: a mask that isn't constant@c962a8ed	f0150011c11c469c
 sources/classify: a negative mask@0d617322	b7460c59cbf9905c
 sources/classify: an unsigned char mask of 200@3f7e0d3a	cdfe7698b5f11c92
 sources/classify: canonicalize in a static initializer@f7c0af67	69831307941133b5
-sources/classify: canonicalize of a pointer@0f4489fa	389c63d53497bd6c
+sources/classify: canonicalize of a pointer@0f4489fa	53bdce5d4744f1a8
 sources/classify: folds in constant expressions@878c768b	15036c0e7469b804
 sources/classify: isfpclass of a complex@eb40164a	f1410f378b083aab
 sources/classify: isfpclass of a vector@bda569f3	3f687b8a675ae777
@@ -757,7 +757,7 @@ sources/classify: issubnormal of a struct@692cf6cd	8122da28d199b3c1
 sources/classify: iszero of two@bc9b5221	1dea34b48b9864d8
 sources/classify: masks of other integer types@1f6d3f6a	e358f902c86eed78
 sources/classify: result types@6339484e	3da8af2395bfe5e4
-sources/classify: signbitf of a pointer@075fdf8d	074596bea1981b7a
+sources/classify: signbitf of a pointer@075fdf8d	b257079bda0c0036
 sources/cleanup function of a result@5261f30b	f14b84b8290b8965
 sources/cleanup function through a typedef@483843af	f14b84b8290b8965
 sources/cleanup ignored on a file-scope variable@85be0ca2	f14b84b8290b8965
@@ -1170,7 +1170,7 @@ sources/generic: dump_struct's value@457e9395	aff9c6e53d5fd3e4
 sources/generic: dump_struct@300d29fe	6a88bf320d6c6425
 sources/generic: dwarf_cfa of a level@b79744fc	472209b26c7ce44e
 sources/generic: eh_return and constant strings@18583e03	eeed0b2ef512417c
-sources/generic: eh_return of a pointer offset@d7bb41da	02a148c1c2af7363
+sources/generic: eh_return of a pointer offset@d7bb41da	ef36e91a81bea783
 sources/generic: eh_return of one@8ae997d4	50c340614800f1ee
 sources/generic: eh_return's value@d9140605	48ff33ecbaa4bd6f
 sources/generic: eh_return_data_regno of a double@13a59e44	cfe2fc9a535936a5
@@ -1290,7 +1290,7 @@ sources/generic: verbose_trap of a member array@c540ef4d	d7282d062972d695
 sources/generic: verbose_trap of an automatic const array@bfa55d04	2ec3c1b2c0c89cb4
 sources/generic: verbose_trap of one argument@a69574ed	a583e9a56216d8ef
 sources/generic: warn_memset_zero_len of one@e6fd6c8d	dffe49c1b2f561ac
-sources/generic: xray of an integer for its string@ef9c21e0	eac63ff9716c9532
+sources/generic: xray of an integer for its string@ef9c21e0	71e389ebf0357c82
 sources/generic: xray typed event of two@d24c7002	d89c94bfa7b641b3
 sources/generic: zos_va_copy of one@301d4ca9	ae631252cc96791c
 sources/generic: zos_va_end's value@8b085edf	64e32f9a78981b6f

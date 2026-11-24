@@ -99,7 +99,6 @@ static void tier1_storage_tests(Tier1EmitTest* test)
                     const Tier1EmitOptions options = {
                         .certify = true,
                         .register_mask = pressure == 0 ? (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI) : tier1_liveness_register_mask(),
-                        .vector = true,
                         .rematerialize = pressure != 0,
                     };
                     Tier1EmitResult emitted;
@@ -245,7 +244,6 @@ static void tier1_storage_phi_tests(Tier1EmitTest* test)
                     const Tier1EmitOptions options = {
                         .certify = true,
                         .register_mask = pressure == 0 ? (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI) : tier1_liveness_register_mask(),
-                        .vector = true,
                         .rematerialize = pressure != 0,
                     };
                     Tier1EmitResult emitted;
@@ -339,7 +337,6 @@ static void tier1_storage_expression_tests(Tier1EmitTest* test)
                     const Tier1EmitOptions options = {
                         .certify = true,
                         .register_mask = pressure == 0 ? (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI) : tier1_liveness_register_mask(),
-                        .vector = true,
                         .rematerialize = pressure != 0,
                     };
                     Tier1EmitResult emitted;
@@ -440,7 +437,6 @@ static void tier1_storage_narrow_arithmetic_tests(Tier1EmitTest* test)
                         const Tier1EmitOptions options = {
                             .certify = true,
                             .register_mask = pressure == 0 ? (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI) : tier1_liveness_register_mask(),
-                            .vector = true,
                             .rematerialize = pressure != 0,
                         };
                         Tier1EmitResult emitted;
@@ -553,7 +549,6 @@ static void tier1_storage_scoped_tests(Tier1EmitTest* test)
                         .diagnostic = &diagnostic,
                         .certify = true,
                         .register_mask = pressure == 0 ? (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI) : tier1_liveness_register_mask(),
-                        .vector = true,
                         .rematerialize = pressure != 0,
                     };
                     Tier1EmitResult emitted;
@@ -654,7 +649,6 @@ static void tier1_storage_loop_state_tests(Tier1EmitTest* test)
                     const Tier1EmitOptions options = {
                         .certify = true,
                         .register_mask = pressure == 0 ? (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI) : tier1_liveness_register_mask(),
-                        .vector = true,
                         .rematerialize = pressure != 0,
                     };
                     Tier1EmitResult emitted;
@@ -787,7 +781,6 @@ static void tier1_storage_parameter_tests(Tier1EmitTest* test)
                         .diagnostic = &diagnostic,
                         .certify = true,
                         .register_mask = pressure == 0 ? (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI) : tier1_liveness_register_mask(),
-                        .vector = true,
                         .rematerialize = pressure != 0,
                     };
                     Tier1EmitResult emitted;
@@ -920,7 +913,6 @@ static void tier1_storage_midpoint_tests(Tier1EmitTest* test)
                     const Tier1EmitOptions options = {
                         .certify = true,
                         .register_mask = pressure == 0 ? (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI) : tier1_liveness_register_mask(),
-                        .vector = true,
                         .rematerialize = pressure != 0,
                     };
                     Tier1EmitResult emitted;

@@ -84,6 +84,11 @@ object of it has no code or symbol of the two dead callees, the same code as
 without `-g`, and linked, the same frames, values and breakpoints (2). The
 instances' origins are abstract instances (no code): gdb 18 drops an instance
 whose origin is the out-of-line copy, whose `DW_AT_low_pc` it inherits. Its
+forward fixture (`check_debug_tier1_forward_test`, #2542) is the same program
+with the callees defined after `main`, so that every instance's origin, and its
+parameters' and locals', is an abstract instance the writer reaches after it,
+patched once every DIE is written: its DWARF verifies, and gdb shows the same
+frames, values and local as in the fixture written in order. Its
 header fixture (`check_debug_tier1_header_test`) expands a header's two static
 callees, the inner into the outer there and both into the main file's
 functions: gdb shows each frame at its line in its own file, in an executable

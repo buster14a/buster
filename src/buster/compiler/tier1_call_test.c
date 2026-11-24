@@ -1204,7 +1204,7 @@ static bool tier1_call_use_registers(Tier1EmitTest* test, const Tier1SelectPlan*
     return named;
 }
 
-static void tier1_call_compile(Tier1EmitTest* test, const Tier1CallFixture* fixture, bool vector, bool rematerialize, uint32_t frame_flags)
+static void tier1_call_compile(Tier1EmitTest* test, const Tier1CallFixture* fixture, bool rematerialize, uint32_t frame_flags)
 {
     test->terms = fixture->terms;
     test->width = fixture->width;
@@ -1228,7 +1228,6 @@ static void tier1_call_compile(Tier1EmitTest* test, const Tier1CallFixture* fixt
             .certify = true,
             .register_mask = fixture->void_return ? 0 : fixture->narrow_return ? 1u << X86_REGISTER_RAX : tier1_liveness_register_mask(),
             .frame_flags = frame_flags,
-            .vector = vector,
             .rematerialize = rematerialize,
         };
         Tier1EmitResult emitted;
@@ -1237,7 +1236,7 @@ static void tier1_call_compile(Tier1EmitTest* test, const Tier1CallFixture* fixt
         tier1_emit_test_expect(test, error == TIER1_EMIT_OK, "direct-call liveness/allocation/frame emission succeeds");
         if (error != TIER1_EMIT_OK && test->failures < 20)
         {
-            fprintf(stderr, "  call emission error=%u node=%u arguments=%u permutation=%u memory=%u vector=%u remat=%u\n", error, node, fixture->arguments, fixture->permutation, fixture->memory, vector, rematerialize);
+            fprintf(stderr, "  call emission error=%u node=%u arguments=%u permutation=%u memory=%u remat=%u\n", error, node, fixture->arguments, fixture->permutation, fixture->memory, rematerialize);
         }
         tier1_emit_test_expect(test, test->scratch.length == scratch_mark, "direct-call emission restores scratch");
         if (error == TIER1_EMIT_OK)
@@ -1419,7 +1418,6 @@ static void tier1_call_failures(Tier1EmitTest* test)
         const Tier1EmitOptions options = {
             .certify = true,
             .register_mask = tier1_liveness_register_mask(),
-            .vector = true,
         };
         Tier1EmitResult success;
         ready = tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &success, &node) == TIER1_EMIT_OK;
@@ -1494,7 +1492,7 @@ static void tier1_call_failures(Tier1EmitTest* test)
             ready = ir_verify(&function, &test->scratch, 0).error == IR_OK;
             tier1_emit_test_expect(test, ready, "unsupported-call fixture is valid semantic IR");
         }
-        for (uint32_t vector = 0; ready && vector < 2; vector += 1)
+        if (ready)
         {
             Tier1SelectPlan rejected;
             Tier1SelectPlan before;
@@ -1533,13 +1531,10 @@ static void tier1_call_cases(Tier1EmitTest* test)
                 fixture.variadic = variadic != 0;
                 const bool ready = tier1_call_fixture(test, &fixture);
                 tier1_emit_test_expect(test, ready, "construct direct-call shuffle and pressure fixture");
-                for (uint32_t vector = 0; ready && vector < 2; vector += 1)
+                for (uint32_t rematerialize = 0; ready && rematerialize < 2; rematerialize += 1)
                 {
-                    for (uint32_t rematerialize = 0; rematerialize < 2; rematerialize += 1)
-                    {
-                        const uint32_t flags = shape % 3 == 0 ? 0 : shape % 3 == 1 ? BUSTER_TIER1_FRAME_KEEP_POINTER : BUSTER_TIER1_FRAME_NO_RED_ZONE | BUSTER_TIER1_FRAME_PROBE_STACK;
-                        tier1_call_compile(test, &fixture, vector != 0, rematerialize != 0, flags);
-                    }
+                    const uint32_t flags = shape % 3 == 0 ? 0 : shape % 3 == 1 ? BUSTER_TIER1_FRAME_KEEP_POINTER : BUSTER_TIER1_FRAME_NO_RED_ZONE | BUSTER_TIER1_FRAME_PROBE_STACK;
+                    tier1_call_compile(test, &fixture, rematerialize != 0, flags);
                 }
                 arena_pop_to(&test->input, 0);
             }
@@ -1550,12 +1545,9 @@ static void tier1_call_cases(Tier1EmitTest* test)
         Tier1CallFixture fixture = {0};
         const bool ready = shape == 0 ? tier1_call_memory_fixture(test, &fixture) : tier1_call_small_fixture(test, &fixture, shape == 1, shape == 3);
         tier1_emit_test_expect(test, ready, "construct helper-signature, pointer and empty-call fixture");
-        for (uint32_t vector = 0; ready && vector < 2; vector += 1)
+        for (uint32_t frame = 0; ready && frame < 2; frame += 1)
         {
-            for (uint32_t frame = 0; frame < 2; frame += 1)
-            {
-                tier1_call_compile(test, &fixture, vector != 0, true, frame ? BUSTER_TIER1_FRAME_KEEP_POINTER : 0);
-            }
+            tier1_call_compile(test, &fixture, true, frame ? BUSTER_TIER1_FRAME_KEEP_POINTER : 0);
         }
         arena_pop_to(&test->input, 0);
     }
@@ -1575,12 +1567,9 @@ static void tier1_call_cases(Tier1EmitTest* test)
                            shape < 10 ? tier1_call_return_fixture(test, &fixture) : shape < 12 ? tier1_call_fixed_fixture(test, &fixture) :
                            shape == 12 ? tier1_call_run_fixture(test, &fixture) : shape < 16 ? tier1_call_carry_fixture(test, &fixture, shape - 12) : tier1_call_callee_fixture(test, &fixture, shape == 16 ? 6 : 5);
         tier1_emit_test_expect(test, ready, "construct genuine mixed-width cycle, dirty narrow return or narrow parameter fixture");
-        for (uint32_t vector = 0; ready && vector < 2; vector += 1)
+        for (uint32_t frame = 0; ready && frame < 2; frame += 1)
         {
-            for (uint32_t frame = 0; frame < 2; frame += 1)
-            {
-                tier1_call_compile(test, &fixture, vector != 0, true, frame ? BUSTER_TIER1_FRAME_KEEP_POINTER : 0);
-            }
+            tier1_call_compile(test, &fixture, true, frame ? BUSTER_TIER1_FRAME_KEEP_POINTER : 0);
         }
         arena_pop_to(&test->input, 0);
     }

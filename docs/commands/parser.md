@@ -33,6 +33,12 @@ requirements. [Command index](README.md).
   end beside the checker's tree walk, lost and were removed: [the
   decision](../../docs/c-parser-fragments.md).
 
+- **Tiles (#2536).** `ParseOptions.tile_tokens` (the C driver's
+  `--parse-tile=N`) runs the vector path a run of top-level declarations of
+  about N tokens at a time (`parse_vector_tiles`), each tile through every
+  kernel before the next, in a workspace a tile long; 0 parses the unit as
+  one. The tree is the unit's either way: [the design](../../docs/c-parser.md#tiles-2536).
+
 Implementation edits rebuild FRONTEND alone on a scalar host and FRONTEND
 plus the standalone parser benchmark on a vector host. Shared interface
 edits still rebuild every consumer. The standalone vector benchmark retains
@@ -44,7 +50,11 @@ its own static parser so that its kernel measurements use the same code.
 [--mutations N] [--seed N] [--streams N] [--reports N] [--keep] [--files-only] [options]
 [file or directory...]` (about 9 s on the 9700X without files, with `--clang`, on one CPU)
 checks the parser interface and implementation; `--clang` needs
-clang 23 on `PATH`, or the one PATH names. `--clang-server PATH` sends that
+clang 23 on `PATH`, or the one PATH names. Each unit is also parsed by tiles of
+a token and of 64 (`ParseOptions.tile_tokens`), which must give the unit's
+tokens, outcome, diagnostics and tree, and `tiles:` checks where
+`parse_tile_end` ends each tile of units given by their top-level
+declarations. `--clang-server PATH` sends that
 clang's `-fsyntax-only` runs (`parse_test_clang`, a file each through the oracle
 cache's runs) to `tools/clang-server`, and `--differential` also runs each as
 before and fails on a difference ([Served runs](oracle-cache.md#served-runs)). Each unit is parsed in full and

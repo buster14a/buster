@@ -39,6 +39,16 @@
 //   never cancels an earlier unit. The injected case calls the reusable driver in a child, as the reservation probes do.
 // - Multi-input -E, whose driver is sequential: the before/last units' stdout and diagnostics, with and without
 //   markers, by both kernels, are each standalone invocation's concatenated bytes; macro state stays unit-local.
+// - Root images (#3070, PPRoot): units that read the predefined macros, change them and leave macros of their own, by
+//   --lanes 1 and 3, with --root-image=off, beside preprocessed inputs (whose prelude is another: they start without the
+//   image), with a forced header and a command line's macro, with a command line whose macros warn (never captured:
+//   each unit prints the warning), with units that spell the time (SOURCE_DATE_EPOCH), with a file of predefines (a
+//   cache record in the image; one that declares gives output, and is never captured) and after a unit the checker
+//   copies the preprocessor of (its lane's root dropped, and
+//   captured again by the next unit): each unit's object and the command's diagnostics as alone, and by --time-stages'
+//   report one lane captures once and starts every later unit of the image's kind from it. The check of what a root
+//   keeps (--poison-arenas) reports each kind of byte a test's fault leaves there (BUSTER_TEST_ROOT_DIRT). --root-image takes on or off alone. tests/units/root-image has the units that disturb the
+//   state every way a unit can (test-check-units --corpus, in CI's inventory).
 // - Refusals: a name two units define (multiple definition), a name none defines (undefined reference), -c with -o,
 //   --dump-typed and two units whose objects have one name: exit status 1, the message, and no output.
 //   And the refusal of two units of one object's name in a child whose stack was filled with a mapping's address first
@@ -1339,6 +1349,278 @@ static void check_units_test_bounds(CheckUnitsTestTally* tally, const char* exec
         free(text);
     }
     printf("  bounds: a section's members kept across units by %u commands\n", (uint32_t)BUSTER_ARRAY_LENGTH(options));
+}
+
+// The lanes' root images (see the file's comment), in a directory of its own under `directory`.
+#define BUSTER_CHECK_UNITS_TEST_ROOT_UNITS 6
+
+// Whether --time-stages' report in `errors` says its lanes captured `captures` root images, dropped `drops` and started
+// `starts` units from one.
+static bool check_units_test_root_report(const char* errors, unsigned captures, unsigned drops, unsigned starts)
+{
+    char expected[96];
+    snprintf(expected, sizeof(expected), "root images: %u captured, %u dropped, %u starts from one\n", captures, drops, starts);
+    return errors != NULL && strstr(errors, expected) != NULL;
+}
+
+static void check_units_test_root_image(CheckUnitsTestTally* tally, const char* executable, const char* directory)
+{
+    // Units that read the predefined macros, the command line's and a forced header's, and leave macros of their own;
+    // root_0.c, the largest, is the first a lane takes. Two preprocessed inputs, whose prelude is another, and two units
+    // that spell the time.
+    static const char unit[] = "#ifndef ROOT_FORCED\n"
+                               "#define ROOT_FORCED 0\n"
+                               "#endif\n"
+                               "#ifndef ROOT_COMMAND\n"
+                               "#define ROOT_COMMAND 0\n"
+                               "#endif\n"
+                               "#define ROOT_LEFT_%u(x) ((x) + __STDC_HOSTED__ + ROOT_FORCED + ROOT_COMMAND + %u)\n"
+                               "#ifdef ROOT_LEFT_%u\n"
+                               "int root_left_%u;\n"
+                               "#endif\n"
+                               "int root_counter_%u = __COUNTER__;\n"
+                               "long root_value_%u(long x)\n"
+                               "{\n"
+                               "    return ROOT_LEFT_%u(x) * __CHAR_BIT__ + sizeof(__SIZE_TYPE__);\n"
+                               "}\n"
+                               "#undef __CHAR_BIT__\n"
+                               "#undef __linux__\n"
+                               "%s";
+    static const char padding[] = "// The lane's first unit, by its size.\n// The lane's first unit, by its size.\n// The lane's first unit, by its size.\n";
+    static const char preprocessed[] = "# 1 \"root_p%u.c\"\n"
+                                       "#ifdef linux\n"
+                                       "int root_preprocessed_linux_%u;\n"
+                                       "#endif\n"
+                                       "int root_preprocessed_%u = 1;\n";
+    static const char timed[] = "const char* root_time_%u = __DATE__ \" \" __TIME__ \" \" __TIMESTAMP__;\n";
+    static const char forced[] = "#define ROOT_FORCED 5\nint root_forced_declaration(void);\n";
+    // A file of predefines in place of the built-in ones: a file of the cache's, whose record's data the image has.
+    static const char predefines[] = "#define __STDC_HOSTED__ 1\n#define __CHAR_BIT__ 8\n#define __SIZE_TYPE__ unsigned long\n#define __linux__ 1\n";
+    // A unit whose first malformed statement is in a do's body: the checker reads what came before it through a copy of
+    // the preprocessor (check_repair_preprocessor), which a root can't take back, so its lane's root is dropped. The
+    // largest of its command's units, so the first its lane takes.
+    static const char repaired[] = "// The lane's first unit, by its size.\n// The lane's first unit, by its size.\n// The lane's first unit, by its size.\n"
+                                   "// The lane's first unit, by its size.\n// The lane's first unit, by its size.\n// The lane's first unit, by its size.\n"
+                                   "// The lane's first unit, by its size.\n// The lane's first unit, by its size.\n// The lane's first unit, by its size.\n"
+                                   "int root_repaired_called(int);\n"
+                                   "void root_repaired(void)\n"
+                                   "{\n"
+                                   "    do\n"
+                                   "    {\n"
+                                   "        root_repaired_called(1 << 40);\n"
+                                   "        root_repaired_called(2) +;\n"
+                                   "    }\n"
+                                   "    while (0);\n"
+                                   "}\n";
+    char root[PATH_MAX];
+    char alone[PATH_MAX];
+    char together[PATH_MAX];
+    char errors_path[PATH_MAX];
+    char path[PATH_MAX];
+    char text[2048];
+    snprintf(root, sizeof(root), "%s/root", directory);
+    snprintf(alone, sizeof(alone), "%s/root/alone", directory);
+    snprintf(together, sizeof(together), "%s/root/together", directory);
+    snprintf(errors_path, sizeof(errors_path), "%s/root/errors.txt", directory);
+    bool written = mkdir(root, 0755) == 0 && mkdir(alone, 0755) == 0 && mkdir(together, 0755) == 0;
+    for (uint32_t u = 0; written && u < BUSTER_CHECK_UNITS_TEST_ROOT_UNITS; u += 1)
+    {
+        const uint32_t other = (u + 1) % BUSTER_CHECK_UNITS_TEST_ROOT_UNITS;
+        snprintf(text, sizeof(text), unit, u, u, other, u, u, u, u, u == 0 ? padding : "");
+        snprintf(path, sizeof(path), "%s/root_%u.c", root, u);
+        written = parse_test_write(path, text, strlen(text));
+    }
+    for (uint32_t u = 0; written && u < 2; u += 1)
+    {
+        snprintf(text, sizeof(text), preprocessed, u, u, u);
+        snprintf(path, sizeof(path), "%s/root_p%u.i", root, u);
+        written = parse_test_write(path, text, strlen(text));
+        snprintf(text, sizeof(text), timed, u);
+        snprintf(path, sizeof(path), "%s/root_t%u.c", root, u);
+        written = written && parse_test_write(path, text, strlen(text));
+    }
+    snprintf(path, sizeof(path), "%s/root_forced.h", root);
+    written = written && parse_test_write(path, forced, strlen(forced));
+    snprintf(path, sizeof(path), "%s/root_predefines.h", root);
+    written = written && parse_test_write(path, predefines, strlen(predefines));
+    snprintf(path, sizeof(path), "%s/root_repaired.c", root);
+    written = written && parse_test_write(path, repaired, strlen(repaired));
+    // And one whose prelude gives output, a declaration every unit then has: never captured.
+    snprintf(text, sizeof(text), "%sint root_predeclared;\n", predefines);
+    snprintf(path, sizeof(path), "%s/root_declares.h", root);
+    written = written && parse_test_write(path, text, strlen(text));
+    check_units_test_expect(tally, written, "write the root images' units", root);
+    // Each command's units (relative to its directory, the test's root's own), its options, the units of them that
+    // compile, the images its one lane captures and drops and the units it starts from one (UINT32_MAX captures for no
+    // report at all).
+    static const struct
+    {
+        const char* name;
+        const char* options[6];
+        const char* units[8];
+        uint32_t failing;
+        uint32_t captures;
+        uint32_t drops;
+        uint32_t starts;
+    } commands[] = {
+        { "the units", { "--lanes", "1", NULL }, { "../root_0.c", "../root_1.c", "../root_2.c", "../root_3.c", "../root_4.c", "../root_5.c", NULL }, 0, 1, 0, 5 },
+        { "the units without root images", { "--lanes", "1", "--root-image=off", NULL }, { "../root_0.c", "../root_1.c", "../root_2.c", "../root_3.c", NULL }, 0, UINT32_MAX, 0, 0 },
+        { "the units by several lanes", { "--lanes", "3", NULL }, { "../root_0.c", "../root_1.c", "../root_2.c", "../root_3.c", "../root_4.c", "../root_5.c", NULL }, 0, 0, 0, 0 },
+        { "source and preprocessed units", { "--lanes", "1", NULL }, { "../root_0.c", "../root_p0.i", "../root_1.c", "../root_p1.i", "../root_2.c", NULL }, 0, 1, 0, 2 },
+        { "a forced header and a command line's macro", { "--lanes", "1", "-include", "../root_forced.h", "-DROOT_COMMAND=7", NULL },
+          { "../root_0.c", "../root_1.c", "../root_2.c", NULL }, 0, 1, 0, 2 },
+        { "a command line that warns", { "--lanes", "1", "-DROOT_COMMAND=1", "-DROOT_COMMAND=2", NULL }, { "../root_0.c", "../root_1.c", "../root_2.c", NULL }, 0, 0, 0, 0 },
+        { "the time", { "--lanes", "1", NULL }, { "../root_t0.c", "../root_t1.c", "../root_0.c", NULL }, 0, 1, 0, 2 },
+        { "a file of predefines", { "--lanes", "1", "--predefines", "../root_predefines.h", NULL }, { "../root_0.c", "../root_1.c", "../root_2.c", "../root_3.c", NULL }, 0, 1, 0, 3 },
+        // (Checked: the image's file's cache record's data is its own again after each unit, PPRoot.verify.)
+        { "a file of predefines, each release checked", { "--lanes", "1", "--poison-arenas", "--predefines", "../root_predefines.h", NULL },
+          { "../root_0.c", "../root_1.c", "../root_2.c", "../root_3.c", NULL }, 0, 1, 0, 3 },
+        { "a file of predefines that declares", { "--lanes", "1", "--predefines", "../root_declares.h", NULL }, { "../root_0.c", "../root_1.c", "../root_2.c", NULL }, 0, 0, 0, 0 },
+        // (Without attested declarations, whose second reading of a unit with a syntax error prints no parser's error.)
+        { "a unit its lane's root is dropped for", { "--lanes", "1", "--attested=off", NULL }, { "../root_repaired.c", "../root_0.c", "../root_1.c", "../root_2.c", NULL }, 1, 2, 1, 2 },
+    };
+    // The time's units spell one time in every run.
+    const char* epoch = getenv("SOURCE_DATE_EPOCH");
+    char saved[64] = "";
+    snprintf(saved, sizeof(saved), "%s", epoch != NULL ? epoch : "");
+    const bool timed_ready = setenv("SOURCE_DATE_EPOCH", "1700000000", 1) == 0;
+    check_units_test_expect(tally, timed_ready, "set the root images' time", NULL);
+    for (uint32_t c = 0; written && c < BUSTER_ARRAY_LENGTH(commands); c += 1)
+    {
+        char* arguments[24];
+        char* expected = NULL;
+        uint64_t expected_length = 0;
+        uint32_t unit_count = 0;
+        uint32_t failed = 0;
+        bool compiled = true;
+        bool statuses[8] = { false };
+        // Each unit alone, its object and its diagnostics, which the command's are in its units' order.
+        for (uint32_t u = 0; commands[c].units[u] != NULL; u += 1)
+        {
+            uint32_t used = 0;
+            arguments[used++] = (char*)executable;
+            arguments[used++] = "-c";
+            for (uint32_t o = 2; commands[c].options[o] != NULL; o += 1)
+            {
+                arguments[used++] = (char*)commands[c].options[o];
+            }
+            arguments[used++] = (char*)commands[c].units[u];
+            arguments[used] = NULL;
+            statuses[u] = check_units_test_run(alone, arguments, "/dev/null", errors_path, false) == 0;
+            failed += !statuses[u];
+            uint64_t length = 0;
+            char* diagnostics = check_units_test_read(errors_path, &length);
+            char* grown = diagnostics != NULL ? realloc(expected, expected_length + length + 1) : NULL;
+            if (grown != NULL)
+            {
+                expected = grown;
+                memcpy(expected + expected_length, diagnostics, length);
+                expected_length += length;
+                expected[expected_length] = 0;
+            }
+            compiled = compiled && grown != NULL;
+            free(diagnostics);
+            unit_count += 1;
+        }
+        check_units_test_expect(tally, compiled && failed == commands[c].failing, "the root images' units compile alone, but those that shouldn't", commands[c].name);
+        // The command, without and with --time-stages, whose report says what its lanes' roots did.
+        for (uint32_t reported = 0; compiled && reported < 2; reported += 1)
+        {
+            uint32_t used = 0;
+            arguments[used++] = (char*)executable;
+            arguments[used++] = "-c";
+            if (reported != 0)
+            {
+                arguments[used++] = "--time-stages";
+            }
+            for (uint32_t o = 0; commands[c].options[o] != NULL; o += 1)
+            {
+                arguments[used++] = (char*)commands[c].options[o];
+            }
+            for (uint32_t u = 0; u < unit_count; u += 1)
+            {
+                arguments[used++] = (char*)commands[c].units[u];
+            }
+            arguments[used] = NULL;
+            const int status = check_units_test_run(together, arguments, "/dev/null", errors_path, false);
+            uint64_t length = 0;
+            char* diagnostics = check_units_test_read(errors_path, &length);
+            check_units_test_expect(tally, status == (failed != 0 ? 1 : 0), "a command of the root images' units exits as its units alone do", commands[c].name);
+            if (reported == 0)
+            {
+                check_units_test_expect(tally, diagnostics != NULL && length == expected_length && memcmp(diagnostics, expected, length) == 0,
+                                        "its diagnostics are its units' alone, in order", commands[c].name);
+            }
+            else if (commands[c].captures == UINT32_MAX)
+            {
+                check_units_test_expect(tally, diagnostics != NULL && strstr(diagnostics, "root images:") == NULL, "a command without root images reports none",
+                                        commands[c].name);
+            }
+            else if (strcmp(commands[c].options[1], "1") == 0)
+            {
+                check_units_test_expect(tally, check_units_test_root_report(diagnostics, commands[c].captures, commands[c].drops, commands[c].starts),
+                                        "its lane captures, drops and starts from its root image as often as its units say", commands[c].name);
+            }
+            else
+            {
+                // Several lanes: each captures at most once, and a unit starts from an image or captures one.
+                check_units_test_expect(tally, diagnostics != NULL && strstr(diagnostics, "root images: ") != NULL && strstr(diagnostics, " captured, 0 dropped, ") != NULL,
+                                        "several lanes report their root images", commands[c].name);
+            }
+            free(diagnostics);
+            for (uint32_t u = 0; u < unit_count; u += 1)
+            {
+                const char* slash = strrchr(commands[c].units[u], '/');
+                char object[64];
+                snprintf(object, sizeof(object), "%s", slash != NULL ? slash + 1 : commands[c].units[u]);
+                object[strlen(object) - 1] = 'o';
+                char first[PATH_MAX];
+                char second[PATH_MAX];
+                snprintf(first, sizeof(first), "%s/%s", together, object);
+                snprintf(second, sizeof(second), "%s/%s", alone, object);
+                check_units_test_expect(tally, statuses[u] ? check_test_driver_same_files(first, second) : !check_units_test_exists(first),
+                                        "a unit's object in the command is its object alone", commands[c].units[u]);
+                unlink(first);
+            }
+        }
+        free(expected);
+    }
+    if (epoch != NULL)
+    {
+        setenv("SOURCE_DATE_EPOCH", saved, 1);
+    }
+    else
+    {
+        unsetenv("SOURCE_DATE_EPOCH");
+    }
+    // The check itself (PPRoot.verify, --poison-arenas): each kind of byte a release could leave (BUSTER_TEST_ROOT_DIRT,
+    // pp_root_test_dirt) fails the unit that left it, with the check's message, and without the fault the same command
+    // succeeds; without --poison-arenas nothing reads the fault's variable.
+    static const char dirt[] = "aitenpr";
+    for (uint32_t d = 0; written && d <= strlen(dirt); d += 1)
+    {
+        char value[2] = { dirt[d], 0 };
+        const bool set = d == strlen(dirt) ? unsetenv("BUSTER_TEST_ROOT_DIRT") == 0 : setenv("BUSTER_TEST_ROOT_DIRT", value, 1) == 0;
+        char* checked[] = { (char*)executable, "-c", "--lanes", "1", "--poison-arenas", "../root_0.c", "../root_1.c", "../root_2.c", NULL };
+        const int status = set ? check_units_test_run(together, checked, "/dev/null", errors_path, false) : -1;
+        uint64_t length = 0;
+        char* diagnostics = check_units_test_read(errors_path, &length);
+        const bool reported = diagnostics != NULL && strstr(diagnostics, "fatal error: the preprocessor's kept state differs from its root image") != NULL;
+        check_units_test_expect(tally, d == strlen(dirt) ? status == 0 && !reported : status == 1 && reported,
+                                "a checked release reports a byte that isn't its root image's, and nothing without one", d == strlen(dirt) ? "no fault" : value);
+        free(diagnostics);
+    }
+    const bool unset = setenv("BUSTER_TEST_ROOT_DIRT", "a", 1) == 0;
+    char* unchecked[] = { (char*)executable, "-c", "--lanes", "1", "../root_0.c", "../root_1.c", "../root_2.c", NULL };
+    check_units_test_expect(tally, unset && check_units_test_run(together, unchecked, "/dev/null", errors_path, false) == 0,
+                            "a release that isn't checked reads no fault", NULL);
+    unsetenv("BUSTER_TEST_ROOT_DIRT");
+    // An option's value that is neither on nor off is refused.
+    char* refused[] = { (char*)executable, "-c", "--root-image=sometimes", "../root_0.c", "../root_1.c", NULL };
+    const int refusal = written ? check_units_test_run(together, refused, "/dev/null", errors_path, false) : 0;
+    check_units_test_expect(tally, refusal != 0, "--root-image takes on or off alone", NULL);
+    printf("  root images: %u commands' units, objects and diagnostics as alone, and what their lanes captured and started from\n",
+           (uint32_t)BUSTER_ARRAY_LENGTH(commands));
 }
 
 // A few large units (see the file's comment), in a directory of its own under `directory`: the count that the command's
@@ -2801,6 +3083,7 @@ static int run_check_units_tests(int argc, char** argv)
         check_units_test_diagnostics(&tally, executable, directory);
         check_units_test_fatals(&tally, executable, directory);
         check_units_test_preprocessed(&tally, executable, directory);
+        check_units_test_root_image(&tally, executable, directory);
         check_units_test_refusals(&tally, executable, directory);
         check_units_test_merge(&tally, executable, directory);
         check_units_test_selectany(&tally, executable, clang, directory);

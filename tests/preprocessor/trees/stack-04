@@ -1,0 +1,3 @@
+user_before
+#pragma GCC system_header
+user_after

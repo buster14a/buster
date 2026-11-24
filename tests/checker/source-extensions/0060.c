@@ -1,0 +1,3 @@
+int f(int
+#pragma STDC FENV_ACCESS ON
+x);

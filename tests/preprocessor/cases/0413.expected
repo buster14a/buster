@@ -1,0 +1,11 @@
+/* lead */ int a; // tail
+F /* not invoked */ (1)
+[2] 1
+/* c */ #define NOT 9
+NOT
+/* header lead */
+int other; /* in header */
+// header trail
+/* multi
+   line */ int m; // splice continued
+int last; /* end */

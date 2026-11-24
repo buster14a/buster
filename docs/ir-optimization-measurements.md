@@ -22,7 +22,8 @@ and controls the large DAG/chain; `--fields` defaults to 64 and supports the
 future aggregate-size policy measurement.
 
 Before timing, both paths run on the same input. LICM and SROA must agree
-exactly, including scalar-slot metadata. GVN is checked with the independent
+exactly, including scalar-slot metadata. LICM has one path since #2924, so its
+two rows time the same code, a control of the harness's spread. GVN is checked with the independent
 bounded interpreter and must remove at least as many instructions as the
 scoped scalar expression table. The large SROA array also feeds both upstream
 SSA promoters outside timing; the fixture's closed-form returned value is

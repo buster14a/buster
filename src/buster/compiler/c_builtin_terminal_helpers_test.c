@@ -174,10 +174,8 @@ static int run_builtin_terminal_helper_tests(int argc, char** argv)
         Arena arena = arena_reserve(BUSTER_CBUILTIN_TERMINAL_TEST_PAGE);
         const X86Target baseline = { 0 };
         uint8_t allowed[X86_FORM_COUNT];
-        uint8_t allowed_scalar[X86_FORM_COUNT];
         x86_target_forms(&baseline, allowed);
-        x86_target_forms_scalar(&baseline, allowed_scalar);
-        cbuiltin_terminal_test_expect(&tally, memcmp(allowed, allowed_scalar, sizeof(allowed)) == 0 && x86_target_form_allowed(allowed, X86_FORM_UD2), "UD2 is explicitly eligible at baseline", 0);
+        cbuiltin_terminal_test_expect(&tally, x86_target_form_allowed(allowed, X86_FORM_UD2) && x86_target_requirement(X86_FORM_UD2) != 0, "UD2 is explicitly eligible at baseline", 0);
         const X86Effects* effects = x86_effects(X86_FORM_UD2);
         cbuiltin_terminal_test_expect(&tally, effects->operation == X86_OPERATION_TRAP && x86_effects_control(effects) == BUSTER_X86_CONTROL_TRAP &&
             (effects->properties & BUSTER_X86_EFFECT_FAULT) != 0, "shared semantics retain faulting terminal control", 0);

@@ -1,0 +1,19 @@
+# 1 "%d/case.c"
+# 1 "<built-in>" 1 3
+#define __STDC_EMBED_EMPTY__ 2
+#define __STDC_EMBED_FOUND__ 1
+#define __STDC_EMBED_NOT_FOUND__ 0
+#define __STDC_UTF_16__ 1
+#define __STDC_UTF_32__ 1
+#define __STDC__ 1
+#define __STDC_VERSION__ 201710L
+#define __STDC_HOSTED__ 1
+# 1 "%d/case.c" 2
+/* a */
+#define M(x) x /* m*/
+#include "other.h" /* clang -E -dI */
+# 1 "%d/other.h" 1
+#define O /* o */ 2
+# 4 "%d/case.c" 2
+int v = 1 /* m*/; /* v */
+#undef M

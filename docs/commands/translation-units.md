@@ -86,6 +86,17 @@ intern table before its real compile; the output must match an unprimed run.
 `-c -o`, the dumps and two
 units of one object's name are refused.
 
+A lane's later units start their preprocessor from its **root image** (#3070,
+`PPRoot`): the state after the predefines and the command line's `-D` and
+`-U`, which the lane's first unit captures, in arenas that stay the lane's
+and that each unit's release restores to the image
+([the guide's "The root image"](../../docs/translation-units.md#the-root-image)).
+`--root-image=off` runs the command without them, for comparisons;
+`--poison-arenas` also checks every byte a root keeps against its image after
+each unit (a difference fails the unit) and fills what the preprocessor's
+stacks keep with the lanes' pattern; and `--time-stages` reports `root images:
+N captured, N dropped, N starts from one`.
+
 `./build/compiler test-check-units [--executable PATH] [--clang PATH]
 [--seed N] [--programs N] [--keep] [--corpus DIR [--option ARG]...]
 [--generate DIR [--units N] [--functions N]]` runs the driver as a process:
@@ -118,7 +129,13 @@ and without it, `BUSTER_TEST_NO_UNITS_BOARD`, at most one unit giving back
 its scratch's pages in whole huge pages by 8 lanes, and by one the large
 unit alone); every reservation of two units' `-c` failed in turn, each run
 reported and its memory released (a lane's partial setup among them); the
-jobserver's tokens held while the link writes; lanes that don't start; and
+jobserver's tokens held while the link writes; lanes that don't start; the
+lanes' root images (#3070: units that change the predefined macros and leave
+their own, by `--lanes` 1 and 3, with `--root-image=off`, beside preprocessed
+inputs, with a forced header, with a command line that warns, with the time,
+with a file of predefines and after a unit the root is dropped for, each
+object and the diagnostics as alone and the captures, drops and starts
+`--time-stages` reports); and
 `benchmark-check-units` by `--lanes` 1 and 2, and its refusals of counts it
 can't take (no lanes, a ninth lane count, runs past 1,000 or 64 bits, a count
 with more than its digits), of forwarded options that set the lanes, and of a
@@ -131,7 +148,11 @@ resolved before compiler children change to their output directories. At least
 one file must compile alone: an empty or all-failing corpus is a failed test,
 even when the failures match. The default suite checks relative and absolute
 paths on a mix of valid and invalid files, and rejects empty, all-invalid,
-missing and non-directory corpora. With `--generate DIR` it writes a program
+missing and non-directory corpora. CI's inventory runs it on
+`tests/units/root-image` with `--option --lanes --option 1` (#3070): units
+that each leave the preprocessor's starting state another way, compiled one
+after another from one lane's root image, and those with syntax errors
+(`errors/`) with `--attested=off`. With `--generate DIR` it writes a program
 of synth's shape (512 units of 200 functions by default) for measurements,
 and tests nothing.
 [docs/translation-units.md](../../docs/translation-units.md) has the design and the

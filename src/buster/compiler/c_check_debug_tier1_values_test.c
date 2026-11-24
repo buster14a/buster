@@ -988,6 +988,82 @@ static void check_debug_tier1_inline_test(CheckDebugTestTally* tally, const char
     check_debug_tier1_inline_break(tally, linked, directory, 2, arena);
 }
 
+// #2542: the inline-instance fixture with its callees defined after their callers (declared before them), so that each
+// instance's DW_AT_abstract_origin, and its parameters' and locals', names an abstract instance the writer reaches only
+// after the instance: written as an index and patched once every DIE is (check_debug_value_origins). Its DWARF verifies,
+// and gdb shows the expanded frames at their calls' lines and their values, as the fixture written in order's.
+static const char check_debug_tier1_forward_source[] =
+    "#line 1 \"dbg_tier1_forward.c\"\n"
+    "int printf(const char *, ...);\n"
+    "volatile int t1i_sink;\n"
+    "static int t1i_twice(int x);\n"
+    "static int t1i_square(int x);\n"
+    "__attribute__((noinline)) void t1i_mark(int y)\n"
+    "{\n"
+    "    t1i_sink = y;\n"
+    "}\n"
+    "int main(void)\n"
+    "{\n"
+    "    int total = 0;\n"
+    "    for (int i = 0; i < 3; i += 1)\n"
+    "    {\n"
+    "        total += t1i_twice(i);\n"
+    "    }\n"
+    "    printf(\"T1I %d\\n\", total);\n"
+    "    return total != 25;\n"
+    "}\n"
+    "static int t1i_twice(int x)\n"
+    "{\n"
+    "    return t1i_square(x) + t1i_square(x + 1);\n"
+    "}\n"
+    "static int t1i_square(int x)\n"
+    "{\n"
+    "    int y = x * x;\n"
+    "    t1i_mark(y);\n"
+    "    return y + 1;\n"
+    "}\n";
+
+static void check_debug_tier1_forward_test(CheckDebugTestTally* tally, const char* directory, Arena* arena)
+{
+    char source[PATH_MAX];
+    char script[PATH_MAX];
+    char program[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/dbg_tier1_forward.c", directory);
+    snprintf(script, sizeof(script), "%s/dbg_tier1_forward.gdb", directory);
+    snprintf(program, sizeof(program), "%s/dbg_t1_forward", directory);
+    const bool written = foreign_test_write(source, check_debug_tier1_forward_source, sizeof(check_debug_tier1_forward_source) - 1) &&
+                         foreign_test_write(script, check_debug_tier1_inline_script, sizeof(check_debug_tier1_inline_script) - 1);
+    check_debug_test_expect(tally, written, "write the Tier 1 forward inline-instance fixture and its debugger script", directory);
+    static const CheckDebugTier1ValuesVariant variant = { .name = "default" };
+    const bool built = written && check_debug_tier1_values_compile(tally, source, NULL, program, &variant, "1", true, false, arena);
+    char report[PATH_MAX + 24];
+    char errors[PATH_MAX + 24];
+    snprintf(report, sizeof(report), "%s.t1-verify", program);
+    snprintf(errors, sizeof(errors), "%s.t1-errors", program);
+    char* verify[] = { (char*)"llvm-dwarfdump", (char*)"--verify", program, NULL };
+    const bool verified = built && object_test_run(verify, report, errors) == 0;
+    const String8 verification = verified ? foreign_test_read(arena, report) : (String8){ 0 };
+    check_debug_test_expect(tally, verification.pointer != NULL && strstr(verification.pointer, "No errors.") != NULL,
+                            "the forward inline instances' DWARF passes llvm-dwarfdump --verify", report);
+    snprintf(report, sizeof(report), "%s.t1-run", program);
+    char* run[] = { program, NULL };
+    const bool ran = built && object_test_run(run, report, errors) == 0;
+    const String8 output = ran ? foreign_test_read(arena, report) : (String8){ 0 };
+    check_debug_test_expect(tally, output.pointer != NULL && strstr(output.pointer, "T1I 25\n") != NULL, "the forward inline-instance fixture runs as written", report);
+    snprintf(report, sizeof(report), "%s.t1-gdb", program);
+    char* gdb[] = { (char*)"gdb", (char*)"-nx", (char*)"-batch", (char*)"-directory", (char*)directory, (char*)"-x", script, program, NULL };
+    const bool inspected = built && object_test_run(gdb, report, errors) == 0;
+    const String8 transcript = inspected ? foreign_test_read(arena, report) : (String8){ 0 };
+    const bool done = transcript.pointer != NULL && strstr(transcript.pointer, "GDB-T1I-DONE\n") != NULL;
+    check_debug_test_expect(tally, done && check_debug_tier1_inline_frame_in(transcript.pointer, 0, "t1i_mark", "dbg_tier1_forward.c", 7) &&
+                                  check_debug_tier1_inline_frame_in(transcript.pointer, 1, "t1i_square", "dbg_tier1_forward.c", 26) &&
+                                  check_debug_tier1_inline_frame_in(transcript.pointer, 2, "t1i_twice", "dbg_tier1_forward.c", 21) &&
+                                  check_debug_tier1_inline_frame_in(transcript.pointer, 3, "main", "dbg_tier1_forward.c", 14),
+                            "gdb shows the expanded callees defined after their callers at their calls' lines", report);
+    check_debug_test_expect(tally, done && check_debug_tier1_inline_values(transcript.pointer), "gdb shows the forward expanded callees' parameters' values", report);
+    check_debug_test_expect(tally, done && check_debug_tier1_inline_locals(transcript.pointer), "gdb shows a forward expanded callee's local's values", report);
+}
+
 // #2541: expanded callees from another file than the function's. A header's two static callees, the inner expanded into
 // the outer there and both into the main file's functions: their code's rows are the header's lines, and an instance's
 // DW_AT_call_file is its call's file, the main file's or the header's. gdb, stopped in the noinline function the inner

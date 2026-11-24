@@ -2,34 +2,33 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // #136's measurement on real C (benchmark-backend-source): benchmark-backend's variants (tier0_benchmark_measure.c),
-// Tier 0's vector path, its scalar twin, branch sizing, encoding, the validation and the immediates' form choice (#221),
+// Tier 0's compile, branch sizing, encoding, the validation and the immediates' form choice (#221),
 // on checked functions' typed streams. Include after c_lowering_source_benchmark.c.
 //
-//   build/compiler benchmark-backend-source [--only vector|scalar|sizing|encode|validate|validate-scalar|choose|choose-scalar]
+//   build/compiler benchmark-backend-source [--only vector|sizing|encode|validate|validate-scalar|choose]
 //                                           [--after-scalar MS] [preprocessor options] file...
 //
-// Each file is prepared as -c prepares it (check_source_prepare, #1057: its options read and refused as the driver reads
-// and refuses them, checked as the driver checks it, the vector path's), and its reachable definitions
+// Each file is prepared as -c prepares it (check_source_prepare, #1057: its options read and refused as the driver
+// reads and refuses them, checked as the driver checks it, the vector path's), and its reachable definitions
 // (check_program_select_mode's C_LOWERING_REACHABLE), their target features checked as -c checks them, lowered and
 // emitted by check_program_emit, outside the time, for the target its options give (-march and the -m features:
-// PPOptions.target), and each function for its target attribute's, as -c compiles them (#1041); by the scalar path
-// with --scalar among the options, as -c --scalar does. Each preprocessed file's line before its outcome gives its
-// configuration (check_source_receipt): its digest, its resolved target and language, -c's own output requirements,
-// its path, and what the benchmark does otherwise (no unwind tables or rows).
-// Admission ends at function emission: static-data publication and object-section placement (including descriptors
-// for assembled file-scope atoms) are outside this benchmark. A valid typed function stream can be measured when
-// whole-object publication is unsupported; use the driver/corpus object checks to establish that eligibility.
-// Their typed streams stay in an arena that outlives the file's other state, with the symbols' access given again
-// (check_program_access), and join one corpus of every file's functions, which the benchmark measures as
-// benchmark-backend measures generated ones: both paths must give each function the same records, then the medians of
-// BUSTER_TIER0_BENCHMARK_PASSES passes per typed entry and per record, and the share of entries the vector path
-// defers. A file the checker rejects, or whose checked program or emission refuses a feature by name
-// (CHECK_PROGRAM_UNSUPPORTED), or whose target features -c's check refuses, is left out with the reason. Any other
-// failure fails the benchmark, with the file left out: options the driver refuses, a file that doesn't preprocess, a resource that runs out, an emission that fails otherwise, and a function that
-// doesn't join the corpus (the paths disagree on it, Tier 0 refuses it now, or memory runs out). So does a run with no
-// function to measure, and a measurement whose runs failed on a function (tier0_benchmark_measure). Run it under the
-// 9700X's lock pinned to one CPU (taskset -c 2 ...). It is a benchmark outside the compile path, with no vector path of
-// its own.
+// PPOptions.target), and each function for its target attribute's, as -c compiles them (#1041); by the scalar path with
+// --scalar among the options, as -c --scalar does. Each preprocessed file's line before its outcome gives its
+// configuration (check_source_receipt): its digest, its resolved target and language, -c's own output requirements, its
+// path, and what the benchmark does otherwise (no unwind tables or rows). Admission ends at function emission:
+// static-data publication and object-section placement (including descriptors for assembled file-scope atoms) are
+// outside this benchmark. A valid typed function stream can be measured when whole-object publication is unsupported;
+// use the driver/corpus object checks to establish that eligibility. Their typed streams stay in an arena that outlives
+// the file's other state, with the symbols' access given again (check_program_access), and join one corpus of every
+// file's functions, which the benchmark measures as benchmark-backend measures generated ones: each function must
+// compile, then the medians of BUSTER_TIER0_BENCHMARK_PASSES passes per typed entry and per record, and the share of
+// entries the vector path defers. A file the checker rejects, or whose checked program or emission refuses a feature by
+// name (CHECK_PROGRAM_UNSUPPORTED), or whose target features -c's check refuses, is left out with the reason. Any other
+// failure fails the benchmark, with the file left out: options the driver refuses, a file that doesn't preprocess, a
+// resource that runs out, an emission that fails otherwise, and a function that doesn't join the corpus (Tier 0 refuses
+// it now, or memory runs out). So does a run with no function to measure, and a measurement whose runs failed on a
+// function (tier0_benchmark_measure). Run it under the 9700X's lock pinned to one CPU (taskset -c 2 ...). It is a
+// benchmark outside the compile path, with no vector path of its own.
 #ifndef BUSTER_TIER0_SOURCE_BENCHMARK_INCLUDED
 #define BUSTER_TIER0_SOURCE_BENCHMARK_INCLUDED
 
@@ -93,8 +92,8 @@ static bool backend_source_file(BackendSource* source, const char* file, char** 
     }
     const bool refused = chosen && reserved && !emitted && code.status == CHECK_PROGRAM_UNSUPPORTED;
     const uint32_t count = selected->program.body_count;
-    // Every function the emission compiled must join the corpus: one Tier 0 refuses now, or that the paths disagree
-    // on, or for which memory runs out, fails the file.
+    // Every function the emission compiled must join the corpus: one Tier 0 refuses now, or for which memory runs out,
+    // fails the file.
     const Tier0BenchmarkCorpus before = source->corpus;
     Tier0BenchmarkAdd outcome = TIER0_BENCHMARK_ADDED;
     uint32_t b = 0;
@@ -131,7 +130,6 @@ static bool backend_source_file(BackendSource* source, const char* file, char** 
     else if (valid && !added)
     {
         printf("backend-source: file=%s failed=\"%s\" function=%u of %u\n", file,
-               outcome == TIER0_BENCHMARK_DISAGREE ? "the paths disagree on a function" :
                outcome == TIER0_BENCHMARK_REFUSED ? "Tier 0 refused a function its emission compiled" : "memory ran out",
                b, count);
     }
@@ -236,7 +234,7 @@ static int run_backend_source_benchmark(int count, char** arguments)
     valid = valid && backend_source_files(&source, files, file_count, options, option_count, only, after_scalar, (BackendSourceFault){ 0 });
     if (!valid)
     {
-        fprintf(stderr, "usage: compiler benchmark-backend-source [--only vector|scalar|sizing|encode|validate|validate-scalar|choose|choose-scalar] [--after-scalar MS] [preprocessor options] file...\n");
+        fprintf(stderr, "usage: compiler benchmark-backend-source [--only vector|sizing|encode|validate|validate-scalar|choose] [--after-scalar MS] [preprocessor options] file...\n");
     }
     free(files);
     free(options);

@@ -77,7 +77,7 @@ static void ir_stack_test_consumers(IrLowerTestTally* tally, const IrFunction* f
             switch (pass)
             {
             case 0:
-                check = scalar ? ssa_ir_promote_scalar(function, output, scratch, &transformed) : ssa_ir_promote(function, output, scratch, &transformed);
+                check = ssa_ir_promote(function, output, scratch, &transformed);
                 break;
             case 1:
             {
@@ -99,10 +99,8 @@ static void ir_stack_test_consumers(IrLowerTestTally* tally, const IrFunction* f
             }
             case 3:
             {
-                IrLicmOptions options = ir_licm_options();
-                options.scalar = scalar != 0;
                 IrLicmResult result = { 0 };
-                check = ir_optimize_licm(function, output, scratch, options, &result);
+                check = ir_optimize_licm(function, output, scratch, ir_licm_options(), &result);
                 transformed = result.function;
                 break;
             }
@@ -218,7 +216,7 @@ static void ir_stack_test_chain(IrLowerTestTally* tally, const IrFunction* funct
             switch (pass)
             {
             case 0:
-                check = scalar ? ssa_ir_promote_scalar(&current, output, scratch, &next) : ssa_ir_promote(&current, output, scratch, &next);
+                check = ssa_ir_promote(&current, output, scratch, &next);
                 break;
             case 1:
             {
@@ -240,10 +238,8 @@ static void ir_stack_test_chain(IrLowerTestTally* tally, const IrFunction* funct
             }
             case 3:
             {
-                IrLicmOptions options = ir_licm_options();
-                options.scalar = scalar != 0;
                 IrLicmResult result = { 0 };
-                check = ir_optimize_licm(&current, output, scratch, options, &result);
+                check = ir_optimize_licm(&current, output, scratch, ir_licm_options(), &result);
                 next = result.function;
                 break;
             }

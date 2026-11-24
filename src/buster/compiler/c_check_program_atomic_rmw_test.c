@@ -178,12 +178,10 @@ static void check_test_program_atomic_rmws(CheckTest* test, const char* clang)
         for (uint32_t f = 0; ready && f < count; f += 1)
         {
             const Tier0Function* function = &code.lowered.functions[f];
-            const Tier0Code scalar = tier0_compile_scalar(function, &scratch);
             const Tier0Code vector = tier0_compile(function, &scratch);
-            const bool compiled = scalar.error == TIER0_OK && vector.error == TIER0_OK && scalar.count == vector.count &&
-                                  memcmp(scalar.records, vector.records, (uint64_t)scalar.count * sizeof(X86Instruction)) == 0 &&
+            const bool compiled = vector.error == TIER0_OK && x86_validate(vector.records, vector.count) == vector.count &&
                                   tier0_validate(function).error == TIER0_OK;
-            const CheckTestFences fences = compiled ? check_test_fences_summary(function, &scalar, &scratch) : (CheckTestFences){ 0 };
+            const CheckTestFences fences = compiled ? check_test_fences_summary(function, &vector, &scratch) : (CheckTestFences){ 0 };
             const CheckTestAccesses rmws = check_test_rmws_summary(function);
             const CheckTestAccesses cas = check_test_cas_summary(function);
             const CheckTestRmwCase* expected = &cases[f];
