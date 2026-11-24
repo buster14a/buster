@@ -797,23 +797,34 @@ static bool pp_directive_test_structure_row(PPTestFixtures* table, const char* d
 // either staged file at every diagnostic location using the same %d directory marker as line-marker fixtures.
 static bool pp_directive_test_expected(const char* actual, const char* wanted, const char* directory, const char* path)
 {
+    bool same = true;
     if (*wanted == ':')
     {
         const size_t length = strlen(path);
-        return strncmp(actual, path, length) == 0 && strcmp(actual + length, wanted) == 0;
+        same = strncmp(actual, path, length) == 0;
+        actual += same ? length : 0;
     }
-    const size_t directory_length = strlen(directory);
-    for (const char* marker = strstr(wanted, "%d"); marker != NULL; marker = strstr(wanted, "%d"))
+    else
     {
-        const size_t prefix = (size_t)(marker - wanted);
-        if (strncmp(actual, wanted, prefix) != 0 || strncmp(actual + prefix, directory, directory_length) != 0)
+        const size_t length = strlen(directory);
+        while (same && *wanted != 0)
         {
-            return false;
+            if (strncmp(wanted, "%d/", 3) == 0)
+            {
+                same = strncmp(actual, directory, length) == 0;
+                actual += same ? length : 0;
+                wanted += 2;
+            }
+            else
+            {
+                wanted += wanted[0] == '%' && wanted[1] == '%';
+                same = *actual == *wanted;
+                actual += same;
+                wanted += 1;
+            }
         }
-        actual += prefix + directory_length;
-        wanted = marker + 2;
     }
-    return strcmp(actual, wanted) == 0;
+    return same && strcmp(actual, wanted) == 0;
 }
 
 // Each fixture by both kernels, whose diagnostics must be the same, and with clang, clang's.

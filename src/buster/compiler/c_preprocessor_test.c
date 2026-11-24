@@ -5676,9 +5676,13 @@ static bool pp_test_option_refusals(const char* directory, bool with_clang)
             // clang's -E with the set, and with its -std= alone or nothing: with the oracle's own messages caught.
             char* standard = NULL;
             const char* key = "";
-            for (int i = 0; i < n; i += 1)
+            for (int i = 0; i < n && strcmp(arguments[i], "--") != 0; i += 1)
             {
-                if (strncmp(arguments[i], "-std=", 5) == 0)
+                if (pp_option_takes_value(arguments[i]))
+                {
+                    i += 1;
+                }
+                else if (strncmp(arguments[i], "-std=", 5) == 0 || strcmp(arguments[i], "-ansi") == 0)
                 {
                     standard = arguments[i];
                     key = set->arguments[i];
