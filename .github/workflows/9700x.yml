@@ -292,6 +292,7 @@ jobs:
           node tests/ci/vector-runtime.cjs
           bash tests/ci/rerun.sh
           bash tests/ci/feedback.sh
+          bash tests/ci/compare-sqlite-objects.sh
 
   analyze:
     name: Clang Static Analyzer
@@ -431,6 +432,8 @@ jobs:
       optimization: ${{ matrix.optimization }}
       hosted-tools: ${{ needs.prepare-hosted-tools.outputs.artifact-name }}
       performance: ${{ needs.changes.outputs.performance }}
+      compare-sqlite: ${{ github.event_name == 'pull_request' && needs.changes.outputs.checker != 'false' }}
+      sqlite-stable: ${{ needs.changes.outputs.sqlite_stable == 'true' }}
 
   # The fuzz campaigns: libFuzzer with ASan, UBSan and leaks, each of the frontend, the ELF import's override and the
   # crash-replay proof. Each builds the compiler for its runner's CPU and runs it, so they draw AVX-512 runners as one
@@ -1282,7 +1285,7 @@ jobs:
         # (main-again); then each build's stages, counters (with store-to-load forwarding's failures) and checker
         # functions' samples. Where this tree changes what -c writes, the step says so and gives both objects' sizes:
         # diagnostic-only changes to selected warning sources are expected to leave the object unchanged and fail if
-        # it differs; other checker changes can legitimately alter output and warn with sizes instead (#1572).
+        # it differs. Other changes warn within the hosted comparison's 10% size limit and fail beyond it (#1572).
         # Both revisions sample the same placements. An older base without checker placements uses the
         # earlier .text sweep in both revisions (#1312).
         if: github.event_name == 'pull_request' && needs.changes.outputs.checker != 'false'
@@ -1312,15 +1315,7 @@ jobs:
           esac
           "$ab/main/compiler-0" "${options[@]}" -o "$ab/main.o"
           "$ab/head/compiler-0" "${options[@]}" -o "$ab/head.o"
-          if ! cmp -s "$ab/main.o" "$ab/head.o"; then
-              echo "== the objects differ: this tree changes sqlite3.c's code"
-              size "$ab/main.o" "$ab/head.o"
-              if [ "$SQLITE_EXPECT_STABLE" = true ]; then
-                  echo "::error::sqlite3.c's object differs after a diagnostic-only change expected to preserve generated objects"
-                  exit 1
-              fi
-              echo "== this change may legitimately affect generated objects; continuing"
-          fi
+          bash tools/ci/compare-sqlite-objects.sh "$ab/main.o" "$ab/head.o" "$SQLITE_EXPECT_STABLE"
           builds=()
           for build in main:main head:head main-again:main; do
               for shift in "${shifts[@]}"; do
