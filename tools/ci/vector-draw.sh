@@ -53,6 +53,13 @@
 #       lookup serves it (#3301), and writes its artifact's name and SHA-256 to GITHUB_OUTPUT (`name`, `digest`).
 #       Polls every 30 s. Fails, without waiting further, when no candidate
 #       can hold item 1 any more, when its holder ended without one, or when the attempt has two; at most 90 minutes.
+#   vector-draw.sh settle
+#       The verdict job's wait, before its download: until the run's listing, the one the download makes, names every
+#       request ledger the verdict requires of the records it lists, this attempt's: a candidate's for its draw's
+#       record, a collector's for its assignment. A ledger is its job's last upload, and the verdict starts as the
+#       last job ends, sooner than the listing names what that job uploaded: on 2026-11-24 a merge-queue verdict listed
+#       31 of the fuzz row's 32 records 6 s after the last candidate had begun uploading its ledger, and failed for
+#       the one it missed. Lists every 2 s, at most 180 s; past that it warns, and the verdict fails what's missing.
 #   vector-draw.sh verdict RECORDS
 #       The row's verdict over the downloaded artifacts (a directory per artifact): exactly one passing qualified
 #       execution of each item, by the candidate its latest assignment names, the configuration's item 1 with the
@@ -115,7 +122,8 @@ product_limit=${VECTOR_DRAW_PRODUCT_LIMIT:-5400}
 # An item polls for its product less often than a draw for its assignment: it waits for a build, minutes. A failed
 # listing backs off as a draw's does.
 product_poll=${VECTOR_DRAW_PRODUCT_POLL:-30}
-# Once the listing names the product: how often and how long its download's lookup is asked until it serves it.
+# Once the listing names the product: how often and how long its download's lookup is asked until it serves it; and
+# how often and how long the verdict's wait lists the run's artifacts until they name the ledgers it requires (settle).
 served_poll=${VECTOR_DRAW_SERVED_POLL:-2}
 served_limit=${VECTOR_DRAW_SERVED_LIMIT:-180}
 levels=${VECTOR_DRAW_LEVELS:-4}
@@ -150,8 +158,11 @@ if [ "$attempt" -gt 1 ]; then rest_budget=6; fi
 if [ "$rest_command" = take ] && [ "$attempt" -eq 1 ]; then rest_budget=0; fi
 if [ "$rest_command" = assign ] && [ "${2:-}" = 1 ]; then rest_budget=$((rest_budget + 1)); fi
 if [ "$rest_command" = verdict ]; then rest_budget=1; fi
-# The probe makes no request and keeps no ledger: it runs before the candidate has anything to account for.
-if [ "$rest_command" != probe ]; then
+# The probe makes no request and keeps no ledger: it runs before the candidate has anything to account for. Nor does
+# the verdict's wait for the listing (settle), which only lists artifacts.
+rest_ledgered=1
+case "$rest_command" in probe | settle) rest_ledgered=0 ;; esac
+if [ "$rest_ledgered" -eq 1 ]; then
     printf 'request\tstatus\tremaining\treset\tendpoint\n' > "$rest_ledger"
     printf '0 -1 0\n' > "$rest_state"
 fi
@@ -200,7 +211,7 @@ rest_summary()
     read -r count remaining reset < "$rest_state"
     summary "REST $rest_command: $count/$rest_budget requests; last shared remaining=$remaining, reset=$reset"
 }
-if [ "$rest_command" != probe ]; then
+if [ "$rest_ledgered" -eq 1 ]; then
     trap 'rest_summary >&2' EXIT
 fi
 
@@ -754,6 +765,55 @@ rest_report()
     [ "$attempt" -ne 1 ] || [ "$total" -le "$bound" ] || die "REST request ceiling exceeded: $total > $bound"
 }
 
+# The ledgers that rest_report requires of the records the artifact names $1 hold, this attempt's, which $1 lacks, a
+# line each: a candidate's for its draw's record, a collector's for its assignment. A product's ledger travels in its
+# candidate's artifact, and an item's evidence uploads before its candidate's ledger, in the same job.
+unlisted_ledgers()
+{
+    local names=$1 name ledger level
+    while IFS= read -r name; do
+        case "$name" in
+            "$prefix-$attempt-draw-"*) ledger="$prefix-$attempt-rest-draw-${name#"$prefix-$attempt-draw-"}" ;;
+            "$prefix-$attempt-assign-"*)
+                level=${name#"$prefix-$attempt-assign-"}
+                ledger="$prefix-$attempt-rest-collect-${level%%-*}"
+                ;;
+            *) continue ;;
+        esac
+        grep -Fxq -- "$ledger" <<< "$names" || printf '%s\n' "$ledger"
+    done <<< "$names"
+}
+
+# The verdict job's wait for the listing (`settle`): until it names every ledger unlisted_ledgers asks for, polled every
+# $served_poll s (a failed listing backs off as a draw's does), at most $served_limit s. Past that, a warning, and the
+# verdict fails what its download still lacks.
+settle()
+{
+    local start=$SECONDS listings=0 names missing='' status
+    while true; do
+        listings=$((listings + 1))
+        status=0
+        names=$(artifact_names) || status=$?
+        next_pause "$status"
+        if [ "$status" -eq 0 ]; then
+            missing=$(unlisted_ledgers "$names")
+            if [ -z "$missing" ]; then
+                [ "$listings" -eq 1 ] || summary "the run's listing named every request ledger the verdict requires after $((SECONDS - start)) s ($listings listings)"
+                return 0
+            fi
+        fi
+        if [ $((SECONDS - start)) -ge "$served_limit" ]; then
+            if [ "$status" -ne 0 ]; then
+                printf '::warning title=Vector draw::no listing of the run'\''s artifacts succeeded at the end of %s s (%s listings); the verdict reads what its download finds\n' "$served_limit" "$listings"
+            else
+                printf '::warning title=Vector draw::after %s s (%s listings), the run'\''s listing still lacks %s; the verdict reads what its download finds\n' "$served_limit" "$listings" "${missing//$'\n'/ }"
+            fi
+            return 0
+        fi
+        sleep "$((status == 0 ? served_poll : pause))"
+    done
+}
+
 verdict()
 {
     local records=$1 latest at name names level holder holders evidence passing item report product built configuration incomplete=() failed=()
@@ -874,12 +934,16 @@ case "${1:-}" in
         [ $# -eq 2 ] || { echo 'usage: vector-draw.sh product CONFIGURATION' >&2; exit 2; }
         product "$2"
         ;;
+    settle)
+        [ $# -eq 1 ] || { echo 'usage: vector-draw.sh settle' >&2; exit 2; }
+        settle
+        ;;
     verdict)
         [ $# -eq 2 ] || { echo 'usage: vector-draw.sh verdict RECORDS' >&2; exit 2; }
         verdict "$2"
         ;;
     *)
-        echo 'usage: vector-draw.sh probe LEVEL CANDIDATE | assign LEVEL CANDIDATES NEXT | take LEVEL CANDIDATE VERDICT RECORD | product CONFIGURATION | verdict RECORDS' >&2
+        echo 'usage: vector-draw.sh probe LEVEL CANDIDATE | assign LEVEL CANDIDATES NEXT | take LEVEL CANDIDATE VERDICT RECORD | product CONFIGURATION | settle | verdict RECORDS' >&2
         exit 2
         ;;
 esac

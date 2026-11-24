@@ -105,7 +105,13 @@ if [ "${FIXTURE_ARTIFACT_FAIL:-0}" -eq 1 ] || [ "$count" -le "${FIXTURE_ARTIFACT
     exit 1
 fi
 [ "$count" -ne "${FIXTURE_ARTIFACT_EMPTY_CALL:-0}" ] || exit 0
-jq -r '.artifacts[].name' "$FIXTURE/artifacts.json"
+# The first FIXTURE_LATE_LISTINGS listings lack the names FIXTURE_LATE: an ended job's last uploads, which the run's
+# listing names late (vector-draw.sh settle).
+if [ "$count" -le "${FIXTURE_LATE_LISTINGS:-0}" ]; then
+    jq -r '.artifacts[].name' "$FIXTURE/artifacts.json" | { grep -Fvx -f <(tr ' ' '\n' <<< "${FIXTURE_LATE:-}") || true; }
+else
+    jq -r '.artifacts[].name' "$FIXTURE/artifacts.json"
+fi
 if [ -n "${FIXTURE_PRODUCT_AFTER_JOBS:-}" ] && grep -q '/jobs?' "$FIXTURE/rest-calls"; then
     printf '%s\n' "$FIXTURE_PRODUCT_AFTER_JOBS"
 fi
@@ -757,6 +763,53 @@ job_evidence f2 1 5 failed
 if verdict; then fail "a job's item whose steps failed passes"; fi
 unset BUSTER_DRAW_ROW
 p=$saved_prefix
+pass
+
+# --- The verdict's wait for the listing ---
+# The verdict job starts as the last draw's job ends, sooner than the run's listing names that job's last uploads: it
+# waits (settle) until the listing names every ledger the verdict requires of what it lists, this attempt's, a
+# candidate's for its draw's record and a collector's for its assignment. It lists through the runtime, never REST, and
+# keeps no ledger. Past its limit it warns and lets the verdict fail what's missing.
+settle_run() { reset_calls; bash "$draw_script" settle > "$work/log" 2>&1; }
+listings() { cat "$FIXTURE/artifact-calls"; }
+export GITHUB_RUN_ATTEMPT=1 BUSTER_VECTOR_CONFIGURATIONS=none
+complete=("$p-1-probe-1-3-yes" "$p-1-probe-1-4-no" "$p-1-assign-1-n1x3" "$p-1-rest-collect-1" "$p-1-assign-2" "$p-1-rest-collect-2"
+    "$p-1-draw-1-3" "$p-1-rest-draw-1-3" "$p-1-draw-1-4" "$p-1-rest-draw-1-4" "$p-1-evidence-n1" "$products-1-none-$sha")
+artifacts "${complete[@]}"
+rm -f -- "$RUNNER_TEMP/vector-rest/settle.tsv"
+settle_run || { debug; fail 'a complete listing'; }
+[ "$(listings)" -eq 1 ] && [ "$(rest_calls)" -eq 0 ] && [ ! -e "$RUNNER_TEMP/vector-rest/settle.tsv" ] || fail 'a complete listing waits, asks REST or keeps a ledger'
+pass
+for late in "$p-1-rest-draw-1-3" "$p-1-rest-collect-2" "$p-1-rest-draw-1-4 $p-1-rest-collect-1"; do
+    FIXTURE_LATE=$late FIXTURE_LATE_LISTINGS=2 settle_run || { debug; fail "a listing that names $late late"; }
+    [ "$(listings)" -eq 3 ] && grep -q 'requires after [0-9]* s (3 listings)' "$work/log" || { debug; fail "the wait for $late"; }
+done
+# Failed listings are retried, as a draw's are.
+FIXTURE_ARTIFACT_FAILURES=2 settle_run && [ "$(listings)" -eq 3 ] || { debug; fail 'a wait through failed listings'; }
+pass
+# A ledger never listed, or no listing at all: a warning past the limit, and the verdict decides.
+FIXTURE_LATE="$p-1-rest-draw-1-3" FIXTURE_LATE_LISTINGS=1000000 VECTOR_DRAW_SERVED_LIMIT=1 settle_run || { debug; fail 'a wait past its limit fails'; }
+grep -q "::warning title=Vector draw::after 1 s ([0-9]* listings), the run's listing still lacks $p-1-rest-draw-1-3; the verdict" "$work/log" || { debug; fail 'a missing ledger past the limit unnamed'; }
+FIXTURE_ARTIFACT_FAIL=1 VECTOR_DRAW_SERVED_LIMIT=1 settle_run || { debug; fail 'a wait without a listing fails'; }
+grep -q "::warning title=Vector draw::no listing of the run's artifacts succeeded" "$work/log" || { debug; fail 'a wait without a listing unexplained'; }
+pass
+# Only this attempt's records, of this row: an earlier attempt's and another row's ledgers aren't the verdict's to ask.
+artifacts "${complete[@]}" "native-O3-1-draw-1-5" "native-O3-1-assign-1-n1x5" "fuzz-1-draw-1-1"
+settle_run && [ "$(listings)" -eq 1 ] || { debug; fail "another row's record waited for"; }
+artifacts "${complete[@]}" "$p-1-draw-1-7" "$p-2-draw-2-6" "$p-2-rest-draw-2-6"
+GITHUB_RUN_ATTEMPT=2 settle_run && [ "$(listings)" -eq 1 ] || { debug; fail "a rerun waited for an earlier attempt's ledgers"; }
+FIXTURE_LATE="$p-2-rest-draw-2-6" FIXTURE_LATE_LISTINGS=1 GITHUB_RUN_ATTEMPT=2 settle_run && [ "$(listings)" -eq 2 ] || { debug; fail "a rerun's own ledger not waited for"; }
+if bash "$draw_script" settle extra > "$work/log" 2>&1; then fail 'settle with an argument'; fi
+pass
+# The merge-queue verdict that failed for it (run 45359486404, 2026-11-24): the fuzz row's listing named 31 of its 32
+# records, all but the ledger of candidate 1, the last job to end.
+fuzz=(fuzz-1-assign-1-f1x1-f2x3-f3x4 fuzz-1-rest-collect-1 fuzz-1-evidence-f1 fuzz-1-evidence-f2 fuzz-1-evidence-f3)
+for candidate in 1 2 3 4 5 6 7 8 9; do
+    fuzz+=("fuzz-1-draw-1-$candidate" "fuzz-1-rest-draw-1-$candidate" "fuzz-1-probe-1-$candidate-$([ $((candidate % 2)) -eq 1 ] && echo yes || echo no)")
+done
+artifacts "${fuzz[@]}"
+BUSTER_DRAW_ROW=fuzz FIXTURE_LATE=fuzz-1-rest-draw-1-1 FIXTURE_LATE_LISTINGS=1 settle_run && [ "$(listings)" -eq 2 ] || { debug; fail "the fuzz row's late ledger"; }
+grep -q 'requires after [0-9]* s (2 listings)' "$work/log" || { debug; fail "the fuzz row's wait unreported"; }
 pass
 
 printf 'vector-draw fixture: %s checks passed\n' "$checks"

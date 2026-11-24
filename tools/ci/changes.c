@@ -3814,7 +3814,8 @@ static uint32_t changes_count(const char* text, const char* needle)
 // collector assigns, which one job publishes once; the draws' records are this run attempt's and never overwrite one
 // another; the first draw holds the candidates' steps (ANCHOR), the other three reuse them, and each of the 4 draws has
 // its collector, whose steps the first's are; the verdict waits for every draw and collector, even after a failure, and
-// reads every attempt's records (PATTERN). Polling steps run inside the runtime action (#2309), and every candidate and
+// reads every attempt's records (PATTERN), once the run's listing names the ledgers it requires (`vector-draw.sh
+// settle`, before its download). Polling steps run inside the runtime action (#2309), and every candidate and
 // collector publishes its REST ledger (named by LEDGER, this attempt's) even after a failure; artifact polling never
 // falls back to the repository REST API.
 static bool changes_draw_scaffold(const char* text, const char* anchor, const char* ledger, const char* pattern)
@@ -3834,6 +3835,7 @@ static bool changes_draw_scaffold(const char* text, const char* anchor, const ch
         "\n    steps: &collect-steps\n",
         "\n    needs: [draw-1, collect-1, draw-2, collect-2, draw-3, collect-3, draw-4, collect-4]\n    if: ${{ !cancelled() }}\n",
         "\n      BUSTER_DRAW_NEXT: '0'\n    steps: *collect-steps\n",
+        "\n      - name: Wait until the run's listing names the request ledgers the verdict requires\n        uses: ./.vector-draw-script/.github/actions/vector-runtime\n        with:\n          script: bash .vector-draw-script/tools/ci/vector-draw.sh settle\n",
     };
     bool valid = true;
     for (uint32_t i = 0; i < sizeof(required) / sizeof(required[0]); i += 1)
@@ -3847,10 +3849,10 @@ static bool changes_draw_scaffold(const char* text, const char* anchor, const ch
     valid = valid && strstr(text, line) != NULL;
     snprintf(line, sizeof(line), "\n          pattern: %s\n", pattern);
     valid = valid && strstr(text, line) != NULL;
-    // The candidates' checkout holds the probe, the collectors' doesn't need it, and the helper stays for the whole
-    // polling step; no workflow may restore REST artifact polls.
+    // The candidates' checkout holds the probe, the collectors' and the verdict's don't need it, and the helper stays for
+    // the whole polling step; no workflow may restore REST artifact polls.
     valid = valid && changes_count(text, "\n          sparse-checkout: |\n            tools/ci/vector-draw.sh\n            tools/ci/vector-probe.c\n            .github/actions/vector-runtime\n") == 1;
-    valid = valid && changes_count(text, "\n          sparse-checkout: |\n            tools/ci/vector-draw.sh\n            .github/actions/vector-runtime\n") == 1;
+    valid = valid && changes_count(text, "\n          sparse-checkout: |\n            tools/ci/vector-draw.sh\n            .github/actions/vector-runtime\n") == 2;
     valid = valid && strstr(text, "/artifacts?") == NULL && strstr(text, "application/vnd.github.raw") == NULL;
     valid = valid && strstr(text, "\n            rm -rf -- \"$GITHUB_WORKSPACE/.vector-draw-script\"") == NULL;
     // The probe before the verdict's publication, which is before the take.
@@ -3859,6 +3861,14 @@ static bool changes_draw_scaffold(const char* text, const char* anchor, const ch
     const char* publish = strstr(text, "\n      - name: Publish the probe's verdict\n");
     const char* take = strstr(text, "\n      - name: Take the vector item the draw assigns, or end as a redraw\n");
     valid = valid && fetch != NULL && probe != NULL && publish != NULL && take != NULL && fetch < probe && probe < publish && publish < take;
+    // The verdict's wait for the listing before its download, which is before the verdict; the verdict's checkout holds
+    // the runtime the wait runs in.
+    const char* verdict_job = strstr(text, "\n  verdict:\n");
+    const char* settle = verdict_job != NULL ? strstr(verdict_job, "\n      - name: Wait until the run's listing names the request ledgers the verdict requires\n") : NULL;
+    const char* download = verdict_job != NULL ? strstr(verdict_job, "\n      - name: Download the vector row's draws, assignments and evidence\n") : NULL;
+    const char* verdict = verdict_job != NULL ? strstr(verdict_job, "\n          bash \"$RUNNER_TEMP/vector-draw.sh\" verdict \"$RUNNER_TEMP/vector-records\"\n") : NULL;
+    const char* runtime = verdict_job != NULL ? strstr(verdict_job, "\n          sparse-checkout: |\n            tools/ci/vector-draw.sh\n            .github/actions/vector-runtime\n") : NULL;
+    valid = valid && settle != NULL && download != NULL && verdict != NULL && runtime != NULL && runtime < settle && settle < download && download < verdict;
     snprintf(line, sizeof(line), "\n    steps: &%s\n", anchor);
     const uint32_t first = changes_count(text, line);
     snprintf(line, sizeof(line), "\n    steps: *%s\n", anchor);
@@ -4024,6 +4034,8 @@ static void changes_test_vector_policy(ChangesTest* test, Text row, Text host_is
         { 0, "    if: ${{ !cancelled() }}\n    runs-on: ubuntu-26.04\n    timeout-minutes: 10", "    if: success()\n    runs-on: ubuntu-26.04\n    timeout-minutes: 10", "a verdict skipped after a failure" },
         { 0, "          pattern: ${{ inputs.host_arch }}-O${{ inputs.optimization }}-*", "          pattern: ${{ inputs.host_arch }}-O${{ inputs.optimization }}-${{ github.run_attempt }}-*", "a verdict blind to the attempt a rerun keeps" },
         { 0, "          if [ \"$path\" != vector ]; then", "          if false; then", "a drawn row on the scalar path" },
+        { 0, "          script: bash .vector-draw-script/tools/ci/vector-draw.sh settle\n", "          script: true\n", "a verdict that downloads before the listing names its ledgers" },
+        { 0, "            .github/actions/vector-runtime\n          sparse-checkout-cone-mode: false\n\n      # This job starts", "          sparse-checkout-cone-mode: false\n\n      # This job starts", "a verdict's checkout without the runtime its wait runs in" },
     };
     for (uint32_t i = 0; i < sizeof(mutants) / sizeof(mutants[0]); i += 1)
     {
@@ -4103,6 +4115,7 @@ static void changes_test_drawn_policy(ChangesTest* test, Text drawn, Text script
         { 0, "          pattern: ${{ inputs.row }}-*", "          pattern: ${{ inputs.row }}-${{ github.run_attempt }}-*", "a job's verdict blind to the attempt a rerun keeps" },
         { 0, "        run: bash .vector-draw-script/tools/ci/vector-draw.sh probe \"$BUSTER_DRAW_LEVEL\" \"$BUSTER_DRAW_CANDIDATE\"\n", "        run: echo 'verdict=qualified' >> \"$GITHUB_OUTPUT\"\n", "a job's candidate that doesn't probe" },
         { 0, "  BUSTER_DRAW_ROW: ${{ inputs.row }}\n", "  BUSTER_DRAW_ROW: fuzz\n", "every job drawn as the fuzz campaigns" },
+        { 0, "          script: bash .vector-draw-script/tools/ci/vector-draw.sh settle\n", "          script: true\n", "a job's verdict that downloads before the listing names its ledgers" },
     };
     for (uint32_t i = 0; i < sizeof(mutants) / sizeof(mutants[0]); i += 1)
     {
