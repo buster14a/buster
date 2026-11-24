@@ -97,11 +97,12 @@ each of its items (see "The vector row"), with no emulation.
 Required native vector coverage of the measured `znver5` build comes from the real Ryzen 7 9700X, after
 both hosted variants pass on the same triggering revision. The hardware job
 asserts that `host_isa.h` takes its target, builds with `BUSTER_HOST_ARCH=znver5` and runs
-the complete suite before any benchmarks. A pull request never runs it (#2055,
+the native inventory before any benchmarks. A backlog state qualified by its full
+merge-queue vector run uses the [native smoke](../tools/ci/znver5-smoke.tests). A pull request never runs it (#2055,
 the owner's choice on 2026-11-10, after #1272 had dropped its native suite on
 2026-11-04): its hosted rows qualify it, and native correctness and
 measurements run on its merged first-parent state in the nightly window, and
-on dispatched runs. Hosted and hardware jobs read one
+on dispatched runs. Hosted and full native runs read one
 suite inventory, `tools/ci/correctness.tests`, with the same counts, seeds and
 external cross-checks. There is no vector emulation.
 Hosted runners are virtual machines, so the compiler runs there with
@@ -111,7 +112,7 @@ Baseline memory boundary tests also run with undefined-behavior checks.
 The hosted matrix additionally builds the entire compiler with each of
 `BUSTER_SANITIZER=address|thread|memory`, for the vector row's configurations
 (the `native` sanitizer rows went in #2032, the `x86-64` ones in #2924).
-Every variant runs `tools/ci/correctness.tests`, including the same corpus,
+Every full row runs `tools/ci/correctness.tests`, including the same corpus,
 seeds, lane counts, generated-code execution and external cross-checks. These
 are full suites, a row's shards together; the TSan and MSan rows are not
 reduced module lists.
@@ -1205,6 +1206,25 @@ Every `9700x.yml` run has an `evidence` job, which must succeed:
   conclusive push, dispatch or merge-queue run of that commit decides its
   hosted rows: a pass is reused and a later failure isn't hidden. The window
   must also admit the run.
+
+  On a backlog dispatch, the measured `znver5` binary can run the
+  [four-command native smoke](../tools/ci/znver5-smoke.tests) when that same
+  source is a successful merge-queue run in this repository, its Integration
+  qualification passed and it has one successful explicit vector verdict
+  covering plain, address, thread and memory. The record names the mode
+  (`native_evidence=smoke`) and run ID (`native_source`). An incomplete API
+  read reruns the hosted rows and keeps the full native inventory. A
+  plain-only source or missing vector qualification also keeps the full native inventory.
+  The snapshot and manual full dispatch also run the full native inventory.
+
+  The smoke exercises lexer masks and page edges, baked backend tables,
+  the deferred checker's sparse-arena page policy, and emitted executables.
+  The full hosted inventory covers the broader compiler suite on the same
+  revision. The snapshot covers the rest of that suite on the measured host.
+  In the [24 November 9700X backlog run](https://github.com/buster14a/buster/actions/runs/45341344037/job/138265644831)
+  the four commands passed in 3.1, 0.2, 7.1 and 0.4 seconds respectively,
+  within a 172-second native step. Those are measured command times within
+  the full suite. The smoke uses the same eight-core parallel runner.
 
 Every run's `record` job writes `coverage-record-ATTEMPT`, kept 90 days. It
 holds the commit, tree, first parent and first-parent tree; the blobs of the

@@ -165,8 +165,8 @@ report's first line names the shard: `parallel: shard K of N, M of T commands,
 at most J CPUs at once`. A shard may have no commands (N past the list's), which
 passes.
 
-The 9700X job's test step ("Run complete native vector correctness before benchmarks") runs every
-test through it, with `--timeout 600`, before the benchmarks, which run one at
+The 9700X job's “Run native vector correctness before benchmarks” step uses
+`--timeout 600` for both the full and smoke inventories. Benchmarks run one at
 a time and pinned. Its commands share CPUs 0 to 7 (`taskset`), one per core,
 and the runner holds them to those 8 CPUs together (#522). Tests such as
 test-lanes and test-files start lanes of their own and the call-graph check

@@ -264,8 +264,10 @@ benchmarks, reusing one build and the existing shared lock. Pull requests never
 run it (#2055, the owner's choice on 2026-11-10): hosted correctness qualifies a
 pull request, and native correctness and measurements run on its merged
 first-parent state in the nightly window. The required aggregate passes a pull
-request on its hosted rows and says so. All correctness builds run
-the same suite inventory, `tools/ci/correctness.tests`. Failed, cancelled or
+request on its hosted rows and says so. Hosted rows and full native runs share `tools/ci/correctness.tests`.
+A backlog state reusing its exact merge-queue candidate's successful full vector
+contract runs `tools/ci/znver5-smoke.tests` on the measured binary. Snapshot and
+manual full runs exercise the complete native inventory. Failed, cancelled or
 skipped hosted tests cannot queue the hardware job; failed native tests cannot
 start benchmarks. A pull request's run stops at its first failure: its test rows
 fail fast, each shard stops at its first failing command (`parallel
