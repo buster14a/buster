@@ -164,7 +164,7 @@ static bool ir_reduce_test_roundtrip(const IrFunction* function, Arena* output, 
     valid = valid && text != NULL && fseek(file, 0, SEEK_SET) == 0 && fread(text, 1, (uint64_t)size, file) == (uint64_t)size;
     if (valid)
     {
-        const IrParseResult parsed = ir_parse_scalar((String8){ .pointer = text, .length = (uint64_t)size }, output, scratch, result);
+        const IrParseResult parsed = ir_parse((String8){ .pointer = text, .length = (uint64_t)size }, output, scratch, result);
         valid = parsed.error == IR_PARSE_OK && parsed.consumed == (uint64_t)size;
     }
     if (file != NULL)

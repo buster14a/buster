@@ -72,18 +72,26 @@ in the high 32 bits, event index in the low 32. Namespace is encoded as
 Input is already ordered by event index, so a stable byte radix sort only sorts
 the high half. While packing keys, `c_bindings_sorted` accumulates the bitwise
 OR and AND of their names; their XOR identifies every bit that varies. The
-vector sort omits any byte pass with no varying bit. This removes work even
-when constant bytes are nonzero or lie between changing bytes. The scalar
-oracle still runs all four passes. Sixteen keys at a time use `vpconflictd` and population
-counts for the lane's bucket rank. Only the last lane for each bucket updates
-the histogram or cursor. Scatters are scalar stores to computed addresses.
-There are no hardware gathers or scatters.
+sort omits any byte pass with no varying bit. This removes work even when
+constant bytes are nonzero or lie between changing bytes. Up to sixteen keys
+take their ranks in one register instead: each lane counts the lanes with a
+smaller high half and the earlier lanes with an equal one, and each key is
+stored at its rank. A larger input's pass counts its bytes a key at a time,
+takes the buckets' starts by an in-register prefix sum of the 256 counts, and
+stores each key at its bucket's cursor. The counting and the stores stay a key
+at a time: ranks within a bucket from `vpconflictd` over sixteen keys, the
+earlier form, cost four times the cycles a key a pass on the 9700X, and lost
+to its scalar twin at every size where all four bytes varied, above 64 keys
+where three did and above 512 where two did
+(#2924; the record is in buster-performance's
+`scalar-paths-removal-2924-2026-11-17/c-bindings-deletion`). There are
+no hardware gathers or scatters.
 
 The internal producer/consumer contract is explicit: `c_bindings_sort` receives
 the variability mask with the packed event count and returns the buffer that
 holds the result. An odd number of passes ends in the temporary buffer, so
 `c_bindings_sorted` hands that buffer directly to `c_bindings_scan` rather than
-copying it back. Both nonoverlapping buffers remain owned by the same scratch
+copying it back; the register sort of sixteen keys or fewer also ends there. Both nonoverlapping buffers remain owned by the same scratch
 arena until the consumer finishes. Neither requires padding. Empty and
 one-record inputs take no radix pass; all-constant names retain event order
 without touching the temporary buffer. Allocation sizes and failure handling
@@ -424,7 +432,7 @@ replayed the parser's grammar for the adapter's columns and mapped them onto its
 uses, a duplicate syntactic producer.
 [#336](https://github.com/buster14a/buster/issues/336) measured the whole reader
 with each handoff and made the reader's retained answers (each use's `previous`)
-the column, with the stack replay as `--scalar`'s twin; the parser's replay and
+the column (the stack replay was `--scalar`'s twin until #2924); the parser's replay and
 the batch sort cost more on every measured input
 ([the checker's binding handoff](c-check-bindings.md)). It preserves [#128](https://github.com/buster14a/buster/issues/128)/[#133](https://github.com/buster14a/buster/issues/133)/[#113](https://github.com/buster14a/buster/issues/113)
 owners; synthetic batch timings are not a source acceptance result.

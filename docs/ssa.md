@@ -101,10 +101,12 @@ in instruction order.
    ([why it is scalar](dominators.md#why-it-is-scalar)). Compact
    unreachable-source edges out of the SSA predecessor result afterward.
 3. Read each reachable block's accesses once, found 64 kinds at a time
-   (`ssa_vector_scan`). A write sets its local's entry in the block's row of
-   `last` and the def bit; a read takes the row's value, the write before it in
-   its block. A read with no such write is exposed: it sets the use bit and is
-   listed with its block's other exposed reads.
+   (`ssa_vector_scan`). A write sets its local's entry in the block's exit row
+   and the def bit; a read takes the row's value, the write before it in its
+   block. A read with no such write is exposed: it sets the use bit and is
+   listed with its block's other exposed reads. The exit rows hold the first
+   group of locals (step 7); a write to a later local goes into one reused row
+   instead, whose chunks of 16 the block's end lists with their masks.
 4. Solve liveness with `dataflow.c`'s AVX-512 equations over the use and def
    bit rows, and list the dominance frontiers sparsely (`ssa_frontiers`,
    Cooper, Harvey and Kennedy's runners from each join's predecessors up to its
@@ -120,14 +122,22 @@ in instruction order.
 7. In reverse postorder, form each block's entry row: its phis' IDs (expanded
    into the placed lanes) and, in its other locals, its immediate dominator's
    exit row; the entry block's row is the locals' undefined values. Its exposed
-   reads take the entry row, and its exit row, kept in `last`, is its last
-   writes over the entry row (`ssa_vector_rows`).
-8. Each phi's operand on an edge is the predecessor's exit row in the phis'
-   locals, compressed to the block's run of phis (`ssa_vector_operands`).
+   reads take the entry row, and its exit row is its last writes over the entry
+   row. Each phi's operand on an edge is then the predecessor's exit row in the
+   phis' locals, compressed to the block's run of phis (`ssa_vector_rows`).
+   The rows are a buffer of a group of chunks of 16 locals for every reachable
+   block (#3449): at most `BUSTER_SSA_ROW_GROUP_BYTES` (256 KiB, so it stays in
+   L2), or one chunk a reachable block (64 bytes each) where that is more. A
+   narrow function's buffer can be larger than main's `last` was (a 1-local
+   function's row is a 64-byte chunk where `last` was 4 bytes a block). A function whose rows fit is one group, written by the scan; a wider
+   one takes its chunks a group at a time, each later group's writes from the
+   scan's lists and each block's next phi ID, next write and phi operands so
+   far carried from group to group.
 
-Its tables are a row of u32 a block (`last`) and a few bit rows a block; no
-table holds a phi or an operand a `(block, local)` cell, and the phis' columns
-are allocated at their exact counts. Past `BUSTER_SSA_FRONTIER_PAIRS`
+Its tables are a few bit rows a block (def, use, liveness, placed, pending), the
+rows' buffer and one row of u32 a local; no table holds a u32 a
+`(block, local)` cell past the buffer, and the phis' columns are allocated at
+their exact counts. Past `BUSTER_SSA_FRONTIER_PAIRS`
 (16 MiB of frontier pairs) the function takes the bounded construction instead.
 
 On the 9700X, #2924's gate timed this constructor against Braun's scalar

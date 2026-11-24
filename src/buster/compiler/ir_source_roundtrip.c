@@ -236,35 +236,31 @@ static bool ir_source_text_roundtrip(const IrFunction* source, Arena* output, Ar
         .pointer = text,
         .length = length,
     };
-    IrFunction parsed[2] = { 0 };
-    IrParseResult results[2] = { 0 };
+    IrFunction parsed = { 0 };
+    IrParseResult result = { 0 };
     if (valid)
     {
-        results[0] = ir_parse(input, output, scratch, &parsed[0]);
-        const bool vector_scratch = scratch->length == scratch_mark;
-        results[1] = ir_parse_scalar(input, output, scratch, &parsed[1]);
-        const bool scalar_scratch = scratch->length == scratch_mark;
-        valid = vector_scratch && scalar_scratch;
+        result = ir_parse(input, output, scratch, &parsed);
+        valid = scratch->length == scratch_mark;
         check->reason = "parsing retained scratch";
     }
-    for (uint32_t path = 0; valid && path < 2; path += 1)
+    if (valid)
     {
-        check->parsed = results[path];
-        valid = results[path].error == IR_PARSE_OK && results[path].consumed == input.length && results[path].check.dominance_checked;
-        check->reason = path == 0 ? "vector parse did not verify and consume the complete function" : "scalar parse did not verify and consume the complete function";
-        if (valid)
-        {
-            valid = ir_source_text_equal(source, &parsed[path]);
-            check->reason = path == 0 ? "vector round trip changed structure" : "scalar round trip changed structure";
-        }
+        check->parsed = result;
+        valid = result.error == IR_PARSE_OK && result.consumed == input.length && result.check.dominance_checked;
+        check->reason = "parse did not verify and consume the complete function";
+    }
+    if (valid)
+    {
+        valid = ir_source_text_equal(source, &parsed);
+        check->reason = "round trip changed structure";
+    }
+    if (valid)
+    {
         char* printed = 0;
         size_t printed_length = 0;
-        if (valid)
-        {
-            valid = ir_source_text_print(&parsed[path], scratch, &printed, &printed_length) &&
-                    printed_length == length && ir_source_text_bytes(text, printed, length);
-            check->reason = path == 0 ? "vector round trip changed canonical bytes" : "scalar round trip changed canonical bytes";
-        }
+        valid = ir_source_text_print(&parsed, scratch, &printed, &printed_length) && printed_length == length && ir_source_text_bytes(text, printed, length);
+        check->reason = "round trip changed canonical bytes";
         free(printed);
     }
     if (valid)
@@ -566,7 +562,7 @@ static void ir_source_text_normalization(IrSourceTextTests* tests, Arena* origin
     arena_pop_to(original_output, mark);
 }
 
-static bool ir_source_text_tests(Arena* sources, Arena* original_output, Arena* twin_output, Arena* output, Arena* scratch)
+static bool ir_source_text_tests(Arena* sources, Arena* original_output, Arena* copy_output, Arena* output, Arena* scratch)
 {
     static const char* const fixtures[] = {
         "tests/ir/arithmetic.ir",
@@ -600,7 +596,7 @@ static bool ir_source_text_tests(Arena* sources, Arena* original_output, Arena* 
         while (valid && position < text.length)
         {
             const uint64_t original_mark = original_output->length;
-            const uint64_t twin_mark = twin_output->length;
+            const uint64_t copy_mark = copy_output->length;
             const uint64_t output_mark = output->length;
             const uint64_t scratch_mark = scratch->length;
             const String8 remaining = {
@@ -608,13 +604,13 @@ static bool ir_source_text_tests(Arena* sources, Arena* original_output, Arena* 
                 .length = text.length - position,
             };
             IrFunction original = { 0 };
-            IrFunction twin = { 0 };
+            IrFunction copy = { 0 };
             const IrParseResult parsed = ir_parse(remaining, original_output, scratch, &original);
-            const IrParseResult parsed_twin = ir_parse_scalar(remaining, twin_output, scratch, &twin);
-            const bool ended = parsed.error == IR_PARSE_END && parsed_twin.error == IR_PARSE_END;
-            valid = !ended && parsed.error == IR_PARSE_OK && parsed_twin.error == IR_PARSE_OK &&
-                    parsed.consumed != 0 && parsed.consumed == parsed_twin.consumed && parsed.consumed <= remaining.length;
-            ir_source_text_expect(&tests, valid || ended, "oracle fixture did not parse through both paths");
+            const bool ended = parsed.error == IR_PARSE_END;
+            valid = !ended && parsed.error == IR_PARSE_OK && parsed.consumed != 0 && parsed.consumed <= remaining.length;
+            // The mutations edit a copy in its own arena, parsed again from the same text.
+            valid = valid && ir_parse(remaining, copy_output, scratch, &copy).error == IR_PARSE_OK;
+            ir_source_text_expect(&tests, valid || ended, "oracle fixture did not parse into the original and its copy");
             if (valid)
             {
                 IrSourceTextCheck check = { 0 };
@@ -626,11 +622,11 @@ static bool ir_source_text_tests(Arena* sources, Arena* original_output, Arena* 
                 }
                 ir_source_text_expect(&tests, roundtrip, "oracle fixture did not round-trip");
                 ir_source_text_expect(&tests, output->length == output_mark && scratch->length == scratch_mark, "round trip retained an arena allocation");
-                ir_source_text_mutations(&tests, &original, &twin);
+                ir_source_text_mutations(&tests, &original, &copy);
                 position += parsed.consumed;
             }
             arena_pop_to(original_output, original_mark);
-            arena_pop_to(twin_output, twin_mark);
+            arena_pop_to(copy_output, copy_mark);
             arena_pop_to(output, output_mark);
             arena_pop_to(scratch, scratch_mark);
         }

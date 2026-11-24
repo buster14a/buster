@@ -354,7 +354,7 @@ passes every checker test.
   large, each written to a file and checked as `test-checker-corpus` checks one:
   on the
   scalar path, the vector path, and the vector path with every body read apart,
-  on 1, 2, 3 and 8 lanes through the stacks, the batch and the direct binding
+  on 1, 2, 3 and 8 lanes through the batch and the direct binding
   resolution, the issue's cases on every lane their bodies can take
   (`CheckDeferred.every_lane`). The deferred result must be the vector path's
   column for column, and each fixture says whether the reader merges it. Each
@@ -513,7 +513,7 @@ passes every checker test.
   one without the restores' check of the history's declarations fails the
   five tags' fixtures, and one without the table's reset 19 fixtures.
 - `./build/compiler test-checker-corpus --deferred N [--deferred-bindings
-  stacks|batch|direct] ...` adds the deferred reader on N lanes as a third path
+  batch|direct] ...` adds the deferred reader on N lanes as a third path
   to each file's comparison, on every lane the bodies can take up to N
   (`CheckDeferred.every_lane`: how many lanes read the bodies doesn't change
   the merge's result, which the comparison checks on as many as it can), which

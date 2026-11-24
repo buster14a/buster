@@ -24,7 +24,6 @@
 typedef struct IrSroaOptions IrSroaOptions;
 struct IrSroaOptions
 {
-    bool scalar;
     bool simd;
     bool flagged;
     // #3311: the eightbytes of slots read and written at mixed widths (ir_sroa_widen), and a register-class aggregate
@@ -144,7 +143,7 @@ static void ir_sroa_flush_uses(IrSroaWork* work, IrSroaUseBatch* batch)
     batch->count = 0;
 }
 
-static void ir_sroa_vector_uses(IrSroaWork* work)
+static void ir_sroa_uses(IrSroaWork* work)
 {
     const IrFunction* f = work->ir.function;
     IrSroaUseBatch batch = { 0 };
@@ -193,10 +192,8 @@ static bool ir_sroa_offset(uint64_t base, int64_t delta, uint64_t* offset)
     return fits;
 }
 
-static void ir_sroa_provenance(IrSroaWork* work, bool scalar, bool flagged)
+static void ir_sroa_provenance(IrSroaWork* work, bool flagged)
 {
-    (void)scalar;
-
     const IrFunction* f = work->ir.function;
     if (f->instruction_count != 0)
     {
@@ -257,37 +254,7 @@ static void ir_sroa_provenance(IrSroaWork* work, bool scalar, bool flagged)
             }
         }
     }
-    if (!BUSTER_SCALAR_PATH(scalar))
-    {
-        ir_sroa_vector_uses(work);
-    }
-    for (uint32_t i = 0; BUSTER_SCALAR_PATH(scalar) && i < f->instruction_count; i += 1)
-    {
-        if (work->ir.dominators.rpo_index[work->ir.cfg.instruction_blocks[i]] != BUSTER_DOMINATOR_NONE)
-        {
-            const uint64_t count = ir_operand_count(f, i);
-            for (uint32_t number = 0; number < count; number += 1)
-            {
-                const IrOperand operand = ir_operand(f, i, number, work->ir.cfg.instruction_blocks[i]);
-                const uint32_t root = work->roots[operand.value];
-                if (root != BUSTER_IR_NONE)
-                {
-                    const bool memory = operand.position == 0 && (f->op[i] == IR_LOAD || f->op[i] == IR_STORE);
-                    const bool forward = operand.position == 0 && (f->op[i] == IR_COPY || f->op[i] == IR_BITCAST || f->op[i] == IR_ADDRESS || f->op[i] == IR_PTRTOINT || f->op[i] == IR_INTTOPTR) &&
-                                         work->roots[i] == root;
-                    const bool ret = work->returns && operand.position == 0 && f->op[i] == IR_RET;
-                    if ((!memory && !forward && !ret) || (memory && (f->flags[i] & BUSTER_IR_OBSERVABLE) != 0))
-                    {
-                        work->refused[root] = 1;
-                    }
-                    if (ret)
-                    {
-                        work->returned[root] = 1;
-                    }
-                }
-            }
-        }
-    }
+    ir_sroa_uses(work);
 }
 
 // The bytes a load or a store at `i` accesses.
@@ -528,13 +495,11 @@ static void ir_sroa_assemble(IrSroaWork* work, IrSroaAssembly* states, uint32_t*
 
 // The exact interval/key query over `root`'s fields alone, in creation order (#1366): its field of `offset` and `type`, and
 // whether another of its fields overlaps the access. The caller proves offset+size is inside the source slot, so ends
-// cannot wrap. Both paths walk the root's chain. A root has a handful of fields (one per distinct access, 16 for a
+// cannot wrap. It walks the root's chain. A root has a handful of fields (one per distinct access, 16 for a
 // 64-byte vector of int), and the 8-wide compare the vector path had over the function's whole field table was what
 // made the pass quadratic in inlined calls: over one root's fields it would mostly run on a partial vector.
-static uint32_t ir_sroa_field(const IrSroaWork* work, uint32_t root, uint64_t offset, uint32_t type, uint32_t size, bool scalar, bool* overlap)
+static uint32_t ir_sroa_field(const IrSroaWork* work, uint32_t root, uint64_t offset, uint32_t type, uint32_t size, bool* overlap)
 {
-    (void)scalar;
-
     uint32_t found = BUSTER_IR_NONE;
     bool conflict = false;
     for (uint32_t next = work->root_first[root]; next != 0; next = work->field_next[next - 1])
@@ -554,10 +519,8 @@ static uint32_t ir_sroa_field(const IrSroaWork* work, uint32_t root, uint64_t of
     return found;
 }
 
-static void ir_sroa_fields(IrSroaWork* work, bool scalar)
+static void ir_sroa_fields(IrSroaWork* work)
 {
-    (void)scalar;
-
     const IrFunction* f = work->ir.function;
     for (uint32_t i = 0; i < f->instruction_count; i += 1)
     {
@@ -575,7 +538,7 @@ static void ir_sroa_fields(IrSroaWork* work, bool scalar)
             else if (work->refused[root] == 0)
             {
                 bool overlap = false;
-                uint32_t field = ir_sroa_field(work, root, offset, type, bytes, BUSTER_SCALAR_PATH(scalar), &overlap);
+                uint32_t field = ir_sroa_field(work, root, offset, type, bytes, &overlap);
                 if (overlap)
                 {
                     work->refused[root] = 1;
@@ -827,7 +790,7 @@ static IrCheck ir_sroa_split(const IrFunction* function, Arena* output, Arena* s
     IrCheck check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, 0);
     if (output != scratch)
     {
-        check = ir_optimize_prepare(&work.ir, function, output, scratch, BUSTER_SCALAR_PATH(options.scalar), options.simd);
+        check = ir_optimize_prepare(&work.ir, function, output, scratch, options.simd);
     }
     if (check.error == IR_OK)
     {
@@ -864,7 +827,7 @@ static IrCheck ir_sroa_split(const IrFunction* function, Arena* output, Arena* s
     IrFunction view = { 0 };
     if (check.error == IR_OK)
     {
-        ir_sroa_provenance(&work, BUSTER_SCALAR_PATH(options.scalar), options.flagged);
+        ir_sroa_provenance(&work, options.flagged);
         if (options.flagged)
         {
             const uint64_t mark = scratch->length;
@@ -904,7 +867,7 @@ static IrCheck ir_sroa_split(const IrFunction* function, Arena* output, Arena* s
     }
     if (check.error == IR_OK)
     {
-        ir_sroa_fields(&work, BUSTER_SCALAR_PATH(options.scalar));
+        ir_sroa_fields(&work);
         check.error = ir_sroa_view(&work, scratch, &view);
     }
     if (check.error == IR_OK)
@@ -924,7 +887,6 @@ static IrCheck ir_sroa_split(const IrFunction* function, Arena* output, Arena* s
         }
         IrOptimizeOptions rewrite = ir_optimize_options();
         rewrite.passes = BUSTER_IR_OPTIMIZE_DCE;
-        rewrite.scalar = BUSTER_SCALAR_PATH(options.scalar);
         ir_optimize_dce(&work.ir, rewrite);
         check.error = ir_optimize_rewrite(&work.ir, output, scratch, rewrite, &work.statistics.function);
     }
@@ -1164,7 +1126,7 @@ static IrCheck ir_sroa_widen(const IrFunction* function, Arena* output, Arena* s
     const bool eligible = options.flagged && f->debug == NULL && f->slot_count != 0 && output != scratch;
     if (eligible)
     {
-        check = ir_optimize_prepare(&work.ir, f, output, scratch, BUSTER_SCALAR_PATH(options.scalar), options.simd);
+        check = ir_optimize_prepare(&work.ir, f, output, scratch, options.simd);
     }
     uint8_t* kinds = NULL;
     uint8_t* widen = NULL;
@@ -1195,7 +1157,7 @@ static IrCheck ir_sroa_widen(const IrFunction* function, Arena* output, Arena* s
             memset(widen, 0, f->slot_count);
             memset(mixed, 0, f->slot_count);
             memset(keys, 0, (uint64_t)f->slot_count * BUSTER_IR_SROA_WIDEN_BYTES * 4);
-            ir_sroa_provenance(&work, BUSTER_SCALAR_PATH(options.scalar), true);
+            ir_sroa_provenance(&work, true);
             chunks = ir_sroa_widen_result(f);
             // Every access of a slot not refused, reachable or not (the split takes both), decides it; widen[] is 1 for a
             // slot an access refuses, until the decision below.

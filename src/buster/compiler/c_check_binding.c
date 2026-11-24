@@ -6,9 +6,8 @@
 // every declaration, use and scope restore in reader->bindings, which CheckEnvironment publishes (#113). A use
 // event's `previous` is the head of its name when it was recorded: the activation event + 1 that the use sees,
 // already in the resolvers' result form. The default path reads those retained answers directly, with no replay,
-// sort or name lookup. --scalar resolves the same events with the independent stack replay (c_bindings_scalar),
-// whose results must be the same. The batch sort and the parser's own grammar replay (#128's ParseBindings,
-// mapped onto the reader's use events) remain selectable for measurement and as oracles.
+// sort or name lookup. The batch sort and the parser's own grammar replay (#128's ParseBindings, mapped onto the
+// reader's use events) remain selectable for measurement and as oracles.
 //
 // Every mode feeds one consumer, check_input_binding_answers, with an answer per event: each use's declaration
 // identity, its type at that point and its reports. Raw attribute uses have reader events but no parser events;
@@ -20,12 +19,10 @@
 
 typedef enum CheckInputBindingMode
 {
-    // The direct answers, or the stack replay for --scalar.
+    // The direct answers.
     CHECK_INPUT_BINDINGS_DEFAULT,
     CHECK_INPUT_BINDINGS_DIRECT,
-    CHECK_INPUT_BINDINGS_STACKS,
     CHECK_INPUT_BINDINGS_BATCH,
-    CHECK_INPUT_BINDINGS_PARSER_STACKS,
     CHECK_INPUT_BINDINGS_PARSER_BATCH,
     CHECK_INPUT_BINDING_MODES,
 } CheckInputBindingMode;
@@ -34,9 +31,7 @@ static const char* const check_input_binding_mode_names[CHECK_INPUT_BINDING_MODE
 {
     "default",
     "direct",
-    "stacks",
     "batch",
-    "parser-stacks",
     "parser-batch",
 };
 
@@ -365,10 +360,9 @@ static bool check_input_unused_may_report(const Preprocessor* pp, const CheckInp
 
 // -Wunused-variable, -Wunused-function and -Wunused-parameter facts, from the resolved binding events: a declaration
 // no use names. Its lexical scope decides completion; a for initializer's scope includes the entire loop statement.
-// Its three passes act at declare events alone, and read the chains' columns only at them: the vector path visits the
-// declare events (`list`, `visited` of them, check_input_operation_events), where it visited every event, most of them
-// uses, in each pass, with a branch on each one's operation; the scalar path, its twin, visits every event (`list` null
-// and `visited` the events' count, #529).
+// Its three passes act at declare events alone, and read the chains' columns only at them: they visit the declare events
+// (`list`, `visited` of them, check_input_operation_events), where they visited every event, most of them uses, in each
+// pass, with a branch on each one's operation (#529).
 static void check_input_unused_events(CheckInputReader* reader, const uint8_t* used, const uint8_t* used_tokens, const uint8_t* read_tokens,
                                       const uint8_t* parameters, uint8_t* reported, const uint32_t* list, uint32_t visited)
 {
@@ -386,8 +380,8 @@ static void check_input_unused_events(CheckInputReader* reader, const uint8_t* u
     // a prototype covers the definition that follows it. Carried along the chain in one pass (#1351), not walked back
     // from each declaration. Only objects' and functions' marks are read: any other kind is suppressed by itself.
     uint8_t* chain_marked = BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint8_t, events->count);
-    // The events the passes visit (check_input_binding_answers'): the declare events on the vector path, every event on
-    // the scalar path, which passes no list.
+    // The events the passes visit (check_input_binding_answers'): the declare events, or every event where there was no
+    // room for their list, which passes none.
     const bool listed = list != NULL;
     bool valid = chain_first != NULL && chain_definition != NULL && chain_marked != NULL;
     if (valid)
@@ -554,7 +548,7 @@ static void check_input_unused_events(CheckInputReader* reader, const uint8_t* u
         keys[i] = (uint64_t)order << 32 | i;
         varying |= order;
     }
-    const uint64_t* ordered = valid && warnings > 1 ? c_bindings_sort(keys, keys + warnings, warnings, !BUSTER_SCALAR_PATH(parser->options.scalar), varying) : NULL;
+    const uint64_t* ordered = valid && warnings > 1 ? c_bindings_sort(keys, keys + warnings, warnings, varying) : NULL;
     for (uint32_t i = 0; valid && i < warnings; i += 1)
     {
         valid = check_input_warning_event(reader, staged + (ordered != NULL ? (uint32_t)ordered[i] : i), NULL, 0);
@@ -656,12 +650,11 @@ static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t
     bool valid = !output->resource;
     uint64_t identifiers = 0;
     uint64_t declarations = 0;
-    // The vector path's passes visit the uses, and the declarations, each listed once in order
-    // (check_input_operation_events), where each visited every event with a branch on its operation; the scalar path, the
-    // twin, visits every event (#529).
-    const bool listed = !BUSTER_SCALAR_PATH(parser->options.scalar);
+    // The passes visit the uses, and the declarations, each listed once in order (check_input_operation_events), where
+    // each visited every event with a branch on its operation (#529). Without room for the lists (a reader with no
+    // scratch arena, or one out of room), they visit every event.
     const uint64_t list_mark = reader->scratch != NULL ? reader->scratch->length : 0;
-    uint32_t* uses = valid && listed && reader->scratch != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, events->count) : NULL;
+    uint32_t* uses = valid && reader->scratch != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, events->count) : NULL;
     uint32_t use_count = events->count;
     if (uses != NULL)
     {
@@ -858,8 +851,8 @@ static bool check_input_binding_answers(CheckInputReader* reader, const uint32_t
     return valid && output->report_count == 0;
 }
 
-// Resolve the reader's own events: DIRECT reads each use's retained answer, STACKS replays them independently and
-// BATCH sorts them. The replay's and the sort's scratch is released before returning.
+// Resolve the reader's own events: DIRECT reads each use's retained answer and BATCH sorts them. The sort's scratch is
+// released before returning.
 static bool check_input_binding_events(CheckInputReader* reader, CheckInputBindingMode mode)
 {
     CheckInput* output = reader->output;
@@ -868,15 +861,14 @@ static bool check_input_binding_events(CheckInputReader* reader, CheckInputBindi
     output->binding_event_count = bindings->count;
     output->binding_statistics = (CBindingStatistics){ 0 };
     const bool direct = mode == CHECK_INPUT_BINDINGS_DIRECT;
-    bool valid = bindings->valid && !output->resource && (mode == CHECK_INPUT_BINDINGS_DIRECT || mode == CHECK_INPUT_BINDINGS_STACKS || mode == CHECK_INPUT_BINDINGS_BATCH);
+    bool valid = bindings->valid && !output->resource && (mode == CHECK_INPUT_BINDINGS_DIRECT || mode == CHECK_INPUT_BINDINGS_BATCH);
     valid = valid && (!direct || bindings->count == 0 || bindings->previous != 0);
     uint32_t* resolved = valid && !direct && bindings->count != 0 ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, bindings->count) : 0;
     valid = valid && (direct || bindings->count == 0 || resolved != 0);
     CBindingStatistics statistics = { 0 };
     if (valid && !direct && bindings->count != 0)
     {
-        valid = mode == CHECK_INPUT_BINDINGS_STACKS ? c_bindings_scalar(bindings, resolved, reader->scratch) :
-                                                      c_bindings_batch(bindings, resolved, reader->scratch, &statistics);
+        valid = c_bindings_batch(bindings, resolved, reader->scratch, &statistics);
     }
     output->resource |= !valid;
     valid = valid && check_input_binding_answers(reader, direct ? bindings->previous : resolved);
@@ -962,9 +954,9 @@ static bool check_input_binding_columns(CheckInputReader* reader, const ParseBin
     return valid && !output->resource && output->report_count == 0;
 }
 
-// The parser modes: the parser's own grammar replay (parse_bindings_build) and resolution, mapped onto the
-// reader's use events. Kept for measurement and as an oracle; the reader's events already hold these answers.
-static bool check_input_binding_parser(CheckInputReader* reader, bool scalar)
+// The parser mode: the parser's own grammar replay (parse_bindings_build) and resolution, mapped onto the reader's use
+// events. Kept for measurement and as an oracle; the reader's events already hold these answers.
+static bool check_input_binding_parser(CheckInputReader* reader)
 {
     CheckInput* output = reader->output;
     const uint64_t mark = reader->arena->length;
@@ -994,7 +986,7 @@ static bool check_input_binding_parser(CheckInputReader* reader, bool scalar)
             }
         }
     }
-    valid = valid && parse_bindings_build(&parsed, &parser, reader->arena) && parse_bindings_resolve(&parsed, scalar, reader->scratch);
+    valid = valid && parse_bindings_build(&parsed, &parser, reader->arena) && parse_bindings_resolve(&parsed, reader->scratch);
     output->resource |= !valid;
     if (valid)
     {
@@ -1008,9 +1000,7 @@ static bool check_input_binding_parser(CheckInputReader* reader, bool scalar)
 
 static bool check_input_bindings(CheckInputReader* reader, CheckInputBindingMode mode)
 {
-    const CheckInputBindingMode selected = mode != CHECK_INPUT_BINDINGS_DEFAULT ? mode :
-                                           BUSTER_SCALAR_PATH(reader->parser->options.scalar) ? CHECK_INPUT_BINDINGS_STACKS : CHECK_INPUT_BINDINGS_DIRECT;
-    const bool parser = selected == CHECK_INPUT_BINDINGS_PARSER_STACKS || selected == CHECK_INPUT_BINDINGS_PARSER_BATCH;
-    return parser ? check_input_binding_parser(reader, selected == CHECK_INPUT_BINDINGS_PARSER_STACKS) : check_input_binding_events(reader, selected);
+    const CheckInputBindingMode selected = mode != CHECK_INPUT_BINDINGS_DEFAULT ? mode : CHECK_INPUT_BINDINGS_DIRECT;
+    return selected == CHECK_INPUT_BINDINGS_PARSER_BATCH ? check_input_binding_parser(reader) : check_input_binding_events(reader, selected);
 }
 

@@ -260,6 +260,9 @@ test "${#host_flags[@]}" -gt 0
 "$BUSTER_COMPILER" --tier1 --tier1-strict --verify -S -o build/register-aggregates.s tests/ir-source/register-aggregates.c
 if awk '/^add_i2:/,/^\tret/' build/register-aggregates.s | grep -q 'rsp'; then exit 1; fi
 if awk '/^add_l2:/,/^\tret/' build/register-aggregates.s | grep -q -- '-8(%rsp)'; then exit 1; fi
+# #2924: and its result's slot, returned whole and written at one width, is widened for the return alone (SROA's uses
+# scan marks it returned): its eightbytes aren't zeroed first.
+if awk '/^add_l2:/,/^\tret/' build/register-aggregates.s | grep -q 'movq \$0'; then exit 1; fi
 awk '/^add_i2:/,/^\tret/' build/register-aggregates.s | grep -q 'ret'
 # Exact-width call-site parts: small_args's 4- and 12-byte objects stay in registers; its stack holds only n's spill.
 test "$(awk '/^small_args:/,/^\tret/' build/register-aggregates.s | grep -c '(%rsp)')" -le 2
@@ -577,8 +580,7 @@ test "${#flags[@]}" -gt 0
 objects=$(mktemp -d)
 "$BUSTER_COMPILER" --lanes 1 --verify -c "${flags[@]}" -o "$objects/selected.o" -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c
 "$BUSTER_COMPILER" --lanes 1 --verify --lower-all -c "${flags[@]}" -o "$objects/all.o" -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c
-"$BUSTER_COMPILER" --scalar --lanes 1 --verify --lower-all -c "${flags[@]}" -o "$objects/all-scalar.o" -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c
-cmp "$objects/all.o" "$objects/all-scalar.o"
+"$BUSTER_COMPILER" test-lowering-templates "${flags[@]}" -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c
 rm -r "$objects"
 else
 printf 'SKIP: main.c -c compiles (the TSan/MSan rows run them alone after the suite; docs/ci.md)\n'
@@ -846,8 +848,8 @@ awk 'BEGIN { print "int ladder(int lim)\n{\n    int n = 0;\n    int m = 0;"; for
 # libc_nonshared.a's members, with readelf's.
 "$BUSTER_COMPILER" test-import --cross-check
 == Test Make dependency-rule serialization
-# #805's serializer, standalone until the driver calls it: the native build's AVX-512BW path (the host's alone since
-# #2924) over generated names against an independent quoting implementation, guarded tails, malformed records and
+# #805's serializer, standalone until the driver calls it: the native build's AVX-512 scan (VBMI's vpermb; the host's
+# alone since #2924) over generated names against an independent quoting implementation, guarded tails, malformed records and
 # capacities, and --oracle's -MT/-MQ target rules against the installed gcc and clang's -MM output.
 clang -std=c17 -O2 -march=native -fwrapv -funsigned-char -fno-strict-aliasing -Wall -Wextra -Werror tests/driver/dependency_rule.c -o build/test-dependency-rule-native
 ./build/test-dependency-rule-native --oracle

@@ -9,7 +9,7 @@ requirements. [Command index](README.md).
 `./build/compiler test-lowering --clang` compares selective function/object
 emission planning with an independent graph oracle and Clang object symbols
 on original, manually modeled C fixtures. `benchmark-lowering` measures
-synthetic graph preparation and vector/scalar selection; use the shared 9700X
+synthetic graph preparation and vector selection; use the shared 9700X
 lock and pin timings to CPU 2.
 
 On the source path, `check_program_select` (`c_check_program_select.c`) gives
@@ -31,8 +31,9 @@ on fixtures of each kind of definition (functions, objects and string literals),
 --symbols` on any corpus. Every correctness run compiles the compiler's own
 `main.c` with `build.sh`'s flags for a plain `-march=znver5` build and
 `-DBUSTER_COMPLETE_DRIVER=1` (all of the compiler's code; build guide), by `-c` and
-by `--lower-all` (`--verify`, and the scalar path's `--lower-all` object the
-vector path's byte for byte), and compares its symbols with clang's
+by `--lower-all` (`--verify`), lowers its selected program by the general
+expansion and by the fast paths with the templates (`test-lowering-templates`,
+every function's entries the same), and compares its symbols with clang's
 (`test-checker-corpus --symbols-minimum 1`), so that it keeps compiling both
 ways. `benchmark-lowering-source [--passes N]
 [preprocessor options] file...` measures what lowering only the referenced

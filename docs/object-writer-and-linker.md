@@ -1065,9 +1065,7 @@ and `crtn.o`. No name binds to a shared library.
   members don't depend on the order the walk visits them in. They are the
   members GNU ld 2.47 and lld 23.1 load for the same objects, which
   `test-bind --cross-check` reads from their traces.
-- **Two paths.** The exact path is a queue of members, each reference tested
-  against the link's symbols and the members needed so far, one at a time.
-  The vector path works in rounds over a bitset of the members. A round takes
+- **The closure** works in rounds over a bitset of the members. A round takes
   each member of its frontier and the member each of its references loads,
   16 references at a time (the first 16 of a member's without a branch:
   most members have fewer). That member comes from a column made at import
@@ -1075,15 +1073,19 @@ and `crtn.o`. No name binds to a shared library.
   loaded are compressed onto the round's list, which is marked after the
   round, a byte per member; the marks, 64 at a time, less the members needed
   already, are the next frontier's word. A name the program defines that a
-  member defines too must not load the member: the vector path compares each
+  member defines too must not load the member: the closure compares each
   batch's references with up to 16 such names in registers, and with more
-  leaves the closure to the exact path's. The generated programs define
-  none.
+  leaves the walk to a queue of members (`bind_closure_queue`), each
+  reference tested against the link's symbols and the members needed so far,
+  one at a time. The generated programs define none. #2924 deleted the exact
+  twin, which took every closure through the queue
+  ([record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/scalar-paths-removal-2924-2026-11-17/c-linker-bind));
+  the tables below that name an exact path are dated measurements of it.
 - **COMDAT groups:** the first group of each signature in link order joins. A
   later one's atoms don't, its definitions join as references of their names,
   and a fixup of an atom that joins to one of its local symbols is an error
   (`BIND_ERROR_DISCARDED`), as GNU ld's reference to a discarded section is.
-  A member with a group to discard joins a record at a time on either path.
+  A member with a group to discard joins a record at a time.
 - **What nothing defines:** `__tls_get_addr`, which the PIC members' general-
   and local-dynamic accesses call, stays undefined for the writer, whose
   relaxation to local-exec consumes the call. Any other strong reference to a
@@ -1161,9 +1163,9 @@ against the dynamic runtime with two of GNU ld's and lld's `-shared` rules:
   objects' and `libc_nonshared.a`'s global names are all hidden, and so are
   `libgcc.a`'s but for its decimal floating-point and split-stack members',
   so the exports are the program's (and those members', as GNU ld and lld
-  export them). The vector path takes 16 symbols at a time, a mask of their
+  export them). They are taken 16 symbols at a time, a mask of their
   flags', atoms' and sources' columns, compressed in a register and stored
-  with a mask of its count; its exact twin takes a symbol at a time.
+  with a mask of its count.
 
 `test-bind --cross-check` compiles three C libraries with `-fPIC` and compares
 binding with lld's `-shared` link of each: the same `.dynsym`, with the
@@ -1390,7 +1392,7 @@ and binds every name before any layout:
   mask of both bits set sends about one miss in a hundred, and every hit, to
   the index. Gathers pay here where the patch kernel's didn't: the alternative
   is two dependent scalar loads a symbol, and the filter's words stay in L1.
-- **Each object joins as a block** (the vector path). Its names' bytes are
+- **Each object joins as a block.** Its names' bytes are
   one run in the runtime's name arena, copied at once, with their pointers
   moved eight at a time. Its atoms' units and fixup ranges move sixteen at a
   time and their bytes are copied one atom at a time: an executable patches
@@ -1398,8 +1400,7 @@ and binds every name before any layout:
   new are compressed into place eight at a time, their ids an expand of
   consecutive ones, and the rest merge with the link's symbol of their name by
   scalar rules. Its fixups' targets move through the symbols' new ids by
-  scalar loads, in a pass of their own. The exact path adds the same records
-  one at a time through `link.c`'s checked adds.
+  scalar loads, in a pass of their own.
 - **Two definitions of a name** resolve as GNU ld and lld resolve them: a
   strong one takes a weak one's place, of two weak ones the first in link
   order stays (`Scrt1.o`'s, `crti.o`'s and `crtbeginS.o`'s come before the
@@ -1450,8 +1451,7 @@ target, and one of 102,400 workers in 117 µs, against 4 to 10 ms for its
 whole link.
 
 The dynamic PIE, the third part, is "The dynamic PIE" below: its stubs,
-dynamic symbols, relocations and RELR, each pass with its vector path and
-its exact twin. Where it differs from the plan here before it: the dynamic
+dynamic symbols, relocations and RELR, each pass data-parallel. Where it differs from the plan here before it: the dynamic
 symbols are found in bitsets, 64 symbols at a time, rather than compressed;
 the stubs and refusals come from a filter in registers that every fixup's
 target is tested against; RELR is encoded per atom, so that its size is known
@@ -1532,8 +1532,8 @@ takes vectors. The count adds its sizes, padded to their alignment, and its
 pieces; the placement scans them into its atoms' addresses, and when its
 atoms are all in the file, or none, interleaves their pieces' records with
 permutes, two to a vector. A block with a bucket's change, or an atom of the
-classes that keep id order or are entries, goes one atom at a time, as the
-exact twins do every block, which also finds any atom the layout refuses.
+classes that keep id order or are entries, goes one atom at a time, which
+also finds any atom the layout refuses.
 Then each symbol's reference, 16 at a time: a block whose symbols are all in
 atoms that aren't thread-local gathers their atoms' classes and addresses.
 On `benchmark-executable`'s 180,000 workers (185,457 atoms and 182,728
@@ -2025,9 +2025,10 @@ cost of the feature, not a throughput improvement. Raw logs remain at
   counting sort) after the undefined symbols. The versions are numbered from
   2 in the libraries' order of them, `libc.so.6`'s first.
 
-Every pass is data-parallel and vectorized, with an exact twin, scalar, that
-`ExecutableOptions.exact` selects; the tests write each program both ways and
-compare the files byte for byte:
+Every pass is data-parallel and vectorized. Each had an exact twin, scalar,
+that `ExecutableOptions.exact` selected and the tests compared byte for byte,
+until #2924 deleted them once the vector passes were at least as fast at every
+size ([record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/scalar-paths-removal-2924-2026-11-17/c-linker-executable)); the table keeps the twins' names as they were:
 
 | Pass (phase) | Vector path | Exact twin |
 | --- | --- | --- |
@@ -2182,8 +2183,8 @@ link of the same object runs, and with `--cross-check` as lld's.
   checked path, which refuses the fixup, as GNU ld says the relocation is
   truncated to fit.
 
-The passes it adds, each data-parallel with an exact twin that
-`ExecutableOptions.exact` selects, which the tests compare byte for byte:
+The passes it adds, each data-parallel; the table keeps the exact twins'
+names that `ExecutableOptions.exact` selected until #2924 deleted them:
 
 | Pass (phase) | Vector path | Exact twin |
 | --- | --- | --- |
@@ -2384,7 +2385,7 @@ slots), a `GOTTPOFF`, or a load of an IFUNC.
   out of the same bitset. lld's non-PIC immediates for `test` and binops
   through the GOT (`R_RELAX_GOT_PC_NOPIC`) aren't taken: the import gives
   those instructions `GOTPCREL`, and the count doesn't read the code.
-- **The passes,** data-parallel with exact twins: `executable_mark_relaxable`
+- **The passes,** data-parallel: `executable_mark_relaxable`
   makes the bitset of the relaxable symbols 64 at a time, a PIE's from its
   RELATIVE bitset and a static executable's from compares of the source and
   type columns, 2 bytes a symbol, less the IFUNCs (the static runtime's
@@ -2636,9 +2637,9 @@ the timed region. The distinct symbols cycle over at most 64 backing TLS
 objects, keeping the existing initial-exec workload within `dlopen`'s static
 TLS reserve. This measures GOT-pair and fixup scaling, not initialization of
 a large TLS storage block. The output records both counts.
-`--exact` selects the scalar writer twin and
 `--after-scalar MS` conditions each lane with a bounded scalar kind-column
-scan before the timed write.
+scan before the timed write. (`--exact`, which selected the scalar writer twin,
+went with the twin in #2924.)
 
 At source `8002d88`, on the locked 9700X with Clang 23.1.1, the complete
 `test-executable`, `test-dynamic --cross-check` and `test-static --cross-check`
@@ -3214,8 +3215,7 @@ with `BUSTER_SPLIT_MAIN`, in `dynamic_test_libgcc_s`), whose
 `generic-morestack.o` has general- and local-dynamic accesses, and an
 assembly fixture with each sequence through the PLT and the GOT, to its own
 thread-locals and to `libc.so.6`'s `errno` (`dynamic_test_tls_program`:
-status 53), on 1, 2, 3 and 8 lanes and by the exact twins into the same
-bytes, and without RELR; every access's bytes in the file must be the
+status 53), on 1, 2, 3 and 8 lanes into the same bytes, and without RELR; every access's bytes in the file must be the
 relaxation's (`dynamic_test_tls`), the PIE must need `libgcc_s.so.1`, both
 are compared with lld's links with `--cross-check`, and both run. A call of
 `__tls_get_addr` that no access makes (one whose fixup doesn't follow a
@@ -3226,7 +3226,7 @@ fixture calls it both ways with the executable's own module and offset,
 beside an access whose call the relaxation consumes (status 120). Only a
 static executable, where nothing defines it, still refuses such a call
 (`EXECUTABLE_ERROR_UNSUPPORTED`). `dynamic_test_tls_refusals` writes what a
-PIE refuses, by every lane count and the exact twins, without an output: the
+PIE refuses, by every lane count, without an output: the
 fixture without `__tls_get_addr` named (`EXECUTABLE_ERROR_RELOCATION` at its
 first access to `errno`); a local-dynamic access to `errno` binds, and
 `link_check` refuses it (`LINK_ERROR_BINDING`), before any write. `test-checker-driver` links a
@@ -3284,7 +3284,7 @@ Other records fail the link (`EXECUTABLE_ERROR_UNWIND`, naming the atom), and
 so does an initial location farther from the header than an int32 reaches,
 which GNU ld and lld refuse too.
 
-Three passes, each with an exact twin:
+Three passes (each had an exact twin until #2924 deleted them):
 
 - **The count, before the layout**, in the count phase. The lanes share the
   `.eh_frame` atoms by cost, an atom's fixups plus one, each lane taking a
@@ -3300,7 +3300,7 @@ Three passes, each with an exact twin:
   fixups must all be `PC32`s of an addend in the column, and the last must end
   at the atom's end or its terminator's start. An atom laid out otherwise
   (other CIEs or fixups among its records, a CIE with a personality) goes to
-  the exact walk, record by record, which is also what `exact` runs.
+  the walk, record by record.
 - **The table, once every symbol's reference is known**, in the dynamic
   phase (a static executable now has one too): each lane writes its share's
   entries, in `.eh_frame`'s order, from the lanes' counts before it. For an
@@ -3316,7 +3316,7 @@ Three passes, each with an exact twin:
   addresses go in their FDEs' order, as in a link of a compiler's objects
   without cold parts (a static executable's libc has them: "The static
   executable with libc"). Only if they aren't does it sort them, by an LSD
-  radix sort, stable, 8 bits a pass; the exact twin always sorts.
+  radix sort, stable, 8 bits a pass.
 
 On the 9700X (`benchmark-executable --only links`), each program in place,
 medians in µs, main's and then this one's (the median of three rounds,

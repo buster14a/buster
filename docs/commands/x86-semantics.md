@@ -25,15 +25,17 @@ requirements. [Command index](README.md).
   - the immediate's contract (`x86_immediate_encodes`, `x86_immediate_field`
     and `x86_immediate_value`): a selector's value against a field's bits;
   - each record's resources read and written, its operands resolved
-    (`x86_instructions_effects`, AVX-512, which leaves the rare records, the
-    x87's, vzeroupper's and those with an operand no role names, an /is4
-    register, a VSIB index or an opmask pair, to its scalar twin), and with
+    (`x86_instructions_effects`, AVX-512; the rare records, the x87's,
+    vzeroupper's and those with an operand no role names, an /is4 register, a
+    VSIB index, an opmask pair or Key Locker's vectors, are completed after the
+    loop by `x86_effects_rare_records`, 8 at a time too; one record is a count
+    of 1), and with
     `x86_instructions_effects_opmasks` each record's opmask registers in a
     column of their own (#760: without it, a record that touches one reads and
     writes everything);
   - value-preserving form choice for an operation with an immediate
-    (`x86_choice_row`, `x86_choose_forms`, AVX-512, its scalar twin
-    `x86_choose_forms_scalar`, and `x86_choice_instruction`): the
+    (`x86_choice_row`, `x86_choose_forms`, AVX-512, and
+    `x86_choice_instruction`): the
     sign-extended imm8, the accumulator's form, constant materialization, and
     other instructions (xor, test r, r, a narrower test, opt-in inc and dec)
     only where the live flags allow, which initialization works out from the
@@ -126,9 +128,16 @@ page, RSP is its own stack, and a fault names the record. The checks:
     operation's register form, and must leave the same registers, memory and
     live flags;
   - every candidate chosen by some request;
-- `x86_choose_forms` and `x86_instructions_effects` against their scalar
-  twins on random inputs, and with every column ending at a `PROT_NONE` page at
-  every count to 100;
+- `x86_choose_forms` and `x86_instructions_effects` (with and without the
+  opmasks) on random inputs: their outputs' digest at seed 1 and 20,000 items,
+  frozen while the scalar twins #2924 deleted still agreed; each item alone
+  against the batch; and every column ending at a `PROT_NONE` page at every
+  count to 100;
+  a change to the covered forms, their effects or the choice rows moves the
+  digest (`BUSTER_X86_SEMANTICS_TEST_COLUMNS_DIGEST`): the PR that makes it
+  re-records the value its own test prints, and what vouches for the new
+  value is the same run's execution check of every covered form, its new
+  fixtures, and the items-alone and page-edge checks passing;
 - #180's check: every row's forms allowed at the baseline target
   (`x86_target_forms`), every chosen record valid there
   (`x86_target_validate`);
@@ -155,16 +164,16 @@ atomic increment's write locked.
 ## x86 semantics benchmark
 
 `./build/compiler benchmark-x86-semantics [--requests N] [--functions N]
-[--seed N] [--after-scalar MS] [--only NAME]` (about 3 s) checks that the
-vector paths agree with their scalar twins, then reports:
+[--seed N] [--after-scalar MS] [--only NAME]` (about 3 s) checks that each
+item alone takes the batch's result, then reports:
 
 - the tables' bytes, and `x86_semantics_initialize`'s time;
 - form choice per request: `--requests` requests (65,536) shaped like a code
-  generator's constants, by `choose-scalar` and `choose-avx512`. Also the
+  generator's constants, by `choose-avx512`. Also the
   chosen forms' bytes against an imm32 for every value;
 - operand-resolved effects per record, on `--functions` functions (2,048) of
   96 records shaped like clang's -O0 and -O2 code (branch sizing's generator),
-  by `effects-scalar`, `effects-avx512` and `effects-opmasks` (the AVX-512
+  by `effects-avx512` and `effects-opmasks` (the AVX-512
   path with the opmask registers' column, #760), beside `encode` (`x86_encode`
   of the same records);
 - `code`: the run time and size of the choices that change the instruction
@@ -173,8 +182,9 @@ vector paths agree with their scalar twins, then reports:
 
 Each case reports 21 interleaved-pass medians: nanoseconds, cycles,
 instructions, IPC, and the throttle (PMCx1A0's umask 0x08, as in #199).
-`--only NAME` times one path alone, back to back. `--after-scalar MS` runs the
-case's scalar twin for MS ms (100 to 300) before every AVX-512 sample. Run it
+`--only NAME` times one path alone, back to back. `--after-scalar MS` runs
+scalar work (an FNV-1a hash of the case's inputs; before #2924 the scalar twins)
+for MS ms (100 to 300) before every AVX-512 sample. Run it
 under the 9700X's lock with `taskset -c 2`. `docs/x86-semantics.md` has the
 numbers in both states. The default 9700X job runs it after the tests; like
 the others, its measurements are informational.

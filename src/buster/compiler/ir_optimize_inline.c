@@ -442,7 +442,7 @@ static IrCheck ir_inline_inputs(const IrInlineUnit* unit, Arena* output, Arena* 
         {
             const uint64_t mark = scratch->length;
             IrOptimizeWork work = { 0 };
-            check = ir_optimize_prepare(&work, function, output, scratch, false, true);
+            check = ir_optimize_prepare(&work, function, output, scratch, true);
             const uint64_t bytes = scratch->length - mark;
             result->scratch_bytes = bytes > result->scratch_bytes ? bytes : result->scratch_bytes;
             arena_pop_to(scratch, mark);
@@ -2319,7 +2319,7 @@ static IrCheck ir_inline_with_shapes(const IrInlineUnit* unit, Arena* output, Ar
             // The caller's CFG keeps its valid unreachable regions (a general expansion's continuation is one where its
             // callee never returns); check the same reachable SSA contract as the input, rather than deleting regions or
             // inventing dominance for dead blocks.
-            check = ir_optimize_prepare(&verification, &inlined.functions[failed_function], output, scratch, false, true);
+            check = ir_optimize_prepare(&verification, &inlined.functions[failed_function], output, scratch, true);
             const uint64_t bytes = scratch->length - scratch_mark;
             inlined.scratch_bytes = bytes > inlined.scratch_bytes ? bytes : inlined.scratch_bytes;
             arena_pop_to(scratch, verification_mark);

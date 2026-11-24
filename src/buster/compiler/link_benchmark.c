@@ -761,7 +761,7 @@ static bool link_benchmark_direct_begin(LinkBenchmarkDirect* direct)
         const uint64_t opened_faults = counted ? link_benchmark_faults() : 0;
         const bool loaded = opened.status == SNAPSHOT_STATUS_LOADED;
         const uint64_t begun_at = counted ? executable_now() : opened_at;
-        result = loaded && bind_begin(&bind, link, &runtime, BIND_PATH_VECTOR, &program->bytes, units, direct->arena);
+        result = loaded && bind_begin(&bind, link, &runtime, &program->bytes, units, direct->arena);
         const uint64_t end = executable_now();
         if (counted)
         {
@@ -786,7 +786,7 @@ static bool link_benchmark_direct_begin(LinkBenchmarkDirect* direct)
     direct->opened = result;
     const SnapshotStatus status = result ? link_benchmark_open(&direct->runtime, direct->cache, direct->kind, direct->cache_bounded).status : SNAPSHOT_STATUS_MISSING;
     result = result && status == SNAPSHOT_STATUS_LOADED;
-    result = result && bind_begin(&direct->bind, link, &direct->runtime, BIND_PATH_VECTOR, &program->bytes, units, direct->arena);
+    result = result && bind_begin(&direct->bind, link, &direct->runtime, &program->bytes, units, direct->arena);
     result = result && link_program_generate_atoms(program);
     result = result && link_benchmark_mark(&direct->atoms_added, link, &program->bytes, direct->marks);
     result = result && link_benchmark_save(&direct->binding, &direct->bind, direct->marks);

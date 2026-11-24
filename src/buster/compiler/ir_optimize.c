@@ -5,6 +5,17 @@
 // never another IR representation. Integer evaluation uses unsigned bits and refuses a faulting division or an
 // out-of-range shift. Unknown analysis state and an IR undef are different: undef must enter as overdefined.
 // The 16-item fold boundary uses bounded columns; it has no padding, alignment or inactive-lane read contract.
+//
+// The passes are scalar, the worklists SCCP and dead-code removal fill, since #2924. The vector passes beside them
+// (rounds over every instruction with sixteen-lane folds and marks, pointer jumping for the threads, sixteen-lane ranks
+// and identity candidates) took 1.02 to 1.44 times their ticks when forced, more with size (#2924's 6987893038).
+// #860's AUTO bound kept SCCP and DCE's sweeps off below 8,192 instructions, but every rewrite (LICM's, GVN's, SROA's)
+// threaded blocks by the vector pointer jumping and SROA's split ran DCE's vector roots and sweeps, in every compile;
+// the deletion's whole-compile run measured their replacement (1,372 of 1,372 objects identical, sqlite3.c's and
+// Lua's Tier 1 compiles 0.4 to 1.2% fewer user cycles). #860 had measured the vector passes 9 to 11% ahead at 16K+
+// instructions in a near-single-block shape, which no corpus function reaches; the owner's decision (7112387760) was
+// asked without it, corrected in 7122231079. #3445 is a vectorized form that would have to win at every size, that
+// shape included.
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -12,7 +23,6 @@
 #include "host_isa.h"
 
 #define BUSTER_IR_OPTIMIZE_BATCH 16
-#define BUSTER_IR_OPTIMIZE_DEFAULT_SWEEPS 64
 #define BUSTER_IR_OPTIMIZE_SCCP 1u
 #define BUSTER_IR_OPTIMIZE_DCE 2u
 #define BUSTER_IR_OPTIMIZE_CFG 4u
@@ -26,24 +36,11 @@
 #define BUSTER_IR_OPTIMIZE_MERGE 32u
 #define BUSTER_IR_OPTIMIZE_MEMORY 64u
 #define BUSTER_IR_OPTIMIZE_PASSES (BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_DCE | BUSTER_IR_OPTIMIZE_CFG | BUSTER_IR_OPTIMIZE_LAYOUT | BUSTER_IR_OPTIMIZE_IDENTITY | BUSTER_IR_OPTIMIZE_MERGE | BUSTER_IR_OPTIMIZE_MEMORY)
-#define BUSTER_IR_OPTIMIZE_AUTO 0u
-#define BUSTER_IR_OPTIMIZE_VECTOR 1u
-#define BUSTER_IR_OPTIMIZE_SCALAR 2u
 
 typedef struct IrOptimizeOptions IrOptimizeOptions;
 struct IrOptimizeOptions
 {
     uint32_t passes;
-    uint32_t sweep_limit;
-    // The caller's requested path. AUTO picks the passes' twin by the function's size (#860): the vector passes'
-    // per-call set-up doesn't pay on small functions, so below the measured bound the scalar passes run. Dominators
-    // use their own AUTO matrix budget, independently of this pass heuristic (#1352); the verifier runs its vector
-    // twin unless `scalar` asks for the scalar twins. VECTOR
-    // and SCALAR force a twin on every size: tests and benchmarks request them so each stays checked everywhere.
-    uint32_t path;
-    // The twin the internals run, resolved from `path` and the function's size by ir_optimize. The modules that call
-    // the internal pieces without ir_optimize set it directly (ir_optimize_sroa.c).
-    bool scalar;
 };
 
 typedef struct IrOptimizeResult IrOptimizeResult;
@@ -51,12 +48,10 @@ struct IrOptimizeResult
 {
     IrFunction function;
     uint64_t sccp_visits;
-    uint64_t sccp_sweeps;
     // The incoming values SCCP's phi transfers examined, executable or not: the work that grew as the square of a
     // join's predecessors when each visit met them all (#1729).
     uint64_t sccp_phi_incoming;
     uint64_t dce_visits;
-    uint64_t dce_sweeps;
     uint64_t scratch_bytes;
     uint32_t folded;
     uint32_t removed_instructions;
@@ -64,7 +59,6 @@ struct IrOptimizeResult
     // CFG cleanup's merged blocks (ir_optimize_merges): each joins its single predecessor; removed_blocks counts them too.
     uint32_t merged_blocks;
     uint32_t forwarded_loads;
-    bool worklist_fallback;
 };
 
 typedef enum IrOptimizeState
@@ -100,7 +94,6 @@ struct IrOptimizeWork
     IrSimdValue* vector_values;
     Arena* scratch;
     IrError simd_error;
-    bool scalar;
     uint8_t* blocks;
     uint8_t* edges;
     uint8_t* live;
@@ -128,8 +121,6 @@ static __attribute__((unused)) IrOptimizeOptions ir_optimize_options(void)
 {
     const IrOptimizeOptions result = {
         .passes = BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_DCE | BUSTER_IR_OPTIMIZE_CFG,
-        .sweep_limit = BUSTER_IR_OPTIMIZE_DEFAULT_SWEEPS,
-        .path = BUSTER_IR_OPTIMIZE_AUTO,
     };
     return result;
 }
@@ -266,8 +257,8 @@ static __attribute__((unused)) bool ir_optimize_fold_one(uint32_t operation, uin
     return folded;
 }
 
-// A returned bit authorizes its result slot. Inactive or refused slots are left unchanged by both paths.
-static __attribute__((unused)) uint16_t ir_optimize_fold_scalar(IrOptimizeFoldBatch batch, uint16_t active)
+// A returned bit authorizes its result slot. Inactive or refused slots are left unchanged.
+static __attribute__((unused)) uint16_t ir_optimize_fold_batch(IrOptimizeFoldBatch batch, uint16_t active)
 {
     uint16_t folded = 0;
     if (batch.count <= BUSTER_IR_OPTIMIZE_BATCH)
@@ -283,185 +274,13 @@ static __attribute__((unused)) uint16_t ir_optimize_fold_scalar(IrOptimizeFoldBa
     return folded;
 }
 
-static __attribute__((unused)) uint16_t ir_optimize_fold_vector(IrOptimizeFoldBatch batch, uint16_t active)
-{
-    uint16_t folded = 0;
-    if (batch.count <= BUSTER_IR_OPTIMIZE_BATCH)
-    {
-        for (uint32_t first = 0; first < batch.count; first += 8)
-        {
-            const uint32_t count = batch.count - first < 8 ? batch.count - first : 8;
-            const __mmask8 lanes = ((UINT32_C(1) << count) - 1) & (active >> first);
-            const __m256i operations = _mm256_maskz_loadu_epi32(lanes, batch.operation + first);
-            const __m256i widths = _mm256_maskz_loadu_epi32(lanes, batch.width + first);
-            const __mmask8 valid = lanes & _mm256_cmpgt_epi32_mask(widths, _mm256_setzero_si256()) & _mm256_cmple_epu32_mask(widths, _mm256_set1_epi32(64));
-            const __m512i shift = _mm512_sub_epi64(_mm512_set1_epi64(64), _mm512_cvtepu32_epi64(widths));
-            const __m512i masks = _mm512_srlv_epi64(_mm512_set1_epi64(-1), shift);
-            const __m512i left = _mm512_and_si512(_mm512_maskz_loadu_epi64(valid, batch.left + first), masks);
-            const __m512i raw_right = _mm512_maskz_loadu_epi64(valid, batch.right + first);
-            const __mmask8 shifts = _mm256_cmpge_epu32_mask(operations, _mm256_set1_epi32(IROPT_FOLD_SHL)) & _mm256_cmple_epu32_mask(operations, _mm256_set1_epi32(IROPT_FOLD_ASHR));
-            const __m512i right = _mm512_mask_blend_epi64(shifts, _mm512_and_si512(raw_right, masks), raw_right);
-            __m512i result = _mm512_setzero_si512();
-            __mmask8 done = 0;
-            __mmask8 selected = valid & _mm256_cmpeq_epi32_mask(operations, _mm256_set1_epi32(IROPT_FOLD_ADD));
-            if (selected != 0)
-            {
-                result = _mm512_mask_add_epi64(result, selected, left, right);
-                done |= selected;
-            }
-            selected = valid & _mm256_cmpeq_epi32_mask(operations, _mm256_set1_epi32(IROPT_FOLD_SUB));
-            if (selected != 0)
-            {
-                result = _mm512_mask_sub_epi64(result, selected, left, right);
-                done |= selected;
-            }
-            selected = valid & _mm256_cmpeq_epi32_mask(operations, _mm256_set1_epi32(IROPT_FOLD_MUL));
-            if (selected != 0)
-            {
-                result = _mm512_mask_mullo_epi64(result, selected, left, right);
-                done |= selected;
-            }
-            selected = valid & _mm256_cmpeq_epi32_mask(operations, _mm256_set1_epi32(IROPT_FOLD_AND));
-            if (selected != 0)
-            {
-                result = _mm512_mask_and_epi64(result, selected, left, right);
-                done |= selected;
-            }
-            selected = valid & _mm256_cmpeq_epi32_mask(operations, _mm256_set1_epi32(IROPT_FOLD_OR));
-            if (selected != 0)
-            {
-                result = _mm512_mask_or_epi64(result, selected, left, right);
-                done |= selected;
-            }
-            selected = valid & _mm256_cmpeq_epi32_mask(operations, _mm256_set1_epi32(IROPT_FOLD_XOR));
-            if (selected != 0)
-            {
-                result = _mm512_mask_xor_epi64(result, selected, left, right);
-                done |= selected;
-            }
-            const __mmask8 shift_valid = valid & _mm512_cmplt_epu64_mask(right, _mm512_cvtepu32_epi64(widths));
-            selected = shift_valid & _mm256_cmpeq_epi32_mask(operations, _mm256_set1_epi32(IROPT_FOLD_SHL));
-            if (selected != 0)
-            {
-                result = _mm512_mask_sllv_epi64(result, selected, left, right);
-                done |= selected;
-            }
-            selected = shift_valid & _mm256_cmpeq_epi32_mask(operations, _mm256_set1_epi32(IROPT_FOLD_LSHR));
-            if (selected != 0)
-            {
-                result = _mm512_mask_srlv_epi64(result, selected, left, right);
-                done |= selected;
-            }
-            selected = shift_valid & _mm256_cmpeq_epi32_mask(operations, _mm256_set1_epi32(IROPT_FOLD_ASHR));
-            if (selected != 0)
-            {
-                const __m512i signed_left = _mm512_srav_epi64(_mm512_sllv_epi64(left, shift), shift);
-                result = _mm512_mask_srav_epi64(result, selected, signed_left, right);
-                done |= selected;
-            }
-            selected = valid & _mm256_cmpeq_epi32_mask(operations, _mm256_set1_epi32(IROPT_FOLD_EQ));
-            if (selected != 0)
-            {
-                result = _mm512_mask_mov_epi64(result, selected, _mm512_maskz_set1_epi64(_mm512_cmpeq_epi64_mask(left, right), 1));
-                done |= selected;
-            }
-            selected = valid & _mm256_cmpeq_epi32_mask(operations, _mm256_set1_epi32(IROPT_FOLD_NE));
-            if (selected != 0)
-            {
-                result = _mm512_mask_mov_epi64(result, selected, _mm512_maskz_set1_epi64(_mm512_cmpneq_epi64_mask(left, right), 1));
-                done |= selected;
-            }
-            selected = valid & _mm256_cmpeq_epi32_mask(operations, _mm256_set1_epi32(IROPT_FOLD_ULT));
-            if (selected != 0)
-            {
-                result = _mm512_mask_mov_epi64(result, selected, _mm512_maskz_set1_epi64(_mm512_cmplt_epu64_mask(left, right), 1));
-                done |= selected;
-            }
-            selected = valid & _mm256_cmpeq_epi32_mask(operations, _mm256_set1_epi32(IROPT_FOLD_ULE));
-            if (selected != 0)
-            {
-                result = _mm512_mask_mov_epi64(result, selected, _mm512_maskz_set1_epi64(_mm512_cmple_epu64_mask(left, right), 1));
-                done |= selected;
-            }
-            const __m512i sign = _mm512_sub_epi64(masks, _mm512_srli_epi64(masks, 1));
-            const __m512i biased_left = _mm512_xor_si512(left, sign);
-            const __m512i biased_right = _mm512_xor_si512(right, sign);
-            selected = valid & _mm256_cmpeq_epi32_mask(operations, _mm256_set1_epi32(IROPT_FOLD_SLT));
-            if (selected != 0)
-            {
-                result = _mm512_mask_mov_epi64(result, selected, _mm512_maskz_set1_epi64(_mm512_cmplt_epu64_mask(biased_left, biased_right), 1));
-                done |= selected;
-            }
-            selected = valid & _mm256_cmpeq_epi32_mask(operations, _mm256_set1_epi32(IROPT_FOLD_SLE));
-            if (selected != 0)
-            {
-                result = _mm512_mask_mov_epi64(result, selected, _mm512_maskz_set1_epi64(_mm512_cmple_epu64_mask(biased_left, biased_right), 1));
-                done |= selected;
-            }
-            _mm512_mask_storeu_epi64(batch.result + first, done, _mm512_and_si512(result, masks));
-            folded |= (uint16_t)done << first;
-            uint32_t remaining = lanes & ~done;
-            while (remaining != 0)
-            {
-                const uint32_t i = first + (uint32_t)__builtin_ctz(remaining);
-                if (ir_optimize_fold_one(batch.operation[i], batch.width[i], batch.left[i], batch.right[i], &batch.result[i]))
-                {
-                    folded |= UINT32_C(1) << i;
-                }
-                remaining &= remaining - 1;
-            }
-        }
-    }
-    return folded;
-}
-
-// Up to 64 block ids fit four registers. A masked tail load authorizes only the logical source entries, and every
-// index has already been checked. Larger graphs use scalar indexed loads rather than Zen 5's expensive gathers.
-static __m512i ir_optimize_lookup_blocks(const uint32_t* values, const uint32_t* indices, uint32_t first, uint32_t count, uint32_t total)
-{
-    const __mmask16 active = (UINT32_C(1) << count) - 1;
-    const __m512i index = _mm512_maskz_loadu_epi32(active, indices + first);
-    __m512i result;
-    if (total <= 64)
-    {
-        __m512i tables[4];
-        for (uint32_t group = 0; group < 4; group += 1)
-        {
-            const uint32_t begin = group * 16;
-            const uint32_t amount = begin < total ? (total - begin < 16 ? total - begin : 16) : 0;
-            if (amount != 0)
-            {
-                tables[group] = _mm512_maskz_loadu_epi32((UINT32_C(1) << amount) - 1, values + begin);
-            }
-            else
-            {
-                tables[group] = _mm512_setzero_si512();
-            }
-        }
-        const __m512i low = _mm512_permutex2var_epi32(tables[0], index, tables[1]);
-        const __m512i high = _mm512_permutex2var_epi32(tables[2], index, tables[3]);
-        result = _mm512_mask_blend_epi32(_mm512_test_epi32_mask(index, _mm512_set1_epi32(32)), low, high);
-    }
-    else
-    {
-        uint32_t gathered[BUSTER_IR_OPTIMIZE_BATCH] = { 0 };
-        for (uint32_t i = 0; i < count; i += 1)
-        {
-            gathered[i] = values[indices[first + i]];
-        }
-        result = _mm512_loadu_si512(gathered);
-    }
-    return result;
-}
-
 // direct[b] is b for an observable block; otherwise the sole successor of a transparent unconditional jump.
 // The caller must protect phi-edge identity before classifying a block as transparent. A cycle of transparent
 // jumps resolves to its smallest block id, where the consumer retains a self-loop. This preserves nontermination.
-// Both implementations write exactly the same targets. Failure leaves targets and scratch.length unchanged.
-static __attribute__((unused, aligned(64))) bool ir_optimize_thread_targets(Arena* scratch, const uint32_t* direct, uint32_t count, uint32_t* targets, bool scalar)
+// Each block's chain is walked once, up to a block whose target is known or back to a block of this walk: the walked
+// blocks take that target, or the smallest block of the cycle found. Failure leaves targets and scratch.length unchanged.
+static __attribute__((unused, aligned(64))) bool ir_optimize_thread_targets(Arena* scratch, const uint32_t* direct, uint32_t count, uint32_t* targets)
 {
-    (void)scalar;
-
     const uint64_t saved = scratch->length;
     bool valid = count == 0 || (direct != 0 && targets != 0);
     for (uint32_t block = 0; valid && block < count; block += 1)
@@ -480,7 +299,7 @@ static __attribute__((unused, aligned(64))) bool ir_optimize_thread_targets(Aren
         next_minimum = arena_push_array(scratch, count, sizeof(uint32_t), _Alignof(uint32_t));
         valid = current != 0 && minimum != 0 && next != 0 && next_minimum != 0;
     }
-    if (valid && count != 0 && BUSTER_SCALAR_PATH(scalar))
+    if (valid && count != 0)
     {
         for (uint32_t block = 0; block < count; block += 1)
         {
@@ -515,40 +334,6 @@ static __attribute__((unused, aligned(64))) bool ir_optimize_thread_targets(Aren
                 current[next[i]] = representative;
             }
         }
-    }
-    else if (valid && count != 0)
-    {
-        memcpy(current, direct, (uint64_t)count * sizeof(uint32_t));
-        for (uint32_t block = 0; block < count; block += 1)
-        {
-            minimum[block] = block;
-        }
-        for (uint64_t covered = 1; covered < count; covered *= 2)
-        {
-            for (uint64_t first = 0; first < count; first += BUSTER_IR_OPTIMIZE_BATCH)
-            {
-                const uint32_t amount = count - first < BUSTER_IR_OPTIMIZE_BATCH ? count - first : BUSTER_IR_OPTIMIZE_BATCH;
-                const __mmask16 active = (UINT32_C(1) << amount) - 1;
-                const __m512i target = ir_optimize_lookup_blocks(current, current, first, amount, count);
-                const __m512i path_minimum = ir_optimize_lookup_blocks(minimum, current, first, amount, count);
-                const __m512i old_minimum = _mm512_maskz_loadu_epi32(active, minimum + first);
-                _mm512_mask_storeu_epi32(next + first, active, target);
-                _mm512_mask_storeu_epi32(next_minimum + first, active, _mm512_min_epu32(old_minimum, path_minimum));
-            }
-            uint32_t* swap = current;
-            current = next;
-            next = swap;
-            swap = minimum;
-            minimum = next_minimum;
-            next_minimum = swap;
-        }
-        // After at least count hops, current points inside the terminal cycle, or at an observable fixed point.
-        // The propagated minima at those nodes contain the cycle only, never a smaller id on an incoming tail.
-        for (uint32_t block = 0; block < count; block += 1)
-        {
-            next[block] = minimum[current[block]];
-        }
-        current = next;
     }
     if (valid && count != 0)
     {
@@ -849,7 +634,7 @@ static const uint8_t ir_optimize_transfer_kinds[BUSTER_IR_OP_TABLE] = {
     [IR_FTRUNC] = 7,
 };
 
-static bool ir_optimize_simd_float(uint32_t op, uint32_t width, uint32_t bits, uint32_t predicate, const IrSimdValue* left, const IrSimdValue* right, bool scalar, IrSimdValue* output);
+static bool ir_optimize_simd_float(uint32_t op, uint32_t width, uint32_t bits, uint32_t predicate, const IrSimdValue* left, const IrSimdValue* right, IrSimdValue* output);
 static bool ir_optimize_simd_float_encode(uint64_t sign, unsigned __int128 m, int32_t e, uint32_t width, uint64_t* value);
 
 // Scalar floating operations (#2720) fold as a one-lane vector of ir_optimize_simd_float, where every floating
@@ -857,7 +642,7 @@ static bool ir_optimize_simd_float_encode(uint64_t sign, unsigned __int128 m, in
 // is no root (ir_optimize_roots' kind 2), so nothing is left to raise one. So no operand is a NaN (a signaling one
 // raises invalid, and two quiet ones' payload would depend on the operands' order in the emitted instruction), the
 // result isn't one (an invalid operation's default NaN) and no division is by zero. f80 stays with the x87 at run time.
-static bool ir_optimize_float_binary(uint32_t op, uint32_t width, uint32_t predicate, uint64_t a, uint64_t b, bool scalar, uint64_t* value)
+static bool ir_optimize_float_binary(uint32_t op, uint32_t width, uint32_t predicate, uint64_t a, uint64_t b, uint64_t* value)
 {
     const uint64_t exponent = width == 32 ? UINT64_C(0x7f800000) : UINT64_C(0x7ff0000000000000);
     const uint64_t fraction = width == 32 ? UINT64_C(0x007fffff) : UINT64_C(0x000fffffffffffff);
@@ -867,7 +652,7 @@ static bool ir_optimize_float_binary(uint32_t op, uint32_t width, uint32_t predi
     const IrSimdValue left = { .words = { a } };
     const IrSimdValue right = { .words = { b } };
     IrSimdValue output = { 0 };
-    bool result = !operand_nan && !divisor_zero && ir_optimize_simd_float(op == IR_FCMP ? IR_VCMP : op, width, width, predicate, &left, &right, scalar, &output);
+    bool result = !operand_nan && !divisor_zero && ir_optimize_simd_float(op == IR_FCMP ? IR_VCMP : op, width, width, predicate, &left, &right, &output);
     if (result)
     {
         *value = op == IR_FCMP ? output.words[0] & 1 : output.words[0];
@@ -957,7 +742,7 @@ static uint8_t ir_optimize_float_transfer(const IrOptimizeWork* work, uint32_t i
     if (result == IROPT_CONSTANT)
     {
         uint64_t bits = 0;
-        const bool folded = binary ? ir_optimize_float_binary(op, from, op == IR_FCMP ? f->c[i] : IR_EQ, work->values[a].low, work->values[f->b[i]].low, work->scalar, &bits)
+        const bool folded = binary ? ir_optimize_float_binary(op, from, op == IR_FCMP ? f->c[i] : IR_EQ, work->values[a].low, work->values[f->b[i]].low, &bits)
                                    : ir_optimize_float_conversion(op, from, to, work->values[a].low, &bits);
         result = folded ? IROPT_CONSTANT : IROPT_OVERDEFINED;
         *value = (IrConstant){ .low = bits };
@@ -1224,6 +1009,11 @@ static __attribute__((aligned(64))) bool ir_optimize_visit(IrOptimizeWork* work,
     return changed;
 }
 
+// A safety net, not a step verified IR takes: every value in an executable block has operands that dominate it, and a
+// phi's block became executable by an edge whose incoming value's block was executable before, so the worklist's fixed
+// point leaves none of them unknown. With a trap here, #2924's review found it never fired over the IR and Tier 1
+// suites, the metamorphic cases, test-ir-source --passes and c-testsuite's subset; it keeps a transfer that answers
+// unknown from known operands sound, by overdefining what is left and visiting its users again.
 static bool ir_optimize_settle_unknown(IrOptimizeWork* work, bool queue)
 {
     bool changed = false;
@@ -1261,81 +1051,6 @@ static __attribute__((aligned(64))) void ir_optimize_sccp_worklist(IrOptimizeWor
             }
         }
         pending = ir_optimize_settle_unknown(work, true);
-    }
-}
-
-static void ir_optimize_sccp_sweeps(IrOptimizeWork* work, uint32_t limit)
-{
-    const IrFunction* f = work->function;
-    bool changed = true;
-    uint32_t sweep = 0;
-    while (changed && sweep < limit)
-    {
-        changed = false;
-        for (uint32_t rank = 0; rank < work->dominators.reachable_count; rank += 1)
-        {
-            const uint32_t block = work->dominators.rpo[rank];
-            if (work->blocks[block] != 0)
-            {
-                for (uint64_t first = f->block_offsets[block]; first < f->block_offsets[(uint64_t)block + 1]; first += BUSTER_IR_OPTIMIZE_BATCH)
-                {
-                    const uint32_t count = f->block_offsets[(uint64_t)block + 1] - first < BUSTER_IR_OPTIMIZE_BATCH ? f->block_offsets[(uint64_t)block + 1] - first : BUSTER_IR_OPTIMIZE_BATCH;
-                    uint32_t operation[BUSTER_IR_OPTIMIZE_BATCH] = { 0 };
-                    uint32_t width[BUSTER_IR_OPTIMIZE_BATCH] = { 0 };
-                    uint64_t left[BUSTER_IR_OPTIMIZE_BATCH] = { 0 };
-                    uint64_t right[BUSTER_IR_OPTIMIZE_BATCH] = { 0 };
-                    uint64_t values[BUSTER_IR_OPTIMIZE_BATCH] = { 0 };
-                    uint16_t active = 0;
-                    for (uint32_t lane = 0; lane < count; lane += 1)
-                    {
-                        const uint32_t i = first + lane;
-                        bool swap;
-                        operation[lane] = ir_optimize_fold_operation(f, i, &swap);
-                        if (operation[lane] != 0 && !ir_vector_type(f->type[i]) && work->states[f->a[i]] == IROPT_CONSTANT && work->states[f->b[i]] == IROPT_CONSTANT && ir_type_bits[f->type[f->a[i]]] <= 64 && work->values[f->b[i]].high == 0)
-                        {
-                            active |= UINT32_C(1) << lane;
-                            width[lane] = ir_type_bits[f->type[f->a[i]]];
-                            left[lane] = work->values[swap ? f->b[i] : f->a[i]].low;
-                            right[lane] = work->values[swap ? f->a[i] : f->b[i]].low;
-                        }
-                    }
-                    const IrOptimizeFoldBatch batch = {
-                        .count = count,
-                        .operation = operation,
-                        .width = width,
-                        .left = left,
-                        .right = right,
-                        .result = values,
-                    };
-                    const uint16_t folded = ir_optimize_fold_vector(batch, active);
-                    for (uint32_t lane = 0; lane < count; lane += 1)
-                    {
-                        const uint32_t i = first + lane;
-                        if ((folded & (UINT32_C(1) << lane)) != 0)
-                        {
-                            const IrConstant value = { .low = values[lane] };
-                            changed = ir_optimize_publish(work, i, IROPT_CONSTANT, value, false) || changed;
-                            work->statistics.sccp_visits += 1;
-                        }
-                        else
-                        {
-                            changed = ir_optimize_visit(work, i, false) || changed;
-                        }
-                    }
-                }
-            }
-        }
-        sweep += 1;
-        if (!changed)
-        {
-            changed = ir_optimize_settle_unknown(work, false);
-        }
-    }
-    work->statistics.sccp_sweeps += sweep;
-    if (changed)
-    {
-        work->statistics.worklist_fallback = true;
-        ir_optimize_sccp_worklist(work);
     }
 }
 
@@ -1446,26 +1161,15 @@ static const uint8_t ir_optimize_identity_kinds[BUSTER_IR_OP_TABLE] = {
     [IR_AND] = BUSTER_IR_OPTIMIZE_RIGHT_ONES | BUSTER_IR_OPTIMIZE_LEFT_ONES,
 };
 
-// The identities' candidates among `count` (at most 64) operations, a bit each: their opcodes' kinds by a 128-byte
-// table's lookup, of which the scalar loop is the exact twin. Only these few read their operands' lattice states.
-static uint64_t ir_optimize_identity_candidates(const uint8_t* operations, uint32_t count, bool scalar)
+// The identities' candidates among `count` (at most 64) operations, a bit each, by their opcodes' kinds. Only these few
+// read their operands' lattice states.
+static uint64_t ir_optimize_identity_candidates(const uint8_t* operations, uint32_t count)
 {
     uint64_t candidates = 0;
-    if (!scalar)
+    for (uint32_t lane = 0; lane < count; lane += 1)
     {
-        const __mmask64 valid = count >= 64 ? UINT64_MAX : (UINT64_C(1) << count) - 1;
-        const __m512i op = _mm512_maskz_loadu_epi8(valid, operations);
-        const __m512i kinds = _mm512_permutex2var_epi8(_mm512_loadu_si512(ir_optimize_identity_kinds), op, _mm512_loadu_si512(ir_optimize_identity_kinds + 64));
-        candidates = _mm512_mask_test_epi8_mask(valid, kinds, kinds);
+        candidates |= (uint64_t)(ir_optimize_identity_kinds[operations[lane]] != 0) << lane;
     }
-    else
-    {
-        for (uint32_t lane = 0; lane < count; lane += 1)
-        {
-            candidates |= (uint64_t)(ir_optimize_identity_kinds[operations[lane]] != 0) << lane;
-        }
-    }
-    (void)scalar;
     return candidates;
 }
 
@@ -1537,7 +1241,7 @@ static bool ir_optimize_identities(IrOptimizeWork* work, Arena* scratch)
     for (uint64_t first = 0; ok && first < count; first += 64)
     {
         const uint32_t lanes = count - first < 64 ? (uint32_t)(count - first) : 64;
-        uint64_t candidates = ir_optimize_identity_candidates(f->op + first, lanes, BUSTER_SCALAR_PATH(work->scalar));
+        uint64_t candidates = ir_optimize_identity_candidates(f->op + first, lanes);
         while (ok && candidates != 0)
         {
             const uint32_t i = (uint32_t)first + (uint32_t)__builtin_ctzll(candidates);
@@ -1658,29 +1362,11 @@ static __attribute__((aligned(64))) void ir_optimize_dce(IrOptimizeWork* work, I
             {
                 memset(work->live + first, 1, end - first);
             }
-            else if (BUSTER_SCALAR_PATH(options.scalar))
+            else
             {
                 for (uint32_t i = first; i < end; i += 1)
                 {
                     work->live[i] = ir_optimize_root(work, i);
-                }
-            }
-            else
-            {
-                for (uint64_t at = first; at < end; at += BUSTER_IR_OPTIMIZE_BATCH)
-                {
-                    const uint32_t count = end - at < BUSTER_IR_OPTIMIZE_BATCH ? end - at : BUSTER_IR_OPTIMIZE_BATCH;
-                    const __mmask16 valid = (UINT32_C(1) << count) - 1;
-                    const __m128i op = _mm_maskz_loadu_epi8(valid, f->op + at);
-                    const __m128i kinds = _mm512_castsi512_si128(_mm512_permutex2var_epi8(_mm512_loadu_si512(ir_optimize_roots), _mm512_zextsi128_si512(op), _mm512_loadu_si512(ir_optimize_roots + 64)));
-                    const __m128i states = _mm_maskz_loadu_epi8(valid, work->states + at);
-                    // SIMD floating arithmetic (kind 2) and comparisons (kind 3) retain their effects, folded or not.
-                    const __m128i flags = _mm_maskz_loadu_epi8(valid, f->flags + at);
-                    const __mmask16 floating = (_mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(3)) | _mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(2))) &
-                                              _mm_cmpge_epu8_mask(flags, _mm_set1_epi8(IR_SIMD_LANE_F32));
-                    const __mmask16 roots = valid & (_mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(1)) | (_mm_cmpeq_epi8_mask(kinds, _mm_set1_epi8(2)) & _mm_cmpneq_epi8_mask(states, _mm_set1_epi8(IROPT_CONSTANT))) |
-                                                floating);
-                    _mm_mask_storeu_epi8(work->live + at, valid, _mm_maskz_set1_epi8(roots, 1));
                 }
             }
         }
@@ -1692,45 +1378,7 @@ static __attribute__((aligned(64))) void ir_optimize_dce(IrOptimizeWork* work, I
     }
     if ((options.passes & BUSTER_IR_OPTIMIZE_DCE) != 0)
     {
-        if (options.scalar)
-        {
-            ir_optimize_dce_worklist(work);
-        }
-        else
-        {
-            bool changed = true;
-            uint32_t sweep = 0;
-            while (changed && sweep < options.sweep_limit)
-            {
-                changed = false;
-                for (uint32_t end = f->instruction_count; end != 0;)
-                {
-                    const uint32_t count = end < BUSTER_IR_OPTIMIZE_BATCH ? end : BUSTER_IR_OPTIMIZE_BATCH;
-                    const uint32_t first = end - count;
-                    const __m128i live = _mm_maskz_loadu_epi8((UINT32_C(1) << count) - 1, work->live + first);
-                    if (_mm_cmpneq_epi8_mask(live, _mm_setzero_si128()) != 0)
-                    {
-                        // The reverse in-batch walk observes operands marked by a later lane immediately. Snapshotting
-                        // one mask for all lanes would add up to 16 rounds to a straight dependency chain.
-                        for (uint32_t i = end; i > first; i -= 1)
-                        {
-                            if (work->live[i - 1] != 0)
-                            {
-                                changed = ir_optimize_mark_operands(work, i - 1, false) || changed;
-                            }
-                        }
-                    }
-                    end = first;
-                }
-                sweep += 1;
-            }
-            work->statistics.dce_sweeps = sweep;
-            if (changed)
-            {
-                work->statistics.worklist_fallback = true;
-                ir_optimize_dce_worklist(work);
-            }
-        }
+        ir_optimize_dce_worklist(work);
     }
 }
 
@@ -1756,13 +1404,11 @@ static IrCheck ir_optimize_check_reachable(const IrFunction* function, const IrC
 
 // `simd`: admission for callers that model vectors and masks. SCCP, GVN and LICM set it; SROA's default does not.
 // The first SIMD SCCP transfer allocates its sparse wide lattice, so this common preparation stays scalar-sized.
-// `scalar` picks the passes' twin. Dominators follow that explicit caller policy too (#1352), not the pass heuristic:
-// the analysis owns its matrix budget and scalar fallback.
-static __attribute__((aligned(64))) IrCheck ir_optimize_prepare(IrOptimizeWork* work, const IrFunction* function, Arena* output, Arena* scratch, bool scalar, bool simd)
+// Dominators own their matrix budget and scalar fallback (#1352).
+static __attribute__((aligned(64))) IrCheck ir_optimize_prepare(IrOptimizeWork* work, const IrFunction* function, Arena* output, Arena* scratch, bool simd)
 {
     work->function = function;
     work->scratch = scratch;
-    work->scalar = scalar;
     // Retain the CFG built by the structural verifier. No input changes before the optimizer consumes it, so
     // rebuilding the same graph here would repeat its edge enumeration, deduplication and instruction map. A verified
     // function (`validated`) has its CFG built alone.
@@ -1854,11 +1500,11 @@ static const uint8_t ir_optimize_rewrite_kinds[BUSTER_IR_OP_TABLE] = {
 // that SCCP left one way, joins that predecessor: the rewrite drops the predecessor's jump and goes on with the block's
 // instructions. A chain of such blocks becomes one block. `next` takes each block's merged successor (BUSTER_IR_NONE for
 // none) and `heads` each block's chain head, itself for a block that merges into none: the predecessors' functional graph
-// resolved by pointer jumping (ir_optimize_thread_targets, with its vector and scalar twins), as the threading's targets
+// resolved by ir_optimize_thread_targets, as the threading's targets
 // are. A merged block's phis each have one executable incoming value, which becomes the phi's users' operand, as an
 // identity's does (`work->forward`); its phis folded to constants stay constants. The predecessor counts are one pass over
 // the executable edges, a scatter of one count per edge. Returns the merges' count in *merges.
-static IrError ir_optimize_merges(IrOptimizeWork* work, const uint32_t* threads, Arena* scratch, bool scalar, uint32_t* next, uint32_t* heads, uint32_t* merges)
+static IrError ir_optimize_merges(IrOptimizeWork* work, const uint32_t* threads, Arena* scratch, uint32_t* next, uint32_t* heads, uint32_t* merges)
 {
     const IrFunction* f = work->function;
     const uint32_t count = f->block_count;
@@ -1911,7 +1557,7 @@ static IrError ir_optimize_merges(IrOptimizeWork* work, const uint32_t* threads,
             *merges += 1;
         }
     }
-    if (error == IR_OK && !ir_optimize_thread_targets(scratch, direct, count, heads, scalar))
+    if (error == IR_OK && !ir_optimize_thread_targets(scratch, direct, count, heads))
     {
         error = IR_ERROR_MEMORY;
     }
@@ -2001,7 +1647,7 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
             direct[block] = target;
         }
     }
-    if (ok && !ir_optimize_thread_targets(scratch, direct, f->block_count, threads, BUSTER_SCALAR_PATH(options.scalar)))
+    if (ok && !ir_optimize_thread_targets(scratch, direct, f->block_count, threads))
     {
         error = IR_ERROR_MEMORY;
     }
@@ -2012,7 +1658,7 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
     uint32_t merges = 0;
     if (error == IR_OK && (options.passes & BUSTER_IR_OPTIMIZE_MERGE) != 0)
     {
-        error = ir_optimize_merges(work, threads, scratch, BUSTER_SCALAR_PATH(options.scalar), next, heads, &merges);
+        error = ir_optimize_merges(work, threads, scratch, next, heads, &merges);
     }
     for (uint32_t block = 0; error == IR_OK && (options.passes & BUSTER_IR_OPTIMIZE_MERGE) == 0 && block < f->block_count; block += 1)
     {
@@ -2024,7 +1670,7 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
     if (error == IR_OK && (options.passes & BUSTER_IR_OPTIMIZE_LAYOUT) != 0)
     {
         order = ir_allocate(scratch, f->block_count, sizeof(uint32_t), &ok);
-        error = ok ? ir_optimize_layout_order(work, threads, scratch, BUSTER_SCALAR_PATH(options.scalar), order, &order_count) : IR_ERROR_MEMORY;
+        error = ok ? ir_optimize_layout_order(work, threads, scratch, order, &order_count) : IR_ERROR_MEMORY;
     }
     IrSizes sizes = {
         .constant_count = f->constant_count,
@@ -2469,33 +2115,15 @@ static IrCheck ir_optimize_verify_result(const IrFunction* function, Arena* outp
     return check;
 }
 
-// #860's AUTO bound, measured on the 9700X against both twins on benchmark-ir-optimize's shapes and
-// benchmark-ir-source's corpora (sqlite3.c's 2602 functions, lua's 1096): the vector passes' per-block
-// set-up only pays on giant dataflow-dense functions — at 16K+ instructions in near-single-block shape
-// vector wins 9-11%, at 8K it breaks even, and it loses everywhere smaller or branchier — so the scalar
-// passes run everywhere else. No corpus function reaches the bound; the largest real instruction-per-block
-// density is chacha_block's 247, where vector still loses 5%.
-#define BUSTER_IR_OPTIMIZE_AUTO_VECTOR_INSTRUCTIONS 8192u
-#define BUSTER_IR_OPTIMIZE_AUTO_VECTOR_BLOCK_LENGTH 512u
-
-static bool ir_optimize_auto_scalar(const IrFunction* function)
-{
-    const bool result = function->instruction_count < BUSTER_IR_OPTIMIZE_AUTO_VECTOR_INSTRUCTIONS ||
-                        (uint64_t)function->block_count * BUSTER_IR_OPTIMIZE_AUTO_VECTOR_BLOCK_LENGTH > function->instruction_count;
-    return result;
-}
-
 static __attribute__((aligned(64))) IrCheck ir_optimize(const IrFunction* function, Arena* output, Arena* scratch, IrOptimizeOptions options, IrOptimizeResult* result)
 {
     const uint64_t output_mark = output->length;
     const uint64_t scratch_mark = scratch->length;
     IrOptimizeWork work = { 0 };
     IrCheck check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, options.passes);
-    if (output != scratch && options.path <= BUSTER_IR_OPTIMIZE_SCALAR && (options.passes & ~BUSTER_IR_OPTIMIZE_PASSES) == 0)
+    if (output != scratch && (options.passes & ~BUSTER_IR_OPTIMIZE_PASSES) == 0)
     {
-        options.scalar = options.path == BUSTER_IR_OPTIMIZE_SCALAR ||
-                         (options.path == BUSTER_IR_OPTIMIZE_AUTO && (options.scalar || ir_optimize_auto_scalar(function)));
-        check = ir_optimize_prepare(&work, function, output, scratch, BUSTER_SCALAR_PATH(options.scalar), true);
+        check = ir_optimize_prepare(&work, function, output, scratch, true);
     }
     if (check.error == IR_OK)
     {
@@ -2505,14 +2133,7 @@ static __attribute__((aligned(64))) IrCheck ir_optimize(const IrFunction* functi
         }
         if ((options.passes & BUSTER_IR_OPTIMIZE_SCCP) != 0)
         {
-            if (options.scalar)
-            {
-                ir_optimize_sccp_worklist(&work);
-            }
-            else
-            {
-                ir_optimize_sccp_sweeps(&work, options.sweep_limit);
-            }
+            ir_optimize_sccp_worklist(&work);
         }
         else
         {

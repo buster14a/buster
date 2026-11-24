@@ -39,7 +39,7 @@ requirements. [Command index](README.md).
   `.rela.dyn`, and relaxes its general- and local-dynamic TLS accesses
   (`ExecutableDynamic.tls_get_addr`, #515): to local-exec, or to initial-exec
   through a `TPOFF64` slot for an imported thread-local; all from vector
-  passes with exact twins.
+  passes (#2924 deleted their exact twins).
   It also writes position-dependent dynamic executables (`-no-pie`, #1503:
   `ExecutableDynamic.position_dependent`, which `dynamic_inputs` sets for a
   runtime of `RUNTIME_KIND_NO_PIE`): the layout's `dynamic` (it has `.dynamic`)
@@ -109,7 +109,7 @@ requirements. [Command index](README.md).
   grouped by library. Required libraries include unversioned dependencies;
   optional ones are selected by used versions. `dynamic_libraries_test.c`,
   included by `dynamic_test.c`, checks high library indices, foreign imports,
-  malformed metadata and exact/vector identity at 1/2/3/8 lanes. Missing import
+  malformed metadata and identity at 1/2/3/8 lanes. Missing import
   version definitions are refused in the existing symbol pass before output.
 ## Direct executable tests
 
@@ -142,7 +142,7 @@ says to leave it:
   once; a lookup of each FDE's first and last byte, by libgcc's binary
   search, finding it, and one of each function finding its FDE, of the
   function's size; and the write's count of FDEs, which must have come in
-  order. The exact twins must write the same file with 1 and 8 lanes. A copy
+  order. A copy
   of the defaults' program with one pointer 8 bytes off must print something
   else, and the two sets that call libc (step 5's) must be refused, an import
   named, without creating the output;
@@ -208,10 +208,10 @@ says to leave it:
 - the sort: tables sorted with equal neighbors, sorted but for one pair,
   reversed, random, all equal, and from `INT32_MIN` to `INT32_MAX`, of every
   count to 200 and some to 5,000: the check must say whether they are sorted,
-  and the sort (always, for the exact twin) give a stable sort's order;
+  and the sort give a stable sort's order;
 - unwind links: 40 functions aligned so that the layout's buckets put them
   out of their FDEs' order, in 12 `.eh_frame` atoms of the CIEs the header
-  indexes, written by every lane count and by the exact twins into the same
+  indexes, written by every lane count into the same
   file, whose table must come out sorted and whose program must run; an
   initial location at `INT32_MAX` from the header (linked) and one past it
   (refused, naming its atom), and one from a wide addend (linked); and the
@@ -227,7 +227,7 @@ says to leave it:
   thread-local or not, weak ones defined nowhere, GOT slots for some, and a
   table pointing at every one; every other link's atom table no larger than
   its atoms, past the class gather's limit. Each is written by every lane
-  count and by the exact twins into the same file, which runs;
+  count into the same file, which runs;
 - the patch kernel: the fast path against the checked one, on random fixups
   of every kind with wide addends, at every count from 0 to 199 from four
   starts, with the kind column ending at a `PROT_NONE` page.
@@ -260,8 +260,7 @@ kept, with a GOT slot for each symbol that an unrelaxed GOT kind or a call to
 a dynamic symbol reaches, and for no other, in symbol order; and the unwind
 tables, by test-executable's rules (the runtime's FDEs among them). The link's
 bytes are binding's again after the writes, for the checks and the objects
-that lld links. The writer's exact twins must write the same file with 1 and 8
-lanes, and a write without RELR must have the same relocations in `.rela.dyn`
+that lld links. A write without RELR must have the same relocations in `.rela.dyn`
 alone and run alike. The checks:
 
 - programs: test-link's two sets that call libc, and one of `--functions`
@@ -285,7 +284,7 @@ alone and run alike. The checks:
   `__tls_get_addr` that no access makes, through its stub and its GOT slot
   with the executable's own module, beside an access whose call the
   relaxation consumes, written and run (status 120); and refused, by every
-  lane count and the exact twins, without an output: that assembly written
+  lane count, without an output: that assembly written
   without `__tls_get_addr` named (at its first access to `errno`); and a
   local-dynamic access to `errno`, which `link_check` refuses
   (`LINK_ERROR_BINDING`);
@@ -296,8 +295,7 @@ alone and run alike. The checks:
   pointed to, which the loader must bind at their versions;
 - position-dependent executables (`dynamic_no_pie_test.c`, #1503), against
   the `-no-pie` runtime (`RUNTIME_KIND_NO_PIE`): the small programs below,
-  none refused, each by every lane count and the exact twins with 1 and 8
-  lanes into the same bytes, an `ET_EXEC` whose `PT_LOAD`s are at
+  none refused, each by every lane count into the same bytes, an `ET_EXEC` whose `PT_LOAD`s are at
   `BUSTER_EXECUTABLE_BASE` from their file offsets, with the interpreter and
   `.dynamic` and no `DF_1_PIE`, RELR or `RELATIVE` relocation, the fields a PIE
   refuses holding `main`'s address (an `ABS32`, a `.rodata` pointer), address
@@ -312,7 +310,7 @@ alone and run alike. The checks:
   in `.data` to a hidden weak reference to nothing, which stays at address 0
   wherever the program loads, and a `lea` of, a call to and a `PC64` in `.data`
   to an absolute symbol, which stays its value (GNU ld and lld refuse them
-  too), each refused with its fixup by every lane count and by the exact twins,
+  too), each refused with its fixup by every lane count,
   without an output; a call to and a pointer to a weak reference to nothing,
   and to a hidden one, loads through the GOT slots of the first and of the
   program's data (by `GOTPCREL`, which doesn't relax), the dynamic one's first
@@ -353,8 +351,8 @@ push saves at the CFA less the new offset, and one a pop restores as it was.
 `--cross-check`.
 
 The same command also writes generated and compiled shared libraries against
-`runtime_import_shared`. Every library is byte-identical on 1, 2, 3 and 8 lanes
-and through the exact twins, then loads with `dlopen` and runs through the
+`runtime_import_shared`. Every library is byte-identical on 1, 2, 3 and 8 lanes,
+then loads with `dlopen` and runs through the
 generated harness. The file checks require ET_DYN without PT_INTERP, SONAME,
 the library's exported symbols and initial-exec TLS, and the corresponding
 dynamic relocations. Compiled fixtures verify that the executable's definitions
@@ -393,10 +391,9 @@ its static PIEs against the static PIE's (`runtime_import_static_pie`), in a
 directory of its own under `--directory` (`TMPDIR` or `/tmp` by default),
 which it removes unless `--keep`. One libc program has a 3 GiB `.bss` atom and
 an `ABS64` pointer to its last byte, in both the static executable and the
-static PIE, written by every lane count and exact twin. Each program is bound
+static PIE, written by every lane count. Each program is bound
 by `bind.c` and
-written by groups of 1, 2, 3 and 8 lanes and by the writer's exact twins with
-1 and 8 lanes, each time from the atoms' bytes as binding left them (the TLS
+written by groups of 1, 2, 3 and 8 lanes and again with 1 and 8 lanes, each time from the atoms' bytes as binding left them (the TLS
 relaxation and the GOT relaxation rewrite them), with zeroed fields over the
 last file scribbled over, every other time over poisoned scratch memory: the
 files must be byte-identical. A link without general- or local-dynamic TLS
@@ -485,8 +482,8 @@ The checks:
   image's base (the symbol) and a `lea` of one whose offset from the base
   fits int32 but not its distance from the `lea` (its fixup, as GNU ld says
   the relocation is truncated; a static PIE refuses any `PC32` to an absolute
-  symbol, as a relocation), each refused alike by every lane count and by
-  the exact twins, without an output; as a static PIE, besides, a pointer to
+  symbol, as a relocation), each refused alike by every lane count, without
+  an output; as a static PIE, besides, a pointer to
   `main` in `.rodata` (a text relocation), an `ABS32` to `main` in `.data`
   and a `lea` of a weak reference to nothing, each refused as a relocation
   naming its fixup; and on the TLS program a lane short of
@@ -517,7 +514,7 @@ it with `--cross-check`.
 
 `./build/compiler benchmark-executable [--directory PATH] [--functions LIST]
 [--lanes N] [--seed N] [--only kernels|hash|links|dynamic|static|static-pie|shared]
-[--tls control|general|local|imported] [--exact] [--after-scalar MS]` (about
+[--tls control|general|local|imported] [--after-scalar MS]` (about
 6 s)
 reports medians of:
 

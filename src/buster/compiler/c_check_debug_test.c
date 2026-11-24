@@ -10,7 +10,7 @@
 //   count to 130 and larger ones, with each column ending at a PROT_NONE page: the same rows, their offsets ascending
 //   and each below the function's length. The same rows through the tier-neutral source-event protocol (#1056): every
 //   valid function's layout and events are accepted and resolve to the raw rows, and a malformed layout is rejected.
-// - Kept rows: check_debug_keep against check_debug_keep_scalar on random rows (the function's file, others and none,
+// - Kept rows: check_debug_keep against what keeping means on random rows (the function's file, others and none,
 //   lines in runs, some past INT32_MAX, the body's start at one of them or none), of every count to 130 and larger,
 //   ending at PROT_NONE pages.
 // - Lines: fixtures (a header's function, macros, a multi-line call, macros nested past the vector path's walk, an
@@ -201,7 +201,7 @@ static void check_debug_test_rows(CheckDebugTestTally* tally)
     printf("  raw rows: %u functions, %llu rows, each path's at PROT_NONE pages\n", 131 + 64, (unsigned long long)rows_checked);
 }
 
-// The kept rows' twins on random rows (see the file's comment).
+// The kept rows against a definition of keeping, on random rows (see the file's comment).
 static void check_debug_test_keep(CheckDebugTestTally* tally)
 {
     uint64_t kept_total = 0;
@@ -225,58 +225,52 @@ static void check_debug_test_keep(CheckDebugTestTally* tally)
             line = line > INT32_MAX ? 7 : line;
         }
         const uint64_t room = (uint64_t)count + BUSTER_CHECK_DEBUG_SLACK;
-        uint32_t* scalar_offsets = calloc(room, sizeof(uint32_t));
-        uint32_t* scalar_lines = calloc(room, sizeof(uint32_t));
-        uint32_t* scalar_keys = calloc(room, sizeof(uint32_t));
-        uint32_t* vector_offsets = calloc(room, sizeof(uint32_t));
-        uint32_t* vector_lines = calloc(room, sizeof(uint32_t));
-        uint32_t* vector_keys = calloc(room, sizeof(uint32_t));
-        ready = ready && scalar_offsets != 0 && scalar_lines != 0 && scalar_keys != 0 && vector_offsets != 0 && vector_lines != 0 && vector_keys != 0;
+        uint32_t* kept_offsets = calloc(room, sizeof(uint32_t));
+        uint32_t* kept_lines = calloc(room, sizeof(uint32_t));
+        uint32_t* kept_keys = calloc(room, sizeof(uint32_t));
+        uint32_t* meant_rows = calloc(room, sizeof(uint32_t));
+        ready = ready && kept_offsets != 0 && kept_lines != 0 && kept_keys != 0 && meant_rows != 0;
         // The body's start: a row's offset, or none.
         const uint32_t body = count != 0 && check_debug_test_random(tally) % 4 != 0 ? (uint32_t)(check_debug_test_random(tally) % count) * 3 : UINT32_MAX;
         if (ready)
         {
-            const uint32_t scalar = check_debug_keep_scalar(offsets, keys, lines, count, body, scalar_offsets, scalar_lines, scalar_keys);
-            const uint32_t vector = check_debug_keep(offsets, keys, lines, count, body, vector_offsets, vector_lines, vector_keys);
-            const bool same = scalar == vector && memcmp(scalar_offsets, vector_offsets, (uint64_t)scalar * sizeof(uint32_t)) == 0 &&
-                              memcmp(scalar_lines, vector_lines, (uint64_t)scalar * sizeof(uint32_t)) == 0 &&
-                              memcmp(scalar_keys, vector_keys, (uint64_t)scalar * sizeof(uint32_t)) == 0;
+            const uint32_t kept = check_debug_keep(offsets, keys, lines, count, body, kept_offsets, kept_lines, kept_keys);
             char detail[96];
-            snprintf(detail, sizeof(detail), "%u rows, %u kept against %u", count, vector, scalar);
-            check_debug_test_expect(tally, same, "the kept rows' vector path keeps the exact path's rows", detail);
-            // The exact path against what keeping means: rows in a file, each line at most INT32_MAX and its file or line
-            // unlike the one kept before it, but the body's row; and every row in a file whose line or file changes kept.
-            bool meant = true;
-            for (uint32_t i = 0; meant && i < scalar; i += 1)
-            {
-                meant = scalar_keys[i] != BUSTER_CHECK_DEBUG_NO_FILE && scalar_lines[i] <= INT32_MAX &&
-                        (i == 0 || scalar_lines[i] != scalar_lines[i - 1] || scalar_keys[i] != scalar_keys[i - 1] || scalar_offsets[i] == body);
-            }
-            uint32_t changes = 0;
+            snprintf(detail, sizeof(detail), "%u rows, %u kept", count, kept);
+            // What keeping means, a row at a time: every row in a file, its line at most INT32_MAX, whose file or line
+            // differs from the last such row's, and the body's row.
+            uint32_t meant = 0;
             uint32_t last_line = UINT32_MAX;
             uint32_t last_key = BUSTER_CHECK_DEBUG_NO_FILE;
             for (uint32_t i = 0; i < count; i += 1)
             {
                 const bool eligible = keys[i] != BUSTER_CHECK_DEBUG_NO_FILE && lines[i] <= INT32_MAX;
-                changes += eligible && (lines[i] != last_line || keys[i] != last_key || offsets[i] == body) ? 1 : 0;
+                const bool keep = eligible && (lines[i] != last_line || keys[i] != last_key || offsets[i] == body);
+                meant_rows[meant] = i;
+                meant += keep ? 1 : 0;
                 last_line = eligible ? lines[i] : last_line;
                 last_key = eligible ? keys[i] : last_key;
             }
-            check_debug_test_expect(tally, meant && changes == scalar, "the kept rows' file or line changes from row to row", detail);
-            kept_total += scalar;
+            // Each kept row is the row meant, with that row's offset, file and line.
+            bool same = meant == kept;
+            for (uint32_t i = 0; same && i < kept; i += 1)
+            {
+                const uint32_t row = meant_rows[i];
+                same = kept_offsets[i] == offsets[row] && kept_keys[i] == keys[row] && kept_lines[i] == lines[row];
+            }
+            check_debug_test_expect(tally, same, "the kept rows are the rows whose file or line changes, and the body's", detail);
+            kept_total += kept;
         }
-        free(vector_keys);
-        free(vector_lines);
-        free(vector_offsets);
-        free(scalar_keys);
-        free(scalar_lines);
-        free(scalar_offsets);
+        free(meant_rows);
+        free(kept_keys);
+        free(kept_lines);
+        free(kept_offsets);
         for (uint32_t g = 0; g < 3; g += 1)
         {
             check_debug_test_unguard(&guards[g]);
         }
     }
-    printf("  kept rows: %u functions' rows, %llu kept, each path's at PROT_NONE pages\n", 131 + 64, (unsigned long long)kept_total);
+    printf("  kept rows: %u functions' rows, %llu kept, at PROT_NONE pages\n", 131 + 64, (unsigned long long)kept_total);
 }
 
 // The fixtures: a header's function, a macro whose definition is lines above its use, a call across two lines, an
@@ -581,10 +575,13 @@ static uint64_t check_debug_test_lines(CheckDebugTestTally* tally, CheckDebugTes
         const uint32_t first = rows->first[b];
         const uint32_t count = rows->counts[b];
         const uint32_t closing = parser->tree.parents[body->opening];
-        for (uint32_t path = 0; path < 2; path += 1)
+        // The exact path row by row (check_debug_line_scalar, which check_debug_lines leaves its rows past its span to),
+        // and the vector one.
+        for (uint32_t r = first; r < first + count; r += 1)
         {
-            check_debug_lines(&source, body->declaration, closing, rows->tokens + first, count, keys[path] + first, lines[path] + first, path == 0);
+            check_debug_line_scalar(&source, rows->tokens[r], keys[0] + r, lines[0] + r);
         }
+        check_debug_lines(&source, body->declaration, closing, rows->tokens + first, count, keys[1] + first, lines[1] + first);
         const bool same = memcmp(keys[0] + first, keys[1] + first, (uint64_t)count * sizeof(uint32_t)) == 0 &&
                           memcmp(lines[0] + first, lines[1] + first, (uint64_t)count * sizeof(uint32_t)) == 0;
         char detail[160];
@@ -821,7 +818,7 @@ static void check_debug_test_sources(CheckDebugTestTally* tally, const char* dir
                 check_debug_test_lowering(tally, &unit, &parser, path);
                 rows += check_debug_test_lines(tally, &unit, &pp, &parser, path);
                 CheckDebug built;
-                const bool made = check_debug_build(&built, &unit.selected.program, &unit.rows, &parser, &pp, path_kind == 0, &unit.output, &unit.scratch);
+                const bool made = check_debug_build(&built, &unit.selected.program, &unit.rows, &parser, &pp, &unit.output, &unit.scratch);
                 check_debug_test_expect(tally, made, "make the debug.c unit", path);
                 if (made)
                 {
@@ -927,7 +924,7 @@ static void check_debug_test_empty(CheckDebugTestTally* tally, const char* direc
         check_debug_test_expect(tally, unit.ready && unit.selected.program.body_count == 0 && unit.rows.count == 0,
                                 "emit a unit whose selection keeps no function with source rows, none of them", path);
         CheckDebug debug;
-        built[side] = unit.ready && check_debug_build(&debug, &unit.selected.program, &unit.rows, &parser, &pp, side == 0, &unit.output, &unit.scratch);
+        built[side] = unit.ready && check_debug_build(&debug, &unit.selected.program, &unit.rows, &parser, &pp, &unit.output, &unit.scratch);
         check_debug_test_expect(tally, built[side] && debug.unit.function_count == 0 && debug.unit.row_count == 0, "make its debug.c unit, of no functions", path);
         for (uint32_t section = 0; built[side] && section < BUSTER_DEBUG_SECTIONS; section += 1)
         {

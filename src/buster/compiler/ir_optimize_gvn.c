@@ -1065,7 +1065,7 @@ static __attribute__((unused)) IrCheck ir_optimize_gvn(const IrFunction* functio
     work.ir.validated = options.validated;
     if (output != scratch)
     {
-        check = ir_optimize_prepare(&work.ir, function, output, scratch, BUSTER_SCALAR_PATH(options.scalar), true);
+        check = ir_optimize_prepare(&work.ir, function, output, scratch, true);
     }
     if (check.error == IR_OK)
     {
@@ -1137,7 +1137,6 @@ static __attribute__((unused)) IrCheck ir_optimize_gvn(const IrFunction* functio
         }
         IrOptimizeOptions rewrite = ir_optimize_options();
         rewrite.passes = 0;
-        rewrite.scalar = BUSTER_SCALAR_PATH(options.scalar);
         check.error = ir_optimize_rewrite(&work.ir, output, scratch, rewrite, &work.statistics.function);
     }
     if (rewritten && check.error == IR_OK)

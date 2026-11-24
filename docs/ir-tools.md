@@ -116,9 +116,10 @@ carry the shared verifier's diagnostic and source instruction location.
 ## Parser contract
 
 `ir_parse(source, output, scratch, result)` consumes one function and returns
-`IrParseResult`; `ir_parse_scalar` is its exact scalar twin. `consumed` lets a
+`IrParseResult`. `consumed` lets a
 caller advance through a sequence. Whitespace-only input returns `IR_PARSE_END`.
-The vector path classifies bounded 64-byte newline chunks with masked tails;
+It classifies bounded 64-byte newline chunks with masked tails (#2924 removed
+the scalar twin, which the newline scan beat by 7% on `tests/`' fixtures);
 the ordered grammar uses an explicit state and no recursion. Geometric scratch
 builders retain parsed rows and metadata during the single text pass. Final
 publication uses the same exact-size `ir_create` constructor as lowering.
@@ -156,8 +157,8 @@ CI step is needed.
 
 For each pair, the test reads both files, requires that they differ (a pair that
 tests no transformation fails), and requires each file to be exactly one
-function that both parser paths accept, consume the same bytes of and agree on
-column for column (`ir_parse` and `ir_parse_scalar`), and whose canonical print
+function that the parser accepts and that a second parse into the twin arena
+gives again, and whose canonical print
 is the file's bytes. It then runs the pass on the parsed before
 function by both optimizer twins, requires the vector twin's non-zero
 transformation counter, prints the vector result and requires its bytes to equal
@@ -525,8 +526,8 @@ renaming, independent constant reordering, unused pure-value insertion, CFG edge
 splitting with phi predecessor repair, commutative operand exchange, and an
 unreachable block. Rebuilding validates the original and replacement. Its
 bounded SIMD ID-remap kernel has a scalar twin; canonical texts must match
-exactly. The complete verifier checks reachable dominance. Both text-parser
-paths must stabilize print/parse/print. For each variant, SCCP, DCE, CFG cleanup,
+exactly. The complete verifier checks reachable dominance. The text parser
+must stabilize print/parse/print. For each variant, SCCP, DCE, CFG cleanup,
 their combination with CFG cleanup's merges (Tier 1's, #139), GVN, LICM and
 scalar replacement run through their scalar and vector paths. Optimized arrays may differ; checked execution must preserve the
 independent result and guarded global-memory observations.

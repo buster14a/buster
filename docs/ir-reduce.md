@@ -91,8 +91,8 @@ assertion rather than an independently verified Git checkout. Its
 `--expect-kind`, `--expect-pass` and
 `--expect-detail` arguments require the recorded failure class before publishing
 a replay. Each replay creates a new `replayed` directory.
-Replay selects the scalar parser used by the independent publication check,
-regardless of the original input parser. Exit status 1 means invalid input,
+Replay passes `--scalar`, which selects nothing since #2924: the parser has one
+path, the newline scan. Exit status 1 means invalid input,
 a different failure class or an existing destination; status 2 means a resource,
 I/O or unavailable-observation boundary, including during publication and replay.
 Neither outcome publishes a partial bundle. Unsigned numeric limits require

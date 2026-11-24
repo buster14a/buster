@@ -79,7 +79,7 @@ scope's events its heads reach (`check_deferred_proxy`).
 
 `./build/compiler test-checker-deferred [--id-order N] [--keep]` checks the
 fixtures of the issue's cases through the scalar path, the vector path and the
-deferred reader on 1, 2, 3 and 8 lanes with the stacks, the batch and the direct
+deferred reader on 1, 2, 3 and 8 lanes with the batch and the direct
 resolution, and on 8 with the identifiers' ids in another order (#153):
 the deferred result must be the vector path's column for column, merged or
 left to source order as each fixture says, on every lane its bodies can take
@@ -119,7 +119,7 @@ expression round must reproduce the complete source-order result.
 A delayed-caller fixture also checks the completed parts' lane identities,
 requiring real expression execution on the caller and at least one other lane.
 `test-checker-corpus --deferred N
-[--deferred-bindings stacks|batch|direct]` adds the reader to a corpus's
+[--deferred-bindings batch|direct]` adds the reader to a corpus's
 comparison, on every lane the bodies can take up to N, and tallies the units
 left to source order by reason. `./build/compiler benchmark-checker-deferred
 [--passes N] [--lanes N] [--cpus LIST] [--every-lane] [--warm] [--cold] [--raw]

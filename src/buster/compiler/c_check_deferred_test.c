@@ -4,7 +4,7 @@
 // test-checker-deferred: #113's deferred bodies (c_check_deferred.c) on fixtures of the issue's cases. Each fixture is
 // written to a file and checked as test-checker-corpus checks one (check_corpus_measure): on the scalar path, the
 // vector path, and the vector path with every body read apart, which must give the vector path's results exactly,
-// column by column, its diagnostics among them. It runs on 1, 2, 3 and 8 lanes through the stacks, the batch and the
+// column by column, its diagnostics among them. It runs on 1, 2, 3 and 8 lanes through the batch and the
 // direct binding resolution, on every lane the bodies can take (CheckDeferred.every_lane), and each fixture says
 // whether the deferred reader must merge it or leave it to source order. Each is checked again with its identifiers' ids
 // in another order (#153, as the driver's --id-order gives them, from --id-order N on), on 8 lanes through each
@@ -680,6 +680,10 @@ static bool check_deferred_test_sparse_pages(void)
         BUSTER_ARENA_HUGE_PAGE_BYTES,
     };
     const bool was_busy = arena_pages_busy;
+    // Not a busy host's medium pages (arena_pages_medium, #2536), whose huge pages each start with a base page: test-lanes
+    // has those.
+    const bool was_medium = arena_pages_medium;
+    arena_pages_medium = false;
     bool valid = true;
     for (uint32_t reading = 0; valid && reading < 4; reading += 1)
     {
@@ -734,6 +738,7 @@ static bool check_deferred_test_sparse_pages(void)
         }
     }
     arena_pages_busy = was_busy;
+    arena_pages_medium = was_medium;
     Arena empty = check_input_sparse_arena(0, 0, true);
     Arena oversized = check_input_sparse_arena(BUSTER_ARENA_MAX_CAPACITY + 1, 0, true);
     valid = valid && empty.base == 0 && empty.capacity == 0 && oversized.base == 0 && oversized.capacity == 0;
@@ -1299,8 +1304,8 @@ static int run_checker_deferred_tests(int count, char** arguments)
     const uint32_t sizes = (uint32_t)BUSTER_ARRAY_LENGTH(check_deferred_sizes);
     const uint32_t fixtures = listed + 1 + 2 * sizes;
     static const uint32_t lane_counts[] = { 1, 2, 3, 8 };
-    static const CheckInputBindingMode modes[] = { CHECK_INPUT_BINDINGS_STACKS, CHECK_INPUT_BINDINGS_BATCH, CHECK_INPUT_BINDINGS_DIRECT };
-    static const char* const mode_names[] = { "stacks", "batch", "direct" };
+    static const CheckInputBindingMode modes[] = { CHECK_INPUT_BINDINGS_BATCH, CHECK_INPUT_BINDINGS_DIRECT };
+    static const char* const mode_names[] = { "batch", "direct" };
     uint64_t checks = 0;
     uint64_t failures = 0;
     uint64_t merged = 0;
@@ -1422,7 +1427,7 @@ static int run_checker_deferred_tests(int count, char** arguments)
         if (valid && size == 0)
         {
             check_corpus_deferred_lanes = 8;
-            check_corpus_deferred_bindings = CHECK_INPUT_BINDINGS_STACKS;
+            check_corpus_deferred_bindings = CHECK_INPUT_BINDINGS_BATCH;
             check_corpus_deferred_every_lane = false;
             CheckCorpusOutcome outcome;
             check_corpus_measure(path, &options, false, true, &outcome);
@@ -1449,7 +1454,7 @@ static int run_checker_deferred_tests(int count, char** arguments)
         for (uint32_t policy = 0; valid && size != 0 && size->bodies > 1 && policy < (size->base_tokens != 0 ? 2u : 1u); policy += 1)
         {
             check_corpus_deferred_lanes = 8;
-            check_corpus_deferred_bindings = CHECK_INPUT_BINDINGS_STACKS;
+            check_corpus_deferred_bindings = CHECK_INPUT_BINDINGS_BATCH;
             check_corpus_deferred_late_first = true;
             check_corpus_deferred_every_lane = policy == 0;
             CheckCorpusOutcome outcome;
@@ -1475,7 +1480,7 @@ static int run_checker_deferred_tests(int count, char** arguments)
         if (valid && expected && size == 0)
         {
             check_corpus_deferred_lanes = 8;
-            check_corpus_deferred_bindings = CHECK_INPUT_BINDINGS_STACKS;
+            check_corpus_deferred_bindings = CHECK_INPUT_BINDINGS_BATCH;
             check_corpus_deferred_hold_lanes = true;
             CheckCorpusOutcome outcome;
             check_corpus_measure(path, &options, false, true, &outcome);
@@ -1496,7 +1501,7 @@ static int run_checker_deferred_tests(int count, char** arguments)
         for (uint32_t l = 0; valid && expected && size == 0 && l < 2; l += 1)
         {
             check_corpus_deferred_lanes = l == 0 ? 1 : 8;
-            check_corpus_deferred_bindings = CHECK_INPUT_BINDINGS_STACKS;
+            check_corpus_deferred_bindings = CHECK_INPUT_BINDINGS_BATCH;
             check_corpus_deferred_fail_merge = true;
             CheckCorpusOutcome outcome;
             check_corpus_measure(path, &options, false, true, &outcome);
@@ -1551,7 +1556,7 @@ static int run_checker_deferred_tests(int count, char** arguments)
         for (uint32_t l = 0; valid && expected && size == 0 && l < 4; l += 1)
         {
             check_corpus_deferred_lanes = 8;
-            check_corpus_deferred_bindings = CHECK_INPUT_BINDINGS_STACKS;
+            check_corpus_deferred_bindings = CHECK_INPUT_BINDINGS_BATCH;
             check_corpus_deferred_reread = l == 0 || l == 3 ? 1 : 8;
             check_corpus_deferred_poison = l < 2;
             check_corpus_deferred_stamp = l == 3 ? UINT32_MAX : 0;
@@ -1581,7 +1586,7 @@ static int run_checker_deferred_tests(int count, char** arguments)
         if (valid && expected && size == 0)
         {
             check_corpus_deferred_lanes = 8;
-            check_corpus_deferred_bindings = CHECK_INPUT_BINDINGS_STACKS;
+            check_corpus_deferred_bindings = CHECK_INPUT_BINDINGS_BATCH;
             check_corpus_deferred_fail_state = true;
             CheckCorpusOutcome outcome;
             check_corpus_measure(path, &options, false, true, &outcome);
@@ -1602,7 +1607,7 @@ static int run_checker_deferred_tests(int count, char** arguments)
         for (uint32_t l = 0; valid && f == listed && l < 3; l += 1)
         {
             check_corpus_deferred_lanes = l < 2 ? 1 : 8;
-            check_corpus_deferred_bindings = CHECK_INPUT_BINDINGS_STACKS;
+            check_corpus_deferred_bindings = CHECK_INPUT_BINDINGS_BATCH;
             check_corpus_deferred_timing = true;
             CheckCorpusOutcome outcome = { 0 };
             bool restored = true;

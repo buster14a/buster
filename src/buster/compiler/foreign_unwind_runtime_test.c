@@ -175,7 +175,6 @@ static bool foreign_unwind_runtime_test(const char* directory, Arena* arena, boo
                         },
                         .entry = foreign_link_test_symbol(&foreign, &converted, "_start"),
                         .dynamic = &converted.dynamic,
-                        .exact = path == 0,
                     },
                 };
                 published = lane_run(foreign_test_lanes[l], executable_test_lane_main, &write, 0) && write.succeeded;

@@ -22,6 +22,11 @@ struct IrParseTest
     uint64_t checks;
     uint64_t failures;
     uint64_t functions;
+    // The inline cases' diagnostics and published columns, in order: frozen in #2924 while the line scan's scalar twin
+    // agreed. Opcodes and types fold as their spellings, so renumbering either keeps it. The catalog's fixtures stay out
+    // (`catalog`): a new or edited fixture is its file alone (#2053), checked by reprint and coverage instead.
+    uint64_t digest;
+    bool catalog;
     bool operations[IR_OP_COUNT];
     bool types[IR_TYPE_COUNT];
 };
@@ -37,70 +42,6 @@ static void ir_parse_test_expect(IrParseTest* test, bool condition, const char* 
         }
         test->failures += 1;
     }
-}
-
-static bool ir_parse_test_bytes(const void* a, const void* b, uint64_t count)
-{
-    return count == 0 || memcmp(a, b, (size_t)count) == 0;
-}
-
-static bool ir_parse_test_equal(const IrFunction* a, const IrFunction* b)
-{
-    bool equal = a->instruction_count == b->instruction_count && a->block_count == b->block_count && a->extra_count == b->extra_count &&
-                 a->constant_count == b->constant_count && a->vector_constant_count == b->vector_constant_count && a->slot_count == b->slot_count && a->address_count == b->address_count &&
-                 a->call_count == b->call_count && a->call_type_count == b->call_type_count && a->parameter_count == b->parameter_count &&
-                 a->result_type == b->result_type && a->symbol_count == b->symbol_count && a->label_count == b->label_count &&
-                 a->abi_call_count == b->abi_call_count && a->passed_count == b->passed_count && a->parameter_passed == b->parameter_passed &&
-                 a->result_size == b->result_size && ir_parse_test_bytes(&a->result_abi, &b->result_abi, sizeof(AbiReturn)) && a->variadic == b->variadic &&
-                 ir_parse_test_bytes(&a->incoming, &b->incoming, sizeof(AbiCall));
-    if (equal)
-    {
-        const uint64_t count = a->instruction_count;
-        equal = ir_parse_test_bytes(a->op, b->op, count) && ir_parse_test_bytes(a->type, b->type, count) &&
-                ir_parse_test_bytes(a->flags, b->flags, count) && ir_parse_test_bytes(a->alignment_log2, b->alignment_log2, count) &&
-                ir_parse_test_bytes(a->a, b->a, count * 4) && ir_parse_test_bytes(a->b, b->b, count * 4) && ir_parse_test_bytes(a->c, b->c, count * 4) &&
-                ir_parse_test_bytes(a->block_offsets, b->block_offsets, ((uint64_t)a->block_count + 1) * 4) &&
-                ir_parse_test_bytes(a->extra, b->extra, (uint64_t)a->extra_count * 4) && ir_parse_test_bytes(a->call_types, b->call_types, a->call_type_count) &&
-                ir_parse_test_bytes(a->parameter_types, b->parameter_types, a->parameter_count) && ir_parse_test_bytes(a->labels, b->labels, (uint64_t)a->label_count * 4);
-        for (uint32_t i = 0; equal && i < a->abi_call_count; i += 1)
-        {
-            equal = ir_parse_test_bytes(&a->abi_calls[i].call, &b->abi_calls[i].call, sizeof(AbiCall)) && a->abi_calls[i].passed == b->abi_calls[i].passed &&
-                    a->abi_calls[i].result_size == b->abi_calls[i].result_size;
-        }
-        for (uint32_t i = 0; equal && i < a->passed_count; i += 1)
-        {
-            equal = ir_parse_test_bytes(&a->passed[i].location, &b->passed[i].location, sizeof(AbiLocation)) && a->passed[i].size == b->passed[i].size;
-        }
-        for (uint32_t i = 0; equal && i < a->constant_count; i += 1)
-        {
-            equal = a->constants[i].low == b->constants[i].low && a->constants[i].high == b->constants[i].high;
-        }
-        equal = equal && ir_parse_test_bytes(a->vector_constants, b->vector_constants, (uint64_t)a->vector_constant_count * sizeof(IrSimdValue));
-        for (uint32_t i = 0; equal && i < a->slot_count; i += 1)
-        {
-            equal = a->slots[i].size == b->slots[i].size && a->slots[i].alignment == b->slots[i].alignment &&
-                    a->slots[i].type == b->slots[i].type && a->slots[i].flags == b->slots[i].flags;
-        }
-        for (uint32_t i = 0; equal && i < a->address_count; i += 1)
-        {
-            equal = a->addresses[i].offset == b->addresses[i].offset && a->addresses[i].scale == b->addresses[i].scale;
-        }
-        for (uint32_t i = 0; equal && i < a->call_count; i += 1)
-        {
-            const IrCall x = a->calls[i];
-            const IrCall y = b->calls[i];
-            equal = x.argument_first == y.argument_first && x.argument_count == y.argument_count && x.type_first == y.type_first &&
-                    x.parameter_count == y.parameter_count && x.result_type == y.result_type && x.variadic == y.variadic && x.abi == y.abi;
-        }
-    }
-    return equal;
-}
-
-static bool ir_parse_test_diagnostic(IrParseResult a, IrParseResult b)
-{
-    return a.error == b.error && a.consumed == b.consumed && a.offset == b.offset && a.line == b.line && a.column == b.column &&
-           a.check.error == b.check.error && a.check.instruction == b.check.instruction && a.check.detail == b.check.detail &&
-           a.check.dominance_checked == b.check.dominance_checked;
 }
 
 static bool ir_parse_test_print(const IrFunction* function, String8 expected, Arena* scratch)
@@ -120,39 +61,73 @@ static bool ir_parse_test_print(const IrFunction* function, String8 expected, Ar
     return equal;
 }
 
-static IrParseResult ir_parse_test_pair(IrParseTest* test, String8 source, Arena* output, Arena* twin_output, Arena* scratch, IrFunction* function)
+#define BUSTER_IR_PARSE_TEST_DIGEST UINT64_C(0x4aa02a17eaaa7b67)
+
+static void ir_parse_test_fold_bytes(uint64_t* digest, const void* bytes, uint64_t count)
+{
+    const uint8_t* source = bytes;
+    for (uint64_t k = 0; k < count; k += 1)
+    {
+        *digest = (*digest ^ source[k]) * UINT64_C(0x100000001b3);
+    }
+}
+
+static void ir_parse_test_fold_result(IrParseTest* test, IrParseResult result, const IrFunction* function)
+{
+    const uint64_t words[] = { result.error, result.consumed, result.offset, result.line, result.column };
+    for (uint32_t k = 0; !test->catalog && k < sizeof(words) / sizeof(words[0]); k += 1)
+    {
+        ir_test_fold(&test->digest, words[k]);
+    }
+    if (!test->catalog && result.error == IR_PARSE_OK)
+    {
+        const uint64_t n = function->instruction_count;
+        const uint64_t counts[] = { n, function->block_count, function->constant_count, function->extra_count, function->slot_count, function->address_count, function->call_count };
+        for (uint32_t k = 0; k < sizeof(counts) / sizeof(counts[0]); k += 1)
+        {
+            ir_test_fold(&test->digest, counts[k]);
+        }
+        for (uint64_t i = 0; i < n; i += 1)
+        {
+            const char* op = ir_op_names[function->op[i]];
+            const char* type = ir_type_names[function->type[i]];
+            ir_parse_test_fold_bytes(&test->digest, op, strlen(op) + 1);
+            ir_parse_test_fold_bytes(&test->digest, type, strlen(type) + 1);
+        }
+        ir_parse_test_fold_bytes(&test->digest, function->flags, n);
+        ir_parse_test_fold_bytes(&test->digest, function->a, n * 4);
+        ir_parse_test_fold_bytes(&test->digest, function->b, n * 4);
+        ir_parse_test_fold_bytes(&test->digest, function->c, n * 4);
+        ir_parse_test_fold_bytes(&test->digest, function->block_offsets, ((uint64_t)function->block_count + 1) * 4);
+        ir_parse_test_fold_bytes(&test->digest, function->extra, (uint64_t)function->extra_count * 4);
+    }
+}
+
+static IrParseResult ir_parse_test_one(IrParseTest* test, String8 source, Arena* output, Arena* scratch, IrFunction* function)
 {
     const uint64_t output_mark = output->length;
-    const uint64_t twin_mark = twin_output->length;
     const uint64_t scratch_mark = scratch->length;
-    IrFunction twin;
     memset(function, 0x5a, sizeof(*function));
-    memset(&twin, 0x5a, sizeof(twin));
     uint8_t saved[sizeof(*function)];
     memcpy(saved, function, sizeof(saved));
-    const IrParseResult vector = ir_parse(source, output, scratch, function);
-    ir_parse_test_expect(test, scratch->length == scratch_mark, "vector parse retained scratch");
-    const IrParseResult scalar = ir_parse_scalar(source, twin_output, scratch, &twin);
-    ir_parse_test_expect(test, scratch->length == scratch_mark, "scalar parse retained scratch");
-    ir_parse_test_expect(test, ir_parse_test_diagnostic(vector, scalar), "parser twins disagree on the complete diagnostic");
-    ir_parse_test_expect(test, vector.consumed <= source.length && vector.offset <= source.length, "parser location extends beyond its source slice");
-    if (vector.error == IR_PARSE_OK && scalar.error == IR_PARSE_OK)
+    const IrParseResult result = ir_parse(source, output, scratch, function);
+    ir_parse_test_expect(test, scratch->length == scratch_mark, "parse retained scratch");
+    ir_parse_test_fold_result(test, result, function);
+    ir_parse_test_expect(test, result.consumed <= source.length && result.offset <= source.length, "parser location extends beyond its source slice");
+    if (result.error == IR_PARSE_OK)
     {
-        ir_parse_test_expect(test, vector.check.dominance_checked && scalar.check.dominance_checked, "published function lacks complete dominance verification");
-        ir_parse_test_expect(test, vector.consumed != 0, "successful parse did not consume a function");
-        ir_parse_test_expect(test, ir_parse_test_equal(function, &twin), "parser twins disagree on IR columns or metadata");
-        ir_parse_test_expect(test, function->arena_bytes == output->length - output_mark && twin.arena_bytes == twin_output->length - twin_mark,
-                             "parser arena byte count differs from the published allocation");
+        ir_parse_test_expect(test, result.check.dominance_checked, "published function lacks complete dominance verification");
+        ir_parse_test_expect(test, result.consumed != 0, "successful parse did not consume a function");
+        ir_parse_test_expect(test, function->arena_bytes == output->length - output_mark, "parser arena byte count differs from the published allocation");
         const IrCheck checked = ir_verify(function, scratch, 0);
-        const IrCheck checked_scalar = ir_verify(&twin, scratch, 0);
-        ir_parse_test_expect(test, checked.error == IR_OK && checked_scalar.error == IR_OK && scratch->length == scratch_mark, "published function fails an independent verifier");
+        ir_parse_test_expect(test, checked.error == IR_OK && scratch->length == scratch_mark, "published function fails an independent verifier");
     }
     else
     {
-        ir_parse_test_expect(test, output->length == output_mark && twin_output->length == twin_mark, "failed parse retained output allocation");
-        ir_parse_test_expect(test, memcmp(saved, function, sizeof(saved)) == 0 && memcmp(saved, &twin, sizeof(saved)) == 0, "failed parse published a partial function");
+        ir_parse_test_expect(test, output->length == output_mark, "failed parse retained output allocation");
+        ir_parse_test_expect(test, memcmp(saved, function, sizeof(saved)) == 0, "failed parse published a partial function");
     }
-    return vector;
+    return result;
 }
 
 static bool ir_parse_test_read(const char* path, Arena* source, String8* text)
@@ -182,7 +157,7 @@ static bool ir_parse_test_read(const char* path, Arena* source, String8* text)
     return ok;
 }
 
-static void ir_parse_test_fixture(IrParseTest* test, const char* path, Arena* source_arena, Arena* output, Arena* twin_output, Arena* scratch)
+static void ir_parse_test_fixture(IrParseTest* test, const char* path, Arena* source_arena, Arena* output, Arena* scratch)
 {
     const uint64_t source_mark = source_arena->length;
     String8 source = { 0 };
@@ -190,16 +165,16 @@ static void ir_parse_test_fixture(IrParseTest* test, const char* path, Arena* so
     ir_parse_test_expect(test, read, path);
     uint64_t position = 0;
     bool done = !read;
+    test->catalog = true;
     while (!done)
     {
         const uint64_t output_mark = output->length;
-        const uint64_t twin_mark = twin_output->length;
         const String8 remaining = {
             .pointer = source.pointer + position,
             .length = source.length - position,
         };
         IrFunction function;
-        const IrParseResult parsed = ir_parse_test_pair(test, remaining, output, twin_output, scratch, &function);
+        const IrParseResult parsed = ir_parse_test_one(test, remaining, output, scratch, &function);
         done = parsed.error != IR_PARSE_OK || parsed.consumed == 0;
         if (parsed.error == IR_PARSE_OK && parsed.consumed != 0)
         {
@@ -222,8 +197,8 @@ static void ir_parse_test_fixture(IrParseTest* test, const char* path, Arena* so
             ir_parse_test_expect(test, parsed.error == IR_PARSE_END && position == source.length, path);
         }
         arena_pop_to(output, output_mark);
-        arena_pop_to(twin_output, twin_mark);
     }
+    test->catalog = false;
     arena_pop_to(source_arena, source_mark);
 }
 
@@ -284,7 +259,7 @@ static bool ir_parse_test_orphans(const char* directory, char* const* files, uin
 
 // The catalog's cases, each through ir_parse_test_fixture, once the whole catalog and its files are found sound; else a
 // failure naming what isn't, and no case.
-static void ir_parse_test_catalog(IrParseTest* test, Arena* source_arena, Arena* output, Arena* twin_output, Arena* scratch)
+static void ir_parse_test_catalog(IrParseTest* test, Arena* source_arena, Arena* output, Arena* scratch)
 {
     const uint64_t source_mark = source_arena->length;
     char directory[PATH_MAX];
@@ -380,7 +355,7 @@ static void ir_parse_test_catalog(IrParseTest* test, Arena* source_arena, Arena*
     for (uint32_t i = 0; valid && i < count; i += 1)
     {
         snprintf(path, sizeof(path), "%s/%s", directory, files[i]);
-        ir_parse_test_fixture(test, path, source_arena, output, twin_output, scratch);
+        ir_parse_test_fixture(test, path, source_arena, output, scratch);
     }
     fprintf(stderr, "IR parser: %u canonical fixtures from %s (#2053)\n", valid ? count : 0, directory);
     arena_pop_to(source_arena, source_mark);
@@ -393,7 +368,7 @@ struct IrParseTestCase
     IrParseError error;
 };
 
-static void ir_parse_test_invalid(IrParseTest* test, Arena* output, Arena* twin_output, Arena* scratch)
+static void ir_parse_test_invalid(IrParseTest* test, Arena* output, Arena* scratch)
 {
     static const IrParseTestCase cases[] = {
         { "", IR_PARSE_END },
@@ -461,7 +436,7 @@ static void ir_parse_test_invalid(IrParseTest* test, Arena* output, Arena* twin_
             .length = strlen(cases[i].text),
         };
         IrFunction function;
-        const IrParseResult parsed = ir_parse_test_pair(test, source, output, twin_output, scratch, &function);
+        const IrParseResult parsed = ir_parse_test_one(test, source, output, scratch, &function);
         if (parsed.error != cases[i].error && test->failures < BUSTER_IR_PARSE_TEST_REPORTS)
         {
             fprintf(stderr, "IR parser: case %u expected %u, got %u at %" PRIu64 "\n", i, (unsigned)cases[i].error, (unsigned)parsed.error, (uint64_t)parsed.offset);
@@ -486,12 +461,12 @@ static void ir_parse_test_invalid(IrParseTest* test, Arena* output, Arena* twin_
             .length = strlen(overflows[i]),
         };
         IrFunction function;
-        const IrParseResult parsed = ir_parse_test_pair(test, source, output, twin_output, scratch, &function);
+        const IrParseResult parsed = ir_parse_test_one(test, source, output, scratch, &function);
         ir_parse_test_expect(test, parsed.error == IR_PARSE_LIMIT || parsed.error == IR_PARSE_SYNTAX, "numeric overflow was accepted or escaped lexical validation");
     }
 }
 
-static void ir_parse_test_reachable(IrParseTest* test, Arena* output, Arena* twin_output, Arena* scratch)
+static void ir_parse_test_reachable(IrParseTest* test, Arena* output, Arena* scratch)
 {
     static const IrParseTestCase cases[] = {
         {
@@ -514,24 +489,22 @@ static void ir_parse_test_reachable(IrParseTest* test, Arena* output, Arena* twi
     for (uint32_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i += 1)
     {
         const uint64_t output_mark = output->length;
-        const uint64_t twin_mark = twin_output->length;
         const String8 source = {
             .pointer = (char*)cases[i].text,
             .length = strlen(cases[i].text),
         };
         IrFunction function;
-        const IrParseResult parsed = ir_parse_test_pair(test, source, output, twin_output, scratch, &function);
+        const IrParseResult parsed = ir_parse_test_one(test, source, output, scratch, &function);
         ir_parse_test_expect(test, parsed.error == cases[i].error, "reachable-use dominance policy returned the wrong outcome");
         if (cases[i].error == IR_PARSE_VERIFY)
         {
             ir_parse_test_expect(test, parsed.check.error == IR_ERROR_DOMINANCE, "reachable non-dominating use lost its dominance diagnostic");
         }
         arena_pop_to(output, output_mark);
-        arena_pop_to(twin_output, twin_mark);
     }
 }
 
-static void ir_parse_test_guards(IrParseTest* test, Arena* output, Arena* twin_output, Arena* scratch)
+static void ir_parse_test_guards(IrParseTest* test, Arena* output, Arena* scratch)
 {
     static const char text[] = "function () -> i64 {\nb0:\n  %0 = const.i64 0x00000000000000000000000000000011\n  %1 = ret.void %0\n}\n";
     const long page_result = sysconf(_SC_PAGESIZE);
@@ -548,14 +521,12 @@ static void ir_parse_test_guards(IrParseTest* test, Arena* output, Arena* twin_o
             .length = length,
         };
         const uint64_t output_mark = output->length;
-        const uint64_t twin_mark = twin_output->length;
         IrFunction function;
-        const IrParseResult parsed = ir_parse_test_pair(test, source, output, twin_output, scratch, &function);
+        const IrParseResult parsed = ir_parse_test_one(test, source, output, scratch, &function);
         const bool complete = length >= sizeof(text) - 2;
         ir_parse_test_expect(test, complete ? parsed.error == IR_PARSE_OK : length == 0 ? parsed.error == IR_PARSE_END : parsed.error != IR_PARSE_OK && parsed.error != IR_PARSE_END,
                              "guarded truncated function was accepted or complete function rejected");
         arena_pop_to(output, output_mark);
-        arena_pop_to(twin_output, twin_mark);
     }
     for (uint64_t padding = 0; ready && padding <= 129; padding += 1)
     {
@@ -568,12 +539,10 @@ static void ir_parse_test_guards(IrParseTest* test, Arena* output, Arena* twin_o
             .length = length,
         };
         const uint64_t output_mark = output->length;
-        const uint64_t twin_mark = twin_output->length;
         IrFunction function;
-        const IrParseResult parsed = ir_parse_test_pair(test, source, output, twin_output, scratch, &function);
+        const IrParseResult parsed = ir_parse_test_one(test, source, output, scratch, &function);
         ir_parse_test_expect(test, parsed.error == IR_PARSE_OK && parsed.consumed == length, "guarded whitespace boundary changed consumed bytes");
         arena_pop_to(output, output_mark);
-        arena_pop_to(twin_output, twin_mark);
     }
     if (mapping != MAP_FAILED)
     {
@@ -634,7 +603,7 @@ static void ir_parse_test_capacity(IrParseTest* test, Arena* output, Arena* scra
     ir_parse_test_expect(test, failures[0] != 0 && failures[1] != 0 && successes[0] != 0 && successes[1] != 0, "capacity sweep did not exercise failures and successes in both arenas");
 }
 
-static void ir_parse_test_comments(IrParseTest* test, Arena* output, Arena* twin_output, Arena* scratch)
+static void ir_parse_test_comments(IrParseTest* test, Arena* output, Arena* scratch)
 {
     static const char text[] = "; original fixture\n\tfunction ( ) -> i64 { ; header\n\n b0: ; entry\n%0 = const.i64 0x11 ; value\n%1 = ret.void %0\n} ; end\n";
     static const char canonical[] = "function () -> i64 {\nb0:\n  %0 = const.i64 0x00000000000000000000000000000011\n  %1 = ret.void %0\n}\n";
@@ -647,9 +616,8 @@ static void ir_parse_test_comments(IrParseTest* test, Arena* output, Arena* twin
         .length = sizeof(canonical) - 1,
     };
     const uint64_t output_mark = output->length;
-    const uint64_t twin_mark = twin_output->length;
     IrFunction function;
-    const IrParseResult parsed = ir_parse_test_pair(test, source, output, twin_output, scratch, &function);
+    const IrParseResult parsed = ir_parse_test_one(test, source, output, scratch, &function);
     ir_parse_test_expect(test, parsed.error == IR_PARSE_OK, "comments, blank lines and bounded hexadecimal literal rejected");
     if (parsed.error == IR_PARSE_OK)
     {
@@ -658,7 +626,66 @@ static void ir_parse_test_comments(IrParseTest* test, Arena* output, Arena* twin
                              "independent constant/return column expectations differ");
     }
     arena_pop_to(output, output_mark);
-    arena_pop_to(twin_output, twin_mark);
+}
+
+// Runs of blank lines, LF and CRLF, 63 to 129 long, at every source alignment in a 64-byte block, so that runs cross
+// the newline scan's blocks; the closing brace replaced by '?' reports the line the run implies.
+static void ir_parse_test_newline_runs(IrParseTest* test, Arena* output, Arena* scratch)
+{
+    static const char head[] = "function () -> i64 {";
+    static const char body[] = "b0:\n%0 = const.i64 0x11\n%1 = ret.void %0\n}\n";
+    static const char canonical[] = "function () -> i64 {\nb0:\n  %0 = const.i64 0x00000000000000000000000000000011\n  %1 = ret.void %0\n}\n";
+    static const uint32_t runs[] = { 1, 63, 64, 65, 129 };
+    const String8 expected = {
+        .pointer = (char*)canonical,
+        .length = sizeof(canonical) - 1,
+    };
+    bool parsed_all = true;
+    bool printed_all = true;
+    bool located_all = true;
+    for (uint32_t r = 0; r < sizeof(runs) / sizeof(runs[0]); r += 1)
+    {
+        for (uint32_t crlf = 0; crlf < 2; crlf += 1)
+        {
+            for (uint32_t shift = 0; shift < 64; shift += 1)
+            {
+                const uint64_t output_mark = output->length;
+                const uint32_t newline = crlf + 1;
+                const uint64_t length = (sizeof(head) - 1) + (uint64_t)runs[r] * newline + (sizeof(body) - 1);
+                char* base = arena_push(output, length + 64, 64);
+                const uint64_t buffer_mark = output->length;
+                char* text = base + shift;
+                memcpy(text, head, sizeof(head) - 1);
+                char* cursor = text + sizeof(head) - 1;
+                for (uint32_t k = 0; k < runs[r]; k += 1)
+                {
+                    if (crlf != 0)
+                    {
+                        *cursor++ = '\r';
+                    }
+                    *cursor++ = '\n';
+                }
+                memcpy(cursor, body, sizeof(body) - 1);
+                const String8 source = {
+                    .pointer = text,
+                    .length = length,
+                };
+                IrFunction function;
+                const IrParseResult parsed = ir_parse_test_one(test, source, output, scratch, &function);
+                parsed_all = parsed_all && parsed.error == IR_PARSE_OK && parsed.consumed == length;
+                printed_all = printed_all && parsed.error == IR_PARSE_OK && ir_parse_test_print(&function, expected, scratch);
+                arena_pop_to(output, buffer_mark);
+                char* brace = text + length - 2;
+                *brace = '?';
+                const IrParseResult broken = ir_parse_test_one(test, source, output, scratch, &function);
+                located_all = located_all && broken.error != IR_PARSE_OK && broken.line == 4 + runs[r] && broken.offset == length - 2;
+                arena_pop_to(output, output_mark);
+            }
+        }
+    }
+    ir_parse_test_expect(test, parsed_all, "a run of blank lines across the scan's blocks was rejected");
+    ir_parse_test_expect(test, printed_all, "a run of blank lines across the scan's blocks changed the printed function");
+    ir_parse_test_expect(test, located_all, "an error after a run of blank lines reported another line or offset");
 }
 
 // Check every enum, including the invalid opcode and intrinsics absent from an individual fixture.
@@ -676,7 +703,7 @@ static void ir_parse_test_spelling_table(IrParseTest* test, const char* const* n
     }
 }
 
-static void ir_parse_test_locations(IrParseTest* test, Arena* output, Arena* twin_output, Arena* scratch)
+static void ir_parse_test_locations(IrParseTest* test, Arena* output, Arena* scratch)
 {
     static const char syntax[] = "function () -> void {\nb0:\n  %0 ret.void\n}\n";
     static const char verify[] = "function () -> void {\nb0:\n  %0 = copy.i64 %0\n  %1 = ret.void\n}\n";
@@ -689,10 +716,10 @@ static void ir_parse_test_locations(IrParseTest* test, Arena* output, Arena* twi
         .length = sizeof(verify) - 1,
     };
     IrFunction function;
-    const IrParseResult syntax_result = ir_parse_test_pair(test, malformed, output, twin_output, scratch, &function);
+    const IrParseResult syntax_result = ir_parse_test_one(test, malformed, output, scratch, &function);
     ir_parse_test_expect(test, syntax_result.error == IR_PARSE_SYNTAX && syntax_result.line == 3 && syntax_result.column == 6 &&
                          syntax_result.offset == (uint64_t)(strstr(syntax, "ret.void") - syntax), "syntax diagnostic lost its exact source location");
-    const IrParseResult verify_result = ir_parse_test_pair(test, invalid, output, twin_output, scratch, &function);
+    const IrParseResult verify_result = ir_parse_test_one(test, invalid, output, scratch, &function);
     ir_parse_test_expect(test, verify_result.error == IR_PARSE_VERIFY && verify_result.line == 3 && verify_result.column == 3 &&
                          verify_result.offset == (uint64_t)(strstr(verify, "%0") - verify) && verify_result.check.instruction == 0,
                          "verification diagnostic lost the offending instruction location");
@@ -714,7 +741,7 @@ static void ir_parse_test_locations(IrParseTest* test, Arena* output, Arena* twi
     for (uint32_t i = 0; i < sizeof(names) / sizeof(names[0]); i += 1)
     {
         const String8 source = { (char*)names[i].text, strlen(names[i].text) };
-        const IrParseResult result = ir_parse_test_pair(test, source, output, twin_output, scratch, &function);
+        const IrParseResult result = ir_parse_test_one(test, source, output, scratch, &function);
         const uint64_t offset = (uint64_t)(strstr(names[i].text, names[i].rejected) - names[i].text);
         ir_parse_test_expect(test, result.error == IR_PARSE_SYNTAX && result.consumed == 0 && result.offset == offset &&
                              result.line == names[i].line && result.column == names[i].column, "named token lost its syntax diagnostic");
@@ -724,8 +751,7 @@ static void ir_parse_test_locations(IrParseTest* test, Arena* output, Arena* twi
     uint8_t saved[sizeof(function)];
     memcpy(saved, &function, sizeof(saved));
     const IrParseResult aliased = ir_parse(malformed, output, output, &function);
-    const IrParseResult aliased_scalar = ir_parse_scalar(malformed, output, output, &function);
-    ir_parse_test_expect(test, aliased.error == IR_PARSE_SYNTAX && ir_parse_test_diagnostic(aliased, aliased_scalar) && output->length == output_mark &&
+    ir_parse_test_expect(test, aliased.error == IR_PARSE_SYNTAX && output->length == output_mark &&
                          memcmp(saved, &function, sizeof(saved)) == 0, "aliased output/scratch arenas were accepted or changed");
     char embedded[] = "function () -> void {\nb0:\n%0 = ret.void\n}\n";
     embedded[12] = 0;
@@ -733,11 +759,11 @@ static void ir_parse_test_locations(IrParseTest* test, Arena* output, Arena* twi
         .pointer = embedded,
         .length = sizeof(embedded) - 1,
     };
-    const IrParseResult zero_result = ir_parse_test_pair(test, zero_byte, output, twin_output, scratch, &function);
+    const IrParseResult zero_result = ir_parse_test_one(test, zero_byte, output, scratch, &function);
     ir_parse_test_expect(test, zero_result.error == IR_PARSE_SYNTAX, "embedded NUL terminated the bounded source early");
 }
 
-static void ir_parse_test_normalization(IrParseTest* test, Arena* output, Arena* twin_output, Arena* scratch)
+static void ir_parse_test_normalization(IrParseTest* test, Arena* output, Arena* scratch)
 {
     static const char canonical[] =
         "function () -> i64 {\n"
@@ -758,7 +784,6 @@ static void ir_parse_test_normalization(IrParseTest* test, Arena* output, Arena*
         .length = sizeof(canonical) - 1,
     };
     const uint64_t output_mark = output->length;
-    const uint64_t twin_mark = twin_output->length;
     const IrSizes sizes = {
         .instruction_count = 9,
         .block_count = 1,
@@ -845,7 +870,7 @@ static void ir_parse_test_normalization(IrParseTest* test, Arena* output, Arena*
         original.b[7] = 6;
         ir_parse_test_expect(test, ir_parse_test_print(&original, source, scratch), "independent shared metadata fixture did not print expected bytes");
         IrFunction parsed;
-        const IrParseResult result = ir_parse_test_pair(test, source, output, twin_output, scratch, &parsed);
+        const IrParseResult result = ir_parse_test_one(test, source, output, scratch, &parsed);
         ir_parse_test_expect(test, result.error == IR_PARSE_OK, "normalized metadata fixture was rejected");
         if (result.error == IR_PARSE_OK)
         {
@@ -855,7 +880,6 @@ static void ir_parse_test_normalization(IrParseTest* test, Arena* output, Arena*
         }
     }
     arena_pop_to(output, output_mark);
-    arena_pop_to(twin_output, twin_mark);
 }
 
 static int run_ir_parse_tests(int argc, char** argv)
@@ -874,20 +898,17 @@ static int run_ir_parse_tests(int argc, char** argv)
     {
         Arena source = arena_reserve(BUSTER_IR_PARSE_TEST_BYTES);
         Arena output = arena_reserve(BUSTER_IR_PARSE_TEST_BYTES);
-        Arena twin_output = arena_reserve(BUSTER_IR_PARSE_TEST_BYTES);
         Arena scratch = arena_reserve(BUSTER_IR_PARSE_TEST_BYTES);
-        IrParseTest test = { 0 };
-        const bool ready = source.base != 0 && output.base != 0 && twin_output.base != 0 && scratch.base != 0;
+        IrParseTest test = { .digest = UINT64_C(0xcbf29ce484222325) };
+        const bool ready = source.base != 0 && output.base != 0 && scratch.base != 0;
         ir_parse_test_expect(&test, ready, "test arenas could not be reserved");
         if (ready)
         {
             uint8_t* output_prefix = arena_push(&output, 19, 1);
-            uint8_t* twin_prefix = arena_push(&twin_output, 19, 1);
             uint8_t* scratch_prefix = arena_push(&scratch, 19, 1);
             memset(output_prefix, 0xa5, 19);
-            memset(twin_prefix, 0xa5, 19);
             memset(scratch_prefix, 0xa5, 19);
-            ir_parse_test_catalog(&test, &source, &output, &twin_output, &scratch);
+            ir_parse_test_catalog(&test, &source, &output, &scratch);
             for (uint32_t op = IR_CONST; op < IR_OP_COUNT; op += 1)
             {
                 ir_parse_test_expect(&test, test.operations[op], "canonical fixture coverage omitted an opcode");
@@ -899,24 +920,29 @@ static int run_ir_parse_tests(int argc, char** argv)
             ir_parse_test_spelling_table(&test, ir_op_names, ir_op_name_lengths, IR_OP_COUNT);
             ir_parse_test_spelling_table(&test, ir_type_names, ir_type_name_lengths, IR_TYPE_COUNT);
             ir_parse_test_spelling_table(&test, ir_intrinsic_names, ir_intrinsic_name_lengths, BUSTER_IR_INTRINSIC_COUNT);
-            ir_parse_test_invalid(&test, &output, &twin_output, &scratch);
-            ir_parse_test_reachable(&test, &output, &twin_output, &scratch);
-            ir_parse_test_comments(&test, &output, &twin_output, &scratch);
-            ir_parse_test_locations(&test, &output, &twin_output, &scratch);
-            ir_parse_test_normalization(&test, &output, &twin_output, &scratch);
-            ir_parse_test_guards(&test, &output, &twin_output, &scratch);
+            ir_parse_test_invalid(&test, &output, &scratch);
+            ir_parse_test_reachable(&test, &output, &scratch);
+            ir_parse_test_comments(&test, &output, &scratch);
+            ir_parse_test_newline_runs(&test, &output, &scratch);
+            ir_parse_test_locations(&test, &output, &scratch);
+            ir_parse_test_normalization(&test, &output, &scratch);
+            ir_parse_test_guards(&test, &output, &scratch);
             ir_parse_test_capacity(&test, &output, &scratch);
-            bool preserved = output.length == 19 && twin_output.length == 19 && scratch.length == 19;
+            bool preserved = output.length == 19 && scratch.length == 19;
             for (uint32_t byte = 0; byte < 19; byte += 1)
             {
-                preserved = preserved && output_prefix[byte] == 0xa5 && twin_prefix[byte] == 0xa5 && scratch_prefix[byte] == 0xa5;
+                preserved = preserved && output_prefix[byte] == 0xa5 && scratch_prefix[byte] == 0xa5;
             }
             ir_parse_test_expect(&test, preserved, "parser tests changed the caller's arena prefixes");
+            ir_parse_test_expect(&test, test.digest == BUSTER_IR_PARSE_TEST_DIGEST, "the parses' results have their frozen digest");
+            if (test.digest != BUSTER_IR_PARSE_TEST_DIGEST)
+            {
+                fprintf(stderr, "IR parser: digest %#018" PRIx64 "\n", test.digest);
+            }
         }
         fprintf(stderr, "IR parser: %" PRIu64 " checks, %" PRIu64 " functions, %" PRIu64 " failures\n", test.checks, test.functions, test.failures);
         result = test.failures != 0;
         arena_release(&scratch);
-        arena_release(&twin_output);
         arena_release(&output);
         arena_release(&source);
     }

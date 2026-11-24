@@ -221,6 +221,8 @@ struct CheckClock
     // Whether the process's arenas took base pages because the host was busy when it started (#672: lane.c's
     // arena_pages_busy), which the driver copies in; the report says `busy` for them.
     bool pages_busy;
+    // Whether they took medium pages there instead (#2536, arena_pages_medium); the report says `medium` for them.
+    bool pages_medium;
     // How many of the command's arenas are warm (#2850: lane.c's arena_reserve_warm), which the driver copies in; the
     // report's `warm-arenas` line.
     uint32_t warm_arenas;
@@ -497,7 +499,7 @@ static void check_clock_report(const CheckClock* stage_clock, const uint64_t* pp
     // Whether transparent huge pages were off for the process (#1109, arena_page_policy), off for its arenas alone because
     // the host was busy when it started (#672), or as the system has them.
     const bool pages_off = prctl(PR_GET_THP_DISABLE, 0, 0, 0, 0) == 1;
-    fprintf(stream, "time-process\thuge-pages\t%s\n", pages_off ? "off" : stage_clock->pages_busy ? "busy" : "system");
+    fprintf(stream, "time-process\thuge-pages\t%s\n", pages_off ? "off" : stage_clock->pages_medium ? "medium" : stage_clock->pages_busy ? "busy" : "system");
     fprintf(stream, "time-process\twarm-arenas\t%u\n", stage_clock->warm_arenas);
     fprintf(stream, "time-process\tstage-system-source\tgetrusage-rusage-self-ru-stime\n");
     fprintf(stream, "time-process\tstage-system-boundary\tresource-marks\n");

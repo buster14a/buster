@@ -103,13 +103,10 @@ static bool check_program_select_shared_make(CheckProgramSelectShared* shared, c
 // UINT32_MAX where there's no room. Only a name of __start_ or __stop_ and an identifier makes one, so the list is short
 // (#2536's step 2.2c.4, part 3: an object-sized column of every object's bound, written and read whole, cost main.c's
 // selection about two fifths of its time). The asm labels come from the tokens with attributes
-// (check_input_attributed_next, 16 at a time on the vector path), and the declared objects from object_declarations, 16
-// at a time on the vector path; the scalar path, the twin, reads each one.
+// (check_input_attributed_next, 16 at a time), and the declared objects from object_declarations, 16 at a time.
 static uint32_t check_program_select_bounds(const CheckProgram* full, uint32_t objects, bool scalar, uint32_t** bounded, String8** names, Arena* output,
                                             Arena* scratch)
 {
-    (void)scalar;
-
     const CheckInput* input = full->input;
     const Parser* parser = full->parser;
     const Preprocessor* pp = parser->preprocessor;
@@ -153,7 +150,7 @@ static uint32_t check_program_select_bounds(const CheckProgram* full, uint32_t o
             valid = keys != NULL && texts != NULL;
         }
     }
-    const uint64_t* sorted = valid && label_count > 1 ? c_bindings_sort(keys, keys + label_count, label_count, !BUSTER_SCALAR_PATH(scalar), UINT32_MAX) : keys;
+    const uint64_t* sorted = valid && label_count > 1 ? c_bindings_sort(keys, keys + label_count, label_count, UINT32_MAX) : keys;
     // The declared objects, in order, each against the labels' cursor; a bound one listed.
     uint32_t* objects_listed = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)objects + label_count) : NULL;
     String8* bounds_listed = objects_listed != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, String8, (uint64_t)objects + label_count) : NULL;
@@ -163,20 +160,9 @@ static uint32_t check_program_select_bounds(const CheckProgram* full, uint32_t o
     const uint32_t* declarations = full->object_declarations;
     for (uint32_t block = 1; valid && block < objects; block += 16)
     {
-        uint32_t present = 0;
-        if (!BUSTER_SCALAR_PATH(scalar))
-        {
-            const __mmask16 inside = (__mmask16)(objects - block >= 16 ? 0xffff : (1u << (objects - block)) - 1);
-            const __m512i declared = _mm512_maskz_loadu_epi32(inside, declarations + block);
-            present = (uint32_t)_mm512_mask_cmpneq_epu32_mask(inside, declared, _mm512_set1_epi32((int)BUSTER_CHECK_NONE));
-        }
-        else
-        {
-            for (uint32_t k = 0; k < 16 && block + k < objects; k += 1)
-            {
-                present |= declarations[block + k] != BUSTER_CHECK_NONE ? 1u << k : 0;
-            }
-        }
+        const __mmask16 inside = (__mmask16)(objects - block >= 16 ? 0xffff : (1u << (objects - block)) - 1);
+        const __m512i declared = _mm512_maskz_loadu_epi32(inside, declarations + block);
+        const uint32_t present = (uint32_t)_mm512_mask_cmpneq_epu32_mask(inside, declared, _mm512_set1_epi32((int)BUSTER_CHECK_NONE));
         for (uint32_t lanes = present; lanes != 0; lanes &= lanes - 1)
         {
             const uint32_t object = block + (uint32_t)__builtin_ctz(lanes);
@@ -365,21 +351,9 @@ __attribute__((noinline)) static bool check_program_body_eager(const CheckProgra
 // initializers), in token order into `tokens`,
 // which has room for `count` + 16: how many. The emission's attributes and the lowering's initializer pass visit these
 // rather than every token of the unit (#442). The selection reads check_data_prepare's static declarations instead
-// (#592). The scalar path is the vector path's exact twin.
-static uint32_t check_program_declaring_scalar(const uint32_t* declarations, const CheckSparseColumn* nodes, uint32_t limit, uint32_t count, uint32_t* tokens)
-{
-    uint32_t written = 0;
-    for (uint32_t token = 0; token < count; token += 1)
-    {
-        tokens[written] = token;
-        written += declarations[token] == token || (nodes != 0 && check_sparse_get(*nodes, token) < limit);
-    }
-    return written;
-}
-
-// The same, 16 tokens at a time, the loads masked to the columns and each block's tokens compressed in a register, then
+// (#592). 16 tokens at a time, the loads masked to the columns and each block's tokens compressed in a register, then
 // stored whole (vpcompressd to memory is 8 µops on Zen 5, the register form 2).
-static uint32_t check_program_declaring_vector(const uint32_t* declarations, const CheckSparseColumn* nodes, uint32_t limit, uint32_t count, uint32_t* tokens)
+static uint32_t check_program_declaring(const uint32_t* declarations, const CheckSparseColumn* nodes, uint32_t limit, uint32_t count, uint32_t* tokens)
 {
     uint32_t written = 0;
     const __m512i bound = _mm512_set1_epi32((int)limit);
@@ -399,27 +373,9 @@ static uint32_t check_program_declaring_vector(const uint32_t* declarations, con
     return written;
 }
 
-static uint32_t check_program_declaring(const uint32_t* declarations, const CheckSparseColumn* nodes, uint32_t limit, uint32_t count, uint32_t* tokens, bool scalar)
-{
-    (void)scalar;
-
-    return BUSTER_SCALAR_PATH(scalar) ? check_program_declaring_scalar(declarations, nodes, limit, count, tokens) :
-                    check_program_declaring_vector(declarations, nodes, limit, count, tokens);
-}
-
-// How many of objects 1 to `objects` - 1 are `needed` (a byte each): the selection's symbols, before it numbers them.
-static uint32_t check_program_needed_count_scalar(const uint8_t* needed, uint32_t objects)
-{
-    uint32_t count = 0;
-    for (uint32_t object = 1; object < objects; object += 1)
-    {
-        count += needed[object] != 0;
-    }
-    return count;
-}
-
-// The same, 64 objects at a time, the loads masked to the column.
-static uint32_t check_program_needed_count_vector(const uint8_t* needed, uint32_t objects)
+// How many of objects 1 to `objects` - 1 are `needed` (a byte each): the selection's symbols, before it numbers them. 64
+// objects at a time, the loads masked to the column.
+static uint32_t check_program_needed_count(const uint8_t* needed, uint32_t objects)
 {
     uint32_t count = 0;
     for (uint32_t object = 0; object < objects; object += 64)
@@ -432,22 +388,9 @@ static uint32_t check_program_needed_count_vector(const uint8_t* needed, uint32_
 }
 
 // Numbers the needed objects 1 to `objects` - 1 in object order: object_symbols[object] the object's symbol (from 1;
-// the column is zero for the others already) and symbol_objects[symbol - 1] its object.
-static void check_program_needed_number_scalar(const uint8_t* needed, uint32_t objects, SymbolId* object_symbols, uint32_t* symbol_objects)
-{
-    SymbolId symbol = 0;
-    for (uint32_t object = 1; object < objects; object += 1)
-    {
-        if (needed[object])
-        {
-            symbol_objects[symbol] = object;
-            object_symbols[object] = ++symbol;
-        }
-    }
-}
-
-// The same, finding the needed objects 64 at a time: few objects of a unit are needed, so a block of none is the rule.
-static void check_program_needed_number_vector(const uint8_t* needed, uint32_t objects, SymbolId* object_symbols, uint32_t* symbol_objects)
+// the column is zero for the others already) and symbol_objects[symbol - 1] its object. It finds them 64 at a time: few
+// objects of a unit are needed, so a block of none is the rule.
+static void check_program_needed_number(const uint8_t* needed, uint32_t objects, SymbolId* object_symbols, uint32_t* symbol_objects)
 {
     SymbolId symbol = 0;
     for (uint32_t object = 0; object < objects; object += 64)
@@ -462,27 +405,6 @@ static void check_program_needed_number_vector(const uint8_t* needed, uint32_t o
             object_symbols[at] = ++symbol;
             found &= found - 1;
         }
-    }
-}
-
-static uint32_t check_program_needed_count(const uint8_t* needed, uint32_t objects, bool scalar)
-{
-    (void)scalar;
-
-    return BUSTER_SCALAR_PATH(scalar) ? check_program_needed_count_scalar(needed, objects) : check_program_needed_count_vector(needed, objects);
-}
-
-static void check_program_needed_number(const uint8_t* needed, uint32_t objects, SymbolId* object_symbols, uint32_t* symbol_objects, bool scalar)
-{
-    (void)scalar;
-
-    if (BUSTER_SCALAR_PATH(scalar))
-    {
-        check_program_needed_number_scalar(needed, objects, object_symbols, symbol_objects);
-    }
-    else
-    {
-        check_program_needed_number_vector(needed, objects, object_symbols, symbol_objects);
     }
 }
 
@@ -1346,8 +1268,6 @@ static void check_program_wrapper_needed(const CheckProgram* full, const CheckPr
 static bool check_program_select_shared(CheckProgramSelection* result, const CheckProgram* full, const CheckDataPrepared* data, CLoweringMode mode,
                                         bool scalar, bool keep_sectioned, CheckProgramSelectShared* shared, Arena* output, Arena* scratch)
 {
-    (void)scalar;
-
     const uint64_t mark = output->length;
     const uint64_t temporary = scratch->length;
     CheckProgramSelection candidate = { .token = BUSTER_CHECK_NONE, .status = CHECK_PROGRAM_INVALID };
@@ -1498,7 +1418,7 @@ static bool check_program_select_shared(CheckProgramSelection* result, const Che
         {
             order[full->body_count + object] = ((uint64_t)data->objects[object].token << 32) | (full->body_count + object);
         }
-        order = c_bindings_sort(order, sorting, definitions, !BUSTER_SCALAR_PATH(scalar), UINT32_MAX);
+        order = c_bindings_sort(order, sorting, definitions, UINT32_MAX);
         for (uint32_t definition = 0; valid && definition < definitions; definition += 1)
         {
             const uint32_t raw = (uint32_t)order[definition];
@@ -1671,7 +1591,7 @@ static bool check_program_select_shared(CheckProgramSelection* result, const Che
                                       .reference_source = sources, .reference_target = targets, .reference_kind = kinds };
         candidate.status = valid ? CHECK_PROGRAM_RESOURCE : CHECK_PROGRAM_INVALID;
         valid = valid && c_lowering_prepare(scratch, graph, &plan) == C_LOWERING_OK;
-        valid = valid && (BUSTER_SCALAR_PATH(scalar) ? c_lowering_scalar(&plan, mode) : c_lowering_vector(&plan, mode)) == C_LOWERING_OK;
+        valid = valid && c_lowering_vector(&plan, mode) == C_LOWERING_OK;
         // An input section a __start_ or __stop_ reference bounds needs all of its members (#1122): the reference
         // names the section, not a member, so no edge reaches the members nothing else does, as GNU ld's and lld's
         // still place them. After each reachability pass the needed objects' bound names root their sections'
@@ -1740,7 +1660,7 @@ static bool check_program_select_shared(CheckProgramSelection* result, const Che
                     grow = true;
                 }
             }
-            valid = !grow || (BUSTER_SCALAR_PATH(scalar) ? c_lowering_scalar(&plan, mode) : c_lowering_vector(&plan, mode)) == C_LOWERING_OK;
+            valid = !grow || c_lowering_vector(&plan, mode) == C_LOWERING_OK;
         }
         if (valid)
         {
@@ -1956,7 +1876,7 @@ static bool check_program_select_shared(CheckProgramSelection* result, const Che
             candidate.program.alias_states[k] |= referenced ? BUSTER_CHECK_PROGRAM_ALIAS_REFERENCED : 0;
             needed[alias->object] |= alias->kind != CHECK_PROGRAM_WEAKREF;
         }
-        valid = valid && check_program_alias_number(&candidate.program, needed, candidate.program.alias_states, BUSTER_SCALAR_PATH(scalar), output);
+        valid = valid && check_program_alias_number(&candidate.program, needed, candidate.program.alias_states, output);
         valid = valid && (!symbol_pragmas || check_program_symbol_pragmas(&candidate.program, &candidate.data, output, scratch));
     }
     // Late weak declarations' bindings (#1849), of the selection that stands.
@@ -2001,8 +1921,6 @@ static bool check_program_select_mode(CheckProgramSelection* result, const Check
 static bool check_program_select(CheckProgramSelection* result, const CheckProgram* full, const CheckDataPrepared* data, bool scalar,
                                  Arena* output, Arena* scratch)
 {
-    (void)scalar;
-
     return check_program_select_mode(result, full, data, C_LOWERING_REACHABLE, BUSTER_SCALAR_PATH(scalar), false, output, scratch);
 }
 

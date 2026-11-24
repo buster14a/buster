@@ -1862,6 +1862,7 @@ struct Figures
     double ghz;
     int huge_pages_system;
     int huge_pages_busy;
+    int huge_pages_medium;
     int huge_pages_off;
     int strays;
     double group_ms[BUSTER_ALLCORE_MAX_GROUPS];
@@ -1971,6 +1972,7 @@ static void allcore_figures_counted(const Options* options, int label, Groups* g
                     const Report report = allcore_report_read(report_path);
                     figures->huge_pages_system += strcmp(report.huge_pages, "system") == 0;
                     figures->huge_pages_busy += strcmp(report.huge_pages, "busy") == 0;
+                    figures->huge_pages_medium += strcmp(report.huge_pages, "medium") == 0;
                     figures->huge_pages_off += strcmp(report.huge_pages, "off") == 0;
                     if (report.tsc_mhz > 0.0)
                     {
@@ -2130,9 +2132,9 @@ static int allcore_table(const Options* options)
         for (int label = 0; label < 2; label += 1)
         {
             const Figures* f = &figures[label];
-            fprintf(out, "%s\t%d\t%d\t%zu\t%zu\t%zu\t%.2f\t%.3f\t%.0f\t%.0f\t%.0f\t%.0f\t%.0f\t%.3f\tsystem=%d busy=%d off=%d\t%d\t%d\t%d\t%d\t%d\n", allcore_labels[label], f->workers, f->rounds, f->runs,
+            fprintf(out, "%s\t%d\t%d\t%zu\t%zu\t%zu\t%.2f\t%.3f\t%.0f\t%.0f\t%.0f\t%.0f\t%.0f\t%.3f\tsystem=%d busy=%d medium=%d off=%d\t%d\t%d\t%d\t%d\t%d\n", allcore_labels[label], f->workers, f->rounds, f->runs,
                     f->used, f->failed, f->mb_per_s, f->wall_ms, f->user_cycles, f->kernel_cycles, f->user_instructions, f->peak_kb, f->faults, f->ghz, f->huge_pages_system,
-                    f->huge_pages_busy, f->huge_pages_off, f->strays, f->sampled_rounds, f->sampled_used, f->sampled_without_anchor, f->sampled_strays);
+                    f->huge_pages_busy, f->huge_pages_medium, f->huge_pages_off, f->strays, f->sampled_rounds, f->sampled_used, f->sampled_without_anchor, f->sampled_strays);
         }
         if (pass == 1)
         {

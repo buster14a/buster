@@ -242,7 +242,6 @@ static void foreign_bounds_test_case(ForeignTestTally* tally, const char* direct
                         .path = { .pointer = executable, .length = strlen(executable) },
                         .entry = linked ? foreign_link_test_symbol(&foreign, &converted, "_start") : 0,
                         .dynamic = &converted.dynamic,
-                        .exact = path == 0,
                     },
                 };
                 // Every named symbol, for the bounds' checks.
@@ -379,8 +378,7 @@ static void foreign_bounds_test_gc(ForeignTestTally* tally, const char* director
             const String8 destination = { .pointer = executable, .length = strlen(executable) };
             const SymbolId entry = linked ? foreign_link_test_symbol(&foreign, &output, "_start") : 0;
             ExecutableResult written = { 0 };
-            const bool published = entry != 0 && (path == 0 ? executable_test_write_exact(&output.link, entry, destination, foreign_test_lanes[l], &written) :
-                                                             executable_test_write(&output.link, entry, destination, foreign_test_lanes[l], &written, 0, 0));
+            const bool published = entry != 0 && executable_test_write(&output.link, entry, destination, foreign_test_lanes[l], &written, 0, 0);
             foreign_test_expect(tally, published && foreign_copy_test_run(directory, executable, FOREIGN_COPY_TEST_DATA, arena), "the collected fixture runs its hook", detail);
             const String8 bytes = published ? foreign_test_read(arena, executable) : (String8){ 0 };
             if (path == 0 && l == 0)

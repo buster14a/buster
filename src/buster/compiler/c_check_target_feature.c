@@ -2026,8 +2026,8 @@ static void check_target_feature_emitted_fill(CheckX86DiagnosticWalk* walk, Chec
     }
     if (index->ready)
     {
-        index->tokens = c_bindings_sort(tokens, index->buffers[1], token_count, true, token_varying);
-        index->joins = c_bindings_sort(joins, index->buffers[3], join_count, true, join_varying);
+        index->tokens = c_bindings_sort(tokens, index->buffers[1], token_count, token_varying);
+        index->joins = c_bindings_sort(joins, index->buffers[3], join_count, join_varying);
         uint32_t reach = 0;
         for (uint32_t j = 0; j < join_count; j += 1)
         {
@@ -2353,7 +2353,7 @@ static bool check_target_feature_calls(CheckProgram* program, CheckTargetFeature
 // `output`, as clang reports them: the first function's to have any of those it emits where the unit defines them
 // (CheckProgram.body_eager, by the declarations up to each definition), or else every deferred one's. Returns false
 // without room in either arena.
-static __attribute__((unused)) bool check_program_target_features(CheckProgram* program, const PPOptions* pp, const PredefinesOptions* options, bool scalar,
+static __attribute__((unused)) bool check_program_target_features(CheckProgram* program, const PPOptions* pp, const PredefinesOptions* options,
                                                                   Arena* output, Arena* scratch, CheckTargetFeatureError** errors, uint32_t* count)
 {
     *errors = 0;
@@ -2620,7 +2620,7 @@ static __attribute__((unused)) bool check_program_target_features(CheckProgram* 
                             keys[c] = ((uint64_t)end << 32) | c;
                             varying |= end ^ (uint32_t)(keys[0] >> 32);
                         }
-                        uint64_t* by_end = c_bindings_sort(keys, temporary, item_count, !scalar, varying);
+                        uint64_t* by_end = c_bindings_sort(keys, temporary, item_count, varying);
                         uint64_t* other = by_end == keys ? temporary : keys;
                         varying = 0;
                         for (uint32_t j = 0; j < item_count; j += 1)
@@ -2629,7 +2629,7 @@ static __attribute__((unused)) bool check_program_target_features(CheckProgram* 
                             other[j] = ((uint64_t)statement << 32) | (uint32_t)by_end[j];
                             varying |= statement ^ (uint32_t)(calls[(uint32_t)by_end[0]] >> 32);
                         }
-                        sorted = c_bindings_sort(other, by_end, item_count, !scalar, varying);
+                        sorted = c_bindings_sort(other, by_end, item_count, varying);
                         for (uint32_t j = 0; j < item_count; j += 1)
                         {
                             const uint32_t place = (uint32_t)sorted[j];

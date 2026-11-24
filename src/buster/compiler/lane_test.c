@@ -519,6 +519,169 @@ static bool lane_test_resident(const uint8_t* address)
     return mincore((void*)address, BUSTER_ARENA_PAGE_BYTES, &vector) == 0 && (vector & 1) != 0;
 }
 
+// A busy host's arena with medium pages (arena_pages_medium, #2536): advised as an idle host's, its huge pages `hg`, but
+// the first page of each 2 MB of them that a commit has reached, a mapping of its own advised base pages (`nh`), so that
+// no mapping covers a whole 2 MB there; none past its commits; and an arena of tables left base pages, as a busy
+// host's. And the knob's readings arena_medium_offered takes.
+static void lane_test_medium_pages(LaneTestTally* tally)
+{
+    // A knob's text, how many of its bytes were read, the word asked for, and whether it is the one in brackets.
+    static const struct
+    {
+        const char* text;
+        uint64_t length;
+        const char* word;
+        bool selects;
+    } knobs[] = {
+        { "always inherit [madvise] never\n", 31, "madvise", true }, { "always inherit [madvise] never\n", 31, "always", false },
+        { "[always] inherit madvise never\n", 31, "always", true },  { "always [inherit] madvise never\n", 31, "inherit", true },
+        { "always inherit madvise [never]\n", 31, "madvise", false }, { "always inherit madvise [never]\n", 31, "never", true },
+        { "", 0, "always", false },                                   { "[madvis", 7, "madvise", false },
+        { "[madvise", 8, "madvise", false },                          { "x[madvise]", 10, "madvise", true },
+        { "[madvise]", 8, "madvise", false },                         { "[madvise]", 9, "madvise", true },
+        { " madvise] [never]", 17, "madvise", false },                { "[madvise never]", 15, "madvise", false },
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(knobs); i += 1)
+    {
+        lane_test_expect(tally, arena_knob_selects(knobs[i].text, knobs[i].length, knobs[i].word) == knobs[i].selects, "a huge page knob's text was misread");
+    }
+    const bool was_busy = arena_pages_busy;
+    const bool was_medium = arena_pages_medium;
+    const uint32_t were_split = arena_medium_splits;
+    // The policy's choice: whether the host is busy, whether it gives medium pages, and the two flags.
+    static const bool choices[][4] = {
+        { false, false, false, false },
+        { false, true, false, false },
+        { true, false, true, false },
+        { true, true, false, true },
+    };
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(choices); i += 1)
+    {
+        arena_pages_choose(choices[i][0], choices[i][1]);
+        lane_test_expect(tally, arena_pages_busy == choices[i][2] && arena_pages_medium == choices[i][3], "a host's page policy was chosen wrong");
+    }
+    arena_pages_busy = false;
+    arena_pages_medium = true;
+    arena_medium_splits = 0;
+    bool found = false;
+    uint64_t first = 0;
+    uint64_t last = 0;
+    Arena medium = arena_reserve(BUSTER_LANE_TEST_LARGE_ARENA);
+    // Past its base pages, into the fourth 2 MB of its huge pages: whatever its commits took beyond, three boundaries are
+    // inside them.
+    const uint64_t pushed = medium.small + 3 * BUSTER_ARENA_HUGE_PAGE_BYTES + 1;
+    const bool reached = medium.base != 0 && arena_push(&medium, pushed, 1) == medium.base;
+    // (Read before the checks below, whose scratch arena commits too.)
+    const uint32_t split_first = arena_medium_splits;
+    bool split = reached && medium.huge;
+    for (uint32_t block = 0; split && block < 3; block += 1)
+    {
+        const uintptr_t boundary = (uintptr_t)medium.base + medium.small + block * BUSTER_ARENA_HUGE_PAGE_BYTES;
+        split = (boundary & (BUSTER_ARENA_HUGE_PAGE_BYTES - 1)) == 0 && lane_test_vm_flag_in(boundary, "nh", &found, &first, &last) && found && first == boundary &&
+                last == boundary + BUSTER_ARENA_PAGE_BYTES && lane_test_vm_flag(boundary + BUSTER_ARENA_PAGE_BYTES, "hg", &found) && found &&
+                lane_test_vm_flag(boundary + BUSTER_ARENA_HUGE_PAGE_BYTES - 1, "hg", &found) && found;
+    }
+    lane_test_expect(tally, split, "an arena with medium pages didn't keep the first page of each 2 MB of its huge pages a base page");
+    // Past what it committed, the reservation is one mapping, advised huge pages and inaccessible.
+    const uintptr_t committed_end = medium.base != 0 ? (uintptr_t)medium.base - medium.mapping_offset + medium.committed : 0;
+    const bool rest = reached && lane_test_vm_flag_in(committed_end, "hg", &found, &first, &last) && found && first == committed_end &&
+                      last > committed_end + 8 * BUSTER_ARENA_HUGE_PAGE_BYTES;
+    lane_test_expect(tally, rest, "an arena with medium pages split its reservation past its commits");
+    // One of the budget for each 2 MB its commits reached, and for no 2 MB twice as they go on.
+    const uint64_t huge_begin = medium.base != 0 ? (uintptr_t)medium.base + medium.small : 0;
+    const bool counted = reached && split_first == (committed_end - huge_begin) / BUSTER_ARENA_HUGE_PAGE_BYTES;
+    const uint32_t split_before = arena_medium_splits;
+    const bool more = counted && arena_push(&medium, medium.committed, 1) != 0;
+    const uint32_t split_more = arena_medium_splits - split_before;
+    const uintptr_t more_end = medium.base != 0 ? (uintptr_t)medium.base - medium.mapping_offset + medium.committed : 0;
+    const bool recounted = more && more_end > committed_end && split_more == (more_end - committed_end) / BUSTER_ARENA_HUGE_PAGE_BYTES &&
+                           lane_test_vm_flag_in(more_end - BUSTER_ARENA_HUGE_PAGE_BYTES, "nh", &found, &first, &last) && found &&
+                           first == more_end - BUSTER_ARENA_HUGE_PAGE_BYTES && last == first + BUSTER_ARENA_PAGE_BYTES;
+    lane_test_expect(tally, counted && recounted, "an arena with medium pages didn't count each 2 MB of its commits once");
+    arena_release(&medium);
+    // The split itself, from inside a 2 MB (a commit the kernel refused past what was needed ends there): the 2 MB that
+    // start in its bytes alone, not the one it starts in.
+    uint8_t* const raw = mmap(0, 5 * BUSTER_ARENA_HUGE_PAGE_BYTES, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (raw != MAP_FAILED)
+    {
+        uint8_t* const aligned = (uint8_t*)(((uintptr_t)raw + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) & ~(uintptr_t)(BUSTER_ARENA_HUGE_PAGE_BYTES - 1));
+        arena_medium_splits = 0;
+        arena_medium_split(aligned, 3 * BUSTER_ARENA_PAGE_BYTES, 3 * BUSTER_ARENA_HUGE_PAGE_BYTES + 5);
+        const uint32_t inside = arena_medium_splits;
+        const bool started = !lane_test_vm_flag((uintptr_t)aligned, "nh", &found) && found;
+        bool later = true;
+        for (uint32_t block = 1; later && block < 4; block += 1)
+        {
+            later = lane_test_vm_flag((uintptr_t)aligned + block * BUSTER_ARENA_HUGE_PAGE_BYTES, "nh", &found) && found;
+        }
+        lane_test_expect(tally, inside == 3 && started && later, "a split from inside a 2 MB took the wrong pages");
+        munmap(raw, 5 * BUSTER_ARENA_HUGE_PAGE_BYTES);
+    }
+    lane_test_expect(tally, raw != MAP_FAILED, "the split's mapping couldn't be made");
+    // An arena with 8 MB of base pages keeps them whole: its commits count the 2 MB past them alone.
+    const uint64_t wide_small = 4 * BUSTER_ARENA_HUGE_PAGE_BYTES;
+    arena_medium_splits = 0;
+    Arena wide = arena_reserve_small(BUSTER_LANE_TEST_LARGE_ARENA, wide_small);
+    const bool wide_pushed = wide.base != 0 && arena_push(&wide, BUSTER_ARENA_HUGE_PAGE_BYTES, 1) == wide.base && arena_push(&wide, wide_small + 1, 1) != 0;
+    const uint32_t wide_split = arena_medium_splits;
+    const uint64_t wide_past = wide.base != 0 ? wide.committed - wide.mapping_offset - wide.small : 0;
+    lane_test_expect(tally, wide_pushed && wide_past != 0 && wide_split == wide_past / BUSTER_ARENA_HUGE_PAGE_BYTES, "an arena with medium pages split its base pages");
+    arena_release(&wide);
+#if BUSTER_ARENA_GROWTH
+    // An arena that grows its mapping in place (arena_extend) keeps each stretch it maps out of 2 MB pages as well.
+    // In steps, most of which start inside a 2 MB an earlier one split; and one with 8 MB of base pages, as above.
+    arena_medium_splits = 0;
+    Arena growing = arena_reserve_growing(1ull << 30, 1ull << 30, BUSTER_ARENA_SMALL_BYTES);
+    bool grown = growing.base != 0 && arena_push(&growing, growing.small + 1, 1) == growing.base;
+    for (uint32_t step = 0; grown && step < 12; step += 1)
+    {
+        grown = arena_push(&growing, BUSTER_ARENA_HUGE_PAGE_BYTES / 4, 1) != 0;
+    }
+    const uint32_t grown_count = arena_medium_splits;
+    const uint64_t grown_past = growing.base != 0 ? growing.committed - growing.mapping_offset - growing.small : 0;
+    grown = grown && growing.huge && grown_past >= 3 * BUSTER_ARENA_HUGE_PAGE_BYTES + 1 &&
+            grown_count == (grown_past + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) / BUSTER_ARENA_HUGE_PAGE_BYTES;
+    arena_medium_splits = 0;
+    Arena growing_wide = arena_reserve_growing(1ull << 30, 1ull << 30, wide_small);
+    const bool wide_grown = growing_wide.base != 0 && arena_push(&growing_wide, BUSTER_ARENA_HUGE_PAGE_BYTES, 1) == growing_wide.base &&
+                            arena_push(&growing_wide, wide_small + 1, 1) != 0;
+    const uint32_t wide_grown_count = arena_medium_splits;
+    const uint64_t wide_grown_past = growing_wide.base != 0 ? growing_wide.committed - growing_wide.mapping_offset - growing_wide.small : 0;
+    lane_test_expect(tally, growing_wide.base == 0 || (wide_grown && wide_grown_past != 0 &&
+                                                       wide_grown_count == (wide_grown_past + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) / BUSTER_ARENA_HUGE_PAGE_BYTES),
+                     "a growing arena with medium pages split its base pages");
+    arena_release(&growing_wide);
+    bool grown_split = grown;
+    for (uint32_t block = 0; grown_split && block < 3; block += 1)
+    {
+        const uintptr_t boundary = (uintptr_t)growing.base + growing.small + block * BUSTER_ARENA_HUGE_PAGE_BYTES;
+        grown_split = (boundary & (BUSTER_ARENA_HUGE_PAGE_BYTES - 1)) == 0 && lane_test_vm_flag_in(boundary, "nh", &found, &first, &last) && found && first == boundary &&
+                      last == boundary + BUSTER_ARENA_PAGE_BYTES && lane_test_vm_flag(boundary + BUSTER_ARENA_PAGE_BYTES, "hg", &found) && found;
+    }
+    lane_test_expect(tally, growing.base == 0 || grown_split, "a growing arena with medium pages didn't keep the first page of each 2 MB a base page");
+    arena_release(&growing);
+#endif
+    // With one left of the process's budget of them, the first 2 MB alone is kept out of huge pages.
+    arena_medium_splits = BUSTER_ARENA_MEDIUM_SPLITS - 1;
+    Arena budgeted = arena_reserve(BUSTER_LANE_TEST_LARGE_ARENA);
+    const uintptr_t budgeted_huge = (uintptr_t)budgeted.base + budgeted.small;
+    const bool spent = budgeted.base != 0 && arena_push(&budgeted, pushed, 1) == budgeted.base && lane_test_vm_flag(budgeted_huge, "nh", &found) && found &&
+                       lane_test_vm_flag_in(budgeted_huge + BUSTER_ARENA_HUGE_PAGE_BYTES, "hg", &found, &first, &last) && found &&
+                       first == budgeted_huge + BUSTER_ARENA_PAGE_BYTES && last >= budgeted_huge + 3 * BUSTER_ARENA_HUGE_PAGE_BYTES;
+    lane_test_expect(tally, spent, "an arena with medium pages didn't stop at the process's budget of them");
+    arena_release(&budgeted);
+    ArenaTable tables[] = {
+        { .bytes = 3 * BUSTER_ARENA_HUGE_PAGE_BYTES, .small = BUSTER_ARENA_HUGE_PAGE_BYTES },
+    };
+    Arena table_arena = arena_reserve_tables(tables, 1);
+    const bool base_pages = table_arena.base != 0 && !lane_test_vm_flag((uintptr_t)tables[0].base + 2 * BUSTER_ARENA_HUGE_PAGE_BYTES, "hg", &found) && found;
+    lane_test_expect(tally, base_pages, "an arena of tables took huge pages' advice with medium pages");
+    arena_release(&table_arena);
+    arena_pages_busy = was_busy;
+    arena_pages_medium = was_medium;
+    arena_medium_splits = were_split;
+}
+
 // The reservations that keep 2 MB or more in base pages (#1444), mapped VM_NOHUGEPAGE (arena_stack_base_pages:
 // MAP_STACK) where the kernel maps MAP_STACK so, and advised MADV_NOHUGEPAGE by a call of their own elsewhere: the same
 // pages either way. An arena with 8 MB of base pages, before its first commit and as it commits past them; a busy host's
@@ -1343,7 +1506,14 @@ static void lane_test_arena_warm(LaneTestTally* tally)
 static bool lane_test_arenas(void)
 {
     LaneTestTally tally = { 0 };
+    // The checks choose the arenas' page policy themselves, from an idle host's: the process may have started on a busy
+    // one, with either of its policies (arena_pages_busy, arena_pages_medium).
+    const bool started_busy = arena_pages_busy;
+    const bool started_medium = arena_pages_medium;
+    arena_pages_busy = false;
+    arena_pages_medium = false;
     lane_test_stack_base_pages(&tally);
+    lane_test_medium_pages(&tally);
     lane_test_arena_regions(&tally);
     lane_test_arena_pool_writable(&tally);
     lane_test_arena_clear(&tally);
@@ -2102,6 +2272,8 @@ static bool lane_test_arenas(void)
     lane_test_expect(&tally, probe_advised && end_advised && bss_probe[0] == 0, "the executable's .bss may take huge pages");
 
     printf("arenas: %lu checks, %lu failed\n", (unsigned long)tally.checks, (unsigned long)tally.failures);
+    arena_pages_busy = started_busy;
+    arena_pages_medium = started_medium;
     return tally.failures == 0;
 }
 

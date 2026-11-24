@@ -9,15 +9,14 @@
 //   build/compiler test-ir-source --passes [preprocessor options] file...
 //
 // For each function, its lowered form L (both lowerings must agree, as test-ir-source requires) and L promoted, P:
-// - SROA on L with Tier 1's options (#1282's simd and flagged), vector and scalar: the same function, or the same
-//   refusal; a split function must promote.
+// - SROA on L with Tier 1's options (#1282's simd and flagged), one path since #2924: a split function must promote.
 // - #866's solver on L: the acyclic numbering against its complete-refinement oracle (IrGvnOptions.complete), which must
 //   give the same function, and against the scalar available-expression twin, which must accept the function and remove
 //   no more instructions than the partition (it doesn't see cyclic congruences): the semantic comparison, as the solver's
 //   guide has it. The numbering's result must promote.
 // - The optimizer on P with SCCP alone, dead-code removal alone, CFG cleanup alone and with its merges, the three, the
 //   three with the merges and Tier 1's layout and identities (c_check_tier1.c's set), value numbering with memory alone
-//   (#2718) and Tier 1's set with it, forced vector and forced scalar: the same function and the same forwarded loads.
+//   (#2718) and Tier 1's set with it (one path since #2924): the optimizer verifies its result.
 // - LICM on P (#2924: its twin is gone): its result, given to LICM again, moves nothing, since each loop's one walk
 //   reaches the fixed point of its readiness (#2979).
 // - #2755's unroller on P optimized with Tier 1's set and its truth values simplified: an unrolled function must verify
@@ -165,17 +164,11 @@ static void ir_source_passes_function(IrSourcePassTotals* totals, const char* fi
         options.simd = true;
         options.flagged = true;
         IrSroaResult vector = { 0 };
-        IrSroaResult scalar = { 0 };
         const IrCheck vector_check = ir_optimize_sroa(lowered, output, scratch, options, &vector);
-        options.scalar = true;
-        const IrCheck scalar_check = ir_optimize_sroa(lowered, twin, scratch, options, &scalar);
-        const bool succeeded = vector_check.error == IR_OK && scalar_check.error == IR_OK;
-        const bool same = succeeded && vector.split_slots == scalar.split_slots && vector.fields == scalar.fields && ir_source_passes_equal(&vector.function, &scalar.function);
         IrFunction split = { 0 };
-        const bool promotes = !same || ssa_ir_promote(&vector.function, promotion, scratch, &split).error == IR_OK;
-        ir_source_passes_record(totals, IR_SOURCE_PASS_SROA, file, name, vector_check, scalar_check, same, promotes, vector.split_slots != 0, vector.split_slots);
+        const bool promotes = vector_check.error != IR_OK || ssa_ir_promote(&vector.function, promotion, scratch, &split).error == IR_OK;
+        ir_source_passes_record(totals, IR_SOURCE_PASS_SROA, file, name, vector_check, vector_check, true, promotes, vector.split_slots != 0, vector.split_slots);
         arena_pop_to(output, output_mark);
-        arena_pop_to(twin, twin_mark);
         arena_pop_to(promotion, promotion_mark);
     }
     // #866's solver, before promotion: the acyclic numbering, its exact oracle and the scalar semantic twin.
@@ -209,24 +202,15 @@ static void ir_source_passes_function(IrSourcePassTotals* totals, const char* fi
     {
         IrOptimizeOptions options = ir_optimize_options();
         options.passes = ir_source_pass_optimizer[row];
-        options.path = BUSTER_IR_OPTIMIZE_VECTOR;
         IrOptimizeResult vector = { 0 };
-        IrOptimizeResult scalar = { 0 };
         const IrCheck vector_check = ir_optimize(promoted, output, scratch, options, &vector);
-        options.path = BUSTER_IR_OPTIMIZE_SCALAR;
-        const IrCheck scalar_check = ir_optimize(promoted, twin, scratch, options, &scalar);
-        const bool same = vector_check.error == IR_OK && scalar_check.error == IR_OK && vector.folded == scalar.folded &&
-                          vector.removed_instructions == scalar.removed_instructions && vector.removed_blocks == scalar.removed_blocks &&
-                          vector.merged_blocks == scalar.merged_blocks && vector.forwarded_loads == scalar.forwarded_loads &&
-                          ir_source_passes_equal(&vector.function, &scalar.function);
         const bool changed = vector.folded != 0 || vector.removed_instructions != 0 || vector.removed_blocks != 0 || vector.forwarded_loads != 0;
         // The merges' row counts its merged blocks, value numbering with memory's its forwarded loads; the others their
         // removed instructions.
         const IrSourcePass pass = (IrSourcePass)(IR_SOURCE_PASS_SCCP + row);
         const uint64_t effect = pass == IR_SOURCE_PASS_MERGE ? vector.merged_blocks : pass >= IR_SOURCE_PASS_MEMORY ? vector.forwarded_loads : vector.removed_instructions;
-        ir_source_passes_record(totals, (IrSourcePass)(IR_SOURCE_PASS_SCCP + row), file, name, vector_check, scalar_check, same, true, changed, effect);
+        ir_source_passes_record(totals, (IrSourcePass)(IR_SOURCE_PASS_SCCP + row), file, name, vector_check, vector_check, true, true, changed, effect);
         arena_pop_to(output, output_mark);
-        arena_pop_to(twin, twin_mark);
     }
     // LICM on the promoted function. Its result, given to LICM again, moves nothing: each loop's one walk reached the
     // fixed point of its readiness (#2979).
@@ -662,7 +646,6 @@ static Tier0BenchmarkReading ir_source_passes_run(IrSourcePass pass, bool scalar
             IrSroaOptions options = ir_sroa_options();
             options.simd = true;
             options.flagged = true;
-            options.scalar = scalar;
             IrSroaResult result = { 0 };
             check = ir_optimize_sroa(&corpus->lowered[f], output, scratch, options, &result);
         }
@@ -732,7 +715,6 @@ static Tier0BenchmarkReading ir_source_passes_run(IrSourcePass pass, bool scalar
         {
             IrOptimizeOptions options = ir_optimize_options();
             options.passes = ir_source_pass_optimizer[pass - IR_SOURCE_PASS_SCCP];
-            options.path = scalar ? BUSTER_IR_OPTIMIZE_SCALAR : BUSTER_IR_OPTIMIZE_VECTOR;
             IrOptimizeResult result = { 0 };
             check = ir_optimize(&corpus->promoted[f], output, scratch, options, &result);
         }
@@ -941,12 +923,9 @@ static int run_ir_source_passes_benchmark(int count, char** arguments)
             }
             double values[2][3][BUSTER_TIER0_BENCHMARK_PASSES];
             memset(values, 0, sizeof(values));
-            // The inliner, the unroller, the loop vectorizer, LICM and value numbering with memory alone have one path
-            // (#2924): timed once; #2719's pressure policies are timed once too, as Tier 1 runs them.
-            const uint32_t versions = pass == IR_SOURCE_PASS_VECTORIZE || pass == IR_SOURCE_PASS_UNROLL || pass == IR_SOURCE_PASS_STORE_MOTION || pass == IR_SOURCE_PASS_INLINE ||
-                                              pass == IR_SOURCE_PASS_LICM || pass == IR_SOURCE_PASS_MEMORY || pass == IR_SOURCE_PASS_HOIST || pass == IR_SOURCE_PASS_NUMBERING ?
-                                          1 :
-                                          2;
+            // GVN alone keeps its scalar twin (#2924, #3433), timed beside its vector path; every other pass has one path,
+            // timed once, and #2719's pressure policies are timed once too, as Tier 1 runs them.
+            const uint32_t versions = pass == IR_SOURCE_PASS_GVN ? 2 : 1;
             for (uint32_t version = 0; version < versions; version += 1)
             {
                 failed += ir_source_passes_run((IrSourcePass)pass, version != 0, &corpus, &output, &scratch, counters).failures;

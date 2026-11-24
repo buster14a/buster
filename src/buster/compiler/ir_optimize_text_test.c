@@ -2,7 +2,7 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // #175's first #139 pass tests in the IR's text form. Each fixture is a hand-written before/after pair under
-// tests/ir/optimize: the before text is parsed by both parser paths, the pass runs by both optimizer twins, the
+// tests/ir/optimize: the before text is parsed, the pass runs by both optimizer twins, the
 // vector result must be the after text byte for byte, the printed result is parsed again, and both sides execute
 // with the same returns, statuses and stores (SROA, whose slot renumbering moves a store to another address in the
 // executor's trace, compares the returns and statuses alone). `test-ir-optimize --print-text` prints the pairs'
@@ -115,23 +115,18 @@ static bool ir_optimize_text_read(const char* path, Arena* source, String8* text
     return ok;
 }
 
-// One fixture file holds exactly one function and then whitespace only. Both parser paths must accept it, consume
-// the same function and agree column for column. On failure both arenas are as they were, so the caller can report
-// and continue.
-static bool ir_optimize_text_parse(String8 text, Arena* output, Arena* twin, Arena* scratch, IrFunction* function, IrFunction* twin_function)
+// One fixture file holds exactly one function and then whitespace only. On failure the arena is as it was, so the
+// caller can report and continue.
+static bool ir_optimize_text_parse(String8 text, Arena* output, Arena* scratch, IrFunction* function)
 {
     const uint64_t output_mark = output->length;
-    const uint64_t twin_mark = twin->length;
-    const IrParseResult vector = ir_parse(text, output, scratch, function);
-    const IrParseResult scalar = ir_parse_scalar(text, twin, scratch, twin_function);
-    bool ok = vector.error == IR_PARSE_OK && scalar.error == IR_PARSE_OK && vector.consumed == scalar.consumed && vector.consumed != 0 && vector.consumed <= text.length &&
-              ir_optimize_test_equal(function, twin_function);
+    const IrParseResult parsed = ir_parse(text, output, scratch, function);
+    bool ok = parsed.error == IR_PARSE_OK && parsed.consumed != 0 && parsed.consumed <= text.length;
     if (ok)
     {
-        // Both paths ended at the same byte, so the vector path's read of the rest is the scalar path's too.
         const String8 rest = {
-            .pointer = text.pointer + vector.consumed,
-            .length = text.length - vector.consumed,
+            .pointer = text.pointer + parsed.consumed,
+            .length = text.length - parsed.consumed,
         };
         const uint64_t rest_mark = output->length;
         IrFunction extra = { 0 };
@@ -142,7 +137,6 @@ static bool ir_optimize_text_parse(String8 text, Arena* output, Arena* twin, Are
     if (!ok)
     {
         arena_pop_to(output, output_mark);
-        arena_pop_to(twin, twin_mark);
     }
     return ok;
 }
@@ -188,7 +182,6 @@ static IrCheck ir_optimize_text_transform(const IrOptimizeTextFixture* fixture, 
     else if (fixture->pass == IR_OPTIMIZE_TEXT_SROA || fixture->pass == IR_OPTIMIZE_TEXT_SROA_WIDEN)
     {
         IrSroaOptions options = ir_sroa_options();
-        options.scalar = scalar;
         options.flagged = fixture->pass == IR_OPTIMIZE_TEXT_SROA_WIDEN;
         options.widen = fixture->pass == IR_OPTIMIZE_TEXT_SROA_WIDEN;
         IrSroaResult pass = { 0 };
@@ -206,7 +199,6 @@ static IrCheck ir_optimize_text_transform(const IrOptimizeTextFixture* fixture, 
                          fixture->pass == IR_OPTIMIZE_TEXT_MEMORY ? BUSTER_IR_OPTIMIZE_MEMORY | BUSTER_IR_OPTIMIZE_DCE :
                          fixture->pass == IR_OPTIMIZE_TEXT_IDENTITIES ? BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_IDENTITY | BUSTER_IR_OPTIMIZE_DCE :
                                                                  BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_DCE | BUSTER_IR_OPTIMIZE_CFG;
-        options.path = scalar ? BUSTER_IR_OPTIMIZE_SCALAR : BUSTER_IR_OPTIMIZE_VECTOR;
         IrOptimizeResult pass = { 0 };
         check = ir_optimize(input, output, scratch, options, &pass);
         result = pass.function;
@@ -280,13 +272,11 @@ static void ir_optimize_text_fixture(IrOptimizeTest* test, const IrOptimizeTextF
         const uint64_t output_mark = output->length;
         const uint64_t twin_mark = twin->length;
         IrFunction before = { 0 };
-        IrFunction temporary = { 0 };
-        const bool parsed = ir_optimize_text_parse(before_text, output, twin, scratch, &before, &temporary);
-        ir_optimize_text_expect(test, parsed, fixture->name, "the before text is one function both parser paths accept and agree on");
+        const bool parsed = ir_optimize_text_parse(before_text, output, scratch, &before);
+        ir_optimize_text_expect(test, parsed, fixture->name, "the before text is one function the parser accepts");
         IrFunction expected = { 0 };
-        const bool expected_parsed = parsed && ir_optimize_text_parse(after_text, output, twin, scratch, &expected, &temporary);
-        ir_optimize_text_expect(test, expected_parsed, fixture->name, "the after text is one function both parser paths accept and agree on");
-        arena_pop_to(twin, twin_mark);
+        const bool expected_parsed = parsed && ir_optimize_text_parse(after_text, output, scratch, &expected);
+        ir_optimize_text_expect(test, expected_parsed, fixture->name, "the after text is one function the parser accepts");
         if (parsed && expected_parsed)
         {
             size_t before_length = 0;
@@ -320,10 +310,8 @@ static void ir_optimize_text_fixture(IrOptimizeTest* test, const IrOptimizeTextF
                         .pointer = text,
                         .length = length,
                     };
-                    const uint64_t reparse_mark = source->length;
                     IrFunction reparsed = { 0 };
-                    IrFunction reparsed_twin = { 0 };
-                    const bool reparsed_ok = ir_optimize_text_parse(printed, twin, source, scratch, &reparsed, &reparsed_twin);
+                    const bool reparsed_ok = ir_optimize_text_parse(printed, twin, scratch, &reparsed);
                     ir_optimize_text_expect(test, reparsed_ok && ir_optimize_test_equal(&reparsed, &expected), fixture->name,
                                             "printing the result and parsing it again does not give the after text's function");
                     size_t again_length = 0;
@@ -332,27 +320,25 @@ static void ir_optimize_text_fixture(IrOptimizeTest* test, const IrOptimizeTextF
                                             "the reparsed result does not print the after text again");
                     free(again);
                     arena_pop_to(twin, twin_mark);
-                    arena_pop_to(source, reparse_mark);
                     free(text);
                     text = 0;
                 }
             }
             arena_pop_to(twin, twin_mark);
-            IrFunction scalar = { 0 };
-            uint64_t scalar_change = 0;
-            const IrCheck scalar_check = ir_optimize_text_transform(fixture, &before, twin, scratch, true, false, &scalar, &scalar_change);
-            ir_optimize_text_expect(test, scalar_check.error == IR_OK, fixture->name, "the scalar twin transforms the before text");
             if (fixture->pass == IR_OPTIMIZE_TEXT_GVN || fixture->pass == IR_OPTIMIZE_TEXT_GVN_PRESSURE)
             {
                 // GVN's scalar twin is the available-expression oracle: it may find fewer congruences than the vector
-                // partition refinement, and always finds no more of them.
+                // partition refinement, and always finds no more of them. The other passes have one path (#2924).
+                IrFunction scalar = { 0 };
+                uint64_t scalar_change = 0;
+                const IrCheck scalar_check = ir_optimize_text_transform(fixture, &before, twin, scratch, true, false, &scalar, &scalar_change);
+                ir_optimize_text_expect(test, scalar_check.error == IR_OK, fixture->name, "the scalar twin transforms the before text");
                 ir_optimize_text_expect(test, scalar_check.error != IR_OK || scalar_change <= vector_change, fixture->name,
                                         "the scalar GVN oracle removes more than the vector partition does");
-            }
-            else
-            {
-                ir_optimize_text_expect(test, scalar_check.error == IR_OK && ir_optimize_test_equal(&vector, &scalar), fixture->name,
-                                        "the optimizer twins give different functions");
+                if (scalar_check.error == IR_OK && !ir_optimize_test_equal(&vector, &scalar))
+                {
+                    ir_optimize_text_execute(test, fixture->name, &before, &scalar, scratch, fixture->effects);
+                }
             }
             if (fixture->pass == IR_OPTIMIZE_TEXT_GVN || fixture->pass == IR_OPTIMIZE_TEXT_GVN_PRESSURE || fixture->pass == IR_OPTIMIZE_TEXT_LICM ||
                 fixture->pass == IR_OPTIMIZE_TEXT_LICM_PRESSURE)
@@ -375,10 +361,6 @@ static void ir_optimize_text_fixture(IrOptimizeTest* test, const IrOptimizeTextF
             if (vector_check.error == IR_OK)
             {
                 ir_optimize_text_execute(test, fixture->name, &before, &vector, scratch, fixture->effects);
-            }
-            if (scalar_check.error == IR_OK && !ir_optimize_test_equal(&vector, &scalar))
-            {
-                ir_optimize_text_execute(test, fixture->name, &before, &scalar, scratch, fixture->effects);
             }
         }
         arena_pop_to(twin, twin_mark);
@@ -451,9 +433,7 @@ static __attribute__((unused)) int ir_optimize_text_print_fixtures(void)
         String8 text = { 0 };
         ok = ir_optimize_text_read(path, &source, &text);
         IrFunction before = { 0 };
-        IrFunction before_twin = { 0 };
-        ok = ok && ir_optimize_text_parse(text, &output, &twin, &scratch, &before, &before_twin);
-        arena_pop_to(&twin, 0);
+        ok = ok && ir_optimize_text_parse(text, &output, &scratch, &before);
         IrFunction result = { 0 };
         uint64_t change = 0;
         ok = ok && ir_optimize_text_transform(fixture, &before, &output, &scratch, false, false, &result, &change).error == IR_OK;

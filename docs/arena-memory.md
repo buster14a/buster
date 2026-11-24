@@ -82,6 +82,19 @@ the advice is only where the layout doesn't decide:
   host whose transparent huge pages are `madvise` needs, and which makes the
   kernel compact for them where they are `always`.
 
+A busy host that gives pages of 64 KB (#2536, `arena_pages_medium`,
+[the units' design](translation-units.md#medium-pages-on-a-busy-host-2536))
+adds one advice to those: as a commit reaches past `base + small`, the first
+page of each 2 MB it reaches is advised `MADV_NOHUGEPAGE`
+(`arena_medium_split`). That page becomes a mapping of its own, so no mapping
+covers a whole 2 MB there and the largest page the kernel gives the other
+2 MB - 4 KB is the next size it has enabled. The reservation past the commits
+stays one mapping. A process makes at most `BUSTER_ARENA_MEDIUM_SPLITS` of them
+(8,192, 16 GB of arenas): each leaves two mappings where there was one, and the
+kernel refuses a commit past `vm.max_map_count` of them. Past that budget an
+arena's further bytes take 2 MB pages. An arena of tables stays base pages, as
+on a busy host without those pages.
+
 On Linux 6.7 and later, whose `MAP_STACK` maps a region `VM_NOHUGEPAGE`, the
 reservations of the first kind, and a busy host's arenas (#672, base pages
 throughout), are mapped `MAP_STACK` rather than advised by a call of their own (#1444,

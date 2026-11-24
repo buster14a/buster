@@ -758,7 +758,7 @@ static __attribute__((unused)) IrCheck ir_optimize_licm(const IrFunction* functi
     work.ir.without_uses = options.validated && options.pressure && !options.vectors && !ir_licm_has_undef(function);
     if (output != scratch)
     {
-        check = ir_optimize_prepare(&work.ir, function, output, scratch, false, true);
+        check = ir_optimize_prepare(&work.ir, function, output, scratch, true);
     }
     if (check.error == IR_OK)
     {

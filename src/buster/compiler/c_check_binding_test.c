@@ -40,25 +40,22 @@ static void check_test_binding_parser_columns(CheckTest* test, Parser* parser, c
     if (direct != 0)
     {
         memcpy(direct, parsed.declarations, (uint64_t)count * sizeof(uint32_t));
-        for (uint32_t path = 0; path < 2; path += 1)
+        const bool resolved = parse_bindings_resolve(&parsed, scratch);
+        check_test_expect(test, resolved, "checker binding parser-column independent resolution");
+        for (uint32_t token = 0; resolved && token < count; token += 1)
         {
-            const bool resolved = parse_bindings_resolve(&parsed, path == 0, scratch);
-            check_test_expect(test, resolved, "checker binding parser-column independent resolution");
-            for (uint32_t token = 0; resolved && token < count; token += 1)
+            check_test_expect(test, parsed.declarations[token] == direct[token], "checker parser replay differs from direct source column");
+            if (parsed.token_events[token] != 0 && input->declared_types[token] != 0)
             {
-                check_test_expect(test, parsed.declarations[token] == direct[token], "checker parser replay differs from direct source column");
-                if (parsed.token_events[token] != 0 && input->declared_types[token] != 0)
+                const uint32_t declaration = parsed.declarations[token];
+                if (parsed.namespaces[token] == C_BINDING_ORDINARY)
                 {
-                    const uint32_t declaration = parsed.declarations[token];
-                    if (parsed.namespaces[token] == C_BINDING_ORDINARY)
-                    {
-                        check_test_expect(test, input->declarations[token] == declaration, "checker ordinary identity differs from parser column");
-                    }
-                    else if (parsed.namespaces[token] == C_BINDING_TAG && declaration < count)
-                    {
-                        check_test_expect(test, input->declarations[token] == input->declarations[declaration],
-                                          "checker tag identity differs from canonical parser declaration");
-                    }
+                    check_test_expect(test, input->declarations[token] == declaration, "checker ordinary identity differs from parser column");
+                }
+                else if (parsed.namespaces[token] == C_BINDING_TAG && declaration < count)
+                {
+                    check_test_expect(test, input->declarations[token] == input->declarations[declaration],
+                                      "checker tag identity differs from canonical parser declaration");
                 }
             }
         }
@@ -90,20 +87,17 @@ static void check_test_binding_parser_columns(CheckTest* test, Parser* parser, c
                 .declared_types = types,
                 .ignored = ignored,
             };
-            // The published history has no `previous` column, so DIRECT is not a mode here: both resolvers rebuild
+            // The published history has no `previous` column, so DIRECT is not a mode here: the batch sort rebuilds
             // the answers from the retained events alone.
-            for (uint32_t mode = CHECK_INPUT_BINDINGS_STACKS; mode <= CHECK_INPUT_BINDINGS_BATCH; mode += 1)
+            memcpy(declarations, input->declarations, ((uint64_t)count + 1) * sizeof(uint32_t));
+            memcpy(types, input->declared_types, ((uint64_t)count + 1) * sizeof(TypeId));
+            oracle.report_count = 0;
+            oracle.resource = false;
+            const bool resolved = check_input_binding_events(&reader, CHECK_INPUT_BINDINGS_BATCH);
+            check_test_expect(test, resolved, "checker retained semantic history replay");
+            for (uint32_t token = 0; resolved && token < count; token += 1)
             {
-                memcpy(declarations, input->declarations, ((uint64_t)count + 1) * sizeof(uint32_t));
-                memcpy(types, input->declared_types, ((uint64_t)count + 1) * sizeof(TypeId));
-                oracle.report_count = 0;
-                oracle.resource = false;
-                const bool resolved = check_input_binding_events(&reader, (CheckInputBindingMode)mode);
-                check_test_expect(test, resolved, "checker retained semantic history replay");
-                for (uint32_t token = 0; resolved && token < count; token += 1)
-                {
-                    check_test_expect(test, declarations[token] == input->declarations[token], "binding handoff differs from semantic history");
-                }
+                check_test_expect(test, declarations[token] == input->declarations[token], "binding handoff differs from semantic history");
             }
         }
     }
@@ -119,27 +113,24 @@ static void check_test_binding_parser_capacity(CheckTest* test, const Parser* pa
     const uint64_t temporary = scratch->length;
     const Parser original = *parser;
     const uint64_t parser_hash = check_test_binding_parser_hash(parser);
-    for (uint32_t path = 0; path < 2; path += 1)
+    for (uint32_t exhausted = 0; exhausted < 2; exhausted += 1)
     {
-        for (uint32_t exhausted = 0; exhausted < 2; exhausted += 1)
-        {
-            uint32_t declaration = 12345;
-            CheckInput input = { .declarations = &declaration };
-            CheckInputReader reader = {
-                .output = &input,
-                .parser = parser,
-                .arena = arena,
-                .scratch = scratch,
-                .bindings = { .valid = true },
-            };
-            arena->capacity = exhausted == 0 ? mark : output_capacity;
-            scratch->capacity = exhausted == 1 ? temporary : scratch_capacity;
-            const bool valid = check_input_binding_parser(&reader, path == 0);
-            check_test_expect(test, !valid && input.resource && declaration == 12345 && arena->length == mark && scratch->length == temporary,
-                              "parser binding allocation failure published results or retained temporary memory");
-            check_test_expect(test, memcmp(&original, parser, sizeof(Parser)) == 0 && parser_hash == check_test_binding_parser_hash(parser),
-                              "failed parser binding consumer changed its borrowed parser");
-        }
+        uint32_t declaration = 12345;
+        CheckInput input = { .declarations = &declaration };
+        CheckInputReader reader = {
+            .output = &input,
+            .parser = parser,
+            .arena = arena,
+            .scratch = scratch,
+            .bindings = { .valid = true },
+        };
+        arena->capacity = exhausted == 0 ? mark : output_capacity;
+        scratch->capacity = exhausted == 1 ? temporary : scratch_capacity;
+        const bool valid = check_input_binding_parser(&reader);
+        check_test_expect(test, !valid && input.resource && declaration == 12345 && arena->length == mark && scratch->length == temporary,
+                          "parser binding allocation failure published results or retained temporary memory");
+        check_test_expect(test, memcmp(&original, parser, sizeof(Parser)) == 0 && parser_hash == check_test_binding_parser_hash(parser),
+                          "failed parser binding consumer changed its borrowed parser");
     }
     arena->capacity = output_capacity;
     scratch->capacity = scratch_capacity;
@@ -161,7 +152,7 @@ static void check_test_binding_modes(CheckTest* test, const Parser* parser, Prep
         if (ready)
         {
             const bool adapted = check_input_bindings_mode(&input, parser, pp, &types.table, &storage, &scratch, (CheckInputBindingMode)mode);
-            const bool parser_mode = mode == CHECK_INPUT_BINDINGS_PARSER_STACKS || mode == CHECK_INPUT_BINDINGS_PARSER_BATCH;
+            const bool parser_mode = mode == CHECK_INPUT_BINDINGS_PARSER_BATCH;
             char description[128];
             snprintf(description, sizeof(description), "binding mode %s differs from the default handoff", check_input_binding_mode_names[mode]);
             bool equal = adapted == accepted && !input.resource && scratch.length == 0 && input.report_count == reference->report_count &&
@@ -561,12 +552,12 @@ static void check_test_binding_guards(CheckTest* test)
             ready &= columns[column] != 0;
         }
         check_test_expect(test, ready, "guarded binding handoff fixture");
-        uint32_t results[3][64];
-        TypeId types[3][64];
-        uint32_t reports[3][64];
-        uint32_t report_counts[3] = { 0 };
-        bool valid[3] = { 0 };
-        for (uint32_t mode = 0; ready && mode < 3; mode += 1)
+        uint32_t results[2][64];
+        TypeId types[2][64];
+        uint32_t reports[2][64];
+        uint32_t report_counts[2] = { 0 };
+        bool valid[2] = { 0 };
+        for (uint32_t mode = 0; ready && mode < 2; mode += 1)
         {
             CBindings events = source;
             uint32_t* const sources[] = { source.key, source.declaration, source.point, source.end, source.previous, source.depth };
@@ -655,7 +646,7 @@ static void check_test_binding_guards(CheckTest* test)
                 check_test_expect(test, equal && input.report_count == expected_reports, "a partial binding batch changed earlier answers or reports");
             }
         }
-        for (uint32_t mode = 1; ready && mode < 3; mode += 1)
+        for (uint32_t mode = 1; ready && mode < 2; mode += 1)
         {
             const bool equal = valid[mode] == valid[0] && report_counts[mode] == report_counts[0] &&
                                memcmp(results[mode], results[0], (uint64_t)count * 4) == 0 && memcmp(types[mode], types[0], (uint64_t)count * 4) == 0 &&

@@ -91,9 +91,10 @@ pull requests included.
   it, from `/proc`'s clock ticks before and after, with the CPU each was last on.
   `whole.tsv` counts them; read the files before trusting a table that has any.
 - **The page state.** A compile on a host whose runnable tasks are a quarter of
-  its online CPUs takes base pages (#1561's `busy`): at one worker it takes huge
-  pages, at eight base pages. `whole.tsv`'s `huge_pages` counts each state; a
-  cohort that mixes them mixes two costs.
+  its online CPUs takes base pages (#1561's `busy`), or pages of 64 KB where the
+  host gives them (#2536's `medium`): at one worker it takes huge pages, at eight
+  one of those. `whole.tsv`'s `huge_pages` counts each state; a cohort that
+  mixes them mixes two costs.
 - **The peak includes the executable's file**, about 4.5 MB of the measuring
   copy's pages ([the record](https://github.com/buster14a/buster-performance/tree/222f622d5f7d46abbc333d80ec8e6ce91930fc4b/docs/measurements/all-core-rerun-2536-2026-11-12)'s
   `rss.sh`): a copy whose file is shared differently gives another peak for the

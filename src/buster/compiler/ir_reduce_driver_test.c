@@ -163,7 +163,7 @@ static bool ir_reduce_test_driver_reparse(const char* directory, IrReduceInjecti
                 ir_reduce_test_driver_read(path, storage, artifacts + i);
         if (valid && i < 2)
         {
-            const IrParseResult result = ir_parse_scalar(artifacts[i], &functions, &scratch, parsed + i);
+            const IrParseResult result = ir_parse(artifacts[i], &functions, &scratch, parsed + i);
             valid = result.error == IR_PARSE_OK && result.consumed == artifacts[i].length &&
                     ir_verify_complete(parsed + i, &scratch).error == IR_OK;
         }

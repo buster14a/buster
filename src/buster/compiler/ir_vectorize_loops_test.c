@@ -278,11 +278,8 @@ static void ir_vectorize_test_fixture(IrVectorizeTest* test, const IrVectorizeTe
     snprintf(path, sizeof(path), "tests/ir/vectorize/%s.ir", fixture->name);
     String8 text = { 0 };
     IrFunction function = { 0 };
-    IrFunction twin = { 0 };
-    const bool parsed = ir_optimize_text_read(path, source, &text) && ir_optimize_text_parse(text, input, execution, scratch, &function, &twin);
-    // The twin was compared; only the first is kept.
-    arena_pop_to(execution, 0);
-    ir_vectorize_test_expect(test, parsed, fixture->name, "the fixture is read and parsed alike by both parser paths");
+    const bool parsed = ir_optimize_text_read(path, source, &text) && ir_optimize_text_parse(text, input, scratch, &function);
+    ir_vectorize_test_expect(test, parsed, fixture->name, "the fixture is read and parsed");
     for (uint32_t t = 0; parsed && t < BUSTER_IR_VECTORIZE_TEST_TARGETS; t += 1)
     {
         IrVectorizeTarget target = { 0 };

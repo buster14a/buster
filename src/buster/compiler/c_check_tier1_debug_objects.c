@@ -153,7 +153,7 @@ static bool check_tier1_debug_object_clips(const Tier0Function* function, const 
             const X86FormDescription* description = x86_form_description(record.form & (BUSTER_X86_FORM_FIXUP - 1));
             uint64_t read = 0;
             uint64_t written = 0;
-            x86_instruction_effects_scalar(&record, &read, &written);
+            x86_instructions_effects(&emitted->code.records[old], 1, &read, &written);
             const bool complete = bytes != 0 && bytes <= 8 && description->operand_bytes == bytes &&
                                   record.mode == BUSTER_X86_MEMORY_BASE && record.rm == frame->base_register && record.index == 0 &&
                                   record.form < X86_FORM_COUNT &&
@@ -210,8 +210,8 @@ static bool check_tier1_debug_object_clips(const Tier0Function* function, const 
     }
     if (valid && prove && event_count != 0)
     {
-        keys = c_bindings_sort(keys, sorting, key_count, true, UINT32_MAX);
-        events = c_bindings_sort(events, event_sorting, event_count, true, UINT32_MAX);
+        keys = c_bindings_sort(keys, sorting, key_count, UINT32_MAX);
+        events = c_bindings_sort(events, event_sorting, event_count, UINT32_MAX);
         memset(owners, 0xff, (uint64_t)frame->slot_count * 4);
         uint32_t event = 0;
         for (uint32_t r = 0; valid && r < count; r += 1)
@@ -237,7 +237,7 @@ static bool check_tier1_debug_object_clips(const Tier0Function* function, const 
             const X86Instruction record = emitted->code.records[old];
             uint64_t read = 0;
             uint64_t written = 0;
-            x86_instruction_effects_scalar(&record, &read, &written);
+            x86_instructions_effects(&emitted->code.records[old], 1, &read, &written);
             const bool base_address = (record.mode & (BUSTER_X86_MODE_MEMORY | BUSTER_X86_MODE_BASE)) == (BUSTER_X86_MODE_MEMORY | BUSTER_X86_MODE_BASE) && record.rm == frame->base_register;
             const bool indexed_address = (record.mode & (BUSTER_X86_MODE_MEMORY | BUSTER_X86_MODE_INDEX)) == (BUSTER_X86_MODE_MEMORY | BUSTER_X86_MODE_INDEX) && record.index == frame->base_register;
             const bool frame_write = (base_address || indexed_address) && (written & BUSTER_X86_RESOURCE_MEMORY) != 0;

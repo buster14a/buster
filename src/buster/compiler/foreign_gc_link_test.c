@@ -540,8 +540,7 @@ static void foreign_gc_link_test_program(ForeignTestTally* tally, const char* di
                         };
                         const SymbolId compact_entry = foreign_link_test_symbol(&foreign, &compact[path], "_start");
                         ExecutableResult written = { 0 };
-                        const bool emitted = path == 0 ? executable_test_write_exact(&compact[path].link, compact_entry, destination, 1, &written) :
-                                                        executable_test_write(&compact[path].link, compact_entry, destination, 1, &written, 0, 0);
+                        const bool emitted = executable_test_write(&compact[path].link, compact_entry, destination, 1, &written, 0, 0);
                         foreign_test_expect(tally, emitted, "write collected executable", detail);
                         char* run[] = {
                             executable,
@@ -716,8 +715,7 @@ static void foreign_gc_link_test_undefined(ForeignTestTally* tally, const char* 
                                 };
                                 const SymbolId entry = foreign_link_test_symbol(&foreign, &output, "_start");
                                 ExecutableResult written = { 0 };
-                                emitted = path == 0 ? executable_test_write_exact(&output.link, entry, destination, 1, &written) :
-                                                      executable_test_write(&output.link, entry, destination, 1, &written, 0, 0);
+                                emitted = executable_test_write(&output.link, entry, destination, 1, &written, 0, 0);
                                 char* run[] = {
                                     destination.pointer,
                                     0,

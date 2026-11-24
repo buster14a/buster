@@ -12,14 +12,16 @@ requirements. [Command index](README.md).
   `check_program_emit`'s raw rows, the driver maps their tokens to presumed
   lines as the diagnostics place them, bounded per function by its
   declaration's and closing brace's places, and keeps a row per change of file
-  or line, and the body's start; each pass a vector path with
-  an exact twin (`--scalar`). The lowering and its loop over tasks are
+  or line, and the body's start; each pass a vector path, the raw rows of an
+  origin column's (Tier 1's) and the lines past a function's span by an exact
+  path row by row. The lowering and its loop over tasks are
   compiled twice, without the tokens (`check_program_lower`,
   `check_lower_drain`) and with them (`check_program_lower_sources`,
   `check_lower_drain_sources`), so that a compile without `-g` runs the code
   it ran before.
   `-c -g` writes the same unit into the object, relocated.
-  `test-check-debug [--cross-check]` checks the twins at `PROT_NONE` pages,
+  `test-check-debug [--cross-check]` checks the raw rows against the exact
+  path and the kept rows against what keeping means at `PROT_NONE` pages,
   the lines against `pp_presumed` on fixtures (a computed goto among them)
   and generated programs, that lowering with the tokens changes no typed
   function, and with `--cross-check` the executable through

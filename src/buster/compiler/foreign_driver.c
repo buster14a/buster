@@ -76,6 +76,8 @@ struct ForeignDriverWrite
     uint32_t offsets[BUSTER_LANE_MAX_COUNT];
     ExecutableResult result;
     bool strip_all;
+    // The symbol table's selection by its exact twin, one symbol at a time on lane 0 (link-foreign --scalar).
+    bool exact;
     bool symbols_ready;
     bool succeeded;
 };
@@ -598,10 +600,10 @@ static void foreign_driver_symbols(ForeignDriverWrite* write)
     // A converted, checked Link always includes symbol zero, even when no named symbol survives.
     const uint32_t count = write->link->symbols.count - 1;
     const Range64 part = lane_range(count);
-    const Range64 range = write->options.exact ? (Range64){ .begin = lane == 0 ? 1 : (uint64_t)count + 1, .end = (uint64_t)count + 1 } :
+    const Range64 range = write->exact ? (Range64){ .begin = lane == 0 ? 1 : (uint64_t)count + 1, .end = (uint64_t)count + 1 } :
                                                (Range64){ .begin = part.begin + 1, .end = part.end + 1 };
     const Link* link = write->link;
-    write->counts[lane] = write->options.exact ? foreign_driver_symbols_exact(link, range, 0) : foreign_driver_symbols_vector(link, range, 0);
+    write->counts[lane] = write->exact ? foreign_driver_symbols_exact(link, range, 0) : foreign_driver_symbols_vector(link, range, 0);
     lane_sync();
     if (lane == 0)
     {
@@ -623,7 +625,7 @@ static void foreign_driver_symbols(ForeignDriverWrite* write)
     if (write->symbols_ready && write->counts[lane] != 0)
     {
         SymbolId* ids = write->selected + write->offsets[lane];
-        if (write->options.exact)
+        if (write->exact)
         {
             foreign_driver_symbols_exact(link, range, ids);
         }
@@ -1032,12 +1034,12 @@ static int foreign_driver_link(ForeignDriverRun* run)
                 .dynamic = driver.kind != RUNTIME_KIND_STATIC ? &converted.dynamic : 0,
                 .runtime = runtime_kind_is_static(driver.kind) ? &converted.runtime : 0,
                 .debug_sections = debug ? &converted.debug : 0,
-                .exact = driver.path == FOREIGN_PATH_EXACT,
                 // The atoms' bytes are the inputs' private mappings: staged, a chunk is patched in a lane's buffer
                 // rather than in pages that each write would copy.
                 .stage = true,
             },
             .strip_all = driver.strip_all,
+            .exact = driver.path == FOREIGN_PATH_EXACT,
             .symbols_ready = true,
         };
         lane_flow_round_begin(&run->flow, FOREIGN_FLOW_WRITE, &write, lanes);

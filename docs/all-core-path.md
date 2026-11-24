@@ -1035,9 +1035,15 @@ back, eight workers:
   Smaller sizes cost the kernel more than base pages do.
 - **Alone, 2 MB pages stay better** (114.6 ms a compile against 118.7), so
   the policy is the busy host's alone.
-- **It needs the host's knob**, the owner's decision; the arenas' policy for
-  it is a pull request of its own, off where the host doesn't offer the
-  pages.
+- **The policy is built** (`arena_pages_medium`,
+  ["Medium pages on a busy host"](translation-units.md#medium-pages-on-a-busy-host-2536)):
+  a busy host's arenas take the 64 KB pages where the host's knob offers
+  them, and base pages as before where it doesn't. The same executable with
+  the knob `never` and `madvise`, one hold: 325.9 and 337.1 MB/s at eight
+  workers (+3.4%), the kernel's cycles 234.0 M and 196.8 M, a compile alone
+  the same.
+- **Turning the knob on is the host's owner's decision**; the compiler turns
+  nothing on. On the 9700X it is `never` today.
 
 ## The model
 

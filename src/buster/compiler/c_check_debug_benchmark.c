@@ -4,7 +4,7 @@
 //
 // benchmark-check-debug [--functions N] [--seed N] [--runs N] [--only rows|lines|keep|build|emit] [--path vector|scalar]
 // [--after-scalar MS] [--directives] [--print PATH]: the C driver's source rows (#395, c_check_debug.c), each pass by its
-// vector path and its exact twin. --directives gives the generated program the test's #lines (an eighth of the
+// vector path and, for rows and lines, its exact path (keep and build have one path, timed on both sides). --directives gives the generated program the test's #lines (an eighth of the
 // functions under a #line of a name of its own, and some inside bodies), as generated C has them. --print writes the
 // generated program to PATH and measures nothing, for timing whole compiles of it with -g and without. Include after c_check_debug_test.c, whose generator and pipeline it takes, and c_check_source_benchmark.c, whose
 // clock and median it shares.
@@ -18,7 +18,7 @@
 // - emit: check_program_emit of that program with the raw rows and without, by the vector path, per typed entry: what
 //   -g adds to the emission (the entries' tokens copied out of the lowering and the raw rows).
 //
-// Before timing, each pass's paths must give the same rows, lines, kept rows and sections. Each sample takes the pass
+// Before timing, the rows and the lines must be the same by both paths, and the unit must build. Each sample takes the pass
 // over every function once; the report gives the medians of --runs (21) runs, the paths taking turns. --path times one
 // path alone, back to back (the other path's median, and the emission's change, then read n/a), and --after-scalar MS
 // runs the exact twin for MS ms before each sample of the vector path
@@ -97,8 +97,19 @@ static void check_debug_benchmark_lines(CheckDebugBenchmark* benchmark, uint32_t
     for (uint32_t b = 0; b < program->body_count; b += 1)
     {
         const uint32_t first = rows->first[b];
-        check_debug_lines(&benchmark->source, program->bodies[b].declaration, benchmark->closings[b], rows->tokens + first, rows->counts[b],
-                          benchmark->keys[path] + first, benchmark->lines[path] + first, path == 0);
+        if (path == 0)
+        {
+            // The exact path row by row, check_debug_line_scalar, which check_debug_lines leaves the rows past its span to.
+            for (uint32_t r = first; r < first + rows->counts[b]; r += 1)
+            {
+                check_debug_line_scalar(&benchmark->source, rows->tokens[r], benchmark->keys[0] + r, benchmark->lines[0] + r);
+            }
+        }
+        else
+        {
+            check_debug_lines(&benchmark->source, program->bodies[b].declaration, benchmark->closings[b], rows->tokens + first, rows->counts[b],
+                              benchmark->keys[1] + first, benchmark->lines[1] + first);
+        }
     }
 }
 
@@ -114,9 +125,7 @@ static uint64_t check_debug_benchmark_keep(CheckDebugBenchmark* benchmark, uint3
         uint32_t* offsets = benchmark->kept_offsets[path] + kept;
         uint32_t* lines = benchmark->kept_lines[path] + kept;
         uint32_t* keys = benchmark->kept_keys[path] + kept;
-        kept += path == 0 ? check_debug_keep_scalar(rows->offsets + first, benchmark->keys[0] + first, benchmark->lines[0] + first, rows->counts[b], rows->bodies[b], offsets, lines,
-                                                    keys) :
-                            check_debug_keep(rows->offsets + first, benchmark->keys[0] + first, benchmark->lines[0] + first, rows->counts[b], rows->bodies[b], offsets, lines, keys);
+        kept += check_debug_keep(rows->offsets + first, benchmark->keys[0] + first, benchmark->lines[0] + first, rows->counts[b], rows->bodies[b], offsets, lines, keys);
     }
     return kept;
 }
@@ -126,8 +135,8 @@ static bool check_debug_benchmark_build(CheckDebugBenchmark* benchmark, uint32_t
 {
     Arena* output = &benchmark->unit.output;
     const uint64_t mark = output->length;
-    const bool made = check_debug_build(debug, &benchmark->unit.selected.program, &benchmark->unit.rows, benchmark->parser, benchmark->pp, path == 0, output,
-                                        &benchmark->unit.scratch);
+    (void)path;
+    const bool made = check_debug_build(debug, &benchmark->unit.selected.program, &benchmark->unit.rows, benchmark->parser, benchmark->pp, output, &benchmark->unit.scratch);
     arena_pop_to(output, mark);
     return made;
 }
@@ -376,32 +385,12 @@ static int run_check_debug_benchmark(int argc, char** argv)
         same = same && memcmp(benchmark.keys[0], benchmark.keys[1], (uint64_t)rows->count * sizeof(uint32_t)) == 0 &&
                memcmp(benchmark.lines[0], benchmark.lines[1], (uint64_t)rows->count * sizeof(uint32_t)) == 0;
         benchmark.kept[0] = check_debug_benchmark_keep(&benchmark, 0);
-        benchmark.kept[1] = check_debug_benchmark_keep(&benchmark, 1);
-        same = same && benchmark.kept[0] == benchmark.kept[1] && memcmp(benchmark.kept_offsets[0], benchmark.kept_offsets[1], benchmark.kept[0] * sizeof(uint32_t)) == 0 &&
-               memcmp(benchmark.kept_lines[0], benchmark.kept_lines[1], benchmark.kept[0] * sizeof(uint32_t)) == 0 &&
-               memcmp(benchmark.kept_keys[0], benchmark.kept_keys[1], benchmark.kept[0] * sizeof(uint32_t)) == 0;
-        CheckDebug debugs[2];
-        bool built = true;
-        uint8_t* sections[2][BUSTER_DEBUG_SECTIONS] = { { 0 } };
-        uint64_t sizes[2][BUSTER_DEBUG_SECTIONS] = { { 0 } };
-        for (uint32_t side = 0; side < 2; side += 1)
-        {
-            // Made again without popping, so that both units' sections are there to compare.
-            built &= check_debug_build(&debugs[side], program, rows, &parser, &pp, side == 0, &benchmark.unit.output, &benchmark.unit.scratch);
-            for (uint32_t section = 0; built && section < BUSTER_DEBUG_SECTIONS; section += 1)
-            {
-                sections[side][section] = debugs[side].output.sections[section].bytes;
-                sizes[side][section] = debugs[side].output.sections[section].size;
-            }
-        }
-        for (uint32_t section = 0; built && section < BUSTER_DEBUG_SECTIONS; section += 1)
-        {
-            built = sizes[0][section] == sizes[1][section] && memcmp(sections[0][section], sections[1][section], sizes[0][section]) == 0;
-        }
+        CheckDebug debug;
+        const bool built = check_debug_benchmark_build(&benchmark, 1, &debug);
         same = same && built && check_debug_benchmark_emit(&benchmark, true) && check_debug_benchmark_emit(&benchmark, false);
         if (!same)
         {
-            fprintf(stderr, "benchmark-check-debug: the vector paths don't give the exact paths' rows, lines, kept rows or sections\n");
+            fprintf(stderr, "benchmark-check-debug: the rows' or the lines' vector path doesn't give its exact path's, or the unit or the emission fails\n");
         }
     }
     if (same)
@@ -470,8 +459,11 @@ static int run_check_debug_benchmark(int argc, char** argv)
                     {
                         snprintf(vector_text, sizeof(vector_text), "%.3f ns per %s (%.3f ms)", vector / denominator, unit, vector / 1e6);
                     }
-                    printf("  %s: vector %s, exact %s%s\n", check_debug_benchmark_names[pass], vector_text, scalar_text,
-                           after_scalar != 0 ? ", each vector sample after the exact path" : "");
+                    // Since #2924 only the rows (check_debug_rows_scalar, an origin column's) and the lines (check_debug_line_scalar,
+                    // the rows past a function's span) keep an exact path; keep and build time the vector path twice.
+                    const bool exact = pass == CHECK_DEBUG_BENCHMARK_ROWS || pass == CHECK_DEBUG_BENCHMARK_LINES;
+                    printf("  %s: vector %s%s%s%s\n", check_debug_benchmark_names[pass], vector_text, exact ? ", exact " : "", exact ? scalar_text : "",
+                           exact && after_scalar != 0 ? ", each vector sample after the exact path" : "");
                 }
             }
         }

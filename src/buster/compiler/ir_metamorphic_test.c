@@ -108,14 +108,17 @@ static bool ir_meta_resource_contracts(IrMetaTally* tally, const IrFunction* fun
         memset(storage[a], 0x51 + a, 16);
         arenas[a] = (Arena){ .base = storage[a], .length = 16, .capacity = sizeof(storage[a]) };
     }
-    for (uint32_t stage = 0; stage < 4; stage += 1)
+    // The round trip's text, parse and scratch arenas; arenas[2] is the transforms' alone.
+    static const uint32_t roundtrip_stages[] = { 0, 1, 3 };
+    for (uint32_t s = 0; s < sizeof(roundtrip_stages) / sizeof(roundtrip_stages[0]); s += 1)
     {
+        const uint32_t stage = roundtrip_stages[s];
         for (uint32_t a = 0; a < 4; a += 1)
         {
             arenas[a].length = 16;
             arenas[a].capacity = a == stage ? 16 : sizeof(storage[a]);
         }
-        const IrMetaFailure failure = ir_meta_roundtrip(function, arenas, arenas + 1, arenas + 2, arenas + 3, NULL);
+        const IrMetaFailure failure = ir_meta_roundtrip(function, arenas, arenas + 1, arenas + 3, NULL);
         bool preserved = failure == IR_META_RESOURCE;
         for (uint32_t a = 0; a < 4; a += 1)
         {
@@ -125,24 +128,23 @@ static bool ir_meta_resource_contracts(IrMetaTally* tally, const IrFunction* fun
                 preserved = preserved && storage[a][b] == 0x51 + a;
             }
         }
-        valid = ir_meta_expect(tally, preserved, "text/parse/twin/scratch exhaustion retains resource classification and every arena prefix") && valid;
+        valid = ir_meta_expect(tally, preserved, "text/parse/scratch exhaustion retains resource classification and every arena prefix") && valid;
     }
-    for (uint32_t stage = 1; stage < 4; stage += 1)
+    for (uint32_t stage = 1; stage < 4; stage += 2)
     {
         for (uint32_t a = 0; a < 4; a += 1)
         {
             arenas[a].length = 16;
             arenas[a].capacity = a == stage ? 16 : sizeof(storage[a]);
         }
-        IrFunction unpublished[2];
-        memset(unpublished, 0x5a, sizeof(unpublished));
-        IrFunction unchanged[2];
-        memcpy(unchanged, unpublished, sizeof(unpublished));
-        const IrMetaFailure failure = ir_meta_parse_pair(generated, arenas + 1, arenas + 2, arenas + 3,
-                                                        unpublished, unpublished + 1, IR_META_GENERATION);
-        valid = ir_meta_expect(tally, failure == IR_META_RESOURCE && memcmp(unpublished, unchanged, sizeof(unpublished)) == 0 &&
-                              arenas[1].length == 16 && arenas[2].length == 16 && arenas[3].length == 16,
-                              "initial parser-pair exhaustion is resource failure and publishes neither partial function") && valid;
+        IrFunction unpublished;
+        memset(&unpublished, 0x5a, sizeof(unpublished));
+        IrFunction unchanged;
+        memcpy(&unchanged, &unpublished, sizeof(unpublished));
+        const IrMetaFailure failure = ir_meta_parse(generated, arenas + 1, arenas + 3, &unpublished, IR_META_GENERATION);
+        valid = ir_meta_expect(tally, failure == IR_META_RESOURCE && memcmp(&unpublished, &unchanged, sizeof(unpublished)) == 0 &&
+                              arenas[1].length == 16 && arenas[3].length == 16,
+                              "initial parse exhaustion is resource failure and publishes no partial function") && valid;
     }
     arenas[1].capacity = sizeof(storage[1]);
     arenas[2].capacity = sizeof(storage[2]);
@@ -353,18 +355,16 @@ static IrMetaFailure ir_meta_contracts(IrMetaTally* tally, Arena* source, Arena*
     }
     const char malformed[] = "function (i64) -> i64 {\nb0:\n%0 = unknown_opcode.i64\n}\n";
     const String8 invalid_text = { .pointer = (char*)malformed, .length = sizeof(malformed) - 1 };
-    IrFunction invalid[2];
-    memset(invalid, 0x5a, sizeof(invalid));
-    IrFunction saved[2];
-    memcpy(saved, invalid, sizeof(invalid));
+    IrFunction invalid;
+    memset(&invalid, 0x5a, sizeof(invalid));
+    IrFunction saved;
+    memcpy(&saved, &invalid, sizeof(invalid));
     const uint64_t before_source = source->length;
-    const uint64_t before_output = output->length;
-    const IrParseResult vector = ir_parse(invalid_text, source, scratch, invalid);
-    const IrParseResult scalar = ir_parse_scalar(invalid_text, output, scratch, invalid + 1);
-    valid = ir_meta_expect(tally, vector.error == IR_PARSE_SYNTAX && scalar.error == IR_PARSE_SYNTAX && vector.offset == scalar.offset &&
-                          vector.line == scalar.line && vector.column == scalar.column && vector.consumed == scalar.consumed &&
-                          source->length == before_source && output->length == before_output && memcmp(invalid, saved, sizeof(invalid)) == 0,
-                          "malformed grammar has stable diagnostics and cannot publish executable IR") && valid;
+    const IrParseResult rejected = ir_parse(invalid_text, source, scratch, &invalid);
+    // The opcode on line 3 at column 6 (the column is 1-based, past "%0 = ").
+    valid = ir_meta_expect(tally, rejected.error == IR_PARSE_SYNTAX && rejected.line == 3 && rejected.offset == 33 && rejected.column == 6 &&
+                          source->length == before_source && memcmp(&invalid, &saved, sizeof(invalid)) == 0,
+                          "malformed grammar has its diagnostic and cannot publish executable IR") && valid;
     tally->negative += 1;
     arena_pop_to(output, output_mark);
     arena_pop_to(source, source_mark);

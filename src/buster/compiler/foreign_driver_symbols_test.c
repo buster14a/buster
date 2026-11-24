@@ -221,7 +221,7 @@ static void foreign_driver_symbols_capacity(ForeignTestTally* tally)
             for (uint32_t l = 0; l < BUSTER_ARRAY_LENGTH(foreign_test_lanes); l += 1)
             {
                 Arena arena = { 0 };
-                ForeignDriverWrite write = { .link = &link, .arena = &arena, .options = { .exact = path != 0 }, .symbols_ready = true };
+                ForeignDriverWrite write = { .link = &link, .arena = &arena, .exact = path != 0, .symbols_ready = true };
                 const bool ran = lane_run(foreign_test_lanes[l], foreign_driver_symbols_select_lane, &write, 0);
                 const bool valid = empty != 0 ? write.symbols_ready && write.result.error == EXECUTABLE_ERROR_NONE && write.symbols.count == 0 && write.symbols.ids == 0 :
                                                !write.symbols_ready && write.result.error == EXECUTABLE_ERROR_MEMORY;
