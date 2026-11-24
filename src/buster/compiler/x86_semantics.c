@@ -3173,13 +3173,13 @@ static __attribute__((unused)) uint64_t x86_register_resource(uint8_t value, boo
 // effects record by a scalar lookup (its number's entry in x86_effects_by_form, then its 16 bytes into a quarter of a
 // ZMM register: Zen 5's gathers cost more than these loads), and then every lane computes its resolved effects with
 // masks for its branches: reg, rm and vvvv, an opmask role's register in `opmasks`' lane (or, without `opmasks`, a record
-// that reads or writes an opmask register an uncovered one). It returns the rare lanes (BUSTER_X86_EFFECTS_RARE: an x87
-// form's, vzeroupper's, RARE's operands or IMPLICIT_VECTORS' registers), whose effects need `rare_terms`: then their
-// operands that no role names come from x86_effects_operands (a byte a record), and the block adds their terms, which
-// are no-ops for the common lanes. Inlined, it is compiled with `opmasks` null and not and with `rare_terms` or not, each
-// without the others' instructions.
-static __attribute__((always_inline)) inline __mmask8 x86_effects_block(const X86Instruction* instructions, uint64_t first, uint64_t count, uint64_t* reads,
-                                                                         uint64_t* writes, uint16_t* opmasks, bool rare_terms)
+// that reads or writes an opmask register an uncovered one). A block with a rare lane (BUSTER_X86_EFFECTS_RARE: an x87
+// form's, vzeroupper's, RARE's operands or IMPLICIT_VECTORS' registers) adds their terms under a branch that the common
+// block doesn't take: their operands that no role names come from x86_effects_operands, a byte a record. No call is
+// made, so the loop keeps its constants in registers (every ZMM register is caller-saved). Inlined into its two
+// callers, it is compiled with `opmasks` null and not, and the first has none of the opmasks' instructions.
+static __attribute__((always_inline)) inline void x86_effects_block(const X86Instruction* instructions, uint64_t first, uint64_t count, uint64_t* reads,
+                                                                     uint64_t* writes, uint16_t* opmasks)
 {
     const bool with_opmasks = opmasks != 0;
     const __m512i even = _mm512_setr_epi64(0, 2, 4, 6, 8, 10, 12, 14);
@@ -3200,18 +3200,10 @@ static __attribute__((always_inline)) inline __mmask8 x86_effects_block(const X8
     // Each lane's effects record: (implicit reads and writes, operands, properties) and (flags, memory, operation,
     // width, write_bytes, kinds). A lane past the count gets form 0's, the conservative record, and stores nothing.
     __m128i records[8];
-    uint32_t numbers[8];
-    uint32_t indices[8];
     for (uint32_t lane = 0; lane < 8; lane += 1)
     {
         const uint32_t number = lane < lanes ? instructions[first + lane].form & BUSTER_X86_FORM_NUMBER : 0;
-        const uint32_t index = x86_effects_by_form[number];
-        records[lane] = _mm_load_si128((const __m128i*)&x86_effects_records[index]);
-        if (rare_terms)
-        {
-            numbers[lane] = number;
-            indices[lane] = index;
-        }
+        records[lane] = _mm_load_si128((const __m128i*)&x86_effects_records[x86_effects_by_form[number]]);
     }
     __m512i effects_head = _mm512_castsi128_si512(records[0]);
     __m512i effects_tail = _mm512_castsi128_si512(records[4]);
@@ -3249,12 +3241,16 @@ static __attribute__((always_inline)) inline __mmask8 x86_effects_block(const X8
     __mmask8 vex_gather = 0;
     __mmask8 is4 = 0;
     __mmask8 pair = 0;
-    if (rare_terms)
+    if (BUSTER_UNLIKELY(rare != 0))
     {
+        // The rare lanes' forms again (a rare block's alone, so that the common one keeps none).
         uint64_t packed = 0;
-        for (uint32_t lane = 0; lane < 8; lane += 1)
+        uint32_t rare_lanes = rare;
+        while (rare_lanes != 0)
         {
-            packed |= (uint64_t)x86_effects_operands[indices[lane]] << (8 * lane);
+            const uint32_t lane = (uint32_t)__builtin_ctz(rare_lanes);
+            packed |= (uint64_t)x86_effects_operands[x86_effects_by_form[instructions[first + lane].form & BUSTER_X86_FORM_NUMBER]] << (8 * lane);
+            rare_lanes &= rare_lanes - 1;
         }
         vsib = (__mmask8)_pext_u64(packed, 0x0101010101010101ull * BUSTER_X86_EFFECT_OPERAND_VSIB);
         vex_gather = vsib & (__mmask8)_pext_u64(packed, 0x0101010101010101ull * BUSTER_X86_EFFECT_OPERAND_VEX);
@@ -3331,7 +3327,7 @@ static __attribute__((always_inline)) inline __mmask8 x86_effects_block(const X8
     // A legacy SSE form reads every vector register it writes (which keeps its bits above 127), a zero idiom's too:
     // write & vectors in the lanes of KEEP_UPPER, the record's top bit, spread over the lane by an arithmetic shift
     // (0x80, all three). A mask register from vptestmq measured slower on the 9700X. It joins the reads at the end.
-    if (rare_terms)
+    if (BUSTER_UNLIKELY(rare != 0))
     {
         // The x87's state and control word, and vzeroupper's vector registers: properties' bits 8 to 10, a register's
         // lookup.
@@ -3349,7 +3345,8 @@ static __attribute__((always_inline)) inline __mmask8 x86_effects_block(const X8
         write = _mm512_mask_or_epi64(write, vex_gather, write, mask_vector);
         // Key Locker's vector registers that no role names (x86_implicit_vectors): the wide forms' XMM0 to XMM7, and
         // encodekey128's, encodekey256's and loadiwkey's.
-        const __m512i number = _mm512_cvtepu32_epi64(_mm256_loadu_si256((const __m256i*)numbers));
+        // Each lane's form number, from its record's form field (bytes 12 and 13 of 16: the high qword's bits 32 to 47).
+        const __m512i number = _mm512_and_si512(_mm512_srli_epi64(high, 32), _mm512_set1_epi64(BUSTER_X86_FORM_NUMBER));
         const __mmask8 implicit = _mm512_test_epi64_mask(properties, _mm512_set1_epi64(BUSTER_X86_EFFECT_IMPLICIT_VECTORS));
         const __mmask8 wide = implicit & _mm512_cmpge_epu64_mask(number, _mm512_set1_epi64(X86_FORM_AESENCWIDE128KL_M384)) &
                               _mm512_cmple_epu64_mask(number, _mm512_set1_epi64(X86_FORM_AESDECWIDE256KL_M512));
@@ -3418,40 +3415,15 @@ static __attribute__((always_inline)) inline __mmask8 x86_effects_block(const X8
     write = _mm512_mask_mov_epi64(_mm512_set1_epi64(-1), known, write);
     _mm512_mask_storeu_epi64(reads + first, live, read);
     _mm512_mask_storeu_epi64(writes + first, live, write);
-    return rare;
 }
 
-// The blocks x86_instructions_effects_lanes found rare lanes in (`blocks`, block b's bit b mod 64, so that a set bit
-// may stand for more than one), computed again with the rare terms, which give every lane's effects, the common ones'
-// too. Apart from the loop, which keeps its constants in registers (every ZMM register is caller-saved).
-static __attribute__((noinline)) void x86_effects_rare_blocks(const X86Instruction* instructions, uint64_t count, uint64_t* reads, uint64_t* writes, uint16_t* opmasks,
-                                                              uint64_t blocks)
-{
-    while (blocks != 0)
-    {
-        const uint32_t bit = (uint32_t)__builtin_ctzll(blocks);
-        for (uint64_t first = (uint64_t)bit * 8; first < count; first += 64 * 8)
-        {
-            x86_effects_block(instructions, first, count, reads, writes, opmasks, true);
-        }
-        blocks &= blocks - 1;
-    }
-}
-
-// The records' resolved effects (BUSTER_X86_RESOURCE_*), 8 at a time (x86_effects_block); the blocks with a rare lane
-// again, after the loop, with the rare terms (x86_effects_rare_blocks).
+// The records' resolved effects (BUSTER_X86_RESOURCE_*), 8 at a time (x86_effects_block).
 static __attribute__((always_inline)) inline void x86_instructions_effects_lanes(const X86Instruction* instructions, uint64_t count, uint64_t* reads, uint64_t* writes,
                                                                                uint16_t* opmasks)
 {
-    uint64_t blocks = 0;
     for (uint64_t first = 0; first < count; first += 8)
     {
-        const __mmask8 rare = x86_effects_block(instructions, first, count, reads, writes, opmasks, false);
-        blocks |= (uint64_t)(rare != 0) << ((first >> 3) & 63);
-    }
-    if (blocks != 0)
-    {
-        x86_effects_rare_blocks(instructions, count, reads, writes, opmasks, blocks);
+        x86_effects_block(instructions, first, count, reads, writes, opmasks);
     }
 }
 
