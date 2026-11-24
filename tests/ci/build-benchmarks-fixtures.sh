@@ -81,7 +81,7 @@ done
 
 # Real Git worktree lifecycle, but tiny fake compiler/LLVM commands. The budget/probe remain the real C programs.
 repo="$temporary/repo"
-mkdir -p "$repo/tools/ci" "$temporary/bin" "$temporary/runner"
+mkdir -p "$repo/cmake" "$repo/tools/ci" "$temporary/bin" "$temporary/runner"
 cp "$root/tools/ci/build-budget.c" "$root/tools/ci/build-benchmarks.sh" "$repo/tools/ci/"
 cat > "$repo/build.sh" <<'SH'
 #!/usr/bin/env bash
@@ -138,6 +138,8 @@ SH
 chmod +x "$temporary/bin/"*
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
 git -C "$repo" -c init.templateDir= init -q
+printf 'include(cmake/BusterCodegen.cmake)\n' > "$repo/CMakeLists.txt"
+printf 'set(flag -O2)\n' > "$repo/cmake/BusterCodegen.cmake"
 git -C "$repo" add .
 git -C "$repo" -c user.name=Fixture -c user.email=fixture@example.invalid commit -qm initial
 base_sha=$(git -C "$repo" rev-parse HEAD)
@@ -145,6 +147,16 @@ export PATH="$temporary/bin:$PATH" RUNNER_TEMP="$temporary/runner" BUSTER_HOST_A
 export FIXTURE_PROBE="$probe" AB_BASE_SHA="$base_sha" GITHUB_EVENT_NAME=pull_request
 export GITHUB_ENV="$temporary/environment" GITHUB_OUTPUT="$temporary/outputs"
 helper="$repo/tools/ci/build-benchmarks.sh"
+
+base_config=$(bash "$helper" config-id "$base_sha")
+printf 'set(flag -O3)\n' > "$repo/cmake/BusterCodegen.cmake"
+git -C "$repo" -c user.name=Fixture -c user.email=fixture@example.invalid commit -qam codegen
+changed_config=$(bash "$helper" config-id HEAD)
+test "$changed_config" != "$base_config"
+printf 'int candidate;\n' > "$repo/candidate.c"
+git -C "$repo" add candidate.c
+git -C "$repo" -c user.name=Fixture -c user.email=fixture@example.invalid commit -qm candidate
+test "$(bash "$helper" config-id HEAD)" = "$changed_config"
 
 reset_case()
 {
@@ -228,6 +240,13 @@ for event in push workflow_dispatch; do
     test ! -d "$directory/base"
     bash "$helper" cleanup "$directory"
 done
+reset_case paired-dispatch
+export GITHUB_EVENT_NAME=workflow_dispatch PAIRED_BASE="$base_sha" AB_BASE_SHA="$base_sha" AB_CHECKER=true AB_TIER1=false
+bash "$helper"
+directory=$(sed -n 's/^BUSTER_BENCHMARK_BUILDS=//p' "$GITHUB_ENV")
+test "$(git -C "$directory/base" rev-parse HEAD)" = "$PAIRED_BASE"
+bash "$helper" cleanup "$directory"
+unset PAIRED_BASE
 export GITHUB_EVENT_NAME=pull_request
 
 for side in head base oracle; do
