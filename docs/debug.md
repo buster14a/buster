@@ -551,7 +551,7 @@ The rows the groups stop before (partial groups, file changes and rows marked
 with `DW_LNS_set_prologue_end`) are written one at a time in the same encoding.
 The writer had an exact twin that wrote every row alone; #2924 deleted it after
 `benchmark-debug` on the 9700X found the groups at least as fast at every row
-count (see the PR's record).
+count ([record](https://github.com/buster14a/buster-performance/tree/b40a8b2a2/docs/measurements/scalar-paths-removal-2924-2026-11-17/c-linker-debug-inflate)).
 
 `benchmark-debug [--functions N] [--rows N]` measures validation, size calculation, all five section
 writes, and final address patching together. Its default is 4,096 functions
@@ -567,7 +567,9 @@ numbers cannot establish whole `-g` compilation performance or a benefit from
 streaming during compilation. Run each build, test and measurement under the
 9700X's shared lock, with measurements pinned to CPU 2.
 
-On October 23, 2026, three separate processes on the approved 9700X, each
+The measurement below is dated: it predates #2924's deletion of the exact
+twin, which its scalar column timed, and the flags it ran with. On October
+23, 2026, three separate processes on the approved 9700X, each
 locked and pinned to CPU 2, measured frozen head
 `7966b9f3fa87b4d3a71e0cc96262ef009c1a23ee`. The ranges below are the three
 process medians, each based on 21 passes:

@@ -501,7 +501,7 @@ static bool snapshot_test_write_link(Link* link, const Bind* bind, const Runtime
 
 // A program bound against a loaded runtime by bind_begin_borrowed, as bind_test_program binds it by bind_begin: the
 // driver's binding, whose runtime atoms keep their bytes in the snapshot's mapping (#2546).
-static bool snapshot_test_borrowed_program(BindTestProgram* test, const Runtime* runtime, LinkProgramOptions options, BindPath path)
+static bool snapshot_test_borrowed_program(BindTestProgram* test, const Runtime* runtime, LinkProgramOptions options)
 {
     uint64_t name_bytes = 0;
     uint64_t atom_bytes = 0;
@@ -509,7 +509,7 @@ static bool snapshot_test_borrowed_program(BindTestProgram* test, const Runtime*
     test->arena = arena_reserve(BUSTER_BIND_TEST_BIND_BYTES);
     test->bind = (Bind){ 0 };
     bool result = link_program_generate_begin(&test->program, options, extra, name_bytes, atom_bytes) && test->arena.base != 0;
-    result = result && bind_begin_borrowed(&test->bind, &test->program.link, runtime, path, &test->program.bytes, options.units, &test->arena);
+    result = result && bind_begin_borrowed(&test->bind, &test->program.link, runtime, &test->program.bytes, options.units, &test->arena);
     result = result && link_program_generate_atoms(&test->program);
     result = result && bind_end(&test->bind, &test->program.link);
     result = result && link_program_generate_end(&test->program);
@@ -563,23 +563,22 @@ static bool snapshot_test_write_borrowed(Link* link, const Bind* bind, const Run
     return ran && write.succeeded;
 }
 
-// Binds a program against each runtime by `path` and writes it with 1 and 8 lanes, as a dynamic PIE, a static
+// Binds a program against each runtime and writes it with 1 and 8 lanes, as a dynamic PIE, a static
 // executable or a static PIE by the runtimes' kind: the same links, bindings and files.
-static void snapshot_test_link(SnapshotTestTally* tally, const ExecutableTestDirectory* directory, const Runtime* imported, const Runtime* loaded, LinkProgramOptions options,
-                               BindPath path, const char* name, uint64_t index)
+static void snapshot_test_link(SnapshotTestTally* tally, const ExecutableTestDirectory* directory, const Runtime* imported, const Runtime* loaded, LinkProgramOptions options, const char* name, uint64_t index)
 {
     BindTestProgram a;
     BindTestProgram b;
     // Both bound, so that both can be released whatever happens.
-    const bool bound_imported = bind_test_program(&a, imported, options, path);
-    const bool bound_loaded = bind_test_program(&b, loaded, options, path);
+    const bool bound_imported = bind_test_program(&a, imported, options);
+    const bool bound_loaded = bind_test_program(&b, loaded, options);
     const bool bound = bound_imported && bound_loaded;
     snapshot_test_expect(tally, bound, "the program bound against both", index);
     snapshot_test_expect(tally, bound && bind_test_same_links(&a.program.link, &b.program.link) && bind_test_same_binds(&a.bind, &b.bind), "the same link and binding", index);
     // Against the loaded runtime again, over binding's arena dirtied first (bind_test_dirty): the members' records read
     // through their own view (#490), and Bind.symbols not cleared.
     BindTestProgram c;
-    const bool bound_dirty = bind_test_program_dirtied(&c, loaded, options, path, bind_test_dirty_bytes(b.arena.length));
+    const bool bound_dirty = bind_test_program_dirtied(&c, loaded, options, bind_test_dirty_bytes(b.arena.length));
     snapshot_test_expect(tally,
                          !bound || (bound_dirty && bind_test_same_links(&b.program.link, &c.program.link) && bind_test_same_binds(&b.bind, &c.bind) &&
                                     bind_test_kept_pattern(&c.bind, loaded)),
@@ -588,7 +587,7 @@ static void snapshot_test_link(SnapshotTestTally* tally, const ExecutableTestDir
     // Against the loaded runtime with its atoms' bytes borrowed (bind_begin_borrowed, the driver's, #2546): the same
     // link, with its runtime atoms in the snapshot's mapping; written below.
     BindTestProgram d;
-    const bool bound_borrowed = snapshot_test_borrowed_program(&d, loaded, options, path);
+    const bool bound_borrowed = snapshot_test_borrowed_program(&d, loaded, options);
     uint64_t borrowed = 0;
     uint64_t copied = 0;
     for (AtomId atom = 1; bound && bound_borrowed && d.program.link.atoms.count == b.program.link.atoms.count && atom < d.program.link.atoms.count; atom += 1)
@@ -657,20 +656,18 @@ static void snapshot_test_link(SnapshotTestTally* tally, const ExecutableTestDir
 }
 
 // test-bind's loader case (main reads _r_debug and __libc_stack_end, which only the loader exports) bound against a
-// dynamic PIE's imported runtime and its loaded one by both paths: the same links and bindings, and the loaded
+// dynamic PIE's imported runtime and its loaded one: the same links and bindings, and the loaded
 // runtime's executable runs with the case's status.
 static void snapshot_test_loader_case(SnapshotTestTally* tally, const ExecutableTestDirectory* directory, const Runtime* imported, const Runtime* loaded)
 {
-    for (uint32_t path = 0; path < 2; path += 1)
     {
-        const BindPath bind_path = path == 0 ? BIND_PATH_VECTOR : BIND_PATH_EXACT;
         BindTestCaseProgram a;
         BindTestCaseProgram b;
-        bind_test_case_program(&a, imported, BIND_TEST_CASE_LOADER, bind_path, true);
-        bind_test_case_program(&b, loaded, BIND_TEST_CASE_LOADER, bind_path, true);
+        bind_test_case_program(&a, imported, BIND_TEST_CASE_LOADER, true);
+        bind_test_case_program(&b, loaded, BIND_TEST_CASE_LOADER, true);
         const bool bound = a.bound && b.bound;
         snapshot_test_expect(tally, bound && bind_test_same_links(&a.test.link, &b.test.link) && bind_test_same_binds(&a.test.bind, &b.test.bind),
-                             "the loader's case: the same link and binding", path);
+                             "the loader's case: the same link and binding", 0);
         char program[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
         snapshot_test_path(program, directory->path, "loader");
         Scratch scratch = scratch_begin(0);
@@ -682,7 +679,7 @@ static void snapshot_test_loader_case(SnapshotTestTally* tally, const Executable
         int status = -1;
         const bool ran = written && executable_test_run(program, output, &length, &status);
         snapshot_test_expect(tally, ran && WIFEXITED(status) && WEXITSTATUS(status) == bind_test_cases[BIND_TEST_CASE_LOADER].status,
-                             "the loader's case runs with its status", path);
+                             "the loader's case runs with its status", 0);
         scratch_end(scratch);
         if (!directory->keep)
         {
@@ -716,9 +713,9 @@ static bool snapshot_test_links(const ExecutableTestDirectory* directory, const 
     for (uint32_t i = 0; status == SNAPSHOT_STATUS_LOADED && i <= BUSTER_LINK_TEST_PROGRAMS; i += 1)
     {
         const char* name = i == BUSTER_LINK_TEST_PROGRAMS ? "calling libc, --functions workers" : link_test_program_names[i];
-        for (uint32_t path = 0; options[i].libc && path < 2; path += 1)
+        if (options[i].libc)
         {
-            snapshot_test_link(&tally, directory, imported, &loaded, options[i], path == 0 ? BIND_PATH_VECTOR : BIND_PATH_EXACT, name, (uint64_t)i * 2 + path);
+            snapshot_test_link(&tally, directory, imported, &loaded, options[i], name, i);
             linked += 1;
         }
     }
@@ -726,7 +723,7 @@ static bool snapshot_test_links(const ExecutableTestDirectory* directory, const 
     {
         snapshot_test_loader_case(&tally, directory, imported, &loaded);
     }
-    printf("  %u programs bound and written against both runtimes\n", linked / 2);
+    printf("  %u programs bound and written against both runtimes\n", linked);
     if (status == SNAPSHOT_STATUS_LOADED)
     {
         runtime_release(&loaded);
@@ -1033,7 +1030,7 @@ static bool snapshot_test_staleness(const ExecutableTestDirectory* directory, co
 // unresolved names (including a shared library's permitted undefined names) must request the caller's normal retry.
 // A needed named library can force GCC retention without a direct GCC import or a version need. Its unversioned
 // strong reference and lack of DT_NEEDED must reach bind_end's runtime_needed check, not an earlier deferred check.
-static void snapshot_test_deferred_dependency(SnapshotTestTally* tally, const Runtime* runtime, BindPath path, bool stale, const char* directory)
+static void snapshot_test_deferred_dependency(SnapshotTestTally* tally, const Runtime* runtime, bool stale, const char* directory)
 {
     if (runtime->gcc_s.exports.count != 0)
     {
@@ -1045,21 +1042,21 @@ static void snapshot_test_deferred_dependency(SnapshotTestTally* tally, const Ru
         RuntimeLibraries libraries = { 0 };
         const RuntimeError error = written ? runtime_libraries_import(&libraries, runtime, &name, 1, &place, 1) : RUNTIME_ERROR_IMPORT;
         snapshot_test_expect(tally, error == RUNTIME_ERROR_NONE && libraries.count == 1 && libraries.needs[0].count == 0,
-                             "an unversioned named dependency imported", path);
+                             "an unversioned named dependency imported", 0);
         if (error == RUNTIME_ERROR_NONE)
         {
             BindTestLink test;
             const bool initialized = bind_test_link_begin(&test, runtime, bind_test_room(runtime));
             const SymbolId main = initialized ? bind_test_symbol(&test, "main", BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, BUSTER_LINK_SOURCE_PROGRAM) : 0;
             const SymbolId entry = main != 0 ? bind_test_symbol(&test, file.export, BUSTER_LINK_SYMBOL_GLOBAL, BUSTER_LINK_SOURCE_NONE) : 0;
-            const bool begun = entry != 0 && bind_begin(&test.bind, &test.link, runtime, path, &test.bytes, 1, &test.arena) && bind_test_define(&test, main);
-            snapshot_test_expect(tally, begun && !test.bind.deferred_checked, "the named reference hasn't checked GCC at bind_begin", path);
+            const bool begun = entry != 0 && bind_begin(&test.bind, &test.link, runtime, &test.bytes, 1, &test.arena) && bind_test_define(&test, main);
+            snapshot_test_expect(tally, begun && !test.bind.deferred_checked, "the named reference hasn't checked GCC at bind_begin", 0);
             test.bind.libraries = &libraries;
             const bool ended = begun && bind_end(&test.bind, &test.link);
             snapshot_test_expect(tally, begun && ended == !stale && test.bind.error == (stale ? BIND_ERROR_SNAPSHOT : BIND_ERROR_NONE) &&
                                          test.bind.libraries_needed == 1 && (test.bind.runtime_needed & BUSTER_BIND_NEEDS_GCC_S) != 0 &&
                                          test.bind.deferred_checked && test.bind.gcc_s_needed,
-                                 "a named dependency checks stale GCC before forced retention; the retry retains it", path);
+                                 "a named dependency checks stale GCC before forced retention; the retry retains it", 0);
             bind_test_link_end(&test);
         }
         runtime_libraries_release(&libraries);
@@ -1070,9 +1067,9 @@ static void snapshot_test_deferred_dependency(SnapshotTestTally* tally, const Ru
     }
 }
 
-static void snapshot_test_deferred_bind(SnapshotTestTally* tally, const Runtime* runtime, BindPath path, bool stale, const char* directory)
+static void snapshot_test_deferred_bind(SnapshotTestTally* tally, const Runtime* runtime, bool stale, const char* directory)
 {
-    snapshot_test_deferred_dependency(tally, runtime, path, stale, directory);
+    snapshot_test_deferred_dependency(tally, runtime, stale, directory);
     if (runtime->gcc_s.version_count != 0)
     {
         const ImportVersion* version = &runtime->gcc_s.versions[0];
@@ -1092,10 +1089,9 @@ static void snapshot_test_deferred_bind(SnapshotTestTally* tally, const Runtime*
         Bind bind = {
             .runtime = runtime,
             .libraries = &libraries,
-            .path = path,
         };
         bind_library_versions(&bind, 1);
-        snapshot_test_expect(tally, bind.error == (stale ? BIND_ERROR_SNAPSHOT : BIND_ERROR_NONE), "a needed library's version checks deferred probes", path);
+        snapshot_test_expect(tally, bind.error == (stale ? BIND_ERROR_SNAPSHOT : BIND_ERROR_NONE), "a needed library's version checks deferred probes", 0);
     }
     static const char* const names[] = { 0, "_Unwind_Backtrace", "_Unwind_Backtrace", "__splitstack_getcontext", "buster_new_unwinder", "buster_new_unwinder" };
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(names); c += 1)
@@ -1107,7 +1103,7 @@ static void snapshot_test_deferred_bind(SnapshotTestTally* tally, const Runtime*
         const uint8_t flags = (weak ? BUSTER_LINK_SYMBOL_WEAK : BUSTER_LINK_SYMBOL_GLOBAL) | BUSTER_LINK_SYMBOL_NOTYPE;
         SymbolId reference = initialized && names[c] != 0 && c != 5 ? bind_test_symbol(&test, names[c], flags, BUSTER_LINK_SOURCE_NONE) : 0;
         bool built = main != 0 && bind_test_define(&test, main) && (names[c] == 0 || c == 5 || reference != 0);
-        const bool begun = built && bind_begin(&test.bind, &test.link, runtime, path, &test.bytes, 1, &test.arena);
+        const bool begun = built && bind_begin(&test.bind, &test.link, runtime, &test.bytes, 1, &test.arena);
         if (begun && c == 5)
         {
             reference = bind_test_symbol(&test, names[c], flags, BUSTER_LINK_SOURCE_NONE);
@@ -1170,10 +1166,7 @@ static bool snapshot_test_deferred(const ExecutableTestDirectory* directory, con
         {
             snapshot_test_expect(&tally, loaded.probes[probe].deferred && runtime_probes_current(&loaded) && !runtime_deferred_probes_current(&loaded),
                                  "only deferred validation sees the change", missing);
-            for (uint32_t way = 0; way < 2; way += 1)
-            {
-                snapshot_test_deferred_bind(&tally, &loaded, way == 0 ? BIND_PATH_VECTOR : BIND_PATH_EXACT, true, place);
-            }
+            snapshot_test_deferred_bind(&tally, &loaded, true, place);
             runtime_release(&loaded);
         }
         snapshot_test_expect(&tally, snapshot_discard(place, imported->kind), "the caller discards the stale snapshot", missing);
@@ -1182,10 +1175,7 @@ static bool snapshot_test_deferred(const ExecutableTestDirectory* directory, con
         snapshot_test_expect(&tally, result.status == SNAPSHOT_STATUS_MISSING && result.error == RUNTIME_ERROR_NONE && result.written, "the retry imports and writes", missing);
         if (result.error == RUNTIME_ERROR_NONE)
         {
-            for (uint32_t way = 0; way < 2; way += 1)
-            {
-                snapshot_test_deferred_bind(&tally, &opened, way == 0 ? BIND_PATH_VECTOR : BIND_PATH_EXACT, false, place);
-            }
+            snapshot_test_deferred_bind(&tally, &opened, false, place);
             runtime_release(&opened);
         }
         scratch_end(scratch);
@@ -1670,7 +1660,7 @@ static bool snapshot_test_damaged(const ExecutableTestDirectory* directory, cons
     Runtime whole;
     const SnapshotStatus whole_status = snapshot_test_damage(&whole, file, path, good, UINT64_MAX, kind, compiler);
     BindTestProgram reference = { 0 };
-    const bool referenced = whole_status == SNAPSHOT_STATUS_LOADED && bind_test_program(&reference, &whole, options, BIND_PATH_VECTOR);
+    const bool referenced = whole_status == SNAPSHOT_STATUS_LOADED && bind_test_program(&reference, &whole, options);
     snapshot_test_expect(&tally, referenced, "the program bound against the whole snapshot", 0);
     uint32_t joined = UINT32_MAX;
     uint32_t unjoined = UINT32_MAX;
@@ -1693,17 +1683,17 @@ static bool snapshot_test_damaged(const ExecutableTestDirectory* directory, cons
         const uint32_t piece = damaged[d];
         const uint64_t flip = piece != UINT32_MAX ? snapshot_test_piece_byte(header, &view, piece) : 0;
         snapshot_test_expect(&tally, piece == UINT32_MAX || snapshot_test_piece_at(header, &view, flip) == piece, "the byte changed is the piece's", d);
-        for (uint32_t way = 0; piece != UINT32_MAX && way < 2; way += 1)
+        if (piece != UINT32_MAX)
         {
             Runtime loaded;
             const SnapshotStatus status = snapshot_test_damage(&loaded, file, path, good, flip, kind, compiler);
             BindTestProgram bound = { 0 };
-            const bool succeeded = status == SNAPSHOT_STATUS_LOADED && bind_test_program(&bound, &loaded, options, way == 0 ? BIND_PATH_VECTOR : BIND_PATH_EXACT);
+            const bool succeeded = status == SNAPSHOT_STATUS_LOADED && bind_test_program(&bound, &loaded, options);
             const bool reads = d < 3;
             const bool right = reads ? !succeeded && bound.bind.error == BIND_ERROR_SNAPSHOT
                                      : succeeded && bind_test_same_links(&bound.program.link, &reference.program.link) && bind_test_same_binds(&bound.bind, &reference.bind);
             snapshot_test_expect(&tally, status == SNAPSHOT_STATUS_LOADED && right, reads ? "a damaged piece the link reads fails the binding" : "a damaged piece it doesn't, binds",
-                                 d * 2 + way);
+                                 d);
             if (status == SNAPSHOT_STATUS_LOADED)
             {
                 bind_test_release(&bound);

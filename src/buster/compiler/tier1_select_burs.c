@@ -24,9 +24,10 @@
 //   rule's kind (tier1_burs_pick), whose walks fill its fields. A node whose operator the grammar doesn't cover, or whose
 //   rule names a candidate the walks didn't make (a walk past BUSTER_TIER1_SELECT_WALK), takes maximal munch's
 //   (tier1_select_munch): the common fallback for what the tables don't cover. An address whose
-//   displacement doesn't fit 32 bits is no fold's: its class is the REG leaf's (tier1_burs_displacement), whose pattern is
+//   displacement doesn't fit 32 bits is no fold's: its class is the REG leaf's (the tests' tier1_burs_displacement), whose pattern is
 //   munch's, the one candidate it has (its constant index in a register, #141) or none, so that both paths take or refuse
-//   it alike. Scalar classification, labeling and rule lookup are independent twins of the vector kernels. The cover is
+//   it alike. Classification, labeling and rule lookup are vector kernels; the tests check them against their definitions
+//   (tier1_select_burs_test.c's equations, tier1_burs_displacement and tier1_select_stack_object). The cover is
 //   the cheapest the grammar has for each tree, and the grammar has every candidate the generator makes for the
 //   operators it covers, so it is never costlier than munch's in the grammar's cost: each pattern's structural bound on
 //   its records, not the records the consumer writes (docs/tier1-selection.md has an addition of two loads, which is
@@ -71,7 +72,8 @@ typedef enum Tier1BursNonterminal
     TIER1_BURS_NONTERMINALS,
 } Tier1BursNonterminal;
 
-// A constant's class bits (tier1_burs_constant_bits): which of the constant nonterminals it derives.
+// A constant's class bits (tier1_burs_constant_bits_vector): which of the constant nonterminals it derives: an immediate
+// that fits, a lea's shift count, a power of two, 3, 5 or 9, a shift's count, a zero and a 32-bit displacement.
 #define BUSTER_TIER1_BURS_FIT 1u
 #define BUSTER_TIER1_BURS_SCALE 2u
 #define BUSTER_TIER1_BURS_POW2 4u
@@ -411,11 +413,6 @@ BUSTER_TIER1_SHARED BUSTER_BAKED uint8_t tier1_burs_goal[TIER1_BURS_OPERATORS + 
 BUSTER_TIER1_SHARED BUSTER_BAKED uint32_t tier1_burs_status;
 
 #ifndef BUSTER_TIER1_BURS_STORAGE_ONLY
-static uint32_t tier1_burs_alu(uint32_t operation, uint32_t kind)
-{
-    return TIER1_BURS_OP_ALU + operation * BUSTER_TIER1_BURS_KINDS + kind;
-}
-
 static uint8_t tier1_burs_operator_arity(uint32_t op)
 {
     uint8_t arity = 1;
@@ -880,59 +877,20 @@ static __attribute__((unused)) bool tier1_select_initialized(void)
     return __atomic_load_n(&tier1_burs_status, __ATOMIC_ACQUIRE) == 2;
 }
 
-// A constant's class bits, for its own width: what the candidates' consumers fold of its value (tier1_select_candidates:
-// an immediate that fits, a lea's shift count, a multiplication's power of two or its 3, 5 or 9, a shift's count, a truth
-// value's zero, a 32-bit displacement).
-static uint32_t tier1_burs_constant_bits(uint32_t width, uint64_t value)
-{
-    const uint32_t shift = tier1_select_log2(value);
-    uint32_t bits = tier1_select_immediate_fits(width, value) ? BUSTER_TIER1_BURS_FIT : 0;
-    bits |= value <= 3 ? BUSTER_TIER1_BURS_SCALE : 0;
-    bits |= shift < width * 8 ? BUSTER_TIER1_BURS_POW2 : 0;
-    bits |= value == 3 || value == 5 || value == 9 ? BUSTER_TIER1_BURS_M359 : 0;
-    bits |= value < width * 8 ? BUSTER_TIER1_BURS_SHAMT : 0;
-    bits |= value == 0 ? BUSTER_TIER1_BURS_ZERO : 0;
-    bits |= (uint64_t)(int64_t)(int32_t)value == value ? BUSTER_TIER1_BURS_DISP : 0;
-    return bits;
-}
-
-// Whether `node` is a link of a truth value's chain (tier1_select_truth): `icmp ne/eq (zext x), 0` in consecutive nodes,
-// x an I1 right before its extension, the zero only the comparison's.
-static bool tier1_burs_link(const Tier1SelectForest* forest, uint32_t node)
-{
-    const IrFunction* function = forest->function;
-    const uint32_t extended = function->a[node];
-    const uint32_t zero = function->b[node];
-    uint64_t value = 1;
-    return function->c[node] <= IR_NE && extended + 2 == node && zero + 1 == node && tier1_select_constant(function, zero, &value) && value == 0 &&
-           function->op[extended] == IR_ZEXT && function->type[function->a[extended]] == IR_I1 && function->a[extended] + 1 == extended && forest->uses[zero] == 1 &&
-           forest->blocks[zero] == forest->blocks[node];
-}
-
-// Whether an address's displacement, its constant index scaled and its offset, fits a disp32: the condition of its lea's
-// candidate (tier1_select_candidates). An address past it has no candidate, and its class is the munch's, which refuses
-// it wherever the walks would.
 // The vector classifier gathers an address's offset and its scale from its 16-byte record.
 _Static_assert(sizeof(IrAddress) == 16 && offsetof(IrAddress, offset) == 0 && offsetof(IrAddress, scale) == 8, "IrAddress's layout, which tier1_burs_classify_vector gathers");
 
-static bool tier1_burs_displacement(const IrFunction* function, uint32_t node)
-{
-    const IrAddress operand = function->addresses[function->c[node]];
-    const uint32_t b = function->b[node];
-    uint64_t constant = 0;
-    const bool constant_index = b != BUSTER_IR_NONE && tier1_select_constant(function, b, &constant);
-    int64_t displacement = 0;
-    return !__builtin_mul_overflow((int64_t)(constant_index ? constant : 0), (int64_t)operand.scale, &displacement) && !__builtin_add_overflow(displacement, operand.offset, &displacement) &&
-           displacement == (int64_t)(int32_t)displacement;
-}
+// The vector classifier gathers a frame object's size and its record's second qword (the alignment, the type and the
+// flags) from its 16-byte slot record.
+_Static_assert(sizeof(IrSlot) == 16 && offsetof(IrSlot, size) == 0 && offsetof(IrSlot, alignment) == 8 && offsetof(IrSlot, type) == 12 && offsetof(IrSlot, flags) == 13,
+    "IrSlot's layout, which tier1_burs_classify_vector gathers");
 
-// Each node's operator (tier1_burs_classify's scalar loop): what tier1_select_candidates would make of it. `users` is each
-// single-use node's user.
 // A floating == or !='s operator (#2922): FCMP_EQ, which a select takes by two cmovs where it is the select's condition
 // directly or through its I1 copy right after it, but the REG leaf's, as on #2791, where that select's values recur through
 // it (tier1_select_recurrent): the select tests its truth value, munch's TIER1_RULE_FLOAT_COMPARE, as
 // tier1_select_candidates makes no other candidate of it. Such a comparison's last user is the select or the copy, its
-// only one where the select may fold it (a tree child). Both classifiers' rare case.
+// only one where the select may fold it (a tree child). The classifier's one case a lane at a time: the walk is candidate
+// generation's too. `users` is each single-use node's user.
 static __attribute__((noinline)) uint32_t tier1_burs_equality(const Tier1SelectForest* forest, const uint32_t* users, uint32_t node)
 {
     const IrFunction* function = forest->function;
@@ -942,92 +900,6 @@ static __attribute__((noinline)) uint32_t tier1_burs_equality(const Tier1SelectF
     const uint32_t user = copied ? users[first] : first;
     const bool select = user < count && function->op[user] == IR_SELECT && function->a[user] == (copied ? first : node);
     return select && tier1_select_recurrent(function, user) ? TIER1_BURS_OP_REG : TIER1_BURS_OP_FCMP_EQ;
-}
-
-static uint32_t tier1_burs_classify_node(const Tier1SelectForest* forest, const uint32_t* users, uint32_t node)
-{
-    const IrFunction* function = forest->function;
-    const uint32_t count = function->instruction_count;
-    const uint32_t op = function->op[node];
-    const uint32_t type = function->type[node];
-    const uint32_t a = function->a[node];
-    const uint32_t b = function->b[node];
-    const bool integer = type == IR_I32 || type == IR_I64;
-    const bool narrow_bitwise = (op == IR_AND || op == IR_OR || op == IR_XOR) && (type == IR_I1 || type == IR_I8 || type == IR_I16);
-    const uint32_t a_type = a < count ? function->type[a] : IR_VOID;
-    uint32_t result = TIER1_BURS_OP_REG;
-    if (op == IR_CONST && tier1_select_mask_width(type) == 0 && tier1_select_float_width(type) == 0 && tier1_select_width(type) != 0)
-    {
-        result = TIER1_BURS_OP_CONST + tier1_burs_constant_bits(tier1_select_width(type), function->constants[a].low);
-    }
-    else if ((((op == IR_ADD || op == IR_SUB || op == IR_MUL || op == IR_AND || op == IR_OR || op == IR_XOR) && integer) || narrow_bitwise) && b < count)
-    {
-        const uint32_t operation = narrow_bitwise ? BUSTER_TIER1_BURS_NARROW :
-                                   op == IR_ADD ? (type == IR_I64 ? BUSTER_TIER1_BURS_ADD64 : BUSTER_TIER1_BURS_ADD32) :
-                                   op == IR_SUB ? (type == IR_I64 ? BUSTER_TIER1_BURS_SUB64 : BUSTER_TIER1_BURS_SUB32) :
-                                   op == IR_MUL ? BUSTER_TIER1_BURS_MUL : op == IR_AND ? BUSTER_TIER1_BURS_AND : op == IR_OR ? BUSTER_TIER1_BURS_OR : BUSTER_TIER1_BURS_XOR;
-        const uint32_t right = function->op[b];
-        const uint32_t kind = right == IR_CONST ? BUSTER_TIER1_BURS_KIND_C : right == IR_LOAD ? BUSTER_TIER1_BURS_KIND_L :
-                              right == IR_SHL && op == IR_ADD ? BUSTER_TIER1_BURS_KIND_S : BUSTER_TIER1_BURS_KIND_O;
-        result = tier1_burs_alu(operation, kind);
-    }
-    else if ((op == IR_SHL || op == IR_LSHR || op == IR_ASHR) && integer)
-    {
-        result = op == IR_SHL ? TIER1_BURS_OP_SHL : op == IR_LSHR ? TIER1_BURS_OP_LSHR : TIER1_BURS_OP_ASHR;
-    }
-    else if (op == IR_LOAD && tier1_select_memory_width(type) != 0)
-    {
-        const uint32_t user = users[node];
-        // Past no barrier but itself, a barrier of its own (tier1_select_barrier: every load, #1059's audit).
-        const bool foldable = function->flags[node] == 0 && forest->uses[node] == 1 && user < count && node < user && forest->blocks[user] == forest->blocks[node] &&
-                              forest->barriers[user] <= node + 1;
-        result = foldable ? TIER1_BURS_OP_LOAD_F : TIER1_BURS_OP_LOAD_N;
-    }
-    else if (op == IR_STORE && b < count && tier1_select_memory_width(function->type[b]) != 0)
-    {
-        result = TIER1_BURS_OP_STORE;
-    }
-    else if (op == IR_ADDRESS && tier1_burs_displacement(function, node))
-    {
-        result = b == BUSTER_IR_NONE ? TIER1_BURS_OP_ADDR_NOIDX : b < count && function->op[b] == IR_CONST ? TIER1_BURS_OP_ADDR_CIDX : TIER1_BURS_OP_ADDR_IDX;
-    }
-    else if ((op == IR_INTTOPTR && a_type == IR_I64) || (op == IR_PTRTOINT && type == IR_I64))
-    {
-        result = TIER1_BURS_OP_CONV_PTR;
-    }
-    else if (op == IR_STACK_ADDR && tier1_select_stack_object(function, a))
-    {
-        result = forest->blocks[node] == 0 ? TIER1_BURS_OP_SLOT_X : TIER1_BURS_OP_SLOT;
-    }
-    else if (op == IR_ICMP && b < count && (a_type == IR_I32 || a_type == IR_I64 || a_type == IR_PTR))
-    {
-        result = tier1_burs_link(forest, node) ? TIER1_BURS_OP_ICMP_LINK : TIER1_BURS_OP_ICMP;
-    }
-    else if (op == IR_ZEXT && (type == IR_I8 || type == IR_I16 || integer) && (a_type == IR_I1 || a_type == IR_I8 || a_type == IR_I16 || a_type == IR_I32))
-    {
-        result = a_type == IR_I1 && a + 1 == node ? TIER1_BURS_OP_ZEXT_TRUTH : TIER1_BURS_OP_ZEXT_PLAIN;
-    }
-    else if (op == IR_FCMP && b < count && tier1_select_float_width(a_type) != 0 && function->c[node] >= IR_LT && function->c[node] <= IR_GE)
-    {
-        result = TIER1_BURS_OP_FCMP_ORD;
-    }
-    else if (op == IR_FCMP && b < count && tier1_select_float_width(a_type) != 0 && function->c[node] <= IR_NE)
-    {
-        result = tier1_burs_equality(forest, users, node);
-    }
-    else if (op == IR_CBR && a + 1 == node)
-    {
-        result = TIER1_BURS_OP_CBR_ADJ;
-    }
-    else if (op == IR_SELECT && tier1_select_width(type) != 0)
-    {
-        result = TIER1_BURS_OP_SELECT;
-    }
-    else if (op == IR_COPY && type == IR_I1 && a + 1 == node && function->op[a] == IR_FCMP)
-    {
-        result = TIER1_BURS_OP_COPY_TRUTH;
-    }
-    return result;
 }
 
 // Per IR operation: an ALU operation's index (BUSTER_TIER1_BURS_ADD32 to XOR, 0xff for none), and a shift's operator.
@@ -1044,7 +916,7 @@ static __mmask16 tier1_burs_types(__mmask16 active, __m512i type, uint32_t types
     return _mm512_mask_test_epi32_mask(active, bit, _mm512_set1_epi32((int)types));
 }
 
-// The constant class bits (tier1_burs_constant_bits) of 8 values at once, each with its width in bytes.
+// The constant class bits of 8 values at once, each with its width in bytes.
 static __m256i tier1_burs_constant_bits_vector(__m512i value, __m512i width)
 {
     const __m512i zero = _mm512_setzero_si512();
@@ -1068,10 +940,39 @@ static __m256i tier1_burs_constant_bits_vector(__m512i value, __m512i width)
     return _mm512_cvtepi64_epi32(bits);
 }
 
-// The nodes' operators and visible children, 16 at a time, a node's operator its tier1_burs_classify_node's. Each node's operation,
+// Which of a function's first 64 slots are frame objects (tier1_select_stack_object), a bit each: eight 16-byte records
+// a step, their sizes and second qwords split by two permutes. The classifier looks a stack address's bit up in a
+// register, where a gather of its record would cost four gathers a block for the one or two lanes most blocks have.
+static uint64_t tier1_burs_slot_objects(const IrFunction* function)
+{
+    const uint32_t count = function->slot_count < 64 ? function->slot_count : 64;
+    const __m512i even = _mm512_setr_epi64(0, 2, 4, 6, 8, 10, 12, 14);
+    const __m512i odd = _mm512_setr_epi64(1, 3, 5, 7, 9, 11, 13, 15);
+    uint64_t objects = 0;
+    for (uint32_t first = 0; first < count; first += 8)
+    {
+        const uint32_t remaining = count - first;
+        const uint32_t live = remaining >= 8 ? 0xffu : (1u << remaining) - 1;
+        // Each record's two qwords: record r's are qwords 2r and 2r + 1 of the step's 128 bytes.
+        const uint32_t qwords = _pdep_u32(live, 0x5555u) * 3u;
+        const IrSlot* low_records = function->slots + first;
+        const IrSlot* high_records = remaining > 4 ? function->slots + first + 4 : low_records;
+        const __m512i low = _mm512_maskz_loadu_epi64((__mmask8)qwords, low_records);
+        const __m512i high = _mm512_maskz_loadu_epi64((__mmask8)(qwords >> 8), high_records);
+        const __m512i size = _mm512_permutex2var_epi64(low, even, high);
+        const __m512i second = _mm512_permutex2var_epi64(low, odd, high);
+        const __mmask8 sized = _mm512_cmple_epu64_mask(size, _mm512_set1_epi64((long long)BUSTER_TIER1_SELECT_MAX_OBJECT_BYTES));
+        const __mmask8 aligned = _mm512_cmple_epu64_mask(_mm512_and_si512(second, _mm512_set1_epi64(0xffffffff)), _mm512_set1_epi64(BUSTER_TIER1_SELECT_MAX_OBJECT_ALIGNMENT));
+        const __mmask8 ordinary = _mm512_testn_epi64_mask(_mm512_srli_epi64(second, 40), _mm512_set1_epi64(BUSTER_IR_SLOT_OVERFLOW_AREA));
+        objects |= (uint64_t)(live & sized & aligned & ordinary) << first;
+    }
+    return objects;
+}
+
+// The nodes' operators and visible children, 16 at a time: what tier1_select_candidates would make of each. Each node's operation,
 // type and flags go first into one 32-bit word (`words`, `count` of them), whose gathers then stay in the columns; the
-// children's columns are gathered by their indices where those are nodes. A frame object's address, whose slot the
-// class reads, takes the scalar classifier.
+// children's columns are gathered by their indices where those are nodes, a frame object's slot record and an address's
+// displacement too.
 static void tier1_burs_classify_vector(const Tier1SelectForest* forest, const uint32_t* users, uint32_t* words, uint32_t* classes, uint32_t* kids)
 {
     const IrFunction* function = forest->function;
@@ -1101,6 +1002,12 @@ static void tier1_burs_classify_vector(const Tier1SelectForest* forest, const ui
     const uint32_t narrows = (1u << IR_I1) | (1u << IR_I8) | (1u << IR_I16);
     const uint32_t compared = (1u << IR_I32) | (1u << IR_I64) | (1u << IR_PTR);
     const uint32_t floats = (1u << IR_F32) | (1u << IR_F64);
+    // Frame objects among the first 64 slots, as two dwords' bits: a stack address's lane shifts both by its slot, and a
+    // shift of 32 or more (the other dword's slots) gives 0.
+    const bool few_slots = function->slot_count <= 64;
+    const uint64_t slot_objects = tier1_burs_slot_objects(function);
+    const __m512i objects_low = _mm512_set1_epi32((int)(uint32_t)slot_objects);
+    const __m512i objects_high = _mm512_set1_epi32((int)(uint32_t)(slot_objects >> 32));
     for (uint32_t first = 0; first < count; first += 16)
     {
         const uint32_t remaining = count - first;
@@ -1185,9 +1092,8 @@ static void tier1_burs_classify_vector(const Tier1SelectForest* forest, const ui
         result = _mm512_mask_mov_epi32(result, store, _mm512_set1_epi32(TIER1_BURS_OP_STORE));
         // Addresses by their index, where their displacement fits (tier1_burs_displacement): the offset, which an index
         // that isn't a constant leaves alone, and a constant index's scaled value added. Where the constant or the offset
-        // doesn't fit 32 bits, which may still sum to a displacement that does, the scalar classifier decides.
+        // doesn't fit 32 bits, which may still sum to a displacement that does, the exact 64-bit arithmetic below decides.
         const __mmask16 address = active & _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_ADDRESS));
-        uint32_t exact = 0;
         if (address != 0)
         {
             const __m512i zero = _mm512_setzero_si512();
@@ -1214,7 +1120,41 @@ static void tier1_burs_classify_vector(const Tier1SelectForest* forest, const ui
                 const __mmask16 sum_fits = (__mmask16)(_mm512_cmpeq_epi64_mask(_mm512_srai_epi64(_mm512_slli_epi64(sum_low, 32), 32), sum_low) |
                                                        ((uint32_t)_mm512_cmpeq_epi64_mask(_mm512_srai_epi64(_mm512_slli_epi64(sum_high, 32), 32), sum_high) << 8));
                 covered |= small & sum_fits;
-                exact = constant_index & ~small;
+                // A constant or an offset past 32 bits, which may still sum to a disp32 (tier1_burs_displacement):
+                // the product of the constant and the scale (at most 255) exactly, by 32-bit limbs of the constant's
+                // magnitude, refused where it overflows 64 bits; then the sum, refused where it overflows; then the
+                // disp32's range.
+                const __mmask16 large = constant_index & ~small;
+                if (large != 0)
+                {
+                    const __m512i scales[2] = {
+                        _mm512_cvtepu32_epi64(_mm512_castsi512_si256(scale)),
+                        _mm512_cvtepu32_epi64(_mm512_extracti64x4_epi64(scale, 1)),
+                    };
+                    const __m512i values[2] = { value_low, value_high };
+                    const __m512i offsets[2] = { offset_low, offset_high };
+                    uint32_t fits = 0;
+                    for (uint32_t half = 0; half < 2; half += 1)
+                    {
+                        const __mmask8 negative = _mm512_movepi64_mask(values[half]);
+                        const __m512i magnitude = _mm512_mask_sub_epi64(values[half], negative, _mm512_setzero_si512(), values[half]);
+                        const __m512i low = _mm512_mul_epu32(magnitude, scales[half]);
+                        const __m512i high = _mm512_mul_epu32(_mm512_srli_epi64(magnitude, 32), scales[half]);
+                        // The magnitude's bits from 32 up, and those below: it fits an int64 under 2^63, or at exactly
+                        // 2^63 when negative.
+                        const __m512i top = _mm512_add_epi64(high, _mm512_srli_epi64(low, 32));
+                        const __m512i limit = _mm512_set1_epi64(INT64_C(1) << 31);
+                        const __mmask8 product_fits = _mm512_cmplt_epu64_mask(top, limit) |
+                                                      (negative & _mm512_cmpeq_epi64_mask(top, limit) & _mm512_testn_epi64_mask(low, _mm512_set1_epi64(0xffffffff)));
+                        const __m512i product = _mm512_mullo_epi64(values[half], scales[half]);
+                        const __m512i sum = _mm512_add_epi64(product, offsets[half]);
+                        // A signed addition overflows where both terms have one sign and the sum the other.
+                        const __mmask8 sum_overflow = _mm512_movepi64_mask(_mm512_andnot_si512(_mm512_xor_si512(product, offsets[half]), _mm512_xor_si512(sum, product)));
+                        const __mmask8 disp32 = _mm512_cmpeq_epi64_mask(_mm512_srai_epi64(_mm512_slli_epi64(sum, 32), 32), sum);
+                        fits |= (uint32_t)(product_fits & ~sum_overflow & disp32) << (half * 8);
+                    }
+                    covered |= large & (__mmask16)fits;
+                }
             }
             const __mmask16 no_index = covered & _mm512_cmpeq_epi32_mask(b, none);
             result = _mm512_mask_mov_epi32(result, covered, _mm512_set1_epi32(TIER1_BURS_OP_ADDR_IDX));
@@ -1224,8 +1164,9 @@ static void tier1_burs_classify_vector(const Tier1SelectForest* forest, const ui
         const __mmask16 conversion = (a_valid & _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_INTTOPTR)) & _mm512_cmpeq_epi32_mask(a_type, _mm512_set1_epi32(IR_I64))) |
                                      (is_i64 & _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_PTRTOINT)));
         result = _mm512_mask_mov_epi32(result, conversion, _mm512_set1_epi32(TIER1_BURS_OP_CONV_PTR));
-        // Integer comparisons, and among them a truth value's links (tier1_burs_link): ne or eq, of the zero extension
-        // right before the zero right before it, of the I1 right before the extension.
+        // Integer comparisons, and among them a truth value's links (tier1_select_truth's chains): ne or eq, of the zero
+        // extension right before the zero right before it, of the I1 right before the extension, the zero only the
+        // comparison's, in its block.
         const __mmask16 compare = b_valid & tier1_burs_types(a_valid, a_type, compared) & _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_ICMP));
         if (compare != 0)
         {
@@ -1270,15 +1211,49 @@ static void tier1_burs_classify_vector(const Tier1SelectForest* forest, const ui
         const __mmask16 copy = adjacent & _mm512_mask_cmpeq_epi32_mask(active, type, _mm512_set1_epi32(IR_I1)) & _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_COPY)) &
                                _mm512_cmpeq_epi32_mask(_mm512_and_si512(a_word, byte), _mm512_set1_epi32(IR_FCMP));
         result = _mm512_mask_mov_epi32(result, copy, _mm512_set1_epi32(TIER1_BURS_OP_COPY_TRUTH));
-        _mm512_mask_storeu_epi32(classes + first, active, result);
-        // A frame object's address, and an address the vector rule leaves: the scalar classifier's, which reads its slot
-        // or its displacement.
-        uint32_t slots = (active & _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_STACK_ADDR))) | exact | equal;
-        while (slots != 0)
+        // A frame object's address (tier1_select_stack_object): a slot of the function's, not the variadic overflow
+        // area, within the planner's object bounds; SLOT_X in the entry block. With up to 64 slots its bit is
+        // tier1_burs_slot_objects'; past them its record's size, alignment and flags are gathered from the slot's 16 bytes.
+        const __mmask16 slot_address = _mm512_mask_cmplt_epu32_mask(active & _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_STACK_ADDR)), a,
+            _mm512_set1_epi32((int)function->slot_count));
+        if (few_slots)
         {
-            const uint32_t lane = (uint32_t)__builtin_ctz(slots);
-            classes[first + lane] = tier1_burs_classify_node(forest, users, first + lane);
-            slots &= slots - 1;
+            const __m512i bits = _mm512_or_si512(_mm512_srlv_epi32(objects_low, a), _mm512_srlv_epi32(objects_high, _mm512_sub_epi32(a, _mm512_set1_epi32(32))));
+            const __mmask16 object = _mm512_mask_test_epi32_mask(slot_address, bits, _mm512_set1_epi32(1));
+            const __mmask16 entry = object & _mm512_cmpeq_epi32_mask(block, _mm512_setzero_si512());
+            result = _mm512_mask_mov_epi32(result, object, _mm512_set1_epi32(TIER1_BURS_OP_SLOT));
+            result = _mm512_mask_mov_epi32(result, entry, _mm512_set1_epi32(TIER1_BURS_OP_SLOT_X));
+        }
+        else if (slot_address != 0)
+        {
+            const __m512i zero = _mm512_setzero_si512();
+            const __m512i record = _mm512_slli_epi32(a, 1);
+            const __m512i size_low = _mm512_mask_i32gather_epi64(zero, (__mmask8)slot_address, _mm512_castsi512_si256(record), function->slots, 8);
+            const __m512i size_high = _mm512_mask_i32gather_epi64(zero, (__mmask8)(slot_address >> 8), _mm512_extracti64x4_epi64(record, 1), function->slots, 8);
+            // The record's second qword: the alignment, then the type and flags bytes and the padding. Indices of qwords
+            // (a slot's 2a and 2a + 1, scale 8) stay in a dword for every slot below 2^30.
+            const __m512i second_low = _mm512_mask_i32gather_epi64(zero, (__mmask8)slot_address, _mm512_castsi512_si256(_mm512_add_epi32(record, _mm512_set1_epi32(1))), function->slots, 8);
+            const __m512i second_high = _mm512_mask_i32gather_epi64(zero, (__mmask8)(slot_address >> 8), _mm512_extracti64x4_epi64(_mm512_add_epi32(record, _mm512_set1_epi32(1)), 1), function->slots, 8);
+            const __m512i tail = _mm512_inserti64x4(_mm512_castsi256_si512(_mm512_cvtepi64_epi32(second_low)), _mm512_cvtepi64_epi32(second_high), 1);
+            const __m512i flags = _mm512_inserti64x4(_mm512_castsi256_si512(_mm512_cvtepi64_epi32(_mm512_srli_epi64(second_low, 40))),
+                                                     _mm512_cvtepi64_epi32(_mm512_srli_epi64(second_high, 40)), 1);
+            const __m512i bytes = _mm512_set1_epi64((long long)BUSTER_TIER1_SELECT_MAX_OBJECT_BYTES);
+            const __mmask16 sized = (__mmask16)(_mm512_cmple_epu64_mask(size_low, bytes) | ((uint32_t)_mm512_cmple_epu64_mask(size_high, bytes) << 8));
+            const __mmask16 object = slot_address & sized & _mm512_cmple_epu32_mask(tail, _mm512_set1_epi32((int)BUSTER_TIER1_SELECT_MAX_OBJECT_ALIGNMENT)) &
+                                     _mm512_testn_epi32_mask(flags, _mm512_set1_epi32(BUSTER_IR_SLOT_OVERFLOW_AREA));
+            const __mmask16 entry = object & _mm512_cmpeq_epi32_mask(block, zero);
+            result = _mm512_mask_mov_epi32(result, object, _mm512_set1_epi32(TIER1_BURS_OP_SLOT));
+            result = _mm512_mask_mov_epi32(result, entry, _mm512_set1_epi32(TIER1_BURS_OP_SLOT_X));
+        }
+        _mm512_mask_storeu_epi32(classes + first, active, result);
+        // A floating == or != (#2922): tier1_burs_equality's, whose select's recurrence is tier1_select_recurrent's
+        // bounded walk, which candidate generation shares (#3450's record has its census).
+        uint32_t equalities = equal;
+        while (equalities != 0)
+        {
+            const uint32_t lane = (uint32_t)__builtin_ctz(equalities);
+            classes[first + lane] = tier1_burs_equality(forest, users, first + lane);
+            equalities &= equalities - 1;
         }
     }
     // The visible children, from the classes: a tree child, a constant or a frame object's address in this block or the

@@ -24,8 +24,6 @@
 typedef struct IrSroaOptions IrSroaOptions;
 struct IrSroaOptions
 {
-    // The verified optimizer's passes' twin, in the preparation and the dead-code rewrite (#2924's C9g removes it).
-    bool scalar;
     bool simd;
     bool flagged;
     // #3311: the eightbytes of slots read and written at mixed widths (ir_sroa_widen), and a register-class aggregate
@@ -792,7 +790,7 @@ static IrCheck ir_sroa_split(const IrFunction* function, Arena* output, Arena* s
     IrCheck check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, 0);
     if (output != scratch)
     {
-        check = ir_optimize_prepare(&work.ir, function, output, scratch, BUSTER_SCALAR_PATH(options.scalar), options.simd);
+        check = ir_optimize_prepare(&work.ir, function, output, scratch, options.simd);
     }
     if (check.error == IR_OK)
     {
@@ -889,7 +887,6 @@ static IrCheck ir_sroa_split(const IrFunction* function, Arena* output, Arena* s
         }
         IrOptimizeOptions rewrite = ir_optimize_options();
         rewrite.passes = BUSTER_IR_OPTIMIZE_DCE;
-        rewrite.scalar = BUSTER_SCALAR_PATH(options.scalar);
         ir_optimize_dce(&work.ir, rewrite);
         check.error = ir_optimize_rewrite(&work.ir, output, scratch, rewrite, &work.statistics.function);
     }
@@ -1129,7 +1126,7 @@ static IrCheck ir_sroa_widen(const IrFunction* function, Arena* output, Arena* s
     const bool eligible = options.flagged && f->debug == NULL && f->slot_count != 0 && output != scratch;
     if (eligible)
     {
-        check = ir_optimize_prepare(&work.ir, f, output, scratch, BUSTER_SCALAR_PATH(options.scalar), options.simd);
+        check = ir_optimize_prepare(&work.ir, f, output, scratch, options.simd);
     }
     uint8_t* kinds = NULL;
     uint8_t* widen = NULL;

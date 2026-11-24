@@ -548,8 +548,7 @@ static ForeignGcBenchmarkSample foreign_gc_benchmark_sample(const ForeignGcBench
     if (prepared)
     {
         const SymbolId entry = foreign_link_test_symbol(&foreign, result, "_start");
-        sample.valid = entry != 0 && (variant->path == FOREIGN_PATH_EXACT ? executable_test_write_exact(&result->link, entry, destination, 1, &sample.written) :
-                                                                         executable_test_write(&result->link, entry, destination, 1, &sample.written, 0, 0));
+        sample.valid = entry != 0 && executable_test_write(&result->link, entry, destination, 1, &sample.written, 0, 0);
         sample.atoms = result->link.atoms.count;
         sample.symbols = result->link.symbols.count;
         sample.fixups = result->link.fixups.count;

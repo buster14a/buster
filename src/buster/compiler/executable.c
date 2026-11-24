@@ -91,8 +91,8 @@
 // that PC32 in code and read-only data; a PC32 in writable data and a PC64 anywhere, it and lld write off by the load
 // address); and a CALL, PC32 or PC64 to an absolute symbol, for the same reason, as GNU ld and lld refuse them.
 //
-// A PIE's passes are data-parallel and vectorized, each with an exact twin, scalar, that ExecutableOptions.exact selects
-// and the tests compare it with: the symbols' classes as bitsets, 64 symbols at a time (executable_mark_symbols); the
+// A PIE's passes are data-parallel and vectorized (the exact twins that ExecutableOptions.exact selected, scalar, went
+// with #2924): the symbols' classes as bitsets, 64 symbols at a time (executable_mark_symbols); the
 // fixups' targets tested 16 at a time against a filter of the symbols outside the image in two registers
 // (executable_filter_test), whose few hits the exact check tells apart; the atoms the loader writes found 64 at a time
 // (executable_written_atoms), and a dense atom's RELR words from its fixup count alone (executable_atom_is_dense); and
@@ -613,8 +613,6 @@ struct ExecutableOptions
     const ExecutableDebug* debug;
     const ExecutableDebugSections* debug_sections;
     const ExecutableSymbols* symbols;
-    // For the tests: a dynamic PIE's passes by their exact twins, scalar, which must write the same file.
-    bool exact;
     // For a link whose atoms' bytes are borrowed from files mapped privately (link-foreign's): each chunk is copied into
     // a lane's buffer, patched there, hashed and written from it, so that the atoms' bytes are only read. Patched in
     // place, each page of a mapped file would be copied on its first write. An output written in order (a FIFO) is

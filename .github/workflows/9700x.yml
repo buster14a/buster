@@ -1834,12 +1834,12 @@ jobs:
           taskset -c "$cpu" ./build/compiler benchmark-ir-optimize-passes
 
       - name: Benchmark the verified Tier 1 optimization passes after scalar work
-        # Where `changes` doesn't rule it out (the module's sources).
+        # Where `changes` doesn't rule it out (the module's sources). benchmark-ir-optimize has one path since #2924, and no
+        # such sample; nor have LICM and SROA, so the conditioned sample is GVN's alone.
         if: needs.changes.outputs.ir_optimize != 'false'
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          taskset -c "$cpu" ./build/compiler benchmark-ir-optimize --only vector --after-scalar 200
-          taskset -c "$cpu" ./build/compiler benchmark-ir-optimize-passes --only vector --after-scalar 200
+          taskset -c "$cpu" ./build/compiler benchmark-ir-optimize-passes --pass gvn --only vector --after-scalar 200
 
       - name: Hold sqlite3.c's compile to its instructions' baseline
         # #2850: the user instructions of `-c` of the frozen corpus's sqlite3.c, the median of three compiles, against

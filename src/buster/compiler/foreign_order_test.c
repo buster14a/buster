@@ -465,7 +465,6 @@ static void foreign_order_test_program(const char* directory, Arena* arena, Fore
                                 .entry = foreign_link_test_symbol(&foreign, &converted, "_start"),
                                 .dynamic = dynamic ? &converted.dynamic : 0,
                                 .symbols = &symbols,
-                                .exact = path == 0,
                             },
                         };
                         emitted = ids != 0 && lane_run(foreign_test_lanes[l], executable_test_lane_main, &write, 0) && write.succeeded;

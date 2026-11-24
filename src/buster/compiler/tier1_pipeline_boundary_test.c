@@ -272,7 +272,6 @@ static bool tier1_pipeline_boundary_tier1(Tier1PipelineTest* test, const Tier0Fu
     if (ok)
     {
         IrOptimizeOptions options = ir_optimize_options();
-        options.path = test->vector ? BUSTER_IR_OPTIMIZE_VECTOR : BUSTER_IR_OPTIMIZE_SCALAR;
         check = ir_optimize(&promoted, &test->arenas[TIER1_PIPELINE_OPTIMIZED], scratch, options, &optimized);
         ok = tier1_pipeline_expect(test, check.error == IR_OK, "boundary SSA optimizes");
     }
@@ -538,10 +537,9 @@ static void tier1_pipeline_boundaries(Tier1PipelineTest* test)
         tier1_pipeline_boundary_fixture(&fixture, shape);
         memcpy(&original, &fixture, sizeof(original));
         test->fixture = BUSTER_TIER1_PIPELINE_CASES + shape;
-        for (uint32_t variant = 0; variant < 4; variant += 1)
+        for (uint32_t variant = 0; variant < 2; variant += 1)
         {
-            test->vector = (variant & 1) != 0;
-            test->rematerialize = (variant & 2) != 0;
+            test->rematerialize = variant != 0;
             uint8_t* machine[2] = { MAP_FAILED, MAP_FAILED };
             uint64_t mapped[2] = {0};
             uint64_t entry[2] = {0};
@@ -609,6 +607,6 @@ static void tier1_pipeline_boundaries(Tier1PipelineTest* test)
             }
         }
     }
-    tier1_pipeline_expect(test, pairs == BUSTER_TIER1_BOUNDARY_CASES * 4 * BUSTER_TIER1_PIPELINE_INPUTS, "every boundary fixture executes both backends on every input and option combination");
+    tier1_pipeline_expect(test, pairs == BUSTER_TIER1_BOUNDARY_CASES * 2 * BUSTER_TIER1_PIPELINE_INPUTS, "every boundary fixture executes both backends on every input and option combination");
     printf("tier1 pipeline boundaries: %u native differential pairs (%u native results)\n", pairs, pairs * 2);
 }

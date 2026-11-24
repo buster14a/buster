@@ -182,7 +182,6 @@ static IrCheck ir_optimize_text_transform(const IrOptimizeTextFixture* fixture, 
     else if (fixture->pass == IR_OPTIMIZE_TEXT_SROA || fixture->pass == IR_OPTIMIZE_TEXT_SROA_WIDEN)
     {
         IrSroaOptions options = ir_sroa_options();
-        options.scalar = scalar;
         options.flagged = fixture->pass == IR_OPTIMIZE_TEXT_SROA_WIDEN;
         options.widen = fixture->pass == IR_OPTIMIZE_TEXT_SROA_WIDEN;
         IrSroaResult pass = { 0 };
@@ -200,7 +199,6 @@ static IrCheck ir_optimize_text_transform(const IrOptimizeTextFixture* fixture, 
                          fixture->pass == IR_OPTIMIZE_TEXT_MEMORY ? BUSTER_IR_OPTIMIZE_MEMORY | BUSTER_IR_OPTIMIZE_DCE :
                          fixture->pass == IR_OPTIMIZE_TEXT_IDENTITIES ? BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_IDENTITY | BUSTER_IR_OPTIMIZE_DCE :
                                                                  BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_DCE | BUSTER_IR_OPTIMIZE_CFG;
-        options.path = scalar ? BUSTER_IR_OPTIMIZE_SCALAR : BUSTER_IR_OPTIMIZE_VECTOR;
         IrOptimizeResult pass = { 0 };
         check = ir_optimize(input, output, scratch, options, &pass);
         result = pass.function;
@@ -327,21 +325,20 @@ static void ir_optimize_text_fixture(IrOptimizeTest* test, const IrOptimizeTextF
                 }
             }
             arena_pop_to(twin, twin_mark);
-            IrFunction scalar = { 0 };
-            uint64_t scalar_change = 0;
-            const IrCheck scalar_check = ir_optimize_text_transform(fixture, &before, twin, scratch, true, false, &scalar, &scalar_change);
-            ir_optimize_text_expect(test, scalar_check.error == IR_OK, fixture->name, "the scalar twin transforms the before text");
             if (fixture->pass == IR_OPTIMIZE_TEXT_GVN || fixture->pass == IR_OPTIMIZE_TEXT_GVN_PRESSURE)
             {
                 // GVN's scalar twin is the available-expression oracle: it may find fewer congruences than the vector
-                // partition refinement, and always finds no more of them.
+                // partition refinement, and always finds no more of them. The other passes have one path (#2924).
+                IrFunction scalar = { 0 };
+                uint64_t scalar_change = 0;
+                const IrCheck scalar_check = ir_optimize_text_transform(fixture, &before, twin, scratch, true, false, &scalar, &scalar_change);
+                ir_optimize_text_expect(test, scalar_check.error == IR_OK, fixture->name, "the scalar twin transforms the before text");
                 ir_optimize_text_expect(test, scalar_check.error != IR_OK || scalar_change <= vector_change, fixture->name,
                                         "the scalar GVN oracle removes more than the vector partition does");
-            }
-            else
-            {
-                ir_optimize_text_expect(test, scalar_check.error == IR_OK && ir_optimize_test_equal(&vector, &scalar), fixture->name,
-                                        "the optimizer twins give different functions");
+                if (scalar_check.error == IR_OK && !ir_optimize_test_equal(&vector, &scalar))
+                {
+                    ir_optimize_text_execute(test, fixture->name, &before, &scalar, scratch, fixture->effects);
+                }
             }
             if (fixture->pass == IR_OPTIMIZE_TEXT_GVN || fixture->pass == IR_OPTIMIZE_TEXT_GVN_PRESSURE || fixture->pass == IR_OPTIMIZE_TEXT_LICM ||
                 fixture->pass == IR_OPTIMIZE_TEXT_LICM_PRESSURE)
@@ -364,10 +361,6 @@ static void ir_optimize_text_fixture(IrOptimizeTest* test, const IrOptimizeTextF
             if (vector_check.error == IR_OK)
             {
                 ir_optimize_text_execute(test, fixture->name, &before, &vector, scratch, fixture->effects);
-            }
-            if (scalar_check.error == IR_OK && !ir_optimize_test_equal(&vector, &scalar))
-            {
-                ir_optimize_text_execute(test, fixture->name, &before, &scalar, scratch, fixture->effects);
             }
         }
         arena_pop_to(twin, twin_mark);

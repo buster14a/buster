@@ -64,11 +64,10 @@ static __attribute__((no_sanitize("function"))) bool tier1_pipeline_benchmark_ag
     return agrees;
 }
 
-// The fixture's Tier 1 code, as the pipeline test makes it for the vector path with rematerialization, but with every
+// The fixture's Tier 1 code, as the pipeline test makes it with rematerialization, but with every
 // caller-saved register and the red zone: its mapping and the entry's start, or MAP_FAILED.
 static uint8_t* tier1_pipeline_benchmark_tier1(Tier1PipelineTest* test, const Tier1PipelineFixture* fixture, uint64_t* mapped, uint64_t* entry)
 {
-    test->vector = true;
     test->rematerialize = true;
     tier1_pipeline_reset(test);
     const Tier1EmitOptions options = {

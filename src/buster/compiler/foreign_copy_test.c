@@ -502,7 +502,6 @@ static void foreign_copy_test_case(ForeignTestTally* tally, const char* director
                             },
                             .entry = linked ? foreign_link_test_symbol(&foreign, &converted, "_start") : 0,
                             .dynamic = &converted.dynamic,
-                            .exact = path == 0,
                         },
                     };
                     const bool published = linked && lane_run(foreign_test_lanes[l], executable_test_lane_main, &write, 0) && write.succeeded;

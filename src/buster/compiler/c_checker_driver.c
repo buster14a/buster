@@ -11662,7 +11662,6 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
         CheckProgramBinding binding = {
             .runtime = &runtime,
             .bind = &bind,
-            .path = BUSTER_SCALAR_PATH(scalar) ? BIND_PATH_EXACT : BIND_PATH_VECTOR,
             .arena = &arena,
             // One link against the runtime just opened: a snapshot's atoms' bytes are borrowed, and the write below
             // stages the chunks that hold them (#2546).
@@ -11910,7 +11909,6 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
                     .runtime = runtime_kind == RUNTIME_KIND_STATIC || runtime_kind == RUNTIME_KIND_STATIC_PIE ? &static_inputs : NULL,
                     .debug = debug ? &dwarf.attach : NULL,
                     .symbols = selected != NULL ? &symbols : NULL,
-                    .exact = BUSTER_SCALAR_PATH(scalar),
                     .borrowed = bind.borrow ? runtime.snapshot : NULL,
                     .borrowed_bytes = bind.borrow ? runtime.snapshot_bytes : 0,
                 },

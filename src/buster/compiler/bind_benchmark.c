@@ -1,28 +1,28 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Binding's benchmark: what joining the C runtime to a program's link and binding its names costs on each path
+// Binding's benchmark: what joining the C runtime to a program's link and binding its names costs
 // (docs/object-writer-and-linker.md, "Step 5's phases, data-parallel" and "Static links, as built").
 //
 // Usage: build/compiler benchmark-bind [--functions LIST] [--seed N]
 //
 // Run it under the 9700X's lock pinned to one CPU (taskset -c 2 ...). For each count of workers in --functions (1, 64,
 // 2000 and 102400 by default), a generated program that calls libc, of 200 workers per unit as synth's translation
-// units have (one unit below 200), with 8 globals and 2 thread-locals per unit, is bound by each path, against the
+// units have (one unit below 200), with 8 globals and 2 thread-locals per unit, is bound against the
 // dynamic PIE's runtime, a static executable's, a static PIE's and a shared library's, and against the dynamic PIE's
 // with libm named as -lm names it (runtime_libraries_import, Bind.libraries): the cost of a library on the line that a
 // program doesn't need, each of its names looked up in libm's and libmvec's exports too. libm's import itself is timed
 // first (runtime_libraries_import, from its script to the libraries' indices). Each figure is the median of
-// BUSTER_BIND_BENCHMARK_RUNS runs after a warm-up, each path's on a program of its own, each run on the same link put
+// BUSTER_BIND_BENCHMARK_RUNS runs after a warm-up, each run on the same link put
 // back as it was before (its counts, arenas and the symbol columns binding writes, and binding's own state):
 //   - match: the program's global symbols looked up in the runtime's names (bind_match), per global symbol;
 //   - begin: bind_begin, the match and the crt objects before the program joined;
 //   - closure (the static runtimes', a static executable's and a static PIE's): the members the link needs found
-//     (bind_closure_vector or bind_closure_exact), per member found;
+//     (bind_closure), per member found;
 //   - end: bind_end, after the program's atoms: the members joined (for a static runtime, the closure among it), every
 //     name bound, the crt objects after the program joined, and the exports found.
-// Cycles and instructions come from the hardware counters (zero when unavailable). The paths must make the same links.
-// The exit status is 1 if the arguments are invalid, a program can't be made or bound, or the paths disagree.
+// Cycles and instructions come from the hardware counters (zero when unavailable). The exit status is 1 if the arguments
+// are invalid, or a program can't be made or bound.
 
 #include "host_isa.h"
 #include <stdint.h>
@@ -73,11 +73,6 @@ static const uint32_t bind_benchmark_default_functions[] = {
     64,
     2000,
     102400,
-};
-
-static const char* const bind_benchmark_path_names[] = {
-    [BIND_PATH_VECTOR] = "vector",
-    [BIND_PATH_EXACT] = "exact",
 };
 
 // Each kind's runtime, as the rows name it.
@@ -320,35 +315,7 @@ static void bind_benchmark_load(const BindBenchmarkState* state, Bind* bind)
 // ---------------------------------------------------------------------------------------------------------------------
 // The programs
 
-// Whether two links hold the same records: names by their bytes, atoms by theirs, and wide addends by value.
-static bool bind_benchmark_same(const Link* a, const Link* b)
-{
-    bool result = a->names.count == b->names.count && a->atoms.count == b->atoms.count && a->symbols.count == b->symbols.count && a->fixups.count == b->fixups.count;
-    for (NameId name = 1; result && name < a->names.count; name += 1)
-    {
-        result = a->names.length[name] == b->names.length[name] && memcmp(a->names.bytes[name], b->names.bytes[name], a->names.length[name]) == 0;
-    }
-    for (AtomId atom = 1; result && atom < a->atoms.count; atom += 1)
-    {
-        result = a->atoms.class[atom] == b->atoms.class[atom] && a->atoms.unit[atom] == b->atoms.unit[atom] && a->atoms.size[atom] == b->atoms.size[atom] &&
-                 a->atoms.fixup_begin[atom] == b->atoms.fixup_begin[atom] && a->atoms.fixup_count[atom] == b->atoms.fixup_count[atom] &&
-                 (a->atoms.bytes[atom] == 0 || memcmp(a->atoms.bytes[atom], b->atoms.bytes[atom], a->atoms.size[atom]) == 0);
-    }
-    for (SymbolId symbol = 1; result && symbol < a->symbols.count; symbol += 1)
-    {
-        result = a->symbols.name[symbol] == b->symbols.name[symbol] && a->symbols.atom[symbol] == b->symbols.atom[symbol] &&
-                 a->symbols.value[symbol] == b->symbols.value[symbol] && a->symbols.flags[symbol] == b->symbols.flags[symbol] &&
-                 a->symbols.source[symbol] == b->symbols.source[symbol] && a->symbols.version[symbol] == b->symbols.version[symbol];
-    }
-    for (FixupId fixup = 1; result && fixup < a->fixups.count; fixup += 1)
-    {
-        result = a->fixups.offset[fixup] == b->fixups.offset[fixup] && a->fixups.target[fixup] == b->fixups.target[fixup] &&
-                 a->fixups.kind[fixup] == b->fixups.kind[fixup] && link_fixup_addend(a, fixup) == link_fixup_addend(b, fixup);
-    }
-    return result;
-}
-
-// The figures of a program bound by a path, in order.
+// The figures of a program's binding, in order.
 typedef enum BindBenchmarkPhase
 {
     BIND_BENCHMARK_MATCH,
@@ -365,13 +332,12 @@ static const char* const bind_benchmark_phase_names[BIND_BENCHMARK_PHASES] = {
     [BIND_BENCHMARK_END] = "bind_end",
 };
 
-// A program of `functions` workers bound by `path`, with `libraries` named (or 0): the match, bind_begin, the closure (for
-// a static runtime) and bind_end measured in the runs, which figures[BIND_BENCHMARK_PHASES * path + phase] holds, and the members found in
-// *members. Its link stays in `program` for the paths' comparison.
-static bool bind_benchmark_program(LinkProgram* program, const Runtime* runtime, const RuntimeLibraries* libraries, uint32_t functions, uint64_t seed, BindPath path,
-                                   BindBenchmarkClock* clock, BindBenchmarkFigure* figures, uint32_t* globals, uint32_t* members, Arena* arena)
+// A program of `functions` workers bound with `libraries` named (or 0): the match, bind_begin, the closure (for a static
+// runtime) and bind_end measured in the runs, which figure[phase] holds, and the members found in *members. Its link
+// stays in `program`.
+static bool bind_benchmark_program(LinkProgram* program, const Runtime* runtime, const RuntimeLibraries* libraries, uint32_t functions, uint64_t seed,
+                                   BindBenchmarkClock* clock, BindBenchmarkFigure* figure, uint32_t* globals, uint32_t* members, Arena* arena)
 {
-    BindBenchmarkFigure* figure = figures + BIND_BENCHMARK_PHASES * path;
     LinkProgramOptions options = link_program_default_options();
     const uint32_t units = functions / BUSTER_BIND_BENCHMARK_UNIT_FUNCTIONS > 0 ? functions / BUSTER_BIND_BENCHMARK_UNIT_FUNCTIONS : 1;
     options.seed = seed;
@@ -403,7 +369,7 @@ static bool bind_benchmark_program(LinkProgram* program, const Runtime* runtime,
     {
         // A binding's arrays for the match alone, from a bind_begin taken back.
         bind_benchmark_restore(&begun, link, &program->bytes);
-        result = bind_begin(&bind, link, runtime, path, &program->bytes, units, arena);
+        result = bind_begin(&bind, link, runtime, &program->bytes, units, arena);
         bind_benchmark_restore(&begun, link, &program->bytes);
         if (result)
         {
@@ -416,7 +382,7 @@ static bool bind_benchmark_program(LinkProgram* program, const Runtime* runtime,
         bind_benchmark_restore(&begun, link, &program->bytes);
         arena_pop_to(arena, bind_arena);
         bind_benchmark_start(clock);
-        result = result && bind_begin(&bind, link, runtime, path, &program->bytes, units, arena);
+        result = result && bind_begin(&bind, link, runtime, &program->bytes, units, arena);
         bind_benchmark_stop(clock, &figure[BIND_BENCHMARK_BEGIN], run);
         arena_pop_to(arena, bind_arena);
     }
@@ -424,7 +390,7 @@ static bool bind_benchmark_program(LinkProgram* program, const Runtime* runtime,
     if (result)
     {
         bind_benchmark_restore(&begun, link, &program->bytes);
-        result = bind_begin(&bind, link, runtime, path, &program->bytes, units, arena) && link_program_generate_atoms(program);
+        result = bind_begin(&bind, link, runtime, &program->bytes, units, arena) && link_program_generate_atoms(program);
     }
     // The libraries named with -l, which binding takes between bind_begin and bind_end, as the driver sets them.
     bind.libraries = libraries;
@@ -439,14 +405,7 @@ static bool bind_benchmark_program(LinkProgram* program, const Runtime* runtime,
         bind_benchmark_restore(&atoms_added, link, &program->bytes);
         bind_benchmark_load(&state, &bind);
         bind_benchmark_start(clock);
-        if (path == BIND_PATH_VECTOR)
-        {
-            bind_closure_vector(&bind, link);
-        }
-        else
-        {
-            bind_closure_exact(&bind, link);
-        }
+        bind_closure(&bind, link);
         bind_benchmark_stop(clock, &figure[BIND_BENCHMARK_CLOSURE], run);
     }
     for (uint32_t run = 0; result && run < BUSTER_BIND_BENCHMARK_RUNS + 1; run += 1)
@@ -586,43 +545,31 @@ int run_bind_benchmark(int argc, char** argv)
         // Each kind's runtime, then the dynamic PIE's again with -lm.
         for (uint32_t variant = 0; result && variant < RUNTIME_KINDS + 1; variant += 1)
         {
-            static BindBenchmarkFigure figures[2 * BIND_BENCHMARK_PHASES];
+            static BindBenchmarkFigure figures[BIND_BENCHMARK_PHASES];
             const uint32_t kind = variant < RUNTIME_KINDS ? variant : RUNTIME_KIND_DYNAMIC;
             const RuntimeLibraries* libraries = variant < RUNTIME_KINDS ? 0 : &libm;
             const Runtime* runtime = &runtimes[kind];
-            LinkProgram programs[2];
+            LinkProgram program;
             uint32_t globals = 0;
             uint32_t members = 0;
             const uint64_t length = arena.length;
-            const bool vector = bind_benchmark_program(&programs[BIND_PATH_VECTOR], runtime, libraries, functions[p], seed, BIND_PATH_VECTOR, &clock, figures, &globals,
-                                                       &members, &arena);
-            const bool exact =
-                bind_benchmark_program(&programs[BIND_PATH_EXACT], runtime, libraries, functions[p], seed, BIND_PATH_EXACT, &clock, figures, &globals, &members, &arena);
-            result = vector && exact;
-            const bool same = result && bind_benchmark_same(&programs[BIND_PATH_VECTOR].link, &programs[BIND_PATH_EXACT].link);
+            result = bind_benchmark_program(&program, runtime, libraries, functions[p], seed, &clock, figures, &globals, &members, &arena);
             if (result)
             {
-                const Link* link = &programs[BIND_PATH_VECTOR].link;
-                printf("%u workers, %s runtime%s (%u members joined): %u units, %u symbols (%u global), %u atoms, %u fixups%s\n", functions[p],
-                       bind_benchmark_kind_names[kind], libraries != 0 ? " with -lm" : "", members, programs[BIND_PATH_VECTOR].options.units, link->symbols.count - 1,
-                       globals, link->atoms.count - 1, link->fixups.count - 1, same ? "" : "; the paths' links differ");
-                for (uint32_t path = 0; path < 2; path += 1)
+                const Link* link = &program.link;
+                printf("%u workers, %s runtime%s (%u members joined): %u units, %u symbols (%u global), %u atoms, %u fixups\n", functions[p],
+                       bind_benchmark_kind_names[kind], libraries != 0 ? " with -lm" : "", members, program.options.units, link->symbols.count - 1, globals,
+                       link->atoms.count - 1, link->fixups.count - 1);
+                for (uint32_t phase = 0; phase < BIND_BENCHMARK_PHASES; phase += 1)
                 {
-                    for (uint32_t phase = 0; phase < BIND_BENCHMARK_PHASES; phase += 1)
+                    const uint64_t items = phase == BIND_BENCHMARK_MATCH ? globals : phase == BIND_BENCHMARK_CLOSURE ? members : 0;
+                    if (phase != BIND_BENCHMARK_CLOSURE || runtime_kind_is_static((RuntimeKind)kind))
                     {
-                        char what[64];
-                        snprintf(what, sizeof(what), "%s %s", bind_benchmark_path_names[path], bind_benchmark_phase_names[phase]);
-                        const uint64_t items = phase == BIND_BENCHMARK_MATCH ? globals : phase == BIND_BENCHMARK_CLOSURE ? members : 0;
-                        if (phase != BIND_BENCHMARK_CLOSURE || runtime_kind_is_static((RuntimeKind)kind))
-                        {
-                            bind_benchmark_print(what, &figures[BIND_BENCHMARK_PHASES * path + phase], items, phase == BIND_BENCHMARK_MATCH ? "global" : "member");
-                        }
+                        bind_benchmark_print(bind_benchmark_phase_names[phase], &figures[phase], items, phase == BIND_BENCHMARK_MATCH ? "global" : "member");
                     }
                 }
             }
-            result = result && same;
-            link_program_release(&programs[BIND_PATH_VECTOR]);
-            link_program_release(&programs[BIND_PATH_EXACT]);
+            link_program_release(&program);
             arena_pop_to(&arena, length);
         }
     }

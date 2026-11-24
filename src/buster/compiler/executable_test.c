@@ -13,7 +13,7 @@
 //     50,000 workers in 38 chunks, several for each of 8 lanes to write. Each is written by executable_write with
 //     groups of 1, 2, 3 and 8 lanes (lane_run), each time from zeroed fields over the last file scribbled over
 //     (executable_test_reset), so that every write has all of it to do: the files must be byte-identical, and run, each
-//     must exit with status 0 having written LinkProgram.output; and the exact twins must write the same file with 1
+//     must exit with status 0 having written LinkProgram.output; must write the same file with 1
 //     and 8 lanes. A copy with one fixup 8 bytes off must write something else. The sets that call libc, step 5's, must
 //     fail with an import named, without creating the output.
 //   - Fields: in each program's file, every fixup's field against a scalar reference of its kind's arithmetic
@@ -41,7 +41,7 @@
 //   - Unwind tables: the scanner against its twin and what the test knows of .eh_frame atoms built here, the sort
 //     against a stable sort, and links whose tables must come out sorted, or are refused (see "Unwind tables").
 //   - Blocks: random links for the vector passes over blocks of 16 atoms and symbols, from the seed and from seed 116,
-//     written by every lane count and by the exact twins into the same file, which runs (executable_test_blocks).
+//     written by every lane count into the same file, which runs (executable_test_blocks).
 //   - The patch kernel: the fast path against the checked one (executable_test_kernel).
 // The exit status is 1 if the arguments are invalid or a check fails.
 //
@@ -312,25 +312,6 @@ static bool executable_test_write(Link* link, SymbolId entry, String8 path, uint
             .entry = entry,
             .boundaries = boundaries,
             .boundary_capacity = boundary_capacity,
-        },
-        .succeeded = false,
-    };
-    const bool ran = lane_run(lanes, executable_test_lane_main, &write, 0);
-    *result = write.result;
-    return ran && write.succeeded;
-}
-#endif
-#if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_EXECUTABLE
-// Writes the link to `path` with a group of `lanes` lanes by the passes' exact twins (ExecutableOptions.exact): whether
-// executable_write succeeded, and its result.
-static bool executable_test_write_exact(Link* link, SymbolId entry, String8 path, uint32_t lanes, ExecutableResult* result)
-{
-    ExecutableTestWrite write = {
-        .link = link,
-        .options = {
-            .path = path,
-            .entry = entry,
-            .exact = true,
         },
         .succeeded = false,
     };
@@ -1626,17 +1607,6 @@ static bool executable_test_programs(const ExecutableTestDirectory* directory, u
                                        "the same file with every lane count", i * 10 + lanes);
                 executable_test_expect(&tally, memcmp(result.build_id, first_result.build_id, BUSTER_EXECUTABLE_BUILD_ID_BYTES) == 0, "the same build ID", i * 10 + lanes);
             }
-        }
-        // The exact twins write the same file, with 1 and 8 lanes.
-        static const uint32_t exact_lanes[] = { 1, 8 };
-        for (uint32_t l = 0; generated && !libc && first.pointer != 0 && l < BUSTER_ARRAY_LENGTH(exact_lanes); l += 1)
-        {
-            ExecutableResult result;
-            const bool written = executable_test_reset(&program.link, path.pointer) && executable_test_write_exact(&program.link, program.entry, path, exact_lanes[l], &result);
-            const String8 file = written ? executable_test_read(scratch.arena, path.pointer) : (String8){ 0 };
-            executable_test_expect(&tally, file.pointer != 0 && file.length == first.length && memcmp(file.pointer, first.pointer, file.length) == 0 &&
-                                               result.fdes == first_result.fdes && result.fdes_in_order == first_result.fdes_in_order,
-                                   "the exact twins write the same file", i * 10 + exact_lanes[l]);
         }
         // Staged, every lane count writes the same file from the atoms' bytes, which it only reads: they stay as they
         // were, every byte of every atom.
@@ -2953,7 +2923,7 @@ static bool executable_test_limits(const ExecutableTestDirectory* directory, uin
 //     and some larger: the sorted check must say whether they are sorted, and the sort (always with `exact`) give a
 //     stable sort's order.
 //   - Links: functions aligned apart so that their FDEs' order isn't their addresses', in .eh_frame atoms of each CIE
-//     the header indexes, written by every lane count and by the exact twins into the same file, whose table must be
+//     the header indexes, written by every lane count into the same file, whose table must be
 //     sorted and the program run; an FDE's initial location at INT32_MAX from the header and at one more (refused), and
 //     one from a wide addend; and atoms the header can't index, the first of two named, by every lane count, and before
 //     a symbol defined nowhere, which only the symbols' phase after the layout refuses: by the count, before it.
@@ -3419,9 +3389,8 @@ static bool executable_test_frames(uint64_t seed)
                     executable_test_expect(&tally, vector ? fast == walked : fast == UINT32_MAX, vector ? "the vector path's count" : "the vector path leaves it to the walk",
                                            round);
                     bool walked_vector = false;
-                    bool walked_exact = false;
-                    const bool either = executable_eh_frame(&link, atom, false, &walked_vector) == walked && executable_eh_frame(&link, atom, true, &walked_exact) == walked;
-                    executable_test_expect(&tally, either && walked_vector == !vector && walked_exact, "either way's count, and which read it", round);
+                    const bool counted = executable_eh_frame(&link, atom, &walked_vector) == walked;
+                    executable_test_expect(&tally, counted && walked_vector == !vector, "the count, and which read it", round);
                     // With entries: the reference's, from the FDEs before any terminator, or refused.
                     for (uint32_t j = 0; walked != UINT32_MAX && j < walked; j += 1)
                     {
@@ -3532,25 +3501,24 @@ static bool executable_test_sort(uint64_t seed)
                 }
                 reference[place] = input[e];
             }
-            for (uint32_t exact = 0; exact < 2; exact += 1)
             {
-                const uint64_t index = (count * BUSTER_EXECUTABLE_TEST_SORT_PATTERNS + pattern) * 2 + exact;
+                const uint64_t index = count * BUSTER_EXECUTABLE_TEST_SORT_PATTERNS + pattern;
                 Arena room = {
                     .base = sort_space,
-                    .capacity = !sorted || exact != 0 ? 8 * count : 0,
+                    .capacity = !sorted ? 8 * count : 0,
                 };
                 memcpy(bytes + BUSTER_EXECUTABLE_EH_FRAME_HDR_BYTES, input, 8 * count);
                 bool in_order = !sorted;
                 if (room.capacity != 0)
                 {
                     room.capacity -= 1;
-                    const bool refused = !executable_eh_frame_sort(bytes, count, exact != 0, &room, &in_order);
+                    const bool refused = !executable_eh_frame_sort(bytes, count, &room, &in_order);
                     executable_test_expect(&tally, refused && in_order == sorted && memcmp(bytes + BUSTER_EXECUTABLE_EH_FRAME_HDR_BYTES, input, 8 * count) == 0,
                                            "short scratch preserves the table", index);
                     room.capacity += 1;
                     in_order = !sorted;
                 }
-                const bool done = executable_eh_frame_sort(bytes, count, exact != 0, &room, &in_order);
+                const bool done = executable_eh_frame_sort(bytes, count, &room, &in_order);
                 executable_test_expect(&tally, done && in_order == sorted, "whether the table is sorted", index);
                 executable_test_expect(&tally, done && memcmp(bytes + BUSTER_EXECUTABLE_EH_FRAME_HDR_BYTES, reference, 8 * count) == 0, "a stable sort's order", index);
             }
@@ -3657,7 +3625,7 @@ static bool executable_test_unwind_small(ExecutableTestLink* test, SymbolId* sta
     return result && link_check(link) == LINK_ERROR_NONE;
 }
 
-// Writes `link` with every lane count and by the exact twins with 1 and 8, each from zeroed fields over the last file
+// Writes `link` with every lane count, each from zeroed fields over the last file
 // scribbled over: whether every write succeeded into the same file, which runs, and whose unwind tables keep
 // executable_test_unwind's rules (with the functions of units below `units`). *result gets the first write's.
 static bool executable_test_unwind_writes(ExecutableTestTally* tally, Link* link, SymbolId entry, String8 path, uint32_t units, const char* what, ExecutableResult* result)
@@ -3665,13 +3633,12 @@ static bool executable_test_unwind_writes(ExecutableTestTally* tally, Link* link
     Scratch scratch = scratch_begin(0);
     String8 first = { 0 };
     bool same = true;
-    for (uint32_t w = 0; w < BUSTER_ARRAY_LENGTH(executable_test_lane_counts) + 2; w += 1)
+    for (uint32_t w = 0; w < BUSTER_ARRAY_LENGTH(executable_test_lane_counts); w += 1)
     {
-        const bool exact = w >= BUSTER_ARRAY_LENGTH(executable_test_lane_counts);
-        const uint32_t lanes = exact ? (w == BUSTER_ARRAY_LENGTH(executable_test_lane_counts) ? 1 : 8) : executable_test_lane_counts[w];
+        const uint32_t lanes = executable_test_lane_counts[w];
         ExecutableResult written;
         const bool reset = executable_test_reset(link, path.pointer);
-        const bool succeeded = reset && (exact ? executable_test_write_exact(link, entry, path, lanes, &written) : executable_test_write(link, entry, path, lanes, &written, 0, 0));
+        const bool succeeded = reset && executable_test_write(link, entry, path, lanes, &written, 0, 0);
         if (!succeeded)
         {
             executable_test_print_failure(what, &written);
@@ -3736,7 +3703,7 @@ static bool executable_test_load_layout(const ExecutableTestDirectory* directory
                                "requested writable segments are present and all others absent", mask);
         executable_test_expect(&tally, wrote && executable_test_load_gaps(file, BUSTER_EXECUTABLE_BASE) &&
                                executable_test_build_id(scratch.arena, file, boundaries, written.chunks), "mapping gaps participate in the build ID", mask);
-        executable_test_expect(&tally, built && executable_test_unwind_writes(&tally, &test.link, start, path, 0, "poisoned lane and exact identity", &written),
+        executable_test_expect(&tally, built && executable_test_unwind_writes(&tally, &test.link, start, path, 0, "poisoned lane identity", &written),
                                "present and absent writable segments", mask);
         executable_test_link_end(&test);
     }
@@ -3862,14 +3829,14 @@ static bool executable_test_unwind_links(const ExecutableTestDirectory* director
 // Blocks
 //
 // Links for the vector passes over blocks of 16 (executable_atom_block's atoms in executable_count and
-// executable_place, and executable_resolve's symbols), against their exact twins: atoms of every class a static
+// executable_place, and executable_resolve's symbols): atoms of every class a static
 // executable takes, in runs of one class and alignment of random lengths, so that blocks change bucket at every lane,
 // of sizes from 0, with zero-fill ones, entry arrays' 8 bytes at a time, alignments from 0 to 6 and a page's; symbols
 // in half of them at random places, thread-local, functions or objects, local or global, and weak ones defined nowhere;
 // GOT slots for some (loads through the GOT in _start, which runs them), and a table with a pointer to (or a
 // thread-local's offset of) every one. Every other link's atom table is just as large as its atoms, so that its last
-// atoms are past the class gather's limit. Each link is written by every lane count and by the exact twins into the
-// same file, which runs.
+// atoms are past the class gather's limit. Each link is written by every lane count into the same file, which
+// runs.
 
 #define BUSTER_EXECUTABLE_TEST_BLOCK_LINKS 24
 #define BUSTER_EXECUTABLE_TEST_BLOCK_ATOMS 200
@@ -4009,7 +3976,7 @@ static bool executable_test_blocks(const ExecutableTestDirectory* directory, uin
             ExecutableResult result;
             if (built)
             {
-                executable_test_unwind_writes(&tally, &test.link, start, path, 0, "the vector passes and the exact twins write the same file", &result);
+                executable_test_unwind_writes(&tally, &test.link, start, path, 0, "every lane count writes the same file", &result);
             }
             executable_test_link_end(&test);
         }

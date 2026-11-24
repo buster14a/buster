@@ -34,8 +34,10 @@ is deliberately a separate stage and is not included in that number.
 
 Repetitions are calibrated once per path to target 2 ms; later samples can be
 shorter as execution conditions change. The default 21 samples alternate
-which path runs first. `--only` measures one path, while `--after-scalar`
-performs scalar stage work before each vector sample. The scalar label refers
+which path runs first. GVN alone has two paths since #2924; LICM and SROA
+are timed once, by their one path. `--only` measures one of GVN's paths, while
+`--after-scalar` performs GVN's scalar work before each of its vector samples,
+and times GVN alone (with `--pass licm` or `--pass sroa` it is refused). The scalar label refers
 to the scalar algorithm option; shared verification and other infrastructure
 may themselves use vector instructions. Timing controls do not establish
 hardware frequency isolation by themselves.

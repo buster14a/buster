@@ -11,7 +11,7 @@
 // cut at their weakest edge. An ordinary while loop keeps latch -> header and cuts header -> body: its initial jump
 // remains, while the latch falls into the test on every iteration. This is a structural heuristic, not a profile.
 //
-// The staged 16-edge rank kernel has scalar/vector twins; target conflicts and chain walks share a scalar consumer.
+// The edges are ranked sixteen at a time from staged columns; target conflicts and chain walks are a scalar consumer.
 // Each CFG edge and block is read a bounded number of times, with O(blocks + edges) work and 10 bytes/block of
 // temporary columns, plus the caller's 4-byte order column. Input/threads are immutable, output order is disjoint,
 // and all scratch allocations precede the first output store. Scratch is restored on success and failure.
@@ -33,34 +33,19 @@ struct IrOptimizeLayoutBatch
 
 // The complete staging arrays authorize these full-width loads, including a partial final batch. Inactive lanes
 // are initialized and never access a CFG or dominator column. Rank 1/2 is reserved for conditional edges.
-static void ir_optimize_layout_ranks(const IrOptimizeLayoutBatch* batch, bool scalar, uint32_t* ranks)
+static void ir_optimize_layout_ranks(const IrOptimizeLayoutBatch* batch, uint32_t* ranks)
 {
     const uint32_t count = batch->count;
     const uint32_t active = batch->active;
-    (void)scalar;
-    if (BUSTER_SCALAR_PATH(scalar))
+    for (uint32_t lane = 0; lane < count; lane += 1)
     {
-        for (uint32_t lane = 0; lane < count; lane += 1)
-        {
-            const bool back = batch->target_enter[lane] <= batch->source_enter[lane] && batch->source_enter[lane] < batch->target_leave[lane];
-            const bool adjacent = batch->target[lane] == batch->following[lane];
-            ranks[lane] = ((active >> lane) & 1) != 0 ? 3 + adjacent + 2 * back : 0;
-        }
-    }
-    else
-    {
-        const __m512i source = _mm512_loadu_si512(batch->source_enter);
-        const __m512i enter = _mm512_loadu_si512(batch->target_enter);
-        const __m512i leave = _mm512_loadu_si512(batch->target_leave);
-        const __mmask16 back = active & _mm512_cmple_epu32_mask(enter, source) & _mm512_cmplt_epu32_mask(source, leave);
-        const __mmask16 adjacent = active & _mm512_cmpeq_epi32_mask(_mm512_loadu_si512(batch->target), _mm512_loadu_si512(batch->following));
-        const __m512i direct = _mm512_maskz_set1_epi32(active, 3);
-        const __m512i ranked = _mm512_mask_add_epi32(direct, adjacent, direct, _mm512_set1_epi32(1));
-        _mm512_storeu_si512(ranks, _mm512_mask_add_epi32(ranked, back, ranked, _mm512_set1_epi32(2)));
+        const bool back = batch->target_enter[lane] <= batch->source_enter[lane] && batch->source_enter[lane] < batch->target_leave[lane];
+        const bool adjacent = batch->target[lane] == batch->following[lane];
+        ranks[lane] = ((active >> lane) & 1) != 0 ? 3 + adjacent + 2 * back : 0;
     }
 }
 
-static IrError ir_optimize_layout_order(const IrOptimizeWork* work, const uint32_t* threads, Arena* scratch, bool scalar, uint32_t* order, uint32_t* order_count)
+static IrError ir_optimize_layout_order(const IrOptimizeWork* work, const uint32_t* threads, Arena* scratch, uint32_t* order, uint32_t* order_count)
 {
     const IrFunction* function = work->function;
     const uint32_t blocks = function->block_count;
@@ -131,7 +116,7 @@ static IrError ir_optimize_layout_order(const IrOptimizeWork* work, const uint32
             }
         }
         uint32_t ranks[BUSTER_IR_OPTIMIZE_BATCH] = { 0 };
-        ir_optimize_layout_ranks(&batch, scalar, ranks);
+        ir_optimize_layout_ranks(&batch, ranks);
         // Original ids increase in this scan, so retaining the first equal-rank proposal is the source-id tie break.
         for (uint32_t lane = 0; lane < count; lane += 1)
         {

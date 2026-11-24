@@ -627,7 +627,6 @@ static void foreign_unwind_dedup_link_test_program(ForeignTestTally* tally, cons
                             },
                             .entry = pooled[path].roots.entry,
                             .dynamic = cpp ? &pooled[path].converted.dynamic : 0,
-                            .exact = path == 0,
                         },
                     };
                     const bool published = lane_run(path == 0 ? 1 : 3, executable_test_lane_main, &write, 0) && write.succeeded;
