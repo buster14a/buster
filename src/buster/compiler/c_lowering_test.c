@@ -169,13 +169,11 @@ static void c_lowering_test_compare(CLoweringTest* test, CLoweringInput input, c
 {
     const uint64_t mark = arena->length;
     CLowering vector = { 0 };
-    CLowering scalar = { 0 };
     const CLoweringStatus vector_status = c_lowering_prepare(arena, input, &vector);
-    const CLoweringStatus scalar_status = c_lowering_prepare(arena, input, &scalar);
     uint8_t* expected = arena_push_array(arena, (uint64_t)input.definition_count + 1, sizeof(uint8_t), 1);
     uint8_t* expected_all = arena_push_array(arena, (uint64_t)input.definition_count + 1, sizeof(uint8_t), 1);
     uint32_t* queue = arena_push_array(arena, (uint64_t)input.definition_count + 1, sizeof(uint32_t), 4);
-    const bool ready = vector_status == C_LOWERING_OK && scalar_status == C_LOWERING_OK && expected != 0 && expected_all != 0 && queue != 0;
+    const bool ready = vector_status == C_LOWERING_OK && expected != 0 && expected_all != 0 && queue != 0;
     c_lowering_test_check(test, ready, "prepare/test allocation failed");
     if (ready)
     {
@@ -194,22 +192,12 @@ static void c_lowering_test_compare(CLoweringTest* test, CLoweringInput input, c
             const bool all = pass == 1;
             const CLoweringMode mode = all ? C_LOWERING_ALL : C_LOWERING_REACHABLE;
             const uint64_t solve_mark = arena->length;
-            const bool solved = c_lowering_vector(&vector, mode) == C_LOWERING_OK && c_lowering_scalar(&scalar, mode) == C_LOWERING_OK;
+            const bool solved = c_lowering_vector(&vector, mode) == C_LOWERING_OK;
             c_lowering_test_check(test, solved, "solver refused a valid graph");
             c_lowering_test_check(test, arena->length == solve_mark, "solver changed the preparation arena");
             if (solved)
             {
                 c_lowering_test_result(test, &vector, input, all ? expected_all : expected, all);
-                c_lowering_test_result(test, &scalar, input, all ? expected_all : expected, all);
-                c_lowering_test_check(test, vector.selected_count == scalar.selected_count, "scalar/vector selected counts differ");
-                if (vector.word_count != 0)
-                {
-                    c_lowering_test_check(test, memcmp(vector.reached, scalar.reached, vector.word_count * sizeof(uint64_t)) == 0, "scalar/vector reached bitsets differ");
-                }
-                if (vector.selected_count == scalar.selected_count && vector.selected_count != 0)
-                {
-                    c_lowering_test_check(test, memcmp(vector.selected, scalar.selected, (uint64_t)vector.selected_count * sizeof(uint32_t)) == 0, "scalar/vector selected IDs differ");
-                }
             }
         }
     }
@@ -503,7 +491,7 @@ static void c_lowering_test_limits(CLoweringTest* test, Arena* arena)
     CLowering no_storage = { 0 };
     c_lowering_test_check(test, c_lowering_prepare(&unavailable, valid, &no_storage) == C_LOWERING_OUT_OF_MEMORY && unavailable.length == 0, "empty arena accepted a nonempty graph");
     c_lowering_test_check(test, c_lowering_prepare(&unavailable, (CLoweringInput){ 0 }, &no_storage) == C_LOWERING_OK, "empty graph requires storage");
-    c_lowering_test_check(test, no_storage.workspace_bytes == 0 && c_lowering_vector(&no_storage, C_LOWERING_REACHABLE) == C_LOWERING_OK && c_lowering_scalar(&no_storage, C_LOWERING_ALL) == C_LOWERING_OK, "empty prepared graph cannot solve");
+    c_lowering_test_check(test, no_storage.workspace_bytes == 0 && c_lowering_vector(&no_storage, C_LOWERING_REACHABLE) == C_LOWERING_OK && c_lowering_vector(&no_storage, C_LOWERING_ALL) == C_LOWERING_OK, "empty prepared graph cannot solve");
 
     CLowering owned = { 0 };
     if (c_lowering_prepare(arena, valid, &owned) == C_LOWERING_OK)
@@ -513,8 +501,7 @@ static void c_lowering_test_limits(CLoweringTest* test, Arena* arena)
         memset(targets, 0xff, sizeof(targets));
         memset(kinds, 0xff, sizeof(kinds));
         c_lowering_test_check(test, c_lowering_vector(&owned, C_LOWERING_REACHABLE) == C_LOWERING_OK && owned.selected_count == 3, "prepared vector graph borrows input storage");
-        c_lowering_test_check(test, c_lowering_scalar(&owned, C_LOWERING_REACHABLE) == C_LOWERING_OK && owned.selected_count == 3, "prepared scalar graph borrows input storage");
-        c_lowering_test_check(test, c_lowering_vector(&owned, (CLoweringMode)99) == C_LOWERING_INVALID && c_lowering_scalar(&owned, (CLoweringMode)99) == C_LOWERING_INVALID, "unknown solve mode accepted");
+        c_lowering_test_check(test, c_lowering_vector(&owned, (CLoweringMode)99) == C_LOWERING_INVALID, "unknown solve mode accepted");
     }
     else
     {
@@ -529,9 +516,9 @@ static void c_lowering_test_guards(CLoweringTest* test, Arena* arena)
     const bool page_valid = page_value >= 4096;
     c_lowering_test_check(test, page_valid, "guard page size unavailable");
     const uint64_t page = page_valid ? (uint64_t)page_value : 4096;
-    uint8_t* mappings[10] = { 0 };
+    uint8_t* mappings[9] = { 0 };
     bool mapped = page_valid;
-    for (uint32_t column = 0; column < 10; column += 1)
+    for (uint32_t column = 0; column < 9; column += 1)
     {
         mappings[column] = mmap(0, page * 3, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         mapped &= mappings[column] != MAP_FAILED;
@@ -594,8 +581,7 @@ static void c_lowering_test_guards(CLoweringTest* test, Arena* arena)
                 const uint32_t edges = lowering.edge_count;
                 uint32_t* edge_targets = (uint32_t*)(mappings[6] + page * (side ? 2 : 1)) - (side ? edges : 0);
                 uint32_t* pending = (uint32_t*)(mappings[7] + page * (side ? 2 : 1)) - (side ? count : 0);
-                uint8_t* visited = mappings[8] + page * (side ? 2 : 1) - (side ? count : 0);
-                uint32_t* offsets = (uint32_t*)(mappings[9] + page * (side ? 2 : 1)) - (side && count != 0 ? count + 1 : 0);
+                uint32_t* offsets = (uint32_t*)(mappings[8] + page * (side ? 2 : 1)) - (side && count != 0 ? count + 1 : 0);
                 if (edges != 0)
                 {
                     memcpy(edge_targets, lowering.edge_targets, (uint64_t)edges * sizeof(uint32_t));
@@ -608,33 +594,29 @@ static void c_lowering_test_guards(CLoweringTest* test, Arena* arena)
                 lowering.edge_targets = edge_targets;
                 lowering.edge_offsets = offsets;
                 lowering.queue = pending;
-                lowering.visited = visited;
                 lowering.reached = reached;
                 lowering.selected = selected;
-                for (uint32_t path = 0; path < 2; path += 1)
+                for (uint32_t mode = 0; mode < 2; mode += 1)
                 {
-                    for (uint32_t mode = 0; mode < 2; mode += 1)
+                    if (count != 0)
                     {
-                        if (count != 0)
-                        {
-                            memset(selected, 0xa5, (uint64_t)count * sizeof(uint32_t));
-                            memset(reached, 0xff, words * sizeof(uint64_t));
-                        }
-                        const CLoweringMode selected_mode = mode ? C_LOWERING_ALL : C_LOWERING_REACHABLE;
-                        const CLoweringStatus status = path ? c_lowering_scalar(&lowering, selected_mode) : c_lowering_vector(&lowering, selected_mode);
-                        c_lowering_test_check(test, status == C_LOWERING_OK, "guarded output solve failed");
-                        if (status == C_LOWERING_OK)
-                        {
-                            c_lowering_test_oracle(input, expected, queue, mode != 0);
-                            c_lowering_test_result(test, &lowering, input, expected, mode != 0);
-                        }
+                        memset(selected, 0xa5, (uint64_t)count * sizeof(uint32_t));
+                        memset(reached, 0xff, words * sizeof(uint64_t));
+                    }
+                    const CLoweringMode selected_mode = mode ? C_LOWERING_ALL : C_LOWERING_REACHABLE;
+                    const CLoweringStatus status = c_lowering_vector(&lowering, selected_mode);
+                    c_lowering_test_check(test, status == C_LOWERING_OK, "guarded output solve failed");
+                    if (status == C_LOWERING_OK)
+                    {
+                        c_lowering_test_oracle(input, expected, queue, mode != 0);
+                        c_lowering_test_result(test, &lowering, input, expected, mode != 0);
                     }
                 }
             }
             arena_pop_to(arena, mark);
         }
     }
-    for (uint32_t column = 0; column < 10; column += 1)
+    for (uint32_t column = 0; column < 9; column += 1)
     {
         if (mappings[column] != MAP_FAILED)
         {

@@ -2,8 +2,9 @@
 
 `c_lowering.c` supplies the emission planner for #129, part of parser tracker
 #126. It consumes resolved definitions and references, finds the definitions
-reachable from the unit's roots, and returns them in source order. It has a
-vector path and an independent scalar worklist. Neither path recurses.
+reachable from the unit's roots, and returns them in source order, by one
+vector path that never recurses. (Its independent scalar worklist went with
+#2924; the tests' oracle and Clang's symbols check it.)
 
 This is a graph consumer. On the source path, `check_program_select`
 (`c_check_program_select.c`) gives it the checked program's definitions, roots
@@ -73,14 +74,14 @@ producer can release its input columns after success. Failure preserves both
 the arena length and the previous result.
 
 For a nonempty input, the prepared `CLowering` owns a flags column,
-`definition_count + 1` adjacency offsets, retained targets, a queue, a scalar
-visited column, the reached bitset
+`definition_count + 1` adjacency offsets, retained targets, a queue, the
+reached bitset
 and selected IDs. An empty plan has null buffers, including adjacency offsets.
 Each solver reuses these buffers without allocating. The bitset has
 `ceil(definition_count / 64)` words, with high unused bits zero;
 only the first `selected_count` output IDs are valid. A workspace belongs to
 one worker and must outlive every consumer of its selected IDs. The reported
-`workspace_bytes` includes both paths' reusable storage and alignment;
+`workspace_bytes` includes the reusable storage and alignment;
 `scratch_bytes` identifies its mutable traversal/output portion. These are
 allocated capacities, not a count of bytes touched by every invocation.
 
@@ -88,8 +89,7 @@ allocated capacities, not a count of bytes touched by every invocation.
 target membership checks and compacts the final selection in source order.
 Sparse bitset writes serialize conflicts so duplicate targets cannot lose a
 bit. A long dependency chain does not cause a full-edge scan at every round.
-`c_lowering_scalar` uses an independent byte-visited worklist and supplies the
-exact reference result. A select-all diagnostic path includes every eligible
+A select-all diagnostic path includes every eligible
 local definition; it still excludes inline-only definitions.
 
 ## Validation and measurement
@@ -105,12 +105,11 @@ including an intrinsic-shaped small live set, broad fanout, chains and cycles.
 Run each build, test and measurement through the shared 9700X lock; pin timings
 to CPU 2. Selection-only measurements reuse the prepared graph; the complete
 planner measurement additionally charges graph preparation and first touches.
-Conditioned runs use a separate prepared plan immediately before a vector
-sample, either running the scalar path or warming the vector path explicitly.
+Conditioned runs warm the vector path on a separate prepared plan immediately
+before a sample.
 
 Options are `--shape all|intrinsic|fanout|chain|cycle|duplicates|large`,
-`--definitions N`, `--only vector|scalar|prepare` and either `--before-vector MS`
-or `--after-scalar MS`.
+`--definitions N`, `--only vector|prepare` and `--before-vector MS`.
 Each path has one warm-up and 21 samples. `prepare` means arena reservation,
 first touches, validation, copying, adjacency preparation and vector selection;
 result verification and arena teardown are excluded. Nanoseconds time the
@@ -118,10 +117,8 @@ operation, while the perf cycles/instructions also include the two clock reads.
 Unavailable or multiplexed counters are reported as unavailable. Every measured
 result is compared to a separate oracle outside the timed interval.
 The default samples are unconditioned single selections; the checks between
-samples do not establish sustained vector execution. Use separate processes
-with `--before-vector 100` and `--after-scalar 100` for the two conditioned
-states. There is no prepare-plus-scalar timing path, so the prepare result does
-not establish a whole-planner improvement over scalar selection.
+samples do not establish sustained vector execution; `--before-vector 100`
+in a separate process gives the conditioned state.
 
 These measurements describe the planner, not backend lowering or a complete
 compiler. The source path below compares emitted symbols on the fixtures and

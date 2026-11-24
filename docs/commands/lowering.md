@@ -9,7 +9,7 @@ requirements. [Command index](README.md).
 `./build/compiler test-lowering --clang` compares selective function/object
 emission planning with an independent graph oracle and Clang object symbols
 on original, manually modeled C fixtures. `benchmark-lowering` measures
-synthetic graph preparation and vector/scalar selection; use the shared 9700X
+synthetic graph preparation and vector selection; use the shared 9700X
 lock and pin timings to CPU 2.
 
 On the source path, `check_program_select` (`c_check_program_select.c`) gives
