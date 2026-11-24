@@ -12652,14 +12652,60 @@ static void check_common_assertion_reach(const CheckGraph* graph, const CheckStr
     }
 }
 
+// The edges of the 16 (or `valid`'s) nodes from `node` into `parents` (check_common_parents), with whether each child
+// precedes its reader into `ordered` and the edges' count into `edges`; `words` has a bit for each operator with arguments.
+static inline __attribute__((always_inline)) void check_common_parents_step(const CheckGraph* graph, uint32_t* parents, uint32_t node, __mmask16 valid, __m512i words,
+                                                                            bool arguments, bool* ordered, uint64_t* edges)
+{
+    const uint32_t count = graph->count;
+    const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+    const __m512i limit = _mm512_set1_epi32((int)count);
+    const uint32_t* slots[] = { graph->operand0, graph->operand1, graph->operand2 };
+    _Alignas(64) uint32_t packed_children[16];
+    _Alignas(64) uint32_t packed_nodes[16];
+    const __m512i nodes = _mm512_add_epi32(_mm512_set1_epi32((int)node), lanes);
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(slots); i += 1)
+    {
+        const __m512i children = _mm512_maskz_loadu_epi32(valid, slots[i] + node);
+        const __mmask16 edge = _mm512_mask_cmplt_epu32_mask(valid, children, limit);
+        const uint32_t present = (uint32_t)__builtin_popcount(edge);
+        *ordered &= _mm512_mask_cmplt_epu32_mask(edge, children, nodes) == edge;
+        *edges += present;
+        // The edges' children and nodes packed to the front, then stored a child at a time: a scatter costs as much
+        // whatever its mask, and most slots of most nodes are absent (clang would make the stores a scatter again).
+        _mm512_store_si512(packed_children, _mm512_maskz_compress_epi32(edge, children));
+        _mm512_store_si512(packed_nodes, _mm512_maskz_compress_epi32(edge, nodes));
+#pragma clang loop vectorize(disable) interleave(disable)
+        for (uint32_t k = 0; k < present; k += 1)
+        {
+            parents[packed_children[k]] = packed_nodes[k];
+        }
+    }
+    const __m512i ops = _mm512_maskz_loadu_epi32(valid, graph->ops + node);
+    const __m512i word = _mm512_permutexvar_epi32(_mm512_srli_epi32(ops, 5), words);
+    const __m512i bit = _mm512_sllv_epi32(_mm512_set1_epi32(1), _mm512_and_si512(ops, _mm512_set1_epi32(31)));
+    for (uint32_t argued_lanes = arguments ? _mm512_mask_test_epi32_mask(valid, word, bit) : 0; argued_lanes != 0; argued_lanes &= argued_lanes - 1)
+    {
+        const uint32_t at = node + (uint32_t)__builtin_ctz(argued_lanes);
+        for (uint32_t a = 0; a < graph->argument_counts[at]; a += 1)
+        {
+            const uint32_t argument = graph->argument_nodes[graph->argument_offsets[at] + a];
+            const bool edge = argument < count;
+            *ordered &= !edge || argument < at;
+            parents[edge ? argument : count] = at;
+            *edges += edge;
+        }
+    }
+}
+
 // Each node's reader, the node that reads it as an operand or an argument, into `parents` (BUSTER_CHECK_NONE for a node no
 // other reads; `count` + 1 entries, the last a sink that the absent operands write). True where the graph is a tree in
 // node order, which the walks up from a node to its root need: each node's operands and arguments precede it, and no node
 // has two readers, or one reading it twice (each edge writes its child's entry, and only distinct children's entries
 // count as many as the edges). 16 nodes at a time: each operand slot's present children and their nodes compressed to
 // the front and written a child at a time (two edges that write one child fail the count, whatever order they write
-// in), and the arguments of the nodes whose operators have them, found from the same 16 operators; the last step masked
-// to the nodes left.
+// in), and the arguments of the nodes whose operators have them, found from the same 16 operators; the last nodes as
+// one masked step.
 static bool check_common_parents(const CheckGraph* graph, uint32_t* parents, uint64_t* roots)
 {
     const uint32_t count = graph->count;
@@ -12675,48 +12721,14 @@ static bool check_common_parents(const CheckGraph* graph, uint32_t* parents, uin
     }
     _Static_assert(CHECK_OP_COUNT <= 512, "the operators' words fit one register");
     const __m512i words = _mm512_maskz_loadu_epi32((__mmask16)((1u << BUSTER_ARRAY_LENGTH(argued)) - 1), argued);
-    const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
-    const __m512i limit = _mm512_set1_epi32((int)count);
-    const uint32_t* slots[] = { graph->operand0, graph->operand1, graph->operand2 };
-    _Alignas(64) uint32_t packed_children[16];
-    _Alignas(64) uint32_t packed_nodes[16];
-    for (uint32_t node = 0; node < count; node += 16)
+    uint32_t node = 0;
+    for (; count - node >= 16; node += 16)
     {
-        const uint32_t left = count - node;
-        const __mmask16 valid = left >= 16 ? (__mmask16)0xffff : (__mmask16)((1u << left) - 1);
-        const __m512i nodes = _mm512_add_epi32(_mm512_set1_epi32((int)node), lanes);
-        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(slots); i += 1)
-        {
-            const __m512i children = _mm512_maskz_loadu_epi32(valid, slots[i] + node);
-            const __mmask16 edge = _mm512_mask_cmplt_epu32_mask(valid, children, limit);
-            const uint32_t present = (uint32_t)__builtin_popcount(edge);
-            ordered &= _mm512_mask_cmplt_epu32_mask(edge, children, nodes) == edge;
-            edges += present;
-            // The edges' children and nodes packed to the front, then stored a child at a time: a scatter costs as much
-            // whatever its mask, and most slots of most nodes are absent (clang would make the stores a scatter again).
-            _mm512_store_si512(packed_children, _mm512_maskz_compress_epi32(edge, children));
-            _mm512_store_si512(packed_nodes, _mm512_maskz_compress_epi32(edge, nodes));
-#pragma clang loop vectorize(disable) interleave(disable)
-            for (uint32_t k = 0; k < present; k += 1)
-            {
-                parents[packed_children[k]] = packed_nodes[k];
-            }
-        }
-        const __m512i ops = _mm512_maskz_loadu_epi32(valid, graph->ops + node);
-        const __m512i word = _mm512_permutexvar_epi32(_mm512_srli_epi32(ops, 5), words);
-        const __m512i bit = _mm512_sllv_epi32(_mm512_set1_epi32(1), _mm512_and_si512(ops, _mm512_set1_epi32(31)));
-        for (uint32_t argued_lanes = arguments ? _mm512_mask_test_epi32_mask(valid, word, bit) : 0; argued_lanes != 0; argued_lanes &= argued_lanes - 1)
-        {
-            const uint32_t at = node + (uint32_t)__builtin_ctz(argued_lanes);
-            for (uint32_t a = 0; a < graph->argument_counts[at]; a += 1)
-            {
-                const uint32_t argument = graph->argument_nodes[graph->argument_offsets[at] + a];
-                const bool edge = argument < count;
-                ordered &= !edge || argument < at;
-                parents[edge ? argument : count] = at;
-                edges += edge;
-            }
-        }
+        check_common_parents_step(graph, parents, node, (__mmask16)0xffff, words, arguments, &ordered, &edges);
+    }
+    if (node < count)
+    {
+        check_common_parents_step(graph, parents, node, (__mmask16)((1u << (count - node)) - 1), words, arguments, &ordered, &edges);
     }
     // Count distinct children and retain the complementary root bits in the same pass. The caller owns both outputs,
     // disjoint from the immutable graph; the final word has no bits beyond count. Keeping this bitmap costs one bit per

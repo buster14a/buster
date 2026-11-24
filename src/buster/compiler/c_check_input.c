@@ -17061,34 +17061,53 @@ static void check_input_tentative_arrays(CheckInputReader* reader, uint32_t limi
 // after it. Keep this small function out of check_input_run: LLVM 23.1.4's MSan switches a large function's wide
 // checks to callbacks whose temporary shadows are allocated at the check, which in this loop can grow the stack
 // with the token count. The separate frame retains every check and the vector path (#1610).
+// The marks of the 16 (or `valid`'s) tokens from `token`: their sources, clamped, gather four bytes each at their levels,
+// of which the low one is the level.
+static inline __attribute__((always_inline)) void check_input_system_token_step(uint8_t* tokens, const uint32_t* sources, const uint8_t* levels, uint32_t limit,
+                                                                                uint32_t token, __mmask16 valid)
+{
+    const __m512i source = _mm512_min_epu32(_mm512_maskz_loadu_epi32(valid, sources + token), _mm512_set1_epi32((int32_t)limit));
+    const __m512i level = _mm512_and_si512(_mm512_mask_i32gather_epi32(_mm512_setzero_si512(), valid, source, levels, 1), _mm512_set1_epi32(0xff));
+    const __mmask16 marked = _mm512_mask_cmpeq_epi32_mask(valid, level, _mm512_set1_epi32(BUSTER_PP_SYSTEM_FILE)) |
+                             _mm512_mask_cmpeq_epi32_mask(valid, level, _mm512_set1_epi32(BUSTER_PP_EXTERN_C_FILE));
+    _mm_mask_storeu_epi8(tokens + token, valid, _mm_maskz_set1_epi8(marked, 1));
+}
+
 static __attribute__((noinline)) void check_input_system_token_map(uint8_t* tokens, const uint32_t* sources, uint32_t count, const uint8_t* levels, uint32_t limit)
 {
-    // 16 tokens at a time (#529), the last step masked to the tokens left: their sources, clamped, gather four bytes each
-    // at their levels, of which the low one is the level.
-    for (uint32_t token = 0; token < count; token += 16)
+    // 16 tokens at a time (#529), the last ones as one masked step.
+    uint32_t token = 0;
+    for (; count - token >= 16; token += 16)
     {
-        const uint32_t left = count - token;
-        const __mmask16 valid = left >= 16 ? (__mmask16)0xffff : (__mmask16)((1u << left) - 1);
-        const __m512i source = _mm512_min_epu32(_mm512_maskz_loadu_epi32(valid, sources + token), _mm512_set1_epi32((int32_t)limit));
-        const __m512i level = _mm512_and_si512(_mm512_mask_i32gather_epi32(_mm512_setzero_si512(), valid, source, levels, 1), _mm512_set1_epi32(0xff));
-        const __mmask16 marked = _mm512_mask_cmpeq_epi32_mask(valid, level, _mm512_set1_epi32(BUSTER_PP_SYSTEM_FILE)) |
-                                 _mm512_mask_cmpeq_epi32_mask(valid, level, _mm512_set1_epi32(BUSTER_PP_EXTERN_C_FILE));
-        _mm_mask_storeu_epi8(tokens + token, valid, _mm_maskz_set1_epi8(marked, 1));
+        check_input_system_token_step(tokens, sources, levels, limit, token, (__mmask16)0xffff);
+    }
+    if (token < count)
+    {
+        check_input_system_token_step(tokens, sources, levels, limit, token, (__mmask16)((1u << (count - token)) - 1));
     }
 }
 
+// The marks of the 64 (or `valid`'s) tokens from `token`, from their level bytes.
+static inline __attribute__((always_inline)) void check_input_level_step(uint8_t* tokens, const uint8_t* levels, uint32_t token, __mmask64 valid)
+{
+    const __m512i level = _mm512_maskz_loadu_epi8(valid, levels + token);
+    const __mmask64 marked = _mm512_mask_cmpeq_epi8_mask(valid, level, _mm512_set1_epi8(BUSTER_PP_SYSTEM_FILE)) |
+                             _mm512_mask_cmpeq_epi8_mask(valid, level, _mm512_set1_epi8(BUSTER_PP_EXTERN_C_FILE));
+    _mm512_mask_storeu_epi8(tokens + token, valid, _mm512_maskz_set1_epi8(marked, 1));
+}
+
 // Each token's mark from its level byte (`levels`, a byte a token): 1 for a system or extern "C" file's, 64 at a time, the
-// last step masked to the tokens left.
+// last ones as one masked step.
 static void check_input_level_marks(uint8_t* tokens, const uint8_t* levels, uint32_t count)
 {
-    for (uint32_t token = 0; token < count; token += 64)
+    uint32_t token = 0;
+    for (; count - token >= 64; token += 64)
     {
-        const uint32_t left = count - token;
-        const __mmask64 valid = left >= 64 ? ~(__mmask64)0 : ((__mmask64)1 << left) - 1;
-        const __m512i level = _mm512_maskz_loadu_epi8(valid, levels + token);
-        const __mmask64 marked = _mm512_mask_cmpeq_epi8_mask(valid, level, _mm512_set1_epi8(BUSTER_PP_SYSTEM_FILE)) |
-                                 _mm512_mask_cmpeq_epi8_mask(valid, level, _mm512_set1_epi8(BUSTER_PP_EXTERN_C_FILE));
-        _mm512_mask_storeu_epi8(tokens + token, valid, _mm512_maskz_set1_epi8(marked, 1));
+        check_input_level_step(tokens, levels, token, ~(__mmask64)0);
+    }
+    if (token < count)
+    {
+        check_input_level_step(tokens, levels, token, ((__mmask64)1 << (count - token)) - 1);
     }
 }
 

@@ -529,7 +529,7 @@ static bool check_data_sort_fixups(CheckDataPlan* plan, Arena* scratch)
 }
 
 // Only bytes owned by this write are inspected. Bit-fields can begin/end inside a byte; the bulk is a bounded
-// byte slice with no readable padding, 64 bytes at a time, the last step masked to the bytes left.
+// byte slice with no readable padding, 64 bytes at a time, the last ones as one masked step.
 static bool check_data_nonzero_bits(const uint8_t* bytes, uint64_t begin, uint64_t end)
 {
     uint8_t nonzero = 0;
@@ -540,11 +540,16 @@ static bool check_data_nonzero_bits(const uint8_t* bytes, uint64_t begin, uint64
         begin += width;
     }
     const uint64_t byte_end = end / 8;
-    for (uint64_t byte = begin / 8; nonzero == 0 && byte < byte_end; byte += 64)
+    uint64_t byte = begin / 8;
+    while (nonzero == 0 && byte_end - byte >= 64)
     {
-        const uint64_t left = byte_end - byte;
-        const __mmask64 valid = left >= 64 ? ~(__mmask64)0 : ((__mmask64)1 << left) - 1;
-        const __m512i block = _mm512_maskz_loadu_epi8(valid, bytes + byte);
+        const __m512i block = _mm512_loadu_si512(bytes + byte);
+        nonzero = _mm512_test_epi64_mask(block, block) != 0;
+        byte += 64;
+    }
+    if (nonzero == 0 && byte < byte_end)
+    {
+        const __m512i block = _mm512_maskz_loadu_epi8(((__mmask64)1 << (byte_end - byte)) - 1, bytes + byte);
         nonzero = _mm512_test_epi64_mask(block, block) != 0;
     }
     if (begin < end && (end % 8) != 0 && begin <= byte_end * 8)

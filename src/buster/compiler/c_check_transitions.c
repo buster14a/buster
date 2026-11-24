@@ -187,57 +187,67 @@ static bool check_transition_op(CheckOp op)
 
 _Static_assert(sizeof(CheckOp) == sizeof(uint32_t), "the static words' vector path loads 16 operators at a time");
 
+// The static words of the 16 (or `valid`'s) nodes from `node` (check_transition_statics).
+static inline __attribute__((always_inline)) void check_transition_statics_step(const CheckGraph* graph, const CheckStream* stream, uint32_t* statics, uint32_t node,
+                                                                                __mmask16 valid)
+{
+    const __m512i op = _mm512_maskz_loadu_epi32(valid, graph->ops + node);
+    const __mmask16 call = _mm512_mask_cmpeq_epi32_mask(valid, op, _mm512_set1_epi32(CHECK_OP_CALL));
+    __mmask16 eligible = valid & ((_mm512_cmpge_epu32_mask(op, _mm512_set1_epi32(CHECK_OP_POSITIVE)) & _mm512_cmple_epu32_mask(op, _mm512_set1_epi32(CHECK_OP_SELECT))) |
+                                  _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(CHECK_OP_REAL)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(CHECK_OP_IMAGINARY)));
+    if (stream->constant_evaluated != NULL)
+    {
+        eligible &= _mm_cmpeq_epi8_mask(_mm_maskz_loadu_epi8(valid, stream->constant_evaluated + node), _mm_setzero_si128());
+    }
+    const __m512i arguments = _mm512_maskz_loadu_epi32(call, graph->argument_counts + node);
+    const __m512i member = _mm512_maskz_loadu_epi32(call, graph->members + node);
+    eligible &= (__mmask16)~(_mm512_test_epi32_mask(member, _mm512_set1_epi32((int)BUSTER_CHECK_LIBRARY_CALL)) |
+                             _mm512_cmpgt_epu32_mask(arguments, _mm512_set1_epi32(BUSTER_CHECK_TRANSITION_ARGUMENTS)));
+    const uint32_t system_count = graph->system_tokens != NULL ? graph->system_token_count : 0;
+    __mmask16 system = 0;
+    if (graph->tokens != NULL && system_count != 0)
+    {
+        const __m512i token = _mm512_maskz_loadu_epi32(valid, graph->tokens + node);
+        const __mmask16 inside = system_count >= 4 ? _mm512_mask_cmplt_epu32_mask(valid, token, _mm512_set1_epi32((int)(system_count - 3))) : 0;
+        const __m512i bytes = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), inside, token, graph->system_tokens, 1);
+        system = _mm512_mask_test_epi32_mask(inside, bytes, _mm512_set1_epi32(0xff));
+        for (uint32_t lanes = (uint32_t)(__mmask16)(valid & ~inside); lanes != 0; lanes &= lanes - 1)
+        {
+            const uint32_t lane = (uint32_t)__builtin_ctz(lanes);
+            system |= (__mmask16)((uint32_t)check_graph_relaxed_token(graph, graph->tokens[node + lane]) << lane);
+        }
+    }
+    const __m512i environment = graph->fp_environments != NULL ? _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(valid, graph->fp_environments + node)) :
+                                _mm512_set1_epi32(graph->fp_contract_default);
+    const __m512i extensions = _mm512_mask_or_epi32(_mm512_set1_epi32((int)graph->extensions), system, _mm512_set1_epi32((int)graph->extensions),
+                                                    _mm512_set1_epi32(BUSTER_CHECK_EXTENSION_SYSTEM_HEADER));
+    const __m512i header = _mm512_or_si512(_mm512_or_si512(op, _mm512_slli_epi32(extensions, BUSTER_CHECK_KEY_EXTENSIONS_SHIFT)),
+                                           _mm512_or_si512(_mm512_or_si512(_mm512_slli_epi32(environment, BUSTER_CHECK_KEY_ENVIRONMENT_SHIFT),
+                                                                           _mm512_slli_epi32(arguments, BUSTER_CHECK_KEY_ARGUMENTS_SHIFT)),
+                                                           _mm512_set1_epi32((int)BUSTER_CHECK_KEY_VALID)));
+    const __m512i words = _mm512_mask_mov_epi32(_mm512_maskz_mov_epi32(eligible, header), _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(CHECK_OP_VALUE)),
+                                                _mm512_set1_epi32(BUSTER_CHECK_TRANSITION_LEAF));
+    _mm512_mask_storeu_epi32(statics + node, valid, words);
+}
+
 // Each node's static word before the node order, which no node's answer changes, and a vector member's
 // (CheckGraph.vector_members) BUSTER_CHECK_TRANSITION_OTHER. The table takes a node by its operator, without a constant
 // evaluation, a plain library builtin's fold or more arguments than a key holds; its key's first word has its operator,
 // extensions (with the system-header bit from its token), floating environment and a call's argument count. It takes 16
-// nodes at a time, the last step masked to the nodes left: their operators, a call's argument count and member by masked
+// nodes at a time, the last nodes as one masked step: their operators, a call's argument count and member by masked
 // loads, the system-header bit by a gather of the 4 bytes from each token's own, where they lie within the tokens' array
 // (and one at a time where they don't).
 static void check_transition_statics(const CheckGraph* graph, const CheckStream* stream, uint32_t* statics)
 {
     const uint32_t count = graph->count;
-    for (uint32_t node = 0; node < count; node += 16)
+    uint32_t node = 0;
+    for (; count - node >= 16; node += 16)
     {
-        const uint32_t left = count - node;
-        const __mmask16 valid = left >= 16 ? (__mmask16)0xffff : (__mmask16)((1u << left) - 1);
-        const __m512i op = _mm512_maskz_loadu_epi32(valid, graph->ops + node);
-        const __mmask16 call = _mm512_mask_cmpeq_epi32_mask(valid, op, _mm512_set1_epi32(CHECK_OP_CALL));
-        __mmask16 eligible = valid & ((_mm512_cmpge_epu32_mask(op, _mm512_set1_epi32(CHECK_OP_POSITIVE)) & _mm512_cmple_epu32_mask(op, _mm512_set1_epi32(CHECK_OP_SELECT))) |
-                                      _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(CHECK_OP_REAL)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(CHECK_OP_IMAGINARY)));
-        if (stream->constant_evaluated != NULL)
-        {
-            eligible &= _mm_cmpeq_epi8_mask(_mm_maskz_loadu_epi8(valid, stream->constant_evaluated + node), _mm_setzero_si128());
-        }
-        const __m512i arguments = _mm512_maskz_loadu_epi32(call, graph->argument_counts + node);
-        const __m512i member = _mm512_maskz_loadu_epi32(call, graph->members + node);
-        eligible &= (__mmask16)~(_mm512_test_epi32_mask(member, _mm512_set1_epi32((int)BUSTER_CHECK_LIBRARY_CALL)) |
-                                 _mm512_cmpgt_epu32_mask(arguments, _mm512_set1_epi32(BUSTER_CHECK_TRANSITION_ARGUMENTS)));
-        const uint32_t system_count = graph->system_tokens != NULL ? graph->system_token_count : 0;
-        __mmask16 system = 0;
-        if (graph->tokens != NULL && system_count != 0)
-        {
-            const __m512i token = _mm512_maskz_loadu_epi32(valid, graph->tokens + node);
-            const __mmask16 inside = system_count >= 4 ? _mm512_mask_cmplt_epu32_mask(valid, token, _mm512_set1_epi32((int)(system_count - 3))) : 0;
-            const __m512i bytes = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), inside, token, graph->system_tokens, 1);
-            system = _mm512_mask_test_epi32_mask(inside, bytes, _mm512_set1_epi32(0xff));
-            for (uint32_t lanes = (uint32_t)(__mmask16)(valid & ~inside); lanes != 0; lanes &= lanes - 1)
-            {
-                const uint32_t lane = (uint32_t)__builtin_ctz(lanes);
-                system |= (__mmask16)((uint32_t)check_graph_relaxed_token(graph, graph->tokens[node + lane]) << lane);
-            }
-        }
-        const __m512i environment = graph->fp_environments != NULL ? _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(valid, graph->fp_environments + node)) :
-                                    _mm512_set1_epi32(graph->fp_contract_default);
-        const __m512i extensions = _mm512_mask_or_epi32(_mm512_set1_epi32((int)graph->extensions), system, _mm512_set1_epi32((int)graph->extensions),
-                                                        _mm512_set1_epi32(BUSTER_CHECK_EXTENSION_SYSTEM_HEADER));
-        const __m512i header = _mm512_or_si512(_mm512_or_si512(op, _mm512_slli_epi32(extensions, BUSTER_CHECK_KEY_EXTENSIONS_SHIFT)),
-                                               _mm512_or_si512(_mm512_or_si512(_mm512_slli_epi32(environment, BUSTER_CHECK_KEY_ENVIRONMENT_SHIFT),
-                                                                               _mm512_slli_epi32(arguments, BUSTER_CHECK_KEY_ARGUMENTS_SHIFT)),
-                                                               _mm512_set1_epi32((int)BUSTER_CHECK_KEY_VALID)));
-        const __m512i words = _mm512_mask_mov_epi32(_mm512_maskz_mov_epi32(eligible, header), _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(CHECK_OP_VALUE)),
-                                                    _mm512_set1_epi32(BUSTER_CHECK_TRANSITION_LEAF));
-        _mm512_mask_storeu_epi32(statics + node, valid, words);
+        check_transition_statics_step(graph, stream, statics, node, (__mmask16)0xffff);
+    }
+    if (node < count)
+    {
+        check_transition_statics_step(graph, stream, statics, node, (__mmask16)((1u << (count - node)) - 1));
     }
     for (uint32_t i = 0; i < graph->vector_member_count; i += 1)
     {
