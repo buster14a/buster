@@ -146,5 +146,8 @@ static void check_test_driver_redefinitions(CheckTest* test, const char* clang, 
                       check_test_implicit_count(diagnostics, "error: invalid universal character") == 1 &&
                       check_test_implicit_count(diagnostics, ": error: ") == 14,
                       "rejected strings, including nested compound literals, are diagnosed once before the next redefinition");
+    check_test_expect(test, diagnostics != NULL &&
+                      check_test_implicit_count(diagnostics, "warning: use of GNU 'missing =' extension in designator") == 1,
+                      "a canceled compound literal still prepares its sibling designator");
     free(diagnostics);
 }
