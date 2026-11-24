@@ -6754,6 +6754,14 @@ an argument's parameter note, and its group's severity at its token. A call's
 argument's takes its place among the call's conversion warnings, as its error
 does (#2481). An error among them rejects the unit.
 
+The recheck's source is the stream's value before its lvalue conversions, so
+the driver decays it first as the checker did
+(`check_driver_default_error_source`): a function designator to its pointer
+(#2424) and an array to the pointer to its element, qualifiers kept (#3559).
+A compatible decayed array or string literal is then no conversion to report.
+The pointer type is the one the checker's conversion interned. Without it, a
+function designator is a resource failure and an array isn't rechecked.
+
 Left: without a demotion, an initializer with two failed members still gives
 only its first error (`struct S { int *m; long n; } s = { 7, &g0 };`), where
 clang gives both.
