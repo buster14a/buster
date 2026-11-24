@@ -221,6 +221,9 @@ struct CheckClock
     // Whether the process's arenas took base pages because the host was busy when it started (#672: lane.c's
     // arena_pages_busy), which the driver copies in; the report says `busy` for them.
     bool pages_busy;
+    // How many of the command's arenas are warm (#2850: lane.c's arena_reserve_warm), which the driver copies in; the
+    // report's `warm-arenas` line.
+    uint32_t warm_arenas;
     // Within the reader's stage (`check-input`), the TSC's ticks of its expressions' walk (CheckInput.expression_ticks,
     // #1038), which the report gives on a `time-check` line; its parts' (CheckInput.expression_part_ticks, in
     // check_clock_walk_parts' order), each on a `time-check expressions.PART` line; and the minor faults and system
@@ -495,6 +498,7 @@ static void check_clock_report(const CheckClock* stage_clock, const uint64_t* pp
     // the host was busy when it started (#672), or as the system has them.
     const bool pages_off = prctl(PR_GET_THP_DISABLE, 0, 0, 0, 0) == 1;
     fprintf(stream, "time-process\thuge-pages\t%s\n", pages_off ? "off" : stage_clock->pages_busy ? "busy" : "system");
+    fprintf(stream, "time-process\twarm-arenas\t%u\n", stage_clock->warm_arenas);
     fprintf(stream, "time-process\tstage-system-source\tgetrusage-rusage-self-ru-stime\n");
     fprintf(stream, "time-process\tstage-system-boundary\tresource-marks\n");
     fprintf(stream, "time-process\tstage-system-status\t%s\n", stage_clock->usage_available ? "available" : "unavailable");

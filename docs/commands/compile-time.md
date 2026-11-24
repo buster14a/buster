@@ -14,7 +14,9 @@ requirements. [Command index](README.md).
   ran on (#905: `lanes-asked` and `lanes`), whether transparent huge pages were off for it (#1109: `huge-pages`, `off`,
   `busy` or `system`; `lane.c`'s `arena_page_policy` turns them off on a virtual machine or by `BUSTER_HUGE_PAGES=0`,
   `BUSTER_HUGE_PAGES=1` leaves them as the system has them, and `busy` means the process's arenas alone took base pages
-  on a host busy when it started, #672: its tasks runnable at least a quarter of its CPUs online), how many of its
+  on a host busy when it started, #672: its tasks runnable at least a quarter of its CPUs online), how many of the
+  command's arenas are warm (#2850: `warm-arenas`, 2 with `BUSTER_ARENA_POOL` naming a directory whose file it could
+  claim, [arena memory](../arena-memory.md#warm-arenas-2850)), how many of its
   units were preprocessed a second time for their expansion history (#2850: `history-replays`; a unit that says nothing
   must read 0, since only a diagnostic or a warning's test of a macro asks for the history), the tiles its parses
   took and the units a tile sent to be parsed as one (#2536: `parse-tiles` and `parse-tiles-refused`, for a unit parsed

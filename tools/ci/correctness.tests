@@ -169,6 +169,31 @@ mapfile -d '' -t host_flags < <(./build.sh print-host-flags)
 test "${#host_flags[@]}" -gt 0
 clang -std=c17 -O2 "${host_flags[@]}" -Wall -Wextra -Werror -fno-strict-aliasing "${sanitizer_flags[@]}" tests/driver/multicore.c -o build/test-driver-multicore
 ./build/test-driver-multicore "$BUSTER_COMPILER"
+== Compile the frozen sqlite3.c and c-testsuite's programs with their warm arenas filled, to the same objects
+# #2850: a warm arena (lane.c's arena_reserve_warm, docs/arena-memory.md) holds an earlier compile's bytes where an
+# ordinary arena's are zero, so code that read a byte of one before writing it would give an object that depends on
+# them. BUSTER_TEST_ARENA_FILL=1 has the command's warm arenas hold a pattern instead: each unit's status, diagnostics
+# and object must be the plain compile's.
+unset CPATH C_INCLUDE_PATH
+directory=$(mktemp -d build/warm-arenas.XXXXXX)
+trap 'rm -rf "$directory"' EXIT
+test -f "$BUSTER_CORPUS/sqlite/sqlite3.c"
+test -f build/c-testsuite/tests/single-exec/00001.c
+compiled=0
+for source in "$BUSTER_CORPUS/sqlite/sqlite3.c" build/c-testsuite/tests/single-exec/*.c; do
+    plain=0
+    filled=0
+    "$BUSTER_COMPILER" -c -o "$directory/plain.o" "$source" > "$directory/plain.txt" 2>&1 || plain=$?
+    BUSTER_TEST_ARENA_FILL=1 "$BUSTER_COMPILER" -c -o "$directory/filled.o" "$source" > "$directory/filled.txt" 2>&1 || filled=$?
+    test "$plain" -eq "$filled" || { echo "$source: status $plain plain and $filled filled"; exit 1; }
+    cmp "$directory/plain.txt" "$directory/filled.txt" || { echo "$source: the diagnostics differ"; exit 1; }
+    if [ "$plain" -eq 0 ]; then
+        cmp "$directory/plain.o" "$directory/filled.o" || { echo "$source: the objects differ"; exit 1; }
+        compiled=$((compiled + 1))
+    fi
+done
+echo "warm arenas filled: $compiled units' objects are the plain compiles'"
+test "$compiled" -ge 200
 == Test c-testsuite's programs end to end [4 CPUs]
 # #145: each program checked, lowered, compiled by Tier 0 and linked by the direct path, by the vector paths and
 # the scalar twins, these with the identifiers' ids in another order (#153's --id-order), into the same bytes,

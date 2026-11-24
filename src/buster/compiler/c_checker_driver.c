@@ -15074,6 +15074,13 @@ static int check_driver_run(CheckDriverRun* run, bool* announced)
 static CheckProgramLanes check_driver_lanes;
 static bool check_driver_lanes_taken;
 
+// The command's warm arenas' slots (arena_reserve_warm), the same in every process, so that each finds its own pages.
+typedef enum CheckDriverWarm
+{
+    CHECK_DRIVER_WARM_ARENA,
+    CHECK_DRIVER_WARM_OUTPUT,
+} CheckDriverWarm;
+
 // The semantic driver: `compiler check` (`executable` false) checks, and with -c writes an object; the default C command
 // (`executable` true) also links an executable at -o (a.out by default) unless -c or -fsyntax-only says otherwise. With
 // several source files (#152), it compiles each of them (check_driver_units): -c writes each one's object, and the link
@@ -15101,9 +15108,23 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     worker_budget_initialize(&worker_budget, getenv("MAKEFLAGS"), BUSTER_CHECK_EMIT_MAX_LANES);
     int result = 1;
     const uint64_t reservation_bytes = UINT64_C(1) << 36;
-    Arena arena = arena_reserve(reservation_bytes);
+    // The command's arena and its output's are warm where BUSTER_ARENA_POOL names a directory (#2850, arena_reserve_warm):
+    // they hold what a unit's reader and its expressions' run write, 131 MB of sqlite3.c's, which a compile then finds
+    // in the file the last one left rather than in pages the kernel clears: 3.7 ms of its 114 on the 9700X. Both stages
+    // ask whether their arena is untouched before they take a byte of it for zero (CheckOptions.fresh_output,
+    // check_input_run), which a warm arena never is. The tests' switches: BUSTER_TEST_ARENA_FILL=1 has a compile find a
+    // pattern there, with or without a directory, and BUSTER_TEST_ARENA_BASE_PAGES=1 takes a directory on a tmpfs of
+    // base pages, which a compile is slower by.
+    const char* warm_directory = getenv("BUSTER_ARENA_POOL");
+    const char* warm_fill = getenv("BUSTER_TEST_ARENA_FILL");
+    const char* warm_base_pages = getenv("BUSTER_TEST_ARENA_BASE_PAGES");
+    const uint32_t warm_flags = (warm_fill != NULL && strcmp(warm_fill, "1") == 0 ? BUSTER_ARENA_WARM_FILL : 0) |
+                                (warm_base_pages != NULL && strcmp(warm_base_pages, "1") == 0 ? BUSTER_ARENA_WARM_BASE_PAGES : 0);
+    const bool warm_begun = arena_warm_begin(warm_directory != NULL && warm_directory[0] != 0 ? warm_directory : NULL, warm_flags);
+    Arena arena = arena_reserve_warm(reservation_bytes, CHECK_DRIVER_WARM_ARENA);
     Arena scratch = arena_reserve(reservation_bytes);
-    Arena output_arena = arena_reserve(reservation_bytes);
+    Arena output_arena = arena_reserve_warm(reservation_bytes, CHECK_DRIVER_WARM_OUTPUT);
+    clock_storage.warm_arenas = (arena.warm != 0 ? 1 : 0) + (output_arena.warm != 0 ? 1 : 0);
     // The command fails at once if one of them can't be reserved, though a command of several units uses only the first.
     const bool reserved = arena.base != NULL && scratch.base != NULL && output_arena.base != NULL;
     char** filtered = arena_push_array(&arena, (uint64_t)count + 1, sizeof(char*), _Alignof(char*));
@@ -16126,6 +16147,11 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         arena_release(&output_arena);
         arena_release(&scratch);
         arena_release(&arena);
+        // The claim this command made is its own: the process's next command makes another, by its own environment.
+        if (warm_begun)
+        {
+            arena_warm_end();
+        }
     }
     check_clock_mark(stage_clock, CHECK_STAGE_RELEASE);
     if (default_path_checked)

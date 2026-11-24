@@ -133,9 +133,12 @@
 #include <fcntl.h>
 #include <dirent.h>
 #include <errno.h>
+#include <sys/file.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <sys/vfs.h>
 #include <sys/wait.h>
 #if defined(BUSTER_HOST_STATIC) && BUSTER_HOST_STATIC
 #include <execinfo.h>
@@ -1007,6 +1010,336 @@ static void lane_test_arena_clear(LaneTestTally* tally)
     arena_release(&arena);
 }
 
+// Whether each of `count` bytes is `value`.
+static bool lane_test_bytes(const uint8_t* bytes, uint64_t count, uint8_t value)
+{
+    bool result = true;
+    for (uint64_t i = 0; i < count; i += 1)
+    {
+        result = result && bytes[i] == value;
+    }
+    return result;
+}
+
+#define BUSTER_LANE_TEST_WARM_CAPACITY (64ull << 20)
+
+// A process whose warm arenas are a file's (#2850, arena_reserve_warm), `directory` a tmpfs's: the claim and its lock;
+// what a warm reservation is, and which are ordinary ones; commits, in whole huge pages allocated in the file; clears in
+// place and discards that do nothing; a slot's next arena, which finds the bytes its last one left; a refused
+// allocation, past which the arena is the process's own memory; another process's claim, of the next file; and the
+// claim's end.
+static void lane_test_arena_warm_file_child(LaneTestTally* tally, const char* directory)
+{
+    const uint64_t page = BUSTER_ARENA_PAGE_BYTES;
+    const uint64_t huge = BUSTER_ARENA_HUGE_PAGE_BYTES;
+    const uint64_t bytes = 3 * huge + 123;
+    char path[PATH_MAX];
+    char next_path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/buster-arena-0", directory);
+    snprintf(next_path, sizeof(next_path), "%s/buster-arena-1", directory);
+    // A call with neither a directory nor the fill begins nothing; the first with one does, and a later one changes
+    // nothing while it stands.
+    const bool begun = !arena_warm_begin(0, BUSTER_ARENA_WARM_BASE_PAGES) && arena_warm.state == 0 && arena_warm_begin(directory, BUSTER_ARENA_WARM_BASE_PAGES) &&
+                       !arena_warm_begin(0, BUSTER_ARENA_WARM_FILL);
+    Arena arena = arena_reserve_warm(BUSTER_LANE_TEST_WARM_CAPACITY, 2);
+    const ArenaWarmSlot* slot = arena_warm.slots + 2;
+    struct stat status = { 0 };
+    const bool claimed = begun && stat(path, &status) == 0 && (status.st_mode & 0777) == 0600 && !arena_warm.fill && arena_warm.pid == getpid();
+    lane_test_expect(tally, claimed && arena.warm == 3 && ((uintptr_t)arena.base & (huge - 1)) == 0 && arena.capacity == BUSTER_LANE_TEST_WARM_CAPACITY && !arena_untouched(&arena) &&
+                                arena_warm_holds(arena.base) && arena_warm_holds(arena.base + BUSTER_LANE_TEST_WARM_CAPACITY - 1) && !arena_warm_holds(arena.base - 1) &&
+                                !arena_warm_holds(arena.base + BUSTER_LANE_TEST_WARM_CAPACITY) && slot->place == 2 * BUSTER_ARENA_WARM_SLOT_BYTES && !slot->own,
+                     "a warm arena wasn't its slot's part of the claimed file, from a huge page's boundary and never untouched");
+    // What another process's claim would meet: a second description of the file, which can't be locked.
+    const int second = open(path, O_RDWR | O_CLOEXEC);
+    lane_test_expect(tally, second >= 0 && flock(second, LOCK_EX | LOCK_NB) != 0 && errno == EWOULDBLOCK, "the claimed file wasn't held");
+    // Ordinary arenas: the slot's second, one of no slot, and one that its base pages hold.
+    Arena again = arena_reserve_warm(BUSTER_LANE_TEST_WARM_CAPACITY, 2);
+    Arena past = arena_reserve_warm(BUSTER_LANE_TEST_WARM_CAPACITY, BUSTER_ARENA_WARM_SLOTS);
+    Arena little = arena_reserve_warm(BUSTER_ARENA_SMALL_BYTES, 3);
+    lane_test_expect(tally, again.base != 0 && again.warm == 0 && arena_untouched(&again) && past.base != 0 && past.warm == 0 && little.base != 0 && little.warm == 0 &&
+                                arena_warm.taken == 4,
+                     "a taken slot's reservation, one past the slots or one of base pages alone wasn't an ordinary arena");
+    arena_release(&again);
+    arena_release(&past);
+    arena_release(&little);
+    // A commit: whole huge pages, allocated in the file.
+    uint8_t* memory = arena_push(&arena, bytes, 1);
+    const bool allocated = memory == arena.base && arena.committed == 4 * huge && slot->allocated == 4 * huge && fstat(arena_warm.file, &status) == 0 &&
+                           (uint64_t)status.st_blocks * 512 >= 4 * huge;
+    lane_test_expect(tally, allocated, "a warm arena's commit wasn't whole huge pages, allocated in its file");
+    if (allocated)
+    {
+        // A long stretch is cleared in place, alone: given back, a file's pages return as they were.
+        memset(memory, 0x5a, bytes);
+        const uint64_t cleared = BUSTER_ARENA_CLEAR_BYTES + 5 * page + 9;
+        arena_clear(memory + 77, cleared);
+        lane_test_expect(tally, lane_test_bytes(memory, 77, 0x5a) && lane_test_zero(memory + 77, cleared) && lane_test_bytes(memory + 77 + cleared, bytes - 77 - cleared, 0x5a),
+                         "a long stretch of a warm arena wasn't cleared, alone");
+        // A discard leaves its pages mapped: reading them takes no fault.
+        memset(memory, 0x5a, bytes);
+        arena_pop_to(&arena, huge);
+        struct rusage before = { 0 };
+        struct rusage after = { 0 };
+        const bool measured = getrusage(RUSAGE_SELF, &before) == 0;
+        arena_discard(&arena);
+        arena_discard_huge(&arena);
+        const bool kept = lane_test_bytes(memory, bytes, 0x5a);
+        lane_test_expect(tally, measured && kept && getrusage(RUSAGE_SELF, &after) == 0 && after.ru_minflt == before.ru_minflt, "a warm arena's discard unmapped its pages");
+        // A rewind clears to the peak in place, and the arena is as little untouched as before.
+        arena_rewind(&arena, page + 9);
+        lane_test_expect(tally, arena.length == page + 9 && lane_test_bytes(memory, page + 9, 0x5a) && lane_test_zero(memory + page + 9, bytes - page - 9) && !arena_untouched(&arena),
+                         "a rewound warm arena didn't keep its bytes to its length and none past it, or was untouched");
+        // The slot's next arena finds the bytes its last one left, at their places.
+        memset(memory, 0x5a, bytes);
+        memory[huge + 3] = 0x77;
+    }
+    arena_release(&arena);
+    lane_test_expect(tally, arena.base == 0 && arena_warm.taken == 0 && slot->mapping == 0 && !arena_warm_holds(memory), "a released warm arena kept its slot");
+    arena = arena_reserve_warm(BUSTER_LANE_TEST_WARM_CAPACITY, 2);
+    memory = arena_push(&arena, bytes, 1);
+    lane_test_expect(tally, allocated && arena.warm == 3 && memory != 0 && lane_test_bytes(memory, huge + 3, 0x5a) && memory[huge + 3] == 0x77 &&
+                                lane_test_bytes(memory + huge + 4, bytes - huge - 4, 0x5a),
+                     "a slot's next arena didn't find the bytes its last one left");
+    // An allocation the file system refuses (here a descriptor in the file's place, which has none): the arena goes on
+    // in the process's own memory past what the file holds of it, which stays.
+    const int file = arena_warm.file;
+    const int null = open("/dev/null", O_RDWR | O_CLOEXEC);
+    arena_warm.file = null;
+    uint8_t* more = memory != 0 && null >= 0 ? arena_push(&arena, 6 * huge, 1) : 0;
+    arena_warm.file = file;
+    const bool own = more != 0 && slot->own && slot->allocated == 4 * huge && arena.committed == 10 * huge && lane_test_zero(memory + 4 * huge, 5 * huge + 123);
+    lane_test_expect(tally, own, "a warm arena whose allocation was refused didn't go on in the process's own memory");
+    if (own)
+    {
+        memset(more, 0x33, 6 * huge);
+        // The file holds what was written before the refusal, and nothing of what was written after it.
+        uint8_t held = 0;
+        uint8_t past = 0xff;
+        const bool read = pread(file, &held, 1, (off_t)(slot->place + huge + 3)) == 1 && pread(file, &past, 1, (off_t)(slot->place + 5 * huge)) == 1;
+        lane_test_expect(tally, lane_test_bytes(memory, huge + 3, 0x5a) && memory[huge + 3] == 0x77 && lane_test_bytes(memory + huge + 4, bytes - huge - 4, 0x5a) &&
+                                    lane_test_bytes(more, 6 * huge, 0x33) && read && held == 0x77 && past == 0,
+                         "a warm arena that went on in the process's own memory lost its bytes, or wrote the file's");
+    }
+    arena_release(&arena);
+    // A file that can't be mapped (the same descriptor, a device's): the reservation is an ordinary arena, its slot free.
+    arena_warm.file = null;
+    Arena unmapped = null >= 0 ? arena_reserve_warm(BUSTER_LANE_TEST_WARM_CAPACITY, 2) : (Arena){ 0 };
+    arena_warm.file = file;
+    lane_test_expect(tally, unmapped.base != 0 && unmapped.warm == 0 && arena_untouched(&unmapped) && arena_warm.taken == 0,
+                     "a reservation whose file couldn't be mapped wasn't an ordinary arena, or kept its slot");
+    arena_release(&unmapped);
+    if (null >= 0)
+    {
+        close(null);
+    }
+    // Another process's claim: the next file, this one's being held.
+    fflush(stdout);
+    const pid_t other = fork();
+    if (other == 0)
+    {
+        // The process this one forked has its descriptor and not its claim: an ordinary arena, until it has ended what
+        // it inherited and begun for itself, which claims the next file.
+        Arena inherited = arena_reserve_warm(BUSTER_LANE_TEST_WARM_CAPACITY, 0);
+        const bool ordinary = inherited.base != 0 && inherited.warm == 0 && !arena_warm_begin(directory, BUSTER_ARENA_WARM_BASE_PAGES);
+        arena_release(&inherited);
+        arena_warm_end();
+        const bool again = arena_warm.state == 0 && arena_warm_begin(directory, BUSTER_ARENA_WARM_BASE_PAGES);
+        Arena its = arena_reserve_warm(BUSTER_LANE_TEST_WARM_CAPACITY, 0);
+        const bool next = its.warm == 1 && arena_warm.file >= 0 && fstat(arena_warm.file, &status) == 0 && stat(next_path, &status) == 0 && arena_push(&its, 16, 1) != 0;
+        _exit(ordinary && again && next ? 0 : 1);
+    }
+    int ended = 0;
+    lane_test_expect(tally, other > 0 && waitpid(other, &ended, 0) == other && WIFEXITED(ended) && WEXITSTATUS(ended) == 0,
+                     "a forked process took its parent's file, or didn't claim the next one for itself");
+    // Unlocked, the file is free for the next process, and the claim stands.
+    arena_warm_unlock();
+    lane_test_expect(tally, second >= 0 && flock(second, LOCK_EX | LOCK_NB) == 0 && flock(second, LOCK_UN) == 0 && arena_warm.state == 2, "the unlocked file stayed held");
+    // The end does nothing while a warm arena is reserved; after it, the process begins again, by other flags.
+    arena = arena_reserve_warm(BUSTER_LANE_TEST_WARM_CAPACITY, 5);
+    arena_warm_end();
+    const bool standing = arena.warm == 6 && arena_warm.state == 2 && arena_warm.file == file;
+    arena_release(&arena);
+    arena_warm_end();
+    const bool ended_claim = arena_warm.state == 0 && arena_warm.file == -1 && fcntl(file, F_GETFD) == -1;
+    Arena ordinary = arena_reserve_warm(BUSTER_LANE_TEST_WARM_CAPACITY, 2);
+    const bool none = ordinary.base != 0 && ordinary.warm == 0;
+    arena_release(&ordinary);
+    const bool anew = arena_warm_begin(directory, BUSTER_ARENA_WARM_BASE_PAGES | BUSTER_ARENA_WARM_FILL) && arena_warm.state == 2 && arena_warm.fill && arena_warm.file >= 0;
+    arena = arena_reserve_warm(BUSTER_LANE_TEST_WARM_CAPACITY, 2);
+    memory = arena_push(&arena, 16, 1);
+    lane_test_expect(tally, standing && ended_claim && none && anew && arena.warm == 3 && memory != 0 && lane_test_bytes(memory, 16, BUSTER_ARENA_WARM_PATTERN),
+                     "a claim ended under a reserved arena, or its end didn't close the file and let the process begin again");
+    arena_release(&arena);
+    arena_warm_end();
+    if (second >= 0)
+    {
+        close(second);
+    }
+    unlink(path);
+    unlink(next_path);
+}
+
+// A process whose claim finds no file to take: a directory that isn't there (`refusal` 0), a file of the directory's that
+// is open to others (1), a directory that is no tmpfs's (2), one of a tmpfs's that gives its files base pages, which
+// only the tests' flag takes (3), and a file that is another user's, which only root can make (4). Its warm
+// reservations are ordinary arenas.
+static void lane_test_arena_warm_refused_child(LaneTestTally* tally, const char* directory, uint32_t refusal)
+{
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/%s", directory, refusal == 0 ? "missing" : "buster-arena-0");
+    const int open_file = refusal == 1 || refusal == 4 ? open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0600) : -1;
+    const bool prepared = (refusal != 1 || (open_file >= 0 && fchmod(open_file, 0644) == 0)) && (refusal != 4 || (open_file >= 0 && fchown(open_file, 65534, (gid_t)-1) == 0));
+    arena_warm_begin(refusal == 0 ? path : directory, refusal == 3 ? 0 : BUSTER_ARENA_WARM_BASE_PAGES);
+    Arena arena = arena_reserve_warm(BUSTER_LANE_TEST_WARM_CAPACITY, 0);
+    static const char* const refusals[] = {
+        "a directory that isn't there gave a warm arena",
+        "a file that is open to others was claimed",
+        "a file of no tmpfs was claimed",
+        "a file of a tmpfs's base pages was claimed unasked",
+        "another user's file was claimed",
+    };
+    lane_test_expect(tally, prepared && arena_warm.state == 3 && arena_warm.file == -1 && arena.base != 0 && arena.warm == 0 && arena_untouched(&arena) && arena_warm.taken == 0,
+                     refusals[refusal]);
+    arena_release(&arena);
+    // The end of a claim that took no file lets the process begin again.
+    arena_warm_end();
+    lane_test_expect(tally, arena_warm.state == 0 && arena_warm_begin(0, BUSTER_ARENA_WARM_FILL) && arena_warm.state == 2, "a claim that took no file didn't end");
+    if (open_file >= 0)
+    {
+        close(open_file);
+    }
+    if (refusal != 0)
+    {
+        unlink(path);
+    }
+}
+
+// A process whose warm arenas are filled, without a file: each commit's bytes are the pattern before a push returns
+// them, once, whichever copy of the arena commits.
+static void lane_test_arena_warm_fill_child(LaneTestTally* tally)
+{
+    const uint64_t huge = BUSTER_ARENA_HUGE_PAGE_BYTES;
+    arena_warm_begin(0, BUSTER_ARENA_WARM_FILL);
+    Arena arena = arena_reserve_warm(BUSTER_LANE_TEST_WARM_CAPACITY, 1);
+    const ArenaWarmSlot* slot = arena_warm.slots + 1;
+    // The process's own memory from the start, without a file to allocate in.
+    const bool own = arena.warm == 2 && arena_warm.file == -1 && slot->own && !arena_untouched(&arena);
+    uint8_t* memory = arena_push(&arena, huge + 5, 1);
+    const bool filled = own && memory != 0 && arena.committed == 2 * huge && slot->filled == 2 * huge && lane_test_bytes(memory, 2 * huge, BUSTER_ARENA_WARM_PATTERN);
+    lane_test_expect(tally, filled, "a filled warm arena's first commit wasn't the pattern");
+    if (filled)
+    {
+        memset(memory, 0x11, huge + 5);
+        // A copy commits past the arena, and writes there; the arena's next commit, from where its own ended, fills only
+        // what no commit has.
+        Arena copy = arena;
+        uint8_t* copied = arena_push(&copy, 3 * huge, 1);
+        const bool through = copied != 0 && copy.committed == 5 * huge && arena.committed == 2 * huge && lane_test_bytes(copied + huge - 5, 3 * huge, BUSTER_ARENA_WARM_PATTERN);
+        if (through)
+        {
+            memset(copied, 0x22, 3 * huge);
+        }
+        uint8_t* next = through ? arena_push(&arena, 5 * huge, 1) : 0;
+        lane_test_expect(tally, next == copied && next != 0 && arena.committed == 7 * huge && slot->filled == 7 * huge && lane_test_bytes(memory, huge + 5, 0x11) &&
+                                    lane_test_bytes(next, 3 * huge, 0x22) && lane_test_bytes(next + 3 * huge, 2 * huge, BUSTER_ARENA_WARM_PATTERN),
+                         "a commit after a copy's filled what the copy wrote, or left bytes of its own unfilled");
+        // A commit takes a quarter more than is committed, in whole huge pages, where the push needs less: 9 after 7.
+        const bool full = next != 0 && arena_push(&arena, 7 * huge - arena.length, 1) != 0 && arena.committed == 7 * huge;
+        lane_test_expect(tally, full && arena_push(&arena, 16, 1) != 0 && arena.committed == 9 * huge && slot->filled == 9 * huge,
+                         "a warm arena's commit didn't grow by a quarter of what was committed");
+    }
+    arena_release(&arena);
+}
+
+// The warm arenas' cases, each in a process of its own, as a process claims once: `kind` 0 is the file's, 1 to 5 the
+// refusals and 6 the fill's. One check here, that every check of the case passed.
+static void lane_test_arena_warm_case(LaneTestTally* tally, const char* directory, uint32_t kind)
+{
+    fflush(stdout);
+    const pid_t child = fork();
+    if (child == 0)
+    {
+        LaneTestTally own = { 0 };
+        if (kind == 0)
+        {
+            lane_test_arena_warm_file_child(&own, directory);
+        }
+        else if (kind < 6)
+        {
+            lane_test_arena_warm_refused_child(&own, directory, kind - 1);
+        }
+        else
+        {
+            lane_test_arena_warm_fill_child(&own);
+        }
+        fflush(stdout);
+        _exit(own.failures == 0 && own.checks != 0 ? 0 : 1);
+    }
+    int status = 0;
+    const bool waited = child > 0 && waitpid(child, &status, 0) == child;
+    lane_test_expect(tally, waited && WIFEXITED(status) && WEXITSTATUS(status) == 0, "the checks of a process's warm arenas failed in their process");
+}
+
+// Warm arenas (#2850). The file's cases need a tmpfs the tests may write: /dev/shm, or the user's runtime directory.
+// The case of a directory that is no tmpfs's takes the tests' temporary directory, where that is none.
+static void lane_test_arena_warm(LaneTestTally* tally)
+{
+    char directory[PATH_MAX];
+    const char* runtime = getenv("XDG_RUNTIME_DIR");
+    struct statfs system = { 0 };
+    snprintf(directory, sizeof(directory), "/dev/shm/buster-warm-XXXXXX");
+    bool made = mkdtemp(directory) != 0;
+    if (!made && runtime != 0 && runtime[0] != 0)
+    {
+        snprintf(directory, sizeof(directory), "%s/buster-warm-XXXXXX", runtime);
+        made = mkdtemp(directory) != 0;
+    }
+    if (made && statfs(directory, &system) == 0 && (uint64_t)system.f_type == BUSTER_ARENA_WARM_TMPFS)
+    {
+        lane_test_arena_warm_case(tally, directory, 0);
+        lane_test_arena_warm_case(tally, directory, 1);
+        lane_test_arena_warm_case(tally, directory, 2);
+        // Where the tmpfs gives a file base pages, which the file's block size says, no claim takes it unasked.
+        char probe[PATH_MAX];
+        struct stat status = { 0 };
+        snprintf(probe, sizeof(probe), "%s/probe", directory);
+        const int probed = open(probe, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+        const bool base_pages = probed >= 0 && fstat(probed, &status) == 0 && (uint64_t)status.st_blksize < BUSTER_ARENA_HUGE_PAGE_BYTES;
+        if (probed >= 0)
+        {
+            close(probed);
+            unlink(probe);
+        }
+        if (base_pages)
+        {
+            lane_test_arena_warm_case(tally, directory, 4);
+        }
+        if (geteuid() == 0)
+        {
+            lane_test_arena_warm_case(tally, directory, 5);
+        }
+    }
+    else
+    {
+        printf("  arenas: no tmpfs to write a file in: the warm arenas' file checks are skipped\n");
+    }
+    if (made)
+    {
+        rmdir(directory);
+    }
+    char other[PATH_MAX];
+    snprintf(other, sizeof(other), "%s/buster-warm-XXXXXX", oracle_temporary_directory());
+    if (mkdtemp(other) != 0)
+    {
+        if (statfs(other, &system) == 0 && (uint64_t)system.f_type != BUSTER_ARENA_WARM_TMPFS)
+        {
+            lane_test_arena_warm_case(tally, other, 3);
+        }
+        rmdir(other);
+    }
+    lane_test_arena_warm_case(tally, directory, 6);
+}
+
 static bool lane_test_arenas(void)
 {
     LaneTestTally tally = { 0 };
@@ -1014,6 +1347,7 @@ static bool lane_test_arenas(void)
     lane_test_arena_regions(&tally);
     lane_test_arena_pool_writable(&tally);
     lane_test_arena_clear(&tally);
+    lane_test_arena_warm(&tally);
 
     // /proc/loadavg's runnable tasks, which arena_host_busy compares with the CPUs online (#672).
     static const struct
