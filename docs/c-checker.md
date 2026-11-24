@@ -7753,6 +7753,69 @@ and unevaluated scans with their definitions at every length to 300. The tree
 tests also compare the root bitmap with an independent edge walk on valid and
 rejected trees and verify cached and uncached root enumeration.
 
+The reach scan lists its candidates by operator, and most of them have no bit:
+on the frozen sqlite3.c, 78,286 nodes for 2,292. A filter
+(`c_check_common_reach_filter.c`, #1340) takes out the candidates whose bits
+can only be zero, before they are listed, so that `check_common_own_reach`,
+still the one implementation of a node's bits, visits 7,691. What the filter
+gives is a necessary condition of each family of that test, read off its code
+(the derivations are at `check_common_reach_step`):
+
+- three bytes a node, made 64 nodes at a time: its traits, from its operator
+  and constant kind (an integer, floating or address constant; a conditional
+  or a comma; a `<<` or an implicit conversion; a selection; a cast; a leaf);
+  its operator's families; and what its children are, which each node with a
+  trait stores at its parent, the facts' tree's;
+- a class byte a type, a byte permute of the type table's kinds (real
+  floating, enumeration, array, `nullptr_t`; a wrapper has every class);
+- 64 candidates at a time, byte tests of those columns: an assignment, an
+  initialization or a conversion needs a child that is a constant, a
+  conditional, a comma, a `<<`, a conversion or a selection (or an
+  enumeration's target); a truth context a floating constant, a `<<`, a
+  conditional, a conversion or a selection; a division a constant, cast,
+  converted or const object's operand; a dereference a constant, cast or
+  converted one or one of `nullptr_t`'s type; a subscript a constant index
+  and an array base; a call an argument slot that asks what a source does,
+  against its parameter's type and that type's default promotion (one pass
+  over the slots marks the calls);
+- the nodes left, about one in ten, take a few scalar loads each: an integer
+  constant converted between builtin integer types to one at least as wide is
+  taken out, unless an assignment stores to a bit-field; a base's or an
+  operand's type's class; and for a conversion edge
+  (`-Wimplicit-const-int-float-conversion`), which needs a constant,
+  conditional, comma or selection child, the node's row of conversions, for a
+  floating type among its targets. The rows are cold by then, so a chunk of
+  512 nodes asks for its rows before it reads any.
+
+It has no gather: a 16-lane `vpgatherdd` is 64 uops on Zen 5, and the filter's
+first form, which gathered each candidate's operands' traits, types and rows,
+cost as much on the 9700X as the scan it replaced.
+
+An operator without a derivation is kept, and which nodes the scan lists stays
+`check_common_reach_selected`'s answer. The options the exact test reads take
+their families' conditions away: `-Wsign-compare` keeps every comparison,
+`-Wimplicit-float-conversion` every assignment, initialization, conversion,
+compound assignment and call, and under `-Wdouble-promotion` or
+`-Wimplicit-int-float-conversion` the scan lists every candidate, as it does
+for a stream of whole values and in the fallback.
+
+A node wrongly taken out would lose a warning, so the filter has three checks.
+`test-checker-driver` (alone: `--reach-filter-only`, which prints its counts
+by operator) generates trees and streams whose columns end at `PROT_NONE`
+pages, a third of their nodes written over with the shape their family's test
+looks for, and asserts, under each of the 256 sets of the options, that no node the
+filter takes out has a bit of its own reach, and that every family's
+operators have nodes with a bit and nodes taken out. The test hook
+`BUSTER_TEST_COMMON_REACH_AUDIT`, read once a unit in every build as
+`BUSTER_TEST_COMMON_WARNING_FAIL_AT` is, makes the facts list every candidate
+as before the filter, ask `check_common_own_reach` of each, and fail the unit
+(`common warning capacity exhausted`, after a line on stderr naming the first
+node) where one the filter took out has a bit; where it names an absolute
+path, each unit appends its counts to that file. The warning sweeps
+(`check_test_driver_warning_fixtures_dealt`) compile every default-warning
+fixture once more under it, with the fixture's own options, and expect the
+plain run's status and diagnostics.
+
 The expression walk starts at roots that reach a candidate or discard a value
 that may warn. The comparison pass uses the shared operator masks.
 `-Wsign-compare` takes every comparison. When it is off and

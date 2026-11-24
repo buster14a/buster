@@ -9670,6 +9670,7 @@ static int run_checker_driver_tests(int argc, char** argv)
     bool branch_truth_only = false;
     // --float-precision-only: -Wimplicit-float-conversion's and -Wliteral-range's floating comparisons (#1875).
     bool float_precision_only = false;
+    bool reach_filter_only = false;
     // --constant-logical-only: logical constant diagnostics and their construction-time policy (#2900).
     bool constant_logical_only = false;
     // --record-extensions-only: zero-length arrays and zero-size records, their policies and output preservation.
@@ -9718,6 +9719,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         else if (strcmp(argv[i], "--uninitialized-only") == 0)
         {
             uninitialized_only = true;
+        }
+        else if (strcmp(argv[i], "--reach-filter-only") == 0)
+        {
+            reach_filter_only = true;
         }
         else if (strcmp(argv[i], "--cpu-dispatch-only") == 0)
         {
@@ -9871,7 +9876,7 @@ static int run_checker_driver_tests(int argc, char** argv)
                              (uint32_t)operand_diagnostics_only + (uint32_t)label_attributes_only + (uint32_t)attribute_recovery_only + (uint32_t)assert_bool_only +
                              (uint32_t)malformed_calls_only + (uint32_t)record_extensions_only + (uint32_t)auto_qualifiers_only + (uint32_t)query_bool_only +
                              (uint32_t)run_modes_only + (uint32_t)correctness_edges_only + (uint32_t)imaginary_bit_int_only + (uint32_t)unused_comparison_only + (uint32_t)assert_diagnostics_only +
-                             (uint32_t)float_precision_only + (uint32_t)branch_truth_only +
+                             (uint32_t)float_precision_only + (uint32_t)reach_filter_only + (uint32_t)branch_truth_only +
                              (uint32_t)constant_logical_only + (uint32_t)pic_only + (uint32_t)string_plus_only + (uint32_t)initializer_diagnostics_only +
                              (uint32_t)stack_protector_only + (uint32_t)cf_protection_only;
     options &= focuses <= 1 && (focuses == 0 || (!lazy && check_driver_part.count == 1));
@@ -9893,6 +9898,12 @@ static int run_checker_driver_tests(int argc, char** argv)
     // no `!lazy`. Every other check runs the same commands
     // either way, so the eager command's run of them is the lazy one's too; repeating them took 90% of the lazy
     // command's time. A section that comes to take `lazy` loses the `!lazy` of its gate.
+    if (reach_filter_only)
+    {
+        // The reach filter's generated graphs alone (#1340), with their counts by operator.
+        check_test_verbose_reach = true;
+        check_test_common_reach_filter(&test);
+    }
     if (!focused && !lazy && check_test_driver_takes())
     {
         check_test_driver_warning_order(&test);
