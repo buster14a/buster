@@ -747,6 +747,15 @@ struct Tier0Function
     // tier0_emit_stack), so that no frame or allocation steps over a guard page. Tier 1's frame takes it too
     // (BUSTER_TIER1_FRAME_PROBE_STACK).
     bool probe_stack;
+    // The stack protector (#3558, -fstack-protector, -fstack-protector-strong and -fstack-protector-all, the lowering's
+    // check_lower_guard): BUSTER_TIER0_GUARD_ON for a function whose frame keeps a guard, a copy of the thread's canary
+    // (fs:0x28) in a slot above its objects (Tier0Frame.guard), which the prologue stores and which the epilogue and each
+    // musttail call compare with the canary before the frame goes, calling `stack_check_fail` (__stack_chk_fail's symbol)
+    // where they differ (tier0_emit_guard_check); BUSTER_TIER0_GUARD_EXEMPT for one whose no_stack_protector attribute
+    // keeps it unguarded whatever the callees spliced into it need (tier0_inline); NONE for any other. Tier 1 leaves a
+    // guarded function to Tier 0 (check_tier1_compile).
+    uint8_t stack_protector;
+    SymbolId stack_check_fail;
     // The registers the function keeps for its caller past System V's callee-saved ones (#147, #1447): preserve_most's
     // and preserve_all's (and no_caller_saved_registers', as clang's x86 handlers keep them), but those its result returns
     // in, which the caller reads (tier0_preserved_general, tier0_preserved_vectors). `preserve_general` has a bit per
@@ -794,6 +803,10 @@ struct Tier0Function
 #define BUSTER_TIER0_INTERRUPT_HANDLER 1
 #define BUSTER_TIER0_INTERRUPT_ERROR_CODE 2
 
+#define BUSTER_TIER0_GUARD_NONE 0
+#define BUSTER_TIER0_GUARD_ON 1
+#define BUSTER_TIER0_GUARD_EXEMPT 2
+
 #define BUSTER_TIER0_LIFETIME_END 0x80000000u
 #define BUSTER_TIER0_FRAME_POINTER_NONE 0
 #define BUSTER_TIER0_FRAME_POINTER_ALL 1
@@ -823,6 +836,8 @@ static bool tier0_asm_bodies_valid(const Tier0Function* function);
 static __attribute__((noinline)) bool tier0_frame_input_valid(const Tier0Function* function)
 {
     bool valid = function->local_count <= BUSTER_TIER0_MAX_LOCALS && function->parameter_count <= function->local_count;
+    // A guarded frame's check calls the C library's report, whose symbol it has (#3558).
+    valid = valid && function->stack_protector <= BUSTER_TIER0_GUARD_EXEMPT && (function->stack_protector != BUSTER_TIER0_GUARD_ON || function->stack_check_fail != 0);
     const AbiCall* incoming = function->incoming_variadic;
     if (incoming != 0)
     {
@@ -4030,6 +4045,9 @@ struct Tier0Entries
     // them (tier0_count_call's).
     uint32_t tail_finish;
     uint32_t eh_finish;
+    // In a guarded frame (#3558, Tier0Frame.guard), the branch and the reference each musttail call's guard check adds
+    // (tier0_tail_guard): 1, else 0.
+    uint32_t tail_guard;
     // A function that calls __builtin_setjmp: the words of each depth's snapshot below a call (tier0_returns_twice_snapshot),
     // and its depths, once the frame is known, 0 for none, and whether it takes snapshots at all (of the masks and deep
     // values too): tier0_count_call's.
@@ -4363,6 +4381,12 @@ struct Tier0Frame
     // and realignment (tier0_probes_reservation, tier0_emit_probed_reservation, tier0_emit_realignment) and ALLOCA's
     // (tier0_emit_stack).
     bool probe;
+    // Whether the frame keeps the stack protector's guard (#3558, Tier0Function.stack_protector): 8 bytes at `guard_area`,
+    // right above the objects and below anything the prologue pushed, so that a write past an object's end reaches the
+    // guard before a saved register or the return address (tier0_layout_frame). The prologue stores the thread's canary
+    // there and each way out compares it (tier0_emit_guard_store, tier0_emit_guard_check).
+    bool guard;
+    uint32_t guard_area;
     // Whether the function calls __builtin_eh_return (#148, Tier0Function.eh_return): `pushes` counts rdx's and rax's,
     // pushed after the callee-saved registers, which its ordinary teardown steps over and its eh_return's pops.
     bool eh_return;
@@ -5004,15 +5028,22 @@ static bool tier0_layout_frame(const Tier0Function* function, Tier0Frame* frame,
     bool objects = false;
     offset = tier0_frame_slots_vector(function, homes, references, offset, &objects);
     offset = objects ? tier0_frame_objects_vector(function, frame, homes, offset, &aligned) : offset;
+    // The stack protector's guard (#3558, Tier0Frame.guard): the 8 bytes past the objects, the frame's highest place but
+    // an interrupt service routine's temporaries.
+    offset = frame->guard ? (offset + 7) & ~UINT64_C(7) : offset;
+    valid = valid && offset <= INT32_MAX;
+    frame->guard_area = frame->guard && valid ? (uint32_t)offset : 0;
+    offset += frame->guard ? 8 : 0;
     // With the pushes and the return address, a multiple of 16 at every call, for an object aligned to 16, and with a
-    // frame pointer, under which every allocation keeps it so. A realigned frame's rsp is rounded down to its alignment
-    // after the reservation instead, which keeps it so too.
+    // frame pointer, under which every allocation keeps it so; and in a guarded frame, whose check may call
+    // __stack_chk_fail from anywhere the body may return (#3558). A realigned frame's rsp is rounded down to its
+    // alignment after the reservation instead, which keeps it so too.
     // A preserving function's block below the pushes counts with them (#147, Tier0Frame.preserve_bytes). An interrupt
     // service routine with an error code is entered 8 bytes off a call's alignment (Tier0Function.interrupt).
     const uint64_t above = 8 * frame->pushes + 8 + frame->preserve_bytes;
     const uint64_t entered = above + (frame->interrupt == BUSTER_TIER0_INTERRUPT_ERROR_CODE ? 8 : 0);
     const bool realigned = frame->alignment_log2 != 0;
-    if ((frame->calls || aligned || frame->pointer) && !realigned)
+    if ((frame->calls || aligned || frame->pointer || frame->guard) && !realigned)
     {
         offset = (offset + entered + 15) / 16 * 16 - entered;
     }
@@ -6297,6 +6328,55 @@ static __attribute__((noinline, cold)) void tier0_emit_preserve(const Tier0Funct
     }
 }
 
+// The stack protector's records (#3558, Tier0Frame.guard), as clang's code has them: the canary is the thread's, at
+// fs:0x28 (glibc's and musl's stack guard in the thread control block on x86-64). The prologue's two (tier0_emit_guard_store)
+// and a way out's four (tier0_emit_guard_check), with one branch and one reference.
+#define BUSTER_TIER0_GUARD_CANARY 0x28
+#define BUSTER_TIER0_GUARD_STORE_RECORDS 2u
+#define BUSTER_TIER0_GUARD_CHECK_RECORDS 4u
+
+// The guard's place, from the frame's base (rsp's, rbp's with a frame pointer or r15's: Tier0Frame.base and bias).
+static int32_t tier0_guard_place(const Tier0Frame* frame)
+{
+    return (int32_t)((int64_t)frame->guard_area + frame->bias);
+}
+
+// The prologue's guard, once the frame is reserved (and realigned, its base set): mov r11, fs:[0x28]; mov [guard], r11,
+// through r11, which no parameter arrives in and which no move to a home has written yet.
+static void tier0_emit_guard_store(const Tier0Frame* frame, Tier0Writer* writer)
+{
+    tier0_put(writer, tier0_instruction(X86_FORM_MOV_R64_RM64 + BUSTER_X86_FORM_FS, X86_REGISTER_R11, 0, BUSTER_X86_MEMORY_ABSOLUTE, BUSTER_TIER0_GUARD_CANARY, 0));
+    tier0_put(writer, tier0_instruction(X86_FORM_MOV_RM64_R64, X86_REGISTER_R11, frame->base, BUSTER_X86_MEMORY_BASE, tier0_guard_place(frame), 0));
+}
+
+// A way out's check of the guard, before anything of the frame goes: mov reg, [guard]; xor reg, fs:[0x28]; je past; call
+// __stack_chk_fail (Tier0Function.stack_check_fail), which doesn't return; past:. Through `reg`, which holds nothing
+// there: r11 in the epilogue, whose result registers it isn't, rax at a musttail call, whose arguments it isn't (neither
+// the call nor the function is variadic) and whose indirect target is r11. The frame keeps rsp a multiple of 16 for
+// the call (tier0_layout_frame), and the unwind tables still describe the body's frame there.
+static void tier0_emit_guard_check(const Tier0Function* function, const Tier0Frame* frame, uint8_t reg, Tier0Writer* writer)
+{
+    tier0_put(writer, tier0_instruction(X86_FORM_MOV_R64_RM64, reg, frame->base, BUSTER_X86_MEMORY_BASE, tier0_guard_place(frame), 0));
+    tier0_put(writer, tier0_instruction(X86_FORM_XOR_R64_RM64 + BUSTER_X86_FORM_FS, reg, 0, BUSTER_X86_MEMORY_ABSOLUTE, BUSTER_TIER0_GUARD_CANARY, 0));
+    const uint32_t past = tier0_put_local_branch(writer, X86_FORM_JE_REL8, 0);
+    if (writer->records != 0)
+    {
+        writer->references[writer->reference_count] = (LinkReference){
+            .instruction = writer->count,
+            .field = X86_FIXUP_DISPLACEMENT,
+            .kind = BUSTER_LINK_FIXUP_CALL,
+            .target = function->stack_check_fail,
+            .addend = 0,
+        };
+    }
+    writer->reference_count += 1;
+    tier0_put(writer, tier0_instruction(X86_FORM_CALL_REL32 | BUSTER_X86_FORM_FIXUP, 0, 0, 0, 0, 0));
+    if (writer->records != 0)
+    {
+        writer->targets[past] = writer->count;
+    }
+}
+
 // The frame released (with a frame pointer, rsp back from rbp, past what the body allocated, or the reservation added
 // back) and the saved registers popped, rbp last with a frame pointer: the epilogue's before its ret, and a tail call's
 // before its jump (tier0_emit_tail). An eh_return function's (Tier0Frame.eh_return) steps over rax's and rdx's slots,
@@ -6366,15 +6446,23 @@ static uint32_t tier0_count_tail_finish(const Tier0Function* function, const Tie
     const bool hidden = function->result.kind == BUSTER_ABI_RESULT_MEMORY && function->local_count != 0 &&
                         !(homes[0].is_register && homes[0].reg == X86_REGISTER_RDI);
     // __builtin_eh_return's (Tier0Frame.eh_return): the CFA's lea, the teardown with rax's and rdx's pops, rsp's mov and
-    // the jump (tier0_emit_tail).
+    // the jump (tier0_emit_tail). A guarded frame's musttail call checks its guard first (#3558, tier0_emit_guard_check);
+    // __builtin_eh_return doesn't, as clang's code checks only before its returns and musttail calls.
     return eh ? 1 + tier0_count_teardown(frame) + BUSTER_TIER0_EH_PUSHES + 2 :
-                (hidden ? 1 : 0) + (tier0_tail_zeroes_upper(function) ? 1 : 0) + tier0_count_teardown(frame) + 1;
+                (hidden ? 1 : 0) + (frame->guard ? BUSTER_TIER0_GUARD_CHECK_RECORDS : 0) + (tier0_tail_zeroes_upper(function) ? 1 : 0) + tier0_count_teardown(frame) + 1;
 }
 
 // The records call `call`'s tail ends with besides its stack arguments' copy (Tier0Entries.tail_finish or eh_finish).
 static uint32_t tier0_tail_finish(const Tier0Function* function, const Tier0Entries* entries, uint32_t call)
 {
     return function->call_tails[call] == BUSTER_TIER0_TAIL_EH ? entries->eh_finish : entries->tail_finish;
+}
+
+// The branches, and the references, that call `call`'s tail adds for its guard check (#3558, Tier0Entries.tail_guard):
+// a musttail call's in a guarded frame, none for __builtin_eh_return's.
+static uint32_t tier0_tail_guard(const Tier0Function* function, const Tier0Entries* entries, uint32_t call)
+{
+    return function->call_tails[call] == BUSTER_TIER0_TAIL_EH ? 0 : entries->tail_guard;
 }
 
 // The hidden pointer a call whose result goes through one passes in rdi, after its arguments' moves, which leave rdi alone
@@ -6420,6 +6508,11 @@ static void tier0_emit_tail_jump(const Tier0Function* function, const Tier0Frame
         const uint8_t base = frame->pointer ? X86_REGISTER_RBP : X86_REGISTER_RSP;
         const int32_t incoming = frame->pointer ? 16 : frame->incoming;
         tier0_copy(writer, base, incoming, X86_REGISTER_RSP, 0, bytes, X86_REGISTER_RAX, 15, false);
+    }
+    // A guarded frame's check (#3558), through rax, once the copy that read it is done.
+    if (frame->guard)
+    {
+        tier0_emit_guard_check(function, frame, X86_REGISTER_RAX, writer);
     }
     // A dirty upper state cleared before the teardown (#3335), so that the unwind tables still find it right before the
     // jump, but where an argument is live in a ymm or zmm register.
@@ -9805,6 +9898,9 @@ static inline __attribute__((always_inline)) uint32_t tier0_count_deferred(const
     else if (kind == BUSTER_TYPED_TAIL_CALL)
     {
         count = tier0_count_tail_call(function, entries, i, memory, references);
+        const uint32_t guard = tier0_tail_guard(function, entries, (uint32_t)function->values[i]);
+        *references += guard;
+        *branches += guard;
     }
     else if (kind == BUSTER_TYPED_FENCE)
     {
@@ -10051,6 +10147,11 @@ static void tier0_emit_prologue(const Tier0Function* function, const Tier0Frame*
     {
         tier0_emit_realignment(frame, writer);
     }
+    // The stack protector's guard (#3558), once its place is reachable.
+    if (frame->guard)
+    {
+        tier0_emit_guard_store(frame, writer);
+    }
     if (function->incoming_variadic != 0)
     {
         // Snapshot before any parameter home move can overwrite an unnamed argument. Full unaligned baseline
@@ -10150,7 +10251,7 @@ static uint32_t tier0_count_prologue(const Tier0Function* function, const Tier0F
 {
     uint32_t count = frame->pushes + (frame->pointer ? 1 : 0) + tier0_reservation_records(frame->probe, frame->size, frame->alignment_log2, frame->moves) +
                      tier0_realignment_records(frame->probe, frame->alignment_log2) + (frame->based ? 1 : 0) + tier0_preserve_records(function, true) +
-                     (frame->interrupt == 0 ? 0 : frame->interrupt == BUSTER_TIER0_INTERRUPT_ERROR_CODE ? 3 : 2);
+                     (frame->interrupt == 0 ? 0 : frame->interrupt == BUSTER_TIER0_INTERRUPT_ERROR_CODE ? 3 : 2) + (frame->guard ? BUSTER_TIER0_GUARD_STORE_RECORDS : 0);
     count += function->incoming_variadic != 0 ? BUSTER_ABI_INTEGER_ARGUMENTS + BUSTER_ABI_VECTOR_ARGUMENTS : 0;
     const bool objects = frame->object_parameters;
     for (uint32_t p = 0; p < function->parameter_count; p += 1)
@@ -10246,12 +10347,19 @@ static bool tier0_epilogue_zeroes_upper(const Tier0Function* function)
     return __builtin_expect(function->zero_upper, 0) && !tier0_result_wide(function);
 }
 
-// The epilogue: an aggregate result's registers loaded (tier0_load_result), or a long double's st0 from slot 0, while the
-// frame they may be in (and what the body allocated) is still there; a preserving function's vector and mask registers
-// loaded back (tier0_emit_preserve); then the frame released (with a frame pointer, rsp
-// back from rbp, past what the body allocated), the saved registers popped (and rbp last: tier0_emit_teardown), ret.
+// The epilogue: a guarded frame's check of its guard (#3558, tier0_emit_guard_check); an aggregate result's registers
+// loaded (tier0_load_result), or a long double's st0 from slot 0, while the frame they may be in (and what the body
+// allocated) is still there; a preserving function's vector and mask registers loaded back (tier0_emit_preserve); then
+// the frame released (with a frame pointer, rsp back from rbp, past what the body allocated), the saved registers popped
+// (and rbp last: tier0_emit_teardown), ret.
 static void tier0_emit_epilogue(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, Tier0Writer* writer)
 {
+    // A guarded frame's check (#3558), first: every RETURN comes here, and the unwind tables find the preserve block's
+    // loads and the teardown right before the ret.
+    if (frame->guard)
+    {
+        tier0_emit_guard_check(function, frame, X86_REGISTER_R11, writer);
+    }
     if (function->result_size != 0)
     {
         tier0_load_result(function, writer);
@@ -10284,14 +10392,15 @@ static void tier0_emit_epilogue(const Tier0Function* function, const Tier0Entrie
     tier0_put(writer, tier0_instruction(frame->interrupt != 0 ? X86_FORM_IRETQ : X86_FORM_RET, 0, 0, 0, 0, 0));
 }
 
-// How many records tier0_emit_epilogue writes, without writing them: the result's loads (tier0_result_records), a
-// preserving function's loads (tier0_preserve_records), the frame's release (an add, or with a frame pointer the lea or
-// mov), the pops (tier0_count_teardown) and the ret (an interrupt service routine's iretq, after its add over the error
-// code where it has one).
+// How many records tier0_emit_epilogue writes, without writing them: a guarded frame's check, the result's loads
+// (tier0_result_records), a preserving function's loads (tier0_preserve_records), the frame's release (an add, or with a
+// frame pointer the lea or mov), the pops (tier0_count_teardown) and the ret (an interrupt service routine's iretq, after
+// its add over the error code where it has one).
 static uint32_t tier0_count_epilogue(const Tier0Function* function, const Tier0Frame* frame)
 {
     const uint32_t records = tier0_count_teardown(frame) + 1 + tier0_preserve_records(function, false) +
-                             (frame->interrupt == BUSTER_TIER0_INTERRUPT_ERROR_CODE ? 1 : 0) + (tier0_epilogue_zeroes_upper(function) ? 1 : 0);
+                             (frame->interrupt == BUSTER_TIER0_INTERRUPT_ERROR_CODE ? 1 : 0) + (tier0_epilogue_zeroes_upper(function) ? 1 : 0) +
+                             (frame->guard ? BUSTER_TIER0_GUARD_CHECK_RECORDS : 0);
     return records + (function->result_size != 0 ? tier0_result_records(function) : frame->x87_result ? 1 : 0);
 }
 
@@ -10702,8 +10811,9 @@ static uint32_t tier0_count_deep(const Tier0Function* function, const Tier0Entri
         }
         const uint32_t below = deep.before[0] - integer_arguments - (indirect ? 1 : 0);
         count += !tail ? tier0_snapshot_records(entries, i, below, deep.before[1] - floating_arguments, true) : 0;
-        counts->references += references;
-        counts->branches += !tail ? tier0_count_call_branches(function, entries, i) : 0;
+        const uint32_t guard = tail ? tier0_tail_guard(function, entries, call) : 0;
+        counts->references += references + guard;
+        counts->branches += !tail ? tier0_count_call_branches(function, entries, i) : guard;
     }
     else
     {
@@ -11367,6 +11477,8 @@ static inline __attribute__((always_inline)) void tier0_job_select(Tier0Job* job
         memset(frame, 0, sizeof(*frame));
         // Stack-clash protection's probes (#177): the prologue's and ALLOCA's.
         frame->probe = function->probe_stack;
+        // The stack protector's guard (#3558).
+        frame->guard = function->stack_protector == BUSTER_TIER0_GUARD_ON;
         Tier0Error error = tier0_frame_input_valid(function) ? TIER0_OK : TIER0_ERROR_UNSUPPORTED;
         // The frame's alignment past 16 bytes, if it needs one, which the integer depths the selections leave depend on.
         frame->alignment_log2 = error == TIER0_OK ? (uint8_t)tier0_frame_alignment_vector(function) : 0;
@@ -11429,6 +11541,7 @@ static inline __attribute__((always_inline)) void tier0_job_homes(Tier0Job* job,
             error = tier0_layout_frame(function, frame, homes, references) ? TIER0_OK : TIER0_ERROR_UNSUPPORTED;
             entries->tail_finish = error == TIER0_OK && function->call_tails != 0 ? tier0_count_tail_finish(function, frame, homes, false) : 0;
             entries->eh_finish = error == TIER0_OK && function->call_tails != 0 && frame->eh_return ? tier0_count_tail_finish(function, frame, homes, true) : 0;
+            entries->tail_guard = error == TIER0_OK && frame->guard ? 1 : 0;
             entries->snapshot_words = error == TIER0_OK && frame->snapshot_depths != 0 ? frame->snapshot_masks / (8 * frame->snapshot_depths) : 0;
             entries->snapshot_depths = error == TIER0_OK ? frame->snapshot_depths : 0;
             entries->snapshot = error == TIER0_OK && frame->snapshot_bytes != 0;
@@ -11463,8 +11576,9 @@ static inline __attribute__((always_inline)) void tier0_job_measure(Tier0Job* jo
         Tier0Counts counts = tier0_measure_vector(function, entries, homes, tier0_count_prologue(function, frame, homes, references), frame->memory);
         counts.references += code->literal_count;
         const uint32_t epilogue = tier0_count_epilogue(function, frame);
-        // The prologue's branches: a probe's loop's (#177).
-        counts.branches += tier0_prologue_branches(frame);
+        // The prologue's branches: a probe's loop's (#177); and the epilogue's guard check's branch and reference (#3558).
+        counts.branches += tier0_prologue_branches(frame) + (frame->guard ? 1 : 0);
+        counts.references += frame->guard ? 1 : 0;
         // The requests' columns, with room for the last compressed store of 8, and the deferred entries' references,
         // before emission merges them with the templates' (#2874), in one push (tier0_column).
         const uint64_t requests = (uint64_t)counts.choices + 8;
@@ -14758,7 +14872,10 @@ static inline __attribute__((always_inline)) void tier0_emit_vector_entries(cons
         writer.reference_count = template_references + deferred_references;
     }
     writer.count = positions[count];
+    // The epilogue's branch (a guard check's, #3558), a record's target, after the body's.
+    writer.branch_count = branches;
     tier0_emit_epilogue(function, entries, frame, &writer);
+    branches = writer.branch_count;
     tier0_branch_targets(targets, branches, positions);
     // An asm body's own branches (#1839) are a deferred entry's, written after the branches of the entries after it.
     bool body_branches = false;
@@ -14766,7 +14883,8 @@ static inline __attribute__((always_inline)) void tier0_emit_vector_entries(cons
     {
         body_branches |= function->asm_bodies[b].branch_count != 0;
     }
-    if (deep || frame->probe || body_branches)
+    // A guarded frame's musttail calls have branches of their own too (#3558), deferred entries' among the templates'.
+    if (deep || frame->probe || body_branches || frame->guard)
     {
         tier0_sort_branches(branch_records, targets, branches);
     }

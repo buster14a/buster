@@ -5698,7 +5698,7 @@ static void check_test_driver_unsupported_codegen(CheckTest* test, const char* c
     const char* source_text = inputs[0].bytes;
     static const char sentinel[] = "unchanged output\n";
     static const char* const options[] = {
-        "-fstack-protector", "-fstack-protector-strong", "-fstack-protector-all", "-fstack-protector-explicit",
+        "-fstack-protector-explicit",
         "-fcf-protection", "-fcf-protection=full", "-fcf-protection=branch", "-fcf-protection=return",
         "-fstack-check", "-fstack-check=specific", "-pg", "-finstrument-functions",
         "-finstrument-functions-after-inlining", "-fprofile-generate", "-fprofile-generate=path", "-fprofile-instr-generate",
@@ -5735,9 +5735,9 @@ static void check_test_driver_unsupported_codegen(CheckTest* test, const char* c
         free(text);
     }
     char* text = NULL;
-    char* const link[] = { compiler, "-o", output, source, "-fstack-protector-strong", NULL };
+    char* const link[] = { compiler, "-o", output, source, "-fcf-protection", NULL };
     const int link_status = made ? check_test_driver_spawn(link, &text) : -1;
-    check_test_expect(test, link_status == 1 && text != NULL && strstr(text, "-fstack-protector-strong") != NULL,
+    check_test_expect(test, link_status == 1 && text != NULL && strstr(text, "-fcf-protection") != NULL,
                       "the executable route rejects unsupported hardening");
     free(text);
     char* const allowed[] = { compiler, "-c", "-fno-stack-protector", "-fcf-protection=none", "-o", output, source, NULL };
@@ -5749,10 +5749,10 @@ static void check_test_driver_unsupported_codegen(CheckTest* test, const char* c
     const int disabled_status = made ? check_test_driver_spawn(disabled_last, &text) : -1;
     check_test_expect(test, disabled_status == 0, "the last stack-protector and CET options may disable unsupported instrumentation");
     free(text);
+    // The stack protector's options are taken (#3558, check_test_driver_stack_protector checks their code).
     char* const enabled_last[] = { compiler, "-c", "-fno-stack-protector", "-fstack-protector-all", "-o", output, source, NULL };
     const int enabled_status = made ? check_test_driver_spawn(enabled_last, &text) : -1;
-    check_test_expect(test, enabled_status == 1 && text != NULL && strstr(text, "-fstack-protector-all") != NULL,
-                      "a later stack-protector option enables the refused instrumentation");
+    check_test_expect(test, enabled_status == 0, "a later stack-protector option guards the code");
     free(text);
     char* const cet_last[] = { compiler, "-c", "-fcf-protection=none", "-fcf-protection=branch", "-o", output, source, NULL };
     const int cet_status = made ? check_test_driver_spawn(cet_last, &text) : -1;
@@ -8913,6 +8913,7 @@ static void check_test_driver_quad_literals(CheckTest* test, const char* clang, 
 #include "c_check_string_pool_driver_test.c"
 #include "c_check_frame_pointer_driver_test.c"
 #include "c_check_stack_clash_driver_test.c"
+#include "c_check_stack_protector_driver_test.c"
 #include "c_check_fence_driver_test.c"
 
 // Whether the objects at `ours_path` and `theirs_path` both read and their .text sections have the same bytes, into *same:
@@ -9592,6 +9593,8 @@ static int run_checker_driver_tests(int argc, char** argv)
     bool cpu_dispatch_only = false;
     // --pic-only: -fPIC's, -fpic's and -shared's section alone (#2101, check_test_driver_pic).
     bool pic_only = false;
+    // --stack-protector-only: the stack protector's section alone (#3558, check_test_driver_stack_protector).
+    bool stack_protector_only = false;
     // --target-versions-only: GNU multiversioning's target and target_clones section alone (#1838).
     bool target_versions_only = false;
     // --semantic-recovery-only: the semantic error recovery section alone (#1447).
@@ -9668,6 +9671,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         else if (strcmp(argv[i], "--pic-only") == 0)
         {
             pic_only = true;
+        }
+        else if (strcmp(argv[i], "--stack-protector-only") == 0)
+        {
+            stack_protector_only = true;
         }
         else if (strcmp(argv[i], "--target-versions-only") == 0)
         {
@@ -9802,7 +9809,8 @@ static int run_checker_driver_tests(int argc, char** argv)
                              (uint32_t)malformed_calls_only + (uint32_t)record_extensions_only + (uint32_t)auto_qualifiers_only + (uint32_t)query_bool_only +
                              (uint32_t)run_modes_only + (uint32_t)correctness_edges_only + (uint32_t)imaginary_bit_int_only + (uint32_t)unused_comparison_only + (uint32_t)assert_diagnostics_only +
                              (uint32_t)float_precision_only +
-                             (uint32_t)constant_logical_only + (uint32_t)pic_only + (uint32_t)string_plus_only + (uint32_t)initializer_diagnostics_only;
+                             (uint32_t)constant_logical_only + (uint32_t)pic_only + (uint32_t)string_plus_only + (uint32_t)initializer_diagnostics_only +
+                             (uint32_t)stack_protector_only;
     options &= focuses <= 1 && (focuses == 0 || (!lazy && check_driver_part.count == 1));
     // One focused section's alone: the others' gates take `focused` as --sign-compare-only's did.
     const bool focused = focuses != 0;
@@ -10310,6 +10318,10 @@ static int run_checker_driver_tests(int argc, char** argv)
     if (temporary && pic_only)
     {
         check_test_driver_pic(&test, executable != NULL ? executable : "./build/compiler", directory);
+    }
+    if (temporary && stack_protector_only)
+    {
+        check_test_driver_stack_protector(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
     }
     if (temporary && target_versions_only)
     {
@@ -11277,6 +11289,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes_weighing(320))
             {
                 check_test_driver_stack_clash(&test, clang, executable, directory);
+            }
+            if (!lazy && check_test_driver_takes_weighing(300))
+            {
+                check_test_driver_stack_protector(&test, clang, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {

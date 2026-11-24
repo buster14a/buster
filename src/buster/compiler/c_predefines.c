@@ -4046,6 +4046,26 @@ static __attribute__((unused)) bool predefines_stack_clash(const PredefinesOptio
     return options->stack_clash_protection == BUSTER_PREDEFINES_ON;
 }
 
+// The stack protector the predefined macros say (__SSP__, __SSP_STRONG__ and __SSP_ALL__): the last of
+// -fstack-protector, -fstack-protector-strong, -fstack-protector-all and -fno-stack-protector, as clang's driver reads
+// it, else the default of the clang the compiler was built with (BUSTER_PREDEFINES_SSP_DEFAULT), which an explicit
+// -fstack-protector doesn't weaken. One of BUSTER_PREDEFINES_SSP_OFF, _ON, _STRONG and _ALL.
+static uint8_t predefines_stack_protector(const PredefinesOptions* options)
+{
+    const uint8_t requested = options->stack_protector;
+    const bool weaker = requested == BUSTER_PREDEFINES_SSP_ON && BUSTER_PREDEFINES_SSP_DEFAULT > BUSTER_PREDEFINES_SSP_ON;
+    return requested == 0 || weaker ? BUSTER_PREDEFINES_SSP_DEFAULT : requested;
+}
+
+// The stack protector the code has (#3558), which the lowering guards the functions by (Tier0Function.stack_protector):
+// the macros' (predefines_stack_protector) where an option of the four asks for one, and none without, whatever default
+// the macros take from the clang that built the compiler, so that a build's code never depends on that clang (the
+// 9700X's defaults to -fstack-protector-strong, CI's to none) and a command line without the options compiles as it did.
+static __attribute__((unused)) uint8_t predefines_stack_guard(const PredefinesOptions* options)
+{
+    return options->stack_protector == 0 ? BUSTER_PREDEFINES_SSP_OFF : predefines_stack_protector(options);
+}
+
 // -fpatchable-function-entry=N[,M[,SECTION]]'s value (#1447), as clang's driver reads the last one: N, then optionally a
 // comma and M, then optionally a comma and a section of at least one byte (commas and all), each number decimal digits that
 // fit in 32 bits, unsigned (clang's consumeInteger). Whether it is one, with them in *count, *offset and *section (the
@@ -4144,10 +4164,7 @@ static __attribute__((unused)) uint32_t predefines_text(const PredefinesOptions*
         }
     }
     // The stack protector.
-    const uint8_t requested = options->stack_protector;
-    const uint8_t ssp = requested == 0 ? BUSTER_PREDEFINES_SSP_DEFAULT
-                        : requested == BUSTER_PREDEFINES_SSP_ON && BUSTER_PREDEFINES_SSP_DEFAULT > BUSTER_PREDEFINES_SSP_ON ? BUSTER_PREDEFINES_SSP_DEFAULT
-                                                                                                                              : requested;
+    const uint8_t ssp = predefines_stack_protector(options);
     length = ssp == BUSTER_PREDEFINES_SSP_ON       ? predefines_append(buffer, length, capacity, "#define __SSP__ 1\n")
              : ssp == BUSTER_PREDEFINES_SSP_STRONG ? predefines_append(buffer, length, capacity, "#define __SSP_STRONG__ 2\n")
              : ssp == BUSTER_PREDEFINES_SSP_ALL    ? predefines_append(buffer, length, capacity, "#define __SSP_ALL__ 3\n")

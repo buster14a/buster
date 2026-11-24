@@ -178,6 +178,9 @@ typedef enum CheckLowerRuntime
     // The dynamic linker's thread-local address, which a thread-local's general- or local-dynamic access calls in
     // position-independent code (#2101, check_lower_tls): the emission's accessors call it, not the bodies.
     CHECK_LOWER_RUNTIME_TLS_GET_ADDR,
+    // The C library's report of a smashed stack, which a guarded function calls where its guard has changed (#3558,
+    // Tier0Function.stack_check_fail).
+    CHECK_LOWER_RUNTIME_STACK_CHK_FAIL,
     CHECK_LOWER_RUNTIME_LIBRARY,
     CHECK_LOWER_RUNTIMES = CHECK_LOWER_RUNTIME_LIBRARY + CBUILTIN_LIBRARY_COUNT,
 } CheckLowerRuntime;
@@ -232,7 +235,7 @@ static const char* const check_lower_runtime_names[CHECK_LOWER_RUNTIMES] = {
     BUSTER_CHECK_LOWER_LIBM(BUSTER_CHECK_LOWER_LIBM_NAME)
 #undef BUSTER_CHECK_LOWER_LIBM_NAME
     "fmaxl", "fminl", "ldexpl", "__powidf2", "__powisf2", "__powixf2", "__cpu_indicator_init", "__cpu_model", "__cpu_features2",
-    "__tls_get_addr",
+    "__tls_get_addr", "__stack_chk_fail",
 #define BUSTER_CBUILTIN_LIBRARY_CALL(id, name) name,
 #include "c_builtin_library_calls.inc"
 #undef BUSTER_CBUILTIN_LIBRARY_CALL
@@ -933,6 +936,9 @@ struct CheckLowerWriter
     // node of the expression statement being lowered (BUSTER_CHECK_NONE for another control), the only place of one.
     bool eh_return;
     uint32_t statement;
+    // Whether a parameter or a declared local of the body is -fstack-protector's buffer (#3558, check_lower_guard_buffer),
+    // read only under that option.
+    bool guard_buffer;
     bool vectors;
     // Whether the function's x86 builtins take or give masks in Tier 0's mask class (Tier0Function.masks, #179).
     bool masks;
@@ -3323,6 +3329,56 @@ static void check_lower_vector_half_chain(CheckLowerWriter* writer, TypeId vecto
         check_lower_unsupported(writer, brain ? "chained arithmetic of bf16 vectors, which clang computes in float without AVX10.2" :
                                                 "chained arithmetic of half-precision vectors, which clang computes in float without AVX512-FP16");
     }
+}
+
+// -fstack-protector's buffer (#3558, LLVM's StackProtector::ContainsProtectableArray outside its strong mode, which
+// clang's -fstack-protector asks for on x86-64 Linux): an array of 8 bytes or more whose elements are bytes (char,
+// signed char, unsigned char, _Bool, a one-byte enum or _BitInt), the object's own type or a member's of its structs and
+// unions at any depth, but not an element of an array of another type (char[2][8] isn't one, as an array of [8 x i8]
+// isn't LLVM's). The nested records wait in a bounded list rather than a recursion; past its room the type counts as a
+// buffer, so that no function is left unguarded for a deep type. clang's IR also lays a union out as one member and an
+// array of bytes for the rest, and an over-aligned struct's tail as one: those padding arrays aren't the C type's, and
+// don't count here (docs/c-checker.md's "The stack protector").
+#define BUSTER_CHECK_LOWER_GUARD_RECORDS 32u
+
+static bool check_lower_guard_bytes(const TypeTable* types, TypeId array)
+{
+    const TypeId element = type_strip_aligned(types, type_element(types, array));
+    const uint8_t kind = type_kind(types, element);
+    const bool bytes = (kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_ENUM || kind == BUSTER_TYPE_KIND_BIT_INT) && type_size(types, element) == 1;
+    return bytes && type_size(types, array) >= 8;
+}
+
+static bool check_lower_guard_buffer(const TypeTable* types, TypeId type)
+{
+    TypeId records[BUSTER_CHECK_LOWER_GUARD_RECORDS];
+    const TypeId bare = type_strip_aligned(types, type);
+    const uint8_t kind = type_kind(types, bare);
+    bool found = kind == BUSTER_TYPE_KIND_ARRAY && check_lower_guard_bytes(types, bare);
+    uint32_t count = 0;
+    if (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION)
+    {
+        records[count++] = bare;
+    }
+    while (count != 0 && !found)
+    {
+        count -= 1;
+        const uint32_t tag = types->types.index[type_index(records[count])];
+        const uint32_t begin = types->tags.member_begin[tag];
+        const uint32_t end = begin + types->tags.member_count[tag];
+        for (uint32_t m = begin; !found && m < end; m += 1)
+        {
+            const TypeId member = type_strip_aligned(types, types->members.type[m]);
+            const uint8_t member_kind = type_kind(types, member);
+            const bool record = member_kind == BUSTER_TYPE_KIND_STRUCT || member_kind == BUSTER_TYPE_KIND_UNION;
+            found = (member_kind == BUSTER_TYPE_KIND_ARRAY && check_lower_guard_bytes(types, member)) || (record && count == BUSTER_CHECK_LOWER_GUARD_RECORDS);
+            if (record && !found)
+            {
+                records[count++] = member;
+            }
+        }
+    }
+    return found;
 }
 
 // A frame object (an array, a struct or a union, or a value that must live in memory): a local of class VOID, reached
@@ -21659,6 +21715,36 @@ static void check_lower_taken_body(CheckLowerWriter* writer, uint32_t slot)
     }
 }
 
+// Whether the stack protector guards the body `writer` just lowered (#3558, Tier0Function.stack_protector), under the
+// options' protector `ssp` (predefines_stack_guard's, 0 for none) and its function's no_stack_protector attribute
+// (`unguarded`, which exempts it whatever its inlined callees need). -fstack-protector-all guards every function;
+// -fstack-protector-strong one with an ALLOCA (a variable-length array's or alloca's) or a local whose address the
+// stream takes (BUSTER_TYPED_LOCAL_ADDRESS_TAKEN: every frame object, an array, a struct or a union among them, and a
+// scalar whose address the code takes), as clang -O0's code has one of LLVM's address-taken allocas, but the variadic
+// frame's two anchors, which are the caller's memory; -fstack-protector one with an ALLOCA or a buffer among its
+// parameters and declared locals (CheckLowerWriter.guard_buffer). The entries' kinds and the locals' flags 64 at a time,
+// and only under the two options that read them.
+static uint8_t check_lower_guard(const CheckLowerWriter* writer, uint8_t ssp, bool unguarded)
+{
+    const bool reads = !unguarded && (ssp == BUSTER_PREDEFINES_SSP_ON || ssp == BUSTER_PREDEFINES_SSP_STRONG);
+    bool needs = ssp == BUSTER_PREDEFINES_SSP_ALL || (ssp == BUSTER_PREDEFINES_SSP_ON && writer->guard_buffer);
+    for (uint32_t first = 0; reads && !needs && first < writer->count; first += 64)
+    {
+        const __mmask64 lanes = tier0_lanes(first, writer->count);
+        const __m512i kinds = _mm512_maskz_loadu_epi8(lanes, writer->kinds + first);
+        needs = _mm512_mask_cmpeq_epi8_mask(lanes, kinds, _mm512_set1_epi8(BUSTER_TYPED_ALLOCA)) != 0;
+    }
+    const __m512i anchors = _mm512_set1_epi8((char)(BUSTER_TYPED_LOCAL_REGISTER_SAVE_AREA | BUSTER_TYPED_LOCAL_OVERFLOW_ARG_AREA));
+    for (uint32_t first = 0; reads && ssp == BUSTER_PREDEFINES_SSP_STRONG && !needs && first < writer->local_count; first += 64)
+    {
+        const __mmask64 lanes = tier0_lanes(first, writer->local_count);
+        const __m512i flags = _mm512_maskz_loadu_epi8(lanes, writer->local_flags + first);
+        const __mmask64 taken = _mm512_mask_test_epi8_mask(lanes, flags, _mm512_set1_epi8(BUSTER_TYPED_LOCAL_ADDRESS_TAKEN));
+        needs = (taken & ~_mm512_test_epi8_mask(flags, anchors)) != 0;
+    }
+    return unguarded ? BUSTER_TIER0_GUARD_EXEMPT : needs ? BUSTER_TIER0_GUARD_ON : BUSTER_TIER0_GUARD_NONE;
+}
+
 static inline __attribute__((always_inline)) void check_lower_part_body(CheckLowerWriter* writer, const CheckLowerShared* shared, CheckLowerPart* part,
                                                                        bool sources, Arena* output, Arena* scratch)
 {
@@ -21772,6 +21858,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         writer->calls_returns_twice = false;
         writer->hidden_copy = 0;
         writer->eh_return = false;
+        writer->guard_buffer = false;
         writer->statement = BUSTER_CHECK_NONE;
         writer->vectors = false;
         writer->masks = false;
@@ -21856,6 +21943,8 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             function->result_size = check_lower_wide(writer, result) ? 16 : check_lower_vector_of(writer, result);
         }
         uint32_t declared = 0;
+        // -fstack-protector's buffers among the parameters and the declared locals (#3558, check_lower_guard_buffer).
+        const bool guard_buffers = program->stack_protector == BUSTER_PREDEFINES_SSP_ON;
         // A K&R definition's callers pass its parameters' promoted types, its ABI's (CHECK_INPUT_FUNCTION_KR).
         const bool kr = (input->function_flags[body.declaration] & CHECK_INPUT_FUNCTION_KR) != 0;
         // ABI locals are the full signature's contiguous prefix, not the compact list of names. An unnamed parameter
@@ -21868,6 +21957,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             const bool named = parameter != BUSTER_CHECK_NONE && check_sparse_get(input->parameters, parameter) == p;
             const TypeId declared_type = named ? input->declared_types[parameter] : parameter_types[p];
             const TypeId parameter_type = kr ? check_input_kr_parameter_type(types, declared_type) : declared_type;
+            writer->guard_buffer |= guard_buffers && check_lower_guard_buffer(types, declared_type);
             // A plain scalar parameter of a prototype is a temporary of its class, as a plain scalar local is (below), and
             // check_lower_passed takes its type.
             const uint32_t info = !kr && writer->type_templates != NULL ? check_lower_type_info(writer, parameter_type) : UINT8_MAX;
@@ -22023,6 +22113,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
             if (check_lower_local_of(writer, declared_object) == BUSTER_CHECK_NONE)
             {
                 const TypeId local_type = input->declared_types[declaration];
+                writer->guard_buffer |= guard_buffers && check_lower_guard_buffer(types, local_type);
                 // A plain scalar's local (check_lower_plain_scalar, neither an array's nor a function's) of no attribute's
                 // alignment, nor one past 8 bytes, is a temporary of its class, as the rules below make it, by its packed
                 // class and facts on the vector path (#1048: 0.08 ms of sqlite3.c's bodies on the 9700X), rather than by
@@ -22463,6 +22554,9 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         // A variadic definition that starts its list has its incoming frame (Tier0Function.incoming_variadic): its own
         // call, which abi_assign gives below.
         shared->incoming[b] = writer->save_anchor != BUSTER_CHECK_NONE;
+        // The stack protector (#3558): whether the frame keeps a guard, and the C library's report the check calls.
+        function->stack_protector = bare ? BUSTER_TIER0_GUARD_NONE : check_lower_guard(writer, program->stack_protector, check_program_unguarded(program, b));
+        function->stack_check_fail = function->stack_protector == BUSTER_TIER0_GUARD_ON ? check_lower_runtime(writer, CHECK_LOWER_RUNTIME_STACK_CHK_FAIL) : 0;
         function->count = writer->count;
         function->local_count = writer->local_count;
         function->call_count = writer->call_count;
@@ -22743,6 +22837,9 @@ static bool check_lower_finish(CheckProgramLowered* lowered, const CheckLowerSha
         // So does a forwarded result's copy in Tier 1 (#2684, Tier0Function.hidden_copy).
         const uint64_t copy = (uint64_t)function->hidden_copy - shared->provisional_runtimes;
         function->hidden_copy = function->hidden_copy != 0 && copy < CHECK_LOWER_RUNTIMES ? lowered->runtime_symbols[copy] : function->hidden_copy;
+        // And a guarded function's check (#3558, Tier0Function.stack_check_fail).
+        const uint64_t report = (uint64_t)function->stack_check_fail - shared->provisional_runtimes;
+        function->stack_check_fail = function->stack_check_fail != 0 && report < CHECK_LOWER_RUNTIMES ? lowered->runtime_symbols[report] : function->stack_check_fail;
     }
     // The jump tables' symbols and their labels', now that the runtime's functions are all known: the lowering's own, after
     // theirs. The labels' are numbered in label_symbols, and the tables' in their dispatches' GLOBAL_ADDRESS entries (the

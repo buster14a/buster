@@ -1377,8 +1377,9 @@ part of the decision.
   under Tier 0.
 - **The stack protector.** The 9700X's clang defaults to
   `-fstack-protector-strong` (938 protected functions in its speedtest1); this
-  compiler emits none at any tier. Not Tier 1's, but a `-O2` build that
-  replaces clang's loses it.
+  compiler guards functions only where the options ask (#3558), by Tier 0's
+  frame: Tier 1 leaves a guarded function to Tier 0. A `-O2` build that
+  replaces clang's needs the option, and Tier 1's own guard.
 - **Unwind tables** are 241 KB for `sqlite3.o` by Tier 1 against clang's
   88 KB (#1377, open).
 - **Tier 1's own code quality gates**, which the guide names with #1116's:

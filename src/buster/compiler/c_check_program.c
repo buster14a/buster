@@ -309,6 +309,9 @@ struct CheckProgramOptions
     // Whether the code probes the stack as it grows it (#177, -fstack-clash-protection, predefines_stack_clash): every
     // function's (Tier0Function.probe_stack).
     bool probe_stack;
+    // The stack protector the code has (#3558, predefines_stack_protector's BUSTER_PREDEFINES_SSP_*, or 0 for none,
+    // BUSTER_PREDEFINES_SSP_OFF's too): which functions the lowering guards (Tier0Function.stack_protector).
+    uint8_t stack_protector;
     // Position-independent code for a shared library (#2101, -fPIC and -fpic where the code isn't a link's executable,
     // check_request_program_options): a symbol another module may preempt is reached through its GOT slot and a
     // thread-local by general- or local-dynamic accesses (check_program_object_access, c_check_program_tls.c). The
@@ -582,6 +585,10 @@ struct CheckProgram
     // BUSTER_CHECK_NONE for the others; null in a unit without one, the usual one. A function's body realigns the stack
     // in its prologue when that declaration is at or before its definition (check_program_realign), as object_interrupt's.
     uint32_t* object_realign;
+    // Per object, its first declaration with the no_stack_protector attribute (#3558, not ignored), and BUSTER_CHECK_NONE
+    // for the others; null in a unit without one, the usual one. A function's body has no stack protector when that
+    // declaration is at or before its definition (check_program_unguarded), as object_realign's.
+    uint32_t* object_unguarded;
     // The function declarations with a patchable_function_entry attribute (#1447, not ignored), as keys of their object in
     // the high half and their token in the low, sorted (check_program_patchable_keys); null in a unit without one, the
     // usual one. A body takes the first attribute of its function's last such declaration up to its definition
@@ -700,8 +707,8 @@ struct CheckProgram
     uint32_t constraint_count;
     uint32_t constraint_capacity;
     uint64_t output_bytes;
-    // CheckProgramOptions.unselected_operands, asm_helpers, asm_bodies, helper_forms, target, frame_pointer, probe_stack
-    // and pic.
+    // CheckProgramOptions.unselected_operands, asm_helpers, asm_bodies, helper_forms, target, frame_pointer, probe_stack,
+    // stack_protector and pic.
     bool unselected_operands;
     bool asm_helpers;
     bool asm_bodies;
@@ -710,6 +717,7 @@ struct CheckProgram
     X86Target target;
     uint8_t frame_pointer;
     bool probe_stack;
+    uint8_t stack_protector;
     bool pic;
     // The tokens the writer left out (#1108), as ranges, keys of their first token in the high half and their last in
     // the low, in token order: an if whose condition is an integer constant without side effects writes only the arm
@@ -1014,6 +1022,7 @@ static void check_program_fail(CheckProgram* program, CheckProgramStatus status,
 // CheckProgram.object_inline's bits.
 #define BUSTER_CHECK_PROGRAM_ATTRIBUTE_WEAK 1024u
 #define BUSTER_CHECK_PROGRAM_ATTRIBUTE_ASM_LABEL 2048u
+#define BUSTER_CHECK_PROGRAM_ATTRIBUTE_NO_STACK_PROTECTOR 4096u
 #define BUSTER_CHECK_PROGRAM_INLINE_ALWAYS 1u
 #define BUSTER_CHECK_PROGRAM_INLINE_NEVER 2u
 
@@ -1022,8 +1031,8 @@ static void check_program_fail(CheckProgram* program, CheckProgramStatus status,
 // callee's that code generation's check of target features reads, always_inline, flatten or noreturn (#775,
 // CheckProgram.attribute_keys), an alias, ifunc or weakref attribute (#147, CheckProgram.aliases), and x86's interrupt
 // (#147, CheckProgram.object_interrupt), force_align_arg_pointer (#1447, CheckProgram.object_realign), returns_twice
-// (#1549, CheckProgram.object_returns_twice), patchable_function_entry (#1447, CheckProgram.patchable_keys) and weak
-// (#1849, CheckProgram.weak_late_keys).
+// (#1549, CheckProgram.object_returns_twice), patchable_function_entry (#1447, CheckProgram.patchable_keys), weak
+// (#1849, CheckProgram.weak_late_keys) and no_stack_protector (#3558, CheckProgram.object_unguarded).
 static uint32_t check_program_attribute_bits(const CheckInputAttributes* attributes)
 {
     uint32_t bits = 0;
@@ -1045,7 +1054,8 @@ static uint32_t check_program_attribute_bits(const CheckInputAttributes* attribu
         const uint32_t patchable = kind == CHECK_ATTRIBUTE_PATCHABLE_FUNCTION_ENTRY && !attribute->subject_ignored ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_PATCHABLE : 0;
         const uint32_t weak = kind == CHECK_ATTRIBUTE_WEAK ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_WEAK : 0;
         const uint32_t label = kind == CHECK_ATTRIBUTE_ASM_LABEL ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_ASM_LABEL : 0;
-        bits |= attribute->ignored ? 0 : bit | inlining | interrupt | realign | twice | patchable | weak | label;
+        const uint32_t unguarded = kind == CHECK_ATTRIBUTE_NO_STACK_PROTECTOR && !attribute->subject_ignored ? BUSTER_CHECK_PROGRAM_ATTRIBUTE_NO_STACK_PROTECTOR : 0;
+        bits |= attribute->ignored ? 0 : bit | inlining | interrupt | realign | twice | patchable | weak | label | unguarded;
     }
     return bits;
 }
@@ -4837,6 +4847,23 @@ static bool check_program_static_object(CheckProgram* program, uint8_t* needed, 
                 program->object_realign[object] = token;
             }
         }
+        // no_stack_protector (#3558), a function's declarations', as object_realign's.
+        if ((function_attributes & BUSTER_CHECK_PROGRAM_ATTRIBUTE_NO_STACK_PROTECTOR) != 0)
+        {
+            if (program->object_unguarded == 0 && room)
+            {
+                program->object_unguarded = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1);
+                room = program->object_unguarded != 0;
+                if (room)
+                {
+                    memset(program->object_unguarded, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
+                }
+            }
+            if (room && program->object_unguarded[object] == BUSTER_CHECK_NONE)
+            {
+                program->object_unguarded[object] = token;
+            }
+        }
     }
     return room;
 }
@@ -4857,6 +4884,15 @@ static bool check_program_realign(const CheckProgram* program, uint32_t b)
 {
     const CheckProgramBody body = program->bodies[b];
     return program->object_realign != 0 && body.object < program->object_count && program->object_realign[body.object] <= body.declaration;
+}
+
+// Whether body `b` has no stack protector whatever the options say (#3558): some declaration of its function up to its
+// definition has the no_stack_protector attribute (CheckProgram.object_unguarded), as clang takes it; clang ignores one
+// after the definition, with a warning.
+static bool check_program_unguarded(const CheckProgram* program, uint32_t b)
+{
+    const CheckProgramBody body = program->bodies[b];
+    return program->object_unguarded != 0 && body.object < program->object_count && program->object_unguarded[body.object] <= body.declaration;
 }
 
 // The static objects' declarations, needs, naked functions and target attributes, by object, in token order (#530):
@@ -6367,7 +6403,7 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
     *program = (CheckProgram){ .input = input, .stream = stream, .types = types, .parser = parser, .identifiers = options.identifiers,
                                .initializers = options.initializers, .asms = options.asms, .unselected_operands = options.unselected_operands,
                                .asm_helpers = options.asm_helpers, .asm_bodies = options.asm_bodies, .assembly_text = options.assembly_text, .helper_forms = options.helper_forms, .target = options.target, .frame_pointer = options.frame_pointer,
-                               .probe_stack = options.probe_stack, .pic = options.pic, .patchable_count = options.patchable_count, .patchable_offset = options.patchable_offset,
+                               .probe_stack = options.probe_stack, .stack_protector = options.stack_protector, .pic = options.pic, .patchable_count = options.patchable_count, .patchable_offset = options.patchable_offset,
                                .patchable_section = options.patchable_section, .initializer_references = options.initializer_references,
                                .initializer_reference_count = options.initializer_reference_count, .token = BUSTER_CHECK_NONE,
                                .diagnostic_position = BUSTER_CHECK_NONE };

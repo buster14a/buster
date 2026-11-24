@@ -65,7 +65,8 @@ static CheckTier1Outcome check_tier1_failure(CheckTier1Stage stage, CheckTier1Ca
     switch (cause)
     {
         case CHECK_TIER1_CAUSE_ADMISSION:
-            category = error == BUSTER_CHECK_TIER1_NAKED || error == BUSTER_CHECK_TIER1_RETURNS_TWICE ? CHECK_TIER1_UNSUPPORTED : category;
+            category = error == BUSTER_CHECK_TIER1_NAKED || error == BUSTER_CHECK_TIER1_RETURNS_TWICE || error == BUSTER_CHECK_TIER1_GUARDED ? CHECK_TIER1_UNSUPPORTED :
+                                                                                                                                            category;
             break;
         case CHECK_TIER1_CAUSE_IR:
             category = error == IR_ERROR_UNSUPPORTED ? CHECK_TIER1_UNSUPPORTED : error == IR_ERROR_MEMORY || error == IR_ERROR_LIMIT ? CHECK_TIER1_RESOURCE_FAILURE : category;
@@ -885,6 +886,13 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     if (stage == CHECK_TIER1_COMPILED && function->calls_returns_twice)
     {
         outcome = check_tier1_failure(CHECK_TIER1_LOWERING, CHECK_TIER1_CAUSE_ADMISSION, BUSTER_CHECK_TIER1_RETURNS_TWICE, UINT32_MAX, 0);
+        stage = outcome.stage;
+    }
+    // So is a function the stack protector guards (#3558, Tier0Function.stack_protector): Tier 1's frame has no guard yet,
+    // and Tier 0's does.
+    if (stage == CHECK_TIER1_COMPILED && function->stack_protector == BUSTER_TIER0_GUARD_ON)
+    {
+        outcome = check_tier1_failure(CHECK_TIER1_LOWERING, CHECK_TIER1_CAUSE_ADMISSION, BUSTER_CHECK_TIER1_GUARDED, UINT32_MAX, 0);
         stage = outcome.stage;
     }
     // A candidate whose summary is ready (#2541, c_check_tier1_inline.c's check_tier1_inline_own) goes on from it to
