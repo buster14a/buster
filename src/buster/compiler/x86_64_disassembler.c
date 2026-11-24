@@ -110,6 +110,19 @@ static uint32_t x86_decode_index_count;
 static uint8_t x86_decode_length_table[2 * 256] __attribute__((aligned(64)));
 static X86DecodeCheck x86_decode_checks[X86_FORM_COUNT];
 static uint32_t x86_decode_simple[2 * 256 * 32];
+// Each bucket's tail after its opcode (x86_decode_tails_initialize): bit 31 known, bit 24 a byte where ModRM sits
+// (ModRM, or a fixed opcode byte, whose mod is 3), bits 16-23 the ModRM digits whose trailing bytes (immediates,
+// relatives, 3DNow's operation byte) are bits 4-7 (8-11 with 66, 12-15 with W); the other digits' are bits 0-3.
+static uint32_t x86_decode_tails[BUSTER_X86_DECODE_BUCKETS];
+static uint32_t x86_decode_tails_unknown;
+// The length pass's tables, from x86_decode_tails (x86_decode_length_tables_initialize). A legacy opcode's byte in
+// maps 0 and 1: bits 0-3 its trailing bytes (15: no hint), bit 4 none but on digits 0 and 1, bit 5 four become eight
+// with REX.W, bit 6 four become two with 66, bit 7 a byte where ModRM sits. A vector opcode's byte in map 1: bits 0-1
+// VEX's (ModRM, an immediate byte), bits 2-3 EVEX's, bit 4 VEX's has no hint, bit 5 EVEX's. Every other map's
+// (family, map) is uniform: its byte is the legacy layout's, 0x0f for no hint, 0xff for map 1's tables.
+static uint8_t x86_decode_legacy_tails[2 * 256] __attribute__((aligned(64)));
+static uint8_t x86_decode_vector_tails[256] __attribute__((aligned(64)));
+static uint8_t x86_decode_map_tails[3 * BUSTER_X86_DECODE_MAPS];
 static bool x86_decode_initialized;
 static uint32_t x86_decode_entry_count;
 
@@ -340,6 +353,196 @@ static void x86_decode_lengths_initialize(void)
     }
 }
 
+// A form's tail after its map's opcode byte: whether a byte sits where ModRM does (ModRM, or one fixed opcode byte of
+// mod 3), and its trailing bytes. False for a tail the descriptor can't hold (two fixed bytes, a fixed byte below C0).
+static bool x86_decode_form_tail(const X86FormDescription* form, bool* slot, uint32_t* trailing)
+{
+    uint32_t index;
+    x86_decode_form_map(form, &index);
+    const bool operation = x86_form_has_operation_byte(form);
+    const uint32_t extra = form->opcode_bytes - (operation ? 1u : 0u) - index - 1;
+    const bool modrm = form->encoding == BUSTER_X86_ENCODING_R || (form->encoding & BUSTER_X86_ENCODING_DIGIT);
+    *slot = modrm || extra == 1;
+    *trailing = form->immediate_bytes + form->relative_bytes + (operation ? 1u : 0u);
+    return extra <= 1 && !(modrm && extra != 0) && (extra == 0 || x86_opcode_byte(form, index + 1) >= 0xc0) && *trailing <= 15;
+}
+
+// Fits each bucket's tail descriptor (x86_decode_tails) to its forms and checks it predicts every form's tail; a bucket
+// it can't hold is left unknown, and its lanes' lengths come from their forms.
+static void x86_decode_tails_initialize(void)
+{
+    static int8_t tails[BUSTER_X86_DECODE_BUCKETS][2][2][8];
+    static int8_t slots[BUSTER_X86_DECODE_BUCKETS];
+    static bool broken[BUSTER_X86_DECODE_BUCKETS];
+    memset(tails, -1, sizeof(tails));
+    memset(slots, -1, sizeof(slots));
+    memset(broken, 0, sizeof(broken));
+    for (uint32_t pass = 0; pass < 2; pass += 1)
+    {
+        for (uint32_t row = 1; row < X86_FORM_COUNT; row += 1)
+        {
+            const X86FormDescription* form = &x86_form_descriptions[row];
+            if (x86_decode_form_supported(row))
+            {
+                uint32_t index;
+                const uint32_t map = x86_decode_form_map(form, &index);
+                bool slot;
+                uint32_t trailing;
+                const bool fits = x86_decode_form_tail(form, &slot, &trailing);
+                // REX.W decides the operand size over 66, as the length pass reads them.
+                const uint32_t wide = form->family == BUSTER_X86_FAMILY_LEGACY && form->w;
+                const uint32_t word = form->family == BUSTER_X86_FAMILY_LEGACY && x86_form_has_prefix(form, 0x66) && !wide;
+                const bool digit = (form->encoding & BUSTER_X86_ENCODING_DIGIT) != 0;
+                const uint32_t count = form->encoding == BUSTER_X86_ENCODING_PR && index + 1 == form->opcode_bytes ? 8 : 1;
+                for (uint32_t i = 0; i < count; i += 1)
+                {
+                    const uint32_t bucket = x86_decode_bucket(form->family, map, x86_opcode_byte(form, index) | i);
+                    for (uint32_t d = 0; d < 8; d += 1)
+                    {
+                        if (!digit || d == (form->encoding & 7u))
+                        {
+                            if (pass == 0)
+                            {
+                                int8_t* entry = &tails[bucket][word][wide][d];
+                                broken[bucket] = broken[bucket] || !fits || (*entry != -1 && *entry != (int8_t)trailing) || (slots[bucket] != -1 && slots[bucket] != (int8_t)slot);
+                                *entry = (int8_t)trailing;
+                                slots[bucket] = (int8_t)slot;
+                            }
+                            else
+                            {
+                                const uint32_t tail = x86_decode_tails[bucket];
+                                const uint32_t predicted = ((tail >> (16 + d)) & 1) == 0 ? tail & 15 : wide ? (tail >> 12) & 15 : word ? (tail >> 8) & 15 : (tail >> 4) & 15;
+                                broken[bucket] = broken[bucket] || predicted != trailing || ((tail >> 24) & 1) != (uint32_t)slot;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for (uint32_t bucket = 0; pass == 0 && bucket < BUSTER_X86_DECODE_BUCKETS; bucket += 1)
+        {
+            // A digit whose defined trailing bytes don't depend on 66 or W, and agree with the last such digit's (from
+            // 7 down: F6's and F7's immediates are on 0 and 1), is outside the mask; the others are inside it, and must
+            // agree with one another.
+            int32_t outside = -1;
+            uint32_t mask = 0;
+            for (uint32_t k = 0; k < 8; k += 1)
+            {
+                const uint32_t d = 7 - k;
+                const int8_t plain = tails[bucket][0][0][d];
+                const int8_t word = tails[bucket][1][0][d];
+                const int8_t wide = tails[bucket][0][1][d];
+                const int8_t value = plain != -1 ? plain : word != -1 ? word : wide;
+                const bool constant = value != -1 && (plain == -1 || plain == value) && (word == -1 || word == value) && (wide == -1 || wide == value);
+                if (constant && (outside == -1 || outside == value))
+                {
+                    outside = value;
+                }
+                else if (value != -1)
+                {
+                    mask |= 1u << d;
+                }
+            }
+            int32_t inside[3] = { -1, -1, -1 };
+            for (uint32_t d = 0; d < 8; d += 1)
+            {
+                const int8_t values[3] = { tails[bucket][0][0][d], tails[bucket][1][0][d], tails[bucket][0][1][d] };
+                for (uint32_t k = 0; ((mask >> d) & 1) != 0 && k < 3; k += 1)
+                {
+                    broken[bucket] = broken[bucket] || (values[k] != -1 && inside[k] != -1 && inside[k] != values[k]);
+                    inside[k] = values[k] != -1 ? values[k] : inside[k];
+                }
+            }
+            // A combination no form has (an unprefixed one where every form has 66) takes a defined one's value.
+            inside[0] = inside[0] != -1 ? inside[0] : inside[1] != -1 ? inside[1] : inside[2] != -1 ? inside[2] : 0;
+            inside[1] = inside[1] != -1 ? inside[1] : inside[0];
+            inside[2] = inside[2] != -1 ? inside[2] : inside[0];
+            outside = outside != -1 ? outside : 0;
+            const bool used = slots[bucket] != -1;
+            x86_decode_tails[bucket] = used && !broken[bucket] ? (1u << 31) | ((uint32_t)slots[bucket] << 24) | (mask << 16) | ((uint32_t)inside[2] << 12) | ((uint32_t)inside[1] << 8) |
+                                                                  ((uint32_t)inside[0] << 4) | (uint32_t)outside
+                                                            : 0;
+        }
+    }
+    x86_decode_tails_unknown = 0;
+    for (uint32_t bucket = 0; bucket < BUSTER_X86_DECODE_BUCKETS; bucket += 1)
+    {
+        x86_decode_tails[bucket] = broken[bucket] ? 0 : x86_decode_tails[bucket];
+        x86_decode_tails_unknown += slots[bucket] != -1 && x86_decode_tails[bucket] == 0;
+
+    }
+}
+
+// A bucket's legacy-layout byte (x86_decode_legacy_tails), 0x0f where its descriptor doesn't fit the layout.
+static uint8_t x86_decode_legacy_tail(uint32_t tail)
+{
+    const uint32_t mask = (tail >> 16) & 0xff;
+    const uint32_t outside = tail & 15;
+    const uint32_t inside = (tail >> 4) & 15;
+    const uint32_t word = (tail >> 8) & 15;
+    const uint32_t wide = (tail >> 12) & 15;
+    const bool known = (tail >> 31) != 0;
+    const bool digits = mask != 0 && (mask & ~3u) == 0 && outside == 0;
+    const bool every = mask == 0xff || digits;
+    const uint32_t trailing = mask == 0 ? outside : inside;
+    const bool shrinks = every && inside == 4 && word == 2;
+    const bool widens = every && inside == 4 && wide == 8;
+    const bool fits = known && (mask == 0 || every) && (mask == 0 || ((word == inside || shrinks) && (wide == inside || widens))) && trailing < 15;
+    return fits ? (uint8_t)(((tail >> 24) & 1) << 7 | (uint32_t)shrinks << 6 | (uint32_t)widens << 5 | (uint32_t)digits << 4 | trailing) : 0x0f;
+}
+
+// The length pass's tables (x86_decode_legacy_tails, x86_decode_vector_tails, x86_decode_map_tails) from the buckets'
+// descriptors; a byte with no hint where they don't fit.
+static void x86_decode_length_tables_initialize(void)
+{
+    memset(x86_decode_map_tails, 0xfe, sizeof(x86_decode_map_tails));
+    memset(x86_decode_vector_tails, 0, sizeof(x86_decode_vector_tails));
+    for (uint32_t family = 0; family < 3; family += 1)
+    {
+        for (uint32_t map = 0; map < BUSTER_X86_DECODE_MAPS; map += 1)
+        {
+            const bool tabled = map == 1 || (family == BUSTER_X86_FAMILY_LEGACY && map == 0);
+            uint8_t* uniform = &x86_decode_map_tails[family * BUSTER_X86_DECODE_MAPS + map];
+            *uniform = tabled ? 0xff : 0xfe;
+            for (uint32_t opcode = 0; opcode < 256; opcode += 1)
+            {
+                const uint32_t tail = x86_decode_tails[x86_decode_bucket(family, map, opcode)];
+                const bool used = x86_decode_buckets[x86_decode_bucket(family, map, opcode)].count != 0;
+                const uint8_t legacy = x86_decode_legacy_tail(tail);
+                if (family == BUSTER_X86_FAMILY_LEGACY && tabled)
+                {
+                    x86_decode_legacy_tails[map * 256 + opcode] = used ? legacy : 0x0f;
+                }
+                else if (tabled)
+                {
+                    // A vector form has one trailing immediate byte at most, and the same on every digit.
+                    const bool fits = (tail >> 31) != 0 && (tail & 15) <= 1 && ((tail >> 16) & 0xff) == 0;
+                    const uint32_t shift = family == BUSTER_X86_FAMILY_VEX ? 0 : 2;
+                    const uint8_t bits = (uint8_t)((((tail >> 24) & 1) | ((tail & 1) << 1)) << shift);
+                    x86_decode_vector_tails[opcode] |= used ? (fits ? bits : (uint8_t)(1u << (4 + shift / 2))) : 0;
+                }
+                else if (used)
+                {
+                    *uniform = *uniform == 0xfe || *uniform == legacy ? legacy : 0x0f;
+                }
+            }
+            *uniform = *uniform == 0xfe ? 0x0f : *uniform;
+            if (getenv("BUSTER_TAILS") != NULL)
+            {
+                fprintf(stderr, "map %u %u: %02x\n", family, map, *uniform);
+            }
+        }
+    }
+    for (uint32_t i = 0; getenv("BUSTER_TAILS") != NULL && i < 512; i += 1)
+    {
+        if (x86_decode_legacy_tails[i] == 0x0f && x86_decode_buckets[x86_decode_bucket(0, i >> 8, i & 255)].count != 0) fprintf(stderr, "legacy no hint: map %u %02x tail %08x\n", i >> 8, i & 255, x86_decode_tails[x86_decode_bucket(0, i >> 8, i & 255)]);
+    }
+    for (uint32_t i = 0; getenv("BUSTER_TAILS") != NULL && i < 256; i += 1)
+    {
+        if (x86_decode_vector_tails[i] & 0x30) fprintf(stderr, "vector no hint: %02x %02x\n", i, x86_decode_vector_tails[i]);
+    }
+}
+
 static void x86_decode_checks_initialize(void)
 {
     // Raw parsing already establishes consistent modes, bounded general bases/indices, high-byte/REX exclusion,
@@ -489,6 +692,8 @@ static bool x86_disassembler_initialize(void)
             if (result)
             {
                 x86_decode_lengths_initialize();
+                x86_decode_tails_initialize();
+                x86_decode_length_tables_initialize();
                 x86_decode_checks_initialize();
                 x86_decode_simple_initialize();
                 x86_disassembly_initialize();
