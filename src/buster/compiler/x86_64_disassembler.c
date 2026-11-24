@@ -1686,7 +1686,9 @@ static X86DecodeResult x86_disassemble_old(const uint8_t* source, uint64_t size,
 // The lane decoder's view of a window: 4 bytes from each lane's dword position (x86_decode_extract on 128 bytes).
 static __m512i x86_decode_lane_bytes(const X86DecodeWindow* window, __m512i positions)
 {
-    const __m512i indices = _mm512_add_epi32(_mm512_mullo_epi32(positions, _mm512_set1_epi32(0x01010101)), _mm512_set1_epi32(0x03020100));
+    // Each dword's low byte (a position below 128) in its four bytes, plus 0, 1, 2, 3.
+    const __m512i broadcast = _mm512_broadcast_i32x4(_mm_setr_epi8(0, 0, 0, 0, 4, 4, 4, 4, 8, 8, 8, 8, 12, 12, 12, 12));
+    const __m512i indices = _mm512_add_epi8(_mm512_shuffle_epi8(positions, broadcast), _mm512_set1_epi32(0x03020100));
     return _mm512_permutex2var_epi8(window->low, indices, window->high);
 }
 
@@ -1753,7 +1755,7 @@ static uint32_t x86_decode_lanes(const X86DecodeWindow* window, uint64_t remaini
         code = _mm512_mask_mov_epi32(code, _mm512_cmpeq_epi32_mask(byte, _mm512_set1_epi32(0x9b)), _mm512_set1_epi32(7));
         unmatched |= is_plain & (_mm512_cmpeq_epi32_mask(code, zero) | _mm512_cmpge_epu32_mask(plain, _mm512_set1_epi32(3)));
         malformed |= is_plain & _mm512_cmpge_epu32_mask(plain, _mm512_set1_epi32(4));
-        codes = _mm512_mask_or_epi32(codes, is_plain, codes, _mm512_sllv_epi32(code, _mm512_mullo_epi32(plain, _mm512_set1_epi32(3))));
+        codes = _mm512_mask_or_epi32(codes, is_plain, codes, _mm512_sllv_epi32(code, _mm512_add_epi32(_mm512_add_epi32(plain, plain), plain)));
         plain = _mm512_mask_add_epi32(plain, is_plain, plain, one);
         malformed |= active & is_segment & _mm512_cmpneq_epi32_mask(segment, zero);
         segment = _mm512_mask_mov_epi32(segment, active & fs, _mm512_set1_epi32(BUSTER_X86_SEGMENT_FS));
