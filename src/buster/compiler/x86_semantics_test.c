@@ -743,7 +743,6 @@ static const uint16_t x86_semantics_uncovered[] = {
     X86_FORM_LOCK_BTS_M64_R64,
     X86_FORM_INT_IMM8,
     X86_FORM_ENTER,
-    X86_FORM_FXCH_ST,
     X86_FORM_FNSTSW_AX,
     X86_FORM_LDMXCSR_M32,
     X86_FORM_VZEROALL,
@@ -1091,6 +1090,12 @@ static bool x86_semantics_check_resolved(void)
             .reads = BUSTER_X86_RESOURCE_GPR(4) | BUSTER_X86_RESOURCE_X87 | BUSTER_X86_RESOURCE_X87_CONTROL,
             .writes = memory | BUSTER_X86_RESOURCE_X87,
             .what = "fstp tbyte [rsp]",
+        },
+        {
+            .record = { .form = X86_FORM_FXCH_ST, .rm = 3 },
+            .reads = BUSTER_X86_RESOURCE_X87 | BUSTER_X86_RESOURCE_X87_CONTROL,
+            .writes = BUSTER_X86_RESOURCE_X87,
+            .what = "fxch st(3) exchanges occupied x87 registers",
         },
         {
             .record = { .form = X86_FORM_FADDP_ST_ST0, .rm = 1 },
