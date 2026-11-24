@@ -1304,8 +1304,8 @@ struct CheckCommonBodyRegions
     const uint32_t* offsets;
     const uint32_t* order;
 };
-static void check_common_body_reached(const CheckProgram* program, const CheckProgramBody* body, CheckCommonBodyRegions regions, uint8_t* seen,
-                                      uint32_t* queue);
+static uint32_t check_common_body_reached(const CheckProgram* program, const CheckProgramBody* body, CheckCommonBodyRegions regions, uint8_t* seen,
+                                          uint32_t* queue);
 static uint8_t* check_common_evaluated(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const Parser* parser,
                                        const CheckProgram* program, const uint32_t* parents, Arena* scratch);
 
@@ -1959,7 +1959,7 @@ static bool check_common_edge_wanted(const CheckGraph* graph, const CheckStream*
                                      bool promotion, bool int_float, bool const_int_float)
 {
     bool target_complex = false;
-    const TypeId target = edge.type != 0 && (edge.flags & BUSTER_CHECK_CONVERT_CAST) == 0 ? check_float_element(types, edge.type, &target_complex) : 0;
+    const TypeId target = edge.type >= BUSTER_TYPE_BF16 && (edge.flags & BUSTER_CHECK_CONVERT_CAST) == 0 ? check_float_element(types, edge.type, &target_complex) : 0;
     const TypeId own = target != 0 && child < graph->count ? check_float_value_type(types, check_stream_type(stream, child)) : 0;
     const CheckOp op = child < graph->count ? graph->ops[child] : CHECK_OP_COUNT;
     const bool integer = own != 0 && !target_complex && type_kind(types, own) == BUSTER_TYPE_KIND_INTEGER &&
@@ -1991,8 +1991,20 @@ static bool check_common_edges_reach(const CheckGraph* graph, const CheckStream*
 {
     const CheckOp op = graph->ops[node];
     bool result = op == CHECK_OP_CONDITIONAL && check_common_arms_wanted(graph, stream, types, node);
-    for (uint32_t i = 0; !result && stream->conversions != NULL && i < 3; i += 1)
+    // Each conversion row holds three (type, flags) pairs followed by the store conversion. Only a target at or
+    // above the first floating builtin can be floating, including qualified, complex and derived aligned types.
+    // Reject ordinary integer and absent targets together before reading their operands or consulting the type table.
+    _Static_assert(sizeof(CheckNodeConversions) == 32 && sizeof(CheckConversion) == 8 && offsetof(CheckConversion, type) == 0 &&
+                   offsetof(CheckNodeConversions, operands) == 0, "the three operand types occupy dwords 0, 2 and 4");
+    uint32_t slots = 0;
+    if (node < stream->count && stream->conversions != NULL && op != CHECK_OP_CONDITIONAL)
     {
+        const __m256i row = _mm256_loadu_si256((const __m256i*)(stream->conversions + node));
+        slots = _mm256_mask_cmpge_epu32_mask(0x15, row, _mm256_set1_epi32(BUSTER_TYPE_BF16));
+    }
+    for (; !result && slots != 0; slots &= slots - 1)
+    {
+        const uint32_t i = (uint32_t)__builtin_ctz(slots) / 2;
         const uint32_t child = i == 0 ? graph->operand0[node] : i == 1 ? graph->operand1[node] : graph->operand2[node];
         result = child < graph->count && check_common_edge_slot(op, i) &&
                  check_common_edge_wanted(graph, stream, types, stream->conversions[node].operands[i], child, promotion, int_float, const_int_float);
@@ -6209,7 +6221,7 @@ static uint32_t check_common_next_indexed_op(const CheckGraph* graph, const Chec
     return result;
 }
 
-// A batch of `live` (up to 16) listed comparison nodes (check_common_next_reach_op): those
+// A batch of `live` (up to 16) listed comparison nodes (check_common_range_candidates): those
 // -Wtautological-constant-out-of-range-compare may warn of (check_common_range_lanes) reach their roots, a reach's bits
 // being a union up the parents, so that the comparisons' order among the others' changes nothing.
 static void check_common_range_batch(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const uint32_t* parents, uint8_t* reach,
@@ -6228,24 +6240,26 @@ static void check_common_range_batch(const CheckGraph* graph, const CheckStream*
     }
 }
 
-// Drain a scan's listed comparisons, including a tail longer than one vector batch.
-static void check_common_range_drain(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const uint32_t* parents, uint8_t* reach,
-                                     const uint32_t* comparisons, uint32_t* tested, uint32_t listed)
+// Only the comparison mask is needed here. Batch its set bits independently of the reach candidates so a long
+// run of comparisons never needs more scratch than one list, even when no other operator can warn.
+static void check_common_range_candidates(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const uint32_t* parents,
+                                          uint8_t* reach, const CheckCommonCandidates* candidates)
 {
-    while (comparisons != NULL && *tested < listed)
+    CheckCommonScan scan = { 0 };
+    while (scan.next < candidates->count)
     {
-        const uint32_t remaining = listed - *tested;
-        const uint32_t live = remaining < 16 ? remaining : 16;
-        check_common_range_batch(graph, stream, types, parents, reach, comparisons + *tested, live);
-        *tested += live;
+        check_common_candidate_list(candidates, CHECK_COMMON_CANDIDATE_COMPARE, &scan);
+        for (uint32_t first = 0; first < scan.listed; first += 16)
+        {
+            const uint32_t remaining = scan.listed - first;
+            check_common_range_batch(graph, stream, types, parents, reach, scan.items + first, remaining < 16 ? remaining : 16);
+        }
     }
 }
 
-// The reach scan consumes the shared REACH and COMPARE masks. With `comparisons`, each block's comparison nodes are
-// appended to it (`*listed` of them so far) for -Wtautological-constant-out-of-range-compare's batches
-// (check_common_range_lanes): a block holds one or two comparisons, and the batches' gathers take 16 at once.
+// The other reach candidates, including comparisons when their signedness or an operand conversion needs a test.
 static uint32_t check_common_next_reach_op(const CheckGraph* graph, const CheckCommonCandidates* candidates, bool sign_compare, bool atomic_access,
-                                           bool float_precision, bool edges, uint32_t* comparisons, uint32_t* listed, CheckCommonScan* scan)
+                                           bool float_precision, bool edges, CheckCommonScan* scan)
 {
     const uint32_t count = graph->count;
     const uint32_t blocks = candidates->blocks;
@@ -6260,12 +6274,6 @@ static uint32_t check_common_next_reach_op(const CheckGraph* graph, const CheckC
             const uint32_t first = scan->next;
             const uint32_t live = count - first < 16 ? count - first : 16;
             const __mmask16 compares = (__mmask16)comparison[first / 16];
-            if (comparisons != NULL)
-            {
-                const __m512i nodes = _mm512_add_epi32(_mm512_set1_epi32((int)first), _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15));
-                _mm512_mask_compressstoreu_epi32(comparisons + *listed, compares, nodes);
-                *listed += (uint32_t)__builtin_popcount(compares);
-            }
             uint32_t selected = own[first / 16] | (sign_compare ? compares : 0u);
             if (atomic_access)
             {
@@ -11706,8 +11714,9 @@ static void check_common_mark_written(const CheckGraph* graph, const CheckStream
 // one is evaluated is its expression's (check_common_statement_roots), and what its exits reach is reached (#1447).
 // `regions` lists the body's statement expressions, so that a unit's bodies visit their own (#1360: each glibc assert is
 // one, and every body of a debug build scanned all of the unit's); without the lists, the walk scans them all.
-static void check_common_body_reached(const CheckProgram* program, const CheckProgramBody* body, CheckCommonBodyRegions regions, uint8_t* seen,
-                                      uint32_t* queue)
+// The queue length on exit is the number of distinct controls marked in seen.
+static uint32_t check_common_body_reached(const CheckProgram* program, const CheckProgramBody* body, CheckCommonBodyRegions regions, uint8_t* seen,
+                                          uint32_t* queue)
 {
     const CheckControl* entries = program->controls + body->first;
     memset(seen, 0, body->count);
@@ -11797,6 +11806,7 @@ static void check_common_body_reached(const CheckProgram* program, const CheckPr
             }
         }
     }
+    return tail;
 }
 
 // The program's statement expressions by body (check_common_body_reached's lists), in scratch, by a counting sort: each
@@ -11866,7 +11876,7 @@ static bool check_common_unreachable(const CheckProgram* program, const CheckGra
             valid = false;
             break;
         }
-        check_common_body_reached(program, body, regions, seen, queue);
+        const uint32_t reached = check_common_body_reached(program, body, regions, seen, queue);
         const CheckControl* entries = program->controls + body->first;
         // The kinds whose `node` is a source expression's value, a bit each.
         const uint64_t expressions = UINT64_C(1) << CHECK_CONTROL_EVALUATE | UINT64_C(1) << CHECK_CONTROL_VLA | UINT64_C(1) << CHECK_CONTROL_RETURN |
@@ -11874,17 +11884,18 @@ static bool check_common_unreachable(const CheckProgram* program, const CheckGra
                                      UINT64_C(1) << CHECK_CONTROL_BRANCH_TRUE | UINT64_C(1) << CHECK_CONTROL_JUMP_INDIRECT |
                                      UINT64_C(1) << CHECK_CONTROL_RESULT;
         _Static_assert(CHECK_CONTROL_RESULT < 64 && CHECK_CONTROL_JUMP_INDIRECT < 64, "the expressions' kinds are bits of a 64-bit mask");
-        for (uint32_t i = 0; i < body->count; i += 1)
+        // The queue admitted each reached control once. An entirely reached body has nothing to clear.
+        CheckCommonScan unreachable = { 0 };
+        const uint32_t count = body->count;
+        for (uint32_t i = reached != count ? check_common_next_unevaluated(seen, count, &unreachable) : count; i < count;
+             i = check_common_next_unevaluated(seen, count, &unreachable))
         {
             const uint8_t kind = entries[i].kind;
-            // An unreached expression's root cleared without a branch (#892): where the entry clears none, the store writes its
-            // own mark again. Tested by its kind, its mark and its node in turn, the entries' test was missed at nearly half
-            // the entries on the 9700X.
-            const bool expression = kind < 64 && (expressions >> kind & 1) != 0;
-            const bool cleared = expression & (seen[i] == 0) & (entries[i].node < graph->count);
-            uint8_t* root = cleared ? evaluated + entries[i].node : seen + i;
-            *root = cleared ? 0 : seen[i];
-            if (kind == CHECK_CONTROL_INITIALIZE && seen[i] == 0 && program->initializers != NULL &&
+            if (kind < 64 && ((expressions >> kind) & 1) != 0 && entries[i].node < graph->count)
+            {
+                evaluated[entries[i].node] = 0;
+            }
+            if (kind == CHECK_CONTROL_INITIALIZE && program->initializers != NULL &&
                 entries[i].target < program->initializers->count && *blocked == NULL)
             {
                 // (The barriers' bytes, which a unit without such an initializer never takes. They outlive this body's
@@ -11897,7 +11908,7 @@ static bool check_common_unreachable(const CheckProgram* program, const CheckGra
                     mark = scratch->length;
                 }
             }
-            if (valid && kind == CHECK_CONTROL_INITIALIZE && seen[i] == 0 && program->initializers != NULL &&
+            if (valid && kind == CHECK_CONTROL_INITIALIZE && program->initializers != NULL &&
                 entries[i].target < program->initializers->count)
             {
                 const uint32_t declaration = entries[i].token;
@@ -13057,27 +13068,21 @@ static bool check_common_facts(const CheckInput* input, const CheckStream* strea
     if (walk)
     {
         memset(reach, 0, count);
-        // The comparisons, last in the list, only where -Wsign-compare may warn: it takes every one. Otherwise only those
-        // -Wtautological-constant-out-of-range-compare may warn of reach their roots, in batches after the scan.
-
-        CheckCommonScan owners = { 0 };
-        uint32_t* comparisons = enabled->out_of_range && !enabled->sign_compare ? CHECK_COMMON_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 16) : NULL;
-        uint32_t listed = 0;
-        uint32_t tested = 0;
-        const bool edges = enabled->promotion || enabled->int_float || enabled->const_int_float;
-        for (uint32_t node = check_common_next_reach_op(graph, candidates, enabled->sign_compare, enabled->atomic_access, enabled->float_precision, edges, comparisons,
-                                                        &listed, &owners);
-             node < count;
-             node = check_common_next_reach_op(graph, candidates, enabled->sign_compare, enabled->atomic_access, enabled->float_precision, edges, comparisons,
-                                               &listed, &owners))
+        // The batched range check sets the same reach bit as the other comparison warnings. A comparison selected
+        // again for one of its conversion edges must not repeat the individual range test.
+        CheckCommonEnabled own = *enabled;
+        own.out_of_range = false;
+        if (enabled->out_of_range && !enabled->sign_compare)
         {
-            // A full batch of comparisons is tested as soon as it is listed, while the scan is near their nodes: tested at
-            // the end, a large unit's gathers would find its columns cold.
-            for (; listed - tested >= 16; tested += 16)
-            {
-                check_common_range_batch(graph, stream, types, parents, reach, comparisons + tested, 16);
-            }
-            uint8_t bits = check_common_own_reach(parser, graph, stream, types, node, enabled);
+            check_common_range_candidates(graph, stream, types, parents, reach, candidates);
+        }
+        CheckCommonScan owners = { 0 };
+        const bool edges = enabled->promotion || enabled->int_float || enabled->const_int_float;
+        for (uint32_t node = check_common_next_reach_op(graph, candidates, enabled->sign_compare, enabled->atomic_access, enabled->float_precision, edges, &owners);
+             node < count;
+             node = check_common_next_reach_op(graph, candidates, enabled->sign_compare, enabled->atomic_access, enabled->float_precision, edges, &owners))
+        {
+            uint8_t bits = check_common_own_reach(parser, graph, stream, types, node, &own);
             if (self_assigns != NULL && check_common_self_assign_candidate(graph, node))
             {
                 self_assigns[node >> 6] |= UINT64_C(1) << (node & 63);
@@ -13088,13 +13093,8 @@ static bool check_common_facts(const CheckInput* input, const CheckStream* strea
                 reach[at] |= bits;
             }
         }
-        // The scan may list many comparisons after its last reach candidate. Drain every remaining batch, not just the
-        // first 16, including when no reach candidate was found at all.
-        check_common_range_drain(graph, stream, types, parents, reach, comparisons, &tested, listed);
-        // (Short of scratch for the list, the facts fail as a whole rather than leave comparisons out.)
-        const bool short_of = enabled->out_of_range && !enabled->sign_compare && comparisons == NULL;
         check_common_assertion_reach(graph, stream, reach);
-        evaluated = short_of ? NULL : check_common_evaluated_tree(graph, stream, types, parser, program, roots, candidates, scratch);
+        evaluated = check_common_evaluated_tree(graph, stream, types, parser, program, roots, candidates, scratch);
     }
     else if (allocated)
     {
