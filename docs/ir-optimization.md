@@ -261,8 +261,10 @@ compiles took 0.4 to 1.2% fewer user cycles
 #860 had measured the vector passes 9 to 11% ahead at 16K+ instructions in a
 near-single-block shape, which no corpus function reaches (the densest real
 function, `chacha_block`, has 247 instructions a block, where they lost 5%); the
-owner deleted AUTO with that known
-([7112387760](https://github.com/buster14a/buster/issues/2924#issuecomment-7112387760)).
+owner's decision
+([7112387760](https://github.com/buster14a/buster/issues/2924#issuecomment-7112387760))
+was asked without it, corrected in
+[7122231079](https://github.com/buster14a/buster/issues/2924#issuecomment-7122231079).
 #3445 is a vectorized form that would have to win at every size, that shape
 included. Integer
 operations support all IR integer widths, including scalar i128 handling.

@@ -208,6 +208,8 @@ static __attribute__((unused)) int run_ir_optimize_passes_benchmark(int argc, ch
             valid = false;
         }
     }
+    // Conditioning is GVN's scalar work before its vector samples: a conditioned run times GVN alone.
+    valid = valid && (after_scalar == 0 || selected <= 0);
     Arena input_arena = arena_reserve(128ull << 20);
     Arena outputs[2] = { arena_reserve(128ull << 20), arena_reserve(128ull << 20) };
     Arena promoted = arena_reserve(128ull << 20);
@@ -217,7 +219,8 @@ static __attribute__((unused)) int run_ir_optimize_passes_benchmark(int argc, ch
     const char* shapes[][3] = { { "small-dag", "large-dag", "cyclic-phi" }, { "no-loop", "nested-loops", "invariant-chain" }, { "two-fields", "conditional-stores", "field-array" } };
     for (uint32_t pass = 0; valid && pass < 3; pass += 1)
     {
-        for (uint32_t shape = 0; valid && (selected < 0 || selected == (int)pass) && shape < 3; shape += 1)
+        const bool chosen = after_scalar != 0 ? pass == 0 : selected < 0 || selected == (int)pass;
+        for (uint32_t shape = 0; valid && chosen && shape < 3; shape += 1)
         {
             IrFunction input = { 0 };
             IrOptimizeTest generator = { .random = 139 + pass * 3 + shape };
@@ -303,7 +306,7 @@ static __attribute__((unused)) int run_ir_optimize_passes_benchmark(int argc, ch
     }
     if (!valid)
     {
-        fprintf(stderr, "benchmark-ir-optimize-passes failed; usage: [--pass all|gvn|licm|sroa] [--instructions N] [--fields 1..4096] [--samples 1..21] [--only scalar|vector] [--after-scalar MS]\n");
+        fprintf(stderr, "benchmark-ir-optimize-passes failed; usage: [--pass all|gvn|licm|sroa] [--instructions N] [--fields 1..4096] [--samples 1..21] [--only scalar|vector] [--after-scalar MS, GVN alone]\n");
     }
     arena_release(&scratch);
     arena_release(&promoted);

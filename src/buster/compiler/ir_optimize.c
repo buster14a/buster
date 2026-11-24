@@ -13,8 +13,9 @@
 // threaded blocks by the vector pointer jumping and SROA's split ran DCE's vector roots and sweeps, in every compile;
 // the deletion's whole-compile run measured their replacement (1,372 of 1,372 objects identical, sqlite3.c's and
 // Lua's Tier 1 compiles 0.4 to 1.2% fewer user cycles). #860 had measured the vector passes 9 to 11% ahead at 16K+
-// instructions in a near-single-block shape, which no corpus function reaches; the owner deleted AUTO knowing it
-// (7112387760). #3445 is a vectorized form that would have to win at every size, that shape included.
+// instructions in a near-single-block shape, which no corpus function reaches; the owner's decision (7112387760) was
+// asked without it, corrected in 7122231079. #3445 is a vectorized form that would have to win at every size, that
+// shape included.
 
 #include <stdbool.h>
 #include <stdint.h>
