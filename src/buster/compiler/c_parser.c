@@ -2735,6 +2735,18 @@ BUSTER_INLINE __m512i parse_tree_column_ranks(__m512i counts, __m512i ends, __m5
     return _mm512_add_epi32(before, _mm512_sub_epi32(ends, tokens));
 }
 
+// Each live rank is a distinct destination. The x86 scatter leaves its destinations' shadow unchanged
+// under MemorySanitizer. Its generic counterpart instruments just the written lanes.
+BUSTER_INLINE void parse_tree_scatter_ranks(uint32_t* column, __mmask16 live, __m512i ranks, __m512i values)
+{
+#if __has_feature(memory_sanitizer)
+    typedef bool ParseLaneMask __attribute__((ext_vector_type(16)));
+    __builtin_masked_scatter(__builtin_bit_cast(ParseLaneMask, live), (__v16si)ranks, (__v16su)values, column);
+#else
+    _mm512_mask_i32scatter_epi32(column, live, ranks, values, 4);
+#endif
+}
+
 // Whole forests occupy the same [begin, end) in both orders. Derive the columns in that interval
 // alone, including for a tile of the parser or an attested declaration at a nonzero offset.
 static void parse_tree_columns_range(const uint32_t* parents, uint32_t begin, uint32_t end, uint32_t* postorder, uint32_t* positions, uint32_t* ends,
@@ -2829,12 +2841,12 @@ static void parse_tree_columns_range(const uint32_t* parents, uint32_t begin, ui
             _mm512_mask_storeu_epi32(positions + at, live, ranks);
             if (sizes == NULL || borrowed)
             {
-                _mm512_mask_i32scatter_epi32(postorder, live, ranks, tokens, 4);
+                parse_tree_scatter_ranks(postorder, live, ranks, tokens);
             }
             if (sizes != NULL)
             {
                 const __m512i spans = _mm512_sub_epi32(end_tokens, _mm512_maskz_loadu_epi32(live, starts + at));
-                _mm512_mask_i32scatter_epi32(sizes, live, ranks, _mm512_add_epi32(spans, _mm512_set1_epi32(1)), 4);
+                parse_tree_scatter_ranks(sizes, live, ranks, _mm512_add_epi32(spans, _mm512_set1_epi32(1)));
             }
         }
         if (sizes != NULL && !borrowed)
@@ -2843,7 +2855,7 @@ static void parse_tree_columns_range(const uint32_t* parents, uint32_t begin, ui
             {
                 const __mmask16 live = (__mmask16)_bzhi_u32(0xffffu, cut - at < 16 ? cut - at : 16);
                 const __m512i tokens = _mm512_add_epi32(lanes, _mm512_set1_epi32((int32_t)at));
-                _mm512_mask_i32scatter_epi32(postorder, live, _mm512_maskz_loadu_epi32(live, positions + at), tokens, 4);
+                parse_tree_scatter_ranks(postorder, live, _mm512_maskz_loadu_epi32(live, positions + at), tokens);
             }
         }
         begin = cut;
