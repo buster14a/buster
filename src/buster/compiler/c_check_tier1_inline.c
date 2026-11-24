@@ -791,7 +791,8 @@ static IrCheck check_tier1_lower_body(const CheckTier1Lane* lane, const Tier0Fun
 // with promotion in steps[2]), whose function and analysis go to this lane's two arenas of the run
 // (check_tier1_inline_arena); the steps are free after. A body that calls a function that returns twice (#1847) is
 // refused, as LLVM's isInlineViable keeps it: its callers would hold the call without
-// Tier0Function.calls_returns_twice, and its own code is Tier 0's.
+// Tier0Function.calls_returns_twice, and its own code is Tier 0's. So is a body the stack protector guards (#3558): its
+// buffers would reach a caller whose frame Tier 1 doesn't guard, and its own code is Tier 0's.
 static void check_tier1_inline_build(CheckTier1Lane* lane, const CheckTier1Inline* inlining, uint32_t b, bool scalar, bool certify)
 {
     const CheckProgram* program = inlining->program;
@@ -804,7 +805,8 @@ static void check_tier1_inline_build(CheckTier1Lane* lane, const CheckTier1Inlin
     Arena* analyses = check_tier1_inline_arena(lane, 1);
     const uint64_t scratch_mark = scratch->length;
     IrFunction lowered = { 0 };
-    IrCheck check = ir_check(output != 0 && analyses != 0 && !function->calls_returns_twice ? IR_OK : IR_ERROR_UNSUPPORTED, BUSTER_IR_NONE, 0);
+    IrCheck check = ir_check(output != 0 && analyses != 0 && !function->calls_returns_twice && function->stack_protector != BUSTER_TIER0_GUARD_ON ? IR_OK : IR_ERROR_UNSUPPORTED,
+                             BUSTER_IR_NONE, 0);
     if (check.error == IR_OK)
     {
         // As the function's own pipeline lowers it (check_tier1_compile): a vector wider than the target moves whole is taken,

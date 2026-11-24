@@ -92,6 +92,8 @@ static const char* const check_tier1_call_kind_names[CHECK_TIER1_CALL_KIND_COUNT
 #define BUSTER_CHECK_TIER1_NAKED 1u
 // A caller of a function that returns twice (#1847, Tier0Function.calls_returns_twice), which Tier 1 leaves to Tier 0.
 #define BUSTER_CHECK_TIER1_RETURNS_TWICE 2u
+// A function the stack protector guards (#3558, Tier0Function.stack_protector), whose guard Tier 0's frame keeps.
+#define BUSTER_CHECK_TIER1_GUARDED 3u
 #define BUSTER_CHECK_TIER1_ARENA_RESERVE 1u
 #define BUSTER_CHECK_TIER1_ARENA_OUTPUT 2u
 #define BUSTER_CHECK_TIER1_FRAME_PUBLICATION 1u

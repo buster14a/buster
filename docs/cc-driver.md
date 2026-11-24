@@ -168,8 +168,10 @@ and `-Wl,-soname` (or `-h`, `-soname=`, `--soname=`) for its `DT_SONAME`; as in
 Clang's driver it takes precedence over `-static`, `-pie` and `-no-pie`, and
 `-static-pie` over it. Without `-fPIC` its code is `-fPIE`'s, which the writer
 refuses where it reaches a preemptible symbol directly or a thread-local by
-local-exec, as GNU ld refuses Clang's. Stack-protector and control-flow-protection requests
-remain explicit refusals, not ignored security flags. `-S`, `-save-temps`, general object-input
+local-exec, as GNU ld refuses Clang's. `-fstack-protector`, `-fstack-protector-strong`
+and `-fstack-protector-all` guard the code (#3558, [the checker's guide](c-checker.md)'s
+"The stack protector"); control-flow-protection requests remain explicit
+refusals, not ignored security flags. `-S`, `-save-temps`, general object-input
 linking and macro-only forced includes (`-imacros`) are not added here. These
 limits mean **#1113 remains open**; dependency support alone does not make Buster
 a universal drop-in CC for CMake/autotools projects.
