@@ -4311,19 +4311,19 @@ raw logs in
 
 ### The front's profile and redesign (2026-11-25)
 
-Where the direct path's time goes on the same unit, and what the window lexer, the masks' skipper and two copies
-removed from the parser changed; the profile, every step's readings, the scripts and what was measured and not kept
+Where the direct path's time goes on the same unit, and what the window lexer, the masks' skipper, an expansion's
+tokens emitted in one loop, long identifiers through the cache and two copies removed from the parser changed; the profile, every step's readings, the scripts and what was measured and not kept
 are in
 [buster-performance](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/direct-speed-2850-2026-11-24).
 
 | 9700X, `sqlite3.c`, CPU 2 | main `1c5287c3` | this | |
 | --- | ---: | ---: | ---: |
-| the product's `-c`, wall (21 rotated runs) | 18.75 ms | **17.71 ms** | -5.5% |
-| user cycles | 92.5 M | **87.1 M** | -5.9% |
-| mispredicted branches | 1.082 M | **0.959 M** | -11.4% |
-| user instructions | 231.3 M | 234.3 M | +1.3% |
-| lexing and preprocessing (the harness's stage) | 8.41 ms | **7.55 ms** | -10.2% |
-| parsing and generating code | 9.18 ms | 9.19 ms | |
+| the product's `-c`, wall (21 rotated runs) | 18.71 ms | **17.40 ms** | -7.0% |
+| user cycles | 92.5 M | **85.3 M** | -7.8% |
+| mispredicted branches | 1.082 M | **0.962 M** | -11.1% |
+| user instructions | 231.3 M | 229.5 M | -0.8% |
+| lexing and preprocessing (the harness's stage) | 8.41 ms | **7.34 ms** | -12.8% |
+| parsing and generating code | 9.15 ms | 9.26 ms | |
 | object | `ff67ee92...` | the same | |
 
 - **The profile is flat.** On main the pipeline's slots were 28% retired ops, 43% without an op from the front end, 14%
@@ -4333,10 +4333,11 @@ are in
   ceiling of what placing its code can give); `-O2`, `-Os`, alignment and inlining flags (nothing); copying a value a
   field at a time so that no load waits on a store (360 K fewer such loads, 1.2% slower: they are not on the critical
   path); directive lines lexed inside the window (a third of the windows, the same time).
-- **What is left in the front,** by its share of the compile's cycles: the emitter's identifier lookups and the
-  expansion stack's loop (12.6%), the window's lexer (8.6%), the expansion engine (4.6%), the directives' and
-  arguments' reader (4.3%), interning (3.7%: every identifier of more than 16 bytes goes to the table), the skipper
-  (2.3%).
+- **What is left in the front,** by its share of the compile's cycles: the emitter with its identifier lookups
+  (13.2%), the window's lexer (8.3%), the expansion engine (5.1%), the directives' and arguments' reader (4.3%), the
+  skipper (2.5%), interning new names (2.2%). The code generator's stage reads 1% slower here than on main although
+  its source is the same but for the specifiers: its code lands at other addresses, and its time follows by that much
+  between any two builds.
 
 ## Related
 
