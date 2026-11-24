@@ -940,6 +940,35 @@ static __m256i tier1_burs_constant_bits_vector(__m512i value, __m512i width)
     return _mm512_cvtepi64_epi32(bits);
 }
 
+// Which of a function's first 64 slots are frame objects (tier1_select_stack_object), a bit each: eight 16-byte records
+// a step, their sizes and second qwords split by two permutes. The classifier looks a stack address's bit up in a
+// register, where a gather of its record would cost four gathers a block for the one or two lanes most blocks have.
+static uint64_t tier1_burs_slot_objects(const IrFunction* function)
+{
+    const uint32_t count = function->slot_count < 64 ? function->slot_count : 64;
+    const __m512i even = _mm512_setr_epi64(0, 2, 4, 6, 8, 10, 12, 14);
+    const __m512i odd = _mm512_setr_epi64(1, 3, 5, 7, 9, 11, 13, 15);
+    uint64_t objects = 0;
+    for (uint32_t first = 0; first < count; first += 8)
+    {
+        const uint32_t remaining = count - first;
+        const uint32_t live = remaining >= 8 ? 0xffu : (1u << remaining) - 1;
+        // Each record's two qwords: record r's are qwords 2r and 2r + 1 of the step's 128 bytes.
+        const uint32_t qwords = _pdep_u32(live, 0x5555u) * 3u;
+        const IrSlot* low_records = function->slots + first;
+        const IrSlot* high_records = remaining > 4 ? function->slots + first + 4 : low_records;
+        const __m512i low = _mm512_maskz_loadu_epi64((__mmask8)qwords, low_records);
+        const __m512i high = _mm512_maskz_loadu_epi64((__mmask8)(qwords >> 8), high_records);
+        const __m512i size = _mm512_permutex2var_epi64(low, even, high);
+        const __m512i second = _mm512_permutex2var_epi64(low, odd, high);
+        const __mmask8 sized = _mm512_cmple_epu64_mask(size, _mm512_set1_epi64((long long)BUSTER_TIER1_SELECT_MAX_OBJECT_BYTES));
+        const __mmask8 aligned = _mm512_cmple_epu64_mask(_mm512_and_si512(second, _mm512_set1_epi64(0xffffffff)), _mm512_set1_epi64(BUSTER_TIER1_SELECT_MAX_OBJECT_ALIGNMENT));
+        const __mmask8 ordinary = _mm512_testn_epi64_mask(_mm512_srli_epi64(second, 40), _mm512_set1_epi64(BUSTER_IR_SLOT_OVERFLOW_AREA));
+        objects |= (uint64_t)(live & sized & aligned & ordinary) << first;
+    }
+    return objects;
+}
+
 // The nodes' operators and visible children, 16 at a time: what tier1_select_candidates would make of each. Each node's operation,
 // type and flags go first into one 32-bit word (`words`, `count` of them), whose gathers then stay in the columns; the
 // children's columns are gathered by their indices where those are nodes, a frame object's slot record and an address's
@@ -973,6 +1002,12 @@ static void tier1_burs_classify_vector(const Tier1SelectForest* forest, const ui
     const uint32_t narrows = (1u << IR_I1) | (1u << IR_I8) | (1u << IR_I16);
     const uint32_t compared = (1u << IR_I32) | (1u << IR_I64) | (1u << IR_PTR);
     const uint32_t floats = (1u << IR_F32) | (1u << IR_F64);
+    // Frame objects among the first 64 slots, as two dwords' bits: a stack address's lane shifts both by its slot, and a
+    // shift of 32 or more (the other dword's slots) gives 0.
+    const bool few_slots = function->slot_count <= 64;
+    const uint64_t slot_objects = tier1_burs_slot_objects(function);
+    const __m512i objects_low = _mm512_set1_epi32((int)(uint32_t)slot_objects);
+    const __m512i objects_high = _mm512_set1_epi32((int)(uint32_t)(slot_objects >> 32));
     for (uint32_t first = 0; first < count; first += 16)
     {
         const uint32_t remaining = count - first;
@@ -1177,11 +1212,19 @@ static void tier1_burs_classify_vector(const Tier1SelectForest* forest, const ui
                                _mm512_cmpeq_epi32_mask(_mm512_and_si512(a_word, byte), _mm512_set1_epi32(IR_FCMP));
         result = _mm512_mask_mov_epi32(result, copy, _mm512_set1_epi32(TIER1_BURS_OP_COPY_TRUTH));
         // A frame object's address (tier1_select_stack_object): a slot of the function's, not the variadic overflow
-        // area, within the planner's object bounds; SLOT_X in the entry block. Its record's size, alignment and flags
-        // are gathered from the slot's 16 bytes.
+        // area, within the planner's object bounds; SLOT_X in the entry block. With up to 64 slots its bit is
+        // tier1_burs_slot_objects'; past them its record's size, alignment and flags are gathered from the slot's 16 bytes.
         const __mmask16 slot_address = _mm512_mask_cmplt_epu32_mask(active & _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_STACK_ADDR)), a,
             _mm512_set1_epi32((int)function->slot_count));
-        if (slot_address != 0)
+        if (few_slots)
+        {
+            const __m512i bits = _mm512_or_si512(_mm512_srlv_epi32(objects_low, a), _mm512_srlv_epi32(objects_high, _mm512_sub_epi32(a, _mm512_set1_epi32(32))));
+            const __mmask16 object = _mm512_mask_test_epi32_mask(slot_address, bits, _mm512_set1_epi32(1));
+            const __mmask16 entry = object & _mm512_cmpeq_epi32_mask(block, _mm512_setzero_si512());
+            result = _mm512_mask_mov_epi32(result, object, _mm512_set1_epi32(TIER1_BURS_OP_SLOT));
+            result = _mm512_mask_mov_epi32(result, entry, _mm512_set1_epi32(TIER1_BURS_OP_SLOT_X));
+        }
+        else if (slot_address != 0)
         {
             const __m512i zero = _mm512_setzero_si512();
             const __m512i record = _mm512_slli_epi32(a, 1);

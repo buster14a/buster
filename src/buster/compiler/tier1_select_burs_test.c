@@ -509,7 +509,8 @@ static void tier1_select_test_burs_addresses(Tier1SelectTest* test)
 // tier1_select_stack_object tells apart (an object, the variadic overflow area, a size past the planner's bound, an
 // alignment past it), so that each class (SLOT_X, SLOT, REG) occurs; the per-function check compares each with the
 // definition.
-static void tier1_select_test_burs_slots(Tier1SelectTest* test)
+// `slot_count` slots (at least 4): the classifier looks the first 64 up in a register and gathers past them.
+static void tier1_select_test_burs_slots(Tier1SelectTest* test, uint32_t slot_count)
 {
     Arena text = arena_reserve(UINT64_C(1) << 20);
     Arena input = arena_reserve(UINT64_C(1) << 24);
@@ -520,30 +521,30 @@ static void tier1_select_test_burs_slots(Tier1SelectTest* test)
     bool valid = source != 0 && input.base != 0 && scratch.base != 0;
     if (valid)
     {
-        // A variadic definition (tests/ir/aggregates.ir's variadic line), whose one overflow area is slot 0; slots 1 to 20 an
-        // object, a size past the bound and an alignment past it in turn.
+        // A variadic definition (tests/ir/aggregates.ir's variadic line), whose one overflow area is slot 0; the slots
+        // after it an object, a size past the bound and an alignment past it in turn; the last two at the bounds.
         length += (uint64_t)snprintf(source + length, room - length,
                                      "function (ptr, i64) -> ptr {\n  variadic call(8,4,2,0,ret(1,0,8,0,2,255,255))\n  slot $0 size=0 align=16 type=void flags=0x11\n");
-        for (uint32_t k = 1; k <= 20; k += 1)
+        for (uint32_t k = 1; k + 2 < slot_count; k += 1)
         {
             const uint32_t kind = k % 3;
             length += (uint64_t)snprintf(source + length, room - length, "  slot $%u size=%" PRIu64 " align=%u type=void flags=0x01\n", k,
                                          kind == 1 ? BUSTER_TIER1_SELECT_MAX_OBJECT_BYTES + 8 : (uint64_t)16, kind == 2 ? BUSTER_TIER1_SELECT_MAX_OBJECT_ALIGNMENT * 2u : 8u);
         }
         // The bounds themselves, which are objects: exactly the largest size and exactly the largest alignment.
-        length += (uint64_t)snprintf(source + length, room - length, "  slot $21 size=%" PRIu64 " align=8 type=void flags=0x01\n  slot $22 size=16 align=%u type=void flags=0x01\n",
-                                     BUSTER_TIER1_SELECT_MAX_OBJECT_BYTES, BUSTER_TIER1_SELECT_MAX_OBJECT_ALIGNMENT);
+        length += (uint64_t)snprintf(source + length, room - length, "  slot $%u size=%" PRIu64 " align=8 type=void flags=0x01\n  slot $%u size=16 align=%u type=void flags=0x01\n",
+                                     slot_count - 2, BUSTER_TIER1_SELECT_MAX_OBJECT_BYTES, slot_count - 1, BUSTER_TIER1_SELECT_MAX_OBJECT_ALIGNMENT);
         length += (uint64_t)snprintf(source + length, room - length, "b0:\n  %%0 = param.ptr 0\n  %%1 = param.i64 1\n");
-        for (uint32_t k = 0; k <= 22; k += 1)
+        for (uint32_t k = 0; k < slot_count; k += 1)
         {
             length += (uint64_t)snprintf(source + length, room - length, "  %%%u = stack_addr.ptr $%u\n", k + 2, k);
         }
-        length += (uint64_t)snprintf(source + length, room - length, "  %%25 = br.void b1\nb1:\n");
-        for (uint32_t k = 0; k <= 22; k += 1)
+        length += (uint64_t)snprintf(source + length, room - length, "  %%%u = br.void b1\nb1:\n", slot_count + 2);
+        for (uint32_t k = 0; k < slot_count; k += 1)
         {
-            length += (uint64_t)snprintf(source + length, room - length, "  %%%u = stack_addr.ptr $%u\n", k + 26, k);
+            length += (uint64_t)snprintf(source + length, room - length, "  %%%u = stack_addr.ptr $%u\n", k + slot_count + 3, k);
         }
-        length += (uint64_t)snprintf(source + length, room - length, "  %%49 = ret.void %%0\n}\n");
+        length += (uint64_t)snprintf(source + length, room - length, "  %%%u = ret.void %%0\n}\n", 2 * slot_count + 3);
         valid = length < room;
     }
     IrFunction function = { 0 };
@@ -561,8 +562,10 @@ static void tier1_select_test_burs_slots(Tier1SelectTest* test)
             others += function.op[node] == IR_STACK_ADDR && !tier1_select_stack_object(&function, function.a[node]);
         }
     }
-    tier1_select_test_expect(test, check.functions == 1 && check.mismatches == 0 && check.addresses == 46 && objects == 16 && others == 30,
-                             "frame objects' addresses: every class its slot's definition's, in both blocks");
+    // Objects: every third of slots 1 to slot_count - 3, and the two at the bounds; in both blocks.
+    const uint32_t object_slots = (slot_count - 3) / 3 + 2;
+    tier1_select_test_expect(test, check.functions == 1 && check.mismatches == 0 && check.addresses == 2 * slot_count && objects == 2 * object_slots && others == 2 * (slot_count - object_slots),
+                             "frame objects' addresses: every class its slot's definition's, in both blocks, below 64 slots and past them");
     arena_release(&scratch);
     arena_release(&input);
     arena_release(&text);
@@ -649,7 +652,11 @@ static void tier1_select_test_burs(Tier1SelectTest* test)
     tier1_select_test_burs_tables(test);
     tier1_select_test_burs_fixtures(test);
     tier1_select_test_burs_addresses(test);
-    tier1_select_test_burs_slots(test);
+    static const uint32_t slot_counts[] = { 23, 32, 33, 63, 64, 65, 100 };
+    for (uint32_t s = 0; s < sizeof(slot_counts) / sizeof(slot_counts[0]); s += 1)
+    {
+        tier1_select_test_burs_slots(test, slot_counts[s]);
+    }
     tier1_select_test_burs_edges(test);
     tier1_select_test_burs_links(test);
 }
