@@ -760,8 +760,7 @@ each later function a pass later), so a pass reads little. Only alignments,
 LEB128s and short branches that may grow change size. A pass reads those
 events' 32-byte records alone, as GNU as's frags hold the bytes between two
 variable parts. A label is its anchor event's end plus a fixed distance.
-Fragment offsets are written once, after the passes, by a prefix sum (sixteen
-at a time on the vector path). On a cloud host, not the 9700X, layout of those
+Fragment offsets are written once, after the passes, by a running sum. On a cloud host, not the 9700X, layout of those
 functions took 0.29 s against the round-based layout's 0.13 s; GNU as took
 1.1 s for the whole file. The `mixed` workload of `benchmark-assembler`, where
 no branch grows, lays out in the same time as before. A version that skipped
@@ -974,7 +973,9 @@ encoder calls remain independent; the default-path improvement is not a claim
 that every scalar workload improved.
 
 Separate `--only vector` runs, again three processes per cell, distinguish
-sustained work from work immediately following 100 ms of scalar assembly:
+sustained work from work immediately following 100 ms of scalar assembly
+(`--only` and `--after-scalar` were removed with the scalar paths in #2924;
+these tables record their measurements as they were):
 
 | Workload/state | Baseline ms [range] | Optimized ms [range] |
 | --- | ---: | ---: |
@@ -1088,7 +1089,7 @@ baseline and candidate; waiting CI and other owners run between invocations.
 There are three processes per workload and variant, each with 21 internal
 passes. The second round reverses baseline/candidate order. The mixed workload
 also runs `--external`; separate `--only vector` runs measure sustained work
-and work immediately after `--after-scalar 100`. Values are medians of the
+and work immediately after `--after-scalar 100` (flags since removed, #2924). Values are medians of the
 three process medians, with their full ranges in brackets; no samples are
 discarded. Input sizes and instruction counts match the earlier tables.
 
@@ -1159,7 +1160,8 @@ build has SHA-256
 
 Following the [profiling guide](profiling.md), a further 18 invocations check
 the integration: three processes each for mixed input with `--external` and
-SIMD input, plus three per mixed/SIMD and sustained/after-scalar cell. Each
+SIMD input, plus three per mixed/SIMD and sustained/after-scalar cell (the
+`--after-scalar` flag since removed, #2924). Each
 process uses 21 passes, CPU 2 and its own lock. The middle round reverses the
 workload order. This is a focused comparison with the frozen corrected
 candidate; it does not rerun registers or AT&T or replace the controlled
@@ -1220,7 +1222,7 @@ Disposition: retain shared form matching, cached register classification and
 direct Link output. `.S` text materialization and per-fragment layout are
 candidates only with producer + PP printing + lex/match/layout + object costs;
 a faster matcher alone cannot justify another token representation.
-`test-assembler --cross-check` checks scalar/vector/GNU as bytes and execution;
+`test-assembler --cross-check` checks bytes against GNU as's and execution;
 `benchmark-assembler` includes its documented phase/initialization/memory costs.
 The #233 compatibility corpus checks compiler-generated assembly through the
 same real producer/writer boundary, including exceptional syntax, capacities
@@ -1235,9 +1237,9 @@ It targets baseline x86-64, disables CET and PIC/PIE for this corpus, and asks
 Clang for GNU-compatible spelling with `-fno-integrated-as`. LLVM-only address
 significance annotations have separate acceptance/refusal fixtures.
 
-Every case requires byte-identical scalar/vector objects, GNU-as section
-properties/bytes/symbol/relocation comparison, and successful execution of all
-three objects linked to independently calculated results. The unwind callback
+Every case requires GNU-as section properties/bytes/symbol/relocation
+comparison and successful execution of both objects (ours and GNU as's) linked
+to independently calculated results. The unwind callback
 must identify both the assembled `corpus_call` and the caller's `main` by
 `_Unwind_GetRegionStart`, as well as reach the expected frame depth. GNU
 relocation records are sorted by offset using the existing importer sorter;
@@ -1323,7 +1325,7 @@ support for every instruction, assembler extension or CFI augmentation.
 
 ### Section-group regression coverage (#1268)
 
-`assembler_groups_test.c` checks scalar/vector identity, group headers and
+`assembler_groups_test.c` checks group headers and
 signature bindings, duplicate `.debug_macro` sections, group relocation
 membership, mergeable strings, TLS zero-fill, empty sections and malformed
 group metadata. Ninety-six same-name groups exercise hash-table growth and

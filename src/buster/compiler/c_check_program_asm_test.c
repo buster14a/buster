@@ -56,7 +56,7 @@ static void check_test_program_asm_room(CheckTest* test)
         const CheckProgramOptions options = { .initializers = &plans, .asms = &asms, .identifiers = &identifiers, .scalar = path == 0, .predefines = &predefines };
         ready = ready && check_program(&program, &parser, &input, &stream, &types.table, options, &output, &scratch) && input.asm_count == 6;
         char description[256];
-        snprintf(description, sizeof(description), "asm room, %s: the program is ready", path == 0 ? "scalar" : "vector");
+        snprintf(description, sizeof(description), "asm room, %s: the program is ready", path == 0 ? "program by the checker's scalar path" : "program by its vector path");
         check_test_expect(test, ready, description);
         const uint64_t output_mark = output.length;
         const uint64_t scratch_mark = scratch.length;
@@ -70,12 +70,12 @@ static void check_test_program_asm_room(CheckTest* test)
         {
             helpers = (CheckProgramHelpers){ 0 };
             output.capacity = output_mark + room;
-            done = check_program_asm_plan(&planned, &helpers, &program, path == 0, &output, &scratch);
+            done = check_program_asm_plan(&planned, &helpers, &program, &output, &scratch);
             output.capacity = capacity;
             failures += !done;
             kept &= done || (planned.status == CHECK_PROGRAM_RESOURCE && output.length == output_mark && scratch.length == scratch_mark && helpers.count == 0);
         }
-        snprintf(description, sizeof(description), "asm room, %s: %u runs without room fail with the arenas as they were, then one plans", path == 0 ? "scalar" : "vector",
+        snprintf(description, sizeof(description), "asm room, %s: %u runs without room fail with the arenas as they were, then one plans", path == 0 ? "program by the checker's scalar path" : "program by its vector path",
                  failures);
         check_test_expect(test, ready && done && kept && failures != 0, description);
         const bool plans_right = done && planned.plans != NULL && planned.plans[0].reason == NULL && planned.plans[0].inlined &&
@@ -86,7 +86,7 @@ static void check_test_program_asm_room(CheckTest* test)
                                  planned.plans[4].inlined && planned.plans[4].helper == BUSTER_CHECK_NONE && planned.plans[4].label_count == 0 && planned.plans[5].reason == NULL &&
                                  planned.plans[5].inlined && planned.plans[5].helper == BUSTER_CHECK_NONE && planned.plans[5].inline_branch_count == 2 && helpers.count == 1;
         snprintf(description, sizeof(description), "asm room, %s: the x87 statements are asm bodies, the __int128 operand is refused by name, rorx has a helper, the private label's and the asm goto's statements are asm bodies",
-                 path == 0 ? "scalar" : "vector");
+                 path == 0 ? "program by the checker's scalar path" : "program by its vector path");
         check_test_expect(test, plans_right, description);
         parse_release(&parser);
         check_test_types_close(&types);
@@ -149,9 +149,9 @@ static void check_test_program_asm_kinds(CheckTest* test)
         ready = ready && check_program(&program, &parser, &input, &stream, &types.table, options, &output, &scratch) && input.asm_count == STATEMENTS;
         CheckProgramAsms planned = { 0 };
         CheckProgramHelpers helpers = { 0 };
-        ready = ready && check_program_asm_plan(&planned, &helpers, &program, path == 0, &output, &scratch) && planned.plans != NULL;
+        ready = ready && check_program_asm_plan(&planned, &helpers, &program, &output, &scratch) && planned.plans != NULL;
         char description[256];
-        snprintf(description, sizeof(description), "asm kinds, %s: the statements are planned, with no helper (%u)", path == 0 ? "scalar" : "vector", helpers.count);
+        snprintf(description, sizeof(description), "asm kinds, %s: the statements are planned, with no helper (%u)", path == 0 ? "program by the checker's scalar path" : "program by its vector path", helpers.count);
         check_test_expect(test, ready && helpers.count == 0, description);
         for (uint32_t s = 0; ready && s < STATEMENTS; s += 1)
         {
@@ -160,7 +160,7 @@ static void check_test_program_asm_kinds(CheckTest* test)
             const bool passes = s == 1;
             bool right = plan->planned && plan->reason == NULL && plan->inlined && plan->helper == BUSTER_CHECK_NONE && plan->inline_passed == passes;
             right = right && (s != MASK || ((plan->inline_masks & 0xfe) != 0 && (plan->inline_touched & (1u << X86_REGISTER_RAX)) != 0));
-            snprintf(description, sizeof(description), "asm kinds, %s: statement %u is an asm body%s", path == 0 ? "scalar" : "vector", s,
+            snprintf(description, sizeof(description), "asm kinds, %s: statement %u is an asm body%s", path == 0 ? "program by the checker's scalar path" : "program by its vector path", s,
                      passes ? " of its call's arguments" : " that loads its block");
             check_test_expect(test, right, description);
         }
@@ -255,9 +255,9 @@ static void check_test_program_asm_placement(CheckTest* test)
         ready = ready && check_program(&program, &parser, &input, &stream, &types.table, options, &output, &scratch) && input.asm_count == PLACED + KEPT;
         CheckProgramAsms planned = { 0 };
         CheckProgramHelpers helpers = { 0 };
-        ready = ready && check_program_asm_plan(&planned, &helpers, &program, path == 0, &output, &scratch) && planned.plans != NULL;
+        ready = ready && check_program_asm_plan(&planned, &helpers, &program, &output, &scratch) && planned.plans != NULL;
         char description[256];
-        snprintf(description, sizeof(description), "asm placement, %s: the statements are planned", path == 0 ? "scalar" : "vector");
+        snprintf(description, sizeof(description), "asm placement, %s: the statements are planned", path == 0 ? "program by the checker's scalar path" : "program by its vector path");
         check_test_expect(test, ready, description);
         for (uint32_t s = 0; ready && s < PLACED + KEPT; s += 1)
         {
@@ -298,7 +298,7 @@ static void check_test_program_asm_placement(CheckTest* test)
                 right = row->record_count == record_counts[s] && row->operand_count == operand_counts[s] && row->records[0].form == first_forms[s] &&
                         row->result_class == BUSTER_TYPED_CLASS_VOID && tier0_operation_valid(row);
             }
-            snprintf(description, sizeof(description), "asm placement, %s: statement %u %s", path == 0 ? "scalar" : "vector", s,
+            snprintf(description, sizeof(description), "asm placement, %s: statement %u %s", path == 0 ? "program by the checker's scalar path" : "program by its vector path", s,
                      placed ? "is a row of its records in its caller" : helped ? "keeps its helper" : "is an asm body in its caller");
             check_test_expect(test, right, description);
             for (uint32_t r = 0; !right && row != NULL && r < row->record_count; r += 1)
@@ -332,9 +332,9 @@ static void check_test_program_asm_placement(CheckTest* test)
                                xadd->records[0].reg == BUSTER_TIER0_ROLE_INTEGER(1) && xadd->records[0].rm == BUSTER_TIER0_ROLE_INTEGER(2) &&
                                xadd->operand_classes[2] == BUSTER_TYPED_CLASS_U64 && widened->operand_classes[1] == BUSTER_TYPED_CLASS_I64 &&
                                widened->records[0].immediate == 7;
-            snprintf(description, sizeof(description), "asm placement, %s: the rows' roles are the operands', scratch's and stores' as planned", path == 0 ? "scalar" : "vector");
+            snprintf(description, sizeof(description), "asm placement, %s: the rows' roles are the operands', scratch's and stores' as planned", path == 0 ? "program by the checker's scalar path" : "program by its vector path");
             check_test_expect(test, roles, description);
-            snprintf(description, sizeof(description), "asm placement, %s: no helper, of %u (the named label's is an asm body too)", path == 0 ? "scalar" : "vector", helpers.count);
+            snprintf(description, sizeof(description), "asm placement, %s: no helper, of %u (the named label's is an asm body too)", path == 0 ? "program by the checker's scalar path" : "program by its vector path", helpers.count);
             check_test_expect(test, helpers.count == 0, description);
         }
         parse_release(&parser);

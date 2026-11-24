@@ -20696,7 +20696,7 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
         valid = false;
     }
     // The asm statements' helpers after the builtins', before the runtime's symbols, which come after every helper's.
-    if (valid && !check_program_asm_plan(&lowered->asms, &lowered->helpers, program, BUSTER_SCALAR_PATH(scalar), output, scratch))
+    if (valid && !check_program_asm_plan(&lowered->asms, &lowered->helpers, program, output, scratch))
     {
         lowered->status = lowered->asms.status;
         lowered->token = lowered->asms.token;
