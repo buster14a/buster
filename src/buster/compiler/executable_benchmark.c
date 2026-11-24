@@ -8,7 +8,7 @@
 //
 // Usage: build/compiler benchmark-executable [--directory PATH] [--functions LIST] [--lanes N] [--seed N]
 //                                            [--only kernels|hash|links|dynamic|static|static-pie|shared]
-//                                            [--tls control|general|local|imported (with --only dynamic or shared)] [--exact]
+//                                            [--tls control|general|local|imported (with --only dynamic or shared)]
 //                                            [--after-scalar MS]
 //
 // Run it under the 9700X's lock pinned to one CPU (taskset -c 2 ...), or with --lanes N to N CPUs, one per core
@@ -484,8 +484,8 @@ static void executable_benchmark_program_kernel(Link* link, uint64_t got)
 }
 
 // The unwind tables' passes over a generated program's .eh_frame atoms, as executable_write runs them on one lane, the
-// program written once so that its references are filled: the FDEs counted by the vector path and by the exact walk,
-// then their table entries both ways; and the sorted check of the table, then the sort the exact twin always does.
+// program written once so that its references are filled: the FDEs counted by the vector path and by the walk, its
+// fallback for an atom it can't read, then their table entries both ways; and the sorted check of the table.
 static void executable_benchmark_unwind(Link* link, Arena* arena)
 {
     uint64_t fdes = 0;
@@ -494,7 +494,7 @@ static void executable_benchmark_unwind(Link* link, Arena* arena)
     {
         const bool frames = link->atoms.class[atom] == BUSTER_LINK_CLASS_EH_FRAME;
         bool walked = false;
-        const uint32_t count = frames ? executable_eh_frame(link, atom, true, &walked) : 0;
+        const uint32_t count = frames ? executable_eh_frame(link, atom, &walked) : 0;
         fdes += count != UINT32_MAX ? count : 0;
         frame_atoms += frames ? 1 : 0;
     }
@@ -504,7 +504,7 @@ static void executable_benchmark_unwind(Link* link, Arena* arena)
     static const char* const names[] = { "count, vector", "count, walk", "entries, vector", "entries, walk" };
     for (uint32_t way = 0; table != 0 && way < BUSTER_ARRAY_LENGTH(names); way += 1)
     {
-        const bool exact = way % 2 == 1;
+        const bool walk = way % 2 == 1;
         const bool entries = way >= 2;
         uint64_t times[BUSTER_EXECUTABLE_BENCHMARK_RUNS];
         uint64_t found = 0;
@@ -525,9 +525,9 @@ static void executable_benchmark_unwind(Link* link, Arena* arena)
                         // generated program's), or by the walk.
                         const uint64_t address = link->atoms.address[atom];
                         bool walked = false;
-                        const uint32_t count = !entries ? executable_eh_frame(link, atom, exact, &walked)
-                                               : !exact ? (executable_eh_frame_entries(link, atom, table + 2 * found, 0, address) ? link->atoms.fixup_count[atom] : 0)
-                                                        : executable_eh_frame_walk(link, atom, table + 2 * found, 0, address);
+                        const uint32_t count = !entries ? (!walk ? executable_eh_frame(link, atom, &walked) : executable_eh_frame_walk(link, atom, 0, 0, 0))
+                                               : !walk ? (executable_eh_frame_entries(link, atom, table + 2 * found, 0, address) ? link->atoms.fixup_count[atom] : 0)
+                                                       : executable_eh_frame_walk(link, atom, table + 2 * found, 0, address);
                         found += count != UINT32_MAX ? count : 0;
                     }
                 }
@@ -537,7 +537,7 @@ static void executable_benchmark_unwind(Link* link, Arena* arena)
         printf("  unwind tables, %-16s %8.3f ns per FDE (%llu FDEs in %llu atoms)%s\n", names[way], executable_benchmark_median(times, BUSTER_EXECUTABLE_BENCHMARK_RUNS) / (double)(fdes * repeats),
                (unsigned long long)fdes, (unsigned long long)frame_atoms, found == fdes ? "" : "  A DIFFERENT COUNT");
     }
-    for (uint32_t exact = 0; table != 0 && exact < 2; exact += 1)
+    if (table != 0)
     {
         uint64_t times[BUSTER_EXECUTABLE_BENCHMARK_RUNS];
         bool in_order = false;
@@ -545,11 +545,11 @@ static void executable_benchmark_unwind(Link* link, Arena* arena)
         {
             const uint64_t length = arena->length;
             const uint64_t begin = executable_now();
-            executable_eh_frame_sort(bytes, fdes, exact != 0, arena, &in_order);
+            executable_eh_frame_sort(bytes, fdes, arena, &in_order);
             times[run] = executable_now() - begin;
             arena_pop_to(arena, length);
         }
-        printf("  unwind tables, %-16s %8.3f ns per FDE (%s)\n", exact != 0 ? "sorted" : "sorted check", executable_benchmark_median(times, BUSTER_EXECUTABLE_BENCHMARK_RUNS) / (double)fdes,
+        printf("  unwind tables, %-16s %8.3f ns per FDE (%s)\n", "sorted check", executable_benchmark_median(times, BUSTER_EXECUTABLE_BENCHMARK_RUNS) / (double)fdes,
                in_order ? "in order" : "out of order");
     }
     arena_pop_to(arena, mark);
@@ -985,7 +985,7 @@ static bool executable_benchmark_tls_relaxed(const Link* link, const uint8_t* fi
 // (executable_benchmark_tls_symbols): a shared library keeps their accesses, and a dynamic PIE relaxes them, which
 // rewrites the probes' bytes so that a write over them again would refuse them, so each write of one starts from
 // binding's bytes, put back outside the time (ExecutableBenchmarkWrite.restore).
-static bool executable_benchmark_link(const char* directory, uint32_t functions, uint32_t lanes, uint64_t seed, const Runtime* runtime, const char* tls, bool exact, uint64_t after_scalar)
+static bool executable_benchmark_link(const char* directory, uint32_t functions, uint32_t lanes, uint64_t seed, const Runtime* runtime, const char* tls, uint64_t after_scalar)
 {
     const bool static_runtime = runtime != 0 && runtime_kind_is_static(runtime->kind);
     const bool pie = runtime != 0 && runtime->kind == RUNTIME_KIND_STATIC_PIE;
@@ -1073,7 +1073,6 @@ static bool executable_benchmark_link(const char* directory, uint32_t functions,
     ExecutableBenchmarkWrite write = {
         .link = &program.link,
         .options = {
-            .exact = exact,
             .path = {
                 .pointer = path,
                 .length = strlen(path),
@@ -1163,8 +1162,8 @@ static bool executable_benchmark_link(const char* directory, uint32_t functions,
     {
         result = executable_benchmark_tls_runs(path, functions);
         const uint32_t objects = functions < BUSTER_EXECUTABLE_BENCHMARK_TLS_OBJECTS ? functions : BUSTER_EXECUTABLE_BENCHMARK_TLS_OBJECTS;
-        printf("  %s-dynamic TLS: %u callable probes and distinct symbols, %u backing objects, %s path, %s\n", tls, functions, objects,
-               exact ? "exact" : "vector", result ? "all results checked" : "failed");
+        printf("  %s-dynamic TLS: %u callable probes and distinct symbols, %u backing objects, %s\n", tls, functions, objects,
+               result ? "all results checked" : "failed");
     }
     // The floor, from the file just written.
     uint8_t* bytes = result ? executable_benchmark_map(size + 1) : 0;
@@ -1177,9 +1176,9 @@ static bool executable_benchmark_link(const char* directory, uint32_t functions,
     if (result && relaxes)
     {
         result = executable_benchmark_tls_relaxed(&program.link, bytes, size, tls_first, functions, local, imported, control);
-        printf("  %s: %u %s, %s path, %s\n", tls, functions,
+        printf("  %s: %u %s, %s\n", tls, functions,
                control ? "probes without TLS, none rewritten" : imported ? "accesses relaxed to initial-exec through errno's GOT slot" : "accesses relaxed to local-exec",
-               exact ? "exact" : "vector", result ? "every probe checked against its target" : "failed");
+               result ? "every probe checked against its target" : "failed");
     }
     for (uint32_t place = 0; result && place < 2; place += 1)
     {
@@ -1238,7 +1237,6 @@ int run_executable_benchmark(int argc, char** argv)
     uint64_t after_scalar = 0;
     const char* only = 0;
     const char* tls = 0;
-    bool exact = false;
     bool valid = true;
     for (int i = 1; i < argc; i += 1)
     {
@@ -1287,10 +1285,6 @@ int run_executable_benchmark(int argc, char** argv)
             valid = valid && (strcmp(tls, "general") == 0 || strcmp(tls, "local") == 0 || strcmp(tls, "imported") == 0 || strcmp(tls, "control") == 0);
             i += 1;
         }
-        else if (strcmp(argv[i], "--exact") == 0)
-        {
-            exact = true;
-        }
         else if (strcmp(argv[i], "--after-scalar") == 0 && i + 1 < argc)
         {
             valid = valid && executable_benchmark_parse_u64(argv[i + 1], &after_scalar) && after_scalar <= 1000;
@@ -1313,7 +1307,7 @@ int run_executable_benchmark(int argc, char** argv)
     {
         fprintf(stderr, "usage: benchmark-executable [--directory PATH] [--functions LIST] [--lanes N] [--seed N] [--only "
                         "kernels|hash|links|dynamic|static|static-pie|shared] [--tls control|general|local|imported (with --only dynamic, or general|local "
-                        "with --only shared)] [--exact] [--after-scalar MS]\n");
+                        "with --only shared)] [--after-scalar MS]\n");
     }
     else if (writes && !started)
     {
@@ -1345,7 +1339,7 @@ int run_executable_benchmark(int argc, char** argv)
         }
         for (uint32_t i = 0; (only == 0 || strcmp(only, "links") == 0) && i < program_count; i += 1)
         {
-            passed = executable_benchmark_link(directory, functions[i], (uint32_t)lanes, seed, 0, 0, exact, after_scalar) && passed;
+            passed = executable_benchmark_link(directory, functions[i], (uint32_t)lanes, seed, 0, 0, after_scalar) && passed;
         }
         // The same sizes as dynamic PIEs, against the system's runtime.
         Runtime runtime;
@@ -1363,7 +1357,7 @@ int run_executable_benchmark(int argc, char** argv)
             const bool runs = tls == 0 || (tls_modes[mode] != 0 && strcmp(tls_modes[mode], tls) == 0);
             for (uint32_t i = 0; runs && i < program_count; i += 1)
             {
-                passed = executable_benchmark_link(directory, functions[i], (uint32_t)lanes, seed, &runtime, tls_modes[mode], exact, after_scalar) && passed;
+                passed = executable_benchmark_link(directory, functions[i], (uint32_t)lanes, seed, &runtime, tls_modes[mode], after_scalar) && passed;
             }
         }
         if (dynamic)
@@ -1385,7 +1379,7 @@ int run_executable_benchmark(int argc, char** argv)
             }
             for (uint32_t i = 0; statics && static_imported == RUNTIME_ERROR_NONE && i < program_count; i += 1)
             {
-                passed = executable_benchmark_link(directory, functions[i], (uint32_t)lanes, seed, &static_runtime, 0, exact, after_scalar) && passed;
+                passed = executable_benchmark_link(directory, functions[i], (uint32_t)lanes, seed, &static_runtime, 0, after_scalar) && passed;
             }
             if (statics)
             {
@@ -1403,7 +1397,7 @@ int run_executable_benchmark(int argc, char** argv)
         }
         for (uint32_t i = 0; libraries && shared_imported == RUNTIME_ERROR_NONE && i < program_count; i += 1)
         {
-            passed = executable_benchmark_link(directory, functions[i], (uint32_t)lanes, seed, &shared_runtime, tls, exact, after_scalar) && passed;
+            passed = executable_benchmark_link(directory, functions[i], (uint32_t)lanes, seed, &shared_runtime, tls, after_scalar) && passed;
         }
         if (libraries)
         {

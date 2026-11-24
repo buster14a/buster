@@ -15,8 +15,8 @@
 //
 // Each program is bound against the system's static runtime (runtime_import_static) by bind.c and written by
 // executable_write as a static executable with groups of 1, 2, 3 and 8 lanes, each time from zeroed fields over the
-// last file scribbled over (executable_test_reset) and every other time over poisoned scratch memory, then by the
-// writer's exact twins with 1 and 8 lanes: the files must be byte-identical. Each file is read back and checked by the
+// last file scribbled over (executable_test_reset) and every other time over poisoned scratch memory, then again
+// with 1 and 8 lanes: the files must be byte-identical. Each file is read back and checked by the
 // test's own rules (static_test_structure):
 //   - the headers: ET_EXEC from _start, no PT_INTERP or PT_DYNAMIC, a PT_NOTE with crt1.o's ABI note, and PT_TLS over
 //     .tdata and .tbss;
@@ -47,7 +47,7 @@
 //   - Refusals: assembly with a call of __tls_get_addr outside an access (refused naming the symbol), a general-dynamic
 //     access without its prefixes (its fixup), a pointer to an absolute symbol farther than int32 from the image's
 //     base (the symbol) and a lea of one whose offset from the base fits int32 but not its distance from the lea (its
-//     fixup), each refused alike by every lane count and by the exact twins, without an output; and a lane short of
+//     fixup), each refused alike by every lane count, without an output; and a lane short of
 //     scratch memory (lane 0 of 1 and of 8 lanes, the last of 2 and of 8), with which every write that fails must fail
 //     with EXECUTABLE_ERROR_MEMORY and no output, and one with room enough must run.
 // With --cross-check, which needs cc with lld, each compiled program is linked by cc -static -fuse-ld=lld too, which
@@ -125,7 +125,7 @@ static uint64_t static_test_base(bool pie)
 // Writes a link bound against the static runtime to `path` as a static executable with a group of `lanes` lanes, from
 // _start, with dynamic_static_inputs's inputs, or against the static PIE's runtime as a static PIE, with
 // dynamic_static_pie_inputs's: whether executable_write succeeded, and its result. `write` holds the poison and starve
-// options and whether the writer's exact twins write it.
+// options.
 static bool static_test_write_with(DynamicTestWrite* write, Link* link, const Bind* bind, const Runtime* runtime, String8 path, uint32_t lanes, ExecutableResult* result)
 {
     ExecutableRuntime inputs;
@@ -145,7 +145,6 @@ static bool static_test_write_with(DynamicTestWrite* write, Link* link, const Bi
         .entry = dynamic_global(runtime, bind, "_start"),
         .dynamic = pie ? &dynamic : 0,
         .runtime = &inputs,
-        .exact = write->exact,
     };
     write->succeeded = false;
     const bool ran = lane_run(lanes, dynamic_test_lane_main, write, 0);
@@ -153,7 +152,7 @@ static bool static_test_write_with(DynamicTestWrite* write, Link* link, const Bi
     return ran && write->succeeded;
 }
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
-// The writes every link gets: one per lane count of static_test_lane_counts, then the exact twins' with 1 and 8 lanes.
+// The writes every link gets: one per lane count of static_test_lane_counts, then two more with 1 and 8 lanes.
 #define BUSTER_STATIC_TEST_WRITES (BUSTER_ARRAY_LENGTH(static_test_lane_counts) + 2)
 
 static uint32_t static_test_write_lanes(uint32_t write)
@@ -189,10 +188,8 @@ static bool static_test_lanes(StaticTestTally* tally, Link* link, const Bind* bi
         const uint32_t lanes = static_test_write_lanes(w);
         const bool permuted = w == 0 || link_test_permute_names(link, id_order + w, arena);
         static_test_expect(tally, permuted, "permuted NameIds", lanes);
-        const bool exact = w >= BUSTER_ARRAY_LENGTH(static_test_lane_counts);
         ExecutableResult written = { 0 };
         DynamicTestWrite write = {
-            .exact = exact,
             .poison = w % 2 == 1,
         };
         const bool reset = executable_test_reset(link, path.pointer);
@@ -205,7 +202,7 @@ static bool static_test_lanes(StaticTestTally* tally, Link* link, const Bind* bi
         const String8 bytes = succeeded ? executable_test_read(arena, path.pointer) : (String8){ 0 };
         const bool identical = w == 0 || (bytes.length == file->length && memcmp(bytes.pointer, file->pointer, bytes.length) == 0 &&
                                           memcmp(written.build_id, result->build_id, BUSTER_EXECUTABLE_BUILD_ID_BYTES) == 0);
-        static_test_expect(tally, succeeded && identical, exact ? "the exact twins' file the same" : "the same file with every lane count", lanes);
+        static_test_expect(tally, succeeded && identical, "the same file with every lane count", lanes);
         same = same && succeeded && identical;
         *file = w == 0 ? bytes : *file;
         *result = w == 0 ? written : *result;
@@ -1093,7 +1090,7 @@ static bool static_test_programs(const ExecutableTestDirectory* directory, const
 
 // A libc program with one 3 GiB .bss atom, a symbol at its last byte, and a pointer to that symbol in DATA: the runtime's
 // own .bss atoms stay below the oversized bucket, the pointer's ABS64 is patched with the far symbol's full address, and
-// the program runs. It is written as the static executable and the static PIE, with every lane count and exact twin.
+// the program runs. It is written as the static executable and the static PIE, with every lane count.
 static bool static_test_large_bss(const ExecutableTestDirectory* directory, const Runtime* runtime, uint64_t seed)
 {
     StaticTestTally tally = {
@@ -1657,7 +1654,7 @@ static FixupId static_test_first_fixup(const Link* link, uint8_t kind, const cha
     return result;
 }
 
-// Writes the link BUSTER_STATIC_TEST_WRITES times as static_test_lanes does (every lane count, then the exact twins),
+// Writes the link BUSTER_STATIC_TEST_WRITES times as static_test_lanes does (every lane count, then 1 and 8 lanes again),
 // each of which must fail with `error`, naming `symbol` if it isn't 0 and otherwise `fixup`, without an output: whether
 // every one did.
 static bool static_test_refuses(StaticTestTally* tally, Link* link, const Bind* bind, const Runtime* runtime, String8 path, const char* name, ExecutableError error,
@@ -1667,10 +1664,7 @@ static bool static_test_refuses(StaticTestTally* tally, Link* link, const Bind* 
     for (uint32_t w = 0; w < BUSTER_STATIC_TEST_WRITES; w += 1)
     {
         const uint32_t lanes = static_test_write_lanes(w);
-        const bool exact = w >= BUSTER_ARRAY_LENGTH(static_test_lane_counts);
-        DynamicTestWrite write = {
-            .exact = exact,
-        };
+        DynamicTestWrite write = { 0 };
         ExecutableResult written;
         unlink(path.pointer);
         const bool succeeded = static_test_write_with(&write, link, bind, runtime, path, lanes, &written);
@@ -1680,7 +1674,7 @@ static bool static_test_refuses(StaticTestTally* tally, Link* link, const Bind* 
         {
             executable_test_print_failure(name, &written);
         }
-        static_test_expect(tally, refused, name, (exact ? 100 : 0) + lanes);
+        static_test_expect(tally, refused, name, 100 * w + lanes);
         result = result && refused;
     }
     return result;
@@ -2102,7 +2096,7 @@ static void static_test_starved(StaticTestTally* tally, BindTestLink* test, cons
     executable_test_restore(&test->link, saved);
 }
 
-// Each refusal of the runtime's kind refused by every lane count and by the exact twins with 1 and 8 lanes, naming its
+// Each refusal of the runtime's kind refused by every lane count, naming its
 // symbol or fixup, without an output; then the starved lanes on the tls program, which runs with status 40.
 static bool static_test_refused(const ExecutableTestDirectory* directory, const Runtime* runtime)
 {

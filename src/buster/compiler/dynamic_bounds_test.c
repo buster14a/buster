@@ -206,24 +206,21 @@ static bool dynamic_test_image_bounds(const ExecutableTestDirectory* directory, 
     }
     const uint8_t* saved = wrote ? executable_test_save(&bound.link, scratch.arena) : 0;
     dynamic_test_expect(&tally, saved != 0, "room for the fixture's unpatched bytes", 0);
-    static const uint32_t variant_lanes[] = { 1, 8, 1 };
+    static const uint32_t variant_lanes[] = { 1 };
     for (uint32_t w = 0; saved != 0 && w < BUSTER_ARRAY_LENGTH(variant_lanes); w += 1)
     {
         executable_test_restore(&bound.link, saved);
         DynamicTestWrite write = {
-            .exact = w < 2,
-            .rela_only = w == 2,
+            .rela_only = true,
         };
         ExecutableResult variant = { 0 };
         const bool written = executable_test_reset(&bound.link, path.pointer) &&
                              dynamic_test_write_with(&write, &bound.link, &bound.bind, runtime, path, variant_lanes[w], &variant);
-        dynamic_test_expect(&tally, written && (!write.rela_only || variant.relr_words == 0), "the exact or RELA-only write succeeds", w);
+        dynamic_test_expect(&tally, written && (!write.rela_only || variant.relr_words == 0), "the RELA-only write succeeds", w);
         const String8 bytes = written ? executable_test_read(scratch.arena, path.pointer) : (String8){ 0 };
         executable_test_restore(&bound.link, saved);
         if (written)
         {
-            const bool identical = bytes.length == file.length && memcmp(bytes.pointer, file.pointer, file.length) == 0;
-            dynamic_test_expect(&tally, !write.exact || identical, "the exact twins write the same file", variant_lanes[w]);
             dynamic_bounds_check(&tally, &bound.link, &bound.bind, runtime, bytes, path.pointer, !write.rela_only && dynamic_test_relr_supported(runtime), w + 1);
         }
     }

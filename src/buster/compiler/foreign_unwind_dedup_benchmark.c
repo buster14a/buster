@@ -472,8 +472,7 @@ static ForeignUnwindDedupBenchmarkSample foreign_unwind_dedup_benchmark_sample(c
     if (prepared)
     {
         const SymbolId entry = foreign_link_test_symbol(&foreign, result, "_start");
-        sample.valid = variant->path == FOREIGN_PATH_EXACT ? executable_test_write_exact(&result->link, entry, destination, 1, &sample.written) :
-                                                           executable_test_write(&result->link, entry, destination, 1, &sample.written, 0, 0);
+        sample.valid = executable_test_write(&result->link, entry, destination, 1, &sample.written, 0, 0);
     }
     const uint64_t written_at = foreign_now();
     sample.resolve_error = (uint32_t)foreign.failure.error;

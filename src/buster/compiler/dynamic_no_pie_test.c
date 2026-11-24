@@ -5,7 +5,7 @@
 // (-no-pie: ExecutableDynamic.position_dependent), written against the position-dependent executable's runtime
 // (RUNTIME_KIND_NO_PIE: crt1.o, crti.o, crtbegin.o, crtend.o and crtn.o with the dynamic PIE's libraries):
 // - the PIE's small programs (dynamic_test_small), none refused: each written by every lane count into the same bytes,
-//   and by the exact twins with 1 and 8 lanes into them too; the file an ET_EXEC whose PT_LOADs are at
+//   into them too; the file an ET_EXEC whose PT_LOADs are at
 //   BUSTER_EXECUTABLE_BASE from their file offsets, with the interpreter, .dynamic and no DF_1_PIE, RELR or RELATIVE
 //   relocation; the fields a PIE refuses hold their values (an ABS32 and a .rodata ABS64 of main's address, a PC32 to a
 //   weak reference to nothing, address 0's distance, and PC64s to a hidden one and to an absolute symbol); and each
@@ -140,26 +140,12 @@ static void dynamic_test_no_pie_structure(DynamicTestTally* tally, String8 file,
     dynamic_test_expect(tally, image.valid && !pie && !relr && relative == 0, "no DF_1_PIE, RELR or RELATIVE relocation", index);
 }
 
-// The link written by every lane count into the same bytes (dynamic_test_lanes), then by the exact twins with 1 and 8
-// lanes into them too: whether all were, the file in `file`.
+// The link written by every lane count into the same bytes (dynamic_test_lanes): whether all were, the file in `file`.
 static bool dynamic_test_no_pie_write(DynamicTestTally* tally, BindTestLink* test, const Runtime* runtime, String8 path, const char* name, uint64_t id_order, String8* file,
                                       Arena* arena)
 {
     ExecutableResult result = { 0 };
-    bool written = dynamic_test_lanes(tally, &test->link, &test->bind, runtime, path, name, &result, file, id_order, arena);
-    for (uint32_t lanes = 1; written && lanes <= 8; lanes += 7)
-    {
-        DynamicTestWrite write = {
-            .exact = true,
-        };
-        ExecutableResult exact = { 0 };
-        const bool reset = executable_test_reset(&test->link, path.pointer);
-        const bool succeeded = reset && dynamic_test_write_with(&write, &test->link, &test->bind, runtime, path, lanes, &exact);
-        const String8 bytes = succeeded ? executable_test_read(arena, path.pointer) : (String8){ 0 };
-        const bool same = succeeded && bytes.length == file->length && memcmp(bytes.pointer, file->pointer, bytes.length) == 0;
-        dynamic_test_expect(tally, same, "the exact twins write the same file", lanes);
-        written = written && same;
-    }
+    const bool written = dynamic_test_lanes(tally, &test->link, &test->bind, runtime, path, name, &result, file, id_order, arena);
     return written;
 }
 
@@ -251,20 +237,18 @@ static bool dynamic_test_no_pie(const ExecutableTestDirectory* directory)
         BindTestLink* test = &program.test;
         dynamic_test_expect(&tally, program.bound, dynamic_test_no_pie_names[which], which);
         bool outcome = program.bound;
-        // By every lane count, then by the exact twins with 1 and 8 lanes.
-        for (uint32_t l = 0; program.bound && program.refused != 0 && l < BUSTER_ARRAY_LENGTH(dynamic_test_lane_counts) + 2; l += 1)
+        // By every lane count.
+        for (uint32_t l = 0; program.bound && program.refused != 0 && l < BUSTER_ARRAY_LENGTH(dynamic_test_lane_counts); l += 1)
         {
-            const bool exact = l >= BUSTER_ARRAY_LENGTH(dynamic_test_lane_counts);
-            const uint32_t lanes = exact ? (l == BUSTER_ARRAY_LENGTH(dynamic_test_lane_counts) ? 1 : 8) : dynamic_test_lane_counts[l];
+            const uint32_t lanes = dynamic_test_lane_counts[l];
             DynamicTestWrite write = {
-                .exact = exact,
             };
             ExecutableResult result;
             unlink(path.pointer);
             const bool written = dynamic_test_write_with(&write, &test->link, &test->bind, &runtime, path, lanes, &result);
             const bool refused = !written && result.error == EXECUTABLE_ERROR_RELOCATION && result.cause == EXECUTABLE_CAUSE_RELOCATION_TEXT &&
                                  result.fixup == program.refused && access(path.pointer, F_OK) != 0;
-            dynamic_test_expect(&tally, refused, dynamic_test_no_pie_names[which], (exact ? 100 : 0) + lanes);
+            dynamic_test_expect(&tally, refused, dynamic_test_no_pie_names[which], lanes);
             outcome = outcome && refused;
         }
         Scratch scratch = scratch_begin(0);
