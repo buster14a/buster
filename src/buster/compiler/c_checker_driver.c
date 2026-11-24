@@ -16332,7 +16332,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             !emit_window_seen && !parse_tile_seen && !lanes->deferred_lowering &&
             !lanes->tier0_no_inline && !lanes->tier0_no_hold && !lanes->tier0_inline_shapes &&
             lanes->helper_forms == 0 && getenv("BUSTER_TEST_NODE_BODIES") == NULL &&
-            !selection_census && !provisional_selection && !windowed_loop && !shared_parts && !helper_report &&
+            !selection_census && !branch_truth_census && !provisional_selection && !windowed_loop && !shared_parts && !helper_report &&
             !options.predefines.common && !options.predefines.short_wchar &&
             (!options.predefines.visibility_given || (options.predefines.visibility != NULL && strcmp(options.predefines.visibility, "default") == 0)) &&
             predefines_stack_guard(&options.predefines) == BUSTER_PREDEFINES_SSP_OFF &&
