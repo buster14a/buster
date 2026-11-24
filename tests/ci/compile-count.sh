@@ -18,9 +18,13 @@ cc -std=c17 -O2 -Wall -Wextra -Werror -o "$tool" "$root/tools/ci/compile-count.c
 "$tool" --self-test > "$work/self-test.log" || { cat "$work/self-test.log" >&2; fail "the self-test failed"; }
 pass
 
-# The repository's own statement is one the check can read.
-"$tool" statement "$root/tools/ci/compile-count.txt" > "$work/statement.log" || fail "tools/ci/compile-count.txt has no well-formed statement"
-pass
+# The repository's own statements are ones the check can read.
+for file in "$root"/tools/ci/compile-count/*.txt; do
+    if [ -e "$file" ]; then
+        "$tool" statement "$file" > "$work/statement.log" || fail "${file#"$root"/} has no well-formed statement"
+        pass
+    fi
+done
 
 # --- The verdicts, on files ---
 # expect STATUS TEXT ARGUMENTS...: compile-count's exit status and a text its output holds.
@@ -36,54 +40,60 @@ expect()
     pass
 }
 profile() { "$tool" --fixture "$work/$1.profraw" "$1" || fail "no fixture profile of $1"; }
-for count in 1000000 1000001 1000400 1005000 1005001 994999 1070000 970000 930000; do
+for count in 1000000 1000001 1000400 1005000 1005001 994999 1070000 1040000 970000; do
     profile "$count"
 done
-printf '# A comment.\n+0.00 the check itself\n' > "$work/base.txt"
-printf '# Another comment, the same line.\n\n+0.00 the check itself\n' > "$work/same.txt"
+printf '# A comment.\n+0.00 the check itself\n' > "$work/none.txt"
 printf '+7.00 a feature\n' > "$work/rise.txt"
 printf -- '-3.00 a cut\n' > "$work/cut.txt"
-printf -- '-7.00 a feature\n' > "$work/fall.txt"
+printf '+1000 the most\n' > "$work/most.txt"
+printf '+0.001 a thousandth\n' > "$work/thousandth.txt"
 printf 'the count rose by seven percent\n' > "$work/prose.txt"
 printf '# Only a comment.\n' > "$work/empty.txt"
-verdict() { local status=$1 text=$2 base=$3 head=$4; shift 4; expect "$status" "$text" check --base-statement "$work/$base" --head-statement "$work/$head" "$@"; }
+verdict() { expect "$1" "$2" check "${@:3}"; }
 p() { printf '%s\n' "$work/$1.profraw"; }
 
 expect 0 "$(printf '1000000\t')" sum "$(p 1000000)"
-verdict 0 'passed: the change states nothing and moves the count by +0.000%' base.txt same.txt --base "$(p 1000000)" --head "$(p 1000000)"
-verdict 0 'moves the count by +0.500%, within half a percent' base.txt base.txt --base "$(p 1000000)" --head "$(p 1005000)"
-verdict 1 'FAILED: the change moves the count by +0.500% and doesn'"'"'t state it' base.txt base.txt --base "$(p 1000000)" --head "$(p 1005001)"
-verdict 1 '"+0.50 what moved it"' base.txt base.txt --base "$(p 1000000)" --head "$(p 1005001)"
-verdict 1 'FAILED: the change moves the count by -0.500% and doesn'"'"'t state it' base.txt base.txt --base "$(p 1000000)" --head "$(p 994999)"
-verdict 1 'FAILED: the change moves the count by +7.000% and doesn'"'"'t state it' rise.txt rise.txt --base "$(p 1000000)" --head "$(p 1070000)"
-verdict 0 'passed: the change states +7.000% ("+7.00 a feature") and moves the count by +7.000%' base.txt rise.txt --base "$(p 1000000)" --head "$(p 1070000)"
-verdict 0 'passed: the change states -3.000% ("-3.00 a cut")' rise.txt cut.txt --base "$(p 1000000)" --head "$(p 970000)"
-verdict 1 'FAILED: the change states +7.000% ("+7.00 a feature") and moves the count by +0.000%' base.txt rise.txt --base "$(p 1000000)" --head "$(p 1000000)"
-# A line as long as its base's and another is a statement.
-verdict 0 'passed: the change states -7.000% ("-7.00 a feature")' rise.txt fall.txt --base "$(p 1000000)" --head "$(p 930000)"
-verdict 1 '"-3.00 what moved it"' base.txt rise.txt --base "$(p 1000000)" --head "$(p 970000)"
-# A base from before the check has no file: the change's line is then a statement.
-verdict 0 'passed: the change states +0.000% ("+0.00 the check itself")' missing.txt base.txt --base "$(p 1000000)" --head "$(p 1000000)"
-verdict 1 'FAILED: the change states +0.000%' missing.txt base.txt --base "$(p 1000000)" --head "$(p 1070000)"
+verdict 0 'passed: the change states nothing and moves the count by +0.000%' --base "$(p 1000000)" --head "$(p 1000000)"
+verdict 0 'moves the count by +0.500%, within half a percent' --base "$(p 1000000)" --head "$(p 1005000)"
+verdict 1 'FAILED: the change moves the count by +0.500% and doesn'"'"'t state it' --base "$(p 1000000)" --head "$(p 1005001)"
+verdict 1 '"+0.50 what moved it"' --base "$(p 1000000)" --head "$(p 1005001)"
+verdict 1 'tools/ci/compile-count/NAME.txt' --base "$(p 1000000)" --head "$(p 1005001)"
+verdict 1 'FAILED: the change moves the count by -0.500% and doesn'"'"'t state it' --base "$(p 1000000)" --head "$(p 994999)"
+verdict 1 'FAILED: the change moves the count by +7.000% and doesn'"'"'t state it' --base "$(p 1000000)" --head "$(p 1070000)"
+verdict 0 'passed: the change states +7.000% and moves the count by +7.000%' --statement "$work/rise.txt" --base "$(p 1000000)" --head "$(p 1070000)"
+verdict 0 'the change'"'"'s statement rise.txt: +7.000% ("+7.00 a feature")' --statement "$work/rise.txt" --base "$(p 1000000)" --head "$(p 1070000)"
+verdict 0 'passed: the change states -3.000%' --statement "$work/cut.txt" --base "$(p 1000000)" --head "$(p 970000)"
+verdict 1 'FAILED: the change states +7.000% and moves the count by +0.000%' --statement "$work/rise.txt" --base "$(p 1000000)" --head "$(p 1000000)"
+verdict 1 '"-3.00 what moved it"' --statement "$work/rise.txt" --base "$(p 1000000)" --head "$(p 970000)"
+# A statement of nothing is as none.
+verdict 0 'passed: the change states +0.000%' --statement "$work/none.txt" --base "$(p 1000000)" --head "$(p 1000000)"
+verdict 1 'FAILED: the change states +0.000%' --statement "$work/none.txt" --base "$(p 1000000)" --head "$(p 1070000)"
+# A change's statements add up, wherever they stand among its sides' profiles.
+verdict 0 'passed: the change states +4.000% and moves the count by +4.000%' --statement "$work/rise.txt" --base "$(p 1000000)" --statement "$work/cut.txt" --head "$(p 1040000)"
+verdict 0 'the change'"'"'s statement cut.txt: -3.000% ("-3.00 a cut")' --statement "$work/rise.txt" --statement "$work/cut.txt" --base "$(p 1000000)" --head "$(p 1040000)"
+verdict 1 'FAILED: the change states +7.000%' --statement "$work/rise.txt" --statement "$work/none.txt" --base "$(p 1000000)" --head "$(p 1040000)"
+verdict 2 'past the most one change states (1000%)' --statement "$work/most.txt" --statement "$work/thousandth.txt" --base "$(p 1000000)" --head "$(p 1000000)"
+many=()
+for statement in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do many+=(--statement "$work/none.txt"); done
+verdict 0 'passed: the change states +0.000%' "${many[@]}" --base "$(p 1000000)" --head "$(p 1000000)"
+verdict 2 'more than 16 of them' "${many[@]}" --statement "$work/none.txt" --base "$(p 1000000)" --head "$(p 1000000)"
+verdict 2 'a --statement without its file' --base "$(p 1000000)" --head "$(p 1000000)" --statement
 # The median of a side's runs, and runs too far apart.
-verdict 0 'the change'"'"'s compile: 1000001 (3 runs, 1000000 to 1000400)' base.txt base.txt --base "$(p 1000000)" --head "$(p 1000400)" "$(p 1000000)" "$(p 1000001)"
-verdict 2 'UNUSABLE: runs of one executable are more than 0.05% apart' base.txt base.txt --base "$(p 1000000)" --head "$(p 1000000)" "$(p 1005000)"
+verdict 0 'the change'"'"'s compile: 1000001 (3 runs, 1000000 to 1000400)' --base "$(p 1000000)" --head "$(p 1000400)" "$(p 1000000)" "$(p 1000001)"
+verdict 2 'UNUSABLE: runs of one executable are more than 0.05% apart' --base "$(p 1000000)" --head "$(p 1000000)" "$(p 1005000)"
 # What can't be judged.
-verdict 2 "can't open" base.txt missing.txt --base "$(p 1000000)" --head "$(p 1000000)"
-verdict 2 'must start with a percentage' base.txt prose.txt --base "$(p 1000000)" --head "$(p 1000000)"
-# A base whose line is no statement holds no change back: the change's own line is then a statement, judged as one.
-verdict 0 'passed: the change states +0.000% ("+0.00 the check itself")' prose.txt base.txt --base "$(p 1000000)" --head "$(p 1000000)"
-verdict 1 'FAILED: the change states +0.000%' prose.txt base.txt --base "$(p 1000000)" --head "$(p 1070000)"
-verdict 0 'passed: the change states +7.000%' prose.txt rise.txt --base "$(p 1000000)" --head "$(p 1070000)"
-verdict 2 'has no statement line' base.txt empty.txt --base "$(p 1000000)" --head "$(p 1000000)"
-verdict 2 'not a 64-bit little-endian raw profile' base.txt base.txt --base "$root/tools/ci/compile-count.c" --head "$(p 1000000)"
-verdict 2 'shorter than a raw profile'"'"'s header' base.txt base.txt --base "$(p 1000000)" --head "$work/base.txt"
-verdict 2 'usage: compile-count check' base.txt base.txt --base "$(p 1000000)"
-verdict 2 'unexpected argument' base.txt base.txt "$(p 1000000)"
+verdict 2 "can't open" --statement "$work/missing.txt" --base "$(p 1000000)" --head "$(p 1000000)"
+verdict 2 'must start with a percentage' --statement "$work/prose.txt" --base "$(p 1000000)" --head "$(p 1000000)"
+verdict 2 'has no statement line' --statement "$work/empty.txt" --base "$(p 1000000)" --head "$(p 1000000)"
+verdict 2 'not a 64-bit little-endian raw profile' --base "$root/tools/ci/compile-count.c" --head "$(p 1000000)"
+verdict 2 'shorter than a raw profile'"'"'s header' --base "$(p 1000000)" --head "$work/none.txt"
+verdict 2 'usage: compile-count check' --base "$(p 1000000)"
+verdict 2 'unexpected argument' "$(p 1000000)"
 many=()
 for run in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do many+=("$(p 1000000)"); done
-verdict 0 '(16 runs, 1000000 to 1000000)' base.txt base.txt --base "$(p 1000000)" --head "${many[@]}"
-verdict 2 'unexpected argument' base.txt base.txt --base "$(p 1000000)" --head "${many[@]}" "$(p 1000000)"
+verdict 0 '(16 runs, 1000000 to 1000000)' --base "$(p 1000000)" --head "${many[@]}"
+verdict 2 'unexpected argument' --base "$(p 1000000)" --head "${many[@]}" "$(p 1000000)"
 expect 2 'usage: compile-count' frobnicate
 expect 2 'has no statement line' statement "$work/empty.txt"
 expect 0 "$(printf -- '-3.000%%\t-3.00 a cut')" statement "$work/cut.txt"
@@ -158,11 +168,12 @@ CLANG
 chmod +x "$work/clang"
 export BUSTER_COMPILE_COUNT_CLANG="$work/clang" BUSTER_COMPILE_COUNT_JOBS=2
 
-# checkout NAME WORK_A WORK_B [STATEMENT]: a checkout of three units, with the real compile-count.c. Its flags are its
-# file's, a dynamic executable's until a test says otherwise.
+# checkout NAME WORK_A WORK_B [FILE=STATEMENT]...: a checkout of three units, with the real compile-count.c and, for
+# each FILE=STATEMENT, the statement file tools/ci/compile-count/FILE. Its flags are its file's, a dynamic executable's
+# until a test says otherwise.
 checkout()
 {
-    local tree="$work/$1"
+    local tree="$work/$1" statement
     rm -rf -- "$tree"
     mkdir -p "$tree/src" "$tree/tools/ci"
     printf '%s\n' '-Isrc -DFIXTURE_FLAG=1 -O3 -g' > "$tree/flags"
@@ -179,9 +190,10 @@ esac
 BUILD
     chmod +x "$tree/build.sh"
     cp "$root/tools/ci/compile-count.c" "$tree/tools/ci/compile-count.c"
-    if [ "$#" -ge 4 ]; then
-        printf '# The statement.\n%s\n' "$4" > "$tree/tools/ci/compile-count.txt"
-    fi
+    for statement in "${@:4}"; do
+        mkdir -p "$tree/tools/ci/compile-count"
+        printf '# The statement.\n%s\n' "${statement#*=}" > "$tree/tools/ci/compile-count/${statement%%=*}"
+    done
 }
 corpus="$work/corpus"
 mkdir -p "$corpus/sqlite" "$corpus/provenance" "$corpus/headers/usr/lib/clang/23/include" "$corpus/headers/usr/local/include" "$corpus/headers/usr/include"
@@ -201,14 +213,18 @@ run()
     pass
 }
 
-checkout base 600000 400000 '+0.00 the check itself'
-checkout same 600000 400000 '+0.00 the check itself'
-checkout rise 610000 400000 '+0.00 the check itself'
-checkout stated 610000 400000 '+1.00 a feature'
-checkout cut 600000 380000 '+0.00 the check itself'
-checkout after 600000 400000 '+1.00 a feature'
+earlier='earlier.txt=-1.37 an earlier change'
+checkout base 600000 400000 "$earlier"
+checkout same 600000 400000 "$earlier"
+checkout rise 610000 400000 "$earlier"
+checkout stated 610000 400000 "$earlier" 'feature.txt=+1.00 a feature'
+checkout replaced 610000 400000 'feature.txt=+1.00 a feature'
+checkout restated 610000 400000 'earlier.txt=+1.00 restated'
+checkout noted 600000 400000 "$earlier" 'notes.md=+9.00 no statement'
+checkout cut 600000 380000 "$earlier"
+checkout after 600000 400000 "$earlier" 'feature.txt=+1.00 a feature'
 checkout older 600000 400000
-checkout broken 600000 400000 '+0.00 the check itself'
+checkout broken 600000 400000 "$earlier"
 printf '// work 1\n#error broken\n' > "$work/broken/src/b.c"
 
 : > "$work/summary"
@@ -217,9 +233,13 @@ grep -Fq 'a one-function unit counts 1000 at the base and 1000 at the change' "$
 grep -Fq 'compile-count: passed: the change states nothing' "$work/summary" || fail "the verdict isn't in the step's summary"
 pass
 run 1 '::error title=The compile'"'"'s count::the change moves the count by +1.000% and doesn'"'"'t state it' base rise
-grep -Fq '"+1.00 what moved it"' "$work/log" || fail "a failure doesn't propose its line"
+grep -Fq 'tools/ci/compile-count/NAME.txt, NAME its branch'"'"'s last part: "+1.00 what moved it"' "$work/log" || fail "a failure doesn't propose its file and line"
 pass
-run 0 'passed: the change states +1.000% ("+1.00 a feature") and moves the count by +1.000%' base stated
+# A statement the change adds is its own; the base's, which it holds the same, are earlier changes'.
+run 0 'passed: the change states +1.000% and moves the count by +1.000%' base stated
+grep -Fq 'the change'"'"'s statement feature.txt: +1.000% ("+1.00 a feature")' "$work/log" || fail "the change's statement isn't named"
+! grep -Fq 'statement earlier.txt' "$work/log" || fail "the base's statement is read as the change's"
+pass
 # The link is the build's own mode: static, with the build's wrapped symbols, where the flags say the units are a static
 # executable's, and dynamic otherwise.
 [ "$(cat "$work/count/base/compiler.mode")" = ' -no-pie' ] || fail "a dynamic build's executable isn't linked so: $(cat "$work/count/base/compiler.mode")"
@@ -227,10 +247,16 @@ printf '%s\n' '-Isrc -DBUSTER_HOST_STATIC=1 -O3' > "$work/stated/flags"
 run 0 'passed: the change states +1.000%' base stated
 [ "$(cat "$work/count/head/compiler.mode")" = ' -no-pie -static -Wl,--wrap=__register_frame_info,--wrap=__deregister_frame_info' ] || fail "a static build's executable isn't linked so: $(cat "$work/count/head/compiler.mode")"
 pass
+# A statement the change deletes states nothing, one it changes is its own, and a file that isn't *.txt is none.
+run 0 'passed: the change states +1.000%' base replaced
+run 0 'the change'"'"'s statement earlier.txt: +1.000% ("+1.00 restated")' base restated
+run 0 'passed: the change states nothing' base noted
+run 0 'passed: the change states nothing' base older
 run 1 '::error title=The compile'"'"'s count::the change moves the count by -2.000% and doesn'"'"'t state it' base cut
-# The base's line doesn't excuse the change after it: a statement is one change's.
+# The base's statements don't excuse the change after it: a statement is one change's.
 run 1 'the change moves the count by -0.990% and doesn'"'"'t state it' stated after
-run 0 'passed: the change states +0.000% ("+0.00 the check itself")' older base
+# A base without the directory: every statement the change holds is its own.
+run 1 'FAILED: the change states -1.370% and moves the count by +0.000%' older base
 run 2 "a unit of $work/broken didn't compile" base broken
 grep -Fq 'error: fixture' "$work/log" || fail "a unit's diagnostics aren't shown"
 pass
