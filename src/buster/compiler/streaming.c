@@ -644,7 +644,7 @@ static StreamError stream_unwind(StreamCode* code, uint32_t until)
             .locations = code->eh_locations + code->described,
             .location_capacity = count,
         };
-        error = unwind_write(batch, count, &output, false) == UNWIND_OK ? STREAM_OK : STREAM_ERROR_UNWIND;
+        error = unwind_write(batch, count, &output) == UNWIND_OK ? STREAM_OK : STREAM_ERROR_UNWIND;
         for (uint32_t i = 0; error == STREAM_OK && i < count; i += 1)
         {
             code->eh_locations[code->described + i] += (uint32_t)code->eh_size;

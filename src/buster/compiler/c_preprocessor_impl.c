@@ -15754,7 +15754,7 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_dependencies(Preprocessor* pp, const char* sou
             pp->dependencies[index - 1].used = false;
         }
     }
-    return dependency_prepare(output, &pp->options.dependencies, pp->dependencies, pp->dependency_count, source, primary, pp->options.scalar, arena, errors);
+    return dependency_prepare(output, &pp->options.dependencies, pp->dependencies, pp->dependency_count, source, primary, arena, errors);
 }
 
 // The deferred first run has no expansion graph. Its exact source-level runs already record where its current

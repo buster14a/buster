@@ -283,7 +283,7 @@ static int run_assembler_command(int count, char** arguments)
     char** preprocess_arguments = BUSTER_ARENA_PUSH_ARRAY(&arena, char*, (uint64_t)count + 1);
     uint32_t preprocess_count = 0;
     PPOptions preprocessing = {0};
-    AsmOptions options = {.vectorized = true};
+    AsmOptions options = {0};
     const char* input = 0;
     const char* output = 0;
     bool timing = false;
@@ -297,10 +297,6 @@ static int run_assembler_command(int count, char** arguments)
         else if (strcmp(argument, "--intel") == 0)
         {
             options.intel = true;
-        }
-        else if (strcmp(argument, "--scalar") == 0)
-        {
-            options.vectorized = false;
         }
         else if (strcmp(argument, "--timing") == 0)
         {
@@ -345,11 +341,10 @@ static int run_assembler_command(int count, char** arguments)
     bool markers;
     valid = valid && pp_parse_options((int)preprocess_count, preprocess_arguments, &preprocessing, &arena, &input, &output, &markers);
     const bool preprocessed = input != 0 && strlen(input) >= 2 && strcmp(input + strlen(input) - 2, ".S") == 0;
-    preprocessing.scalar = !BUSTER_VECTOR_PATH(options.vectorized);
     int status = 1;
     if (!valid || input == 0)
     {
-        fprintf(stderr, "usage: compiler assemble [--intel] [--scalar] [-march=CPU] [-mtune=CPU] [--timing] [-I dir] [-D name[=value]] [-U name] -o output.o input.s|input.S\n");
+        fprintf(stderr, "usage: compiler assemble [--intel] [-march=CPU] [-mtune=CPU] [--timing] [-I dir] [-D name[=value]] [-U name] -o output.o input.s|input.S\n");
     }
     else
     {

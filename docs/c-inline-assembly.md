@@ -748,8 +748,7 @@ template is printed as it is, without substitution.
 ## Assembly
 
 `asm_assemble_code` takes the text through the assembler's lexer, parser and
-matcher. It runs the vector path or the scalar twin, as the checker's path does.
-It returns the records, the local branches as branch sizing's columns, its
+matcher, the assembler's one path since #2924. It returns the records, the local branches as branch sizing's columns, its
 symbolic fields as references by name, and its named labels. It accepts
 instructions, labels and the syntax directives. It refuses:
 

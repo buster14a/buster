@@ -1200,7 +1200,7 @@ static void check_unseq_check(CheckCommonEmission* emission, CheckUnseqStorage* 
 // clang's SequenceChecker visits in one region (C's InitListExpr): keys of their last value's node and their index,
 // sorted, `*count` of them, their values marked BUSTER_CHECK_UNSEQ_PLANNED. A scalar `=` initializer's plan is its
 // INITIALIZE root's, checked as that root. Null where none does (or scratch has no room, which `*failed` says).
-static const uint64_t* check_unseq_plans(const CheckInput* input, const CheckProgram* program, const uint32_t* parents, uint8_t* marks, bool vector,
+static const uint64_t* check_unseq_plans(const CheckInput* input, const CheckProgram* program, const uint32_t* parents, uint8_t* marks,
                                          Arena* scratch, uint32_t* count, bool* failed)
 {
     const CheckInitializers* initializers = program != NULL ? program->initializers : NULL;
@@ -1244,7 +1244,7 @@ static const uint64_t* check_unseq_plans(const CheckInput* input, const CheckPro
         }
     }
     const uint32_t varying = input->graph.count != 0 ? UINT32_MAX >> __builtin_clz(input->graph.count) : 0;
-    return *count != 0 ? c_bindings_sort(keys, temporary, *count, vector, varying) : NULL;
+    return *count != 0 ? c_bindings_sort(keys, temporary, *count, varying) : NULL;
 }
 
 // -Wunsequenced of the brace initializer `index`'s list, its values in order, each read where its conversion reads it

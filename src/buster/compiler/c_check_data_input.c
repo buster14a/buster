@@ -129,9 +129,9 @@ static uint32_t check_data_latest(const CheckDataPrepared* prepared, uint32_t ob
 
 // The static data: each static object's last declaration, and for each one the unit defines or tentatively defines, in
 // object order, its definition, type, alignment and initializer's references; then the string literals. Few of a unit's
-// tokens declare a static object (#592), so the vector path finds them 64 tokens at a time (the scalar path, `scalar`,
-// takes every token), as keys of their object and token, which c_bindings_sort puts in object order, each object's
-// declarations in token order: no token-sized column is filled or read past them.
+// tokens declare a static object (#592), so it finds them 64 tokens at a time, as keys of their object and token, which
+// c_bindings_sort puts in object order, each object's declarations in token order: no token-sized column is filled or
+// read past them.
 // The canonical object of `object` among the `count` calls of `calls` (in object order), or `object` itself where it is no
 // call's: a reference to a call's object is its canonical record's (#148).
 static uint32_t check_data_cfstring_canonical(const CheckDataCFString* calls, uint32_t count, uint32_t object)
@@ -228,7 +228,7 @@ static uint32_t check_data_cfstring_hash(const uint8_t* bytes, uint32_t count, b
 // __CFConstantStringClassReference (CheckGraph.cfstring_class), or else the object of the lowest call's name, which the
 // emission names so, an undefined global. `keys` holds `capacity` keys of `*key_count` found; the UTF-16 units go in
 // `output`.
-static bool check_data_cfstring_keys(const CheckInput* input, const CheckStream* stream, bool scalar, Arena* output, Arena* scratch, CheckDataCFStringKey** keys,
+static bool check_data_cfstring_keys(const CheckInput* input, const CheckStream* stream, Arena* output, Arena* scratch, CheckDataCFStringKey** keys,
                                      uint32_t* key_count, uint32_t* refused)
 {
     const CheckGraph* graph = &input->graph;
@@ -299,7 +299,7 @@ static bool check_data_cfstring_keys(const CheckInput* input, const CheckStream*
     {
         order[k] = (uint64_t)found[k].object << 32 | k;
     }
-    const uint64_t* ordered = valid && count > 1 ? c_bindings_sort(order, temporary, count, !scalar, UINT32_MAX) : 0;
+    const uint64_t* ordered = valid && count > 1 ? c_bindings_sort(order, temporary, count, UINT32_MAX) : 0;
     for (uint32_t k = 0; ordered != 0 && k < count; k += 1)
     {
         sorted[k] = found[(uint32_t)ordered[k]];
@@ -313,7 +313,7 @@ static bool check_data_cfstring_keys(const CheckInput* input, const CheckStream*
 // sorted by their hashes, in their order (c_bindings_sort); within one hash, each key is compared with the distinct
 // contents seen so far there (one, but for a collision), each of which keeps its keys' lowest object. Writes `count`
 // calls into `cfstrings`.
-static bool check_data_cfstring_unique(const CheckDataCFStringKey* keys, uint32_t count, bool scalar, Arena* scratch, CheckDataCFString* cfstrings)
+static bool check_data_cfstring_unique(const CheckDataCFStringKey* keys, uint32_t count, Arena* scratch, CheckDataCFString* cfstrings)
 {
     uint64_t* order = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, count) : 0;
     uint64_t* temporary = order != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, count) : 0;
@@ -325,7 +325,7 @@ static bool check_data_cfstring_unique(const CheckDataCFStringKey* keys, uint32_
     {
         order[k] = (uint64_t)keys[k].hash << 32 | k;
     }
-    const uint64_t* sorted = valid && count > 1 ? c_bindings_sort(order, temporary, count, !scalar, UINT32_MAX) : order;
+    const uint64_t* sorted = valid && count > 1 ? c_bindings_sort(order, temporary, count, UINT32_MAX) : order;
     for (uint32_t start = 0; valid && start < count;)
     {
         uint32_t end = start + 1;
@@ -468,7 +468,7 @@ static bool check_data_prepare(CheckDataPrepared* result, const CheckInput* inpu
     uint32_t varying = 0;
     for (uint32_t first = 0; valid && first < count; first += 64)
     {
-        const uint64_t lanes = scalar ? check_input_scan_all(first, count) : check_input_scan_bit(input->declaration_bits, first, count, BUSTER_CHECK_BITS_STATIC);
+        const uint64_t lanes = check_input_scan_bit(input->declaration_bits, first, count, BUSTER_CHECK_BITS_STATIC);
         for (uint64_t selected = lanes; valid && selected != 0; selected &= selected - 1)
         {
             const uint32_t token = first + (uint32_t)__builtin_ctzll(selected);
@@ -489,7 +489,7 @@ static bool check_data_prepare(CheckDataPrepared* result, const CheckInput* inpu
             }
         }
     }
-    const uint64_t* sorted = valid ? c_bindings_sort(keys, sorting, declared, !scalar, varying) : 0;
+    const uint64_t* sorted = valid ? c_bindings_sort(keys, sorting, declared, varying) : 0;
     result->declaration_keys = valid && declared != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint64_t, declared) : 0;
     if (result->declaration_keys != 0)
     {
@@ -542,7 +542,7 @@ static bool check_data_prepare(CheckDataPrepared* result, const CheckInput* inpu
     if (valid && input->graph.ns_constant_string != 0)
     {
         uint32_t refused = BUSTER_CHECK_NONE;
-        valid = check_data_cfstring_keys(input, stream, scalar, output, scratch, &cfstring_keys, &cfstring_key_count, &refused);
+        valid = check_data_cfstring_keys(input, stream, output, scratch, &cfstring_keys, &cfstring_key_count, &refused);
         if (refused != BUSTER_CHECK_NONE)
         {
             result->status = CHECK_DATA_INPUT_UNSUPPORTED;
@@ -551,7 +551,7 @@ static bool check_data_prepare(CheckDataPrepared* result, const CheckInput* inpu
         }
         result->cfstrings = valid && cfstring_key_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckDataCFString, cfstring_key_count) : 0;
         valid = valid && (cfstring_key_count == 0 || result->cfstrings != 0) &&
-                check_data_cfstring_unique(cfstring_keys, cfstring_key_count, scalar, scratch, result->cfstrings);
+                check_data_cfstring_unique(cfstring_keys, cfstring_key_count, scratch, result->cfstrings);
         result->cfstring_count = valid ? cfstring_key_count : 0;
         // The class reference: the unit's declaration's, or the lowest call's name's object, an undefined global's.
         uint32_t lowest = 0;

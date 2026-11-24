@@ -485,7 +485,7 @@ static CheckLanesTestEmission check_lanes_test_emit_limited(CheckLanesTestUnit* 
     result.parts = lanes != NULL ? lanes->parts : 1;
     result.squeezed = lanes != NULL ? lanes->squeezed : 0;
     result.again = lanes != NULL ? lanes->again : CHECK_PROGRAM_AGAIN_NONE;
-    bool built = emitted && (!rows || check_debug_build(&dwarf, program, &row_set, parser, pp, scalar, &output, &scratch));
+    bool built = emitted && (!rows || check_debug_build(&dwarf, program, &row_set, parser, pp, &output, &scratch));
     CheckDataResult published = { 0 };
     built = built && check_data_publish(&unit->selected.data, &unit->types, program->stream, program->object_symbols, program->object_count, &code.link, 0, &bytes,
                                         &scratch, &published);

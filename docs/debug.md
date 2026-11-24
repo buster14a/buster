@@ -408,7 +408,8 @@ and 8 lanes into `object_build`'s bytes.
 `./build/compiler -g -o program file.c` links an executable with a unit of
 the program's source functions (`c_check_debug.c`), which
 `ExecutableOptions.debug` attaches. Its rows come from three passes, each a
-vector path with an exact twin that `--scalar` takes, into the same bytes:
+vector path; the first two leave what they can't take to an exact path (an
+origin column's raw rows, a line past the function's span):
 
 - **Raw rows**, in `check_program_emit` after branch sizing: each typed
   entry's first record (`Tier0Code.entry_records`) at its byte offset, with
@@ -432,7 +433,7 @@ vector path with an exact twin that `--scalar` takes, into the same bytes:
   the function marks `prologue_end`. A row in another file than the
   function's (an expanded callee's from a header, or a body's statement an
   `#include` put there, #2541) keeps its file (`DebugUnit.row_files`), which
-  the line program sets by `DW_LNS_set_file` where it changes, by both paths.
+  the line program sets by `DW_LNS_set_file` where it changes.
   A file is one key per name (a hash table of the files' paths and the
   `#line`s' names), so that two `#line`s naming one file keep their rows
   together, and the unit's file table is built by key without comparing
@@ -493,7 +494,8 @@ file of its declaration (a header's for a function a header defines, a
 `#line`'s name after one); the unit's first file is the translation unit's.
 `-c -g` writes the same unit into the object, relocated against the
 functions' sections ("Relocatable objects" above). `test-check-debug
-[--cross-check]` checks each pass's twins (at `PROT_NONE` pages), the lines
+[--cross-check]` checks the raw rows and the lines against their exact
+paths and the kept rows against what keeping means (at `PROT_NONE` pages), the lines
 against `pp_presumed` on fixtures and generated programs, the fixtures'
 functions' rows, and with `--cross-check` the executable through
 `llvm-dwarfdump --verify` and gdb: a line's breakpoint, a function's on its

@@ -48,26 +48,22 @@ static void dependency_test_rule(DependencyRule rule, const char* expected)
 {
     const size_t expected_length = strlen(expected);
     char output[4096];
-    for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+    memset(output, 0x5a, sizeof(output));
+    uint64_t needed = UINT64_MAX;
+    dependency_test_check(dependency_rule(&rule, NULL, 0, &needed) == DEPENDENCY_OK && needed == expected_length, "size query");
+    dependency_test_check(dependency_rule(&rule, output, expected_length, &needed) == DEPENDENCY_OK &&
+                          needed == expected_length && memcmp(output, expected, expected_length) == 0, "exact rule");
+    dependency_test_check(output[expected_length] == 0x5a, "no NUL or capacity overrun");
+    for (uint64_t capacity = 0; capacity < expected_length; capacity += 1)
     {
-        rule.scalar = scalar != 0;
         memset(output, 0x5a, sizeof(output));
-        uint64_t needed = UINT64_MAX;
-        dependency_test_check(dependency_rule(&rule, NULL, 0, &needed) == DEPENDENCY_OK && needed == expected_length, "size query");
-        dependency_test_check(dependency_rule(&rule, output, expected_length, &needed) == DEPENDENCY_OK &&
-                              needed == expected_length && memcmp(output, expected, expected_length) == 0, "exact rule");
-        dependency_test_check(output[expected_length] == 0x5a, "no NUL or capacity overrun");
-        for (uint64_t capacity = 0; capacity < expected_length; capacity += 1)
+        dependency_test_check(dependency_rule(&rule, output, capacity, &needed) == DEPENDENCY_CAPACITY && needed == expected_length, "capacity rejection");
+        bool unchanged = true;
+        for (size_t i = 0; i < sizeof(output); i += 1)
         {
-            memset(output, 0x5a, sizeof(output));
-            dependency_test_check(dependency_rule(&rule, output, capacity, &needed) == DEPENDENCY_CAPACITY && needed == expected_length, "capacity rejection");
-            bool unchanged = true;
-            for (size_t i = 0; i < sizeof(output); i += 1)
-            {
-                unchanged = unchanged && output[i] == 0x5a;
-            }
-            dependency_test_check(unchanged, "capacity rejection preserves destination");
+            unchanged = unchanged && output[i] == 0x5a;
         }
+        dependency_test_check(unchanged, "capacity rejection preserves destination");
     }
 }
 
@@ -128,8 +124,7 @@ static void dependency_test_generated(void)
     static const char alphabet[] = "abcXYZ012._/- \t$#\\\\";
     char input[257];
     char expected[2048];
-    char scalar_output[2048];
-    char vector_output[2048];
+    char output[2048];
     uint32_t random = 0x805;
     for (uint32_t iteration = 0; iteration < 8192; iteration += 1)
     {
@@ -153,18 +148,24 @@ static void dependency_test_generated(void)
         DependencyRule rule = {
             .source = { .pointer = input, .length = length },
             .object = dependency_test_text("out.o"),
-            .scalar = true,
         };
-        uint64_t scalar_count = 0;
-        uint64_t vector_count = 0;
-        const DependencyStatus scalar_status = dependency_rule(&rule, scalar_output, sizeof(scalar_output), &scalar_count);
-        rule.scalar = false;
-        const DependencyStatus vector_status = dependency_rule(&rule, vector_output, sizeof(vector_output), &vector_count);
-        dependency_test_check(scalar_status == DEPENDENCY_OK && vector_status == DEPENDENCY_OK &&
-                              scalar_count == expected_count && vector_count == expected_count &&
-                              memcmp(scalar_output, expected, expected_count) == 0 &&
-                              memcmp(vector_output, expected, expected_count) == 0, "generated independent quote oracle");
+        uint64_t count = 0;
+        const DependencyStatus status = dependency_rule(&rule, output, sizeof(output), &count);
+        dependency_test_check(status == DEPENDENCY_OK && count == expected_count && memcmp(output, expected, expected_count) == 0,
+                              "generated independent quote oracle");
     }
+}
+
+// The classifier's definition, a byte at a time: NUL, CR, LF, space, tab, '$', '#' and '\\' are special.
+static uint64_t dependency_test_special(const char* text, uint32_t count)
+{
+    uint64_t mask = 0;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        const unsigned char c = (unsigned char)text[i];
+        mask |= (uint64_t)(c == 0 || c == '\r' || c == '\n' || c == ' ' || c == '\t' || c == '$' || c == '#' || c == '\\') << i;
+    }
+    return mask;
 }
 
 static void dependency_test_guarded(void)
@@ -187,8 +188,8 @@ static void dependency_test_guarded(void)
                     {
                         char* start = memory + page - length;
                         memset(start, (int)byte, length);
-                        const uint64_t expected = dependency_special_scalar(start, length);
-                        dependency_test_check(dependency_special(start, length, false) == expected, "all bytes and guarded classifier tails");
+                        const uint64_t expected = dependency_test_special(start, length);
+                        dependency_test_check(dependency_special(start, length) == expected, "all bytes and guarded classifier tails");
                     }
                 }
                 for (uint32_t length = 1; length <= 256; length += 1)
@@ -428,6 +429,6 @@ int main(int argc, char** argv)
     {
         dependency_test_check(false, "usage: dependency-rule-test [--oracle]");
     }
-    printf("dependency-rule: %u checks, %u failures; AVX-512BW compiled: %d\n", checks, failures, BUSTER_DEPENDENCY_VECTOR);
+    printf("dependency-rule: %u checks, %u failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }

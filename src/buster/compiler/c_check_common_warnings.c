@@ -8647,9 +8647,9 @@ static CheckCommonInitializerKeys check_common_initializer_roots(const Parser* p
     const uint32_t varying = input->graph.count != 0 ? UINT32_MAX >> __builtin_clz(input->graph.count) : 0;
     const CheckCommonInitializerKeys result =
     {
-        .literal = count != 0 ? c_bindings_sort(keys, temporary, count, !parser->options.scalar, varying) : NULL,
+        .literal = count != 0 ? c_bindings_sort(keys, temporary, count, varying) : NULL,
         .literal_count = count,
-        .integer = integer_count != 0 ? c_bindings_sort(integer_keys, integer_temporary, integer_count, !parser->options.scalar, varying) : NULL,
+        .integer = integer_count != 0 ? c_bindings_sort(integer_keys, integer_temporary, integer_count, varying) : NULL,
         .integer_count = integer_count,
     };
     return result;
@@ -9287,7 +9287,6 @@ static bool check_common_shift_extras(const Parser* parser, const CheckInput* in
                                       const CheckCommonFacts* facts, CheckCommonShiftExtras* extras, Arena* scratch)
 {
     const CheckGraph* graph = &input->graph;
-    const bool vector = !BUSTER_SCALAR_PATH(parser->options.scalar);
     CheckCommonScan scan = { 0 };
     bool needed = false;
     for (uint32_t node = check_common_next_candidate(facts->candidates, CHECK_COMMON_CANDIDATE_SHIFT, &scan); !needed && node < graph->count;
@@ -9332,7 +9331,7 @@ static bool check_common_shift_extras(const Parser* parser, const CheckInput* in
             }
             count = used;
             const uint32_t varying = UINT32_MAX >> __builtin_clz(graph->count);
-            const uint64_t* ordered = c_bindings_sort(keys, temporary, count, vector, varying);
+            const uint64_t* ordered = c_bindings_sort(keys, temporary, count, varying);
             for (uint32_t i = 0; i < count; i += 1)
             {
                 const uint32_t root = (uint32_t)ordered[i];
@@ -9340,7 +9339,7 @@ static bool check_common_shift_extras(const Parser* parser, const CheckInput* in
                 keys[i] = (uint64_t)root << 32 | i;
             }
             extras->records = records;
-            extras->root_order = c_bindings_sort(keys, temporary, count, vector, varying);
+            extras->root_order = c_bindings_sort(keys, temporary, count, varying);
             extras->count = count;
             uint32_t extra = 0;
             for (uint32_t node = 0; node < graph->count; node += 1)
@@ -9388,7 +9387,7 @@ static bool check_common_displaced_root(const Parser* parser, const CheckGraph* 
 // closers, a statement's condition's `)` (its node the token's) and a for clause's `)` (the discard of its increment's
 // value, the node of the token its last token climbs to), 64 roles at a time (check_common_next_token).
 static uint32_t check_common_displaced_roots(const Parser* parser, const CheckInput* input, const uint32_t* parents, uint8_t* emitted, uint64_t* items,
-                                             uint64_t* temporary, const uint64_t** sorted, bool vector)
+                                             uint64_t* temporary, const uint64_t** sorted)
 {
     static const uint8_t closers[] = { PARSE_ROLE_CLOSE_CONDITION, PARSE_ROLE_CLOSE_FOR };
     const CheckGraph* graph = &input->graph;
@@ -9421,7 +9420,7 @@ static uint32_t check_common_displaced_roots(const Parser* parser, const CheckIn
         }
     }
     const uint32_t varying = graph->count != 0 ? UINT32_MAX >> __builtin_clz(graph->count) : 0;
-    *sorted = !ordered ? c_bindings_sort(items, temporary, count, vector, varying) : items;
+    *sorted = !ordered ? c_bindings_sort(items, temporary, count, varying) : items;
     return count;
 }
 
@@ -9455,7 +9454,7 @@ struct CheckCommonRootOrder
 // unit with few pays for their nodes alone.
 static uint32_t check_common_inner_roots(const Parser* parser, const CheckInput* input, const CheckStream* stream, const uint32_t* parents,
                                          const uint8_t* evaluated, uint8_t* reach, uint8_t* emitted, uint64_t* items, uint64_t* temporary,
-                                         uint64_t** sorted, bool vector)
+                                         uint64_t** sorted)
 {
     const CheckGraph* graph = &input->graph;
     const uint32_t tokens = parser->tokens.count;
@@ -9497,7 +9496,7 @@ static uint32_t check_common_inner_roots(const Parser* parser, const CheckInput*
         }
     }
     const uint32_t varying = graph->count != 0 ? UINT32_MAX >> __builtin_clz(graph->count) : 0;
-    *sorted = count != 0 ? c_bindings_sort(items, temporary, count, vector, varying) : items;
+    *sorted = count != 0 ? c_bindings_sort(items, temporary, count, varying) : items;
     return count;
 }
 
@@ -9674,7 +9673,6 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
         {
             check_common_exhausted(pp);
         }
-        const bool vector = !BUSTER_SCALAR_PATH(parser->options.scalar);
         // Expression roots in graph order: each evaluated expression emits its subtree's deferred warnings
         // where clang's traversal puts them — the diagnostics' shared publication slot keeps this order. A root
         // whose subtree holds no reach and whose discarded expression is no comma and can't have a marker can't warn.
@@ -9692,7 +9690,7 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
         // The brace initializers whose lists can warn, each list one full expression (check_unseq_plans), by their last
         // value's node, where the walk checks them.
         uint32_t unsequenced_plan_count = 0;
-        const uint64_t* unsequenced_plans = unsequenced_marks != NULL ? check_unseq_plans(input, program, parents, unsequenced_marks, vector, scratch,
+        const uint64_t* unsequenced_plans = unsequenced_marks != NULL ? check_unseq_plans(input, program, parents, unsequenced_marks, scratch,
                                                                                         &unsequenced_plan_count, &unsequenced_failed) : NULL;
         uint32_t unsequenced_plan = 0;
         if (unsequenced_failed)
@@ -9717,10 +9715,10 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
         }
         uint64_t* inner_sorted = inner;
         emission.inner_count = inner_temporary != NULL ? check_common_inner_roots(parser, input, stream, facts->parents, facts->evaluated, facts->reach, emitted,
-                                                                                   inner, inner_temporary, &inner_sorted, vector) : 0;
+                                                                                   inner, inner_temporary, &inner_sorted) : 0;
         emission.inner = inner_sorted;
         const uint32_t displaced_count = displaced_temporary != NULL ?
-                                         check_common_displaced_roots(parser, input, parents, emitted, displaced, displaced_temporary, &displaced_sorted, vector) : 0;
+                                         check_common_displaced_roots(parser, input, parents, emitted, displaced, displaced_temporary, &displaced_sorted) : 0;
         CheckCommonRootOrder order = { .displaced = displaced_sorted, .displaced_count = displaced_count, .emitted = emitted,
                                        .skipping = displaced_count != 0 || emission.inner_count != 0 };
         order.natural = check_common_next_root(parents, facts->roots, graph->count, &order.roots);
@@ -12124,7 +12122,7 @@ static bool check_common_chosen_spans(const CheckGraph* graph, const Parser* par
                     every &= token;
                 }
             }
-            const uint64_t* const sorted = c_bindings_sort(keys, temporary, queries, vector, any ^ every);
+            const uint64_t* const sorted = c_bindings_sort(keys, temporary, queries, any ^ every);
             const uint32_t* const depths = parser->tree.depths;
             const uint8_t* const kinds = parser->tokens.kinds;
             const uint32_t through = (uint32_t)(sorted[queries - 1] >> 32) + 1;
@@ -12387,7 +12385,7 @@ static bool check_common_unselected_roots_indexed(const CheckGraph* graph, const
             }
         }
         const uint32_t varying = last != 0 ? UINT32_MAX >> __builtin_clz(last) : 0;
-        const uint64_t* const closes = valid ? c_bindings_sort(keys, temporary, selections, vector, varying) : NULL;
+        const uint64_t* const closes = valid ? c_bindings_sort(keys, temporary, selections, varying) : NULL;
         used = 0;
         // The two halves do not overlap the closing-token keys. Claim each closing token once, by its last keyword
         // child, exactly as the oracle's backward walk does. Sort these sparse claims to join the closing-token keys.
@@ -12416,7 +12414,7 @@ static bool check_common_unselected_roots_indexed(const CheckGraph* graph, const
             }
             end = first;
         }
-        const uint64_t* const keywords = valid ? c_bindings_sort(keys + selections, temporary + selections, used, vector, varying) : NULL;
+        const uint64_t* const keywords = valid ? c_bindings_sort(keys + selections, temporary + selections, used, varying) : NULL;
         uint32_t matched = 0;
         uint32_t keyword = 0;
         for (uint32_t i = 0; valid && i < selections && keyword < used; i += 1)
@@ -12456,7 +12454,7 @@ static bool check_common_unselected_roots_indexed(const CheckGraph* graph, const
                 keys[pieces++] = (uint64_t)resume << 32 | close;
             }
         }
-        const uint64_t* const ranges = valid ? c_bindings_sort(keys, temporary, pieces, vector, varying) : NULL;
+        const uint64_t* const ranges = valid ? c_bindings_sort(keys, temporary, pieces, varying) : NULL;
         uint32_t covered = 0;
         const uint32_t lowest = pieces != 0 ? (uint32_t)(ranges[0] >> 32) : last;
         if (valid && pieces != 0)

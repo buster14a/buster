@@ -6,7 +6,7 @@
 // without replaying the grammar; ambiguous inputs retain the exact resolved-binding planner below. Both prove
 // which system static/inline bodies are unreachable from ordinary bodies and file-scope uses. Neither ever
 // substitutes its conservative checking-demand graph for the checked semantic references used for emission.
-// The shared #129 solver supplies independent scalar/vector traversals; INLINE_ONLY is deliberately absent here:
+// The shared #129 solver supplies the vector traversal (c_lowering_vector); INLINE_ONLY is deliberately absent here:
 // referencing an inline body demands semantic checking even when that body has no emitted definition.
 //
 // All token intervals retain their original identities and order. The selected reader visits the unit once in
@@ -231,7 +231,7 @@ static bool check_lazy_replay(CheckLazy* result, const Parser* parser, const Pre
     Parser replay = valid ? *parser : (Parser){ 0 };
     replay.scratch = *scratch;
     valid = valid && parse_bindings_build(&bindings, &replay, output) && bindings.body_count == body_count &&
-            parse_bindings_resolve(&bindings, BUSTER_SCALAR_PATH(scalar), scratch);
+            parse_bindings_resolve(&bindings, scratch);
     uint32_t* owners = valid ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, slots) : 0;
     uint32_t* firsts = owners != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, slots) : 0;
     uint32_t* targets = firsts != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, names) : 0;
@@ -366,7 +366,7 @@ static bool check_lazy_replay(CheckLazy* result, const Parser* parser, const Pre
             .reference_kind = kinds,
         };
         valid = valid && c_lowering_prepare(scratch, graph, &plan) == C_LOWERING_OK;
-        valid = valid && (BUSTER_SCALAR_PATH(scalar) ? c_lowering_scalar(&plan, C_LOWERING_REACHABLE) : c_lowering_vector(&plan, C_LOWERING_REACHABLE)) == C_LOWERING_OK;
+        valid = valid && c_lowering_vector(&plan, C_LOWERING_REACHABLE) == C_LOWERING_OK;
         if (valid)
         {
             for (uint32_t body = 0; body < body_count; body += 1)
@@ -404,7 +404,7 @@ static bool check_lazy_replay(CheckLazy* result, const Parser* parser, const Pre
 // Prove that policy before either planner tries to classify declarators: an asm label in an otherwise unusual
 // header must not force a whole-unit grammar replay just to select every body. This allocates nothing, and its
 // count is used only for opt-in reporting. The metadata-producing check_lazy_plan retains its complete contract.
-static bool check_lazy_eager(const Parser* parser, const Preprocessor* pp, bool scalar, uint32_t* selected)
+static bool check_lazy_eager(const Parser* parser, const Preprocessor* pp, uint32_t* selected)
 {
     const bool valid = parser != NULL && pp != NULL && pp->table != NULL && parser->errors == 0 && parser->fatal == PARSE_MESSAGE_NONE &&
                        parser->tree.roles != NULL && parser->tokens.kinds != NULL && parser->tokens.names != NULL;
@@ -423,38 +423,22 @@ static bool check_lazy_eager(const Parser* parser, const Preprocessor* pp, bool 
     for (uint64_t block = 0; block < count; block += 64)
     {
         const uint32_t live = count - block < 64 ? (uint32_t)(count - block) : 64;
-        if (!scalar)
+        const __mmask64 active = live == 64 ? UINT64_MAX : (UINT64_C(1) << live) - 1;
+        const __m512i role = _mm512_maskz_loadu_epi8(active, roles + block);
+        bodies += (uint32_t)__builtin_popcountll(_mm512_mask_cmpeq_epi8_mask(active, role, _mm512_set1_epi8(PARSE_ROLE_OPEN_BODY)));
+        if (!opaque)
         {
-            const __mmask64 active = live == 64 ? UINT64_MAX : (UINT64_C(1) << live) - 1;
-            const __m512i role = _mm512_maskz_loadu_epi8(active, roles + block);
-            bodies += (uint32_t)__builtin_popcountll(_mm512_mask_cmpeq_epi8_mask(active, role, _mm512_set1_epi8(PARSE_ROLE_OPEN_BODY)));
-            if (!opaque)
-            {
-                const __m512i kind = _mm512_maskz_loadu_epi8(active, kinds + block);
-                opaque = _mm512_mask_cmpeq_epi8_mask(active, kind, _mm512_set1_epi8(PARSE_KIND_ASM)) != 0;
-            }
-            for (uint32_t lane = 0; !opaque && lane < live; lane += 16)
-            {
-                const uint32_t remaining = live - lane;
-                const __mmask16 present = remaining < 16 ? (__mmask16)((1u << remaining) - 1) : (__mmask16)UINT16_MAX;
-                const __m512i ids = _mm512_maskz_loadu_epi32(present, names + block + lane);
-                for (uint32_t name = 0; !opaque && name < BUSTER_ARRAY_LENGTH(opaque_names); name += 1)
-                {
-                    opaque = opaque_names[name] != 0 && _mm512_mask_cmpeq_epi32_mask(present, ids, _mm512_set1_epi32((int32_t)opaque_names[name])) != 0;
-                }
-            }
+            const __m512i kind = _mm512_maskz_loadu_epi8(active, kinds + block);
+            opaque = _mm512_mask_cmpeq_epi8_mask(active, kind, _mm512_set1_epi8(PARSE_KIND_ASM)) != 0;
         }
-        else
+        for (uint32_t lane = 0; !opaque && lane < live; lane += 16)
         {
-            for (uint32_t lane = 0; lane < live; lane += 1)
+            const uint32_t remaining = live - lane;
+            const __mmask16 present = remaining < 16 ? (__mmask16)((1u << remaining) - 1) : (__mmask16)UINT16_MAX;
+            const __m512i ids = _mm512_maskz_loadu_epi32(present, names + block + lane);
+            for (uint32_t name = 0; !opaque && name < BUSTER_ARRAY_LENGTH(opaque_names); name += 1)
             {
-                const uint32_t token = (uint32_t)block + lane;
-                bodies += roles[token] == PARSE_ROLE_OPEN_BODY;
-                opaque |= kinds[token] == PARSE_KIND_ASM;
-                for (uint32_t name = 0; !opaque && name < BUSTER_ARRAY_LENGTH(opaque_names); name += 1)
-                {
-                    opaque = opaque_names[name] != 0 && names[token] == opaque_names[name];
-                }
+                opaque = opaque_names[name] != 0 && _mm512_mask_cmpeq_epi32_mask(present, ids, _mm512_set1_epi32((int32_t)opaque_names[name])) != 0;
             }
         }
     }
@@ -464,7 +448,7 @@ static bool check_lazy_eager(const Parser* parser, const Preprocessor* pp, bool 
 
 static bool check_lazy_plan(CheckLazy* result, const Parser* parser, const Preprocessor* pp, Arena* output, Arena* scratch, bool scalar)
 {
-    const CheckLazyStatus status = check_lazy_tree_plan(result, parser, pp, output, scratch, scalar);
+    const CheckLazyStatus status = check_lazy_tree_plan(result, parser, pp, output, scratch);
     bool valid = status == CHECK_LAZY_OK;
     if (status == CHECK_LAZY_UNSUPPORTED)
     {

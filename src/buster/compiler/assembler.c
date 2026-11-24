@@ -195,7 +195,6 @@ struct AsmInstruction
 typedef struct AsmOptions AsmOptions;
 struct AsmOptions
 {
-    bool vectorized;
     bool intel;
     // A C unit's assembly (inline templates and file-scope asm), which follows clang's integrated assembler where it
     // differs from GNU as: `.comm` without an alignment and `.lcomm` align to 1 (#2304). `.s` files keep GNU as's rules,
@@ -483,37 +482,23 @@ static bool asm_word_byte(uint8_t byte)
     return (byte >= 'a' && byte <= 'z') || (byte >= 'A' && byte <= 'Z') || (byte >= '0' && byte <= '9') || byte == '_' || byte == '.';
 }
 
-static uint32_t asm_word_length(const uint8_t* source, uint32_t length, bool vectorized)
+static uint32_t asm_word_length(const uint8_t* source, uint32_t length)
 {
-    (void)vectorized;
-
     uint32_t count = 0;
-    if (BUSTER_VECTOR_PATH(vectorized))
+    bool stopped = false;
+    while (count < length && !stopped)
     {
-        while (count < length)
-        {
-            const uint32_t left = length - count;
-            const uint32_t n = left < 64 ? left : 64;
-            const uint64_t valid = n == 64 ? UINT64_MAX : (1ull << n) - 1;
-            const __m512i bytes = _mm512_maskz_loadu_epi8(valid, source + count);
-            const __m512i lower = _mm512_or_si512(bytes, _mm512_set1_epi8(32));
-            uint64_t word = _mm512_cmple_epu8_mask(_mm512_sub_epi8(lower, _mm512_set1_epi8('a')), _mm512_set1_epi8(25));
-            word |= _mm512_cmple_epu8_mask(_mm512_sub_epi8(bytes, _mm512_set1_epi8('0')), _mm512_set1_epi8(9));
-            word |= _mm512_cmpeq_epi8_mask(bytes, _mm512_set1_epi8('_')) | _mm512_cmpeq_epi8_mask(bytes, _mm512_set1_epi8('.'));
-            const uint64_t stop = valid & ~word;
-            count += stop != 0 ? __builtin_ctzll(stop) : n;
-            if (stop != 0)
-            {
-                break;
-            }
-        }
-    }
-    else
-    {
-        while (count < length && asm_word_byte(source[count]))
-        {
-            count += 1;
-        }
+        const uint32_t left = length - count;
+        const uint32_t n = left < 64 ? left : 64;
+        const uint64_t valid = n == 64 ? UINT64_MAX : (1ull << n) - 1;
+        const __m512i bytes = _mm512_maskz_loadu_epi8(valid, source + count);
+        const __m512i lower = _mm512_or_si512(bytes, _mm512_set1_epi8(32));
+        uint64_t word = _mm512_cmple_epu8_mask(_mm512_sub_epi8(lower, _mm512_set1_epi8('a')), _mm512_set1_epi8(25));
+        word |= _mm512_cmple_epu8_mask(_mm512_sub_epi8(bytes, _mm512_set1_epi8('0')), _mm512_set1_epi8(9));
+        word |= _mm512_cmpeq_epi8_mask(bytes, _mm512_set1_epi8('_')) | _mm512_cmpeq_epi8_mask(bytes, _mm512_set1_epi8('.'));
+        const uint64_t stop = valid & ~word;
+        stopped = stop != 0;
+        count += stopped ? (uint32_t)__builtin_ctzll(stop) : n;
     }
     return count;
 }
@@ -561,7 +546,7 @@ static void asm_lex_scalar(AsmParser* parser)
         }
         if (asm_word_byte(byte))
         {
-            at = start + asm_word_length(bytes + start, length - start, BUSTER_VECTOR_PATH(parser->options.vectorized));
+            at = start + asm_word_length(bytes + start, length - start);
             kind = BUSTER_ASM_WORD;
         }
         else if (byte == '"')
@@ -698,7 +683,7 @@ static void asm_lex_vector(AsmParser* parser)
         }
         else if (asm_word_byte(source[at]))
         {
-            const uint32_t end = at + asm_word_length(source + at, length - at, true);
+            const uint32_t end = at + asm_word_length(source + at, length - at);
             parser->tokens[parser->token_count++] = (AsmToken){.start = at, .end = end, .kind = BUSTER_ASM_WORD};
             at = end;
         }
@@ -733,7 +718,6 @@ static void asm_lex_vector(AsmParser* parser)
             rare.source = (String8){.pointer = parser->source.pointer + at, .length = end - at};
             rare.tokens += parser->token_count;
             rare.token_count = 0;
-            rare.options.vectorized = false;
             asm_lex_scalar(&rare);
             for (uint32_t i = 0; i < rare.token_count; i += 1)
             {
@@ -4211,15 +4195,6 @@ static bool asm_layout_records(AsmParser* parser)
     return eligible;
 }
 
-static __m512i asm_prefix16(__m512i values)
-{
-    values = _mm512_add_epi32(values, _mm512_maskz_permutexvar_epi32(0xfffe, _mm512_setr_epi32(0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14), values));
-    values = _mm512_add_epi32(values, _mm512_maskz_permutexvar_epi32(0xfffc, _mm512_setr_epi32(0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13), values));
-    values = _mm512_add_epi32(values, _mm512_maskz_permutexvar_epi32(0xfff0, _mm512_setr_epi32(0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11), values));
-    values = _mm512_add_epi32(values, _mm512_maskz_permutexvar_epi32(0xff00, _mm512_setr_epi32(0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7), values));
-    return values;
-}
-
 // DWARF's variable-length integers, as GNU as's .uleb128 and .sleb128 write them. Compiler debug sections use them for
 // constant offsets, label differences and label offsets, which asm_leb_value reduces to one value.
 static uint32_t asm_leb_size(__int128 value, bool is_signed)
@@ -4402,9 +4377,10 @@ static uint32_t asm_relax_role(const AsmRelax* relax, const AsmFragment* fragmen
     return leb ? ASM_RELAX_LEB : branch ? ASM_RELAX_BRANCH : ASM_RELAX_PLAIN;
 }
 
-// GNU as's first addresses, every branch short and every LEB128 one byte, recording the section's events. Between
-// alignments, the vector path computes sixteen offsets by a prefix network; the exact path is a plain sum. Scalar
-// column loads/stores avoid Zen 5's costly gather/scatter.
+// GNU as's first addresses, every branch short and every LEB128 one byte, recording the section's events. The offsets
+// are a plain running sum: sixteen at a time by a prefix network made layout 0.1% to 3.8% slower on every input
+// (#2924), as each fragment's size and role are reached through `fragment_order` either way. #3429 asks for a
+// vectorized form that wins.
 static void asm_relax_first(AsmParser* parser, AsmRelax* relax, uint32_t section)
 {
     const uint32_t* order = parser->fragment_order;
@@ -4427,45 +4403,6 @@ static void asm_relax_first(AsmParser* parser, AsmRelax* relax, uint32_t section
             region += 1;
             offset += fragment->size;
             at += 1;
-        }
-        else if (BUSTER_VECTOR_PATH(parser->options.vectorized))
-        {
-            uint32_t sizes[16] = {0};
-            uint32_t offsets[16];
-            uint32_t count = 0;
-            uint64_t total = offset;
-            while (count < 16 && at + count < end && parser->fragments[order[at + count]].kind != ASM_ALIGN)
-            {
-                sizes[count] = parser->fragments[order[at + count]].size;
-                total += sizes[count++];
-            }
-            const __m512i values = _mm512_loadu_si512(sizes);
-            const __m512i prefix = asm_prefix16(values);
-            _mm512_storeu_si512(offsets, _mm512_add_epi32(_mm512_sub_epi32(prefix, values), _mm512_set1_epi32(offset)));
-            for (uint32_t i = 0; i < count; i += 1)
-            {
-                const uint32_t member = order[at + i];
-                AsmFragment* placed = &parser->fragments[member];
-                placed->offset = offsets[i];
-                const uint32_t role = asm_relax_role(relax, placed, member);
-                if (role != ASM_RELAX_PLAIN)
-                {
-                    asm_relax_add(relax, placed, member, region << 2 | role, &event_end);
-                }
-            }
-            if (total > BUSTER_ASM_MAX_SECTION)
-            {
-                // Name the fragment that crosses the limit, as the exact path does, not the group's first.
-                uint64_t crossed = offset;
-                uint32_t i = 0;
-                while ((crossed += sizes[i]) <= BUSTER_ASM_MAX_SECTION)
-                {
-                    i += 1;
-                }
-                asm_fail(parser, parser->fragments[order[at + i]].location, "section exceeds the 256 MiB layout limit");
-            }
-            offset = (uint32_t)total;
-            at += count;
         }
         else
         {
@@ -4616,8 +4553,8 @@ static bool asm_relax_pass(AsmParser* parser, AsmRelax* relax, uint32_t section)
     return stretched;
 }
 
-// Every fragment's offset from the passes' sizes: one prefix sum per section, sixteen at a time on the vector path,
-// with no alignment to stop at, as the events' sizes are final.
+// Every fragment's offset from the passes' sizes: one running sum per section, with no alignment to stop at, as the
+// events' sizes are final.
 static void asm_relax_place(AsmParser* parser, const AsmRelax* relax, uint32_t section)
 {
     for (uint32_t e = relax->event_begin[section]; e < relax->event_begin[section + 1]; e += 1)
@@ -4630,32 +4567,10 @@ static void asm_relax_place(AsmParser* parser, const AsmRelax* relax, uint32_t s
     uint32_t offset = 0;
     while (at < end)
     {
-        if (BUSTER_VECTOR_PATH(parser->options.vectorized))
-        {
-            uint32_t sizes[16] = {0};
-            uint32_t offsets[16];
-            const uint32_t count = end - at < 16 ? end - at : 16;
-            for (uint32_t i = 0; i < count; i += 1)
-            {
-                sizes[i] = parser->fragments[order[at + i]].size;
-            }
-            const __m512i values = _mm512_loadu_si512(sizes);
-            const __m512i prefix = asm_prefix16(values);
-            _mm512_storeu_si512(offsets, _mm512_add_epi32(_mm512_sub_epi32(prefix, values), _mm512_set1_epi32(offset)));
-            for (uint32_t i = 0; i < count; i += 1)
-            {
-                parser->fragments[order[at + i]].offset = offsets[i];
-            }
-            offset = offsets[count - 1] + sizes[count - 1];
-            at += count;
-        }
-        else
-        {
-            AsmFragment* fragment = &parser->fragments[order[at]];
-            fragment->offset = offset;
-            offset += fragment->size;
-            at += 1;
-        }
+        AsmFragment* fragment = &parser->fragments[order[at]];
+        fragment->offset = offset;
+        offset += fragment->size;
+        at += 1;
     }
 }
 

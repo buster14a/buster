@@ -6,8 +6,9 @@
 //   build/compiler test-lowering-templates [--passes N] [preprocessor options] file...
 //
 // Each file is prepared as -c prepares it (lower_source_open), then its selected program is lowered by the tasks alone
-// (check_program_lower's scalar path) and with the templates (check_program_lower_templates, which takes them on any
-// host's path): both must succeed or fail alike, and every function must have the same entries, locals (their classes,
+// (the general expansion, as the source rows' lowering takes it: check_program_lower_sources) and with the templates
+// (check_program_lower_templates, which also takes the plain expressions and the batched fragments): both must succeed or
+// fail alike, and every function must have the same entries, locals (their classes,
 // flags, sizes and alignments), calls and arguments. The report gives, per file and in total, the evaluated nodes and the
 // entries, and the share the templates' closed subtrees gave. A file the checker rejects is left out; any other failure
 // or difference fails the command: a file neither lowering lowers, the checker running out of a resource, and a corpus
@@ -52,7 +53,8 @@ static bool lower_templates_time(const CheckProgram* program, uint32_t passes, A
             const bool with_templates = ((pass + step) & 1) != 0;
             CheckProgramLowered lowered = { 0 };
             const uint64_t begin = check_source_time();
-            valid = with_templates ? check_program_lower_templates(&lowered, program, false, output, scratch) : check_program_lower(&lowered, program, true, output, scratch);
+            valid = with_templates ? check_program_lower_templates(&lowered, program, false, output, scratch) :
+                                     check_program_lower_sources(&lowered, program, true, output, scratch);
             const uint64_t elapsed = check_source_time() - begin;
             if (with_templates)
             {
@@ -111,7 +113,7 @@ static bool lower_templates_compare(const char* name, const CheckProgram* progra
 {
     CheckProgramLowered tasks = { 0 };
     CheckProgramLowered templates = { 0 };
-    const bool lowered_tasks = check_program_lower(&tasks, program, true, output, scratch);
+    const bool lowered_tasks = check_program_lower_sources(&tasks, program, true, output, scratch);
     const bool lowered_templates = check_program_lower_templates(&templates, program, true, output, scratch);
     const bool reasons = tasks.reason == templates.reason || (tasks.reason != NULL && templates.reason != NULL && strcmp(tasks.reason, templates.reason) == 0);
     bool same = lowered_tasks == lowered_templates && tasks.status == templates.status && tasks.token == templates.token && reasons &&

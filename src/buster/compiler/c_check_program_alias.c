@@ -188,7 +188,7 @@ static bool check_program_alias_names(const CheckProgram* program, CheckProgramA
     {
         hashes[k] = (uint64_t)(uint32_t)link_hash((const uint8_t*)aliases[k].target.pointer, aliases[k].target.length) << 32 | k;
     }
-    const uint64_t* by_hash = valid && count > 1 ? c_bindings_sort(hashes, hashes + count, count, !BUSTER_SCALAR_PATH(scalar), UINT32_MAX) : hashes;
+    const uint64_t* by_hash = valid && count > 1 ? c_bindings_sort(hashes, hashes + count, count, UINT32_MAX) : hashes;
     for (uint32_t i = 0; valid && i < count; i += 1)
     {
         const uint32_t k = (uint32_t)by_hash[i];
@@ -213,12 +213,12 @@ static bool check_program_alias_names(const CheckProgram* program, CheckProgramA
         }
         groups[k] = group;
     }
-    const uint64_t* by_name = valid && group_count > 1 ? c_bindings_sort(names, names + count, group_count, !BUSTER_SCALAR_PATH(scalar), UINT32_MAX) : names;
+    const uint64_t* by_name = valid && group_count > 1 ? c_bindings_sort(names, names + count, group_count, UINT32_MAX) : names;
     // The first scan: the labels, then their objects in order.
     uint32_t label_count = 0;
     for (uint32_t first = 0; valid && first < token_count; first += 64)
     {
-        const uint64_t lanes = BUSTER_SCALAR_PATH(scalar) ? check_input_scan_all(first, token_count) : check_input_scan_bit(input->declaration_bits, first, token_count, BUSTER_CHECK_BITS_STATIC);
+        const uint64_t lanes = check_input_scan_bit(input->declaration_bits, first, token_count, BUSTER_CHECK_BITS_STATIC);
         for (uint64_t selected = lanes; selected != 0; selected &= selected - 1)
         {
             const uint32_t token = first + (uint32_t)__builtin_ctzll(selected);
@@ -228,7 +228,7 @@ static bool check_program_alias_names(const CheckProgram* program, CheckProgramA
             }
         }
     }
-    const uint64_t* by_object = valid && label_count > 1 ? c_bindings_sort(labels, label_sorting, label_count, !BUSTER_SCALAR_PATH(scalar), UINT32_MAX) : labels;
+    const uint64_t* by_object = valid && label_count > 1 ? c_bindings_sort(labels, label_sorting, label_count, UINT32_MAX) : labels;
     // A label names its object: its group is the one of its name, by the hash and then the bytes.
     for (uint32_t l = 0; valid && l < label_count; l += 1)
     {
@@ -310,7 +310,7 @@ static bool check_program_alias_names(const CheckProgram* program, CheckProgramA
     // An identifier names its object where no declaration of it has a label, but an overloadable function's.
     for (uint32_t first = 0; valid && first < token_count; first += 64)
     {
-        const uint64_t lanes = BUSTER_SCALAR_PATH(scalar) ? check_input_scan_all(first, token_count) : check_input_scan_bit(input->declaration_bits, first, token_count, BUSTER_CHECK_BITS_STATIC);
+        const uint64_t lanes = check_input_scan_bit(input->declaration_bits, first, token_count, BUSTER_CHECK_BITS_STATIC);
         for (uint64_t selected = lanes; selected != 0; selected &= selected - 1)
         {
             const uint32_t token = first + (uint32_t)__builtin_ctzll(selected);
@@ -331,10 +331,10 @@ static bool check_program_alias_names(const CheckProgram* program, CheckProgramA
     {
         objects[g] = (uint64_t)(earliest[g] != BUSTER_CHECK_NONE ? input->objects[earliest[g]] : 0) << 32 | g;
     }
-    const uint64_t* by_target = valid && group_count > 1 ? c_bindings_sort(objects, objects + count, group_count, !BUSTER_SCALAR_PATH(scalar), UINT32_MAX) : objects;
+    const uint64_t* by_target = valid && group_count > 1 ? c_bindings_sort(objects, objects + count, group_count, UINT32_MAX) : objects;
     for (uint32_t first = 0; valid && first < token_count; first += 64)
     {
-        const uint64_t lanes = BUSTER_SCALAR_PATH(scalar) ? check_input_scan_all(first, token_count) : check_input_scan_bit(input->declaration_bits, first, token_count, BUSTER_CHECK_BITS_STATIC);
+        const uint64_t lanes = check_input_scan_bit(input->declaration_bits, first, token_count, BUSTER_CHECK_BITS_STATIC);
         for (uint64_t selected = lanes; selected != 0; selected &= selected - 1)
         {
             const uint32_t token = first + (uint32_t)__builtin_ctzll(selected);
@@ -463,7 +463,7 @@ static bool check_program_aliases(CheckProgram* program, CheckProgramTargetEvent
                                      program->parser->preprocessor != NULL ? program->parser->preprocessor->table : NULL;
     uint64_t* sorting = events->room && event_count > 1 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, event_count) : 0;
     bool valid = events->room && (event_count <= 1 || sorting != 0);
-    const uint64_t* keys = valid && event_count > 1 ? c_bindings_sort(events->alias_keys, sorting, event_count, !BUSTER_SCALAR_PATH(scalar), UINT32_MAX) : events->alias_keys;
+    const uint64_t* keys = valid && event_count > 1 ? c_bindings_sort(events->alias_keys, sorting, event_count, UINT32_MAX) : events->alias_keys;
     uint32_t count = 0;
     for (uint32_t e = 0; valid && e < event_count; e += 1)
     {
@@ -576,7 +576,7 @@ static bool check_program_label_merges(CheckProgram* program, const CheckProgram
     const uint64_t mark = scratch->length;
     uint64_t* sorting = events->room ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, event_count) : 0;
     bool valid = events->room && sorting != 0;
-    const uint64_t* keys = valid && event_count > 1 ? c_bindings_sort(events->label_keys, sorting, event_count, !BUSTER_SCALAR_PATH(scalar), UINT32_MAX) : events->label_keys;
+    const uint64_t* keys = valid && event_count > 1 ? c_bindings_sort(events->label_keys, sorting, event_count, UINT32_MAX) : events->label_keys;
     // The labelled objects, one each: its key (the object and its first labelled declaration), its label, the hash keys
     // that group them, and each one's group.
     uint32_t count = 0;
@@ -600,7 +600,7 @@ static bool check_program_label_merges(CheckProgram* program, const CheckProgram
             unique += 1;
         }
     }
-    const uint64_t* by_hash = valid && count > 1 ? c_bindings_sort(hashes, hashes + count, count, !BUSTER_SCALAR_PATH(scalar), UINT32_MAX) : hashes;
+    const uint64_t* by_hash = valid && count > 1 ? c_bindings_sort(hashes, hashes + count, count, UINT32_MAX) : hashes;
     // The groups, a name each: its first labelled object (by hash order), how many it has, and the unit's identifier of
     // its spelling, as keys of the identifier and the group.
     uint32_t* sizes = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, count) : 0;
@@ -632,7 +632,7 @@ static bool check_program_label_merges(CheckProgram* program, const CheckProgram
         scan |= sizes[group] > 1;
     }
     scan |= named != 0;
-    const uint64_t* by_name = valid && named > 1 ? c_bindings_sort(names, names + count, named, !BUSTER_SCALAR_PATH(scalar), UINT32_MAX) : names;
+    const uint64_t* by_name = valid && named > 1 ? c_bindings_sort(names, names + count, named, UINT32_MAX) : names;
     // The members: the labelled objects (0 to count - 1) and each group's identifier's object (count + group), with their
     // first definitions and tentative definitions, found by one scan of the unit's static declarations.
     const uint32_t members = count + group_count;
@@ -651,7 +651,7 @@ static bool check_program_label_merges(CheckProgram* program, const CheckProgram
     const uint32_t token_count = input->token_count;
     for (uint32_t first = 0; valid && scan && first < token_count; first += 64)
     {
-        const uint64_t lanes = BUSTER_SCALAR_PATH(scalar) ? check_input_scan_all(first, token_count) : check_input_scan_bit(input->declaration_bits, first, token_count, BUSTER_CHECK_BITS_STATIC);
+        const uint64_t lanes = check_input_scan_bit(input->declaration_bits, first, token_count, BUSTER_CHECK_BITS_STATIC);
         for (uint64_t selected = lanes; selected != 0; selected &= selected - 1)
         {
             const uint32_t token = first + (uint32_t)__builtin_ctzll(selected);
@@ -734,7 +734,7 @@ static bool check_program_label_merges(CheckProgram* program, const CheckProgram
             merged[merge_count++] = (uint64_t)member_objects[m] << 32 | member_objects[canonical[g]];
         }
     }
-    const uint64_t* sorted_merges = valid && merge_count > 1 ? c_bindings_sort(merged, merge_sorting, merge_count, !BUSTER_SCALAR_PATH(scalar), UINT32_MAX) : merged;
+    const uint64_t* sorted_merges = valid && merge_count > 1 ? c_bindings_sort(merged, merge_sorting, merge_count, UINT32_MAX) : merged;
     if (valid && merge_count != 0)
     {
         if (sorted_merges != merged)
@@ -754,7 +754,7 @@ static bool check_program_label_merges(CheckProgram* program, const CheckProgram
 // nothing else needs it (clang's GetWeakRefReference, whose extern_weak declaration an ordinary reference makes
 // external), which the first loop decides for every weakref before the second marks any target. Returns false where
 // there was no room.
-static bool check_program_alias_number(CheckProgram* program, uint8_t* needed, uint8_t* states, bool scalar, Arena* output)
+static bool check_program_alias_number(CheckProgram* program, uint8_t* needed, uint8_t* states, Arena* output)
 {
     // An object an asm label makes another's symbol (#1979) needs that one's instead.
     for (uint32_t k = 0; k < program->label_merge_count; k += 1)
@@ -810,12 +810,12 @@ static bool check_program_alias_number(CheckProgram* program, uint8_t* needed, u
                                      check_input_bit(program->input->declaration_bits, object - 1, BUSTER_CHECK_BITS_STATIC);
         needed[object] = global_register ? 0 : needed[object];
     }
-    program->symbol_count = check_program_needed_count(needed, program->object_count, BUSTER_SCALAR_PATH(scalar));
+    program->symbol_count = check_program_needed_count(needed, program->object_count);
     program->symbol_objects = program->symbol_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, program->symbol_count) : 0;
     const bool valid = program->symbol_count == 0 || program->symbol_objects != 0;
     if (valid && program->symbol_count != 0)
     {
-        check_program_needed_number(needed, program->object_count, program->object_symbols, program->symbol_objects, BUSTER_SCALAR_PATH(scalar));
+        check_program_needed_number(needed, program->object_count, program->object_symbols, program->symbol_objects);
     }
     for (uint32_t k = 0; valid && k < program->alias_count; k += 1)
     {

@@ -509,9 +509,12 @@ outputs are the clang-built compiler's, byte for byte.
 failures were gone. The build has the lever as `BUSTER_SELF_BUILT` for Develop
 alone, with the tree's Release executable as the previous stage and clang's
 predefined macros, starting with the units whose code no compile runs (`tests`).
-Its first self-built units found a Tier 1 miscompile (#3424, fixed). The build
-guide's ["Self-built units"](commands/build.md#self-built-units) has the
-setting and its measurements.
+Its first self-built units found a Tier 1 miscompile (#3424, fixed). On the
+9700X a clean Develop build took 27.7 s against 31.9 s, an edit of a file only
+those units read 2.9 s against 6.6 s, the compile path ran as before and the
+units' own tests 5.8% longer. The build guide's ["Self-built
+units"](commands/build.md#self-built-units) has the setting and its
+measurements.
 
 ### 7. A faster clang
 

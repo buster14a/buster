@@ -3,7 +3,7 @@
 //
 // Synthetic definition-graph benchmark for #126/#129, included after c_lowering.c by main.c. This does not extract
 // references from C, check function bodies or lower selected bodies: it cannot establish main.c lowering savings.
-// run_c_lowering_benchmark measures vector/scalar selection on a reusable prepared graph, and "prepare" measures
+// run_c_lowering_benchmark measures vector selection on a reusable prepared graph, and "prepare" measures
 // arena reservation, first touches, validation/copy/CSR handoff and vector selection together. Input generation and
 // the independent byte-mark/linked-edge oracle are outside all timings. Prepared graphs are checked before their
 // arenas are released; that verification and arena teardown are outside the timing. Workspace is reported explicitly.
@@ -12,13 +12,13 @@
 // is checked against the independent oracle, including reached bits, ordered IDs, kinds and work counts. Preparation
 // also checks the full copied graph, including unreachable edges. The default is unconditioned, even with --only.
 // Intervening result checks do not establish sustained vector execution. --before-vector MS runs the selector repeatedly
-// immediately before vector/prepare samples; mutually exclusive --after-scalar MS runs the scalar selector instead.
+// immediately before vector/prepare samples.
 // Conditioning uses a separate prepared plan so its final output remains available for checking AFTER the measured
 // call. No result verification separates the last conditioning iteration from measurement, only small local setup,
 // counter control and clock reads. Compare both conditions across separate processes on the locked 9700X, CPU 2.
 // Nanoseconds cover one operation; perf cycles/instructions include the bracketing clock reads, and are unavailable
-// if opening, enabling, reading or uninterrupted scheduling of the group fails. There is no prepare+scalar path, so
-// these measurements cannot establish a whole-planner vector speedup.
+// if opening, enabling, reading or uninterrupted scheduling of the group fails. The scalar selector was deleted under
+// #2924 (one implementation per function); the independent oracle checks every result.
 //
 // The clock, median and perf setup adapt this repository's original c_bindings_benchmark.c at
 // c62cd8405e75838bd387d0bd1b7c025de43586f6 (Apache-2.0 WITH LLVM-exception). The two-counter group, synthetic graphs,
@@ -41,7 +41,7 @@
 #define BUSTER_C_LOWERING_BENCHMARK_MAX_DEFINITIONS 1048576u
 #define BUSTER_C_LOWERING_BENCHMARK_DUPLICATES 32u
 #define BUSTER_C_LOWERING_BENCHMARK_SHAPES 6u
-#define BUSTER_C_LOWERING_BENCHMARK_PATHS 3u
+#define BUSTER_C_LOWERING_BENCHMARK_PATHS 2u
 
 typedef enum CLoweringBenchmarkShape CLoweringBenchmarkShape;
 enum CLoweringBenchmarkShape
@@ -58,7 +58,6 @@ typedef enum CLoweringBenchmarkPath CLoweringBenchmarkPath;
 enum CLoweringBenchmarkPath
 {
     C_LOWERING_BENCHMARK_VECTOR,
-    C_LOWERING_BENCHMARK_SCALAR,
     C_LOWERING_BENCHMARK_PREPARE,
 };
 
@@ -82,7 +81,6 @@ static const uint32_t c_lowering_benchmark_sizes[BUSTER_C_LOWERING_BENCHMARK_SHA
 
 static const char* const c_lowering_benchmark_paths[BUSTER_C_LOWERING_BENCHMARK_PATHS] = {
     "vector",
-    "scalar",
     "prepare",
 };
 
@@ -92,7 +90,6 @@ struct CLoweringBenchmarkOptions
     uint32_t definitions;
     uint32_t shape;
     uint32_t only;
-    uint32_t after_scalar;
     uint32_t before_vector;
 };
 
@@ -246,11 +243,6 @@ static bool c_lowering_benchmark_options(int argc, char** argv, CLoweringBenchma
                 bit = 1;
                 valid = c_lowering_benchmark_number(value, 1, BUSTER_C_LOWERING_BENCHMARK_MAX_DEFINITIONS, &options->definitions);
             }
-            else if (strcmp(option, "--after-scalar") == 0)
-            {
-                bit = 2;
-                valid = c_lowering_benchmark_number(value, 0, 1000, &options->after_scalar);
-            }
             else if (strcmp(option, "--before-vector") == 0)
             {
                 bit = 16;
@@ -292,7 +284,6 @@ static bool c_lowering_benchmark_options(int argc, char** argv, CLoweringBenchma
             seen |= bit;
         }
     }
-    valid = valid && (seen & (2 | 16)) != (2 | 16);
     return valid;
 }
 
@@ -501,21 +492,14 @@ static bool c_lowering_benchmark_matches(const CLowering* plan, CLoweringInput i
     return valid;
 }
 
-static bool c_lowering_benchmark_condition(CLowering* plan, bool vector, uint32_t milliseconds)
+static bool c_lowering_benchmark_condition(CLowering* plan, uint32_t milliseconds)
 {
     const uint64_t begin = c_lowering_benchmark_now();
     uint64_t now = begin;
     bool valid = begin != 0;
     while (valid && now - begin < (uint64_t)milliseconds * 1000000)
     {
-        if (vector)
-        {
-            valid = c_lowering_vector(plan, C_LOWERING_REACHABLE) == C_LOWERING_OK;
-        }
-        else
-        {
-            valid = c_lowering_scalar(plan, C_LOWERING_REACHABLE) == C_LOWERING_OK;
-        }
+        valid = c_lowering_vector(plan, C_LOWERING_REACHABLE) == C_LOWERING_OK;
         __asm__ volatile("" : : "r"(plan->selected) : "memory");
         now = c_lowering_benchmark_now();
         valid = valid && now >= begin;
@@ -557,7 +541,7 @@ static bool c_lowering_benchmark_case(uint32_t shape, CLoweringBenchmarkOptions 
 {
     const uint32_t count = options.definitions != 0 ? options.definitions : c_lowering_benchmark_sizes[shape];
     const uint32_t references = c_lowering_benchmark_reference_count(shape, count);
-    const uint32_t conditioning_ms = options.before_vector != 0 ? options.before_vector : options.after_scalar;
+    const uint32_t conditioning_ms = options.before_vector;
     const uint64_t input_capacity = (uint64_t)count * 32 + (uint64_t)references * 16 + 4096;
     const uint64_t prepared_capacity = ((uint64_t)count + references + 16) * 64;
     Arena input_arena = arena_reserve(input_capacity);
@@ -570,13 +554,13 @@ static bool c_lowering_benchmark_case(uint32_t shape, CLoweringBenchmarkOptions 
     bool valid = c_lowering_benchmark_generate(&input_arena, shape, count, &input) &&
                  c_lowering_benchmark_expected(&input_arena, input, &expected) &&
                  c_lowering_prepare(&prepared_arena, input, &plan) == C_LOWERING_OK &&
-                 c_lowering_scalar(&plan, C_LOWERING_REACHABLE) == C_LOWERING_OK &&
+                 c_lowering_vector(&plan, C_LOWERING_REACHABLE) == C_LOWERING_OK &&
                  c_lowering_benchmark_matches(&plan, input, &expected, true);
-    if (valid && conditioning_ms != 0 && options.only != C_LOWERING_BENCHMARK_SCALAR)
+    if (valid && conditioning_ms != 0)
     {
         conditioning_arena = arena_reserve(prepared_capacity);
         valid = c_lowering_prepare(&conditioning_arena, input, &conditioning) == C_LOWERING_OK &&
-                c_lowering_scalar(&conditioning, C_LOWERING_REACHABLE) == C_LOWERING_OK &&
+                c_lowering_vector(&conditioning, C_LOWERING_REACHABLE) == C_LOWERING_OK &&
                 c_lowering_benchmark_matches(&conditioning, input, &expected, true);
     }
     CLoweringBenchmarkSample samples[BUSTER_C_LOWERING_BENCHMARK_PATHS][BUSTER_C_LOWERING_BENCHMARK_PASSES] = { 0 };
@@ -588,10 +572,10 @@ static bool c_lowering_benchmark_case(uint32_t shape, CLoweringBenchmarkOptions 
             const uint32_t path = (pass + step) % BUSTER_C_LOWERING_BENCHMARK_PATHS;
             if (options.only == BUSTER_C_LOWERING_BENCHMARK_PATHS || options.only == path)
             {
-                const bool conditioned = conditioning_ms != 0 && path != C_LOWERING_BENCHMARK_SCALAR;
+                const bool conditioned = conditioning_ms != 0;
                 if (conditioned)
                 {
-                    valid = c_lowering_benchmark_condition(&conditioning, options.before_vector != 0, conditioning_ms);
+                    valid = c_lowering_benchmark_condition(&conditioning, conditioning_ms);
                 }
                 if (valid)
                 {
@@ -607,13 +591,9 @@ static bool c_lowering_benchmark_case(uint32_t shape, CLoweringBenchmarkOptions 
                         valid = c_lowering_prepare(&sample_arena, input, measured) == C_LOWERING_OK &&
                                 c_lowering_vector(measured, C_LOWERING_REACHABLE) == C_LOWERING_OK;
                     }
-                    else if (path == C_LOWERING_BENCHMARK_VECTOR)
-                    {
-                        valid = c_lowering_vector(measured, C_LOWERING_REACHABLE) == C_LOWERING_OK;
-                    }
                     else
                     {
-                        valid = c_lowering_scalar(measured, C_LOWERING_REACHABLE) == C_LOWERING_OK;
+                        valid = c_lowering_vector(measured, C_LOWERING_REACHABLE) == C_LOWERING_OK;
                     }
                     const uint64_t end = c_lowering_benchmark_now();
                     c_lowering_benchmark_counter_end(counters, counters_started, &sample);
@@ -650,7 +630,7 @@ static bool c_lowering_benchmark_case(uint32_t shape, CLoweringBenchmarkOptions 
         printf("  functions selected %" PRIu64 ", skipped %" PRIu64 "; objects selected %" PRIu64 ", skipped %" PRIu64 "\n",
                expected.functions, functions - expected.functions, expected.objects, objects - expected.objects);
         printf("  workspace %" PRIu64 " bytes, including %" PRIu64 " scratch/output bytes (alignment included)\n", plan.workspace_bytes, plan.scratch_bytes);
-        if (conditioning_ms != 0 && options.only != C_LOWERING_BENCHMARK_SCALAR)
+        if (conditioning_ms != 0)
         {
             printf("  additional untimed conditioning workspace %" PRIu64 " bytes\n", conditioning.workspace_bytes);
         }
@@ -680,26 +660,24 @@ static int run_c_lowering_benchmark(int argc, char** argv)
     if (help || !valid)
     {
         FILE* const output = help ? stdout : stderr;
-        fprintf(output, "usage: benchmark-lowering [--shape all|intrinsic|fanout|chain|cycle|duplicates|large] [--definitions N] [--only vector|scalar|prepare] [--before-vector MS | --after-scalar MS]\n");
-        fprintf(output, "  N: 1..%u; MS: 0..1000; duplicate options and combining conditioning flags are rejected\n", BUSTER_C_LOWERING_BENCHMARK_MAX_DEFINITIONS);
-        fprintf(output, "  default: unconditioned single-selection samples; conditioning applies to vector and prepare only\n");
+        fprintf(output, "usage: benchmark-lowering [--shape all|intrinsic|fanout|chain|cycle|duplicates|large] [--definitions N] [--only vector|prepare] [--before-vector MS]\n");
+        fprintf(output, "  N: 1..%u; MS: 0..1000; duplicate options are rejected\n", BUSTER_C_LOWERING_BENCHMARK_MAX_DEFINITIONS);
+        fprintf(output, "  default: unconditioned single-selection samples; --before-vector conditions each sample\n");
     }
     else
     {
         const CLoweringBenchmarkCounters counters = c_lowering_benchmark_counters();
         printf("benchmark-lowering: synthetic graphs only; medians of %u rotating-order single-operation samples after one warm-up\n", BUSTER_C_LOWERING_BENCHMARK_PASSES);
-        if ((options.before_vector != 0 || options.after_scalar != 0) && options.only != C_LOWERING_BENCHMARK_SCALAR)
+        if (options.before_vector != 0)
         {
-            printf("  vector/prepare conditioning: %s %u ms on a separate prepared plan immediately before measurement\n",
-                   options.before_vector != 0 ? "before-vector" : "after-scalar", options.before_vector != 0 ? options.before_vector : options.after_scalar);
+            printf("  vector/prepare conditioning: before-vector %u ms on a separate prepared plan immediately before measurement\n", options.before_vector);
         }
         else
         {
             printf("  unconditioned single-selection samples; no sustained vector state is established\n");
         }
-        printf("  vector/scalar: reusable graph selection; prepare: reserve + first-touch graph preparation/handoff + vector selection\n");
+        printf("  vector: reusable graph selection; prepare: reserve + first-touch graph preparation/handoff + vector selection\n");
         printf("  oracle, result checks and arena teardown excluded; no body checking, body lowering or main.c savings measured\n");
-        printf("  no prepare+scalar comparison: no whole-planner vector speedup can be inferred\n");
         printf("  measured and final conditioning outputs checked after timing; perf counts include clock reads and exclude kernel/hypervisor work\n");
         for (uint32_t shape = 0; valid && shape < BUSTER_C_LOWERING_BENCHMARK_SHAPES; shape += 1)
         {

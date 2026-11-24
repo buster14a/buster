@@ -78,6 +78,27 @@ static void check_test_program_forwarded_results(CheckTest* test, const char* cl
     check_test_program_forward_shape(test, "struct S{long a[8];};struct S make(int);void done(int*);"
                                            "struct S f(int n){__attribute__((cleanup(done)))int guard=n;return make(n);}",
                                      "forwarded-kept-before-cleanup", 0, 1, false, 64, false);
+    // The same with 0 to 20 expression statements (one EVALUATE control each) before the kept return, so that its RESULT
+    // takes every lane of check_lower_forwards' 16 controls at a time: no call of the function forwards, the last
+    // return's call included.
+    for (uint32_t k = 0; k <= 20; k += 1)
+    {
+        char source[1024];
+        int length = snprintf(source, sizeof(source), "struct S{long a[8];};struct S make(long);void done(long*);struct S f(long n){");
+        for (uint32_t e = 0; length > 0 && (size_t)length < sizeof(source) && e < k; e += 1)
+        {
+            length += snprintf(source + length, sizeof(source) - (size_t)length, "n+=%u;", e + 1);
+        }
+        length += snprintf(source + length, sizeof(source) - (size_t)length,
+                           "{__attribute__((cleanup(done)))long c=n;if(n&1)return make(c+1);}return make(n+5);}");
+        CheckTestClearShape shape = { 0 };
+        const bool fits = length > 0 && (size_t)length < sizeof(source);
+        const bool lowered = fits && check_test_program_clear_lower(source, false, &shape);
+        char description[160];
+        snprintf(description, sizeof(description), "a kept return's RESULT after %u statements keeps the function's calls from forwarding (%u forwarded)", k,
+                 shape.forwarded);
+        check_test_expect(test, lowered && shape.forwarded == 0, description);
+    }
     check_test_program_forward_shape(test, "struct S{long a[8];};struct S make(int);void done(int*);"
                                            "struct S f(int n){if(n>3){__attribute__((cleanup(done)))int guard=n;return make(guard);}return make(n);}",
                                      "forwarded-body-with-a-kept-return", 0, 2, false, 128, false);

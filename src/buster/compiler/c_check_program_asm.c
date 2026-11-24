@@ -22,8 +22,7 @@
 //   - Substitution (check_asm_substitute): the template with each operand as GCC and clang print it in AT&T syntax: a
 //     register by the operand's size or its modifier's (b h w k q), memory as (%reg), a constant as $value, and %%, %=,
 //     %{ %| %} and {att|intel}'s first alternative. A basic asm statement's template is its text, as it is.
-//   - Assembly: asm_assemble_code's records of the text, by the checker's path (the assembler's vector path or its
-//     scalar twin), from a match index that admits every form the encoder has (an inline template's instructions are
+//   - Assembly: asm_assemble_code's records of the text (the assembler's one path since #2924), from a match index that admits every form the encoder has (an inline template's instructions are
 //     its author's to choose, as GNU as and clang's integrated assembler take any).
 //   - A template that takes a directive besides the syntax switches is one source assembled whole by asm_assemble
 //     (check_asm_unit_helper): the record helper's frame and operand loads around the template as encoded bytes, the
@@ -1923,7 +1922,7 @@ static uint32_t check_asm_inline_touched(const CheckAsmPlace* places, uint32_t c
         uint64_t writes = 0;
         // With the opmask registers it reads and writes: a record that names one otherwise resolves as everything.
         uint16_t opmasks = 0;
-        x86_instruction_effects_opmasks_scalar(record, &reads, &writes, &opmasks);
+        x86_instructions_effects_opmasks(record, 1, &reads, &writes, &opmasks);
         opmask_writes |= (uint32_t)opmasks >> 8;
         if (effects->operation == X86_OPERATION_NONE)
         {
@@ -2080,7 +2079,7 @@ static void check_asm_unit_goto(Arena* output, uint32_t statement, uint32_t labe
 // MMX, opmask, pair and x87 outputs' stores, the x87 pops, the exit into eax, and the epilogue. Its code is its default
 // text section's atom, at AsmResult.entry_atom. A failure keeps nothing.
 static AsmResult check_asm_unit_helper(const CheckAsmPlace* places, uint32_t count, const uint8_t stores[2], bool block, uint32_t saved, uint32_t pops, uint32_t statement,
-                                       uint32_t labels, uint8_t exit, String8 text, const X86MatchIndex* index, bool scalar, Arena* output, Arena* scratch)
+                                       uint32_t labels, uint8_t exit, String8 text, const X86MatchIndex* index, Arena* output, Arena* scratch)
 {
     const uint64_t mark = output->length;
     const uint64_t scratch_mark = scratch->length;
@@ -2127,7 +2126,7 @@ static AsmResult check_asm_unit_helper(const CheckAsmPlace* places, uint32_t cou
     check_asm_unit_records(output, valid ? code.records + first + exits : 0, valid ? code.count - first - exits : 0, &valid);
     const uint64_t length = output->length - mark;
     AsmResult result = valid ? asm_assemble((String8){ .pointer = (char*)output->base + mark, .length = length }, index,
-                                            (AsmOptions){ .vectorized = !BUSTER_SCALAR_PATH(scalar), .integrated = true }, output) :
+                                            (AsmOptions){ .integrated = true }, output) :
                                (AsmResult){ .error = "arena exhausted placing inline assembly's unit" };
     if (result.error != 0)
     {
@@ -2329,7 +2328,7 @@ static const uint8_t check_asm_row_registers[14] = {
 // both arenas as they were, for a statement it doesn't place, which keeps its helper; and sets `*valid` false where an
 // arena had no room, so that the plan fails for want of it rather than taking a helper the room decided.
 static bool check_asm_row(const CheckProgram* program, uint32_t s, const CheckAsmPlace* places, const CheckAsmConstraint* constraints, const X86MatchIndex* index,
-                          bool scalar, Tier0Operation* row, bool* valid, Arena* output, Arena* scratch)
+                          Tier0Operation* row, bool* valid, Arena* output, Arena* scratch)
 {
     const CheckInput* input = program->input;
     const CheckInputAsm* statement = input->asm_statements + s;
@@ -2406,7 +2405,7 @@ static bool check_asm_row(const CheckProgram* program, uint32_t s, const CheckAs
     AsmCode code = { 0 };
     if (placed)
     {
-        code = asm_assemble_code(source, index, (AsmOptions){ .vectorized = !BUSTER_SCALAR_PATH(scalar), .integrated = true }, output, scratch);
+        code = asm_assemble_code(source, index, (AsmOptions){ .integrated = true }, output, scratch);
         *valid = code.error == NULL || strstr(code.error, "arena exhausted") == NULL;
         placed = code.error == NULL && !code.directive && code.count != 0 && code.branch_count == 0 && code.reference_count == 0 && code.label_count == 0;
     }
@@ -2557,10 +2556,8 @@ static bool check_asm_row(const CheckProgram* program, uint32_t s, const CheckAs
 }
 
 static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, uint32_t p, const CheckAsmCheckedOperand* operands, const X86MatchIndex* index,
-                                       const X86Target* instruction_set, bool scalar, CheckProgramAsm* plan, CheckProgramHelper* helper, Arena* output, Arena* scratch)
+                                       const X86Target* instruction_set, CheckProgramAsm* plan, CheckProgramHelper* helper, Arena* output, Arena* scratch)
 {
-    (void)scalar;
-
     const CheckInput* input = program->input;
     const CheckInputAsm* statement = input->asm_statements + s;
     const TypeTable* types = program->types;
@@ -3155,7 +3152,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
     const uint64_t code_mark = output->length;
     if (valid && reason == NULL)
     {
-        code = asm_assemble_code(text, index, (AsmOptions){ .vectorized = !BUSTER_SCALAR_PATH(scalar), .integrated = true }, output, scratch);
+        code = asm_assemble_code(text, index, (AsmOptions){ .integrated = true }, output, scratch);
         if (code.error != NULL && code.directive)
         {
             // A template that takes a directive besides the syntax switches is assembled by the full assembler
@@ -3180,7 +3177,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
                 }
             }
             AsmResult body = body_valid ? asm_assemble((String8){ .pointer = body_source, .length = text.length }, index,
-                                                       (AsmOptions){ .vectorized = !BUSTER_SCALAR_PATH(scalar), .integrated = true }, output) :
+                                                       (AsmOptions){ .integrated = true }, output) :
                                           (AsmResult){ .error = "arena exhausted placing inline assembly's unit" };
             valid = body_valid;
             // A template of directives alone has no code to call, but with x87 operands or flag outputs, whose helper
@@ -3217,7 +3214,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
                 // frame and operand block around the template. An asm goto's labels are its jumps' targets alone.
                 const uint32_t labels = statement->is_goto ? statement->label_count : 0;
                 arena_pop_to(output, body_mark);
-                unit = reason == NULL ? check_asm_unit_helper(places, count, stores, block != 0, taken & BUSTER_CHECK_ASM_CALLEE_SAVED, pops, p, labels, exit, text, index, scalar,
+                unit = reason == NULL ? check_asm_unit_helper(places, count, stores, block != 0, taken & BUSTER_CHECK_ASM_CALLEE_SAVED, pops, p, labels, exit, text, index,
                                                               output, scratch) :
                                         (AsmResult){ .error = reason };
                 unit_assembled = unit.error == NULL;
@@ -3295,7 +3292,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         arena_pop_to(output, code_mark);
         code = (AsmCode){ 0 };
         goto_count = 0;
-        unit = check_asm_unit_helper(places, count, stores, block != 0, taken & BUSTER_CHECK_ASM_CALLEE_SAVED, pops, p, statement->label_count, exit, text, index, scalar,
+        unit = check_asm_unit_helper(places, count, stores, block != 0, taken & BUSTER_CHECK_ASM_CALLEE_SAVED, pops, p, statement->label_count, exit, text, index,
                                      output, scratch);
         unit_assembled = unit.error == NULL;
         reason = unit.error != NULL && strstr(unit.error, "arena exhausted") == NULL ? unit.error : NULL;
@@ -3388,7 +3385,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
     }
     else if (valid && reason == NULL && helped && !x87 && !flagged && code.count != 0 && !program->asm_helpers && !program->asm_bodies &&
              !check_program_helper_forced(program, CHECK_PROGRAM_HELPER_ASM) &&
-             check_asm_row(program, s, places, constraints, index, scalar, &row, &valid, output, scratch))
+             check_asm_row(program, s, places, constraints, index, &row, &valid, output, scratch))
     {
         // Placed in its caller (#1059): the row, and no helper. The helper's assembly is dropped.
         arena_pop_to(output, code_mark);
@@ -3760,9 +3757,8 @@ static const char* check_asm_naked_frame_rows(const AsmResult* unit, Arena* outp
 
 static bool check_program_asm_plan_naked(CheckProgramAsms* result, const CheckProgram* program, uint32_t b, const CheckAsmCheckedOperand* operands,
                                          const uint32_t* firsts, const uint32_t* sequence_starts, const uint32_t* sequence, const uint32_t* sequence_tokens,
-                                         const X86MatchIndex* index, bool scalar, Arena* output, Arena* scratch)
+                                         const X86MatchIndex* index, Arena* output, Arena* scratch)
 {
-    (void)scalar;
 
     static const char att[] = ".att_syntax prefix\n";
     const CheckInput* input = program->input;
@@ -3870,7 +3866,7 @@ static bool check_program_asm_plan_naked(CheckProgramAsms* result, const CheckPr
     bool unit_assembled = false;
     if (valid && reason == NULL)
     {
-        code = asm_assemble_code((String8){ .pointer = source, .length = at }, index, (AsmOptions){ .vectorized = !BUSTER_SCALAR_PATH(scalar), .integrated = true }, output, scratch);
+        code = asm_assemble_code((String8){ .pointer = source, .length = at }, index, (AsmOptions){ .integrated = true }, output, scratch);
         if (code.error != NULL && code.directive)
         {
             // The naked function's templates take directives: its whole code is a unit assembled by the full assembler.
@@ -3893,7 +3889,7 @@ static bool check_program_asm_plan_naked(CheckProgramAsms* result, const CheckPr
                 memcpy(wrapped + sizeof(start) - 1 + at, finish, sizeof(finish) - 1);
             }
             const String8 text = wrapped != NULL ? (String8){ .pointer = wrapped, .length = at + sizeof(start) + sizeof(finish) - 2 } : (String8){ .pointer = source, .length = at };
-            unit = valid ? asm_assemble(text, index, (AsmOptions){ .vectorized = !BUSTER_SCALAR_PATH(scalar), .integrated = true }, output) : unit;
+            unit = valid ? asm_assemble(text, index, (AsmOptions){ .integrated = true }, output) : unit;
             unit_assembled = valid && unit.error == NULL;
             reason = valid && unit.error != NULL && strstr(unit.error, "arena exhausted") == NULL ? unit.error : NULL;
             valid = valid && (unit.error == NULL || reason != NULL);
@@ -4206,7 +4202,7 @@ static bool check_program_asm_names(CheckProgramAsms* result, const CheckProgram
 // section groups (COMDAT, #1848) are the emission's too (check_program_emit_asm_groups), in -c's object as clang's, and
 // selected among the units of a link of several (check_units_keep).
 // False only for an arena without room.
-static bool check_program_asm_plan_file(CheckProgramAsms* result, const CheckProgram* program, const X86MatchIndex* index, bool scalar, Arena* output)
+static bool check_program_asm_plan_file(CheckProgramAsms* result, const CheckProgram* program, const X86MatchIndex* index, Arena* output)
 {
     const CheckInput* input = program->input;
     uint64_t length = 0;
@@ -4231,7 +4227,7 @@ static bool check_program_asm_plan_file(CheckProgramAsms* result, const CheckPro
             at += 1;
         }
     }
-    const AsmResult assembled = source != 0 ? asm_assemble((String8){ .pointer = source, .length = length }, index, (AsmOptions){ .vectorized = !scalar, .integrated = true }, output) :
+    const AsmResult assembled = source != 0 ? asm_assemble((String8){ .pointer = source, .length = length }, index, (AsmOptions){ .integrated = true }, output) :
                                               (AsmResult){ 0 };
     const char* refused = source == 0 ? NULL : assembled.error != 0 ? "file-scope assembly the assembler doesn't take" : NULL;
     // Every section is published as the assembler made it: notes, the arrays of constructors and destructors in their
@@ -4315,9 +4311,8 @@ static uint32_t check_program_asm_sequence(const CheckProgram* program, uint32_t
 // assembles to instructions to `helpers`, after the builtin ones, with the next symbols, and every naked function's code
 // (whatever its statements); then the names the templates define and refer to. False for an arena without room or an
 // inconsistent input; the refusals are the plans' own, which the lowering reports in its order.
-static bool check_program_asm_plan(CheckProgramAsms* result, CheckProgramHelpers* helpers, const CheckProgram* program, bool scalar, Arena* output, Arena* scratch)
+static bool check_program_asm_plan(CheckProgramAsms* result, CheckProgramHelpers* helpers, const CheckProgram* program, Arena* output, Arena* scratch)
 {
-    (void)scalar;
 
     *result = (CheckProgramAsms){ .status = CHECK_PROGRAM_OK, .token = BUSTER_CHECK_NONE };
     const CheckInput* input = program->input;
@@ -4404,8 +4399,8 @@ static bool check_program_asm_plan(CheckProgramAsms* result, CheckProgramHelpers
     {
         if (check_program_asm_naked(program, b))
         {
-            valid = check_program_asm_plan_naked(result, program, b, statements != 0 ? asms->operands : 0, firsts, sequence_starts, sequence, sequence_tokens, index,
-                                                 BUSTER_SCALAR_PATH(scalar), output, scratch);
+            valid = check_program_asm_plan_naked(result, program, b, statements != 0 ? asms->operands : 0, firsts, sequence_starts, sequence, sequence_tokens, index, output,
+                                                 scratch);
             result->status = valid ? CHECK_PROGRAM_OK : result->status == CHECK_PROGRAM_OK ? CHECK_PROGRAM_RESOURCE : result->status;
         }
     }
@@ -4434,7 +4429,7 @@ static bool check_program_asm_plan(CheckProgramAsms* result, CheckProgramHelpers
                 const uint32_t body_target = program->body_targets != 0 ? program->body_targets[b] : 0;
                 const X86Target* instruction_set = body_target == 0 || body_target == BUSTER_CHECK_PROGRAM_TARGET_VERSIONS ? &program->target :
                                                    &program->targets[body_target - 1];
-                valid = check_program_asm_plan_one(program, s, (uint32_t)(plan - result->plans), asms->operands + firsts[s], index, instruction_set, BUSTER_SCALAR_PATH(scalar), plan,
+                valid = check_program_asm_plan_one(program, s, (uint32_t)(plan - result->plans), asms->operands + firsts[s], index, instruction_set, plan,
                                                    helper, output, scratch);
                 if (valid && plan->helper != BUSTER_CHECK_NONE)
                 {
@@ -4471,7 +4466,7 @@ static bool check_program_asm_plan(CheckProgramAsms* result, CheckProgramHelpers
             helpers->count += count;
         }
     }
-    if (valid && file_count != 0 && !check_program_asm_plan_file(result, program, index, BUSTER_SCALAR_PATH(scalar), output))
+    if (valid && file_count != 0 && !check_program_asm_plan_file(result, program, index, output))
     {
         result->status = CHECK_PROGRAM_RESOURCE;
         valid = false;

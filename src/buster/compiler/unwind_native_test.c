@@ -269,7 +269,7 @@ static bool unwind_test_consumer(bool keep, uint32_t frame, const TestTool* perf
         .location_capacity = 2,
         .shared = pointer,
     };
-    valid = valid && unwind_write(descriptions, 2, &frames, false) == UNWIND_OK && unwind_test_decode(descriptions, 2, &frames);
+    valid = valid && unwind_write(descriptions, 2, &frames) == UNWIND_OK && unwind_test_decode(descriptions, 2, &frames);
     char assembly[512];
     char object[512];
     char executable[512];

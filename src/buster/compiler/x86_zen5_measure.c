@@ -480,7 +480,7 @@ static void x86_zen5_shape(uint32_t form, uint32_t operands, X86CostShape* shape
         uint64_t reads = 0;
         uint64_t writes = 0;
         uint16_t opmasks = 0;
-        x86_instructions_effects_opmasks_scalar(&sample, 1, &reads, &writes, &opmasks);
+        x86_instructions_effects_opmasks(&sample, 1, &reads, &writes, &opmasks);
         merged = (reads & BUSTER_X86_RESOURCE_VECTOR(1)) != 0;
     }
     shape->lea = effects->operation == X86_OPERATION_LEA;

@@ -402,7 +402,7 @@ static bool check_binding_benchmark_measure(PPOptions* pp_options, const char* f
         uint64_t nanoseconds = 0;
         valid = check_binding_benchmark_run(&benchmark, (CheckInputBindingMode)mode, &input, &nanoseconds) &&
                 (pipeline || check_binding_benchmark_equal(&reference, &input));
-        const bool parser_mode = mode == CHECK_INPUT_BINDINGS_PARSER_STACKS || mode == CHECK_INPUT_BINDINGS_PARSER_BATCH;
+        const bool parser_mode = mode == CHECK_INPUT_BINDINGS_PARSER_BATCH;
         parser_events = parser_mode ? input.parser_binding_event_count : parser_events;
         statistics[mode] = parser_mode ? input.parser_binding_statistics : input.binding_statistics;
         visits[mode][0] = input.resolve_visits;
@@ -489,8 +489,8 @@ static bool check_binding_benchmark_measure(PPOptions* pp_options, const char* f
             uint64_t elapsed = 0;
             if (after != 0)
             {
-                // The lighter phase before either scope: the scalar twin's reader, without the vector parser
-                // or expression checker. Keep this conditioning independent of the timed pipeline option.
+                // A phase of other work before either scope: the batch sort's reader, without the parser or the
+                // expression checker. Keep this conditioning independent of the timed pipeline option.
                 const uint64_t until = check_source_time() + after * 1000000;
                 benchmark.pipeline = false;
                 if (pipeline)
@@ -502,7 +502,7 @@ static bool check_binding_benchmark_measure(PPOptions* pp_options, const char* f
                 }
                 while (valid && check_source_time() < until)
                 {
-                    valid = check_binding_benchmark_run(&benchmark, CHECK_INPUT_BINDINGS_STACKS, &input, &elapsed);
+                    valid = check_binding_benchmark_run(&benchmark, CHECK_INPUT_BINDINGS_BATCH, &input, &elapsed);
                 }
                 if (pipeline)
                 {
@@ -570,13 +570,13 @@ static bool check_binding_benchmark_measure(PPOptions* pp_options, const char* f
         }
         class_overheads[pass] = input.expression_class_overhead;
     }
-    // The handoff's pieces alone, on the retained events: the reader's (both resolvers) and the parser's replay.
+    // The handoff's pieces alone, on the retained events: the reader's (the stack replay, the batch sort's fallback, and
+    // the batch sort) and the parser's replay.
     enum
     {
         ISOLATED_READER_STACKS,
         ISOLATED_READER_BATCH,
         ISOLATED_PARSER_REPLAY,
-        ISOLATED_PARSER_STACKS,
         ISOLATED_PARSER_BATCH,
         ISOLATED_COUNT,
     };
@@ -584,7 +584,6 @@ static bool check_binding_benchmark_measure(PPOptions* pp_options, const char* f
         "reader-stacks",
         "reader-batch",
         "parser-replay",
-        "parser-resolve-stacks",
         "parser-resolve-batch",
     };
     static uint64_t isolated[ISOLATED_COUNT][BUSTER_CHECK_SOURCE_MAX_PASSES];
@@ -610,7 +609,7 @@ static bool check_binding_benchmark_measure(PPOptions* pp_options, const char* f
             view.scratch = benchmark.scratch;
             ParseBindings parsed = { 0 };
             CBindingStatistics ignored = { 0 };
-            const bool replayed = piece < ISOLATED_PARSER_STACKS || parse_bindings_build(&parsed, &view, &benchmark.output);
+            const bool replayed = piece < ISOLATED_PARSER_BATCH || parse_bindings_build(&parsed, &view, &benchmark.output);
             const uint64_t from[] = {
                 benchmark.output.length,
                 benchmark.scratch.length,
@@ -627,7 +626,7 @@ static bool check_binding_benchmark_measure(PPOptions* pp_options, const char* f
                     (piece == ISOLATED_READER_STACKS ? c_bindings_scalar(events, results, &benchmark.scratch) :
                      piece == ISOLATED_READER_BATCH ? c_bindings_batch(events, results, &benchmark.scratch, &ignored) :
                      piece == ISOLATED_PARSER_REPLAY ? parse_bindings_build(&parsed, &view, &benchmark.output) :
-                     parse_bindings_resolve(&parsed, piece == ISOLATED_PARSER_STACKS, &benchmark.scratch));
+                     parse_bindings_resolve(&parsed, &benchmark.scratch));
             const uint64_t elapsed = check_source_time() - begin;
             if (pass != 0)
             {
@@ -808,7 +807,7 @@ static int run_checker_binding_benchmark(int count, char** arguments)
     {
         fprintf(stderr, "usage: benchmark-checker-bindings [--pipeline] [--passes N] [--only MODE [--after-scalar MS]] [-E's options] {file.c | --input NAME}\n"
                         "       benchmark-checker-bindings --input NAME --print\n"
-                        "modes: direct, stacks, batch, parser-stacks, parser-batch; inputs: small, large, headers\n");
+                        "modes: direct, batch, parser-batch; inputs: small, large, headers\n");
     }
     if (valid && print)
     {
