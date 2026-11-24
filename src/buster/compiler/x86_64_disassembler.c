@@ -2212,11 +2212,19 @@ static X86DecodeResult x86_disassemble(const uint8_t* source, uint64_t size, X86
             const uint32_t count = reached < room ? reached : (uint32_t)room;
             uint8_t offsets[16];
             _mm_storeu_si128((__m128i*)offsets, _mm512_castsi512_si128(at));
+            // The window's end by the hints alone, which the next window's length pass can start from while this
+            // one's lanes decode (a branch, not a data dependency); their end replaces it only when a lane failed or
+            // wasn't its hint's length.
+            const uint32_t hinted_end = offsets[count - 1] + lengths[offsets[count - 1]];
             X86DecodeStatus status = X86_DECODE_OK;
             uint32_t consumed = 0;
             const uint32_t written = x86_decode_lanes(&window, remaining, offsets, lengths, count, start, output + result.count, &status, &consumed);
             result.count += written;
-            result.consumed = start + consumed;
+            result.consumed = start + hinted_end;
+            if (__builtin_expect(status != X86_DECODE_OK || consumed != hinted_end, 0))
+            {
+                result.consumed = start + consumed;
+            }
             result.status = status;
         }
     }
