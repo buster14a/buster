@@ -3484,9 +3484,9 @@ subnormals among them, at x86-64, x86-64-v2, x86-64-v3 and x86-64-v4
 x86-64-v4.
 
 **Memory functions, absolute values and signs** (#1373). The reader marks a
-plain call of `memcpy`, `memmove`, `memset`, `abs`, `labs`, `llabs`, `fabs`,
+plain call of `memcpy`, `memmove`, `memset`, `memcmp`, `abs`, `labs`, `llabs`, `fabs`,
 `fabsf`, `fabsl`, `copysign`, `copysignf` and `copysignl` by the same rules as
-`fmax`'s (`cbuiltin_library_plain_folds`' rows of no fold, each with its
+`fmax`'s (`cbuiltin_library_plain_folds`' rows, each with its
 `computed` kind, `CBuiltinLibraryComputed`), and the lowering computes it in
 the call's place (`check_program_call_computed`, `check_lower_library_computed`)
 at both tiers, as clang -O0's code computes `llvm.memcpy`, `llvm.memmove`,
@@ -3495,7 +3495,7 @@ function, and an asm label, `-fno-builtin`, `-fno-builtin-NAME`,
 `-ffreestanding` and `no_builtin` keep it a call:
 
 - `memcpy` and `memset` of a constant size of at most 32 bytes
-  (`BUSTER_CBUILTIN_LIBRARY_INLINE_BYTES`), and `memmove` of at most 128
+  (`BUSTER_CBUILTIN_LIBRARY_INLINE_BYTES`), and `memmove` of up to eight target-width pieces
   (`BUSTER_CBUILTIN_LIBRARY_MOVE_INLINE_BYTES`, `cbuiltin_library_inline_bytes`):
   `memcpy` by a `COPY` of the size, as `__builtin_memcpy`'s recipe copies;
   `memmove` to 32 bytes by pieces of 8 bytes, the last ending at the size
@@ -3512,21 +3512,22 @@ function, and an asm label, `-fno-builtin`, `-fno-builtin-NAME`,
   (`-mtune`'s, else `-march`'s, or a `target` attribute's `tune=`, else its
   `arch=`: core2, penryn, nocona, bonnell, k8 and the older CPUs,
   `predefines_slow_unaligned`) and its instruction set has no SSE4.2, which
-  makes LLVM take unaligned 16-byte accesses as fast; else 16. So this code
+  makes LLVM take unaligned 16-byte accesses as fast; else 16. This code
   moves up to 128 bytes inline at x86-64, 64 for core2's tuning or with
   `minsize`, 32 for both (`check_program_move_bytes`, from
   `X86Target.slow_unaligned_16` and `CheckProgram.object_move`, which the
-  references' pass and the lowering read alike), and calls `memmove` of 129 to
-  512 bytes where clang's doesn't with AVX. clang's `memset` calls the library
+  references' pass and the lowering read alike), and up to 256 with AVX or 512 with AVX-512F when the tuning prefers
+  512-bit vectors. Each clone uses its own target. Explicit `__builtin_memmove` shares this
+  inline expansion and uses its existing loop for larger or dynamic sizes. clang's `memset` calls the library
   whatever the size, so this code stores a small `memset`'s bytes where
   clang's code calls it.
-- `COPY`'s move form (`tier0_copy_moves`, `BUSTER_TIER0_MOVE_VALUE`): a value
+- `COPY`'s move form (`tier0_copy_moves`, `tier0_move_value`): a value
   past `BUSTER_TIER0_MAX_COPY_BYTES`, to `BUSTER_TIER0_MAX_COPY_VALUE`, is a
-  move of 33 to 128 bytes whose ranges may overlap either way. Tier 0 loads its
-  16-byte pieces, the last ending at the end, into the floating stack's free XMM
+  move of 33 to 512 bytes whose ranges may overlap either way. Tier 0 loads its
+  16-, 32- or 64-byte pieces, the last ending at the end, into the floating stack's free vector
   registers from the first (`tier0_copy_move`: past the table, the deep
   window's), then stores them, as clang -O0's code moves `llvm.memmove`'s bytes;
-  the IR loads them as `IR_V4I32`s before the first store (`ir_typed_move`), and
+  the IR loads them as vectors of the same width before the first store (`ir_typed_move`), and
   the typed interpreter moves the bytes and their definedness as `memmove`
   does. Held in the stack's vector slots or in vector locals instead, Tier 0's
   pieces each took a store and a load more, which made a chain of overlapping
@@ -3546,11 +3547,17 @@ function, and an asm label, `-fno-builtin`, `-fno-builtin-NAME`,
   tiers: the helper planner checks their actions as the helper's and plans none
   (`check_program_helpers`), and the lowering takes `check_lower_library_sign`.
 
-`memcmp` stays a call, as clang's code makes it. The node machine and its
+For a constant size up to 32 bytes, `memcmp` and `__builtin_memcmp` compare bounded
+words in address order. On the first unequal pair, `bsf` or `tzcnt` on its XOR
+locates the first differing byte. The result is the difference of those two unsigned
+bytes. A zero size still evaluates both pointers and performs zero loads. The
+existing literal folds take precedence. Larger and dynamic plain calls go to libc.
+
+The node machine and its
 census leave a computed call to the pipeline, and take a marked one that stays a
 call as any call (`check_program_call_library`). At reader time the node
 machine sees no function's tuning or `minsize`, so its shadow counts a
-`memmove` of 33 to 128 bytes that those keep a call as a difference
+`memmove` of 33 to 512 bytes that those keep a call as a difference
 (`node_machine_reader_call_library`). `test-checker
 --program-library`'s `library-computed-inline` program runs each size to 33,
 overlapping both ways, `memmove` of each size from 34 to 129 between unaligned

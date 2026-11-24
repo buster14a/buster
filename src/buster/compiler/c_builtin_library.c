@@ -195,6 +195,8 @@ static __attribute__((unused)) CBuiltinLibraryFold cbuiltin_library_fold(CBuilti
 //   past them; its memmove stores up to 8 of its widest vectors inline (128 bytes at x86-64, 256 with AVX, 512 with
 //   512-bit vectors preferred), and its memset calls the library's whatever the size, which a few stores beat. A size
 //   that is no constant, or a larger one, calls the library's function, whose vector loops a large size wants.
+// - COMPARE: after constant folding, small fixed-size memcmp compares words in address order and returns the
+//   unsigned byte difference at the first mismatch.
 typedef enum CBuiltinLibraryComputed
 {
     CBUILTIN_LIBRARY_COMPUTED_NONE,
@@ -205,13 +207,18 @@ typedef enum CBuiltinLibraryComputed
     CBUILTIN_LIBRARY_COMPUTED_COPY,
     CBUILTIN_LIBRARY_COMPUTED_MOVE,
     CBUILTIN_LIBRARY_COMPUTED_SET,
+    CBUILTIN_LIBRARY_COMPUTED_COMPARE,
 } CBuiltinLibraryComputed;
 
 #define BUSTER_CBUILTIN_LIBRARY_INLINE_BYTES 32u
-#define BUSTER_CBUILTIN_LIBRARY_MOVE_INLINE_BYTES 128u
+#define BUSTER_CBUILTIN_LIBRARY_MOVE_INLINE_BYTES 512u
 
-// The largest constant size whose call of `computed`, a memory function's, the code computes in place: memmove's 8 of
-// x86-64's 16-byte vectors, which clang's code moves inline at every target, and memcpy's and memset's 32 bytes.
+static inline bool cbuiltin_library_computed_memory(CBuiltinLibraryComputed computed)
+{
+    return computed >= CBUILTIN_LIBRARY_COMPUTED_COPY && computed <= CBUILTIN_LIBRARY_COMPUTED_COMPARE;
+}
+
+// The absolute limit. A move's limit also depends on its function's target and minsize attribute.
 static inline __attribute__((always_inline, unused)) uint64_t cbuiltin_library_inline_bytes(CBuiltinLibraryComputed computed)
 {
     return computed == CBUILTIN_LIBRARY_COMPUTED_MOVE ? BUSTER_CBUILTIN_LIBRARY_MOVE_INLINE_BYTES : BUSTER_CBUILTIN_LIBRARY_INLINE_BYTES;
@@ -240,7 +247,7 @@ struct CBuiltinLibraryPlainFold
 static const CBuiltinLibraryPlainFold cbuiltin_library_plain_folds[] __attribute__((unused)) =
 {
     { "bcmp", "ivC*vC*z", CBUILTIN_LIBRARY_FOLD_COMPARE_MEMORY, false, CBUILTIN_LIBRARY_COUNT, CBUILTIN_LIBRARY_COMPUTED_NONE },
-    { "memcmp", "ivC*vC*z", CBUILTIN_LIBRARY_FOLD_COMPARE_MEMORY, false, CBUILTIN_LIBRARY_COUNT, CBUILTIN_LIBRARY_COMPUTED_NONE },
+    { "memcmp", "ivC*vC*z", CBUILTIN_LIBRARY_FOLD_COMPARE_MEMORY, false, CBUILTIN_LIBRARY_COUNT, CBUILTIN_LIBRARY_COMPUTED_COMPARE },
     { "strcmp", "icC*cC*", CBUILTIN_LIBRARY_FOLD_COMPARE, false, CBUILTIN_LIBRARY_COUNT, CBUILTIN_LIBRARY_COMPUTED_NONE },
     { "strlen", "zcC*", CBUILTIN_LIBRARY_FOLD_LENGTH, false, CBUILTIN_LIBRARY_COUNT, CBUILTIN_LIBRARY_COMPUTED_NONE },
     { "strncmp", "icC*cC*z", CBUILTIN_LIBRARY_FOLD_COMPARE_BOUNDED, false, CBUILTIN_LIBRARY_COUNT, CBUILTIN_LIBRARY_COMPUTED_NONE },

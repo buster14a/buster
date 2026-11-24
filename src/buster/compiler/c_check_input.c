@@ -2330,6 +2330,8 @@ struct CheckInputReader
     uint32_t* parameter_seen;
     uint32_t* parameter_previous;
     uint8_t* parameter_shapes;
+    // Original array types before parameter adjustment, retained only during reading for sizeof's source warning.
+    uint64_t* parameter_arrays;
     // The tags and enumeration constants a definition's parameter list declared besides its parameters, which its body
     // declares again: the first at the body's opening (written with output->body_declarations there, which says whether
     // it was), and each one's next at its declaration token.
@@ -8181,6 +8183,8 @@ struct CheckDeclaratorPart
     // Its newly retained folding warning, or NONE, ordered before the dimension's zero-size warning or error.
     uint32_t fold_warning;
     bool object_size;
+    bool nonnull_parameters;
+    const CheckInputAttribute* nonnull_type;
     // A function's: whether a parameter has a Swift ABI (#1447, CheckDeclaratorParameter.abi).
     bool parameter_abis;
     // An array's bound whose negative constant a recovering run reported (#1447, CheckDeclaratorRun.recover): the part
@@ -8215,6 +8219,8 @@ struct CheckDeclaratorParameter
     uint32_t abi_token;
     uint32_t place;
     const CheckNoderefType* noderef;
+    const CheckInputAttribute* nonnull;
+    const CheckInputAttribute* nonnull_type;
 };
 
 typedef struct CheckDeclaratorFrame CheckDeclaratorFrame;
@@ -9002,6 +9008,11 @@ static bool check_input_publish_parameter(CheckInputReader* reader, CheckDeclara
             check_input_rare_claim(reader, &reader->parameter_shapes[token]);
             reader->parameter_shapes[token] = shape;
         }
+        if (type_kind_is_array(kind))
+        {
+            check_input_rare_claim(reader, &reader->parameter_arrays[token]);
+            reader->parameter_arrays[token] = (uint64_t)token << 32 | type;
+        }
         reader->declaration_kinds[token] = C_BINDING_OBJECT;
         check_input_set_bit(reader->declaration_bits, token, BUSTER_CHECK_BITS_REGISTER, frame->storage == C_NAME_REGISTER);
         reader->objects[token] = token + 1;
@@ -9138,6 +9149,12 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                 }
                 const uint32_t space_end = frame->attributes != NULL && frame->attributes->count > attribute_first ?
                                            check_input_spaces_claim(frame->attributes, attribute_first) : attribute_first;
+                const CheckInputAttribute* nonnull_type = NULL;
+                for (uint32_t a = attribute_first; frame->attributes != NULL && a < frame->attributes->count; a += 1)
+                {
+                    const CheckInputAttribute* attribute = frame->attributes->records + a;
+                    nonnull_type = attribute->kind == CHECK_ATTRIBUTE_NULLABILITY && attribute->name == C_NAME_NONNULL ? attribute : nonnull_type;
+                }
                 parts[part_count] = (CheckDeclaratorPart)
                 {
                     .next = frame->pointers,
@@ -9149,6 +9166,7 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                     .spaces = space_end > attribute_first ? frame->attributes : NULL,
                     .space_first = attribute_first,
                     .space_end = space_end,
+                    .nonnull_type = nonnull_type,
                 };
                 frame->pointers = part_count++;
             }
@@ -9878,12 +9896,18 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                             const CheckInputAttributes* lists[] = { frame->common_attributes, frame->attributes };
                             uint8_t object_size = 0;
                             uint32_t object_size_token = BUSTER_CHECK_NONE;
+                            const CheckInputAttribute* nonnull = NULL;
                             for (uint32_t list = 0; list < BUSTER_ARRAY_LENGTH(lists); list += 1)
                             {
                                 const CheckInputAttributes* attributes = lists[list];
                                 for (uint32_t a = 0; attributes != NULL && a < attributes->count; a += 1)
                                 {
                                     const CheckInputAttribute* attribute = attributes->records + a;
+                                    if (attribute->kind == CHECK_ATTRIBUTE_NONNULL && attribute->argument_count == 0 &&
+                                        !attribute->ignored && !attribute->subject_ignored)
+                                    {
+                                        nonnull = attribute;
+                                    }
                                     const bool size = !attribute->ignored && (attribute->kind == CHECK_ATTRIBUTE_PASS_OBJECT_SIZE ||
                                                                             attribute->kind == CHECK_ATTRIBUTE_PASS_DYNAMIC_OBJECT_SIZE);
                                     if (size)
@@ -9915,6 +9939,9 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                                 valid &= check_input_swift_parameter(reader, abi_lists, BUSTER_ARRAY_LENGTH(abi_lists), adjusted, declared, spelling, &abi, &abi_token);
                             }
                             function->parameter_abis |= abi != TYPE_PARAMETER_ABI_ORDINARY;
+                            const CheckInputAttribute* nonnull_type = first != BUSTER_CHECK_NONE && parts[first].kind == BUSTER_TYPE_KIND_POINTER ?
+                                                                      parts[first].nonnull_type : NULL;
+                            function->nonnull_parameters |= nonnull != NULL || nonnull_type != NULL;
                             parameters[parameter_count] = (CheckDeclaratorParameter)
                             {
                                 .abi = abi,
@@ -9927,6 +9954,8 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                                 .object_size = object_size,
                                 .const_pointer = ((type_kind_is_array(kind) ? frame->array_qualifiers : qualifiers) & BUSTER_TYPE_CONST) != 0,
                                 .noderef = check_input_noderef_adjust_parameter(reader, type, noderef),
+                                .nonnull = nonnull,
+                                .nonnull_type = nonnull_type,
                             };
                             valid &= check_input_publish_parameter(reader, function, parameters, parameter_count++, frame, type, abi_origin, noderef, i);
                         }
@@ -10161,6 +10190,51 @@ static inline __attribute__((always_inline)) TypeId check_input_declarator_end(C
             reader->declarator_attributes = attributes;
         }
     }
+    // Parameter declarations do not all have names, and their prototype scopes have ended before call checking. Publish
+    // indexed contracts with the function's immutable attributes, rather than reconstructing those scopes at calls.
+    // A keyword record preserves a pointer's _Nonnull origin, which also applies through a dereferenced designator.
+    bool nonnulls = true;
+    if (own != NULL && own->nonnull_parameters)
+    {
+        CheckInputAttributes* attributes = reader->declarator_attributes;
+        if (attributes == NULL)
+        {
+            attributes = BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputAttributes, 1);
+            if (attributes != NULL)
+            {
+                *attributes = (CheckInputAttributes){ 0 };
+            }
+        }
+        int64_t* indices = attributes != NULL ? BUSTER_ARENA_PUSH_ARRAY(reader->arena, int64_t, (uint64_t)own->parameter_count * 2) : NULL;
+        nonnulls = indices != NULL;
+        uint32_t index = 0;
+        uint32_t count = 0;
+        for (uint32_t p = own->parameter_first; nonnulls && p != BUSTER_CHECK_NONE; p = run->parameters[p].next)
+        {
+            const CheckInputAttribute* contracts[] = { run->parameters[p].nonnull, run->parameters[p].nonnull_type };
+            for (uint32_t c = 0; nonnulls && c < BUSTER_ARRAY_LENGTH(contracts); c += 1)
+            {
+                const CheckInputAttribute* parameter = contracts[c];
+                if (parameter != NULL)
+                {
+                    indices[count] = (int64_t)index + 1;
+                    CheckInputAttribute contract = *parameter;
+                    contract.kind = CHECK_ATTRIBUTE_NONNULL;
+                    contract.argument_values = indices + count++;
+                    contract.argument_count = 1;
+                    contract.argument_ends = NULL;
+                    contract.schema = CHECK_ATTRIBUTE_INTEGER_LIST;
+                    nonnulls = check_input_attribute_append(reader, attributes, contract);
+                }
+            }
+            index += 1;
+        }
+        if (nonnulls)
+        {
+            reader->declarator_attributes = attributes;
+        }
+        reader->output->resource |= !nonnulls;
+    }
     // What check_input_declarator_conventions checks once the declaration's convention is final (#1447): the declared
     // function's own parameters' Swift ABIs, their places and attributes kept in the reader's arena, and a declaration's
     // name where its function has no prototype.
@@ -10187,7 +10261,7 @@ static inline __attribute__((always_inline)) TypeId check_input_declarator_end(C
     }
     const bool definition_next = run->cursor < reader->parser->tokens.count && reader->parser->tokens.kinds[run->cursor] == PARSE_KIND_L_BRACE;
     reader->declarator_no_prototype = complete && own != NULL && run->name != BUSTER_CHECK_NONE && !definition_next && !own->identifier_list ? run->name : BUSTER_CHECK_NONE;
-    const TypeId result = complete && captured && object_sizes ? run->result : 0;
+    const TypeId result = complete && captured && object_sizes && nonnulls ? run->result : 0;
     if (complete && run->function_part != BUSTER_CHECK_NONE && reader->pp->options.language.standard < 2023 &&
         run->cursor < reader->parser->tokens.count && reader->parser->tokens.kinds[run->cursor] == PARSE_KIND_L_BRACE)
     {
@@ -11388,6 +11462,11 @@ static bool check_input_kr_declarations(CheckInputReader* reader, uint32_t names
                 {
                     check_input_rare_claim(reader, &reader->parameter_shapes[listed]);
                     reader->parameter_shapes[listed] = shape;
+                }
+                if (type_kind_is_array(kind))
+                {
+                    check_input_rare_claim(reader, &reader->parameter_arrays[listed]);
+                    reader->parameter_arrays[listed] = (uint64_t)name << 32 | type;
                 }
                 check_input_set_bit(reader->declaration_bits, listed, BUSTER_CHECK_BITS_REGISTER, storage == C_NAME_REGISTER);
                 // Its bounds are the listed parameter's, as a prototype's are its parameter's.
@@ -16751,6 +16830,7 @@ static __attribute__((noinline)) void check_input_expression_act(CheckInputReade
     }
     if (op == CHECK_OP_SIZEOF && supported)
     {
+        check_input_sizeof_array_parameter(reader, token);
         TypeId requested = reader->query_types[token] != 0 ? reader->query_types[token] : check_input_memo_get(reader, reader->sizeof_types, token);
         if (requested == 0)
         {
@@ -17897,9 +17977,8 @@ static uint32_t check_input_rare_verify(const CheckInputReader* reader)
 typedef struct CheckAttested CheckAttested;
 static const uint64_t* check_attested_skips(const CheckAttested* attested);
 static const uint8_t* check_attested_token_levels(const CheckAttested* attested);
-static bool check_attested_tree_columns(CheckAttested* census, const uint32_t* parents, uint32_t count, uint32_t* last_children, uint32_t* before,
-                                        uint32_t* postorder, uint32_t* positions, uint32_t* ends, uint32_t* first_children, uint32_t* next_siblings,
-                                        uint32_t* starts, uint32_t* sizes, Arena* scratch);
+static bool check_attested_tree_columns(CheckAttested* census, const uint32_t* parents, uint32_t count, uint32_t* postorder, uint32_t* positions,
+                                        uint32_t* ends, uint32_t* first_children, uint32_t* next_siblings, uint32_t* sizes, Arena* scratch);
 static void check_attested_events(CheckAttested* census, Preprocessor* pp, const CBindings* bindings, const uint32_t* completions, const TypeTable* types, uint32_t count);
 
 // The tokens of the declarations that attested declarations skip (#2531, c_check_attested.c's marks: a bit a token, 64
@@ -18225,8 +18304,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     reader.warning_index = valid ? arena_push_array(scratch, (uint64_t)reader.warning_index_base * 2, sizeof(uint16_t), 64) : 0;
     valid &= reader.warning_index != 0;
     // The tree's traversal: the parser's where it derived it (parse_tree_columns), else the reader's own, in its scratch,
-    // derived below once the columns are reserved: five columns with room for parse_tree_columns' sentinel, and the
-    // passes' two temporaries, pushed last.
+    // derived below in five columns with room for the sentinel.
     const bool derived = parser->postorder != 0 && parser->positions != 0 && parser->ends != 0 && parser->first_children != 0 && parser->next_siblings != 0;
     const uint64_t slots = (uint64_t)count + 1;
     uint32_t* traversal = derived || !valid ? 0 : arena_push_array(scratch, 5 * slots, sizeof(uint32_t), 64);
@@ -18295,6 +18373,7 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
     X(vla_scope_ends, uint32_t) \
     MEMO(sizeof_types) \
     MEMO(tag_types) \
+    X(parameter_arrays, uint64_t) \
     X(parameter_shapes, uint8_t) \
     X(warning_suppressed, uint8_t)
 #define BUSTER_CHECK_SPARSE_BYTES(field, type) + ((uint64_t)count + 1) * sizeof(type) + 63
@@ -18421,14 +18500,6 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
             memset(reader.transparent_unions, 0, (uint64_t)types->tags.capacity * sizeof(uint32_t));
         }
     }
-    // The traversal's temporaries, last on the scratch and popped once it is derived, so that the passes after it take
-    // their pages.
-    const uint64_t traversal_mark = scratch->length;
-    const uint64_t temporary_columns = (traversal != 0 ? 2u : 0u) + (sizes != 0 ? 1u : 0u);
-    uint32_t* const temporaries = temporary_columns != 0 && valid ? arena_push_array(scratch, temporary_columns * slots, sizeof(uint32_t), 64) : 0;
-    uint32_t* const starts = sizes != 0 && temporaries != 0 ? temporaries + (traversal != 0 ? 2 * slots : 0) : 0;
-    valid &= temporary_columns == 0 || temporaries != 0;
-
     if (valid && !output_zero)
     {
         // The output arena's columns whose empty value is zero, where its pages may hold what something wrote before.
@@ -18479,42 +18550,36 @@ static bool check_input_run(CheckInput* input, const Parser* parser, Preprocesso
         check_input_output_none(input, &reader, count);
         if (traversal != 0)
         {
-            // The views of c_check_prefix.c and c_check_repair.c bring their postorder, the rest is derived from it;
-            // otherwise, the C driver's tree_only parse, all of it in parse_tree_columns' three passes.
+            // The prefix and repair views bring their postorder. The ordinary tree_only parse needs all columns.
             if (parser->postorder != 0)
             {
-                if (parser->postorder == 0)
-                {
-                    parse_postorder(parser->tree.parents, count, temporaries, traversal);
-                }
                 parse_tree_links(parser->tree.parents, reader.postorder, count, traversal + slots, traversal + 2 * slots, traversal + 3 * slots, traversal + 4 * slots);
             }
             else if (attested == NULL ||
-                     !check_attested_tree_columns(attested, parser->tree.parents, count, temporaries, temporaries + slots, traversal, traversal + slots,
-                                                  traversal + 2 * slots, traversal + 3 * slots, traversal + 4 * slots, starts, sizes, scratch))
+                     !check_attested_tree_columns(attested, parser->tree.parents, count, traversal, traversal + slots,
+                                                  traversal + 2 * slots, traversal + 3 * slots, traversal + 4 * slots, sizes, scratch))
             {
                 // (Attested declarations' cache gives a cached declaration's columns, c_check_attested.c's
                 // check_attested_tree_columns, its own made as these are.)
-                parse_tree_columns(parser->tree.parents, count, temporaries, temporaries + slots, traversal, traversal + slots, traversal + 2 * slots,
-                                   traversal + 3 * slots, traversal + 4 * slots, starts, sizes);
+                parse_tree_columns(parser->tree.parents, count, traversal, traversal + slots, traversal + 2 * slots,
+                                   traversal + 3 * slots, traversal + 4 * slots, sizes);
             }
         }
         if (sizes != 0 && (traversal == 0 || parser->postorder != 0))
         {
-            // The prefix/repair traversal already exists. Source order gives an earlier first child's start before its
-            // parent, exactly as parse_tree_columns' size publication does.
+            // The prefix/repair traversal already exists. An earlier first child already published its size,
+            // so its end and size give the parent's start without another column.
             for (uint32_t token = 0; token < count; token += 1)
             {
                 const uint32_t first = reader.first_child[token];
-                starts[token] = first < token ? starts[first] : token;
-                sizes[reader.postorder_positions[token]] = reader.ends[token] - starts[token] + 1;
+                const uint32_t start = first < token ? reader.ends[first] + 1 - sizes[reader.postorder_positions[first]] : token;
+                sizes[reader.postorder_positions[token]] = reader.ends[token] - start + 1;
             }
         }
         if (sizes != 0)
         {
             sizes[count] = 0;
         }
-        arena_pop_to(scratch, traversal_mark);
         // The parser uses SEPARATOR for commas inside any parentheses. The enclosing delimiter distinguishes
         // expression commas from call/declaration separators; only separators inherit that fact from a parent.
         check_input_expression_commas(&reader);

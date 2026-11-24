@@ -883,7 +883,7 @@ static const BuiltinIntrinsicInfo* check_input_checks_library(CheckInputReader* 
 // clang crashes (an index of 0), where the checker can't spell a builtin parameter's type in its error, and for more than
 // 32 arguments. A definition's identifier list compares its parameters by their
 // declarations' types, the promoted prototype's standing aside (clang's ParmVarDecl types). Nothing else changes: the
-// -Wfortify-source warnings it would give the function's calls, as a builtin's, the checker doesn't make. Whether the
+// -Wfortify-source checks of the named builtin do not yet extend to calls of the annotated function. Whether the
 // declaration goes on.
 static bool check_input_attribute_diagnose_builtin(CheckInputReader* reader, CheckInputAttributes* attributes, CheckInputAttribute* attribute, TypeId function,
                                                    uint32_t name)

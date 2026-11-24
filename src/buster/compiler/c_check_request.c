@@ -41,9 +41,6 @@ struct CheckRequestScan
 {
     // The first option that asks for code generation the driver doesn't implement (check_request_codegen_option).
     const char* codegen;
-    // The last of -fstack-protector, -fstack-protector-strong and -fstack-protector-all, unless -fno-stack-protector
-    // follows it.
-    const char* stack_protector;
     // The last -fcf-protection or -fcf-protection=VALUE, unless it is -fcf-protection=none.
     const char* cf_protection;
     // The object and linkage options the producer doesn't implement, refused where the request emits code (#1124), each
@@ -80,8 +77,8 @@ typedef enum CheckRequestError
 {
     CHECK_REQUEST_ACCEPTED,
     // Code generation the driver doesn't implement: the first option of check_request_codegen_option's (or a bare
-    // -fvisibility), else the stack protector's or -fcf-protection's that decides, else, for a request that emits code,
-    // the object and linkage options' (#1124).
+    // -fvisibility), else -fcf-protection's that decides, else, for a request that emits code, the object and linkage
+    // options' (#1124).
     CHECK_REQUEST_CODEGEN,
     // Instrumentation the driver doesn't implement, for a request that emits code, from the resolved predefines rather
     // than from an enabling option, which a later -fno-sanitize= or -fno-openmp may have cancelled (#1112): a sanitizer,
@@ -186,8 +183,8 @@ static bool check_request_codegen_option(const char* argument, COptionMatch matc
     }
     // These complete spellings request the behavior already emitted. Exemptions are never prefixes: -mcmodel=small-bogus
     // and -fzero-call-used-regs=skip,all are still refused by name. Within these families, an earlier unsupported
-    // request isn't cancelled by a later inactive spelling; the stack protector's and CET's families are resolved
-    // separately (check_request_scan) and do honor a later disabling spelling.
+    // request isn't cancelled by a later inactive spelling; CET's family is resolved separately (check_request_scan) and
+    // does honor a later disabling spelling, and the stack protector's four spellings are taken (#3558).
     static const uint16_t inactive[] = {
         C_OPTION_FTRIVIAL_AUTO_VAR_INIT_EQ_UNINITIALIZED,
         C_OPTION_FZERO_CALL_USED_REGS_EQ_SKIP,
@@ -243,11 +240,21 @@ static bool check_request_visibility(const char* option)
                               strcmp(value, "=internal") == 0);
 }
 
+// Whether `match` is one of the stack protector's options the code has (#3558, predefines_stack_guard):
+// -fstack-protector, -fstack-protector-strong, -fstack-protector-all and -fno-stack-protector, which pp_parse_options
+// resolves and every request takes. The family's other spellings (GCC's -fstack-protector-explicit, a misspelling) stay
+// check_request_codegen_option's refusals.
+static bool check_request_stack_protector(COptionMatch match)
+{
+    return match.exact == C_OPTION_FNO_STACK_PROTECTOR || match.exact == C_OPTION_FSTACK_PROTECTOR || match.exact == C_OPTION_FSTACK_PROTECTOR_STRONG ||
+           match.exact == C_OPTION_FSTACK_PROTECTOR_ALL;
+}
+
 // Reads `argument`, one that is no option's value (pp_option_takes_value's), into `scan`: whether it goes on to
 // pp_parse_options. Only an option that asks for code generation the driver doesn't implement stays apart, since the
-// preprocessor doesn't model it; the stack protector's, -fcf-protection's, the layout options and the object and
-// linkage options go on, for their predefined macros, and so does a bare -fvisibility, which clang doesn't take. `match`
-// is the argument's IDs (c_option_find).
+// preprocessor doesn't model it; the stack protector's (which the code has), -fcf-protection's, the layout options and
+// the object and linkage options go on, for their predefined macros, and so does a bare -fvisibility, which clang
+// doesn't take. `match` is the argument's IDs (c_option_find).
 static bool check_request_scan_match(CheckRequestScan* scan, const char* argument, COptionMatch match)
 {
     bool passed = true;
@@ -266,11 +273,6 @@ static bool check_request_scan_match(CheckRequestScan* scan, const char* argumen
         scan->pack_value = true;
         scan->invalid_pack = valid ? NULL : argument;
         scan->packed_value = value == 0 && valid ? NULL : argument;
-    }
-    else if (match.exact == C_OPTION_FNO_STACK_PROTECTOR || match.exact == C_OPTION_FSTACK_PROTECTOR || match.exact == C_OPTION_FSTACK_PROTECTOR_STRONG ||
-             match.exact == C_OPTION_FSTACK_PROTECTOR_ALL)
-    {
-        scan->stack_protector = match.exact == C_OPTION_FNO_STACK_PROTECTOR ? NULL : argument;
     }
     else if (match.exact == C_OPTION_FCF_PROTECTION || match.joined == C_OPTION_FCF_PROTECTION_EQ)
     {
@@ -292,7 +294,7 @@ static bool check_request_scan_match(CheckRequestScan* scan, const char* argumen
     {
         scan->codegen = scan->codegen != NULL ? scan->codegen : argument;
     }
-    else if (check_request_codegen_option(argument, match))
+    else if (!check_request_stack_protector(match) && check_request_codegen_option(argument, match))
     {
         scan->codegen = scan->codegen != NULL ? scan->codegen : argument;
         passed = false;
@@ -311,8 +313,7 @@ static CheckRequestRefusal check_request_refusal(const CheckRequestScan* scan, c
     const bool emits = code != CHECK_REQUEST_CODE_NONE;
     const char* visibility = check_request_visibility(scan->visibility) ? scan->visibility : NULL;
     const char* object = !emits ? NULL : visibility != NULL ? visibility : scan->function_sections != NULL ? scan->function_sections : scan->data_sections;
-    const char* codegen = scan->codegen != NULL ? scan->codegen : scan->stack_protector != NULL ? scan->stack_protector :
-                          scan->cf_protection != NULL ? scan->cf_protection : object;
+    const char* codegen = scan->codegen != NULL ? scan->codegen : scan->cf_protection != NULL ? scan->cf_protection : object;
     const bool sanitized = options != NULL && emits && options->predefines.sanitizers != 0;
     const bool covered = options != NULL && emits && options->predefines.sanitize_coverage;
     const bool parallel = options != NULL && emits && options->predefines.openmp_enabled;
@@ -500,6 +501,8 @@ static CheckProgramOptions check_request_program_options(const Preprocessor* pp,
     unit.predefines = &pp->options.predefines;
     unit.frame_pointer = predefines_frame_pointer(&pp->options.predefines);
     unit.probe_stack = predefines_stack_clash(&pp->options.predefines);
+    // The stack protector the options ask for (#3558), which the lowering guards the functions by.
+    unit.stack_protector = predefines_stack_guard(&pp->options.predefines);
     // -fPIC's and -fpic's code (#2101) where the client's output may go into a shared library: -fPIE's elsewhere, as a
     // link's executable takes them.
     unit.pic = unit.pic && (pp->options.predefines.pic == BUSTER_PREDEFINES_PIC_BIG || pp->options.predefines.pic == BUSTER_PREDEFINES_PIC_SMALL);
@@ -555,6 +558,7 @@ static CheckRequestReceipt check_request_receipt(const Preprocessor* pp, const c
     digest = check_request_mix_word(digest, 3, (uint64_t)target.architecture << 1 | (target.native_znver5 ? 1u : 0u));
     // A tuning with slow unaligned 16-byte accesses (#1373, X86Target.slow_unaligned_16), which bounds the memmoves the code
     // computes: mixed in where it is set alone, so that every other request's digest stays what it was.
+    digest = target.prefer_256 ? check_request_mix_word(digest, 41, 1) : digest;
     digest = target.slow_unaligned_16 ? check_request_mix_word(digest, 40, 1) : digest;
     digest = check_request_mix_word(digest, 4, (uint64_t)language.standard << 32 | (uint64_t)language.gnu << 16 | (uint64_t)language.gnu_keywords << 8 | language.digraphs);
     const uint64_t lexical = (uint64_t)options->freestanding | (uint64_t)options->no_builtin << 1 | (uint64_t)options->undefine << 2 | (uint64_t)options->trigraphs << 3 |

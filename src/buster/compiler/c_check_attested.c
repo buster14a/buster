@@ -3585,51 +3585,6 @@ static bool check_attested_read(CheckAttested* attested, CheckInput* input, cons
 // tree pool, check_attested_tree_keep); a later declaration under its key whose parents are the same takes them, 16
 // tokens at a time, and any other has them made over its run as parse_tree_columns makes the unit's, the twin.
 
-// The declaration of tokens [`a`, `b`]'s tree columns as parse_tree_columns makes the unit's (with the sizes), its three
-// passes over the run alone: the positions' prefix sum starts at `a`, the tokens whose subtree ends before it.
-static void check_attested_tree_range(const uint32_t* parents, uint32_t count, uint32_t a, uint32_t b, uint32_t* last_children, uint32_t* before,
-                                      uint32_t* postorder, uint32_t* positions, uint32_t* ends, uint32_t* first_children, uint32_t* next_siblings,
-                                      uint32_t* starts, uint32_t* sizes)
-{
-    for (uint32_t v = a; v <= b; v += 1)
-    {
-        last_children[v] = 0;
-        first_children[v] = BUSTER_PARSE_NONE;
-        before[v] = 0;
-    }
-    first_children[count] = BUSTER_PARSE_NONE;
-    for (uint32_t i = a; i <= b; i += 1)
-    {
-        last_children[parents[i] == BUSTER_PARSE_NONE ? count : parents[i]] = i;
-    }
-    for (uint32_t v = b + 1; v-- > a;)
-    {
-        const uint32_t parent = parents[v];
-        const uint32_t slot = parent != BUSTER_PARSE_NONE ? parent : count;
-        const uint32_t sibling = first_children[slot];
-        next_siblings[v] = parent != BUSTER_PARSE_NONE ? sibling : BUSTER_PARSE_NONE;
-        first_children[slot] = v;
-        const uint32_t last = last_children[v];
-        const uint32_t end = ends[last];
-        const uint32_t own = __builtin_unpredictable(last > v) ? end : v;
-        ends[v] = own;
-        before[own] += 1;
-    }
-    uint32_t sum = a;
-    for (uint32_t v = a; v <= b; v += 1)
-    {
-        const uint32_t position = sum + ends[v] - v;
-        positions[v] = position;
-        postorder[position] = v;
-        sum += before[v];
-        const uint32_t first = first_children[v];
-        const bool before_v = first < v;
-        const uint32_t start = starts[before_v ? first : v];
-        starts[v] = __builtin_unpredictable(before_v) ? start : v;
-        sizes[position] = ends[v] - starts[v] + 1;
-    }
-}
-
 // Whether every parent of tokens [`a`, `b`] is one of them or none: the declaration is its own tree.
 static bool check_attested_tree_own(const uint32_t* parents, uint32_t a, uint32_t b)
 {
@@ -3708,9 +3663,8 @@ static const uint16_t* check_attested_tree_of(const CheckAttested* census, uint3
 // the lists' cache (the section's comment): false where the unit's passes didn't run, it has no sizes or a declaration
 // isn't its own tree, and the caller then makes them whole. With --attested=verify or --twins the unit's columns are
 // made whole too, in `scratch`, and a difference is a contradiction.
-static bool check_attested_tree_columns(CheckAttested* census, const uint32_t* parents, uint32_t count, uint32_t* last_children, uint32_t* before,
-                                        uint32_t* postorder, uint32_t* positions, uint32_t* ends, uint32_t* first_children, uint32_t* next_siblings,
-                                        uint32_t* starts, uint32_t* sizes, Arena* scratch)
+static bool check_attested_tree_columns(CheckAttested* census, const uint32_t* parents, uint32_t count, uint32_t* postorder, uint32_t* positions,
+                                        uint32_t* ends, uint32_t* first_children, uint32_t* next_siblings, uint32_t* sizes, Arena* scratch)
 {
     const bool ready = census->unit_ready && !census->alone && count == census->token_count && sizes != NULL && census->declaration_count != 0;
     // In a view, its read declarations alone, in order (a skipped one has no tokens, nor columns, and its cached tree's
@@ -3761,7 +3715,7 @@ static bool check_attested_tree_columns(CheckAttested* census, const uint32_t* p
             valid = check_attested_tree_own(parents, a, b);
             if (valid)
             {
-                check_attested_tree_range(parents, count, a, b, last_children, before, postorder, positions, ends, first_children, next_siblings, starts, sizes);
+                parse_tree_columns_range(parents, a, b + 1, postorder, positions, ends, first_children, next_siblings, sizes);
                 census->tree_made += 1;
                 census->tree_mismatches += kept != NULL ? 1 : 0;
             }
@@ -3799,15 +3753,14 @@ static bool check_attested_tree_columns(CheckAttested* census, const uint32_t* p
         // The twin: the whole unit's columns, which these must be to the word.
         const uint64_t mark = scratch->length;
         const uint64_t slots = (uint64_t)count + 1;
-        uint32_t* const whole = arena_push_array(scratch, 9 * slots, sizeof(uint32_t), 64);
+        uint32_t* const whole = arena_push_array(scratch, 6 * slots, sizeof(uint32_t), 64);
         if (whole != NULL)
         {
-            parse_tree_columns(parents, count, whole, whole + slots, whole + 2 * slots, whole + 3 * slots, whole + 4 * slots, whole + 5 * slots, whole + 6 * slots, whole + 7 * slots,
-                               whole + 8 * slots);
-            const bool same = memcmp(whole + 2 * slots, postorder, (uint64_t)count * sizeof(uint32_t)) == 0 &&
-                              memcmp(whole + 3 * slots, positions, slots * sizeof(uint32_t)) == 0 && memcmp(whole + 4 * slots, ends, slots * sizeof(uint32_t)) == 0 &&
-                              memcmp(whole + 5 * slots, first_children, slots * sizeof(uint32_t)) == 0 &&
-                              memcmp(whole + 6 * slots, next_siblings, slots * sizeof(uint32_t)) == 0 && memcmp(whole + 8 * slots, sizes, (uint64_t)count * sizeof(uint32_t)) == 0;
+            parse_tree_columns(parents, count, whole, whole + slots, whole + 2 * slots, whole + 3 * slots, whole + 4 * slots, whole + 5 * slots);
+            const bool same = memcmp(whole, postorder, (uint64_t)count * sizeof(uint32_t)) == 0 &&
+                              memcmp(whole + slots, positions, slots * sizeof(uint32_t)) == 0 && memcmp(whole + 2 * slots, ends, slots * sizeof(uint32_t)) == 0 &&
+                              memcmp(whole + 3 * slots, first_children, slots * sizeof(uint32_t)) == 0 &&
+                              memcmp(whole + 4 * slots, next_siblings, slots * sizeof(uint32_t)) == 0 && memcmp(whole + 5 * slots, sizes, (uint64_t)count * sizeof(uint32_t)) == 0;
             census->unit_tree_mismatches += same ? 0 : 1;
             census->contradictions += same ? 0 : 1;
             census->tree_mismatches += same ? 0 : 1;

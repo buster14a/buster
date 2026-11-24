@@ -1310,6 +1310,47 @@ static void check_warning_graph_int_pointer_cast(CheckInputReader* reader, const
     }
 }
 
+// Both a[c] and c[a] use the written index type before its integer promotion. Plain char is distinct from explicitly
+// signed or unsigned char. A nonnegative constant index is unambiguous; a negative char constant still warns.
+static void check_warning_graph_char_subscript(CheckInputReader* reader, const CheckStream* stream, uint32_t node)
+{
+    const CheckGraph* graph = &reader->output->graph;
+    const TypeTable* types = reader->types;
+    const Parser* parser = reader->parser;
+    const uint32_t left = graph->operand0[node];
+    const uint32_t right = graph->operand1[node];
+    const TypeId left_type = left < stream->count ? type_unqualified(type_strip_aligned(types, check_stream_type(stream, left))) : 0;
+    const uint32_t index = left_type != 0 && type_kind(types, left_type) == BUSTER_TYPE_KIND_INTEGER ? left : right;
+    const TypeId type = index < stream->count ? type_unqualified(type_strip_aligned(types, check_stream_type(stream, index))) : 0;
+    bool warn = type == BUSTER_TYPE_CHAR;
+    if (warn && check_stream_constant_kind(stream, index) == CHECK_CONSTANT_INTEGER && (check_stream_flags(stream, index) & BUSTER_CHECK_ICE) != 0)
+    {
+        const CheckValue value = check_stream_value(stream, index);
+        uint32_t width = 0;
+        bool signed_type = false;
+        warn = value.fault == CHECK_FAULT_NONE && check_action_integer_type(types, type, &width, &signed_type) && signed_type &&
+               width != 0 && width <= 128 && (value.integer & ((unsigned __int128)1 << (width - 1))) != 0;
+    }
+    const uint32_t close = graph->tokens[node];
+    const uint32_t open = warn && close < parser->tokens.count && parser->tree.roles[close] == PARSE_ROLE_CLOSE_SUBSCRIPT ?
+                          check_warning_graph_void_opener(parser, close) : BUSTER_CHECK_NONE;
+    if (open < parser->tokens.count)
+    {
+        const CheckWarningEvent event =
+        {
+            .id = CHECK_WARNING_ID_CHAR_SUBSCRIPTS,
+            .kind = CHECK_WARNING_EVENT_CHAR_SUBSCRIPT,
+            .token = open,
+            .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+            .flags = BUSTER_CHECK_WARNING_DEFAULT_IGNORED,
+            .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+            .completion = graph->source_positions[node],
+            .payload = { .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+        };
+        check_input_warning_once(reader, &event);
+    }
+}
+
 // GCC's cast to a union from a member's type (#2301, clang's CheckCStyleCast, BUSTER_CHECK_CONVERT_TO_UNION): the extension's
 // -Wgnu-union-cast at the cast's `(`, as soon as it is read, in an unevaluated operand too. Off by default.
 static void check_warning_graph_union_cast(CheckInputReader* reader, const CheckStream* stream, uint32_t node)
@@ -1757,6 +1798,7 @@ static bool check_input_warning_graph(CheckInput* input, const Parser* parser, T
                     _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_CONVERT)) |
                     _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_CALL)) |
                     _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_DEREFERENCE)) |
+                    _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_SUBSCRIPT)) |
                     _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_SIZEOF)) |
                     _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_ALIGNOF)) |
                     _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_LOGICAL_AND)) |
@@ -1869,6 +1911,10 @@ static bool check_input_warning_graph(CheckInput* input, const Parser* parser, T
                 else if (op == CHECK_OP_SIZEOF || op == CHECK_OP_ALIGNOF)
                 {
                     check_warning_graph_operand(&reader, stream, node);
+                }
+                else if (op == CHECK_OP_SUBSCRIPT)
+                {
+                    check_warning_graph_char_subscript(&reader, stream, node);
                 }
                 else if (op == CHECK_OP_CAST && token < parser->tokens.count && parser->tree.roles[token] == PARSE_ROLE_CLOSE_CAST)
                 {

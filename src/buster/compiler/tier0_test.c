@@ -610,7 +610,7 @@ static uint64_t tier0_test_interpret(const Tier0Program* program, const Tier0Fun
             break;
         case BUSTER_TYPED_COPY:
             top -= 2;
-            memmove((void*)(uintptr_t)stack[top], (const void*)(uintptr_t)stack[top + 1], value);
+            memmove((void*)(uintptr_t)stack[top], (const void*)(uintptr_t)stack[top + 1], tier0_copy_bytes(value & ~BUSTER_TYPED_ACCESS_VOLATILE));
             break;
         case BUSTER_TYPED_BRANCH_FALSE:
         case BUSTER_TYPED_BRANCH_TRUE:
@@ -2550,7 +2550,7 @@ static void tier0_test_objects(Tier0TestTally* tally, uint64_t seed)
             arena_pop_to(&arena, mark);
         }
     }
-    // A copy's rules: between two objects of 256 bytes, all of them, then each way to break them; and a move's (#1373,
+    // A copy's rules: between two objects, a maximum-sized copy, then each way to break it; and a move's (#1373,
     // COPY's move form) of BUSTER_TIER0_MAX_MOVE_BYTES of them, which compiles.
     for (uint32_t way = 0; way < 7; way += 1)
     {
@@ -2558,7 +2558,7 @@ static void tier0_test_objects(Tier0TestTally* tally, uint64_t seed)
         {
             local_classes[l] = BUSTER_TYPED_CLASS_VOID;
             local_flags[l] = BUSTER_TYPED_LOCAL_ADDRESS_TAKEN;
-            local_sizes[l] = BUSTER_TIER0_MAX_COPY_BYTES;
+            local_sizes[l] = BUSTER_TIER0_MAX_MOVE_BYTES;
             local_alignments[l] = 3;
         }
         static const uint8_t copy_kinds[4] = { BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_LOCAL_ADDRESS, BUSTER_TYPED_COPY, BUSTER_TYPED_RETURN };
@@ -2588,7 +2588,7 @@ static void tier0_test_objects(Tier0TestTally* tally, uint64_t seed)
             classes[0] = BUSTER_TYPED_CLASS_I64;
             break;
         case 6:
-            values[2] = BUSTER_TIER0_MOVE_VALUE(BUSTER_TIER0_MAX_MOVE_BYTES);
+            values[2] = tier0_move_value(BUSTER_TIER0_MAX_MOVE_BYTES, 64);
             break;
         default:
             break;

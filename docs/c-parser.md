@@ -510,23 +510,33 @@ as one, the twin.
 
 ## The postorder and the tree's columns
 
-`parse_tree_columns` (#186, #544) derives from the parents, in three passes
-without a branch on the tree, everything the checker's reader reads of the tree
-but the parents and the roles:
+`parse_tree_columns` derives the postorder, its inverse, source subtree ends,
+first children and next siblings from the ordered parent forest. A subtree is
+a contiguous source interval. Complete trees occupy the same interval in either
+order, so the builder finishes groups of trees while their columns are in cache.
+After about 2,048 tokens it looks for a root and checks the following token's
+ancestors. A root with children on its right stays with those children. The
+probe has a fixed depth limit and an inconclusive probe leaves the tree intact.
 
-- each token's last child, forward (each parent's last write);
-- backward, each token's next sibling and its parent's first child (each token
-  pushes itself on its parent's list, which leaves the first child at the
-  head), each token's subtree end (its last child's, where that child comes
-  after it, else its own), and how many subtrees end at each token;
-- forward, the exclusive prefix sum of those counts, `C(v)`, and each token's
-  postorder position, `C(v) + end(v) - v`, which places it in the postorder.
+The backward pass builds sibling links 16 children at a time. A conflict mask
+identifies the next child with the same parent within a block. The first child
+seen in a later block supplies the link that crosses a block boundary. While
+linking, the builder records only children that are both last and to their
+parent's right. These edges are disjoint paths. Processing the saved children
+in descending order propagates each completed end to its parent and increments
+the count at that end. A node with no such edge keeps its own end.
 
-With `ParseOptions.sizes` the last pass also takes each token's subtree start
-from its first child before it and writes the position's size,
-`end(v) - start(v) + 1`. `parse_tree_links` is the other derivation: the checker's reader's
-derivation before this change (each token's children linked from the last, then
-its position and its parent's end from a postorder in order).
+For token `v`, let `C(v)` count the subtrees that end before `v`. Its postorder
+position is `C(v) + end(v) - v`. The builder accumulates end counts in the
+positions output, then computes their exclusive prefix sum in groups of 16.
+A masked scatter publishes the inverse permutation. With `ParseOptions.sizes`,
+a forward pass visits the compact list of parents whose first child precedes
+them and copies each earlier child's start. The size at the postorder position is
+`end(v) - start(v) + 1`. An unwritten interval of the postorder holds the
+starts. When only the current interval fits, its inverse is published after
+its sizes. The builder reserves no per-token temporary arrays.
+
+`parse_tree_links` derives positions, ends and links from a supplied postorder.
 `parse_postorder` is the walk the spike measured the passes against (each token
 with no child after it, then the climb through the ancestors it ends): it
 mispredicts where the tree is irregular, as on `sqlite3.c`, and costs less where
@@ -534,19 +544,22 @@ its branches predict, as on libc ("Measurements"). `test-parser` checks the
 parse's columns and `parse_tree_links`' against a depth-first walk of its own,
 and the benchmark times the four.
 
-Where the columns are made. Before, the parser derived its postorder and the
-subtree sizes in five passes (`parse_postorder_sorted`), and the checker's reader
-then derived the links, the ends and the positions again, in two passes and three
-fills; nothing read the sizes. Now a parse that isn't `tree_only` publishes the
-columns and the reader reads them as they are, and the C driver parses
-`tree_only`: the reader derives the columns once, with `parse_tree_columns`
-(with `--scalar`, the walk and `parse_tree_links`), into its own scratch, whose
-pages the parse's temporaries already touched, so that no column of the parser's
-is faulted in for them. The prefix and repair views (`c_check_prefix.c`,
-`c_check_repair.c`) bring their own postorder, and the reader derives the rest
-from it with `parse_tree_links`.
+The ordinary driver requests `tree_only` parsing. Its checker constructs the
+columns once in scratch previously used by the parser. When the parser publishes
+a traversal, the checker borrows it. The prefix and repair views bring their own
+postorder and the checker derives the remaining columns with `parse_tree_links`.
+An attested declaration without a cached traversal uses the same bounded-range
+builder as a parser tile.
 
-Why scalar. The passes are a scatter's loads and stores: per token, two of the
+On the 9700X, constructing the six columns for frozen SQLite took 1.898 ns per
+token, down from 2.068, and eliminated 8,593,644 bytes of checker scratch.
+The ordinary one-lane compile measured 113.317 ms against 113.380 ms, within
+the variation across nine paired rounds. For the frozen compiler translation
+unit the scratch saving was 29,202,804 bytes and sized traversal time was flat.
+The companion record includes the commands, individual samples and object
+hashes. [9700X measurements](https://github.com/buster14a/buster-performance/tree/3802e6b7939295ced4a6510566708065409dab14/docs/measurements/tree-columns-2850-2026-11-24)
+
+In the earlier whole-unit implementation, two of the
 backward pass's loads and a read-modify-write land at the token's parent, its
 last child and its subtree's end, and each forward pass makes a store at its
 parent or its position. On Zen 5 a zmm `vpgatherdd` takes about 12.6 cycles for
@@ -574,8 +587,8 @@ comes from its own forward pass; the one-pass version leaves each end at its
 parent through a store whose address is a select of loaded values. On the
 laptop's Zen 4 the variants rank otherwise and vary more from process to process
 (the old passes took 43 TSC ticks a token there, the others 17 to 28), so the
-9700X decides. The forward pass in AVX-512 saved nothing: its scatter of the
-postorder costs what the scalar pass does.
+9700X decides. In that whole-unit implementation the AVX-512 forward pass
+took the same time as the scalar pass.
 
 ## The driver
 
