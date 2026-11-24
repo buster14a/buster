@@ -11037,7 +11037,7 @@ static void check_lower_dump_struct(CheckLowerWriter* writer, uint32_t node)
                     }
                     else
                     {
-                        field.is_volatile = operand->is_volatile;
+                        field.is_volatile = check_lower_volatile(field.class, operand->type);
                         if (writer->bit_units != NULL && !field.is_volatile)
                         {
                             check_lower_bit_unit_apply(writer->bit_units[member], operand->value, &field);
@@ -11063,7 +11063,7 @@ static void check_lower_dump_struct(CheckLowerWriter* writer, uint32_t node)
                     {
                         check_lower_convert(writer, operand->type, operand->promoted);
                     }
-                    check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, check_lower_access_value(types, class, operand->type));
+                    check_lower_instruction(writer, BUSTER_TYPED_LOAD, class, check_lower_access(writer, class, operand->type));
                     check_lower_dump_field_address(writer, base, operand->value / 8);
                 }
             }

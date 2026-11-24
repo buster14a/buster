@@ -221,7 +221,8 @@ static void check_test_program_bit_units(CheckTest* test, const char* clang)
                                   "struct __attribute__((packed)) R{char c;unsigned long long a:60;unsigned b:20;};"
                                   "struct __attribute__((packed)) Q12{unsigned a:30,b:30,c:30;};"
                                   "struct __attribute__((packed)) Big{char head;unsigned long long a:51,b:40;signed long long c:60;unsigned d:25;char tail;};"
-                                  "struct D{struct B fields;volatile struct B observed;};void print(const char*,...);";
+                                  "struct D{struct B fields;volatile struct B observed;};"
+                                  "struct DumpWide{volatile short prefix;struct Big inner;};void print(const char*,...);";
     static const char functions[] = "unsigned issue(struct B*b){b->y+=b->x;b->z^=b->w;return b->x+b->y+b->z+b->w;}"
                                     "void guard(struct G*p,unsigned v){p->x=v;p->x++;}"
                                     "void clipped(struct T*p){p->a+=1;}"
@@ -247,7 +248,8 @@ static void check_test_program_bit_units(CheckTest* test, const char* clang)
                                     "unsigned observed(volatile struct Big*p){return p->d;}"
                                     "unsigned cleared(unsigned n){struct B v={.w=n,.z={}};return v.z+v.w;}"
                                     "void dumped(struct D*p){__builtin_dump_struct(p,print);}"
-                                    "void observed_dump(volatile struct B*p){__builtin_dump_struct(p,print);}";
+                                    "void observed_dump(volatile struct N*p){__builtin_dump_struct(p,print);}"
+                                    "void wide_dump(struct DumpWide*p){__builtin_dump_struct(p,print);}";
     typedef struct CheckTestBitCase CheckTestBitCase;
     struct CheckTestBitCase
     {
@@ -295,7 +297,14 @@ static void check_test_program_bit_units(CheckTest* test, const char* clang)
         { "observed", "vr19:4" },
         { "cleared", "w0:4 r0:4" },
         { "dumped", "r0:4 vr4:1 vr4:2 vr5:2 vr6:2" },
-        { "observed_dump", "vr0:1 vr0:2 vr1:2 vr2:2" },
+        {
+            "observed_dump",
+            "vr0:4 vr4:1 vr4:2 vr5:2 vr6:2",
+        },
+        {
+            "wide_dump",
+            "vr0:2 r2:1 r3:8 r11:8 r19:4 r23:2 r25:1",
+        },
     };
     const uint32_t count = BUSTER_ARRAY_LENGTH(cases);
     char source[sizeof(records) + sizeof(functions)];

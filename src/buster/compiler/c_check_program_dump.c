@@ -967,8 +967,13 @@ static void check_lower_dump_record(CheckLowerDumpBuilder* builder, TypeId recor
     check_lower_dump_line(builder, "%s", &header, 1);
     check_lower_dump_line(builder, " {\n", NULL, 0);
     const uint32_t first_tag = types->types.index[type_index(record)];
-    stack[depth++] = (Frame){ .tag = first_tag, .indent = BUSTER_CHECK_NONE, .is_volatile = (type_qualifiers(record) & BUSTER_TYPE_VOLATILE) != 0,
-                              .close = builder->closes[first_tag], .cursor = builder->opens[first_tag] + 1 };
+    stack[depth++] = (Frame){
+        .tag = first_tag,
+        .indent = BUSTER_CHECK_NONE,
+        .is_volatile = (type_qualifiers(record) & BUSTER_TYPE_VOLATILE) != 0,
+        .close = builder->closes[first_tag],
+        .cursor = builder->opens[first_tag] + 1,
+    };
     while (depth != 0 && builder->refusal == NULL)
     {
         Frame* top = stack + depth - 1;
@@ -1005,8 +1010,16 @@ static void check_lower_dump_record(CheckLowerDumpBuilder* builder, TypeId recor
             if (name == 0 && !bits && record_kind && depth < BUSTER_CHECK_DUMP_DEPTH)
             {
                 // An anonymous struct or union: its fields, at this record's level.
-                stack[depth++] = (Frame){ .tag = inner, .offset = offset, .depth = top->depth, .indent = top->indent, .anonymous = true,
-                                          .is_volatile = is_volatile, .close = builder->closes[inner], .cursor = builder->opens[inner] + 1 };
+                stack[depth++] = (Frame){
+                    .tag = inner,
+                    .offset = offset,
+                    .depth = top->depth,
+                    .indent = top->indent,
+                    .anonymous = true,
+                    .is_volatile = is_volatile,
+                    .close = builder->closes[inner],
+                    .cursor = builder->opens[inner] + 1,
+                };
             }
             else if (name == 0 && !bits && record_kind)
             {
@@ -1033,8 +1046,15 @@ static void check_lower_dump_record(CheckLowerDumpBuilder* builder, TypeId recor
                 {
                     check_lower_dump_line(builder, format, operands, count);
                     check_lower_dump_line(builder, " {\n", NULL, 0);
-                    stack[depth++] = (Frame){ .tag = inner, .offset = offset, .depth = field_depth, .indent = indent, .close = builder->closes[inner],
-                                              .cursor = builder->opens[inner] + 1, .is_volatile = is_volatile };
+                    stack[depth++] = (Frame){
+                        .tag = inner,
+                        .offset = offset,
+                        .depth = field_depth,
+                        .indent = indent,
+                        .is_volatile = is_volatile,
+                        .close = builder->closes[inner],
+                        .cursor = builder->opens[inner] + 1,
+                    };
                 }
                 else if (record_kind)
                 {
@@ -1048,9 +1068,13 @@ static void check_lower_dump_record(CheckLowerDumpBuilder* builder, TypeId recor
                     {
                         strcat(format, " ");
                         strcat(format, specifier);
-                        operands[count++] = (CheckLowerDumpOperand){ .kind = CHECK_LOWER_DUMP_VALUE, .value = offset, .type = bare,
-                                                                     .bit_member = bits ? member : 0, .is_volatile = is_volatile,
-                                                                     .promoted = check_lower_dump_promoted(types, bare, width) };
+                        operands[count++] = (CheckLowerDumpOperand){
+                            .kind = CHECK_LOWER_DUMP_VALUE,
+                            .value = offset,
+                            .type = bare | (is_volatile ? BUSTER_TYPE_VOLATILE : 0),
+                            .promoted = check_lower_dump_promoted(types, bare, width),
+                            .bit_member = bits ? member : 0,
+                        };
                     }
                     else
                     {

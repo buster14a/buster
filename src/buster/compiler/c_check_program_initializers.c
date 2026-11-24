@@ -22,8 +22,8 @@ struct CheckLowerInitPool
 // builtin's arguments and the format, one of
 // - STRING, a string of the call's image at `value`;
 // - SIZE, the size_t `value` (a bit-field's width);
-// - VALUE, the value of the field of `type` at bit `value` of the record, converted to `promoted`. For a bit-field,
-//   `bit_member` identifies its declared width and access unit and `is_volatile` includes enclosing records;
+// - VALUE, the value of the field of `type` at bit `value` of the record, converted to `promoted`. The type carries the
+//   effective volatile qualifier, including enclosing records. For a bit-field, `bit_member` identifies its width and unit;
 // - ADDRESS, the address of the field at bit `value`.
 typedef enum CheckLowerDumpKind
 {
@@ -41,7 +41,6 @@ struct CheckLowerDumpOperand
     TypeId promoted;
     uint32_t bit_member;
     uint8_t kind;
-    bool is_volatile;
 };
 
 // A call: its format's offset in the image and its operands, `count` of them from `first`.
