@@ -132,7 +132,8 @@ or `test-preprocessor --tables path...`:
   header sets below (`--clang`) in 16 and the files (below) a part each (a
   range each past 64), each part in a child process with a directory of its
   own, at most `test_process_cpus()` at once, the output in their order
-  (`pp_test_children`, #465). They must give the same stream
+  (`pp_test_children`, #465). In file mode, any completed part frees a CPU
+  for the next part while the parent collects results in input order. They must give the same stream
   token for token (kind, flags, value and location) and the same directive
   tables, with the expected spellings and the expected number of warnings. The
   vectorized kernels' outputs must also give their digests in
