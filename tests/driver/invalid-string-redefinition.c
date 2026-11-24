@@ -10,5 +10,11 @@ const char *grouped = ("\x100");
 const char *direct __attribute__((unused)) ("ok");
 const char *direct __attribute__((unused)) ("ok", "\x100");
 
+const char *compound = "ok";
+const char *compound = (char[]){ "\x100" };
+
+const char *compound_grouped = "ok";
+const char *compound_grouped = (const char[]){ ("\x100") };
+
 int later = 0;
 int later = 1;

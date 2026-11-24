@@ -14935,8 +14935,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
     const bool modern = parser->language.standard >= 1999;
     CheckInputJumpContext jumps = { .next = begin };
     uint32_t visits = 0;
-    uint32_t rejected_initializer_begin = 0;
-    uint32_t rejected_initializer_end = 0;
+    CheckInputRejectedInitializer rejected_initializer = { 0 };
     for (uint32_t i = begin; i <= end && reader->output->report_count == 0 && !reader->output->resource; i = check_input_resolve_next(reader, i, end))
     {
         visits += 1;
@@ -14955,7 +14954,9 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
         {
             for (uint32_t declaration = reader->initializer_finish_heads[i]; declaration != BUSTER_CHECK_NONE; declaration = reader->initializer_finish_next[declaration])
             {
-                if (!check_input_initializer_finish(reader, declaration))
+                const bool discarded = parser->tree.roles[declaration] == PARSE_ROLE_OPEN_COMPOUND &&
+                                       reader->initializer_declarations[declaration] == BUSTER_CHECK_NONE;
+                if (!discarded && !check_input_initializer_finish(reader, declaration))
                 {
                     break;
                 }
@@ -15174,17 +15175,17 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                 break;
             }
             const bool rejected = reader->invalid_redefinition_count != 0 && check_input_invalid_redefinition(reader, declaration);
-            check_input_initializer_prepare(reader, i, !rejected);
+            check_input_initializer_prepare(reader, i, !rejected, rejected_initializer);
             if (rejected)
             {
                 // Designators and their operands are prepared even though the rejected object cannot be initialized again.
                 // The direct form's trailing arguments are checked too, past its first argument's stored end.
                 const uint32_t stop = role == PARSE_ROLE_OPEN_GROUP && parent < parser->tokens.count ? parent : initializer_end;
-                if (i >= rejected_initializer_end)
+                if (i >= rejected_initializer.end)
                 {
-                    rejected_initializer_begin = i + 1;
+                    rejected_initializer.first = i + 1;
                 }
-                rejected_initializer_end = stop > rejected_initializer_end ? stop : rejected_initializer_end;
+                rejected_initializer.end = stop > rejected_initializer.end ? stop : rejected_initializer.end;
                 check_input_invalid_initializer(reader, declaration, i);
             }
             else
@@ -15395,7 +15396,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                         check_input_noderef_set(reader->output, body_end, reader->declarator_noderef);
                         reader->initializer_declarations[body_end] = i;
                         reader->query_types[i] = type;
-                        check_input_initializer_prepare(reader, i, true);
+                        check_input_initializer_prepare(reader, i, true, rejected_initializer);
                         reader->ignored[close] = true;
                     }
                     else
@@ -15411,14 +15412,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
         }
         if (__builtin_expect((syntax & BUSTER_CHECK_SYNTAX_STRING) != 0, 0) && syntactic && !reader->ignored[i])
         {
-            if (rejected_initializer_begin <= i && i < rejected_initializer_end)
-            {
-                check_input_initializer_rejected_string(reader, i, rejected_initializer_begin, rejected_initializer_end);
-            }
-            else
-            {
-                check_input_string(reader, i);
-            }
+            check_input_initializer_string(reader, i, rejected_initializer);
         }
     }
     reader->output->resolve_visits += visits;

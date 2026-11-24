@@ -36,16 +36,43 @@ static bool check_input_initializer_recover(CheckInputReader* reader, uint32_t b
     return !input->resource;
 }
 
-// The source walk reads strings in a rejected initializer. Ignore a refused concatenation's token run and its
-// dependent expressions so later visits do not read a value it could not supply. Sibling operands still get checked.
-static void check_input_initializer_rejected_string(CheckInputReader* reader, uint32_t token, uint32_t first, uint32_t limit)
+typedef struct CheckInputRejectedInitializer CheckInputRejectedInitializer;
+struct CheckInputRejectedInitializer
 {
-    const uint32_t before = reader->output->report_count;
-    if (check_input_string(reader, token) == NULL && reader->output->report_count > before)
+    uint32_t first;
+    uint32_t end;
+};
+
+// The malformed compound's body cannot supply an object. Leave its finish link intact so other jobs still run.
+static void check_input_initializer_discard_compound(CheckInputReader* reader, uint32_t closing)
+{
+    const uint32_t declaration = reader->initializer_declarations[closing];
+    if (declaration < reader->parser->tokens.count && check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND))
+    {
+        check_input_invalid_initializer(reader, declaration, declaration);
+        reader->initializer_declarations[closing] = BUSTER_CHECK_NONE;
+        reader->output->declarations[declaration] = BUSTER_CHECK_NONE;
+        reader->declaration_kinds[declaration] = 0;
+        reader->declared_types[declaration] = 0;
+        reader->objects[declaration] = 0;
+        reader->declaration_bits[declaration] = 0;
+        check_sparse_set(reader->output->sparse_pool, reader->output->declaration_bodies, declaration, BUSTER_CHECK_NONE);
+    }
+}
+
+// Preparation and the source walk share recovery for strings in rejected initializers. Skip a refused
+// concatenation and the expressions that need its value, while still checking sibling operands.
+static const CheckInitString* check_input_initializer_string(CheckInputReader* reader, uint32_t token, CheckInputRejectedInitializer rejected)
+{
+    const bool recover = rejected.first <= token && token < rejected.end;
+    const uint32_t before = recover ? reader->output->report_count : 0;
+    const CheckInitString* string = check_input_string(reader, token);
+    if (recover && string == NULL && reader->output->report_count > before)
     {
         const Parser* parser = reader->parser;
         const uint32_t count = parser->tokens.count;
         const uint8_t* kinds = parser->tokens.kinds;
+        const uint8_t* roles = parser->tree.roles;
         const uint32_t* parents = parser->tree.parents;
         const bool literal = kinds[token] == PARSE_KIND_STRING;
         uint32_t end = token + 1;
@@ -54,15 +81,20 @@ static void check_input_initializer_rejected_string(CheckInputReader* reader, ui
             end += 1;
         }
         memset(reader->ignored + token, 1, end - token);
-        for (uint32_t parent = parents[token]; first <= parent && parent < limit && !reader->ignored[parent]; parent = parents[parent])
+        for (uint32_t parent = parents[token]; rejected.first <= parent && parent < rejected.end && !reader->ignored[parent]; parent = parents[parent])
         {
             reader->ignored[parent] = true;
+            if (roles[parent] == PARSE_ROLE_CLOSE_COMPOUND_BODY)
+            {
+                check_input_initializer_discard_compound(reader, parent);
+            }
         }
         check_input_initializer_recover(reader, before);
     }
+    return string;
 }
 
-static bool check_input_initializer_prepare_slow(CheckInputReader* reader, uint32_t assignment, bool initialize)
+static bool check_input_initializer_prepare_slow(CheckInputReader* reader, uint32_t assignment, bool initialize, CheckInputRejectedInitializer rejected)
 {
     const Parser* parser = reader->parser;
     const uint32_t declaration = reader->initializer_declarations[assignment];
@@ -165,7 +197,7 @@ static bool check_input_initializer_prepare_slow(CheckInputReader* reader, uint3
             item = false;
             if (kind == PARSE_KIND_STRING && initialize)
             {
-                valid = check_input_string(reader, token) != 0;
+                valid = check_input_initializer_string(reader, token, rejected) != NULL;
                 string_refused = !valid;
             }
             if (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE)
@@ -207,11 +239,11 @@ static bool check_input_initializer_prepare_slow(CheckInputReader* reader, uint3
     return valid;
 }
 
-static bool check_input_initializer_prepare(CheckInputReader* reader, uint32_t assignment, bool initialize)
+static bool check_input_initializer_prepare(CheckInputReader* reader, uint32_t assignment, bool initialize, CheckInputRejectedInitializer rejected)
 {
     const uint32_t before = reader->output->report_count;
     const bool compact = initialize && check_input_literal_table_prepare(reader, assignment);
-    const bool valid = compact || (!reader->output->resource && check_input_initializer_prepare_slow(reader, assignment, initialize));
+    const bool valid = compact || (!reader->output->resource && check_input_initializer_prepare_slow(reader, assignment, initialize, rejected));
     if (valid && initialize)
     {
         const uint32_t declaration = reader->initializer_declarations[assignment];
