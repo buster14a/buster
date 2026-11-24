@@ -367,8 +367,10 @@ ranges use ordinary `madvise`. The pending mappings enter the reusable set
 only after the reset completes. A short result repeats the first incomplete
 range and all remaining ranges with ordinary advice. A failed reset unmaps
 the original mapping. Reservations and the end of unit teardown flush the
-batch before reuse or memory admission. A kernel or sandbox that declines
-the vector call uses ordinary advice for the rest of the pool's lifetime.
+batch before reuse or memory admission. Before opening its pidfd the lane
+checks its seccomp mode in `/proc/thread-self/status`. A filtered lane, a lane
+that cannot read its mode, or a kernel that declines the vector call uses
+ordinary advice for the rest of the pool's lifetime.
 
 Clearing a released arena's pages in place and keeping them, rather than
 discarding them, was measured and rejected (#3070). Found by `PAGEMAP_SCAN`,

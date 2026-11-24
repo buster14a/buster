@@ -687,6 +687,21 @@ static void arena_pool_finish_discards(ArenaPool* pool, uint64_t advised)
     pool->pending_bytes = 0;
 }
 
+// A seccomp filter may terminate the process for either optional syscall. Read the current thread's
+// mode before trying them. If procfs cannot confirm that it is unfiltered, use ordinary madvise.
+static int arena_pool_open_pidfd(void)
+{
+    const int file = open("/proc/thread-self/status", O_RDONLY | O_CLOEXEC);
+    char status[4096];
+    const ssize_t size = file >= 0 ? read(file, status, sizeof(status) - 1) : -1;
+    if (file >= 0)
+    {
+        close(file);
+    }
+    status[size > 0 ? size : 0] = 0;
+    return strstr(status, "\nSeccomp:\t0\n") != 0 ? (int)syscall(SYS_pidfd_open, getpid(), 0) : -1;
+}
+
 static void arena_pool_flush(ArenaPool* pool)
 {
     if (pool != 0 && pool->pending != 0)
@@ -696,7 +711,7 @@ static void arena_pool_flush(ArenaPool* pool)
         {
             if (!pool->tried_pidfd)
             {
-                pool->pidfd = (int)syscall(SYS_pidfd_open, getpid(), 0);
+                pool->pidfd = arena_pool_open_pidfd();
                 pool->tried_pidfd = true;
             }
             if (pool->pidfd >= 0)
