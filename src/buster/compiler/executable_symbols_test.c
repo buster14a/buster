@@ -258,17 +258,19 @@ static bool executable_symbols_test_dynamic(const ExecutableTestDirectory* direc
                     bool ran = false;
                     if (valid && library != 0)
                     {
+                        char copy[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+                        const char* fixture = executable_test_fixture_path(directory, path, copy);
                         uint8_t output[BUSTER_EXECUTABLE_TEST_OUTPUT_BYTES];
                         uint64_t length = 0;
                         int status = -1;
-                        char* arguments[] = { harness, path, 0 };
+                        char* arguments[] = { harness, (char*)fixture, 0 };
                         char* environment[] = { "BUSTER=1", 0 };
-                        ran = executable_test_run_arguments(arguments, environment, output, &length, &status) &&
+                        ran = fixture != 0 && executable_test_run_arguments(arguments, environment, output, &length, &status) &&
                               WIFEXITED(status) && WEXITSTATUS(status) == 0 && length == 0;
                     }
                     else if (valid)
                     {
-                        ran = executable_test_runs(path, (const uint8_t*)"", 0);
+                        ran = executable_test_runs_fixture(directory, path, (const uint8_t*)"", 0);
                     }
                     executable_test_expect(tally, ran, "PIE/shared imported function and TLS execute", index);
                     references[attached] = references[attached].pointer == 0 ? file : references[attached];
