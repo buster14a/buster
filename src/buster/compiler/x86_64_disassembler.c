@@ -144,8 +144,8 @@ struct X86DecodeLaneIndex
 // Bits 28-31: the segments (none, FS, GS, SS) the form allows.
 #define BUSTER_X86_LANE_SEGMENTS 28
 static uint32_t x86_decode_lane_forms[X86_FORM_COUNT];
-// A row's lane form and its compact checks' words (X86DecodeCheck's registers, memory and flags), 16 bytes a row, for
-// the lane decoder's gathers.
+// A row's lane form and its compact checks' words (X86DecodeCheck's registers, memory, and flags with the row in the
+// high half), 16 bytes a row, which the lane decoder loads a lane at a time (x86_decode_lane_rows_load).
 static uint32_t x86_decode_lane_rows[X86_FORM_COUNT][4] __attribute__((aligned(64)));
 static X86DecodeLaneIndex x86_decode_lane_indices[BUSTER_X86_DECODE_BUCKETS] __attribute__((aligned(64)));
 // Each bucket's varying bits' positions in the compact key, ascending, 16 bytes (the rest 31, a bit no key has), for
@@ -910,7 +910,7 @@ static bool x86_disassembler_initialize(void)
                     x86_decode_lane_rows[row][0] = x86_decode_lane_forms[row];
                     x86_decode_lane_rows[row][1] = x86_decode_checks[row].registers;
                     x86_decode_lane_rows[row][2] = x86_decode_checks[row].memory;
-                    x86_decode_lane_rows[row][3] = x86_decode_checks[row].flags;
+                    x86_decode_lane_rows[row][3] = x86_decode_checks[row].flags | row << 16;
                 }
                 x86_disassembly_initialize();
                 x86_decode_entry_count = total;
@@ -1716,6 +1716,29 @@ static __m512i x86_decode_lane_bytes(const X86DecodeWindow* window, __m512i posi
     return _mm512_permutex2var_epi8(window->low, indices, window->high);
 }
 
+// The lanes' rows' entries (x86_decode_lane_rows), a 16-byte load a lane, transposed into four vectors of a field each:
+// gathers are microcoded on Zen 5, and a vector load of scalar stores waits for them all.
+static void x86_decode_lane_rows_load(const uint32_t* rows, __m512i* fields)
+{
+    __m512i blocks[4];
+    for (uint32_t k = 0; k < 4; k += 1)
+    {
+        // Block j holds lane 4j + k's entry.
+        __m512i block = _mm512_castsi128_si512(_mm_load_si128((const __m128i*)x86_decode_lane_rows[rows[k]]));
+        block = _mm512_inserti32x4(block, _mm_load_si128((const __m128i*)x86_decode_lane_rows[rows[4 + k]]), 1);
+        block = _mm512_inserti32x4(block, _mm_load_si128((const __m128i*)x86_decode_lane_rows[rows[8 + k]]), 2);
+        blocks[k] = _mm512_inserti32x4(block, _mm_load_si128((const __m128i*)x86_decode_lane_rows[rows[12 + k]]), 3);
+    }
+    const __m512i low01 = _mm512_unpacklo_epi32(blocks[0], blocks[1]);
+    const __m512i high01 = _mm512_unpackhi_epi32(blocks[0], blocks[1]);
+    const __m512i low23 = _mm512_unpacklo_epi32(blocks[2], blocks[3]);
+    const __m512i high23 = _mm512_unpackhi_epi32(blocks[2], blocks[3]);
+    fields[0] = _mm512_unpacklo_epi64(low01, low23);
+    fields[1] = _mm512_unpackhi_epi64(low01, low23);
+    fields[2] = _mm512_unpacklo_epi64(high01, high23);
+    fields[3] = _mm512_unpackhi_epi64(high01, high23);
+}
+
 // A per-position field of the length pass (X86DecodeWindow) at each lane's start.
 static __m512i x86_decode_lane_field(__m512i starts, __m512i field)
 {
@@ -1875,53 +1898,33 @@ static uint32_t x86_decode_lanes(const X86DecodeWindow* window, uint64_t remaini
     key = _mm512_mask_or_epi32(key, has_next & _mm512_cmpneq_epi32_mask(_mm512_srli_epi32(next, 6), _mm512_set1_epi32(3)), key, _mm512_set1_epi32(1 << 23));
     const __m512i family = _mm512_mask_mov_epi32(_mm512_maskz_mov_epi32(vex2 | vex3, one), evex, _mm512_set1_epi32(2));
     const __m512i bucket = _mm512_add_epi32(_mm512_slli_epi32(_mm512_add_epi32(_mm512_mullo_epi32(family, _mm512_set1_epi32(BUSTER_X86_DECODE_MAPS)), map), 8), opcode);
-    // Each lane's cell (the lane index): the bucket's common bits, then its varying bits packed by bit shuffles (a
-    // lane's PEXT) into its cell number. A cell's list, and a lane without a ModRM byte (it matches its bucket's
-    // entries on the bits it has, in order, into a list of its own), take the lanes' rare per-lane path.
+    // Each lane's row (the lane index): the bucket's common bits, then its cell by PEXT of its varying bits, a lane at a
+    // time. A cell's list, and a lane without a ModRM byte (it matches its bucket's entries on the bits it has, in
+    // order, into a list of its own), give the lane its rows in turn.
     const uint16_t open_lanes = live & ~(refused | truncated);
-    const __m512i bucket_ok = _mm512_min_epu32(bucket, _mm512_set1_epi32(BUSTER_X86_DECODE_BUCKETS - 1));
-    const __m512i entry_at = _mm512_slli_epi32(bucket_ok, 2);
-    const __m512i common_mask = _mm512_mask_i32gather_epi32(zero, open_lanes, entry_at, x86_decode_lane_indices, 4);
-    const __m512i common_key = _mm512_mask_i32gather_epi32(zero, open_lanes, _mm512_add_epi32(entry_at, one), x86_decode_lane_indices, 4);
-    const __m512i first_cell = _mm512_mask_i32gather_epi32(zero, open_lanes, _mm512_add_epi32(entry_at, _mm512_set1_epi32(3)), x86_decode_lane_indices, 4);
-    const uint16_t indexed = open_lanes & has_next & _mm512_cmpeq_epi32_mask(_mm512_and_si512(key, common_mask), common_key);
-    __m512i cell_number = zero;
-    for (uint32_t half = 0; half < 2; half += 1)
-    {
-        const __m256i half_bucket = half == 0 ? _mm512_castsi512_si256(bucket_ok) : _mm512_extracti64x4_epi64(bucket_ok, 1);
-        const __m512i bits_at = _mm512_slli_epi64(_mm512_cvtepu32_epi64(half_bucket), 1);
-        const __mmask8 lanes = (__mmask8)(indexed >> (8 * half));
-        const __m512i low_bits = _mm512_mask_i64gather_epi64(zero, lanes, bits_at, x86_decode_lane_bits, 8);
-        const __m512i high_bits = _mm512_mask_i64gather_epi64(zero, lanes, _mm512_add_epi64(bits_at, _mm512_set1_epi64(1)), x86_decode_lane_bits, 8);
-        const __m512i half_key = _mm512_cvtepu32_epi64(half == 0 ? _mm512_castsi512_si256(key) : _mm512_extracti64x4_epi64(key, 1));
-        const uint64_t low = _mm512_bitshuffle_epi64_mask(half_key, low_bits);
-        const uint64_t high = _mm512_bitshuffle_epi64_mask(half_key, high_bits);
-        const __m512i shifts = _mm512_set_epi64(56, 48, 40, 32, 24, 16, 8, 0);
-        const __m512i byte = _mm512_set1_epi64(0xff);
-        const __m512i packed = _mm512_or_si512(_mm512_and_si512(_mm512_srlv_epi64(_mm512_set1_epi64((long long)low), shifts), byte),
-                                               _mm512_slli_epi64(_mm512_and_si512(_mm512_srlv_epi64(_mm512_set1_epi64((long long)high), shifts), byte), 8));
-        cell_number = half == 0 ? _mm512_castsi256_si512(_mm512_cvtepi64_epi32(packed)) : _mm512_inserti64x4(cell_number, _mm512_cvtepi64_epi32(packed), 1);
-    }
-    const __m512i cell = _mm512_and_si512(_mm512_mask_i32gather_epi32(zero, indexed, _mm512_add_epi32(first_cell, cell_number), x86_decode_cells, 2), _mm512_set1_epi32(0xffff));
-    const uint16_t listed = indexed & _mm512_test_epi32_mask(cell, _mm512_set1_epi32(BUSTER_X86_DECODE_LIST));
-    const uint16_t unindexed = open_lanes & ~has_next;
-    // The rare lanes' lists: a cell's, or one of its own.
-    const uint16_t* lists[16];
-    uint16_t partial[16][65];
     uint32_t keys[16];
     uint32_t buckets[16];
-    uint32_t cells[16];
-    if ((listed | unindexed) != 0)
+    _mm512_storeu_si512(keys, key);
+    _mm512_storeu_si512(buckets, _mm512_min_epu32(bucket, _mm512_set1_epi32(BUSTER_X86_DECODE_BUCKETS - 1)));
+    const uint16_t* lists[16];
+    uint16_t partial[16][65];
+    uint32_t rows[16] = { 0 };
+    uint16_t listed = 0;
+    uint16_t pending = 0;
+    for (uint32_t i = 0; i < count; i += 1)
     {
-        _mm512_storeu_si512(keys, key);
-        _mm512_storeu_si512(buckets, bucket_ok);
-        _mm512_storeu_si512(cells, cell);
+        const X86DecodeLaneIndex* index = &x86_decode_lane_indices[buckets[i]];
+        const bool open_lane = ((open_lanes >> i) & 1) != 0;
+        const bool next_byte = ((has_next >> i) & 1) != 0;
+        const bool matched = open_lane && next_byte && (keys[i] & index->common_mask) == index->common_key;
+        const uint32_t cell = matched ? x86_decode_cells[index->first + _pext_u32(keys[i], index->varying)] : 0;
+        const bool list = (cell & BUSTER_X86_DECODE_LIST) != 0;
+        lists[i] = x86_decode_lists + (cell & ~BUSTER_X86_DECODE_LIST);
+        rows[i] = list ? lists[i][0] : cell;
+        listed |= (uint16_t)((uint32_t)list << i);
+        pending |= (uint16_t)((uint32_t)(matched || (open_lane && !next_byte)) << i);
     }
-    for (uint16_t lanes = listed; lanes != 0; lanes &= lanes - 1)
-    {
-        const uint32_t i = (uint32_t)__builtin_ctz(lanes);
-        lists[i] = x86_decode_lists + (cells[i] & ~BUSTER_X86_DECODE_LIST);
-    }
+    const uint16_t unindexed = open_lanes & ~has_next;
     for (uint16_t lanes = unindexed; lanes != 0; lanes &= lanes - 1)
     {
         const uint32_t i = (uint32_t)__builtin_ctz(lanes);
@@ -1937,18 +1940,11 @@ static uint32_t x86_decode_lanes(const X86DecodeWindow* window, uint64_t remaini
         }
         partial[i][found] = 0;
         lists[i] = partial[i];
+        rows[i] = partial[i][0];
     }
     // The candidates in rounds: a lane whose candidate is UNSUPPORTED takes its next one (x86_decode_one's order).
-    uint16_t pending = indexed | unindexed;
     uint16_t decoded = 0;
     uint32_t round = 0;
-    uint32_t rows[16];
-    __m512i row = _mm512_maskz_mov_epi32(indexed & ~listed, cell);
-    for (uint16_t lanes = listed | unindexed; lanes != 0; lanes &= lanes - 1)
-    {
-        const uint32_t i = (uint32_t)__builtin_ctz(lanes);
-        row = _mm512_mask_set1_epi32(row, (__mmask16)(1u << i), (int)lists[i][0]);
-    }
     __m512i done_immediate = zero;
     __m512i done_displacement = zero;
     __m512i done_registers = zero;
@@ -1957,26 +1953,23 @@ static uint32_t x86_decode_lanes(const X86DecodeWindow* window, uint64_t remaini
     uint16_t done_address32 = 0;
     while (pending != 0)
     {
-        // A later round's candidates: the next on each pending lane's list (a lane with a list has one).
-        if (round != 0)
+        // A later round's candidates: the next on each pending lane's list (a lane with a list has one); a lane done
+        // reads row 0's entry.
+        for (uint32_t i = 0; i < count; i += 1)
         {
-            _mm512_storeu_si512(rows, row);
-            for (uint32_t lanes = pending; lanes != 0; lanes &= lanes - 1)
-            {
-                const uint32_t i = (uint32_t)__builtin_ctz(lanes);
-                rows[i] = ((listed | unindexed) >> i) & 1 ? lists[i][round] : 0;
-            }
-            row = _mm512_loadu_si512(rows);
+            rows[i] = ((pending >> i) & 1) == 0 ? 0 : round == 0 ? rows[i] : ((listed | unindexed) >> i) & 1 ? lists[i][round] : 0;
         }
+        __m512i entries[4];
+        x86_decode_lane_rows_load(rows, entries);
+        const __m512i row = _mm512_srli_epi32(entries[3], 16);
         // A lane out of candidates is UNSUPPORTED.
         const uint16_t candidates = pending & _mm512_cmpneq_epi32_mask(row, zero);
         refused |= pending & ~candidates;
         pending = candidates;
-        const __m512i entry = _mm512_slli_epi32(row, 2);
-        const __m512i form = _mm512_mask_i32gather_epi32(zero, pending, entry, x86_decode_lane_rows, 4);
-        const __m512i check_registers = _mm512_mask_i32gather_epi32(zero, pending, _mm512_add_epi32(entry, one), x86_decode_lane_rows, 4);
-        const __m512i check_memory = _mm512_mask_i32gather_epi32(zero, pending, _mm512_add_epi32(entry, _mm512_set1_epi32(2)), x86_decode_lane_rows, 4);
-        const __m512i flags = _mm512_mask_i32gather_epi32(zero, pending, _mm512_add_epi32(entry, _mm512_set1_epi32(3)), x86_decode_lane_rows, 4);
+        const __m512i form = entries[0];
+        const __m512i check_registers = entries[1];
+        const __m512i check_memory = entries[2];
+        const __m512i flags = _mm512_and_si512(entries[3], _mm512_set1_epi32(0xffff));
         const uint16_t has_modrm = _mm512_test_epi32_mask(form, _mm512_set1_epi32(BUSTER_X86_LANE_MODRM));
         const uint16_t has_reg = _mm512_test_epi32_mask(form, _mm512_set1_epi32(BUSTER_X86_LANE_REG));
         const uint16_t plus = _mm512_test_epi32_mask(form, _mm512_set1_epi32(BUSTER_X86_LANE_PLUS));
