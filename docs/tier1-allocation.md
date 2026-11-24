@@ -694,7 +694,10 @@ after 8 paddings, `perf stat` on CPU 2, 1,762 runs), main `b7d0b5ed` against
 −0.08%, slower at 1 of 8 shifts) for 1.02% fewer instructions, and Lua's five
 scripts 0.36% fewer (−0.71% to −0.00%, slower at 9 of 33 orders) for 0.15%
 fewer instructions; `calls.lua` runs 1.73% fewer cycles, `tables.lua` 0.52%.
-The executables' `.text` is the code counted above.
+The executables' `.text` is the code counted above. [The
+record](https://github.com/buster14a/buster-performance/tree/3f5909d86842bdd012f89a28afd9a5477ffc49a1/docs/measurements/tier1-current-slots-2553-2026-11-23)
+has the callgrind counts, the runs, the compile times and profiles below, and
+the scripts, with #1189's tags ported to main.
 
 The analysis costs compile time. As #3460 merged it, `sqlite3.c`'s `--tier1
 --lanes 1 -c` took 0.70% more instructions and 0.80% more cycles than main
