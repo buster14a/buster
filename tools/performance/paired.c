@@ -661,8 +661,9 @@ static void paired_report(FILE *out, const PairPlan *p, const char *manifest, Pa
     fputs(",\"estimator\":\"mean paired log ratio of within-unit medians\",\"family_confidence\":0.95,\"reference_count\":2", out);
     fprintf(out, ",\"series\":\"%s\",\"dataset\":", r->series);
     paired_json_value(out, json, perf_json_find(json, 0, "id"));
+    uint32_t kind = perf_json_find(json, 0, "kind");
     fputs(",\"kind\":", out);
-    paired_json_value(out, json, perf_json_find(json, 0, "kind"));
+    paired_json_value(out, json, kind);
     fputs(",\"limitations\":", out);
     paired_json_value(out, json, perf_json_find(json, 0, "limitations"));
     fputs(",\"observations_sha256\":", out);
@@ -673,7 +674,8 @@ static void paired_report(FILE *out, const PairPlan *p, const char *manifest, Pa
     uint32_t format = raw ? perf_json_find(json, raw->definition, "format") : UINT32_MAX;
     bool v2 = perf_json_is(json, format, "time-runs-v2");
     bool legacy = perf_json_is(json, format, "time-runs-v1");
-    bool imported = perf_json_is(json, perf_json_find(json, 0, "kind"), "imported");
+    bool measured = perf_json_is(json, kind, "measured");
+    bool imported = perf_json_is(json, kind, "imported");
     if (loaded && identified && raw == NULL && perf_json_is(json, status, "planned"))
     {
         r->status = PAIR_NONE;
@@ -694,7 +696,7 @@ static void paired_report(FILE *out, const PairPlan *p, const char *manifest, Pa
         {
             r->reason = "fixed sampling plan complete";
             paired_statistics(out, p, r, samples, scratch);
-            r->measured_pass = r->status == PAIR_PASS && perf_json_is(json, perf_json_find(json, 0, "kind"), "measured");
+            r->measured_pass = r->status == PAIR_PASS && measured;
             r->promotable = v2 && r->measured_pass;
             if (legacy && !imported && !r->warmups_verified)
             {
@@ -705,6 +707,12 @@ static void paired_report(FILE *out, const PairPlan *p, const char *manifest, Pa
         free(samples);
         free(counts);
         free(scratch);
+    }
+    if (measured)
+    {
+        fputs("\"observations_format\":", out);
+        paired_json_value(out, json, format);
+        fprintf(out, ",\"promotable\":%s,", r->promotable ? "true" : "false");
     }
     fprintf(out, "\"independent_units\":%zu,\"planned_units\":%zu,\"verdict\":\"%s\",\"reason\":\"%s\"}", r->complete_units, p->units, paired_status[r->status], r->reason);
 }

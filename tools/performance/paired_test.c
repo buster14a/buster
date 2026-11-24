@@ -158,7 +158,7 @@ static void paired_fixture(const char *manifest, const PairPlan *p, PairFixture 
     perf_expect(valid, "write paired fixture");
 }
 
-static bool paired_test_report(const PairPlan *plan, const char *manifest, PairStatus expected, size_t units, bool false_alert)
+static void paired_test_report(const PairPlan *plan, const char *manifest, PairStatus expected, size_t units, bool false_alert, bool promotable)
 {
     PairReport report = {0};
     char *text = NULL;
@@ -177,10 +177,59 @@ static bool paired_test_report(const PairPlan *plan, const char *manifest, PairS
     {
         perf_expect(perf_json_is(&json, perf_json_find(&json, 0, "aa_false_alerts"), false_alert ? "1" : "0"), "observed A/A false alerts");
     }
+    perf_expect(report.promotable == promotable, "promotion eligibility for the verdict");
     free(text);
     perf_json_free(&json);
     perf_dataset_free(&report.dataset);
-    return report.promotable;
+}
+
+// Change one manifest's format at a time while preserving the observation bytes.
+static void paired_test_format_retries(const PairPlan *p, const char *ledger, const char *a, const char *b)
+{
+    PairFixture f = {
+        .base = 1,
+        .head = 1,
+        .ratio = 1,
+        .control = 1,
+        .status = "complete",
+        .legacy_receipts = true
+    };
+    char source[41];
+    snprintf(source, sizeof(source), "%040x", f.head);
+    char path[160];
+    for (size_t i = 0; i < 3; ++i)
+    {
+        f.legacy = i == 1;
+        paired_fixture(a, p, f);
+        f.legacy = i == 2;
+        paired_fixture(b, p, f);
+        perf_expect(paired_record(p, ledger, source, a, b), "record each observation format pair");
+        perf_expect(paired_record(p, ledger, source, a, b), "retry the same format pair");
+        snprintf(path, sizeof(path), "%s/%08zu.json", ledger, i + 1);
+        PerfJson event = {0};
+        bool read = paired_load_json(path, &event, NULL);
+        perf_expect(read && perf_json_is(&event, perf_json_find(&event, 0, "promoted"), i == 0 ? "true" : "false") &&
+                    perf_json_is(&event, perf_json_find(&event, 0, "adverse"), i == 0 ? "false" : "true"),
+                    "only the v2 self-comparison promotes, each relabeled comparison records a distinct adverse decision");
+        uint32_t comparisons = perf_json_find(&event, 0, "comparisons");
+        perf_expect(perf_json_count(&event, comparisons) == 2, "event retains both comparison reports");
+        uint32_t report = perf_json_first(&event, comparisons);
+        for (size_t side = 1; side <= 2 && report != UINT32_MAX; ++side)
+        {
+            perf_expect(perf_json_is(&event, perf_json_find(&event, report, "observations_format"), i == side ? "time-runs-v1" : "time-runs-v2") &&
+                        perf_json_is(&event, perf_json_find(&event, report, "promotable"), i == side ? "false" : "true"),
+                        "stored comparison identifies the verified format and promotion eligibility");
+            report = perf_json_after(&event, comparisons, report);
+        }
+        perf_json_free(&event);
+    }
+    snprintf(path, sizeof(path), "%s/00000004.json", ledger);
+    perf_expect(access(path, F_OK) < 0 && errno == ENOENT, "exact retries reuse each format pair's event");
+    for (size_t i = 1; i <= 3; ++i)
+    {
+        snprintf(path, sizeof(path), "%s/%08zu.json", ledger, i);
+        unlink(path);
+    }
 }
 
 static bool paired_self_test(void)
@@ -229,45 +278,45 @@ static bool paired_self_test(void)
         {
             f.ratio = ratios[i];
             paired_fixture(a, &p, f);
-            paired_test_report(&p, a, expected[i], 6, false);
+            paired_test_report(&p, a, expected[i], 6, false, expected[i] == PAIR_PASS);
         }
         f.ratio = 1;
         f.legacy = true;
         paired_fixture(a, &p, f);
-        perf_expect(!paired_test_report(&p, a, PAIR_INVALID, 6, false), "legacy measurement cannot promote");
+        paired_test_report(&p, a, PAIR_INVALID, 6, false, false);
         f.imported = true;
         paired_fixture(a, &p, f);
-        perf_expect(!paired_test_report(&p, a, PAIR_PASS, 6, false), "imported v1 replays a pass without promotion");
+        paired_test_report(&p, a, PAIR_PASS, 6, false, false);
         f.imported = false;
         f.legacy = false;
         f.control = 1.04;
         paired_fixture(a, &p, f);
-        paired_test_report(&p, a, PAIR_UNCERTAIN, 6, true);
+        paired_test_report(&p, a, PAIR_UNCERTAIN, 6, true, false);
         f.control = 1;
         f.missing = true;
         paired_fixture(a, &p, f);
-        paired_test_report(&p, a, PAIR_INVALID, 5, false);
+        paired_test_report(&p, a, PAIR_INVALID, 5, false, false);
         f.missing = false;
         f.reorder = true;
         paired_fixture(a, &p, f);
-        paired_test_report(&p, a, PAIR_INVALID, 0, false);
+        paired_test_report(&p, a, PAIR_INVALID, 0, false, false);
         f.reorder = false;
         f.broken_control = true;
         paired_fixture(a, &p, f);
-        paired_test_report(&p, a, PAIR_INVALID, 0, false);
+        paired_test_report(&p, a, PAIR_INVALID, 0, false, false);
         f.broken_control = false;
         f.corrupt = true;
         paired_fixture(a, &p, f);
-        paired_test_report(&p, a, PAIR_INVALID, 0, false);
+        paired_test_report(&p, a, PAIR_INVALID, 0, false, false);
         f.corrupt = false;
         f.status = "planned";
         paired_fixture(a, &p, f);
-        paired_test_report(&p, a, PAIR_NONE, 0, false);
+        paired_test_report(&p, a, PAIR_NONE, 0, false, false);
         f.status = "complete";
         f.ratio = 1.02;
         f.noise = 0.08;
         paired_fixture(a, &p, f);
-        paired_test_report(&p, a, PAIR_UNCERTAIN, 6, false);
+        paired_test_report(&p, a, PAIR_UNCERTAIN, 6, false, false);
         f.noise = 0;
         // First seed. The second revision costs 1.5%, within 2%. Another
         // 1.5% passes against the latest but exceeds 2% against the anchor.
@@ -357,6 +406,7 @@ static bool paired_self_test(void)
             snprintf(event, sizeof(event), "%s/%08zu.json", ledger, i);
             unlink(event);
         }
+        paired_test_format_retries(&p, ledger, a, b);
     }
     if (valid)
     {
@@ -380,13 +430,13 @@ static bool paired_self_test(void)
                 .status = "complete"
             };
             paired_fixture(a, &layout, f);
-            paired_test_report(&layout, a, PAIR_PASS, 2, false);
+            paired_test_report(&layout, a, PAIR_PASS, 2, false, true);
             f.zero_system_rounds = 1;
             paired_fixture(a, &layout, f);
-            paired_test_report(&layout, a, PAIR_PASS, 2, false);
+            paired_test_report(&layout, a, PAIR_PASS, 2, false, true);
             f.zero_system_rounds = 4;
             paired_fixture(a, &layout, f);
-            paired_test_report(&layout, a, PAIR_INVALID, 2, false);
+            paired_test_report(&layout, a, PAIR_INVALID, 2, false, false);
             f.zero_system_rounds = 0;
             const char *bad_warmups[] = {
                 "",
@@ -398,7 +448,7 @@ static bool paired_self_test(void)
             {
                 f.last_warmups = bad_warmups[i];
                 paired_fixture(a, &layout, f);
-                paired_test_report(&layout, a, PAIR_INVALID, 0, false);
+                paired_test_report(&layout, a, PAIR_INVALID, 0, false, false);
             }
             f.last_warmups = NULL;
             paired_fixture(a, &layout, f);
@@ -429,7 +479,7 @@ static bool paired_self_test(void)
                 f.legacy_receipts = true;
                 paired_fixture(b, &layout, f);
                 perf_expect(paired_overlap(sink, &layout, b, a), "verified warmups allow a cross-format overlap");
-                perf_expect(!paired_test_report(&layout, b, PAIR_PASS, 2, false), "overlap does not promote an older format");
+                paired_test_report(&layout, b, PAIR_PASS, 2, false, false);
                 f.legacy = false;
                 f.wall = 110;
                 paired_fixture(b, &layout, f);

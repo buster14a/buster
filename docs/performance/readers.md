@@ -204,8 +204,10 @@ The producer checks source revisions, binary digests and environment before
 timing. Both revisions must share a build recipe fingerprint covering the
 build driver, CMake tree and presets, code generation tools and toolchain setup.
 The report retains the manifest ID, observation digest, identities, sample
-plan and number of complete units. Keep the manifests and evidence with the
-history in buster-performance.
+plan and number of complete units. Measured reports also include
+`observations_format` and `promotable`. Changing the format of either measured
+comparison records a separate attempt even when the observation bytes match.
+Keep the manifests and evidence with the history in buster-performance.
 
 ```sh
 mkdir series-history
