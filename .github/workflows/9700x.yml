@@ -293,6 +293,7 @@ jobs:
           bash tests/ci/rerun.sh
           bash tests/ci/feedback.sh
           bash tests/ci/compare-sqlite-objects.sh
+          bash tests/ci/compile-count.sh
 
   analyze:
     name: Clang Static Analyzer

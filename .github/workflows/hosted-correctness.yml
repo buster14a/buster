@@ -214,7 +214,9 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           ref: ${{ github.sha }}
-          fetch-depth: ${{ inputs.compare-sqlite && env.BUSTER_VECTOR_ITEM == 'n2' && 2 || 1 }}
+          # The first parent too, for the two steps that build the change's base: the checker's SQLite comparison (plain
+          # shard 2) and the compile's count (the vector row's plain shard 4).
+          fetch-depth: ${{ ((inputs.compare-sqlite && env.BUSTER_VECTOR_ITEM == 'n2') || (inputs.host_arch == 'vector' && env.BUSTER_VECTOR_ITEM == 'n4' && (github.event_name == 'pull_request' || github.event_name == 'merge_group'))) && 2 || 1 }}
           persist-credentials: false
 
       - name: Restore verified hosted release inputs
@@ -294,6 +296,26 @@ jobs:
           git worktree add --detach "$RUNNER_TEMP/sqlite-base" "$base"
           cd "$RUNNER_TEMP/sqlite-base"
           ./build.sh --config Release --jobs "$(nproc)"
+
+      # The compile's count against its base's (#2850; docs/commands/ci.md, "The compile's count before the merge"), on
+      # the vector row's plain shard 4 while shard 1 builds the product, so that it costs the row no time: the change
+      # and its first parent, each built with clang's -fprofile-instr-generate at -O0, compile the frozen sqlite3.c, and
+      # the sums of their raw profiles' counters are compared (tools/ci/compile-count.sh). A change that moves the count
+      # by more than half a percent, above or below, states its move in tools/ci/compile-count.txt or fails here. No
+      # hardware counter is read, so any runner the draw qualified takes it; the base is counted on the same runner, so
+      # that main's drift fails no change. Advisory (continue-on-error) until its hosted runs have shown the
+      # specification's predictions: its runs within 0.05% of each other, and the step under 12 minutes.
+      - name: Count the compile against its base's
+        if: inputs.host_arch == 'vector' && env.BUSTER_VECTOR_ITEM == 'n4' && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+        continue-on-error: true
+        run: |
+          # Nothing to count where the change leaves the compiler's sources, its build and the count's own files alone.
+          if git diff --quiet HEAD^1 HEAD -- src cmake CMakeLists.txt build.sh tools/ci/compile-count.c tools/ci/compile-count.sh tools/ci/compile-count.txt; then
+              echo "The change touches nothing the count reads."
+              exit 0
+          fi
+          git worktree add --detach "$RUNNER_TEMP/count-base" HEAD^1
+          bash tools/ci/compile-count.sh check "$RUNNER_TEMP/count-base" "$GITHUB_WORKSPACE" "$BUSTER_CORPUS" "$RUNNER_TEMP/compile-count"
 
       # A vector configuration's product (#2032): its item 1's holder builds it, on a CPU whose probe qualified (the
       # build runs the executable), and publishes it in this run alone, by a name that holds its attempt and its

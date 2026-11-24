@@ -39,7 +39,8 @@ requirements. [Command index](README.md).
   where FILE states no count, and where the host counts no instructions. It prints the count to write where a change
   means to move it. The 9700X job's last measurement runs it on `sqlite3.c` against
   `tools/ci/compile-instructions.txt` ([CI](ci.md)); a test's switch, `BUSTER_TEST_MEASURE_INSTRUCTIONS=N`, gives the
-  count in the median's place.
+  count in the median's place. Before a merge, where no run counts instructions, the hosted row holds a change to its
+  base by [the compile's count](ci.md#the-compiles-count-before-the-merge).
 
 With `-flazy-system-headers --time-stages`, each planned translation unit also
 prints `time-lazy planner=eager|tree|bindings tokens=N scalar-replay-tokens=N
