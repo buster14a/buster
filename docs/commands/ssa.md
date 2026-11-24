@@ -8,8 +8,8 @@ requirements. [Command index](README.md).
 
 - `src/buster/compiler/ssa.c` promotes eligible locals over a completed CFG:
   a dense constructor that works a block's locals at a time (sparse frontiers,
-  liveness-pruned placement of every local at once, entry and exit rows in
-  reverse postorder) and redundant-phi SCC cleanup. Large functions
+  liveness-pruned placement of every local at once, renaming by a dominator-tree
+  walk with one row of current values) and redundant-phi SCC cleanup. Large functions
   use `ssa_bounded.c`'s reusable local workspace and actual retained phi extents;
   `ssa_verify.c` independently checks symbolic equations with bounded block rows.
   `test-ssa` forces the bounded construction on its fixtures too, checks the

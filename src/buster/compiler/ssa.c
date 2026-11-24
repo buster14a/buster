@@ -607,23 +607,20 @@ static uint32_t ssa_read_entry(SsaWork* work, uint32_t block, uint32_t dense, Ss
 }
 
 // The vector constructor works a block's slots at a time, or the accesses in instruction order, and never one slot over
-// every block:
-// 1. ssa_vector_scan reads each reachable block's accesses once, finding them 64 kinds at a time. It writes each slot's
-//    last write into the block's row of `last`, the def and use bit rows, and each read's value from its own block (the
+// every block in anything wider than a bit (#3449):
+// 1. ssa_vector_scan reads each reachable block's accesses once, finding them 64 kinds at a time. It lists each slot's
+//    last write in the block, sets the def and use bit rows, and gives each read its value from its own block (the
 //    write before it). A read with no such write is exposed: it is listed with its block's other exposed reads.
 // 2. Liveness over the bit rows (dataflow_liveness) and sparse dominance frontiers (ssa_frontiers).
 // 3. ssa_vector_place: each block's pending slots (its writes, then its new phis) cross its frontier edges a row at a
 //    time, kept where the slot is live into the join: the pruned phis of the iterated frontier (Cytron et al.), whose
 //    least fixpoint doesn't depend on the order. The entry's undefined values need no row: its frontier is empty.
-// 4. The phis are numbered block by block, each block's in slot order (ssa_vector_phis). In reverse postorder, a block's
-//    entry row is its phis' ids, and its immediate dominator's exit row in its other slots; its exit row, kept in `last`,
-//    is its last writes, and its entry row in the slots it doesn't write (ssa_vector_rows). Its exposed reads take the
-//    entry row. A phi's operand on an edge is the predecessor's exit row (ssa_vector_operands).
-// The tables are a row of u32 a block for the exits and a few bit rows a block; nothing holds a phi a cell.
-static void ssa_vector_scan(SsaWork* work, uint32_t* values, uint32_t* exposed, uint32_t* exposed_offsets)
+// 4. The phis are numbered block by block, each block's in slot order (ssa_vector_phis). ssa_vector_rename walks the
+//    dominator tree with one row of current values: a block's exposed reads take its entry values (its phis', its
+//    immediate dominator's exit elsewhere), and a phi's operand on an edge the predecessor's exit values.
+static void ssa_vector_scan(SsaWork* work, uint32_t* values, uint32_t* exposed, uint32_t* exposed_offsets, uint32_t* written, uint32_t* def_offsets, uint32_t* def_slots, uint32_t* def_values)
 {
     const SsaInput* input = work->input;
-    const uint32_t slots = work->promoted_count;
     const uint64_t words = work->flow.row_words;
     const __m512i positions = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
     for (uint32_t first = 0; first < input->instruction_count; first += 16)
@@ -632,14 +629,16 @@ static void ssa_vector_scan(SsaWork* work, uint32_t* values, uint32_t* exposed, 
         _mm512_mask_storeu_epi32(values + first, (__mmask16)((1u << count) - 1), _mm512_add_epi32(positions, _mm512_set1_epi32((int)first)));
     }
     uint32_t listed = 0;
+    uint32_t defined = 0;
     for (uint32_t block = 0; block < input->block_count; block += 1)
     {
         const uint32_t begin = input->block_offsets[block];
         const uint32_t end = input->block_offsets[block + 1];
         exposed_offsets[block] = listed;
+        def_offsets[block] = defined;
         if (work->result.reachable[block] != 0)
         {
-            uint32_t* last = work->last + (uint64_t)block * slots;
+            uint32_t* last = written;
             uint64_t* def = work->flow.def + (uint64_t)block * words;
             uint64_t* use = work->flow.use + (uint64_t)block * words;
             for (uint32_t first = begin; first < end; first += 64)
@@ -659,6 +658,9 @@ static void ssa_vector_scan(SsaWork* work, uint32_t* values, uint32_t* exposed, 
                         const uint64_t bit = 1ull << (dense % 64);
                         if (((writes >> lane) & 1) != 0)
                         {
+                            // A slot's first write in the block lists it; its last is the value the list takes below.
+                            def_slots[defined] = dense;
+                            defined += last[dense] == BUSTER_SSA_NONE;
                             last[dense] = input->operands[i];
                             def[dense / 64] |= bit;
                         }
@@ -675,6 +677,14 @@ static void ssa_vector_scan(SsaWork* work, uint32_t* values, uint32_t* exposed, 
                     accesses &= accesses - 1;
                 }
             }
+            // The block's last writes, and the row back to empty for the next block.
+            for (uint32_t first = def_offsets[block]; first < defined; first += 16)
+            {
+                const __mmask16 lanes = (__mmask16)_bzhi_u32(0xffff, defined - first < 16 ? defined - first : 16);
+                const __m512i slot = _mm512_maskz_loadu_epi32(lanes, def_slots + first);
+                _mm512_mask_storeu_epi32(def_values + first, lanes, _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), lanes, slot, last, 4));
+                _mm512_mask_i32scatter_epi32(last, lanes, slot, _mm512_set1_epi32(-1), 4);
+            }
         }
         else
         {
@@ -688,6 +698,7 @@ static void ssa_vector_scan(SsaWork* work, uint32_t* values, uint32_t* exposed, 
         }
     }
     exposed_offsets[input->block_count] = listed;
+    def_offsets[input->block_count] = defined;
 }
 
 // Sparse dominance frontiers: a join (two or more reachable incoming edges) is in the frontier of each block on the
@@ -841,7 +852,7 @@ static __mmask16 ssa_vector_chunk(const uint64_t* row, uint32_t slot)
 
 // Numbers the phis block by block, each block's in slot order, and lays out their columns: a block's phis are one run,
 // with as many operands each as the block has reachable incoming edges.
-static SsaError ssa_vector_phis(SsaWork* work, const uint64_t* placed, uint32_t* phi_first)
+static SsaError ssa_vector_phis(SsaWork* work, const uint64_t* placed, uint32_t* phi_first, uint32_t** phi_slots_out)
 {
     const uint32_t blocks = work->input->block_count;
     const uint32_t slots = work->promoted_count;
@@ -868,7 +879,8 @@ static SsaError ssa_vector_phis(SsaWork* work, const uint64_t* placed, uint32_t*
         work->phi_locals = ssa_allocate(work->scratch, phis, sizeof(uint32_t));
         work->phi_offsets = ssa_allocate(work->scratch, phis + 1, sizeof(uint32_t));
         work->phi_operands = ssa_allocate(work->scratch, operands, sizeof(uint32_t));
-        if (work->phi_blocks == 0 || work->phi_locals == 0 || work->phi_offsets == 0 || work->phi_operands == 0)
+        *phi_slots_out = ssa_allocate(work->scratch, phis, sizeof(uint32_t));
+        if (work->phi_blocks == 0 || work->phi_locals == 0 || work->phi_offsets == 0 || work->phi_operands == 0 || *phi_slots_out == 0)
         {
             error = SSA_ERROR_MEMORY;
         }
@@ -889,6 +901,7 @@ static SsaError ssa_vector_phis(SsaWork* work, const uint64_t* placed, uint32_t*
                 const __mmask16 run = (__mmask16)((1u << count) - 1);
                 const __m512i locals = _mm512_maskz_loadu_epi32(chunk, work->local_ids + slot);
                 _mm512_mask_storeu_epi32(work->phi_locals + phi, run, _mm512_maskz_compress_epi32(chunk, locals));
+                _mm512_mask_storeu_epi32(*phi_slots_out + phi, run, _mm512_maskz_compress_epi32(chunk, _mm512_add_epi32(positions, _mm512_set1_epi32((int)slot))));
                 _mm512_mask_storeu_epi32(work->phi_blocks + phi, run, _mm512_set1_epi32((int)block));
                 _mm512_mask_storeu_epi32(work->phi_offsets + phi, run, _mm512_add_epi32(_mm512_set1_epi32((int)operand), _mm512_mullo_epi32(positions, _mm512_set1_epi32((int)edges))));
                 phi += count;
@@ -904,103 +917,173 @@ static SsaError ssa_vector_phis(SsaWork* work, const uint64_t* placed, uint32_t*
     return error;
 }
 
-// In reverse postorder, so that a block's immediate dominator comes first: the block's entry row into `row` (its phis'
-// ids where it has phis, its immediate dominator's exit elsewhere; the entry's own undefs), its exposed reads' values
-// from it, and its exit row over its last writes in `last`.
-static void ssa_vector_rows(SsaWork* work, const uint64_t* placed, const uint32_t* phi_first, const uint32_t* exposed, const uint32_t* exposed_offsets, uint32_t* row)
+// Sets `cur` at each of the `count` slots in `slots` to `values`, or where `values` is null to consecutive ids from
+// `first_id`, logging each slot's old value first. A block's slots are distinct, so no two lanes of a scatter share one.
+static uint32_t ssa_vector_set(uint32_t* cur, const uint32_t* slots, const uint32_t* values, uint32_t first_id, uint32_t count, uint32_t* log_slots, uint32_t* log_values, uint32_t logged)
 {
-    const SsaInput* input = work->input;
-    const uint32_t slots = work->promoted_count;
-    const uint64_t words = work->flow.row_words;
     const __m512i positions = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
-    const __m512i none = _mm512_set1_epi32(-1);
-    for (uint32_t order = 0; order < work->dominators.reachable_count; order += 1)
+    for (uint32_t first = 0; first < count; first += 16)
     {
-        const uint32_t block = work->dominators.rpo[order];
-        const bool entry = block == 0;
-        const uint32_t* dominator = work->last + (uint64_t)work->dominators.idom[block] * slots;
-        uint32_t* exit = work->last + (uint64_t)block * slots;
-        uint32_t next = work->result.phi_base + phi_first[block];
-        for (uint32_t slot = 0; slot < slots; slot += 16)
-        {
-            const uint32_t count = slots - slot < 16 ? slots - slot : 16;
-            const __mmask16 active = (__mmask16)((1u << count) - 1);
-            const __mmask16 phis = entry ? 0 : (__mmask16)(ssa_vector_chunk(placed + (uint64_t)block * words, slot) & active);
-            const __m512i ids = _mm512_maskz_expand_epi32(phis, _mm512_add_epi32(positions, _mm512_set1_epi32((int)next)));
-            const __m512i undefined = _mm512_add_epi32(_mm512_maskz_loadu_epi32(active, work->local_ids + slot), _mm512_set1_epi32((int)input->instruction_count));
-            const __m512i reaching = entry ? undefined : _mm512_maskz_loadu_epi32(active, dominator + slot);
-            const __m512i value = _mm512_mask_blend_epi32(phis, reaching, ids);
-            next += (uint32_t)__builtin_popcount(phis);
-            _mm512_store_si512(row + slot, value);
-            const __m512i written = _mm512_maskz_loadu_epi32(active, exit + slot);
-            const __mmask16 unwritten = _mm512_mask_cmpeq_epi32_mask(active, written, none);
-            _mm512_mask_storeu_epi32(exit + slot, unwritten, value);
-        }
-        for (uint32_t listed = exposed_offsets[block]; listed < exposed_offsets[block + 1]; listed += 1)
-        {
-            const uint32_t i = exposed[listed];
-            work->aliases[i] = row[work->dense[input->locals[i]]];
-        }
+        const __mmask16 lanes = (__mmask16)_bzhi_u32(0xffff, count - first < 16 ? count - first : 16);
+        const __m512i slot = _mm512_maskz_loadu_epi32(lanes, slots + first);
+        const __m512i value = values != 0 ? _mm512_maskz_loadu_epi32(lanes, values + first) : _mm512_add_epi32(positions, _mm512_set1_epi32((int)(first_id + first)));
+        _mm512_mask_storeu_epi32(log_slots + logged, lanes, slot);
+        _mm512_mask_storeu_epi32(log_values + logged, lanes, _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), lanes, slot, cur, 4));
+        _mm512_mask_i32scatter_epi32(cur, lanes, slot, value, 4);
+        logged += (uint32_t)__builtin_popcount(lanes);
     }
+    return logged;
 }
 
-// Each phi's operand on each of its block's reachable incoming edges: the predecessor's exit row in the phis' slots,
-// compressed to the block's run of phis.
-static void ssa_vector_operands(SsaWork* work, const uint64_t* placed, const uint32_t* phi_first, uint32_t* row)
+// Renaming without a row a block (#3449): the dominator tree in preorder with one row of current values, `cur`, set at
+// each block to its phis' ids and then its last writes, each set logged and undone when the walk leaves the block's
+// subtree. At a block, `cur` holds its entry values once its phis are set (its exposed reads take them) and its exit
+// values once its writes are (the phi operands on its outgoing edges take them, as requested below). The work is the
+// blocks' phis, writes, exposed reads and phi operands: nothing a slot over every block.
+static SsaError ssa_vector_rename(SsaWork* work, const uint32_t* phi_first, const uint32_t* phi_slots, const uint32_t* exposed, const uint32_t* exposed_offsets, const uint32_t* def_offsets, const uint32_t* def_slots, const uint32_t* def_values)
 {
+    const SsaInput* input = work->input;
+    const uint32_t blocks = input->block_count;
     const uint32_t slots = work->promoted_count;
-    const uint64_t words = work->flow.row_words;
-    for (uint32_t block = 0; block < work->input->block_count; block += 1)
+    const uint32_t reachable = work->dominators.reachable_count;
+    const uint32_t* predecessor_offsets = work->result.predecessor_offsets;
+    const uint32_t* predecessors = work->result.predecessors;
+    const __m512i positions = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+    // Each phi operand's request at its predecessor: the join and the edge's position among the join's predecessors.
+    uint32_t requests = 0;
+    for (uint32_t block = 0; block < blocks; block += 1)
     {
-        const uint32_t count = phi_first[block + 1] - phi_first[block];
-        if (count != 0)
+        requests += phi_first[block + 1] != phi_first[block] ? predecessor_offsets[block + 1] - predecessor_offsets[block] : 0;
+    }
+    const uint32_t logs = phi_first[blocks] + def_offsets[blocks];
+    uint32_t* cur = ssa_allocate(work->scratch, (uint64_t)slots + 16, sizeof(uint32_t));
+    uint32_t* order = ssa_allocate(work->scratch, reachable, sizeof(uint32_t));
+    uint32_t* request_offsets = ssa_allocate(work->scratch, (uint64_t)blocks + 1, sizeof(uint32_t));
+    uint32_t* request_joins = ssa_allocate(work->scratch, requests, sizeof(uint32_t));
+    uint32_t* request_edges = ssa_allocate(work->scratch, requests, sizeof(uint32_t));
+    uint32_t* log_slots = ssa_allocate(work->scratch, (uint64_t)logs + 16, sizeof(uint32_t));
+    uint32_t* log_values = ssa_allocate(work->scratch, (uint64_t)logs + 16, sizeof(uint32_t));
+    uint32_t* stack_blocks = ssa_allocate(work->scratch, reachable, sizeof(uint32_t));
+    uint32_t* stack_logs = ssa_allocate(work->scratch, reachable, sizeof(uint32_t));
+    SsaError error = cur != 0 && order != 0 && request_offsets != 0 && request_joins != 0 && request_edges != 0 && log_slots != 0 && log_values != 0 && stack_blocks != 0 && stack_logs != 0 ? SSA_OK : SSA_ERROR_MEMORY;
+    if (error == SSA_OK)
+    {
+        for (uint32_t slot = 0; slot < slots; slot += 16)
         {
-            const uint32_t begin = work->result.predecessor_offsets[block];
-            const uint32_t edges = work->result.predecessor_offsets[block + 1] - begin;
-            const uint32_t first = work->phi_offsets[phi_first[block]];
-            const uint64_t* placed_row = placed + (uint64_t)block * words;
-            for (uint32_t edge = 0; edge < edges; edge += 1)
+            const __mmask16 lanes = (__mmask16)_bzhi_u32(0xffff, slots - slot < 16 ? slots - slot : 16);
+            _mm512_mask_storeu_epi32(cur + slot, lanes, _mm512_add_epi32(_mm512_maskz_loadu_epi32(lanes, work->local_ids + slot), _mm512_set1_epi32((int)input->instruction_count)));
+        }
+        for (uint32_t block = 0; block < blocks; block += 1)
+        {
+            if (work->result.reachable[block] != 0)
             {
-                const uint32_t* exit = work->last + (uint64_t)work->result.predecessors[begin + edge] * slots;
-                uint32_t gathered = 0;
-                for (uint32_t slot = 0; gathered != count && slot < slots; slot += 16)
+                order[work->dominators.preorder[block]] = block;
+            }
+        }
+        memset(request_offsets, 0, ((uint64_t)blocks + 1) * sizeof(uint32_t));
+        for (uint32_t block = 0; block < blocks; block += 1)
+        {
+            for (uint32_t edge = predecessor_offsets[block]; phi_first[block + 1] != phi_first[block] && edge < predecessor_offsets[block + 1]; edge += 1)
+            {
+                request_offsets[predecessors[edge] + 1] += 1;
+            }
+        }
+        for (uint32_t block = 0; block < blocks; block += 1)
+        {
+            request_offsets[block + 1] += request_offsets[block];
+        }
+        for (uint32_t block = 0; block < blocks; block += 1)
+        {
+            const uint32_t begin = predecessor_offsets[block];
+            for (uint32_t edge = begin; phi_first[block + 1] != phi_first[block] && edge < predecessor_offsets[block + 1]; edge += 1)
+            {
+                const uint32_t at = request_offsets[predecessors[edge]]++;
+                request_joins[at] = block;
+                request_edges[at] = edge - begin;
+            }
+        }
+        // The fill moved each offset to its block's end: a block's requests now end at its offset, from its predecessor's.
+        uint32_t logged = 0;
+        uint32_t depth = 0;
+        for (uint32_t visit = 0; visit < reachable; visit += 1)
+        {
+            const uint32_t block = order[visit];
+            // Leave every subtree the block is not in, newest log entries first: lanes are reversed so that, of two
+            // entries for one slot, the older (in the higher lane) is scattered last.
+            while (depth != 0 && work->dominators.subtree_end[stack_blocks[depth - 1]] <= visit)
+            {
+                const uint32_t floor = stack_logs[depth - 1];
+                while (logged > floor)
                 {
-                    const __mmask16 chunk = ssa_vector_chunk(placed_row, slot);
-                    _mm512_storeu_si512(row + gathered, _mm512_maskz_compress_epi32(chunk, _mm512_maskz_loadu_epi32(chunk, exit + slot)));
-                    gathered += (uint32_t)__builtin_popcount(chunk);
+                    const uint32_t count = logged - floor < 16 ? logged - floor : 16;
+                    const uint32_t first = logged - count;
+                    const __mmask16 lanes = (__mmask16)_bzhi_u32(0xffff, count);
+                    const __m512i reverse = _mm512_sub_epi32(_mm512_set1_epi32((int)count - 1), positions);
+                    const __m512i slot = _mm512_permutexvar_epi32(reverse, _mm512_maskz_loadu_epi32(lanes, log_slots + first));
+                    const __m512i value = _mm512_permutexvar_epi32(reverse, _mm512_maskz_loadu_epi32(lanes, log_values + first));
+                    _mm512_mask_i32scatter_epi32(cur, lanes, slot, value, 4);
+                    logged = first;
                 }
-                for (uint32_t phi = 0; phi < count; phi += 1)
+                depth -= 1;
+            }
+            stack_blocks[depth] = block;
+            stack_logs[depth] = logged;
+            depth += 1;
+            logged = ssa_vector_set(cur, phi_slots + phi_first[block], 0, work->result.phi_base + phi_first[block], phi_first[block + 1] - phi_first[block], log_slots, log_values, logged);
+            for (uint32_t listed = exposed_offsets[block]; listed < exposed_offsets[block + 1]; listed += 16)
+            {
+                const uint32_t count = exposed_offsets[block + 1] - listed < 16 ? exposed_offsets[block + 1] - listed : 16;
+                const __mmask16 lanes = (__mmask16)_bzhi_u32(0xffff, count);
+                const __m512i reads = _mm512_maskz_loadu_epi32(lanes, exposed + listed);
+                const __m512i locals = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), lanes, reads, input->locals, 4);
+                const __m512i slot = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), lanes, locals, work->dense, 4);
+                _mm512_mask_i32scatter_epi32(work->aliases, lanes, reads, _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), lanes, slot, cur, 4), 4);
+            }
+            logged = ssa_vector_set(cur, def_slots + def_offsets[block], def_values + def_offsets[block], 0, def_offsets[block + 1] - def_offsets[block], log_slots, log_values, logged);
+            const uint32_t request_begin = block == 0 ? 0 : request_offsets[block - 1];
+            for (uint32_t request = request_begin; request < request_offsets[block]; request += 1)
+            {
+                const uint32_t join = request_joins[request];
+                const uint32_t count = phi_first[join + 1] - phi_first[join];
+                const uint32_t edges = predecessor_offsets[join + 1] - predecessor_offsets[join];
+                uint32_t* operands = work->phi_operands + work->phi_offsets[phi_first[join]] + request_edges[request];
+                for (uint32_t phi = 0; phi < count; phi += 16)
                 {
-                    work->phi_operands[first + phi * edges + edge] = row[phi];
+                    const __mmask16 lanes = (__mmask16)_bzhi_u32(0xffff, count - phi < 16 ? count - phi : 16);
+                    const __m512i slot = _mm512_maskz_loadu_epi32(lanes, phi_slots + phi_first[join] + phi);
+                    const __m512i at = _mm512_mullo_epi32(_mm512_add_epi32(positions, _mm512_set1_epi32((int)phi)), _mm512_set1_epi32((int)edges));
+                    _mm512_mask_i32scatter_epi32(operands, lanes, at, _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), lanes, slot, cur, 4), 4);
                 }
             }
         }
     }
+    return error;
 }
 
 static SsaError ssa_construct_vector(SsaWork* work, uint32_t frontier_budget)
 {
     const SsaInput* input = work->input;
     const uint32_t blocks = input->block_count;
-    const uint64_t cells = (uint64_t)blocks * work->promoted_count;
     const uint64_t words = work->flow.row_words;
     const uint64_t rows = (uint64_t)blocks * words * sizeof(uint64_t);
-    const uint64_t row_slots = ((uint64_t)work->promoted_count + 15) / 16 * 16 + 16;
-    work->last = ssa_allocate(work->scratch, cells, sizeof(uint32_t));
     uint32_t* values = ssa_allocate(work->scratch, input->instruction_count, sizeof(uint32_t));
     uint32_t* exposed = ssa_allocate(work->scratch, input->instruction_count, sizeof(uint32_t));
     uint32_t* exposed_offsets = ssa_allocate(work->scratch, (uint64_t)blocks + 1, sizeof(uint32_t));
+    uint32_t* written = ssa_allocate(work->scratch, (uint64_t)work->promoted_count + 16, sizeof(uint32_t));
+    uint32_t* def_offsets = ssa_allocate(work->scratch, (uint64_t)blocks + 1, sizeof(uint32_t));
+    uint32_t* def_slots = ssa_allocate(work->scratch, (uint64_t)input->instruction_count + 16, sizeof(uint32_t));
+    uint32_t* def_values = ssa_allocate(work->scratch, (uint64_t)input->instruction_count + 16, sizeof(uint32_t));
     uint32_t* phi_first = ssa_allocate(work->scratch, (uint64_t)blocks + 1, sizeof(uint32_t));
+    uint32_t* phi_slots = 0;
     uint64_t* placed = arena_push(work->scratch, rows == 0 ? 64 : rows, 64);
-    uint32_t* row = ssa_allocate(work->scratch, row_slots, sizeof(uint32_t));
     uint32_t* frontier_offsets = 0;
     uint32_t* frontier_targets = 0;
-    SsaError error = work->last != 0 && values != 0 && exposed != 0 && exposed_offsets != 0 && phi_first != 0 && placed != 0 && row != 0 ? SSA_OK : SSA_ERROR_MEMORY;
+    SsaError error = values != 0 && exposed != 0 && exposed_offsets != 0 && written != 0 && def_offsets != 0 && def_slots != 0 && def_values != 0 && phi_first != 0 && placed != 0 ? SSA_OK : SSA_ERROR_MEMORY;
     if (error == SSA_OK)
     {
-        memset(work->last, 0xff, cells * sizeof(uint32_t));
+        memset(written, 0xff, ((uint64_t)work->promoted_count + 16) * sizeof(uint32_t));
         memset(placed, 0, rows);
-        ssa_vector_scan(work, values, exposed, exposed_offsets);
+        ssa_vector_scan(work, values, exposed, exposed_offsets, written, def_offsets, def_slots, def_values);
         error = ssa_frontiers(work, frontier_budget, &frontier_offsets, &frontier_targets);
     }
     if (error == SSA_OK)
@@ -1010,7 +1093,7 @@ static SsaError ssa_construct_vector(SsaWork* work, uint32_t frontier_budget)
     }
     if (error == SSA_OK)
     {
-        error = ssa_vector_phis(work, placed, phi_first);
+        error = ssa_vector_phis(work, placed, phi_first, &phi_slots);
     }
     if (error == SSA_OK)
     {
@@ -1028,8 +1111,7 @@ static SsaError ssa_construct_vector(SsaWork* work, uint32_t frontier_budget)
             const uint64_t lanes = count - value < 16 ? count - value : 16;
             _mm512_mask_storeu_epi32(work->aliases + value, (__mmask16)((1u << lanes) - 1), _mm512_add_epi32(positions, _mm512_set1_epi32((int)value)));
         }
-        ssa_vector_rows(work, placed, phi_first, exposed, exposed_offsets, row);
-        ssa_vector_operands(work, placed, phi_first, row);
+        error = ssa_vector_rename(work, phi_first, phi_slots, exposed, exposed_offsets, def_offsets, def_slots, def_values);
     }
     return error;
 }
