@@ -20838,11 +20838,16 @@ static uint32_t check_lower_opening_owner(const CheckProgram* program, uint32_t 
     return body < program->body_count && program->bodies[body].opening == opening ? body : BUSTER_CHECK_NONE;
 }
 
+// c_check_program_emit.c's: the objects the unit defines, a byte per symbol's object.
+static void check_program_defined_objects(const CheckProgram* program, uint8_t* defined);
+
 // Position-independent code's thread-locals (#2101, CheckProgram.pic): in `scratch`, each of the program's symbols'
 // access model, BUSTER_CHECK_LOWER_TLS_GENERAL for a thread-local another module may preempt
 // (check_program_preemptible), BUSTER_CHECK_LOWER_TLS_LOCAL for the unit's own and 0 for any other symbol, as clang's
 // -fPIC chooses general- and local-dynamic accesses; null where the code isn't position-independent or no symbol is a
-// thread-local, and `*count` the thread-locals. Returns false for a failed allocation.
+// thread-local, and `*count` the thread-locals. Under -fvisibility= (#3576, CheckProgram.visibility), whether the unit
+// defines a thread-local decides its visibility, so its definitions are found (check_program_defined_objects) only then.
+// Returns false for a failed allocation.
 static bool check_lower_tls_models(const CheckProgram* program, Arena* scratch, uint8_t** models, uint32_t* count)
 {
     const CheckInput* input = program->input;
@@ -20853,12 +20858,20 @@ static bool check_lower_tls_models(const CheckProgram* program, Arena* scratch, 
         found += declaration != BUSTER_CHECK_NONE && check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL);
     }
     uint8_t* made = found != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->symbol_count + 1) : NULL;
+    const bool visibility = made != NULL && program->visibility != BUSTER_LINK_SYMBOL_DEFAULT;
+    uint8_t* defined = visibility ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->object_count + 1) : NULL;
+    made = !visibility || defined != NULL ? made : NULL;
+    if (defined != NULL)
+    {
+        check_program_defined_objects(program, defined);
+    }
     for (uint32_t s = 0; made != NULL && s <= program->symbol_count; s += 1)
     {
         const uint32_t object = s != 0 ? program->symbol_objects[s - 1] : 0;
         const uint32_t declaration = s != 0 ? program->object_declarations[object] : BUSTER_CHECK_NONE;
         const bool thread_local = declaration != BUSTER_CHECK_NONE && check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_THREAD_LOCAL);
-        made[s] = !thread_local ? 0 : check_program_preemptible(program, object) ? BUSTER_CHECK_LOWER_TLS_GENERAL : BUSTER_CHECK_LOWER_TLS_LOCAL;
+        const bool own = thread_local && defined != NULL && defined[object] != 0;
+        made[s] = !thread_local ? 0 : check_program_preemptible(program, object, own) ? BUSTER_CHECK_LOWER_TLS_GENERAL : BUSTER_CHECK_LOWER_TLS_LOCAL;
     }
     *models = made;
     *count = made != NULL ? found : 0;

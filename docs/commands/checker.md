@@ -86,7 +86,8 @@ unused-warning fixtures also check exact scope-completion tokens.
   and the default C command (`-fsyntax-only`, `-c`) use it; `compiler parse`
   keeps the parser's driver alone. Unsupported syntax is diagnosed.
   `test-checker-driver --executable ./build/compiler [--part K/N]
-  [--lazy-system-headers | --cpu-dispatch-only | --pic-only | --stack-protector-only | --target-versions-only | --type-sugar-only |
+  [--lazy-system-headers | --cpu-dispatch-only | --pic-only | --stack-protector-only | --cf-protection-only | --visibility-only |
+  --target-versions-only | --type-sugar-only |
   --asm-definitions-only | --call-counts-only | --fp-contract-only | --imaginary-bit-int-only | --operand-diagnostics-only | --label-attributes-only |
   --attribute-recovery-only | --initializer-diagnostics-only | --malformed-calls-only | --string-plus-only | --assert-bool-only | --assert-diagnostics-only | --query-bool-only | --constant-logical-only | --quiet-roots-only | --unused-comparison-only |
   --float-precision-only | --reach-filter-only | --branch-truth-only |
@@ -154,7 +155,10 @@ unused-warning fixtures also check exact scope-completion tokens.
   each frame's shape aborting); `--cf-protection-only` runs CET's section alone
   (#3570, `c_check_cf_protection_driver_test.c`: each spelling's `endbr64` and
   `notrack` marks per function and its note against clang `-O0`'s, a program
-  through the marks, and the refusals); `--target-versions-only` runs GNU multiversioning's `target` and
+  through the marks, and the refusals); `--visibility-only` runs visibility's
+  section alone (`c_check_visibility_driver_test.c`: the pragmas' symbols and
+  diagnostics against clang's, and #3576's `-fvisibility=` objects' symbols and
+  `-fPIC` accesses at both tiers and a hidden library's exports); `--target-versions-only` runs GNU multiversioning's `target` and
   `target_clones` section alone, #1838 (inline assembly in `target_clones` copies at both tiers among it, #2247); `--asm-definitions-only` runs what
   inline assembly defines against clang's objects alone, #1848; `--operand-diagnostics-only` runs
   the original runtime sources in `tests/driver/operand_diagnostics/` against Clang's complete
@@ -1150,14 +1154,26 @@ semantic/bounds coverage and need not reproduce the large-reader threshold.
 
 ## Object and linkage options (#1124)
 
-The C driver refuses an effective `-ffunction-sections`,
-`-fdata-sections`, non-default `-fvisibility=hidden|protected|internal`, or
-`-fvisibility-ms-compat` when writing an object (`-c`, including `check -c`)
+The C driver refuses an effective `-ffunction-sections` or
+`-fdata-sections` when writing an object (`-c`, including `check -c`)
 or linking an executable. The diagnostic names the option:
 `error: unsupported code generation option '…'`. This is an explicit
 unsupported boundary, not implementation of these features. The refusal
 precedes input processing and output creation, including multi-file commands,
 and preserves an existing destination in both Tier 0 and Tier 1.
+
+`-fvisibility=hidden|protected|internal` and `-fvisibility-ms-compat` are
+implemented (#3576). As clang's do, they give the unit's definitions of
+external linkage the visibility neither an attribute nor a
+`#pragma GCC visibility` gives them (`predefines_default_visibility`,
+`CheckProgram.visibility`, `check_program_visibility`): functions, objects,
+tentative definitions and their `-fcommon` commons, thread-locals, weak
+definitions, aliases and ifuncs, multiversioned functions' symbols and
+`#pragma weak` aliases. Declarations, weak references and an inline-only
+function the unit doesn't emit keep the default. `internal` lowers to hidden,
+and `-fvisibility-ms-compat` is hidden in C. Under `-fPIC` such a definition is
+no other module's to preempt: it is reached directly, and a thread-local by
+local-dynamic accesses. `-shared` exports none of them.
 
 `-fcommon` is implemented (#147). When it comes after any `-fno-common`,
 every tentative definition of external linkage is an `SHN_COMMON` symbol,
@@ -1168,8 +1184,7 @@ Each family has independent last-option-wins state.
 retain the current output and cancel an earlier request in their own family.
 For visibility, the last of `-fvisibility=…` and `-fvisibility-ms-compat`
 decides, as clang's driver reads them: an earlier malformed value is ignored,
-a malformed last value keeps clang's `invalid value` diagnostic, and an
-effective `-fvisibility-ms-compat` (clang's hidden default) is refused by name.
+and a malformed last value keeps clang's `invalid value` diagnostic.
 Option values consumed by another option (such as `-include -fvisibility=hidden`)
 are filenames, not code-generation requests.
 
@@ -1179,7 +1194,8 @@ Explicit source visibility attributes and pragmas are unaffected. The real-drive
 regressions in `c_check_pic_driver_test.c`, included by `test-checker-driver`,
 cover these boundaries, both option orders, the effective visibility spelling,
 `-fvisibility-ms-compat`, scalar/default paths, both tiers, output preservation
-and the original two-unit tentative-definition example.
+and the original two-unit tentative-definition example; `--visibility-only`
+compares the visibility options' objects and libraries with clang's.
 
 ## Unsupported hardening requests
 

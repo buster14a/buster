@@ -4116,16 +4116,11 @@ static UnwindError check_asm_unit_frame(uint32_t saved, uint32_t frame, uint32_t
     return UNWIND_ERROR_INVALID;
 }
 
-// The objects the unit defines, a byte per object in `defined` (1 where it does), and how Tier 0 reaches each of the
-// program's symbols, `access` 1 to symbol_count (Tier0Function.symbol_access): a symbol this unit doesn't define may be a
-// shared library's, which the direct path, without copy relocations, reaches only through its GOT slot (an executable's
-// writer relaxes the load where the symbol is in the image), and a thread-local is the image's by local-exec, or
-// another's by initial-exec. The unit defines its bodies' functions, the objects it defines or tentatively defines (as
-// check_data_prepare selects them), its aliases and ifuncs (#147), its literals and whatever has no external linkage
-// but a weakref's own symbol, a weak reference to another's name (check_program_alias_external). The emission's column
-// (check_program_emit_lanes) and check_program_access's share it. The objects it defines are found among the tokens
-// that define or tentatively define, few of a unit's (#592), 64 at a time.
-static void check_program_object_access(const CheckProgram* program, uint8_t* access, uint8_t* defined)
+// The objects the unit defines, a byte per symbol's object in `defined` (1 where it does): its bodies' functions, the
+// objects it defines or tentatively defines (as check_data_prepare selects them), its aliases and ifuncs (#147) and its
+// multiversioning's dispatchers and resolved groups (#1447, #1838). The objects it defines are found among the tokens that
+// define or tentatively define, few of a unit's (#592), 64 at a time.
+static void check_program_defined_objects(const CheckProgram* program, uint8_t* defined)
 {
     const CheckInput* input = program->input;
     // Only symbols' objects are consumed below or by the linker's external-name collection.
@@ -4183,6 +4178,18 @@ static void check_program_object_access(const CheckProgram* program, uint8_t* ac
         defined[group->body] |= group->body != 0 && defined[group->clones];
         defined[group->clones] = group->clones != 0 ? group->resolved : defined[group->clones];
     }
+}
+
+// The objects the unit defines (check_program_defined_objects, in `defined`) and how Tier 0 reaches each of the
+// program's symbols, `access` 1 to symbol_count (Tier0Function.symbol_access): a symbol this unit doesn't define may be a
+// shared library's, which the direct path, without copy relocations, reaches only through its GOT slot (an executable's
+// writer relaxes the load where the symbol is in the image), and a thread-local is the image's by local-exec, or
+// another's by initial-exec. The unit's own are what it defines, its literals and whatever has no external linkage but a
+// weakref's own symbol, a weak reference to another's name (check_program_alias_external). The emission's column
+// (check_program_emit_lanes) and check_program_access's share it.
+static void check_program_object_access(const CheckProgram* program, uint8_t* access, uint8_t* defined)
+{
+    check_program_defined_objects(program, defined);
     for (uint32_t s = 0; s < program->symbol_count; s += 1)
     {
         check_program_emit_prefetch_symbol(program, NULL, NULL, s);
@@ -4200,7 +4207,7 @@ static void check_program_object_access(const CheckProgram* program, uint8_t* ac
         // doesn't define (check_program_preemptible), and a thread-local never by local-exec, which no shared library
         // has: the lowering makes its accesses general- or local-dynamic (check_lower_tls), and initial-exec is what
         // any it left would take.
-        const bool reached = own && !(program->pic && check_program_preemptible(program, object));
+        const bool reached = own && !(program->pic && check_program_preemptible(program, object, defined[object] != 0));
         const uint8_t exec = reached && !program->pic ? BUSTER_TIER0_ACCESS_LOCAL_EXEC : BUSTER_TIER0_ACCESS_INITIAL_EXEC;
         access[s + 1] = thread_local ? exec : reached ? BUSTER_TIER0_ACCESS_DIRECT : BUSTER_TIER0_ACCESS_GOT;
     }
@@ -5824,9 +5831,12 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             flags = kind | ((check_input_linkage(program->input->declaration_bits, declaration) != 2 || private_size_wrapper) && !weak[s + 1] ? BUSTER_LINK_SYMBOL_LOCAL :
                             weak[s + 1]                                      ? BUSTER_LINK_SYMBOL_WEAK :
                                                                                BUSTER_LINK_SYMBOL_GLOBAL);
-            if (check_input_linkage(program->input->declaration_bits, declaration) == 2 && program->input->object_visibility != NULL && program->input->object_visibility[object] != 0)
+            // Its visibility (check_program_visibility): the one its attributes or pragmas give it, else -fvisibility='s
+            // for a global or weak symbol of the unit's definition (#3576), whose local ones (a private size wrapper's)
+            // keep the default, as clang's do.
+            if (check_input_linkage(program->input->declaration_bits, declaration) == 2)
             {
-                flags |= (uint8_t)((program->input->object_visibility[object] - 1) << BUSTER_LINK_SYMBOL_VISIBILITY_SHIFT);
+                flags |= check_program_visibility(program, object, defined[object] != 0 && (flags & BUSTER_LINK_SYMBOL_BINDING) != BUSTER_LINK_SYMBOL_LOCAL);
             }
             // An alias's symbol (#147) has its entry's type with its own binding and visibility; an ifunc's is global
             // whatever its declaration's linkage or weak attribute, as clang gives every ifunc external linkage; and a
@@ -7007,7 +7017,9 @@ static bool check_program_define_pragma_aliases(CheckProgramCode* code, const Ch
         if (valid && record->alias_target != BUSTER_CHECK_NONE && identifiers != NULL && atom != 0)
         {
             const NameId name = link_add_name(link, intern_bytes(identifiers, record->name), intern_length(identifiers, record->name));
-            const uint8_t flags = (uint8_t)((link->symbols.flags[base] & BUSTER_LINK_SYMBOL_TYPE) | BUSTER_LINK_SYMBOL_WEAK);
+            // A definition of the unit's, of -fvisibility='s visibility (#3576) as clang gives it, whatever its target's or
+            // the visibility pragmas'.
+            const uint8_t flags = (uint8_t)((link->symbols.flags[base] & BUSTER_LINK_SYMBOL_TYPE) | BUSTER_LINK_SYMBOL_WEAK | program->visibility);
             const SymbolId symbol = name != 0 ? link_add_symbol(link, name, atom, link->symbols.value[base], link->symbols.size[base], flags, BUSTER_LINK_SOURCE_PROGRAM) : 0;
             valid = symbol != 0;
             if (!valid)
