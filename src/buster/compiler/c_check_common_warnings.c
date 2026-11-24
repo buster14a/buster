@@ -1134,9 +1134,8 @@ static bool check_common_expression_has_effect(const Parser* parser, uint32_t fi
 // unused because the subscript and the add produce a value nobody reads, while assignments, calls and
 // increments carry their own effect. A nested comma's contribution is the right operand it yields, so the
 // caller hands in the unwrapped operand node.
-static bool check_common_node_effect(const CheckGraph* graph, uint32_t node)
+static bool check_common_op_effect(uint8_t op)
 {
-    const uint8_t op = node < graph->count ? graph->ops[node] : CHECK_OP_COUNT;
     const bool result = op == CHECK_OP_ASSIGN || op == CHECK_OP_CALL || op == CHECK_OP_STATEMENT_VALUE || op == CHECK_OP_VARARGS ||
                         (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN) ||
                         op == CHECK_OP_BUILTIN_UNARY || op == CHECK_OP_BUILTIN_OVERFLOW || op == CHECK_OP_BUILTIN_MISC ||
@@ -1145,15 +1144,23 @@ static bool check_common_node_effect(const CheckGraph* graph, uint32_t node)
     return result;
 }
 
+static bool check_common_node_effect(const CheckGraph* graph, uint32_t node)
+{
+    const bool result = check_common_op_effect(node < graph->count ? graph->ops[node] : CHECK_OP_COUNT);
+    return result;
+}
+
 static bool check_common_void_cast(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
                                    const TypeTable* types, uint32_t token)
 {
-    const uint32_t node = input->token_nodes != NULL && token < input->token_count ? input->token_nodes[token] : BUSTER_CHECK_NONE;
-    const bool typed = node < input->graph.count && input->graph.ops[node] == CHECK_OP_CAST &&
-                       type_kind(types, type_unqualified(type_strip_aligned(types, check_stream_type(stream, node)))) == BUSTER_TYPE_KIND_VOID;
+    // (The spelling first: `(void)x` is most of them, and its keyword is the token before, where the token's node and that
+    // node's type are loads apiece elsewhere.)
     const bool spelled = token > 0 && token < parser->tokens.count && parser->tokens.kinds[token - 1] == PARSE_KIND_TYPE &&
                          intern_length(pp->table, parser->tokens.names[token - 1]) == 4 &&
                          memcmp(intern_bytes(pp->table, parser->tokens.names[token - 1]), "void", 4) == 0;
+    const uint32_t node = !spelled && input->token_nodes != NULL && token < input->token_count ? input->token_nodes[token] : BUSTER_CHECK_NONE;
+    const bool typed = node < input->graph.count && input->graph.ops[node] == CHECK_OP_CAST &&
+                       type_kind(types, type_unqualified(type_strip_aligned(types, check_stream_type(stream, node)))) == BUSTER_TYPE_KIND_VOID;
     return typed || spelled;
 }
 
@@ -5965,13 +5972,18 @@ static uint32_t check_common_discarded(const Parser* parser, const CheckGraph* g
     return result;
 }
 
+// Whether a discarded expression of operator `op` can produce an unused-value marker.
+static bool check_common_marker_op(uint8_t op)
+{
+    const bool result = (op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL) || op == CHECK_OP_CONDITIONAL ||
+                        (op != CHECK_OP_INITIALIZE && op != CHECK_OP_CONVERT && op != CHECK_OP_CONDITION && !check_common_op_effect(op));
+    return result;
+}
+
 // Whether the discarded expression can produce an unused-value marker.
 static bool check_common_marker_candidate(const CheckGraph* graph, uint32_t expr)
 {
-    const CheckOp op = expr < graph->count ? graph->ops[expr] : CHECK_OP_COUNT;
-    const bool result = expr < graph->count &&
-                        ((op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL) || op == CHECK_OP_CONDITIONAL ||
-                         (op != CHECK_OP_INITIALIZE && op != CHECK_OP_CONVERT && op != CHECK_OP_CONDITION && !check_common_node_effect(graph, expr)));
+    const bool result = expr < graph->count && check_common_marker_op((uint8_t)graph->ops[expr]);
     return result;
 }
 
@@ -9089,8 +9101,17 @@ static uint8_t check_common_own_reach(const Parser* parser, const CheckGraph* gr
     return result;
 }
 
-// The scan's next node below `count` without a parent, or `count`: the immutable root bits where supplied, otherwise 16
-// parents at a time (the facts' tree fallback, check_common_facts, has no root bits).
+// Of the 16 nodes from `first` (a multiple of 16), the `lanes` without a parent, a bit each: the immutable root bits where
+// supplied, otherwise their parents (the facts' tree fallback, check_common_facts, has no root bits).
+static uint32_t check_common_root_lanes(const uint32_t* parents, const uint64_t* roots, uint32_t first, uint32_t lanes)
+{
+    const uint32_t result = roots != NULL ? (uint32_t)(roots[first >> 6] >> (first & 63)) & lanes :
+                            _mm512_mask_cmpeq_epi32_mask((__mmask16)lanes, _mm512_maskz_loadu_epi32((__mmask16)lanes, parents + first),
+                                                         _mm512_set1_epi32((int)BUSTER_CHECK_NONE));
+    return result;
+}
+
+// The scan's next node below `count` without a parent, or `count`, 16 nodes at a time (check_common_root_lanes).
 static uint32_t check_common_next_root(const uint32_t* parents, const uint64_t* roots, uint32_t count, CheckCommonScan* scan)
 
 {
@@ -9103,13 +9124,38 @@ static uint32_t check_common_next_root(const uint32_t* parents, const uint64_t* 
             const uint32_t first = scan->next;
             const uint32_t live = count - first < 16 ? count - first : 16;
             const uint32_t lanes = live == 16 ? 0xffffu : (1u << live) - 1;
-            const uint32_t selected = roots != NULL ? (uint32_t)(roots[first >> 6] >> (first & 63)) & lanes :
-                                      _mm512_mask_cmpeq_epi32_mask((__mmask16)lanes, _mm512_maskz_loadu_epi32((__mmask16)lanes, parents + first),
-                                                                   _mm512_set1_epi32((int)BUSTER_CHECK_NONE));
+            const uint32_t selected = check_common_root_lanes(parents, roots, first, lanes);
             scan->next = first + live;
             check_common_scan_list(scan, first, (__mmask16)selected);
         }
 
+    }
+    const uint32_t result = check_common_scan_listed(scan, count);
+    return result;
+}
+
+// The scan's next root the roots' loop visits (check_common_graph_warnings), or `count`: check_common_next_root's roots but
+// the quiet ones below `limit`, those without a bit of `loud` (check_common_root_classes), which leave 16 nodes at a time,
+// before the list. A list made under a lower limit keeps the roots a later one would drop: the loop asks each again. Every
+// root where `loud` is null.
+static uint32_t check_common_next_loud_root(const uint32_t* parents, const uint64_t* roots, const uint64_t* loud, uint32_t limit, uint32_t count,
+                                            CheckCommonScan* scan)
+{
+    if (scan->taken == scan->listed)
+    {
+        scan->taken = 0;
+        scan->listed = 0;
+        while (scan->listed < BUSTER_CHECK_SCAN_ITEMS && scan->next < count)
+        {
+            const uint32_t first = scan->next;
+            const uint32_t live = count - first < 16 ? count - first : 16;
+            const uint32_t lanes = live == 16 ? 0xffffu : (1u << live) - 1;
+            const uint32_t below = limit <= first ? 0u : limit - first >= 16 ? 0xffffu : (1u << (limit - first)) - 1;
+            const uint32_t kept = loud != NULL ? (uint32_t)(loud[first >> 6] >> (first & 63)) | ~below : UINT32_MAX;
+            const uint32_t selected = check_common_root_lanes(parents, roots, first, lanes) & kept;
+            scan->next = first + live;
+            check_common_scan_list(scan, first, (__mmask16)selected);
+        }
     }
     const uint32_t result = check_common_scan_listed(scan, count);
     return result;
@@ -9479,6 +9525,10 @@ struct CheckCommonRootOrder
     // inner (`skipping`).
     const uint8_t* emitted;
     bool skipping;
+    // The natural order's filter (check_common_next_loud_root): the roots' loud bits, null to take every root, and the
+    // node below which a quiet root is left out, the loop's first pending plan's key (BUSTER_CHECK_NONE for none).
+    const uint64_t* loud;
+    uint32_t limit;
 };
 
 // The roots of statement expressions' statements that the arithmetic scan takes where it enters their statement expression
@@ -9539,11 +9589,11 @@ static uint32_t check_common_inner_roots(const Parser* parser, const CheckInput*
     return count;
 }
 
-static uint32_t check_common_root_order_next(const CheckGraph* graph, const uint32_t* parents, const uint64_t* roots, CheckCommonRootOrder* order)
+static uint32_t check_common_root_order_step(const CheckGraph* graph, const uint32_t* parents, const uint64_t* roots, CheckCommonRootOrder* order)
 {
     while (order->natural < graph->count && order->skipping && (order->emitted[order->natural] & BUSTER_CHECK_EMITTED_DISPLACED) != 0)
     {
-        order->natural = check_common_next_root(parents, roots, graph->count, &order->roots);
+        order->natural = check_common_next_loud_root(parents, roots, order->loud, order->limit, graph->count, &order->roots);
     }
     const bool moved = order->displaced_at < order->displaced_count && (uint32_t)(order->displaced[order->displaced_at] >> 32) < order->natural;
     const uint32_t result = moved ? (uint32_t)order->displaced[order->displaced_at] : order->natural;
@@ -9551,9 +9601,227 @@ static uint32_t check_common_root_order_next(const CheckGraph* graph, const uint
     order->displaced_at += moved ? 1u : 0u;
     if (!moved && order->natural < graph->count)
     {
-        order->natural = check_common_next_root(parents, roots, graph->count, &order->roots);
+        order->natural = check_common_next_loud_root(parents, roots, order->loud, order->limit, graph->count, &order->roots);
     }
     return result;
+}
+
+// The next root the roots' loop visits, or the graph's count: check_common_root_order_step's but the quiet roots below the
+// order's limit (CheckCommonRootOrder.loud), a displaced one or one a list made under a lower limit kept.
+static uint32_t check_common_root_order_next(const CheckGraph* graph, const uint32_t* parents, const uint64_t* roots, CheckCommonRootOrder* order)
+{
+    uint32_t result = check_common_root_order_step(graph, parents, roots, order);
+    while (result < graph->count && order->loud != NULL && result < order->limit && (order->loud[result / 64] & (UINT64_C(1) << (result % 64))) == 0)
+    {
+        result = check_common_root_order_step(graph, parents, roots, order);
+    }
+    return result;
+}
+
+// The roots' classes (#1340): what the roots' loop of check_common_graph_warnings asks of every root, answered for the
+// unit's roots at once, a bit a node.
+typedef struct CheckCommonRootClasses CheckCommonRootClasses;
+struct CheckCommonRootClasses
+{
+    // The roots whose visit may do something. A root without its bit is quiet: its visit pushes no frame, reports nothing
+    // and writes nothing a later step reads (check_common_root_classes has the reasons, step by step).
+    uint64_t* loud;
+    // The roots whose full expression -Wunsequenced may warn in, one that holds a modification other than its outer one
+    // alone; null where the warning is off.
+    uint64_t* unsequenced;
+    // -Wunsequenced's marks (BUSTER_CHECK_UNSEQ_*, check_unseq_mark), made in the same pass; null where the warning is
+    // off or the unit has no modification.
+    uint8_t* marks;
+};
+
+// An operator's classes for the roots' classes, a byte each: a discarded expression of it does nothing at its root; one of
+// it has the statement's marker alone to ask; the cast a statement's discard is; a modification; -Wunsequenced's unary
+// wrappers; and a call, whose discarded result's warning is asked.
+#define BUSTER_CHECK_ROOT_OP_SILENT 0x01u
+#define BUSTER_CHECK_ROOT_OP_MARKER 0x02u
+#define BUSTER_CHECK_ROOT_OP_CAST 0x04u
+#define BUSTER_CHECK_ROOT_OP_MODIFICATION 0x08u
+#define BUSTER_CHECK_ROOT_OP_WRAPPER 0x10u
+#define BUSTER_CHECK_ROOT_OP_CALL 0x20u
+_Static_assert(CHECK_OP_COUNT <= 128, "the operators' classes fit two byte-permute tables");
+
+// The operators' bytes of the 16 nodes from `operators`, the `lanes` of them: 0, CHECK_OP_VALUE's, for the other lanes
+// and for an operator outside CHECK_OP_COUNT, which the caller gives no class.
+static __m128i check_common_root_op_bytes(const CheckOp* operators, __mmask16 lanes)
+{
+    const __m512i ops = _mm512_maskz_loadu_epi32(lanes, operators);
+    const __m128i result = _mm_maskz_mov_epi8(_mm512_mask_cmplt_epu32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_COUNT)), _mm512_cvtepi32_epi8(ops));
+    return result;
+}
+
+// The classes' bytes (BUSTER_CHECK_ROOT_OP_*, the table's halves `low` and `high`) of the 64 nodes from `first`, the
+// `lanes` of them: four operator vectors narrowed to one of bytes, and one lookup.
+static __m512i check_common_root_op_kinds(const CheckGraph* graph, __m512i low, __m512i high, uint32_t first, uint64_t lanes)
+{
+    __m512i operators = _mm512_zextsi128_si512(check_common_root_op_bytes(graph->ops + first, (__mmask16)lanes));
+    operators = _mm512_inserti32x4(operators, check_common_root_op_bytes(graph->ops + first + 16, (__mmask16)(lanes >> 16)), 1);
+    operators = _mm512_inserti32x4(operators, check_common_root_op_bytes(graph->ops + first + 32, (__mmask16)(lanes >> 32)), 2);
+    operators = _mm512_inserti32x4(operators, check_common_root_op_bytes(graph->ops + first + 48, (__mmask16)(lanes >> 48)), 3);
+    const __m512i result = _mm512_maskz_permutex2var_epi8((__mmask64)lanes, low, operators, high);
+    return result;
+}
+
+// -Wunsequenced's marks of the modifications `modification` (a bit each of the 64 nodes from `first`) into `*marks`,
+// made, zeroed, at the unit's first: false where scratch has no room for them.
+static bool check_common_root_marks(const CheckGraph* graph, const uint32_t* parents, Arena* scratch, uint8_t** marks, uint32_t first, uint64_t modification)
+{
+    if (*marks == NULL && modification != 0)
+    {
+        *marks = CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, graph->count);
+        if (*marks != NULL)
+        {
+            memset(*marks, 0, graph->count);
+        }
+    }
+    for (uint64_t pending = *marks != NULL ? modification : 0; pending != 0; pending &= pending - 1)
+    {
+        check_unseq_mark(graph, parents, *marks, first + (uint32_t)__builtin_ctzll(pending));
+    }
+    return modification == 0 || *marks != NULL;
+}
+
+// The roots' classes (CheckCommonRootClasses), 64 nodes at a time; false where scratch can't hold them. The loop's body
+// (check_common_graph_warnings) stays the one implementation of a root's visit: this only says which visits it can leave
+// out, and a root it calls loud for no reason is visited as before. A root is quiet where each step of the body does
+// nothing for it, whatever the loop's state:
+// - its stashed shifts (check_common_shift_span) are an unevaluated root's: it is evaluated;
+// - check_common_root_frames' discarded call (check_common_ignored_statement) and unevaluated value
+//   (check_common_unused_unevaluated) need a call's, a comma's, a conditional's or a selection's operator at its discarded
+//   expression (check_common_discarded) and, but the call, an unevaluated root: the operator is no comma's, and no
+//   call's but one whose callee's name says it can't warn (BUSTER_CHECK_ROOT_OP_CALL, check_common_ignored_wanted, what
+//   the discarded call's test asks first);
+// - its walks' frames (check_common_root_push) need a bit of its reach or a comma, its atomic and detached scans
+//   (check_common_emit_reach) a bit of its reach: its reach is 0;
+// - its statement's marker (check_common_stmt_marker) needs an operator check_common_marker_op takes: the operator is
+//   none of those (BUSTER_CHECK_ROOT_OP_SILENT), or it is one (BUSTER_CHECK_ROOT_OP_MARKER) where the expression isn't
+//   discarded (check_common_discarded_place), a brace initializer's value under its declaration's `;`, say, which the
+//   marker asks first and then does nothing, or it is a cast to void, which the marker's last test leaves alone
+//   (check_common_void_cast, of a cast's own token, where no earlier test of the marker takes a cast). That visit marks
+//   the root and the expression walked
+//   (BUSTER_CHECK_EMITTED_TREE), and in a verified tree (facts->roots) nothing reads those marks after it: the root's own
+//   visit is this one; a walk's frame reaches a node from its parent, and the expression's is the root; a plan walks its
+//   parts that are roots (check_common_initializer_conversions) when it emits, at or before their visit, never after;
+//   and the nodes no walk reached (the loop's last scan) are those with a bit of reach, which the two don't have;
+// - -Wunsequenced's walk (check_unseq_check) needs a modification that isn't its outer one alone: it has none.
+// The operators' classes come from the body's own tests of them, and the columns are the facts' and the marks', final
+// before the loop. The masks settle the roots whose own operator answers, most of them. A discard's expression is its
+// operand, whether a place discards is the parser's to say, and a call's callee is a node of its own: those roots, the
+// casts', the markers' and the calls', take the body's own functions a root at a time, as do the wrappers that modify,
+// plain loads each (a gather of them costs Zen 5 64 uops, docs/coding-style.md). What the loop's state adds, its
+// pending plans, the loop tests itself.
+// -Wunsequenced's marks (`unsequenced`: the warning is on) are made here, from the same pass over the operators: a
+// word's modifications climb (check_unseq_mark) before its roots read their marks, and a node's marks come from the
+// nodes before it, which a tree in node order has had by then. Its candidate (check_unseq_wrapper has why a sole outer
+// modification can't warn): a root that holds a modification (BUSTER_CHECK_UNSEQ_MODIFIES) and isn't a modification
+// with none under its children (BUSTER_CHECK_UNSEQ_INNER), nor the unary wrapper of one. Every root that modifies is a
+// candidate in a graph that isn't a verified tree, where the marks don't say it, and there the marks are made before
+// the roots are read, a pass of their own.
+static bool check_common_root_classes(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream, const TypeTable* types,
+                                      const CheckCommonFacts* facts, CheckCommonIgnored* ignored, bool unsequenced_warned, Arena* scratch,
+                                      CheckCommonRootClasses* classes)
+{
+    const CheckGraph* graph = &input->graph;
+    const uint32_t count = graph->count;
+    const uint64_t words = ((uint64_t)count + 63) / 64;
+    uint64_t* loud = words != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint64_t, words) : NULL;
+    uint64_t* unsequenced = words != 0 && unsequenced_warned ? CHECK_COMMON_PUSH_ARRAY(scratch, uint64_t, words) : NULL;
+    bool valid = words == 0 || (loud != NULL && (unsequenced != NULL || !unsequenced_warned));
+    const bool tree = facts->roots != NULL;
+    uint8_t* marks = NULL;
+    uint8_t table[128] = { 0 };
+    for (uint32_t op = 0; op < CHECK_OP_COUNT; op += 1)
+    {
+        // (A call's operator is no marker's: its result's own warning is the one asked.)
+        const bool call = check_common_ignored_op((uint8_t)op) && !check_common_marker_op((uint8_t)op);
+        const bool asked = check_common_ignored_op((uint8_t)op) || op == CHECK_OP_COMMA;
+        const bool marker = check_common_marker_op((uint8_t)op);
+        table[op] = (uint8_t)((!asked && !marker ? BUSTER_CHECK_ROOT_OP_SILENT : 0u) | (!asked && marker ? BUSTER_CHECK_ROOT_OP_MARKER : 0u) |
+                              (call ? BUSTER_CHECK_ROOT_OP_CALL : 0u) |
+                              (op == CHECK_OP_CAST ? BUSTER_CHECK_ROOT_OP_CAST : 0u) |
+                              (check_unseq_modification((CheckOp)op) ? BUSTER_CHECK_ROOT_OP_MODIFICATION : 0u) |
+                              (check_unseq_wrapper((CheckOp)op) ? BUSTER_CHECK_ROOT_OP_WRAPPER : 0u));
+    }
+    const __m512i low = _mm512_loadu_si512(table);
+    const __m512i high = _mm512_loadu_si512(table + 64);
+    // Outside a tree a node's reader may precede it: every modification's marks first, a pass of their own.
+    for (uint32_t first = 0; valid && !tree && unsequenced_warned && first < count; first += 64)
+    {
+        const uint32_t live = count - first < 64 ? count - first : 64;
+        const uint64_t lanes = live == 64 ? UINT64_MAX : (UINT64_C(1) << live) - 1;
+        const __m512i kinds = check_common_root_op_kinds(graph, low, high, first, lanes);
+        valid = check_common_root_marks(graph, facts->parents, scratch, &marks, first,
+                                        _mm512_test_epi8_mask(kinds, _mm512_set1_epi8((char)BUSTER_CHECK_ROOT_OP_MODIFICATION)));
+    }
+    for (uint32_t first = 0; valid && first < count; first += 64)
+    {
+        const uint32_t live = count - first < 64 ? count - first : 64;
+        const uint64_t lanes = live == 64 ? UINT64_MAX : (UINT64_C(1) << live) - 1;
+        const __m512i kinds = check_common_root_op_kinds(graph, low, high, first, lanes);
+        const uint64_t silent = _mm512_test_epi8_mask(kinds, _mm512_set1_epi8((char)BUSTER_CHECK_ROOT_OP_SILENT));
+        const uint64_t marker = _mm512_test_epi8_mask(kinds, _mm512_set1_epi8((char)BUSTER_CHECK_ROOT_OP_MARKER));
+        const uint64_t cast = _mm512_test_epi8_mask(kinds, _mm512_set1_epi8((char)BUSTER_CHECK_ROOT_OP_CAST));
+        const uint64_t modification = _mm512_test_epi8_mask(kinds, _mm512_set1_epi8((char)BUSTER_CHECK_ROOT_OP_MODIFICATION));
+        const uint64_t wrapper = _mm512_test_epi8_mask(kinds, _mm512_set1_epi8((char)BUSTER_CHECK_ROOT_OP_WRAPPER));
+        const uint64_t call = _mm512_test_epi8_mask(kinds, _mm512_set1_epi8((char)BUSTER_CHECK_ROOT_OP_CALL));
+        // (A word of no room for the marks is the last: its roots stay loud, and the caller fails the unit.)
+        valid = !tree || !unsequenced_warned || check_common_root_marks(graph, facts->parents, scratch, &marks, first, modification);
+        const uint64_t roots = (uint64_t)check_common_root_lanes(facts->parents, facts->roots, first, (uint32_t)lanes & 0xffffu) |
+                               (uint64_t)check_common_root_lanes(facts->parents, facts->roots, first + 16, (uint32_t)(lanes >> 16) & 0xffffu) << 16 |
+                               (uint64_t)check_common_root_lanes(facts->parents, facts->roots, first + 32, (uint32_t)(lanes >> 32) & 0xffffu) << 32 |
+                               (uint64_t)check_common_root_lanes(facts->parents, facts->roots, first + 48, (uint32_t)(lanes >> 48) & 0xffffu) << 48;
+        const __m512i evaluated_bytes = _mm512_maskz_loadu_epi8((__mmask64)lanes, facts->evaluated + first);
+        const uint64_t evaluated = _mm512_test_epi8_mask(evaluated_bytes, evaluated_bytes);
+        const __m512i reach_bytes = _mm512_maskz_loadu_epi8((__mmask64)lanes, facts->reach + first);
+        const uint64_t reached = _mm512_test_epi8_mask(reach_bytes, reach_bytes);
+        const __m512i mark_bytes = marks != NULL ? _mm512_maskz_loadu_epi8((__mmask64)lanes, marks + first) : _mm512_setzero_si512();
+        const uint64_t modifies = _mm512_test_epi8_mask(mark_bytes, _mm512_set1_epi8((char)BUSTER_CHECK_UNSEQ_MODIFIES));
+        const uint64_t inner = _mm512_test_epi8_mask(mark_bytes, _mm512_set1_epi8((char)BUSTER_CHECK_UNSEQ_INNER));
+        // The roots that are quiet unless their operator says otherwise; of them, those whose discarded expression the
+        // parser places or whose call's callee is asked, and the wrappers that modify, a root at a time.
+        const uint64_t calm = roots & evaluated & ~reached;
+        const uint64_t placed = calm & (cast | marker | call);
+        const uint64_t wrapped = tree ? roots & wrapper & modifies : 0;
+        uint64_t settled = 0;
+        uint64_t wrapping = 0;
+        for (uint64_t pending = placed | wrapped; pending != 0; pending &= pending - 1)
+        {
+            const uint64_t bit = pending & (0 - pending);
+            const uint32_t node = first + (uint32_t)__builtin_ctzll(pending);
+            if ((placed & bit) != 0)
+            {
+                const uint32_t expr = check_common_discarded(parser, graph, node);
+                const uint8_t kind = expr < count && (uint32_t)graph->ops[expr] < CHECK_OP_COUNT ? table[graph->ops[expr]] : 0;
+                const uint32_t token = expr < count ? graph->tokens[expr] : BUSTER_CHECK_NONE;
+                const bool voided = (kind & BUSTER_CHECK_ROOT_OP_CAST) != 0 && token < parser->tokens.count &&
+                                    parser->tree.roles[token] == PARSE_ROLE_CLOSE_CAST && check_common_void_cast(parser, pp, input, stream, types, token);
+                const bool idle = tree && (kind & BUSTER_CHECK_ROOT_OP_MARKER) != 0 && facts->reach[expr] == 0 &&
+                                  (voided || !check_common_discarded_place(parser, token));
+                const bool uncalled = (kind & BUSTER_CHECK_ROOT_OP_CALL) != 0 && !check_common_ignored_wanted(ignored, pp, parser, input, expr).wanted;
+                settled |= (kind & BUSTER_CHECK_ROOT_OP_SILENT) != 0 || idle || uncalled ? bit : 0;
+            }
+            if ((wrapped & bit) != 0)
+            {
+                const uint32_t operand = graph->operand0[node];
+                const bool single = operand < count && graph->operand1[node] >= count && graph->operand2[node] >= count;
+                wrapping |= single && check_unseq_modification(graph->ops[operand]) && (marks[operand] & BUSTER_CHECK_UNSEQ_INNER) == 0 ? bit : 0;
+            }
+        }
+        const uint64_t sole = tree ? (modification & ~inner) | wrapping : 0;
+        const uint64_t candidates = roots & modifies & ~sole;
+        const uint64_t quiet = calm & ((silent & ~cast) | settled) & ~candidates;
+        loud[first >> 6] = roots & ~quiet;
+        if (unsequenced != NULL)
+        {
+            unsequenced[first >> 6] = candidates;
+        }
+    }
+    *classes = (CheckCommonRootClasses){ .loud = valid ? loud : NULL, .unsequenced = valid ? unsequenced : NULL, .marks = valid ? marks : NULL };
+    return valid;
 }
 
 static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckStream* stream,
@@ -9722,21 +9990,8 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
         // read, not discarded.
         // The displaced roots (check_common_displaced_root) join the roots' order at their operands, ahead of the later roots
         // their own nodes follow; a root walk skips them where they stand.
-        // -Wunsequenced's candidates and its walk's tables (c_check_unsequenced.c), where it can warn at all.
+        // -Wunsequenced's walk's tables (c_check_unsequenced.c).
         CheckUnseqStorage unsequenced = { 0 };
-        bool unsequenced_failed = false;
-        uint8_t* unsequenced_marks = check_common_enabled(pp, input, CHECK_WARNING_ID_UNSEQUENCED, false) ?
-                                           check_unseq_marks(graph, parents, scratch, &unsequenced_failed) : NULL;
-        // The brace initializers whose lists can warn, each list one full expression (check_unseq_plans), by their last
-        // value's node, where the walk checks them.
-        uint32_t unsequenced_plan_count = 0;
-        const uint64_t* unsequenced_plans = unsequenced_marks != NULL ? check_unseq_plans(input, program, parents, unsequenced_marks, scratch,
-                                                                                        &unsequenced_plan_count, &unsequenced_failed) : NULL;
-        uint32_t unsequenced_plan = 0;
-        if (unsequenced_failed)
-        {
-            check_common_exhausted(pp);
-        }
         const uint32_t displaced_capacity = graph->count / 2 + 1;
         uint64_t* displaced = CHECK_COMMON_PUSH_ARRAY(scratch, uint64_t, displaced_capacity);
         uint64_t* displaced_temporary = displaced != NULL ? CHECK_COMMON_PUSH_ARRAY(scratch, uint64_t, displaced_capacity) : NULL;
@@ -9761,7 +10016,6 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
                                          check_common_displaced_roots(parser, input, parents, emitted, displaced, displaced_temporary, &displaced_sorted) : 0;
         CheckCommonRootOrder order = { .displaced = displaced_sorted, .displaced_count = displaced_count, .emitted = emitted,
                                        .skipping = displaced_count != 0 || emission.inner_count != 0 };
-        order.natural = check_common_next_root(parents, facts->roots, graph->count, &order.roots);
         // An initializer's plan (its key's first node) emits before the first root at or after that node, a displaced root
         // standing at its operand (CheckCommonRootOrder.position), as main's walk of the roots goes on unchanged between
         // them: a unit with none tests one bound per root.
@@ -9778,11 +10032,54 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
         // The stashed shift warnings no walk will reach, dropped or kept, before the roots' order: a kept one in an unevaluated
         // root (a folded condition's) is reported where that root stands (check_common_shift_span).
         check_common_shift_unreached(parser, pp, shifts, input, stream, types, program, parents, evaluated, scratch);
+        // The quiet roots (check_common_root_classes), most of a unit's, are not visited (#1340): the roots' order leaves
+        // them out (CheckCommonRootOrder.loud), the natural ones 16 nodes at a time. A visit of a quiet root does nothing
+        // of its own, and nothing for the loop's ordered state either while every pending plan's key is past its node
+        // (CheckCommonRootOrder.limit, the least of them, set after each visit): an integer plan waits for a root's place
+        // past its key, a place at or below the root's node, or (an inner one) for an earlier root's place past it; an
+        // initializer's for a place at or past its key; an unsequenced one for a node at or past its key. The places only
+        // grow along the order and the keys along their lists, so a root left out under one limit is below every later
+        // key too: no plan would have emitted at its visit, and `walked`, which only an inner plan's key is compared with,
+        // is below every pending key whether or not it counts the roots left out. With the test's switch
+        // (CheckInput.default_path_counts) every root is visited all the same, and a quiet one's visit is counted where it
+        // did anything.
+        CheckCommonRootClasses classes = { 0 };
+        if (!check_common_root_classes(parser, pp, input, stream, types, facts, &ignored, check_common_enabled(pp, input, CHECK_WARNING_ID_UNSEQUENCED, false),
+                                       scratch, &classes))
+        {
+            check_common_exhausted(pp);
+        }
+        // -Wunsequenced's marks (the classes' pass makes them), where it can warn at all, and the brace initializers
+        // whose lists can warn, each list one full expression (check_unseq_plans), by their last value's node, where
+        // the walk checks them.
+        uint8_t* unsequenced_marks = classes.marks;
+        bool unsequenced_failed = false;
+        uint32_t unsequenced_plan_count = 0;
+        const uint64_t* unsequenced_plans = unsequenced_marks != NULL ? check_unseq_plans(input, program, parents, unsequenced_marks, scratch,
+                                                                                        &unsequenced_plan_count, &unsequenced_failed) : NULL;
+        uint32_t unsequenced_plan = 0;
+        if (unsequenced_failed)
+        {
+            check_common_exhausted(pp);
+        }
+        const bool every_root = input->default_path_counts != NULL || classes.loud == NULL;
+        const uint32_t next_unsequenced = unsequenced_plan_count != 0 ? (uint32_t)(unsequenced_plans[0] >> 32) : UINT32_MAX;
+        order.loud = every_root ? NULL : classes.loud;
+        order.limit = next_init < next_integer ? next_init : next_integer;
+        order.limit = next_unsequenced < order.limit ? next_unsequenced : order.limit;
+        order.natural = check_common_next_loud_root(parents, facts->roots, order.loud, order.limit, graph->count, &order.roots);
         for (uint32_t node = check_common_root_order_next(graph, parents, facts->roots, &order); node < graph->count && !pp->fatal;
              node = check_common_root_order_next(graph, parents, facts->roots, &order))
         {
             // (A pending plan's key is below its first root past it: only then is the root's operand read.)
             const uint32_t at = order.position;
+            // What a quiet root's visit must leave as it was, for the test's switch.
+            const bool quiet = classes.loud != NULL && (classes.loud[node / 64] & (UINT64_C(1) << (node % 64))) == 0 && node < order.limit;
+            const PPDiagnosticRecord* diagnostic_before = pp->diagnostic_last;
+            const uint32_t plans_before = integer + initializer + unsequenced_plan;
+            const uint32_t shifts_before = shifts != NULL ? shifts->count : 0;
+            const uint8_t emitted_before = emitted[node];
+            bool pushed = false;
             const uint32_t operand = next_integer < at && graph->ops[node] == CHECK_OP_CAST && graph->operand0[node] < at ? graph->operand0[node] : at;
             while (next_integer < UINT32_MAX && !pp->fatal &&
                    (((uint32_t)initializer_keys.integer[integer] & BUSTER_CHECK_INITIALIZER_INNER) != 0 ? any_walked && next_integer < walked :
@@ -9813,15 +10110,15 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
             check_common_root_frames(&emission, node);
             if (emission.work_count != 0)
             {
+                pushed = true;
                 check_common_emit_run(&emission);
             }
             // Its unsequenced accesses, after its conversions, as clang's CheckCompletedExpr checks them (#1953); not in
             // unreachable code, which clang's DiagRuntimeBehavior drops.
             // (Only a root holding a modification can warn: the cheap tests first.)
             const uint32_t root_token = graph->tokens[node];
-            const bool unsequenced_candidate = root && !planned && unsequenced_marks != NULL && node < graph->count &&
-                                               (unsequenced_marks[node] & BUSTER_CHECK_UNSEQ_MODIFIES) != 0 && evaluated[node] != 0 &&
-                                               (facts->roots == NULL || !check_unseq_sole_modification(graph, unsequenced_marks, node));
+            const bool unsequenced_candidate = root && !planned && classes.unsequenced != NULL && node < graph->count &&
+                                               (classes.unsequenced[node / 64] & (UINT64_C(1) << (node % 64))) != 0 && evaluated[node] != 0;
             const bool unsequenced_dropped = unsequenced_candidate && program != NULL &&
                                              (facts->flushed == NULL || root_token >= parser->tokens.count || facts->flushed[root_token] == 0) &&
                                              root_token < parser->tokens.count && check_program_token_dropped(program, root_token);
@@ -9834,6 +10131,18 @@ static void check_common_graph_warnings(const Parser* parser, Preprocessor* pp, 
             {
                 check_unseq_plan(&emission, &unsequenced, unsequenced_marks, program, (uint32_t)unsequenced_plans[unsequenced_plan]);
                 unsequenced_plan += 1;
+            }
+            const uint32_t pending_unsequenced = unsequenced_plan < unsequenced_plan_count ? (uint32_t)(unsequenced_plans[unsequenced_plan] >> 32) : UINT32_MAX;
+            order.limit = next_init < next_integer ? next_init : next_integer;
+            order.limit = pending_unsequenced < order.limit ? pending_unsequenced : order.limit;
+            if (__builtin_expect(input->default_path_counts != NULL, 0))
+            {
+                const bool acted = pushed || unsequenced_candidate || pp->diagnostic_last != diagnostic_before ||
+                                   integer + initializer + unsequenced_plan != plans_before || (shifts != NULL ? shifts->count : 0) != shifts_before ||
+                                   ((emitted[node] ^ emitted_before) & (uint8_t)~BUSTER_CHECK_EMITTED_TREE) != 0;
+                check_default_path_count(input->default_path_counts, CHECK_DEFAULT_PATH_ROOTS, 1);
+                check_default_path_count(input->default_path_counts, CHECK_DEFAULT_PATH_ROOTS_QUIET, quiet);
+                check_default_path_count(input->default_path_counts, CHECK_DEFAULT_PATH_ROOTS_ACTED, quiet && acted);
             }
         }
         // The plans whose first node follows every root.

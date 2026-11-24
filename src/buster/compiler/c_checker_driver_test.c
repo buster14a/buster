@@ -126,6 +126,10 @@ struct CheckDriverRunModes
     uint64_t differences;
     uint64_t sweep_fixtures;
     uint64_t sweep_nanoseconds;
+    // #1340's quiet roots over the sweep (check_test_driver_warning_fixtures_dealt): the roots of the fixtures' compiles
+    // with every root visited, and those of them the common warnings' classes call quiet.
+    uint64_t sweep_roots;
+    uint64_t sweep_quiet_roots;
     // --carets (#2376, check_test_driver_carets): the command lines run again with carets on by buster and by clang, and
     // how their whole errors compared: the same, apart only in highlighted ranges' '~', in other source lines (fix-its,
     // scratch space, a range's lines), or in diagnostics' own lines; and how many of those were printed.
@@ -9429,6 +9433,7 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 #include "c_check_unevaluated_driver_test.c"
 #include "c_check_pointer_cast_driver_test.c"
 #include "c_check_unsequenced_driver_test.c"
+#include "c_check_quiet_roots_driver_test.c"
 #include "c_check_sign_compare_driver_test.c"
 #include "c_check_uninitialized_driver_test.c"
 #include "c_check_type_sugar_driver_test.c"
@@ -9660,6 +9665,8 @@ static int run_checker_driver_tests(int argc, char** argv)
     bool float_precision_only = false;
     // --constant-logical-only: logical constant diagnostics and their construction-time policy (#2900).
     bool constant_logical_only = false;
+    // --quiet-roots-only: -Wunsequenced's fixtures and the common warnings' quiet roots against every root's visit (#1340).
+    bool quiet_roots_only = false;
     // --record-extensions-only: zero-length arrays and zero-size records, their policies and output preservation.
     bool record_extensions_only = false;
     // --auto-qualifiers-only: qualified __auto_type declarations and recovered atomic pointees (#1844).
@@ -9763,6 +9770,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             constant_logical_only = true;
         }
+        else if (strcmp(argv[i], "--quiet-roots-only") == 0)
+        {
+            quiet_roots_only = true;
+        }
         else if (strcmp(argv[i], "--record-extensions-only") == 0)
         {
             record_extensions_only = true;
@@ -9844,7 +9855,7 @@ static int run_checker_driver_tests(int argc, char** argv)
                              (uint32_t)malformed_calls_only + (uint32_t)record_extensions_only + (uint32_t)auto_qualifiers_only + (uint32_t)query_bool_only +
                              (uint32_t)run_modes_only + (uint32_t)correctness_edges_only + (uint32_t)imaginary_bit_int_only + (uint32_t)unused_comparison_only + (uint32_t)assert_diagnostics_only +
                              (uint32_t)float_precision_only +
-                             (uint32_t)constant_logical_only + (uint32_t)pic_only + (uint32_t)string_plus_only + (uint32_t)initializer_diagnostics_only;
+                             (uint32_t)constant_logical_only + (uint32_t)quiet_roots_only + (uint32_t)pic_only + (uint32_t)string_plus_only + (uint32_t)initializer_diagnostics_only;
     options &= focuses <= 1 && (focuses == 0 || (!lazy && check_driver_part.count == 1));
     // One focused section's alone: the others' gates take `focused` as --sign-compare-only's did.
     const bool focused = focuses != 0;
@@ -10433,6 +10444,10 @@ static int run_checker_driver_tests(int argc, char** argv)
     {
         check_test_driver_constant_logical(&test, clang, executable, directory);
     }
+    if (temporary && quiet_roots_only)
+    {
+        check_test_driver_unsequenced_sections(&test, clang, executable, directory);
+    }
     if (temporary && record_extensions_only)
     {
         check_test_driver_gnu_empty_struct(&test, clang, executable, directory);
@@ -10695,8 +10710,8 @@ static int run_checker_driver_tests(int argc, char** argv)
                 .weight = 160,
             },
             {
-                .check = check_test_driver_unsequenced,
-                .weight = 170,
+                .check = check_test_driver_unsequenced_sections,
+                .weight = 240,
             },
             {
                 .check = check_test_driver_unused_labels,
@@ -11604,6 +11619,8 @@ static int run_checker_driver_tests(int argc, char** argv)
            modes->in_process ? "in-process" : "as children", modes->server.path != NULL ? "through the server (" : "as children",
            modes->server.path != NULL ? modes->server.version : "", modes->server.path != NULL ? ")" : "", modes->differential ? ", differential" : "",
            modes->in_process_runs, modes->served_runs, modes->child_runs, modes->sweep_fixtures, (double)modes->sweep_nanoseconds / 1e9, modes->differences);
+    printf("checker-driver: quiet roots: the warning sweep's compiles with every root visited took %" PRIu64 " roots, %" PRIu64 " of them quiet\n",
+           modes->sweep_roots, modes->sweep_quiet_roots);
     if (modes->carets)
     {
         printf("checker-driver: carets: %" PRIu64 " command lines again with carets on: %" PRIu64 " the same as clang's, %" PRIu64 " apart only in ranges' '~', %" PRIu64

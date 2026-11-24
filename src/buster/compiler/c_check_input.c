@@ -787,9 +787,10 @@ struct CheckInputKrDiagnostic
 #define BUSTER_CHECK_EXPRESSION_PARTS 4u
 
 // #2850's default path: a rule that answers early what a longer way answered, against that way. A logical operator's right
-// operand that can only be 0 or 1 is not replayed for -Wconstant-logical-operand (c_check_warning_graph.c). With a
-// test's switch (BUSTER_TEST_DEFAULT_PATH_LOG, a file's path) it is replayed all the same, and the command writes one
-// line of these counts at its end: the events and the types stay 0.
+// operand that can only be 0 or 1 is not replayed for -Wconstant-logical-operand (c_check_warning_graph.c), and a quiet
+// root is not visited by the common warnings' loop (c_check_common_warnings.c). With a test's switch
+// (BUSTER_TEST_DEFAULT_PATH_LOG, a file's path) each is replayed or visited all the same, and the command writes a
+// line of each rule's counts at its end: the events, the types and the visits that acted stay 0.
 typedef enum CheckDefaultPathCount
 {
     // Right operands the warning's pass did not replay; of them, those whose replay gives the warning's event; and those
@@ -797,6 +798,13 @@ typedef enum CheckDefaultPathCount
     CHECK_DEFAULT_PATH_LOGICAL_SKIPPED,
     CHECK_DEFAULT_PATH_LOGICAL_EVENTS,
     CHECK_DEFAULT_PATH_LOGICAL_TYPES,
+    // The roots the common warnings' loop takes (#1340, check_common_graph_warnings); of them, those its classes call
+    // quiet, which it does not visit; and those of the quiet whose visit did anything: pushed a frame, walked for
+    // -Wunsequenced, reported, emitted a plan, took a stashed shift or marked the root (but as walked, a mark of such
+    // a root that nothing reads after its visit, check_common_root_classes).
+    CHECK_DEFAULT_PATH_ROOTS,
+    CHECK_DEFAULT_PATH_ROOTS_QUIET,
+    CHECK_DEFAULT_PATH_ROOTS_ACTED,
     CHECK_DEFAULT_PATH_COUNTS,
 } CheckDefaultPathCount;
 

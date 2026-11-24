@@ -7600,6 +7600,82 @@ flags, types, operators and constant values (#2451). It checks the remaining
 candidates' ranges and marks their ancestors. A floating conversion on the
 same comparison can still set its own reach bit. Its range is tested once.
 
+### The quiet roots (#1340)
+
+The roots' loop (`check_common_graph_warnings`) keeps clang's order of the
+deferred warnings: each root's walks, the brace initializers' plans between
+them, and `-Wunsequenced`'s check after each. Most roots have nothing to do,
+and the loop does not visit them. `check_common_root_classes` classifies the
+unit's roots before the loop, 64 nodes at a time, into two bitmaps: the loud
+roots, and `-Wunsequenced`'s candidates. The loop's body stays the one
+implementation of a root's visit; a root the classes call loud for no reason
+is visited as before.
+
+A root is quiet where every step of the body does nothing for it:
+
+- it is evaluated (no stashed shift, no unevaluated value's call);
+- its reach is 0 (no walk, no atomic or detached scan);
+- its discarded expression's operator (`check_common_discarded`) asks nothing:
+  it is no comma's, and no call's but one whose callee's name says its result
+  can't warn (`check_common_ignored_wanted`, the first step of
+  `check_common_ignored_of`: a bit of the marked functions' names, the name's
+  byte of the builtin table, and whether the unit marks any return type);
+- the statement's marker has nothing to say: the operator isn't one
+  `check_common_marker_op` takes, or the expression isn't in a discarded place
+  (`check_common_discarded_place`: a brace initializer's value under its
+  declaration's `;`), or it is a cast to void (`check_common_void_cast`);
+- `-Wunsequenced` has no candidate in it.
+
+The operators' classes are a byte each, built from the body's own predicates,
+and one byte-table lookup gives 64 nodes' classes. The masks settle the roots
+whose own operator answers. The cast roots, the marker roots and the call
+roots ask the body's own functions, a root at a time with plain loads: a
+`vpgatherdd` of them costs Zen 5 64 uops.
+
+The marker's visit of a root that reaches nothing marks the root and its
+expression walked (`BUSTER_CHECK_EMITTED_TREE`). In a verified tree nothing
+reads those two marks after that visit, so leaving it out changes nothing:
+a walk's frame reaches a node from its parent only, a plan walks its parts
+at or before their visit, and the last scan takes the nodes with a bit of
+reach, which these don't have. Outside a verified tree those roots stay loud.
+
+The loop's ordered state is the plans' cursors. A quiet root's visit emits
+no plan while every pending plan's key is past its node, so the roots' order
+(`CheckCommonRootOrder.loud` and `.limit`) leaves out the quiet roots below
+the least pending key: the natural ones 16 nodes at a time before they are
+listed, a displaced one where it comes. A root at or past a pending key is
+visited whatever its class. The places only grow along the order and the keys
+along their lists, so a root left out under one limit is below every later
+key too.
+
+`-Wunsequenced`'s marks are made in the same pass (`check_unseq_mark`): a
+word's modifications climb before its roots read their marks. Each climb also
+marks the reader of a marked node (`BUSTER_CHECK_UNSEQ_INNER`), so "the outer
+modification is the only one" is one bit of that modification's node, where
+it was three loads of its operands' marks. A candidate's name filter
+(`check_unseq_repeats`) scans a unary wrapper's operand's range, not the
+wrapper's: a statement's condition stands after its body, whose nodes the
+range from the condition's first node to the wrapper would take in.
+
+`BUSTER_TEST_DEFAULT_PATH_LOG=FILE` visits every root all the same and writes
+a line of counts: the roots, the quiet ones, and the quiet ones whose visit
+acted (pushed a frame, walked for `-Wunsequenced`, reported, emitted a plan,
+took a stashed shift, or marked the root other than as walked).
+`test-checker-driver` holds a compile without the switch to one with it
+(`c_check_quiet_roots_driver_test.c`): the same diagnostics in the same order,
+the same object, and no quiet visit that acted, over a unit of each kind of
+root with frozen counts, whose diagnostics are also clang's, over 48 generated
+units, and over every warning fixture of the sweeps, whose compiles with the
+switch are also held to clang. The reader leaves a statement's discard wrapper
+out only in a unit of 8,192 tokens or more (`CheckInput.discard_roots`), so
+the unit and every other generated unit are also compiled behind a filler
+table that long: there a statement's root is its assignment, its call or its
+cast to void itself.
+
+On the 9700X the frozen `sqlite3.c` has 58,722 roots, of which 56,443 are
+quiet; the measurements and what the remaining roots cost are in
+[the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/root-loop-1340-2026-11-24).
+
 The floating-conversion scan also reads the result types of 16 operators at
 a time. A unary sign or ordinary arithmetic operation with a successfully
 checked builtin integer result has no floating operand conversion. Other

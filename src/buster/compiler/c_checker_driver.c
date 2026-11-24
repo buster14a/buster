@@ -16255,6 +16255,9 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             fprintf(file, "default-path: logical-operands-not-replayed=%" PRIu64 " of-them-an-event=%" PRIu64 " of-them-a-type-made=%" PRIu64 "\n",
                     default_path_counts[CHECK_DEFAULT_PATH_LOGICAL_SKIPPED], default_path_counts[CHECK_DEFAULT_PATH_LOGICAL_EVENTS],
                     default_path_counts[CHECK_DEFAULT_PATH_LOGICAL_TYPES]);
+            fprintf(file, "default-path: roots=%" PRIu64 " of-them-quiet=%" PRIu64 " of-them-a-visit-that-acted=%" PRIu64 "\n",
+                    default_path_counts[CHECK_DEFAULT_PATH_ROOTS], default_path_counts[CHECK_DEFAULT_PATH_ROOTS_QUIET],
+                    default_path_counts[CHECK_DEFAULT_PATH_ROOTS_ACTED]);
             fclose(file);
         }
     }

@@ -68,6 +68,9 @@ struct CheckCommonIgnored
     // A byte an identifier: a builtin's name's (BUSTER_CHECK_IGNORED_*), 0 until a call asks.
     uint8_t* builtins;
     uint32_t builtin_count;
+    // A bit an identifier (`builtin_count` of them): the name of a function that has a mark, which a call's callee's
+    // name is asked before its declaration is read (check_common_ignored_wanted). Null where no function has one.
+    uint64_t* named;
 };
 
 // What a discarded call's result warns of (check_common_ignored_of): its callee's pure or const, the warn_unused_result or
@@ -213,6 +216,27 @@ static __attribute__((noinline)) bool check_common_ignored_prepare(CheckCommonIg
     {
         memset(ignored->builtins, 0, names);
         ignored->builtin_count = names;
+    }
+    // The marked functions' names: a mark's key and its declaration are declarations of one function, as the declaration
+    // a call's lookup finds is, so they spell the callee's name.
+    uint64_t* named = valid && ignored->mark_count != 0 && names != 0 ? CHECK_COMMON_PUSH_ARRAY(scratch, uint64_t, (uint64_t)names / 64 + 1) : NULL;
+    valid &= ignored->mark_count == 0 || names == 0 || named != NULL;
+    if (named != NULL)
+    {
+        memset(named, 0, ((uint64_t)names / 64 + 1) * sizeof(uint64_t));
+        for (uint32_t i = 0; i < ignored->mark_count; i += 1)
+        {
+            const uint32_t tokens[] = { ignored->marks[i].key, ignored->marks[i].declaration };
+            for (uint32_t t = 0; t < BUSTER_ARRAY_LENGTH(tokens); t += 1)
+            {
+                const uint32_t name = tokens[t] < count ? parser->tokens.names[tokens[t]] : names;
+                if (name < names)
+                {
+                    named[name / 64] |= UINT64_C(1) << (name % 64);
+                }
+            }
+        }
+        ignored->named = named;
     }
     return valid;
 }
@@ -401,6 +425,55 @@ static uint32_t check_common_ignored_unnamed(const CheckCommonEmission* emission
     return declaration < count ? check_common_ignored_pointee(emission->parser, emission->input, declaration) : BUSTER_CHECK_NONE;
 }
 
+// A call's callee before its declaration is read (check_common_ignored_wanted): the callee as written
+// (BUSTER_CHECK_NONE for a builtin's operation) and past its dereferences and addresses, a value's token (else
+// BUSTER_CHECK_NONE) and whether it is an identifier, that name's builtin kinds, and whether the call can warn at all.
+typedef struct CheckCommonIgnoredCallee CheckCommonIgnoredCallee;
+struct CheckCommonIgnoredCallee
+{
+    uint32_t written;
+    uint32_t callee;
+    uint32_t name;
+    bool identifier;
+    uint8_t table;
+    bool wanted;
+};
+
+// The call `node`'s callee, and whether its discarded result can warn at all: what check_common_ignored_of asks first,
+// and the roots' classes of a root's call (check_common_root_classes). A call of an unmarked function whose name is no
+// builtin's, in a unit of no marked return type, is most calls, and its callee's name says so: a call warns by its
+// callee's function's marks, whose names have a bit each (CheckCommonIgnored.named), by its name's row of the builtin
+// table, a byte, or by its return type's tag's or typedef's marks, which a unit has or not. So such a call reads its
+// callee's node and its token's name, and neither its declaration nor its type. A builtin's operation is always asked.
+static CheckCommonIgnoredCallee check_common_ignored_wanted(CheckCommonIgnored* ignored, const Preprocessor* pp, const Parser* parser, const CheckInput* input,
+                                                            uint32_t node)
+{
+    const CheckGraph* graph = &input->graph;
+    const uint32_t count = parser->tokens.count < input->token_count ? parser->tokens.count : input->token_count;
+    const CheckOp op = node < graph->count ? graph->ops[node] : CHECK_OP_COUNT;
+    const bool call = op == CHECK_OP_CALL;
+    const bool builtin = !call && op < CHECK_OP_COUNT && check_common_ignored_op((uint8_t)op);
+    // A function's name through the callee's dereferences and addresses (`(*f)()`, `(&f)()`, clang's
+    // getReferencedDeclOfCallee). A callee of no name (a member's, an element's, a call's result) warns of none.
+    const uint32_t written = call ? graph->operand0[node] : BUSTER_CHECK_NONE;
+    uint32_t callee = written;
+    for (uint32_t steps = 0; callee < graph->count && (graph->ops[callee] == CHECK_OP_DEREFERENCE || graph->ops[callee] == CHECK_OP_ADDRESS) && steps < 64;
+         steps += 1)
+    {
+        callee = graph->operand0[callee];
+    }
+    const uint32_t name = callee < graph->count && graph->ops[callee] == CHECK_OP_VALUE ? graph->tokens[callee] : BUSTER_CHECK_NONE;
+    const bool identifier = name < count && parser->tokens.kinds[name] == PARSE_KIND_IDENTIFIER;
+    const uint32_t spelling = identifier ? parser->tokens.names[name] : 0;
+    const uint8_t table = identifier && ignored != NULL ? check_common_ignored_builtin(ignored, pp, spelling) : 0u;
+    const bool named = identifier && ignored != NULL && ignored->named != NULL && spelling < ignored->builtin_count &&
+                       (ignored->named[spelling / 64] & (UINT64_C(1) << (spelling % 64))) != 0;
+    const bool wanted = ignored != NULL && (builtin || named || (table & (BUSTER_CHECK_IGNORED_CONST | BUSTER_CHECK_IGNORED_PURE)) != 0 ||
+                                            (call && (ignored->tag_count != 0 || ignored->typedefs)));
+    const CheckCommonIgnoredCallee result = { .written = written, .callee = callee, .name = name, .identifier = identifier, .table = table, .wanted = wanted };
+    return result;
+}
+
 // What the call `node`'s discarded result warns of (CheckCommonIgnoredResult), or false: a call of a function or a
 // builtin whose result isn't void.
 static __attribute__((noinline)) bool check_common_ignored_of(CheckCommonEmission* emission, uint32_t node, CheckCommonIgnoredResult* out)
@@ -415,28 +488,20 @@ static __attribute__((noinline)) bool check_common_ignored_of(CheckCommonEmissio
     const bool builtin = !call && op < CHECK_OP_COUNT && check_common_ignored_op(op);
     const TypeTable* types = emission->types;
     *out = (CheckCommonIgnoredResult){ .token = BUSTER_CHECK_NONE, .macro = BUSTER_CHECK_NONE, .type_name = BUSTER_CHECK_NONE };
-    // A function's name, its declaration as the call's lookup finds it, and its first declaration, through the callee's
-    // dereferences and addresses (`(*f)()`, `(&f)()`, clang's getReferencedDeclOfCallee); a pointer object's name, whose
-    // call warns of its return type's alone, its tag's or the typedef its declaration spells (check_common_ignored_pointee).
-    // A callee of no name (a member's, an element's, a call's result) warns of none.
-    const uint32_t written = call ? graph->operand0[node] : BUSTER_CHECK_NONE;
-    uint32_t callee = written;
-    for (uint32_t steps = 0; callee < graph->count && (graph->ops[callee] == CHECK_OP_DEREFERENCE || graph->ops[callee] == CHECK_OP_ADDRESS) && steps < 64;
-         steps += 1)
-    {
-        callee = graph->operand0[callee];
-    }
-    const uint32_t name = callee < graph->count && graph->ops[callee] == CHECK_OP_VALUE ? graph->tokens[callee] : BUSTER_CHECK_NONE;
-    const uint32_t declaration = name < count && parser->tokens.kinds[name] == PARSE_KIND_IDENTIFIER && input->declarations != NULL ?
-                                 input->declarations[name] : BUSTER_CHECK_NONE;
+    // The callee's name, its declaration as the call's lookup finds it, and its first declaration, read where the name
+    // says the call can warn (check_common_ignored_wanted); a pointer object's name, whose call warns of its return
+    // type's alone, its tag's or the typedef its declaration spells (check_common_ignored_pointee).
+    const CheckCommonIgnoredCallee asked = check_common_ignored_wanted(ignored, emission->pp, parser, input, node);
+    const uint32_t written = asked.written;
+    const uint32_t callee = asked.callee;
+    const uint32_t name = asked.name;
+    const uint32_t declaration = asked.wanted && asked.identifier && input->declarations != NULL ? input->declarations[name] : BUSTER_CHECK_NONE;
     const bool function = declaration < count && input->declaration_kinds != NULL && input->declaration_kinds[declaration] == C_BINDING_FUNCTION;
     const bool pointer = declaration < count && input->declaration_kinds != NULL && input->declaration_kinds[declaration] == C_BINDING_OBJECT;
     const uint32_t object = function && input->objects != NULL ? input->objects[declaration] : 0;
     const uint32_t key = object != 0 && object - 1 < count ? object - 1 : declaration;
-    // A call of an unmarked function whose name is no builtin's, in a unit of no marked return type, is most calls: one bit
-    // and one byte decide it, before its type is read.
     const bool marked = function && ignored != NULL && ignored->keys != NULL && (ignored->keys[key / 64] & (UINT64_C(1) << (key % 64))) != 0;
-    const uint8_t table = function && ignored != NULL ? check_common_ignored_builtin(ignored, emission->pp, parser->tokens.names[name]) : 0u;
+    const uint8_t table = function ? asked.table : 0u;
     const bool candidate = ignored != NULL && (builtin || marked || (table & (BUSTER_CHECK_IGNORED_CONST | BUSTER_CHECK_IGNORED_PURE)) != 0 ||
                                                (call && (ignored->tag_count != 0 || ignored->typedefs)));
     const TypeId type = candidate ? check_stream_type(emission->stream, node) : 0;

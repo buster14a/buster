@@ -23,8 +23,9 @@
 // expressions of their own; its value is one too, checked before the full expression that holds it, as clang completes
 // it first. The walk is an explicit stack (no recursion): each frame is one of clang's visits, at a step.
 //
-// SIMD: the candidates come from one pass over the graph's operators, 16 at a time, for a modification; a full
-// expression with none, nearly all of them, is never walked. The walk itself stays scalar: it is an ordered tree walk
+// SIMD: the candidates come from the roots' classes' pass over the graph's operators, 64 at a time
+// (check_common_root_classes, c_check_common_warnings.c), which marks the modifications' nodes and their roots; a full
+// expression with none, or with its outer one alone, nearly all of them, is never walked. The walk itself stays scalar: it is an ordered tree walk
 // whose every step reads and updates the region tree's union-find and the variables' usages, which no lane order keeps.
 // Included by c_check_common_warnings.c.
 
@@ -147,13 +148,27 @@ struct CheckUnseq
 };
 
 // CheckUnseq.marks' bits: a node whose subtree holds a modification; a brace initializer's value, whose list is checked
-// as one full expression with its plan, not as a root of its own.
+// as one full expression with its plan, not as a root of its own; a node one of whose children's subtree holds a
+// modification (check_unseq_mark).
 #define BUSTER_CHECK_UNSEQ_MODIFIES 1u
 #define BUSTER_CHECK_UNSEQ_PLANNED 2u
+#define BUSTER_CHECK_UNSEQ_INNER 4u
 
 static bool check_unseq_modification(CheckOp op)
 {
     const bool result = op == CHECK_OP_ASSIGN || (op >= CHECK_OP_PRE_INCREMENT && op <= CHECK_OP_BIT_XOR_ASSIGN);
+    return result;
+}
+
+// A full expression with just its outer modification cannot conflict with itself (the roots' classes' test,
+// check_common_root_classes). Its pre-modification check precedes its operands' reads. Its post-modification check only
+// tests for another modification. A single unary wrapper, one of these operators with one operand, adds no sibling
+// access, and its child (the modification) names no read object. The outer modification is the only one where no child
+// of it holds one (BUSTER_CHECK_UNSEQ_INNER), which the marks say only in a verified tree, where every child's
+// modifications reach its unique parent.
+static bool check_unseq_wrapper(CheckOp op)
+{
+    const bool result = op == CHECK_OP_CAST || op == CHECK_OP_CONVERT || op == CHECK_OP_CONDITION || op == CHECK_OP_POSITIVE;
     return result;
 }
 
@@ -932,8 +947,17 @@ static bool check_unseq_repeats(const CheckUnseq* checker, const Parser* parser,
     uint32_t names[8];
     uint32_t uses[8];
     uint32_t name_count = 0;
-    const uint32_t first = !repeats ? check_unseq_first(graph, root) : 0;
-    const uint32_t end = !repeats ? root + 1 : 0;
+    // A unary wrapper stands apart from its operand where its statement's body comes between them (a condition's, a for
+    // clause's increment's: check_common_displaced_root), and names nothing itself: the range is its operand's, whose
+    // nodes all precede it.
+    uint32_t top = root;
+    for (uint32_t steps = 0; !repeats && steps < graph->count && check_unseq_wrapper(graph->ops[top]) && graph->operand0[top] < top &&
+                             graph->operand1[top] >= graph->count && graph->operand2[top] >= graph->count; steps += 1)
+    {
+        top = graph->operand0[top];
+    }
+    const uint32_t first = !repeats ? check_unseq_first(graph, top) : 0;
+    const uint32_t end = !repeats ? top + 1 : 0;
     // (Two passes: the modifications' targets' names, then every identifier value's against them.)
     for (uint32_t pass = 0; pass < 2 && !repeats; pass += 1)
     {
@@ -1031,72 +1055,22 @@ static bool check_unseq_reserve(CheckUnseqStorage* storage, uint32_t nodes, Aren
     return valid;
 }
 
-// The unit's marks (BUSTER_CHECK_UNSEQ_MODIFIES): each modification's node and every node above it, to its root. The
-// modifications are found 16 nodes at a time by operator. Each climb stops at a node already marked, so the marks cost
-// O(nodes). Null where the unit has no modification (or scratch has no room, which `*failed` says).
-static uint8_t* check_unseq_marks(const CheckGraph* graph, const uint32_t* parents, Arena* scratch, bool* failed)
+// A modification's marks (BUSTER_CHECK_UNSEQ_MODIFIES): its node `node` and every node above it, to its root, and each
+// such node's reader marked BUSTER_CHECK_UNSEQ_INNER, a modification under one of its children. The climb stops at a
+// node already marked, so a unit's marks cost O(nodes). The roots' classes' pass finds the modifications by operator
+// and makes the unit's marks with it (check_common_root_classes).
+static void check_unseq_mark(const CheckGraph* graph, const uint32_t* parents, uint8_t* marks, uint32_t node)
 {
-    uint8_t* marks = NULL;
-    *failed = false;
-    for (uint32_t first = 0; first < graph->count && !*failed; first += 16)
+    for (uint32_t at = node; at < graph->count && (marks[at] & BUSTER_CHECK_UNSEQ_MODIFIES) == 0;)
     {
-        const uint32_t live = graph->count - first < 16 ? graph->count - first : 16;
-        uint32_t selected = live == 16 ? 0xffffu : (1u << live) - 1;
-        const __mmask16 lanes = (__mmask16)selected;
-        const __m512i ops = _mm512_maskz_loadu_epi32(lanes, graph->ops + first);
-        selected = _mm512_mask_cmpge_epu32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_PRE_INCREMENT)) &
-                   _mm512_mask_cmple_epu32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_BIT_XOR_ASSIGN));
-        selected |= _mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_ASSIGN));
-        for (; selected != 0 && !*failed; selected &= selected - 1)
+        marks[at] |= BUSTER_CHECK_UNSEQ_MODIFIES;
+        const uint32_t up = parents[at];
+        if (up < graph->count)
         {
-            const uint32_t node = first + (uint32_t)__builtin_ctz(selected);
-            if (check_unseq_modification(graph->ops[node]))
-            {
-                if (marks == NULL)
-                {
-                    marks = CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, graph->count);
-                    *failed = marks == NULL;
-                    if (marks != NULL)
-                    {
-                        memset(marks, 0, graph->count);
-                    }
-                }
-                for (uint32_t at = node; marks != NULL && at < graph->count && marks[at] == 0;)
-                {
-                    marks[at] = BUSTER_CHECK_UNSEQ_MODIFIES;
-                    const uint32_t up = parents[at];
-                    at = up > at ? up : BUSTER_CHECK_NONE;
-                }
-            }
+            marks[up] |= BUSTER_CHECK_UNSEQ_INNER;
         }
+        at = up > at ? up : BUSTER_CHECK_NONE;
     }
-    return marks;
-}
-
-// A full expression with just its outer modification cannot conflict with itself. Its pre-modification
-// check precedes its operands' reads. Its post-modification check only tests for another modification.
-// A single unary wrapper adds no sibling access, and its child (the modification) names no read object.
-// This uses marks only in a verified tree, where every child's modifications reach its unique parent.
-static bool check_unseq_sole_modification(const CheckGraph* graph, const uint8_t* marks, uint32_t root)
-{
-    const uint32_t count = graph->count;
-    const CheckOp op = graph->ops[root];
-    const bool wrapper = op == CHECK_OP_CAST || op == CHECK_OP_CONVERT || op == CHECK_OP_CONDITION || op == CHECK_OP_POSITIVE;
-    const uint32_t node = wrapper && graph->operand0[root] < count && graph->operand1[root] >= count && graph->operand2[root] >= count ?
-                          graph->operand0[root] : root;
-    if (!check_unseq_modification(graph->ops[node]))
-    {
-        return false;
-    }
-    const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
-    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(operands); i += 1)
-    {
-        if (operands[i] < count && (marks[operands[i]] & BUSTER_CHECK_UNSEQ_MODIFIES) != 0)
-        {
-            return false;
-        }
-    }
-    return true;
 }
 
 // A warning's publication, as clang's DiagRuntimeBehavior queues it: in a function at its end, in a file-scope
