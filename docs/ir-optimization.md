@@ -572,6 +572,11 @@ a comparison that fed it through copies or extensions. Other edits
 invalidate the proof, and `--verify` checks the input afresh.
 The final verifier checks the rewritten function before selection.
 
+On the 9700X, compiling Lua 5.4.8's `lvm.c` with `--tier1 --lanes=1`
+reduced calls to `ir_check_rows` from 163 to 146, `ir_check_dominance`
+from 178 to 115 and `ir_cfg_validated` from 265 to 198 across 32 functions.
+The emitted object had the same SHA-256 digest. [Compiler change and measurement record](https://github.com/buster14a/buster/pull/3554)
+
 `--tier1-passes=` turns each pass on
 or off ([the Tier 1 guide](tier1.md)). By default SCCP, dead-code removal, CFG
 cleanup, the merges, the inlining, the switches of constants, the
