@@ -934,7 +934,7 @@ scalar/vector comparisons.
 | `enum-sources` | 41 | Each case runs as `enum.c` |
 | `vla-sources` | 51 | Includes the generated repeated-size expression |
 | `const-objects` | 63 | The sparse-array probe retains its independent smaller Clang input |
-| `bit-builtins` | 30 | Each char signedness gets its own Clang command |
+| `bit-builtins` | 30 | GNU17 Clang oracle per char signedness, with the recorded checker standard |
 | `stdc-bit-builtins` | 10 | Groups by GNU17 or GNU23 |
 | `typeof-compound` | 20 | Groups by GNU17 or GNU23 |
 | `function-name-semantics` | 10 | Retains the quiet Clang syntax check |

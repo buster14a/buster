@@ -13,7 +13,7 @@
 static __attribute__((noinline)) void check_test_bits_sources(CheckTest* test, const char* clang)
 {
     CheckTestFixtures catalog;
-    const uint32_t file_count = check_test_private_catalog(test, &catalog, "checker/bit-builtins", NULL, 0, CHECK_TEST_CATALOG_UNSIGNED_CHAR);
+    const uint32_t file_count = check_test_private_catalog(test, &catalog, "checker/bit-builtins", NULL, 0, CHECK_TEST_CATALOG_GNU23 | CHECK_TEST_CATALOG_UNSIGNED_CHAR);
     const CheckSourceFixture* fixtures = catalog.cases;
     CheckTestOracleBatch batch;
     const bool allocated = check_test_oracle_batch(test, &batch, &catalog.storage, file_count);
@@ -25,7 +25,8 @@ static __attribute__((noinline)) void check_test_bits_sources(CheckTest* test, c
         snprintf(batch.paths[i], sizeof(batch.paths[i]), "%s/%u.c", directory, i);
         ready = parse_test_write(batch.paths[i], fixtures[i].source, strlen(fixtures[i].source));
     }
-    // Plain char's signedness is an option: clang checks the fixtures of each in a run of its own.
+    // Clang accepts the wide GNU23 builtin cases as GNU17 extensions. Keep the original GNU17 oracle commands,
+    // grouped by plain char signedness, while check_test_source applies each case's checker standard.
     const char* signed_arguments[] = { "-std=gnu17" };
     const char* unsigned_arguments[] = { "-std=gnu17", "-funsigned-char" };
     for (uint32_t group = 0; ready && group < 2; group += 1)
