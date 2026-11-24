@@ -194,6 +194,87 @@ analyzer failure also stops the rest of that candidate's run. An optional
 build configuration such as libFuzzer needs its own analysis invocation.
 [Hosted timing evidence](https://github.com/buster14a/buster-performance/tree/4087a9e563960f17e9e1fc2729f7904e12343270/docs/measurements/merge-queue-clang-analyzer-2026-11-18).
 
+## The compile's count before the merge
+
+No pull request or candidate reaches the 9700X, and hosted runners count no
+instructions, so a change's cost to the compile is counted another way before
+it merges (#2850). The compiler built with clang's `-fprofile-instr-generate`
+keeps a counter for each region of its own source; **the count** is their sum
+after one `-c` of the frozen `sqlite3.c` on one lane.
+
+**Count the compile against its base's** takes it on the vector row's plain
+shard 4, on pull requests and merge-queue candidates that change the compiler's
+sources, its build or the count's own files:
+
+- `tools/ci/compile-count.sh` builds the change and its first parent that
+  way, each from its own `print-sources` and Release flags at `-O0`. That
+  takes half a minute each, while shard 1 builds the row's product.
+- Each executable compiles the unit three times, with the corpus's headers
+  and predefines.
+- `tools/ci/compile-count.c` reads the raw profiles (format version 11, as
+  clang 23.1.4 writes it; another version is refused by its number) and
+  compares the two medians.
+
+The verdict:
+
+- A change may move the count by **half a percent**, above or below, without
+  saying so.
+- A change that means to move it further, a feature's cost or a cut's gain,
+  **states its move**: it replaces the line of `tools/ci/compile-count.txt`
+  with its own, the move in percent of its base's count and what moved it.
+  The failing step prints the line to write (`+7.25 what moved it`). The
+  change is then held to within half a percent of what it states.
+- A line a change leaves alone states nothing. It is the last move stated,
+  and no later change is held to it.
+- Runs of one executable more than 0.05% apart are no verdict (exit status
+  2), and neither are a build that fails, an executable that writes no
+  profile and a change whose statement file has no well-formed line. The
+  base's line is only compared as text: a base without the file, or with a
+  line that is no statement, holds no later change back.
+- The step is skipped where the change touches none of the compiler's
+  sources, its build, the count's own files, the toolchain's pin, the
+  corpus's fetch or the row's workflow.
+
+The base is counted on the same runner in the same step, so main's drift
+fails no change. A fixed baseline's does: the 9700X's instructions' baseline
+below had 0.11% left a day after it was set, and a branch run had crossed it.
+
+What the count is, measured at `ef3d4475f`
+([record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/compile-count-2850-2026-11-24)):
+
+- 315,170,858 for `sqlite3.c`, of which a one-function unit's 5,387,592 are
+  the process's start and the tables a real executable has baked. The step
+  prints both sides' one-function counts, so that a move of the start can be
+  told from a move of the unit's work.
+- Runs of one executable are within 0.0005% of each other: about one run in
+  five counts up to 1,500 fewer of 315 million.
+- An `-O0` and an `-O1` build count the same, since the counters are placed
+  before any optimization, and so do a `native` build and the explicit vector
+  target's.
+- At #3381's merge, the regression the check was asked for, it counts 7.25%
+  over its parent (the instructions rose 7.0%), and the one-function unit's
+  count doesn't move.
+
+What it doesn't see: the count is how many times each region runs, not what a
+region costs. A change that makes a region slower without running any region
+more or less often, a slower vector kernel's straight-line code, a larger
+clear, time in the C library or the kernel, moves no counter. The
+executable is also unbaked, so a table the real executable has baked counts
+at its start (the one-function unit's count shows it). The 9700X's step,
+"Hold sqlite3.c's compile to its instructions' baseline" below, and its
+timings stay what tell of those, after a merge.
+
+The step is advisory (`continue-on-error`) until its hosted runs have shown
+the specification's two other predictions: runs within 0.05% on the runners
+drawn, and the step under 12 minutes.
+
+```sh
+bash tests/ci/compile-count.sh                      # in the CI glue fixtures job: the reader, the verdicts, fake checkouts
+git worktree add --detach build/count-base origin/main
+bash tools/ci/fetch-corpus.sh build/corpus
+bash tools/ci/compile-count.sh check build/count-base . build/corpus build/compile-count
+```
+
 ## Sharing the 9700X
 
 Correctness CI runs on GitHub-hosted Ubuntu 26.04 with the official stable
@@ -350,7 +431,8 @@ there at a time, so everything takes one lock:
   count repeats to a thousandth on the 9700X, and a day of main's merges once
   moved it 15% unseen (11% of it one merge's regression). No pull request's or
   candidate's run reaches the 9700X, so the step tells after the merge, in the
-  nightly's runs:
+  nightly's runs ([the count before the merge](#the-compiles-count-before-the-merge)
+  is the hosted row's):
   - A change that means to move the count, a feature's cost or a cut's gain,
     states it: it writes the count the step prints into the file.
   - A count out of its band that no change meant is a regression. The
