@@ -25,7 +25,7 @@ static __attribute__((noinline, cold)) void check_input_gnu_designator(CheckInpu
     check_input_warning_once(reader, &event);
 }
 
-static bool check_input_initializer_prepare_slow(CheckInputReader* reader, uint32_t assignment)
+static bool check_input_initializer_prepare_slow(CheckInputReader* reader, uint32_t assignment, bool initialize)
 {
     const Parser* parser = reader->parser;
     const uint32_t declaration = reader->initializer_declarations[assignment];
@@ -147,7 +147,7 @@ static bool check_input_initializer_prepare_slow(CheckInputReader* reader, uint3
     // An array whose initializer is parenthesized may be a compound literal's (GNU's, check_input_initializer_finish).
     const bool parenthesized = parser->tokens.kinds[begin] == PARSE_KIND_L_PAREN && type_kind_is_array(type_kind(reader->types, type_strip_aligned(reader->types, type)));
     // (A variable whose type tags register its initializer's value, #1447, c_check_type_safety_input.c, finishes too.)
-    if (valid && (incomplete || parenthesized || check_const_eligible(reader->types, type) || check_input_auto_type(reader->types, type) ||
+    if (valid && initialize && (incomplete || parenthesized || check_const_eligible(reader->types, type) || check_input_auto_type(reader->types, type) ||
                   (BUSTER_CHECK_RARE(reader, declaration_flags, declaration) & BUSTER_CHECK_DECLARATION_DEDUCED) != 0 ||
                   (reader->type_tag_attributes && check_type_tags_pending(reader->output, declaration) != NULL)))
     {
@@ -170,11 +170,11 @@ static bool check_input_initializer_prepare_slow(CheckInputReader* reader, uint3
     return valid;
 }
 
-static bool check_input_initializer_prepare(CheckInputReader* reader, uint32_t assignment)
+static bool check_input_initializer_prepare(CheckInputReader* reader, uint32_t assignment, bool initialize)
 {
-    const bool compact = check_input_literal_table_prepare(reader, assignment);
-    const bool valid = compact || (!reader->output->resource && check_input_initializer_prepare_slow(reader, assignment));
-    if (valid)
+    const bool compact = initialize && check_input_literal_table_prepare(reader, assignment);
+    const bool valid = compact || (!reader->output->resource && check_input_initializer_prepare_slow(reader, assignment, initialize));
+    if (valid && initialize)
     {
         const uint32_t declaration = reader->initializer_declarations[assignment];
         check_input_noderef_set(reader->output, assignment, check_input_noderef_at(reader->output, declaration));

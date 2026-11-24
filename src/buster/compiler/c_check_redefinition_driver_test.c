@@ -63,11 +63,14 @@ static void check_test_driver_redefinitions(CheckTest* test, const char* clang, 
     };
     char path[PATH_MAX];
     snprintf(path, sizeof(path), "%s/redefinition.c", directory);
-    char const_redefinitions[] = "tests/driver/const-redefinitions.c";
-    for (uint32_t f = 0; f <= BUSTER_ARRAY_LENGTH(fixtures); f += 1)
+    static const char* const sources[] = {
+        "tests/driver/const-redefinitions.c",
+        "tests/driver/designated-redefinition.c",
+    };
+    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(fixtures) + BUSTER_ARRAY_LENGTH(sources); f += 1)
     {
         const bool embedded = f < BUSTER_ARRAY_LENGTH(fixtures);
-        char* source = embedded ? path : const_redefinitions;
+        char* source = embedded ? path : (char*)sources[f - BUSTER_ARRAY_LENGTH(fixtures)];
         const bool available = embedded ? parse_test_write(source, fixtures[f], strlen(fixtures[f])) : access(source, R_OK) == 0;
         char* reference[] = { (char*)clang, "-std=gnu23", "-fsyntax-only", "-fno-caret-diagnostics", source, NULL };
         char* expected = NULL;

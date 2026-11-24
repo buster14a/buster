@@ -7351,6 +7351,30 @@ static void check_input_constexpr_add(CheckInputReader* reader, CheckConstexprVa
     }
 }
 
+// Recovery keeps the rejected declaration visible. Give its uses the accepted constexpr definition's value.
+static void check_input_constexpr_redefinition(CheckInputReader* reader, uint32_t declaration, uint32_t definition)
+{
+    const CheckConstexprValue* original = check_input_constexpr_find(reader, definition);
+    if (original != NULL)
+    {
+        const TypeAnswer same = type_same_canonical(reader->types, reader->declared_types[declaration], reader->declared_types[definition]);
+        reader->output->resource |= same == TYPE_ANSWER_FULL;
+        if (same == TYPE_ANSWER_YES)
+        {
+            CheckConstexprValue* value = BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckConstexprValue, 1);
+            reader->output->resource |= value == NULL;
+            if (value != NULL)
+            {
+                value->declaration = declaration;
+                value->value = original->value;
+                check_input_constexpr_add(reader, value);
+                check_input_rare_claim(reader, &reader->declaration_flags[declaration]);
+                reader->declaration_flags[declaration] |= BUSTER_CHECK_DECLARATION_CONSTEXPR;
+            }
+        }
+    }
+}
+
 // A weak attribute's name and the declaration token it was applied at.
 typedef struct CheckInputWeakName CheckInputWeakName;
 struct CheckInputWeakName
@@ -13923,8 +13947,7 @@ static void check_input_bind_checked(CheckInputReader* reader, uint32_t token, u
                 dropped = recovered && !redefinition_alone && !function_redefinition;
                 if (recovered && redefinition_alone && check_input_invalid_redefinition_note(reader, token))
                 {
-                    // Keep the invalid declaration's binding and expression diagnostics without initializing the object again.
-                    check_input_invalid_initializer(reader, token, point);
+                    check_input_constexpr_redefinition(reader, token, definition - 1);
                 }
                 if (recovered && function_redefinition)
                 {
@@ -15141,12 +15164,21 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                 check_input_pragma_report(reader);
                 break;
             }
-            check_input_initializer_prepare(reader, i);
-            const CheckInputLiteralTable* table = reader->output->literal_tables_last;
-            if (table != NULL && table->declaration == declaration)
+            const bool rejected = reader->invalid_redefinition_count != 0 && check_input_invalid_redefinition(reader, declaration);
+            check_input_initializer_prepare(reader, i, !rejected);
+            if (rejected)
             {
-                i = check_sparse_get(reader->output->initializer_ends, declaration) - 1;
-                continue;
+                // Designators and their operands are prepared even though the rejected object cannot be initialized again.
+                check_input_invalid_initializer(reader, declaration, i);
+            }
+            else
+            {
+                const CheckInputLiteralTable* table = reader->output->literal_tables_last;
+                if (table != NULL && table->declaration == declaration)
+                {
+                    i = check_sparse_get(reader->output->initializer_ends, declaration) - 1;
+                    continue;
+                }
             }
         }
         uint32_t implicit_first = BUSTER_CHECK_NONE;
@@ -15347,7 +15379,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                         check_input_noderef_set(reader->output, body_end, reader->declarator_noderef);
                         reader->initializer_declarations[body_end] = i;
                         reader->query_types[i] = type;
-                        check_input_initializer_prepare(reader, i);
+                        check_input_initializer_prepare(reader, i, true);
                         reader->ignored[close] = true;
                     }
                     else

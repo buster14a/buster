@@ -29,3 +29,13 @@ static const int bare = nonconstant;
 static const int direct __attribute__((unused)) (1);
 static const int direct __attribute__((unused)) (nonconstant, 2);
 _Static_assert(direct == 1);
+
+static constexpr int original = 1;
+static constexpr int original = 19;
+constexpr int dependent = original;
+_Static_assert(dependent == 1);
+
+static constexpr int mixed = 3;
+static const int mixed = 4;
+constexpr int mixed_dependent = mixed;
+_Static_assert(mixed_dependent == 3);
