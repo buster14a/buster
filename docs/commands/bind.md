@@ -23,14 +23,15 @@ requirements. [Command index](README.md).
   system without `libgcc_s.so.1`, a name that only the members which joined
   refer to and nothing defines is refused, naming the member
   (`BIND_ERROR_MEMBER_UNDEFINED`): `libgcc.a`'s split-stack `morestack.o`'s
-  unwinder. It has a vector path and an exact
-  one, its twin, which make the same link. `link_program.c`'s programs leave
-  room for it (`link_program_generate_begin`, `_atoms` and `_end`), and the C
-  driver's links take room for the crt objects and the members their names
-  may make join (`bind_capacity_needed`), rather than for every member
-  (`bind_capacity`). The driver binds with `bind_begin_borrowed`: a loaded
-  runtime's atoms keep their bytes in the snapshot's mapping instead of
-  copies, and the writer stages the chunks that hold them
+  unwinder. It has one path, the vector one: #2924 deleted its exact twin
+  (`BIND_PATH_EXACT`) once the vector path was at least as fast at every size.
+  `link_program.c`'s programs leave room for it (`link_program_generate_begin`,
+  `_atoms` and `_end`), and the C driver's links take room for the crt
+  objects and the members their names may make join (`bind_capacity_needed`),
+  rather than for every member (`bind_capacity`). The driver binds with
+  `bind_begin_borrowed`: a loaded runtime's atoms keep their bytes in the
+  snapshot's mapping instead of copies, and the writer stages the chunks that
+  hold them
   (`ExecutableOptions.borrowed`), so that the mapping is only read (#2546).
   It binds against the static runtime too (step 6's second part): the
   archives' members the link needs, found as GNU ld's group finds them, joined
@@ -47,9 +48,8 @@ requirements. [Command index](README.md).
 
 `./build/compiler test-bind [--seed N] [--cross-check] [--keep]` (about
 0.11 s on the 9700X, and 1.35 s with `--cross-check`) checks `bind.c` against
-this system's runtime (`runtime_import`). Every check binds by both paths,
-which must make the same link, column by column, and the same imports,
-exports and members:
+this system's runtime (`runtime_import`). Each check binds and checks the link,
+its imports, exports and members by the test's own rules:
 
 - programs: test-link's two sets that call libc, each generated with room for
   the runtime, Scrt1.o, crti.o and crtbeginS.o joined after the program's
@@ -73,7 +73,9 @@ exports and members:
   reports: a strong definition of `_start` (a duplicate); one of `data_start`,
   which Scrt1.o defines weakly (the program's wins), and a weak one and a weak
   absolute one (Scrt1.o's wins, first in link order, at `__data_start`'s place
-  over the absolute one); weak definitions of `_init`, with their atoms
+  over the absolute one); a strong absolute definition of a name nothing
+  else defines (it keeps its source and value); weak definitions of `_init`,
+  with their atoms
   before and after `bind_begin` (crti.o's strong one takes the symbol, with
   its atom in `.init` and its visibility); a reference to
   `__dso_handle` (defined by crtbeginS.o's atom, hidden); strong and weak
@@ -146,7 +148,7 @@ exports and members:
   floating point's thread-local flags), which mustn't be taken for weak
   references left to nothing;
 - dirty arenas (#490's review): the programs above and the atexit and libgcc
-  programs, bound once more by each path over binding's arena dirtied first
+  programs, bound once more over binding's arena dirtied first
   (`bind_test_dirty_arena`: filled with 0xa5 as far as the clean binding
   pushed and as far again, then popped), must give the clean binding's link
   and binding, and keep the pattern in an entry of `Bind.symbols` of a piece
@@ -177,8 +179,7 @@ exports and members:
   with GNU ld and with lld, must link, or fail to, as binding did, and run
   with the case's status (0), and so must its bound link.
 
-Then the same against the static runtime (`runtime_import_static`), by both
-paths, which must make the same link and join the same members:
+Then the same against the static runtime (`runtime_import_static`):
 
 - static programs: test-link's two sets that call libc. The members that
   join must be those GNU ld's archive scan loads, and no others: an oracle of
@@ -203,8 +204,8 @@ paths, which must make the same link and join the same members:
   in link order, takes its place, at `__data_start`'s, as GNU ld and lld
   bind it); a reference to a name a member defines absolutely; and weak
   definitions of 4 and of 24 names the members refer to (none thread-local),
-  which the vector path's closure compares with, or past 16 leaves to the
-  exact path's;
+  which the closure compares with, or past 16 leaves to its queue
+  (`bind_closure_queue`);
 - with `--cross-check`: each static program's own objects linked by
   `cc -static` with GNU ld (its `--trace` given twice) and with lld
   (`--why-extract`), which must load the members that joined and no others,
@@ -215,8 +216,7 @@ paths, which must make the same link and join the same members:
 
 Then the static programs, the static rules, and with `--cross-check` the C
 programs (compiled with `-fPIE`), against the static PIE's runtime
-(`runtime_import_static_pie`), by both paths, which must make the same link
-and join the same members, checked as against the static runtime: the
+(`runtime_import_static_pie`), checked as against the static runtime: the
 members the oracle's scan loads, among them `libc.a`'s
 `dl-reloc-static-pie.o`, which `rcrt1.o` makes join by not defining
 `_dl_relocate_static_pie`; that name the member's, its `_DYNAMIC` the
@@ -228,8 +228,7 @@ linked by `cc -static-pie` with GNU ld (`--trace` twice) and with lld
 (`--why-extract`), which must load the same members and run as the model
 predicts, or with the program's status.
 
-Then against a shared library's runtime (`runtime_import_shared`), by both
-paths, which must make the same link and binding:
+Then against a shared library's runtime (`runtime_import_shared`):
 
 - shared programs: test-link's two sets that call libc, bound as libraries:
   `link_check`; no `_start`, as there is no start object; `_init`, `_fini` and
@@ -256,7 +255,7 @@ paths, which must make the same link and binding:
 - with `--cross-check`, split-stack code (`bind_test_split_stack`): C
   compiled with `-fsplit-stack` (and `-fcf-protection=none`, whose `endbr64`
   keeps lld from adjusting a split-stack prologue) as a library and as a
-  PIE, which binding binds by both paths alike, `morestack.o` joined and its
+  PIE, which binding binds, `morestack.o` joined and its
   `_Unwind_Resume` a strong import of `libgcc_s.so.1`'s; the bound links'
   objects linked by ld.lld and ld.bfd with `libgcc_s.so.1` as needed run,
   the library in a harness that doesn't need `libgcc_s.so.1` (`dlopen` with
@@ -276,7 +275,7 @@ removed at the end unless `--keep`. The 9700X job's test step runs it with
 `./build/compiler benchmark-bind [--functions LIST] [--seed N]` binds
 generated programs that call libc, of 1, 64, 2,000 and 102,400 workers by
 default (`--functions` takes a list), 200 workers per unit as synth's
-translation units have, by each path, against the dynamic PIE's runtime, a
+translation units have, against the dynamic PIE's runtime, a
 static executable's, a static PIE's and a shared library's, and against the
 dynamic PIE's with libm on the line as `-lm` puts it there, which these
 programs don't need (each name looked up in libm's and libmvec's exports too),
@@ -285,8 +284,8 @@ cycles, instructions, IPC) of libm's import (`runtime_libraries_import`), the
 match (the program's global symbols looked
 up in the runtime's names, per global symbol), `bind_begin`, the static
 runtimes' closure (the members the link needs, per member) and `bind_end`,
-each run on the same link put back as it was. The paths must make the same
-links. Run it under the 9700X's lock with `taskset -c 2`; the design's "Step
+each run on the same link put back as it was. Run it under the 9700X's lock
+with `taskset -c 2`; the design's "Step
 5's phases, data-parallel", "Static links, as built" and "Libraries named with
 `-l`" have the numbers. The
 default 9700X job runs it after the tests, pinned to one allowed CPU;

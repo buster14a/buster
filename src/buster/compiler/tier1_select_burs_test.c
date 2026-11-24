@@ -31,6 +31,8 @@ struct Tier1BursCheck
     uint64_t fallbacks;
     // Integer comparisons classed as a truth value's link.
     uint64_t links;
+    // Addresses and frame objects' addresses whose class was checked against its definition.
+    uint64_t addresses;
 };
 
 // The plan's prerequisites, built here apart from it: each node's block, uses, last user, barriers, canonical answer and
@@ -114,6 +116,20 @@ static bool tier1_burs_test_equation(uint32_t count, const uint32_t* classes, co
     return states[node] == state && rules[node] == tier1_burs_state_rules[states[node] * TIER1_BURS_NONTERMINALS + tier1_burs_goal[op]];
 }
 
+// The definition of an address's displacement fitting a disp32 (its constant index scaled, plus its offset, in exact
+// arithmetic): the condition of its lea's candidate (tier1_select_candidates). An address past it has no candidate, and
+// its class is the REG leaf's; tier1_burs_classify_vector's limbs must agree with it.
+static bool tier1_burs_displacement(const IrFunction* function, uint32_t node)
+{
+    const IrAddress operand = function->addresses[function->c[node]];
+    const uint32_t b = function->b[node];
+    uint64_t constant = 0;
+    const bool constant_index = b != BUSTER_IR_NONE && tier1_select_constant(function, b, &constant);
+    int64_t displacement = 0;
+    return !__builtin_mul_overflow((int64_t)(constant_index ? constant : 0), (int64_t)operand.scale, &displacement) && !__builtin_add_overflow(displacement, operand.offset, &displacement) &&
+           displacement == (int64_t)(int32_t)displacement;
+}
+
 // Checks `function` (verified, with dominance) into `check`: its children, states and rules against their definitions,
 // and the candidates of the grammar's classes.
 static void tier1_burs_check_function(Tier1BursCheck* check, const IrFunction* function, const IrDominance* dominance, Arena* scratch)
@@ -187,6 +203,23 @@ static void tier1_burs_check_function(Tier1BursCheck* check, const IrFunction* f
                     columns[0][node], a, b, columns[2][node], columns[3][node]);
         }
         check->mismatches += !same;
+        // An address's class by its displacement's definition (tier1_burs_displacement), and a frame object's address's by
+        // its slot's (tier1_select_stack_object), which the vector classifier computes from gathers (#3450).
+        const uint32_t op = function->op[node];
+        if (op == IR_ADDRESS || op == IR_STACK_ADDR)
+        {
+            const uint32_t b_child = function->b[node];
+            const uint32_t expected = op == IR_STACK_ADDR ? (tier1_select_stack_object(function, function->a[node]) ? (blocks[node] == 0 ? TIER1_BURS_OP_SLOT_X : TIER1_BURS_OP_SLOT) : TIER1_BURS_OP_REG) :
+                                      !tier1_burs_displacement(function, node) ? TIER1_BURS_OP_REG :
+                                      b_child == BUSTER_IR_NONE ? TIER1_BURS_OP_ADDR_NOIDX :
+                                      b_child < count && function->op[b_child] == IR_CONST ? TIER1_BURS_OP_ADDR_CIDX : TIER1_BURS_OP_ADDR_IDX;
+            if (columns[0][node] != expected && check->mismatches < 8)
+            {
+                fprintf(stderr, "  burs node %u (%s) has class %u, its definition's %u\n", node, ir_op_names[op], columns[0][node], expected);
+            }
+            check->mismatches += columns[0][node] != expected;
+            check->addresses += 1;
+        }
         // An integer comparison's class is the link's exactly where it is one (tier1_select_truth): eq or ne of the zero
         // extension two nodes before it, of the I1 right before that, and of a zero right before it that it alone uses,
         // in its block.
@@ -401,12 +434,15 @@ static void tier1_select_test_burs_fixtures(Tier1SelectTest* test)
 }
 
 // Addresses around a disp32's edges (tier1_burs_displacement): constant indices and offsets inside and past 32 bits, at
-// every scale, among them pairs past it whose sum fits, which the vector classifier leaves to the scalar one; an index
+// every scale, among them pairs past it whose sum fits, which the vector classifier decides by exact 64-bit arithmetic; an index
 // that isn't a constant and none, with offsets on both sides of the edge. The definitions must hold, every address of a covered
 // class must have its candidate, and both classes must occur.
 static void tier1_select_test_burs_addresses(Tier1SelectTest* test)
 {
-    static const int64_t values[] = { 0, 1, -1, 7, INT32_MAX, INT32_MIN, (int64_t)INT32_MAX + 1, (int64_t)INT32_MIN - 1, INT64_C(1) << 28, -(INT64_C(1) << 28), INT64_C(1) << 40, -(INT64_C(1) << 40), INT64_MAX, INT64_MIN };
+    // Past 2^60 every scale's product meets 64 bits' edge: exactly 2^63 overflows, exactly -2^63 doesn't.
+    static const int64_t values[] = { 0, 1, -1, 7, INT32_MAX, INT32_MIN, (int64_t)INT32_MAX + 1, (int64_t)INT32_MIN - 1, INT64_C(1) << 28, -(INT64_C(1) << 28), INT64_C(1) << 40, -(INT64_C(1) << 40),
+                                      INT64_C(1) << 60, -(INT64_C(1) << 60), -(INT64_C(1) << 60) - 1, INT64_C(1) << 61, -(INT64_C(1) << 61), -(INT64_C(1) << 61) - 1, INT64_C(1) << 62, -(INT64_C(1) << 62),
+                                      -(INT64_C(1) << 62) - 1, INT64_MAX, INT64_MIN };
     static const int64_t offsets[] = { 0, 16, -16, INT32_MAX, INT32_MIN, (int64_t)INT32_MAX + 1, (int64_t)INT32_MIN - 1, -(INT64_C(1) << 40), INT64_C(1) << 40, -(INT64_C(1) << 31) + 8, INT64_MAX, INT64_MIN };
     static const uint32_t scales[] = { 1, 2, 4, 8 };
     const uint32_t value_count = BUSTER_ARRAY_LENGTH(values);
@@ -469,6 +505,108 @@ static void tier1_select_test_burs_addresses(Tier1SelectTest* test)
     arena_release(&text);
 }
 
+// Frame objects' addresses at every lane of the classifier's 16, in the entry block and another: slots of each kind
+// tier1_select_stack_object tells apart (an object, the variadic overflow area, a size past the planner's bound, an
+// alignment past it), so that each class (SLOT_X, SLOT, REG) occurs; the per-function check compares each with the
+// definition.
+// `slot_count` slots (at least 4): the classifier looks the first 64 up in a register and gathers past them.
+static void tier1_select_test_burs_slots(Tier1SelectTest* test, uint32_t slot_count)
+{
+    Arena text = arena_reserve(UINT64_C(1) << 20);
+    Arena input = arena_reserve(UINT64_C(1) << 24);
+    Arena scratch = arena_reserve(UINT64_C(1) << 26);
+    const uint64_t room = UINT64_C(1) << 16;
+    char* source = text.base != 0 ? arena_push_array(&text, room, 1, 1) : 0;
+    uint64_t length = 0;
+    bool valid = source != 0 && input.base != 0 && scratch.base != 0;
+    if (valid)
+    {
+        // A variadic definition (tests/ir/aggregates.ir's variadic line), whose one overflow area is slot 0; the slots
+        // after it an object, a size past the bound and an alignment past it in turn; the last two at the bounds.
+        length += (uint64_t)snprintf(source + length, room - length,
+                                     "function (ptr, i64) -> ptr {\n  variadic call(8,4,2,0,ret(1,0,8,0,2,255,255))\n  slot $0 size=0 align=16 type=void flags=0x11\n");
+        for (uint32_t k = 1; k + 2 < slot_count; k += 1)
+        {
+            const uint32_t kind = k % 3;
+            length += (uint64_t)snprintf(source + length, room - length, "  slot $%u size=%" PRIu64 " align=%u type=void flags=0x01\n", k,
+                                         kind == 1 ? BUSTER_TIER1_SELECT_MAX_OBJECT_BYTES + 8 : (uint64_t)16, kind == 2 ? BUSTER_TIER1_SELECT_MAX_OBJECT_ALIGNMENT * 2u : 8u);
+        }
+        // The bounds themselves, which are objects: exactly the largest size and exactly the largest alignment.
+        length += (uint64_t)snprintf(source + length, room - length, "  slot $%u size=%" PRIu64 " align=8 type=void flags=0x01\n  slot $%u size=16 align=%u type=void flags=0x01\n",
+                                     slot_count - 2, BUSTER_TIER1_SELECT_MAX_OBJECT_BYTES, slot_count - 1, BUSTER_TIER1_SELECT_MAX_OBJECT_ALIGNMENT);
+        length += (uint64_t)snprintf(source + length, room - length, "b0:\n  %%0 = param.ptr 0\n  %%1 = param.i64 1\n");
+        for (uint32_t k = 0; k < slot_count; k += 1)
+        {
+            length += (uint64_t)snprintf(source + length, room - length, "  %%%u = stack_addr.ptr $%u\n", k + 2, k);
+        }
+        length += (uint64_t)snprintf(source + length, room - length, "  %%%u = br.void b1\nb1:\n", slot_count + 2);
+        for (uint32_t k = 0; k < slot_count; k += 1)
+        {
+            length += (uint64_t)snprintf(source + length, room - length, "  %%%u = stack_addr.ptr $%u\n", k + slot_count + 3, k);
+        }
+        length += (uint64_t)snprintf(source + length, room - length, "  %%%u = ret.void %%0\n}\n", 2 * slot_count + 3);
+        valid = length < room;
+    }
+    IrFunction function = { 0 };
+    valid = valid && ir_parse((String8){ .pointer = source, .length = length }, &input, &scratch, &function).error == IR_PARSE_OK && ir_verify(&function, &scratch, 0).error == IR_OK;
+    tier1_select_test_expect(test, valid, "the frame objects' fixture parses and verifies");
+    Tier1BursCheck check = { 0 };
+    uint32_t objects = 0;
+    uint32_t others = 0;
+    if (valid)
+    {
+        tier1_burs_check_function(&check, &function, 0, &scratch);
+        for (uint32_t node = 0; node < function.instruction_count; node += 1)
+        {
+            objects += function.op[node] == IR_STACK_ADDR && tier1_select_stack_object(&function, function.a[node]);
+            others += function.op[node] == IR_STACK_ADDR && !tier1_select_stack_object(&function, function.a[node]);
+        }
+    }
+    // Objects: every third of slots 1 to slot_count - 3, and the two at the bounds; in both blocks.
+    const uint32_t object_slots = (slot_count - 3) / 3 + 2;
+    tier1_select_test_expect(test, check.functions == 1 && check.mismatches == 0 && check.addresses == 2 * slot_count && objects == 2 * object_slots && others == 2 * (slot_count - object_slots),
+                             "frame objects' addresses: every class its slot's definition's, in both blocks, below 64 slots and past them");
+    arena_release(&scratch);
+    arena_release(&input);
+    arena_release(&text);
+}
+
+// The exact edges, with their classes written out (#3493's review): a constant times 8 that is exactly 2^63 (overflows:
+// REG) and one just past -2^63 (REG), and frame objects of exactly the largest size and alignment (SLOT_X).
+static void tier1_select_test_burs_edges(Tier1SelectTest* test)
+{
+    static const char source[] = "function (ptr, i64) -> i64 {\n"
+                                 "  slot $0 size=268435456 align=8 type=void flags=0x01\n"
+                                 "  slot $1 size=16 align=1073741824 type=void flags=0x01\n"
+                                 "b0:\n"
+                                 "  %0 = param.ptr 0\n"
+                                 "  %1 = param.i64 1\n"
+                                 "  %2 = const.i64 0x00000000000000001000000000000000\n"
+                                 "  %3 = const.i64 0x0000000000000000efffffffffffffff\n"
+                                 "  %4 = address.ptr %0 + %2 * 8 offset=9223372036854775807\n"
+                                 "  %5 = address.ptr %0 + %3 * 8 offset=-9223372036854775808\n"
+                                 "  %6 = stack_addr.ptr $0\n"
+                                 "  %7 = stack_addr.ptr $1\n"
+                                 "  %8 = ret.void %1\n"
+                                 "}\n";
+    _Static_assert(BUSTER_TIER1_SELECT_MAX_OBJECT_BYTES == 268435456 && BUSTER_TIER1_SELECT_MAX_OBJECT_ALIGNMENT == 1073741824, "the edges' fixture names the planner's bounds");
+    Arena input = arena_reserve(UINT64_C(1) << 24);
+    Arena scratch = arena_reserve(UINT64_C(1) << 26);
+    IrFunction function = { 0 };
+    bool valid = input.base != 0 && scratch.base != 0 && ir_parse((String8){ .pointer = (char*)source, .length = sizeof(source) - 1 }, &input, &scratch, &function).error == IR_PARSE_OK &&
+                 ir_verify(&function, &scratch, 0).error == IR_OK;
+    tier1_select_test_expect(test, valid, "the edges' fixture parses and verifies");
+    Tier1BursCheck check = { 0 };
+    if (valid)
+    {
+        tier1_burs_check_function(&check, &function, 0, &scratch);
+        valid = !tier1_burs_displacement(&function, 4) && !tier1_burs_displacement(&function, 5) && tier1_select_stack_object(&function, 0) && tier1_select_stack_object(&function, 1);
+    }
+    tier1_select_test_expect(test, valid && check.mismatches == 0 && check.addresses == 4, "a product of exactly 2^63, one past -2^63, and the planner's exact bounds: their definitions' classes");
+    arena_release(&scratch);
+    arena_release(&input);
+}
+
 // Truth values' links at every lane of the classifier's 16: 32 chains of five nodes, (a < b) zero-extended, compared
 // eq or ne with a zero (a one in the last 16, which are no links), then an xor of the two comparisons. A chain's link
 // sits at node 5k + 5, so the first 16 put one in each lane. Exactly those 16 must be classed links.
@@ -514,6 +652,12 @@ static void tier1_select_test_burs(Tier1SelectTest* test)
     tier1_select_test_burs_tables(test);
     tier1_select_test_burs_fixtures(test);
     tier1_select_test_burs_addresses(test);
+    static const uint32_t slot_counts[] = { 23, 32, 33, 63, 64, 65, 100 };
+    for (uint32_t s = 0; s < sizeof(slot_counts) / sizeof(slot_counts[0]); s += 1)
+    {
+        tier1_select_test_burs_slots(test, slot_counts[s]);
+    }
+    tier1_select_test_burs_edges(test);
     tier1_select_test_burs_links(test);
 }
 #endif
