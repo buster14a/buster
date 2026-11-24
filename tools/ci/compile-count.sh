@@ -4,8 +4,8 @@
 # The compile's count of a change against its base's (#2850; docs/commands/ci.md, "The compile's count before the
 # merge"): each checkout's compiler built with clang's -fprofile-instr-generate, the frozen sqlite3.c compiled with
 # each, and tools/ci/compile-count.c's verdict on the two raw profiles' counts. Hosted runners count no instructions,
-# and no pull request reaches the 9700X; this count needs neither, and it is the same on any runner to a few parts in a
-# million, so that a change is held to its own base on the runner it drew.
+# and no pull request reaches the 9700X; this count needs neither. One executable's runs are within a few parts in a
+# million of each other on a runner, and a change is held to its own base's count on the runner it drew.
 #
 #   compile-count.sh check BASE HEAD CORPUS WORK
 #       BASE and HEAD are checkouts of the change's base and of the change, CORPUS the frozen corpus
