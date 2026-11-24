@@ -13529,8 +13529,17 @@ static void check_input_implicit_late_attributes(CheckInputReader* reader, uint3
 // Remove both the initializer action and its metadata; leaving either would make a later diagnostic view revive it.
 static void check_input_invalid_initializer(CheckInputReader* reader, uint32_t token, uint32_t point)
 {
-    if (point < reader->parser->tokens.count && reader->initializer_declarations[point] == token)
+    const Parser* parser = reader->parser;
+    if (point < parser->tokens.count && reader->initializer_declarations[point] == token)
     {
+        // A direct initializer's closing parenthesis owns its conversion and reads the opening from the metadata.
+        const uint32_t close = parser->tree.roles[point] == PARSE_ROLE_OPEN_GROUP ? parser->tree.parents[point] : BUSTER_CHECK_NONE;
+        if (close < parser->tokens.count && reader->initializer_declarations[close] == token)
+        {
+            reader->initializers[close] = 0;
+            reader->initializer_declarations[close] = BUSTER_CHECK_NONE;
+            reader->ignored[close] = true;
+        }
         reader->initializers[point] = 0;
         reader->initializer_declarations[point] = BUSTER_CHECK_NONE;
         reader->query_types[point] = 0;

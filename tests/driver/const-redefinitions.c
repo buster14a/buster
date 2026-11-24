@@ -25,3 +25,7 @@ _Static_assert(array[0] == 1);
 int nonconstant;
 static const int bare = 1;
 static const int bare = nonconstant;
+
+static const int direct __attribute__((unused)) (1);
+static const int direct __attribute__((unused)) (nonconstant, 2);
+_Static_assert(direct == 1);
