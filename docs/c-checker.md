@@ -37,19 +37,26 @@ Preprocessing, `check` without `-c`, and `-fsyntax-only` retain predefine modeli
 observed in a non-emitting action is not a promise that Buster can generate the
 corresponding instrumentation or parallel runtime calls.
 
-The driver gives Clang's common default and `-Wall`/`-Wextra` warnings for
-constant conversions and bounds, shifts and division, parenthesization, unused
-results and names, format calls, returned stack addresses, uninitialized reads
-and enum switches, with Clang's messages, places, notes and
-`#pragma clang diagnostic` policy; `-Werror` and its `=group` and
-`-Wno-error=` forms promote them. The remaining gaps are the full
-`-Wuninitialized` dataflow, the `scanf`/`strftime` `format` archetypes,
-computed `case` expressions in `-Wswitch`, and several rarer
-`-Wparentheses`/`-Wreturn-stack-address` shapes,
-so Clang remains a separate diagnostic check for source that relies on those. The implemented families,
-their boundaries and their differential tests are described in "Common
-warnings (#823)" below; the remaining work stays tracked in
-[#823](https://github.com/buster14a/buster/issues/823).
+The driver checks common default and `-Wall`/`-Wextra` warnings for conversions,
+bounds, shifts, parenthesization, unused results and names, format calls,
+returned stack addresses, uninitialized reads and enum switches. Warning
+groups, `-Werror` promotion and source diagnostic pragmas apply to these checks.
+
+The [#1394](https://github.com/buster14a/buster/issues/1394) cases include
+discarding a GNU `warn_unused_result` or C23 `nodiscard` return value, passing a
+null constant to a parameter with a visible `nonnull` contract, copying a
+known byte count or literal string past the destination, and using the
+pointer itself as the operand of `sizeof` in a memory call. The checker also
+diagnoses the reported self, pointer and string comparisons, a function in a
+truth condition, an extra pair of parentheses around an equality condition,
+a logical negation on the left of bitwise AND, a boolean switch, and `sizeof`
+on an adjusted array parameter. Plain `char` subscripts and unused labels
+warn under `-Wall`. Fortify warnings require a provable destination extent.
+
+“Common warnings (#823)” below describes individual checks and their
+differential tests. Remaining coverage gaps include full `-Wuninitialized`
+dataflow, `scanf`/`strftime` format checking, computed `case` expressions in
+`-Wswitch`, and some `-Wparentheses` and `-Wreturn-stack-address` cases.
 
 `-c` and the direct path lower only the definitions that the unit's roots reach,
 as clang does ([#129](https://github.com/buster14a/buster/issues/129),
@@ -10848,10 +10855,8 @@ arguments against the function. The checker now gives these as clang does.
     (`check_input_generic_undeclared`). Refused by name is an index of 0, on
     which clang 23 crashes. A definition's identifier list compares its parameters by
     their declarations' types, the promoted prototype's standing aside, as
-    clang's ParmVarDecl types do. It changes nothing else here: the
-    `-Wfortify-source` warnings clang gives the function's calls, as it gives
-    them a builtin's, the checker makes for no call (it has no
-    `-Wfortify-source`).
+    clang's ParmVarDecl types do. The attribute does not forward the named builtin’s `-Wfortify-source` checks
+    to calls of the annotated function.
 
   clang's NEON vectors (#1447), `neon_vector_type(N)` and
   `neon_polyvector_type(N)`, are vectors on x86-64 too: GNU vectors of a kind
@@ -11648,8 +11653,8 @@ arguments against the function. The checker now gives these as clang does.
     declarator alone, and a TCB function's call clang declares implicitly
     with an error (C99 and later) has no `-Wtcb-enforcement` warning after
     it.
-    `diagnose_as_builtin`'s calls have no `-Wfortify-source` warnings, as no
-    call has.
+    Calls through `diagnose_as_builtin` still lack the annotated builtin’s
+    `-Wfortify-source` checks.
   - A bare tag declaration's C23 lists after its name (#1447,
     `check_input_tag_attributes`): a struct's or a union's, right after the
     name, are clang's parser's "an attribute list cannot appear here" at the

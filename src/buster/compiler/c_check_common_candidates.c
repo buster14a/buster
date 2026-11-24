@@ -29,7 +29,7 @@ struct CheckCommonCandidates
 
 // The operators whose own reach can have a bit; comparisons have their own class so that -Wsign-compare and the
 // out-of-range comparison batches can select them separately. DISCARD covers both CAST and COMMA, whose first operand
-// may have an unused value. CALL includes the explicit library builtins' source-call receipts (BUILTIN_X86).
+// may have an unused value. CALL includes the explicit library builtins' source-call receipts (BUILTIN_X86 and BUILTIN_MISC).
 static const uint8_t check_common_candidate_classes[128] =
 {
     [CHECK_OP_NOT] = 1u << CHECK_COMMON_CANDIDATE_REACH,
@@ -64,6 +64,7 @@ static const uint8_t check_common_candidate_classes[128] =
     [CHECK_OP_SHIFT_RIGHT_ASSIGN] = (1u << CHECK_COMMON_CANDIDATE_REACH) | (1u << CHECK_COMMON_CANDIDATE_SHIFT),
     [CHECK_OP_SELECT] = 1u << CHECK_COMMON_CANDIDATE_SELECT,
     [CHECK_OP_BUILTIN_X86] = 1u << CHECK_COMMON_CANDIDATE_CALL,
+    [CHECK_OP_BUILTIN_MISC] = 1u << CHECK_COMMON_CANDIDATE_CALL,
 };
 _Static_assert(CHECK_OP_COUNT <= BUSTER_ARRAY_LENGTH(check_common_candidate_classes), "the candidate classes fit two byte-permute tables");
 _Static_assert(CHECK_COMMON_CANDIDATE_COUNT == 8, "one byte holds the common-warning candidate classes");

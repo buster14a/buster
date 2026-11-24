@@ -214,6 +214,23 @@ static const char node_census_test_quiet[] =
 #define BUSTER_NODE_CENSUS_TEST_SEVENTY(name)                                                                                                                                 \
     BUSTER_NODE_CENSUS_TEST_TEN(name) " + " BUSTER_NODE_CENSUS_TEST_TEN(name) " + " BUSTER_NODE_CENSUS_TEST_TEN(name) " + " BUSTER_NODE_CENSUS_TEST_TEN(name) " + "             \
     BUSTER_NODE_CENSUS_TEST_TEN(name) " + " BUSTER_NODE_CENSUS_TEST_TEN(name) " + " BUSTER_NODE_CENSUS_TEST_TEN(name)
+static const char node_census_test_common_expressions[] =
+    "int global;\n"
+    "int fun(int);\n"
+    "int expressions(int x, int y, int* p, int a[5], char c) {\n"
+    "    int z = 0;\n"
+    "    z = x < x; // refuse: unmodeled-warning\n"
+    "    z = x < y; // take\n"
+    "    z = &global == 0; // refuse: unmodeled-warning\n"
+    "    z = p == 0; // take\n"
+    "    if (fun) z++; // refuse: unmodeled-warning\n"
+    "    if ((x == y)) z++; // refuse: unmodeled-warning\n"
+    "    z = a[c]; // refuse: unmodeled-warning\n"
+    "    z = sizeof(a); // refuse: warning-event\n"
+    "    z = sizeof(p); // take\n"
+    "    return z;\n"
+    "}\n";
+
 static const char node_census_test_defaults[] =
     "enum A { A0, A1 };\n"
     "enum B { B0, B1 };\n"
@@ -5777,6 +5794,7 @@ static bool node_facts_test_operators(const char* directory, uint32_t mode, uint
     NodeCensus census = { .shadow = &shadow };
     fflush(stdout);
     valid = valid && node_census_file(&census, path, options, option_count) && census.files == 1 && census.failures == 0;
+    // The warning tests retain q == q, q < q and the array's truth conversion in if (ga) on the graph path.
     // Each operator's records, those the kernel made, and of them those a class's loop made (the rest by a rule).
     static const struct
     {
@@ -5795,11 +5813,11 @@ static bool node_facts_test_operators(const char* directory, uint32_t mode, uint
         { CHECK_OP_REMAINDER, 1, 1, 1 },
         { CHECK_OP_SHIFT_LEFT, 2, 2, 1 },
         { CHECK_OP_SHIFT_RIGHT, 1, 1, 1 },
-        { CHECK_OP_LESS, 2, 1, 1 },
+        { CHECK_OP_LESS, 1, 1, 1 },
         { CHECK_OP_LESS_EQUAL, 1, 1, 1 },
         { CHECK_OP_GREATER, 1, 1, 1 },
         { CHECK_OP_GREATER_EQUAL, 1, 1, 1 },
-        { CHECK_OP_EQUAL, 4, 3, 1 },
+        { CHECK_OP_EQUAL, 3, 3, 1 },
         { CHECK_OP_NOT_EQUAL, 2, 2, 1 },
         { CHECK_OP_BIT_AND, 2, 2, 1 },
         { CHECK_OP_BIT_OR, 2, 2, 1 },
@@ -5809,12 +5827,12 @@ static bool node_facts_test_operators(const char* directory, uint32_t mode, uint
         { CHECK_OP_CONDITIONAL, 6, 5, 0 },
         { CHECK_OP_CAST, 12, 8, 8 },
         { CHECK_OP_ADDRESS, 7, 7, 7 },
-        { CHECK_OP_ASSIGN, 100, 97, 95 },
+        { CHECK_OP_ASSIGN, 98, 95, 93 },
         { CHECK_OP_COMMA, 1, 1, 0 },
         { CHECK_OP_SIZEOF, 3, 3, 0 },
         { CHECK_OP_ALIGNOF, 1, 1, 0 },
         { CHECK_OP_CONVERT, 1, 1, 1 },
-        { CHECK_OP_CONDITION, 6, 5, 4 },
+        { CHECK_OP_CONDITION, 5, 5, 4 },
         { CHECK_OP_PRE_INCREMENT, 1, 1, 1 },
         { CHECK_OP_PRE_DECREMENT, 2, 2, 2 },
         { CHECK_OP_POST_INCREMENT, 7, 7, 7 },
@@ -7116,6 +7134,9 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
                       "node-census refuses nothing for warnings that are off by default");
     check_test_expect(test, ready && node_census_test_fixture(directory, "atomic.c", node_census_test_atomic, quiet, BUSTER_ARRAY_LENGTH(quiet), &system),
                       "node-census refuses atomic record accesses by type without refusing ordinary members or the whole unit");
+    char* subscripts[] = { "-nostdinc", "-Wchar-subscripts" };
+    check_test_expect(test, ready && node_census_test_fixture(directory, "common.c", node_census_test_common_expressions, subscripts, BUSTER_ARRAY_LENGTH(subscripts), &system),
+                      "node-census retains common warnings and accepts their quiet counterparts");
     check_test_expect(test, ready && node_census_test_fixture(directory, "defaults.c", node_census_test_defaults, quiet, BUSTER_ARRAY_LENGTH(quiet), &system),
                       "node-census refuses what warns without an option, by its test, with the default warnings alone");
     CheckTestFixtures character_storage = { .storage = arena_reserve(UINT64_C(1) << 20) };
@@ -7429,6 +7450,12 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     check_test_expect(test, ready && node_tests_test_fixture(directory, "atomic.c", node_census_test_atomic, quiet, BUSTER_ARRAY_LENGTH(quiet),
                                                              BUSTER_NODE_FRONT_AFTER, 2, 0, windowed_atomic),
                       "node-tests: at reader time atomic record accesses are refused by type");
+    const NodeTestsWindowed windowed_common = {
+        .expressions = 11, .decided = 11, .quiet = 2, .values = 3, .spared = 10, .direct = 10, .apart = 2,
+    };
+    check_test_expect(test, ready && node_tests_test_fixture(directory, "common.c", node_census_test_common_expressions, subscripts, BUSTER_ARRAY_LENGTH(subscripts),
+                                                             BUSTER_NODE_FRONT_AFTER, 5, 1, windowed_common),
+                      "both reader paths retain common expression warnings");
     check_test_expect(test, ready && node_tests_test_fixture(directory, "defaults.c", node_census_test_defaults, quiet, BUSTER_ARRAY_LENGTH(quiet),
                                                              BUSTER_NODE_FRONT_AFTER, 198, 28, windowed_defaults),
                       "node-tests: at reader time the tests refuse what warns without an option, with the default warnings alone");

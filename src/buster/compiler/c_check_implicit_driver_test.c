@@ -1311,7 +1311,7 @@ static void check_test_driver_common_warnings(CheckTest* test, const char* clang
         { unused_chains, { "-Wall", NULL, NULL, NULL } },
         { unused_values, { "-Wall", NULL, NULL, NULL } },
         { statement_expressions, { "-Wall", NULL, NULL, NULL } },
-        // buster gives no -Wpointer-bool-conversion, which clang gives for `&x ? p : p`.
+        // Isolate the returned-address diagnostic from the pointer-bool warning in `&x ? p : p`.
         { return_stack, { "-Wall", "-Wno-pointer-bool-conversion", NULL, NULL } },
         { generic_selection, { "-Wall", NULL, NULL, NULL } },
         { kr_deprecated, { NULL, NULL, NULL, NULL } },

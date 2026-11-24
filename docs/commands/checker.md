@@ -91,7 +91,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   --attribute-recovery-only | --initializer-diagnostics-only | --malformed-calls-only | --string-plus-only | --assert-bool-only | --assert-diagnostics-only | --query-bool-only | --constant-logical-only | --unused-comparison-only |
   --float-precision-only |
   --record-extensions-only | --auto-qualifiers-only |
-  --run-modes-only] [--in-process] [--clang-server PATH]
+  --run-modes-only | --common-warnings-only] [--in-process] [--clang-server PATH]
   [--differential] [--carets | --carets-all]` and `test-checker-asm`
   check the driver and inline assembly against Clang (named UCNs too, #1447,
   `check_test_driver_named_ucns`; a generated unit of about 180,000 tokens as

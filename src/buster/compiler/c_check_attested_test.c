@@ -1182,6 +1182,7 @@ static const CheckAttestedField check_attested_reader_fields[] =
     { "parameter_seen", CHECK_ATTESTED_FIELD_NAME },
     { "parameter_previous", CHECK_ATTESTED_FIELD_OWN },
     { "parameter_shapes", CHECK_ATTESTED_FIELD_OWN },
+    { "parameter_arrays", CHECK_ATTESTED_FIELD_OWN },
     { "parameter_declarations", CHECK_ATTESTED_FIELD_OWN },
     { "parameter_declaration_next", CHECK_ATTESTED_FIELD_OWN },
     { "member_seen", CHECK_ATTESTED_FIELD_NAME },
