@@ -1270,7 +1270,6 @@ static __attribute__((unused)) void main_backend_test_interfaces(void)
 // parsing the fixtures or emitting code; the executable unit still checks the real callers with unused warnings on.
 static __attribute__((unused)) void main_foreign_test_interfaces(void)
 {
-    (void)&inflate_adler32;
     (void)&foreign_unwind_dedup_section_offset;
 }
 #endif
