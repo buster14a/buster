@@ -115,6 +115,23 @@ static uint32_t x86_decode_simple[2 * 256 * 32];
 // relatives, 3DNow's operation byte) are bits 4-7 (8-11 with 66, 12-15 with W); the other digits' are bits 0-3.
 static uint32_t x86_decode_tails[BUSTER_X86_DECODE_BUCKETS];
 static uint32_t x86_decode_tails_unknown;
+// Every bucket's index over its forms' compact keys (x86_decode_compact): the bits all its signatures share, the
+// varying bits a cell's number packs (PEXT), and its cells' first entry. A cell holds 0 for no form, a row, or
+// BUSTER_X86_DECODE_LIST | n for the candidates at x86_decode_lists[n], in catalogue order, ended by 0.
+typedef struct X86DecodeLaneIndex X86DecodeLaneIndex;
+struct X86DecodeLaneIndex
+{
+    uint32_t common_mask;
+    uint32_t common_key;
+    uint32_t varying;
+    uint32_t first;
+};
+#define BUSTER_X86_DECODE_LIST 0x8000u
+static X86DecodeLaneIndex x86_decode_lane_indices[BUSTER_X86_DECODE_BUCKETS];
+static uint16_t* x86_decode_cells;
+static uint16_t* x86_decode_lists;
+static uint32_t x86_decode_cell_count;
+static uint32_t x86_decode_list_count;
 // The length pass's tables, from x86_decode_tails (x86_decode_length_tables_initialize). A legacy opcode's byte in
 // maps 0 and 1: bits 0-3 its trailing bytes (15: no hint), bit 4 none but on digits 0 and 1, bit 5 four become eight
 // with REX.W, bit 6 four become two with 66, bit 7 a byte where ModRM sits. A vector opcode's byte in map 1: bits 0-1
@@ -194,6 +211,26 @@ static bool x86_decode_indices_initialize(void)
         x86_decode_index_count = total;
     }
     return valid;
+}
+
+// A signature key's (x86_decode_signature) compact form for the lane index: each of the first three prefix bytes as a
+// code (bits 0-8: none 0, 66 1, F2 2, F3 3, F0 4, 2E 5, 3E 6, 9B 7: the bytes forms' keys hold), W, L, b and pp (bits
+// 9-14), the byte where ModRM sits (bits 15-22) and the memory bit (23). A mask's prefix byte compacts to its code's
+// three bits. An input lane with any other prefix byte, or a fourth, matches no form, and is refused before.
+static uint32_t x86_decode_compact(uint64_t key, bool mask)
+{
+    uint32_t compact = 0;
+    for (uint32_t k = 0; k < 3; k += 1)
+    {
+        const uint32_t byte = (uint32_t)(key >> (8 * k)) & 0xff;
+        const uint32_t code = byte == 0 ? 0 : byte == 0x66 ? 1 : byte == 0xf2 ? 2 : byte == 0xf3 ? 3 : byte == 0xf0 ? 4 : byte == 0x2e ? 5 : byte == 0x3e ? 6 : 7;
+        // (Init checks every form's prefix bytes are among these: x86_decode_lane_indices_initialize.)
+        compact |= (mask ? (byte != 0 ? 7u : 0u) : code) << (3 * k);
+    }
+    compact |= (uint32_t)((key >> 32) & 63) << 9;
+    compact |= (uint32_t)((key >> 40) & 0xff) << 15;
+    compact |= (uint32_t)((key >> 56) & 1) << 23;
+    return compact;
 }
 
 static uint32_t x86_decode_bucket(uint32_t family, uint32_t map, uint32_t opcode)
@@ -621,6 +658,106 @@ static void x86_decode_simple_initialize(void)
     }
 }
 
+// The lane index (x86_decode_lane_indices) over every bucket's entries' compact keys. False where a form's prefix byte
+// has no code, a bucket varies in more than 16 bits, or an allocation fails.
+static bool x86_decode_lane_indices_initialize(void)
+{
+    bool valid = true;
+    uint32_t cells = 0;
+    for (uint32_t b = 0; b < BUSTER_X86_DECODE_BUCKETS; b += 1)
+    {
+        const X86DecodeBucket bucket = x86_decode_buckets[b];
+        X86DecodeLaneIndex* index = &x86_decode_lane_indices[b];
+        *index = (X86DecodeLaneIndex){ 0 };
+        if (bucket.count != 0)
+        {
+            uint32_t common = UINT32_MAX;
+            uint32_t all = 0;
+            uint32_t different = 0;
+            const uint32_t key = x86_decode_compact(x86_decode_keys[bucket.first], false);
+            for (uint32_t j = 0; j < bucket.count; j += 1)
+            {
+                const uint64_t raw = x86_decode_keys[bucket.first + j];
+                for (uint32_t k = 0; k < 4; k += 1)
+                {
+                    const uint32_t byte = (uint32_t)(raw >> (8 * k)) & 0xff;
+                    valid = valid && (k < 3 || byte == 0) && (byte == 0 || byte == 0x66 || byte == 0xf2 || byte == 0xf3 || byte == 0xf0 || byte == 0x2e || byte == 0x3e || byte == 0x9b);
+                }
+                const uint32_t mask = x86_decode_compact(x86_decode_masks[bucket.first + j], true);
+                common &= mask;
+                all |= mask;
+                different |= key ^ x86_decode_compact(raw, false);
+            }
+            common &= ~different;
+            index->common_mask = common;
+            index->common_key = key & common;
+            index->varying = all & ~common;
+            index->first = cells;
+            valid = valid && __builtin_popcount(index->varying) <= 16;
+            cells += valid ? 1u << __builtin_popcount(index->varying) : 0;
+        }
+    }
+    x86_decode_cells = valid ? malloc((uint64_t)cells * sizeof(*x86_decode_cells)) : 0;
+    // A list per ambiguous cell, its candidates and its end: at most a bucket's entries and one.
+    uint64_t list_room = 0;
+    for (uint32_t b = 0; b < BUSTER_X86_DECODE_BUCKETS; b += 1)
+    {
+        list_room += x86_decode_buckets[b].count != 0 ? ((uint64_t)x86_decode_buckets[b].count + 1) : 0;
+    }
+    uint16_t* lists = valid ? malloc(sizeof(uint16_t) * (list_room * 64 + 1)) : 0;
+    valid = valid && x86_decode_cells != 0 && lists != 0;
+    uint32_t used = 1;
+    uint32_t longest = 0;
+    uint32_t ambiguous = 0;
+    for (uint32_t b = 0; valid && b < BUSTER_X86_DECODE_BUCKETS; b += 1)
+    {
+        const X86DecodeBucket bucket = x86_decode_buckets[b];
+        const X86DecodeLaneIndex* index = &x86_decode_lane_indices[b];
+        const uint32_t count = bucket.count != 0 ? 1u << __builtin_popcount(index->varying) : 0;
+        for (uint32_t cell = 0; cell < count; cell += 1)
+        {
+            const uint32_t key = index->common_key | _pdep_u32(cell, index->varying);
+            uint32_t matches = 0;
+            uint16_t row = 0;
+            const uint32_t list = used;
+            for (uint32_t j = 0; j < bucket.count; j += 1)
+            {
+                const uint32_t entry = bucket.first + j;
+                const uint32_t mask = x86_decode_compact(x86_decode_masks[entry], true);
+                if ((key & mask) == x86_decode_compact(x86_decode_keys[entry], false))
+                {
+                    row = x86_decode_forms[entry];
+                    valid = valid && used < list_room * 64;
+                    lists[used] = row;
+                    used += valid;
+                    matches += 1;
+                }
+            }
+            lists[used] = 0;
+            used += matches > 1;
+            used = matches > 1 ? used : list;
+            longest = matches > longest ? matches : longest;
+            ambiguous += matches > 1;
+            valid = valid && list < BUSTER_X86_DECODE_LIST;
+            x86_decode_cells[index->first + cell] = matches > 1 ? (uint16_t)(BUSTER_X86_DECODE_LIST | list) : row;
+        }
+    }
+    x86_decode_lists = lists;
+    x86_decode_cell_count = cells;
+    x86_decode_list_count = used;
+    if (getenv("BUSTER_INDEX_STATS") != NULL)
+    {
+        uint32_t histogram[33] = { 0 };
+        for (uint32_t b = 0; b < BUSTER_X86_DECODE_BUCKETS; b += 1)
+        {
+            histogram[x86_decode_buckets[b].count != 0 ? __builtin_popcount(x86_decode_lane_indices[b].varying) : 32] += x86_decode_buckets[b].count != 0;
+        }
+        for (uint32_t i = 0; i < 33; i += 1) if (histogram[i]) fprintf(stderr, "varying %u: %u buckets\n", i, histogram[i]);
+        fprintf(stderr, "lane index: valid %u cells %u list entries %u ambiguous cells %u longest %u\n", valid, cells, used, ambiguous, longest);
+    }
+    return valid;
+}
+
 static bool x86_disassembler_initialize(void)
 {
     bool result = (x86_encoder_initialized || x86_encoder_initialize()) &&
@@ -689,7 +826,7 @@ static bool x86_disassembler_initialize(void)
                     }
                 }
             }
-            result = x86_decode_indices_initialize();
+            result = x86_decode_indices_initialize() && x86_decode_lane_indices_initialize();
             if (result)
             {
                 x86_decode_lengths_initialize();
