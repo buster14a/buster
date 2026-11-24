@@ -133,10 +133,11 @@ declarations (each a subtree whose root is the parser's root's child):
 1. **A semantic hash for each declaration.** A hash of its own tokens, of the
    current hash of every name its reading looks up or declares (ordinary names
    and tags apart), and of the pragmas before it. A name's current hash is
-   made from the hashes of the declarations that declared it so far. So two
-   declarations with one hash are the same tokens, read where every name they
-   depend on was declared by the same tokens in the same way, back to the
-   unit's start.
+   made from the hashes of the declarations that declared it so far, and of
+   each tag's completion that reached it since ("A tag's completion" below).
+   So two declarations with one hash are the same tokens, read where every
+   name they depend on was declared by the same tokens in the same way, back
+   to the unit's start.
 2. **The memo.** The lane keeps the set of semantic hashes of the declarations
    that its earlier units read *silently* (no diagnostic of the unit, from any
    stage, lies in their tokens, and no recovery) and *purely* (nothing changed
@@ -191,7 +192,10 @@ for the units that don't.
   pragmas in force, the options, which a command's units share). The
   semantic hash covers each, the bindings through their own hashes. So a
   reading with the same hash does the same thing: no diagnostic, and the same
-  changes up to where they are in the unit.
+  changes up to where they are in the unit. A binding's type is a value but
+  for the tags in it: a tag's type is an identity, whose content its
+  completion changes for every binding made through it, so a completion goes
+  into those names' hashes when it happens ("A tag's completion").
 - **A pure reading changes only what a name can reach.** By the memo's test,
   D's reading changed the bindings of D's declared names and the type table,
   and nothing else: no object or function to emit, no alias, no tentative
@@ -254,9 +258,9 @@ outside a parameter list, a body's members and an expression), and **the
 reader checks it at every reading**: each `DECLARE` event of file scope that a
 declaration's reading appends, and each tag it declares or completes, must be
 for a listed name. A declaration that declares anything else is never
-attested, and the name's hash is poisoned for the rest of the unit (set to a
-value no other unit computes), so that nothing depending on it is attested or
-hits. The emulation met this failure once, in its own rules: its list of type
+attested; its unit is read again with nothing skipped where it skipped, and
+teaches the memo nothing, since the chain's hashes of its later declarations
+didn't cover the name. The emulation met this failure once, in its own rules: its list of type
 keywords held `_Float128`, which glibc declares by typedef for a compiler
 without the keyword; the typedef then declared nothing, was skipped, and one
 unit failed with `unknown type name '_Float128'`. The parser has no such list
@@ -286,6 +290,65 @@ selection numbers only the objects its selected code references, a reading's
 that spells the name or its builtin, which reaches the declaration. A runtime
 call of a name whose declaration nothing read takes the lowering's own symbol
 whether the declaration was skipped or not.
+
+### A tag's completion
+
+A name's hash is made from the declarations of **that name**. That leaves out
+one thing a later reading depends on (#3494):
+
+```c
+typedef struct shape Shape;                  /* D1: declares Shape, mentions the tag */
+struct shape { int width; };                 /* D2: completes the tag */
+_Static_assert(sizeof(Shape) == 4, "shape"); /* D3: lists Shape alone */
+```
+
+D2 changes the tag's hash and not `Shape`'s, so D3 had one hash in a unit
+whose `struct shape` is four bytes and in one whose `struct shape` is sixteen:
+the second unit skipped an assertion that fails there, and compiled. The same
+holds through any binding whose type mentions the tag: a function that returns
+a pointer to it (`sizeof(*make_shape())`), a typedef of the typedef, a struct
+with a member of it, and every `p->member` once function bodies are attested.
+
+The chain closes it before any reading, as the rest of the rule:
+
+- **The lists mark a completion.** A tag's entry takes a class bit
+  (`BUSTER_ATTESTED_COMPLETES`) where its body follows at its level, past
+  its attributes, or an enum's fixed type follows its name. A superset, and
+  the reader checks it like the declared names: each tag a reading completes
+  must be one its list marks, or the declaration is unlisted, and its unit
+  then teaches the memo nothing. A second bit (`BUSTER_ATTESTED_CLOSES`)
+  says the completion is the file scope's for sure: no parameter list comes
+  before it in the declaration (a tag defined in one has its scope), and it
+  is no anonymous bit-field's `enum E : 3`.
+- **A name is open** while a tag in what its declarations listed isn't
+  complete: a declaration that mentions a tag before any completion of it, or
+  lists an open name, makes the names it declares open (a bit of the name's
+  hash, `BUSTER_ATTESTED_OPEN`). The tag a declaration completes itself, and
+  its mentions in its own body (`struct node { struct node *next; }`), open
+  nothing. Open is kept once given, but for a tag that a declaration with
+  nothing else open completes for sure.
+- **Open names keep their listers**: each declaration that listed one while
+  it was open, or mentioned a tag before any declaration of it
+  (`check_attested_listers`). A declaration that lists no open name keeps
+  nothing, and tests one bit a listed name.
+- **At a completion**, every name declared by a declaration that listed the
+  tag, and by one that listed such a name, in turn, takes the completed tag's
+  new hash into its own, once (`check_attested_complete`: a walk over the
+  listers, each declaration and each name passed once a completion). The
+  declarations after the completion then hash what their readings depend on.
+  Those before it were read before it, and keep their hashes.
+
+Only a tag's completion acts at a distance. A redeclaration that changes a
+binding (an array's bound, a function's composite type, an attribute) declares
+the name itself, and the name's hash takes it as before.
+
+On musl's command the chain meets 952 completions of a tag that earlier
+declarations listed (0.7 a unit), which reach 15,275 names, from 37,316
+listers kept (28 a unit). Its memo learns 3,256 hashes where it learned 2,994,
+and 274,392 declarations hit where 274,654 did. Lua's 34 units over glibc's
+headers, which declare more through tags they complete later, meet 184
+completions that reach 6,909 names from 10,513 listers (309 a unit): 17,604
+declarations hit where 17,959 did (`measure-attested`, a container).
 
 ### Where it sits
 
@@ -329,7 +392,7 @@ no columns, and the passes after the walk read what the walk wrote.
 | --- | --- | --- |
 | lists | each identifier's class from kinds, roles and the brackets' nesting; the declarations' ranges | 64 tokens' masks at a time, with a stack for the nesting |
 | own hashes | each declaration's tokens, two an AES round, keyed | four declarations at a time |
-| chain | each declaration's semantic hash from its own and its names' current hashes; the memo's probe; its declared names' new hashes | source order |
+| chain | each declaration's semantic hash from its own and its names' current hashes; the memo's probe; its declared names' new hashes; a completed tag's hash into the names declared through it | source order |
 | reach | from the roots, by two cursors a name | a worklist |
 | marks | the skipped ranges' visit and ignored marks | 64 tokens at a time |
 
@@ -366,7 +429,13 @@ reach doesn't run.
   the names no token spells: a library function's prototype in a unit that
   spells only its builtin (`__builtin_memcpy`), and one with an asm label.
   For the lists: an enumerator a body names, and a tag first mentioned in a
-  prototype's return type. For the memo's silence: a declaration that warns
+  prototype's return type. For a tag's completion: two units that complete
+  the same tags otherwise (a struct, a struct in a cycle with another, an
+  enum, a struct named after its attribute), with assertions that list only
+  names declared through them (a typedef, a function's return type, a typedef
+  of the typedef, a member), each of which must be read where its tag's
+  completion is another, and a command whose second unit's assertions fail.
+  For the memo's silence: a declaration that warns
   (`int f();` under `-Wstrict-prototypes`), which every unit must report
   again. And the corpora as many-unit commands (musl, the libc corpus, Lua,
   `sqlite3.c` with `shell.c`, the compiler's own units), each unit's object
