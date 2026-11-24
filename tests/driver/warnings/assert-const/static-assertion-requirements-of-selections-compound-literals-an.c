@@ -1,0 +1,11 @@
+int x;
+_Static_assert(sizeof((int[]){1, 2}) == 1, "a");
+_Static_assert(sizeof((int[][2]){{1, 2}, {3}}) == 1, "b");
+_Static_assert(_Generic(x, int: 1, default: 2) == 2, "c");
+_Static_assert(_Generic(x, int: 1, default: 2) + 1 == 3, "d");
+_Static_assert(__builtin_choose_expr(1, 3, 4) == 4, "e");
+_Static_assert(__builtin_offsetof(struct { int a, b; }, b) == 1, "f");
+_Static_assert(__builtin_offsetof(struct T { int a, b; }, b) == 1, "g");
+_Static_assert(__builtin_offsetof(union { int a, b; }, b) == 1, "h");
+_Static_assert(sizeof(enum E { A }) == 1, "i");
+_Static_assert(sizeof(enum { B }) == 1, "j");

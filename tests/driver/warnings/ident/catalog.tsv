@@ -1,0 +1,5 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+# At the directive's name, not in a skipped group, nor where a pragma ignores -Wpedantic.
+ident-under-pedantic	ident-under-pedantic.c	2	0	0	warning-text	-pedantic	#ident under -pedantic
+ident-by-default	ident-by-default.c	0	0	0	warning-text	-	#ident by default

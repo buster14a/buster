@@ -1,0 +1,1 @@
+int a(int x){return _Generic(x,int:0,default:({x<<31;}));}int b(int x){return __builtin_choose_expr(0,({x>>31;}),0);}unsigned long c(int x){return _Generic(x,int:0,default:sizeof(({x<<32;})));}unsigned long d(int x){return __builtin_choose_expr(0,sizeof(({x>>32;})),0);}

@@ -1,0 +1,7 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+the-alignment-checks-errors-past-128-bits-too-and-an-alignment-o	the-alignment-checks-errors-past-128-bits-too-and-an-alignment-o.c	1	4	0	-	-	the alignment checks' errors, past 128 bits too, and an alignment of 1
+the-alignment-checks-errors-at-clang-s-places	the-alignment-checks-errors-at-clang-s-places.c	0	11	0	-	-	the alignment checks' errors at clang's places
+the-alignment-builtins-operand-types	the-alignment-builtins-operand-types.c	0	5	2	-	-	the alignment builtins' operand types
+an-alignment-of-1-unevaluated-and-under-a-pragma	an-alignment-of-1-unevaluated-and-under-a-pragma.c	5	0	0	-	-	an alignment of 1, unevaluated and under a pragma
+an-alignment-of-1-where-the-source-s-type-is-refused	an-alignment-of-1-where-the-source-s-type-is-refused.c	5	4	2	-	-	an alignment of 1 where the source's type is refused

@@ -1,0 +1,152 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+the-address-of-an-enable-if-function-in-parentheses	the-address-of-an-enable-if-function-in-parentheses.c	0	1	0	-	-	the address of an enable_if function in parentheses
+unevaluated-uses-and-calls-through-parentheses	unevaluated-uses-and-calls-through-parentheses.c	1	1	0	-	-	unevaluated uses and calls through parentheses
+a-call-no-enable-if-admits	a-call-no-enable-if-admits.c	0	1	1	-	-	a call no enable_if admits
+a-disabled-call-gives-no-diagnose-if	a-disabled-call-gives-no-diagnose-if.c	1	1	2	-	-	a disabled call gives no diagnose_if
+enable-if-that-is-always-false	enable-if-that-is-always-false.c	0	1	1	-	-	enable_if that is always false
+enable-if-with-a-message-that-is-no-string	enable-if-with-a-message-that-is-no-string.c	0	1	0	-	-	enable_if with a message that is no string
+enable-if-that-never-produces-a-constant	enable-if-that-never-produces-a-constant.c	0	1	1	-	-	enable_if that never produces a constant
+# A volatile parameter's read is never a constant (#2383); each declaration's error drops its attribute, and the unit
+# goes on to the next one's and to its calls.
+enable-if-and-diagnose-if-reading-a-volatile-parameter	enable-if-and-diagnose-if-reading-a-volatile-parameter.c	0	4	4	-	-	enable_if and diagnose_if reading a volatile parameter
+a-volatile-parameter-s-read-that-some-arguments-skip	a-volatile-parameter-s-read-that-some-arguments-skip.c	0	4	4	-	-	a volatile parameter's read that some arguments skip
+# Casts clang's constant evaluation refuses (#2253): to void, its note "non-literal type 'void'", and between an integer
+# and a pointer but a null pointer constant's, "this conversion is not allowed"; where no arguments skip them, in a
+# parameter's condition or not. A void condition isn't one; a call reads past a void left operand.
+casts-to-void-and-between-integers-and-pointers-in-a-condition	casts-to-void-and-between-integers-and-pointers-in-a-condition.c	7	8	11	-	-	casts to void and between integers and pointers in a condition
+enable-if-with-an-argument-that-is-no-constant	enable-if-with-an-argument-that-is-no-constant.c	0	1	1	-	-	enable_if with an argument that is no constant
+the-candidate-note-at-the-latest-declaration	the-candidate-note-at-the-latest-declaration.c	0	1	1	-	-	the candidate note at the latest declaration
+# An inherited enable_if names the parameters of the declaration that wrote it, and clang binds a call's arguments to
+# the found declaration's, so each parameter it reads is unknown (#2464): a call through a later declaration is
+# disabled, one through the writer isn't, and an overloadable redeclaration's enable_ifs are its own.
+an-inherited-enable-if-that-reads-a-parameter	an-inherited-enable-if-that-reads-a-parameter.c	0	3	3	-	-	an inherited enable_if that reads a parameter
+# Its parameters are unknown values, not an error: an operator that doesn't read one still decides, a non-null
+# address is unknown too, and a diagnose_if still reads the arguments (#2464).
+an-inherited-enable-if-s-unknown-parameters	an-inherited-enable-if-s-unknown-parameters.c	2	4	5	-	-	an inherited enable_if's unknown parameters
+an-inherited-enable-if-at-block-scope-and-after-a-definition	an-inherited-enable-if-at-block-scope-and-after-a-definition.c	0	3	3	-	-	an inherited enable_if at block scope and after a definition
+# A redeclaration takes an enable_if only where it has none of its own, and then only the previous declaration's
+# first, as clang's attribute merge skips a kind the declaration has (#2464): `q`'s address can be taken.
+a-redeclaration-s-inherited-enable-if-is-the-first-alone	a-redeclaration-s-inherited-enable-if-is-the-first-alone.c	0	0	0	-	-	a redeclaration's inherited enable_if is the first alone
+# A redeclaration whose own conditions are diagnose_ifs alone has no enable_if of its own, so it still inherits the
+# previous declaration's first (#2464): `r(8)` is disabled. `n == 9` doesn't hold, so no disabled call's diagnose_if
+# is at stake.
+a-redeclaration-with-a-diagnose-if-alone-inherits-the-first-enab	a-redeclaration-with-a-diagnose-if-alone-inherits-the-first-enab.c	0	1	1	-	-	a redeclaration with a diagnose_if alone inherits the first enable_if
+an-inherited-enable-if-of-a-pass-object-size-function	an-inherited-enable-if-of-a-pass-object-size-function.c	0	1	1	-	-	an inherited enable_if of a pass_object_size function
+enable-if-with-one-argument	enable-if-with-one-argument.c	0	1	0	-	-	enable_if with one argument
+a-redeclaration-s-own-enable-if-not-the-one-before	a-redeclaration-s-own-enable-if-not-the-one-before.c	0	1	1	-	-	a redeclaration's own enable_if, not the one before
+enable-if-of-a-declaration-s-first	enable-if-of-a-declaration-s-first.c	0	1	1	-	-	enable_if of a declaration's first
+enable-if-with-three-arguments	enable-if-with-three-arguments.c	0	1	0	-	-	enable_if with three arguments
+the-first-error-alone-at-a-call	the-first-error-alone-at-a-call.c	0	1	1	-	-	the first error alone at a call
+an-error-at-a-use	an-error-at-a-use.c	0	1	1	-	-	an error at a use
+too-many-arguments	too-many-arguments.c	0	1	0	-	-	too many arguments
+a-warning-group-that-is-no-string	a-warning-group-that-is-no-string.c	0	1	0	-	-	a warning group that is no string
+an-unknown-warning-group	an-unknown-warning-group.c	0	1	0	-	-	an unknown warning group
+an-empty-warning-group	an-empty-warning-group.c	0	1	0	-	-	an empty warning group
+a-diagnostic-type-that-is-no-string	a-diagnostic-type-that-is-no-string.c	0	1	0	-	-	a diagnostic type that is no string
+an-invalid-diagnostic-type	an-invalid-diagnostic-type.c	0	1	0	-	-	an invalid diagnostic type
+a-message-that-is-no-string	a-message-that-is-no-string.c	0	1	0	-	-	a message that is no string
+a-condition-that-never-produces-a-constant	a-condition-that-never-produces-a-constant.c	0	1	1	-	-	a condition that never produces a constant
+a-dependent-condition-that-reads-a-variable	a-dependent-condition-that-reads-a-variable.c	0	1	1	-	-	a dependent condition that reads a variable
+one-argument	one-argument.c	0	1	0	-	-	one argument
+too-few-arguments	too-few-arguments.c	0	1	0	-	-	too few arguments
+an-undeclared-name	an-undeclared-name.c	0	1	0	-	-	an undeclared name
+no-argument	no-argument.c	0	1	0	-	-	no argument
+a-tautological-enable-if	a-tautological-enable-if.c	0	0	0	-	-	a tautological enable_if
+a-system-header-s-enable-if-1	a-system-header-s-enable-if-1.c	0	0	0	-	-	a system header's enable_if(1, )
+a-system-header-function	a-system-header-function.c	1	0	1	-	-	a system header function
+an-array-parameter	an-array-parameter.c	1	0	1	-	-	an array parameter
+a-bool-parameter	a-bool-parameter.c	1	0	1	-	-	a _Bool parameter
+the-c23-spelling	the-c23-spelling.c	1	0	0	-	-	the C23 spelling
+a-character-parameter	a-character-parameter.c	2	0	2	-	-	a character parameter
+a-message-of-joined-strings	a-message-of-joined-strings.c	1	0	1	-	-	a message of joined strings
+a-definition-with-diagnose-if	a-definition-with-diagnose-if.c	1	0	1	-	-	a definition with diagnose_if
+enable-if-and-diagnose-if-together	enable-if-and-diagnose-if-together.c	1	0	1	-	-	enable_if and diagnose_if together
+an-enumerator-in-a-condition	an-enumerator-in-a-condition.c	2	0	2	-	-	an enumerator in a condition
+a-use-at-file-scope	a-use-at-file-scope.c	1	0	1	-	-	a use at file scope
+a-long-long-parameter	a-long-long-parameter.c	1	0	1	-	-	a long long parameter
+shifts-that-fault-decide-nothing	shifts-that-fault-decide-nothing.c	1	0	1	-	-	shifts that fault decide nothing
+nested-arithmetic	nested-arithmetic.c	2	0	2	-	-	nested arithmetic
+source-order-uses-of-a-function-and-unevaluated-uses	source-order-uses-of-a-function-and-unevaluated-uses.c	12	0	12	-	-	source order, uses of a function and unevaluated uses
+an-overflowing-condition-decides-nothing	an-overflowing-condition-decides-nothing.c	1	0	1	-	-	an overflowing condition decides nothing
+an-unnamed-parameter-before-a-named-one	an-unnamed-parameter-before-a-named-one.c	1	0	1	-	-	an unnamed parameter before a named one
+a-pragma-ignores-the-warning	a-pragma-ignores-the-warning.c	0	0	0	-	-	a pragma ignores the warning
+a-redeclaration-inherits-and-renames	a-redeclaration-inherits-and-renames.c	1	0	1	-	-	a redeclaration inherits and renames
+pointer-floating-sizeof-unsigned-conditional-cast-and-short-circ	pointer-floating-sizeof-unsigned-conditional-cast-and-short-circ.c	8	0	8	-	-	pointer, floating, sizeof, unsigned, conditional, cast and short-circuit conditions
+diagnose-if-on-a-variable	diagnose-if-on-a-variable.c	1	0	0	-	-	diagnose_if on a variable
+a-variadic-function	a-variadic-function.c	2	0	2	-	-	a variadic function
+object-and-function-addresses-are-never-null	object-and-function-addresses-are-never-null.c	1	0	1	-	-	object and function addresses are never null
+a-variable-read-a-short-circuit-can-skip	a-variable-read-a-short-circuit-can-skip.c	1	1	2	-	-	a variable read a short circuit can skip
+addresses-compared-tested-and-cast	addresses-compared-tested-and-cast.c	4	0	4	-	-	addresses compared, tested and cast
+unknown-operands-skipped-at-calls	unknown-operands-skipped-at-calls.c	2	0	2	-	-	unknown operands skipped at calls
+one-address-error-for-each-operation-that-converts	one-address-error-for-each-operation-that-converts.c	0	14	0	-	-	one address error for each operation that converts
+one-address-error-for-each-call-and-statement	one-address-error-for-each-call-and-statement.c	0	9	0	-	-	one address error for each call and statement
+address-errors-in-initializer-lists	address-errors-in-initializer-lists.c	0	5	0	-	-	address errors in initializer lists
+address-errors-inside-unevaluated-operands	address-errors-inside-unevaluated-operands.c	0	5	0	-	-	address errors inside unevaluated operands
+warning-groups	warning-groups.c	5	1	1	-	-	warning groups
+warning-groups-under-wno-format	warning-groups.c	5	0	1	-	-Wno-format	warning groups under -Wno-format
+warning-groups-under-wall	warning-groups.c	6	0	1	-	-Wall	warning groups under -Wall
+warning-groups-under-wno-all	warning-groups.c	2	0	0	-	-Wno-all	warning groups under -Wno-all
+warning-groups-under-werror-array-bounds	warning-groups-under-werror-array-bounds.c	4	2	1	-	-Werror=array-bounds	warning groups under -Werror=array-bounds
+warning-groups-under-werror-wno-error-shadow	warning-groups.c	0	6	1	-	-Werror -Wno-error=shadow	warning groups under -Werror -Wno-error=shadow
+warning-groups-under-wno-error-shadow-werror	warning-groups.c	0	6	1	-	-Wno-error=shadow -Werror	warning groups under -Wno-error=shadow -Werror
+warning-groups-under-wno-everything	warning-groups.c	4	1	0	-	-Wno-everything	warning groups under -Wno-everything
+warning-groups-under-wfatal-errors-array-bounds	warning-groups-under-werror-array-bounds.c	0	1	0	-	-Wfatal-errors=array-bounds	warning groups under -Wfatal-errors=array-bounds
+warning-groups-under-wno-error-format	warning-groups.c	6	0	1	-	-Wno-error=format	warning groups under -Wno-error=format
+warning-groups-under-wformat	warning-groups.c	6	0	1	-	-Wformat	warning groups under -Wformat
+warning-groups-under-wno-array-bounds-warray-bounds	warning-groups-under-werror-array-bounds.c	5	1	1	-	-Wno-array-bounds -Warray-bounds	warning groups under -Wno-array-bounds -Warray-bounds
+warning-groups-under-wno-unused	warning-groups.c	4	1	1	-	-Wno-unused	warning groups under -Wno-unused
+warning-groups-under-w	warning-groups.c	5	1	1	-	-W	warning groups under -W
+warning-groups-under-wno-error-format-werror	warning-groups.c	0	6	1	-	-Wno-error=format -Werror	warning groups under -Wno-error=format -Werror
+warning-groups-under-pragmas	warning-groups-under-pragmas.c	3	1	0	-	-	warning groups under pragmas
+calls-assignments-and-increments-a-call-skips-or-leaves-unknown	calls-assignments-and-increments-a-call-skips-or-leaves-unknown.c	3	0	3	-	-	calls, assignments and increments a call skips or leaves unknown
+a-condition-that-never-produces-a-constant-x-g-1	a-condition-that-never-produces-a-constant-x-g-1.c	0	1	1	-	-	a condition that never produces a constant: x == g(1)
+a-condition-that-never-produces-a-constant-x-1-2	a-condition-that-never-produces-a-constant-x-1-2.c	0	1	1	-	-	a condition that never produces a constant: (x += 1) > 2
+a-condition-that-never-produces-a-constant-x-2	a-condition-that-never-produces-a-constant-x-2.c	0	1	1	-	-	a condition that never produces a constant: --x > 2
+a-condition-that-never-produces-a-constant-x-3	a-condition-that-never-produces-a-constant-x-3.c	0	1	1	-	-	a condition that never produces a constant: x++ > 3
+a-condition-that-never-produces-a-constant-g-x-1	a-condition-that-never-produces-a-constant-g-x-1.c	0	1	1	-	-	a condition that never produces a constant: g(x = 1)
+a-condition-that-never-produces-a-constant-x-1	a-condition-that-never-produces-a-constant-x-1.c	0	1	1	-	-	a condition that never produces a constant: (x++, 1)
+a-condition-that-never-produces-a-constant-h	a-condition-that-never-produces-a-constant-h.c	0	1	1	-	-	a condition that never produces a constant: h()
+a-condition-that-never-produces-a-constant-g-1-0	a-condition-that-never-produces-a-constant-g-1-0.c	0	1	1	-	-	a condition that never produces a constant: g(1) > 0
+# A comma operator's left operand in a condition (#1447, check_input_attribute_unused): -Wunused-value's "has no effect"
+# at the place clang's isUnusedResultAWarning gives (a nested comma's right operand, a conditional's else arm, a logical
+# operator, a cast's `(`, sizeof's keyword), quiet for a call, an assignment and a literal 0 after a comma, and
+# -Wunused-comparison's, with its note, for a comparison; and in another attribute's argument.
+comma-operators-left-operands-in-conditions	comma-operators-left-operands-in-conditions.c	5	0	1	-	-	comma operators' left operands in conditions
+the-shapes-of-a-comma-s-discarded-left-operand	the-shapes-of-a-comma-s-discarded-left-operand.c	14	0	2	-	-	the shapes of a comma's discarded left operand
+a-comma-operator-in-another-attribute-s-argument	a-comma-operator-in-another-attribute-s-argument.c	1	1	0	-	-	a comma operator in another attribute's argument
+# Overloadable functions' conditions in overload resolution (#1447, c_check_overload.c): an enable_if that doesn't
+# admit the call makes its candidate not viable, the candidate whose enable_ifs are another's and more is better, and
+# ones that differ (clang's profile: the tree, literals by value, parameters by place and type) are neither, and
+# are two functions of one signature; diagnose_if applies to the selected candidate. A call no candidate or several are
+# viable for has clang's error and candidate notes. And a pointer variable's argument, which is no constant.
+overloads-disabled-by-enable-if-and-the-one-selected	overloads-disabled-by-enable-if-and-the-one-selected.c	0	0	0	-	-	overloads disabled by enable_if, and the one selected
+no-overload-viable-a-disabled-candidate-s-note-and-another-s-arg	no-overload-viable-a-disabled-candidate-s-note-and-another-s-arg.c	0	4	8	-	-	no overload viable: a disabled candidate's note and another's argument count
+a-variadic-overload-s-count-and-an-empty-message	a-variadic-overload-s-count-and-an-empty-message.c	0	2	4	-	-	a variadic overload's count and an empty message
+the-overload-with-more-enable-if-conditions-is-better	the-overload-with-more-enable-if-conditions-is-better.c	0	0	0	-	-	the overload with more enable_if conditions is better
+enable-if-conditions-that-differ-are-ambiguous	enable-if-conditions-that-differ-are-ambiguous.c	0	5	10	-	-	enable_if conditions that differ are ambiguous
+an-overload-whose-enable-if-conditions-differ-is-another-functio	an-overload-whose-enable-if-conditions-differ-is-another-functio.c	0	1	2	-	-	an overload whose enable_if conditions differ is another function
+# The one candidate without overloadable reads an enable_if it inherits with its parameters unknown (#2464), so it
+# isn't viable and the call selects the other, whose diagnose_if holds.
+an-unmarked-candidate-s-inherited-enable-if-in-overload-resoluti	an-unmarked-candidate-s-inherited-enable-if-in-overload-resoluti.c	1	0	1	-	-	an unmarked candidate's inherited enable_if in overload resolution
+an-ambiguous-call-s-candidates	an-ambiguous-call-s-candidates.c	0	1	3	-	-	an ambiguous call's candidates
+# An overload call's candidate that fails by an argument's conversion (#2384): clang's "no known conversion" note,
+# these first in display order; and an overload set's address that matches no candidate, '<overloaded function
+# type>' with each candidate's note (check_driver_overload_address).
+a-candidate-that-fails-by-an-argument-s-conversion	a-candidate-that-fails-by-an-argument-s-conversion.c	0	1	2	-	-	a candidate that fails by an argument's conversion
+conversion-failures-first-with-clang-s-fix-it-words	conversion-failures-first-with-clang-s-fix-it-words.c	0	6	16	-	-	conversion failures first, with clang's fix-it words
+an-overload-set-s-address-that-matches-no-candidate	an-overload-set-s-address-that-matches-no-candidate.c	0	4	16	-	-	an overload set's address that matches no candidate
+# Returned or passed (#2480, check_driver_overload_operand): '<overloaded function type>' as the source, with a
+# parameter's note where the callee's declaration names it, and no candidate notes; and an incompatible pointer
+# argument a viable conversion, whose error names the selected candidate's parameter.
+an-overload-set-s-address-returned-or-passed-and-an-incompatible	an-overload-set-s-address-returned-or-passed-and-an-incompatible.c	0	4	3	-	-	an overload set's address returned or passed, and an incompatible pointer argument
+an-overload-set-s-address-with-one-candidate-the-enable-ifs-leav	an-overload-set-s-address-with-one-candidate-the-enable-ifs-leav.c	0	4	6	-	-	an overload set's address with one candidate the enable_ifs leave
+an-overload-set-s-address-parameter-counts-return-types-variadic	an-overload-set-s-address-parameter-counts-return-types-variadic.c	0	2	6	-	-	an overload set's address: parameter counts, return types, variadic
+diagnose-if-on-the-selected-overload	diagnose-if-on-the-selected-overload.c	2	1	3	-	-	diagnose_if on the selected overload
+diagnose-if-accumulates-over-an-overload-s-redeclarations	diagnose-if-accumulates-over-an-overload-s-redeclarations.c	2	0	2	-	-	diagnose_if accumulates over an overload's redeclarations
+pointer-arguments-of-enable-if-overloaded-or-not	pointer-arguments-of-enable-if-overloaded-or-not.c	0	6	10	-	-	pointer arguments of enable_if, overloaded or not
+# A user's function with a pass_object_size parameter reads its conditions as any other's (#2147): an undeclared name,
+# a constant condition at a call, enable_if's and diagnose_if's at calls, overloads, and its address.
+pass-object-size-functions-undeclared-and-constant-conditions	pass-object-size-functions-undeclared-and-constant-conditions.c	1	1	1	-	-	pass_object_size functions' undeclared and constant conditions
+pass-object-size-functions-conditions-at-calls	pass-object-size-functions-conditions-at-calls.c	1	3	3	-	-	pass_object_size functions' conditions at calls
+pass-object-size-functions-conditions-that-hold	pass-object-size-functions-conditions-that-hold.c	0	0	0	-	-	pass_object_size functions' conditions that hold

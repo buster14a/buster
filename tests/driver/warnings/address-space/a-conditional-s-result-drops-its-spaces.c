@@ -1,0 +1,16 @@
+__attribute__((opencl_global)) int *gl;
+__attribute__((opencl_generic)) int *ge;
+__attribute__((address_space(1))) int *p;
+__attribute__((address_space(1))) void *v;
+const __attribute__((address_space(1))) int *cp;
+_Static_assert(_Generic(0 ? ge : gl, int *: 1, default: 0), "overlapping spaces drop");
+_Static_assert(_Generic(0 ? gl : gl, __attribute__((opencl_global)) int *: 1, default: 0), "one type keeps");
+_Static_assert(_Generic(0 ? p : v, __attribute__((address_space(1))) void *: 1, default: 0), "void takes the space");
+_Static_assert(_Generic(0 ? p : cp, const int *: 1, default: 0), "qualifiers merge, space dropped");
+_Static_assert(_Generic(0 ? p : 0, __attribute__((address_space(1))) int *: 1, default: 0), "null pointer");
+_Static_assert(_Generic(p, int *: 0, __attribute__((address_space(1))) int *: 1), "distinct association types");
+_Static_assert(__builtin_types_compatible_p(__typeof__(*p), int) == 1, "qualifiers dropped");
+_Static_assert(sizeof(*p) == 4 && _Alignof(__attribute__((address_space(1))) long) == 8, "size and alignment");
+_Static_assert(_Generic(*p, int: 1, default: 0), "a value has no space");
+_Static_assert(_Generic(cp, const __attribute__((address_space(1))) int *: 1, default: 0), "qualified pointee");
+int x = _Generic(*cp, int: 1);
