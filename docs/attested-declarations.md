@@ -327,7 +327,8 @@ The chain closes it before any reading, as the rest of the rule:
   its mentions in its own body (`struct node { struct node *next; }`), open
   nothing. Open is kept once given, but for a tag that a declaration with
   nothing else open completes for sure.
-- **Open names keep their listers**: each declaration that listed one
+- **Open names keep their listers**: each declaration that listed one while
+  it was open, or mentioned a tag before any declaration of it
   (`check_attested_listers`). A declaration that lists no open name keeps
   nothing, and tests one bit a listed name.
 - **At a completion**, every name declared by a declaration that listed the
@@ -342,11 +343,11 @@ binding (an array's bound, a function's composite type, an attribute) declares
 the name itself, and the name's hash takes it as before.
 
 On musl's command the chain meets 952 completions of a tag that earlier
-declarations listed (0.7 a unit), which reach 15,275 names, from 74,342
-listers kept (56 a unit). Its memo learns 3,256 hashes where it learned 2,994,
+declarations listed (0.7 a unit), which reach 15,275 names, from 37,316
+listers kept (28 a unit). Its memo learns 3,256 hashes where it learned 2,994,
 and 274,392 declarations hit where 274,654 did. Lua's 34 units over glibc's
 headers, which declare more through tags they complete later, meet 184
-completions that reach 6,909 names from 18,747 listers (551 a unit): 17,604
+completions that reach 6,909 names from 10,513 listers (309 a unit): 17,604
 declarations hit where 17,959 did (`measure-attested`, a container).
 
 ### Where it sits

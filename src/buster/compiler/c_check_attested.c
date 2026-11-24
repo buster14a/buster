@@ -457,6 +457,8 @@ struct CheckAttested
     uint32_t* lister_declarations;
     uint32_t* lister_next;
     uint32_t lister_count;
+    // The chain's own: the keys of the open names the declaration under way lists (room for its every name).
+    uint32_t* lister_keys;
     uint32_t* complete_declarations;
     uint32_t* complete_lists;
     uint32_t* complete_pending;
@@ -2019,20 +2021,21 @@ static void check_attested_declarings(CheckAttested* census)
     }
 }
 
-// Declaration `d`, which listed an open name or opened one, among the listers of each open name its list holds: a link a
-// name, the name's last. Where a later declaration completes a tag these names were declared through, the completion
-// finds `d` by them and the names it declares (check_attested_complete).
-static void check_attested_listers(CheckAttested* census, uint32_t d)
+// Declaration `d` among the listers of the `count` names `keys` that its list holds open (the chain's: each name that
+// was open where the declaration listed it, and each tag it mentioned before any declaration of it, which its own
+// declaring has opened since): a link a name, the name's last. Where a later declaration completes a tag these names
+// were declared through, the completion finds `d` by them and the names it declares (check_attested_complete). A name
+// the declaration declares itself and nothing opened before isn't among them: what a completion reaches it by is the
+// tag's lister, this declaration. Only the open names are passed: a declaration that lists none keeps nothing.
+static void check_attested_listers(CheckAttested* census, uint32_t d, const uint32_t* keys, uint32_t count)
 {
-    for (uint32_t n = census->name_starts[d]; n < census->name_starts[d + 1]; n += 1)
+    for (uint32_t k = 0; k < count; k += 1)
     {
-        const uint32_t entry = census->name_entries[n];
-        const CheckAttestedKey* state = census->keys + (entry & BUSTER_ATTESTED_KEY_MASK);
-        const bool listed = (entry >> BUSTER_ATTESTED_CLASS_SHIFT & (BUSTER_ATTESTED_DECLARES | BUSTER_ATTESTED_LOOKS_UP)) != 0;
-        const bool open = listed && state->stamp == census->stamp && (state->hash & BUSTER_ATTESTED_OPEN) != 0 && state->local != BUSTER_ATTESTED_NONE;
-        const uint32_t head = open ? census->lister_heads[state->local] : BUSTER_ATTESTED_NONE;
+        const CheckAttestedKey* state = census->keys + keys[k];
+        const bool listed = state->stamp == census->stamp && state->local != BUSTER_ATTESTED_NONE;
+        const uint32_t head = listed ? census->lister_heads[state->local] : BUSTER_ATTESTED_NONE;
         // (A name the list holds twice takes one link.)
-        if (open && (head == BUSTER_ATTESTED_NONE || census->lister_declarations[head] != d))
+        if (listed && (head == BUSTER_ATTESTED_NONE || census->lister_declarations[head] != d))
         {
             const uint32_t link = census->lister_count;
             census->lister_declarations[link] = d;
@@ -2155,6 +2158,10 @@ static __attribute__((noinline)) void check_attested_chain(CheckAttested* census
         // own body: `struct node { struct node *next; }`).
         uint64_t open = 0;
         uint32_t completing = BUSTER_ATTESTED_NONE;
+        // The open names it lists, for their listers' links after its own names are declared (no branch a name: each
+        // key written, kept where it is open).
+        uint32_t* const opened = census->lister_keys;
+        uint32_t opened_count = 0;
         for (uint32_t n = start; n < end; n += 1)
         {
             // The names' states are the lane's, mostly out of the first two caches by the time the next unit lists them: a
@@ -2170,7 +2177,10 @@ static __attribute__((noinline)) void check_attested_chain(CheckAttested* census
             high += listed ? check_attested_mum(name ^ placed ^ BUSTER_ATTESTED_K2, BUSTER_ATTESTED_K3) : 0;
             completing = (classes & BUSTER_ATTESTED_COMPLETES) != 0 ? entry & BUSTER_ATTESTED_KEY_MASK : completing;
             const uint64_t incomplete = (classes & BUSTER_ATTESTED_TAG) != 0 && name == 0 ? BUSTER_ATTESTED_OPEN : 0;
-            open |= listed && (entry & BUSTER_ATTESTED_KEY_MASK) != completing ? (name & BUSTER_ATTESTED_OPEN) | incomplete : 0;
+            const uint64_t opens = listed && (entry & BUSTER_ATTESTED_KEY_MASK) != completing ? (name & BUSTER_ATTESTED_OPEN) | incomplete : 0;
+            opened[opened_count] = entry & BUSTER_ATTESTED_KEY_MASK;
+            opened_count += opens != 0 ? 1u : 0u;
+            open |= opens;
         }
         const CheckAttestedHash mixed = check_attested_step((CheckAttestedHash){ .low = own.low ^ ambient.low ^ low, .high = own.high ^ ambient.high ^ high }, end - start);
         const CheckAttestedHash unique = check_attested_step((CheckAttestedHash){ .low = BUSTER_ATTESTED_K2 ^ ((uint64_t)census->stamp << 32 | d), .high = BUSTER_ATTESTED_K1 ^ census->nonce },
@@ -2186,10 +2196,7 @@ static __attribute__((noinline)) void check_attested_chain(CheckAttested* census
         {
             check_attested_complete(census, d, open != 0);
         }
-        if (open != 0)
-        {
-            check_attested_listers(census, d);
-        }
+        check_attested_listers(census, d, opened, opened_count);
         // A body's names it may declare, each at the first body that may: from there on the name's hash is the lane's own
         // (from a definition's hash), and so is that of every later declaration that lists it, which then misses, as it
         // would after any later body's too. A definition is reached in every unit, so that it is no name's declarer in
@@ -2595,6 +2602,7 @@ static bool check_attested_unit_arrays(CheckAttested* census, uint32_t count, ui
     census->lister_heads = arena_push_array(arena, slots + 1, sizeof(uint32_t), 64);
     census->lister_declarations = arena_push_array(arena, slots, sizeof(uint32_t), 64);
     census->lister_next = arena_push_array(arena, slots, sizeof(uint32_t), 64);
+    census->lister_keys = arena_push_array(arena, slots, sizeof(uint32_t), 64);
     census->complete_declarations = arena_push_array(arena, slots, sizeof(uint32_t), 64);
     census->complete_lists = arena_push_array(arena, slots + 1, sizeof(uint32_t), 64);
     census->complete_pending = arena_push_array(arena, slots + 1, sizeof(uint32_t), 64);
