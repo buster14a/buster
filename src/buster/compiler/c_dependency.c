@@ -11,7 +11,8 @@
 // output and written destinations must be disjoint from one another and from
 // the input records and strings, which stay immutable for sizing and emission. A null output with zero capacity is a size query.
 // The result is a byte slice, not a NUL-terminated string. No allocation or I/O is
-// hidden here. Filename classification is a bounded AVX-512BW scan (dependency_special).
+// hidden here. Filename classification is one bounded AVX-512 scan (dependency_special: AVX-512BW, VBMI's vpermb
+// and BMI2's bzhi).
 
 #include <stdbool.h>
 #include <stddef.h>

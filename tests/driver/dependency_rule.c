@@ -48,24 +48,22 @@ static void dependency_test_rule(DependencyRule rule, const char* expected)
 {
     const size_t expected_length = strlen(expected);
     char output[4096];
+    memset(output, 0x5a, sizeof(output));
+    uint64_t needed = UINT64_MAX;
+    dependency_test_check(dependency_rule(&rule, NULL, 0, &needed) == DEPENDENCY_OK && needed == expected_length, "size query");
+    dependency_test_check(dependency_rule(&rule, output, expected_length, &needed) == DEPENDENCY_OK &&
+                          needed == expected_length && memcmp(output, expected, expected_length) == 0, "exact rule");
+    dependency_test_check(output[expected_length] == 0x5a, "no NUL or capacity overrun");
+    for (uint64_t capacity = 0; capacity < expected_length; capacity += 1)
     {
         memset(output, 0x5a, sizeof(output));
-        uint64_t needed = UINT64_MAX;
-        dependency_test_check(dependency_rule(&rule, NULL, 0, &needed) == DEPENDENCY_OK && needed == expected_length, "size query");
-        dependency_test_check(dependency_rule(&rule, output, expected_length, &needed) == DEPENDENCY_OK &&
-                              needed == expected_length && memcmp(output, expected, expected_length) == 0, "exact rule");
-        dependency_test_check(output[expected_length] == 0x5a, "no NUL or capacity overrun");
-        for (uint64_t capacity = 0; capacity < expected_length; capacity += 1)
+        dependency_test_check(dependency_rule(&rule, output, capacity, &needed) == DEPENDENCY_CAPACITY && needed == expected_length, "capacity rejection");
+        bool unchanged = true;
+        for (size_t i = 0; i < sizeof(output); i += 1)
         {
-            memset(output, 0x5a, sizeof(output));
-            dependency_test_check(dependency_rule(&rule, output, capacity, &needed) == DEPENDENCY_CAPACITY && needed == expected_length, "capacity rejection");
-            bool unchanged = true;
-            for (size_t i = 0; i < sizeof(output); i += 1)
-            {
-                unchanged = unchanged && output[i] == 0x5a;
-            }
-            dependency_test_check(unchanged, "capacity rejection preserves destination");
+            unchanged = unchanged && output[i] == 0x5a;
         }
+        dependency_test_check(unchanged, "capacity rejection preserves destination");
     }
 }
 
