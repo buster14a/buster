@@ -1849,6 +1849,15 @@ static int run_assembler_tests(int count, char** arguments)
                 kept |= escaped.link.atoms.size[a] == 65 && escaped.link.atoms.bytes[a][63] == '"' && escaped.link.atoms.bytes[a][64] == 'x';
             }
             asm_test_check(&test, kept, "a backslash on a string scan's 64th byte escapes the next block's '\"'", escaped.error);
+            // A "\\\\" pair split there: the next block's backslash is the escaped byte, so the '"' after it closes the string.
+            const int pair_length = snprintf(edge, sizeof(edge), ".data\n.ascii \"%.63s\\\\\"\n", "abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabc");
+            const AsmResult paired = asm_assemble((String8){.pointer = edge, .length = (uint64_t)pair_length}, test.index, (AsmOptions){0}, &test.vector);
+            bool closed = false;
+            for (uint32_t a = 1; paired.error == 0 && a < paired.link.atoms.count; a += 1)
+            {
+                closed |= paired.link.atoms.size[a] == 64 && paired.link.atoms.bytes[a][63] == '\\';
+            }
+            asm_test_check(&test, closed, "a \"\\\\\" pair split at a string scan's 64th byte escapes only its second backslash", paired.error);
             static const char slash[] = ".text\n/*/ nop */ ret\n";
             const AsmResult commented = asm_assemble(BUSTER_S8(slash), test.index, (AsmOptions){0}, &test.vector);
             asm_test_check(&test, commented.error == 0 && commented.link.atoms.count == 2 && commented.link.atoms.size[1] == 1 && commented.link.atoms.bytes[1][0] == 0xc3,

@@ -528,9 +528,9 @@ static uint32_t asm_scan_bytes(const uint8_t* source, uint32_t length, uint32_t 
 }
 
 // A string from its '"' at `at`: up to the first '"' or '\n' that no backslash escapes, a backslash escaping the byte
-// after it whatever it is (a line end too), as GNU as reads one. The escaped bytes of each 64 come from the
-// backslashes in order, a backslash that is itself escaped escaping nothing; one at a block's end escapes the next
-// block's first byte. Returns the offset past the closing '"', or the '\n' or end that leaves it open.
+// after it whatever it is (a line end too), as GNU as reads one. The escaped bytes of each 64 come from its runs of
+// backslashes by one addition (simdjson's method); a run that escapes past a block's end escapes the next block's
+// first byte. Returns the offset past the closing '"', or the '\n' or end that leaves it open.
 static uint32_t asm_scan_string(const uint8_t* source, uint32_t length, uint32_t at, bool* closed)
 {
     uint32_t result = length;
@@ -542,17 +542,16 @@ static uint32_t asm_scan_string(const uint8_t* source, uint32_t length, uint32_t
         const __mmask64 valid = _bzhi_u64(~0ull, n);
         const __m512i bytes = _mm512_maskz_loadu_epi8(valid, source + offset);
         const uint64_t ends = _mm512_mask_cmpeq_epi8_mask(valid, bytes, _mm512_set1_epi8('"')) | _mm512_mask_cmpeq_epi8_mask(valid, bytes, _mm512_set1_epi8('\n'));
-        uint64_t escaped = carried;
-        uint64_t backslashes = _mm512_mask_cmpeq_epi8_mask(valid, bytes, _mm512_set1_epi8('\\')) & ~carried;
-        carried = 0;
-        for (; backslashes != 0; backslashes &= backslashes - 1)
-        {
-            const uint32_t bit = (uint32_t)__builtin_ctzll(backslashes);
-            const uint64_t next = bit == 63 ? 0 : 1ull << (bit + 1);
-            const bool live = ((escaped >> bit) & 1) == 0;
-            escaped |= live ? next : 0;
-            carried |= live && bit == 63 ? 1 : 0;
-        }
+        // A run of backslashes escapes the byte after it when the run, less a first backslash the previous block
+        // escaped, has odd length: adding each run's odd-position start to the backslashes carries through the run
+        // and leaves the bit after it set exactly when its start and length differ in parity from the even bits.
+        const uint64_t even = UINT64_C(0x5555555555555555);
+        const uint64_t backslashes = _mm512_mask_cmpeq_epi8_mask(valid, bytes, _mm512_set1_epi8('\\')) & ~carried;
+        const uint64_t follows = (backslashes << 1) | carried;
+        const uint64_t odd_starts = backslashes & ~even & ~follows;
+        uint64_t sum = 0;
+        carried = __builtin_add_overflow(odd_starts, backslashes, &sum) ? 1 : 0;
+        const uint64_t escaped = (even ^ (sum << 1)) & follows;
         const uint64_t stop = ends & ~escaped;
         result = stop != 0 ? offset + (uint32_t)__builtin_ctzll(stop) : result;
         offset += n;
