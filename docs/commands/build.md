@@ -1324,6 +1324,41 @@ the previous stage (PATH): ...`), and `build.sh`'s report counts them among
 the units compiled. Develop's compile commands (`build/compile_commands.json`)
 have no entry for them, as for the benchmark units Develop leaves out.
 
+**Measured** on the 9700X with CI's toolchain, eight jobs, each build its own
+hold of the lock, the previous stage built before ([the
+record](https://github.com/buster14a/buster-performance/tree/60a1bc493/docs/measurements/self-built-units-2630-2026-11-23),
+medians):
+
+| Develop build | Without the setting | `BUSTER_SELF_BUILT=tests` |
+| --- | ---: | ---: |
+| Clean | 31.9 s | 27.7 s |
+| Nothing changed | 0.04 s | 0.03 s |
+| A function appended to `differential.c` (the backend's unit alone) | 6.55 s | 2.86 s |
+| ... to `x86_64_encoder.c` (12 units) | 14.75 s | 14.17 s |
+| ... to `tier0.c` (the checker's and the backend's units) | 14.17 s | 13.84 s |
+| ... to `c_check_input.c` (the checker's unit alone, clang's either way) | 15.65 s | 15.33 s |
+
+- **The gain is the edit of a file only those units read**: the previous stage
+  compiles the backend's unit in 2.4 s, where clang's build of it took 6.5 s
+  (its front end alone 3.4 s, then its split, a part and the link). A clean
+  build saves 4.2 s, 13%. An edit that the checker's unit reads waits for its
+  clang compile as before, and gains 0.3 to 0.6 s.
+- **The compile path doesn't change.** `-c sqlite3.c` ran the same
+  instructions within 50 of 1.31 billion, and 0.19% fewer user cycles;
+  `-fsyntax-only` of the checker's unit 0.04% fewer (`time-runs`, 11 runs a
+  list on one CPU).
+- **The units' own commands run 5.8% longer** (16 test commands: 18.0 s against
+  19.05 s, two rounds). `test-tier0` takes 4.65 s against 3.74 s,
+  `test-branch-sizing` 1.47 s against 1.08 s and `test-x86-encoder` 2.58 s
+  against 2.38 s, while `test-ssa` and `test-ir` run faster (2.10 s against
+  2.70 s): Develop compiles the tests' own functions `optnone` with clang, and
+  Tier 1 optimizes them. The other 12 commands of the list take the same 49.5 s.
+- **The correctness inventory passes on the hybrid**: every block in a cloud
+  container, and on the 9700X the five blocks that container's tools couldn't
+  judge (its GNU as, binutils 2.42, relaxes as the clang-built Release's checks
+  don't expect either; no perf; no Tcl) and the ownership check, fixed for the
+  previous stage's records.
+
 **Checks.** `build-regression --self-built-only` (and the full regression)
 builds Develop with `BUSTER_SELF_BUILT=tests` beside Release and checks that:
 
