@@ -188,6 +188,25 @@ struct FastTok
     uint32_t data;    // ident_id (IDENT/KW), inline u32 or num_pool index (INT/FLOAT), lit_pool index (STR)
 };
 
+// A token made in a register and given back whole. A token written a field at a time and then loaded whole waits for
+// its stores to leave the store buffer: Zen 5 forwards a store to a load only when the load lies inside that one store
+// (#2850's profile on the 9700X: 956 K failed forwards a compile of sqlite3.c, a fifth of them fast_lex_one's token).
+static inline FastTok fast_tok_make(uint32_t kind, uint32_t flags, uint32_t extra, uint32_t data)
+{
+    const uint64_t bits = (uint64_t)(kind & 0xffu) | ((uint64_t)(flags & 0xffu) << 8) | ((uint64_t)(extra & 0xffffu) << 16) | ((uint64_t)data << 32);
+    FastTok tok;
+    memcpy(&tok, &bits, sizeof(tok));
+    return tok;
+}
+
+// A lexed literal and where its text ends, in two registers.
+typedef struct FastLexed FastLexed;
+struct FastLexed
+{
+    const uint8_t* p;
+    FastTok tok;
+};
+
 // Literal pool slice (for string literals and float/large-int source text)
 typedef struct FastLitSlice FastLitSlice;
 struct FastLitSlice
@@ -1218,16 +1237,14 @@ static inline uint32_t fast_pp_add_lit(FastPP* pp, const char* bytes, uint32_t l
 // ---------------------------------------------------------------------------------------------------------------------
 // Fast single-token lexer from a byte buffer (handles splices, numbers, strings, punctuators, identifiers)
 
-// Parse integer or floating-point preprocessing number at [p, end).
-static const uint8_t* fast_lex_number(FastPP* pp, const uint8_t* p, const uint8_t* end, FastTok* tok)
+// Parse integer or floating-point preprocessing number at [p, end). `flags_in` are the token's flags so far.
+static FastLexed fast_lex_number(FastPP* pp, const uint8_t* p, const uint8_t* end, uint32_t flags_in)
 {
     const uint8_t* const start = p;
     // Fast path for single ASCII digit followed by non-ident/non-dot char (super common: 0, 1, 2, ...)
     if (__builtin_expect(p + 1 < end && (fast_char_class[p[1]] & 1u) == 0 && p[1] != '.' && p[1] != '\\' && p[1] != '\'', 1))
     {
-        tok->kind = FTOK_INT_LIT;
-        tok->data = (uint32_t)(p[0] - '0');
-        return p + 1;
+        return (FastLexed){ .p = p + 1, .tok = fast_tok_make(FTOK_INT_LIT, flags_in, 0, (uint32_t)(p[0] - '0')) };
     }
 
     bool is_float = false;
@@ -1288,22 +1305,24 @@ static const uint8_t* fast_lex_number(FastPP* pp, const uint8_t* p, const uint8_
     if (has_splice)
     {
         fast_pp_bail(pp, "spliced number");
-        return p;
+        return (FastLexed){ .p = p, .tok = fast_tok_make(FTOK_EOF, flags_in, 0, 0) };
     }
 
     const uint32_t len = (uint32_t)(p - start);
     if (is_float)
     {
-        tok->kind = FTOK_FLOAT_LIT;
+        uint32_t float_flags = flags_in;
+        uint32_t float_data = 0;
+        uint32_t float_extra = 0;
         // Check suffix f/F/l/L
         const uint8_t last = p[-1];
         if (last == 'f' || last == 'F')
         {
-            tok->flags |= BUSTER_FTOK_LONG; // f32
+            float_flags |= BUSTER_FTOK_LONG; // f32
         }
         else if (last == 'l' || last == 'L')
         {
-            tok->flags |= BUSTER_FTOK_LONGLONG; // f80 (long double)
+            float_flags |= BUSTER_FTOK_LONGLONG; // f80 (long double)
         }
         // Parse double immediately via strtod on small stack copy
         char buf[128];
@@ -1315,14 +1334,14 @@ static const uint8_t* fast_lex_number(FastPP* pp, const uint8_t* p, const uint8_
             const double d = strtod(buf, &ep);
             uint64_t bits = 0;
             memcpy(&bits, &d, 8);
-            tok->data = fast_pp_add_num(pp, bits);
-            tok->extra = (uint16_t)fast_pp_add_lit(pp, buf, len);
+            float_data = fast_pp_add_num(pp, bits);
+            float_extra = (uint16_t)fast_pp_add_lit(pp, buf, len);
         }
         else
         {
             fast_pp_bail(pp, "long float literal");
         }
-        return p;
+        return (FastLexed){ .p = p, .tok = fast_tok_make(FTOK_FLOAT_LIT, float_flags, float_extra, float_data) };
     }
 
     // Integer literal
@@ -1431,18 +1450,14 @@ static const uint8_t* fast_lex_number(FastPP* pp, const uint8_t* p, const uint8_
         }
     }
 
-    tok->kind = FTOK_INT_LIT;
-    tok->flags |= flags;
-    if (val <= UINT32_MAX)
+    uint32_t int_flags = flags_in | flags;
+    uint32_t int_data = (uint32_t)val;
+    if (val > UINT32_MAX)
     {
-        tok->data = (uint32_t)val;
+        int_flags |= BUSTER_FTOK_IN_POOL;
+        int_data = fast_pp_add_num(pp, val);
     }
-    else
-    {
-        tok->flags |= BUSTER_FTOK_IN_POOL;
-        tok->data = fast_pp_add_num(pp, val);
-    }
-    return p;
+    return (FastLexed){ .p = p, .tok = fast_tok_make(FTOK_INT_LIT, int_flags, 0, int_data) };
 }
 
 static inline uint64_t fast_tok_int_val(const FastPP* pp, FastTok tok)
@@ -1507,10 +1522,13 @@ static uint32_t fast_decode_escape(const uint8_t** pp_ptr, const uint8_t* end, b
 }
 
 // Lex string literal starting at '"' using AVX-512 to scan for '"' or '\' or '\n'
-static const uint8_t* fast_lex_string(FastPP* pp, const uint8_t* p, const uint8_t* end, FastTok* tok, uint16_t prefix_kind)
+static FastLexed fast_lex_string(FastPP* pp, const uint8_t* p, const uint8_t* end, uint32_t flags_in, uint16_t prefix_kind)
 {
     p += 1; // skip opening '"'
     const uint8_t* const start = p;
+    uint32_t tok_kind = FTOK_EOF;
+    uint32_t tok_extra = 0;
+    uint32_t tok_data = 0;
     const __m512i v_q = _mm512_set1_epi8('"');
     const __m512i v_bs = _mm512_set1_epi8('\\');
     const __m512i v_nl = _mm512_set1_epi8('\n');
@@ -1568,11 +1586,11 @@ static const uint8_t* fast_lex_string(FastPP* pp, const uint8_t* p, const uint8_
     {
         const uint32_t raw_len = (uint32_t)(p - start);
         p += 1; // skip closing '"'
-        tok->kind = FTOK_STR_LIT;
-        tok->extra = prefix_kind;
+        tok_kind = FTOK_STR_LIT;
+        tok_extra = prefix_kind;
         if (!has_escape)
         {
-            tok->data = fast_pp_add_lit(pp, (const char*)start, raw_len);
+            tok_data = fast_pp_add_lit(pp, (const char*)start, raw_len);
         }
         else if (pp->lit_count < pp->lit_cap && pp->lit_bytes_used + raw_len + 1u <= pp->lit_bytes_cap)
         {
@@ -1610,23 +1628,24 @@ static const uint8_t* fast_lex_string(FastPP* pp, const uint8_t* p, const uint8_
             pp->lit_bytes_used += out_len + 1u;
             const uint32_t idx = pp->lit_count++;
             pp->lit_slices[idx] = (FastLitSlice){ .offset = off, .length = out_len };
-            tok->data = idx;
+            tok_data = idx;
         }
         else
         {
             fast_pp_bail(pp, "lit_pool overflow");
         }
     }
-    return p;
+    return (FastLexed){ .p = p, .tok = fast_tok_make(tok_kind, flags_in, tok_extra, tok_data) };
 }
 
 // Lex character literal starting at '\''
-static const uint8_t* fast_lex_char(FastPP* pp, const uint8_t* p, const uint8_t* end, FastTok* tok, uint16_t prefix_kind)
+static FastLexed fast_lex_char(FastPP* pp, const uint8_t* p, const uint8_t* end, uint32_t flags_in, uint16_t prefix_kind)
 {
     p += 1; // skip opening '\''
     uint32_t val = 0;
     uint32_t chars = 0;
     bool ok = true;
+    FastTok tok = fast_tok_make(FTOK_EOF, flags_in, 0, 0);
     while (p < end && *p != '\'' && *p != '\n' && ok)
     {
         uint32_t ch = 0;
@@ -1653,11 +1672,9 @@ static const uint8_t* fast_lex_char(FastPP* pp, const uint8_t* p, const uint8_t*
         {
             val = (uint32_t)(int32_t)(int8_t)(val & 0xffu);
         }
-        tok->kind = FTOK_CHAR_LIT;
-        tok->extra = prefix_kind;
-        tok->data = val;
+        tok = fast_tok_make(FTOK_CHAR_LIT, flags_in, prefix_kind, val);
     }
-    return p;
+    return (FastLexed){ .p = p, .tok = tok };
 }
 
 // Lex ONE raw preprocessing token from [p, end), updating *line_count and *at_bol.
@@ -1668,7 +1685,12 @@ static BUSTER_DIRECT_HOT const uint8_t* fast_lex_one(FastPP* pp, const uint8_t* 
 {
     uint8_t flags = 0;
     bool bol = *at_bol;
-    FastTok tok = { 0 };
+    // The token's fields stay in registers and are stored once, whole (fast_tok_make).
+    uint32_t tok_kind = FTOK_EOF;
+    uint32_t tok_flags = 0;
+    uint32_t tok_data = 0;
+    FastLexed literal = { 0 };
+    bool is_literal = false;
 
     for (;;)
     {
@@ -1680,7 +1702,6 @@ static BUSTER_DIRECT_HOT const uint8_t* fast_lex_one(FastPP* pp, const uint8_t* 
         }
         if (p >= end)
         {
-            tok.kind = FTOK_EOF;
             break;
         }
         const uint8_t c = *p;
@@ -1688,7 +1709,6 @@ static BUSTER_DIRECT_HOT const uint8_t* fast_lex_one(FastPP* pp, const uint8_t* 
         {
             if (stop_at_eol)
             {
-                tok.kind = FTOK_EOF;
                 break;
             }
             p += 1;
@@ -1712,7 +1732,6 @@ static BUSTER_DIRECT_HOT const uint8_t* fast_lex_one(FastPP* pp, const uint8_t* 
                 if (p == NULL)
                 {
                     fast_pp_bail(pp, "unterminated block comment");
-                    tok.kind = FTOK_EOF;
                     p = end;
                     break;
                 }
@@ -1732,7 +1751,7 @@ static BUSTER_DIRECT_HOT const uint8_t* fast_lex_one(FastPP* pp, const uint8_t* 
             flags |= BUSTER_FTOK_BOL;
         }
         bol = false;
-        tok.flags = flags;
+        tok_flags = flags;
 
         const uint8_t cls = fast_char_class[c];
         if ((cls & 2u) != 0)
@@ -1741,12 +1760,14 @@ static BUSTER_DIRECT_HOT const uint8_t* fast_lex_one(FastPP* pp, const uint8_t* 
             if (p + 1 < end && (c == 'L' || c == 'u' || c == 'U') && (p[1] == '"' || p[1] == '\''))
             {
                 const uint16_t pk = c == 'L' ? 1u : c == 'u' ? 2u : 3u;
-                p = p[1] == '"' ? fast_lex_string(pp, p + 1, end, &tok, pk) : fast_lex_char(pp, p + 1, end, &tok, pk);
+                literal = p[1] == '"' ? fast_lex_string(pp, p + 1, end, flags, pk) : fast_lex_char(pp, p + 1, end, flags, pk);
+                is_literal = true;
                 break;
             }
             if (c == 'u' && p + 2 < end && p[1] == '8' && (p[2] == '"' || p[2] == '\''))
             {
-                p = p[2] == '"' ? fast_lex_string(pp, p + 2, end, &tok, 4u) : fast_lex_char(pp, p + 2, end, &tok, 4u);
+                literal = p[2] == '"' ? fast_lex_string(pp, p + 2, end, flags, 4u) : fast_lex_char(pp, p + 2, end, flags, 4u);
+                is_literal = true;
                 break;
             }
             const uint32_t len = fast_scan_ident_len(p, end);
@@ -1754,7 +1775,6 @@ static BUSTER_DIRECT_HOT const uint8_t* fast_lex_one(FastPP* pp, const uint8_t* 
             if (__builtin_expect(p + len < end && p[len] == '\\', 0))
             {
                 fast_pp_bail(pp, "spliced identifier");
-                tok.kind = FTOK_EOF;
                 p = end;
                 break;
             }
@@ -1765,7 +1785,6 @@ static BUSTER_DIRECT_HOT const uint8_t* fast_lex_one(FastPP* pp, const uint8_t* 
             if (__builtin_expect(id == 0, 0))
             {
                 fast_pp_bail(pp, "ident table full");
-                tok.kind = FTOK_EOF;
                 p = end;
                 break;
             }
@@ -1774,24 +1793,27 @@ static BUSTER_DIRECT_HOT const uint8_t* fast_lex_one(FastPP* pp, const uint8_t* 
                 const uint8_t kw = pp->idents.entries[id].kw_kind;
                 kw_resolved = kw != 0 ? kw : FTOK_IDENT;
             }
-            tok.kind = kw_resolved;
-            tok.data = id;
+            tok_kind = kw_resolved;
+            tok_data = id;
             p += len;
             break;
         }
         if ((cls & 4u) != 0)
         {
-            p = fast_lex_number(pp, p, end, &tok);
+            literal = fast_lex_number(pp, p, end, flags);
+            is_literal = true;
             break;
         }
         if (c == '"')
         {
-            p = fast_lex_string(pp, p, end, &tok, 0);
+            literal = fast_lex_string(pp, p, end, flags, 0);
+            is_literal = true;
             break;
         }
         if (c == '\'')
         {
-            p = fast_lex_char(pp, p, end, &tok, 0);
+            literal = fast_lex_char(pp, p, end, flags, 0);
+            is_literal = true;
             break;
         }
 
@@ -1800,92 +1822,92 @@ static BUSTER_DIRECT_HOT const uint8_t* fast_lex_one(FastPP* pp, const uint8_t* 
         const uint8_t c2 = p + 2 < end ? p[2] : 0;
         switch (c)
         {
-            case '(': tok.kind = FTOK_LPAREN; p += 1; break;
-            case ')': tok.kind = FTOK_RPAREN; p += 1; break;
-            case '{': tok.kind = FTOK_LBRACE; p += 1; break;
-            case '}': tok.kind = FTOK_RBRACE; p += 1; break;
-            case '[': tok.kind = FTOK_LBRACKET; p += 1; break;
-            case ']': tok.kind = FTOK_RBRACKET; p += 1; break;
-            case ';': tok.kind = FTOK_SEMI; p += 1; break;
-            case ',': tok.kind = FTOK_COMMA; p += 1; break;
-            case '?': tok.kind = FTOK_QUESTION; p += 1; break;
-            case ':': tok.kind = FTOK_COLON; p += 1; break;
-            case '~': tok.kind = FTOK_TILDE; p += 1; break;
+            case '(': tok_kind = FTOK_LPAREN; p += 1; break;
+            case ')': tok_kind = FTOK_RPAREN; p += 1; break;
+            case '{': tok_kind = FTOK_LBRACE; p += 1; break;
+            case '}': tok_kind = FTOK_RBRACE; p += 1; break;
+            case '[': tok_kind = FTOK_LBRACKET; p += 1; break;
+            case ']': tok_kind = FTOK_RBRACKET; p += 1; break;
+            case ';': tok_kind = FTOK_SEMI; p += 1; break;
+            case ',': tok_kind = FTOK_COMMA; p += 1; break;
+            case '?': tok_kind = FTOK_QUESTION; p += 1; break;
+            case ':': tok_kind = FTOK_COLON; p += 1; break;
+            case '~': tok_kind = FTOK_TILDE; p += 1; break;
             case '.':
-                if (c1 >= '0' && c1 <= '9') { p = fast_lex_number(pp, p, end, &tok); }
-                else if (c1 == '.' && c2 == '.') { tok.kind = FTOK_ELLIPSIS; p += 3; }
-                else { tok.kind = FTOK_DOT; p += 1; }
+                if (c1 >= '0' && c1 <= '9') { literal = fast_lex_number(pp, p, end, flags); is_literal = true; }
+                else if (c1 == '.' && c2 == '.') { tok_kind = FTOK_ELLIPSIS; p += 3; }
+                else { tok_kind = FTOK_DOT; p += 1; }
                 break;
             case '-':
-                if (c1 == '>') { tok.kind = FTOK_ARROW; p += 2; }
-                else if (c1 == '-') { tok.kind = FTOK_DEC; p += 2; }
-                else if (c1 == '=') { tok.kind = FTOK_SUB_ASSIGN; p += 2; }
-                else { tok.kind = FTOK_MINUS; p += 1; }
+                if (c1 == '>') { tok_kind = FTOK_ARROW; p += 2; }
+                else if (c1 == '-') { tok_kind = FTOK_DEC; p += 2; }
+                else if (c1 == '=') { tok_kind = FTOK_SUB_ASSIGN; p += 2; }
+                else { tok_kind = FTOK_MINUS; p += 1; }
                 break;
             case '+':
-                if (c1 == '+') { tok.kind = FTOK_INC; p += 2; }
-                else if (c1 == '=') { tok.kind = FTOK_ADD_ASSIGN; p += 2; }
-                else { tok.kind = FTOK_PLUS; p += 1; }
+                if (c1 == '+') { tok_kind = FTOK_INC; p += 2; }
+                else if (c1 == '=') { tok_kind = FTOK_ADD_ASSIGN; p += 2; }
+                else { tok_kind = FTOK_PLUS; p += 1; }
                 break;
             case '*':
-                if (c1 == '=') { tok.kind = FTOK_MUL_ASSIGN; p += 2; }
-                else { tok.kind = FTOK_STAR; p += 1; }
+                if (c1 == '=') { tok_kind = FTOK_MUL_ASSIGN; p += 2; }
+                else { tok_kind = FTOK_STAR; p += 1; }
                 break;
             case '/':
-                if (c1 == '=') { tok.kind = FTOK_DIV_ASSIGN; p += 2; }
-                else { tok.kind = FTOK_SLASH; p += 1; }
+                if (c1 == '=') { tok_kind = FTOK_DIV_ASSIGN; p += 2; }
+                else { tok_kind = FTOK_SLASH; p += 1; }
                 break;
             case '%':
-                if (c1 == '=') { tok.kind = FTOK_MOD_ASSIGN; p += 2; }
-                else { tok.kind = FTOK_PERCENT; p += 1; }
+                if (c1 == '=') { tok_kind = FTOK_MOD_ASSIGN; p += 2; }
+                else { tok_kind = FTOK_PERCENT; p += 1; }
                 break;
             case '&':
-                if (c1 == '&') { tok.kind = FTOK_LAND; p += 2; }
-                else if (c1 == '=') { tok.kind = FTOK_AND_ASSIGN; p += 2; }
-                else { tok.kind = FTOK_AMP; p += 1; }
+                if (c1 == '&') { tok_kind = FTOK_LAND; p += 2; }
+                else if (c1 == '=') { tok_kind = FTOK_AND_ASSIGN; p += 2; }
+                else { tok_kind = FTOK_AMP; p += 1; }
                 break;
             case '|':
-                if (c1 == '|') { tok.kind = FTOK_LOR; p += 2; }
-                else if (c1 == '=') { tok.kind = FTOK_OR_ASSIGN; p += 2; }
-                else { tok.kind = FTOK_PIPE; p += 1; }
+                if (c1 == '|') { tok_kind = FTOK_LOR; p += 2; }
+                else if (c1 == '=') { tok_kind = FTOK_OR_ASSIGN; p += 2; }
+                else { tok_kind = FTOK_PIPE; p += 1; }
                 break;
             case '^':
-                if (c1 == '=') { tok.kind = FTOK_XOR_ASSIGN; p += 2; }
-                else { tok.kind = FTOK_CARET; p += 1; }
+                if (c1 == '=') { tok_kind = FTOK_XOR_ASSIGN; p += 2; }
+                else { tok_kind = FTOK_CARET; p += 1; }
                 break;
             case '!':
-                if (c1 == '=') { tok.kind = FTOK_NE; p += 2; }
-                else { tok.kind = FTOK_BANG; p += 1; }
+                if (c1 == '=') { tok_kind = FTOK_NE; p += 2; }
+                else { tok_kind = FTOK_BANG; p += 1; }
                 break;
             case '=':
-                if (c1 == '=') { tok.kind = FTOK_EQ; p += 2; }
-                else { tok.kind = FTOK_ASSIGN; p += 1; }
+                if (c1 == '=') { tok_kind = FTOK_EQ; p += 2; }
+                else { tok_kind = FTOK_ASSIGN; p += 1; }
                 break;
             case '<':
                 if (c1 == '<')
                 {
-                    if (c2 == '=') { tok.kind = FTOK_SHL_ASSIGN; p += 3; }
-                    else { tok.kind = FTOK_LSHIFT; p += 2; }
+                    if (c2 == '=') { tok_kind = FTOK_SHL_ASSIGN; p += 3; }
+                    else { tok_kind = FTOK_LSHIFT; p += 2; }
                 }
-                else if (c1 == '=') { tok.kind = FTOK_LE; p += 2; }
-                else { tok.kind = FTOK_LT; p += 1; }
+                else if (c1 == '=') { tok_kind = FTOK_LE; p += 2; }
+                else { tok_kind = FTOK_LT; p += 1; }
                 break;
             case '>':
                 if (c1 == '>')
                 {
-                    if (c2 == '=') { tok.kind = FTOK_SHR_ASSIGN; p += 3; }
-                    else { tok.kind = FTOK_RSHIFT; p += 2; }
+                    if (c2 == '=') { tok_kind = FTOK_SHR_ASSIGN; p += 3; }
+                    else { tok_kind = FTOK_RSHIFT; p += 2; }
                 }
-                else if (c1 == '=') { tok.kind = FTOK_GE; p += 2; }
-                else { tok.kind = FTOK_GT; p += 1; }
+                else if (c1 == '=') { tok_kind = FTOK_GE; p += 2; }
+                else { tok_kind = FTOK_GT; p += 1; }
                 break;
             case '#':
-                if (c1 == '#') { tok.kind = FTOK_HASHHASH; p += 2; }
-                else { tok.kind = FTOK_HASH; p += 1; }
+                if (c1 == '#') { tok_kind = FTOK_HASHHASH; p += 2; }
+                else { tok_kind = FTOK_HASH; p += 1; }
                 break;
             default:
-                tok.kind = FTOK_PP_OTHER;
-                tok.data = c;
+                tok_kind = FTOK_PP_OTHER;
+                tok_data = c;
                 p += 1;
                 break;
         }
@@ -1893,7 +1915,15 @@ static BUSTER_DIRECT_HOT const uint8_t* fast_lex_one(FastPP* pp, const uint8_t* 
     }
 
     *at_bol = bol;
-    *out_tok = tok;
+    if (is_literal)
+    {
+        *out_tok = literal.tok;
+        p = literal.p;
+    }
+    else
+    {
+        *out_tok = fast_tok_make(tok_kind, tok_flags, 0, tok_data);
+    }
     return p;
 }
 
@@ -4527,11 +4557,11 @@ static BUSTER_DIRECT_HOT bool fast_pp_drain(FastPP* pp)
                     if (ch == '"' || ch == '\'')
                     {
                         if (f->guard_state == 0 || f->guard_state == 4u) { f->guard_state = 3u; }
-                        FastTok stok = { 0 };
-                        p = ch == '"' ? fast_lex_string(pp, p, end, &stok, 0) : fast_lex_char(pp, p, end, &stok, 0);
+                        const FastLexed lexed = ch == '"' ? fast_lex_string(pp, p, end, 0, 0) : fast_lex_char(pp, p, end, 0, 0);
+                        p = lexed.p;
                         bol = false;
                         pp->out_count = out_count;
-                        fast_pp_emit_soa(pp, stok);
+                        fast_pp_emit_soa(pp, lexed.tok);
                         out_count = pp->out_count;
                         continue;
                     }
@@ -4827,22 +4857,20 @@ static BUSTER_DIRECT_HOT bool fast_pp_drain(FastPP* pp)
                         }
                         else
                         {
-                            FastTok ntok = { 0 };
-                            (void)fast_lex_number(pp, p + b, p + b + len, &ntok);
+                            const FastLexed lexed = fast_lex_number(pp, p + b, p + b + len, 0);
                             const uint32_t saved_oc = pp->out_count;
                             pp->out_count = out_count + k;
-                            fast_pp_emit_soa(pp, ntok);
+                            fast_pp_emit_soa(pp, lexed.tok);
                             pp->out_count = saved_oc;
                         }
                     }
                     else
                     {
-                        FastTok ntok = { 0 };
-                        (void)fast_lex_number(pp, p + b, p + b + len, &ntok);
+                        const FastLexed lexed = fast_lex_number(pp, p + b, p + b + len, 0);
                         // Fast inline commit into slot out_count + k
                         const uint32_t saved_oc = pp->out_count;
                         pp->out_count = out_count + k;
-                        fast_pp_emit_soa(pp, ntok);
+                        fast_pp_emit_soa(pp, lexed.tok);
                         pp->out_count = saved_oc;
                     }
                 }
