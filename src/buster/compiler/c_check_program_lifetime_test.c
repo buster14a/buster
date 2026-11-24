@@ -861,8 +861,7 @@ static void check_test_program_lifetime_source(CheckTest* test, const char* sour
         .lifetimes = true,
         .lifetime_work = &work,
     };
-    ready = ready && check_program(&program, &parser, &input, &stream, &types.table, program_options, &input_arena, &scratch) && program.status == CHECK_PROGRAM_OK &&
-            program.lifetime_first != NULL;
+    ready = ready && check_program(&program, &parser, &input, &stream, &types.table, program_options, &input_arena, &scratch) && program.status == CHECK_PROGRAM_OK;
     char description[256];
     snprintf(description, sizeof(description), "%s: the source's program has its blocks' lifetimes", name);
     check_test_expect(test, ready, description);
@@ -905,9 +904,12 @@ static void check_test_program_lifetime_source(CheckTest* test, const char* sour
         }
         addressed[count] = 0;
         check_test_lifetime_entered_oracle(&parser, &input, program.cases, program.case_count, addressed, stamps, expected_first, &old_work);
+        bool has_block = false;
         for (uint32_t token = 0; equal && token < count; token += 1)
         {
-            equal = program.lifetime_first[token] == expected_first[token];
+            const uint32_t first = program.lifetime_first != NULL ? program.lifetime_first[token] : BUSTER_CHECK_NONE;
+            equal = first == expected_first[token];
+            has_block |= parser.tree.roles[token] == PARSE_ROLE_CLOSE_BLOCK;
             entered += parser.tree.roles[token] == PARSE_ROLE_CLOSE_BLOCK && located[token] != BUSTER_CHECK_NONE && expected_first[token] == BUSTER_CHECK_NONE;
         }
         snprintf(description, sizeof(description), "%s: the blocks jumps enter are the stamped walks', %u of them (at least %u)", name, entered, bypassed);
@@ -925,7 +927,7 @@ static void check_test_program_lifetime_source(CheckTest* test, const char* sour
                 }
                 const uint32_t stop = to_label ? BUSTER_CHECK_NONE : check_test_lifetime_loop(&parser, keywords, jump, kind == PARSE_KIND_BREAK);
                 const uint32_t label = to_label ? check_sparse_get(input.label_targets, jump) : BUSTER_CHECK_NONE;
-                const uint32_t expected = check_test_lifetime_left_oracle(&parser, program.lifetime_first, openings, closing, jump, stop, to_label, label, blocks, &old_work);
+                const uint32_t expected = check_test_lifetime_left_oracle(&parser, expected_first, openings, closing, jump, stop, to_label, label, blocks, &old_work);
                 uint32_t found = 0;
                 for (uint32_t c = 0; c < program.control_count && found <= expected; c += 1)
                 {
@@ -949,7 +951,7 @@ static void check_test_program_lifetime_source(CheckTest* test, const char* sour
         }
         snprintf(description, sizeof(description), "%s: each jump's lifetime ends are the ancestor walk's, %u of them (at least %u)", name, made, ends);
         check_test_expect(test, equal && made >= ends, description);
-        const uint64_t bound = (uint64_t)count * 8 + jumps + made;
+        const uint64_t bound = has_block ? (uint64_t)count * 8 + jumps + made : 0;
         snprintf(description, sizeof(description), "%s: the lifetime walks take %llu steps, at most %llu (8 a token, 1 a jump and 1 an end)", name,
                  (unsigned long long)work, (unsigned long long)bound);
         check_test_expect(test, work <= bound, description);
@@ -1086,6 +1088,8 @@ static void check_test_program_lifetime_jumps(CheckTest* test)
                       "the blocks jumps enter and the jumps' lifetime ends are the ancestor walks' on random forests");
     check_test_program_lifetime_sources(test, 40, &tally);
     check_test_program_lifetime_sources(test, 1024, &tally);
+    check_test_program_lifetime_source(test, "int f(int x){int y=x;if(x<0)return -y;else if(x==0)goto out;return y+1;out:return 0;}",
+                                       "lifetime-function-body-only", 0, 0, &tally);
     check_test_program_lifetime_source(test, check_test_lifetime_functions, "lifetime-functions-regions", 15, 21, &tally);
     arena_release(&arena);
 }

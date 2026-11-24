@@ -6427,7 +6427,8 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
     // The blocks' objects' lifetimes, asked for (#177): each block's locals, the room their controls take, and the two
     // columns of the pass that finds the blocks a jump enters, the first of which then keeps the writer's chain of the
     // blocks with lifetimes (#1355, check_program_lifetime_entered).
-    const bool lifetimes = valid && options.lifetimes;
+    // A function body's own locals live for the whole function. Only a CLOSE_BLOCK can own lifetime entries.
+    const bool lifetimes = valid && options.lifetimes && count != 0 && memchr(parser->tree.roles, PARSE_ROLE_CLOSE_BLOCK, count) != NULL;
     uint32_t* lifetime_first = lifetimes ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* lifetime_next = lifetimes ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, (uint64_t)count + 1) : 0;
     uint32_t* lifetime_nearest = lifetimes ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)count + 1) : 0;
