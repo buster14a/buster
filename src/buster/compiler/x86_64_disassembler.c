@@ -1603,7 +1603,7 @@ static uint32_t x86_decode_simple_batch(const uint8_t* source, uint32_t span, co
     return admitted;
 }
 
-static X86DecodeResult x86_disassemble(const uint8_t* source, uint64_t size, X86Decoded* output, uint64_t capacity)
+static X86DecodeResult x86_disassemble_old(const uint8_t* source, uint64_t size, X86Decoded* output, uint64_t capacity)
 {
     X86DecodeResult result = {0};
     if (!x86_decode_initialized || size > UINT32_MAX || (size != 0 && source == 0) || (capacity != 0 && output == 0))
@@ -1679,6 +1679,497 @@ static X86DecodeResult x86_disassemble(const uint8_t* source, uint64_t size, X86
                 }
             }
         }
+    }
+    return result;
+}
+
+// The lane decoder's view of a window: 4 bytes from each lane's dword position (x86_decode_extract on 128 bytes).
+static __m512i x86_decode_lane_bytes(const X86DecodeWindow* window, __m512i positions)
+{
+    const __m512i indices = _mm512_add_epi32(_mm512_mullo_epi32(positions, _mm512_set1_epi32(0x01010101)), _mm512_set1_epi32(0x03020100));
+    return _mm512_permutex2var_epi8(window->low, indices, window->high);
+}
+
+// A per-position field of the length pass (X86DecodeWindow) at each lane's start.
+static __m512i x86_decode_lane_field(__m512i starts, __m512i field)
+{
+    return _mm512_cvtepu8_epi32(_mm512_castsi512_si128(_mm512_permutexvar_epi8(starts, field)));
+}
+
+// The window's `count` instructions at `offsets` (from the window's start, `remaining` bytes of input from there), in
+// one pass of 16 lanes: their prefixes, VEX, XOP or EVEX header, compact key, form (the lane index; an ambiguous cell's
+// candidates in turn, in catalogue order), operands, validity and length. Writes the instructions before the first
+// that doesn't decode, and stops after one whose length isn't its hint (the caller's next window starts after it).
+// Returns how many it wrote; `status` is the first failure's (UNSUPPORTED or TRUNCATED), else OK.
+static uint32_t x86_decode_lanes(const X86DecodeWindow* window, uint64_t remaining, const uint8_t* offsets, const uint8_t* lengths, uint32_t count, uint64_t start,
+                                 X86Decoded* output, X86DecodeStatus* status)
+{
+    const uint16_t live = (uint16_t)((1u << count) - 1);
+    const __m512i zero = _mm512_setzero_si512();
+    const __m512i one = _mm512_set1_epi32(1);
+    const __m512i byte_mask = _mm512_set1_epi32(0xff);
+    const __m512i lane_starts = _mm512_maskz_loadu_epi8(live, offsets);
+    const __m512i starts = _mm512_cvtepu8_epi32(_mm512_castsi512_si128(lane_starts));
+    const __m512i run = x86_decode_lane_field(lane_starts, window->run);
+    const __m512i opcode_at = x86_decode_lane_field(lane_starts, window->opcode_at);
+    const __m512i map = x86_decode_lane_field(lane_starts, window->map);
+    const __m512i kind = x86_decode_lane_field(lane_starts, window->kind);
+    // Each lane's bytes, at most 15 (the input's end may come first).
+    const __m512i available = _mm512_min_epu32(_mm512_set1_epi32(15), _mm512_sub_epi32(_mm512_set1_epi32((int)(remaining < 127 ? remaining : 127)), starts));
+    const __m512i end = _mm512_add_epi32(starts, available);
+    // The prefixes, as x86_decode_header reads them: a REX ends them; FS, GS and SS's overrides and 67 once each; the
+    // others as codes (x86_decode_compact), three at most for any form.
+    __m512i codes = zero;
+    __m512i plain = zero;
+    __m512i segment = zero;
+    __m512i rex = zero;
+    uint16_t address32 = 0;
+    // A header error (a segment or 67 twice, a fifth plain prefix), and a prefix no form has (a byte without a code, a
+    // fourth plain one), which only the match refuses.
+    uint16_t malformed = 0;
+    uint16_t unmatched = 0;
+    uint16_t operand = 0;
+    uint16_t padding = live;
+    const uint32_t longest = _mm512_mask_reduce_max_epu32(live, run);
+    for (uint32_t k = 0; k < longest; k += 1)
+    {
+        const uint16_t active = live & _mm512_cmpgt_epu32_mask(run, _mm512_set1_epi32((int)k));
+        const __m512i byte = _mm512_and_si512(x86_decode_lane_bytes(window, _mm512_add_epi32(starts, _mm512_set1_epi32((int)k))), byte_mask);
+        const uint16_t is_rex = _mm512_cmpeq_epi32_mask(_mm512_and_si512(byte, _mm512_set1_epi32(0xf0)), _mm512_set1_epi32(0x40));
+        const uint16_t fs = _mm512_cmpeq_epi32_mask(byte, _mm512_set1_epi32(0x64));
+        const uint16_t gs = _mm512_cmpeq_epi32_mask(byte, _mm512_set1_epi32(0x65));
+        const uint16_t ss = _mm512_cmpeq_epi32_mask(byte, _mm512_set1_epi32(0x36));
+        const uint16_t is_address = _mm512_cmpeq_epi32_mask(byte, _mm512_set1_epi32(0x67));
+        const uint16_t is_segment = fs | gs | ss;
+        const uint16_t is_plain = active & ~is_rex & ~is_segment & ~is_address;
+        const uint16_t word = _mm512_cmpeq_epi32_mask(byte, _mm512_set1_epi32(0x66));
+        const uint16_t cs = _mm512_cmpeq_epi32_mask(byte, _mm512_set1_epi32(0x2e));
+        __m512i code = _mm512_maskz_mov_epi32(word, one);
+        code = _mm512_mask_mov_epi32(code, _mm512_cmpeq_epi32_mask(byte, _mm512_set1_epi32(0xf2)), _mm512_set1_epi32(2));
+        code = _mm512_mask_mov_epi32(code, _mm512_cmpeq_epi32_mask(byte, _mm512_set1_epi32(0xf3)), _mm512_set1_epi32(3));
+        code = _mm512_mask_mov_epi32(code, _mm512_cmpeq_epi32_mask(byte, _mm512_set1_epi32(0xf0)), _mm512_set1_epi32(4));
+        code = _mm512_mask_mov_epi32(code, cs, _mm512_set1_epi32(5));
+        code = _mm512_mask_mov_epi32(code, _mm512_cmpeq_epi32_mask(byte, _mm512_set1_epi32(0x3e)), _mm512_set1_epi32(6));
+        code = _mm512_mask_mov_epi32(code, _mm512_cmpeq_epi32_mask(byte, _mm512_set1_epi32(0x9b)), _mm512_set1_epi32(7));
+        unmatched |= is_plain & (_mm512_cmpeq_epi32_mask(code, zero) | _mm512_cmpge_epu32_mask(plain, _mm512_set1_epi32(3)));
+        malformed |= is_plain & _mm512_cmpge_epu32_mask(plain, _mm512_set1_epi32(4));
+        codes = _mm512_mask_or_epi32(codes, is_plain, codes, _mm512_sllv_epi32(code, _mm512_mullo_epi32(plain, _mm512_set1_epi32(3))));
+        plain = _mm512_mask_add_epi32(plain, is_plain, plain, one);
+        malformed |= active & is_segment & _mm512_cmpneq_epi32_mask(segment, zero);
+        segment = _mm512_mask_mov_epi32(segment, active & fs, _mm512_set1_epi32(BUSTER_X86_SEGMENT_FS));
+        segment = _mm512_mask_mov_epi32(segment, active & gs, _mm512_set1_epi32(BUSTER_X86_SEGMENT_GS));
+        segment = _mm512_mask_mov_epi32(segment, active & ss, _mm512_set1_epi32(BUSTER_X86_SEGMENT_SS));
+        malformed |= active & is_address & address32;
+        address32 |= active & is_address;
+        rex = _mm512_mask_mov_epi32(rex, active & is_rex, byte);
+        operand |= active & word;
+        padding &= ~active | word | cs;
+    }
+    const __m512i lead_at = _mm512_add_epi32(starts, run);
+    const __m512i lead4 = x86_decode_lane_bytes(window, lead_at);
+    const __m512i lead = _mm512_and_si512(lead4, byte_mask);
+    const __m512i p0 = _mm512_and_si512(_mm512_srli_epi32(lead4, 8), byte_mask);
+    const __m512i middle = _mm512_and_si512(_mm512_srli_epi32(lead4, 16), byte_mask);
+    const __m512i p1 = _mm512_srli_epi32(lead4, 24);
+    const uint16_t vex2 = _mm512_test_epi32_mask(kind, one);
+    const uint16_t vex3 = _mm512_test_epi32_mask(kind, _mm512_set1_epi32(2));
+    const uint16_t evex = _mm512_test_epi32_mask(kind, _mm512_set1_epi32(4));
+    const uint16_t vector = vex2 | vex3 | evex;
+    const __m512i opcode4 = x86_decode_lane_bytes(window, opcode_at);
+    const __m512i opcode = _mm512_and_si512(opcode4, byte_mask);
+    const __m512i next = _mm512_and_si512(_mm512_srli_epi32(opcode4, 8), byte_mask);
+    // Clang's long NOPs: 66 and CS bytes before 0F 1F are padding, one 66 kept.
+    padding &= _mm512_cmpgt_epu32_mask(run, zero) & ~vector & _mm512_cmpeq_epi32_mask(map, one) & _mm512_cmpeq_epi32_mask(opcode, _mm512_set1_epi32(0x1f)) &
+               _mm512_cmpeq_epi32_mask(lead, _mm512_set1_epi32(0x0f));
+    codes = _mm512_mask_mov_epi32(codes, padding, _mm512_maskz_mov_epi32(operand, one));
+    plain = _mm512_mask_mov_epi32(plain, padding, _mm512_maskz_mov_epi32(operand, one));
+    segment = _mm512_mask_mov_epi32(segment, padding, zero);
+    malformed &= ~padding;
+    unmatched &= ~padding;
+    address32 &= ~padding;
+    // The header's truncations and refusals, in x86_decode_header's order: the first that applies decides.
+    const __m512i vector_bytes = _mm512_mask_mov_epi32(_mm512_mask_mov_epi32(_mm512_maskz_mov_epi32(vex2, _mm512_set1_epi32(2)), vex3, _mm512_set1_epi32(3)), evex, _mm512_set1_epi32(4));
+    const uint16_t short_input = _mm512_cmplt_epu32_mask(available, _mm512_set1_epi32(15));
+    const uint16_t lead_missing = live & _mm512_cmpge_epu32_mask(lead_at, end);
+    uint16_t truncated = lead_missing & short_input;
+    uint16_t refused = lead_missing & ~short_input;
+    uint16_t open = live & ~lead_missing;
+    refused |= open & malformed;
+    open &= ~malformed;
+    const uint16_t vector_cut = open & vector & _mm512_cmpge_epu32_mask(_mm512_add_epi32(lead_at, vector_bytes), end);
+    truncated |= vector_cut;
+    open &= ~vector_cut;
+    const uint16_t vector_refused = open & ((vector & (_mm512_cmpneq_epi32_mask(plain, zero) | _mm512_cmpneq_epi32_mask(rex, zero))) |
+                                            (evex & (_mm512_test_epi32_mask(p0, _mm512_set1_epi32(8)) | _mm512_testn_epi32_mask(middle, _mm512_set1_epi32(4)) |
+                                                     _mm512_cmpeq_epi32_mask(map, _mm512_set1_epi32(4)) | _mm512_cmpeq_epi32_mask(map, _mm512_set1_epi32(7)))));
+    refused |= vector_refused;
+    open &= ~vector_refused;
+    const uint16_t opcode_cut = open & _mm512_cmpge_epu32_mask(opcode_at, end);
+    truncated |= opcode_cut;
+    open &= ~opcode_cut;
+    const uint16_t unmapped = open & _mm512_cmpge_epu32_mask(map, _mm512_set1_epi32(BUSTER_X86_DECODE_MAPS));
+    refused |= unmapped;
+    open &= ~unmapped;
+    // A prefix no form has matches nothing.
+    refused |= open & unmatched;
+    // The registers' high bits, vvvv, the decorations, W, L, pp and EVEX.b, as x86_decode_header has them.
+    const __m512i not_p0 = _mm512_xor_si512(p0, byte_mask);
+    __m512i r = _mm512_slli_epi32(_mm512_and_si512(rex, _mm512_set1_epi32(4)), 1);
+    __m512i x = _mm512_slli_epi32(_mm512_and_si512(rex, _mm512_set1_epi32(2)), 2);
+    __m512i b = _mm512_slli_epi32(_mm512_and_si512(rex, one), 3);
+    __m512i w = _mm512_and_si512(_mm512_srli_epi32(rex, 3), one);
+    r = _mm512_mask_mov_epi32(r, vector, _mm512_srli_epi32(_mm512_and_si512(not_p0, _mm512_set1_epi32(0x80)), 4));
+    r = _mm512_mask_or_epi32(r, evex, r, _mm512_and_si512(not_p0, _mm512_set1_epi32(16)));
+    x = _mm512_mask_mov_epi32(x, vex3 | evex, _mm512_srli_epi32(_mm512_and_si512(not_p0, _mm512_set1_epi32(0x40)), 3));
+    b = _mm512_mask_mov_epi32(b, vex3 | evex, _mm512_srli_epi32(_mm512_and_si512(not_p0, _mm512_set1_epi32(0x20)), 2));
+    x = _mm512_mask_mov_epi32(x, vex2, zero);
+    b = _mm512_mask_mov_epi32(b, vex2, zero);
+    w = _mm512_mask_mov_epi32(w, vex2, zero);
+    w = _mm512_mask_mov_epi32(w, vex3 | evex, _mm512_srli_epi32(middle, 7));
+    const __m512i high_rm = _mm512_maskz_mov_epi32(evex, _mm512_srli_epi32(_mm512_and_si512(not_p0, _mm512_set1_epi32(0x40)), 2));
+    const __m512i high_index = _mm512_maskz_mov_epi32(evex, _mm512_slli_epi32(_mm512_andnot_si512(p1, _mm512_set1_epi32(8)), 1));
+    __m512i vvvv = _mm512_maskz_mov_epi32(vex2, _mm512_and_si512(_mm512_srli_epi32(not_p0, 3), _mm512_set1_epi32(15)));
+    vvvv = _mm512_mask_mov_epi32(vvvv, vex3 | evex, _mm512_and_si512(_mm512_srli_epi32(_mm512_xor_si512(middle, byte_mask), 3), _mm512_set1_epi32(15)));
+    vvvv = _mm512_or_si512(vvvv, high_index);
+    const __m512i decorations = _mm512_maskz_mov_epi32(evex, _mm512_and_si512(p1, _mm512_set1_epi32(0xe7)));
+    __m512i length = _mm512_maskz_mov_epi32(vex2, _mm512_and_si512(_mm512_srli_epi32(p0, 2), one));
+    length = _mm512_mask_mov_epi32(length, vex3, _mm512_and_si512(_mm512_srli_epi32(middle, 2), one));
+    length = _mm512_mask_mov_epi32(length, evex, _mm512_and_si512(_mm512_srli_epi32(p1, 5), _mm512_set1_epi32(3)));
+    __m512i pp = _mm512_maskz_mov_epi32(vex2, _mm512_and_si512(p0, _mm512_set1_epi32(3)));
+    pp = _mm512_mask_mov_epi32(pp, vex3 | evex, _mm512_and_si512(middle, _mm512_set1_epi32(3)));
+    const __m512i broadcast = _mm512_maskz_mov_epi32(evex, _mm512_and_si512(_mm512_srli_epi32(p1, 4), one));
+    // The compact key (x86_decode_compact); a lane whose opcode is its last byte has no ModRM byte or memory bit, and
+    // its signatures match on their other bits (x86_decode_one's `header.end == size`).
+    const uint16_t has_next = _mm512_cmplt_epu32_mask(_mm512_add_epi32(opcode_at, one), end);
+    __m512i key = _mm512_or_si512(codes, _mm512_slli_epi32(w, 9));
+    key = _mm512_or_si512(key, _mm512_slli_epi32(length, 10));
+    key = _mm512_or_si512(key, _mm512_slli_epi32(broadcast, 12));
+    key = _mm512_or_si512(key, _mm512_slli_epi32(pp, 13));
+    key = _mm512_mask_or_epi32(key, has_next, key, _mm512_slli_epi32(next, 15));
+    key = _mm512_mask_or_epi32(key, has_next & _mm512_cmpneq_epi32_mask(_mm512_srli_epi32(next, 6), _mm512_set1_epi32(3)), key, _mm512_set1_epi32(1 << 23));
+    const __m512i family = _mm512_mask_mov_epi32(_mm512_maskz_mov_epi32(vex2 | vex3, one), evex, _mm512_set1_epi32(2));
+    const __m512i bucket = _mm512_add_epi32(_mm512_slli_epi32(_mm512_add_epi32(_mm512_mullo_epi32(family, _mm512_set1_epi32(BUSTER_X86_DECODE_MAPS)), map), 8), opcode);
+    uint32_t keys[16];
+    uint32_t buckets[16];
+    _mm512_storeu_si512(keys, key);
+    _mm512_storeu_si512(buckets, bucket);
+    // Each lane's candidates: its cell's row, or its list; a lane without a ModRM byte matches its bucket's entries on
+    // the bits it has, in order, into a list of its own.
+    const uint16_t* lists[16];
+    uint16_t singles[16][2];
+    uint16_t partial[16][65];
+    const uint16_t settled = refused | truncated;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        singles[i][0] = 0;
+        singles[i][1] = 0;
+        lists[i] = singles[i];
+        const uint32_t which = buckets[i] < BUSTER_X86_DECODE_BUCKETS ? buckets[i] : 0;
+        const X86DecodeBucket entries = x86_decode_buckets[which];
+        const X86DecodeLaneIndex* index = &x86_decode_lane_indices[which];
+        if (((settled >> i) & 1) == 0 && entries.count != 0 && ((has_next >> i) & 1) != 0 && (keys[i] & index->common_mask) == index->common_key)
+        {
+            const uint16_t cell = x86_decode_cells[index->first + _pext_u32(keys[i], index->varying)];
+            singles[i][0] = (cell & BUSTER_X86_DECODE_LIST) != 0 ? 0 : cell;
+            lists[i] = (cell & BUSTER_X86_DECODE_LIST) != 0 ? x86_decode_lists + (cell & ~BUSTER_X86_DECODE_LIST) : singles[i];
+        }
+        else if (((settled >> i) & 1) == 0 && ((has_next >> i) & 1) == 0)
+        {
+            uint32_t found = 0;
+            for (uint32_t j = 0; j < entries.count; j += 1)
+            {
+                const uint32_t entry = entries.first + j;
+                const uint32_t mask = x86_decode_compact(x86_decode_masks[entry], true) & ((1u << 15) - 1);
+                const uint32_t wanted = x86_decode_compact(x86_decode_keys[entry], false) & mask;
+                partial[i][found] = x86_decode_forms[entry];
+                found += (keys[i] & mask) == wanted;
+            }
+            partial[i][found] = 0;
+            lists[i] = partial[i];
+        }
+    }
+    // The candidates in rounds: a lane whose candidate is UNSUPPORTED takes its next one (x86_decode_one's order).
+    uint16_t pending = live & ~settled;
+    uint16_t decoded = 0;
+    uint32_t round = 0;
+    uint32_t rows[16] = { 0 };
+    __m512i done_immediate = zero;
+    __m512i done_displacement = zero;
+    __m512i done_registers = zero;
+    __m512i done_tail = zero;
+    __m512i done_length = zero;
+    uint16_t done_address32 = 0;
+    while (pending != 0)
+    {
+        uint32_t lane_forms[16] = { 0 };
+        uint32_t check_registers[16] = { 0 };
+        uint32_t check_memory[16] = { 0 };
+        uint32_t check_flags[16] = { 0 };
+        uint16_t candidates = 0;
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            const uint16_t row = ((pending >> i) & 1) != 0 ? lists[i][round] : 0;
+            rows[i] = ((pending >> i) & 1) != 0 ? row : rows[i];
+            lane_forms[i] = x86_decode_lane_forms[row];
+            check_registers[i] = x86_decode_checks[row].registers;
+            check_memory[i] = x86_decode_checks[row].memory;
+            check_flags[i] = x86_decode_checks[row].flags;
+            candidates |= (uint16_t)((row != 0) << i);
+        }
+        // A lane out of candidates is UNSUPPORTED.
+        refused |= pending & ~candidates;
+        pending &= candidates;
+        const __m512i form = _mm512_loadu_si512(lane_forms);
+        const __m512i row = _mm512_loadu_si512(rows);
+        const uint16_t has_modrm = _mm512_test_epi32_mask(form, _mm512_set1_epi32(BUSTER_X86_LANE_MODRM));
+        const uint16_t has_reg = _mm512_test_epi32_mask(form, _mm512_set1_epi32(BUSTER_X86_LANE_REG));
+        const uint16_t plus = _mm512_test_epi32_mask(form, _mm512_set1_epi32(BUSTER_X86_LANE_PLUS));
+        const uint16_t fixed = _mm512_test_epi32_mask(form, _mm512_set1_epi32(BUSTER_X86_LANE_FIXED));
+        const uint16_t fixed_plus = _mm512_test_epi32_mask(form, _mm512_set1_epi32(BUSTER_X86_LANE_FIXED_PLUS));
+        const uint16_t form_address = _mm512_test_epi32_mask(form, _mm512_set1_epi32(BUSTER_X86_LANE_ADDRESS));
+        const uint16_t allowed_segment = _mm512_test_epi32_mask(_mm512_srlv_epi32(form, _mm512_add_epi32(segment, _mm512_set1_epi32(BUSTER_X86_LANE_SEGMENTS))), one);
+        const uint16_t nop = _mm512_test_epi32_mask(form, _mm512_set1_epi32(BUSTER_X86_LANE_NOP));
+        const uint16_t lane_address32 = address32 & ~form_address;
+        uint16_t valid = pending & (address32 | ~form_address) & allowed_segment & ~(nop & _mm512_test_epi32_mask(b, b));
+        __m512i at = _mm512_add_epi32(opcode_at, one);
+        const __m512i fixed_byte = _mm512_and_si512(x86_decode_lane_bytes(window, at), byte_mask);
+        at = _mm512_mask_add_epi32(at, fixed, at, one);
+        __m512i rm = _mm512_maskz_mov_epi32(plus, _mm512_or_si512(_mm512_and_si512(opcode, _mm512_set1_epi32(7)), b));
+        rm = _mm512_mask_mov_epi32(rm, fixed_plus, _mm512_or_si512(_mm512_and_si512(fixed_byte, _mm512_set1_epi32(7)), b));
+        const __m512i modrm4 = x86_decode_lane_bytes(window, at);
+        const __m512i modrm = _mm512_and_si512(modrm4, byte_mask);
+        const __m512i sib = _mm512_and_si512(_mm512_srli_epi32(modrm4, 8), byte_mask);
+        at = _mm512_mask_add_epi32(at, has_modrm, at, one);
+        const __m512i mod = _mm512_srli_epi32(modrm, 6);
+        const __m512i modrm_rm = _mm512_and_si512(modrm, _mm512_set1_epi32(7));
+        const __m512i reg = _mm512_maskz_mov_epi32(has_reg, _mm512_or_si512(_mm512_and_si512(_mm512_srli_epi32(modrm, 3), _mm512_set1_epi32(7)), r));
+        const uint16_t direct = has_modrm & _mm512_cmpeq_epi32_mask(mod, _mm512_set1_epi32(3));
+        const uint16_t memory = has_modrm & ~direct;
+        rm = _mm512_mask_mov_epi32(rm, direct, _mm512_or_si512(_mm512_or_si512(modrm_rm, b), high_rm));
+        const uint16_t has_sib = memory & _mm512_cmpeq_epi32_mask(modrm_rm, _mm512_set1_epi32(4));
+        const uint16_t mod0 = _mm512_cmpeq_epi32_mask(mod, zero);
+        const uint16_t vsib = _mm512_test_epi32_mask(form, _mm512_set1_epi32(BUSTER_X86_LANE_VSIB));
+        const uint16_t sib_operand = _mm512_test_epi32_mask(form, _mm512_set1_epi32(BUSTER_X86_LANE_SIB));
+        const __m512i index = _mm512_or_si512(_mm512_or_si512(_mm512_and_si512(_mm512_srli_epi32(sib, 3), _mm512_set1_epi32(7)), x), _mm512_maskz_mov_epi32(vsib, high_index));
+        const uint16_t has_index = has_sib & (_mm512_cmpneq_epi32_mask(index, _mm512_set1_epi32(4)) | vsib | sib_operand);
+        const uint16_t sib_base5 = _mm512_cmpeq_epi32_mask(_mm512_and_si512(sib, _mm512_set1_epi32(7)), _mm512_set1_epi32(5));
+        const uint16_t sib_base = has_sib & ~(mod0 & sib_base5);
+        const uint16_t rip = memory & ~has_sib & mod0 & _mm512_cmpeq_epi32_mask(modrm_rm, _mm512_set1_epi32(5));
+        const uint16_t plain_base = memory & ~has_sib & ~rip;
+        rm = _mm512_mask_mov_epi32(rm, sib_base, _mm512_or_si512(_mm512_and_si512(sib, _mm512_set1_epi32(7)), b));
+        rm = _mm512_mask_mov_epi32(rm, plain_base, _mm512_or_si512(modrm_rm, b));
+        __m512i mode = _mm512_maskz_mov_epi32(memory, _mm512_set1_epi32(BUSTER_X86_MODE_MEMORY));
+        mode = _mm512_mask_or_epi32(mode, has_index, mode, _mm512_or_si512(_mm512_set1_epi32(BUSTER_X86_MODE_INDEX), _mm512_srli_epi32(sib, 6)));
+        mode = _mm512_mask_or_epi32(mode, sib_base | plain_base, mode, _mm512_set1_epi32(BUSTER_X86_MODE_BASE));
+        mode = _mm512_mask_or_epi32(mode, rip, mode, _mm512_set1_epi32(BUSTER_X86_MODE_RIP));
+        at = _mm512_mask_add_epi32(at, has_sib, at, one);
+        const uint16_t disp1 = memory & _mm512_cmpeq_epi32_mask(mod, one);
+        const uint16_t disp4 = (memory & _mm512_cmpeq_epi32_mask(mod, _mm512_set1_epi32(2))) | rip | (has_sib & mod0 & sib_base5);
+        const __m512i displacement_raw = x86_decode_lane_bytes(window, at);
+        __m512i displacement = _mm512_maskz_mov_epi32(disp4, displacement_raw);
+        const __m512i scale = _mm512_and_si512(_mm512_srli_epi32(form, 8), byte_mask);
+        displacement = _mm512_mask_mov_epi32(displacement, disp1, _mm512_mullo_epi32(_mm512_srai_epi32(_mm512_slli_epi32(displacement_raw, 24), 24), scale));
+        at = _mm512_mask_add_epi32(at, disp1, at, one);
+        at = _mm512_mask_add_epi32(at, disp4, at, _mm512_set1_epi32(4));
+        const __m512i relative_width = _mm512_and_si512(_mm512_srli_epi32(form, 4), _mm512_set1_epi32(15));
+        const __m512i relative_raw = x86_decode_lane_bytes(window, at);
+        const __m512i relative_shift = _mm512_sub_epi32(_mm512_set1_epi32(32), _mm512_slli_epi32(relative_width, 3));
+        displacement = _mm512_mask_mov_epi32(displacement, _mm512_cmpneq_epi32_mask(relative_width, zero), _mm512_srav_epi32(_mm512_sllv_epi32(relative_raw, relative_shift), relative_shift));
+        at = _mm512_add_epi32(at, relative_width);
+        const __m512i immediate_width = _mm512_and_si512(form, _mm512_set1_epi32(15));
+        const __m512i immediate_raw = x86_decode_lane_bytes(window, at);
+        const __m512i immediate_shift = _mm512_sub_epi32(_mm512_set1_epi32(32), _mm512_slli_epi32(_mm512_min_epu32(immediate_width, _mm512_set1_epi32(4)), 3));
+        const __m512i immediate = _mm512_and_si512(immediate_raw, _mm512_srlv_epi32(_mm512_set1_epi32(-1), immediate_shift));
+        const uint16_t immediate64 = _mm512_cmpeq_epi32_mask(immediate_width, _mm512_set1_epi32(8));
+        displacement = _mm512_mask_mov_epi32(displacement, immediate64, x86_decode_lane_bytes(window, _mm512_add_epi32(at, _mm512_set1_epi32(4))));
+        at = _mm512_add_epi32(at, immediate_width);
+        // VEX's and EVEX's vvvv and decorations; without REX, a byte register 4-7 is AH, CH, DH or BH.
+        __m512i lane_vvvv = _mm512_maskz_mov_epi32(vector, vvvv);
+        lane_vvvv = _mm512_mask_and_epi32(lane_vvvv, evex & vsib, lane_vvvv, _mm512_set1_epi32(15));
+        const __m512i decoration_mask = _mm512_mask_blend_epi32(_mm512_test_epi32_mask(form, _mm512_set1_epi32(BUSTER_X86_LANE_ROUNDING)), _mm512_set1_epi32(0x87), _mm512_set1_epi32(0xe7));
+        const __m512i lane_decorations = _mm512_maskz_and_epi32(vector, decorations, decoration_mask);
+        const uint16_t no_rex = ~vector & _mm512_cmpeq_epi32_mask(rex, zero);
+        const __m512i four = _mm512_set1_epi32(4);
+        const uint16_t high_reg = no_rex & _mm512_test_epi32_mask(form, _mm512_set1_epi32(BUSTER_X86_LANE_REG8)) & _mm512_cmpge_epu32_mask(reg, four);
+        const uint16_t high_rm8 = no_rex & ~memory & _mm512_test_epi32_mask(form, _mm512_set1_epi32(BUSTER_X86_LANE_RM8)) & _mm512_cmpge_epu32_mask(rm, four);
+        const __m512i lane_reg = _mm512_mask_or_epi32(reg, high_reg, reg, _mm512_set1_epi32(BUSTER_X86_REGISTER_HIGH_BYTE));
+        const __m512i lane_rm = _mm512_mask_or_epi32(rm, high_rm8, rm, _mm512_set1_epi32(BUSTER_X86_REGISTER_HIGH_BYTE));
+        const __m512i lane_index = _mm512_maskz_mov_epi32(has_index, index);
+        // Its length, complete when the input has it, and too long past 15 bytes.
+        const __m512i instruction_length = _mm512_sub_epi32(at, starts);
+        const uint16_t overlong = _mm512_cmpgt_epu32_mask(instruction_length, _mm512_set1_epi32(15));
+        const uint16_t complete = _mm512_cmple_epu32_mask(at, end) & ~overlong;
+        // The compact checks (x86_decode_valid); the other rows take the full validator.
+        const __m512i fields = _mm512_or_si512(_mm512_or_si512(lane_reg, _mm512_slli_epi32(lane_rm, 8)), _mm512_or_si512(_mm512_slli_epi32(lane_vvvv, 16), _mm512_slli_epi32(lane_decorations, 24)));
+        const __m512i flags = _mm512_loadu_si512(check_flags);
+        const uint16_t compact = _mm512_test_epi32_mask(flags, one);
+        const uint16_t memory_mode = _mm512_test_epi32_mask(mode, _mm512_set1_epi32(BUSTER_X86_MODE_MEMORY));
+        const __m512i allowed_shift = _mm512_add_epi32(_mm512_add_epi32(_mm512_set1_epi32(2), _mm512_maskz_mov_epi32(lane_address32, four)), segment);
+        __m512i allowed = _mm512_maskz_mov_epi32(memory_mode, _mm512_sllv_epi32(one, allowed_shift));
+        allowed = _mm512_mask_mov_epi32(allowed, ~memory_mode & _mm512_cmpeq_epi32_mask(segment, zero), _mm512_set1_epi32(2));
+        const __m512i check = _mm512_mask_blend_epi32(memory_mode, _mm512_loadu_si512(check_registers), _mm512_loadu_si512(check_memory));
+        const uint16_t zeroing = _mm512_test_epi32_mask(lane_decorations, _mm512_set1_epi32(BUSTER_X86_DECORATION_ZEROING));
+        const uint16_t unmasked = _mm512_testn_epi32_mask(lane_decorations, _mm512_set1_epi32(BUSTER_X86_DECORATION_MASK));
+        const uint16_t memory_zeroing = memory_mode & _mm512_test_epi32_mask(flags, _mm512_set1_epi32(1 << 10));
+        const uint16_t checked = _mm512_test_epi32_mask(flags, allowed) & _mm512_testn_epi32_mask(fields, check) & ~(zeroing & (unmasked | memory_zeroing));
+        const __m512i record_registers = _mm512_or_si512(_mm512_or_si512(lane_reg, _mm512_slli_epi32(lane_rm, 8)), _mm512_or_si512(_mm512_slli_epi32(lane_index, 16), _mm512_slli_epi32(mode, 24)));
+        const __m512i record_tail = _mm512_or_si512(_mm512_add_epi32(row, _mm512_mullo_epi32(segment, _mm512_set1_epi32(X86_FORM_COUNT))),
+                                                    _mm512_or_si512(_mm512_slli_epi32(lane_vvvv, 16), _mm512_slli_epi32(lane_decorations, 24)));
+        uint16_t accepted = valid & complete & compact & checked;
+        uint16_t full = valid & complete & ~compact;
+        if (full != 0)
+        {
+            uint32_t words[4][16];
+            _mm512_storeu_si512(words[0], immediate);
+            _mm512_storeu_si512(words[1], displacement);
+            _mm512_storeu_si512(words[2], record_registers);
+            _mm512_storeu_si512(words[3], record_tail);
+            for (uint32_t i = 0; i < count; i += 1)
+            {
+                if (((full >> i) & 1) != 0)
+                {
+                    X86Instruction instruction;
+                    memcpy(&instruction.immediate, &words[0][i], 4);
+                    memcpy(&instruction.displacement, &words[1][i], 4);
+                    memcpy(&instruction.reg, &words[2][i], 4);
+                    memcpy(&instruction.form, &words[3][i], 4);
+                    const bool lane_valid = ((lane_address32 >> i) & 1) != 0 ? x86_instruction_is_valid_address32(&instruction) : x86_instruction_is_valid(&instruction);
+                    accepted |= (uint16_t)((uint32_t)lane_valid << i);
+                }
+            }
+        }
+        const uint16_t cut = valid & ~complete & ~overlong;
+        done_immediate = _mm512_mask_mov_epi32(done_immediate, accepted, immediate);
+        done_displacement = _mm512_mask_mov_epi32(done_displacement, accepted, displacement);
+        done_registers = _mm512_mask_mov_epi32(done_registers, accepted, record_registers);
+        done_tail = _mm512_mask_mov_epi32(done_tail, accepted, record_tail);
+        done_length = _mm512_mask_mov_epi32(done_length, accepted, instruction_length);
+        done_address32 |= accepted & lane_address32;
+        decoded |= accepted;
+        truncated |= cut;
+        pending &= ~accepted & ~cut;
+        round += 1;
+    }
+    // A lane starting with FWAIT whose waiting form didn't decode is FWAIT alone, one byte.
+    const uint16_t wait = live & ~decoded & _mm512_cmpeq_epi32_mask(_mm512_and_si512(x86_decode_lane_bytes(window, starts), byte_mask), _mm512_set1_epi32(0x9b));
+    done_tail = _mm512_mask_mov_epi32(done_tail, wait, _mm512_set1_epi32(X86_FORM_FWAIT));
+    done_length = _mm512_mask_mov_epi32(done_length, wait, one);
+    done_immediate = _mm512_mask_mov_epi32(done_immediate, wait, zero);
+    done_displacement = _mm512_mask_mov_epi32(done_displacement, wait, zero);
+    done_registers = _mm512_mask_mov_epi32(done_registers, wait, zero);
+    done_address32 &= ~wait;
+    decoded |= wait;
+    refused &= ~wait;
+    truncated &= ~wait;
+    // In order: the lanes before the first failure, and none after a lane whose length isn't its hint.
+    uint32_t words[5][16];
+    _mm512_storeu_si512(words[0], done_immediate);
+    _mm512_storeu_si512(words[1], done_displacement);
+    _mm512_storeu_si512(words[2], done_registers);
+    _mm512_storeu_si512(words[3], done_tail);
+    _mm512_storeu_si512(words[4], done_length);
+    uint32_t written = 0;
+    bool more = true;
+    *status = X86_DECODE_OK;
+    for (uint32_t i = 0; i < count && more; i += 1)
+    {
+        if (((decoded >> i) & 1) != 0)
+        {
+            X86Decoded lane = { .offset = (uint32_t)(start + offsets[i]), .length = (uint8_t)words[4][i], .address32 = (uint8_t)((done_address32 >> i) & 1) };
+            memcpy(&lane.instruction.immediate, &words[0][i], 4);
+            memcpy(&lane.instruction.displacement, &words[1][i], 4);
+            memcpy(&lane.instruction.reg, &words[2][i], 4);
+            memcpy(&lane.instruction.form, &words[3][i], 4);
+            output[written] = lane;
+            written += 1;
+            more = lengths[offsets[i]] == words[4][i];
+        }
+        else
+        {
+            *status = ((truncated >> i) & 1) != 0 ? X86_DECODE_TRUNCATED : X86_DECODE_UNSUPPORTED;
+            more = false;
+        }
+    }
+    return written;
+}
+
+// Decodes `source[0, size)` into at most `capacity` records, a window at a time: the length pass (x86_decode_lengths)
+// chains up to 16 instruction starts through the hints, and the lane decoder (x86_decode_lanes) decodes them in one
+// pass; the next window starts after the last instruction decoded.
+static X86DecodeResult x86_disassemble(const uint8_t* source, uint64_t size, X86Decoded* output, uint64_t capacity)
+{
+    X86DecodeResult result = {0};
+    if (!x86_decode_initialized || size > UINT32_MAX || (size != 0 && source == 0) || (capacity != 0 && output == 0))
+    {
+        result.status = X86_DECODE_BAD_ARGUMENT;
+    }
+    while (result.status == X86_DECODE_OK && result.consumed < size)
+    {
+        if (result.count == capacity)
+        {
+            result.status = X86_DECODE_OUTPUT_FULL;
+        }
+        else
+        {
+            const uint64_t start = result.consumed;
+            const uint64_t remaining = size - start;
+            uint8_t lengths[64];
+            X86DecodeWindow window;
+            x86_decode_lengths(source + start, remaining, lengths, &window);
+            // The starts: each lane's 15 bytes lie inside the window's 128.
+            uint8_t offsets[16] = {0};
+            uint32_t count = 0;
+            uint32_t end = 0;
+            bool known = true;
+            while (known && count < 16 && count < capacity - result.count && end < remaining && end < 64)
+            {
+                offsets[count] = (uint8_t)end;
+                count += 1;
+                known = lengths[end] != 0;
+                end += lengths[end];
+            }
+            X86DecodeStatus status = X86_DECODE_OK;
+            const uint32_t written = x86_decode_lanes(&window, remaining, offsets, lengths, count, start, output + result.count, &status);
+            result.count += written;
+            result.consumed = written != 0 ? output[result.count - 1].offset + output[result.count - 1].length : result.consumed;
+            result.status = status;
+        }
+    }
+    if (getenv("BUSTER_LANES_CHECK") != NULL && result.status != X86_DECODE_BAD_ARGUMENT)
+    {
+        X86Decoded* old = malloc(sizeof(X86Decoded) * (capacity != 0 ? capacity : 1));
+        const X86DecodeResult reference = x86_disassemble_old(source, size, old, capacity);
+        bool same = reference.count == result.count && reference.consumed == result.consumed && reference.status == result.status;
+        uint64_t first = UINT64_MAX;
+        const uint64_t compared = reference.count < result.count ? reference.count : result.count;
+        for (uint64_t i = 0; i < compared && first == UINT64_MAX; i += 1)
+        {
+            first = memcmp(&old[i], &output[i], sizeof(X86Decoded)) == 0 ? first : i;
+        }
+        same = same && first == UINT64_MAX;
+        if (!same)
+        {
+            fprintf(stderr, "lanes check: size %llu: old count %llu consumed %llu status %u, new %llu %llu %u, first differing record %lld\n", (unsigned long long)size,
+                    (unsigned long long)reference.count, (unsigned long long)reference.consumed, reference.status, (unsigned long long)result.count,
+                    (unsigned long long)result.consumed, result.status, (long long)first);
+            const uint64_t at = first != UINT64_MAX ? old[first].offset : (reference.consumed < result.consumed ? reference.consumed : result.consumed);
+            fprintf(stderr, "  bytes at %llu:", (unsigned long long)at);
+            for (uint64_t k = at; k < at + 16 && k < size; k += 1)
+            {
+                fprintf(stderr, " %02x", source[k]);
+            }
+            fprintf(stderr, "\n");
+            if (first != UINT64_MAX)
+            {
+                const X86Decoded* o = &old[first];
+                const X86Decoded* n = &output[first];
+                fprintf(stderr, "  old form %u len %u reg %u rm %u idx %u mode %u imm %d disp %d vvvv %u dec %u a32 %u\n", o->instruction.form, o->length, o->instruction.reg, o->instruction.rm,
+                        o->instruction.index, o->instruction.mode, o->instruction.immediate, o->instruction.displacement, o->instruction.vvvv, o->instruction.decorations, o->address32);
+                fprintf(stderr, "  new form %u len %u reg %u rm %u idx %u mode %u imm %d disp %d vvvv %u dec %u a32 %u\n", n->instruction.form, n->length, n->instruction.reg, n->instruction.rm,
+                        n->instruction.index, n->instruction.mode, n->instruction.immediate, n->instruction.displacement, n->instruction.vvvv, n->instruction.decorations, n->address32);
+            }
+        }
+        free(old);
     }
     return result;
 }
