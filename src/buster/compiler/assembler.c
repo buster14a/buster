@@ -515,15 +515,14 @@ static uint32_t asm_scan_line_end(const uint8_t* source, uint32_t length, uint32
 {
     uint32_t result = length;
     uint32_t block = origin;
-    uint64_t below = _bzhi_u64(~0ull, from - origin);
     while (block < length && result == length)
     {
         const uint32_t n = length - block < 64 ? length - block : 64;
+        const uint64_t below = from > block ? _bzhi_u64(~0ull, from - block) : 0;
         const __m512i bytes = block == origin ? first : _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, n), source + block);
         const uint64_t found = _mm512_mask_cmpeq_epi8_mask(_bzhi_u64(~0ull, n) & ~below, bytes, _mm512_set1_epi8('\n'));
         result = found != 0 ? block + (uint32_t)__builtin_ctzll(found) : result;
         block += n;
-        below = 0;
     }
     return result;
 }
@@ -536,12 +535,14 @@ static uint32_t asm_scan_string(const uint8_t* source, uint32_t length, uint32_t
 {
     uint32_t result = length;
     uint32_t block = origin;
-    uint64_t below = _bzhi_u64(~0ull, at + 1 - origin);
+    const uint32_t start = at + 1;
     uint64_t carried = 0;
     *closed = false;
     while (block < length && result == length)
     {
         const uint32_t n = length - block < 64 ? length - block : 64;
+        // The bytes before the string's first, which reach past the lexer's block when the quote is its last byte.
+        const uint64_t below = start > block ? _bzhi_u64(~0ull, start - block) : 0;
         const __mmask64 valid = _bzhi_u64(~0ull, n) & ~below;
         const __m512i bytes = block == origin ? first : _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, n), source + block);
         const uint64_t quotes = _mm512_mask_cmpeq_epi8_mask(valid, bytes, _mm512_set1_epi8('"'));
@@ -561,7 +562,6 @@ static uint32_t asm_scan_string(const uint8_t* source, uint32_t length, uint32_t
         // Whether the first stop is a quote, from the masks rather than a load of the byte at `result`.
         *closed = (stop & (0 - stop) & quotes) != 0;
         block += n;
-        below = 0;
     }
     return *closed ? result + 1 : result;
 }
@@ -572,11 +572,14 @@ static uint32_t asm_scan_block_comment(AsmParser* parser, const uint8_t* source,
 {
     uint32_t result = length;
     uint32_t block = origin;
-    uint64_t below = _bzhi_u64(~0ull, at + 2 - origin);
+    const uint32_t start = at + 2;
     *closed = false;
     while (block + 1 < length && !*closed)
     {
         const uint32_t n = length - 1 - block < 64 ? length - 1 - block : 64;
+        // The bytes before the comment's own "*/" may start, its "/*" included: they reach into the next block when
+        // the '/' is the lexer's block's last byte, whose '*' must not close it ("/*/").
+        const uint64_t below = start > block ? _bzhi_u64(~0ull, start - block) : 0;
         const __mmask64 valid = _bzhi_u64(~0ull, n) & ~below;
         const __m512i here = block == origin ? first : _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, n), source + block);
         const __m512i next = _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, n), source + block + 1);
@@ -591,7 +594,6 @@ static uint32_t asm_scan_block_comment(AsmParser* parser, const uint8_t* source,
         *closed = close != 0;
         result = close != 0 ? block + (uint32_t)__builtin_ctzll(close) + 2 : result;
         block += n;
-        below = 0;
     }
     return result;
 }
