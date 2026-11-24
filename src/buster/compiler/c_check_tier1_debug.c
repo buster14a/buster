@@ -85,13 +85,26 @@ struct CheckTier1DebugConstants
 // GPR and XMM facts never cross classes: the DWARF home describes its source type's register class. At a target with
 // AVX the copies are VEX twins of the legacy ones (#2830, tier1_emit_vex), decoded as those (x86_vex_canonical):
 // `vmovaps x, y` as `movaps x, y`, and `vmovss x, x, y` (its VEX.vvvv the destination) as the merge `movss x, y`.
-static CheckTier1DebugTransfer check_tier1_debug_transfer(const X86Instruction* original)
+// The resources each of the code's records writes (BUSTER_X86_RESOURCE_*), by its index in the code: one
+// x86_instructions_effects call over them all, which the walks below read record by record (#2924: a call per record cost
+// more than the whole column). Null where scratch has no room.
+static const uint64_t* check_tier1_debug_writes(const Tier1EmitResult* emitted, Arena* scratch, bool* valid)
+{
+    const uint32_t count = emitted->code.count;
+    uint64_t* reads = *valid ? ir_allocate(scratch, (uint64_t)count + 1, 8, valid) : NULL;
+    uint64_t* writes = *valid ? ir_allocate(scratch, (uint64_t)count + 1, 8, valid) : NULL;
+    if (*valid)
+    {
+        x86_instructions_effects(emitted->code.records, count, reads, writes);
+    }
+    return *valid ? writes : NULL;
+}
+
+// `written`: the record's write set (check_tier1_debug_writes).
+static CheckTier1DebugTransfer check_tier1_debug_transfer(const X86Instruction* original, uint64_t written)
 {
     const X86Instruction canonical = x86_vex_canonical(*original);
     const X86Instruction* record = &canonical;
-    uint64_t read = 0;
-    uint64_t written = 0;
-    x86_instructions_effects(original, 1, &read, &written);
     CheckTier1DebugTransfer result = {
         .killed = (uint32_t)written,
         .control = (uint8_t)x86_effects_control(x86_effects(record->form)),
@@ -210,6 +223,7 @@ static bool check_tier1_debug_parameters(const Tier0Function* function, const Ir
     }
     bool supported = valid && candidate.count != 0 && count != 0;
     CheckTier1DebugTransfer* transfers = supported ? ir_allocate(scratch, count, sizeof(CheckTier1DebugTransfer), &valid) : NULL;
+    const uint64_t* written = supported && valid ? check_tier1_debug_writes(emitted, scratch, &valid) : NULL;
     uint8_t* cuts = supported && valid ? ir_allocate(scratch, (uint64_t)count + 1, 1, &valid) : NULL;
     uint32_t* targets = supported && valid ? ir_allocate(scratch, (uint64_t)count + 1, 4, &valid) : NULL;
     uint32_t* blocks = supported && valid ? ir_allocate(scratch, (uint64_t)count + 1, 4, &valid) : NULL;
@@ -236,7 +250,7 @@ static bool check_tier1_debug_parameters(const Tier0Function* function, const Ir
     for (uint32_t r = 0; supported && valid && r < count; r += 1)
     {
         const uint32_t old = record_order != NULL ? record_order[r] : r;
-        transfers[r] = check_tier1_debug_transfer(emitted->code.records + old);
+        transfers[r] = check_tier1_debug_transfer(emitted->code.records + old, written[old]);
         const uint32_t control = transfers[r].control;
         const bool branch = control == BUSTER_X86_CONTROL_JUMP || control == BUSTER_X86_CONTROL_BRANCH;
         supported = control != BUSTER_X86_CONTROL_UNKNOWN && control != BUSTER_X86_CONTROL_TRAP && (!branch || targets[r] != BUSTER_IR_NONE);

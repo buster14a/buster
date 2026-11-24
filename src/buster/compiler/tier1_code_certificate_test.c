@@ -641,11 +641,15 @@ static bool tier1_code_certificate_walked(bool xor)
     emitted.origins = origins;
     emitted.block_records = block_records;
     emitted.cfg_input.successors = successors;
+    uint64_t reads[5];
+    uint64_t writes[5];
+    x86_instructions_effects(records, 5, reads, writes);
     Tier1CertEmittedStats stats = { 0 };
     Tier1CertEmittedBuild build = {
         .emitted = &emitted,
         .stats = &stats,
         .branch_of = branch_of,
+        .writes = writes,
     };
     uint32_t taken = 0;
     uint32_t other = 0;

@@ -268,6 +268,9 @@ struct Tier1CertEmittedBuild
     const Tier1EmitResult* emitted;
     // The nodes' immediates' requests, checked a batch at a time (canonically).
     Tier1CertEmittedChoices choices;
+    // The resources each of the code's records writes (BUSTER_X86_RESOURCE_*), by record: one x86_instructions_effects
+    // call over them all, which the walks read record by record (#2924: a call a record cost more than the column).
+    const uint64_t* writes;
     // Optional per-node scalar definition candidates. They are usable only after the complete decoded program
     // passes tier1_certificate_check; a kernel's matching bytes alone do not prove its operands' provenance.
     Tier1DebugDefinition* debug_definitions;
@@ -2083,13 +2086,10 @@ static Tier1CertEmittedReason tier1_cert_emitted_supported(const Tier1SelectPlan
     return reason;
 }
 
-// Whether `record` writes any flag, which a conditional jump after it would read instead of its condition's.
-static bool tier1_cert_emitted_writes_flags(const X86Instruction* record)
+// Whether record `r` writes any flag, which a conditional jump after it would read instead of its condition's.
+static bool tier1_cert_emitted_writes_flags(const Tier1CertEmittedBuild* build, uint32_t r)
 {
-    uint64_t read = 0;
-    uint64_t written = 0;
-    x86_instructions_effects(record, 1, &read, &written);
-    return (written & BUSTER_X86_RESOURCE_FLAGS) != 0;
+    return (build->writes[r] & BUSTER_X86_RESOURCE_FLAGS) != 0;
 }
 
 // Block `b`'s tail, walked for its edge `e` (`outcome` the condition's value for a conditional branch's, its form
@@ -2122,7 +2122,7 @@ static bool tier1_cert_emitted_walk(Tier1CertEmittedBuild* build, uint32_t b, ui
         {
             // An edge's move that writes the flags (a zero's xor) leaves no condition for a conditional jump after it.
             valid = (origin & BUSTER_TIER1_ORIGIN_PAYLOAD) == e;
-            flags = flags && !tier1_cert_emitted_writes_flags(&emitted->code.records[pc]);
+            flags = flags && !tier1_cert_emitted_writes_flags(build, pc);
             *taken += 1;
             pc += 1;
         }
@@ -3445,6 +3445,15 @@ static Tier1CertEmittedReason tier1_certificate_emitted_records(const Tier1Selec
     }
     valid = valid && emitted->block_records[blocks] == records;
     valid = valid || tier1_cert_emitted_refuse(&build, TIER1_CERT_EMITTED_ORIGIN, UINT32_MAX);
+    // The records' write sets, in one call.
+    uint64_t* record_reads = valid ? arena_push_array(scratch, (uint64_t)records + 1, 8, 8) : 0;
+    uint64_t* record_writes = valid ? arena_push_array(scratch, (uint64_t)records + 1, 8, 8) : 0;
+    valid = valid && ((record_reads != 0 && record_writes != 0) || tier1_cert_emitted_refuse(&build, TIER1_CERT_EMITTED_CAPACITY, UINT32_MAX));
+    if (valid)
+    {
+        x86_instructions_effects(code->records, records, record_reads, record_writes);
+        build.writes = record_writes;
+    }
     // The prologue's frame: rsp after it, the frame base register's offset, the pushes' slots.
     uint32_t prologue_end = 0;
     valid = valid && tier1_cert_emitted_prologue(&build, &prologue_end);
@@ -4097,9 +4106,7 @@ static Tier1CertEmittedReason tier1_certificate_emitted_records(const Tier1Selec
             if (kind == TIER1_ORIGIN_FRAME && payload == 0)
             {
                 // The prologue: first in the entry block (tier1_cert_emitted_prologue), writing no parameter's register.
-                uint64_t read = 0;
-                uint64_t written = 0;
-                x86_instructions_effects(&code->records[r], 1, &read, &written);
+                const uint64_t written = build.writes[r];
                 valid = (b == 0 && !body && r < prologue_end && (written & entry_registers) == 0) || tier1_cert_emitted_refuse(&build, TIER1_CERT_EMITTED_FRAME, r);
                 valid = valid && tier1_cert_emitted_prologue_record(&build, r);
             }
@@ -4207,7 +4214,7 @@ static Tier1CertEmittedReason tier1_certificate_emitted_records(const Tier1Selec
             bool writes = false;
             for (uint32_t k = from; valid && k <= r && k < tail; k += 1)
             {
-                writes = writes || tier1_cert_emitted_writes_flags(&code->records[k]);
+                writes = writes || tier1_cert_emitted_writes_flags(&build, k);
             }
             flags_node = writes ? (kind == TIER1_ORIGIN_NODE ? payload : UINT32_MAX) : flags_node;
             compared = compared || (kind == TIER1_ORIGIN_NODE && function->op[payload] == IR_CBR);
