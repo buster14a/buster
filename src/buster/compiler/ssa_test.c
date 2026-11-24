@@ -694,7 +694,8 @@ static void ssa_test_frontiers(SsaTestTally* tally, SsaTestSpace* space, const S
 
 // The dense construction with its rows a group of chunks at a time (#3449): with a buffer of one byte (one chunk of 16
 // locals a group), of 128 bytes and of 1 KiB, each result verified, run against the memory locals and equal to the one
-// group's: the same replacements and the same phis, numbered alike, with the same operands.
+// group's: the same replacements and the same phis, numbered alike, with the same operands; and the buffer no larger than
+// its budget or a chunk a reachable block.
 static void ssa_test_row_groups(SsaTestTally* tally, SsaTestSpace* space, const SsaInput* input)
 {
     static const uint32_t budgets[] = { 1, 128, 1024 };
@@ -721,6 +722,15 @@ static void ssa_test_row_groups(SsaTestTally* tally, SsaTestSpace* space, const 
             ssa_test_expect(tally, same, "the rows in groups give the one group's phis and replacements");
         }
         arena_pop_to(&space->output, mark);
+        // The buffer itself: at most the budget, or a chunk a reachable block where that is more, and never less.
+        const uint64_t scratch_mark = space->scratch.length;
+        SsaWork work;
+        bool sized = ssa_prepare_path(&work, input, &space->scratch, true) == SSA_OK && ssa_construct_vector(&work, BUSTER_SSA_FRONTIER_PAIRS, budgets[budget]) == SSA_OK;
+        const uint64_t chunk = (uint64_t)work.dominators.reachable_count * 64;
+        const uint64_t bound = budgets[budget] > chunk ? budgets[budget] : chunk;
+        sized = sized && work.row_bytes <= bound && (work.promoted_count == 0 || work.row_bytes >= chunk);
+        ssa_test_expect(tally, sized, "the rows' buffer is at most its budget or a chunk a reachable block");
+        arena_pop_to(&space->scratch, scratch_mark);
     }
     arena_pop_to(&space->output, output_mark);
 }
@@ -765,6 +775,8 @@ static void ssa_test_generated(SsaTestTally* tally, SsaTestSpace* space, uint32_
                 }
             }
             ssa_test_run(tally, space, &input, false, false);
+            // Rows in groups past the first 512-bit liveness row, a chunk a group at the smallest budget.
+            ssa_test_row_groups(tally, space, &input);
         }
     }
     uint64_t random = tally->seed;

@@ -125,9 +125,11 @@ in instruction order.
    reads take the entry row, and its exit row is its last writes over the entry
    row. Each phi's operand on an edge is then the predecessor's exit row in the
    phis' locals, compressed to the block's run of phis (`ssa_vector_rows`).
-   The rows are a buffer of at most `BUSTER_SSA_ROW_GROUP_BYTES` (256 KiB, so it
-   stays in L2): a group of chunks of 16 locals for every reachable block
-   (#3449). A function whose rows fit is one group, written by the scan; a wider
+   The rows are a buffer of a group of chunks of 16 locals for every reachable
+   block (#3449): at most `BUSTER_SSA_ROW_GROUP_BYTES` (256 KiB, so it stays in
+   L2), or one chunk a reachable block (64 bytes each) where that is more. A
+   narrow function's buffer can be larger than main's `last` was (a 1-local
+   function's row is a 64-byte chunk where `last` was 4 bytes a block). A function whose rows fit is one group, written by the scan; a wider
    one takes its chunks a group at a time, each later group's writes from the
    scan's lists and each block's next phi ID, next write and phi operands so
    far carried from group to group.

@@ -156,6 +156,9 @@ struct SsaWork
     uint32_t* phi_operands;
     // Original values, one undef per local, then provisional phis. Redirects are acyclic; phi operand edges may cycle.
     uint32_t* aliases;
+    // The dense constructor's rows' buffer, in bytes (ssa_vector_rows): its budget, or a chunk a reachable block where that
+    // is more (#3449).
+    uint64_t row_bytes;
     SsaError construction_error;
 };
 
@@ -185,8 +188,8 @@ static uint32_t ssa_undefined(const SsaWork* work, uint32_t local)
 #define BUSTER_SSA_DENSE_BYTES (16ull << 20)
 
 // Bound every Cartesian workspace. The estimate (128 bytes a cell) still holds the earlier constructor's tables of a u32
-// a cell; the dense constructor's are its `last` row (a u32 a cell), the liveness, placement and pending bit rows, its
-// cleanup and emission. The topology and instruction terms deliberately overestimate their aligned columns. The
+// a cell; the dense constructor's are its rows' buffer (ssa_vector_rows, at most BUSTER_SSA_ROW_GROUP_BYTES or a chunk a
+// reachable block), the liveness, placement and pending bit rows, its cleanup and emission. The topology and instruction terms deliberately overestimate their aligned columns. The
 // frontier pairs have their own cap (BUSTER_SSA_FRONTIER_PAIRS). This is a storage bound, not a measured crossover;
 // eligibility can only reduce these conservative input-local extents.
 static bool ssa_dense_fits(const SsaInput* input)
@@ -929,7 +932,8 @@ static SsaError ssa_vector_phis(SsaWork* work, const uint64_t* placed, uint32_t*
 }
 
 // The rows' buffer: at most this many bytes of exit rows at once, a group of chunks of 16 slots for every reachable block,
-// so that the buffer stays in L2 however wide the function is (#3449); the tests pass smaller budgets.
+// so that the buffer stays in L2 however wide the function is (#3449); the tests pass smaller budgets. A function of more
+// reachable blocks than the budget has 64-byte chunks takes one chunk a group, past the budget: a chunk a block.
 #define BUSTER_SSA_ROW_GROUP_BYTES (256u << 10)
 
 // In reverse postorder, so that a block's immediate dominator comes first, a group of chunks at a time: each block's
@@ -1059,6 +1063,7 @@ static SsaError ssa_construct_vector(SsaWork* work, uint32_t frontier_budget, ui
     uint32_t* exposed = ssa_allocate(work->scratch, input->instruction_count, sizeof(uint32_t));
     uint32_t* exposed_offsets = ssa_allocate(work->scratch, (uint64_t)blocks + 1, sizeof(uint32_t));
     uint32_t* rows = arena_push(work->scratch, block_bytes * group, 64);
+    work->row_bytes = block_bytes * group;
     uint32_t* entry_row = arena_push(work->scratch, ((uint64_t)group + 1) * 64, 64);
     uint32_t* written = grouped ? arena_push(work->scratch, ((uint64_t)chunks + 1) * 64, 64) : entry_row;
     uint32_t* carry = grouped ? ssa_allocate(work->scratch, 3 * (uint64_t)blocks, sizeof(uint32_t)) : entry_row;
