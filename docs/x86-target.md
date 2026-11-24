@@ -75,11 +75,11 @@ blocks of 16 forms that hold one (`x86_target_extended_blocks`, 29 of 523) then
 decide them: after the loop, each such block's 16 lanes again, by both words
 (#3451, which replaced a scalar pass over their full requirements: 0.93 of its
 time on the 9700X; buster-performance's `phase-d-3451-target-forms/`). A branch
-inside the loop, or a rest word read in every block, cost 23 to 43% more.
+inside the loop cost 31 to 36% more, and a rest word read in every block 23 to 43%.
 
 `x86_target_rows.c` is the single source for immutable policy data. The vector
-builder reads the compact32 table (33,408 bytes), and for the extended blocks
-the rest32 table (33,408 bytes, all but the extended rows' words 0). The full requirements keep all 64
+builder reads the compact32 table (8,358 forms, 33,432 bytes), and for the extended
+blocks the rest32 table (33,432 bytes, all but the extended rows' words 0). The full requirements keep all 64
 feature bits densely for 3,480 classified rows (27,840 bytes), with their form
 indices (6,960 bytes).
 

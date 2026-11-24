@@ -55,6 +55,9 @@
      BUSTER_X86_FEATURE(RDPRU) | BUSTER_X86_FEATURE(RDRND) | BUSTER_X86_FEATURE(RDSEED) | BUSTER_X86_FEATURE(SHA) | BUSTER_X86_FEATURE(SHSTK) |                \
      BUSTER_X86_FEATURE(SSE4A) | BUSTER_X86_FEATURE(VPCLMULQDQ) | BUSTER_X86_FEATURE(WBNOINVD) | BUSTER_X86_FEATURE(XSAVEC) | BUSTER_X86_FEATURE(XSAVEOPT) |   \
      BUSTER_X86_FEATURE(XSAVES) | BUSTER_X86_FEATURE(RDTSCP) | BUSTER_X86_FEATURE(CLFLUSH))
+// The rest word's two lists agree: its features fill its 31 bits, each its own, and the compact word's take none.
+_Static_assert(BUSTER_X86_TARGET_REST(BUSTER_X86_TARGET_REST_FEATURES) == 0x7fffffffu && BUSTER_X86_TARGET_REST(BUSTER_X86_TARGET_COMPACT_FEATURES) == 0,
+               "every rest feature has its own bit of the rest word");
 _Static_assert((BUSTER_X86_TARGET_REST_FEATURES & BUSTER_X86_TARGET_COMPACT_FEATURES) == 0 &&
                    ((BUSTER_X86_TARGET_REST_FEATURES | BUSTER_X86_TARGET_COMPACT_FEATURES) & ((UINT64_C(1) << X86_FEATURE_COUNT) - 1)) == (UINT64_C(1) << X86_FEATURE_COUNT) - 1,
                "the compact and rest words hold every feature, each in one of them");
@@ -258,8 +261,8 @@ static uint64_t x86_target_requirement(uint32_t form)
 // Sixteen contiguous 32-bit rows per iteration: no gathers, scratch allocation or speculative tail loads.
 // Unknown rows stay zero, so the nonzero test still distinguishes them from classified baseline rows. An extended
 // row's mark is in every target's unavailable bits, so the loop denies it; the blocks with one
-// (x86_target_extended_blocks, 29 of 523 on 2026-11-24) are then decided again by both words, after the loop, which a
-// branch inside it made 35% slower on mispredictions and reading every block's rest word 25% slower.
+// (x86_target_extended_blocks, 29 of 523 on 2026-11-24) are then decided again by both words, after the loop: a branch
+// inside it made it 31 to 36% slower on mispredictions, and reading every block's rest word 23 to 43% slower.
 static void x86_target_forms(const X86Target* target, uint8_t* allowed)
 {
     const uint64_t available = target->features | BUSTER_X86_TARGET_KNOWN;
