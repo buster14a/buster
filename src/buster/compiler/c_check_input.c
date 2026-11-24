@@ -13912,9 +13912,10 @@ static void check_input_bind_checked(CheckInputReader* reader, uint32_t token, u
                 // invalid with it and its uses quiet (check_input_bind), without replacing its entity's linked one.
                 const bool function_redefinition = redefined && !mismatch && !(thread_local && !thread_local_alone) && kind == C_BINDING_FUNCTION;
                 dropped = recovered && !redefinition_alone && !function_redefinition;
-                if (recovered && redefinition_alone)
+                if (recovered && redefinition_alone && check_input_invalid_redefinition_note(reader, token))
                 {
-                    (void)check_input_invalid_redefinition_note(reader, token);
+                    // Keep the invalid declaration's binding and expression diagnostics without initializing the object again.
+                    check_input_invalid_initializer(reader, token, point);
                 }
                 if (recovered && function_redefinition)
                 {

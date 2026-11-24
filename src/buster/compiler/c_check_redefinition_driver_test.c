@@ -63,19 +63,22 @@ static void check_test_driver_redefinitions(CheckTest* test, const char* clang, 
     };
     char path[PATH_MAX];
     snprintf(path, sizeof(path), "%s/redefinition.c", directory);
-    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(fixtures); f += 1)
+    char const_redefinitions[] = "tests/driver/const-redefinitions.c";
+    for (uint32_t f = 0; f <= BUSTER_ARRAY_LENGTH(fixtures); f += 1)
     {
-        const bool written = parse_test_write(path, fixtures[f], strlen(fixtures[f]));
-        char* reference[] = { (char*)clang, "-std=gnu23", "-fsyntax-only", "-fno-caret-diagnostics", path, NULL };
+        const bool embedded = f < BUSTER_ARRAY_LENGTH(fixtures);
+        char* source = embedded ? path : const_redefinitions;
+        const bool available = embedded ? parse_test_write(source, fixtures[f], strlen(fixtures[f])) : access(source, R_OK) == 0;
+        char* reference[] = { (char*)clang, "-std=gnu23", "-fsyntax-only", "-fno-caret-diagnostics", source, NULL };
         char* expected = NULL;
-        const int oracle = written ? check_test_driver_spawn(reference, &expected) : -1;
-        check_test_expect(test, written && oracle == 1 && expected != NULL, "redefinition oracle rejects original source");
+        const int oracle = available ? check_test_driver_spawn(reference, &expected) : -1;
+        check_test_expect(test, available && oracle == 1 && expected != NULL, "redefinition oracle rejects original source");
         bool printed = false;
         for (uint32_t schedule = 0; expected != NULL && schedule < 2; schedule += 1)
         {
             for (uint32_t scalar = 0; scalar < 2; scalar += 1)
             {
-                char* arguments[] = { (char*)executable, "-std=gnu23", "-fsyntax-only", "-fno-caret-diagnostics", path,
+                char* arguments[] = { (char*)executable, "-std=gnu23", "-fsyntax-only", "-fno-caret-diagnostics", source,
                                       "--lanes", schedule != 0 ? "3" : "1", scalar != 0 ? "--scalar" : NULL, NULL };
                 char* actual = NULL;
                 const int status = check_test_driver_spawn(arguments, &actual);
