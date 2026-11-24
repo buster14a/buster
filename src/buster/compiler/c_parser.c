@@ -2618,13 +2618,11 @@ struct ParseVectorBuffers
     // Only the kernel benchmark uses these traversal buffers. Production tree-only parsing leaves them null;
     // clients requesting traversal columns build them after popping the vector workspace (#628).
     uint32_t* last_children;
-    uint32_t* before;
     uint32_t* postorder;
     uint32_t* positions;
     uint32_t* subtree_ends;
     uint32_t* first_children;
     uint32_t* next_siblings;
-    uint32_t* subtree_starts;
     uint32_t* sizes;
     // K2's blocks by the rounds they took (index 0: the twin did them), and K4's blocks whose depths span more than
     // byte lanes hold, which run as two 16-bit blocks.
@@ -2686,96 +2684,184 @@ static uint32_t parse_postorder(const uint32_t* parents, uint32_t count, uint32_
     return written;
 }
 
-// The tree's columns (#186, #544): what the checker reads of the tree besides the parents and the roles, from the
-// parents, in three passes without a branch on the tree, where the postorder alone took five and the checker's reader
-// two more for the rest. For each token:
-//   - its subtree's end, its last token (every subtree is a run of tokens): its own, or its last child's where that
-//     child comes after it;
-//   - its first child and its next sibling, in token order (BUSTER_PARSE_NONE where it has none);
-//   - its position in the postorder, and the postorder itself, the token at each position. In postorder a subtree's
-//     tokens are a run that ends with its root, after every token whose subtree ends before it, and its other tokens
-//     are those its source run holds, so the root's position is C(v) + end(v) - v, where C(v), the number of tokens
-//     whose subtree ends before v, is an exclusive prefix sum of how many subtrees end at each token.
-// The first pass, forward, writes each token's last child (each parent's last write); the second, backward, sees a
-// token after its children after it, so that its subtree's end is its last child's, and pushes each token on its
-// parent's list of children, which leaves the first child at its head and each sibling linked to the next; the third,
-// forward, takes the prefix sum as it goes. `last_children` and `before` have count + 1 entries, and each column count
-// + 1: the last is the sentinel the checker's reader had (its own end, no child, no sibling), and the roots' writes go
-// to it during the passes. With `sizes` (else 0), each position also gets its subtree's size, end(v) - start(v) + 1,
-// where start(v) is its first child's start where that child comes before it, else v, in `starts`.
-//
-// Data-parallel? The passes are a scatter's loads and stores: per token, two of the backward pass's loads and a
-// read-modify-write land at the token's parent, its last child and its subtree's end, and each forward pass makes a
-// store at its parent or its position. On Zen 5 a zmm `vpgatherdd` takes about 12.6 cycles for 16 lanes and a
-// `vpscatterdd` 17 (docs/coding-style.md), against three scalar loads and two stores a cycle, and a block's writes to
-// one parent conflict, since a parent's children are near it: the passes stay scalar. The third pass in AVX-512 (its
-// prefix sum in registers, the positions a vector store) and the counts kept in the positions column were each slower
-// on the 9700X, and so was one fused backward pass, which leaves each end at its parent through a select's address:
-// docs/c-parser.md's "The tree's columns" has the numbers.
-//
-// parse_tree_columns_range is the passes over the tokens [begin, end), whole top-level declarations, of a unit's columns
-// (#2536, the parser's tiles): no subtree crosses a top-level declaration's end, so every token whose subtree ends
-// before `begin` is one before it, the prefix sum starts at `begin`, and the range's positions are the postorder's own
-// there. `last_children`, `before` and `starts` are read and written at [begin, end] alone, so a caller may give arrays
-// a tile long, placed so that those entries are theirs; the roots' writes go to the entry at `end`, the next range's
-// first, which that range clears, or the unit's sentinel. parse_tree_columns is the unit's range and the sentinel.
-static void parse_tree_columns_range(const uint32_t* parents, uint32_t begin, uint32_t end, uint32_t* last_children, uint32_t* before, uint32_t* postorder,
-                                     uint32_t* positions, uint32_t* ends, uint32_t* first_children, uint32_t* next_siblings, uint32_t* starts, uint32_t* sizes)
+// Each subtree occupies consecutive source tokens. A root followed by a token from another tree
+// ends a complete forest. Following the next token's parents proves the boundary, even for a root
+// with children on its right. A deep chain can stay in this tile until a later boundary.
+#define BUSTER_PARSE_COLUMN_TILE 2048u
+
+static uint32_t parse_tree_column_cut(const uint32_t* parents, uint32_t begin, uint32_t end)
 {
-    const uint64_t slots = (uint64_t)(end - begin) + 1;
-    // 0: no child after the token, as a child at 0 comes after none.
-    memset(last_children + begin, 0, slots * sizeof(uint32_t));
-    memset(first_children + begin, 0xff, slots * sizeof(uint32_t));
-    memset(before + begin, 0, slots * sizeof(uint32_t));
-    for (uint32_t i = begin; i < end; i += 1)
+    uint32_t cut = end;
+    if (end - begin > BUSTER_PARSE_COLUMN_TILE)
     {
-        last_children[parents[i] == BUSTER_PARSE_NONE ? end : parents[i]] = i;
-    }
-    for (uint32_t v = end; v-- > begin;)
-    {
-        const uint32_t parent = parents[v];
-        const uint32_t slot = parent != BUSTER_PARSE_NONE ? parent : end;
-        const uint32_t sibling = first_children[slot];
-        next_siblings[v] = parent != BUSTER_PARSE_NONE ? sibling : BUSTER_PARSE_NONE;
-        first_children[slot] = v;
-        // ends[last] is v's end when last comes after v, and was written then; otherwise it is unused. Unpredictable,
-        // so that Clang selects (cmov) rather than branching around the load.
-        const uint32_t last = last_children[v];
-        const uint32_t last_end = ends[last];
-        const uint32_t own = __builtin_unpredictable(last > v) ? last_end : v;
-        ends[v] = own;
-        before[own] += 1;
-    }
-    uint32_t sum = begin;
-    if (sizes == 0)
-    {
-        for (uint32_t v = begin; v < end; v += 1)
+        uint32_t at = begin + BUSTER_PARSE_COLUMN_TILE - 1;
+        while (at < end && cut == end)
         {
-            const uint32_t position = sum + ends[v] - v;
-            positions[v] = position;
-            postorder[position] = v;
-            sum += before[v];
+            const uint32_t length = end - at < 16 ? end - at : 16;
+            const __mmask16 live = (__mmask16)_bzhi_u32(0xffffu, length);
+            const __m512i block = _mm512_maskz_loadu_epi32(live, parents + at);
+            uint32_t roots = _mm512_mask_cmpeq_epi32_mask(live, block, _mm512_set1_epi32(-1));
+            while (roots != 0)
+            {
+                const uint32_t root = at + (uint32_t)__builtin_ctz(roots);
+                uint32_t node = root + 1;
+                for (uint32_t depth = 0; depth < 16 && node > root && node < end; depth += 1)
+                {
+                    node = parents[node];
+                }
+                if (node == BUSTER_PARSE_NONE)
+                {
+                    cut = root + 1;
+                    break;
+                }
+                roots &= roots - 1;
+            }
+            at += length;
         }
     }
-    else
+    return cut;
+}
+
+// Each source token v follows every subtree ending before it and another end(v) - v tokens in
+// postorder. Prefix the counts of subtree ends, then add that distance to get 16 distinct ranks.
+BUSTER_INLINE __m512i parse_tree_column_ranks(__m512i counts, __m512i ends, __m512i tokens, uint32_t* sum)
+{
+    counts = _mm512_add_epi32(counts, _mm512_maskz_alignr_epi32(0xfffe, counts, counts, 15));
+    counts = _mm512_add_epi32(counts, _mm512_maskz_alignr_epi32(0xfffc, counts, counts, 14));
+    counts = _mm512_add_epi32(counts, _mm512_maskz_alignr_epi32(0xfff0, counts, counts, 12));
+    counts = _mm512_add_epi32(counts, _mm512_maskz_alignr_epi32(0xff00, counts, counts, 8));
+    const __m512i before = _mm512_add_epi32(_mm512_set1_epi32((int32_t)*sum), _mm512_maskz_alignr_epi32(0xfffe, counts, counts, 15));
+    *sum += (uint32_t)_mm_extract_epi32(_mm512_extracti32x4_epi32(counts, 3), 3);
+    return _mm512_add_epi32(before, _mm512_sub_epi32(ends, tokens));
+}
+
+// Each live rank is a distinct destination. The x86 scatter leaves its destinations' shadow unchanged
+// under MemorySanitizer. Its generic counterpart instruments just the written lanes.
+BUSTER_INLINE void parse_tree_scatter_ranks(uint32_t* column, __mmask16 live, __m512i ranks, __m512i values)
+{
+#if __has_feature(memory_sanitizer)
+    typedef bool ParseLaneMask __attribute__((ext_vector_type(16)));
+    __builtin_masked_scatter(__builtin_bit_cast(ParseLaneMask, live), (__v16si)ranks, (__v16su)values, column);
+#else
+    _mm512_mask_i32scatter_epi32(column, live, ranks, values, 4);
+#endif
+}
+
+// Whole forests occupy the same [begin, end) in both orders. Derive the columns in that interval
+// alone, including for a tile of the parser or an attested declaration at a nonzero offset.
+static void parse_tree_columns_range(const uint32_t* parents, uint32_t begin, uint32_t end, uint32_t* postorder, uint32_t* positions, uint32_t* ends,
+                                     uint32_t* first_children, uint32_t* next_siblings, uint32_t* sizes)
+{
+    const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
+    const __m512i reverse = _mm512_sub_epi32(_mm512_set1_epi32(15), lanes);
+    const __m512i none = _mm512_set1_epi32(-1);
+    while (begin < end)
     {
-        for (uint32_t v = begin; v < end; v += 1)
+        const uint32_t cut = parse_tree_column_cut(parents, begin, end);
+        const uint32_t length = cut - begin;
+        const size_t bytes = (size_t)length * sizeof(uint32_t);
+        memset(first_children + begin, 0xff, bytes);
+        // For sizes, the first child's start is needed later in source order. Borrow the next
+        // unwritten part of postorder if it fits. Otherwise use this tile and publish its inverse last.
+        const bool borrowed = end - cut >= length;
+        uint32_t* const starts = postorder + (borrowed ? length : 0);
+        // A parent's end is its last right child's end. These edges form disjoint paths
+        // toward larger tokens. Start with singleton paths, one subtree ending at each token.
+        for (uint32_t at = begin; at < cut; at += 16)
         {
-            const uint32_t position = sum + ends[v] - v;
-            positions[v] = position;
-            postorder[position] = v;
-            sum += before[v];
-            // starts[v] is read only where the first child comes before v, which wrote it; v's own slot otherwise.
-            const uint32_t first = first_children[v];
-            const bool before_v = first < v;
-            const uint32_t start = starts[before_v ? first : v];
-            starts[v] = __builtin_unpredictable(before_v) ? start : v;
-            sizes[position] = ends[v] - starts[v] + 1;
+            const __mmask16 live = (__mmask16)_bzhi_u32(0xffffu, cut - at < 16 ? cut - at : 16);
+            const __m512i tokens = _mm512_add_epi32(lanes, _mm512_set1_epi32((int32_t)at));
+            _mm512_mask_storeu_epi32(ends + at, live, tokens);
+            _mm512_mask_storeu_epi32(positions + at, live, _mm512_set1_epi32(1));
         }
+        uint32_t edge_count = 0;
+        for (uint32_t stop = cut; stop > begin;)
+        {
+            const uint32_t width = stop - begin < 16 ? stop - begin : 16;
+            const uint32_t at = stop - width;
+            const __mmask16 live = (__mmask16)_bzhi_u32(0xffffu, width);
+            const __m512i parent = _mm512_permutexvar_epi32(reverse, _mm512_mask_loadu_epi32(none, live, parents + at));
+            const __m512i child = _mm512_sub_epi32(_mm512_set1_epi32((int32_t)at + 15), lanes);
+            const __mmask16 linked = _mm512_cmpneq_epi32_mask(parent, none);
+            // In reverse order, the nearest earlier lane with the same parent is the next
+            // sibling. Other children take the head from a block already visited. For a
+            // repeated scatter destination x86 commits the highest lane, the earliest child.
+            const __m512i conflicts = _mm512_conflict_epi32(parent);
+            const __mmask16 local = _mm512_test_epi32_mask(conflicts, conflicts);
+            const __m512i sibling = _mm512_add_epi32(_mm512_set1_epi32((int32_t)at - 16), _mm512_lzcnt_epi32(conflicts));
+            const __m512i next = _mm512_mask_i32gather_epi32(_mm512_mask_mov_epi32(none, linked, sibling), linked & ~local, parent, first_children, 4);
+            _mm512_mask_storeu_epi32(next_siblings + at, live, _mm512_permutexvar_epi32(reverse, next));
+            _mm512_mask_i32scatter_epi32(first_children, linked, parent, child, 4);
+            const __mmask16 last_right = _mm512_mask_cmplt_epu32_mask(_mm512_cmpeq_epi32_mask(next, none), parent, child);
+            _mm512_mask_compressstoreu_epi32(postorder + begin + edge_count, last_right, child);
+            edge_count += (uint32_t)__builtin_popcount((uint32_t)last_right);
+            stop = at;
+        }
+        // Children are in descending order. Each child's end is final before it extends
+        // its parent. No subtree can end at a parent that has a child to its right.
+        for (uint32_t i = 0; i < edge_count; i += 1)
+        {
+            const uint32_t child = postorder[begin + i];
+            const uint32_t parent = parents[child];
+            const uint32_t end_token = ends[child];
+            ends[parent] = end_token;
+            positions[parent] = 0;
+            positions[end_token] += 1;
+        }
+        if (sizes != NULL)
+        {
+            // Only an earlier first child can extend a subtree to the left. Compact those parents
+            // into the unpublished sizes and resolve their starts in increasing source order.
+            uint32_t left_count = 0;
+            for (uint32_t at = begin; at < cut; at += 16)
+            {
+                const __mmask16 live = (__mmask16)_bzhi_u32(0xffffu, cut - at < 16 ? cut - at : 16);
+                const __m512i tokens = _mm512_add_epi32(lanes, _mm512_set1_epi32((int32_t)at));
+                const __m512i first = _mm512_maskz_loadu_epi32(live, first_children + at);
+                const __mmask16 earlier = _mm512_mask_cmplt_epu32_mask(live, first, tokens);
+                _mm512_mask_storeu_epi32(starts + at, live, tokens);
+                _mm512_mask_compressstoreu_epi32(sizes + begin + left_count, earlier, tokens);
+                left_count += (uint32_t)__builtin_popcount((uint32_t)earlier);
+            }
+            for (uint32_t i = 0; i < left_count; i += 1)
+            {
+                const uint32_t v = sizes[begin + i];
+                starts[v] = starts[first_children[v]];
+            }
+        }
+        uint32_t sum = begin;
+        for (uint32_t offset = 0; offset < length; offset += 16)
+        {
+            const uint32_t at = begin + offset;
+            const uint32_t width = length - offset < 16 ? length - offset : 16;
+            const __mmask16 live = (__mmask16)_bzhi_u32(0xffffu, width);
+            const __m512i tokens = _mm512_add_epi32(lanes, _mm512_set1_epi32((int32_t)at));
+            const __m512i end_tokens = _mm512_maskz_loadu_epi32(live, ends + at);
+            const __m512i ranks = parse_tree_column_ranks(_mm512_maskz_loadu_epi32(live, positions + at), end_tokens, tokens, &sum);
+            _mm512_mask_storeu_epi32(positions + at, live, ranks);
+            if (sizes == NULL || borrowed)
+            {
+                parse_tree_scatter_ranks(postorder, live, ranks, tokens);
+            }
+            if (sizes != NULL)
+            {
+                const __m512i spans = _mm512_sub_epi32(end_tokens, _mm512_maskz_loadu_epi32(live, starts + at));
+                parse_tree_scatter_ranks(sizes, live, ranks, _mm512_add_epi32(spans, _mm512_set1_epi32(1)));
+            }
+        }
+        if (sizes != NULL && !borrowed)
+        {
+            for (uint32_t at = begin; at < cut; at += 16)
+            {
+                const __mmask16 live = (__mmask16)_bzhi_u32(0xffffu, cut - at < 16 ? cut - at : 16);
+                const __m512i tokens = _mm512_add_epi32(lanes, _mm512_set1_epi32((int32_t)at));
+                parse_tree_scatter_ranks(postorder, live, _mm512_maskz_loadu_epi32(live, positions + at), tokens);
+            }
+        }
+        begin = cut;
     }
 }
 
-// The columns' sentinel, the entry past the unit's last token: its own end, no child, no sibling.
 static void parse_tree_columns_sentinel(uint32_t count, uint32_t* positions, uint32_t* ends, uint32_t* first_children, uint32_t* next_siblings)
 {
     first_children[count] = BUSTER_PARSE_NONE;
@@ -2784,10 +2870,10 @@ static void parse_tree_columns_sentinel(uint32_t count, uint32_t* positions, uin
     positions[count] = count;
 }
 
-static void parse_tree_columns(const uint32_t* parents, uint32_t count, uint32_t* last_children, uint32_t* before, uint32_t* postorder, uint32_t* positions,
-                               uint32_t* ends, uint32_t* first_children, uint32_t* next_siblings, uint32_t* starts, uint32_t* sizes)
+static void parse_tree_columns(const uint32_t* parents, uint32_t count, uint32_t* postorder, uint32_t* positions, uint32_t* ends, uint32_t* first_children,
+                               uint32_t* next_siblings, uint32_t* sizes)
 {
-    parse_tree_columns_range(parents, 0, count, last_children, before, postorder, positions, ends, first_children, next_siblings, starts, sizes);
+    parse_tree_columns_range(parents, 0, count, postorder, positions, ends, first_children, next_siblings, sizes);
     parse_tree_columns_sentinel(count, positions, ends, first_children, next_siblings);
 }
 

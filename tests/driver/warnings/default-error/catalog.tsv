@@ -27,3 +27,39 @@ parenthesized-argument-conversions-demoted	parenthesized-argument-bodies.c	5	0	3
 parenthesized-argument-conversions-pragmas	parenthesized-argument-conversions-pragmas.c	4	1	5	-	-	parenthesized argument conversions' pragmas
 # Pragmas: a group's warning, ignored and error, and push and pop.
 default-error-conversions-pragmas	default-error-conversions-pragmas.c	4	1	0	-	-Wno-error=incompatible-pointer-types	default-error conversions' pragmas
+# An array that decays to a compatible pointer at a relaxed token (#3559) is no conversion to report: a string
+# literal, an array object, a member's, a compound literal's, a variable length array, an array of arrays and a
+# const array to a pointer to const, initializing (braced and not), assigned, passed and returned, under each
+# option that relaxes a default-error group.
+array-decay-accepted-no-int-conversion	array-decay-accepted.c	0	0	0	-	-Wno-int-conversion	array decay accepted with -Wno-int-conversion
+array-decay-accepted-no-error-int-conversion	array-decay-accepted.c	0	0	0	-	-Wno-error=int-conversion	array decay accepted with -Wno-error=int-conversion
+array-decay-accepted-no-return-type	array-decay-accepted.c	0	0	0	-	-Wno-return-type	array decay accepted with -Wno-return-type
+array-decay-accepted-no-error-return-type	array-decay-accepted.c	0	0	0	-	-Wno-error=return-type	array decay accepted with -Wno-error=return-type
+array-decay-accepted-no-return-mismatch	array-decay-accepted.c	0	0	0	-	-Wno-return-mismatch	array decay accepted with -Wno-return-mismatch
+array-decay-accepted-all-extra-no-return-type	array-decay-accepted.c	0	0	0	-	-Wall -Wextra -Wno-return-type	array decay accepted with -Wall -Wextra -Wno-return-type
+# The conversions of an array that still report there: another pointee's stays its group's error, a discarded
+# qualifier its warning, and a pointer to an integer is quiet, a warning or an error as -Wint-conversion is mapped.
+array-decay-refused-no-int-conversion	array-decay-refused.c	4	7	2	-	-Wno-int-conversion	array decay refused with -Wno-int-conversion
+array-decay-refused-no-error-int-conversion	array-decay-refused.c	9	7	3	-	-Wno-error=int-conversion	array decay refused with -Wno-error=int-conversion
+array-decay-refused-no-return-type	array-decay-refused.c	4	12	3	-	-Wno-return-type	array decay refused with -Wno-return-type
+array-decay-refused-no-error-return-type	array-decay-refused.c	4	12	3	-	-Wno-error=return-type	array decay refused with -Wno-error=return-type
+array-decay-refused-no-return-mismatch	array-decay-refused.c	4	12	3	-	-Wno-return-mismatch	array decay refused with -Wno-return-mismatch
+array-decay-refused-demoted	array-decay-refused.c	16	0	3	-	-Wno-error=int-conversion -Wno-error=incompatible-pointer-types	array decay refused with -Wno-error=int-conversion -Wno-error=incompatible-pointer-types
+# #3565: an _Atomic pointer read as its plain pointer, the recheck's third lvalue conversion: a file-scope, a
+# member's, an array element's, a parameter's and a dereferenced one, a const one and a volatile pointer, initializing
+# (braced and not), assigned, passed and returned, to their pointer, to void * and to _Bool, under each option that
+# relaxes a default-error group.
+atomic-lvalue-accepted-no-int-conversion	atomic-lvalue-accepted.c	0	0	0	-	-Wno-int-conversion	atomic lvalue accepted with -Wno-int-conversion
+atomic-lvalue-accepted-no-error-int-conversion	atomic-lvalue-accepted.c	0	0	0	-	-Wno-error=int-conversion	atomic lvalue accepted with -Wno-error=int-conversion
+atomic-lvalue-accepted-no-return-type	atomic-lvalue-accepted.c	0	0	0	-	-Wno-return-type	atomic lvalue accepted with -Wno-return-type
+atomic-lvalue-accepted-no-error-return-type	atomic-lvalue-accepted.c	0	0	0	-	-Wno-error=return-type	atomic lvalue accepted with -Wno-error=return-type
+atomic-lvalue-accepted-no-return-mismatch	atomic-lvalue-accepted.c	0	0	0	-	-Wno-return-mismatch	atomic lvalue accepted with -Wno-return-mismatch
+atomic-lvalue-accepted-all-extra-no-return-type	atomic-lvalue-accepted.c	0	0	0	-	-Wall -Wextra -Wno-return-type	atomic lvalue accepted with -Wall -Wextra -Wno-return-type
+# What its read still can't convert to: another pointer type an error, a discarded qualifier a warning, an integer
+# as -Wint-conversion says.
+atomic-lvalue-refused-no-int-conversion	atomic-lvalue-refused.c	4	4	2	-	-Wno-int-conversion	atomic lvalue refused with -Wno-int-conversion
+atomic-lvalue-refused-no-error-int-conversion	atomic-lvalue-refused.c	6	4	3	-	-Wno-error=int-conversion	atomic lvalue refused with -Wno-error=int-conversion
+atomic-lvalue-refused-no-return-type	atomic-lvalue-refused.c	4	6	3	-	-Wno-return-type	atomic lvalue refused with -Wno-return-type
+atomic-lvalue-refused-no-error-return-type	atomic-lvalue-refused.c	4	6	3	-	-Wno-error=return-type	atomic lvalue refused with -Wno-error=return-type
+atomic-lvalue-refused-no-return-mismatch	atomic-lvalue-refused.c	4	6	3	-	-Wno-return-mismatch	atomic lvalue refused with -Wno-return-mismatch
+atomic-lvalue-refused-demoted	atomic-lvalue-refused.c	10	0	3	-	-Wno-error=int-conversion -Wno-error=incompatible-pointer-types	atomic lvalue refused with -Wno-error=int-conversion -Wno-error=incompatible-pointer-types

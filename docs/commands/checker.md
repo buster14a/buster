@@ -86,12 +86,12 @@ unused-warning fixtures also check exact scope-completion tokens.
   and the default C command (`-fsyntax-only`, `-c`) use it; `compiler parse`
   keeps the parser's driver alone. Unsupported syntax is diagnosed.
   `test-checker-driver --executable ./build/compiler [--part K/N]
-  [--lazy-system-headers | --cpu-dispatch-only | --pic-only | --target-versions-only | --type-sugar-only |
+  [--lazy-system-headers | --cpu-dispatch-only | --pic-only | --stack-protector-only | --target-versions-only | --type-sugar-only |
   --asm-definitions-only | --call-counts-only | --fp-contract-only | --imaginary-bit-int-only | --operand-diagnostics-only | --label-attributes-only |
   --attribute-recovery-only | --initializer-diagnostics-only | --malformed-calls-only | --string-plus-only | --assert-bool-only | --assert-diagnostics-only | --query-bool-only | --constant-logical-only | --quiet-roots-only | --unused-comparison-only |
   --float-precision-only |
   --record-extensions-only | --auto-qualifiers-only |
-  --run-modes-only] [--in-process] [--clang-server PATH]
+  --run-modes-only | --common-warnings-only] [--in-process] [--clang-server PATH]
   [--differential] [--carets | --carets-all]` and `test-checker-asm`
   check the driver and inline assembly against Clang (named UCNs too, #1447,
   `check_test_driver_named_ucns`; a generated unit of about 180,000 tokens as
@@ -148,7 +148,10 @@ unused-warning fixtures also check exact scope-completion tokens.
   plain row; `--cpu-dispatch-only` runs the `cpu_specific` and
   `cpu_dispatch` section alone, #1447; `--pic-only` runs `-fPIC`'s, `-fpic`'s
   and `-shared`'s section alone (#2101, `c_check_pic_driver_test.c`: its shared
-  libraries against clang's, run by the same programs); `--target-versions-only` runs GNU multiversioning's `target` and
+  libraries against clang's, run by the same programs); `--stack-protector-only`
+  runs the stack protector's section alone (#3558, `c_check_stack_protector_driver_test.c`:
+  each option's guarded functions against clang `-O0`'s, and a smashed buffer of
+  each frame's shape aborting); `--target-versions-only` runs GNU multiversioning's `target` and
   `target_clones` section alone, #1838 (inline assembly in `target_clones` copies at both tiers among it, #2247); `--asm-definitions-only` runs what
   inline assembly defines against clang's objects alone, #1848; `--operand-diagnostics-only` runs
   the original runtime sources in `tests/driver/operand_diagnostics/` against Clang's complete
@@ -1193,9 +1196,11 @@ are refused by the semantic option admission boundary below. The resolved
 admitting either never admits a `-fsanitize-coverage-*` prefix. Negative flags
 are admitted only by an explicit owner or compatibility entry. Within these families, any unsupported request is an error
 even when a later option requests an inactive/default form; this is not
-Clang's last-option-wins policy. Unlike `-fstack-protector*` and
-`-fcf-protection=*`, which are resolved separately and do honor a later
-disabling spelling, a later inactive spelling cannot cancel an earlier request.
+Clang's last-option-wins policy. Unlike `-fcf-protection=*`, which is resolved
+separately and does honor a later disabling spelling, a later inactive spelling
+cannot cancel an earlier request. `-fstack-protector`, `-fstack-protector-strong`,
+`-fstack-protector-all` and `-fno-stack-protector` are taken, the last
+deciding (#3558, [the checker's guide](../c-checker.md)'s "The stack protector").
 The diagnostic retains the first unsupported spelling from this refusal table
 (`check_request_codegen_option` in `c_check_request.c`, which every client
 that reads the driver's options shares).

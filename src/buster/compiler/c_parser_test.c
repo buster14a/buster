@@ -1675,7 +1675,7 @@ static uint32_t parse_test_check_columns(const uint32_t* parents, uint32_t count
 static uint32_t parse_test_columns_guarded(void)
 {
     const size_t page = (size_t)sysconf(_SC_PAGESIZE);
-    uint8_t* mappings[10] = { 0 };
+    uint8_t* mappings[7] = { 0 };
     bool ready = true;
     for (uint32_t column = 0; column < BUSTER_ARRAY_LENGTH(mappings); column += 1)
     {
@@ -1685,7 +1685,7 @@ static uint32_t parse_test_columns_guarded(void)
     uint32_t failures = !ready;
     for (uint32_t count = 0; ready && count <= 200; count += 1)
     {
-        uint32_t* columns[10];
+        uint32_t* columns[7];
         for (uint32_t column = 0; column < BUSTER_ARRAY_LENGTH(columns); column += 1)
         {
             const uint32_t length = column == 0 ? count : count + 1;
@@ -1700,19 +1700,19 @@ static uint32_t parse_test_columns_guarded(void)
             }
             for (uint32_t sizes = 0; sizes < 2; sizes += 1)
             {
-                parse_tree_columns(columns[0], count, columns[1], columns[2], columns[3], columns[4], columns[5], columns[6], columns[7],
-                                   sizes != 0 ? columns[8] : NULL, sizes != 0 ? columns[9] : NULL);
+                parse_tree_columns(columns[0], count, columns[1], columns[2], columns[3], columns[4], columns[5],
+                                   sizes != 0 ? columns[6] : NULL);
                 for (uint32_t token = 0; token <= count; token += 1)
                 {
                     const uint32_t child = shape == 0 && token != 0 && token < count ? token - 1 : BUSTER_PARSE_NONE;
-                    failures += columns[4][token] != token || columns[5][token] != token || columns[6][token] != child || columns[7][token] != BUSTER_PARSE_NONE;
-                    failures += token < count && (columns[3][token] != token || (sizes != 0 && columns[9][token] != (shape == 0 ? token + 1 : 1)));
+                    failures += columns[2][token] != token || columns[3][token] != token || columns[4][token] != child || columns[5][token] != BUSTER_PARSE_NONE;
+                    failures += token < count && (columns[1][token] != token || (sizes != 0 && columns[6][token] != (shape == 0 ? token + 1 : 1)));
                 }
-                parse_tree_links(columns[0], columns[3], count, columns[4], columns[5], columns[6], columns[7]);
+                parse_tree_links(columns[0], columns[1], count, columns[2], columns[3], columns[4], columns[5]);
                 for (uint32_t token = 0; token <= count; token += 1)
                 {
                     const uint32_t child = shape == 0 && token != 0 && token < count ? token - 1 : BUSTER_PARSE_NONE;
-                    failures += columns[4][token] != token || columns[5][token] != token || columns[6][token] != child || columns[7][token] != BUSTER_PARSE_NONE;
+                    failures += columns[2][token] != token || columns[3][token] != token || columns[4][token] != child || columns[5][token] != BUSTER_PARSE_NONE;
                 }
             }
         }
@@ -1727,9 +1727,61 @@ static uint32_t parse_test_columns_guarded(void)
     return failures;
 }
 
+// A root can occur inside its tree. The first candidate cut here has a 35-deep right child
+// chain returning to that root. The following small forests and a long final declaration
+// exercise borrowed and in-place postorder storage, with both ends of the range already live.
+static uint32_t parse_test_columns_ranges(Arena* scratch)
+{
+    const uint64_t mark = scratch->length;
+    const uint32_t count = 5 * BUSTER_PARSE_COLUMN_TILE + 37;
+    const uint32_t slots = count + 1;
+    uint32_t* const parents = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, 7 * slots);
+    uint32_t failures = parents == NULL;
+    if (parents != NULL)
+    {
+        uint32_t* const postorder = parents + slots;
+        uint32_t* const positions = postorder + slots;
+        uint32_t* const ends = positions + slots;
+        uint32_t* const first = ends + slots;
+        uint32_t* const next = first + slots;
+        uint32_t* const sizes = next + slots;
+        const uint32_t root = BUSTER_PARSE_COLUMN_TILE + 3;
+        parents[0] = BUSTER_PARSE_NONE;
+        parents[1] = 0;
+        parents[2] = 0;
+        for (uint32_t v = 3; v <= root + 35; v += 1)
+        {
+            parents[v] = v == root ? BUSTER_PARSE_NONE : v > root && v < root + 35 ? v + 1 : root;
+        }
+        for (uint32_t v = root + 36; v < count - 2; v += 1)
+        {
+            // Many roots to split, then a declaration longer than a tile with its root last.
+            parents[v] = v < 3 * BUSTER_PARSE_COLUMN_TILE || v == count - 3 ? BUSTER_PARSE_NONE : v + 1;
+        }
+        parents[count - 2] = BUSTER_PARSE_NONE;
+        parents[count - 1] = count - 2;
+        const uint32_t ranges[][2] = { { 0, 3 }, { count - 2, count }, { 3, count - 2 } };
+        for (uint32_t sized = 0; sized < 2; sized += 1)
+        {
+            memset(postorder, 0xa5, (size_t)6 * slots * sizeof(uint32_t));
+            for (uint32_t r = 0; r < BUSTER_ARRAY_LENGTH(ranges); r += 1)
+            {
+                parse_tree_columns_range(parents, ranges[r][0], ranges[r][1], postorder, positions, ends, first, next, sized ? sizes : NULL);
+            }
+            parse_tree_columns_sentinel(count, positions, ends, first, next);
+            const ParseTestColumns columns = { positions, ends, first, next };
+            uint32_t expected;
+            failures += parse_test_check_columns(parents, count, &columns, scratch) != BUSTER_PARSE_NONE;
+            failures += parse_test_check_postorder(parents, count, postorder, count, sized ? sizes : NULL, scratch, &expected) != BUSTER_PARSE_NONE;
+        }
+    }
+    arena_pop_to(scratch, mark);
+    return failures;
+}
+
 static uint32_t parse_test_check_postorder_self(Arena* scratch)
 {
-    uint32_t failures = parse_test_columns_guarded();
+    uint32_t failures = parse_test_columns_guarded() + parse_test_columns_ranges(scratch);
     // a = b * c ;  ->  ; <- = <- (a, * <- (b, c))
     const uint32_t good[] = { 1, 5, 3, 1, 3, BUSTER_PARSE_NONE };
     const uint32_t postorder[] = { 0, 2, 4, 3, 1, 5 };
@@ -1762,11 +1814,8 @@ static uint32_t parse_test_check_postorder_self(Arena* scratch)
     }
     for (uint32_t way = 0; way < 3; way += 1)
     {
-        uint32_t last_children[8];
-        uint32_t before[8];
         uint32_t derived_postorder[8];
         uint32_t derived[4][8];
-        uint32_t starts[8];
         uint32_t derived_sizes[8];
         if (way == 2)
         {
@@ -1775,8 +1824,7 @@ static uint32_t parse_test_check_postorder_self(Arena* scratch)
         }
         else
         {
-            parse_tree_columns(good, 6, last_children, before, derived_postorder, derived[0], derived[1], derived[2], derived[3], way == 1 ? starts : 0,
-                               way == 1 ? derived_sizes : 0);
+            parse_tree_columns(good, 6, derived_postorder, derived[0], derived[1], derived[2], derived[3], way == 1 ? derived_sizes : 0);
         }
         const ParseTestColumns columns = { derived[0], derived[1], derived[2], derived[3] };
         failures += parse_test_check_columns(good, 6, &columns, scratch) != BUSTER_PARSE_NONE;
@@ -3953,9 +4001,9 @@ static uint32_t parse_test_workspace_budget(void)
     valid = valid && parse_vector_buffers_reserve(&buffers, &copy, count);
     if (valid)
     {
-        valid = guarded.length == mark && buffers.last_children == 0 && buffers.before == 0 && buffers.postorder == 0 &&
+        valid = guarded.length == mark && buffers.last_children == 0 && buffers.postorder == 0 &&
                 buffers.positions == 0 && buffers.subtree_ends == 0 && buffers.first_children == 0 && buffers.next_siblings == 0 &&
-                buffers.subtree_starts == 0 && buffers.sizes == 0;
+                buffers.sizes == 0;
         for (uint32_t i = 0; i < 12345; i += 1)
         {
             valid &= held[i] == 0x3c;

@@ -4128,6 +4128,42 @@ static void check_driver_default_error_report(const Parser* parser, Preprocessor
     }
 }
 
+// A relaxed conversion's source as the checker's operand conversion left it (check_action_operand_value), for the
+// recheck, which takes a source after its lvalue conversions: a function designator decayed to its pointer (#2424),
+// an array to the pointer to its element, the element's qualifiers kept (#3559), and any other lvalue read as its
+// value, without _Atomic and its own qualifiers (#3565). Rechecking the raw function, array or atomic type against a
+// pointer would invent an error for a compatible source. The checker's conversion interned the pointer type; the
+// value is the caller's copy, with that conversion's type and category (which the recheck reads), and the stream is
+// unchanged. False where the table has no such pointer, the value then as it was.
+static bool check_driver_default_error_source(const TypeTable* types, const CheckAction* action, CheckValue* value)
+{
+    const TypeId plain = type_strip_aligned(types, value->type);
+    const uint8_t kind = type_kind(types, plain);
+    const bool array = type_kind_is_array(kind);
+    const bool function = kind == BUSTER_TYPE_KIND_FUNCTION;
+    const TypeId pointer = array ? type_find_pointer(types, type_element(types, plain)) : function ? type_find_pointer(types, plain) : 0;
+    if (pointer != 0)
+    {
+        value->type = pointer;
+        value->category = CHECK_RVALUE;
+        value->flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL);
+        if (array)
+        {
+            value->flags &= ~(BUSTER_CHECK_BIT_FIELD | BUSTER_CHECK_REGISTER | BUSTER_CHECK_REGISTER_NAME);
+            if (!action->context.constant_evaluated && (value->flags & BUSTER_CHECK_STATIC_OBJECT) == 0 && value->constant_kind == CHECK_CONSTANT_ADDRESS)
+            {
+                value->constant_kind = CHECK_CONSTANT_NONE;
+            }
+        }
+    }
+    if (!array && !function && value->category == CHECK_LVALUE)
+    {
+        value->type = type_conversion_operand(types, value->type);
+        value->category = CHECK_RVALUE;
+    }
+    return pointer != 0 || (!array && !function);
+}
+
 // The warnings of the conversions that default to errors which the checker made at relaxed tokens (#1963,
 // BUSTER_CHECK_RELAXED_TOKEN): an initialization's, an assignment's, a return's and a prototype argument's that its
 // action refuses without a system header's leniency, a void function's returned value, and a non-void function's
@@ -4156,29 +4192,22 @@ static void check_driver_default_error_warnings(const Parser* parser, Preprocess
                 if (source < stream->count && (conversion.flags & BUSTER_CHECK_CONVERT_ASSIGNMENT) != 0 && conversion.type != 0)
                 {
                     CheckValue value = check_stream_value(stream, source);
-                    // The checker decays a function designator before assignment. Rechecking its raw function type
-                    // against a pointer would invent an error for a compatible argument (#2424). Its pointer type
-                    // was interned by that conversion; use the same local category/flags without changing the stream.
-                    const TypeId plain = type_strip_aligned(types, value.type);
-                    const bool function = type_kind(types, plain) == BUSTER_TYPE_KIND_FUNCTION;
-                    const TypeId pointer = function ? type_find_pointer(types, plain) : 0;
-                    if (function && pointer != 0)
-                    {
-                        value.type = pointer;
-                        value.category = CHECK_RVALUE;
-                        value.flags &= ~(BUSTER_CHECK_ICE | BUSTER_CHECK_GNU_ICE_FORM | BUSTER_CHECK_FLOAT_LITERAL);
-                    }
-                    if (function && pointer == 0)
+                    CheckAction action = { .node = node, .context = check_graph_context(graph, node, false) };
+                    action.context.extensions &= ~BUSTER_CHECK_EXTENSION_SYSTEM_HEADER;
+                    // A function designator whose pointer the table lacks is a resource failure (#2424). An array's
+                    // (#3559) is a conversion the checker didn't make: nothing of its to recheck, and no error to
+                    // invent for it.
+                    const bool function = type_kind(types, type_strip_aligned(types, value.type)) == BUSTER_TYPE_KIND_FUNCTION;
+                    const bool decayed = check_driver_default_error_source(types, &action, &value);
+                    if (function && !decayed)
                     {
                         pp_diagnose_output(pp, PP_SEVERITY_FATAL, parse_source_index(&parser->tokens, token), "%s", check_driver_action_message(CHECK_DIAG_RESOURCE));
                     }
-                    CheckAction action = { .node = node, .context = check_graph_context(graph, node, false) };
-                    action.context.extensions &= ~BUSTER_CHECK_EXTENSION_SYSTEM_HEADER;
                     CheckActionResult result = { 0 };
                     const bool void_target = check_action_kind(types, conversion.type) == BUSTER_TYPE_KIND_VOID;
-                    const bool refused = (!function || pointer != 0) &&
-                                         (void_target ? check_action_kind(types, value.type) != BUSTER_TYPE_KIND_VOID :
-                                          !check_action_assignable_mode(types, conversion.type, &value, &action, &result, false) && result.diagnostic == CHECK_DIAG_NONE);
+                    const bool refused = void_target ? (decayed || !function) && check_action_kind(types, value.type) != BUSTER_TYPE_KIND_VOID :
+                                         decayed && !check_action_assignable_mode(types, conversion.type, &value, &action, &result, false) &&
+                                         result.diagnostic == CHECK_DIAG_NONE;
                     const CheckDriverConversion kind = refused && !void_target ?
                                                        check_driver_conversion_kind(types, conversion.type, check_driver_conversion_source(types, stream, source)) :
                                                        CHECK_DRIVER_CONVERSION_INCOMPATIBLE;
@@ -4216,11 +4245,13 @@ static void check_driver_default_error_warnings(const Parser* parser, Preprocess
                 const uint8_t bits = token < graph->system_token_count ? graph->system_tokens[token] : 0;
                 if (part->kind == CHECK_INIT_VALUE && part->conversion.type != 0 && (bits & BUSTER_CHECK_SYSTEM_TOKEN) == 0 && (bits & BUSTER_CHECK_RELAXED_TOKEN) != 0)
                 {
-                    const CheckValue value = check_stream_value(stream, part->node);
+                    CheckValue value = check_stream_value(stream, part->node);
                     CheckAction action = { .node = part->node, .context = check_graph_context(graph, part->node, false) };
                     action.context.extensions &= ~BUSTER_CHECK_EXTENSION_SYSTEM_HEADER;
+                    // Without its pointer in the table, the value's conversion isn't one the checker made: not rechecked.
+                    const bool decayed = check_driver_default_error_source(types, &action, &value);
                     CheckActionResult result = { 0 };
-                    const bool refused = !check_action_assignable_mode(types, part->conversion.type, &value, &action, &result, false) && result.diagnostic == CHECK_DIAG_NONE;
+                    const bool refused = decayed && !check_action_assignable_mode(types, part->conversion.type, &value, &action, &result, false) && result.diagnostic == CHECK_DIAG_NONE;
                     const CheckDriverConversion kind = refused ? check_driver_conversion_kind(types, part->conversion.type, check_driver_conversion_source(types, stream, part->node)) :
                                                        CHECK_DRIVER_CONVERSION_INCOMPATIBLE;
                     const uint32_t id = kind == CHECK_DRIVER_CONVERSION_INT_POINTER || kind == CHECK_DRIVER_CONVERSION_POINTER_INT ? CHECK_WARNING_ID_INT_CONVERSION :

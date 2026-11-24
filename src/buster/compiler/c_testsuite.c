@@ -1274,11 +1274,8 @@ static int c_testsuite_self_test(CTestsuite* suite)
     }
     snprintf(suite->compiler, sizeof(suite->compiler), "%s/stand-in.sh", base);
     valid = valid && c_testsuite_write(suite->compiler, c_testsuite_stand_in, 0755);
-    // These scenarios run concurrently, alongside other correctness tests in hosted CI. A one-second watchdog
-    // can kill healthy shell and compiler children that have simply been descheduled. Five seconds still bounds
-    // the intentional 30-second hangs, without mistaking hosted scheduler contention for a harness failure.
+    // The stand-in program for 00003 sleeps for 30 seconds. Every run of that program must time out.
     suite->timeout = 5;
-    suite->compile_timeout = 5;
     uint32_t failures = valid ? 0 : 1;
     failures += !tier1_code_size_self_test();
     failures += valid && !c_testsuite_code_size_self_test(base);
@@ -1294,7 +1291,13 @@ static int c_testsuite_self_test(CTestsuite* suite)
         children[scenario] = valid ? fork() : -1;
         if (children[scenario] == 0)
         {
-            // Every scenario uses the same watchdog, including the one invoking cc, readelf and clang.
+            // The symbols and missing-report fixtures invoke real cc, readelf and clang processes. Give them
+            // the normal compile deadline even when the runner is busy. Other scenarios use only stand-ins.
+            const bool uses_toolchain = scenario == 5 || scenario == 6;
+            if (!uses_toolchain)
+            {
+                suite->compile_timeout = 5;
+            }
             // The suite's results are shared with the workers that write them (a MAP_SHARED mapping), and so with the
             // other scenarios' processes: each scenario's go in a mapping of its own.
             CTestsuiteResult* results = mmap(0, BUSTER_C_TESTSUITE_MAX_TESTS * sizeof(CTestsuiteResult), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
@@ -1314,7 +1317,10 @@ static int c_testsuite_self_test(CTestsuite* suite)
             const uint64_t start = c_testsuite_now();
             const bool ran = ready && c_testsuite_execute(suite, relative ? "checkout" : path, 0, 3);
             const uint64_t elapsed = c_testsuite_now() - start;
-            const bool expected = ran && c_testsuite_expect(suite, scenarios[scenario], expectations[scenario]) && elapsed < UINT64_C(20) * 1000000000;
+            // Check the stand-ins' wall time as well as their timeout diagnostics. For the toolchain scenarios,
+            // the total includes several successful compiles and links, each with its own deadline.
+            const bool timely = uses_toolchain || elapsed < UINT64_C(20) * 1000000000;
+            const bool expected = ran && c_testsuite_expect(suite, scenarios[scenario], expectations[scenario]) && timely;
             if (ran)
             {
                 c_testsuite_remove(suite);

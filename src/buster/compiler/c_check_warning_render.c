@@ -1784,6 +1784,53 @@ static String8 check_driver_warning_type_sugared(const Parser* parser, Preproces
     return sugared.length != 0 ? sugared : check_driver_warning_type(parser, pp, input, types, spell, scratch, type, spelling);
 }
 
+// Array parameter adjustment discards its outer bracket qualifiers and `static` from the canonical type. Restore
+// those written modifiers only for this warning's original type; the retained TypeId still supplies bounds, nested
+// arrays, element qualifiers and typedef spelling through the ordinary diagnostic printer.
+static String8 check_driver_parameter_array_type(const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types,
+                                                  CheckWarningSpelling* spell, Arena* scratch, const CheckWarningPayload* payload)
+{
+    String8 text = check_driver_warning_type(parser, pp, input, types, spell, scratch, payload->second_type, payload->data);
+    uint32_t at = payload->token + 1;
+    const uint32_t count = parser->tokens.count;
+    while (at < count && parser->tokens.kinds[at] == PARSE_KIND_R_PAREN)
+    {
+        at += 1;
+    }
+    bool static_bound = false;
+    uint32_t qualifiers = 0;
+    if (at < count && parser->tokens.kinds[at] == PARSE_KIND_L_SQUARE)
+    {
+        at += 1;
+        while (at < count && (parser->tokens.kinds[at] == PARSE_KIND_QUALIFIER || parser->tokens.names[at] == C_NAME_STATIC))
+        {
+            static_bound |= parser->tokens.names[at] == C_NAME_STATIC;
+            check_input_qualifier(parser, at, &qualifiers);
+            at += 1;
+        }
+    }
+    if (text.length != 0 && (qualifiers != 0 || static_bound))
+    {
+        // Insert the qualifiers into both the written type and its optional desugared spelling.
+        const char* extra = check_warning_text(scratch, "%s%s%s%s", (qualifiers & BUSTER_TYPE_CONST) != 0 ? "const " : "",
+                                                (qualifiers & BUSTER_TYPE_VOLATILE) != 0 ? "volatile " : "",
+                                                (qualifiers & BUSTER_TYPE_RESTRICT) != 0 ? "restrict " : "", static_bound ? "static " : "");
+        const char* first = memchr(text.pointer, '[', text.length);
+        if (first != NULL && extra != NULL)
+        {
+            const char* rest = first + 1;
+            const char* end = text.pointer + text.length;
+            const char* aka = memchr(rest, '(', (size_t)(end - rest));
+            const char* second = aka != NULL ? memchr(aka, '[', (size_t)(end - aka)) : NULL;
+            const char* split = second != NULL ? second + 1 : end;
+            const char* changed = check_warning_text(scratch, "%.*s%s%.*s%s%.*s", (int)(rest - text.pointer), text.pointer, extra,
+                                                      (int)(split - rest), rest, second != NULL ? extra : "", (int)(end - split), split);
+            text = changed != NULL ? (String8){ .pointer = (char*)changed, .length = strlen(changed) } : (String8){ 0 };
+        }
+    }
+    return text;
+}
+
 // An attribute's spelling without a keyword's surrounding underscores (__packed__ as packed), as clang normalizes one.
 static String8 check_warning_attribute_normalized(String8 name)
 {
@@ -2442,6 +2489,18 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
                      NULL;
             break;
         }
+        case CHECK_WARNING_EVENT_CHAR_SUBSCRIPT:
+            result = "array subscript is of type 'char'";
+            break;
+        case CHECK_WARNING_EVENT_SIZEOF_ARRAY_ARGUMENT:
+        {
+            const String8 adjusted = check_driver_warning_type(parser, pp, input, types, spell, scratch, payload->first_type, payload->data);
+            const String8 original = check_driver_parameter_array_type(parser, pp, input, types, spell, scratch, payload);
+            result = adjusted.length != 0 && original.length != 0 ?
+                     check_warning_text(scratch, "sizeof on array function parameter will return size of %.*s instead of %.*s", (int)adjusted.length,
+                                        adjusted.pointer, (int)original.length, original.pointer) : NULL;
+            break;
+        }
         case CHECK_WARNING_EVENT_VOID_PTR_DEREFERENCE:
         {
             const String8 type = check_driver_warning_type(parser, pp, input, types, spell, scratch, payload->first_type, payload->data);
@@ -2993,6 +3052,9 @@ static const char* check_driver_warning_note(const Parser* parser, Preprocessor*
             break;
         case CHECK_WARNING_NOTE_DECLARED_HERE:
             result = check_warning_text(scratch, "'%.*s' declared here", (int)name.length, name.pointer);
+            break;
+        case CHECK_WARNING_NOTE_PARAMETER_DECLARED_HERE:
+            result = "declared here";
             break;
         case CHECK_WARNING_NOTE_CONST_MEMBER:
             result = check_warning_text(scratch, "member '%.*s' declared 'const' here", (int)name.length, name.pointer);

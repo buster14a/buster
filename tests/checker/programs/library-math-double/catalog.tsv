@@ -25,12 +25,13 @@ library-memory-and-absolutes	library-memory-and-absolutes.c	-	library-memory-and
 # intrinsics: memcpy, memmove and memset of each constant size to one past BUSTER_CBUILTIN_LIBRARY_INLINE_BYTES, whose
 # bytes and values must be the library's, memmove's ranges overlapping by up to 9 bytes in either direction and
 # memset's values negative and wider than a byte, constant and not; memmove of each size from 34 to one past
-# BUSTER_CBUILTIN_LIBRARY_MOVE_INLINE_BYTES, by COPY's move form, between unaligned ranges that overlap by up to 65 bytes,
+# x86-64's 128-byte inline limit, by COPY's move form, between unaligned ranges that overlap by up to 65 bytes,
 # forward and backward; a musttail return of a memcpy; abs, labs and llabs, plain and __builtin_, of their extremes
 # but the undefined ones; and fabs, fabsf, fabsl, copysign, copysignf and copysignl, plain, and __builtin_copysign,
 # __builtin_copysignf and __builtin_copysignl, of the harness's special values, signaling NaNs among them, bit for
 # bit.
 library-computed-inline	library-computed-inline.c	-	library-computed-inline
+fixed-memory-builtins	fixed-memory-builtins.c	-	fixed-memory-builtins
 # The folds in code: clang's -1, 0 or 1 of constant strings, where the library's functions return the differences
 # (glibc's strcmp("a", "c") is -2), through __builtin_X and the plain declarations; a const array's string; and a
 # call with a side effect, which neither folds.

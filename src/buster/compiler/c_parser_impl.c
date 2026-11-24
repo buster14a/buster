@@ -11294,22 +11294,20 @@ static bool parse_vector_buffers_reserve(ParseVectorBuffers* buffers, Arena* are
     return result;
 }
 
-// The benchmark runs traversal kernels while retaining its workspace. Production does not: reserving these nine
+// The benchmark runs traversal kernels while retaining its workspace. Production does not: reserving these
 // unused columns there separated K4's active slots and fallback scratch from the prefix reused by checking (#628).
 static bool parse_vector_postorder_reserve(ParseVectorBuffers* buffers, Arena* arena, uint64_t capacity)
 {
     const uint64_t slots = capacity + 2 * BUSTER_PARSE_TOKEN_PADDING;
     buffers->last_children = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots);
-    buffers->before = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots);
     buffers->postorder = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots);
     buffers->positions = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots);
     buffers->subtree_ends = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots);
     buffers->first_children = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots);
     buffers->next_siblings = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots);
-    buffers->subtree_starts = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots);
     buffers->sizes = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots);
-    return buffers->last_children != 0 && buffers->before != 0 && buffers->postorder != 0 && buffers->positions != 0 && buffers->subtree_ends != 0 &&
-           buffers->first_children != 0 && buffers->next_siblings != 0 && buffers->subtree_starts != 0 && buffers->sizes != 0;
+    return buffers->last_children != 0 && buffers->postorder != 0 && buffers->positions != 0 && buffers->subtree_ends != 0 &&
+           buffers->first_children != 0 && buffers->next_siblings != 0 && buffers->sizes != 0;
 }
 
 // The deepest node depth, which decides whether K4's 16-bit keys can hold it.
@@ -11613,7 +11611,7 @@ static uint32_t parse_tile_end(const uint8_t* kinds, uint32_t begin, uint32_t co
 // the unit to parse_vector as one, with the unit's arrays.
 //
 // With `columns`, each tile's part of the tree's columns too (parse_tree_columns_range), from its parents as they are
-// written: the passes' temporaries are a tile's, in the workspace, and the unit's sentinel follows the last tile. A unit
+// written, and the unit's sentinel follows the last tile. A unit
 // that goes to parse_vector as one has none of them derived.
 static ParseKernelResult parse_vector_tiles(ParseKernels* kernels, const ParseInput* input, const IdentId* predeclared, ParseVectorBuffers* buffers, uint32_t tile_tokens,
                                             Arena* arena, const ParseTree* tree, uint32_t name_capacity, const ParseTileColumns* columns)
@@ -11644,11 +11642,9 @@ static ParseKernelResult parse_vector_tiles(ParseKernels* kernels, const ParseIn
         memset(tree->depths - BUSTER_PARSE_TOKEN_PADDING, 0, BUSTER_PARSE_TOKEN_PADDING * sizeof(uint32_t));
         parse_kernels_predeclared(&names, predeclared, true);
     }
-    // The workspace: the kernels' arrays by token and the buffers, for `room` tokens, from `tile_mark`, and the columns'
-    // passes' temporaries (last children, counts, starts), each of room + 1 entries.
+    // The workspace holds the kernel arrays and buffers for room tokens.
     const uint64_t tile_mark = arena->length;
     const bool deriving = columns->postorder != NULL;
-    uint32_t* passes = NULL;
     uint64_t room = 0;
     uint64_t rounds[BUSTER_PARSE_ROLE_ROUNDS + 1] = { 0 };
     uint64_t wide_blocks = 0;
@@ -11669,8 +11665,6 @@ static ParseKernelResult parse_vector_tiles(ParseKernels* kernels, const ParseIn
             room = length > doubled ? length : doubled;
             arena_pop_to(arena, tile_mark);
             memory = parse_kernels_reserve_shared(kernels, arena, room, name_capacity, tree, &names) && parse_vector_buffers_reserve(buffers, arena, room);
-            passes = memory && deriving ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, 3 * (room + 1)) : NULL;
-            memory = memory && (!deriving || passes != NULL);
             served = memory;
         }
         if (served)
@@ -11760,13 +11754,8 @@ static ParseKernelResult parse_vector_tiles(ParseKernels* kernels, const ParseIn
                 deep |= tile.deep_node_depths;
                 if (deriving)
                 {
-                    // The passes' temporaries, a tile's, placed so that the tile's tokens' entries are theirs.
-                    const uintptr_t bias = (uintptr_t)begin * sizeof(uint32_t);
-                    uint32_t* last_children = (uint32_t*)((uintptr_t)passes - bias);
-                    uint32_t* before_counts = (uint32_t*)((uintptr_t)(passes + room + 1) - bias);
-                    uint32_t* starts = columns->sizes != NULL ? (uint32_t*)((uintptr_t)(passes + 2 * (room + 1)) - bias) : NULL;
-                    parse_tree_columns_range(tree->parents, begin, end, last_children, before_counts, columns->postorder, columns->positions, columns->ends,
-                                             columns->first_children, columns->next_siblings, starts, columns->sizes);
+                    parse_tree_columns_range(tree->parents, begin, end, columns->postorder, columns->positions, columns->ends, columns->first_children,
+                                             columns->next_siblings, columns->sizes);
                 }
             }
             // What the buffers count, which the workspace's next reservation clears.
@@ -12222,19 +12211,12 @@ BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp
     }
     if (result && !parser->options.tree_only && !traversed)
     {
-        // The postorder and the tree's columns (and with ParseOptions.sizes the subtree sizes), with the temporaries' room
-        // for the passes.
         const uint32_t count = parser->tokens.count;
-        const bool sizes = parser->options.sizes;
-        const bool reserved = parser->postorder != NULL || parse_traversal_reserve(parser);
-        uint32_t* last_children = BUSTER_ARENA_PUSH_ARRAY(temporary, uint32_t, (uint64_t)count + 1);
-        uint32_t* before = BUSTER_ARENA_PUSH_ARRAY(temporary, uint32_t, (uint64_t)count + 1);
-        uint32_t* starts = sizes ? BUSTER_ARENA_PUSH_ARRAY(temporary, uint32_t, (uint64_t)count + 1) : 0;
-        result = reserved && last_children != 0 && before != 0 && (!sizes || starts != 0);
+        result = parser->postorder != NULL || parse_traversal_reserve(parser);
         if (result)
         {
-            parse_tree_columns(parser->tree.parents, count, last_children, before, parser->postorder, parser->positions, parser->ends, parser->first_children,
-                               parser->next_siblings, starts, parser->sizes);
+            parse_tree_columns(parser->tree.parents, count, parser->postorder, parser->positions, parser->ends, parser->first_children,
+                               parser->next_siblings, parser->sizes);
         }
         else
         {

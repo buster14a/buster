@@ -302,9 +302,8 @@ static bool check_library_plain_type(const TypeTable* types, TypeId type, const 
 
 // Whether a declaration's type is a plain library builtin's prototype, as clang requires for the declaration to be the
 // builtin (hasSameFunctionTypeIgnoringExceptionSpec): its result and each parameter, and a prototype without "...".
-static bool check_library_plain_prototype(const TypeTable* types, TypeId declared, uint32_t index)
+static bool check_library_matches_prototype(const TypeTable* types, TypeId declared, const char* prototype)
 {
-    const char* prototype = cbuiltin_library_plain_folds[index].prototype;
     const TypeId function = type_strip_aligned(types, declared);
     bool result = type_kind(types, function) == BUSTER_TYPE_KIND_FUNCTION;
     const uint8_t flags = result ? types->types.flags[type_index(function)] : 0;
@@ -318,6 +317,11 @@ static bool check_library_plain_prototype(const TypeTable* types, TypeId declare
         result = prototype[position] != 0 && check_library_plain_type(types, parameters[i], prototype, &position);
     }
     return result && prototype[position] == 0;
+}
+
+static bool check_library_plain_prototype(const TypeTable* types, TypeId declared, uint32_t index)
+{
+    return check_library_matches_prototype(types, declared, cbuiltin_library_plain_folds[index].prototype);
 }
 
 // A CALL node's member (CheckGraph.members), or an ordinary overload candidate's library_call, with this bit set and

@@ -77,7 +77,7 @@ static __attribute__((noinline)) void check_test_library_tables(CheckTest* test)
                  (inline_call ? !info->constant_evaluable_attribute || cplusplus : info->constant_evaluable_attribute) &&
                  cbuiltin_library_plain(fold->name, length) != NULL && cbuiltin_library_plain_fold(fold->name, length) == f &&
                  (inline_call ? fold->computed != CBUILTIN_LIBRARY_COMPUTED_NONE && fold->library == own :
-                                fold->library == CBUILTIN_LIBRARY_COUNT && fold->computed == CBUILTIN_LIBRARY_COMPUTED_NONE);
+                                fold->library == CBUILTIN_LIBRARY_COUNT && fold->computed == (strcmp(fold->name, "memcmp") == 0 ? CBUILTIN_LIBRARY_COMPUTED_COMPARE : CBUILTIN_LIBRARY_COMPUTED_NONE));
     }
     // Every fold of a listed call is of a row with attribute E, which clang's evaluator folds.
     for (uint32_t l = 0; l < CBUILTIN_LIBRARY_COUNT; l += 1)
@@ -295,6 +295,9 @@ static __attribute__((noinline)) void check_test_library_extremes_targets(CheckT
 static __attribute__((noinline)) void check_test_library_programs(CheckTest* test, const char* clang)
 {
     check_test_program_suite(test, "checker/programs/library-math-double", clang);
+    check_test_program_clear_shape(test, "void*f(char*d,char*s){return __builtin_memmove(d,s,17);}"
+                                         "void*g(char*d,char*s){return __builtin_memmove(d,s,128);}",
+                                   "fixed builtin memmoves use straight-line code", false, false, false, 64);
     check_test_program_source(test, check_test_library_extremes_source, "library-extremes-of-special-values", clang);
     // errno, which the library's functions set: log of a negative number and of zero, and pow's overflow.
     check_test_program_suite(test, "checker/programs/library-errno", clang);
