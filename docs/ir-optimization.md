@@ -565,9 +565,11 @@ guide](tier1-loop-vectorization.md)); the unroller (`+unroll`, #2755); and the o
 which runs SCCP, the identities, value numbering with memory (`+memory`,
 #2718), dead-code removal, CFG cleanup and its merges and layout, then the
 final verification that selection reads. When promotion has already verified the
-input with dominance, the driver tracks whether later passes borrow it or
-rewrite it. Optimizer preparation can reuse the proof for the same revision.
-An in-place rewrite invalidates it, and `--verify` checks the input afresh.
+input with dominance, optimizer preparation can reuse that proof across
+passes that borrow it. For truth simplification, the driver checks each
+rewritten comparison’s row and verifies that its new operands came from
+a comparison that fed it through copies or extensions. Other edits
+invalidate the proof, and `--verify` checks the input afresh.
 The final verifier checks the rewritten function before selection.
 
 `--tier1-passes=` turns each pass on

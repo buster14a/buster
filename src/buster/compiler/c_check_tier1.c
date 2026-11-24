@@ -442,8 +442,8 @@ static CheckTier1Outcome check_tier1_sink_optimize(CheckTier1Lane* lane, IrFunct
         IrOptimizeOptions options = ir_optimize_options();
         options.passes = (on & (BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_DCE | BUSTER_IR_OPTIMIZE_CFG | BUSTER_IR_OPTIMIZE_MERGE)) | BUSTER_IR_OPTIMIZE_LAYOUT |
                         BUSTER_IR_OPTIMIZE_IDENTITY | ((on & BUSTER_CHECK_TIER1_PASS_MEMORY) != 0 ? BUSTER_IR_OPTIMIZE_MEMORY : 0);
-        // Promotion checks its result with dominance. Reuse that proof only when every intervening pass
-        // explicitly borrowed it and the in-place passes reported no writes. --verify takes the fresh path.
+        // Promotion checks its result with dominance. Each step either retains a proof of this exact
+        // revision or invalidates it. A new sink order and --verify both require fresh preparation.
         const IrCheck check = ir_optimize_verified_path(function, output, analyses, scratch, options, revision, &passes->optimized, &passes->analysis,
                                                        verified && !certify && passes->sunk == 0);
         outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
@@ -596,7 +596,7 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
         outcome.operation = check.instruction < promoted.instruction_count ? promoted.op[check.instruction] : IR_OP_COUNT;
         stage = outcome.stage;
     }
-    bool verified = !wide.split;
+    bool verified = !certify && !wide.split;
     // The 128-bit integers' frame objects in registers (#3299): the checker gives an __int128 local, parameter and
     // temporary a 16-byte object, which the lowering copies by 8-byte pieces and reads and writes whole, so that promotion
     // keeps it in memory and each operation's value went through its slot. The split makes every access of such an object
@@ -645,7 +645,7 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
         // The lane owns these columns, including the borrowed promoted columns when no wide split was needed.
         // No later consumer reads their old operands and no analysis revision has been published. Simplify before
         // optimizer preparation builds uses, then let its DCE and final SSA verification consume the new operands.
-        verified &= ir_truth_simplify(&wide.function) == 0;
+        ir_truth_simplify_rules(&wide.function, false, &verified);
     }
     if (stage == CHECK_TIER1_COMPILED)
     {
