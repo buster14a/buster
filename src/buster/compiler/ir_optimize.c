@@ -6,11 +6,15 @@
 // out-of-range shift. Unknown analysis state and an IR undef are different: undef must enter as overdefined.
 // The 16-item fold boundary uses bounded columns; it has no padding, alignment or inactive-lane read contract.
 //
-// The passes are scalar, the worklists SCCP and dead-code removal fill, since #2924: the vector passes beside them (rounds
-// over every instruction with sixteen-lane folds and marks, pointer jumping for the threads, sixteen-lane ranks and
-// identity candidates) took 1.02 to 1.44 times their ticks, more with size, and compiles never ran them (#860's AUTO
-// bound chose the scalar passes below 8,192 instructions; #2924's 6987893038). #3445 is a vectorized form that would
-// have to win at every size.
+// The passes are scalar, the worklists SCCP and dead-code removal fill, since #2924. The vector passes beside them
+// (rounds over every instruction with sixteen-lane folds and marks, pointer jumping for the threads, sixteen-lane ranks
+// and identity candidates) took 1.02 to 1.44 times their ticks when forced, more with size (#2924's 6987893038).
+// #860's AUTO bound kept SCCP and DCE's sweeps off below 8,192 instructions, but every rewrite (LICM's, GVN's, SROA's)
+// threaded blocks by the vector pointer jumping and SROA's split ran DCE's vector roots and sweeps, in every compile;
+// the deletion's whole-compile run measured their replacement (1,372 of 1,372 objects identical, sqlite3.c's and
+// Lua's Tier 1 compiles 0.4 to 1.2% fewer user cycles). #860 had measured the vector passes 9 to 11% ahead at 16K+
+// instructions in a near-single-block shape, which no corpus function reaches; the owner deleted AUTO knowing it
+// (7112387760). #3445 is a vectorized form that would have to win at every size, that shape included.
 
 #include <stdbool.h>
 #include <stdint.h>

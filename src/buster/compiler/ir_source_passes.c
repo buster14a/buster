@@ -923,12 +923,9 @@ static int run_ir_source_passes_benchmark(int count, char** arguments)
             }
             double values[2][3][BUSTER_TIER0_BENCHMARK_PASSES];
             memset(values, 0, sizeof(values));
-            // The inliner, the unroller, the loop vectorizer, LICM and value numbering with memory alone have one path
-            // (#2924): timed once; #2719's pressure policies are timed once too, as Tier 1 runs them.
-            const uint32_t versions = pass == IR_SOURCE_PASS_VECTORIZE || pass == IR_SOURCE_PASS_UNROLL || pass == IR_SOURCE_PASS_STORE_MOTION || pass == IR_SOURCE_PASS_INLINE ||
-                                              pass == IR_SOURCE_PASS_LICM || pass == IR_SOURCE_PASS_MEMORY || pass == IR_SOURCE_PASS_HOIST || pass == IR_SOURCE_PASS_NUMBERING ?
-                                          1 :
-                                          2;
+            // GVN alone keeps its scalar twin (#2924, #3433), timed beside its vector path; every other pass has one path,
+            // timed once, and #2719's pressure policies are timed once too, as Tier 1 runs them.
+            const uint32_t versions = pass == IR_SOURCE_PASS_GVN ? 2 : 1;
             for (uint32_t version = 0; version < versions; version += 1)
             {
                 failed += ir_source_passes_run((IrSourcePass)pass, version != 0, &corpus, &output, &scratch, counters).failures;

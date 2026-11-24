@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Whole public-stage costs for GVN, LICM and SROA. Include after their tests and ir_optimize_benchmark.c.
+// Whole public-stage costs for GVN, LICM and SROA. Include after their tests and ir_optimize_benchmark.c. GVN alone keeps
+// a scalar twin (#2924, #3433), timed and checked beside its vector path; LICM and SROA have one path, path 1, timed once.
 // Frozen synthetic fixtures are built and checked before timing. These are pass costs, not emitted-code gains.
 
 typedef struct IrPassBenchmarkResult IrPassBenchmarkResult;
@@ -28,7 +29,6 @@ static bool ir_pass_benchmark_once(const IrFunction* input, Arena* output, Arena
     }
     else if (pass == 1)
     {
-        // LICM has one path (#2924): its scalar and vector runs time the same code, a control of the harness's spread.
         IrLicmResult run = { 0 };
         const IrLicmOptions options = ir_licm_options();
         check = ir_optimize_licm(input, output, scratch, options, &run);
@@ -51,6 +51,13 @@ static bool ir_pass_benchmark_once(const IrFunction* input, Arena* output, Arena
         *result = candidate;
     }
     return valid;
+}
+
+// Whether `path` (0 GVN's scalar twin, 1 the vector or only path) runs for `pass` under --only.
+static bool ir_pass_benchmark_path(uint32_t pass, int only, uint32_t path)
+{
+    const bool runs = pass == 0 ? only < 0 || only == (int)path : path == 1;
+    return runs;
 }
 
 static __attribute__((noinline)) bool ir_pass_benchmark_repeat(const IrFunction* input, Arena* output, Arena* scratch, uint32_t pass, bool scalar, uint32_t repeats)
@@ -122,19 +129,15 @@ static bool ir_pass_benchmark_fixture(Arena* arena, IrFunction* f, IrOptimizeTes
 
 static bool ir_pass_benchmark_check(const IrFunction* input, const IrPassBenchmarkResult* reference, uint32_t pass, uint32_t shape, uint32_t fields, Arena* output, Arena* scratch)
 {
-    bool valid = pass == 0 ? reference[1].changed >= reference[0].changed : ir_optimize_test_equal(&reference[0].function, &reference[1].function);
-    if (pass == 2)
-    {
-        const IrFunction* a = &reference[0].function;
-        const IrFunction* b = &reference[1].function;
-        valid = valid && a->slot_count == b->slot_count && (a->slot_count == 0 || memcmp(a->slots, b->slots, (uint64_t)a->slot_count * sizeof(IrSlot)) == 0);
-    }
+    // GVN's scalar twin may remove fewer values than the partition, never more; the other passes have path 1 alone.
+    bool valid = pass != 0 || reference[1].changed >= reference[0].changed;
+    const uint32_t first = pass == 0 ? 0 : 1;
     for (uint32_t trial = 0; valid && trial < 9; trial += 1)
     {
         const uint64_t parameter = trial == 8 ? UINT64_MAX : trial;
         if (pass == 2 && shape == 2)
         {
-            for (uint32_t path = 0; valid && path < 2; path += 1)
+            for (uint32_t path = first; valid && path < 2; path += 1)
             {
                 const uint64_t mark = output->length;
                 IrFunction promoted = { 0 };
@@ -151,7 +154,7 @@ static bool ir_pass_benchmark_check(const IrFunction* input, const IrPassBenchma
         else
         {
             const IrOptimizeExecution before = ir_optimize_test_execute(input, scratch, parameter, 0);
-            for (uint32_t path = 0; valid && path < 2; path += 1)
+            for (uint32_t path = first; valid && path < 2; path += 1)
             {
                 const IrOptimizeExecution after = ir_optimize_test_execute(&reference[path].function, scratch, parameter, 0);
                 valid = before.status != 4 && before.status == after.status && before.value == after.value && (pass == 2 || before.effects == after.effects);
@@ -220,12 +223,16 @@ static __attribute__((unused)) int run_ir_optimize_passes_benchmark(int argc, ch
             IrOptimizeTest generator = { .random = 139 + pass * 3 + shape };
             valid = ir_pass_benchmark_fixture(&input_arena, &input, &generator, pass, shape, length, fields);
             IrPassBenchmarkResult reference[2] = { 0 };
-            for (uint32_t path = 0; valid && path < 2; path += 1)
+            for (uint32_t path = pass == 0 ? 0 : 1; valid && path < 2; path += 1)
             {
                 valid = ir_pass_benchmark_once(&input, &outputs[path], &scratch, pass, path == 0, &reference[path]);
             }
             valid = valid && ir_pass_benchmark_check(&input, reference, pass, shape, fields, &promoted, &scratch);
-            if (valid)
+            if (valid && pass != 0)
+            {
+                printf("ir-pass %s %s input=%u output=%u changed=%u output-bytes=%" PRIu64 " analysis-bytes=%" PRIu64 "\n", names[pass], shapes[pass][shape], input.instruction_count, reference[1].function.instruction_count, reference[1].changed, reference[1].function.arena_bytes, reference[1].analysis_bytes);
+            }
+            else if (valid)
             {
                 printf("ir-pass %s %s input=%u scalar-output=%u vector-output=%u scalar-changed=%u vector-changed=%u scalar-output-bytes=%" PRIu64 " vector-output-bytes=%" PRIu64 " scalar-analysis-bytes=%" PRIu64 " vector-analysis-bytes=%" PRIu64 "\n", names[pass], shapes[pass][shape], input.instruction_count, reference[0].function.instruction_count, reference[1].function.instruction_count, reference[0].changed, reference[1].changed, reference[0].function.arena_bytes, reference[1].function.arena_bytes, reference[0].analysis_bytes, reference[1].analysis_bytes);
             }
@@ -236,7 +243,7 @@ static __attribute__((unused)) int run_ir_optimize_passes_benchmark(int argc, ch
             double ticks[2][BUSTER_IR_OPTIMIZE_BENCHMARK_SAMPLES] = { 0 };
             for (uint32_t path = 0; valid && path < 2; path += 1)
             {
-                if (only < 0 || only == (int)path)
+                if (ir_pass_benchmark_path(pass, only, path))
                 {
                     uint64_t elapsed = 0;
                     while (valid && elapsed < BUSTER_IR_OPTIMIZE_BENCHMARK_MIN_NS && repetitions[path] < (1u << 20))
@@ -256,9 +263,9 @@ static __attribute__((unused)) int run_ir_optimize_passes_benchmark(int argc, ch
                 for (uint32_t order = 0; valid && order < 2; order += 1)
                 {
                     const uint32_t path = (order + sample) & 1;
-                    if (only < 0 || only == (int)path)
+                    if (ir_pass_benchmark_path(pass, only, path))
                     {
-                        if (path == 1 && after_scalar != 0)
+                        if (pass == 0 && path == 1 && after_scalar != 0)
                         {
                             const uint64_t until = ir_optimize_benchmark_time() + (uint64_t)after_scalar * 1000000;
                             while (valid && ir_optimize_benchmark_time() < until)
@@ -278,7 +285,7 @@ static __attribute__((unused)) int run_ir_optimize_passes_benchmark(int argc, ch
             }
             for (uint32_t path = 0; valid && path < 2; path += 1)
             {
-                if (only < 0 || only == (int)path)
+                if (ir_pass_benchmark_path(pass, only, path))
                 {
                     double minimum = times[path][0];
                     double maximum = minimum;
@@ -288,7 +295,7 @@ static __attribute__((unused)) int run_ir_optimize_passes_benchmark(int argc, ch
                         maximum = times[path][sample] > maximum ? times[path][sample] : maximum;
                     }
                     const double median = ir_optimize_benchmark_median(times[path], samples);
-                    printf("ir-pass %s %s %s samples=%u repeats=%u ns=%.2f min=%.2f max=%.2f tsc-ticks=%.2f instructions-per-second=%.2f\n", names[pass], shapes[pass][shape], path == 0 ? "scalar" : "vector", samples, repetitions[path], median, minimum, maximum, ir_optimize_benchmark_median(ticks[path], samples), median == 0 ? 0 : (double)input.instruction_count * 1000000000.0 / median);
+                    printf("ir-pass %s %s %s samples=%u repeats=%u ns=%.2f min=%.2f max=%.2f tsc-ticks=%.2f instructions-per-second=%.2f\n", names[pass], shapes[pass][shape], pass != 0 ? "one" : path == 0 ? "scalar" : "vector", samples, repetitions[path], median, minimum, maximum, ir_optimize_benchmark_median(ticks[path], samples), median == 0 ? 0 : (double)input.instruction_count * 1000000000.0 / median);
                 }
             }
             arena_pop_to(&input_arena, 0);

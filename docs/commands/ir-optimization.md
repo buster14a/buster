@@ -18,13 +18,13 @@ requirements. [Command index](README.md).
   begin it), through the same steps, and its per-callee limits and caller-only
   rewrite); `test-ir-optimize` also runs
   #175's hand-written `tests/ir/optimize/*.ir` before/after pairs in the text form
-  through both parser paths, both twins, the canonical printer and the
-  independent executor (`--print-text` prints them for review).
+  through the parser, the pass (GVN's fixtures also through its scalar twin,
+  which must remove no more), the canonical printer and the independent executor (`--print-text` prints them for review).
   #1729's join chains (arms of distinct constants, of the parameter's sums and
-  of one constant, meeting at one phi) run through both twins against the
+  of one constant, meeting at one phi) run through the optimizer against the
   executor, and chains of 4,096 arms bound the incoming values SCCP's phi
-  transfers examine (`sccp_phi_incoming`) to four per arm on both paths, which
-  the worklist path exceeded before the change.
+  transfers examine (`sccp_phi_incoming`) to four per arm, which the worklist
+  exceeded before the change.
   #1450's SIMD fixtures exercise constant lane folding against the lane model
   and interpreter, wide phi/bitcast propagation, exact-bit splats, GVN's complete
   vector payload keys and LICM's integer-lane motion. A floating
@@ -41,8 +41,8 @@ requirements. [Command index](README.md).
   and an overflow fixture. `benchmark-ir-source --passes` times its `memory`
   row once. [Its guide](../../docs/ir-memory-value-numbering.md) has the rules,
   the vector phases and the measurements.
-- #139's acceptance on real C: `test-ir-source --passes` runs every pass's
-  vector and scalar versions on every function of c-testsuite's subset, the
+- #139's acceptance on real C: `test-ir-source --passes` runs every pass
+  (GVN also by its scalar twin) on every function of c-testsuite's subset, the
   frozen `sqlite3.c` and musl in the correctness list, and
   `benchmark-ir-source --passes` times them on the 9700X ([the IR
   guide](ir.md)). The C driver's `--tier1-passes=LIST` turns each pass of

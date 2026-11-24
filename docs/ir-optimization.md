@@ -249,11 +249,22 @@ The passes are these worklists alone since #2924. The vector passes beside them
 (SCCP sweeping executable blocks in reverse postorder with 16-instruction fold
 batches, dead-code sweeps, pointer jumping for the threads, sixteen-lane ranks,
 roots and identity candidates) took 1.02 to 1.44 times their ticks when forced,
-more with size, on Tier 1's pipeline over `sqlite3.c`, Lua and musl, and #860's
-AUTO bound never chose them below 8,192 instructions ([#2924's
+more with size, on Tier 1's pipeline over `sqlite3.c`, Lua and musl ([#2924's
 6987893038](https://github.com/buster14a/buster/issues/2924#issuecomment-6987893038)).
-The owner kept the scalar passes; #3445 is a vectorized form that would have to
-win at every size. Integer
+#860's AUTO bound kept SCCP's and DCE's sweeps off below 8,192 instructions, but
+some vector arms ran in every compile: every rewrite (LICM's, GVN's, SROA's)
+threaded blocks by the vector pointer jumping, and SROA's split ran DCE's vector
+roots and sweeps. The deletion's whole-compile run on the 9700X measured their
+replacement: 1,372 of 1,372 objects identical, and `sqlite3.c`'s and Lua's Tier 1
+compiles took 0.4 to 1.2% fewer user cycles
+([record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/scalar-paths-removal-2924-2026-11-17/c-ir-optimize-deletion)).
+#860 had measured the vector passes 9 to 11% ahead at 16K+ instructions in a
+near-single-block shape, which no corpus function reaches (the densest real
+function, `chacha_block`, has 247 instructions a block, where they lost 5%); the
+owner deleted AUTO with that known
+([7112387760](https://github.com/buster14a/buster/issues/2924#issuecomment-7112387760)).
+#3445 is a vectorized form that would have to win at every size, that shape
+included. Integer
 operations support all IR integer widths, including scalar i128 handling.
 Copies, phis, selects, integer/pointer conversions, bitcasts and floating sign
 negation preserve exact constant bits. Floating arithmetic, comparisons and
@@ -671,8 +682,8 @@ The optimizer's rows and LICM take the promoted form, 480,852 instructions.
 The merges cost 2.2 ms over CFG cleanup alone on the vector path (1.3 ms on
 the scalar), or 4 ns a lowered instruction. Their predecessor counts are one
 scalar pass over the executable edges, a scatter of one count per edge, which
-that bound includes; the chain heads come from the threading's pointer jumping,
-with its vector and scalar twins.
+that bound includes; the chain heads come from the threading's walk, one scalar
+path since #2924 (its pointer jumping went then).
 
 The whole driver, `--tier1 --lanes 1 -c sqlite3.c`, 11 runs each by
 `time-runs`, in user cycles:

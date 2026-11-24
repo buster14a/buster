@@ -1135,16 +1135,7 @@ static void ir_optimize_test_limits(IrOptimizeTest* test, Arena* input, Arena* o
         f.op[2] = IR_SHL;
         f.constants[0] = (IrConstant){ .low = 128 };
         f.constants[1] = (IrConstant){ .low = 256 };
-        Arena reference = arena_reserve(1ull << 20);
-        if (reference.base != 0)
-        {
-            ir_optimize_test_compare(test, &f, output, scratch, 7);
-        }
-        else
-        {
-            ir_optimize_test_expect(test, false, "mixed-width fixture arena");
-        }
-        arena_release(&reference);
+        ir_optimize_test_compare(test, &f, output, scratch, 7);
     }
     arena_pop_to(input, 0);
 }

@@ -114,7 +114,6 @@ struct Tier1PipelineTest
     Tier1PipelineMutant accepted[BUSTER_TIER1_PIPELINE_MUTANTS];
     uint32_t accepted_count;
     uint32_t fixture;
-    bool vector;
     bool rematerialize;
     Arena arenas[BUSTER_TIER1_PIPELINE_ARENAS];
     Tier0Tables tables;
@@ -130,7 +129,7 @@ static bool tier1_pipeline_expect(Tier1PipelineTest* test, bool passed, const ch
     {
         if (test->failures < 20)
         {
-            fprintf(stderr, "tier1-pipeline: %s (fixture=%u, vector=%u, remat=%u, seed=%" PRIu64 ")\n", message, test->fixture, test->vector, test->rematerialize, test->seed);
+            fprintf(stderr, "tier1-pipeline: %s (fixture=%u, remat=%u, seed=%" PRIu64 ")\n", message, test->fixture, test->rematerialize, test->seed);
         }
         test->failures += 1;
     }
@@ -1394,7 +1393,6 @@ static void tier1_pipeline_supported(Tier1PipelineTest* test)
         const bool frozen = tier1_pipeline_freeze(test, &fixture, &original);
         if (frozen)
         {
-            test->vector = true;
             for (uint32_t remat = 0; remat < 2; remat += 1)
             {
                 test->rematerialize = remat != 0;

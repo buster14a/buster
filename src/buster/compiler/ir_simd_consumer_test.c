@@ -230,41 +230,38 @@ static void ir_simd_vector_consumer_test(IrTestTally* tally, Arena* input, Arena
             ir_test_instruction(&function, 10, IR_RET, IR_VOID, 9, BUSTER_IR_NONE, BUSTER_IR_NONE);
             ir_test_expect(tally, ir_verify(&function, scratch, NULL).error == IR_OK && ir_function_has_vectors(&function), "the vector consumer fixture verifies and has vectors");
             arena_pop_to(scratch, 0);
-            for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+            IrFunction promoted = { 0 };
+            IrCheck checked = ssa_ir_promote(&function, output, scratch, &promoted);
+            uint32_t accesses = 0;
+            for (uint32_t i = 0; checked.error == IR_OK && i < promoted.instruction_count; i += 1)
             {
-                IrFunction promoted = { 0 };
-                IrCheck checked = ssa_ir_promote(&function, output, scratch, &promoted);
-                uint32_t accesses = 0;
-                for (uint32_t i = 0; checked.error == IR_OK && i < promoted.instruction_count; i += 1)
-                {
-                    accesses += promoted.op[i] == IR_LOAD || promoted.op[i] == IR_STORE;
-                }
-                ir_test_expect(tally, checked.error == IR_OK && accesses == 0 && promoted.slot_count == 0 && promoted.vector_constant_count == 2 &&
-                                          memcmp(promoted.vector_constants, function.vector_constants, 2 * sizeof(IrSimdValue)) == 0 && scratch->length == 0,
-                               "SSA promotion takes a vector's slot, its constants' payloads kept");
-                IrOptimizeResult optimized = { 0 };
-                IrOptimizeOptions options = ir_optimize_options();
-                checked = checked.error == IR_OK ? ir_optimize(&promoted, output, scratch, options, &optimized) : checked;
-                uint32_t vector_values = 0;
-                for (uint32_t i = 0; checked.error == IR_OK && i < optimized.function.instruction_count; i += 1)
-                {
-                    vector_values += ((BUSTER_IR_VECTORS >> optimized.function.type[i]) & 1) != 0;
-                }
-                ir_test_expect(tally, checked.error == IR_OK && ir_verify(&optimized.function, scratch, NULL).error == IR_OK && vector_values == 0 && optimized.function.instruction_count == 2 &&
-                                          optimized.function.vector_constant_count == 2 && memcmp(optimized.function.vector_constants, function.vector_constants, 2 * sizeof(IrSimdValue)) == 0,
-                               "SCCP folds promoted constant lanes through compare and select to a verified constant mask");
-                arena_pop_to(scratch, 0);
-                const IrFunction* const forms[3] = { &function, &promoted, &optimized.function };
-                for (uint32_t form = 0; checked.error == IR_OK && form < 3; form += 1)
-                {
-                    const IrInterpreterFunction binding = { .symbol = 1, .function = forms[form] };
-                    const IrInterpreterProgram program = { .functions = &binding, .function_count = 1 };
-                    const InterpreterResult run = ir_interpret(&program, 1, NULL, 0, NULL, scratch);
-                    ir_test_expect(tally, run.status == INTERPRETER_OK && run.value.low == expected && run.value.high == 0 && scratch->length == 0,
-                                   "the lowered, promoted and optimized vector functions return the lanes' mask on the shared interpreter");
-                }
-                arena_pop_to(output, 0);
+                accesses += promoted.op[i] == IR_LOAD || promoted.op[i] == IR_STORE;
             }
+            ir_test_expect(tally, checked.error == IR_OK && accesses == 0 && promoted.slot_count == 0 && promoted.vector_constant_count == 2 &&
+                                      memcmp(promoted.vector_constants, function.vector_constants, 2 * sizeof(IrSimdValue)) == 0 && scratch->length == 0,
+                           "SSA promotion takes a vector's slot, its constants' payloads kept");
+            IrOptimizeResult optimized = { 0 };
+            IrOptimizeOptions options = ir_optimize_options();
+            checked = checked.error == IR_OK ? ir_optimize(&promoted, output, scratch, options, &optimized) : checked;
+            uint32_t vector_values = 0;
+            for (uint32_t i = 0; checked.error == IR_OK && i < optimized.function.instruction_count; i += 1)
+            {
+                vector_values += ((BUSTER_IR_VECTORS >> optimized.function.type[i]) & 1) != 0;
+            }
+            ir_test_expect(tally, checked.error == IR_OK && ir_verify(&optimized.function, scratch, NULL).error == IR_OK && vector_values == 0 && optimized.function.instruction_count == 2 &&
+                                      optimized.function.vector_constant_count == 2 && memcmp(optimized.function.vector_constants, function.vector_constants, 2 * sizeof(IrSimdValue)) == 0,
+                           "SCCP folds promoted constant lanes through compare and select to a verified constant mask");
+            arena_pop_to(scratch, 0);
+            const IrFunction* const forms[3] = { &function, &promoted, &optimized.function };
+            for (uint32_t form = 0; checked.error == IR_OK && form < 3; form += 1)
+            {
+                const IrInterpreterFunction binding = { .symbol = 1, .function = forms[form] };
+                const IrInterpreterProgram program = { .functions = &binding, .function_count = 1 };
+                const InterpreterResult run = ir_interpret(&program, 1, NULL, 0, NULL, scratch);
+                ir_test_expect(tally, run.status == INTERPRETER_OK && run.value.low == expected && run.value.high == 0 && scratch->length == 0,
+                               "the lowered, promoted and optimized vector functions return the lanes' mask on the shared interpreter");
+            }
+            arena_pop_to(output, 0);
         }
         arena_pop_to(input, mark);
     }

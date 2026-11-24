@@ -135,9 +135,9 @@ builtins with `-march=x86-64` and `-march=znver5`, including functions that add
 and remove BMI, LZCNT and POPCNT through their target attributes (#1374).
 
 `./build/compiler test-ir-source --passes [preprocessor options] file...`
-(`ir_source_passes.c`) is #139's twin check on real C. It prepares, lowers and
+(`ir_source_passes.c`) is #139's check on real C. It prepares, lowers and
 promotes every function as `test-ir-source` does, then runs each of #139's
-passes by its vector and its scalar version:
+passes, each by its one path since #2924 but GVN, which keeps its scalar twin:
 - SROA with Tier 1's options, on the lowered form;
 - #866's solver on the lowered form: its acyclic numbering must give its
   complete-refinement oracle's function, and its scalar available-expression
@@ -158,9 +158,9 @@ passes by its vector and its scalar version:
   among the file's functions, as the C driver's expansion builds one, with
   the caller alone rewritten and #2541's general splice on.
 
-Both versions must give the same function, counts and decisions. SROA's,
-the solver's and the inliner's results must also promote. A refusal both
-versions give alike is counted, not failed: `IR_ERROR_UNSUPPORTED`. Any other
+Each pass's result must verify, and the checks above hold. SROA's, the
+solver's and the inliner's results must also promote. A refusal is counted,
+not failed: `IR_ERROR_UNSUPPORTED`. Any other
 error or difference fails the command, with a line naming the file,
 function and pass; the inliner's unit of a caller with an unprototyped or
 variadic call is no refusal (its signature is that call's decision, #2721:
@@ -168,12 +168,11 @@ c-testsuite's subset and `sqlite3.c` had 7 and 219 such units). The correctness 
 frozen `sqlite3.c` and musl, every pass agreeing on all 5,807 functions.
 
 `./build/compiler benchmark-ir-source --passes [--only PASS] [preprocessor
-options] file...` times the same passes by both versions on the same inputs
-(by its one version where #2924 left one: the inliner, the unroller, the loop
-vectorizer, loop store motion, LICM and value numbering with memory).
+options] file...` times the same passes on the same inputs, by their one
+version since #2924, and #866's solver by its vector path and its scalar twin.
 The inputs are prepared outside the time, and so are the callers' units that
 both inliner versions take. Each pass runs over the whole corpus by each
-version, in 21 rounds that alternate which runs first, after a warm-up of
+version, in 21 rounds that alternate which of GVN's runs first, after a warm-up of
 each. A run is the public call with its checks, analyses, rewrite and
 verification. The report gives each version's median total and its
 nanoseconds, cycles and instructions per lowered IR instruction. Run it
