@@ -4592,7 +4592,7 @@ _Alignas(64) static const uint8_t fast_iota64_plus1[64] = {
 // that ends the line, as fast_lex_one's stop_at_eol does. Its tokens are fast_lex_one's tokens of the same text, byte
 // for byte, or are marked as fast_lex_one's (BUSTER_FWIN_SCALAR), which the readers lex there:
 //   - a '.' before a digit or a '.', a two-character punctuator before a character that could go on with it ("<<=",
-//     ">>=") or at a block's last byte, an identifier or number of more than a block;
+//     ">>=") or at a block's last byte, an identifier or number of more than 255 bytes;
 //   - a number before a '.' or with an exponent's sign is a plain run here, and its readers look at the byte after it.
 // What it can't promise even that for ends the window (BUSTER_FWIN_STOP_SCALAR): a backslash, a byte that is neither
 // ASCII nor a C character, a literal with a prefix, a string a newline cuts, a character constant that isn't 'c' or a
@@ -4601,9 +4601,8 @@ _Alignas(64) static const uint8_t fast_iota64_plus1[64] = {
 // The loop steps 64 bytes at a time while a block holds none of the bytes that need a decision: the next block's
 // address doesn't wait for this block's masks, so the blocks' work overlaps. A block does no branch on its tokens and
 // reads nothing back from the window (a 64-byte store that crosses a cache line does not forward to a load on Zen 5):
-// what crosses its end is carried in registers, a run that goes on (its token's index and first byte; its length is
-// written when its end is found) and whether the next block's first byte is the second character of a two-character
-// punctuator. The classes are one table's lookup and a bit test each; the two-character punctuators are a lookup by
+// what crosses its end is carried in registers: a run that goes on (its token's index and first byte; its length is
+// written when its end is found). The classes are one table's lookup and a bit test each; the two-character punctuators are a lookup by
 // the two characters' classes, taken at even places of each run of candidates (the longest match from the left); and
 // the tokens' kinds, first bytes and lengths are three compresses and an expand.
 static BUSTER_DIRECT_HOT void fast_pp_lex_window(FastPP* pp, const FastIncludeFile* f, const uint8_t* p, bool bol, bool line_mode)
@@ -4641,7 +4640,6 @@ static BUSTER_DIRECT_HOT void fast_pp_lex_window(FastPP* pp, const FastIncludeFi
     uint32_t unused_line = 0;
     // What crosses a block's end.
     uint64_t run_carry = 0;      // 1 if the last byte's identifier or number goes on in this block
-    uint64_t pair_carry = 0;     // 1 if this block's first byte ends a two-character punctuator
     uint64_t tail_run = 0;       // 1 if the byte before this block is an identifier's or a number's
     uint32_t open_idx = spare;   // the token whose run goes on
     uint32_t open_start = 0;     // ... and its first byte's offset
@@ -4676,10 +4674,9 @@ static BUSTER_DIRECT_HOT void fast_pp_lex_window(FastPP* pp, const FastIncludeFi
         const __mmask64 run_ends = runs & ~((runs >> 1) | (next_run << 63));
         const __mmask64 run_starts = runs & ~((runs << 1) | run_carry);
         const __mmask64 punct = ~(space | run_chars) & lmask;
-        // A character that pairs with the one after it has that one inside the block's lexed bytes, or in the next
-        // block if this block has no byte that stops it.
-        const uint64_t next_pairs = limit == 64u && next_byte < 128u ? top_bit : 0u;
-        const __mmask64 with_next = punct & ((lmask >> 1) | next_pairs);
+        // A character that goes with the one after it has that one among the block's lexed bytes, or is the block's last
+        // byte (whose token is fast_lex_one's below, whatever the next block's first byte is).
+        const __mmask64 with_next = punct & ((lmask >> 1) | top_bit);
 
         // The two-character punctuators: a candidate wherever two characters' classes name one, and of each run of
         // candidates the ones at even places from its start, since a taken pair uses up the next candidate's first
@@ -4688,22 +4685,24 @@ static BUSTER_DIRECT_HOT void fast_pp_lex_window(FastPP* pp, const FastIncludeFi
                                                             _mm512_or_si512(_mm512_permutex2var_epi8(v_first_lo, v, v_first_hi),
                                                                             _mm512_permutex2var_epi8(v_second_lo, v1, v_second_hi)),
                                                             v_pair_hi);
-        const __mmask64 candidates = _mm512_test_epi8_mask(pair_kinds, pair_kinds) & with_next & ~pair_carry;
+        const __mmask64 candidates = _mm512_test_epi8_mask(pair_kinds, pair_kinds) & with_next;
         const __mmask64 candidate_starts = candidates & ~(candidates << 1);
         const __mmask64 from_even = candidates & ~(candidates + (candidate_starts & even_bits));
         const __mmask64 pairs = (from_even & even_bits) | (candidates & ~from_even & ~even_bits);
-        const __mmask64 tok_starts = (run_starts | punct) & ~((pairs << 1) | pair_carry);
+        const __mmask64 tok_starts = (run_starts | punct) & ~(pairs << 1);
         // fast_lex_one's tokens: a '.' before a digit or a '.', a pair before a candidate (the third character may
-        // go on with it) and a pair at the last byte (the third character is not in this block).
+        // go on with it) and a pair at the last byte (its second and third characters are not in this block: the next
+        // block lexes them as their own tokens, which fast_pp_window_pass passes or lexes again after this one).
         const __mmask64 scalars = (dots & with_next & ((dot_nexts >> 1) | ((uint64_t)((fast_lex_class[next_byte & 127u] >> 5) & 1u) << 63))) |
                                   (pairs & ((candidates >> 1) | top_bit));
 
-        // A run that came from the block before ends here, and its token's length is known. One that fills this
-        // block too is longer than a block: fast_lex_one's.
+        // A run that came from the block before ends here, and its token's length is known (or the run goes on: the
+        // length so far, written again by the block that ends it). A length of more than a byte is fast_lex_one's.
         const uint32_t first_end = (uint32_t)_tzcnt_u64(run_ends);
         const uint32_t carried_idx = run_carry != 0 ? open_idx : spare;
-        wl[carried_idx] = (uint8_t)(block_offset + first_end + 1u - open_start);
-        wk[run_carry != 0 && run_ends == 0 ? open_idx : spare] = BUSTER_FWIN_SCALAR;
+        const uint32_t carried_len = block_offset + first_end + 1u - open_start;
+        wl[carried_idx] = (uint8_t)carried_len;
+        wk[run_carry != 0 && carried_len > 255u ? open_idx : spare] = BUSTER_FWIN_SCALAR;
 
         // The tokens' kinds and first bytes, packed. A run's length is the byte after its last less its first: those
         // bytes, packed in the runs' order (without the end of the run that came from the block before), are spread
@@ -4730,8 +4729,11 @@ static BUSTER_DIRECT_HOT void fast_pp_lex_window(FastPP* pp, const FastIncludeFi
             uint64_t rest = scalars;
             do
             {
+                // Marked, with the bytes it has as the window splits the text: a pair's two, a '.' alone.
                 const uint32_t bit = (uint32_t)__builtin_ctzll(rest);
-                wk[n + (uint32_t)__builtin_popcountll(tok_starts & _bzhi_u64(~UINT64_C(0), bit))] = BUSTER_FWIN_SCALAR;
+                const uint32_t idx = n + (uint32_t)__builtin_popcountll(tok_starts & _bzhi_u64(~UINT64_C(0), bit));
+                wk[idx] = BUSTER_FWIN_SCALAR;
+                wl[idx] = (uint8_t)(1u + (uint32_t)((pairs >> bit) & 1u));
                 rest &= rest - 1u;
             } while (rest != 0);
         }
@@ -4742,8 +4744,6 @@ static BUSTER_DIRECT_HOT void fast_pp_lex_window(FastPP* pp, const FastIncludeFi
         open_start = starts_run ? block_offset + 63u - (uint32_t)_lzcnt_u64(run_starts) : open_start;
         open_idx = starts_run ? n + m_count - 1u : open_idx;
         run_carry = (runs >> 63) & next_run;
-        pair_carry = pairs >> 63;
-        tail_run = runs >> 63;
 
         // Whether a line starts after these bytes: a newline past the last byte that is no whitespace.
         const __mmask64 solid = (~space) & lmask;
@@ -4753,12 +4753,13 @@ static BUSTER_DIRECT_HOT void fast_pp_lex_window(FastPP* pp, const FastIncludeFi
 
         if (limit == 64u)
         {
+            tail_run = runs >> 63;
             p += 64;
             continue;
         }
         p += limit;
 
-        // The byte that needs a decision. No run and no pair crosses into it. What stands directly before it may
+        // The byte that needs a decision. No run crosses into it, and no pair. What stands directly before it may
         // belong with it: the identifier or number that ends there, which is the window's last token.
         const bool after_run = limit != 0 ? ((runs >> (limit - 1u)) & 1u) != 0 : tail_run != 0;
         const __mmask64 starts_before = run_starts & lmask;
@@ -4875,17 +4876,12 @@ static BUSTER_DIRECT_HOT void fast_pp_lex_window(FastPP* pp, const FastIncludeFi
         break;
     }
 
-    // A window never ends inside a token: a run that goes on is lexed again by the next window, and the second
-    // character of a pair that is already a token is passed.
+    // A window never ends inside a run: one that goes on is lexed again by the next window.
     if (run_carry != 0)
     {
         n = open_idx;
         p = base + open_start;
         bol = false;
-    }
-    else if (pair_carry != 0)
-    {
-        p += 1;
     }
 
     w->count = n;
@@ -4899,9 +4895,9 @@ static BUSTER_DIRECT_HOT void fast_pp_lex_window(FastPP* pp, const FastIncludeFi
 }
 
 // Passes the window's tokens that start before the file's byte `offset`. False where the last of them goes on past it:
-// what moved the position there split the text another way than the window (fast_lex_one takes the '+' of "1e+=2" as an
-// exponent's sign, the window as "+="), and the text is lexed again from the position. A literal and a token marked as
-// fast_lex_one's have no length here; whatever passed their first byte took them whole.
+// what moved the position there split the text another way than the window (fast_lex_one takes "<<=" where the window
+// has "<<" and "=="; a pair at a block's last byte takes the first byte of the next block's pair), and the text is lexed
+// again from the position. A string has no length here: whatever passed its first byte took it whole.
 static inline bool fast_pp_window_pass(FastWindow* w, uint32_t offset)
 {
     const uint32_t count = w->count;
@@ -4917,13 +4913,13 @@ static inline bool fast_pp_window_pass(FastWindow* w, uint32_t offset)
         const uint32_t last = i - 1u;
         const uint32_t kind = w->kinds[last];
         uint32_t length = 1u;
-        if (kind == FTOK_IDENT || kind == FTOK_INT_LIT)
-        {
-            length = w->lens[last];
-        }
-        else if (kind > FTOK_STR_LIT && kind < 64u)
+        if (kind > FTOK_STR_LIT && kind < 64u)
         {
             length = fast_punct_len[kind];
+        }
+        else if (kind != FTOK_STR_LIT)
+        {
+            length = w->lens[last];
         }
         whole = starts[last] + length <= offset;
     }
