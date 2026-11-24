@@ -1,0 +1,1 @@
+int tested(int n){int x=n;__typeof__(({int y=++x;y;})) t=2;return x+t;}

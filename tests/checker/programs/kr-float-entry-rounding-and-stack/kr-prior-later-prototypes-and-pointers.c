@@ -1,0 +1,1 @@
+int f(int,double);int f(x,y)char x;float y;{return x+(int)(y*10);}int before(int n){return f(n,3.7);}int f(int,double);int tested(int n){int (*p)(int,double)=f;int (*q)()=f;return before(n&255)+p(n&255,3.7)+q((char)(n&255),3.7);}

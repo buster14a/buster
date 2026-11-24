@@ -1,0 +1,1 @@
+int tested(int n){const char*s="\x{41}\o{102}\u{e9}\q\E\(\%";const unsigned short*u=u"\x{1234}\u{1F600}";const int*w=L"\o{7777777}\Q";int c='\x{43}'+'\o{104}'*3+'\E'*5+'\z'*7;unsigned long h=0;for(int i=0;s[i];i++)h=h*31+(unsigned char)s[i];for(int i=0;u[i];i++)h=h*37+u[i];for(int i=0;w[i];i++)h=h*41+(unsigned)w[i];return (int)(h%1000003)+c+n;}

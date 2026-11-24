@@ -1,0 +1,1 @@
+int add(int a,int b){return a+b;}int mul(int a,int b){return a*b;}int(*pick(int n))(int,int){return n&1?add:mul;}int apply(int(*f)(int,int),int x){return (*f)(x,x);}int tested(int n){int(*f)(int,int)=n<0?add:mul;int(*t[2])(int,int)={add,mul};return f(n,3)+(*t[n&1])(n,4)+pick(n)(2,n)+apply(t[0],n)+apply(&mul,2);}

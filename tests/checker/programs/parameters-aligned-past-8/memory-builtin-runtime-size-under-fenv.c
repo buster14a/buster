@@ -1,0 +1,2 @@
+#pragma STDC FENV_ACCESS ON
+int change_rounding(int);unsigned char a[2]={7,9},b[2];int tested(int n){b[0]=b[1]=0;change_rounding(n);__builtin_memcpy(b,a,(unsigned long)(1.0+0x1.fffffffffffffp-1));change_rounding(0);return b[0]+b[1]*256;}

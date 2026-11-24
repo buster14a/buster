@@ -1,0 +1,1 @@
+int inc(int x){return x+1;}int dec(int x){return x-1;}int tested(int n){int(*f)(int)=n&1?inc:dec;int y=({int t=f(n);t*2;});if(n>5)return f(y);int z=n>2?f(n):({f(y)+1;});return y+z;}

@@ -1,0 +1,1 @@
+int tested(int n){n+=10;int x=sizeof(int[n++]);return x+(int)sizeof(int[n++])+n;}

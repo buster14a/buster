@@ -1,0 +1,1 @@
+int f(n,a)int n;int a[n++];{return n;}int h(int*x){return x[0];}int g(n,p)int n;int (*p)(int a[n++]);{return n*10+p(&n);}int e(n,a,m)int n,m;int (*a)[n++][m++];{return n*100+m*10+(int)(sizeof(*a)/sizeof(int));}int tested(int k){int a[8]={0};int b[5][6];return f((k&3)+3,a)*1000+g((k&3)+3,h)*10+e((k&3)+3,&b,5);}

@@ -1,0 +1,1 @@
+static void *bump(int *p, int v) { *p = *p * 10 + v; return 0; }int tested(int n) { int x = 0; (void)n;__typeof__((int (*)[3]){bump(&x, 1)}) p = bump(&x, 2); (void)p; return x; }

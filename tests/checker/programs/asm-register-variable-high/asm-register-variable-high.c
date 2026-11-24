@@ -1,0 +1,1 @@
+int tested(int n){register char r __asm__("ah")=(char)n;__asm__ volatile(".p2align 4\n\tincb %0" : "+q"(r));return r;}

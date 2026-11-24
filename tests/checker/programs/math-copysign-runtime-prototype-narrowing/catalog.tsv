@@ -1,0 +1,16 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+math-copysign-runtime-prototype-narrowing	math-copysign-runtime-prototype-narrowing.c	-	math-copysign-runtime-prototype-narrowing
+math-reuses-existing-errno-accessor	math-reuses-existing-errno-accessor.c	-	math-reuses-existing-errno-accessor
+math-source-definitions-do-not-recurse-through-runtime-helpers	math-source-definitions-do-not-recurse-through-runtime-helpers.c	-	math-source-definitions-do-not-recurse-through-runtime-helpers
+math-nested-accessor-calls-preserve-live-arguments	math-nested-accessor-calls-preserve-live-arguments.c	-	math-nested-accessor-calls-preserve-live-arguments
+typed-overflow-prototype-conversions-and-effects	typed-overflow-prototype-conversions-and-effects.c	-	typed-overflow-prototype-conversions-and-effects
+# The other typed overflow builtins (#148) of boundary values, each from long long operands that convert to its
+# prototype's type, the overflow and the stored value hashed; then a fold of constants and operands evaluated once.
+typed-overflow-every-builtin-of-boundary-values	typed-overflow-every-builtin-of-boundary-values.c	-	typed-overflow-every-builtin-of-boundary-values
+typed-overflow-folds-and-operands-evaluated-once	typed-overflow-folds-and-operands-evaluated-once.c	-	typed-overflow-folds-and-operands-evaluated-once
+deferred-query-runtime-values-remain-unevaluated	deferred-query-runtime-values-remain-unevaluated.c	-	deferred-query-runtime-values-remain-unevaluated
+atomic-shared-helper-widths-orders-and-sign	atomic-shared-helper-widths-orders-and-sign.c	-	atomic-shared-helper-widths-orders-and-sign
+terminal-helper-has-no-continuation	terminal-helper-has-no-continuation.c	-	terminal-helper-has-no-continuation
+gnu-omitted-middle-evaluates-once	gnu-omitted-middle-evaluates-once.c	-	gnu-omitted-middle-evaluates-once
+scalar-real-imaginary-preserve-evaluation	scalar-real-imaginary-preserve-evaluation.c	-	scalar-real-imaginary-preserve-evaluation

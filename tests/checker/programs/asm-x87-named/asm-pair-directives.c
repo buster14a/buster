@@ -1,0 +1,1 @@
+int tested(int n){unsigned __int128 v=(unsigned)n;__asm__(".p2align 4\n\tnotq %%rax" : "+A"(v));return (int)v+(int)(v>>64)*3;}

@@ -396,34 +396,7 @@ static void check_test_const_sources(CheckTest* test, const char* clang)
 
 static void check_test_const_programs(CheckTest* test, const char* clang)
 {
-    check_test_program_source(test,
-        "int calls;int touch(void){calls+=1;return 9;}struct S{int x,y;};struct P{struct S s;};const struct S base={8,9};\n"
-        "int tested(int n){const struct P p={.s=(touch(),base),.s={1,2}};enum{E=p.s.x};return E+p.s.y+calls+n;}\n",
-        "const-object-whole-replacement-drops-effectful-aggregate-rvalue", clang);
-    check_test_program_source(test,
-        "int calls;struct S{int x,y;};struct P{struct S s;};struct S make(int n){calls+=1;return (struct S){n,n+1};}\n"
-        "int tested(int n){const struct P p={.s=make(n),.s={1,2}};enum{E=p.s.x};return E+p.s.y+calls+n;}\n",
-        "const-object-whole-aggregate-replacement-drops-runtime-effect", clang);
-    check_test_program_source(test,
-        "int calls;int get(void){calls+=1;return 9;}\n"
-        "int tested(int n){const int a[3]={[0 ... 2]=get(),[0]=1,[1]=2,[2]=3};enum{E=a[0]};return E+a[1]+a[2]+calls+n;}\n",
-        "const-object-overridden-range-effect-is-not-executed", clang);
-    check_test_program_source(test,
-        "int calls;struct S{int x,y;};struct P{struct S s;};struct S make(int n){calls+=1;return (struct S){n,n+1};}\n"
-        "int tested(int n){const struct P p={.s=make(n),.s.x=1,.s.y=2};return p.s.x+p.s.y+calls+n;}\n",
-        "const-object-partial-aggregate-base-retains-runtime-effect", clang);
-    check_test_program_source(test,
-        "int calls;int get(void){calls+=1;return 9;}struct P{int x;};\n"
-        "int tested(int n){const struct P p={.x=get(),.x=3};enum{E=p.x};return E+calls+n;}\n",
-        "const-object-dead-initializer-effect-is-not-executed", clang);
-    check_test_program_source(test,
-        "const int k=3;int a[k];struct P{int x;};const struct P p={4};enum{E=p.x};int g=k;\n"
-        "int tested(int n){const int local=3;switch(n){case local:return g+E+(int)sizeof(a);default:return n+g;}}\n",
-        "const-object-case-label-and-static-initializer-values", clang);
-    check_test_program_source(test,
-        "int object=9;int* const p=&object;int* q=p;const int k=3;const int* const r=&k;int g=*r;\n"
-        "const double d=3.5;int h=(int)d;\nint tested(int n){return *q+g+h+n;}\n",
-        "const-pointer-target-and-converted-static-values", clang);
+    check_test_program_suite(test, "checker/programs/const-programs", clang);
 }
 
 #endif

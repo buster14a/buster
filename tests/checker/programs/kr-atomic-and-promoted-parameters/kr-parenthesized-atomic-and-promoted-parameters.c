@@ -1,0 +1,1 @@
+struct T{int a,b,c;};int take(x)_Atomic(struct T) x;{struct T v=x;return v.a+v.b*3+v.c*7;}int f(a,b,c,p,d)_Atomic(short) a;_Atomic(unsigned char) b;_Atomic(float) c;_Atomic(int*) p;float d;{a+=2;b+=3;c+=0.5f;return a+b+(int)(c*10+d*10)+*p;}int tested(int n){struct T t={n&127,5,7};int v=n&63;return f(65539,259,1.25,&v,3.7)+take(t);}

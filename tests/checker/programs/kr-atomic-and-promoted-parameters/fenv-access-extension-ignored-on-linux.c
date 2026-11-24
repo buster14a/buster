@@ -1,0 +1,2 @@
+#pragma fenv_access(on)
+int change_rounding(int);int clear_fp(void);int fp_state(void);int tested(int n){change_rounding(n);clear_fp();double x=1.0+0x1p-53;int a=x>1.0;int f=fp_state();change_rounding(0);return a*100+f;}

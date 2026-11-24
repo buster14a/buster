@@ -1,0 +1,1 @@
+int tested(int n){void*t[2]={&&even,&&odd};void*p=t[n&1];int r=0,k=0;goto*p+0;even:r+=2;k+=1;goto*k<3?t[0]:&&odd;odd:r+=3;k+=1;goto*k<5?t[1]+0:&&last;last:if(r>12)goto*r++,&&done;goto*p=&&done;done:return r*100+k*10+(p==&&done);}
