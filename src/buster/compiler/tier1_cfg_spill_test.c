@@ -310,10 +310,129 @@ static void tier1_cfg_test_spill_across(Tier1CfgTestTally* tally, Arena* output,
     }
 }
 
+// Each diamond feeds a two-block loop. The first value spills at home. The second spills on one arm or both:
+// only the latter is current at the join and latch. Layout puts the latch before the join and both before the arms,
+// so losses must travel forward around the loop. Number the second values after all the first ones to exercise the
+// ordering across groups, and give the solve less scratch than a full set of block rows.
+static void tier1_cfg_test_slot_groups(Tier1CfgTestTally* tally, Arena* output, Arena* scratch)
+{
+    const uint64_t saved = output->length;
+    const uint32_t diamonds = 2049;
+    const uint32_t blocks = 5 * diamonds;
+    const uint32_t values = 2 * diamonds;
+    const uint32_t edges = 6 * diamonds;
+    const uint32_t successor_offsets[] = { 0, 2, 3, 4, 5, 6 };
+    const uint32_t successors[] = { 3, 4, 2, 1, 2, 2 };
+    const uint32_t predecessor_offsets[] = { 0, 0, 1, 4, 5, 6 };
+    const uint32_t predecessors[] = { 2, 1, 3, 4, 0, 0 };
+    uint32_t* starts = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, blocks + 1);
+    uint32_t* succ_offsets = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, blocks + 1);
+    uint32_t* pred_offsets = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, blocks + 1);
+    uint32_t* succ = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, edges);
+    uint32_t* pred = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, edges);
+    uint32_t* begin = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, values);
+    uint32_t* end = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, values);
+    uint32_t* ids = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, values + 1);
+    uint32_t* fragments = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, values + 1);
+    uint32_t* fragment_starts = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, 2 * values);
+    uint32_t* fragment_ends = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, 2 * values);
+    uint8_t* kinds = BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, 2 * values);
+    const bool room = starts && succ_offsets && pred_offsets && succ && pred && begin && end && ids && fragments && fragment_starts && fragment_ends && kinds;
+    tier1_cfg_test_expect(tally, room, "space for the spill-slot diamonds");
+    if (room)
+    {
+        for (uint32_t b = 0; b <= blocks; b += 1)
+        {
+            starts[b] = 2 * b;
+            succ_offsets[b] = (b / 5) * 6 + successor_offsets[b % 5];
+            pred_offsets[b] = (b / 5) * 6 + predecessor_offsets[b % 5];
+        }
+        for (uint32_t e = 0; e < edges; e += 1)
+        {
+            succ[e] = (e / 6) * 5 + successors[e % 6];
+            pred[e] = (e / 6) * 5 + predecessors[e % 6];
+        }
+        for (uint32_t v = 0; v < values; v += 1)
+        {
+            const uint32_t d = v % diamonds;
+            const uint32_t home = 5 * d;
+            const bool second = v >= diamonds;
+            const uint32_t split = starts[home + (second ? 3 + (d & 1) : 1)];
+            begin[v] = starts[home] + second;
+            end[v] = starts[home + 5];
+            ids[v] = v;
+            fragments[v] = 2 * v;
+            fragment_starts[2 * v] = begin[v];
+            fragment_ends[2 * v] = split;
+            fragment_starts[2 * v + 1] = split;
+            fragment_ends[2 * v + 1] = end[v];
+            kinds[2 * v] = second ? BUSTER_TIER1_ALLOCATE_REGISTER : BUSTER_TIER1_ALLOCATE_SPILL;
+            kinds[2 * v + 1] = second ? BUSTER_TIER1_ALLOCATE_SPILL : BUSTER_TIER1_ALLOCATE_REGISTER;
+        }
+        ids[values] = values;
+        fragments[values] = 2 * values;
+        const Tier1CfgInput input = {
+            .block_starts = starts,
+            .successors = succ,
+            .successor_offsets = succ_offsets,
+            .predecessors = pred,
+            .predecessor_offsets = pred_offsets,
+            .definitions = begin,
+            .block_count = blocks,
+            .value_count = values,
+            .edge_count = edges,
+            .position_count = starts[blocks],
+        };
+        Tier1CfgAllocation result = {
+            .value_interval_offsets = ids,
+            .intervals = {
+                .starts = begin,
+                .ends = end,
+            },
+            .allocation = {
+                .spill_ids = ids,
+                .fragment_offsets = fragments,
+                .starts = fragment_starts,
+                .ends = fragment_ends,
+                .kinds = kinds,
+            },
+        };
+        const uint64_t scratch_mark = scratch->length;
+        const uint64_t allowance = 768u << 10;
+        Arena bounded = {
+            .base = arena_push(scratch, allowance, BUSTER_DATAFLOW_VECTOR_BYTES),
+            .capacity = allowance,
+        };
+        const bool solved = tier1_cfg_current_slots(&input, &result, output, &bounded);
+        bool exact = solved;
+        for (uint32_t b = 0; exact && b < blocks; b += 1)
+        {
+            const uint32_t d = b / 5;
+            const uint32_t block = b % 5;
+            const bool second = (d & 1) == 0 && (block == 1 || block == 2);
+            const uint32_t k = result.current_slot_offsets[b];
+            exact = result.current_slot_offsets[b + 1] - k == (uint32_t)(block != 0) + second;
+            exact = exact && (block == 0 || result.current_slots[k] == d);
+            exact = exact && (!second || result.current_slots[k + 1] == diamonds + d);
+        }
+        tier1_cfg_test_expect(tally, solved && bounded.length == 0, "4,098 spill candidates fit 768 KiB of scratch");
+        tier1_cfg_test_expect(tally, exact, "each diamond holds exactly the values stored on all paths, in value order");
+        // Refuse partway through building the first group's rows. A previous successful result remains usable.
+        bounded.capacity = allowance / 2;
+        const uint64_t output_mark = output->length;
+        const Tier1CfgAllocation kept = result;
+        const bool refused = !tier1_cfg_current_slots(&input, &result, output, &bounded);
+        tier1_cfg_test_expect(tally, refused && bounded.length == 0 && output->length == output_mark && result.current_slot_offsets == kept.current_slot_offsets && result.current_slots == kept.current_slots, "slot-row exhaustion restores both arenas and preserves the published lists");
+        arena_pop_to(scratch, scratch_mark);
+    }
+    arena_pop_to(output, saved);
+}
+
 static void tier1_cfg_test_current_slots(Tier1CfgTestTally* tally, Arena* output, Arena* scratch)
 {
     tier1_cfg_test_spill_prefix(tally);
     tier1_cfg_test_spill_edges(tally, output, scratch);
     tier1_cfg_test_spill_pressure(tally, output, scratch);
     tier1_cfg_test_spill_across(tally, output, scratch);
+    tier1_cfg_test_slot_groups(tally, output, scratch);
 }
