@@ -821,20 +821,26 @@ static bool pp_test_run(Preprocessor* pp, InternTable* table, const PPOptions* o
     return result;
 }
 
+static bool pp_test_scalar_compile(const PPOptions* options, const char* path, const Preprocessor* vector, bool vector_ran, const char* label);
+
+// The recorded vector compile is the reference for the scalar compile and the replay checks.
 // A run as the drivers make one, with its history deferred (PPOptions.defer_history), against one that records it, both
 // by the vectorized kernels without expansion starts: the same stream, errors and warnings, and the same diagnostics
 // printed byte for byte, notes and all (the deferred run prints its own by recording the history at its end); then a
 // diagnostic at the first output token a macro made (or the last token) through pp_diagnose_output, which records the
 // deferred history first, printed alike; and the same history, with nothing more printed. Returns whether they agree.
-static bool pp_test_deferred_history(const PPOptions* options, const char* path, const char* label)
+static bool pp_test_compile_kernels(const PPOptions* options, const char* path, const char* name, bool frozen)
 {
     static InternTable tables[2];
     static Preprocessor runs[2];
     char* texts[2] = { 0, 0 };
     size_t lengths[2] = { 0, 0 };
-    FILE* streams[2];
-    bool ready[2];
-    for (uint32_t k = 0; k < 2; k += 1)
+    FILE* streams[2] = { 0, 0 };
+    bool ready[2] = { false, false };
+    char label[4200];
+    snprintf(label, sizeof(label), "%s (as a compile runs it)", name);
+    bool scalar_matches = true;
+    for (uint32_t k = 0; scalar_matches && k < 2; k += 1)
     {
         PPOptions run = *options;
         run.scalar = false;
@@ -844,18 +850,23 @@ static bool pp_test_deferred_history(const PPOptions* options, const char* path,
         streams[k] = open_memstream(&texts[k], &lengths[k]);
         run.diagnostics = streams[k];
         ready[k] = streams[k] != 0 && intern_initialize(&tables[k]) && pp_initialize(&runs[k], &run, &tables[k]);
-        if (ready[k])
-        {
-            pp_run(&runs[k], path);
-        }
+        const bool ran = ready[k] && pp_run(&runs[k], path);
         if (streams[k] != 0)
         {
             fflush(streams[k]);
         }
+        if (k == 0)
+        {
+            // The recorded vector run serves both comparisons. Forward its initial diagnostics as the scalar run does.
+            run.diagnostics = options->diagnostics;
+            FILE* output = run.diagnostics != 0 ? run.diagnostics : stderr;
+            scalar_matches = ready[k] && (lengths[k] == 0 || fwrite(texts[k], 1, lengths[k], output) == lengths[k]) &&
+                             pp_test_scalar_compile(&run, path, &runs[k], ran, label) && (!frozen || pp_kernel_digest_check(&runs[k], "compile", name));
+        }
     }
-    bool result = ready[0] && ready[1] && pp_tokens_same(&runs[0].output, &runs[1].output) && runs[0].errors == runs[1].errors &&
+    bool result = scalar_matches && ready[1] && pp_tokens_same(&runs[0].output, &runs[1].output) && runs[0].errors == runs[1].errors &&
                   runs[0].warnings == runs[1].warnings && lengths[0] == lengths[1] && (lengths[0] == 0 || memcmp(texts[0], texts[1], lengths[0]) == 0);
-    if (!result)
+    if (scalar_matches && !result)
     {
         printf("%s: with its history deferred, a run gives other tokens or diagnostics (%u and %u errors, %u and %u warnings, %zu and %zu bytes printed)\n",
                label, runs[0].errors, runs[1].errors, runs[0].warnings, runs[1].warnings, lengths[0], lengths[1]);
@@ -1025,35 +1036,22 @@ static bool pp_test_invocation_places(const Preprocessor* a, const char* label)
     return result;
 }
 
-// Both kernels again as a compile runs them, without the expansion starts that -E's line markers need: the main loop
-// takes some direct paths only then (pp_expand_file_direct, pp_emit_simple), so the streams, the expansion history and
-// the statistics (but the timing ones) must agree in this configuration too, and the vectorized run's with its history
-// deferred, as the drivers run it (pp_test_deferred_history). Returns whether they do.
-static bool pp_test_compile_kernels(const PPOptions* options, const char* path, const char* name, bool frozen)
+// Compare the scalar compile with the recorded vector compile before the deferred-history probe adds a diagnostic.
+static bool pp_test_scalar_compile(const PPOptions* options, const char* path, const Preprocessor* vector, bool vector_ran, const char* label)
 {
-    static InternTable tables[2];
-    static Preprocessor runs[2];
-    bool ready[2];
-    bool ran[2];
-    for (uint32_t k = 0; k < 2; k += 1)
+    static InternTable table;
+    static Preprocessor scalar;
+    PPOptions run = *options;
+    run.scalar = true;
+    const bool ready = intern_initialize(&table) && pp_initialize(&scalar, &run, &table);
+    const bool ran = ready && pp_run(&scalar, path);
+    bool result = ready && pp_same_streams(vector, &scalar, label);
+    if (result && (vector_ran != ran || vector->errors != scalar.errors || vector->warnings != scalar.warnings))
     {
-        PPOptions run = *options;
-        run.scalar = k == 1;
-        run.expansion_starts = false;
-        run.timing = true;
-        ready[k] = intern_initialize(&tables[k]) && pp_initialize(&runs[k], &run, &tables[k]);
-        ran[k] = ready[k] && pp_run(&runs[k], path);
-    }
-    char label[4200];
-    snprintf(label, sizeof(label), "%s (as a compile runs it)", name);
-    bool result = ready[0] && ready[1] && pp_same_streams(&runs[0], &runs[1], label) && (!frozen || pp_kernel_digest_check(&runs[0], "compile", name));
-    if (result && (ran[0] != ran[1] || runs[0].errors != runs[1].errors || runs[0].warnings != runs[1].warnings))
-    {
-        printf("%s: the vectorized and scalar kernels give %u and %u errors and %u and %u warnings\n", label, runs[0].errors, runs[1].errors, runs[0].warnings,
-               runs[1].warnings);
+        printf("%s: the vectorized and scalar kernels give %u and %u errors and %u and %u warnings\n", label, vector->errors, scalar.errors, vector->warnings, scalar.warnings);
         result = false;
     }
-    PPStatistics statistics[2] = { runs[0].statistics, runs[1].statistics };
+    PPStatistics statistics[2] = { vector->statistics, scalar.statistics };
     for (uint32_t k = 0; k < 2; k += 1)
     {
         statistics[k].include_ticks = 0;
@@ -1064,16 +1062,13 @@ static bool pp_test_compile_kernels(const PPOptions* options, const char* path, 
         printf("%s: the vectorized and scalar kernels count different statistics\n", label);
         result = false;
     }
-    result = result && pp_test_system_levels(&runs[0], &runs[1], label) && pp_test_invocation_places(&runs[0], label);
-    for (uint32_t k = 0; k < 2; k += 1)
+    result = result && pp_test_system_levels(vector, &scalar, label) && pp_test_invocation_places(vector, label);
+    if (ready)
     {
-        if (ready[k])
-        {
-            pp_release(&runs[k]);
-        }
-        intern_release(&tables[k]);
+        pp_release(&scalar);
     }
-    return result && pp_test_deferred_history(options, path, label);
+    intern_release(&table);
+    return result;
 }
 
 // The text -E prints for a run, in memory (null if it fails); `free` it.
@@ -1119,22 +1114,19 @@ static bool pp_compare_printed_spellings(Preprocessor* pp, const PPSpellings* ou
     return result;
 }
 
-// The text -E prints for a run, which must lex into the stream's spellings (with the EOF boundary above), and with a
-// built-in case's `key` give its recorded digest; the text with line markers must print too (clang checks the markers:
-// pp_test_markers).
-static bool pp_test_printed(Preprocessor* pp, const PPSpellings* ours, const char* name, const char* key)
+// Check the unmarked text against the stream's spellings and the built-in case's digest, when supplied.
+// Return the line-marked text for the marker and Clang checks. The caller frees it.
+static bool pp_test_printed(Preprocessor* pp, const PPSpellings* ours, const char* name, const char* key, String8* marked)
 {
     size_t length = 0;
     char* text = pp_test_print(pp, false, &length);
-    size_t marked_length = 0;
-    char* marked = pp_test_print(pp, true, &marked_length);
-    bool result = text != 0 && marked != 0;
+    marked->pointer = pp_test_print(pp, true, &marked->length);
+    bool result = text != 0 && marked->pointer != 0;
     if (!result && !pp_test_quiet)
     {
         printf("%s: -E can't print the run%s\n", name, text != 0 ? " with line markers" : "");
     }
     result = result && (key == 0 || pp_kernel_digest_matches(pp_kernel_fold(0xcbf29ce484222325ull, text, length), "print", key));
-    free(marked);
     PPSpellings printed = { 0 };
     if (result && (pp->options.dump_defines || pp->options.dump_includes))
     {
@@ -1523,8 +1515,6 @@ static bool pp_compare_placed(const PPPlaced* ours, const PPPlaced* theirs, cons
     return result;
 }
 
-// Our line markers against clang's (`theirs`, from pp_test_clang): the vectorized printer's text with markers must
-// place every token as clang's does.
 // Whether line [at, end) of a printed text is one of -dD's or -dI's directives (pp_print_events): a #define, an #undef,
 // or an include that ends in clang's ` /* clang -E -dI */`.
 static bool pp_test_directive_line(const char* text, size_t at, size_t end)
@@ -1621,21 +1611,19 @@ static void pp_test_directive_lines(char* text, size_t length, FILE* listing, co
 }
 
 // -dD's and -dI's directives in our text with line markers against clang's, where each is and what it says
-// (pp_test_directive_lines), then clang's blanked, as ours are for the comparisons of the tokens.
-static bool pp_test_dumped_directives(Preprocessor* pp, char* clang_text, size_t clang_length, const char* name)
+// (pp_test_directive_lines). Blank both texts' directives as they are collected so their remaining tokens keep their places.
+static bool pp_test_dumped_directives(const Preprocessor* pp, String8 marked, char* clang_text, size_t clang_length, const char* name)
 {
-    size_t length = 0;
-    char* text = pp_test_print(pp, true, &length);
     char* ours = 0;
     char* theirs = 0;
     size_t ours_length = 0;
     size_t theirs_length = 0;
     FILE* ours_stream = open_memstream(&ours, &ours_length);
     FILE* theirs_stream = open_memstream(&theirs, &theirs_length);
-    bool result = text != 0 && ours_stream != 0 && theirs_stream != 0;
+    bool result = ours_stream != 0 && theirs_stream != 0;
     if (result)
     {
-        pp_test_directive_lines(text, length, ours_stream, pp->options.predefines_path);
+        pp_test_directive_lines(marked.pointer, marked.length, ours_stream, pp->options.predefines_path);
         pp_test_directive_lines(clang_text, clang_length, theirs_stream, 0);
     }
     if (ours_stream != 0)
@@ -1651,24 +1639,17 @@ static bool pp_test_dumped_directives(Preprocessor* pp, char* clang_text, size_t
     {
         printf("%s: -dD's or -dI's directives differ from clang's:\n  ours:\n%s  clang's:\n%s", name, ours, theirs);
     }
-    free(text);
     free(ours);
     free(theirs);
     return result;
 }
 
-static bool pp_test_placed(Preprocessor* pp, const PPPlaced* theirs, const char* name)
+// The marked texts must place every token alike. In dump modes pp_test_dumped_directives has blanked the directives in both.
+static bool pp_test_placed(const Preprocessor* pp, String8 marked, const PPPlaced* theirs, const char* name)
 {
-    size_t length = 0;
-    char* text = pp_test_print(pp, true, &length);
-    if (text != 0 && (pp->options.dump_defines || pp->options.dump_includes))
-    {
-        pp_test_directive_lines(text, length, 0, 0);
-    }
     PPPlaced ours = { 0 };
-    const bool result = text != 0 && pp_placed_tokens((const uint8_t*)text, length, pp->split_kinds, pp_test_lex_flags(pp), &ours) && pp_compare_placed(&ours, theirs, name, "clang");
+    const bool result = pp_placed_tokens((const uint8_t*)marked.pointer, marked.length, pp->split_kinds, pp_test_lex_flags(pp), &ours) && pp_compare_placed(&ours, theirs, name, "clang");
     pp_placed_release(&ours);
-    free(text);
     return result;
 }
 
@@ -2342,10 +2323,8 @@ static int pp_test_arguments(const PPTestCase* test, const char* directory, cons
 
 // A case's text with line markers (PPTestCase.markers, %d for its directory) against the vectorized printer's, byte for
 // byte: the first line that differs is printed.
-static bool pp_test_markers(Preprocessor* pp, const PPTestCase* test, const char* directory)
+static bool pp_test_markers(const char* text, size_t length, const PPTestCase* test, const char* directory)
 {
-    size_t length = 0;
-    char* text = pp_test_print(pp, true, &length);
     char* wanted = 0;
     size_t wanted_length = 0;
     FILE* stream = open_memstream(&wanted, &wanted_length);
@@ -2380,7 +2359,6 @@ static bool pp_test_markers(Preprocessor* pp, const PPTestCase* test, const char
         printf("%s: the line markers differ at byte %zu:\n  ours   %.*s\n  wanted %.*s\n", test->name, at, (int)((ours_end != 0 ? ours_end : text + length) - (text + line)),
                text + line, (int)((wanted_end != 0 ? wanted_end : wanted + wanted_length) - (wanted + line)), wanted + line);
     }
-    free(text);
     free(wanted);
     return result;
 }
@@ -2554,21 +2532,23 @@ static bool pp_test_case(const PPTestCase* test, const char* directory, bool wit
     {
         PPSpellings ours = { 0 };
         PPSpellings expected = { 0 };
+        String8 marked = { 0 };
         result = pp_stream_spellings(&runs[0], &ours) && pp_text_spellings((const uint8_t*)test->expected, strlen(test->expected), runs[0].split_kinds, pp_test_lex_flags(&runs[0]), &expected) &&
-                 pp_compare_spellings(&runs[0], &ours, &expected, test->name, "wanted") && pp_test_printed(&runs[0], &ours, test->name, key) &&
-                 (test->markers == 0 || pp_test_markers(&runs[0], test, directory));
+                 pp_compare_spellings(&runs[0], &ours, &expected, test->name, "wanted") && pp_test_printed(&runs[0], &ours, test->name, key, &marked) &&
+                 (test->markers == 0 || pp_test_markers(marked.pointer, marked.length, test, directory));
         if (result && with_clang)
         {
             size_t length;
             char* clang_text = pp_test_clang(arguments, argument_count, path, 0, &length);
             PPPlaced theirs = { 0 };
             const bool plain = !runs[0].options.dump_defines && !runs[0].options.dump_includes;
-            result = clang_text != 0 && (plain || pp_test_dumped_directives(&runs[0], clang_text, length, test->name)) &&
+            result = clang_text != 0 && (plain || pp_test_dumped_directives(&runs[0], marked, clang_text, length, test->name)) &&
                      pp_placed_tokens((const uint8_t*)clang_text, length, runs[0].split_kinds, pp_test_lex_flags(&runs[0]), &theirs) &&
-                     pp_compare_printed_spellings(&runs[0], &ours, &theirs.spellings, test->name, "clang") && pp_test_placed(&runs[0], &theirs, test->name);
+                     pp_compare_printed_spellings(&runs[0], &ours, &theirs.spellings, test->name, "clang") && pp_test_placed(&runs[0], marked, &theirs, test->name);
             pp_placed_release(&theirs);
             free(clang_text);
         }
+        free(marked.pointer);
         arena_release(&ours.arena);
         arena_release(&expected.arena);
     }
@@ -4065,7 +4045,8 @@ static bool pp_test_file_output(const PPOptions* base, const char* path, bool wi
                   pp_test_compile_kernels(&options, path, path, false);
     *tokens += runs[0].output.count;
     PPSpellings ours = { 0 };
-    result = result && pp_stream_spellings(&runs[0], &ours) && pp_test_printed(&runs[0], &ours, path, 0);
+    String8 marked = { 0 };
+    result = result && pp_stream_spellings(&runs[0], &ours) && pp_test_printed(&runs[0], &ours, path, 0, &marked);
     if (result && with_clang)
     {
         // -dD's and -dI's directives against clang's, then blanked in a copy of clang's text (pp_test_dumped_directives).
@@ -4077,12 +4058,13 @@ static bool pp_test_file_output(const PPOptions* base, const char* path, bool wi
         }
         const char* clang_text = dumped ? copy : text;
         PPPlaced theirs = { 0 };
-        result = clang_text != 0 && (!dumped || pp_test_dumped_directives(&runs[0], copy, length, path)) &&
+        result = clang_text != 0 && (!dumped || pp_test_dumped_directives(&runs[0], marked, copy, length, path)) &&
                  pp_placed_tokens((const uint8_t*)clang_text, length, runs[0].split_kinds, pp_test_lex_flags(&runs[0]), &theirs) &&
-                 pp_compare_spellings(&runs[0], &ours, &theirs.spellings, path, "clang") && pp_test_placed(&runs[0], &theirs, path);
+                 pp_compare_spellings(&runs[0], &ours, &theirs.spellings, path, "clang") && pp_test_placed(&runs[0], marked, &theirs, path);
         pp_placed_release(&theirs);
         free(copy);
     }
+    free(marked.pointer);
     if (guards != 0)
     {
         *guards += runs[0].statistics.skipped_guards;
