@@ -793,6 +793,29 @@ static bool pp_directive_test_structure_row(PPTestFixtures* table, const char* d
     return valid;
 }
 
+// Existing nonempty suffix goldens start at the first location's colon. A full golden can name
+// either staged file at every diagnostic location using the same %d directory marker as line-marker fixtures.
+static bool pp_directive_test_expected(const char* actual, const char* wanted, const char* directory, const char* path)
+{
+    if (*wanted == ':')
+    {
+        const size_t length = strlen(path);
+        return strncmp(actual, path, length) == 0 && strcmp(actual + length, wanted) == 0;
+    }
+    const size_t directory_length = strlen(directory);
+    for (const char* marker = strstr(wanted, "%d"); marker != NULL; marker = strstr(wanted, "%d"))
+    {
+        const size_t prefix = (size_t)(marker - wanted);
+        if (strncmp(actual, wanted, prefix) != 0 || strncmp(actual + prefix, directory, directory_length) != 0)
+        {
+            return false;
+        }
+        actual += prefix + directory_length;
+        wanted = marker + 2;
+    }
+    return strcmp(actual, wanted) == 0;
+}
+
 // Each fixture by both kernels, whose diagnostics must be the same, and with clang, clang's.
 static bool pp_directive_test_diagnostics(const char* suite, const char* label, const char* directory, bool with_clang)
 {
@@ -842,12 +865,10 @@ static bool pp_directive_test_diagnostics(const char* suite, const char* label, 
         result = result && (!with_clang || (oracle != 0 && strcmp(diagnostics[0], oracle) == 0));
         if (result && fixture->diagnostic != NULL)
         {
-            char expected[8192];
-            const int length = snprintf(expected, sizeof(expected), "%s%s", fixture->diagnostic[0] != 0 ? path : "", fixture->diagnostic);
-            result = length >= 0 && (size_t)length < sizeof(expected) && strcmp(diagnostics[0], expected) == 0;
+            result = pp_directive_test_expected(diagnostics[0], fixture->diagnostic, directory, path);
             if (!result)
             {
-                printf("expected numeric diagnostic:\n%s", length >= 0 && (size_t)length < sizeof(expected) ? expected : "<too long>\n");
+                printf("expected diagnostic:\n%s", fixture->diagnostic);
             }
         }
         if (!result)
@@ -945,7 +966,10 @@ struct PPDirectiveTestGuard
 static bool pp_directive_test_guard(const PPDirectiveTestGuard* fixture, const char* directory, bool with_clang)
 {
     char path[4200];
-    const PPTestCase test = { .source = fixture->source, .files = fixture->files };
+    const PPTestCase test = {
+        .source = fixture->source,
+        .files = fixture->files,
+    };
     bool result = pp_test_write_named_case(&test, directory, "guard.c", path, sizeof(path));
     static InternTable tables[2];
     static Preprocessor runs[2];

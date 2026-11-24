@@ -124,9 +124,14 @@ or `test-preprocessor --tables path...`:
   - `raw-errors`, `structure`, `messages` and `definitions` (kind `directives`):
     standard (or `-`), flags (`header`, `expected`, both, or `-`) and name.
     `ID.c` is staged as `structure.c`. The flags select `ID.h` and the exact
-    diagnostic bytes in `ID.expected`.
+    diagnostic in `ID.expected`. A leading `:` continues the staged main file
+    path. A full transcript can use `%d/structure.c` and `%d/structure.h`
+    for repeated or header locations. An empty golden expects silence.
   - `guards`: tree ID, expected guard skips, expected pragma-once skips and
     name. `ID.c` runs as `guard.c` beside that tree's files and links.
+    A new display name also needs its `guards/NAME` entry in the frozen
+    `tests/preprocessor-kernels/digests.tsv` using the recording procedure
+    below. The catalog, files and digest are all runtime data.
   - `option-refusals`: the expected refusal substring (or `-` for acceptance)
     and space-separated option arguments, with `%d` for the temporary directory.
     All rows preprocess the same `probe.c`.

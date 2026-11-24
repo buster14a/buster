@@ -2100,7 +2100,10 @@ static void* pp_test_fixture_row(PPTestFixtures* fixtures, const char* id)
 static bool pp_test_fixture_table(PPTestFixtures* fixtures, const char* suite, const char* header, uint32_t fields, size_t row_size,
                                   bool (*read_row)(PPTestFixtures*, const char*, char**, uint32_t), const char** probe)
 {
-    *fixtures = (PPTestFixtures){ .storage = arena_reserve(UINT64_C(1) << 27), .row_size = row_size };
+    *fixtures = (PPTestFixtures){
+        .storage = arena_reserve(UINT64_C(1) << 27),
+        .row_size = row_size,
+    };
     fixtures->rows = arena_push(&fixtures->storage, row_size * BUSTER_PP_TEST_FIXTURE_CASES, 8);
     fixtures->named = arena_push(&fixtures->storage, sizeof(*fixtures->named) * BUSTER_PP_TEST_FIXTURE_CASES * 4, 8);
     fixtures->identifiers = arena_push(&fixtures->storage, sizeof(*fixtures->identifiers) * BUSTER_PP_TEST_FIXTURE_CASES, 8);
@@ -5671,8 +5674,16 @@ static bool pp_test_option_refusals(const char* directory, bool with_clang)
         if (with_clang && right && set->refused != 0)
         {
             // clang's -E with the set, and with its -std= alone or nothing: with the oracle's own messages caught.
-            const int base = strncmp(arguments[0], "-std=", 5) == 0;
-            const char* key = base != 0 ? set->arguments[0] : "";
+            char* standard = NULL;
+            const char* key = "";
+            for (int i = 0; i < n; i += 1)
+            {
+                if (strncmp(arguments[i], "-std=", 5) == 0)
+                {
+                    standard = arguments[i];
+                    key = set->arguments[i];
+                }
+            }
             uint32_t b = 0;
             while (b < base_count && strcmp(base_keys[b], key) != 0)
             {
@@ -5683,7 +5694,7 @@ static bool pp_test_option_refusals(const char* directory, bool with_clang)
             if (b == base_count)
             {
                 base_keys[b] = key;
-                bases[b] = pp_test_clang_process("clang", arguments, base, path, false);
+                bases[b] = pp_test_clang_process("clang", &standard, standard != NULL, path, false);
                 base_count += 1;
             }
             pp_test_release_stderr(keep, caught, messages, sizeof(messages));
