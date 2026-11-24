@@ -1,0 +1,202 @@
+buster-fixtures v1 checker-sources
+0001	0001.c	-	half arithmetic in required constant expressions
+0002	0002.c	-	half constants round each operation before the next
+# Declaration-time bit casts currently certify integer sources only. Classifiers observe the
+# floating result here; action and native-program tests independently check its exact raw bits.
+0003	0003.c	-	half invalid constant arithmetic has Clang NaN signs
+# The host's SSE and x87 give a negative NaN for each of these and may take either NaN operand (#1473).
+0004	0004.c	-	real invalid constant arithmetic has Clang NaN signs
+0005	@nested-selections-0	-	deep selected choose expressions
+0006	@nested-selections-1	-	deep unselected choose expressions
+0007	@nested-selections-2	-	deep selected generic expressions
+0008	@nested-selections-3	-	deep unselected generic expressions
+0009	0009.c	-	nested selections retain prefix, infix and comma roots
+0010	0010.c	-	nested selections retain vector values and lvalues
+0011	0011.c	rejected	unselected nested operands remain type checked in source order
+0012	0012.c	-	bitcast declaration integer representation
+0013	0013.c	rejected	bitcast raw attribute is not an integer constant expression
+0014	0014.c	-	bitcast half operand is not promoted
+0015	0015.c	-	bitcast raw array operand is not decayed
+0016	0016.c	rejected	bitcast rejects mismatched raw sizes
+0017	0017.c	rejected	bitcast rejects atomic source storage
+0018	0018.c	rejected	bitcast rejects evaluated invalid bool representation
+0019	0019.c	-	bitcast destination nested type job
+0020	0020.c	-	abstract function ABI prefix and grouped attributes
+0021	0021.c	-	abstract function ABI raw cast context
+0022	0022.c	rejected	abstract function ABI preserves explicit typedef conflict
+0023	0023.c	-	half storage type in declaration query
+0024	0024.c	-	raw abstract function pointer query
+0025	0025.c	-	raw abstract function query
+0026	0026.c	-	constant query saturates floating casts only in proof
+0027	0027.c	-	raw constant query proof propagates saturated conversion
+0028	0028.c	rejected	overloaded argument cannot hide inside folded query
+0029	0029.c	rejected	earlier incomplete query precedes later missing name
+0030	0030.c	rejected	earlier missing name precedes later incomplete query
+0031	0031.c	rejected	raw earlier incomplete query precedes later missing name
+0032	0032.c	-	declaration vector builtin exact type queries
+0033	0033.c	-	declaration vector conversion nested destination query
+0034	0034.c	-	declaration vector conversion attributed abstract destination
+0035	@long-shuffle	-	declaration vector builtin arbitrary argument slice
+0036	0036.c	-	declaration vector shuffle GNU lexical index
+0037	@raw-shuffle	-	raw attribute vector builtin arbitrary argument slice
+0038	0038.c	-	raw attribute vector builtin destination type
+0039	0039.c	-	raw attribute nested vector builtin destination type
+0040	0040.c	-	declaration vector memory builtin type query
+0041	0041.c	rejected	declaration vector conversion rejects lane count mismatch
+0042	0042.c	rejected	declaration vector conversion rejects scalar destination
+0043	0043.c	rejected	declaration vector shuffle rejects out of range lane
+0044	0044.c	rejected	declaration vector shuffle rejects nonconstant lane
+0045	0045.c	-	declaration sizeof arithmetic
+0046	@nested-attributes	-	deeply nested tag attribute queries
+0047	0047.c	-	tag attribute source ordered identity
+0048	0048.c	-	tag attribute nested new identity
+0049	0049.c	rejected	tag attribute invalid alignment
+0050	0050.c	rejected	tag attribute evaluated fault
+0051	0051.c	-	raw attribute nested tag query jobs
+0052	0052.c	-	nested type array bound
+0053	0053.c	-	integer rank and cast in array bound
+0054	0054.c	-	real literal immediate integer cast
+0055	0055.c	-	constant type names retain repeated modifier semantics
+0056	0056.c	-	GNU real expression folds in integer constant context
+0057	0057.c	-	declaration conditional
+0058	0058.c	-	declaration GNU omitted conditional
+0059	0059.c	-	declaration short circuit
+0060	0060.c	rejected	declaration evaluated fault
+0061	0061.c	-	declaration typedef and object source order
+0062	0062.c	-	declaration prior enumerator
+0063	0063.c	rejected	declaration future enumerator rejected
+0064	0064.c	-	declaration object shadow
+0065	0065.c	-	declaration const object folds as a GNU enumerator value
+0066	0066.c	-	declaration alignof callback array
+0067	0067.c	-	declaration sizeof object expressions
+0068	0068.c	-	declaration GNU void and function queries
+0069	0069.c	-	declaration sizeof pointer member
+0070	0070.c	-	declaration sizeof comma expression
+0071	0071.c	rejected	declaration unknown sizeof object
+0072	0072.c	-	declaration string query
+0073	0073.c	rejected	declaration bit field sizeof rejected
+0074	0074.c	-	declaration object alignment
+0075	0075.c	rejected	declaration bit field alignof rejected
+0076	0076.c	rejected	declaration incomplete sizeof rejected
+0077	0077.c	-	declaration type compatibility
+0078	0078.c	-	declaration nested typeof
+0079	0079.c	-	declaration typeof preserves array
+0080	0080.c	-	declaration typeof compound literal immediate queries
+0081	0081.c	-	declaration typeof nested in a compound literal type
+0082	0082.c	-	declaration typeof compound literal member query
+0083	0083.c	rejected	declaration typeof compound literal function type rejected
+0084	0084.c	rejected	declaration typeof compound literal variable array rejected
+0085	0085.c	-	typeof statement expression effects are unevaluated
+0086	0086.c	-	nested statement expression type query
+0087	0087.c	-	statement expression local declaration type query
+0088	0088.c	-	statement expression multiple declarator type query
+0089	0089.c	-	statement expression nested declaration type query
+0090	0090.c	-	statement expression aggregate declaration type query
+0091	0091.c	-	statement expression control type query
+0092	0092.c	-	statement expression loop type query
+0093	0093.c	-	statement expression nested block type query
+0094	0094.c	rejected	statement expression control constraints remain checked
+0095	0095.c	rejected	statement expression final declaration has void type
+0096	0096.c	rejected	statement expression initializer constraints remain checked
+0097	0097.c	rejected	statement expression initializer reports its actual line
+0098	0098.c	-	statement expression size is constant
+0099	0099.c	-	GNU statement expression folds in integer constant context
+0100	0100.c	-	declaration atomic type names
+0101	0101.c	rejected	declaration invalid atomic type
+0102	0102.c	-	declaration complex type names
+0103	0103.c	-	declaration bit integer type name
+0104	0104.c	-	declaration named callback type
+0105	0105.c	rejected	declaration duplicate callback parameter
+0106	0106.c	rejected	type name duplicate separated by unnamed parameters
+0107	0107.c	-	type name nested prototypes reuse outer names
+0108	0108.c	-	type name sibling prototypes reuse names
+0109	0109.c	rejected	type name outer duplicate survives nested prototype
+0110	0110.c	rejected	type name nested prototype duplicate
+0111	0111.c	-	separate type names reuse prototype names
+0112	0112.c	-	nested type name parameter does not hide outer typedef
+0113	0113.c	-	type name unnamed parameters do not collide
+0114	0114.c	rejected	type name duplicate precedes later invalid declaration
+0115	0115.c	rejected	type name invalid parameter precedes later duplicate
+0116	0116.c	-	body expression named callback type
+0117	0117.c	-	declaration member offset
+0118	0118.c	-	declaration nested member offset
+0119	0119.c	rejected	declaration bit field offsetof rejected
+0120	0120.c	rejected	declaration missing offsetof member
+0121	0121.c	-	source type compatibility builtin
+0122	0122.c	-	source member offset builtin
+0123	0123.c	-	source member offset binding identity
+0124	0124.c	-	source anonymous record offset retains member typedef identity
+0125	0125.c	-	source anonymous record offset retains nested layout
+0126	0126.c	-	initializer designator bindings remain source ordered
+0127	0127.c	rejected	incomplete array remains incomplete inside its own initializer
+0128	@nested-source	-	declaration iterative nested type queries
+0129	0129.c	-	declaration generic selection
+0130	0130.c	rejected	generic aligned nominal duplicate
+0131	0131.c	rejected	generic enum underlying duplicate
+0132	0132.c	rejected	generic compatible record array pointers
+0133	0133.c	rejected	generic compatible function pointers
+0134	0134.c	-	generic nominal qualifiers retain exact checks
+0135	0135.c	-	generic distinct pointer shapes share a nominal key
+0136	0136.c	rejected	generic transparent function parameter duplicate
+0137	0137.c	-	generic later transparent attribute is inactive
+0138	0138.c	-	declaration nested generic selection
+0139	0139.c	rejected	declaration generic duplicate association
+0140	0140.c	rejected	declaration generic duplicate default
+0141	0141.c	rejected	declaration generic no match
+# C2y's extension, which clang takes (-Wc2y-extensions): it matches no control.
+0142	0142.c	-	declaration generic incomplete association
+0143	0143.c	-	declaration GNU choose expression
+0144	0144.c	-	declaration GNU choose retains wrapped ICE form
+0145	0145.c	rejected	declaration GNU choose rejects computed floating cast
+0146	0146.c	rejected	declaration GNU choose rejects comma with wrapped integer
+0147	0147.c	rejected	declaration GNU choose rejects statement with wrapped integer
+0148	0148.c	-	declaration GNU choose wide integer condition
+0149	@wide-truth-source	extension	declaration GNU choose full-width truth oracle divergence
+0150	0150.c	rejected	declaration GNU choose nonconstant condition
+0151	0151.c	-	generic exact selected lvalue
+0152	0152.c	-	generic array and function conversion
+0153	0153.c	-	generic qualifier conversion
+0154	0154.c	-	generic exact binding after scopes close
+0155	0155.c	rejected	generic source type compatibility duplicate
+0156	0156.c	-	generic source incomplete association
+0157	0157.c	rejected	generic rejects invalid unselected expression
+0158	0158.c	-	GNU choose exact selected array
+0159	0159.c	-	GNU choose exact selected lvalue
+0160	0160.c	rejected	GNU choose rejected nonconstant source condition
+0161	0161.c	rejected	generic selected fault
+0162	0162.c	-	generic unselected fault
+0163	0163.c	-	declaration integer builtin constant
+0164	0164.c	-	declaration builtin array bound
+0165	0165.c	-	declaration nested builtin constant
+0166	0166.c	-	declaration builtin converted constants
+0167	0167.c	rejected	declaration builtin invalid zero evaluated
+0168	0168.c	-	declaration builtin invalid zero unevaluated
+0169	0169.c	rejected	declaration builtin incorrect arity
+0170	0170.c	-	declaration overflow builtin sizeof
+0171	0171.c	rejected	declaration overflow builtin is not ICE
+# #990: clang's evaluator reads a const object's constant initializer inside a builtin call, so the folded
+# call is an integer constant expression in every context.
+0172	0172.c	-	declaration builtin calls of a const integer object
+# #990: the same const-object read at block scope, for the generic bit and floating builtin families and a
+# static local's initializer.
+0173	0173.c	-	block-scope builtin calls of const objects in other families
+0174	0174.c	-	declaration builtin calls of const integer objects across families
+0175	0175.c	-	declaration builtin calls of const member, element and floating objects
+0176	0176.c	rejected	declaration builtin call of a volatile object
+0177	0177.c	rejected	declaration builtin call of a mutable object
+0178	0178.c	rejected	declaration builtin call of a runtime-initialized const object
+0179	0179.c	rejected	declaration overflow builtin of a const object is not ICE
+# #990: the atomic action's operand conversions read const objects in constant contexts too, so clang's
+# folded lock-free query of a const size object is an integer constant expression. Its answer 1 is a
+# lock-free size the pointee's alignment covers; no fixture value or memory is executed.
+0180	0180.c	-	declaration atomic lock-free query of const objects
+0181	0181.c	-	C23 raw attribute arithmetic
+0182	0182.c	-	C23 raw attribute enum binding
+0183	0183.c	-	C23 raw attribute cast and conditional
+0184	0184.c	-	C23 raw attribute nested query
+0185	0185.c	-	C23 raw attribute typedef query
+0186	0186.c	-	C23 raw attribute typeof query
+0187	0187.c	-	C23 raw attribute object alignment
+0188	0188.c	-	C23 raw attribute integer builtin
+0189	0189.c	rejected	C23 raw attribute invalid alignment
+0190	0190.c	rejected	C23 raw attribute evaluated fault

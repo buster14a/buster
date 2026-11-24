@@ -1,0 +1,28 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+asm-fx-state	asm-fx-state.c	-	asm-fx-state
+# XMM operands of double and float.
+asm-xmm-operands	asm-xmm-operands.c	-	asm-xmm-operands
+# Operands evaluated in clang's order, each once: the outputs' lvalues (a `+` one's value loaded through its own),
+# then the inputs, in a template of instructions and in one of none.
+asm-operand-order	asm-operand-order.c	-	asm-operand-order
+# rdi and rsi as operands (the block's address comes in rdi, loaded last), constants sign-extended from their types
+# as clang prints them (0xffffffffu is $-1), a memory input after a register output, and an XMM matching input.
+asm-fixed-registers-and-constants	asm-fixed-registers-and-constants.c	-	asm-fixed-registers-and-constants
+# Matching inputs of other widths than their outputs', in templates of no instructions and of one: a narrower one
+# zero-extended from its own width, as GCC and clang place it ("=r"(long) : "0"(-1) is 4294967295), and a wider one's
+# low bits; the inputs run below 0.
+asm-tied-widths	asm-tied-widths.c	-	asm-tied-widths
+# Z's constants, which clang's backend checks by their zero-extended bits and prints sign-extended, as every constant.
+asm-z-constants	asm-z-constants.c	-	asm-z-constants
+# A constraint of a register and bounded immediates: a constant its letters take is the immediate ("rI"(31), which only
+# %c1's displacement assembles; "cI"(3)), and another goes in the register ("rI"(40); "cI"(40), which %b1 prints %cl;
+# "Kr"(-200)), as GCC and clang place them.
+asm-register-or-immediate	asm-register-or-immediate.c	-	asm-register-or-immediate
+# 32-bit addresses (#2339): int operands print as %eax-style registers in an address, which clang's integrated
+# assembler encodes with a 67; the assembler does too, in the template's helper, as a record has no room for it.
+asm-address32	asm-address32.c	-	asm-address32
+# Naked functions: their templates, in AT&T syntax, are their whole code, with an integer constant operand.
+asm-naked-att	asm-naked-att.c	-	asm-naked-att
+# A label in a naked function's template, a second entry that another function's template takes the address of.
+asm-naked-entries	asm-naked-entries.c	-	asm-naked-entries

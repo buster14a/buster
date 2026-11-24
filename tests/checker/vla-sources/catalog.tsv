@@ -1,0 +1,52 @@
+buster-fixtures v1 checker-sources
+0001	@repeated-size	-	repeated deep variable array size queries
+0002	0002.c	-	automatic variable array
+0003	0003.c	-	variable array runtime sizeof
+0004	0004.c	-	typeof variable array runtime sizeof
+0005	0005.c	-	typeof pointer to variable array runtime sizeof
+0006	0006.c	-	typeof variable typedef retains original extent
+0007	0007.c	-	suspended typeof retains nested VLA owner
+0008	0008.c	rejected	typeof variable type preserves later asm diagnostic
+0009	0009.c	rejected	goto into typeof variable scope rejected
+0010	0010.c	-	multidimensional runtime sizeof
+0011	0011.c	-	fixed outer variable inner dimension
+0012	0012.c	-	inline variable array sizeof
+0013	0013.c	-	file sizeof pointer to variable array is constant
+0014	0014.c	rejected	file sizeof variable array remains nonconstant
+0015	0015.c	rejected	file sizeof nested variable array remains nonconstant
+0016	0016.c	rejected	file sizeof array of pointers with variable outer bound remains nonconstant
+0017	0017.c	-	file alignof variable array and pointer remains constant
+0018	0018.c	-	file sizeof and alignof leave nested runtime array queries unevaluated
+0019	0019.c	rejected	file evaluated nested runtime array query remains nonconstant
+0020	0020.c	rejected	file nested unevaluated query still checks array bound type
+0021	0021.c	-	variable array sizeof bound
+0022	0022.c	-	inline sizeof variable array bound
+0023	0023.c	-	variable array typedef reuse
+0024	0024.c	-	static pointer to variable array
+0025	0025.c	-	thread local pointer to variable array
+0026	0026.c	-	sizeof evaluated variable array operand
+0027	0027.c	-	prototype variable bound
+0028	0028.c	-	prototype star bound
+0029	0029.c	-	definition variable parameter bound
+0030	0030.c	-	definition static qualified bound
+0031	0031.c	rejected	definition star bound rejected
+0032	0032.c	rejected	file variable array rejected
+0033	0033.c	rejected	file pointer to variable array rejected
+0034	0034.c	rejected	static variable array rejected
+0035	0035.c	rejected	extern variable type rejected
+0036	0036.c	rejected	variable array nonempty initializer rejected
+0037	0037.c	rejected	noninteger array bound rejected
+0038	0038.c	rejected	runtime sizeof is not ICE
+0039	0039.c	rejected	known computed real local bound remains variable
+0040	0040.c	rejected	known comma local bound remains variable
+0041	0041.c	rejected	known type-name bound remains variable at file scope
+0042	0042.c	-	file and record computed bounds fold with GNU array policy
+0043	0043.c	rejected	overflowing division cannot fold a file array
+0044	0044.c	rejected	record array unknown bound retains inner source line
+0045	0045.c	-	goto within variable scope
+0046	0046.c	-	goto out of variable scope
+0047	0047.c	rejected	goto into variable scope rejected
+0048	0048.c	rejected	goto into variable pointer scope rejected
+0049	0049.c	rejected	goto into reused variable typedef rejected
+0050	0050.c	rejected	switch enters variable scope rejected
+0051	0051.c	-	goto past constant logical bounds

@@ -21,9 +21,9 @@
 // holding the callees' code for the last pass (--tier0-no-hold).
 //
 // The lanes' fixture (#1398's review): a chain of 20 always_inline functions, past the expansion's depth bound, and a
-// cycle of two, reached from 40 roots at every depth, which the lanes take in an order their timing decides. Which
-// callees expand must be the graph's alone: its object by 4 lanes, three times, and by 1 lane are the same bytes, and
-// it runs as clang -O0's build does.
+// cycle of two, reached from 40 roots at every depth, which the lanes take in an order their timing decides. Two
+// overlapping cycles also call a directly recursive helper. The fixture checks which symbols survive, compares the
+// objects by 1 and 4 lanes and runs the program against clang -O0.
 
 static const char check_test_tier0_inline_source[] =
     "#include <immintrin.h>\n"
@@ -150,8 +150,15 @@ static const char check_test_tier0_inline_lanes_source[] =
     "AI int pong(int n);\n"
     "AI int ping(int n) { return n <= 0 ? 0 : pong(n - 1) + 2; }\n"
     "AI int pong(int n) { return n <= 0 ? 0 : ping(n - 1) + 1; }\n"
-    "__attribute__((noinline)) int root00(int x) { return f01(x) + pong(x & 7); }\n"
-    "__attribute__((noinline)) int root01(int x) { return f08(x) + ping(x & 7); }\n"
+    "AI int self_sum(int n) { return n ? n + self_sum(n - 1) : 0; }\n"
+    "AI int cycle_middle(int n);\n"
+    "AI int cycle_last(int n);\n"
+    "AI int cycle_shared(int n) { return n ? cycle_last(n - 1) + 4 : 10; }\n"
+    "AI int cycle_first(int n) { return n ? (n & 1 ? cycle_middle(n - 1) : cycle_shared(n - 1)) + 1 : self_sum(3); }\n"
+    "AI int cycle_middle(int n) { return n ? (n & 1 ? cycle_first(n - 1) : cycle_last(n - 1)) + 2 : 7; }\n"
+    "AI int cycle_last(int n) { return n ? (n & 1 ? cycle_first(n - 1) : cycle_shared(n - 1)) + 3 : 9; }\n"
+    "__attribute__((noinline)) int root00(int x) { return f01(x) + pong(x & 7) + cycle_last(x & 7); }\n"
+    "__attribute__((noinline)) int root01(int x) { return f08(x) + ping(x & 7) + cycle_middle(x & 7); }\n"
     "__attribute__((noinline)) int root02(int x) { return f15(x) + pong(x & 7); }\n"
     "__attribute__((noinline)) int root03(int x) { return f02(x) + ping(x & 7); }\n"
     "__attribute__((noinline)) int root04(int x) { return f09(x) + pong(x & 7); }\n"
@@ -192,7 +199,7 @@ static const char check_test_tier0_inline_lanes_source[] =
     "__attribute__((noinline)) int root39(int x) { return f14(x) + ping(x & 7); }\n"
     "int main(void)\n"
     "{\n"
-    "    long long s = 0;\n"
+    "    unsigned long long s = 0;\n"
     "    s = s * 31 + root00(5);\n"
     "    s = s * 31 + root01(18);\n"
     "    s = s * 31 + root02(31);\n"
@@ -233,7 +240,7 @@ static const char check_test_tier0_inline_lanes_source[] =
     "    s = s * 31 + root37(486);\n"
     "    s = s * 31 + root38(499);\n"
     "    s = s * 31 + root39(512);\n"
-    "    printf(\"%lld\\n\", s);\n"
+    "    printf(\"%llu\\n\", s);\n"
     "    return 0;\n"
     "}\n";
 
@@ -273,6 +280,13 @@ static void check_test_driver_tier0_inline_lanes(CheckTest* test, const char* cl
     check_test_expect(test, ran && same, "Tier 0's lanes fixture is the same object by 4 lanes, three times, and by 1 lane");
     const bool windowed = made[3] && made[4] && made[5] && check_test_driver_same_files(objects[3], objects[4]) && check_test_driver_same_files(objects[3], objects[5]);
     check_test_expect(test, ran && windowed, "Tier 0's lanes fixture is the same object by 1 lane's windows of 1 and 64 tokens");
+    Arena arena = arena_reserve(UINT64_C(1) << 26);
+    CheckTestElf elf = { 0 };
+    const bool read = made[3] && arena.base != NULL && check_test_elf_open(&elf, object_test_read_file(&arena, objects[3]));
+    check_test_expect(test, read && check_test_elf_defined(&elf, "cycle_middle") == 0 && check_test_elf_defined(&elf, "cycle_first") != 0 &&
+                          check_test_elf_defined(&elf, "cycle_last") != 0 && check_test_elf_defined(&elf, "cycle_shared") != 0 && check_test_elf_defined(&elf, "self_sum") != 0,
+                      "overlapping cycles inline their single-site member and keep the shared members and directly recursive helper");
+    arena_release(&arena);
     char program[512];
     snprintf(program, sizeof(program), "%s/tier0-inline-lanes", directory);
     char* arguments[] = { (char*)executable, "--lanes", "4", "-o", program, unit, NULL };
@@ -381,9 +395,9 @@ static void check_test_driver_tier0_inline(CheckTest* test, const char* clang, c
     // The callees left out (#1398 step 3): those spliced at every call, wrappers among them, and with step 5's shapes
     // (build 5) the two returns' and the result in memory's; the others a kept call or an address refers to, and the
     // noinline function. The control defines them all.
-    static const char* const spliced[] = { "swap", "twist", "mixf", "seven", "sum_to", "bump", "ld", "quot", "_mm512_add_epi32", "_mm256_mask_add_epi32", "_mm_slli_epi32" };
+    static const char* const spliced[] = { "swap", "twist", "mixf", "seven", "sum_to", "bump", "ld", "quot", "ping", "_mm512_add_epi32", "_mm256_mask_add_epi32", "_mm_slli_epi32" };
     static const char* const shaped[] = { "sgn", "widen" };
-    static const char* const still_called[] = { "add3", "vla", "ping", "pong", "kept" };
+    static const char* const still_called[] = { "add3", "vla", "pong", "kept" };
     static const uint32_t checked[] = { 0, 2, 5 };
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(checked); c += 1)
     {

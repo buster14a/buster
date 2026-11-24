@@ -1,0 +1,1 @@
+double helper(double a,float b,int c){return a*2.0+b+c;}int tested(int n){double d=helper(n+0.25,1.5f,n);return (d?7:3)+(int)d;}

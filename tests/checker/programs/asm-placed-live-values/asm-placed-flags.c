@@ -1,0 +1,1 @@
+int tested(int n){unsigned z=(unsigned)n;int r=0;if(n>3&&({__asm__("addl $1, %0" : "+r"(z) : : "cc");z;})>5u)r=1;int lt;__asm__("cmpl %2, %1\n\tsetl %b0\n\tmovzbl %b0, %0" : "=&r"(lt) : "r"(n), "r"(10) : "cc");for(int i=0;i<(n&7);i++){__asm__("notl %0" : "+r"(z) : : "cc");}return r*1000+lt*100+(int)(z&0xff);}

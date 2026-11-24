@@ -1913,6 +1913,7 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
                             else if (op == IR_BR || ((op == IR_CBR || op == IR_SWITCH) && target != BUSTER_IR_NONE))
                             {
                                 candidate.op[out] = IR_BR;
+                                candidate.flags[out] = 0;
                                 candidate.a[out] = blocks[threads[target]];
                                 candidate.b[out] = BUSTER_IR_NONE;
                                 candidate.c[out] = BUSTER_IR_NONE;

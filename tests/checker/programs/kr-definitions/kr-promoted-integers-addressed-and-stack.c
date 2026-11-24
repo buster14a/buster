@@ -1,0 +1,1 @@
+int narrow(a,b,c,d,e,f,g,h) signed char a;unsigned char b;short c;unsigned short d;_Bool e;int f;char g;short h;{signed char *pa=&a;short *ph=&h;*pa+=1;*ph-=2;return a+b+c+d+e+f+g+h;}int tested(int n){unsigned u=(unsigned)n;return narrow((int)(u&255),513,(int)(u&65535),65539,n,7,130,32769);}

@@ -1,0 +1,1 @@
+int f(a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q,r,s,t)_Bool a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q,r,s,t;{return 7;}int tested(int n){return f(n,n,n,n,n,n,n,n,n,n,n,n,n,n,n,n,n,n,n,n);}

@@ -1,0 +1,1 @@
+struct S{int x,y;};struct P{struct S s;};const struct S base={8,9};int touch(void);int f(void){const struct P p={.s=(touch(),base),.s={1,2}};enum{E=p.s.x};_Static_assert(E==1,"rvalue replacement");return E;}

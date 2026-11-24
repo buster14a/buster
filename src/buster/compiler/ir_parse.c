@@ -904,6 +904,7 @@ static void ir_parse_instruction(IrParseState* state)
                 row.b = ir_parse_id(state, 'b');
                 ir_parse_expect(state, ',');
                 row.c = ir_parse_id(state, 'b');
+                row.flags = ir_parse_word(state, "predictable") ? BUSTER_IR_BRANCH_PREDICTABLE : 0;
             } break;
             case IR_SWITCH: ir_parse_switch(state, &row); break;
             case IR_BR_INDIRECT:

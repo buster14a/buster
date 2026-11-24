@@ -1,0 +1,1 @@
+int tested(int n){int x=1;switch(n){case 3 ... 1:x=7;break;case 2:x=5;break;default:x=9;}return x;}

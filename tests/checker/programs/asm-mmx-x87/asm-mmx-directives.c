@@ -1,0 +1,1 @@
+int tested(int n){long m=n;__asm__(".p2align 4\n\tpaddd %0, %0" : "+y"(m));__asm__ volatile("emms");return (int)m;}

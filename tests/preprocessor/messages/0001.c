@@ -1,0 +1,2 @@
+#warning /* never closed
+tail

@@ -1,0 +1,1 @@
+int f(void){_Static_assert(sizeof __func__==2,"func");_Static_assert(sizeof __FUNCTION__==2,"function");_Static_assert(sizeof __PRETTY_FUNCTION__==12,"pretty");_Static_assert(__builtin_types_compatible_p(__typeof__(__func__),const char[2]),"type");return 0;}

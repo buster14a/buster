@@ -1,0 +1,7 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+asm-naked-bridge	asm-naked-bridge.c	-	asm-naked-bridge
+# x86_semantics_test_enter's shape, in Intel syntax: statics RIP-relative, a jump through one to another naked
+# function, whose template jumps back to the first one's label. Execute SSE2 moves on every x86-64 host;
+# assemble AVX-512 moves separately so the oracle can run without AVX-512.
+asm-naked-intel	asm-naked-intel.c	-	asm-naked-intel

@@ -1,0 +1,2 @@
+#pragma clang fp eval_method(double)
+int tested(int n){float _Complex a=__builtin_complex(0x1p24f,0x1p24f);float _Complex b=__builtin_complex((float)((n&3)+1),2.0f);double _Complex sum=(a+b)-a,conjugate=~(a+b)-~a;float _Complex stored=a+b;double _Complex barrier=stored-a;return (int)(__real__ sum)*4096+(int)(__imag__ sum)*256+(int)(__imag__ conjugate)*16+(int)(__real__ barrier);}

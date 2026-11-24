@@ -1,0 +1,14 @@
+buster-fixtures v1 checker-sources
+0001	0001.c	-	GNU overflow enumeration retains target arithmetic
+0002	0002.c	-	GNU constant array bound and raw attribute
+0003	0003.c	-	GNU negative shifts and bit-precise type width
+0004	0004.c	-	GNU full-width overflow and shift constants
+0005	0005.c	-	GNU complex integer product wraps its components
+0006	0006.c	-	GNU wrapped ICE zero remains a null pointer constant
+0007	0007.c	rejected	GNU folded comma zero is not a null pointer constant
+0008	0008.c	rejected	GNU computed floating zero is not a null pointer constant
+0009	0009.c	rejected	GNU statement expression zero is not a null pointer constant
+0010	0010.c	rejected	sizeof retains invalid arithmetic operand constraints
+0011	0011.c	rejected	sizeof retains a selected builtin argument constraint
+0012	0012.c	rejected	sizeof retains an unselected builtin argument constraint
+0013	0013.c	rejected	GNU folding still rejects an evaluated zero divisor

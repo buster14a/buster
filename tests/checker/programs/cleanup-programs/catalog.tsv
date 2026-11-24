@@ -1,0 +1,29 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+cleanup-shared-specifier-binding	cleanup-shared-specifier-binding.c	-	cleanup-shared-specifier-binding
+# A function declarator before, after and among a specifier's variables ignores the specifier's cleanups, which the
+# variables still have (#745's review): the last of two, and beside a declarator's own.
+cleanup-shared-specifier-functions	cleanup-shared-specifier-functions.c	-	cleanup-shared-specifier-functions
+cleanup-blocks	cleanup-blocks.c	-	cleanup-blocks
+cleanup-loops	cleanup-loops.c	-	cleanup-loops
+cleanup-gotos	cleanup-gotos.c	-	cleanup-gotos
+cleanup-returns	cleanup-returns.c	-	cleanup-returns
+# A nested return is expanded while its enclosing return's expression is still pending. Both use the function's
+# same return slot, with each body starting afresh, including floating and wide return classes.
+cleanup-nested-scalar-returns	cleanup-nested-scalar-returns.c	-	cleanup-nested-scalar-returns
+cleanup-nested-aggregate-returns	cleanup-nested-aggregate-returns.c	-	cleanup-nested-aggregate-returns
+# The named return value (Sema's NRVO): every return after its declaration in its scope names it, and the cleanups'
+# writes reach the caller; any other return's value is kept before them.
+cleanup-named-return-values	cleanup-named-return-values.c	-	cleanup-named-return-values
+cleanup-statement-expressions	cleanup-statement-expressions.c	-	cleanup-statement-expressions
+cleanup-switches	cleanup-switches.c	-	cleanup-switches
+cleanup-kinds	cleanup-kinds.c	-	cleanup-kinds
+# An __auto_type variable's cleanup gets the deduced type's address (#745's review): a double's, a structure's and
+# a pointer's from a decayed array.
+cleanup-auto-type	cleanup-auto-type.c	-	cleanup-auto-type
+# A _Bool parameter takes the address's low bit, as clang's code passes it (an int's: 0), and results that come back in memory, in registers as a struct, or in a result
+# object (a 128-bit integer, a vector, a complex) land in frame objects of their own, dropped.
+cleanup-parameters-results	cleanup-parameters-results.c	-	cleanup-parameters-results
+# An _Atomic pointer parameter takes the address, as clang's code passes it (#1844): of the variable's type, of void
+# and through a typedef, qualified, an __auto_type variable's too, past a return and a block's end.
+cleanup-atomic-parameters	cleanup-atomic-parameters.c	-	cleanup-atomic-parameters

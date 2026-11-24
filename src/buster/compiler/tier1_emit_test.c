@@ -1237,6 +1237,86 @@ static bool tier1_emit_test_lifetime_fixture(Tier1EmitTest* test, uint32_t shape
     return ok;
 }
 
+// Each slot starts in its block and ends at both neighbors. Its live back edge reaches the previous block's entry.
+// A second slot stays live around every cycle. The old four matrices for 2,050 blocks and 2,051 marked slots need
+// over 2.5 MiB. Bound only the lifetime pass's scratch and check every hull, including the partial final group.
+static void tier1_emit_test_many_lifetimes(Tier1EmitTest* test)
+{
+    const uint32_t locals = 2049;
+    const uint32_t blocks = 1 + locals; // Synthetic CFG entry before the IR's first loop header.
+    const uint32_t slots = locals + 3; // One end-only, one live throughout the loops, one unmarked.
+    const uint32_t per_block = 6;
+    const IrSizes sizes = {
+        .instruction_count = locals * per_block,
+        .block_count = locals,
+        .slot_count = slots,
+    };
+    IrFunction function;
+    bool ok = ir_create(&test->input, &sizes, &function) == IR_OK;
+    uint32_t* positions = ir_allocate(&test->input, blocks + 1, 4, &ok);
+    uint32_t* offsets = ir_allocate(&test->input, blocks + 1, 4, &ok);
+    uint32_t* edges = ir_allocate(&test->input, 2 * blocks, 4, &ok);
+    uint32_t* starts = ir_allocate(&test->input, slots, 4, &ok);
+    uint32_t* ends = ir_allocate(&test->input, slots, 4, &ok);
+    tier1_emit_test_expect(test, ok, "construct many frame-object lifetime columns");
+    if (ok)
+    {
+        edges[0] = 1;
+        offsets[1] = 1;
+        positions[1] = 2;
+        uint32_t edge = 1;
+        for (uint32_t i = 0; i < locals; i += 1)
+        {
+            const uint32_t block = i + 1;
+            const uint32_t node = per_block * i;
+            tier1_emit_test_node(&function, node, IR_LIFETIME, IR_VOID, i == 0 ? locals : i - 1, 1);
+            tier1_emit_test_node(&function, node + 1, IR_LIFETIME, IR_VOID, i + 1, 1);
+            if (i == 0)
+            {
+                tier1_emit_test_node(&function, node + 2, IR_LIFETIME, IR_VOID, locals + 1, 0);
+            }
+            tier1_emit_test_node(&function, node + 3, IR_LIFETIME, IR_VOID, i, 1);
+            tier1_emit_test_node(&function, node + 4, IR_LIFETIME, IR_VOID, i, 0);
+            function.block_offsets[i + 1] = node + per_block;
+            if (i != 0)
+            {
+                edges[edge++] = block - 1;
+            }
+            if (i + 1 < locals)
+            {
+                edges[edge++] = block + 1;
+            }
+            offsets[block + 1] = edge;
+            positions[block + 1] = positions[block] + 2 * per_block;
+        }
+        const Tier1CfgInput input = {
+            .block_starts = positions,
+            .successor_offsets = offsets,
+            .successors = edges,
+            .block_count = blocks,
+            .edge_count = edge,
+            .position_count = positions[blocks],
+        };
+        Arena bounded = test->scratch;
+        bounded.capacity = bounded.length + (384u << 10);
+        const Tier1EmitError solved = tier1_emit_cfg_lifetimes(&function, &input, &bounded, starts, ends);
+        tier1_emit_test_expect(test, solved == TIER1_EMIT_OK && bounded.length == test->scratch.length, "many cross-block lifetimes fit 384 KiB of temporary scratch");
+        bool exact = solved == TIER1_EMIT_OK;
+        for (uint32_t i = 0; exact && i < locals; i += 1)
+        {
+            const uint32_t first = i == 0 ? positions[1] + 8 : positions[i];
+            const uint32_t end = positions[i + 2] + (i + 1 < locals);
+            exact = starts[i] == first && ends[i] == end;
+        }
+        tier1_emit_test_expect(test, exact, "each frame lifetime includes its last start, live exit and both successor entries");
+        tier1_emit_test_expect(test, solved == TIER1_EMIT_OK && starts[locals + 1] == positions[1] && ends[locals + 1] == positions[blocks], "one frame object propagates through all loops");
+        tier1_emit_test_expect(test, solved == TIER1_EMIT_OK && starts[locals] == 0 && ends[locals] == positions[blocks] && starts[locals + 2] == 0 && ends[locals + 2] == positions[blocks], "end-only and unmarked frame objects keep the whole function");
+        bounded.capacity = bounded.length + 128;
+        tier1_emit_test_expect(test, tier1_emit_cfg_lifetimes(&function, &input, &bounded, starts, ends) == TIER1_EMIT_MEMORY && bounded.length == test->scratch.length, "a lifetime scratch refusal releases its partial allocations");
+    }
+    arena_pop_to(&test->input, 0);
+}
+
 static void tier1_emit_test_lifetimes(Tier1EmitTest* test)
 {
     for (uint32_t shape = 0; shape < 4; shape += 1)
@@ -1541,6 +1621,7 @@ static int run_tier1_emit_tests(int argc, char** argv)
             tier1_emit_test_failures(&test);
             tier1_emit_test_objects(&test);
             tier1_emit_test_lifetimes(&test);
+            tier1_emit_test_many_lifetimes(&test);
             tier1_emit_test_object_overflow(&test);
             tier1_emit_test_capacity(&test);
             tier1_emit_test_saves_rows(&test);

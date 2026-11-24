@@ -1,0 +1,1 @@
+int set_math_errno(int);int get_math_errno(void);int tested(int n){set_math_errno(0);double x=__builtin_log(n<0?-1.0:n==0?0.0:n);int a=get_math_errno();set_math_errno(0);double y=__builtin_pow(10.0,n*40.0);int b=get_math_errno();return a*100+b*7+(x>0)+(y>1e300);}

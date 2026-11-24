@@ -2036,7 +2036,7 @@ static X86IntrinsicAction x86_intrinsic_step(X86IntrinsicTrace* trace, const X86
 {
     X86IntrinsicAction action = X86_INTRINSIC_NEXT;
     const X86Instruction* instruction = &decoded->instruction;
-    const uint32_t number = instruction->form & BUSTER_X86_FORM_NUMBER;
+    const uint32_t number = x86_semantics_row(instruction->form);
     const X86FormDescription* form = x86_form_description(number);
     const X86Effects* effects = x86_effects(number);
     const uint32_t operation = effects->operation;
@@ -2493,12 +2493,14 @@ static X86IntrinsicAction x86_intrinsic_step(X86IntrinsicTrace* trace, const X86
                 count += 1;
             }
         }
-        // The XMM registers that Key Locker's forms read and write and no role names (x86_implicit_vectors).
+        // The XMM operands that Key Locker reads and writes in addition to its explicit roles.
         uint32_t vector_reads = 0;
         uint32_t vector_writes = 0;
         if ((effects->properties & BUSTER_X86_EFFECT_IMPLICIT_VECTORS) != 0)
         {
-            x86_implicit_vectors(number, &vector_reads, &vector_writes);
+            const uint64_t vectors = x86_implicit_vectors[number - X86_FORM_AESENCWIDE128KL_M384];
+            vector_reads = (uint32_t)vectors & 0xff;
+            vector_writes = (uint32_t)(vectors >> 8);
         }
         for (uint32_t v = 0; v < 8; v += 1)
         {

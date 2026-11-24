@@ -81,6 +81,8 @@
 
 // The reports and lists the tests build, each in a buffer of this many bytes.
 #define BUSTER_PARALLEL_TEST_TEXT_BYTES 4096
+// The normalized timing and peak for a command that ran, followed by its user and system CPU times.
+#define BUSTER_PARALLEL_TEST_USAGE " in * s, * s of CPU, * MiB peak\nCPU time * s user, * s system\n"
 // The large output's bytes.
 #define BUSTER_PARALLEL_TEST_LARGE_BYTES (1ull << 20)
 // How long a process the runner killed may take to be gone (reaped by whatever inherits it), in nanoseconds.
@@ -101,16 +103,15 @@ static String8 parallel_test_string(const char* text)
     return (String8){ .pointer = (char*)text, .length = strlen(text) };
 }
 
-// The report with each time (" in 1.2 s"), CPU time (", 0.3 s of CPU") and peak memory (", 4 MiB peak") written as
-// " in * s", ", * s of CPU" and ", * MiB peak".
+// Replace the numbers in the report's elapsed time, CPU times and peak memory with "*".
 static String8 parallel_test_normalize(Arena* arena, String8 text)
 {
     // A measure's text before and after its number, which is digits, then a '.' and a digit where `tenths` says so,
     // and what takes its place.
-    static const char* const befores[] = { " in ", ", ", ", " };
-    static const char* const afters[] = { " s", " s of CPU", " MiB peak" };
-    static const bool tenths[] = { true, true, false };
-    static const char* const normals[] = { " in * s", ", * s of CPU", ", * MiB peak" };
+    static const char* const befores[] = { " in ", ", ", ", ", "CPU time ", ", " };
+    static const char* const afters[] = { " s", " s of CPU", " MiB peak", " s user", " s system" };
+    static const bool tenths[] = { true, true, false, true, true };
+    static const char* const normals[] = { " in * s", ", * s of CPU", ", * MiB peak", "CPU time * s user", ", * s system" };
     char* bytes = arena_push(arena, text.length, 1);
     uint64_t length = 0;
     uint64_t i = 0;
@@ -428,17 +429,17 @@ static void parallel_test_order(ParallelTest* test)
                                        options, &summary, &results);
     parallel_test_check(test, "order", !summary.succeeded && summary.passed == 3 && summary.failed == 2 && summary.peak == 5, report,
                         "parallel: 5 commands, at most 5 CPUs at once\n"
-                        "== slow: passed in * s, * s of CPU, * MiB peak\n"
+                        "== slow: passed" BUSTER_PARALLEL_TEST_USAGE
                         "slow\n"
-                        "== mixed: passed in * s, * s of CPU, * MiB peak\n"
+                        "== mixed: passed" BUSTER_PARALLEL_TEST_USAGE
                         "out\n"
                         "err\n"
                         "out again\n"
                         "no newline\n"
-                        "== silent: passed in * s, * s of CPU, * MiB peak\n"
-                        "== three: failed (exit status 3) in * s, * s of CPU, * MiB peak\n"
+                        "== silent: passed" BUSTER_PARALLEL_TEST_USAGE
+                        "== three: failed (exit status 3)" BUSTER_PARALLEL_TEST_USAGE
                         "three\n"
-                        "== killed: failed (killed by signal 9: Killed) in * s, * s of CPU, * MiB peak\n"
+                        "== killed: failed (killed by signal 9: Killed)" BUSTER_PARALLEL_TEST_USAGE
                         "parallel: 5 commands in * s, * s of CPU, at most 5 CPUs at once: 3 passed, 2 failed, 0 skipped, 0 not started\n"
                         "parallel: three failed (exit status 3) in * s, * s of CPU, * MiB peak\n"
                         "parallel: killed failed (killed by signal 9: Killed) in * s, * s of CPU, * MiB peak\n");
@@ -454,10 +455,10 @@ static void parallel_test_order(ParallelTest* test)
                                github, &summary, &results);
     parallel_test_check(test, "order with --github", !summary.succeeded && summary.passed == 1 && summary.failed == 1, report,
                         "parallel: 2 commands, at most 2 CPUs at once\n"
-                        "::group::ok: passed in * s, * s of CPU, * MiB peak\n"
+                        "::group::ok: passed" BUSTER_PARALLEL_TEST_USAGE
                         "fine\n"
                         "::endgroup::\n"
-                        "::group::50%25 done, step: 1: failed (exit status 1) in * s, * s of CPU, * MiB peak\n"
+                        "::group::50%25 done, step: 1: failed (exit status 1)" BUSTER_PARALLEL_TEST_USAGE
                         "100%\n"
                         "::endgroup::\n"
                         "parallel: 2 commands in * s, * s of CPU, at most 2 CPUs at once: 1 passed, 1 failed, 0 skipped, 0 not started\n"
@@ -493,7 +494,7 @@ static void parallel_test_order(ParallelTest* test)
     unlink(input_path);
     parallel_test_check(test, "descriptors", redirected && restored && summary.succeeded, report,
                         "parallel: 1 commands, at most 5 CPUs at once\n"
-                        "== descriptors: passed in * s, * s of CPU, * MiB peak\n"
+                        "== descriptors: passed" BUSTER_PARALLEL_TEST_USAGE
                         "checked\n"
                         "parallel: 1 commands in * s, * s of CPU, at most 5 CPUs at once: 1 passed, 0 failed, 0 skipped, 0 not started\n");
     test->arena.length = 0;
@@ -513,9 +514,9 @@ static void parallel_test_skips(ParallelTest* test)
                                        options, &summary, &results);
     parallel_test_check(test, "skip status", summary.succeeded && summary.passed == 1 && summary.skipped == 1 && summary.failed == 0, report,
                         "parallel: 2 commands, at most 2 CPUs at once\n"
-                        "== skipped: skipped in * s, * s of CPU, * MiB peak\n"
+                        "== skipped: skipped" BUSTER_PARALLEL_TEST_USAGE
                         "SKIP: left to another stage\n"
-                        "== passed: passed in * s, * s of CPU, * MiB peak\n"
+                        "== passed: passed" BUSTER_PARALLEL_TEST_USAGE
                         "parallel: 2 commands in * s, * s of CPU, at most 2 CPUs at once: 1 passed, 0 failed, 1 skipped, 0 not started\n");
     test->arena.length = 0;
 }
@@ -537,9 +538,9 @@ static void parallel_test_at_once(ParallelTest* test)
     String8 report = parallel_test_run(test, (String8){ .pointer = text, .length = length }, barrier, &summary, &results);
     parallel_test_check(test, "three at once", summary.succeeded && summary.peak == 3, report,
                         "parallel: 3 commands, at most 3 CPUs at once\n"
-                        "== waits 1: passed in * s, * s of CPU, * MiB peak\n"
-                        "== waits 2: passed in * s, * s of CPU, * MiB peak\n"
-                        "== waits 3: passed in * s, * s of CPU, * MiB peak\n"
+                        "== waits 1: passed" BUSTER_PARALLEL_TEST_USAGE
+                        "== waits 2: passed" BUSTER_PARALLEL_TEST_USAGE
+                        "== waits 3: passed" BUSTER_PARALLEL_TEST_USAGE
                         "parallel: 3 commands in * s, * s of CPU, at most 3 CPUs at once: 3 passed, 0 failed, 0 skipped, 0 not started\n");
     test->arena.length = 0;
 
@@ -635,14 +636,14 @@ static void parallel_test_cpus(ParallelTest* test)
                         results[5].start >= results[4].end && results[6].start >= results[5].end;
     parallel_test_check(test, "CPUs: at most 4 at once", ordered && fitted && summary.succeeded && parallel_test_most_cpus(results, 8) == 4, report,
                         "parallel: 8 commands, at most 4 CPUs at once\n"
-                        "== a [2 CPUs]: passed in * s, * s of CPU, * MiB peak\n"
-                        "== b [2 CPUs]: passed in * s, * s of CPU, * MiB peak\n"
-                        "== c [3 CPUs]: passed in * s, * s of CPU, * MiB peak\n"
-                        "== d: passed in * s, * s of CPU, * MiB peak\n"
-                        "== e: passed in * s, * s of CPU, * MiB peak\n"
-                        "== f [8 CPUs]: passed in * s, * s of CPU, * MiB peak\n"
-                        "== g: passed in * s, * s of CPU, * MiB peak\n"
-                        "== h: passed in * s, * s of CPU, * MiB peak\n"
+                        "== a [2 CPUs]: passed" BUSTER_PARALLEL_TEST_USAGE
+                        "== b [2 CPUs]: passed" BUSTER_PARALLEL_TEST_USAGE
+                        "== c [3 CPUs]: passed" BUSTER_PARALLEL_TEST_USAGE
+                        "== d: passed" BUSTER_PARALLEL_TEST_USAGE
+                        "== e: passed" BUSTER_PARALLEL_TEST_USAGE
+                        "== f [8 CPUs]: passed" BUSTER_PARALLEL_TEST_USAGE
+                        "== g: passed" BUSTER_PARALLEL_TEST_USAGE
+                        "== h: passed" BUSTER_PARALLEL_TEST_USAGE
                         "parallel: 8 commands in * s, * s of CPU, at most 4 CPUs at once: 8 passed, 0 failed, 0 skipped, 0 not started\n");
     test->arena.length = 0;
 
@@ -674,11 +675,11 @@ static void parallel_test_cpus(ParallelTest* test)
     }
     parallel_test_check(test, "CPUs: each command's BUSTER_PARALLEL_CPUS", summary.succeeded, report,
                         "parallel: 3 commands, at most 4 CPUs at once\n"
-                        "== plain: passed in * s, * s of CPU, * MiB peak\n"
+                        "== plain: passed" BUSTER_PARALLEL_TEST_USAGE
                         "1 1\n"
-                        "== two [2 CPUs]: passed in * s, * s of CPU, * MiB peak\n"
+                        "== two [2 CPUs]: passed" BUSTER_PARALLEL_TEST_USAGE
                         "2 1\n"
-                        "== eight [8 CPUs]: passed in * s, * s of CPU, * MiB peak\n"
+                        "== eight [8 CPUs]: passed" BUSTER_PARALLEL_TEST_USAGE
                         "4 1\n"
                         "parallel: 3 commands in * s, * s of CPU, at most 4 CPUs at once: 3 passed, 0 failed, 0 skipped, 0 not started\n");
     test->arena.length = 0;
@@ -703,7 +704,7 @@ static void parallel_test_cpus(ParallelTest* test)
     }
     parallel_test_check(test, "CPUs: each command's BUSTER_COMPILER", summary.succeeded, report,
                         "parallel: 1 commands, at most 4 CPUs at once\n"
-                        "== compiler: passed in * s, * s of CPU, * MiB peak\n"
+                        "== compiler: passed" BUSTER_PARALLEL_TEST_USAGE
                         "runner's 1\n"
                         "parallel: 1 commands in * s, * s of CPU, at most 4 CPUs at once: 1 passed, 0 failed, 0 skipped, 0 not started\n");
     test->arena.length = 0;
@@ -719,6 +720,25 @@ static void parallel_test_cpus(ParallelTest* test)
     const bool timed = results != 0 && results[0].cpu >= tenth / 2 && results[1].cpu >= tenth / 2 && results[2].cpu < tenth &&
                        results[2].end - results[2].start >= 3 * tenth && summary.cpu == results[0].cpu + results[1].cpu + results[2].cpu;
     parallel_test_check(test, "CPUs: the commands' CPU time", summary.succeeded && timed, report, 0);
+    test->arena.length = 0;
+
+    // Give the two clocks distinct values so swapped labels or lost microseconds fail without relying on host load.
+    const struct rusage usage = {
+        .ru_utime = { .tv_sec = 2, .tv_usec = 300000 },
+        .ru_stime = { .tv_usec = 700000 },
+    };
+    const ParallelCommand command = { .title = parallel_test_string("busy") };
+    ParallelResult timeout = {
+        .end = 4 * BUSTER_PARALLEL_NANOSECONDS,
+        .capture = -1,
+        .cpu = 3 * BUSTER_PARALLEL_NANOSECONDS,
+        .state = PARALLEL_STATE_ENDED,
+        .timed_out = true,
+    };
+    const bool rendered = parallel_render(&test->arena, &command, &four, &timeout, &usage);
+    parallel_test_check(test, "CPUs: user and system time on timeout", rendered, timeout.report,
+                        "== busy: failed (timed out) in 4.0 s, 3.0 s of CPU, 0 MiB peak\n"
+                        "CPU time 2.3 s user, 0.7 s system\n");
     test->arena.length = 0;
 }
 
@@ -810,7 +830,7 @@ static void parallel_test_output(ParallelTest* test)
     ParallelResult* results = 0;
     const ParallelOptions options = { .jobs = 1 };
     const String8 report = parallel_test_run(test, parallel_test_string("== large\nhead -c 1048576 /dev/zero | tr '\\0' x\necho\n"), options, &summary, &results);
-    static const char head[] = "parallel: 1 commands, at most 1 CPUs at once\n== large: passed in * s, * s of CPU, * MiB peak\n";
+    static const char head[] = "parallel: 1 commands, at most 1 CPUs at once\n== large: passed" BUSTER_PARALLEL_TEST_USAGE;
     static const char tail[] = "\nparallel: 1 commands in * s, * s of CPU, at most 1 CPUs at once: 1 passed, 0 failed, 0 skipped, 0 not started\n";
     const uint64_t head_length = sizeof(head) - 1;
     const uint64_t tail_length = sizeof(tail) - 1;
@@ -837,7 +857,7 @@ static void parallel_test_processes(ParallelTest* test)
                        results[0].end - results[0].start < 10 * BUSTER_PARALLEL_NANOSECONDS;
     parallel_test_check(test, "a timeout", timed && !summary.succeeded && parallel_test_gone(test, "stuck"), report,
                         "parallel: 1 commands, at most 1 CPUs at once\n"
-                        "== stuck: failed (timed out) in * s, * s of CPU, * MiB peak\n"
+                        "== stuck: failed (timed out)" BUSTER_PARALLEL_TEST_USAGE
                         "parallel: 1 commands in * s, * s of CPU, at most 1 CPUs at once: 0 passed, 1 failed, 0 skipped, 0 not started\n"
                         "parallel: stuck failed (timed out) in * s, * s of CPU, * MiB peak\n");
     test->arena.length = 0;
@@ -848,7 +868,7 @@ static void parallel_test_processes(ParallelTest* test)
     report = parallel_test_run(test, (String8){ .pointer = text, .length = length }, one, &summary, &results);
     parallel_test_check(test, "what a command leaves", summary.succeeded && summary.elapsed < 10 * BUSTER_PARALLEL_NANOSECONDS && parallel_test_gone(test, "left"), report,
                         "parallel: 1 commands, at most 1 CPUs at once\n"
-                        "== leaves: passed in * s, * s of CPU, * MiB peak\n"
+                        "== leaves: passed" BUSTER_PARALLEL_TEST_USAGE
                         "left\n"
                         "parallel: 1 commands in * s, * s of CPU, at most 1 CPUs at once: 1 passed, 0 failed, 0 skipped, 0 not started\n");
     test->arena.length = 0;
@@ -879,10 +899,10 @@ static void parallel_test_fail_fast(ParallelTest* test)
                             summary.elapsed < 10 * BUSTER_PARALLEL_NANOSECONDS && results != 0 && results[1].stopped,
                         report,
                         "parallel: 3 commands, at most 2 CPUs at once\n"
-                        "::group::fails: failed (exit status 3) in * s, * s of CPU, * MiB peak\n"
+                        "::group::fails: failed (exit status 3)" BUSTER_PARALLEL_TEST_USAGE
                         "broken\n"
                         "::endgroup::\n"
-                        "::group::beside: failed (stopped: another command failed) in * s, * s of CPU, * MiB peak\n"
+                        "::group::beside: failed (stopped: another command failed)" BUSTER_PARALLEL_TEST_USAGE
                         "::endgroup::\n"
                         "::group::after: not started\n"
                         "::endgroup::\n"
@@ -896,9 +916,9 @@ static void parallel_test_fail_fast(ParallelTest* test)
     report = parallel_test_run(test, parallel_test_string("== fails\nexit 3\n== beside\nsleep 0.1\n== after\ntrue\n"), plain, &summary, &results);
     parallel_test_check(test, "fail-fast: off by default", !summary.succeeded && !summary.failed_fast && summary.failed == 1 && summary.passed == 2 && summary.stopped == 0, report,
                         "parallel: 3 commands, at most 2 CPUs at once\n"
-                        "== fails: failed (exit status 3) in * s, * s of CPU, * MiB peak\n"
-                        "== beside: passed in * s, * s of CPU, * MiB peak\n"
-                        "== after: passed in * s, * s of CPU, * MiB peak\n"
+                        "== fails: failed (exit status 3)" BUSTER_PARALLEL_TEST_USAGE
+                        "== beside: passed" BUSTER_PARALLEL_TEST_USAGE
+                        "== after: passed" BUSTER_PARALLEL_TEST_USAGE
                         "parallel: 3 commands in * s, * s of CPU, at most 2 CPUs at once: 2 passed, 1 failed, 0 skipped, 0 not started\n"
                         "parallel: fails failed (exit status 3) in * s, * s of CPU, * MiB peak\n");
     test->arena.length = 0;
@@ -911,9 +931,9 @@ static void parallel_test_fail_fast(ParallelTest* test)
                             summary.stopped == 0,
                         report,
                         "parallel: 4 commands, at most 1 CPUs at once\n"
-                        "== skipped: skipped in * s, * s of CPU, * MiB peak\n"
-                        "== passes: passed in * s, * s of CPU, * MiB peak\n"
-                        "== fails: failed (exit status 5) in * s, * s of CPU, * MiB peak\n"
+                        "== skipped: skipped" BUSTER_PARALLEL_TEST_USAGE
+                        "== passes: passed" BUSTER_PARALLEL_TEST_USAGE
+                        "== fails: failed (exit status 5)" BUSTER_PARALLEL_TEST_USAGE
                         "== after: not started\n"
                         "parallel: 4 commands in * s, * s of CPU, at most 1 CPUs at once: 1 passed, 1 failed, 1 skipped, 1 not started, stopped at the first failure (0 running "
                         "commands stopped)\n"
@@ -924,8 +944,8 @@ static void parallel_test_fail_fast(ParallelTest* test)
     report = parallel_test_run(test, parallel_test_string("== a\ntrue\n== b\ntrue\n"), one, &summary, &results);
     parallel_test_check(test, "fail-fast: every command passing", summary.succeeded && !summary.failed_fast && summary.passed == 2, report,
                         "parallel: 2 commands, at most 1 CPUs at once\n"
-                        "== a: passed in * s, * s of CPU, * MiB peak\n"
-                        "== b: passed in * s, * s of CPU, * MiB peak\n"
+                        "== a: passed" BUSTER_PARALLEL_TEST_USAGE
+                        "== b: passed" BUSTER_PARALLEL_TEST_USAGE
                         "parallel: 2 commands in * s, * s of CPU, at most 1 CPUs at once: 2 passed, 0 failed, 0 skipped, 0 not started\n");
     test->arena.length = 0;
 
@@ -1044,8 +1064,8 @@ static void parallel_test_slow_reader(ParallelTest* test)
                                             "sleep 1", &summary, &results, &run_time);
     bool killed = results != 0 && results[1].timed_out && !results[1].passed && results[1].end - results[1].start < 7 * BUSTER_PARALLEL_NANOSECONDS / 10;
     parallel_test_check(test, "a slow reader, and a timeout", killed && summary.passed == 1 && summary.failed == 1 &&
-                                                                 parallel_test_large(report, "parallel: 2 commands, at most 2 CPUs at once\n== large: passed in * s, * s of CPU, * MiB peak\n",
-                                                                                     "== deadline: failed (timed out) in * s, * s of CPU, * MiB peak\n"
+                                                                 parallel_test_large(report, "parallel: 2 commands, at most 2 CPUs at once\n== large: passed" BUSTER_PARALLEL_TEST_USAGE,
+                                                                                     "== deadline: failed (timed out)" BUSTER_PARALLEL_TEST_USAGE
                                                                                      "parallel: 2 commands in * s, * s of CPU, at most 2 CPUs at once: 1 passed, 1 failed, 0 skipped, 0 not started\n"
                                                                                      "parallel: deadline failed (timed out) in * s, * s of CPU, * MiB peak\n"),
                         report.length < 4096 ? report : (String8){ 0 }, 0);
@@ -1061,8 +1081,8 @@ static void parallel_test_slow_reader(ParallelTest* test)
     report = parallel_test_slow_run(test, (String8){ .pointer = text, .length = length }, plain, "sleep 1", &summary, &results, &run_time);
     killed = results != 0 && results[1].interrupted && results[1].end - results[1].start < 7 * BUSTER_PARALLEL_NANOSECONDS / 10;
     parallel_test_check(test, "a slow reader, and a signal", killed && summary.signal == SIGTERM &&
-                                                                parallel_test_large(report, "parallel: 2 commands, at most 2 CPUs at once\n== large: passed in * s, * s of CPU, * MiB peak\n",
-                                                                                    "== stops: failed (killed by signal 15: Terminated) in * s, * s of CPU, * MiB peak\n"
+                                                                parallel_test_large(report, "parallel: 2 commands, at most 2 CPUs at once\n== large: passed" BUSTER_PARALLEL_TEST_USAGE,
+                                                                                    "== stops: failed (killed by signal 15: Terminated)" BUSTER_PARALLEL_TEST_USAGE
                                                                                     "parallel: 2 commands in * s, * s of CPU, at most 2 CPUs at once: 1 passed, 1 failed, 0 skipped, 0 not started, stopped by "
                                                                                     "signal 15: Terminated\n"
                                                                                     "parallel: stops failed (killed by signal 15: Terminated) in * s, * s of CPU, * MiB peak\n"),
@@ -1161,7 +1181,7 @@ static void parallel_test_signals(ParallelTest* test)
                                              parallel_test_signals_kept(&mask, actions),
                         report,
                         "parallel: 2 commands, at most 1 CPUs at once\n"
-                        "== stops: failed (killed by signal 15: Terminated) in * s, * s of CPU, * MiB peak\n"
+                        "== stops: failed (killed by signal 15: Terminated)" BUSTER_PARALLEL_TEST_USAGE
                         "== waits: not started\n"
                         "parallel: 2 commands in * s, * s of CPU, at most 1 CPUs at once: 0 passed, 1 failed, 0 skipped, 1 not started, stopped by signal 15: Terminated\n"
                         "parallel: stops failed (killed by signal 15: Terminated) in * s, * s of CPU, * MiB peak\n");
@@ -1172,7 +1192,7 @@ static void parallel_test_signals(ParallelTest* test)
     parallel_test_check(test, "a signal with every command passing", summary.signal == SIGTERM && !summary.succeeded && summary.passed == 1 && results != 0 && results[0].interrupted,
                         report,
                         "parallel: 1 commands, at most 1 CPUs at once\n"
-                        "== shrugs: passed in * s, * s of CPU, * MiB peak\n"
+                        "== shrugs: passed" BUSTER_PARALLEL_TEST_USAGE
                         "parallel: 1 commands in * s, * s of CPU, at most 1 CPUs at once: 1 passed, 0 failed, 0 skipped, 0 not started, stopped by signal 15: Terminated\n");
     test->arena.length = 0;
 
@@ -1180,7 +1200,7 @@ static void parallel_test_signals(ParallelTest* test)
     report = parallel_test_run(test, parallel_test_string("== ignores\ntrap '' INT TERM\nkill -INT $PPID\nkill -TERM $PPID\nexec sleep 30\n"), one, &summary, &results);
     parallel_test_check(test, "SIGINT, then SIGTERM", summary.signal == SIGINT && !summary.succeeded && parallel_test_signals_kept(&mask, actions), report,
                         "parallel: 1 commands, at most 1 CPUs at once\n"
-                        "== ignores: failed (killed by signal 9: Killed) in * s, * s of CPU, * MiB peak\n"
+                        "== ignores: failed (killed by signal 9: Killed)" BUSTER_PARALLEL_TEST_USAGE
                         "parallel: 1 commands in * s, * s of CPU, at most 1 CPUs at once: 0 passed, 1 failed, 0 skipped, 0 not started, stopped by signal 2: Interrupt\n"
                         "parallel: ignores failed (killed by signal 9: Killed) in * s, * s of CPU, * MiB peak\n");
     test->arena.length = 0;
@@ -1198,9 +1218,9 @@ static void parallel_test_signals(ParallelTest* test)
     report = parallel_test_run(test, parallel_test_string("== hangs up\nkill -HUP $PPID\necho still here\n== exits\nexit 4\n"), one, &summary, &results);
     parallel_test_check(test, "SIGHUP and SIGCHLD ignored", summary.signal == 0 && summary.passed == 1 && parallel_test_signals_kept(&mask, ignored), report,
                         "parallel: 2 commands, at most 1 CPUs at once\n"
-                        "== hangs up: passed in * s, * s of CPU, * MiB peak\n"
+                        "== hangs up: passed" BUSTER_PARALLEL_TEST_USAGE
                         "still here\n"
-                        "== exits: failed (exit status 4) in * s, * s of CPU, * MiB peak\n"
+                        "== exits: failed (exit status 4)" BUSTER_PARALLEL_TEST_USAGE
                         "parallel: 2 commands in * s, * s of CPU, at most 1 CPUs at once: 1 passed, 1 failed, 0 skipped, 0 not started\n"
                         "parallel: exits failed (exit status 4) in * s, * s of CPU, * MiB peak\n");
     for (uint64_t i = 0; i < 4; i += 1)
@@ -1273,9 +1293,9 @@ static void parallel_test_command_line(ParallelTest* test)
     String8 report = parallel_test_normalize(&test->arena, parallel_test_read(&test->arena, output));
     parallel_test_check(test, "the command, a list on standard input", status == 0, report,
                         "parallel: 2 commands, at most 2 CPUs at once\n"
-                        "== first: passed in * s, * s of CPU, * MiB peak\n"
+                        "== first: passed" BUSTER_PARALLEL_TEST_USAGE
                         "one\n"
-                        "== second: passed in * s, * s of CPU, * MiB peak\n"
+                        "== second: passed" BUSTER_PARALLEL_TEST_USAGE
                         "two\n"
                         "parallel: 2 commands in * s, * s of CPU, at most 2 CPUs at once: 2 passed, 0 failed, 0 skipped, 0 not started\n");
     test->arena.length = 0;
@@ -1288,7 +1308,7 @@ static void parallel_test_command_line(ParallelTest* test)
     const unsigned long long cpus = (unsigned long long)lane_core_count();
     snprintf(expected, sizeof(expected),
              "parallel: 1 commands, at most %llu CPUs at once\n"
-             "::group::fails: failed (exit status 2) in * s, * s of CPU, * MiB peak\n"
+             "::group::fails: failed (exit status 2)" BUSTER_PARALLEL_TEST_USAGE
              "::endgroup::\n"
              "parallel: 1 commands in * s, * s of CPU, at most %llu CPUs at once: 0 passed, 1 failed, 0 skipped, 0 not started\n"
              "::error title=fails::failed (exit status 2) in * s, * s of CPU, * MiB peak\n",
@@ -1418,7 +1438,7 @@ static void parallel_test_command_line(ParallelTest* test)
     parallel_test_check(test, "the command, a command that ends past its deadline unseen", continued && late_waited == runner && WIFEXITED(late_status) && WEXITSTATUS(late_status) == 1,
                         report,
                         "parallel: 1 commands, at most 1 CPUs at once\n"
-                        "== late: failed (timed out) in * s, * s of CPU, * MiB peak\n"
+                        "== late: failed (timed out)" BUSTER_PARALLEL_TEST_USAGE
                         "parallel: 1 commands in * s, * s of CPU, at most 1 CPUs at once: 0 passed, 1 failed, 0 skipped, 0 not started\n"
                         "parallel: late failed (timed out) in * s, * s of CPU, * MiB peak\n");
     unlink(late);
@@ -1505,72 +1525,72 @@ static void parallel_test_shards(ParallelTest* test)
             "1/2",
             true,
             "parallel: shard 1 of 2, 3 of 6 commands, at most 4 CPUs at once\n"
-            "== a: passed in * s, * s of CPU, * MiB peak\na\n"
-            "== c [2 CPUs]: passed in * s, * s of CPU, * MiB peak\nc\n"
-            "== d: passed in * s, * s of CPU, * MiB peak\nd\n"
+            "== a: passed" BUSTER_PARALLEL_TEST_USAGE "a\n"
+            "== c [2 CPUs]: passed" BUSTER_PARALLEL_TEST_USAGE "c\n"
+            "== d: passed" BUSTER_PARALLEL_TEST_USAGE "d\n"
             "parallel: 3 commands in * s, * s of CPU, at most 4 CPUs at once: 3 passed, 0 failed, 0 skipped, 0 not started\n",
         },
         {
             "2/2",
             true,
             "parallel: shard 2 of 2, 3 of 6 commands, at most 4 CPUs at once\n"
-            "== b: passed in * s, * s of CPU, * MiB peak\nb\n"
-            "== e: passed in * s, * s of CPU, * MiB peak\ne\n"
-            "== f [3 CPUs]: passed in * s, * s of CPU, * MiB peak\nf\n"
+            "== b: passed" BUSTER_PARALLEL_TEST_USAGE "b\n"
+            "== e: passed" BUSTER_PARALLEL_TEST_USAGE "e\n"
+            "== f [3 CPUs]: passed" BUSTER_PARALLEL_TEST_USAGE "f\n"
             "parallel: 3 commands in * s, * s of CPU, at most 4 CPUs at once: 3 passed, 0 failed, 0 skipped, 0 not started\n",
         },
         {
             "1/3",
             true,
             "parallel: shard 1 of 3, 2 of 6 commands, at most 4 CPUs at once\n"
-            "== a: passed in * s, * s of CPU, * MiB peak\na\n"
-            "== e: passed in * s, * s of CPU, * MiB peak\ne\n"
+            "== a: passed" BUSTER_PARALLEL_TEST_USAGE "a\n"
+            "== e: passed" BUSTER_PARALLEL_TEST_USAGE "e\n"
             "parallel: 2 commands in * s, * s of CPU, at most 4 CPUs at once: 2 passed, 0 failed, 0 skipped, 0 not started\n",
         },
         {
             "2/3",
             true,
             "parallel: shard 2 of 3, 2 of 6 commands, at most 4 CPUs at once\n"
-            "== d: passed in * s, * s of CPU, * MiB peak\nd\n"
-            "== f [3 CPUs]: passed in * s, * s of CPU, * MiB peak\nf\n"
+            "== d: passed" BUSTER_PARALLEL_TEST_USAGE "d\n"
+            "== f [3 CPUs]: passed" BUSTER_PARALLEL_TEST_USAGE "f\n"
             "parallel: 2 commands in * s, * s of CPU, at most 4 CPUs at once: 2 passed, 0 failed, 0 skipped, 0 not started\n",
         },
         {
             "3/3",
             true,
             "parallel: shard 3 of 3, 2 of 6 commands, at most 4 CPUs at once\n"
-            "== b: passed in * s, * s of CPU, * MiB peak\nb\n"
-            "== c [2 CPUs]: passed in * s, * s of CPU, * MiB peak\nc\n"
+            "== b: passed" BUSTER_PARALLEL_TEST_USAGE "b\n"
+            "== c [2 CPUs]: passed" BUSTER_PARALLEL_TEST_USAGE "c\n"
             "parallel: 2 commands in * s, * s of CPU, at most 4 CPUs at once: 2 passed, 0 failed, 0 skipped, 0 not started\n",
         },
         {
             "1/1",
             true,
             "parallel: shard 1 of 1, 6 of 6 commands, at most 4 CPUs at once\n"
-            "== a: passed in * s, * s of CPU, * MiB peak\na\n"
-            "== b: passed in * s, * s of CPU, * MiB peak\nb\n"
-            "== c [2 CPUs]: passed in * s, * s of CPU, * MiB peak\nc\n"
-            "== d: passed in * s, * s of CPU, * MiB peak\nd\n"
-            "== e: passed in * s, * s of CPU, * MiB peak\ne\n"
-            "== f [3 CPUs]: passed in * s, * s of CPU, * MiB peak\nf\n"
+            "== a: passed" BUSTER_PARALLEL_TEST_USAGE "a\n"
+            "== b: passed" BUSTER_PARALLEL_TEST_USAGE "b\n"
+            "== c [2 CPUs]: passed" BUSTER_PARALLEL_TEST_USAGE "c\n"
+            "== d: passed" BUSTER_PARALLEL_TEST_USAGE "d\n"
+            "== e: passed" BUSTER_PARALLEL_TEST_USAGE "e\n"
+            "== f [3 CPUs]: passed" BUSTER_PARALLEL_TEST_USAGE "f\n"
             "parallel: 6 commands in * s, * s of CPU, at most 4 CPUs at once: 6 passed, 0 failed, 0 skipped, 0 not started\n",
         },
         {
             "1/2",
             false,
             "parallel: shard 1 of 2, 3 of 6 commands, at most 4 CPUs at once\n"
-            "== b: passed in * s, * s of CPU, * MiB peak\nb\n"
-            "== e: passed in * s, * s of CPU, * MiB peak\ne\n"
-            "== f [3 CPUs]: passed in * s, * s of CPU, * MiB peak\nf\n"
+            "== b: passed" BUSTER_PARALLEL_TEST_USAGE "b\n"
+            "== e: passed" BUSTER_PARALLEL_TEST_USAGE "e\n"
+            "== f [3 CPUs]: passed" BUSTER_PARALLEL_TEST_USAGE "f\n"
             "parallel: 3 commands in * s, * s of CPU, at most 4 CPUs at once: 3 passed, 0 failed, 0 skipped, 0 not started\n",
         },
         {
             "2/2",
             false,
             "parallel: shard 2 of 2, 3 of 6 commands, at most 4 CPUs at once\n"
-            "== a: passed in * s, * s of CPU, * MiB peak\na\n"
-            "== c [2 CPUs]: passed in * s, * s of CPU, * MiB peak\nc\n"
-            "== d: passed in * s, * s of CPU, * MiB peak\nd\n"
+            "== a: passed" BUSTER_PARALLEL_TEST_USAGE "a\n"
+            "== c [2 CPUs]: passed" BUSTER_PARALLEL_TEST_USAGE "c\n"
+            "== d: passed" BUSTER_PARALLEL_TEST_USAGE "d\n"
             "parallel: 3 commands in * s, * s of CPU, at most 4 CPUs at once: 3 passed, 0 failed, 0 skipped, 0 not started\n",
         },
         {
@@ -1585,7 +1605,7 @@ static void parallel_test_shards(ParallelTest* test)
             "1/4294967295",
             true,
             "parallel: shard 1 of 4294967295, 1 of 6 commands, at most 4 CPUs at once\n"
-            "== a: passed in * s, * s of CPU, * MiB peak\na\n"
+            "== a: passed" BUSTER_PARALLEL_TEST_USAGE "a\n"
             "parallel: 1 commands in * s, * s of CPU, at most 4 CPUs at once: 1 passed, 0 failed, 0 skipped, 0 not started\n",
         },
         {
@@ -1676,24 +1696,24 @@ static void parallel_test_shards(ParallelTest* test)
             "1/2",
             true,
             "parallel: shard 1 of 2, 1 of 4 commands, at most 4 CPUs at once\n"
-            "== long: passed in * s, * s of CPU, * MiB peak\nlong\n"
+            "== long: passed" BUSTER_PARALLEL_TEST_USAGE "long\n"
             "parallel: 1 commands in * s, * s of CPU, at most 4 CPUs at once: 1 passed, 0 failed, 0 skipped, 0 not started\n",
         },
         {
             "2/2",
             true,
             "parallel: shard 2 of 2, 3 of 4 commands, at most 4 CPUs at once\n"
-            "== w1 [8 CPUs]: passed in * s, * s of CPU, * MiB peak\nw1\n"
-            "== w2 [8 CPUs]: passed in * s, * s of CPU, * MiB peak\nw2\n"
-            "== w3 [8 CPUs]: passed in * s, * s of CPU, * MiB peak\nw3\n"
+            "== w1 [8 CPUs]: passed" BUSTER_PARALLEL_TEST_USAGE "w1\n"
+            "== w2 [8 CPUs]: passed" BUSTER_PARALLEL_TEST_USAGE "w2\n"
+            "== w3 [8 CPUs]: passed" BUSTER_PARALLEL_TEST_USAGE "w3\n"
             "parallel: 3 commands in * s, * s of CPU, at most 4 CPUs at once: 3 passed, 0 failed, 0 skipped, 0 not started\n",
         },
         {
             "1/2",
             false,
             "parallel: shard 1 of 2, 2 of 4 commands, at most 4 CPUs at once\n"
-            "== w3 [8 CPUs]: passed in * s, * s of CPU, * MiB peak\nw3\n"
-            "== long: passed in * s, * s of CPU, * MiB peak\nlong\n"
+            "== w3 [8 CPUs]: passed" BUSTER_PARALLEL_TEST_USAGE "w3\n"
+            "== long: passed" BUSTER_PARALLEL_TEST_USAGE "long\n"
             "parallel: 2 commands in * s, * s of CPU, at most 4 CPUs at once: 2 passed, 0 failed, 0 skipped, 0 not started\n",
         },
     };
@@ -1718,16 +1738,16 @@ static void parallel_test_shards(ParallelTest* test)
             "1/2",
             true,
             "parallel: shard 1 of 2, 2 of 4 commands, at most 4 CPUs at once\n"
-            "== w1 [8 CPUs]: passed in * s, * s of CPU, * MiB peak\nw1\n"
-            "== w2 [8 CPUs]: passed in * s, * s of CPU, * MiB peak\nw2\n"
+            "== w1 [8 CPUs]: passed" BUSTER_PARALLEL_TEST_USAGE "w1\n"
+            "== w2 [8 CPUs]: passed" BUSTER_PARALLEL_TEST_USAGE "w2\n"
             "parallel: 2 commands in * s, * s of CPU, at most 4 CPUs at once: 2 passed, 0 failed, 0 skipped, 0 not started\n",
         },
         {
             "2/2",
             true,
             "parallel: shard 2 of 2, 2 of 4 commands, at most 4 CPUs at once\n"
-            "== w3 [8 CPUs]: passed in * s, * s of CPU, * MiB peak\nw3\n"
-            "== long: passed in * s, * s of CPU, * MiB peak\nlong\n"
+            "== w3 [8 CPUs]: passed" BUSTER_PARALLEL_TEST_USAGE "w3\n"
+            "== long: passed" BUSTER_PARALLEL_TEST_USAGE "long\n"
             "parallel: 2 commands in * s, * s of CPU, at most 4 CPUs at once: 2 passed, 0 failed, 0 skipped, 0 not started\n",
         },
     };
@@ -1751,23 +1771,23 @@ static void parallel_test_shards(ParallelTest* test)
             "1/2",
             true,
             "parallel: shard 1 of 2, 2 of 3 commands, at most 4 CPUs at once\n"
-            "== big: passed in * s, * s of CPU, * MiB peak\nbig\n"
-            "== b: passed in * s, * s of CPU, * MiB peak\nb\n"
+            "== big: passed" BUSTER_PARALLEL_TEST_USAGE "big\n"
+            "== b: passed" BUSTER_PARALLEL_TEST_USAGE "b\n"
             "parallel: 2 commands in * s, * s of CPU, at most 4 CPUs at once: 2 passed, 0 failed, 0 skipped, 0 not started\n",
         },
         {
             "2/2",
             true,
             "parallel: shard 2 of 2, 1 of 3 commands, at most 4 CPUs at once\n"
-            "== a: passed in * s, * s of CPU, * MiB peak\na\n"
+            "== a: passed" BUSTER_PARALLEL_TEST_USAGE "a\n"
             "parallel: 1 commands in * s, * s of CPU, at most 4 CPUs at once: 1 passed, 0 failed, 0 skipped, 0 not started\n",
         },
         {
             "2/2",
             false,
             "parallel: shard 2 of 2, 2 of 3 commands, at most 4 CPUs at once\n"
-            "== a: passed in * s, * s of CPU, * MiB peak\na\n"
-            "== b: passed in * s, * s of CPU, * MiB peak\nb\n"
+            "== a: passed" BUSTER_PARALLEL_TEST_USAGE "a\n"
+            "== b: passed" BUSTER_PARALLEL_TEST_USAGE "b\n"
             "parallel: 2 commands in * s, * s of CPU, at most 4 CPUs at once: 2 passed, 0 failed, 0 skipped, 0 not started\n",
         },
     };
@@ -1800,15 +1820,15 @@ static void parallel_test_shards(ParallelTest* test)
     static const char* const memories[] = { "1000", "100000" };
     static const char* const run_expected[] = {
         "parallel: shard 1 of 1, 3 of 3 commands, at most 4 CPUs at once\n"
-        "== x: passed in * s, * s of CPU, * MiB peak\n"
-        "== y: passed in * s, * s of CPU, * MiB peak\nalone\n"
-        "== z: passed in * s, * s of CPU, * MiB peak\nz\n"
+        "== x: passed" BUSTER_PARALLEL_TEST_USAGE
+        "== y: passed" BUSTER_PARALLEL_TEST_USAGE "alone\n"
+        "== z: passed" BUSTER_PARALLEL_TEST_USAGE "z\n"
         "parallel: 3 commands in * s, * s of CPU, at most 4 CPUs at once: 3 passed, 0 failed, 0 skipped, 0 not started\n"
         "parallel: z needs 2000 MiB at its peak, past the 900 MiB the commands at once may hold, so it ran alone\n",
         "parallel: shard 1 of 1, 3 of 3 commands, at most 4 CPUs at once\n"
-        "== x: passed in * s, * s of CPU, * MiB peak\n"
-        "== y: passed in * s, * s of CPU, * MiB peak\nbeside x\n"
-        "== z: passed in * s, * s of CPU, * MiB peak\nz\n"
+        "== x: passed" BUSTER_PARALLEL_TEST_USAGE
+        "== y: passed" BUSTER_PARALLEL_TEST_USAGE "beside x\n"
+        "== z: passed" BUSTER_PARALLEL_TEST_USAGE "z\n"
         "parallel: 3 commands in * s, * s of CPU, at most 4 CPUs at once: 3 passed, 0 failed, 0 skipped, 0 not started\n",
     };
     for (uint64_t i = 0; i < sizeof(memories) / sizeof(memories[0]); i += 1)

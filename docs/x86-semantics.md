@@ -591,9 +591,9 @@ run (its native target lacks their features) are listed too, and not executed.
 **The random columns** (the twins' comparison until #2924):
 
 - both vector paths on 20,000 random requests and records, the context's unused
-  bits and uncovered forms among them: their outputs' digest at seed 1, frozen
-  while the scalar twins still agreed on every item, and each item alone
-  against the batch;
+  bits and uncovered forms among them. Each item alone must match its batch
+  result. The seed-1 digest originally matched the scalar twins and was updated
+  for the corrected XMM effects of seven Key Locker records with segment overrides (#3510).
 - with every column and output ending at a `PROT_NONE` page, at every count to
   100.
 

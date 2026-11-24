@@ -1,0 +1,1 @@
+int tested(int n){int d[({int k=n&7;k+1;})];int e[({int r=2;if(n>3)goto out;r=5;out:r;})];long f[n&1][({int w=3;for(int i=0;i<n;i++)w+=i&1;w;})];return (int)(sizeof d*100+sizeof e*10+sizeof f);}

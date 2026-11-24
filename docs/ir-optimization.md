@@ -160,9 +160,14 @@ four selects. The moved rows' cost plus two per select is at most eight: a
 constant costs nothing, an integer multiply three, a select two, and other
 admitted rows (a speculated load among them) one. These conservative bounds
 limit speculation and added live values; they are not measured target
-latencies. The IR has no branch-probability metadata (`__builtin_expect`
-currently lowers to its value), so a predictable branch converts unless the
-recurrence rule keeps it. Functions containing indirect-branch labels remain
+latencies. A `cbr` marked `predictable` stays a branch. Direct truth tests of
+`__builtin_expect` with a constant expectation carry this flag, including
+negated tests and integer comparisons with a constant. For `__builtin_expect_with_probability`, the threshold is 90%
+for either truth outcome. A probability of at most 10% for equality to zero
+therefore qualifies. Equality to any explicitly rare value qualifies, as does
+a rare zero or one for a boolean operand. For a general
+integer, rarely equalling one leaves the probability of zero unknown.
+Functions containing indirect-branch labels remain
 unchanged.
 
 `ir_if_convert(function, output, scratch, scalar, result)` requires verified

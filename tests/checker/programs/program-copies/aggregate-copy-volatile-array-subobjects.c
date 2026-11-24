@@ -1,0 +1,1 @@
+struct S{volatile unsigned char c[3][171];};static struct S a,b;struct S returned(void){return a;}int tested(int n){for(int i=0;i<3;i++)for(int j=0;j<171;j++)a.c[i][j]=(unsigned char)(n+i+j);b=a;b=b;struct S r=returned();return b.c[2][170]+r.c[0][0];}
