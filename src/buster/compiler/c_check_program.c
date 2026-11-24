@@ -4911,7 +4911,7 @@ static bool check_program_text_equal(String8 a, String8 b)
 // finds a version or the default (clang drops one after the definition where none came before, with a warning); and a
 // function of several versions where another one's string differs, or it has target_clones. Each string resolves once
 // (predefines_function_target), against the unit's -march=native host features, read once, and an attribute of the same
-// string as the one before is taken as it was. The keys sort by object with the radix kernel's twins (c_bindings_sort),
+// string as the one before is taken as it was. The keys sort by object with the bindings' radix sort (c_bindings_sort),
 // and a body in their objects' range finds its object's by a binary search: the rest is scalar, as a unit holds few of
 // them (main.c's 5,344 among its 23.5 MB of preprocessed text, the clang headers' intrinsics), and none in the usual
 // unit, which this leaves at once. Returns false if a column had no room.
@@ -4930,7 +4930,7 @@ static bool check_program_targets(CheckProgram* program, const CheckProgramOptio
         {
             varying |= (uint32_t)((keys[0] ^ keys[e]) >> 32);
         }
-        keys = valid ? c_bindings_sort(keys, temporary, count, !BUSTER_SCALAR_PATH(options->scalar), varying) : keys;
+        keys = valid ? c_bindings_sort(keys, temporary, count, varying) : keys;
     }
     // The strings of the targets made so far, in their order.
     String8* texts = valid && count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, String8, count) : 0;
@@ -5053,7 +5053,7 @@ static bool check_program_targets(CheckProgram* program, const CheckProgramOptio
 // The keys code generation's check of target features reads (#775, CheckProgram.attribute_keys), in `output`, where the
 // unit has a target attribute: the target attributes' declarations (check_program_targets sorted them stably by object,
 // so each object's are still in token order) and then the always_inline, flatten and noreturn ones, sorted stably by
-// object with the radix kernel's twins (c_bindings_sort). A late symbol rename also needs the callee keys for the
+// object with the bindings' radix sort (c_bindings_sort). A late symbol rename also needs the callee keys for the
 // shared emission walk's noreturn decisions. Other units without a target attribute keep none. Returns false if
 // there was no room.
 __attribute__((noinline)) static bool check_program_attribute_keys(CheckProgram* program, const CheckProgramTargetEvents* events, bool scalar, Arena* output, Arena* scratch)
@@ -5088,7 +5088,7 @@ __attribute__((noinline)) static bool check_program_attribute_keys(CheckProgram*
             {
                 varying |= (uint32_t)((keys[0] ^ keys[e]) >> 32);
             }
-            const uint64_t* sorted = c_bindings_sort(keys, temporary, (uint32_t)total, !scalar, varying);
+            const uint64_t* sorted = c_bindings_sort(keys, temporary, (uint32_t)total, varying);
             if (sorted != keys)
             {
                 memcpy(keys, sorted, total * sizeof(uint64_t));
@@ -5101,7 +5101,7 @@ __attribute__((noinline)) static bool check_program_attribute_keys(CheckProgram*
 }
 
 // The patchable_function_entry declarations' keys (#1447, CheckProgram.patchable_keys), in `output`, where the unit has
-// one: in token order as the scan found them, sorted stably by object with the radix kernel's twins (c_bindings_sort), so
+// one: in token order as the scan found them, sorted stably by object with the bindings' radix sort (c_bindings_sort), so
 // that each object's are in token order. Returns false if there was no room.
 __attribute__((noinline)) static bool check_program_patchable_keys(CheckProgram* program, const CheckProgramTargetEvents* events, bool scalar, Arena* output, Arena* scratch)
 {
@@ -5120,7 +5120,7 @@ __attribute__((noinline)) static bool check_program_patchable_keys(CheckProgram*
             {
                 varying |= (uint32_t)((keys[0] ^ keys[e]) >> 32);
             }
-            const uint64_t* sorted = c_bindings_sort(keys, temporary, total, !scalar, varying);
+            const uint64_t* sorted = c_bindings_sort(keys, temporary, total, varying);
             if (sorted != keys)
             {
                 memcpy(keys, sorted, (uint64_t)total * sizeof(uint64_t));
@@ -5400,7 +5400,7 @@ static bool check_program_census_walk(CheckProgram* program, const Parser* parse
         {
             varying |= (uint32_t)((reference_items[0] ^ reference_items[r]) >> 32);
         }
-        const uint64_t* sorted = c_bindings_sort(reference_items, reference_sort, found, !BUSTER_SCALAR_PATH(scalar), varying);
+        const uint64_t* sorted = c_bindings_sort(reference_items, reference_sort, found, varying);
         valid = check_program_census_store(census, b, sorted, found, &total, output);
     }
     if (region_reached != NULL)
@@ -6101,7 +6101,7 @@ static bool check_program_census_scan(CheckProgram* program, CheckProgramCensus*
             {
                 varying |= (uint32_t)((reference_items[0] ^ reference_items[r]) >> 32);
             }
-            sorted = c_bindings_sort(reference_items, reference_sort, found, !BUSTER_SCALAR_PATH(scalar), varying);
+            sorted = c_bindings_sort(reference_items, reference_sort, found, varying);
         }
         uint32_t kept = 0;
         for (uint32_t r = 0; r < found; r += 1)
@@ -6242,7 +6242,7 @@ static uint32_t check_program_constant_arms(CheckControlWriter* writer, const ui
     {
         varying |= (uint32_t)((keys[0] ^ keys[i]) >> 32);
     }
-    const uint64_t* ordered = c_bindings_sort(keys, sort, key_count, !BUSTER_SCALAR_PATH(scalar), varying);
+    const uint64_t* ordered = c_bindings_sort(keys, sort, key_count, varying);
     uint32_t arm_count = 0;
     uint32_t b = 0;
     uint32_t prepared = BUSTER_CHECK_NONE;
@@ -6295,7 +6295,7 @@ static uint32_t check_program_constant_arms(CheckControlWriter* writer, const ui
     {
         varying |= (uint32_t)((arms[0] ^ arms[i]) >> 32);
     }
-    const uint64_t* sorted = c_bindings_sort(arms, sort, arm_count, !BUSTER_SCALAR_PATH(scalar), varying);
+    const uint64_t* sorted = c_bindings_sort(arms, sort, arm_count, varying);
     uint32_t joined = 0;
     for (uint32_t i = 0; i < arm_count; i += 1)
     {
@@ -7080,7 +7080,7 @@ static void check_program_bodies(CheckProgramRun* run, uint32_t end)
             }
             // The existing bounded radix kernel sorts high 32-bit keys. Reuse its scalar/vector twins, keeping
             // this body's canonical object IDs compact instead of rescanning the entire translation unit.
-            uint64_t* sorted = c_bindings_sort(reference_items, reference_sort, body->reference_count, !BUSTER_SCALAR_PATH(options->scalar), varying);
+            uint64_t* sorted = c_bindings_sort(reference_items, reference_sort, body->reference_count, varying);
             uint32_t* output_references = body->reference_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, body->reference_count) : 0;
             if (body->reference_count != 0 && output_references == 0)
             {
@@ -7244,7 +7244,7 @@ static bool check_program_finish(CheckProgramRun* run)
             {
                 varying |= (uint32_t)((arm_keys[0] ^ arm_keys[i]) >> 32);
             }
-            arms = c_bindings_sort(arm_keys, arm_keys + arm_count, arm_count, !BUSTER_SCALAR_PATH(options.scalar), varying);
+            arms = c_bindings_sort(arm_keys, arm_keys + arm_count, arm_count, varying);
         }
         const uint64_t arms_start = __rdtsc();
         valid = valid && (!scanned || check_program_census_scan(program, &program->census_arms, parser, openings, program->body_count, arms, arm_count, true, false, NULL,
@@ -7275,7 +7275,7 @@ static bool check_program_finish(CheckProgramRun* run)
         {
             varying |= (uint32_t)((dropped_ranges[0] ^ dropped_ranges[i]) >> 32);
         }
-        const uint64_t* sorted = c_bindings_sort(dropped_ranges, dropped_sort, dropped_count, !BUSTER_SCALAR_PATH(options.scalar), varying);
+        const uint64_t* sorted = c_bindings_sort(dropped_ranges, dropped_sort, dropped_count, varying);
         memcpy(program->dropped_ranges, sorted, (uint64_t)dropped_count * sizeof(uint64_t));
         program->dropped_range_count = dropped_count;
     }

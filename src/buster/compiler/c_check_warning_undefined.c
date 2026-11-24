@@ -286,7 +286,7 @@ static bool check_warning_undefined_internal(CheckWarningBuffer* output, const C
             }
         }
         const uint64_t* ordered_references = valid && reference_count != 0 ?
-            c_bindings_sort(reference_keys, reference_sorting, reference_count, !parser->options.scalar, UINT32_MAX) : NULL;
+            c_bindings_sort(reference_keys, reference_sorting, reference_count, UINT32_MAX) : NULL;
         for (uint32_t i = 0; valid && i < reference_count; i += 1)
         {
             const uint32_t token = (uint32_t)(ordered_references[i] >> 32);
@@ -373,14 +373,14 @@ static bool check_warning_undefined_internal(CheckWarningBuffer* output, const C
         appended.capacity = appended.count;
         appended.note_capacity = appended.note_count;
         // Stable low-half then high-half sorts preserve the selected-reference sequence at equal completion.
-        uint64_t* sequences = valid && used != 0 ? c_bindings_sort(keys, sorting, used, !parser->options.scalar, UINT32_MAX) : NULL;
+        uint64_t* sequences = valid && used != 0 ? c_bindings_sort(keys, sorting, used, UINT32_MAX) : NULL;
         for (uint32_t i = 0; valid && i < used; i += 1)
         {
             const uint32_t index = (uint32_t)sequences[i];
             sequences[i] = (functions[index].order & UINT64_C(0xffffffff00000000)) | index;
         }
         const uint64_t* ordered = valid && used != 0 ?
-            c_bindings_sort(sequences, sequences == keys ? sorting : keys, used, !parser->options.scalar, UINT32_MAX) : NULL;
+            c_bindings_sort(sequences, sequences == keys ? sorting : keys, used, UINT32_MAX) : NULL;
         for (uint32_t i = 0; valid && i < used; i += 1)
         {
             const CheckWarningUndefinedFunction* function = functions + (uint32_t)ordered[i];

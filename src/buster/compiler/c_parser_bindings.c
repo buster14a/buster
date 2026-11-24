@@ -219,7 +219,7 @@ static bool parse_bindings_build(ParseBindings* output, Parser* parser, Arena* a
     return valid;
 }
 
-static bool parse_bindings_resolve(ParseBindings* output, bool scalar, Arena* scratch)
+static bool parse_bindings_resolve(ParseBindings* output, Arena* scratch)
 {
     const uint64_t mark = scratch->length;
     uint32_t* results = output->valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)output->events.count + 1) : 0;
@@ -227,8 +227,7 @@ static bool parse_bindings_resolve(ParseBindings* output, bool scalar, Arena* sc
     CBindingStatistics statistics = { 0 };
     if (valid)
     {
-        valid = scalar ? c_bindings_scalar(&output->events, results, scratch) :
-                         c_bindings_batch(&output->events, results, scratch, &statistics);
+        valid = c_bindings_batch(&output->events, results, scratch, &statistics);
     }
     if (valid)
     {
@@ -242,14 +241,6 @@ static bool parse_bindings_resolve(ParseBindings* output, bool scalar, Arena* sc
                 output->kinds[token] = resolved != 0 ? output->events.kind[resolved - 1] :
                                        output->namespaces[token] == C_BINDING_LABEL ? C_BINDING_LABEL_KIND :
                                        output->namespaces[token] == C_BINDING_TAG ? C_BINDING_TAG_KIND : C_BINDING_OBJECT;
-            }
-        }
-        if (scalar)
-        {
-            for (uint32_t event = 0; event < output->events.count; event += 1)
-            {
-                statistics.identifiers += output->events.operation[event] != C_BINDING_RESTORE;
-                statistics.declarations += output->events.operation[event] == C_BINDING_DECLARE;
             }
         }
         output->statistics = statistics;

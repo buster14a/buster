@@ -1880,8 +1880,8 @@ static void check_data_test_boundary_sort(CheckTest* test)
                 }
                 expected[at] = value;
             }
-            const uint64_t* vector = check_data_sort_boundaries(keys, temporary, count);
-            check_test_expect(test, memcmp(vector, expected, (uint64_t)count * 8) == 0, "64-bit boundary sort matches independent insertion oracle at guarded tails");
+            const uint64_t* sorted = check_data_sort_boundaries(keys, temporary, count);
+            check_test_expect(test, memcmp(sorted, expected, (uint64_t)count * 8) == 0, "64-bit boundary sort matches an insertion oracle at guarded tails");
         }
     }
     for (uint32_t i = 0; i < 2; i += 1)

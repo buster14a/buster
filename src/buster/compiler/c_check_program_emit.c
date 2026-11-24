@@ -6430,7 +6430,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                 }
             }
         }
-        const uint64_t* sorted = valid ? c_bindings_sort(order, sorting, structor_count, !BUSTER_SCALAR_PATH(scalar), UINT32_MAX) : 0;
+        const uint64_t* sorted = valid ? c_bindings_sort(order, sorting, structor_count, UINT32_MAX) : 0;
         for (uint32_t e = 0; valid && e < structor_count; e += 1)
         {
             const uint32_t k = (uint32_t)(sorted[e] >> 48);

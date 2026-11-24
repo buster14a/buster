@@ -956,7 +956,7 @@ static bool check_input_symbol_unbound_use(CheckInputReader* reader, uint32_t to
     }
     if (count != 0 && !input->resource)
     {
-        const uint64_t* ordered = count == 1 ? &first : c_bindings_sort(keys, keys + history->count, count, !BUSTER_SCALAR_PATH(reader->parser->options.scalar), UINT32_MAX);
+        const uint64_t* ordered = count == 1 ? &first : c_bindings_sort(keys, keys + history->count, count, UINT32_MAX);
         CheckInputSymbolPragma* owner = history->records + (uint32_t)ordered[0];
         const uint32_t target = owner->alias_declaration;
         if (count > 1 && !functions)
@@ -1407,7 +1407,7 @@ static void check_input_symbol_finish(CheckInputReader* reader, bool complete)
             }
         }
     }
-    const uint64_t* references = valid && use_count > 1 ? c_bindings_sort(uses, keys + bindings->count, use_count, !scalar, UINT32_MAX) : uses;
+    const uint64_t* references = valid && use_count > 1 ? c_bindings_sort(uses, keys + bindings->count, use_count, UINT32_MAX) : uses;
     uint32_t unique = 0;
     for (uint32_t i = 0; valid && i < use_count; i += 1)
     {
@@ -1422,7 +1422,7 @@ static void check_input_symbol_finish(CheckInputReader* reader, bool complete)
             uses[unique++] = key;
         }
     }
-    const uint64_t* ordered = valid && count > 1 ? c_bindings_sort(keys, keys + bindings->count, count, !scalar, UINT32_MAX) : keys;
+    const uint64_t* ordered = valid && count > 1 ? c_bindings_sort(keys, keys + bindings->count, count, UINT32_MAX) : keys;
     // The alias directives, by where each one's clone appears (T's selected declaration, or the directive where T is
     // already declared), then by directive: clang creates its clones in that order, so the first created is the one a
     // declaration of A carries and code generation emits, a later one of the same A then being ignored (#2449).
@@ -1525,7 +1525,7 @@ static void check_input_symbol_finish(CheckInputReader* reader, bool complete)
             }
         }
     }
-    const uint64_t* created = valid && clone_count > 1 ? c_bindings_sort(clones, clones + history->count, clone_count, !scalar, UINT32_MAX) : clones;
+    const uint64_t* created = valid && clone_count > 1 ? c_bindings_sort(clones, clones + history->count, clone_count, UINT32_MAX) : clones;
     for (uint32_t c = 0; valid && c < clone_count; c += 1)
     {
         const uint32_t i = (uint32_t)created[c];

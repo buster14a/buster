@@ -5149,7 +5149,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
         {
             completion_keys[i] = (uint64_t)input->warning_events.events[i].token << 32 | i;
         }
-        const uint64_t* completions = completion_count != 0 ? c_bindings_sort(completion_keys, completion_sorting, completion_count, !scalar, varying) : NULL;
+        const uint64_t* completions = completion_count != 0 ? c_bindings_sort(completion_keys, completion_sorting, completion_count, varying) : NULL;
         uint32_t report_total = 0;
         // A name is corrected before its replacement is checked. Stable sorting keeps the typo before any error
         // the corrected expression or statement has at the same token.
@@ -5258,7 +5258,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
             report_kept += called || check_driver_interrupt_kept(input, (uint32_t)(report_keys[i] >> 32)) ? 1u : 0u;
         }
         report_total = input->interrupt_range_count != 0 ? report_kept : report_total;
-        uint64_t* firsts = reports ? c_bindings_sort(report_keys, report_sorting, report_total, !scalar, varying) : NULL;
+        uint64_t* firsts = reports ? c_bindings_sort(report_keys, report_sorting, report_total, varying) : NULL;
         uint32_t first_count = 0;
         for (uint32_t i = 0; i < report_total; i += 1)
         {
@@ -5342,7 +5342,7 @@ static bool check_driver_reports_from(const Parser* parser, const Parser* origin
             warning_kept += check_driver_interrupt_kept(input, (uint32_t)(warning_keys[i] >> 32)) ? 1u : 0u;
         }
         warning_total = input->interrupt_range_count != 0 ? warning_kept : warning_total;
-        uint64_t* warnings = show_warnings ? c_bindings_sort(warning_keys, warning_sorting, warning_total, !scalar, varying) : NULL;
+        uint64_t* warnings = show_warnings ? c_bindings_sort(warning_keys, warning_sorting, warning_total, varying) : NULL;
         uint32_t warning_count = 0;
         for (uint32_t i = 0; i < warning_total; i += 1)
         {
@@ -8930,7 +8930,7 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
             const CheckWarningEvent* event = i < first->count ? first->events + i : first_graph->events + (i - first->count);
             known[i] = (uint64_t)event->token << 32 | event->kind;
         }
-        sorted = c_bindings_sort(known, sorting, known_count, !scalar, UINT32_MAX);
+        sorted = c_bindings_sort(known, sorting, known_count, UINT32_MAX);
     }
     if (valid && (known_count == 0 || sorted != NULL))
     {
@@ -9564,13 +9564,12 @@ static const uint8_t* check_driver_function_name(const CheckProgram* program, co
 // words. Clang reports them as it emits their function: after its closing
 // brace and the lookahead past it (as the x86 builtins' deferred range errors, from `original`'s tree), or at the
 // unit's end for a function it defers. Returns false after an error.
-static bool check_driver_target_features(CheckProgram* program, const Parser* parser, const Parser* original, Preprocessor* pp, const PredefinesOptions* predefines,
-                                         bool scalar, Arena* output, Arena* scratch)
+static bool check_driver_target_features(CheckProgram* program, const Parser* parser, const Parser* original, Preprocessor* pp, const PredefinesOptions* predefines, Arena* output, Arena* scratch)
 {
     const uint64_t mark = output->length;
     CheckTargetFeatureError* errors = NULL;
     uint32_t count = 0;
-    const bool valid = check_program_target_features(program, &pp->options, predefines, scalar, output, scratch, &errors, &count);
+    const bool valid = check_program_target_features(program, &pp->options, predefines, output, scratch, &errors, &count);
     if (!valid)
     {
         check_driver_resource(pp, "checker program capacity exhausted");
@@ -9958,7 +9957,7 @@ static bool check_driver_pragma_aliases(const CheckProgram* program, const Parse
         }
     }
     valid = valid && (clone_count == 0 || check_program_alias_names(program, clones, clone_count, pp->table, scalar, scratch));
-    const uint64_t* sorted = valid && count > 1 ? c_bindings_sort(keys, keys + capacity, count, !BUSTER_SCALAR_PATH(scalar), UINT32_MAX) : keys;
+    const uint64_t* sorted = valid && count > 1 ? c_bindings_sort(keys, keys + capacity, count, UINT32_MAX) : keys;
     for (uint32_t i = 0; valid && i < count; i += 1)
     {
         const uint32_t index = (uint32_t)sorted[i];
@@ -10083,7 +10082,7 @@ static bool check_driver_aliases(const CheckProgram* program, const Parser* pars
             keys[count++] = (uint64_t)alias->token << 32 | k << 1 | (reported ? 1u : 0u);
         }
     }
-    const uint64_t* sorted = count > 1 ? c_bindings_sort(keys, keys + program->alias_count, count, !BUSTER_SCALAR_PATH(scalar), UINT32_MAX) : keys;
+    const uint64_t* sorted = count > 1 ? c_bindings_sort(keys, keys + program->alias_count, count, UINT32_MAX) : keys;
     for (uint32_t i = 0; valid && i < count; i += 1)
     {
         const CheckProgramAlias* alias = program->aliases + ((uint32_t)sorted[i] >> 1);
@@ -14586,7 +14585,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         }
                         if (selection)
                         {
-                            result = check_driver_target_features(&selected.program, checking, recovered, pp, &options->predefines, scalar, output_arena, scratch) ? result : 1;
+                            result = check_driver_target_features(&selected.program, checking, recovered, pp, &options->predefines, output_arena, scratch) ? result : 1;
                             result = check_driver_aliases(&selected.program, checking, pp, scalar, scratch) ? result : 1;
                         }
                         // --provisional-selection (#2536's step 2.2b): the code numbered by the candidates' selection,
@@ -14657,7 +14656,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         }
                         if (selection)
                         {
-                            result = check_driver_target_features(&selected.program, checking, recovered, pp, &options->predefines, scalar, output_arena, scratch) ? result : 1;
+                            result = check_driver_target_features(&selected.program, checking, recovered, pp, &options->predefines, output_arena, scratch) ? result : 1;
                             result = check_driver_aliases(&selected.program, checking, pp, scalar, scratch) ? result : 1;
                         }
                         if (selection && result == 0)

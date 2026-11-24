@@ -9,7 +9,7 @@ requirements. [Command index](README.md).
 `./build/compiler test-checker-corpus [--clang PATH] [--report NEW.tsv]
 [--files-from LIST --root DIR] [--semantic-mutations N [--minimize N]]
 [--symbols] [--symbols-minimum N] [--seed N] [--deferred N [--deferred-bindings
-stacks|batch|direct]] [--id-order N] [--keep] [preprocessor options]
+batch|direct]] [--id-order N] [--keep] [preprocessor options]
 file-or-directory...`
 checks each file as the driver does and compares it with
 `clang -fsyntax-only` on the same options: acceptance, the first error's

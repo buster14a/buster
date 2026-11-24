@@ -10,7 +10,7 @@ the existing sequential reader; this helper supplies the next binding consumer.
 ## Entry points and ownership
 
 Before scheduling, call `c_body_bindings_spans` once for all source-order body
-slots. Two position searches locate each interval; scalar/vector classification
+slots. Two position searches locate each interval; a masked classification
 counts declarations, uses and preceding file activations once across the unit.
 Spans are independent jobs. Each stores the original event range, its undo-base,
 use/declaration counts and source-order slot. `c_body_bindings_span` is a one-off
@@ -26,17 +26,14 @@ with its historical type identity; an earlier activation uses the file index.
 Nested function definitions are rejected by the current validated parser.
 
 Each worker calls `c_body_bindings_resolve` with private output/scratch arenas.
-For the scalar path, initialize a private `CBindingReplay` once with the
-environment's name capacity and the largest span event count. The replay
-returns with empty heads after each body, so later bodies reuse the allocation
-without clearing the process-wide name universe again. The batch path uses
-the existing kernel and its bounded-walk fallback.
+It uses the batch kernel and its bounded-walk fallback. (Until #2924 a scalar
+path replayed each body with a private `CBindingReplay` instead.)
 
 The private event view borrows `key`, `point`, `operation`, `kind` and `depth`.
 Only `declaration` and `end` are materialized: restores subtract the undo-base,
 and declaration-end indexes subtract the span's first event index. Ends at or
-beyond the slice become unbounded within this view. A scalar
-twin and masked SIMD translation implement exactly these operations. Restore
+beyond the slice become unbounded within this view. A masked SIMD
+translation implements exactly these operations. Restore
 and use events' unspecified end entries are never read.
 
 A use resolved locally maps its private activation handle to its original
@@ -78,8 +75,9 @@ publish linkage effects. Join before merging source-order result slots.
 `test-checker` compares the helper with the real whole-unit declaration column
 through both parser/producer paths. It also builds actual `ParseBindings`
 histories, comparing private body results with the grammar's immediate
-declaration column and an independent complete event replay. Scalar and batch body resolution run in
-reverse order on one/eight lanes with private replay and arenas. Fixtures cover
+declaration column and an independent complete event replay. Batch body resolution runs in
+reverse order on one/eight lanes with private arenas, and each span's counts
+are counted again an event at a time. Fixtures cover
 parameter/function-name shadowing, nested local scopes, a closed block
 prototype followed by a file lookup, later prototypes and array bounds,
 ordinary/tag namespaces, and macro-generated bodies. A 32-sibling-scope case

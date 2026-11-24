@@ -36,7 +36,6 @@
 #ifndef BUSTER_C_CHECK_DATA_INCLUDED
 #define BUSTER_C_CHECK_DATA_INCLUDED
 #define BUSTER_CHECK_DATA_WITNESS_PARTS 8u
-#define BUSTER_CHECK_DATA_VECTOR_BOUNDARIES 65536u
 
 #include <float.h>
 #include <limits.h>
@@ -578,10 +577,9 @@ static uint32_t check_data_boundary_position(const uint64_t* boundaries, uint32_
     return begin;
 }
 
-// Reuse the existing stable scalar/vector radix kernel, whose key is the high 32-bit half. Rotate once to sort
-// the low half, then restore and sort the high half. Both buffers remain count-bounded; no gather/scatter is added.
-// The 9700X comparison retains scalar passes for small/mid sets and vector passes at the measured large-set
-// threshold. A half whose keys are all equal takes no pass.
+// Reuse the bindings' stable radix sort (c_bindings_sort), whose key is the high 32-bit half. Rotate once to sort the
+// low half, then restore and sort the high half. Both buffers remain count-bounded; no gather/scatter is added.
+// A constant half is skipped.
 static uint64_t* check_data_sort_boundaries(uint64_t* keys, uint64_t* temporary, uint32_t count)
 {
     for (uint32_t half = 0; half < 2; half += 1)
@@ -599,7 +597,7 @@ static uint64_t* check_data_sort_boundaries(uint64_t* keys, uint64_t* temporary,
         uint64_t* sorted = keys;
         if (varying != 0)
         {
-            sorted = c_bindings_sort(keys, temporary, count, count >= BUSTER_CHECK_DATA_VECTOR_BOUNDARIES, varying);
+            sorted = c_bindings_sort(keys, temporary, count, varying);
         }
         temporary = sorted == keys ? temporary : keys;
         keys = sorted;

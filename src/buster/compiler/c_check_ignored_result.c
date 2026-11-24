@@ -116,7 +116,6 @@ static __attribute__((noinline)) bool check_common_ignored_prepare(CheckCommonIg
                                          const TypeTable* types, Arena* scratch)
 {
     const uint32_t count = parser->tokens.count < input->token_count ? parser->tokens.count : input->token_count;
-    const bool scalar = parser->options.scalar;
     *ignored = (CheckCommonIgnored){ 0 };
     bool valid = true;
     uint32_t marks = 0;
@@ -196,7 +195,7 @@ static __attribute__((noinline)) bool check_common_ignored_prepare(CheckCommonIg
             bits[records[i].key / 64] |= UINT64_C(1) << (records[i].key % 64);
         }
         const uint32_t varying = count != 0 ? UINT32_MAX >> __builtin_clz(count) : 0;
-        const uint64_t* ordered = c_bindings_sort(keys, temporary, marks, !BUSTER_SCALAR_PATH(scalar), varying);
+        const uint64_t* ordered = c_bindings_sort(keys, temporary, marks, varying);
         for (uint32_t i = 0; i < marks; i += 1)
         {
             sorted[i] = records[(uint32_t)ordered[i]];

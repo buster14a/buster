@@ -150,7 +150,7 @@ static uint32_t check_program_select_bounds(const CheckProgram* full, uint32_t o
             valid = keys != NULL && texts != NULL;
         }
     }
-    const uint64_t* sorted = valid && label_count > 1 ? c_bindings_sort(keys, keys + label_count, label_count, !BUSTER_SCALAR_PATH(scalar), UINT32_MAX) : keys;
+    const uint64_t* sorted = valid && label_count > 1 ? c_bindings_sort(keys, keys + label_count, label_count, UINT32_MAX) : keys;
     // The declared objects, in order, each against the labels' cursor; a bound one listed.
     uint32_t* objects_listed = valid ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)objects + label_count) : NULL;
     String8* bounds_listed = objects_listed != NULL ? BUSTER_ARENA_PUSH_ARRAY(scratch, String8, (uint64_t)objects + label_count) : NULL;
@@ -1418,7 +1418,7 @@ static bool check_program_select_shared(CheckProgramSelection* result, const Che
         {
             order[full->body_count + object] = ((uint64_t)data->objects[object].token << 32) | (full->body_count + object);
         }
-        order = c_bindings_sort(order, sorting, definitions, !BUSTER_SCALAR_PATH(scalar), UINT32_MAX);
+        order = c_bindings_sort(order, sorting, definitions, UINT32_MAX);
         for (uint32_t definition = 0; valid && definition < definitions; definition += 1)
         {
             const uint32_t raw = (uint32_t)order[definition];

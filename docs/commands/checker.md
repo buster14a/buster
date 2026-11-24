@@ -74,7 +74,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   an entry in, as 16-token blocks behind a directory (`docs/compile-time.md`'s
   "The sparse output columns", #628), and `attributes` as a wide one, of 64-bit
   values ("The attributes column", #1167); `c_check_binding.c` publishes each use's retained answer from those events
-  directly (`--scalar`: the independent stack replay); `benchmark-checker-bindings
+  directly; `benchmark-checker-bindings
   [--pipeline] [--only MODE [--after-scalar MS]] [-E's options] file.c` times the whole reader
   including initialization, or fresh parsing through expression checking and cleanup with `--pipeline`
   with each handoff ([the binding handoff](../../docs/c-check-bindings.md), #336). `compiler check [--scalar] [--dump-typed] [--dump-static] file.c`

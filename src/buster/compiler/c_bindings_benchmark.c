@@ -196,7 +196,7 @@ static int run_c_bindings_benchmark(int argc, char** argv)
                 }
                 else
                 {
-                    valid = c_bindings_sorted(&bindings, &scratch, &keys, &key_count, true);
+                    valid = c_bindings_sorted(&bindings, &scratch, &keys, &key_count);
                 }
                 const uint64_t elapsed = c_binding_benchmark_time() - begin;
                 uint64_t counts[3] = { 0 };
