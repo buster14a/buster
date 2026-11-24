@@ -1,0 +1,6 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+# A cast of an lvalue, through parentheses, as an assignment's, a compound assignment's, an increment's or a
+# decrement's operand: clang's lvalue cast error at the cast's `(`, after the cast's own warning. A cast of an
+# rvalue and another rvalue keep "expression is not assignable" at the operator.
+lvalue-casts	lvalue-casts.c	2	10	0	-	-	lvalue casts

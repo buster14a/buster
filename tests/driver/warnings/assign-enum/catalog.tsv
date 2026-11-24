@@ -1,0 +1,14 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+# Assignments, compound assignments, initializers, returns, prototype arguments, brace
+# initializers and a typedef's spelling; a flag_enum's bits; enumerators, a variable and a cast don't warn.
+integer-constants-out-of-an-enumeration	integer-constants-out-of-an-enumeration.c	15	0	0	-	-Wassign-enum	integer constants out of an enumeration
+# enum_extensibility(open) and (closed); an anonymous typedef's; a value in the enumeration's width and signedness
+# (negative, past int, a fixed underlying type's truncation); a trailing flag_enum's masks; bit-fields; unreachable
+# and unevaluated code; designators, a compound literal; _Bool, character, conditional and comma sources.
+integer-constants-out-of-an-enumeration-s-edges	integer-constants-out-of-an-enumeration-s-edges.c	21	0	0	c23	-Wassign-enum	integer constants out of an enumeration's edges
+# A braced scalar, a nested definition's enumerators, file-scope aggregates, a macro's argument, a pragma's
+# suppression and a return's conditional.
+integer-constants-out-of-an-enumeration-at-file-scope	integer-constants-out-of-an-enumeration-at-file-scope.c	7	0	0	-	-Wassign-enum	integer constants out of an enumeration at file scope
+# Off by default; a pragma enables and ignores it.
+assign-enum-pragmas	assign-enum-pragmas.c	1	0	0	-	-	assign-enum pragmas

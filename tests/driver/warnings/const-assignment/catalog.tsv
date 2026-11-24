@@ -1,0 +1,13 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+# Members const themselves through `.` and `->`, nested chains with a note per level, a const return value, a
+# record with a const member or a nested one, a const pointer member, compound assignments and increments.
+const-members-variables-and-return-values	const-members-variables-and-return-values.c	0	19	23	-	-	const members, variables and return values
+# Subscripts of a const pointer, anonymous members, unions, arrays of const and of records.
+const-assignment-through-subscripts-unions-and-arrays	const-assignment-through-subscripts-unions-and-arrays.c	0	9	9	-	-	const assignment through subscripts, unions and arrays
+# Typedef'd const members, attributes and storage classes before a const return type, vector elements,
+# parenthesized lvalues and dereferences.
+const-assignment-through-returns-vectors-and-parentheses	const-assignment-through-returns-vectors-and-parentheses.c	0	11	13	-	-	const assignment through returns, vectors and parentheses
+# A call's return value is a function's only through a direct callee (clang's getDirectCallee): a function's name
+# through `*`, `&` and parentheses; a function pointer variable's or parameter's call is the generic error.
+const-return-values-of-direct-and-indirect-calls	const-return-values-of-direct-and-indirect-calls.c	0	10	7	-	-	const return values of direct and indirect calls

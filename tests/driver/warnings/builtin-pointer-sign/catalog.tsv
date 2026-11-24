@@ -1,0 +1,9 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+builtin-arguments-pointer-warnings	builtin-arguments-pointer-warnings.c	10	0	0	-	-	builtin arguments' pointer warnings
+cfstring-s-argument-of-no-ordinary-literal-item-1	cfstring-s-argument-of-no-ordinary-literal-item-1.c	0	3	0	-	-	CFString's argument of no ordinary literal (item 1)
+dump-struct-s-rest-argument-that-doesn-t-convert-to-its-printer	dump-struct-s-rest-argument-that-doesn-t-convert-to-its-printer.c	0	5	9	-	-	dump_struct's rest argument that doesn't convert to its printer's parameter (item 2)
+verbose-trap-through-a-const-pointer-whose-initializer-lost-its	verbose-trap-through-a-const-pointer-whose-initializer-lost-its.c	0	4	0	-	-	verbose_trap through a const pointer whose initializer lost its designator (item 4)
+# A builtin's argument that doesn't convert to its parameter (#2460, check_driver_builtin_conversion): the
+# conversion's own words at the argument, no parameter's note; CFString's then adds its literal's error.
+builtin-arguments-that-don-t-convert	builtin-arguments-that-don-t-convert.c	0	8	0	-	-	builtin arguments that don't convert

@@ -1,0 +1,12 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+# At the name, a macro's (with its note) or written past an empty one, and at a line's end without one, each
+# numbered as before its own marker, the first after a flag 1 with its include stack; a pragma ignores, promotes
+# (by -Wgnu) and demotes (by -Wpedantic) it; a #line is none.
+gnu-line-markers-places-macros-and-pragmas	gnu-line-markers-places-macros-and-pragmas.c	8	1	1	-	-pedantic	gnu line markers' places, macros and pragmas
+# Without a name: at the line's end, past a comment and blanks, or at the file's end without a newline; and not
+# after a marker that makes a system header.
+gnu-line-markers-without-names	gnu-line-markers-without-names.c	6	0	0	-	-Wgnu	gnu line markers without names
+# Off by default, and ignored by a pragma of -Wgnu.
+gnu-line-markers-off-by-default	gnu-line-markers-off-by-default.c	0	0	0	-	-	gnu line markers off by default
+gnu-line-markers-under-wgnu-line-marker	gnu-line-markers-off-by-default.c	2	0	0	-	-Wgnu-line-marker	gnu line markers under -Wgnu-line-marker

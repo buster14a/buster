@@ -1,0 +1,40 @@
+typedef float F;
+struct P { float x; double y; };
+static const double half = 0.5;
+static const double tenth = 0.1;
+static const struct P exact = { 0.5f, 0.25 };
+float controls(double d, long double l, float f, _Float16 h, __bf16 b, int i, _Complex double z, struct P* p)
+{
+    const double local = 0.25;
+    _Atomic float af = d;
+    double w = f;
+    long double v = d;
+    float r = (float)d;
+    F e = (F)l;
+    float g = 0.5;
+    float k = -0.0;
+    float m = 0x1p-149;
+    float n = 3.4028234663852886e38;
+    float s = __builtin_inff();
+    float t = __builtin_inf();
+    float u = __builtin_nan("");
+    float q = 0.5 + 0.25;
+    float c = half;
+    float c2 = local;
+    float c3 = exact.y;
+    _Float16 hh = 0.5f;
+    __bf16 bb = 1.0;
+    __fp16 fp = h;
+    _Complex float cz = 0.5 + 0.25i;
+    f = (float)d;
+    f = (short)i;
+    f += f;
+    f *= 2;
+    d += f;
+    h = (_Float16)f;
+    b = (__bf16)h;
+    f = sizeof(f = d);
+    f = (float)(d + l);
+    p->x = (float)p->y;
+    return f + (float)w + (float)v + r + e + g + k + m + n + s + t + u + q + c + c2 + c3 + hh + bb + fp + __real__ cz + af + (float)tenth + (float)__real__ z + b;
+}

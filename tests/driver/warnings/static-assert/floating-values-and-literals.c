@@ -1,0 +1,13 @@
+enum{K=2};
+_Static_assert(2.0 == K+1, "");
+_Static_assert(0.5 == K, "");
+_Static_assert(100.0 == K, "");
+_Static_assert(1e10 == K, "");
+_Static_assert(0.1 == K, "");
+_Static_assert(1.0/3 == K, "");
+_Static_assert(1.5f == K, "");
+_Static_assert(1234567.0 == K, "");
+_Static_assert(-0.25 == K, "");
+_Static_assert(1e-5 == K, "");
+_Static_assert(1000.0 == K, "");
+_Static_assert(10000.0 == K, "");

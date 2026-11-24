@@ -1,0 +1,31 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+narrow-signed-bit-precise-data-is-not-an-int-format-argument	narrow-signed-bit-precise-data-is-not-an-int-format-argument.c	1	0	0	c23	-	narrow signed bit-precise data is not an int format argument
+narrow-unsigned-bit-precise-data-is-not-an-unsigned-int-format-a	narrow-unsigned-bit-precise-data-is-not-an-unsigned-int-format-a.c	1	0	0	c23	-	narrow unsigned bit-precise data is not an unsigned int format argument
+one-bit-unsigned-data-is-not-an-int-format-argument	one-bit-unsigned-data-is-not-an-int-format-argument.c	1	0	0	c23	-	one-bit unsigned data is not an int format argument
+equal-width-bit-precise-data-is-distinct-from-int	equal-width-bit-precise-data-is-distinct-from-int.c	1	0	0	c23	-	equal-width bit-precise data is distinct from int
+character-conversions-require-ordinary-integer-classes	character-conversions-require-ordinary-integer-classes.c	2	0	0	c23	-	character conversions require ordinary integer classes
+count-pointers-require-the-ordinary-pointed-to-class	count-pointers-require-the-ordinary-pointed-to-class.c	3	0	0	c23	-	count pointers require the ordinary pointed-to class
+field-width-does-not-promote-a-bit-precise-integer-to-int	field-width-does-not-promote-a-bit-precise-integer-to-int.c	1	0	0	c23	-	field width does not promote a bit-precise integer to int
+field-precision-does-not-promote-a-bit-precise-integer-to-int	field-precision-does-not-promote-a-bit-precise-integer-to-int.c	1	0	0	c23	-	field precision does not promote a bit-precise integer to int
+c23-exact-width-modifiers-still-require-their-ordinary-integer-t	c23-exact-width-modifiers-still-require-their-ordinary-integer-t.c	2	0	0	c23	-	C23 exact-width modifiers still require their ordinary integer types
+explicit-integer-casts-retain-valid-data-width-and-precision	explicit-integer-casts-retain-valid-data-width-and-precision.c	0	0	0	c23	-	explicit integer casts retain valid data width and precision
+ordinary-arithmetic-promotes-the-narrow-bit-precise-operand	ordinary-arithmetic-promotes-the-narrow-bit-precise-operand.c	0	0	0	c23	-	ordinary arithmetic promotes the narrow bit-precise operand
+fixed-int-parameter-converts-a-bit-precise-source-before-format	fixed-int-parameter-converts-a-bit-precise-source-before-format.c	0	0	0	c23	-Wno-gcc-compat	fixed int parameter converts a bit-precise source before format checking
+fixed-long-parameter-conversion-retains-its-valid-format	fixed-long-parameter-conversion-retains-its-valid-format.c	0	0	0	c23	-Wno-gcc-compat	fixed long parameter conversion retains its valid format
+fixed-long-parameter-mismatch-reports-the-converted-type	fixed-long-parameter-mismatch-reports-the-converted-type.c	1	0	0	c23	-Wno-gcc-compat	fixed long parameter mismatch reports the converted type
+fixed-bit-precise-parameter-retains-its-distinct-type	fixed-bit-precise-parameter-retains-its-distinct-type.c	1	0	0	c23	-Wno-gcc-compat	fixed bit-precise parameter retains its distinct type
+ordinary-narrow-integer-and-count-pointer-classes-remain-valid	ordinary-narrow-integer-and-count-pointer-classes-remain-valid.c	0	0	0	c23	-	ordinary narrow integer and count-pointer classes remain valid
+wide-bit-precise-data-remains-distinct-from-equal-width-long	wide-bit-precise-data-remains-distinct-from-equal-width-long.c	1	0	0	c23	-	wide bit-precise data remains distinct from equal-width long
+ordinary-boolean-character-warning-is-retained	ordinary-boolean-character-warning-is-retained.c	1	0	0	c23	-	ordinary boolean character warning is retained
+string-conversions-require-character-rather-than-bit-precise-poi	string-conversions-require-character-rather-than-bit-precise-poi.c	2	0	0	c23	-	string conversions require character rather than bit-precise pointees
+explicit-string-pointer-casts-and-generic-pointer-formats-remain	explicit-string-pointer-casts-and-generic-pointer-formats-remain.c	0	0	0	c23	-	explicit string-pointer casts and generic pointer formats remain valid
+fixed-dynamic-width-and-precision-use-their-int-parameter-conver	fixed-dynamic-width-and-precision-use-their-int-parameter-conver.c	0	0	0	c23	-Wno-gcc-compat	fixed dynamic width and precision use their int parameter conversions
+fixed-void-pointer-mismatch-reports-its-converted-count-pointer	fixed-void-pointer-mismatch-reports-its-converted-count-pointer.c	1	0	0	c23	-Wno-gcc-compat	fixed void pointer mismatch reports its converted count-pointer type
+fixed-bit-precise-data-parameter-converts-an-ordinary-int-before	fixed-bit-precise-data-parameter-converts-an-ordinary-int-before.c	1	0	0	c23	-Wno-gcc-compat	fixed bit-precise data parameter converts an ordinary int before checking
+fixed-bit-precise-width-parameter-converts-an-ordinary-int-befor	fixed-bit-precise-width-parameter-converts-an-ordinary-int-befor.c	1	0	0	c23	-Wno-gcc-compat	fixed bit-precise width parameter converts an ordinary int before checking
+fixed-bit-precise-pointer-parameter-converts-void-pointer-before	fixed-bit-precise-pointer-parameter-converts-void-pointer-before.c	1	0	0	c23	-Wno-gcc-compat	fixed bit-precise pointer parameter converts void pointer before checking
+# _Atomic arguments are their value types (#2234): clang's lvalue conversion drops _Atomic, so a matching one gives no
+# warning and a mismatched one names its value type.
+atomic-format-arguments-by-their-value-types	atomic-format-arguments-by-their-value-types.c	0	0	0	-	-	atomic format arguments by their value types
+atomic-format-arguments-that-don-t-match-by-their-value-types	atomic-format-arguments-that-don-t-match-by-their-value-types.c	3	0	0	-	-	atomic format arguments that don't match, by their value types

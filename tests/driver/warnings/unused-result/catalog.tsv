@@ -1,0 +1,81 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+# A discarded call a macro's argument writes (#1447): clang highlights the call, which spans more than the argument's one
+# token, so each macro whose argument it is gets an "expanded from macro" note, a nested one's in the order clang gives
+# them (Preprocessor.diagnostic_spans).
+ignored-results-of-calls-macros-arguments-write	unused-result-macro-arguments.c	12	0	14	c23	-	ignored results of calls macros' arguments write
+ignored-results-of-calls-macros-arguments-write-under-wall-wextr	unused-result-macro-arguments.c	12	0	14	c23	-Wall -Wextra	ignored results of calls macros' arguments write under -Wall -Wextra
+ignored-results-of-calls-macros-arguments-write-without-wunused	unused-result-macro-arguments.c	8	0	9	c23	-Wno-unused-result	ignored results of calls macros' arguments write without -Wunused-result
+# Each spelling, its message (a standard nodiscard's alone) and its flag; warn_unused_result before const; a void
+# cast; a statement's, a comma's operands', a conditional's arms' (both must warn, the else arm's reported), a for
+# clause's, an if's and a return's comma's.
+ignored-results-of-attributed-functions	unused-result-functions.c	21	0	0	c23	-	ignored results of attributed functions
+ignored-results-without-wunused-value	unused-result-functions.c	0	0	0	c23	-Wno-unused-value	ignored results without -Wunused-value
+ignored-results-without-wunused-result	unused-result-functions.c	14	0	0	c23	-Wno-unused-result	ignored results without -Wunused-result
+ignored-results-without-wunused	unused-result-functions.c	0	0	0	c23	-Wno-unused	ignored results without -Wunused
+ignored-results-without-wall	unused-result-functions.c	0	0	0	c23	-Wno-all	ignored results without -Wall
+ignored-results-with-wunused-result-alone	unused-result-functions.c	7	0	0	c23	-Wno-unused -Wunused-result	ignored results with -Wunused-result alone
+# A pure or const call written in a macro's body is quiet, a warn_unused_result one's isn't and notes the
+# expansion; a call whose argument a macro writes is the file's.
+ignored-results-through-macros	ignored-results-through-macros.c	3	0	1	-	-	ignored results through macros
+# A return type's struct, union, enum or typedef (through another typedef), the tag before the typedef; not a
+# pointer to one; the function's own attribute first.
+ignored-results-of-nodiscard-types	ignored-results-of-nodiscard-types.c	8	0	0	c23	-	ignored results of nodiscard types
+# A redeclaration inherits the attributes before it; a call reads those its lookup sees.
+ignored-results-through-redeclarations	ignored-results-through-redeclarations.c	3	0	0	-	-	ignored results through redeclarations
+# Clang's builtin table's const and pure (a g row's const too, an e row's not under -fmath-errno), a library
+# function's where the unit keeps it a builtin and declares it external; a query builtin's constant and a
+# selection's chosen operand.
+ignored-results-of-builtins	ignored-results-of-builtins.c	18	0	0	-	-	ignored results of builtins
+# A statement expression in sizeof's operand is unevaluated: its calls' results are clang's to drop quietly.
+ignored-results-in-an-unevaluated-statement-expression	ignored-results-in-an-unevaluated-statement-expression.c	2	0	0	-	-	ignored results in an unevaluated statement expression
+# An initializer's values (scalar and braced, designated, nested and a compound literal's) are read, not discarded,
+# though a declaration's `;` casts each to void as a root of its own; a statement's call after them still warns.
+initializers-calls-keep-their-results	initializers-calls-keep-their-results.c	2	0	0	-	-	initializers' calls keep their results
+# A conditional whose arms hide their results behind the `(x, 0)` idiom is quiet (clang's isUnusedResultAWarning).
+ignored-results-a-conditional-of-hidden-results	ignored-results-a-conditional-of-hidden-results.c	0	0	0	-	-	ignored results: a conditional of hidden results
+# A comma's left operand or a discarded comma's value warns of the call the conditional leaves, the else arm's.
+ignored-results-a-comma-s-conditional-operand	ignored-results-a-comma-s-conditional-operand.c	3	0	0	-	-	ignored results: a comma's conditional operand
+# A conditional's arms warn through their commas and their own conditionals.
+ignored-results-a-conditional-s-comma-and-conditional-arms	ignored-results-a-conditional-s-comma-and-conditional-arms.c	4	0	0	-	-	ignored results: a conditional's comma and conditional arms
+# A call through a pointer warns of the typedef its declarator spells as the return type.
+ignored-results-a-call-through-a-pointer	ignored-results-a-call-through-a-pointer.c	1	0	0	-	-	ignored results: a call through a pointer
+# The `(x, 0)` idiom in one arm, parenthesized, nested; commas of commas; GNU `?:`, whose else arm alone counts;
+# an arm of no effect, of a plain call, of another type; a member; selections of conditionals and commas; a for
+# clause's conditionals.
+# Discarded conditionals, commas and selections (clang's isUnusedResultAWarning, check_common_unused_of).
+ignored-results-through-conditionals-commas-and-selections	unused-result-conditionals.c	28	0	0	-	-	ignored results through conditionals, commas and selections
+ignored-results-through-conditionals-without-wunused-result	unused-result-conditionals.c	19	0	0	-	-Wno-unused-result	ignored results through conditionals without -Wunused-result
+# A pointer object's and a parameter's declarator, a pointer typedef, a function typedef's pointer, a typedef of the
+# typedef; not a pointer the call returns; a tag; a callee through dereferences.
+ignored-results-of-calls-through-pointers	ignored-results-of-calls-through-pointers.c	11	0	0	-	-	ignored results of calls through pointers
+# A pure or const call is quiet where the discarded expression itself is a macro body's: a call's callee, a comma's
+# operator, a conditional's first token; a warn_unused_result call warns anyway.
+ignored-results-of-conditionals-and-commas-through-macros	ignored-results-of-conditionals-and-commas-through-macros.c	8	0	3	-	-	ignored results of conditionals and commas through macros
+# A conditional in a comma's result chain warns only where both arms do; a conditional's comma, conditional and
+# selection arms; a selection's comma and conditional; a statement's comma, conditional and selection in
+# unreachable code, a dead for clause's, a constant condition's other arm's and a short-circuited side's comma;
+# a call's report at its callee, through the parentheses of the callee alone, a dereference and an address.
+ignored-results-through-nested-values-unreachable-code-and-calle	ignored-results-through-nested-values-unreachable-code-and-calle.c	36	0	0	-	-	ignored results through nested values, unreachable code and callee groups
+# A place's and a type query's builtin constant, discarded, reports at its keyword, in a conditional's arm, a
+# comma's operand and a selection too.
+unused-values-of-keyword-builtins	unused-values-of-keyword-builtins.c	18	0	0	-	-	unused values of keyword builtins
+# An unevaluated operand's (sizeof's, typeof's, _Alignof's, a _Generic's controlling expression) commas and
+# conditionals are quiet; a _Generic's other association, a short-circuited side, a statement expression's
+# unreachable statement and a constant condition's other arm are clang's to warn of.
+ignored-results-in-unevaluated-operands-and-dead-code	ignored-results-in-unevaluated-operands-and-dead-code.c	4	0	0	-	-	ignored results in unevaluated operands and dead code
+# Logical operators among conditionals and commas (#1390): a logical operator's value warns where both operands
+# do, at the operator, and a conditional's where both arms' do; a call whose result warns makes its logical operand
+# warn (a tag's contract, a g row's const), a plain one, an enum's, an e row's or a pointer's doesn't; a statement
+# expression's final value; a volatile object's read accepts the discard everywhere.
+ignored-results-among-logical-operators	ignored-results-among-logical-operators.c	19	0	0	-	-	ignored results among logical operators
+# A statement expression's value is its final expression's, and one that ends without an expression is quiet; a
+# void dereference is no cast to void.
+unused-values-of-statement-expressions	unused-values-of-statement-expressions.c	3	0	0	-	-Wno-void-ptr-dereference	unused values of statement expressions
+# Discarded values among runtime shift-count warnings (#1394): each keeps clang's order, the counts' before the
+# unused-value markers they precede, in commas, conditionals, logical operators and selections.
+ignored-results-among-shift-count-warnings	ignored-results-among-shift-count-warnings.c	17	0	0	-	-	ignored results among shift-count warnings
+ignored-results-of-library-functions-without-builtins	ignored-results-of-library-functions-without-builtins.c	1	0	0	-	-fno-builtin	ignored results of library functions without builtins
+# An initialized pointer declarator's return-type typedef (review on #1732): the declarator hangs from its `=`,
+# at file scope and in a block, static, a later declarator's, a pointer typedef's object, `_Nonnull`.
+ignored-results-through-initialized-pointer-declarators	ignored-results-through-initialized-pointer-declarators.c	8	0	0	-	-	ignored results through initialized pointer declarators

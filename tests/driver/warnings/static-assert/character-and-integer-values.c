@@ -1,0 +1,14 @@
+enum { K = 2 };
+_Static_assert((char)-1 == K, "");
+_Static_assert((char)'a' == K, "");
+_Static_assert((char)' ' == K, "");
+_Static_assert((char)'\'' == K, "");
+_Static_assert((char)'\\' == K, "");
+_Static_assert((char)127 == K, "");
+_Static_assert((char)'\t' == K, "");
+_Static_assert((char)'"' == K, "");
+_Static_assert((char)0 == K, "");
+_Static_assert((_Bool)0 == K, "");
+_Static_assert((unsigned long long)-1 == K, "");
+_Static_assert(K == (__int128)3, "");
+_Static_assert((char)200 == K, "");

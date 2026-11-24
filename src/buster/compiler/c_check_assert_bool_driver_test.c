@@ -12,28 +12,9 @@ struct CheckDriverAssertFile
     CheckDriverDefaultWarningFixture fixture;
 };
 
-static const CheckDriverDefaultWarningFixture check_driver_assert_bool_fixtures[] =
-{
-    {
-        // A `<<` of literals and a conditional of integer literals as a static assertion's condition, at file scope, among
-        // a record's members and in a block, where the shift's count gives no warning of its own; a runtime one's does.
-        .name = "static assertions' conditions converted to booleans",
-        .source = "_Static_assert(1 << 40, \"big\");\n"
-                  "struct Y { int a; _Static_assert(1 << 40, \"big\"); };\n"
-                  "void f(void) { _Static_assert(1 << 40, \"big\"); if (1 << 40) {} }\n"
-                  "_Static_assert(1 << 4, \"a\");\n"
-                  "_Static_assert(2 ? 3 : 4, \"c\");\n"
-                  "_Static_assert(1 ? 1 : 0, \"d\");\n"
-                  "_Static_assert((1 << 4) != 0, \"e\");\n",
-        .warnings = 7,
-        .compare_warning_text = true,
-    },
-};
-
 static void check_test_driver_assert_bool(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
-    check_test_driver_warning_fixtures(test, clang, executable, directory, check_driver_assert_bool_fixtures,
-                                      BUSTER_ARRAY_LENGTH(check_driver_assert_bool_fixtures));
+    check_test_driver_warning_suite(test, clang, executable, directory, "driver/warnings/assert-bool", false);
     // Failed assertions never reach the ordinary warning walk. The runtime sources also retain successful assertions,
     // plain failures and an explicit comparison, so recovery must neither repeat a warning nor invent one for a control.
     static const CheckDriverAssertFile failed[] =
