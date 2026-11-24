@@ -352,6 +352,11 @@ struct Tier0InlinePlan
     bool segments;
     // Whether a LOAD, STORE or SET of G is a volatile access (#3310, Tier0Function.volatiles).
     bool volatiles;
+    // G's stack protector (#3558, Tier0Function.stack_protector and stack_check_fail): guarded where the caller or a
+    // spliced callee is, as LLVM's inliner raises its caller's protector to its callee's, but where the caller's
+    // no_stack_protector attribute exempts it; and the report its checks call, the first guarded one's.
+    uint8_t stack_protector;
+    SymbolId stack_check_fail;
 };
 
 // How an aggregate of `size` bytes binds (BUSTER_TIER0_INLINE_BIND_*): as a vector where G has vectors and its transport
@@ -621,6 +626,8 @@ static bool tier0_inline_plan(const Tier0InlineInput* input, Arena* arena, Tier0
     plan->int128 = caller->int128;
     plan->segments = caller->segments;
     plan->volatiles = caller->volatiles;
+    plan->stack_protector = caller->stack_protector;
+    plan->stack_check_fail = caller->stack_check_fail;
     for (uint32_t s = 0; valid && s < plan->site_count; s += 1)
     {
         const Tier0InlineSite* site = plan->sites + s;
@@ -639,6 +646,9 @@ static bool tier0_inline_plan(const Tier0InlineInput* input, Arena* arena, Tier0
         plan->int128 = plan->int128 || callee->int128;
         plan->segments = plan->segments || callee->segments;
         plan->volatiles = plan->volatiles || callee->volatiles;
+        const bool raised = plan->stack_protector == BUSTER_TIER0_GUARD_NONE && callee->stack_protector == BUSTER_TIER0_GUARD_ON;
+        plan->stack_protector = raised ? BUSTER_TIER0_GUARD_ON : plan->stack_protector;
+        plan->stack_check_fail = raised ? callee->stack_check_fail : plan->stack_check_fail;
     }
     plan->transport = caller->vectors ? caller->vector_bytes : plan->vectors ? input->vector_bytes : caller->vector_bytes;
     for (uint32_t d = 0; valid && d < plan->distinct_count; d += 1)
@@ -1461,6 +1471,8 @@ static bool tier0_inline(const Tier0InlineInput* input, Arena* arena, Tier0Inlin
         g.int128 = plan.int128;
         g.segments = plan.segments;
         g.volatiles = plan.volatiles;
+        g.stack_protector = plan.stack_protector;
+        g.stack_check_fail = plan.stack_check_fail;
         g.vector_bytes = plan.transport;
         // Entry-indexed IR annotations belong to the original streams. This splice reaches only Tier 0.
         g.predictable_branches = NULL;

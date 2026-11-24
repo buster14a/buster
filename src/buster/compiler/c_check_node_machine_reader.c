@@ -143,9 +143,8 @@ static void node_machine_settle(NodeMachine* machine)
 // steps: its prototype's arguments, a memory builtin's size a constant of at most BUSTER_CBUILTIN_LIBRARY_INLINE_BYTES,
 // its callee without an asm label), with the size's and the callee's values read of T's records where the program reads
 // the stream's.
-// A memmove of 33 to 128 bytes it takes as its row's limit has it (cbuiltin_library_inline_bytes): at reader time it sees
-// no function's tuning or minsize, with which the program keeps one past 64 or 32 bytes a call (#1373,
-// check_program_move_bytes), and the shadow counts the difference.
+// The reader uses the largest inline move size. Function tuning and minsize become known later, when
+// check_program_move_bytes applies the narrower limit and the shadow counts the difference.
 static bool node_machine_reader_call_library(const NodeMachine* machine, uint32_t r, uint32_t node)
 {
     const CheckGraph* graph = machine->graph;
@@ -156,7 +155,7 @@ static bool node_machine_reader_call_library(const NodeMachine* machine, uint32_
     if (library && !own)
     {
         const CBuiltinLibraryComputed computed = cbuiltin_library_plain_folds[index].computed;
-        const bool memory = computed == CBUILTIN_LIBRARY_COMPUTED_COPY || computed == CBUILTIN_LIBRARY_COMPUTED_MOVE || computed == CBUILTIN_LIBRARY_COMPUTED_SET;
+        const bool memory = cbuiltin_library_computed_memory(computed);
         const bool unary = computed == CBUILTIN_LIBRARY_COMPUTED_ABSOLUTE || computed == CBUILTIN_LIBRARY_COMPUTED_FLOAT_ABSOLUTE;
         const uint32_t arity = memory ? 3 : unary ? 1 : 2;
         bool marked = computed != CBUILTIN_LIBRARY_COMPUTED_NONE && graph->argument_counts[node] == arity;

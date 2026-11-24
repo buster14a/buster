@@ -37,19 +37,26 @@ Preprocessing, `check` without `-c`, and `-fsyntax-only` retain predefine modeli
 observed in a non-emitting action is not a promise that Buster can generate the
 corresponding instrumentation or parallel runtime calls.
 
-The driver gives Clang's common default and `-Wall`/`-Wextra` warnings for
-constant conversions and bounds, shifts and division, parenthesization, unused
-results and names, format calls, returned stack addresses, uninitialized reads
-and enum switches, with Clang's messages, places, notes and
-`#pragma clang diagnostic` policy; `-Werror` and its `=group` and
-`-Wno-error=` forms promote them. The remaining gaps are the full
-`-Wuninitialized` dataflow, the `scanf`/`strftime` `format` archetypes,
-computed `case` expressions in `-Wswitch`, and several rarer
-`-Wparentheses`/`-Wreturn-stack-address` shapes,
-so Clang remains a separate diagnostic check for source that relies on those. The implemented families,
-their boundaries and their differential tests are described in "Common
-warnings (#823)" below; the remaining work stays tracked in
-[#823](https://github.com/buster14a/buster/issues/823).
+The driver checks common default and `-Wall`/`-Wextra` warnings for conversions,
+bounds, shifts, parenthesization, unused results and names, format calls,
+returned stack addresses, uninitialized reads and enum switches. Warning
+groups, `-Werror` promotion and source diagnostic pragmas apply to these checks.
+
+The [#1394](https://github.com/buster14a/buster/issues/1394) cases include
+discarding a GNU `warn_unused_result` or C23 `nodiscard` return value, passing a
+null constant to a parameter with a visible `nonnull` contract, copying a
+known byte count or literal string past the destination, and using the
+pointer itself as the operand of `sizeof` in a memory call. The checker also
+diagnoses the reported self, pointer and string comparisons, a function in a
+truth condition, an extra pair of parentheses around an equality condition,
+a logical negation on the left of bitwise AND, a boolean switch, and `sizeof`
+on an adjusted array parameter. Plain `char` subscripts and unused labels
+warn under `-Wall`. Fortify warnings require a provable destination extent.
+
+“Common warnings (#823)” below describes individual checks and their
+differential tests. Remaining coverage gaps include full `-Wuninitialized`
+dataflow, `scanf`/`strftime` format checking, computed `case` expressions in
+`-Wswitch`, and some `-Wparentheses` and `-Wreturn-stack-address` cases.
 
 `-c` and the direct path lower only the definitions that the unit's roots reach,
 as clang does ([#129](https://github.com/buster14a/buster/issues/129),
@@ -213,12 +220,13 @@ existing language, include-path and macro-definition options.
 
 The semantic driver refuses unsupported hardening, instrumentation and ABI
 options by name rather than silently producing an object without them (#814).
-This includes stack protection, CET, stack-clash checking, `-pg`, function
+This includes CET, stack-clash checking (`-fstack-check`), GCC's
+`-fstack-protector-explicit`, `-pg`, function
 instrumentation and profile-generation forms, coverage flags, explicit TLS models, `-mno-red-zone`,
 `-fno-plt`, and the unsupported structure-return, short-double and
-wide-execution-character options. The last stack-protector and CET option
-decides those families, so `-fno-stack-protector` and `-fcf-protection=none`
-can turn them off. The other listed options are conservatively refused even if
+wide-execution-character options. The last CET option decides that family, so
+`-fcf-protection=none` can turn it off. The stack protector's other options
+guard the code ("The stack protector" below, #3558). The other listed options are conservatively refused even if
 a later argument would disable them. The separate `-E` preprocessor retains
 its predefined-macro behavior; it emits no object. This list does not cover
 sanitizer options.
@@ -2557,6 +2565,75 @@ and runs the same programs against each as against clang's: two threads, one
 that preempts the library's object, thread-local and function, and a `dlopen`
 harness; then executables of a program and the `-c` object, linked by the
 driver and by `cc`.
+
+### The stack protector
+
+`-fstack-protector`, `-fstack-protector-strong` and `-fstack-protector-all`
+guard functions as clang's code does on x86-64 Linux (#3558); the last of them
+and `-fno-stack-protector` decides. Every request takes them: distributions'
+package builds pass `-fstack-protector-strong` by default.
+`check_request_program_options` sets `CheckProgramOptions.stack_protector` from
+`predefines_stack_guard`, which is the predefined macros' level
+(`predefines_stack_protector`, the stronger of an explicit `-fstack-protector`
+and the building clang's default) when one of the four options is given, and
+none without one. So a command line without them compiles as before, whatever
+default the macros record from the clang that built the compiler. GCC's
+`-fstack-protector-explicit` and the `-mstack-protector-guard*` options stay
+refused by name.
+
+**Which functions.** The lowering decides per body (`check_lower_guard`) into
+`Tier0Function.stack_protector`:
+
+| option | a guard for |
+|---|---|
+| `-fstack-protector` | an `ALLOCA` (a variable-length array's or `alloca`'s), or a parameter or declared local that holds a buffer: an array of 8 bytes or more of one-byte elements (`char`, `signed char`, `unsigned char`, `_Bool`, a one-byte enum or `_BitInt`), the object's own type or a member's of its structs and unions at any depth (`check_lower_guard_buffer`) |
+| `-fstack-protector-strong` | an `ALLOCA`, or any local whose address the stream takes (`BUSTER_TYPED_LOCAL_ADDRESS_TAKEN`, but the variadic frame's two anchors): every frame object, so every array, struct and union, and every scalar whose address the code takes |
+| `-fstack-protector-all` | every function |
+
+A `no_stack_protector` attribute on a declaration at or before the definition
+(`CheckProgram.object_unguarded`, `check_program_unguarded`) exempts its body
+(`BUSTER_TIER0_GUARD_EXEMPT`); one after the definition is ignored, as clang
+ignores it. A naked function has no frame to guard.
+
+These are LLVM's `StackProtector` rules on the C types and the stream rather
+than on clang's IR, and the sets differ from clang's where the IR isn't the
+C type. Clang's `-fstack-protector` also counts the arrays of bytes its IR
+pads a union or an over-aligned struct with (`union { double d; int x[3]; }`
+lays out as `{ double, [8 x i8] }`); the C types have none, so those functions
+stay unguarded here. `-fstack-protector-strong` guards a superset of clang
+`-O0`'s: every struct or union local, as the stream doesn't tell a member's
+access from an address that escapes, where clang's guards one only where its
+address is taken (a call's argument, a copy); and a function with a volatile
+scalar, which the stream keeps address-taken.
+
+**The code.** Tier 0's frame keeps the guard in 8 bytes right above its
+objects (`Tier0Frame.guard_area`), below the saved registers and the return
+address, so that a write past an object's end reaches the guard first. A
+guarded frame keeps rsp a multiple of 16 for the check's call. After the
+reservation and realignment, the prologue stores the thread's canary there
+(`tier0_emit_guard_store`: `mov r11, fs:[0x28]` and a store). The epilogue,
+before anything else, and each `musttail` call, before its teardown, compare it
+(`tier0_emit_guard_check`: a load, `xor` with `fs:[0x28]`, `je` past `call
+__stack_chk_fail`), through r11 in the epilogue and rax at a tail call, which
+hold nothing there. `__builtin_eh_return` doesn't check, as clang's doesn't.
+The lowering marks `__stack_chk_fail` called
+(`CHECK_LOWER_RUNTIME_STACK_CHK_FAIL`) and gives its symbol to the function
+(`Tier0Function.stack_check_fail`). The check sits before the epilogue's preserve
+loads and teardown, so the unwind tables still describe the body's frame there.
+
+**Inlining and Tier 1.** Tier 0's inliner guards a splice whose caller or a
+callee is guarded, unless the caller is exempt, as LLVM's inliner raises its
+caller's protector. Tier 1 leaves a guarded function to Tier 0 (admission's
+`BUSTER_CHECK_TIER1_GUARDED`, as a caller of a function that returns twice),
+and its inliner doesn't expand a guarded callee into a caller whose frame it
+doesn't guard. Tier 1's own frame doesn't keep a guard yet.
+
+`test-checker-driver --stack-protector-only`
+(`c_check_stack_protector_driver_test.c`) compares each option's guarded
+functions with clang `-O0`'s on fixtures where the two rules agree, runs a
+smashed buffer to glibc's "stack smashing detected" abort at both tiers and by
+`musttail`, and checks that without the options, or with `-fno-stack-protector`
+last, the objects are byte for byte the default's.
 
 What the lowering covers past scalars (#145's programs):
 
@@ -6764,6 +6841,14 @@ an argument's parameter note, and its group's severity at its token. A call's
 argument's takes its place among the call's conversion warnings, as its error
 does (#2481). An error among them rejects the unit.
 
+The recheck's source is the stream's value before its lvalue conversions, so
+the driver decays it first as the checker did
+(`check_driver_default_error_source`): a function designator to its pointer
+(#2424) and an array to the pointer to its element, qualifiers kept (#3559).
+A compatible decayed array or string literal is then no conversion to report.
+The pointer type is the one the checker's conversion interned. Without it, a
+function designator is a resource failure and an array isn't rechecked.
+
 Left: without a demotion, an initializer with two failed members still gives
 only its first error (`struct S { int *m; long n; } s = { 7, &g0 };`), where
 clang gives both.
@@ -10770,10 +10855,8 @@ arguments against the function. The checker now gives these as clang does.
     (`check_input_generic_undeclared`). Refused by name is an index of 0, on
     which clang 23 crashes. A definition's identifier list compares its parameters by
     their declarations' types, the promoted prototype's standing aside, as
-    clang's ParmVarDecl types do. It changes nothing else here: the
-    `-Wfortify-source` warnings clang gives the function's calls, as it gives
-    them a builtin's, the checker makes for no call (it has no
-    `-Wfortify-source`).
+    clang's ParmVarDecl types do. The attribute does not forward the named builtin’s `-Wfortify-source` checks
+    to calls of the annotated function.
 
   clang's NEON vectors (#1447), `neon_vector_type(N)` and
   `neon_polyvector_type(N)`, are vectors on x86-64 too: GNU vectors of a kind
@@ -11570,8 +11653,8 @@ arguments against the function. The checker now gives these as clang does.
     declarator alone, and a TCB function's call clang declares implicitly
     with an error (C99 and later) has no `-Wtcb-enforcement` warning after
     it.
-    `diagnose_as_builtin`'s calls have no `-Wfortify-source` warnings, as no
-    call has.
+    Calls through `diagnose_as_builtin` still lack the annotated builtin’s
+    `-Wfortify-source` checks.
   - A bare tag declaration's C23 lists after its name (#1447,
     `check_input_tag_attributes`): a struct's or a union's, right after the
     name, are clang's parser's "an attribute list cannot appear here" at the

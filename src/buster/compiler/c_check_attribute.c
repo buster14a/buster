@@ -1489,18 +1489,23 @@ static bool check_input_analyzer_noreturn(const InternTable* names, const CheckI
            check_input_attribute_equal(check_input_attribute_spelling(names, attribute->name), "analyzer_noreturn");
 }
 
+// Unlike the other inherited contracts, nonnull can add parameter indices at each redeclaration.
+#define CHECK_INHERITED_NONNULL 32u
+
 static uint32_t check_input_inherited_contract(const InternTable* names, const CheckInputAttribute* attribute)
 {
     const uint32_t bit = attribute->kind == CHECK_ATTRIBUTE_FORMAT ? 1u :
                          attribute->kind == CHECK_ATTRIBUTE_CONST ? 2u :
                          attribute->kind == CHECK_ATTRIBUTE_PURE ? 4u :
                          attribute->kind == CHECK_ATTRIBUTE_WARN_UNUSED_RESULT ? 8u :
+                         attribute->kind == CHECK_ATTRIBUTE_NONNULL ? CHECK_INHERITED_NONNULL :
+                         attribute->kind == CHECK_ATTRIBUTE_RETURNS_NONNULL ? 64u :
                          check_input_analyzer_noreturn(names, attribute) ? 16u : 0u;
     const uint32_t result = !attribute->ignored && !attribute->subject_ignored ? bit : 0u;
     return result;
 }
 
-// A compatible visible function redeclaration keeps its predecessor's format, value-discard and analyzer contracts. Copy only those
+// A compatible visible function redeclaration keeps its predecessor's format, value-discard, nonnull and analyzer contracts. Copy only those
 // records into a new accumulator: neither the predecessor nor already published declaration metadata is mutable.
 static void check_input_contract_inherit(CheckInputReader* reader, uint32_t token, uint32_t previous)
 {
@@ -1519,7 +1524,8 @@ static void check_input_contract_inherit(CheckInputReader* reader, uint32_t toke
     {
         annotated |= check_input_inherited_contract(names, own->records + i);
     }
-    const uint32_t missing = inherit & ~annotated;
+    // Nonnull declarations add argument obligations; a new index list does not replace the predecessor's indices.
+    const uint32_t missing = (inherit & ~annotated) | (inherit & CHECK_INHERITED_NONNULL);
     if (missing != 0)
     {
         CheckInputAttributes* copy = BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckInputAttributes, 1);
@@ -1532,7 +1538,12 @@ static void check_input_contract_inherit(CheckInputReader* reader, uint32_t toke
         for (uint32_t i = 0; valid && i < prior->count; i += 1)
         {
             const CheckInputAttribute* attribute = prior->records + i;
-            if ((check_input_inherited_contract(names, attribute) & missing) != 0)
+            bool present = false;
+            for (uint32_t j = 0; own != NULL && attribute->kind == CHECK_ATTRIBUTE_NONNULL && j < own->count; j += 1)
+            {
+                present |= own->records[j].kind == CHECK_ATTRIBUTE_NONNULL && own->records[j].first == attribute->first;
+            }
+            if (!present && (check_input_inherited_contract(names, attribute) & missing) != 0)
             {
                 valid = check_input_attribute_append(reader, copy, *attribute);
             }

@@ -301,6 +301,18 @@ enum
     // pointer to void under it.
     CHECK_WARNING_ID_INT_TO_POINTER_CAST = 177,
     CHECK_WARNING_ID_INT_TO_VOID_POINTER_CAST = 178,
+    // Common expression and library-call warnings (#1394).
+    CHECK_WARNING_ID_TAUTOLOGICAL_SELF_COMPARE,
+    CHECK_WARNING_ID_POINTER_BOOL_CONVERSION,
+    CHECK_WARNING_ID_TAUTOLOGICAL_POINTER_COMPARE,
+    CHECK_WARNING_ID_STRING_COMPARE,
+    CHECK_WARNING_ID_NONNULL,
+    CHECK_WARNING_ID_FORTIFY_SOURCE,
+    CHECK_WARNING_ID_SIZEOF_POINTER_MEMACCESS,
+    CHECK_WARNING_ID_PARENTHESES_EQUALITY,
+    CHECK_WARNING_ID_SWITCH_BOOL,
+    CHECK_WARNING_ID_CHAR_SUBSCRIPTS,
+    CHECK_WARNING_ID_SIZEOF_ARRAY_ARGUMENT,
     CHECK_WARNING_ID_COUNT,
 };
 
@@ -629,6 +641,11 @@ typedef enum CheckWarningEventKind
     // to smaller integer type T from P", payload.first_type the operand's type after decay and payload.name its typedef's
     // spelling, payload.second_type the cast's type and payload.data its.
     CHECK_WARNING_EVENT_POINTER_TO_INT_CAST,
+    // A plain char subscript, except a nonnegative integer constant expression (#1394).
+    CHECK_WARNING_EVENT_CHAR_SUBSCRIPT,
+    // sizeof of an adjusted array parameter (#1394): first_type the adjusted pointer, second_type its original array,
+    // payload.token the parameter declaration and payload.data its original type spelling.
+    CHECK_WARNING_EVENT_SIZEOF_ARRAY_ARGUMENT,
     // A default-initialized const object (#2168): payload.first_type its type, payload.data its typedef or typeof
     // specifier's spelling (check_input_specifier_spelling); its ID chooses the words.
     CHECK_WARNING_EVENT_DEFAULT_CONST_INIT,
@@ -768,6 +785,8 @@ typedef enum CheckWarningNoteKind
     CHECK_WARNING_NOTE_PREVIOUS_ATTRIBUTE,
     // "'f' declared here" (clang's note_entity_declared_at), payload.name the entity's name.
     CHECK_WARNING_NOTE_DECLARED_HERE,
+    // "declared here", without an entity name, for an array parameter's original declaration (#1394).
+    CHECK_WARNING_NOTE_PARAMETER_DECLARED_HERE,
     // "from 'diagnose_if' attribute on 'f':" (#1447), payload.name the function's name.
     CHECK_WARNING_NOTE_DIAGNOSE_IF,
     // "attribute 'packed' here" (#1447, CHECK_WARNING_EVENT_ODR_ATTRIBUTE's), payload.name the attribute's name.

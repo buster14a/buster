@@ -84,7 +84,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
     { "-Wsign-compare", NULL, "comparison of integers of different signs" },
     { "-Wunused-comparison", "-Wunused-value", "comparison result unused" },
     { "-Wunused-value", NULL, "expression result unused" },
-    { "-Wlogical-not-parentheses", NULL, "logical not is only applied to the left hand side of this comparison" },
+    { "-Wlogical-not-parentheses", "-Wparentheses", "logical not is only applied to the left hand side of this comparison" },
     { "-Wparentheses", NULL, "using the result of an assignment as a condition without parentheses" },
     { "-Wempty-body", NULL, "empty body" },
     { "-Wself-assign", NULL, "explicitly assigning value of variable to itself" },
@@ -233,6 +233,17 @@ static const CheckWarningDescription check_warning_descriptions[] =
     [CHECK_WARNING_ID_ABSOLUTE_VALUE] = { "-Wabsolute-value", NULL, "absolute value function given an argument it doesn't suit" },
     [CHECK_WARNING_ID_INT_TO_POINTER_CAST] = { "-Wint-to-pointer-cast", NULL, "cast to pointer from smaller integer type" },
     [CHECK_WARNING_ID_INT_TO_VOID_POINTER_CAST] = { "-Wint-to-void-pointer-cast", "-Wint-to-pointer-cast", "cast to pointer from smaller integer type" },
+    [CHECK_WARNING_ID_TAUTOLOGICAL_SELF_COMPARE] = { "-Wtautological-compare", NULL, "self-comparison always evaluates to true or false" },
+    [CHECK_WARNING_ID_POINTER_BOOL_CONVERSION] = { "-Wpointer-bool-conversion", "-Wbool-conversion", "address always evaluates to true" },
+    [CHECK_WARNING_ID_TAUTOLOGICAL_POINTER_COMPARE] = { "-Wtautological-pointer-compare", "-Wtautological-compare", "comparison of address against a null pointer is always false" },
+    [CHECK_WARNING_ID_STRING_COMPARE] = { "-Wstring-compare", NULL, "result of comparison against a string literal is unspecified" },
+    [CHECK_WARNING_ID_NONNULL] = { "-Wnonnull", NULL, "null passed to a callee that requires a non-null argument" },
+    [CHECK_WARNING_ID_FORTIFY_SOURCE] = { "-Wfortify-source", NULL, "destination buffer is too small" },
+    [CHECK_WARNING_ID_SIZEOF_POINTER_MEMACCESS] = { "-Wsizeof-pointer-memaccess", NULL, "sizeof argument is the same expression as the destination" },
+    [CHECK_WARNING_ID_PARENTHESES_EQUALITY] = { "-Wparentheses-equality", "-Wparentheses", "equality comparison with extraneous parentheses" },
+    [CHECK_WARNING_ID_SWITCH_BOOL] = { "-Wswitch-bool", NULL, "switch condition has boolean value" },
+    [CHECK_WARNING_ID_CHAR_SUBSCRIPTS] = { "-Wchar-subscripts", NULL, "array subscript is of type 'char'" },
+    [CHECK_WARNING_ID_SIZEOF_ARRAY_ARGUMENT] = { "-Wsizeof-array-argument", NULL, "sizeof on array function parameter will return size of a pointer" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");
