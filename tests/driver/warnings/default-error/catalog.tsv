@@ -27,3 +27,21 @@ parenthesized-argument-conversions-demoted	parenthesized-argument-bodies.c	5	0	3
 parenthesized-argument-conversions-pragmas	parenthesized-argument-conversions-pragmas.c	4	1	5	-	-	parenthesized argument conversions' pragmas
 # Pragmas: a group's warning, ignored and error, and push and pop.
 default-error-conversions-pragmas	default-error-conversions-pragmas.c	4	1	0	-	-Wno-error=incompatible-pointer-types	default-error conversions' pragmas
+# An array that decays to a compatible pointer at a relaxed token (#3559) is no conversion to report: a string
+# literal, an array object, a member's, a compound literal's, a variable length array, an array of arrays and a
+# const array to a pointer to const, initializing (braced and not), assigned, passed and returned, under each
+# option that relaxes a default-error group.
+array-decay-accepted-no-int-conversion	array-decay-accepted.c	0	0	0	-	-Wno-int-conversion	array decay accepted with -Wno-int-conversion
+array-decay-accepted-no-error-int-conversion	array-decay-accepted.c	0	0	0	-	-Wno-error=int-conversion	array decay accepted with -Wno-error=int-conversion
+array-decay-accepted-no-return-type	array-decay-accepted.c	0	0	0	-	-Wno-return-type	array decay accepted with -Wno-return-type
+array-decay-accepted-no-error-return-type	array-decay-accepted.c	0	0	0	-	-Wno-error=return-type	array decay accepted with -Wno-error=return-type
+array-decay-accepted-no-return-mismatch	array-decay-accepted.c	0	0	0	-	-Wno-return-mismatch	array decay accepted with -Wno-return-mismatch
+array-decay-accepted-all-extra-no-return-type	array-decay-accepted.c	0	0	0	-	-Wall -Wextra -Wno-return-type	array decay accepted with -Wall -Wextra -Wno-return-type
+# The conversions of an array that still report there: another pointee's stays its group's error, a discarded
+# qualifier its warning, and a pointer to an integer is quiet, a warning or an error as -Wint-conversion is mapped.
+array-decay-refused-no-int-conversion	array-decay-refused.c	4	7	2	-	-Wno-int-conversion	array decay refused with -Wno-int-conversion
+array-decay-refused-no-error-int-conversion	array-decay-refused.c	9	7	3	-	-Wno-error=int-conversion	array decay refused with -Wno-error=int-conversion
+array-decay-refused-no-return-type	array-decay-refused.c	4	12	3	-	-Wno-return-type	array decay refused with -Wno-return-type
+array-decay-refused-no-error-return-type	array-decay-refused.c	4	12	3	-	-Wno-error=return-type	array decay refused with -Wno-error=return-type
+array-decay-refused-no-return-mismatch	array-decay-refused.c	4	12	3	-	-Wno-return-mismatch	array decay refused with -Wno-return-mismatch
+array-decay-refused-demoted	array-decay-refused.c	16	0	3	-	-Wno-error=int-conversion -Wno-error=incompatible-pointer-types	array decay refused with -Wno-error=int-conversion -Wno-error=incompatible-pointer-types
