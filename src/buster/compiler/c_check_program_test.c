@@ -790,8 +790,8 @@ static void check_test_program_body_columns(CheckTest* test, const char* source,
 
 static void check_test_program_source(CheckTest* test, const char* source, const char* name, const char* clang);
 static bool check_test_program_function(const Tier0Function* a, const Tier0Function* b);
-// The program fixtures whose lowering the source rows' lowering compared (0) and refused for room (1).
-static uint32_t check_test_program_expansions[2];
+// The program fixtures whose lowering the source rows' lowering compared.
+static uint32_t check_test_program_expansions;
 static void check_test_constant_conversion_lowered(CheckTest* test, const char* name, const CheckProgramLowered lowered[2], const CheckProgram* program, Arena* output,
                                                    Arena* scratch);
 static void check_test_branch_condition_lowered(CheckTest* test, const char* name, const CheckProgramLowered lowered[2], const CheckProgram* program, Arena* output,
@@ -2500,16 +2500,21 @@ static void check_test_program_source_native_bounds(CheckTest* test, const char*
                               "complete typed function and ABI locations agree across unit batches");
         }
         // The lowering's fast paths (the plain expressions, the batched fragments and the types' templates) against the
-        // general expansion, which the source rows' lowering (-g's) takes alone: every function's entries the same. A few
-        // large vector fixtures exceed the source rows' lowering's room (CHECK_PROGRAM_RESOURCE), and are counted apart.
+        // general expansion, which the source rows' lowering (-g's) takes alone: every function's entries the same. Its
+        // arenas are reservations of their own, large enough for the largest vector fixtures' expansion.
         CheckProgramLowered expanded = { 0 };
-        Arena expanded_output = arena_reserve(plan_room);
-        Arena expanded_scratch = arena_reserve(plan_room);
+        Arena expanded_output = arena_reserve(UINT64_C(1) << 34);
+        Arena expanded_scratch = arena_reserve(UINT64_C(1) << 34);
         const bool expansion = lowered && expanded_output.base != NULL && expanded_scratch.base != NULL &&
                                check_program_lower_sources(&expanded, &program, path == 0, &expanded_output, &expanded_scratch);
-        snprintf(description, sizeof(description), "%s: the source rows' lowering takes every body, or refuses it for room alone", name);
-        check_test_expect(test, !lowered || (expansion && expanded.count == lower[1].count) || (!expansion && expanded.status == CHECK_PROGRAM_RESOURCE), description);
-        check_test_program_expansions[expansion ? 0 : 1] += lowered && path == 1;
+        snprintf(description, sizeof(description), "%s: the source rows' lowering takes every body", name);
+        check_test_expect(test, !lowered || (expansion && expanded.count == lower[1].count), description);
+        if (lowered && !expansion)
+        {
+            fprintf(stderr, "test-checker: %s: the source rows' lowering status=%u token=%u reason=%s\n", name, expanded.status, expanded.token,
+                    expanded.reason != NULL ? expanded.reason : "");
+        }
+        check_test_program_expansions += lowered && expansion && path == 1;
         for (uint32_t b = 0; expansion && expanded.count == lower[1].count && b < program.body_count; b += 1)
         {
             snprintf(description, sizeof(description), "%s: function %u's entries by the fast paths are the general expansion's", name, b);
@@ -2885,6 +2890,72 @@ static void check_test_classify_types_definition(const TypeTable* types, uint32_
         classes[index] = check_lower_type_class(types, type);
         facts[index] = check_lower_type_facts(types, type);
     }
+}
+
+// The named result's and the forwarded calls' scans of a body's controls, 16 at a time (check_lower_named_result,
+// check_lower_forwards), with the deciding control at every lane: functions of 0 to 20 expression statements (one
+// EVALUATE control each) before it. Each fN builds `a` in its result's storage unless a return of `b` (lane N's RETURN)
+// forbids it; each gN passes its result's pointer on to `make` unless a return kept before a cleanup (its RESULT)
+// forbids it. clang's build of the same source is the oracle.
+static void check_test_program_result_lanes(CheckTest* test, const char* clang)
+{
+    static char source[65536];
+    int length = snprintf(source, sizeof(source),
+                          "struct S{long v[4];};static void clean(long*p){*p=0;}\n"
+                          "static __attribute__((noinline)) struct S make(long n){struct S s={{n,n*3,n+7,n^5}};return s;}\n");
+    for (uint32_t k = 0; length > 0 && (size_t)length < sizeof(source) && k <= 20; k += 1)
+    {
+        length += snprintf(source + length, sizeof(source) - (size_t)length, "struct S f%u(long n){struct S a={{n,1,2,3}};struct S b={{n+10,4,5,6}};", k);
+        for (uint32_t e = 0; length > 0 && (size_t)length < sizeof(source) && e < k; e += 1)
+        {
+            length += snprintf(source + length, sizeof(source) - (size_t)length, "a.v[%u]+=n;", e % 4);
+        }
+        length += snprintf(source + length, sizeof(source) - (size_t)length, "if(n&1)return b;return a;}\nstruct S g%u(long n){", k);
+        for (uint32_t e = 0; length > 0 && (size_t)length < sizeof(source) && e < k; e += 1)
+        {
+            length += snprintf(source + length, sizeof(source) - (size_t)length, "n+=%u;", e + 1);
+        }
+        length += snprintf(source + length, sizeof(source) - (size_t)length,
+                           "{__attribute__((cleanup(clean)))long c=n;if(n&1)return make(c+1);}return make(n+5);}\n");
+    }
+    length += snprintf(source + length, sizeof(source) - (size_t)length, "int tested(int n){long h=0;struct S r;");
+    for (uint32_t k = 0; length > 0 && (size_t)length < sizeof(source) && k <= 20; k += 1)
+    {
+        length += snprintf(source + length, sizeof(source) - (size_t)length,
+                           "r=f%u(n);h=h*31+r.v[0]+r.v[1]*3+r.v[2]*5+r.v[3]*7;r=g%u(n);h=h*31+r.v[0]+r.v[1]*3+r.v[2]*5+r.v[3]*7;", k, k);
+    }
+    length += snprintf(source + length, sizeof(source) - (size_t)length, "return (int)(h^(h>>32));}\n");
+    check_test_expect(test, length > 0 && (size_t)length < sizeof(source), "the result lanes' source fits");
+    if (length > 0 && (size_t)length < sizeof(source))
+    {
+        check_test_program_source(test, source, "result-control-lanes", clang);
+    }
+}
+
+// The returns-twice library names' compare (check_lower_calls_twice), the eight interned ids at once: a callee named
+// each of them returns twice, and one named none of them, or unnamed, doesn't.
+static void check_test_lower_calls_twice(CheckTest* test)
+{
+    IdentId names[4] = { 0 };
+    uint32_t object_declarations[4] = { 0, 1, 2, 3 };
+    Parser parser = { 0 };
+    parser.tokens.names = names;
+    const CheckInput input = { .token_count = 4 };
+    const CheckProgram program = { .input = &input, .parser = &parser, .object_declarations = object_declarations, .object_count = 4 };
+    IdentId twice[BUSTER_CHECK_LOWER_TWICE_NAMES];
+    for (uint32_t k = 0; k < BUSTER_CHECK_LOWER_TWICE_NAMES; k += 1)
+    {
+        twice[k] = 100 + k * 3;
+    }
+    const CheckLowerWriter writer = { .program = &program, .twice_names = twice };
+    bool right = true;
+    for (uint32_t k = 0; k < BUSTER_CHECK_LOWER_TWICE_NAMES; k += 1)
+    {
+        names[1] = 100 + k * 3;
+        names[2] = 101 + k * 3;
+        right &= check_lower_calls_twice(&writer, 1) && !check_lower_calls_twice(&writer, 2) && !check_lower_calls_twice(&writer, 0);
+    }
+    check_test_expect(test, right, "a callee named any of the eight returns-twice names returns twice, and no other");
 }
 
 // The branches' targets by their definition: each entry in order whose kind is one of the four branches' takes its
@@ -4476,6 +4547,8 @@ static __attribute__((noinline)) void check_test_programs(CheckTest* test, const
             "multi-declarator-plan-scopes", clang);
         check_test_lower_opening_owner(test);
         check_test_program_resolve_labels(test);
+        check_test_lower_calls_twice(test);
+        check_test_program_result_lanes(test, clang);
         check_test_program_bodies(test, clang);
         // C89's implicit int in the runtime program harness (#1121): the declarations' types and qualifiers decide what
         // `tested` computes, and clang's build of the same source in the same mode is the oracle the executable compares.
