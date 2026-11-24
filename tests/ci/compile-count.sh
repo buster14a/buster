@@ -71,7 +71,10 @@ verdict 2 'UNUSABLE: runs of one executable are more than 0.05% apart' base.txt 
 # What can't be judged.
 verdict 2 "can't open" base.txt missing.txt --base "$(p 1000000)" --head "$(p 1000000)"
 verdict 2 'must start with a percentage' base.txt prose.txt --base "$(p 1000000)" --head "$(p 1000000)"
-verdict 2 'must start with a percentage' prose.txt base.txt --base "$(p 1000000)" --head "$(p 1000000)"
+# A base whose line is no statement holds no change back: the change's own line is then a statement, judged as one.
+verdict 0 'passed: the change states +0.000% ("+0.00 the check itself")' prose.txt base.txt --base "$(p 1000000)" --head "$(p 1000000)"
+verdict 1 'FAILED: the change states +0.000%' prose.txt base.txt --base "$(p 1000000)" --head "$(p 1070000)"
+verdict 0 'passed: the change states +7.000%' prose.txt rise.txt --base "$(p 1000000)" --head "$(p 1070000)"
 verdict 2 'has no statement line' base.txt empty.txt --base "$(p 1000000)" --head "$(p 1000000)"
 verdict 2 'not a 64-bit little-endian raw profile' base.txt base.txt --base "$root/tools/ci/compile-count.c" --head "$(p 1000000)"
 verdict 2 'shorter than a raw profile'"'"'s header' base.txt base.txt --base "$(p 1000000)" --head "$work/base.txt"
@@ -258,6 +261,22 @@ run 2 'is no checkout' older base
 status=0
 bash "$root/tools/ci/compile-count.sh" check "$work/base" > "$work/log" 2>&1 || status=$?
 [ "$status" = 2 ] && grep -Fq 'usage: compile-count.sh check BASE HEAD CORPUS WORK' "$work/log" || fail "a check without its arguments isn't refused"
+pass
+# A count of jobs that is none, and a directory whose name the profile runtime would expand.
+for jobs in 0 x 2x ''; do
+    status=0
+    BUSTER_COMPILE_COUNT_JOBS="$jobs" timeout 20 bash "$root/tools/ci/compile-count.sh" build "$work/base" "$work/jobs" > "$work/log" 2>&1 || status=$?
+    if [ -n "$jobs" ]; then
+        [ "$status" = 2 ] && grep -Fq 'BUSTER_COMPILE_COUNT_JOBS must be a positive number' "$work/log" || { cat "$work/log" >&2; fail "BUSTER_COMPILE_COUNT_JOBS='$jobs' isn't refused"; }
+    else
+        # (An empty setting is the default's, the CPUs'.)
+        [ "$status" = 0 ] || { cat "$work/log" >&2; fail "an empty BUSTER_COMPILE_COUNT_JOBS isn't the default"; }
+    fi
+    pass
+done
+status=0
+bash "$root/tools/ci/compile-count.sh" count "$work/again/compiler" "$corpus" "$work/50%h" base > "$work/log" 2>&1 || status=$?
+[ "$status" = 2 ] && grep -Fq "holds a '%'" "$work/log" || { cat "$work/log" >&2; fail "a directory with a % isn't refused"; }
 pass
 
 printf 'compile-count fixtures passed: %s checks\n' "$checks"

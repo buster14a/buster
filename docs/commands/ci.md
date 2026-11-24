@@ -228,7 +228,12 @@ The verdict:
   and no later change is held to it.
 - Runs of one executable more than 0.05% apart are no verdict (exit status
   2), and neither are a build that fails, an executable that writes no
-  profile and a statement file without a well-formed line.
+  profile and a change whose statement file has no well-formed line. The
+  base's line is only compared as text: a base without the file, or with a
+  line that is no statement, holds no later change back.
+- The step is skipped where the change touches none of the compiler's
+  sources, its build, the count's own files, the toolchain's pin, the
+  corpus's fetch or the row's workflow.
 
 The base is counted on the same runner in the same step, so main's drift
 fails no change. A fixed baseline's does: the 9700X's instructions' baseline
@@ -250,10 +255,18 @@ What the count is, measured at `ef3d4475f`
   over its parent (the instructions rose 7.0%), and the one-function unit's
   count doesn't move.
 
+What it doesn't see: the count is how many times each region runs, not what a
+region costs. A change that makes a region slower without running any region
+more or less often, a slower vector kernel's straight-line code, a larger
+clear, time in the C library or the kernel, moves no counter. The
+executable is also unbaked, so a table the real executable has baked counts
+at its start (the one-function unit's count shows it). The 9700X's step,
+"Hold sqlite3.c's compile to its instructions' baseline" below, and its
+timings stay what tell of those, after a merge.
+
 The step is advisory (`continue-on-error`) until its hosted runs have shown
 the specification's two other predictions: runs within 0.05% on the runners
-drawn, and the step under 12 minutes. The 9700X's step, "Hold sqlite3.c's
-compile to its instructions' baseline" below, stays what tells after a merge.
+drawn, and the step under 12 minutes.
 
 ```sh
 bash tests/ci/compile-count.sh                      # in the CI glue fixtures job: the reader, the verdicts, fake checkouts

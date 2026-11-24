@@ -304,13 +304,19 @@ jobs:
       # by more than half a percent, above or below, states its move in tools/ci/compile-count.txt or fails here. No
       # hardware counter is read, so any runner the draw qualified takes it; the base is counted on the same runner, so
       # that main's drift fails no change. Advisory (continue-on-error) until its hosted runs have shown the
-      # specification's predictions: its runs within 0.05% of each other, and the step under 12 minutes.
+      # specification's predictions: its runs within 0.05% of each other, and the step under 12 minutes. Its own limit
+      # is the specification's refutation line and more: a compile that never ends must not hold the item to the
+      # job's two hours.
       - name: Count the compile against its base's
         if: inputs.host_arch == 'vector' && env.BUSTER_VECTOR_ITEM == 'n4' && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
         continue-on-error: true
+        timeout-minutes: 25
         run: |
-          # Nothing to count where the change leaves the compiler's sources, its build and the count's own files alone.
-          if git diff --quiet HEAD^1 HEAD -- src cmake CMakeLists.txt build.sh tools/ci/compile-count.c tools/ci/compile-count.sh tools/ci/compile-count.txt; then
+          # Nothing to count where the change leaves alone the compiler's sources, its build, the count's own files, the
+          # toolchain that instruments both sides (whose raw profile the reader reads by its version), the corpus's
+          # fetch and this workflow.
+          if git diff --quiet HEAD^1 HEAD -- src cmake CMakeLists.txt build.sh tools/ci/compile-count.c tools/ci/compile-count.sh tools/ci/compile-count.txt \
+              tools/ci/hosted-tools.lock tools/ci/session-toolchain.sh tools/ci/setup-hosted.sh tools/ci/fetch-corpus.sh .github/workflows/hosted-correctness.yml; then
               echo "The change touches nothing the count reads."
               exit 0
           fi

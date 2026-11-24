@@ -15,9 +15,9 @@
 #   compile-count.sh build TREE DIRECTORY
 #       DIRECTORY/compiler, the instrumented executable of the checkout TREE: its own sources and Release flags
 #       (./build.sh print-sources, print-compile-flags), compiled at -O0 without debug information. The counters are
-#       the front end's, placed before any optimization, so -O0 counts what -O3 counts (315,115,704 both ways at
-#       ef3d4475f) and builds in a tenth of the time. The executable is left unbaked, as BUSTER_PGO's is: its counters
-#       are writable memory outside buster_baked.
+#       the front end's, placed before any optimization, so -O0 counts what an optimized build counts (315,115,704 at
+#       -O0 and at -O1, main 16ccdccd) and builds in an eighth of -O1's time. The executable is left unbaked, as
+#       BUSTER_PGO's is: its counters are writable memory outside buster_baked.
 #   compile-count.sh count EXECUTABLE CORPUS DIRECTORY NAME
 #       DIRECTORY/NAME-1.profraw to NAME-3.profraw, three compiles' raw profiles, and NAME-one.profraw, a one-function
 #       unit's. The unit is the corpus's sqlite3.c with the corpus's headers and predefines, on one lane: a compile's
@@ -29,6 +29,9 @@ set -euo pipefail
 
 die() { printf 'compile-count.sh: %s\n' "$*" >&2; exit 2; }
 jobs=${BUSTER_COMPILE_COUNT_JOBS:-$(nproc)}
+case "$jobs" in
+    ''|*[!0-9]*|0*) die "BUSTER_COMPILE_COUNT_JOBS must be a positive number, not '$jobs'" ;;
+esac
 clang=${BUSTER_COMPILE_COUNT_CLANG:-}
 
 # CI's clang where none is named, as ./build.sh takes it (#2628): PATH's where it is the release
@@ -105,6 +108,10 @@ count()
         -isystem "$corpus/headers/usr/lib/clang/23/include" -isystem "$corpus/headers/usr/local/include" -isystem "$corpus/headers/usr/include")
     local -a sqlite=(-c -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_THREADSAFE=0 -DSQLITE_ENABLE_MEMSYS5 -DSQLITE_ENABLE_RTREE "-I$corpus/sqlite" "$corpus/sqlite/sqlite3.c")
     [ -f "$corpus/sqlite/sqlite3.c" ] || die "count: $corpus has no sqlite/sqlite3.c"
+    # The profile runtime expands a % in its file's name (%p, %h, %m): a directory that holds one names another file.
+    case "$directory" in
+        *%*) die "count: $directory holds a '%', which the raw profile's file name would expand" ;;
+    esac
     mkdir -p "$directory"
     for run in 1 2 3; do
         rm -f -- "$directory/$name-$run.profraw"
