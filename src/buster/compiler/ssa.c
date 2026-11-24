@@ -187,24 +187,28 @@ static uint32_t ssa_undefined(const SsaWork* work, uint32_t local)
 #define BUSTER_SSA_DOMINANCE_BYTES (16ull << 20)
 #define BUSTER_SSA_DENSE_BYTES (16ull << 20)
 
-// Bound every Cartesian workspace. The estimate (128 bytes a cell) still holds the earlier constructor's tables of a u32
-// a cell; the dense constructor's are its rows' buffer (ssa_vector_rows, at most BUSTER_SSA_ROW_GROUP_BYTES or a chunk a
-// reachable block), the liveness, placement and pending bit rows, its cleanup and emission. The topology and instruction terms deliberately overestimate their aligned columns. The
-// frontier pairs have their own cap (BUSTER_SSA_FRONTIER_PAIRS). This is a storage bound, not a measured crossover;
-// eligibility can only reduce these conservative input-local extents.
+// The rows' buffer: at most this many bytes of exit rows at once, a group of chunks of 16 slots for every reachable block,
+// so that the buffer stays in L2 however wide the function is (#3449); the tests pass smaller budgets. A function of more
+// reachable blocks than the budget has 64-byte chunks takes one chunk a group, past the budget: a chunk a block.
+#define BUSTER_SSA_ROW_GROUP_BYTES (256u << 10)
+
+// The dense constructor's storage a phi and an operand, from placement's count on (ssa_vector_phis): its phi columns and
+// alias, cleanup's SCC tables (ssa_simplify) and emission's columns (ssa_emit).
+#define BUSTER_SSA_PHI_BYTES 96
+#define BUSTER_SSA_OPERAND_BYTES 8
+
+// Bound the dense constructor's storage before placement (#3449): six bit rows a block (def, use, the two liveness rows,
+// placed and pending), the rows' buffer (its budget or a chunk a reachable block), the scan's lists of writes past the
+// first group of rows, and the columns a block, an edge, an instruction and a local. Nothing in it is a u32 a cell; its
+// phis are bounded once placement has counted them (BUSTER_SSA_PHI_BYTES), and the frontier pairs have their own cap
+// (BUSTER_SSA_FRONTIER_PAIRS). This is a storage bound, not a measured crossover.
 static bool ssa_dense_fits(const SsaInput* input)
 {
-    const uint64_t cells = (uint64_t)input->block_count * input->local_count;
-    const uint64_t operands = (uint64_t)input->edge_count * input->local_count;
-    bool fits = cells <= BUSTER_SSA_DENSE_BYTES / 128 && operands <= BUSTER_SSA_DENSE_BYTES / 16;
-    if (fits)
-    {
-        const uint64_t rows = ((uint64_t)input->local_count + BUSTER_DATAFLOW_VECTOR_BITS - 1) / BUSTER_DATAFLOW_VECTOR_BITS;
-        const uint64_t flow = (uint64_t)input->block_count * rows * BUSTER_DATAFLOW_VECTOR_BYTES * 4;
-        const uint64_t linear = ((uint64_t)input->instruction_count + input->local_count) * 32 + (uint64_t)input->block_count * 256 + (uint64_t)input->edge_count * 32 + 8192;
-        fits = flow <= BUSTER_SSA_DENSE_BYTES && linear <= BUSTER_SSA_DENSE_BYTES && cells * 128 + operands * 16 + flow + linear <= BUSTER_SSA_DENSE_BYTES;
-    }
-    return fits;
+    const uint64_t rows = ((uint64_t)input->local_count + BUSTER_DATAFLOW_VECTOR_BITS - 1) / BUSTER_DATAFLOW_VECTOR_BITS;
+    const uint64_t bits = (uint64_t)input->block_count * rows * BUSTER_DATAFLOW_VECTOR_BYTES * 6;
+    const uint64_t buffer = (uint64_t)input->block_count * 64 > BUSTER_SSA_ROW_GROUP_BYTES ? (uint64_t)input->block_count * 64 : BUSTER_SSA_ROW_GROUP_BYTES;
+    const uint64_t linear = ((uint64_t)input->instruction_count + input->local_count) * 32 + (uint64_t)input->instruction_count * 72 + (uint64_t)input->block_count * 256 + (uint64_t)input->edge_count * 32 + 8192;
+    return bits <= BUSTER_SSA_DENSE_BYTES && linear <= BUSTER_SSA_DENSE_BYTES && bits + buffer + linear <= BUSTER_SSA_DENSE_BYTES;
 }
 
 static void* ssa_allocate(Arena* arena, uint64_t count, uint64_t bytes)
@@ -887,7 +891,9 @@ static SsaError ssa_vector_phis(SsaWork* work, const uint64_t* placed, uint32_t*
         phis += count;
         operands += count * (predecessor_offsets[block + 1] - predecessor_offsets[block]);
     }
-    SsaError error = phis < BUSTER_SSA_NONE - work->result.phi_base && operands < BUSTER_SSA_NONE ? SSA_OK : SSA_ERROR_LIMIT;
+    // The phis' storage past BUSTER_SSA_DENSE_BYTES takes the bounded construction (ssa_construct_dense).
+    const bool fits = phis * BUSTER_SSA_PHI_BYTES + operands * BUSTER_SSA_OPERAND_BYTES <= BUSTER_SSA_DENSE_BYTES;
+    SsaError error = fits && phis < BUSTER_SSA_NONE - work->result.phi_base && operands < BUSTER_SSA_NONE ? SSA_OK : SSA_ERROR_LIMIT;
     if (error == SSA_OK)
     {
         phi_first[blocks] = (uint32_t)phis;
@@ -930,11 +936,6 @@ static SsaError ssa_vector_phis(SsaWork* work, const uint64_t* placed, uint32_t*
     }
     return error;
 }
-
-// The rows' buffer: at most this many bytes of exit rows at once, a group of chunks of 16 slots for every reachable block,
-// so that the buffer stays in L2 however wide the function is (#3449); the tests pass smaller budgets. A function of more
-// reachable blocks than the budget has 64-byte chunks takes one chunk a group, past the budget: a chunk a block.
-#define BUSTER_SSA_ROW_GROUP_BYTES (256u << 10)
 
 // In reverse postorder, so that a block's immediate dominator comes first, a group of chunks at a time: each block's
 // entry chunks (its phis' ids expanded into their lanes, its immediate dominator's exit elsewhere; the entry's undefined
