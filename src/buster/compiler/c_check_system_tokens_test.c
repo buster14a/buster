@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// The system-header bitmap's kernels against independently stated level classes (#1610).
+// The system-header bitmap's kernels against independently stated level classes (#1610), and the marks from a level byte a
+// token (check_input_level_marks).
 // Protected ends cover every small tail, clamped sources and the gather's three readable padding bytes. A large
 // column also covers long conversions; the existing repository self-check is the original MSan
 // failing consumer, since a small test caller alone need not cross LLVM's callback-instrumentation threshold.
@@ -87,6 +88,33 @@ static __attribute__((noinline)) void check_test_system_tokens(CheckTest* test)
         }
     }
     check_test_expect(test, differences == 0, "system-token bitmaps match the level classes with guarded tails and clamped sources");
+    // The marks from a byte a token (check_input_level_marks: the mapped levels, and the identity sources' levels), at every
+    // count around the 64-byte steps, each column ending at a PROT_NONE page.
+    static const uint32_t mark_counts[] = { 1023, 1024, 1025, CAPACITY };
+    uint32_t mark_cases = 0;
+    uint32_t mark_differences = 0;
+    for (uint32_t round = 0; ready && round < 200 + BUSTER_ARRAY_LENGTH(mark_counts); round += 1)
+    {
+        const uint32_t count = round < 200 ? round : mark_counts[round - 200];
+        uint8_t* token_levels = mappings[SOURCES] + source_bytes - count;
+        uint8_t* map = mappings[TOKENS] + token_bytes - count - 1;
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            token_levels[i] = level_values[(i * 5 + i / 64 + round) % BUSTER_ARRAY_LENGTH(level_values)];
+        }
+        map[-1] = 0x5a;
+        map[count] = 0xa5;
+        memset(map, 0xcc, count);
+        check_input_level_marks(map, token_levels, count);
+        bool equal = map[-1] == 0x5a && map[count] == 0xa5;
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            equal &= map[i] == (uint8_t)expected_levels[(i * 5 + i / 64 + round) % BUSTER_ARRAY_LENGTH(level_values)];
+        }
+        mark_differences += !equal;
+        mark_cases += 1;
+    }
+    check_test_expect(test, mark_differences == 0, "system-token marks from a level byte a token at every count around the 64-token steps");
     for (uint32_t i = 0; i < COLUMNS; i += 1)
     {
         if (mappings[i] != MAP_FAILED)
@@ -94,5 +122,6 @@ static __attribute__((noinline)) void check_test_system_tokens(CheckTest* test)
             munmap(mappings[i], bytes[i] + page);
         }
     }
-    printf("system-token bitmap: %u cases, %u differences (guarded tails, clamped sources and large columns)\n", cases, differences);
+    printf("system-token bitmap: %u cases, %u differences (guarded tails, clamped sources and large columns); level marks: %u cases, %u differences\n", cases,
+           differences, mark_cases, mark_differences);
 }
