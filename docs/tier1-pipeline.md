@@ -5,7 +5,7 @@
 ```text
 tier0_emit / tier0_program_functions (including abi_assign)
   → ir_lower_typed
-  → ssa_ir_promote / ssa_ir_promote_scalar
+  → ssa_ir_promote
   → ir_optimize (SCCP, DCE and CFG cleanup)
   → rebuilt CFG and dominance; the IR verifier
   → tier1_select_plan_verified (as the C driver plans ir_optimize's verified

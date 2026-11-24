@@ -1,0 +1,63 @@
+buster-fixtures v1 checker-sources
+# check_test_attribute_sources's source fixtures (c_check_attribute_test.c; #2053): ID, FILE, FLAGS, NAME, tab-separated.
+0001	0001.c	-	GNU fallthrough null statement
+0002	0002.c	-	standard fallthrough null statement
+0003	0003.c	-	GNU scoped standard fallthrough null statement
+0004	0004.c	-	fallthrough through a closing compound statement
+0005	0005.c	rejected	fallthrough outside switch rejected
+0006	0006.c	rejected	standard fallthrough outside switch rejected
+0007	0007.c	-	fallthrough placement checking is disabled by the oracle warning profile
+0008	0008.c	-	outer-switch fallthrough placement is deferred without warning analysis
+0009	0009.c	-	end-of-switch fallthrough placement is deferred without warning analysis
+0010	0010.c	-	empty attributed null statements outside switch
+0011	0011.c	rejected	fallthrough cannot annotate an object declaration
+0012	0012.c	rejected	fallthrough cannot annotate a function declaration
+0013	0013.c	rejected	fallthrough cannot annotate a tag declaration
+0014	0014.c	-	leading GNU attribute declaration
+0015	0015.c	-	leading standard attribute declaration
+0016	0016.c	-	leading numeric alignment declaration
+0017	0017.c	-	glibc function attribute integration
+0018	0018.c	-	integer mode type reaches sizeof
+0019	0019.c	-	glibc complex mode reaches sizeof
+0020	0020.c	-	vector type reaches sizeof
+0021	0021.c	-	typedef alignment reaches alignof
+0022	0022.c	-	specifier alignment applies to completed typedef
+0023	0023.c	-	packed record layout integration
+0024	0024.c	-	postfix packed record layout integration
+0025	0025.c	-	aligned packed member integration
+0026	0026.c	-	multiple declarators retain separate attributes
+0027	0027.c	-	asm weak visibility declaration integration
+0028	0028.c	-	GNU attribute ICE integration
+0029	0029.c	-	standard attribute ICE integration
+0030	0030.c	-	alignment type-name integration
+0031	0031.c	rejected	invalid attribute alignment diagnosed
+0032	0032.c	rejected	invalid standard alignment diagnosed
+0033	0033.c	rejected	zero alignment cannot annotate typedef
+0034	0034.c	rejected	zero alignment cannot annotate function
+0035	0035.c	rejected	invalid nonnull index diagnosed
+0036	0036.c	rejected	postfix vector pointer rejected
+# GNU's weak attribute needs external linkage (#147); a typedef's is ignored, and so is one after the entity's
+# definition, as a constructor or a destructor after it is.
+0037	0037.c	rejected	weak static function rejected
+0038	0038.c	rejected	weak static variable rejected
+0039	0039.c	rejected	weak block-scope static rejected
+0040	0040.c	rejected	weak automatic variable rejected
+0041	0041.c	rejected	weak redeclaration of a static function rejected
+0042	0042.c	-	weak block-scope extern
+0043	0043.c	-	weak block-scope function
+0044	0044.c	-	weak typedef ignored
+0045	0045.c	-	weak after static function definition ignored
+0046	0046.c	-	weak after static object definition ignored
+0047	0047.c	rejected	weak after tentative static object rejected
+0048	0048.c	-	weak after the definition ignored
+0049	0049.c	-	weak declarators after one's definition
+0050	0050.c	-	constructor after the definition ignored
+0051	0051.c	-	constructor priorities
+0052	0052.c	rejected	alias function definition rejected
+0053	0053.c	-	alias function declaration accepted
+0054	0054.c	rejected	alias followed by a body rejected
+0055	0055.c	rejected	alias followed by a declaration and a body rejected
+0056	0056.c	-	alias followed by a declaration accepted
+0057	0057.c	rejected	repeated alias definition rejected
+0058	0058.c	rejected	body followed by alias rejected
+0059	0059.c	rejected	block alias followed by body rejected

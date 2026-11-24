@@ -84,6 +84,15 @@ struct IrOptimizeWork
     // What ir_optimize_prepare's dominator analysis gives past the tree (DominatorOptions.outputs): 0, or LICM's natural
     // loops (#2719), which would otherwise take the analysis a second time.
     uint32_t dominator_outputs;
+    // Set before ir_optimize_prepare where the function needs no verification (#2719: Tier 1's LICM and value numbering on
+    // the promoted function, which promotion verified and the passes since, threading and if-conversion among them, take
+    // as verified, as these two now do; the optimizer after them verifies what reaches it): the preparation builds its
+    // CFG without the structural verifier's shape, row and graph checks and doesn't check its operands' dominance. A
+    // pass's own result is still verified where it rewrites the function.
+    bool validated;
+    // Set before ir_optimize_prepare by a pass that reads no use list (#2719: LICM's pressure policy in a function
+    // without an undef, whose taint is all it reads them for): the preparation builds none, and `uses` stays empty.
+    bool without_uses;
     uint8_t* states;
     IrConstant* values;
     // Allocated lazily by the first SIMD transfer; scalar functions keep their two-word lattice and no wide map.
@@ -1755,8 +1764,9 @@ static __attribute__((aligned(64))) IrCheck ir_optimize_prepare(IrOptimizeWork* 
     work->scratch = scratch;
     work->scalar = scalar;
     // Retain the CFG built by the structural verifier. No input changes before the optimizer consumes it, so
-    // rebuilding the same graph here would repeat its edge enumeration, deduplication and instruction map.
-    IrCheck check = ir_verify_cfg(function, scratch, output, &work->cfg);
+    // rebuilding the same graph here would repeat its edge enumeration, deduplication and instruction map. A verified
+    // function (`validated`) has its CFG built alone.
+    IrCheck check = work->validated ? ir_check(ir_cfg_validated(function, scratch, output, &work->cfg), BUSTER_IR_NONE, 0) : ir_verify_cfg(function, scratch, output, &work->cfg);
     if (check.error == IR_OK && !simd && ir_function_has_simd(function))
     {
         check.error = IR_ERROR_UNSUPPORTED;
@@ -1768,7 +1778,7 @@ static __attribute__((aligned(64))) IrCheck ir_optimize_prepare(IrOptimizeWork* 
         check = ir_check(IR_ERROR_PHI, 0, 0);
     }
     // The use lists consume the same verified revision without repeating its shape, row or graph checks.
-    if (check.error == IR_OK)
+    if (check.error == IR_OK && !work->without_uses)
     {
         check.error = ir_uses_validated(function, scratch, output, &work->uses);
     }
@@ -1792,7 +1802,7 @@ static __attribute__((aligned(64))) IrCheck ir_optimize_prepare(IrOptimizeWork* 
                       status == DOMINATOR_MATRIX_LIMIT  ? IR_ERROR_UNSUPPORTED :
                                                           IR_ERROR_DOMINANCE;
     }
-    if (check.error == IR_OK)
+    if (check.error == IR_OK && !work->validated)
     {
         check = ir_optimize_check_reachable(function, &work->cfg, &work->dominators);
     }

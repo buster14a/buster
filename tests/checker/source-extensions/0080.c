@@ -1,0 +1,1 @@
+int side(void); enum { N=__builtin_expect(3,side())+2 }; int a[N]; _Static_assert(N==5,"enum"); _Static_assert(__builtin_expect(3,side())+2==5,"assert"); static long x=__builtin_expect(7,side())+1; static int b[]={__builtin_expect(9,side())}; long f(long n){return __builtin_expect(n,side());}

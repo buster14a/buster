@@ -1815,9 +1815,19 @@ static const ChangesFixture changes_fixtures[] = {
         .unmeasured = "checker lexer",
     },
     {
+        .name = "the preprocessor's runtime cases, trees and catalogs are code",
+        .files = "tests/preprocessor/cases/catalog.tsv tests/preprocessor/cases/0001.expected tests/preprocessor/trees/embed-02",
+        .outputs_true = "code",
+    },
+    {
         // #2053: runtime fixtures and their catalogs are under tests/, never Markdown, which counts as documentation.
         .name = "the checker's runtime fixtures and catalog are code",
         .files = "tests/checker/sources/catalog.tsv tests/checker/sources/0001.c",
+        .outputs_true = "code",
+    },
+    {
+        .name = "the checker suites' runtime fixtures and catalogs are code",
+        .files = "tests/checker/source-extensions/catalog.tsv tests/checker/attributes/0001.c tests/checker/overload/catalog.tsv",
         .outputs_true = "code",
     },
     {

@@ -139,7 +139,7 @@ static bool ir_pass_benchmark_check(const IrFunction* input, const IrPassBenchma
             {
                 const uint64_t mark = output->length;
                 IrFunction promoted = { 0 };
-                const IrCheck check = path == 0 ? ssa_ir_promote_scalar(&reference[path].function, output, scratch, &promoted) : ssa_ir_promote(&reference[path].function, output, scratch, &promoted);
+                const IrCheck check = ssa_ir_promote(&reference[path].function, output, scratch, &promoted);
                 valid = check.error == IR_OK;
                 if (valid)
                 {

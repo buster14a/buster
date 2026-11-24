@@ -33,7 +33,10 @@ requirements. [Command index](README.md).
   three classes with mutants (three generated cases in four share phi webs' slots, and a mutant gives two values whose
   slot fragments overlap one slot), and #2553's two: a join whose dominating critical edge moves nothing, and a phi web
   around a loop that keeps one slot; #2784's loop whose body precedes its header, whose path for a character moves
-  nothing; #2834's loop whose latch lies between its body and its header, whose entry edge moves nothing; every allocation's continuations (#2774) are checked against a twin that recomputes them from the intervals
+  nothing; #2834's loop whose latch lies between its body and its header, whose entry edge moves nothing; #2553's
+  current slots (`tier1_cfg_current_slots`): a loop whose body reloads a value its header keeps in its slot, whose back
+  edge stores nothing, refused by both checkers without the body's assertion and with one the entry doesn't give, and in
+  the generated cases a slot asserted current that an edge doesn't bring (a mutant both refuse); every allocation's continuations (#2774) are checked against a twin that recomputes them from the intervals
   alone; `test-tier1-cfg-source` adapts every function `-c`
   compiles of real C, lowered and promoted, through a machine model
   (`tier1_cfg_ir.c`) and checks each allocation, and with `--simd`

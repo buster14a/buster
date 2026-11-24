@@ -61,8 +61,8 @@
 // #2874's gate, the tables' rows, what the gate's keys decide without each family of inputs (so what needs it), and
 // what no key decides.
 //
-// Tier 0's passes are not called but tier0_compile and the fusion's own inlined body (tier0_fuse_entries), so that no
-// function of a compile gains a caller. Include after tier0_source_benchmark.c.
+// Tier 0's passes are not called but tier0_compile and the front (tier0_vector_front), inlined into its callers, so
+// that no function of a compile gains a caller. Include after tier0_source_benchmark.c.
 #ifndef BUSTER_TIER0_ENTRIES_MEASURE_INCLUDED
 #define BUSTER_TIER0_ENTRIES_MEASURE_INCLUDED
 
@@ -696,8 +696,37 @@ static void tier0_census_end(Tier0Census* census)
     arena_release(&census->sample_arena);
 }
 
+// The class a kind's templates are keyed by: a compare's operands' (the entry before it), the entry's own otherwise.
+static uint32_t tier0_census_key_class(uint32_t kind, uint32_t class, uint32_t operand)
+{
+    return kind >= BUSTER_TYPED_EQ && kind <= BUSTER_TYPED_GE ? operand : class;
+}
+
+// Whether `kind`, keyed by `class`, takes the constant `value` as an immediate, as the front's P0 and P1 decide it: any
+// 32-bit pattern for a 1- to 4-byte operation, a sign-extended 32-bit one for an 8-byte one (but `mov r, imm` takes
+// any), a shift's count up to 255, an index whose product with the element's size `scale` fits 32 bits.
+static bool tier0_census_constant_fits(uint32_t kind, uint32_t class, uint64_t value, uint64_t scale)
+{
+    bool fits = tier0_class_bytes(class) < 8 || tier0_fits_int32((int64_t)value);
+    if (kind == BUSTER_TYPED_SHL || kind == BUSTER_TYPED_SHR)
+    {
+        fits = value <= 255;
+    }
+    else if (kind == BUSTER_TYPED_PTR_ADD)
+    {
+        // The index fits 32 bits and the size is below 2^31, so that their product can't overflow: it must fit too.
+        const int64_t product = (int64_t)value * (int64_t)scale;
+        fits = tier0_fits_int32((int64_t)value) && scale <= INT32_MAX && tier0_fits_int32(product);
+    }
+    else if (kind == BUSTER_TYPED_DISCARD || kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_STORE_GLOBAL)
+    {
+        fits = true;
+    }
+    return fits;
+}
+
 // A function's groups, added to the census: its code by tier0_compile into `scratch` (popped again), its fusion's
-// columns by tier0_fuse_entries. False without room; a function Tier 0 refuses is counted and left out.
+// columns by tier0_vector_front. False without room; a function Tier 0 refuses is counted and left out.
 static bool tier0_census_function(Tier0Census* census, const Tier0Function* function, Arena* scratch)
 {
     const uint64_t mark = scratch->length;
@@ -706,20 +735,9 @@ static bool tier0_census_function(Tier0Census* census, const Tier0Function* func
     asked.entry_records = true;
     asked.choice_requests = false;
     const Tier0Code code = tier0_compile(&asked, scratch);
-    const uint64_t padded = (uint64_t)count + 64;
     Tier0Entries entries;
     memset(&entries, 0, sizeof(entries));
-    entries.key_kinds = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, padded);
-    entries.key_classes = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, padded);
-    entries.variants = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, padded);
-    entries.absorbed = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, padded);
-    entries.integer_effects = BUSTER_ARENA_PUSH_ARRAY(scratch, int8_t, padded);
-    entries.floating_effects = BUSTER_ARENA_PUSH_ARRAY(scratch, int8_t, padded);
-    entries.depths = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, padded);
-    entries.floating_depths = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, padded);
-    uint64_t* labels = BUSTER_ARENA_PUSH_ARRAY(scratch, uint64_t, (uint64_t)count / 64 + 2);
-    bool room = entries.key_kinds != 0 && entries.key_classes != 0 && entries.variants != 0 && entries.absorbed != 0 && entries.integer_effects != 0 &&
-                entries.floating_effects != 0 && entries.depths != 0 && entries.floating_depths != 0 && labels != 0 && code.error != TIER0_ERROR_MEMORY;
+    bool room = code.error != TIER0_ERROR_MEMORY && (code.error != TIER0_OK || tier0_vector_front(function, scratch, &entries) == TIER0_OK);
     census->refused += room && code.error != TIER0_OK ? 1 : 0;
     // A function with segment overrides is compiled from a stripped copy of its values, which only its compile makes.
     const bool special = function->segments;
@@ -732,36 +750,9 @@ static bool tier0_census_function(Tier0Census* census, const Tier0Function* func
         const Tier0Home* homes = code.local_homes;
         const uint32_t local_count = function->local_count;
         const uint32_t* entry_records = code.entry_records;
-        // The labels (tier0_labels's), the fusion and the depths (tier0_depths_scalar's), as both paths make them.
-        memset(labels, 0, ((uint64_t)count / 64 + 2) * sizeof(uint64_t));
-        for (uint32_t i = 0; i < count; i += 1)
-        {
-            if (kinds[i] >= BUSTER_TYPED_BRANCH_FALSE && kinds[i] <= BUSTER_TYPED_JUMP_VALUE)
-            {
-                const uint64_t target = values[i];
-                labels[target >> 6] |= 1ull << (target & 63);
-            }
-        }
-        for (uint32_t k = 0; k < function->label_count; k += 1)
-        {
-            const uint32_t target = function->label_entries[k];
-            labels[target >> 6] |= 1ull << (target & 63);
-        }
+        // The labels (the targets of branches and jumps, and the function's labels), as the front marks them.
+        const uint64_t* labels = entries.labels;
         const bool columned = function->symbol_access != 0;
-        tier0_fuse_entries(function, labels, &entries, columned ? function->symbol_access : 0, columned ? function->symbol_count : 0);
-        if (function->vectors)
-        {
-            tier0_operation_effects(function, &entries);
-        }
-        int32_t integer = 0;
-        int32_t floating = 0;
-        for (uint32_t i = 0; i < count; i += 1)
-        {
-            entries.depths[i] = (uint8_t)integer;
-            entries.floating_depths[i] = (uint8_t)floating;
-            integer += entries.integer_effects[i];
-            floating += entries.floating_effects[i];
-        }
         census->functions += 1;
         census->entries += count;
         census->records += code.count;
@@ -921,9 +912,9 @@ static bool tier0_census_function(Tier0Census* census, const Tier0Function* func
                 // back fits that addition's product; and the class of the nearest such product's magnitude plus one
                 // (the head's own first), 0 where there is none: `p + 3` and `p + 20` of 8-byte elements have the same
                 // constant's class and the same size, and their products take an 8-bit and a 32-bit immediate.
-                const uint32_t key_class = tier0_key_class(kind, class, i >= 1 ? classes[i - 1] : BUSTER_TYPED_CLASS_VOID);
+                const uint32_t key_class = tier0_census_key_class(kind, class, i >= 1 ? classes[i - 1] : BUSTER_TYPED_CLASS_VOID);
                 inputs[TIER0_CENSUS_FITS_1] = i >= 1 && kinds[i - 1] == BUSTER_TYPED_CONST ?
-                                                  (tier0_constant_fits(kind, key_class, values[i - 1], kind == BUSTER_TYPED_PTR_ADD ? values[i] : 1) ? 1 : 0) : 2;
+                                                  (tier0_census_constant_fits(kind, key_class, values[i - 1], kind == BUSTER_TYPED_PTR_ADD ? values[i] : 1) ? 1 : 0) : 2;
                 uint8_t product = 2;
                 uint8_t product_class = kind == BUSTER_TYPED_PTR_ADD && i >= 1 && kinds[i - 1] == BUSTER_TYPED_CONST ?
                                             (uint8_t)(1 + tier0_census_value_class((int64_t)(values[i - 1] * values[i]))) : 0;
@@ -932,7 +923,7 @@ static bool tier0_census_function(Tier0Census* census, const Tier0Function* func
                     const uint32_t j = i - back;
                     if (kinds[j] == BUSTER_TYPED_PTR_ADD && kinds[j - 1] == BUSTER_TYPED_CONST)
                     {
-                        product = tier0_constant_fits(BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, values[j - 1], values[j]) ? 1 : 0;
+                        product = tier0_census_constant_fits(BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, values[j - 1], values[j]) ? 1 : 0;
                         product_class = product_class == 0 ? (uint8_t)(1 + tier0_census_value_class((int64_t)(values[j - 1] * values[j]))) : product_class;
                     }
                 }

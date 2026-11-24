@@ -63,8 +63,8 @@ requirements. [Command index](README.md).
   first record, for source rows. `tier0_compile`
   finds the fusions, effects and depths 64 entries at a time in AVX-512, then
   selects, measures and emits 8 at a time from a 64-bit word per entry,
-  expanding each template with one `vpermb`; `tier0_compile_scalar` is its
-  twin. `tier0_validate`, the stream's rules (the compile paths'
+  expanding each template with one `vpermb` (its scalar twin was deleted,
+  #2972). `tier0_validate`, the stream's rules (the compile paths'
   precondition, which the lowering checks on every function it lowers), runs a
   vector path 64 entries at a time (`tier0_validate_accepts`, #569) and leaves
   every stream it doesn't take to the scalar validator (`tier0_validate_scalar`,
@@ -117,6 +117,10 @@ conversion's destination before `cvtsi2ss`/`cvtsi2sd`, and before
 `cvtss2sd`/`cvtsd2ss` but in place, which would otherwise wait on the
 register's last value (#3308); `conversion zeroes` checks the same of every
 class's conversion to `float` and `double`, of a home and of a register.
+Every program's functions are also compiled together, each pass over all of
+them before the next (`tier0_compile_batch`, #2874), the list taken again until
+it is past a batch's 32 functions: each one's code must be its own compile's
+(`batch`).
 Half the programs, on a host with AVX, compile at a target with AVX (#3335) and run natively
 through their VEX twins, no legacy SSE record with a twin left, and half of
 those clear the upper state at every exit (`Tier0Function.zero_upper`); the
@@ -138,16 +142,16 @@ are values, with the stack's position saved and restored around the loops'
 constructs that declare them, as a producer does. Before them
 it checks
 the call emitter's move resolver on 20,000 random sets of moves (paths and
-cycles of every length) run on a register file, the vector path's application
-of chosen forms against the scalar path's on random records, that both paths
-refuse unsupported entries alike and compile stacks across the former 240-value
-bound, byte wraps and 1000 values alike (#1106), and the
+cycles of every length) run on a register file, the application of chosen
+forms against the choice's definition (`x86_choice_instruction`) on random
+records, that the compile refuses unsupported entries and compiles stacks
+across the former 240-value bound, byte wraps and 1000 values (#1106), and the
 objects: `tier0_validate` refusing each break of their rules, and 2,000 random
-frames of objects, values and `VA_LIST`s whose places both paths must give
-alike, aligned, inside the frame and apart, every other round's realigned for
+frames of objects, values and `VA_LIST`s whose places the compile must give
+aligned, inside the frame and apart, every other round's realigned for
 objects aligned past 16 (the prologue's `and rsp` by the most they need, which
-the frame publishes); the frame's alignment, `tier0_frame_alignment` and its
-vector twin, on random columns of every count of locals to 40 and of calls to
+the frame publishes); the frame's alignment, `tier0_frame_alignment_vector`,
+on random columns of every count of locals to 40 and of calls to
 12, each ending at a `PROT_NONE` page; copies: their rules, and a copy of
 each size class above every count of values, whose scratch register both
 selections must count among the frame's clobbers; and variadic calls through a
@@ -163,7 +167,7 @@ an allocation past them that keeps rsp aligned to 4096), run natively against
 the file's model; and the
 operands: `tier0_validate` refusing each
 stream whose entry's last operand has another class than the entry before it,
-which both paths read for it, and taking the rest (postorder, and values left
+which the compile reads for it, and taking the rest (postorder, and values left
 under a store of their class); and the stack: `tier0_validate`'s rules for
 `ALLOCA`, `STACK_SAVE`, `STACK_RESTORE` and `FRAME_ADDRESS`, a frame pointer's 14 integer
 depths (the 15th value in its deep slot), and a function that allocates 64 KB and up a thousand times, each in a
@@ -179,7 +183,7 @@ across xmm0 to xmm3, #1193's), run natively both ways: as calls, whose
 probe records every register and stack slot it gets from bytes that end or
 start at a `PROT_NONE` page, and as functions, which a driver calls and which
 copy their parameters out; and `tier0_validate` refusing 67 breaks of their
-rules, as both paths do (the end reached without a RETURN of an aggregate
+rules, as the compile does (the end reached without a RETURN of an aggregate
 result, by falling off it, a jump or a branch, a hidden result's RETURN of
 nothing, two parts or two parameters in one register, registers outside
 the convention's, and a split vector's registers out of order or of the wrong
@@ -222,12 +226,12 @@ of both TLS models (`_Thread_local` in C), and functions' addresses through the
 GOT. The native run gives each symbol a GOT slot and the thread-locals a block
 of their own, which FS points at for the entry's call alone. An `access` check
 before the programs compiles every global kind of every class by each access:
-both paths alike, with the access's references, and validation's rule. A
+to valid records, with the access's references, and validation's rule. A
 `segments` check (#1447) compiles `LOAD`, `STORE` and `SET` with FS, GS and SS
 overrides (`Tier0Function.segments`) for every integer and floating class, at
 `[p]`, `[p + 8]` and `[p + i * size]`, a seq_cst store, and copies of long
 double, the 128-bit integers and vectors (EVEX and SSE/AVX transports) from and
-to a segment: both paths alike, each record the stripped twin's but for the
+to a segment: each record the stripped twin's but for the
 override on the access's memory operand, and validation's rules for the marker
 (a constant's top bits are its own; SS's 3 is an override).
 A child runs them, `%fs` at the thread's base and `%gs` set by `arch_prctl`, on
@@ -237,8 +241,7 @@ mode, so its cases run on the data's own addresses. It calls them through
 reads a signature in the 8 bytes before the entry, which generated code lacks
 and which is unmapped before the first case's page (#2077). After
 the programs, the `x87` check (`tier0_x87_test.c`, #136's item 8) compiles long
-double code by both paths into the same records, encoded by both encoders into
-the same bytes and run natively, called from C through function pointers, so
+double code into valid records, encoded and run natively, called from C through function pointers, so
 that clang's code is the oracle of the convention and the x87's arithmetic of
 the values: each break of the class's rules refused at its entry; functions of
 long double parameters and results (on the stack around an integer in a
@@ -279,8 +282,8 @@ neighbours taken) and the stream's, each break refused at its entry (a vector
 converted and two compared among them); each row under no
 live values, under 8 floats and 3 integers, and under as many floats as leave
 its VECTOR registers past the XMM ones (EVEX rows) or at a VEX row's edge, and
-one past it and a scratch register past the integer table, which both paths
-take through the deep slots (#780); functions of vectors of 16, 32 and 64 bytes in XMM, YMM and ZMM
+one past it and a scratch register past the integer table, which the compile
+takes through the deep slots (#780); functions of vectors of 16, 32 and 64 bytes in XMM, YMM and ZMM
 registers and on the stack, called from C and calling C (a vector argument on
 the stack among them), a float parameter's register that a row of no records
 loads its vector operand into, and a 16-byte operand that a ZMM form reads
@@ -313,8 +316,7 @@ vector path must take each function, and one change of each in every fourth
 program (a kind, a class or a value, two entries swapped, one removed or
 repeated) only where the scalar validator takes it. Then the `masks` check
 (`tier0_mask_test.c`, #179): `--count` random programs over the mask class,
-each compiled by both paths into the same records and both encoders into the
-same bytes, linked with a callee whose masks fill k1 to k7, and run natively
+each compiled into valid records and encoded, linked with a callee whose masks fill k1 to k7, and run natively
 where the host has AVX-512 F, VL, BW and DQ, every output byte against the
 check's stack machine and, for the programs without rows or frame objects,
 `interpreter.c`'s: masks of every width loaded, converted from every integer
@@ -408,7 +410,7 @@ with an address alone at its last entry and at each full batch's last lane. On t
 -funsigned-char -fno-strict-aliasing`) it splices 830 of 8,509 bodies,
 7,695 calls, in about 8 s on a 4-core cloud host. `test-checker-driver`'s
 fixture (`c_check_tier0_inline_driver_test.c`) builds a program of the
-splice's shapes by default, with `--scalar` (Tier 0's compile twin, #2972),
+splice's shapes by default, with `--scalar` (the twins it still selects),
 `--tier0-no-inline` and `--tier0-inline-shapes` with and without `--scalar`:
 each runs as clang -O0's build does, the builds with and without `--scalar`
 are the same bytes, and the control's differs; the object
@@ -420,15 +422,15 @@ token.
 ## Backend benchmark
 
 `./build/compiler benchmark-backend [--entries N] [--seed N] [--only
-vector|scalar|sizing|encode|validate|validate-scalar|choose|choose-scalar]
+vector|sizing|encode|validate|validate-scalar|choose]
 [--after-scalar MS]` (about 4 s) generates programs
-until their functions hold `--entries` typed entries (262,144), checks that both
-of Tier 0's paths give every function the same code, then reports 21-pass
-medians, per typed entry and per record, of `tier0_compile`,
-`tier0_compile_scalar`, `size_branches` on their records, `x86_encode` of the
+until their functions hold `--entries` typed entries (262,144), checks that
+every function compiles, then reports 21-pass
+medians, per typed entry and per record, of `tier0_compile` (`vector`),
+`size_branches` on their records, `x86_encode` of the
 sized records, `tier0_validate` and `tier0_validate_scalar` (#569), and the
 immediates' form choice on each function's own requests as Tier 0 makes them
-(`x86_choose_forms` and `x86_choose_forms_scalar`, #221, from
+(`x86_choose_forms`, #221, from
 `Tier0Function.choice_requests`, which copies them into the code: read from
 there, colder than in `tier0_compile`'s own call): nanoseconds, cycles,
 instructions, IPC and the throttle (PMCx1A0's umask 0x08, #199), with the share
@@ -436,21 +438,21 @@ of entries deferred, the functions the validation's vector path takes alone,
 and the choice's requests (per entry, the share whose form it kept, gave another
 encoding of the instruction or another instruction, and the bytes it saved
 against each template's imm32 form). `--only` runs one variant alone, and
-`--after-scalar MS` runs the scalar twin for MS ms before each pass of the vector
-path, of the validation and of the choice. Run it under the 9700X's lock with `taskset -c 2`.
+`--after-scalar MS` runs the scalar validator for MS ms before each pass of the
+validation and of the choice. Run it under the 9700X's lock with `taskset -c 2`.
 `docs/tier0.md` has the numbers. The default 9700X job runs it after the tests,
 pinned to one allowed CPU; like the others, its measurements are informational.
 
 `./build/compiler benchmark-backend-source [--only
-vector|scalar|sizing|encode|validate|validate-scalar|choose|choose-scalar]
+vector|sizing|encode|validate|validate-scalar|choose]
 [--after-scalar MS] [preprocessor options] file...` (about 1 s for `sqlite3.c`)
 measures the same variants on real C. Each file is checked as the driver checks
 it, and the definitions `-c` lowers are lowered and emitted for the target its
 options give (`-march`, the `-m` features: #1041), each function with a target
 attribute for the attribute's, outside the time;
 their typed streams, with the symbols' access the emission gave them
-(`check_program_access`), make one corpus with the other files' functions, which
-both paths must agree on before the same medians are reported. A file the
+(`check_program_access`), make one corpus with the other files' functions, each of
+which must compile before the same medians are reported. A file the
 checker rejects, or whose checked program or emission refuses a feature by
 name, is left out with its reason; one that fails otherwise (it doesn't
 preprocess, a resource runs out, a function doesn't join the corpus) fails the

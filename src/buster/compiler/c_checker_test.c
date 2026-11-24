@@ -3368,8 +3368,9 @@ static void check_test_source(CheckTest* test, const CheckSourceFixture* fixture
 // catalog's first line is check_test_fixture_header, and each later one is a case (a line that starts with # is a
 // comment), four tab-separated fields: its ID, unique, of letters, digits, '.', '_' and '-'; its file, in the same
 // directory, unique, of the same characters, ending in .c; its flags, comma-separated, or - for none; and its name.
-// The flags are CheckSourceFixture's fields: rejected, unsupported, extension, gnu23 (standard 2023), unsigned-char,
-// undecided, overload-tables, overload-none, and capacity=NAME, a name check_test_fixture_capacity knows. A case's file
+// The flags are CheckSourceFixture's fields: rejected, unsupported, extension, one of gnu89, gnu99 and gnu23 (standard
+// 1989, 1999 or 2023; gnu17 without), unsigned-char, undecided, overload-tables, overload-none, and capacity=NAME, a name
+// check_test_fixture_capacity knows. A case's file
 // is its source's bytes, read as they are; one with a NUL in it is refused, since the runner writes a source to its first
 // NUL. The cases run in the catalog's order. A missing, unreadable or malformed catalog, a missing or unreadable file, a
 // duplicate ID or file, a file in the directory that no case names, or no case at all fails the run: no case is
@@ -3494,9 +3495,17 @@ static bool check_test_fixture_flags(CheckTestFixtures* fixtures, char* flags, C
             {
                 fixture->extension = true;
             }
-            else if (strcmp(flag, "gnu23") == 0)
+            else if (strcmp(flag, "gnu23") == 0 && fixture->standard == 0)
             {
                 fixture->standard = 2023;
+            }
+            else if (strcmp(flag, "gnu89") == 0 && fixture->standard == 0)
+            {
+                fixture->standard = 1989;
+            }
+            else if (strcmp(flag, "gnu99") == 0 && fixture->standard == 0)
+            {
+                fixture->standard = 1999;
             }
             else if (strcmp(flag, "unsigned-char") == 0)
             {
@@ -3654,11 +3663,12 @@ static bool check_test_fixtures_load(CheckTestFixtures* fixtures, const char* su
 }
 
 // A suite of runtime source fixtures (#2053) under the fixture root, checked as the shared ones are but without their
-// generated cases and variants: each case's source in a temporary file, clang -fsyntax-only -std=gnu17 on them all at
-// once, then each case's acceptance against clang's (an unsupported case refuses by name what clang takes, an undecided
-// one what clang rejects) and check_test_source's checks on both paths. `oracle` names clang's run in its check. The
-// suites' runners were test files' own tables and loops: c_check_cleanup_test.c's, c_check_musttail_test.c's and the
-// others that call this.
+// generated cases: each case's source in a temporary file, clang -fsyntax-only on them, a run for each dialect the cases
+// name (-std=gnu17 for those that name none, as one run; gnu89, gnu99 or gnu23, and -funsigned-char for an
+// unsigned-char case, for the others), then each case's acceptance against clang's (an unsupported case refuses by name
+// what clang takes, an undecided one what clang rejects, and an extension case is one clang takes) and
+// check_test_source's checks on both paths. `oracle` names clang's runs in its check. The suites' runners were test
+// files' own tables and loops: c_check_cleanup_test.c's, c_check_source_test.c's and the others that call this.
 static __attribute__((noinline)) void check_test_suite(CheckTest* test, const char* clang, const char* suite, const char* oracle)
 {
     CheckTestFixtures catalog;
@@ -3672,7 +3682,11 @@ static __attribute__((noinline)) void check_test_suite(CheckTest* test, const ch
     char (*paths)[4200] = count != 0 ? arena_push(&catalog.storage, sizeof(*paths) * count, 8) : 0;
     char** pointers = count != 0 ? arena_push(&catalog.storage, sizeof(char*) * count, 8) : 0;
     ParseTestClang* outcomes = count != 0 ? arena_push(&catalog.storage, sizeof(ParseTestClang) * count, 8) : 0;
-    const bool made = paths != 0 && pointers != 0 && outcomes != 0 && length > 0 && length < (int)sizeof(directory) && mkdtemp(directory) != 0;
+    char** dialect_pointers = count != 0 ? arena_push(&catalog.storage, sizeof(char*) * count, 8) : 0;
+    uint32_t* dialect_cases = count != 0 ? arena_push(&catalog.storage, sizeof(uint32_t) * count, 8) : 0;
+    ParseTestClang* dialect_outcomes = count != 0 ? arena_push(&catalog.storage, sizeof(ParseTestClang) * count, 8) : 0;
+    const bool made = paths != 0 && pointers != 0 && outcomes != 0 && dialect_pointers != 0 && dialect_cases != 0 && dialect_outcomes != 0 && length > 0 &&
+                      length < (int)sizeof(directory) && mkdtemp(directory) != 0;
     bool ready = made;
     for (uint32_t i = 0; ready && i < count; i += 1)
     {
@@ -3680,15 +3694,36 @@ static __attribute__((noinline)) void check_test_suite(CheckTest* test, const ch
         pointers[i] = paths[i];
         ready = parse_test_write(paths[i], catalog.cases[i].source, strlen(catalog.cases[i].source));
     }
-    const char* arguments[] = { "-std=gnu17" };
-    const bool ran = ready && parse_test_clang(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), pointers, count, outcomes);
+    // Each dialect's cases in one run: the standards gnu17 (0), gnu89, gnu99 and gnu23, each with plain char signed and
+    // unsigned; gnu17's signed run passes -std=gnu17 alone.
+    static const uint32_t standards[4] = { 0, 1989, 1999, 2023 };
+    static const char* const standard_arguments[4] = { "-std=gnu17", "-std=gnu89", "-std=gnu99", "-std=gnu23" };
+    bool ran = ready;
+    for (uint32_t dialect = 0; ran && dialect < 8; dialect += 1)
+    {
+        const uint32_t standard = standards[dialect / 2];
+        const bool char_unsigned = (dialect & 1) != 0;
+        uint32_t dialect_count = 0;
+        for (uint32_t i = 0; i < count; i += 1)
+        {
+            dialect_pointers[dialect_count] = paths[i];
+            dialect_cases[dialect_count] = i;
+            dialect_count += catalog.cases[i].standard == standard && catalog.cases[i].char_unsigned == char_unsigned ? 1 : 0;
+        }
+        const char* arguments[2] = { standard_arguments[dialect / 2], "-funsigned-char" };
+        ran = dialect_count == 0 || parse_test_clang(clang, arguments, char_unsigned ? 2 : 1, dialect_pointers, dialect_count, dialect_outcomes);
+        for (uint32_t k = 0; ran && k < dialect_count; k += 1)
+        {
+            outcomes[dialect_cases[k]] = dialect_outcomes[k];
+        }
+    }
     check_test_expect(test, ran, oracle);
     for (uint32_t i = 0; ran && i < count; i += 1)
     {
         const CheckSourceFixture* fixture = catalog.cases + i;
         char description[256];
         snprintf(description, sizeof(description), "%s: expectation differs from Clang", fixture->name);
-        check_test_expect(test, outcomes[i].rejected == (fixture->rejected && (!fixture->unsupported || fixture->undecided)), description);
+        check_test_expect(test, outcomes[i].rejected == (fixture->rejected && (!fixture->unsupported || fixture->undecided) && !fixture->extension), description);
         check_test_source(test, fixture, paths[i], outcomes + i);
     }
     for (uint32_t i = 0; made && i < count; i += 1)

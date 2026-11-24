@@ -328,35 +328,55 @@ placement and critical-edge splitting are not done by this routine.
 
 The deterministic policy is unchanged: emit the lowest input index whose
 destination has no remaining source users; when none is ready, save the lowest
-pending destination to scratch. Up to eight moves use the independent scan
-implementation, `tier1_resolve_moves_scalar`. The only current production caller
-is `tier1_emit_call`, bounded by the six SysV integer argument registers; the
-general API keeps its full 2^20-move limit and opaque location domain.
+pending destination to scratch. Two vector forms implement it, each the only
+code for its range (#3450, phase D of #2924; they replaced a scalar scan up to
+eight moves and a merge-sort-and-heap path beyond, which gave the same order):
 
-Larger sets use `tier1_resolve_moves_indexed`. Eight-wide masked initialization
-validates scratch exclusion, marks identities and constructs packed
-`(destination, input index)` keys. A nonrecursive merge sort detects duplicate
-destinations; binary searches map each source to its destination owner. Source
-use counts and a minimum heap replace repeated pending-move scans. Each emitted
-move updates only its source owner's count, and each move enters the ready
-heap once. A monotonically advancing cursor finds the first pending move when
-breaking cycles. Sorting, lookup and heap work are O(N log N), with O(N) storage,
-including adversarial opaque ids and fan-out.
+- **Up to 32 moves** (`tier1_resolve_moves_register`): every set the census
+  found (sqlite3.c, Lua and musl under `--tier1`: 41,188 sets, at most 12
+  moves, 596 with a cycle). Sources and destinations are two registers each.
+  Broadcast compares give each destination's readers as a 32-bit row and find
+  duplicate destinations; the 32 rows are two registers of dwords, so each step
+  tests every row against the pending mask at once and takes the lowest ready
+  lane by `tzcnt`. (A first version stopped at 16 moves, and the wide form then
+  read 0.96 to 0.98 of the old path's time at 17.) A cycle saves the lowest pending destination, its readers
+  read scratch and its row empties. Nothing but the output is pushed.
+- **More than 32, up to 2^20** (`tier1_resolve_moves_wide`). Masked 16-lane
+  steps validate scratch exclusion and pack `(destination, identity bit 31 |
+  input index)` keys; a vector radix sort (conflict masks rank lanes within a
+  bucket, only the digits that differ) orders them by destination, and adjacent
+  equal destinations are invalid. Each pending move's writer, the move whose
+  destination is its source, is a 16-lane branchless lower bound by gathers;
+  reader counts add up by conflict masks. The ready moves are a three-level
+  bitset, so the lowest is three `tzcnt`s below the first nonzero top word, and
+  the cycle cursor advances 16 moves a step.
 
-When the ready heap is empty, every remaining destination has at least one
+When no move is ready, every remaining destination has at least one
 source user. There are at most as many source edges as remaining moves, so
 every remaining destination has exactly one user: the residual graph is a set
 of disjoint cycles. Saving one destination makes its move ready; its sole
 remaining consumer reads scratch instead. That cycle drains before another
-save can reuse scratch. The algorithm needs neither repeated source rewriting
-nor a scan for that consumer.
+save can reuse scratch.
 
-Both paths retain at most 16*N bytes for output columns. The indexed path uses
-28*N temporary bytes (two u64 key arrays and three u32 dependency/count/heap
-arrays), plus alignment; the small scan uses 5*N temporary bytes. Inputs remain
-immutable, errors restore the entry arena length and preserve the result, and
-success discards all temporary arrays. Sorting requires temporary capacity, so
-capacity exhaustion can precede duplicate-destination diagnosis.
+The emission itself stays an ordered loop: each choice depends on the moves
+emitted before it, and the order is the objects' (every caller's move
+sequence), so it can't be a different data-parallel order without changing
+code. Its steps are word operations on bitsets and masks. On the 9700X the two
+forms take 0.12 to 0.89 of the old routes' time at every count from 0 to
+2^20, real sets replayed (0.58 over all of them) and random sets by count (buster-performance's
+`docs/measurements/scalar-paths-removal-2924-2026-11-17/tier1-moves/`).
+
+Both forms retain 16*N bytes for output columns. The register form pushes
+nothing else; the wide form uses 24*N temporary bytes (two u64 key arrays and
+the u32 writers and reader counts) and the bitset's words, plus alignment.
+Inputs remain immutable, errors restore the entry arena length and preserve the
+result, and success discards all temporary arrays. The wide form allocates
+before it validates, so capacity exhaustion can precede an invalid input's
+diagnosis there. `test-tier1-allocation` checks every order against
+`tier1_move_test_definition`, the policy as a plain cubic scan, at every
+shape up to 1,024 moves, 256 random sets of 0 to 32 moves and 256 of 33 to
+64 (identity moves, fan-out and cycles), and refuses a duplicate destination
+in every lane of both forms.
 
 ### Resolver measurements (#608)
 
@@ -368,18 +388,10 @@ and 13.309–13.314 microseconds with dispatch. Median retired instructions fell
 from 3,842,936,080 to 420,805. Across 32–1024 moves, doubling N increased the
 original chain's instruction work by 7.39–7.96 times, and dispatch's by
 2.13–2.15 times. Reversed chains, independent moves, cycles and fan-out were
-also measured at every requested size and retain the indexed path's bounded
-work. These are resolver measurements, separate from whole-compiler throughput.
-
-At 1024 moves the indexed call peaks at 44 KiB of arena storage versus 21 KiB
-for the scan; both retain 16 KiB. The small cutoff preserves the current
-caller's original algorithm and smaller arena budget. Its tuning remains an
-opportunity: forced indexing takes 43.811–44.878 ns on the six-move synthetic
-chain, while dispatch takes 106.910–117.510 ns; the original scan wins on the
-one- and two-move chains. The actual caller's shuffle distribution remains
-unmeasured, so these data establish neither an optimal cutoff nor a corpus
-speedup. The native/Clang pipeline, allocation, liveness, selection, call-graph
-and resolver ASan/UBSan qualification all passed on the locked host.
+also measured at every requested size. These are resolver measurements,
+separate from whole-compiler throughput; they were the scan and the indexed path
+that #3450 replaced with the two vector forms above, whose own gate is in their
+paragraph.
 
 The [pinned report, harnesses, raw counters/timings, assembly and identities](https://github.com/buster14a/buster-performance/tree/24e978f162396700cfc1848a4d77804e2e7f065e/docs/measurements/tier1-moves-608-2026-10-27)
 record the shapes, complete process ranges, memory costs and validation scope.
@@ -591,6 +603,96 @@ chosen predecessors read from a given tree, with and without an added entry,
 with the analysis's on its fixtures and 2,000 random CFGs, and checks that a
 given tree is the one read. `sqlite3.c`'s and Lua's 34 units' `--tier1 -c`
 objects are the same bytes.
+
+### Slots already current (#2553)
+
+After #2603 and the allocator work that followed it, the edges' stores were
+still a third of speedtest1's edge traffic: 44.1 M of 134.5 M tagged edge
+instructions on main `b7d0b5ed` (#1189's tags, callgrind), 27.2 M of them in
+`sqlite3VdbeExec`. Much of it stored a value back into a slot that already
+held it. Each handler of `sqlite3VdbeExec`'s opcode loop enters with the
+loop's values where the first handler has them (#1216's convention), which
+for three of them is a register, while the dispatch, short of registers for
+the loop's other values and the jump table's address, holds them in their
+slots: the edge into each handler reloads them, and the handler's edge back
+to the loop's latch, whose places for them are their slots, stored them there
+again, 5.8 M times for a loop-invariant 32-bit value alone. #1216's rule
+(`tier1_cfg_slot_current`) leaves out such a store only where the
+predecessor block itself stored the value or entered with it in its slot,
+and #2784's slot stamps only within a run of blocks each the only
+predecessor of the next.
+
+`tier1_cfg_current_slots` finds, for each block, the values whose slots hold
+them at its start whatever their ranges' places there: a forward
+must-analysis over the dense values, after slot sharing. Once stored, a
+value's slot holds it while it lives: an SSA value never changes, and slots
+are shared only by values never live at once. So, with SLOT[b] the values
+with a slot fragment in block b (an edge or a transition stored them there,
+or they rest there),
+
+    IN[b] = AND over b's predecessors p of OUT[p]
+    OUT[b] = (IN[b] & LIVE_IN[b]) | SLOT[b]
+
+with the entry's IN, and that of a block without predecessors, empty. A
+value is live into no block its definition is in, so `LIVE_IN` drops what an
+earlier iteration of a loop stored before the value's next definition. The
+candidates are the values with a slot that are live into some block (the
+liveness's lists), solved as the liveness is since #1384, 512 at a time in
+one AVX-512 row a block (`dataflow.c`'s rows), so that the rows take
+blocks * 256 bytes however many values have slots. A group keeps OUT beside
+IN, so that an edge is a load and an AND, starts every IN full but the
+entry's and those of blocks without predecessors, and sweeps the blocks in
+reverse postorder until none changes. In layout order, where a loop's
+header follows its body, `sqlite3VdbeExec` took 7 sweeps.
+
+- **The edges.** An edge leaves out a store of a value from a register into
+  its own slot where the slot is current at the predecessor's exit: current at
+  its start and live through it (the predecessor's list, stamped as its edges
+  are made), or stored in it (`tier1_cfg_slot_current`, #1216's proof, which
+  is the rest of OUT for a value in a register at the exit). An operand of a phi whose slot it
+  shares counts too: the slot then holds the operand, which is what the phi
+  takes. A changed operand of another slot still stores.
+- **The blocks.** The allocation publishes each block's IN restricted to the
+  values live into it (`Tier1CfgAllocation.current_slots`, by
+  `current_slot_offsets`). The CFG consumer stamps them as each block starts
+  (`tier1_emit_phase`'s slot stamps), so that an eviction into such a slot
+  stores nothing either.
+- **The checkers.** They are assertions, never trusted. `tier1_cfg_verify`
+  seeds each block's entry state with them and checks, on every edge into the
+  block, that the edge's final state holds each one, as it checks the places;
+  it refuses one at a block no edge enters, or of a value not live into the
+  block. The CFG allocation's certificate (`tier1_certificate_cfg`) adds each
+  as a block-entry fact, which the checker proves on every edge, and the code's
+  certificate gets each one held in a register or as its recipe at a block's
+  start as an entry slot (`Tier1EmitResult.entry_slots`, #2870's), proved the
+  same way from the decoded records.
+
+By callgrind (#1189's `gap.c` and tags, #1217's inputs, Lua's hash seed fixed,
+this container's builds of the programs), main `b7d0b5ed` against the change:
+
+| Instructions | main | this | change |
+| --- | ---: | ---: | ---: |
+| speedtest1 | 2,279.18 M | 2,255.03 M | −1.06% |
+| speedtest1's edge stores (T+t) | 44.14 M | 30.15 M | −13.99 M |
+| speedtest1's spill stores (S) | 30.95 M | 21.03 M | −9.92 M |
+| Lua's five scripts | 4,000.99 M | 3,994.60 M | −0.16% |
+| Lua's edge stores (T+t) | 6.24 M | 5.54 M | −0.70 M |
+| Lua's spill stores (S) | 34.95 M | 29.25 M | −5.70 M |
+
+No other tag changes, and no function runs 0.05 M more.
+`sqlite3VdbeExec` runs 15.75 M fewer (473.5 M to 457.8 M), `balance_nonroot`
+1.39 M and `sqlite3Insert` 1.18 M fewer; Lua's `luaV_execute` 3.22 M and
+`rehash` 2.36 M. speedtest1's tagged edge traffic falls from 134.5 M to
+120.5 M, Lua's from 110.3 M to 109.6 M. Statically (`--tier1-report`),
+speedtest1's unit has 7,031 spill stores instead of 10,976 and 23,728 edge
+moves instead of 26,484, Lua's 388 and 1,911 instead of 460 and 1,962.
+
+What the change leaves of `sqlite3VdbeExec`'s loop is the convention itself:
+on most opcodes the dispatch's edge reloads the three values into the
+handlers' registers and stores the step counter, which the dispatch holds in
+a register, into its slot, for handlers that read none of them. The handlers
+take their places from the first handler's entry, laid out long before the
+dispatch is allocated.
 
 ### The opmask class (#179)
 
@@ -2665,11 +2767,12 @@ victim's register to `UINT8_MAX` and a reload records the new one.
 
 The move-specific fixtures (`tier1_moves_test.c`, #608) exercise the chain,
 reversed chain, independent moves, long and disjoint cycles, fan-out and
-identities at 0, 1, 2, 7, 8, 9, 15, 16, 17, 31, 32, 64, 128, 256, 512 and
+identities at 0, 1, 2, 7, 8, 9, 15, 16, 17, 31, 32, 33, 64, 128, 256, 512 and
 1024 moves, with sparse ids including UINT32_MAX. A 2^20-move chain checks the
-full accepted limit. Snapshot execution checks meaning, the independent scan
-checks exact ordering on small sets, and the scalar/vector indexed paths agree
-exactly. Read-only guarded columns cover every tail through 33 elements; a
+full accepted limit, and random sets of 5,000 and 300,000 moves (many ready at
+once, cycles, fan-out) the wide form's bitset levels and cycle cursor.
+Snapshot execution checks meaning, and every order up to 1,024 moves is
+`tier1_move_test_definition`'s exactly. Read-only guarded columns cover every tail through 33 elements; a
 byte-by-byte capacity sweep checks rollback, prior arena contents and retained
 output length. Scratch collisions, duplicate destinations, excessive counts
 and absent columns fail transactionally.

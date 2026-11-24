@@ -77,7 +77,7 @@ static void ir_stack_test_consumers(IrLowerTestTally* tally, const IrFunction* f
             switch (pass)
             {
             case 0:
-                check = scalar ? ssa_ir_promote_scalar(function, output, scratch, &transformed) : ssa_ir_promote(function, output, scratch, &transformed);
+                check = ssa_ir_promote(function, output, scratch, &transformed);
                 break;
             case 1:
             {
@@ -216,7 +216,7 @@ static void ir_stack_test_chain(IrLowerTestTally* tally, const IrFunction* funct
             switch (pass)
             {
             case 0:
-                check = scalar ? ssa_ir_promote_scalar(&current, output, scratch, &next) : ssa_ir_promote(&current, output, scratch, &next);
+                check = ssa_ir_promote(&current, output, scratch, &next);
                 break;
             case 1:
             {

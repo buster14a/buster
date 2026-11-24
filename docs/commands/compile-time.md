@@ -30,6 +30,13 @@ requirements. [Command index](README.md).
   lowering's coverage; the 9700X job runs it on
   `sqlite3.c` against tcc, clang -O0 and gcc -O0 (those two unpinned, their versions printed), with perf's counters and profile, where `changes`' `compile_time` says. [The compile-time
   guide](../../docs/compile-time.md) has the attribution. `test-checker-driver --executable` checks both.
+  With `--instructions-baseline FILE [--instructions-tolerance PARTS]` (#2850) the default compile's median user
+  instructions are held to the count FILE states (its first line that is no `#` comment, a decimal number alone): the
+  command fails where they are more than PARTS parts a million of it away, above or below (5,000, half a percent),
+  where FILE states no count, and where the host counts no instructions. It prints the count to write where a change
+  means to move it. The 9700X job's last measurement runs it on `sqlite3.c` against
+  `tools/ci/compile-instructions.txt` ([CI](ci.md)); a test's switch, `BUSTER_TEST_MEASURE_INSTRUCTIONS=N`, gives the
+  count in the median's place.
 
 With `-flazy-system-headers --time-stages`, each planned translation unit also
 prints `time-lazy planner=eager|tree|bindings tokens=N scalar-replay-tokens=N

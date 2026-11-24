@@ -277,7 +277,7 @@ static __attribute__((noinline)) void check_test_backend_source_benchmark(CheckT
             .functions = 2,
             .measured = 1,
             .status = 1,
-            .report = { "benchmark-backend-source: a function's vector path's compile failed, so its runs measured less than the corpus: no report\n",
+            .report = { "benchmark-backend-source: a function's compile failed, so its runs measured less than the corpus: no report\n",
                         " totals files=1 left_out=0 failures=0 measurement=failed\n" },
         },
         {
@@ -379,7 +379,7 @@ static __attribute__((noinline)) void check_test_backend_source_benchmark(CheckT
     } onlies[] = {
         { "vector", "typo", 1 },
         { "typo", "vector", 1 },
-        { "scalar", "encode", 0 },
+        { "sizing", "encode", 0 },
     };
     for (uint32_t i = 0; ready && i < BUSTER_ARRAY_LENGTH(onlies); i += 1)
     {

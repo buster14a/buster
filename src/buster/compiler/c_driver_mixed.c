@@ -13,6 +13,8 @@ static int check_driver_assembly(const CheckDriverCommand* command, const PPOpti
     // this unit's files instead; its intern table and Preprocessor are the lane's, never the standalone adapter's statics.
     options.files = NULL;
     options.semantic_pragmas = false;
+    // Nor does it start from the lane's root image, which is a C unit's prelude's (#3070).
+    options.root = NULL;
     const bool preprocess = unit->kind == CHECK_DRIVER_INPUT_ASSEMBLY_CPP;
     const char* output = command->output != NULL ? command->output : unit->object;
     String8 source = { 0 };

@@ -1,0 +1,1 @@
+typedef union {int *i;double *d;} U __attribute__((transparent_union));_Static_assert(!__builtin_types_compatible_p(U,int*),"");_Static_assert(__builtin_types_compatible_p(void(*)(U),void(*)(int*)),"");_Static_assert(__builtin_types_compatible_p(void(*)(double*),void(*)(U)),"");

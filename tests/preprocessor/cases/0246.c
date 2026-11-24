@@ -1,0 +1,4 @@
+#warning /*
+inside
+*/
+tail

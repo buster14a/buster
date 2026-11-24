@@ -762,8 +762,7 @@ jobs:
             if [ "$sample" != 1 ]; then
               taskset -c "$cpu" ./build/compiler benchmark-x86-zen5
             fi
-            taskset -c "$cpu" ./build/compiler benchmark-x86-zen5 --only vector
-            taskset -c "$cpu" ./build/compiler benchmark-x86-zen5 --only vector --after-scalar 200
+            taskset -c "$cpu" ./build/compiler benchmark-x86-zen5 --after-scalar 200
           done
 
       - name: Benchmark x86-64 disassembly
@@ -976,19 +975,6 @@ jobs:
         run: |
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-ssa
-
-      - name: Benchmark local SSA construction in isolation and after scalar work
-        # Where `changes` doesn't rule it out (the module's sources). Compare isolated execution and vector samples
-        # after warm scalar work across separate processes.
-        if: needs.changes.outputs.ssa != 'false'
-        run: |
-          cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
-          for repetition in 1 2 3; do
-              echo "SSA repetition $repetition"
-              taskset -c "$cpu" ./build/compiler benchmark-ssa --only scalar
-              taskset -c "$cpu" ./build/compiler benchmark-ssa --only vector
-              taskset -c "$cpu" ./build/compiler benchmark-ssa --only vector --after-scalar 200
-          done
 
       - name: Benchmark dominator analysis on synthetic and exported source CFGs
         # The --cfg run is #174's real-function importer smoke: test-ir-source --dominators-cfg writes the
@@ -1662,8 +1648,8 @@ jobs:
           taskset -c "$placement" ./build/compiler benchmark-streaming --units 100 --runs 5 --lanes "${#core_cpus[@]}" "${writer[@]}"
 
       - name: Benchmark the backend on the frozen SQLite source's functions
-        # #136: benchmark-backend's variants on the functions -c compiles of the oracle's frozen sqlite3.c, after both
-        # paths agree on every one. The feature queries answer what this compiler implements, as -c's do: with clang's
+        # #136: benchmark-backend's variants on the functions -c compiles of the oracle's frozen sqlite3.c, after every
+        # one compiles. The feature queries answer what this compiler implements, as -c's do: with clang's
         # answers (--clang-features), sqlite3.c takes its __atomic_* path, which the producer doesn't lower yet.
         if: env.MEASURE == 'all' || contains(env.MEASURE, ',backend-source,')
         run: |
@@ -1854,6 +1840,19 @@ jobs:
           cpu="$(awk '/^Cpus_allowed_list:/ { split($2, cpus, /[,-]/); print cpus[1] }' /proc/self/status)"
           taskset -c "$cpu" ./build/compiler benchmark-ir-optimize --only vector --after-scalar 200
           taskset -c "$cpu" ./build/compiler benchmark-ir-optimize-passes --only vector --after-scalar 200
+
+      - name: Hold sqlite3.c's compile to its instructions' baseline
+        # #2850: the user instructions of `-c` of the frozen corpus's sqlite3.c, the median of three compiles, against
+        # the count tools/ci/compile-instructions.txt states: the step fails where they are more than half a percent away
+        # from it, above or below (measure-compile --instructions-baseline). They repeat to a thousandth on this host. No
+        # pull request's or candidate's run reaches the 9700X (#2055, #1430), so this is what tells of a merge that moved
+        # the compile: the daily, dispatched and backlog runs' check. A change that means to move the count writes the new
+        # one in the file. The last of the measurements, so that a count out of its band costs the run none of them.
+        run: |
+          sqlite=/var/lib/buster-9700x/corpora/preprocessor-391e729af658/sqlite
+          printf '%s  %s\n' 0a409f1633283fa31a9126b11fbfd64a1991c5d30defad07e5745d4667f5e23d "$sqlite/sqlite3.c" | sha256sum --check
+          taskset -c 2 ./build/compiler measure-compile --runs 3 --instructions-baseline tools/ci/compile-instructions.txt -- \
+            -c -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_THREADSAFE=0 -DSQLITE_ENABLE_MEMSYS5 -DSQLITE_ENABLE_RTREE "-I$sqlite" "$sqlite/sqlite3.c"
 
       - name: Remove the comparison build worktree
         if: ${{ always() && steps.compiler_builds.outputs.directory != '' }}

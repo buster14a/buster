@@ -477,86 +477,8 @@ static void check_test_overload_arguments(CheckTest* test, TypeTable* table)
 
 static __attribute__((noinline)) void check_test_overload_sources(CheckTest* test, const char* clang)
 {
-    const CheckSourceFixture fixtures[] = {
-        { .name = "overload tgmath selection and unavailable fallback", .source = "#define O __attribute__((overloadable))\nstatic void choose(...) O __attribute__((unavailable)); static int choose(int x) O{return x;} static double choose(double x) O{return x;} _Static_assert(_Generic(choose(3),int:1,default:0),\"int\"); _Static_assert(_Generic(choose(3.0),double:1,default:0),\"double\"); int run(void){return choose(7);}\n" },
-        { .name = "overload selected unavailable fallback", .source = "#define O __attribute__((overloadable))\nvoid f(...) O __attribute__((unavailable)); int f(int) O; void g(void){f((void*)1);}\n", .rejected = true },
-        { .name = "overload exact source visibility", .source = "#define O __attribute__((overloadable))\nint f(int) O; _Static_assert(_Generic(f(1.0),int:1,default:0),\"before\"); double f(double) O; _Static_assert(_Generic(f(1.0),double:1,default:0),\"after\");\n" },
-        { .name = "overload lexical hiding", .source = "#define O __attribute__((overloadable))\nint f(int) O; double f(double) O; void g(void){int f(int) O; _Static_assert(_Generic(f(1.0),int:1,default:0),\"inner\");} _Static_assert(_Generic(f(1.0),double:1,default:0),\"outer\");\n" },
-        { .name = "overload nested calls use selected type", .source = "#define O __attribute__((overloadable))\nint f(int) O; double f(double) O; _Static_assert(_Generic(f(f(1.0)),double:1,default:0),\"nested\");\n" },
-        { .name = "overload typeof uses selected type", .source = "#define O __attribute__((overloadable))\nint f(int) O; double f(double) O; __typeof__(f(1.0)) value; _Static_assert(__builtin_types_compatible_p(__typeof__(value),double),\"typeof\");\n" },
-        { .name = "overload common parameter redeclaration", .source = "#define O __attribute__((overloadable))\nint f(int) O; double f(double) O; int f(int) O; _Static_assert(_Generic(f(1),int:1,default:0),\"redecl\");\n" },
-        { .name = "indexed aligned parameter redeclaration", .source = "#define O __attribute__((overloadable))\ntypedef int A __attribute__((aligned(16))); int f(A**) O; int f(int**) O; _Static_assert(_Generic(f((int**)0),int:1,default:0),\"aligned\");\n" },
-        { .name = "indexed sibling scopes share linkage and restore outer set", .source = "#define O __attribute__((overloadable))\nint f(int) O; double f(double) O; void g(void){{int f(int) O;} {int f(int) O; _Static_assert(_Generic(f(1.0),int:1,default:0),\"sibling\");} _Static_assert(_Generic(f(1.0),double:1,default:0),\"restored\");}\n" },
-        { .name = "indexed sibling linkage return conflict", .source = "#define O __attribute__((overloadable))\nvoid g(void){{int f(int) O;} {double f(int) O;}}\n", .rejected = true },
-        { .name = "indexed oldstyle returns retain earlier prototype constraint", .source = "#define O __attribute__((overloadable))\nint (*f(int))(int) O; int (*f(int))() O; int (*f(int))(double) O;\n", .rejected = true },
-        { .name = "indexed redeclarations retain earlier definition", .source = "#define O __attribute__((overloadable))\nint f(int x) O{return x;} double f(double) O; int f(int) O; int f(int x) O{return x;}\n", .rejected = true },
-        { .name = "indexed activation retains ordinary definition history", .source = "#define O __attribute__((overloadable))\nint f(int x){return x;} int f(int); double f(double) O; int f(int x){return x;}\n", .rejected = true },
-        { .name = "indexed activation inherits ordinary unavailable history", .source = "#define O __attribute__((overloadable))\nint f(int) __attribute__((unavailable)); int f(int); double f(double) O; int f(int); void g(void){f(1);}\n", .rejected = true },
-        { .name = "indexed second unmarked signature rejects", .source = "#define O __attribute__((overloadable))\nint f(int); double f(double) O; int f(char);\n", .rejected = true },
-        { .name = "indexed explicit linkage change rejects", .source = "#define O __attribute__((overloadable))\nint f(int) O; static int f(int) O;\n", .rejected = true },
-        { .name = "indexed ABI inherited across sibling scopes", .source = "#define O __attribute__((overloadable))\nvoid g(void){{int f(int) O __attribute__((ms_abi));} {int f(int) O; int (__attribute__((ms_abi))*p)(int)=f;}}\n" },
-        { .name = "indexed explicit ABI conflict across sibling scopes", .source = "#define O __attribute__((overloadable))\nvoid g(void){{int f(int) O __attribute__((ms_abi));} {int f(int) O __attribute__((sysv_abi));}}\n", .rejected = true },
-        { .name = "overload changing return type rejects", .source = "#define O __attribute__((overloadable))\nint f(int) O;\ndouble f(int) O;\n", .rejected = true },
-        { .name = "overload changing marked declaration rejects", .source = "#define O __attribute__((overloadable))\nint f(int) O;\nint f(int);\n", .rejected = true },
-        { .name = "overload one unmarked signature", .source = "#define O __attribute__((overloadable))\nint f(int); double f(double) O; _Static_assert(_Generic(f(1),int:1,default:0),\"unmarked\"); _Static_assert(_Generic(f(1.0),double:1,default:0),\"marked\");\n" },
-        { .name = "overload incompatible best matches stay ambiguous", .source = "#define O __attribute__((overloadable))\nint f(int,long,long) O; double f(long,int,int) O;\nvoid g(void){f(1,1,1);}\n", .rejected = true },
-        { .name = "overload prototype required", .source = "int f() __attribute__((overloadable));\n", .rejected = true },
-        { .name = "ordinary bare ellipsis remains invalid", .source = "void f(...);\n", .rejected = true },
-        { .name = "overload applies only to functions", .source = "int x __attribute__((overloadable));\n", .rejected = true },
-        { .name = "overload cannot annotate an enumerator", .source = "enum E { X __attribute__((overloadable)) };\n", .rejected = true },
-        { .name = "overload cannot annotate a parameter", .source = "void f(int x __attribute__((overloadable)));\n", .rejected = true },
-        { .name = "overload cannot annotate a record tag", .source = "struct __attribute__((overloadable)) S {int x;};\n", .rejected = true },
-        { .name = "overload cannot annotate a member", .source = "struct S {int x __attribute__((overloadable));};\n", .rejected = true },
-        { .name = "overload selects ordinary unmarked definition", .source = "int pick(int x){return x+5;} double pick(double) __attribute__((overloadable)); int run(void){return pick(7);}\n" },
-        { .name = "overload call in raw attribute", .source = "#define O __attribute__((overloadable))\nint f(int) O; double f(double) O; typedef int T [[gnu::aligned(sizeof(f(1.0)))]]; _Static_assert(_Alignof(T)==8,\"raw call\");\n" },
-        { .name = "overload zero argument call in raw attribute", .source = "#define O __attribute__((overloadable))\nlong f(void) O; int f(int) O; typedef int T [[gnu::aligned(sizeof(f()))]]; _Static_assert(_Alignof(T)==8,\"raw zero call\");\n" },
-        { .name = "overload parenthesized callee", .source = "#define O __attribute__((overloadable))\nint f(int) O; double f(double) O; _Static_assert(_Generic((f)(1.0),double:1,default:0),\"grouped\");\n" },
-        { .name = "overload deep pointer qualification", .source = "#define O __attribute__((overloadable))\nint f(const int*const*) O; double f(void*) O; _Static_assert(_Generic(f((int**)1),int:1,default:0),\"qualified\");\n" },
-        { .name = "outer overload supplies unique function argument target", .source = "#define O __attribute__((overloadable))\nint f(int) O; double f(double) O; int take(int(*)(int)) O; double take(char*) O; _Static_assert(_Generic(take(f),int:1,default:0),\"context\");\n" },
-        { .name = "outer overload preserves ambiguous function argument targets", .source = "#define O __attribute__((overloadable))\nint f(int) O; double f(double) O; int take(int(*)(int)) O; double take(double(*)(double)) O;\nvoid g(void){take(f);}\n", .rejected = true },
-        { .name = "ordinary call supplies function argument target", .source = "#define O __attribute__((overloadable))\nint f(int) O; double f(double) O; int take(int(*)(int)); _Static_assert(_Generic(take(f),int:1,default:0),\"ordinary context\");\n" },
-        { .name = "function pointer call supplies function argument target", .source = "#define O __attribute__((overloadable))\nint f(int) O; double f(double) O; int(*take)(int(*)(int)); _Static_assert(_Generic(take(&f),int:1,default:0),\"pointer context\");\n" },
-        { .name = "raw outer call supplies function argument target", .source = "#define O __attribute__((overloadable))\nint f(int) O; double f(double) O; int take(int(*)(int)) O; double take(char*) O; typedef int T [[gnu::aligned(sizeof(take(f)))]]; _Static_assert(_Alignof(T)==4,\"raw context\");\n" },
-        { .name = "raw cast selects exact function address", .source = "#define O __attribute__((overloadable))\nint f(int) O; double f(double) O; typedef int T [[gnu::aligned(sizeof((int(*)(int))f))]]; _Static_assert(_Alignof(T)==8,\"raw cast\");\n" },
-        { .name = "typeof cannot choose latest overload", .source = "#define O __attribute__((overloadable))\nint f(int) O; double f(double) O;\n__typeof__(f) p;\n", .rejected = true },
-        { .name = "typeof cast supplies exact overload context", .source = "#define O __attribute__((overloadable))\nint f(int) O; double f(double) O; __typeof__((int(*)(int))f) p; _Static_assert(__builtin_types_compatible_p(__typeof__(p),int(*)(int)),\"typed address\");\n" },
-        { .name = "unavailable singleton in unchosen generic association", .source = "int f(int) __attribute__((overloadable,unavailable));\n_Static_assert(_Generic(0,int:1,default:f),\"type\");\n", .rejected = true },
-        // Which units get overload tables (#1038): a name of the attribute's inside an attribute list, in each spelling and
-        // place, but no other token of that name, which gave main.c tables and left its expressions' walk scalar.
-        { .name = "overload names outside attribute lists make no tables", .source = "struct s { int overloadable; };\nint __overloadable__;\nint get(struct s* p){int overloadable = p->overloadable; return overloadable + __overloadable__;}\nint run(void){struct s v = {3}; return get(&v);}\n",
-          .overload_tables = CHECK_TEST_OVERLOAD_NONE },
-        { .name = "overload attribute after another in its list", .source = "int f(int) __attribute__((unused, overloadable)); double f(double) __attribute__((__overloadable__)); _Static_assert(_Generic(f(1.0),double:1,default:0),\"listed\"); int run(void){return f(2);}\n",
-          .overload_tables = CHECK_TEST_OVERLOAD_TABLES },
-        { .name = "overload attribute with empty arguments", .source = "__attribute__((overloadable())) int f(int); __attribute__((overloadable)) double f(double); _Static_assert(_Generic(f(1.0),double:1,default:0),\"empty\");\n",
-          .overload_tables = CHECK_TEST_OVERLOAD_TABLES },
-        { .name = "overload standard attribute in clang's namespace", .source = "[[clang::overloadable]] long q(long); [[clang::overloadable]] char* q(char*); _Static_assert(_Generic(q((char*)0),char*:1,default:0),\"standard\"); long run(void){long (*p)(long) = &q; return (__extension__ q)(4) + p(5) + (&q)(6);}\n",
-          .overload_tables = CHECK_TEST_OVERLOAD_TABLES },
-        { .name = "unavailable selected address from a set remains usable", .source = "#define O __attribute__((overloadable))\nint f(int) O __attribute__((unavailable)); double f(double) O; int take(int(*)(int)) O; double take(char*) O; _Static_assert(_Generic(take(_Generic(0,int:f,default:0)),int:1,default:0),\"selected argument\"); int g(void){return ((int(*)(int))f)(1);}\n" },
-    };
-    char directory[] = "/tmp/buster-check-overload-source-XXXXXX";
-    bool ready = mkdtemp(directory) != 0;
-    char paths[BUSTER_ARRAY_LENGTH(fixtures)][160];
-    char* pointers[BUSTER_ARRAY_LENGTH(fixtures)];
-    ParseTestClang outcomes[BUSTER_ARRAY_LENGTH(fixtures)];
-    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
-    {
-        snprintf(paths[i], sizeof(paths[i]), "%s/%u.c", directory, i);
-        pointers[i] = paths[i];
-        ready &= parse_test_write(paths[i], fixtures[i].source, strlen(fixtures[i].source));
-    }
-    const char* mode = "-std=gnu17";
-    const bool oracle = ready && parse_test_clang(clang, &mode, 1, pointers, BUSTER_ARRAY_LENGTH(fixtures), outcomes);
-    check_test_expect(test, oracle, "overload full source Clang oracle runs");
-    for (uint32_t i = 0; oracle && i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
-    {
-        check_test_expect(test, outcomes[i].rejected == fixtures[i].rejected, fixtures[i].name);
-        check_test_source(test, fixtures + i, paths[i], outcomes + i);
-    }
-    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
-    {
-        unlink(paths[i]);
-    }
-    rmdir(directory);
+    // Its source fixtures are runtime data (#2053): tests/checker/overload, which check_test_suite reads and runs.
+    check_test_suite(test, clang, "checker/overload", "overload full source Clang oracle runs");
 }
 
 // Which names of the overloadable attribute's count_tokens counts (#1038): those inside an attribute list, by both of its

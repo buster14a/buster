@@ -318,6 +318,18 @@ static __attribute__((unused)) void* arena_push_array(Arena* arena, uint64_t cou
 #define BUSTER_ARENA_PUSH_ARRAY(arena, Type, count) ((Type*)arena_push_array((arena), (count), sizeof(Type), _Alignof(Type)))
 // Frees what was pushed since the arena's length was `length`. Its pages stay committed for the next pushes.
 static __attribute__((unused)) void arena_pop_to(Arena* arena, uint64_t length);
+// The most bytes arena_clear clears in place: past them, the whole pages of a longer stretch go back to the kernel.
+#define BUSTER_ARENA_CLEAR_BYTES (1ull << 20)
+// Makes `size` writable bytes of an arena's own mapping zero again, as a push expects of bytes no push took: cleared in
+// place, and past BUSTER_ARENA_CLEAR_BYTES of them their whole pages given back to the kernel (MADV_DONTNEED), which maps
+// them zero where they are next touched. For memory its owner keeps from one use to the next and knows the written
+// extent of (#3070: a units lane's preprocessor): clearing what one use wrote costs its bytes, where the pool's discard
+// of an arena costs a walk of its mapping and a fault for every page the next use touches (arena_release).
+static __attribute__((unused)) void arena_clear(uint8_t* bytes, uint64_t size);
+// Sets the arena's length to `length`, at most its peak, and leaves every byte past it zero (arena_clear of those up to
+// the peak, which becomes `length`), so that the arena's next pushes find what a fresh arena's do. Only for the arena's
+// owner, and only where no copy of the arena pushed past its peak, which a push through a copy doesn't move.
+static __attribute__((unused)) void arena_rewind(Arena* arena, uint64_t length);
 // Sets every byte pushes have taken (to the arena's peak) to `value`, and empties the arena: a test's way to make what
 // reuses the arena find no byte it didn't write as a fresh arena's zero (#152's --poison-arenas).
 static __attribute__((unused)) void arena_poison(Arena* arena, uint8_t value);
@@ -1611,6 +1623,35 @@ static void arena_pop_to(Arena* arena, uint64_t length)
 {
     assert(length <= arena->length);
     arena->length = length;
+}
+
+static void arena_clear(uint8_t* bytes, uint64_t size)
+{
+    const uint64_t kept = size < BUSTER_ARENA_CLEAR_BYTES ? size : BUSTER_ARENA_CLEAR_BYTES;
+    // The whole pages past the bytes cleared in place: given back, with the part of a page on each side of them cleared.
+    const uintptr_t begin = ((uintptr_t)bytes + kept + BUSTER_ARENA_PAGE_BYTES - 1) & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1);
+    const uintptr_t end = ((uintptr_t)bytes + size) & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1);
+    const bool discarded = size > kept && end > begin && madvise((void*)begin, end - begin, MADV_DONTNEED) == 0;
+    if (discarded)
+    {
+        memset(bytes, 0, begin - (uintptr_t)bytes);
+        memset((void*)end, 0, (uintptr_t)bytes + size - end);
+    }
+    else
+    {
+        memset(bytes, 0, size);
+    }
+}
+
+static void arena_rewind(Arena* arena, uint64_t length)
+{
+    const uint64_t peak = arena->peak;
+    if (arena->base != 0 && peak > length)
+    {
+        arena_clear(arena->base + length, peak - length);
+    }
+    arena->length = length;
+    arena->peak = peak < length ? peak : length;
 }
 
 static bool arena_untouched(const Arena* arena)
