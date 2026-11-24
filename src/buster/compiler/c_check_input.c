@@ -10882,9 +10882,11 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                         else if (repaired_width && !read && !width_error && width_value.type != 0 && check_action_is_integer(reader->types, width_value.type) &&
                                  reader->output->report_count == width_reports)
                         {
-                            check_input_report_argument(reader, begin, CHECK_INPUT_CONSTANT_EXPRESSION, CHECK_ARGUMENT_NOT_ICE);
+                            const uint32_t location = failure.token >= begin && failure.token < i ? failure.token : begin;
+                            check_input_report_argument(reader, location, CHECK_INPUT_CONSTANT_EXPRESSION, CHECK_ARGUMENT_NOT_ICE);
                             if (reader->output->report_count > width_reports)
                             {
+                                reader->output->reports[width_reports].member_operand = true;
                                 reader->output->reports[width_reports].completion = i - 1;
                             }
                             width_error = check_input_recover_reports(reader, width_reports);

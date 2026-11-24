@@ -12,13 +12,13 @@ void statements(int visible)
 struct Array { unsigned char [BOUND_NAME 4]; };
 struct Width { unsigned : x 5; };
 struct Grouped { unsigned : (count + missing_width) 5; };
-struct Known { unsigned : count 5; };
 struct KnownBound { unsigned char [count 4]; };
 
-void local(void)
+void local(int parameter)
 {
     enum { local_width = 2 };
     struct Local { unsigned : local_width 5; };
+    struct Nonconstant { unsigned : (1 + (parameter * 2)) 5; };
     struct Hidden { unsigned : later_width 5; };
     enum { later_width = 1 };
     (void)after_local;

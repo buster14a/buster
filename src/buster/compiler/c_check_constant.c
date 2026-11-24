@@ -5608,6 +5608,31 @@ static bool check_input_constant_job_step(CheckConstantInput* input, CheckValue*
     return valid;
 }
 
+// Clang points at the operand whose value a nonconstant bit-field width needed. Follow the evaluated
+// arithmetic through its recorded child values. A grouped lvalue is read at its opening parenthesis.
+static uint32_t check_constant_width_location(const CheckConstantInput* input, uint32_t root)
+{
+    const CheckInputReader* reader = input->reader;
+    uint32_t token = root;
+    uint32_t location = input->first;
+    while (token >= input->first && token < input->end)
+    {
+        const uint32_t index = token - input->first;
+        location = input->warning_begin[index];
+        const uint8_t role = reader->parser->tree.roles[token];
+        const bool arithmetic = role == PARSE_ROLE_CLOSE_GROUP || role == PARSE_ROLE_CLOSE_CAST || role == PARSE_ROLE_PREFIX ||
+                                (role >= PARSE_ROLE_MULTIPLICATIVE && role <= PARSE_ROLE_BITWISE_OR);
+        uint32_t child = arithmetic && input->values[index].category != CHECK_LVALUE ? reader->first_child[token] : BUSTER_CHECK_NONE;
+        while (child >= input->first && child < input->end &&
+               (!input->present[child - input->first] || input->values[child - input->first].constant_kind == CHECK_CONSTANT_INTEGER))
+        {
+            child = reader->next_child[child];
+        }
+        token = child;
+    }
+    return location;
+}
+
 static bool check_input_constant_read(CheckInputReader* reader, uint32_t first, uint32_t end, bool type_name, bool cached, bool scoped_names,
                                       CheckValue* value, TypeId* type, uint32_t* failed_token, CheckConstantFailure* diagnosed)
 {
@@ -5640,6 +5665,12 @@ static bool check_input_constant_read(CheckInputReader* reader, uint32_t first, 
     {
         valid = check_constant_range_value(&input, first, end, value) && check_constant_resolve(&input, value, 0, value);
         const uint32_t root = valid ? check_constant_range_root(&input, first, end) : BUSTER_CHECK_NONE;
+        if (input.diagnosed != NULL && input.diagnosed->diagnostic == CHECK_DIAG_NONE && !input.raw && root != BUSTER_CHECK_NONE &&
+            value->constant_kind != CHECK_CONSTANT_INTEGER && end < reader->parser->tokens.count && reader->parser->tokens.kinds[end] == PARSE_KIND_SEMI &&
+            check_constant_recovered_member(&input))
+        {
+            input.diagnosed->token = check_constant_width_location(&input, root);
+        }
         reader->constant_abi_origin = root != BUSTER_CHECK_NONE ? input.abi_origins[root - first] : 0;
         reader->constant_noderef = check_input_noderef_at(reader->output, root);
     }

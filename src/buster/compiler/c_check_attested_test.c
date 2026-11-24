@@ -962,6 +962,7 @@ static const CheckAttestedField check_attested_input_fields[] =
     { "sizeof_queries", CHECK_ATTESTED_FIELD_MEASURE },
     { "sizeof_query_tokens", CHECK_ATTESTED_FIELD_MEASURE },
     { "diagnostic_limits", CHECK_ATTESTED_FIELD_CONSEQUENCE },
+    { "invalid_member_operands", CHECK_ATTESTED_FIELD_CONSEQUENCE },
     { "diagnostic_report_count", CHECK_ATTESTED_FIELD_CONSEQUENCE },
     { "walk_end", CHECK_ATTESTED_FIELD_CONSEQUENCE },
     { "diagnostic_graph", CHECK_ATTESTED_FIELD_CONSEQUENCE },
