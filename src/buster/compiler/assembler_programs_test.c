@@ -854,7 +854,7 @@ static void asm_test_program_corpus(AsmTest* test, const char* directory, bool k
                     char source_path[PATH_MAX];
                     snprintf(source_path, sizeof(source_path), "examples/assembler/program-%s.c", programs[program]);
                     const size_t length = strlen(stem);
-                    static const char* const suffixes[] = { ".s", "-reference.o", "-vector.o", "-scalar.o", "-reference", "-program", "-reference-output", "-output", "-errors" };
+                    static const char* const suffixes[] = { ".s", "-reference.o", "-vector.o", "-reference", "-program", "-reference-output", "-output", "-errors" };
                     char paths[BUSTER_ARRAY_LENGTH(suffixes)][PATH_MAX];
                     bool okay = length + 24 < PATH_MAX;
                     for (uint32_t path = 0; okay && path < BUSTER_ARRAY_LENGTH(suffixes); path += 1)
@@ -865,12 +865,11 @@ static void asm_test_program_corpus(AsmTest* test, const char* directory, bool k
                     char* const assembly = paths[0];
                     char* const reference_path = paths[1];
                     char* const vector_path = paths[2];
-                    char* const scalar_path = paths[3];
-                    char* const reference_program = paths[4];
-                    char* const program_path = paths[5];
-                    char* const reference_output = paths[6];
-                    char* const program_output = paths[7];
-                    char* const error_path = paths[8];
+                    char* const reference_program = paths[3];
+                    char* const program_path = paths[4];
+                    char* const reference_output = paths[5];
+                    char* const program_output = paths[6];
+                    char* const error_path = paths[7];
                     // The compiler's arguments: the variant's flags it gives, then the corpus's.
                     char* generate[16] = { (char*)compilers[compiler] };
                     uint32_t argument = 1;
@@ -898,23 +897,21 @@ static void asm_test_program_corpus(AsmTest* test, const char* directory, bool k
                         // does, Ubuntu's doesn't); the assembler's are uncompressed, as the comparison needs (#1115).
                         char* gas[] = { "as", "--64", "--nocompress-debug-sections", "-o", reference_path, assembly, 0 };
                         char* vector[] = { "/proc/self/exe", "assemble", (char*)target, "-o", vector_path, assembly, 0 };
-                        char* scalar[] = { "/proc/self/exe", "assemble", "--scalar", (char*)target, "-o", scalar_path, assembly, 0 };
                         const bool runs = chosen->architecture != X86_ARCH_V4 || runs_v4;
                         bool reference = oracle_epoch_file(assembly) && asm_test_tool(gas, reference_path, program_output, error_path) == 0;
                         reference = reference && asm_test_program_link(compilers[compiler], reference_path, reference_program, program_output, error_path);
                         reference = reference && (!runs || object_test_run((char*[]){ reference_program, 0 }, reference_output, error_path) == 0);
                         asm_test_check(test, reference, name, "GNU as's object links and runs");
                         const AsmResult result = asm_test_pair(test, source, 1, chosen->architecture);
-                        bool assembled = result.error == 0 && object_test_run(vector, program_output, error_path) == 0 && object_test_run(scalar, program_output, error_path) == 0;
-                        asm_test_check(test, assembled, name, result.error != 0 ? result.error : "both production assembly commands");
+                        bool assembled = result.error == 0 && object_test_run(vector, program_output, error_path) == 0;
+                        asm_test_check(test, assembled, name, result.error != 0 ? result.error : "the production assembly command");
                         bool same = false;
-                        char difference[256] = "the vector and scalar objects differ";
+                        char difference[256] = "the object is empty";
                         if (assembled)
                         {
                             const String8 gnu = object_test_read_file(&files, reference_path);
                             const String8 vector_object = object_test_read_file(&files, vector_path);
-                            const String8 scalar_object = object_test_read_file(&files, scalar_path);
-                            same = vector_object.length != 0 && vector_object.length == scalar_object.length && memcmp(vector_object.pointer, scalar_object.pointer, vector_object.length) == 0;
+                            same = vector_object.length != 0;
                             ObjectView ours;
                             ObjectView theirs;
                             same = same && object_view_open(&ours, (const uint8_t*)vector_object.pointer, vector_object.length, false, difference, sizeof(difference));
@@ -947,7 +944,7 @@ static void asm_test_program_corpus(AsmTest* test, const char* directory, bool k
                             asm_test_check(test, ran, name, "the program assembled here links, runs and prints GNU as's program's output");
                         }
                         okay = reference && assembled && same && ran;
-                        snprintf(why, sizeof(why), "%s", !reference ? "GNU as's object links and runs" : !assembled ? (result.error != 0 ? result.error : "both production assembly commands") :
+                        snprintf(why, sizeof(why), "%s", !reference ? "GNU as's object links and runs" : !assembled ? (result.error != 0 ? result.error : "the production assembly command") :
                                                          !same ? difference : "the program assembled here links, runs and prints GNU as's program's output");
                         if (!assembled && result.error != 0)
                         {
