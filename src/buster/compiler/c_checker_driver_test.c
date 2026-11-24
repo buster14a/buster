@@ -148,7 +148,7 @@ static CheckDriverRunModes check_driver_run_modes = {
 
 // What main_driver reads as a process starts: arena_page_policy's variables and transparent huge pages setting, and the
 // lanes' test hooks. A run whose differ from this process's at its start needs a start of its own: a child.
-static const char* const check_driver_start_variables[] = { "BUSTER_HUGE_PAGES", "BUSTER_TEST_HOST_BUSY", "BUSTER_TEST_NO_LANE_THREADS",
+static const char* const check_driver_start_variables[] = { "BUSTER_HUGE_PAGES", "BUSTER_TEST_HOST_BUSY", "BUSTER_TEST_MEDIUM_PAGES", "BUSTER_TEST_NO_LANE_THREADS",
                                                             "BUSTER_TEST_LANE_FAIL_AT", "BUSTER_TEST_THREADS" };
 static char* check_driver_start_values[BUSTER_ARRAY_LENGTH(check_driver_start_variables)];
 static bool check_driver_start_set[BUSTER_ARRAY_LENGTH(check_driver_start_variables)];
@@ -7339,39 +7339,49 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
     // huge pages off for the process; "1" leaves them as the system has them, even where the process that started it had
     // them off; without it, they are off on a virtual machine (CPUID's hypervisor bit), which the child must decide
     // itself, and elsewhere as the process that started it had them, but on a busy host, with them on, its arenas alone
-    // take base pages ("busy").
+    // take base pages ("busy"), or medium pages where the host gives them ("medium", #2536: BUSTER_TEST_MEDIUM_PAGES
+    // forces that answer too, which only a busy host's process asks for).
     const char* pages_saved = getenv("BUSTER_HUGE_PAGES");
     char* pages_copy = pages_saved != NULL ? strdup(pages_saved) : NULL;
     const char* busy_saved = getenv("BUSTER_TEST_HOST_BUSY");
     char* busy_copy = busy_saved != NULL ? strdup(busy_saved) : NULL;
+    const char* medium_saved = getenv("BUSTER_TEST_MEDIUM_PAGES");
+    char* medium_copy = medium_saved != NULL ? strdup(medium_saved) : NULL;
     const int pages_own = prctl(PR_GET_THP_DISABLE, 0, 0, 0, 0);
     uint32_t eax = 0;
     uint32_t ebx = 0;
     uint32_t ecx = 0;
     uint32_t edx = 0;
     const bool virtual_machine = __get_cpuid(1, &eax, &ebx, &ecx, &edx) != 0 && (ecx & (1u << 31)) != 0;
-    // Each case: the variable's value (null for none), this process's setting, whether the host is busy, and the child's
-    // report.
+    // Each case: the variable's value (null for none), this process's setting, whether the host is busy, whether it
+    // gives medium pages, and the child's report.
     const struct
     {
         const char* setting;
         int inherited;
         const char* busy;
+        const char* medium;
         const char* report;
     } pages_cases[] = {
-        { "0", 0, "0", "off" },
-        { "1", 1, "0", "system" },
-        { NULL, 0, "0", virtual_machine ? "off" : "system" },
-        { NULL, 1, "0", "off" },
-        { "0", 0, "1", "off" },
-        { "1", 0, "1", "system" },
-        { NULL, 0, "1", virtual_machine ? "off" : "busy" },
-        { NULL, 1, "1", "off" },
+        { "0", 0, "0", "0", "off" },
+        { "1", 1, "0", "0", "system" },
+        { NULL, 0, "0", "0", virtual_machine ? "off" : "system" },
+        { NULL, 1, "0", "0", "off" },
+        { "0", 0, "1", "0", "off" },
+        { "1", 0, "1", "0", "system" },
+        { NULL, 0, "1", "0", virtual_machine ? "off" : "busy" },
+        { NULL, 1, "1", "0", "off" },
+        { "0", 0, "1", "1", "off" },
+        { "1", 0, "1", "1", "system" },
+        { NULL, 0, "1", "1", virtual_machine ? "off" : "medium" },
+        { NULL, 1, "1", "1", "off" },
+        { NULL, 0, "0", "1", virtual_machine ? "off" : "system" },
     };
-    bool paged = made && (pages_saved == NULL || pages_copy != NULL) && (busy_saved == NULL || busy_copy != NULL) && pages_own >= 0;
+    bool paged = made && (pages_saved == NULL || pages_copy != NULL) && (busy_saved == NULL || busy_copy != NULL) && (medium_saved == NULL || medium_copy != NULL) && pages_own >= 0;
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(pages_cases); c += 1)
     {
         paged = paged && prctl(PR_SET_THP_DISABLE, pages_cases[c].inherited, 0, 0, 0) == 0 && setenv("BUSTER_TEST_HOST_BUSY", pages_cases[c].busy, 1) == 0 &&
+                setenv("BUSTER_TEST_MEDIUM_PAGES", pages_cases[c].medium, 1) == 0 &&
                 (pages_cases[c].setting != NULL ? setenv("BUSTER_HUGE_PAGES", pages_cases[c].setting, 1) : unsetenv("BUSTER_HUGE_PAGES")) == 0;
         const int pages_status = paged ? check_test_driver_spawn(syntax, &text) : -1;
         char expected[64];
@@ -7461,8 +7471,10 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
     paged = (pages_own < 0 || prctl(PR_SET_THP_DISABLE, pages_own, 0, 0, 0) == 0) && paged;
     paged = (pages_copy != NULL ? setenv("BUSTER_HUGE_PAGES", pages_copy, 1) == 0 : unsetenv("BUSTER_HUGE_PAGES") == 0) && paged;
     paged = (busy_copy != NULL ? setenv("BUSTER_TEST_HOST_BUSY", busy_copy, 1) == 0 : unsetenv("BUSTER_TEST_HOST_BUSY") == 0) && paged;
+    paged = (medium_copy != NULL ? setenv("BUSTER_TEST_MEDIUM_PAGES", medium_copy, 1) == 0 : unsetenv("BUSTER_TEST_MEDIUM_PAGES") == 0) && paged;
     free(pages_copy);
     free(busy_copy);
+    free(medium_copy);
     printf("  huge pages: %s\n", virtual_machine ? "a virtual machine (CPUID's hypervisor bit): off without BUSTER_HUGE_PAGES, by the child's own test" :
                                                    "not a virtual machine: as the parent had them without BUSTER_HUGE_PAGES, the arenas' alone off on a busy host");
     check_test_expect(test, paged, virtual_machine ? "BUSTER_HUGE_PAGES=0 turns huge pages off for the process, 1 leaves them as the system has them, and "
