@@ -1701,12 +1701,6 @@ struct PPTestCase
 #include <fcntl.h>
 #include <limits.h>
 
-// 4,096 'A's: an identifier, and a header name too long for any path (#254's review), which the history's cases use.
-#define BUSTER_PP_TEST_A64 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-#define BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64
-#define BUSTER_PP_TEST_A4096 BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A512
-_Static_assert(sizeof(BUSTER_PP_TEST_A4096) == 4097, "BUSTER_PP_TEST_A4096 must be 4,096 letters");
-
 // Runtime header queries may get their identity through a macro. Raw-looking header bytes remain header bytes;
 // earlier and later macro definitions keep the prepared view that supplied their token indexes. Its own check
 // (pp_test_raw_query_views) keeps it in C; the cases' copy is tests/preprocessor/trees' raw-query.
@@ -1757,6 +1751,8 @@ struct PPTestFixtures
 {
     Arena storage;
     PPTestCase* cases;
+    uint8_t* rows;
+    size_t row_size;
     const char** identifiers;
     uint32_t count;
     PPTestFile* files;
@@ -1954,7 +1950,7 @@ static bool pp_test_fixture_lines(PPTestFixtures* fixtures, const char* director
             if (valid && !line(fixtures, directory, fields, number))
             {
                 char reason[sizeof(fixtures->problem)];
-                snprintf(reason, sizeof(reason), "%s", fixtures->problem);
+                snprintf(reason, sizeof(reason), "%s", fixtures->problem[0] != 0 ? fixtures->problem : "invalid case metadata");
                 snprintf(fixtures->problem, sizeof(fixtures->problem), "%s line %u: %s", path, number, reason);
                 valid = false;
             }
@@ -2059,6 +2055,52 @@ static bool pp_test_fixture_text(PPTestFixtures* fixtures, const char* directory
     uint64_t length = 0;
     *text = valid ? pp_test_fixture_read(fixtures, path, false, &length) : 0;
     return *text != 0;
+}
+
+// The smaller suites keep their own row types and execution loops. They share the catalog bounds,
+// raw text reader and orphan check with the main regression cases. All rows live until the suite ends.
+static void* pp_test_fixture_row(PPTestFixtures* fixtures, const char* id)
+{
+    bool valid = pp_test_fixture_word(id) && fixtures->count < BUSTER_PP_TEST_FIXTURE_CASES;
+    for (uint32_t i = 0; valid && i < fixtures->count; i += 1)
+    {
+        valid = strcmp(id, fixtures->identifiers[i]) != 0;
+    }
+    void* row = NULL;
+    if (valid)
+    {
+        row = fixtures->rows + fixtures->row_size * fixtures->count;
+        memset(row, 0, fixtures->row_size);
+        fixtures->identifiers[fixtures->count++] = id;
+    }
+    else
+    {
+        snprintf(fixtures->problem, sizeof(fixtures->problem), "invalid or duplicate case ID '%s'", id);
+    }
+    return row;
+}
+
+static bool pp_test_fixture_table(PPTestFixtures* fixtures, const char* suite, const char* header, uint32_t fields, size_t row_size,
+                                  bool (*read_row)(PPTestFixtures*, const char*, char**, uint32_t), const char** probe)
+{
+    *fixtures = (PPTestFixtures){
+        .storage = arena_reserve(UINT64_C(1) << 27),
+        .row_size = row_size,
+    };
+    fixtures->rows = arena_push(&fixtures->storage, row_size * BUSTER_PP_TEST_FIXTURE_CASES, 8);
+    fixtures->named = arena_push(&fixtures->storage, sizeof(*fixtures->named) * BUSTER_PP_TEST_FIXTURE_CASES * 4, 8);
+    fixtures->identifiers = arena_push(&fixtures->storage, sizeof(*fixtures->identifiers) * BUSTER_PP_TEST_FIXTURE_CASES, 8);
+    char directory[PATH_MAX];
+    const int length = snprintf(directory, sizeof(directory), "%s/preprocessor/%s", pp_test_fixture_root, suite);
+    const bool ready = length >= 0 && (size_t)length < sizeof(directory) && fixtures->rows != NULL && fixtures->named != NULL && fixtures->identifiers != NULL;
+    const bool valid = ready && (probe == NULL || pp_test_fixture_text(fixtures, directory, "probe", ".c", probe)) &&
+                       pp_test_fixture_lines(fixtures, directory, header, fields, read_row) && fixtures->count != 0 && pp_test_fixture_orphans(fixtures, directory);
+    if (!valid)
+    {
+        fprintf(stderr, "%s/catalog.tsv: %s\n", directory, fixtures->problem[0] ? fixtures->problem : "empty or invalid fixture table");
+        fixtures->count = 0;
+    }
+    return valid;
 }
 
 // A count flag's decimal value, 1 to UINT32_MAX, in `*value`; false for another value or a repeated flag.
@@ -2222,9 +2264,9 @@ static bool pp_test_write_file(const char* path, const char* text)
 
 // Writes a case's files into its directory (other.h, and the others with their directories, or links); returns the
 // main file's path (in `path`).
-static bool pp_test_write_case(const PPTestCase* test, const char* directory, char* path, uint32_t capacity)
+static bool pp_test_write_named_case(const PPTestCase* test, const char* directory, const char* name, char* path, uint32_t capacity)
 {
-    snprintf(path, capacity, "%s/case.c", directory);
+    snprintf(path, capacity, "%s/%s", directory, name);
     bool result = pp_test_write_file(path, test->source);
     char other[4096];
     if (result && test->other != 0)
@@ -2256,12 +2298,20 @@ static bool pp_test_write_case(const PPTestCase* test, const char* directory, ch
     return result;
 }
 
+static bool pp_test_write_case(const PPTestCase* test, const char* directory, char* path, uint32_t capacity)
+{
+    return pp_test_write_named_case(test, directory, "case.c", path, capacity);
+}
+
 // Removes the files pp_test_write_case wrote besides case.c, and their directories, innermost first.
 static void pp_test_remove_case(const PPTestCase* test, const char* directory)
 {
     char path[4096];
-    snprintf(path, sizeof(path), "%s/other.h", directory);
-    unlink(path);
+    if (test->other != NULL)
+    {
+        snprintf(path, sizeof(path), "%s/other.h", directory);
+        unlink(path);
+    }
     for (uint32_t i = 0; test->files != 0 && test->files[i].path != 0; i += 1)
     {
         snprintf(path, sizeof(path), "%s/%s", directory, test->files[i].path);
@@ -2379,29 +2429,29 @@ struct PPTestSystemCase
     bool inexact;
 };
 
-static const PPTestSystemCase pp_test_system_cases[] = {
-    // A system header's macros, a paste and a stringification in it, invoked in the main file, and the main file's
-    // macro in the header: each token is where its outermost invocation is.
-    { "macros across a system header", "#define USERMAC 1\n#include <s.h>\nSYSMAC SYSFN(a) CALLS USERMAC CAT(x, y) STR(q)\n",
-      "#define SYSMAC user_token\n#define SYSFN(x) [x]\n#define CALLS USERMAC\n#define CAT(a, b) a ## b\n#define STR(x) #x\n"
-      "int header = SYSMAC + USERMAC + CALLS + CAT(1, 2);\n",
-      "sssssssssssuuuuuuuu" },
-    { "line markers", "#define USER(x) x\n# 1 \"fake-system.h\" 3\n#define SYS(x) (x)\nSYS(1) USER(2)\n# 5 \"main.c\"\nSYS(3) USER(4)\n", "", "ssssuuuu" },
-    { "an extern C header's line marker", "# 1 \"c-header.h\" 3 4\n#define E(x) x\nE(1) e\n", "", "ee" },
-    { "#pragma GCC system_header", "#define MAINMAC main_value\n#include \"other.h\"\nint c = BEFORE;\n",
-      "#define BEFORE before_value\nint a = BEFORE;\n#pragma GCC system_header\nint b = BEFORE + MAINMAC;\n", "uuuuusssssssuuuuu" },
-    // A line marker read while the arguments of a system header's F are collected in the user's file: F's body is where
-    // the invocation starts, before the marker, and its argument where it is read, after it; the runs would have both
-    // after it, and the body's own place is the system header. The second F is all after the marker.
-    { "a line marker among an invocation's arguments", "# 1 \"sys.h\" 3\n#define F(x) [x]\n# 5 \"user.c\"\nF(\n# 10 \"s.h\" 3\na) F(b)\n", "",
-      "ususss", true },
-};
+static bool pp_test_system_row(PPTestFixtures* table, const char* dir, char** fields, uint32_t line)
+{
+    (void)line;
+    PPTestSystemCase* row = pp_test_fixture_row(table, fields[0]);
+    bool valid = row != NULL && (strcmp(fields[1], "exact") == 0 || strcmp(fields[1], "inexact") == 0);
+    if (valid)
+    {
+        row->name = fields[2];
+        row->inexact = strcmp(fields[1], "inexact") == 0;
+        valid = pp_test_fixture_text(table, dir, fields[0], ".c", &row->source) && pp_test_fixture_text(table, dir, fields[0], ".h", &row->header) &&
+                pp_test_fixture_text(table, dir, fields[0], ".expected", &row->levels) && strspn(row->levels, "use") == strlen(row->levels);
+    }
+    return valid;
+}
 
-// Each of pp_test_system_cases, preprocessed as a compile runs it with its history: both paths must give its levels, or
+// Each system-level case, preprocessed as a compile runs it with its history: both paths must give its levels, or
 // its runs must say they can't. Returns whether every case does.
 static bool pp_test_system_case_levels(const char* directory)
 {
-    uint32_t failures = 0;
+    PPTestFixtures fixtures;
+    const bool loaded = pp_test_fixture_table(&fixtures, "system-levels", "buster-fixtures v1 preprocessor-system-levels", 3, sizeof(PPTestSystemCase), pp_test_system_row, NULL);
+    const PPTestSystemCase* cases = (const PPTestSystemCase*)fixtures.rows;
+    uint32_t failures = !loaded;
     char system[4096];
     char header[4096];
     char other[4096];
@@ -2411,9 +2461,9 @@ static bool pp_test_system_case_levels(const char* directory)
     snprintf(other, sizeof(other), "%s/other.h", directory);
     snprintf(path, sizeof(path), "%s/system-levels.c", directory);
     const bool made = mkdir(system, 0700) == 0 || errno == EEXIST;
-    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(pp_test_system_cases); c += 1)
+    for (uint32_t c = 0; c < fixtures.count; c += 1)
     {
-        const PPTestSystemCase* test = &pp_test_system_cases[c];
+        const PPTestSystemCase* test = &cases[c];
         static InternTable table;
         static Preprocessor pp;
         Arena arena = arena_reserve(1ull << 20);
@@ -2457,7 +2507,8 @@ static bool pp_test_system_case_levels(const char* directory)
     unlink(header);
     unlink(other);
     rmdir(system);
-    printf("system levels: %u of %lu cases written by hand differ\n", failures, (unsigned long)BUSTER_ARRAY_LENGTH(pp_test_system_cases));
+    printf("system levels: %u of %lu cases written by hand differ\n", failures, (unsigned long)fixtures.count);
+    arena_release(&fixtures.storage);
     return failures == 0;
 }
 
@@ -5503,122 +5554,54 @@ struct PPTestOptionSet
     const char* refused;
 };
 
-static const PPTestOptionSet pp_test_option_sets[] = {
-    // Refused: each family buster doesn't follow, where its last option turns it on; -fzvector whatever follows it (clang's
-    // driver ignores -fno-zvector); and the options without a -fno- form.
-    { { "-fms-extensions" }, "-fms-extensions" },
-    { { "-fno-ms-extensions", "-fms-extensions" }, "-fms-extensions" },
-    { { "-fms-compatibility" }, "-fms-compatibility" },
-    { { "-fborland-extensions" }, "-fborland-extensions" },
-    { { "-fno-declspec", "-fdeclspec" }, "-fdeclspec" },
-    { { "-fzvector" }, "-fzvector" },
-    { { "-fzvector", "-fno-zvector" }, "-fzvector" },
-    // clang's -mzvector is -fzvector (predefines_alias), and -mno-zvector is -fno-zvector.
-    { { "-mzvector" }, "-fzvector" },
-    { { "-mzvector", "-mno-zvector" }, "-fzvector" },
-    { { "-fno-zos-extensions", "-fzos-extensions" }, "-fzos-extensions" },
-    { { "-ffixed-point" }, "-ffixed-point" },
-    { { "-fdefer-ts" }, "-fdefer-ts" },
-    { { "-fno-directives-only", "-fdirectives-only" }, "-fdirectives-only" },
-    { { "-fkeep-system-includes" }, "-fkeep-system-includes" },
-    { { "-fminimize-whitespace" }, "-fminimize-whitespace" },
-    { { "-fuse-line-directives" }, "-fuse-line-directives" },
-    { { "-frewrite-includes" }, "-frewrite-includes" },
-    { { "-frewrite-imports" }, "-frewrite-imports" },
-    // clang fails without the module it would otherwise build into its cache, so that nothing is written.
-    { { "-fno-implicit-modules", "-fno-modules", "-fmodules" }, "-fmodules" },
-    { { "-fimplicit-module-maps" }, "-fimplicit-module-maps" },
-    { { "-fbuiltin-module-map" }, "-fbuiltin-module-map" },
-    { { "-fmodule-name=probe" }, "-fmodule-name=probe" },
-    { { "-fmodule-map-file=%d/missing.modulemap" }, "-fmodule-map-file=" },
-    { { "-fdriver-only" }, "-fdriver-only" },
-    { { "-fproc-stat-report" }, "-fproc-stat-report" },
-    { { "-fmacro-prefix-map=%d=/remapped" }, "-fmacro-prefix-map=" },
-    { { "-ffile-prefix-map=%d=/remapped" }, "-ffile-prefix-map=" },
-    { { "-fexec-charset=UTF-8", "-fexec-charset=latin1" }, "-fexec-charset=latin1" },
-    { { "-finput-charset=UTF8" }, "-finput-charset=UTF8" },
-    // Taken: the modeled families, each refused family turned off again, -fzvector in assembly, digraphs on and off in
-    // any mode (c89 with them is C94, and C94 without them c89: #288), and raw strings off (buster lexes none), each in
-    // c17, where clang's lexes none either (a GNU mode's would differ); and UTF-8 charsets in any case.
-    { { "-std=c17", "-fgnu-keywords" }, 0 },
-    { { "-std=c17", "-fno-raw-string-literals", "-fraw-string-literals" }, 0 },
-    { { "-std=gnu89", "-fraw-string-literals" }, 0 },
-    { { "-std=gnu99", "-fraw-string-literals", "-fno-raw-string-literals", "-fraw-string-literals" }, 0 },
-    { { "-std=gnu23", "-fno-raw-string-literals" }, 0 },
-    { { "-x", "assembler-with-cpp", "-fno-raw-string-literals" }, 0 },
-    { { "-std=gnu17", "-fno-raw-string-literals", "-fno-asm" }, 0 },
-    { { "-std=c17", "-fno-dollars-in-identifiers" }, 0 },
-    { { "-std=c17", "-fno-signed-char" }, 0 },
-    { { "-std=c17", "-funsigned-char", "-fno-unsigned-char" }, 0 },
-    { { "-std=c17", "-fms-extensions", "-fno-ms-extensions" }, 0 },
-    { { "-std=c17", "-fms-compatibility", "-fno-ms-compatibility" }, 0 },
-    { { "-std=c17", "-fborland-extensions", "-fno-borland-extensions" }, 0 },
-    { { "-std=c17", "-fdeclspec", "-fno-declspec" }, 0 },
-    { { "-std=c17", "-fno-zvector" }, 0 },
-    { { "-std=c17", "-mno-zvector" }, 0 },
-    { { "-std=c17", "-x", "assembler-with-cpp", "-fzvector" }, 0 },
-    { { "-std=c17", "-fzos-extensions", "-fno-zos-extensions" }, 0 },
-    { { "-std=c17", "-ffixed-point", "-fno-fixed-point" }, 0 },
-    { { "-std=c17", "-fdefer-ts", "-fno-defer-ts" }, 0 },
-    { { "-std=c17", "-fno-digraphs", "-fdigraphs" }, 0 },
-    { { "-std=gnu89", "-fno-raw-string-literals", "-fdigraphs" }, 0 },
-    { { "-std=c17", "-fdigraphs", "-fno-digraphs" }, 0 },
-    { { "-std=c89", "-fdigraphs" }, 0 },
-    { { "-std=iso9899:199409", "-fno-digraphs" }, 0 },
-    { { "-std=iso9899:199409" }, 0 },
-    { { "-std=c89" }, 0 },
-    { { "-std=gnu17", "-fraw-string-literals", "-fno-raw-string-literals" }, 0 },
-    { { "-std=c17", "-fshort-wchar", "-fno-short-wchar" }, 0 },
-    // -fshort-wchar is predefines_option's, which #if's wide character constants follow.
-    { { "-std=c17", "-fno-short-wchar", "-fshort-wchar" }, 0 },
-    { { "-std=c17", "-fdirectives-only", "-fno-directives-only" }, 0 },
-    { { "-std=c17", "-fkeep-system-includes", "-fno-keep-system-includes" }, 0 },
-    { { "-std=c17", "-fminimize-whitespace", "-fno-minimize-whitespace" }, 0 },
-    { { "-std=c17", "-fuse-line-directives", "-fno-use-line-directives" }, 0 },
-    { { "-std=c17", "-frewrite-includes", "-fno-rewrite-includes" }, 0 },
-    { { "-std=c17", "-frewrite-imports", "-fno-rewrite-imports" }, 0 },
-    { { "-std=c17", "-fmodules", "-fno-modules" }, 0 },
-    { { "-std=c17", "-fimplicit-module-maps", "-fno-implicit-module-maps" }, 0 },
-    { { "-std=c17", "-fmodules-driver" }, 0 },
-    { { "-std=c17", "-fexec-charset=latin1", "-fexec-charset=UTF-8" }, 0 },
-    { { "-std=c17", "-finput-charset=Utf-8" }, 0 },
-};
+static bool pp_test_option_row(PPTestFixtures* table, const char* directory, char** fields, uint32_t line)
+{
+    (void)directory;
+    (void)line;
+    PPTestOptionSet* row = pp_test_fixture_row(table, fields[0]);
+    char* arguments = fields[2];
+    uint32_t count = 0;
+    bool valid = row != NULL && strlen(arguments) < 1000;
+    if (valid)
+    {
+        row->refused = strcmp(fields[1], "-") == 0 ? NULL : fields[1];
+    }
+    while (valid && arguments != NULL)
+    {
+        char* argument = strsep(&arguments, " ");
+        valid = *argument != 0 && count < BUSTER_PP_TEST_SET_ARGUMENTS;
+        if (valid)
+        {
+            row->arguments[count++] = argument;
+        }
+    }
+    return valid;
+}
 
-// What the families change in clang's -E: the names that are keywords under them, '$', digraphs and __STDC_VERSION__
-// (C94's with -fdigraphs in c89), "//" comments (none in c89 and C94), raw strings, character constants' signs,
-// __FILE__ (remapped) and __MODULE__ (named), and a system header for the output modes and the modules.
-static const char pp_test_option_probe[] =
-    "#include <stddef.h>\n"
-    "__is_identifier(__int64) __is_identifier(_pascal) __is_identifier(__declspec) __is_identifier(__vector) __is_identifier(__ptr32)\n"
-    "__is_identifier(_Accum) __is_identifier(_Defer) __is_identifier(asm) __is_identifier(typeof)\n"
-    "#define bb BB\naa$bb 1$bb\n"
-    "%:define DIGRAPH __STDC_VERSION__\nDIGRAPH <: :> <%= a //* c */ b x // y\n"
-    "#define R RR\n#define LR LRR\n#define uR uRR\n#define UR URR\n#define u8R u8RR\n"
-    "R\"x(raw)x\" LR\"(l)\" uR\"(u)\" UR\"(U)\" u8R\"(8)\"\n"
-    "#if (L'\\0' - 1) < 0\nwide_signed\n#endif\n"
-    "#if '\\xff' < 0\nchar_signed\n#endif\n"
-    "__FILE__ __MODULE__\n";
-
-// pp_test_option_sets: each set refused or taken as it says. With --clang, clang's -E of pp_test_option_probe must
+// Each option set is refused or taken as it says. With --clang, clang's -E of probe.c must
 // change with each refused set (from the set's -std= alone, or from no options), which is why buster refuses it, and
 // each taken set must give clang's tokens, by both kernels.
 static bool pp_test_option_refusals(const char* directory, bool with_clang)
 {
     char path[4096];
     snprintf(path, sizeof(path), "%s/options.c", directory);
-    bool result = pp_test_write_file(path, pp_test_option_probe);
+    PPTestFixtures table;
+    const char* probe = NULL;
+    bool result = pp_test_fixture_table(&table, "option-refusals", "buster-fixtures v1 preprocessor-option-refusals", 3, sizeof(PPTestOptionSet), pp_test_option_row, &probe) &&
+                  pp_test_write_file(path, probe);
+    const PPTestOptionSet* sets = (const PPTestOptionSet*)table.rows;
     uint32_t wrong = 0;
     uint32_t unchanged = 0;
     uint32_t different = 0;
     uint32_t refused_count = 0;
     // clang's -E of the probe with each base a refused set is compared with (its -std=, or none: "" here), run once each.
-    const char* base_keys[4] = { 0 };
-    PPClangOutput bases[4];
-    memset(bases, 0, sizeof(bases));
+    const char** base_keys = arena_push(&table.storage, sizeof(*base_keys) * table.count, 8);
+    PPClangOutput* bases = arena_push(&table.storage, sizeof(*bases) * table.count, 8);
+    result = result && base_keys != NULL && bases != NULL;
     uint32_t base_count = 0;
-    for (uint32_t s = 0; result && s < BUSTER_ARRAY_LENGTH(pp_test_option_sets); s += 1)
+    for (uint32_t s = 0; result && s < table.count; s += 1)
     {
-        const PPTestOptionSet* set = &pp_test_option_sets[s];
+        const PPTestOptionSet* set = &sets[s];
         char text[16384];
         char* arguments[BUSTER_PP_TEST_SET_ARGUMENTS + 1];
         char shown[1024];
@@ -5629,14 +5612,30 @@ static bool pp_test_option_refusals(const char* directory, bool with_clang)
         {
             // The argument with %d replaced by the directory.
             arguments[n] = text + used;
-            for (const char* at = set->arguments[n]; *at != 0 && used + 4200 < sizeof(text); at += 1)
+            for (const char* at = set->arguments[n]; *at != 0; at += 1)
             {
-                const bool directory_here = at[0] == '%' && at[1] == 'd';
-                used += directory_here ? (uint32_t)snprintf(text + used, sizeof(text) - used, "%s", directory) : (uint32_t)snprintf(text + used, sizeof(text) - used, "%c", *at);
-                at += directory_here;
+                const bool substitute = at[0] == '%' && at[1] == 'd';
+                const size_t size = substitute ? strlen(directory) : 1;
+                if (used + size >= sizeof(text))
+                {
+                    result = false;
+                    break;
+                }
+                memcpy(text + used, substitute ? directory : at, size);
+                used += (uint32_t)size;
+                at += substitute;
             }
-            used += 1;
+            if (!result)
+            {
+                break;
+            }
+            text[used++] = 0;
             shown_used += (uint32_t)snprintf(shown + shown_used, sizeof(shown) - shown_used, "%s%s", n != 0 ? " " : "", set->arguments[n]);
+        }
+        if (!result)
+        {
+            fprintf(stderr, "option-refusals: expanded arguments for %s exceed the staging buffer\n", table.identifiers[s]);
+            break;
         }
         arguments[n] = path;
         Arena arena = arena_reserve(1ull << 20);
@@ -5659,8 +5658,20 @@ static bool pp_test_option_refusals(const char* directory, bool with_clang)
         if (with_clang && right && set->refused != 0)
         {
             // clang's -E with the set, and with its -std= alone or nothing: with the oracle's own messages caught.
-            const int base = strncmp(arguments[0], "-std=", 5) == 0;
-            const char* key = base != 0 ? set->arguments[0] : "";
+            char* standard = NULL;
+            const char* key = "";
+            for (int i = 0; i < n && strcmp(arguments[i], "--") != 0; i += 1)
+            {
+                if (pp_option_takes_value(arguments[i]))
+                {
+                    i += 1;
+                }
+                else if (strncmp(arguments[i], "-std=", 5) == 0 || strcmp(arguments[i], "-ansi") == 0)
+                {
+                    standard = arguments[i];
+                    key = set->arguments[i];
+                }
+            }
             uint32_t b = 0;
             while (b < base_count && strcmp(base_keys[b], key) != 0)
             {
@@ -5668,16 +5679,16 @@ static bool pp_test_option_refusals(const char* directory, bool with_clang)
             }
             const int keep = pp_test_catch_stderr(&caught);
             PPClangOutput with = pp_test_clang_process("clang", arguments, n, path, false);
-            if (b == base_count && b < BUSTER_ARRAY_LENGTH(bases))
+            if (b == base_count)
             {
                 base_keys[b] = key;
-                bases[b] = pp_test_clang_process("clang", arguments, base, path, false);
+                bases[b] = pp_test_clang_process("clang", &standard, standard != NULL, path, false);
                 base_count += 1;
             }
             pp_test_release_stderr(keep, caught, messages, sizeof(messages));
-            const PPClangOutput* without = b < base_count ? &bases[b] : 0;
-            const bool changed = without != 0 && (with.status != without->status || with.length != without->length ||
-                                                  (with.length != 0 && memcmp(with.text, without->text, with.length) != 0));
+            const PPClangOutput* without = &bases[b];
+            const bool changed = with.status != without->status || with.length != without->length ||
+                                 (with.length != 0 && memcmp(with.text, without->text, with.length) != 0);
             if (!changed)
             {
                 printf("option sets: clang's -E doesn't change with %s, which buster refuses\n", shown);
@@ -5713,13 +5724,14 @@ static bool pp_test_option_refusals(const char* directory, bool with_clang)
         free(bases[b].diagnostics);
     }
     unlink(path);
-    printf("option sets: %u of %lu refused or taken wrongly", wrong, (unsigned long)BUSTER_ARRAY_LENGTH(pp_test_option_sets));
+    printf("option sets: %u of %lu refused or taken wrongly", wrong, (unsigned long)table.count);
     if (with_clang)
     {
         printf(", %u of %u refused ones change nothing in clang's -E and %u of %lu taken ones differ from clang's", unchanged, refused_count, different,
-               (unsigned long)BUSTER_ARRAY_LENGTH(pp_test_option_sets) - refused_count);
+               (unsigned long)table.count - refused_count);
     }
     printf("\n");
+    arena_release(&table.storage);
     return result && wrong == 0 && unchanged == 0 && different == 0;
 }
 
