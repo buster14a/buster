@@ -4,8 +4,8 @@
 // #131's measurement on real C (benchmark-ir-source): the IR's bytes per source token of the functions the driver's -c
 // compiles of a set of files, with the largest function's share (#15: sqlite3.c's sqlite3VdbeExec, 5.0% of its -O0
 // code), and the time per typed entry of lowering them (ir_lower_typed), of verifying the result
-// (ir_verify), of promoting it to SSA (ssa_ir_promote and ssa_ir_promote_scalar), with each
-// promotion's phis (#134), of #866's two GVN paths on the lowered IR, and of the shared SCCP/DCE/CFG optimizer's
+// (ir_verify), of promoting it to SSA (ssa_ir_promote), with its phis (#134), of #866's two GVN paths on the lowered
+// IR, and of the shared SCCP/DCE/CFG optimizer's
 // default and forced-scalar paths (#860). Include after ir_source_test.c and
 // tier0_benchmark_measure.c, whose clock, counters and medians it takes.
 //
@@ -13,7 +13,7 @@
 //   build/compiler benchmark-ir-source --passes [--only PASS] [preprocessor options] file... (ir_source_passes.c)
 //
 // The files' functions are prepared as test-ir-source prepares them (ir_source_prepare), each lowered once into the IR
-// the verifier, promotion and GVN variants read, and promoted once by both paths (and given to GVN once by both),
+// the verifier, promotion and GVN variants read, promoted once (and given to GVN once by both paths),
 // outside the time. Any file that fails or is left out, and any function the lowering or either path refuses, fails
 // the benchmark, which then reports no time: its corpus would be less than the files'. The bytes are
 // the function arenas' (IrFunction.arena_bytes: every column and side table, with their alignment gaps, each function
@@ -21,29 +21,27 @@
 // run takes every function once, after a warm-up, in BUSTER_TIER0_BENCHMARK_PASSES passes that alternate which of each
 // pair runs first; --only times one alone, back to back, and --after-scalar MS runs a vector variant's scalar twin, untimed,
 // for MS ms before each of its passes. The variants below BUSTER_IR_SOURCE_PAIRED come in pairs, a vector path and then
-// its twin; optimize-vector, lower and verify have none. Run it under the 9700X's lock pinned to one CPU (taskset -c 2 ...).
+// its twin; optimize-vector, promote, lower and verify have none. Run it under the 9700X's lock pinned to one CPU (taskset -c 2 ...).
 
-#define BUSTER_IR_SOURCE_PROMOTE 0
-#define BUSTER_IR_SOURCE_PROMOTE_SCALAR 1
-#define BUSTER_IR_SOURCE_GVN 2
-#define BUSTER_IR_SOURCE_GVN_SCALAR 3
-#define BUSTER_IR_SOURCE_OPTIMIZE 4
-#define BUSTER_IR_SOURCE_OPTIMIZE_SCALAR 5
-#define BUSTER_IR_SOURCE_PAIRED 6
-#define BUSTER_IR_SOURCE_OPTIMIZE_VECTOR 6
-#define BUSTER_IR_SOURCE_LOWER 7
-#define BUSTER_IR_SOURCE_VERIFY 8
-#define BUSTER_IR_SOURCE_VARIANTS 9
+#define BUSTER_IR_SOURCE_GVN 0
+#define BUSTER_IR_SOURCE_GVN_SCALAR 1
+#define BUSTER_IR_SOURCE_OPTIMIZE 2
+#define BUSTER_IR_SOURCE_OPTIMIZE_SCALAR 3
+#define BUSTER_IR_SOURCE_PAIRED 4
+#define BUSTER_IR_SOURCE_OPTIMIZE_VECTOR 4
+#define BUSTER_IR_SOURCE_PROMOTE 5
+#define BUSTER_IR_SOURCE_LOWER 6
+#define BUSTER_IR_SOURCE_VERIFY 7
+#define BUSTER_IR_SOURCE_VARIANTS 8
 #define BUSTER_IR_SOURCE_LARGEST 10
 
 static const char* const ir_source_variant_names[BUSTER_IR_SOURCE_VARIANTS] = {
-    "promote",
-    "promote-scalar",
     "gvn",
     "gvn-scalar",
     "optimize",
     "optimize-scalar",
     "optimize-vector",
+    "promote",
     "lower",
     "verify",
 };
@@ -65,7 +63,7 @@ struct IrSourceCorpus
     uint64_t promoted_instructions;
     uint64_t promoted_bytes;
     // Each promotion's phis (#134): the vector path's (ssa_ir_promote), then its twin's.
-    uint64_t phis[2];
+    uint64_t phis;
     // #866's GVN on the lowered IR, run once by each path outside the time: the instructions it removed, those its
     // acyclic numbering classed, its refinement rounds, key comparisons and collision-budget completions.
     uint64_t gvn_changed[2];
@@ -104,7 +102,6 @@ static Tier0BenchmarkReading ir_source_run(uint32_t variant, const IrSourceCorpu
         {
         case BUSTER_IR_SOURCE_LOWER: check = ir_lower_typed_target(source->function, source->result_type, source->symbol_count, source->target_features, output, scratch, &result); break;
         case BUSTER_IR_SOURCE_PROMOTE: check = ssa_ir_promote(lowered, output, scratch, &result); break;
-        case BUSTER_IR_SOURCE_PROMOTE_SCALAR: check = ssa_ir_promote_scalar(lowered, output, scratch, &result); break;
         case BUSTER_IR_SOURCE_GVN:
         case BUSTER_IR_SOURCE_GVN_SCALAR:
         {
@@ -143,7 +140,7 @@ static Tier0BenchmarkReading ir_source_run(uint32_t variant, const IrSourceCorpu
     return taken;
 }
 
-// Adds `file`'s functions to the corpus, each lowered (its IR kept in `kept`) and promoted by both paths (into `output`,
+// Adds `file`'s functions to the corpus, each lowered (its IR kept in `kept`) and promoted (into `output`,
 // put back), and prints the file's line: whether every function joined.
 static bool ir_source_corpus_file(IrSourceCorpus* corpus, const char* name, char** options, uint32_t option_count, Arena* lowered, Arena* table, Arena* kept,
                                   Arena* output, Arena* scratch)
@@ -158,7 +155,6 @@ static bool ir_source_corpus_file(IrSourceCorpus* corpus, const char* name, char
         const IrSourceFunction* source = &file.functions[f];
         IrFunction* vector = &corpus->lowered[corpus->count];
         IrFunction promoted = { 0 };
-        IrFunction promoted_twin = { 0 };
         const uint64_t mark = output->length;
         // Each function starts its kept columns at a 64-byte boundary, as in an arena of its own (#131's one per
         // function), so that its bytes, alignment gaps and all, don't depend on the functions before it.
@@ -172,9 +168,6 @@ static bool ir_source_corpus_file(IrSourceCorpus* corpus, const char* name, char
         const uint64_t promoted_bytes = promoted.arena_bytes;
         uint32_t trivial = 0;
         const uint32_t phis = promotion.error == IR_OK ? ssa_ir_phis(&promoted, &trivial) : 0;
-        arena_pop_to(output, mark);
-        const IrCheck promotion_twin = lowers ? ssa_ir_promote_scalar(vector, output, scratch, &promoted_twin) : (IrCheck){ .error = IR_ERROR_STRUCTURE };
-        const uint32_t twin_phis = promotion_twin.error == IR_OK ? ssa_ir_phis(&promoted_twin, &trivial) : 0;
         arena_pop_to(output, mark);
         // #866: both GVN paths on the lowered IR, once, outside the time. GVN verifies its output; the scalar
         // available-expression path must accept the function too, and its removal count is the cyclic-quality control
@@ -204,7 +197,7 @@ static bool ir_source_corpus_file(IrSourceCorpus* corpus, const char* name, char
         arena_pop_to(output, mark);
         const bool optimizes = optimize_check.error == IR_OK && optimize_vector_check.error == IR_OK && optimize_scalar_check.error == IR_OK &&
                                ir_optimize_test_equal(&optimized.function, &optimized_vector.function) && ir_optimize_test_equal(&optimized.function, &optimized_scalar.function);
-        joined = promotion.error == IR_OK && promotion_twin.error == IR_OK && gvn_check.error == IR_OK && gvn_twin_check.error == IR_OK && optimizes;
+        joined = promotion.error == IR_OK && gvn_check.error == IR_OK && gvn_twin_check.error == IR_OK && optimizes;
         if (joined)
         {
             corpus->functions[corpus->count] = *source;
@@ -215,8 +208,7 @@ static bool ir_source_corpus_file(IrSourceCorpus* corpus, const char* name, char
             corpus->tables += ir_source_tables(vector);
             corpus->promoted_instructions += promoted.instruction_count;
             corpus->promoted_bytes += promoted_bytes;
-            corpus->phis[0] += phis;
-            corpus->phis[1] += twin_phis;
+            corpus->phis += phis;
             corpus->gvn_changed[0] += gvn.removed;
             corpus->gvn_changed[1] += gvn_twin.removed;
             corpus->gvn_acyclic += gvn.acyclic;
@@ -228,7 +220,7 @@ static bool ir_source_corpus_file(IrSourceCorpus* corpus, const char* name, char
         }
         else
         {
-            const char* reason = !lowers ? "a lowering refused it, or the paths disagree" : promotion.error != IR_OK || promotion_twin.error != IR_OK ? "a promotion refused it" :
+            const char* reason = !lowers ? "a lowering refused it, or the paths disagree" : promotion.error != IR_OK ? "a promotion refused it" :
                                  gvn_check.error != IR_OK || gvn_twin_check.error != IR_OK ? "GVN refused it" : "the optimizer refused it, or its paths disagree";
             printf("benchmark-ir-source: file=%s function=%s failed=\"%s\"\n", name, source->name, reason);
         }
@@ -265,8 +257,7 @@ static void ir_source_bytes(const IrSourceCorpus* corpus)
            (double)columns / tokens, (double)corpus->tables / tokens, (double)gaps / tokens);
     printf("benchmark-ir-source: promoted IR: %" PRIu64 " instructions (%.3f per token), %" PRIu64 " bytes: %.2f per token\n", corpus->promoted_instructions,
            (double)corpus->promoted_instructions / tokens, corpus->promoted_bytes, (double)corpus->promoted_bytes / tokens);
-    printf("benchmark-ir-source: phis: %" PRIu64 " by promote (%.4f per lowered instruction), %" PRIu64 " by promote-scalar (%.4f)\n", corpus->phis[0],
-           (double)corpus->phis[0] / (double)corpus->instructions, corpus->phis[1], (double)corpus->phis[1] / (double)corpus->instructions);
+    printf("benchmark-ir-source: phis: %" PRIu64 " by promote (%.4f per lowered instruction)\n", corpus->phis, (double)corpus->phis / (double)corpus->instructions);
     printf("benchmark-ir-source: GVN removed %" PRIu64 " instructions by gvn and %" PRIu64 " by gvn-scalar; %" PRIu64 " of %" PRIu64 " numbered acyclic, %" PRIu64 " refinement rounds, %" PRIu64 " key comparisons, %" PRIu64 " collision-budget completions\n",
            corpus->gvn_changed[0], corpus->gvn_changed[1], corpus->gvn_acyclic, corpus->instructions, corpus->gvn_rounds, corpus->gvn_probes, corpus->gvn_sort_fallbacks);
     // The largest functions, by insertion into a short list sorted by bytes, the first function of equal bytes first.
@@ -375,21 +366,20 @@ static bool ir_source_measure(const IrSourceCorpus* corpus, Arena* output, Arena
     return failed == BUSTER_IR_SOURCE_VARIANTS;
 }
 
-// --functions (#787): each function's promotion by both paths timed apart, with its blocks, slots and instructions:
-// where the vector path pays against its twin. A sample is `repetitions` runs of a path, enough for both paths' one run
-// (the calibration) to take BUSTER_IR_SOURCE_FUNCTION_NS together; each path's line takes its least time per run over
-// BUSTER_IR_SOURCE_FUNCTION_SAMPLES samples, the paths taking turns running first.
+// --functions (#787): each function's promotion timed alone, with its blocks, slots and instructions, and the
+// optimizer's paths. A sample is `repetitions` runs, enough for one run (the calibration) to take
+// BUSTER_IR_SOURCE_FUNCTION_NS; each line takes the least time per run over BUSTER_IR_SOURCE_FUNCTION_SAMPLES samples.
 #define BUSTER_IR_SOURCE_FUNCTION_NS 500000ull
 #define BUSTER_IR_SOURCE_FUNCTION_SAMPLES 5
 
-static uint64_t ir_source_function_run(const IrFunction* lowered, bool vector, uint32_t repetitions, Arena* output, Arena* scratch, bool* failed)
+static uint64_t ir_source_function_run(const IrFunction* lowered, uint32_t repetitions, Arena* output, Arena* scratch, bool* failed)
 {
     const uint64_t mark = output->length;
     const uint64_t begin = tier0_benchmark_now();
     for (uint32_t r = 0; r < repetitions; r += 1)
     {
         IrFunction result;
-        const IrCheck check = vector ? ssa_ir_promote(lowered, output, scratch, &result) : ssa_ir_promote_scalar(lowered, output, scratch, &result);
+        const IrCheck check = ssa_ir_promote(lowered, output, scratch, &result);
         *failed |= check.error != IR_OK;
         arena_pop_to(output, mark);
     }
@@ -419,18 +409,14 @@ static bool ir_source_functions(const IrSourceCorpus* corpus, Arena* output, Are
     for (uint32_t f = 0; f < corpus->count && !failed; f += 1)
     {
         const IrFunction* lowered = &corpus->lowered[f];
-        const uint64_t once = ir_source_function_run(lowered, true, 1, output, scratch, &failed) + ir_source_function_run(lowered, false, 1, output, scratch, &failed);
+        const uint64_t once = ir_source_function_run(lowered, 1, output, scratch, &failed);
         const uint64_t wanted = BUSTER_IR_SOURCE_FUNCTION_NS / (once != 0 ? once : 1) + 1;
         const uint32_t repetitions = wanted < 100000 ? (uint32_t)wanted : 100000;
-        uint64_t least[2] = { UINT64_MAX, UINT64_MAX };
+        uint64_t least = UINT64_MAX;
         for (uint32_t sample = 0; sample < BUSTER_IR_SOURCE_FUNCTION_SAMPLES && !failed; sample += 1)
         {
-            for (uint32_t turn = 0; turn < 2; turn += 1)
-            {
-                const uint32_t path = (sample & 1) != 0 ? 1 - turn : turn;
-                const uint64_t taken = ir_source_function_run(lowered, path == 0, repetitions, output, scratch, &failed);
-                least[path] = taken < least[path] ? taken : least[path];
-            }
+            const uint64_t taken = ir_source_function_run(lowered, repetitions, output, scratch, &failed);
+            least = taken < least ? taken : least;
         }
         IrFunction promoted;
         const uint64_t mark = output->length;
@@ -455,8 +441,8 @@ static bool ir_source_functions(const IrSourceCorpus* corpus, Arena* output, Are
         }
         if (!failed)
         {
-            printf("benchmark-ir-source: function=%s blocks=%u slots=%u instructions=%u promoted_instructions=%u vector_ns=%.1f scalar_ns=%.1f optimize_vector_ns=%.1f optimize_scalar_ns=%.1f optimize_auto_ns=%.1f\n", corpus->functions[f].name,
-                   lowered->block_count, lowered->slot_count, lowered->instruction_count, promoted_instructions, (double)least[0] / repetitions, (double)least[1] / repetitions,
+            printf("benchmark-ir-source: function=%s blocks=%u slots=%u instructions=%u promoted_instructions=%u promote_ns=%.1f optimize_vector_ns=%.1f optimize_scalar_ns=%.1f optimize_auto_ns=%.1f\n", corpus->functions[f].name,
+                   lowered->block_count, lowered->slot_count, lowered->instruction_count, promoted_instructions, (double)least / repetitions,
                    (double)optimize_least[0] / optimize_repetitions, (double)optimize_least[1] / optimize_repetitions, (double)optimize_least[2] / optimize_repetitions);
         }
     }
@@ -554,7 +540,7 @@ static int ir_source_benchmark_command(int count, char** arguments, bool testing
         }
         else
         {
-            fprintf(stderr, "usage: compiler benchmark-ir-source [--only promote|promote-scalar|gvn|gvn-scalar|optimize|optimize-scalar|optimize-vector|lower|verify] [--after-scalar MS] [--functions] "
+            fprintf(stderr, "usage: compiler benchmark-ir-source [--only promote|gvn|gvn-scalar|optimize|optimize-scalar|optimize-vector|lower|verify] [--after-scalar MS] [--functions] "
                             "[preprocessor options] file...\n");
         }
     }

@@ -7214,7 +7214,7 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     static const NodeTestsWindowed windowed_warnings = {
         .expressions = 50,
         .trees = 4,
-        .operators = 68,
+        .operators = 69,
         .sent = 26,
         .walks = 4,
         .quiet = 7,
@@ -7283,7 +7283,7 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     static const NodeTestsWindowed windowed_defaults = {
         .expressions = 475,
         .trees = 29,
-        .operators = 135,
+        .operators = 142,
         .sent = 51,
         .walks = 11,
         .far = 37,
@@ -7304,7 +7304,7 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     // (The loop leaves three ordered comparisons of two pointers out: `p < e`, `ga < p` and the `while`'s.)
     static const NodeTestsWindowed windowed_holes = {
         .expressions = 65,
-        .operators = 25,
+        .operators = 26,
         .sent = 13,
         .quiet = 11,
         .calls = 3,
@@ -7320,12 +7320,12 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     };
     static const NodeTestsWindowed windowed_segments = {
         .expressions = 11,
-        .operators = 2,
+        .operators = 3,
         .quiet = 1,
         .casts_left = 1,
         .values = 2,
         .spared = 9,
-        .direct = 8,
+        .direct = 7,
         .decided = 11,
     };
     static const NodeTestsWindowed windowed_interrupt = {
@@ -7419,6 +7419,8 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         .values = 1,
         .decided = 1,
     };
+    // (Their operators count each cast to a pointer of an operand that is no pointer once converted, which the casts' rule
+    // sends to its test for -Wint-to-pointer-cast's switches, #2914: one or a few a fixture.)
     // The same fixtures with the census's tests at reader time, after T there: the machine's verdict before the pipeline
     // is never a take the census refuses, and every test's bit is the census's.
     check_test_expect(test, ready && node_tests_test_fixture(directory, "warnings.c", node_census_test_warnings, loud, BUSTER_ARRAY_LENGTH(loud),

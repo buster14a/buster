@@ -517,7 +517,11 @@ static bool check_builtin_float_prototype(TypeTable* table, const CheckBuiltinFl
     const bool arithmetic = check_action_is_arithmetic(table, values[0].type);
     if (!arithmetic)
     {
-        check_action_diagnose(&output->action, CHECK_DIAG_ARITHMETIC_REQUIRED, 0);
+        // An argument of no arithmetic type doesn't convert to the prototype's parameter (#2914): clang's "passing 'T' to
+        // parameter of incompatible type 'U'" at the argument, which the driver words from the failed conversion
+        // (check_driver_builtin_conversion).
+        check_action_diagnose(&output->action, CHECK_DIAG_INCOMPATIBLE, 0);
+        output->argument_conversions[0] = (CheckConversion){ .type = parameter, .flags = BUSTER_CHECK_CONVERT_FAILED };
     }
     else
     {

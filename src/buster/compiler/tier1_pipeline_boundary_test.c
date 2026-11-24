@@ -266,8 +266,7 @@ static bool tier1_pipeline_boundary_tier1(Tier1PipelineTest* test, const Tier0Fu
     bool ok = tier1_pipeline_expect(test, check.error == IR_OK, "boundary typed stream lowers");
     if (ok)
     {
-        check = test->vector ? ssa_ir_promote(&lowered, &test->arenas[TIER1_PIPELINE_PROMOTED], scratch, &promoted) :
-                               ssa_ir_promote_scalar(&lowered, &test->arenas[TIER1_PIPELINE_PROMOTED], scratch, &promoted);
+        check = ssa_ir_promote(&lowered, &test->arenas[TIER1_PIPELINE_PROMOTED], scratch, &promoted);
         ok = tier1_pipeline_expect(test, check.error == IR_OK, "boundary locals promote without discarding address-taken objects");
     }
     if (ok)
@@ -562,7 +561,7 @@ static void tier1_pipeline_boundaries(Tier1PipelineTest* test)
                     }
                     if (ok && tier == 0)
                     {
-                        bodies[f] = test->vector ? tier0_compile(source, &test->arenas[TIER1_PIPELINE_EMITTED]) : tier0_compile_scalar(source, &test->arenas[TIER1_PIPELINE_EMITTED]);
+                        bodies[f] = tier0_compile(source, &test->arenas[TIER1_PIPELINE_EMITTED]);
                         ok = tier1_pipeline_expect(test, bodies[f].error == TIER0_OK, "boundary Tier 0 oracle compiles the original stream");
                     }
                     else if (ok)

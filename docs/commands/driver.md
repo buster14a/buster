@@ -57,6 +57,10 @@ requirements. [Command index](README.md).
   emission after the loop otherwise, the same bytes and diagnostics (step
   2.2c.4's test option, implying `--provisional-selection` and
   `--deferred-lowering`, which reports on stderr whether its code served),
+  `--parse-tile=N` parsing by tiles of about N tokens (4,096 by default), each
+  a run of top-level declarations taken through every parser kernel before the
+  next, 0 for the unit as one, the same tree ([the parser's tiles](../c-parser.md#tiles-2536),
+  #2536; `--time-stages` reports `parse-tiles` and `parse-tiles-refused`),
   `--tier1` compiling each function Tier 1's pipeline
   takes by Tier 1 and the others by Tier 0 (`c_check_tier1.c`, both tiers'
   code the emission's `EmittedCode`, #1056, their unwind tables alike; with `-g`

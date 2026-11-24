@@ -110,10 +110,23 @@ implements this interface;
 headers/corpora, manifest identities, CI subset and on-demand commands.
 
 `./build/compiler test-preprocessor [--clang] [--clang-server PATH [--differential]]
-[--keep] [--seed N] [--count N] [--part K/N] [options] [file...]`, or
-`test-preprocessor --tables path...`:
+[--keep] [--seed N] [--count N] [--part K/N] [--fixtures DIR] [options] [file...]`,
+or `test-preprocessor --tables path...`:
 
-- without files, the 320 built-in cases (`pp_test_cases`), each preprocessed
+- without files, the 419 built-in cases (`pp_test_cases`), runtime data
+  (#2053): `tests/preprocessor/cases/catalog.tsv` (`buster-fixtures v1
+  preprocessor-cases`: ID, STANDARD, FLAGS, OPTIONS and NAME a line; FLAGS
+  `fails`, `warnings=N`, `errors=N`, `other`, `markers` and `files=TREE`)
+  with each case's `ID.c` and `ID.expected`, and `ID.other.h` and
+  `ID.markers` where its flags say; and `tests/preprocessor/trees/catalog.tsv`
+  (`buster-fixtures v1 preprocessor-trees`: TREE, KIND, SOURCE and PATH a
+  line), the files a case writes beside `case.c`: a text file's bytes, a
+  symbolic link or a hard link, each at its PATH, as the case's directory
+  has it. Both are read from `tests/` under the working directory, or
+  `--fixtures DIR`, before the checks are dealt; a malformed catalog, a
+  missing file, a repeated ID, an unknown flag or tree, a file no line names
+  or no case at all fails the run, and no check runs. A new case is its files
+  and its line, and rebuilds nothing. Each case is preprocessed
   twice, the second time with `PPOptions.scalar` (since #2924 it selects
   `pp_define`'s scalar body scan alone). They run in 32 parts, the
   header sets below (`--clang`) in 16 and the files (below) a part each (a

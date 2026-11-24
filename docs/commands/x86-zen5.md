@@ -9,7 +9,7 @@ requirements. [Command index](README.md).
 - `src/buster/compiler/x86_zen5.c` is the Zen 5 processor model (#181): a row of
   the 9700X's own measurements for every case (form and operand kind) Tier 0
   and Tier 1 emit, in `x86_zen5_rows.c`, deduplicated into byte IDs, with the
-  scalar/AVX-512 cost-column lookups.
+  AVX-512 cost-column lookup.
 - `measure-x86-zen5` (`x86_zen5_measure.c`) measures the cases on the approved
   9700X and prints the rows: `--table` the whole rows file, `--check` whether a
   measurement reproduces the committed rows, `--sample N [--offset K]` every Nth
@@ -18,8 +18,8 @@ requirements. [Command index](README.md).
   decorations in place of its own (the sweep).
 - `test-x86-zen5` checks the lookups, each record's operand kind, the table's
   completeness, and builds, validates and runs every case's fixtures that the
-  host allows; `benchmark-x86-zen5 [--only scalar|vector] [--after-scalar MS]`
-  times the lookups.
+  host allows; `benchmark-x86-zen5 [--after-scalar MS]` times the lookup, after
+  MS ms of scalar work (an FNV-1a hash of the IDs) before each sample.
 - test-tier0, test-tier1-select, test-tier1-emit, test-tier1-masks and
   test-tier1-pipeline check that every record they emit has a complete row.
 

@@ -155,31 +155,29 @@ static bool x86_target_test_tier0(const uint8_t* allowed, const char* profile)
             arena_pop_to(&output, 0);
             const Tier0Function* function = &views->functions[f];
             ready = tier0_validate(function).error == TIER0_OK;
-            const Tier0Code scalar = ready ? tier0_compile_scalar(function, &output) : (Tier0Code){ .error = TIER0_ERROR_DEPTH };
             const Tier0Code vector = ready ? tier0_compile(function, &output) : (Tier0Code){ .error = TIER0_ERROR_DEPTH };
-            passed &= ready && scalar.error == vector.error;
-            if (scalar.error == TIER0_OK && vector.error == TIER0_OK)
+            passed &= ready;
+            if (vector.error == TIER0_OK)
             {
-                passed &= tier0_test_same_code(&scalar, &vector);
-                const uint32_t valid = x86_target_validate(allowed, scalar.records, scalar.count);
-                if (valid != scalar.count)
+                const uint32_t valid = x86_target_validate(allowed, vector.records, vector.count);
+                if (valid != vector.count)
                 {
-                    fprintf(stderr, "target %s: Tier 0 seed %llu function %u record %u of %u has unavailable/invalid form %u\n", profile, (unsigned long long)seed, f, valid, scalar.count, scalar.records[valid].form);
+                    fprintf(stderr, "target %s: Tier 0 seed %llu function %u record %u of %u has unavailable/invalid form %u\n", profile, (unsigned long long)seed, f, valid, vector.count, vector.records[valid].form);
                     passed = false;
                 }
-                records += scalar.count;
+                records += vector.count;
                 functions += 1;
             }
             else
             {
                 // These are bounded generator cases, not permission to accept an ISA failure.
-                passed &= scalar.error == vector.error && scalar.error == TIER0_ERROR_DEPTH;
+                passed &= vector.error == TIER0_ERROR_DEPTH;
                 refused += 1;
             }
         }
     }
     passed &= ready && functions != 0 && refused == 0;
-    printf("target %s Tier 0: %s (%u templates, %u functions / %llu records, %u explicit depth refusals; exact twins)\n", profile, passed ? "pass" : "FAIL", tier0_template_count, functions, (unsigned long long)records, refused);
+    printf("target %s Tier 0: %s (%u templates, %u functions / %llu records, %u explicit depth refusals)\n", profile, passed ? "pass" : "FAIL", tier0_template_count, functions, (unsigned long long)records, refused);
     fflush(stdout);
     arena_release(&input);
     arena_release(&output);

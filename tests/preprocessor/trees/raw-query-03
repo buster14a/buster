@@ -1,0 +1,14 @@
+#ifndef RAW_REENTER
+#define RAW_REENTER
+#define RAW_BEFORE 11
+#if RAW_QUERY(<R"(x>) // )"
+outer
+#endif
+#define RAW_AFTER 22
+#include "raw-view.h"
+RAW_BEFORE RAW_AFTER
+#else
+#if RAW_QUERY(<R"(x>) // )"
+inner
+#endif
+#endif

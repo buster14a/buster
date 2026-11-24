@@ -1,0 +1,7 @@
+#pragma clang assume_nonnull begin
+#pragma clang assume_nonnull end
+int first = 4;
+#pragma clang assume_nonnull begin
+int *pointer;
+#pragma clang assume_nonnull end
+int last = 8;

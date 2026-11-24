@@ -93,6 +93,11 @@ struct Tier1CfgTestTally
     uint64_t carried_entries;
     uint64_t carried_mutants;
     uint64_t carried_killed;
+    // #2553: the current slots the allocations assert, and slots asserted current where an edge doesn't bring them.
+    uint64_t current_slots;
+    uint64_t current_mutants;
+    uint64_t current_killed;
+    uint64_t current_refused;
     uint64_t carried_refused;
     // #2611: CFGs whose anchors and chosen predecessors were compared with those read from a given dominator tree, as is
     // and with an entry added before it, and their blocks with a latch among their predecessors.
@@ -1162,6 +1167,39 @@ static bool tier1_cfg_test_continuations(const Tier1CfgInput* input, const Tier1
     return same;
 }
 
+// Whether `value` is among block b's current slots (tier1_cfg_current_slots).
+static bool tier1_cfg_test_slot_listed(const Tier1CfgAllocation* result, uint32_t block, uint32_t value)
+{
+    bool listed = false;
+    for (uint32_t k = result->current_slot_offsets != 0 ? result->current_slot_offsets[block] : 0; result->current_slot_offsets != 0 && k < result->current_slot_offsets[block + 1]; k += 1)
+    {
+        listed = listed || result->current_slots[k] == value;
+    }
+    return listed;
+}
+
+// The result's current slots with `value` taken out of block `block`'s (`add` false) or put first into them (`add` true),
+// into `offsets` (blocks + 1) and `slots` (one more than the result's).
+static void tier1_cfg_test_slots_edited(const Tier1CfgAllocation* result, uint32_t blocks, uint32_t block, uint32_t value, bool add, uint32_t* offsets, uint32_t* slots)
+{
+    uint32_t count = 0;
+    for (uint32_t c = 0; c < blocks; c += 1)
+    {
+        offsets[c] = count;
+        if (add && c == block)
+        {
+            slots[count] = value;
+            count += 1;
+        }
+        for (uint32_t k = result->current_slot_offsets[c]; k < result->current_slot_offsets[c + 1]; k += 1)
+        {
+            slots[count] = result->current_slots[k];
+            count += add || c != block || result->current_slots[k] != value;
+        }
+    }
+    offsets[blocks] = count;
+}
+
 static void tier1_cfg_test_case(Tier1CfgTestTally* tally, const Tier1CfgInput* input, Arena* output, Arena* scratch, const char* name, bool mutate, uint8_t temp_slots, uint32_t split_moves, bool must_allocate)
 {
     const uint64_t output_saved = output->length;
@@ -1185,6 +1223,7 @@ static void tier1_cfg_test_case(Tier1CfgTestTally* tally, const Tier1CfgInput* i
             tally->shared_slots += result.allocation.spill_ids[v] != UINT32_MAX;
         }
         tally->shared_slots -= result.allocation.spill_count;
+        tally->current_slots += result.current_slot_offsets != 0 ? result.current_slot_offsets[input->block_count] : 0;
         Tier1CfgCheck check;
         const bool verified = tier1_cfg_verify(input, &result, scratch, &check);
         if (!verified && tally->failures < 20)
@@ -1329,6 +1368,40 @@ static void tier1_cfg_test_case(Tier1CfgTestTally* tally, const Tier1CfgInput* i
                     tally->carried_mutants += 1;
                     tally->carried_killed += rejected;
                     tried += 1;
+                }
+            }
+            // #2553: a slot asserted current at a block's start that an edge into it doesn't bring: a value live into the
+            // block in a register there, with a slot, outside the block's current slots. tier1_cfg_current_slots' solution is
+            // the greatest: some predecessor's exit then holds the value in a register alone.
+            tried = 0;
+            for (uint32_t b = 1; result.current_slot_offsets != 0 && tried < 4 && b < input->block_count; b += 1)
+            {
+                const uint32_t entry = input->block_starts[b];
+                const bool reached = input->predecessor_offsets[b] != input->predecessor_offsets[b + 1];
+                for (uint32_t v = 0; reached && tried < 4 && v < input->value_count; v += 1)
+                {
+                    uint32_t location = 0;
+                    uint8_t kind = 0;
+                    const bool chosen = input->definitions[v] < entry && allocation->spill_ids[v] != UINT32_MAX && tier1_cfg_entry_location_oracle(&result, v, entry, &location, &kind) &&
+                                        kind == BUSTER_TIER1_ALLOCATE_REGISTER && !tier1_cfg_test_slot_listed(&result, b, v);
+                    const uint64_t scratch_mark = scratch->length;
+                    uint32_t* offsets = chosen ? arena_push_array(scratch, (uint64_t)input->block_count + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+                    uint32_t* slots = chosen ? arena_push_array(scratch, (uint64_t)result.current_slot_offsets[input->block_count] + 2, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
+                    if (offsets != 0 && slots != 0)
+                    {
+                        tier1_cfg_test_slots_edited(&result, input->block_count, b, v, true, offsets, slots);
+                        uint32_t* const kept_offsets = result.current_slot_offsets;
+                        uint32_t* const kept_slots = result.current_slots;
+                        result.current_slot_offsets = offsets;
+                        result.current_slots = slots;
+                        const bool rejected = tier1_cfg_test_mutant(tally, input, &result, output, scratch, &tally->current_refused);
+                        result.current_slot_offsets = kept_offsets;
+                        result.current_slots = kept_slots;
+                        tally->current_mutants += 1;
+                        tally->current_killed += rejected;
+                        tried += 1;
+                    }
+                    arena_pop_to(scratch, scratch_mark);
                 }
             }
             // Order: a move run before one that reads what it writes, where that location is written once on the
@@ -3904,6 +3977,7 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
         tier1_cfg_test_expect(&tally, count < 500 || (tally.avoiding_ranges != 0 && tally.reading_ranges != 0), "the cases reach ranges that avoid fixed sequences' registers and readers across their sequences");
         tier1_cfg_test_expect(&tally, tally.carried_killed == tally.carried_mutants && (count < 500 || (tally.carried_entries != 0 && tally.carried_mutants != 0)),
                               "the cases reach entries the carried proof takes and ones it refuses, and every refused one marked fails the checker");
+        tier1_cfg_test_expect(&tally, tally.current_killed == tally.current_mutants && (count < 500 || (tally.current_slots != 0 && tally.current_mutants != 0)), "every slot asserted current that an edge doesn't bring is refused, and the allocations assert some");
         // #939: every allocation's certificate proved, and the oracle reached some of them.
         tier1_cfg_test_expect(&tally, tally.certificates == tally.allocations && tally.oracle_certificates != 0, "every allocation's certificate is proved, the oracle's share among them");
         // A mutant that moves a value wrongly must fail the certificate too: every order, definition and split
@@ -3911,7 +3985,7 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
         // names of equal contents in one register at a block's start, a mask in k0 for a fragment nothing reads), and
         // the certificate never refuses what the verifier accepts.
         tier1_cfg_test_expect(&tally, tally.order_refused == tally.order_mutants && tally.definition_refused == tally.definition_mutants && tally.destination_refused == tally.destination_mutants, "every order, definition and split destination mutant fails the certificate");
-        tier1_cfg_test_expect(&tally, tally.certificate_only == 0 && tally.verifier_only == (tally.interference_mutants - tally.interference_refused) + (tally.k0_mutants - tally.k0_refused) + (tally.slot_mutants - tally.slot_refused) + (tally.carried_mutants - tally.carried_refused), "the certificate refuses no mutant the verifier accepts");
+        tier1_cfg_test_expect(&tally, tally.certificate_only == 0 && tally.verifier_only == (tally.interference_mutants - tally.interference_refused) + (tally.k0_mutants - tally.k0_refused) + (tally.slot_mutants - tally.slot_refused) + (tally.carried_mutants - tally.carried_refused) + (tally.current_mutants - tally.current_refused), "the certificate refuses no mutant the verifier accepts");
         // #2538: the one-call order reaches a taken preference, a refused one, a constraint that frees the definitions and a
         // case with fixed ranges.
         tier1_cfg_test_expect(&tally, count < 500 || (tally.two_taken != 0 && tally.two_refused != 0 && tally.two_freed != 0 && tally.two_fixed != 0), "two problems reach every outcome");
@@ -3919,7 +3993,7 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
         tier1_cfg_test_expect(&tally, count < 500 || tally.column_widest > 16, "the column's set checks reach a second step of values");
         // A malformed shape must fail both, before either reads through it (#1142's review).
         tier1_cfg_test_expect(&tally, tally.shape_mutants != 0 && tally.shape_killed == tally.shape_mutants && tally.shape_refused == tally.shape_mutants, "every malformed shape fails both checkers");
-        printf("test-tier1-cfg: %" PRIu64 " checks, %" PRIu64 " failures; %" PRIu64 " allocations, %" PRIu64 " constraint refusals; %" PRIu64 " moves, %" PRIu64 " at splits, %" PRIu64 " through the scratch register, %" PRIu64 " split edges, %" PRIu64 " spilled values, %" PRIu64 " allocations with a temporary slot; %" PRIu64 " mask moves, %" PRIu64 " at splits, %" PRIu64 " spilled masks; mutants rejected: %" PRIu64 " of %" PRIu64 " interference, %" PRIu64 " of %" PRIu64 " order, %" PRIu64 " of %" PRIu64 " definition, %" PRIu64 " of %" PRIu64 " split destination, %" PRIu64 " of %" PRIu64 " k0, %" PRIu64 " of %" PRIu64 " shared slot; %" PRIu64 " values in a phi web's slot, %" PRIu64 " entries left to their recipes, %" PRIu64 " carried, %" PRIu64 " of %" PRIu64 " carried mutants rejected (seed=%" PRIu64 ", count=%" PRIu64 ")\n", tally.checks, tally.failures, tally.allocations, tally.constraints, tally.moves, tally.split_moves, tally.scratch_moves, tally.split_edges, tally.spills, tally.temp_slot_cases, tally.mask_moves, tally.mask_split_moves, tally.mask_spills, tally.interference_killed, tally.interference_mutants, tally.order_killed, tally.order_mutants, tally.definition_killed, tally.definition_mutants, tally.destination_killed, tally.destination_mutants, tally.k0_killed, tally.k0_mutants, tally.slot_killed, tally.slot_mutants, tally.shared_slots, tally.unread_entries, tally.carried_entries, tally.carried_killed, tally.carried_mutants, seed, count);
+        printf("test-tier1-cfg: %" PRIu64 " checks, %" PRIu64 " failures; %" PRIu64 " allocations, %" PRIu64 " constraint refusals; %" PRIu64 " moves, %" PRIu64 " at splits, %" PRIu64 " through the scratch register, %" PRIu64 " split edges, %" PRIu64 " spilled values, %" PRIu64 " allocations with a temporary slot; %" PRIu64 " mask moves, %" PRIu64 " at splits, %" PRIu64 " spilled masks; mutants rejected: %" PRIu64 " of %" PRIu64 " interference, %" PRIu64 " of %" PRIu64 " order, %" PRIu64 " of %" PRIu64 " definition, %" PRIu64 " of %" PRIu64 " split destination, %" PRIu64 " of %" PRIu64 " k0, %" PRIu64 " of %" PRIu64 " shared slot; %" PRIu64 " values in a phi web's slot, %" PRIu64 " entries left to their recipes, %" PRIu64 " carried, %" PRIu64 " of %" PRIu64 " carried mutants rejected; %" PRIu64 " current slots, %" PRIu64 " of %" PRIu64 " current-slot mutants rejected (seed=%" PRIu64 ", count=%" PRIu64 ")\n", tally.checks, tally.failures, tally.allocations, tally.constraints, tally.moves, tally.split_moves, tally.scratch_moves, tally.split_edges, tally.spills, tally.temp_slot_cases, tally.mask_moves, tally.mask_split_moves, tally.mask_spills, tally.interference_killed, tally.interference_mutants, tally.order_killed, tally.order_mutants, tally.definition_killed, tally.definition_mutants, tally.destination_killed, tally.destination_mutants, tally.k0_killed, tally.k0_mutants, tally.slot_killed, tally.slot_mutants, tally.shared_slots, tally.unread_entries, tally.carried_entries, tally.carried_killed, tally.carried_mutants, tally.current_slots, tally.current_killed, tally.current_mutants, seed, count);
         printf("test-tier1-cfg: certificates: %" PRIu64 " proved (%" PRIu64 " by the oracle too), %" PRIu64 " facts, %" PRIu64 " edits, %" PRIu64 " operands, %" PRIu64 " renames; mutants refused: %" PRIu64 " interference, %" PRIu64 " order, %" PRIu64 " definition, %" PRIu64 " split destination, %" PRIu64 " k0, %" PRIu64 " shared slot, %" PRIu64 " of %" PRIu64 " shape; %" PRIu64 " refused by the certificate alone, %" PRIu64 " by the verifier alone\n", tally.certificates, tally.oracle_certificates, tally.certificate_facts, tally.certificate_edits, tally.certificate_operands, tally.certificate_renames, tally.interference_refused, tally.order_refused, tally.definition_refused, tally.destination_refused, tally.k0_refused, tally.slot_refused, tally.shape_refused, tally.shape_mutants, tally.certificate_only, tally.verifier_only);
         printf("test-tier1-cfg: given dominator trees (#2611): %" PRIu64 " CFGs' anchors the same with and without an added entry, %" PRIu64 " blocks anchored at a latch\n", tally.given_trees, tally.given_latches);
         tier1_cfg_test_expect(&tally, tally.given_latches != 0, "some given tree's block takes a latch laid out before it (#2611)");

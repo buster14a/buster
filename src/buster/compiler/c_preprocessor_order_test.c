@@ -104,7 +104,7 @@ static bool pp_order_prime(InternTable* table, const PPOrderOutput* reference, u
 static void pp_order_lane(void* argument)
 {
     PPOrderTest* test = argument;
-    const uint32_t count = BUSTER_ARRAY_LENGTH(pp_test_cases);
+    const uint32_t count = pp_test_case_count;
     for (uint32_t slot = lane_index(); slot < count; slot += lane_count())
     {
         const uint32_t index = test->reverse ? count - 1 - slot : slot;
@@ -194,7 +194,7 @@ static bool pp_test_id_order(const char* directory, uint64_t seed)
         3,
         8,
     };
-    const uint32_t count = BUSTER_ARRAY_LENGTH(pp_test_cases);
+    const uint32_t count = pp_test_case_count;
     PPOrderInput* inputs = calloc(count, sizeof(PPOrderInput));
     PPOrderOutput* reference = calloc(count, sizeof(PPOrderOutput));
     PPOrderOutput* outputs = calloc(count, sizeof(PPOrderOutput));

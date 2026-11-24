@@ -1,0 +1,2 @@
+#define DROP(x) kept
+DROP(a\N{GREEK SMALL LETTER ALPHA})

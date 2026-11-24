@@ -1,0 +1,1 @@
+__has_c_attribute(x

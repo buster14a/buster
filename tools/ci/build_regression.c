@@ -1351,7 +1351,7 @@ static const OwnershipException ownership_exceptions[] = {
     { "src/buster/compiler/object_writer_test.c", ownership_main_units, "object metadata types and helpers used by shared symbol/source readers", UINT64_C(0x1753ed9d953b02d3) },
     { "src/buster/compiler/snapshot_test.c", "main_unit_executable.c main_unit_checker.c", "executable patch checks shared with checker debug tests", UINT64_C(0xf83ab1966416eae8) },
     { "src/buster/compiler/static_test.c", "main_unit_executable.c main_unit_dynamic.c", "static executable writer shared by executable and dynamic tests", UINT64_C(0xe0e54572562aaf20) },
-    { "src/buster/compiler/tier0_benchmark_measure.c", "main_unit_backend.c main_unit_checker.c", "counter utilities for backend IR and checker source benchmarks", UINT64_C(0x16670544301d2354) },
+    { "src/buster/compiler/tier0_benchmark_measure.c", "main_unit_backend.c main_unit_checker.c", "counter utilities for backend IR and checker source benchmarks", UINT64_C(0x19f550c607e8538c) },
     { "src/buster/compiler/x86_64_encoder_test.c", "main.c main_unit_x86.c main_unit_frontend.c main_unit_assembler.c main_unit_link.c main_unit_backend.c", "encoding/execute helpers for these six test families", UINT64_C(0xc4d128a61e85c6d3) },
     { "src/buster/compiler/x86_intrinsics_test.c", "main_unit_checker.c main_unit_x86.c", "object reading and instruction decoding for checker AMX and intrinsic tests", UINT64_C(0x83a1dc58c44b290a) },
     { "src/buster/compiler/x86_semantics_test.c", ownership_main_units, "form names for DRIVER/BACKEND and six forced-emission globals retained in all units", UINT64_C(0x929ee4e6ddcf62ef) },

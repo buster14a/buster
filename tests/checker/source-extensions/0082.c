@@ -1,0 +1,1 @@
+static double inf=__builtin_huge_val(); static float nan=__builtin_nanf("0x123"); _Static_assert(__builtin_isinf(__builtin_inf()),"inf"); _Static_assert(__builtin_isnan(__builtin_nan("")),"nan"); _Static_assert(__builtin_fpclassify(1,2,3,4,5,0.0)==5,"zero");

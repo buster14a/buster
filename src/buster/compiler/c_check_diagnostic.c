@@ -230,6 +230,9 @@ static const CheckWarningDescription check_warning_descriptions[] =
     [CHECK_WARNING_ID_IMPLICIT_CONST_INT_FLOAT_CONVERSION] = { "-Wimplicit-const-int-float-conversion", "-Wimplicit-int-float-conversion",
                                                                "implicit conversion changes value" },
     [CHECK_WARNING_ID_DOUBLE_PROMOTION] = { "-Wdouble-promotion", NULL, "implicit conversion increases floating-point precision" },
+    [CHECK_WARNING_ID_ABSOLUTE_VALUE] = { "-Wabsolute-value", NULL, "absolute value function given an argument it doesn't suit" },
+    [CHECK_WARNING_ID_INT_TO_POINTER_CAST] = { "-Wint-to-pointer-cast", NULL, "cast to pointer from smaller integer type" },
+    [CHECK_WARNING_ID_INT_TO_VOID_POINTER_CAST] = { "-Wint-to-void-pointer-cast", "-Wint-to-pointer-cast", "cast to pointer from smaller integer type" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");

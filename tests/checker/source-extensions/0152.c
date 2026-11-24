@@ -1,0 +1,1 @@
+int f(x,A)enum E{A=3}x;int A;{return x+A;}

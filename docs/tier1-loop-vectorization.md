@@ -287,13 +287,51 @@ unit inlining copied the sorter's vectorized `nDiv *= 16` loop (six trips at
 most) into `sqlite3VdbeExec`, and LICM moved its two splats out of the
 interpreter's loop (#2831's localization). At znver5 the function grew from
 87,473 to 130,652 bytes, and the unit's stores around calls from 17,907 to
-19,695. On the 9700X that cost speedtest1 1.34% more instructions and 1.91%
+19,695. On the 9700X that cost speedtest1 1.34% more instructions and 1.90%
 more cycles (`measure-tier1-programs --runs 11`, `-march=znver5` against
 `-march=znver5 --tier1-passes=+vectorize`). With the rule, the function is
 89,931 bytes and LICM moves nothing there. The rule also takes the compiler's
 own lexer, built by `--tier1` at znver5, from 3.725 to 3.289 cycles a byte in
 `c_tokenize` (`measure-tier1-rows --runs 11` against main), because the
 lexer's loops hold calls too. Its rows and scan programs don't change.
+
+**The record**
+([buster-performance](https://github.com/buster14a/buster-performance/tree/8d4254292/docs/measurements/tier1-vectorize-default-2743-2026-11-23)).
+This is the 9700X under the lock, CPU 2, Release builds of main `b7d0b5ed` and
+#3421's code (`d682e67a`). Every digest equals clang -O2's. On #2743's kernels,
+the geometric means of the time over clang -O2's, as linked and at each build's
+best of four placements, are:
+
+| | znver5: 19 loops | znver5: 6 controls | x86-64: 19 loops | x86-64: 6 controls |
+| --- | ---: | ---: | ---: | ---: |
+| `--tier1`, before | 15.27 / 15.68 | 1.09 / 1.09 | 3.27 / 3.26 | 1.08 / 1.08 |
+| `--tier1`, by default | 1.32 / 1.29 | 1.09 / 1.09 | 2.04 / 2.06 | 1.08 / 1.08 |
+
+At x86-64, 6 loops of the unit vectorize; at znver5, all 19.
+
+Short calls pay for the vector loop before it tests whether there is a
+vector's worth of work (#3479). At znver5, the 19 loops' time per call over
+main's is 1.40, 1.57 and 1.23 at 0, 1 and 4 elements. It is 0.99 at 7, 0.47
+at 16 and 0.20 at 64. At x86-64 it is 1.07, 1.05 and 1.00, then 0.84 at 16.
+Clang tests the trip count first.
+
+Compiling with the default, against main, in 11 alternating runs:
+
+| Unit | Target | Cycles | Instructions | `.text` |
+| --- | --- | ---: | ---: | ---: |
+| `sqlite3.c` | znver5 | +1.01% | +0.42% | +0.2% |
+| `sqlite3.c` | x86-64 | +0.63% | +0.24% | about the same |
+| the compiler's `main.c` | znver5 | +0.64% | −0.03% | −2.9% |
+
+`main.c` gets smaller because the LICM rule cuts its stores around calls from
+12,944 to 10,868.
+
+On speedtest1 and Lua's scripts (`measure-tier1-programs --runs 11`, the pass
+on against `-vectorize` in one executable), the default moves cycles within
+code placement's noise: speedtest1 0.9952 and Lua 1.0036 at x86-64, 1.0054 and
+0.9936 at znver5. Instructions change by at most +0.19% (speedtest1 at znver5).
+Both builds pass the code-size gate at x86-64. Few loops in those programs
+vectorize: one in Lua, and one or three in `sqlite3.c`.
 
 ## What the measurements rank
 

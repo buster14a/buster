@@ -1,0 +1,1 @@
+int f(a,b)int a;{return a+b;} int g(void){return f(3,4);}

@@ -587,7 +587,7 @@ static void parse_benchmark_run_stage(ParseBenchmark* bench, ParseBenchmarkTimed
         case PARSE_TIMED_VECTOR_FALLBACK:
         {
             const bool everything = k->unbalanced || k->unsupported || !bench->statements_ok;
-            parse_fallback(k, &input, everything);
+            parse_fallback(k, &input, everything, false);
             break;
         }
         // The tree's columns as the parser derives them, then with the subtree sizes, then the links from that postorder, as

@@ -112,7 +112,7 @@ function and the first error. `--print NAME` prints that function's IR as lowere
 and as promoted. The correctness list runs it on c-testsuite's subset, the frozen
 `sqlite3.c` and the frozen musl's units.
 
-`./build/compiler benchmark-ir-source [--only promote|promote-scalar|gvn|
+`./build/compiler benchmark-ir-source [--only promote|gvn|
 gvn-scalar|optimize|optimize-scalar|optimize-vector|lower|verify]
 [--after-scalar MS] [preprocessor options]
 file...` (`ir_source_benchmark.c`) prepares the files' functions as test-ir-source
