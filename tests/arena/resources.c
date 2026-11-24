@@ -455,14 +455,23 @@ static bool memory_refuse(uint32_t operation)
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
     };
-    struct sock_fprog filter = { .len = sizeof(instructions) / sizeof(instructions[0]), .filter = (struct sock_filter*)instructions };
+    struct sock_fprog filter = {
+        .len = sizeof(instructions) / sizeof(instructions[0]),
+        .filter = (struct sock_filter*)instructions,
+    };
     if (operation == 3)
     {
-        filter = (struct sock_fprog){ .len = sizeof(layout) / sizeof(layout[0]), .filter = (struct sock_filter*)layout };
+        filter = (struct sock_fprog){
+            .len = sizeof(layout) / sizeof(layout[0]),
+            .filter = (struct sock_filter*)layout,
+        };
     }
     if (operation == 4)
     {
-        filter = (struct sock_fprog){ .len = sizeof(discards) / sizeof(discards[0]), .filter = (struct sock_filter*)discards };
+        filter = (struct sock_fprog){
+            .len = sizeof(discards) / sizeof(discards[0]),
+            .filter = (struct sock_filter*)discards,
+        };
     }
     return prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0 && prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &filter) == 0;
 }
@@ -669,7 +678,15 @@ static bool memory_commands(char* compiler, const char* directory, bool valgrind
     }
     if (!valgrind && !strict && ready)
     {
-        char* filtered[] = { compiler, "--lanes", "1", "-fsyntax-only", source, source, 0 };
+        char* filtered[] = {
+            compiler,
+            "--lanes",
+            "1",
+            "-fsyntax-only",
+            source,
+            source,
+            0,
+        };
         snprintf(log, sizeof(log), "%s/filtered-discards.log", directory);
         valid = memory_command(filtered, log, RLIM_INFINITY, RLIM_INFINITY, 4) && valid;
     }

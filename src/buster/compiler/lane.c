@@ -1616,7 +1616,10 @@ static void arena_release(Arena* arena)
             uint32_t slot = pool->count + pool->pending;
             if (queued)
             {
-                pool->ranges[pool->pending++] = (struct iovec){ .iov_base = mapping + begin, .iov_len = length };
+                pool->ranges[pool->pending++] = (struct iovec){
+                    .iov_base = mapping + begin,
+                    .iov_len = length,
+                };
                 pool->pending_bytes += length;
             }
             else if (pool->count == BUSTER_ARENA_POOL_SLOTS)
