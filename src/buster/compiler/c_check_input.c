@@ -1564,6 +1564,9 @@ _Static_assert(C_NAME_BUILTIN_COLUMN < C_NAME_IS_NOTHROW_DESTRUCTIBLE && C_NAME_
 // A specifier's type query finishes at the token, or a designator's, a selection's type, a va_arg's or a builtin's type
 // name starts there (specifier_finishes, designator_valid, selection_type_ends, vararg_types, builtin_type_ends).
 #define BUSTER_CHECK_RESOLVE_QUERY 0x20u
+// Designator states 0 and 1 are absent and resolved. These two still need their index expressions checked.
+#define BUSTER_CHECK_DESIGNATOR_PENDING 2u
+#define BUSTER_CHECK_DESIGNATOR_PENDING_REJECTED 3u
 // Before the expressions' walk (check_input_expressions), the token's classes (check_input_expression_classes):
 // The expressions' walk may act at the token: it has children, a sparse column has an entry for it, or its role or
 // kind is one the walk acts at.
@@ -7383,6 +7386,30 @@ static void check_input_constexpr_add(CheckInputReader* reader, CheckConstexprVa
             reader->constexpr_index = index;
             reader->constexpr_indexed = node;
             reader->constexpr_index_owner = reader;
+        }
+    }
+}
+
+// Recovery keeps the rejected declaration visible. Give its uses the accepted constexpr definition's value.
+static void check_input_constexpr_redefinition(CheckInputReader* reader, uint32_t declaration, uint32_t definition)
+{
+    const CheckConstexprValue* original = check_input_constexpr_find(reader, definition);
+    if (original != NULL)
+    {
+        const TypeAnswer same = type_same_canonical(reader->types, reader->declared_types[declaration], reader->declared_types[definition]);
+        reader->output->resource |= same == TYPE_ANSWER_FULL;
+        if (same == TYPE_ANSWER_YES)
+        {
+            CheckConstexprValue* value = BUSTER_ARENA_PUSH_ARRAY(reader->arena, CheckConstexprValue, 1);
+            reader->output->resource |= value == NULL;
+            if (value != NULL)
+            {
+                value->declaration = declaration;
+                value->value = original->value;
+                check_input_constexpr_add(reader, value);
+                check_input_rare_claim(reader, &reader->declaration_flags[declaration]);
+                reader->declaration_flags[declaration] |= BUSTER_CHECK_DECLARATION_CONSTEXPR;
+            }
         }
     }
 }
@@ -13595,8 +13622,18 @@ static void check_input_implicit_late_attributes(CheckInputReader* reader, uint3
 // Remove both the initializer action and its metadata; leaving either would make a later diagnostic view revive it.
 static void check_input_invalid_initializer(CheckInputReader* reader, uint32_t token, uint32_t point)
 {
-    if (point < reader->parser->tokens.count && reader->initializer_declarations[point] == token)
+    const Parser* parser = reader->parser;
+    const uint32_t count = parser->tokens.count;
+    if (point < count && reader->initializer_declarations[point] == token)
     {
+        // A direct initializer's closing parenthesis owns its conversion and reads the opening from the metadata.
+        const uint32_t close = parser->tree.roles[point] == PARSE_ROLE_OPEN_GROUP ? parser->tree.parents[point] : BUSTER_CHECK_NONE;
+        if (close < count && reader->initializer_declarations[close] == token)
+        {
+            reader->initializers[close] = 0;
+            reader->initializer_declarations[close] = BUSTER_CHECK_NONE;
+            reader->ignored[close] = true;
+        }
         reader->initializers[point] = 0;
         reader->initializer_declarations[point] = BUSTER_CHECK_NONE;
         reader->query_types[point] = 0;
@@ -13978,9 +14015,9 @@ static void check_input_bind_checked(CheckInputReader* reader, uint32_t token, u
                 // invalid with it and its uses quiet (check_input_bind), without replacing its entity's linked one.
                 const bool function_redefinition = redefined && !mismatch && !(thread_local && !thread_local_alone) && kind == C_BINDING_FUNCTION;
                 dropped = recovered && !redefinition_alone && !function_redefinition;
-                if (recovered && redefinition_alone)
+                if (recovered && redefinition_alone && check_input_invalid_redefinition_note(reader, token))
                 {
-                    (void)check_input_invalid_redefinition_note(reader, token);
+                    check_input_constexpr_redefinition(reader, token, definition - 1);
                 }
                 if (recovered && function_redefinition)
                 {
@@ -14964,6 +15001,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
     const bool modern = parser->language.standard >= 1999;
     CheckInputJumpContext jumps = { .next = begin };
     uint32_t visits = 0;
+    CheckInputRejectedInitializer rejected_initializer = { 0 };
     for (uint32_t i = begin; i <= end && reader->output->report_count == 0 && !reader->output->resource; i = check_input_resolve_next(reader, i, end))
     {
         visits += 1;
@@ -14982,7 +15020,9 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
         {
             for (uint32_t declaration = reader->initializer_finish_heads[i]; declaration != BUSTER_CHECK_NONE; declaration = reader->initializer_finish_next[declaration])
             {
-                if (!check_input_initializer_finish(reader, declaration))
+                const bool discarded = parser->tree.roles[declaration] == PARSE_ROLE_OPEN_COMPOUND &&
+                                       reader->initializer_declarations[declaration] == BUSTER_CHECK_NONE;
+                if (!discarded && !check_input_initializer_finish(reader, declaration))
                 {
                     break;
                 }
@@ -15069,7 +15109,9 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                 continue;
             }
         }
-        if (BUSTER_CHECK_RESOLVE_RARE(mark, BUSTER_CHECK_RESOLVE_QUERY) && BUSTER_CHECK_RARE(reader, designator_valid, i) == 2 && !check_input_initializer_designator(reader, i))
+        const uint8_t designator = BUSTER_CHECK_RESOLVE_RARE(mark, BUSTER_CHECK_RESOLVE_QUERY) ? BUSTER_CHECK_RARE(reader, designator_valid, i) : 0;
+        if (designator >= BUSTER_CHECK_DESIGNATOR_PENDING &&
+            !check_input_initializer_designator(reader, i, designator == BUSTER_CHECK_DESIGNATOR_PENDING_REJECTED))
         {
             break;
         }
@@ -15191,18 +15233,35 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
             reader->initializer_declarations[i] != BUSTER_CHECK_NONE)
         {
             const uint32_t declaration = reader->initializer_declarations[i];
-            if (check_sparse_get(reader->output->initializer_ends, declaration) > reader->resolve_limit)
+            const uint32_t initializer_end = check_sparse_get(reader->output->initializer_ends, declaration);
+            if (initializer_end > reader->resolve_limit)
             {
                 reader->expression_limit = i < reader->expression_limit ? i : reader->expression_limit;
                 check_input_pragma_report(reader);
                 break;
             }
-            check_input_initializer_prepare(reader, i);
-            const CheckInputLiteralTable* table = reader->output->literal_tables_last;
-            if (table != NULL && table->declaration == declaration)
+            const bool rejected = reader->invalid_redefinition_count != 0 && check_input_invalid_redefinition(reader, declaration);
+            check_input_initializer_prepare(reader, i, !rejected, rejected_initializer);
+            if (rejected)
             {
-                i = check_sparse_get(reader->output->initializer_ends, declaration) - 1;
-                continue;
+                // Designators and their operands are prepared even though the rejected object cannot be initialized again.
+                // The direct form's trailing arguments are checked too, past its first argument's stored end.
+                const uint32_t stop = role == PARSE_ROLE_OPEN_GROUP && parent < parser->tokens.count ? parent : initializer_end;
+                if (i >= rejected_initializer.end)
+                {
+                    rejected_initializer.first = i + 1;
+                }
+                rejected_initializer.end = stop > rejected_initializer.end ? stop : rejected_initializer.end;
+                check_input_invalid_initializer(reader, declaration, i);
+            }
+            else
+            {
+                const CheckInputLiteralTable* table = reader->output->literal_tables_last;
+                if (table != NULL && table->declaration == declaration)
+                {
+                    i = check_sparse_get(reader->output->initializer_ends, declaration) - 1;
+                    continue;
+                }
             }
         }
         uint32_t implicit_first = BUSTER_CHECK_NONE;
@@ -15403,7 +15462,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                         check_input_noderef_set(reader->output, body_end, reader->declarator_noderef);
                         reader->initializer_declarations[body_end] = i;
                         reader->query_types[i] = type;
-                        check_input_initializer_prepare(reader, i);
+                        check_input_initializer_prepare(reader, i, true, rejected_initializer);
                         reader->ignored[close] = true;
                     }
                     else
@@ -15419,7 +15478,7 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
         }
         if (__builtin_expect((syntax & BUSTER_CHECK_SYNTAX_STRING) != 0, 0) && syntactic && !reader->ignored[i])
         {
-            check_input_string(reader, i);
+            check_input_initializer_string(reader, i, rejected_initializer);
         }
     }
     reader->output->resolve_visits += visits;

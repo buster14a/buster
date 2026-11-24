@@ -145,10 +145,9 @@ tcl=$(bash tools/ci/tcl-config.sh) || exit $?
 # undefined, pushed and poisoned, macros of their own by the hundred, headers read once, lines moved, a fatal include),
 # each after the others on one lane, from the lane's root image: every object and diagnostic its own alone, and under
 # --poison-arenas every byte the root keeps the image's after each unit. Then the units with syntax errors, one of
-# which the checker reads through a copy of the preprocessor (the root dropped and captured again), without attested
-# declarations, whose second reading of such a unit prints no parser's error.
+# which the checker reads through a copy of the preprocessor (the root dropped and captured again).
 "$BUSTER_COMPILER" test-check-units --corpus tests/units/root-image --option --lanes --option 1
-"$BUSTER_COMPILER" test-check-units --corpus tests/units/root-image/errors --option --lanes --option 1 --option --attested=off
+"$BUSTER_COMPILER" test-check-units --corpus tests/units/root-image/errors --option --lanes --option 1
 == Test the driver's commands of several source files [8 CPUs]
 # #152: generated programs of several units, and one of synth's shape, compiled by one command into executables
 # that run as clang's builds of them do and define what cc's links of their units' objects do, at every lane count
