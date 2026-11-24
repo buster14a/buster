@@ -1,28 +1,29 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// The reach scan's filter (#1340), included after the candidates' classes. The scan (check_common_next_reach_op) lists
-// its candidates by operator alone and check_common_own_reach tests each one: on sqlite3.c 78,304 nodes for 2,292 with a
-// bit. This filter takes out of each block of 16 candidates the nodes whose bits can only be zero, before they are
-// listed. It is no second implementation of a node's bits: check_common_own_reach stays the only verdict, asked of every
+// The reach scan's filter (#1340), included after the scan's selection (check_common_reach_selected). The scan
+// (check_common_next_reach_op) lists its candidates by operator alone and check_common_own_reach tests each one: on
+// sqlite3.c 78,304 nodes for 2,292 with a bit. This filter takes out the candidates whose bits can only be zero, before
+// they are listed. It is no second implementation of a node's bits: check_common_own_reach stays the only verdict, asked of every
 // node the filter keeps, and what the filter gives is a necessary condition of each family of that test, read off its
-// code (the derivations are at check_common_reach_keep). A node it wrongly kept costs a visit; a node it wrongly took out
+// code (the derivations are at check_common_reach_step). A node it wrongly kept costs a visit; a node it wrongly took out
 // would lose a warning, which the audit (CheckCommonReachAudit) and the candidates' tests look for.
 //
 // What it makes, each once a unit, over the facts' tree (each node's operands and arguments have it for their parent):
-//   - a trait byte a node (check_common_reach_traits), 64 nodes at a time, from its operator and its constant kind, and
-//     in the same pass a byte of what each node's children are, which the few nodes with a trait store at their parent;
+//   - three bytes a node (check_common_reach_traits), 64 nodes at a time: its traits, from its operator and its constant
+//     kind; its operator's families; and what its children are, which the few nodes with a trait store at their parent;
 //   - a class byte a type (check_common_reach_type_classes), 64 types at a time, from the type table's kinds;
 //   - a bit a call whose argument slots hold one that could matter (check_common_reach_arguments).
-// Then a block of candidates is sequential loads and compares: its operators' families from a permute, its own and its
-// children's traits, and the traits and type of the node before each one, which is its last operand in a graph built in
-// evaluation order (where it isn't, the children's byte answers).
+// Then 64 candidates at a time are three byte loads and a dozen byte tests (check_common_reach_step): most nodes are
+// taken out there, where no child is anything a test asks for. What is left, about a node in ten on sqlite3.c, takes a
+// few scalar loads each for what its family reads past its children's byte: a source's and its target's widths, a base's
+// or an operand's type's class, its row of conversions.
 //
 // No gather: on Zen 5 a 16-lane vpgatherdd is 64 uops (docs/coding-style.md, "SIMD and Zen 5"). This filter's first
-// form gathered each candidate's operands' traits, types and rows of conversions, a block at a time, and on the 9700X
-// its blocks cost 10 M cycles of sqlite3.c's compile, as much as the scan it replaced
-// (buster-performance, reach-scan-1340-2026-11-24). What is left to scalar loads is a lane at a time for the few lanes
-// that need a type's class past the builtin types or a row of conversions, and the argument slots' pass.
+// form gathered each candidate's operands' traits, types and rows of conversions, 16 nodes at a time, and on the 9700X
+// its blocks cost 10 M cycles of sqlite3.c's compile, as much as the scan it replaced; its second, 16 nodes at a time
+// without the gathers, 6 M (the 9700X readings are with #1340's pull request). The rows of conversions are cold by now,
+// a cache line each, so a chunk's are asked for together before any is read (check_common_reach_chunk).
 
 // A node's traits: what the exact tests ask of a node read as an operand, a source or an argument.
 // Its constant kind is CHECK_CONSTANT_INTEGER.
@@ -103,6 +104,8 @@ _Static_assert(BUSTER_TYPE_KIND_WRAPPERS == BUSTER_TYPE_KIND_ALIGNED && BUSTER_T
 #define BUSTER_CHECK_FAMILY_DEREFERENCE 0x40u
 // No test but the conversion edges': a unary sign, `+`, `-`, `*`, a comparison, `+=`, `-=`, `*=`.
 #define BUSTER_CHECK_FAMILY_EDGES 0x80u
+// In a unit's table (CheckCommonReachFilter.families), an operator the scan lists under none of the unit's options.
+#define BUSTER_CHECK_FAMILY_UNLISTED 0xffu
 
 static const uint8_t check_common_reach_families[128] =
 {
@@ -137,26 +140,33 @@ static const uint8_t check_common_reach_families[128] =
 };
 _Static_assert(CHECK_OP_COUNT <= BUSTER_ARRAY_LENGTH(check_common_reach_families), "the operators' families fit two byte-permute tables");
 
-// The traits each family's test asks of the operand it reads (check_common_reach_keep).
-// A source's traits but an integer constant's, whose conversion alone the widths decide (check_common_reach_keep).
+// The traits each family's test asks of the operand it reads (check_common_reach_step).
+// A source's traits but an integer constant's, whose conversion alone the widths decide (check_common_reach_step).
 #define BUSTER_CHECK_REACH_ARM_TRAITS (BUSTER_CHECK_TRAIT_FLOATING | BUSTER_CHECK_TRAIT_ARMS | BUSTER_CHECK_TRAIT_PEELED | BUSTER_CHECK_TRAIT_SELECT)
 #define BUSTER_CHECK_REACH_TRUTH_TRAITS (BUSTER_CHECK_TRAIT_FLOATING | BUSTER_CHECK_TRAIT_ARMS | BUSTER_CHECK_TRAIT_PEELED | BUSTER_CHECK_TRAIT_SELECT)
 #define BUSTER_CHECK_REACH_EDGE_TRAITS (BUSTER_CHECK_TRAIT_INTEGER | BUSTER_CHECK_TRAIT_ARMS | BUSTER_CHECK_TRAIT_SELECT)
 #define BUSTER_CHECK_REACH_DIVISOR_TRAITS (BUSTER_CHECK_TRAIT_INTEGER | BUSTER_CHECK_TRAIT_CAST | BUSTER_CHECK_TRAIT_PEELED | BUSTER_CHECK_TRAIT_ADDRESS)
 #define BUSTER_CHECK_REACH_POINTER_TRAITS (BUSTER_CHECK_TRAIT_INTEGER | BUSTER_CHECK_TRAIT_CAST | BUSTER_CHECK_TRAIT_PEELED)
 
+// The blocks of 16 nodes the scan's filter takes at a time: 512 nodes, eight steps, about thirty of whose rows of
+// conversions the edges' test reads on sqlite3.c.
+#define BUSTER_CHECK_REACH_CHUNK 32u
+_Static_assert(BUSTER_CHECK_REACH_CHUNK % 4 == 0, "a chunk is whole steps of 64 nodes");
+
 typedef struct CheckCommonReachFilter CheckCommonReachFilter;
 struct CheckCommonReachFilter
 {
     const CheckGraph* graph;
     const CheckStream* stream;
-    // A trait byte a node, with two zero bytes before the first, the traits of the nodes before node 0. Null where the
-    // filter doesn't apply (check_common_reach_filter_build) and the scan lists every candidate.
+    // A trait byte a node. Null where the filter doesn't apply (check_common_reach_filter_build) and the scan lists every
+    // candidate.
     const uint8_t* traits;
     // What each node's children are: the traits of its operands and arguments but a leaf's, and
     // BUSTER_CHECK_CHILD_BIT_FIELD.
     const uint8_t* children;
-    // A class byte a type; 64 at least, so that the builtin types' are one register.
+    // Each node's operator's families, from the unit's table below; no family for an operator outside the table.
+    const uint8_t* node_families;
+    // A class byte a type.
     const uint8_t* classes;
     // A bit a node: a call with an argument slot that could matter (check_common_reach_arguments). Null without the
     // argument columns.
@@ -170,14 +180,20 @@ struct CheckCommonReachFilter
     // -Wimplicit-const-int-float-conversion may report, the conversion edges' only warning that the filter is built
     // under.
     bool edges;
-    // The operators' families under the unit's options (check_common_reach_filter_build).
+    // The operators' families under the unit's options (check_common_reach_filter_build), and
+    // BUSTER_CHECK_FAMILY_UNLISTED for the operators the scan can't list under them.
     uint8_t families[128];
     // A builtin type's width as check_common_integer gives it, by its index, 0 where it isn't an integer type; and the
     // lesser of that and its default argument promotion's, 0 where either isn't one.
     uint8_t widths[BUSTER_TYPE_BUILTIN_COUNT];
     uint8_t promoted[BUSTER_TYPE_BUILTIN_COUNT];
+    // The scan's chunk (check_common_reach_chunk): its first node, its blocks' candidates that may have a bit, and how
+    // many of the blocks the scan has listed.
+    uint32_t chunk_first;
+    uint32_t chunk_blocks;
+    uint32_t chunk_taken;
+    uint16_t chunk_kept[BUSTER_CHECK_REACH_CHUNK];
 };
-_Static_assert(BUSTER_TYPE_BUILTIN_COUNT == 64, "the builtin types' widths and classes fit one byte-permute table each");
 
 // The reach scan's audit, a test's (BUSTER_TEST_COMMON_REACH_AUDIT, read once a unit by check_driver_common_warnings):
 // check_common_facts then lists every candidate the operators' classes give, as it did before the filter, asks
@@ -192,13 +208,15 @@ struct CheckCommonReachAudit
 };
 static _Thread_local CheckCommonReachAudit check_common_reach_audit;
 
-// Every node's trait byte into `traits` and what its children are into `children` (`count` + 1 bytes, the last for the
-// nodes without a parent), 64 nodes at a time: four operator vectors narrowed to bytes and looked up, as
-// check_common_candidates_build has them, the nodes' constant kinds through a shuffle, and their bit-field flags. An
+// Every node's trait byte into `traits`, its operator's families (`families`, the unit's table) into `node_families`, and
+// what its children are into `children` (`count` + 1 bytes, the last for the nodes without a parent), 64 nodes at a
+// time: four operator vectors narrowed to bytes and looked up twice, as check_common_candidates_build has them, the
+// nodes' constant kinds through a shuffle, and their bit-field flags. An
 // operator or a constant kind outside its table has no trait, as no test names it. The nodes with a trait other than a
 // leaf's, or a bit-field's flag, each store theirs at their parent, a node at a time: a constant, a conditional, a
 // comma, a `<<`, a conversion, a selection, a cast.
-static void check_common_reach_traits(const CheckGraph* graph, const CheckStream* stream, const uint32_t* parents, uint8_t* traits, uint8_t* children)
+static void check_common_reach_traits(const CheckGraph* graph, const CheckStream* stream, const uint32_t* parents, const uint8_t* families, uint8_t* traits,
+                                      uint8_t* children, uint8_t* node_families)
 {
     const uint32_t count = graph->count;
     const CheckOp* operators = graph->ops;
@@ -207,6 +225,8 @@ static void check_common_reach_traits(const CheckGraph* graph, const CheckStream
     const __m512i low = _mm512_loadu_si512(check_common_reach_operator_traits);
     const __m512i high = _mm512_loadu_si512(check_common_reach_operator_traits + 64);
     const __m512i kinds = _mm512_broadcast_i32x4(_mm_loadu_si128((const __m128i*)check_common_reach_constant_traits));
+    const __m512i family_low = _mm512_loadu_si512(families);
+    const __m512i family_high = _mm512_loadu_si512(families + 64);
     const __m512i limit = _mm512_set1_epi32(CHECK_OP_COUNT);
     const __m512i field = _mm512_set1_epi32(BUSTER_CHECK_BIT_FIELD);
     memset(children, 0, (uint64_t)count + 1);
@@ -229,6 +249,7 @@ static void check_common_reach_traits(const CheckGraph* graph, const CheckStream
         const __m512i by_constant = _mm512_maskz_shuffle_epi8(_mm512_cmplt_epu8_mask(constant, _mm512_set1_epi8(16)) & lanes, kinds, constant);
         const __m512i own = _mm512_or_si512(by_operator, by_constant);
         _mm512_mask_storeu_epi8(traits + first, lanes, own);
+        _mm512_mask_storeu_epi8(node_families + first, lanes, _mm512_maskz_permutex2var_epi8(known & lanes, family_low, indices, family_high));
         const __mmask64 fields = (__mmask64)_mm512_test_epi32_mask(_mm512_maskz_loadu_epi32((__mmask16)lanes, flags + first), field) |
                                  (__mmask64)_mm512_test_epi32_mask(_mm512_maskz_loadu_epi32((__mmask16)(lanes >> 16), flags + first + 16), field) << 16 |
                                  (__mmask64)_mm512_test_epi32_mask(_mm512_maskz_loadu_epi32((__mmask16)(lanes >> 32), flags + first + 32), field) << 32 |
@@ -246,15 +267,14 @@ static void check_common_reach_traits(const CheckGraph* graph, const CheckStream
     }
 }
 
-// Every type's class byte into `classes` (64 at least, the table's count or more), 64 types at a time: one byte permute
-// of the kinds. A kind outside the table has every class, and so do the entries past the table's count.
-static void check_common_reach_type_classes(const TypeTable* types, uint8_t* classes, uint32_t entries)
+// Every type's class byte into `classes`, 64 types at a time: one byte permute of the kinds. A kind outside the table has
+// every class.
+static void check_common_reach_type_classes(const TypeTable* types, uint8_t* classes)
 {
     const uint32_t count = types->types.count;
     const uint8_t* kinds = types->types.kind;
     const __m512i table = _mm512_loadu_si512(check_common_reach_kind_classes);
     const __m512i every = _mm512_set1_epi8((char)BUSTER_CHECK_CLASS_ALL);
-    memset(classes, BUSTER_CHECK_CLASS_ALL, entries);
     for (uint32_t first = 0; first < count; first += 64)
     {
         const uint32_t live = count - first < 64 ? count - first : 64;
@@ -272,37 +292,17 @@ static inline __attribute__((always_inline)) uint32_t check_common_reach_class(c
     return index < filter->type_count ? filter->classes[index] : BUSTER_CHECK_CLASS_ALL;
 }
 
-// Of 16 TypeIds, the lanes of `asked` whose type has one of the classes `classes`: the builtin types' by an in-register
-// lookup of their index, the others' a load each.
-static inline __attribute__((always_inline)) __mmask16 check_common_reach_classed(const CheckCommonReachFilter* filter, __mmask16 asked, __m512i types, uint32_t classes)
+// A TypeId's width from `table`, the filter's widths or its promoted ones; 0 for a type that isn't a builtin one, whose
+// width isn't known here.
+static inline __attribute__((always_inline)) uint32_t check_common_reach_width(const uint8_t* table, TypeId type)
 {
-    const __m512i indices = _mm512_srli_epi32(types, BUSTER_TYPE_INDEX_SHIFT);
-    const __mmask16 builtin = _mm512_mask_cmplt_epu32_mask(asked, indices, _mm512_set1_epi32(BUSTER_TYPE_BUILTIN_COUNT));
-    const __m512i bytes = _mm512_permutexvar_epi8(_mm512_zextsi128_si512(_mm512_cvtepi32_epi8(indices)), _mm512_loadu_si512(filter->classes));
-    __mmask16 result = _mm512_mask_test_epi32_mask(builtin, _mm512_cvtepu8_epi32(_mm512_castsi512_si128(bytes)), _mm512_set1_epi32((int)classes));
-    TypeId each[16];
-    _mm512_storeu_si512(each, types);
-    for (uint32_t rest = asked & (__mmask16)~builtin; rest != 0; rest &= rest - 1)
-    {
-        const uint32_t lane = (uint32_t)__builtin_ctz(rest);
-        result |= (__mmask16)(((check_common_reach_class(filter, each[lane]) & classes) != 0 ? 1u : 0u) << lane);
-    }
-    return result;
-}
-
-// The widths of 16 TypeIds (`lanes` of them asked) from `table`, the filter's widths or its promoted ones: an in-register
-// lookup by the type's index. 0 for a type that isn't a builtin one, whose width isn't known here, and for a lane not asked.
-static inline __attribute__((always_inline)) __m512i check_common_reach_widths(const uint8_t* table, __mmask16 lanes, __m512i types)
-{
-    const __m512i indices = _mm512_srli_epi32(types, BUSTER_TYPE_INDEX_SHIFT);
-    const __mmask16 builtin = _mm512_mask_cmplt_epu32_mask(lanes, indices, _mm512_set1_epi32(BUSTER_TYPE_BUILTIN_COUNT));
-    const __m512i bytes = _mm512_permutexvar_epi8(_mm512_zextsi128_si512(_mm512_cvtepi32_epi8(indices)), _mm512_loadu_si512(table));
-    return _mm512_maskz_cvtepu8_epi32(builtin, _mm512_castsi512_si128(bytes));
+    const uint32_t index = type >> BUSTER_TYPE_INDEX_SHIFT;
+    return index < BUSTER_TYPE_BUILTIN_COUNT ? table[index] : 0;
 }
 
 // The calls with an argument slot that could matter, a bit each in `marked` (zeroed): a slot at a time, its argument's
 // traits, its conversion's target and the call that reads it, the argument's parent. Which slots could matter is
-// check_common_reach_keep's derivation for a call. Scalar: each slot's argument is anywhere before its call, so its
+// check_common_reach_step's derivation for a call. Scalar: each slot's argument is anywhere before its call, so its
 // trait is a load, and a 16-lane gather of them costs more than 16 loads do (the header).
 static void check_common_reach_arguments(const CheckCommonReachFilter* filter, const uint32_t* parents, uint64_t* marked)
 {
@@ -316,10 +316,8 @@ static void check_common_reach_arguments(const CheckCommonReachFilter* filter, c
         if (argument < count && (filter->enum_cast || (traits & (BUSTER_CHECK_TRAIT_INTEGER | BUSTER_CHECK_REACH_ARM_TRAITS)) != 0))
         {
             const TypeId target = stream->argument_conversions[slot].type;
-            const uint32_t source_index = stream->value_types[argument] >> BUSTER_TYPE_INDEX_SHIFT;
-            const uint32_t target_index = target >> BUSTER_TYPE_INDEX_SHIFT;
-            const uint32_t source_width = source_index < BUSTER_TYPE_BUILTIN_COUNT ? filter->widths[source_index] : 0;
-            const uint32_t target_width = target_index < BUSTER_TYPE_BUILTIN_COUNT ? filter->promoted[target_index] : 0;
+            const uint32_t source_width = check_common_reach_width(filter->widths, stream->value_types[argument]);
+            const uint32_t target_width = check_common_reach_width(filter->promoted, target);
             const uint32_t classes = check_common_reach_class(filter, target);
             const bool arms = (traits & BUSTER_CHECK_REACH_ARM_TRAITS) != 0;
             const bool narrowing = (traits & BUSTER_CHECK_TRAIT_INTEGER) != 0 && !(source_width != 0 && target_width >= source_width);
@@ -365,13 +363,13 @@ static bool check_common_reach_filter_build(const CheckGraph* graph, const Check
     };
     if (applies)
     {
-        const uint32_t class_entries = types->types.count < BUSTER_TYPE_BUILTIN_COUNT ? BUSTER_TYPE_BUILTIN_COUNT : types->types.count;
         const uint64_t words = ((uint64_t)count + 63) / 64;
-        uint8_t* traits = CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 2);
+        uint8_t* traits = CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, count);
         uint8_t* children = CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 1);
-        uint8_t* classes = CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, class_entries);
+        uint8_t* node_families = CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, count);
+        uint8_t* classes = CHECK_COMMON_PUSH_ARRAY(scratch, uint8_t, types->types.count);
         uint64_t* marked = arguments ? CHECK_COMMON_PUSH_ARRAY(scratch, uint64_t, words) : NULL;
-        result = traits != NULL && children != NULL && classes != NULL && (marked != NULL || !arguments);
+        result = traits != NULL && children != NULL && node_families != NULL && classes != NULL && (marked != NULL || !arguments);
         if (result)
         {
             memcpy(filter->families, check_common_reach_families, sizeof(filter->families));
@@ -391,6 +389,22 @@ static bool check_common_reach_filter_build(const CheckGraph* graph, const Check
             {
                 filter->families[CHECK_OP_CALL] = 0;
             }
+            // The operators the scan can list under the unit's options (check_common_reach_selected): the reach and
+            // comparison classes', a member where -Watomic-access asks, the compound assignments and the builtins where
+            // -Wimplicit-float-conversion does, and the conversion edges' operators. Whether it lists a node is still its
+            // own answer; an operator it never lists is none of the filter's.
+            for (uint32_t op = 0; op < CHECK_OP_COUNT; op += 1)
+            {
+                const bool classed = (check_common_candidate_classes[op] & ((1u << CHECK_COMMON_CANDIDATE_REACH) | (1u << CHECK_COMMON_CANDIDATE_COMPARE))) != 0;
+                const bool member = enabled->atomic_access && (op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW);
+                const bool precision = enabled->float_precision && ((op >= CHECK_OP_ADD_ASSIGN && op <= CHECK_OP_MULTIPLY_ASSIGN) || op >= CHECK_OP_BUILTIN_MISC);
+                const bool edged = enabled->const_int_float && ((op >= CHECK_OP_POSITIVE && op <= CHECK_OP_NEGATIVE) || (op >= CHECK_OP_ADD && op <= CHECK_OP_DIVIDE) ||
+                                                                (op >= CHECK_OP_ADD_ASSIGN && op <= CHECK_OP_DIVIDE_ASSIGN) || op >= CHECK_OP_SELECT);
+                if (!classed && !member && !precision && !edged)
+                {
+                    filter->families[op] = BUSTER_CHECK_FAMILY_UNLISTED;
+                }
+            }
             // The builtin types' widths, from the functions the exact test asks, so that the tables can't say other than
             // they do: 64 types.
             for (uint32_t index = 0; index < BUSTER_TYPE_BUILTIN_COUNT && index < types->types.count; index += 1)
@@ -403,12 +417,11 @@ static bool check_common_reach_filter_build(const CheckGraph* graph, const Check
                 filter->widths[index] = integer ? (uint8_t)width : 0;
                 filter->promoted[index] = promotes ? (uint8_t)(promoted < width ? promoted : width) : 0;
             }
-            traits[0] = 0;
-            traits[1] = 0;
-            check_common_reach_traits(graph, stream, parents, traits + 2, children);
-            check_common_reach_type_classes(types, classes, class_entries);
-            filter->traits = traits + 2;
+            check_common_reach_traits(graph, stream, parents, filter->families, traits, children, node_families);
+            check_common_reach_type_classes(types, classes);
+            filter->traits = traits;
             filter->children = children;
+            filter->node_families = node_families;
             filter->classes = classes;
             if (arguments)
             {
@@ -421,26 +434,25 @@ static bool check_common_reach_filter_build(const CheckGraph* graph, const Check
     return result;
 }
 
-// Of the 16 nodes from `first`, the candidates `selected` that may have a bit of their own reach: the others'
-// check_common_own_reach is zero, and they aren't check_common_self_assign_candidate's. A test's operand is read two
-// ways. Where it is the node before its reader, as a last operand is in a graph built in evaluation order, its traits
-// and its type are the ones before the reader's in their columns. Otherwise the reader's children answer for it: in the
-// facts' tree every operand and argument that is a node has its reader for parent, so what no child is, no operand is;
-// an operand that isn't a node gives no test a bit. Family by family, each a necessary condition read off the exact test:
+// Of the 64 nodes from `first` (a multiple of 64), the scan's candidates that may have a bit of their own reach, a mask
+// each of four blocks of 16 into `kept_blocks`, but for those whose only way to one is a conversion edge, which go to
+// `row_blocks` for check_common_reach_rows to decide: the others' check_common_own_reach is zero, and they aren't
+// check_common_self_assign_candidate's. What an operand is, its reader's children tell: in the facts' tree every operand
+// and argument that is a node has its reader for parent, so what no child is, no operand is; an operand that isn't a node
+// gives no test a bit. Family by family, each a necessary condition read off the exact test:
 //
 //   - No family (the table's 0): kept.
 //   - An assignment's, an initialization's, a conversion's source (check_common_candidate_bits' first case): the test
 //     gives its bit through check_common_conversion_source (an integer or floating constant, a conditional or a comma),
 //     through check_common_bool_candidate (a `<<` or a conditional, past conversions and selections), through
 //     check_common_enum_cast_edge, whose target, the node's own type, has an enumeration's or an aligned typedef's kind,
-//     or through check_float_narrows, which -Wimplicit-float-conversion alone asks (the family is gone then). So: its
-//     source is a floating constant, a conditional, a comma, a `<<`, a conversion or a selection; or enumerations may
+//     or through check_float_narrows, which -Wimplicit-float-conversion alone asks (the family is gone then). So: a
+//     child is a floating constant, a conditional, a comma, a `<<`, a conversion or a selection; or enumerations may
 //     report and its own type has an enumeration's class; or its source is an integer constant, whose bit is
 //     check_common_constant_changes' or check_common_bitfield_assignment's. The first is false of a conversion between
-//     integer types to one at least as wide, which the builtin types' widths tell where the source is the node before
-//     (a type they don't know keeps the node); the second needs a bit-field's lvalue among an assignment's operands.
-//     And, where -Wself-assign may report, a plain `x = y` is kept for the facts' mark: an assignment is taken out only
-//     where the node before it is its second operand and no leaf, or the node before that is its first and no leaf.
+//     integer types to one at least as wide, which the builtin types' widths tell (a type they don't know keeps the
+//     node); the second needs a bit-field's lvalue among an assignment's operands. And, where -Wself-assign may report,
+//     an assignment that check_common_self_assign_candidate takes is kept for the facts' mark.
 //   - A call (its second case): each argument's bit comes the same ways, its target the argument's conversion's type,
 //     or, for an unprototyped call, that type's promotion: the narrower of the two answers for both. So: the call is
 //     marked (check_common_reach_arguments).
@@ -455,104 +467,159 @@ static bool check_common_reach_filter_build(const CheckGraph* graph, const Check
 //   - Any other operator's conversion edges (check_common_edges_reach, where only
 //     -Wimplicit-const-int-float-conversion may report): check_common_edge_wanted takes an operand's or an argument's
 //     edge only where it is an integer constant, a conditional, a comma or a selection, and the edge's target is a real
-//     floating type's. So: a child that is one, and a floating type's class among the three targets of the node's row
-//     of conversions, which only such nodes have read. A call's arguments' targets are their slots' (the call is marked).
-static __mmask16 check_common_reach_keep(const CheckCommonReachFilter* filter, uint32_t first, __mmask16 selected)
+//     floating type's. So: a child that is one (`row_blocks`), and a floating type's class among the three targets of
+//     the node's row of conversions, which only such nodes have read (check_common_reach_rows). A call's arguments'
+//     targets are their slots' (the call is marked).
+//
+// Which nodes the scan lists is check_common_reach_selected's answer alone. A block's candidates of the reach and the
+// comparison classes are its two masks'; the function is asked only of a block where a node of another operator may
+// have a bit, as its other candidates read the block's operators, types and diagnostics.
+static void check_common_reach_step(const CheckCommonReachFilter* filter, const CheckCommonCandidates* candidates, bool sign_compare, bool atomic_access, bool float_precision,
+                                    bool edges, uint32_t first, uint16_t* kept_blocks, uint16_t* row_blocks)
 {
     const CheckGraph* graph = filter->graph;
     const CheckStream* stream = filter->stream;
-    const __m512i zero = _mm512_setzero_si512();
-    const __m512i limit = _mm512_set1_epi32((int)filter->count);
-    const __m512i before = _mm512_add_epi32(_mm512_set1_epi32((int)first), _mm512_setr_epi32(-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14));
-    const __m512i ops = _mm512_maskz_loadu_epi32(selected, graph->ops + first);
-    const __mmask16 known = _mm512_mask_cmplt_epu32_mask(selected, ops, _mm512_set1_epi32(BUSTER_ARRAY_LENGTH(filter->families)));
-    const __m512i table = _mm512_permutex2var_epi8(_mm512_loadu_si512(filter->families), _mm512_zextsi128_si512(_mm512_cvtepi32_epi8(ops)),
-                                                   _mm512_loadu_si512(filter->families + 64));
-    const __m512i families = _mm512_maskz_cvtepu8_epi32(known, _mm512_castsi512_si128(table));
-    const __m512i operand0 = _mm512_maskz_loadu_epi32(selected, graph->operand0 + first);
-    const __m512i operand1 = _mm512_maskz_loadu_epi32(selected, graph->operand1 + first);
-    // An operand that is the node before its reader (and a node: before node 0 there is none).
-    const __mmask16 adjacent0 = _mm512_mask_cmpeq_epi32_mask(_mm512_mask_cmplt_epu32_mask(selected, operand0, limit), operand0, before);
-    const __mmask16 adjacent1 = _mm512_mask_cmpeq_epi32_mask(_mm512_mask_cmplt_epu32_mask(selected, operand1, limit), operand1, before);
-    const __m512i own = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(selected, filter->traits + first));
-    const __m512i previous = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(selected, filter->traits + first - 1));
-    const __m512i children = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(selected, filter->children + first));
+    const uint32_t count = filter->count;
+    const uint32_t live = count - first < 64 ? count - first : 64;
+    const __mmask64 lanes = live == 64 ? (__mmask64)UINT64_MAX : (__mmask64)((UINT64_C(1) << live) - 1);
+    const __m512i raw = _mm512_maskz_loadu_epi8(lanes, filter->node_families + first);
+    const __mmask64 listed = _mm512_mask_cmpneq_epi8_mask(lanes, raw, _mm512_set1_epi8((char)BUSTER_CHECK_FAMILY_UNLISTED));
+    const __m512i families = _mm512_maskz_mov_epi8(listed, raw);
+    const __m512i children = _mm512_maskz_loadu_epi8(listed, filter->children + first);
+    const __m512i own = _mm512_maskz_loadu_epi8(listed, filter->traits + first);
     // (A leaf's trait is no child's: the children's byte has a bit-field's flag in its place.)
-    const __m512i any = _mm512_andnot_si512(_mm512_set1_epi32(BUSTER_CHECK_CHILD_BIT_FIELD), children);
-    const __m512i traits0 = _mm512_mask_blend_epi32(adjacent0, any, previous);
-    const __m512i traits1 = _mm512_mask_blend_epi32(adjacent1, any, previous);
-    __mmask16 kept = _mm512_mask_cmpeq_epi32_mask(selected, families, zero);
-    // The sources.
-    const __mmask16 source1 = _mm512_test_epi32_mask(families, _mm512_set1_epi32(BUSTER_CHECK_FAMILY_SOURCE1));
-    const __mmask16 source0 = _mm512_test_epi32_mask(families, _mm512_set1_epi32(BUSTER_CHECK_FAMILY_SOURCE0));
-    const __mmask16 sources = source0 | source1;
-    kept |= _mm512_mask_test_epi32_mask(source1, traits1, _mm512_set1_epi32(BUSTER_CHECK_REACH_ARM_TRAITS)) |
-            _mm512_mask_test_epi32_mask(source0, traits0, _mm512_set1_epi32(BUSTER_CHECK_REACH_ARM_TRAITS));
-    const __mmask16 constants = (_mm512_mask_test_epi32_mask(source1, traits1, _mm512_set1_epi32(BUSTER_CHECK_TRAIT_INTEGER)) |
-                                 _mm512_mask_test_epi32_mask(source0, traits0, _mm512_set1_epi32(BUSTER_CHECK_TRAIT_INTEGER))) & (__mmask16)~kept;
-    if (constants != 0)
+    const __m512i any = _mm512_andnot_si512(_mm512_set1_epi8(BUSTER_CHECK_CHILD_BIT_FIELD), children);
+    const __mmask64 source1 = _mm512_test_epi8_mask(families, _mm512_set1_epi8(BUSTER_CHECK_FAMILY_SOURCE1));
+    const __mmask64 sources = source1 | _mm512_test_epi8_mask(families, _mm512_set1_epi8(BUSTER_CHECK_FAMILY_SOURCE0));
+    const __mmask64 truths = _mm512_test_epi8_mask(families, _mm512_set1_epi8(BUSTER_CHECK_FAMILY_TRUTH));
+    const __mmask64 dereferences = _mm512_test_epi8_mask(families, _mm512_set1_epi8(BUSTER_CHECK_FAMILY_DEREFERENCE));
+    __mmask64 kept = _mm512_mask_testn_epi8_mask(listed, families, families);
+    kept |= _mm512_mask_test_epi8_mask(sources, any, _mm512_set1_epi8(BUSTER_CHECK_REACH_ARM_TRAITS));
+    kept |= _mm512_mask_test_epi8_mask(truths, _mm512_or_si512(any, own), _mm512_set1_epi8(BUSTER_CHECK_REACH_TRUTH_TRAITS));
+    kept |= _mm512_mask_test_epi8_mask(_mm512_test_epi8_mask(families, _mm512_set1_epi8(BUSTER_CHECK_FAMILY_DIVISION)), any,
+                                       _mm512_set1_epi8((char)BUSTER_CHECK_REACH_DIVISOR_TRAITS));
+    kept |= _mm512_mask_test_epi8_mask(dereferences, any, _mm512_set1_epi8(BUSTER_CHECK_REACH_POINTER_TRAITS));
+    kept |= _mm512_test_epi8_mask(families, _mm512_set1_epi8(BUSTER_CHECK_FAMILY_CALL)) & (filter->marked != NULL ? filter->marked[first >> 6] : 0);
+    // The nodes a lane's loads decide.
+    __mmask64 constants = _mm512_mask_test_epi8_mask(sources & ~kept, any, _mm512_set1_epi8(BUSTER_CHECK_TRAIT_INTEGER));
+    __mmask64 typed = _mm512_mask_test_epi8_mask(_mm512_test_epi8_mask(families, _mm512_set1_epi8(BUSTER_CHECK_FAMILY_SUBSCRIPT)), any,
+                                                 _mm512_set1_epi8(BUSTER_CHECK_TRAIT_INTEGER)) | (dereferences & ~kept);
+    __mmask64 selfs = filter->self_assign ? source1 & ~kept : 0;
+    __mmask64 enumerations = filter->enum_cast ? sources & ~kept : 0;
+    __mmask64 rows = filter->edges ? _mm512_mask_test_epi8_mask(listed & ~kept & ~truths, any, _mm512_set1_epi8(BUSTER_CHECK_REACH_EDGE_TRAITS)) : 0;
+    // The scan's candidates among them.
+    const __mmask64 interest = kept | constants | typed | selfs | enumerations | rows;
+    const uint32_t blocks = candidates->blocks;
+    const uint16_t* reach_class = candidates->masks + (uint64_t)CHECK_COMMON_CANDIDATE_REACH * blocks;
+    const uint16_t* compare_class = candidates->masks + (uint64_t)CHECK_COMMON_CANDIDATE_COMPARE * blocks;
+    uint64_t selected = 0;
+    for (uint32_t block = 0; block < 4 && first + block * 16 < count; block += 1)
     {
-        // The source's type is the one before the node's own where the source is the node before it.
-        const __mmask16 typed = constants & ((source1 & adjacent1) | (source0 & adjacent0));
-        const __m512i source = check_common_reach_widths(filter->widths, typed, _mm512_maskz_loadu_epi32(typed, stream->value_types + first - 1));
-        const __m512i target = check_common_reach_widths(filter->widths, typed, _mm512_maskz_loadu_epi32(typed, stream->value_types + first));
-        const __mmask16 widening = _mm512_mask_cmpge_epu32_mask(_mm512_mask_cmpneq_epi32_mask(typed, source, zero), target, source);
-        kept |= constants & (__mmask16)~widening;
-        kept |= _mm512_mask_test_epi32_mask(widening & source1, children, _mm512_set1_epi32(BUSTER_CHECK_CHILD_BIT_FIELD));
+        const uint32_t at = first / 16 + block;
+        const uint32_t classed = reach_class[at] | (sign_compare || edges ? compare_class[at] : 0u);
+        const uint32_t others = (uint32_t)(interest >> (block * 16)) & 0xffffu & ~classed;
+        const uint32_t listing = others != 0 ? check_common_reach_selected(graph, stream, candidates, sign_compare, atomic_access, float_precision, edges, first + block * 16) :
+                                 classed;
+        selected |= (uint64_t)listing << (block * 16);
     }
-    if (filter->self_assign)
+    kept &= selected;
+    constants &= selected;
+    typed &= selected;
+    selfs &= selected;
+    enumerations &= selected;
+    rows &= selected;
+    // An integer constant's source, by the widths; where the constant is another operand's, no test reads it.
+    for (uint64_t left = constants; left != 0; left &= left - 1)
     {
-        // Taken out only where an operand is known and no leaf.
-        const __m512i second = _mm512_cvtepu8_epi32(_mm_maskz_loadu_epi8(source1, filter->traits + first - 2));
-        const __mmask16 first_known = _mm512_mask_cmpeq_epi32_mask(_mm512_mask_cmplt_epu32_mask(source1, operand0, limit), operand0,
-                                                                   _mm512_sub_epi32(before, _mm512_set1_epi32(1)));
-        const __mmask16 other = _mm512_mask_testn_epi32_mask(adjacent1 & source1, previous, _mm512_set1_epi32(BUSTER_CHECK_TRAIT_VALUE)) |
-                                _mm512_mask_testn_epi32_mask(first_known, second, _mm512_set1_epi32(BUSTER_CHECK_TRAIT_VALUE));
-        kept |= source1 & (__mmask16)~other;
+        const uint32_t lane = (uint32_t)__builtin_ctzll(left);
+        const uint32_t node = first + lane;
+        const bool assignment = (source1 >> lane & 1) != 0;
+        const uint32_t source = assignment ? graph->operand1[node] : graph->operand0[node];
+        const bool constant = source < count && (filter->traits[source] & BUSTER_CHECK_TRAIT_INTEGER) != 0;
+        const uint32_t source_width = constant ? check_common_reach_width(filter->widths, stream->value_types[source]) : 0;
+        const uint32_t target_width = check_common_reach_width(filter->widths, stream->value_types[node]);
+        const bool widening = source_width != 0 && target_width >= source_width;
+        const bool field = assignment && (filter->children[node] & BUSTER_CHECK_CHILD_BIT_FIELD) != 0;
+        kept |= (uint64_t)(constant && (!widening || field) ? 1u : 0u) << lane;
     }
-    if (filter->enum_cast && (sources & ~kept) != 0)
+    for (uint64_t left = selfs & ~kept; left != 0; left &= left - 1)
     {
-        const __mmask16 asked = sources & (__mmask16)~kept;
-        kept |= check_common_reach_classed(filter, asked, _mm512_maskz_loadu_epi32(asked, stream->value_types + first), BUSTER_CHECK_CLASS_ENUM);
+        const uint32_t lane = (uint32_t)__builtin_ctzll(left);
+        kept |= (uint64_t)(check_common_self_assign_candidate(graph, first + lane) ? 1u : 0u) << lane;
     }
-    // The truth contexts and the divisions.
-    const __mmask16 truths = _mm512_test_epi32_mask(families, _mm512_set1_epi32(BUSTER_CHECK_FAMILY_TRUTH));
-    kept |= _mm512_mask_test_epi32_mask(truths, _mm512_or_si512(any, own), _mm512_set1_epi32(BUSTER_CHECK_REACH_TRUTH_TRAITS));
-    kept |= _mm512_mask_test_epi32_mask(_mm512_test_epi32_mask(families, _mm512_set1_epi32(BUSTER_CHECK_FAMILY_DIVISION)), traits1,
-                                        _mm512_set1_epi32(BUSTER_CHECK_REACH_DIVISOR_TRAITS));
-    // The subscripts with a constant index, by their bases' types, and the dereferences, by their operands': a lane at a
-    // time, as each one's first operand is anywhere before it.
-    const __mmask16 subscripts = _mm512_mask_test_epi32_mask(_mm512_test_epi32_mask(families, _mm512_set1_epi32(BUSTER_CHECK_FAMILY_SUBSCRIPT)), traits1,
-                                                             _mm512_set1_epi32(BUSTER_CHECK_TRAIT_INTEGER));
-    const __mmask16 dereferences = _mm512_test_epi32_mask(families, _mm512_set1_epi32(BUSTER_CHECK_FAMILY_DEREFERENCE));
-    kept |= _mm512_mask_test_epi32_mask(dereferences, traits0, _mm512_set1_epi32(BUSTER_CHECK_REACH_POINTER_TRAITS));
-    for (uint32_t typed = (subscripts | (dereferences & (__mmask16)~kept)) & _mm512_cmplt_epu32_mask(operand0, limit); typed != 0; typed &= typed - 1)
+    for (uint64_t left = enumerations & ~kept; left != 0; left &= left - 1)
     {
-        const uint32_t lane = (uint32_t)__builtin_ctz(typed);
-        const uint32_t classes = check_common_reach_class(filter, stream->value_types[graph->operand0[first + lane]]);
-        const uint32_t asked = (subscripts >> lane & 1) != 0 ? BUSTER_CHECK_CLASS_ARRAY : BUSTER_CHECK_CLASS_NULLPTR;
-        kept |= (__mmask16)(((classes & asked) != 0 ? 1u : 0u) << lane);
+        const uint32_t lane = (uint32_t)__builtin_ctzll(left);
+        kept |= (uint64_t)((check_common_reach_class(filter, stream->value_types[first + lane]) & BUSTER_CHECK_CLASS_ENUM) != 0 ? 1u : 0u) << lane;
     }
-    // The calls that are marked.
-    const __mmask16 calls = _mm512_test_epi32_mask(families, _mm512_set1_epi32(BUSTER_CHECK_FAMILY_CALL));
-    if (calls != 0)
+    // A subscript's constant index and its base's type, and a dereference's operand's type.
+    for (uint64_t left = typed & ~kept; left != 0; left &= left - 1)
     {
-        // (`first` is a multiple of 16: the block's bits are in one word.)
-        kept |= calls & (__mmask16)(filter->marked[first >> 6] >> (first & 63));
+        const uint32_t lane = (uint32_t)__builtin_ctzll(left);
+        const uint32_t node = first + lane;
+        const uint32_t operand = graph->operand0[node];
+        const uint32_t index = graph->operand1[node];
+        const uint32_t classes = operand < count ? check_common_reach_class(filter, stream->value_types[operand]) : 0;
+        const bool dereference = (dereferences >> lane & 1) != 0;
+        const bool subscript = !dereference && index < count && (filter->traits[index] & BUSTER_CHECK_TRAIT_INTEGER) != 0 && (classes & BUSTER_CHECK_CLASS_ARRAY) != 0;
+        kept |= (uint64_t)(subscript || (dereference && (classes & BUSTER_CHECK_CLASS_NULLPTR) != 0) ? 1u : 0u) << lane;
     }
-    // The conversion edges of the nodes left, where a child could have one: a row at a time.
-    if (filter->edges)
+    rows &= ~kept;
+    memcpy(kept_blocks, &kept, sizeof(kept));
+    memcpy(row_blocks, &rows, sizeof(rows));
+}
+
+// Of the nodes `rows` of the block from `first`, those with a floating type's class among the three targets of their row
+// of conversions (check_common_reach_step's last family): a row at a time.
+static __mmask16 check_common_reach_rows(const CheckCommonReachFilter* filter, uint32_t first, __mmask16 rows)
+{
+    _Static_assert(sizeof(CheckNodeConversions) == 32 && BUSTER_ARRAY_LENGTH(((CheckNodeConversions*)0)->operands) == 3, "a node's row has three operands' targets");
+    __mmask16 kept = 0;
+    for (uint32_t left = rows; left != 0; left &= left - 1)
     {
-        _Static_assert(sizeof(CheckNodeConversions) == 32 && BUSTER_ARRAY_LENGTH(((CheckNodeConversions*)0)->operands) == 3, "a node's row has three operands' targets");
-        for (uint32_t rows = _mm512_mask_test_epi32_mask(selected & (__mmask16)~kept & (__mmask16)~truths, any, _mm512_set1_epi32(BUSTER_CHECK_REACH_EDGE_TRAITS)); rows != 0;
-             rows &= rows - 1)
-        {
-            const uint32_t lane = (uint32_t)__builtin_ctz(rows);
-            const CheckNodeConversions* row = stream->conversions + first + lane;
-            const uint32_t classes = check_common_reach_class(filter, row->operands[0].type) | check_common_reach_class(filter, row->operands[1].type) |
-                                     check_common_reach_class(filter, row->operands[2].type);
-            kept |= (__mmask16)(((classes & BUSTER_CHECK_CLASS_FLOATING) != 0 ? 1u : 0u) << lane);
-        }
+        const uint32_t lane = (uint32_t)__builtin_ctz(left);
+        const CheckNodeConversions* row = filter->stream->conversions + first + lane;
+        const uint32_t classes = check_common_reach_class(filter, row->operands[0].type) | check_common_reach_class(filter, row->operands[1].type) |
+                                 check_common_reach_class(filter, row->operands[2].type);
+        kept |= (__mmask16)(((classes & BUSTER_CHECK_CLASS_FLOATING) != 0 ? 1u : 0u) << lane);
     }
     return kept;
+}
+
+// The filter's next chunk of blocks, from node `first` (a multiple of 64): each block's candidates that may have a bit,
+// in two steps. The first makes every block's mask (check_common_reach_step) and asks for the rows of conversions that
+// the edges' test will read, a prefetch each; the second reads them (check_common_reach_rows). A row is a cache line of an
+// array of 32 bytes a node, cold by now, and a test that waited for its own row had them one or two at a time; a chunk's
+// worth are in flight together. The kept nodes' rows are asked for too: their visits read them.
+static void check_common_reach_chunk(CheckCommonReachFilter* filter, const CheckCommonCandidates* candidates, bool sign_compare, bool atomic_access, bool float_precision,
+                                     bool edges, uint32_t first)
+{
+    const CheckStream* stream = filter->stream;
+    const uint32_t count = filter->count;
+    uint16_t rows[BUSTER_CHECK_REACH_CHUNK] = { 0 };
+    uint32_t blocks = 0;
+    for (uint32_t node = first; node < count && blocks < BUSTER_CHECK_REACH_CHUNK; node += 64)
+    {
+        memset(filter->chunk_kept + blocks, 0, 4 * sizeof(uint16_t));
+        check_common_reach_step(filter, candidates, sign_compare, atomic_access, float_precision, edges, node, filter->chunk_kept + blocks, rows + blocks);
+        uint64_t asked = 0;
+        memcpy(&asked, rows + blocks, sizeof(asked));
+        uint64_t kept = 0;
+        memcpy(&kept, filter->chunk_kept + blocks, sizeof(kept));
+        for (uint64_t lanes = asked | kept; lanes != 0; lanes &= lanes - 1)
+        {
+            _mm_prefetch((const char*)(stream->conversions + node + (uint32_t)__builtin_ctzll(lanes)), _MM_HINT_T0);
+        }
+        blocks += 4;
+    }
+    for (uint32_t block = 0; block < blocks; block += 1)
+    {
+        if (rows[block] != 0)
+        {
+            filter->chunk_kept[block] |= check_common_reach_rows(filter, first + block * 16, rows[block]);
+        }
+    }
+    filter->chunk_first = first;
+    filter->chunk_blocks = blocks;
+    filter->chunk_taken = 0;
 }

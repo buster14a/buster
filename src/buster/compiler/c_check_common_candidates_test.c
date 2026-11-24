@@ -458,7 +458,7 @@ static void check_test_common_scan_definitions(CheckTest* test)
 // Set by test-checker-driver --reach-filter-only: the generated nodes' counts, by operator, on stdout.
 static bool check_test_verbose_reach;
 
-// The reach filter's property (#1340): a node check_common_reach_keep takes out of the scan has no bit of its own reach
+// The reach filter's property (#1340): a node check_common_reach_step takes out of the scan has no bit of its own reach
 // (check_common_own_reach, the one verdict) and is no self-assignment's candidate. Over generated graphs and streams,
 // under every set of the options the exact test reads, by the audit's own steps (check_common_reach_audit_kept and
 // check_common_reach_audit_node), with every column the filter reads ending at a protected page.
