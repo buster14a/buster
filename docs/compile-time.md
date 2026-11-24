@@ -1376,6 +1376,18 @@ stored values makes the pool's empty blocks read as zero, including at the
 end-of-input sentinel. The reader releases the pool before emission. Deferred
 readers keep contiguous arrays for parallel body writes and the TypeId remap.
 
+The reader-only change saved 879 more arena faults on main `7515714d0`.
+Declaration checking set the compile's peak after the reader released its
+pool. For a source-order compile with at least one huge page of scratch reuse,
+the driver now rounds the end of its 96-byte-per-token allowance down to a
+whole page. The discard protects all live scratch. Against the same revision
+with both steps removed, the arena took 3,972 faults before and 2,030 after.
+Across twelve interleaved pairs, median savings per SQLite compile were
+5.10 million kernel cycles, 5.00 million total cycles and 1,960 KiB of peak
+RSS. The final change alone, against main including step one, saved 2.17
+million kernel cycles, 1.26 million total cycles and 1,956 KiB of peak RSS.
+[9700X counters, fault traces and output comparisons](https://github.com/buster14a/buster-performance/tree/1f655876d9474db55032d83e6f0a19e18742cda9/docs/measurements/reader-memos-1167-2026-11-24)
+
 ### The preprocessor's output before the backend (#628)
 
 After the change above, the backend's end was the compile's peak. A map on the

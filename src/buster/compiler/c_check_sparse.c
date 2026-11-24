@@ -67,7 +67,7 @@ struct CheckSparseColumn
     // An entry for each 16 tokens, and one past the last 16 with an entry, which check_sparse_vector may read: its block
     // in `blocks`, 0 for none.
     uint32_t* directory;
-    // The pool's blocks (CheckSparsePool.blocks).
+    // The pool's blocks, advanced one block for the second field of a paired reader memo.
     uint32_t* blocks;
 };
 
