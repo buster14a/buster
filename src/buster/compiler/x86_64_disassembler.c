@@ -127,6 +127,23 @@ struct X86DecodeLaneIndex
     uint32_t first;
 };
 #define BUSTER_X86_DECODE_LIST 0x8000u
+// What the lane decoder needs of a row (x86_decode_lane_forms_initialize): bits 0-3 its immediate bytes, 4-7 its
+// relative bytes, 8-15 its disp8 scale, then BUSTER_X86_LANE_*.
+#define BUSTER_X86_LANE_MODRM (1u << 16)
+#define BUSTER_X86_LANE_REG (1u << 17)
+#define BUSTER_X86_LANE_PLUS (1u << 18)
+#define BUSTER_X86_LANE_FIXED (1u << 19)
+#define BUSTER_X86_LANE_FIXED_PLUS (1u << 20)
+#define BUSTER_X86_LANE_REG8 (1u << 21)
+#define BUSTER_X86_LANE_RM8 (1u << 22)
+#define BUSTER_X86_LANE_VSIB (1u << 23)
+#define BUSTER_X86_LANE_SIB (1u << 24)
+#define BUSTER_X86_LANE_ROUNDING (1u << 25)
+#define BUSTER_X86_LANE_ADDRESS (1u << 26)
+#define BUSTER_X86_LANE_NOP (1u << 27)
+// Bits 28-31: the segments (none, FS, GS, SS) the form allows.
+#define BUSTER_X86_LANE_SEGMENTS 28
+static uint32_t x86_decode_lane_forms[X86_FORM_COUNT];
 static X86DecodeLaneIndex x86_decode_lane_indices[BUSTER_X86_DECODE_BUCKETS];
 static uint16_t* x86_decode_cells;
 static uint16_t* x86_decode_lists;
@@ -658,6 +675,42 @@ static void x86_decode_simple_initialize(void)
     }
 }
 
+// Each row's lane descriptor (x86_decode_lane_forms), as x86_decode_candidate reads its form.
+static void x86_decode_lane_forms_initialize(void)
+{
+    for (uint32_t row = 1; row < X86_FORM_COUNT; row += 1)
+    {
+        const X86FormDescription* form = &x86_form_descriptions[row];
+        uint32_t lane = 0;
+        if (x86_decode_form_supported(row))
+        {
+            uint32_t index;
+            x86_decode_form_map(form, &index);
+            const uint32_t opcode_count = form->opcode_bytes - (x86_form_has_operation_byte(form) ? 1u : 0u);
+            const bool fixed = index + 1 < opcode_count;
+            const bool plus = form->encoding == BUSTER_X86_ENCODING_PR;
+            lane = form->immediate_bytes | (uint32_t)form->relative_bytes << 4 | (uint32_t)form->disp8_scale << 8;
+            lane |= form->encoding == BUSTER_X86_ENCODING_R || (form->encoding & BUSTER_X86_ENCODING_DIGIT) ? BUSTER_X86_LANE_MODRM : 0;
+            lane |= form->encoding == BUSTER_X86_ENCODING_R ? BUSTER_X86_LANE_REG : 0;
+            lane |= plus && !fixed ? BUSTER_X86_LANE_PLUS : 0;
+            lane |= fixed ? BUSTER_X86_LANE_FIXED : 0;
+            lane |= plus && fixed ? BUSTER_X86_LANE_FIXED_PLUS : 0;
+            lane |= (form->reg & BUSTER_X86_OPERAND_CLASS) == BUSTER_X86_CLASS_GPR8 ? BUSTER_X86_LANE_REG8 : 0;
+            lane |= (form->rm & BUSTER_X86_OPERAND_CLASS) == BUSTER_X86_CLASS_GPR8 ? BUSTER_X86_LANE_RM8 : 0;
+            lane |= (form->rm & BUSTER_X86_OPERAND_VSIB) ? BUSTER_X86_LANE_VSIB : 0;
+            lane |= (form->rm & BUSTER_X86_OPERAND_SIB) ? BUSTER_X86_LANE_SIB : 0;
+            lane |= (form->evex & BUSTER_X86_EVEX_ROUNDING) ? BUSTER_X86_LANE_ROUNDING : 0;
+            lane |= x86_form_has_prefix(form, 0x67) ? BUSTER_X86_LANE_ADDRESS : 0;
+            lane |= row == X86_FORM_NOP ? BUSTER_X86_LANE_NOP : 0;
+            for (uint32_t segment = 0; segment <= BUSTER_X86_SEGMENT_SS; segment += 1)
+            {
+                lane |= x86_form_has_segment(row, segment) ? 1u << (BUSTER_X86_LANE_SEGMENTS + segment) : 0;
+            }
+        }
+        x86_decode_lane_forms[row] = lane;
+    }
+}
+
 // The lane index (x86_decode_lane_indices) over every bucket's entries' compact keys. False where a form's prefix byte
 // has no code, a bucket varies in more than 16 bits, or an allocation fails.
 static bool x86_decode_lane_indices_initialize(void)
@@ -827,6 +880,7 @@ static bool x86_disassembler_initialize(void)
                 }
             }
             result = x86_decode_indices_initialize() && x86_decode_lane_indices_initialize();
+            x86_decode_lane_forms_initialize();
             if (result)
             {
                 x86_decode_lengths_initialize();
@@ -870,6 +924,20 @@ static __m512i x86_decode_window(const uint8_t* source, uint64_t size, uint32_t 
     return _mm512_maskz_loadu_epi8(active, source + (available != 0 ? offset : 0));
 }
 
+// The length pass's per-position fields, which the lane decoder reads at its lanes' starts: the window's 128 bytes,
+// each position's prefix run, its opcode's position and map, and its kind (bit 0 VEX C5, bit 1 VEX C4 or XOP, bit 2
+// EVEX, bit 4 FWAIT alone).
+typedef struct X86DecodeWindow X86DecodeWindow;
+struct X86DecodeWindow
+{
+    __m512i low;
+    __m512i high;
+    __m512i run;
+    __m512i opcode_at;
+    __m512i map;
+    __m512i kind;
+};
+
 // A window's bytes that are legacy or REX prefixes: two nibble-table shuffles and their intersection.
 static uint64_t x86_decode_prefix_bytes(__m512i bytes)
 {
@@ -891,7 +959,7 @@ static __m512i x86_decode_lookup(const uint8_t* table, __m512i indices)
 // Every position's instruction length in the window `source[0, size)`, as if an instruction started there: 0 where it
 // has no hint (a bucket x86_decode_length_tables_initialize couldn't describe, a vector prefix after legacy ones, 15
 // prefix bytes, an end past `size` or past 15 bytes). Reads the 128 bytes from `source` that lie inside `size`.
-static void x86_decode_lengths(const uint8_t* source, uint64_t size, uint8_t* lengths)
+static void x86_decode_lengths(const uint8_t* source, uint64_t size, uint8_t* lengths, X86DecodeWindow* window)
 {
     const __m512i low = x86_decode_window(source, size, 0);
     const __m512i high = x86_decode_window(source, size, 64);
@@ -1006,6 +1074,15 @@ static void x86_decode_lengths(const uint8_t* source, uint64_t size, uint8_t* le
     uint64_t known = hinted & ~overlong & ~(vector & _mm512_test_epi8_mask(run, run)) & _mm512_cmple_epu8_mask(length, _mm512_set1_epi8(15));
     known &= _mm512_cmple_epu8_mask(ends, _mm512_set1_epi8((char)(size < 127 ? size : 127)));
     _mm512_storeu_si512(lengths, _mm512_maskz_mov_epi8(known, length));
+    window->low = low;
+    window->high = high;
+    window->run = run;
+    window->opcode_at = opcode_at;
+    window->map = map;
+    __m512i kind = _mm512_maskz_mov_epi8(vex2, one);
+    kind = _mm512_mask_mov_epi8(kind, vex3, _mm512_set1_epi8(2));
+    kind = _mm512_mask_mov_epi8(kind, evex, _mm512_set1_epi8(4));
+    window->kind = _mm512_mask_mov_epi8(kind, waits, _mm512_set1_epi8(16));
 }
 
 static X86DecodeStatus x86_decode_header(const uint8_t* bytes, uint32_t size, uint64_t prefix_bits, X86DecodeHeader* header)
@@ -1546,7 +1623,8 @@ static X86DecodeResult x86_disassemble(const uint8_t* source, uint64_t size, X86
             const uint32_t span = remaining < 64 ? (uint32_t)remaining : 64;
             const uint64_t prefixes = x86_decode_classify(source + start, span);
             uint8_t lengths[64];
-            x86_decode_lengths(source + start, remaining, lengths);
+            X86DecodeWindow window;
+            x86_decode_lengths(source + start, remaining, lengths, &window);
             uint32_t offset = 0;
             // Reuse this classification/length window across unsupported hints too. Rebuilding it after every
             // VEX/EVEX instruction would charge the entire speculative pass to a single matcher fallback.
