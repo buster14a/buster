@@ -1628,16 +1628,19 @@ homes, and whether its four cases' words differ in the template alone (uniform).
    (their fixed rdx) and the unsupported lanes collected, and the deferred entries are listed (`vpcompressd`), so
    that a block takes no branch. The listed entries' touches (a call's saves, division's fixed registers) are then
    taken an entry at a time, in a loop of their own: inside the blocks' loop, its end at each block's last deferred
-   lane mispredicted, and the blocks behind it waited (#2874). The first unsupported entry is looked for only when
-   there is one, in a compile that fails.
+   lane mispredicted, and the blocks behind it waited (#2874). Each block's words are gathered while the block
+   before it is worked on, and carried (`tier0_select_words`, #2874: 0.04 ms of `tier0` on `-c sqlite3.c`). The
+   first unsupported entry is looked for only when there is one, in a compile that fails.
 2. **Homes:** the references' count takes the referring entries of 64 at a time as a mask (`vpshufbitqmb` of their kinds
    in the four kinds' bitset), then a count per set bit, without a branch per entry. The greedy loop gives the k-th
    local of a kind that takes a register (not in one yet, its address not taken, referenced) the k-th free register of
    its kind: the caller-saved registers in depth order, then the callee-saved ones to a local referenced twice or more
    (those come first in the order), or the XMM registers. So for up to 64 locals the vector path needs no order: each
    such local's rank among its kind's, counted by vector compares 16 locals at a time, picks its register from the free
-   registers' list (`vpermd`), and its home is a masked store. Where no local can take a register, the lists and ranks
-   are skipped. Past 64 locals, only each kind's first 16 eligible locals can take a register.
+   registers' list (`vpermd`), and its home is a masked store. Each list is its candidates in the tables' orders
+   compressed by the mask of the free ones (`vpcompressd`), and the callee-saved registers taken are the first that
+   many free ones (`pdep`): nothing of them goes through memory (#2874). Where no local can take a register, the lists
+   and ranks are skipped. Past 64 locals, only each kind's first 16 eligible locals can take a register.
    `tier0_register_locals_vector` filters 16 locals at a time by eligibility and the current smallest retained count,
    then inserts a candidate into 16 register lanes by comparisons and permutations. Equal counts keep the earlier local,
    as the old stable full sort did. It takes linear time in the locals, including increasing counts and builtin recipes'
