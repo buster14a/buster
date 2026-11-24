@@ -4059,12 +4059,7 @@ _Static_assert((BUSTER_NODE_TESTS_KIND_BITS(BUSTER_NODE_TESTS_KIND_CONSTANT) & 0
 // And for C on the window (c_check_node_machine_window.c): whether the declaration's object has a symbol of its own (a
 // global's; NodeMachine.object_symbols), made with the byte.
 #define BUSTER_NODE_TESTS_LINE_SYMBOL 0x20u
-// And for a summary's side facts (c_check_node_machine_rows.c's node_rows_window_summary), what the return flow asks
-// of a call's callee's declaration (check_program_return_call), a function's alone: a plain one, a call of whose name
-// has no fact (it is not declared noreturn, and its name is none of the library's that the flow leaves unknown); and
-// one declared noreturn, a call of which stops. A function with neither is one of those names, unknown as a call
-// through a value is. Made with the byte, where the tapes are made. The sweep copies a name's leaf's line's byte to
-// the rows' column (NodeFactsReader.window_x_lines), whose readers know the two by the rows' names.
+// The declaration's return contract, copied to NodeFactsReader.window_x_lines.
 #define BUSTER_NODE_TESTS_LINE_PLAIN 0x40u
 #define BUSTER_NODE_TESTS_LINE_STOPS 0x80u
 _Static_assert(BUSTER_NODE_TESTS_LINE_PLAIN == BUSTER_NODE_ROWS_LINE_PLAIN && BUSTER_NODE_TESTS_LINE_STOPS == BUSTER_NODE_ROWS_LINE_STOPS,
@@ -4136,17 +4131,6 @@ static NodeCensusReader* node_census_reader_begin(const CheckInputReader* reader
         s->program = &tests->program;
         s->pp = reader->pp;
         s->records = machine;
-        if ((reader->pp->options.node_reader & BUSTER_NODE_READER_WINDOW_ROWS) != 0)
-        {
-            // The functions the return flow leaves unknown from one of their declarations on: its own table, made as
-            // it makes it (check_program_return_unknowns reads the program's input and its identifiers alone), for a
-            // summary's return fact (node_rows_window_summary). Null where the unit has none.
-            CheckProgram flow = tests->program;
-            uint32_t* unknowns = NULL;
-            flow.identifiers = reader->pp->table;
-            room = check_program_return_unknowns(&flow, arena, &unknowns);
-            types->return_unknowns = unknowns;
-        }
         s->policy = node_census_policy(reader->pp, input);
         *policy = s->policy;
         types->policy = policy;
@@ -4407,34 +4391,22 @@ static __attribute__((noinline)) uint8_t node_tests_window_line(NodeCensusScratc
     return bits;
 }
 
-// The same line's two bits for the return flow (BUSTER_NODE_TESTS_LINE_PLAIN and _STOPS), of the declaration the
-// name's leaf at `token` names: check_program_return_call's own questions of a direct call's declaration, a
-// function's, in its order: declared noreturn (CHECK_INPUT_FUNCTION_NORETURN), which stops; or else a library's name
-// the catalogue marks (check_program_return_library_search), which has neither bit; or else plain. An object's, a call
-// through it, by its function type (#1393). Another declaration's line has neither.
+// Direct calls can also terminate by declaration. Indirect calls use the callee's
+// checked type, including for a compound expression without a declaration line.
 static __attribute__((noinline)) uint8_t node_tests_window_returns(const NodeCensusScratch* s, uint32_t token)
 {
     const CheckProgram* program = s->program;
     const CheckInput* input = program->input;
     const uint32_t declaration = node_census_declaration(program, token);
-    const bool function = declaration != BUSTER_CHECK_NONE && declaration < input->token_count && input->declaration_kinds[declaration] == C_BINDING_FUNCTION &&
-                          input->function_flags != NULL;
-    // An object's: a call through it stops where its function type is noreturn and returns otherwise
-    // (check_program_return_indirect's, #1393).
-    const bool object = declaration != BUSTER_CHECK_NONE && declaration < input->token_count && input->declaration_kinds != NULL &&
-                        input->declaration_kinds[declaration] == C_BINDING_OBJECT;
     uint8_t bits = 0;
-    if (function && (input->function_flags[declaration] & CHECK_INPUT_FUNCTION_NORETURN) != 0)
+    if (declaration < input->token_count && input->declaration_kinds != NULL)
     {
-        bits = BUSTER_NODE_TESTS_LINE_STOPS;
-    }
-    else if (function && check_program_return_library_search(s->pp->table, program->parser->tokens.names[declaration]) == 0)
-    {
-        bits = BUSTER_NODE_TESTS_LINE_PLAIN;
-    }
-    else if (object)
-    {
-        bits = check_input_fallthrough_noreturn_object(input, program->parser, declaration) ? BUSTER_NODE_TESTS_LINE_STOPS : BUSTER_NODE_TESTS_LINE_PLAIN;
+        const bool function = input->declaration_kinds[declaration] == C_BINDING_FUNCTION;
+        if (function || input->declaration_kinds[declaration] == C_BINDING_OBJECT)
+        {
+            const bool declared = function && check_program_return_declared(input, s->pp->table, declaration);
+            bits = declared || type_callee_noreturn(program->types, input->declared_types[declaration]) ? BUSTER_NODE_TESTS_LINE_STOPS : BUSTER_NODE_TESTS_LINE_PLAIN;
+        }
     }
     return bits;
 }
@@ -4806,10 +4778,7 @@ static inline __attribute__((always_inline)) void node_tests_window_loop_by(Node
     const __m512i quiet_pairs = _mm512_loadu_si512(s->own_quiet_pairs);
     const __mmask64 calls_rule = _cvtu64_mask64(s->own_calls_quiet ? UINT64_MAX : 0);
     const __mmask64 int_pointer_rule = _cvtu64_mask64(s->own_int_pointer_casts ? UINT64_MAX : 0);
-    // A line's byte's bit of a plain function. No bit, where no call of the unit's may be plain at all: one of its
-    // functions is unknown from a declaration on (check_program_return_unknowns' table), which a call's rule asks by
-    // its use.
-    const __m512i plain_line = _mm512_set1_epi8(summaries && tests->types->return_unknowns == NULL ? (char)BUSTER_NODE_TESTS_LINE_PLAIN : 0);
+    const __m512i plain_line = _mm512_set1_epi8(summaries ? (char)BUSTER_NODE_TESTS_LINE_PLAIN : 0);
     const uint8_t* const line_column = summaries ? state->window_x_lines : NULL;
     uint64_t* const suspect_masks = summaries ? state->window_x_suspects : NULL;
     __m512i previous = _mm512_setzero_si512();

@@ -10,3 +10,8 @@ int e(int *p) { if (p) return 1; __builtin_dynamic_object_size(p, 0); }
 int f(int x) { if (x) return 1; (void)__builtin_constant_p(x); }
 int g(int x) { if (x) return 1; return __builtin_constant_p(die_int()) ? 1 : 2; }
 int h(int x) { if (x) return 1; x = __builtin_constant_p(x) ? die_int() : 0; }
+int assumed_false(void) { __builtin_assume(0); }
+int one_assumption(int x) { if (x) __builtin_assume(0); }
+int short_circuit(int x) { (void)(x && die_int()); }
+int conditional(int x) { (void)(x ? die_int() : 0); }
+int nested(int x, int y) { (void)(x || (y && die_int())); }

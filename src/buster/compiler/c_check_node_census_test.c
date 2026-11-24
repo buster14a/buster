@@ -4525,15 +4525,8 @@ static const char node_rows_test_branch_source[] =
 // function's name as a value and by its address; a call through a pointer, the pointer its reference; a function's
 // static object; a static function; an array of pointers; a string literal subscripted, cast and dereferenced; a call
 // with no value; and a condition's, a loop's, a `for` statement's clauses' and a `switch`'s.
-// `facts`: a plain call; calls through a pointer, a member, a pointer dereferenced and a conditional; a function's name
-// dereferenced and by its address, which are the function; an unknown in an argument, an arm, an operand, a condition
-// and a comma; a call that stops, by the attribute and by the keyword; a conditional with one arm that stops, with
-// both and with a condition that does; `&&` and `||` with an operand that stops on either side; an argument that
-// stops, and one with an arm that does; an arm that stops beside one that is unknown, on either side; both beside an
-// unknown; an unknown before a stop with no operator that selects; an `&&`'s second operand that is unknown over an
-// argument that stops; an arm that stops past a block's records from its expression's first; a call the kernel does
-// not place (a `sizeof`'s operand's, which the front leaves to the walk); and the library's names the flow leaves
-// unknown.
+// `facts` covers calls through compound pointer expressions and expressions that combine
+// ordinary calls with terminating calls in conditions, arms, arguments, and comma operands.
 // `truths`: a branch's condition whose second operand's truth is known, of each operator, under a `!` and under
 // another operator, and an address constant's; a value's with one; conditions with none, an object's lvalue for a
 // second operand among them;
@@ -5023,10 +5016,8 @@ static const char node_summary_test_source[] =
     "    return a;\n"
     "}\n";
 
-// And a unit with a function the return flow leaves unknown from one of its declarations on
-// (check_program_return_unknowns): no call of such a unit's is a plain one, and each is asked a record at a time. A
-// call of the function before that declaration has no fact and one after it is unknown; a function with the attribute
-// at its first declaration is unknown at every call.
+// Direct calls before and after an analyzer_noreturn declaration exercise the line's
+// declaration contract and its inheritance independently of the callee type.
 static const char node_summary_test_unknowns_source[] =
     "int f(int);\n"
     "void later(int);\n"
@@ -7821,8 +7812,7 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     };
     check_test_expect(test, ready && node_rows_test_fixture(directory, "rows-values.c", node_rows_test_values_source, quiet, BUSTER_ARRAY_LENGTH(quiet), &rows_values_expected),
                       "node-rows: X's rows on the window make each entry's value as X does on T's columns: a line's field, a stride, a fixed number or its number in its expression");
-    // A summary's side facts on the window: its own fixture's, and a unit's with a function the return flow leaves
-    // unknown from a declaration on.
+    // Check summary facts for ordinary calls and source-ordered analyzer annotations.
     check_test_expect(test, node_summary_test_selectors(quiet, BUSTER_ARRAY_LENGTH(quiet), false) && node_summary_test_selectors(loud, BUSTER_ARRAY_LENGTH(loud), true),
                       "node-summary: a switch retains its selector type before promotion and the comparison catches every changed type");
     static const NodeSummaryExpected summary_expected = {
@@ -7831,8 +7821,8 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         .program_references = 801,
         .listed = 808,
         .suspects = 222,
-        .unknowns = 5,
-        .stops = 74,
+        .unknowns = 0,
+        .stops = 76,
         .reduced = 141,
         .decided = 9,
         .conditions = 16,
@@ -7864,9 +7854,9 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
         .references = 15,
         .program_references = 14,
         .listed = 15,
-        .suspects = 15,
-        .unknowns = 5,
-        .stops = 2,
+        .suspects = 8,
+        .unknowns = 0,
+        .stops = 7,
         .reduced = 1,
         .decided = 0,
         .conditions = 2,
@@ -7879,7 +7869,7 @@ static __attribute__((noinline)) void check_test_node_census(CheckTest* test)
     };
     check_test_expect(test, ready && node_summary_test_fixture(directory, "summaries-unknowns.c", node_summary_test_unknowns_source, quiet, BUSTER_ARRAY_LENGTH(quiet),
                                                                &summary_unknowns_expected),
-                      "node-summary: in a unit with a function unknown from a declaration on, each call is asked a record at a time, and one after that declaration is unknown");
+                      "node-summary: in a unit with analyzer_noreturn, calls stop only where the declaration is visible");
     if (written)
     {
         unlink(header);

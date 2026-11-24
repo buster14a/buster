@@ -2157,6 +2157,19 @@ static TypeId check_action_pointer_common(TypeTable* table, const CheckValue* le
             }
         }
     }
+    // A conditional call only has the type contract if both alternatives have it. A null
+    // pointer constant takes the other operand's type unchanged.
+    if (common != 0 && action->op == CHECK_OP_CONDITIONAL && lp && rp && type_callee_noreturn(table, common) &&
+        !check_action_null(table, left, action->context.extensions) && !check_action_null(table, right, action->context.extensions) &&
+        !(type_callee_noreturn(table, left->type) && type_callee_noreturn(table, right->type)))
+    {
+        const TypeId function = type_function_set_noreturn(table, type_element(table, common), false);
+        common = function != 0 ? type_pointer(table, function) : 0;
+        if (common == 0)
+        {
+            check_action_diagnose(result, CHECK_DIAG_RESOURCE, 0);
+        }
+    }
     return common;
 }
 

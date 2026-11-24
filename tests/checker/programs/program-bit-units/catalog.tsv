@@ -1,5 +1,7 @@
 buster-fixtures v1 checker-sources
 # ID	FILE	FLAGS	NAME
+# A signed field crosses from the second eight-byte chunk into a six-byte tail. Its neighbors share those chunks.
+bit-field-unit-wide-tail	bit-field-unit-wide-tail.c	-	bit-field-unit-wide-tail
 bit-field-units	bit-field-units.c	-	bit-field-units
 # Natively against clang: the layouts and initialized bits of records with zero-width fields (ordinary, ms_struct,
 # packed and a union's), an ms_struct union, a packed run of 16 bytes (an i128 unit) and a record that nests them in

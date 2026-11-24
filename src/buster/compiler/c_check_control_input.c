@@ -2993,20 +2993,6 @@ static uint32_t check_input_fallthrough_strip(const CheckInputReader* reader, ui
     return callee;
 }
 
-// Whether a function's declaration holds GNU's noreturn attribute (`__attribute__((noreturn))`, `[[gnu::noreturn]]`),
-// which clang makes its type's: not the _Noreturn keyword, nor C23's `[[noreturn]]` or `[[_Noreturn]]`, its declaration's.
-static bool check_input_fallthrough_noreturn_type(const CheckInputAttributes* attributes)
-{
-    bool noreturn = false;
-    for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
-    {
-        const CheckInputAttribute* attribute = &attributes->records[i];
-        noreturn |= attribute->kind == CHECK_ATTRIBUTE_NORETURN && !attribute->ignored && !attribute->keyword &&
-                    (!attribute->standard || attribute->name_token != attribute->first);
-    }
-    return noreturn;
-}
-
 // Whether an object's (a variable's or a parameter's) function type is noreturn, as clang's CFG reads a call through it
 // (CFGBuilder::VisitCallExpr: the callee's type's noreturn): GNU's noreturn attribute, a type's in clang, on its own
 // declaration (`void (*p)(void) __attribute__((noreturn))`), or on the typedef its specifiers name, through the typedefs
@@ -3029,7 +3015,7 @@ static bool check_input_fallthrough_noreturn_object(const CheckInput* input, con
                               close < count && keyword + 4 == close && parser->tokens.kinds[keyword + 2] == PARSE_KIND_AMP ? keyword + 3 : count;
         const uint32_t named = name < count && parser->tokens.kinds[name] == PARSE_KIND_IDENTIFIER && input->declarations != NULL ? input->declarations[name] : 0;
         const bool function = named != 0 && named < count && input->declaration_kinds[named] == C_BINDING_FUNCTION;
-        noreturn = noreturn || (function && check_input_fallthrough_noreturn_type(check_input_attributes_at(input, named)));
+        noreturn = noreturn || (function && check_input_attribute_noreturn_type(check_input_attributes_at(input, named)));
         next = next != 0 ? next : named != 0 && named < count && !function ? named : 0;
         at = next;
     }

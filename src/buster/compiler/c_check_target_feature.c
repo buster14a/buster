@@ -643,13 +643,7 @@ static bool check_target_feature_library_noreturn(const CheckProgram* program, c
 // __builtin_eh_return, __builtin_verbose_trap; __builtin_trap and __builtin_unreachable go by CHECK_OP_BUILTIN_MISC).
 static bool check_target_feature_intrinsic_noreturn(const CheckProgram* program, uint32_t node)
 {
-    const CheckInput* input = program->input;
-    const uint32_t closing = input->graph.tokens[node];
-    const uint32_t id = input->intrinsic_ids != NULL && closing < input->token_count ? input->intrinsic_ids[closing] : 0;
-    const CheckInputIntrinsicCall* call = id != 0 && id <= input->intrinsic_call_count ? input->intrinsic_calls + id - 1 : NULL;
-    const BuiltinIntrinsicInfo* info = call != NULL && call->declaration < input->intrinsic_declaration_count ?
-                                       input->intrinsic_declarations[call->declaration].info :
-                                       NULL;
+    const BuiltinIntrinsicInfo* info = check_program_intrinsic_info(program, node);
     return info != NULL && memchr(info->attributes, 'r', info->attributes_length) != NULL;
 }
 

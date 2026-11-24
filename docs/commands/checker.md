@@ -790,19 +790,17 @@ unused-warning fixtures also check exact scope-completion tokens.
   and warning policy. The shared default-warning harness covers syntax checking and object publication through
   both kernels and requested one/three-lane options, including `-Werror`, output preservation and `-w`.
   The ordinary vector-shift exclusion control is syntax-only because baseline x86-64 cannot lower its vector shift.
-  `c_check_return_flow.c` supplies source return-warning facts for checked graphs. Ordinary direct calls no longer
-  suppress a function's `-Wreturn-type` warning; a proven direct `noreturn` call or terminating builtin ends only its
-  own warning-flow edge. Short circuit, conditional and unevaluated operands retain their execution rules, and
-  emission reachability is unchanged. A call through a pointer object's name returns unless its type is noreturn, as
-  clang's CFG reads the callee's type (#1393, `check_program_return_indirect`: GNU `noreturn` on its declaration or the
-  typedefs and typeofs its specifiers name; the node machine's lines answer the same, `node_tests_window_returns`). The
-  query builtins return: `__builtin_constant_p`'s operand is visited, the object size queries' left out. Overloads,
-  analyzer annotations, conditional classifier contracts, library-policy contracts (`-ffreestanding`, `-fno-builtin`,
-  `jmp_buf`) and other indirect callees (a member, an element, a cast, a conditional, a comma, a call's result, whose
-  types the node machine's window can't answer yet) remain conservative.
-  `c_check_return_call_driver_test.c` exercises direct-call fall-off,
-  path-local termination, initializer/comma operands, warning flags and those conservative boundaries through the
-  ordinary, scalar and deferred readers against Clang, with independent warning counts.
+  `c_check_return_flow.c` follows each reachable path for `-Wreturn-type`. An ordinary call returns.
+  A direct call can terminate the path through its visible declaration, including a selected overload or an
+  inherited analyzer annotation. An indirect call uses the complete callee expression's function type.
+  GNU `noreturn` survives typedefs, member selection, casts and pointer results. A conditional pointer
+  keeps it when both alternatives carry it. C11 `_Noreturn` and C23 `[[noreturn]]` apply to the declaration.
+  Library declarations acquire their builtin type contract according to linkage, compiler options and typedef
+  visibility. The warning walk visits `__builtin_fpclassify` selectors and the operand of `__builtin_constant_p`.
+  It skips object-size query operands and ends a path at `__builtin_assume(0)`.
+  When only one arm of `?:`, `&&` or `||` executes a terminating call, the other can reach
+  the end, and Clang's diagnostic includes “in all control paths”.
+  The return-call driver tests compare diagnostics and warning policies with Clang through both readers.
   `c_check_data.c` and `c_check_data_input.c` turn selected static scalar definitions into real
   Link atoms/fixups; their tests compare emitted ELF bytes with Clang objects.
   `c_check_string_pool.c` shares exact decoded literal storage after selection, keeping
@@ -1061,12 +1059,8 @@ clang code tests `isInSystemMacro` itself: a conversion's context
 (`check_common_unused_quiet`), a format call's extra argument and an array
 index both a system header spells.
 
-`tests/checker/return-calls` (#1393) is one too: `-Wreturn-type` past calls
-(`c_check_return_flow.c`), a direct call's by its declaration, a call through
-a pointer object's name by its type's noreturn (GNU's attribute through its
-declaration, typedefs and typeofs), and the query builtins, which return
-(`__builtin_constant_p`'s operand visited, the object size queries' left
-out).
+`tests/checker/return-calls` (#1393) checks fall-off after direct and indirect calls, source-visible
+library and declaration contracts, and query builtins.
 
 A table's comments are `#` lines of its catalog, above the cases they described.
 The other test files' tables stay C for now: they build their sources when they

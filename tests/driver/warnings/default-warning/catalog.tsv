@@ -271,6 +271,9 @@ noreturn-independent-of-return-type-warning-policy	noreturn-fall-off.c	1	0	0	-	-
 noreturn-call-when-return-type-warnings-are-disabled	noreturn-call-ends-the-path.c	0	0	0	-	-Wno-return-type	noreturn call when return-type warnings are disabled
 noreturn-group-disabled	noreturn-explicit-return.c	0	0	0	-	-Wno-invalid-noreturn	noreturn group disabled
 noreturn-source-policy	noreturn-source-policy.c	0	0	0	-	-	noreturn source policy
+freestanding-exit-returns	freestanding-exit-returns.c	1	0	0	-	-ffreestanding	freestanding exit returns
+disabled-library-builtins-return	disabled-library-builtins-return.c	1	0	0	-	-fno-builtin	disabled library builtins return
+only-the-disabled-library-builtin-returns	only-the-disabled-library-builtin-returns.c	1	0	0	-	-fno-builtin-exit	only the disabled library builtin returns
 scalar-return-fall-off-after-ordinary-call	scalar-return-fall-off-after-ordinary-call.c	1	0	0	-	-	scalar return fall off after ordinary call
 scalar-return-partial-terminal-path	scalar-return-partial-terminal-path.c	1	0	0	-	-	scalar return partial terminal path
 scalar-return-terminal-call	scalar-return-terminal-call.c	0	0	0	-	-	scalar return terminal call

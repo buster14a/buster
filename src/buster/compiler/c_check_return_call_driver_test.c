@@ -58,7 +58,9 @@ static void check_test_driver_return_calls(CheckTest* test, const char* clang, c
         { "noreturn condition", "_Noreturn int die(void); int f(void){if(die())return 1;}\n", 0, 0 },
         { "noreturn argument", "_Noreturn int die(void); void g(int); int f(void){g(die());}\n", 0, 0 },
         { "ordinary builtin operand call", "int g(void); int f(void){(void)__builtin_expect(g(),1);}\n", 1, 1 },
-        { "conditional classifier stop remains conservative", "_Noreturn int die(void); int f(double x){(void)__builtin_fpclassify(die(),1,2,3,4,x);}\n", 0, 0 },
+        { "fpclassify visits its selector arguments", "_Noreturn int die(void); int f(double x){(void)__builtin_fpclassify(die(),1,2,3,4,x);}\n", 0, 0 },
+        { "fpclassify selector stops only its branch", "_Noreturn int g(void);int f(double x){if(x)(void)__builtin_fpclassify(g(),1,2,3,4,x);}", 1, 1 },
+        { "fpclassify visits selectors even for a constant", "_Noreturn int g(void);int f(void){(void)__builtin_fpclassify(0,1,2,3,g(),3.0);}", 0, 0 },
         { "terminating builtin", "int f(void){__builtin_trap();}\n", 0, 0 },
         { "unreachable builtin", "int f(void){__builtin_unreachable();}\n", 0, 0 },
         { "builtin stop on one branch", "int f(int x){if(x)__builtin_trap();}\n", 1, 1 },
@@ -69,10 +71,10 @@ static void check_test_driver_return_calls(CheckTest* test, const char* clang, c
         { "qualified typedef initializer stops", "typedef int (*NR)(void) __attribute__((noreturn)); NR p; int f(void){int n=p();(void)n;}\n", 0, 0 },
         { "qualified indirect call stops", "void (*p)(void) __attribute__((noreturn)); int f(void){p();}\n", 0, 0 },
         { "qualified typedef call stops", "typedef void (*NR)(void) __attribute__((noreturn)); NR p; int f(void){p();}\n", 0, 0 },
-        { "analyzer noreturn remains conservative", "void die(void) __attribute__((analyzer_noreturn)); int f(void){die();}\n", 0, 0 },
-        { "inherited analyzer contract remains conservative", "void die(void) __attribute__((analyzer_noreturn)); void die(void); int f(void){die();}\n", 0, 0 },
-        { "wrapped analyzer contract remains conservative", "void die(void) __attribute__((__analyzer_noreturn__)); int f(void){die();}\n", 0, 0 },
-        { "inherited wrapped analyzer remains conservative", "void die(void) __attribute__((__analyzer_noreturn__)); void die(void); int f(void){die();}\n", 0, 0 },
+        { "analyzer noreturn stops", "void die(void) __attribute__((analyzer_noreturn)); int f(void){die();}\n", 0, 0 },
+        { "inherited analyzer contract stops", "void die(void) __attribute__((analyzer_noreturn)); void die(void); int f(void){die();}\n", 0, 0 },
+        { "wrapped analyzer contract stops", "void die(void) __attribute__((__analyzer_noreturn__)); int f(void){die();}\n", 0, 0 },
+        { "inherited wrapped analyzer stops", "void die(void) __attribute__((__analyzer_noreturn__)); void die(void); int f(void){die();}\n", 0, 0 },
     };
     static const char* const flags[] = { NULL, "-Werror=return-type", "-Wno-return-type", "-w" };
     char path[PATH_MAX];

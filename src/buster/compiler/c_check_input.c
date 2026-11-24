@@ -3998,8 +3998,8 @@ static TypeId check_input_expression_type(CheckInputReader* reader, uint32_t tok
         (reader->output->function_flags[declaration] & CHECK_INPUT_FUNCTION_KR) != 0)
     {
         const TypeId function = type_strip_aligned(reader->types, type);
-        type = check_input_type_result(reader, type_function_abi(reader->types, type_return(reader->types, function), NULL, 0, 0,
-                                                               type_function_abi_kind(reader->types, function)));
+        type = check_input_type_result(reader, type_function_abi(reader->types, type_return(reader->types, function), NULL, 0,
+                                                               reader->types->types.flags[type_index(function)] & BUSTER_TYPE_FLAG_NORETURN, type_function_abi_kind(reader->types, function)));
     }
     return type;
 }
@@ -4202,7 +4202,7 @@ static bool check_input_noreturn_attribute(const CheckInputAttributes* attribute
     bool noreturn = false;
     for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
     {
-        noreturn |= attributes->records[i].kind == CHECK_ATTRIBUTE_NORETURN && !attributes->records[i].ignored;
+        noreturn |= attributes->records[i].kind == CHECK_ATTRIBUTE_NORETURN && !attributes->records[i].ignored && !attributes->records[i].subject_ignored;
     }
     return noreturn;
 }
@@ -4414,9 +4414,9 @@ static TypeId check_input_attribute_salt(CheckInputReader* reader, CheckInputAtt
         const TypeId* parameters = type_parameters(types, function, &count);
         const uint32_t abi = (uint32_t)type_function_abi_kind(types, function) | id << BUSTER_TYPE_FUNCTION_SALT_SHIFT;
         // (An empty salt removes the model's: no parameter ABIs then, which a salt and a Swift convention seldom meet.)
-        result = id != 0 ? type_function_like(types, type_return(types, function), parameters, count, types->types.flags[type_index(function)] & BUSTER_TYPE_FLAG_KEY,
+        result = id != 0 ? type_function_like(types, type_return(types, function), parameters, count, types->types.flags[type_index(function)] & BUSTER_TYPE_FUNCTION_FLAGS,
                                               (TypeFunctionABI)abi, function) :
-                           type_function_abi(types, type_return(types, function), parameters, count, types->types.flags[type_index(function)] & BUSTER_TYPE_FLAG_KEY,
+                           type_function_abi(types, type_return(types, function), parameters, count, types->types.flags[type_index(function)] & BUSTER_TYPE_FUNCTION_FLAGS,
                                              (TypeFunctionABI)abi);
         result = check_input_type_result(reader, result);
         // The wrappers again, outermost last, with their qualifiers.
@@ -13504,7 +13504,7 @@ static void check_input_inherit_abi(CheckInputReader* reader, uint32_t token, ui
             // (Its cfi_salt kept, #1447.)
             const TypeFunctionABI salted = (TypeFunctionABI)((uint32_t)abi | type_function_salt(reader->types, type) << BUSTER_TYPE_FUNCTION_SALT_SHIFT);
             reader->declared_types[token] = check_input_type_result(reader, type_function_abi(reader->types, type_return(reader->types, type),
-                                                    parameters, count, reader->types->types.flags[type_index(type)] & BUSTER_TYPE_FLAG_KEY, salted));
+                                                    parameters, count, reader->types->types.flags[type_index(type)] & BUSTER_TYPE_FUNCTION_FLAGS, salted));
         }
     }
 }
@@ -13741,6 +13741,23 @@ static void check_input_invalid_initializer(CheckInputReader* reader, uint32_t t
 
 static bool check_input_library_enabled(const BuiltinIntrinsicInfo* info, const PPOptions* options);
 
+// Clang merges the builtin's noreturn type into an external library declaration only when
+// its prototype can be formed at this point (longjmp and siglongjmp need a file-scope typedef).
+static void check_input_library_noreturn(CheckInputReader* reader, uint32_t token, uint32_t name)
+{
+    const InternSpan span = reader->pp->table->spans[name];
+    const BuiltinIntrinsicInfo* info = builtin_intrinsic_lookup((const char*)reader->pp->table->records + span.offset, span.length);
+    if (info != NULL && memchr(info->attributes, 'r', info->attributes_length) != NULL &&
+        memchr(info->attributes, 'f', info->attributes_length) != NULL && check_input_library_enabled(info, &reader->pp->options))
+    {
+        const char* jump = memchr(info->encoding, 'J', info->encoding_length);
+        if (jump == NULL || check_input_file_type(reader, jump > info->encoding && jump[-1] == 'S' ? "sigjmp_buf" : "jmp_buf") != 0)
+        {
+            reader->declared_types[token] = check_input_type_result(reader, type_function_set_noreturn(reader->types, reader->declared_types[token], true));
+        }
+    }
+}
+
 // The reader keeps a composite type after binding. The warning compares written prototypes and still needs the
 // inherited parameter count when clang describes an earlier, unprototyped declaration that acquired parameters.
 static bool check_input_non_prototype_merge(CheckInputReader* reader, uint32_t token, uint32_t previous, uint32_t point)
@@ -13808,6 +13825,10 @@ static void check_input_bind_checked(CheckInputReader* reader, uint32_t token, u
     const uint32_t old_declaration = old != 0 ? reader->bindings.declaration[old - 1] : BUSTER_CHECK_NONE;
     const bool linked_visible = old != 0 && check_input_linkage(reader->declaration_bits, old_declaration) != 0 && check_input_linkage(reader->declaration_bits, token) != 0;
     const bool overload = check_input_overload_active(reader, token);
+    if (old == 0 && kind == C_BINDING_FUNCTION && reader->pp != NULL && !overload && check_input_linkage(reader->declaration_bits, token) == 2)
+    {
+        check_input_library_noreturn(reader, token, name);
+    }
     bool builtin_function = false;
     if (__builtin_expect(kind == C_BINDING_FUNCTION && check_input_linkage(reader->declaration_bits, token) == 2 && !overload &&
                          check_input_builtin_named(reader, name), 0))
