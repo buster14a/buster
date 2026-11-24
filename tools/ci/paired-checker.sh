@@ -37,11 +37,8 @@ bins() {
 toolchain=$( { sha256sum < "$(command -v clang)"; sha256sum < "$(command -v ld)"; clang --version; } | hash)
 host=$( { printf '%s\n' "${PAIRED_HOST:?}"; cat /sys/devices/system/cpu/cpu2/cpufreq/scaling_governor /sys/kernel/mm/transparent_hugepage/enabled; } | hash)
 harness=$(sha256sum src/buster/compiler/profile.c src/buster/compiler/profile_order.h | hash)
-config_id() {
-    git ls-tree -r "$1" -- build.sh CMakeLists.txt CMakePresets.json cmake/BusterSettings.cmake tools/ci/setup-build-tools.sh | hash
-}
-base_config=$(config_id "$base")
-head_config=$(config_id "$head")
+base_config=$(bash tools/ci/build-benchmarks.sh config-id "$base")
+head_config=$(bash tools/ci/build-benchmarks.sh config-id "$head")
 recipe=$( { printf '%s\n' "$head_config" "$BUSTER_HOST_ARCH" "$BUSTER_DEBUG_INFO"; sha256sum tools/ci/paired-checker.sh tools/ci/build-benchmarks.sh; } | hash)
 jq -n --arg id "paired-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --arg date "$(date -u +%FT%TZ)" \
    --arg base "$base" --arg head "$head" --argjson a "$(bins main)" --argjson b "$(bins head)" \
@@ -49,7 +46,7 @@ jq -n --arg id "paired-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" --arg date "$(date -u
    --arg host "$host" --arg host_label "$PAIRED_HOST" --arg harness "$harness" --arg recipe "$recipe" \
    --arg base_config "$base_config" --arg head_config "$head_config" \
    '{format:"buster-benchmark",version:1,id:$id,kind:"measured",status:"partial",recorded_at:$date,
-     producer:{name:"time-runs",version:"1",revision:$head},resources:[],limitations:["One CPU and four verified checker offsets"],
+     producer:{name:"time-runs",version:"2",revision:$head},resources:[],limitations:["One CPU and four verified checker offsets"],
      extensions:{paired:{plan_sha256:$plan,toolchain:$toolchain,corpus:$corpus,host:$host,harness:$harness,recipe:$recipe,
        host_label:$host_label,build_config:{main:$base_config,head:$head_config},
        main:{source:$base,binaries:$a},head:{source:$head,binaries:$b},"main-again":{source:$base,binaries:$a}}}}' > "$manifest"
@@ -60,5 +57,5 @@ copies=$(jq -er .copies "$plan")
 warmups=$(jq -er .warmups "$plan")
 timeout --kill-after=5s 90s taskset -c 2 ./build/compiler time-runs --runs "$rounds" --warmups "$warmups" --copies "$copies" "${builds[@]}" --list "${options[@]}" > "$out/observations.txt" || status=partial
 jq --arg status "$status" --arg sha "$(hash < "$out/observations.txt")" --arg bytes "$(stat -c %s "$out/observations.txt")" \
-   '.status=$status | .resources=[{id:"observations",format:"time-runs-v1",path:"observations.txt",sha256:$sha,bytes:$bytes}]' "$manifest" > "$manifest.tmp"
+   '.status=$status | .resources=[{id:"observations",format:"time-runs-v2",path:"observations.txt",sha256:$sha,bytes:$bytes}]' "$manifest" > "$manifest.tmp"
 mv "$manifest.tmp" "$manifest"

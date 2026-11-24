@@ -2900,6 +2900,10 @@ static uint64_t profile_time_runs(Arena* arena, const ProfileTimeRuns* t)
                 dprintf(t->output, ": FAILED (status %d)\n", exited ? WEXITSTATUS(one.status) : -1);
             }
         }
+        if (warmup && run + 1 == t->warmups && failures == 0)
+        {
+            dprintf(t->output, "time-runs: completed warmups: rounds=%llu slots=%llu\n", (unsigned long long)(run + 1), (unsigned long long)slot_count);
+        }
     }
     bool counted = true;
     for (uint64_t s = 0; ready && s < slot_count; s += 1)

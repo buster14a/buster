@@ -24,6 +24,7 @@ struct PairPlan
     size_t layouts;
     size_t copies;
     size_t rounds;
+    size_t warmups;
     size_t sessions;
     size_t block_rounds;
     size_t units;
@@ -104,13 +105,12 @@ static bool paired_plan(const char *path, PairPlan *plan)
     plan->layout_unit = perf_json_is(json, unit, "relative-layout");
     uint32_t layouts = perf_json_find(json, 0, "layouts");
     plan->layouts = perf_json_count(json, layouts);
-    size_t warmups = 0;
     size_t version = 0;
     valid = valid && paired_count(json, 0, "version", 1, &version) && perf_identifier(paired_field(json, 0, "case")) &&
             (plan->layout_unit || perf_json_is(json, unit, "block")) && plan->layouts > 0 && plan->layouts <= 128 &&
             json->nodes[layouts].kind == PERF_JSON_ARRAY && paired_count(json, 0, "copies", 16, &plan->copies) &&
             paired_count(json, 0, "rounds", 1000, &plan->rounds) && paired_count(json, 0, "sessions", 64, &plan->sessions) &&
-            paired_count(json, 0, "warmups", 1000, &warmups) && paired_count(json, 0, "rounds_per_block", 1000, &plan->block_rounds);
+            paired_count(json, 0, "warmups", 1000, &plan->warmups) && paired_count(json, 0, "rounds_per_block", 1000, &plan->block_rounds);
     for (size_t i = 0; valid && i < plan->layouts; ++i)
     {
         uint32_t id = layouts + 1 + i;
@@ -125,7 +125,7 @@ static bool paired_plan(const char *path, PairPlan *plan)
     {
         plan->units = plan->layout_unit ? plan->layouts : plan->sessions * plan->rounds / plan->block_rounds;
         plan->inner = plan->copies * (plan->layout_unit ? plan->sessions * plan->rounds : plan->block_rounds);
-        valid = plan->units <= 2048 && (warmups + plan->rounds) * plan->copies * plan->layouts * plan->sessions * PAIRED_ROLES <= PAIRED_MAX_ROWS;
+        valid = plan->units <= 2048 && (plan->warmups + plan->rounds) * plan->copies * plan->layouts * plan->sessions * PAIRED_ROLES <= PAIRED_MAX_ROWS;
     }
     uint32_t metrics = perf_json_find(json, 0, "metrics");
     valid = valid && metrics < json->node_count && json->nodes[metrics].kind == PERF_JSON_ARRAY;
@@ -286,11 +286,14 @@ static bool paired_row(const PairPlan *p, size_t session, size_t ordinal, PerfBy
     return valid;
 }
 
-static bool paired_rows(const PairPlan *p, PerfBytes bytes, PairSamples *samples, size_t *counts)
+static bool paired_rows(const PairPlan *p, PerfBytes bytes, bool require_warmups, PairSamples *samples, size_t *counts)
 {
     const size_t rows = p->layouts * p->copies * p->rounds * PAIRED_ROLES;
     size_t ordinal = 0;
     size_t sessions = 0;
+    bool warmed = false;
+    char warmups[80];
+    snprintf(warmups, sizeof(warmups), "rounds=%zu slots=%zu", p->warmups, p->layouts * p->copies * PAIRED_ROLES);
     bool valid = true;
     while (valid && bytes.size > 0)
     {
@@ -303,9 +306,14 @@ static bool paired_rows(const PairPlan *p, PerfBytes bytes, PairSamples *samples
         PerfBytes line = {bytes.data, (size_t)(end - bytes.data)};
         bytes.data = end + 1;
         bytes.size -= line.size + 1;
-        if (paired_take(&line, "run "))
+        if (paired_take(&line, "time-runs: completed warmups: "))
         {
-            valid = ordinal < rows && sessions < p->sessions && paired_row(p, sessions, ordinal, line, samples, counts);
+            valid = !warmed && ordinal == 0 && sessions < p->sessions && perf_bytes_equal(line, perf_literal(warmups));
+            warmed = valid;
+        }
+        else if (paired_take(&line, "run "))
+        {
+            valid = (warmed || !require_warmups) && ordinal < rows && sessions < p->sessions && paired_row(p, sessions, ordinal, line, samples, counts);
             ++ordinal;
         }
         else if (paired_take(&line, "time-runs: done, "))
@@ -313,8 +321,13 @@ static bool paired_rows(const PairPlan *p, PerfBytes bytes, PairSamples *samples
             valid = sessions < p->sessions && ordinal == rows && perf_bytes_equal(line, perf_literal("0 failed processes"));
             ++sessions;
             ordinal = 0;
+            warmed = false;
         }
-        else if (paired_take(&line, "warm-up ") || paired_take(&line, "ab: done, "))
+        else if (paired_take(&line, "warm-up "))
+        {
+            valid = false;
+        }
+        else if (paired_take(&line, "ab: done, "))
         {
             valid = perf_bytes_equal(line, perf_literal("0 failed runs"));
         }
@@ -429,10 +442,10 @@ static void paired_statistics(FILE *out, const PairPlan *p, PairReport *r, const
                 for (size_t j = 0; j < p->inner; ++j)
                 {
                     scratch[j] = samples[start + j].value[m];
-                    positive = positive && scratch[j] > 0;
                 }
                 qsort(scratch, p->inner, sizeof(*scratch), paired_number_order);
                 median[side] = (scratch[(p->inner - 1) / 2] + scratch[p->inner / 2]) / 2;
+                positive = positive && median[side] > 0;
                 if (r->unit_medians)
                 {
                     r->unit_medians[u * PAIRED_ROLES + side].value[m] = median[side];
@@ -454,7 +467,7 @@ static void paired_statistics(FILE *out, const PairPlan *p, PairReport *r, const
         }
         else
         {
-            fputs(",\"unavailable\":\"zero observation has no log ratio\"", out);
+            fputs(",\"unavailable\":\"zero unit median has no log ratio\"", out);
         }
         fputs("}", out);
         if (p->primary[m])
@@ -518,27 +531,35 @@ static void paired_report(FILE *out, const PairPlan *p, const char *manifest, Pa
     paired_json_value(out, json, raw ? perf_json_find(json, raw->definition, "sha256") : UINT32_MAX);
     fputs(",", out);
     uint32_t status = perf_json_find(json, 0, "status");
+    uint32_t format = raw ? perf_json_find(json, raw->definition, "format") : UINT32_MAX;
+    bool v2 = perf_json_is(json, format, "time-runs-v2");
+    bool legacy = perf_json_is(json, format, "time-runs-v1");
+    bool imported = perf_json_is(json, perf_json_find(json, 0, "kind"), "imported");
     if (loaded && identified && raw == NULL && perf_json_is(json, status, "planned"))
     {
         r->status = PAIR_NONE;
         r->reason = "no observations";
     }
-    else if (loaded && identified && raw && perf_json_is(json, perf_json_find(json, raw->definition, "format"), "time-runs-v1"))
+    else if (loaded && identified && (v2 || legacy))
     {
         PairSamples *samples = calloc(p->units * p->inner * PAIRED_ROLES, sizeof(*samples));
         size_t *counts = calloc(p->units * PAIRED_ROLES, sizeof(*counts));
         double *scratch = calloc(p->inner, sizeof(*scratch));
-        bool valid = samples && counts && scratch && paired_rows(p, perf_buffer_bytes(&raw->bytes), samples, counts);
+        bool valid = samples && counts && scratch && paired_rows(p, perf_buffer_bytes(&raw->bytes), v2, samples, counts);
         for (size_t u = 0; counts && u < p->units; ++u)
         {
             size_t *cell = &counts[u * PAIRED_ROLES];
             r->complete_units += cell[0] == p->inner && cell[1] == p->inner && cell[2] == p->inner;
         }
-        if (valid && r->complete_units == p->units && perf_json_is(json, status, "complete"))
+        if (legacy && !imported)
+        {
+            r->reason = "legacy capture does not verify completed warmups";
+        }
+        else if (valid && r->complete_units == p->units && perf_json_is(json, status, "complete"))
         {
             r->reason = "fixed sampling plan complete";
             paired_statistics(out, p, r, samples, scratch);
-            r->promotable = r->status == PAIR_PASS && perf_json_is(json, perf_json_find(json, 0, "kind"), "measured");
+            r->promotable = v2 && r->status == PAIR_PASS && perf_json_is(json, perf_json_find(json, 0, "kind"), "measured");
         }
         free(samples);
         free(counts);

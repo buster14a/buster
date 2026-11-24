@@ -1,4 +1,4 @@
-/* Exercise the reader and the history writer through real v1 resources.
+/* Exercise the reader and the history writer through v1 manifests and versioned time-runs resources.
  * Synthetic roles, constant absolute times and the six frozen Williams rows
  * make the effects, boundary decisions and observed control errors explicit.
  * SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
@@ -18,18 +18,25 @@ struct PairFixture
     bool reorder;
     unsigned host;
     double wall;
+    size_t zero_system_rounds;
+    const char *last_warmups;
+    bool legacy;
 };
 
-static void paired_fixture(const char *manifest, const PairPlan *p, PairFixture f)
+static void paired_fixture_session(FILE *file, const PairPlan *p, PairFixture f, size_t session)
 {
     static const unsigned order[6][3] = {
         {0,1,2}, {1,2,0}, {2,0,1}, {2,1,0}, {0,2,1}, {1,0,2}
     };
-    char raw[128];
-    snprintf(raw, sizeof(raw), "%s.log", manifest);
-    FILE *file = fopen(raw, "w");
-    bool valid = file != NULL;
-    for (size_t r = 0; valid && r < p->rounds; ++r)
+    if (session + 1 == p->sessions && f.last_warmups)
+    {
+        fputs(f.last_warmups, file);
+    }
+    else if (!f.legacy)
+    {
+        fprintf(file, "time-runs: completed warmups: rounds=%zu slots=%zu\n", p->warmups, 3 * p->layouts * p->copies);
+    }
+    for (size_t r = 0; r < p->rounds; ++r)
     {
         static const unsigned six_slots[] = {0, 1, 5, 2, 4, 3};
         for (size_t j = 0; j < 3 * p->layouts; ++j)
@@ -49,14 +56,26 @@ static void paired_fixture(const char *manifest, const PairPlan *p, PairFixture 
             if (!f.missing || r != p->rounds - 1 || j != 2)
             {
                 double wall = f.wall > 0 ? f.wall : 100;
-                fprintf(file, "run %zu list 1 %s%s copy 1: %.3f ms wall, %.3f ms user, 1.000 ms system, 1 KiB wait4 peak, 0 minor faults, 0 major, 0 user cycles, 0 instructions, status 0\n",
-                        r + 1, paired_roles[role], placement, wall * gain[role], role == 1 ? 100.0 : 10.0);
+                fprintf(file, "run %zu list 1 %s%s copy 1: %.3f ms wall, %.3f ms user, %u.000 ms system, 1 KiB wait4 peak, 0 minor faults, 0 major, 0 user cycles, 0 instructions, status 0\n",
+                        r + 1, paired_roles[role], placement, wall * gain[role], role == 1 ? 100.0 : 10.0, (unsigned)(r >= f.zero_system_rounds));
             }
         }
     }
+    fputs("time-runs: done, 0 failed processes\n", file);
+}
+
+static void paired_fixture(const char *manifest, const PairPlan *p, PairFixture f)
+{
+    char raw[128];
+    snprintf(raw, sizeof(raw), "%s.log", manifest);
+    FILE *file = fopen(raw, "w");
+    bool valid = file != NULL;
     if (valid)
     {
-        fputs("time-runs: done, 0 failed processes\n", file);
+        for (size_t session = 0; session < p->sessions; ++session)
+        {
+            paired_fixture_session(file, p, f, session);
+        }
         valid = fclose(file) == 0;
     }
     PerfBuffer bytes = {0};
@@ -71,7 +90,7 @@ static void paired_fixture(const char *manifest, const PairPlan *p, PairFixture 
         if (strcmp(f.status, "planned") != 0)
         {
             const char *name = strrchr(raw, '/');
-            fprintf(meta, "{\"id\":\"observations\",\"format\":\"time-runs-v1\",\"path\":\"%s\",\"bytes\":\"%zu\",\"sha256\":\"%s\"}", name + 1, bytes.size, digest);
+            fprintf(meta, "{\"id\":\"observations\",\"format\":\"time-runs-v%u\",\"path\":\"%s\",\"bytes\":\"%zu\",\"sha256\":\"%s\"}", f.legacy ? 1u : 2u, name + 1, bytes.size, digest);
         }
         fprintf(meta, "],\"extensions\":{\"paired\":{\"plan_sha256\":\"%s\",\"host\":\"%064x\",\"corpus\":\"%064x\",\"toolchain\":\"%064x\",\"recipe\":\"%064x\",\"harness\":\"%064x\"",
                 p->digest, f.host + 1, 2, 3, 4, 5);
@@ -108,6 +127,7 @@ static void paired_test_report(const PairPlan *plan, const char *manifest, PairS
     PerfJson json = {0};
     perf_expect(perf_json_parse(&json, (PerfBytes){(unsigned char *)text, size}), "machine-readable verdict");
     perf_expect(report.status == expected && report.complete_units == units, "verdict and independent population");
+    perf_expect(report.promotable == (expected == PAIR_PASS), "only a verified measured pass is eligible for promotion");
     if (expected != PAIR_INVALID && expected != PAIR_NONE)
     {
         perf_expect(perf_json_is(&json, perf_json_find(&json, 0, "aa_false_alerts"), false_alert ? "1" : "0"), "observed A/A false alerts");
@@ -147,6 +167,10 @@ static bool paired_self_test(void)
             paired_test_report(&p, a, expected[i], 6, false);
         }
         f.ratio = 1;
+        f.legacy = true;
+        paired_fixture(a, &p, f);
+        paired_test_report(&p, a, PAIR_INVALID, 6, false);
+        f.legacy = false;
         f.control = 1.04;
         paired_fixture(a, &p, f);
         paired_test_report(&p, a, PAIR_UNCERTAIN, 6, true);
@@ -227,7 +251,7 @@ static bool paired_self_test(void)
         valid = layout_plan != NULL;
         if (valid)
         {
-            fputs("{\"version\":1,\"case\":\"layout-test\",\"unit\":\"relative-layout\",\"layouts\":[\"normal\",\"shifted\"],\"sessions\":1,\"rounds\":6,\"rounds_per_block\":1,\"copies\":1,\"warmups\":1,"
+            fputs("{\"version\":1,\"case\":\"layout-test\",\"unit\":\"relative-layout\",\"layouts\":[\"normal\",\"shifted\"],\"sessions\":2,\"rounds\":6,\"rounds_per_block\":1,\"copies\":1,\"warmups\":1,"
                   "\"metrics\":[{\"name\":\"wall_ms\",\"role\":\"primary\",\"budget_ppm\":20000},{\"name\":\"system_ms\",\"role\":\"primary\",\"budget_ppm\":10000}]}", layout_plan);
             valid = fclose(layout_plan) == 0;
         }
@@ -238,6 +262,24 @@ static bool paired_self_test(void)
             PairFixture f = {.base = 1, .head = 2, .ratio = 1, .control = 1, .status = "complete"};
             paired_fixture(a, &layout, f);
             paired_test_report(&layout, a, PAIR_PASS, 2, false);
+            f.zero_system_rounds = 1;
+            paired_fixture(a, &layout, f);
+            paired_test_report(&layout, a, PAIR_PASS, 2, false);
+            f.zero_system_rounds = 4;
+            paired_fixture(a, &layout, f);
+            paired_test_report(&layout, a, PAIR_INVALID, 2, false);
+            f.zero_system_rounds = 0;
+            const char *bad_warmups[] = {"", "time-runs: completed warmups: rounds=4 slots=6\n",
+                                         "time-runs: completed warmups: rounds=1 slots=5\n",
+                                         "time-runs: completed warmups: rounds=1 slots=6\ntime-runs: completed warmups: rounds=1 slots=6\n"};
+            for (size_t i = 0; i < sizeof(bad_warmups) / sizeof(*bad_warmups); ++i)
+            {
+                f.last_warmups = bad_warmups[i];
+                paired_fixture(a, &layout, f);
+                paired_test_report(&layout, a, PAIR_INVALID, 0, false);
+            }
+            f.last_warmups = NULL;
+            paired_fixture(a, &layout, f);
             FILE *sink = tmpfile();
             perf_expect(sink != NULL, "overlap report destination");
             if (sink)

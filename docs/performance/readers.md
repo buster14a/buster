@@ -129,11 +129,11 @@ reports `not_measured`.
 
 ### Population and decision
 
-Version 1 covers a single case with one argument list and three time-runs
+Each plan covers a single case with one argument list and three time-runs
 builds, in order: `main`, `head` and `main-again`. The last build repeats the
 base source and every base binary. The reader checks the declared count, role,
-layout, round, copy, Williams order, zero exit status and successful end of
-each invocation. It accepts wall, user and system milliseconds. PMU and profile
+layout, completed warmup rounds and slots, measured round, copy, Williams
+order, zero exit status and successful end of each invocation. It accepts wall, user and system milliseconds. PMU and profile
 fields supply no verdict inputs. The reader checks BMF byte lengths and SHA-256
 before interpreting observations.
 
@@ -159,8 +159,9 @@ Changing the budget changes the series.
 - Each entry in a metric's `units` array gives the absolute medians for
   base, candidate and same-base control, in that order. The point estimate is
   the mean of the paired log ratios. Exponentiate it to obtain the geometric
-  mean ratio. The report includes the percentage effect and the interval on
-  the log scale.
+  mean ratio. A zero inner sample contributes to the median. A zero unit
+  median makes its log ratio unavailable. The report includes the percentage
+  effect and the interval on the log scale.
 - The paired Student interval assumes approximately normal independent
   unit effects. Degrees of freedom are rounded down to the next tabulated
   value and critical values are rounded up. A Bonferroni adjustment covers
@@ -192,9 +193,15 @@ The manifest's `extensions.paired` object binds the SHA-256 of the plan's
 original bytes (`plan_sha256`) and content identities for `harness`, `recipe`,
 `toolchain`, `corpus` and `host`. These six digests determine the series.
 Each role has a Git `source` ID and an ordered `binaries` array of SHA-256s
-corresponding to the plan's layouts. The `observations` resource has format
-`time-runs-v1` and contains the unmodified time-runs text. The producer
-checks its source revisions, binary digests and environment before timing.
+corresponding to the plan's layouts. New `observations` resources use
+`time-runs-v2`. Before its first measured row, each invocation records how
+many warmup rounds completed successfully and how many slots each contained.
+The reader requires exactly one matching receipt per session. Imported
+`time-runs-v1` resources support historical replay. A measured v1 capture
+has unverified warmups and is ineligible for certification or promotion.
+The producer checks source revisions, binary digests and environment before
+timing. Both revisions must share a build recipe fingerprint covering the
+build driver, CMake tree and presets, code generation tools and toolchain setup.
 The report retains the manifest ID, observation digest, identities, sample
 plan and number of complete units. Keep the manifests and evidence with the
 history in buster-performance.

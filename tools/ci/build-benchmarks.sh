@@ -17,6 +17,15 @@ cleanup()
 }
 
 case "${1:-prepare}" in
+    config-id)
+        [ "$#" -eq 2 ]
+        # Hash both complete trees: the CMake modules and link-order data,
+        # and the code-generation tools those modules build and execute.
+        git -C "$root" ls-tree -rz "$2" -- build.sh CMakeLists.txt CMakePresets.json cmake tools/codegen \
+            tools/ci/{session-toolchain,setup-build-tools,hosted-release,install-hosted-tools}.sh tools/ci/hosted-tools.lock |
+            sha256sum | cut -d' ' -f1
+        exit 0
+        ;;
     cleanup)
         [ "$#" -eq 2 ]
         # A failed preparation may already have removed its directory.
@@ -45,7 +54,7 @@ case "${1:-prepare}" in
         exit 0
         ;;
     prepare) [ "$#" -le 1 ] ;;
-    *) echo "usage: build-benchmarks.sh [prepare|cleanup DIRECTORY]" >&2; exit 2 ;;
+    *) echo "usage: build-benchmarks.sh [prepare|cleanup DIRECTORY|config-id COMMIT]" >&2; exit 2 ;;
 esac
 
 cd -- "$root"
