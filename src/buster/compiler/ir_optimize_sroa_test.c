@@ -98,38 +98,33 @@ static bool ir_sroa_test_cfg(Arena* arena, IrFunction* f, bool loop)
     return created;
 }
 
-static void ir_sroa_test_compare(IrOptimizeTest* test, const IrFunction* f, Arena* vector, Arena* scalar, Arena* promoted, Arena* scratch, uint32_t expected_fields)
+// SROA on `f` against the fields the fixture expects, and its output against the independent byte-memory interpreter
+// before and after upstream promotion (#2924: its scalar twin, which these checks replace, is gone).
+static void ir_sroa_test_compare(IrOptimizeTest* test, const IrFunction* f, Arena* output, Arena* promoted, Arena* scratch, uint32_t expected_fields)
 {
-    const uint64_t vm = vector->length;
-    const uint64_t sm = scalar->length;
+    const uint64_t vm = output->length;
     const uint64_t pm = promoted->length;
     const uint64_t tm = scratch->length;
-    IrSroaOptions options = ir_sroa_options();
     IrSroaResult a = { 0 };
-    IrSroaResult b = { 0 };
-    const IrCheck ac = ir_optimize_sroa(f, vector, scratch, options, &a);
-    options.scalar = true;
-    const IrCheck bc = ir_optimize_sroa(f, scalar, scratch, options, &b);
-    ir_optimize_test_expect(test, ac.error == IR_OK && bc.error == IR_OK && scratch->length == tm, "SROA paths accept fixture and restore scratch");
-    if (ac.error == IR_OK && bc.error == IR_OK)
+    const IrCheck ac = ir_optimize_sroa(f, output, scratch, ir_sroa_options(), &a);
+    ir_optimize_test_expect(test, ac.error == IR_OK && scratch->length == tm, "SROA accepts fixture and restores scratch");
+    if (ac.error == IR_OK)
     {
-        const bool slots_equal = a.function.slot_count == b.function.slot_count && (a.function.slot_count == 0 || memcmp(a.function.slots, b.function.slots, (uint64_t)a.function.slot_count * sizeof(IrSlot)) == 0);
-        ir_optimize_test_expect(test, a.fields == expected_fields && b.fields == expected_fields && ir_optimize_test_equal(&a.function, &b.function) && slots_equal, "SROA exact scalar/vector fields, layout and output");
+        ir_optimize_test_expect(test, a.fields == expected_fields && a.split_slots == (expected_fields != 0) && a.function.slot_count == (expected_fields != 0 ? expected_fields : f->slot_count),
+                                "SROA's expected fields, split slots and output slots");
         if (f->debug != NULL)
         {
             const IrDebugInfo* ad = a.function.debug;
-            const IrDebugInfo* bd = b.function.debug;
-            bool exact = ad != NULL && bd != NULL && ad != f->debug && bd != f->debug && ad != bd &&
-                         ad->entry_count == f->instruction_count && bd->entry_count == f->instruction_count && f->debug->locals[0] == 0 &&
-                         ad->slot_count == bd->slot_count && ad->instruction_count == bd->instruction_count;
+            bool exact = ad != NULL && ad != f->debug && ad->entry_count == f->instruction_count && f->debug->locals[0] == 0 && ad->slot_count == a.function.slot_count &&
+                         ad->instruction_count == a.function.instruction_count;
             for (uint32_t slot = 0; exact && slot < ad->slot_count; slot += 1)
             {
                 const uint32_t expected = expected_fields != 0 ? BUSTER_IR_NONE : 0;
-                exact = ad->locals[slot] == expected && bd->locals[slot] == expected;
+                exact = ad->locals[slot] == expected;
             }
             for (uint32_t i = 0; exact && i < ad->instruction_count; i += 1)
             {
-                exact = ad->origins[i] == bd->origins[i] && ad->origins[i] < f->instruction_count &&
+                exact = ad->origins[i] < f->instruction_count &&
                         (i == 0 || ad->origins[i - 1] < ad->origins[i]);
             }
             ir_optimize_test_expect(test, exact, "SROA keeps exact origins and refused objects but drops every split whole-object identity");
@@ -162,22 +157,9 @@ static void ir_sroa_test_compare(IrOptimizeTest* test, const IrFunction* f, Aren
                 ir_optimize_test_expect(test, before.status == after.status && before.value == after.value, "SROA plus upstream SSA preserves independently interpreted value");
             }
         }
-        arena_pop_to(promoted, pm);
-        const IrCheck scalar_ssa = ssa_ir_promote(&b.function, promoted, scratch, &ssa);
-        ir_optimize_test_expect(test, scalar_ssa.error == IR_OK, "SROA's scalar output accepted by upstream SSA promotion");
-        if (scalar_ssa.error == IR_OK)
-        {
-            for (uint32_t trial = 0; trial < 9; trial += 1)
-            {
-                const IrOptimizeExecution before = ir_optimize_test_execute(f, scratch, trial, 0);
-                const IrOptimizeExecution after = ir_optimize_test_execute(&ssa, scratch, trial, 0);
-                ir_optimize_test_expect(test, before.status == after.status && before.value == after.value, "SROA's scalar output plus upstream SSA preserves independently interpreted value");
-            }
-        }
     }
     arena_pop_to(promoted, pm);
-    arena_pop_to(scalar, sm);
-    arena_pop_to(vector, vm);
+    arena_pop_to(output, vm);
 }
 
 static void ir_sroa_test_guards(IrOptimizeTest* test)
@@ -207,7 +189,7 @@ static void ir_sroa_test_guards(IrOptimizeTest* test)
                 returned_expected |= (uint16_t)ret << lane;
             }
             uint16_t returning = UINT16_MAX;
-            ir_optimize_test_expect(test, ir_sroa_escape_mask(&batch, false, &returning) == expected && returning == 0, "SROA exact scalar/vector escape masks for every packet tail");
+            ir_optimize_test_expect(test, ir_sroa_escape_mask(&batch, false, &returning) == expected && returning == 0, "SROA's escape mask is its definition's on every packet tail");
             ir_optimize_test_expect(test, ir_sroa_escape_mask(&batch, true, &returning) == (expected & (uint16_t)~returned_expected) && returning == returned_expected,
                                     "SROA's returns (#3311): a ret's operand is a return, not an escape");
         }
@@ -292,10 +274,9 @@ static void ir_sroa_test_ir(IrOptimizeTest* test)
 {
     Arena input = arena_reserve(16ull << 20);
     Arena vector = arena_reserve(16ull << 20);
-    Arena scalar = arena_reserve(16ull << 20);
     Arena promoted = arena_reserve(16ull << 20);
     Arena scratch = arena_reserve(32ull << 20);
-    const bool ready = input.base != 0 && vector.base != 0 && scalar.base != 0 && promoted.base != 0 && scratch.base != 0;
+    const bool ready = input.base != 0 && vector.base != 0 && promoted.base != 0 && scratch.base != 0;
     ir_optimize_test_expect(test, ready, "SROA fixture arenas");
     if (ready)
     {
@@ -323,7 +304,7 @@ static void ir_sroa_test_ir(IrOptimizeTest* test)
             ir_optimize_test_expect(test, created, "SROA field fixture allocation");
             if (created)
             {
-                ir_sroa_test_compare(test, &f, &vector, &scalar, &promoted, &scratch, kind == 0 || kind == 12 ? 2 : kind == 10 ? 1 : 0);
+                ir_sroa_test_compare(test, &f, &vector, &promoted, &scratch, kind == 0 || kind == 12 ? 2 : kind == 10 ? 1 : 0);
                 if (kind == 0)
                 {
                     const uint64_t sm = scratch.length;
@@ -353,7 +334,7 @@ static void ir_sroa_test_ir(IrOptimizeTest* test)
                 f.constants[0].low = ir_optimize_test_random(test);
                 f.addresses[0].offset = 8 + ir_optimize_test_random(test) % 41;
                 f.slots[0].size = f.addresses[0].offset + 8;
-                ir_sroa_test_compare(test, &f, &vector, &scalar, &promoted, &scratch, 2);
+                ir_sroa_test_compare(test, &f, &vector, &promoted, &scratch, 2);
             }
             arena_pop_to(&input, 0);
         }
@@ -364,14 +345,13 @@ static void ir_sroa_test_ir(IrOptimizeTest* test)
             ir_optimize_test_expect(test, created, "SROA control-flow field fixture allocation");
             if (created)
             {
-                ir_sroa_test_compare(test, &f, &vector, &scalar, &promoted, &scratch, 2);
+                ir_sroa_test_compare(test, &f, &vector, &promoted, &scratch, 2);
             }
             arena_pop_to(&input, 0);
         }
     }
     arena_release(&scratch);
     arena_release(&promoted);
-    arena_release(&scalar);
     arena_release(&vector);
     arena_release(&input);
 }
@@ -446,6 +426,122 @@ static void ir_sroa_test_lanes(IrOptimizeTest* test)
     arena_release(&input);
 }
 
+#define BUSTER_SROA_TEST_ROOTS 34
+#define BUSTER_SROA_TEST_ESCAPES 6
+
+// Whether the roots fixture's slot escapes: its address stored as a value. Each slot's two uses take two lanes of the
+// uses scan's 16-use packets, so slots 0, 8, 16, 24 and 32 begin packets and none of these does.
+static bool ir_sroa_test_root_escapes(uint32_t slot)
+{
+    return slot == 3 || slot == 10 || slot == 13 || slot == 21 || slot == 30 || slot == 33;
+}
+
+// One function of 34 eight-byte slots whose uses share packets (#2924's review of the uses scan): instruction 0 the
+// parameter, 1 to 34 the slots' addresses, then a store to each slot, of its own address where the slot escapes and
+// of the parameter elsewhere, a load of each slot that doesn't escape, the loads' sum and its return.
+static bool ir_sroa_test_roots_function(Arena* arena, IrFunction* f)
+{
+    const uint32_t roots = BUSTER_SROA_TEST_ROOTS;
+    const uint32_t loads = roots - BUSTER_SROA_TEST_ESCAPES;
+    const uint32_t count = 1 + roots + roots + loads + (loads - 1) + 1;
+    const IrSizes sizes = { .instruction_count = count, .block_count = 1, .parameter_count = 1, .slot_count = roots };
+    const bool created = ir_create(arena, &sizes, f) == IR_OK;
+    if (created)
+    {
+        f->result_type = IR_I64;
+        f->parameter_types[0] = IR_I64;
+        f->block_offsets[1] = count;
+        ir_optimize_test_instruction(f, 0, IR_PARAM, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        for (uint32_t slot = 0; slot < roots; slot += 1)
+        {
+            f->slots[slot] = (IrSlot){ .size = 8, .alignment = 8, .type = IR_VOID };
+            ir_optimize_test_instruction(f, 1 + slot, IR_STACK_ADDR, IR_PTR, slot, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        }
+        uint32_t at = 1 + roots;
+        for (uint32_t slot = 0; slot < roots; slot += 1)
+        {
+            ir_optimize_test_instruction(f, at, IR_STORE, IR_VOID, 1 + slot, ir_sroa_test_root_escapes(slot) ? 1 + slot : 0, BUSTER_IR_NONE);
+            at += 1;
+        }
+        uint32_t sum = BUSTER_IR_NONE;
+        for (uint32_t slot = 0; slot < roots; slot += 1)
+        {
+            if (!ir_sroa_test_root_escapes(slot))
+            {
+                ir_optimize_test_instruction(f, at, IR_LOAD, IR_I64, 1 + slot, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                at += 1;
+                if (sum == BUSTER_IR_NONE)
+                {
+                    sum = at - 1;
+                }
+                else
+                {
+                    ir_optimize_test_instruction(f, at, IR_ADD, IR_I64, sum, at - 1, BUSTER_IR_NONE);
+                    sum = at;
+                    at += 1;
+                }
+            }
+        }
+        ir_optimize_test_instruction(f, at, IR_RET, IR_VOID, sum, BUSTER_IR_NONE, BUSTER_IR_NONE);
+    }
+    return created;
+}
+
+// The roots fixture's expectations, by hand: the six escaping slots refused and the 28 others split into one field
+// each; the function returns 28 times its parameter before and after; and after upstream promotion only the escaping
+// slots' addresses and stores remain in memory, with no load.
+static void ir_sroa_test_roots(IrOptimizeTest* test)
+{
+    Arena input = arena_reserve(16ull << 20);
+    Arena output = arena_reserve(16ull << 20);
+    Arena promoted = arena_reserve(16ull << 20);
+    Arena scratch = arena_reserve(32ull << 20);
+    const bool ready = input.base != 0 && output.base != 0 && promoted.base != 0 && scratch.base != 0;
+    ir_optimize_test_expect(test, ready, "SROA roots fixture arenas");
+    IrFunction f = { 0 };
+    const bool created = ready && ir_sroa_test_roots_function(&input, &f);
+    ir_optimize_test_expect(test, created && ir_verify(&f, &scratch, 0).error == IR_OK, "SROA roots fixture allocation and verification");
+    if (created)
+    {
+        const uint32_t escapes = BUSTER_SROA_TEST_ESCAPES;
+        const uint32_t splits = BUSTER_SROA_TEST_ROOTS - escapes;
+        IrSroaResult result = { 0 };
+        const IrCheck check = ir_optimize_sroa(&f, &output, &scratch, ir_sroa_options(), &result);
+        ir_optimize_test_expect(test, check.error == IR_OK && result.split_slots == splits && result.refused_slots == escapes && result.fields == splits,
+                                "SROA's uses scan refuses each escaping root of a packet that holds sixteen roots' uses, and only those");
+        IrFunction ssa = { 0 };
+        const IrCheck promotion = check.error == IR_OK ? ssa_ir_promote(&result.function, &promoted, &scratch, &ssa) : check;
+        if (promotion.error == IR_OK)
+        {
+            uint32_t addresses = 0;
+            uint32_t stores = 0;
+            uint32_t loads = 0;
+            for (uint32_t i = 0; i < ssa.instruction_count; i += 1)
+            {
+                addresses += ssa.op[i] == IR_STACK_ADDR;
+                stores += ssa.op[i] == IR_STORE;
+                loads += ssa.op[i] == IR_LOAD;
+            }
+            ir_optimize_test_expect(test, addresses == escapes && stores == escapes && loads == 0, "SROA's roots fixture leaves only the escaping slots in memory");
+        }
+        ir_optimize_test_expect(test, promotion.error == IR_OK, "SROA's roots fixture output promotes");
+        for (uint32_t trial = 0; check.error == IR_OK && trial < 4; trial += 1)
+        {
+            const uint64_t parameter = trial == 3 ? UINT64_MAX : (uint64_t)trial * 0x9e3779b97f4a7c15u;
+            const uint64_t expected = parameter * splits;
+            const IrOptimizeExecution before = ir_optimize_test_execute(&f, &scratch, parameter, 0);
+            const IrOptimizeExecution split = ir_optimize_test_execute(&result.function, &scratch, parameter, 0);
+            const IrOptimizeExecution after = promotion.error == IR_OK ? ir_optimize_test_execute(&ssa, &scratch, parameter, 0) : split;
+            ir_optimize_test_expect(test, before.status == 1 && before.value == expected && split.status == 1 && split.value == expected && after.status == 1 && after.value == expected,
+                                    "SROA's roots fixture returns 28 times its parameter before and after");
+        }
+    }
+    arena_release(&scratch);
+    arena_release(&promoted);
+    arena_release(&output);
+    arena_release(&input);
+}
+
 static __attribute__((unused)) int run_ir_sroa_tests(int argc, char** argv)
 {
     IrOptimizeTest test = { .random = 139 };
@@ -470,6 +566,7 @@ static __attribute__((unused)) int run_ir_sroa_tests(int argc, char** argv)
         ir_sroa_test_guards(&test);
         ir_sroa_test_ir(&test);
         ir_sroa_test_lanes(&test);
+        ir_sroa_test_roots(&test);
         printf("ir-sroa: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
         result = test.failures == 0 ? 0 : 1;
     }

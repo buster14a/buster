@@ -71,9 +71,13 @@ owned by its output or scratch arena.
 
 `test-ir-sroa [--seed N]` is `run_ir_sroa_tests(argc, argv)`, with the command
 in `argv[0]`. Include it after `ir_optimize_sroa.c`,
-`ir_optimize_test.c` and upstream `ssa_ir.c`. The tests compare exact scalar
-and vector splitting, guarded interval queries, partial allocation rollback,
-and both upstream promotion algorithms. An independent byte-memory fixture
+`ir_optimize_test.c` and upstream `ssa_ir.c`. The tests check each fixture's
+expected fields and split slots, the uses scan's escapes on every lane of its
+16-use packets (one slot's uses at each count from 0 to 33, and 34 slots' uses
+sharing packets, six of them escaping off the packets' first lanes, with their
+counts and results derived by hand), the escape mask against its definition,
+guarded interval queries, partial allocation rollback, and upstream
+promotion. An independent byte-memory fixture
 interpreter checks returned values and faults for direct fields, pointer
 copies, checked negative offsets, randomized gaps, conditional stores and
 loops. Private nonescaping stores are excluded from the observable trace

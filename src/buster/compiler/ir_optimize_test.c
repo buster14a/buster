@@ -447,7 +447,8 @@ static IrOptimizeExecution ir_optimize_test_execute_table(const IrFunction* f, A
     uint64_t* values = arena_push_array(scratch, f->instruction_count, sizeof(uint64_t), _Alignof(uint64_t));
     uint64_t* phis = arena_push_array(scratch, f->instruction_count, sizeof(uint64_t), _Alignof(uint64_t));
     IrOptimizeExecution execution = { 0 };
-    uint8_t memory[256] = { 0 };
+    // Slot k's bytes are at k * 64 + 1 (IR_STACK_ADDR); SROA's roots fixture has 34 slots.
+    uint8_t memory[4096] = { 0 };
     // A data symbol's bytes (#2826): symbol k below BUSTER_IR_OPTIMIZE_TEST_SYMBOLS has 32 of its own at its address,
     // k << 32 (a label's symbol, from BUSTER_IR_OPTIMIZE_TEST_LABEL, has none).
     uint8_t symbol_memory[BUSTER_IR_OPTIMIZE_TEST_SYMBOLS * 32] = { 0 };
