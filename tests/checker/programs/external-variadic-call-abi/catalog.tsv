@@ -1,0 +1,8 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+external-variadic-call-abi	external-variadic-call-abi.c	-	external-variadic-call-abi
+floating-stack-arguments	floating-stack-arguments.c	-	floating-stack-arguments
+addressed-local-updates	addressed-local-updates.c	-	addressed-local-updates
+# An address constant cast to an integer type, of a class other than a pointer's (musl's syscalls take one).
+address-constants-as-integers	address-constants-as-integers.c	-	address-constants-as-integers
+narrow-values-and-bool	narrow-values-and-bool.c	-	narrow-values-and-bool

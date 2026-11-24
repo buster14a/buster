@@ -1,0 +1,1 @@
+struct S{short s;char c;};short a[1]={1<<20};int c[1]={3LL<<40};short d={1<<20};struct S e={1<<18,2<<8};void f(void){short x[1]={4<<18};struct S y={0,1<<9};_Bool b[1]={1<<3};short z[1]={1<<3};(void)x;(void)y;(void)b;(void)z;}

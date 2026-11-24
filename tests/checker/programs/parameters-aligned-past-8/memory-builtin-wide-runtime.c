@@ -1,0 +1,1 @@
+unsigned char a[512],b[512];int tested(int n){unsigned k=(unsigned)n%300;for(unsigned i=0;i<512;i++)a[i]=(unsigned char)(1+i%255);__builtin_memset(b,0x180,512);__builtin_memcpy(b+3,a+1,k);__builtin_memmove(b+4,b+3,k);__builtin_memmove(b+2,b+4,k);b[k+2]=0;return (int)__builtin_strlen((char*)b+2)+__builtin_memcmp(a+1,b+2,k)+b[400];}

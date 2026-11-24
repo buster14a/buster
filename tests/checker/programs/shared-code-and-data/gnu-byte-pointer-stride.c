@@ -1,0 +1,1 @@
+int tested(int n){void*p=(void*)100;p++;p+=3;return (char*)p-(char*)100+n;}

@@ -53,6 +53,9 @@
 // pointer, rbp, the address of the caller's rbp its prologue pushed, as clang's and Tier 0's frames have it. The typed
 // stream's FRAME_ADDRESS. The function keeps a frame pointer (Tier 1's frame planner, BUSTER_TIER1_FRAME_KEEP_POINTER).
 #define BUSTER_IR_STACK_SAVE_FRAME 1
+
+// IR_CBR only. One outcome is strongly favored. Both successors remain reachable.
+#define BUSTER_IR_BRANCH_PREDICTABLE 1
 #define BUSTER_IR_SLOT_ADDRESS_TAKEN 1
 #define BUSTER_IR_SLOT_VOLATILE 2
 #define BUSTER_IR_SLOT_TEMPORARY 4
@@ -2227,7 +2230,8 @@ static IrCheck ir_check_shape(const IrFunction* f)
 static bool ir_check_metadata(uint32_t op, uint8_t flags, uint8_t alignment_log2)
 {
     const uint32_t metadata = ir_metadata_table[op];
-    const bool flags_valid = metadata == IR_METADATA_PLAIN  ? flags == 0 || op == IR_INTRINSIC || ir_lane_valid(op, flags) || (op == IR_STACK_SAVE && flags == BUSTER_IR_STACK_SAVE_FRAME) :
+    const bool flags_valid = metadata == IR_METADATA_PLAIN  ? flags == 0 || op == IR_INTRINSIC || ir_lane_valid(op, flags) ||
+                                                              (op == IR_STACK_SAVE && flags == BUSTER_IR_STACK_SAVE_FRAME) || (op == IR_CBR && flags == BUSTER_IR_BRANCH_PREDICTABLE) :
                              metadata == IR_METADATA_ACCESS ? ir_access_flags_valid(op, flags) :
                              metadata == IR_METADATA_RMW    ? ir_rmw_flags_valid(flags) :
                                                               ir_masked_lanes_valid(flags);
@@ -3872,7 +3876,9 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
                             fprintf(output, "%s#%" PRIu32 "%s", p == 0 ? " [" : ", ", f->extra[b + p], p + 1 == c ? "]" : "");
                         }
                     } break;
-                    case IR_CBR: fprintf(output, " %%%" PRIu32 ", b%" PRIu32 ", b%" PRIu32, a, b, c); break;
+                    case IR_CBR:
+                        fprintf(output, " %%%" PRIu32 ", b%" PRIu32 ", b%" PRIu32 "%s", a, b, c, f->flags[i] == BUSTER_IR_BRANCH_PREDICTABLE ? " predictable" : "");
+                        break;
                     case IR_SWITCH:
                     {
                         fprintf(output, " %%%" PRIu32 ", default b%" PRIu32, a, f->extra[b]);

@@ -1,0 +1,1 @@
+int tested(int n){int x=0;({int y=n;if(y)x++;});return x;}

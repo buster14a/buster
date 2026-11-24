@@ -1,0 +1,6 @@
+typedef _BitInt(5) S5;typedef _BitInt(13) S13;typedef _BitInt(40) S40;
+#define U5 unsigned _BitInt(5)
+#define U13 unsigned _BitInt(13)
+#define U27 unsigned _BitInt(27)
+#define U40 unsigned _BitInt(40)
+static S5 table[3]={-3,7,-16};U5 u5(int n){return (U5)n;}S5 s5(int n){return (S5)(n%16);}unsigned _BitInt(5) external_bit_int(_BitInt(5),unsigned _BitInt(13),_BitInt(40),unsigned _BitInt(5)*);int external_bit_apply(unsigned _BitInt(13)(*)(_BitInt(5),unsigned _BitInt(27)),int);U13 mine(S5 a,U27 b){return (U13)(b%8000)+(U13)a;}int tested(int n){union{unsigned char c;U5 v;}pu;pu.c=(unsigned char)(0xe0|n);union{unsigned char c;S5 v;}ps;ps.c=(unsigned char)(0xa0+n);union{unsigned long l;U40 v;S40 s;}pw;pw.l=0xfedcba9876543210UL+(unsigned long)n;static S5 t2[2]={-3,9};static U13 t3[2]={8000,3};static S40 t4=-5;const unsigned char*b=(const unsigned char*)t2;const unsigned char*c=(const unsigned char*)t3;const unsigned char*d=(const unsigned char*)&t4;union{S5 v;unsigned char c;}u1;u1.v=s5(n);union{U13 v;unsigned short s;}u2;u2.v=(U13)(n*1000);u2.v+=7000;U5 q=0;U5 r=external_bit_int(s5(n),(U13)(n*700),(S40)n*1073741824,&q);return (int)pu.v+(int)ps.v*7+(int)(pw.v%1009)+(int)(pw.s%1013)*3+b[n&1]+c[n&3]*3+d[n&7]*5+u1.c*11+u2.s*13+(int)r*100+(int)q+external_bit_apply(mine,n)*1000;}

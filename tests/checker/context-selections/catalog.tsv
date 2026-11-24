@@ -1,0 +1,9 @@
+buster-fixtures v1 checker-sources
+0001	0001.c	-	context: unselected discarded read is not evaluated
+0002	0002.c	rejected	context: selected discarded read is unevaluable
+0003	0003.c	-	context: unselected arithmetic fault is deferred
+0004	0004.c	rejected	context: selected arithmetic fault is diagnosed
+0005	0005.c	-	context: inactive union address is not a read
+0006	0006.c	rejected	context: inactive union member cannot supply a receipt
+0007	0007.c	-	context: qualifier-only pointer path retains receipt evidence
+0008	0008.c	rejected	context: void round trip cannot recreate receipt evidence

@@ -1476,8 +1476,27 @@ static void check_units_test_root_image(CheckUnitsTestTally* tally, const char* 
         { "a file of predefines, each release checked", { "--lanes", "1", "--poison-arenas", "--predefines", "../root_predefines.h", NULL },
           { "../root_0.c", "../root_1.c", "../root_2.c", "../root_3.c", NULL }, 0, 1, 0, 3 },
         { "a file of predefines that declares", { "--lanes", "1", "--predefines", "../root_declares.h", NULL }, { "../root_0.c", "../root_1.c", "../root_2.c", NULL }, 0, 0, 0, 0 },
-        // (Without attested declarations, whose second reading of a unit with a syntax error prints no parser's error.)
-        { "a unit its lane's root is dropped for", { "--lanes", "1", "--attested=off", NULL }, { "../root_repaired.c", "../root_0.c", "../root_1.c", "../root_2.c", NULL }, 1, 2, 1, 2 },
+        {
+            .name = "a unit its lane's root is dropped for",
+            .options =
+            {
+                "--lanes",
+                "1",
+                NULL,
+            },
+            .units =
+            {
+                "../root_repaired.c",
+                "../root_0.c",
+                "../root_1.c",
+                "../root_2.c",
+                NULL,
+            },
+            .failing = 1,
+            .captures = 2,
+            .drops = 1,
+            .starts = 2,
+        },
     };
     // The time's units spell one time in every run.
     const char* epoch = getenv("SOURCE_DATE_EPOCH");

@@ -67,6 +67,17 @@ typedef enum AssemblyError
     ASSEMBLY_INVALID,
 } AssemblyError;
 
+// Substituted inline text and the range it occupies in its atom. Extraction-only marker lines
+// have zero width. A directive assembled in a helper occupies its actual byte range.
+typedef struct AssemblyInline AssemblyInline;
+struct AssemblyInline
+{
+    String8 text;
+    uint32_t offset;
+    uint32_t size;
+    uint32_t statement;
+};
+
 // A TEXT atom's instructions, as the emission made them: `count` records, sized (each branch's rel8 or rel32 form) and
 // encoded into the atom's bytes, and its branches to its own records (`branches[i]` targets `targets[i]`, a record or
 // `count` for the code's end).
@@ -80,6 +91,8 @@ struct AssemblyCode
     uint32_t branch_count;
     // The patchable-entry bytes in the atom before its first instruction record.
     uint32_t sled;
+    AssemblyInline* templates;
+    uint32_t template_count;
 };
 
 // A unit of a link to print: its atoms (those of `unit`), each TEXT atom's code (indexed by AtomId, `code_count` entries),
@@ -90,6 +103,7 @@ struct AssemblyView
 {
     const Link* link;
     const AssemblyCode* code;
+    const ObjectDebug* debug;
     const ObjectAtomSection* sections;
     const uint8_t* temporary;
     String8 source_name;
@@ -270,7 +284,7 @@ typedef struct AssemblyNames AssemblyNames;
 struct AssemblyNames
 {
     uint8_t* own;
-    // Each symbol's uses (assembly_print's `used`): 4 where an unwind table names its local label (AssemblyView.local_unwind).
+    // Each symbol's uses (assembly_print's `used`): 4 for a PIC unwind reference, 8 for DWARF, both naming the local definition.
     const uint8_t* used;
     // Each form row's assembly_ambiguous answer, as the walk finds it: the printing's other per-unit table.
     uint8_t* widths;
@@ -1177,7 +1191,7 @@ static void assembly_labels(AssemblyText* text, const Link* link, const Assembly
         assembly_attributes(text, link, names, symbol, true);
         assembly_name(text, link, names, symbol);
         assembly_append(text, ":\n");
-        if (names->used != 0 && (names->used[symbol] & 4) != 0)
+        if (names->used != 0 && (names->used[symbol] & (4 | 8)) != 0)
         {
             assembly_append(text, BUSTER_ASSEMBLY_PREFIX "l");
             assembly_unsigned(text, symbol);
@@ -1312,6 +1326,37 @@ static AssemblyError assembly_data(AssemblyText* text, const Link* link, const A
     return error;
 }
 
+static void assembly_inline_text(AssemblyText* text, const AssemblyInline* piece)
+{
+    assembly_append(text, "#APP\n");
+    assembly_bytes(text, piece->text.pointer, piece->text.length);
+    assembly_append(text, "\n#NO_APP\n");
+}
+
+// A standalone string directive uses the same helper and byte range as direct object emission.
+static AssemblyError assembly_inline_helper(AssemblyText* text, const Link* link, const AssemblyNames* names, AtomId atom, const AssemblyInline* piece,
+                                            const SymbolId* defined, uint32_t begin, uint32_t end, const char** reason)
+{
+    const uint64_t size = link->atoms.size[atom];
+    const uint64_t tail = (uint64_t)piece->offset + piece->size;
+    uint32_t cursor = begin;
+    assembly_labels(text, link, names, defined, end, &cursor, 0);
+    const bool valid = tail <= size && link->atoms.fixup_count[atom] == 0 && (cursor == end || link->symbols.value[defined[cursor]] == size);
+    if (valid)
+    {
+        const uint8_t* bytes = link->atoms.bytes[atom];
+        assembly_plain_bytes(text, bytes, piece->offset);
+        assembly_inline_text(text, piece);
+        assembly_plain_bytes(text, bytes + tail, size - tail);
+        assembly_labels(text, link, names, defined, end, &cursor, size);
+    }
+    else
+    {
+        *reason = "an inconsistent inline assembly range";
+    }
+    return valid ? ASSEMBLY_OK : ASSEMBLY_INVALID;
+}
+
 // A TEXT atom's code: its records, each after the labels of its offset (its symbols' and, for a branch's target, the
 // sink's own), with the atom's fixups as their records' references, then the labels at its end. The records must encode
 // to the atom's bytes (with its fixups' fields zero, as link_add_code_fixups leaves them) and every fixup must be one of
@@ -1386,6 +1431,7 @@ static AssemblyError assembly_code(AssemblyText* text, const Link* link, const A
         at = stop;
     }
     uint32_t next_fixup = 0;
+    uint32_t piece = 0;
     for (uint32_t r = 0; error == ASSEMBLY_OK && !text->full && r < count; r += 1)
     {
         const uint32_t offset = offsets[r];
@@ -1404,6 +1450,10 @@ static AssemblyError assembly_code(AssemblyText* text, const Link* link, const A
             assembly_append(text, ".");
             assembly_unsigned(text, r);
             assembly_append(text, ":\n");
+        }
+        while (piece < code->template_count && code->templates[piece].offset == at)
+        {
+            assembly_inline_text(text, &code->templates[piece++]);
         }
         // The record's fixups: on its displacement's field, then its immediate's, each at its distance from the end.
         const X86Instruction* record = &code->records[r];
@@ -1468,6 +1518,15 @@ static AssemblyError assembly_code(AssemblyText* text, const Link* link, const A
     if (error == ASSEMBLY_OK)
     {
         assembly_labels(text, link, names, defined, end, &cursor, size);
+        while (piece < code->template_count && code->templates[piece].offset == size)
+        {
+            assembly_inline_text(text, &code->templates[piece++]);
+        }
+        if (piece != code->template_count)
+        {
+            error = ASSEMBLY_INVALID;
+            *reason = "an inline assembly marker outside an instruction boundary";
+        }
         if (cursor != end || next_fixup != fixup_count)
         {
             error = ASSEMBLY_INVALID;
@@ -1476,6 +1535,102 @@ static AssemblyError assembly_code(AssemblyText* text, const Link* link, const A
     }
     arena_pop_to(scratch, mark);
     return error;
+}
+
+// Emit the bytes up to a relocated DWARF field, then its symbolic value. A definition address uses
+// a local label even for a preemptible symbol. The debugger needs the address of this unit's own definition.
+static void assembly_debug_field(AssemblyText* text, String8 section, uint64_t* cursor, uint64_t offset, SymbolId symbol, uint32_t target_section, uint64_t addend)
+{
+    assembly_plain_bytes(text, (const uint8_t*)section.pointer + *cursor, offset - *cursor);
+    if (symbol != 0)
+    {
+        assembly_append(text, "\t.quad " BUSTER_ASSEMBLY_PREFIX "l");
+        assembly_unsigned(text, symbol);
+        *cursor = offset + 8;
+    }
+    else
+    {
+        uint32_t value = 0;
+        memcpy(&value, section.pointer + offset, 4);
+        addend = value;
+        assembly_append(text, "\t.long " BUSTER_ASSEMBLY_PREFIX "d");
+        assembly_unsigned(text, target_section);
+        *cursor = offset + 4;
+    }
+    if (addend != 0)
+    {
+        assembly_append(text, "+");
+        assembly_unsigned(text, addend);
+    }
+    assembly_append(text, "\n");
+}
+
+// The same ordered section contributions and relocation columns as object_fill_debug. The three
+// .debug_info columns are each sorted by offset. Walk them together so unrelocated bytes are copied once.
+static void assembly_debug(AssemblyText* text, const ObjectDebug* debug)
+{
+    const uint32_t units = debug->unit_count != 0 ? debug->unit_count : 1;
+    for (uint32_t s = 0; !text->full && s < BUSTER_OBJECT_DEBUG_SECTIONS; s += 1)
+    {
+        const String8 section = debug->sections[s];
+        if (section.length == 0)
+        {
+            continue;
+        }
+        assembly_append(text, "\t.section ");
+        assembly_append(text, object_debug_sections[s]);
+        assembly_append(text, ",\"\",@progbits\n" BUSTER_ASSEMBLY_PREFIX "d");
+        assembly_unsigned(text, s);
+        assembly_append(text, ":\n");
+        uint64_t cursor = 0;
+        if (s == BUSTER_OBJECT_DEBUG_INFO)
+        {
+            const uint64_t core_count = (uint64_t)units * BUSTER_OBJECT_DEBUG_FIELDS;
+            uint64_t core = 0;
+            uint32_t field = 0;
+            uint32_t address = 0;
+            while (!text->full && (core < core_count || field < debug->extra.field_count || address < debug->extra.address_count))
+            {
+                const uint32_t c = core < core_count ? debug->fields[core] : UINT32_MAX;
+                const uint32_t f = field < debug->extra.field_count ? debug->extra.fields[field].offset : UINT32_MAX;
+                const uint32_t a = address < debug->extra.address_count ? debug->extra.addresses[address].offset : UINT32_MAX;
+                if (c < f && c < a)
+                {
+                    assembly_debug_field(text, section, &cursor, c, 0, core % BUSTER_OBJECT_DEBUG_FIELDS + 1, 0);
+                    core += 1;
+                }
+                else if (f < a)
+                {
+                    assembly_debug_field(text, section, &cursor, f, 0, debug->extra.fields[field].section, 0);
+                    field += 1;
+                }
+                else
+                {
+                    const NativeDebugAddress item = debug->extra.addresses[address];
+                    assembly_debug_field(text, section, &cursor, a, item.symbol, 0, item.addend);
+                    address += 1;
+                }
+            }
+        }
+        else if (s == BUSTER_OBJECT_DEBUG_LINE || s == BUSTER_OBJECT_DEBUG_ADDR)
+        {
+            uint32_t function = 0;
+            uint64_t slot = 0;
+            for (uint32_t u = 0; !text->full && u < units; u += 1)
+            {
+                slot += 8; // DWARF 5 contribution header in .debug_addr.
+                const uint32_t count = object_debug_unit_functions(debug, u);
+                for (uint32_t i = 0; !text->full && i < count; i += 1)
+                {
+                    const uint64_t at = s == BUSTER_OBJECT_DEBUG_ADDR ? slot : debug->line_addresses[function];
+                    assembly_debug_field(text, section, &cursor, at, debug->functions[function], 0, 0);
+                    function += 1;
+                    slot += 8;
+                }
+            }
+        }
+        assembly_plain_bytes(text, (const uint8_t*)section.pointer + cursor, section.length - cursor);
+    }
 }
 
 static AssemblyResult assembly_print(const AssemblyView* view, Arena* output, Arena* scratch)
@@ -1550,6 +1705,26 @@ static AssemblyResult assembly_print(const AssemblyView* view, Arena* output, Ar
             }
         }
     }
+    const ObjectDebug* debug = view->debug != NULL && !object_debug_absent(view->debug) ? view->debug : NULL;
+    if (result.error == ASSEMBLY_OK && debug != NULL)
+    {
+        if (object_debug_valid(debug, link, unit))
+        {
+            for (uint32_t i = 0; i < debug->function_count; i += 1)
+            {
+                used[debug->functions[i]] |= 8;
+            }
+            for (uint32_t i = 0; i < debug->extra.address_count; i += 1)
+            {
+                used[debug->extra.addresses[i].symbol] |= 8;
+            }
+        }
+        else
+        {
+            result.error = ASSEMBLY_INVALID;
+            result.reason = "invalid debug information";
+        }
+    }
     // What the sink doesn't print yet, by name, before any text.
     for (AtomId a = 1; result.error == ASSEMBLY_OK && a < atom_count; a += 1)
     {
@@ -1557,7 +1732,7 @@ static AssemblyResult assembly_print(const AssemblyView* view, Arena* output, Ar
         const bool mine = link->atoms.unit[a] == unit;
         const bool grouped = link->groups.count != 0 && a < link->groups.atom_count && link->groups.atom_groups[a] != 0;
         const AssemblyCode* code = view->code != 0 && a < view->code_count ? &view->code[a] : 0;
-        const bool uncoded = class == BUSTER_LINK_CLASS_TEXT && link->atoms.size[a] != 0 && (code == 0 || code->records == 0);
+        const bool uncoded = class == BUSTER_LINK_CLASS_TEXT && link->atoms.size[a] != 0 && (code == 0 || (code->records == 0 && code->template_count != 1));
         const char* reason = !mine ? 0 : class == BUSTER_LINK_CLASS_TDATA || class == BUSTER_LINK_CLASS_TBSS ? "thread-local storage" :
                              grouped ? "section groups (COMDAT)" :
                              class == BUSTER_LINK_CLASS_INIT || class == BUSTER_LINK_CLASS_FINI ? "the C runtime's .init and .fini fragments" :
@@ -1656,7 +1831,9 @@ static AssemblyResult assembly_print(const AssemblyView* view, Arena* output, Ar
             const char* reason = 0;
             if (result.error == ASSEMBLY_OK && class == BUSTER_LINK_CLASS_TEXT && link->atoms.size[a] != 0)
             {
-                result.error = assembly_code(&text, link, &names, a, &view->code[a], defined, begin, end, scratch, &reason);
+                const AssemblyCode* code = &view->code[a];
+                result.error = code->records == NULL ? assembly_inline_helper(&text, link, &names, a, code->templates, defined, begin, end, &reason) :
+                                                       assembly_code(&text, link, &names, a, code, defined, begin, end, scratch, &reason);
             }
             else if (result.error == ASSEMBLY_OK)
             {
@@ -1680,6 +1857,10 @@ static AssemblyResult assembly_print(const AssemblyView* view, Arena* output, Ar
         {
             assembly_attributes(&text, link, &names, s, false);
         }
+    }
+    if (result.error == ASSEMBLY_OK && debug != NULL)
+    {
+        assembly_debug(&text, debug);
     }
     if (result.error == ASSEMBLY_OK)
     {

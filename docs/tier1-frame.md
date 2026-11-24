@@ -412,14 +412,17 @@ happens, wherever its declaration is in the block (C17 6.2.4p5).
   doesn't read. `ir_lower` turns the events into `lifetime` markers before their
   entries ([the IR guide](ir.md)'s "Slot lifetimes"), and SSA promotion drops a
   promoted slot's markers.
-- The CFG consumer (`tier1_emit_cfg_lifetimes`) finds where each object with
-  markers is live. That forward problem (some path from a start reaches here
-  without an end) is backward liveness on the reversed CFG, which `dataflow.c`'s
-  AVX-512 solver, or its scalar twin with `--scalar`, solves. A block's last
-  marker of an object is its use where it starts the object and its definition
-  where it ends it. The object's interval for the coloring above is the hull of
-  the positions where it is live, among the spill slots'. An object without
-  markers keeps its whole function.
+- The CFG consumer (`tier1_emit_cfg_lifetimes`) groups slots in sets of up
+  to 512. Within a block, the last marker for a slot determines whether the
+  slot is live at exit. A worklist propagates those live exits to successors.
+  A block without a marker forwards each newly live slot once. The frame
+  interval includes start markers, extends past every marker, and covers each
+  live exit and the entries reached by its outgoing edges. Unmarked slots and
+  slots with only end markers keep their whole-function intervals.
+- Each group reuses two 512-bit masks per CFG block. A block is initialized
+  when a marker or live edge first reaches it in that group. Scratch grows
+  with blocks, marker occurrences and slot groups. The lifetime pass releases
+  it before frame coloring.
 
 The positions are the blocks' layout, so a hull can cover positions where its
 object is dead (a branch's other arm laid out inside), which only keeps slots

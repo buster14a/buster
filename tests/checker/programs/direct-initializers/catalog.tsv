@@ -1,0 +1,8 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+direct-first-argument-only	direct-first-argument-only.c	-	direct-first-argument-only
+direct-nested-comma-and-conditional	direct-nested-comma-and-conditional.c	-	direct-nested-comma-and-conditional
+# A discarded later argument's VLA type must not evaluate its bound: Clang checks it but does not run it.
+direct-unused-vla-bound	direct-unused-vla-bound.c	-	direct-unused-vla-bound
+direct-aggregate-pointer-and-string	direct-aggregate-pointer-and-string.c	-	direct-aggregate-pointer-and-string
+direct-scope-for-and-deduction	direct-scope-for-and-deduction.c	-	direct-scope-for-and-deduction

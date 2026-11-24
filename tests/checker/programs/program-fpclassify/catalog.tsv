@@ -1,0 +1,4 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+fpclassify-conditional-selector-effects	fpclassify-conditional-selector-effects.c	-	fpclassify-conditional-selector-effects
+fpclassify-known-category-effects	fpclassify-known-category-effects.c	-	fpclassify-known-category-effects

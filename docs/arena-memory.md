@@ -469,6 +469,126 @@ Complete IR verification and SSA analysis borrow only output already pushed
 through the owner; temporary work also pushes through that owner. They never
 write an uncommitted tail or commit half a large reservation just to split it.
 
+## Warm arenas (#2850)
+
+The kernel clears every page a process touches for the first time, and a
+compile's memory is new to it each time: of sqlite3.c's 114 ms on the 9700X the
+kernel's clearing is the first single cost. A file of a tmpfs keeps its pages
+after the process that wrote them has gone, and the next process maps them as
+they are. On the 9700X, 256 MB touched for the first time took 11.4 ms as fresh
+huge pages, 9.5 ms in a file of `/dev/shm` (base pages), and 0.68 ms in a file
+of a tmpfs mounted `huge=always` that a previous process had written.
+
+A warm arena (`arena_reserve_warm`) is an arena whose memory is a part of such
+a file, mapped shared. It is off unless the command names a directory:
+
+```sh
+sudo mount -t tmpfs -o huge=always,size=2G,mode=0700,uid=$(id -u) tmpfs /path/to/pool
+BUSTER_ARENA_POOL=/path/to/pool ./build/compiler -c unit.c
+```
+
+- **The claim.** `arena_warm_begin` takes the first file of the directory,
+  `buster-arena-N` from N = 0, that no other process holds: a lock that does
+  not wait (`flock`), on up to 64 files. Compiles that run at once so take a
+  file each, and one that runs alone finds the file the last one left. A file
+  is taken only if it is a regular file of the user's own, closed to every
+  other user, on a tmpfs that gives it huge pages, which its
+  block size says (2 MB under `huge=always`): a disk's file system would write
+  the pages back, another user's file would show them the compile's memory,
+  and a file's base pages cost more to map than the process's own huge pages
+  cost to clear (sqlite3.c's compile was a sixth slower in a file of a plain
+  `/dev/shm` on a virtual machine). Where no file can be claimed, a warm
+  reservation is an ordinary arena. The claim is the command's that made it
+  (`arena_warm_begin` returns whether it did): once its warm arenas are
+  released, `arena_warm_end` closes the file, so that a process that runs
+  several commands claims for each by its own environment. A process ends its
+  lock as it exits, or at `arena_warm_unlock`, which `lane_exit_helper_start`
+  calls: the exit helper shares the address space, whose mapping of the file
+  would hold the lock until the helper had torn it down, after the next
+  compile had started. A process that a claimant forked has the descriptor
+  and not the claim: its warm reservations are ordinary arenas, since the
+  file's pages are its parent's arenas (a shared mapping is not copied on
+  write).
+- **Slots.** Each warm arena takes a slot of the file, 1 TB of offsets of its
+  own (`BUSTER_ARENA_WARM_SLOT_BYTES`; the file is sparse and holds only the
+  pages that were written), and the caller gives each of its arenas the same
+  slot in every process, so that an arena finds the pages its own last use
+  left: the reader's tokens where the reader wrote tokens. The mapping starts
+  at a huge page's boundary, as its slot does in the file, which is what the
+  kernel needs to map the file's huge pages as such. A slot holds one arena at
+  a time; a second reservation of it is an ordinary arena.
+- **Not zero.** What a warm arena holds past its length is what an earlier
+  process wrote. `arena_untouched` is false of it, so the code that takes an
+  untouched arena's bytes for zero clears for itself there (the reader's
+  columns, `check_input_run`; the run's output, `CheckOptions.fresh_output`),
+  and no other code may read a byte of a warm arena before writing it. That
+  costs sqlite3.c 10.1 million instructions, about 1 ms, less than the pages
+  save (below). The compiler's output depends on none of those bytes:
+  `BUSTER_TEST_ARENA_FILL=1` writes 0xA5 over each warm arena's memory as it is
+  committed, with or without a directory, and the object must be the same.
+- **Commits.** A commit allocates its pages in the file first (`fallocate`,
+  which finds the pages a previous process left and takes the others from the
+  file system) and then makes them writable, in whole huge pages, growing by a
+  quarter where an ordinary arena's commits quadruple: what it allocates stays
+  in the file. A tmpfs without room refuses the allocation, where the first
+  touch of an unallocated page would kill the process with `SIGBUS`; the
+  arena's memory past what the file holds of it is then the process's own, as
+  an ordinary arena's, for the rest of its use, and takes the pages an ordinary
+  arena's would: on a busy host that gives medium pages (#2536), its commits
+  are split as theirs are (`arena_medium_split`); the file's pages stay the
+  mount's. The slot, not the arena, keeps
+  how far the file is allocated and how far a fill has written, so that a
+  commit through a copy of the arena counts.
+- **Release and discards.** `arena_release` unmaps a warm arena and leaves its
+  pages in the file; it is never put in a thread's pool. `arena_discard` does
+  nothing to it, and `arena_clear` clears its bytes in place: `MADV_DONTNEED`
+  on a shared mapping drops the page table's entries and leaves the file's
+  pages as they were.
+- **What it holds.** A file only grows, to the most its slots' arenas have
+  committed, which is more than they wrote: sqlite3.c's command's arena and
+  its output's commit 432 MB and write 130, since the reader pushes columns it
+  fills in part, and with the scratch the file is 528 MB. An ordinary
+  arena's committed pages cost nothing until they are written; a warm arena's
+  are allocated, so that no later touch can fail, and the second compile into
+  a file clears the ones the first left unwritten, once. The mount's `size=`
+  bounds the pool, and removing the files frees it. The files hold the memory
+  of the user's last compiles, readable by that user alone.
+
+The C driver's command reserves its three arenas warm
+(`check_driver_command`). On the 9700X, sqlite3.c's fresh `-c` on one lane,
+seven rounds a hold, every round lower:
+
+| the command's arenas | elapsed | against main | kernel cycles |
+| --- | ---: | ---: | ---: |
+| ordinary (main `939732da`) | 112.93 ms | | 74.9 M |
+| its arena and its output's warm | 109.40 ms | -3.74 ms | 50.7 M |
+| and its scratch | 105.76 ms | -7.34 ms | 32.7 M |
+
+The arena and the output's hold what the reader and the expressions' run
+write, 130 MB, and their stages' own clearing is 10.1 million instructions of
+the compile. The scratch costs nothing in instructions: no code takes it for
+zero past its first pushes, and the driver gives its pages back between the
+stages (`check_driver_discard_scratch`, #628), which the next stage then
+takes cleared again. Warm, the discards do nothing and the pages stay, so the
+command's peak resident set is 28 MB more (282 MB against 254). The first
+compile into an empty file takes 142 ms and the second 125; Lua's 34 files,
+each a process, take 28% fewer kernel cycles on the pages sqlite3.c left.
+`--time-stages` reports how many of the command's arenas are warm
+(`warm-arenas`).
+
+The tests' switches: `BUSTER_TEST_ARENA_FILL=1` fills the command's warm
+arenas, with or without a directory, and `BUSTER_TEST_ARENA_BASE_PAGES=1`
+takes a directory on a tmpfs of base pages, such as `/dev/shm`, which a test
+on a host without a `huge=always` mount needs.
+
+`tools/ci/correctness.tests` compiles the frozen sqlite3.c and c-testsuite's
+programs plain and filled and compares status, diagnostics and object.
+`test-lanes` checks the claim and its refusals, the slots, the commits and a
+refused allocation, the clears and discards, another process's claim and the
+fill, each case in a process of its own ([lanes guide](commands/lanes.md));
+`test-checker-driver` compiles a unit with its arenas filled, in a pool's file
+and after another compile's bytes, and compares the objects.
+
 ## Initial qualification
 
 [Hosted qualification run 41196519751](https://github.com/buster14a/buster/actions/runs/41196519751)

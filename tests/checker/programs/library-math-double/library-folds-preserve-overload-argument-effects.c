@@ -1,0 +1,1 @@
+int ov(int) __attribute__((overloadable));unsigned long strlen(const char*);int tested(int n){int calls=0;int length=(int)strlen((++calls,"abcd"));return n+length+10*calls;}

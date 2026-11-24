@@ -1,0 +1,1 @@
+static int set(int*p,int v){*p=v;return v;}int tested(int n){int x=n;int*q=&x;int y=x+1;*q=7;int z=x*2;x=x+n;q[0]+=n;x=x-(*q>>1);int w=x;int s=set(q,n+3);return y+z+x+w+s+(*q==x);}

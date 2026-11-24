@@ -1,0 +1,1 @@
+int sum(int a,double b,int c,double d,int e){return a+(int)(b*2)+c+(int)(d*4)+e;}int tested(int n){return sum(n,n+0.5,n+1,n+0.25,({int x=n;x+3;}));}

@@ -7574,6 +7574,155 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
     }
 }
 
+// Warm arenas (#2850, lane.c's arena_reserve_warm): a compile's object is the same whatever its warm arenas held before
+// it. The command's three are filled with a pattern (BUSTER_TEST_ARENA_FILL), without a file and with one, and then hold
+// what that compile left (BUSTER_ARENA_POOL alone, twice: the second finds the first's own bytes), for one unit and for
+// a command of two; --time-stages says how many of the command's arenas are warm. The file's cases need a tmpfs the
+// test may write, /dev/shm, whose base pages a command takes only with the tests' switch
+// (BUSTER_TEST_ARENA_BASE_PAGES): the last case, without it, has no warm arena.
+static void check_test_driver_warm_arenas(CheckTest* test, const char* executable, const char* directory)
+{
+    static const char unit_text[] = "struct pair { int first; long second; };\n"
+                                    "enum shade { RED, GREEN = 4, BLUE };\n"
+                                    "static const char* const names[] = { \"red\", \"green\", \"blue\" };\n"
+                                    "extern int printf(const char*, ...);\n"
+                                    "static long total(const struct pair* pairs, int count)\n"
+                                    "{\n"
+                                    "    long sum = 0;\n"
+                                    "    for (int i = 0; i < count; i += 1)\n"
+                                    "    {\n"
+                                    "        sum += pairs[i].first * 3 + pairs[i].second;\n"
+                                    "    }\n"
+                                    "    return sum;\n"
+                                    "}\n"
+                                    "int shade_of(int value)\n"
+                                    "{\n"
+                                    "    switch (value & 3)\n"
+                                    "    {\n"
+                                    "    case 0: return RED;\n"
+                                    "    case 1: return GREEN;\n"
+                                    "    default: return BLUE;\n"
+                                    "    }\n"
+                                    "}\n"
+                                    "int report(int value)\n"
+                                    "{\n"
+                                    "    struct pair pairs[3] = { { value, 2 }, { 3, value }, { 5, 6 } };\n"
+                                    "    const int shade = shade_of(value);\n"
+                                    "    return printf(\"%s %ld\\n\", names[shade == GREEN ? 1 : shade == BLUE ? 2 : 0], total(pairs, 3));\n"
+                                    "}\n";
+    static const char other_text[] = "int report(int value);\nint main(void)\n{\n    return report(7) > 0 ? 0 : 1;\n}\n";
+    char* compiler = (char*)executable;
+    char source[PATH_MAX];
+    char other[PATH_MAX];
+    char pool[PATH_MAX];
+    char pool_file[PATH_MAX + 32];
+    char objects[6][PATH_MAX];
+    char others[2][PATH_MAX];
+    snprintf(source, sizeof(source), "%s/warm_unit.c", directory);
+    snprintf(other, sizeof(other), "%s/warm_other.c", directory);
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(objects); i += 1)
+    {
+        snprintf(objects[i], sizeof(objects[i]), "%s/warm_unit_%u.o", directory, i);
+    }
+    const bool made = parse_test_write(source, unit_text, sizeof(unit_text) - 1) && parse_test_write(other, other_text, sizeof(other_text) - 1);
+    snprintf(pool, sizeof(pool), "/dev/shm/buster-warm-XXXXXX");
+    const bool pooled = mkdtemp(pool) != NULL;
+    snprintf(pool_file, sizeof(pool_file), "%s/buster-arena-0", pool);
+    if (!pooled)
+    {
+        printf("  warm arenas: no /dev/shm to write a file in: the file's cases are skipped\n");
+    }
+    // Whether /dev/shm gives a file huge pages, which the file's block size says: then a command takes it unasked.
+    struct stat probed = { 0 };
+    const int probe = pooled ? open(pool_file, O_RDWR | O_CREAT | O_CLOEXEC, 0600) : -1;
+    const bool huge = probe >= 0 && fstat(probe, &probed) == 0 && probed.st_blksize >= (2 << 20);
+    if (probe >= 0)
+    {
+        close(probe);
+    }
+    // Each case's directory (or none), whether its arenas are filled, and the warm arenas its report states.
+    typedef struct CheckTestWarm CheckTestWarm;
+    struct CheckTestWarm
+    {
+        bool file;
+        bool fill;
+        bool base_pages;
+        const char* warm;
+    };
+    static const CheckTestWarm cases[] = {
+        { false, false, false, "\ntime-process\twarm-arenas\t0\n" },
+        { false, true, false, "\ntime-process\twarm-arenas\t3\n" },
+        { true, true, true, "\ntime-process\twarm-arenas\t3\n" },
+        { true, false, true, "\ntime-process\twarm-arenas\t3\n" },
+        { true, false, true, "\ntime-process\twarm-arenas\t3\n" },
+        // /dev/shm's base pages, which no command takes unasked.
+        { true, false, false, "\ntime-process\twarm-arenas\t0\n" },
+    };
+    bool same = made;
+    bool stated = made;
+    for (uint32_t c = 0; made && c < BUSTER_ARRAY_LENGTH(cases); c += 1)
+    {
+        if (!cases[c].file || pooled)
+        {
+            char* const compile[] = { compiler, "-c", "--time-stages", "-o", objects[c], source, NULL };
+            char* text = NULL;
+            const bool switched = (cases[c].file ? setenv("BUSTER_ARENA_POOL", pool, 1) : unsetenv("BUSTER_ARENA_POOL")) == 0 &&
+                                  (cases[c].fill ? setenv("BUSTER_TEST_ARENA_FILL", "1", 1) : unsetenv("BUSTER_TEST_ARENA_FILL")) == 0 &&
+                                  setenv("BUSTER_TEST_ARENA_BASE_PAGES", cases[c].base_pages ? "1" : "0", 1) == 0;
+            const int status = switched ? check_test_driver_spawn(compile, &text) : -1;
+            const char* warm = cases[c].file && !cases[c].base_pages && huge ? cases[1].warm : cases[c].warm;
+            stated = stated && status == 0 && text != NULL && strstr(text, warm) != NULL;
+            same = same && status == 0 && (c == 0 || check_test_driver_same_files(objects[0], objects[c]));
+            if (status != 0 || text == NULL || strstr(text, warm) == NULL)
+            {
+                printf("  warm arenas: case %u: status %d: %s\n", c, status, text != NULL ? text : "");
+            }
+            free(text);
+        }
+    }
+    // The file holds what the compiles wrote, and is no other user's to read.
+    struct stat status = { 0 };
+    const bool kept = !pooled || (stat(pool_file, &status) == 0 && (status.st_mode & 0777) == 0600 && status.st_blocks != 0);
+    // A command of two units, whose lanes' arenas are their own: the command's are warm and each object is the same.
+    bool units = made;
+    for (uint32_t c = 0; made && c < 2; c += 1)
+    {
+        snprintf(others[c], sizeof(others[c]), "%s/warm_units_%u", directory, c);
+        char* const link[] = { compiler, "-o", others[c], source, other, NULL };
+        char* text = NULL;
+        const bool switched = (c == 1 && pooled ? setenv("BUSTER_ARENA_POOL", pool, 1) : unsetenv("BUSTER_ARENA_POOL")) == 0 &&
+                              (c == 1 ? setenv("BUSTER_TEST_ARENA_FILL", "1", 1) : unsetenv("BUSTER_TEST_ARENA_FILL")) == 0 &&
+                              setenv("BUSTER_TEST_ARENA_BASE_PAGES", "1", 1) == 0;
+        const int linked = switched ? check_test_driver_spawn(link, &text) : -1;
+        units = units && linked == 0 && (c == 0 || check_test_driver_same_files(others[0], others[1]));
+        if (linked != 0)
+        {
+            printf("  warm arenas: two units, case %u: status %d: %s\n", c, linked, text != NULL ? text : "");
+        }
+        free(text);
+    }
+    unsetenv("BUSTER_ARENA_POOL");
+    unsetenv("BUSTER_TEST_ARENA_FILL");
+    unsetenv("BUSTER_TEST_ARENA_BASE_PAGES");
+    check_test_expect(test, stated, "--time-stages states the command's warm arenas: none unasked, and its three with a pool's directory or a fill");
+    check_test_expect(test, same, "a unit's object is the same whatever its warm arenas held: a pattern, or what the last compile left in the pool's file");
+    check_test_expect(test, kept, "the pool's file holds what the compiles wrote, closed to other users");
+    check_test_expect(test, units, "a command of two units links the same executable with its arenas warm and filled");
+    unlink(source);
+    unlink(other);
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(objects); i += 1)
+    {
+        unlink(objects[i]);
+    }
+    unlink(others[0]);
+    unlink(others[1]);
+    if (pooled)
+    {
+        unlink(pool_file);
+        rmdir(pool);
+    }
+}
+
 // Exact-capacity warning sinks end at an unreadable page. Scalar scans also visit the non-warning tokens after
 // their last output, which must never write a speculative token beyond the sink's logical extent.
 static void check_test_driver_warning_order(CheckTest* test)
@@ -10557,6 +10706,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             clang = argv[++i];
         }
+        else if (strcmp(argv[i], "--fixtures") == 0 && i + 1 < argc)
+        {
+            check_test_fixture_root = argv[++i];
+        }
         else if (strcmp(argv[i], "--executable") == 0 && i + 1 < argc)
         {
             executable = argv[++i];
@@ -11264,8 +11417,8 @@ static int run_checker_driver_tests(int argc, char** argv)
     if (temporary && initializer_diagnostics_only)
     {
         check_test_driver_warning_catalog(&test, clang, executable != NULL ? executable : "./build/compiler", directory, "checker/initializer-comma");
-        check_test_driver_warning_catalog_language(&test, clang, executable != NULL ? executable : "./build/compiler", directory,
-                                                   "checker/initializer-comma", true);
+        check_test_driver_warning_catalog_run(&test, clang, executable != NULL ? executable : "./build/compiler", directory,
+                                                   "checker/initializer-comma", false, true);
     }
     if (temporary && auto_qualifiers_only)
     {
@@ -12439,6 +12592,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             if (!lazy && check_test_driver_takes())
             {
                 check_test_driver_time_stages(&test, executable, directory);
+                check_test_driver_warm_arenas(&test, executable, directory);
                 check_test_driver_cpu_pinning(&test, executable, directory);
             }
         }

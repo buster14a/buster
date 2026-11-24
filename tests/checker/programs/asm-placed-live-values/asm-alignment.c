@@ -1,0 +1,1 @@
+int tested(int n){long sp;__asm__ volatile("movq %%rsp, %0" : "=r"(sp));__asm__("nop");__asm__ volatile("nop\n\tnop");return (int)(sp&15)+n;}

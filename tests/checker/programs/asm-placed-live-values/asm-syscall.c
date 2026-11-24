@@ -1,0 +1,1 @@
+int tested(int n){long r;__asm__ volatile("syscall" : "=a"(r) : "a"(39L) : "rcx","r11","memory");long q=39;__asm__ volatile("syscall" : "+a"(q) : : "rcx","r11","memory");return (r==q)*100+(r>0)+n;}

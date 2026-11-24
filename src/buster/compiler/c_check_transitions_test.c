@@ -63,16 +63,40 @@ static void check_test_transition_classes(CheckTest* test, const char* name, con
     arena_pop_to(scratch, mark);
 }
 
+// The operators whose actions the table memoizes (check_transition_statics_step), the test's definition.
+static bool check_test_transition_op(CheckOp op)
+{
+    return (op >= CHECK_OP_POSITIVE && op <= CHECK_OP_SELECT) || op == CHECK_OP_REAL || op == CHECK_OP_IMAGINARY;
+}
+
+// One node's static word: the table takes a node by its operator, without a constant evaluation, a plain library builtin's
+// fold or more arguments than a key holds; its key's first word has its operator, extensions (with the system-header bit
+// from its token), floating environment and a call's argument count. The test's definition, a node at a time.
+static uint32_t check_test_transition_static(const CheckGraph* graph, const CheckStream* stream, uint32_t node)
+{
+    const CheckOp op = graph->ops[node];
+    const bool call = op == CHECK_OP_CALL;
+    const uint32_t count = call ? graph->argument_counts[node] : 0;
+    const bool eligible = check_test_transition_op(op) && (stream->constant_evaluated == NULL || stream->constant_evaluated[node] == 0) &&
+                          (!call || ((graph->members[node] & BUSTER_CHECK_LIBRARY_CALL) == 0 && count <= BUSTER_CHECK_TRANSITION_ARGUMENTS));
+    const uint32_t token = graph->tokens != NULL ? graph->tokens[node] : BUSTER_CHECK_NONE;
+    const uint32_t extensions = graph->extensions | (check_graph_relaxed_token(graph, token) ? BUSTER_CHECK_EXTENSION_SYSTEM_HEADER : 0);
+    const uint32_t environment = graph->fp_environments != NULL ? graph->fp_environments[node] : graph->fp_contract_default;
+    const uint32_t header = (uint32_t)op | extensions << BUSTER_CHECK_KEY_EXTENSIONS_SHIFT | environment << BUSTER_CHECK_KEY_ENVIRONMENT_SHIFT |
+                            count << BUSTER_CHECK_KEY_ARGUMENTS_SHIFT | BUSTER_CHECK_KEY_VALID;
+    return op == CHECK_OP_VALUE ? BUSTER_CHECK_TRANSITION_LEAF : eligible ? header : BUSTER_CHECK_TRANSITION_OTHER;
+}
+
 // The static words, 16 nodes at a time, against their definition (check_test_transition_statics_definition), node by node: for the graph as read,
 // and with system-header marks of every third token, in arrays from the tokens' whole count down to fewer than a gather's
 // 4 bytes, so that the gather's lanes past the array's end go one at a time.
-// check_transition_statics' definition (#2924): each node's word by check_transition_static, then every vector member's
+// check_transition_statics' definition (#2924): each node's word by check_test_transition_static, then every vector member's
 // that isn't a leaf BUSTER_CHECK_TRANSITION_OTHER.
 static void check_test_transition_statics_definition(const CheckGraph* graph, const CheckStream* stream, uint32_t* statics)
 {
     for (uint32_t node = 0; node < graph->count; node += 1)
     {
-        statics[node] = check_transition_static(graph, stream, node);
+        statics[node] = check_test_transition_static(graph, stream, node);
     }
     for (uint32_t i = 0; i < graph->vector_member_count; i += 1)
     {

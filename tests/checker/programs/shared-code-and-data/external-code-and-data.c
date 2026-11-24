@@ -1,0 +1,1 @@
+extern int external_data;int external_helper(int);int tested(int n){return external_helper(n)+external_data;}

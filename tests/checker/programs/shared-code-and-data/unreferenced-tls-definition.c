@@ -1,0 +1,1 @@
+_Thread_local int saved=9;int tested(int n){return n+1;}

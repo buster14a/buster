@@ -904,23 +904,31 @@ static bool nightly_test_row(const char* full, uint32_t* architecture, uint32_t*
     return valid;
 }
 
-// The native plain row's verdict job (#2924): the native row draws AVX-512 runners as the vector row does, so its
-// credit is its verdict, `Tests on Ubuntu 26.04 (native, none, O3) / Vector row verdict (Clang V, none, O3)`, the
-// caller's part naming the row (a reusable workflow's job is `CALLER / JOB`; the caller may have callers of its own).
+#define BUSTER_NIGHTLY_VECTOR_POOL "none address thread memory"
+
+// A row's caller and the verdict it actually ran. Reusable workflows may be nested.
+static bool nightly_draw_verdict(const char* full, const char* caller, const char* suffix)
+{
+    static const char verdict[] = "Vector row verdict (Clang ";
+    const size_t caller_length = strlen(caller);
+    const char* own = nightly_job_own_name(full);
+    const size_t prefix = (size_t)(own - full);
+    const bool caller_matches = prefix >= caller_length && memcmp(own - caller_length, caller, caller_length) == 0 &&
+                                (prefix == caller_length || (prefix >= caller_length + 3 && memcmp(own - caller_length - 3, " / ", 3) == 0));
+    const bool valid = caller_matches && strncmp(own, verdict, sizeof(verdict) - 1) == 0;
+    const char* version = valid ? own + sizeof(verdict) - 1 : "";
+    const size_t digits = strspn(version, "0123456789");
+    return digits != 0 && strcmp(version + digits, suffix) == 0;
+}
+
 static bool nightly_native_verdict(const char* full)
 {
-    static const char caller[] = "Tests on Ubuntu 26.04 (native, none, O3) / ";
-    static const char verdict[] = "Vector row verdict (Clang ";
-    const char* own = nightly_job_own_name(full);
-    bool valid = (size_t)(own - full) >= sizeof(caller) - 1 && memcmp(own - (sizeof(caller) - 1), caller, sizeof(caller) - 1) == 0 &&
-                 strncmp(own, verdict, sizeof(verdict) - 1) == 0;
-    const char* version = valid ? own + sizeof(verdict) - 1 : NULL;
-    const char* suffix = version;
-    while (valid && *suffix >= '0' && *suffix <= '9')
-    {
-        suffix += 1;
-    }
-    return valid && suffix != version && strcmp(suffix, ", none, O3)") == 0;
+    return nightly_draw_verdict(full, "Tests on Ubuntu 26.04 (native, none, O3) / ", ", none, O3)");
+}
+
+static bool nightly_vector_verdict(const char* full)
+{
+    return nightly_draw_verdict(full, "Tests on Ubuntu 26.04 (vector, " BUSTER_NIGHTLY_VECTOR_POOL ", O3) / ", ", " BUSTER_NIGHTLY_VECTOR_POOL ", O3)");
 }
 
 static bool nightly_test_job(const char* full, uint32_t* architecture, uint32_t* shard, uint32_t* shards, bool* plain)
@@ -980,6 +988,7 @@ typedef struct NightlyHosted NightlyHosted;
 struct NightlyHosted
 {
     NightlyPlain verdict;
+    bool qualified_vector;
     uint64_t run;
 };
 
@@ -1002,6 +1011,25 @@ static NightlyHosted nightly_hosted(const NightlyFacts* facts, const char* commi
             hosted.run = run->id;
         }
     }
+    // Only the successful full contract of this exact queue candidate can replace the backlog suite.
+    const NightlyRun* source = nightly_find_run(facts, hosted.run);
+    if (source != NULL && source->repository == BUSTER_NIGHTLY_REPOSITORY && source->event == NIGHTLY_EVENT_MERGE_GROUP &&
+        source->conclusion == NIGHTLY_CONCLUSION_SUCCESS && hosted.verdict == NIGHTLY_PLAIN_OK)
+    {
+        const NightlyJob* gate = nightly_find_job(facts, source->id, "Integration qualification");
+        uint32_t verdicts = 0;
+        bool success = false;
+        for (uint32_t i = 0; i < facts->job_count; i += 1)
+        {
+            const NightlyJob* job = &facts->jobs[i];
+            if (job->run == source->id && nightly_vector_verdict(job->name))
+            {
+                verdicts += 1;
+                success = job->completed && job->conclusion == NIGHTLY_CONCLUSION_SUCCESS;
+            }
+        }
+        hosted.qualified_vector = verdicts == 1 && success && gate != NULL && gate->completed && gate->conclusion == NIGHTLY_CONCLUSION_SUCCESS;
+    }
     return hosted;
 }
 
@@ -1011,7 +1039,6 @@ static NightlyHosted nightly_hosted(const NightlyFacts* facts, const char* commi
 // the vector pool's configurations (the test job's one call of the row workflow for the vector row, where the sanitizer
 // rows run).
 #define BUSTER_NIGHTLY_FUZZ_VERDICT "libFuzzer (ASan + UBSan + leaks) / Vector row verdict (fuzz)"
-#define BUSTER_NIGHTLY_VECTOR_POOL "none address thread memory"
 #define BUSTER_NIGHTLY_ROWS_FULL (2u * BUSTER_NIGHTLY_SANITIZERS)
 
 // The sharded rows a full run's contract has: none. The native plain row is drawn, and its verdict is the contract's
@@ -1104,14 +1131,12 @@ static bool nightly_coverage(const NightlyFacts* facts, uint64_t run, const char
             unsuccessful[row] = unsuccessful[row] || !success;
             succeeded[row] |= success ? (uint64_t)1 << (shard - 1) : 0;
         }
-        const size_t own_length = strlen(own);
-        const char suffix[] = ", " BUSTER_NIGHTLY_VECTOR_POOL ", O3)";
         if (job->run == run && nightly_native_verdict(job->name))
         {
             natives += 1;
             native = success;
         }
-        if (job->run == run && strncmp(own, "Vector row verdict (Clang ", 26) == 0 && own_length > sizeof(suffix) - 1 && strcmp(own + own_length - (sizeof(suffix) - 1), suffix) == 0)
+        if (job->run == run && nightly_vector_verdict(job->name))
         {
             verdicts += 1;
             verdict = success;
@@ -1350,7 +1375,7 @@ static const NightlyKey nightly_record_keys[NIGHTLY_FIELD_COUNT] = {
     { "scope", NIGHTLY_KIND_ENUM, "plain full -" },
     { "hosted", NIGHTLY_KIND_ENUM, "run reused -" },
     { "hosted_source", NIGHTLY_KIND_ID_OR_DASH, NULL },
-    { "native_evidence", NIGHTLY_KIND_ENUM, "run reused -" },
+    { "native_evidence", NIGHTLY_KIND_ENUM, "run smoke reused -" },
     { "native_source", NIGHTLY_KIND_ID_OR_DASH, NULL },
     { "measurement_evidence", NIGHTLY_KIND_ENUM, "run reused -" },
     { "measurement_source", NIGHTLY_KIND_ID_OR_DASH, NULL },
@@ -5063,7 +5088,7 @@ int main(int argc, char** argv)
         }
         NightlyFacts facts = nightly_load_facts("-");
         const NightlyHosted hosted = nightly_hosted(&facts, commit, nightly_option_number(argc, argv, "--exclude", 0, UINT64_MAX));
-        printf("hosted\t%s\t%llu\n", hosted.verdict == NIGHTLY_PLAIN_OK ? "reused" : hosted.verdict == NIGHTLY_PLAIN_FAILED ? "failed" : "none", (unsigned long long)hosted.run);
+        printf("hosted\t%s\t%llu\t%s\n", hosted.verdict == NIGHTLY_PLAIN_OK ? "reused" : hosted.verdict == NIGHTLY_PLAIN_FAILED ? "failed" : "none", (unsigned long long)hosted.run, hosted.qualified_vector ? "vector" : "-");
         nightly_facts_free(&facts);
         status = 0;
     }

@@ -1,0 +1,14 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+transparent-union-made-between-initializers	transparent-union-made-between-initializers.c	-	transparent-union-made-between-initializers
+# A union aligned or packed otherwise than its first member: clang's code takes its registers from the member and,
+# where none is left, a stack slot of the union's size and alignment, as an argument, a parameter, through a pointer
+# and as va_arg's, which reads the member from the union's slot.
+transparent-union-aligned	transparent-union-aligned.c	-	transparent-union-aligned
+# Past two eightbytes, of a first member clang passes as an aggregate, in registers or in memory, a pair or a 16-byte
+# vector, of any size (#1844): the harness's clang code calls and is called with each, in registers, on the stack, through pointers and
+# as unnamed arguments, and a member's value converted to the union passes from a zeroed object of the union's size.
+transparent-union-own-slots	transparent-union-own-slots.c	-	transparent-union-own-slots
+transparent-union-own-slots-variadic	transparent-union-own-slots-variadic.c	-	transparent-union-own-slots-variadic
+transparent-union-own-slots-pairs	transparent-union-own-slots-pairs.c	-	transparent-union-own-slots-pairs
+transparent-union-own-slots-larger	transparent-union-own-slots-larger.c	-	transparent-union-own-slots-larger

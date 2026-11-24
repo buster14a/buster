@@ -174,273 +174,43 @@ static __attribute__((noinline)) void check_test_vla_sources(CheckTest* test, co
         length += (uint32_t)snprintf(repeated_size + length, sizeof(repeated_size) - length, "%ssizeof a", query != 0 ? "+" : "");
     }
     snprintf(repeated_size + length, sizeof(repeated_size) - length, "; }\n");
-    const CheckSourceFixture fixtures[] =
-    {
-        {
-            .name = "repeated deep variable array size queries",
-            .source = repeated_size,
-        },
-        {
-            .name = "automatic variable array",
-            .source = "int f(int n) { char a[n]; a[0]=1; return a[0]; }\n",
-        },
-        {
-            .name = "variable array runtime sizeof",
-            .source = "unsigned long f(int n) { int a[n]; return sizeof a; }\n",
-        },
-        {
-            .name = "typeof variable array runtime sizeof",
-            .source = "unsigned long f(int n) { __typeof__(int[n++]) a; return sizeof a; }\n",
-        },
-        {
-            .name = "typeof pointer to variable array runtime sizeof",
-            .source = "unsigned long f(int n) { __typeof__(int[n++])*p; return sizeof *p; }\n",
-        },
-        {
-            .name = "typeof variable typedef retains original extent",
-            .source = "unsigned long f(int n) { typedef int A[n++]; __typeof__(A) a; __typeof__(int[n++]) b; return sizeof a+sizeof b; }\n",
-        },
-        {
-            .name = "suspended typeof retains nested VLA owner",
-            .source = "unsigned long f(int n) { __typeof__(({ int (*p)[n]; p; })) q; return sizeof *q; }\n",
-        },
-        {
-            .name = "typeof variable type preserves later asm diagnostic",
-            .source = "int x;\nint f(void){__typeof__(int[x]) a;return sizeof(a);}\nextern int x asm(\"b\");\n",
-            .rejected = true,
-        },
-        {
-            .name = "goto into typeof variable scope rejected",
-            .source = "void f(int n) { goto target; __typeof__(int[n]) a; target:; }\n",
-            .rejected = true,
-        },
-        {
-            .name = "multidimensional runtime sizeof",
-            .source = "unsigned long f(int n,int m) { int a[n][m]; return sizeof a; }\n",
-        },
-        {
-            .name = "fixed outer variable inner dimension",
-            .source = "unsigned long f(int n) { int a[3][n]; return sizeof a; }\n",
-        },
-        {
-            .name = "inline variable array sizeof",
-            .source = "unsigned long f(int n) { return sizeof(int[n++]); }\n",
-        },
-        {
-            .name = "file sizeof pointer to variable array is constant",
-            .source = "int n; unsigned long c=sizeof(int(*)[n]); unsigned long a=sizeof(int(*)[(3,2)]);\n"
-                      "enum { P=sizeof(int(*)[n]), PP=sizeof(int(**)[n]), A=sizeof(int(*[3])[n]), M=sizeof(int(*)[n][n+1]) };\n"
-                      "_Static_assert(P==8 && PP==8 && A==24 && M==8, \"fixed pointer layout\");\n",
-        },
-        {
-            .name = "file sizeof variable array remains nonconstant",
-            .source = "int n; unsigned long c=sizeof(int[n]);\n",
-            .rejected = true,
-        },
-        {
-            .name = "file sizeof nested variable array remains nonconstant",
-            .source = "int n; unsigned long c=sizeof(int[3][n]);\n",
-            .rejected = true,
-        },
-        {
-            .name = "file sizeof array of pointers with variable outer bound remains nonconstant",
-            .source = "int n; unsigned long c=sizeof(int(*[n])[n]);\n",
-            .rejected = true,
-        },
-        {
-            .name = "file alignof variable array and pointer remains constant",
-            .source = "int n; enum { A=_Alignof(int[n]), P=_Alignof(int(*)[n]) }; _Static_assert(A==4 && P==8, \"fixed alignment\");\n",
-        },
-        {
-            .name = "file sizeof and alignof leave nested runtime array queries unevaluated",
-            .source = "int n; unsigned long p=sizeof(int(*)[sizeof(int[n])]); unsigned long a=_Alignof(int[sizeof(int[n])]);\n"
-                      "unsigned long s=sizeof(sizeof(int[n])); unsigned long side=sizeof(sizeof(int[++n]));\n"
-                      "enum { P=sizeof(int(*)[sizeof(int[n])]), A=_Alignof(int[sizeof(int[n])]), S=sizeof(sizeof(int[n])) };\n"
-                      "_Static_assert(P==8 && A==4 && S==8, \"nested unevaluated array size\");\n",
-        },
-        {
-            .name = "file evaluated nested runtime array query remains nonconstant",
-            .source = "int n; unsigned long x=sizeof(int[sizeof(int[n])]);\n",
-            .rejected = true,
-        },
-        {
-            .name = "file nested unevaluated query still checks array bound type",
-            .source = "unsigned long x=sizeof(sizeof(int[1.5]));\n",
-            .rejected = true,
-        },
-        {
-            .name = "variable array sizeof bound",
-            .source = "unsigned long f(int n) { int a[n]; char b[sizeof a]; return sizeof b; }\n",
-        },
-        {
-            .name = "inline sizeof variable array bound",
-            .source = "unsigned long f(int n) { char a[sizeof(int[n])]; return sizeof a; }\n",
-        },
-        {
-            .name = "variable array typedef reuse",
-            .source = "unsigned long f(int n) { typedef int A[n]; A a,b; return sizeof a+sizeof b; }\n",
-        },
-        {
-            .name = "static pointer to variable array",
-            .source = "unsigned long f(int n) { static int (*p)[n]; return sizeof p+sizeof *p; }\n",
-        },
-        {
-            .name = "thread local pointer to variable array",
-            .source = "unsigned long f(int n) { static _Thread_local int (*p)[n]; return sizeof p; }\n",
-        },
-        {
-            .name = "sizeof evaluated variable array operand",
-            .source = "unsigned long f(int n,int (*p)[n]) { return sizeof *(p++); }\n",
-        },
-        {
-            .name = "prototype variable bound",
-            .source = "void f(int n,int a[n]);\n",
-        },
-        {
-            .name = "prototype star bound",
-            .source = "void f(int n,int a[*]);\n",
-        },
-        {
-            .name = "definition variable parameter bound",
-            .source = "int f(int n,int a[n]) { return a[0]; }\n",
-        },
-        {
-            .name = "definition static qualified bound",
-            .source = "int f(int n,int a[static restrict n]) { return a[0]; }\n",
-        },
-        {
-            .name = "definition star bound rejected",
-            .source = "int f(int a[*]) { return a[0]; }\n",
-            .rejected = true,
-        },
-        {
-            .name = "file variable array rejected",
-            .source = "int n; int a[n];\n",
-            .rejected = true,
-        },
-        {
-            .name = "file pointer to variable array rejected",
-            .source = "int n; int (*p)[n];\n",
-            .rejected = true,
-        },
-        {
-            .name = "static variable array rejected",
-            .source = "void f(int n) { static int a[n]; }\n",
-            .rejected = true,
-        },
-        {
-            .name = "extern variable type rejected",
-            .source = "void f(int n) { extern int (*p)[n]; }\n",
-            .rejected = true,
-        },
-        {
-            .name = "variable array nonempty initializer rejected",
-            .source = "void f(int n) { int a[n]={1}; }\n",
-            .rejected = true,
-        },
-        {
-            .name = "noninteger array bound rejected",
-            .source = "void f(double n) { int a[n]; }\n",
-            .rejected = true,
-        },
-        {
-            .name = "runtime sizeof is not ICE",
-            .source = "void f(int n) { int a[n]; _Static_assert(sizeof a>0,\"runtime\"); }\n",
-            .rejected = true,
-        },
-        {
-            .name = "known computed real local bound remains variable",
-            .source = "void f(void) { int a[(int)(1.0+2.0)]; _Static_assert(sizeof a==12,\"still variable\"); }\n",
-            .rejected = true,
-        },
-        {
-            .name = "known comma local bound remains variable",
-            .source = "void f(void) { int a[(1,3)]; _Static_assert(sizeof a==12,\"still variable\"); }\n",
-            .rejected = true,
-        },
-        {
-            .name = "known type-name bound remains variable at file scope",
-            .source = "enum { N=sizeof(int[(int)(1.0+2.0)]) };\n",
-            .rejected = true,
-        },
-        {
-            .name = "file and record computed bounds fold with GNU array policy",
-            .source = "int a[(int)(1.0+2.0)]; struct S {int a[(1,3)];}; void f(void){struct T {int a[(int)(1.0+2.0)];}; _Static_assert(sizeof(struct T)==12,\"member fold\");} _Static_assert(sizeof a==12 && sizeof(struct S)==12,\"array folds\");\n",
-        },
-        {
-            .name = "overflowing division cannot fold a file array",
-            .source = "int a[((-2147483647-1)/-1)<0];\n",
-            .rejected = true,
-        },
-        {
-            .name = "record array unknown bound retains inner source line",
-            .source = "struct S {\nchar a[\nMISSING];\n};\n",
-            .rejected = true,
-        },
-        {
-            .name = "goto within variable scope",
-            .source = "void f(int n) { int a[n]; again: if(n--) goto again; }\n",
-        },
-        {
-            .name = "goto out of variable scope",
-            .source = "void f(int n) { { int a[n]; goto done; } done:; }\n",
-        },
-        {
-            .name = "goto into variable scope rejected",
-            .source = "void f(int n) { goto target; int a[n]; target:; }\n",
-            .rejected = true,
-        },
-        {
-            .name = "goto into variable pointer scope rejected",
-            .source = "void f(int n) { goto target; int (*p)[n]; target:; }\n",
-            .rejected = true,
-        },
-        {
-            .name = "goto into reused variable typedef rejected",
-            .source = "void f(int n) { typedef int A[n]; goto target; { A a; target:; } }\n",
-            .rejected = true,
-        },
-        {
-            .name = "switch enters variable scope rejected",
-            .source = "void f(int n) { switch(n) { int a[n]; case 1:; } }\n",
-            .rejected = true,
-        },
-        {
-            .name = "goto past constant logical bounds",
-            .source = "void f(void) { goto target; { int a[1&&1],b[1||0],c[1?1:2]; target: a[0]=b[0]=c[0]=0; } }\n",
-        },
+    CheckTestFixtures catalog;
+    const CheckTestBoundSource bindings[] = {
+        { "@repeated-size", repeated_size },
     };
-    enum { FILE_COUNT = BUSTER_ARRAY_LENGTH(fixtures) };
+    const uint32_t file_count = check_test_private_catalog(test, &catalog, "checker/vla-sources", bindings, BUSTER_ARRAY_LENGTH(bindings), 0);
+    const CheckSourceFixture* fixtures = catalog.cases;
+    CheckTestOracleBatch batch;
+    const bool allocated = check_test_oracle_batch(test, &batch, &catalog.storage, file_count);
     char directory[] = "/tmp/buster-checker-vla-XXXXXX";
-    bool ready = mkdtemp(directory) != 0;
-    char paths[FILE_COUNT][160];
-    char* pointers[FILE_COUNT];
-    ParseTestClang outcomes[FILE_COUNT];
-    for (uint32_t i = 0; ready && i < FILE_COUNT; i += 1)
+    const bool created = allocated && mkdtemp(directory) != NULL;
+    bool ready = created;
+    for (uint32_t i = 0; ready && i < file_count; i += 1)
     {
-        snprintf(paths[i], sizeof(paths[i]), "%s/%u.c", directory, i);
-        pointers[i] = paths[i];
-        ready = parse_test_write(paths[i], fixtures[i].source, strlen(fixtures[i].source));
+        snprintf(batch.paths[i], sizeof(batch.paths[i]), "%s/%u.c", directory, i);
+        batch.pointers[i] = batch.paths[i];
+        ready = parse_test_write(batch.paths[i], fixtures[i].source, strlen(fixtures[i].source));
     }
     const char* arguments[] = { "-std=gnu17" };
-    ready = ready && parse_test_clang(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), pointers, FILE_COUNT, outcomes);
+    ready = ready && parse_test_clang(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), batch.pointers, file_count, batch.outcomes);
     check_test_expect(test, ready, "variable array Clang oracle could not run");
-    for (uint32_t i = 0; ready && i < FILE_COUNT; i += 1)
+    for (uint32_t i = 0; ready && i < file_count; i += 1)
     {
         char description[192];
         snprintf(description, sizeof(description), "%s: expectation differs from Clang", fixtures[i].name);
-        check_test_expect(test, outcomes[i].rejected == fixtures[i].rejected, description);
-        check_test_source(test, &fixtures[i], paths[i], &outcomes[i]);
+        check_test_expect(test, batch.outcomes[i].rejected == fixtures[i].rejected, description);
+        check_test_source(test, &fixtures[i], batch.paths[i], &batch.outcomes[i]);
     }
-    for (uint32_t i = 0; i < FILE_COUNT; i += 1)
+    for (uint32_t i = 0; created && i < file_count; i += 1)
     {
-        snprintf(paths[i], sizeof(paths[i]), "%s/%u.c", directory, i);
-        unlink(paths[i]);
+        snprintf(batch.paths[i], sizeof(batch.paths[i]), "%s/%u.c", directory, i);
+        unlink(batch.paths[i]);
     }
-    if (directory[0] != 0)
+    if (created)
     {
         rmdir(directory);
     }
+    arena_release(&catalog.storage);
     check_test_vla_metadata(test);
     check_test_vla_scaling(test);
 }

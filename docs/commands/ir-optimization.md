@@ -472,6 +472,8 @@ and nested) and conditional arithmetic, no select of a tested truth value (no
 `cmov` whose flags a `test` wrote) and no conditional branch for the `&&`/`||`
 values (#2677; their `cmov`s are #2676's fused selects of comparisons), and
 `cmov` with only the loop's branch for the conditional sum and the `?:` sum. They also
+check that a strong `__builtin_expect` hint keeps its conditional jump and a
+balanced or dynamic expectation still permits a conditional move. They
 require the branches to remain for loads, division, variable shifts, calls, a
 reload after a call and the running max. #2842's floating selects (the issue's
 kernels, the six double comparisons, `!(a < b)` and `!(a == b)`, the float

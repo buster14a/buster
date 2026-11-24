@@ -1,0 +1,18 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+auto-type	auto-type.c	-	auto-type
+# A cast to an atomic type (#2230): an `_Atomic` rvalue, which __auto_type deduces, an _Atomic object takes (a
+# static's as a constant) and the usual arithmetic conversions take as their left operand; and __auto_type's
+# redeclarations of atomic entities (#1844), which take the earlier atomic types.
+atomic-casts	atomic-casts.c	-	atomic-casts
+# An _Alignas of __auto_type's variables against their deduced types (#840's review): past a double's, a char's below
+# int's and past a short's, their addresses and GNU's alignments of them.
+auto-type-alignment	auto-type-alignment.c	-	auto-type-alignment
+# Structures deduced from compound literals at file scope, in a static and in a block, whose static data the deduced
+# types initialize.
+auto-type-static-structures	auto-type-static-structures.c	-	auto-type-static-structures
+# A variably modified deduction (#1844): a pointer to a variable-length array, whose sizes the array's declaration
+# evaluated once; and redeclarations of variables with linkage,
+# which take the earlier declarations' types (a long, a pointer's, a typedef's, a restrict pointer's) rather than
+# deduce theirs.
+auto-type-variably-modified-merged	auto-type-variably-modified-merged.c	-	auto-type-variably-modified-merged
