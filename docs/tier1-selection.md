@@ -593,7 +593,9 @@ patterns are:
   Within a region of up to 64 records the planner simulates eight physical
   x87 registers. Independent replay checks source snapshots, operand order,
   observable stores, private-home overlaps and exit depth. If the full set
-  fails replay, the planner tries smaller sets. Calls, control edges and
+  fails replay, the planner tries smaller sets. A sole phi use can consume the
+  result directly in an unconditional predecessor’s parallel copy. The copy
+  completes before the branch, with its original destination order. Calls, control edges and
   environment observations end a region. Multiuse values and unrepresentable
   permutations keep their homes. The proof preserves record indices for
   branches, references and debug events.

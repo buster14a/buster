@@ -188,13 +188,23 @@ static void tier1_x87_transfer_emission(Tier1WideTest* test)
         "  %5 = fmul.f80 %1, %3\n",
     };
     static const uint32_t values[] = { 5, 7, 6, 6, 5 };
-    static const uint32_t pairs[] = { 3, 3, 3, 3, 2 };
-    static const uint32_t stores[] = { 1, 3, 2, 2, 2 };
-    for (uint32_t fixture = 0; fixture < BUSTER_ARRAY_LENGTH(operations); fixture += 1)
+    static const uint32_t pairs[] = { 3, 3, 3, 3, 2, 2 };
+    static const uint32_t stores[] = { 1, 3, 2, 2, 2, 3 };
+    for (uint32_t fixture = 0; fixture < BUSTER_ARRAY_LENGTH(pairs); fixture += 1)
     {
         char text[1024];
-        snprintf(text, sizeof(text), "function (ptr) -> void {\nb0:\n  %%0 = param.ptr 0\n  %%1 = load.f80 %%0 align=16\n  %%2 = address.ptr %%0 offset=16\n  %%3 = load.f80 %%2 align=16\n  %%4 = address.ptr %%0 offset=256\n%s  %%%u = store.void %%4, %%%u align=16%s\n  %%%u = ret.void\n}\n",
-                 operations[fixture], values[fixture] + 1, values[fixture], fixture == 4 ? " volatile" : "", values[fixture] + 2);
+        if (fixture == BUSTER_ARRAY_LENGTH(operations))
+        {
+            strcpy(text, "function (ptr, i64) -> void {\nb0:\n  %0 = param.ptr 0\n  %1 = param.i64 1\n  %2 = const.i64 0x0\n"
+                         "  %3 = icmp.i1 %1, %2 ne\n  %4 = cbr.void %3, b1, b2\nb1:\n  %5 = load.f80 %0 align=16\n  %6 = br.void b3\n"
+                         "b2:\n  %7 = address.ptr %0 offset=16\n  %8 = load.f80 %7 align=16\n  %9 = br.void b3\nb3:\n"
+                         "  %10 = phi.f80 [%5, b1], [%8, b2]\n  %11 = store.void %0, %10 align=16\n  %12 = ret.void\n}\n");
+        }
+        else
+        {
+            snprintf(text, sizeof(text), "function (ptr) -> void {\nb0:\n  %%0 = param.ptr 0\n  %%1 = load.f80 %%0 align=16\n  %%2 = address.ptr %%0 offset=16\n  %%3 = load.f80 %%2 align=16\n  %%4 = address.ptr %%0 offset=256\n%s  %%%u = store.void %%4, %%%u align=16%s\n  %%%u = ret.void\n}\n",
+                     operations[fixture], values[fixture] + 1, values[fixture], fixture == 4 ? " volatile" : "", values[fixture] + 2);
+        }
         const uint64_t mark = test->output.length;
         IrFunction function = { 0 };
         bool ok = tier1_wide_test_parse(test, "canonical x87 transport", text, &function);
