@@ -354,7 +354,7 @@ static void x86_decode_lengths_initialize(void)
 }
 
 // A form's tail after its map's opcode byte: whether a byte sits where ModRM does (ModRM, or one fixed opcode byte of
-// mod 3), and its trailing bytes. False for a tail the descriptor can't hold (two fixed bytes, a fixed byte below C0).
+// mod 3), and its trailing bytes (immediates and relatives). False for a tail the descriptor can't hold (two fixed bytes, a fixed byte below C0).
 static bool x86_decode_form_tail(const X86FormDescription* form, bool* slot, uint32_t* trailing)
 {
     uint32_t index;
@@ -363,7 +363,8 @@ static bool x86_decode_form_tail(const X86FormDescription* form, bool* slot, uin
     const uint32_t extra = form->opcode_bytes - (operation ? 1u : 0u) - index - 1;
     const bool modrm = form->encoding == BUSTER_X86_ENCODING_R || (form->encoding & BUSTER_X86_ENCODING_DIGIT);
     *slot = modrm || extra == 1;
-    *trailing = form->immediate_bytes + form->relative_bytes + (operation ? 1u : 0u);
+    // 3DNow's operation byte is its immediate.
+    *trailing = form->immediate_bytes + form->relative_bytes;
     return extra <= 1 && !(modrm && extra != 0) && (extra == 0 || x86_opcode_byte(form, index + 1) >= 0xc0) && *trailing <= 15;
 }
 
@@ -732,56 +733,140 @@ static __m512i x86_decode_window(const uint8_t* source, uint64_t size, uint32_t 
     return _mm512_maskz_loadu_epi8(active, source + (available != 0 ? offset : 0));
 }
 
+// A window's bytes that are legacy or REX prefixes: two nibble-table shuffles and their intersection.
+static uint64_t x86_decode_prefix_bytes(__m512i bytes)
+{
+    const __m128i low = _mm_setr_epi8(5, 1, 5, 5, 3, 3, 11, 3, 1, 1, 1, 17, 1, 1, 9, 1);
+    const __m128i high = _mm_setr_epi8(0, 0, 8, 8, 1, 0, 2, 0, 0, 16, 0, 0, 0, 0, 0, 4);
+    const __m512i lo = _mm512_shuffle_epi8(_mm512_broadcast_i32x4(low), _mm512_and_si512(bytes, _mm512_set1_epi8(15)));
+    const __m512i hi = _mm512_shuffle_epi8(_mm512_broadcast_i32x4(high), _mm512_and_si512(_mm512_srli_epi16(bytes, 4), _mm512_set1_epi8(15)));
+    return _mm512_test_epi8_mask(lo, hi);
+}
+
+// A 256-byte table's entries for 64 byte indices: two two-source permutes, chosen by the index's top bit.
+static __m512i x86_decode_lookup(const uint8_t* table, __m512i indices)
+{
+    const __m512i low = _mm512_permutex2var_epi8(_mm512_load_si512(table), indices, _mm512_load_si512(table + 64));
+    const __m512i high = _mm512_permutex2var_epi8(_mm512_load_si512(table + 128), indices, _mm512_load_si512(table + 192));
+    return _mm512_mask_blend_epi8(_mm512_movepi8_mask(indices), low, high);
+}
+
+// Every position's instruction length in the window `source[0, size)`, as if an instruction started there: 0 where it
+// has no hint (a bucket x86_decode_length_tables_initialize couldn't describe, a vector prefix after legacy ones, 15
+// prefix bytes, an end past `size` or past 15 bytes). Reads the 128 bytes from `source` that lie inside `size`.
 static void x86_decode_lengths(const uint8_t* source, uint64_t size, uint8_t* lengths)
 {
-    const __m512i first = x86_decode_window(source, size, 0);
-    const __m512i next = x86_decode_window(source, size, 1);
-    const __m512i third = x86_decode_window(source, size, 2);
-    const __m512i fourth = x86_decode_window(source, size, 3);
-    const __m512i fifth = x86_decode_window(source, size, 4);
-    const uint64_t rex = _mm512_cmpeq_epi8_mask(_mm512_and_si512(first, _mm512_set1_epi8((char)0xf0)), _mm512_set1_epi8(0x40));
-    const uint64_t wide = rex & _mm512_test_epi8_mask(first, _mm512_set1_epi8(8));
-    // An optional REX, then an optional 0F escape (its map's opcodes: x86_decode_simple_map): one byte or two before
-    // the opcode.
-    const uint64_t escape = _mm512_cmpeq_epi8_mask(_mm512_mask_blend_epi8(rex, first, next), _mm512_set1_epi8(0x0f));
-    const uint64_t one = rex ^ escape;
-    const uint64_t two = rex & escape;
-    const __m512i opcode = _mm512_mask_blend_epi8(two, _mm512_mask_blend_epi8(one, first, next), third);
-    const __m512i modrm = _mm512_mask_blend_epi8(two, _mm512_mask_blend_epi8(one, next, third), fourth);
-    const __m512i sib = _mm512_mask_blend_epi8(two, _mm512_mask_blend_epi8(one, third, fourth), fifth);
-    const uint64_t upper = _mm512_movepi8_mask(opcode);
-    const __m512i low = _mm512_permutex2var_epi8(_mm512_load_si512(x86_decode_length_table), opcode, _mm512_load_si512(x86_decode_length_table + 64));
-    const __m512i high = _mm512_permutex2var_epi8(_mm512_load_si512(x86_decode_length_table + 128), opcode, _mm512_load_si512(x86_decode_length_table + 192));
-    const __m512i escaped_low = _mm512_permutex2var_epi8(_mm512_load_si512(x86_decode_length_table + 256), opcode, _mm512_load_si512(x86_decode_length_table + 320));
-    const __m512i escaped_high = _mm512_permutex2var_epi8(_mm512_load_si512(x86_decode_length_table + 384), opcode, _mm512_load_si512(x86_decode_length_table + 448));
-    const __m512i meta = _mm512_mask_blend_epi8(escape, _mm512_mask_blend_epi8(upper, low, high), _mm512_mask_blend_epi8(upper, escaped_low, escaped_high));
-    const uint64_t has_modrm = _mm512_test_epi8_mask(meta, _mm512_set1_epi8(16));
+    const __m512i low = x86_decode_window(source, size, 0);
+    const __m512i high = x86_decode_window(source, size, 64);
+    const uint64_t active_low = size >= 64 ? UINT64_MAX : (1ull << size) - 1;
+    const uint64_t active_high = size >= 128 ? UINT64_MAX : size > 64 ? (1ull << (size - 64)) - 1 : 0;
+    const __m512i one = _mm512_set1_epi8(1);
+    const __m512i positions = _mm512_set_epi8(63, 62, 61, 60, 59, 58, 57, 56, 55, 54, 53, 52, 51, 50, 49, 48, 47, 46, 45, 44, 43, 42, 41, 40, 39, 38, 37, 36, 35, 34, 33, 32,
+                                              31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+    const __uint128_t prefix = (__uint128_t)(x86_decode_prefix_bytes(low) & active_low) | (__uint128_t)(x86_decode_prefix_bytes(high) & active_high) << 64;
+    const __m512i rex_nibble = _mm512_set1_epi8(0x40);
+    const __m512i high_nibble = _mm512_set1_epi8((char)0xf0);
+    const __uint128_t rex = (__uint128_t)_mm512_cmpeq_epi8_mask(_mm512_and_si512(low, high_nibble), rex_nibble) |
+                            (__uint128_t)_mm512_cmpeq_epi8_mask(_mm512_and_si512(high, high_nibble), rex_nibble) << 64;
+    const __uint128_t rex_w = rex & ((__uint128_t)_mm512_test_epi8_mask(low, _mm512_set1_epi8(8)) | (__uint128_t)_mm512_test_epi8_mask(high, _mm512_set1_epi8(8)) << 64);
+    const __uint128_t operand = (__uint128_t)_mm512_cmpeq_epi8_mask(low, _mm512_set1_epi8(0x66)) | (__uint128_t)_mm512_cmpeq_epi8_mask(high, _mm512_set1_epi8(0x66)) << 64;
+    // Each position's run of prefixes, which a REX ends: the run's bytes in step k are those k bytes on.
+    __m512i run = _mm512_setzero_si512();
+    uint64_t word = 0;
+    uint64_t wide = 0;
+    uint64_t in = (uint64_t)prefix;
+    for (uint32_t k = 0; in != 0 && k < 15; k += 1)
+    {
+        run = _mm512_mask_add_epi8(run, in, run, one);
+        word |= in & (uint64_t)(operand >> k);
+        wide |= in & (uint64_t)(rex_w >> k);
+        in &= ~(uint64_t)(rex >> k) & (uint64_t)(prefix >> (k + 1));
+    }
+    uint64_t overlong = in;
+    __m512i lead_at = _mm512_add_epi8(positions, run);
+    __m512i lead = _mm512_permutex2var_epi8(low, lead_at, high);
+    // FWAIT (9B) prefixes a waiting x87 form only, one whose prefix run leads to D9, DB, DD or DF; an instruction
+    // starting with it otherwise is FWAIT alone, one byte (x86_decode_header's caller retries it so).
+    const uint64_t waits = _mm512_cmpeq_epi8_mask(low, _mm512_set1_epi8((char)0x9b)) &
+                           ~_mm512_cmpeq_epi8_mask(_mm512_and_si512(_mm512_sub_epi8(lead, _mm512_set1_epi8((char)0xd9)), _mm512_set1_epi8((char)0xf9)), _mm512_setzero_si512());
+    run = _mm512_mask_mov_epi8(run, waits, _mm512_setzero_si512());
+    word &= ~waits;
+    wide &= ~waits;
+    overlong &= ~waits;
+    lead_at = _mm512_mask_mov_epi8(lead_at, waits, positions);
+    lead = _mm512_mask_mov_epi8(lead, waits, low);
+    const __m512i second = _mm512_permutex2var_epi8(low, _mm512_add_epi8(lead_at, one), high);
+    const uint64_t vex2 = _mm512_cmpeq_epi8_mask(lead, _mm512_set1_epi8((char)0xc5));
+    const uint64_t vex3 = _mm512_cmpeq_epi8_mask(lead, _mm512_set1_epi8((char)0xc4)) |
+                          (_mm512_cmpeq_epi8_mask(lead, _mm512_set1_epi8((char)0x8f)) & _mm512_cmpge_epu8_mask(_mm512_and_si512(second, _mm512_set1_epi8(31)), _mm512_set1_epi8(8)));
+    const uint64_t evex = _mm512_cmpeq_epi8_mask(lead, _mm512_set1_epi8(0x62));
+    const uint64_t vector = vex2 | vex3 | evex;
+    const uint64_t escape = _mm512_cmpeq_epi8_mask(lead, _mm512_set1_epi8(0x0f)) & ~vector;
+    const uint64_t map2 = escape & _mm512_cmpeq_epi8_mask(second, _mm512_set1_epi8(0x38));
+    const uint64_t map3 = escape & _mm512_cmpeq_epi8_mask(second, _mm512_set1_epi8(0x3a));
+    // The opcode's offset from the lead byte, and its map: 0F, 0F 38 or 0F 3A's, C5's 1, C4's and XOP's mmmmm, EVEX's mmm.
+    __m512i offset = _mm512_maskz_mov_epi8(escape, one);
+    offset = _mm512_mask_add_epi8(offset, map2 | map3, offset, one);
+    offset = _mm512_mask_mov_epi8(offset, vex2, _mm512_set1_epi8(2));
+    offset = _mm512_mask_mov_epi8(offset, vex3, _mm512_set1_epi8(3));
+    offset = _mm512_mask_mov_epi8(offset, evex, _mm512_set1_epi8(4));
+    __m512i map = _mm512_maskz_mov_epi8(escape, one);
+    map = _mm512_mask_add_epi8(map, map2, map, one);
+    map = _mm512_mask_add_epi8(map, map3, map, _mm512_set1_epi8(2));
+    map = _mm512_mask_mov_epi8(map, vex2, one);
+    map = _mm512_mask_mov_epi8(map, vex3, _mm512_and_si512(second, _mm512_set1_epi8(31)));
+    map = _mm512_mask_mov_epi8(map, evex, _mm512_and_si512(second, _mm512_set1_epi8(7)));
+    const __m512i opcode_at = _mm512_add_epi8(lead_at, offset);
+    const __m512i opcode = _mm512_permutex2var_epi8(low, opcode_at, high);
+    const __m512i modrm = _mm512_permutex2var_epi8(low, _mm512_add_epi8(opcode_at, one), high);
+    const __m512i sib = _mm512_permutex2var_epi8(low, _mm512_add_epi8(opcode_at, _mm512_set1_epi8(2)), high);
+    // The tail's byte in the legacy layout (x86_decode_legacy_tails): the (family, map)'s, or its opcode's in map 1's
+    // and legacy map 0's tables.
+    const uint64_t mapped = _mm512_cmplt_epu8_mask(map, _mm512_set1_epi8(BUSTER_X86_DECODE_MAPS));
+    __m512i family_map = _mm512_mask_add_epi8(map, vex2 | vex3, map, _mm512_set1_epi8(BUSTER_X86_DECODE_MAPS));
+    family_map = _mm512_mask_add_epi8(family_map, evex, map, _mm512_set1_epi8(2 * BUSTER_X86_DECODE_MAPS));
+    uint8_t map_table[64] __attribute__((aligned(64))) = { 0 };
+    memcpy(map_table, x86_decode_map_tails, sizeof(x86_decode_map_tails));
+    __m512i tail = _mm512_permutexvar_epi8(family_map, _mm512_load_si512(map_table));
+    const uint64_t tabled = _mm512_cmpeq_epi8_mask(tail, _mm512_set1_epi8((char)0xff));
+    const uint64_t legacy0 = tabled & ~vector & ~escape;
+    const uint64_t legacy1 = tabled & escape;
+    tail = _mm512_mask_mov_epi8(tail, legacy0, x86_decode_lookup(x86_decode_legacy_tails, opcode));
+    tail = _mm512_mask_mov_epi8(tail, legacy1, x86_decode_lookup(x86_decode_legacy_tails + 256, opcode));
+    // VEX's bits 0, 1 and 4, EVEX's 2, 3 and 5: ModRM, an immediate byte, and no hint (15) in the legacy layout.
+    const __m512i bits = x86_decode_lookup(x86_decode_vector_tails, opcode);
+    const uint64_t vector_slot = _mm512_test_epi8_mask(bits, _mm512_mask_blend_epi8(evex, one, _mm512_set1_epi8(4)));
+    const uint64_t vector_immediate = _mm512_test_epi8_mask(bits, _mm512_mask_blend_epi8(evex, _mm512_set1_epi8(2), _mm512_set1_epi8(8)));
+    const uint64_t vector_unknown = _mm512_test_epi8_mask(bits, _mm512_mask_blend_epi8(evex, _mm512_set1_epi8(0x10), _mm512_set1_epi8(0x20)));
+    __m512i vector_tail = _mm512_maskz_mov_epi8(vector_immediate, one);
+    vector_tail = _mm512_mask_mov_epi8(vector_tail, vector_slot, _mm512_or_si512(vector_tail, _mm512_set1_epi8((char)0x80)));
+    vector_tail = _mm512_mask_mov_epi8(vector_tail, vector_unknown, _mm512_set1_epi8(0x0f));
+    tail = _mm512_mask_mov_epi8(tail, tabled & vector, vector_tail);
+    const uint64_t hinted = mapped & ~_mm512_cmpeq_epi8_mask(_mm512_and_si512(tail, _mm512_set1_epi8(15)), _mm512_set1_epi8(15));
+    const uint64_t slot = _mm512_test_epi8_mask(tail, _mm512_set1_epi8((char)0x80));
+    const uint64_t shrinks = _mm512_test_epi8_mask(tail, _mm512_set1_epi8(0x40)) & word & ~wide;
+    const uint64_t widens = _mm512_test_epi8_mask(tail, _mm512_set1_epi8(0x20)) & wide;
+    const uint64_t digits = _mm512_test_epi8_mask(tail, _mm512_set1_epi8(0x10)) &
+                            _mm512_cmpge_epu8_mask(_mm512_and_si512(_mm512_srli_epi16(modrm, 3), _mm512_set1_epi8(7)), _mm512_set1_epi8(2));
+    __m512i trailing = _mm512_and_si512(tail, _mm512_set1_epi8(15));
+    trailing = _mm512_mask_mov_epi8(trailing, shrinks, _mm512_set1_epi8(2));
+    trailing = _mm512_mask_mov_epi8(trailing, widens, _mm512_set1_epi8(8));
+    trailing = _mm512_mask_mov_epi8(trailing, digits & slot, _mm512_setzero_si512());
     const __m512i mod = _mm512_and_si512(_mm512_srli_epi16(modrm, 6), _mm512_set1_epi8(3));
     const __m512i rm = _mm512_and_si512(modrm, _mm512_set1_epi8(7));
-    const uint64_t memory = has_modrm & _mm512_cmpneq_epi8_mask(mod, _mm512_set1_epi8(3));
+    const uint64_t memory = slot & _mm512_cmpneq_epi8_mask(mod, _mm512_set1_epi8(3));
     const uint64_t has_sib = memory & _mm512_cmpeq_epi8_mask(rm, _mm512_set1_epi8(4));
     const uint64_t mod0 = memory & _mm512_cmpeq_epi8_mask(mod, _mm512_setzero_si512());
-    const uint64_t disp1 = memory & _mm512_cmpeq_epi8_mask(mod, _mm512_set1_epi8(1));
+    const uint64_t disp1 = memory & _mm512_cmpeq_epi8_mask(mod, one);
     const uint64_t base5 = _mm512_cmpeq_epi8_mask(_mm512_and_si512(sib, _mm512_set1_epi8(7)), _mm512_set1_epi8(5));
     const uint64_t disp4 = (memory & _mm512_cmpeq_epi8_mask(mod, _mm512_set1_epi8(2))) | (mod0 & (_mm512_cmpeq_epi8_mask(rm, _mm512_set1_epi8(5)) | (has_sib & base5)));
-    __m512i length = _mm512_add_epi8(_mm512_and_si512(meta, _mm512_set1_epi8(15)), _mm512_set1_epi8(1));
-    length = _mm512_mask_add_epi8(length, rex, length, _mm512_set1_epi8(1));
-    length = _mm512_mask_add_epi8(length, escape, length, _mm512_set1_epi8(1));
-    length = _mm512_mask_add_epi8(length, has_modrm, length, _mm512_set1_epi8(1));
-    length = _mm512_mask_add_epi8(length, has_sib, length, _mm512_set1_epi8(1));
-    length = _mm512_mask_add_epi8(length, disp1, length, _mm512_set1_epi8(1));
+    __m512i length = _mm512_add_epi8(_mm512_add_epi8(run, offset), _mm512_add_epi8(one, trailing));
+    length = _mm512_mask_add_epi8(length, slot, length, one);
+    length = _mm512_mask_add_epi8(length, has_sib, length, one);
+    length = _mm512_mask_add_epi8(length, disp1, length, one);
     length = _mm512_mask_add_epi8(length, disp4, length, _mm512_set1_epi8(4));
-    length = _mm512_mask_add_epi8(length, wide & _mm512_test_epi8_mask(meta, _mm512_set1_epi8(32)), length, _mm512_set1_epi8(4));
-    static const uint8_t positions[64] __attribute__((aligned(64))) =
-    {
-        0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
-        16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
-        32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47,
-        48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63,
-    };
-    const __m512i ends = _mm512_add_epi8(length, _mm512_load_si512(positions));
-    uint64_t known = _mm512_test_epi8_mask(meta, _mm512_set1_epi8(64));
-    known &= ~_mm512_movepi8_mask(meta) | wide;
+    const __m512i ends = _mm512_add_epi8(length, positions);
+    uint64_t known = hinted & ~overlong & ~(vector & _mm512_test_epi8_mask(run, run)) & _mm512_cmple_epu8_mask(length, _mm512_set1_epi8(15));
     known &= _mm512_cmple_epu8_mask(ends, _mm512_set1_epi8((char)(size < 127 ? size : 127)));
     _mm512_storeu_si512(lengths, _mm512_maskz_mov_epi8(known, length));
 }
@@ -1367,6 +1452,12 @@ static X86DecodeResult x86_disassemble(const uint8_t* source, uint64_t size, X86
                             result.count += 1;
                             result.consumed = start + at + decoded.length;
                             consistent = lengths[at] == decoded.length;
+                            if (lengths[at] != 0 && lengths[at] != decoded.length && getenv("BUSTER_LENGTHS") != NULL)
+                            {
+                                fprintf(stderr, "length mismatch at %llu: hint %u decoded %u bytes", (unsigned long long)(start + at), lengths[at], decoded.length);
+                                for (uint32_t j = 0; j < decoded.length + 2 && at + j < remaining; j += 1) fprintf(stderr, " %02x", source[start + at + j]);
+                                fprintf(stderr, "\n");
+                            }
                         }
                     }
                     offset = (uint32_t)(result.consumed - start);
