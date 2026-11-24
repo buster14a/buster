@@ -1,0 +1,1 @@
+struct T{int a,b,c;};int f(x)_Atomic(struct T) x;{struct T v=x;return v.a+v.b+v.c;}

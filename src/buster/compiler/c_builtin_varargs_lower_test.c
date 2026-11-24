@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// #148's scalar SysV va_list recipes, consumed by both Tier 0 paths and native code. A Clang variadic wrapper owns
+// #148's scalar SysV va_list recipes, consumed by Tier 0 and native code. A Clang variadic wrapper owns
 // real va_start/va_copy/va_arg oracle lists; generated helpers consume a separate list and store the requested scalar
 // with its actual machine class, preserving floating bits. Synthetic save/overflow areas test va_start independently
 // of a generated variadic frame. These tests do not supply the absent source selector or variadic prologue wiring.
@@ -358,7 +358,7 @@ static bool cbuiltin_va_lower_test_program(CBuiltinVaLowerTestTally* tally, Aren
         result = cbuiltin_va_lower_test_expect(tally, checked.error == TIER0_OK, checked.rule != 0 ? checked.rule : "typed validation", item);
         if (result)
         {
-            codes[path] = path == 0 ? tier0_compile_scalar(&function, arena) : tier0_compile(&function, arena);
+            codes[path] = tier0_compile(&function, arena);
             result = cbuiltin_va_lower_test_expect(tally, codes[path].error == TIER0_OK && codes[path].reference_count == 0 &&
                 x86_validate(codes[path].records, codes[path].count) == codes[path].count, "native records", item);
         }

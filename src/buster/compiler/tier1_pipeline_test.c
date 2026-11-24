@@ -734,7 +734,7 @@ static bool tier1_pipeline_upstream(Tier1PipelineTest* test, const Tier0Program*
     }
     if (ok)
     {
-        const IrCheck check = test->vector ? ssa_ir_promote(&lowered, &test->arenas[TIER1_PIPELINE_PROMOTED], scratch, &promoted) : ssa_ir_promote_scalar(&lowered, &test->arenas[TIER1_PIPELINE_PROMOTED], scratch, &promoted);
+        const IrCheck check = ssa_ir_promote(&lowered, &test->arenas[TIER1_PIPELINE_PROMOTED], scratch, &promoted);
         ok = tier1_pipeline_expect(test, check.error == IR_OK, "real shared-IR local promotion succeeds");
         if (ok)
         {
@@ -1404,7 +1404,6 @@ static void tier1_pipeline_supported(Tier1PipelineTest* test)
                     .certify = true,
                     .register_mask = (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RCX) | (1u << X86_REGISTER_RDX) | (1u << X86_REGISTER_RSI) | (1u << X86_REGISTER_RDI),
                     .frame_flags = remat != 0 ? BUSTER_TIER1_FRAME_KEEP_POINTER | BUSTER_TIER1_FRAME_NO_RED_ZONE : 0,
-                    .vector = test->vector,
                     .rematerialize = test->rematerialize,
                 };
                 Tier1EmitResult bodies[BUSTER_TIER1_PIPELINE_FUNCTIONS];

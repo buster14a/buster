@@ -141,7 +141,11 @@ static void check_input_constant_failure_report(CheckInputReader* reader, const 
     const CheckConstantError mapped = evidence ? check_constant_failure_error(reader, failure, failure->token) :
                                                  (CheckConstantError){ .error = CHECK_ARGUMENT_EXPECTED_EXPRESSION };
     const uint32_t before = reader->output->report_count;
-    if (mapped.error == CHECK_ARGUMENT_EXPECTED_EXPRESSION)
+    if (evidence && failure->diagnostic == CHECK_DIAG_RECOVERED_MEMBER)
+    {
+        check_input_report(reader, failure->token, CHECK_INPUT_INVALID_USE);
+    }
+    else if (mapped.error == CHECK_ARGUMENT_EXPECTED_EXPRESSION)
     {
         check_input_report(reader, fallback, CHECK_INPUT_DECLARATION);
     }
@@ -426,7 +430,10 @@ static bool check_input_attribute_expression(CheckInputReader* reader, CheckInpu
     const uint32_t before = reader->output->report_count;
     const bool valid = check_input_constant_read(reader, first, end, false, false, scoped, value, &unused, &failed, &failure);
     *call_failure = false;
-    if (!valid && !reader->output->resource && reader->output->report_count == before)
+    // (An argument a stray token follows, `aligned(n n)`, is clang's parse error at that token, which the argument list's
+    // reading gives; the argument's own errors are none: clang drops its delayed typos with the failed expression, #2914.)
+    const bool stray = end < parser->tokens.count && parser->tokens.kinds[end] != PARSE_KIND_COMMA && parser->tokens.kinds[end] != PARSE_KIND_R_PAREN;
+    if (!valid && !stray && !reader->output->resource && reader->output->report_count == before)
     {
         const uint32_t token = failure.diagnostic != CHECK_DIAG_NONE && failure.token < parser->tokens.count ? failure.token :
                                failed != BUSTER_CHECK_NONE ? failed : first;

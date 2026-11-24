@@ -108,7 +108,7 @@ static bool cbuiltin_lower_benchmark_compile(Arena* arena, const CBuiltinLowerCa
     }
     if (result)
     {
-        output->code = scalar ? tier0_compile_scalar(&function, arena) : tier0_compile(&function, arena);
+        output->code = tier0_compile(&function, arena);
         result = output->code.error == TIER0_OK && output->code.reference_count == 0;
     }
     if (result)

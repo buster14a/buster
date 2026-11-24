@@ -106,7 +106,8 @@ individual operands and used ordinary scalar bit ORs.
 ## Qualification
 
 `test-ir-source` now checks dataflow for **every accepted function** in its
-lowered, vector-promoted and scalar-promoted forms. Its existing text checks are
+lowered and promoted forms (a scalar-promoted third went with promotion's twin,
+#2924). Its existing text checks are
 unchanged. The normal source gate reports files left out by the existing C
 producer separately; it does not label them as tested functions. The existing
 correctness manifest's c-testsuite subset, SQLite and musl invocations therefore

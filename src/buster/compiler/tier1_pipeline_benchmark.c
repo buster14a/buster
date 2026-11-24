@@ -73,7 +73,6 @@ static uint8_t* tier1_pipeline_benchmark_tier1(Tier1PipelineTest* test, const Ti
     tier1_pipeline_reset(test);
     const Tier1EmitOptions options = {
         .register_mask = tier1_liveness_register_mask(),
-        .vector = true,
         .rematerialize = true,
     };
     Tier1EmitResult bodies[BUSTER_TIER1_PIPELINE_FUNCTIONS];

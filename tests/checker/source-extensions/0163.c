@@ -1,0 +1,1 @@
+int f(a)int a;{return a;}int g(void){return (*f)(1,2)+(1?f:f)(1,2);}

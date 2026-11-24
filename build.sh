@@ -12,11 +12,13 @@
 #   ./build.sh check-call-graph [--config C] [--jobs N]
 #   ./build.sh lexer-variant [--config C] [--jobs N] NAME=SOURCE...
 #   ./build.sh lexer-variant-assembly NAME SOURCE OUTPUT.s
-#   ./build.sh shifts [--config C] [--jobs N] DIRECTORY SOURCE SHIFT...
+#   ./build.sh shifts [--checker-placements] [--config C] [--jobs N] DIRECTORY SOURCE SHIFT...
 #
 # It builds with CI's toolchain, the official LLVM release, CMake and Ninja that tools/ci/hosted-tools.lock pins: PATH's
 # when its clang is the release's, or else tools/ci/session-toolchain.sh's, staged once in the user's cache (#2628);
-# BUSTER_TOOLCHAIN=path builds with PATH's as found.
+# BUSTER_TOOLCHAIN=path builds with PATH's as found. BUSTER_SELF_BUILT has Develop compile the units it names with the
+# previous stage, the tree's Release executable unless BUSTER_SELF_COMPILER names another, which it builds first where
+# it is missing (#2630).
 #
 # A build configures build/cmake/VARIANT, Ninja Multi-Config's tree for the BUSTER_* environment's host ISA,
 # runtime, sanitizer, fuzzing, debug information and Release in parts (BUSTER_RELEASE_PARTS=1), only when the settings, PATH or the toolchain changed since it
@@ -78,6 +80,7 @@ jobs=""
 targets=()
 verbose=0
 clean_all=0
+checker_placements=0
 arguments=()
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -96,11 +99,13 @@ while [ $# -gt 0 ]; do
         -j?*) jobs="${1#-j}"; shift ;;
         --verbose|-v) verbose=1; shift ;;
         --all) clean_all=1; shift ;;
+        --checker-placements) checker_placements=1; shift ;;
         --) shift; arguments+=("$@"); break ;;
         -*) die "unknown option $1; ./build.sh --help lists the commands" ;;
         *) arguments+=("$1"); shift ;;
     esac
 done
+[ "$checker_placements" = 0 ] || [ "$command" = shifts ] || die "--checker-placements is shifts' option"
 # The default configuration: Develop for the edit loop; Release for the commands that measure and for BUSTER_PGO.
 if [ "$config_given" = 0 ]; then
     case "$command" in
@@ -174,6 +179,8 @@ fuzz_entry="${BUSTER_FUZZ_ENTRY:-}"
 [ -z "$fuzz_entry" ] || fuzz_entry="$(absolute "$fuzz_entry")"
 pgo_train="${BUSTER_PGO_TRAIN:-}"
 [ -z "$pgo_train" ] || pgo_train="$(absolute "$pgo_train")"
+self_compiler="${BUSTER_SELF_COMPILER:-}"
+[ -z "$self_compiler" ] || self_compiler="$(absolute "$self_compiler")"
 settings=(
     "-DBUSTER_HOST_ARCH=${BUSTER_HOST_ARCH:-native}"
     "-DBUSTER_DEBUG_INFO=${BUSTER_DEBUG_INFO-1}"
@@ -188,6 +195,8 @@ settings=(
     "-DBUSTER_PGO_TRAIN=$pgo_train"
     "-DBUSTER_PARALLEL_CODEGEN=${BUSTER_PARALLEL_CODEGEN:-auto}"
     "-DBUSTER_RELEASE_PARTS=${BUSTER_RELEASE_PARTS:-0}"
+    "-DBUSTER_SELF_BUILT=${BUSTER_SELF_BUILT:-}"
+    "-DBUSTER_SELF_COMPILER=$self_compiler"
 )
 
 # The long commands (configuring, building, testing, checking) run in a process group of their own, `child`, which an
@@ -417,6 +426,7 @@ configure_arguments=(
     "-DBUSTER_LEXER_VARIANTS=$lexer_variants"
     "-DBUSTER_SHIFT_SOURCE=$shift_source"
     "-DBUSTER_SHIFTS=$shift_bytes"
+    "-DBUSTER_CHECKER_PLACEMENTS=$checker_placements"
 )
 clang_version="$("$clang" --version)"
 toolchain="clang $clang ($(realpath "$clang")): ${clang_version%%$'\n'*}"
@@ -477,7 +487,7 @@ build()
     # Ninja appends a line for each command it ran; when it rewrites its log to compact it, the report is skipped.
     if [ -f "$log" ] && { [ -z "$inode" ] || [ "$(stat -c %i "$log")" = "$inode" ]; }; then
         tail -c "+$((offset + 1))" "$log" | awk -F '\t' -v total="$((end - start))" -v config="$config" '
-            $4 ~ /\.c\.o$/ { count += 1; name = $4; sub(/^.*\//, "", name); sub(/\.o$/, "", name); time[name] = $2 - $1 }
+            $4 ~ /\.c\.o$/ { name = $4; sub(/^.*\//, "", name); sub(/\.o$/, "", name); count += !(name in time); time[name] = $2 - $1 }
             END {
                 line = sprintf("build.sh: %s: %u units compiled, the build took %.1f s", config, count, total / 1e6)
                 n = 0
@@ -519,6 +529,31 @@ publish()
     echo "build.sh: $config: ${binary#"$root/"}, published as build/compiler" >&2
 }
 
+# BUSTER_SELF_BUILT's previous stage (#2630; docs/commands/build.md, "Self-built units"), which compiles the units it
+# names in Develop: BUSTER_SELF_COMPILER, or else the tree's Release executable, which Develop's graph reads but doesn't
+# build, so that an edit's units are compiled by the stage built before the edit. Built first where it is missing; never
+# the executable Develop makes, which would compile its own next build.
+self_stage()
+{
+    local units="${BUSTER_SELF_BUILT:-}" stage="$self_compiler"
+    units="${units//none/}"
+    [ "$config" = Develop ] && [ -n "${units//[$' \t\n,']/}" ] || return 0
+    if [ -z "$stage" ]; then
+        stage="$tree/Release/compiler"
+        if [ ! -x "$stage" ]; then
+            echo "build.sh: building Release first, the previous stage BUSTER_SELF_BUILT's units take" >&2
+            run "$cmake" --build "$tree" --config Release --parallel "$jobs" --target compiler >&2
+        fi
+    fi
+    [ -x "$stage" ] || die "BUSTER_SELF_COMPILER, $stage, isn't an executable"
+    [ ! "$stage" -ef "$tree/Develop/compiler" ] || die "BUSTER_SELF_COMPILER, $stage, is the Develop executable this build makes; name a copy of it or a clang-built one"
+}
+
+case "$command" in
+    build|test|lexer-variant|shifts)
+        self_stage
+        ;;
+esac
 case "$command" in
     build)
         if [ "${#targets[@]}" -eq 0 ]; then
@@ -565,7 +600,11 @@ case "$command" in
         for bytes in "${shifted[@]}"; do
             output="$shift_directory/compiler-$bytes"
             ln -f -- "$tree/$config/shifts/compiler-$bytes" "$output" 2> /dev/null || cp -f -- "$tree/$config/shifts/compiler-$bytes" "$output"
-            echo "build.sh shifts: $output: $shift_source's code $bytes bytes later" >&2
+            if [ "$checker_placements" = 1 ]; then
+                echo "build.sh shifts: $output: $shift_source's checker code $bytes bytes later within its page" >&2
+            else
+                echo "build.sh shifts: $output: $shift_source's code $bytes bytes later" >&2
+            fi
         done
         ;;
 esac

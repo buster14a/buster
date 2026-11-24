@@ -172,7 +172,7 @@ static void ir_inline_test_by_value(IrInlineTest* test, Arena* input, Arena* out
                     IrFunction promoted = { 0 };
                     // Promotion's output owns no input: the twin's arena, emptied after.
                     const uint64_t twin_mark = twin->length;
-                    const IrCheck promotion = checked.error == IR_OK ? (path == 1 ? ssa_ir_promote_scalar(&split.function, twin, scratch, &promoted) : ssa_ir_promote(&split.function, twin, scratch, &promoted)) : checked;
+                    const IrCheck promotion = checked.error == IR_OK ? ssa_ir_promote(&split.function, twin, scratch, &promoted) : checked;
                     // Copied by integers, an argument's slot has eight i64 stores beside the callee's vector load: SROA
                     // keeps it, and the copies stay memory, correctly.
                     ir_inline_test_expect(test, checked.error == IR_OK && promotion.error == IR_OK && (copies != 0 || (split.refused_slots == 0 && split.split_slots == 8)),
@@ -485,7 +485,7 @@ static void ir_inline_test_assembled(IrInlineTest* test, Arena* input, Arena* ou
                 IrSroaResult split = { 0 };
                 const IrCheck checked = ir_optimize_sroa(&function, output, scratch, sroa, &split);
                 IrFunction promoted = { 0 };
-                const IrCheck promotion = checked.error == IR_OK ? (path == 1 ? ssa_ir_promote_scalar(&split.function, twin, scratch, &promoted) : ssa_ir_promote(&split.function, twin, scratch, &promoted)) : checked;
+                const IrCheck promotion = checked.error == IR_OK ? ssa_ir_promote(&split.function, twin, scratch, &promoted) : checked;
                 ir_inline_test_expect(test, checked.error == IR_OK && promotion.error == IR_OK, "SROA and promotion take an assembled vector's function");
                 if (checked.error == IR_OK && promotion.error == IR_OK)
                 {

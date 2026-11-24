@@ -1,0 +1,18 @@
+function (ptr) -> void {
+b0:
+  %0 = param.ptr 0
+  %1 = load.m16 %0 align=2
+  %2 = address.ptr %0 offset=8
+  %3 = load.m64 %2 align=8
+  %4 = address.ptr %0 offset=16
+  %5 = load.m8 %4 align=1
+  %6 = call.void @9() fixed=() variadic=0
+  %7 = not.m16 %1
+  %8 = address.ptr %0 offset=128
+  %9 = store.void %8, %7 align=2
+  %10 = address.ptr %0 offset=136
+  %11 = store.void %10, %3 align=8
+  %12 = address.ptr %0 offset=144
+  %13 = store.void %12, %5 align=1
+  %14 = ret.void
+}

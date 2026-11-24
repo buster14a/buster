@@ -1,0 +1,3 @@
+#pragma clang fp eval_method(extended)
+#define T(e,t) _Static_assert(_Generic((e),t:1,default:0),"evaluation type")
+float x;double y;float _Complex z;double _Complex w;typedef float V __attribute__((vector_size(16)));V v;T(+x,long double);T(x+x,long double);T(+y,long double);T(x?y:y,long double);T((double)(y+y),double);T(z+z,long double _Complex);T(w+w,long double _Complex);T(~w,long double _Complex);T(__real__ w,double);T(v+v,V);T(x?v:v,V);T(v+x,V);T(__builtin_elementwise_abs(v),V);T(__builtin_elementwise_abs(y),long double);_Static_assert(sizeof(x+x)==16 && sizeof(y+y)==16 && sizeof(v+v)==16,"evaluation sizes");_Static_assert((9007199254740992.0+1.0)-9007199254740992.0==1,"extended constant");

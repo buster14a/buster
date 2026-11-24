@@ -1,0 +1,41 @@
+function (ptr) -> void {
+b0:
+  %0 = param.ptr 0
+  %1 = const.m8 0x00000000000000000000000000000000
+  %2 = address.ptr %0 offset=128
+  %3 = store.void %2, %1 align=1
+  %4 = const.m8 0x000000000000000000000000000000ff
+  %5 = address.ptr %0 offset=129
+  %6 = store.void %5, %4 align=1
+  %7 = const.m8 0x0000000000000000000000000000005a
+  %8 = address.ptr %0 offset=130
+  %9 = store.void %8, %7 align=1
+  %10 = const.m16 0x0000000000000000000000000000ffff
+  %11 = address.ptr %0 offset=132
+  %12 = store.void %11, %10 align=2
+  %13 = const.m16 0x0000000000000000000000000000a5c3
+  %14 = address.ptr %0 offset=134
+  %15 = store.void %14, %13 align=2
+  %16 = const.m32 0x000000000000000000000000ffffffff
+  %17 = address.ptr %0 offset=136
+  %18 = store.void %17, %16 align=4
+  %19 = const.m32 0x00000000000000000000000080000001
+  %20 = address.ptr %0 offset=140
+  %21 = store.void %20, %19 align=4
+  %22 = const.m64 0x0000000000000000ffffffffffffffff
+  %23 = address.ptr %0 offset=144
+  %24 = store.void %23, %22 align=8
+  %25 = const.m64 0x00000000000000008000000000000001
+  %26 = address.ptr %0 offset=152
+  %27 = store.void %26, %25 align=8
+  %28 = const.m64 0x00000000000000000000000012345678
+  %29 = address.ptr %0 offset=160
+  %30 = store.void %29, %28 align=8
+  %31 = const.m64 0x00000000000000000000000000000000
+  %32 = address.ptr %0 offset=168
+  %33 = store.void %32, %31 align=8
+  %34 = const.m16 0x00000000000000000000000000000000
+  %35 = address.ptr %0 offset=176
+  %36 = store.void %35, %34 align=2
+  %37 = ret.void
+}

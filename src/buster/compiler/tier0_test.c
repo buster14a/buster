@@ -2,12 +2,12 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 
 //
-// Tier 0's tests (test-tier0): generated programs (tier0_generate.c) compiled by both paths, which must agree on every
-// per-entry column and every record; their records valid for x86_validate and their branch columns for
-// branch_sizing_validate; then sized, encoded, loaded into memory and run in a child process, which must give what an
-// interpreter of the typed stream gives, the result and the globals' bytes, for random inputs. With --cross-check, the
-// same programs printed as C and compiled by clang -O0 are linked beside Tier 0's objects (written by the object writer)
-// into one executable, which runs both on the same inputs and compares them, and their code's sizes are compared.
+// Tier 0's tests (test-tier0): generated programs (tier0_generate.c) compiled, their code folded into a frozen digest
+// (BUSTER_TIER0_TEST_DIGEST); their records valid for x86_validate and their branch columns for branch_sizing_validate;
+// then sized, encoded, loaded into memory and run in a child process, which must give what an interpreter of the typed
+// stream gives, the result and the globals' bytes, for random inputs. With --cross-check, the same programs printed as
+// C and compiled by clang -O0 are linked beside Tier 0's objects (written by the object writer) into one executable,
+// which runs both on the same inputs and compares them, and their code's sizes are compared.
 //
 // Usage: build/compiler test-tier0 [--seed N] [--count N] [--cross-check] [--clang PATH] [--keep]
 //
@@ -712,8 +712,54 @@ struct Tier0TestCode
     // The conditions tested against zero that are their compare's jump (#2877), by how the compare takes its operands
     // (both on the stack, a constant, a local, a local and a constant, two locals), behind one test and then two.
     uint64_t tested[BUSTER_TIER0_TEST_TESTED_WAYS];
+    // The functions' code, folded in order (tier0_test_fold_code) by tier0_test_build.
+    uint64_t digest;
 };
 #endif
+// The random programs' code (tier0_test_programs, every shape in turn), folded in order by tier0_test_fold_code: with the
+// default seed and count it must give BUSTER_TIER0_TEST_DIGEST. Frozen where tier0_compile and its scalar twin gave the
+// same code for every function (#2972); a change to Tier 0's code or to the generator moves it, and a run reports its own.
+#define BUSTER_TIER0_TEST_DIGEST UINT64_C(0xea441cc3cbf308b2)
+#define BUSTER_TIER0_TEST_DIGEST_BASIS UINT64_C(0xcbf29ce484222325)
+
+// `size` bytes folded into `digest` (FNV-1a).
+static uint64_t tier0_test_fold(uint64_t digest, const void* bytes, uint64_t size)
+{
+    const uint8_t* at = bytes;
+    uint64_t folded = digest;
+    for (uint64_t i = 0; i < size; i += 1)
+    {
+        folded = (folded ^ at[i]) * UINT64_C(0x100000001b3);
+    }
+    return folded;
+}
+
+// A function's code folded into `digest`: its records, branch columns, references (field by field: the struct has
+// padding), the entries' first records, and the frame.
+static uint64_t tier0_test_fold_code(uint64_t digest, const Tier0Code* code)
+{
+    uint64_t folded = tier0_test_fold(digest, &code->count, sizeof(code->count));
+    folded = tier0_test_fold(folded, code->records, (uint64_t)code->count * sizeof(X86Instruction));
+    folded = tier0_test_fold(folded, &code->branch_count, sizeof(code->branch_count));
+    folded = tier0_test_fold(folded, code->branches, (uint64_t)code->branch_count * sizeof(uint32_t));
+    folded = tier0_test_fold(folded, code->targets, (uint64_t)code->branch_count * sizeof(uint32_t));
+    folded = tier0_test_fold(folded, &code->reference_count, sizeof(code->reference_count));
+    for (uint32_t r = 0; r < code->reference_count; r += 1)
+    {
+        const LinkReference* reference = &code->references[r];
+        folded = tier0_test_fold(folded, &reference->instruction, sizeof(reference->instruction));
+        folded = tier0_test_fold(folded, &reference->field, sizeof(reference->field));
+        folded = tier0_test_fold(folded, &reference->kind, sizeof(reference->kind));
+        folded = tier0_test_fold(folded, &reference->target, sizeof(reference->target));
+        folded = tier0_test_fold(folded, &reference->addend, sizeof(reference->addend));
+    }
+    folded = tier0_test_fold(folded, &code->entry_count, sizeof(code->entry_count));
+    folded = tier0_test_fold(folded, code->entry_records, code->entry_records != 0 ? ((uint64_t)code->entry_count + 1) * sizeof(uint32_t) : 0);
+    const uint32_t frame[] = { code->frame_saved, code->frame_size, code->frame_pointer, code->frame_alignment_log2, code->frame_base };
+    folded = tier0_test_fold(folded, frame, sizeof(frame));
+    return folded;
+}
+
 // Whether two compilations of a function made the same code: records, branch columns, references, labels' records and
 // the entries' first records.
 static bool tier0_test_same_code(const Tier0Code* a, const Tier0Code* b)
@@ -762,7 +808,6 @@ static void tier0_test_wide_call_depths(Tier0TestTally* tally)
                     const uint32_t call = before_integer + before_floating;
                     const uint32_t after_integer = floating != 0 ? 0 : prefix + 1;
                     const uint32_t after_floating = floating != 0 ? prefix + 1 : 0;
-                    for (uint32_t vector = 0; vector < 2; vector += 1)
                     {
                         arena_pop_to(&scratch, 0);
                         uint8_t kinds[capacity] = { 0 };
@@ -798,7 +843,7 @@ static void tier0_test_wide_call_depths(Tier0TestTally* tally)
                         };
                         Tier0Frame frame = { .depth_count = 15, .save_slots = UINT32_MAX };
                         uint32_t deep_count = 0;
-                        const Tier0Error error = tier0_select_deep(&function, &entries, &frame, &scratch, vector != 0, &deep_count);
+                        const Tier0Error error = tier0_select_deep(&function, &entries, &frame, &scratch, &deep_count);
                         bool correct = error == TIER0_OK;
                         if (correct)
                         {
@@ -810,8 +855,8 @@ static void tier0_test_wide_call_depths(Tier0TestTally* tally)
                                       ((flags & BUSTER_TIER0_DEEP_FILL_INTEGER) != 0) == (after_integer <= 15) &&
                                       ((flags & BUSTER_TIER0_DEEP_FILL_FLOATING) != 0) == (after_floating <= BUSTER_TIER0_FLOATING_DEPTHS);
                         }
-                        tier0_test_expect(tally, correct, "wide call depths", "%u arguments, prefix %u, floating %u, indirect %u, vector %u: error %u",
-                                          arguments, prefix, floating, indirect, vector, (uint32_t)error);
+                        tier0_test_expect(tally, correct, "wide call depths", "%u arguments, prefix %u, floating %u, indirect %u: error %u", arguments,
+                                          prefix, floating, indirect, (uint32_t)error);
                     }
                 }
             }
@@ -820,8 +865,8 @@ static void tier0_test_wide_call_depths(Tier0TestTally* tally)
     arena_release(&scratch);
 }
 
-// Scalar per-entry lengths must hold a whole call's copies, not only one argument's. Exercise the 16-bit
-// crossing in ordinary and deep calls without executing their source addresses; both encoders must agree too.
+// Per-entry lengths must hold a whole call's copies, not only one argument's. Exercise the 16-bit crossing in ordinary
+// and deep calls without executing their source addresses; the records must encode.
 static void tier0_test_large_call_records(Tier0TestTally* tally)
 {
     enum { ARGUMENTS = 16, ENTRIES = ARGUMENTS + 2 };
@@ -888,19 +933,16 @@ static void tier0_test_large_call_records(Tier0TestTally* tally)
             .entry_records = true,
         };
         const Tier0Check checked = tier0_validate(&function);
-        const Tier0Code scalar = checked.error == TIER0_OK ? tier0_compile_scalar(&function, &arena) : (Tier0Code){ .error = TIER0_ERROR_INVALID };
         const Tier0Code vector = checked.error == TIER0_OK ? tier0_compile(&function, &arena) : (Tier0Code){ .error = TIER0_ERROR_INVALID };
-        bool same = scalar.error == TIER0_OK && vector.error == TIER0_OK && tier0_test_same_code(&scalar, &vector) &&
-                    (arguments == 7 ? scalar.count < UINT16_MAX : scalar.count > UINT16_MAX) && (arguments != 16 || scalar.deep != 0) &&
-                    x86_validate(scalar.records, scalar.count) == scalar.count;
-        const uint64_t capacity = same ? BUSTER_X86_ENCODER_CAPACITY(scalar.count) : 0;
-        uint8_t* a = same ? BUSTER_ARENA_PUSH_ARRAY(&arena, uint8_t, capacity) : NULL;
-        uint32_t* ends = same ? BUSTER_ARENA_PUSH_ARRAY(&arena, uint32_t, (uint64_t)scalar.count + 1) : NULL;
-        same = same && a != NULL && ends != NULL;
-        const int64_t a_length = same ? x86_encode(scalar.records, scalar.count, a, capacity, 0, ends) : -1;
-        tier0_test_expect(tally, same && a_length >= 0,
-                          "large call records", "%u maximum-size aggregates: validation %u, scalar %u/%u records, vector %u/%u", arguments,
-                          checked.error, scalar.error, scalar.count, vector.error, vector.count);
+        bool valid = vector.error == TIER0_OK && (arguments == 7 ? vector.count < UINT16_MAX : vector.count > UINT16_MAX) && (arguments != 16 || vector.deep != 0) &&
+                     x86_validate(vector.records, vector.count) == vector.count;
+        const uint64_t capacity = valid ? BUSTER_X86_ENCODER_CAPACITY(vector.count) : 0;
+        uint8_t* a = valid ? BUSTER_ARENA_PUSH_ARRAY(&arena, uint8_t, capacity) : NULL;
+        uint32_t* ends = valid ? BUSTER_ARENA_PUSH_ARRAY(&arena, uint32_t, (uint64_t)vector.count + 1) : NULL;
+        valid = valid && a != NULL && ends != NULL;
+        const int64_t a_length = valid ? x86_encode(vector.records, vector.count, a, capacity, 0, ends) : -1;
+        tier0_test_expect(tally, valid && a_length >= 0, "large call records", "%u maximum-size aggregates: validation %u, %u/%u records", arguments, checked.error,
+                          vector.error, vector.count);
     }
     arena_release(&arena);
 }
@@ -909,14 +951,9 @@ static void tier0_test_large_call_records(Tier0TestTally* tally)
 // maximum representable boundary reaches the real arena-capacity check; an unrepresentable total touches nothing.
 static void tier0_test_record_count_bounds(Tier0TestTally* tally)
 {
-    uint32_t lengths[] = { UINT32_MAX - 64, 32, 64 };
-    uint32_t positions[4] = { 0 };
-    Tier0Entries entries = { .lengths = lengths, .positions = positions };
-    const Tier0Function function = { .count = BUSTER_ARRAY_LENGTH(lengths) };
-    tier0_positions_scalar(&function, &entries, 7);
-    const uint64_t expected = (uint64_t)UINT32_MAX + 39;
-    tier0_test_expect(tally, entries.record_count == expected && positions[0] == 7 && positions[1] == UINT32_MAX - 57 && positions[2] == UINT32_MAX - 25,
-                      "record count bounds", "the scalar prefix retains its full cumulative count");
+    // The total of lengths UINT32_MAX - 64, 32 and 64 after a prologue of 7, which measuring's 64-bit carry keeps
+    // whole.
+    const uint64_t past = (uint64_t)UINT32_MAX + 39;
     Arena arena = arena_reserve(4096);
     const bool ready = tier0_test_expect(tally, arena.base != NULL, "record count bounds", "no small output arena");
     if (ready)
@@ -926,7 +963,7 @@ static void tier0_test_record_count_bounds(Tier0TestTally* tally)
         const bool room = tier0_push_output(&boundary, &arena, limit, (Tier0Counts){ 0 }, NULL, 0);
         tier0_test_expect(tally, !room && boundary.count == limit, "record count bounds", "the exact representable boundary reaches real capacity checking");
         arena_pop_to(&arena, 0);
-        const uint64_t counts[] = { limit + 1, entries.record_count, (uint64_t)UINT32_MAX - 3 + 4, UINT64_MAX };
+        const uint64_t counts[] = { limit + 1, past, (uint64_t)UINT32_MAX - 3 + 4, UINT64_MAX };
         for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(counts); c += 1)
         {
             Tier0Code code = { .count = 19, .node = 27 };
@@ -959,7 +996,7 @@ static bool tier0_test_covered(Tier0TestTally* tally, const char* check, const c
     return result;
 }
 
-// Compiles every function of the program by both paths (which must agree), checks the records and branch columns,
+// Compiles every function of the program, folds its code into the digest, checks the records and branch columns,
 // sizes the branches and encodes each function into `code`.
 static void tier0_test_scan_program(Tier0TestTally* tally, const Tier0Function* function, Arena* arena, uint64_t seed, uint32_t changes, uint64_t* taken);
 
@@ -991,6 +1028,26 @@ static bool tier0_test_build(Tier0TestTally* tally, const Tier0Functions* functi
     bool result = true;
     code->size = 0;
     code->fixup_count = 0;
+    // The batch (#2874): the program's functions compiled together, each pass over every one of them before the next
+    // (tier0_compile_batch), and the list taken again until it is past a batch's functions, so that the batches are cut
+    // by their functions and by their entries. Each one's code must be its own compile's (below).
+    const uint64_t batch_mark = arena->length;
+    const uint32_t batch_repeats = functions->count != 0 ? BUSTER_TIER0_BATCH_JOBS / functions->count + 2 : 0;
+    const uint32_t batch_count = batch_repeats * functions->count;
+    Tier0Function* batch_functions = BUSTER_ARENA_PUSH_ARRAY(arena, Tier0Function, (uint64_t)batch_count + 1);
+    const Tier0Function** batch_list = BUSTER_ARENA_PUSH_ARRAY(arena, const Tier0Function*, (uint64_t)batch_count + 1);
+    Tier0Code* batch_codes = BUSTER_ARENA_PUSH_ARRAY(arena, Tier0Code, (uint64_t)batch_count + 1);
+    result = tier0_test_expect(tally, batch_functions != 0 && batch_list != 0 && batch_codes != 0, "batch", "seed %" PRIu64 ": no room for the batch", seed);
+    for (uint32_t k = 0; result && k < batch_count; k += 1)
+    {
+        batch_functions[k] = functions->functions[k % functions->count];
+        batch_functions[k].entry_records = true;
+        batch_list[k] = &batch_functions[k];
+    }
+    if (result)
+    {
+        tier0_compile_batch(batch_list, batch_count, arena, batch_codes);
+    }
     for (uint32_t f = 0; f < functions->count && result; f += 1)
     {
         const Tier0Function* function = &functions->functions[f];
@@ -1013,12 +1070,16 @@ static bool tier0_test_build(Tier0TestTally* tally, const Tier0Functions* functi
         // make the same code and none of them.
         Tier0Function wanted = *function;
         wanted.entry_records = true;
-        Tier0Code scalar = result ? tier0_compile_scalar(&wanted, arena) : (Tier0Code){ 0 };
         Tier0Code vector = result ? tier0_compile(&wanted, arena) : (Tier0Code){ 0 };
         const Tier0Code plain = result ? tier0_compile(function, arena) : (Tier0Code){ 0 };
-        result = result && tier0_test_expect(tally, scalar.error == TIER0_OK, "compile", "seed %" PRIu64 " function %u: error %d at entry %u", seed, f, scalar.error,
-                                             scalar.node);
-        result = result && tier0_test_expect(tally, tier0_test_same_code(&scalar, &vector), "twins", "seed %" PRIu64 " function %u: the paths differ", seed, f);
+        result = result && tier0_test_expect(tally, vector.error == TIER0_OK, "compile", "seed %" PRIu64 " function %u: error %d at entry %u", seed, f, vector.error,
+                                             vector.node);
+        code->digest = result ? tier0_test_fold_code(code->digest, &vector) : code->digest;
+        for (uint32_t r = 0; result && r < batch_repeats; r += 1)
+        {
+            result = tier0_test_expect(tally, tier0_test_same_code(&batch_codes[r * functions->count + f], &vector), "batch",
+                                       "seed %" PRIu64 " function %u: its code in a batch of %u (copy %u) isn't its own compile's", seed, f, batch_count, r);
+        }
         // The calls' memo (#2874): the same code with an empty table, whatever the thread's held from the functions and
         // programs compiled before this one.
         const Tier0CallMemo thread_memo = tier0_call_memo_swap((Tier0CallMemo){ 0 });
@@ -1034,44 +1095,44 @@ static bool tier0_test_build(Tier0TestTally* tally, const Tier0Functions* functi
             calls |= function->kinds[i] == BUSTER_TYPED_CALL;
         }
         const bool kept = function->frame_pointer == BUSTER_TIER0_FRAME_POINTER_ALL || (function->frame_pointer == BUSTER_TIER0_FRAME_POINTER_NON_LEAF && calls);
-        result = result && tier0_test_expect(tally, !kept || scalar.frame_pointer, "frame pointer", "seed %" PRIu64 " function %u: the frame pointer the options keep is missing", seed, f);
+        result = result && tier0_test_expect(tally, !kept || vector.frame_pointer, "frame pointer", "seed %" PRIu64 " function %u: the frame pointer the options keep is missing", seed, f);
         result = result && tier0_test_expect(tally, plain.error == TIER0_OK && plain.entry_records == 0 && plain.entry_count == 0 && plain.count == vector.count &&
                                                     memcmp(plain.records, vector.records, (uint64_t)plain.count * sizeof(X86Instruction)) == 0,
                                              "entries", "seed %" PRIu64 " function %u: a compile without the entries' first records differs or makes them", seed, f);
-        code->records += scalar.count;
+        code->records += vector.count;
         code->entries += function->count;
-        code->deferred += scalar.deferred;
-        code->deep += scalar.deep;
-        code->realigned += scalar.frame_alignment_log2 != 0 ? 1 : 0;
-        code->based += scalar.frame_base ? 1 : 0;
+        code->deferred += vector.deferred;
+        code->deep += vector.deep;
+        code->realigned += vector.frame_alignment_log2 != 0 ? 1 : 0;
+        code->based += vector.frame_base ? 1 : 0;
         if (result)
         {
-            const uint64_t valid = x86_validate(scalar.records, scalar.count);
-            result = tier0_test_expect(tally, valid == scalar.count, "records", "seed %" PRIu64 " function %u: record %" PRIu64 " of %u is invalid", seed, f, valid,
-                                       scalar.count);
+            const uint64_t valid = x86_validate(vector.records, vector.count);
+            result = tier0_test_expect(tally, valid == vector.count, "records", "seed %" PRIu64 " function %u: record %" PRIu64 " of %u is invalid", seed, f, valid,
+                                       vector.count);
             char name[64];
             snprintf(name, sizeof(name), "seed %" PRIu64 " function %u", seed, f);
-            result = result && tier0_test_covered(tally, "effects", name, &scalar);
+            result = result && tier0_test_covered(tally, "effects", name, &vector);
             uint32_t conversions = 0;
-            const uint32_t unbroken = tier0_test_unbroken_conversion(scalar.records, scalar.count, &conversions);
-            result = result && tier0_test_expect(tally, unbroken == scalar.count, "conversions",
+            const uint32_t unbroken = tier0_test_unbroken_conversion(vector.records, vector.count, &conversions);
+            result = result && tier0_test_expect(tally, unbroken == vector.count, "conversions",
                                                  "seed %" PRIu64 " function %u: record %u converts into a register it doesn't zero first (#3308)", seed, f, unbroken);
             // #3335: at a target with AVX, no legacy SSE record that has a VEX twin is left, but an asm body's.
-            uint32_t legacy = scalar.count;
-            for (uint32_t r = 0; function->avx && function->asm_body_count == 0 && r < scalar.count; r += 1)
+            uint32_t legacy = vector.count;
+            for (uint32_t r = 0; function->avx && function->asm_body_count == 0 && r < vector.count; r += 1)
             {
-                legacy = legacy == scalar.count && x86_vex_forms_tier0[(scalar.records[r].form & BUSTER_X86_FORM_NUMBER) % X86_FORM_COUNT] != 0 ? r : legacy;
+                legacy = legacy == vector.count && x86_vex_forms_tier0[(vector.records[r].form & BUSTER_X86_FORM_NUMBER) % X86_FORM_COUNT] != 0 ? r : legacy;
             }
-            result = result && tier0_test_expect(tally, legacy == scalar.count, "VEX twins",
+            result = result && tier0_test_expect(tally, legacy == vector.count, "VEX twins",
                                                  "seed %" PRIu64 " function %u: record %u is a legacy SSE record at a target with AVX (#3335)", seed, f, legacy);
         }
         if (result)
         {
             // The entries' first records: one per entry and the epilogue's, ascending, within the records.
-            bool ascending = scalar.entry_count == function->count && scalar.entry_records[scalar.entry_count] <= scalar.count;
-            for (uint32_t e = 0; ascending && e < scalar.entry_count; e += 1)
+            bool ascending = vector.entry_count == function->count && vector.entry_records[vector.entry_count] <= vector.count;
+            for (uint32_t e = 0; ascending && e < vector.entry_count; e += 1)
             {
-                ascending = scalar.entry_records[e] <= scalar.entry_records[e + 1];
+                ascending = vector.entry_records[e] <= vector.entry_records[e + 1];
             }
             result = tier0_test_expect(tally, ascending, "entries", "seed %" PRIu64 " function %u: the entries' first records aren't ascending within the records", seed, f);
         }
@@ -1081,7 +1142,7 @@ static bool tier0_test_build(Tier0TestTally* tally, const Tier0Functions* functi
             // record, which only the jump on a compare's flags is, the tests between make none, and the leaves the
             // compare fuses, which make none either, say how it takes its operands.
             const uint8_t* kinds = function->kinds;
-            const uint32_t* firsts = scalar.entry_records;
+            const uint32_t* firsts = vector.entry_records;
             for (uint32_t i = 3; i < function->count; i += 1)
             {
                 const bool branch = (kinds[i] == BUSTER_TYPED_BRANCH_FALSE || kinds[i] == BUSTER_TYPED_BRANCH_TRUE) && firsts[i + 1] - firsts[i] == 1;
@@ -1099,30 +1160,30 @@ static bool tier0_test_build(Tier0TestTally* tally, const Tier0Functions* functi
         }
         if (result)
         {
-            const BranchSizingCheck sizing = branch_sizing_validate(scalar.records, scalar.count, scalar.branches, scalar.targets, scalar.branch_count);
+            const BranchSizingCheck sizing = branch_sizing_validate(vector.records, vector.count, vector.branches, vector.targets, vector.branch_count);
             result = tier0_test_expect(tally, sizing.error == BRANCH_SIZING_OK, "branches", "seed %" PRIu64 " function %u: error %d at %" PRIu64, seed, f, sizing.error,
                                        sizing.index);
         }
-        uint32_t* offsets = result ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)scalar.count + 1) : 0;
-        uint32_t* ends = result ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, BUSTER_X86_ENCODER_FIXUP_CAPACITY(scalar.reference_count)) : 0;
+        uint32_t* offsets = result ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)vector.count + 1) : 0;
+        uint32_t* ends = result ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, BUSTER_X86_ENCODER_FIXUP_CAPACITY(vector.reference_count)) : 0;
         if (result && offsets != 0 && ends != 0)
         {
-            const BranchSizing sizing = size_branches(scalar.records, scalar.count, scalar.branches, scalar.targets, scalar.branch_count, offsets);
+            const BranchSizing sizing = size_branches(vector.records, vector.count, vector.branches, vector.targets, vector.branch_count, offsets);
             const uint32_t start = (code->size + 15) & ~15u;
-            const uint64_t capacity = BUSTER_X86_ENCODER_CAPACITY(scalar.count);
+            const uint64_t capacity = BUSTER_X86_ENCODER_CAPACITY(vector.count);
             result = tier0_test_expect(tally, sizing.error == BRANCH_SIZING_OK && start + capacity <= BUSTER_TIER0_TEST_CODE_BYTES &&
-                                                  code->fixup_count + scalar.reference_count <= BUSTER_TIER0_TEST_FIXUPS,
+                                                  code->fixup_count + vector.reference_count <= BUSTER_TIER0_TEST_FIXUPS,
                                        "encode", "seed %" PRIu64 " function %u: sizing error %d or no room", seed, f, sizing.error);
-            const int64_t length = result ? x86_encode(scalar.records, scalar.count, code->code + start, capacity, 0, ends) : -1;
+            const int64_t length = result ? x86_encode(vector.records, vector.count, code->code + start, capacity, 0, ends) : -1;
             result = result && tier0_test_expect(tally, length >= 0, "encode", "seed %" PRIu64 " function %u: x86_encode failed", seed, f);
             if (result)
             {
                 // The k-th reference is the k-th marked record's: one symbolic field each.
-                for (uint32_t r = 0; r < scalar.reference_count; r += 1)
+                for (uint32_t r = 0; r < vector.reference_count; r += 1)
                 {
-                    const LinkReference* reference = &scalar.references[r];
+                    const LinkReference* reference = &vector.references[r];
                     const uint32_t end = ends[r];
-                    const uint32_t field = end - x86_fixup_distance(scalar.records[reference->instruction].form, reference->field);
+                    const uint32_t field = end - x86_fixup_distance(vector.records[reference->instruction].form, reference->field);
                     code->fields[code->fixup_count] = start + field;
                     code->ends[code->fixup_count] = start + end;
                     code->targets[code->fixup_count] = reference->target;
@@ -1140,6 +1201,7 @@ static bool tier0_test_build(Tier0TestTally* tally, const Tier0Functions* functi
         }
         arena_pop_to(arena, mark);
     }
+    arena_pop_to(arena, batch_mark);
     return result;
 }
 
@@ -1320,9 +1382,9 @@ static __attribute__((no_sanitize("function"))) bool tier0_test_run(const Tier0P
 // ---------------------------------------------------------------------------------------------------------------------
 // The checks
 
-// Programs from consecutive seeds: generated, compiled by both paths, run natively and by the interpreter, compared.
-// What the programs' records exercise (#137), as tier0_emit_call, the prologue and the epilogue take them: arguments on
-// the stack and ignored, each kind of part loaded (a general register's exactly, overlapping, through a temporary; an XMM
+// Programs from consecutive seeds: generated, compiled, run natively and by the interpreter, compared. What the
+// programs' records exercise (#137), as tier0_emit_call, the prologue and the epilogue take them: arguments on the
+// stack and ignored, each kind of part loaded (a general register's exactly, overlapping, through a temporary; an XMM
 // register's exactly and through a temporary), results stored in registers and through a hidden pointer, parameters
 // arriving in registers and on the stack, and functions returning records in registers and through a hidden pointer.
 // And functions with a frame pointer (variable-length arrays, #136's item 8) that pass, take or return a record, whose
@@ -1382,7 +1444,7 @@ static void tier0_test_coverage(const Tier0Functions* functions, uint64_t* cover
 }
 
 static void tier0_test_programs(Tier0TestTally* tally, Tier0Tables* tables, uint64_t seed, uint32_t count, Tier0ProgramOptions options, uint64_t* records,
-                                uint64_t* entries, uint64_t* deferred, uint64_t* deep, uint64_t* frames, uint64_t* tested, uint64_t* coverage)
+                                uint64_t* entries, uint64_t* deferred, uint64_t* deep, uint64_t* frames, uint64_t* tested, uint64_t* coverage, uint64_t* digest)
 {
     Arena arena = arena_reserve(1ull << 32);
     Tier0TestCode* code = BUSTER_ARENA_PUSH_ARRAY(&arena, Tier0TestCode, 1);
@@ -1391,6 +1453,7 @@ static void tier0_test_programs(Tier0TestTally* tally, Tier0Tables* tables, uint
     if (tier0_test_expect(tally, code != 0 && code_bytes != 0 && globals != 0, "programs", "no memory"))
     {
         code->code = code_bytes;
+        code->digest = *digest;
         for (uint32_t p = 0; p < count; p += 1)
         {
             const uint64_t program_seed = seed + p;
@@ -1406,7 +1469,7 @@ static void tier0_test_programs(Tier0TestTally* tally, Tier0Tables* tables, uint
             const uint8_t frame_pointer = program_seed % 4 == 2 ? BUSTER_TIER0_FRAME_POINTER_ALL : program_seed % 4 == 3 ? BUSTER_TIER0_FRAME_POINTER_NON_LEAF : BUSTER_TIER0_FRAME_POINTER_NONE;
             // Half the programs, in each of those quarters, probe their frames and allocations (#177,
             // -fstack-clash-protection): ALLOCA's loop runs natively against the same oracle, and its branches and the
-            // prologue's are both paths' twins.
+            // prologue's are in the digest.
             const bool probe_stack = (program_seed / 4) % 2 == 1;
             // Half the programs, in each of those eighths, at a target with AVX (#3335) where the host has it: their legacy
             // SSE records' VEX twins (tier0_vex) run natively against the same oracle.
@@ -1476,6 +1539,7 @@ static void tier0_test_programs(Tier0TestTally* tally, Tier0Tables* tables, uint
             }
             arena_pop_to(&arena, mark);
         }
+        *digest = code->digest;
     }
     arena_release(&arena);
 }
@@ -2142,14 +2206,14 @@ static void tier0_test_vex_window(Tier0TestTally* tally)
     }
 }
 
-// The chosen forms' application, the vector path's (tier0_apply_choices_vector, from a byte per form) against the
-// scalar path's (tier0_apply_choice, through x86_choice_instruction): random records, each given a candidate form of a
-// random row, or X86_FORM_NONE (which keeps the record), and a random value, in batches of 1 to 64.
+// The chosen forms' application (tier0_apply_choices_vector, from a byte per form) against the choice's definition
+// (x86_choice_instruction, with the fixup flag kept): random records, each given a candidate form of a random row, or
+// X86_FORM_NONE (which keeps the record), and a random value, in batches of 1 to 64.
 static void tier0_test_applies(Tier0TestTally* tally)
 {
     uint64_t random = 0x2545f4914f6cdd1dull;
     X86Instruction vector[64];
-    X86Instruction scalar[64];
+    X86Instruction expected[64];
     uint32_t indices[64];
     uint16_t forms[64];
     int64_t values[64];
@@ -2161,7 +2225,7 @@ static void tier0_test_applies(Tier0TestTally* tally)
             uint64_t halves[2] = { tier0_generate_random(&random), tier0_generate_random(&random) };
             memcpy(&vector[q], halves, sizeof(vector[q]));
             vector[q].form = (uint16_t)(tier0_generate_below(&random, X86_FORM_COUNT) | (tier0_generate_below(&random, 2) != 0 ? BUSTER_X86_FORM_FIXUP : 0));
-            scalar[q] = vector[q];
+            expected[q] = vector[q];
             const X86ChoiceRow* row = &x86_choice_rows[tier0_generate_below(&random, x86_choice_row_count)];
             const uint32_t candidate = tier0_generate_below(&random, BUSTER_X86_CHOICE_CANDIDATES + 1);
             forms[q] = candidate < BUSTER_X86_CHOICE_CANDIDATES ? row->forms[candidate] : X86_FORM_NONE;
@@ -2174,7 +2238,7 @@ static void tier0_test_applies(Tier0TestTally* tally)
         choices.forms = forms;
         choices.values = values;
         choices.count = count;
-        // Each request's record is at its index; the scalar path's applies in the same order.
+        // Each request's record is at its index.
         X86Instruction placed[64];
         for (uint32_t q = 0; q < count; q += 1)
         {
@@ -2184,15 +2248,20 @@ static void tier0_test_applies(Tier0TestTally* tally)
         bool same = true;
         for (uint32_t q = 0; q < count; q += 1)
         {
-            tier0_apply_choice(&scalar[q], forms[q], values[q]);
-            same &= memcmp(&placed[indices[q]], &scalar[q], sizeof(scalar[q])) == 0;
+            if (forms[q] != X86_FORM_NONE)
+            {
+                const uint16_t fixup = (uint16_t)(expected[q].form & BUSTER_X86_FORM_FIXUP);
+                expected[q] = x86_choice_instruction(forms[q], expected[q], values[q]);
+                expected[q].form |= fixup;
+            }
+            same &= memcmp(&placed[indices[q]], &expected[q], sizeof(expected[q])) == 0;
         }
         tier0_test_expect(tally, same, "applies", "round %u: %u requests, a record differs", round, count);
     }
 }
 
-// The errors both paths must report alike, on streams of the test's own: the first entry without a template (NOT of a
-// double, which tier0_validate refuses too: a stream the paths take covers every entry) wherever it falls among
+// The errors the compile must report, on streams of the test's own: the first entry without a template (NOT of a
+// double, which tier0_validate refuses too: a stream the compile takes covers every entry) wherever it falls among
 // 64-entry blocks and after another, and an expression deeper than the integer depths.
 static void tier0_test_errors(Tier0TestTally* tally)
 {
@@ -2244,11 +2313,9 @@ static void tier0_test_errors(Tier0TestTally* tally)
         function.values = values;
         function.count = count;
         const uint64_t mark = arena.length;
-        const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
         const Tier0Code vector = tier0_compile(&function, &arena);
-        tier0_test_expect(tally, scalar.error == TIER0_ERROR_UNSUPPORTED && vector.error == scalar.error && scalar.node == expected && vector.node == expected,
-                          "errors", "the entry at %u: the scalar path's error %d at %u, the vector path's %d at %u", expected, scalar.error, scalar.node,
-                          vector.error, vector.node);
+        tier0_test_expect(tally, vector.error == TIER0_ERROR_UNSUPPORTED && vector.node == expected, "errors", "the entry at %u: error %d at %u", expected, vector.error,
+                          vector.node);
         arena_pop_to(&arena, mark);
     }
     static const uint32_t deeps[] = { 14, 15, 16, 17, 32, 239, 240, 241, 250, 255, 256, 257, 258, 511, 512, 513, 1000 };
@@ -2287,11 +2354,9 @@ static void tier0_test_errors(Tier0TestTally* tally)
         function.values = values;
         function.count = count;
         const uint64_t mark = arena.length;
-        const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
         const Tier0Code vector = tier0_compile(&function, &arena);
-        const Tier0Error expected = TIER0_OK;
-        tier0_test_expect(tally, scalar.error == expected && vector.error == expected && (expected != TIER0_OK || tier0_test_same_code(&scalar, &vector)), "errors",
-                          "%u values at once: the scalar path's error %d, the vector path's %d, %d expected", deep, scalar.error, vector.error, expected);
+        tier0_test_expect(tally, vector.error == TIER0_OK && x86_validate(vector.records, vector.count) == vector.count, "errors",
+                          "%u values at once: error %d, or an invalid record", deep, vector.error);
         arena_pop_to(&arena, mark);
     }
     {
@@ -2343,21 +2408,20 @@ static void tier0_test_errors(Tier0TestTally* tally)
         function.local_count = locals;
         const uint64_t mark = arena.length;
         const Tier0Check check = tier0_validate(&function);
-        const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
         const Tier0Code vector = tier0_compile(&function, &arena);
-        tier0_test_expect(tally, check.error == TIER0_OK && scalar.error == TIER0_OK && vector.error == TIER0_OK && tier0_test_same_code(&scalar, &vector), "errors",
-                          "%u locals set from constants: the paths' errors %d and %d, or their code differs", (uint32_t)locals, scalar.error, vector.error);
+        tier0_test_expect(tally, check.error == TIER0_OK && vector.error == TIER0_OK && x86_validate(vector.records, vector.count) == vector.count, "errors",
+                          "%u locals set from constants: error %d, or an invalid record", (uint32_t)locals, vector.error);
         arena_pop_to(&arena, mark);
     }
     arena_release(&arena);
 }
 
-// The objects (Tier0Function.local_sizes): the validator's rules, each broken one way on a function that keeps them; then
-// random frames of objects and value locals, compiled by both paths, which must agree: each LOCAL_ADDRESS's lea gives
-// its local's place, which must be a multiple of the object's alignment, inside the frame, and overlap no other local's
-// bytes, and a frame with an object aligned to 16 must leave rsp a multiple of 16 below the pushes and the return
-// address. A frame with an object aligned past 16 is realigned: rbp pushed and pointed at the push, the frame reserved
-// and rsp rounded down to the most an object needs, which the frame publishes, so that its places are rsp's.
+// The objects (Tier0Function.local_sizes): the validator's rules, each broken one way on a function that keeps them;
+// then random frames of objects and value locals, compiled and checked: each LOCAL_ADDRESS's lea gives its local's
+// place, which must be a multiple of the object's alignment, inside the frame, and overlap no other local's bytes, and
+// a frame with an object aligned to 16 must leave rsp a multiple of 16 below the pushes and the return address. A frame
+// with an object aligned past 16 is realigned: rbp pushed and pointed at the push, the frame reserved and rsp rounded
+// down to the most an object needs, which the frame publishes, so that its places are rsp's.
 static void tier0_test_objects(Tier0TestTally* tally, uint64_t seed)
 {
     enum
@@ -2480,15 +2544,14 @@ static void tier0_test_objects(Tier0TestTally* tally, uint64_t seed)
         if (valid && way != 9)
         {
             const uint64_t mark = arena.length;
-            const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
             const Tier0Code vector = tier0_compile(&function, &arena);
-            tier0_test_expect(tally, scalar.error == TIER0_OK && vector.error == TIER0_OK && tier0_test_same_code(&scalar, &vector), "objects",
-                              "an object %s: the paths' errors %d and %d, or their code differs", ways[way], scalar.error, vector.error);
+            tier0_test_expect(tally, vector.error == TIER0_OK && x86_validate(vector.records, vector.count) == vector.count, "objects",
+                              "an object %s: error %d, or an invalid record", ways[way], vector.error);
             arena_pop_to(&arena, mark);
         }
     }
     // A copy's rules: between two objects of 256 bytes, all of them, then each way to break them; and a move's (#1373,
-    // COPY's move form) of BUSTER_TIER0_MAX_MOVE_BYTES of them, which both paths compile alike.
+    // COPY's move form) of BUSTER_TIER0_MAX_MOVE_BYTES of them, which compiles.
     for (uint32_t way = 0; way < 7; way += 1)
     {
         for (uint32_t l = 0; l < 2; l += 1)
@@ -2548,10 +2611,9 @@ static void tier0_test_objects(Tier0TestTally* tally, uint64_t seed)
         if (kept && check.error == TIER0_OK)
         {
             const uint64_t mark = arena.length;
-            const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
             const Tier0Code vector = tier0_compile(&function, &arena);
-            tier0_test_expect(tally, scalar.error == TIER0_OK && vector.error == TIER0_OK && tier0_test_same_code(&scalar, &vector), "objects",
-                              "a copy %s: the paths' errors %d and %d, or their code differs", ways[way], scalar.error, vector.error);
+            tier0_test_expect(tally, vector.error == TIER0_OK && x86_validate(vector.records, vector.count) == vector.count, "objects",
+                              "a copy %s: error %d, or an invalid record", ways[way], vector.error);
             arena_pop_to(&arena, mark);
         }
     }
@@ -2611,19 +2673,18 @@ static void tier0_test_objects(Tier0TestTally* tally, uint64_t seed)
         function.local_count = locals;
         const uint64_t mark = arena.length;
         const Tier0Check check = tier0_validate(&function);
-        const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
         const Tier0Code vector = tier0_compile(&function, &arena);
-        bool laid = check.error == TIER0_OK && scalar.error == TIER0_OK && vector.error == TIER0_OK && tier0_test_same_code(&scalar, &vector);
+        bool laid = check.error == TIER0_OK && vector.error == TIER0_OK;
         // The prologue is the frame's sub alone (nothing is pushed), or in a realigned frame rbp's push and mov, the sub
         // and the and of rsp, then a lea per address-taken local, in order.
         const uint32_t reserve = realigned != 0 ? 2 : 0;
-        laid = laid && (realigned == 0 || (scalar.frame_pointer && scalar.frame_alignment_log2 == realigned && !scalar.frame_base && scalar.count > 4 &&
-                                           scalar.records[0].form == X86_FORM_PUSH_R64 && scalar.records[0].rm == X86_REGISTER_RBP &&
-                                           scalar.records[1].form == X86_FORM_MOV_RM64_R64 && scalar.records[1].rm == X86_REGISTER_RBP &&
-                                           (scalar.records[3].form == X86_FORM_AND_RM64_IMM8 || scalar.records[3].form == X86_FORM_AND_RM64_IMM32) &&
-                                           scalar.records[3].rm == X86_REGISTER_RSP && (int64_t)scalar.records[3].immediate == -(int64_t)(UINT64_C(1) << realigned)));
-        laid = laid && (realigned != 0 || (!scalar.frame_pointer && scalar.frame_alignment_log2 == 0));
-        const uint32_t size = laid && scalar.count > reserve && (scalar.records[reserve].form & ~BUSTER_X86_FORM_FIXUP) != X86_FORM_RET ? (uint32_t)scalar.records[reserve].immediate : 0;
+        laid = laid && (realigned == 0 || (vector.frame_pointer && vector.frame_alignment_log2 == realigned && !vector.frame_base && vector.count > 4 &&
+                                           vector.records[0].form == X86_FORM_PUSH_R64 && vector.records[0].rm == X86_REGISTER_RBP &&
+                                           vector.records[1].form == X86_FORM_MOV_RM64_R64 && vector.records[1].rm == X86_REGISTER_RBP &&
+                                           (vector.records[3].form == X86_FORM_AND_RM64_IMM8 || vector.records[3].form == X86_FORM_AND_RM64_IMM32) &&
+                                           vector.records[3].rm == X86_REGISTER_RSP && (int64_t)vector.records[3].immediate == -(int64_t)(UINT64_C(1) << realigned)));
+        laid = laid && (realigned != 0 || (!vector.frame_pointer && vector.frame_alignment_log2 == 0));
+        const uint32_t size = laid && vector.count > reserve && (vector.records[reserve].form & ~BUSTER_X86_FORM_FIXUP) != X86_FORM_RET ? (uint32_t)vector.records[reserve].immediate : 0;
         const uint32_t first = reserve + (size != 0 ? 1 : 0) + (realigned != 0 ? 1 : 0);
         uint32_t places[locals_capacity];
         uint32_t lea = first;
@@ -2632,8 +2693,8 @@ static void tier0_test_objects(Tier0TestTally* tally, uint64_t seed)
             if (local_flags[l] != 0)
             {
                 // The index first: code with fewer records than leas mustn't make the pointer past them.
-                laid &= lea < scalar.count;
-                const X86Instruction* record = laid ? &scalar.records[lea] : 0;
+                laid &= lea < vector.count;
+                const X86Instruction* record = laid ? &vector.records[lea] : 0;
                 laid = laid && record->form == X86_FORM_LEA_R64_M && record->rm == X86_REGISTER_RSP && record->displacement >= 0;
                 places[l] = laid ? (uint32_t)record->displacement : 0;
                 lea += 1;
@@ -2658,8 +2719,8 @@ static void tier0_test_objects(Tier0TestTally* tally, uint64_t seed)
             }
         }
         laid &= !sixteen || realigned != 0 || (size + 8) % 16 == 0;
-        tier0_test_expect(tally, laid, "objects", "round %u: %u locals, a frame of %u bytes (realigned to 2^%u): the paths disagree, or a local is misplaced", round, locals,
-                          size, realigned);
+        tier0_test_expect(tally, laid, "objects", "round %u: %u locals, a frame of %u bytes (realigned to 2^%u): an error, or a local is misplaced", round, locals, size,
+                          realigned);
         arena_pop_to(&arena, mark);
     }
     arena_release(&arena);
@@ -2719,15 +2780,15 @@ static void tier0_test_home_oracle(const Tier0Function* function, Tier0Frame* fr
 
 // All columns end at protected pages: tails around 16 and 64, then up to 100,000 locals. The keys cover ties, zeros,
 // arbitrary u32 counts, increasing/decreasing orders and the alternating references builtin recipes produce. Check
-// each prefix against the full order, then both complete home assignments against the original greedy policy.
+// each prefix against the full order, then the complete home assignment against the original greedy policy.
 static void tier0_test_home_candidates(Tier0TestTally* tally, uint64_t seed)
 {
     const uint32_t maximum = 100000;
     const uint64_t span = ((uint64_t)maximum * sizeof(uint64_t) + BUSTER_TIER0_TEST_PAGE - 1) / BUSTER_TIER0_TEST_PAGE * BUSTER_TIER0_TEST_PAGE;
     const uint64_t stride = span + BUSTER_TIER0_TEST_PAGE;
-    uint8_t* pages = mmap(0, 7 * stride, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    uint8_t* pages = mmap(0, 6 * stride, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     bool guarded = pages != MAP_FAILED;
-    for (uint32_t column = 0; column < 7 && guarded; column += 1)
+    for (uint32_t column = 0; column < 6 && guarded; column += 1)
     {
         guarded = mprotect(pages + column * stride + span, BUSTER_TIER0_TEST_PAGE, PROT_NONE) == 0;
     }
@@ -2741,9 +2802,8 @@ static void tier0_test_home_candidates(Tier0TestTally* tally, uint64_t seed)
         uint8_t* classes = pages + stride + span - locals;
         uint8_t* flags = pages + 2 * stride + span - locals;
         Tier0Home* expected = (Tier0Home*)(pages + 3 * stride + span) - locals;
-        Tier0Home* scalar = (Tier0Home*)(pages + 4 * stride + span) - locals;
-        Tier0Home* vector = (Tier0Home*)(pages + 5 * stride + span) - locals;
-        uint64_t* keys = (uint64_t*)(pages + 6 * stride + span) - locals;
+        Tier0Home* vector = (Tier0Home*)(pages + 4 * stride + span) - locals;
+        uint64_t* keys = (uint64_t*)(pages + 5 * stride + span) - locals;
         for (uint32_t pattern = 0; pattern < 10; pattern += 1)
         {
             for (uint32_t local = 0; local < locals; local += 1)
@@ -2795,32 +2855,27 @@ static void tier0_test_home_candidates(Tier0TestTally* tally, uint64_t seed)
                     }
                 }
             }
-            uint32_t orders[2][2 * BUSTER_TIER0_HOME_CANDIDATES + 1];
-            memset(orders, 0x9d, sizeof(orders));
-            const uint32_t scalar_count = tier0_register_locals(&function, expected, references, orders[0]);
-            const uint32_t vector_count = tier0_register_locals_vector(&function, expected, references, orders[1]);
-            const bool same = scalar_count == count && vector_count == count && memcmp(wanted, orders[0], count * sizeof(*wanted)) == 0 &&
-                              memcmp(wanted, orders[1], count * sizeof(*wanted)) == 0 && orders[0][count] == UINT32_C(0x9d9d9d9d) && orders[1][count] == UINT32_C(0x9d9d9d9d);
+            uint32_t order[2 * BUSTER_TIER0_HOME_CANDIDATES + 1];
+            memset(order, 0x9d, sizeof(order));
+            const uint32_t vector_count = tier0_register_locals_vector(&function, expected, references, order);
+            const bool same = vector_count == count && memcmp(wanted, order, count * sizeof(*wanted)) == 0 && order[count] == UINT32_C(0x9d9d9d9d);
             tier0_test_expect(tally, same, "home candidates", "%u locals, pattern %u: eligible prefixes differ", locals, pattern);
             Tier0Frame frame = { .clobbers = pattern % 3 == 0 ? 0 : pattern % 3 == 1 ? UINT32_MAX : tier0_generate_below(&random, UINT32_MAX),
                                  .pointer = pattern % 2 != 0, .based = pattern % 4 == 3 };
-            Tier0Frame scalar_frame = frame;
             Tier0Frame vector_frame = frame;
             tier0_test_home_oracle(&function, &frame, expected, references, keys);
-            tier0_assign_homes(&function, &scalar_frame, scalar, references, orders[0], false);
-            tier0_assign_homes(&function, &vector_frame, vector, references, orders[1], true);
-            const bool homes = memcmp(expected, scalar, (uint64_t)locals * sizeof(*expected)) == 0 && memcmp(expected, vector, (uint64_t)locals * sizeof(*expected)) == 0 &&
-                               frame.saved == scalar_frame.saved && frame.saved == vector_frame.saved && frame.pushes == scalar_frame.pushes && frame.pushes == vector_frame.pushes;
+            tier0_assign_homes(&function, &vector_frame, vector, references, order);
+            const bool homes = memcmp(expected, vector, (uint64_t)locals * sizeof(*expected)) == 0 && frame.saved == vector_frame.saved && frame.pushes == vector_frame.pushes;
             tier0_test_expect(tally, homes, "home candidates", "%u locals, pattern %u: complete homes or save masks differ from greedy oracle", locals, pattern);
         }
     }
     if (pages != MAP_FAILED)
     {
-        munmap(pages, 7 * stride);
+        munmap(pages, 6 * stride);
     }
 }
 
-// The frame's alignment, tier0_frame_alignment and its vector twin, against the test's own most: for every count of
+// The frame's alignment (tier0_frame_alignment_vector) against the test's own most: for every count of
 // locals to 40 and of calls to 12, random columns that each end at a PROT_NONE page, so that a read past one faults.
 // Sizes of 0 among the locals (not objects, whatever their alignment byte), alignments past 16 now and then (any byte,
 // up to 255), and calls whose every other byte is random too; then the same without local_sizes, the calls' alone.
@@ -2871,10 +2926,9 @@ static void tier0_test_frame_alignment(Tier0TestTally* tally, uint64_t seed)
                 function.call_count = calls;
                 const uint32_t most = with_sizes != 0 && objects_most > calls_most ? objects_most : calls_most;
                 const uint32_t expected = most > BUSTER_TIER0_FRAME_ALIGNMENT_LOG2 ? most : 0;
-                const uint32_t scalar = tier0_frame_alignment(&function);
                 const uint32_t vector = tier0_frame_alignment_vector(&function);
-                tier0_test_expect(tally, scalar == expected && vector == expected, "frame alignment", "%u locals (%s), %u calls: 2^%u expected, the paths give %u and %u",
-                                  locals, with_sizes != 0 ? "with sizes" : "no sizes", calls, expected, scalar, vector);
+                tier0_test_expect(tally, vector == expected, "frame alignment", "%u locals (%s), %u calls: 2^%u expected, %u given", locals,
+                                  with_sizes != 0 ? "with sizes" : "no sizes", calls, expected, vector);
             }
         }
     }
@@ -2943,9 +2997,9 @@ static void tier0_test_copy_widths(Tier0TestTally* tally)
 }
 
 // A copy's scratch register, its stacks' first free one (an XMM one above BUSTER_TIER0_COPY_NARROW_BYTES, a general
-// one below), must be in the frame's clobbers after either selection, so that no local makes it its home; past the
-// tables, selection says the function is too deep, and the compile takes the values to the deep slots. On copies above
-// every count of integer and floating values, of each size class, with both paths' code compared. The values are then
+// one below), must be in the frame's clobbers after the selection, so that no local makes it its home; past the tables,
+// selection says the function is too deep, and the compile takes the values to the deep slots. On copies above every
+// count of integer and floating values, of each size class, with the code validated. The values are then
 // folded in postorder, each consumer's last operand the entry before it: the doubles summed onto a zero pushed above
 // them, the sum converted, and the integers summed onto that. The zero takes one more floating depth, so that 16
 // doubles are too deep for the tables whatever the copy.
@@ -3029,38 +3083,27 @@ static void tier0_test_copies(Tier0TestTally* tally)
                 function.local_alignments = local_alignments;
                 function.local_count = 2;
                 const uint64_t mark = arena.length;
-                // The selections, from the scalar fusion's and depths' columns, which both paths compute alike.
+                // The selection, from the front's columns.
                 Tier0Entries entries;
-                uint64_t* labels = BUSTER_ARENA_PUSH_ARRAY(&arena, uint64_t, count / 64 + 2);
-                bool ready = labels != 0 && tier0_push_entries(&entries, &arena, count);
-                Tier0Frame frames[2];
-                Tier0Error errors[2] = { TIER0_OK, TIER0_OK };
-                memset(frames, 0, sizeof(frames));
+                const bool ready = tier0_vector_front(&function, &arena, &entries) == TIER0_OK;
+                Tier0Frame frame;
+                Tier0Error error = TIER0_OK;
+                memset(&frame, 0, sizeof(frame));
                 if (ready)
                 {
-                    memset(labels, 0, (count / 64 + 2) * sizeof(uint64_t));
-                    tier0_labels(&function, labels);
-                    tier0_fuse_scalar(&function, labels, &entries);
-                    tier0_depths_scalar(&function, &entries);
-                    (void)tier0_select(&function, &entries, &frames[0], &errors[0]);
-                    (void)tier0_select_vector(&function, &entries, &frames[1], &errors[1]);
+                    (void)tier0_select_vector(&function, &entries, &frame, &error);
                 }
                 const bool wide = sizes[s] > BUSTER_TIER0_COPY_NARROW_BYTES;
                 const uint32_t depth = ready ? entries.depths[copy] : 0;
                 const uint32_t floating = ready ? entries.floating_depths[copy] : 0;
                 const bool too_deep = floatings >= BUSTER_TIER0_FLOATING_DEPTHS || (wide ? floating >= BUSTER_TIER0_FLOATING_DEPTHS : depth >= BUSTER_TIER0_INTEGER_DEPTHS);
                 const uint32_t scratch = too_deep ? 0 : wide ? 1u << BUSTER_TIER0_XMM(floating) : 1u << tier0_integer_depths[depth];
-                bool counted = ready;
-                for (uint32_t path = 0; path < 2 && ready; path += 1)
-                {
-                    counted &= too_deep ? errors[path] == TIER0_ERROR_DEPTH : errors[path] == TIER0_OK && (frames[path].clobbers & scratch) != 0;
-                }
+                const bool counted = ready && (too_deep ? error == TIER0_ERROR_DEPTH : error == TIER0_OK && (frame.clobbers & scratch) != 0);
                 // Past the tables, the copy's values go to the deep slots (tier0_select_deep).
-                const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
                 const Tier0Code vector = tier0_compile(&function, &arena);
-                const bool compiled = scalar.error == TIER0_OK && vector.error == TIER0_OK && tier0_test_same_code(&scalar, &vector);
+                const bool compiled = vector.error == TIER0_OK && x86_validate(vector.records, vector.count) == vector.count;
                 tier0_test_expect(tally, counted && compiled, "copies", "a copy of %u bytes over %u integers and %u floating values: its scratch %s", sizes[s], integers,
-                                  floatings, counted ? "counted, but the paths differ" : "not in a selection's clobbers");
+                                  floatings, counted ? "counted, but the compile fails" : "not in the selection's clobbers");
                 arena_pop_to(&arena, mark);
             }
         }
@@ -3084,7 +3127,8 @@ struct Tier0TestProbe
 };
 
 #define BUSTER_TIER0_TEST_PROBE_RESULT 0x5a17c0deu
-#define BUSTER_TIER0_TEST_PROBE_RUNS 4
+// A run per fixture.
+#define BUSTER_TIER0_TEST_PROBE_RUNS 2
 
 // The probe's records: every register it watches stored into the state at `state` (movabs r10, then a store each),
 // then eax set to BUSTER_TIER0_TEST_PROBE_RESULT and ret. Returns the count.
@@ -3122,8 +3166,7 @@ static uint32_t tier0_test_probe(X86Instruction* records, uint64_t state)
 // doubles saved around the call, so that its arguments' moves run through r11 (rbx, r8, rdi, r11 and rcx) and through
 // the vector registers (xmm4, xmm2 and xmm0), and the values below must come back: the caller returns
 // d0 - (d1 - (d2 - (d3 - (long)(f0 - (f1 - (double)call))))), in postorder, so that each entry's last operand is the
-// entry before it. Both paths must compile each alike; the records encoded by each encoder run in a child, under an
-// alarm.
+// entry before it. Each compiles to valid records, which run in a child, under an alarm.
 static __attribute__((no_sanitize("function"))) void tier0_test_variadic_calls(Tier0TestTally* tally, const Tier0Tables* tables)
 {
     enum
@@ -3268,23 +3311,19 @@ static __attribute__((no_sanitize("function"))) void tier0_test_variadic_calls(T
         function.call_count = 1;
         function.argument_count = 9;
         const Tier0Check check = tier0_validate(&function);
-        const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
         const Tier0Code vector = tier0_compile(&function, &arena);
-        ready = tier0_test_expect(tally, check.error == TIER0_OK && scalar.error == TIER0_OK && tier0_test_same_code(&scalar, &vector), "variadic calls",
-                                  "fixture %u: rule \"%s\" at %u, error %d, or the paths differ", fixture, check.rule != 0 ? check.rule : "", check.node, scalar.error);
-        ready = ready && tier0_test_expect(tally, x86_validate(scalar.records, scalar.count) == scalar.count && scalar.branch_count == 0 && scalar.reference_count == 0,
+        ready = tier0_test_expect(tally, check.error == TIER0_OK && vector.error == TIER0_OK, "variadic calls", "fixture %u: rule \"%s\" at %u, error %d", fixture,
+                                  check.rule != 0 ? check.rule : "", check.node, vector.error);
+        ready = ready && tier0_test_expect(tally, x86_validate(vector.records, vector.count) == vector.count && vector.branch_count == 0 && vector.reference_count == 0,
                                            "variadic calls", "fixture %u: an invalid record, a branch or a reference", fixture);
-        // Each path's records, run apart.
-        for (uint32_t encoder = 0; encoder < 2 && ready; encoder += 1)
+        if (ready)
         {
-            const uint32_t run = fixture * 2 + encoder;
-            const Tier0Code* code = encoder == 0 ? &vector : &scalar;
-            const uint64_t room = BUSTER_X86_ENCODER_CAPACITY(code->count);
-            images[run] = BUSTER_ARENA_PUSH_ARRAY(&arena, uint8_t, room);
-            const int64_t length = images[run] == 0 ? -1 : x86_encode(code->records, code->count, images[run], room, 0, 0);
-            ready = tier0_test_expect(tally, length > 0, "variadic calls", "fixture %u: path %u's code doesn't encode", fixture, encoder);
-            lengths[run] = ready ? (uint32_t)length : 0;
-            expected[run] = result;
+            const uint64_t room = BUSTER_X86_ENCODER_CAPACITY(vector.count);
+            images[fixture] = BUSTER_ARENA_PUSH_ARRAY(&arena, uint8_t, room);
+            const int64_t length = images[fixture] == 0 ? -1 : x86_encode(vector.records, vector.count, images[fixture], room, 0, 0);
+            ready = tier0_test_expect(tally, length > 0, "variadic calls", "fixture %u: the code doesn't encode", fixture);
+            lengths[fixture] = ready ? (uint32_t)length : 0;
+            expected[fixture] = result;
         }
     }
     // The callers at page starts and the probe on a page after them, mapped before the fork, so that the probe's
@@ -3338,10 +3377,9 @@ static __attribute__((no_sanitize("function"))) void tier0_test_variadic_calls(T
                 memcpy(&bits, &doubles[v], sizeof(bits));
                 arguments &= seen->vectors[v] == bits;
             }
-            tier0_test_expect(tally, arguments, "variadic calls", "fixture %u encoder %u: the probe saw al %u, r11 %016" PRIx64 " and other arguments than the call's",
-                              run / 2, run % 2, (uint32_t)(seen->rax & 0xff), seen->r11);
-            tier0_test_expect(tally, seen->result == expected[run], "variadic calls", "fixture %u encoder %u: %016" PRIx64 ", not %016" PRIx64, run / 2, run % 2,
-                              seen->result, expected[run]);
+            tier0_test_expect(tally, arguments, "variadic calls", "fixture %u: the probe saw al %u, r11 %016" PRIx64 " and other arguments than the call's", run,
+                              (uint32_t)(seen->rax & 0xff), seen->r11);
+            tier0_test_expect(tally, seen->result == expected[run], "variadic calls", "fixture %u: %016" PRIx64 ", not %016" PRIx64, run, seen->result, expected[run]);
         }
     }
     if (region != MAP_FAILED)
@@ -3356,12 +3394,12 @@ static __attribute__((no_sanitize("function"))) void tier0_test_variadic_calls(T
 }
 
 // The conversions between U64 and the floating classes (tier0_emit_u64_convert) on named values, as functions that
-// convert their parameter, compiled by both paths and run: from U64 around 2^53, 2^63 and 2^64, where the halving's
-// lowest bit decides the rounding (ties to even, and just past them), and from values below 2^63, at it and up to the
-// largest below 2^64, each against C's conversion of it. Each call must raise the floating exceptions C's conversion
-// raises, MXCSR's invalid and inexact flags (#429's review: a truncation of a value at 2^63 or past it, which C's
-// conversion takes, is invalid as a signed one, and a needless subtraction inexact), and every conversion to U64 must run
-// with invalid unmasked, where a spurious one would raise SIGFPE.
+// convert their parameter, compiled and run: from U64 around 2^53, 2^63 and 2^64, where the halving's lowest bit
+// decides the rounding (ties to even, and just past them), and from values below 2^63, at it and up to the largest
+// below 2^64, each against C's conversion of it. Each call must raise the floating exceptions C's conversion raises,
+// MXCSR's invalid and inexact flags (#429's review: a truncation of a value at 2^63 or past it, which C's conversion
+// takes, is invalid as a signed one, and a needless subtraction inexact), and every conversion to U64 must run with
+// invalid unmasked, where a spurious one would raise SIGFPE.
 #define BUSTER_TIER0_TEST_UNSIGNED_VALUES 22
 #define BUSTER_TIER0_TEST_UNSIGNED_FLAGS (_MM_EXCEPT_INVALID | _MM_EXCEPT_INEXACT)
 // MXCSR's four rounding modes: to nearest, down, up and toward zero.
@@ -3491,11 +3529,11 @@ static __attribute__((no_sanitize("function"))) void tier0_test_unsigned_floatin
     const char* const* names = tier0_test_unsigned_names;
     const uint8_t* to = tier0_test_unsigned_to;
     const uint8_t* from = tier0_test_unsigned_from;
-    // Each signature's code by each path, a page each; per rounding mode, the results and then the flags each call raised,
-    // the child's.
-    uint64_t* shared = mmap(0, sizeof(uint64_t) * 16 * BUSTER_TIER0_TEST_UNSIGNED_VALUES * BUSTER_TIER0_TEST_UNSIGNED_MODES, PROT_READ | PROT_WRITE,
+    // Each signature's code, a page each; per rounding mode, the results and then the flags each call raised, the
+    // child's.
+    uint64_t* shared = mmap(0, sizeof(uint64_t) * 8 * BUSTER_TIER0_TEST_UNSIGNED_VALUES * BUSTER_TIER0_TEST_UNSIGNED_MODES, PROT_READ | PROT_WRITE,
                             MAP_SHARED | MAP_ANONYMOUS, -1, 0);
-    uint8_t* region = mmap(0, 8 * BUSTER_TIER0_TEST_PAGE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    uint8_t* region = mmap(0, 4 * BUSTER_TIER0_TEST_PAGE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     Arena arena = arena_reserve(1u << 20);
     bool ready = tier0_test_expect(tally, shared != MAP_FAILED && region != MAP_FAILED && arena.base != 0, "unsigned floating", "no memory");
     for (uint32_t signature = 0; signature < 4 && ready; signature += 1)
@@ -3523,42 +3561,40 @@ static __attribute__((no_sanitize("function"))) void tier0_test_unsigned_floatin
                                        .registers = { from_floating ? BUSTER_ABI_RAX : BUSTER_ABI_REGISTER_VECTOR, BUSTER_ABI_REGISTER_NONE, BUSTER_ABI_REGISTER_NONE,
                                                       BUSTER_ABI_REGISTER_NONE } };
         const Tier0Check check = tier0_validate(&function);
-        const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
         const Tier0Code vector = tier0_compile(&function, &arena);
-        ready = tier0_test_expect(tally, check.error == TIER0_OK && scalar.error == TIER0_OK && tier0_test_same_code(&scalar, &vector), "unsigned floating",
-                                  "%s: rule \"%s\" at %u, error %d, or the paths differ", names[signature], check.rule != 0 ? check.rule : "", check.node, scalar.error);
-        ready = ready && tier0_test_expect(tally, x86_validate(scalar.records, scalar.count) == scalar.count && scalar.branch_count == 0, "unsigned floating",
+        ready = tier0_test_expect(tally, check.error == TIER0_OK && vector.error == TIER0_OK, "unsigned floating", "%s: rule \"%s\" at %u, error %d", names[signature],
+                                  check.rule != 0 ? check.rule : "", check.node, vector.error);
+        ready = ready && tier0_test_expect(tally, x86_validate(vector.records, vector.count) == vector.count && vector.branch_count == 0, "unsigned floating",
                                            "%s: an invalid record or a branch", names[signature]);
-        for (uint32_t encoder = 0; encoder < 2 && ready; encoder += 1)
+        if (ready)
         {
-            const Tier0Code* code = encoder == 0 ? &vector : &scalar;
-            uint8_t* page = region + (signature * 2 + encoder) * BUSTER_TIER0_TEST_PAGE;
-            const int64_t length = x86_encode(code->records, code->count, page, BUSTER_TIER0_TEST_PAGE, 0, 0);
-            ready = tier0_test_expect(tally, length > 0, "unsigned floating", "%s: path %u's code doesn't encode", names[signature], encoder);
+            uint8_t* page = region + signature * BUSTER_TIER0_TEST_PAGE;
+            const int64_t length = x86_encode(vector.records, vector.count, page, BUSTER_TIER0_TEST_PAGE, 0, 0);
+            ready = tier0_test_expect(tally, length > 0, "unsigned floating", "%s: the code doesn't encode", names[signature]);
         }
     }
-    ready = ready && tier0_test_expect(tally, mprotect(region, 8 * BUSTER_TIER0_TEST_PAGE, PROT_READ | PROT_EXEC) == 0, "unsigned floating", "the code can't be loaded");
+    ready = ready && tier0_test_expect(tally, mprotect(region, 4 * BUSTER_TIER0_TEST_PAGE, PROT_READ | PROT_EXEC) == 0, "unsigned floating", "the code can't be loaded");
     const pid_t child = ready ? tier0_test_fork() : -1;
     tier0_test_expect(tally, !ready || child >= 0, "unsigned floating", "fork failed");
     if (child == 0)
     {
         alarm(BUSTER_TIER0_TEST_RUN_SECONDS);
-        for (uint32_t run = 0; run < 8 * BUSTER_TIER0_TEST_UNSIGNED_MODES; run += 1)
+        for (uint32_t run = 0; run < 4 * BUSTER_TIER0_TEST_UNSIGNED_MODES; run += 1)
         {
-            void* address = region + run % 8 * BUSTER_TIER0_TEST_PAGE;
-            uint64_t* block = shared + run / 8 * 16 * BUSTER_TIER0_TEST_UNSIGNED_VALUES;
+            void* address = region + run % 4 * BUSTER_TIER0_TEST_PAGE;
+            uint64_t* block = shared + run / 4 * 8 * BUSTER_TIER0_TEST_UNSIGNED_VALUES;
             for (uint32_t v = 0; v < BUSTER_TIER0_TEST_UNSIGNED_VALUES; v += 1)
             {
                 uint64_t bits = 0;
-                _mm_setcsr((_mm_getcsr() & ~(uint32_t)(_MM_EXCEPT_MASK | _MM_ROUND_MASK)) | (run / 8) << 13);
-                if (run % 8 < 2)
+                _mm_setcsr((_mm_getcsr() & ~(uint32_t)(_MM_EXCEPT_MASK | _MM_ROUND_MASK)) | (run / 4) << 13);
+                if (run % 4 == 0)
                 {
                     double (*convert)(uint64_t) = 0;
                     memcpy(&convert, &address, sizeof(convert));
                     const double d = convert(integers[v]);
                     memcpy(&bits, &d, sizeof(d));
                 }
-                else if (run % 8 < 4)
+                else if (run % 4 == 1)
                 {
                     float (*convert)(uint64_t) = 0;
                     memcpy(&convert, &address, sizeof(convert));
@@ -3567,7 +3603,7 @@ static __attribute__((no_sanitize("function"))) void tier0_test_unsigned_floatin
                     memcpy(&low, &f, sizeof(f));
                     bits = low;
                 }
-                else if (run % 8 < 6)
+                else if (run % 4 == 2)
                 {
                     uint64_t (*convert)(double) = 0;
                     memcpy(&convert, &address, sizeof(convert));
@@ -3579,8 +3615,8 @@ static __attribute__((no_sanitize("function"))) void tier0_test_unsigned_floatin
                     memcpy(&convert, &address, sizeof(convert));
                     bits = convert(floats[v]);
                 }
-                block[(8 + run % 8) * BUSTER_TIER0_TEST_UNSIGNED_VALUES + v] = _mm_getcsr() & BUSTER_TIER0_TEST_UNSIGNED_FLAGS;
-                block[run % 8 * BUSTER_TIER0_TEST_UNSIGNED_VALUES + v] = bits;
+                block[(4 + run % 4) * BUSTER_TIER0_TEST_UNSIGNED_VALUES + v] = _mm_getcsr() & BUSTER_TIER0_TEST_UNSIGNED_FLAGS;
+                block[run % 4 * BUSTER_TIER0_TEST_UNSIGNED_VALUES + v] = bits;
             }
         }
         _exit(0);
@@ -3594,23 +3630,23 @@ static __attribute__((no_sanitize("function"))) void tier0_test_unsigned_floatin
         // FENV_ACCESS), MXCSR put back after.
         static const char* const modes[BUSTER_TIER0_TEST_UNSIGNED_MODES] = { "to nearest", "down", "up", "toward zero" };
         const uint32_t csr = _mm_getcsr();
-        for (uint32_t run = 0; run < 8 * BUSTER_TIER0_TEST_UNSIGNED_MODES && ran; run += 1)
+        for (uint32_t run = 0; run < 4 * BUSTER_TIER0_TEST_UNSIGNED_MODES && ran; run += 1)
         {
-            const uint32_t signature = run % 8 / 2;
-            const uint32_t mode = run / 8;
-            const uint64_t* block = shared + mode * 16 * BUSTER_TIER0_TEST_UNSIGNED_VALUES;
+            const uint32_t signature = run % 4;
+            const uint32_t mode = run / 4;
+            const uint64_t* block = shared + mode * 8 * BUSTER_TIER0_TEST_UNSIGNED_VALUES;
             for (uint32_t v = 0; v < BUSTER_TIER0_TEST_UNSIGNED_VALUES; v += 1)
             {
                 _mm_setcsr((csr & ~(uint32_t)_MM_ROUND_MASK) | mode << 13);
                 uint64_t expected = 0;
                 const uint32_t oracle = tier0_test_unsigned_oracle(signature, integers[v], doubles[v], floats[v], &expected);
                 _mm_setcsr(csr);
-                const uint64_t seen = block[run % 8 * BUSTER_TIER0_TEST_UNSIGNED_VALUES + v];
-                tier0_test_expect(tally, seen == expected, "unsigned floating", "%s, %s path, rounding %s: value %u gave 0x%016" PRIx64 ", 0x%016" PRIx64 " expected",
-                                  names[signature], run % 2 == 0 ? "vector" : "scalar", modes[mode], v, seen, expected);
-                const uint64_t flags = block[(8 + run % 8) * BUSTER_TIER0_TEST_UNSIGNED_VALUES + v];
-                tier0_test_expect(tally, flags == oracle, "unsigned floating", "%s, %s path, rounding %s: value %u raised flags 0x%02" PRIx64 ", C's conversion 0x%02x",
-                                  names[signature], run % 2 == 0 ? "vector" : "scalar", modes[mode], v, flags, oracle);
+                const uint64_t seen = block[run % 4 * BUSTER_TIER0_TEST_UNSIGNED_VALUES + v];
+                tier0_test_expect(tally, seen == expected, "unsigned floating", "%s, rounding %s: value %u gave 0x%016" PRIx64 ", 0x%016" PRIx64 " expected",
+                                  names[signature], modes[mode], v, seen, expected);
+                const uint64_t flags = block[(4 + run % 4) * BUSTER_TIER0_TEST_UNSIGNED_VALUES + v];
+                tier0_test_expect(tally, flags == oracle, "unsigned floating", "%s, rounding %s: value %u raised flags 0x%02" PRIx64 ", C's conversion 0x%02x",
+                                  names[signature], modes[mode], v, flags, oracle);
             }
         }
     }
@@ -3621,12 +3657,12 @@ static __attribute__((no_sanitize("function"))) void tier0_test_unsigned_floatin
     {
         alarm(BUSTER_TIER0_TEST_RUN_SECONDS);
         _mm_setcsr(_mm_getcsr() & ~(uint32_t)(_MM_EXCEPT_MASK | _MM_MASK_INVALID));
-        for (uint32_t run = 4; run < 8; run += 1)
+        for (uint32_t run = 2; run < 4; run += 1)
         {
             void* address = region + run * BUSTER_TIER0_TEST_PAGE;
             for (uint32_t v = 0; v < BUSTER_TIER0_TEST_UNSIGNED_VALUES; v += 1)
             {
-                if (run < 6)
+                if (run == 2)
                 {
                     uint64_t (*convert)(double) = 0;
                     memcpy(&convert, &address, sizeof(convert));
@@ -3652,23 +3688,23 @@ static __attribute__((no_sanitize("function"))) void tier0_test_unsigned_floatin
     arena_release(&arena);
     if (region != MAP_FAILED)
     {
-        munmap(region, 8 * BUSTER_TIER0_TEST_PAGE);
+        munmap(region, 4 * BUSTER_TIER0_TEST_PAGE);
     }
     if (shared != MAP_FAILED)
     {
-        munmap(shared, sizeof(uint64_t) * 16 * BUSTER_TIER0_TEST_UNSIGNED_VALUES * BUSTER_TIER0_TEST_UNSIGNED_MODES);
+        munmap(shared, sizeof(uint64_t) * 8 * BUSTER_TIER0_TEST_UNSIGNED_VALUES * BUSTER_TIER0_TEST_UNSIGNED_MODES);
     }
 }
 
 // The conversions between U64 and the floating classes at the stacks' limits (#429's review): where the register form's
-// scratch registers would be past their tables, the red zone form takes the conversion (tier0_u64_convert_registers), so
-// that every depth with room for the conversion's value compiles. Each placement puts a conversion over integers and
+// scratch registers would be past their tables, the red zone form takes the conversion (tier0_u64_convert_registers),
+// so that every depth with room for the conversion's value compiles. Each placement puts a conversion over integers and
 // doubles held below it, with or without a frame pointer (STACK_SAVE's), at the last depth of each form or the one
 // before it, as a function of x and out that converts x, stores the integers' sum at out[0] and the doubles' at out[1],
-// and returns the conversion. Both paths must compile it alike, in the form the check's own rule gives (the red zone
-// form's records are those at negative displacements from rsp), and each call, on the named values under each rounding
-// mode, must give C's conversion, raise its flags and leave the values below as they were; and a conversion to U64 must
-// run with invalid unmasked.
+// and returns the conversion. It must compile in the form the check's own rule gives (the red zone form's records are
+// those at negative displacements from rsp), and each call, on the named values under each rounding mode, must give C's
+// conversion, raise its flags and leave the values below as they were; and a conversion to U64 must run with invalid
+// unmasked.
 typedef struct Tier0TestLimit Tier0TestLimit;
 struct Tier0TestLimit
 {
@@ -3855,7 +3891,7 @@ static void tier0_test_unsigned_limits(Tier0TestTally* tally)
     enum
     {
         functions = BUSTER_TIER0_TEST_LIMITS * 2,
-        pages = functions * 2,
+        pages = functions,
     };
     const uint64_t calls = (uint64_t)pages * BUSTER_TIER0_TEST_UNSIGNED_MODES * BUSTER_TIER0_TEST_UNSIGNED_VALUES;
     uint64_t* shared = mmap(0, sizeof(uint64_t) * BUSTER_TIER0_TEST_LIMIT_RESULTS * calls, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
@@ -3892,35 +3928,33 @@ static void tier0_test_unsigned_limits(Tier0TestTally* tally)
                                        .registers = { from_floating ? BUSTER_ABI_RAX : BUSTER_ABI_REGISTER_VECTOR, BUSTER_ABI_REGISTER_NONE, BUSTER_ABI_REGISTER_NONE,
                                                       BUSTER_ABI_REGISTER_NONE } };
         const Tier0Check check = tier0_validate(&function);
-        const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
         const Tier0Code vector = tier0_compile(&function, &arena);
-        ready = tier0_test_expect(tally, check.error == TIER0_OK && scalar.error == TIER0_OK && tier0_test_same_code(&scalar, &vector), "unsigned floating limits",
-                                  "%s over %u integers and %u doubles, %s frame pointer: rule \"%s\" at %u, error %d at %u, or the paths differ",
+        ready = tier0_test_expect(tally, check.error == TIER0_OK && vector.error == TIER0_OK, "unsigned floating limits",
+                                  "%s over %u integers and %u doubles, %s frame pointer: rule \"%s\" at %u, error %d at %u",
                                   tier0_test_unsigned_names[signature], limit->integers, limit->doubles, limit->pointer ? "a" : "no", check.rule != 0 ? check.rule : "",
-                                  check.node, scalar.error, scalar.node);
-        ready = ready && tier0_test_expect(tally, x86_validate(scalar.records, scalar.count) == scalar.count && scalar.branch_count == 0, "unsigned floating limits",
+                                  check.node, vector.error, vector.node);
+        ready = ready && tier0_test_expect(tally, x86_validate(vector.records, vector.count) == vector.count && vector.branch_count == 0, "unsigned floating limits",
                                            "%s over %u integers and %u doubles: an invalid record or a branch", tier0_test_unsigned_names[signature], limit->integers,
                                            limit->doubles);
         // The form, by the integer stack's depth at the conversion (x's among them, from U64) and its table's depths.
         const uint32_t depths = limit->pointer ? 14 : 15;
         const uint32_t depth = limit->integers + (limit->to_u64 ? 0u : 1u);
         const bool registers = limit->to_u64 ? depth + 1 < depths && limit->doubles + 1u < 16 : depth < depths;
-        ready = ready && tier0_test_expect(tally, tier0_test_red_zone(&scalar) == !registers, "unsigned floating limits",
+        ready = ready && tier0_test_expect(tally, tier0_test_red_zone(&vector) == !registers, "unsigned floating limits",
                                            "%s over %u integers and %u doubles, %s frame pointer: not the %s form", tier0_test_unsigned_names[signature],
                                            limit->integers, limit->doubles, limit->pointer ? "a" : "no", registers ? "register" : "red zone");
         // The register form's integer scratch, a callee-saved register past the caller-saved depths, which the selections'
         // tops must count, so that the prologue saves it.
         const uint32_t scratch = limit->to_u64 ? depth + 1 : depth;
-        const bool saved = !registers || scratch < BUSTER_TIER0_CALLER_SAVED_DEPTHS || tier0_test_pushes(&scalar, tier0_integer_depths[scratch]);
+        const bool saved = !registers || scratch < BUSTER_TIER0_CALLER_SAVED_DEPTHS || tier0_test_pushes(&vector, tier0_integer_depths[scratch]);
         ready = ready && tier0_test_expect(tally, saved, "unsigned floating limits", "%s over %u integers and %u doubles, %s frame pointer: depth %u's register unsaved",
                                            tier0_test_unsigned_names[signature], limit->integers, limit->doubles, limit->pointer ? "a" : "no", scratch);
-        for (uint32_t encoder = 0; encoder < 2 && ready; encoder += 1)
+        if (ready)
         {
-            const Tier0Code* code = encoder == 0 ? &vector : &scalar;
-            uint8_t* page = region + (f * 2 + encoder) * BUSTER_TIER0_TEST_PAGE;
-            const int64_t length = x86_encode(code->records, code->count, page, BUSTER_TIER0_TEST_PAGE, 0, 0);
-            ready = tier0_test_expect(tally, length > 0, "unsigned floating limits", "%s over %u integers: path %u's code doesn't encode", tier0_test_unsigned_names[signature],
-                                      limit->integers, encoder);
+            uint8_t* page = region + f * BUSTER_TIER0_TEST_PAGE;
+            const int64_t length = x86_encode(vector.records, vector.count, page, BUSTER_TIER0_TEST_PAGE, 0, 0);
+            ready = tier0_test_expect(tally, length > 0, "unsigned floating limits", "%s over %u integers: the code doesn't encode", tier0_test_unsigned_names[signature],
+                                      limit->integers);
         }
     }
     ready = ready && tier0_test_expect(tally, mprotect(region, pages * BUSTER_TIER0_TEST_PAGE, PROT_READ | PROT_EXEC) == 0, "unsigned floating limits",
@@ -3932,8 +3966,8 @@ static void tier0_test_unsigned_limits(Tier0TestTally* tally)
         alarm(BUSTER_TIER0_TEST_RUN_SECONDS);
         for (uint32_t page = 0; page < pages; page += 1)
         {
-            const Tier0TestLimit* limit = &limits[page / 4];
-            const uint32_t signature = (limit->to_u64 ? 2u : 0u) + page / 2 % 2;
+            const Tier0TestLimit* limit = &limits[page / 2];
+            const uint32_t signature = (limit->to_u64 ? 2u : 0u) + page % 2;
             for (uint32_t mode = 0; mode < BUSTER_TIER0_TEST_UNSIGNED_MODES; mode += 1)
             {
                 for (uint32_t v = 0; v < BUSTER_TIER0_TEST_UNSIGNED_VALUES; v += 1)
@@ -3959,8 +3993,8 @@ static void tier0_test_unsigned_limits(Tier0TestTally* tally)
         const uint32_t csr = _mm_getcsr();
         for (uint32_t page = 0; page < pages && ran; page += 1)
         {
-            const Tier0TestLimit* limit = &limits[page / 4];
-            const uint32_t signature = (limit->to_u64 ? 2u : 0u) + page / 2 % 2;
+            const Tier0TestLimit* limit = &limits[page / 2];
+            const uint32_t signature = (limit->to_u64 ? 2u : 0u) + page % 2;
             // The values below: the integers' sum (wrapping) and the doubles', or out[1] untouched without doubles.
             uint64_t integers = 0;
             for (uint32_t k = 1; k <= tier0_test_limit_constants(limit); k += 1)
@@ -3988,9 +4022,9 @@ static void tier0_test_unsigned_limits(Tier0TestTally* tally)
                     _mm_setcsr(csr);
                     const uint64_t* results = shared + BUSTER_TIER0_TEST_LIMIT_RESULTS * (((uint64_t)page * BUSTER_TIER0_TEST_UNSIGNED_MODES + mode) * BUSTER_TIER0_TEST_UNSIGNED_VALUES + v);
                     tier0_test_expect(tally, results[0] == expected && results[1] == oracle && results[2] == integers && results[3] == doubles, "unsigned floating limits",
-                                      "%s over %u integers and %u doubles, %s frame pointer, %s path, rounding %s, value %u: 0x%016" PRIx64 " with flags 0x%02" PRIx64
+                                      "%s over %u integers and %u doubles, %s frame pointer, rounding %s, value %u: 0x%016" PRIx64 " with flags 0x%02" PRIx64
                                       " and out 0x%016" PRIx64 " 0x%016" PRIx64 ", C's 0x%016" PRIx64 " with 0x%02x and 0x%016" PRIx64 " 0x%016" PRIx64,
-                                      tier0_test_unsigned_names[signature], limit->integers, limit->doubles, limit->pointer ? "a" : "no", page % 2 == 0 ? "vector" : "scalar",
+                                      tier0_test_unsigned_names[signature], limit->integers, limit->doubles, limit->pointer ? "a" : "no",
                                       modes[mode], v, results[0], results[1], results[2], results[3], expected, oracle, integers, doubles);
                 }
             }
@@ -4005,8 +4039,8 @@ static void tier0_test_unsigned_limits(Tier0TestTally* tally)
         _mm_setcsr(_mm_getcsr() & ~(uint32_t)(_MM_EXCEPT_MASK | _MM_MASK_INVALID));
         for (uint32_t page = 0; page < pages; page += 1)
         {
-            const Tier0TestLimit* limit = &limits[page / 4];
-            const uint32_t signature = (limit->to_u64 ? 2u : 0u) + page / 2 % 2;
+            const Tier0TestLimit* limit = &limits[page / 2];
+            const uint32_t signature = (limit->to_u64 ? 2u : 0u) + page % 2;
             for (uint32_t v = 0; v < BUSTER_TIER0_TEST_UNSIGNED_VALUES && limit->to_u64; v += 1)
             {
                 uint64_t out[2] = { 0, 0 };
@@ -4033,7 +4067,7 @@ static void tier0_test_unsigned_limits(Tier0TestTally* tally)
     }
 }
 
-// An entry's last operand must have the class of the entry before it, which both paths read for it (in postorder,
+// An entry's last operand must have the class of the entry before it, which the compile reads for it (in postorder,
 // that entry is the operand), so that tier0_validate must refuse each stream below whose operand has another class,
 // at that entry, and take the others: the same in postorder, a store that pushes before its consumer, DUP, values
 // left under a store of their class (an increment's old value, as #357's producer leaves it), and calls, which read
@@ -4293,18 +4327,17 @@ static void tier0_test_operands(Tier0TestTally* tally)
 // The access column (Tier0Function.symbol_access). tier0_validate must refuse a global entry whose symbol is past the
 // column or whose access doesn't exist, and take the column otherwise. Then each global kind of every class, by each
 // access: GLOBAL, STORE_GLOBAL and SET_GLOBAL of a local's value, SET_GLOBAL of a constant, and GLOBAL_ADDRESS, whose
-// symbol is 1 of 2. Both paths must compile it alike to valid records with one reference to symbol 1, of the access's
-// kind (PC32, LOAD_GOT, TPOFF32 or GOTTPOFF), in the displacement but for a thread-local's address of the image's (the
-// TPOFF32 immediate an add takes), with an FS override exactly for a thread-local, and for a direct symbol the code
-// without the column. A constant stored into a symbol is an immediate (its CONST absorbed) only for a direct symbol,
-// which a store of an integer's constant's record count shows.
-// Segment overrides (#1447, Tier0Function.segments): LOAD, STORE and SET in FS, GS and SS. Each function compiles to the
-// same code on both paths, and to its stripped twin's but for its marked accesses' memory operands, which take the
-// override (one record for an integer's or a floating value's access); the frame's own operands and the unmarked accesses
-// keep none. Validation takes no override on another kind (a constant's top bits are its own). Then they run in a child,
-// %fs's base the thread's and %gs's set by arch_prctl, on addresses that hold the data only through the segment (the
-// data's address less the base), so that an access without its override faults; SS's base is 0 in 64-bit mode, so its
-// cases run on the data's own address, and their records show the override.
+// symbol is 1 of 2. Each must compile to valid records with one reference to symbol 1, of the access's kind (PC32,
+// LOAD_GOT, TPOFF32 or GOTTPOFF), in the displacement but for a thread-local's address of the image's (the TPOFF32
+// immediate an add takes), with an FS override exactly for a thread-local, and for a direct symbol the code without the
+// column. A constant stored into a symbol is an immediate (its CONST absorbed) only for a direct symbol, which a store
+// of an integer's constant's record count shows. Segment overrides (#1447, Tier0Function.segments): LOAD, STORE and SET
+// in FS, GS and SS. Each function compiles to its stripped twin's code but for its marked accesses' memory operands,
+// which take the override (one record for an integer's or a floating value's access); the frame's own operands and the
+// unmarked accesses keep none. Validation takes no override on another kind (a constant's top bits are its own). Then
+// they run in a child, %fs's base the thread's and %gs's set by arch_prctl, on addresses that hold the data only
+// through the segment (the data's address less the base), so that an access without its override faults; SS's base is 0
+// in 64-bit mode, so its cases run on the data's own address, and their records show the override.
 #define BUSTER_TIER0_TEST_SEGMENT_SHAPES 10
 #define BUSTER_TIER0_TEST_SEGMENT_CASES 128
 
@@ -4546,24 +4579,22 @@ static void tier0_test_segments(Tier0TestTally* tally)
         function.int128 = c->class == BUSTER_TYPED_CLASS_I128 || c->class == BUSTER_TYPED_CLASS_U128;
         function.vectors = c->class == BUSTER_TYPED_CLASS_VECTOR;
         function.vector_bytes = c->transport;
-        const Tier0Code plain = tier0_compile_scalar(&function, &arena);
+        const Tier0Code plain = tier0_compile(&function, &arena);
         function.values = values;
         function.segments = true;
         const Tier0Check check = tier0_validate(&function);
         const Tier0Check scalar_check = tier0_validate_scalar(&function);
-        const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
         const Tier0Code vector = tier0_compile(&function, &arena);
-        ready = tier0_test_expect(tally, check.error == TIER0_OK && scalar_check.error == TIER0_OK && plain.error == TIER0_OK && scalar.error == TIER0_OK &&
-                                             tier0_test_same_code(&scalar, &vector) &&
-                                             x86_validate(scalar.records, scalar.count) == scalar.count && scalar.count == plain.count,
-                                  "segments", "case %u (class %u, shape %u): rule \"%s\" at %u, errors %d and %d, or the paths differ", k, c->class, c->shape,
-                                  check.rule != 0 ? check.rule : "", check.node, plain.error, scalar.error);
+        ready = tier0_test_expect(tally, check.error == TIER0_OK && scalar_check.error == TIER0_OK && plain.error == TIER0_OK && vector.error == TIER0_OK &&
+                                             x86_validate(vector.records, vector.count) == vector.count && vector.count == plain.count,
+                                  "segments", "case %u (class %u, shape %u): rule \"%s\" at %u, errors %d and %d, or the counts differ", k, c->class, c->shape,
+                                  check.rule != 0 ? check.rule : "", check.node, plain.error, vector.error);
         // The records are the stripped twin's but for the overrides, on memory operands.
         uint32_t changed = 0;
         bool others = true;
-        for (uint32_t r = 0; ready && r < scalar.count; r += 1)
+        for (uint32_t r = 0; ready && r < vector.count; r += 1)
         {
-            X86Instruction a = scalar.records[r];
+            X86Instruction a = vector.records[r];
             const X86Instruction b = plain.records[r];
             const bool overridden = a.form == b.form + c->segment * X86_FORM_COUNT && (a.mode & BUSTER_X86_MODE_MEMORY) != 0;
             changed += overridden ? 1 : 0;
@@ -4572,7 +4603,7 @@ static void tier0_test_segments(Tier0TestTally* tally)
         }
         ready = ready && tier0_test_expect(tally, others && changed >= 1 && (copy || changed == 1), "segments",
                                            "case %u (class %u, shape %u): %u records with the override, or another record differs", k, c->class, c->shape, changed);
-        const int64_t length = ready ? x86_encode(scalar.records, scalar.count, region + (uint64_t)k * BUSTER_TIER0_TEST_PAGE, BUSTER_TIER0_TEST_PAGE, 0, 0) : -1;
+        const int64_t length = ready ? x86_encode(vector.records, vector.count, region + (uint64_t)k * BUSTER_TIER0_TEST_PAGE, BUSTER_TIER0_TEST_PAGE, 0, 0) : -1;
         ready = ready && tier0_test_expect(tally, length > 0, "segments", "case %u: the encoder failed", k);
     }
     ready = ready && tier0_test_expect(tally, mprotect(region, (uint64_t)count * BUSTER_TIER0_TEST_PAGE, PROT_READ | PROT_EXEC) == 0, "segments", "the code can't be loaded");
@@ -4775,33 +4806,32 @@ static void tier0_test_access(Tier0TestTally* tally)
             function.local_flags = local_flags;
             function.local_count = 1;
             const uint64_t mark = arena.length;
-            const Tier0Code plain = tier0_compile_scalar(&function, &arena);
+            const Tier0Code plain = tier0_compile(&function, &arena);
             function.symbol_access = column;
             function.symbol_count = 2;
             for (uint32_t access = 0; access < BUSTER_TIER0_ACCESSES; access += 1)
             {
                 column[1] = (uint8_t)access;
                 const Tier0Check check = tier0_validate(&function);
-                const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
                 const Tier0Code vector = tier0_compile(&function, &arena);
-                const bool compiled = check.error == TIER0_OK && scalar.error == TIER0_OK && tier0_test_same_code(&scalar, &vector) &&
-                                      x86_validate(scalar.records, scalar.count) == scalar.count;
+                const bool compiled = check.error == TIER0_OK && vector.error == TIER0_OK &&
+                                      x86_validate(vector.records, vector.count) == vector.count;
                 bool segment = false;
-                for (uint32_t r = 0; compiled && r < scalar.count; r += 1)
+                for (uint32_t r = 0; compiled && r < vector.count; r += 1)
                 {
-                    segment |= (scalar.records[r].form & BUSTER_X86_FORM_NUMBER) >= BUSTER_X86_FORM_FS;
+                    segment |= (vector.records[r].form & BUSTER_X86_FORM_NUMBER) >= BUSTER_X86_FORM_FS;
                 }
                 const bool immediate = shape == 4 && access == BUSTER_TIER0_ACCESS_LOCAL_EXEC;
-                const bool referenced = compiled && scalar.reference_count == 1 && scalar.references[0].kind == reference_kinds[access] &&
-                                        scalar.references[0].target == 1 && scalar.references[0].field == (immediate ? X86_FIXUP_IMMEDIATE : X86_FIXUP_DISPLACEMENT);
+                const bool referenced = compiled && vector.reference_count == 1 && vector.references[0].kind == reference_kinds[access] &&
+                                        vector.references[0].target == 1 && vector.references[0].field == (immediate ? X86_FIXUP_IMMEDIATE : X86_FIXUP_DISPLACEMENT);
                 const bool thread_local = access == BUSTER_TIER0_ACCESS_LOCAL_EXEC || access == BUSTER_TIER0_ACCESS_INITIAL_EXEC;
-                const bool direct = access != BUSTER_TIER0_ACCESS_DIRECT || tier0_test_same_code(&plain, &scalar);
-                const bool constant = shape != 3 || tier0_class_floating(class) || scalar.count == constant_records[access];
+                const bool direct = access != BUSTER_TIER0_ACCESS_DIRECT || tier0_test_same_code(&plain, &vector);
+                const bool constant = shape != 3 || tier0_class_floating(class) || vector.count == constant_records[access];
                 tier0_test_expect(tally, compiled && referenced && segment == thread_local && direct && constant, "access",
-                                  "class %u, shape %u, access %u: validated %d, compiled %d, the paths alike %d, %u records, %u references (kind %u, field %u), "
+                                  "class %u, shape %u, access %u: validated %d, compiled %d, %u records, %u references (kind %u, field %u), "
                                   "FS %d, the direct code the code without the column %d",
-                                  class, shape, access, check.error, scalar.error, tier0_test_same_code(&scalar, &vector), scalar.count, scalar.reference_count,
-                                  scalar.reference_count != 0 ? scalar.references[0].kind : 0, scalar.reference_count != 0 ? scalar.references[0].field : 0, segment,
+                                  class, shape, access, check.error, vector.error, vector.count, vector.reference_count,
+                                  vector.reference_count != 0 ? vector.references[0].kind : 0, vector.reference_count != 0 ? vector.references[0].field : 0, segment,
                                   direct);
             }
             arena_pop_to(&arena, mark);
@@ -4941,8 +4971,8 @@ static const Tier0TestPassing tier0_test_passings[] = {
 #define BUSTER_TIER0_TEST_HIDDEN_BYTES 40
 #define BUSTER_TIER0_TEST_SLOT_BYTES 48
 #define BUSTER_TIER0_TEST_ADDRESS_AT 40
-// Two placements of the bytes (ending at a PROT_NONE page, and starting after one) by each encoder.
-#define BUSTER_TIER0_TEST_AGGREGATE_RUNS 4
+// Two placements of the bytes: ending at a PROT_NONE page, and starting after one.
+#define BUSTER_TIER0_TEST_AGGREGATE_RUNS 2
 // The vector registers a result comes back in: xmm0 and xmm1, and xmm2 and xmm3 for a vector split across four.
 #define BUSTER_TIER0_TEST_RESULT_VECTORS 4
 
@@ -5350,27 +5380,24 @@ static void tier0_test_aggregate_callee(Tier0TestCallee* callee, const Tier0Test
     function->result_size = hidden ? 0 : fixture->result_size;
 }
 
-// A function's code by both paths, which must agree and be valid, each path's encoded into `images` (a page each).
-static bool tier0_test_aggregate_encode(Tier0TestTally* tally, const char* check, const char* name, const Tier0Function* function, Arena* arena, uint8_t* images)
+// A function's code, which must be valid, encoded into `image` (a page).
+static bool tier0_test_aggregate_encode(Tier0TestTally* tally, const char* check, const char* name, const Tier0Function* function, Arena* arena, uint8_t* image)
 {
     const Tier0Check validation = tier0_validate(function);
-    const Tier0Code scalar = tier0_compile_scalar(function, arena);
     const Tier0Code vector = tier0_compile(function, arena);
-    bool ready = tier0_test_expect(tally, validation.error == TIER0_OK && scalar.error == TIER0_OK && tier0_test_same_code(&scalar, &vector), check,
-                                   "%s: rule \"%s\" at %u, error %d, or the paths differ", name, validation.rule != 0 ? validation.rule : "", validation.node, scalar.error);
-    ready = ready && tier0_test_expect(tally, x86_validate(scalar.records, scalar.count) == scalar.count && scalar.branch_count == 0 && scalar.reference_count == 0,
+    bool ready = tier0_test_expect(tally, validation.error == TIER0_OK && vector.error == TIER0_OK, check, "%s: rule \"%s\" at %u, error %d", name,
+                                   validation.rule != 0 ? validation.rule : "", validation.node, vector.error);
+    ready = ready && tier0_test_expect(tally, x86_validate(vector.records, vector.count) == vector.count && vector.branch_count == 0 && vector.reference_count == 0,
                                        check, "%s: an invalid record, a branch or a reference", name);
-    int64_t lengths[2] = { -1, -1 };
-    for (uint32_t encoder = 0; encoder < 2 && ready; encoder += 1)
+    if (ready)
     {
-        const Tier0Code* code = encoder == 0 ? &vector : &scalar;
-        const uint64_t room = BUSTER_X86_ENCODER_CAPACITY(code->count);
+        const uint64_t room = BUSTER_X86_ENCODER_CAPACITY(vector.count);
         uint8_t* bytes = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, room);
-        lengths[encoder] = bytes == 0 ? -1 : x86_encode(code->records, code->count, bytes, room, 0, 0);
-        ready = tier0_test_expect(tally, lengths[encoder] > 0 && lengths[encoder] <= BUSTER_TIER0_TEST_PAGE, check, "%s: path %u's code doesn't encode", name, encoder);
+        const int64_t length = bytes == 0 ? -1 : x86_encode(vector.records, vector.count, bytes, room, 0, 0);
+        ready = tier0_test_expect(tally, length > 0 && length <= BUSTER_TIER0_TEST_PAGE, check, "%s: the code doesn't encode", name);
         if (ready)
         {
-            memcpy(images + encoder * BUSTER_TIER0_TEST_PAGE, bytes, (size_t)lengths[encoder]);
+            memcpy(image, bytes, (size_t)length);
         }
     }
     return ready;
@@ -5439,7 +5466,7 @@ static __attribute__((no_sanitize("function"))) bool tier0_test_aggregate_run(Ti
     return waited && WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
-// Each fixture as a call: the caller, for each placement of the aggregates' bytes, by both paths, called in a child,
+// Each fixture as a call: the caller, for each placement of the aggregates' bytes, called in a child,
 // passes them to the probe, which records what it gets: each value and each part in its register, each part on the
 // stack and each aggregate on the stack whole in its slots. A result in registers that the probe returns must land in
 // the caller's object, which it copies out, as must one the probe writes through the hidden pointer.
@@ -5448,7 +5475,7 @@ static void tier0_test_aggregate_calls(Tier0TestTally* tally)
     static const char check[] = "aggregate calls";
     Tier0TestShared* shared = mmap(0, sizeof(Tier0TestShared), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     uint8_t* data = tier0_test_aggregate_data();
-    // Per fixture: the callers (2 placements by 2 encoders), then the probe.
+    // Per fixture: the callers (2 placements), then the probe.
     const uint64_t pages = (BUSTER_TIER0_TEST_AGGREGATE_RUNS + 1) * BUSTER_TIER0_TEST_PAGE;
     uint8_t* code = mmap(0, pages, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     Arena arena = arena_reserve(1ull << 26);
@@ -5471,7 +5498,7 @@ static void tier0_test_aggregate_calls(Tier0TestTally* tally)
             Tier0TestCaller caller;
             tier0_test_aggregate_caller(&caller, fixture, addresses, (uint64_t)(uintptr_t)(code + BUSTER_TIER0_TEST_AGGREGATE_RUNS * BUSTER_TIER0_TEST_PAGE),
                                         (uint64_t)(uintptr_t)shared->runs[0].out, deep);
-            ready = tier0_test_aggregate_encode(tally, check, fixture->name, &caller.function, &arena, code + 2 * placement * BUSTER_TIER0_TEST_PAGE);
+            ready = tier0_test_aggregate_encode(tally, check, fixture->name, &caller.function, &arena, code + placement * BUSTER_TIER0_TEST_PAGE);
         }
         // What the probe returns: registers of bytes of their own, and for a hidden result its bytes.
         memset(&shared->preset, 0, sizeof(shared->preset));
@@ -5500,7 +5527,7 @@ static void tier0_test_aggregate_calls(Tier0TestTally* tally)
         for (uint32_t r = 0; r < BUSTER_TIER0_TEST_AGGREGATE_RUNS && ready; r += 1)
         {
             Tier0TestSeen* seen = &shared->runs[1 + r];
-            const uint32_t placement = r / 2;
+            const uint32_t placement = r;
             for (uint32_t a = 0; a < fixture->count; a += 1)
             {
                 const Tier0TestPassed* passed = &fixture->passed[a];
@@ -5565,7 +5592,7 @@ static void tier0_test_aggregate_calls(Tier0TestTally* tally)
 }
 
 // Each fixture as a function: a driver passes the aggregates' bytes as its locations say (each register's and each
-// slot's other bytes their own, which no parameter may read), and the function, by both paths, copies each parameter
+// slot's other bytes their own, which no parameter may read), and the function copies each parameter
 // out, which must be its bytes; it returns bytes placed at a PROT_NONE page's edge, both ways, in registers, which the
 // driver records, or through the hidden pointer it passes, which must come back in rax.
 static void tier0_test_aggregate_functions(Tier0TestTally* tally)
@@ -5573,7 +5600,7 @@ static void tier0_test_aggregate_functions(Tier0TestTally* tally)
     static const char check[] = "aggregate functions";
     Tier0TestShared* shared = mmap(0, sizeof(Tier0TestShared), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     uint8_t* data = tier0_test_aggregate_data();
-    // Per fixture: the functions (2 placements of the result by 2 encoders), then a driver of each.
+    // Per fixture: the functions (2 placements of the result), then a driver of each.
     const uint64_t pages = 2 * BUSTER_TIER0_TEST_AGGREGATE_RUNS * BUSTER_TIER0_TEST_PAGE;
     uint8_t* code = mmap(0, pages, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     Arena arena = arena_reserve(1ull << 26);
@@ -5628,7 +5655,7 @@ static void tier0_test_aggregate_functions(Tier0TestTally* tally)
             source[placement] = tier0_test_aggregate_place(data, BUSTER_TIER0_TEST_PASSED, fixture->result_size != 0 ? fixture->result_size : 1, placement);
             Tier0TestCallee callee;
             tier0_test_aggregate_callee(&callee, fixture, (uint64_t)(uintptr_t)shared->runs[0].out, (uint64_t)(uintptr_t)source[placement]);
-            ready = tier0_test_aggregate_encode(tally, check, fixture->name, &callee.function, &arena, code + 2 * placement * BUSTER_TIER0_TEST_PAGE);
+            ready = tier0_test_aggregate_encode(tally, check, fixture->name, &callee.function, &arena, code + placement * BUSTER_TIER0_TEST_PAGE);
         }
         for (uint32_t r = 0; r < BUSTER_TIER0_TEST_AGGREGATE_RUNS && ready; r += 1)
         {
@@ -5672,7 +5699,7 @@ static void tier0_test_aggregate_functions(Tier0TestTally* tally)
                 same &= passed->size == 0 || address % (1u << passed->alignment_log2) == 0;
                 tier0_test_expect(tally, same, check, "%s, run %u: parameter %u isn't what its location passed, or isn't aligned", fixture->name, r, a);
             }
-            const uint8_t* expected = source[r / 2];
+            const uint8_t* expected = source[r];
             if (hidden)
             {
                 tier0_test_expect(tally, seen->rax == (uint64_t)(uintptr_t)shared->runs[0].hidden && memcmp(seen->hidden, expected, fixture->result_size) == 0, check,
@@ -5707,7 +5734,7 @@ static void tier0_test_aggregate_functions(Tier0TestTally* tally)
 }
 
 // A change to a fixture's caller (or with `callee`, its function) that tier0_validate must refuse, and whether it is
-// one of the aggregates' metadata, which both compile paths refuse too (tier0_frame_input_valid); else the rule it
+// one of the aggregates' metadata, which the compile refuses too (tier0_frame_input_valid); else the rule it
 // breaks, which `rule` begins.
 typedef struct Tier0TestBreak Tier0TestBreak;
 struct Tier0TestBreak
@@ -6092,7 +6119,7 @@ static void tier0_test_aggregate_break(uint32_t b, Tier0TestCaller* caller, Tier
 }
 
 // Each break of the fixtures' callers and functions, built afresh: tier0_validate must refuse it by its rule, and for
-// the metadata both compile paths must refuse it too; the fixtures themselves must be valid.
+// the metadata the compile must refuse it too; the fixtures themselves must be valid.
 static void tier0_test_aggregate_errors(Tier0TestTally* tally)
 {
     static const char check[] = "aggregate errors";
@@ -6117,12 +6144,11 @@ static void tier0_test_aggregate_errors(Tier0TestTally* tally)
         tier0_test_aggregate_break(b, &caller, &callee, &incoming);
         const Tier0Check after = tier0_validate(function);
         const bool metadata = strcmp(broken->rule, BUSTER_TIER0_TEST_METADATA) == 0;
-        const Tier0Code scalar = metadata ? tier0_compile_scalar(function, &arena) : (Tier0Code){ .error = TIER0_ERROR_UNSUPPORTED };
         const Tier0Code vector = metadata ? tier0_compile(function, &arena) : (Tier0Code){ .error = TIER0_ERROR_UNSUPPORTED };
         const bool refused = after.error == TIER0_ERROR_INVALID && after.rule != 0 && strncmp(after.rule, broken->rule, strlen(broken->rule)) == 0;
-        tier0_test_expect(tally, before.error == TIER0_OK && refused && scalar.error == TIER0_ERROR_UNSUPPORTED && vector.error == TIER0_ERROR_UNSUPPORTED, check,
-                          "%s: before it, \"%s\"; after it, \"%s\" at %u, and the paths' errors %d and %d", broken->name, before.rule != 0 ? before.rule : "valid",
-                          after.rule != 0 ? after.rule : "valid", after.node, scalar.error, vector.error);
+        tier0_test_expect(tally, before.error == TIER0_OK && refused && vector.error == TIER0_ERROR_UNSUPPORTED, check,
+                          "%s: before it, \"%s\"; after it, \"%s\" at %u, and the compile's error %d", broken->name, before.rule != 0 ? before.rule : "valid",
+                          after.rule != 0 ? after.rule : "valid", after.node, vector.error);
         arena_pop_to(&arena, 0);
     }
     arena_release(&arena);
@@ -6305,9 +6331,9 @@ static Tier0Function tier0_test_stack_function(const Tier0TestEntry* entries, ui
     return function;
 }
 
-// The stack's allocations: the validator's rules for ALLOCA, STACK_SAVE, STACK_RESTORE and FRAME_ADDRESS; a frame pointer's depths
-// (rbp's taken from the table); then the program above, compiled by both paths, its frame pointer in its prologue, run
-// natively on 8 inputs, and against the interpreter and this file's own count.
+// The stack's allocations: the validator's rules for ALLOCA, STACK_SAVE, STACK_RESTORE and FRAME_ADDRESS; a frame
+// pointer's depths (rbp's taken from the table); then the program above, compiled, its frame pointer in its prologue,
+// run natively on 8 inputs, and against the interpreter and this file's own count.
 static void tier0_test_stack(Tier0TestTally* tally, Tier0Tables* tables)
 {
     static const uint8_t local_classes[TIER0_TEST_STACK_LOCALS] = {
@@ -6366,12 +6392,10 @@ static void tier0_test_stack(Tier0TestTally* tally, Tier0Tables* tables)
             entries[count++] = (Tier0TestEntry){ BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_U64, 0 };
             const Tier0Function function = tier0_test_stack_function(entries, count, kinds, classes, values, local_classes, local_flags, 3);
             const uint64_t mark = arena.length;
-            const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
             const Tier0Code vector = tier0_compile(&function, &arena);
-            tier0_test_expect(tally, tier0_validate(&function).error == TIER0_OK && scalar.error == TIER0_OK && vector.error == TIER0_OK &&
-                                         tier0_test_same_code(&scalar, &vector),
-                              "stack", "%u values at once %s a frame pointer: errors %d and %d, or the paths differ", values_at_once, pointer != 0 ? "with" : "without",
-                              scalar.error, vector.error);
+            tier0_test_expect(tally, tier0_validate(&function).error == TIER0_OK && vector.error == TIER0_OK && x86_validate(vector.records, vector.count) == vector.count,
+                              "stack", "%u values at once %s a frame pointer: error %d, or an invalid record", values_at_once, pointer != 0 ? "with" : "without",
+                              vector.error);
             arena_pop_to(&arena, mark);
         }
     }
@@ -6508,12 +6532,11 @@ static const Tier0TestEntry tier0_test_frame_entry[] = {
     { BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0 }, { BUSTER_TYPED_RETURN, BUSTER_TYPED_CLASS_U64, 0 },
 };
 
-// The frame's address: a function of it alone, compiled by both paths alike with a frame pointer and its record (mov
-// from rbp at its depth), then the program above, both of its functions with frame pointers, run natively on 8 inputs.
-// Stack-clash protection's records (#177): the counts the vector path's positions take from formulas
-// (tier0_reservation_records, tier0_realignment_records, tier0_prologue_branches and BUSTER_TIER0_PROBED_ALLOCA_RECORDS)
-// are the records and branches the emitters write, which the scalar path counts by running them. A host without the
-// vector path runs only the scalar one, whose twins can't differ: this holds there too.
+// The frame's address: a function of it alone, compiled with a frame pointer and its record (mov from rbp at its
+// depth), then the program above, both of its functions with frame pointers, run natively on 8 inputs. Stack-clash
+// protection's records (#177): the counts measuring's positions take from formulas (tier0_reservation_records,
+// tier0_realignment_records, tier0_prologue_branches and BUSTER_TIER0_PROBED_ALLOCA_RECORDS) are the records and
+// branches the emitters write.
 static void tier0_test_probes(Tier0TestTally* tally)
 {
     static const uint32_t sizes[] = { 0, 16, 100, 4095, 4096, 4097, 5000, 8192, 12288, 100000, 1u << 20 };
@@ -6573,7 +6596,6 @@ static void tier0_test_frame_address(Tier0TestTally* tally, Tier0Tables* tables)
     uint64_t values[2];
     Arena arena = arena_reserve(1ull << 26);
     const Tier0Function function = tier0_test_stack_function(alone, 2, kinds, classes, values, local_classes, local_flags, 0);
-    const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
     const Tier0Code vector = tier0_compile(&function, &arena);
     bool read = false;
     for (uint32_t r = 0; vector.error == TIER0_OK && r < vector.count; r += 1)
@@ -6582,10 +6604,8 @@ static void tier0_test_frame_address(Tier0TestTally* tally, Tier0Tables* tables)
     }
     const bool pointer = vector.error == TIER0_OK && vector.count >= 2 && vector.records[0].form == X86_FORM_PUSH_R64 && vector.records[0].rm == X86_REGISTER_RBP &&
                          vector.records[1].form == X86_FORM_MOV_RM64_R64 && vector.records[1].rm == X86_REGISTER_RBP && vector.records[1].reg == X86_REGISTER_RSP;
-    tier0_test_expect(tally, tier0_validate(&function).error == TIER0_OK && scalar.error == TIER0_OK && vector.error == TIER0_OK &&
-                                 tier0_test_same_code(&scalar, &vector) && pointer && read,
-                      "frame address", "alone: errors %d and %d, paths %s, frame pointer %s, rbp %s", scalar.error, vector.error,
-                      tier0_test_same_code(&scalar, &vector) ? "alike" : "different", pointer ? "there" : "missing", read ? "read" : "unread");
+    tier0_test_expect(tally, tier0_validate(&function).error == TIER0_OK && vector.error == TIER0_OK && pointer && read, "frame address",
+                      "alone: error %d, frame pointer %s, rbp %s", vector.error, pointer ? "there" : "missing", read ? "read" : "unread");
     arena_release(&arena);
     enum
     {
@@ -6700,7 +6720,7 @@ static void tier0_test_inc_dec(Tier0TestTally* tally)
     {
         const uint16_t context = tier0_choice_context(&record, live != 0 ? BUSTER_X86_FLAG_CF : 0);
         uint16_t form = X86_FORM_NONE;
-        x86_choose_forms_scalar(&row, &value, &context, 1, &form);
+        x86_choose_forms(&row, &value, &context, 1, &form);
         tier0_test_expect(tally, form == (live != 0 ? X86_FORM_ADD_RM32_IMM8 : X86_FORM_INC_RM32), "inc and dec", "add ebx, 1 with CF %s took form %u",
                           live != 0 ? "live" : "dead", form);
     }
@@ -6740,10 +6760,10 @@ static void tier0_test_entry_repetitions(Tier0TestTally* tally)
 // #975's branch columns: the vector path's compressed stores of them (a block's whole 8-entry tail included) must hold,
 // for every branch, its own entry's first record and the first record of the entry it goes to, or the epilogue's for a
 // return's jump to the function's end: 12 branches, 8 and 4 in the emitter's two blocks, so that the last store writes
-// its reserved tail, against the positions both paths publish (Tier0Code.entry_records).
-// A chain of `entries` jumps, each to the next, the last two returns: its branches' records and targets, the entries' first
-// records. 271 entries make 270 branches, whose count's low byte (14) is under a vector's 16 targets: #2874's resolution
-// of the targets after emission (tier0_branch_targets) once wrapped there.
+// its reserved tail, against the positions the compile publishes (Tier0Code.entry_records). A chain of `entries` jumps,
+// each to the next, the last two returns: its branches' records and targets, the entries' first records. 271 entries
+// make 270 branches, whose count's low byte (14) is under a vector's 16 targets: #2874's resolution of the targets
+// after emission (tier0_branch_targets) once wrapped there.
 #define BUSTER_TIER0_TEST_CHAIN_MOST 512
 static void tier0_test_branch_chain(Tier0TestTally* tally, uint32_t entries)
 {
@@ -6765,12 +6785,9 @@ static void tier0_test_branch_chain(Tier0TestTally* tally, uint32_t entries)
     function.entry_records = true;
     Arena arena = arena_reserve(UINT64_C(1) << 20);
     const Tier0Check check = tier0_validate(&function);
-    const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
     const Tier0Code vector = tier0_compile(&function, &arena);
-    bool ready = tier0_test_expect(tally, arena.base != NULL && check.error == TIER0_OK && scalar.error == TIER0_OK && vector.error == TIER0_OK &&
-                                              tier0_test_same_code(&scalar, &vector),
-                                   "branches", "the chain: rule \"%s\" at %u, errors %d and %d, or the paths differ", check.rule != 0 ? check.rule : "", check.node,
-                                   scalar.error, vector.error);
+    bool ready = tier0_test_expect(tally, arena.base != NULL && check.error == TIER0_OK && vector.error == TIER0_OK, "branches", "the chain: rule \"%s\" at %u, error %d",
+                                   check.rule != 0 ? check.rule : "", check.node, vector.error);
     ready = ready && tier0_test_expect(tally, vector.entry_count == entries && vector.branch_count == branches && vector.entry_records != 0 &&
                                                   x86_validate(vector.records, vector.count) == vector.count &&
                                                   branch_sizing_validate(vector.records, vector.count, vector.branches, vector.targets, vector.branch_count).error ==
@@ -7101,6 +7118,7 @@ static int run_tier0_tests(int argc, char** argv)
                 total.checks += tally.checks;
                 total.failures += tally.failures;
             }
+            uint64_t digest = BUSTER_TIER0_TEST_DIGEST_BASIS;
             for (uint32_t s = 0; s < 8; s += 1)
             {
                 Tier0TestTally tally = { 0, 0 };
@@ -7112,7 +7130,7 @@ static int run_tier0_tests(int argc, char** argv)
                 uint64_t fused[BUSTER_TIER0_TEST_TESTED_WAYS] = { 0 };
                 uint64_t coverage[BUSTER_TIER0_TEST_COVERAGE] = { 0 };
                 tier0_test_programs(&tally, &tables, seed + s * 1000003ull, count, s < 4 ? shapes[s] : s == 4 ? records : s == 5 ? deep : s == 6 ? aligned : tested,
-                                    &instructions, &entries, &deferred, &deep_entries, frames, fused, coverage);
+                                    &instructions, &entries, &deferred, &deep_entries, frames, fused, coverage, &digest);
                 if (s == 4 || s == 5)
                 {
                     // With the default count, every kind of part, location and result the catalog can make shows: the
@@ -7154,6 +7172,16 @@ static int run_tier0_tests(int argc, char** argv)
                                   tally);
                 printf("    %" PRIu64 " entries, %" PRIu64 " records, %" PRIu64 " deferred, %" PRIu64 " deep, %" PRIu64 " realigned frames (%" PRIu64 " with a base)\n",
                        entries, instructions, deferred, deep_entries, frames[0], frames[1]);
+                total.checks += tally.checks;
+                total.failures += tally.failures;
+            }
+            {
+                // The programs' code against its frozen digest, with the default seed and count.
+                Tier0TestTally tally = { 0, 0 };
+                tier0_test_expect(&tally, seed != 1 || count != 300 || digest == BUSTER_TIER0_TEST_DIGEST, "digest",
+                                  "the programs' code folds to %016" PRIx64 ", not the frozen %016" PRIx64, digest, BUSTER_TIER0_TEST_DIGEST);
+                tier0_test_report("programs: digest", tally);
+                printf("    %016" PRIx64 "\n", digest);
                 total.checks += tally.checks;
                 total.failures += tally.failures;
             }

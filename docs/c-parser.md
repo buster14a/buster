@@ -436,6 +436,70 @@ benchmark's counts; `test-parser --explain` says why for each):
 | libc corpus (733 files) | 142 | 7,827 | 0.20% | asm statements; `__restrict` in glibc's parameters' array declarators; block-scope typedef names (musl's string functions); definitions whose declarator has a group (`signal`'s kind) |
 | `main.c` | 47 | 22,088 | 1.29% | asm statements (clang's intrinsics headers, the compiler's own); `_Alignas(64)` before a typedef name; `__restrict` in glibc's `spawn.h`; a block's variable named `va_list` |
 
+## Tiles (#2536)
+
+`parse_vector_tiles` (`ParseOptions.tile_tokens`, the C driver's
+`--parse-tile=N`) runs the same kernels and the same fallback over the unit a
+**tile** at a time: a run of top-level declarations of about N tokens, each
+tile through every kernel before the next tile's first. It is the first piece
+of [the all-core path](all-core-path.md)'s chain from the front. The driver's
+default is 4,096 tokens (`BUSTER_PARSE_TILE_TOKENS`); `N = 0` parses the unit
+as one, the twin.
+
+- **Why.** A kernel passes over the unit and leaves arrays as long as the unit
+  for the kernels after it: 88 bytes a token, 63 MB for `sqlite3.c`. Alone,
+  the third-level cache gives most of that back; beside seven other compiles
+  each pass comes from DRAM again, and the parse costs 3.3 times its
+  one-worker time. A tile's arrays stay in the second-level cache from one
+  kernel to the next. On the 9700X, `sqlite3.c`'s parse beside seven other
+  compiles takes 8.7 ms by tiles of 4,096 tokens and 22.0 ms as one unit
+  (+5.3% for the compile), and a compile alone takes the same time either way
+  ([the design's "The parser by tiles"](all-core-path.md#the-parser-by-tiles)).
+- **A tile is a unit to every kernel.** The columns' entries around it hold
+  what a unit's padding holds while its kernels run (the tokens' kinds, names
+  and flags, and the tree's roles and depths, 128 entries on each side, saved
+  and put back), and its parents are counted from its first token until the
+  tile is done, then from the unit's. The unit's columns are the output: the
+  tokens' and the tree's are written in place, a tile at a time.
+- **The workspace.** The kernels' arrays by token and the buffers are reserved
+  for the longest tile so far (`BUSTER_PARSE_TILE_ROOM` tokens at least) and
+  written again by every tile; nothing in them outlives a tile. Only the
+  arrays by name do: the type names.
+- **Type names from tile to tile.** A top-level declaration parses alone as it
+  does in its unit, given the type names declared before it: the fallback
+  already relies on that (`parse_fallback_item`). After a tile, each name it
+  declared a type's at file scope is marked as clang's predeclared ones are
+  (a type's name from the next tile's first token), and its meaning for the
+  scalar parser is a typedef's; a block's is ordinary again. At the unit's end
+  the meanings are what the unit's own parse leaves.
+- **Where a tile ends** (`parse_tile_end`): after the first top-level
+  declaration that ends N tokens or more past the tile's start. From the
+  kinds alone, 64 tokens a step: the brackets' depth is a prefix sum in byte
+  lanes, and only the tokens at depth 0 are read one at a time (a `;`, an
+  opener, a closer). A declaration ends at a `;` outside every bracket, except
+  between an old-style definition's parameters and its body, or at the `}` of
+  a function's body where a declaration can start after it. A body's brace is
+  one after a declarator's parameters, past any attributes' groups; a tag's
+  body after its attributes isn't, nor is a compound literal's, by what
+  follows its closer.
+- **A wrong end is refused, not parsed.** A tile that ends inside a declaration
+  holds a declaration cut short, which the kernels' checks or the scalar parser
+  refuse; so does a tile with an error. The unit is then parsed as one by
+  `parse_vector`, with the unit's arrays, as if no tile had been tried
+  (`ParseStatistics.tiles_refused`). So `parse_tile_end` decides how often
+  tiles serve, never the tree. A function that returns a pointer to an array
+  (`int (*f(void))[3] { ... }`) ends no tile; an old-style parameter declared
+  after an attribute is the one valid shape known to be refused.
+- **The checks.** `test-parser` parses every unit it checks by tiles of a
+  token (every top-level declaration a tile) and of 64 too, and compares the
+  tokens, the outcome, the diagnostics and the tree with the unit's parse as
+  one; `parse_test_tiles` gives `parse_tile_end` units by their top-level
+  declarations (old-style definitions, attributes before a brace, compound
+  literals, brackets deeper than a block, type names hidden and declared
+  again) and requires each tile's end where they end. `test-checker-driver`
+  compares objects, stderr and statuses by `--parse-tile=1`, `16` and `4096`
+  with `--parse-tile=0`.
+
 ## The postorder and the tree's columns
 
 `parse_tree_columns` (#186, #544) derives from the parents, in three passes

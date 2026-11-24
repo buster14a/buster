@@ -302,6 +302,73 @@ static bool check_input_auto_initializer_bit_field(const CheckInputReader* reade
     return field;
 }
 
+// The common specifiers' attributes precede the declarator's. A nullability keyword next to `*` qualifies that
+// pointer, while a keyword in the specifiers checks the type deduced for the placeholder (#1844).
+static bool check_input_auto_nullability(CheckInputReader* reader, const CheckInputAttributes* attributes, uint32_t declaration,
+                                        uint32_t begin, uint32_t end, TypeId base, TypeId* deduced, bool* rejected)
+{
+    const Parser* parser = reader->parser;
+    const CheckInputAttribute* attribute = check_input_attribute_of(attributes, CHECK_ATTRIBUTE_NULLABILITY);
+    const uint32_t at = attribute != NULL ? attribute->name_token : BUSTER_CHECK_NONE;
+    const bool specifier = at < declaration && attribute->keyword && parser->tree.roles[at] == PARSE_ROLE_SPECIFIER;
+    const uint8_t* invalid = reader->output->invalid_declarations;
+    bool invalid_initializer = false;
+    for (uint32_t token = begin; specifier && invalid != NULL && token < end && !invalid_initializer; token += 1)
+    {
+        const uint32_t named = parser->tokens.kinds[token] == PARSE_KIND_IDENTIFIER ? reader->output->declarations[token] : BUSTER_CHECK_NONE;
+        invalid_initializer = named < parser->tokens.count && invalid[named] != 0;
+    }
+    const bool non_pointer = specifier && type_kind(reader->types, type_strip_aligned(reader->types, base)) != BUSTER_TYPE_KIND_POINTER;
+    const bool invalid_declaration = non_pointer || invalid_initializer;
+    if (invalid_declaration)
+    {
+        const uint32_t before = reader->output->report_count;
+        if (!invalid_initializer)
+        {
+            check_input_report(reader, at, CHECK_INPUT_AUTO_TYPE_NULLABILITY);
+            if (reader->output->report_count == before + 1)
+            {
+                CheckInputReport* report = reader->output->reports + before;
+                report->type = base;
+                report->type_spelling = check_input_auto_initializer_spelling(reader, begin, end);
+                report->sort = declaration;
+            }
+        }
+        check_input_lane_refuse(reader, reader->lane, "an invalid declaration's uses are quiet in source order");
+        const bool recovered = !reader->lane && (invalid_initializer ||
+                               (reader->output->report_count == before + 1 && check_input_recover_reports(reader, before)));
+        if (recovered)
+        {
+            check_input_invalid_declare(reader, declaration);
+            // A linked __auto_type deduces only when it has no earlier linked declaration to merge. At recovery the
+            // provisional entry belongs to this invalid declaration, whose binding stays visible without its linkage.
+            const uint32_t name = parser->tokens.names[declaration];
+            if (check_input_linkage(reader->declaration_bits, declaration) != 0 && reader->linked_declarations[name] == declaration + 1)
+            {
+                reader->linked_declarations[name] = 0;
+                reader->linked_types[name] = 0;
+                if (reader->deferred != 0)
+                {
+                    check_deferred_linked(reader, name, declaration);
+                }
+            }
+            if (invalid_initializer || !type_is_complete(reader->types, *deduced))
+            {
+                const uint32_t assignment = begin - 1;
+                reader->initializers[assignment] = 0;
+                reader->initializer_declarations[assignment] = BUSTER_CHECK_NONE;
+                reader->query_types[assignment] = 0;
+                reader->ignored[assignment] = true;
+                check_sparse_set(reader->output->sparse_pool, reader->output->initializer_begins, declaration, BUSTER_CHECK_NONE);
+                check_sparse_set(reader->output->sparse_pool, reader->output->initializer_ends, declaration, BUSTER_CHECK_NONE);
+                *rejected = true;
+            }
+        }
+        *deduced = recovered && !*rejected ? *deduced : 0;
+    }
+    return invalid_declaration;
+}
+
 // An __auto_type declaration's type, once the walk has read its initializer (whose uses' declarations it captured:
 // inference_end), as clang deduces it: the initializer's, converted as an lvalue's (its qualifiers dropped, but not
 // _Atomic) and decayed, with the specifiers' const and volatile. A use of the variable in its initializer is an error
@@ -510,14 +577,18 @@ static __attribute__((noinline)) TypeId check_input_auto_type_finish(CheckInputR
     else
     {
         TypeId deduced_base = 0;
-        TypeId deduced = deduced_declarator ? check_input_type_result(reader, check_input_c23_auto_deduce(reader, placeholder, value.type, declaration, &deduced_base)) :
+        TypeId raw_base = 0;
+        TypeId deduced = deduced_declarator ? check_input_type_result(reader, check_input_c23_auto_deduce(reader, placeholder, value.type, &deduced_base, &raw_base)) :
                                               check_input_type_result(reader, type_strip_aligned(types, type_adjust_parameter(types, value.type)));
         if (deduced == 0 && !reader->output->resource && reader->output->report_count == 0)
         {
             // A declarator shape its initializer doesn't fit, at clang's name for it.
             check_input_report(reader, declaration, CHECK_INPUT_DECLARATION);
         }
-        if (deduced_declarator && deduced != 0)
+        CheckInputAttributes* attributes = check_input_attributes_at(reader->output, declaration);
+        const bool nullability_invalid = gnu && deduced != 0 && attributes != NULL &&
+                                         check_input_auto_nullability(reader, attributes, declaration, begin, end, raw_base, &deduced, rejected);
+        if (deduced_declarator && deduced != 0 && !nullability_invalid)
         {
             // C23's later declarators deduce the same type (6.7.9), and __auto_type's as clang deduces them: clang reports
             // the difference at the declaration.
@@ -572,13 +643,12 @@ static __attribute__((noinline)) TypeId check_input_auto_type_finish(CheckInputR
                 reader->declaration_deduced_first[group] = declaration;
             }
         }
-        CheckInputAttributes* attributes = check_input_attributes_at(reader->output, declaration);
         const uint32_t required = attributes != 0 ? attributes->required_alignment_log2 : 0;
         if (deduced != 0 && !type_is_complete(types, deduced))
         {
             check_input_report(reader, declaration, CHECK_INPUT_INCOMPLETE_OBJECT);
         }
-        else if (deduced != 0 && required != 0 && required - 1 < type_alignment_log2(types, deduced))
+        else if (deduced != 0 && !nullability_invalid && required != 0 && required - 1 < type_alignment_log2(types, deduced))
         {
             for (uint32_t i = 0; i < attributes->count; i += 1)
             {
@@ -599,7 +669,7 @@ static __attribute__((noinline)) TypeId check_input_auto_type_finish(CheckInputR
             check_input_noderef_set(reader->output, declaration, noderef);
             check_input_noderef_set(reader->output, assignment, noderef);
             reader->initializers[assignment] = check_init_aggregate(types, result) ? 2 : 1;
-            if (check_input_linkage(reader->declaration_bits, declaration) != 0)
+            if (!nullability_invalid && check_input_linkage(reader->declaration_bits, declaration) != 0)
             {
                 const uint32_t name = parser->tokens.names[declaration];
                 reader->linked_types[name] = result;

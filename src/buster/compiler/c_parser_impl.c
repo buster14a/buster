@@ -7799,7 +7799,7 @@ static void parse_check_body(ParseKernels* kernels, uint32_t body, uint8_t* reas
 }
 
 // The scalar parser on tokens [begin, end] in place, with the file-scope typedef names declared before begin visible.
-static void parse_fallback_item(ParseKernels* kernels, const ParseInput* input, uint32_t begin, uint32_t end, uint32_t* visible, ParseFallback* result)
+static void parse_fallback_item(ParseKernels* kernels, const ParseInput* input, uint32_t begin, uint32_t end, bool earlier, uint32_t* visible, ParseFallback* result)
 {
     ParseMeanings* meanings = input->meanings;
     while (*visible < kernels->typedef_count && kernels->typedef_tokens[*visible] < begin)
@@ -7815,7 +7815,7 @@ static void parse_fallback_item(ParseKernels* kernels, const ParseInput* input, 
     // A declaration that made a file-scope typedef name an ordinary one changes how the rest of the unit parses, which
     // the kernels' type names don't know, and a name only the earlier file-scope declarations can decide
     // (parse_scalar_attribute_name), which the scalar parser doesn't have here: the whole unit goes to the scalar parser.
-    result->errors |= parse.errors != 0 || parse.out_of_memory || parse.retyped || (parse.undecided && begin != 0);
+    result->errors |= parse.errors != 0 || parse.out_of_memory || parse.retyped || (parse.undecided && (begin != 0 || earlier));
     for (uint32_t j = begin; j <= end; j += 1)
     {
         kernels->parents[j] = kernels->parents[j] == BUSTER_PARSE_ROOT ? BUSTER_PARSE_ROOT : kernels->parents[j] + begin;
@@ -7829,14 +7829,14 @@ static void parse_fallback_item(ParseKernels* kernels, const ParseInput* input, 
 // `everything`, the whole unit is one range (unbalanced brackets, a typedef the pass can't read, or what K5 can't
 // settle). The declarations end where a terminator or a function body's closer is at node depth 0, found 64 tokens at a
 // time.
-static ParseFallback parse_fallback(ParseKernels* kernels, const ParseInput* input, bool everything)
+static ParseFallback parse_fallback(ParseKernels* kernels, const ParseInput* input, bool everything, bool earlier)
 {
     ParseFallback result = { .items = 0, .tokens = 0, .errors = false };
     const uint32_t count = input->count;
     uint32_t visible = 0;
     if (everything && count != 0)
     {
-        parse_fallback_item(kernels, input, 0, count - 1, &visible, &result);
+        parse_fallback_item(kernels, input, 0, count - 1, earlier, &visible, &result);
     }
     else
     {
@@ -7869,7 +7869,7 @@ static ParseFallback parse_fallback(ParseKernels* kernels, const ParseInput* inp
                     flags &= ~through;
                     if (flagged)
                     {
-                        parse_fallback_item(kernels, input, begin, block + lane, &visible, &result);
+                        parse_fallback_item(kernels, input, begin, block + lane, earlier, &visible, &result);
                     }
                     begin = block + lane + 1;
                     flagged = false;
@@ -7880,13 +7880,14 @@ static ParseFallback parse_fallback(ParseKernels* kernels, const ParseInput* inp
         // A flagged declaration the input ends in.
         if (flagged && begin < count)
         {
-            parse_fallback_item(kernels, input, begin, count - 1, &visible, &result);
+            parse_fallback_item(kernels, input, begin, count - 1, earlier, &visible, &result);
         }
     }
     for (uint32_t i = 0; i < visible; i += 1)
     {
         input->meanings->meanings[kernels->typedef_log[i]] = PARSE_MEANING_ORDINARY;
     }
+    result.visible = visible;
     return result;
 }
 
@@ -7902,7 +7903,11 @@ static void parse_statement_tables_init(void);
 // `name_capacity` names, in `arena`, but for the tree's roles, node depths and parents with `tree`: its columns (each of
 // capacity + 2 * BUSTER_PARSE_TOKEN_PADDING entries, the first token's at the padding's end), which outlive the others,
 // a parse's temporaries.
-static bool parse_kernels_reserve_tree(ParseKernels* kernels, Arena* arena, uint64_t capacity, uint64_t name_capacity, const ParseTree* tree)
+//
+// With `names` (else null), the kernels' arrays for a tile of a unit (parse_vector_tiles): the arrays by name are
+// `names`' own, as they are, which hold the unit's type names so far, and `tree`'s columns are the unit's, already
+// written for the tiles before, so neither is cleared.
+static bool parse_kernels_reserve_shared(ParseKernels* kernels, Arena* arena, uint64_t capacity, uint64_t name_capacity, const ParseTree* tree, const ParseKernels* names)
 {
     const uint64_t slots = capacity + 2 * BUSTER_PARSE_TOKEN_PADDING;
     uint8_t* vkinds = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, slots);
@@ -7925,9 +7930,9 @@ static bool parse_kernels_reserve_tree(ParseKernels* kernels, Arena* arena, uint
         .waiting_thresholds = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
         .lefts = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
         .left_key_values = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
-        .typedef_names = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, name_capacity),
-        .typedef_first = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, name_capacity),
-        .typedef_heads = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, name_capacity),
+        .typedef_names = names != 0 ? names->typedef_names : BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, name_capacity),
+        .typedef_first = names != 0 ? names->typedef_first : BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, name_capacity),
+        .typedef_heads = names != 0 ? names->typedef_heads : BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, name_capacity),
         .typedef_log = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
         .typedef_tokens = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
         .typedef_points = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, slots),
@@ -7952,17 +7957,25 @@ static bool parse_kernels_reserve_tree(ParseKernels* kernels, Arena* arena, uint
                         kernels->typedef_scopes != 0 && kernels->check_group != 0 && kernels->check_kind != 0 &&
                         kernels->check_part != 0 && kernels->check_items != 0 && kernels->check_typed != 0 && kernels->check_after_body != 0 &&
                         kernels->check_classes != 0 && kernels->check_groups != 0;
-    if (result)
+    if (result && names == 0)
     {
         memset(kernels->typedef_names, 0, name_capacity);
         memset(kernels->typedef_first, 0, name_capacity * sizeof(uint32_t));
         memset(kernels->typedef_heads, 0, name_capacity * sizeof(uint32_t));
-        memset(vkinds, PARSE_KIND_END, slots);
         memset(roles, PARSE_ROLE_NONE, slots);
-        memset(flags, 0, slots);
         memset(node_depths, 0, slots * sizeof(uint32_t));
     }
+    if (result)
+    {
+        memset(vkinds, PARSE_KIND_END, slots);
+        memset(flags, 0, slots);
+    }
     return result;
+}
+
+static bool parse_kernels_reserve_tree(ParseKernels* kernels, Arena* arena, uint64_t capacity, uint64_t name_capacity, const ParseTree* tree)
+{
+    return parse_kernels_reserve_shared(kernels, arena, capacity, name_capacity, tree, 0);
 }
 
 // parse_kernels_reserve_tree with the tree's arrays in `arena` too.
@@ -11209,8 +11222,10 @@ static void parse_flag_custom_attributes(ParseKernels* kernels, const ParseInput
     }
 }
 
-// Every kernel in AVX-512 in turn, then the fallback, into kernels->parents: the data-parallel parser.
-static ParseKernelResult parse_vector(ParseKernels* kernels, const ParseInput* input, const IdentId* predeclared, ParseVectorBuffers* buffers)
+// The kernels over `input`, a unit or a tile of one (parse_vector_tiles), whose type names from before its first token
+// are marked already: every kernel in turn, then the fallback unless `tile` and the kernels can't take the input, which
+// its caller then parses with the unit. `earlier` is whether declarations precede the input's first token.
+static ParseKernelResult parse_vector_run(ParseKernels* kernels, const ParseInput* input, ParseVectorBuffers* buffers, bool earlier, bool tile)
 {
     ParseKernelResult result = { .flagged_tokens = 0, .everything = false };
     const uint8_t* kinds = input->kinds;
@@ -11218,7 +11233,6 @@ static ParseKernelResult parse_vector(ParseKernels* kernels, const ParseInput* i
     const uint32_t count = input->count;
     kernels->unbalanced = false;
     kernels->unsupported = false;
-    parse_kernels_predeclared(kernels, predeclared, true);
     // K1, on ( [ {.
     kernels->unbalanced = !parse_brackets_avx512(kinds, parse_kind_deltas, count, kernels->enclosing, buffers->open_stack, kernels->bracket_blocks);
     // K3.
@@ -11251,9 +11265,403 @@ static ParseKernelResult parse_vector(ParseKernels* kernels, const ParseInput* i
             parse_function_roles_block_avx512(kernels, block, live);
         }
     }
-    result.fallback = parse_fallback(kernels, input, result.everything);
+    if (!(tile && result.everything))
+    {
+        result.fallback = parse_fallback(kernels, input, result.everything, earlier);
+    }
+    return result;
+}
+
+// Every kernel in AVX-512 in turn, then the fallback, into kernels->parents: the data-parallel parser.
+static ParseKernelResult parse_vector(ParseKernels* kernels, const ParseInput* input, const IdentId* predeclared, ParseVectorBuffers* buffers)
+{
+    parse_kernels_predeclared(kernels, predeclared, true);
+    const ParseKernelResult result = parse_vector_run(kernels, input, buffers, false, false);
     parse_typedefs_clear(kernels);
     parse_kernels_predeclared(kernels, predeclared, false);
+    return result;
+}
+
+// Whether a token of `kind` can start a top-level declaration: what follows a function's body.
+BUSTER_INLINE bool parse_tile_starts_declaration(uint8_t kind)
+{
+    return kind == PARSE_KIND_END || kind == PARSE_KIND_IDENTIFIER || kind == PARSE_KIND_TYPE || kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM ||
+           kind == PARSE_KIND_QUALIFIER || kind == PARSE_KIND_ATOMIC || kind == PARSE_KIND_CALLING_CONVENTION || kind == PARSE_KIND_STORAGE ||
+           kind == PARSE_KIND_TYPEDEF || kind == PARSE_KIND_ATTRIBUTE || kind == PARSE_KIND_ASM || kind == PARSE_KIND_ALIGNAS || kind == PARSE_KIND_TYPEOF ||
+           kind == PARSE_KIND_STATIC_ASSERT || kind == PARSE_KIND_EXTENSION;
+}
+
+// Whether a token of `kind` after a declarator's parameters starts an old-style definition's parameter declarations.
+BUSTER_INLINE bool parse_tile_starts_parameters(uint8_t kind)
+{
+    return kind == PARSE_KIND_IDENTIFIER || kind == PARSE_KIND_TYPE || kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM || kind == PARSE_KIND_QUALIFIER ||
+           kind == PARSE_KIND_ATOMIC || kind == PARSE_KIND_STORAGE || kind == PARSE_KIND_TYPEOF || kind == PARSE_KIND_EXTENSION;
+}
+
+// The parenthesized groups outside every other bracket that parse_tile_end keeps of the declaration it is in: those
+// before a body's brace that an attribute's can hide a declarator's parameters behind.
+#define BUSTER_PARSE_TILE_GROUPS 8
+
+// Whether the `{` at `brace`, outside every bracket, opens a function's body, by the kinds before it: after a
+// declarator's parameters, past any attributes' groups between them (`void f(void) __attribute__((cold)) {`), or after
+// an old-style definition's parameter declarations. `opens` and `closes` are the last `groups` groups' brackets, of which
+// the scan keeps BUSTER_PARSE_TILE_GROUPS. A compound literal's brace at file scope reads as a body's too; what follows
+// its closer tells them apart (parse_tile_end). A tag's body after its attributes (`struct __attribute__((packed)) {`)
+// doesn't, nor does what the kept groups don't reach.
+static bool parse_tile_body(const uint8_t* kinds, uint32_t begin, uint32_t brace, const uint32_t* opens, const uint32_t* closes, uint32_t groups, bool old_style)
+{
+    bool result = false;
+    bool searching = brace > begin;
+    uint32_t at = brace - 1;
+    uint32_t group = groups;
+    while (searching)
+    {
+        const uint8_t kind = kinds[at];
+        const uint32_t slot = (group - 1) % BUSTER_PARSE_TILE_GROUPS;
+        const bool kept = kind == PARSE_KIND_R_PAREN && group != 0 && groups - group < BUSTER_PARSE_TILE_GROUPS && closes[slot] == at;
+        const uint32_t open = kept ? opens[slot] : begin;
+        const uint8_t before = open > begin ? kinds[open - 1] : PARSE_KIND_END;
+        const bool attribute = kept && (before == PARSE_KIND_ATTRIBUTE || before == PARSE_KIND_ALIGNAS);
+        // An attribute's group: what is before its keyword decides.
+        searching = attribute && open >= begin + 2;
+        result = (kept && !attribute) || (kind == PARSE_KIND_SEMI && old_style);
+        at = searching ? open - 2 : at;
+        group -= searching ? 1 : 0;
+    }
+    return result;
+}
+
+// Where a tile that starts at `begin`, a top-level declaration's first token, ends: after the first top-level declaration
+// that ends `tile_tokens` tokens or more past `begin`, or `count`. A declaration ends at a `;` outside every bracket, but
+// between an old-style definition's parameters and its body, or at the `}` of a function's body where a declaration can
+// start after it. The test is of the kinds alone, before any kernel has run, so it may take for a declaration's end
+// what isn't one: such a tile's last declaration is cut short, which the kernels' checks or the scalar parser refuse,
+// and parse_vector_tiles then parses the unit as one. So what it takes decides how often tiles serve, never the tree.
+//
+// 64 tokens a step: the brackets' depth after each token is a prefix sum in byte lanes (parse_prefix_sum8), and the
+// tokens that can end a declaration or say what kind it is are those at depth 0, a mask: a `;`, an opener before which
+// the depth is 0, a closer after which it is. Those alone are then read, a token at a time: a declaration has a few,
+// and a function's body, most of a unit's tokens, none between its braces. A block wholly inside brackets deeper
+// than 64 has none, and takes the two counts of its brackets alone.
+static uint32_t parse_tile_end(const uint8_t* kinds, uint32_t begin, uint32_t count, uint32_t tile_tokens)
+{
+    uint32_t result = count;
+    uint32_t opens[BUSTER_PARSE_TILE_GROUPS] = { 0 };
+    uint32_t closes[BUSTER_PARSE_TILE_GROUPS] = { 0 };
+    uint32_t groups = 0;
+    // Between an old-style definition's parameters and its body; and inside a function's body.
+    bool old_style = false;
+    bool body = false;
+    bool searching = true;
+    uint64_t base = 0;
+    for (uint32_t block = begin; searching && block < count; block += 64)
+    {
+        const __mmask64 live = count - block < 64 ? (((__mmask64)1 << (count - block)) - 1) : ~(__mmask64)0;
+        const __m512i kind = _mm512_loadu_si512(kinds + block);
+        const __mmask64 openers = live & (parse_equal8(kind, PARSE_KIND_L_PAREN) | parse_equal8(kind, PARSE_KIND_L_SQUARE) | parse_equal8(kind, PARSE_KIND_L_BRACE));
+        const __mmask64 closers = live & (parse_equal8(kind, PARSE_KIND_R_PAREN) | parse_equal8(kind, PARSE_KIND_R_SQUARE) | parse_equal8(kind, PARSE_KIND_R_BRACE));
+        uint64_t events = 0;
+        uint64_t under = 0;
+        if (base <= 64)
+        {
+            const __m512i delta = _mm512_sub_epi8(_mm512_maskz_set1_epi8(openers, 1), _mm512_maskz_set1_epi8(closers, 1));
+            const __m512i after = parse_prefix_sum8(delta);
+            // Depth 0 is the prefix sum at minus the depth before the block, which a byte holds.
+            const __m512i ground = _mm512_set1_epi8((char)-(int64_t)base);
+            const __mmask64 after_ground = _mm512_cmpeq_epi8_mask(after, ground);
+            const __mmask64 before_ground = _mm512_cmpeq_epi8_mask(_mm512_sub_epi8(after, delta), ground);
+            // A closer without its opener: the unit's brackets don't balance, and it is one tile.
+            under = live & _mm512_cmplt_epi8_mask(after, ground);
+            events = (live & parse_equal8(kind, PARSE_KIND_SEMI) & before_ground) | (openers & before_ground) | (closers & after_ground) | under;
+        }
+        for (; searching && events != 0; events &= events - 1)
+        {
+            const uint32_t lane = (uint32_t)__builtin_ctzll(events);
+            const uint32_t i = block + lane;
+            const uint8_t at = kinds[i];
+            const bool fits = i + 1 - begin >= tile_tokens;
+            bool cut = false;
+            if (((under >> lane) & 1) != 0)
+            {
+                searching = false;
+            }
+            else if (at == PARSE_KIND_L_PAREN)
+            {
+                opens[groups % BUSTER_PARSE_TILE_GROUPS] = i;
+                closes[groups % BUSTER_PARSE_TILE_GROUPS] = BUSTER_PARSE_NONE;
+                groups += 1;
+            }
+            else if (at == PARSE_KIND_L_BRACE)
+            {
+                body = parse_tile_body(kinds, begin, i, opens, closes, groups, old_style);
+            }
+            else if (at == PARSE_KIND_R_PAREN && groups != 0)
+            {
+                // After a declarator's parameters (`f(a, b)`, `(*f)(a)`), a declaration's specifiers start an old-style
+                // definition's parameter declarations, whose `;` end no top-level declaration.
+                const uint32_t open = opens[(groups - 1) % BUSTER_PARSE_TILE_GROUPS];
+                const uint8_t before = open > begin ? kinds[open - 1] : PARSE_KIND_END;
+                closes[(groups - 1) % BUSTER_PARSE_TILE_GROUPS] = i;
+                old_style |= (before == PARSE_KIND_IDENTIFIER || before == PARSE_KIND_R_PAREN) && parse_tile_starts_parameters(kinds[i + 1]);
+            }
+            else if (at == PARSE_KIND_R_BRACE)
+            {
+                cut = body && fits && parse_tile_starts_declaration(kinds[i + 1]);
+                old_style = body ? false : old_style;
+                groups = body ? 0 : groups;
+                body = false;
+            }
+            else if (at == PARSE_KIND_SEMI)
+            {
+                cut = !old_style && fits;
+                groups = old_style ? groups : 0;
+            }
+            if (cut)
+            {
+                result = i + 1;
+                searching = false;
+            }
+        }
+        base += (uint64_t)__builtin_popcountll(openers) - (uint64_t)__builtin_popcountll(closers);
+    }
+    return result;
+}
+
+// The fewest tokens parse_vector_tiles' workspace has room for.
+#define BUSTER_PARSE_TILE_ROOM 1024
+
+// parse_vector by tiles (#2536): the kernels and the fallback over one run of top-level declarations of about
+// `tile_tokens` tokens at a time (parse_tile_end), each as a unit of its own whose type names from the tiles before it
+// are marked as clang's predeclared ones are. The kernels' arrays are then a tile's, a workspace in `arena` with room
+// for the longest tile so far that every tile writes again, where the unit's are 88 bytes a token that each kernel
+// passes over (63 MB of sqlite3.c's): a tile's stay in the cache from one kernel to the next, and the tree's columns
+// (`tree`) are written a tile at a time.
+//
+// A tile's tokens are a unit's to every kernel: the columns' entries around it hold what a unit's padding holds while
+// its kernels run, and its parents are counted from its first token until they are done. A top-level declaration
+// parses alone as it does in its unit, given the type names before it (the fallback's rule, parse_fallback_item), so the
+// tree is the unit's. A tile the kernels or the fallback can't take (as a unit they can't, or a tile cut short) sends
+// the unit to parse_vector as one, with the unit's arrays.
+//
+// With `columns`, each tile's part of the tree's columns too (parse_tree_columns_range), from its parents as they are
+// written: the passes' temporaries are a tile's, in the workspace, and the unit's sentinel follows the last tile. A unit
+// that goes to parse_vector as one has none of them derived.
+static ParseKernelResult parse_vector_tiles(ParseKernels* kernels, const ParseInput* input, const IdentId* predeclared, ParseVectorBuffers* buffers, uint32_t tile_tokens,
+                                            Arena* arena, const ParseTree* tree, uint32_t name_capacity, const ParseTileColumns* columns)
+{
+    ParseKernelResult result = { .flagged_tokens = 0, .everything = false };
+    const uint32_t count = input->count;
+    ParseMeanings* meanings = input->meanings;
+    const uint64_t unit_mark = arena->length;
+    // The arrays by name, the unit's, and the names every tile so far declared a type's, in order: what the unit's parse
+    // would clear at its end.
+    ParseKernels names = {
+        .typedef_names = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, name_capacity),
+        .typedef_first = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, name_capacity),
+        .typedef_heads = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, name_capacity),
+    };
+    uint32_t* logged = BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, (uint64_t)count + 1);
+    uint32_t logged_count = 0;
+    // How many of them were declared before the last top-level declaration the fallback took (ParseFallback.visible).
+    uint32_t covered = 0;
+    bool memory = names.typedef_names != NULL && names.typedef_first != NULL && names.typedef_heads != NULL && logged != NULL;
+    if (memory)
+    {
+        memset(names.typedef_names, 0, name_capacity);
+        memset(names.typedef_first, 0, (uint64_t)name_capacity * sizeof(uint32_t));
+        memset(names.typedef_heads, 0, (uint64_t)name_capacity * sizeof(uint32_t));
+        // The unit's first tokens' padding, which the unit's own reservation clears with the columns.
+        memset(tree->roles - BUSTER_PARSE_TOKEN_PADDING, PARSE_ROLE_NONE, BUSTER_PARSE_TOKEN_PADDING);
+        memset(tree->depths - BUSTER_PARSE_TOKEN_PADDING, 0, BUSTER_PARSE_TOKEN_PADDING * sizeof(uint32_t));
+        parse_kernels_predeclared(&names, predeclared, true);
+    }
+    // The workspace: the kernels' arrays by token and the buffers, for `room` tokens, from `tile_mark`, and the columns'
+    // passes' temporaries (last children, counts, starts), each of room + 1 entries.
+    const uint64_t tile_mark = arena->length;
+    const bool deriving = columns->postorder != NULL;
+    uint32_t* passes = NULL;
+    uint64_t room = 0;
+    uint64_t rounds[BUSTER_PARSE_ROLE_ROUNDS + 1] = { 0 };
+    uint64_t wide_blocks = 0;
+    ParseStatementCounts statement_counts = { 0 };
+    uint64_t check_twins = 0;
+    bool deep = false;
+    uint32_t tiles = 0;
+    bool served = memory;
+    uint32_t begin = 0;
+    while (served && begin < count)
+    {
+        const uint32_t end = parse_tile_end(input->kinds, begin, count, tile_tokens);
+        const uint32_t length = end - begin;
+        if (length > room)
+        {
+            // A longer tile than any before: the workspace again, larger. Nothing in it outlives a tile.
+            const uint64_t doubled = room * 2 > BUSTER_PARSE_TILE_ROOM ? room * 2 : BUSTER_PARSE_TILE_ROOM;
+            room = length > doubled ? length : doubled;
+            arena_pop_to(arena, tile_mark);
+            memory = parse_kernels_reserve_shared(kernels, arena, room, name_capacity, tree, &names) && parse_vector_buffers_reserve(buffers, arena, room);
+            passes = memory && deriving ? BUSTER_ARENA_PUSH_ARRAY(arena, uint32_t, 3 * (room + 1)) : NULL;
+            memory = memory && (!deriving || passes != NULL);
+            served = memory;
+        }
+        if (served)
+        {
+            // The columns' entries before the tile and the tokens' after it, as a unit's padding has them, and the
+            // temporaries' past the tile, which a longer tile before it wrote.
+            uint8_t saved_kinds[2][BUSTER_PARSE_TOKEN_PADDING];
+            uint32_t saved_names[2][BUSTER_PARSE_TOKEN_PADDING];
+            uint8_t saved_flags[2][BUSTER_PARSE_TOKEN_PADDING];
+            uint8_t saved_roles[BUSTER_PARSE_TOKEN_PADDING];
+            uint32_t saved_depths[BUSTER_PARSE_TOKEN_PADDING];
+            uint8_t* kinds_before = (uint8_t*)((uintptr_t)input->kinds + begin - BUSTER_PARSE_TOKEN_PADDING);
+            uint32_t* names_before = (uint32_t*)((uintptr_t)input->names + ((uint64_t)begin - BUSTER_PARSE_TOKEN_PADDING) * sizeof(uint32_t));
+            uint8_t* flags_before = (uint8_t*)((uintptr_t)input->flags + begin - BUSTER_PARSE_TOKEN_PADDING);
+            uint8_t* kinds_after = (uint8_t*)((uintptr_t)input->kinds + end);
+            uint32_t* names_after = (uint32_t*)((uintptr_t)input->names + (uint64_t)end * sizeof(uint32_t));
+            uint8_t* flags_after = (uint8_t*)((uintptr_t)input->flags + end);
+            uint8_t* roles_before = tree->roles + begin - BUSTER_PARSE_TOKEN_PADDING;
+            uint32_t* depths_before = tree->depths + begin - BUSTER_PARSE_TOKEN_PADDING;
+            memcpy(saved_kinds[0], kinds_before, sizeof(saved_kinds[0]));
+            memcpy(saved_names[0], names_before, sizeof(saved_names[0]));
+            memcpy(saved_flags[0], flags_before, sizeof(saved_flags[0]));
+            memcpy(saved_kinds[1], kinds_after, sizeof(saved_kinds[1]));
+            memcpy(saved_names[1], names_after, sizeof(saved_names[1]));
+            memcpy(saved_flags[1], flags_after, sizeof(saved_flags[1]));
+            memcpy(saved_roles, roles_before, sizeof(saved_roles));
+            memcpy(saved_depths, depths_before, sizeof(saved_depths));
+            memset(kinds_before, PARSE_KIND_END, sizeof(saved_kinds[0]));
+            memset(names_before, 0, sizeof(saved_names[0]));
+            memset(flags_before, 0, sizeof(saved_flags[0]));
+            memset(kinds_after, PARSE_KIND_END, sizeof(saved_kinds[1]));
+            memset(names_after, 0, sizeof(saved_names[1]));
+            memset(flags_after, 0, sizeof(saved_flags[1]));
+            memset(roles_before, PARSE_ROLE_NONE, sizeof(saved_roles));
+            memset(depths_before, 0, sizeof(saved_depths));
+            memset(tree->roles + end, PARSE_ROLE_NONE, BUSTER_PARSE_TOKEN_PADDING);
+            memset(tree->depths + end, 0, BUSTER_PARSE_TOKEN_PADDING * sizeof(uint32_t));
+            memset(kernels->vkinds + length, PARSE_KIND_END, BUSTER_PARSE_TOKEN_PADDING);
+            memset(kernels->flags + length, 0, BUSTER_PARSE_TOKEN_PADDING);
+            ParseKernels tile = *kernels;
+            tile.roles = tree->roles + begin;
+            tile.node_depths = tree->depths + begin;
+            tile.parents = tree->parents + begin;
+            ParseInput tile_input = *input;
+            tile_input.kinds = input->kinds + begin;
+            tile_input.names = input->names + begin;
+            tile_input.flags = input->flags + begin;
+            tile_input.count = length;
+            const ParseKernelResult ran = parse_vector_run(&tile, &tile_input, buffers, begin != 0, true);
+            memcpy(kinds_before, saved_kinds[0], sizeof(saved_kinds[0]));
+            memcpy(names_before, saved_names[0], sizeof(saved_names[0]));
+            memcpy(flags_before, saved_flags[0], sizeof(saved_flags[0]));
+            memcpy(kinds_after, saved_kinds[1], sizeof(saved_kinds[1]));
+            memcpy(names_after, saved_names[1], sizeof(saved_names[1]));
+            memcpy(flags_after, saved_flags[1], sizeof(saved_flags[1]));
+            memcpy(roles_before, saved_roles, sizeof(saved_roles));
+            memcpy(depths_before, saved_depths, sizeof(saved_depths));
+            served = !ran.everything && !ran.fallback.errors;
+            if (served)
+            {
+                // The parents, counted from the unit's first token.
+                const __m512i base = _mm512_set1_epi32((int32_t)begin);
+                for (uint32_t block = 0; begin != 0 && block < length; block += 16)
+                {
+                    const __mmask16 live = length - block < 16 ? (__mmask16)((1u << (length - block)) - 1) : (__mmask16)0xffff;
+                    const __m512i parents = _mm512_maskz_loadu_epi32(live, tile.parents + block);
+                    const __mmask16 rooted = _mm512_mask_cmpneq_epi32_mask(live, parents, _mm512_set1_epi32((int32_t)BUSTER_PARSE_ROOT));
+                    _mm512_mask_storeu_epi32(tile.parents + block, rooted, _mm512_add_epi32(parents, base));
+                }
+                covered = ran.fallback.items != 0 ? logged_count + ran.fallback.visible : covered;
+                // The tile's type names, for the tiles after it: a file-scope one is a type's from their first token, as
+                // a predeclared one is; a block's is none again, but one that the typedef pass has seen (its first
+                // declarator is kept, as any but 0).
+                for (uint32_t record = 0; record < tile.typedef_count; record += 1)
+                {
+                    const uint32_t id = tile.typedef_log[record];
+                    const bool file = (tile.typedef_names[id] & BUSTER_PARSE_TYPEDEF_FILE) != 0;
+                    tile.typedef_first[id] = file ? 0 : BUSTER_PARSE_NONE;
+                    tile.typedef_heads[id] = 0;
+                    meanings->meanings[id] = file ? PARSE_MEANING_TYPEDEF : PARSE_MEANING_ORDINARY;
+                    logged[logged_count] = id;
+                    logged_count += 1;
+                }
+                result.flagged_tokens += ran.flagged_tokens;
+                result.fallback.items += ran.fallback.items;
+                result.fallback.tokens += ran.fallback.tokens;
+                deep |= tile.deep_node_depths;
+                if (deriving)
+                {
+                    // The passes' temporaries, a tile's, placed so that the tile's tokens' entries are theirs.
+                    const uintptr_t bias = (uintptr_t)begin * sizeof(uint32_t);
+                    uint32_t* last_children = (uint32_t*)((uintptr_t)passes - bias);
+                    uint32_t* before_counts = (uint32_t*)((uintptr_t)(passes + room + 1) - bias);
+                    uint32_t* starts = columns->sizes != NULL ? (uint32_t*)((uintptr_t)(passes + 2 * (room + 1)) - bias) : NULL;
+                    parse_tree_columns_range(tree->parents, begin, end, last_children, before_counts, columns->postorder, columns->positions, columns->ends,
+                                             columns->first_children, columns->next_siblings, starts, columns->sizes);
+                }
+            }
+            // What the buffers count, which the workspace's next reservation clears.
+            for (uint32_t r = 0; r < BUSTER_ARRAY_LENGTH(rounds); r += 1)
+            {
+                rounds[r] += buffers->rounds[r];
+                buffers->rounds[r] = 0;
+            }
+            wide_blocks += buffers->wide_blocks;
+            check_twins += buffers->check_twins;
+            statement_counts.blocks += buffers->statement_counts.blocks;
+            statement_counts.interrupted_blocks += buffers->statement_counts.interrupted_blocks;
+            statement_counts.sparse += buffers->statement_counts.sparse;
+            statement_counts.twins += buffers->statement_counts.twins;
+            buffers->wide_blocks = 0;
+            buffers->check_twins = 0;
+            buffers->statement_counts = (ParseStatementCounts){ 0 };
+            tiles += 1;
+        }
+        begin = end;
+    }
+    // The names' meanings as the unit's parse leaves them: ordinary for those declared before the last declaration the
+    // fallback took, and as they were for the others.
+    for (uint32_t i = 0; memory && i < logged_count; i += 1)
+    {
+        const uint32_t id = logged[i];
+        bool given = false;
+        for (uint32_t p = 0; p < BUSTER_PARSE_PREDECLARED_TYPEDEFS; p += 1)
+        {
+            given |= predeclared[p] == id;
+        }
+        meanings->meanings[id] = given && (!served || i >= covered) ? PARSE_MEANING_TYPEDEF : PARSE_MEANING_ORDINARY;
+    }
+    if (memory && !served)
+    {
+        // The unit as one, with the unit's arrays, as if no tile had been tried.
+        arena_pop_to(arena, unit_mark);
+        memory = parse_kernels_reserve_tree(kernels, arena, count, name_capacity, tree) && parse_vector_buffers_reserve(buffers, arena, count);
+        if (memory)
+        {
+            result = parse_vector(kernels, input, predeclared, buffers);
+        }
+    }
+    else if (memory)
+    {
+        for (uint32_t r = 0; r < BUSTER_ARRAY_LENGTH(rounds); r += 1)
+        {
+            buffers->rounds[r] = rounds[r];
+        }
+        buffers->wide_blocks = wide_blocks;
+        buffers->check_twins = check_twins;
+        buffers->statement_counts = statement_counts;
+        kernels->deep_node_depths = deep;
+        kernels->roles = tree->roles;
+        kernels->node_depths = tree->depths;
+        kernels->parents = tree->parents;
+        if (deriving)
+        {
+            parse_tree_columns_sentinel(count, columns->positions, columns->ends, columns->first_children, columns->next_siblings);
+        }
+    }
+    result.tiles = tiles;
+    result.tiles_refused = memory && !served;
+    result.out_of_memory = !memory;
     return result;
 }
 
@@ -11343,6 +11751,18 @@ static bool parse_tree_columns_reserve(Parser* parser, ParseTree* tree)
     const uint64_t sizes[] = { 1, 4, 4 };
     void** columns[] = { (void**)&tree->roles, (void**)&tree->parents, (void**)&tree->depths };
     return parse_columns(parser, 5, BUSTER_ARRAY_LENGTH(columns), entries, sizes, columns);
+}
+
+// The postorder and the tree's columns for the unit's tokens (and with ParseOptions.sizes the subtree sizes), in arena
+// 11 (parse_columns).
+static bool parse_traversal_reserve(Parser* parser)
+{
+    const uint64_t count = parser->tokens.count;
+    const uint64_t entries[] = { count, count, count, count, count, count };
+    const uint64_t widths[] = { 4, 4, 4, 4, 4, 4 };
+    void** columns[] = { (void**)&parser->postorder,      (void**)&parser->positions,     (void**)&parser->ends,
+                         (void**)&parser->first_children, (void**)&parser->next_siblings, (void**)&parser->sizes };
+    return parse_columns(parser, 11, parser->options.sizes ? 6 : 5, entries, widths, columns);
 }
 
 // clang's reading of `__clang__`'s expansion where a C23 attribute's identifier goes (#147, clang's
@@ -11534,6 +11954,8 @@ BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp
     Arena* temporary = parser->options.scratch != 0 ? parser->options.scratch : &parser->scratch;
     const uint64_t temporary_mark = temporary->length;
     bool scalar = false;
+    // The tiles derived the tree's columns (parse_vector_tiles).
+    bool traversed = false;
     if (result)
     {
         // The vector path, with the scalar parser on what it flags; an error there sends the whole unit to the scalar
@@ -11541,8 +11963,19 @@ BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp
         // sqlite3.c's took 63 MB, which the C driver's checker takes again (#528).
         const uint32_t count = parser->tokens.count;
         ParseTree tree = { 0 };
-        const bool reserved = parse_tree_columns_reserve(parser, &tree) && parse_kernels_reserve_tree(&parser->kernels, temporary, count, parser->meanings.capacity, &tree) &&
-                              parse_vector_buffers_reserve(&parser->buffers, temporary, count);
+        // By tiles (ParseOptions.tile_tokens), the kernels' arrays are parse_vector_tiles' to reserve, a tile's, and the
+        // tree's columns, where the parse makes them, are derived a tile at a time, so they are reserved first.
+        const uint32_t tile_tokens = parser->options.tile_tokens;
+        ParseTileColumns tile_columns = { 0 };
+        if (tile_tokens != 0 && !parser->options.tree_only && parse_traversal_reserve(parser))
+        {
+            tile_columns = (ParseTileColumns){ .postorder = parser->postorder, .positions = parser->positions, .ends = parser->ends,
+                                               .first_children = parser->first_children, .next_siblings = parser->next_siblings, .sizes = parser->sizes };
+        }
+        const bool reserved = parse_tree_columns_reserve(parser, &tree) &&
+                              (tile_tokens != 0 || (parse_kernels_reserve_tree(&parser->kernels, temporary, count, parser->meanings.capacity, &tree) &&
+                                                    parse_vector_buffers_reserve(&parser->buffers, temporary, count)));
+        bool out_of_memory = !reserved;
         if (reserved)
         {
             const ParseInput input = {
@@ -11556,15 +11989,21 @@ BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp
                 .diagnostics = parser->diagnostics,
                 .diagnostic_capacity = parser->diagnostic_capacity,
             };
-            const ParseKernelResult vector = parse_vector(&parser->kernels, &input, parser->predeclared, &parser->buffers);
+            const ParseKernelResult vector = tile_tokens != 0 ? parse_vector_tiles(&parser->kernels, &input, parser->predeclared, &parser->buffers, tile_tokens, temporary,
+                                                                                    &tree, parser->meanings.capacity, &tile_columns) :
+                                                                 parse_vector(&parser->kernels, &input, parser->predeclared, &parser->buffers);
+            out_of_memory = vector.out_of_memory;
+            traversed = tile_columns.postorder != NULL && vector.tiles != 0 && !vector.tiles_refused && !vector.out_of_memory;
+            parser->statistics.tiles = vector.tiles;
+            parser->statistics.tiles_refused = vector.tiles_refused;
             parser->statistics.fallback_items = vector.fallback.items;
             parser->statistics.fallback_tokens = vector.fallback.tokens;
             parser->statistics.flagged_tokens = vector.flagged_tokens;
             parser->statistics.whole = vector.everything || vector.fallback.errors;
             scalar = vector.fallback.errors;
-            parser->tree = (ParseTree){ .roles = parser->kernels.roles, .depths = parser->kernels.node_depths, .parents = parser->kernels.parents };
+            parser->tree = tree;
         }
-        else
+        if (out_of_memory)
         {
             parser->errors += 1;
             parser->fatal = PARSE_MESSAGE_OUT_OF_MEMORY;
@@ -11607,17 +12046,13 @@ BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp
             parser->fatal = status == GNU_SYNTAX_MEMORY ? PARSE_MESSAGE_OUT_OF_MEMORY : PARSE_MESSAGE_INVALID_GNU_METADATA;
         }
     }
-    if (result && !parser->options.tree_only)
+    if (result && !parser->options.tree_only && !traversed)
     {
         // The postorder and the tree's columns (and with ParseOptions.sizes the subtree sizes), with the temporaries' room
         // for the passes.
         const uint32_t count = parser->tokens.count;
         const bool sizes = parser->options.sizes;
-        const uint64_t entries[] = { count, count, count, count, count, count };
-        const uint64_t widths[] = { 4, 4, 4, 4, 4, 4 };
-        void** columns[] = { (void**)&parser->postorder,      (void**)&parser->positions,     (void**)&parser->ends,
-                             (void**)&parser->first_children, (void**)&parser->next_siblings, (void**)&parser->sizes };
-        const bool reserved = parse_columns(parser, 11, sizes ? 6 : 5, entries, widths, columns);
+        const bool reserved = parser->postorder != NULL || parse_traversal_reserve(parser);
         uint32_t* last_children = BUSTER_ARENA_PUSH_ARRAY(temporary, uint32_t, (uint64_t)count + 1);
         uint32_t* before = BUSTER_ARENA_PUSH_ARRAY(temporary, uint32_t, (uint64_t)count + 1);
         uint32_t* starts = sizes ? BUSTER_ARENA_PUSH_ARRAY(temporary, uint32_t, (uint64_t)count + 1) : 0;
@@ -11633,6 +12068,16 @@ BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp
             parser->fatal = PARSE_MESSAGE_OUT_OF_MEMORY;
         }
         arena_pop_to(temporary, temporary_mark);
+    }
+    if (!result)
+    {
+        // A unit with an error has no columns, though its tiles had theirs reserved.
+        parser->postorder = 0;
+        parser->sizes = 0;
+        parser->positions = 0;
+        parser->ends = 0;
+        parser->first_children = 0;
+        parser->next_siblings = 0;
     }
     return result;
 }
@@ -11768,7 +12213,7 @@ static __attribute__((unused)) int run_parse_command(int count, char** arguments
         static InternTable table;
         static Preprocessor pp;
         static Parser parser;
-        const ParseOptions parse_options = { .scalar = scalar, .tree_only = true };
+        const ParseOptions parse_options = { .scalar = scalar, .tree_only = true, .tile_tokens = BUSTER_PARSE_TILE_TOKENS };
         // The history only for diagnostics, which record it when there are any (PPOptions.defer_history).
         options.defer_history = true;
         if (!intern_initialize(&table) || !pp_initialize(&pp, &options, &table) || !parse_initialize(&parser, &parse_options, options.language))

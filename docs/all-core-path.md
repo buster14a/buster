@@ -1,6 +1,10 @@
 # The all-core path: a compile whose working memory is a window of the unit (#2536): design
 
-Status: design. Step 0, the gauge, is built: `tools/allcore/allcore.c`
+Status: design, reordered on 2026-11-23: **the chain is built from the front,
+by tiles** (["The chain from the front, by tiles"](#the-chain-from-the-front-by-tiles)),
+after the chain built from the back measured a loss at eight workers. The
+parser is its first piece, built and measured. Steps 2.3 to 6 below are kept
+as they were written; that section says what replaces each. Step 0, the gauge, is built: `tools/allcore/allcore.c`
 ([its guide](commands/all-core.md)), measured against its gate in
 [its record](https://github.com/buster14a/buster-performance/tree/359dcadc4a98855be571e0e7b64c50c44d82c9c9/docs/measurements/all-core-gauge-2536-2026-11-12).
 Step 1, the back half by parts, is built as `--emit-window=N` and measured
@@ -885,7 +889,159 @@ the reader's unit-wide passes take the unit's read ranges where they take
 every token; a window's range is the same change to the same passes, so
 whichever of that step and this design's step 3 comes second finds it made.
 
+## The chain from the front, by tiles
+
+On 2026-11-23 the design's remaining steps were measured against main
+`b7d0b5ed` and reordered. The figures of this section are that revision's on
+the 9700X, by step 0's gauge, from
+[its record](https://github.com/buster14a/buster-performance/tree/00634ead69151ad2856304620e5b649d3a406cc6/docs/measurements/all-core-tiles-2536-2026-11-23).
+
+### Main, and the chain built from the back
+
+| `-c sqlite3.c` | one worker | eight workers |
+| --- | ---: | ---: |
+| MB/s | 83.2 | 322.0 |
+| wall ms a compile | 114.2 | 232.9 |
+| user cycles | 552.1 M | 968.5 M |
+| kernel cycles | 76.5 M | 239.3 M |
+
+A compile beside seven others costs 1.92 times the cycles of one alone (1.97
+on 12 November). A profile by function at one worker and at eight has the
+user side's 391 M more cycles everywhere (the reader 128 M, the parser 49 M,
+the program and its controls 47 M, the warnings 35 M, the lowering 27 M,
+`memset` 19 M, the graph's run 16 M, the preprocessor 16 M), most where a
+pass only streams over the unit (4 to 12 times its one-worker cost), and the
+kernel's 177 M more in the bookkeeping of 56,000 base-page faults.
+
+`--windowed-loop`, step 2.2c.4's chain of the program's loop, the lowering
+and the emission, at the same main:
+
+| | main | `--windowed-loop` |
+| --- | ---: | ---: |
+| eight workers, MB/s | 322.0 | 314.8 |
+| one worker, MB/s | 83.2 | 80.6 |
+| `check-program` to the emission, ms alone → at eight | 41.7 → 72.6, 1.74 times | 45.1 → 78.8, 1.75 times |
+
+- **The chain from the back loses**, 2.2% at eight workers and 3.1% at one,
+  and its stages wait as before. A chained stage stops waiting only for what
+  the stage before it in the chain wrote: the loop and the lowering still read
+  the graph, the stream and the reader's columns, which the stages outside the
+  chain wrote for the whole unit. Step 1 paid because Tier 0 reads nothing but
+  the typed stream.
+- **Step 2.3 as written can't mend it.** The selection before the windows
+  needs the constant `if`s, which are the graph's run's; with the run in the
+  windows, `main.c` keeps the 756 bodies the census found.
+- **So** `--windowed-loop` stays a test option (#2866), and the provisional
+  selection, its remap and its second selection are not built further.
+
+### The order
+
+- **A tile** is a run of top-level declarations of about 4,096 tokens (a
+  declaration longer than that alone). The stages run tile by tile **from the
+  front**: a stage's passes over a tile, then the next stage's over the same
+  tile, as far as the chain reaches; the stages after it run over the unit, as
+  today.
+- **A stage joins the chain only after the stage that makes what it reads.**
+  So each piece pays when it lands, and the chain needs no fact of the unit
+  before its time: the selection stays where it is until the chain reaches
+  it, exact.
+- **The unit's columns stay the unit's.** A token keeps its index and every
+  output column its place, so objects and diagnostics are the same bytes by
+  construction. What becomes a tile's is each stage's temporaries and the
+  order of its passes. A stage has three entries: what it reserves for the
+  unit, its passes over a tile, and what it finishes for the unit.
+- **The unit as one tile is the twin**, as `W = ∞` was.
+- **The window's memory comes after the order.** The biased bases and the
+  arena that every window reuses ("A window's memory") remove the pages a
+  stage's output columns take; the order alone removes the waiting, which is
+  the larger part, and needs neither. The kernel's part has a cheaper first
+  answer below.
+
+| piece | what is built | gate, on `sqlite3.c` unless it says | result |
+| --- | --- | --- | --- |
+| T1. The parser | `parse_vector_tiles` ([its design](c-parser.md#tiles-2536)): the kernels and the fallback a tile at a time, in a workspace a tile long; `--parse-tile=N`. | The parse at eight workers at most twice its one-worker time (3.2 times). Objects and diagnostics the same bytes at tiles of 1, 64 and 4,096 tokens. One worker not slower. | Built, the default: ["The parser by tiles"](#the-parser-by-tiles). 1.8 times; +5.3% at eight workers. |
+| T2. The tokens and the tree's columns | The preprocessor's output converted a tile ahead of its parse, and the tree's columns derived from each tile's parents (`parse_tree_columns_range`, built with T1 for a parse that makes them; the driver's parse leaves them to the reader still). | `parse_tree_columns` and the conversion at most twice their one-worker cycles (2.4 and 8.7 times). | |
+| T3. The reader's passes before its walk | The passes over the tokens and the tree that the walk reads (the counts, the prefixes, the commas, the declarations' starts, the attributes' items) on the tile the parser just left. Their totals size the graph's and the tables' columns today (`check_input_count_tokens`), which then take bounds or grow. | Those passes at most twice (2.4 to 5.5 times). | |
+| T4. The reader's walk and its rounds | `check_input_resolve_range`, the controls, the binding answers, the constant contexts and the expressions for a tile, before the next tile is parsed. The largest piece: `check-input` moves 41% of a compile's DRAM bytes. | `check-input` at most 1.5 times (1.98). | |
+| T5. The graph's run, the warnings, the program | Each for the tile's nodes, after T4. | `check-expressions` to `check-program` at most 1.3 times (1.4 to 1.7). | |
+| T6. The lowering and the emission | Step 1's windows become the tile's, with the exact selection where every tile's references are known. | The step's: `lower` at most 1.25 times. | |
+| T7. The preprocessor | Step 5's yield, a tile ahead of the parser. | Step 5's. | |
+
+After T7 the output columns are what is left of a stage's traffic, and "A
+window's memory" applies to them stage by stage; step 6's lanes take tiles
+where they took windows.
+
+### The parser by tiles
+
+Paired in one hold of the lock, the same executable, six rounds each
+(`--parse-tile=4096` against the unit as one):
+
+| `sqlite3.c` | unit as one | tiles of 4,096 |
+| --- | ---: | ---: |
+| eight workers, MB/s | 320.3 | 337.2 |
+| their user cycles | 968.6 M | 912.3 M |
+| the parse, ms alone → at eight | 6.8 → 22.0 | 4.8 → 8.7 |
+| `check-input`, the same | 41.1 → 93.7 | 42.5 → 95.2 |
+| one worker, ms a compile by its stages | 114.3 | 113.7 |
+| user instructions | 1,282.3 M | 1,284.7 M |
+
+- **+5.3% at eight workers**, all of it the parse, which takes 1.8 times its
+  one-worker time there where it took 3.2. What it still waits for is the
+  tokens, converted for the whole unit before it (T2), and the pages of the
+  tree's columns.
+- **One worker is not slower**, and its parse is 2.0 ms shorter: as one unit,
+  the kernels' arrays took 25 huge pages that the kernel cleared for the
+  parse. The reader after it now clears the pages it takes itself, 1.4 ms.
+  (Three of the unit-as-one's twelve one-worker compiles in this hold found the
+  host busy and took base pages; in the evening's other holds it measured 113.6
+  and 113.8 ms.)
+- **The default** is tiles of 4,096 tokens (`BUSTER_PARSE_TILE_TOKENS`), a
+  workspace of about 0.4 MB; `--parse-tile=0` is the unit as one.
+- **The same bytes**: `sqlite3.c`'s and `main.c`'s objects at tiles of 1, 64,
+  4,096 and 16,384 tokens; objects, diagnostics and statuses of c-testsuite's
+  220 programs and the repository's 1,571 C fixtures at tiles of 1 and 64; and
+  `test-parser` compares every unit it generates by tiles of 1 and 64 with
+  the unit as one (1.2 million tiles).
+- **Tiles of 1,024 and 16,384 tokens** measure the same within the passes'
+  spread (341.7 MB/s at eight workers by 16,384 in this hold; 338.0 against
+  4,096's 338.9 in the hold before, by the first version).
+- **The first version**, which kept the kernels' arrays at the unit's length
+  and wrote only each one's start, measured +4.2% at eight workers and 0.5%
+  slower alone: every array's first huge page was still cleared, for a tile's
+  use.
+
+### The kernel's part: 64 KB pages
+
+A busy host's arenas take base pages (#1561), 56,000 faults a compile, and
+the kernel's cycles at eight workers are their bookkeeping. Linux 6.18 gives
+an advised mapping pages of a size between (`hugepages-64kB/enabled`), which
+no code of the compiler's has to wait for a window to use. Measured with the
+arenas advised as on an idle host and the first page of every 2 MB advised a
+base page, so that no 2 MB page fits (`BUSTER_HUGE_PAGES=medium`, an
+experiment's switch), the host's knob set to `madvise` for the hold and put
+back, eight workers:
+
+| pages | MB/s | kernel cycles | faults |
+| --- | ---: | ---: | ---: |
+| base pages, today | 323.3 | 229.3 M | 56,056 |
+| 16 KB | 325.1 | 245.8 M | 24,169 |
+| 32 KB | 326.0 | 240.2 M | 19,094 |
+| 64 KB | 338.9 | 192.0 M | 17,132 |
+| 128 KB | 338.5 | 195.6 M | 17,258 |
+| 16, 32 and 64 KB | 328.9 | 235.5 M | 15,812 |
+
+- **64 KB pages are 2% to 5% at eight workers** (three pairs), and with the
+  parser's tiles 10.3% together (357.0 MB/s against 323.6 in one hold).
+  Smaller sizes cost the kernel more than base pages do.
+- **Alone, 2 MB pages stay better** (114.6 ms a compile against 118.7), so
+  the policy is the busy host's alone.
+- **It needs the host's knob**, the owner's decision; the arenas' policy for
+  it is a pull request of its own, off where the host doesn't offer the
+  pages.
+
 ## The model
+
+The model below is 12 November's, of the windows as they were first ordered.
 
 The estimate is `tools/model.awk` of the record over its measured tables: a
 compile of `sqlite3.c` at eight workers, stage by stage, after each step. Its

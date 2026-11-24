@@ -1,0 +1,19 @@
+function (ptr) -> void {
+  row #0 (vector64, u64, vector64, mask2) -> vector64 [VPGATHERDD_Z_VM32Z 0x80 0x00 0x81 0x82 0x1e 0x0b 0 0]
+b0:
+  %0 = param.ptr 0
+  %1 = ptrtoint.i64 %0
+  %2 = address.ptr %0 offset=64
+  %3 = load.v16i32 %2 align=1
+  %4 = load.m16 %0 align=2
+  %5 = call.v16i32 row #0(%3, %1, %3, %4) fixed=(v16i32, i64, v16i32, m16) variadic=0
+  %6 = load.v16i32 %0 align=1
+  %7 = load.v16i32 %2 align=1
+  %8 = load.m16 %0 align=2
+  %9 = call.v16i32 row #0(%6, %1, %7, %8) fixed=(v16i32, i64, v16i32, m16) variadic=0
+  %10 = address.ptr %0 offset=128
+  %11 = store.void %10, %5 align=1
+  %12 = address.ptr %0 offset=192
+  %13 = store.void %12, %9 align=1
+  %14 = ret.void
+}

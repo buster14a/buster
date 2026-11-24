@@ -1,0 +1,79 @@
+function (ptr) -> void {
+b0:
+  %0 = param.ptr 0
+  %1 = address.ptr %0 offset=0
+  %2 = load.v16i32 %1 align=4
+  %3 = address.ptr %0 offset=4
+  %4 = load.v16i32 %3 align=4
+  %5 = address.ptr %0 offset=8
+  %6 = load.v16i32 %5 align=4
+  %7 = address.ptr %0 offset=12
+  %8 = load.v16i32 %7 align=4
+  %9 = address.ptr %0 offset=16
+  %10 = load.v16i32 %9 align=4
+  %11 = address.ptr %0 offset=20
+  %12 = load.v16i32 %11 align=4
+  %13 = address.ptr %0 offset=24
+  %14 = load.v16i32 %13 align=4
+  %15 = address.ptr %0 offset=28
+  %16 = load.v16i32 %15 align=4
+  %17 = address.ptr %0 offset=32
+  %18 = load.v16i32 %17 align=4
+  %19 = address.ptr %0 offset=36
+  %20 = load.v16i32 %19 align=4
+  %21 = address.ptr %0 offset=40
+  %22 = load.v16i32 %21 align=4
+  %23 = address.ptr %0 offset=44
+  %24 = load.v16i32 %23 align=4
+  %25 = address.ptr %0 offset=48
+  %26 = load.v16i32 %25 align=4
+  %27 = address.ptr %0 offset=52
+  %28 = load.v16i32 %27 align=4
+  %29 = address.ptr %0 offset=56
+  %30 = load.v16i32 %29 align=4
+  %31 = address.ptr %0 offset=60
+  %32 = load.v16i32 %31 align=4
+  %33 = address.ptr %0 offset=0
+  %34 = load.v16i32 %33 align=4
+  %35 = address.ptr %0 offset=4
+  %36 = load.v16i32 %35 align=4
+  %37 = xor.v16i32 %2, %34
+  %38 = sub.v16i32 %37, %32
+  %39 = mul.v16i32 %38, %30
+  %40 = add.v16i32 %39, %28
+  %41 = xor.v16i32 %40, %26
+  %42 = sub.v16i32 %41, %24
+  %43 = mul.v16i32 %42, %22
+  %44 = add.v16i32 %43, %20
+  %45 = xor.v16i32 %44, %18
+  %46 = sub.v16i32 %45, %16
+  %47 = mul.v16i32 %46, %14
+  %48 = add.v16i32 %47, %12
+  %49 = xor.v16i32 %48, %10
+  %50 = sub.v16i32 %49, %8
+  %51 = mul.v16i32 %50, %6
+  %52 = add.v16i32 %51, %4
+  %53 = xor.v16i32 %52, %2
+  %54 = xor.v16i32 %36, %34
+  %55 = add.v16i32 %54, %32
+  %56 = xor.v16i32 %55, %30
+  %57 = add.v16i32 %56, %28
+  %58 = xor.v16i32 %57, %26
+  %59 = add.v16i32 %58, %24
+  %60 = xor.v16i32 %59, %22
+  %61 = add.v16i32 %60, %20
+  %62 = xor.v16i32 %61, %18
+  %63 = add.v16i32 %62, %16
+  %64 = xor.v16i32 %63, %14
+  %65 = add.v16i32 %64, %12
+  %66 = xor.v16i32 %65, %10
+  %67 = add.v16i32 %66, %8
+  %68 = xor.v16i32 %67, %6
+  %69 = add.v16i32 %68, %4
+  %70 = xor.v16i32 %69, %2
+  %71 = address.ptr %0 offset=128
+  %72 = store.void %71, %53 align=1
+  %73 = address.ptr %0 offset=192
+  %74 = store.void %73, %70 align=1
+  %75 = ret.void
+}
