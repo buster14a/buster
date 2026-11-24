@@ -1714,7 +1714,7 @@ static __m512i x86_decode_lane_field(__m512i starts, __m512i field)
 // that doesn't decode, and stops after one whose length isn't its hint (the caller's next window starts after it).
 // Returns how many it wrote; `status` is the first failure's (UNSUPPORTED or TRUNCATED), else OK.
 static uint32_t x86_decode_lanes(const X86DecodeWindow* window, uint64_t remaining, const uint8_t* offsets, const uint8_t* lengths, uint32_t count, uint64_t start,
-                                 X86Decoded* output, X86DecodeStatus* status)
+                                 X86Decoded* output, X86DecodeStatus* status, uint32_t* consumed)
 {
     const uint16_t live = (uint16_t)((1u << count) - 1);
     const __m512i zero = _mm512_setzero_si512();
@@ -2080,6 +2080,9 @@ static uint32_t x86_decode_lanes(const X86DecodeWindow* window, uint64_t remaini
     const uint32_t last = (uint32_t)__builtin_ctz(mismatched) + 1;
     const uint32_t written = first_failure < last ? first_failure : last < count ? last : count;
     *status = first_failure < count && first_failure < last ? (((truncated >> first_failure) & 1) != 0 ? X86_DECODE_TRUNCATED : X86_DECODE_UNSUPPORTED) : X86_DECODE_OK;
+    // Where the last written instruction ends, from the lanes (not read back from the records just stored).
+    const __m512i last_lane = _mm512_set1_epi32((int)(written != 0 ? written - 1 : 0));
+    *consumed = written != 0 ? (uint32_t)_mm512_cvtsi512_si32(_mm512_permutexvar_epi32(last_lane, _mm512_add_epi32(starts, done_length))) : 0;
     // The records' six dwords (X86Decoded) a lane, transposed into 24-byte records in lane order.
     const __m512i where = _mm512_add_epi32(starts, _mm512_set1_epi32((int)start));
     const __m512i sizes = _mm512_mask_or_epi32(done_length, done_address32, done_length, _mm512_set1_epi32(1 << 8));
@@ -2166,9 +2169,10 @@ static X86DecodeResult x86_disassemble(const uint8_t* source, uint64_t size, X86
             uint8_t offsets[16];
             _mm_storeu_si128((__m128i*)offsets, _mm512_castsi512_si128(at));
             X86DecodeStatus status = X86_DECODE_OK;
-            const uint32_t written = x86_decode_lanes(&window, remaining, offsets, lengths, count, start, output + result.count, &status);
+            uint32_t consumed = 0;
+            const uint32_t written = x86_decode_lanes(&window, remaining, offsets, lengths, count, start, output + result.count, &status, &consumed);
             result.count += written;
-            result.consumed = written != 0 ? output[result.count - 1].offset + output[result.count - 1].length : result.consumed;
+            result.consumed = start + consumed;
             result.status = status;
         }
     }
