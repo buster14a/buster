@@ -4129,11 +4129,12 @@ static void check_driver_default_error_report(const Parser* parser, Preprocessor
 }
 
 // A relaxed conversion's source as the checker's operand conversion left it (check_action_operand_value), for the
-// recheck, which takes a source after its lvalue conversions: a function designator decayed to its pointer (#2424) and
-// an array to the pointer to its element, the element's qualifiers kept (#3559). Rechecking the raw function or array
-// type against a pointer would invent an error for a compatible source. The checker's conversion interned the pointer
-// type; the value is the caller's copy, with that conversion's category and flags, and the stream is unchanged. False
-// where the table has no such pointer, the value then as it was.
+// recheck, which takes a source after its lvalue conversions: a function designator decayed to its pointer (#2424),
+// an array to the pointer to its element, the element's qualifiers kept (#3559), and any other lvalue read as its
+// value, without _Atomic and its own qualifiers (#3565). Rechecking the raw function, array or atomic type against a
+// pointer would invent an error for a compatible source. The checker's conversion interned the pointer type; the
+// value is the caller's copy, with that conversion's type and category (which the recheck reads), and the stream is
+// unchanged. False where the table has no such pointer, the value then as it was.
 static bool check_driver_default_error_source(const TypeTable* types, const CheckAction* action, CheckValue* value)
 {
     const TypeId plain = type_strip_aligned(types, value->type);
@@ -4154,6 +4155,11 @@ static bool check_driver_default_error_source(const TypeTable* types, const Chec
                 value->constant_kind = CHECK_CONSTANT_NONE;
             }
         }
+    }
+    if (!array && !function && value->category == CHECK_LVALUE)
+    {
+        value->type = type_conversion_operand(types, value->type);
+        value->category = CHECK_RVALUE;
     }
     return pointer != 0 || (!array && !function);
 }
