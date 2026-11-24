@@ -17,7 +17,7 @@
 // took). The graph's nodes are the callees tier0_inline_callee_valid accepts, and its edges their rows' calls of other
 // such callees whose targets theirs include (check_tier0_inline_row). A lane finds the graph's strongly connected
 // components, as far as a body's calls reach, by an iterative Tarjan search (check_tier0_inline_prepare). In a mutual
-// cycle, calls to the targets of a deterministic DFS's back edges stay calls (check_tier0_inline_cycle). Every other
+// cycle, the calls kept by check_tier0_inline_cut break the cycle and bound the number of copies. Every other
 // callee is settled after the callees it calls (the search's postorder): its height is one more than the highest of
 // those that expand, and one past BUSTER_CHECK_TIER0_INLINE_DEPTH isn't inlined either (its own calls are); else it is
 // spliced with those callees and ready. A callee the splice refuses is ready as its own stream, its calls kept. Any
@@ -31,7 +31,6 @@ static const X86Target* check_tier1_inline_target(const CheckProgram* program, u
 #define BUSTER_CHECK_TIER0_INLINE_PROGRESS 1u
 #define BUSTER_CHECK_TIER0_INLINE_READY 2u
 #define BUSTER_CHECK_TIER0_INLINE_REFUSED 3u
-#define BUSTER_CHECK_TIER0_INLINE_ON_PATH 4u
 
 // The vector transport of a function of `target` (the lowering's Tier0Function.vector_bytes).
 static uint8_t check_tier0_inline_transport(const X86Target* target)
@@ -192,60 +191,51 @@ static void check_tier0_inline_settle(const CheckEmitRun* run, CheckTier0InlineL
     }
 }
 
-// Revisit just this completed component in a stable order: start at the largest body index and follow call rows in
-// order. Keep calls to each ancestor reached by a back edge. The remaining callees can expand in postorder, so a
-// simple ring becomes one recursive function. Outgoing edges lead only to settled components, so a PROGRESS callee
-// belongs to this component and is unvisited by this walk. Reuse the popped stack slots and low links for the path
-// and next rows.
-static void check_tier0_inline_cycle(const CheckEmitRun* run, CheckTier0InlineLane* lane, const CheckTier1Inline* table, uint32_t* members, uint32_t count)
+// Cut a completed component in a way that depends only on its internal call sites. Keep every member with two or
+// more incoming sites out of line, so its callers cannot recursively duplicate its body. This breaks every cycle:
+// a cycle inside a larger strongly connected component has an incoming edge from outside the cycle at some member,
+// in addition to that member's predecessor. If the whole component is a ring with one site per link, cut it at the
+// largest body index. The remaining graph is acyclic and the ordinary search can settle it in one more pass.
+static void check_tier0_inline_cut(const CheckEmitRun* run, CheckTier0InlineLane* lane, const CheckTier1Inline* table, const uint32_t* members, uint32_t count)
 {
-    uint32_t* next_row = lane->links;
-    uint32_t root = 0;
+    // Tarjan has propagated the component's last low link. Reuse its low links for incoming sites, saturated at two.
+    uint32_t* incoming = lane->links;
+    uint32_t largest = 0;
     for (uint32_t k = 0; k < count; k += 1)
     {
         const uint32_t v = members[k];
-        root = v > root ? v : root;
+        incoming[v] = 0;
+        largest = v > largest ? v : largest;
     }
-    uint32_t depth = 1;
-    members[0] = root;
-    next_row[root] = 0;
-    lane->states[root] = BUSTER_CHECK_TIER0_INLINE_ON_PATH;
-    while (depth != 0)
+    bool ring = true;
+    for (uint32_t k = 0; k < count; k += 1)
     {
-        const uint32_t v = members[depth - 1];
+        const uint32_t v = members[k];
         const Tier0Function* function = &run->lowered->functions[v];
-        if (next_row[v] < function->call_count)
+        for (uint32_t c = 0; c < function->call_count; c += 1)
         {
-            const uint32_t callee = check_tier0_inline_row(run, table, function, v, next_row[v]);
-            next_row[v] += 1;
-            const uint8_t state = callee != 0 ? lane->states[callee - 1] : BUSTER_CHECK_TIER0_INLINE_REFUSED;
-            if (state == BUSTER_CHECK_TIER0_INLINE_PROGRESS)
+            const uint32_t callee = check_tier0_inline_row(run, table, function, v, c);
+            // Every outgoing edge of a completed component already has a settled target.
+            if (callee != 0 && lane->states[callee - 1] == BUSTER_CHECK_TIER0_INLINE_PROGRESS)
             {
-                members[depth] = callee - 1;
-                depth += 1;
-                next_row[callee - 1] = 0;
-                lane->states[callee - 1] = BUSTER_CHECK_TIER0_INLINE_ON_PATH;
-            }
-            else if (state == BUSTER_CHECK_TIER0_INLINE_ON_PATH)
-            {
-                lane->states[callee - 1] = BUSTER_CHECK_TIER0_INLINE_REFUSED;
+                const bool repeated = incoming[callee - 1] != 0;
+                incoming[callee - 1] = 1u + repeated;
+                ring &= !repeated;
             }
         }
-        else
-        {
-            depth -= 1;
-            if (lane->states[v] == BUSTER_CHECK_TIER0_INLINE_ON_PATH)
-            {
-                check_tier0_inline_settle(run, lane, table, v);
-            }
-        }
+    }
+    for (uint32_t k = 0; k < count; k += 1)
+    {
+        const uint32_t v = members[k];
+        const bool keep_call = incoming[v] == 2 || (ring && v == largest);
+        lane->states[v] = keep_call ? BUSTER_CHECK_TIER0_INLINE_REFUSED : BUSTER_CHECK_TIER0_INLINE_UNPREPARED;
     }
 }
 
 // Settles every callee that body `b`'s rows reach in the lane's cache (the file's comment), by Tarjan's search from each
 // one unmet, with explicit stacks: the search's (a callee and its next row each) and the components' (the callees in
-// progress, whose components aren't complete). A singleton is settled directly, a mutual cycle in its own order. Body `b` is a node
-// only as another's callee: its own code splices it.
+// progress, whose components aren't complete). A singleton is settled directly. After cutting a cycle, retry its
+// entry if it can expand. Other members are prepared when a caller needs them.
 static void check_tier0_inline_prepare(const CheckEmitRun* run, CheckTier0InlineLane* lane, const CheckTier1Inline* table, uint32_t b)
 {
     const Tier0Function* root = &run->lowered->functions[b];
@@ -294,15 +284,20 @@ static void check_tier0_inline_prepare(const CheckEmitRun* run, CheckTier0Inline
                         first -= 1;
                     }
                     first -= 1;
-                    if (components - first == 1)
+                    const uint32_t count = components - first;
+                    components = first;
+                    if (count == 1)
                     {
                         check_tier0_inline_settle(run, lane, table, v);
                     }
                     else
                     {
-                        check_tier0_inline_cycle(run, lane, table, lane->components + first, components - first);
+                        check_tier0_inline_cut(run, lane, table, lane->components + first, count);
+                        if (lane->states[v] == BUSTER_CHECK_TIER0_INLINE_UNPREPARED)
+                        {
+                            check_tier0_inline_visit(run, lane, v, &components, &depth);
+                        }
                     }
-                    components = first;
                 }
             }
         }

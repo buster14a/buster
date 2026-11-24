@@ -654,12 +654,14 @@ and the lanes take bodies in an order their timing decides. #1770's review found
 it: a chain of 20 wrappers made several different objects by `--lanes 4`. Each
 lane now finds the graph's strongly connected components by an iterative Tarjan
 search (`check_tier0_inline_prepare`). For a component with mutually recursive
-callees, a second walk starts at its largest body index and visits calls in
-row order. A call back to a body on this path marks that body as an out-of-line
-target. All calls to those targets stay calls. In a simple ring this leaves one
-recursive call per trip around the ring. Overlapping cycles can keep several
-targets. A direct self-call also stays a call. The walk reuses the component
-stack and low links and visits each member and its rows once.
+callees, count the call sites inside the component that target each member.
+A member with two or more such sites stays out of line, so two branches cannot
+double the copied code at every link. These members break every cycle inside
+a larger component. In a ring with one call per link, keep calls to the member
+with the largest body index. This leaves one recursive call per trip around
+the ring, within the splice's usual limits. Direct self-calls stay calls.
+The counts reuse Tarjan's low links. Its iterative search can then prepare
+the remaining members as it would any acyclic chain.
 
 Each remaining callee is settled after the callees it can expand. Its height is one more than the highest
 of those that expand, and one past `BUSTER_CHECK_TIER0_INLINE_DEPTH` (16) isn't

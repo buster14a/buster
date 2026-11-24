@@ -153,9 +153,10 @@ static const char check_test_tier0_inline_lanes_source[] =
     "AI int self_sum(int n) { return n ? n + self_sum(n - 1) : 0; }\n"
     "AI int cycle_middle(int n);\n"
     "AI int cycle_last(int n);\n"
-    "AI int cycle_first(int n) { return n ? cycle_middle(n - 1) + 1 : self_sum(3); }\n"
+    "AI int cycle_shared(int n) { return n ? cycle_last(n - 1) + 4 : 10; }\n"
+    "AI int cycle_first(int n) { return n ? (n & 1 ? cycle_middle(n - 1) : cycle_shared(n - 1)) + 1 : self_sum(3); }\n"
     "AI int cycle_middle(int n) { return n ? (n & 1 ? cycle_first(n - 1) : cycle_last(n - 1)) + 2 : 7; }\n"
-    "AI int cycle_last(int n) { return n ? cycle_first(n - 1) + 3 : 9; }\n"
+    "AI int cycle_last(int n) { return n ? (n & 1 ? cycle_first(n - 1) : cycle_shared(n - 1)) + 3 : 9; }\n"
     "__attribute__((noinline)) int root00(int x) { return f01(x) + pong(x & 7) + cycle_last(x & 7); }\n"
     "__attribute__((noinline)) int root01(int x) { return f08(x) + ping(x & 7) + cycle_middle(x & 7); }\n"
     "__attribute__((noinline)) int root02(int x) { return f15(x) + pong(x & 7); }\n"
@@ -198,7 +199,7 @@ static const char check_test_tier0_inline_lanes_source[] =
     "__attribute__((noinline)) int root39(int x) { return f14(x) + ping(x & 7); }\n"
     "int main(void)\n"
     "{\n"
-    "    long long s = 0;\n"
+    "    unsigned long long s = 0;\n"
     "    s = s * 31 + root00(5);\n"
     "    s = s * 31 + root01(18);\n"
     "    s = s * 31 + root02(31);\n"
@@ -239,7 +240,7 @@ static const char check_test_tier0_inline_lanes_source[] =
     "    s = s * 31 + root37(486);\n"
     "    s = s * 31 + root38(499);\n"
     "    s = s * 31 + root39(512);\n"
-    "    printf(\"%lld\\n\", s);\n"
+    "    printf(\"%llu\\n\", s);\n"
     "    return 0;\n"
     "}\n";
 
@@ -283,8 +284,8 @@ static void check_test_driver_tier0_inline_lanes(CheckTest* test, const char* cl
     CheckTestElf elf = { 0 };
     const bool read = made[3] && arena.base != NULL && check_test_elf_open(&elf, object_test_read_file(&arena, objects[3]));
     check_test_expect(test, read && check_test_elf_defined(&elf, "cycle_middle") == 0 && check_test_elf_defined(&elf, "cycle_first") != 0 &&
-                          check_test_elf_defined(&elf, "cycle_last") != 0 && check_test_elf_defined(&elf, "self_sum") != 0,
-                      "overlapping cycles keep both closing targets and the directly recursive helper");
+                          check_test_elf_defined(&elf, "cycle_last") != 0 && check_test_elf_defined(&elf, "cycle_shared") != 0 && check_test_elf_defined(&elf, "self_sum") != 0,
+                      "overlapping cycles inline their single-site member and keep the shared members and directly recursive helper");
     arena_release(&arena);
     char program[512];
     snprintf(program, sizeof(program), "%s/tier0-inline-lanes", directory);
