@@ -42,6 +42,7 @@
 #include "buster/compiler/test_deal.h"
 #include "buster/compiler/test_paths.h"
 #include <errno.h>
+#include <poll.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -7399,6 +7400,27 @@ static PPTestChildCounts pp_test_child_part(const PPTestChildren* children, uint
     return counts;
 }
 
+// A child writes its counts after it has finished its work and stopped its Clang server. A closed pipe also
+// frees a slot. Leave the counts and output in place for test_process_finish to collect in input order.
+static uint32_t pp_test_finished_files(struct pollfd* pipes, uint32_t count)
+{
+    int ready;
+    do
+    {
+        ready = poll(pipes, count, -1);
+    } while (ready < 0 && errno == EINTR);
+    uint32_t finished = 0;
+    for (uint32_t i = 0; ready > 0 && i < count; i += 1)
+    {
+        if (pipes[i].revents != 0)
+        {
+            pipes[i].fd = -1;
+            finished += 1;
+        }
+    }
+    return finished;
+}
+
 // The work's parts, at most one per CPU at once (#465): each in a child process (test_process.c) with a directory of
 // its own (directory/headers-N, cases-N or files-N), its output printed in the parts' order and its counts sent back.
 // Returns their counts added up, with the first part's system_inexact_first that has one.
@@ -7409,13 +7431,42 @@ static PPTestChildCounts pp_test_children(const PPTestChildren* children)
     const uint32_t running = cpus < parts ? cpus : parts;
     TestProcess processes[BUSTER_PP_TEST_CHILDREN];
     PPTestChildCounts total = { .result = parts == children->parts };
+    struct pollfd pipes[BUSTER_PP_TEST_CHILDREN];
+    uint32_t active = 0;
     uint32_t started = 0;
     for (uint32_t finished = 0; finished < parts; finished += 1)
     {
-        while (started < parts && started - finished < running)
+        while (started < parts)
         {
+            if (active == running)
+            {
+                if (children->work != PP_TEST_CHILD_FILES || pipes[finished].fd < 0)
+                {
+                    break;
+                }
+                const uint32_t done = pp_test_finished_files(pipes + finished, started - finished);
+                if (done == 0)
+                {
+                    break;
+                }
+                active -= done;
+                if (pipes[finished].fd < 0)
+                {
+                    break;
+                }
+            }
             if (test_process_start(&processes[started]))
             {
+                // Only the parent collects older parts. Give their descriptors back before opening this part's files.
+                for (uint32_t i = finished; i < started; i += 1)
+                {
+                    if (processes[i].pid > 0)
+                    {
+                        fclose(processes[i].output);
+                        fclose(processes[i].errors);
+                        close(processes[i].result);
+                    }
+                }
                 char own[4200];
                 static const char* const kinds[] = { "headers", "cases", "files" };
                 snprintf(own, sizeof(own), "%s/%s-%u", children->directory, kinds[children->work], started);
@@ -7435,8 +7486,18 @@ static PPTestChildCounts pp_test_children(const PPTestChildren* children)
                 }
                 test_process_exit(&processes[started], &counts, sizeof(counts));
             }
+            if (processes[started].pid < 0 && started > finished)
+            {
+                // Buffered output can fill a low descriptor limit. Collect the oldest part before retrying.
+                PPTestChildCounts unused;
+                test_process_finish(&processes[started], &unused, sizeof(unused));
+                break;
+            }
+            pipes[started] = (struct pollfd){ .fd = processes[started].pid > 0 ? processes[started].result : -1, .events = POLLIN };
+            active += pipes[started].fd >= 0;
             started += 1;
         }
+        active -= pipes[finished].fd >= 0;
         PPTestChildCounts counts;
         const bool ran = test_process_finish(&processes[finished], &counts, sizeof(counts));
         if (!ran)
