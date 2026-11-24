@@ -911,15 +911,12 @@ static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena
         .scratch = scratch,
     };
     IrFunction candidate = { 0 };
-    if (check.error == IR_OK && !input_verified)
-    {
-        check = ir_verify(input, scratch, 0);
-    }
-    // A function with SIMD values promotes as any other: its masks' slots (#179) and its vectors' (#141) as any scalar's,
-    // each read and written whole at its own type (ssa_ir_classify).
+    // Promotion needs this exact CFG for classification and dominance. A new input (for example after
+    // inlining) retains the graph from its first verification. A verified input only needs the graph.
     if (check.error == IR_OK)
     {
-        check.error = ir_cfg_validated(input, scratch, scratch, &work.cfg);
+        check = input_verified ? ir_check(ir_cfg_validated(input, scratch, scratch, &work.cfg), BUSTER_IR_NONE, 0) :
+                                 ir_verify_cfg(input, scratch, output, &work.cfg);
     }
     if (check.error == IR_OK && input->block_count != 0 && work.cfg.predecessor_offsets[1] != 0)
     {

@@ -384,9 +384,19 @@ static void ir_optimize_text_truth(IrOptimizeTest* test, Arena* source, Arena* o
     ir_optimize_test_expect(test, verified, "truth encoding: the input and expected result verify as complete SSA");
     if (verified)
     {
-        const uint32_t changed = ir_truth_simplify(&function);
+        const uint32_t old_left = function.a[10];
+        const uint32_t old_right = function.b[10];
+        bool preserved = true;
+        const uint32_t changed = ir_truth_simplify_rules(&function, false, &preserved);
+        ir_optimize_test_expect(test, preserved, "truth encoding: each changed comparison preserves SSA validity");
         ir_optimize_test_expect(test, changed == 7 && ir_optimize_test_equal(&function, &expected), "truth encoding: exactly the matching integer comparisons fold");
         ir_optimize_test_expect(test, ir_verify_complete(&function, scratch).error == IR_OK, "truth encoding: the rewritten function verifies as complete SSA");
+        // Row 10 normally inherits the distinct inputs of row 3 through copies and extensions.
+        // A different but well-typed pair cannot use that dominance proof.
+        function.b[10] = function.a[10];
+        ir_optimize_test_expect(test, ir_check_instruction(&function, 10, false).error == IR_OK &&
+                                !ir_truth_inherits_operands(&function, 10, old_left) && !ir_truth_inherits_operands(&function, 10, old_right),
+                                "truth encoding: an unrelated operand pair must be verified afresh");
     }
 }
 

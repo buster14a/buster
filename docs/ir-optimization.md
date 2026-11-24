@@ -569,7 +569,20 @@ pressure policy (`hoist`, #2719); the loop vectorizer (`vectorize`, #2743: [its
 guide](tier1-loop-vectorization.md)); the unroller (`+unroll`, #2755); and the optimizer,
 which runs SCCP, the identities, value numbering with memory (`+memory`,
 #2718), dead-code removal, CFG cleanup and its merges and layout, then the
-final verification that selection reads. `--tier1-passes=` turns each pass on
+final verification that selection reads. When promotion has already verified the
+input with dominance, optimizer preparation can reuse that proof across
+passes that borrow it. For truth simplification, the driver checks each
+rewritten comparison’s row and verifies that its new operands came from
+a comparison that fed it through copies or extensions. Other edits
+invalidate the proof, and `--verify` checks the input afresh.
+The final verifier checks the rewritten function before selection.
+
+On the 9700X, compiling Lua 5.4.8's `lvm.c` with `--tier1 --lanes=1`
+reduced calls to `ir_check_rows` from 163 to 146, `ir_check_dominance`
+from 178 to 115 and `ir_cfg_validated` from 265 to 198 across 32 functions.
+The emitted object had the same SHA-256 digest. [Compiler change and measurement record](https://github.com/buster14a/buster/pull/3554)
+
+`--tier1-passes=` turns each pass on
 or off ([the Tier 1 guide](tier1.md)). By default SCCP, dead-code removal, CFG
 cleanup, the merges, the inlining, the switches of constants, the
 vector/mask-only passes and the loop vectorizer run; unrestricted LICM and its pressure policy

@@ -984,6 +984,45 @@ static void ir_test_scalar_shifts(IrTestTally* test, Arena* output, Arena* scrat
     ir_test_expect(test, admitted_count == 3 * 3 * 3, "every scalar shift of the IR's vector widths is admitted, and no other");
 }
 
+// The scatter's stored vector and mask live in extra. Either can be a valid type defined too late.
+static void ir_test_scatter_dominance(IrTestTally* test, Arena* output, Arena* scratch)
+{
+    const uint64_t mark = output->length;
+    const IrSizes sizes = {
+        .instruction_count = 7,
+        .block_count = 1,
+        .extra_count = 2,
+    };
+    IrFunction f = { 0 };
+    const bool ready = ir_create(output, &sizes, &f) == IR_OK;
+    ir_test_expect(test, ready, "scatter dominance fixture allocates");
+    if (ready)
+    {
+        f.block_offsets[1] = 7;
+        ir_test_instruction(&f, 0, IR_UNDEF, IR_PTR, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&f, 1, IR_UNDEF, IR_V4I32, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&f, 2, IR_UNDEF, IR_M8, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&f, 3, IR_SCATTER, IR_VOID, 0, 1, 0);
+        f.flags[3] = IR_SIMD_LANE_I32;
+        ir_test_instruction(&f, 4, IR_UNDEF, IR_V4I32, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&f, 5, IR_UNDEF, IR_M8, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_test_instruction(&f, 6, IR_RET, IR_VOID, BUSTER_IR_NONE, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        for (uint32_t k = 0; k < 3; k += 1)
+        {
+            f.extra[0] = k == 1 ? 4 : 1;
+            f.extra[1] = k == 2 ? 5 : 2;
+            const IrCheck full = ir_verify(&f, scratch, NULL);
+            const IrCheck lowered = ir_verify_path(&f, scratch, NULL, true);
+            ir_test_expect(test, k == 0 ? full.error == IR_OK : full.error == IR_ERROR_DOMINANCE && full.instruction == 3 && full.detail == k + 2,
+                           "a scatter checks the definition order of both side-table operands");
+            ir_test_expect(test, lowered.error == full.error && lowered.instruction == full.instruction && lowered.detail == full.detail,
+                           "lowering preserves the scatter's first dominance diagnostic");
+        }
+    }
+    arena_pop_to(output, mark);
+}
+
+
 // A ternary intrinsic's third value lives in extra, outside the three instruction columns. It obeys the same
 // definition-before-use and block-dominance rules as a and b. Keep those two inputs valid while varying only the
 // third, with the intrinsic in every position of a verifier batch, so a fast-path omission cannot hide behind them.
@@ -2471,6 +2510,7 @@ static void ir_test_simd(IrTestTally* test, Arena* output, Arena* scratch)
     ir_test_scalar_shifts(test, output, scratch);
     ir_test_lane_ops(test, output, scratch);
     ir_test_ternary_dominance(test, output, scratch);
+    ir_test_scatter_dominance(test, output, scratch);
     ir_test_permute2s(test, output, scratch);
     ir_test_ternlogs(test, output, scratch);
     ir_test_compresses(test, output, scratch);
