@@ -459,7 +459,7 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
                 const uint64_t copied = value & ~BUSTER_TYPED_ACCESS_VOLATILE;
                 if (tier0_copy_moves(copied))
                 {
-                    ir_typed_move(&sink, stack[depth - 2], stack[depth - 1], tier0_copy_bytes(copied));
+                    ir_typed_move(&sink, stack[depth - 2], stack[depth - 1], copied);
                 }
                 else
                 {

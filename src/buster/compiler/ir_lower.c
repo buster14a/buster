@@ -2405,24 +2405,24 @@ static IrType ir_typed_vector_whole(AbiLocation location, uint64_t size, uint8_t
     return whole && width < 3 && ((allowed >> width) & 1) != 0 ? types[width] : IR_VOID;
 }
 
-// COPY's move form (#1373, tier0_copy_moves): `bytes` (BUSTER_TIER0_COPY_NARROW_BYTES + 1 to BUSTER_TIER0_MAX_MOVE_BYTES)
-// whose ranges may overlap either way, as memmove's, by 16-byte pieces (IR_V4I32), the last ending at the end, every one
-// loaded before the first is stored, as Tier 0's tier0_copy_move holds them in its registers and clang's code moves
-// llvm.memmove's bytes. Their alignment is unknown, as LOAD's is.
-static void ir_typed_move(IrTypedSink* sink, uint32_t destination_bits, uint32_t source_bits, uint32_t bytes)
+// COPY's move form. All unaligned loads precede the first store, including the overlapping final piece.
+static void ir_typed_move(IrTypedSink* sink, uint32_t destination_bits, uint32_t source_bits, uint64_t value)
 {
     const uint32_t destination = ir_typed_emit(sink, IR_INTTOPTR, IR_PTR, destination_bits, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
     const uint32_t source = ir_typed_emit(sink, IR_INTTOPTR, IR_PTR, source_bits, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
-    const uint32_t pieces = tier0_move_pieces(bytes);
-    uint32_t loaded[BUSTER_TIER0_MAX_MOVE_BYTES / 16] = { 0 };
+    const uint32_t bytes = tier0_copy_bytes(value);
+    const uint32_t width = 1u << tier0_move_shift(value);
+    const IrType type = width == 64 ? IR_V16I32 : width == 32 ? IR_V8I32 : IR_V4I32;
+    const uint32_t pieces = tier0_move_pieces(value);
+    uint32_t loaded[BUSTER_TIER0_MOVE_PIECES];
     for (uint32_t p = 0; p < pieces; p += 1)
     {
-        const uint64_t at = p + 1 < pieces ? 16 * (uint64_t)p : bytes - 16;
-        loaded[p] = ir_typed_emit(sink, IR_LOAD, IR_V4I32, ir_typed_offset(sink, source, at), BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+        const uint32_t at = p + 1 < pieces ? width * p : bytes - width;
+        loaded[p] = ir_typed_emit(sink, IR_LOAD, type, ir_typed_offset(sink, source, at), BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
     }
     for (uint32_t p = 0; p < pieces; p += 1)
     {
-        const uint64_t at = p + 1 < pieces ? 16 * (uint64_t)p : bytes - 16;
+        const uint32_t at = p + 1 < pieces ? width * p : bytes - width;
         ir_typed_emit(sink, IR_STORE, IR_VOID, ir_typed_offset(sink, destination, at), loaded[p], BUSTER_IR_NONE, 0);
     }
 }

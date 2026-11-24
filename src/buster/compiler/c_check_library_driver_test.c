@@ -396,6 +396,52 @@ static bool check_test_library_undefined(const char* path, const char* name)
     return valid && found;
 }
 
+// Check the actual references at both tiers. A run against libc alone also passes when every operation is a call.
+static void check_test_library_memory_calls(CheckTest* test, const char* executable, const char* directory)
+{
+    static const struct
+    {
+        const char* bytes;
+        const char* option;
+        bool compare_call;
+        bool move_call;
+        bool clones;
+    } cases[] = {
+        { "-DBYTES=0", "-march=x86-64", false, false, false },
+        { "-DBYTES=32", "-march=x86-64", false, false, false },
+        { "-DBYTES=33", "-march=x86-64", true, false, false },
+        { "-DBYTES=129", "-march=x86-64", true, true, false },
+        { "-DBYTES=256", "-march=x86-64-v3", true, false, false },
+        { "-DBYTES=257", "-march=x86-64-v4", true, true, false },
+        { "-DBYTES=512", "-march=znver5", true, false, false },
+        { "-DBYTES=513", "-march=znver5", true, true, false },
+        { "-DBYTES=512", "-march=znver5", true, true, true },
+        { "-DBYTES=size", "-march=znver5", true, true, false },
+        { "-DBYTES=7", "-fno-builtin-memcmp", true, false, false },
+        { "-DBYTES=7", "-ffreestanding", true, true, false },
+    };
+    char object[512];
+    snprintf(object, sizeof(object), "%s/fixed-memory.o", directory);
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(cases); c += 1)
+    {
+        for (uint32_t tier = 0; tier < 2; tier += 1)
+        {
+            char* arguments[] = { (char*)executable, "-c", (char*)cases[c].bytes, (char*)cases[c].option, cases[c].clones ? "-DCLONES" : "-UCLONES", "tests/driver/fixed_memory_calls.c", "-o", object,
+                                  tier != 0 ? "--tier1" : NULL, "--tier1-strict", NULL };
+            char* diagnostics = NULL;
+            const int status = check_test_driver_spawn(arguments, &diagnostics);
+            const bool matches = status == 0 && check_test_library_undefined(object, "memcmp") == cases[c].compare_call &&
+                                 check_test_library_undefined(object, "memmove") == cases[c].move_call;
+            char description[512];
+            snprintf(description, sizeof(description), "fixed memory calls, Tier %u %s %s: %s", tier, cases[c].bytes, cases[c].option,
+                     status != 0 && diagnostics != NULL ? diagnostics : "library references");
+            check_test_expect(test, matches, description);
+            free(diagnostics);
+        }
+    }
+    unlink(object);
+}
+
 // strlcat and strlcpy are plain calls, never folds: buster's and clang's objects for a call of each name must refer to
 // the library's function (an undefined symbol) in each mode and with -fno-builtin and -fno-builtin-NAME too. Buster's
 // plain fold list (c_builtin_library.c) has only comparisons, lengths and memory copies, so a call here that referred
@@ -1030,6 +1076,7 @@ static void check_test_driver_library(CheckTest* test, const char* clang, const 
 {
     check_test_library_implicit(test, clang, executable, directory);
     check_test_library_lowering(test, clang, executable, directory);
+    check_test_library_memory_calls(test, executable, directory);
     check_test_library_renames(test, clang, executable, directory);
     check_test_library_runs(test, clang, executable, directory);
     check_test_cpu_model_runs(test, clang, executable, directory);
