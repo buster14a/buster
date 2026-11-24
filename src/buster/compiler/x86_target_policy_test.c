@@ -57,10 +57,26 @@ static bool x86_target_test_matrix(void)
         {
             restored |= (uint64_t)((compact >> (X86_FEATURE_AES + 1 + h)) & 1) << high[h];
         }
-        // An extended row's compact word holds its compactable features and the mark, and its slot is past the compact
-        // rows', where the exact pass reads it.
+        // The rest word's features, at its bits 0 to 30 in this order: the features the compact word doesn't project.
+        static const uint8_t rest_features[] = { X86_FEATURE_AVX512BF16, X86_FEATURE_AVX512BITALG, X86_FEATURE_AVX512IFMA, X86_FEATURE_AVX512VBMI2, X86_FEATURE_AVX512VNNI,
+                                                 X86_FEATURE_AVX512VPOPCNTDQ, X86_FEATURE_AVXVNNI, X86_FEATURE_CLFLUSHOPT, X86_FEATURE_CLWB, X86_FEATURE_CLZERO,
+                                                 X86_FEATURE_FSGSBASE, X86_FEATURE_INVPCID, X86_FEATURE_MOVDIR64B, X86_FEATURE_MOVDIRI, X86_FEATURE_MWAITX, X86_FEATURE_PKU,
+                                                 X86_FEATURE_PRFCHW, X86_FEATURE_RDPID, X86_FEATURE_RDPRU, X86_FEATURE_RDRND, X86_FEATURE_RDSEED, X86_FEATURE_SHA,
+                                                 X86_FEATURE_SHSTK, X86_FEATURE_SSE4A, X86_FEATURE_VPCLMULQDQ, X86_FEATURE_WBNOINVD, X86_FEATURE_XSAVEC,
+                                                 X86_FEATURE_XSAVEOPT, X86_FEATURE_XSAVES, X86_FEATURE_RDTSCP, X86_FEATURE_CLFLUSH };
+        _Static_assert(BUSTER_ARRAY_LENGTH(rest_features) == 31, "the rest word's 31 features");
+        const uint32_t rest = x86_target_rest_requirements[form];
+        uint64_t rest_restored = 0;
+        for (uint32_t r = 0; r < BUSTER_ARRAY_LENGTH(rest_features); r += 1)
+        {
+            rest_restored |= (uint64_t)((rest >> r) & 1) << rest_features[r];
+        }
+        // An extended row's compact word holds its compactable features and the mark, its rest word the others, and its
+        // slot is past the compact rows'; every other row's rest word is 0.
         const bool extended = (row & ~BUSTER_X86_TARGET_COMPACT_FEATURES) != 0;
         passed &= (row & BUSTER_X86_TARGET_COMPACT_FEATURES) == restored;
+        passed &= (row & ~BUSTER_X86_TARGET_COMPACT_FEATURES) == rest_restored;
+        passed &= (rest >> 31) == 0;
         passed &= ((compact & BUSTER_X86_TARGET_COMPACT_EXTENDED) != 0) == extended;
         passed &= !extended || x86_target_requirement_slots[form] > BUSTER_X86_TARGET_COMPACT_COUNT;
         passed &= extended || row == 0 || x86_target_requirement_slots[form] <= BUSTER_X86_TARGET_COMPACT_COUNT;
