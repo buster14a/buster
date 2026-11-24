@@ -538,12 +538,14 @@ static uint32_t asm_scan_string(const uint8_t* source, uint32_t length, uint32_t
     uint32_t block = origin;
     uint64_t below = _bzhi_u64(~0ull, at + 1 - origin);
     uint64_t carried = 0;
+    *closed = false;
     while (block < length && result == length)
     {
         const uint32_t n = length - block < 64 ? length - block : 64;
         const __mmask64 valid = _bzhi_u64(~0ull, n) & ~below;
         const __m512i bytes = block == origin ? first : _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, n), source + block);
-        const uint64_t ends = _mm512_mask_cmpeq_epi8_mask(valid, bytes, _mm512_set1_epi8('"')) | _mm512_mask_cmpeq_epi8_mask(valid, bytes, _mm512_set1_epi8('\n'));
+        const uint64_t quotes = _mm512_mask_cmpeq_epi8_mask(valid, bytes, _mm512_set1_epi8('"'));
+        const uint64_t ends = quotes | _mm512_mask_cmpeq_epi8_mask(valid, bytes, _mm512_set1_epi8('\n'));
         // A run of backslashes escapes the byte after it when the run, less a first backslash the previous block
         // escaped, has odd length: adding each run's odd-position start to the backslashes carries through the run
         // and leaves the bit after it set exactly when its start and length differ in parity from the even bits.
@@ -556,10 +558,11 @@ static uint32_t asm_scan_string(const uint8_t* source, uint32_t length, uint32_t
         const uint64_t escaped = (even ^ (sum << 1)) & follows;
         const uint64_t stop = ends & ~escaped;
         result = stop != 0 ? block + (uint32_t)__builtin_ctzll(stop) : result;
+        // Whether the first stop is a quote, from the masks rather than a load of the byte at `result`.
+        *closed = (stop & (0 - stop) & quotes) != 0;
         block += n;
         below = 0;
     }
-    *closed = result < length && source[result] == '"';
     return *closed ? result + 1 : result;
 }
 
