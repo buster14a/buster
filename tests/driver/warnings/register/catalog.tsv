@@ -1,0 +1,5 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+register-objects-addresses-and-arrays-decays	register-objects-addresses-and-arrays-decays.c	0	7	0	-	-	register objects' addresses and arrays' decays
+a-register-array-decays-at-its-unparenthesized-name-in-every-ope	a-register-array-decays-at-its-unparenthesized-name-in-every-ope.c	0	12	0	-	-	a register array decays at its unparenthesized name, in every operand
+the-operator-climbs-parentheses-members-and-array-subscripts-to	the-operator-climbs-parentheses-members-and-array-subscripts-to.c	0	11	0	-	-	the & operator climbs parentheses, members and array subscripts to a register object

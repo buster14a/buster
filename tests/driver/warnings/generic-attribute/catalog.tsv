@@ -1,0 +1,3 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+c23-type-attributes-in-constant-queries-casts	c23-type-attributes-in-constant-queries-casts.c	0	0	0	c23	-	C23 type attributes in constant queries' casts
