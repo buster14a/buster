@@ -7603,8 +7603,8 @@ gives is a necessary condition of each family of that test, read off its code
   or a comma; a `<<` or an implicit conversion; a selection; a cast; a leaf);
   its operator's families; and what its children are, which each node with a
   trait stores at its parent, the facts' tree's;
-- a class byte a type, a byte permute of the type table's kinds (floating or
-  complex, enumeration, array, `nullptr_t`; a wrapper has every class);
+- a class byte a type, a byte permute of the type table's kinds (real
+  floating, enumeration, array, `nullptr_t`; a wrapper has every class);
 - 64 candidates at a time, byte tests of those columns: an assignment, an
   initialization or a conversion needs a child that is a constant, a
   conditional, a comma, a `<<`, a conversion or a selection (or an
@@ -7639,7 +7639,8 @@ for a stream of whole values and in the fallback.
 A node wrongly taken out would lose a warning, so the filter has three checks.
 `test-checker-driver` (alone: `--reach-filter-only`, which prints its counts
 by operator) generates trees and streams whose columns end at `PROT_NONE`
-pages and asserts, under each of the 256 sets of the options, that no node the
+pages, a third of their nodes written over with the shape their family's test
+looks for, and asserts, under each of the 256 sets of the options, that no node the
 filter takes out has a bit of its own reach, and that every family's
 operators have nodes with a bit and nodes taken out. The test hook
 `BUSTER_TEST_COMMON_REACH_AUDIT`, read once a unit in every build as

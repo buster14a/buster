@@ -500,11 +500,199 @@ static const unsigned __int128 check_test_reach_integers[] =
     (unsigned __int128)1 << 32, (unsigned __int128)1 << 63, ~(unsigned __int128)0, ~(unsigned __int128)1, ~(unsigned __int128)0 << 31,
 };
 
+// A generated graph's columns, for the shapes check_test_common_reach_shape writes over the drawn nodes.
+typedef struct CheckTestReachColumns CheckTestReachColumns;
+struct CheckTestReachColumns
+{
+    CheckOp* ops;
+    uint32_t* operand0;
+    uint32_t* operand1;
+    TypeId* value_types;
+    uint32_t* value_flags;
+    uint8_t* value_constants;
+    uint32_t* payload_rows;
+    CheckValue* payloads;
+    uint32_t* payload_count;
+    CheckNodeConversions* conversions;
+    uint32_t* argument_offsets;
+    uint32_t* argument_counts;
+    uint32_t* argument_nodes;
+    CheckConversion* argument_conversions;
+    uint32_t count;
+};
+
+// `node` rewritten as an operator `op` of type `type` without a constant, or as a leaf's integer constant `integer` of
+// that type (`constant`), or as a bit-field's lvalue of `bit_width` bits.
+static void check_test_common_reach_node(const CheckTestReachColumns* columns, uint32_t node, CheckOp op, TypeId type, bool constant, unsigned __int128 integer,
+                                         uint32_t bit_width)
+{
+    if (node < columns->count)
+    {
+        const CheckValue value =
+        {
+            .type = type,
+            .category = bit_width != 0 ? CHECK_LVALUE : CHECK_RVALUE,
+            .flags = (constant ? BUSTER_CHECK_ICE : 0u) | (bit_width != 0 ? BUSTER_CHECK_BIT_FIELD : 0u),
+            .constant_kind = constant ? CHECK_CONSTANT_INTEGER : CHECK_CONSTANT_NONE,
+            .integer = integer,
+            .bit_width = bit_width,
+        };
+        columns->ops[node] = op;
+        columns->value_types[node] = type;
+        columns->value_flags[node] = value.flags;
+        columns->value_constants[node] = (uint8_t)value.constant_kind;
+        columns->payload_rows[node] = 0;
+        if (integer != 0 || bit_width != 0)
+        {
+            columns->payloads[*columns->payload_count] = value;
+            *columns->payload_count += 1;
+            columns->payload_rows[node] = *columns->payload_count;
+        }
+    }
+}
+
+// The shapes written, by their node's operator, which --reach-filter-only prints.
+static uint64_t check_test_reach_shaped[CHECK_OP_COUNT];
+
+// The shape one family's test looks for, written over `node`'s drawn operands, which stay the tree's: the generator's
+// independent draws make most of them once in ten thousand nodes or never. `draw` picks the shape; `pointer` is a
+// prototyped function's pointer, `array` an array of four, `enumeration` an enumeration.
+static void check_test_common_reach_shape(const CheckTestReachColumns* columns, uint32_t node, uint32_t draw, TypeId pointer, TypeId array, TypeId enumeration)
+{
+    const CheckOp op = columns->ops[node];
+    const uint32_t count = columns->count;
+    const uint32_t left = columns->operand0[node];
+    const uint32_t right = columns->operand1[node];
+    const uint32_t shape = draw % 4;
+    const unsigned __int128 value = check_test_reach_integers[draw / 4 % BUSTER_ARRAY_LENGTH(check_test_reach_integers)];
+    check_test_reach_shaped[(uint32_t)op < CHECK_OP_COUNT ? op : CHECK_OP_VALUE] += 1;
+    if ((op == CHECK_OP_DIVIDE || op == CHECK_OP_REMAINDER || op == CHECK_OP_DIVIDE_ASSIGN || op == CHECK_OP_REMAINDER_ASSIGN) && right < count)
+    {
+        // A zero divisor, or one under a cast or a conversion to an integer type.
+        const uint32_t under = columns->operand0[right];
+        if (shape == 0 || under >= count)
+        {
+            check_test_common_reach_node(columns, right, CHECK_OP_VALUE, BUSTER_TYPE_INT, true, shape == 3 ? value : 0, 0);
+        }
+        else
+        {
+            check_test_common_reach_node(columns, right, shape == 1 ? CHECK_OP_CAST : CHECK_OP_CONVERT, BUSTER_TYPE_LONG, false, 0, 0);
+            check_test_common_reach_node(columns, under, CHECK_OP_VALUE, BUSTER_TYPE_INT, true, shape == 3 ? value : 0, 0);
+        }
+    }
+    else if (op == CHECK_OP_DEREFERENCE && left < count)
+    {
+        // A null pointer constant, under a cast, or nullptr under a conversion; of a type whose value a read takes.
+        const uint32_t under = columns->operand0[left];
+        columns->value_types[node] = BUSTER_TYPE_INT;
+        if (shape == 0 || under >= count)
+        {
+            check_test_common_reach_node(columns, left, CHECK_OP_VALUE, shape == 0 ? BUSTER_TYPE_NULLPTR : BUSTER_TYPE_INT, shape != 0, 0, 0);
+        }
+        else if (shape == 1)
+        {
+            check_test_common_reach_node(columns, left, CHECK_OP_CAST, pointer, false, 0, 0);
+            check_test_common_reach_node(columns, under, CHECK_OP_VALUE, BUSTER_TYPE_INT, true, 0, 0);
+        }
+        else
+        {
+            check_test_common_reach_node(columns, left, CHECK_OP_CONVERT, pointer, false, 0, 0);
+            check_test_common_reach_node(columns, under, CHECK_OP_VALUE, BUSTER_TYPE_NULLPTR, false, 0, 0);
+        }
+    }
+    else if (op == CHECK_OP_SUBSCRIPT && left < count && right < count)
+    {
+        // A constant index into an array of four.
+        columns->value_types[left] = array;
+        check_test_common_reach_node(columns, right, CHECK_OP_VALUE, BUSTER_TYPE_INT, true, value, 0);
+    }
+    else if ((op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE || op == CHECK_OP_CONVERT) && (op == CHECK_OP_ASSIGN ? right : left) < count)
+    {
+        const uint32_t source = op == CHECK_OP_ASSIGN ? right : left;
+        const uint32_t under = columns->operand0[source];
+        columns->conversions[node].operands[op == CHECK_OP_ASSIGN ? 1 : 0].flags = BUSTER_CHECK_CONVERT_ASSIGNMENT;
+        if (shape == 0 && under < count)
+        {
+            // A `<<` under a selection or a conversion, converted to _Bool.
+            columns->value_types[node] = BUSTER_TYPE_BOOL;
+            check_test_common_reach_node(columns, source, draw / 256 % 2 != 0 ? CHECK_OP_SELECT : CHECK_OP_CONVERT, BUSTER_TYPE_INT, false, 0, 0);
+            check_test_common_reach_node(columns, under, CHECK_OP_SHIFT_LEFT, BUSTER_TYPE_INT, false, 0, 0);
+        }
+        else if (shape == 1 && op == CHECK_OP_ASSIGN && left < count)
+        {
+            // A constant stored to a bit-field of a few bits.
+            columns->value_types[node] = BUSTER_TYPE_INT;
+            check_test_common_reach_node(columns, left, CHECK_OP_MEMBER, BUSTER_TYPE_INT, false, 0, 1 + draw / 256 % 6);
+            check_test_common_reach_node(columns, source, CHECK_OP_VALUE, BUSTER_TYPE_INT, true, value, 0);
+        }
+        else
+        {
+            // A constant converted to a narrower, a wider or an enumeration's type.
+            static const TypeId targets[] = { BUSTER_TYPE_CHAR, BUSTER_TYPE_UCHAR, BUSTER_TYPE_SHORT, BUSTER_TYPE_LONG, BUSTER_TYPE_UINT, 0 };
+            const TypeId target = targets[draw / 256 % BUSTER_ARRAY_LENGTH(targets)];
+            columns->value_types[node] = target != 0 ? target : enumeration;
+            check_test_common_reach_node(columns, source, CHECK_OP_VALUE, target != 0 ? BUSTER_TYPE_INT : enumeration, true, value, 0);
+        }
+    }
+    else if (op == CHECK_OP_CALL && columns->argument_offsets != NULL && left < count)
+    {
+        // A prototyped callee, whose parameter's type the conversion is to, and one argument, so that it alone decides: a
+        // `<<` under a selection or a conversion passed to _Bool, an enumeration's value passed to another's, a double
+        // passed to a float, or a constant, narrowed or not.
+        const uint32_t slot = columns->argument_offsets[node];
+        const uint32_t argument = columns->argument_nodes[slot];
+        const uint32_t call_shape = draw % 5;
+        columns->value_types[left] = pointer;
+        columns->argument_counts[node] = 1;
+        if (argument < count)
+        {
+            const uint32_t under = columns->operand0[argument];
+            if (call_shape == 0 && under < count)
+            {
+                columns->argument_conversions[slot] = (CheckConversion){ .type = BUSTER_TYPE_BOOL, .flags = BUSTER_CHECK_CONVERT_ASSIGNMENT };
+                check_test_common_reach_node(columns, argument, draw / 256 % 2 != 0 ? CHECK_OP_SELECT : CHECK_OP_CONVERT, BUSTER_TYPE_INT, false, 0, 0);
+                check_test_common_reach_node(columns, under, draw / 512 % 2 != 0 ? CHECK_OP_SHIFT_LEFT : CHECK_OP_CONDITIONAL, BUSTER_TYPE_INT, false, 0, 0);
+            }
+            else if (call_shape == 1)
+            {
+                columns->argument_conversions[slot] = (CheckConversion){ .type = enumeration, .flags = BUSTER_CHECK_CONVERT_ASSIGNMENT };
+                check_test_common_reach_node(columns, argument, draw / 256 % 2 != 0 ? CHECK_OP_COMMA : CHECK_OP_ADD, enumeration, false, 0, 0);
+            }
+            else if (call_shape == 2)
+            {
+                columns->argument_conversions[slot] = (CheckConversion){ .type = BUSTER_TYPE_FLOAT, .flags = BUSTER_CHECK_CONVERT_ASSIGNMENT };
+                check_test_common_reach_node(columns, argument, CHECK_OP_ADD, BUSTER_TYPE_DOUBLE, false, 0, 0);
+            }
+            else
+            {
+                static const TypeId targets[] = { BUSTER_TYPE_CHAR, BUSTER_TYPE_UCHAR, BUSTER_TYPE_SHORT, BUSTER_TYPE_LONG, BUSTER_TYPE_DOUBLE };
+                columns->argument_conversions[slot] = (CheckConversion){ .type = targets[draw / 256 % BUSTER_ARRAY_LENGTH(targets)], .flags = BUSTER_CHECK_CONVERT_ASSIGNMENT };
+                check_test_common_reach_node(columns, argument, CHECK_OP_VALUE, BUSTER_TYPE_INT, true, value, 0);
+            }
+        }
+    }
+    else if ((op == CHECK_OP_NOT || op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR || op == CHECK_OP_CONDITION) && left < count)
+    {
+        // A truth context's `<<` or conditional under a selection or a conversion, or its floating constant.
+        const uint32_t under = columns->operand0[left];
+        if (shape == 0 || under >= count)
+        {
+            check_test_common_reach_node(columns, left, CHECK_OP_VALUE, BUSTER_TYPE_DOUBLE, false, 0, 0);
+            columns->value_constants[left] = (uint8_t)CHECK_CONSTANT_FLOATING;
+        }
+        else
+        {
+            check_test_common_reach_node(columns, left, shape == 1 ? CHECK_OP_SELECT : CHECK_OP_CONVERT, BUSTER_TYPE_INT, false, 0, 0);
+            check_test_common_reach_node(columns, under, shape == 3 ? CHECK_OP_CONDITIONAL : CHECK_OP_SHIFT_LEFT, BUSTER_TYPE_INT, false, 0, 0);
+        }
+    }
+}
+
 // One generated graph of `count` nodes, a tree in node order (check_common_parents), audited under each of the 256 option sets, with its argument columns or, as a
 // graph without calls' slices has them, without. Whether every run agreed with its expectations: no node lost, and the filter applied exactly where neither -Wdouble-promotion nor
 // -Wimplicit-int-float-conversion may report.
-static bool check_test_common_reach_case(uint64_t* state, uint32_t count, bool arguments, const TypeTable* types, const TypeId* pool, uint32_t pool_count, Arena* scratch,
-                                         CheckTestReachTotals* totals)
+static bool check_test_common_reach_case(uint64_t* state, uint32_t count, bool arguments, const TypeTable* types, const TypeId* pool, uint32_t pool_count,
+                                         const TypeId* shapes, Arena* scratch, CheckTestReachTotals* totals)
 {
     enum { COLUMNS = 20, TOKENS = 97 };
     CheckTestSelectionColumn columns[COLUMNS] = { 0 };
@@ -526,11 +714,14 @@ static bool check_test_common_reach_case(uint64_t* state, uint32_t count, bool a
     uint32_t payload_capacity = 0;
     for (uint32_t node = 0; same && node < count; node += 1)
     {
-        drawn[node] = check_test_reach_ops[check_test_common_scan_draw(state) % BUSTER_ARRAY_LENGTH(check_test_reach_ops)];
+        // Half the nodes are leaves, as an expression tree's are, so that the others find operands.
+        const uint32_t leaf = check_test_common_scan_draw(state);
+        drawn[node] = leaf % 5 < 2 ? CHECK_OP_VALUE : check_test_reach_ops[leaf / 5 % BUSTER_ARRAY_LENGTH(check_test_reach_ops)];
         const uint32_t shape = check_test_common_scan_draw(state);
         argument_shape[node] = check_graph_has_arguments(drawn[node]) ? (shape % 64 == 0 ? 17 + shape / 64 % 24 : shape % 6) : 0;
         argument_count += argument_shape[node];
-        payload_capacity += 1;
+        // (Its own value's row, and the two a shape may write over its operands.)
+        payload_capacity += 3;
     }
     CheckOp* ops = check_test_selection_column(columns, (uint64_t)count * sizeof(CheckOp));
     uint32_t* operand0 = check_test_selection_column(columns + 1, (uint64_t)count * sizeof(uint32_t));
@@ -573,7 +764,7 @@ static bool check_test_common_reach_case(uint64_t* state, uint32_t count, bool a
         {
             const uint32_t slot = order[turn];
             const uint32_t draw = check_test_common_scan_draw(state);
-            const uint32_t present = slot == 0 ? 90 : slot == 1 ? 65 : 15;
+            const uint32_t present = drawn[node] == CHECK_OP_VALUE ? 0 : slot == 0 ? 90 : slot == 1 ? 65 : 15;
             static const uint32_t strays[] = { 0, 1, 0x7fffffffu, 0xf0000000u };
             if (draw % 100 < present && draw / 100 % 64 == 0)
             {
@@ -658,6 +849,34 @@ static bool check_test_common_reach_case(uint64_t* state, uint32_t count, bool a
         }
         open[open_count] = node;
         open_count += 1;
+    }
+    const CheckTestReachColumns shaped =
+    {
+        .ops = ops,
+        .operand0 = operand0,
+        .operand1 = operand1,
+        .value_types = value_types,
+        .value_flags = value_flags,
+        .value_constants = value_constants,
+        .payload_rows = payload_rows,
+        .payloads = payloads,
+        .payload_count = &payload_count,
+        .conversions = conversions,
+        .argument_offsets = arguments ? argument_offsets : NULL,
+        .argument_counts = argument_counts,
+        .argument_nodes = argument_nodes,
+        .argument_conversions = argument_conversions,
+        .count = count,
+    };
+    // A third of the nodes take their family's shape, from the last node down, so that a node's shape isn't written over
+    // by its reader's.
+    for (uint32_t node = count; same && node-- > 0;)
+    {
+        const uint32_t draw = check_test_common_scan_draw(state);
+        if (draw % 3 == 0 && (!check_graph_has_arguments(ops[node]) || argument_shape[node] != 0))
+        {
+            check_test_common_reach_shape(&shaped, node, draw / 3, shapes[0], shapes[1], shapes[2]);
+        }
     }
     const CheckGraph graph =
     {
@@ -768,6 +987,7 @@ static void check_test_common_reach_filter(CheckTest* test)
     TypeTable types = { 0 };
     bool same = type_initialize(&types, &type_storage, &type_index_storage, capacity);
     TypeId pool[40];
+    TypeId shapes[3] = { 0 };
     uint32_t pool_count = 0;
     if (same)
     {
@@ -789,6 +1009,10 @@ static void check_test_common_reach_filter(CheckTest* test)
             type_complex(&types, BUSTER_TYPE_DOUBLE), type_complex(&types, BUSTER_TYPE_FLOAT), type_atomic(&types, BUSTER_TYPE_INT), type_bit_int(&types, 7, false),
             type_bit_int(&types, 40, true), type_tag(&types, BUSTER_TYPE_KIND_STRUCT, 0),
         };
+        // A prototyped function's pointer, an array of four and an enumeration, for check_test_common_reach_shape.
+        shapes[0] = derived[1];
+        shapes[1] = derived[3];
+        shapes[2] = derived[6];
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(derived); i += 1)
         {
             same = same && derived[i] != 0;
@@ -804,7 +1028,7 @@ static void check_test_common_reach_filter(CheckTest* test)
     {
         for (uint32_t size = 0; same && size < BUSTER_ARRAY_LENGTH(sizes); size += 1)
         {
-            same = check_test_common_reach_case(&state, sizes[size], round % 6 != 5, &types, pool, pool_count, &scratch, totals);
+            same = check_test_common_reach_case(&state, sizes[size], round % 6 != 5, &types, pool, pool_count, shapes, &scratch, totals);
         }
     }
     check_test_expect(test, same && totals->lost == 0, "reach filter: no generated node it takes out has a bit of its own reach, under every option set");
@@ -831,7 +1055,8 @@ static void check_test_common_reach_filter(CheckTest* test)
         {
             if (totals->found[op] != 0 || totals->taken[op] != 0)
             {
-                printf("reach filter: operator %u: %llu with a bit, %llu taken out\n", op, (unsigned long long)totals->found[op], (unsigned long long)totals->taken[op]);
+                printf("reach filter: operator %u: %llu with a bit, %llu taken out, %llu nodes offered a shape\n", op, (unsigned long long)totals->found[op],
+                       (unsigned long long)totals->taken[op], (unsigned long long)(op < CHECK_OP_COUNT ? check_test_reach_shaped[op] : 0));
             }
         }
     }

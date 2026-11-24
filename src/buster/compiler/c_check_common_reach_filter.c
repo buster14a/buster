@@ -69,6 +69,8 @@ _Static_assert(CHECK_CONSTANT_LABEL_DIFFERENCE < 16, "the constant kinds index o
 // A type's classes, by the kind its TypeId's index has: what a test may find past type_strip_aligned and
 // type_unqualified. A wrapper (ALIGNED, QUALIFIED), whose kind hides its base's, and a kind this table doesn't know have
 // every class.
+// A real floating type: a conversion edge's target (a complex one's edge is none of check_common_edge_wanted's where
+// only -Wimplicit-const-int-float-conversion may report).
 #define BUSTER_CHECK_CLASS_FLOATING 0x01u
 #define BUSTER_CHECK_CLASS_ENUM 0x02u
 #define BUSTER_CHECK_CLASS_ARRAY 0x04u
@@ -78,7 +80,6 @@ _Static_assert(CHECK_CONSTANT_LABEL_DIFFERENCE < 16, "the constant kinds index o
 static const uint8_t check_common_reach_kind_classes[64] =
 {
     [BUSTER_TYPE_KIND_FLOATING] = BUSTER_CHECK_CLASS_FLOATING,
-    [BUSTER_TYPE_KIND_COMPLEX] = BUSTER_CHECK_CLASS_FLOATING,
     [BUSTER_TYPE_KIND_ENUM] = BUSTER_CHECK_CLASS_ENUM,
     [BUSTER_TYPE_KIND_ARRAY] = BUSTER_CHECK_CLASS_ARRAY,
     [BUSTER_TYPE_KIND_NULLPTR] = BUSTER_CHECK_CLASS_NULLPTR,
@@ -318,13 +319,13 @@ static void check_common_reach_arguments(const CheckCommonReachFilter* filter, c
             const TypeId target = stream->argument_conversions[slot].type;
             const uint32_t source_width = check_common_reach_width(filter->widths, stream->value_types[argument]);
             const uint32_t target_width = check_common_reach_width(filter->promoted, target);
-            const uint32_t classes = check_common_reach_class(filter, target);
             const bool arms = (traits & BUSTER_CHECK_REACH_ARM_TRAITS) != 0;
+            // (Its conversion edge needs no test of its own: the argument is then a conditional, a comma or a selection, or
+            // an integer constant whose target, a floating type, has no integer's width.)
             const bool narrowing = (traits & BUSTER_CHECK_TRAIT_INTEGER) != 0 && !(source_width != 0 && target_width >= source_width);
-            const bool edge = filter->edges && (traits & BUSTER_CHECK_REACH_EDGE_TRAITS) != 0 && (classes & BUSTER_CHECK_CLASS_FLOATING) != 0;
-            const bool enumeration = filter->enum_cast && (classes & BUSTER_CHECK_CLASS_ENUM) != 0;
+            const bool enumeration = filter->enum_cast && (check_common_reach_class(filter, target) & BUSTER_CHECK_CLASS_ENUM) != 0;
             const uint32_t call = parents[argument];
-            if ((arms || narrowing || edge || enumeration) && call < count)
+            if ((arms || narrowing || enumeration) && call < count)
             {
                 marked[call >> 6] |= UINT64_C(1) << (call & 63);
             }
@@ -340,8 +341,9 @@ static void check_common_reach_arguments(const CheckCommonReachFilter* filter, c
 // them the filter's say:
 //   - -Wsign-compare gives every comparison a bit;
 //   - -Wimplicit-float-conversion reads an assignment's, an initialization's, a conversion's and a compound assignment's
-//     types and a call's arguments' (check_float_narrows), whatever their operands are;
-//   - a graph or a stream without its argument columns has no call's test here.
+//     types and a call's arguments' (check_float_narrows), whatever their operands are.
+// A graph or a stream without its argument columns marks no call: the exact test then reads no argument, and a call
+// has its own operands' edges alone.
 static bool check_common_reach_filter_build(const CheckGraph* graph, const CheckStream* stream, const TypeTable* types, const CheckCommonEnabled* enabled,
                                             const uint32_t* parents, Arena* scratch, CheckCommonReachFilter* filter)
 {
@@ -384,10 +386,6 @@ static bool check_common_reach_filter_build(const CheckGraph* graph, const Check
                 filter->families[CHECK_OP_CONVERT] = 0;
                 filter->families[CHECK_OP_CALL] = 0;
                 memset(filter->families + CHECK_OP_ADD_ASSIGN, 0, CHECK_OP_DIVIDE_ASSIGN - CHECK_OP_ADD_ASSIGN + 1);
-            }
-            if (!arguments)
-            {
-                filter->families[CHECK_OP_CALL] = 0;
             }
             // The operators the scan can list under the unit's options (check_common_reach_selected): the reach and
             // comparison classes', a member where -Watomic-access asks, the compound assignments and the builtins where
