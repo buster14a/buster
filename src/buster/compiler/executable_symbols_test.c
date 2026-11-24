@@ -258,17 +258,19 @@ static bool executable_symbols_test_dynamic(const ExecutableTestDirectory* direc
                     bool ran = false;
                     if (valid && library != 0)
                     {
+                        char copy[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+                        const char* fixture = executable_test_fixture_path(directory, path, copy);
                         uint8_t output[BUSTER_EXECUTABLE_TEST_OUTPUT_BYTES];
                         uint64_t length = 0;
                         int status = -1;
-                        char* arguments[] = { harness, path, 0 };
+                        char* arguments[] = { harness, (char*)fixture, 0 };
                         char* environment[] = { "BUSTER=1", 0 };
-                        ran = executable_test_run_arguments(arguments, environment, output, &length, &status) &&
+                        ran = fixture != 0 && executable_test_run_arguments(arguments, environment, output, &length, &status) &&
                               WIFEXITED(status) && WEXITSTATUS(status) == 0 && length == 0;
                     }
                     else if (valid)
                     {
-                        ran = executable_test_runs(path, (const uint8_t*)"", 0);
+                        ran = executable_test_runs_fixture(directory, path, (const uint8_t*)"", 0);
                     }
                     executable_test_expect(tally, ran, "PIE/shared imported function and TLS execute", index);
                     references[attached] = references[attached].pointer == 0 ? file : references[attached];
@@ -362,7 +364,7 @@ static bool executable_test_symbols(const ExecutableTestDirectory* directory)
             executable_test_expect(&tally, valid && executable_symbols_test_table(file, &image, &write.result), "ELF names, sizes, types and final definitions", lanes);
             const bool same = file.pointer != 0 && (reference.pointer == 0 || (file.length == reference.length && memcmp(file.pointer, reference.pointer, file.length) == 0));
             executable_test_expect(&tally, same, "lane byte identity", lanes);
-            executable_test_expect(&tally, valid && executable_test_runs(path, (const uint8_t*)"", 0), "native program executes", lanes);
+            executable_test_expect(&tally, valid && executable_test_runs_fixture(directory, path, (const uint8_t*)"", 0), "native program executes", lanes);
             executable_test_expect(&tally, valid && executable_test_build_id(&saved, file, boundaries, write.result.chunks), "symbol bytes participate in build ID", lanes);
             reference = reference.pointer == 0 ? file : reference;
         }

@@ -113,6 +113,14 @@ requirements. [Command index](README.md).
   version definitions are refused in the existing symbol pass before output.
 ## Direct executable tests
 
+With `--keep`, ordinary runs and shared-library loads use separate copies of
+their ELF files so profilers can reopen them after later writes. The check that
+replaces a running executable restores the original image at its recorded path
+after verifying the replacement.
+Setting `BUSTER_TEST_PROFILE_DIR` to an existing writable absolute directory
+also enables retention for `test-executable`, including when the correctness
+suite invokes it.
+
 `./build/compiler test-executable` (about 0.2 s on the 9700X) checks
 the shared interface and private implementation in a directory of its own under
 `--directory` (`TMPDIR` or `/tmp` by default), which it removes unless `--keep`
