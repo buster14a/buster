@@ -309,7 +309,7 @@ static bool check_init_diagnostic_append(CheckInitDiagnostic* result, CheckInitF
 
 // A compound literal must be diagnosed before an enclosing initializer can decide whether its source exists.
 // Completion order is a postorder of the nested source spans; equal ends take the inner declaration first. The
-// existing stable scalar/vector radix kernel retains that tie order, supplied by reversing the declaration list.
+// bindings' stable radix sort (c_bindings_sort) retains that tie order, supplied by reversing the declaration list.
 // Initializers without a compound literal keep their original order and pay no extra allocation or sorting.
 static bool check_init_diagnostic_order(const CheckInput* input, uint32_t* declarations, uint32_t count, Arena* scratch, bool* compounds)
 {

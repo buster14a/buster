@@ -1869,15 +1869,13 @@ static void check_data_test_boundary_sort(CheckTest* test)
         {
             uint64_t* keys = (uint64_t*)(mappings[0] + page) - count;
             uint64_t* temporary = (uint64_t*)(mappings[1] + page) - count;
-            uint64_t scalar[200];
-            uint64_t scalar_temporary[200];
             uint64_t expected[200];
             for (uint32_t i = 0; i < count; i += 1)
             {
                 uint64_t value = ((uint64_t)check_test_random(test) << 32) | check_test_random(test);
                 value = shape == 1 ? value & UINT32_MAX : shape == 2 ? value << 32 : shape == 3 ? UINT64_MAX :
                         shape == 4 ? count - i : shape == 5 ? (i % 2 == 0 ? UINT64_MAX : 0) : value;
-                keys[i] = scalar[i] = value;
+                keys[i] = value;
                 uint32_t at = i;
                 while (at != 0 && expected[at - 1] > value)
                 {
@@ -1886,10 +1884,8 @@ static void check_data_test_boundary_sort(CheckTest* test)
                 }
                 expected[at] = value;
             }
-            const uint64_t* vector = check_data_sort_boundaries(keys, temporary, count, false);
-            const uint64_t* twin = check_data_sort_boundaries(scalar, scalar_temporary, count, true);
-            check_test_expect(test, memcmp(vector, expected, (uint64_t)count * 8) == 0 && memcmp(twin, expected, (uint64_t)count * 8) == 0,
-                              "64-bit boundary sort matches independent insertion oracle and scalar twin at guarded tails");
+            const uint64_t* sorted = check_data_sort_boundaries(keys, temporary, count);
+            check_test_expect(test, memcmp(sorted, expected, (uint64_t)count * 8) == 0, "64-bit boundary sort matches an insertion oracle at guarded tails");
         }
     }
     for (uint32_t i = 0; i < 2; i += 1)

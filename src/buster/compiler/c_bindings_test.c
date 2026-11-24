@@ -249,18 +249,23 @@ static void c_binding_test_sort_edges(CBindingTest* test)
                     }
                     first = i == 0 ? key : first;
                     varying |= key ^ first;
-                    keys[i] = ((uint64_t)key << 32) | i;
+                    // The low half's upper bits are random, so a sort by the whole key orders equal high halves
+                    // differently from a stable sort by the high half alone; its lower bits name the input position.
+                    keys[i] = ((uint64_t)key << 32) | (c_binding_test_random(test) & 0xffff0000u) | i;
                     original[i] = keys[i];
                 }
                 const uint64_t* sorted = c_bindings_sort(keys, temporary, length, varying);
                 c_binding_test_check(test, sorted == keys || sorted == temporary, "sort returned an unowned buffer");
-                // Every key came in at the position its low half names (`original` holds them as they came in), and they
-                // come out strictly ascending: a permutation, sorted by the high half, stable among equal ones.
+                // Every key came in at the position its low 16 bits name (`original` holds them as they came in), and they
+                // come out by high half, in input order among equal high halves: a permutation, sorted stably.
                 for (uint32_t i = 0; i < length; i += 1)
                 {
-                    const uint32_t position = (uint32_t)sorted[i];
+                    const uint32_t position = (uint32_t)sorted[i] & 0xffffu;
+                    const uint32_t high = (uint32_t)(sorted[i] >> 32);
+                    const uint32_t before = i == 0 ? 0 : (uint32_t)(sorted[i - 1] >> 32);
+                    const bool ordered = i == 0 || before < high || (before == high && (sorted[i - 1] & 0xffffu) < position);
                     c_binding_test_check(test, position < length && original[position] == sorted[i], "guarded sort lost or invented a key");
-                    c_binding_test_check(test, i == 0 || sorted[i - 1] < sorted[i], "guarded sort lost stable order");
+                    c_binding_test_check(test, ordered, "guarded sort lost stable order");
                 }
             }
         }

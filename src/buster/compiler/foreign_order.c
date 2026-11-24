@@ -40,7 +40,7 @@ static __attribute__((unused)) __m512i foreign_order_values(const uint64_t* keys
 }
 
 // The high half is the complete checked first-record ordinal, the low half the opaque name ID. Stable byte radix
-// count/place/fill, with the same conflict/rank scheme as this project's c_bindings_sort. The scalar twin takes all
+// count/place/fill, with the conflict/rank scheme c_bindings_sort had until #2924. The scalar twin takes all
 // four digits; vector skips only digits proved constant while keys were packed. IDs never break an ordinal tie:
 // distinct names cannot have the same first record. Return the buffer holding the last completed pass.
 static uint64_t* foreign_order_sort(uint64_t* keys, uint64_t* temporary, uint32_t count, ForeignPath path, uint32_t varying)

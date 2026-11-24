@@ -1082,7 +1082,7 @@ static void check_target_versions_call(CheckInputReader* reader, uint32_t close,
 }
 
 // Binding uses arrive in source order, but a nested call's node precedes its enclosing call's. Sort only these sparse
-// call receipts, using binding's scalar/vector radix twins; no discovery pass over the expression graph is needed.
+// call receipts with the bindings' radix sort; no discovery pass over the expression graph is needed.
 static void check_target_versions_calls_sort(CheckInputReader* reader, uint32_t previous)
 {
     CheckGraph* graph = &reader->output->graph;

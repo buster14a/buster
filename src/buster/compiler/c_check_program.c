@@ -4950,7 +4950,7 @@ static bool check_program_text_equal(String8 a, String8 b)
 // finds a version or the default (clang drops one after the definition where none came before, with a warning); and a
 // function of several versions where another one's string differs, or it has target_clones. Each string resolves once
 // (predefines_function_target), against the unit's -march=native host features, read once, and an attribute of the same
-// string as the one before is taken as it was. The keys sort by object with the radix kernel's twins (c_bindings_sort),
+// string as the one before is taken as it was. The keys sort by object with the bindings' radix sort (c_bindings_sort),
 // and a body in their objects' range finds its object's by a binary search: the rest is scalar, as a unit holds few of
 // them (main.c's 5,344 among its 23.5 MB of preprocessed text, the clang headers' intrinsics), and none in the usual
 // unit, which this leaves at once. Returns false if a column had no room.
@@ -5092,7 +5092,7 @@ static bool check_program_targets(CheckProgram* program, const CheckProgramOptio
 // The keys code generation's check of target features reads (#775, CheckProgram.attribute_keys), in `output`, where the
 // unit has a target attribute: the target attributes' declarations (check_program_targets sorted them stably by object,
 // so each object's are still in token order) and then the always_inline, flatten and noreturn ones, sorted stably by
-// object with the radix kernel's twins (c_bindings_sort). A late symbol rename also needs the callee keys for the
+// object with the bindings' radix sort (c_bindings_sort). A late symbol rename also needs the callee keys for the
 // shared emission walk's noreturn decisions. Other units without a target attribute keep none. Returns false if
 // there was no room.
 __attribute__((noinline)) static bool check_program_attribute_keys(CheckProgram* program, const CheckProgramTargetEvents* events, bool scalar, Arena* output, Arena* scratch)
@@ -5140,7 +5140,7 @@ __attribute__((noinline)) static bool check_program_attribute_keys(CheckProgram*
 }
 
 // The patchable_function_entry declarations' keys (#1447, CheckProgram.patchable_keys), in `output`, where the unit has
-// one: in token order as the scan found them, sorted stably by object with the radix kernel's twins (c_bindings_sort), so
+// one: in token order as the scan found them, sorted stably by object with the bindings' radix sort (c_bindings_sort), so
 // that each object's are in token order. Returns false if there was no room.
 __attribute__((noinline)) static bool check_program_patchable_keys(CheckProgram* program, const CheckProgramTargetEvents* events, bool scalar, Arena* output, Arena* scratch)
 {
