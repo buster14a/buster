@@ -226,21 +226,21 @@ static void assembly_register(AssemblyText* text, uint32_t reg, uint32_t operand
 // ---------------------------------------------------------------------------------------------------------------------
 // Names
 
-// Whether GNU as reads the bytes as a plain symbol or section name: a letter, `_`, `.` or `$` first, then those and digits.
-static bool assembly_plain_name(const uint8_t* bytes, uint64_t length)
+// Both assemblers read these plain names. GNU as also accepts `$`, which Buster's lexer splits out of section names.
+static bool assembly_plain_name(const uint8_t* bytes, uint64_t length, bool quote_dollar)
 {
     bool plain = length != 0 && !(bytes[0] >= '0' && bytes[0] <= '9');
     for (uint64_t i = 0; plain && i < length; i += 1)
     {
         const uint8_t c = bytes[i];
-        plain = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '.' || c == '$';
+        plain = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '.' || (c == '$' && !quote_dollar);
     }
     return plain;
 }
 
-static void assembly_identifier(AssemblyText* text, const uint8_t* bytes, uint64_t length)
+static void assembly_identifier(AssemblyText* text, const uint8_t* bytes, uint64_t length, bool quote_dollar)
 {
-    if (assembly_plain_name(bytes, length))
+    if (assembly_plain_name(bytes, length, quote_dollar))
     {
         assembly_bytes(text, bytes, length);
     }
@@ -270,6 +270,8 @@ typedef struct AssemblyNames AssemblyNames;
 struct AssemblyNames
 {
     uint8_t* own;
+    const SymbolId* slots;
+    uint32_t mask;
     // Each symbol's uses (assembly_print's `used`): 4 where an unwind table names its local label (AssemblyView.local_unwind).
     const uint8_t* used;
     // Each form row's assembly_ambiguous answer, as the walk finds it: the printing's other per-unit table.
@@ -281,13 +283,29 @@ static void assembly_name(AssemblyText* text, const Link* link, const AssemblyNa
     if (names->own[symbol] != 0)
     {
         const NameId name = link->symbols.name[symbol];
-        assembly_identifier(text, link->names.bytes[name], link->names.length[name]);
+        assembly_identifier(text, link->names.bytes[name], link->names.length[name], false);
     }
     else
     {
         assembly_append(text, BUSTER_ASSEMBLY_PREFIX "s");
         assembly_unsigned(text, symbol);
     }
+}
+
+// The slot for a name the sink spells explicitly, or the empty slot where it would go.
+static uint32_t assembly_name_slot(const AssemblyNames* names, const Link* link, const uint8_t* bytes, uint64_t length, uint64_t hash)
+{
+    uint32_t slot = (uint32_t)hash & names->mask;
+    while (names->slots[slot] != 0)
+    {
+        const NameId other = link->symbols.name[names->slots[slot]];
+        if (link->names.length[other] == length && memcmp(link->names.bytes[other], bytes, length) == 0)
+        {
+            break;
+        }
+        slot = (slot + 1) & names->mask;
+    }
+    return slot;
 }
 
 // Fills `names` for the view's symbols, from `scratch`, and checks that each own name the text spells is one symbol's:
@@ -313,6 +331,8 @@ static AssemblyError assembly_names(AssemblyNames* names, const AssemblyView* vi
     if (table != 0)
     {
         memset(table, 0, (uint64_t)slots * sizeof(*table));
+        names->slots = table;
+        names->mask = slots - 1;
         names->own[0] = 0;
     }
     const uint64_t prefix_length = sizeof(BUSTER_ASSEMBLY_PREFIX) - 1;
@@ -332,27 +352,16 @@ static AssemblyError assembly_names(AssemblyNames* names, const AssemblyView* vi
         }
         if (error == ASSEMBLY_OK && names->own[s] != 0 && used[s] != 0)
         {
-            uint32_t slot = (uint32_t)link->names.hash[name] & (slots - 1);
-            bool placed = false;
-            while (!placed && error == ASSEMBLY_OK)
+            const uint32_t slot = assembly_name_slot(names, link, bytes, length, link->names.hash[name]);
+            if (table[slot] == 0)
             {
-                const SymbolId other = table[slot];
-                if (other == 0)
-                {
-                    table[slot] = s;
-                    placed = true;
-                }
-                else
-                {
-                    const NameId other_name = link->symbols.name[other];
-                    if (link->names.length[other_name] == length && memcmp(link->names.bytes[other_name], bytes, length) == 0)
-                    {
-                        error = ASSEMBLY_UNSUPPORTED;
-                        result->reason = "two symbols of the same name, which GNU as would take for one";
-                        result->symbol = s;
-                    }
-                    slot = (slot + 1) & (slots - 1);
-                }
+                table[slot] = s;
+            }
+            else
+            {
+                error = ASSEMBLY_UNSUPPORTED;
+                result->reason = "two symbols of the same name, which GNU as would take for one";
+                result->symbol = s;
             }
         }
     }
@@ -1105,7 +1114,7 @@ static bool assembly_section_directive(AssemblyText* text, AssemblySection secti
     if (spelled)
     {
         assembly_append(text, "\t.section ");
-        assembly_identifier(text, (const uint8_t*)section.name, section.name_length);
+        assembly_identifier(text, (const uint8_t*)section.name, section.name_length, true);
         assembly_append(text, ",\"");
         assembly_append(text, (section.flags & SHF_ALLOC) ? "a" : "");
         assembly_append(text, (section.flags & SHF_WRITE) ? "w" : "");
@@ -1645,6 +1654,18 @@ static AssemblyResult assembly_print(const AssemblyView* view, Arena* output, Ar
                 result.error = assembly_section_directive(&text, section, label, link, &names) ? ASSEMBLY_OK : ASSEMBLY_UNSUPPORTED;
                 result.reason = result.error != ASSEMBLY_OK ? "a section type or flags -S doesn't print yet" : 0;
                 current = section;
+            }
+            // A bare reference to this spelling could otherwise select the table rather than the undefined global.
+            if (result.error == ASSEMBLY_OK && ordered)
+            {
+                const uint8_t* bytes = (const uint8_t*)section.name;
+                const SymbolId symbol = names.slots[assembly_name_slot(&names, link, bytes, section.name_length, link_hash(bytes, section.name_length))];
+                if (symbol != 0 && used[symbol] == 2 && (link->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_BINDING) == BUSTER_LINK_SYMBOL_GLOBAL)
+                {
+                    assembly_append(&text, "\t.globl ");
+                    assembly_name(&text, link, &names, symbol);
+                    assembly_append(&text, "\n");
+                }
             }
             const uint32_t alignment = link->atoms.alignment_log2[a];
             if (result.error == ASSEMBLY_OK && alignment != 0)

@@ -266,6 +266,8 @@ struct AsmSection
     uint64_t unique;
     uint32_t name_symbol;
     bool name_ambiguous;
+    // This spelling also names an ordinary or grouped section and is reserved in symbol expressions.
+    bool name_binds_section;
     uint32_t size;
     AtomId atom;
     uint8_t class;
@@ -445,6 +447,7 @@ struct AsmParser
     uint32_t line_file_count;
     uint32_t line_directory_count;
     bool line_dwarf5;
+    bool linked_sections;
     // The table's .debug_line section and the fragment its bytes fill after layout (asm_line_emit), or 0 for none;
     // each directory's and file's string label in .debug_line_str (DWARF 5), and the table's relocations.
     uint32_t line_section;
@@ -862,6 +865,25 @@ static uint32_t asm_find_section(const AsmParser* parser, String8 name, uint32_t
 static uint32_t asm_find_latest_section(const AsmParser* parser, String8 name);
 static void asm_line_instruction(AsmParser* parser, uint32_t location);
 
+// A linked-order table may share an ordinary symbol's spelling. Its section name is a fallback after parsing.
+static uint32_t asm_symbol_section(const AsmParser* parser, String8 name)
+{
+    uint32_t result = 0;
+    if (!parser->code)
+    {
+        if (parser->section_name_slots == 0)
+        {
+            result = asm_find_section(parser, name, 0);
+        }
+        else
+        {
+            const uint32_t section = asm_find_latest_section(parser, name);
+            result = section != 0 && parser->sections[section].name_binds_section ? section : 0;
+        }
+    }
+    return result;
+}
+
 static uint32_t asm_symbol_scoped(AsmParser* parser, String8 name, uint32_t location, bool internal)
 {
     if (name.length == 0 || (name.pointer[0] >= '0' && name.pointer[0] <= '9') || (name.length == 1 && name.pointer[0] == '.'))
@@ -940,7 +962,7 @@ static uint32_t asm_symbol(AsmParser* parser, String8 name, uint32_t location)
 static void asm_section_attribute(AsmParser* parser, AsmSymbol* symbol, String8 name, uint32_t location)
 {
     symbol->section_attributes = true;
-    const uint32_t section = parser->code ? 0 : parser->section_name_slots != 0 ? asm_find_latest_section(parser, name) : asm_find_section(parser, name, 0);
+    const uint32_t section = asm_symbol_section(parser, name);
     if (section != 0)
     {
         asm_fail(parser, location, "section symbol attributes are not supported");
@@ -1320,7 +1342,7 @@ static AsmExpr asm_expression_mode(AsmParser* parser, uint32_t end, bool address
                         {
                             asm_fail(parser, token.start, "expected address register");
                         }
-                        const uint32_t section = parser->code ? 0 : parser->section_name_slots != 0 ? asm_find_latest_section(parser, text) : asm_find_section(parser, text, 0);
+                        const uint32_t section = asm_symbol_section(parser, text);
                         uint32_t symbol = 0;
                         if (section != 0)
                         {
@@ -3028,7 +3050,7 @@ static void asm_common_directive(AsmParser* parser, uint32_t token, uint32_t end
     {
         const String8 name = asm_name_text(parser, parser->at++);
         const uint32_t id = asm_symbol(parser, name, location);
-        const uint32_t section = parser->code ? 0 : parser->section_name_slots != 0 ? asm_find_latest_section(parser, name) : asm_find_section(parser, name, 0);
+        const uint32_t section = asm_symbol_section(parser, name);
         if (section != 0)
         {
             asm_fail(parser, location, "section name already defined as a symbol");
@@ -3447,7 +3469,7 @@ static void asm_directive(AsmParser* parser, uint32_t end)
             {
                 asm_section_attribute(parser, symbol, name, location);
             }
-            const uint32_t section = parser->code ? 0 : parser->section_name_slots != 0 ? asm_find_latest_section(parser, name) : asm_find_section(parser, name, 0);
+            const uint32_t section = asm_symbol_section(parser, name);
             if (section != 0 && (asm_is(parser, token, ".equ") || asm_is(parser, token, ".equiv") || asm_is(parser, token, ".set")))
             {
                 asm_fail(parser, location, "section name already defined as a symbol");
@@ -3837,7 +3859,7 @@ static void asm_parse(AsmParser* parser)
             else
             {
                 id = asm_symbol(parser, name, location);
-                const uint32_t section = parser->code ? 0 : parser->section_name_slots != 0 ? asm_find_latest_section(parser, name) : asm_find_section(parser, name, 0);
+                const uint32_t section = asm_symbol_section(parser, name);
                 if (section != 0)
                 {
                     asm_fail(parser, location, "section name already defined as a symbol");
@@ -3929,6 +3951,7 @@ static void asm_parse(AsmParser* parser)
         parser->at = end;
     }
     asm_place_commons(parser);
+    asm_resolve_linked_section_names(parser);
     asm_resolve_aliases(parser);
     asm_line_finish(parser);
     asm_cfi_finish(parser);

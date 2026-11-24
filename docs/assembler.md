@@ -377,7 +377,9 @@ from `-S`, `.section name,"awo",@progbits,label[,unique,ID]`. The label may
 be defined later and must belong to an earlier section class. Each combination
 of section name, associated symbol and optional ID selects its own section,
 even when several targets lie in the same code section. The object writes the
-associated section's index in `sh_link`.
+associated section's index in `sh_link`. Ordinary symbol definitions and
+explicit symbol directives take precedence over a linked-order table of the
+same name. A bare section reference can select a uniquely named table.
 
 `.set name, symbol + constant` (#1115: GCC's constant pools write one entry
 within another, `.set .LC4,.LC11+4`) is an alias, which may come before its

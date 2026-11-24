@@ -68,15 +68,19 @@ static void asm_section_index(AsmParser* parser, uint32_t id)
         const uint32_t end = rebuild ? parser->section_count : id + 1;
         for (uint32_t i = begin; parser->result.error == 0 && i < end; i += 1)
         {
-            const String8 name = parser->sections[i].object.name;
+            AsmSection* section = &parser->sections[i];
+            const String8 name = section->object.name;
+            section->name_binds_section = section->linked_symbol == 0;
             uint32_t slot = link_hash((const uint8_t*)name.pointer, name.length) & parser->section_name_mask;
             while (parser->section_name_slots[slot] != 0)
             {
-                const String8 old = parser->sections[parser->section_name_slots[slot]].object.name;
+                AsmSection* previous = &parser->sections[parser->section_name_slots[slot]];
+                const String8 old = previous->object.name;
                 if (old.length == name.length && memcmp(old.pointer, name.pointer, name.length) == 0)
                 {
-                    parser->sections[parser->section_name_slots[slot]].name_ambiguous = true;
-                    parser->sections[i].name_ambiguous = true;
+                    section->name_binds_section |= previous->name_binds_section;
+                    previous->name_ambiguous = true;
+                    section->name_ambiguous = true;
                     break;
                 }
                 slot = (slot + 1) & parser->section_name_mask;
@@ -105,6 +109,33 @@ static uint32_t asm_find_latest_section(const AsmParser* parser, String8 name)
         }
     }
     return result;
+}
+
+// An ordinary definition wins regardless of its order relative to a linked-order table.
+static void asm_resolve_linked_section_names(AsmParser* parser)
+{
+    for (uint32_t i = 1; parser->linked_sections && parser->result.error == 0 && i < parser->symbol_count; i += 1)
+    {
+        AsmSymbol* symbol = &parser->symbols[i];
+        if (symbol->referenced && !symbol->defined && !symbol->section_start && !symbol->internal && !symbol->section_attributes &&
+            symbol->common == 0 && symbol->view == 0)
+        {
+            const uint32_t id = asm_find_latest_section(parser, symbol->name);
+            const AsmSection* section = &parser->sections[id];
+            if (id != 0 && section->linked_symbol != 0 && !section->name_binds_section)
+            {
+                if (section->name_ambiguous)
+                {
+                    asm_fail(parser, symbol->location, "ambiguous section name in expression");
+                }
+                else
+                {
+                    symbol->section_start = true;
+                    symbol->section_index = id;
+                }
+            }
+        }
+    }
 }
 
 static void asm_sections_initialize(AsmParser* parser)
@@ -432,7 +463,11 @@ static void asm_section_directive(AsmParser* parser, uint32_t token, uint32_t en
         section->declared = true;
         if (added)
         {
-            asm_bind_forward_section(parser, name, id);
+            if (linked_symbol == 0)
+            {
+                asm_bind_forward_section(parser, name, id);
+            }
+            parser->linked_sections |= linked_symbol != 0;
             asm_section_index(parser, id);
         }
         parser->previous_section = parser->section;

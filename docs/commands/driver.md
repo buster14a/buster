@@ -624,7 +624,9 @@ The form contract, which its tests hold GNU as to:
   patchable function's exact NOP sled around its function label, with a
   pointer to the sled's start in a writable linked-order table section.
   Buster's assembler and GNU as read those sections using `"awo"`, an
-  associated label and `unique` to keep same-name entries distinct.
+  associated label and `unique` to keep same-name entries distinct. The writer
+  quotes section names with dollar signs. Buster's assembler also accepts a
+  table whose name matches an ordinary symbol, a spelling GNU as 2.44 refuses.
 
 What the sink doesn't print yet it refuses with the reason naming it
 (`ASSEMBLY_UNSUPPORTED`): thread-local storage, section groups, other
@@ -666,7 +668,10 @@ relocations in both objects before checking the bytes. GNU as also lists an unde
 skips. The patchable-entry fixture compares Buster's reassembled objects at
 both tiers and GNU as's with `--cross-check`. It includes several table sections
 with the same name and entries associated with different code sections. Each
-reassembled program must link and run.
+reassembled program must link and run. A second fixture compares sections
+named after functions with Buster's direct object emission, in both orders of
+the table and the function definition. It also checks relocations to undefined
+function and data symbols whose names match tables.
 Then the form sweep: every form the matcher admits for a target of every
 feature but the branches (whose targets are labels, the program fixture's), two
 random records each, printed and assembled each in a 16-byte slot of its own,

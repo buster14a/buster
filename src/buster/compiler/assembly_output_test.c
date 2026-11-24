@@ -1076,43 +1076,33 @@ static bool assembly_test_c_program(AssemblyTest* test, const char* compiler, co
     return passed;
 }
 
-// Exercise multiple same-name table sections, including two associated with .text and one with named code. The
-// comparison checks their sh_link and relocations, as well as the NOP bytes and the function symbols in their sleds.
-static void assembly_test_patchable(AssemblyTest* test)
+// Compare sh_link and relocations as well as the NOP bytes and the function symbols in their sleds.
+static void assembly_test_patchable(AssemblyTest* test, const char* source, const char* fixture, bool cross_check)
 {
-    static const char fixture[] =
-        "__attribute__((noinline, patchable_function_entry(18,4))) int first(int x) { return x + 3; }\n"
-        "__attribute__((noinline, patchable_function_entry(6,6), section(\".text.patchable\"))) int second(int x) { return first(x) + 1; }\n"
-        "__attribute__((noinline, patchable_function_entry(3))) int third(int x) { return second(x) * 2; }\n"
-        "__attribute__((noinline, patchable_function_entry(7,1,\"custom,patch\"))) static int fourth(int x) { return third(x) + 2; }\n"
-        "int main(int argc, char** argv) { return fourth(argc) != 12; }\n";
     char compiler[PATH_MAX];
     const ssize_t length = readlink("/proc/self/exe", compiler, sizeof(compiler) - 1);
     compiler[length > 0 ? length : 0] = 0;
-    char source[PATH_MAX];
     char expected[PATH_MAX];
-    snprintf(source, sizeof(source), "%s/patchable-input.c", test->directory);
     snprintf(expected, sizeof(expected), "%s/patchable-expected.txt", test->directory);
-    const bool ready = length > 0 && object_write_file(source, (const uint8_t*)fixture, sizeof(fixture) - 1) == OBJECT_ERROR_NONE &&
+    const bool ready = length > 0 && access(source, R_OK) == 0 &&
                        object_write_file(expected, (const uint8_t*)"", 0) == OBJECT_ERROR_NONE;
-    assembly_test_check(test, ready, "write patchable function entry fixture", 0);
+    assembly_test_check(test, ready, "prepare patchable function entry fixture", source);
     for (uint32_t tier = 0; ready && tier < 2; tier += 1)
     {
-        char name[32];
+        char name[64];
         char error[512] = { 0 };
-        snprintf(name, sizeof(name), "patchable-tier%u-buster", tier);
+        snprintf(name, sizeof(name), "%s-tier%u-buster", fixture, tier);
         const bool buster = assembly_test_c_program(test, compiler, source, expected, name, tier != 0, true, error, sizeof(error));
         assembly_test_check(test, buster, "patchable entry tables, code and symbols round-trip through Buster", error);
-        if (test->cross_check)
+        if (cross_check)
         {
-            snprintf(name, sizeof(name), "patchable-tier%u-gnu", tier);
+            snprintf(name, sizeof(name), "%s-tier%u-gnu", fixture, tier);
             const bool gnu = assembly_test_c_program(test, compiler, source, expected, name, tier != 0, false, error, sizeof(error));
             assembly_test_check(test, gnu, "patchable entry tables, code and symbols round-trip through GNU as", error);
         }
     }
     if (!test->keep)
     {
-        unlink(source);
         unlink(expected);
     }
 }
@@ -1284,7 +1274,9 @@ static int run_assembly_output_tests(int count, char** arguments)
         assembly_test_refusal(&test, ASSEMBLY_TEST_TARGETLESS, ASSEMBLY_INVALID, "a relative branch without a target");
         assembly_test_refusal(&test, ASSEMBLY_TEST_TLS_FIXUP, ASSEMBLY_UNSUPPORTED, "thread-local storage");
         assembly_test_refusal(&test, ASSEMBLY_TEST_BND_CALL, ASSEMBLY_UNSUPPORTED, "GNU as encodes otherwise");
-        assembly_test_patchable(&test);
+        assembly_test_patchable(&test, "tests/assembly-output/patchable.c", "patchable", test.cross_check);
+        // GNU as refuses a section named after an ordinary symbol. Compare this spelling with direct object emission.
+        assembly_test_patchable(&test, "tests/assembly-output/patchable-collisions.c", "patchable-collisions", false);
         if (test.cross_check)
         {
             assembly_test_forms(&test, 2);
