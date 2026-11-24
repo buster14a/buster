@@ -2148,6 +2148,20 @@ static const CheckBuiltinCall* check_graph_builtin_call(const CheckGraph* graph,
     return first < graph->builtin_count && graph->builtin_calls[first].node == node ? graph->builtin_calls + first : NULL;
 }
 
+// Whether an x86 builtin node's builtin is checked as an ordinary call of its prototype (check_x86_action): a fortified or
+// a library builtin (c_builtin_library.c), libgcc's or an alias of one. The driver words its arguments' errors as a
+// call's (#2914, check_driver_library_call_type).
+static bool check_x86_ordinary_call(const CheckX86Call* call)
+{
+    const char* name = call->info->name;
+    const uint32_t length = call->info->name_length;
+    const bool candidate = cbuiltin_library_candidate(name, length);
+    const CBuiltinLibraryId library = candidate ? cbuiltin_library_id(name, length) : CBUILTIN_LIBRARY_COUNT;
+    return cbuiltin_fortify_id(name, length) != CBUILTIN_FORTIFY_COUNT || library != CBUILTIN_LIBRARY_COUNT ||
+           (candidate && cbuiltin_library_libgcc(name, length) != BUSTER_CBUILTIN_LIBRARY_LIBGCC) ||
+           (candidate && cbuiltin_library_alias(name, length) != CBUILTIN_LIBRARY_COUNT);
+}
+
 static void check_x86_action(TypeTable* types, const CheckX86Call* call, const CheckAction* action, CheckBuiltinX86Result* checked)
 {
     const uint32_t node = action->node;
@@ -2172,9 +2186,7 @@ static void check_x86_action(TypeTable* types, const CheckX86Call* call, const C
     // folds it.
     const bool candidate = cbuiltin_library_candidate(name, length);
     const CBuiltinLibraryId library = candidate ? cbuiltin_library_id(name, length) : CBUILTIN_LIBRARY_COUNT;
-    const bool ordinary_call = cbuiltin_fortify_id(name, length) != CBUILTIN_FORTIFY_COUNT || library != CBUILTIN_LIBRARY_COUNT ||
-                               (candidate && cbuiltin_library_libgcc(name, length) != BUSTER_CBUILTIN_LIBRARY_LIBGCC) ||
-                               (candidate && cbuiltin_library_alias(name, length) != CBUILTIN_LIBRARY_COUNT);
+    const bool ordinary_call = check_x86_ordinary_call(call);
     if (library != CBUILTIN_LIBRARY_COUNT)
     {
         check_builtin_library_fold(types, library, &ordinary, &ordinary_result);
@@ -3876,7 +3888,8 @@ static void check_graph_report_node(TypeTable* types, const CheckGraph* graph, C
     {
         // Poisoned operands already have a primary error. Reporting their parents' invalid-type cascades
         // would move the first error to an earlier prefix/return token instead of the offending expression.
-        if (stream->diagnostics[node] != CHECK_DIAG_INVALID_TYPE || !check_graph_inherited_error(graph, stream, node))
+        if (stream->diagnostics[node] != CHECK_DIAG_RECOVERED_MEMBER &&
+            (stream->diagnostics[node] != CHECK_DIAG_INVALID_TYPE || !check_graph_inherited_error(graph, stream, node)))
         {
             check_graph_report(graph, stream, node, CHECK_MESSAGE_ACTION, stream->diagnostics[node], CHECK_FAULT_NONE);
             check_graph_report_arguments(types, graph, stream, node);

@@ -112,7 +112,7 @@ function and the first error. `--print NAME` prints that function's IR as lowere
 and as promoted. The correctness list runs it on c-testsuite's subset, the frozen
 `sqlite3.c` and the frozen musl's units.
 
-`./build/compiler benchmark-ir-source [--only promote|promote-scalar|gvn|
+`./build/compiler benchmark-ir-source [--only promote|gvn|
 gvn-scalar|optimize|optimize-scalar|optimize-vector|lower|verify]
 [--after-scalar MS] [preprocessor options]
 file...` (`ir_source_benchmark.c`) prepares the files' functions as test-ir-source
@@ -147,7 +147,9 @@ passes by its vector and its scalar version:
   set (the three with the merges, layout and identities), value numbering
   with memory alone (`memory`, #2718) and Tier 1's set with it
   (`tier1-memory`), which must also forward the same loads;
-- LICM on the promoted form;
+- LICM on the promoted form, by its one path (#2924): its result, given to
+  LICM again, must move nothing, since each loop's one walk reaches its fixed
+  point (#2979);
 - the loop vectorizer (#2743), at every operation the IR has
   (`ir_vectorize_target_ir`), on the promoted form after Tier 1's optimizer
   set (whose exit tests are simplified), its refusals and loops alike by both
@@ -166,7 +168,9 @@ c-testsuite's subset and `sqlite3.c` had 7 and 219 such units). The correctness 
 frozen `sqlite3.c` and musl, every pass agreeing on all 5,807 functions.
 
 `./build/compiler benchmark-ir-source --passes [--only PASS] [preprocessor
-options] file...` times the same passes by both versions on the same inputs.
+options] file...` times the same passes by both versions on the same inputs
+(by its one version where #2924 left one: the inliner, the unroller, the loop
+vectorizer, loop store motion, LICM and value numbering with memory).
 The inputs are prepared outside the time, and so are the callers' units that
 both inliner versions take. Each pass runs over the whole corpus by each
 version, in 21 rounds that alternate which runs first, after a warm-up of

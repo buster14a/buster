@@ -1,0 +1,42 @@
+function (ptr) -> void {
+b0:
+  %0 = param.ptr 0
+  %1 = load.v8i32 %0 align=1
+  %2 = address.ptr %0 offset=32
+  %3 = load.v8i32 %2 align=1
+  %4 = address.ptr %0 offset=64
+  %5 = load.v8i32 %4 align=1
+  %6 = address.ptr %0 offset=96
+  %7 = load.m8 %6 align=1
+  %8 = address.ptr %0 offset=104
+  %9 = load.v4i32 %8 align=1
+  %10 = address.ptr %0 offset=120
+  %11 = load.v4i32 %10 align=1
+  %12 = add.v8i32 %1, %3
+  %13 = vselect.v8i32 %7, %12, %5
+  %14 = address.ptr %0 offset=128
+  %15 = store.void %14, %13 align=1
+  %16 = vconst.v8i32 0x0000000000000000000000000000000000000000000000000000000000000000
+  %17 = sub.v8i32 %1, %3
+  %18 = vselect.v8i32 %7, %17, %16
+  %19 = address.ptr %0 offset=160
+  %20 = store.void %19, %18 align=1
+  %21 = intrinsic.v8i32 %1, %3 lane_op 2
+  %22 = vselect.v8i32 %7, %21, %1
+  %23 = address.ptr %0 offset=192
+  %24 = store.void %23, %22 align=1
+  %25 = mul.v8i32 %5, %3
+  %26 = vselect.v8i32 %7, %25, %3
+  %27 = address.ptr %0 offset=224
+  %28 = store.void %27, %26 align=1
+  %29 = fmul.v4f32 %9, %11
+  %30 = vselect.v4f32 %7, %29, %11
+  %31 = store.void %0, %30 align=1
+  %32 = add.v8i32 %1, %5
+  %33 = vselect.v8i32 %7, %32, %3
+  %34 = address.ptr %0 offset=16
+  %35 = store.void %34, %33 align=1
+  %36 = address.ptr %0 offset=48
+  %37 = store.void %36, %32 align=1
+  %38 = ret.void
+}

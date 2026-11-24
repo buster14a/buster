@@ -8,7 +8,7 @@
 // a conditional jump, whose PC32 addend covers the immediate's two bytes). One arm loads symbol 1 + 8 and the other
 // three symbols, adds them, stores x into symbol 1 + 8 and the thread-local 3, and the sum into symbol 2; the other
 // compares symbol 1's first byte with 3 (cmp byte ptr [rip + symbol], 3) and stores the truth value into symbol 4.
-// Both selection paths plan it with the access column: symbol 1's accesses and comparisons fold it, no node computes
+// With the access column, symbol 1's accesses and comparisons fold it, no node computes
 // its address, and the others' go through their sequences' registers. Without the column, every symbol folds, and the
 // consumer, given the column, refuses the plan. The code is certified and runs natively with its references resolved
 // here: the PC32s and the GOT loads against a data page after the code, the thread-locals' against this thread's own.
@@ -298,7 +298,6 @@ static void tier1_symbol_fold_straight(Tier1EmitTest* test)
     tier1_emit_test_expect(test, ready, "a straight-line load selects for the straight-line consumer");
     const Tier1EmitOptions options = {
         .register_mask = tier1_liveness_register_mask(),
-        .vector = true,
     };
     Tier1EmitResult emitted;
     const Tier1EmitError plain = ready ? tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
@@ -386,12 +385,11 @@ static __attribute__((no_sanitize("function"))) uint64_t tier1_symbol_fold_call_
 
 static void tier1_symbol_fold_repeated_tests(Tier1EmitTest* test)
 {
-    for (uint32_t variant = 0; variant < 8; variant += 1)
+    for (uint32_t variant = 0; variant < 4; variant += 1)
     {
-        const uint32_t vector = variant & 1;
         // The nodes past the parameters' move by the padding.
-        const uint32_t at = (variant & 2) != 0 ? 62 : 0;
-        const uint8_t extension = (variant & 4) != 0 ? IR_SEXT : IR_ZEXT;
+        const uint32_t at = (variant & 1) != 0 ? 62 : 0;
+        const uint8_t extension = (variant & 2) != 0 ? IR_SEXT : IR_ZEXT;
         IrFunction function;
         const bool created = tier1_symbol_fold_repeated_function(test, &function, extension, at);
         const bool valid = created && ir_verify(&function, &test->scratch, 0).error == IR_OK;
@@ -415,7 +413,6 @@ static void tier1_symbol_fold_repeated_tests(Tier1EmitTest* test)
         tier1_emit_test_expect(test, shared, "every indexed access reads its block's first symbol address and index extension, or the index whose register holds it");
         const Tier1EmitOptions options = {
             .register_mask = tier1_liveness_register_mask(),
-            .vector = vector != 0,
             .rematerialize = true,
             .certify = true,
         };
@@ -462,16 +459,15 @@ static void tier1_symbol_fold_repeated_tests(Tier1EmitTest* test)
     }
 }
 
-// #2602: x + g and g + x, g symbol 1's I32 or I64 at 8, by both paths. The addition takes g as its memory operand,
+// #2602: x + g and g + x, g symbol 1's I32 or I64 at 8. The addition takes g as its memory operand,
 // rip-relative: no node loads it or computes its address, and the code's one memory access is the addition's, with the
 // symbol's one PC32. It runs natively against the sum C gives.
 static void tier1_symbol_fold_addition_tests(Tier1EmitTest* test)
 {
-    for (uint32_t variant = 0; variant < 8; variant += 1)
+    for (uint32_t variant = 0; variant < 4; variant += 1)
     {
-        const bool vector = (variant & 1) != 0;
-        const uint32_t order = (variant >> 1) & 1;
-        const uint8_t type = (variant & 4) != 0 ? IR_I64 : IR_I32;
+        const uint32_t order = variant & 1;
+        const uint8_t type = (variant & 2) != 0 ? IR_I64 : IR_I32;
         const IrSizes sizes = {
             .instruction_count = 6,
             .block_count = 1,
@@ -507,7 +503,6 @@ static void tier1_symbol_fold_addition_tests(Tier1EmitTest* test)
         tier1_emit_test_expect(test, folded, "an addition takes a symbol's load as its rip-relative memory operand");
         const Tier1EmitOptions options = {
             .register_mask = tier1_liveness_register_mask(),
-            .vector = vector,
             .rematerialize = true,
             .certify = true,
         };
@@ -558,10 +553,9 @@ static void tier1_symbol_fold_addition_tests(Tier1EmitTest* test)
 
 static void tier1_symbol_fold_tests(Tier1EmitTest* test)
 {
-    for (uint32_t variant = 0; variant < 4; variant += 1)
+    for (uint32_t variant = 0; variant < 2; variant += 1)
     {
-        const bool vector = (variant & 1) != 0;
-        const bool pointer = (variant & 2) != 0;
+        const bool pointer = (variant & 1) != 0;
         IrFunction function;
         const bool created = tier1_symbol_fold_function(test, &function);
         const bool valid = created && ir_verify(&function, &test->scratch, 0).error == IR_OK;
@@ -570,7 +564,6 @@ static void tier1_symbol_fold_tests(Tier1EmitTest* test)
         const bool dominated = valid && tier1_terminal_dominance(test, &function, &dominance);
         const Tier1EmitOptions options = {
             .register_mask = tier1_liveness_register_mask(),
-            .vector = vector,
             .rematerialize = true,
             .certify = true,
             .frame_flags = pointer ? BUSTER_TIER1_FRAME_KEEP_POINTER : 0,

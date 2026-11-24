@@ -842,7 +842,7 @@ in a file-scope initializer (#2528); the completed queried type decides whether
 its size is runtime, after its bounds have been checked.
 A variable-length array or variably modified type where C allows none takes
 clang's error at the declarator's name (`check_input_vla_place`,
-`check_input_vla_declaration`):
+`check_input_vla_declaration`, `check_input_tag_definition`):
 - at file scope, "variable length array declaration not allowed at file
   scope", or "variably modified type declaration …" where the declared type
   is no array (`int (*p)[n]`);
@@ -885,8 +885,14 @@ does: the graph's cast follows a comma of the captured bounds
 evaluating the bound again. In an unevaluated `sizeof` operand the bound isn't
 evaluated.
 
-Differences left: a member's error still stops the reader, where clang marks
-the field and its record invalid. A warning inside a `sizeof` or `typeof`
+A variably modified member's bound is read without a runtime capture. Its
+comma warnings are retained, the field and record are marked invalid, and
+later members and declarations still receive diagnostics (#2252). Ordinary
+references to the invalid field produce no extra error.
+
+Differences left include statement expressions in rejected member bounds,
+and constant evaluation after a reference to an invalid field or a query of
+the invalid record's offsets. A warning inside a `sizeof` or `typeof`
 operand of variable array type (`sizeof(*(int (*)[(1, n)])v)`'s comma) is given
 once, where clang, which transforms that operand again as potentially
 evaluated, gives it twice.
@@ -9279,7 +9285,12 @@ spelled as its initializer spells it (`'T' (aka 'int')`), once a declaration,
 as clang's comparison of its declarators stops there
 (`CheckInputReader.declaration_deduced_first`). The later declarator is
 invalid, its uses quiet (`check_input_invalid_declare`), and the reader goes
-on past the error. A variably modified deduced
+on past the error. A nullability specifier on `__auto_type` checks the
+deduced base before the declaration applies its own qualifiers. If that base
+isn't a pointer, the diagnostic names its type and points to the specifier.
+A qualifier written next to `*` applies to that pointer level. The reader
+recovers the invalid declaration and continues with the next declarator.
+A variably modified deduced
 type is the initializer's, whose sizes its own declaration evaluated, and the
 declaration evaluates none, as clang's doesn't (`__auto_type p = &vla;`); a
 cast to a variably modified type in the initializer evaluates its bounds once,
@@ -9362,6 +9373,8 @@ GNU restrict spellings, macros, comma groups and later independent errors.
 Atomic pointer initializers also cover nested pointers, pointer qualifiers,
 unconverted source types and typedefs, mixed valid/invalid comma declarators,
 quiet uses of invalid bindings and expression warnings after the recovered error.
+Nullability fixtures cover its four keyword spellings, deduced types with
+typedef names, pointers with qualifiers on either level, and grouped recovery.
 Missing initializers retain both errors, and `typeof` assertions check the
 recovered atomic types. Accepted neighboring atomic and restricted-pointer
 declarations check that deduction and emission remain valid; C23 constexpr

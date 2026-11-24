@@ -1,0 +1,1 @@
+int f(x)struct S{int a;}x;{struct S t=x;return t.a;}

@@ -614,13 +614,13 @@ static bool tier0_vf_build(Tier0VfTally* tally, const Tier0Tables* tables, Arena
         ready = tier0_vf_expect(tally, check.error == TIER0_OK, "incoming metadata and address-only special locals validate", kind * 2 + path);
         if (ready)
         {
-            code[path] = path == 0 ? tier0_compile_scalar(&streams[path].function, arena) : tier0_compile(&streams[path].function, arena);
+            code[path] = tier0_compile(&streams[path].function, arena);
             ready = tier0_vf_expect(tally, code[path].error == TIER0_OK, "compile actual incoming variadic frame", kind * 2 + path);
         }
     }
     if (ready)
     {
-        ready = tier0_vf_expect(tally, tier0_vf_same(code, code + 1), "scalar and vector callees have identical complete logical output", kind);
+        ready = tier0_vf_expect(tally, tier0_vf_same(code, code + 1), "both publishers' callees compile to identical complete logical output", kind);
     }
     for (uint32_t path = 0; ready && path < 2; path += 1)
     {
@@ -935,20 +935,20 @@ static void tier0_vf_null(Tier0VfTally* tally, Arena* arena)
     Tier0Function explicit_null = omitted;
     explicit_null.incoming_variadic = NULL;
     const uint64_t mark = arena->length;
-    const Tier0Code scalar = tier0_compile_scalar(&omitted, arena);
-    const Tier0Code vector = tier0_compile(&explicit_null, arena);
+    const Tier0Code omitted_code = tier0_compile(&omitted, arena);
+    const Tier0Code null_code = tier0_compile(&explicit_null, arena);
     const X86Instruction expected =
     {
         .form = X86_FORM_RET,
     };
-    bool ready = tier0_vf_expect(tally, tier0_validate(&omitted).error == TIER0_OK && tier0_vf_same(&scalar, &vector) && scalar.error == TIER0_OK &&
-        scalar.count == 1 && scalar.branch_count == 0 && scalar.reference_count == 0 && memcmp(scalar.records, &expected, sizeof(expected)) == 0,
+    bool ready = tier0_vf_expect(tally, tier0_validate(&omitted).error == TIER0_OK && tier0_vf_same(&omitted_code, &null_code) && omitted_code.error == TIER0_OK &&
+        omitted_code.count == 1 && omitted_code.branch_count == 0 && omitted_code.reference_count == 0 && memcmp(omitted_code.records, &expected, sizeof(expected)) == 0,
         "omitted and explicit null incoming metadata preserve the original RET-only record stream", 0);
     if (ready)
     {
         uint8_t bytes[2][BUSTER_X86_ENCODER_CAPACITY(1)] = { 0 };
-        const int64_t a = x86_encode(scalar.records, 1, bytes[0], sizeof(bytes[0]), NULL, NULL);
-        const int64_t b = x86_encode(vector.records, 1, bytes[1], sizeof(bytes[1]), NULL, NULL);
+        const int64_t a = x86_encode(omitted_code.records, 1, bytes[0], sizeof(bytes[0]), NULL, NULL);
+        const int64_t b = x86_encode(null_code.records, 1, bytes[1], sizeof(bytes[1]), NULL, NULL);
         tier0_vf_expect(tally, a == 1 && b == 1 && bytes[0][0] == 0xc3 && bytes[1][0] == 0xc3,
             "default ordinary frame remains exactly its independent original C3 byte", 0);
     }
@@ -1015,17 +1015,17 @@ static void tier0_vf_null(Tier0VfTally* tally, Arena* arena)
     };
     Tier0Function ordinary_null = ordinary;
     ordinary_null.incoming_variadic = NULL;
-    const Tier0Code ordinary_scalar = tier0_compile_scalar(&ordinary, arena);
-    const Tier0Code ordinary_vector = tier0_compile(&ordinary_null, arena);
-    ready = tier0_vf_expect(tally, tier0_validate(&ordinary).error == TIER0_OK && tier0_vf_same(&ordinary_scalar, &ordinary_vector) &&
-        ordinary_scalar.error == TIER0_OK && ordinary_scalar.count == BUSTER_ARRAY_LENGTH(frame_records) && ordinary_scalar.branch_count == 0 &&
-        ordinary_scalar.reference_count == 0 && memcmp(ordinary_scalar.records, frame_records, sizeof(frame_records)) == 0,
+    const Tier0Code ordinary_code = tier0_compile(&ordinary, arena);
+    const Tier0Code ordinary_null_code = tier0_compile(&ordinary_null, arena);
+    ready = tier0_vf_expect(tally, tier0_validate(&ordinary).error == TIER0_OK && tier0_vf_same(&ordinary_code, &ordinary_null_code) &&
+        ordinary_code.error == TIER0_OK && ordinary_code.count == BUSTER_ARRAY_LENGTH(frame_records) && ordinary_code.branch_count == 0 &&
+        ordinary_code.reference_count == 0 && memcmp(ordinary_code.records, frame_records, sizeof(frame_records)) == 0,
         "ordinary eight-byte memory-local frame retains independently specified old records under default/null metadata", 0);
     if (ready)
     {
         uint8_t bytes[2][BUSTER_X86_ENCODER_CAPACITY(BUSTER_ARRAY_LENGTH(frame_records))] = { 0 };
-        const int64_t a = x86_encode(ordinary_scalar.records, ordinary_scalar.count, bytes[0], sizeof(bytes[0]), NULL, NULL);
-        const int64_t b = x86_encode(ordinary_vector.records, ordinary_vector.count, bytes[1], sizeof(bytes[1]), NULL, NULL);
+        const int64_t a = x86_encode(ordinary_code.records, ordinary_code.count, bytes[0], sizeof(bytes[0]), NULL, NULL);
+        const int64_t b = x86_encode(ordinary_null_code.records, ordinary_null_code.count, bytes[1], sizeof(bytes[1]), NULL, NULL);
         tier0_vf_expect(tally, a == sizeof(frame_bytes) && b == sizeof(frame_bytes) &&
             memcmp(bytes[0], frame_bytes, sizeof(frame_bytes)) == 0 && memcmp(bytes[1], frame_bytes, sizeof(frame_bytes)) == 0,
             "ordinary null-metadata frame preserves the exact independent thirteen-byte baseline encoding", 0);
@@ -1099,12 +1099,11 @@ static void tier0_vf_invalid(Tier0VfTally* tally, Arena* arena)
             bad.stack_bytes = INT32_MAX & ~7u;
         }
         function.incoming_variadic = &bad;
-        for (uint32_t path = 0; path < 2; path += 1)
         {
             const uint64_t mark = arena->length;
-            const Tier0Code code = path == 0 ? tier0_compile_scalar(&function, arena) : tier0_compile(&function, arena);
-            tier0_vf_expect(tally, code.error == TIER0_ERROR_UNSUPPORTED && arena->length == mark,
-                "invalid incoming ABI bounds reject both compilation paths transactionally", variant * 2 + path);
+            const Tier0Code code = tier0_compile(&function, arena);
+            tier0_vf_expect(tally, code.error == TIER0_ERROR_UNSUPPORTED && arena->length == mark, "invalid incoming ABI bounds reject the compile transactionally",
+                variant);
         }
     }
     function.incoming_variadic = &incoming;
@@ -1176,12 +1175,11 @@ static void tier0_vf_invalid(Tier0VfTally* tally, Arena* arena)
         locations[6].stack_offset = variant == 1 ? 1 : variant == 2 ? 8 : 0;
         tier0_vf_expect(tally, tier0_validate(&function).error != TIER0_OK,
             "incoming stack parameter metadata rejects omitted, unaligned and out-of-bounds named slots", variant);
-        for (uint32_t path = 0; path < 2; path += 1)
         {
             const uint64_t mark = arena->length;
-            const Tier0Code code = path == 0 ? tier0_compile_scalar(&function, arena) : tier0_compile(&function, arena);
+            const Tier0Code code = tier0_compile(&function, arena);
             tier0_vf_expect(tally, code.error == TIER0_ERROR_UNSUPPORTED && arena->length == mark,
-                "both compilers refuse inconsistent named-stack metadata without publishing output", variant * 2 + path);
+                "the compile refuses inconsistent named-stack metadata without publishing output", variant);
         }
     }
 }
@@ -1244,14 +1242,12 @@ static void tier0_vf_guards(Tier0VfTally* tally, Arena* arena)
         };
         const uint64_t mark = arena->length;
         const Tier0Check check = tier0_validate(&function);
-        const Tier0Code scalar = check.error == TIER0_OK ? tier0_compile_scalar(&function, arena) : (Tier0Code){ .error = TIER0_ERROR_INVALID };
-        const Tier0Code vector = check.error == TIER0_OK ? tier0_compile(&function, arena) : (Tier0Code){ .error = TIER0_ERROR_INVALID };
-        tier0_vf_expect(tally, check.error == TIER0_OK && scalar.error == TIER0_OK && tier0_vf_same(&scalar, &vector),
-            "both paths read only exact logical metadata, entry and local slices", 0);
+        const Tier0Code code = check.error == TIER0_OK ? tier0_compile(&function, arena) : (Tier0Code){ .error = TIER0_ERROR_INVALID };
+        tier0_vf_expect(tally, check.error == TIER0_OK && code.error == TIER0_OK && x86_validate(code.records, code.count) == code.count,
+            "the compile reads only exact logical metadata, entry and local slices", 0);
         arena_pop_to(arena, mark);
         uint8_t bytes[128];
         memset(bytes, 0xa5, sizeof(bytes));
-        for (uint32_t path = 0; path < 2; path += 1)
         {
             Arena empty =
             {
@@ -1259,14 +1255,14 @@ static void tier0_vf_guards(Tier0VfTally* tally, Arena* arena)
                 .capacity = sizeof(bytes),
                 .length = sizeof(bytes),
             };
-            const Tier0Code code = path == 0 ? tier0_compile_scalar(&function, &empty) : tier0_compile(&function, &empty);
+            const Tier0Code code = tier0_compile(&function, &empty);
             bool unchanged = true;
             for (uint32_t byte = 0; byte < sizeof(bytes); byte += 1)
             {
                 unchanged &= bytes[byte] == 0xa5;
             }
             tier0_vf_expect(tally, code.error == TIER0_ERROR_MEMORY && empty.length == sizeof(bytes) && unchanged,
-                "incoming frame output exhaustion preserves prior arena length and bytes", path);
+                "incoming frame output exhaustion preserves prior arena length and bytes", 0);
         }
     }
     for (uint32_t view = 0; view < 6; view += 1)

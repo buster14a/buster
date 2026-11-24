@@ -51,7 +51,7 @@ static bool cbuiltin_rounds_test_contract(const CBuiltinRoundsHelper* helper)
     return result;
 }
 
-static bool cbuiltin_rounds_test_map(CBuiltinRoundsTestTally* tally, const CBuiltinRoundsHelper* helper, Tier0Code* caller, uint32_t path, CBuiltinRoundsTestProgram* program)
+static bool cbuiltin_rounds_test_map(CBuiltinRoundsTestTally* tally, const CBuiltinRoundsHelper* helper, Tier0Code* caller, uint32_t item, CBuiltinRoundsTestProgram* program)
 {
     const uint64_t helper_capacity = BUSTER_X86_ENCODER_CAPACITY(helper->code.count);
     const uint64_t caller_offset = (helper_capacity + 15) & ~UINT64_C(15);
@@ -59,11 +59,11 @@ static bool cbuiltin_rounds_test_map(CBuiltinRoundsTestTally* tally, const CBuil
     const uint64_t pages = (capacity + BUSTER_CBUILTIN_ROUNDS_TEST_PAGE - 1) & ~(uint64_t)(BUSTER_CBUILTIN_ROUNDS_TEST_PAGE - 1);
     program->mapping_bytes = pages + BUSTER_CBUILTIN_ROUNDS_TEST_PAGE;
     program->mapping = mmap(0, program->mapping_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    bool result = cbuiltin_rounds_test_expect(tally, program->mapping != MAP_FAILED, "native mapping", path);
+    bool result = cbuiltin_rounds_test_expect(tally, program->mapping != MAP_FAILED, "native mapping", item);
     if (result)
     {
         const int64_t encoded = x86_encode(helper->code.records, helper->code.count, program->mapping, helper_capacity, NULL, NULL);
-        result = cbuiltin_rounds_test_expect(tally, encoded > 0, "helper encoding", path);
+        result = cbuiltin_rounds_test_expect(tally, encoded > 0, "helper encoding", item);
         program->entry = program->mapping;
         program->byte_count = encoded > 0 ? (uint32_t)encoded : 0;
         if (result && caller == NULL)
@@ -81,12 +81,12 @@ static bool cbuiltin_rounds_test_map(CBuiltinRoundsTestTally* tally, const CBuil
             result = cbuiltin_rounds_test_expect(tally, sized.error == BRANCH_SIZING_OK && described == UNWIND_OK && proof == UNWIND_OK &&
                 memcmp(&published, &proven_frame, sizeof(published)) == 0 && published.frame_size == 8 && published.event_count == 2 &&
                 published.saved == 0 && published.pointer == 0 && published.offsets[0] == 4 && published.offsets[1] == program->byte_count - 1,
-                "rounding-mode helper CFA matches the records' unwind proof", path);
+                "rounding-mode helper CFA matches the records' unwind proof", item);
             sized_code.frame_size = 0;
             UnwindFunction wrong = { 0 };
             const UnwindError wrong_frame = unwind_tier0_frame(&sized_code, offsets, program->byte_count, &wrong);
             result = cbuiltin_rounds_test_expect(tally, wrong_frame != UNWIND_OK || memcmp(&wrong, &proven_frame, sizeof(wrong)) != 0,
-                "missing rounding-mode reservation disagrees with the record proof", path) && result;
+                "missing rounding-mode reservation disagrees with the record proof", item) && result;
         }
         if (result && caller != NULL)
         {
@@ -94,13 +94,13 @@ static bool cbuiltin_rounds_test_map(CBuiltinRoundsTestTally* tally, const CBuil
             const int64_t caller_bytes = x86_encode(caller->records, caller->count, program->mapping + caller_offset, capacity - caller_offset, NULL, ends);
             result = cbuiltin_rounds_test_expect(tally, caller_bytes > 0 && caller->reference_count == 1 && caller->references[0].target == 1 &&
                 caller->references[0].field == X86_FIXUP_DISPLACEMENT && caller->references[0].kind == BUSTER_LINK_FIXUP_CALL &&
-                caller->references[0].instruction < caller->count && caller->references[0].addend == 0, "real Tier 0 helper CALL reference", path);
+                caller->references[0].instruction < caller->count && caller->references[0].addend == 0, "real Tier 0 helper CALL reference", item);
             if (result)
             {
                 const LinkReference reference = caller->references[0];
                 const uint32_t distance = x86_fixup_distance(caller->records[reference.instruction].form, reference.field);
                 result = cbuiltin_rounds_test_expect(tally, distance == 4 && ends[0] >= distance && ends[0] <= (uint64_t)caller_bytes &&
-                    caller_offset + ends[0] <= INT32_MAX, "bounded relative helper displacement", path);
+                    caller_offset + ends[0] <= INT32_MAX, "bounded relative helper displacement", item);
                 if (result)
                 {
                     const int32_t displacement = -(int32_t)(caller_offset + ends[0]);
@@ -111,12 +111,12 @@ static bool cbuiltin_rounds_test_map(CBuiltinRoundsTestTally* tally, const CBuil
             }
         }
         result = cbuiltin_rounds_test_expect(tally, result && mprotect(program->mapping, pages, PROT_READ | PROT_EXEC) == 0 &&
-            mprotect(program->mapping + pages, BUSTER_CBUILTIN_ROUNDS_TEST_PAGE, PROT_NONE) == 0, "native permissions", path);
+            mprotect(program->mapping + pages, BUSTER_CBUILTIN_ROUNDS_TEST_PAGE, PROT_NONE) == 0, "native permissions", item);
     }
     return result;
 }
 
-static bool cbuiltin_rounds_test_callers(CBuiltinRoundsTestTally* tally, Arena* arena, const CBuiltinRoundsHelper* helper, CBuiltinRoundsTestProgram programs[2])
+static bool cbuiltin_rounds_test_caller(CBuiltinRoundsTestTally* tally, Arena* arena, const CBuiltinRoundsHelper* helper, CBuiltinRoundsTestProgram* program)
 {
     const uint64_t mark = arena->length;
     const uint8_t kinds[] = { BUSTER_TYPED_CALL, BUSTER_TYPED_RETURN };
@@ -152,14 +152,14 @@ static bool cbuiltin_rounds_test_callers(CBuiltinRoundsTestTally* tally, Arena* 
     };
     const Tier0Check checked = tier0_validate(&function);
     bool result = cbuiltin_rounds_test_expect(tally, checked.error == TIER0_OK, checked.rule != NULL ? checked.rule : "Tier 0 caller validation", 0);
-    for (uint32_t path = 0; result && path < 2; path += 1)
+    if (result)
     {
-        Tier0Code code = path == 0 ? tier0_compile_scalar(&function, arena) : tier0_compile(&function, arena);
+        Tier0Code code = tier0_compile(&function, arena);
         result = cbuiltin_rounds_test_expect(tally, code.error == TIER0_OK && code.branch_count == 0 && code.reference_count == 1 &&
-            x86_validate(code.records, code.count) == code.count, "Tier 0 caller compiled to valid records", path);
+            x86_validate(code.records, code.count) == code.count, "Tier 0 caller compiled to valid records", 0);
         if (result)
         {
-            result = cbuiltin_rounds_test_map(tally, helper, &code, path, programs + path);
+            result = cbuiltin_rounds_test_map(tally, helper, &code, 0, program);
         }
     }
     arena_pop_to(arena, mark);
@@ -210,7 +210,7 @@ static __attribute__((no_sanitize("function"))) void cbuiltin_rounds_test_words(
 }
 
 // Generated entry points have no Clang function-type prefix.
-static __attribute__((no_sanitize("function"))) void cbuiltin_rounds_test_native(CBuiltinRoundsTestTally* tally, CBuiltinRoundsTestProgram direct[2], CBuiltinRoundsTestProgram callers[2])
+static __attribute__((no_sanitize("function"))) void cbuiltin_rounds_test_native(CBuiltinRoundsTestTally* tally, const CBuiltinRoundsTestProgram* direct, const CBuiltinRoundsTestProgram* caller)
 {
     const uint16_t original_control = cbuiltin_rounds_test_control();
     const uint32_t original_mxcsr = _mm_getcsr();
@@ -230,9 +230,8 @@ static __attribute__((no_sanitize("function"))) void cbuiltin_rounds_test_native
             _mm_setcsr(mxcsr);
             const int oracle = cbuiltin_rounds_test_clang();
             cbuiltin_rounds_test_expect(tally, oracle == (int)cbuiltin_rounds_test_expected[x87], "Clang uses x87 rounding when controls diverge", x87 * 4 + sse);
-            for (uint32_t path = 0; path < 2; path += 1)
             {
-                const uint8_t* entries[] = { direct[path].entry, callers[path].entry };
+                const uint8_t* entries[] = { direct->entry, caller->entry };
                 for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(entries); i += 1)
                 {
                     uint32_t (*query)(void) = (uint32_t (*)(void))(void*)entries[i];
@@ -241,7 +240,7 @@ static __attribute__((no_sanitize("function"))) void cbuiltin_rounds_test_native
                     __asm__ volatile("mov %%rsp,%0" : "=r"(before_sp) : : "memory");
                     const uint32_t answer = query();
                     __asm__ volatile("fnstsw %1\n\tmov %%rsp,%0" : "=r"(after_sp), "=m"(after_status) : : "memory");
-                    const uint32_t item = ((x87 * 4 + sse) * 2 + path) * 2 + i;
+                    const uint32_t item = (x87 * 4 + sse) * 2 + i;
                     cbuiltin_rounds_test_expect(tally, answer == (uint32_t)oracle, "native leaf or ordinary helper CALL matches Clang", item);
                     // FNSTCW leaves only the condition codes C0..C3 undefined.
                     cbuiltin_rounds_test_expect(tally, before_sp == after_sp && ((after_status ^ status) & 0xb8ff) == 0 &&
@@ -343,24 +342,18 @@ static int run_builtin_rounds_helper_tests(int argc, char** argv)
         cbuiltin_rounds_test_guards(&tally);
         Arena arena = arena_reserve(UINT64_C(1) << 24);
         const CBuiltinRoundsHelper helper = cbuiltin_rounds_helper(CBUILTIN_FLT_ROUNDS, &arena);
-        CBuiltinRoundsTestProgram direct[2] = { 0 };
-        CBuiltinRoundsTestProgram callers[2] = { 0 };
+        CBuiltinRoundsTestProgram direct = { 0 };
+        CBuiltinRoundsTestProgram caller = { 0 };
         const X86Target baseline = { 0 };
         uint8_t allowed[X86_FORM_COUNT];
         x86_target_forms(&baseline, allowed);
         bool valid = cbuiltin_rounds_test_expect(&tally, cbuiltin_rounds_test_contract(&helper) && x86_validate(helper.code.records, helper.code.count) == helper.code.count &&
             x86_target_validate(allowed, helper.code.records, helper.code.count) == helper.code.count, "baseline record and ABI contracts", 0);
-        for (uint32_t path = 0; valid && path < 2; path += 1)
-        {
-            valid = cbuiltin_rounds_test_map(&tally, &helper, NULL, path, direct + path);
-        }
-        valid = valid && cbuiltin_rounds_test_callers(&tally, &arena, &helper, callers);
+        valid = valid && cbuiltin_rounds_test_map(&tally, &helper, NULL, 0, &direct);
+        valid = valid && cbuiltin_rounds_test_caller(&tally, &arena, &helper, &caller);
         if (valid)
         {
-            cbuiltin_rounds_test_expect(&tally, helper.code.count <= 9 && direct[0].byte_count <= 27, "baseline helper instruction and byte budgets", direct[0].byte_count);
-            valid = cbuiltin_rounds_test_expect(&tally, direct[0].byte_count == direct[1].byte_count && callers[0].byte_count == callers[1].byte_count &&
-                memcmp(direct[0].entry, direct[1].entry, direct[0].byte_count) == 0 && memcmp(callers[0].entry, callers[1].entry, callers[0].byte_count) == 0,
-                "scalar/vector helper and patched caller bytes", 0);
+            cbuiltin_rounds_test_expect(&tally, helper.code.count <= 9 && direct.byte_count <= 27, "baseline helper instruction and byte budgets", direct.byte_count);
         }
         CBuiltinRoundsTestTally* shared = MAP_FAILED;
         if (valid)
@@ -381,7 +374,7 @@ static int run_builtin_rounds_helper_tests(int argc, char** argv)
                 }
                 alarm(5);
                 cbuiltin_rounds_test_words(shared, &helper);
-                cbuiltin_rounds_test_native(shared, direct, callers);
+                cbuiltin_rounds_test_native(shared, &direct, &caller);
                 _exit(shared->failures == 0 ? 0 : 1);
             }
             int status = 0;
@@ -394,16 +387,13 @@ static int run_builtin_rounds_helper_tests(int argc, char** argv)
             tally.failures += shared->failures;
             munmap(shared, sizeof(*shared));
         }
-        for (uint32_t path = 0; path < 2; path += 1)
+        if (direct.mapping != NULL && direct.mapping != MAP_FAILED)
         {
-            if (direct[path].mapping != NULL && direct[path].mapping != MAP_FAILED)
-            {
-                munmap(direct[path].mapping, direct[path].mapping_bytes);
-            }
-            if (callers[path].mapping != NULL && callers[path].mapping != MAP_FAILED)
-            {
-                munmap(callers[path].mapping, callers[path].mapping_bytes);
-            }
+            munmap(direct.mapping, direct.mapping_bytes);
+        }
+        if (caller.mapping != NULL && caller.mapping != MAP_FAILED)
+        {
+            munmap(caller.mapping, caller.mapping_bytes);
         }
         arena_release(&arena);
         printf("test-builtin-rounds-helper: %" PRIu64 " checks, %" PRIu64 " failed\n", tally.checks, tally.failures);

@@ -286,7 +286,7 @@ static void tier1_wide_vector_program(Tier1WideTest* test, const Tier1WideVector
         for (uint32_t run = 0; piece_ok && pieces[w] == 16 && run < 2; run += 1)
         {
             const uint64_t before = test->native_runs;
-            tier1_wide_test_native(test, fixture->name, &optimized.function, &dominance, true, run != 0, inputs, counts, expected);
+            tier1_wide_test_native(test, fixture->name, &optimized.function, &dominance, run != 0, inputs, counts, expected);
             test->vector_native_runs += test->native_runs - before;
             test->native_runs = before;
         }

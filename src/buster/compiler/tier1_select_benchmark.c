@@ -4,7 +4,7 @@
 // Original frozen synthetic IR -> selection -> effective uses -> liveness -> allocation -> frame/fragments -> encoder.
 // Separate selection and complete-pipeline rows include verification and arena resets. No source/corpus or generated
 // run-time performance is inferred. Timing uses elapsed nanoseconds and invariant TSC ticks, explicitly not core cycles.
-// The 9700X invocation takes its shared per-run lock and CPU 2 pin. --only and --after-scalar expose both power states.
+// The 9700X invocation takes its shared per-run lock and CPU 2 pin.
 
 #include "host_isa.h"
 #include <stdint.h>
@@ -198,7 +198,7 @@ static bool tier1_select_bench_corpus(Tier1SelectBench* bench, Arena* input, uin
     return valid;
 }
 
-static bool tier1_select_bench_run(Tier1SelectBench* bench, bool vector, bool complete, bool verify)
+static bool tier1_select_bench_run(Tier1SelectBench* bench, bool complete, bool verify)
 {
     bool valid = true;
     bench->records = 0;
@@ -217,7 +217,7 @@ static bool tier1_select_bench_run(Tier1SelectBench* bench, bool vector, bool co
         valid = tier1_select_plan(&bench->functions[f], 0, &bench->output, &bench->scratch, &plan, &node) == TIER1_SELECT_OK;
         if (valid && complete)
         {
-            const Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .vector = vector, .rematerialize = true };
+            const Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .rematerialize = true };
             Tier1EmitResult emitted;
             valid = tier1_emit_function(&plan, &options, bench->allowed, &bench->output, &bench->scratch, &emitted, &node) == TIER1_EMIT_OK;
             if (valid)
@@ -257,7 +257,7 @@ static bool tier1_select_bench_run(Tier1SelectBench* bench, bool vector, bool co
         }
         else
         {
-            fprintf(stderr, "benchmark-tier1-select: %s pipeline failed at function %u, node %u\n", vector ? "vector" : "scalar", f, node);
+            fprintf(stderr, "benchmark-tier1-select: pipeline failed at function %u, node %u\n", f, node);
         }
         arena_pop_to(&bench->output, 0);
         arena_pop_to(&bench->scratch, 0);
@@ -286,8 +286,6 @@ int run_tier1_select_benchmark(int argc, char** argv)
 {
     uint32_t steps = 256;
     uint32_t functions = 32;
-    uint32_t after_scalar = 0;
-    uint32_t only = 2;
     bool valid = true;
     for (int argument = 1; valid && argument < argc; argument += 1)
     {
@@ -299,16 +297,6 @@ int run_tier1_select_benchmark(int argc, char** argv)
         {
             valid = tier1_select_bench_number(argv[++argument], 256, &functions) && functions != 0;
         }
-        else if (strcmp(argv[argument], "--after-scalar") == 0 && argument + 1 < argc)
-        {
-            valid = tier1_select_bench_number(argv[++argument], 10000, &after_scalar);
-        }
-        else if (strcmp(argv[argument], "--only") == 0 && argument + 1 < argc)
-        {
-            argument += 1;
-            only = strcmp(argv[argument], "scalar") == 0 ? 0 : strcmp(argv[argument], "vector") == 0 ? 1 : 3;
-            valid = only != 3;
-        }
         else
         {
             valid = false;
@@ -317,7 +305,7 @@ int run_tier1_select_benchmark(int argc, char** argv)
     int result = 1;
     if (!valid)
     {
-        fprintf(stderr, "usage: benchmark-tier1-select [--steps N] [--functions N] [--only scalar|vector] [--after-scalar MS]\n");
+        fprintf(stderr, "usage: benchmark-tier1-select [--steps N] [--functions N]\n");
     }
     else
     {
@@ -334,55 +322,37 @@ int run_tier1_select_benchmark(int argc, char** argv)
         x86_target_forms(&target, allowed);
         bench.allowed = allowed;
         printf("synthetic IR; complete = plan + liveness + required locations + allocation + frame + fragments + branch sizing + encode; TSC ticks are not core cycles\n");
-        printf("shape,phase,path,IR,records,bytes,unknown_costs,spill_slots,stores,reloads,rematerializations,retained_peak,scratch_liveness_transition_peak,ns/IR,TSC_ticks/IR\n");
+        printf("shape,phase,IR,records,bytes,unknown_costs,spill_slots,stores,reloads,rematerializations,retained_peak,scratch_liveness_transition_peak,ns/IR,TSC_ticks/IR\n");
         for (uint32_t shape = 0; valid && shape < 3; shape += 1)
         {
             bench.instruction_count = 0;
             valid = tier1_select_bench_corpus(&bench, &input, steps, shape);
             for (uint32_t phase = 0; valid && phase < 2; phase += 1)
             {
-                double nanoseconds[2][BUSTER_TIER1_SELECT_BENCH_PASSES] = {0};
-                double ticks[2][BUSTER_TIER1_SELECT_BENCH_PASSES] = {0};
-                valid = tier1_select_bench_run(&bench, false, phase != 0, true) && tier1_select_bench_run(&bench, true, phase != 0, true);
+                double nanoseconds[BUSTER_TIER1_SELECT_BENCH_PASSES] = {0};
+                double ticks[BUSTER_TIER1_SELECT_BENCH_PASSES] = {0};
+                valid = tier1_select_bench_run(&bench, phase != 0, true);
                 for (uint32_t pass = 0; valid && pass < BUSTER_TIER1_SELECT_BENCH_PASSES; pass += 1)
                 {
-                    for (uint32_t order = 0; valid && order < 2; order += 1)
+                    const uint64_t start = tier1_select_bench_time();
+                    const uint64_t first_tick = tier1_select_bench_ticks();
+                    uint32_t repetitions = 0;
+                    uint64_t end;
+                    do
                     {
-                        const uint32_t path = order ^ (pass & 1);
-                        if (only == 2 || only == path)
-                        {
-                            if (path != 0 && after_scalar != 0)
-                            {
-                                const uint64_t end = tier1_select_bench_time() + (uint64_t)after_scalar * 1000000;
-                                do
-                                {
-                                    valid = tier1_select_bench_run(&bench, false, phase != 0, false);
-                                } while (valid && tier1_select_bench_time() < end);
-                            }
-                            const uint64_t start = tier1_select_bench_time();
-                            const uint64_t first_tick = tier1_select_bench_ticks();
-                            uint32_t repetitions = 0;
-                            uint64_t end;
-                            do
-                            {
-                                valid = tier1_select_bench_run(&bench, path != 0, phase != 0, false);
-                                repetitions += 1;
-                                end = tier1_select_bench_time();
-                            } while (valid && end - start < BUSTER_TIER1_SELECT_BENCH_SAMPLE_NS);
-                            const uint64_t last_tick = tier1_select_bench_ticks();
-                            const double instructions = (double)bench.instruction_count * repetitions;
-                            nanoseconds[path][pass] = (double)(end - start) / instructions;
-                            ticks[path][pass] = (double)(last_tick - first_tick) / instructions;
-                        }
-                    }
+                        valid = tier1_select_bench_run(&bench, phase != 0, false);
+                        repetitions += 1;
+                        end = tier1_select_bench_time();
+                    } while (valid && end - start < BUSTER_TIER1_SELECT_BENCH_SAMPLE_NS);
+                    const uint64_t last_tick = tier1_select_bench_ticks();
+                    const double instructions = (double)bench.instruction_count * repetitions;
+                    nanoseconds[pass] = (double)(end - start) / instructions;
+                    ticks[pass] = (double)(last_tick - first_tick) / instructions;
                 }
-                for (uint32_t path = 0; valid && path < 2; path += 1)
+                if (valid)
                 {
-                    if (only == 2 || only == path)
-                    {
-                        valid = tier1_select_bench_run(&bench, path != 0, phase != 0, false);
-                        printf("%s,%s,%s,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%.3f,%.3f\n", shape == 0 ? "chain" : shape == 1 ? "wide" : "pressure", phase == 0 ? "selection" : "complete", path == 0 ? "scalar" : "vector", bench.instruction_count, bench.records, bench.code_bytes, bench.unknown_costs, bench.spill_slots, bench.spill_stores, bench.spill_loads, bench.rematerializations, bench.peak_retained, bench.peak_scratch, tier1_select_bench_median(nanoseconds[path]), tier1_select_bench_median(ticks[path]));
-                    }
+                    valid = tier1_select_bench_run(&bench, phase != 0, false);
+                    printf("%s,%s,%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%" PRIu64 ",%.3f,%.3f\n", shape == 0 ? "chain" : shape == 1 ? "wide" : "pressure", phase == 0 ? "selection" : "complete", bench.instruction_count, bench.records, bench.code_bytes, bench.unknown_costs, bench.spill_slots, bench.spill_stores, bench.spill_loads, bench.rematerializations, bench.peak_retained, bench.peak_scratch, tier1_select_bench_median(nanoseconds), tier1_select_bench_median(ticks));
                 }
             }
             arena_pop_to(&input, 0);

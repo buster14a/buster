@@ -1,0 +1,52 @@
+buster-fixtures v1 checker-sources
+# check_test_overload_sources's source fixtures (c_check_overload_test.c; #2053): ID, FILE, FLAGS, NAME, tab-separated.
+0001	0001.c	-	overload tgmath selection and unavailable fallback
+0002	0002.c	rejected	overload selected unavailable fallback
+0003	0003.c	-	overload exact source visibility
+0004	0004.c	-	overload lexical hiding
+0005	0005.c	-	overload nested calls use selected type
+0006	0006.c	-	overload typeof uses selected type
+0007	0007.c	-	overload common parameter redeclaration
+0008	0008.c	-	indexed aligned parameter redeclaration
+0009	0009.c	-	indexed sibling scopes share linkage and restore outer set
+0010	0010.c	rejected	indexed sibling linkage return conflict
+0011	0011.c	rejected	indexed oldstyle returns retain earlier prototype constraint
+0012	0012.c	rejected	indexed redeclarations retain earlier definition
+0013	0013.c	rejected	indexed activation retains ordinary definition history
+0014	0014.c	rejected	indexed activation inherits ordinary unavailable history
+0015	0015.c	rejected	indexed second unmarked signature rejects
+0016	0016.c	rejected	indexed explicit linkage change rejects
+0017	0017.c	-	indexed ABI inherited across sibling scopes
+0018	0018.c	rejected	indexed explicit ABI conflict across sibling scopes
+0019	0019.c	rejected	overload changing return type rejects
+0020	0020.c	rejected	overload changing marked declaration rejects
+0021	0021.c	-	overload one unmarked signature
+0022	0022.c	rejected	overload incompatible best matches stay ambiguous
+0023	0023.c	rejected	overload prototype required
+0024	0024.c	rejected	ordinary bare ellipsis remains invalid
+0025	0025.c	rejected	overload applies only to functions
+0026	0026.c	rejected	overload cannot annotate an enumerator
+0027	0027.c	rejected	overload cannot annotate a parameter
+0028	0028.c	rejected	overload cannot annotate a record tag
+0029	0029.c	rejected	overload cannot annotate a member
+0030	0030.c	-	overload selects ordinary unmarked definition
+0031	0031.c	-	overload call in raw attribute
+0032	0032.c	-	overload zero argument call in raw attribute
+0033	0033.c	-	overload parenthesized callee
+0034	0034.c	-	overload deep pointer qualification
+0035	0035.c	-	outer overload supplies unique function argument target
+0036	0036.c	rejected	outer overload preserves ambiguous function argument targets
+0037	0037.c	-	ordinary call supplies function argument target
+0038	0038.c	-	function pointer call supplies function argument target
+0039	0039.c	-	raw outer call supplies function argument target
+0040	0040.c	-	raw cast selects exact function address
+0041	0041.c	rejected	typeof cannot choose latest overload
+0042	0042.c	-	typeof cast supplies exact overload context
+0043	0043.c	rejected	unavailable singleton in unchosen generic association
+# Which units get overload tables (#1038): a name of the attribute's inside an attribute list, in each spelling and
+# place, but no other token of that name, which gave main.c tables and left its expressions' walk scalar.
+0044	0044.c	overload-none	overload names outside attribute lists make no tables
+0045	0045.c	overload-tables	overload attribute after another in its list
+0046	0046.c	overload-tables	overload attribute with empty arguments
+0047	0047.c	overload-tables	overload standard attribute in clang's namespace
+0048	0048.c	-	unavailable selected address from a set remains usable

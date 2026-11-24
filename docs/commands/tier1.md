@@ -549,7 +549,7 @@ and kept, its value the accesses' base, where the returned sum does.
 A direct symbol's address folds into its memory operands rip-relative
 (#2573, [the selection guide](../tier1-selection.md)). `test-tier1-emit`'s
 `tier1_symbol_fold_test.c` plans a function of a direct, a GOT, a local-exec
-and an initial-exec symbol by both paths with the access column: the direct
+and an initial-exec symbol with the access column: the direct
 symbol's load, store, byte comparison and word comparison fused with a branch
 fold it from another block, no node computes its address, and the others keep
 their sequences; without the column every symbol folds and the consumer, given
@@ -557,12 +557,12 @@ it, refuses the plan. The code certifies and runs natively with its `PC32`,
 GOT and thread-pointer references resolved by the test, the comparisons'
 addends covering their immediates. Its repeated-access fixture (#2601) has the
 lowering's three symbol addresses and index extensions for three indexed
-accesses of one table in one block: every access reads the first of each, by
-both paths, and the code has one `lea` and runs natively; with the index's
+accesses of one table in one block: every access reads the first of each, and
+the code has one `lea` and runs natively; with the index's
 sign extensions, which the parameter's signed storage holds, every access
 reads the parameter itself (#2843). `tier1_extension_test.c` loads a byte, a
 word or a doubleword with two uses, a comparison and an extension to I64
-that a select reads, in one block and across a branch, by both paths: the
+that a select reads, in one block and across a branch: the
 select reads the load wherever its storage holds the extension, a word's
 sign extension stays its own, and a load the extension alone reads is its
 `movsx`'s operand; each runs natively against its oracle. `tests/driver/tier1_symbols.c` is the

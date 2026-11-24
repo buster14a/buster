@@ -6,7 +6,7 @@
 // while other values live past them there. The straight-line consumer takes p0 op c + p2 op' c' + p2 + p3 + p0 + p1:
 // p2 arrives in rdx, where it lives past both divisions, and is itself the second's dividend. The CFG consumer takes a
 // loop's digit sum, s += n op c, n = n op' c while n != 0, then s + p1, its phis' values wherever the allocation puts
-// them. Each runs at both widths, by both paths, with constants rematerialized and not, and with every register and
+// them. Each runs at both widths, with constants rematerialized and not, and with every register and
 // with the parameters' and rax alone, against an oracle of C's own division that reads only the inputs, in a bounded
 // child (tier1_divide_tests).
 
@@ -174,9 +174,9 @@ static uint64_t tier1_divide_expected(const Tier1DivideCase* entry, uint32_t wid
     return result;
 }
 
-// One fixture by one path and one set of options: its divisions their reciprocals, its consumer the expected one, and
+// One fixture by one set of options: its divisions their reciprocals, its consumer the expected one, and
 // its code run on the samples. Returns how many of the fixed registers' values it saved.
-static uint32_t tier1_divide_compile(Tier1EmitTest* test, const Tier1DivideCase* entry, uint32_t width, bool loop, bool vector, bool rematerialize, uint32_t register_mask)
+static uint32_t tier1_divide_compile(Tier1EmitTest* test, const Tier1DivideCase* entry, uint32_t width, bool loop, bool rematerialize, uint32_t register_mask)
 {
     IrFunction function;
     const bool created = loop ? tier1_divide_loop_fixture(test, entry, width, &function) : tier1_divide_straight_fixture(test, entry, width, &function);
@@ -193,7 +193,6 @@ static uint32_t tier1_divide_compile(Tier1EmitTest* test, const Tier1DivideCase*
     const Tier1EmitOptions options = {
         .certify = true,
         .register_mask = register_mask,
-        .vector = vector,
         .rematerialize = rematerialize,
     };
     Tier1EmitResult emitted;
@@ -202,7 +201,7 @@ static uint32_t tier1_divide_compile(Tier1EmitTest* test, const Tier1DivideCase*
     tier1_emit_test_expect(test, error == TIER1_EMIT_OK && test->scratch.length == scratch_mark, "a division by a constant's reciprocal emits through its consumer");
     if (error != TIER1_EMIT_OK && planned && test->failures < 20)
     {
-        fprintf(stderr, "  division emission error=%u node=%u loop=%u width=%u vector=%u remat=%u mask=%x\n", error, node, loop, width, vector, rematerialize, register_mask);
+        fprintf(stderr, "  division emission error=%u node=%u loop=%u width=%u remat=%u mask=%x\n", error, node, loop, width, rematerialize, register_mask);
     }
     uint32_t saved = 0;
     if (error == TIER1_EMIT_OK)
@@ -269,9 +268,9 @@ static void tier1_divide_cases(Tier1EmitTest* test)
             {
                 // The loop's values in rax, rdx and the parameters' registers alone, where its dividend and sum must be.
                 const uint32_t reduced = loop != 0 ? (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDX) | (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI) : few;
-                for (uint32_t variant = 0; variant < 8; variant += 1)
+                for (uint32_t variant = 0; variant < 4; variant += 1)
                 {
-                    const uint32_t saved = tier1_divide_compile(test, &cases[c], width, loop != 0, (variant & 1) != 0, (variant & 2) != 0, (variant & 4) != 0 ? reduced : all);
+                    const uint32_t saved = tier1_divide_compile(test, &cases[c], width, loop != 0, (variant & 1) != 0, (variant & 2) != 0 ? reduced : all);
                     straight_saves += loop != 0 ? 0 : saved;
                     loop_saves += loop != 0 ? saved : 0;
                 }

@@ -1,0 +1,12 @@
+# 1 "%d/case.c"
+int a[] = {65 , __builtin_LINE()
+
+
+
+};
+int b[] = {65
+
+
+
+, 3
+};

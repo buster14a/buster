@@ -29,6 +29,8 @@ typedef enum IrOptimizeTextPass
     // LICM and GVN under #2719's pressure policy (IrLicmOptions.pressure, IrGvnOptions.pressure).
     IR_OPTIMIZE_TEXT_LICM_PRESSURE,
     IR_OPTIMIZE_TEXT_GVN_PRESSURE,
+    // SCCP, the identities and DCE, as the C driver's Tier 1 runs them (#3424).
+    IR_OPTIMIZE_TEXT_IDENTITIES,
 } IrOptimizeTextPass;
 
 typedef struct IrOptimizeTextFixture IrOptimizeTextFixture;
@@ -70,6 +72,9 @@ static const IrOptimizeTextFixture ir_optimize_text_fixtures[] = {
     { .name = "licm-pressure-budget", .pass = IR_OPTIMIZE_TEXT_LICM_PRESSURE, .effects = true },
     // #2719: a free value is never merged, a truth value only within its block, a costly one across blocks.
     { .name = "gvn-pressure", .pass = IR_OPTIMIZE_TEXT_GVN_PRESSURE, .effects = true },
+    // #3424: an `and` of an undef is zero, not the undef: SROA's eightbyte with a field cleared in its padding's undef,
+    // set on one path, which the join's phi reads. The interpreter's undef is 0 and 1 by turns.
+    { .name = "identity-undef-and", .pass = IR_OPTIMIZE_TEXT_IDENTITIES, .effects = true },
 };
 
 // A fixture's diagnostic names the pair, so that a failure points at the file to read without a printout of the
@@ -143,8 +148,10 @@ static bool ir_optimize_text_parse(String8 text, Arena* output, Arena* twin, Are
 }
 
 // The pass by the requested twin. `change` counts the pass's own transformations, as its result reports them, so a
-// fixture that stops exercising its pass fails instead of passing on an unchanged function.
-static IrCheck ir_optimize_text_transform(const IrOptimizeTextFixture* fixture, const IrFunction* input, Arena* output, Arena* scratch, bool scalar, IrFunction* function, uint64_t* change)
+// fixture that stops exercising its pass fails instead of passing on an unchanged function. `validated` gives LICM and
+// GVN their verified input's preparation (#2719, IrOptimizeWork.validated), which Tier 1 runs them with.
+static IrCheck ir_optimize_text_transform(const IrOptimizeTextFixture* fixture, const IrFunction* input, Arena* output, Arena* scratch, bool scalar, bool validated, IrFunction* function,
+                                          uint64_t* change)
 {
     IrCheck check;
     IrFunction result = { 0 };
@@ -154,6 +161,7 @@ static IrCheck ir_optimize_text_transform(const IrOptimizeTextFixture* fixture, 
         IrGvnOptions options = ir_gvn_options();
         options.scalar = scalar;
         options.pressure = fixture->pass == IR_OPTIMIZE_TEXT_GVN_PRESSURE;
+        options.validated = validated;
         IrGvnResult pass = { 0 };
         check = ir_optimize_gvn(input, output, scratch, options, &pass);
         result = pass.function;
@@ -162,8 +170,8 @@ static IrCheck ir_optimize_text_transform(const IrOptimizeTextFixture* fixture, 
     else if (fixture->pass == IR_OPTIMIZE_TEXT_LICM || fixture->pass == IR_OPTIMIZE_TEXT_LICM_PRESSURE)
     {
         IrLicmOptions options = ir_licm_options();
-        options.scalar = scalar;
         options.pressure = fixture->pass == IR_OPTIMIZE_TEXT_LICM_PRESSURE;
+        options.validated = validated;
         IrLicmResult pass = { 0 };
         check = ir_optimize_licm(input, output, scratch, options, &pass);
         result = pass.function;
@@ -196,6 +204,7 @@ static IrCheck ir_optimize_text_transform(const IrOptimizeTextFixture* fixture, 
                          fixture->pass == IR_OPTIMIZE_TEXT_DCE ? BUSTER_IR_OPTIMIZE_DCE :
                          fixture->pass == IR_OPTIMIZE_TEXT_CFG ? BUSTER_IR_OPTIMIZE_CFG :
                          fixture->pass == IR_OPTIMIZE_TEXT_MEMORY ? BUSTER_IR_OPTIMIZE_MEMORY | BUSTER_IR_OPTIMIZE_DCE :
+                         fixture->pass == IR_OPTIMIZE_TEXT_IDENTITIES ? BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_IDENTITY | BUSTER_IR_OPTIMIZE_DCE :
                                                                  BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_DCE | BUSTER_IR_OPTIMIZE_CFG;
         options.path = scalar ? BUSTER_IR_OPTIMIZE_SCALAR : BUSTER_IR_OPTIMIZE_VECTOR;
         IrOptimizeResult pass = { 0 };
@@ -292,7 +301,7 @@ static void ir_optimize_text_fixture(IrOptimizeTest* test, const IrOptimizeTextF
             free(after_printed);
             IrFunction vector = { 0 };
             uint64_t vector_change = 0;
-            const IrCheck vector_check = ir_optimize_text_transform(fixture, &before, output, scratch, false, &vector, &vector_change);
+            const IrCheck vector_check = ir_optimize_text_transform(fixture, &before, output, scratch, false, false, &vector, &vector_change);
             ir_optimize_text_expect(test, vector_check.error == IR_OK, fixture->name, "the vector twin transforms the before text");
             ir_optimize_text_expect(test, vector_check.error != IR_OK || vector_change != 0, fixture->name,
                                     "the pass reports no transformation, so the fixture no longer exercises it");
@@ -331,7 +340,7 @@ static void ir_optimize_text_fixture(IrOptimizeTest* test, const IrOptimizeTextF
             arena_pop_to(twin, twin_mark);
             IrFunction scalar = { 0 };
             uint64_t scalar_change = 0;
-            const IrCheck scalar_check = ir_optimize_text_transform(fixture, &before, twin, scratch, true, &scalar, &scalar_change);
+            const IrCheck scalar_check = ir_optimize_text_transform(fixture, &before, twin, scratch, true, false, &scalar, &scalar_change);
             ir_optimize_text_expect(test, scalar_check.error == IR_OK, fixture->name, "the scalar twin transforms the before text");
             if (fixture->pass == IR_OPTIMIZE_TEXT_GVN || fixture->pass == IR_OPTIMIZE_TEXT_GVN_PRESSURE)
             {
@@ -344,6 +353,24 @@ static void ir_optimize_text_fixture(IrOptimizeTest* test, const IrOptimizeTextF
             {
                 ir_optimize_text_expect(test, scalar_check.error == IR_OK && ir_optimize_test_equal(&vector, &scalar), fixture->name,
                                         "the optimizer twins give different functions");
+            }
+            if (fixture->pass == IR_OPTIMIZE_TEXT_GVN || fixture->pass == IR_OPTIMIZE_TEXT_GVN_PRESSURE || fixture->pass == IR_OPTIMIZE_TEXT_LICM ||
+                fixture->pass == IR_OPTIMIZE_TEXT_LICM_PRESSURE)
+            {
+                // #2719: the preparation of a verified input (Tier 1's) gives the same function as the verifying one.
+                const uint64_t validated_mark = twin->length;
+                IrFunction validated = { 0 };
+                uint64_t validated_change = 0;
+                const IrCheck validated_check = ir_optimize_text_transform(fixture, &before, twin, scratch, false, true, &validated, &validated_change);
+                ir_optimize_text_expect(test, validated_check.error == IR_OK && validated_change == vector_change && ir_optimize_test_equal(&vector, &validated), fixture->name,
+                                        "the pass on a verified input's preparation gives another function");
+                arena_pop_to(twin, validated_mark);
+            }
+            if (fixture->pass == IR_OPTIMIZE_TEXT_LICM_PRESSURE)
+            {
+                // #2719: Tier 1 runs the pressure policy where its screen finds a loop that may hold no call; every
+                // fixture moves something, so the screen must find one.
+                ir_optimize_text_expect(test, ir_licm_pressure_screen(&before, scratch), fixture->name, "the pressure screen passes over a function whose loop moves a value");
             }
             if (vector_check.error == IR_OK)
             {
@@ -429,7 +456,7 @@ static __attribute__((unused)) int ir_optimize_text_print_fixtures(void)
         arena_pop_to(&twin, 0);
         IrFunction result = { 0 };
         uint64_t change = 0;
-        ok = ok && ir_optimize_text_transform(fixture, &before, &output, &scratch, false, &result, &change).error == IR_OK;
+        ok = ok && ir_optimize_text_transform(fixture, &before, &output, &scratch, false, false, &result, &change).error == IR_OK;
         size_t length = 0;
         char* printed = ok ? ir_optimize_text_print(&result, &scratch, &length) : 0;
         ok = ok && printed != 0;

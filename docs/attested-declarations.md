@@ -797,10 +797,22 @@ every token of the unit, skipped or not. Seven changes, each exact:
   over musl's 1,336 units and the glibc units' 512.
 - **The reader's system tokens take the levels the passes mapped**
   (`check_attested_token_levels`), 64 tokens at a time, instead of mapping the
-  preprocessor's levels again; the passes' map goes 16 tokens at a time.
-- **A body's list holds each name and class once**, so that the reach and the
-  events' test take a name once however often the body spells it (the first
-  entry, on both paths).
+  preprocessor's levels again; the passes' map goes 16 tokens at a time, and a
+  unit whose tokens are the output's one to one (`identity_sources`, nearly
+  every unit) takes the preprocessor's levels themselves (#2769).
+- **A function body's names make no list** (#2769). A definition is a root of
+  every unit and its hash is the lane's own, so what the passes take from a
+  body's names is by key, whichever bodies name it: the reach rises from the
+  last body that names a key (`CheckAttested.namings`, a store a name, the
+  last one standing) and falls from the first that may declare it
+  (`declarings`, the bodies' declared keys from the last definition back), and
+  the chain makes the name's hash the lane's own there, once; any later body
+  would leave every later declaration that lists the name a miss all the same.
+  The binding events find a body's names at the events' own tokens
+  (`check_attested_body_holds`), and only where those don't spell the name,
+  in the body's names marked (none in musl's or sqlite's commands: the
+  definition's own name is its declarator's list's). `--twins` tests every
+  event in a body by the marks and by a search of the body too.
 - **The chain fetches a name's state eight entries ahead**, and the lists'
   cache a slot four declarations ahead.
 - **The expressions' walk gives a skipped declaration's tokens no class**
@@ -1111,6 +1123,35 @@ symbol):
 
 The passes are what `sqlite3.c` still pays for its skip: the lists, the chain
 and the reach over its 710,061 tokens, about 2% of its user cycles.
+
+### The passes on a large unit (#2769)
+
+Main's profile of `-c sqlite3.c` with the memo warm put most of the passes'
+2.4% in its function bodies: each body's 147,602 identifiers listed and
+deduplicated by key, then walked one by one by the reach, the chain (each
+callee a declarer) and the events. A function body's names make no list now
+(the bullet in step 3's second part says how), and the rest each had a cost of
+its own: a `memcpy` call a name's and a literal's last bytes in their hashes
+(now the intern table's, `intern_hash_bytes`), a 16-lane gather a 16 tokens
+for the system levels (now the preprocessor's own, where the tokens are its
+output's one to one), and for a command of one source file, which keeps no
+lists' cache, a bounds pass and a loop of declarations before its walk (now
+the walk alone). On the 9700X (15 interleaved rounds; the record's
+`attested-bodies-by-key-2769-2026-11-23`), every build the same toolchain's:
+
+| `-c sqlite3.c` | main | #2769 |
+| --- | ---: | ---: |
+| the attested symbols' share of the user cycles | 2.38% | 1.39% |
+| … the issue's table's passes alone | 2.27% | 1.30% |
+| with the memo warm, M cycles | 564.8 | 561.1 |
+| with `--attested=off`, M cycles | 554.6 | 554.1 |
+
+musl's command on one lane is main's (2,805 and 2,779 M cycles with the skip).
+Every unit's hits, reach and file-scope lists are main's on musl's 1,336 units
+and `sqlite3.c` with `shell.c`, and every object and diagnostic is
+`--attested=off`'s. Short of #2769's half: the walk's scalar step a file-scope
+token with a part (about 95,000 on `sqlite3.c`), the chain's per-name work, and
+the own hashes and literals.
 
 ## Expected gains
 

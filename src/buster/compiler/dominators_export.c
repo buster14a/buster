@@ -15,9 +15,9 @@
 //
 // Decimals have no sign and no leading zero. The reader takes exactly that text: a missing completion record, an
 // edge out of range or out of order, or any other byte refuses the whole export. The records' own structure is
-// checked too, not only the completion's counts: every function a complete corpus passed wrote exactly its three
-// forms, 0, 1 and 2 in that order, under one file and function name, so the records must group into those triplets
-// and FUNCTIONS must be their number (FORMS the records' own count, as before). FILES alone stays
+// checked too, not only the completion's counts: every function a complete corpus passed wrote exactly its
+// BUSTER_DOMINATOR_EXPORT_FORMS forms (lowered and promoted), 0 and 1 in that order, under one file and function name,
+// so the records must group into those pairs and FUNCTIONS must be their number (FORMS the records' own count, as before). FILES alone stays
 // producer-supplied provenance: a file with no function of its own left no record to enumerate, so the reader can
 // only require it not to fall below the file names the records do carry. It rebuilds
 // each CFG's predecessor view as the stable transpose of its successors, sorted by source, as ir_build_cfg builds
@@ -28,6 +28,8 @@
 #include <string.h>
 
 #define BUSTER_DOMINATOR_EXPORT_HEADER "buster-dominators-v1\n"
+// A function's forms: its lowered IR and its promoted IR (a scalar-promoted third went with promotion's twin, #2924).
+#define BUSTER_DOMINATOR_EXPORT_FORMS 2
 
 typedef struct DominatorExportGraph DominatorExportGraph;
 struct DominatorExportGraph
@@ -47,7 +49,7 @@ struct DominatorExport
 {
     DominatorExportGraph* graphs;
     uint32_t count;
-    // The completion record's counts. `functions` and the record count are verified against the records' triplets;
+    // The completion record's counts. `functions` and the record count are verified against the records' pairs;
     // `files` only had to cover the file names they carry, the rest of it producer-supplied provenance.
     uint64_t files;
     uint64_t functions;
@@ -265,7 +267,7 @@ static bool dominators_export_read(Arena* arena, const uint8_t* bytes, uint64_t 
     valid = valid && dominators_export_number(&text, UINT64_MAX, ' ', &export.functions) && dominators_export_number(&text, UINT64_MAX, '\n', &forms);
     valid = valid && forms == records && text.position == length;
     // The completion counts are corpus claims the records must prove: each function a complete export passed wrote
-    // forms 0, 1 and 2 in order under one file and function name, so the records group into exactly those triplets
+    // its forms in order under one file and function name, so the records group into exactly those pairs
     // and FUNCTIONS is their number. `files` had more to count: files with no function of their own left no record,
     // so it is accepted only down to the file names the records carry.
     uint64_t functions = 0;
@@ -273,7 +275,7 @@ static bool dominators_export_read(Arena* arena, const uint8_t* bytes, uint64_t 
     for (uint32_t record = 0; valid && record < export.count; record += 1)
     {
         const DominatorExportGraph* graph = &export.graphs[record];
-        const uint32_t form = record % 3;
+        const uint32_t form = record % BUSTER_DOMINATOR_EXPORT_FORMS;
         valid = graph->form == form;
         if (valid && form == 0)
         {
@@ -288,7 +290,7 @@ static bool dominators_export_read(Arena* arena, const uint8_t* bytes, uint64_t 
                     memcmp(graph->file, first->file, graph->file_length) == 0 && memcmp(graph->name, first->name, graph->name_length) == 0;
         }
     }
-    valid = valid && export.count % 3 == 0 && functions == export.functions && file_names <= export.files;
+    valid = valid && export.count % BUSTER_DOMINATOR_EXPORT_FORMS == 0 && functions == export.functions && file_names <= export.files;
     if (valid)
     {
         *result = export;

@@ -1,0 +1,2 @@
+%:define D 1
+D __STDC_VERSION__

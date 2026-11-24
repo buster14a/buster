@@ -1,23 +1,23 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// The backend's benchmark (benchmark-backend, #136): Tier 0's vector path and its scalar twin on the functions of
-// generated programs (tier0_generate.c), apart from branch sizing and encoding, which it measures on their records after.
-// docs/tier0.md has the numbers.
+// The backend's benchmark (benchmark-backend, #136): Tier 0's compile on the functions of generated programs
+// (tier0_generate.c), apart from branch sizing and encoding, which it measures on their records after. docs/tier0.md
+// has the numbers.
 //
 // Usage: build/compiler benchmark-backend [--entries N] [--seed N]
-//            [--only vector|scalar|sizing|encode|validate|validate-scalar|choose|choose-scalar] [--after-scalar MS]
+//            [--only vector|sizing|encode|validate|validate-scalar|choose] [--after-scalar MS]
 //
 // Run it under the 9700X's lock pinned to one CPU (taskset -c 2 ...). It generates programs until their functions
 // hold --entries typed entries (262,144 by default, more than the branch predictor learns from pass to pass), checks
-// that both paths give every function the same code, then reports the median of BUSTER_TIER0_BENCHMARK_PASSES passes
+// that every function compiles, then reports the median of BUSTER_TIER0_BENCHMARK_PASSES passes
 // that alternate which variant runs first, each a run over every function: nanoseconds, cycles and instructions per
 // typed entry and per record (the counters read zero where perf_event_open refuses), IPC and the throttle (PMCx1A0's
 // umask 0x08, #199); then the entries the vector path defers and the records' and bytes' totals, and the form choice's
 // requests (#221): how many per entry, what they chose and the bytes they saved. --only times one variant alone, back
-// to back; --after-scalar MS runs the scalar twin, untimed, for MS ms before each pass of the vector path, the
-// validation and the choice (#199's state after lighter phases: 100 to 300). The exit status is 1 on invalid arguments or if the paths
-// disagree.
+// to back; --after-scalar MS runs the scalar validator, untimed, for MS ms before each pass of the validation and the choice
+// (#199's state after lighter phases: 100 to 300). The exit status is 1 on invalid arguments or if a function's compile
+// runs out of memory.
 //
 // Layout: the corpus (tier0_benchmark_corpus); run_backend_benchmark. The clock, the counters, the variants and the
 // report are tier0_benchmark_measure.c's, which benchmark-backend-source shares (tier0_source_benchmark.c).
@@ -96,8 +96,7 @@ static bool tier0_benchmark_corpus(Tier0BenchmarkCorpus* corpus, Tier0Tables* ta
             result = added == TIER0_BENCHMARK_ADDED || added == TIER0_BENCHMARK_REFUSED;
             if (!result)
             {
-                fprintf(stderr, "benchmark-backend: %s program %" PRIu64 "'s function %u\n",
-                        added == TIER0_BENCHMARK_DISAGREE ? "the paths disagree on" : "memory ran out for", seed + p, f);
+                fprintf(stderr, "benchmark-backend: memory ran out for program %" PRIu64 "'s function %u\n", seed + p, f);
             }
         }
     }
@@ -150,7 +149,7 @@ int run_backend_benchmark(int argc, char** argv)
     Tier0Tables tables;
     if (!valid || entries == 0 || after_scalar > 10000)
     {
-        fprintf(stderr, "usage: build/compiler benchmark-backend [--entries N] [--seed N] [--only vector|scalar|sizing|encode|validate|validate-scalar|choose|choose-scalar] [--after-scalar MS]\n");
+        fprintf(stderr, "usage: build/compiler benchmark-backend [--entries N] [--seed N] [--only vector|sizing|encode|validate|validate-scalar|choose] [--after-scalar MS]\n");
     }
     else if (!(x86_encoder_initialize() && x86_semantics_initialize() && tier0_initialize() && tier0_tables_open(&tables)))
     {

@@ -3,11 +3,27 @@
 //
 // Policy-owned checks included by x86_target_test.c. Enumerate every subset of every distinct requirement mask,
 // every single-feature removal from each profile, and unknown rows even with every feature bit set. The independent
-// named-form expectations and external compiler/assembler checks establish ISA facts; the matrix checks the kernels.
+// named-form expectations and external compiler/assembler checks establish ISA facts; the matrix checks the kernel
+// against the table's definition.
+
+// Whether `allowed` is `target`'s form table by its definition: a form is allowed (1) exactly when it has a classified
+// requirement and the target's features, with the known marker, cover it, and is 0 otherwise. The requirement comes from
+// the full-width slot map (x86_target_requirement), not the compact rows x86_target_forms reads.
+static bool x86_target_test_definition(const X86Target* target, const uint8_t* allowed)
+{
+    const uint64_t available = target->features | BUSTER_X86_TARGET_KNOWN;
+    bool matches = true;
+    for (uint32_t form = 0; form < X86_FORM_COUNT; form += 1)
+    {
+        const uint64_t row = x86_target_requirement(form);
+        const uint8_t expected = row != 0 && (row & ~available) == 0;
+        matches &= allowed[form] == expected;
+    }
+    return matches;
+}
 
 static bool x86_target_test_matrix(void)
 {
-    uint8_t scalar[X86_FORM_COUNT];
     uint8_t vector[X86_FORM_COUNT];
     uint64_t masks[X86_FORM_COUNT];
     uint32_t mask_count = 0;
@@ -72,9 +88,8 @@ static bool x86_target_test_matrix(void)
         do
         {
             const X86Target target = { .features = subset };
-            x86_target_forms_scalar(&target, scalar);
             x86_target_forms(&target, vector);
-            passed &= memcmp(scalar, vector, sizeof(scalar)) == 0;
+            passed &= x86_target_test_definition(&target, vector);
             for (uint32_t form = 0; form < X86_FORM_COUNT; form += 1)
             {
                 const uint64_t row = x86_target_requirement(form);
@@ -91,9 +106,8 @@ static bool x86_target_test_matrix(void)
     for (uint32_t bit = 0; bit < 64; bit += 1)
     {
         const X86Target target = { .features = UINT64_C(1) << bit };
-        x86_target_forms_scalar(&target, scalar);
         x86_target_forms(&target, vector);
-        passed &= memcmp(scalar, vector, sizeof(scalar)) == 0;
+        passed &= x86_target_test_definition(&target, vector);
         configurations += 1;
     }
     uint64_t random = 180;
@@ -105,17 +119,17 @@ static bool x86_target_test_matrix(void)
         for (uint32_t f = 0; f <= X86_FEATURE_COUNT; f += 1)
         {
             target.features = f == X86_FEATURE_COUNT ? original : original & ~(UINT64_C(1) << f);
-            x86_target_forms_scalar(&target, scalar);
             x86_target_forms(&target, vector);
-            passed &= memcmp(scalar, vector, sizeof(scalar)) == 0;
+            passed &= x86_target_test_definition(&target, vector);
             configurations += 1;
         }
         // Reserved target bits, including the table's known marker, must not enable or disable a form.
-        // Use the scalar result without those bits as the reference, and a deliberately unaligned output.
+        // Use the definition's table without those bits as the reference, and a deliberately unaligned output.
         const uint64_t reserved = ~(features | BUSTER_X86_TARGET_KNOWN);
         const uint64_t extra[] = { BUSTER_X86_TARGET_KNOWN, reserved, reserved | BUSTER_X86_TARGET_KNOWN };
         target.features = original;
-        x86_target_forms_scalar(&target, scalar);
+        x86_target_forms(&target, vector);
+        passed &= x86_target_test_definition(&target, vector);
         for (uint32_t r = 0; r < BUSTER_ARRAY_LENGTH(extra); r += 1)
         {
             uint8_t guarded[X86_FORM_COUNT + 2] __attribute__((aligned(64)));
@@ -123,7 +137,7 @@ static bool x86_target_test_matrix(void)
             target.features = original | extra[r];
             x86_target_forms(&target, guarded + 1);
             passed &= guarded[0] == 0xa5 && guarded[X86_FORM_COUNT + 1] == 0xa5;
-            passed &= memcmp(scalar, guarded + 1, sizeof(scalar)) == 0;
+            passed &= memcmp(vector, guarded + 1, sizeof(vector)) == 0;
             configurations += 1;
         }
         for (uint32_t form = 1; form < X86_FORM_COUNT; form += 1)
@@ -154,9 +168,6 @@ static bool x86_target_test_matrix(void)
         X86Target target;
         uint8_t allowed[X86_FORM_COUNT];
     } overlap;
-    overlap.target = all;
-    x86_target_forms_scalar(&overlap.target, overlap.allowed);
-    passed &= memcmp(overlap.allowed, vector, sizeof(vector)) == 0;
     overlap.target = all;
     x86_target_forms(&overlap.target, overlap.allowed);
     passed &= memcmp(overlap.allowed, vector, sizeof(vector)) == 0;
@@ -602,7 +613,8 @@ static bool x86_target_test_matcher_admission(void)
         for (uint32_t bit = 0; bit <= X86_FEATURE_COUNT; bit += 1)
         {
             target.features = bit == X86_FEATURE_COUNT ? original : original & ~(UINT64_C(1) << bit);
-            x86_target_forms_scalar(&target, allowed);
+            x86_target_forms(&target, allowed);
+            passed &= x86_target_test_definition(&target, allowed);
             x86_match_initialize(index, &target);
             memset(seen, 0, sizeof(seen));
             const uint32_t count = index->begin[BUSTER_X86_MATCH_BUCKETS];

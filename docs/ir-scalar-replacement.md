@@ -6,8 +6,8 @@
 constructor. Include it after `ir_optimize.c` and call
 `ir_optimize_sroa(function, output, scratch, ir_sroa_options(), result)`.
 `IrSroaResult.function` is a fresh verified function containing typed scalar
-slots. Pass that result to the existing `ssa_ir_promote` or
-`ssa_ir_promote_scalar`, with a separate output arena, to obtain scalar SSA.
+slots. Pass that result to the existing `ssa_ir_promote`, with a separate
+output arena, to obtain scalar SSA.
 The split function must remain alive through promotion. This explicit
 composition respects the upstream promoter's independent-arena contract.
 Promotion additionally requires an entry block with no incoming edges;
