@@ -692,6 +692,39 @@ static void ssa_test_frontiers(SsaTestTally* tally, SsaTestSpace* space, const S
     }
 }
 
+// The dense construction with its rows a group of chunks at a time (#3449): with a buffer of one byte (one chunk of 16
+// locals a group), of 128 bytes and of 1 KiB, each result verified, run against the memory locals and equal to the one
+// group's: the same replacements and the same phis, numbered alike, with the same operands.
+static void ssa_test_row_groups(SsaTestTally* tally, SsaTestSpace* space, const SsaInput* input)
+{
+    static const uint32_t budgets[] = { 1, 128, 1024 };
+    const uint64_t output_mark = space->output.length;
+    SsaResult whole = { 0 };
+    const bool built = ssa_test_expect(tally, ssa_build(input, &space->output, &space->scratch, &whole) == SSA_OK, "the dense construction in one group of rows");
+    for (uint32_t budget = 0; built && budget < BUSTER_ARRAY_LENGTH(budgets); budget += 1)
+    {
+        const uint64_t mark = space->output.length;
+        SsaResult result = { 0 };
+        const SsaError error = ssa_build_row_budget(input, &space->output, &space->scratch, &result, budgets[budget]);
+        if (ssa_test_expect(tally, error == SSA_OK, "the dense construction with its rows in groups"))
+        {
+            const SsaCheck check = ssa_verify(input, &result, &space->scratch);
+            const bool verified = ssa_test_expect(tally, check.error == SSA_OK, "the rows in groups' construction verifies");
+            ssa_test_expect(tally, verified && ssa_test_metadata(input, &result, &space->oracle) && ssa_test_interpret(input, &result, &space->oracle, tally->seed),
+                            "the rows in groups' construction runs as the memory locals do");
+            bool same = result.phi_count == whole.phi_count && result.operand_count == whole.operand_count;
+            same = same && memcmp(result.replacements, whole.replacements, (uint64_t)input->instruction_count * sizeof(uint32_t)) == 0;
+            same = same && memcmp(result.phi_blocks, whole.phi_blocks, (uint64_t)whole.phi_count * sizeof(uint32_t)) == 0;
+            same = same && memcmp(result.phi_locals, whole.phi_locals, (uint64_t)whole.phi_count * sizeof(uint32_t)) == 0;
+            same = same && memcmp(result.phi_offsets, whole.phi_offsets, ((uint64_t)whole.phi_count + 1) * sizeof(uint32_t)) == 0;
+            same = same && memcmp(result.phi_operands, whole.phi_operands, (uint64_t)whole.operand_count * sizeof(uint32_t)) == 0;
+            ssa_test_expect(tally, same, "the rows in groups give the one group's phis and replacements");
+        }
+        arena_pop_to(&space->output, mark);
+    }
+    arena_pop_to(&space->output, output_mark);
+}
+
 static void ssa_test_generated(SsaTestTally* tally, SsaTestSpace* space, uint32_t count)
 {
     static const uint32_t boundaries[] = { 1, 2, 15, 16, 17, 63, 64, 65, 511, 512, 513, 1025 };
@@ -707,6 +740,7 @@ static void ssa_test_generated(SsaTestTally* tally, SsaTestSpace* space, uint32_
             {
                 ssa_test_run(tally, space, &input, false, false);
                 ssa_test_frontiers(tally, space, &input);
+                ssa_test_row_groups(tally, space, &input);
             }
         }
     }
@@ -746,6 +780,7 @@ static void ssa_test_generated(SsaTestTally* tally, SsaTestSpace* space, uint32_
         {
             ssa_test_run(tally, space, &input, false, false);
             ssa_test_frontiers(tally, space, &input);
+            ssa_test_row_groups(tally, space, &input);
             // The same program with every fourth write one of its local's undef instead (#141's lifetime starts).
             uint32_t kills = 0;
             for (uint32_t w = 0; w < input.instruction_count; w += 1)

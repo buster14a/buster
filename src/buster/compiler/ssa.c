@@ -929,7 +929,7 @@ static SsaError ssa_vector_phis(SsaWork* work, const uint64_t* placed, uint32_t*
 }
 
 // The rows' buffer: at most this many bytes of exit rows at once, a group of chunks of 16 slots for every reachable block,
-// so that the buffer stays in L2 however wide the function is (#3449).
+// so that the buffer stays in L2 however wide the function is (#3449); the tests pass smaller budgets.
 #define BUSTER_SSA_ROW_GROUP_BYTES (256u << 10)
 
 // In reverse postorder, so that a block's immediate dominator comes first, a group of chunks at a time: each block's
@@ -1039,7 +1039,7 @@ static void ssa_vector_rows(SsaWork* work, const uint64_t* placed, const uint32_
     }
 }
 
-static SsaError ssa_construct_vector(SsaWork* work, uint32_t frontier_budget)
+static SsaError ssa_construct_vector(SsaWork* work, uint32_t frontier_budget, uint32_t row_bytes)
 {
     const SsaInput* input = work->input;
     const uint32_t blocks = input->block_count;
@@ -1049,7 +1049,7 @@ static SsaError ssa_construct_vector(SsaWork* work, uint32_t frontier_budget)
     const uint32_t reachable = work->dominators.reachable_count;
     // The rows' group: as many chunks as fit the buffer for every reachable block, at least one.
     const uint64_t block_bytes = (uint64_t)(reachable == 0 ? 1 : reachable) * 64;
-    const uint64_t fit = BUSTER_SSA_ROW_GROUP_BYTES / block_bytes;
+    const uint64_t fit = row_bytes / block_bytes;
     const uint32_t group = fit == 0 ? 1 : fit < chunks ? (uint32_t)fit : chunks == 0 ? 1 : chunks;
     const bool grouped = group != chunks && chunks != 0;
     // A block lists each chunk past the first group it writes in once: no more of them than writes or than its chunks.
@@ -1489,11 +1489,12 @@ static SsaError ssa_simplify(SsaWork* work)
 #include "ssa_bounded.c"
 
 // The dense constructor, or the bounded one where the sparse frontiers would pass `frontier_budget` pairs
-// (BUSTER_SSA_FRONTIER_PAIRS but in the tests).
-static SsaError ssa_construct_dense(SsaWork* work, uint32_t frontier_budget)
+// (BUSTER_SSA_FRONTIER_PAIRS but in the tests), with its rows `row_bytes` at a time (BUSTER_SSA_ROW_GROUP_BYTES but in the
+// tests).
+static SsaError ssa_construct_dense(SsaWork* work, uint32_t frontier_budget, uint32_t row_bytes)
 {
     const uint64_t mark = work->scratch->length;
-    SsaError error = ssa_construct_vector(work, frontier_budget);
+    SsaError error = ssa_construct_vector(work, frontier_budget, row_bytes);
     if (error == SSA_ERROR_LIMIT)
     {
         arena_pop_to(work->scratch, mark);
@@ -1503,7 +1504,7 @@ static SsaError ssa_construct_dense(SsaWork* work, uint32_t frontier_budget)
     return error;
 }
 
-static SsaError ssa_build_selected_path(const SsaInput* input, Arena* output, Arena* scratch, SsaResult* result, bool bounded, uint32_t frontier_budget)
+static SsaError ssa_build_selected_path(const SsaInput* input, Arena* output, Arena* scratch, SsaResult* result, bool bounded, uint32_t frontier_budget, uint32_t row_bytes)
 {
     SsaError error = output != 0 && scratch != 0 && output != scratch && result != 0 ? ssa_check_input(input) : SSA_ERROR_INVALID;
     const uint64_t output_length = output == 0 ? 0 : output->length;
@@ -1516,7 +1517,7 @@ static SsaError ssa_build_selected_path(const SsaInput* input, Arena* output, Ar
     }
     if (error == SSA_OK)
     {
-        error = bounded ? ssa_construct_bounded(&work) : ssa_construct_dense(&work, frontier_budget);
+        error = bounded ? ssa_construct_bounded(&work) : ssa_construct_dense(&work, frontier_budget, row_bytes);
     }
     if (error == SSA_OK)
     {
@@ -1539,19 +1540,25 @@ static SsaError ssa_build_selected_path(const SsaInput* input, Arena* output, Ar
 
 static SsaError ssa_build(const SsaInput* input, Arena* output, Arena* scratch, SsaResult* result)
 {
-    return ssa_build_selected_path(input, output, scratch, result, false, BUSTER_SSA_FRONTIER_PAIRS);
+    return ssa_build_selected_path(input, output, scratch, result, false, BUSTER_SSA_FRONTIER_PAIRS, BUSTER_SSA_ROW_GROUP_BYTES);
 }
 
 // The tests force the bounded construction on tiny fixtures as well as the memory-limit cases.
 static __attribute__((unused)) SsaError ssa_build_bounded(const SsaInput* input, Arena* output, Arena* scratch, SsaResult* result)
 {
-    return ssa_build_selected_path(input, output, scratch, result, true, BUSTER_SSA_FRONTIER_PAIRS);
+    return ssa_build_selected_path(input, output, scratch, result, true, BUSTER_SSA_FRONTIER_PAIRS, BUSTER_SSA_ROW_GROUP_BYTES);
 }
 
 // The tests' dense construction with a frontier budget of their own, to take the bounded fallback past it.
 static __attribute__((unused)) SsaError ssa_build_frontier_budget(const SsaInput* input, Arena* output, Arena* scratch, SsaResult* result, uint32_t frontier_budget)
 {
-    return ssa_build_selected_path(input, output, scratch, result, false, frontier_budget);
+    return ssa_build_selected_path(input, output, scratch, result, false, frontier_budget, BUSTER_SSA_ROW_GROUP_BYTES);
+}
+
+// The tests' dense construction with its rows `row_bytes` at a time, to take several groups of chunks.
+static __attribute__((unused)) SsaError ssa_build_row_budget(const SsaInput* input, Arena* output, Arena* scratch, SsaResult* result, uint32_t row_bytes)
+{
+    return ssa_build_selected_path(input, output, scratch, result, false, BUSTER_SSA_FRONTIER_PAIRS, row_bytes);
 }
 
 #include "ssa_verify.c"
