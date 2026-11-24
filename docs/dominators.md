@@ -155,14 +155,24 @@ join of many predecessors under a deep chain, as a `?:` chain's, made them
 O(E × depth). A goto ladder's frontiers are themselves quadratic in size.
 
 Backedges are edges whose target dominates their source. All latches at one
-header contribute to one natural loop. Its body is walked over predecessor CSR
-with a mark-before-push worklist, stopping at the header.
+header contribute to one natural loop.
 
-The smallest strict containing natural loop is the parent. Loops sharing a
-header are merged first; natural loops with different headers are nested or
-disjoint. Membership counts give per-block depth. There is no recursion and
-no stack grows past the block count. The loop-parent scan is quadratic in the
-number of headers; the measurements must include that cost.
+Loops sharing a header are merged first; natural loops with different headers
+are nested or disjoint, and an outer loop's header dominates its inner loops'.
+`dominators_discover` therefore finds loops innermost first, by decreasing
+dominator-tree preorder of their headers. Each walks back from its latches over
+predecessor CSR and stops at its header. A block no loop has claimed becomes
+this loop's own: its innermost loop, one bit in its body row. A block that a
+loop found before claimed brings that loop's outermost discovered loop, by
+union-find, and this loop absorbs it whole: it becomes that loop's parent, the
+smallest strict containing natural loop; ORs that loop's body row into its own
+with 512-bit ORs; adds its size and irreducible flag; and walks on from its
+header. A walk leaves a natural loop only through its header, so each block is
+claimed once and each header's predecessors are read at most twice: the walks
+cost O(E α) and the bodies O(loops × row) vector ORs. Until #2953 a walk per
+loop cost the bodies' total size, quadratic in nesting depth, and the parent
+scan was quadratic in the number of loops. Depths follow the loop forest top
+down. There is no recursion and no stack grows past the block count.
 
 A reverse DFS walk assigns SCCs. A DFS retreating edge whose target does not
 dominate its source proves irreducibility; the module conservatively flags
@@ -177,8 +187,9 @@ bodies.
 
 ### Why it is scalar
 
-DFS/RPO, SEMI-NCA, the frontier walks, SCC traversal, the loop-body worklist
-and sparse bit enumeration are scalar. Until #2924 the module also had an
+DFS/RPO, SEMI-NCA, the frontier walks, SCC traversal and the loops' union-find
+walk are scalar; the loop bodies are combined by 512-bit ORs of whole rows
+(above). Until #2924 the module also had an
 AVX-512 path. Its bit-matrix solver started every reachable nonentry row at the
 reachable set and swept in RPO until stable, intersecting predecessor rows with
 `vpandq`; vector popcounts then made each block's largest strict dominator its
@@ -210,6 +221,27 @@ but quadratic in tree depth. A data-parallel solver that beats SEMI-NCA at every
 size must be another design than a dense matrix; #2953 tracks it. Raw logs:
 [the re-measurement](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/scalar-paths-removal-2924-2026-11-17/c-dominators-gate)
 and [#1352's](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/dominators-semi-nca-1352-2026-11-07).
+
+#2953 measured such a design: one sweep over RPO in which a block's dominators
+among the 64 numbers above it are a u64 window, the AND of its forward
+predecessors' windows shifted by their distances, whose lowest set bit is the
+immediate dominator. Joins without a common dominator that close met by
+skew-binary jump pointers in O(log depth), and irreducible regions the sweep
+didn't settle took Cooper–Harvey–Kennedy passes. Its results equalled
+SEMI-NCA's on every sqlite3.c CFG and generated graph. On the 9700X (main
+`968a085f` against #2953's `6c67b3b8`, Release, CPU 2, the whole analysis per
+block, median of three processes), tree only:
+
+- **sqlite3.c's CFGs:** 1.00× SEMI-NCA's time for 2–4 blocks, 1.04× for 4–8,
+  0.94–0.98× for 8–64, 1.01× for 64–128 and 1.10–1.19× above 128 blocks, as
+  for `sqlite3VdbeExec`; 0.98× over all of them.
+- **Synthetic shapes:** 1.10× on 16-block diamonds, 1.19× on the 513-block
+  irreducible shape, 1.06×, 1.25× and 1.77× on the 8,192-block `fan-in`,
+  `nested-ifs` and `ladder`, and 2.75× on the random 2,049-block `dispatch`,
+  which its first sweep doesn't settle.
+
+So SEMI-NCA stays. The sweep is on the `claude/2953-window-sweep` branch, and
+#2953 has the measurements.
 
 ## Tests and benchmark
 
@@ -247,7 +279,10 @@ cycles. #2924's mutation check added three paths no generated shape takes: two
 6-block graphs on which SEMI-NCA's evaluation must climb through the vertex
 numbered right after the one being processed, and carry a compressed link's
 least semidominator; and a 3-block acyclic graph whose cross edge into a
-just-finished DFS subtree the SCC pass must not flag. CSR arrays end at
+just-finished DFS subtree the SCC pass must not flag. #2953's mutation check
+skipped an absorbed loop's body OR or its parent, found outer loops first, and
+took every predecessor of a header for a latch: each fails `test-dominators`.
+CSR arrays end at
 inaccessible pages. Malformed columns, mismatched CSR views, invalid IDs, arena
 exhaustion at every allocation, and matrix budgets one byte short of the
 frontiers alone, or of the frontiers and loop bodies, check rollback. These are

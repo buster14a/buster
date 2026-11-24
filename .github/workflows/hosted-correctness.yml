@@ -31,6 +31,14 @@ on:
         type: string
         required: false
         default: ''
+      compare-sqlite:
+        description: Compare the frozen sqlite3.c object against the checker PR's base
+        type: boolean
+        default: false
+      sqlite-stable:
+        description: Require byte-identical sqlite3.c objects for diagnostic-only changes
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -206,6 +214,7 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           ref: ${{ github.sha }}
+          fetch-depth: ${{ inputs.compare-sqlite && env.BUSTER_VECTOR_ITEM == 'n2' && 2 || 1 }}
           persist-credentials: false
 
       - name: Restore verified hosted release inputs
@@ -271,6 +280,17 @@ jobs:
           printf 'Configuration: %s, linker %s\n' "$BUSTER_SANITIZER" "$BUSTER_LINKER"
           test "$BUSTER_LINKER" = "$([ "$BUSTER_SANITIZER" = none ] && echo auto || echo lld)"
 
+      # Build the PR base on plain shard 2 while shard 1 builds the merge revision.
+      - name: Build the checker PR base for the SQLite object comparison
+        if: inputs.compare-sqlite && env.BUSTER_VECTOR_ITEM == 'n2'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          test "$(git rev-parse HEAD^1)" = "$BASE_SHA"
+          git worktree add --detach "$RUNNER_TEMP/sqlite-base" "$BASE_SHA"
+          cd "$RUNNER_TEMP/sqlite-base"
+          ./build.sh --config Release --jobs "$(nproc)"
+
       # A vector configuration's product (#2032): its item 1's holder builds it, on a CPU whose probe qualified (the
       # build runs the executable), and publishes it in this run alone, by a name that holds its attempt and its
       # SHA-256. Every other item waits for it here, after its own setup, and fails without it: when no candidate can
@@ -318,6 +338,17 @@ jobs:
         env:
           DIGEST: ${{ steps.product.outputs.digest }}
         run: bash tools/ci/hosted-product.sh install "$RUNNER_TEMP/vector-product-download" "$DIGEST"
+
+      - name: Compare the checker PR's frozen sqlite3.c object against its base
+        if: inputs.compare-sqlite && env.BUSTER_VECTOR_ITEM == 'n2'
+        env:
+          SQLITE_EXPECT_STABLE: ${{ inputs.sqlite-stable }}
+        run: |
+          sqlite="$BUSTER_CORPUS/sqlite"
+          options=(-c -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_THREADSAFE=0 -DSQLITE_ENABLE_MEMSYS5 -DSQLITE_ENABLE_RTREE "-I$sqlite" "$sqlite/sqlite3.c")
+          "$RUNNER_TEMP/sqlite-base/build/compiler" "${options[@]}" -o "$RUNNER_TEMP/base-sqlite.o"
+          "$BUSTER_COMPILER" "${options[@]}" -o "$RUNNER_TEMP/pr-sqlite.o"
+          bash tools/ci/compare-sqlite-objects.sh "$RUNNER_TEMP/base-sqlite.o" "$RUNNER_TEMP/pr-sqlite.o" "$SQLITE_EXPECT_STABLE"
 
       - name: Build the external Clang pragma oracle, the clang server and the compiler
         # A native row's shard builds its own, for the CPU it runs on; so does a vector configuration's item 1, on a CPU

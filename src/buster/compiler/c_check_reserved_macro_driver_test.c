@@ -15,7 +15,7 @@ static const CheckDriverDefaultWarningFixture check_driver_reserved_macro_fixtur
                   "#define _XOPEN_SOURCE 700\n"
                   "#define _POSIX_C_SOURCE 200809L\n"
                   "#define __STDC_WANT_LIB_EXT1__ 1\n"
-                  "#define _FORTIFY_SOURCE 2\n"
+                  "#define _FORTIFY_SOURCE 0\n"
                   "#define _DEFAULT_SOURCE\n"
                   "#define _BSD_SOURCE\n"
                   "#define _ISOC99_SOURCE\n"

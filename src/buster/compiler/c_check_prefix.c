@@ -582,6 +582,7 @@ static ParseDiagnostic check_prefix_original_diagnostic(const ParseDiagnostic* d
     result.resume_call_tail = 0;
     result.resume_operand = false;
     result.resume_colon = false;
+    result.resume_terminate = false;
     return result;
 }
 
@@ -779,7 +780,8 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
                 ParseDiagnostic diagnostic = current->diagnostics[d];
                 uint32_t begin = diagnostic.token;
                 uint32_t name = BUSTER_PARSE_NONE;
-                const uint32_t end = diagnostic.error && (!diagnostic.resumed || diagnostic.resume_at != 0) ?
+                // (A resumed error's consequent one is its recovery's, no name's tail of its own.)
+                const uint32_t end = diagnostic.error && !diagnostic.consequent && (!diagnostic.resumed || diagnostic.resume_at != 0) ?
                                      tails->end(current, origin, &diagnostic, &begin, &name, tails->context) : 0;
                 diagnostic.token = end != 0 ? begin : diagnostic.token;
                 diagnostic.argument = end != 0 ? name : diagnostic.argument;
@@ -800,7 +802,8 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
             // Unknown types were read as specifiers before recovery erased the declaration's tree. They do not stop
             // a later declarator's proven tail repair (#2640); the reparse retains their errors and the prefix view
             // marks their recovered types invalid. Missing parameter types likewise do not stop the rounds.
-            const bool type = check_prefix_parameter_error(diagnostic) || diagnostic->declaration_type || diagnostic->attribute_prefix ||
+            // (Nor does a resumed error's consequent one, ParseDiagnostic.consequent.)
+            const bool type = check_prefix_parameter_error(diagnostic) || diagnostic->declaration_type || diagnostic->attribute_prefix || diagnostic->consequent ||
                               diagnostic->message == PARSE_MESSAGE_UNKNOWN_TYPE_NAME;
             const bool other = diagnostic->error && !check_prefix_resumes(current, diagnostic, count) && !type;
             limit = other && diagnostic->token < limit ? diagnostic->token : limit;
@@ -820,15 +823,22 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
         uint32_t preserve_begin = 0;
         uint32_t preserve_end = 0;
         bool ordered = true;
+        // A taken error's consequent ones (ParseDiagnostic.consequent), which follow it in the list and go with it: the next
+        // parse, without its tokens, makes none of them again.
+        uint32_t consequents = 0;
+        bool owner_taken = false;
         for (uint32_t d = 0; d < current->diagnostic_count; d += 1)
         {
             const ParseDiagnostic* diagnostic = diagnostics + d;
             const bool taken = check_prefix_resumes(current, diagnostic, limit);
+            consequents += diagnostic->consequent && owner_taken;
+            owner_taken = diagnostic->consequent ? owner_taken : taken;
             const uint32_t at = diagnostic->resume_at != 0 ? diagnostic->resume_at : diagnostic->token;
             const uint32_t begin = diagnostic->resume_begin != 0 ? diagnostic->resume_begin : at;
             ordered &= !taken || begin > last;
             last = taken ? (diagnostic->resume_end != 0 ? diagnostic->resume_end - 1 : at) : last;
             insert += taken && !diagnostic->resume_delete ? (diagnostic->resume_closers != 0 ? diagnostic->resume_closers : 1u) + (diagnostic->resume_follow != 0) : 0u;
+            insert += taken && diagnostic->resume_delete ? diagnostic->resume_closers + diagnostic->resume_terminate : 0u;
             following += taken && diagnostic->resume_follow;
             const uint32_t attributes = taken ? check_prefix_call_attributes(diagnostic) : 0;
             insert += (attributes != 0) + (taken && diagnostic->resume_call_semi);
@@ -852,7 +862,7 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
         }
         const uint32_t total = count + insert + retained - discard;
         work += total;
-        more = ordered && repairs != 0 && total <= capacity && (uint64_t)pending_count + repairs + following + preserved <= original_count && work <= budget;
+        more = ordered && repairs != 0 && total <= capacity && (uint64_t)pending_count + repairs + following + preserved + consequents <= original_count && work <= budget;
         Parser* view = views + (round & 1);
         uint32_t* next_origin = origins[round & 1];
         if (more)
@@ -878,10 +888,17 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
                     pending_count += 1;
                 }
             }
+            bool consequent_owner = false;
             for (uint32_t d = 0; d <= current->diagnostic_count; d += 1)
             {
                 const ParseDiagnostic* diagnostic = d < current->diagnostic_count ? diagnostics + d : 0;
                 const bool taken = diagnostic == 0 || check_prefix_resumes(current, diagnostic, limit);
+                if (diagnostic != 0 && diagnostic->consequent && consequent_owner)
+                {
+                    pending[pending_count] = check_prefix_original_diagnostic(diagnostic, origin, count, original_count);
+                    pending_count += 1;
+                }
+                consequent_owner = diagnostic != 0 && diagnostic->consequent ? consequent_owner : diagnostic != 0 && taken;
                 const uint32_t at = diagnostic != NULL && diagnostic->resume_at != 0 ? diagnostic->resume_at : diagnostic != NULL ? diagnostic->token : count;
                 const uint32_t to = diagnostic != 0 ? (diagnostic->resume_begin != 0 ? diagnostic->resume_begin : at) : count;
                 if (taken)
@@ -982,6 +999,21 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
                                     view->tokens.flags[written] |= BUSTER_PARSE_RECOVERY_ARGUMENT;
                                 }
                                 next_origin[written] = origin != NULL ? origin[token] : token;
+                                written += 1;
+                            }
+                        }
+                        else if ((diagnostic->resume_closers != 0 || diagnostic->resume_terminate) && diagnostic->resume_delete)
+                        {
+                            // A deletion that closes the groups it cuts: a GNU attribute list's entries kept before a
+                            // stray argument's attribute (#2914); and ends its declaration, where it reached the unit's
+                            // end. The tokens borrow the first deleted token's source.
+                            for (uint32_t c = 0; c < diagnostic->resume_closers + diagnostic->resume_terminate; c += 1)
+                            {
+                                view->tokens.kinds[written] = c < diagnostic->resume_closers ? PARSE_KIND_R_PAREN : PARSE_KIND_SEMI;
+                                view->tokens.names[written] = 0;
+                                view->tokens.sources[written] = parse_source_index(&current->tokens, to);
+                                view->tokens.flags[written] = 0;
+                                next_origin[written] = origin != 0 ? origin[to] : to;
                                 written += 1;
                             }
                         }

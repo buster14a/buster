@@ -15894,6 +15894,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     {
         fprintf(stderr, "warning: --attested-memo keeps no memo: the compiler's build can't be identified\n");
     }
+    options.diagnose_fortify = emit_object || link;
     options.published_unused_only = (emit_object || link) && !dump && !dump_static && attested_memo == NULL && attested != CHECK_ATTESTED_MODE_VERIFY;
     options.statement_controls = (emit_object || link) && !scalar && !dump && !dump_static &&
                                  !node_window && !node_window_constants && !source_rows;

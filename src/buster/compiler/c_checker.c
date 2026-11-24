@@ -3673,31 +3673,40 @@ static bool check_graph_evaluable(const TypeTable* types, const CheckGraph* grap
     return evaluable;
 }
 
+// The 16 (or `valid`'s) nodes from `node` of check_graph_warning_contexts' first pass: whether one needs the second.
+static inline __attribute__((always_inline)) bool check_graph_warning_step(TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint32_t node,
+                                                                           __mmask16 valid)
+{
+    bool needed = false;
+    __mmask16 candidates = _mm512_mask_test_epi32_mask(valid, _mm512_maskz_loadu_epi32(valid, stream->warnings + node), _mm512_set1_epi32(-1));
+    if (graph->contexts != NULL)
+    {
+        const __m128i contexts = _mm_maskz_loadu_epi8(valid, graph->contexts + node);
+        candidates |= _mm_mask_test_epi8_mask(valid, contexts, _mm_set1_epi8((char)(BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT))) &
+                      _mm_test_epi8_mask(contexts, _mm_set1_epi8((char)BUSTER_CHECK_CONTEXT_GNU_CONSTANT));
+    }
+    for (uint32_t lanes = candidates; !needed && lanes != 0; lanes &= lanes - 1)
+    {
+        needed = check_graph_warning_needed(types, graph, stream, node + (uint32_t)__builtin_ctz(lanes));
+    }
+    return needed;
+}
+
 static void check_graph_warning_contexts(TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint8_t* states)
 {
     stream->warning_count = 0;
     stream->warnings_prepared = true;
     bool needed = false;
     uint32_t node = 0;
-    // It reads only the warnings and the contexts, 16 at a time, and the values of the nodes whose GNU context may need
-    // them (#530); the nodes past the last 16 one at a time.
+    // It reads only the warnings and the contexts, 16 at a time and the last nodes as one masked step, and the values of
+    // the nodes whose GNU context may need them (#530).
     for (; !needed && graph->count - node >= BUSTER_CHECK_VALIDATE_LANES; node += BUSTER_CHECK_VALIDATE_LANES)
     {
-        __mmask16 candidates = _mm512_test_epi32_mask(_mm512_loadu_si512(stream->warnings + node), _mm512_set1_epi32(-1));
-        if (graph->contexts != NULL)
-        {
-            const __m128i contexts = _mm_loadu_si128((const __m128i*)(graph->contexts + node));
-            candidates |= _mm_test_epi8_mask(contexts, _mm_set1_epi8((char)(BUSTER_CHECK_CONTEXT_ICE | BUSTER_CHECK_CONTEXT_ASSERT))) &
-                          _mm_test_epi8_mask(contexts, _mm_set1_epi8((char)BUSTER_CHECK_CONTEXT_GNU_CONSTANT));
-        }
-        for (uint32_t lanes = candidates; !needed && lanes != 0; lanes &= lanes - 1)
-        {
-            needed = check_graph_warning_needed(types, graph, stream, node + (uint32_t)__builtin_ctz(lanes));
-        }
+        needed = check_graph_warning_step(types, graph, stream, node, (__mmask16)0xffff);
     }
-    for (; !needed && node < graph->count; node += 1)
+    if (!needed && node < graph->count)
     {
-        needed = check_graph_warning_needed(types, graph, stream, node);
+        needed = check_graph_warning_step(types, graph, stream, node, (__mmask16)((1u << (graph->count - node)) - 1));
     }
     if (!needed)
     {
@@ -4035,26 +4044,33 @@ static void check_graph_counted_uses(const TypeTable* types, const CheckGraph* g
     arena_pop_to(scratch, mark);
 }
 
+// The 16 (or `valid`'s) nodes from `node` of check_graph_reports: each with a diagnostic or a context reports.
+static inline __attribute__((always_inline)) void check_graph_report_step(TypeTable* types, const CheckGraph* graph, CheckStream* stream, uint32_t node,
+                                                                          __mmask16 valid)
+{
+    __mmask16 reported = _mm512_mask_cmpneq_epi32_mask(valid, _mm512_maskz_loadu_epi32(valid, stream->diagnostics + node), _mm512_set1_epi32(CHECK_DIAG_NONE));
+    if (graph->contexts != 0)
+    {
+        reported |= _mm_mask_test_epi8_mask(valid, _mm_maskz_loadu_epi8(valid, graph->contexts + node), _mm_set1_epi8(-1));
+    }
+    for (uint32_t lanes = reported; lanes != 0; lanes &= lanes - 1)
+    {
+        check_graph_report_node(types, graph, stream, node + (uint32_t)__builtin_ctz(lanes));
+    }
+}
+
 static void check_graph_reports(TypeTable* types, const CheckGraph* graph, CheckStream* stream, CheckReport* temporary)
 {
     // Only a node with a diagnostic or a context reports: it finds those 16 at a time and reads no other node's value (a
-    // sixth of the graph's bytes, #530), the nodes past the last 16 one at a time.
+    // sixth of the graph's bytes, #530), the last nodes as one masked step.
     uint32_t node = 0;
     for (; graph->count - node >= BUSTER_CHECK_VALIDATE_LANES; node += BUSTER_CHECK_VALIDATE_LANES)
     {
-        __mmask16 reported = _mm512_cmpneq_epi32_mask(_mm512_loadu_si512(stream->diagnostics + node), _mm512_set1_epi32(CHECK_DIAG_NONE));
-        if (graph->contexts != 0)
-        {
-            reported |= _mm_test_epi8_mask(_mm_loadu_si128((const __m128i*)(graph->contexts + node)), _mm_set1_epi8(-1));
-        }
-        for (uint32_t lanes = reported; lanes != 0; lanes &= lanes - 1)
-        {
-            check_graph_report_node(types, graph, stream, node + (uint32_t)__builtin_ctz(lanes));
-        }
+        check_graph_report_step(types, graph, stream, node, (__mmask16)0xffff);
     }
-    for (; node < graph->count; node += 1)
+    if (node < graph->count)
     {
-        check_graph_report_node(types, graph, stream, node);
+        check_graph_report_step(types, graph, stream, node, (__mmask16)((1u << (graph->count - node)) - 1));
     }
     // Diagnostics are cold. Four stable radix passes restore source-token order without callbacks or recursion.
     CheckReport* source = stream->reports;
@@ -4089,8 +4105,8 @@ static void check_graph_reports(TypeTable* types, const CheckGraph* graph, Check
 
 _Static_assert(sizeof(CheckDiagnostic) == sizeof(uint32_t), "the vector scans load diagnostics as 32-bit lanes");
 
-// The first node whose action ran out of room, or BUSTER_CHECK_NONE: AVX-512 compares 16 diagnostics at a time, the rest one
-// at a time.
+// The first node whose action ran out of room, or BUSTER_CHECK_NONE: AVX-512 compares 16 diagnostics at a time, the last
+// ones as one masked step.
 static uint32_t check_graph_resource_node(const CheckStream* stream, uint32_t count)
 {
     uint32_t found = BUSTER_CHECK_NONE;
@@ -4100,9 +4116,11 @@ static uint32_t check_graph_resource_node(const CheckStream* stream, uint32_t co
         const __mmask16 exhausted = _mm512_cmpeq_epi32_mask(_mm512_loadu_si512(stream->diagnostics + node), _mm512_set1_epi32(CHECK_DIAG_RESOURCE));
         found = exhausted != 0 ? node + (uint32_t)__builtin_ctz(exhausted) : BUSTER_CHECK_NONE;
     }
-    for (; found == BUSTER_CHECK_NONE && node < count; node += 1)
+    if (found == BUSTER_CHECK_NONE && node < count)
     {
-        found = stream->diagnostics[node] == CHECK_DIAG_RESOURCE ? node : BUSTER_CHECK_NONE;
+        const __mmask16 valid = (__mmask16)((1u << (count - node)) - 1);
+        const __mmask16 exhausted = _mm512_mask_cmpeq_epi32_mask(valid, _mm512_maskz_loadu_epi32(valid, stream->diagnostics + node), _mm512_set1_epi32(CHECK_DIAG_RESOURCE));
+        found = exhausted != 0 ? node + (uint32_t)__builtin_ctz(exhausted) : BUSTER_CHECK_NONE;
     }
     return found;
 }
