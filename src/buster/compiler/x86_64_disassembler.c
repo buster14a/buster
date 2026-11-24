@@ -106,9 +106,10 @@ static uint64_t x86_decode_storage_bytes;
 static X86DecodeIndex x86_decode_indices[2 * BUSTER_X86_DECODE_MAPS * 256];
 static uint16_t* x86_decode_index_rows;
 static uint32_t x86_decode_index_count;
-static uint8_t x86_decode_length_table[256] __attribute__((aligned(64)));
+// By map (0: one-byte opcodes, 1: 0F's) and opcode.
+static uint8_t x86_decode_length_table[2 * 256] __attribute__((aligned(64)));
 static X86DecodeCheck x86_decode_checks[X86_FORM_COUNT];
-static uint32_t x86_decode_simple[256 * 32];
+static uint32_t x86_decode_simple[2 * 256 * 32];
 static bool x86_decode_initialized;
 static uint32_t x86_decode_entry_count;
 
@@ -270,31 +271,55 @@ static uint64_t x86_decode_signature(const X86FormDescription* form, uint64_t* k
     return mask;
 }
 
+// The direct paths' map of an unprefixed legacy form: 0 for a one-byte opcode, 1 for 0F's two-byte ones (not 0F 38's
+// or 0F 3A's), UINT32_MAX for any other form.
+static uint32_t x86_decode_simple_map(const X86FormDescription* form)
+{
+    uint32_t map = UINT32_MAX;
+    if (form->family == BUSTER_X86_FAMILY_LEGACY && form->prefixes == 0)
+    {
+        const uint8_t second = x86_opcode_byte(form, 1);
+        map = form->opcode_bytes == 1 ? 0 : form->opcode_bytes == 2 && x86_opcode_byte(form, 0) == 0x0f && second != 0x38 && second != 0x3a ? 1 : UINT32_MAX;
+    }
+    return map;
+}
+
 static void x86_decode_lengths_initialize(void)
 {
-    // A fast length hint exists only if every unprefixed one-byte catalogue form for this opcode agrees on the
-    // layout. 0x40 marks a known row, 0x10 ModRM, the low nibble trailing bytes, 0x20 adds four bytes with REX.W,
-    // and 0x80 requires REX.W. Conflicting opcode extensions (F6/F7, for example) have no hint.
-    uint8_t metadata[2][256] = {{0}};
+    // A fast length hint exists only if every unprefixed legacy catalogue form for this opcode in its map (one-byte
+    // opcodes, or 0F's two-byte ones) agrees on the layout. 0x40 marks a known row, 0x10 ModRM, the low nibble trailing
+    // bytes, 0x20 adds four bytes with REX.W, and 0x80 requires REX.W. Conflicting opcode extensions (F6/F7, for
+    // example) have no hint.
+    uint8_t metadata[2][2][256] = {{{0}}};
     for (uint32_t row = 1; row < X86_FORM_COUNT; row += 1)
     {
         const X86FormDescription* form = &x86_form_descriptions[row];
-        if (x86_decode_form_supported(row) && form->family == BUSTER_X86_FAMILY_LEGACY && form->prefixes == 0 && form->opcode_bytes == 1 && form->opcode != 0x9b)
+        const uint32_t map = x86_decode_simple_map(form);
+        if (x86_decode_form_supported(row) && map != UINT32_MAX && form->opcode != 0x9b)
         {
             const bool modrm = form->encoding == BUSTER_X86_ENCODING_R || (form->encoding & BUSTER_X86_ENCODING_DIGIT);
             const uint8_t meta = 0x40 | (modrm ? 0x10 : 0) | (form->immediate_bytes + form->relative_bytes);
             const uint32_t count = form->encoding == BUSTER_X86_ENCODING_PR ? 8 : 1;
             for (uint32_t i = 0; i < count; i += 1)
             {
-                uint8_t* entry = &metadata[form->w][form->opcode | i];
+                uint8_t* entry = &metadata[map][form->w][(form->opcode & 0xff) | i];
                 *entry = *entry == 0 || *entry == meta ? meta : 0xff;
             }
         }
+        // A longer form whose opcode starts with 0F and the same second byte (0F 01 D0, 0F AE F0, 0F 0F's operation
+        // byte, a prefixed one too) fixes a byte the direct paths would read as ModRM: that opcode gets no hint, so
+        // neither its length nor its admission is taken there.
+        const bool longer = form->family == BUSTER_X86_FAMILY_LEGACY && form->opcode_bytes >= 3 && x86_opcode_byte(form, 0) == 0x0f;
+        if (longer && x86_decode_form_supported(row) && x86_opcode_byte(form, 1) != 0x38 && x86_opcode_byte(form, 1) != 0x3a)
+        {
+            metadata[1][0][x86_opcode_byte(form, 1)] = 0xff;
+            metadata[1][1][x86_opcode_byte(form, 1)] = 0xff;
+        }
     }
-    for (uint32_t opcode = 0; opcode < 256; opcode += 1)
+    for (uint32_t opcode = 0; opcode < 2 * 256; opcode += 1)
     {
-        const uint8_t narrow = metadata[0][opcode];
-        const uint8_t wide = metadata[1][opcode];
+        const uint8_t narrow = metadata[opcode >> 8][0][opcode & 0xff];
+        const uint8_t wide = metadata[opcode >> 8][1][opcode & 0xff];
         uint8_t meta = 0;
         if (narrow != 0xff && wide != 0xff)
         {
@@ -357,13 +382,13 @@ static void x86_decode_checks_initialize(void)
 
 static void x86_decode_simple_initialize(void)
 {
-    // Direct admission for ordinary, unprefixed one-byte legacy forms. The table distinguishes REX.W, /digit and
-    // memory admission. Ambiguous aliases retain the ordinary matcher; no input-dependent form scan is hidden here.
+    // Direct admission for ordinary, unprefixed legacy forms of one-byte opcodes and of 0F's (x86_decode_simple_map),
+    // where the length table has a hint. The table distinguishes REX.W, /digit and memory admission. Ambiguous aliases retain the ordinary matcher; no input-dependent form scan is hidden here.
     for (uint32_t row = 1; row < X86_FORM_COUNT; row += 1)
     {
         const X86FormDescription* form = &x86_form_descriptions[row];
-        if ((x86_decode_checks[row].flags & 1) && form->family == BUSTER_X86_FAMILY_LEGACY && form->prefixes == 0 &&
-            form->opcode_bytes == 1 && form->opcode != 0x9b && form->opcode != 0x90 &&
+        const uint32_t map = x86_decode_simple_map(form);
+        if ((x86_decode_checks[row].flags & 1) && map != UINT32_MAX && form->opcode != 0x9b && form->opcode != 0x90 &&
             (form->reg & BUSTER_X86_OPERAND_CLASS) <= BUSTER_X86_CLASS_GPR64 && (form->rm & BUSTER_X86_OPERAND_CLASS) <= BUSTER_X86_CLASS_GPR64)
         {
             const bool modrm = form->encoding == BUSTER_X86_ENCODING_R || (form->encoding & BUSTER_X86_ENCODING_DIGIT);
@@ -372,7 +397,8 @@ static void x86_decode_simple_initialize(void)
                                   ((uint32_t)plus << 18) | ((uint32_t)((form->reg & BUSTER_X86_OPERAND_CLASS) == BUSTER_X86_CLASS_GPR8) << 19) |
                                   ((uint32_t)((form->rm & BUSTER_X86_OPERAND_CLASS) == BUSTER_X86_CLASS_GPR8) << 20) |
                                   ((uint32_t)form->immediate_bytes << 24) | ((uint32_t)form->relative_bytes << 28);
-            for (uint32_t opcode = form->opcode; opcode < form->opcode + (plus ? 8u : 1u); opcode += 1)
+            const uint32_t first = map * 256 + (form->opcode & 0xff);
+            for (uint32_t opcode = first; opcode < first + (plus ? 8u : 1u); opcode += 1)
             {
                 for (uint32_t digit = 0; digit < 8; digit += 1)
                 {
@@ -507,14 +533,23 @@ static void x86_decode_lengths(const uint8_t* source, uint64_t size, uint8_t* le
     const __m512i next = x86_decode_window(source, size, 1);
     const __m512i third = x86_decode_window(source, size, 2);
     const __m512i fourth = x86_decode_window(source, size, 3);
+    const __m512i fifth = x86_decode_window(source, size, 4);
     const uint64_t rex = _mm512_cmpeq_epi8_mask(_mm512_and_si512(first, _mm512_set1_epi8((char)0xf0)), _mm512_set1_epi8(0x40));
     const uint64_t wide = rex & _mm512_test_epi8_mask(first, _mm512_set1_epi8(8));
-    const __m512i opcode = _mm512_mask_blend_epi8(rex, first, next);
-    const __m512i modrm = _mm512_mask_blend_epi8(rex, next, third);
-    const __m512i sib = _mm512_mask_blend_epi8(rex, third, fourth);
+    // An optional REX, then an optional 0F escape (its map's opcodes: x86_decode_simple_map): one byte or two before
+    // the opcode.
+    const uint64_t escape = _mm512_cmpeq_epi8_mask(_mm512_mask_blend_epi8(rex, first, next), _mm512_set1_epi8(0x0f));
+    const uint64_t one = rex ^ escape;
+    const uint64_t two = rex & escape;
+    const __m512i opcode = _mm512_mask_blend_epi8(two, _mm512_mask_blend_epi8(one, first, next), third);
+    const __m512i modrm = _mm512_mask_blend_epi8(two, _mm512_mask_blend_epi8(one, next, third), fourth);
+    const __m512i sib = _mm512_mask_blend_epi8(two, _mm512_mask_blend_epi8(one, third, fourth), fifth);
+    const uint64_t upper = _mm512_movepi8_mask(opcode);
     const __m512i low = _mm512_permutex2var_epi8(_mm512_load_si512(x86_decode_length_table), opcode, _mm512_load_si512(x86_decode_length_table + 64));
     const __m512i high = _mm512_permutex2var_epi8(_mm512_load_si512(x86_decode_length_table + 128), opcode, _mm512_load_si512(x86_decode_length_table + 192));
-    const __m512i meta = _mm512_mask_blend_epi8(_mm512_movepi8_mask(opcode), low, high);
+    const __m512i escaped_low = _mm512_permutex2var_epi8(_mm512_load_si512(x86_decode_length_table + 256), opcode, _mm512_load_si512(x86_decode_length_table + 320));
+    const __m512i escaped_high = _mm512_permutex2var_epi8(_mm512_load_si512(x86_decode_length_table + 384), opcode, _mm512_load_si512(x86_decode_length_table + 448));
+    const __m512i meta = _mm512_mask_blend_epi8(escape, _mm512_mask_blend_epi8(upper, low, high), _mm512_mask_blend_epi8(upper, escaped_low, escaped_high));
     const uint64_t has_modrm = _mm512_test_epi8_mask(meta, _mm512_set1_epi8(16));
     const __m512i mod = _mm512_and_si512(_mm512_srli_epi16(modrm, 6), _mm512_set1_epi8(3));
     const __m512i rm = _mm512_and_si512(modrm, _mm512_set1_epi8(7));
@@ -526,6 +561,7 @@ static void x86_decode_lengths(const uint8_t* source, uint64_t size, uint8_t* le
     const uint64_t disp4 = (memory & _mm512_cmpeq_epi8_mask(mod, _mm512_set1_epi8(2))) | (mod0 & (_mm512_cmpeq_epi8_mask(rm, _mm512_set1_epi8(5)) | (has_sib & base5)));
     __m512i length = _mm512_add_epi8(_mm512_and_si512(meta, _mm512_set1_epi8(15)), _mm512_set1_epi8(1));
     length = _mm512_mask_add_epi8(length, rex, length, _mm512_set1_epi8(1));
+    length = _mm512_mask_add_epi8(length, escape, length, _mm512_set1_epi8(1));
     length = _mm512_mask_add_epi8(length, has_modrm, length, _mm512_set1_epi8(1));
     length = _mm512_mask_add_epi8(length, has_sib, length, _mm512_set1_epi8(1));
     length = _mm512_mask_add_epi8(length, disp1, length, _mm512_set1_epi8(1));
@@ -964,14 +1000,18 @@ static uint32_t x86_decode_simple_batch(const uint8_t* source, uint32_t span, co
     const __m512i first = _mm512_and_si512(initial, byte_mask);
     const uint16_t rex_mask = _mm512_cmpeq_epi32_mask(_mm512_and_si512(first, _mm512_set1_epi32(0xf0)), _mm512_set1_epi32(0x40));
     const __m512i rex = _mm512_maskz_mov_epi32(rex_mask, first);
-    const __m512i fields = _mm512_mask_srli_epi32(initial, rex_mask, initial, 8);
+    // After an optional REX, an optional 0F escape: the opcode's map (x86_decode_simple_map) and its position.
+    const __m512i lead = _mm512_and_si512(_mm512_mask_srli_epi32(initial, rex_mask, initial, 8), byte_mask);
+    const uint16_t escape = _mm512_cmpeq_epi32_mask(lead, _mm512_set1_epi32(0x0f));
+    const __m512i skip = _mm512_mask_add_epi32(_mm512_maskz_mov_epi32(rex_mask, one), escape, _mm512_maskz_mov_epi32(rex_mask, one), one);
+    const __m512i fields = x86_decode_extract(bytes, _mm512_add_epi32(positions, skip));
     const __m512i opcode = _mm512_and_si512(fields, byte_mask);
     const __m512i modrm = _mm512_and_si512(_mm512_srli_epi32(fields, 8), byte_mask);
     const __m512i sib = _mm512_srli_epi32(fields, 16);
     const __m512i mod = _mm512_srli_epi32(modrm, 6);
     const __m512i rm = _mm512_and_si512(modrm, seven);
     const uint16_t memory_mask = _mm512_cmpneq_epi32_mask(mod, _mm512_set1_epi32(3));
-    __m512i keys = _mm512_slli_epi32(opcode, 5);
+    __m512i keys = _mm512_slli_epi32(_mm512_mask_or_epi32(opcode, escape, opcode, _mm512_set1_epi32(256)), 5);
     keys = _mm512_or_si512(keys, _mm512_slli_epi32(_mm512_and_si512(rex, _mm512_set1_epi32(8)), 1));
     keys = _mm512_or_si512(keys, _mm512_and_si512(_mm512_srli_epi32(modrm, 2), _mm512_set1_epi32(14)));
     keys = _mm512_mask_or_epi32(keys, memory_mask, keys, one);
@@ -1022,8 +1062,7 @@ static uint32_t x86_decode_simple_batch(const uint8_t* source, uint32_t span, co
         mode = _mm512_mask_or_epi32(mode, base, mode, _mm512_set1_epi32(BUSTER_X86_MODE_BASE));
         mode = _mm512_mask_or_epi32(mode, rip, mode, _mm512_set1_epi32(BUSTER_X86_MODE_RIP));
         mode = _mm512_mask_or_epi32(mode, has_index, mode, _mm512_or_si512(_mm512_set1_epi32(BUSTER_X86_MODE_INDEX), _mm512_and_si512(_mm512_srli_epi32(sib, 6), _mm512_set1_epi32(3))));
-        __m512i at = _mm512_add_epi32(positions, one);
-        at = _mm512_mask_add_epi32(at, rex_mask, at, one);
+        __m512i at = _mm512_add_epi32(_mm512_add_epi32(positions, skip), one);
         at = _mm512_mask_add_epi32(at, has_modrm, at, one);
         at = _mm512_mask_add_epi32(at, has_sib, at, one);
         const __m512i displacement_bytes = _mm512_mask_mov_epi32(_mm512_maskz_mov_epi32(disp1, one), disp4, _mm512_set1_epi32(4));
@@ -1114,7 +1153,8 @@ static X86DecodeResult x86_disassemble(const uint8_t* source, uint64_t size, X86
                         result.count += fast;
                         result.consumed = start + offsets[fast - 1] + lengths[offsets[fast - 1]];
                     }
-                    for (uint32_t i = fast; i < count && consistent && result.status == X86_DECODE_OK; i += 1)
+                    // The first lane the batch refused alone; the lanes after it go back to the batch.
+                    for (uint32_t i = fast; i < count && i == fast && consistent && result.status == X86_DECODE_OK; i += 1)
                     {
                         const uint32_t at = offsets[i];
                         const uint64_t available = remaining - at;
