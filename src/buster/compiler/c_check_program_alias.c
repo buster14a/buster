@@ -218,7 +218,7 @@ static bool check_program_alias_names(const CheckProgram* program, CheckProgramA
     uint32_t label_count = 0;
     for (uint32_t first = 0; valid && first < token_count; first += 64)
     {
-        const uint64_t lanes = BUSTER_SCALAR_PATH(scalar) ? check_input_scan_all(first, token_count) : check_input_scan_bit(input->declaration_bits, first, token_count, BUSTER_CHECK_BITS_STATIC);
+        const uint64_t lanes = check_input_scan_bit(input->declaration_bits, first, token_count, BUSTER_CHECK_BITS_STATIC);
         for (uint64_t selected = lanes; selected != 0; selected &= selected - 1)
         {
             const uint32_t token = first + (uint32_t)__builtin_ctzll(selected);
@@ -310,7 +310,7 @@ static bool check_program_alias_names(const CheckProgram* program, CheckProgramA
     // An identifier names its object where no declaration of it has a label, but an overloadable function's.
     for (uint32_t first = 0; valid && first < token_count; first += 64)
     {
-        const uint64_t lanes = BUSTER_SCALAR_PATH(scalar) ? check_input_scan_all(first, token_count) : check_input_scan_bit(input->declaration_bits, first, token_count, BUSTER_CHECK_BITS_STATIC);
+        const uint64_t lanes = check_input_scan_bit(input->declaration_bits, first, token_count, BUSTER_CHECK_BITS_STATIC);
         for (uint64_t selected = lanes; selected != 0; selected &= selected - 1)
         {
             const uint32_t token = first + (uint32_t)__builtin_ctzll(selected);
@@ -334,7 +334,7 @@ static bool check_program_alias_names(const CheckProgram* program, CheckProgramA
     const uint64_t* by_target = valid && group_count > 1 ? c_bindings_sort(objects, objects + count, group_count, !BUSTER_SCALAR_PATH(scalar), UINT32_MAX) : objects;
     for (uint32_t first = 0; valid && first < token_count; first += 64)
     {
-        const uint64_t lanes = BUSTER_SCALAR_PATH(scalar) ? check_input_scan_all(first, token_count) : check_input_scan_bit(input->declaration_bits, first, token_count, BUSTER_CHECK_BITS_STATIC);
+        const uint64_t lanes = check_input_scan_bit(input->declaration_bits, first, token_count, BUSTER_CHECK_BITS_STATIC);
         for (uint64_t selected = lanes; selected != 0; selected &= selected - 1)
         {
             const uint32_t token = first + (uint32_t)__builtin_ctzll(selected);
@@ -651,7 +651,7 @@ static bool check_program_label_merges(CheckProgram* program, const CheckProgram
     const uint32_t token_count = input->token_count;
     for (uint32_t first = 0; valid && scan && first < token_count; first += 64)
     {
-        const uint64_t lanes = BUSTER_SCALAR_PATH(scalar) ? check_input_scan_all(first, token_count) : check_input_scan_bit(input->declaration_bits, first, token_count, BUSTER_CHECK_BITS_STATIC);
+        const uint64_t lanes = check_input_scan_bit(input->declaration_bits, first, token_count, BUSTER_CHECK_BITS_STATIC);
         for (uint64_t selected = lanes; selected != 0; selected &= selected - 1)
         {
             const uint32_t token = first + (uint32_t)__builtin_ctzll(selected);
@@ -754,7 +754,7 @@ static bool check_program_label_merges(CheckProgram* program, const CheckProgram
 // nothing else needs it (clang's GetWeakRefReference, whose extern_weak declaration an ordinary reference makes
 // external), which the first loop decides for every weakref before the second marks any target. Returns false where
 // there was no room.
-static bool check_program_alias_number(CheckProgram* program, uint8_t* needed, uint8_t* states, bool scalar, Arena* output)
+static bool check_program_alias_number(CheckProgram* program, uint8_t* needed, uint8_t* states, Arena* output)
 {
     // An object an asm label makes another's symbol (#1979) needs that one's instead.
     for (uint32_t k = 0; k < program->label_merge_count; k += 1)
@@ -810,12 +810,12 @@ static bool check_program_alias_number(CheckProgram* program, uint8_t* needed, u
                                      check_input_bit(program->input->declaration_bits, object - 1, BUSTER_CHECK_BITS_STATIC);
         needed[object] = global_register ? 0 : needed[object];
     }
-    program->symbol_count = check_program_needed_count(needed, program->object_count, BUSTER_SCALAR_PATH(scalar));
+    program->symbol_count = check_program_needed_count(needed, program->object_count);
     program->symbol_objects = program->symbol_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, program->symbol_count) : 0;
     const bool valid = program->symbol_count == 0 || program->symbol_objects != 0;
     if (valid && program->symbol_count != 0)
     {
-        check_program_needed_number(needed, program->object_count, program->object_symbols, program->symbol_objects, BUSTER_SCALAR_PATH(scalar));
+        check_program_needed_number(needed, program->object_count, program->object_symbols, program->symbol_objects);
     }
     for (uint32_t k = 0; valid && k < program->alias_count; k += 1)
     {

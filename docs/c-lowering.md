@@ -1944,8 +1944,8 @@ ablation with main's file takes it back).
 The lowering visits the tokens that declare or start an initializer, which
 `check_program_declaring` gives 16 at a time with a register compress; the
 selection counts and numbers its needed objects 64 at a time
-(`check_program_needed_count`, `check_program_needed_number`); each has an exact
-scalar twin, which `test-checker` compares at `PROT_NONE` pages. The lowering's
+(`check_program_needed_count`, `check_program_needed_number`); `test-checker`
+compares each with its definition at `PROT_NONE` pages. The lowering's
 ABI table has rows for its type table's types alone (`abi_initialize_types`):
 the lowering makes no type, and classifies only the types it has rows for. The
 selection now reads the static declaration keys retained by `check_data_prepare`
