@@ -8221,6 +8221,7 @@ static void check_test_driver_lazy(CheckTest* test, const char* clang, const cha
         const char* source;
         bool rejected;
         bool lazy_rejected;
+        const char* history_row;
     } fixtures[] =
     {
         {
@@ -8278,6 +8279,7 @@ static void check_test_driver_lazy(CheckTest* test, const char* clang, const cha
             "#define DEF(name) static int name(void){return missing;}\n#include \"lazy.h\"\nint f(void){return 3;}\n",
             true,
             false,
+            "\ntime-process\thistory-replays\t0\n",
         },
         {
             "a system transition inside a macro argument uses the invocation's history",
@@ -8285,6 +8287,7 @@ static void check_test_driver_lazy(CheckTest* test, const char* clang, const cha
             "#define DEF(x) static int hidden(void){return missing;}\n# 1 \"sys.h\" 3\nDEF(\n# 2 \"user.c\"\n0)\nint f(void){return 3;}\n",
             true,
             false,
+            "\ntime-process\thistory-replays\t1\n",
         },
         {
             "a file-scope address retains a system body in both modes",
@@ -8309,6 +8312,14 @@ static void check_test_driver_lazy(CheckTest* test, const char* clang, const cha
                            parse_test_write(source, fixtures[fixture].source, strlen(fixtures[fixture].source)) &&
                            check_corpus_clang_file(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), source, &oracle);
         check_test_expect(test, ready && oracle.rejected == fixtures[fixture].rejected, fixtures[fixture].name);
+        if (ready && executable != NULL && fixtures[fixture].history_row != NULL)
+        {
+            char* timed[] = { (char*)executable, "-std=gnu17", "-w", "-flazy-system-headers", "-fsyntax-only", "--time-stages", source, NULL };
+            char* text = NULL;
+            const int status = check_test_driver_spawn(timed, &text);
+            check_test_expect(test, status == 0 && text != NULL && strstr(text, fixtures[fixture].history_row) != NULL, fixtures[fixture].name);
+            free(text);
+        }
         const uint32_t routes = executable != NULL ? 4 : 2;
         for (uint32_t route = 0; ready && route < routes; route += 1)
         {
