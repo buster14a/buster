@@ -1450,8 +1450,7 @@ target, and one of 102,400 workers in 117 µs, against 4 to 10 ms for its
 whole link.
 
 The dynamic PIE, the third part, is "The dynamic PIE" below: its stubs,
-dynamic symbols, relocations and RELR, each pass with its vector path and
-its exact twin. Where it differs from the plan here before it: the dynamic
+dynamic symbols, relocations and RELR, each pass data-parallel. Where it differs from the plan here before it: the dynamic
 symbols are found in bitsets, 64 symbols at a time, rather than compressed;
 the stubs and refusals come from a filter in registers that every fixup's
 target is tested against; RELR is encoded per atom, so that its size is known
@@ -1532,8 +1531,8 @@ takes vectors. The count adds its sizes, padded to their alignment, and its
 pieces; the placement scans them into its atoms' addresses, and when its
 atoms are all in the file, or none, interleaves their pieces' records with
 permutes, two to a vector. A block with a bucket's change, or an atom of the
-classes that keep id order or are entries, goes one atom at a time, as the
-exact twins do every block, which also finds any atom the layout refuses.
+classes that keep id order or are entries, goes one atom at a time, which
+also finds any atom the layout refuses.
 Then each symbol's reference, 16 at a time: a block whose symbols are all in
 atoms that aren't thread-local gathers their atoms' classes and addresses.
 On `benchmark-executable`'s 180,000 workers (185,457 atoms and 182,728
@@ -2025,9 +2024,10 @@ cost of the feature, not a throughput improvement. Raw logs remain at
   counting sort) after the undefined symbols. The versions are numbered from
   2 in the libraries' order of them, `libc.so.6`'s first.
 
-Every pass is data-parallel and vectorized, with an exact twin, scalar, that
-`ExecutableOptions.exact` selects; the tests write each program both ways and
-compare the files byte for byte:
+Every pass is data-parallel and vectorized. Each had an exact twin, scalar,
+that `ExecutableOptions.exact` selected and the tests compared byte for byte,
+until #2924 deleted them once the vector passes were at least as fast at every
+size ([record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/scalar-paths-removal-2924-2026-11-17/c-linker-executable)); the table keeps the twins' names as they were:
 
 | Pass (phase) | Vector path | Exact twin |
 | --- | --- | --- |
@@ -2182,8 +2182,8 @@ link of the same object runs, and with `--cross-check` as lld's.
   checked path, which refuses the fixup, as GNU ld says the relocation is
   truncated to fit.
 
-The passes it adds, each data-parallel with an exact twin that
-`ExecutableOptions.exact` selects, which the tests compare byte for byte:
+The passes it adds, each data-parallel; the table keeps the exact twins'
+names that `ExecutableOptions.exact` selected until #2924 deleted them:
 
 | Pass (phase) | Vector path | Exact twin |
 | --- | --- | --- |
@@ -2384,7 +2384,7 @@ slots), a `GOTTPOFF`, or a load of an IFUNC.
   out of the same bitset. lld's non-PIC immediates for `test` and binops
   through the GOT (`R_RELAX_GOT_PC_NOPIC`) aren't taken: the import gives
   those instructions `GOTPCREL`, and the count doesn't read the code.
-- **The passes,** data-parallel with exact twins: `executable_mark_relaxable`
+- **The passes,** data-parallel: `executable_mark_relaxable`
   makes the bitset of the relaxable symbols 64 at a time, a PIE's from its
   RELATIVE bitset and a static executable's from compares of the source and
   type columns, 2 bytes a symbol, less the IFUNCs (the static runtime's
