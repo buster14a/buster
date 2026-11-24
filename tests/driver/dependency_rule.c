@@ -191,7 +191,7 @@ static void dependency_test_guarded(void)
                         char* start = memory + page - length;
                         memset(start, (int)byte, length);
                         const uint64_t expected = dependency_test_special(start, length);
-                        dependency_test_check(dependency_special(start, length, false) == expected, "all bytes and guarded classifier tails");
+                        dependency_test_check(dependency_special(start, length) == expected, "all bytes and guarded classifier tails");
                     }
                 }
                 for (uint32_t length = 1; length <= 256; length += 1)
@@ -431,6 +431,6 @@ int main(int argc, char** argv)
     {
         dependency_test_check(false, "usage: dependency-rule-test [--oracle]");
     }
-    printf("dependency-rule: %u checks, %u failures; AVX-512BW compiled: %d\n", checks, failures, BUSTER_DEPENDENCY_VECTOR);
+    printf("dependency-rule: %u checks, %u failures\n", checks, failures);
     return failures == 0 ? 0 : 1;
 }
