@@ -994,7 +994,7 @@ data too.
 The source reader maps parser tokens' source indices to system-header bits in
 `check_input_system_token_map`. It clamps indices at or beyond the preprocessor
 output count to the user-file sentinel, gathers the low level byte in groups of
-16 and finishes the tail with the scalar twin. History/run selection, arena
+16 and takes the last tokens as one masked step (#3448). History/run selection, arena
 ownership and the graph's final sentinel remain in `check_input_system_tokens`.
 
 The mapping kernel is deliberately `noinline`. In the pinned LLVM 23.1.4

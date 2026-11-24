@@ -63,6 +63,12 @@ static void check_test_transition_classes(CheckTest* test, const char* name, con
     arena_pop_to(scratch, mark);
 }
 
+// The operators whose actions the table memoizes (check_transition_statics_step), the test's definition.
+static bool check_test_transition_op(CheckOp op)
+{
+    return (op >= CHECK_OP_POSITIVE && op <= CHECK_OP_SELECT) || op == CHECK_OP_REAL || op == CHECK_OP_IMAGINARY;
+}
+
 // One node's static word: the table takes a node by its operator, without a constant evaluation, a plain library builtin's
 // fold or more arguments than a key holds; its key's first word has its operator, extensions (with the system-header bit
 // from its token), floating environment and a call's argument count. The test's definition, a node at a time.
@@ -71,7 +77,7 @@ static uint32_t check_test_transition_static(const CheckGraph* graph, const Chec
     const CheckOp op = graph->ops[node];
     const bool call = op == CHECK_OP_CALL;
     const uint32_t count = call ? graph->argument_counts[node] : 0;
-    const bool eligible = check_transition_op(op) && (stream->constant_evaluated == NULL || stream->constant_evaluated[node] == 0) &&
+    const bool eligible = check_test_transition_op(op) && (stream->constant_evaluated == NULL || stream->constant_evaluated[node] == 0) &&
                           (!call || ((graph->members[node] & BUSTER_CHECK_LIBRARY_CALL) == 0 && count <= BUSTER_CHECK_TRANSITION_ARGUMENTS));
     const uint32_t token = graph->tokens != NULL ? graph->tokens[node] : BUSTER_CHECK_NONE;
     const uint32_t extensions = graph->extensions | (check_graph_relaxed_token(graph, token) ? BUSTER_CHECK_EXTENSION_SYSTEM_HEADER : 0);

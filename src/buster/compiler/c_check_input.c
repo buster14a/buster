@@ -17057,10 +17057,6 @@ static void check_input_tentative_arrays(CheckInputReader* reader, uint32_t limi
 #include "c_check_x86_input.c"
 #include "c_check_naked_input.c"
 
-// Map the parser's sources to the byte bitmap, with levels[limit] a user-file sentinel and three readable bytes
-// after it. Keep this small function out of check_input_run: LLVM 23.1.4's MSan switches a large function's wide
-// checks to callbacks whose temporary shadows are allocated at the check, which in this loop can grow the stack
-// with the token count. The separate frame retains every check and the vector path (#1610).
 // The marks of the 16 (or `valid`'s) tokens from `token`: their sources, clamped, gather four bytes each at their levels,
 // of which the low one is the level.
 static inline __attribute__((always_inline)) void check_input_system_token_step(uint8_t* tokens, const uint32_t* sources, const uint8_t* levels, uint32_t limit,
@@ -17073,6 +17069,10 @@ static inline __attribute__((always_inline)) void check_input_system_token_step(
     _mm_mask_storeu_epi8(tokens + token, valid, _mm_maskz_set1_epi8(marked, 1));
 }
 
+// Map the parser's sources to the byte bitmap, with levels[limit] a user-file sentinel and three readable bytes
+// after it. Keep this small function out of check_input_run: LLVM 23.1.4's MSan switches a large function's wide
+// checks to callbacks whose temporary shadows are allocated at the check, which in this loop can grow the stack
+// with the token count. The separate frame retains every check and the vector path (#1610).
 static __attribute__((noinline)) void check_input_system_token_map(uint8_t* tokens, const uint32_t* sources, uint32_t count, const uint8_t* levels, uint32_t limit)
 {
     // 16 tokens at a time (#529), the last ones as one masked step.

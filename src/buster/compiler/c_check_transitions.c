@@ -171,14 +171,6 @@ struct CheckTransitionBatch
     uint32_t count;
 };
 
-// The operators whose actions the table memoizes: every ordinary action's, which the node's own operands and arguments
-// decide. VALUE completes as a leaf; the builtins, varargs, the variable-length arrays' operators and a statement
-// expression's value keep their own records or effects.
-static bool check_transition_op(CheckOp op)
-{
-    return (op >= CHECK_OP_POSITIVE && op <= CHECK_OP_SELECT) || op == CHECK_OP_REAL || op == CHECK_OP_IMAGINARY;
-}
-
 // The node order's static words (check_transition_statics), one a node: BUSTER_CHECK_TRANSITION_OTHER for a node the table
 // doesn't take, BUSTER_CHECK_TRANSITION_LEAF for a VALUE (a leaf, check_graph_is_leaf, unless it has an overload set), and
 // otherwise the key's first word but its objects' pattern and member (BUSTER_CHECK_KEY_VALID among its bits).
@@ -187,7 +179,10 @@ static bool check_transition_op(CheckOp op)
 
 _Static_assert(sizeof(CheckOp) == sizeof(uint32_t), "the static words' vector path loads 16 operators at a time");
 
-// The static words of the 16 (or `valid`'s) nodes from `node` (check_transition_statics).
+// The static words of the 16 (or `valid`'s) nodes from `node` (check_transition_statics). The table memoizes every
+// ordinary action, POSITIVE to SELECT, REAL and IMAGINARY, which the node's own operands and arguments decide. VALUE
+// completes as a leaf; the builtins, varargs, the variable-length arrays' operators and a statement expression's value
+// keep their own records or effects.
 static inline __attribute__((always_inline)) void check_transition_statics_step(const CheckGraph* graph, const CheckStream* stream, uint32_t* statics, uint32_t node,
                                                                                 __mmask16 valid)
 {
