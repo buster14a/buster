@@ -6842,10 +6842,12 @@ argument's takes its place among the call's conversion warnings, as its error
 does (#2481). An error among them rejects the unit.
 
 The recheck's source is the stream's value before its lvalue conversions, so
-the driver decays it first as the checker did
+the driver converts it first as the checker did
 (`check_driver_default_error_source`): a function designator to its pointer
-(#2424) and an array to the pointer to its element, qualifiers kept (#3559).
-A compatible decayed array or string literal is then no conversion to report.
+(#2424), an array to the pointer to its element, qualifiers kept (#3559), and
+any other lvalue to its value's type, without `_Atomic` and its own qualifiers
+(#3565). A compatible decayed array, string literal or `_Atomic` pointer is
+then no conversion to report.
 The pointer type is the one the checker's conversion interned. Without it, a
 function designator is a resource failure and an array isn't rechecked.
 
