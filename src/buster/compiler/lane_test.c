@@ -1226,10 +1226,15 @@ static void lane_test_arena_warm_file_child(LaneTestTally* tally, const char* di
     arena_release(&again);
     arena_release(&past);
     arena_release(&little);
-    // A commit: whole huge pages, allocated in the file.
+    // A commit: whole huge pages, allocated in the file. On a busy host that gives medium pages (#2536), the file's are
+    // still the mount's: none of them is split (arena_medium_split).
+    const bool was_medium = arena_pages_medium;
+    arena_pages_medium = true;
+    arena_medium_splits = 0;
     uint8_t* memory = arena_push(&arena, bytes, 1);
+    arena_pages_medium = was_medium;
     const bool allocated = memory == arena.base && arena.committed == 4 * huge && slot->allocated == 4 * huge && fstat(arena_warm.file, &status) == 0 &&
-                           (uint64_t)status.st_blocks * 512 >= 4 * huge;
+                           (uint64_t)status.st_blocks * 512 >= 4 * huge && arena_medium_splits == 0;
     lane_test_expect(tally, allocated, "a warm arena's commit wasn't whole huge pages, allocated in its file");
     if (allocated)
     {
@@ -1265,13 +1270,18 @@ static void lane_test_arena_warm_file_child(LaneTestTally* tally, const char* di
                                 lane_test_bytes(memory + huge + 4, bytes - huge - 4, 0x5a),
                      "a slot's next arena didn't find the bytes its last one left");
     // An allocation the file system refuses (here a descriptor in the file's place, which has none): the arena goes on
-    // in the process's own memory past what the file holds of it, which stays.
+    // in the process's own memory past what the file holds of it, which stays. That memory takes an ordinary arena's
+    // pages: on a busy host that gives medium pages, each 2 MB of it is split, 6 of them, from the 4 the file holds.
     const int file = arena_warm.file;
     const int null = open("/dev/null", O_RDWR | O_CLOEXEC);
     arena_warm.file = null;
+    arena_pages_medium = true;
+    arena_medium_splits = 0;
     uint8_t* more = memory != 0 && null >= 0 ? arena_push(&arena, 6 * huge, 1) : 0;
+    arena_pages_medium = was_medium;
     arena_warm.file = file;
-    const bool own = more != 0 && slot->own && slot->allocated == 4 * huge && arena.committed == 10 * huge && lane_test_zero(memory + 4 * huge, 5 * huge + 123);
+    const bool own = more != 0 && slot->own && slot->allocated == 4 * huge && arena.committed == 10 * huge && lane_test_zero(memory + 4 * huge, 5 * huge + 123) &&
+                     arena_medium_splits == 6;
     lane_test_expect(tally, own, "a warm arena whose allocation was refused didn't go on in the process's own memory");
     if (own)
     {
@@ -1386,10 +1396,16 @@ static void lane_test_arena_warm_fill_child(LaneTestTally* tally)
     arena_warm_begin(0, BUSTER_ARENA_WARM_FILL);
     Arena arena = arena_reserve_warm(BUSTER_LANE_TEST_WARM_CAPACITY, 1);
     const ArenaWarmSlot* slot = arena_warm.slots + 1;
-    // The process's own memory from the start, without a file to allocate in.
+    // The process's own memory from the start, without a file to allocate in, which takes an ordinary arena's pages: on
+    // a busy host that gives medium pages (#2536), each 2 MB of its first commit is split.
     const bool own = arena.warm == 2 && arena_warm.file == -1 && slot->own && !arena_untouched(&arena);
+    const bool was_medium = arena_pages_medium;
+    arena_pages_medium = true;
+    arena_medium_splits = 0;
     uint8_t* memory = arena_push(&arena, huge + 5, 1);
-    const bool filled = own && memory != 0 && arena.committed == 2 * huge && slot->filled == 2 * huge && lane_test_bytes(memory, 2 * huge, BUSTER_ARENA_WARM_PATTERN);
+    arena_pages_medium = was_medium;
+    const bool filled = own && memory != 0 && arena.committed == 2 * huge && slot->filled == 2 * huge && lane_test_bytes(memory, 2 * huge, BUSTER_ARENA_WARM_PATTERN) &&
+                        arena_medium_splits == 2;
     lane_test_expect(tally, filled, "a filled warm arena's first commit wasn't the pattern");
     if (filled)
     {

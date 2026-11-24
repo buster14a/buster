@@ -533,7 +533,10 @@ BUSTER_ARENA_POOL=/path/to/pool ./build/compiler -c unit.c
   in the file. A tmpfs without room refuses the allocation, where the first
   touch of an unallocated page would kill the process with `SIGBUS`; the
   arena's memory past what the file holds of it is then the process's own, as
-  an ordinary arena's, for the rest of its use. The slot, not the arena, keeps
+  an ordinary arena's, for the rest of its use, and takes the pages an ordinary
+  arena's would: on a busy host that gives medium pages (#2536), its commits
+  are split as theirs are (`arena_medium_split`); the file's pages stay the
+  mount's. The slot, not the arena, keeps
   how far the file is allocated and how far a fill has written, so that a
   commit through a copy of the arena counts.
 - **Release and discards.** `arena_release` unmaps a warm arena and leaves its

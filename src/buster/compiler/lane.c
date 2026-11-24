@@ -1828,7 +1828,7 @@ static Arena arena_reserve_warm(uint64_t capacity, uint32_t slot)
         if (mapping != MAP_FAILED)
         {
             // The file's pages are huge where its mount gives them, or gives them to a mapping that asks; the process's
-            // own follow its arenas' (arena_pages_busy).
+            // own follow its arenas' (arena_pages_busy, and arena_pages_medium's splits as they are committed).
             if (!own || !arena_pages_busy)
             {
                 madvise(mapping, bytes, MADV_HUGEPAGE);
@@ -1907,6 +1907,12 @@ static bool arena_warm_commit(Arena* arena, uint64_t end)
     if (result)
     {
         arena->committed = target;
+        // The process's own memory, past what the file holds of the arena, takes an ordinary arena's pages: on a busy
+        // host that gives medium pages (#2536), none of 2 MB. The file's are the mount's.
+        if (slot->own && arena_pages_medium)
+        {
+            arena_medium_split(mapping, committed > slot->allocated ? committed : slot->allocated, target);
+        }
         if (warm->fill && target > slot->filled)
         {
             memset(mapping + slot->filled, BUSTER_ARENA_WARM_PATTERN, target - slot->filled);
