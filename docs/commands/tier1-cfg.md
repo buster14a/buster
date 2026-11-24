@@ -70,9 +70,41 @@ list, the later-successor entry test, the boundary sweep and the edge moves read
 the lists directly.
 
 With more than one group, each group is solved again for the fill rather than
-kept, and every group's solve sweeps every block. The solve's time is still
-`groups * blocks`, although its storage is now linear. A worklist over the
-blocks a group touches would remove that term.
+kept, and every group's dense solve sweeps every block, `groups * blocks` rows.
+
+### Sparse groups
+
+Where those rows would pass 65,536 (`BUSTER_TIER1_CFG_SPARSE_ROWS`), every group
+is solved by `tier1_cfg_live_group_sparse` instead, and no dense rows are
+allocated. A group gives a 256-byte row (def, in, out and pending, one 512-bit
+vector each) only to its values' homes, their uses' blocks, the blocks passing
+them to phis and the blocks they turn out to be live into, with a generation
+stamp per block. Seeded as the dense rows are, a worklist sends each block's
+newly live values to every predecessor as one OR, and queues a predecessor whose
+in row grows. This is the least solution of the same equations, which the order
+the blocks are taken in doesn't change, so the lists, the three facts and the
+allocations are the dense solve's. Counting and filling read only the touched
+rows. Its work follows the live pairs and the predecessors they cross. A group
+whose values are live everywhere touches every block, and on 1,000 values live
+across 1,000 blocks the worklist took 4% longer than the dense groups, which the
+bound keeps there. No function of the frozen SQLite or musl sources passes the
+bound, so they solve as before. `sparse_liveness` reports the form; for it
+`liveness_bytes` is the most rows one group touched, 256 bytes each, and
+`liveness_iterations` the worklist's block visits.
+
+`test-tier1-cfg` allocates every fixture and generated case again with the
+sparse groups forced (`tier1_cfg_allocate_sparse`), requiring every field
+`tier1_cfg_differs` compares to match but the solves' own counters, and checks
+every generated case's sparse lists against the per-value walk below. #1353's
+function of scoped loops (`tier1_cfg_test_loops`: each loop's header has its
+counter's and the sum's phis, its latch their next values) at 1, 255 and 1,200
+loops compares both forms' lists with the walk and runs as whole cases; at
+3,000 and 6,000 loops, past the bound, it must be sparse, match the walk, and
+visit blocks and touch rows at most 2.2 times as much for twice the loops.
+`test-tier1-cfg-source` allocates every function again with the sparse groups
+forced and fails on any difference. Breaking the sparse solve (no phi-edge OUT,
+a dropped predecessor, no continuation narrowing, a wrong group base, no
+phi-edge USE) fails these checks.
 
 `test-tier1-cfg` checks the local/global partition, duplicate local occurrences,
 remote occurrences and uses, self-phis, undefined operands, sibling edges,
@@ -101,9 +133,10 @@ check rollback at each allocation failure. The mapping removes a repeated
 predecessor search at large joins without changing phi operand associations.
 
 `cross_block_values` counts genuinely nonlocal values, `edge_local_values`
-counts excluded phi operands, `liveness_bytes` counts one group's four matrices,
-`live_entries` counts the entries of the live-in and live-out lists, and
-`liveness_iterations` counts the sweeps of every group's first solve.
+counts excluded phi operands, `liveness_bytes` counts one group's four matrices
+(or, sparse, its most touched rows), `live_entries` counts the entries of the
+live-in and live-out lists, and `liveness_iterations` counts the sweeps of every
+group's first solve (or, sparse, the worklist's block visits).
 
 The measurements are from a cloud VM with AVX-512 (Release, `--tier1
 --tier1-strict -c`), not the 9700X, so they are indicative only. They use `{ int
@@ -123,6 +156,24 @@ to 2.6 times: 64,000 statements make 125 groups over 128,001 blocks, and about h
 of 30 stack samples fell in `dataflow_liveness` or the group scan. Every object
 was byte-identical to main's, and so was `main.c` compiled with `--tier1`. The
 issue's `||` chain needs no group: 8,000 operands peak at 51 MB on both.
+
+With the sparse groups, on another cloud VM with AVX-512 (Release, so again
+indicative only), the same statements against main `47440912`:
+
+| N | main wall | sparse wall | peak RSS, both |
+| ---: | ---: | ---: | ---: |
+| 8,000 | 206 ms | 197 ms | 186 MB |
+| 16,000 | 460 ms | 408 ms | 334 MB |
+| 32,000 | 1,143 ms | 868 ms | 631 MB |
+| 64,000 | 2,835 ms | 1,627 ms | 1,226 MB |
+
+Wall time now grows 1.9 to 2.1 times per doubling. `benchmark-tier1-cfg-source`
+times the allocation alone: on #1353's scoped loops (one function of N `for`
+loops, each with its own `i`) main took 25, 84 and 306 ms at 4,000, 8,000 and
+16,000 loops, the sparse groups 12, 29 and 59 ms; on its `MAX` statement
+expressions, 32, 115 and 394 ms against 17, 38 and 80 ms. Below the bound both
+are the dense solve, within noise. Every object was byte-identical to main's,
+`sqlite3.c`'s too.
 
 ## One allocation for two problems (#2538)
 
