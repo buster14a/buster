@@ -1,0 +1,12 @@
+int n;
+unsigned long c = sizeof(int(*)[n]);
+unsigned long a = sizeof(int(*)[(3, 2)]);
+unsigned long p = sizeof(int(*[3])[n]);
+unsigned long m = sizeof(int(*)[n][n + 1]);
+enum { P = sizeof(int(*)[++n]), A = sizeof(int(*[3])[n]) };
+_Static_assert(P == 8 && A == 24, "fixed pointer size");
+_Static_assert(_Alignof(int[n]) == 4 && _Alignof(int(*)[n]) == 8, "fixed alignment");
+unsigned long nested_p = sizeof(int(*)[sizeof(int[n])]);
+unsigned long nested_a = _Alignof(int[sizeof(int[n])]);
+unsigned long nested_s = sizeof(sizeof(int[n]));
+unsigned long nested_side = sizeof(sizeof(int[++n]));

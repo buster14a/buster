@@ -1,0 +1,8 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+# At the main file's last newline, after the preprocessor's own warnings.
+a-unit-of-directives-alone-under-pedantic	a-unit-of-directives-alone-under-pedantic.c	3	0	0	warning-text	-pedantic	a unit of directives alone under -pedantic
+# At its end where no newline ends it.
+a-unit-of-a-directive-without-a-final-newline	a-unit-of-a-directive-without-a-final-newline.c	1	0	0	warning-text	-Wempty-translation-unit	a unit of a directive without a final newline
+an-empty-unit	an-empty-unit.c	1	0	0	warning-text	-pedantic	an empty unit
+an-empty-unit-by-default	an-empty-unit-by-default.c	0	0	0	warning-text	-	an empty unit by default

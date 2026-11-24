@@ -1,0 +1,22 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+# Constants out of an operand type's range on either side, its typedef as written, an enumerator's name, a _Bool's
+# and a known boolean's range, an unsigned comparison's wrapped gap, and those in range or at a limit, which say
+# nothing here.
+constants-out-of-an-operand-s-range	constants-out-of-an-operand-s-range.c	12	0	0	warning-text	-	constants out of an operand's range
+# A _BitInt constant past 128 bits (check_wide_text's digits), and file scope, where the comparison completes after
+# the initializer's error.
+constants-out-of-range-past-128-bits-and-at-file-scope	constants-out-of-range-past-128-bits-and-at-file-scope.c	3	1	0	c23,syntax-only	-	constants out of range past 128 bits and at file scope
+# -Wsign-compare (-Wextra) gives nothing of an always true or false comparison, and both follow clang's walk of a
+# full expression: a comparison before its operands, an assignment's, a conditional's and a comparison's operands
+# left to right, any other node's right to left, a call's last argument first; GNU's ?: reads its condition once.
+constants-out-of-range-under-wextra	constants-out-of-range-under-wextra.c	15	0	0	warning-text	-Wextra	constants out of range under -Wextra
+# Forty comparisons across the candidate pass's 16-node blocks (check_common_range_candidates): constants out of
+# and in a narrow operand's range on either side, both sides constant, neither, and a known boolean's.
+constants-out-of-range-across-vector-blocks	constants-out-of-range-across-vector-blocks.c	16	0	0	-	-	constants out of range across vector blocks
+# The void cast leaves no reach candidate after the comparisons (#2702). A return conversion here would drain
+# the full batches in the scan loop, hiding a missing second or third batch in the final drain.
+many-trailing-out-of-range-comparisons	many-trailing-out-of-range-comparisons.c	48	0	0	-	-	many trailing out of range comparisons
+# The vector test's type rule: an int or a long class operand against a constant its type covers is no candidate,
+# a narrower one's constant is (an int's against a long constant), and a boolean operator's always is.
+constants-out-of-range-of-builtin-types	constants-out-of-range-of-builtin-types.c	8	0	2	-	-	constants out of range of builtin types

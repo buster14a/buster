@@ -1,0 +1,122 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+# A cast to a variably modified type in a body (#2321, #1852): its type name's bounds are evaluated before its operand,
+# as clang's EmitVariablyModifiedType does, a sizeof's in an unevaluated operand not; no comma of its own warns, and
+# -Wunsequenced, whose visit reaches no type, doesn't read them.
+a-body-s-casts-to-variably-modified-types	vla-cast-source.c	2	0	0	-	-	a body's casts to variably modified types
+# Misplaced variable-length arrays and variably modified types (#1447): each error recovers, the declaration invalid and
+# its uses quiet, a file-scope one's group going on.
+misplaced-variable-length-arrays-recover	vla-misplaced-source.c	0	9	0	-	-	misplaced variable-length arrays recover
+# Scalar compound literals in bounds (#1447): folded, with clang's warning where the array can't be variable, an
+# enumerator's quietly; an `&` keeps the literal's object.
+scalar-compound-literals-in-bounds	vla-compound-source.c	5	0	0	-	-	scalar compound literals in bounds
+# A file-scope cast's or _Alignof's variable type name (#1852), which clang takes and never evaluates.
+a-file-scope-cast-s-and-alignof-s-variable-type-names	vla-unevaluated-source.c	0	2	0	-	-	a file-scope cast's and _Alignof's variable type names
+# A variably modified type can still have a constant layout (#2528). The pointer ends the runtime-size walk; a fixed
+# array of such pointers stays constant too. The comma bound is still checked, so its ordinary warning is retained.
+a-file-scope-sizeof-of-pointers-to-variable-arrays-stays-constan	vla-pointer-size-source.c	1	0	0	-	-	a file-scope sizeof of pointers to variable arrays stays constant
+a-file-scope-sizeof-refuses-only-the-runtime-sized-array	vla-pointer-size-error-source.c	1	1	0	-	-	a file-scope sizeof refuses only the runtime-sized array
+a-file-scope-evaluated-nested-variable-array-size-remains-noncon	a-file-scope-evaluated-nested-variable-array-size-remains-noncon.c	0	1	0	-	-	a file-scope evaluated nested variable array size remains nonconstant
+a-file-scope-unevaluated-nested-size-still-checks-its-array-boun	a-file-scope-unevaluated-nested-size-still-checks-its-array-boun.c	0	1	0	-	-	a file-scope unevaluated nested size still checks its array bound type
+# A block's automatic variable-length array with an initializer (#1447): clang's "variable-sized object may not be
+# initialized", at the outermost bound for a list and at the name otherwise, recovered; the declaration stays valid and its
+# initializer unchecked, and `= {}` is taken.
+a-block-s-variable-length-array-with-an-initializer	vla-initializer-source.c	0	11	0	-	-	a block's variable-length array with an initializer
+# The comma operators of variable bounds only the constant reader reads (#2252): a file-scope cast's and _Alignof's type
+# names, a file-scope array's and member's folded bounds and an enumerator's beside them, and a body's cast's and
+# sizeof's variable type names.
+variable-bounds-comma-operators-the-constant-reader-alone-reads	vla-variable-commas-source.c	9	0	0	-	-	variable bounds' comma operators the constant reader alone reads
+# A function body's constants' commas among its queued diagnostics, in source order as clang queues them (#2252),
+# though the reader finds them first: enumerators' values, a member's bound and width, a static array's bound, in nested
+# blocks, in an if's, a do's and a for's bodies, beside the graph's variable typedef bound, array bounds and a division
+# by zero, in two functions.
+a-body-s-constants-commas-among-its-queued-diagnostics-in-source	vla-body-commas-source.c	24	0	9	-	-	a body's constants' commas among its queued diagnostics in source order
+# A body's constants' comparisons and `void *` cast as a comma's left operand, which clang gives at once rather than
+# queued (#2252): before the body's queued diagnostics, a plain comma's among them.
+a-body-s-constants-comparisons-as-commas-left-operands-at-once	vla-body-comparisons-source.c	8	0	3	-	-	a body's constants' comparisons as commas' left operands at once
+# A file-scope sizeof's variable bound's commas, which clang gives as it reads them, before its initializer's "not a
+# compile-time constant" once the initializer is read (#2252): alone, beside a folded bound in a braced list, with an
+# _Alignof's in a member's, and after a designator.
+a-file-scope-sizeof-s-variable-bound-s-comma-before-its-initiali	a-file-scope-sizeof-s-variable-bound-s-comma-before-its-initiali.c	1	1	0	-	-	a file-scope sizeof's variable bound's comma before its initializer's error
+a-braced-file-scope-sizeof-s-two-variable-bounds-commas-before-i	a-braced-file-scope-sizeof-s-two-variable-bounds-commas-before-i.c	4	1	0	-	-	a braced file-scope sizeof's two variable bounds' commas before its error
+a-member-s-alignof-s-and-sizeof-s-variable-bounds-commas-before	a-member-s-alignof-s-and-sizeof-s-variable-bounds-commas-before.c	2	1	0	-	-	a member's _Alignof's and sizeof's variable bounds' commas before its error
+a-designated-file-scope-sizeof-s-variable-bound-s-comma-before-i	a-designated-file-scope-sizeof-s-variable-bound-s-comma-before-i.c	1	1	0	-	-	a designated file-scope sizeof's variable bound's comma before its error
+# A block's static object's sizeof of a variable bound: its initializer's error at once, its comma with the body's queued
+# diagnostics, among them in source order (#2252).
+a-block-s-static-sizeof-s-error-before-its-body-s-queued-commas	vla-static-commas-source.c	4	1	2	-	-	a block's static sizeof's error before its body's queued commas
+# A file-scope sizeof's comma in a later declarator's initializer, or before a later declarator, whose initializer's
+# error is at its own `,` or `;` (#2252, check_driver_initializer_last).
+a-second-declarator-s-sizeof-s-variable-bound-s-comma-before-its	a-second-declarator-s-sizeof-s-variable-bound-s-comma-before-its.c	1	1	0	-	-	a second declarator's sizeof's variable bound's comma before its error
+a-middle-declarator-s-sizeof-s-variable-bound-s-comma-before-its	a-middle-declarator-s-sizeof-s-variable-bound-s-comma-before-its.c	1	1	0	-	-	a middle declarator's sizeof's variable bound's comma before its error
+a-first-declarator-s-sizeof-s-variable-bound-s-comma-before-its	a-first-declarator-s-sizeof-s-variable-bound-s-comma-before-its.c	1	1	0	-	-	a first declarator's sizeof's variable bound's comma before its error
+# A constant's comma inside a body's full expression, which clang queues as it reads it, before what the full expression
+# queues as it completes (#2252, pp_diagnostic_queued): array indexes before and after it, an unused result, unsequenced
+# modifications, a constant conversion and a call's argument, each after a queued array index of an earlier statement.
+a-body-s-constants-commas-before-what-their-full-expressions-que	vla-body-completions-source.c	20	0	5	-	-	a body's constants' commas before what their full expressions queue as they complete
+# The same in statement expressions (a call's argument's, one whose own statement's warnings come first), before a null
+# dereference's reader, in a division's and a shift's right operands, and in a for statement's clauses, whose third
+# completes before its body (#2252).
+a-body-s-constants-commas-in-statement-expressions-operators-ope	vla-body-nested-source.c	25	0	9	-	-	a body's constants' commas in statement expressions, operators' operands and a for statement's clauses
+# What building an operator queues comes before a constant's comma later in its full expression (#2252): a division's, a
+# shift's, an atomic member's and a comma's left operand's.
+what-building-a-body-s-operators-queues-before-a-later-constant	vla-body-operators-source.c	12	1	1	-	-	what building a body's operators queues before a later constant's comma
+# A comparison's warnings, which clang analyzes as its full expression completes, after a constant's comma it holds
+# (#2252): a constant out of the operand's range, and a sign mismatch under -Wsign-compare.
+a-body-s-comparisons-constant-warnings-after-a-constant-s-comma	vla-body-comparison-queue-source.c	6	0	1	-	-	a body's comparisons' constant warnings after a constant's comma they hold
+a-body-s-comparisons-sign-warnings-after-a-constant-s-comma-they	vla-body-comparison-queue-source.c	7	0	1	-	-Wsign-compare	a body's comparisons' sign warnings after a constant's comma they hold
+# An x86 builtin's argument's range error, which clang queues as it builds the call, after a constant's comma in the
+# argument (#2252).
+an-x86-builtin-s-range-error-after-a-constant-s-comma-in-its-arg	vla-body-builtin-source.c	2	2	0	-	-	an x86 builtin's range error after a constant's comma in its argument
+# A body's member bounds' and bit-fields' widths' comparisons as commas' left operands, at once, before each declarator's
+# fold warning and among the body's queued diagnostics (#2252).
+a-body-s-members-and-bit-fields-comparisons-as-commas-left-opera	vla-body-member-comparisons-source.c	8	0	2	-	-	a body's members' and bit-fields' comparisons as commas' left operands at once
+# A rejected static assertion's comma in a body, which clang queues as it reads the assertion (#2252): in source order
+# among the body's queued diagnostics, as a constant's comma is, after the assertion's error. One assertion a unit: after
+# a unit's second rejected assertion a later constant's comma still comes after the body's later queued warnings
+# (docs/c-checker.md's "Left").
+a-body-s-rejected-static-assertion-s-condition-s-comma-among-its	vla-body-assertion-condition-source.c	7	1	3	-	-	a body's rejected static assertion's condition's comma among its queued diagnostics in source order
+a-body-s-rejected-static-assertion-s-arm-s-comma-among-its-queue	vla-body-assertion-arm-source.c	7	1	3	-	-	a body's rejected static assertion's arm's comma among its queued diagnostics in source order
+# The comma operators of constant bounds, bit-field widths and enumerators, which no graph walk reads (#2202): each
+# discarded left operand's -Wunused-value "left operand of comma operator has no effect" as clang's isUnusedResultAWarning
+# decides and places it (a binary or unary operator's at it, a cast's at its `(`, sizeof's at its keyword, a comma's at its
+# right operand's but a literal 0's), -Wunused-comparison's for a comparison, none for a cast to void or in sizeof's
+# operand, and in a dead conditional arm too; before the declarator's fold warning at file scope, and in a function body
+# with its queued diagnostics at its end.
+constant-bounds-comma-operators-discarded-left-operands	vla-fold-commas-source.c	31	0	0	-	-	constant bounds' comma operators' discarded left operands
+constant-bounds-comma-operators-under-wno-unused-value	vla-fold-commas-source.c	13	0	0	-	-Wno-unused-value	constant bounds' comma operators under -Wno-unused-value
+constant-bounds-comma-operators-under-wno-unused-value-wunused-c	vla-fold-commas-source.c	14	0	0	-	-Wno-unused-value -Wunused-comparison	constant bounds' comma operators under -Wno-unused-value -Wunused-comparison
+folded-bounds-in-each-context-by-default	vla-fold-contexts-source.c	11	2	2	-	-	folded bounds in each context, by default
+folded-bounds-in-each-context-under-w	vla-fold-contexts-source.c	0	2	2	-	-w	folded bounds in each context under -w
+folded-bounds-in-each-context-under-werror-gnu-folding-constant	vla-fold-contexts-source.c	0	18	7	-	-Werror=gnu-folding-constant	folded bounds in each context under -Werror=gnu-folding-constant
+a-declarator-s-folded-bounds-warn-once-at-its-name	vla-fold-declarators-source.c	6	0	0	-	-	a declarator's folded bounds warn once, at its name
+folds-of-casts-gnu-object-reads-and-string-subscripts	vla-fold-forms-source.c	3	0	0	-	-	folds of casts, GNU object reads and string subscripts
+folded-bounds-under-wno-gnu-folding-constant	vla-fold-forms-source.c	0	0	0	-	-Wno-gnu-folding-constant	folded bounds under -Wno-gnu-folding-constant
+a-type-name-s-folded-looking-bound-in-a-file-scope-initializer-s	vla-place-source-0.c	0	1	0	-	-	a type name's folded-looking bound in a file-scope initializer stays variable
+a-file-scope-bound-that-holds-a-variable-type-name	vla-place-source-1.c	0	1	0	-	-	a file-scope bound that holds a variable type name
+a-block-s-static-array-whose-bound-holds-a-variable-type-name	vla-place-source-2.c	2	1	0	-	-	a block's static array whose bound holds a variable type name
+a-member-whose-bound-holds-a-variable-type-name	vla-place-source-3.c	0	1	0	-	-	a member whose bound holds a variable type name
+a-file-scope-variable-length-array	vla-place-source-4.c	0	1	0	-	-	a file-scope variable-length array
+a-file-scope-variably-modified-pointer	vla-place-source-5.c	0	1	0	-	-	a file-scope variably modified pointer
+a-file-scope-variable-length-typedef	vla-place-source-6.c	0	1	0	-	-	a file-scope variable-length typedef
+a-list-item-s-variable-type-name-in-a-file-scope-initializer	vla-place-source-7.c	0	1	0	-	-	a list item's variable type name in a file-scope initializer
+a-block-s-extern-variable-length-array	vla-place-source-8.c	0	1	0	-	-	a block's extern variable-length array
+a-block-s-extern-variably-modified-pointer	vla-place-source-9.c	0	1	0	-	-	a block's extern variably modified pointer
+a-block-s-static-thread-local-variable-length-array	vla-place-source-10.c	0	1	0	-	-	a block's static thread-local variable-length array
+a-block-s-record-s-variably-modified-member	vla-place-source-11.c	0	1	0	-	-	a block's record's variably modified member
+a-file-scope-record-s-variable-length-member	vla-place-source-12.c	0	1	0	-	-	a file-scope record's variable-length member
+a-parenthesized-file-scope-variable-length-array	vla-place-source-13.c	0	1	0	-	-	a parenthesized file-scope variable-length array
+a-nested-parenthesized-file-scope-variable-length-array	vla-place-source-14.c	0	1	0	-	-	a nested parenthesized file-scope variable-length array
+a-parenthesized-array-of-pointers-at-file-scope-a-variable-lengt	vla-place-source-15.c	0	1	0	-	-	a parenthesized array of pointers at file scope, a variable-length array
+a-parenthesized-pointer-to-a-variable-length-array-at-file-scope	vla-place-source-16.c	0	1	0	-	-	a parenthesized pointer to a variable-length array at file scope, a variably modified type
+# A comma whose discarded left operand folds undefined behavior fails clang's array-bound fold, as a division's overflow
+# does anywhere (#2264): its bound is variable, which file scope, a static or extern object, a typedef and a pointer's
+# pointee refuse, after the declarator's commas' -Wunused-value and without the bound's shift or overflow warnings. An
+# unselected or short-circuited operand's, a const object's read and a shift that keeps its bits fold; an enumerator, a
+# bit-field width, a case label, a static assertion and a static initializer fold the same comma.
+a-comma-s-discarded-undefined-behavior-makes-its-bound-variable	vla-discarded-undefined-source.c	24	9	0	-	-	a comma's discarded undefined behavior makes its bound variable
+# A file-scope sizeof's runtime-sized type name is refused once per initializer, and the reading goes on (#2252): the
+# initializer's later commas and the unit's later declarations keep their diagnostics.
+a-file-scope-sizeof-s-runtime-sized-type-name-recovers	vla-sizeof-recovery-source.c	7	3	0	-	-	a file-scope sizeof's runtime-sized type name recovers
+# A compound literal can't have a variable array's type, so clang folds its bound, in a body too, with its warning at the
+# compound literal's `(` (#2252).
+compound-literals-bounds-fold-in-a-body-too	vla-compound-fold-source.c	8	0	0	-	-	compound literals' bounds fold, in a body too
