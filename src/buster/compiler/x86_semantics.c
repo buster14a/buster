@@ -43,8 +43,8 @@
 //     x86_effects_role.
 //   - The immediate's contract (x86_immediate_encodes, x86_immediate_field and x86_immediate_value) and the flags
 //     (x86_instruction_flags, X86FlagEffects, x86_flags_substitutable and x86_instruction_flags_substitutable).
-//   - Operand-resolved effects: BUSTER_X86_RESOURCE_*, x86_instruction_resolve (the rare records' route),
-//     x86_instruction_rare and x86_instructions_effects.
+//   - Operand-resolved effects: BUSTER_X86_RESOURCE_*, x86_effects_rare_records (the rare records' terms) and
+//     x86_instructions_effects.
 //   - Form choice: the classes and the context (BUSTER_X86_CHOICE_* and BUSTER_X86_CONTEXT_*), the rows
 //     (BUSTER_X86_CHOICE_SOURCES, X86ChoiceSource), X86ChoiceRow and its tables, x86_choice_row, x86_choice_classes,
 //     x86_choose_forms and x86_choice_instruction.
@@ -148,12 +148,12 @@
 //     from the form's operands: kmov, kand, a compare's destination). A form whose roles have none takes K1 to K7 only
 //     as its record's opmask (X86Instruction.decorations), which reads it, and makes a vector destination merge into its
 //     old elements unless it zeroes them.
-//   - RARE: the scalar resolver (x86_instruction_resolve) takes the record alone (x86_instruction_rare): it reads an
+//   - RARE: x86_effects_rare_records completes the record after its block (x86_effects_operands' byte): it reads an
 //     operand that no role names (an /is4 register, in the immediate's bits 7 to 4, or a VSIB memory operand's vector
 //     index, a gather's or a scatter's, which clears its opmask too), or writes a pair of opmask registers
 //     (vp2intersect's). The initialization's, from the form's operands.
 //   - IMPLICIT_VECTORS: reads or writes vector registers that no role names: Key Locker's XMM0 to XMM7, whose sets
-//     x86_implicit_vectors gives. The scalar resolver takes the record alone, as RARE's, and adds them.
+//     x86_implicit_vectors gives. x86_effects_rare_records adds them, as it does RARE's operands.
 #define BUSTER_X86_EFFECT_FAULT 0x0001
 #define BUSTER_X86_EFFECT_ZERO_IDIOM 0x0002
 #define BUSTER_X86_EFFECT_RARE 0x0004
@@ -2810,6 +2810,14 @@ BUSTER_X86_SHARED BUSTER_BAKED uint16_t x86_effects_by_form[BUSTER_X86_FORM_NUMB
 _Static_assert(BUSTER_X86_FORM_FS == X86_FORM_COUNT && BUSTER_X86_FORM_GS == 2 * X86_FORM_COUNT && BUSTER_X86_FORM_SS == 3 * X86_FORM_COUNT &&
                    BUSTER_X86_FORM_TEMPLATES == BUSTER_X86_FORM_NUMBER + 1,
                "x86_effects_by_form holds a form's record and its FS, GS and SS copies'");
+// Each record's operands that no role names, for the rare records' terms (x86_effects_rare_records,
+// BUSTER_X86_EFFECT_OPERAND_*): a VSIB memory operand, a VEX form (whose gather's mask is vvvv), an /is4 register and an
+// opmask pair (in reg). A covered form has a record of its own, so a record's byte is its form's.
+#define BUSTER_X86_EFFECT_OPERAND_VSIB 0x01
+#define BUSTER_X86_EFFECT_OPERAND_VEX 0x02
+#define BUSTER_X86_EFFECT_OPERAND_IS4 0x04
+#define BUSTER_X86_EFFECT_OPERAND_PAIR 0x08
+BUSTER_X86_SHARED BUSTER_BAKED uint8_t x86_effects_operands[BUSTER_X86_EFFECTS_CAPACITY] __attribute__((aligned(64)));
 BUSTER_X86_SHARED BUSTER_BAKED uint32_t x86_effects_count;
 // Whether x86_semantics_initialize has built the tables, for the consumers that build theirs from them on demand (the
 // assembler's matcher, x86_match.c).
@@ -3145,166 +3153,184 @@ static const uint64_t x86_rare_writes[8] = {
 #undef BUSTER_X86_RARE_WRITES
 
 // A register operand's resource: a general register (AH to BH are RAX to RBX's) or a vector one. The covered forms take
-// general registers 0 to 15, as x86_encode does.
-static uint64_t x86_register_resource(uint8_t value, bool vector)
+// general registers 0 to 15, as x86_encode does. The effects compute it 8 lanes at a time; tests use it.
+static __attribute__((unused)) uint64_t x86_register_resource(uint8_t value, bool vector)
 {
     const uint32_t general = (value & BUSTER_X86_REGISTER_HIGH_BYTE) ? (value & 3) : (value & 15);
     return vector ? BUSTER_X86_RESOURCE_VECTOR(value & 31) : BUSTER_X86_RESOURCE_GPR(general);
 }
 
-// The rare records' route of x86_instructions_effects (x86_instruction_rare; phase D of #2924 vectorizes it): what one
-// record reads and writes (BUSTER_X86_RESOURCE_*), its operands resolved: a register operand's register; a
-// memory operand's base and index (read, as lea's are; a VSIB operand's index is a vector register) and the memory read
-// or written; a narrower write's register (which keeps the rest, so it is read), and a legacy SSE write's vector
-// register (which keeps its bits above 127); a zero idiom's register not read (but a legacy SSE one's, whose upper bits
-// still pass through); an /is4 register; a shift's flags by its immediate count (x86_instruction_flags); the stack and
-// fences as memory; control; the x87's state and control word, vzeroupper's vector registers, and Key Locker's vector
-// registers that no role names (x86_implicit_vectors). With `opmasks` (which may be null), also the opmask registers it
-// reads (bits 0 to 7: K0 to K7) and writes (bits 8 to 15): an opmask role's register, and the record's opmask (an EVEX
-// form's: x86_validate refuses one in any other's), which it reads, as a vector destination of it reads its old
-// elements unless it zeroes them, and which a gather or a scatter clears. Without `opmasks`, a record that reads or
-// writes an opmask register reads and writes everything, as an uncovered form does (its opmask set, 0xffff).
-static void x86_instruction_resolve(const X86Instruction* instruction, uint64_t* reads, uint64_t* writes, uint16_t* opmasks)
-{
-    const X86Effects* effects = x86_effects(instruction->form);
-    const uint32_t mask = instruction->decorations & BUSTER_X86_DECORATION_MASK;
-    const bool touches = mask != 0 || (effects->properties & BUSTER_X86_EFFECT_OPMASKS) != 0;
-    uint64_t read = BUSTER_X86_RESOURCE_ALL;
-    uint64_t write = BUSTER_X86_RESOURCE_ALL;
-    uint32_t opmask_read = 0xff;
-    uint32_t opmask_write = 0xff;
-    if (effects->operation != X86_OPERATION_NONE && (opmasks != 0 || !touches))
-    {
-        const X86FormDescription* description = x86_form_description(instruction->form);
-        const bool memory = (instruction->mode & BUSTER_X86_MODE_MEMORY) != 0;
-        uint8_t flags_read;
-        uint8_t flags_written;
-        uint8_t flags_undefined;
-        x86_instruction_flags(instruction, &flags_read, &flags_written, &flags_undefined);
-        read = effects->implicit_reads | (uint64_t)flags_read << BUSTER_X86_RESOURCE_FLAGS_SHIFT;
-        write = effects->implicit_writes | (uint64_t)(flags_written | flags_undefined) << BUSTER_X86_RESOURCE_FLAGS_SHIFT;
-        opmask_read = 0;
-        opmask_write = 0;
-        read |= (effects->properties & BUSTER_X86_EFFECT_MXCSR) ? BUSTER_X86_RESOURCE_MXCSR : 0;
-        const uint32_t rare = (effects->properties >> 8) & 7;
-        read |= x86_rare_reads[rare];
-        write |= x86_rare_writes[rare];
-        const uint8_t values[BUSTER_X86_ROLES] = { instruction->reg, instruction->rm, instruction->vvvv };
-        uint64_t vector_writes = 0;
-        for (uint32_t role = 0; role < BUSTER_X86_ROLES; role += 1)
-        {
-            const uint32_t bits = x86_effects_role(effects, role);
-            const uint32_t rest = (bits & BUSTER_X86_ROLE_REST) >> BUSTER_X86_ROLE_REST_SHIFT;
-            if (role == BUSTER_X86_ROLE_RM && memory)
-            {
-                const bool address = (effects->memory & BUSTER_X86_MEMORY_EFFECT_ADDRESS) != 0;
-                if ((bits & (BUSTER_X86_ROLE_READ | BUSTER_X86_ROLE_WRITE)) || address)
-                {
-                    const bool vsib = (description->rm & BUSTER_X86_OPERAND_VSIB) != 0;
-                    read |= (instruction->mode & BUSTER_X86_MODE_BASE) ? BUSTER_X86_RESOURCE_GPR(instruction->rm & 15) : 0;
-                    const uint64_t index = vsib ? BUSTER_X86_RESOURCE_VECTOR(instruction->index & 31) : BUSTER_X86_RESOURCE_GPR(instruction->index & 15);
-                    read |= (instruction->mode & BUSTER_X86_MODE_INDEX) ? index : 0;
-                }
-                read |= (bits & BUSTER_X86_ROLE_READ) && !address ? BUSTER_X86_RESOURCE_MEMORY : 0;
-                write |= (bits & BUSTER_X86_ROLE_WRITE) ? BUSTER_X86_RESOURCE_MEMORY : 0;
-            }
-            else if (effects->properties & BUSTER_X86_EFFECT_OPMASK(role))
-            {
-                // vp2intersect writes an even opmask register and the next one.
-                const uint32_t number = values[role] & 7;
-                const bool pair = role == BUSTER_X86_ROLE_REG && (description->reg & BUSTER_X86_OPERAND_PAIR);
-                const uint32_t registers = pair ? 3u << (number & 6) : 1u << number;
-                opmask_read |= (bits & BUSTER_X86_ROLE_READ) ? registers : 0;
-                opmask_write |= (bits & BUSTER_X86_ROLE_WRITE) ? registers : 0;
-            }
-            else
-            {
-                // vvvv's general register is never AH to BH (VEX and EVEX name 32- and 64-bit ones there).
-                const bool vector = (bits & BUSTER_X86_ROLE_VECTOR) != 0;
-                const uint64_t resource = role == BUSTER_X86_ROLE_VVVV && !vector ? BUSTER_X86_RESOURCE_GPR(values[role] & 15) : x86_register_resource(values[role], vector);
-                // movss's and movsd's loads keep the rest from a register source and zero it from memory.
-                const bool merge = rest == BUSTER_X86_REST_MERGE || (rest == BUSTER_X86_REST_MERGE_IF_REGISTER && !memory);
-                read |= (bits & BUSTER_X86_ROLE_READ) || ((bits & BUSTER_X86_ROLE_WRITE) && merge) ? resource : 0;
-                write |= (bits & BUSTER_X86_ROLE_WRITE) ? resource : 0;
-                vector_writes |= (bits & BUSTER_X86_ROLE_WRITE) && (bits & BUSTER_X86_ROLE_VECTOR) ? resource : 0;
-            }
-        }
-        // A zero idiom's sources (reg and rm, or vvvv and rm) are one register, which it doesn't read.
-        const bool three = (x86_effects_role(effects, BUSTER_X86_ROLE_VVVV) & BUSTER_X86_ROLE_READ) != 0;
-        const uint8_t source = three ? instruction->vvvv : instruction->reg;
-        if ((effects->properties & BUSTER_X86_EFFECT_ZERO_IDIOM) && !memory && source == instruction->rm)
-        {
-            const uint32_t bits = x86_effects_role(effects, BUSTER_X86_ROLE_RM);
-            read &= ~x86_register_resource(instruction->rm, (bits & BUSTER_X86_ROLE_VECTOR) != 0);
-        }
-        // An /is4 register: the immediate's bits 7 to 4, one of XMM0 to XMM15 (or their YMM registers).
-        const uint8_t syntax = description->syntax;
-        const bool is4 = syntax == X86_SYNTAX_REG_VVVV_RM_IS4 || syntax == X86_SYNTAX_REG_VVVV_IS4_RM || syntax == X86_SYNTAX_REG_VVVV_RM_IS4_IMM ||
-                         syntax == X86_SYNTAX_REG_VVVV_IS4_RM_IMM;
-        read |= is4 ? BUSTER_X86_RESOURCE_VECTOR(((uint32_t)instruction->immediate >> 4) & 15) : 0;
-        // A VEX gather's mask is its vvvv register, which it reads and clears, and its destination keeps the elements the
-        // mask leaves.
-        if ((description->rm & BUSTER_X86_OPERAND_VSIB) && description->family == BUSTER_X86_FAMILY_VEX)
-        {
-            read |= BUSTER_X86_RESOURCE_VECTOR(instruction->vvvv & 15) | BUSTER_X86_RESOURCE_VECTOR(instruction->reg & 15);
-            write |= BUSTER_X86_RESOURCE_VECTOR(instruction->vvvv & 15);
-        }
-        // The record's opmask: read; a vector destination merges into its old elements (but with zeroing); a gather or
-        // a scatter clears it.
-        opmask_read |= mask != 0 ? 1u << mask : 0;
-        read |= mask != 0 && !(instruction->decorations & BUSTER_X86_DECORATION_ZEROING) ? vector_writes : 0;
-        opmask_write |= mask != 0 && (description->rm & BUSTER_X86_OPERAND_VSIB) ? 1u << mask : 0;
-        // Key Locker's vector registers that no role names (x86_implicit_vectors).
-        uint32_t implicit_vector_reads = 0;
-        uint32_t implicit_vector_writes = 0;
-        if (effects->properties & BUSTER_X86_EFFECT_IMPLICIT_VECTORS)
-        {
-            x86_implicit_vectors(instruction->form, &implicit_vector_reads, &implicit_vector_writes);
-        }
-        read |= (uint64_t)implicit_vector_reads << BUSTER_X86_RESOURCE_VECTOR_SHIFT;
-        write |= (uint64_t)implicit_vector_writes << BUSTER_X86_RESOURCE_VECTOR_SHIFT;
-        // A legacy SSE write keeps its vector register's bits above 127, so the form reads every vector register it writes,
-        // a zero idiom's too.
-        read |= (effects->properties & BUSTER_X86_EFFECT_KEEP_UPPER) ? write & BUSTER_X86_RESOURCE_VECTORS : 0;
-        read |= (effects->memory & (BUSTER_X86_MEMORY_EFFECT_STACK_READ | BUSTER_X86_MEMORY_EFFECT_FENCE)) ? BUSTER_X86_RESOURCE_MEMORY : 0;
-        write |= (effects->memory & (BUSTER_X86_MEMORY_EFFECT_STACK_WRITE | BUSTER_X86_MEMORY_EFFECT_FENCE)) ? BUSTER_X86_RESOURCE_MEMORY : 0;
-        const uint32_t control = x86_effects_control(effects);
-        write |= control != BUSTER_X86_CONTROL_NONE ? BUSTER_X86_RESOURCE_CONTROL : 0;
-        write |= control == BUSTER_X86_CONTROL_CALL ? BUSTER_X86_RESOURCE_CALL : 0;
-    }
-    *reads = read;
-    *writes = write;
-    if (opmasks != 0)
-    {
-        *opmasks = (uint16_t)(opmask_read | opmask_write << 8);
-    }
-}
-
-// The records x86_instructions_effects leaves to x86_instruction_resolve: a covered form's (with opmasks, or without one
-// that touches an opmask register) with an x87 property, vzeroupper's, RARE's operands or IMPLICIT_VECTORS' registers.
-// BUSTER_X86_EFFECTS_RARE is the same test on the effects record's first 8 bytes (its properties in the upper quarter),
-// as the vector path makes it.
+// The rare records, whose effects x86_effects_rare_records completes: a covered form's (with opmasks, or without one that
+// touches an opmask register) with an x87 property, vzeroupper's, RARE's operands or IMPLICIT_VECTORS' registers.
+// BUSTER_X86_EFFECTS_RARE is the test on the effects record's first 8 bytes (its properties in the upper quarter).
 #define BUSTER_X86_EFFECTS_RARE_PROPERTIES \
     (BUSTER_X86_EFFECT_X87 | BUSTER_X86_EFFECT_X87_CONTROL | BUSTER_X86_EFFECT_ZERO_UPPER | BUSTER_X86_EFFECT_RARE | BUSTER_X86_EFFECT_IMPLICIT_VECTORS)
 #define BUSTER_X86_EFFECTS_RARE ((uint64_t)BUSTER_X86_EFFECTS_RARE_PROPERTIES << 48)
-static __attribute__((unused)) bool x86_instruction_rare(const X86Instruction* instruction, bool opmasks)
+
+// The rare records of a call that x86_instructions_effects_lanes has stored (it found one), completed in place, 8 at a
+// time: the terms the common block leaves out. A block whose lanes' forms have no rare property (their records'
+// properties alone) is passed over; another's lanes' effects records and operand bytes are read again (a lane's qwords
+// broadcast into it under its mask, no array in memory), its rare lanes found as the common block finds them, and those
+// lanes completed:
+//   - the x87's state and control word, and vzeroupper's ZMM0 to ZMM15 (properties' bits 8 to 10, a register lookup):
+//     the common rare records', which need nothing else;
+//   - RARE's and IMPLICIT_VECTORS' records' operands, where a block has one:
+//     - an /is4 register (the immediate's bits 7 to 4, XMM0 to XMM15);
+//     - a VEX gather's mask, vvvv, which it reads and clears, and its destination, which keeps what the mask leaves;
+//     - a VSIB operand's index, a vector register, where the common block took a general one: a VSIB form reads no
+//       general register but its base, so the index's is dropped and the base's kept;
+//     - Key Locker's vector registers that no role names (x86_implicit_vectors' sets);
+//     - with `opmasks`, vp2intersect's opmask pair (an even register and the next) and a gather's or a scatter's record
+//       opmask, which it clears.
+// A KEEP_UPPER form reads every vector register these add to its writes, as the common block's do. Apart from the
+// common loop, after it, so that the loop keeps its constants in registers and pays nothing for the rare records.
+static __attribute__((noinline)) void x86_effects_rare_records(const X86Instruction* instructions, uint64_t count, uint64_t* reads, uint64_t* writes, uint16_t* opmasks)
 {
-    const X86Effects* effects = x86_effects(instruction->form);
-    const bool touches = (instruction->decorations & BUSTER_X86_DECORATION_MASK) != 0 || (effects->properties & BUSTER_X86_EFFECT_OPMASKS) != 0;
-    const bool known = effects->operation != X86_OPERATION_NONE && (opmasks || !touches);
-    return known && (effects->properties & BUSTER_X86_EFFECTS_RARE_PROPERTIES) != 0;
+    const __m512i zero = _mm512_setzero_si512();
+    const __m512i one = _mm512_set1_epi64(1);
+    const __m512i bytes = _mm512_set1_epi64(0xff);
+    const __m512i fifteen = _mm512_set1_epi64(15);
+    const __m512i vector_shift = _mm512_set1_epi64(BUSTER_X86_RESOURCE_VECTOR_SHIFT);
+    for (uint64_t first = 0; first < count; first += 8)
+    {
+        const uint64_t left = count - first;
+        const uint32_t lanes = left >= 8 ? 8 : (uint32_t)left;
+        // Whether any lane's form has a rare property, its properties alone (2 bytes of its record): most blocks of a
+        // long call have none.
+        uint32_t candidates = 0;
+        for (uint32_t lane = 0; lane < lanes; lane += 1)
+        {
+            const X86Effects* effects = &x86_effects_records[x86_effects_by_form[instructions[first + lane].form & BUSTER_X86_FORM_NUMBER]];
+            candidates |= (effects->properties & BUSTER_X86_EFFECTS_RARE_PROPERTIES) != 0 ? 1u : 0u;
+        }
+        if (candidates == 0)
+        {
+            continue;
+        }
+        __m512i facts = zero;
+        __m512i details = zero;
+        uint64_t packed = 0;
+        for (uint32_t lane = 0; lane < lanes; lane += 1)
+        {
+            const uint32_t index = x86_effects_by_form[instructions[first + lane].form & BUSTER_X86_FORM_NUMBER];
+            uint64_t record[2];
+            memcpy(record, &x86_effects_records[index], sizeof(record));
+            facts = _mm512_mask_set1_epi64(facts, (__mmask8)(1u << lane), (long long)record[0]);
+            details = _mm512_mask_set1_epi64(details, (__mmask8)(1u << lane), (long long)record[1]);
+            packed |= (uint64_t)x86_effects_operands[index] << (8 * lane);
+        }
+        // The records' halves, as the common block reads them: (immediate, displacement) and (reg, rm, index, mode, form,
+        // vvvv, decorations); and its rare lanes: a covered form's (without `opmasks`, one that touches no opmask
+        // register) with BUSTER_X86_EFFECTS_RARE's properties.
+        const uint32_t qwords = (1u << (2 * lanes)) - 1;
+        const __m512i head = _mm512_maskz_loadu_epi64((__mmask8)qwords, instructions + first);
+        const __m512i tail = _mm512_maskz_loadu_epi64((__mmask8)(qwords >> 8), instructions + first + 4);
+        const __m512i high = _mm512_permutex2var_epi64(head, _mm512_setr_epi64(1, 3, 5, 7, 9, 11, 13, 15), tail);
+        const __m512i mask_number = _mm512_and_si512(_mm512_srli_epi64(high, 56), _mm512_set1_epi64(BUSTER_X86_DECORATION_MASK));
+        const __mmask8 masked = _mm512_test_epi64_mask(mask_number, mask_number);
+        const __mmask8 covered = _mm512_test_epi64_mask(details, _mm512_set1_epi64(0xffull << 32));
+        const __mmask8 known = opmasks != 0 ? covered : covered & ~masked & _mm512_testn_epi64_mask(facts, _mm512_set1_epi64((int64_t)BUSTER_X86_EFFECT_OPMASKS << 48));
+        const __mmask8 rare = _mm512_mask_test_epi64_mask(known, facts, _mm512_set1_epi64((int64_t)BUSTER_X86_EFFECTS_RARE));
+        if (rare == 0)
+        {
+            continue;
+        }
+        __m512i read = zero;
+        __m512i write = zero;
+        uint32_t rare_lanes = rare;
+        while (rare_lanes != 0)
+        {
+            const uint32_t lane = (uint32_t)__builtin_ctz(rare_lanes);
+            read = _mm512_mask_set1_epi64(read, (__mmask8)(1u << lane), (long long)reads[first + lane]);
+            write = _mm512_mask_set1_epi64(write, (__mmask8)(1u << lane), (long long)writes[first + lane]);
+            rare_lanes &= rare_lanes - 1;
+        }
+        const __m512i properties = _mm512_srli_epi64(facts, 48);
+        // The x87's and vzeroupper's sets.
+        const __m512i rare_index = _mm512_and_si512(_mm512_srli_epi64(properties, 8), _mm512_set1_epi64(7));
+        __m512i added_read = _mm512_permutexvar_epi64(rare_index, _mm512_loadu_si512(x86_rare_reads));
+        __m512i added_write = _mm512_permutexvar_epi64(rare_index, _mm512_loadu_si512(x86_rare_writes));
+        const __mmask8 implicit = rare & _mm512_test_epi64_mask(properties, _mm512_set1_epi64(BUSTER_X86_EFFECT_IMPLICIT_VECTORS));
+        const __mmask8 operands = rare & _mm512_test_epi64_mask(properties, _mm512_set1_epi64(BUSTER_X86_EFFECT_RARE));
+        if ((implicit | operands) != 0)
+        {
+            const __mmask8 vsib = operands & (__mmask8)_pext_u64(packed, 0x0101010101010101ull * BUSTER_X86_EFFECT_OPERAND_VSIB);
+            const __mmask8 vex_gather = vsib & (__mmask8)_pext_u64(packed, 0x0101010101010101ull * BUSTER_X86_EFFECT_OPERAND_VEX);
+            const __mmask8 is4 = operands & (__mmask8)_pext_u64(packed, 0x0101010101010101ull * BUSTER_X86_EFFECT_OPERAND_IS4);
+            const __mmask8 pair = operands & (__mmask8)_pext_u64(packed, 0x0101010101010101ull * BUSTER_X86_EFFECT_OPERAND_PAIR);
+            const __m512i low = _mm512_permutex2var_epi64(head, _mm512_setr_epi64(0, 2, 4, 6, 8, 10, 12, 14), tail);
+            const __m512i reg = _mm512_and_si512(high, bytes);
+            const __m512i rm = _mm512_and_si512(_mm512_srli_epi64(high, 8), bytes);
+            const __m512i index = _mm512_and_si512(_mm512_srli_epi64(high, 16), bytes);
+            const __m512i mode = _mm512_and_si512(_mm512_srli_epi64(high, 24), bytes);
+            const __m512i vvvv = _mm512_and_si512(_mm512_srli_epi64(high, 48), bytes);
+            const __m512i number = _mm512_and_si512(_mm512_srli_epi64(high, 32), _mm512_set1_epi64(BUSTER_X86_FORM_NUMBER));
+            // An /is4 register.
+            added_read = _mm512_mask_or_epi64(added_read, is4, added_read,
+                                              _mm512_sllv_epi64(one, _mm512_add_epi64(_mm512_and_si512(_mm512_srli_epi64(low, 4), fifteen), vector_shift)));
+            // A VEX gather's mask and destination.
+            const __m512i mask_vector = _mm512_sllv_epi64(one, _mm512_add_epi64(_mm512_and_si512(vvvv, fifteen), vector_shift));
+            const __m512i destination = _mm512_sllv_epi64(one, _mm512_add_epi64(_mm512_and_si512(reg, fifteen), vector_shift));
+            added_read = _mm512_mask_or_epi64(added_read, vex_gather, added_read, _mm512_or_si512(mask_vector, destination));
+            added_write = _mm512_mask_or_epi64(added_write, vex_gather, added_write, mask_vector);
+            // Key Locker's implicit vector registers.
+            const __mmask8 wide = implicit & _mm512_cmpge_epu64_mask(number, _mm512_set1_epi64(X86_FORM_AESENCWIDE128KL_M384)) &
+                                  _mm512_cmple_epu64_mask(number, _mm512_set1_epi64(X86_FORM_AESDECWIDE256KL_M512));
+            const __mmask8 key128 = implicit & _mm512_cmpeq_epi64_mask(number, _mm512_set1_epi64(X86_FORM_ENCODEKEY128_R32_R32));
+            const __mmask8 key256 = implicit & _mm512_cmpeq_epi64_mask(number, _mm512_set1_epi64(X86_FORM_ENCODEKEY256_R32_R32));
+            const __mmask8 integrity = implicit & _mm512_cmpeq_epi64_mask(number, _mm512_set1_epi64(X86_FORM_LOADIWKEY_X_X));
+            __m512i implicit_reads = _mm512_maskz_mov_epi64(wide, _mm512_set1_epi64(0xff));
+            implicit_reads = _mm512_mask_mov_epi64(implicit_reads, key256, _mm512_set1_epi64(0x03));
+            implicit_reads = _mm512_mask_mov_epi64(implicit_reads, key128 | integrity, _mm512_set1_epi64(0x01));
+            __m512i implicit_writes = _mm512_maskz_mov_epi64(wide, _mm512_set1_epi64(0xff));
+            implicit_writes = _mm512_mask_mov_epi64(implicit_writes, key256, _mm512_set1_epi64(0x7f));
+            implicit_writes = _mm512_mask_mov_epi64(implicit_writes, key128, _mm512_set1_epi64(0x77));
+            added_read = _mm512_or_si512(added_read, _mm512_slli_epi64(implicit_reads, BUSTER_X86_RESOURCE_VECTOR_SHIFT));
+            added_write = _mm512_or_si512(added_write, _mm512_slli_epi64(implicit_writes, BUSTER_X86_RESOURCE_VECTOR_SHIFT));
+            // A VSIB operand's index: its vector register for the general one, the base's general register kept, where the
+            // common block took them (a memory operand it accesses or whose address it takes).
+            const __m512i role_rm = _mm512_srli_epi64(facts, 32 + BUSTER_X86_ROLE_BITS);
+            const __mmask8 accessed = _mm512_test_epi64_mask(mode, _mm512_set1_epi64(BUSTER_X86_MODE_MEMORY)) &
+                                      (_mm512_test_epi64_mask(role_rm, _mm512_set1_epi64(BUSTER_X86_ROLE_READ | BUSTER_X86_ROLE_WRITE)) |
+                                       _mm512_test_epi64_mask(details, _mm512_set1_epi64((int64_t)BUSTER_X86_MEMORY_EFFECT_ADDRESS << 24)));
+            const __mmask8 indexed = vsib & accessed & _mm512_test_epi64_mask(mode, _mm512_set1_epi64(BUSTER_X86_MODE_INDEX));
+            const __m512i base = _mm512_maskz_sllv_epi64(_mm512_test_epi64_mask(mode, _mm512_set1_epi64(BUSTER_X86_MODE_BASE)), one, _mm512_and_si512(rm, fifteen));
+            const __m512i general_index = _mm512_sllv_epi64(one, _mm512_and_si512(index, fifteen));
+            const __m512i vector_index = _mm512_sllv_epi64(one, _mm512_add_epi64(_mm512_and_si512(index, _mm512_set1_epi64(31)), vector_shift));
+            read = _mm512_mask_or_epi64(read, indexed, _mm512_andnot_si512(general_index, read), _mm512_or_si512(base, vector_index));
+            if (opmasks != 0)
+            {
+                // vp2intersect's pair (an opmask role in reg, which writes), and a gather's or a scatter's record opmask.
+                const __m512i role_reg = _mm512_and_si512(_mm512_srli_epi64(facts, 32), _mm512_set1_epi64((1u << BUSTER_X86_ROLE_BITS) - 1));
+                const __mmask8 opmask_reg = _mm512_test_epi64_mask(properties, _mm512_set1_epi64(BUSTER_X86_EFFECT_OPMASK_REG)) & pair;
+                const __m512i pair_registers = _mm512_sllv_epi64(_mm512_set1_epi64(3), _mm512_and_si512(reg, _mm512_set1_epi64(6)));
+                __m512i opmask = _mm512_cvtepu16_epi64(_mm_maskz_loadu_epi16(rare, opmasks + first));
+                opmask = _mm512_mask_or_epi64(opmask, opmask_reg & _mm512_test_epi64_mask(role_reg, _mm512_set1_epi64(BUSTER_X86_ROLE_READ)), opmask, pair_registers);
+                opmask = _mm512_mask_or_epi64(opmask, opmask_reg & _mm512_test_epi64_mask(role_reg, _mm512_set1_epi64(BUSTER_X86_ROLE_WRITE)), opmask,
+                                              _mm512_slli_epi64(pair_registers, 8));
+                opmask = _mm512_mask_or_epi64(opmask, masked & vsib, opmask, _mm512_slli_epi64(_mm512_sllv_epi64(one, mask_number), 8));
+                _mm512_mask_cvtepi64_storeu_epi16(opmasks + first, rare, opmask);
+            }
+        }
+        // A KEEP_UPPER form reads the vector registers it writes (the record's top bit spread over the lane).
+        added_read = _mm512_ternarylogic_epi64(added_read, _mm512_and_si512(added_write, _mm512_srai_epi64(facts, 63)),
+                                               _mm512_set1_epi64((int64_t)BUSTER_X86_RESOURCE_VECTORS), 0xf8);
+        _mm512_mask_storeu_epi64(reads + first, rare, _mm512_or_si512(read, added_read));
+        _mm512_mask_storeu_epi64(writes + first, rare, _mm512_or_si512(write, added_write));
+    }
 }
 
 // The same 8 records at a time (one per 64-bit lane), the records and the outputs read and written with masked loads and
 // stores (so nothing past either array is touched). Each record's form gives its effects record by a scalar lookup (its
 // number's entry in x86_effects_by_form, then its 16 bytes into a quarter of a ZMM register: Zen 5's gathers cost more
-// than these loads), and then every lane computes as x86_instruction_resolve does, with masks for its branches: reg, rm
-// and vvvv, an opmask role's register in `opmasks`' lane (or, without `opmasks`, a record that reads or writes an opmask
-// register an uncovered one). The records of the forms code generators emit rarely, an x87 form's, vzeroupper's and
-// RARE's (x86_instruction_rare), are that function's: each group ORs its rare lanes' facts into a register, and after
-// the loop (whose vector constants a call inside it would make it reload) one test of it says whether the function
-// resolves any again, so that the common lane pays the OR alone. Inlined into its two callers, it is compiled with
-// `opmasks` null and not, and the first has none of the opmasks' instructions.
+// than these loads), and then every lane computes its resolved effects with masks for its branches: reg, rm and vvvv, an
+// opmask role's register in `opmasks`' lane (or, without `opmasks`, a record that reads or writes an opmask register an
+// uncovered one). The records of the forms code generators emit rarely (BUSTER_X86_EFFECTS_RARE: an x87 form's,
+// vzeroupper's, RARE's and IMPLICIT_VECTORS') are completed by x86_effects_rare_records after the loop: each block ORs
+// its rare lanes' facts into a register, and one test of it after the loop (whose vector constants a call inside it
+// would make it reload: every ZMM register is caller-saved) says whether the call has any, so that the common block pays
+// the OR alone. Inlined into its two callers, it is compiled with `opmasks` null and not, and the first has none of the
+// opmasks' instructions.
 static __attribute__((always_inline)) inline void x86_instructions_effects_lanes(const X86Instruction* instructions, uint64_t count, uint64_t* reads, uint64_t* writes,
                                                                                uint16_t* opmasks)
 {
@@ -3483,13 +3509,9 @@ static __attribute__((always_inline)) inline void x86_instructions_effects_lanes
         _mm512_mask_storeu_epi64(writes + first, live, write);
         rare = _mm512_mask_ternarylogic_epi64(rare, known, facts, _mm512_set1_epi64((int64_t)BUSTER_X86_EFFECTS_RARE), 0xf8);
     }
-    const bool any = _mm512_test_epi64_mask(rare, rare) != 0;
-    for (uint64_t i = 0; any && i < count; i += 1)
+    if (_mm512_test_epi64_mask(rare, rare) != 0)
     {
-        if (x86_instruction_rare(&instructions[i], with_opmasks))
-        {
-            x86_instruction_resolve(&instructions[i], &reads[i], &writes[i], with_opmasks ? &opmasks[i] : 0);
-        }
+        x86_effects_rare_records(instructions, count, reads, writes, opmasks);
     }
 }
 
@@ -3498,7 +3520,7 @@ static __attribute__((unused)) void x86_instructions_effects(const X86Instructio
     x86_instructions_effects_lanes(instructions, count, reads, writes, 0);
 }
 
-// x86_instructions_effects with each record's opmask registers in `opmasks` (x86_instruction_resolve's).
+// x86_instructions_effects with each record's opmask registers in `opmasks` (bits 0 to 7 read, 8 to 15 written).
 static __attribute__((unused)) void x86_instructions_effects_opmasks(const X86Instruction* instructions, uint64_t count, uint64_t* reads, uint64_t* writes,
                                                                      uint16_t* opmasks)
 {
@@ -3951,7 +3973,7 @@ static uint32_t x86_effects_slots(uint8_t syntax, uint8_t* slots)
         slots[2] = BUSTER_X86_SLOT_RM;
         count = 3;
         break;
-    // The /is4 register (in the immediate's bits 7 to 4) is no role: x86_instruction_resolve reads it (RARE).
+    // The /is4 register (in the immediate's bits 7 to 4) is no role: x86_effects_rare_records reads it (RARE).
     case X86_SYNTAX_REG_VVVV_RM_IMM:
     case X86_SYNTAX_REG_VVVV_RM_IS4:
         slots[0] = BUSTER_X86_SLOT_REG;
@@ -4276,9 +4298,23 @@ static bool x86_choice_build(void)
 
 // Builds the effects of every covered form and the form choice's tables. Returns false if a row doesn't fit its forms,
 // rows overlap, or there are more covered forms than BUSTER_X86_EFFECTS_CAPACITY (a broken table): the test catches it.
+// A covered form's x86_effects_operands byte, from its description, as x86_effects_shape's RARE says.
+static uint8_t x86_effects_operand_bits(uint32_t form)
+{
+    const X86FormDescription* description = x86_form_description(form);
+    const uint8_t syntax = description->syntax;
+    const bool is4 = syntax == X86_SYNTAX_REG_VVVV_RM_IS4 || syntax == X86_SYNTAX_REG_VVVV_IS4_RM || syntax == X86_SYNTAX_REG_VVVV_RM_IS4_IMM ||
+                     syntax == X86_SYNTAX_REG_VVVV_IS4_RM_IMM;
+    const uint32_t vsib = (description->rm & BUSTER_X86_OPERAND_VSIB) != 0 ? BUSTER_X86_EFFECT_OPERAND_VSIB : 0;
+    const uint32_t vex = description->family == BUSTER_X86_FAMILY_VEX ? BUSTER_X86_EFFECT_OPERAND_VEX : 0;
+    const uint32_t pair = (description->reg & BUSTER_X86_OPERAND_PAIR) != 0 ? BUSTER_X86_EFFECT_OPERAND_PAIR : 0;
+    return (uint8_t)(vsib | vex | (is4 ? BUSTER_X86_EFFECT_OPERAND_IS4 : 0) | pair);
+}
+
 static bool x86_semantics_initialize(void)
 {
     memset(x86_effects_index, 0, sizeof(x86_effects_index));
+    memset(x86_effects_operands, 0, sizeof(x86_effects_operands));
     memset(x86_effects_shapes, 0, sizeof(x86_effects_shapes));
     x86_effects_records[0] = x86_effects_unknown;
     // The count in a local: the records' stores would make the global's every read a reload (#760: 6 times the time).
@@ -4294,6 +4330,7 @@ static bool x86_semantics_initialize(void)
             if (valid)
             {
                 valid = x86_effects_build(form, effects_row, &x86_effects_records[count]);
+                x86_effects_operands[count] = x86_effects_operand_bits(form);
                 x86_effects_index[form] = (uint16_t)count;
                 count += 1;
             }

@@ -25,8 +25,8 @@ measurements.
   `x86_immediate_field`, `x86_immediate_value`), the flags
   (`x86_instruction_flags`, `x86_flags_substitutable` and
   `x86_instruction_flags_substitutable`), operand-resolved effects
-  (`x86_instructions_effects`, and `x86_instruction_resolve` for its rare
-  records), and form choice (`x86_choice_row`, `x86_choose_forms`,
+  (`x86_instructions_effects`, and `x86_effects_rare_records` after its loop for
+  its rare records), and form choice (`x86_choice_row`, `x86_choose_forms`,
   `x86_choice_instruction`). A caller with one record or request passes a count
   of 1; one that walks a run of records resolves them in batches.
   `x86_semantics_initialize` builds the tables: each covered form's record from
@@ -396,8 +396,7 @@ a digest of the forms frozen while the two agreed.
   load into its part of a ZMM register. `x86_semantics_row`'s arithmetic for
   the segment overrides, a compare and a subtraction per lane, had taken a
   quarter of the loop's instructions (below);
-- each lane computes what `x86_instruction_resolve` does, with masks for its
-  branches;
+- each lane computes a record's resolved effects, with masks for its branches;
 - a legacy SSE form's read of the vector registers it writes is `write &
   vectors` in the lanes of `BUSTER_X86_EFFECT_KEEP_UPPER`, the record's top bit,
   which one arithmetic shift (`vpsraq`) spreads over the lane, and it joins the
@@ -415,15 +414,27 @@ a digest of the forms frozen while the two agreed.
   the merging destinations' reads. The two entry points inline one body
   (`x86_instructions_effects_lanes`, `always_inline`) with the column's pointer
   null and not, so that the first has none of the column's instructions;
-- the rare records are `x86_instruction_resolve`'s (phase D of #2924): an x87
-  form's, vzeroupper's,
-  `BUSTER_X86_EFFECT_RARE`'s (an /is4 operand, a VSIB one's vector index, and
-  vp2intersect's pair of opmask registers) and `IMPLICIT_VECTORS`' (Key
-  Locker's XMM registers). A masked `vpternlogq` ORs the effects
-  records' properties into a register, one `vptestmq` of it after the loop says
-  whether any lane was rare, and then `x86_instruction_resolve` overwrites the
-  rare lanes after the stores. A count in a general register cost more
+- the rare records are completed after the loop by `x86_effects_rare_records`
+  (#3451, phase D of #2924, which deleted the record-at-a-time resolver): an
+  x87 form's, vzeroupper's, `BUSTER_X86_EFFECT_RARE`'s (an /is4 operand, a
+  VSIB one's vector index, and vp2intersect's pair of opmask registers) and
+  `IMPLICIT_VECTORS`' (Key Locker's XMM registers). A masked `vpternlogq` ORs
+  the effects records' properties into a register, and one `vptestmq` of it
+  after the loop says whether any lane was rare. Then the pass goes over the
+  call's blocks: a block whose lanes' forms have no rare property (two loads a
+  lane) is passed over; another's lanes' records and operand bytes
+  (`x86_effects_operands`, a baked byte a record: VSIB, VEX, /is4, pair) are
+  broadcast into registers under their masks, and its rare lanes get their
+  terms, 8 lanes at a time: the x87's and vzeroupper's sets by a
+  `vpermq` of two 8-entry tables, and only where a block has a RARE or
+  IMPLICIT_VECTORS record the operand terms. A VSIB lane's index, which the loop
+  took as a general register, becomes its vector register (a VSIB form reads no
+  general register but its base). A count in a general register cost more
   (below): the lanes' lookups take every general register the loop has.
+  Inside the loop, the same terms cost the common block: a branch a block read
+  plain calls of 9 records and more 2 to 5% slower on the 9700X, and the terms
+  inline made the loop spill ZMM registers (buster-performance's
+  `phase-d-3451-rare-records/`).
   Code generators emit them rarely (Tier 0's long double code, its vector
   constants' zeroing, a function's vzeroupper, a gather), so the common lane
   pays the test alone, rather than the x87's resources in every lane. An EVEX
@@ -809,10 +820,10 @@ clang's instead (`x86_intrinsics_test.c`).
    and rows that overlap.
 2. If a fixture of the issue's kind fits (a fixed register, a partial write, a
    flag), add one to `x86_semantics_fixtures`.
-3. If the vector resolver should leave the form's records to `x86_instruction_resolve`
-   (an operand no role names: an /is4 register, a VSIB index, an opmask pair),
-   the initialization gives it `BUSTER_X86_EFFECT_RARE` from its operands; a new
-   kind of such operand goes there and in `x86_instruction_resolve`. An opmask
+3. If the form has an operand no role names (an /is4 register, a VSIB index, an
+   opmask pair), the initialization gives it `BUSTER_X86_EFFECT_RARE` from its
+   operands and its `x86_effects_operands` byte (`x86_effects_operand_bits`); a
+   new kind of such operand goes there and in `x86_effects_rare_records`. An opmask
    operand's role gets its `BUSTER_X86_EFFECT_OPMASK_*` from its class.
 4. If #180's table doesn't classify it, add its row to `x86_target_rows.c` with
    its features: the harness runs only a form its host's target allows, and

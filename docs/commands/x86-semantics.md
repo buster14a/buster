@@ -25,10 +25,11 @@ requirements. [Command index](README.md).
   - the immediate's contract (`x86_immediate_encodes`, `x86_immediate_field`
     and `x86_immediate_value`): a selector's value against a field's bits;
   - each record's resources read and written, its operands resolved
-    (`x86_instructions_effects`, AVX-512, which leaves the rare records, the
-    x87's, vzeroupper's and those with an operand no role names, an /is4
-    register, a VSIB index or an opmask pair, to a record-at-a-time resolver,
-    `x86_instruction_resolve`; one record is a count of 1), and with
+    (`x86_instructions_effects`, AVX-512; the rare records, the x87's,
+    vzeroupper's and those with an operand no role names, an /is4 register, a
+    VSIB index, an opmask pair or Key Locker's vectors, are completed after the
+    loop by `x86_effects_rare_records`, 8 at a time too; one record is a count
+    of 1), and with
     `x86_instructions_effects_opmasks` each record's opmask registers in a
     column of their own (#760: without it, a record that touches one reads and
     writes everything);
