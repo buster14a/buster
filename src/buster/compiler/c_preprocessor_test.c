@@ -42,7 +42,6 @@
 #include "buster/compiler/test_deal.h"
 #include "buster/compiler/test_paths.h"
 #include <errno.h>
-#include <poll.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <string.h>
@@ -1260,6 +1259,8 @@ static PPClangOutput pp_test_clang_process(const char* executable, char** argume
 }
 
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_FRONTEND
+
+#include <poll.h>
 
 // Legacy fixture callers may compare the partial output of an intentionally rejected case. File-oracle callers
 // inspect PPClangOutput.status instead: a rejection is an explicit skip, a process/I/O failure is a failed run.
