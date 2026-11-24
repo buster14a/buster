@@ -16333,10 +16333,11 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             !lanes->tier0_no_inline && !lanes->tier0_no_hold && !lanes->tier0_inline_shapes &&
             lanes->helper_forms == 0 && getenv("BUSTER_TEST_NODE_BODIES") == NULL &&
             !selection_census && !provisional_selection && !windowed_loop && !shared_parts && !helper_report &&
-            !options.predefines.common && !options.predefines.short_wchar && !options.predefines.visibility_given &&
-            (options.predefines.stack_protector == 0 || options.predefines.stack_protector == BUSTER_PREDEFINES_SSP_OFF) &&
-            options.predefines.omit_frame_pointer == 0 && options.predefines.omit_leaf_frame_pointer == 0 &&
-            options.predefines.stack_clash_protection != BUSTER_PREDEFINES_ON &&
+            !options.predefines.common && !options.predefines.short_wchar &&
+            (!options.predefines.visibility_given || (options.predefines.visibility != NULL && strcmp(options.predefines.visibility, "default") == 0)) &&
+            predefines_stack_guard(&options.predefines) == BUSTER_PREDEFINES_SSP_OFF &&
+            predefines_frame_pointer(&options.predefines) == BUSTER_PREDEFINES_FRAME_POINTER_NONE &&
+            !predefines_stack_clash(&options.predefines) &&
             options.predefines.patchable_function_entry == NULL && options.predefines.sanitizers == 0 &&
             !options.predefines.sanitize_coverage && !options.predefines.openmp && !options.predefines.blocks &&
             options.predefines.cf_protection == 0 &&

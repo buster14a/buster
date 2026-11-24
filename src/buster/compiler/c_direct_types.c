@@ -1243,14 +1243,20 @@ static FastType fast_cc_parse_simple_typename_leaf(FastCCState* cc, bool* out_ok
             }
             cc->pos += 1u;
         }
-        for (int32_t i = (int32_t)nd - 1; i >= 0; i -= 1)
+        for (int32_t i = (int32_t)nd - 1; i >= 0 && !cc->bailout; i -= 1)
         {
+            const uint64_t total_sz = (uint64_t)dims[i] * (uint64_t)ftype_size(cc, base);
+            if (total_sz > (uint64_t)INT32_MAX)
+            {
+                fast_cc_bail(cc, "array size overflow");
+                break;
+            }
             const uint32_t ac = fast_cc_alloc_ctype(cc, FCTYPE_ARRAY);
             if (ac != 0)
             {
                 cc->ctypes[ac].inner = base;
                 cc->ctypes[ac].count = dims[i];
-                cc->ctypes[ac].size = dims[i] * ftype_size(cc, base);
+                cc->ctypes[ac].size = (uint32_t)total_sz;
                 cc->ctypes[ac].align = ftype_align(cc, base);
                 cc->ctypes[ac].complete = 1u;
                 base = BUSTER_FTYPE_COMPLEX_BIT | ac;
@@ -2222,19 +2228,30 @@ static BUSTER_DIRECT_HOT bool fast_cc_parse_declarator(FastCCState* cc, FastType
                                 if (fast_cc_peek(cc) != FTOK_RBRACKET)
                                 {
                                     const int64_t dv = fast_cc_const_int_expr(cc, false);
-                                    dc = dv >= 0 ? (uint32_t)dv : 0u;
+                                    if (dv < 0 || dv > (int64_t)UINT32_MAX - 1)
+                                    {
+                                        fast_cc_bail(cc, "array param size invalid");
+                                        break;
+                                    }
+                                    dc = (uint32_t)dv;
                                 }
                                 if (fast_cc_peek(cc) == FTOK_RBRACKET) { cc->pos += 1u; }
                                 dims[ndim++] = dc;
                             }
-                            for (int32_t di = (int32_t)ndim - 1; di >= 1; di -= 1)
+                            for (int32_t di = (int32_t)ndim - 1; di >= 1 && !cc->bailout; di -= 1)
                             {
+                                const uint64_t total_sz = dims[di] == UINT32_MAX ? 0u : (uint64_t)dims[di] * (uint64_t)ftype_size(cc, pt);
+                                if (total_sz > (uint64_t)INT32_MAX)
+                                {
+                                    fast_cc_bail(cc, "array size overflow");
+                                    break;
+                                }
                                 const uint32_t ac = fast_cc_alloc_ctype(cc, FCTYPE_ARRAY);
                                 if (ac != 0)
                                 {
                                     cc->ctypes[ac].inner = pt;
                                     cc->ctypes[ac].count = dims[di];
-                                    cc->ctypes[ac].size = dims[di] == UINT32_MAX ? 0u : dims[di] * ftype_size(cc, pt);
+                                    cc->ctypes[ac].size = (uint32_t)total_sz;
                                     cc->ctypes[ac].align = ftype_align(cc, pt);
                                     cc->ctypes[ac].complete = dims[di] != UINT32_MAX ? 1u : 0u;
                                     pt = BUSTER_FTYPE_COMPLEX_BIT | ac;
@@ -2317,14 +2334,20 @@ static BUSTER_DIRECT_HOT bool fast_cc_parse_declarator(FastCCState* cc, FastType
             const FastDeclMod sm = mods[groups[gi].suffix_start + (uint32_t)si];
             if (sm.kind == FDMOD_ARRAY)
             {
+                const uint32_t esz = ftype_size(cc, cur);
+                const uint64_t total_sz = sm.count == UINT32_MAX ? 0u : (uint64_t)sm.count * (uint64_t)esz;
+                if (total_sz > (uint64_t)INT32_MAX)
+                {
+                    fast_cc_bail(cc, "array size overflow");
+                    break;
+                }
                 const uint32_t ac = fast_cc_alloc_ctype(cc, FCTYPE_ARRAY);
                 if (ac != 0)
                 {
-                    const uint32_t esz = ftype_size(cc, cur);
                     const uint32_t eal = ftype_align(cc, cur);
                     cc->ctypes[ac].inner = cur;
                     cc->ctypes[ac].count = sm.count;
-                    cc->ctypes[ac].size = sm.count == UINT32_MAX ? 0u : sm.count * esz;
+                    cc->ctypes[ac].size = (uint32_t)total_sz;
                     cc->ctypes[ac].align = eal;
                     cc->ctypes[ac].complete = sm.count != UINT32_MAX ? 1u : 0u;
                     cur = BUSTER_FTYPE_COMPLEX_BIT | ac;

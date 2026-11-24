@@ -126,25 +126,47 @@ static FastBodyScan fast_cc_prescan_body(const FastCCState* cc, uint32_t start_p
     return res;
 }
 
+#define BUSTER_FDIRECT_MAX_FRAME UINT64_C(0x10000000)
+
 static inline int32_t fast_cc_alloc_local(FastCCState* cc, uint32_t size, uint32_t align)
 {
+    int32_t result = 0;
     if (size == 0) { size = 1u; }
     if (align < 1u) { align = 1u; }
-    const uint32_t aligned = ((uint32_t)cc->cur_frame_size + size + align - 1u) & ~(align - 1u);
-    cc->cur_frame_size = (int32_t)aligned;
-    if (cc->cur_frame_size > cc->cur_tmp_off) { cc->cur_tmp_off = cc->cur_frame_size; }
-    if (cc->cur_tmp_off > cc->cur_max_frame) { cc->cur_max_frame = cc->cur_tmp_off; }
-    return -cc->cur_frame_size;
+    const uint64_t raw = (uint64_t)(uint32_t)cc->cur_frame_size + (uint64_t)size + (uint64_t)(align - 1u);
+    const uint64_t aligned = raw & ~(uint64_t)(align - 1u);
+    if (aligned > BUSTER_FDIRECT_MAX_FRAME)
+    {
+        fast_cc_bail(cc, "stack frame too large");
+    }
+    else
+    {
+        cc->cur_frame_size = (int32_t)aligned;
+        if (cc->cur_frame_size > cc->cur_tmp_off) { cc->cur_tmp_off = cc->cur_frame_size; }
+        if (cc->cur_tmp_off > cc->cur_max_frame) { cc->cur_max_frame = cc->cur_tmp_off; }
+        result = -cc->cur_frame_size;
+    }
+    return result;
 }
 
 static inline int32_t fast_cc_alloc_tmp(FastCCState* cc, uint32_t size, uint32_t align)
 {
+    int32_t result = 0;
     if (size == 0) { size = 8u; }
     if (align < 8u) { align = 8u; }
-    const uint32_t aligned = ((uint32_t)cc->cur_tmp_off + size + align - 1u) & ~(align - 1u);
-    cc->cur_tmp_off = (int32_t)aligned;
-    if (cc->cur_tmp_off > cc->cur_max_frame) { cc->cur_max_frame = cc->cur_tmp_off; }
-    return -cc->cur_tmp_off;
+    const uint64_t raw = (uint64_t)(uint32_t)cc->cur_tmp_off + (uint64_t)size + (uint64_t)(align - 1u);
+    const uint64_t aligned = raw & ~(uint64_t)(align - 1u);
+    if (aligned > BUSTER_FDIRECT_MAX_FRAME)
+    {
+        fast_cc_bail(cc, "stack frame too large");
+    }
+    else
+    {
+        cc->cur_tmp_off = (int32_t)aligned;
+        if (cc->cur_tmp_off > cc->cur_max_frame) { cc->cur_max_frame = cc->cur_tmp_off; }
+        result = -cc->cur_tmp_off;
+    }
+    return result;
 }
 
 static inline void fast_cc_reset_tmps(FastCCState* cc)
@@ -6449,8 +6471,16 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
         x86_leave(obj);
         x86_ret(obj);
 
-        const uint32_t total_frame = ((uint32_t)(cc->cur_max_frame + cc->cur_max_call_stack) + 15u) & ~15u;
-        memcpy(obj->text.data + sub_rsp_patch, &total_frame, 4);
+        const uint64_t total_frame64 = ((uint64_t)(uint32_t)cc->cur_max_frame + (uint64_t)(uint32_t)cc->cur_max_call_stack + 15u) & ~UINT64_C(15);
+        if (total_frame64 > BUSTER_FDIRECT_MAX_FRAME)
+        {
+            fast_cc_bail(cc, "stack frame too large");
+        }
+        else
+        {
+            const uint32_t total_frame = (uint32_t)total_frame64;
+            memcpy(obj->text.data + sub_rsp_patch, &total_frame, 4);
+        }
 
         fast_obj_patch_func_jumps(obj);
         if (obj->overflow) { fast_cc_bail(cc, "object buffer overflow"); }
