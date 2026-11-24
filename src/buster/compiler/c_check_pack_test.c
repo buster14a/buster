@@ -106,12 +106,12 @@ static void check_test_pack_history(CheckTest* test, const CheckPackFixture* fix
             memset(handled, 0, (uint64_t)parser.tokens.pragma_count + 1);
             // The reader's traversal, which the placements walk (check_input_pack_placements), in the long-lived arena.
             const uint64_t slots = (uint64_t)parser.tokens.count + 1;
-            uint32_t* columns = arena_push_array(&arena, 9 * slots, sizeof(uint32_t), 4);
+            uint32_t* columns = arena_push_array(&arena, 6 * slots, sizeof(uint32_t), 4);
             check_test_expect(test, columns != NULL, "packing traversal allocation");
             if (columns != NULL)
             {
                 parse_tree_columns(parser.tree.parents, parser.tokens.count, columns, columns + slots, columns + 2 * slots, columns + 3 * slots,
-                                   columns + 4 * slots, columns + 5 * slots, columns + 6 * slots, columns + 7 * slots, columns + 8 * slots);
+                                   columns + 4 * slots, columns + 5 * slots);
             }
             const uint64_t mark = scratch.length;
             CheckInput output = { 0 };
@@ -122,7 +122,7 @@ static void check_test_pack_history(CheckTest* test, const CheckPackFixture* fix
                 .pp = &pp,
                 .arena = &arena,
                 .scratch = &scratch,
-                .postorder = columns != NULL ? columns + 2 * slots : NULL,
+                .postorder = columns,
             };
             const bool valid = columns != NULL && check_input_pack_pragmas(&reader, handled);
             const CheckInputPackPragmas* history = output.pack_pragmas;

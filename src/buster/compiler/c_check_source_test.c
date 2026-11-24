@@ -56,17 +56,16 @@ static void check_test_source_region_transfers(CheckTest* test)
         check_test_expect(test, adapted && input.report_count == 0 && input.region_count == 3,
                           "reader-owned traversal adapts nested and sibling statement expressions on every schedule");
         const uint64_t slots = (uint64_t)parser.tokens.count + 1;
-        uint32_t* columns = adapted ? arena_push_array(&scratch, 9 * slots, sizeof(uint32_t), 4) : NULL;
+        uint32_t* columns = adapted ? arena_push_array(&scratch, 6 * slots, sizeof(uint32_t), 4) : NULL;
         check_test_expect(test, columns != NULL, "region-transfer oracle traversal allocation");
         if (columns != NULL)
         {
             // Derive test-only metadata after check_input released its scratch. Production retains this same
             // traversal for all of the reader's consumers; it never needs Parser.sizes or another size pass.
-            uint32_t* postorder = columns + 2 * slots;
-            uint32_t* positions = columns + 3 * slots;
-            uint32_t* sizes = columns + 8 * slots;
-            parse_tree_columns(parser.tree.parents, parser.tokens.count, columns, columns + slots, postorder, positions,
-                               columns + 4 * slots, columns + 5 * slots, columns + 6 * slots, columns + 7 * slots, sizes);
+            uint32_t* postorder = columns;
+            uint32_t* positions = columns + slots;
+            uint32_t* sizes = columns + 5 * slots;
+            parse_tree_columns(parser.tree.parents, parser.tokens.count, postorder, positions, columns + 2 * slots, columns + 3 * slots, columns + 4 * slots, sizes);
             for (uint32_t token = 0; token < parser.tokens.count; token += 1)
             {
                 const uint32_t position = positions[token];
