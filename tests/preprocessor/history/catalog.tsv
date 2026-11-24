@@ -1,0 +1,67 @@
+buster-fixtures v1 preprocessor-history
+0001	-	undefined function-like name
+0002	-	undefined function-like name in elif
+0003	-	undefined function-like name in short-circuited operands
+0004	-	undefined function-like alias
+0005	-	undefined function-like name in nested expansion
+0006	-	undefined function-like self expansion
+0007	-	disabled function-like recursive expansion
+0008	-	undefined function-like Unicode name
+0009	-	undefined function-like long name is not truncated
+0010	-	undefined function-like name before a splice
+0011	header	undefined function-like included name
+0012	-	number before parentheses keeps its operator diagnostic
+0013	-	defined before parentheses keeps its operator diagnostic
+0014	-	name after a value keeps its operator diagnostic
+0015	-	parenthesized name keeps its operator diagnostic
+0016	-	object
+0017	-	function
+0018	-	argument
+0019	-	nested
+0020	-	argument prescan
+0021	-	paste
+0022	-	stringification
+0023	-	invalid paste
+0024	-	arity
+0025	-	arity across contexts
+0026	-	extra arguments
+0027	header	line/include
+0028	parser	output/redefinition
+0029	parser	output/nested
+0030	parser	output/argument
+0031	parser	output/paste
+0032	parser	empty paste left
+0033	parser	empty paste right
+0034	parser	cross-context invocation
+0035	parser	argument macro name
+0036	parser	forwarded function
+0037	-	builtin
+0038	-	empty stringification
+0039	header,parser	header definition
+0040	header	header errors
+0041	header	nested include stack
+0042	parser	nested argument name
+0043	-	CRLF
+# #254's review: header names written out that are too long for a path (clang's fatal error about the first
+# path the search tries, and #embed's file not found), the header refused at the depth limit (one error, the
+# includes of it after that left out: the main file includes itself to the limit), and the limit at a name a
+# macro made (at its expansion, with the macro's note).
+0044	header	include: an angled name too long for a path
+0045	-	include: a quoted name too long for a path
+# A name with a part longer than a file name may be (NAME_MAX), in a path shorter than PATH_MAX: the open fails
+# (ENAMETOOLONG), and the file cache's probe keeps the error for the search to report. And an absolute name too
+# long for a path, which is the one place searched, not a name in the includer's directory.
+0046	-	include: a name with a part longer than NAME_MAX
+0047	-	include: an absolute name too long for a path
+0048	header	embed: an angled name too long for a path
+# Extra tokens after a name written out are a warning at the first of them.
+0049	header,parser	include: extra tokens after a name written out
+0050	header	include: the header refused at the depth limit
+0051	header	include: the depth limit at a name a macro made
+# -Wunused-macros (#2222), which a pragma enables: the main file's unused definitions at its end, in clang's set's
+# order, an #undef's at it; none for a header's, or for a definition used only in a #if line or by #ifdef.
+0052	header	unused macros, preprocessed
+# -Wgnu-line-marker (#2222), which a pragma enables: at a marker's name, or its line's end, numbered as before its
+# own marker; in a header too.
+0053	header	gnu line markers, preprocessed
+0054	-	unused macros: defined, push_macro and pop_macro, preprocessed

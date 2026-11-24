@@ -1,0 +1,53 @@
+buster-fixtures v1 preprocessor-directives
+# #1254: exact error text and source character, even without the optional Clang oracle.
+0001	gnu17	expected	invalid octal digit
+0002	c23	expected	invalid explicit octal digit
+0003	c23	expected	invalid binary digit
+0004	gnu17	expected	invalid integer suffix
+0005	gnu17	expected	missing hexadecimal digits
+0006	gnu17	expected	missing exponent digits
+0007	c23	expected	missing signed exponent digits
+0008	c23	expected	missing hexadecimal exponent digits
+0009	gnu17	expected	missing hexadecimal exponent
+0010	c23	expected	missing hexadecimal significand
+0011	gnu17	expected	invalid floating suffix
+0012	c23	expected	separator at exponent start
+0013	c23	expected	separator at mantissa end
+0014	gnu17	expected	well-formed decimal floating constant
+0015	gnu17	expected	well-formed hexadecimal floating constant
+0016	gnu17	expected	integer overflow unchanged
+0017	gnu17	expected	invalid digit after LF splice
+0018	gnu17	expected	invalid digit after CRLF splice
+0019	gnu17	expected	invalid suffix after repeated splices
+0020	gnu17	expected	missing exponent after splice
+0021	gnu17	expected	malformed selected elif
+0022	gnu17	expected	short circuit still checks literal syntax
+0023	gnu17	expected	skipped group does not check literal syntax
+0024	gnu17	expected	untaken elif does not check literal syntax
+0025	c23	expected	valid integer forms unchanged
+0026	-	-	#else after #else
+0027	-	-	#elif after #else
+0028	-	-	#elifdef and #elifndef after #else
+0029	c23	-	the same in C23
+0030	-	-	without #if
+0031	-	-	unterminated
+0032	-	-	inside a skipped group
+0033	-	-	deep inside skipped groups
+0034	-	-	after a taken group
+0035	-	-	unterminated inside skipped groups
+0036	-	header	unterminated in an include
+0037	-	-	a comment that swallows the group
+0038	-	-	an active comment that swallows the group
+0039	-	-	a comment on the opening directive
+0040	-	-	a spliced comment on the opening directive
+0041	-	-	a comment after a skipped group
+0042	-	-	a comment after a taken group
+0043	-	-	a comment on a selected #elif
+0044	-	-	a comment on an excluded #elif
+0045	-	-	a comment on a skipped group's end
+0046	-	header	a comment in a repeated include
+0047	-	-	extra tokens
+0048	-	-	extra tokens around the structure
+0049	c23	-	extra tokens on #elifdef
+0050	-	-	after #line
+0051	-	-	digraphs and splices

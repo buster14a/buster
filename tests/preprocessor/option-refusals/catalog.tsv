@@ -1,0 +1,79 @@
+buster-fixtures v1 preprocessor-option-refusals
+# Refused: each family buster doesn't follow, where its last option turns it on; -fzvector whatever follows it (clang's
+# driver ignores -fno-zvector); and the options without a -fno- form.
+0001	-fms-extensions	-fms-extensions
+0002	-fms-extensions	-fno-ms-extensions -fms-extensions
+0003	-fms-compatibility	-fms-compatibility
+0004	-fborland-extensions	-fborland-extensions
+0005	-fdeclspec	-fno-declspec -fdeclspec
+0006	-fzvector	-fzvector
+0007	-fzvector	-fzvector -fno-zvector
+# clang's -mzvector is -fzvector (predefines_alias), and -mno-zvector is -fno-zvector.
+0008	-fzvector	-mzvector
+0009	-fzvector	-mzvector -mno-zvector
+0010	-fzos-extensions	-fno-zos-extensions -fzos-extensions
+0011	-ffixed-point	-ffixed-point
+0012	-fdefer-ts	-fdefer-ts
+0013	-fdirectives-only	-fno-directives-only -fdirectives-only
+0014	-fkeep-system-includes	-fkeep-system-includes
+0015	-fminimize-whitespace	-fminimize-whitespace
+0016	-fuse-line-directives	-fuse-line-directives
+0017	-frewrite-includes	-frewrite-includes
+0018	-frewrite-imports	-frewrite-imports
+# clang fails without the module it would otherwise build into its cache, so that nothing is written.
+0019	-fmodules	-fno-implicit-modules -fno-modules -fmodules
+0020	-fimplicit-module-maps	-fimplicit-module-maps
+0021	-fbuiltin-module-map	-fbuiltin-module-map
+0022	-fmodule-name=probe	-fmodule-name=probe
+0023	-fmodule-map-file=	-fmodule-map-file=%d/missing.modulemap
+0024	-fdriver-only	-fdriver-only
+0025	-fproc-stat-report	-fproc-stat-report
+0026	-fmacro-prefix-map=	-fmacro-prefix-map=%d=/remapped
+0027	-ffile-prefix-map=	-ffile-prefix-map=%d=/remapped
+0028	-fexec-charset=latin1	-fexec-charset=UTF-8 -fexec-charset=latin1
+0029	-finput-charset=UTF8	-finput-charset=UTF8
+# Taken: the modeled families, each refused family turned off again, -fzvector in assembly, digraphs on and off in
+# any mode (c89 with them is C94, and C94 without them c89: #288), and raw strings off (buster lexes none), each in
+# c17, where clang's lexes none either (a GNU mode's would differ); and UTF-8 charsets in any case.
+0030	-	-std=c17 -fgnu-keywords
+0031	-	-std=c17 -fno-raw-string-literals -fraw-string-literals
+0032	-	-std=gnu89 -fraw-string-literals
+0033	-	-std=gnu99 -fraw-string-literals -fno-raw-string-literals -fraw-string-literals
+0034	-	-std=gnu23 -fno-raw-string-literals
+0035	-	-x assembler-with-cpp -fno-raw-string-literals
+0036	-	-std=gnu17 -fno-raw-string-literals -fno-asm
+0037	-	-std=c17 -fno-dollars-in-identifiers
+0038	-	-std=c17 -fno-signed-char
+0039	-	-std=c17 -funsigned-char -fno-unsigned-char
+0040	-	-std=c17 -fms-extensions -fno-ms-extensions
+0041	-	-std=c17 -fms-compatibility -fno-ms-compatibility
+0042	-	-std=c17 -fborland-extensions -fno-borland-extensions
+0043	-	-std=c17 -fdeclspec -fno-declspec
+0044	-	-std=c17 -fno-zvector
+0045	-	-std=c17 -mno-zvector
+0046	-	-std=c17 -x assembler-with-cpp -fzvector
+0047	-	-std=c17 -fzos-extensions -fno-zos-extensions
+0048	-	-std=c17 -ffixed-point -fno-fixed-point
+0049	-	-std=c17 -fdefer-ts -fno-defer-ts
+0050	-	-std=c17 -fno-digraphs -fdigraphs
+0051	-	-std=gnu89 -fno-raw-string-literals -fdigraphs
+0052	-	-std=c17 -fdigraphs -fno-digraphs
+0053	-	-std=c89 -fdigraphs
+0054	-	-std=iso9899:199409 -fno-digraphs
+0055	-	-std=iso9899:199409
+0056	-	-std=c89
+0057	-	-std=gnu17 -fraw-string-literals -fno-raw-string-literals
+0058	-	-std=c17 -fshort-wchar -fno-short-wchar
+# -fshort-wchar is predefines_option's, which #if's wide character constants follow.
+0059	-	-std=c17 -fno-short-wchar -fshort-wchar
+0060	-	-std=c17 -fdirectives-only -fno-directives-only
+0061	-	-std=c17 -fkeep-system-includes -fno-keep-system-includes
+0062	-	-std=c17 -fminimize-whitespace -fno-minimize-whitespace
+0063	-	-std=c17 -fuse-line-directives -fno-use-line-directives
+0064	-	-std=c17 -frewrite-includes -fno-rewrite-includes
+0065	-	-std=c17 -frewrite-imports -fno-rewrite-imports
+0066	-	-std=c17 -fmodules -fno-modules
+0067	-	-std=c17 -fimplicit-module-maps -fno-implicit-module-maps
+0068	-	-std=c17 -fmodules-driver
+0069	-	-std=c17 -fexec-charset=latin1 -fexec-charset=UTF-8
+0070	-	-std=c17 -finput-charset=Utf-8

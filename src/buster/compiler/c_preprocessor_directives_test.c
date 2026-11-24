@@ -677,248 +677,13 @@ struct PPDirectiveTestStructure
 };
 
 // Original raw-string inputs; Clang is an external diagnostic/location oracle, including suppressed contexts.
-static const PPDirectiveTestStructure pp_directive_test_raw_errors[] = {
-    { "invalid delimiter character", "R\"bad space\"\n", 0, "gnu17" },
-    { "delimiter lookahead past the salvaged token", "R\"a\"b c\n", 0, "gnu17" },
-    { "delimiter newline", "LR\"bad\n\"\n", 0, "gnu17" },
-    { "delimiter too long", "u8R\"abcdefghijklmnopq\"\n", 0, "gnu17" },
-    { "unterminated", "R\"tag(body\n", 0, "gnu17" },
-    { "spliced prefix", "L\\\nR\"bad space\"\n", 0, "gnu17" },
-    { "macro definitions diagnose once", "#define BAD R\"bad space\"\nBAD BAD\n", 0, "gnu17" },
-    { "discarded macro argument", "#define DROP(x) kept\nDROP(R\"bad space\")\n", 0, "gnu17" },
-    { "condition after expansion", "#define DROP(x) 1\n#if DROP(R\"bad space\")\nkept\n#endif\n", 0, "gnu17" },
-    { "skipped body", "#if 0\nR\"bad space\"\n#endif\n", 0, "gnu17" },
-    { "untaken elif is still lexed", "#if 1\nkept\n#elif R\"bad space\"\n#endif\n", 0, "gnu17" },
-    { "opaque diagnostic", "#warning R\"bad space\"\n", 0, "gnu17" },
-    { "opaque query", "#define HI __has_include\n#if HI(<R\"bad\"x>)\n#endif\n", 0, "gnu17" },
-    { "included file", "#include \"structure.h\"\n#include \"structure.h\"\n", "R\"bad space\"\n", "gnu17" },
-};
-
-static const PPDirectiveTestStructure pp_directive_test_structures[] = {
-    // #1254: exact error text and source character, even without the optional Clang oracle.
-    {
-        .name = "invalid octal digit",
-        .source = "#if 08\n#endif\n",
-        .standard = "gnu17",
-        .diagnostic = ":1:6: error: invalid digit '8' in octal constant\n",
-    },
-    {
-        .name = "invalid explicit octal digit",
-        .source = "#if 0o18\n#endif\n",
-        .standard = "c23",
-        .diagnostic = ":1:8: error: invalid digit '8' in octal constant\n",
-    },
-    {
-        .name = "invalid binary digit",
-        .source = "#if 0b102\n#endif\n",
-        .standard = "c23",
-        .diagnostic = ":1:9: error: invalid digit '2' in binary constant\n",
-    },
-    {
-        .name = "invalid integer suffix",
-        .source = "#if 1lul\n#endif\n",
-        .standard = "gnu17",
-        .diagnostic = ":1:6: error: invalid suffix 'lul' on integer constant\n",
-    },
-    {
-        .name = "missing hexadecimal digits",
-        .source = "#if 0x\n#endif\n",
-        .standard = "gnu17",
-        .diagnostic = ":1:6: error: invalid suffix 'x' on integer constant\n",
-    },
-    {
-        .name = "missing exponent digits",
-        .source = "#if 1e\n#endif\n",
-        .standard = "gnu17",
-        .diagnostic = ":1:6: error: exponent has no digits\n",
-    },
-    {
-        .name = "missing signed exponent digits",
-        .source = "#if 1e+\n#endif\n",
-        .standard = "c23",
-        .diagnostic = ":1:6: error: exponent has no digits\n",
-    },
-    {
-        .name = "missing hexadecimal exponent digits",
-        .source = "#if 0x1p\n#endif\n",
-        .standard = "c23",
-        .diagnostic = ":1:8: error: exponent has no digits\n",
-    },
-    {
-        .name = "missing hexadecimal exponent",
-        .source = "#if 0x1.\n#endif\n",
-        .standard = "gnu17",
-        .diagnostic = ":1:9: error: hexadecimal floating constant requires an exponent\n",
-    },
-    {
-        .name = "missing hexadecimal significand",
-        .source = "#if 0x.p1\n#endif\n",
-        .standard = "c23",
-        .diagnostic = ":1:8: error: hexadecimal floating constant requires a significand\n",
-    },
-    {
-        .name = "invalid floating suffix",
-        .source = "#if 1.0fblah\n#endif\n",
-        .standard = "gnu17",
-        .diagnostic = ":1:8: error: invalid suffix 'fblah' on floating constant\n",
-    },
-    {
-        .name = "separator at exponent start",
-        .source = "#if 1e'2\n#endif\n",
-        .standard = "c23",
-        .diagnostic = ":1:7: error: digit separator cannot appear at start of digit sequence\n",
-    },
-    {
-        .name = "separator at mantissa end",
-        .source = "#if 1'e2\n#endif\n",
-        .standard = "c23",
-        .diagnostic = ":1:6: error: digit separator cannot appear at end of digit sequence\n",
-    },
-    {
-        .name = "well-formed decimal floating constant",
-        .source = "#if 1.5\n#endif\n",
-        .standard = "gnu17",
-        .diagnostic = ":1:5: error: floating point literal in preprocessor expression\n",
-    },
-    {
-        .name = "well-formed hexadecimal floating constant",
-        .source = "#if 0x1p2\n#endif\n",
-        .standard = "gnu17",
-        .diagnostic = ":1:5: error: floating point literal in preprocessor expression\n",
-    },
-    {
-        .name = "integer overflow unchanged",
-        .source = "#if 99999999999999999999999\n#endif\n",
-        .standard = "gnu17",
-        .diagnostic = ":1:5: error: integer literal is too large to be represented in any integer type\n",
-    },
-    {
-        .name = "invalid digit after LF splice",
-        .source = "#if 0\\\n8\n#endif\n",
-        .standard = "gnu17",
-        .diagnostic = ":2:1: error: invalid digit '8' in octal constant\n",
-    },
-    {
-        .name = "invalid digit after CRLF splice",
-        .source = "#if 0\\\r\n8\r\n#endif\r\n",
-        .standard = "gnu17",
-        .diagnostic = ":2:1: error: invalid digit '8' in octal constant\n",
-    },
-    {
-        .name = "invalid suffix after repeated splices",
-        .source = "#if 1\\\n\\\nlul\n#endif\n",
-        .standard = "gnu17",
-        .diagnostic = ":3:1: error: invalid suffix 'lul' on integer constant\n",
-    },
-    {
-        .name = "missing exponent after splice",
-        .source = "#if 1\\\ne\n#endif\n",
-        .standard = "gnu17",
-        .diagnostic = ":2:1: error: exponent has no digits\n",
-    },
-    {
-        .name = "malformed selected elif",
-        .source = "#if 0\n#elif 08\n#endif\n",
-        .standard = "gnu17",
-        .diagnostic = ":2:8: error: invalid digit '8' in octal constant\n",
-    },
-    {
-        .name = "short circuit still checks literal syntax",
-        .source = "#if 0 && 08\n#endif\n",
-        .standard = "gnu17",
-        .diagnostic = ":1:11: error: invalid digit '8' in octal constant\n",
-    },
-    {
-        .name = "skipped group does not check literal syntax",
-        .source = "#if 0\n#if 08\n#endif\n#endif\n",
-        .standard = "gnu17",
-        .diagnostic = "",
-    },
-    {
-        .name = "untaken elif does not check literal syntax",
-        .source = "#if 1\n#elif 08\n#endif\n",
-        .standard = "gnu17",
-        .diagnostic = "",
-    },
-    {
-        .name = "valid integer forms unchanged",
-        .source = "#if 0xffu == 255 && 077LL == 63 && 0b10 == 2 && 1ULL == 1\nkept\n#endif\n",
-        .standard = "c23",
-        .diagnostic = "",
-    },
-    { "#else after #else", "#if 1\n#else\n#else\n#endif\n", 0, 0 },
-    { "#elif after #else", "#if 0\n#else\n#elif 1\n#endif\n#if 1\n#else\n#elif 1\n#endif\n", 0, 0 },
-    { "#elifdef and #elifndef after #else", "#if 0\n#else\n#elifdef X\n#endif\n#if 0\n#else\n#elifndef X\n#endif\n", 0, 0 },
-    { "the same in C23", "#if 0\n#else\n#elifdef X\n#endif\n#if 1\n#elifndef Y\n#endif\n", 0, "c23" },
-    { "without #if", "a\n#endif\nb\n#else\n#elif 1\n#elifdef X\n#elifndef Y\n", 0, 0 },
-    { "unterminated", "#if 1\n#if 0\nx\n", 0, 0 },
-    { "inside a skipped group", "#if 0\n#if 1\n#else\n#else\n#elif 1\n#endif\n#endif\n", 0, 0 },
-    { "deep inside skipped groups",
-      "#if 0\n#ifdef A\n#if 2\n#else\n#elifdef B\n#else\n#endif\n#else\n#else\n#endif\n#elif 1\n#else\n#else\n#endif\n", 0, 0 },
-    { "after a taken group", "#if 1\n#elif 1\n#if 0\n#else\n#else\n#endif\n#else\n#elif 0\n#endif\n", 0, 0 },
-    { "unterminated inside skipped groups", "#if 1\n#if 0\n#if 1\n#ifdef X\n#else\n#else\n", 0, 0 },
-    { "unterminated in an include", "#if 1\n#include \"structure.h\"\n#endif\n#endif\n", "#if 1\n#if 0\n#if 1\n", 0 },
-    { "a comment that swallows the group", "#if 0\n/* never closed\n#else\n#endif\nx\n", 0, 0 },
-    { "an active comment that swallows the group", "#if 1\n/* never closed\n#else\n#endif\nx\n", 0, 0 },
-    { "a comment on the opening directive", "#if 0 /* never closed\n#else\n#endif\nx\n", 0, 0 },
-    { "a spliced comment on the opening directive", "#if 0\\\n /* never closed\n#else\n#endif\nx\n", 0, 0 },
-    { "a comment after a skipped group", "#if 0\n#else /* never closed\n#endif\nx\n", 0, 0 },
-    { "a comment after a taken group", "#if 1\n#else /* never closed\n#endif\nx\n", 0, 0 },
-    { "a comment on a selected #elif", "#if 0\n#elif 1 /* never closed\n#endif\nx\n", 0, 0 },
-    { "a comment on an excluded #elif", "#if 1\n#elif 1 /* never closed\n#endif\nx\n", 0, 0 },
-    { "a comment on a skipped group's end", "#if 0\n#endif /* never closed\nx\n", 0, 0 },
-    { "a comment in a repeated include", "#include \"structure.h\"\n#include \"structure.h\"\n", "/* never closed\n", 0 },
-    { "extra tokens", "#if 1 // c\n#else junk\n#endif junk\n#if 0\n#else junk\n#endif junk\n#ifdef A B\n#endif\n#if 0\n#if 1\n#else x\n#endif y\n#endif\n",
-      0, 0 },
-    { "extra tokens around the structure", "#else junk\n#endif junk\n#if 0\n#else\n#else junk\n#endif\n#if 1\n#else\n#else junk\n#endif\n#if 1\n#elif 1\n#else junk\n#endif\n",
-      0, 0 },
-    { "extra tokens on #elifdef", "#if 0\n#elifdef X Y\n#elifndef Z W\n#endif\n", 0, "c23" },
-    { "after #line", "#line 100\n#else\n#if 0\n#else\n#else\n#endif\n#line 7 \"renamed.c\"\n#elif 1\n#if 1\n", 0, 0 },
-    { "digraphs and splices", "%:if 0\n%:  if 1\n#el\\\nse\n%:else\n%:endif\n#endif\n#\\\nendif\n", 0, 0 },
-};
 
 // Diagnostic messages are original source text, including comments and trailing blanks. A skipped directive still
 // belongs to raw excluded input; an active one must not let its comment text swallow the source after its newline.
-static const PPDirectiveTestStructure pp_directive_test_messages[] = {
-    { "an active warning's comment text", "#warning /* never closed\ntail\n", 0, 0 },
-    { "an active error's comment text", "#error /* never closed\ntail\n", 0, 0 },
-    { "comments, quotes and trailing blanks", "#warning /* comment */ x   \t\n#error '\n", 0, 0 },
-    { "a spliced name and message", "#war\\\nning /* op\\\nen\ntail\n", 0, 0 },
-    { "an excluded warning's comment", "#if 0\n#warning /* never closed\n#endif\ntail\n", 0, 0 },
-    { "an excluded error's comment", "#if 0\n#error /* never closed\n#endif\ntail\n", 0, 0 },
-    { "repeated inclusions", "#include \"structure.h\"\n#include \"structure.h\"\n", "#warning /* never closed\ntail\n", 0 },
-};
+
 
 // Fixtures of #define's and #undef's constraints and of redefinitions (C 6.10.4, #121), reported as clang reports them.
-static const PPDirectiveTestStructure pp_directive_test_definitions[] = {
-    { "'#' without a parameter", "#define F(x) #y\n#define G() #\n#define H(a) a #\n#define O #y\n#define P(x) #x x ## ##\n", 0, 0 },
-    { "'##' at either end", "#define F(x) ## x\n#define G(x) x ##\n#define H ## x\n#define I x ##\n", 0, 0 },
-    { "__VA_OPT__",
-      "#define F(x) __VA_OPT__(x)\n#define G __VA_OPT__\n#define H(...) __VA_OPT__(__VA_OPT__())\n#define I(...) __VA_OPT__ x\n#define J(...) __VA_OPT__\n"
-      "#define K(...) __VA_OPT__(## a)\n#define L(...) __VA_OPT__((a ##))\n#define M(...) __VA_OPT__(a ##)\n#define N(...) #__VA_ARGS__ __VA_OPT__(a ## b)\n",
-      0, 0 },
-    { "an unterminated __VA_OPT__",
-      "#define F(...) __VA_OPT__(\n#define G(...) __VA_OPT__(a\n#define H(...) __VA_OPT__(a (b)\n#define I(...) __VA_OPT__(int\n#define J(...) __VA_OPT__(1\n"
-      "#define K(...) __VA_OPT__(<:\n#define L(...) __VA_OPT__(L\"s\"\n#define M(...) __VA_OPT__(@\n",
-      0, 0 },
-    { "parameter lists",
-      "#define A(x, x) x\n#define B(x\n#define C(x,) x\n#define D(\n#define E(1) x\n#define F(...x) x\n#define G(x...y) x\n#define H(x,...,y) x\n"
-      "#define I(x y) x\n#define J(a,b,a) a\n#define K(__VA_ARGS__) 1\n#define L(x...) x\n#define M(for, int) for int\n",
-      0, 0 },
-    { "names", "#define\n#define 123\n#define defined 1\n#undef\n#undef 1\n#undef X Y\n#ifdef\n#endif\n#ifdef 1\n#endif\n#ifndef /* c */ \n#endif\n#if 0\n#elifdef\n#endif\n",
-      0, "c23" },
-    { "builtins",
-      "#define __LINE__ 1\n#undef __FILE__\n#define __STDC__ 2\n#define __has_include 1\n#undef __STDC_VERSION__\n#undef __COUNTER__\n#undef _Pragma\n"
-      "#undef __x86_64__\n#define __STDC_HOSTED__ 0\n#undef __LINE__\n",
-      0, 0 },
-    { "whitespace after the name", "#define A+1\n#define B\"s\"\n#define C\\\n+1\n#define D\\\n 1\n#define E/**/+1\n#define F@\n", 0, 0 },
-    { "whitespace after the name in C89", "#define A+1\n#define B@\n#define C`\n#define D\"s\"\n", 0, "c89" },
-    { "redefinitions",
-      "#define A 1\n#define A 2\n#define B(x) x\n#define B(y) y\n#define C 1\n#define C  1\n#define D a/**/b\n#define D a b\n#define E <:\n#define E [\n"
-      "#define G 1 // c\n#define G 1\n#define H /* a */\n#define H\n#define I(x) x\n#undef I\n#define I(y) y\n#define J(...) __VA_OPT__(a)\n#define J(...) __VA_OPT__(a )\n"
-      "#define K(x) #x\n#define K(x) # x\n#define L 01\n#define L 1\n",
-      0, 0 },
-};
+
 
 // Runs a command (`argv`, ended by a null) with CPATH and C_INCLUDE_PATH unset and its standard input /dev/null: what
 // it writes to standard output and to standard error go to `*output` and `*errors` (each may be null to drop it), in
@@ -1020,9 +785,31 @@ static int64_t pp_directive_test_clang_guards(char** arguments, int argument_cou
 }
 
 // Each fixture by both kernels, whose diagnostics must be the same, and with clang, clang's.
-static bool pp_directive_test_diagnostics(const PPDirectiveTestStructure* fixtures, uint32_t count, const char* label, const char* directory, bool with_clang)
+static bool pp_directive_test_structure_row(PPTestFixtures* table, const char* directory, char** fields, uint32_t line)
 {
-    uint32_t failures = 0;
+    (void)line;
+    PPDirectiveTestStructure* row = pp_test_fixture_row(table, fields[0]);
+    const bool header = strcmp(fields[2], "header") == 0 || strcmp(fields[2], "header,expected") == 0;
+    const bool expected = strcmp(fields[2], "expected") == 0 || strcmp(fields[2], "header,expected") == 0;
+    bool valid = row != NULL && (header || expected || strcmp(fields[2], "-") == 0);
+    if (valid)
+    {
+        row->name = fields[3];
+        row->standard = strcmp(fields[1], "-") == 0 ? NULL : fields[1];
+        valid = pp_test_fixture_text(table, directory, fields[0], ".c", &row->source) &&
+                (!header || pp_test_fixture_text(table, directory, fields[0], ".h", &row->header)) &&
+                (!expected || pp_test_fixture_text(table, directory, fields[0], ".expected", &row->diagnostic));
+    }
+    return valid;
+}
+
+static bool pp_directive_test_diagnostics(const char* suite, const char* label, const char* directory, bool with_clang)
+{
+    PPTestFixtures catalog;
+    const bool loaded = pp_test_fixture_table(&catalog, suite, "buster-fixtures v1 preprocessor-directives", 4, sizeof(PPDirectiveTestStructure), pp_directive_test_structure_row, NULL);
+    const PPDirectiveTestStructure* fixtures = (const PPDirectiveTestStructure*)catalog.rows;
+    const uint32_t count = catalog.count;
+    uint32_t failures = !loaded;
     for (uint32_t f = 0; f < count; f += 1)
     {
         const PPDirectiveTestStructure* fixture = &fixtures[f];
@@ -1086,6 +873,7 @@ static bool pp_directive_test_diagnostics(const PPDirectiveTestStructure* fixtur
         unlink(header);
     }
     printf("%s: %u of %u fixtures differ%s\n", label, failures, count, with_clang ? " from clang's diagnostics" : " between the kernels");
+    arena_release(&catalog.storage);
     return failures == 0;
 }
 
@@ -1159,77 +947,16 @@ struct PPDirectiveTestGuard
 {
     const char* name;
     const char* source;
-    const char* files[4][2];
+    const PPTestFile* files;
     uint32_t guards;
     uint32_t once;
 };
 
-#define BUSTER_PP_DIRECTIVE_TEST_GUARDED "#ifndef G\n#define G\nint g;\n#endif\n"
-#define BUSTER_PP_DIRECTIVE_TEST_TWICE "#include \"g.h\"\n#include \"g.h\"\nx\n"
-
-static const PPDirectiveTestGuard pp_directive_test_guard_fixtures[] = {
-    { "a guarded file included twice", BUSTER_PP_DIRECTIVE_TEST_TWICE, { { "g.h", BUSTER_PP_DIRECTIVE_TEST_GUARDED } }, 1, 0 },
-    { "#undef between the inclusions", "#include \"g.h\"\n#undef G\n#include \"g.h\"\n#include \"g.h\"\n", { { "g.h", BUSTER_PP_DIRECTIVE_TEST_GUARDED } }, 1, 0 },
-    { "#if !defined G", BUSTER_PP_DIRECTIVE_TEST_TWICE, { { "g.h", "#if !defined G\n#define G\nint g;\n#endif\n" } }, 1, 0 },
-    { "#if !defined(G)", BUSTER_PP_DIRECTIVE_TEST_TWICE, { { "g.h", "#if !defined(G)\n#define G\nint g;\n#endif\n" } }, 1, 0 },
-    { "parentheses and three '!'", BUSTER_PP_DIRECTIVE_TEST_TWICE, { { "g.h", "#if ( !!!( defined ( G ) ) )\n#define G\nint g;\n#endif\n" } }, 1, 0 },
-    { "two '!'", BUSTER_PP_DIRECTIVE_TEST_TWICE, { { "g.h", "#if !!defined G\n#else\n#define G\nint g;\n#endif\n" } }, 0, 0 },
-    { "!defined G || 0", BUSTER_PP_DIRECTIVE_TEST_TWICE, { { "g.h", "#if !defined G || 0\n#define G\nint g;\n#endif\n" } }, 0, 0 },
-    { "a guard with #else", BUSTER_PP_DIRECTIVE_TEST_TWICE, { { "g.h", "#ifndef G\n#define G\nfirst\n#else\nsecond\n#endif\n" } }, 0, 0 },
-    { "a guard with #elif", BUSTER_PP_DIRECTIVE_TEST_TWICE, { { "g.h", "#ifndef G\n#define G\nfirst\n#elif 1\nsecond\n#endif\n" } }, 0, 0 },
-    { "a token before the #ifndef", BUSTER_PP_DIRECTIVE_TEST_TWICE, { { "g.h", "int before;\n#ifndef G\n#define G\n#endif\n" } }, 0, 0 },
-    { "a token after the #endif", BUSTER_PP_DIRECTIVE_TEST_TWICE, { { "g.h", "#ifndef G\n#define G\n#endif\nint after;\n" } }, 0, 0 },
-    { "a directive before the #ifndef", BUSTER_PP_DIRECTIVE_TEST_TWICE, { { "g.h", "#define X\n#ifndef G\n#define G\nint g;\n#endif\n" } }, 0, 0 },
-    { "a directive after the #endif", BUSTER_PP_DIRECTIVE_TEST_TWICE, { { "g.h", "#ifndef G\n#define G\nint g;\n#endif\n#define Y\n" } }, 0, 0 },
-    { "comments and null directives around the group", BUSTER_PP_DIRECTIVE_TEST_TWICE,
-      { { "g.h", "/* a */\n#\n%:\n#ifndef G // b\n#define G\nint g;\n#endif /* c */\n#\n// d\n" } }, 1, 0 },
-    { "extra tokens", BUSTER_PP_DIRECTIVE_TEST_TWICE, { { "g.h", "#ifndef G junk\n#define G\nint g;\n#endif junk\n" } }, 1, 0 },
-    { "the macro defined before the first inclusion", "#define G\n" BUSTER_PP_DIRECTIVE_TEST_TWICE, { { "g.h", BUSTER_PP_DIRECTIVE_TEST_GUARDED } }, 0, 0 },
-    { "an inclusion from inside the file", "#include \"n.h\"\n#include \"n.h\"\n", { { "n.h", "#ifndef N\n#define N\n#include \"n.h\"\nint n;\n#endif\n" } }, 1, 0 },
-    { "an inclusion in a skipped group", "#if 0\n#include \"g.h\"\n#endif\n" BUSTER_PP_DIRECTIVE_TEST_TWICE, { { "g.h", BUSTER_PP_DIRECTIVE_TEST_GUARDED } }, 1, 0 },
-    { "#pragma once through a symbolic link and a hard link", "#include \"o.h\"\n#include \"link.h\"\n#include \"hard.h\"\n#include \"o.h\"\n",
-      { { "o.h", "#pragma once\nint o;\n" }, { "link.h", "->o.h" }, { "hard.h", "=>o.h" } }, 0, 3 },
-    { "#import", "#import \"i.h\"\n#include \"i.h\"\n#import \"i.h\"\n", { { "i.h", "int i;\n" } }, 0, 2 },
-};
-
-// Writes a fixture's files into `directory` (links as links), or removes them (`write` false).
-static bool pp_directive_test_guard_files(const PPDirectiveTestGuard* fixture, const char* directory, bool write)
-{
-    bool result = true;
-    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixture->files) && fixture->files[i][0] != 0; i += 1)
-    {
-        char path[4200];
-        char target[4200];
-        const char* text = fixture->files[i][1];
-        snprintf(path, sizeof(path), "%s/%s", directory, fixture->files[i][0]);
-        snprintf(target, sizeof(target), "%s/%s", directory, text + 2);
-        if (!write)
-        {
-            unlink(path);
-        }
-        else if (text[0] == '-' && text[1] == '>')
-        {
-            result &= symlink(text + 2, path) == 0;
-        }
-        else if (text[0] == '=' && text[1] == '>')
-        {
-            result &= link(target, path) == 0;
-        }
-        else
-        {
-            result &= pp_test_write_file(path, text);
-        }
-    }
-    return result;
-}
-
-// A fixture by both kernels: the same stream, and the skips it must make; with clang, clang's output and its count of
-// the inclusions it skips by guards.
 static bool pp_directive_test_guard(const PPDirectiveTestGuard* fixture, const char* directory, bool with_clang)
 {
     char path[4200];
-    snprintf(path, sizeof(path), "%s/guard.c", directory);
-    bool result = pp_test_write_file(path, fixture->source) && pp_directive_test_guard_files(fixture, directory, true);
+    const PPTestCase test = { .source = fixture->source, .files = fixture->files };
+    bool result = pp_test_write_named_case(&test, directory, "guard.c", path, sizeof(path));
     static InternTable tables[2];
     static Preprocessor runs[2];
     bool ran[2] = { false, false };
@@ -1275,20 +1002,45 @@ static bool pp_directive_test_guard(const PPDirectiveTestGuard* fixture, const c
         pp_release(&runs[k]);
         intern_release(&tables[k]);
     }
-    pp_directive_test_guard_files(fixture, directory, false);
+    pp_test_remove_case(&test, directory);
     unlink(path);
     return result;
 }
 
+static bool pp_directive_test_guard_row(PPTestFixtures* table, const char* directory, char** fields, uint32_t line)
+{
+    (void)line;
+    PPDirectiveTestGuard* row = pp_test_fixture_row(table, fields[0]);
+    bool valid = row != NULL;
+    if (valid)
+    {
+        row->name = fields[4];
+        for (uint32_t i = 0; i < pp_test_fixtures.tree_count; i += 1)
+        {
+            if (strcmp(fields[1], pp_test_fixtures.tree_names[i]) == 0)
+            {
+                row->files = pp_test_fixtures.files + pp_test_fixtures.tree_firsts[i];
+            }
+        }
+        valid = row->files != NULL && (strcmp(fields[2], "0") == 0 || pp_test_fixture_count(fields[2], &row->guards)) &&
+                (strcmp(fields[3], "0") == 0 || pp_test_fixture_count(fields[3], &row->once)) && pp_test_fixture_text(table, directory, fields[0], ".c", &row->source);
+    }
+    return valid;
+}
+
 static bool pp_directive_test_guards(const char* directory, bool with_clang)
 {
-    uint32_t failures = 0;
-    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(pp_directive_test_guard_fixtures); i += 1)
+    PPTestFixtures table;
+    const bool loaded = pp_test_fixture_table(&table, "guards", "buster-fixtures v1 preprocessor-guards", 5, sizeof(PPDirectiveTestGuard), pp_directive_test_guard_row, NULL);
+    const PPDirectiveTestGuard* cases = (const PPDirectiveTestGuard*)table.rows;
+    uint32_t failures = !loaded;
+    for (uint32_t i = 0; i < table.count; i += 1)
     {
-        failures += !pp_directive_test_guard(&pp_directive_test_guard_fixtures[i], directory, with_clang);
+        failures += !pp_directive_test_guard(&cases[i], directory, with_clang);
     }
-    printf("include guards: %u of %lu fixtures differ%s\n", failures, (unsigned long)BUSTER_ARRAY_LENGTH(pp_directive_test_guard_fixtures),
+    printf("include guards: %u of %lu fixtures differ%s\n", failures, (unsigned long)table.count,
            with_clang ? " (outputs and skips by guards against clang's)" : "");
+    arena_release(&table.storage);
     return failures == 0;
 }
 
@@ -1511,12 +1263,12 @@ static bool pp_directive_test_location_option(const char* directory, bool with_c
 static bool pp_test_directives(const char* directory, bool with_clang, uint64_t seed, uint64_t count)
 {
     bool result = pp_directive_test_streams(seed, count);
-    result &= pp_directive_test_diagnostics(pp_directive_test_structures, BUSTER_ARRAY_LENGTH(pp_directive_test_structures), "directive structure", directory, with_clang);
-    result &= pp_directive_test_diagnostics(pp_directive_test_messages, BUSTER_ARRAY_LENGTH(pp_directive_test_messages), "diagnostic text", directory, with_clang);
-    result &= pp_directive_test_diagnostics(pp_directive_test_raw_errors, BUSTER_ARRAY_LENGTH(pp_directive_test_raw_errors), "raw string diagnostics", directory, with_clang);
+    result &= pp_directive_test_diagnostics("structure", "directive structure", directory, with_clang);
+    result &= pp_directive_test_diagnostics("messages", "diagnostic text", directory, with_clang);
+    result &= pp_directive_test_diagnostics("raw-errors", "raw string diagnostics", directory, with_clang);
     result &= pp_directive_test_message_capacity();
     result &= pp_directive_test_predefines_origin(directory);
-    result &= pp_directive_test_diagnostics(pp_directive_test_definitions, BUSTER_ARRAY_LENGTH(pp_directive_test_definitions), "definitions", directory, with_clang);
+    result &= pp_directive_test_diagnostics("definitions", "definitions", directory, with_clang);
     result &= pp_directive_test_guards(directory, with_clang);
     result &= pp_directive_test_location_space(directory);
     result &= pp_directive_test_location_option(directory, with_clang);

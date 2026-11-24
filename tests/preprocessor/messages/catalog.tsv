@@ -1,0 +1,8 @@
+buster-fixtures v1 preprocessor-directives
+0001	-	-	an active warning's comment text
+0002	-	-	an active error's comment text
+0003	-	-	comments, quotes and trailing blanks
+0004	-	-	a spliced name and message
+0005	-	-	an excluded warning's comment
+0006	-	-	an excluded error's comment
+0007	-	header	repeated inclusions
