@@ -143,9 +143,8 @@
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DRIVER
 // uname, for lane_test_kernel_at_least: the driver's arena checks alone ask the kernel's release.
 #include <sys/utsname.h>
-// flock, getrusage and statfs, for the driver's warm arenas' checks alone (#2850).
+// flock and statfs, for the driver's warm arenas' checks alone (#2850).
 #include <sys/file.h>
-#include <sys/resource.h>
 #include <sys/vfs.h>
 #define BUSTER_LANE_TEST_MAX_LANES 8
 // Ranges: every count up to this, and the cost patterns of lane_test_cost.
@@ -1185,6 +1184,35 @@ static bool lane_test_bytes(const uint8_t* bytes, uint64_t count, uint8_t value)
     return result;
 }
 
+// Whether each base page of [bytes, bytes + count) is mapped in the process's page table (bit 63 of its
+// /proc/self/pagemap entry): a discard that gave the pages back would have unmapped them, and only a fault maps them
+// again. The page table says so where the process's count of its faults can't: a sanitizer's runtime faults in its own
+// memory (MemorySanitizer maps a large range's shadow afresh when the range is written whole, and the reads that
+// check the range fault that shadow in).
+static bool lane_test_mapped(const uint8_t* bytes, uint64_t count)
+{
+    uint64_t entries[512];
+    const uint64_t batch = sizeof(entries) / sizeof(entries[0]);
+    const uint64_t first = (uintptr_t)bytes / BUSTER_ARENA_PAGE_BYTES;
+    const uint64_t end = ((uintptr_t)bytes + count + BUSTER_ARENA_PAGE_BYTES - 1) / BUSTER_ARENA_PAGE_BYTES;
+    const int pagemap = open("/proc/self/pagemap", O_RDONLY | O_CLOEXEC);
+    bool result = pagemap >= 0 && count != 0;
+    for (uint64_t page = first; result && page < end; page += batch)
+    {
+        const uint64_t wanted = end - page < batch ? end - page : batch;
+        result = pread(pagemap, entries, wanted * sizeof(uint64_t), (off_t)(page * sizeof(uint64_t))) == (ssize_t)(wanted * sizeof(uint64_t));
+        for (uint64_t i = 0; result && i < wanted; i += 1)
+        {
+            result = (entries[i] >> 63) != 0;
+        }
+    }
+    if (pagemap >= 0)
+    {
+        close(pagemap);
+    }
+    return result;
+}
+
 #define BUSTER_LANE_TEST_WARM_CAPACITY (64ull << 20)
 
 // A process whose warm arenas are a file's (#2850, arena_reserve_warm), `directory` a tmpfs's: the claim and its lock;
@@ -1244,16 +1272,14 @@ static void lane_test_arena_warm_file_child(LaneTestTally* tally, const char* di
         arena_clear(memory + 77, cleared);
         lane_test_expect(tally, lane_test_bytes(memory, 77, 0x5a) && lane_test_zero(memory + 77, cleared) && lane_test_bytes(memory + 77 + cleared, bytes - 77 - cleared, 0x5a),
                          "a long stretch of a warm arena wasn't cleared, alone");
-        // A discard leaves its pages mapped: reading them takes no fault.
+        // A discard leaves its pages mapped: each is in the page table after it, as before (lane_test_mapped), and holds
+        // what it held.
         memset(memory, 0x5a, bytes);
         arena_pop_to(&arena, huge);
-        struct rusage before = { 0 };
-        struct rusage after = { 0 };
-        const bool measured = getrusage(RUSAGE_SELF, &before) == 0;
+        const bool mapped = lane_test_mapped(memory, bytes);
         arena_discard(&arena);
         arena_discard_huge(&arena);
-        const bool kept = lane_test_bytes(memory, bytes, 0x5a);
-        lane_test_expect(tally, measured && kept && getrusage(RUSAGE_SELF, &after) == 0 && after.ru_minflt == before.ru_minflt, "a warm arena's discard unmapped its pages");
+        lane_test_expect(tally, mapped && lane_test_mapped(memory, bytes) && lane_test_bytes(memory, bytes, 0x5a), "a warm arena's discard unmapped its pages");
         // A rewind clears to the peak in place, and the arena is as little untouched as before.
         arena_rewind(&arena, page + 9);
         lane_test_expect(tally, arena.length == page + 9 && lane_test_bytes(memory, page + 9, 0x5a) && lane_test_zero(memory + page + 9, bytes - page - 9) && !arena_untouched(&arena),
