@@ -364,7 +364,7 @@ static bool executable_test_symbols(const ExecutableTestDirectory* directory)
             executable_test_expect(&tally, valid && executable_symbols_test_table(file, &image, &write.result), "ELF names, sizes, types and final definitions", lanes);
             const bool same = file.pointer != 0 && (reference.pointer == 0 || (file.length == reference.length && memcmp(file.pointer, reference.pointer, file.length) == 0));
             executable_test_expect(&tally, same, "lane byte identity", lanes);
-            executable_test_expect(&tally, valid && executable_test_runs(path, (const uint8_t*)"", 0), "native program executes", lanes);
+            executable_test_expect(&tally, valid && executable_test_runs_fixture(directory, path, (const uint8_t*)"", 0), "native program executes", lanes);
             executable_test_expect(&tally, valid && executable_test_build_id(&saved, file, boundaries, write.result.chunks), "symbol bytes participate in build ID", lanes);
             reference = reference.pointer == 0 ? file : reference;
         }
