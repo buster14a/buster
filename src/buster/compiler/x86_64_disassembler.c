@@ -988,6 +988,9 @@ static __m512i x86_decode_extract(__m512i bytes, __m512i positions)
     return _mm512_permutexvar_epi8(indices, bytes);
 }
 
+// Decodes the window's `count` lanes at `offsets` whose forms the direct table admits (x86_decode_simple_map's
+// unprefixed legacy forms with a length hint), each into output[lane]. Returns the admitted lanes' mask; a lane it
+// refuses is left for the caller.
 static uint32_t x86_decode_simple_batch(const uint8_t* source, uint32_t span, const uint8_t* offsets, const uint8_t* lengths, uint32_t count, uint32_t start, X86Decoded* output)
 {
     const __m512i bytes = x86_decode_window(source, span, 0);
@@ -1019,17 +1022,14 @@ static uint32_t x86_decode_simple_batch(const uint8_t* source, uint32_t span, co
     uint32_t metadata[16] = {0};
     _mm512_storeu_si512(key_values, keys);
     uint32_t admitted = 0;
-    while (admitted < count && lengths[offsets[admitted]] != 0)
+    for (uint32_t i = 0; i < count; i += 1)
     {
-        const uint32_t meta = x86_decode_simple[key_values[admitted]];
-        if (meta == 0 || meta == UINT32_MAX)
-        {
-            break;
-        }
-        metadata[admitted] = meta;
-        admitted += 1;
+        const uint32_t meta = x86_decode_simple[key_values[i]];
+        const bool direct = lengths[offsets[i]] != 0 && meta != 0 && meta != UINT32_MAX;
+        metadata[i] = direct ? meta : 0;
+        admitted |= (uint32_t)direct << i;
     }
-    if (admitted >= 2)
+    if (admitted != 0)
     {
         const __m512i meta = _mm512_loadu_si512(metadata);
         const uint16_t has_modrm = _mm512_test_epi32_mask(meta, _mm512_set1_epi32(1u << 16));
@@ -1088,17 +1088,13 @@ static uint32_t x86_decode_simple_batch(const uint8_t* source, uint32_t span, co
         _mm512_storeu_si512(immediates, immediate);
         _mm512_storeu_si512(displacements, displacement);
         _mm512_storeu_si512(registers, packed);
-        for (uint32_t i = 0; i < admitted; i += 1)
+        for (uint32_t i = 0; i < count; i += 1)
         {
             X86Decoded decoded = {.instruction = {.immediate = (int32_t)immediates[i], .displacement = (int32_t)displacements[i], .form = (uint16_t)metadata[i]},
                                   .offset = start + offsets[i], .length = lengths[offsets[i]]};
             memcpy(&decoded.instruction.reg, &registers[i], sizeof(registers[i]));
             output[i] = decoded;
         }
-    }
-    else
-    {
-        admitted = 0;
     }
     return admitted;
 }
@@ -1147,19 +1143,19 @@ static X86DecodeResult x86_disassemble(const uint8_t* source, uint64_t size, X86
                         end += lengths[end];
                     }
                     bool consistent = true;
-                    const uint32_t fast = count >= 2 ? x86_decode_simple_batch(source + start, span, offsets, lengths, count, (uint32_t)start, output + result.count) : 0;
-                    if (fast != 0)
-                    {
-                        result.count += fast;
-                        result.consumed = start + offsets[fast - 1] + lengths[offsets[fast - 1]];
-                    }
-                    // The first lane the batch refused alone; the lanes after it go back to the batch.
-                    for (uint32_t i = fast; i < count && i == fast && consistent && result.status == X86_DECODE_OK; i += 1)
+                    // The batch's lanes in order, each lane it refused decoded alone.
+                    X86Decoded lanes[16];
+                    const uint32_t direct = x86_decode_simple_batch(source + start, span, offsets, lengths, count, (uint32_t)start, lanes);
+                    for (uint32_t i = 0; i < count && consistent && result.status == X86_DECODE_OK; i += 1)
                     {
                         const uint32_t at = offsets[i];
-                        const uint64_t available = remaining - at;
-                        X86Decoded decoded = {.offset = (uint32_t)(start + at)};
-                        result.status = x86_decode_one(source + start + at, available < 15 ? (uint32_t)available : 15, prefixes >> at, &decoded);
+                        X86Decoded decoded = lanes[i];
+                        if (((direct >> i) & 1) == 0)
+                        {
+                            const uint64_t available = remaining - at;
+                            decoded = (X86Decoded){.offset = (uint32_t)(start + at)};
+                            result.status = x86_decode_one(source + start + at, available < 15 ? (uint32_t)available : 15, prefixes >> at, &decoded);
+                        }
                         if (result.status == X86_DECODE_OK)
                         {
                             output[result.count] = decoded;
