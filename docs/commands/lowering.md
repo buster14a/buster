@@ -2443,11 +2443,10 @@ survey of those passes, what it measured and its gates.
   the count through the record before its operand's first and the count
   through its last: two loads where its summary's record is written, and
   no step of the sweep is an expression's own.
-- **Its root's return fact** (`check_program_return_facts`: a stop, an
-  unknown, which `-Wreturn-type` reads). A call of a plain function's name
-  has none: the name of a function that is not declared noreturn and whose
-  name is none of the library's that the flow leaves unknown. A function's
-  declaration's line has a bit for that and one for noreturn
+- **Its root's return fact** records whether the expression can stop, must
+  stop or has an unknown contract. The `-Wreturn-type` walk reads it.
+  An ordinary function call has no stop fact. A function's
+  declaration line has a bit for ordinary calls and one for noreturn
   (`BUSTER_NODE_TESTS_LINE_PLAIN` and `_STOPS`, made with the line), and the
   tests' sweep copies a name's leaf's line's byte to `window_x_lines`. The
   tests' loop (`node_tests_window_loop_by`) gives each block a mask of its

@@ -792,6 +792,8 @@ unused-warning fixtures also check exact scope-completion tokens.
   Library declarations acquire their builtin type contract according to linkage, compiler options and typedef
   visibility. The warning walk visits `__builtin_fpclassify` selectors and the operand of `__builtin_constant_p`.
   It skips object-size query operands and ends a path at `__builtin_assume(0)`.
+  When only one arm of `?:`, `&&` or `||` executes a terminating call, the other can reach
+  the end, and Clang's diagnostic includes “in all control paths”.
   The return-call driver tests compare diagnostics and warning policies with Clang through both readers.
   `c_check_data.c` and `c_check_data_input.c` turn selected static scalar definitions into real
   Link atoms/fixups; their tests compare emitted ELF bytes with Clang objects.

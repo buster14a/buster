@@ -535,7 +535,7 @@ struct NodeFrontTypes
     uint64_t side_unkept;
     // A summary's side facts (BUSTER_NODE_READER_WINDOW_ROWS; null otherwise), by root node, for an expression the
     // rows take whole on the window: its references' first in their store (UINT32_MAX: none is kept for the root) and
-    // their count, and its root's return fact (BUSTER_CHECK_RETURN_STOPS and _UNKNOWN). The store is the references'
+    // their count, and its root's return fact (a guaranteed stop, possible stop or unknown contract). The store is the references'
     // objects, followed only for a switch by its selector's TypeId. `summary_count` counts all words stored,
     // of `summary_capacity`; an expression it had no room for keeps none
     // (`summary_unkept`).

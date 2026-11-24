@@ -1934,8 +1934,8 @@ static __attribute__((noinline)) uint8_t node_rows_summary_call(const struct Nod
 
 // The return fact of the expression whose operand's records are the window's `first` to `last`, by the flow's
 // reduction (check_program_return_node), a record at a time up the postorder: a call's own fact and its operands'
-// joined; and an `&&`, an `||` or a `?:` keeps its condition's fact, an unknown of either arm, and a stop where both
-// arms of a `?:` stop. (A taken expression has no operand that is not evaluated for a known condition, which C lists;
+// joined; and an `&&`, an `||` or a `?:` keeps its condition's fact and the possible or guaranteed stop of its arms.
+// (A taken expression has no operand that is not evaluated for a known condition, which C lists;
 // and no `sizeof`, whose token the front leaves to the walk.) For the expressions with a call that stops and one of
 // those three operators alone: any other's fact is its calls' own facts together, since an unknown goes up through
 // every operator and a stop through every other one.
@@ -1954,8 +1954,7 @@ static __attribute__((noinline, cold)) uint8_t node_rows_summary_reduce(struct N
             const uint8_t condition = facts[x - front->window_left[x]];
             const uint8_t yes = facts[x - front->window_right[x]];
             const uint8_t no = third != 0 ? facts[x - third] : 0;
-            const uint8_t both = op == CHECK_OP_CONDITIONAL ? (uint8_t)(yes & no & BUSTER_CHECK_RETURN_STOPS) : 0;
-            fact = (uint8_t)(condition | ((yes | no) & BUSTER_CHECK_RETURN_UNKNOWN) | both);
+            fact = condition | check_return_alternatives(yes, no);
         }
         else
         {

@@ -5,6 +5,7 @@
 
 #define BUSTER_CHECK_RETURN_STOPS 1u
 #define BUSTER_CHECK_RETURN_UNKNOWN 2u
+#define BUSTER_CHECK_RETURN_MAY_STOP 4u
 
 // The shared callee resolver is defined with the target-feature consumer later in c_check_program.c. It reads the
 // call's checked designator/overload, not the program's later-populated object-to-declaration table.
@@ -68,10 +69,17 @@ static uint8_t check_program_return_fact(const uint8_t* facts, uint32_t count, u
     return node < count ? facts[node] : 0;
 }
 
-// One node's facts, from its own contract and its operands' and arguments' facts, which precede it: a guaranteed stop
-// and a possible unknown control contract. Conditional operands retain only executable arms; an unknown condition
-// guarantees a stop only if both alternatives stop. An operand or argument that doesn't precede the node counts for
-// nothing.
+// Both alternatives are reachable. A skipped short-circuit operand is a returning alternative.
+static uint8_t check_return_alternatives(uint8_t yes, uint8_t no)
+{
+    const uint8_t either = yes | no;
+    const uint8_t stop = (yes & no & BUSTER_CHECK_RETURN_STOPS) != 0 ? BUSTER_CHECK_RETURN_STOPS :
+                         (either & (BUSTER_CHECK_RETURN_STOPS | BUSTER_CHECK_RETURN_MAY_STOP)) != 0 ? BUSTER_CHECK_RETURN_MAY_STOP : 0;
+    return (either & BUSTER_CHECK_RETURN_UNKNOWN) | stop;
+}
+
+// One node's facts, from its own contract and its evaluated operands' and arguments' facts.
+// An operand or argument that doesn't precede the node counts for nothing.
 static uint8_t check_program_return_node(CheckProgram* program, const uint8_t* facts, uint32_t node)
 {
     const CheckGraph* graph = &program->input->graph;
@@ -120,8 +128,7 @@ static uint8_t check_program_return_node(CheckProgram* program, const uint8_t* f
         }
         else
         {
-            result |= (yes | no) & BUSTER_CHECK_RETURN_UNKNOWN;
-            result |= op == CHECK_OP_CONDITIONAL && (yes & no & BUSTER_CHECK_RETURN_STOPS) != 0 ? BUSTER_CHECK_RETURN_STOPS : 0;
+            result |= check_return_alternatives(yes, op == CHECK_OP_CONDITIONAL ? no : 0);
         }
     }
     else

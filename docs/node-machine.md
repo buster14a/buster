@@ -6944,7 +6944,8 @@ condition after its body's, and not in the window's.
 
 **The return fact.** A call stops if its checked callee type carries GNU noreturn or the
 visible declaration identifies a terminating function (#1393). Ordinary calls return.
-The window combines these facts according to the operands that execute.
+The window combines these facts according to the operands that execute. A
+conditionally evaluated call can stop one path while another falls through.
 
 - **A plain call has none.** A function's declaration's line has two bits,
   made with the line to identify plain and terminating calls. The tests' sweep copies a name's leaf's line's byte beside
