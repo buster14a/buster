@@ -953,7 +953,7 @@ static IrCheck ssa_ir_promote_path(const IrFunction* input, Arena* output, Arena
         }
         else
         {
-            check.error = ssa_ir_error(dense ? ssa_construct_dense(&work.work) : ssa_construct_bounded(&work.work));
+            check.error = ssa_ir_error(dense ? ssa_construct_dense(&work.work, BUSTER_SSA_FRONTIER_PAIRS) : ssa_construct_bounded(&work.work));
         }
     }
     if (check.error == IR_OK)

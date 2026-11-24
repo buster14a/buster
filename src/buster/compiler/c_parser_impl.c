@@ -11619,21 +11619,26 @@ static ParseKernelResult parse_vector_tiles(ParseKernels* kernels, const ParseIn
         }
         begin = end;
     }
-    // The names' meanings as the unit's parse leaves them: ordinary for those declared before the last declaration the
-    // fallback took, and as they were for the others.
+    // The names' meanings as the unit's parse leaves them: as they were before it, a predeclared type's a type's and the
+    // others' ordinary, but ordinary for every name declared before the last declaration the fallback took, whatever
+    // declares it again after that.
     for (uint32_t i = 0; memory && i < logged_count; i += 1)
     {
-        const uint32_t id = logged[i];
-        bool given = false;
-        for (uint32_t p = 0; p < BUSTER_PARSE_PREDECLARED_TYPEDEFS; p += 1)
-        {
-            given |= predeclared[p] == id;
-        }
-        meanings->meanings[id] = given && (!served || i >= covered) ? PARSE_MEANING_TYPEDEF : PARSE_MEANING_ORDINARY;
+        meanings->meanings[logged[i]] = PARSE_MEANING_ORDINARY;
+    }
+    for (uint32_t p = 0; memory && p < BUSTER_PARSE_PREDECLARED_TYPEDEFS; p += 1)
+    {
+        // Every predeclared name, logged or not: a refused tile's fallback leaves the ones its tile declared ordinary,
+        // and none of that tile's names is logged.
+        meanings->meanings[predeclared[p]] = PARSE_MEANING_TYPEDEF;
+    }
+    for (uint32_t i = 0; memory && served && i < covered; i += 1)
+    {
+        meanings->meanings[logged[i]] = PARSE_MEANING_ORDINARY;
     }
     if (memory && !served)
     {
-        // The unit as one, with the unit's arrays, as if no tile had been tried.
+        // The unit as one, with the unit's arrays and the names' meanings as they were, as if no tile had been tried.
         arena_pop_to(arena, unit_mark);
         memory = parse_kernels_reserve_tree(kernels, arena, count, name_capacity, tree) && parse_vector_buffers_reserve(buffers, arena, count);
         if (memory)

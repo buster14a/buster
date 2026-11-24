@@ -93,9 +93,9 @@ static void check_test_runtime_scan(CheckTest* test)
             const uint64_t mark = sparse.length;
             const CheckSparseColumn sparse_nodes = ready ? check_sparse_from_values(&sparse, nodes, count) : (CheckSparseColumn){ 0 };
             ready &= check_sparse_present(sparse_nodes);
-            for (uint32_t producer = 0; ready && producer < 2; producer += 1)
+            if (ready)
             {
-                const uint32_t declared = check_program_declaring(declarations, &sparse_nodes, 1, count, tokens, producer == 0);
+                const uint32_t declared = check_program_declaring(declarations, &sparse_nodes, 1, count, tokens);
                 uint32_t* compact = (uint32_t*)check_test_program_guarded(&maps[7], &sizes[7], (uint64_t)declared * sizeof(uint32_t));
                 ready &= compact != NULL;
                 if (ready)
@@ -151,7 +151,7 @@ static void check_test_runtime_scan(CheckTest* test)
     const IdentId identifiers[1] = { 77 };
     const uint16_t runtimes[1] = { CHECK_LOWER_RUNTIME_ERRNO + 1 };
     const CheckSparseColumn sparse_nodes = check_sparse_from_values(&sparse, nodes, 8);
-    const uint32_t declared = check_program_declaring(declarations, &sparse_nodes, 1, 8, tokens, false);
+    const uint32_t declared = check_program_declaring(declarations, &sparse_nodes, 1, 8, tokens);
     for (uint32_t path = 0; path < 2; path += 1)
     {
         SymbolId actual[CHECK_LOWER_RUNTIMES] = { 0 };

@@ -66,20 +66,20 @@ static bool emitted_test_expect(EmittedTest* test, bool condition, const char* c
     return condition;
 }
 
-// A descriptor's FDE written alone by the exact writer (`shared` with one CIE), into `bytes`: its size, 0 if refused.
-static uint64_t emitted_test_write(const UnwindFunction* function, bool shared, bool exact, uint8_t* bytes, uint64_t capacity)
+// A descriptor's FDE written alone by unwind_write (`shared` with one CIE), into `bytes`: its size, 0 if refused.
+static uint64_t emitted_test_write(const UnwindFunction* function, bool shared, uint8_t* bytes, uint64_t capacity)
 {
     uint32_t location = 0;
     UnwindOutput output = { .bytes = bytes, .capacity = capacity, .locations = &location, .location_capacity = 1, .shared = shared };
-    return unwind_write(function, 1, &output, exact) == UNWIND_OK ? output.size : 0;
+    return unwind_write(function, 1, &output) == UNWIND_OK ? output.size : 0;
 }
 
 static bool emitted_test_same_bytes(const UnwindFunction* a, const UnwindFunction* b, bool shared)
 {
     static uint8_t first[8192];
     static uint8_t second[8192];
-    const uint64_t a_size = emitted_test_write(a, shared, true, first, sizeof(first));
-    const uint64_t b_size = emitted_test_write(b, shared, true, second, sizeof(second));
+    const uint64_t a_size = emitted_test_write(a, shared, first, sizeof(first));
+    const uint64_t b_size = emitted_test_write(b, shared, second, sizeof(second));
     return a_size != 0 && a_size == b_size && memcmp(first, second, a_size) == 0;
 }
 
@@ -150,24 +150,22 @@ static void emitted_test_rows(EmittedTest* test)
         emitted_test_expect(test, simple ? fixed : lowers && lowered.open == BUSTER_UNWIND_ROWS, "the simple shape lowers to its fixed descriptor, the others to rows", f);
         test->descriptors += 1;
     }
-    // The whole batch as row programs, by the batch path (which leaves them to the exact writer) and the exact path: the
-    // fixed descriptors' bytes.
-    static uint8_t bytes[3][64 * 16 * 384];
-    static uint32_t locations[3][64 * 16];
+    // The whole batch as row programs, by the batch path (which leaves them to the exact writer, lane by lane): the
+    // fixed descriptors' bytes, which it writes by their shapes.
+    static uint8_t bytes[2][64 * 16 * 384];
+    static uint32_t locations[2][64 * 16];
     for (uint32_t shared = 0; shared < 2; shared += 1)
     {
-        UnwindOutput outputs[3];
-        for (uint32_t way = 0; way < 3; way += 1)
+        UnwindOutput outputs[2];
+        for (uint32_t way = 0; way < 2; way += 1)
         {
             outputs[way] = (UnwindOutput){ .bytes = bytes[way], .capacity = sizeof(bytes[way]), .locations = locations[way], .location_capacity = count, .shared = shared != 0 };
             memset(bytes[way], 0x5a, sizeof(bytes[way]));
         }
-        const bool written = unwind_write(functions, count, &outputs[0], true) == UNWIND_OK && unwind_write(programs, count, &outputs[1], true) == UNWIND_OK &&
-                             unwind_write(programs, count, &outputs[2], false) == UNWIND_OK;
-        emitted_test_expect(test, written && outputs[0].size == outputs[1].size && outputs[1].size == outputs[2].size &&
-                                      memcmp(bytes[0], bytes[1], outputs[0].size) == 0 && memcmp(bytes[1], bytes[2], outputs[0].size) == 0 &&
-                                      memcmp(locations[0], locations[1], count * 4) == 0 && memcmp(locations[1], locations[2], count * 4) == 0,
-                            "a batch of row programs is the fixed batch's bytes by either writer", shared);
+        const bool written = unwind_write(functions, count, &outputs[0]) == UNWIND_OK && unwind_write(programs, count, &outputs[1]) == UNWIND_OK;
+        emitted_test_expect(test, written && outputs[0].size == outputs[1].size && memcmp(bytes[0], bytes[1], outputs[0].size) == 0 &&
+                                      memcmp(locations[0], locations[1], count * 4) == 0,
+                            "a batch of row programs is the fixed batch's bytes", shared);
     }
     // Canonical form: a closed frame's last epilogue bracketed as a frame emitter brackets every epilogue (its state
     // remembered before its first row, restored at the end), and a rule at the end: both dropped, the rest as it was.
@@ -322,12 +320,7 @@ static void emitted_test_tier0_function(EmittedTest* test, const Tier0Function* 
     Arena* arena = &test->arena;
     const uint64_t mark = arena->length;
     const Tier0Code code = tier0_validate(function).error == TIER0_OK ? tier0_compile(function, arena) : (Tier0Code){ .error = TIER0_ERROR_INVALID };
-    const Tier0Code twin = code.error == TIER0_OK ? tier0_compile_scalar(function, arena) : (Tier0Code){ .error = TIER0_ERROR_INVALID };
-    emitted_test_expect(test, code.error != TIER0_OK || (twin.error == TIER0_OK && twin.count == code.count && twin.branch_count == code.branch_count &&
-                                                         memcmp(twin.records, code.records, code.count * sizeof(X86Instruction)) == 0 &&
-                                                         (code.branch_count == 0 || (memcmp(twin.branches, code.branches, code.branch_count * sizeof(uint32_t)) == 0 &&
-                                                                                     memcmp(twin.targets, code.targets, code.branch_count * sizeof(uint32_t)) == 0))),
-                        "Tier 0's paths compile the same code", id);
+    emitted_test_expect(test, code.error != TIER0_OK || x86_validate(code.records, code.count) == code.count, "Tier 0's records are valid", id);
     const bool r11 = code.error == TIER0_OK && !code.frame_pointer && (code.frame_size & ~(BUSTER_TIER0_PAGE_BYTES - 1)) != 0 &&
                      tier0_probes_reservation(code.frame_probe, code.frame_size, code.frame_alignment_log2, false);
     EmittedTestLayout layout;
@@ -614,10 +607,8 @@ static void emitted_test_tier0_preserving(EmittedTest* test)
                     Arena* arena = &test->arena;
                     const uint64_t mark = arena->length;
                     const Tier0Code code = tier0_validate(&function).error == TIER0_OK ? tier0_compile(&function, arena) : (Tier0Code){ .error = TIER0_ERROR_INVALID };
-                    const Tier0Code twin = code.error == TIER0_OK ? tier0_compile_scalar(&function, arena) : (Tier0Code){ .error = TIER0_ERROR_INVALID };
-                    bool valid = emitted_test_expect(test, code.error == TIER0_OK && twin.error == TIER0_OK && twin.count == code.count &&
-                                                               memcmp(twin.records, code.records, code.count * sizeof(X86Instruction)) == 0,
-                                                     "Tier 0's paths compile the same preserving frame", id);
+                    bool valid = emitted_test_expect(test, code.error == TIER0_OK && x86_validate(code.records, code.count) == code.count,
+                                                     "Tier 0 compiles the preserving frame", id);
                     EmittedTestLayout layout;
                     valid = valid && emitted_test_expect(test, emitted_test_layout(code.records, code.count, code.branches, code.targets, code.branch_count,
                                                                                    code.reference_count, arena, &layout),
@@ -715,10 +706,8 @@ static void emitted_test_tier0_interrupt(EmittedTest* test)
                         const uint64_t mark = arena->length;
                         const Tier0Check checked = tier0_validate(&function);
                         const Tier0Code code = checked.error == TIER0_OK ? tier0_compile(&function, arena) : (Tier0Code){ .error = TIER0_ERROR_INVALID };
-                        const Tier0Code twin = code.error == TIER0_OK ? tier0_compile_scalar(&function, arena) : (Tier0Code){ .error = TIER0_ERROR_INVALID };
-                        bool valid = emitted_test_expect(test, code.error == TIER0_OK && twin.error == TIER0_OK && twin.count == code.count &&
-                                                                   memcmp(twin.records, code.records, code.count * sizeof(X86Instruction)) == 0,
-                                                         "Tier 0's paths compile the same interrupt service routine", id);
+                        bool valid = emitted_test_expect(test, code.error == TIER0_OK && x86_validate(code.records, code.count) == code.count,
+                                                         "Tier 0 compiles the interrupt service routine", id);
                         // Its entry and exit: cld and the parameters from the processor's frame, and iretq after its add.
                         bool shaped = false;
                         for (uint32_t r = 0; valid && r + 1 < code.count; r += 1)
@@ -1349,7 +1338,7 @@ static void emitted_test_native(EmittedTest* test, bool keep)
     uint8_t frame_bytes[1024];
     uint32_t location = 0;
     UnwindOutput frames = { .bytes = frame_bytes, .capacity = sizeof(frame_bytes), .locations = &location, .location_capacity = 1 };
-    valid = valid && unwind_write(&unwind, 1, &frames, false) == UNWIND_OK;
+    valid = valid && unwind_write(&unwind, 1, &frames) == UNWIND_OK;
     char assembly[PATH_MAX + 32], object[PATH_MAX + 32], executable[PATH_MAX + 32], out[PATH_MAX + 32], err[PATH_MAX + 32], commands[PATH_MAX + 32],
         path[PATH_MAX + 32];
     snprintf(assembly, sizeof(assembly), "%s/fixture.s", directory);

@@ -2524,6 +2524,9 @@ static uint32_t parse_test_tree_only(const Parser* full, Parser* tree, Preproces
             const uint64_t count = full->tokens.count;
             same = memcmp(tree->tree.roles, full->tree.roles, count) == 0 && memcmp(tree->tree.parents, full->tree.parents, count * sizeof(uint32_t)) == 0 &&
                    memcmp(tree->tree.depths, full->tree.depths, count * sizeof(uint32_t)) == 0;
+            // The names' meanings each parse leaves (a parse by tiles gives the unit's, #2536).
+            same = same && tree->meanings.capacity == full->meanings.capacity &&
+                   memcmp(tree->meanings.meanings, full->meanings.meanings, full->meanings.capacity) == 0;
         }
     }
     if (!same)
@@ -4142,6 +4145,28 @@ static uint32_t parse_test_tiles(const PPOptions* options, const char* directory
                       "void f5(void) { typedef struct { T2 m; } T2; T2 l = { 0 }; (void)l; }\n", "T2 after5;\n" } },
         { .name = "an old-style parameter declared after an attribute",
           .pieces = { "int f(a) __attribute__((unused)) int a; { return 0; }\n", "int z;\n" },
+          .refused = true },
+        // A predeclared type's name declared again before and after a function the fallback takes: the unit's parse
+        // leaves it ordinary, for the declaration before.
+        { .name = "a predeclared type's name around the fallback's declaration",
+          .pieces = { "typedef __int128 __int128_t;\n", "int f(int b) { return _Generic(b, int: 1, default: 2); }\n", "typedef __int128 __int128_t;\n",
+                      "__int128_t after;\n" } },
+        // By tiles of 64 tokens the second tile declares a predeclared type's name and is refused for its old-style
+        // definition: the unit as one must read the name in the first tile's cast as the type it was before any tile
+        // ran. (The last declaration, in a tile after, sends the unit as one to the scalar parser, which keeps the
+        // meanings it is given.)
+        { .name = "a refused tile that declared a predeclared type's name",
+          .pieces = { "int f(int b) { return (int)(__int128_t)(b); }\n", "int p1(int x) { return x + 1; }\n", "int p2(int x) { return x + 2; }\n",
+                      "int p3(int x) { return x + 3; }\n", "int p4(int x) { return x + 4; }\n", "typedef __int128 __int128_t;\n",
+                      "int g(a) int a; { return a; }\n", "int p5(int x) { return x + 5; }\n", "int p6(int x) { return x + 6; }\n",
+                      "int p7(int x) { return x + 7; }\n", "int p8(int x) { return x + 8; }\n", "__attribute__((unused)) typedef int W;\n" },
+          .refused = true },
+        { .name = "a refused tile whose block declared a predeclared type's name",
+          .pieces = { "int f(int b) { return (int)(__uint128_t)(b); }\n", "int p1(int x) { return x + 1; }\n", "int p2(int x) { return x + 2; }\n",
+                      "int p3(int x) { return x + 3; }\n", "int p4(int x) { return x + 4; }\n",
+                      "int h(void) { typedef int __uint128_t; __uint128_t v = 1; return v; }\n", "int g(a) int a; { return a; }\n",
+                      "int p5(int x) { return x + 5; }\n", "int p6(int x) { return x + 6; }\n", "int p7(int x) { return x + 7; }\n",
+                      "__attribute__((unused)) typedef int W;\n" },
           .refused = true },
     };
     uint32_t failures = 0;

@@ -6,14 +6,13 @@
 // function is lowered, promoted and optimized as the C driver's --tier1 takes it (c_check_tier1.c), and its dominance
 // found, outside the time; a function a step before selection refuses, or that selection refuses, is left out and
 // counted by the step. Any other failure fails the benchmark, which then reports no time. The run selects every function
-// once, after a warm-up, in BUSTER_TIER0_BENCHMARK_PASSES passes; --after-scalar MS runs scalar integer work, untimed,
-// for MS ms before each pass. Before the
+// once, after a warm-up, in BUSTER_TIER0_BENCHMARK_PASSES passes. Before the
 // time, each selected function's bottom-up rewrite (tier1_select_burs.c) is checked against its definitions and the
 // walks' candidates (tier1_burs_check_function), and a broken one fails the benchmark. Include after tier1_cfg_source_benchmark.c,
 // tier0_benchmark_measure.c, whose clock, counters and medians it takes, and tier1_select_burs_test.c. Run it under the
 // 9700X's lock pinned to one CPU (taskset -c 2 ...).
 //
-//   build/compiler benchmark-tier1-select-source [--only select] [--after-scalar MS] [preprocessor options] file...
+//   build/compiler benchmark-tier1-select-source [preprocessor options] file...
 //
 // The corpus's type and preparation also serve the checker's code-certificate benchmark. Keep those shared at their
 // original positions; only the backend unit reads this command's measurement and driver.
@@ -23,15 +22,6 @@
 #define BUSTER_TIER1_SELECT_SOURCE_BACKEND BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 #else
 #define BUSTER_TIER1_SELECT_SOURCE_BACKEND 1
-#endif
-
-#if BUSTER_TIER1_SELECT_SOURCE_BACKEND
-#define BUSTER_TIER1_SELECT_SOURCE_VECTOR 0
-#define BUSTER_TIER1_SELECT_SOURCE_VARIANTS 1
-
-static const char* const tier1_select_source_variant_names[BUSTER_TIER1_SELECT_SOURCE_VARIANTS] = {
-    "select",
-};
 #endif
 
 // The corpus: each function's optimized IR and its dominance, in the kept arena, which both selections took.
@@ -53,7 +43,7 @@ struct Tier1SelectSourceCorpus
 };
 
 #if BUSTER_TIER1_SELECT_SOURCE_BACKEND
-static Tier0BenchmarkReading tier1_select_source_run(uint32_t variant, const Tier1SelectSourceCorpus* corpus, Arena* output, Arena* scratch, Tier0BenchmarkCounters counters)
+static Tier0BenchmarkReading tier1_select_source_run(const Tier1SelectSourceCorpus* corpus, Arena* output, Arena* scratch, Tier0BenchmarkCounters counters)
 {
     uint32_t failures = 0;
     const uint64_t output_mark = output->length;
@@ -166,72 +156,40 @@ static bool tier1_select_source_corpus_file(Tier1SelectSourceCorpus* corpus, con
 }
 
 #if BUSTER_TIER1_SELECT_SOURCE_BACKEND
-static bool tier1_select_source_measure(const Tier1SelectSourceCorpus* corpus, Arena* output, Arena* scratch, uint32_t only, uint64_t after_scalar)
+static bool tier1_select_source_measure(const Tier1SelectSourceCorpus* corpus, Arena* output, Arena* scratch)
 {
     const Tier0BenchmarkCounters counters = {
         .cycles = tier0_benchmark_counter(PERF_TYPE_HARDWARE, PERF_COUNT_HW_CPU_CYCLES),
         .instructions = tier0_benchmark_counter(PERF_TYPE_HARDWARE, PERF_COUNT_HW_INSTRUCTIONS),
         .throttle = tier0_benchmark_counter(PERF_TYPE_RAW, BUSTER_TIER0_BENCHMARK_THROTTLE_EVENT),
     };
-    uint32_t failed = BUSTER_TIER1_SELECT_SOURCE_VARIANTS;
-    for (uint32_t v = 0; v < BUSTER_TIER1_SELECT_SOURCE_VARIANTS && failed == BUSTER_TIER1_SELECT_SOURCE_VARIANTS; v += 1)
-    {
-        failed = (only == BUSTER_TIER1_SELECT_SOURCE_VARIANTS || v == only) && tier1_select_source_run(v, corpus, output, scratch, counters).failures != 0 ? v : failed;
-    }
-    double values[BUSTER_TIER1_SELECT_SOURCE_VARIANTS][4][BUSTER_TIER0_BENCHMARK_PASSES];
+    // The warm-up, then the timed passes.
+    bool failed = tier1_select_source_run(corpus, output, scratch, counters).failures != 0;
+    double values[4][BUSTER_TIER0_BENCHMARK_PASSES];
     memset(values, 0, sizeof(values));
-    for (uint32_t pass = 0; pass < BUSTER_TIER0_BENCHMARK_PASSES && failed == BUSTER_TIER1_SELECT_SOURCE_VARIANTS; pass += 1)
+    for (uint32_t pass = 0; pass < BUSTER_TIER0_BENCHMARK_PASSES && !failed; pass += 1)
     {
-        for (uint32_t k = 0; k < BUSTER_TIER1_SELECT_SOURCE_VARIANTS && failed == BUSTER_TIER1_SELECT_SOURCE_VARIANTS; k += 1)
-        {
-            // The two paths take turns running first.
-            const uint32_t v = (pass & 1) != 0 ? k ^ 1 : k;
-            if (only == BUSTER_TIER1_SELECT_SOURCE_VARIANTS || v == only)
-            {
-                if (v == BUSTER_TIER1_SELECT_SOURCE_VECTOR && after_scalar != 0)
-                {
-                    const uint64_t until = tier0_benchmark_now() + after_scalar * 1000000ull;
-                    // Scalar integer work, no vector instructions: a multiply-xor chain the compiler can't vectorize.
-                    uint64_t state = UINT64_C(0xcbf29ce484222325);
-                    while (tier0_benchmark_now() < until)
-                    {
-                        #pragma clang loop vectorize(disable) interleave(disable)
-                        for (uint32_t i = 0; i < 4096; i += 1)
-                        {
-                            state = (state ^ i) * UINT64_C(0x100000001b3);
-                        }
-                    }
-                    __asm__ volatile("" : : "r"(state));
-                }
-                const Tier0BenchmarkReading taken = failed == BUSTER_TIER1_SELECT_SOURCE_VARIANTS ? tier1_select_source_run(v, corpus, output, scratch, counters) : (Tier0BenchmarkReading){ 0 };
-                failed = taken.failures != 0 ? v : failed;
-                values[v][0][pass] = (double)taken.nanoseconds;
-                values[v][1][pass] = (double)taken.cycles;
-                values[v][2][pass] = (double)taken.instructions;
-                values[v][3][pass] = (double)taken.throttle;
-            }
-        }
+        const Tier0BenchmarkReading taken = tier1_select_source_run(corpus, output, scratch, counters);
+        failed = taken.failures != 0;
+        values[0][pass] = (double)taken.nanoseconds;
+        values[1][pass] = (double)taken.cycles;
+        values[2][pass] = (double)taken.instructions;
+        values[3][pass] = (double)taken.throttle;
     }
-    if (failed != BUSTER_TIER1_SELECT_SOURCE_VARIANTS)
+    if (failed)
     {
-        printf("benchmark-tier1-select-source: a function's %s failed, so its runs measured less than the corpus: no report\n", tier1_select_source_variant_names[failed]);
+        printf("benchmark-tier1-select-source: a function's selection failed, so its runs measured less than the corpus: no report\n");
     }
     else
     {
+        const double ns = tier0_benchmark_median(values[0]);
+        const double cycles = tier0_benchmark_median(values[1]);
+        const double instructions = tier0_benchmark_median(values[2]);
+        const double throttle = tier0_benchmark_median(values[3]);
+        const double r = (double)corpus->instructions;
+        const double e = (double)corpus->entries;
         printf("%-14s %12s %12s %12s %12s %8s %12s\n", "variant", "ns/instr", "cyc/instr", "ins/instr", "cyc/entry", "IPC", "thr/instr");
-        for (uint32_t v = 0; v < BUSTER_TIER1_SELECT_SOURCE_VARIANTS; v += 1)
-        {
-            if (only == BUSTER_TIER1_SELECT_SOURCE_VARIANTS || v == only)
-            {
-                const double ns = tier0_benchmark_median(values[v][0]);
-                const double cycles = tier0_benchmark_median(values[v][1]);
-                const double instructions = tier0_benchmark_median(values[v][2]);
-                const double throttle = tier0_benchmark_median(values[v][3]);
-                const double r = (double)corpus->instructions;
-                const double e = (double)corpus->entries;
-                printf("%-14s %12.2f %12.2f %12.2f %12.2f %8.2f %12.3f\n", tier1_select_source_variant_names[v], ns / r, cycles / r, instructions / r, cycles / e, cycles != 0 ? instructions / cycles : 0.0, throttle / r);
-            }
-        }
+        printf("%-14s %12.2f %12.2f %12.2f %12.2f %8.2f %12.3f\n", "select", ns / r, cycles / r, instructions / r, cycles / e, cycles != 0 ? instructions / cycles : 0.0, throttle / r);
     }
     const int descriptors[] = {
         counters.cycles,
@@ -245,13 +203,11 @@ static bool tier1_select_source_measure(const Tier1SelectSourceCorpus* corpus, A
             close(descriptors[i]);
         }
     }
-    return failed == BUSTER_TIER1_SELECT_SOURCE_VARIANTS;
+    return !failed;
 }
 
 static __attribute__((unused)) int run_tier1_select_source_benchmark(int count, char** arguments)
 {
-    uint32_t only = BUSTER_TIER1_SELECT_SOURCE_VARIANTS;
-    uint64_t after_scalar = 0;
     char** options = calloc((size_t)count + 1, sizeof(char*));
     char** files = calloc((size_t)count + 1, sizeof(char*));
     uint32_t option_count = 0;
@@ -259,25 +215,7 @@ static __attribute__((unused)) int run_tier1_select_source_benchmark(int count, 
     bool valid = options != 0 && files != 0;
     for (int i = 0; valid && i < count; i += 1)
     {
-        if (strcmp(arguments[i], "--only") == 0)
-        {
-            valid = i + 1 < count;
-            for (uint32_t v = 0; valid && v < BUSTER_TIER1_SELECT_SOURCE_VARIANTS; v += 1)
-            {
-                only = strcmp(arguments[i + 1], tier1_select_source_variant_names[v]) == 0 ? v : only;
-            }
-            valid = valid && only != BUSTER_TIER1_SELECT_SOURCE_VARIANTS;
-            i += 1;
-        }
-        else if (strcmp(arguments[i], "--after-scalar") == 0)
-        {
-            valid = i + 1 < count;
-            char* end = 0;
-            after_scalar = valid ? strtoull(arguments[i + 1], &end, 10) : 0;
-            valid = valid && end != arguments[i + 1] && *end == 0 && after_scalar <= 1000;
-            i += 1;
-        }
-        else if (arguments[i][0] != '-')
+        if (arguments[i][0] != '-')
         {
             files[file_count] = arguments[i];
             file_count += 1;
@@ -328,11 +266,11 @@ static __attribute__((unused)) int run_tier1_select_source_benchmark(int count, 
                corpus.burs.nodes, corpus.burs.mismatches, corpus.burs.uncovered, corpus.burs.matched, corpus.burs.fallbacks);
         // A broken definition, or a class the grammar covers without a candidate, fails the run.
         const bool twins = corpus.burs.functions == corpus.count && corpus.burs.mismatches == 0 && corpus.burs.uncovered == 0;
-        measured = twins && corpus.count != 0 && corpus.instructions != 0 && tier1_select_source_measure(&corpus, &output, &scratch, only, after_scalar);
+        measured = twins && corpus.count != 0 && corpus.instructions != 0 && tier1_select_source_measure(&corpus, &output, &scratch);
     }
     else if (!valid)
     {
-        fprintf(stderr, "usage: compiler benchmark-tier1-select-source [--only select] [--after-scalar MS] [preprocessor options] file...\n");
+        fprintf(stderr, "usage: compiler benchmark-tier1-select-source [preprocessor options] file...\n");
     }
     arena_release(&scratch);
     arena_release(&output);

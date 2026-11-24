@@ -3590,6 +3590,63 @@ compile them together, then makes each body's code after Tier 0 in order.
   entries 3.68. Larger batches read the same, and so do windows of 8,192
   tokens.
 
+**After the batches**
+([the fixed cost's record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier0-fixed-cost-2874-2026-11-23)),
+on main `d4a6eb540`. In batches the back end stalls a third of Tier 0's slots,
+so the question became what its loops wait on.
+
+- **What moved nothing.** The three gathers as eight loads each: 10
+  microcoded uops an entry gone, `tier0` 3.695 against 3.683 ms. Emission's
+  choices, branches and references in scalar loops after its blocks: 0.11 ms
+  slower. Four reorderings of the passes' chains, a knob each (the labels'
+  bits from bytes, the depths' carry off the scan, the references in two
+  tables, emission's hole blocks a block ahead): within 0.02 ms of none.
+- **A memo of statements would not carry the front.** Keyed by what the
+  front's passes read of a statement, 66.4% of `sqlite3.c`'s entries are in a
+  statement seen before; with a table a unit, 51.8% of Lua's and 29.9% of
+  musl's. And the homes, measuring and emission depend on the function's
+  locals.
+- **A function's fixed cost is its instructions.** A line through nine bins
+  of `sqlite3.c`'s functions by size: 1,043 cycles a function and 34.9 an
+  entry, so 16% of Tier 0 is the functions' fixed work. A function of five
+  entries runs 5,119 instructions, 3.9 a cycle. The front's 64-entry blocks
+  are 0.25 M of its 6.1 M cycles: sharing blocks across a batch's functions
+  is not worth its machinery.
+- **Samples at a waiting load overstate it.** In the functions under 16
+  entries, `perf record` put 392 of 1,641 cycles a function at five loads,
+  each right after stores it cannot be forwarded from (a masked store, a
+  `memset` of under 64 bytes, a list stored a register at a time, a struct's
+  two fields, a second copy of a struct). Each one removed alone, behind a
+  knob, gained 9 to 28 cycles a function where it was sampled at 58 to 95,
+  and moved `tier0` in a compile by nothing measurable: the processor works
+  past the load, and retirement stops at it. Running the front's sub-passes
+  each over the batch, so that every store is long in the cache when read,
+  was 0.09 ms slower.
+- **What landed from it** (#3486, every object's bytes unchanged; `-c
+  sqlite3.c` on main `d4a6eb540`, that main, the first piece and both built
+  from one tree, medians of 30 with the order rotated every round):
+  selection's words gathered a block ahead, `tier0` 3.660 to 3.616 ms; then
+  the five loads without their stores, 3.616 to 3.582, with branch sizing
+  0.392 to 0.380 behind the driver's copies. The second piece's gate was
+  0.10 ms, from the samples: missed, and its premise refuted; it stays as
+  the exact 0.03 ms it measured. The row is 6.33 to 6.23 ms. Of the five,
+  the counts' zeroing merged as #2972's `tier0_clear`, which main had by
+  then.
+- **An A/B in a fixed order reads the second executable 0.01 to 0.03 ms
+  high on `tier0`.** The same executable read 3.644 as the second of a pair
+  and 3.604 as the first, an hour apart; rotated among three it read 3.616.
+  The pieces before this one were all the second of their pairs.
+
+**Against the step's gate.** The row is about 6.2 ms on `sqlite3.c`, 47
+cycles a token where the budget has 10: `tier0` 27 of them, and the stages
+after it (branch sizing, the encoder, the unwind rows, the unit's parts and
+the object) 20, twice the gate by themselves. Tier 0's cycles are spread over
+a dozen passes at four uops a cycle with no pass above a quarter, a function's
+fixed work is a sixth, and since the batches no local change has been worth
+more than 2%. The gate needs fewer uops an entry by a factor of about five,
+which is another machine for Tier 0's middle and for the emission after it,
+not these passes made faster.
+
 ## Step 5's first piece: a census of the kernel's time and fresh memory
 
 [The record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/kernel-census-2873-2026-11-16)

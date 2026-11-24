@@ -295,8 +295,10 @@ module), so that tools and the comparisons below read them alike.
 
 `c_check_program_batch.c` handles reached operation fragments before the general
 task loop expands them. The general expansion, which the source rows' lowering
-(`-g`'s) takes alone, remains the oracle: `test-checker` compares every program
-fixture's functions by the two lowerings. Since #1048 no
+(`-g`'s) takes alone, remains the oracle: `test-checker` compares the functions
+of every program fixture it lowers by the two lowerings, and
+`test-lowering-templates` those of c-testsuite's programs, `sqlite3.c` and the
+compiler's `main.c`. Since #1048 no
 compile takes the fragments (`CheckLowerWriter.fragments`, which only their
 test sets): on the 9700X they cost `sqlite3.c`'s statements more than they
 saved ("The vector path's fast paths" below), and none takes the leaf path
@@ -1725,8 +1727,8 @@ none of its subset's programs makes a name twice in clang's objects.
 - **`main.c`**, the compiler's own unit, with `build.sh`'s flags for a plain
   `-march=znver5` build, whatever the run's host, sanitizer and fuzzing: every
   correctness run compiles it by `-c` and by `--lower-all`, each with
-  `--verify`, the scalar path's `--lower-all` object byte for byte the vector
-  path's, and compares its checking, by both paths, and its `-c` object with
+  `--verify`, lowers its selection by the general expansion and by the fast
+  paths with the templates (`test-lowering-templates`), and compares its checking, by both paths, and its `-c` object with
   clang's (`test-checker-corpus --symbols-minimum 1`). The TSan and MSan rows
   run the compiles in a separate step after the suite, and leave out only the
   checking comparison, whose unit (4,864,411 tokens on 2026-11-10, with
@@ -1944,8 +1946,8 @@ ablation with main's file takes it back).
 The lowering visits the tokens that declare or start an initializer, which
 `check_program_declaring` gives 16 at a time with a register compress; the
 selection counts and numbers its needed objects 64 at a time
-(`check_program_needed_count`, `check_program_needed_number`); each has an exact
-scalar twin, which `test-checker` compares at `PROT_NONE` pages. The lowering's
+(`check_program_needed_count`, `check_program_needed_number`); `test-checker`
+compares each with its definition at `PROT_NONE` pages. The lowering's
 ABI table has rows for its type table's types alone (`abi_initialize_types`):
 the lowering makes no type, and classifies only the types it has rows for. The
 selection now reads the static declaration keys retained by `check_data_prepare`

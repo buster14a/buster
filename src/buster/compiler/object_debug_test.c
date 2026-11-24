@@ -162,7 +162,7 @@ static bool object_test_debug_make(ObjectTestDebug* debug, const Link* link, con
             .address_capacity = end[k] - first[k],
         };
         memcpy(outputs[k].bases, sizes, sizeof(sizes));
-        valid = debug_write(&parts[k], &outputs[k], false) == DEBUG_ERROR_CAPACITY;
+        valid = debug_write(&parts[k], &outputs[k]) == DEBUG_ERROR_CAPACITY;
         for (uint32_t s = 0; valid && s < BUSTER_DEBUG_SECTIONS; s += 1)
         {
             sizes[s] += outputs[k].sections[s].size;
@@ -181,7 +181,7 @@ static bool object_test_debug_make(ObjectTestDebug* debug, const Link* link, con
             outputs[k].sections[s].bytes = bytes[s] + outputs[k].bases[s];
             outputs[k].sections[s].capacity = outputs[k].sections[s].size;
         }
-        valid = debug_write(&parts[k], &outputs[k], false) == DEBUG_OK && debug_finalize(&parts[k], &outputs[k], addresses + first[k]) == DEBUG_OK;
+        valid = debug_write(&parts[k], &outputs[k]) == DEBUG_OK && debug_finalize(&parts[k], &outputs[k], addresses + first[k]) == DEBUG_OK;
         for (uint32_t i = first[k]; valid && i < end[k]; i += 1)
         {
             line_addresses[i] += (uint32_t)outputs[k].bases[DEBUG_SECTION_LINE];

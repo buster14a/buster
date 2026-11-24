@@ -7,11 +7,12 @@
 // instructions, inserts the returned phis at block entry, and discards unreachable blocks. The caller's full IR
 // verifier remains responsible for VALUE's hidden operands, terminators and the semantics of memory operations.
 //
-// Small inputs place pruned phis with liveness and dominance-frontier bitsets, then rename through nearest dominating
-// definitions. The dense workspace has a checked byte budget. Larger inputs reuse one local's predecessor-reading
-// workspace, retaining only its compact phi graph (ssa_bounded.c). The scalar twin reads variables through
-// predecessors with an explicit stack (Braun et al., CC 2013); ssa_verify.c checks independent bounded equations.
-// Both remove trivial phis and redundant phi cycles without recursion. No implementation from the papers is copied.
+// Inputs within the dense budget take the dense constructor (ssa_construct_vector: sparse dominance frontiers, pruned
+// phis of every local at once by liveness bit rows, entry and exit rows a block at a time in reverse postorder). Larger
+// inputs reuse one local's predecessor-reading workspace, which reads variables through predecessors with an explicit
+// stack (Braun et al., CC 2013), retaining only its compact phi graph (ssa_bounded.c); ssa_verify.c checks independent
+// bounded equations. Both remove trivial phis and redundant phi cycles without recursion. No implementation from the
+// papers is copied.
 // Include after lane.c, dataflow.c and dominators.c. All temporary/output memory belongs to the caller's arenas.
 
 #include <stdbool.h>
@@ -183,10 +184,11 @@ static uint32_t ssa_undefined(const SsaWork* work, uint32_t local)
 #define BUSTER_SSA_DOMINANCE_BYTES (16ull << 20)
 #define BUSTER_SSA_DENSE_BYTES (16ull << 20)
 
-// Bound every Cartesian workspace, including provisional SCC cleanup, emission, four padded liveness matrices,
-// and the vector renamer's offsets/cursors. The topology and instruction terms deliberately overestimate their
-// aligned columns. Dominance/frontier storage has its own separate cap above. This is a storage bound, not a new
-// measured scalar/vector crossover; eligibility can only reduce these conservative input-local extents.
+// Bound every Cartesian workspace. The estimate (128 bytes a cell) still holds the earlier constructor's tables of a u32
+// a cell; the dense constructor's are its `last` row (a u32 a cell), the liveness, placement and pending bit rows, its
+// cleanup and emission. The topology and instruction terms deliberately overestimate their aligned columns. The
+// frontier pairs have their own cap (BUSTER_SSA_FRONTIER_PAIRS). This is a storage bound, not a measured crossover;
+// eligibility can only reduce these conservative input-local extents.
 static bool ssa_dense_fits(const SsaInput* input)
 {
     const uint64_t cells = (uint64_t)input->block_count * input->local_count;
@@ -976,7 +978,7 @@ static void ssa_vector_operands(SsaWork* work, const uint64_t* placed, const uin
     }
 }
 
-static SsaError ssa_construct_vector(SsaWork* work)
+static SsaError ssa_construct_vector(SsaWork* work, uint32_t frontier_budget)
 {
     const SsaInput* input = work->input;
     const uint32_t blocks = input->block_count;
@@ -999,7 +1001,7 @@ static SsaError ssa_construct_vector(SsaWork* work)
         memset(work->last, 0xff, cells * sizeof(uint32_t));
         memset(placed, 0, rows);
         ssa_vector_scan(work, values, exposed, exposed_offsets);
-        error = ssa_frontiers(work, BUSTER_SSA_FRONTIER_PAIRS, &frontier_offsets, &frontier_targets);
+        error = ssa_frontiers(work, frontier_budget, &frontier_offsets, &frontier_targets);
     }
     if (error == SSA_OK)
     {
@@ -1033,7 +1035,7 @@ static SsaError ssa_construct_vector(SsaWork* work)
 }
 
 // Cleanup is followed by compacting only the phis reachable from original promoted reads. Alias substitution can
-// leave dead provisional phis behind, particularly along the scalar path's single-predecessor chains.
+// leave dead provisional phis behind, particularly along the bounded reader's single-predecessor chains.
 static SsaError ssa_emit(SsaWork* work, Arena* output, SsaResult* result)
 {
     const SsaInput* input = work->input;
@@ -1408,11 +1410,12 @@ static SsaError ssa_simplify(SsaWork* work)
 
 #include "ssa_bounded.c"
 
-// The dense constructor, or the bounded one where the sparse frontiers would pass their budget.
-static SsaError ssa_construct_dense(SsaWork* work)
+// The dense constructor, or the bounded one where the sparse frontiers would pass `frontier_budget` pairs
+// (BUSTER_SSA_FRONTIER_PAIRS but in the tests).
+static SsaError ssa_construct_dense(SsaWork* work, uint32_t frontier_budget)
 {
     const uint64_t mark = work->scratch->length;
-    SsaError error = ssa_construct_vector(work);
+    SsaError error = ssa_construct_vector(work, frontier_budget);
     if (error == SSA_ERROR_LIMIT)
     {
         arena_pop_to(work->scratch, mark);
@@ -1422,7 +1425,7 @@ static SsaError ssa_construct_dense(SsaWork* work)
     return error;
 }
 
-static SsaError ssa_build_selected_path(const SsaInput* input, Arena* output, Arena* scratch, SsaResult* result, bool bounded)
+static SsaError ssa_build_selected_path(const SsaInput* input, Arena* output, Arena* scratch, SsaResult* result, bool bounded, uint32_t frontier_budget)
 {
     SsaError error = output != 0 && scratch != 0 && output != scratch && result != 0 ? ssa_check_input(input) : SSA_ERROR_INVALID;
     const uint64_t output_length = output == 0 ? 0 : output->length;
@@ -1435,7 +1438,7 @@ static SsaError ssa_build_selected_path(const SsaInput* input, Arena* output, Ar
     }
     if (error == SSA_OK)
     {
-        error = bounded ? ssa_construct_bounded(&work) : ssa_construct_dense(&work);
+        error = bounded ? ssa_construct_bounded(&work) : ssa_construct_dense(&work, frontier_budget);
     }
     if (error == SSA_OK)
     {
@@ -1458,13 +1461,19 @@ static SsaError ssa_build_selected_path(const SsaInput* input, Arena* output, Ar
 
 static SsaError ssa_build(const SsaInput* input, Arena* output, Arena* scratch, SsaResult* result)
 {
-    return ssa_build_selected_path(input, output, scratch, result, false);
+    return ssa_build_selected_path(input, output, scratch, result, false, BUSTER_SSA_FRONTIER_PAIRS);
 }
 
 // The tests force the bounded construction on tiny fixtures as well as the memory-limit cases.
 static __attribute__((unused)) SsaError ssa_build_bounded(const SsaInput* input, Arena* output, Arena* scratch, SsaResult* result)
 {
-    return ssa_build_selected_path(input, output, scratch, result, true);
+    return ssa_build_selected_path(input, output, scratch, result, true, BUSTER_SSA_FRONTIER_PAIRS);
+}
+
+// The tests' dense construction with a frontier budget of their own, to take the bounded fallback past it.
+static __attribute__((unused)) SsaError ssa_build_frontier_budget(const SsaInput* input, Arena* output, Arena* scratch, SsaResult* result, uint32_t frontier_budget)
+{
+    return ssa_build_selected_path(input, output, scratch, result, false, frontier_budget);
 }
 
 #include "ssa_verify.c"

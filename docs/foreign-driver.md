@@ -554,7 +554,7 @@ arguments and locals but for addresses. `test-inflate` checks the decompressor
 against gzip's streams of generated inputs at levels 1, 6 and 9, streams made by
 hand bit by bit for each error, every cut and three changes of each byte of
 streams to 4 KB ending at `PROT_NONE` pages, and the Adler-32's vector path
-against its twin.
+against RFC 1950's definition.
 The corpus is its two original programs (C, with threads,
 thread-locals, an archive, constructors, a weak reference, a registry and
 IFUNCs called, loaded from the GOT and pointed to from data, and

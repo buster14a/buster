@@ -471,7 +471,12 @@ as one, the twin.
   declared a type's at file scope is marked as clang's predeclared ones are
   (a type's name from the next tile's first token), and its meaning for the
   scalar parser is a typedef's; a block's is ordinary again. At the unit's end
-  the meanings are what the unit's own parse leaves.
+  the meanings are what the unit's own parse leaves: a predeclared type's name
+  a type's and every other ordinary, but ordinary for each name declared before
+  the last declaration the fallback took. A refused tile's fallback leaves the
+  predeclared names its tile declared ordinary, with no record of them, so the
+  unit parsed as one after it starts from every predeclared name a type's
+  again, as its first parse would.
 - **Where a tile ends** (`parse_tile_end`): after the first top-level
   declaration that ends N tokens or more past the tile's start. From the
   kinds alone, 64 tokens a step: the brackets' depth is a prefix sum in byte
@@ -488,17 +493,20 @@ as one, the twin.
   `parse_vector`, with the unit's arrays, as if no tile had been tried
   (`ParseStatistics.tiles_refused`). So `parse_tile_end` decides how often
   tiles serve, never the tree. A function that returns a pointer to an array
-  (`int (*f(void))[3] { ... }`) ends no tile; an old-style parameter declared
-  after an attribute is the one valid shape known to be refused.
+  (`int (*f(void))[3] { ... }`) ends no tile. An old-style definition with
+  declared parameters sends its unit to the scalar parser whole, as one unit
+  and so from its tile: such a unit's tiles are refused there, and the tiles
+  before it were parsed for nothing.
 - **The checks.** `test-parser` parses every unit it checks by tiles of a
   token (every top-level declaration a tile) and of 64 too, and compares the
   tokens, the outcome, the diagnostics and the tree with the unit's parse as
   one; `parse_test_tiles` gives `parse_tile_end` units by their top-level
   declarations (old-style definitions, attributes before a brace, compound
   literals, brackets deeper than a block, type names hidden and declared
-  again) and requires each tile's end where they end. `test-checker-driver`
-  compares objects, stderr and statuses by `--parse-tile=1`, `16` and `4096`
-  with `--parse-tile=0`.
+  again, a predeclared type's name declared in a tile that is refused) and
+  requires each tile's end where they end; the names' meanings each parse
+  leaves are compared too. `test-checker-driver` compares objects, stderr and
+  statuses by `--parse-tile=1`, `16` and `4096` with `--parse-tile=0`.
 
 ## The postorder and the tree's columns
 
