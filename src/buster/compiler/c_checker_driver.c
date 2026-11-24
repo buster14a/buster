@@ -13515,8 +13515,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                 // A unit that skipped is its view from here (#2531's step 3): the parse without its skipped declarations, whose
                 // token indices the reader's columns have. The view is a whole unit's, as the parse was (its places end where
                 // the parse's did, publication_end).
-                checking = check_attested_parse(attested, checking);
-                recovered = recovered == parser ? checking : recovered;
+                Parser* const view = check_attested_parse(attested, checking);
+                // A prefix or repair is distinct from the parse that supplies its diagnostics.
+                recovered = recovered == checking ? view : recovered;
+                checking = view;
                 tokens = checking->tokens.count;
             }
             else
