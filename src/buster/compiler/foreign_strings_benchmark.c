@@ -388,8 +388,7 @@ static bool foreign_strings_benchmark_case(const char* directory, uint32_t count
             bool emitted = false;
             if (removed && names.base != 0 && built.error == FOREIGN_LINK_ERROR_NONE && merge_error == FOREIGN_STRINGS_ERROR_NONE)
             {
-                emitted = variant->path == FOREIGN_PATH_EXACT ? executable_test_write_exact(&converted.link, entry, destination, 1, &written) :
-                                                              executable_test_write(&converted.link, entry, destination, 1, &written, 0, 0);
+                emitted = executable_test_write(&converted.link, entry, destination, 1, &written, 0, 0);
             }
             const uint64_t written_at = foreign_now();
             const unsigned resolve_error = (unsigned)foreign.failure.error;

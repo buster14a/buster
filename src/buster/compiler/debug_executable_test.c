@@ -23,7 +23,7 @@ static SymbolId debug_native_symbol(const Link* link, String8 name)
 }
 #endif
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK || BUSTER_UNIT == BUSTER_UNIT_BACKEND
-static bool debug_native_write(Link* link, SymbolId entry, String8 path, const ExecutableDebug* debug, uint32_t lanes, bool exact, ExecutableResult* result)
+static bool debug_native_write(Link* link, SymbolId entry, String8 path, const ExecutableDebug* debug, uint32_t lanes, ExecutableResult* result)
 {
     ExecutableTestWrite write = {
         .link = link,
@@ -31,7 +31,6 @@ static bool debug_native_write(Link* link, SymbolId entry, String8 path, const E
             .path = path,
             .entry = entry,
             .debug = debug,
-            .exact = exact,
         },
     };
     const bool ran = lane_run(lanes, executable_test_lane_main, &write, 0);
@@ -56,7 +55,7 @@ static bool debug_native_symbol_override(Link* link, SymbolId entry, String8 pat
             .count = count,
         };
         String8 first = { 0 };
-        for (uint32_t exact = 0; valid && exact < 2; exact += 1)
+        if (valid)
         {
             for (uint32_t l = 0; valid && l < BUSTER_ARRAY_LENGTH(executable_test_lane_counts); l += 1)
             {
@@ -68,7 +67,6 @@ static bool debug_native_symbol_override(Link* link, SymbolId entry, String8 pat
                         .entry = entry,
                         .debug = debug,
                         .symbols = &symbols,
-                        .exact = exact != 0,
                     },
                 };
                 const bool poisoned = executable_test_reset(link, path.pointer);
@@ -106,14 +104,14 @@ static bool debug_native_symbol_override(Link* link, SymbolId entry, String8 pat
                 first = first.pointer == 0 ? file : first;
                 const bool same = file.pointer != 0 && first.pointer != 0 && file.length == first.length && memcmp(file.pointer, first.pointer, file.length) == 0;
                 valid = succeeded && unchanged && selected && same;
-                executable_test_expect(tally, valid, "explicit empty/single symbol table preserves all DWARF slots", 100 * count + 10 * exact + lanes);
+                executable_test_expect(tally, valid, "explicit empty/single symbol table preserves all DWARF slots", 100 * count + lanes);
             }
         }
     }
     const bool reset = valid && executable_test_reset(link, path.pointer);
     executable_test_restore(link, atoms);
     ExecutableResult written = { 0 };
-    valid = reset && debug_native_write(link, entry, path, debug, 3, false, &written) && executable_test_same_file(arena, path.pointer, reference);
+    valid = reset && debug_native_write(link, entry, path, debug, 3, &written) && executable_test_same_file(arena, path.pointer, reference);
     executable_test_expect(tally, valid, "restore debug function selection for external consumers", 0);
     return valid;
 }
@@ -373,15 +371,14 @@ static bool debug_test_native_write(const char* object_path, const char* executa
         .length = strlen(executable_path),
     };
     String8 first = { 0 };
-    const uint32_t vector_writes = BUSTER_ARRAY_LENGTH(executable_test_lane_counts);
-    for (uint32_t write = 0; ready && write < vector_writes + 2; write += 1)
+    const uint32_t writes = BUSTER_ARRAY_LENGTH(executable_test_lane_counts);
+    for (uint32_t write = 0; ready && write < writes; write += 1)
     {
-        const bool exact = write >= vector_writes;
-        const uint32_t lanes = exact ? (write == vector_writes ? 1 : 8) : executable_test_lane_counts[write];
+        const uint32_t lanes = executable_test_lane_counts[write];
         const bool poisoned = executable_test_reset(&link, executable_path);
         executable_test_restore(&link, atoms);
         ExecutableResult written = { 0 };
-        const bool succeeded = poisoned && debug_native_write(&link, entry, path, (write & 1) != 0 ? &zero_debug : &debug, lanes, exact, &written);
+        const bool succeeded = poisoned && debug_native_write(&link, entry, path, (write & 1) != 0 ? &zero_debug : &debug, lanes, &written);
         if (!succeeded)
         {
             executable_test_print_failure("native debug write", &written);
@@ -392,7 +389,7 @@ static bool debug_test_native_write(const char* object_path, const char* executa
             first = file;
         }
         const bool identical = file.pointer != 0 && first.pointer != 0 && file.length == first.length && memcmp(file.pointer, first.pointer, file.length) == 0;
-        executable_test_expect(&tally, succeeded && identical, "lane/exact writes reproduce poisoned file", write);
+        executable_test_expect(&tally, succeeded && identical, "every lane count's write reproduces the poisoned file", write);
         executable_test_expect(&tally, file.pointer != 0 && debug_native_image(&link, unit, functions, output, file, &written, &arena),
                                "native debug sections and resolved addresses", write);
         executable_test_expect(&tally, debug_native_unchanged(unit, output, saved, positions) && debug_native_unchanged(unit, &zeroed, zero_saved, positions) &&
@@ -410,7 +407,7 @@ static bool debug_test_native_write(const char* object_path, const char* executa
         const bool poisoned = executable_test_reset(&link, executable_path);
         executable_test_restore(&link, atoms);
         ExecutableResult written = { 0 };
-        const bool succeeded = consistent && poisoned && debug_native_write(&link, entry, path, &zero_debug, 3, false, &written);
+        const bool succeeded = consistent && poisoned && debug_native_write(&link, entry, path, &zero_debug, 3, &written);
         const String8 file = succeeded ? executable_test_read(&arena, executable_path) : (String8){ 0 };
         executable_test_expect(&tally, succeeded && file.pointer != 0 && debug_native_image(&link, unit, functions, output, file, &written, &arena),
                                "local/global symbols retain binding and sh_info order", 0);
@@ -419,7 +416,7 @@ static bool debug_test_native_write(const char* object_path, const char* executa
         link.symbols.flags[local] = flags;
         const bool reset = executable_test_reset(&link, executable_path);
         executable_test_restore(&link, atoms);
-        const bool restored = reset && debug_native_write(&link, entry, path, &debug, 8, true, &written);
+        const bool restored = reset && debug_native_write(&link, entry, path, &debug, 8, &written);
         ready = restored && executable_test_same_file(&arena, executable_path, first);
         executable_test_expect(&tally, ready, "restore global consumer fixture byte for byte", 0);
     }
@@ -508,7 +505,7 @@ static bool debug_test_native_write(const char* object_path, const char* executa
         {
             executable_test_restore(&link, atoms);
             ExecutableResult refused = { 0 };
-            const bool succeeded = consistent && debug_native_write(&link, entry, path, &bad, way == 0 ? 1 : 8, way != 0, &refused);
+            const bool succeeded = consistent && debug_native_write(&link, entry, path, &bad, way == 0 ? 1 : 8, &refused);
             const bool same = executable_test_same_file(&arena, executable_path, first);
             executable_test_expect(&tally, !succeeded && refused.error == EXECUTABLE_ERROR_UNSUPPORTED && same,
                                    "malformed descriptor rejected before publication", change * 2 + way);
@@ -530,7 +527,7 @@ static bool debug_test_native_write(const char* object_path, const char* executa
 #endif
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
 // Units written one after another at their bases (DebugOutput.bases) into one buffer per section, `outputs[i]` unit
-// i's, attached by one descriptor with their function counts. Every lane count and the exact twins write the same file,
+// i's, attached by one descriptor with their function counts. Every lane count write the same file,
 // whose sections are the units' contributions one after another, each finalized at its functions' native addresses;
 // and a descriptor whose units' counts don't add up to the functions, or don't match the units' .debug_addr headers, is
 // refused before publication. The caller's gdb and perf read the file this leaves.
@@ -591,19 +588,18 @@ static bool debug_test_native_units(const char* object_path, const char* executa
     const String8 path = { .pointer = (char*)executable_path, .length = strlen(executable_path) };
     static const char* const names[] = { ".debug_info", ".debug_abbrev", ".debug_line", ".debug_addr", ".debug_rnglists" };
     String8 first = { 0 };
-    const uint32_t vector_writes = BUSTER_ARRAY_LENGTH(executable_test_lane_counts);
-    for (uint32_t write = 0; ready && write < vector_writes + 2; write += 1)
+    const uint32_t writes = BUSTER_ARRAY_LENGTH(executable_test_lane_counts);
+    for (uint32_t write = 0; ready && write < writes; write += 1)
     {
-        const bool exact = write >= vector_writes;
-        const uint32_t lanes = exact ? (write == vector_writes ? 1 : 8) : executable_test_lane_counts[write];
+        const uint32_t lanes = executable_test_lane_counts[write];
         const bool poisoned = executable_test_reset(&link, executable_path);
         executable_test_restore(&link, atoms);
         ExecutableResult written = { 0 };
-        const bool succeeded = poisoned && debug_native_write(&link, entry, path, &debug, lanes, exact, &written);
+        const bool succeeded = poisoned && debug_native_write(&link, entry, path, &debug, lanes, &written);
         const String8 file = succeeded ? executable_test_read(&arena, executable_path) : (String8){ 0 };
         first = write == 0 ? file : first;
         const bool identical = file.pointer != 0 && first.pointer != 0 && file.length == first.length && memcmp(file.pointer, first.pointer, file.length) == 0;
-        executable_test_expect(&tally, succeeded && identical, "lane/exact writes of the units reproduce the poisoned file", write);
+        executable_test_expect(&tally, succeeded && identical, "every lane count's write of the units reproduces the poisoned file", write);
         // Each unit finalized at its functions' native addresses, from a copy of its source bytes, against its part of
         // the file's sections.
         const ExecutableTestImage image = executable_test_image(file);
@@ -678,7 +674,7 @@ static bool debug_test_native_units(const char* object_path, const char* executa
         }
         executable_test_restore(&link, atoms);
         ExecutableResult refused = { 0 };
-        const bool succeeded = debug_native_write(&link, entry, path, &bad, 3, false, &refused);
+        const bool succeeded = debug_native_write(&link, entry, path, &bad, 3, &refused);
         const bool same = executable_test_same_file(&arena, executable_path, first);
         executable_test_expect(&tally, !succeeded && refused.error == EXECUTABLE_ERROR_UNSUPPORTED && same, "a descriptor whose units don't match is refused", change);
     }
@@ -687,7 +683,7 @@ static bool debug_test_native_units(const char* object_path, const char* executa
     {
         executable_test_restore(&link, atoms);
         ExecutableResult written = { 0 };
-        ready = debug_native_write(&link, entry, path, &debug, 2, false, &written) && executable_test_same_file(&arena, executable_path, first);
+        ready = debug_native_write(&link, entry, path, &debug, 2, &written) && executable_test_same_file(&arena, executable_path, first);
         executable_test_expect(&tally, ready, "write the units' file for the consumers", 0);
     }
     arena_release(&arena);

@@ -339,8 +339,7 @@ static void foreign_link_test_program(ForeignTestTally* tally, const char* direc
                     .length = strlen(destination),
                 };
                 ExecutableResult written = { 0 };
-                const bool emitted = path == 0 ? executable_test_write_exact(&converted.link, entry, destination_name, foreign_test_lanes[l], &written) :
-                                                executable_test_write(&converted.link, entry, destination_name, foreign_test_lanes[l], &written, 0, 0);
+                const bool emitted = executable_test_write(&converted.link, entry, destination_name, foreign_test_lanes[l], &written, 0, 0);
                 foreign_test_expect(tally, emitted, "write converted executable", detail);
                 char* run[] = {
                     destination,
@@ -530,8 +529,7 @@ static bool foreign_link_test_generated(const char* directory, Arena* arena, con
                     bool emitted = false;
                     if (removed && names.base != 0 && built.error == FOREIGN_LINK_ERROR_NONE)
                     {
-                        emitted = path == 0 ? executable_test_write_exact(&converted.link, entry, destination, foreign_test_lanes[l], &written) :
-                                              executable_test_write(&converted.link, entry, destination, foreign_test_lanes[l], &written, 0, 0);
+                        emitted = executable_test_write(&converted.link, entry, destination, foreign_test_lanes[l], &written, 0, 0);
                     }
                     const uint64_t finished = foreign_now();
                     valid = foreign.failure.error == FOREIGN_ERROR_NONE && built.error == FOREIGN_LINK_ERROR_NONE && emitted;

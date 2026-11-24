@@ -11909,7 +11909,6 @@ static bool check_driver_executable(const CheckProgram* program, const CheckData
                     .runtime = runtime_kind == RUNTIME_KIND_STATIC || runtime_kind == RUNTIME_KIND_STATIC_PIE ? &static_inputs : NULL,
                     .debug = debug ? &dwarf.attach : NULL,
                     .symbols = selected != NULL ? &symbols : NULL,
-                    .exact = BUSTER_SCALAR_PATH(scalar),
                     .borrowed = bind.borrow ? runtime.snapshot : NULL,
                     .borrowed_bytes = bind.borrow ? runtime.snapshot_bytes : 0,
                 },

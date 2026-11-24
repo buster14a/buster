@@ -499,7 +499,6 @@ static void foreign_dynamic_test_case(ForeignTestTally* tally, const char* direc
                             },
                             .entry = foreign_link_test_symbol(&foreign, &converted, "_start"),
                             .dynamic = &converted.dynamic,
-                            .exact = path == 0,
                         },
                     };
                     const bool ran = lane_run(foreign_test_lanes[l], executable_test_lane_main, &write, 0);

@@ -57,7 +57,6 @@ static bool dynamic_test_libraries(const ExecutableTestDirectory* directory, con
                 .path = path,
                 .entry = dynamic_global(runtime, &test->bind, "_start"),
                 .dynamic = &dynamic,
-                .exact = configuration >= 4,
             },
             .poison = true,
         };
@@ -80,7 +79,7 @@ static bool dynamic_test_libraries(const ExecutableTestDirectory* directory, con
             reference = file;
         }
         dynamic_test_expect(&tally, file.length != 0 && file.length == reference.length && memcmp(file.pointer, reference.pointer, file.length) == 0,
-                            "runtime/foreign sources, lane counts and exact path agree", configuration);
+                            "runtime/foreign sources and lane counts agree", configuration);
         dynamic_test_expect(&tally, written && executable_test_runs(path.pointer, (const uint8_t*)"", 0), "loader resolves every dependency and version", configuration);
     }
     // Invalid metadata must fail on every lane before opening an output, rather than indexing a missing library or

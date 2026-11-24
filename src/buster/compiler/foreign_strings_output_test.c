@@ -485,8 +485,7 @@ static void foreign_strings_output_program(ForeignTestTally* tally, const char* 
                     };
                     const SymbolId entry = foreign_link_test_symbol(&foreign, &converted, "_start");
                     ExecutableResult written = { 0 };
-                    const bool emitted = accepted && entry != 0 && (path == 0 ? executable_test_write_exact(&converted.link, entry, destination_name, foreign_test_lanes[lane], &written) :
-                                                                                  executable_test_write(&converted.link, entry, destination_name, foreign_test_lanes[lane], &written, 0, 0));
+                    const bool emitted = accepted && entry != 0 && executable_test_write(&converted.link, entry, destination_name, foreign_test_lanes[lane], &written, 0, 0);
                     foreign_test_expect(tally, emitted, "write merged or unchanged fallback executable", detail);
                     char* run[] = {
                         destination,

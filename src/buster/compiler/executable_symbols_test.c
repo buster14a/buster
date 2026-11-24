@@ -2,7 +2,7 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // Optional regular-symbol output: independent ELF expectations, definition addresses rather than IFUNC stubs,
-// TLS module offsets, local ordering, exact/vector/lane identity and refusal before changing an existing output.
+// TLS module offsets, local ordering, lane identity and refusal before changing an existing output.
 // Included by executable_test.c after its image, fixture and file helpers.
 
 static SymbolId executable_symbols_test_add(Link* link, const char* name, AtomId atom, uint64_t value, uint64_t size, uint8_t flags, uint8_t source)
@@ -239,13 +239,12 @@ static bool executable_symbols_test_dynamic(const ExecutableTestDirectory* direc
         for (uint32_t attached = 0; valid && attached < 2; attached += 1)
         {
             write.options.symbols = attached != 0 ? &selected : 0;
-            for (uint32_t exact = 0; valid && exact < 2; exact += 1)
+            if (valid)
             {
-                write.options.exact = exact != 0;
                 for (uint32_t l = 0; valid && l < BUSTER_ARRAY_LENGTH(executable_test_lane_counts); l += 1)
                 {
                     const uint32_t lanes = executable_test_lane_counts[l];
-                    const uint32_t index = 1000 * library + 100 * attached + 10 * exact + lanes;
+                    const uint32_t index = 1000 * library + 100 * attached + lanes;
                     const bool reset = executable_test_reset(link, path);
                     executable_test_restore(link, original);
                     valid = reset && lane_run(lanes, executable_test_lane_main, &write, 0) && write.succeeded;
@@ -255,7 +254,7 @@ static bool executable_symbols_test_dynamic(const ExecutableTestDirectory* direc
                                         image.valid && executable_test_section(&image, ".symtab") == 0 && executable_test_section(&image, ".strtab") == 0;
                     const bool same = file.pointer != 0 && (references[attached].pointer == 0 ||
                                       (file.length == references[attached].length && memcmp(file.pointer, references[attached].pointer, file.length) == 0));
-                    executable_test_expect(tally, valid && fields && same, "PIE/shared symbol fields and exact/vector/lane identity", index);
+                    executable_test_expect(tally, valid && fields && same, "PIE/shared symbol fields and lane identity", index);
                     bool ran = false;
                     if (valid && library != 0)
                     {
@@ -350,22 +349,21 @@ static bool executable_test_symbols(const ExecutableTestDirectory* directory)
     String8 reference = { 0 };
     valid &= original != 0;
     executable_test_expect(&tally, valid, "construct independent fixture", 0);
-    for (uint32_t exact = 0; valid && exact < 2; exact += 1)
+    if (valid)
     {
         for (uint32_t l = 0; valid && l < BUSTER_ARRAY_LENGTH(executable_test_lane_counts); l += 1)
         {
             executable_test_restore(link, original);
             const uint32_t lanes = executable_test_lane_counts[l];
-            write.options.exact = exact != 0;
             write.succeeded = false;
             valid = executable_test_reset(link, path) && lane_run(lanes, executable_test_lane_main, &write, 0) && write.succeeded;
             const String8 file = valid ? object_test_read_file(&saved, path) : (String8){ 0 };
             const ExecutableTestImage image = executable_test_image(file);
-            executable_test_expect(&tally, valid && executable_symbols_test_table(file, &image, &write.result), "ELF names, sizes, types and final definitions", 10 * exact + lanes);
+            executable_test_expect(&tally, valid && executable_symbols_test_table(file, &image, &write.result), "ELF names, sizes, types and final definitions", lanes);
             const bool same = file.pointer != 0 && (reference.pointer == 0 || (file.length == reference.length && memcmp(file.pointer, reference.pointer, file.length) == 0));
-            executable_test_expect(&tally, same, "exact/vector/lane byte identity", 10 * exact + lanes);
-            executable_test_expect(&tally, valid && executable_test_runs(path, (const uint8_t*)"", 0), "native program executes", 10 * exact + lanes);
-            executable_test_expect(&tally, valid && executable_test_build_id(&saved, file, boundaries, write.result.chunks), "symbol bytes participate in build ID", 10 * exact + lanes);
+            executable_test_expect(&tally, same, "lane byte identity", lanes);
+            executable_test_expect(&tally, valid && executable_test_runs(path, (const uint8_t*)"", 0), "native program executes", lanes);
+            executable_test_expect(&tally, valid && executable_test_build_id(&saved, file, boundaries, write.result.chunks), "symbol bytes participate in build ID", lanes);
             reference = reference.pointer == 0 ? file : reference;
         }
     }
@@ -381,9 +379,8 @@ static bool executable_test_symbols(const ExecutableTestDirectory* directory)
         { .ids = outside, .count = 1 },
         { .ids = descending, .count = 2 },
     };
-    for (uint32_t exact = 0; valid && exact < 2; exact += 1)
+    if (valid)
     {
-        write.options.exact = exact != 0;
         for (uint32_t i = 0; valid && i < BUSTER_ARRAY_LENGTH(invalid); i += 1)
         {
             write.options.symbols = &invalid[i];
@@ -391,16 +388,15 @@ static bool executable_test_symbols(const ExecutableTestDirectory* directory)
             const bool ran = lane_run(3, executable_test_lane_main, &write, 0);
             const String8 file = object_test_read_file(&saved, path);
             executable_test_expect(&tally, ran && !write.succeeded && write.result.error == EXECUTABLE_ERROR_UNSUPPORTED && file.length == reference.length &&
-                                   file.pointer != 0 && memcmp(file.pointer, reference.pointer, file.length) == 0, "invalid descriptor preserves destination", 10 * exact + i);
+                                   file.pointer != 0 && memcmp(file.pointer, reference.pointer, file.length) == 0, "invalid descriptor preserves destination", i);
         }
     }
     // Linker boundaries have image addresses, not module TLS offsets. Link accepts this contradictory type, so the
     // optional table must refuse it before changing the existing destination, on every path and lane partition.
     const uint8_t boundary_flags = link->symbols.flags[ids[6]];
     link->symbols.flags[ids[6]] = BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_TLS;
-    for (uint32_t exact = 0; valid && exact < 2; exact += 1)
+    if (valid)
     {
-        write.options.exact = exact != 0;
         write.options.symbols = &selected;
         for (uint32_t l = 0; valid && l < BUSTER_ARRAY_LENGTH(executable_test_lane_counts); l += 1)
         {
@@ -411,7 +407,7 @@ static bool executable_test_symbols(const ExecutableTestDirectory* directory)
             const String8 file = object_test_read_file(&saved, path);
             executable_test_expect(&tally, ran && !write.succeeded && write.result.error == EXECUTABLE_ERROR_UNSUPPORTED && file.length == reference.length &&
                                    file.pointer != 0 && memcmp(file.pointer, reference.pointer, file.length) == 0,
-                                   "linker boundary TLS refusal preserves destination", 10 * exact + lanes);
+                                   "linker boundary TLS refusal preserves destination", lanes);
         }
     }
     link->symbols.flags[ids[6]] = boundary_flags;

@@ -15,8 +15,7 @@
 // every other time over poisoned scratch memory: the files must be byte-identical. Each file is then read back and
 // checked by the test's own rules (dynamic_test_structure): the headers and .dynamic, .dynsym with its versions and
 // .gnu.hash, every relocation the loader needs, from .rela.dyn and from .relr.dyn decoded, with each GOT slot and
-// stub, and the unwind tables (test-executable's executable_test_unwind). The writer's exact twins must write the same
-// bytes with 1 and 8 lanes, and a write without RELR must have the same relocations in .rela.dyn alone and run alike
+// stub, and the unwind tables (test-executable's executable_test_unwind). A write without RELR must have the same relocations in .rela.dyn alone and run alike
 // (dynamic_test_variants). With --cross-check, ld.lld links the same link's objects (the object writer's) as a PIE,
 // and the two files must have the same dynamic symbols, relocations against them, RELATIVE pointers, init and fini
 // arrays and functions in .eh_frame_hdr's table (dynamic_test_against_lld); each program runs again with a library
@@ -36,7 +35,7 @@
 //     the loader must bind at their versions.
 //   - Refusals: small programs with what a dynamic PIE refuses (a text relocation, an ABS32 to the image, a PC32 to a
 //     dynamic symbol, a lea of and a PC64 to a hidden weak reference to nothing, at address 0, and a lea of, a call to
-//     and a PC64 to an absolute symbol), refused by every lane count and by the exact twins with their fixup and
+//     and a PC64 to an absolute symbol), refused by every lane count with their fixup and
 //     without an output, or handles (a call to and a pointer to a weak reference to nothing, and to a hidden one, loads
 //     through GOT slots whose word starts with that dynamic symbol's, a pointer at an odd address, which .rela.dyn
 //     holds, and pointers in .data and .rodata to, a load through the GOT of and an ABS32 to an absolute symbol, which
@@ -121,9 +120,8 @@ struct DynamicTestWrite
     Link* link;
     ExecutableOptions options;
     ExecutableResult result;
-    // The writer's exact twins, and .rela.dyn alone without RELR; and without the link's __tls_get_addr
-    // (ExecutableDynamic.tls_get_addr 0), as a producer that doesn't name it writes a PIE.
-    bool exact;
+    // .rela.dyn alone without RELR; and without the link's __tls_get_addr (ExecutableDynamic.tls_get_addr 0), as a
+    // producer that doesn't name it writes a PIE.
     bool rela_only;
     bool no_tls_get_addr;
     bool poison;
@@ -219,7 +217,6 @@ static bool dynamic_test_write_with(DynamicTestWrite* write, Link* link, const B
         .path = path,
         .entry = library ? 0 : dynamic_global(runtime, bind, "_start"),
         .dynamic = &dynamic,
-        .exact = write->exact,
     };
     write->succeeded = false;
     const bool checked = prepared && dynamic_test_gcc_s_inputs(&dynamic, link, bind, runtime);
@@ -1483,8 +1480,7 @@ static bool dynamic_test_loads(const char* harness, const char* library, const u
     return ran && WIFEXITED(status) && WEXITSTATUS(status) == 0 && length == expected_length && memcmp(output, expected, length) == 0;
 }
 
-// The same link by the writer's exact twins, with 1 and 8 lanes: the same bytes as `file`; and without RELR, with one
-// lane: .rela.dyn alone, whose structure the checks read and which must run as the program does, writing `expected`
+// The same link without RELR, with one lane: .rela.dyn alone, whose structure the checks read and which must run as the program does, writing `expected`
 // and exiting with `status`, or for a shared library, which `harness` loads (dynamic_test_loads), with status 0. They
 // go beside `path`.
 static void dynamic_test_variants(DynamicTestTally* tally, Link* link, const Bind* bind, const Runtime* runtime, String8 path, String8 file, const uint8_t* expected,
@@ -1500,24 +1496,6 @@ static void dynamic_test_variants(DynamicTestTally* tally, Link* link, const Bin
         .pointer = variant_bytes,
         .length = length > 0 ? (uint64_t)length : 0,
     };
-    static const uint32_t exact_lanes[] = { 1, 8 };
-    for (uint32_t l = 0; l < BUSTER_ARRAY_LENGTH(exact_lanes); l += 1)
-    {
-        DynamicTestWrite write = {
-            .exact = true,
-        };
-        ExecutableResult result;
-        if (saved != 0)
-        {
-            executable_test_restore(link, saved);
-        }
-        const bool succeeded = executable_test_reset(link, variant.pointer) && dynamic_test_write_with(&write, link, bind, runtime, variant, exact_lanes[l], &result);
-        Scratch scratch = scratch_begin(0);
-        const String8 bytes = succeeded ? executable_test_read(scratch.arena, variant.pointer) : (String8){ 0 };
-        const bool same = bytes.pointer != 0 && bytes.length == file.length && memcmp(bytes.pointer, file.pointer, file.length) == 0;
-        dynamic_test_expect(tally, same, "the exact twins write the same file", index * 10 + exact_lanes[l]);
-        scratch_end(scratch);
-    }
     DynamicTestWrite write = {
         .rela_only = true,
     };
@@ -3439,19 +3417,17 @@ static bool dynamic_test_smalls(const ExecutableTestDirectory* directory, const 
         BindTestLink* test = &program.test;
         dynamic_test_expect(&tally, program.bound, dynamic_test_small_names[which], which);
         bool outcome = program.bound;
-        // By every lane count, then by the exact twins with 1 and 8 lanes.
-        for (uint32_t l = 0; program.bound && program.refused != 0 && l < BUSTER_ARRAY_LENGTH(dynamic_test_lane_counts) + 2; l += 1)
+        // By every lane count.
+        for (uint32_t l = 0; program.bound && program.refused != 0 && l < BUSTER_ARRAY_LENGTH(dynamic_test_lane_counts); l += 1)
         {
-            const bool exact = l >= BUSTER_ARRAY_LENGTH(dynamic_test_lane_counts);
-            const uint32_t lanes = exact ? (l == BUSTER_ARRAY_LENGTH(dynamic_test_lane_counts) ? 1 : 8) : dynamic_test_lane_counts[l];
+            const uint32_t lanes = dynamic_test_lane_counts[l];
             DynamicTestWrite write = {
-                .exact = exact,
             };
             ExecutableResult result;
             unlink(path.pointer);
             const bool written = dynamic_test_write_with(&write, &test->link, &test->bind, runtime, path, lanes, &result);
             const bool refused = !written && result.error == EXECUTABLE_ERROR_RELOCATION && result.fixup == program.refused && access(path.pointer, F_OK) != 0;
-            dynamic_test_expect(&tally, refused, dynamic_test_small_names[which], (exact ? 100 : 0) + lanes);
+            dynamic_test_expect(&tally, refused, dynamic_test_small_names[which], lanes);
             outcome = outcome && refused;
         }
         if (program.bound && program.refused == 0)
@@ -3523,18 +3499,16 @@ static bool dynamic_test_shared_absolute_call(const ExecutableTestDirectory* dir
     dynamic_test_expect(&tally, built && dynamic_test_is_dynamic(&test.link, absolute, true), "the absolute symbol is preemptible", 0);
     char path_bytes[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
     const String8 path = executable_test_path(directory, "shared-absolute-call", path_bytes);
-    for (uint32_t l = 0; built && l < BUSTER_ARRAY_LENGTH(dynamic_test_lane_counts) + 2; l += 1)
+    for (uint32_t l = 0; built && l < BUSTER_ARRAY_LENGTH(dynamic_test_lane_counts); l += 1)
     {
-        const bool exact = l >= BUSTER_ARRAY_LENGTH(dynamic_test_lane_counts);
-        const uint32_t lanes = exact ? (l == BUSTER_ARRAY_LENGTH(dynamic_test_lane_counts) ? 1 : 8) : dynamic_test_lane_counts[l];
+        const uint32_t lanes = dynamic_test_lane_counts[l];
         DynamicTestWrite write = {
-            .exact = exact,
         };
         ExecutableResult result;
         unlink(path.pointer);
         const bool written = dynamic_test_write_with(&write, &test.link, &test.bind, runtime, path, lanes, &result);
         const bool clean = !written && result.error == EXECUTABLE_ERROR_RELOCATION && result.fixup == refused && access(path.pointer, F_OK) != 0;
-        dynamic_test_expect(&tally, clean, "the absolute CALL refused without output", (exact ? 100 : 0) + lanes);
+        dynamic_test_expect(&tally, clean, "the absolute CALL refused without output", lanes);
     }
     bind_test_link_end(&test);
     return dynamic_test_report(&tally);
@@ -3564,11 +3538,10 @@ static void dynamic_test_shared_replacement(DynamicTestTally* tally, const Execu
     dynamic_test_expect(tally, built && old_saved != 0 && new_saved != 0, "the libraries for replacement", 0);
     char path_bytes[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
     const String8 path = executable_test_path(directory, "shared-replacement", path_bytes);
-    for (uint32_t l = 0; old_saved != 0 && new_saved != 0 && l < BUSTER_ARRAY_LENGTH(dynamic_test_lane_counts) + 2; l += 1)
+    for (uint32_t l = 0; old_saved != 0 && new_saved != 0 && l < BUSTER_ARRAY_LENGTH(dynamic_test_lane_counts); l += 1)
     {
-        const bool exact = l >= BUSTER_ARRAY_LENGTH(dynamic_test_lane_counts);
-        const uint32_t lanes = exact ? (l == BUSTER_ARRAY_LENGTH(dynamic_test_lane_counts) ? 1 : 8) : dynamic_test_lane_counts[l];
-        const uint64_t index = (exact ? 100 : 0) + lanes;
+        const uint32_t lanes = dynamic_test_lane_counts[l];
+        const uint64_t index = lanes;
         Scratch iteration = scratch_begin(0);
         executable_test_restore(&old.program.link, old_saved);
         executable_test_restore(&bound->program.link, new_saved);
@@ -3587,7 +3560,6 @@ static void dynamic_test_shared_replacement(DynamicTestTally* tally, const Execu
         const bool mapped = mapping != MAP_FAILED && memcmp(mapping, before.pointer, before.length) == 0;
         dynamic_test_expect(tally, opened && mapped, "the old library's one-link inode mapped", index);
         DynamicTestWrite write = {
-            .exact = exact,
         };
         ExecutableResult result;
         const bool written = mapped && dynamic_test_write_with(&write, &bound->program.link, &bound->bind, runtime, path, lanes, &result);
@@ -4114,20 +4086,18 @@ static bool dynamic_test_shared_compiled(const ExecutableTestDirectory* director
         const String8 path = executable_test_path(directory, name, path_bytes);
         ExecutableResult result = { 0 };
         String8 bytes = { 0 };
-        // A refused one by every lane count, then by the exact twins with 1 and 8 lanes, each without an output.
+        // A refused one by every lane count, each without an output.
         bool refused = bound_ok;
-        for (uint32_t l = 0; bound_ok && library->refused && l < BUSTER_ARRAY_LENGTH(dynamic_test_lane_counts) + 2; l += 1)
+        for (uint32_t l = 0; bound_ok && library->refused && l < BUSTER_ARRAY_LENGTH(dynamic_test_lane_counts); l += 1)
         {
-            const bool exact = l >= BUSTER_ARRAY_LENGTH(dynamic_test_lane_counts);
-            const uint32_t lanes = exact ? (l == BUSTER_ARRAY_LENGTH(dynamic_test_lane_counts) ? 1 : 8) : dynamic_test_lane_counts[l];
+            const uint32_t lanes = dynamic_test_lane_counts[l];
             DynamicTestWrite write = {
-                .exact = exact,
             };
             ExecutableResult refusal;
             unlink(path.pointer);
             const bool written = dynamic_test_write_with(&write, &bound.link, &bound.bind, runtime, path, lanes, &refusal);
             const bool clean = !written && refusal.error == EXECUTABLE_ERROR_RELOCATION && refusal.fixup != 0 && access(path.pointer, F_OK) != 0;
-            dynamic_test_expect(&tally, clean, "refused by every lane count", (exact ? 100 : 0) + lanes);
+            dynamic_test_expect(&tally, clean, "refused by every lane count", lanes);
             refused = refused && clean;
         }
         const bool linked = bound_ok && !library->refused && dynamic_test_lanes(&tally, &bound.link, &bound.bind, runtime, path, library->name, &result, &bytes, directory->id_order, scratch.arena);
@@ -4193,7 +4163,7 @@ static bool dynamic_test_shared_compiled(const ExecutableTestDirectory* director
 // Against a dynamic PIE's runtime, test-bind's split-stack PIE too (bind_test_split_source with BUSTER_SPLIT_MAIN, #515):
 // morestack.o makes generic-morestack.o join, whose thread-locals it reaches by general- and local-dynamic accesses,
 // which the writer relaxes to local-exec (dynamic_test_tls), and which must be there; its main exits with status 0, and
-// the exact twins and a write without RELR must write and run it alike (dynamic_test_variants). Every import of
+// a write without RELR must write and run it alike (dynamic_test_variants). Every import of
 // libgcc_s.so.1's names must be strong, and binding must have made one. With `cross_check`, the bound link's objects as
 // dynamic_test_against_lld compares them.
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
@@ -4442,7 +4412,7 @@ static bool dynamic_test_section_bounds(const ExecutableTestDirectory* directory
 // Assembly with each general- and local-dynamic sequence, through the PLT and through the GOT (test-static's "tls"
 // program's), and general-dynamic accesses to libc.so.6's errno (an import, at GLIBC_PRIVATE), which relax to
 // initial-exec through its GOT slot, after main sets errno to 11 through __errno_location: 7 + 7 + 5 + 7 + 5 + 11 + 11,
-// status 53. Assembled by cc, imported as the program, bound, written by every lane count and by the exact twins,
+// status 53. Assembled by cc, imported as the program, bound, written by every lane count,
 // read back by the structure's rules (dynamic_test_tls among them: every access relaxed, and errno's to initial-exec),
 // compared with lld's link with `cross_check`, and run.
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
@@ -4627,8 +4597,8 @@ static bool dynamic_test_tls_program(const ExecutableTestDirectory* directory, c
 }
 #endif
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_DYNAMIC
-// What a dynamic PIE refuses of general- and local-dynamic TLS (#515's review), each by every lane count and by the
-// exact twins with 1 and 8 lanes, without an output:
+// What a dynamic PIE refuses of general- and local-dynamic TLS (#515's review), each by every lane count, without an
+// output:
 //   - the TLS fixture written without __tls_get_addr named (DynamicTestWrite.no_tls_get_addr, as a producer that
 //     doesn't name it, link-foreign's, writes one), whose general-dynamic access to errno, an import, the writer can't
 //     relax: EXECUTABLE_ERROR_RELOCATION at the first such fixup, from the relocations' check, before the patch;
@@ -4692,12 +4662,10 @@ static bool dynamic_test_tls_refusals(const ExecutableTestDirectory* directory, 
         dynamic_test_expect(&tally, !bound_ok || (relocation ? fixup != 0 : tls_get_addr != 0), "the fixup or the symbol to name", c);
         // A link link_check refuses is refused when link_check gave its error.
         bool outcome = bound_ok || (cases[c].link_error != LINK_ERROR_NONE && tally.failures == failures);
-        for (uint32_t l = 0; bound_ok && l < BUSTER_ARRAY_LENGTH(dynamic_test_lane_counts) + 2; l += 1)
+        for (uint32_t l = 0; bound_ok && l < BUSTER_ARRAY_LENGTH(dynamic_test_lane_counts); l += 1)
         {
-            const bool exact = l >= BUSTER_ARRAY_LENGTH(dynamic_test_lane_counts);
-            const uint32_t lanes = exact ? (l == BUSTER_ARRAY_LENGTH(dynamic_test_lane_counts) ? 1 : 8) : dynamic_test_lane_counts[l];
+            const uint32_t lanes = dynamic_test_lane_counts[l];
             DynamicTestWrite write = {
-                .exact = exact,
                 .no_tls_get_addr = cases[c].no_tls_get_addr,
             };
             ExecutableResult result = { 0 };
@@ -4705,7 +4673,7 @@ static bool dynamic_test_tls_refusals(const ExecutableTestDirectory* directory, 
             const bool written = dynamic_test_write_with(&write, &bound.link, &bound.bind, runtime, path, lanes, &result);
             const bool named = relocation ? result.fixup == fixup : result.symbol == tls_get_addr;
             const bool refused = !written && result.error == cases[c].error && named && access(path.pointer, F_OK) != 0;
-            dynamic_test_expect(&tally, refused, cases[c].name, (exact ? 100 : 0) + lanes);
+            dynamic_test_expect(&tally, refused, cases[c].name, lanes);
             if (!refused)
             {
                 executable_test_print_failure(cases[c].name, &result);
