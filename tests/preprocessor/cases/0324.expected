@@ -1,0 +1,3 @@
+
+a__VA_OPT__(b) # __VA_OPT__(c)
+__VA_OPT__ ( )

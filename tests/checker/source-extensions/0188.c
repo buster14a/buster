@@ -1,0 +1,1 @@
+int f(void) { extern int x=1; return x; }

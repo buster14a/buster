@@ -5,8 +5,8 @@
 // predecessor-reading workspace, and retain only its live, simplified phis. Original READs of other locals remain
 // symbolic until all locals have been assembled; resolving them earlier makes cross-local cycles order-dependent.
 // Storage is O(instructions + blocks + edges + locals + retained phis/operands), including provisional workspace.
-// ssa_bounded_rename uses the dense constructor's segmented prefix operation on contiguous groups of actual accesses;
-// its scalar twin has exactly the same access order. Neither path enumerates the blocks times locals product.
+// ssa_bounded_rename finds each read's preceding write with a 16-lane prefix maximum over contiguous groups of actual
+// accesses. Nothing enumerates the blocks times locals product.
 
 typedef struct SsaBoundedPart SsaBoundedPart;
 struct SsaBoundedPart
@@ -99,9 +99,8 @@ static SsaError ssa_bounded_accesses(const SsaWork* work, SsaBounded* bounded, b
 // A segment contains one local in one block, in original instruction order. Its first WRITE makes the entry value
 // irrelevant; an exposed READ requests that value once. The prefix maximum selects the last preceding WRITE for
 // every lane, and masked tails never load beyond the original columns or the local's access group.
-static SsaError ssa_bounded_rename(SsaWork* work, const uint32_t* accesses, uint32_t begin, uint32_t end, SsaReadFrame* stack, bool vector)
+static SsaError ssa_bounded_rename(SsaWork* work, const uint32_t* accesses, uint32_t begin, uint32_t end, SsaReadFrame* stack)
 {
-    (void)vector;
     const SsaInput* input = work->input;
     const uint8_t* kinds = input->kinds;
     const uint32_t* operands = input->operands;
@@ -117,7 +116,7 @@ static SsaError ssa_bounded_rename(SsaWork* work, const uint32_t* accesses, uint
             limit += 1;
         }
         uint32_t current = kinds[accesses[first]] == BUSTER_SSA_READ ? ssa_read_entry(work, block, 0, stack) : BUSTER_SSA_NONE;
-        if (vector && work->construction_error == SSA_OK)
+        if (work->construction_error == SSA_OK)
         {
             const __m512i positions = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
             _Alignas(64) uint32_t written[16];
@@ -151,21 +150,6 @@ static SsaError ssa_bounded_rename(SsaWork* work, const uint32_t* accesses, uint
                 }
                 current = resolved[count - 1];
                 first += count;
-            }
-        }
-        else
-        {
-            while (first < limit && work->construction_error == SSA_OK)
-            {
-                const uint32_t i = accesses[first++];
-                if (kinds[i] == BUSTER_SSA_WRITE)
-                {
-                    current = operands[i];
-                }
-                else
-                {
-                    aliases[i] = current;
-                }
             }
         }
     }
@@ -342,7 +326,7 @@ static SsaError ssa_bounded_assemble(SsaWork* work, const SsaBounded* bounded)
     return error;
 }
 
-static SsaError ssa_construct_bounded(SsaWork* work, bool vector)
+static SsaError ssa_construct_bounded(SsaWork* work)
 {
     const SsaInput* input = work->input;
     const uint32_t blocks = input->block_count;
@@ -410,7 +394,7 @@ static SsaError ssa_construct_bounded(SsaWork* work, bool vector)
                     last[instruction_blocks[i]] = operands[i];
                 }
             }
-            error = ssa_bounded_rename(&local_work, accesses, begin, end, frames, BUSTER_VECTOR_PATH(vector));
+            error = ssa_bounded_rename(&local_work, accesses, begin, end, frames);
             if (error == SSA_OK)
             {
                 const uint64_t mark = work->scratch->length;

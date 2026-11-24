@@ -8,7 +8,7 @@
 // operand, or the value live into a block that doesn't follow in the layout. f(p0, p1) defines 7 in its entry, which
 // branches on p0's low bit to a block where nine values live at once with few registers, which takes 7 out of its
 // register to recompute it for its last use there, and to the join, whose phi takes 7 from the entry's edge: the move
-// along that edge reads 7's first register. Natively, by both paths, with and without rematerialization and with
+// along that edge reads 7's first register. Natively, with and without rematerialization and with
 // every register and with three, f returns 7 for an even p0 and the block's sum for an odd one.
 
 #define BUSTER_TIER1_DROPPED_VALUES 9u
@@ -95,7 +95,7 @@ static __attribute__((no_sanitize("function"))) uint64_t tier1_dropped_call(cons
     return function(p0, p1);
 }
 
-static void tier1_dropped_compile(Tier1EmitTest* test, bool vector, bool rematerialize, uint32_t register_mask, uint32_t* dropped)
+static void tier1_dropped_compile(Tier1EmitTest* test, bool rematerialize, uint32_t register_mask, uint32_t* dropped)
 {
     IrFunction function;
     const bool created = tier1_dropped_function(&test->input, &function);
@@ -107,7 +107,7 @@ static void tier1_dropped_compile(Tier1EmitTest* test, bool vector, bool remater
     uint32_t node = BUSTER_IR_NONE;
     const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
     tier1_emit_test_expect(test, planned, "the dropped definition's fixture selects");
-    const Tier1EmitOptions options = { .register_mask = register_mask, .vector = vector, .rematerialize = rematerialize, .certify = true };
+    const Tier1EmitOptions options = { .register_mask = register_mask, .rematerialize = rematerialize, .certify = true };
     Tier1EmitResult emitted;
     const Tier1EmitError error = planned ? tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
     tier1_emit_test_expect(test, error == TIER1_EMIT_OK, "the dropped definition's fixture emits through the CFG consumer");
@@ -118,7 +118,7 @@ static void tier1_dropped_compile(Tier1EmitTest* test, bool vector, bool remater
         uint64_t bytes = 0;
         if (tier1_emit_test_load(test, &emitted.code, &executable, &bytes))
         {
-            uint64_t random = UINT64_C(0x510e527fade682d1) ^ register_mask ^ (vector ? 1 : 0) ^ (rematerialize ? 2 : 0);
+            uint64_t random = UINT64_C(0x510e527fade682d0) ^ register_mask ^ (rematerialize ? 2 : 0);
             for (uint32_t sample = 0; sample < 32; sample += 1)
             {
                 const uint64_t p0 = (sample & 1) != 0 ? tier1_emit_test_random(&random) | 1 : tier1_emit_test_random(&random) & ~UINT64_C(1);
@@ -129,7 +129,7 @@ static void tier1_dropped_compile(Tier1EmitTest* test, bool vector, bool remater
                 const uint64_t expected = tier1_dropped_oracle(p0, p1);
                 if (actual != expected && test->failures < 20)
                 {
-                    fprintf(stderr, "  dropped vector=%u remat=%u mask=%x p0=%016" PRIx64 " actual=%016" PRIx64 " expected=%016" PRIx64 "\n", vector, rematerialize, register_mask, p0, actual, expected);
+                    fprintf(stderr, "  dropped remat=%u mask=%x p0=%016" PRIx64 " actual=%016" PRIx64 " expected=%016" PRIx64 "\n", rematerialize, register_mask, p0, actual, expected);
                 }
                 tier1_emit_test_expect(test, actual == expected, "an edge that reads a recomputed value's register finds its definition");
             }
@@ -202,7 +202,7 @@ static uint64_t tier1_bare_oracle(uint64_t p0, uint64_t p1)
     return (sum & 1) != 0 ? UINT64_C(0x123456789abcdef1) : sum;
 }
 
-static void tier1_bare_compile(Tier1EmitTest* test, bool vector, uint32_t register_mask, uint32_t* dropped)
+static void tier1_bare_compile(Tier1EmitTest* test, uint32_t register_mask, uint32_t* dropped)
 {
     IrFunction function;
     const bool created = tier1_bare_function(&test->input, &function);
@@ -214,7 +214,7 @@ static void tier1_bare_compile(Tier1EmitTest* test, bool vector, uint32_t regist
     uint32_t node = BUSTER_IR_NONE;
     const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
     tier1_emit_test_expect(test, planned, "the registerless definition's fixture selects");
-    const Tier1EmitOptions options = { .register_mask = register_mask, .vector = vector, .rematerialize = true, .certify = true };
+    const Tier1EmitOptions options = { .register_mask = register_mask, .rematerialize = true, .certify = true };
     Tier1EmitResult emitted;
     const Tier1EmitError error = planned ? tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
     tier1_emit_test_expect(test, error == TIER1_EMIT_OK, "a recomputed definition with no free register emits through the CFG consumer");
@@ -226,7 +226,7 @@ static void tier1_bare_compile(Tier1EmitTest* test, bool vector, uint32_t regist
         uint64_t bytes = 0;
         if (tier1_emit_test_load(test, &emitted.code, &executable, &bytes))
         {
-            uint64_t random = UINT64_C(0x9b05688c2b3e6c1f) ^ register_mask ^ (vector ? 1 : 0);
+            uint64_t random = UINT64_C(0x9b05688c2b3e6c1e) ^ register_mask;
             for (uint32_t sample = 0; sample < 32; sample += 1)
             {
                 const uint64_t p0 = tier1_emit_test_random(&random);
@@ -235,7 +235,7 @@ static void tier1_bare_compile(Tier1EmitTest* test, bool vector, uint32_t regist
                 const uint64_t expected = tier1_bare_oracle(p0, p1);
                 if (actual != expected && test->failures < 20)
                 {
-                    fprintf(stderr, "  bare vector=%u mask=%x p0=%016" PRIx64 " p1=%016" PRIx64 " actual=%016" PRIx64 " expected=%016" PRIx64 "\n", vector, register_mask, p0, p1, actual, expected);
+                    fprintf(stderr, "  bare mask=%x p0=%016" PRIx64 " p1=%016" PRIx64 " actual=%016" PRIx64 " expected=%016" PRIx64 "\n", register_mask, p0, p1, actual, expected);
                 }
                 tier1_emit_test_expect(test, actual == expected, "a recomputed definition left without a register is recomputed where it is read");
             }
@@ -324,7 +324,7 @@ static uint64_t tier1_rest_oracle(uint64_t p0, uint64_t p1)
     return s;
 }
 
-static void tier1_rest_compile(Tier1EmitTest* test, bool vector, uint32_t register_mask, uint32_t* dropped)
+static void tier1_rest_compile(Tier1EmitTest* test, uint32_t register_mask, uint32_t* dropped)
 {
     IrFunction function;
     const bool created = tier1_rest_function(&test->input, &function);
@@ -336,7 +336,7 @@ static void tier1_rest_compile(Tier1EmitTest* test, bool vector, uint32_t regist
     uint32_t node = BUSTER_IR_NONE;
     const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
     tier1_emit_test_expect(test, planned, "the resting loop's fixture selects");
-    const Tier1EmitOptions options = { .register_mask = register_mask, .vector = vector, .rematerialize = true, .certify = true };
+    const Tier1EmitOptions options = { .register_mask = register_mask, .rematerialize = true, .certify = true };
     Tier1EmitResult emitted;
     const Tier1EmitError error = planned ? tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node) : TIER1_EMIT_INVALID;
     tier1_emit_test_expect(test, error == TIER1_EMIT_OK, "the resting loop's fixture emits through the CFG consumer");
@@ -348,7 +348,7 @@ static void tier1_rest_compile(Tier1EmitTest* test, bool vector, uint32_t regist
         uint64_t bytes = 0;
         if (tier1_emit_test_load(test, &emitted.code, &executable, &bytes))
         {
-            uint64_t random = UINT64_C(0x1f83d9abfb41bd6b) ^ register_mask ^ (vector ? 1 : 0);
+            uint64_t random = UINT64_C(0x1f83d9abfb41bd6a) ^ register_mask;
             for (uint32_t sample = 0; sample < 32; sample += 1)
             {
                 const uint64_t p0 = tier1_emit_test_random(&random);
@@ -357,7 +357,7 @@ static void tier1_rest_compile(Tier1EmitTest* test, bool vector, uint32_t regist
                 const uint64_t expected = tier1_rest_oracle(p0, p1);
                 if (actual != expected && test->failures < 20)
                 {
-                    fprintf(stderr, "  rest vector=%u mask=%x p0=%016" PRIx64 " p1=%016" PRIx64 " actual=%016" PRIx64 " expected=%016" PRIx64 "\n", vector, register_mask, p0, p1, actual, expected);
+                    fprintf(stderr, "  rest mask=%x p0=%016" PRIx64 " p1=%016" PRIx64 " actual=%016" PRIx64 " expected=%016" PRIx64 "\n", register_mask, p0, p1, actual, expected);
                 }
                 tier1_emit_test_expect(test, actual == expected, "a loop whose recipe rests at its header computes its value");
             }
@@ -376,21 +376,15 @@ static void tier1_dropped_tests(Tier1EmitTest* test)
 {
     const uint32_t few = (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI);
     uint32_t dropped = 0;
-    for (uint32_t variant = 0; variant < 8; variant += 1)
+    for (uint32_t variant = 0; variant < 4; variant += 1)
     {
-        tier1_dropped_compile(test, (variant & 1) != 0, (variant & 2) != 0, (variant & 4) != 0 ? few : tier1_liveness_register_mask(), &dropped);
+        tier1_dropped_compile(test, (variant & 1) != 0, (variant & 2) != 0 ? few : tier1_liveness_register_mask(), &dropped);
     }
     uint32_t bare = 0;
-    for (uint32_t variant = 0; variant < 2; variant += 1)
-    {
-        tier1_bare_compile(test, variant != 0, few, &bare);
-    }
-    tier1_emit_test_expect(test, bare >= 2, "a recomputed definition with no free register is left out on both paths");
+    tier1_bare_compile(test, few, &bare);
+    tier1_emit_test_expect(test, bare >= 1, "a recomputed definition with no free register is left out");
     uint32_t rested = 0;
-    for (uint32_t variant = 0; variant < 2; variant += 1)
-    {
-        tier1_rest_compile(test, variant != 0, few | (1u << X86_REGISTER_RCX), &rested);
-    }
-    tier1_emit_test_expect(test, rested == 2, "a definition whose successors' ranges rest is left out on both paths");
+    tier1_rest_compile(test, few | (1u << X86_REGISTER_RCX), &rested);
+    tier1_emit_test_expect(test, rested == 1, "a definition whose successors' ranges rest is left out");
     printf("tier1 dropped definitions: %u left out over the fixture's compiles, %u with no register, %u before a resting loop\n", dropped, bare, rested);
 }

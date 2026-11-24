@@ -14,7 +14,7 @@ Its command line is unchanged:
 
 For each function that the source producer prepares, the existing scalar and
 vector typed-stream lowerings must agree. The command prints and parses the
-lowered form, the vector-promoted SSA form, and the scalar-promoted SSA form.
+lowered form and the promoted SSA form.
 Each representation goes through **both** text parser paths. Every parse must
 consume the entire printed function, pass the parser's full verifier including
 dominance, and reproduce the same canonical bytes when printed again.
@@ -37,7 +37,7 @@ either; their presence is governed by `parameter_passed` and `variadic`.
 A round-trip failure identifies the source file, function, representation, stage
 and parser diagnostic. `text_forms` counts representations attempted, each through
 both parser paths; `text_failed` counts failed representations. A nonzero failure
-count makes the command fail. On a completely accepted run, `text_forms` is three
+count makes the command fail. On a completely accepted run, `text_forms` is two
 times the function count and `text_failed` is zero.
 
 ## Checking the checker

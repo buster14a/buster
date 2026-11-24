@@ -309,7 +309,7 @@ static int run_builtin_atomic_helper_tests(int argc, char** argv)
         if (valid)
         {
             valid = cbuiltin_atomic_test_expect(&test, native.direct[0][i].byte_count == native.direct[1][i].byte_count &&
-                memcmp(native.direct[0][i].entry, native.direct[1][i].entry, native.direct[0][i].byte_count) == 0, "scalar and vector helper bytes", i);
+                memcmp(native.direct[0][i].entry, native.direct[1][i].entry, native.direct[0][i].byte_count) == 0, "both mappings' helper bytes", i);
         }
         if (valid && (load || store))
         {
@@ -322,7 +322,7 @@ static int run_builtin_atomic_helper_tests(int argc, char** argv)
             if (valid)
             {
                 valid = cbuiltin_atomic_test_expect(&test, programs[0].byte_count == programs[1].byte_count && memcmp(programs[0].entry, programs[1].entry, programs[0].byte_count) == 0,
-                    "scalar and vector Tier 0 caller bytes with helper fixup", i);
+                    "the emitter's and the calls' memo's caller bytes with helper fixup", i);
             }
         }
     }
@@ -438,15 +438,20 @@ static bool cbuiltin_atomic_test_caller(CBuiltinAtomicHelperTest* test, Arena* a
     };
     const Tier0Check checked = tier0_validate(&function);
     bool result = cbuiltin_atomic_test_expect(test, checked.error == TIER0_OK, checked.rule != NULL ? checked.rule : "Tier 0 caller validation", item);
+    // Path 0 compiles with an empty table of calls, whose call's records its emitter writes (tier0_emit_call); path 1
+    // with that table, which then holds them (the calls' memo, #2874): the two must make the same bytes.
+    const Tier0CallMemo thread_memo = tier0_call_memo_swap((Tier0CallMemo){ 0 });
     for (uint32_t path = 0; result && path < 2; path += 1)
     {
-        Tier0Code code = path == 0 ? tier0_compile_scalar(&function, arena) : tier0_compile(&function, arena);
+        Tier0Code code = tier0_compile(&function, arena);
         result = cbuiltin_atomic_test_expect(test, code.error == TIER0_OK && code.branch_count == 0 && code.reference_count == 1, "Tier 0 helper CALL compiled", item);
         if (result)
         {
             result = cbuiltin_atomic_test_map(test, helper, &code, programs + path, item);
         }
     }
+    Tier0CallMemo used = tier0_call_memo_swap(thread_memo);
+    arena_release(&used.arena);
     arena_pop_to(arena, mark);
     return result;
 }

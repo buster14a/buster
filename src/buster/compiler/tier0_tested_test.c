@@ -5,7 +5,7 @@
 // zero before the branch (a compare, CONST 0, NE or EQ, BRANCH_FALSE or BRANCH_TRUE), or tested twice (a negation, or a
 // macro's `!= 0`, first), must be the compare and its jump, with no setcc. For every compare, integer class of 4 and 8
 // bytes, way the compare takes its operands (both on the stack, a constant, a local, a local and a constant, two
-// locals), test or two tests and branch: both paths give the same records, no record makes the compare's value, the
+// locals), test or two tests and branch: the records are valid, no record makes the compare's value, the
 // compare's group ends in its own record, the entries between make none, and the branch's group is one record, the jump
 // of the right condition (the compare's for a branch taken where it holds, which BRANCH_TRUE is, turned by each EQ
 // among the tests; its opposite's otherwise). The same at every place across a 64-entry block's end, where the vector
@@ -95,8 +95,8 @@ static uint32_t tier0_test_tested_values(const Tier0Code* code)
     return values;
 }
 
-// A stream of `count` entries over f's two locals of `class`, compiled by both paths: whether it is valid, both compile
-// it and their code is the same; the vector path's code in `code`.
+// A stream of `count` entries over f's two locals of `class`, compiled: whether it is valid and compiles to valid
+// records; the code in `code`.
 static bool tier0_test_tested_compile(const Tier0TestEntry* entries, uint32_t count, uint32_t class, Arena* arena, Tier0Code* code)
 {
     static const AbiLocation parameters[2] = {
@@ -117,10 +117,8 @@ static bool tier0_test_tested_compile(const Tier0TestEntry* entries, uint32_t co
     function.parameters = tier0_class_floating(class) ? floating_parameters : parameters;
     function.entry_records = true;
     const Tier0Check check = tier0_validate(&function);
-    const Tier0Code scalar = tier0_compile_scalar(&function, arena);
     *code = tier0_compile(&function, arena);
-    return check.error == TIER0_OK && scalar.error == TIER0_OK && code->error == TIER0_OK && tier0_test_same_code(&scalar, code) && code->entry_records != 0 &&
-           x86_validate(code->records, code->count) == code->count;
+    return check.error == TIER0_OK && code->error == TIER0_OK && code->entry_records != 0 && x86_validate(code->records, code->count) == code->count;
 }
 
 // The records of entry e's group in `code`.
@@ -129,8 +127,8 @@ static uint32_t tier0_test_tested_records(const Tier0Code* code, uint32_t e)
     return code->entry_records[e + 1] - code->entry_records[e];
 }
 
-// One condition after `pad` entries: both paths give the same records, none makes the compare's value, the compare has
-// records of its own, the tests between none, and the branch's is the jump alone, taken as the tests and the branch say.
+// One condition after `pad` entries: valid records, none of which makes the compare's value, the compare has records of
+// its own, the tests between none, and the branch's is the jump alone, taken as the tests and the branch say.
 static bool tier0_test_tested_condition(Tier0TestTally* tally, Arena* arena, uint32_t kind, uint32_t class, uint32_t variant, uint32_t tests, bool inner_equal, bool equal,
                                         bool when, uint32_t pad)
 {
@@ -144,7 +142,7 @@ static bool tier0_test_tested_condition(Tier0TestTally* tally, Arena* arena, uin
     char name[160];
     snprintf(name, sizeof(name), "kind %u of class %u with %s, %s%s and BRANCH_%s after %u entries", kind, class, variants[variant],
              tests == 2 ? (inner_equal ? "EQ, " : "NE, ") : "", equal ? "EQ" : "NE", when ? "TRUE" : "FALSE", pad);
-    bool ready = tier0_test_expect(tally, tier0_test_tested_compile(entries, count, class, arena, &code), "tested compares", "%s: invalid, refused, or the paths differ", name);
+    bool ready = tier0_test_expect(tally, tier0_test_tested_compile(entries, count, class, arena, &code), "tested compares", "%s: invalid or refused", name);
     // The branch is taken where the compare holds for BRANCH_TRUE, turned by each EQ among the tests.
     const uint32_t cc = tier0_condition(kind, tier0_class_signed(class));
     const bool holds = when != (equal != (tests == 2 && inner_equal));

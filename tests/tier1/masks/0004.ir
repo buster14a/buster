@@ -1,0 +1,60 @@
+function (ptr) -> void {
+b0:
+  %0 = param.ptr 0
+  %1 = load.m8 %0 align=1
+  %2 = address.ptr %0 offset=1
+  %3 = load.m8 %2 align=1
+  %4 = address.ptr %0 offset=2
+  %5 = load.m16 %4 align=2
+  %6 = address.ptr %0 offset=4
+  %7 = load.m16 %6 align=2
+  %8 = address.ptr %0 offset=8
+  %9 = load.m32 %8 align=4
+  %10 = address.ptr %0 offset=12
+  %11 = load.m32 %10 align=4
+  %12 = address.ptr %0 offset=16
+  %13 = load.m64 %12 align=8
+  %14 = address.ptr %0 offset=24
+  %15 = load.m64 %14 align=8
+  %16 = address.ptr %0 offset=32
+  %17 = load.m64 %16 align=8
+  %18 = address.ptr %0 offset=40
+  %19 = load.m16 %18 align=2
+  %20 = xor.m8 %1, %3
+  %21 = and.m16 %5, %7
+  %22 = or.m32 %9, %11
+  %23 = xor.m64 %13, %15
+  %24 = and.m64 %23, %17
+  %25 = not.m16 %19
+  %26 = address.ptr %0 offset=128
+  %27 = store.void %26, %1 align=1
+  %28 = address.ptr %0 offset=129
+  %29 = store.void %28, %3 align=1
+  %30 = address.ptr %0 offset=130
+  %31 = store.void %30, %5 align=2
+  %32 = address.ptr %0 offset=132
+  %33 = store.void %32, %7 align=2
+  %34 = address.ptr %0 offset=136
+  %35 = store.void %34, %9 align=4
+  %36 = address.ptr %0 offset=140
+  %37 = store.void %36, %11 align=4
+  %38 = address.ptr %0 offset=144
+  %39 = store.void %38, %13 align=8
+  %40 = address.ptr %0 offset=152
+  %41 = store.void %40, %15 align=8
+  %42 = address.ptr %0 offset=160
+  %43 = store.void %42, %17 align=8
+  %44 = address.ptr %0 offset=168
+  %45 = store.void %44, %19 align=2
+  %46 = address.ptr %0 offset=170
+  %47 = store.void %46, %20 align=1
+  %48 = address.ptr %0 offset=172
+  %49 = store.void %48, %21 align=2
+  %50 = address.ptr %0 offset=176
+  %51 = store.void %50, %22 align=4
+  %52 = address.ptr %0 offset=184
+  %53 = store.void %52, %24 align=8
+  %54 = address.ptr %0 offset=192
+  %55 = store.void %54, %25 align=2
+  %56 = ret.void
+}

@@ -27,7 +27,7 @@ requirements. [Command index](README.md).
   the worklist path exceeded before the change.
   #1450's SIMD fixtures exercise constant lane folding against the lane model
   and interpreter, wide phi/bitcast propagation, exact-bit splats, GVN's complete
-  vector payload keys and LICM's integer-lane motion on both paths. A floating
+  vector payload keys and LICM's integer-lane motion. A floating
   lane folds exactly where the model gives the same bits under every rounding
   and under FTZ with DAZ (4,096 random lane pairs, and every lane fixture), the
   operation's row staying for its effects.
@@ -133,25 +133,38 @@ passes, and `-vectors` disables both restricted forms. The LICM implementation
 walks each eligible loop's own blocks and skips loops with no safe vector or
 mask value, and loops that hold a call (#2743: every vector register is
 caller-saved, so a value moved out of one is stored and reloaded around its
-calls). `test-ir-gvn` and `test-ir-licm` cover both host paths, the
-per-loop/whole-function LICM oracle, scalar neutrality, nested loops and calls;
+calls). `test-ir-gvn` covers both host paths, and `test-ir-licm` the walk's
+frozen digest (its whole-function oracle went in #2924), scalar neutrality,
+nested loops and calls;
 `test-checker-driver` checks the default and `-vectors` reports and native
 output on a C vector fixture. See [the Tier 1 guide](../../docs/tier1.md).
 
 ## Pressure-aware LICM and value numbering (#2719)
 
-`IrLicmOptions.pressure` (Tier 1's `+hoist` item, off by default, in functions
-with a loop and no vector or mask value) moves only what pays for the register it
-holds through the loop: nothing out of a loop that holds a call, free values
-(constants, addresses, casts of no bits) only as operands of a costly value
-that moves, no truth value, and at most a budget of costly general-register
-values. `IrGvnOptions.pressure` (`+numbering`, off by default, on the promoted
+`IrLicmOptions.pressure` (Tier 1's `hoist` item, on by default, in functions
+without a vector or mask value where `ir_licm_pressure_screen` finds a loop that
+may hold no call) moves only what pays for the register it holds through the
+loop: nothing out of a loop that holds a call, free values (constants,
+addresses, casts of no bits) only as operands of a costly value that moves, no
+truth value, and at most a budget of costly general-register values.
+`IrGvnOptions.pressure` (`+numbering`, off by default, on the promoted
 function) never merges a free value and merges a truth value only within its
-block. `test-ir-optimize`'s `licm-pressure`, `licm-pressure-call`,
-`licm-pressure-budget` and `gvn-pressure` pairs and `test-ir-licm`'s budget
-on random invariant chains check them; `test-checker-driver`'s passes fixture
-checks that `+hoist` and `+numbering` reach their passes. The rules and their
-measurements are in [the loop motion guide](../../docs/ir-loop-motion.md#the-pressure-policy-2719)
+block. Tier 1 runs both with `validated` (`IrOptimizeWork.validated`): their
+input comes verified from the passes before them, so their preparation builds
+its CFG without verifying it again, and LICM's under the policy builds no use
+lists for a function without an undef (`IrOptimizeWork.without_uses`).
+`test-ir-optimize`'s `licm-pressure`, `licm-pressure-call`,
+`licm-pressure-budget` and `gvn-pressure` pairs check the rules, and it runs
+every LICM and value-numbering pair with and without the verified input's
+preparation, which must give the same function; `test-ir-licm`'s budget on
+random invariant chains, its screen fixtures and the undef taint under the
+policy check the rest. On real C, `test-ir-source --passes`' `hoist` and
+`numbering` rows run each as Tier 1 does against the verifying preparation (the
+same function; where the screen passes a function over, the verifying LICM
+moves nothing), and `benchmark-ir-source --passes` times each once, as Tier 1
+runs it. `test-checker-driver`'s passes fixture checks that the default
+hoists, that `-hoist` doesn't, and that `+numbering` reaches its pass.
+The rules and their measurements are in [the loop motion guide](../../docs/ir-loop-motion.md#the-pressure-policy-2719)
 and [the value numbering guide](../../docs/ir-value-numbering.md#the-pressure-policy-2719).
 
 ## Loop unrolling (#2755)
@@ -320,8 +333,11 @@ forwarding. Tier 1 now takes them in three steps, all in
 - **The optimizer's identities** take what the eightbytes leave: an `and` of a
   zero extension and a mask that keeps its bits, a bitcast of a bitcast and a
   truncation of an extension back to the first value's type, and an `undef`
-  as zero (an `and` absorbed by it, an `or`, `xor` or `add` of it the other
-  operand), as Tier 1 selects it.
+  as zero where it is an operand: an `or`, `xor` or `add` of it is the other
+  operand, and SCCP folds an `and` of it to zero, as LLVM does. The `and`
+  isn't the `undef` itself (#3424): its other operand clears bits, and an
+  `undef` that reaches a phi has no definition, so the phi's register held
+  whatever it held, a struct field left zero among it.
 
 Tier 1 runs the widening SROA on every function with its own ABI records
 (`check_tier1_compile`, and `check_tier1_inline_expand` where the expansion

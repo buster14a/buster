@@ -12,8 +12,9 @@
 // A function may mark the row where its body starts (DebugFunction.prologue_end): DW_LNS_set_prologue_end before that
 // row, where gdb and lldb put a breakpoint on the function.
 // Four rows at a time: write fitting address/line deltas as special opcodes. For other deltas, spread the seven-bit
-// groups with vpmultishiftqb and compact each row's bytes into the line program. No per-row allocations. The
-// exact path independently writes each opcode and LEB128 value; tails use it too. All vector loads/stores are bounded.
+// groups with vpmultishiftqb and compact each row's bytes into the line program. No per-row allocations. The rows
+// the groups stop before (a function's last rows, its body's row and a row in another file) are written one at a time,
+// each opcode and LEB128 value alone. All vector loads/stores are bounded.
 //
 // The caller owns every slice and keeps input and output disjoint. No padding is read or written. Empty units are
 // valid. debug_write checks inputs and measures all sections before writing; on DEBUG_ERROR_CAPACITY it sets the
@@ -114,7 +115,6 @@ struct DebugPlan
     DebugUnit unit;
     uint64_t bases[BUSTER_DEBUG_SECTIONS];
     uint64_t sizes[BUSTER_DEBUG_SECTIONS];
-    bool exact;
 };
 
 typedef struct DebugWriter DebugWriter;
@@ -265,8 +265,12 @@ static void debug_rows_vector(DebugWriter* writer, __m128i offset, __m128i line)
     }
 }
 
-static void debug_line(const DebugUnit* unit, DebugWriter* writer, uint32_t* addresses, bool exact)
+// The line program into `output`. Its writer is a local copy, stored back at the end: the bytes it writes could alias
+// `output` itself, so writing through it would reload its pointer and size after every store.
+static void debug_line(const DebugUnit* unit, DebugWriter* output, uint32_t* addresses)
 {
+    DebugWriter local = *output;
+    DebugWriter* writer = &local;
     debug_integer(writer, 0, 4);
     debug_integer(writer, 5, 2);
     debug_integer(writer, 8, 1);
@@ -307,12 +311,12 @@ static void debug_line(const DebugUnit* unit, DebugWriter* writer, uint32_t* add
         uint32_t offset = 0;
         int32_t line = 1;
         uint32_t file = entry->file;
-        // The body's row, which the vector path's groups stop before and the exact path writes with its flag.
+        // The body's row, which the groups stop before, written alone with its flag.
         const uint32_t body = entry->prologue_end != 0 ? entry->prologue_end - 1 : UINT32_MAX;
         while (row < entry->row_count)
         {
-            // A row in another file than the row before's (DebugUnit.row_files) stops the groups too: the exact path writes
-            // DW_LNS_set_file before it.
+            // A row in another file than the row before's (DebugUnit.row_files) stops the groups too: DW_LNS_set_file goes
+            // before it.
             uint32_t change = row;
             while (unit->row_files != 0 && change < entry->row_count && unit->row_files[entry->first_row + change] == file)
             {
@@ -320,7 +324,7 @@ static void debug_line(const DebugUnit* unit, DebugWriter* writer, uint32_t* add
             }
             const uint32_t last = unit->row_files != 0 ? change : entry->row_count;
             const uint32_t stop = body >= row && body < last ? body : last;
-            for (; !exact && stop - row >= 4; row += 4)
+            for (; stop - row >= 4; row += 4)
             {
                 const uint32_t first = entry->first_row + row;
                 const __m128i offsets = _mm_loadu_si128((const __m128i*)(unit->offsets + first));
@@ -353,11 +357,12 @@ static void debug_line(const DebugUnit* unit, DebugWriter* writer, uint32_t* add
         debug_bytes(writer, end, sizeof(end));
     }
     debug_length(writer, 0, writer->size - 4);
+    *output = local;
 }
 
 // The unit's five sections, into `writers` (measured where they have no bytes), each function's line address into
 // `addresses` and the fields that point into the other sections into `fields` (DebugOutput's), unless they are null.
-static void debug_sections(const DebugUnit* unit, const uint64_t* bases, DebugWriter* writers, uint32_t* addresses, uint32_t* fields, bool exact)
+static void debug_sections(const DebugUnit* unit, const uint64_t* bases, DebugWriter* writers, uint32_t* addresses, uint32_t* fields)
 {
     // compile_unit: name/string, comp_dir/string, producer/string, language/data2, stmt_list/sec_offset,
     // addr_base/sec_offset, ranges/sec_offset; subprogram: name/string, low_pc/addrx, high_pc/data4,
@@ -367,7 +372,11 @@ static void debug_sections(const DebugUnit* unit, const uint64_t* bases, DebugWr
         2, 0x2e, 0, 3, 8, 0x11, 0x1b, 0x12, 6, 0x3a, 15, 0x3b, 15, 0, 0, 0,
     };
     debug_bytes(&writers[DEBUG_SECTION_ABBREV], abbreviations, sizeof(abbreviations));
-    DebugWriter* info = &writers[DEBUG_SECTION_INFO];
+    // Local copies of the writers, stored back at the end, as debug_line's.
+    DebugWriter info_local = writers[DEBUG_SECTION_INFO];
+    DebugWriter addr_local = writers[DEBUG_SECTION_ADDR];
+    DebugWriter ranges_local = writers[DEBUG_SECTION_RNGLISTS];
+    DebugWriter* info = &info_local;
     debug_integer(info, 0, 4);
     debug_integer(info, 5, 2);
     debug_integer(info, 1, 1); // DW_UT_compile
@@ -391,12 +400,12 @@ static void debug_sections(const DebugUnit* unit, const uint64_t* bases, DebugWr
         fields[DEBUG_SECTION_ADDR] = line_field + 4;
         fields[DEBUG_SECTION_RNGLISTS] = line_field + 8;
     }
-    DebugWriter* addr = &writers[DEBUG_SECTION_ADDR];
+    DebugWriter* addr = &addr_local;
     debug_integer(addr, 4 + 8ull * unit->function_count, 4);
     debug_integer(addr, 5, 2);
     debug_integer(addr, 8, 1);
     debug_integer(addr, 0, 1);
-    DebugWriter* ranges = &writers[DEBUG_SECTION_RNGLISTS];
+    DebugWriter* ranges = &ranges_local;
     debug_integer(ranges, 0, 4);
     debug_integer(ranges, 5, 2);
     debug_integer(ranges, 8, 1);
@@ -420,7 +429,10 @@ static void debug_sections(const DebugUnit* unit, const uint64_t* bases, DebugWr
     debug_integer(ranges, 0, 1);
     debug_length(info, 0, info->size - 4);
     debug_length(ranges, 0, ranges->size - 4);
-    debug_line(unit, &writers[DEBUG_SECTION_LINE], addresses, exact);
+    writers[DEBUG_SECTION_INFO] = info_local;
+    writers[DEBUG_SECTION_ADDR] = addr_local;
+    writers[DEBUG_SECTION_RNGLISTS] = ranges_local;
+    debug_line(unit, &writers[DEBUG_SECTION_LINE], addresses);
 }
 
 static bool debug_valid_string(String8 string)
@@ -457,7 +469,7 @@ static DebugError debug_validate(const DebugUnit* unit)
 }
 
 // Validate and size once, without changing the plan on failure. No output storage is needed yet.
-static DebugError debug_prepare(const DebugUnit* unit, const uint64_t* bases, DebugPlan* plan, bool exact)
+static DebugError debug_prepare(const DebugUnit* unit, const uint64_t* bases, DebugPlan* plan)
 {
     // Even the smallest encodings exceed DWARF32 at these counts. Check before traversing any supplied slices;
     // these bounds also keep the sizing pass's sums below uint64, including the largest permitted strings.
@@ -466,7 +478,7 @@ static DebugError debug_prepare(const DebugUnit* unit, const uint64_t* bases, De
     DebugWriter measured[BUSTER_DEBUG_SECTIONS] = { 0 };
     if (result == DEBUG_OK)
     {
-        debug_sections(unit, bases, measured, 0, 0, exact);
+        debug_sections(unit, bases, measured, 0, 0);
         for (uint32_t section = 0; section < BUSTER_DEBUG_SECTIONS; section += 1)
         {
             // The contribution ends within DWARF32's offsets, from its base.
@@ -480,7 +492,6 @@ static DebugError debug_prepare(const DebugUnit* unit, const uint64_t* bases, De
     {
         *plan = (DebugPlan){
             .unit = *unit,
-            .exact = exact,
         };
         for (uint32_t section = 0; section < BUSTER_DEBUG_SECTIONS; section += 1)
         {
@@ -518,16 +529,16 @@ static DebugError debug_emit(const DebugPlan* plan, DebugOutput* output)
         {
             writers[section].bytes = output->sections[section].bytes;
         }
-        debug_sections(&plan->unit, plan->bases, writers, output->line_addresses, output->fields, plan->exact);
+        debug_sections(&plan->unit, plan->bases, writers, output->line_addresses, output->fields);
     }
     return result;
 }
 
 // Defensive entry point for callers without an immutable preparation/emission handoff.
-static DebugError debug_write(const DebugUnit* unit, DebugOutput* output, bool exact)
+static DebugError debug_write(const DebugUnit* unit, DebugOutput* output)
 {
     DebugPlan plan;
-    DebugError result = debug_prepare(unit, output->bases, &plan, exact);
+    DebugError result = debug_prepare(unit, output->bases, &plan);
     if (result == DEBUG_OK)
     {
         result = debug_emit(&plan, output);

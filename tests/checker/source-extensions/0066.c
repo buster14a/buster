@@ -1,0 +1,1 @@
+typedef typedef unsigned unsigned I; extern extern signed signed int x; static static short short y; _Thread_local _Thread_local int z; _Complex _Complex double c; _Atomic _Atomic int a; I f(I n){return n+(unsigned unsigned)3+y;}

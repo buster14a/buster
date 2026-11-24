@@ -432,49 +432,45 @@ static void tier1_terminal_supported(Tier1EmitTest* test)
     {
         IrFunction function;
         const bool ready = tier1_terminal_fixture(test, (Tier1TerminalShape)shape, &function);
-        tier1_emit_test_expect(test, ready && ir_verify(&function, &test->scratch, 0).error == IR_OK, "original terminal fixture is valid semantic IR on both paths");
-        for (uint32_t vector = 0; ready && vector < 2; vector += 1)
+        tier1_emit_test_expect(test, ready && ir_verify(&function, &test->scratch, 0).error == IR_OK, "original terminal fixture is valid semantic IR");
+        for (uint32_t frame = 0; ready && frame < 2; frame += 1)
         {
-            for (uint32_t frame = 0; frame < 2; frame += 1)
+            IrDominance dominance;
+            const bool derived = tier1_terminal_dominance(test, &function, &dominance);
+            tier1_emit_test_expect(test, derived, "terminal fixture derives its real CFG and dominance before cross-block selection");
+            Tier1SelectPlan plan;
+            uint32_t node = BUSTER_IR_NONE;
+            const Tier1SelectError selected = derived ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &node) : TIER1_SELECT_ERROR_MEMORY;
+            tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "terminal fixture selects");
+            if (selected != TIER1_SELECT_OK)
             {
-                IrDominance dominance;
-                const bool derived = tier1_terminal_dominance(test, &function, &dominance);
-                tier1_emit_test_expect(test, derived, "terminal fixture derives its real CFG and dominance before cross-block selection");
-                Tier1SelectPlan plan;
-                uint32_t node = BUSTER_IR_NONE;
-                const Tier1SelectError selected = derived ? tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &node) : TIER1_SELECT_ERROR_MEMORY;
-                tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "terminal fixture selects on the scalar/vector path");
-                if (selected != TIER1_SELECT_OK)
-                {
-                    fprintf(stderr, "  terminal shape=%u vector=%u frame=%u selection=%u node=%u\n", shape, vector, frame, selected, node);
-                }
-                if (selected == TIER1_SELECT_OK)
-                {
-                    const Tier1EmitOptions options = {
-                        .certify = true,
-                        .register_mask = tier1_liveness_register_mask(),
-                        .frame_flags = frame ? BUSTER_TIER1_FRAME_KEEP_POINTER : 0,
-                        .vector = vector != 0,
-                        .rematerialize = true,
-                    };
-                    const uint64_t output_mark = test->output.length;
-                    const uint64_t scratch_mark = test->scratch.length;
-                    Tier1EmitResult emitted;
-                    const Tier1EmitError error = tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node);
-                    tier1_emit_test_expect(test, error == TIER1_EMIT_OK && test->scratch.length == scratch_mark, "terminal emission succeeds and restores scratch");
-                    if (error == TIER1_EMIT_OK)
-                    {
-                        const uint64_t required = test->output.length;
-                        tier1_emit_test_expect(test, tier1_allocation_verify(&emitted.prepared.allocation, &emitted.allocation), "terminal allocation satisfies independent interference checks");
-                        tier1_emit_test_expect(test, emitted.frame.frame_pointer == (frame != 0) && (shape < TIER1_TERMINAL_RETURNING_HELPER || !emitted.frame.red_zone), "terminal variants realize the requested frame pointer and protect calls from the red zone");
-                        tier1_terminal_execute(test, (Tier1TerminalShape)shape, &function, &emitted);
-                        arena_pop_to(&test->output, output_mark);
-                        const uint32_t denied = shape == TIER1_TERMINAL_RETURN ? X86_FORM_RET : shape < TIER1_TERMINAL_SINK ? X86_FORM_UD2 : shape == TIER1_TERMINAL_TRAP_HELPER ? X86_FORM_CALL_REL32 : X86_FORM_JMP_REL8;
-                        tier1_terminal_failures(test, &plan, &options, required, denied);
-                    }
-                }
-                arena_pop_to(&test->output, 0);
+                fprintf(stderr, "  terminal shape=%u frame=%u selection=%u node=%u\n", shape, frame, selected, node);
             }
+            if (selected == TIER1_SELECT_OK)
+            {
+                const Tier1EmitOptions options = {
+                    .certify = true,
+                    .register_mask = tier1_liveness_register_mask(),
+                    .frame_flags = frame ? BUSTER_TIER1_FRAME_KEEP_POINTER : 0,
+                    .rematerialize = true,
+                };
+                const uint64_t output_mark = test->output.length;
+                const uint64_t scratch_mark = test->scratch.length;
+                Tier1EmitResult emitted;
+                const Tier1EmitError error = tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node);
+                tier1_emit_test_expect(test, error == TIER1_EMIT_OK && test->scratch.length == scratch_mark, "terminal emission succeeds and restores scratch");
+                if (error == TIER1_EMIT_OK)
+                {
+                    const uint64_t required = test->output.length;
+                    tier1_emit_test_expect(test, tier1_allocation_verify(&emitted.prepared.allocation, &emitted.allocation), "terminal allocation satisfies independent interference checks");
+                    tier1_emit_test_expect(test, emitted.frame.frame_pointer == (frame != 0) && (shape < TIER1_TERMINAL_RETURNING_HELPER || !emitted.frame.red_zone), "terminal variants realize the requested frame pointer and protect calls from the red zone");
+                    tier1_terminal_execute(test, (Tier1TerminalShape)shape, &function, &emitted);
+                    arena_pop_to(&test->output, output_mark);
+                    const uint32_t denied = shape == TIER1_TERMINAL_RETURN ? X86_FORM_RET : shape < TIER1_TERMINAL_SINK ? X86_FORM_UD2 : shape == TIER1_TERMINAL_TRAP_HELPER ? X86_FORM_CALL_REL32 : X86_FORM_JMP_REL8;
+                    tier1_terminal_failures(test, &plan, &options, required, denied);
+                }
+            }
+            arena_pop_to(&test->output, 0);
         }
         arena_pop_to(&test->input, 0);
     }
@@ -546,7 +542,7 @@ static void tier1_terminal_general(Tier1EmitTest* test)
         IrFunction function;
         const bool ready = tier1_terminal_refusal_fixture(test, shape, &function);
         tier1_emit_test_expect(test, ready && ir_verify(&function, &test->scratch, 0).error == IR_OK, "nonempty loop, conditional or phi fixture is valid semantic IR");
-        for (uint32_t vector = 0; ready && vector < 2; vector += 1)
+        if (ready)
         {
             IrDominance dominance;
             const bool derived = tier1_terminal_dominance(test, &function, &dominance);
@@ -558,7 +554,7 @@ static void tier1_terminal_general(Tier1EmitTest* test)
             tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "valid nonempty loops, conditionals and phis select");
             if (selected != TIER1_SELECT_OK)
             {
-                fprintf(stderr, "  terminal general shape=%u vector=%u frame=n/a selection=%u node=%u\n", shape, vector, selected, node);
+                fprintf(stderr, "  terminal general shape=%u frame=n/a selection=%u node=%u\n", shape, selected, node);
             }
             for (uint32_t frame = 0; selected == TIER1_SELECT_OK && frame < 2; frame += 1)
             {
@@ -568,7 +564,6 @@ static void tier1_terminal_general(Tier1EmitTest* test)
                     .certify = true,
                     .register_mask = tier1_liveness_register_mask(),
                     .frame_flags = frame ? BUSTER_TIER1_FRAME_KEEP_POINTER : 0,
-                    .vector = vector != 0,
                 };
                 Tier1EmitResult result;
                 const Tier1EmitError error = tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &result, &node);

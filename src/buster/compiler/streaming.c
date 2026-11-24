@@ -733,7 +733,7 @@ static StreamError stream_debug_unit(const StreamCode* code, uint32_t first, uin
         .row_count = count,
     };
     DebugPlan plan;
-    DebugError written = error == STREAM_OK ? debug_prepare(&unit, output->bases, &plan, false) : DEBUG_ERROR_INPUT;
+    DebugError written = error == STREAM_OK ? debug_prepare(&unit, output->bases, &plan) : DEBUG_ERROR_INPUT;
     // Each section's reservation commits exactly the unit's measured bytes before emit writes into it (stream_write's
     // debug_arenas; the direct path's destinations are pushes already).
     for (uint32_t section = 0; written == DEBUG_OK && code->debug_arenas != 0 && section < BUSTER_DEBUG_SECTIONS; section += 1)

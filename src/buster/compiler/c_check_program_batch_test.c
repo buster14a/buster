@@ -158,7 +158,7 @@ static void check_test_program_batch(CheckTest* test)
     ready = ready && types.table.types.count < BUSTER_ARRAY_LENGTH(type_classes);
     if (ready)
     {
-        check_lower_classify_types_scalar(&types.table, types.table.types.count, type_classes, type_facts);
+        check_lower_classify_types(&types.table, types.table.types.count, type_classes, type_facts);
         for (uint32_t i = 0; i < types.table.types.count; i += 1)
         {
             type_templates[i] = type_classes[i] | (uint32_t)type_facts[i] << 8;

@@ -2,7 +2,7 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // Independent native fixtures for variadic definitions (#789), included after tier1_labels_test.c: the functions of
-// tier1_select_test_variadic_function through tier1_emit_function, which gives them to the CFG consumer, by both paths,
+// tier1_select_test_variadic_function through tier1_emit_function, which gives them to the CFG consumer,
 // with constants rematerialized and not, with every register and with four, and with and without a kept frame pointer.
 // Each is called natively as C calls a variadic function, uint64_t (*)(uint64_t, ...): n and five unnamed integers in
 // rdi to r9, two more on the stack and, for shapes 1 and 2, a double in xmm0 with al 1, which the prologue saves in the
@@ -82,8 +82,8 @@ static bool tier1_variadic_overflow(const Tier1EmitResult* emitted)
     return found == 1;
 }
 
-// One compile by one path and one set of options, its prologue checked and its code run on the samples.
-static void tier1_variadic_compile(Tier1EmitTest* test, uint32_t shape, bool vector, bool rematerialize, uint32_t register_mask, bool keep_pointer)
+// One compile by one set of options, its prologue checked and its code run on the samples.
+static void tier1_variadic_compile(Tier1EmitTest* test, uint32_t shape, bool rematerialize, uint32_t register_mask, bool keep_pointer)
 {
     IrFunction function;
     const bool created = tier1_select_test_variadic_function(&test->input, shape, false, &function);
@@ -94,7 +94,6 @@ static void tier1_variadic_compile(Tier1EmitTest* test, uint32_t shape, bool vec
     const Tier1EmitOptions options = {
         .certify = true,
         .register_mask = register_mask,
-        .vector = vector,
         .rematerialize = rematerialize,
         .frame_flags = keep_pointer ? BUSTER_TIER1_FRAME_KEEP_POINTER : 0,
         .symbol_count = function.symbol_count,
@@ -105,7 +104,7 @@ static void tier1_variadic_compile(Tier1EmitTest* test, uint32_t shape, bool vec
     tier1_emit_test_expect(test, error == TIER1_EMIT_OK && test->scratch.length == scratch_mark, "the variadic fixture emits through the CFG consumer");
     if (error != TIER1_EMIT_OK && planned && test->failures < 20)
     {
-        fprintf(stderr, "  variadic emission error=%u node=%u shape=%u vector=%u remat=%u mask=%x pointer=%u\n", error, node, shape, vector, rematerialize, register_mask, keep_pointer);
+        fprintf(stderr, "  variadic emission error=%u node=%u shape=%u remat=%u mask=%x pointer=%u\n", error, node, shape, rematerialize, register_mask, keep_pointer);
     }
     if (error == TIER1_EMIT_OK)
     {
@@ -117,7 +116,7 @@ static void tier1_variadic_compile(Tier1EmitTest* test, uint32_t shape, bool vec
         uint64_t bytes = 0;
         if (tier1_emit_test_load(test, &emitted.code, &executable, &bytes))
         {
-            uint64_t random = UINT64_C(0x7a3c19e5d2b84f60) ^ ((uint64_t)register_mask << 8) ^ (vector ? 1 : 0) ^ (rematerialize ? 2 : 0) ^ (keep_pointer ? 4 : 0) ^ ((uint64_t)shape << 40);
+            uint64_t random = UINT64_C(0x7a3c19e5d2b84f61) ^ ((uint64_t)register_mask << 8) ^ (rematerialize ? 2 : 0) ^ (keep_pointer ? 4 : 0) ^ ((uint64_t)shape << 40);
             for (uint32_t sample = 0; sample < BUSTER_TIER1_VARIADIC_SAMPLES; sample += 1)
             {
                 uint64_t integers[BUSTER_ABI_INTEGER_ARGUMENTS];
@@ -139,7 +138,7 @@ static void tier1_variadic_compile(Tier1EmitTest* test, uint32_t shape, bool vec
                 const uint64_t actual = tier1_variadic_call(executable, integers, stacked, value, with_vector);
                 if (actual != expected && test->failures < 20)
                 {
-                    fprintf(stderr, "  variadic shape=%u vector=%u remat=%u mask=%x pointer=%u al=%u actual=%016" PRIx64 " expected=%016" PRIx64 "\n", shape, vector, rematerialize, register_mask, keep_pointer,
+                    fprintf(stderr, "  variadic shape=%u remat=%u mask=%x pointer=%u al=%u actual=%016" PRIx64 " expected=%016" PRIx64 "\n", shape, rematerialize, register_mask, keep_pointer,
                             with_vector, actual, expected);
                 }
                 tier1_emit_test_expect(test, actual == expected, "a variadic definition reads its arguments from its save area and its overflow area natively");
@@ -163,9 +162,9 @@ static void tier1_variadic_cases(Tier1EmitTest* test)
     test->selects = false;
     for (uint32_t shape = 0; shape < BUSTER_TIER1_SELECT_TEST_VARIADIC_SHAPES; shape += 1)
     {
-        for (uint32_t variant = 0; variant < 16; variant += 1)
+        for (uint32_t variant = 0; variant < 8; variant += 1)
         {
-            tier1_variadic_compile(test, shape, (variant & 1) != 0, (variant & 2) != 0, (variant & 4) != 0 ? few : all, (variant & 8) != 0);
+            tier1_variadic_compile(test, shape, (variant & 1) != 0, (variant & 2) != 0 ? few : all, (variant & 4) != 0);
         }
     }
 }

@@ -513,7 +513,8 @@ static void check_builtin_float_test_absolute(CheckBuiltinFloatTest* test, TypeT
             "fabs complex argument requires real-component conversion rather than complex magnitude");
         integer = check_test_integer(type_pointer(table, BUSTER_TYPE_INT), 0);
         check_builtin_float_one(table, &action, &result);
-        check_builtin_float_test_expect(test, result.action.diagnostic == CHECK_DIAG_ARITHMETIC_REQUIRED, "fabs does not accept a pointer as an FP prototype argument");
+        check_builtin_float_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPATIBLE && result.argument_conversions[0].flags == BUSTER_CHECK_CONVERT_FAILED,
+                                    "fabs does not accept a pointer as an FP prototype argument (#2914: its conversion fails)");
         action.arguments = NULL;
         action.argument_count = 0;
         check_builtin_float_one(table, &action, &result);
@@ -760,7 +761,7 @@ static void check_builtin_float_test_classes(CheckBuiltinFloatTest* test, TypeTa
     arguments[0] = (CheckValue){ .type = type_pointer(table, BUSTER_TYPE_INT), .category = CHECK_RVALUE };
     action = (CheckBuiltinFloatAction){ .id = CBUILTIN_SIGNBITF, .arguments = arguments, .argument_count = 1 };
     check_builtin_float_one(table, &action, &result);
-    check_builtin_float_test_expect(test, result.action.diagnostic == CHECK_DIAG_ARITHMETIC_REQUIRED, "signbitf refuses a pointer");
+    check_builtin_float_test_expect(test, result.action.diagnostic == CHECK_DIAG_INCOMPATIBLE, "signbitf refuses a pointer (#2914: its prototype's conversion fails)");
     action.id = CBUILTIN_ISNORMAL;
     check_builtin_float_one(table, &action, &result);
     check_builtin_float_test_expect(test, result.action.diagnostic == CHECK_DIAG_INVALID_TYPE, "isnormal refuses a pointer");

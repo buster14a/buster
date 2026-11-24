@@ -3044,6 +3044,117 @@ static const CheckDriverDefaultWarningFixture check_driver_default_warning_fixtu
         .c23 = true,
     },
     {
+        // -Wabsolute-value (#2914, clang's CheckAbsoluteValueFunction): an unsigned argument's, a larger one's of the function's kind,
+        // another kind's, each with its replacement's note (the header's where it is undeclared, none where a declaration of it isn't the
+        // library's), of builtins, library functions and a parenthesized callee; and what it leaves alone (bool, a _Complex's cabs with a
+        // floating argument too small for any).
+        .name = "absolute value functions' arguments",
+        .source =
+                  "int abs(int); long labs(long); double fabs(double); float fabsf(float);\n"
+                  "typedef unsigned long size_type; typedef long L; enum E { A, B };\n"
+                  "size_type s; const unsigned cu; L lv; enum E e; _Bool bo; unsigned char uc; char ch; __int128 i128; long double ld; float fl; double d; _Complex double cd; int *p; int arr[2]; void fn(void);\n"
+                  "void g(void) {\n"
+                  "(void)__builtin_abs(cu); (void)__builtin_abs(lv); (void)__builtin_abs(d); (void)__builtin_fabs(ch); (void)__builtin_fabsf(d); (void)__builtin_labs(ld);\n"
+                  "(void)abs(s); (void)abs(lv); (void)abs(d); (void)fabs(ch); (void)fabsf(ld); (void)abs(e); (void)abs(bo); (void)abs(uc); (void)abs(i128); (void)fabs(fl);\n"
+                  "(void)__builtin_abs(cd); (void)__builtin_cabs(d); (void)__builtin_llabs(ch); (void)(abs)(lv); (void)abs((L)1); (void)abs(1.0f);\n"
+                  "}\n"
+                  "static long llabs(long long x) { return x; }\n"
+                  "void h(void) { (void)abs(1LL); }\n",
+        .warnings = 21,
+        .notes = 20,
+        .c23 = true,
+    },
+    {
+        // -Wabsolute-value's pointer, array and function forms (#2914), after their argument's -Wint-conversion error, of builtins and
+        // library functions.
+        .name = "absolute value functions of pointers",
+        .source =
+                  "int abs(int); long labs(long);\n"
+                  "int *p; int arr[2]; void fn(void);\n"
+                  "void g(void) { (void)__builtin_abs(p); (void)__builtin_labs(arr); (void)labs(arr); (void)abs(fn); (void)__builtin_llabs(p); }\n",
+        .warnings = 5,
+        .errors = 5,
+        .notes = 2,
+        .c23 = true,
+    },
+    {
+        // -Wint-to-pointer-cast and -Wint-to-void-pointer-cast (#2914, clang's checkIntToPointerCast): a typedef's sugar on either side,
+        // the target's qualifiers dropped and an _Atomic one's value type, in sizeof, of a bit-field and a _BitInt; none of bool, an
+        // enumeration, a wide integer or an integer constant expression.
+        .name = "casts to pointers from narrower integers",
+        .source =
+                  "typedef short S; typedef int *IP; typedef void *VP; typedef const void *CVP;\n"
+                  "enum E { A }; enum E e; S s; char c; _Bool bo; int i; long l; unsigned _BitInt(63) u63; _BitInt(7) b7; const short cs; volatile char vc; __int128 i128;\n"
+                  "struct R { int f : 3; } r;\n"
+                  "void f(void) {\n"
+                  "(void)(void*)s; (void)(IP)c; (void)(VP)i; (void)(void*)e; (void)(void*)bo; (void)(void*)l; (void)(void*)u63; (void)(void*)b7; (void)(CVP)i;\n"
+                  "(void)(void*)(char)1; (void)(void*)(s+1); (void)(void*)cs; (void)(void*)vc; (void)(const void*)c; (void)sizeof((void*)c);\n"
+                  "(void)(_Atomic(int*))c; (void)(void(*)(void))c; (void)(int(*)[2])c; (void)(void*)'a'; (void)(void*)(short)i; (void)(char*)(c);\n"
+                  "(void)(void*)(char)(1 ? 2 : i); (void)(void*)(enum E)c; (void)(void*)__extension__ c; (void)(void*)r.f; (void)(int * const)c; (void)(void*)i128;\n"
+                  "(void)(void*)(c = 1); (void)(void*)c++; (void)(void*)(i, c); (void)(void*)(int)1.5; (void)(void*)(1 + 2); (void)(void*)(char)i; }\n"
+                  "void *g = (void*)(char)3;\n",
+        .warnings = 24,
+        .c23 = true,
+    },
+    {
+        // A builtin's later arguments' conversion errors after a default error's (#2914, GatherArgumentsForCall), none after a hard one,
+        // and a size_t parameter as clang spells it, '__size_t' (aka 'unsigned long').
+        .name = "builtins' later failed arguments",
+        .source =
+                  "struct S { int a; } s; int *p; float *fp; double d; char q[4];\n"
+                  "void f(void) {\n"
+                  "long a = __builtin_expect(p, p); long c = __builtin_expect(p, s); long e = __builtin_expect_with_probability(p, p, p);\n"
+                  "void *m = __builtin_memcpy(1, 2, p); void *n = __builtin_memcpy(fp, d, p);\n"
+                  "(void)__builtin_alloca_with_align(p, 64); __xray_typedevent(p, q, p);\n"
+                  "(void)a; (void)c; (void)e; (void)m; (void)n; }\n",
+        .errors = 14,
+        .c23 = true,
+    },
+    {
+        // A floating builtin's argument that doesn't convert to its prototype's parameter (#2914): "passing 'T' to parameter of
+        // incompatible type 'U'" at the argument; and the integer absolute value builtins' -Wint-conversion.
+        .name = "floating builtins' prototypes",
+        .source =
+                  "int *p; struct S { int a; } s;\n"
+                  "void f(void) { (void)__builtin_fabs(p); (void)__builtin_fabsf(p); (void)__builtin_fabsl(s); (void)__builtin_canonicalize(p); (void)__builtin_signbitf(p); (void)__builtin_abs(p); (void)__builtin_labs(p); }\n",
+        .warnings = 2,
+        .errors = 7,
+        .c23 = true,
+    },
+    {
+        // An initializer list at file scope with a default error keeps its other parts' conversion warnings, as at block scope (#2914):
+        // the rejected view casts the failed part's source.
+        .name = "file-scope initializers beside errors",
+        .source =
+                  "char c0 = 1000;\n"
+                  "char c = 1000;\n"
+                  "struct S { int *p; int n; char c; } s = { 2, 1.5, 1000 };\n"
+                  "int a[3] = { 1.5, (int*)0, 2.5 };\n"
+                  "struct S t[2] = { { 2, 1.5 }, { 3, 2.5 } };\n"
+                  "int *h = 2;\n"
+                  "int z = 1.5;\n",
+        .warnings = 9,
+        .errors = 5,
+        .c23 = true,
+    },
+    {
+        // A _Generic selection's diagnostics in clang's CreateGenericSelectionExpr order at its `)` (#2914): each association's
+        // -Wunreachable-code-generic-assoc, then its type's errors against later associations', and the no-match error after them.
+        .name = "generic selections' diagnostics in clang's order",
+        .source =
+                  "void f(int x) {\n"
+                  "(void)_Generic(x, int: 1, char: 2, char: 3, int: 4);\n"
+                  "(void)_Generic(x, const int: 1, int const: 2, int[2]: 3, default: 0);\n"
+                  "(void)_Generic(x, int[2]: 1, int[3]: 2);\n"
+                  "(void)_Generic(x, int: 1, const char: 2, char: 3, int: 4, long[1]: 5);\n"
+                  "}\n"
+                  "int h[_Generic(1, long: 1, const int: 2, long: 3)];\n",
+        .warnings = 8,
+        .errors = 6,
+        .notes = 5,
+        .c23 = true,
+    },
+    {
         .name = "unit end unused declarations alone",
         .source = "static int unused(void) { return 0; }\nstatic int unused_var;\nint main(void) { return 0; }\n",
         .options = { "-Wall" },

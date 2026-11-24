@@ -179,7 +179,7 @@ static bool tier1_select_test_load_records(Tier1SelectTest* test, const X86Instr
         uint16_t costs[X86_COST_COLUMN_COUNT];
         for (uint32_t column = 0; column < X86_COST_COLUMN_COUNT; column += 1)
         {
-            x86_zen5_lookup_scalar(&id, 1, (X86CostColumn)column, &costs[column]);
+            x86_zen5_lookup(&id, 1, (X86CostColumn)column, &costs[column]);
             test->missing_columns[origin][column] += costs[column] == BUSTER_X86_COST_UNKNOWN;
         }
         if (test->manifest)

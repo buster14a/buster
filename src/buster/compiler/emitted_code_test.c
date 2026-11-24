@@ -320,12 +320,7 @@ static void emitted_test_tier0_function(EmittedTest* test, const Tier0Function* 
     Arena* arena = &test->arena;
     const uint64_t mark = arena->length;
     const Tier0Code code = tier0_validate(function).error == TIER0_OK ? tier0_compile(function, arena) : (Tier0Code){ .error = TIER0_ERROR_INVALID };
-    const Tier0Code twin = code.error == TIER0_OK ? tier0_compile_scalar(function, arena) : (Tier0Code){ .error = TIER0_ERROR_INVALID };
-    emitted_test_expect(test, code.error != TIER0_OK || (twin.error == TIER0_OK && twin.count == code.count && twin.branch_count == code.branch_count &&
-                                                         memcmp(twin.records, code.records, code.count * sizeof(X86Instruction)) == 0 &&
-                                                         (code.branch_count == 0 || (memcmp(twin.branches, code.branches, code.branch_count * sizeof(uint32_t)) == 0 &&
-                                                                                     memcmp(twin.targets, code.targets, code.branch_count * sizeof(uint32_t)) == 0))),
-                        "Tier 0's paths compile the same code", id);
+    emitted_test_expect(test, code.error != TIER0_OK || x86_validate(code.records, code.count) == code.count, "Tier 0's records are valid", id);
     const bool r11 = code.error == TIER0_OK && !code.frame_pointer && (code.frame_size & ~(BUSTER_TIER0_PAGE_BYTES - 1)) != 0 &&
                      tier0_probes_reservation(code.frame_probe, code.frame_size, code.frame_alignment_log2, false);
     EmittedTestLayout layout;
@@ -612,10 +607,8 @@ static void emitted_test_tier0_preserving(EmittedTest* test)
                     Arena* arena = &test->arena;
                     const uint64_t mark = arena->length;
                     const Tier0Code code = tier0_validate(&function).error == TIER0_OK ? tier0_compile(&function, arena) : (Tier0Code){ .error = TIER0_ERROR_INVALID };
-                    const Tier0Code twin = code.error == TIER0_OK ? tier0_compile_scalar(&function, arena) : (Tier0Code){ .error = TIER0_ERROR_INVALID };
-                    bool valid = emitted_test_expect(test, code.error == TIER0_OK && twin.error == TIER0_OK && twin.count == code.count &&
-                                                               memcmp(twin.records, code.records, code.count * sizeof(X86Instruction)) == 0,
-                                                     "Tier 0's paths compile the same preserving frame", id);
+                    bool valid = emitted_test_expect(test, code.error == TIER0_OK && x86_validate(code.records, code.count) == code.count,
+                                                     "Tier 0 compiles the preserving frame", id);
                     EmittedTestLayout layout;
                     valid = valid && emitted_test_expect(test, emitted_test_layout(code.records, code.count, code.branches, code.targets, code.branch_count,
                                                                                    code.reference_count, arena, &layout),
@@ -713,10 +706,8 @@ static void emitted_test_tier0_interrupt(EmittedTest* test)
                         const uint64_t mark = arena->length;
                         const Tier0Check checked = tier0_validate(&function);
                         const Tier0Code code = checked.error == TIER0_OK ? tier0_compile(&function, arena) : (Tier0Code){ .error = TIER0_ERROR_INVALID };
-                        const Tier0Code twin = code.error == TIER0_OK ? tier0_compile_scalar(&function, arena) : (Tier0Code){ .error = TIER0_ERROR_INVALID };
-                        bool valid = emitted_test_expect(test, code.error == TIER0_OK && twin.error == TIER0_OK && twin.count == code.count &&
-                                                                   memcmp(twin.records, code.records, code.count * sizeof(X86Instruction)) == 0,
-                                                         "Tier 0's paths compile the same interrupt service routine", id);
+                        bool valid = emitted_test_expect(test, code.error == TIER0_OK && x86_validate(code.records, code.count) == code.count,
+                                                         "Tier 0 compiles the interrupt service routine", id);
                         // Its entry and exit: cld and the parameters from the processor's frame, and iretq after its add.
                         bool shaped = false;
                         for (uint32_t r = 0; valid && r + 1 < code.count; r += 1)

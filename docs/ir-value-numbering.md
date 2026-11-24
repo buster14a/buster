@@ -417,3 +417,15 @@ cycles 0.9970 and instructions 0.9975, Lua's 0.9950 and 0.9932, the kernels'
 0.9682 and 0.9817, for 12.4% more of `sqlite3.c`'s `--tier1` compile than
 `+hoist` (16.2% more than neither). The programs move within code placement's
 noise, so it stays off by default.
+
+Tier 1 runs it with `IrGvnOptions.validated`, as LICM's pressure policy
+(LICM's guide, "What it costs to compile"): its preparation doesn't verify the
+promoted function again. On the 9700X (`measure-compile --runs 11` of
+`sqlite3.c`, `-c --tier1 --lanes 1`), `+numbering` now adds 11.1% to 11.4% of
+the default compile's wall time, 11.5% of its cycles and 13.1% of its
+instructions, where it added 12.4%, 12.8% and 15.1% to `+hoist`'s before. A
+profile puts most of what is left in the solver itself (the numbering, the
+partition and its visits) and in the rewrite and verification of the functions
+where it merges, so it stays off by default; against `--tier1` it took 0.04%
+of speedtest1's cycles, 0.48% of Lua's (one link order) and 3.3% of the
+kernels'.

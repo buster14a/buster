@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// test-debug: independent line-machine decoding, scalar/vector bytes, guarded tails, input and capacity failures,
+// test-debug: independent line-machine decoding, a frozen digest of the units' bytes, guarded tails, input and capacity failures,
 // late-address patching, units written after others and where their fields are. --cross-check additionally asks
 // readelf, gdb and perf to consume an original fixed-layout three-function ELF with these five debug sections, as one
 // unit and as two (its first function's and the other two's, the second written at the first's sizes), linked by GNU
@@ -282,6 +282,19 @@ static bool debug_test_decode(const DebugUnit* unit, const DebugOutput* output, 
 }
 #endif
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_LINK
+#define BUSTER_DEBUG_TEST_UNITS_DIGEST 0xf5a9298721066e18ull
+
+// FNV-1a over `size` bytes, from `digest`.
+static uint64_t debug_test_digest(uint64_t digest, const void* bytes, uint64_t size)
+{
+    const uint8_t* data = bytes;
+    for (uint64_t i = 0; i < size; i += 1)
+    {
+        digest = (digest ^ data[i]) * 0x100000001b3ull;
+    }
+    return digest;
+}
+
 static bool debug_test_units(void)
 {
     bool valid = true;
@@ -324,6 +337,10 @@ static bool debug_test_units(void)
         .lines = lines,
     };
     valid &= a_bytes != 0 && b_bytes != 0;
+    // The sections' bytes, sizes, fields and line addresses of every case below, before the addresses are patched: a
+    // digest frozen on 2026-11-23 while the vector path and its exact twin wrote the same bytes for every case. Each row's
+    // meaning is checked independently by debug_test_decode; the digest holds the encoding (#2924).
+    uint64_t digest = 0xcbf29ce484222325ull;
     // Every count with each row in its function's file, then with rows in other files (DebugUnit.row_files, #2541): runs of
     // three and four, so that a change falls at every place of a vector group and on the body's row.
     // One dense sequence also makes file switches and the prologue marker coincide with duplicate addresses.
@@ -354,8 +371,15 @@ static bool debug_test_units(void)
         DebugOutput a = debug_test_output(a_bytes, a_addresses, 3);
         DebugOutput b = debug_test_output(b_bytes, b_addresses, 3);
         DebugPlan plan;
-        valid &= debug_write(&unit, &a, true) == DEBUG_OK && debug_prepare(&unit, b.bases, &plan, false) == DEBUG_OK && debug_emit(&plan, &b) == DEBUG_OK;
+        valid &= debug_write(&unit, &a) == DEBUG_OK && debug_prepare(&unit, b.bases, &plan) == DEBUG_OK && debug_emit(&plan, &b) == DEBUG_OK;
         valid &= memcmp(a_addresses, b_addresses, sizeof(a_addresses)) == 0 && memcmp(a.fields, b.fields, sizeof(a.fields)) == 0;
+        digest = debug_test_digest(digest, b_addresses, sizeof(b_addresses));
+        digest = debug_test_digest(digest, b.fields, sizeof(b.fields));
+        for (uint32_t section = 0; valid && section < BUSTER_DEBUG_SECTIONS; section += 1)
+        {
+            digest = debug_test_digest(digest, &b.sections[section].size, sizeof(b.sections[section].size));
+            digest = debug_test_digest(digest, b.sections[section].bytes, b.sections[section].size);
+        }
         for (uint32_t section = 0; valid && section < BUSTER_DEBUG_SECTIONS; section += 1)
         {
             valid &= a.sections[section].size == b.sections[section].size && memcmp(a.sections[section].bytes, b.sections[section].bytes, a.sections[section].size) == 0;
@@ -386,6 +410,11 @@ static bool debug_test_units(void)
         valid &= debug_finalize(&unit, &a, moved) == DEBUG_OK && debug_test_decode(&unit, &a, moved);
         valid &= memcmp(a.sections[DEBUG_SECTION_INFO].bytes, b.sections[DEBUG_SECTION_INFO].bytes, a.sections[DEBUG_SECTION_INFO].size) == 0;
     }
+    if (valid && digest != BUSTER_DEBUG_TEST_UNITS_DIGEST)
+    {
+        printf("  debug units: digest %016llx, frozen %016llx\n", (unsigned long long)digest, (unsigned long long)BUSTER_DEBUG_TEST_UNITS_DIGEST);
+        valid = false;
+    }
     DebugOutput output = debug_test_output(b_bytes, b_addresses, 3);
     if (valid)
     {
@@ -396,43 +425,43 @@ static bool debug_test_units(void)
         functions[1].first_row = 1;
         functions[2].first_row = 1;
         offsets[0] = UINT32_MAX;
-        valid &= debug_write(&unit, &output, false) == DEBUG_ERROR_INPUT;
+        valid &= debug_write(&unit, &output) == DEBUG_ERROR_INPUT;
         offsets[0] = 0;
         lines[0] = UINT32_MAX;
-        valid &= debug_write(&unit, &output, false) == DEBUG_ERROR_INPUT;
+        valid &= debug_write(&unit, &output) == DEBUG_ERROR_INPUT;
         lines[0] = 1;
         functions[1].first_row = 0;
-        valid &= debug_write(&unit, &output, false) == DEBUG_ERROR_INPUT;
+        valid &= debug_write(&unit, &output) == DEBUG_ERROR_INPUT;
         functions[1].first_row = 1;
         functions[1].file = 2;
-        valid &= debug_write(&unit, &output, false) == DEBUG_ERROR_INPUT;
+        valid &= debug_write(&unit, &output) == DEBUG_ERROR_INPUT;
         functions[1].file = 1;
         // A row's file past the unit's files.
         unit.row_files = row_files;
         row_files[0] = 2;
-        valid &= debug_write(&unit, &output, false) == DEBUG_ERROR_INPUT;
+        valid &= debug_write(&unit, &output) == DEBUG_ERROR_INPUT;
         row_files[0] = 0;
         unit.row_files = 0;
         // A body's row past the function's rows.
         functions[0].prologue_end = 2;
-        valid &= debug_write(&unit, &output, false) == DEBUG_ERROR_INPUT;
+        valid &= debug_write(&unit, &output) == DEBUG_ERROR_INPUT;
         functions[0].prologue_end = 1;
         unit.directory = (String8){
             .pointer = "a\0b",
             .length = 3,
         };
-        valid &= debug_write(&unit, &output, false) == DEBUG_ERROR_INPUT;
+        valid &= debug_write(&unit, &output) == DEBUG_ERROR_INPUT;
         DebugUnit empty = { 0 };
-        valid &= debug_write(&empty, &output, false) == DEBUG_OK && debug_finalize(&empty, &output, 0) == DEBUG_OK && debug_test_decode(&empty, &output, 0);
+        valid &= debug_write(&empty, &output) == DEBUG_OK && debug_finalize(&empty, &output, 0) == DEBUG_OK && debug_test_decode(&empty, &output, 0);
         DebugPlan empty_plan;
-        valid &= debug_prepare(&empty, output.bases, &empty_plan, true) == DEBUG_OK && debug_emit(&empty_plan, &output) == DEBUG_OK &&
+        valid &= debug_prepare(&empty, output.bases, &empty_plan) == DEBUG_OK && debug_emit(&empty_plan, &output) == DEBUG_OK &&
                  debug_finalize(&empty, &output, 0) == DEBUG_OK && debug_test_decode(&empty, &output, 0);
         DebugUnit oversized = { .row_count = UINT32_MAX };
-        valid &= debug_write(&oversized, &output, false) == DEBUG_ERROR_LIMIT;
+        valid &= debug_write(&oversized, &output) == DEBUG_ERROR_LIMIT;
         unit.directory = BUSTER_S8(".");
         output.address_capacity = 2;
         b_addresses[0] = UINT32_MAX;
-        valid &= debug_write(&unit, &output, false) == DEBUG_ERROR_CAPACITY && b_addresses[0] == UINT32_MAX;
+        valid &= debug_write(&unit, &output) == DEBUG_ERROR_CAPACITY && b_addresses[0] == UINT32_MAX;
     }
     free(a_bytes);
     free(b_bytes);
@@ -472,23 +501,23 @@ static bool debug_test_plans(void)
     {
         valid &= mprotect(mapping + 2 * section * page, page, PROT_READ | PROT_WRITE) == 0;
     }
-    for (uint32_t exact = 0; valid && exact < 2; exact += 1)
+    if (valid)
     {
         DebugPlan plan = { 0 };
-        valid &= debug_prepare(&unit, bases, &plan, exact != 0) == DEBUG_OK;
+        valid &= debug_prepare(&unit, bases, &plan) == DEBUG_OK;
         uint8_t saved[sizeof(plan)];
         memcpy(saved, &plan, sizeof(plan));
         DebugUnit bad = unit;
         bad.row_count -= 1;
-        valid &= debug_prepare(&bad, bases, &plan, exact != 0) == DEBUG_ERROR_INPUT && memcmp(saved, &plan, sizeof(plan)) == 0;
+        valid &= debug_prepare(&bad, bases, &plan) == DEBUG_ERROR_INPUT && memcmp(saved, &plan, sizeof(plan)) == 0;
         bad = (DebugUnit){ .function_count = UINT32_MAX };
-        valid &= debug_prepare(&bad, bases, &plan, exact != 0) == DEBUG_ERROR_LIMIT && memcmp(saved, &plan, sizeof(plan)) == 0;
+        valid &= debug_prepare(&bad, bases, &plan) == DEBUG_ERROR_LIMIT && memcmp(saved, &plan, sizeof(plan)) == 0;
         for (uint32_t section = 0; valid && section < BUSTER_DEBUG_SECTIONS; section += 1)
         {
             uint64_t limit[BUSTER_DEBUG_SECTIONS];
             memcpy(limit, bases, sizeof(limit));
             limit[section] = BUSTER_DEBUG_DWARF32_LIMIT - plan.sizes[section];
-            valid &= debug_prepare(&unit, limit, &plan, exact != 0) == DEBUG_ERROR_LIMIT && memcmp(saved, &plan, sizeof(plan)) == 0;
+            valid &= debug_prepare(&unit, limit, &plan) == DEBUG_ERROR_LIMIT && memcmp(saved, &plan, sizeof(plan)) == 0;
         }
         // A missing/short section or address column: all variants must fail before touching any destination.
         for (uint32_t failure = 0; valid && failure < 2 * BUSTER_DEBUG_SECTIONS + 3; failure += 1)
@@ -606,7 +635,7 @@ static bool debug_test_bases(void)
         [DEBUG_SECTION_RNGLISTS] = 0x40000c,
     };
     memcpy(based.bases, bases, sizeof(bases));
-    valid &= valid && debug_write(&unit, &alone, false) == DEBUG_OK && debug_write(&unit, &based, false) == DEBUG_OK;
+    valid &= valid && debug_write(&unit, &alone) == DEBUG_OK && debug_write(&unit, &based) == DEBUG_OK;
     for (uint32_t section = 0; valid && section < BUSTER_DEBUG_SECTIONS; section += 1)
     {
         valid &= alone.sections[section].size == based.sections[section].size;
@@ -646,9 +675,9 @@ static bool debug_test_bases(void)
         refused.bases[section] = BUSTER_DEBUG_DWARF32_LIMIT - alone.sections[section].size;
         memset(based_bytes, 0xa5, BUSTER_DEBUG_SECTIONS * BUSTER_DEBUG_TEST_BYTES);
         based_addresses[0] = UINT32_MAX;
-        valid &= debug_write(&unit, &refused, false) == DEBUG_ERROR_LIMIT && based_addresses[0] == UINT32_MAX && based_bytes[0] == 0xa5;
+        valid &= debug_write(&unit, &refused) == DEBUG_ERROR_LIMIT && based_addresses[0] == UINT32_MAX && based_bytes[0] == 0xa5;
         refused.bases[section] -= 1;
-        valid &= debug_write(&unit, &refused, false) == DEBUG_OK;
+        valid &= debug_write(&unit, &refused) == DEBUG_OK;
     }
     free(alone_bytes);
     free(based_bytes);
@@ -692,9 +721,9 @@ static bool debug_test_guards(void)
                 .row_count = count,
             };
             DebugWriter measure = { 0 };
-            debug_line(&unit, &measure, 0, false);
+            debug_line(&unit, &measure, 0);
             DebugWriter write = { .bytes = mapping + 5 * page - measure.size };
-            debug_line(&unit, &write, 0, false);
+            debug_line(&unit, &write, 0);
             valid &= measure.size == write.size;
         }
         munmap(mapping, 6 * page);
@@ -828,13 +857,13 @@ static bool debug_test_consumers(bool keep, uint32_t way, bool split, const Test
     DebugOutput outputs[2] = { 0 };
     if (valid && !split)
     {
-        valid &= debug_write(&unit, &output, false) == DEBUG_OK && debug_finalize(&unit, &output, addresses) == DEBUG_OK;
+        valid &= debug_write(&unit, &output) == DEBUG_OK && debug_finalize(&unit, &output, addresses) == DEBUG_OK;
     }
     else if (valid)
     {
         outputs[0] = output;
         outputs[0].address_capacity = 1;
-        valid &= debug_write(&parts[0], &outputs[0], false) == DEBUG_OK && debug_finalize(&parts[0], &outputs[0], addresses) == DEBUG_OK;
+        valid &= debug_write(&parts[0], &outputs[0]) == DEBUG_OK && debug_finalize(&parts[0], &outputs[0], addresses) == DEBUG_OK;
         outputs[1] = output;
         outputs[1].line_addresses = address_offsets + 1;
         outputs[1].address_capacity = 2;
@@ -844,7 +873,7 @@ static bool debug_test_consumers(bool keep, uint32_t way, bool split, const Test
             outputs[1].sections[section].capacity -= outputs[0].sections[section].size;
             outputs[1].bases[section] = outputs[0].sections[section].size;
         }
-        valid &= debug_write(&parts[1], &outputs[1], false) == DEBUG_OK && debug_finalize(&parts[1], &outputs[1], addresses + 1) == DEBUG_OK;
+        valid &= debug_write(&parts[1], &outputs[1]) == DEBUG_OK && debug_finalize(&parts[1], &outputs[1], addresses + 1) == DEBUG_OK;
         // The two units' contributions, one after the other, for the fixture's sections.
         for (uint32_t section = 0; section < BUSTER_DEBUG_SECTIONS; section += 1)
         {

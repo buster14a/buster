@@ -16,7 +16,9 @@
 #
 # It builds with CI's toolchain, the official LLVM release, CMake and Ninja that tools/ci/hosted-tools.lock pins: PATH's
 # when its clang is the release's, or else tools/ci/session-toolchain.sh's, staged once in the user's cache (#2628);
-# BUSTER_TOOLCHAIN=path builds with PATH's as found.
+# BUSTER_TOOLCHAIN=path builds with PATH's as found. BUSTER_SELF_BUILT has Develop compile the units it names with the
+# previous stage, the tree's Release executable unless BUSTER_SELF_COMPILER names another, which it builds first where
+# it is missing (#2630).
 #
 # A build configures build/cmake/VARIANT, Ninja Multi-Config's tree for the BUSTER_* environment's host ISA,
 # runtime, sanitizer, fuzzing, debug information and Release in parts (BUSTER_RELEASE_PARTS=1), only when the settings, PATH or the toolchain changed since it
@@ -177,6 +179,8 @@ fuzz_entry="${BUSTER_FUZZ_ENTRY:-}"
 [ -z "$fuzz_entry" ] || fuzz_entry="$(absolute "$fuzz_entry")"
 pgo_train="${BUSTER_PGO_TRAIN:-}"
 [ -z "$pgo_train" ] || pgo_train="$(absolute "$pgo_train")"
+self_compiler="${BUSTER_SELF_COMPILER:-}"
+[ -z "$self_compiler" ] || self_compiler="$(absolute "$self_compiler")"
 settings=(
     "-DBUSTER_HOST_ARCH=${BUSTER_HOST_ARCH:-native}"
     "-DBUSTER_DEBUG_INFO=${BUSTER_DEBUG_INFO-1}"
@@ -191,6 +195,8 @@ settings=(
     "-DBUSTER_PGO_TRAIN=$pgo_train"
     "-DBUSTER_PARALLEL_CODEGEN=${BUSTER_PARALLEL_CODEGEN:-auto}"
     "-DBUSTER_RELEASE_PARTS=${BUSTER_RELEASE_PARTS:-0}"
+    "-DBUSTER_SELF_BUILT=${BUSTER_SELF_BUILT:-}"
+    "-DBUSTER_SELF_COMPILER=$self_compiler"
 )
 
 # The long commands (configuring, building, testing, checking) run in a process group of their own, `child`, which an
@@ -481,7 +487,7 @@ build()
     # Ninja appends a line for each command it ran; when it rewrites its log to compact it, the report is skipped.
     if [ -f "$log" ] && { [ -z "$inode" ] || [ "$(stat -c %i "$log")" = "$inode" ]; }; then
         tail -c "+$((offset + 1))" "$log" | awk -F '\t' -v total="$((end - start))" -v config="$config" '
-            $4 ~ /\.c\.o$/ { count += 1; name = $4; sub(/^.*\//, "", name); sub(/\.o$/, "", name); time[name] = $2 - $1 }
+            $4 ~ /\.c\.o$/ { name = $4; sub(/^.*\//, "", name); sub(/\.o$/, "", name); count += !(name in time); time[name] = $2 - $1 }
             END {
                 line = sprintf("build.sh: %s: %u units compiled, the build took %.1f s", config, count, total / 1e6)
                 n = 0
@@ -523,6 +529,31 @@ publish()
     echo "build.sh: $config: ${binary#"$root/"}, published as build/compiler" >&2
 }
 
+# BUSTER_SELF_BUILT's previous stage (#2630; docs/commands/build.md, "Self-built units"), which compiles the units it
+# names in Develop: BUSTER_SELF_COMPILER, or else the tree's Release executable, which Develop's graph reads but doesn't
+# build, so that an edit's units are compiled by the stage built before the edit. Built first where it is missing; never
+# the executable Develop makes, which would compile its own next build.
+self_stage()
+{
+    local units="${BUSTER_SELF_BUILT:-}" stage="$self_compiler"
+    units="${units//none/}"
+    [ "$config" = Develop ] && [ -n "${units//[$' \t\n,']/}" ] || return 0
+    if [ -z "$stage" ]; then
+        stage="$tree/Release/compiler"
+        if [ ! -x "$stage" ]; then
+            echo "build.sh: building Release first, the previous stage BUSTER_SELF_BUILT's units take" >&2
+            run "$cmake" --build "$tree" --config Release --parallel "$jobs" --target compiler >&2
+        fi
+    fi
+    [ -x "$stage" ] || die "BUSTER_SELF_COMPILER, $stage, isn't an executable"
+    [ ! "$stage" -ef "$tree/Develop/compiler" ] || die "BUSTER_SELF_COMPILER, $stage, is the Develop executable this build makes; name a copy of it or a clang-built one"
+}
+
+case "$command" in
+    build|test|lexer-variant|shifts)
+        self_stage
+        ;;
+esac
 case "$command" in
     build)
         if [ "${#targets[@]}" -eq 0 ]; then

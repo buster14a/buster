@@ -1127,7 +1127,8 @@ The tests:
   paths, at each lanes' size and width; a loop with an invariant permute2 twice
   and a loop-carried one runs as the interpreter says under every set of passes.
 - `test-ir-licm`: GVN gives the two invariant permute2s one value and LICM
-  hoists it with their sum, alike on both paths, each result the interpreter's.
+  hoists it with their sum, alike after both of GVN's paths, each result the
+  interpreter's.
 - `test-ir-inline`: an inlined callee's permute2s, one of which takes the
   callee's parameter, get slots of the caller's, remapped.
 - `test-ir-simd`: the 24 rows decode at exactly their features, refused without

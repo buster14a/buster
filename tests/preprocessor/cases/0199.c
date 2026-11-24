@@ -1,0 +1,7 @@
+#define F(...) call(0, ##__VA_ARGS__)
+F()
+F(1)
+#define G(x, ...) call(x, ##__VA_ARGS__)
+G(0)
+G(0,)
+G(0, 1)
