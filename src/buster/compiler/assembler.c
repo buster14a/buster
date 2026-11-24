@@ -2621,6 +2621,198 @@ static uint32_t asm_encoding_prefixes(AsmParser* parser, uint32_t end)
     return encoding;
 }
 
+// What an instruction's mnemonic says of its operands, which asm_instruction_mnemonic reads.
+typedef struct
+{
+    uint32_t width;
+    uint32_t source_width;
+    uint32_t string_prefix_count;
+    int32_t predicate;
+    uint8_t string_prefixes[2];
+    bool checked;
+    bool address;
+} AsmMnemonic;
+
+// An instruction's mnemonic, at parser->at, into its request: the name as the catalogue spells it (its prefixes, AT&T's
+// suffix and aliases resolved), its width, whether it branches, and what its operands must agree with. parser->at moves
+// past the mnemonic's tokens. asm_instruction and asm_parse_vector_batch's AT&T rows share it.
+static AsmMnemonic asm_instruction_mnemonic(AsmParser* parser, AsmInstruction* instruction, uint32_t end)
+{
+    AsmMnemonic mnemonic = {0};
+    instruction->request.mnemonic = asm_token_text(parser, parser->at++);
+    String8* name = &instruction->request.mnemonic;
+    asm_lock_mnemonic(parser, name, end);
+    asm_prefixed_mnemonic(parser, name, end);
+    instruction->rep_scan = asm_string_mnemonic(parser, name, end);
+    instruction->written = asm_token_text(parser, parser->at - 1);
+    mnemonic.string_prefix_count = asm_string_operands(parser, name, end, mnemonic.string_prefixes);
+    mnemonic.predicate = asm_compare_predicate(name);
+    uint32_t width = 0;
+    uint32_t source_width = 0;
+    // A complete alias keeps its last letter: jnb, jnl and sal end in suffix letters.
+    bool known = asm_alias(name) || (!parser->options.intel && asm_att_extension(name, &width, &source_width));
+    // Whether the parser checks each operand's width against the suffix's: a move's extension (movzbl, both widths),
+    // the x87's memory width and LEA's destination. Any other suffix the matcher checks against each form.
+    bool checked = width != 0;
+    if (!parser->options.intel && !known && name->length > 1)
+    {
+        // Strip suffixes only when the full mnemonic has no catalogue name, and movq's (mov's 64-bit form) unless an
+        // XMM operand makes it SSE2's. A name whose forms the target refuses is still that instruction's.
+        const uint32_t bucket = x86_match_bucket(parser->index, *name);
+        known = parser->index->names[bucket].pointer != 0 && (!x86_match_name(*name, "movq") || asm_vector_operands(parser, end));
+        if (!known)
+        {
+            bool x87 = false;
+            width = asm_att_suffix(parser->index, name, &x87);
+            source_width = x87 ? width : 0;
+            checked = x87;
+            instruction->suffixed = width != 0 && !x87;
+            asm_alias(name);
+        }
+    }
+    // LEA's memory operand is an address, not a load: its suffix sizes the destination register alone.
+    const bool address = x86_match_name(*name, "lea");
+    checked |= address && width != 0;
+    instruction->suffixed &= !address;
+    // Extension forms describe their source memory width; the destination is fixed by its register class.
+    instruction->request.width = address ? 0 : source_width != 0 ? source_width : width;
+    instruction->branch = asm_branch_mnemonic(*name);
+    mnemonic.width = width;
+    mnemonic.source_width = source_width;
+    mnemonic.checked = checked;
+    mnemonic.address = address;
+    return mnemonic;
+}
+
+// Operand `i`'s width against the mnemonic's suffix where the parser checks it (AsmMnemonic.checked), in the written
+// order: an AT&T shift's %cl count keeps its own.
+static void asm_operand_width(AsmParser* parser, AsmInstruction* instruction, const AsmMnemonic* mnemonic, uint32_t i, uint32_t location)
+{
+    const String8 name = instruction->request.mnemonic;
+    X86Operand* operand = &instruction->request.operands[i];
+    const bool shift = x86_match_name(name, "shl") || x86_match_name(name, "shr") || x86_match_name(name, "sar") || x86_match_name(name, "rol") || x86_match_name(name, "ror") || x86_match_name(name, "shld") || x86_match_name(name, "shrd");
+    const bool count_register = !parser->options.intel && i == 0 && shift && operand->kind == X86_OPERAND_REGISTER && operand->class == BUSTER_X86_CLASS_GPR8 && operand->reg == 1;
+    if (mnemonic->checked && mnemonic->width != 0 && operand->kind != X86_OPERAND_IMMEDIATE && !count_register && !(mnemonic->address && operand->kind == X86_OPERAND_MEMORY))
+    {
+        const uint32_t expected_width = i == 0 && mnemonic->source_width != 0 ? mnemonic->source_width : mnemonic->width;
+        if (operand->width != 0 && operand->width != expected_width)
+        {
+            asm_fail(parser, location, "mnemonic suffix and register width disagree");
+        }
+        operand->width = expected_width;
+    }
+}
+
+// An instruction whose operands are read, in the written order: the operands its mnemonic implies (a compare
+// predicate's, a shift's 1, the x87's), Intel's order, its row and prefixes, and its fragment. parser->at goes to `end`.
+static void asm_instruction_finish(AsmParser* parser, AsmInstruction* instruction, const AsmMnemonic* mnemonic, uint32_t location, uint32_t encoding, uint32_t end)
+{
+    const String8* name = &instruction->request.mnemonic;
+    // A shift or rotate of one operand shifts it by 1, as GNU as reads `shrl %ecx` (clang's x >> 1): the count written
+    // out, which takes D1's form.
+    static const char* const shifts[] = { "shl", "shr", "sar", "rol", "ror", "rcl", "rcr" };
+    bool shift = false;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(shifts); i += 1)
+    {
+        shift |= x86_match_name(*name, shifts[i]);
+    }
+    // A compare-predicate name's predicate is the immediate (asm_compare_predicate): first in AT&T, last in Intel.
+    if (parser->result.error == 0 && mnemonic->predicate >= 0)
+    {
+        const uint32_t count = instruction->request.count;
+        if (count >= BUSTER_X86_MATCH_OPERANDS)
+        {
+            asm_fail(parser, location, "empty operand or too many operands");
+        }
+        else
+        {
+            const uint32_t at = parser->options.intel ? count : 0;
+            for (uint32_t i = count; i > at; i -= 1)
+            {
+                instruction->request.operands[i] = instruction->request.operands[i - 1];
+                instruction->expressions[i] = instruction->expressions[i - 1];
+            }
+            instruction->request.operands[at] = (X86Operand){ .kind = X86_OPERAND_IMMEDIATE, .value = mnemonic->predicate };
+            instruction->expressions[at] = (AsmExpr){ .value = mnemonic->predicate };
+            instruction->request.count = count + 1;
+        }
+    }
+    if (parser->result.error == 0 && shift && instruction->request.count == 1 && instruction->request.operands[0].kind != X86_OPERAND_IMMEDIATE)
+    {
+        const uint32_t count = parser->options.intel ? 1 : 0;
+        instruction->request.operands[1] = instruction->request.operands[0];
+        instruction->expressions[1] = instruction->expressions[0];
+        instruction->request.operands[count] = (X86Operand){ .kind = X86_OPERAND_IMMEDIATE, .value = 1 };
+        instruction->expressions[count] = (AsmExpr){ .value = 1 };
+        instruction->request.count = 2;
+    }
+    if (!parser->options.intel)
+    {
+        for (uint32_t i = 0; i < instruction->request.count / 2; i += 1)
+        {
+            const uint32_t j = instruction->request.count - 1 - i;
+            const X86Operand operand = instruction->request.operands[i];
+            const AsmExpr expression = instruction->expressions[i];
+            instruction->request.operands[i] = instruction->request.operands[j];
+            instruction->expressions[i] = instruction->expressions[j];
+            instruction->request.operands[j] = operand;
+            instruction->expressions[j] = expression;
+        }
+    }
+    asm_x87_operands(parser, &instruction->request);
+    // An exchange of two general registers is commutative: with the accumulator first (Intel's order), its operands
+    // swap, so that the accumulator's one-byte form (90+r) can take it, as GNU as encodes `xchg rax, rcx` (#1134).
+    X86Operand* exchanged = instruction->request.operands;
+    if (encoding == 0 && x86_match_name(*name, "xchg") && instruction->request.count == 2 && exchanged[0].kind == X86_OPERAND_REGISTER && exchanged[1].kind == X86_OPERAND_REGISTER &&
+        exchanged[0].class >= BUSTER_X86_CLASS_GPR16 && exchanged[0].class <= BUSTER_X86_CLASS_GPR64 && exchanged[1].class == exchanged[0].class && exchanged[0].reg == 0 &&
+        exchanged[1].reg != 0)
+    {
+        const X86Operand operand = exchanged[0];
+        const AsmExpr expression = instruction->expressions[0];
+        exchanged[0] = exchanged[1];
+        instruction->expressions[0] = instruction->expressions[1];
+        exchanged[1] = operand;
+        instruction->expressions[1] = expression;
+    }
+    // GNU as gives an instruction the row a `.loc` left waiting (#1115), before its prefixes.
+    asm_line_instruction(parser, location);
+    for (uint32_t i = 0; i < instruction->request.count; i += 1)
+    {
+        instruction->address32 |= instruction->request.operands[i].kind == X86_OPERAND_MEMORY && instruction->request.operands[i].address_size == 4;
+    }
+    if (instruction->address32 && parser->code && parser->result.error == 0)
+    {
+        // Another function's records have no room for the 67: its caller assembles the template whole.
+        parser->directive = true;
+        asm_fail(parser, location, "inline assembly's 32-bit addresses are its unit's");
+    }
+    else if (mnemonic->string_prefix_count != 0 && parser->code)
+    {
+        // Code that another function's records hold has no bytes but its records': its caller assembles it whole.
+        parser->directive = true;
+        asm_fail(parser, location, "inline assembly's string instruction operands that need a prefix are its unit's");
+    }
+    else if (mnemonic->string_prefix_count != 0 && parser->result.error == 0)
+    {
+        const uint32_t prefix = asm_fragment(parser, ASM_BYTES, location);
+        uint8_t* bytes = arena_push(parser->arena, mnemonic->string_prefix_count, 1);
+        if (bytes == 0)
+        {
+            asm_fail(parser, location, "arena exhausted");
+        }
+        else if (parser->result.error == 0)
+        {
+            memcpy(bytes, mnemonic->string_prefixes, mnemonic->string_prefix_count);
+            parser->fragments[prefix].bytes = bytes;
+            parser->fragments[prefix].size = mnemonic->string_prefix_count;
+        }
+    }
+    instruction->fragment = asm_fragment(parser, ASM_INSTRUCTION, location);
+    parser->fragments[instruction->fragment].instruction = parser->instruction_count - 1;
+    parser->sections[parser->section].data = false;
+    parser->at = end;
+}
+
 static void asm_instruction(AsmParser* parser, uint32_t end, uint32_t encoding)
 {
     const uint32_t location = parser->tokens[parser->at].start;
@@ -2633,45 +2825,7 @@ static void asm_instruction(AsmParser* parser, uint32_t end, uint32_t encoding)
         AsmInstruction* instruction = &parser->instructions[parser->instruction_count++];
         *instruction = (AsmInstruction){.location = location};
         instruction->request.encoding = encoding;
-        instruction->request.mnemonic = asm_token_text(parser, parser->at++);
-        String8* name = &instruction->request.mnemonic;
-        asm_lock_mnemonic(parser, name, end);
-        asm_prefixed_mnemonic(parser, name, end);
-        instruction->rep_scan = asm_string_mnemonic(parser, name, end);
-        instruction->written = asm_token_text(parser, parser->at - 1);
-        uint8_t string_prefixes[2];
-        const uint32_t string_prefix_count = asm_string_operands(parser, name, end, string_prefixes);
-        const int32_t predicate = asm_compare_predicate(name);
-        uint32_t width = 0;
-        uint32_t source_width = 0;
-        // A complete alias keeps its last letter: jnb, jnl and sal end in suffix letters.
-        bool known = asm_alias(name) || (!parser->options.intel && asm_att_extension(name, &width, &source_width));
-        // Whether the parser checks each operand's width against the suffix's: a move's extension (movzbl, both widths),
-        // the x87's memory width and LEA's destination. Any other suffix the matcher checks against each form.
-        bool checked = width != 0;
-        if (!parser->options.intel && !known && name->length > 1)
-        {
-            // Strip suffixes only when the full mnemonic has no catalogue name, and movq's (mov's 64-bit form) unless an
-            // XMM operand makes it SSE2's. A name whose forms the target refuses is still that instruction's.
-            const uint32_t bucket = x86_match_bucket(parser->index, *name);
-            known = parser->index->names[bucket].pointer != 0 && (!x86_match_name(*name, "movq") || asm_vector_operands(parser, end));
-            if (!known)
-            {
-                bool x87 = false;
-                width = asm_att_suffix(parser->index, name, &x87);
-                source_width = x87 ? width : 0;
-                checked = x87;
-                instruction->suffixed = width != 0 && !x87;
-                asm_alias(name);
-            }
-        }
-        // LEA's memory operand is an address, not a load: its suffix sizes the destination register alone.
-        const bool address = x86_match_name(*name, "lea");
-        checked |= address && width != 0;
-        instruction->suffixed &= !address;
-        // Extension forms describe their source memory width; the destination is fixed by its register class.
-        instruction->request.width = address ? 0 : source_width != 0 ? source_width : width;
-        instruction->branch = asm_branch_mnemonic(*name);
+        const AsmMnemonic mnemonic = asm_instruction_mnemonic(parser, instruction, end);
         uint32_t begins[4];
         uint32_t ends[4];
         uint32_t first = parser->at;
@@ -2725,125 +2879,13 @@ static void asm_instruction(AsmParser* parser, uint32_t end, uint32_t encoding)
                     operand->mode |= BUSTER_X86_MODE_DISP32;
                 }
             }
-            const bool shift = x86_match_name(*name, "shl") || x86_match_name(*name, "shr") || x86_match_name(*name, "sar") || x86_match_name(*name, "rol") || x86_match_name(*name, "ror") || x86_match_name(*name, "shld") || x86_match_name(*name, "shrd");
-            const bool count_register = !parser->options.intel && i == 0 && shift && operand->kind == X86_OPERAND_REGISTER && operand->class == BUSTER_X86_CLASS_GPR8 && operand->reg == 1;
-            if (checked && width != 0 && operand->kind != X86_OPERAND_IMMEDIATE && !count_register && !(address && operand->kind == X86_OPERAND_MEMORY))
-            {
-                const uint32_t expected_width = i == 0 && source_width != 0 ? source_width : width;
-                if (operand->width != 0 && operand->width != expected_width)
-                {
-                    asm_fail(parser, location, "mnemonic suffix and register width disagree");
-                }
-                operand->width = expected_width;
-            }
+            asm_operand_width(parser, instruction, &mnemonic, i, location);
             if (parser->at != ends[i])
             {
                 asm_fail(parser, parser->tokens[parser->at].start, "unsupported operand syntax");
             }
         }
-        // A shift or rotate of one operand shifts it by 1, as GNU as reads `shrl %ecx` (clang's x >> 1): the count written
-        // out, which takes D1's form.
-        static const char* const shifts[] = { "shl", "shr", "sar", "rol", "ror", "rcl", "rcr" };
-        bool shift = false;
-        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(shifts); i += 1)
-        {
-            shift |= x86_match_name(*name, shifts[i]);
-        }
-        // A compare-predicate name's predicate is the immediate (asm_compare_predicate): first in AT&T, last in Intel.
-        if (parser->result.error == 0 && predicate >= 0)
-        {
-            const uint32_t count = instruction->request.count;
-            if (count >= BUSTER_X86_MATCH_OPERANDS)
-            {
-                asm_fail(parser, location, "empty operand or too many operands");
-            }
-            else
-            {
-                const uint32_t at = parser->options.intel ? count : 0;
-                for (uint32_t i = count; i > at; i -= 1)
-                {
-                    instruction->request.operands[i] = instruction->request.operands[i - 1];
-                    instruction->expressions[i] = instruction->expressions[i - 1];
-                }
-                instruction->request.operands[at] = (X86Operand){ .kind = X86_OPERAND_IMMEDIATE, .value = predicate };
-                instruction->expressions[at] = (AsmExpr){ .value = predicate };
-                instruction->request.count = count + 1;
-            }
-        }
-        if (parser->result.error == 0 && shift && instruction->request.count == 1 && instruction->request.operands[0].kind != X86_OPERAND_IMMEDIATE)
-        {
-            const uint32_t count = parser->options.intel ? 1 : 0;
-            instruction->request.operands[1] = instruction->request.operands[0];
-            instruction->expressions[1] = instruction->expressions[0];
-            instruction->request.operands[count] = (X86Operand){ .kind = X86_OPERAND_IMMEDIATE, .value = 1 };
-            instruction->expressions[count] = (AsmExpr){ .value = 1 };
-            instruction->request.count = 2;
-        }
-        if (!parser->options.intel)
-        {
-            for (uint32_t i = 0; i < instruction->request.count / 2; i += 1)
-            {
-                const uint32_t j = instruction->request.count - 1 - i;
-                const X86Operand operand = instruction->request.operands[i];
-                const AsmExpr expression = instruction->expressions[i];
-                instruction->request.operands[i] = instruction->request.operands[j];
-                instruction->expressions[i] = instruction->expressions[j];
-                instruction->request.operands[j] = operand;
-                instruction->expressions[j] = expression;
-            }
-        }
-        asm_x87_operands(parser, &instruction->request);
-        // An exchange of two general registers is commutative: with the accumulator first (Intel's order), its operands
-        // swap, so that the accumulator's one-byte form (90+r) can take it, as GNU as encodes `xchg rax, rcx` (#1134).
-        X86Operand* exchanged = instruction->request.operands;
-        if (encoding == 0 && x86_match_name(*name, "xchg") && instruction->request.count == 2 && exchanged[0].kind == X86_OPERAND_REGISTER && exchanged[1].kind == X86_OPERAND_REGISTER &&
-            exchanged[0].class >= BUSTER_X86_CLASS_GPR16 && exchanged[0].class <= BUSTER_X86_CLASS_GPR64 && exchanged[1].class == exchanged[0].class && exchanged[0].reg == 0 &&
-            exchanged[1].reg != 0)
-        {
-            const X86Operand operand = exchanged[0];
-            const AsmExpr expression = instruction->expressions[0];
-            exchanged[0] = exchanged[1];
-            instruction->expressions[0] = instruction->expressions[1];
-            exchanged[1] = operand;
-            instruction->expressions[1] = expression;
-        }
-        // GNU as gives an instruction the row a `.loc` left waiting (#1115), before its prefixes.
-        asm_line_instruction(parser, location);
-        for (uint32_t i = 0; i < instruction->request.count; i += 1)
-        {
-            instruction->address32 |= instruction->request.operands[i].kind == X86_OPERAND_MEMORY && instruction->request.operands[i].address_size == 4;
-        }
-        if (instruction->address32 && parser->code && parser->result.error == 0)
-        {
-            // Another function's records have no room for the 67: its caller assembles the template whole.
-            parser->directive = true;
-            asm_fail(parser, location, "inline assembly's 32-bit addresses are its unit's");
-        }
-        else if (string_prefix_count != 0 && parser->code)
-        {
-            // Code that another function's records hold has no bytes but its records': its caller assembles it whole.
-            parser->directive = true;
-            asm_fail(parser, location, "inline assembly's string instruction operands that need a prefix are its unit's");
-        }
-        else if (string_prefix_count != 0 && parser->result.error == 0)
-        {
-            const uint32_t prefix = asm_fragment(parser, ASM_BYTES, location);
-            uint8_t* bytes = arena_push(parser->arena, string_prefix_count, 1);
-            if (bytes == 0)
-            {
-                asm_fail(parser, location, "arena exhausted");
-            }
-            else if (parser->result.error == 0)
-            {
-                memcpy(bytes, string_prefixes, string_prefix_count);
-                parser->fragments[prefix].bytes = bytes;
-                parser->fragments[prefix].size = string_prefix_count;
-            }
-        }
-        instruction->fragment = asm_fragment(parser, ASM_INSTRUCTION, location);
-        parser->fragments[instruction->fragment].instruction = parser->instruction_count - 1;
-        parser->sections[parser->section].data = false;
-        parser->at = end;
+        asm_instruction_finish(parser, instruction, &mnemonic, location, encoding, end);
     }
 }
 
@@ -3700,9 +3742,11 @@ static void asm_simple_words_vector(const uint64_t* keys, const uint64_t* length
     }
 }
 
-// Common Intel statements are classified in batches rather than calling the scalar operand grammar for every
-// register and integer. The first uncommon row is retried by asm_instruction; no source is consumed speculatively.
-// State-changing directives and labels delimit batches. A batch gives the requests and fragments asm_instruction would.
+// Common statements are classified in batches rather than calling the scalar operand grammar for every register and
+// integer: Intel's (registers and integers bare), and AT&T's (%-registers and $-integers), whose mnemonics, suffixes and
+// implied operands asm_instruction_mnemonic and asm_instruction_finish read as for any instruction. The first uncommon row
+// is retried by asm_instruction; no source is consumed speculatively. State-changing directives and labels delimit
+// batches. A batch gives the requests and fragments asm_instruction would.
 static bool asm_parse_vector_batch(AsmParser* parser)
 {
     uint32_t row_begin[16];
@@ -3713,10 +3757,14 @@ static bool asm_parse_vector_batch(AsmParser* parser)
     uint64_t descriptors[64];
     uint64_t values[64];
     bool negative[64] = {0};
+    // What each word must be: an AT&T operand's '%' asks for a register and its '$' for an integer; Intel's either.
+    uint8_t wanted[64];
     uint32_t rows = 0;
     uint32_t words = 0;
     uint32_t at = parser->at;
-    bool available = parser->options.intel && !parser->prefix;
+    const bool intel = parser->options.intel;
+    // Registers take a '%' in AT&T's syntax and none in Intel's, the default of each; the other spelling is the grammar's.
+    bool available = intel != parser->prefix;
     while (available && rows < 16 && at < parser->token_count)
     {
         const uint32_t first = at;
@@ -3735,15 +3783,19 @@ static bool asm_parse_vector_batch(AsmParser* parser)
             }
             if (available && at < parser->token_count && operands < 4)
             {
-                const bool sign = parser->tokens[at].kind == '-';
+                const uint16_t sigil = intel ? 0 : parser->tokens[at].kind;
+                available = intel || sigil == '%' || sigil == '$';
+                at += !intel;
+                const bool sign = sigil != '%' && at < parser->token_count && parser->tokens[at].kind == '-';
                 at += sign;
                 const String8 text = asm_token_text(parser, at);
-                available = parser->tokens[at].kind == BUSTER_ASM_WORD && text.length <= 8;
+                available &= at < parser->token_count && parser->tokens[at].kind == BUSTER_ASM_WORD && text.length <= 8;
                 if (available)
                 {
                     memcpy(&keys[words], text.pointer, text.length);
                     lengths[words] = text.length;
                     descriptors[words] = parser->tokens[at].reserved & ~BUSTER_ASM_REGISTER_CACHED;
+                    wanted[words] = sigil == '%' ? X86_OPERAND_REGISTER : sigil == '$' ? X86_OPERAND_IMMEDIATE : 0;
                     negative[words++] = sign;
                     at += 1;
                     operands += 1;
@@ -3776,30 +3828,56 @@ static bool asm_parse_vector_batch(AsmParser* parser)
         bool supported = true;
         for (uint32_t word = operand_begin[row]; word < operand_begin[row + 1]; word += 1)
         {
-            supported &= descriptors[word] != 0 && (!negative[word] || (descriptors[word] & 255) == X86_OPERAND_IMMEDIATE);
+            const uint32_t kind = descriptors[word] & 255;
+            supported &= descriptors[word] != 0 && (!negative[word] || kind == X86_OPERAND_IMMEDIATE) && (wanted[word] == 0 || kind == wanted[word]);
         }
         const String8 mnemonic = asm_token_text(parser, row_begin[row]);
-        // Canonical names only: aliases, branch symbols, width suffixes and other grammar keep their exact path, and so
-        // do the exchange, whose operands asm_instruction may swap, and the shifts and rotates, one operand of which
-        // shifts by 1 there (#1134).
-        const uint32_t bucket = x86_match_bucket(parser->index, mnemonic);
-        const bool named = parser->index->names[bucket].pointer != 0;
-        static const char* const exact[] = { "sal", "xchg", "shl", "shr", "sar", "rol", "ror", "rcl", "rcr" };
-        bool grammar = false;
-        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(exact); i += 1)
+        const uint32_t location = parser->tokens[row_begin[row]].start;
+        AsmInstruction resolved = {.location = location};
+        AsmMnemonic reading = {0};
+        if (intel)
         {
-            grammar |= x86_match_name(mnemonic, exact[i]);
+            // Canonical names only: aliases, branch symbols, width suffixes and other grammar keep their exact path, and
+            // so do the exchange, whose operands asm_instruction may swap, and the shifts and rotates, one operand of
+            // which shifts by 1 there (#1134).
+            const uint32_t bucket = x86_match_bucket(parser->index, mnemonic);
+            const bool named = parser->index->names[bucket].pointer != 0;
+            static const char* const exact[] = { "sal", "xchg", "shl", "shr", "sar", "rol", "ror", "rcl", "rcr" };
+            bool grammar = false;
+            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(exact); i += 1)
+            {
+                grammar |= x86_match_name(mnemonic, exact[i]);
+            }
+            supported &= named && !grammar;
         }
-        supported &= named && !grammar;
+        else if (supported)
+        {
+            // AT&T's mnemonic as asm_instruction reads it, into a record the row takes only if the name took no operand
+            // token and is no branch, string instruction or prefix (a prefix's own statement joins its instruction in
+            // asm_parse), and the catalogue names it.
+            static const char* const prefixes[] = { "lock", "rep", "repe", "repz", "repne", "repnz", "notrack", "bnd" };
+            bool prefix = false;
+            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(prefixes); i += 1)
+            {
+                prefix |= x86_match_name(mnemonic, prefixes[i]);
+            }
+            parser->at = row_begin[row];
+            reading = asm_instruction_mnemonic(parser, &resolved, row_end[row]);
+            const bool named = parser->index->names[x86_match_bucket(parser->index, resolved.request.mnemonic)].pointer != 0;
+            supported = parser->result.error == 0 && parser->at == row_begin[row] + 1 && !prefix && named && !resolved.branch && !resolved.rep_scan && reading.string_prefix_count == 0;
+            parser->at = row_begin[row];
+        }
         if (!supported || parser->instruction_count >= parser->instruction_capacity || object_class_is_zero_fill(parser->sections[parser->section].class))
         {
             break;
         }
-        const uint32_t location = parser->tokens[row_begin[row]].start;
         AsmInstruction* instruction = &parser->instructions[parser->instruction_count++];
-        *instruction = (AsmInstruction){.location = location};
-        instruction->request.mnemonic = mnemonic;
-        instruction->written = mnemonic;
+        *instruction = resolved;
+        if (intel)
+        {
+            instruction->request.mnemonic = mnemonic;
+            instruction->written = mnemonic;
+        }
         instruction->request.count = operand_begin[row + 1] - operand_begin[row];
         for (uint32_t word = operand_begin[row]; word < operand_begin[row + 1]; word += 1)
         {
@@ -3816,16 +3894,31 @@ static bool asm_parse_vector_batch(AsmParser* parser)
             };
             instruction->expressions[operand].value = value;
         }
-        // The x87's operands GNU as leaves out (fxch alone, fadd st), as asm_instruction gives them.
-        asm_x87_operands(parser, &instruction->request);
-        // GNU as gives an instruction the row a `.loc` left waiting (#1115).
-        asm_line_instruction(parser, location);
-        instruction->fragment = asm_fragment(parser, ASM_INSTRUCTION, location);
-        parser->fragments[instruction->fragment].instruction = parser->instruction_count - 1;
-        parser->sections[parser->section].data = false;
+        if (intel)
+        {
+            // The x87's operands GNU as leaves out (fxch alone, fadd st), as asm_instruction gives them.
+            asm_x87_operands(parser, &instruction->request);
+            // GNU as gives an instruction the row a `.loc` left waiting (#1115).
+            asm_line_instruction(parser, location);
+            instruction->fragment = asm_fragment(parser, ASM_INSTRUCTION, location);
+            parser->fragments[instruction->fragment].instruction = parser->instruction_count - 1;
+            parser->sections[parser->section].data = false;
+        }
+        else
+        {
+            for (uint32_t i = 0; parser->result.error == 0 && i < instruction->request.count; i += 1)
+            {
+                asm_operand_width(parser, instruction, &reading, i, location);
+            }
+            asm_instruction_finish(parser, instruction, &reading, location, 0, row_end[row]);
+        }
         parser->at = row_end[row];
         parser->at += parser->at < parser->token_count;
         done += 1;
+        if (parser->result.error != 0)
+        {
+            break;
+        }
     }
     return done != 0;
 }
@@ -3834,7 +3927,7 @@ static void asm_parse(AsmParser* parser)
 {
     while (parser->at < parser->token_count && parser->result.error == 0)
     {
-        if (parser->options.intel && !parser->prefix && asm_parse_vector_batch(parser))
+        if (parser->options.intel != parser->prefix && asm_parse_vector_batch(parser))
         {
             continue;
         }
