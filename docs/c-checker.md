@@ -246,11 +246,16 @@ Both modes use the same checked-reference selection for object publication;
 tests require equal objects for valid inputs. Performance comparisons use the
 default mode, with any lazy-mode measurements reported separately.
 
-Before planning, the compile driver checks whether missing expansion history
-or the existing opaque-reference policy already requires every body: assembly
-or an `alias`, `ifunc` or `cleanup` name. In that case it uses the ordinary
-reader directly, without allocating body records, a mask or binding events.
-This proof does not depend on how complicated a declaration is.
+When assembly, an `alias`, `ifunc` or `cleanup` name, or explicitly disabled
+history requires every body, the driver goes straight to the ordinary reader.
+Only `--time-stages` asks it to finish counting bodies after that decision.
+
+Lazy syntax checks and object compiles can defer macro expansion history just
+as eager compiles do. The planner looks up a file token's system level at its
+source location and a macro token's level in the preprocessor's output runs.
+If a macro invocation spans a system-level change, the runs can be inexact.
+The planner then requests the full history before it selects any body. Debug
+line rows, lazy links and scalar checking still record history up front.
 
 Otherwise the lazy planner first tries a certificate from the completed parser
 tree (#1364). It identifies simple function declarations and their complete
@@ -267,10 +272,16 @@ checks headers and demanded bodies in original source order, and emission
 still follows the checked semantic references. With `--time-stages`, a
 `time-lazy` row reports the route (`eager`, `tree` or `bindings`), scalar-replay token count, body selection, skipped headers,
 references and retained bytes; planning remains charged to `check-input`.
-Use those counters to distinguish an admitted tree plan from a grammar fallback
-when measuring a workload. The new planner's performance requires the approved
-9700X campaign; its structural removal of a replay alone is not a measured
-whole-compilation speedup.
+On the Ryzen 7 9700X, the eager and lazy whole-process medians for #1364
+were 101.76 / 101.73 ms for the CI SQLite object, 68.31 / 68.35 ms for the
+380-header syntax check and 63.96 / 63.93 ms for the mixed-library syntax
+check. Each difference was within the spread of the repeated eager controls.
+With only `<immintrin.h>` and an empty `main`, lazy checking reduced the
+median from 40.59 to 15.52 ms. The campaign used three balanced rounds on
+CPU 2 with the original issue inputs. The three controls took the opaque
+route. On the intrinsic workload, one of 14,837 user-cycle samples in the
+compiler fell on the sparse macro-run search.
+[9700X timings, controls and profile](https://github.com/buster14a/buster-performance/tree/dd263b0b017f3a5d9969ffc0d80a5a0acca51289/docs/measurements/lazy-system-headers-1364-2026-11-24).
 
 Unsupported source constructs produce an explicit diagnostic. `-c` also
 requires the checked program to be representable by the current backend; a
@@ -4298,7 +4309,8 @@ What the lowering covers past scalars (#145's programs):
   has the harness, counters and limitations.
   The lowering's preparation chains each struct's units once, from its first
   member (an anonymous struct's are its own, as clang's), into a column of 2
-  bytes per member: the member's bit in its unit and the unit's bytes. A
+  bytes per member encoding the member's bit in its first eight-byte chunk
+  and the number of bytes covered by the chunks it touches. A
   bit-field access reads its member's, the one its name finds
   (`check_lower_bit_unit_place`). A constant address of a field's lvalue
   (a local's or a global's, the checker's of the field's first byte) is its
@@ -4309,20 +4321,18 @@ What the lowering covers past scalars (#145's programs):
   units: a run's declared type at its first field, which the fields after it
   share while they start before its end (`{ unsigned x : 3, y : 7; unsigned
   short z : 5; }` an `i32` at 0 and an `i16` at 4), and an `ms_struct` union's
-  its declared type. A unit of 9 to 16 bytes (a packed run's `i72` to `i128`)
-  is its first 8 bytes and the rest's pieces, as clang's -O0 code moves it: a
-  field in one of the two takes that part alone, where clang's code moves both,
-  and a field across them both (a packed field of up to 64 bits off a byte
-  boundary in 9 bytes of its own is one, #2999) takes both, joined by shifts
-  on a read and split on a store (`check_lower_bit_wide`, out of line, apart
-  from the tasks' always-inlined store). A local's initializer stores a field
-  through its member's unit too, found by going down the object's elements and
-  members to it (`check_lower_bit_init_unit`), after the object's zeros, as
-  clang's initialization does, but in an object with a volatile part, whose
-  stores are its plan's. A unit wider than 16 bytes, an initializer's cleared
-  bits and `__builtin_dump_struct`'s reads take the bytes that hold the
-  field's bits. A field wider than
-  64 bits (a `_BitInt`'s) is refused. `c_check_program_bit_unit_test.c`
+  its declared type. Units wider than eight bytes are divided into eight-byte
+  chunks from the start of the unit. A shorter final chunk uses the pieces
+  that fit before the end. A field crossing a chunk boundary takes both
+  chunks, joined by shifts on a read and split on a store
+  (`check_lower_bit_wide`). A local initializer clears or sets a bit-field
+  through the unit found by walking its object's elements and members
+  (`check_lower_bit_init_unit`). A dump of a record keeps each bit-field's
+  member ID and uses its unit at the field's offset in the dumped object.
+  Initializers of objects with volatile parts retain their planned accesses.
+  Volatile dumps and volatile member accesses in units wider than 16 bytes
+  use the bytes holding the field's bits. A field wider than 64 bits is
+  refused. `c_check_program_bit_unit_test.c`
   checks each fixture's loads and stores against clang's units and runs them
   against clang's code.
 - **Variable-length arrays.** Their objects live on the stack, as clang's do.

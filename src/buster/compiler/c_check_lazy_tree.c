@@ -299,7 +299,7 @@ static bool check_lazy_tree_eligible(uint32_t flags)
 static bool check_lazy_tree_skippable(const Parser* parser, const Preprocessor* pp, const CheckLazyBody* row, uint32_t first)
 {
     bool valid = (row->flags & BUSTER_CHECK_LAZY_NAMED) == 0 && first < row->declaration && row->declaration < row->begin &&
-                 check_lazy_system(pp, parse_source_index(&parser->tokens, first));
+                 check_lazy_definition_system(pp, parse_source_index(&parser->tokens, first));
     for (uint32_t token = first; valid && token < row->begin; token += 1)
     {
         const uint8_t kind = parser->tokens.kinds[token];
@@ -355,7 +355,7 @@ static CheckLazyStatus check_lazy_tree_plan(CheckLazy* result, const Parser* par
                 if (valid)
                 {
                     uint32_t flags = check_lazy_tree_header(parser, pp, first, begin);
-                    const bool system = check_lazy_system(pp, parse_source_index(&parser->tokens, declaration)) && check_lazy_system(pp, parse_source_index(&parser->tokens, begin));
+                    const bool system = check_lazy_definition_system(pp, parse_source_index(&parser->tokens, declaration)) && check_lazy_definition_system(pp, parse_source_index(&parser->tokens, begin));
                     flags |= system ? BUSTER_CHECK_LAZY_SYSTEM : 0;
                     flags |= (flags & BUSTER_CHECK_LAZY_STATIC) == 0 && ((flags & BUSTER_CHECK_LAZY_INLINE) == 0 || (flags & BUSTER_CHECK_LAZY_EXTERN) != 0) ?
                              BUSTER_CHECK_LAZY_RETAIN : 0;
@@ -373,7 +373,7 @@ static CheckLazyStatus check_lazy_tree_plan(CheckLazy* result, const Parser* par
             }
         }
     }
-    bool opaque = pp != NULL && pp->options.no_history;
+    bool opaque = pp != NULL && check_lazy_missing_history(pp);
     uint32_t occurrences = 0;
     if (valid)
     {

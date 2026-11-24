@@ -3519,6 +3519,7 @@ static void check_program_return_flow(CheckControlWriter* writer, CheckProgramBo
                     }
                     else
                     {
+                        returns |= (fact & BUSTER_CHECK_RETURN_MAY_STOP) != 0;
                         warning_safe &= (fact & BUSTER_CHECK_RETURN_UNKNOWN) == 0;
                     }
                 }
