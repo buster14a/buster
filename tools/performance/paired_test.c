@@ -21,24 +21,62 @@ struct PairFixture
     size_t zero_system_rounds;
     const char *last_warmups;
     bool legacy;
+    bool legacy_receipts;
+    bool imported;
 };
 
 static void paired_fixture_session(FILE *file, const PairPlan *p, PairFixture f, size_t session)
 {
     static const unsigned order[6][3] = {
-        {0,1,2}, {1,2,0}, {2,0,1}, {2,1,0}, {0,2,1}, {1,0,2}
+        {
+            0,
+            1,
+            2
+        },
+        {
+            1,
+            2,
+            0
+        },
+        {
+            2,
+            0,
+            1
+        },
+        {
+            2,
+            1,
+            0
+        },
+        {
+            0,
+            2,
+            1
+        },
+        {
+            1,
+            0,
+            2
+        }
     };
     if (session + 1 == p->sessions && f.last_warmups)
     {
         fputs(f.last_warmups, file);
     }
-    else if (!f.legacy)
+    else if (!f.legacy || f.legacy_receipts)
     {
         fprintf(file, "time-runs: completed warmups: rounds=%zu slots=%zu\n", p->warmups, 3 * p->layouts * p->copies);
     }
     for (size_t r = 0; r < p->rounds; ++r)
     {
-        static const unsigned six_slots[] = {0, 1, 5, 2, 4, 3};
+        static const unsigned six_slots[] = {
+            0,
+            1,
+            5,
+            2,
+            4,
+            3
+        };
         for (size_t j = 0; j < 3 * p->layouts; ++j)
         {
             size_t slot = p->layouts == 2 ? (six_slots[j] + r) % 6 : order[r % 6][j];
@@ -52,7 +90,11 @@ static void paired_fixture_session(FILE *file, const PairPlan *p, PairFixture f,
             {
                 role = order[0][j];
             }
-            double gain[] = {1, f.ratio + (r / p->block_rounds % 2 ? f.noise : -f.noise), f.control};
+            double gain[] = {
+                1,
+                f.ratio + (r / p->block_rounds % 2 ? f.noise : -f.noise),
+                f.control
+            };
             if (!f.missing || r != p->rounds - 1 || j != 2)
             {
                 double wall = f.wall > 0 ? f.wall : 100;
@@ -85,8 +127,8 @@ static void paired_fixture(const char *manifest, const PairPlan *p, PairFixture 
     valid = meta != NULL;
     if (valid)
     {
-        fprintf(meta, "{\"format\":\"buster-benchmark\",\"version\":1,\"id\":\"fixture\",\"kind\":\"measured\",\"status\":\"%s\",\"recorded_at\":\"2026-01-01T00:00:00Z\","
-                      "\"producer\":{\"name\":\"fixture\",\"version\":\"1\"},\"limitations\":[],\"resources\":[", f.status);
+        fprintf(meta, "{\"format\":\"buster-benchmark\",\"version\":1,\"id\":\"fixture\",\"kind\":\"%s\",\"status\":\"%s\",\"recorded_at\":\"2026-01-01T00:00:00Z\","
+                      "\"producer\":{\"name\":\"fixture\",\"version\":\"1\"},\"limitations\":[],\"resources\":[", f.imported ? "imported" : "measured", f.status);
         if (strcmp(f.status, "planned") != 0)
         {
             const char *name = strrchr(raw, '/');
@@ -116,7 +158,7 @@ static void paired_fixture(const char *manifest, const PairPlan *p, PairFixture 
     perf_expect(valid, "write paired fixture");
 }
 
-static void paired_test_report(const PairPlan *plan, const char *manifest, PairStatus expected, size_t units, bool false_alert)
+static bool paired_test_report(const PairPlan *plan, const char *manifest, PairStatus expected, size_t units, bool false_alert)
 {
     PairReport report = {0};
     char *text = NULL;
@@ -125,9 +167,12 @@ static void paired_test_report(const PairPlan *plan, const char *manifest, PairS
     paired_report(report_file, plan, manifest, &report);
     fclose(report_file);
     PerfJson json = {0};
-    perf_expect(perf_json_parse(&json, (PerfBytes){(unsigned char *)text, size}), "machine-readable verdict");
+    PerfBytes bytes = {
+        .data = (unsigned char *)text,
+        .size = size
+    };
+    perf_expect(perf_json_parse(&json, bytes), "machine-readable verdict");
     perf_expect(report.status == expected && report.complete_units == units, "verdict and independent population");
-    perf_expect(report.promotable == (expected == PAIR_PASS), "only a verified measured pass is eligible for promotion");
     if (expected != PAIR_INVALID && expected != PAIR_NONE)
     {
         perf_expect(perf_json_is(&json, perf_json_find(&json, 0, "aa_false_alerts"), false_alert ? "1" : "0"), "observed A/A false alerts");
@@ -135,13 +180,17 @@ static void paired_test_report(const PairPlan *plan, const char *manifest, PairS
     free(text);
     perf_json_free(&json);
     perf_dataset_free(&report.dataset);
+    return report.promotable;
 }
 
 static bool paired_self_test(void)
 {
     char tmp[] = "/tmp/buster-paired-XXXXXX";
     bool valid = mkdtemp(tmp) != NULL;
-    char path[120], a[120], b[120], ledger[120];
+    char path[120];
+    char a[120];
+    char b[120];
+    char ledger[120];
     snprintf(path, sizeof(path), "%s/plan", tmp);
     snprintf(a, sizeof(a), "%s/a", tmp);
     snprintf(b, sizeof(b), "%s/b", tmp);
@@ -157,9 +206,25 @@ static bool paired_self_test(void)
     }
     if (valid)
     {
-        PairFixture f = {.base = 1, .head = 2, .ratio = 1, .control = 1, .status = "complete"};
-        const double ratios[] = {1, 0.90, 1.02, 1.04};
-        const PairStatus expected[] = {PAIR_PASS, PAIR_PASS, PAIR_PASS, PAIR_REGRESSION};
+        PairFixture f = {
+            .base = 1,
+            .head = 2,
+            .ratio = 1,
+            .control = 1,
+            .status = "complete"
+        };
+        const double ratios[] = {
+            1,
+            0.90,
+            1.02,
+            1.04
+        };
+        const PairStatus expected[] = {
+            PAIR_PASS,
+            PAIR_PASS,
+            PAIR_PASS,
+            PAIR_REGRESSION
+        };
         for (size_t i = 0; i < 4; ++i)
         {
             f.ratio = ratios[i];
@@ -169,7 +234,11 @@ static bool paired_self_test(void)
         f.ratio = 1;
         f.legacy = true;
         paired_fixture(a, &p, f);
-        paired_test_report(&p, a, PAIR_INVALID, 6, false);
+        perf_expect(!paired_test_report(&p, a, PAIR_INVALID, 6, false), "legacy measurement cannot promote");
+        f.imported = true;
+        paired_fixture(a, &p, f);
+        perf_expect(!paired_test_report(&p, a, PAIR_PASS, 6, false), "imported v1 replays a pass without promotion");
+        f.imported = false;
         f.legacy = false;
         f.control = 1.04;
         paired_fixture(a, &p, f);
@@ -202,14 +271,48 @@ static bool paired_self_test(void)
         f.noise = 0;
         // First seed. The second revision costs 1.5%, within 2%. Another
         // 1.5% passes against the latest but exceeds 2% against the anchor.
-        const unsigned heads[] = {1, 2, 3, 3, 4};
-        const unsigned bases[] = {1, 1, 2, 2, 2};
-        const double latest_ratio[] = {1, 1.015, 1.015, 1, 1};
-        const double anchor_ratio[] = {1, 1.015, 1.030225, 1, 1};
+        const unsigned heads[] = {
+            1,
+            2,
+            3,
+            3,
+            4,
+            5,
+            5
+        };
+        const unsigned bases[] = {
+            1,
+            1,
+            2,
+            2,
+            2,
+            1,
+            2
+        };
+        const double latest_ratio[] = {
+            1,
+            1.015,
+            1.015,
+            1,
+            1,
+            1,
+            1
+        };
+        const double anchor_ratio[] = {
+            1,
+            1.015,
+            1.030225,
+            1,
+            1,
+            1,
+            1
+        };
         char first_anchor[65] = "";
         char accepted[65] = "";
-        for (size_t i = 0; i < 5; ++i)
+        const size_t attempts = sizeof(heads) / sizeof(*heads);
+        for (size_t i = 0; i < attempts; ++i)
         {
+            f.missing = false;
             f.base = bases[i];
             f.head = heads[i];
             f.ratio = latest_ratio[i];
@@ -218,14 +321,15 @@ static bool paired_self_test(void)
             f.ratio = anchor_ratio[i];
             f.missing = i == 4;
             paired_fixture(b, &p, f);
-            char source[41], event_path[160];
+            char source[41];
+            char event_path[160];
             snprintf(source, sizeof(source), "%040x", heads[i]);
             perf_expect(paired_record(&p, ledger, source, a, b), "append baseline decision");
             perf_expect(paired_record(&p, ledger, source, a, b), "idempotent replay");
             snprintf(event_path, sizeof(event_path), "%s/%08zu.json", ledger, i + 1);
             PerfJson event = {0};
             bool read = paired_load_json(event_path, &event, NULL);
-            perf_expect(read && perf_json_is(&event, perf_json_find(&event, 0, "promoted"), i < 2 ? "true" : "false"), "calibrated complete coverage against both references");
+            perf_expect(read && perf_json_is(&event, perf_json_find(&event, 0, "promoted"), (i < 2 || i == 6) ? "true" : "false"), "calibrated complete coverage against both references");
             if (i == 0)
             {
                 paired_saved_hash(&event, "anchor", first_anchor);
@@ -235,10 +339,19 @@ static bool paired_self_test(void)
                 paired_saved_hash(&event, "latest", accepted);
             }
             perf_expect(perf_json_is(&event, perf_json_find(&event, 0, "anchor"), first_anchor), "immutable anchor");
-            perf_expect(i < 2 || perf_json_is(&event, perf_json_find(&event, 0, "latest"), accepted), "adverse attempts cannot advance baseline");
+            perf_expect(i < 2 || i == 6 || perf_json_is(&event, perf_json_find(&event, 0, "latest"), accepted), "adverse attempts cannot advance baseline");
+            if (i == 5)
+            {
+                perf_expect(perf_json_is(&event, perf_json_find(&event, 0, "decision"), "stale latest reference") &&
+                            perf_json_is(&event, perf_json_find(&event, 0, "adverse"), "false"), "stale passing comparison retains a retryable decision");
+            }
+            if (i == 6)
+            {
+                perf_expect(perf_json_is(&event, perf_json_find(&event, 0, "prior_attempt"), "6"), "fresh accepted comparison links to stale attempt");
+            }
             perf_json_free(&event);
         }
-        for (size_t i = 1; i <= 5; ++i)
+        for (size_t i = 1; i <= attempts; ++i)
         {
             char event[160];
             snprintf(event, sizeof(event), "%s/%08zu.json", ledger, i);
@@ -259,7 +372,13 @@ static bool paired_self_test(void)
         valid = valid && paired_plan(path, &layout) && layout.primary_count == 2;
         if (valid)
         {
-            PairFixture f = {.base = 1, .head = 2, .ratio = 1, .control = 1, .status = "complete"};
+            PairFixture f = {
+                .base = 1,
+                .head = 2,
+                .ratio = 1,
+                .control = 1,
+                .status = "complete"
+            };
             paired_fixture(a, &layout, f);
             paired_test_report(&layout, a, PAIR_PASS, 2, false);
             f.zero_system_rounds = 1;
@@ -269,9 +388,12 @@ static bool paired_self_test(void)
             paired_fixture(a, &layout, f);
             paired_test_report(&layout, a, PAIR_INVALID, 2, false);
             f.zero_system_rounds = 0;
-            const char *bad_warmups[] = {"", "time-runs: completed warmups: rounds=4 slots=6\n",
-                                         "time-runs: completed warmups: rounds=1 slots=5\n",
-                                         "time-runs: completed warmups: rounds=1 slots=6\ntime-runs: completed warmups: rounds=1 slots=6\n"};
+            const char *bad_warmups[] = {
+                "",
+                "time-runs: completed warmups: rounds=4 slots=6\n",
+                "time-runs: completed warmups: rounds=1 slots=5\n",
+                "time-runs: completed warmups: rounds=1 slots=6\ntime-runs: completed warmups: rounds=1 slots=6\n"
+            };
             for (size_t i = 0; i < sizeof(bad_warmups) / sizeof(*bad_warmups); ++i)
             {
                 f.last_warmups = bad_warmups[i];
@@ -287,6 +409,28 @@ static bool paired_self_test(void)
                 f.host = 1;
                 paired_fixture(b, &layout, f);
                 perf_expect(paired_overlap(sink, &layout, a, b), "matched common builds qualify overlap");
+                f.legacy = true;
+                paired_fixture(b, &layout, f);
+                char *bridge = NULL;
+                size_t size = 0;
+                FILE *stream = open_memstream(&bridge, &size);
+                perf_expect(!paired_overlap(stream, &layout, b, a), "unverified v1 warmups limit the bridge");
+                fclose(stream);
+                PerfJson overlap = {0};
+                PerfBytes output = {
+                    .data = (unsigned char *)bridge,
+                    .size = size
+                };
+                bool parsed = perf_json_parse(&overlap, output);
+                perf_expect(parsed && perf_json_count(&overlap, perf_json_find(&overlap, 0, "between_series")) == 4,
+                            "legacy bridge retains absolute comparisons of both common builds");
+                perf_json_free(&overlap);
+                free(bridge);
+                f.legacy_receipts = true;
+                paired_fixture(b, &layout, f);
+                perf_expect(paired_overlap(sink, &layout, b, a), "verified warmups allow a cross-format overlap");
+                perf_expect(!paired_test_report(&layout, b, PAIR_PASS, 2, false), "overlap does not promote an older format");
+                f.legacy = false;
                 f.wall = 110;
                 paired_fixture(b, &layout, f);
                 perf_expect(!paired_overlap(sink, &layout, a, b), "within-series passes cannot hide an environment shift");

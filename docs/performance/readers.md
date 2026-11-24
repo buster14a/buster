@@ -197,8 +197,9 @@ corresponding to the plan's layouts. New `observations` resources use
 `time-runs-v2`. Before its first measured row, each invocation records how
 many warmup rounds completed successfully and how many slots each contained.
 The reader requires exactly one matching receipt per session. Imported
-`time-runs-v1` resources support historical replay. A measured v1 capture
-has unverified warmups and is ineligible for certification or promotion.
+`time-runs-v1` resources support historical replay. Only measured v2 captures are eligible for promotion. A measured v1
+capture without warmup receipts retains its statistics and reports
+`invalid_incomplete`.
 The producer checks source revisions, binary digests and environment before
 timing. Both revisions must share a build recipe fingerprint covering the
 build driver, CMake tree and presets, code generation tools and toolchain setup.
@@ -227,7 +228,10 @@ resulting anchor and latest build IDs. Its exit status indicates whether the
 decision was durably recorded. Read `promoted` for the decision. A directory
 lock serializes writers. An atomic create preserves earlier events. An exact
 retry returns the existing event. A previous adverse attempt for the same
-source prevents promotion by a later favorable retest. Git preserves the
+source prevents promotion by a later favorable retest. If another writer
+advanced the latest reference, a passing pair against a previously accepted
+reference records a stale attempt. Fresh comparisons against the current
+latest and original anchor can then qualify. Git preserves the
 archived event files and both input manifests.
 
 For a changed toolchain, host, corpus, recipe or harness, initialize a new
@@ -235,6 +239,9 @@ series. To establish overlap for a case, run the same common source pair over
 the same relative layouts and plan in both environments, then run
 `paired overlap PLAN.json OLD_MANIFEST NEW_MANIFEST`. Both within-series
 comparisons must qualify. The bridge also checks the paired old/new absolute
-values for each common build against the symmetric primary budgets. Its JSON
+values for each common build against the symmetric primary budgets. For
+matching measured sources and layouts, it reports these absolute comparisons
+across format versions when both within-series statistical tests pass.
+Missing warmup receipts leave the bridge unqualified. Its JSON
 and exit status record overlap qualification for that case. Keep both histories
 and their anchors.

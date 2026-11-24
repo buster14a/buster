@@ -11,6 +11,7 @@ struct PairHistory
     size_t count;
     size_t prior;
     bool adverse;
+    bool accepted_reference;
     size_t duplicate;
     char previous[65];
     char series[65];
@@ -31,7 +32,7 @@ static bool paired_saved_hash(const PerfJson *json, const char *key, char hash[6
     return valid;
 }
 
-static bool paired_history_read(const char *directory, int fd, const char *candidate, const char *request, PairHistory *history)
+static bool paired_history_read(const char *directory, int fd, const char *candidate, const char *request, const char *reference, PairHistory *history)
 {
     DIR *entries = fdopendir(dup(fd));
     bool valid = entries != NULL;
@@ -68,6 +69,7 @@ static bool paired_history_read(const char *directory, int fd, const char *candi
             {
                 history->duplicate = i;
             }
+            history->accepted_reference |= history->latest[0] && strcmp(history->latest, reference) == 0;
             memcpy(history->previous, digest, sizeof(digest));
             if (perf_json_is(&event, perf_json_find(&event, 0, "candidate_source"), candidate))
             {
@@ -102,11 +104,15 @@ static bool paired_record(const PairPlan *p, const char *directory, const char *
     }
     char request[65];
     PerfSha256 hash = perf_sha256_start();
-    valid = valid && perf_sha256_add(&hash, perf_literal(candidate)) && perf_sha256_add(&hash, (PerfBytes){(unsigned char *)reports, size});
+    PerfBytes comparisons = {
+        .data = (unsigned char *)reports,
+        .size = size
+    };
+    valid = valid && perf_sha256_add(&hash, perf_literal(candidate)) && perf_sha256_add(&hash, comparisons);
     perf_sha256_finish(&hash, request);
     int fd = valid ? open(directory, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC) : -1;
     PairHistory history = {0};
-    valid = fd >= 0 && flock(fd, LOCK_EX) == 0 && paired_history_read(directory, fd, candidate, request, &history);
+    valid = fd >= 0 && flock(fd, LOCK_EX) == 0 && paired_history_read(directory, fd, candidate, request, a.builds[0], &history);
     char temp[4096];
     int length = snprintf(temp, sizeof(temp), "%s/.attempt-XXXXXX", directory);
     bool append = valid && history.duplicate == 0;
@@ -122,6 +128,7 @@ static bool paired_record(const PairPlan *p, const char *directory, const char *
         fwrite(reports, 1, size, file);
         bool eligible = a.promotable && b.promotable && strcmp(a.sources[1], candidate) == 0 &&
                         strcmp(a.series, b.series) == 0 && strcmp(a.builds[1], b.builds[1]) == 0;
+        bool stale = false;
         if (history.anchor[0] == 0)
         {
             // Seed a new series only with a measured self-comparison.
@@ -129,7 +136,12 @@ static bool paired_record(const PairPlan *p, const char *directory, const char *
         }
         else
         {
-            eligible = eligible && strcmp(a.series, history.series) == 0 && strcmp(a.builds[0], history.latest) == 0 && strcmp(b.builds[0], history.anchor) == 0;
+            eligible = eligible && strcmp(a.series, history.series) == 0 && strcmp(b.builds[0], history.anchor) == 0;
+            if (eligible && strcmp(a.builds[0], history.latest) != 0)
+            {
+                stale = history.accepted_reference;
+                eligible = false;
+            }
         }
         bool promoted = eligible && !history.adverse;
         if (promoted)
@@ -141,9 +153,9 @@ static bool paired_record(const PairPlan *p, const char *directory, const char *
             }
             memcpy(history.latest, a.builds[1], sizeof(history.latest));
         }
-        const char *decision = promoted ? "accepted" : !eligible ? "coverage, calibration, candidate or reference mismatch" : "prior adverse attempt";
+        const char *decision = promoted ? "accepted" : stale ? "stale latest reference" : !eligible ? "coverage, calibration, candidate or reference mismatch" : "prior adverse attempt";
         fprintf(file, "],\"decision\":\"%s\",\"adverse\":%s,\"promoted\":%s,\"series\":\"%s\",\"anchor\":\"%s\",\"latest\":\"%s\"}\n",
-                decision, eligible ? "false" : "true", promoted ? "true" : "false", history.series, history.anchor, history.latest);
+                decision, (eligible || stale) ? "false" : "true", promoted ? "true" : "false", history.series, history.anchor, history.latest);
         valid = !ferror(file) && fflush(file) == 0 && fsync(output) == 0;
     }
     if (file)
