@@ -146,19 +146,17 @@ static void check_test_program_atomic_accesses(CheckTest* test, const char* clan
         for (uint32_t f = 0; ready && f < count; f += 1)
         {
             const Tier0Function* function = &code.lowered.functions[f];
-            const Tier0Code scalar = tier0_compile_scalar(function, &scratch);
             const Tier0Code vector = tier0_compile(function, &scratch);
-            const bool compiled = scalar.error == TIER0_OK && vector.error == TIER0_OK && scalar.count == vector.count &&
-                                  memcmp(scalar.records, vector.records, (uint64_t)scalar.count * sizeof(X86Instruction)) == 0 &&
+            const bool compiled = vector.error == TIER0_OK && x86_validate(vector.records, vector.count) == vector.count &&
                                   tier0_validate(function).error == TIER0_OK;
-            const CheckTestFences fences = compiled ? check_test_fences_summary(function, &scalar, &scratch) : (CheckTestFences){ 0 };
+            const CheckTestFences fences = compiled ? check_test_fences_summary(function, &vector, &scratch) : (CheckTestFences){ 0 };
             const CheckTestAccesses accesses = check_test_accesses_summary(function);
             const CheckTestAccessCase* expected = &cases[f];
             uint32_t exchanges = 0;
             bool width = true;
-            for (uint32_t r = 0; compiled && r < scalar.count; r += 1)
+            for (uint32_t r = 0; compiled && r < vector.count; r += 1)
             {
-                const X86Instruction record = scalar.records[r];
+                const X86Instruction record = vector.records[r];
                 const uint32_t form = record.form & BUSTER_X86_FORM_NUMBER;
                 if (form >= X86_FORM_XCHG_RM8_R8 && form <= X86_FORM_XCHG_RM64_R64 && (record.mode & BUSTER_X86_MODE_MEMORY) != 0)
                 {

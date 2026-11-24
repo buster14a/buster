@@ -7,7 +7,7 @@ requirements. [Command index](README.md).
 ## Module overview
 
 - `src/buster/compiler/debug.c` emits bounded DWARF 5 function names, ranges
-  and source lines with scalar/vector twins and explicit late address slots.
+  and source lines, four rows a vector, with explicit late address slots.
   `ExecutableOptions.debug` attaches one unit or several (#395), each written
   after the others at its bases (`DebugOutput.bases`) and finalized at its
   functions' TEXT addresses, with nonallocated debug sections and a regular
@@ -25,6 +25,6 @@ requirements. [Command index](README.md).
   finalization. [The debug guide](../../docs/debug.md) records the contract and a function's body's row
   (`DebugFunction.prologue_end`); a unit's rows may name files of their own
   (`DebugUnit.row_files`, #2541: an expanded callee's from another file), which
-  the line program follows by `DW_LNS_set_file` by both paths, test-debug's
-  twins covering a change at every place of a vector group; `streaming.c` makes a unit per 256 functions
+  the line program follows by `DW_LNS_set_file`, test-debug's digest and decoder
+  covering a change at every place of a vector group; `streaming.c` makes a unit per 256 functions
   as they compile.

@@ -843,7 +843,7 @@ static bool check_debug_build(CheckDebug* debug, const CheckProgram* program, co
     debug->output = (DebugOutput){ .line_addresses = addresses, .address_capacity = live };
     // The unit and its borrowed slices stay unchanged across allocation: validate and size once, then emit once.
     DebugPlan plan;
-    valid = valid && addresses != 0 && fields != 0 && debug_prepare(&debug->unit, debug->output.bases, &plan, false) == DEBUG_OK;
+    valid = valid && addresses != 0 && fields != 0 && debug_prepare(&debug->unit, debug->output.bases, &plan) == DEBUG_OK;
     for (uint32_t section = 0; valid && section < BUSTER_DEBUG_SECTIONS; section += 1)
     {
         DebugSection* written = &debug->output.sections[section];

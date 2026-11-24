@@ -2397,7 +2397,7 @@ struct CheckEmitStep
 // after Tier 0 (check_program_emit_code) until one of them fails. The bodies go a group at a time, in three steps (#2874):
 // each body's tier and the stream Tier 0 compiles for it, in order; Tier 0's code of the group's streams together, each
 // of its passes over every one of them before the next (tier0_compile_batch); then each body's code after Tier 0, in
-// order. With --tier1 or the scalar path a group is one body, so that a body's code is whole before the next one's tier
+// order. With --tier1 a group is one body, so that a body's code is whole before the next one's tier
 // is decided, as it was. A group's later bodies are prepared, and compiled by Tier 0, before an earlier one's failure is
 // known: what they left is the failed part's, which a part that goes again makes anew.
 static void check_program_emit_code_half(CheckEmitRun* run, CheckEmitLane* lane, CheckEmitPart* part)
@@ -2405,7 +2405,7 @@ static void check_program_emit_code_half(CheckEmitRun* run, CheckEmitLane* lane,
     const uint32_t end = part->lower.end;
     part->tier0_failed = end;
     part->code_failed = end;
-    const uint32_t group = lane->tier1 != NULL || run->scalar ? 1 : BUSTER_TIER0_BATCH_JOBS;
+    const uint32_t group = lane->tier1 != NULL ? 1 : BUSTER_TIER0_BATCH_JOBS;
     uint32_t first = part->lower.first;
     while (part->lower.stage == CHECK_LOWER_STAGE_NONE && part->tier0_failed == end && first < end)
     {
@@ -2458,7 +2458,7 @@ static void check_program_emit_code_half(CheckEmitRun* run, CheckEmitLane* lane,
                 // entries and locals then put back in terms of its own (tier0_inline_code).
                 step->spliced = naked == 0 && lane->tier0_inline != NULL && check_tier0_inline_body(run, lane, b, lane->code, &step->inlined);
                 step->source = step->spliced ? &step->inlined.function : function;
-                step->batched = naked == 0 && !run->scalar;
+                step->batched = naked == 0;
                 if (step->batched)
                 {
                     step->slot = source_count;
@@ -2513,7 +2513,7 @@ static void check_program_emit_code_half(CheckEmitRun* run, CheckEmitLane* lane,
                     // are written: a naked function's templates have none.
                     const Tier0Function* function = &run->lowered->functions[b];
                     const Tier0Function* source = step->source;
-                    Tier0Code code = naked != 0 ? naked->code : step->batched ? compiled[step->slot] : tier0_compile_scalar(source, lane->code);
+                    Tier0Code code = naked != 0 ? naked->code : compiled[step->slot];
                     if (step->spliced)
                     {
                         tier0_inline_code(&code, function, &step->inlined, lane->code);

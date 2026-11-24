@@ -394,7 +394,7 @@ static bool ir_source_uses_check(const IrFunction* function, Arena* arena, Arena
 // per function that fails. `print` names a function to print the IR of, or is null.
 // Each lowering goes into its own arena and each promotion into another, which mustn't hold its input (ssa_ir.c).
 static void ir_source_check(IrSourceTotals* totals, const IrSourceFile* file, const char* name, const char* print, bool allow_simd, bool dominators, FILE* graphs, Arena* output,
-                            Arena* twin_output, Arena* promoted_output, Arena* text_output, Arena* scratch, bool benchmark_dataflow, Tier0BenchmarkCounters counters)
+                            Arena* promoted_output, Arena* text_output, Arena* scratch, bool benchmark_dataflow, Tier0BenchmarkCounters counters)
 {
     uint64_t entries = 0;
     uint64_t instructions = 0;
@@ -682,7 +682,7 @@ static int ir_source_tests_command(int count, char** arguments)
         ir_source_prepare(&file, files[i], options, option_count, &lowered, &arena, false, false);
         if (file.status == IR_SOURCE_PREPARED)
         {
-            ir_source_check(&totals, &file, files[i], print, simd, dominators, graphs, &output, &twin_output, &promoted, &text_output, &scratch, benchmark_dataflow, counters);
+            ir_source_check(&totals, &file, files[i], print, simd, dominators, graphs, &output, &promoted, &text_output, &scratch, benchmark_dataflow, counters);
         }
         else
         {

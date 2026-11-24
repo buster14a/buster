@@ -69,6 +69,7 @@
     ENTRY(POISON_ARENAS, "--poison-arenas") \
     ENTRY(PREDEFINES, "--predefines") \
     ENTRY(PROVISIONAL_SELECTION, "--provisional-selection") \
+    ENTRY(ROOT_IMAGE_EQ, "--root-image=") \
     ENTRY(SCALAR, "--scalar") \
     ENTRY(SELECTION_CENSUS, "--selection-census") \
     ENTRY(SHARED_PARTS, "--shared-parts") \

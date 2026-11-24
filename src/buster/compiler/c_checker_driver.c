@@ -12148,6 +12148,10 @@ struct CheckDriverCommand
     // --poison-arenas, #152's test option: the lanes of several units overwrite what each unit left in their arenas
     // with a pattern, before the next unit reuses them (c_checker_units.c).
     bool poison_arenas;
+    // --root-image=on|off (#3070): whether the lanes of several units keep their preprocessor's state after the
+    // predefines and the command line for their later units to start from (PPRoot); on unless the option says off, which
+    // is how the tests and the measurements compare a command with it and without.
+    bool root_image;
     // --selection-census (#2536's step 2.1): the candidates' references beside the exact ones, and their selection where
     // they differ, reported on stderr (check_driver_selection_census).
     bool selection_census;
@@ -15161,6 +15165,8 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     // --poison-arenas, --shared-parts and --units-memory=BYTES: #152's, #777's and #1109's test options
     // (CheckDriverCommand's).
     bool poison_arenas = false;
+    bool root_image = true;
+    bool invalid_root_image = false;
     bool selection_census = false;
     bool provisional_selection = false;
     bool windowed_loop = false;
@@ -15635,6 +15641,12 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         {
             shared_parts = true;
         }
+        else if (match.joined == C_OPTION_ROOT_IMAGE_EQ)
+        {
+            const char* mode = arguments[i] + 13;
+            root_image = strcmp(mode, "off") != 0;
+            invalid_root_image |= strcmp(mode, "on") != 0 && strcmp(mode, "off") != 0;
+        }
         else if (match.joined == C_OPTION_ATTESTED_EQ)
         {
             const char* mode = arguments[i] + 11;
@@ -15817,7 +15829,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     const bool arguments_ready = filtered != NULL && inputs != NULL && libraries.names != NULL && libraries.directories != NULL && linker_ready;
     invalid_lanes |= pinned_cpus_seen && (!lanes->every_lane || pinned_cpu_count != lanes->lanes);
     bool parsed = reserved && arguments_ready && linker_valid && !runtime_path_refused && !pie_conflict && codegen.error == CHECK_REQUEST_ACCEPTED && !missing_value &&
-                  !invalid_lanes && !invalid_id_order && !invalid_units_memory && !invalid_attested && !invalid_helper_forms && !invalid_tier1_schedule && !invalid_tier1_passes && pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
+                  !invalid_lanes && !invalid_id_order && !invalid_units_memory && !invalid_attested && !invalid_root_image && !invalid_helper_forms && !invalid_tier1_schedule && !invalid_tier1_passes && pp_parse_options((int)filtered_count, filtered, &options, &arena, &path, &output, &markers);
     if (parsed && (stdin_count > 1 || invalid_stdin))
     {
         fprintf(stderr, "error: standard input may appear once and requires -x c, assembler or assembler-with-cpp when compiling\n");
@@ -15956,6 +15968,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .id_ordered = id_ordered,
         .id_order = id_order,
         .poison_arenas = poison_arenas,
+        .root_image = root_image,
         .selection_census = selection_census,
         .provisional_selection = provisional_selection,
         .windowed_loop = windowed_loop,
@@ -16028,7 +16041,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     }
     else if (!parsed)
     {
-        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--check-transitions] [--node-window | --node-window-assignments | --node-window-constants] [--node-bodies] [--dump-typed] [--dump-static] [-flazy-system-headers] [--deferred-bodies | --no-deferred-bodies] [--attested=on|verify|off] [--attested-memo=DIRECTORY] [--lower-all] [--poison-arenas] [--shared-parts] [--units-memory=BYTES] [--lanes N] [--lane-cpus LIST] "
+        fprintf(stderr, "usage: compiler [check] [--scalar] [--verify] [--check-transitions] [--node-window | --node-window-assignments | --node-window-constants] [--node-bodies] [--dump-typed] [--dump-static] [-flazy-system-headers] [--deferred-bodies | --no-deferred-bodies] [--attested=on|verify|off] [--attested-memo=DIRECTORY] [--root-image=on|off] [--lower-all] [--poison-arenas] [--shared-parts] [--units-memory=BYTES] [--lanes N] [--lane-cpus LIST] "
                         "[--worker-budget N] [--time-stages] [--id-order N] [--tier1 [--tier1-strict] [--tier1-report] [--tier1-refusals] [--tier1-function-sizes] [--tier1-no-rematerialize] [--tier1-gvn] [--tier1-no-lifetimes] [--tier1-schedule=none|post|pre] [--tier1-passes=LIST]] [--helper-report] [--helper-forms=LIST] [-fsyntax-only | -c | -S] [-o file] [-lNAME] [-LDIR] [preprocessor options] file.c...\n");
         fprintf(stderr, "note: -O flags set preprocessor optimization macros but do not select Tier 1; Tier 0 is the default, and --tier1 opts into Tier 1 (with per-function Tier 0 fallback)\n");
     }

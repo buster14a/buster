@@ -40,16 +40,15 @@
 // registers hold other values) go to tier0_emit_deferred, which computes their lengths before the prefix sum and writes
 // their records at the places it reserved.
 //
-// Two paths make the same records: tier0_compile, whose fusion, depths, templates and hole blocks are computed 64
-// entries at a time in AVX-512 and whose expansion stores a template's four records at once with one byte permute, and
-// tier0_compile_scalar, its twin and the tests' oracle, one entry at a time, which builds each record field by field
-// from the templates' specifications rather than from their compiled bytes. Homes, the frame and the deferred entries
-// are shared: they are per function or per local, not per entry. After expansion both run the immediates' form choice
-// (#221's x86_choose_forms and its twin): every record with an immediate takes the shortest form that keeps its value
-// and the flags its template reads.
+// tier0_compile computes the fusion, depths, templates and hole blocks 64 entries at a time in AVX-512, and its
+// expansion stores a template's four records at once with one byte permute. Homes, the frame and the deferred entries
+// are per function or per local, not per entry. After expansion it runs the immediates' form choice (#221's
+// x86_choose_forms): every record with an immediate takes the shortest form that keeps its value and the flags its
+// template reads. Its scalar twin, tier0_compile_scalar, was deleted (#2972); the tests check its records against clang
+// and by running them, and pin them with frozen digests.
 //
 // Entry points: tier0_initialize (builds the templates; requires x86_encoder_initialize and x86_semantics_initialize),
-// tier0_compile, tier0_compile_scalar and tier0_validate (the stream's rules, for the tests and for debugging). Like
+// tier0_compile and tier0_validate (the stream's rules, for the tests and for debugging). Like
 // x86_encode and size_branches, the compile paths are the code generator's internal functions: they take a function
 // tier0_validate accepts and check nothing about it in their loops. Files that use this one include it after
 // x86_64_encoder.c, lane.c, link.c, x86_semantics.c, c_types.c and calling_convention.c; every function in it is
@@ -62,8 +61,8 @@
 //   - Registers: the depth tables, the homes' registers and the condition codes.
 //   - Templates: the sources (BUSTER_TIER0_SOURCE_*), Tier0RecordSpec, the variants (BUSTER_TIER0_VARIANT_*), Tier0Template,
 //     the tables (tier0_templates, tier0_slots), the builder (tier0_template_*) and tier0_initialize.
-//   - Fusion and depths: the kinds' shapes (tier0_shapes), Tier0Entries (the per-entry columns both paths fill),
-//     tier0_labels, tier0_fuse_scalar.
+//   - Fusion and depths: the kinds' shapes (tier0_shapes), Tier0Entries (the per-entry columns the front fills,
+//     tier0_vector_front).
 //   - Homes and the frame: Tier0Frame, tier0_assign_homes, tier0_layout_frame.
 //   - Holes and expansion: tier0_holes_scalar, tier0_expand_scalar.
 //   - The deferred entries: tier0_emit_deferred (calls, division, shifts), with its parallel moves.
@@ -213,7 +212,7 @@
 //     on x86-64, which every order takes: the object takes the desired value where it holds the expected one, and the
 //     old value is pushed either way, so that the producer compares it with the expected one for the success. A
 //     consumer keeps it as an atomic read/modify/write's barrier, and its local as a use of it (the references that
-//     give a local its home: tier0_count_references). Tier 0 defers it (tier0_emit_atomic_cas); the C producer's
+//     give a local its home: tier0_count_references_vector). Tier 0 defers it (tier0_emit_atomic_cas); the C producer's
 //     compare-exchanges of a native object (c_check_program_atomic.c's plans).
 // A function with ALLOCA, STACK_SAVE, STACK_RESTORE or FRAME_ADDRESS has a frame pointer, rbp, which then neither a depth
 // nor a home takes: its integer stack has one depth fewer. So has a function whose frame is realigned (an object, or a call's
@@ -773,9 +772,9 @@ struct Tier0Function
     // the interrupted code's registers, which its prologue saves before its entry gives rdi and rsi its parameters.
     uint8_t interrupt;
     // Whether the prologue realigns the stack to 16 bytes at least (#1447, x86's force_align_arg_pointer, LLVM's
-    // stackrealign), as a frame whose objects need more does (tier0_frame_alignment): its caller, an interrupt handler or
-    // code of another ABI, may leave rsp misaligned. Its objects are then aligned whatever rsp was; its incoming stack
-    // arguments stay where the caller put them, read through rbp.
+    // stackrealign), as a frame whose objects need more does (tier0_frame_alignment_vector): its caller, an interrupt
+    // handler or code of another ABI, may leave rsp misaligned. Its objects are then aligned whatever rsp was; its
+    // incoming stack arguments stay where the caller put them, read through rbp.
     bool realign_stack;
     // Whether the function's target has AVX (#3335), which a front end gives from its target's features: its code then
     // has the VEX forms of Tier 0's legacy SSE records (tier0_vex, x86_vex_forms_tier0), and a vzeroupper before each
@@ -879,8 +878,8 @@ struct Tier0Home
 // offsets, where each entry's code starts in bytes, which source rows give a debugger (debug.c, #395). Without it,
 // entry_records is null and entry_count 0. With Tier0Function.choice_requests, the `choice_count` requests the form
 // choice took (x86_choose_forms's): each one's record before the choice (its template's form, the row's widest
-// immediate), and its row, value and context; without it they are null and 0. `deferred` counts the entries the vector
-// path left to tier0_emit_deferred (the scalar path counts the same ones), and `deep` those among them whose values
+// immediate), and its row, value and context; without it they are null and 0. `deferred` counts the entries left to
+// tier0_emit_deferred, and `deep` those among them whose values
 // went to the deep slots (tier0_select_deep). `label_records` has a record index for each of
 // Tier0Function.label_entries, label_count of them in their order (0 for a function without them): the label's first
 // record. The frame is the one tier0_emit_prologue made, for its unwind tables (unwind_tier0_frame, #395): the
@@ -979,8 +978,6 @@ static __attribute__((unused)) Tier0Code tier0_compile(const Tier0Function* func
 // Compiles `count` functions, codes[i] the code tier0_compile gives functions[i], each pass over a batch of them before
 // the next pass (#2874). A function that fails may leave what it pushed in `output`.
 static __attribute__((unused)) void tier0_compile_batch(const Tier0Function* const* functions, uint32_t count, Arena* output, Tier0Code* codes);
-// The same, an entry at a time: the twin and oracle, with identical results.
-static __attribute__((unused)) Tier0Code tier0_compile_scalar(const Tier0Function* function, Arena* output);
 // Whether the function keeps the typed stream's rules (the kinds, classes and values, operands and depths, targets and
 // the stacks at them, locals and calls): the lowering's check of every function it lowers, and the tests'. The vector
 // path, which leaves to the scalar validator whatever it doesn't take, so that a refusal is always the scalar's.
@@ -1845,9 +1842,9 @@ static bool tier0_call_valid(const Tier0Function* function, uint32_t c)
     const AbiReturn result = function->calls[c].result;
     const uint32_t object = function->call_result_objects != 0 ? function->call_result_objects[c] : 0;
     const uint64_t stack_bytes = function->calls[c].stack_bytes;
-    // The registers the call's arguments take, as a register set (BUSTER_TIER0_XMM's). The outgoing area starts at rsp, a
-    // multiple of the frame's alignment at the call: 16, or the most a call's area needs past it, to which the frame is
-    // realigned (tier0_frame_alignment).
+    // The registers the call's arguments take, as a register set (BUSTER_TIER0_XMM's). The outgoing area starts at rsp,
+    // a multiple of the frame's alignment at the call: 16, or the most a call's area needs past it, to which the frame
+    // is realigned (tier0_frame_alignment_vector).
     uint32_t taken = 0;
     bool valid = (uint64_t)first + count <= function->argument_count && function->calls[c].stack_alignment_log2 <= BUSTER_TIER0_MAX_OBJECT_ALIGNMENT_LOG2;
     // An asm body's arguments (#1839) are values in the registers its template finds them in: any general register but
@@ -2080,13 +2077,14 @@ struct Tier0RecordSpec
 #define BUSTER_TIER0_ABSORB_REACH 4
 #define BUSTER_TIER0_VARIANTS 32
 
-// A template: up to four records, as specifications (for the scalar expansion and the passes after expansion) and
-// compiled (for the vector expansion: the records' static bytes, each byte's hole in the hole block, and which bytes take
-// their hole). Its holes: K is the value of entry `k_offset` back (BUSTER_TIER0_NO_OFFSET: none), times the value of
-// entry `k_scale` back when there is one (a pointer addition's element size); A is the home of the local entry
-// `a_offset` back reads, and B the home of entry `b_offset` back's (without one, the entry's own local's). `required_depth` is the integer depth its fixed registers need (BUSTER_TIER0_ANY_DEPTH: any);
-// at another, the entry goes to tier0_emit_deferred. `reach` is how far above the entry's depth its registers go on each
-// stack (3 for R0 or X0, 2 for R1, 1 for R2, 0 for none), and `clobbers` the fixed registers it writes.
+// A template: up to four records, as specifications (for the deep entries' expansion and the passes after expansion)
+// and compiled (for the vector expansion: the records' static bytes, each byte's hole in the hole block, and which
+// bytes take their hole). Its holes: K is the value of entry `k_offset` back (BUSTER_TIER0_NO_OFFSET: none), times the
+// value of entry `k_scale` back when there is one (a pointer addition's element size); A is the home of the local entry
+// `a_offset` back reads, and B the home of entry `b_offset` back's (without one, the entry's own local's).
+// `required_depth` is the integer depth its fixed registers need (BUSTER_TIER0_ANY_DEPTH: any); at another, the entry
+// goes to tier0_emit_deferred. `reach` is how far above the entry's depth its registers go on each stack (3 for R0 or
+// X0, 2 for R1, 1 for R2, 0 for none), and `clobbers` the fixed registers it writes.
 #define BUSTER_TIER0_TEMPLATE_RECORDS 4
 #define BUSTER_TIER0_NO_OFFSET 0xff
 #define BUSTER_TIER0_ANY_DEPTH 0xff
@@ -3975,22 +3973,10 @@ static uint32_t tier0_kind_by_access(uint32_t kind, uint32_t access)
 _Static_assert(BUSTER_TYPED_GLOBAL == 4 && BUSTER_TYPED_GLOBAL_ADDRESS == 5 && BUSTER_TYPED_STORE_GLOBAL == 32 && BUSTER_TYPED_SET_GLOBAL == 33,
                "tier0_kind_by_access's order of the global kinds");
 
-// The kind fusion keys an entry of kind `kind` and value `symbol` by before its fusions: a global kind's for its
-// symbol's access (tier0_kind_by_access), the entry's kind otherwise. `access` and `count` are the function's column and
-// its symbols, read once per function (the fusion's byte stores may alias the function's fields under
-// -fno-strict-aliasing, so reads through the function would load them again for every entry), or 0 and 0 in the
-// fusion's copy for functions without a column, where the lookup folds away. A symbol past the column is direct, as
-// tier0_validate requires none to be.
-static uint32_t tier0_access_kind(uint32_t kind, uint64_t symbol, const uint8_t* access, uint32_t count)
-{
-    const bool reached = count != 0 && tier0_global_kind(kind) && symbol < count;
-    return reached ? tier0_kind_by_access(kind, access[symbol] & (BUSTER_TIER0_ACCESSES - 1)) : kind;
-}
-
-// The per-entry columns both paths fill, which the tests compare: each entry's key (its template's kind, class and
-// variant), whether a later entry absorbs it, its effects on the two stacks (with its absorbed entries'), the depths
-// before it, its template (or ABSORBED or DEFERRED; with HOME_DEPENDENT until the homes are known), its records' count
-// and its first record's index.
+// The per-entry columns the front fills (tier0_vector_front) and the passes after it: each entry's key (its template's
+// kind, class and variant), whether a later entry absorbs it, its effects on the two stacks (with its absorbed
+// entries'), the depths before it, its template (or ABSORBED or DEFERRED; with HOME_DEPENDENT until the homes are
+// known), its records' count and its first record's index.
 typedef struct Tier0Entries Tier0Entries;
 struct Tier0Entries
 {
@@ -4026,12 +4012,11 @@ struct Tier0Entries
     uint8_t* deep;
     uint32_t* deep_depths;
     uint32_t* deep_floating_depths;
-    // The mask stack (#179), 0 in a function without masks: each entry's depth before it (tier0_vector_mask_depths and
-    // tier0_mask_depths_scalar), below BUSTER_TIER0_MAX_MASK_DEPTH (both refuse a deeper one), and the
-    // most masks any entry leaves or finds on it.
+    // The mask stack (#179), 0 in a function without masks: each entry's depth before it (tier0_vector_mask_depths),
+    // below BUSTER_TIER0_MAX_MASK_DEPTH (it refuses a deeper one), and the most masks any entry leaves or finds on it.
     uint8_t* mask_depths;
     uint32_t mask_top;
-    // The labels, a bit per entry (tier0_labels's, or tier0_vector_labels's), for emission's looks at an entry's operands'
+    // The labels, a bit per entry (tier0_vector_labels's), for emission's looks at an entry's operands'
     // producers (tier0_int128_product); 0 where a caller of the passes has none.
     const uint64_t* labels;
     // The asm goto body call rows that branch straight to their labels (tier0_asm_direct, #2351), a bit per entry; 0 for
@@ -4115,22 +4100,6 @@ static void tier0_label_entries(const Tier0Function* function, uint64_t* labels)
     }
 }
 
-// The entries a branch or a jump goes to, a bit each (the bit past the last entry is the function's end), into
-// `labels`, which has room for count + 1 bits and is zero.
-static void tier0_labels(const Tier0Function* function, uint64_t* labels)
-{
-    for (uint32_t i = 0; i < function->count; i += 1)
-    {
-        const uint8_t kind = function->kinds[i];
-        if (kind >= BUSTER_TYPED_BRANCH_FALSE && kind <= BUSTER_TYPED_JUMP_VALUE)
-        {
-            const uint64_t target = function->values[i];
-            labels[target >> 6] |= 1ull << (target & 63);
-        }
-    }
-    tier0_label_entries(function, labels);
-}
-
 // Which stack a class's values live on: 0 for none (VOID), 1 for the integer stack, 2 for the floating one.
 // The stack a class's values take: 1 the integer one (and the memory classes' and vectors', in their slots), 2 the
 // floating one, and 0 none: VOID's, and a mask's (#179), whose stack is its own (Tier0Entries.mask_depths).
@@ -4194,29 +4163,10 @@ static void tier0_raw_effects(const Tier0Function* function, uint32_t i, int32_t
     *floating = counts[2];
 }
 
-// The class a kind's templates are keyed by: a compare's operands' (the entry before it), the entry's own otherwise.
-static uint32_t tier0_key_class(uint32_t kind, uint32_t class, uint32_t operand)
-{
-    return kind >= BUSTER_TYPED_EQ && kind <= BUSTER_TYPED_GE ? operand : class;
-}
-
 static uint16_t tier0_slot(uint32_t kind, uint32_t class, uint32_t variant)
 {
     return tier0_slots[tier0_slot_bases[(kind & (BUSTER_TYPED_KIND_LIMIT - 1)) * BUSTER_TYPED_CLASS_LIMIT + (class & (BUSTER_TYPED_CLASS_LIMIT - 1))] +
                        (variant & (BUSTER_TIER0_VARIANTS - 1))];
-}
-
-// The variant code of a fusion for a kind: CONVERT's carry its source class.
-static uint32_t tier0_kind_variant(uint32_t kind, uint32_t operand, uint32_t variant)
-{
-    uint32_t result = variant;
-    if (kind == BUSTER_TYPED_CONVERT)
-    {
-        result = variant == BUSTER_TIER0_VARIANT_HOME ? operand | BUSTER_TIER0_VARIANT_CONVERT_HOME
-                 : variant == BUSTER_TIER0_VARIANT_PLAIN ? operand
-                                                          : BUSTER_TIER0_VARIANTS - 1;
-    }
-    return result;
 }
 
 static bool tier0_fits_int32(int64_t value)
@@ -4224,65 +4174,7 @@ static bool tier0_fits_int32(int64_t value)
     return value >= INT32_MIN && value <= INT32_MAX;
 }
 
-// Whether `kind`, keyed by `class`, takes the constant `value` as an immediate: any 32-bit pattern for a 1- to 4-byte
-// operation, a sign-extended 32-bit one for an 8-byte one (but `mov r, imm` takes any), a shift's count up to 255, an
-// index whose product with the element's size `scale` fits 32 bits.
-static bool tier0_constant_fits(uint32_t kind, uint32_t class, uint64_t value, uint64_t scale)
-{
-    bool fits = tier0_class_bytes(class) < 8 || tier0_fits_int32((int64_t)value);
-    if (kind == BUSTER_TYPED_SHL || kind == BUSTER_TYPED_SHR)
-    {
-        fits = value <= 255;
-    }
-    else if (kind == BUSTER_TYPED_PTR_ADD)
-    {
-        // The index fits 32 bits and the size is below 2^31, so that their product can't overflow: it must fit too.
-        const int64_t product = (int64_t)value * (int64_t)scale;
-        fits = tier0_fits_int32((int64_t)value) && scale <= INT32_MAX && tier0_fits_int32(product);
-    }
-    else if (kind == BUSTER_TYPED_DISCARD || kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_STORE_GLOBAL)
-    {
-        fits = true;
-    }
-    return fits;
-}
-
-// Whether a pointer addition's element size is a SIB scale, and which.
-static bool tier0_sib_scale(uint64_t size, uint32_t* log2)
-{
-    const bool sib = size == 1 || size == 2 || size == 4 || size == 8;
-    *log2 = size == 8 ? 3 : size == 4 ? 2 : size == 2 ? 1 : 0;
-    return sib;
-}
-
-static void tier0_absorb(Tier0Entries* entries, uint32_t consumer, uint32_t absorbed)
-{
-    entries->integer_effects[consumer] = (int8_t)(entries->integer_effects[consumer] + entries->integer_effects[absorbed]);
-    entries->floating_effects[consumer] = (int8_t)(entries->floating_effects[consumer] + entries->floating_effects[absorbed]);
-    entries->integer_effects[absorbed] = 0;
-    entries->floating_effects[absorbed] = 0;
-    entries->absorbed[absorbed] = 1;
-}
-
-// Whether entry j tests the value before it against zero (#2877): NE or EQ that fused its constant, a zero no jump
-// arrives at. The constant is an integer's (a fused one is), so the tested value is the entry before the constant's.
-static bool tier0_is_test(const Tier0Function* function, const uint64_t* labels, const Tier0Entries* entries, uint32_t j)
-{
-    return (function->kinds[j] == BUSTER_TYPED_NE || function->kinds[j] == BUSTER_TYPED_EQ) && entries->variants[j] == BUSTER_TIER0_VARIANT_CONST &&
-           function->values[j - 1] == 0 && !tier0_label(labels, j - 1);
-}
-
-// Whether entry j is a compare that a branch behind its tests can take: its operands on the stack or a leaf fusion's,
-// with the templates that leave its flags to the branch's jump.
-static bool tier0_tested_compare(const Tier0Function* function, const Tier0Entries* entries, uint32_t j)
-{
-    const uint8_t kind = function->kinds[j];
-    return kind >= BUSTER_TYPED_EQ && kind <= BUSTER_TYPED_GE && entries->variants[j] <= BUSTER_TIER0_VARIANT_HOME_HOME &&
-           tier0_slot(kind, entries->key_classes[j], BUSTER_TIER0_VARIANT_FLAGS + entries->variants[j]) != BUSTER_TIER0_SLOT_UNSUPPORTED &&
-           tier0_slot(kind, entries->key_classes[j], BUSTER_TIER0_VARIANT_JUMP_FALSE) != BUSTER_TIER0_SLOT_UNSUPPORTED;
-}
-
-// Whether entry i takes a last operand whose class both paths read from the entry before it (its stack in
+// Whether entry i takes a last operand whose class the compile reads from the entry before it (its stack in
 // tier0_raw_effects, and the entry's template key and variant): a kind whose shape has one, but RETURN of nothing. A
 // call reads its own arguments' classes.
 static bool tier0_takes_last(const Tier0Function* function, uint32_t i)
@@ -4291,220 +4183,9 @@ static bool tier0_takes_last(const Tier0Function* function, uint32_t i)
     return tier0_shapes[kind].last == BUSTER_TIER0_STACK_OPERAND && !(kind == BUSTER_TYPED_RETURN && function->classes[i] == BUSTER_TYPED_CLASS_VOID);
 }
 
-// Phase 1, an entry at a time: each consumer takes the entries its windows allow (they are all behind it, and no two
-// consumers want the same one), and gets its key. The vector path computes the same columns with masks. `access` and
-// `access_count` are the function's access column and its symbols (tier0_access_kind), or 0 and 0 without one.
-static inline __attribute__((always_inline)) void tier0_fuse_entries(const Tier0Function* function, const uint64_t* labels, Tier0Entries* entries,
-                                                                    const uint8_t* access, uint32_t access_count)
-{
-    const uint8_t* kinds = function->kinds;
-    const uint8_t* classes = function->classes;
-    const uint64_t* values = function->values;
-    for (uint32_t i = 0; i < function->count; i += 1)
-    {
-        const uint8_t kind = kinds[i];
-        const uint8_t class = classes[i];
-        const uint8_t operand = i > 0 ? classes[i - 1] : BUSTER_TYPED_CLASS_VOID;
-        uint32_t key_kind = tier0_access_kind(kind, values[i], access, access_count);
-        uint32_t key_class = tier0_key_class(kind, class, operand);
-        uint32_t variant = tier0_kind_variant(kind, operand, BUSTER_TIER0_VARIANT_PLAIN);
-        int32_t integer = 0;
-        int32_t floating = 0;
-        tier0_raw_effects(function, i, &integer, &floating);
-        entries->integer_effects[i] = (int8_t)integer;
-        entries->floating_effects[i] = (int8_t)floating;
-        entries->absorbed[i] = 0;
-        const bool here = tier0_label(labels, i);
-        const bool before = i > 0 && tier0_label(labels, i - 1);
-        const bool sequential = (kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET) && tier0_class_integer(class) &&
-                                 values[i] == (BUSTER_TYPED_ACCESS_ATOMIC | BUSTER_TYPED_FENCE_SEQ_CST);
-        // The entry's own variants.
-        uint32_t log2 = 0;
-        if (kind == BUSTER_TYPED_CONST && tier0_class_floating(class) && values[i] == 0)
-        {
-            variant = BUSTER_TIER0_VARIANT_CONST;
-        }
-        else if (kind == BUSTER_TYPED_PTR_ADD && tier0_sib_scale(values[i], &log2))
-        {
-            variant = BUSTER_TIER0_VARIANT_INDEX(log2);
-        }
-        else if (kind == BUSTER_TYPED_PTR_ADD && values[i] > INT32_MAX)
-        {
-            variant = BUSTER_TIER0_VARIANT_WIDE_SCALE;
-        }
-        else if (kind == BUSTER_TYPED_RETURN && i + 1 == function->count)
-        {
-            variant = BUSTER_TIER0_VARIANT_LAST;
-        }
-        else if (sequential)
-        {
-            variant = BUSTER_TIER0_VARIANT_ATOMIC;
-        }
-        // A local and a constant as a compare's or a multiplication's operands; or a leaf as the last operand.
-        const bool has_last = tier0_shapes[kind].last == BUSTER_TIER0_STACK_OPERAND && !(kind == BUSTER_TYPED_RETURN && class == BUSTER_TYPED_CLASS_VOID);
-        const bool binary = tier0_shapes[kind].first != BUSTER_TIER0_STACK_NONE;
-        const uint64_t scale = kind == BUSTER_TYPED_PTR_ADD ? values[i] : 1;
-        bool leaf_taken = false;
-        if (i >= 2 && !here && !before && (kind == BUSTER_TYPED_MUL || (kind >= BUSTER_TYPED_EQ && kind <= BUSTER_TYPED_GE)) && kinds[i - 1] == BUSTER_TYPED_CONST &&
-            kinds[i - 2] == BUSTER_TYPED_LOCAL && tier0_class_integer(operand) && tier0_constant_fits(kind, key_class, values[i - 1], 1) &&
-            tier0_slot(kind, key_class, BUSTER_TIER0_VARIANT_HOME_CONST) != BUSTER_TIER0_SLOT_UNSUPPORTED)
-        {
-            variant = BUSTER_TIER0_VARIANT_HOME_CONST;
-            tier0_absorb(entries, i, i - 1);
-            tier0_absorb(entries, i, i - 2);
-            leaf_taken = true;
-        }
-        else if (i >= 2 && !here && !before && kind >= BUSTER_TYPED_EQ && kind <= BUSTER_TYPED_GE && kinds[i - 1] == BUSTER_TYPED_LOCAL &&
-                 kinds[i - 2] == BUSTER_TYPED_LOCAL && tier0_slot(kind, key_class, BUSTER_TIER0_VARIANT_HOME_HOME) != BUSTER_TIER0_SLOT_UNSUPPORTED)
-        {
-            variant = BUSTER_TIER0_VARIANT_HOME_HOME;
-            tier0_absorb(entries, i, i - 1);
-            tier0_absorb(entries, i, i - 2);
-            leaf_taken = true;
-        }
-        if (!leaf_taken && !sequential && i >= 1 && !here && has_last)
-        {
-            const uint8_t previous = kinds[i - 1];
-            const bool constant = previous == BUSTER_TYPED_CONST && (tier0_class_integer(operand) || kind == BUSTER_TYPED_DISCARD) &&
-                                  tier0_constant_fits(kind, key_class, values[i - 1], scale);
-            const uint32_t fused = constant ? BUSTER_TIER0_VARIANT_CONST : previous == BUSTER_TYPED_LOCAL ? BUSTER_TIER0_VARIANT_HOME : BUSTER_TIER0_VARIANT_PLAIN;
-            const uint32_t fused_variant = tier0_kind_variant(kind, operand, fused);
-            if (fused != BUSTER_TIER0_VARIANT_PLAIN && tier0_slot(key_kind, key_class, fused_variant) != BUSTER_TIER0_SLOT_UNSUPPORTED)
-            {
-                variant = fused_variant;
-                tier0_absorb(entries, i, i - 1);
-                leaf_taken = true;
-            }
-        }
-        (void)binary;
-        // A store's address: the pointer addition before its fused value.
-        if (kind == BUSTER_TYPED_SET && leaf_taken && i >= 2 && kinds[i - 2] == BUSTER_TYPED_PTR_ADD && !entries->absorbed[i - 2] && !before)
-        {
-            const uint32_t address = entries->variants[i - 2];
-            uint32_t fused = BUSTER_TIER0_VARIANTS;
-            if (address >= BUSTER_TIER0_VARIANT_INDEX(0) && address <= BUSTER_TIER0_VARIANT_INDEX(3))
-            {
-                const uint32_t s = address - BUSTER_TIER0_VARIANT_INDEX(0);
-                fused = variant == BUSTER_TIER0_VARIANT_CONST ? BUSTER_TIER0_VARIANT_INDEX_CONST(s) : BUSTER_TIER0_VARIANT_INDEX_HOME(s);
-            }
-            else if (address == BUSTER_TIER0_VARIANT_CONST && variant == BUSTER_TIER0_VARIANT_HOME)
-            {
-                fused = BUSTER_TIER0_VARIANT_OFFSET_HOME;
-            }
-            if (fused < BUSTER_TIER0_VARIANTS && tier0_slot(kind, key_class, fused) != BUSTER_TIER0_SLOT_UNSUPPORTED)
-            {
-                variant = fused;
-                tier0_absorb(entries, i, i - 2);
-            }
-        }
-        // A load's address.
-        if (kind == BUSTER_TYPED_LOAD && i >= 1 && !here && kinds[i - 1] == BUSTER_TYPED_PTR_ADD)
-        {
-            const uint32_t address = entries->variants[i - 1];
-            uint32_t fused = BUSTER_TIER0_VARIANTS;
-            if (address >= BUSTER_TIER0_VARIANT_INDEX(0) && address <= BUSTER_TIER0_VARIANT_INDEX(3))
-            {
-                fused = address;
-            }
-            else if (address == BUSTER_TIER0_VARIANT_CONST)
-            {
-                fused = BUSTER_TIER0_VARIANT_OFFSET;
-            }
-            if (fused < BUSTER_TIER0_VARIANTS && tier0_slot(kind, key_class, fused) != BUSTER_TIER0_SLOT_UNSUPPORTED)
-            {
-                variant = fused;
-                tier0_absorb(entries, i, i - 1);
-            }
-        }
-        // A branch's compare: the one right before it, or the one whose value the entries between test against zero
-        // (#2877), once (a compare, CONST 0, NE or EQ: how the lowering writes a condition) or twice (a negation, or a
-        // macro's `!= 0`, before that). A compare's value is 0 or 1, so a test of it is the compare, or with EQ its
-        // opposite: the compare, already this function's, leaves its flags (its variant becomes the flags' one) and
-        // the branch is the jump on them, with the tests. A test's first operand is the value the entry before its
-        // constant made: a compare's operands are of one class (validation's rule), and the fused constant is an
-        // integer's.
-        if ((kind == BUSTER_TYPED_BRANCH_FALSE || kind == BUSTER_TYPED_BRANCH_TRUE) && i >= 1 && !here && kinds[i - 1] >= BUSTER_TYPED_EQ &&
-            kinds[i - 1] <= BUSTER_TYPED_GE)
-        {
-            const bool test = i >= 3 && tier0_is_test(function, labels, entries, i - 1);
-            // Behind two tests the compare is five back, and the entry three back, a compare too, is the first test.
-            const bool twice = test && i >= 5 && tier0_is_test(function, labels, entries, i - 3) && tier0_tested_compare(function, entries, i - 5);
-            const bool once = test && tier0_tested_compare(function, entries, i - 3);
-            const uint32_t base = kind == BUSTER_TYPED_BRANCH_TRUE ? BUSTER_TIER0_VARIANT_BRANCH_TRUE : BUSTER_TIER0_VARIANT_BRANCH_FALSE;
-            const uint32_t fused = base + entries->variants[i - 1];
-            if (once || twice)
-            {
-                // The branch is taken where the compare holds if it is BRANCH_TRUE, turned by each EQ among the tests.
-                const uint32_t compare = twice ? i - 5 : i - 3;
-                const bool holds = (kind == BUSTER_TYPED_BRANCH_TRUE) != ((kinds[i - 1] == BUSTER_TYPED_EQ) != (twice && kinds[i - 3] == BUSTER_TYPED_EQ));
-                entries->variants[compare] = (uint8_t)(BUSTER_TIER0_VARIANT_FLAGS + entries->variants[compare]);
-                key_kind = kinds[compare];
-                key_class = entries->key_classes[compare];
-                variant = holds ? BUSTER_TIER0_VARIANT_JUMP_TRUE : BUSTER_TIER0_VARIANT_JUMP_FALSE;
-                tier0_absorb(entries, i, i - 1);
-                if (twice)
-                {
-                    tier0_absorb(entries, i, i - 3);
-                }
-            }
-            else if (entries->variants[i - 1] <= BUSTER_TIER0_VARIANT_HOME_HOME &&
-                     tier0_slot(kinds[i - 1], entries->key_classes[i - 1], fused) != BUSTER_TIER0_SLOT_UNSUPPORTED)
-            {
-                key_kind = kinds[i - 1];
-                key_class = entries->key_classes[i - 1];
-                variant = fused;
-                tier0_absorb(entries, i, i - 1);
-            }
-        }
-        // x = x op v.
-        if (kind == BUSTER_TYPED_SET_LOCAL && i >= 3 && !here && !before && !tier0_label(labels, i - 2))
-        {
-            const uint8_t op = kinds[i - 1];
-            const uint32_t inner = entries->variants[i - 1];
-            const bool rmw_kind = (op >= BUSTER_TYPED_AND && op <= BUSTER_TYPED_SHR) || op == BUSTER_TYPED_ADD || op == BUSTER_TYPED_SUB;
-            const uint32_t fused = inner == BUSTER_TIER0_VARIANT_CONST ? BUSTER_TIER0_VARIANT_RMW_CONST : BUSTER_TIER0_VARIANT_RMW_HOME;
-            if (rmw_kind && (inner == BUSTER_TIER0_VARIANT_CONST || inner == BUSTER_TIER0_VARIANT_HOME) && kinds[i - 3] == BUSTER_TYPED_LOCAL &&
-                !entries->absorbed[i - 3] && values[i - 3] == values[i] && classes[i - 3] == class && classes[i - 1] == class &&
-                tier0_slot(op, class, fused) != BUSTER_TIER0_SLOT_UNSUPPORTED)
-            {
-                key_kind = op;
-                key_class = class;
-                variant = fused;
-                tier0_absorb(entries, i, i - 1);
-                tier0_absorb(entries, i, i - 3);
-            }
-        }
-        entries->key_kinds[i] = (uint8_t)key_kind;
-        entries->key_classes[i] = (uint8_t)key_class;
-        entries->variants[i] = (uint8_t)variant;
-    }
-}
-
-// Phase 1 for a function with an access column: tier0_fuse_entries's copy with the lookups. It is a function of its
-// own because inlined beside the other copy it cost that one two more register moves per entry.
-static __attribute__((noinline)) void tier0_fuse_columned(const Tier0Function* function, const uint64_t* labels, Tier0Entries* entries)
-{
-    tier0_fuse_entries(function, labels, entries, function->symbol_access, function->symbol_count);
-}
-
-// Phase 1 by tier0_fuse_entries's copies, as the encoder's loops are made (encode_batches): a function without an access
-// column gets the one whose lookups fold away, inlined into tier0_compile_scalar as the loop was before the column.
-static void tier0_fuse_scalar(const Tier0Function* function, const uint64_t* labels, Tier0Entries* entries)
-{
-    if (function->symbol_access != 0)
-    {
-        tier0_fuse_columned(function, labels, entries);
-    }
-    else
-    {
-        tier0_fuse_entries(function, labels, entries, 0, 0);
-    }
-}
-
 // The X86 entries' effects, from their rows' operands and results, in place of the shape's that phase 1 gives them (one
-// push of their class): a pass of its own, which both paths make after phase 1 over a function with vectors alone, so
-// that the others' fusion has no look for the kind (in tier0_raw_effects, a compare that cost every entry two
-// instructions on the scalar path and one on the vector one). No X86 entry absorbs or is absorbed: their keys have no
+// push of their class): a pass of its own, made after P1 over a function with vectors alone, so that the others' fusion
+// has no look for the kind. No X86 entry absorbs or is absorbed: their keys have no
 // fused variants.
 static __attribute__((noinline)) void tier0_operation_effects(const Tier0Function* function, Tier0Entries* entries)
 {
@@ -4522,20 +4203,6 @@ static __attribute__((noinline)) void tier0_operation_effects(const Tier0Functio
             entries->integer_effects[i] = (int8_t)counts[1];
             entries->floating_effects[i] = (int8_t)counts[2];
         }
-    }
-}
-
-// Phase 2: the depths before each entry, the effects' exclusive prefix sums.
-static void tier0_depths_scalar(const Tier0Function* function, Tier0Entries* entries)
-{
-    int32_t integer = 0;
-    int32_t floating = 0;
-    for (uint32_t i = 0; i < function->count; i += 1)
-    {
-        entries->depths[i] = (uint8_t)integer;
-        entries->floating_depths[i] = (uint8_t)floating;
-        integer += entries->integer_effects[i];
-        floating += entries->floating_effects[i];
     }
 }
 
@@ -4570,25 +4237,6 @@ static int32_t tier0_mask_effect(const Tier0Function* function, uint32_t i)
     return effect;
 }
 
-// The mask stack's depth before each entry (Tier0Entries.mask_depths), its effects' exclusive prefix sum, and the most
-// masks on it at once (mask_top), for a function with masks: tier0_vector_mask_depths' twin. Both paths make it after
-// phase 2, as a column of its own, so that a function without masks counts nothing for them. Returns TIER0_OK, or
-// TIER0_ERROR_DEPTH where an entry finds BUSTER_TIER0_MAX_MASK_DEPTH masks or more: unlike the other stacks, masks
-// retain byte depths, which would wrap past 255 (a depth of 256 read as 0, its slot and register the first mask's).
-static Tier0Error tier0_mask_depths_scalar(const Tier0Function* function, Tier0Entries* entries)
-{
-    int32_t depth = 0;
-    int32_t deepest = 0;
-    for (uint32_t i = 0; i < function->count; i += 1)
-    {
-        entries->mask_depths[i] = (uint8_t)depth;
-        deepest = depth > deepest ? depth : deepest;
-        depth += tier0_mask_effect(function, i);
-    }
-    entries->mask_top = (uint32_t)(depth > deepest ? depth : deepest);
-    return deepest >= BUSTER_TIER0_MAX_MASK_DEPTH ? TIER0_ERROR_DEPTH : TIER0_OK;
-}
-
 // ---------------------------------------------------------------------------------------------------------------------
 // Homes and the frame
 
@@ -4617,14 +4265,15 @@ _Static_assert(sizeof(Tier0Home) == 8, "a home is a hole block's eight bytes");
 // multiple of 16 at every entry.
 //
 // A function whose objects or calls' outgoing areas need more than 16 bytes' alignment (`alignment_log2`, 0 for none:
-// tier0_frame_alignment) has a realigned frame: rbp pushed and pointed at the push, the callee-saved registers pushed, the
-// frame reserved, then rsp rounded down to the alignment (`and rsp, -alignment`), which leaves rbp at a distance no one
-// knows from it. Its places are then addressed from rsp with no bias, or with `moves` from r15 (`based`), pushed with
-// the callee-saved registers and set to rsp after the realignment, since the body moves rsp: an allocation then rounds
-// its bytes up to the frame's alignment, so that rsp keeps it. Its incoming places (stack parameters' homes, an
-// aggregate's incoming bytes, the variadic overflow area) are addressed from rbp, past the return address. `depth_count`
-// is the integer depths the frame leaves the stack (tier0_integer_depth_count), and the incoming area starts at
-// [`incoming_base` + `incoming`]: rsp's, past the frame, the pushes and the return address, or rbp's in a realigned frame.
+// tier0_frame_alignment_vector) has a realigned frame: rbp pushed and pointed at the push, the callee-saved registers
+// pushed, the frame reserved, then rsp rounded down to the alignment (`and rsp, -alignment`), which leaves rbp at a
+// distance no one knows from it. Its places are then addressed from rsp with no bias, or with `moves` from r15
+// (`based`), pushed with the callee-saved registers and set to rsp after the realignment, since the body moves rsp: an
+// allocation then rounds its bytes up to the frame's alignment, so that rsp keeps it. Its incoming places (stack
+// parameters' homes, an aggregate's incoming bytes, the variadic overflow area) are addressed from rbp, past the return
+// address. `depth_count` is the integer depths the frame leaves the stack (tier0_integer_depth_count), and the incoming
+// area starts at [`incoming_base` + `incoming`]: rsp's, past the frame, the pushes and the return address, or rbp's in
+// a realigned frame.
 typedef struct Tier0Frame Tier0Frame;
 struct Tier0Frame
 {
@@ -4774,8 +4423,8 @@ static uint32_t tier0_depth_registers(int32_t integer_top, int32_t floating_top)
 
 // A tail call whose result goes through a hidden pointer passes the function's own on, parameter 0's (tier0_emit_call's
 // tail), and so does a call whose result object is that pointer's target (BUSTER_TIER0_RESULT_HIDDEN, #2684,
-// tier0_emit_hidden_pointer), which so has a home: one reference per such call. Both counts' (tier0_count_references),
-// for a function with tail calls or result objects alone, out of line.
+// tier0_emit_hidden_pointer), which so has a home: one reference per such call. The references' count's
+// (tier0_count_references_vector), for a function with tail calls or result objects alone, out of line.
 static __attribute__((noinline)) void tier0_hidden_references(const Tier0Function* function, uint32_t* references)
 {
     for (uint32_t c = 0; function->local_count != 0 && c < function->call_count; c += 1)
@@ -4786,44 +4435,31 @@ static __attribute__((noinline)) void tier0_hidden_references(const Tier0Functio
     }
 }
 
-// Each local's references: its LOCAL, LOCAL_ADDRESS, STORE_LOCAL and SET_LOCAL entries (`references` has local_count), and
-// the hidden pointer's that calls pass on (tier0_hidden_references).
-static void tier0_count_references(const Tier0Function* function, uint32_t* references)
+static __mmask64 tier0_lanes(int64_t first, uint32_t count);
+
+// `count` bytes from `bytes` cleared 64 at a time, the last 64's under a mask: a small function's columns take a few
+// lines, which a call of the C library's memset cost more than (#2972).
+static inline __attribute__((always_inline)) void tier0_clear(void* bytes, uint64_t count)
 {
-    const uint8_t* kinds = function->kinds;
-    const uint64_t* values = function->values;
-    memset(references, 0, function->local_count * sizeof(uint32_t));
-    for (uint32_t i = 0; i < function->count; i += 1)
+    uint8_t* at = bytes;
+    for (uint64_t first = 0; first < count; first += 64)
     {
-        const uint8_t kind = kinds[i];
-        if (kind == BUSTER_TYPED_LOCAL || kind == BUSTER_TYPED_LOCAL_ADDRESS || kind == BUSTER_TYPED_STORE_LOCAL || kind == BUSTER_TYPED_SET_LOCAL)
-        {
-            references[values[i]] += 1;
-        }
-        else if (kind == BUSTER_TYPED_ATOMIC_CAS)
-        {
-            // A compare-exchange reads its address from the local its value names (#1059), so that a parameter whose
-            // only use it is still has its home and its incoming register's save.
-            references[values[i] >> BUSTER_TYPED_CAS_LOCAL_SHIFT] += 1;
-        }
-    }
-    if (function->call_tails != 0 || function->call_result_objects != 0)
-    {
-        tier0_hidden_references(function, references);
+        const uint64_t left = count - first;
+        const __mmask64 lanes = left >= 64 ? ~UINT64_C(0) : _bzhi_u64(~UINT64_C(0), (uint32_t)left);
+        _mm512_mask_storeu_epi8(at + first, lanes, _mm512_setzero_si512());
     }
 }
 
-static __mmask64 tier0_lanes(int64_t first, uint32_t count);
-
-// tier0_count_references for the vector path: the referring entries of 64 at a time as a mask (vpshufbitqmb of their
-// kinds in the five kinds' bitset), then a count per set bit, without a branch per entry: an ATOMIC_CAS's local is its
-// value's bits from BUSTER_TYPED_CAS_LOCAL_SHIFT, the others' their whole value.
+// Each local's references: its LOCAL, LOCAL_ADDRESS, STORE_LOCAL and SET_LOCAL entries (`references` has local_count),
+// and the hidden pointer's that calls pass on (tier0_hidden_references). The referring entries of 64 at a time as a
+// mask (vpshufbitqmb of their kinds in the five kinds' bitset), then a count per set bit, without a branch per entry:
+// an ATOMIC_CAS's local is its value's bits from BUSTER_TYPED_CAS_LOCAL_SHIFT, the others' their whole value.
 static void tier0_count_references_vector(const Tier0Function* function, uint32_t* references)
 {
     const uint8_t* kinds = function->kinds;
     const uint64_t* values = function->values;
     const uint32_t count = function->count;
-    memset(references, 0, function->local_count * sizeof(uint32_t));
+    tier0_clear(references, (uint64_t)function->local_count * sizeof(uint32_t));
     const uint64_t kinds_referring = 1ull << BUSTER_TYPED_LOCAL | 1ull << BUSTER_TYPED_LOCAL_ADDRESS | 1ull << BUSTER_TYPED_STORE_LOCAL | 1ull << BUSTER_TYPED_SET_LOCAL |
                                      1ull << BUSTER_TYPED_ATOMIC_CAS;
     const __m512i referring = _mm512_set1_epi64((int64_t)kinds_referring);
@@ -4849,42 +4485,6 @@ static void tier0_count_references_vector(const Tier0Function* function, uint32_
 // reference order can take one, whatever the clobbers. Keep those prefixes instead of sorting every local (#664).
 #define BUSTER_TIER0_HOME_CANDIDATES 16u
 _Static_assert(BUSTER_TIER0_CALLER_SAVED_DEPTHS + BUSTER_TIER0_CALLEE_SAVED <= BUSTER_TIER0_HOME_CANDIDATES, "the bounded prefix covers every general home");
-
-static uint32_t tier0_register_locals(const Tier0Function* function, const Tier0Home* homes, const uint32_t* references, uint32_t* order)
-{
-    uint32_t count = 0;
-    for (uint32_t kind = 0; kind < 2; kind += 1)
-    {
-        uint32_t counts[BUSTER_TIER0_HOME_CANDIDATES] = { 0 };
-        uint32_t indices[BUSTER_TIER0_HOME_CANDIDATES] = { 0 };
-        #pragma clang loop vectorize(disable) interleave(disable) unroll(disable)
-        for (uint32_t local = 0; local < function->local_count; local += 1)
-        {
-            const uint32_t reference = references[local];
-            const bool eligible = !homes[local].is_register && (function->local_flags[local] & BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) == 0 &&
-                                  tier0_class_floating(function->local_classes[local]) == (kind != 0);
-            if (eligible && reference > counts[BUSTER_TIER0_HOME_CANDIDATES - 1])
-            {
-                uint32_t at = BUSTER_TIER0_HOME_CANDIDATES - 1;
-                #pragma clang loop vectorize(disable) interleave(disable) unroll(disable)
-                while (at > 0 && reference > counts[at - 1])
-                {
-                    counts[at] = counts[at - 1];
-                    indices[at] = indices[at - 1];
-                    at -= 1;
-                }
-                counts[at] = reference;
-                indices[at] = local;
-            }
-        }
-        for (uint32_t at = 0; at < BUSTER_TIER0_HOME_CANDIDATES && counts[at] != 0; at += 1)
-        {
-            order[count] = indices[at];
-            count += 1;
-        }
-    }
-    return count;
-}
 
 // The same bounded prefixes, with 16-local eligibility and threshold masks and register-resident insertion. Locals
 // arrive by index, so a new key precedes only strictly smaller counts: equal keys retain their original index order.
@@ -5045,34 +4645,9 @@ static bool tier0_object_parameters(const Tier0Function* function)
     return objects;
 }
 
-// The log2 of the alignment a function's frame needs past 16 bytes, to which the prologue realigns it
-// (Tier0Frame.alignment_log2), or 0 for none (16 bytes' for a force_align_arg_pointer function's, Tier0Function.realign_stack,
-// which the frame realigns whatever it needs): the most its objects need and the most its calls' outgoing areas need
-// (AbiCall.stack_alignment_log2, which an argument aligned past 16 raises). An aggregate parameter that keeps its
-// incoming bytes rather than living in the frame (tier0_parameter_in_place) is aligned to 16 at most, so that every
-// object may count. Out of line, once per function, before selection, whose integer depths it decides; the vector
-// path's twin is tier0_frame_alignment_vector.
-static __attribute__((noinline)) uint32_t tier0_frame_alignment(const Tier0Function* function)
-{
-    uint32_t log2 = BUSTER_TIER0_FRAME_ALIGNMENT_LOG2;
-    #pragma clang loop vectorize(disable) interleave(disable) unroll(disable)
-    for (uint32_t l = 0; l < function->local_count && function->local_sizes != 0; l += 1)
-    {
-        const uint32_t alignment = function->local_sizes[l] != 0 ? function->local_alignments[l] : 0;
-        log2 = alignment > log2 ? alignment : log2;
-    }
-    #pragma clang loop vectorize(disable) interleave(disable) unroll(disable)
-    for (uint32_t c = 0; c < function->call_count; c += 1)
-    {
-        const uint32_t alignment = function->calls[c].stack_alignment_log2;
-        log2 = alignment > log2 ? alignment : log2;
-    }
-    return log2 > BUSTER_TIER0_FRAME_ALIGNMENT_LOG2 ? log2 : function->realign_stack ? BUSTER_TIER0_FRAME_ALIGNMENT_LOG2 : 0;
-}
-
-// tier0_frame_alignment for the vector path: the objects' alignments 16 locals at a time (their bytes loaded under the
-// mask of the locals with sizes) and the calls' 4 at a time (each one's stack_alignment_log2, the low byte of its second
-// dword), as dwords whose most is the answer.
+// The frame's alignment past 16 bytes, if it needs one (its log2, 0 otherwise): the objects' alignments 16 locals at a
+// time (their bytes loaded under the mask of the locals with sizes) and the calls' 4 at a time (each one's
+// stack_alignment_log2, the low byte of its second dword), as dwords whose most is the answer.
 static __attribute__((noinline)) uint32_t tier0_frame_alignment_vector(const Tier0Function* function)
 {
     _Static_assert(sizeof(AbiCall) == 16 && offsetof(AbiCall, stack_alignment_log2) == 4, "4 calls in 64 bytes, each one's alignment the low byte of its second dword");
@@ -5103,10 +4678,8 @@ static __attribute__((noinline)) uint32_t tier0_frame_alignment_vector(const Tie
 // every local whose address is taken, get frame slots; a parameter on the stack keeps its incoming slot, unless it takes
 // a register, which the prologue loads from that slot. `references` (local_count) holds each local's references, and
 // `order` (2 * BUSTER_TIER0_HOME_CANDIDATES) is scratch for the bounded eligible prefixes by kind.
-static void tier0_assign_homes(const Tier0Function* function, Tier0Frame* frame, Tier0Home* homes, const uint32_t* references, uint32_t* order, bool vector)
+static void tier0_assign_homes(const Tier0Function* function, Tier0Frame* frame, Tier0Home* homes, const uint32_t* references, uint32_t* order)
 {
-    (void)vector;
-
     const uint32_t locals = function->local_count;
     // The registers parameters arrive in: no other local takes one, so the prologue's moves never overwrite a source. An
     // aggregate's parts arrive in both of a location's registers (a SPLIT one's in one of them).
@@ -5157,9 +4730,9 @@ static void tier0_assign_homes(const Tier0Function* function, Tier0Frame* frame,
             }
         }
     }
-    // The eligible prefixes by references, most first (`order`); for the vector path and up to 64 locals, by their
-    // ranks (tier0_assign_registers_vector).
-    const bool ranked = BUSTER_VECTOR_PATH(vector) && locals <= 64;
+    // The eligible prefixes by references, most first (`order`); for up to 64 locals, by their ranks
+    // (tier0_assign_registers_vector).
+    const bool ranked = locals <= 64;
     uint32_t candidates = 0;
     if (ranked)
     {
@@ -5167,7 +4740,7 @@ static void tier0_assign_homes(const Tier0Function* function, Tier0Frame* frame,
     }
     else
     {
-        candidates = vector ? tier0_register_locals_vector(function, homes, references, order) : tier0_register_locals(function, homes, references, order);
+        candidates = tier0_register_locals_vector(function, homes, references, order);
     }
     for (uint32_t k = 0; k < candidates; k += 1)
     {
@@ -5328,19 +4901,6 @@ static uint64_t tier0_frame_objects_vector(const Tier0Function* function, const 
     return offset;
 }
 
-// Whether a function with vectors holds a VECTOR value, which its frame's slots (Tier0Frame.vectors, 64 bytes per depth)
-// take: an entry of class VECTOR, the value every VECTOR operand of a row is. A function whose X86 entries are scalar
-// alone (an asm statement's placed in its caller, #1059; an x86 builtin's of general registers or masks) has none.
-static bool tier0_vector_slots(const Tier0Function* function)
-{
-    bool found = false;
-    for (uint32_t i = 0; !found && i < function->count; i += 1)
-    {
-        found = function->classes[i] == BUSTER_TYPED_CLASS_VECTOR;
-    }
-    return found;
-}
-
 // tier0_vector_slots for the vector path: 64 entries' classes at a time.
 static bool tier0_vector_slots_vector(const Tier0Function* function)
 {
@@ -5354,10 +4914,8 @@ static bool tier0_vector_slots_vector(const Tier0Function* function)
     return found;
 }
 
-static bool tier0_layout_frame(const Tier0Function* function, Tier0Frame* frame, Tier0Home* homes, const uint32_t* references, bool vector)
+static bool tier0_layout_frame(const Tier0Function* function, Tier0Frame* frame, Tier0Home* homes, const uint32_t* references)
 {
-    (void)vector;
-
     const bool object_parameters = frame->object_parameters;
     uint64_t outgoing = 0;
     for (uint32_t c = 0; c < function->call_count; c += 1)
@@ -5420,40 +4978,10 @@ static bool tier0_layout_frame(const Tier0Function* function, Tier0Frame* frame,
         frame->variadic_area = valid ? (uint32_t)offset : 0;
         offset += BUSTER_ABI_SAVE_AREA_BYTES;
     }
-    for (uint32_t l = 0; l < function->local_count && !BUSTER_VECTOR_PATH(vector); l += 1)
-    {
-        const bool address_taken = (function->local_flags[l] & BUSTER_TYPED_LOCAL_ADDRESS_TAKEN) != 0;
-        const uint32_t role = function->local_flags[l] & BUSTER_TYPED_LOCAL_ADDRESS_ONLY;
-        const bool anchor = role == BUSTER_TYPED_LOCAL_REGISTER_SAVE_AREA || role == BUSTER_TYPED_LOCAL_OVERFLOW_ARG_AREA;
-        const bool on_stack = l < function->parameter_count && function->parameters[l].kind == BUSTER_ABI_LOCATION_STACK;
-        if (!homes[l].is_register && (references[l] != 0 || address_taken) && !on_stack && !anchor && !tier0_is_object(function, l))
-        {
-            valid = valid && offset <= INT32_MAX;
-            homes[l].displacement = valid ? (int32_t)offset : 0;
-            homes[l].reg = X86_REGISTER_RSP;
-            homes[l].mode = BUSTER_X86_MEMORY_BASE;
-            offset += role == BUSTER_TYPED_LOCAL_VA_LIST ? sizeof(AbiVaList) : BUSTER_ABI_SLOT_BYTES;
-        }
-    }
     bool aligned = false;
-    for (uint32_t l = 0; l < function->local_count && !BUSTER_VECTOR_PATH(vector); l += 1)
-    {
-        const bool in_place = object_parameters && l < function->parameter_count && tier0_parameter_in_place(function, l);
-        if (tier0_is_object(function, l) && !in_place)
-        {
-            const uint64_t alignment = 1ull << function->local_alignments[l];
-            offset = (offset + alignment - 1) & ~(alignment - 1);
-            valid = valid && offset <= INT32_MAX;
-            homes[l].displacement = valid ? (int32_t)offset : 0;
-            homes[l].reg = X86_REGISTER_RSP;
-            homes[l].mode = BUSTER_X86_MEMORY_BASE;
-            offset += ((uint64_t)function->local_sizes[l] + 7) & ~UINT64_C(7);
-            aligned |= alignment == 16;
-        }
-    }
     bool objects = false;
-    offset = BUSTER_VECTOR_PATH(vector) ? tier0_frame_slots_vector(function, homes, references, offset, &objects) : offset;
-    offset = BUSTER_VECTOR_PATH(vector) && objects ? tier0_frame_objects_vector(function, frame, homes, offset, &aligned) : offset;
+    offset = tier0_frame_slots_vector(function, homes, references, offset, &objects);
+    offset = objects ? tier0_frame_objects_vector(function, frame, homes, offset, &aligned) : offset;
     // With the pushes and the return address, a multiple of 16 at every call, for an object aligned to 16, and with a
     // frame pointer, under which every allocation keeps it so. A realigned frame's rsp is rounded down to its alignment
     // after the reservation instead, which keeps it so too.
@@ -5628,9 +5156,8 @@ static uint8_t tier0_register_of(uint8_t source, const Tier0Holes* holes)
     return reg;
 }
 
-// A record from its specification, field by field: the scalar expansion (the vector one copies the compiled bytes).
-// Always inlined, as it was with one caller: the scalar path's emission, whose loop it is most of; the deep entries'
-// (tier0_emit_deep) is the second.
+// A record from its specification, field by field: the deep entries' expansion (tier0_emit_deep; the blocks' copies the
+// compiled bytes). Always inlined.
 static inline __attribute__((always_inline)) X86Instruction tier0_record_scalar(const Tier0RecordSpec* spec, const Tier0Holes* holes)
 {
     X86Instruction record;
@@ -7686,9 +7213,9 @@ static uint32_t tier0_copy_reach(const Tier0Function* function, uint32_t i)
     return tier0_copy_moves(value) ? tier0_move_pieces(tier0_copy_bytes(value)) - 1 : 0;
 }
 
-// ALLOCA's records, and STACK_SAVE's, STACK_RESTORE's and FRAME_ADDRESS's (tier0_emit_stack's). A probed ALLOCA's (#177)
-// are its add and and, tier0_emit_probed_allocation's ten (three of them branches) and its address's lea or mov: the
-// vector path's positions count them so, the scalar path's by running the emitter.
+// ALLOCA's records, and STACK_SAVE's, STACK_RESTORE's and FRAME_ADDRESS's (tier0_emit_stack's). A probed ALLOCA's
+// (#177) are its add and and, tier0_emit_probed_allocation's ten (three of them branches) and its address's lea or mov:
+// the positions count them so.
 #define BUSTER_TIER0_ALLOCA_RECORDS 4
 #define BUSTER_TIER0_PROBED_ALLOCATION_RECORDS 10
 #define BUSTER_TIER0_PROBED_ALLOCA_RECORDS (3 + BUSTER_TIER0_PROBED_ALLOCATION_RECORDS)
@@ -10174,8 +9701,8 @@ static __attribute__((noinline)) uint32_t tier0_count_tail_call(const Tier0Funct
 // than by running it: the vector path's measuring. Each term mirrors its emitter's step: a call's saves and restores,
 // argument extensions, stack stores, its register moves (one per move but the last of each cycle, which the xchg
 // before it resolves), al, the call and the result's move; division's saves, moves, extension and divide; a shift's
-// swaps or its saved rcx; the entries that move rsp, their fixed counts. The scalar path counts by running the
-// emitter, so that the twins check the count. `memory` is tier0_emit_deferred_entry's: a constant at each of
+// swaps or its saved rcx; the entries that move rsp, their fixed counts; the emitter must write as many (test-tier0's
+// programs check each function's positions). `memory` is tier0_emit_deferred_entry's: a constant at each of
 // tier0_measure_vector's two instances.
 static inline __attribute__((always_inline)) uint32_t tier0_count_deferred(const Tier0Function* function, const Tier0Entries* entries, uint32_t i, bool memory,
                                                                            uint32_t* references, uint32_t* branches)
@@ -10686,185 +10213,6 @@ static uint32_t tier0_count_epilogue(const Tier0Function* function, const Tier0F
 // ---------------------------------------------------------------------------------------------------------------------
 // The passes after fusion
 
-// The deferred entries are those whose template column says so (a deferred slot, or a template at the wrong depth).
-static bool tier0_is_deferred(uint16_t entry)
-{
-    return entry == BUSTER_TIER0_ENTRY_DEFERRED || entry == BUSTER_TIER0_SLOT_DEFERRED;
-}
-
-// Selection: each entry's template from its key's slot (ABSORBED for an absorbed entry; DEFERRED for a deferred slot
-// or a template whose fixed registers need another depth; with HOME_DEPENDENT until the homes are known), and what the
-// body touches, into the frame: the depth registers it reaches, the templates' fixed registers, and for a call
-// everything caller-saved, with the call save area's and the fixed slots' sizes. Returns the first entry without a
-// template (the count if none), and sets *error to TIER0_ERROR_DEPTH for depths past the tables. `memory` is
-// tier0_memory_function's and `realigned` whether the frame is (Tier0Frame.alignment_log2): constants at tier0_select's
-// inline use, both false, so that a function without values of the memory classes or a realigned frame has the loop
-// without a look for their entries (#423's measurements) and without the frame's alignment, which its other entries
-// don't read; the out-of-line use takes either from the function.
-static inline __attribute__((always_inline)) uint32_t tier0_select_entries(const Tier0Function* function, Tier0Entries* entries, Tier0Frame* frame,
-                                                                           Tier0Error* error, bool memory, bool realigned)
-{
-    uint32_t unsupported = function->count;
-    int32_t integer_top = -1;
-    int32_t floating_top = -1;
-    int32_t slot_top = -1;
-    Tier0Tops convert_scratch[2] = { { -1, -1 }, { -1, -1 } };
-    uint32_t clobbers = 0;
-    uint32_t save_slots = 0;
-    bool fixed = false;
-    bool calls = false;
-    bool moves = false;
-    for (uint32_t i = 0; i < function->count; i += 1)
-    {
-        uint16_t entry = BUSTER_TIER0_ENTRY_ABSORBED;
-        if (!entries->absorbed[i])
-        {
-            entry = tier0_slot(entries->key_kinds[i], entries->key_classes[i], entries->variants[i]);
-            const int32_t depth = entries->depths[i];
-            const int32_t floating = entries->floating_depths[i];
-            if (entry == BUSTER_TIER0_SLOT_UNSUPPORTED)
-            {
-                unsupported = unsupported == function->count ? i : unsupported;
-            }
-            else if (entry != BUSTER_TIER0_SLOT_DEFERRED)
-            {
-                const Tier0TemplateInfo* info = &tier0_template_infos[entry & BUSTER_TIER0_SLOT_TEMPLATE];
-                if (info->required_depth != BUSTER_TIER0_ANY_DEPTH && info->required_depth != depth)
-                {
-                    entry = BUSTER_TIER0_ENTRY_DEFERRED;
-                }
-                else
-                {
-                    const int32_t top = info->integer_reach != 0 ? depth + info->integer_reach - 3 : -1;
-                    const int32_t floating_reach = info->floating_reach != 0 ? floating + info->floating_reach - 3 : -1;
-                    integer_top = top > integer_top ? top : integer_top;
-                    floating_top = floating_reach > floating_top ? floating_reach : floating_top;
-                    clobbers |= info->clobbers;
-                }
-            }
-            if (tier0_is_deferred(entry))
-            {
-                if (function->kinds[i] == BUSTER_TYPED_CALL)
-                {
-                    const uint32_t call = (uint32_t)function->values[i];
-                    const uint32_t first = function->call_first[call];
-                    uint32_t integer_arguments = 0;
-                    uint32_t floating_arguments = 0;
-                    for (uint32_t a = 0; a < function->call_argument_counts[call]; a += 1)
-                    {
-                        const bool is_floating = tier0_class_floating(function->argument_classes[first + a]);
-                        integer_arguments += is_floating ? 0 : 1;
-                        floating_arguments += is_floating ? 1 : 0;
-                    }
-                    const int32_t below = depth - (int32_t)integer_arguments - (function->call_targets[call] == 0 ? 1 : 0);
-                    const int32_t floating_below = floating - (int32_t)floating_arguments;
-                    const uint32_t saved = tier0_call_saved(function, call, (uint32_t)below);
-                    const uint32_t slots = saved + (uint32_t)floating_below;
-                    save_slots = slots > save_slots ? slots : save_slots;
-                    const uint32_t result = tier0_stack(function->classes[i]);
-                    integer_top = result == 1 && below > integer_top ? below : integer_top;
-                    floating_top = result == 2 && floating_below > floating_top ? floating_below : floating_top;
-                    const Tier0AsmBody* body = tier0_call_body(function, call);
-                    clobbers |= BUSTER_TIER0_GENERAL_CALLER_SAVED | BUSTER_TIER0_XMM_ALL | (body != 0 ? body->touched : 0);
-                    calls = true;
-                }
-                else if (function->kinds[i] == BUSTER_TYPED_TAIL_CALL)
-                {
-                    clobbers |= tier0_tail_clobbers(function, i);
-                }
-                else if (function->kinds[i] == BUSTER_TYPED_FENCE || function->kinds[i] == BUSTER_TYPED_ATOMIC_RMW)
-                {
-                    // No register past its operands': mfence or nothing, or an atomic read/modify/write in its operands'.
-                }
-                else if (function->kinds[i] == BUSTER_TYPED_COPY)
-                {
-                    // A copy's scratch, its stacks' first free register: an XMM one above BUSTER_TIER0_COPY_NARROW_BYTES,
-                    // a general one below; a move's, its pieces' XMM registers from the first free one.
-                    const bool wide = function->values[i] > BUSTER_TIER0_COPY_NARROW_BYTES;
-                    const int32_t reach = floating + (int32_t)tier0_copy_reach(function, i);
-                    integer_top = !wide && depth > integer_top ? depth : integer_top;
-                    floating_top = wide && reach > floating_top ? reach : floating_top;
-                }
-                else if (function->kinds[i] == BUSTER_TYPED_ATOMIC_CAS)
-                {
-                    // A compare-exchange's address, in the integer stack's first free register; rax, which it swaps with its
-                    // expected value, it gives back.
-                    integer_top = depth > integer_top ? depth : integer_top;
-                }
-                else if (tier0_moves_stack(function->kinds[i]))
-                {
-                    // The frame pointer's; STACK_SAVE's and FRAME_ADDRESS's value at its depth (ALLOCA's and
-                    // STACK_RESTORE's operand is the entry before's).
-                    const bool leaf = function->kinds[i] == BUSTER_TYPED_STACK_SAVE || function->kinds[i] == BUSTER_TYPED_FRAME_ADDRESS;
-                    integer_top = leaf && depth > integer_top ? depth : integer_top;
-                    moves = true;
-                }
-                else if (memory && tier0_vector_entry(entries, i))
-                {
-                    tier0_vector_tops(function, entries, i, &integer_top, &floating_top, &slot_top);
-                }
-                else if (memory && tier0_memory_entry(entries, i))
-                {
-                    tier0_memory_tops(function, entries, i, &integer_top, &floating_top, &slot_top, &clobbers, &fixed);
-                }
-                else if (function->kinds[i] == BUSTER_TYPED_CONVERT)
-                {
-                    // A conversion between U64 and a floating class (tier0_emit_u64_convert): its result's register, and its
-                    // register form's scratch ones, which the tops take once the frame pointer is known.
-                    Tier0Tops tops = { integer_top, floating_top };
-                    tier0_select_u64_convert(function->classes[i] == BUSTER_TYPED_CLASS_U64, depth, floating, realigned, &tops, convert_scratch);
-                    integer_top = tops.integer;
-                    floating_top = tops.floating;
-                }
-                else
-                {
-                    // Division and shifts by a register: rax, rdx and rcx, saved around them in the fixed slots.
-                    clobbers |= 1u << X86_REGISTER_RAX | 1u << X86_REGISTER_RDX | 1u << X86_REGISTER_RCX;
-                    fixed = true;
-                }
-            }
-        }
-        entries->templates[i] = entry;
-    }
-    // The conversions' register forms' scratch registers, as the frame pointer decides them: the entries that move rsp,
-    // or the options' (`kept`, #177), whose rbp a frame that isn't realigned gives up as one that moves rsp does.
-    const bool kept = tier0_kept_pointer(function, calls);
-    const bool pointer_depths = moves || (kept && !realigned);
-    const Tier0Tops convert = convert_scratch[pointer_depths ? 1 : 0];
-    integer_top = convert.integer > integer_top ? convert.integer : integer_top;
-    floating_top = convert.floating > floating_top ? convert.floating : floating_top;
-    // An aggregate's copies take each stack's first free register.
-    if (function->argument_sizes != 0)
-    {
-        const Tier0Tops tops = tier0_select_scratch(function, entries, (Tier0Tops){ integer_top, floating_top });
-        integer_top = tops.integer;
-        floating_top = tops.floating;
-    }
-    const int32_t depth_count = tier0_returns_twice_depths(function, tier0_integer_depth_count(realigned, pointer_depths));
-    *error = integer_top >= depth_count || floating_top >= BUSTER_TIER0_FLOATING_DEPTHS || slot_top >= BUSTER_TIER0_INTEGER_DEPTHS ? TIER0_ERROR_DEPTH : TIER0_OK;
-    frame->integer_top = integer_top;
-    frame->floating_top = floating_top;
-    frame->clobbers = clobbers | tier0_depth_registers(integer_top, floating_top);
-    frame->save_slots = save_slots;
-    frame->fixed_slots = fixed ? 2 : 0;
-    frame->calls = calls;
-    tier0_frame_registers(frame, moves, kept, depth_count);
-    *error = *error == TIER0_OK && function->returns_twice && frame->based ? TIER0_ERROR_UNSUPPORTED : *error;
-    return unsupported;
-}
-
-// The selection of a function with values of the memory classes or a realigned frame, out of line.
-static __attribute__((noinline)) uint32_t tier0_select_memory(const Tier0Function* function, Tier0Entries* entries, Tier0Frame* frame, Tier0Error* error)
-{
-    return tier0_select_entries(function, entries, frame, error, tier0_memory_function(function), frame->alignment_log2 != 0);
-}
-
-static uint32_t tier0_select(const Tier0Function* function, Tier0Entries* entries, Tier0Frame* frame, Tier0Error* error)
-{
-    const bool rare = tier0_memory_function(function) || frame->alignment_log2 != 0;
-    return rare ? tier0_select_memory(function, entries, frame, error) : tier0_select_entries(function, entries, frame, error, false, false);
-}
-
 // What a memory class's or a vector's deferred entry (tier0_memory_entry's or tier0_vector_entry's, but a call) uses of each
 // stack, as tier0_deferred_uses gives it: its window, every operand it has on each stack (its shape's, the top DUP copies,
 // an X86 entry's row's), so that the depths its records name from the window's keep their distances to its values' slots
@@ -10998,29 +10346,6 @@ static void tier0_deferred_uses(const Tier0Function* function, const Tier0Entrie
 // delta, not a push. The stream's MAX_ENTRIES bound keeps every prefix sum within int32_t. The extra element is the
 // linear depth after the last entry; JUMP_VALUE reinstates its value separately at its taken exit.
 _Static_assert(BUSTER_TIER0_MAX_CALL_ARGUMENTS < 255, "a call's byte effect must unwrap unambiguously");
-static void tier0_wide_depths_scalar(const Tier0Function* function, Tier0Entries* entries)
-{
-    const uint32_t count = function->count;
-    const uint8_t* kinds = function->kinds;
-    const int8_t* integer_effects = entries->integer_effects;
-    const int8_t* floating_effects = entries->floating_effects;
-    uint32_t* integer_depths = entries->deep_depths;
-    uint32_t* floating_depths = entries->deep_floating_depths;
-    int32_t integer = 0;
-    int32_t floating = 0;
-    for (uint32_t i = 0; i < count; i += 1)
-    {
-        integer_depths[i] = (uint32_t)integer;
-        floating_depths[i] = (uint32_t)floating;
-        const bool call = kinds[i] == BUSTER_TYPED_CALL || kinds[i] == BUSTER_TYPED_TAIL_CALL;
-        const int32_t integer_effect = integer_effects[i];
-        const int32_t floating_effect = floating_effects[i];
-        integer += integer_effect - (call && integer_effect > 1 ? 256 : 0);
-        floating += floating_effect - (call && floating_effect > 1 ? 256 : 0);
-    }
-    integer_depths[count] = (uint32_t)integer;
-    floating_depths[count] = (uint32_t)floating;
-}
 
 // Inclusive prefix sum in sixteen dword lanes; the masks zero the lanes before each shift, not just the indices.
 static __m512i tier0_wide_prefix(__m512i values)
@@ -11072,22 +10397,21 @@ static void tier0_wide_depths_vector(const Tier0Function* function, Tier0Entries
 
 // The deep entries of a function whose stacks go past the depth tables (selection's TIER0_ERROR_DEPTH): their values in
 // the frame's deep slots. At each entry's start a stack's values are where its depth says, all in their registers up to
-// the table's depth count (14 integer ones with a frame pointer, 15 without; 16 floating ones) and all in their slots past
-// it, so that every way into a label agrees. An entry is deep on a stack where its exit (a JUMP_VALUE's at its target)
-// and its start are on the two sides of that line, or where it uses the stack's registers past it or reaches past the
-// table. It loads the values it reads (its window, 2 at most) from their slots into the stack's first registers, after
-// storing the registers into their slots if they were there, makes its own records at that depth (the depth columns hold
-// it from here on: tier0_emit_deep), stores its result into its slot, and loads the registers back if its exit is within
-// the table. A call deep on either stack takes its arguments from their slots (tier0_emit_deep_call). Every deep entry is
-// deferred, in both paths, and counted in *deep_count. The memory classes' and the vectors' values keep their own slots,
-// by their true depths, for as many depths as the stack reaches (Tier0Frame.memory_depths): a deep entry of theirs reads
-// them from its window's depths, moved by the window's base (tier0_memory_uses). Full-width cold columns retain their
-// true depths past 255; the byte columns only name register windows or representable memory depths. The frame and
-// output arenas, not a fixed slot count, bound this path. A single entry whose window cannot fit still refuses.
-static Tier0Error tier0_select_deep(const Tier0Function* function, Tier0Entries* entries, Tier0Frame* frame, Arena* scratch, bool vector, uint32_t* deep_count)
+// the table's depth count (14 integer ones with a frame pointer, 15 without; 16 floating ones) and all in their slots
+// past it, so that every way into a label agrees. An entry is deep on a stack where its exit (a JUMP_VALUE's at its
+// target) and its start are on the two sides of that line, or where it uses the stack's registers past it or reaches
+// past the table. It loads the values it reads (its window, 2 at most) from their slots into the stack's first
+// registers, after storing the registers into their slots if they were there, makes its own records at that depth (the
+// depth columns hold it from here on: tier0_emit_deep), stores its result into its slot, and loads the registers back
+// if its exit is within the table. A call deep on either stack takes its arguments from their slots
+// (tier0_emit_deep_call). Every deep entry is deferred, and counted in *deep_count. The memory classes' and the
+// vectors' values keep their own slots, by their true depths, for as many depths as the stack reaches
+// (Tier0Frame.memory_depths): a deep entry of theirs reads them from its window's depths, moved by the window's base
+// (tier0_memory_uses). Full-width cold columns retain their true depths past 255; the byte columns only name register
+// windows or representable memory depths. The frame and output arenas, not a fixed slot count, bound this path. A
+// single entry whose window cannot fit still refuses.
+static Tier0Error tier0_select_deep(const Tier0Function* function, Tier0Entries* entries, Tier0Frame* frame, Arena* scratch, uint32_t* deep_count)
 {
-    (void)vector;
-
     const uint32_t count = function->count;
     const uint32_t limits[2] = { (uint32_t)frame->depth_count, BUSTER_TIER0_FLOATING_DEPTHS };
     const uint8_t window_flags[2] = { BUSTER_TIER0_DEEP_INTEGER, BUSTER_TIER0_DEEP_FLOATING };
@@ -11099,14 +10423,7 @@ static Tier0Error tier0_select_deep(const Tier0Function* function, Tier0Entries*
     Tier0Error error = entries->deep != 0 && entries->deep_depths != 0 && entries->deep_floating_depths != 0 ? TIER0_OK : TIER0_ERROR_MEMORY;
     if (error == TIER0_OK)
     {
-        if (BUSTER_VECTOR_PATH(vector))
-        {
-            tier0_wide_depths_vector(function, entries);
-        }
-        else
-        {
-            tier0_wide_depths_scalar(function, entries);
-        }
+        tier0_wide_depths_vector(function, entries);
     }
     uint32_t slots[2] = { 0, 0 };
     uint32_t save_slots = 0;
@@ -11211,14 +10528,7 @@ static Tier0Error tier0_select_deep(const Tier0Function* function, Tier0Entries*
                 tier0_memory_uses(function, entries, i, window_uses, windows, window_touch);
                 error = window_touch[0] >= (int32_t)limits[0] || window_touch[1] >= (int32_t)limits[1] ? TIER0_ERROR_DEPTH : error;
             }
-            if (BUSTER_VECTOR_PATH(vector))
-            {
-                entries->words[i] |= BUSTER_TIER0_WORD_DEFERRED;
-            }
-            else
-            {
-                entries->templates[i] = BUSTER_TIER0_ENTRY_DEFERRED;
-            }
+            entries->words[i] |= BUSTER_TIER0_WORD_DEFERRED;
         }
     }
     if (error == TIER0_OK)
@@ -11246,63 +10556,6 @@ struct Tier0Counts
     uint32_t references;
     uint32_t choices;
 };
-
-// The scalar path's measuring. `deep` is whether the function has deep entries (tier0_select_deep's), a constant at each
-// of tier0_measure's two uses, so that a function without them is measured as before they existed; a deep entry's
-// template may add a branch and a choice request (tier0_emit_deep's).
-static inline __attribute__((always_inline)) Tier0Counts tier0_measure_entries(const Tier0Function* function, Tier0Entries* entries, const Tier0Frame* frame,
-                                                                              const Tier0Home* homes, bool deep)
-{
-    Tier0Counts counts = { 0, 0, 0 };
-    for (uint32_t i = 0; i < function->count; i += 1)
-    {
-        const uint16_t entry = entries->templates[i];
-        uint32_t length = 0;
-        if (tier0_is_deferred(entry))
-        {
-            Tier0Writer counter = { 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-            if (deep)
-            {
-                tier0_emit_deferred_deep(function, entries, frame, homes, i, &counter);
-            }
-            else
-            {
-                tier0_emit_deferred(function, entries, frame, homes, i, &counter);
-            }
-            length = counter.count;
-            counts.references += counter.reference_count;
-            // A deep entry's branches, and outside deep entries a probed ALLOCA's loop's (#177).
-            counts.branches += counter.branch_count;
-            counts.choices += deep ? counter.choice_count : 0;
-        }
-        else if (entry != BUSTER_TIER0_ENTRY_ABSORBED)
-        {
-            const uint32_t index = tier0_home_case(function, homes, i, entry);
-            if ((entry & BUSTER_TIER0_SLOT_HOME_DEPENDENT) != 0)
-            {
-                entries->templates[i] = (uint16_t)index;
-            }
-            const Tier0TemplateInfo* info = &tier0_template_infos[index];
-            length = info->length;
-            counts.branches += info->branch != 0xff ? 1 : 0;
-            counts.references += info->fixup != 0xff ? 1 : 0;
-            counts.choices += info->choice != 0xff ? 1 : 0;
-        }
-        entries->lengths[i] = length;
-    }
-    return counts;
-}
-
-// The scalar measuring of a function with deep entries, out of line.
-static __attribute__((noinline)) Tier0Counts tier0_measure_deep(const Tier0Function* function, Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes)
-{
-    return tier0_measure_entries(function, entries, frame, homes, true);
-}
-
-static Tier0Counts tier0_measure(const Tier0Function* function, Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes)
-{
-    return entries->deep != 0 ? tier0_measure_deep(function, entries, frame, homes) : tier0_measure_entries(function, entries, frame, homes, false);
-}
 
 // How many records tier0_emit_deep writes for entry i, with its references and branch counted into `counts`, from what
 // the emitter decides rather than by running it (tier0_count_deferred's way): the vector path's measuring.
@@ -11409,19 +10662,6 @@ static void tier0_sort_branches(uint32_t* branches, uint32_t* targets, uint32_t 
     }
 }
 
-// Each entry's first record, after the prologue (the entry past the last is the epilogue's first record).
-static void tier0_positions_scalar(const Tier0Function* function, Tier0Entries* entries, uint32_t prologue)
-{
-    uint64_t position = prologue;
-    for (uint32_t i = 0; i < function->count; i += 1)
-    {
-        entries->positions[i] = (uint32_t)position;
-        position += entries->lengths[i];
-    }
-    entries->record_count = position;
-    entries->positions[function->count] = (uint32_t)position;
-}
-
 // The next of the columns one push holds, `bytes` of them at `*offset` from its start, which then moves past them; 0 if
 // the push failed (base 0). A body's columns take a push or two this way, not one each: each push cost Tier 0 about 10
 // cycles, about 250 a body in all (#2874).
@@ -11483,17 +10723,6 @@ static uint16_t tier0_choice_context(const X86Instruction* record, uint8_t live)
     return (uint16_t)context;
 }
 
-// The record for a chosen form (x86_choice_instruction), its fixup flag kept; none chosen keeps it as it is.
-static void tier0_apply_choice(X86Instruction* record, uint32_t form, int64_t value)
-{
-    if (form != X86_FORM_NONE)
-    {
-        const uint16_t fixup = (uint16_t)(record->form & BUSTER_X86_FORM_FIXUP);
-        *record = x86_choice_instruction(form, *record, value);
-        record->form |= fixup;
-    }
-}
-
 // Tier0Function.choice_requests: the requests copied into the code (from `output`), each with its record before the
 // choice rewrites it. Returns false without room. Out of line and cold: a compile without the request runs none of it.
 static __attribute__((cold, noinline)) bool tier0_copy_choices(Tier0Code* code, Arena* output, const Tier0Choices* choices)
@@ -11535,104 +10764,6 @@ static bool tier0_build_choice_shapes(void)
     return valid;
 }
 
-
-// Emission for the scalar path, in entry order: the prologue; each entry's template expanded at its place, field by
-// field from its specifications, its choice request, branch and reference, or a deferred entry's records; then the
-// epilogue. tier0_emit_vector is its twin. `deep` is tier0_measure_entries': with deep entries, the branch count goes
-// to their emitter in the writer and back (a deep entry's branch comes in entry order, as a template's does).
-static inline __attribute__((always_inline)) void tier0_emit_body_entries(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame,
-                                                                         const Tier0Home* homes, const uint32_t* references, Tier0Code* code, Tier0Choices* choices,
-                                                                         bool deep)
-{
-    Tier0Writer writer = { code->records, 0, code->references, 0, code->branches, code->targets, 0, choices, 0, frame->interrupt != 0, frame->temporaries, code->asm_label_records };
-    tier0_emit_prologue(function, frame, homes, references, &writer);
-    // The body's branches after the prologue's (a probe's loop's, #177).
-    uint32_t branches = writer.branch_count;
-    for (uint32_t i = 0; i < function->count; i += 1)
-    {
-        const uint16_t entry = entries->templates[i];
-        const uint32_t position = entries->positions[i];
-        if (tier0_is_deferred(entry))
-        {
-            writer.count = position;
-            if (deep)
-            {
-                writer.branch_count = branches;
-                tier0_emit_deferred_deep(function, entries, frame, homes, i, &writer);
-                branches = writer.branch_count;
-            }
-            else
-            {
-                // A probed ALLOCA's loop's branches (#177), in entry order as a template's.
-                writer.branch_count = branches;
-                tier0_emit_deferred(function, entries, frame, homes, i, &writer);
-                branches = writer.branch_count;
-            }
-            code->deferred += 1;
-        }
-        else if (entry != BUSTER_TIER0_ENTRY_ABSORBED && tier0_template_infos[entry].length != 0)
-        {
-            const Tier0TemplateInfo* info = &tier0_template_infos[entry];
-            const Tier0Holes holes = tier0_holes_scalar(function, entries, homes, i, info);
-            const Tier0Template* template = &tier0_templates[entry];
-            for (uint32_t r = 0; r < info->length; r += 1)
-            {
-                code->records[position + r] = tier0_record_scalar(&template->specs[r], &holes);
-            }
-            if (info->choice != 0xff)
-            {
-                const uint32_t at = position + info->choice;
-                choices->records[choices->count] = at;
-                choices->rows[choices->count] = info->choice_row;
-                choices->values[choices->count] = info->choice_static != 0 ? (int64_t)info->choice_immediate : (int64_t)holes.k;
-                choices->contexts[choices->count] = tier0_choice_context(&code->records[at], info->choice_live);
-                choices->count += 1;
-            }
-            if (info->branch != 0xff)
-            {
-                const uint32_t target = info->end != 0 ? function->count : (uint32_t)function->values[i];
-                code->branches[branches] = position + info->branch;
-                code->targets[branches] = entries->positions[target];
-                branches += 1;
-            }
-            if (info->fixup != 0xff)
-            {
-                code->references[writer.reference_count] = (LinkReference){
-                    .instruction = position + info->fixup,
-                    .field = info->fixup_field,
-                    .kind = info->fixup_kind,
-                    .target = (SymbolId)function->values[i],
-                    .addend = 0,
-                };
-                writer.reference_count += 1;
-            }
-        }
-    }
-    writer.count = entries->positions[function->count];
-    tier0_emit_epilogue(function, frame, &writer);
-    code->branch_count = branches;
-    code->reference_count = writer.reference_count;
-}
-
-// The scalar emission of a function with deep entries, out of line.
-static __attribute__((noinline)) void tier0_emit_body_deep(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes,
-                                                           const uint32_t* references, Tier0Code* code, Tier0Choices* choices)
-{
-    tier0_emit_body_entries(function, entries, frame, homes, references, code, choices, true);
-}
-
-static void tier0_emit_body(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes, const uint32_t* references,
-                            Tier0Code* code, Tier0Choices* choices)
-{
-    if (entries->deep != 0)
-    {
-        tier0_emit_body_deep(function, entries, frame, homes, references, code, choices);
-    }
-    else
-    {
-        tier0_emit_body_entries(function, entries, frame, homes, references, code, choices, false);
-    }
-}
 
 // The per-entry columns, from the scratch arena.
 static bool tier0_push_entries(Tier0Entries* entries, Arena* scratch, uint32_t count)
@@ -11684,11 +10815,11 @@ static bool tier0_call_memo_function(const Tier0Function* function, const Tier0E
 static void tier0_emit_vector(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, const Tier0Home* homes, const uint32_t* references,
                               Tier0Code* code, Tier0Choices* choices);
 
-// tier0_apply_choice for every request, for the vector path: each chosen form's record from its shape (one byte) rather
-// than its description, on the record's two 8-byte halves (the immediate and the displacement; the operands, the form,
-// vvvv and the decorations) rather than its fields, without a branch: the form with the fixup flag kept, the operands
-// cleared or the destination taken twice, and the immediate's field (and a 64-bit immediate's high half in the
-// displacement); a request whose form is X86_FORM_NONE keeps its record.
+// Each request's chosen form applied to its record (x86_choice_instruction's, with the fixup flag kept): its record
+// from its shape (one byte) rather than its description, on the record's two 8-byte halves (the immediate and the
+// displacement; the operands, the form, vvvv and the decorations) rather than its fields, without a branch: the form
+// with the fixup flag kept, the operands cleared or the destination taken twice, and the immediate's field (and a
+// 64-bit immediate's high half in the displacement); a request whose form is X86_FORM_NONE keeps its record.
 static void tier0_apply_choices_vector(X86Instruction* records, const Tier0Choices* choices)
 {
     _Static_assert(offsetof(X86Instruction, displacement) == 4 && offsetof(X86Instruction, reg) == 8 && offsetof(X86Instruction, form) == 12,
@@ -11791,12 +10922,11 @@ static __attribute__((noinline, cold)) bool tier0_push_asm_labels(const Tier0Fun
     return room;
 }
 
-// What both paths share once the fusion and the depths are in the entries' columns, each pass in the path's version:
-// selection, the references' count, the homes and the frame (shared), measuring and positions (the vector path's
-// measuring sums them), the output, emission and the immediates' choice (x86_choose_forms or its twin).
-// Whether asm goto body call entry i (Tier0AsmBody.exits, #2351) may branch straight to its labels: nothing runs after
-// its row (no value under its arguments on any stack, none of them a deep entry's), and the statement's dispatch follows
-// it as the lowering writes it, none of its entries a label.
+// What follows the front once the fusion and the depths are in the entries' columns: selection, the references' count,
+// the homes and the frame, measuring and positions (measuring sums them), the output, emission and the immediates'
+// choice (x86_choose_forms). Whether asm goto body call entry i (Tier0AsmBody.exits, #2351) may branch straight to its
+// labels: nothing runs after its row (no value under its arguments on any stack, none of them a deep entry's), and the
+// statement's dispatch follows it as the lowering writes it, none of its entries a label.
 static bool tier0_asm_dispatch(const Tier0Function* function, const Tier0Entries* entries, uint32_t i, const Tier0AsmBody* body)
 {
     const uint32_t call = (uint32_t)function->values[i];
@@ -11909,7 +11039,7 @@ static uint32_t tier0_x87_transfer_slot(const X86Instruction* record, const Tier
 // Arithmetic and widening conversions produce canonical values; NEG and copies may propagate that proof. The shared
 // bounded planner preserves the selected order and the waiting boundary, and leaves all record indices intact.
 #define BUSTER_TIER0_X87_CANONICAL 0x80
-static void tier0_x87_transfers(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, Tier0Code* code, Arena* scratch, bool vector)
+static void tier0_x87_transfers(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame, Tier0Code* code, Arena* scratch)
 {
     if (function->x87 && entries->deep == 0)
     {
@@ -12001,7 +11131,7 @@ static void tier0_x87_transfers(const Tier0Function* function, const Tier0Entrie
                     }
                 }
             }
-            (void)x87_transfer_records(records, count, tokens, eligible, boundaries, vector);
+            (void)x87_transfer_records(records, count, tokens, eligible, boundaries, true);
         }
         arena_pop_to(scratch, mark);
     }
@@ -12010,9 +11140,9 @@ static void tier0_x87_transfers(const Tier0Function* function, const Tier0Entrie
 // A function's compile in progress: what its passes hand one another, from its entries' columns to its code (#2874). A
 // pass takes a job and leaves it for the next: selection (tier0_job_select), the homes and the frame (tier0_job_homes),
 // measuring and the output's room (tier0_job_measure), emission (tier0_job_emit), then the immediates' forms and what
-// the code keeps (tier0_job_finish). A pass does nothing for a job whose `error` an earlier one set. The vector path runs
-// each pass over every job of a batch before the next pass (tier0_run_jobs), so that a pass's code and tables serve one
-// function after another; the scalar path runs them a function at a time.
+// the code keeps (tier0_job_finish). A pass does nothing for a job whose `error` an earlier one set. Each pass runs over
+// every job of a batch before the next pass (tier0_run_jobs), so that a pass's code and tables serve one function after
+// another.
 typedef struct Tier0Job Tier0Job;
 struct Tier0Job
 {
@@ -12048,12 +11178,10 @@ static void tier0_job_begin(Tier0Job* job, const Tier0Function* function, const 
 }
 
 // Selection, from the entries' columns: the frame's alignment, each entry's template or its deferral, the depths reached
-// and what the body touches (tier0_select_vector, tier0_select), the deep entries where the depths run out
+// and what the body touches (tier0_select_vector), the deep entries where the depths run out
 // (tier0_select_deep), and the frame's kinds of slots.
-static inline __attribute__((always_inline)) void tier0_job_select(Tier0Job* job, Arena* scratch, bool vector)
+static inline __attribute__((always_inline)) void tier0_job_select(Tier0Job* job, Arena* scratch)
 {
-    (void)vector;
-
     const Tier0Function* function = job->function;
     Tier0Entries* entries = &job->entries;
     Tier0Frame* frame = &job->frame;
@@ -12065,11 +11193,11 @@ static inline __attribute__((always_inline)) void tier0_job_select(Tier0Job* job
         frame->probe = function->probe_stack;
         Tier0Error error = tier0_frame_input_valid(function) ? TIER0_OK : TIER0_ERROR_UNSUPPORTED;
         // The frame's alignment past 16 bytes, if it needs one, which the integer depths the selections leave depend on.
-        frame->alignment_log2 = error == TIER0_OK ? (uint8_t)(BUSTER_VECTOR_PATH(vector) ? tier0_frame_alignment_vector(function) : tier0_frame_alignment(function)) : 0;
-        const uint32_t unsupported = error == TIER0_OK ? (BUSTER_VECTOR_PATH(vector) ? tier0_select_vector(function, entries, frame, &error) : tier0_select(function, entries, frame, &error)) : function->count;
+        frame->alignment_log2 = error == TIER0_OK ? (uint8_t)tier0_frame_alignment_vector(function) : 0;
+        const uint32_t unsupported = error == TIER0_OK ? tier0_select_vector(function, entries, frame, &error) : function->count;
         if (error == TIER0_ERROR_DEPTH && unsupported == function->count)
         {
-            error = tier0_select_deep(function, entries, frame, scratch, BUSTER_VECTOR_PATH(vector), &code->deep);
+            error = tier0_select_deep(function, entries, frame, scratch, &code->deep);
         }
         if (error == TIER0_OK && unsupported == function->count && function->asm_body_count != 0)
         {
@@ -12079,7 +11207,7 @@ static inline __attribute__((always_inline)) void tier0_job_select(Tier0Job* job
         // and the vectors'.
         frame->memory = tier0_memory_function(function);
         frame->memory_slots = function->x87 || function->int128;
-        frame->vectors = function->vectors && (BUSTER_VECTOR_PATH(vector) ? tier0_vector_slots_vector(function) : tier0_vector_slots(function));
+        frame->vectors = function->vectors && tier0_vector_slots_vector(function);
         frame->x87_result = function->x87 && tier0_x87_returns(function);
         // The masks' slots: one per depth the mask stack reaches, and at least one per register, which a deep row's
         // borrowing saves (tier0_emit_operation).
@@ -12096,10 +11224,8 @@ static inline __attribute__((always_inline)) void tier0_job_select(Tier0Job* job
 
 // The homes and the frame, after selection: the locals' references counted, each local's home (tier0_assign_homes), the
 // frame's layout (tier0_layout_frame), and what measuring takes of the frame for the tail calls and a setjmp's snapshots.
-static inline __attribute__((always_inline)) void tier0_job_homes(Tier0Job* job, Arena* scratch, bool vector)
+static inline __attribute__((always_inline)) void tier0_job_homes(Tier0Job* job, Arena* scratch)
 {
-    (void)vector;
-
     const Tier0Function* function = job->function;
     Tier0Entries* entries = &job->entries;
     Tier0Frame* frame = &job->frame;
@@ -12117,21 +11243,14 @@ static inline __attribute__((always_inline)) void tier0_job_homes(Tier0Job* job,
         Tier0Error error = homes == 0 || references == 0 ? TIER0_ERROR_MEMORY : TIER0_OK;
         if (error == TIER0_OK)
         {
-            if (BUSTER_VECTOR_PATH(vector))
-            {
-                tier0_count_references_vector(function, references);
-            }
-            else
-            {
-                tier0_count_references(function, references);
-            }
+            tier0_count_references_vector(function, references);
             if (entries->direct != 0)
             {
                 tier0_direct_references(function, entries, references);
             }
             frame->object_parameters = tier0_object_parameters(function);
-            tier0_assign_homes(function, frame, homes, references, order, BUSTER_VECTOR_PATH(vector));
-            error = tier0_layout_frame(function, frame, homes, references, BUSTER_VECTOR_PATH(vector)) ? TIER0_OK : TIER0_ERROR_UNSUPPORTED;
+            tier0_assign_homes(function, frame, homes, references, order);
+            error = tier0_layout_frame(function, frame, homes, references) ? TIER0_OK : TIER0_ERROR_UNSUPPORTED;
             entries->tail_finish = error == TIER0_OK && function->call_tails != 0 ? tier0_count_tail_finish(function, frame, homes, false) : 0;
             entries->eh_finish = error == TIER0_OK && function->call_tails != 0 && frame->eh_return ? tier0_count_tail_finish(function, frame, homes, true) : 0;
             entries->snapshot_words = error == TIER0_OK && frame->snapshot_depths != 0 ? frame->snapshot_masks / (8 * frame->snapshot_depths) : 0;
@@ -12144,13 +11263,11 @@ static inline __attribute__((always_inline)) void tier0_job_homes(Tier0Job* job,
     }
 }
 
-// Measuring, after the homes: every entry's records counted and placed (tier0_measure_vector, tier0_measure), the
+// Measuring, after the homes: every entry's records counted and placed (tier0_measure_vector), the
 // prologue's and the epilogue's, then the room for the choice requests (from the scratch arena) and for the code's
 // columns (from `output`).
-static inline __attribute__((always_inline)) void tier0_job_measure(Tier0Job* job, Arena* scratch, Arena* output, bool vector)
+static inline __attribute__((always_inline)) void tier0_job_measure(Tier0Job* job, Arena* scratch, Arena* output)
 {
-    (void)vector;
-
     const Tier0Function* function = job->function;
     Tier0Entries* entries = &job->entries;
     Tier0Frame* frame = &job->frame;
@@ -12161,36 +11278,19 @@ static inline __attribute__((always_inline)) void tier0_job_measure(Tier0Job* jo
     if (job->error == TIER0_OK)
     {
         Tier0Error error = TIER0_OK;
-        Tier0Counts counts;
-        uint32_t epilogue = 0;
-        if (BUSTER_VECTOR_PATH(vector))
-        {
-            // The calls' entries in the thread's table (tier0_call_memo_find), where the function's calls can take it.
-            entries->call_slots = tier0_call_memo_function(function, entries, frame) ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)function->count + 64) : 0;
-            counts = tier0_measure_vector(function, entries, homes, tier0_count_prologue(function, frame, homes, references), frame->memory);
-            epilogue = tier0_count_epilogue(function, frame);
-            // The prologue's branches: a probe's loop's (#177).
-            counts.branches += tier0_prologue_branches(frame);
-        }
-        else
-        {
-            Tier0Writer counter = { 0, 0, 0, 0 };
-            tier0_emit_prologue(function, frame, homes, references, &counter);
-            const uint32_t prologue_branches = counter.branch_count;
-            counts = tier0_measure(function, entries, frame, homes);
-            counts.branches += prologue_branches;
-            tier0_positions_scalar(function, entries, counter.count);
-            counter.count = 0;
-            tier0_emit_epilogue(function, frame, &counter);
-            epilogue = counter.count;
-        }
-        // The requests' columns, with room for the vector path's last compressed store of 8, and the vector path's deferred
-        // entries' references, before emission merges them with the templates' (#2874), in one push (tier0_column).
+        // The calls' entries in the thread's table (tier0_call_memo_find), where the function's calls can take it.
+        entries->call_slots = tier0_call_memo_function(function, entries, frame) ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)function->count + 64) : 0;
+        Tier0Counts counts = tier0_measure_vector(function, entries, homes, tier0_count_prologue(function, frame, homes, references), frame->memory);
+        const uint32_t epilogue = tier0_count_epilogue(function, frame);
+        // The prologue's branches: a probe's loop's (#177).
+        counts.branches += tier0_prologue_branches(frame);
+        // The requests' columns, with room for the last compressed store of 8, and the deferred entries' references,
+        // before emission merges them with the templates' (#2874), in one push (tier0_column).
         const uint64_t requests = (uint64_t)counts.choices + 8;
         const uint64_t request_dwords = tier0_column_bytes(4 * requests);
         const uint64_t request_halves = tier0_column_bytes(2 * requests);
         const uint64_t request_qwords = tier0_column_bytes(8 * requests);
-        const uint64_t side_bytes = BUSTER_VECTOR_PATH(vector) ? tier0_column_bytes(((uint64_t)counts.references + 1) * sizeof(LinkReference)) : 0;
+        const uint64_t side_bytes = tier0_column_bytes(((uint64_t)counts.references + 1) * sizeof(LinkReference));
         uint8_t* request_columns = arena_push(scratch, request_dwords + 3 * request_halves + request_qwords + side_bytes, 64);
         uint64_t request_offset = 0;
         choices->records = tier0_column(request_columns, &request_offset, request_dwords);
@@ -12198,7 +11298,7 @@ static inline __attribute__((always_inline)) void tier0_job_measure(Tier0Job* jo
         choices->values = tier0_column(request_columns, &request_offset, request_qwords);
         choices->contexts = tier0_column(request_columns, &request_offset, request_halves);
         choices->forms = tier0_column(request_columns, &request_offset, request_halves);
-        entries->deferred_references = BUSTER_VECTOR_PATH(vector) ? tier0_column(request_columns, &request_offset, side_bytes) : 0;
+        entries->deferred_references = tier0_column(request_columns, &request_offset, side_bytes);
         const bool room = request_columns != 0;
         if (!room || !tier0_push_output(code, output, entries->record_count + epilogue, counts, function->entry_records ? entries->positions : 0,
                                         function->count))
@@ -12220,31 +11320,20 @@ static inline __attribute__((always_inline)) void tier0_job_measure(Tier0Job* jo
 }
 
 // Emission, into the room measuring made: the prologue, every entry's records at its place, the epilogue, and the
-// immediates' choice requests (tier0_emit_vector, tier0_emit_body).
-static inline __attribute__((always_inline)) void tier0_job_emit(Tier0Job* job, bool vector)
+// immediates' choice requests (tier0_emit_vector).
+static inline __attribute__((always_inline)) void tier0_job_emit(Tier0Job* job)
 {
-    (void)vector;
-
     if (job->error == TIER0_OK)
     {
-        if (BUSTER_VECTOR_PATH(vector))
-        {
-            tier0_emit_vector(job->function, &job->entries, &job->frame, job->homes, job->references, &job->code, &job->choices);
-        }
-        else
-        {
-            tier0_emit_body(job->function, &job->entries, &job->frame, job->homes, job->references, &job->code, &job->choices);
-        }
+        tier0_emit_vector(job->function, &job->entries, &job->frame, job->homes, job->references, &job->code, &job->choices);
     }
 }
 
 // What ends a function's code, after emission: the immediates' forms chosen and applied (x86_choose_forms), its segment
 // overrides, the x87 transfers, the locals' homes when the producer asks for the entries' records, and the frame the
 // prologue made, for the unwind tables.
-static inline __attribute__((always_inline)) void tier0_job_finish(Tier0Job* job, Arena* scratch, Arena* output, bool vector)
+static inline __attribute__((always_inline)) void tier0_job_finish(Tier0Job* job, Arena* scratch, Arena* output)
 {
-    (void)vector;
-
     const Tier0Function* function = job->function;
     Tier0Entries* entries = &job->entries;
     const Tier0Frame* frame = &job->frame;
@@ -12253,26 +11342,15 @@ static inline __attribute__((always_inline)) void tier0_job_finish(Tier0Job* job
     if (job->error == TIER0_OK)
     {
         Tier0Error error = function->choice_requests && !tier0_copy_choices(code, output, choices) ? TIER0_ERROR_MEMORY : TIER0_OK;
-        if (BUSTER_VECTOR_PATH(vector))
-        {
-            x86_choose_forms(choices->rows, choices->values, choices->contexts, choices->count, choices->forms);
-            tier0_apply_choices_vector(code->records, choices);
-        }
-        else
-        {
-            x86_choose_forms_scalar(choices->rows, choices->values, choices->contexts, choices->count, choices->forms);
-            for (uint32_t q = 0; q < choices->count; q += 1)
-            {
-                tier0_apply_choice(&code->records[choices->records[q]], choices->forms[q], choices->values[q]);
-            }
-        }
+        x86_choose_forms(choices->rows, choices->values, choices->contexts, choices->count, choices->forms);
+        tier0_apply_choices_vector(code->records, choices);
         if (__builtin_expect(job->segments != 0, 0))
         {
             error = !tier0_apply_segments(code->records, entries->positions, function->count, job->segments, frame) && error == TIER0_OK ? TIER0_ERROR_UNSUPPORTED : error;
         }
         if (error == TIER0_OK)
         {
-            tier0_x87_transfers(function, entries, frame, code, scratch, BUSTER_VECTOR_PATH(vector));
+            tier0_x87_transfers(function, entries, frame, code, scratch);
         }
         if (function->entry_records)
         {
@@ -12306,7 +11384,7 @@ static inline __attribute__((always_inline)) void tier0_job_finish(Tier0Job* job
     }
 }
 
-// Each label's first record (Tier0Code.label_records), from the positions both paths give, after the job's other passes.
+// Each label's first record (Tier0Code.label_records), from the positions, after the job's other passes.
 static Tier0Error tier0_label_records(const Tier0Function* function, const Tier0Entries* entries, Arena* output, Tier0Code* code)
 {
     Tier0Error error = TIER0_OK;
@@ -12323,7 +11401,7 @@ static Tier0Error tier0_label_records(const Tier0Function* function, const Tier0
     return error;
 }
 
-// Each tail call's jump (Tier0Code.tail_records), its entry's last record, from the positions both paths give, after
+// Each tail call's jump (Tier0Code.tail_records), its entry's last record, from the positions, after
 // the job's other passes: a pass over the kinds for a function with tail calls alone.
 static Tier0Error tier0_tail_records(const Tier0Function* function, const Tier0Entries* entries, Arena* output, Tier0Code* code)
 {
@@ -12371,50 +11449,6 @@ static void tier0_job_records(Tier0Job* job, Arena* output)
 {
     job->error = job->error == TIER0_OK ? tier0_label_records(job->function, &job->entries, output, &job->code) : job->error;
     job->error = job->error == TIER0_OK ? tier0_tail_records(job->function, &job->entries, output, &job->code) : job->error;
-}
-
-// tier0_compile_scalar's body, with a function's segment overrides (tier0_apply_segments; 0 without them): its job's
-// passes, one after another.
-static Tier0Code tier0_compile_scalar_entries(const Tier0Function* function, const uint8_t* segments, Arena* output)
-{
-    Scratch scratch = scratch_begin(output);
-    Tier0Job job;
-    tier0_job_begin(&job, function, segments, output);
-    Tier0Entries* entries = &job.entries;
-    const uint32_t count = function->count;
-    uint64_t* labels = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint64_t, (uint64_t)count / 64 + 2);
-    Tier0Error error = labels != 0 && tier0_push_entries(entries, scratch.arena, count) ? TIER0_OK : TIER0_ERROR_MEMORY;
-    if (error == TIER0_OK)
-    {
-        memset(labels, 0, ((uint64_t)count / 64 + 2) * sizeof(uint64_t));
-        tier0_labels(function, labels);
-        entries->labels = labels;
-        tier0_fuse_scalar(function, labels, entries);
-        if (function->vectors)
-        {
-            tier0_operation_effects(function, entries);
-        }
-        tier0_depths_scalar(function, entries);
-        if (function->masks)
-        {
-            entries->mask_depths = BUSTER_ARENA_PUSH_ARRAY(scratch.arena, uint8_t, (uint64_t)count + 64);
-            error = entries->mask_depths != 0 ? TIER0_OK : TIER0_ERROR_MEMORY;
-        }
-        if (error == TIER0_OK && function->masks)
-        {
-            error = tier0_mask_depths_scalar(function, entries);
-        }
-    }
-    job.error = error;
-    tier0_job_select(&job, scratch.arena, false);
-    tier0_job_homes(&job, scratch.arena, false);
-    tier0_job_measure(&job, scratch.arena, output, false);
-    tier0_job_emit(&job, false);
-    tier0_job_finish(&job, scratch.arena, output, false);
-    tier0_job_records(&job, output);
-    const Tier0Code code = tier0_conclude(job.code, job.error, output, job.output_length);
-    scratch_end(scratch);
-    return code;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -12552,9 +11586,9 @@ static uint32_t tier0_stack_operand(uint32_t class, uint32_t bytes)
 }
 
 // Whether entry i takes its last operand (tier0_takes_last) from a stack whose top has another class than the entry
-// before it, which both paths read for it: in postorder that entry is the operand itself, and a value left under a store
-// of its class (an increment's DUP leaves one) has it too. At a target, every way control arrives brings the same stack
-// (tier0_arrive), the top's class among it.
+// before it, which the compile reads for it: in postorder that entry is the operand itself, and a value left under a
+// store of its class (an increment's DUP leaves one) has it too. At a target, every way control arrives brings the same
+// stack (tier0_arrive), the top's class among it.
 static inline __attribute__((always_inline)) bool tier0_last_mismatch(const Tier0Function* function, const Tier0Validator* validator, uint32_t i)
 {
     return tier0_takes_last(function, i) && validator->depth != 0 && tier0_stack_class(validator->stack[validator->depth - 1]) != function->classes[i - 1];
@@ -13673,8 +12707,8 @@ static __attribute__((noinline)) Tier0Check tier0_validate_scalar_entries(const 
 // ---------------------------------------------------------------------------------------------------------------------
 // The vector path
 
-// The vector fusion's tables, built from the slots once (tier0_build_vector_tables), so that both paths follow one
-// table: a kind's shape (first operand, last operand, push: BUSTER_TIER0_STACK_* in bits 0-1, 2 and 3-4) and flags, a
+// The vector fusion's tables, built from the slots once (tier0_build_vector_tables), so that the fusion follows the
+// slots: a kind's shape (first operand, last operand, push: BUSTER_TIER0_STACK_* in bits 0-1, 2 and 3-4) and flags, a
 // class's stack, width and kind, and the properties of a (kind, key class): which fused variants exist. The properties
 // are a byte table indexed by (row << 4 | class), where a kind's row groups the kinds with the same properties over the
 // classes (at most 16 rows, so that the table is 256 bytes, two vpermi2b and a blend), and a CONVERT's (to << 4 | from)
@@ -13749,7 +12783,7 @@ static uint8_t tier0_properties_of(uint32_t kind, uint32_t class)
 }
 
 // Builds the vector tables. Returns false if the kinds need more than BUSTER_TIER0_ROWS rows of properties, or a
-// property the vector path reads as all-or-none is some (a table the twins would disagree on).
+// property the vector path reads as all-or-none is some (a table the slots would disagree with).
 static bool tier0_build_vector_tables(void)
 {
     bool valid = true;
@@ -13779,7 +12813,7 @@ static bool tier0_build_vector_tables(void)
             row[class] = kind < BUSTER_TIER0_KINDS && kind != BUSTER_TYPED_CONVERT ? tier0_properties_of(kind, class) : 0;
             // A compare takes two locals exactly where it takes a local and a constant: the vector path reads one bit.
             // And its branches' templates are all there or none is, right before the branch and behind its tests: one
-            // bit again, where the scalar fusion asks for the slot it takes.
+            // bit again, where the slot it takes is asked for.
             if ((flags & BUSTER_TIER0_KIND_COMPARE) != 0)
             {
                 const bool home_home = tier0_slot(kind, class, BUSTER_TIER0_VARIANT_HOME_HOME) != BUSTER_TIER0_SLOT_UNSUPPORTED;
@@ -13931,7 +12965,7 @@ struct Tier0Bits
 };
 
 // P0: each entry's value predicates, 8 entries at a time (a byte of each bitset), and its SIB scale's log2.
-static void tier0_vector_values(const Tier0Function* function, Tier0Bits* bits)
+static inline __attribute__((always_inline)) void tier0_vector_values(const Tier0Function* function, Tier0Bits* bits)
 {
     const uint32_t count = function->count;
     const __m512i int32_max = _mm512_set1_epi64(INT32_MAX);
@@ -13968,7 +13002,7 @@ static void tier0_vector_values(const Tier0Function* function, Tier0Bits* bits)
 
 // The labels, a bit per entry: the control entries' targets (found 64 at a time and listed in `listed`, room for the
 // entries and 16 more, then set one at a time: they are few), and the labels JUMP_INDIRECT may go to.
-static void tier0_vector_labels(const Tier0Function* function, uint32_t* listed, uint64_t* labels)
+static inline __attribute__((always_inline)) void tier0_vector_labels(const Tier0Function* function, uint32_t* listed, uint64_t* labels)
 {
     const uint32_t count = function->count;
     const __m512i lane_numbers = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
@@ -14052,11 +13086,19 @@ static __m512i tier0_vector_access_kinds(const Tier0Entries* entries, __m512i ki
     return keys;
 }
 
-// P1 and P2: each consumer's fusions and key, and every entry's raw effects, 64 entries at a time.
-static void tier0_vector_fuse(const Tier0Function* function, Tier0Bits* bits, Tier0Entries* entries)
+// P1 and P2: each consumer's fusions and key, and every entry's raw effects, 64 entries at a time. P2 runs only in a
+// function with one of the kinds its fusions end at (LOAD, SET, the branches and SET_LOCAL): without them it changes
+// nothing. Returns whether any entry is absorbed (a leaf, HOME_CONST or compound fusion), without which P3 has nothing to
+// fold (tier0_vector_depths).
+static inline __attribute__((always_inline)) bool tier0_vector_fuse(const Tier0Function* function, Tier0Bits* bits, Tier0Entries* entries)
 {
     const uint32_t count = function->count;
     const __m512i one = _mm512_set1_epi8(1);
+    const uint64_t compound_kinds = 1ull << BUSTER_TYPED_LOAD | 1ull << BUSTER_TYPED_SET | 1ull << BUSTER_TYPED_BRANCH_TRUE | 1ull << BUSTER_TYPED_BRANCH_FALSE |
+                                    1ull << BUSTER_TYPED_SET_LOCAL;
+    _Static_assert(BUSTER_TYPED_KIND_LIMIT == 64, "a kind is a bit of a quadword");
+    uint64_t compound = 0;
+    uint64_t absorbing = 0;
     __m512i previous_kinds = _mm512_setzero_si512();
     __m512i previous_classes = _mm512_setzero_si512();
     __m512i previous_kinds_2 = _mm512_setzero_si512();
@@ -14150,6 +13192,8 @@ static void tier0_vector_fuse(const Tier0Function* function, Tier0Bits* bits, Ti
         const uint64_t leaf = lanes & has_last & ~labels & (leaf_constant | leaf_home) & ~home_const & ~home_home & ~sequential & (block != 0 ? ~0ull : ~1ull);
         bits->leaf[block] = leaf;
         bits->home_const[block] = home_const | home_home;
+        absorbing |= leaf | home_const | home_home;
+        compound |= _mm512_mask_bitshuffle_epi64_mask(lanes, _mm512_set1_epi64((int64_t)compound_kinds), kinds);
         // The variants: the entry's own, then the leaf fusion's.
         __m512i variant = _mm512_setzero_si512();
         const uint64_t floating_zero = _mm512_cmpeq_epi8_mask(kinds, _mm512_set1_epi8(BUSTER_TYPED_CONST)) & _mm512_cmpeq_epi8_mask(stack, _mm512_set1_epi8(2)) &
@@ -14217,7 +13261,7 @@ static void tier0_vector_fuse(const Tier0Function* function, Tier0Bits* bits, Ti
     uint64_t previous_tests = 0;
     uint64_t previous_equals = 0;
     uint64_t previous_takable = 0;
-    for (uint32_t block = 0; block < bits->blocks; block += 1)
+    for (uint32_t block = 0; compound != 0 && block < bits->blocks; block += 1)
     {
         const uint32_t first = block * 64;
         const __mmask64 lanes = tier0_lanes(first, count);
@@ -14310,6 +13354,7 @@ static void tier0_vector_fuse(const Tier0Function* function, Tier0Bits* bits, Ti
         bits->one[block] = load | fused_branch | tested | rmw;
         bits->two[block] = store;
         bits->rmw[block] = rmw | twice;
+        absorbing |= load | fused_branch | tested | rmw | store | twice;
         // The keys and variants of the compound fusions.
         __m512i variant = variants;
         variant = _mm512_mask_mov_epi8(variant, load & constant_variant_1, tier0_variant(BUSTER_TIER0_VARIANT_OFFSET));
@@ -14348,19 +13393,21 @@ static void tier0_vector_fuse(const Tier0Function* function, Tier0Bits* bits, Ti
         previous_equals = equals;
         previous_takable = takable;
     }
+    return absorbing != 0;
 }
 
 // P3 and P4: each entry's absorber (the consumer that takes it, 1 to 3 entries on, and up to BUSTER_TIER0_ABSORB_REACH
 // after one pointer-jump step for an absorber that is absorbed itself: the constant of the first of two tests behind a
 // branch is one before its test and four before the branch), the effects folded into the absorbers, and the depths,
-// their prefix sums.
-static void tier0_vector_depths(const Tier0Function* function, Tier0Bits* bits, Tier0Entries* entries)
+// their prefix sums. In a function where fusion absorbed no entry (`absorbing` false, tier0_vector_fuse), every distance
+// is 0 and every entry's effects its own: P4 alone, on the raw effects.
+static inline __attribute__((always_inline)) void tier0_vector_depths(const Tier0Function* function, Tier0Bits* bits, Tier0Entries* entries, bool absorbing)
 {
     const uint32_t count = function->count;
     const uint32_t blocks = bits->blocks;
     // P3a: the direct absorber's distance (0 for none), into the `absorbed` column (overwritten in P3b by the absorbed
     // flag).
-    for (uint32_t block = 0; block < blocks; block += 1)
+    for (uint32_t block = 0; absorbing && block < blocks; block += 1)
     {
         const uint32_t first = block * 64;
         const __mmask64 lanes = tier0_lanes(first, count);
@@ -14385,13 +13432,13 @@ static void tier0_vector_depths(const Tier0Function* function, Tier0Bits* bits, 
     const __m512i lane_index = _mm512_set_epi8(63, 62, 61, 60, 59, 58, 57, 56, 55, 54, 53, 52, 51, 50, 49, 48, 47, 46, 45, 44, 43, 42, 41, 40, 39, 38, 37, 36,
                                                35, 34, 33, 32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7,
                                                6, 5, 4, 3, 2, 1, 0);
-    __m512i next_direct = blocks > 0 ? _mm512_maskz_loadu_epi8(tier0_lanes(0, count), entries->absorbed) : _mm512_setzero_si512();
+    __m512i next_direct = absorbing && blocks > 0 ? _mm512_maskz_loadu_epi8(tier0_lanes(0, count), entries->absorbed) : _mm512_setzero_si512();
     for (uint32_t block = 0; block < blocks; block += 1)
     {
         const uint32_t first = block * 64;
         const __mmask64 lanes = tier0_lanes(first, count);
         const __m512i direct = next_direct;
-        next_direct = block + 1 < blocks ? _mm512_maskz_loadu_epi8(tier0_lanes(first + 64, count), entries->absorbed + first + 64) : _mm512_setzero_si512();
+        next_direct = absorbing && block + 1 < blocks ? _mm512_maskz_loadu_epi8(tier0_lanes(first + 64, count), entries->absorbed + first + 64) : _mm512_setzero_si512();
         // The absorber's own distance: lane j + direct[j], across into the next block.
         const __m512i at = _mm512_add_epi8(lane_index, direct);
         const __m512i absorber_direct = _mm512_permutex2var_epi8(direct, at, next_direct);
@@ -14403,7 +13450,7 @@ static void tier0_vector_depths(const Tier0Function* function, Tier0Bits* bits, 
         // ultimate absorber it is.
         __m512i integer = _mm512_maskz_mov_epi8(~absorbed, integer_raw);
         __m512i floating = _mm512_maskz_mov_epi8(~absorbed, floating_raw);
-        for (uint32_t back = 1; back <= BUSTER_TIER0_ABSORB_REACH; back += 1)
+        for (uint32_t back = 1; absorbing && back <= BUSTER_TIER0_ABSORB_REACH; back += 1)
         {
             const __m512i ultimate_back = tier0_shift_back(ultimate, previous_ultimate, back);
             const __mmask64 mine = _mm512_cmpeq_epi8_mask(ultimate_back, _mm512_set1_epi8((char)back));
@@ -14437,12 +13484,13 @@ static void tier0_vector_depths(const Tier0Function* function, Tier0Bits* bits, 
     }
 }
 
-// tier0_mask_depths_scalar's twin, 64 entries at a time: each entry's effect from its shape's codes
-// (tier0_vector_shapes) and the classes, as P1 makes the other stacks' raw effects, an X86 entry's from its row (they are
-// few, as calls are), and the depths their exclusive prefix sums, as P4 makes the others'. Its sums are bytes, the
+// The mask stack's depths (Tier0Entries.mask_depths), 64 entries at a time: each entry's effect from its shape's codes
+// (tier0_vector_shapes) and the classes, as P1 makes the other stacks' raw effects, an X86 entry's from its row (they
+// are few, as calls are), and the depths their exclusive prefix sums, as P4 makes the others'. Its sums are bytes, the
 // depths modulo 256 (a block's own sum among them, which rows of many masks take past an int8's range), exact while the
-// depths stay below 256; and since an entry pushes one mask at most, the first entry that finds BUSTER_TIER0_MAX_MASK_DEPTH
-// masks or more finds exactly that many, so that the highest of the bytes refuses what the twin refuses.
+// depths stay below 256; and since an entry pushes one mask at most, the first entry that finds
+// BUSTER_TIER0_MAX_MASK_DEPTH masks or more finds exactly that many, so that the highest of the bytes refuses what the
+// twin refuses.
 static Tier0Error tier0_vector_mask_depths(const Tier0Function* function, Tier0Entries* entries)
 {
     const uint32_t count = function->count;
@@ -14642,8 +13690,8 @@ static __m512i tier0_value_back(__m512i previous, __m512i current, __m512i offse
 // Selection for the vector path, 8 entries at a time: each entry's word gathered from its slot's (an absorbed entry's
 // ABSORBED), the depth checks (a template whose fixed registers need another depth is deferred), the depths each stack
 // reaches and the fixed clobbers, as masks and lane maxima, and the deferred entries listed (Tier0Entries.
-// deferred_entries); then the deferred entries' touches an entry at a time, as tier0_select's, and `memory` and
-// `realigned` as tier0_select_entries's.
+// deferred_entries); then the deferred entries' touches an entry at a time. `memory` and `realigned` are constants: the
+// memory classes' values and a realigned frame, out of line (tier0_select_vector_memory).
 static inline __attribute__((always_inline)) uint32_t tier0_select_vector_entries(const Tier0Function* function, Tier0Entries* entries, Tier0Frame* frame,
                                                                                   Tier0Error* error, bool memory, bool realigned)
 {
@@ -14707,7 +13755,7 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_vector_entrie
         _mm256_storeu_si256((__m256i*)(listed + deferred_count), _mm256_maskz_compress_epi32(deferred, _mm256_add_epi32(_mm256_set1_epi32((int32_t)first), lane_numbers)));
         deferred_count += (uint32_t)__builtin_popcount(deferred);
     }
-    // The deferred entries' touches, as the scalar selection has them, in order: a loop of their own, which the blocks'
+    // The deferred entries' touches, in order: a loop of their own, which the blocks'
     // loop doesn't wait on at a block's last deferred lane (#2874).
     for (uint32_t k = 0; k < deferred_count; k += 1)
     {
@@ -14753,7 +13801,7 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_vector_entrie
         }
         else if (function->kinds[i] == BUSTER_TYPED_FENCE || function->kinds[i] == BUSTER_TYPED_ATOMIC_RMW)
         {
-            // No register past its operands', as the scalar selection has it.
+            // No register past its operands'.
         }
         else if (function->kinds[i] == BUSTER_TYPED_COPY)
         {
@@ -14798,7 +13846,7 @@ static inline __attribute__((always_inline)) uint32_t tier0_select_vector_entrie
     {
         unsupported = (words[i] & BUSTER_TIER0_WORD_UNSUPPORTED) != 0 ? i : count;
     }
-    // The frame pointer's depths, as the scalar selection's (tier0_select_entries).
+    // The frame pointer's depths.
     const bool kept = tier0_kept_pointer(function, calls);
     const bool pointer_depths = moves || (kept && !realigned);
     const Tier0Tops convert = convert_scratch[pointer_depths ? 1 : 0];
@@ -15100,11 +14148,11 @@ static void tier0_call_memo_write(const Tier0Function* function, const Tier0Fram
 // A deep entry is deferred after selection (tier0_select_deep), so a function with them lists its deferred entries in
 // the words' loop again, then counts them, then sums the lengths in a third loop. The words' loop has no branch on its
 // words and the list's none on the blocks, so that neither the gathers nor the calls' table lookups wait for each
-// other's guards (a loop over the deferred lanes of each block mispredicted at its end). The last block's words and positions are stored whole, past the entries: emission expands every lane of a block,
-// and a lane past the entries has template 0 and the end's position, which the epilogue overwrites. `memory` is
-// Tier0Frame.memory and `deep` whether the function has deep entries (tier0_select_deep's): constants at each of
-// tier0_measure_vector's four uses, as tier0_select_entries's are.
-// The lengths of measuring's listed deferred entries (tier0_measure_vector_entries), in order: a call the thread's table
+// other's guards (a loop over the deferred lanes of each block mispredicted at its end). The last block's words and
+// positions are stored whole, past the entries: emission expands every lane of a block, and a lane past the entries has
+// template 0 and the end's position, which the epilogue overwrites. `memory` is Tier0Frame.memory and `deep` whether
+// the function has deep entries (tier0_select_deep's): constants at each of tier0_measure_vector's four uses. The
+// lengths of measuring's listed deferred entries (tier0_measure_vector_entries), in order: a call the thread's table
 // gives (tier0_call_memo_find) its records' count, and its entry for emission; another its count's.
 static inline __attribute__((always_inline)) void tier0_measure_listed(const Tier0Function* function, Tier0Entries* entries, const Tier0Home* homes,
                                                                        const uint32_t* listed, uint32_t deferred_count, bool memory, bool deep,
@@ -15316,7 +14364,7 @@ static inline __attribute__((always_inline)) __m512i tier0_expand(const uint64_t
 // - the choice requests are compressed into their columns, their contexts read from the expanded records;
 // - the branches, then the references and the deferred entries, are written an entry at a time in order, the deferred
 //   entries over what the lanes stored at their places.
-// `deep` is tier0_emit_body_entries': with deep entries, the branch and request counts go to their emitter in the writer
+// `deep` is whether the function has deep entries: then the branch and request counts go to their emitter in the writer
 // and back, and since a block's deep entries' branches come after its templates', the branch columns are sorted last
 // (tier0_sort_branches), as they are where an asm body has branches (a deferred entry's, #1839).
 static inline __attribute__((always_inline)) void tier0_emit_vector_entries(const Tier0Function* function, const Tier0Entries* entries, const Tier0Frame* frame,
@@ -15547,12 +14595,12 @@ static void tier0_emit_vector(const Tier0Function* function, const Tier0Entries*
     }
 }
 
-// The vector path's first pass over a job: its entries' columns and the fusion's bitsets (from the scratch arena), the
-// labels, the values' predicates (P0), the fusions (P1 to P3) and the depths (P4), then selection (tier0_job_select).
-static inline __attribute__((always_inline)) void tier0_job_front(Tier0Job* job, Arena* scratch)
+// The front: the entries' columns and the passes' bitsets from `scratch`, then the labels, P0 to P4 and the masks'
+// depths, which the selection and the passes after it read (Tier0Entries). Inlined into each caller
+// (tier0_job_front; the tests and the entries' census, which read the columns), so that the compile's own passes
+// keep one caller each.
+static inline __attribute__((always_inline)) Tier0Error tier0_vector_front(const Tier0Function* function, Arena* scratch, Tier0Entries* entries)
 {
-    const Tier0Function* function = job->function;
-    Tier0Entries* entries = &job->entries;
     const uint32_t count = function->count;
     const uint32_t blocks = (count + 63) / 64;
     Tier0Bits bits;
@@ -15567,7 +14615,7 @@ static inline __attribute__((always_inline)) void tier0_job_front(Tier0Job* job,
     pushed = pushed && column_words != 0;
     if (column_words != 0)
     {
-        memset(column_words, 0, words * BUSTER_ARRAY_LENGTH(columns) * sizeof(uint64_t));
+        tier0_clear(column_words, words * BUSTER_ARRAY_LENGTH(columns) * sizeof(uint64_t));
         for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(columns); c += 1)
         {
             *columns[c] = column_words + words * c;
@@ -15580,12 +14628,12 @@ static inline __attribute__((always_inline)) void tier0_job_front(Tier0Job* job,
         tier0_vector_labels(function, entries->deferred_entries, bits.labels);
         entries->labels = bits.labels;
         tier0_vector_values(function, &bits);
-        tier0_vector_fuse(function, &bits, entries);
+        const bool absorbing = tier0_vector_fuse(function, &bits, entries);
         if (function->vectors)
         {
             tier0_operation_effects(function, entries);
         }
-        tier0_vector_depths(function, &bits, entries);
+        tier0_vector_depths(function, &bits, entries, absorbing);
         if (function->masks)
         {
             entries->mask_depths = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)count + 64);
@@ -15596,8 +14644,14 @@ static inline __attribute__((always_inline)) void tier0_job_front(Tier0Job* job,
             error = tier0_vector_mask_depths(function, entries);
         }
     }
-    job->error = error;
-    tier0_job_select(job, scratch, true);
+    return error;
+}
+
+// The first pass over a job: the front (tier0_vector_front), then selection (tier0_job_select).
+static inline __attribute__((always_inline)) void tier0_job_front(Tier0Job* job, Arena* scratch)
+{
+    job->error = tier0_vector_front(job->function, scratch, &job->entries);
+    tier0_job_select(job, scratch);
 }
 
 // The vector path's passes, each over every job of `jobs` before the next (#2874): a function's compile is a dozen
@@ -15616,7 +14670,7 @@ static __attribute__((noinline)) void tier0_jobs_homes(Tier0Job* jobs, uint32_t 
 {
     for (uint32_t j = 0; j < count; j += 1)
     {
-        tier0_job_homes(&jobs[j], scratch, true);
+        tier0_job_homes(&jobs[j], scratch);
     }
 }
 
@@ -15624,7 +14678,7 @@ static __attribute__((noinline)) void tier0_jobs_measure(Tier0Job* jobs, uint32_
 {
     for (uint32_t j = 0; j < count; j += 1)
     {
-        tier0_job_measure(&jobs[j], scratch, output, true);
+        tier0_job_measure(&jobs[j], scratch, output);
     }
 }
 
@@ -15632,7 +14686,7 @@ static __attribute__((noinline)) void tier0_jobs_emit(Tier0Job* jobs, uint32_t c
 {
     for (uint32_t j = 0; j < count; j += 1)
     {
-        tier0_job_emit(&jobs[j], true);
+        tier0_job_emit(&jobs[j]);
     }
 }
 
@@ -15640,7 +14694,7 @@ static __attribute__((noinline)) void tier0_jobs_finish(Tier0Job* jobs, uint32_t
 {
     for (uint32_t j = 0; j < count; j += 1)
     {
-        tier0_job_finish(&jobs[j], scratch, output, true);
+        tier0_job_finish(&jobs[j], scratch, output);
         tier0_job_records(&jobs[j], output);
     }
 }
@@ -15685,9 +14739,9 @@ static void tier0_segments_strip(const Tier0Function* function, uint64_t* values
     }
 }
 
-// Compiles a function with segment overrides (tier0_compile's and tier0_compile_scalar's): its stripped copy
-// (tier0_segments_strip) on the path's own passes, then the overrides on its records.
-static __attribute__((noinline)) Tier0Code tier0_compile_segments(const Tier0Function* function, Arena* output, bool vector)
+// Compiles a function with segment overrides (tier0_compile's): its stripped copy (tier0_segments_strip), then the
+// overrides on its records.
+static __attribute__((noinline)) Tier0Code tier0_compile_segments(const Tier0Function* function, Arena* output)
 {
     Tier0Code code;
     memset(&code, 0, sizeof(code));
@@ -15707,19 +14761,17 @@ static __attribute__((noinline)) Tier0Code tier0_compile_segments(const Tier0Fun
         stripped.volatiles = false;
         // A function with volatile accesses alone has no override to add.
         const uint8_t* overrides = function->segments ? segments : 0;
-        code = BUSTER_VECTOR_PATH(vector) ? tier0_compile_entries(&stripped, overrides, output) : tier0_compile_scalar_entries(&stripped, overrides, output);
+        code = tier0_compile_entries(&stripped, overrides, output);
     }
     scratch_end(scratch);
     return code;
 }
 
-// One compilation of a function on the scalar path or the vector one, as Tier0Function.zero_upper has it.
-static Tier0Code tier0_compile_once(const Tier0Function* function, Arena* output, bool vector)
+// One compilation of a function, as Tier0Function.zero_upper has it.
+static Tier0Code tier0_compile_once(const Tier0Function* function, Arena* output)
 {
     const bool stripped = __builtin_expect(function->segments || function->volatiles, 0);
-    return stripped ? tier0_compile_segments(function, output, vector) :
-           vector   ? tier0_compile_entries(function, 0, output) :
-                      tier0_compile_scalar_entries(function, 0, output);
+    return stripped ? tier0_compile_segments(function, output) : tier0_compile_entries(function, 0, output);
 }
 
 // Rewrites a function's legacy SSE records as their VEX twins (x86_vex_forms_tier0, #3335), for a target with AVX
@@ -15780,7 +14832,7 @@ static bool tier0_upper_likely(const Tier0Function* function)
 // checked on its records (x86_upper_dirty): a wrong prediction compiles it again, as the code says, so that only a
 // mispredicted function, which has vector values or an asm body, pays a second compilation; any other function compiles
 // once, as the front end gave it.
-static Tier0Code tier0_compile_upper(const Tier0Function* function, Arena* output, bool vector)
+static Tier0Code tier0_compile_upper(const Tier0Function* function, Arena* output)
 {
     Tier0Code code;
     if (__builtin_expect(tier0_upper_possible(function), 0))
@@ -15788,18 +14840,18 @@ static Tier0Code tier0_compile_upper(const Tier0Function* function, Arena* outpu
         Tier0Function predicted = *function;
         predicted.zero_upper = tier0_upper_likely(function);
         const uint64_t mark = output->length;
-        code = tier0_compile_once(&predicted, output, vector);
+        code = tier0_compile_once(&predicted, output);
         const bool dirty = code.error == TIER0_OK && x86_upper_dirty(code.records, code.count);
         if (code.error == TIER0_OK && dirty != predicted.zero_upper)
         {
             arena_pop_to(output, mark);
             predicted.zero_upper = dirty;
-            code = tier0_compile_once(&predicted, output, vector);
+            code = tier0_compile_once(&predicted, output);
         }
     }
     else
     {
-        code = tier0_compile_once(function, output, vector);
+        code = tier0_compile_once(function, output);
     }
     if (code.error == TIER0_OK && function->avx)
     {
@@ -15808,14 +14860,9 @@ static Tier0Code tier0_compile_upper(const Tier0Function* function, Arena* outpu
     return code;
 }
 
-static Tier0Code tier0_compile_scalar(const Tier0Function* function, Arena* output)
-{
-    return tier0_compile_upper(function, output, false);
-}
-
 static Tier0Code tier0_compile(const Tier0Function* function, Arena* output)
 {
-    return tier0_compile_upper(function, output, true);
+    return tier0_compile_upper(function, output);
 }
 
 // The functions the passes of a batch run over together (tier0_compile_batch): at most BUSTER_TIER0_BATCH_JOBS, and no

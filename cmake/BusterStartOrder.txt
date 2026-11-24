@@ -44,6 +44,7 @@ main_unit_frontend.c pp_set_macro
 main_unit_frontend.c pp_scratch_in
 main_unit_frontend.c arena_commit
 main_unit_frontend.c pp_run_prelude
+main_unit_frontend.c pp_run_prelude_macros
 main_unit_frontend.c pp_lookup_path
 main_unit_frontend.c pp_run_main
 main_unit_frontend.c pp_run_file

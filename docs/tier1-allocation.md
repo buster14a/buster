@@ -328,35 +328,55 @@ placement and critical-edge splitting are not done by this routine.
 
 The deterministic policy is unchanged: emit the lowest input index whose
 destination has no remaining source users; when none is ready, save the lowest
-pending destination to scratch. Up to eight moves use the independent scan
-implementation, `tier1_resolve_moves_scalar`. The only current production caller
-is `tier1_emit_call`, bounded by the six SysV integer argument registers; the
-general API keeps its full 2^20-move limit and opaque location domain.
+pending destination to scratch. Two vector forms implement it, each the only
+code for its range (#3450, phase D of #2924; they replaced a scalar scan up to
+eight moves and a merge-sort-and-heap path beyond, which gave the same order):
 
-Larger sets use `tier1_resolve_moves_indexed`. Eight-wide masked initialization
-validates scratch exclusion, marks identities and constructs packed
-`(destination, input index)` keys. A nonrecursive merge sort detects duplicate
-destinations; binary searches map each source to its destination owner. Source
-use counts and a minimum heap replace repeated pending-move scans. Each emitted
-move updates only its source owner's count, and each move enters the ready
-heap once. A monotonically advancing cursor finds the first pending move when
-breaking cycles. Sorting, lookup and heap work are O(N log N), with O(N) storage,
-including adversarial opaque ids and fan-out.
+- **Up to 32 moves** (`tier1_resolve_moves_register`): every set the census
+  found (sqlite3.c, Lua and musl under `--tier1`: 41,188 sets, at most 12
+  moves, 596 with a cycle). Sources and destinations are two registers each.
+  Broadcast compares give each destination's readers as a 32-bit row and find
+  duplicate destinations; the 32 rows are two registers of dwords, so each step
+  tests every row against the pending mask at once and takes the lowest ready
+  lane by `tzcnt`. (A first version stopped at 16 moves, and the wide form then
+  read 0.96 to 0.98 of the old path's time at 17.) A cycle saves the lowest pending destination, its readers
+  read scratch and its row empties. Nothing but the output is pushed.
+- **More than 32, up to 2^20** (`tier1_resolve_moves_wide`). Masked 16-lane
+  steps validate scratch exclusion and pack `(destination, identity bit 31 |
+  input index)` keys; a vector radix sort (conflict masks rank lanes within a
+  bucket, only the digits that differ) orders them by destination, and adjacent
+  equal destinations are invalid. Each pending move's writer, the move whose
+  destination is its source, is a 16-lane branchless lower bound by gathers;
+  reader counts add up by conflict masks. The ready moves are a three-level
+  bitset, so the lowest is three `tzcnt`s below the first nonzero top word, and
+  the cycle cursor advances 16 moves a step.
 
-When the ready heap is empty, every remaining destination has at least one
+When no move is ready, every remaining destination has at least one
 source user. There are at most as many source edges as remaining moves, so
 every remaining destination has exactly one user: the residual graph is a set
 of disjoint cycles. Saving one destination makes its move ready; its sole
 remaining consumer reads scratch instead. That cycle drains before another
-save can reuse scratch. The algorithm needs neither repeated source rewriting
-nor a scan for that consumer.
+save can reuse scratch.
 
-Both paths retain at most 16*N bytes for output columns. The indexed path uses
-28*N temporary bytes (two u64 key arrays and three u32 dependency/count/heap
-arrays), plus alignment; the small scan uses 5*N temporary bytes. Inputs remain
-immutable, errors restore the entry arena length and preserve the result, and
-success discards all temporary arrays. Sorting requires temporary capacity, so
-capacity exhaustion can precede duplicate-destination diagnosis.
+The emission itself stays an ordered loop: each choice depends on the moves
+emitted before it, and the order is the objects' (every caller's move
+sequence), so it can't be a different data-parallel order without changing
+code. Its steps are word operations on bitsets and masks. On the 9700X the two
+forms take 0.12 to 0.89 of the old routes' time at every count from 0 to
+2^20, real sets replayed (0.58 over all of them) and random sets by count (buster-performance's
+`docs/measurements/scalar-paths-removal-2924-2026-11-17/tier1-moves/`).
+
+Both forms retain 16*N bytes for output columns. The register form pushes
+nothing else; the wide form uses 24*N temporary bytes (two u64 key arrays and
+the u32 writers and reader counts) and the bitset's words, plus alignment.
+Inputs remain immutable, errors restore the entry arena length and preserve the
+result, and success discards all temporary arrays. The wide form allocates
+before it validates, so capacity exhaustion can precede an invalid input's
+diagnosis there. `test-tier1-allocation` checks every order against
+`tier1_move_test_definition`, the policy as a plain cubic scan, at every
+shape up to 1,024 moves, 256 random sets of 0 to 32 moves and 256 of 33 to
+64 (identity moves, fan-out and cycles), and refuses a duplicate destination
+in every lane of both forms.
 
 ### Resolver measurements (#608)
 
@@ -368,18 +388,10 @@ and 13.309–13.314 microseconds with dispatch. Median retired instructions fell
 from 3,842,936,080 to 420,805. Across 32–1024 moves, doubling N increased the
 original chain's instruction work by 7.39–7.96 times, and dispatch's by
 2.13–2.15 times. Reversed chains, independent moves, cycles and fan-out were
-also measured at every requested size and retain the indexed path's bounded
-work. These are resolver measurements, separate from whole-compiler throughput.
-
-At 1024 moves the indexed call peaks at 44 KiB of arena storage versus 21 KiB
-for the scan; both retain 16 KiB. The small cutoff preserves the current
-caller's original algorithm and smaller arena budget. Its tuning remains an
-opportunity: forced indexing takes 43.811–44.878 ns on the six-move synthetic
-chain, while dispatch takes 106.910–117.510 ns; the original scan wins on the
-one- and two-move chains. The actual caller's shuffle distribution remains
-unmeasured, so these data establish neither an optimal cutoff nor a corpus
-speedup. The native/Clang pipeline, allocation, liveness, selection, call-graph
-and resolver ASan/UBSan qualification all passed on the locked host.
+also measured at every requested size. These are resolver measurements,
+separate from whole-compiler throughput; they were the scan and the indexed path
+that #3450 replaced with the two vector forms above, whose own gate is in their
+paragraph.
 
 The [pinned report, harnesses, raw counters/timings, assembly and identities](https://github.com/buster14a/buster-performance/tree/24e978f162396700cfc1848a4d77804e2e7f065e/docs/measurements/tier1-moves-608-2026-10-27)
 record the shapes, complete process ranges, memory costs and validation scope.
@@ -2755,11 +2767,12 @@ victim's register to `UINT8_MAX` and a reload records the new one.
 
 The move-specific fixtures (`tier1_moves_test.c`, #608) exercise the chain,
 reversed chain, independent moves, long and disjoint cycles, fan-out and
-identities at 0, 1, 2, 7, 8, 9, 15, 16, 17, 31, 32, 64, 128, 256, 512 and
+identities at 0, 1, 2, 7, 8, 9, 15, 16, 17, 31, 32, 33, 64, 128, 256, 512 and
 1024 moves, with sparse ids including UINT32_MAX. A 2^20-move chain checks the
-full accepted limit. Snapshot execution checks meaning, the independent scan
-checks exact ordering on small sets, and the scalar/vector indexed paths agree
-exactly. Read-only guarded columns cover every tail through 33 elements; a
+full accepted limit, and random sets of 5,000 and 300,000 moves (many ready at
+once, cycles, fan-out) the wide form's bitset levels and cycle cursor.
+Snapshot execution checks meaning, and every order up to 1,024 moves is
+`tier1_move_test_definition`'s exactly. Read-only guarded columns cover every tail through 33 elements; a
 byte-by-byte capacity sweep checks rollback, prior arena contents and retained
 output length. Scratch collisions, duplicate destinations, excessive counts
 and absent columns fail transactionally.
