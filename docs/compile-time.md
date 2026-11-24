@@ -1357,6 +1357,22 @@ Since no fault maps those pages, every later load there costs the same again.
 The gated loads now read `check_input_rare_line`'s static line of zeros
 instead, and the classes' pass takes 0.43 ms.
 
+### Sparse reader memos (#1167)
+
+On the 9700X, the first change to the rare-column reads reduced faults in the
+reader's arena from 4,169 to 3,076 per compile of the frozen `sqlite3.c`.
+Five columns still accounted for 1,041 first-write pages. The `sizeof` operand
+types used 318 pages, the tag types and ends used 351, and the declaration bases
+and specifiers used 372. [Column census and first change](https://github.com/buster14a/buster-performance/tree/dd3544b/docs/measurements/sparse-columns-1167-2026-11-16)
+
+In source order, these five columns share a pool in the reader's base-page
+arena. The first nonzero write in a group of 16 tokens takes one 64-byte block.
+Each directory entry indexes the pool, so writes far apart in the source can
+share a physical page. Complementing each value makes the pool's empty block
+read as zero, including at the end-of-input sentinel. The reader releases the
+pool before emission. Deferred readers use contiguous arrays for the parallel
+body writes and the subsequent TypeId remap.
+
 ### The preprocessor's output before the backend (#628)
 
 After the change above, the backend's end was the compile's peak. A map on the

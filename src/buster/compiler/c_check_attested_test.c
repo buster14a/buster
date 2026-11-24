@@ -1020,6 +1020,7 @@ static const CheckAttestedField check_attested_reader_fields[] =
     { "declared_types", CHECK_ATTESTED_FIELD_OWN },
     { "query_types", CHECK_ATTESTED_FIELD_OWN },
     { "sizeof_types", CHECK_ATTESTED_FIELD_OWN },
+    { "memo_pool", CHECK_ATTESTED_FIELD_AMBIENT },
     { "sizeof_capture", CHECK_ATTESTED_FIELD_TRANSIENT },
     { "specifier_jobs", CHECK_ATTESTED_FIELD_TRANSIENT },
     { "specifier_finishes", CHECK_ATTESTED_FIELD_TRANSIENT },

@@ -592,7 +592,7 @@ static __attribute__((noinline)) TypeId check_input_auto_type_finish(CheckInputR
         {
             // C23's later declarators deduce the same type (6.7.9), and __auto_type's as clang deduces them: clang reports
             // the difference at the declaration.
-            const uint32_t group = reader->declaration_specifiers[declaration];
+            const uint32_t group = check_input_memo_get(&reader->declaration_specifiers, declaration);
             const TypeId previous = group < parser->tokens.count ? reader->declaration_deduced[group] : 0;
             const uint32_t first = previous != 0 ? reader->declaration_deduced_first[group] : BUSTER_CHECK_NONE;
             if (previous != 0 && first < parser->tokens.count && type_same_canonical(types, previous, deduced_base) != TYPE_ANSWER_YES)
