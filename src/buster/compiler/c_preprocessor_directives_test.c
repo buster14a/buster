@@ -808,18 +808,20 @@ static bool pp_directive_test_expected(const char* actual, const char* wanted, c
     {
         static const char trace[] = "In file included from ";
         const size_t length = strlen(directory);
-        while (same && *actual != 0)
+        while (same && *wanted != 0)
         {
-            const size_t prefix = strncmp(actual, trace, sizeof(trace) - 1) == 0 ? sizeof(trace) - 1 : 0;
-            const char* location = actual + prefix;
-            if (strncmp(location, directory, length) == 0 && location[length] == '/')
+            const size_t prefix = strncmp(wanted, trace, sizeof(trace) - 1) == 0 ? sizeof(trace) - 1 : 0;
+            if (strncmp(wanted + prefix, "%d/", 3) == 0)
             {
-                same = strncmp(wanted, actual, prefix) == 0 && strncmp(wanted + prefix, "%d/", 3) == 0;
-                actual = location + length;
-                wanted += same ? prefix + 2 : 0;
+                same = strncmp(actual, wanted, prefix) == 0 && strncmp(actual + prefix, directory, length) == 0;
+                if (same)
+                {
+                    actual += prefix + length;
+                    wanted += prefix + 2;
+                }
             }
-            size_t line = strcspn(actual, "\n");
-            line += actual[line] == '\n';
+            size_t line = strcspn(wanted, "\n");
+            line += wanted[line] == '\n';
             same = same && strncmp(wanted, actual, line) == 0;
             if (same)
             {
