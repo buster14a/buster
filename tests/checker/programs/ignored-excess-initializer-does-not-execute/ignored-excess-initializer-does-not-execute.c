@@ -1,0 +1,1 @@
+int g;int bump(void){g++;return 9;}int tested(int n){g=0;int x={n,bump()};return x+g;}

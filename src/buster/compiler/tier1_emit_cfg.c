@@ -501,7 +501,7 @@ static void tier1_emit_cfg_recipes(const Tier1SelectPlan* plan, const Tier1EmitR
 // The plan's allocation problem, in `output`, which the result keeps (see the header), with the maps between nodes and
 // values and the prepared columns the shared helpers read: recipes and sizes by node, the calls' save rows, and the
 // frame's columns (a node's slot, each caller-save row, then the temporary slot).
-static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const Tier1EmitOptions* options, Arena* output, Arena* scratch, Tier1EmitResult* emitted)
+static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const IrCfg* verified_cfg, const Tier1EmitOptions* options, Arena* output, Arena* scratch, Tier1EmitResult* emitted)
 {
     const IrFunction* function = plan->function;
     const uint32_t count = function->instruction_count;
@@ -512,7 +512,7 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
     IrCfg cfg = { 0 };
     if (error == TIER1_EMIT_OK)
     {
-        const IrError built = ir_build_cfg(function, output, scratch, &cfg);
+        const IrError built = tier1_liveness_cfg(function, verified_cfg, output, scratch, &cfg);
         tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_IR, built);
         error = built == IR_OK ? TIER1_EMIT_OK : built == IR_ERROR_MEMORY ? TIER1_EMIT_MEMORY : built == IR_ERROR_LIMIT ? TIER1_EMIT_LIMIT : TIER1_EMIT_INVALID;
     }
@@ -1248,121 +1248,179 @@ static bool tier1_emit_cfg_incoming(const Tier1EmitResult* emitted, uint64_t pas
     return found;
 }
 
-// Each frame object's lifetime over tier1_cfg's positions (#177), into `starts` and `ends` by slot: its whole function
-// for an object without lifetime markers (IR_LIFETIME), and for one with them the hull of the positions where some path
-// from a start reaches without an end. That forward problem is backward liveness on the reversed CFG, which dataflow.c
-// solves (its vector path or its scalar twin): a block's last marker of the object a use where it starts and a
-// definition where it ends, so that the fixpoint's in row is the object's state after the block and its out row the one
-// before it. The hull takes each block's start where the object is live before it, its end where the object is live
-// after it, and each marker's own position: an access through the object's address, at a node between a start and an
-// end on some path, has its positions inside. Scratch keeps the dataflow's rows; the caller restores it.
+typedef struct Tier1LifetimeMarker Tier1LifetimeMarker;
+struct Tier1LifetimeMarker
+{
+    uint32_t block;
+    uint32_t node;
+};
+
+typedef struct Tier1LifetimeRow Tier1LifetimeRow;
+struct Tier1LifetimeRow
+{
+    __m512i seen;
+    __m512i pending;
+};
+
+// A group's rows start empty. Only initialize the blocks its markers or live edges reach.
+static Tier1LifetimeRow* tier1_emit_lifetime_row(Tier1LifetimeRow* rows, uint32_t* stamps, uint32_t group, uint32_t block)
+{
+    Tier1LifetimeRow* row = &rows[block];
+    if (stamps[block] != group + 1)
+    {
+        row->seen = _mm512_setzero_si512();
+        row->pending = _mm512_setzero_si512();
+        stamps[block] = group + 1;
+    }
+    return row;
+}
+
+// One vector of independent objects. A block's last marker determines its exit state regardless of its entry state.
+// Mark all such bits as seen and enqueue the starts. For unmarked bits, the first live incoming edge makes the exit
+// live. Each (block, object) exit is propagated once, including around back edges and in disconnected components.
+static void tier1_emit_lifetime_group(const IrFunction* function, const Tier1CfgInput* input, const Tier1LifetimeMarker* markers, uint32_t count, uint32_t group, Tier1LifetimeRow* rows, uint32_t* stamps, uint32_t* work, uint32_t* starts, uint32_t* ends)
+{
+    uint32_t queued = 0;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        // Markers are in reverse instruction order within the group.
+        const uint32_t block = markers[i].block;
+        const uint32_t node = markers[i].node;
+        const uint32_t bit_index = function->a[node] % BUSTER_DATAFLOW_VECTOR_BITS;
+        const uint32_t word = bit_index / 64;
+        const uint64_t bit = UINT64_C(1) << (bit_index % 64);
+        Tier1LifetimeRow* row = tier1_emit_lifetime_row(rows, stamps, group, block);
+        uint64_t* seen = (uint64_t*)&row->seen;
+        if ((seen[word] & bit) == 0)
+        {
+            seen[word] |= bit;
+            if (function->b[node] == 0)
+            {
+                if (_mm512_test_epi64_mask(row->pending, row->pending) == 0)
+                {
+                    work[queued++] = block;
+                }
+                ((uint64_t*)&row->pending)[word] |= bit;
+            }
+        }
+    }
+
+    const uint32_t* const offsets = input->successor_offsets;
+    const uint32_t* const successors = input->successors;
+    const uint32_t* const positions = input->block_starts;
+    while (queued != 0)
+    {
+        const uint32_t block = work[--queued];
+        const __m512i delta = rows[block].pending;
+        rows[block].pending = _mm512_setzero_si512();
+        // Every bit in delta is live at this exit and at each successor's entry, even one whose first marker ends it.
+        // Fold those positions into the hull together. A terminal block contributes only its exit.
+        uint32_t low = UINT32_MAX;
+        uint32_t high = positions[block + 1];
+        for (uint32_t edge = offsets[block]; edge < offsets[block + 1]; edge += 1)
+        {
+            const uint32_t next = successors[edge];
+            const uint32_t entry = positions[next];
+            low = entry < low ? entry : low;
+            high = entry + 1 > high ? entry + 1 : high;
+            Tier1LifetimeRow* row = tier1_emit_lifetime_row(rows, stamps, group, next);
+            const __m512i fresh = _mm512_andnot_si512(row->seen, delta);
+            if (_mm512_test_epi64_mask(fresh, fresh) != 0)
+            {
+                if (_mm512_test_epi64_mask(row->pending, row->pending) == 0)
+                {
+                    work[queued++] = next;
+                }
+                row->seen = _mm512_or_si512(row->seen, fresh);
+                row->pending = _mm512_or_si512(row->pending, fresh);
+            }
+        }
+        for (uint32_t word = 0; word < BUSTER_DATAFLOW_VECTOR_WORDS; word += 1)
+        {
+            for (uint64_t bits = (uint64_t)delta[word]; bits != 0; bits &= bits - 1)
+            {
+                const uint32_t slot = group * BUSTER_DATAFLOW_VECTOR_BITS + word * 64 + (uint32_t)__builtin_ctzll(bits);
+                starts[slot] = low < starts[slot] ? low : starts[slot];
+                ends[slot] = high > ends[slot] ? high : ends[slot];
+            }
+        }
+    }
+}
+
+// Frame coloring uses the layout hull of each object's lifetime (#177). Markers give the within-block endpoints.
+// Only a live exit can extend that hull across blocks. Solve groups of up to 512 slots in the same rows (#1384).
 static Tier1EmitError tier1_emit_cfg_lifetimes(const IrFunction* function, const Tier1CfgInput* input, Arena* scratch, uint32_t* starts, uint32_t* ends)
 {
+    const uint64_t saved = scratch->length;
     const uint32_t objects = function->slot_count;
     const uint32_t blocks = input->block_count;
-    const uint32_t added = blocks - function->block_count;
+    const uint32_t ir_blocks = function->block_count;
+    const uint32_t instructions = function->instruction_count;
+    const uint32_t groups = (uint32_t)(((uint64_t)objects + BUSTER_DATAFLOW_VECTOR_BITS - 1) / BUSTER_DATAFLOW_VECTOR_BITS);
     bool ok = true;
-    uint32_t* ids = objects != 0 ? ir_allocate(scratch, objects, 4, &ok) : 0;
-    Tier1EmitError error = ok ? TIER1_EMIT_OK : TIER1_EMIT_MEMORY;
-    uint32_t marked = 0;
-    for (uint32_t o = 0; error == TIER1_EMIT_OK && o < objects; o += 1)
+    uint32_t* offsets = ir_allocate(scratch, groups, sizeof(uint32_t), &ok);
+    uint32_t count = 0;
+    for (uint32_t node = 0; ok && objects != 0 && node < instructions; node += 1)
     {
-        ids[o] = BUSTER_IR_NONE;
-        starts[o] = 0;
-        ends[o] = input->position_count;
-    }
-    for (uint32_t node = 0; error == TIER1_EMIT_OK && node < function->instruction_count; node += 1)
-    {
-        if (function->op[node] == IR_LIFETIME && ids[function->a[node]] == BUSTER_IR_NONE)
+        if (function->op[node] == IR_LIFETIME)
         {
-            ids[function->a[node]] = marked++;
+            offsets[function->a[node] / BUSTER_DATAFLOW_VECTOR_BITS] += 1;
+            count += 1;
         }
     }
-    Dataflow lifetimes = { 0 };
-    if (error == TIER1_EMIT_OK && marked != 0)
+    if (ok && count != 0)
     {
-        ok = dataflow_create(scratch, blocks, marked, input->edge_count, &lifetimes);
+        Tier1LifetimeMarker* markers = arena_push_array(scratch, count, sizeof(*markers), _Alignof(Tier1LifetimeMarker));
+        Tier1LifetimeRow* rows = arena_push_array(scratch, blocks, sizeof(*rows), _Alignof(Tier1LifetimeRow));
+        uint32_t* work = arena_push_array(scratch, blocks, sizeof(*work), _Alignof(uint32_t));
+        uint32_t* stamps = ir_allocate(scratch, blocks, sizeof(*stamps), &ok);
+        ok = ok && markers != 0 && rows != 0 && work != 0;
         if (ok)
         {
-            memcpy(lifetimes.successor_offsets, input->predecessor_offsets, ((uint64_t)blocks + 1) * sizeof(uint32_t));
-            if (input->edge_count != 0)
+            memset(starts, 0xff, (uint64_t)objects * sizeof(*starts));
+            memset(ends, 0, (uint64_t)objects * sizeof(*ends));
+            for (uint32_t group = 1; group < groups; group += 1)
             {
-                memcpy(lifetimes.successors, input->predecessors, (uint64_t)input->edge_count * sizeof(uint32_t));
+                offsets[group] += offsets[group - 1];
             }
-            ok = dataflow_postorder(&lifetimes, scratch);
+            const uint32_t added = blocks - ir_blocks;
+            for (uint32_t b = 0; b < ir_blocks; b += 1)
+            {
+                const uint32_t first = function->block_offsets[b];
+                const uint32_t end = function->block_offsets[b + 1];
+                for (uint32_t node = first; node < end; node += 1)
+                {
+                    if (function->op[node] == IR_LIFETIME)
+                    {
+                        const uint32_t slot = function->a[node];
+                        const uint32_t position = input->block_starts[b + added] + 2 * (node - first);
+                        starts[slot] = function->b[node] == 0 && position < starts[slot] ? position : starts[slot];
+                        ends[slot] = position + 1 > ends[slot] ? position + 1 : ends[slot];
+                        markers[--offsets[slot / BUSTER_DATAFLOW_VECTOR_BITS]] = (Tier1LifetimeMarker){ .block = b + added, .node = node };
+                    }
+                }
+            }
+            for (uint32_t group = 0; group < groups; group += 1)
+            {
+                const uint32_t end = group + 1 < groups ? offsets[group + 1] : count;
+                if (end != offsets[group])
+                {
+                    tier1_emit_lifetime_group(function, input, markers + offsets[group], end - offsets[group], group, rows, stamps, work, starts, ends);
+                }
+            }
         }
-        error = ok ? TIER1_EMIT_OK : TIER1_EMIT_MEMORY;
     }
-    if (error == TIER1_EMIT_OK && marked != 0)
+    for (uint32_t slot = 0; ok && slot < objects; slot += 1)
     {
-        for (uint32_t b = 0; b < function->block_count; b += 1)
+        // Unmarked objects and objects with only end markers retain the whole function.
+        if (count == 0 || starts[slot] == UINT32_MAX)
         {
-            uint64_t* use = lifetimes.use + (uint64_t)(b + added) * lifetimes.row_words;
-            uint64_t* def = lifetimes.def + (uint64_t)(b + added) * lifetimes.row_words;
-            for (uint32_t node = function->block_offsets[b]; node < function->block_offsets[b + 1]; node += 1)
-            {
-                if (function->op[node] == IR_LIFETIME)
-                {
-                    const uint32_t id = ids[function->a[node]];
-                    const uint64_t bit = UINT64_C(1) << (id & 63);
-                    const bool start = function->b[node] == 0;
-                    use[id >> 6] = start ? use[id >> 6] | bit : use[id >> 6] & ~bit;
-                    def[id >> 6] = start ? def[id >> 6] & ~bit : def[id >> 6] | bit;
-                }
-            }
-        }
-        (void)dataflow_liveness(&lifetimes);
-        uint32_t* low = ir_allocate(scratch, marked, 4, &ok);
-        uint32_t* high = ir_allocate(scratch, marked, 4, &ok);
-        error = ok ? TIER1_EMIT_OK : TIER1_EMIT_MEMORY;
-        for (uint32_t id = 0; error == TIER1_EMIT_OK && id < marked; id += 1)
-        {
-            low[id] = UINT32_MAX;
-            high[id] = 0;
-        }
-        for (uint32_t cb = 0; error == TIER1_EMIT_OK && cb < blocks; cb += 1)
-        {
-            const uint64_t* before = lifetimes.out + (uint64_t)cb * lifetimes.row_words;
-            const uint64_t* after = lifetimes.in + (uint64_t)cb * lifetimes.row_words;
-            for (uint64_t word = 0; word < lifetimes.row_words; word += 1)
-            {
-                for (uint64_t bits = before[word]; bits != 0; bits &= bits - 1)
-                {
-                    const uint32_t id = (uint32_t)(word * 64 + (uint64_t)__builtin_ctzll(bits));
-                    low[id] = input->block_starts[cb] < low[id] ? input->block_starts[cb] : low[id];
-                    high[id] = input->block_starts[cb] + 1 > high[id] ? input->block_starts[cb] + 1 : high[id];
-                }
-                for (uint64_t bits = after[word]; bits != 0; bits &= bits - 1)
-                {
-                    const uint32_t id = (uint32_t)(word * 64 + (uint64_t)__builtin_ctzll(bits));
-                    high[id] = input->block_starts[cb + 1] > high[id] ? input->block_starts[cb + 1] : high[id];
-                }
-            }
-        }
-        for (uint32_t b = 0; error == TIER1_EMIT_OK && b < function->block_count; b += 1)
-        {
-            for (uint32_t node = function->block_offsets[b]; node < function->block_offsets[b + 1]; node += 1)
-            {
-                if (function->op[node] == IR_LIFETIME)
-                {
-                    const uint32_t id = ids[function->a[node]];
-                    const uint32_t position = input->block_starts[b + added] + 2 * (node - function->block_offsets[b]);
-                    low[id] = function->b[node] == 0 && position < low[id] ? position : low[id];
-                    high[id] = position + 1 > high[id] ? position + 1 : high[id];
-                }
-            }
-        }
-        for (uint32_t o = 0; error == TIER1_EMIT_OK && o < objects; o += 1)
-        {
-            const uint32_t id = ids[o];
-            if (id != BUSTER_IR_NONE && low[id] < high[id])
-            {
-                starts[o] = low[id];
-                ends[o] = high[id];
-            }
+            starts[slot] = 0;
+            ends[slot] = input->position_count;
         }
     }
-    return error;
+    arena_pop_to(scratch, saved);
+    return ok ? TIER1_EMIT_OK : TIER1_EMIT_MEMORY;
 }
 
 // The frame: each slot over its values' intervals' hull (a phi's widened to its predecessors' ends), the general
@@ -2279,35 +2337,6 @@ static X86Instruction tier1_emit_cfg_x87_memory(uint32_t form, uint8_t base, int
     return (X86Instruction){ .form = (uint16_t)form, .rm = base, .mode = BUSTER_X86_MEMORY_BASE, .displacement = displacement };
 }
 
-// The exact binary32 or binary64 encoding of a finite normal (and signed zero), or the original
-// extended significand. A narrower subnormal would introduce a denormal-operand exception on FLD.
-static uint16_t tier1_emit_cfg_x87_literal_bits(IrConstant constant, uint64_t* bits)
-{
-    const uint32_t exponent = (uint16_t)constant.high & 0x7fffu;
-    const uint64_t sign = (uint16_t)constant.high >> 15;
-    const bool normal = (constant.low >> 63) != 0;
-    uint16_t form = X86_FORM_FLD_M80;
-    *bits = constant.low;
-    if (exponent == 0 && constant.low == 0)
-    {
-        *bits = sign << 31;
-        form = X86_FORM_FLD_M32;
-    }
-    else if (normal && exponent >= 16383 - 126 && exponent <= 16383 + 127 && (constant.low & ((UINT64_C(1) << 40) - 1)) == 0)
-    {
-        const uint64_t fraction = (constant.low >> 40) & 0x7fffffu;
-        *bits = (sign << 31) | ((uint64_t)(exponent - (16383 - 127)) << 23) | fraction;
-        form = X86_FORM_FLD_M32;
-    }
-    else if (normal && exponent >= 16383 - 1022 && exponent <= 16383 + 1023 && (constant.low & 0x7ffu) == 0)
-    {
-        const uint64_t fraction = (constant.low >> 11) & ((UINT64_C(1) << 52) - 1);
-        *bits = (sign << 63) | ((uint64_t)(exponent - (16383 - 1023)) << 52) | fraction;
-        form = X86_FORM_FLD_M64;
-    }
-    return form;
-}
-
 // x87 constants still wait at their original consumers. FLDZ and FLD1 push positive zero and one
 // directly. The displacement of a memory constant names its pool index until the record is appended.
 static X86Instruction tier1_emit_cfg_x87_load(Tier1EmitResult* emitted, uint32_t value, uint8_t base, int32_t offset)
@@ -2321,10 +2350,10 @@ static X86Instruction tier1_emit_cfg_x87_load(Tier1EmitResult* emitted, uint32_t
                            emitted->symbol_access_count <= BUSTER_TIER1_EMIT_LITERAL;
         const IrConstant constant = valid ? function->constants[index] : (IrConstant){ 0 };
         uint64_t bits = 0;
-        const uint16_t form = tier1_emit_cfg_x87_literal_bits(constant, &bits);
-        if (valid && form == X86_FORM_FLD_M32 && (bits == 0 || bits == UINT32_C(0x3f800000)))
+        const uint16_t form = x87_literal_bits(constant.low, (uint16_t)constant.high, &bits);
+        if (valid && (form == X86_FORM_FLDZ || form == X86_FORM_FLD1))
         {
-            record = (X86Instruction){ .form = (uint16_t)(bits == 0 ? X86_FORM_FLDZ : X86_FORM_FLD1) };
+            record = (X86Instruction){ .form = form };
         }
         else
         {
@@ -3683,10 +3712,32 @@ static uint64_t tier1_emit_cfg_x87_node_records(const Tier1SelectPlan* plan, uin
     return records;
 }
 
-// Optional transport of a canonical F80 result to its sole consumer (#1387). Use the complete IR use list, including
+// A phi reads its incoming object in the emitted edge copy. Within a predecessor with one successor,
+// the unconditional terminator owns that copy and the following jump, if any.
+static uint32_t tier1_emit_cfg_x87_consumer(const Tier1EmitResult* emitted, const Tier1SelectPlan* plan, uint32_t node, IrUse use)
+{
+    const IrFunction* function = plan->function;
+    const uint32_t user = use.instruction;
+    uint32_t consumer = plan->patterns[user].rule == TIER1_RULE_X87 && function->op[user] != IR_PHI ? user : BUSTER_IR_NONE;
+    if (function->op[user] == IR_PHI && use.operand >= 3)
+    {
+        const uint32_t source = function->extra[function->a[user] + (uint64_t)(use.operand - 3) * 2];
+        const uint32_t terminator = function->block_offsets[source + 1] - 1;
+        const uint32_t block = source + emitted->cfg_input.block_count - function->block_count;
+        const uint32_t edge = emitted->cfg_input.successor_offsets[block];
+        if (node >= function->block_offsets[source] && node < terminator && function->op[terminator] == IR_BR &&
+            emitted->cfg_input.successor_offsets[block + 1] == edge + 1 && emitted->cfg.edge_placements[edge] == TIER1_CFG_EDGE_PREDECESSOR)
+        {
+            consumer = terminator;
+        }
+    }
+    return consumer;
+}
+
+// Optional transport of an F80 result to its sole consumer (#1387). Use the complete IR use list, including
 // repeated operands, calls and phi edges. Only the selected producer's own private store and the selected consumer's
-// matching load are annotated; raw loads and constants are excluded from forwarding. The shared record proof
-// preserves both waiting points and every metadata index, and declines barriers, right operands and excess pressure.
+// matching load are annotated. The shared record proof preserves both waiting points and every metadata index,
+// and declines barriers, unresolved operand order and excess pressure.
 static void tier1_emit_cfg_x87_transfers(const Tier1SelectPlan* plan, Tier1EmitResult* emitted, uint32_t records, const uint32_t* block_first, uint32_t blocks, Arena* output, Arena* scratch)
 {
     const IrFunction* function = plan->function;
@@ -3697,13 +3748,12 @@ static void tier1_emit_cfg_x87_transfers(const Tier1SelectPlan* plan, Tier1EmitR
     uint32_t* tokens = ok ? ir_allocate(scratch, (uint64_t)records + 1, 4, &ok) : 0;
     uint8_t* eligible = ok ? ir_allocate(scratch, (uint64_t)records + 1, 1, &ok) : 0;
     uint8_t* boundaries = ok ? ir_allocate(scratch, (uint64_t)records + 1, 1, &ok) : 0;
-    uint8_t* canonical = ok ? ir_allocate(scratch, (uint64_t)nodes + 1, 1, &ok) : 0;
+
     if (ok)
     {
         memset(tokens, 0xff, ((uint64_t)records + 1) * 4);
         memset(eligible, 0, (uint64_t)records + 1);
         memset(boundaries, 0, (uint64_t)records + 1);
-        memset(canonical, 0, (uint64_t)nodes + 1);
         boundaries[0] = BUSTER_X87_TRANSFER_BOUNDARY | BUSTER_X87_TRANSFER_CUT;
         boundaries[records] = BUSTER_X87_TRANSFER_BOUNDARY | BUSTER_X87_TRANSFER_CUT;
         for (uint32_t b = 0; b < blocks; b += 1)
@@ -3715,11 +3765,6 @@ static void tier1_emit_cfg_x87_transfers(const Tier1SelectPlan* plan, Tier1EmitR
             const uint32_t first = emitted->code.node_first[node];
             const uint32_t end = node + 1 < nodes ? emitted->code.node_first[node + 1] : records;
             const uint32_t op = function->op[node];
-            const uint32_t a = function->a[node];
-            const bool arithmetic = op == IR_FADD || op == IR_FSUB || op == IR_FMUL || op == IR_FDIV;
-            const bool converts = op == IR_SITOFP || op == IR_UITOFP || op == IR_FEXT;
-            const bool copied = (op == IR_COPY || op == IR_FNEG) && a < node && canonical[a] != 0;
-            canonical[node] = function->type[node] == IR_F80 && (arithmetic || converts || copied);
             boundaries[first] |= BUSTER_X87_TRANSFER_BOUNDARY;
             boundaries[end] |= BUSTER_X87_TRANSFER_BOUNDARY;
             const bool barrier = (function->flags[node] & BUSTER_IR_OBSERVABLE) != 0 || op == IR_PHI ||
@@ -3733,16 +3778,22 @@ static void tier1_emit_cfg_x87_transfers(const Tier1SelectPlan* plan, Tier1EmitR
         for (uint32_t node = 0; node < nodes; node += 1)
         {
             const bool single = uses.offsets[node + 1] - uses.offsets[node] == 1;
-            const uint32_t user = single ? uses.uses[uses.offsets[node]].instruction : BUSTER_IR_NONE;
-            const bool candidate = canonical[node] != 0 && single && user < nodes && !plan->covered[node] && !plan->covered[user] &&
-                                   plan->patterns[node].rule == TIER1_RULE_X87 && plan->patterns[user].rule == TIER1_RULE_X87;
+            const bool producer = function->type[node] == IR_F80 && single && !plan->covered[node] && plan->patterns[node].rule == TIER1_RULE_X87;
+            const uint32_t user = producer ? tier1_emit_cfg_x87_consumer(emitted, plan, node, uses.uses[uses.offsets[node]]) : BUSTER_IR_NONE;
+            const bool candidate = user < nodes && !plan->covered[user];
             int32_t offset = 0;
             if (candidate && tier1_emit_cfg_x87_offset(function, emitted, node, &offset))
             {
                 const uint32_t first = emitted->code.node_first[node];
                 const uint32_t end = node + 1 < nodes ? emitted->code.node_first[node + 1] : records;
                 const uint32_t use_first = emitted->code.node_first[user];
-                const uint32_t use_end = user + 1 < nodes ? emitted->code.node_first[user + 1] : records;
+                uint32_t use_end = user + 1 < nodes ? emitted->code.node_first[user + 1] : records;
+                if (function->op[user] == IR_BR && use_end > use_first && emitted->code.records[use_end - 1].form == X86_FORM_JMP_REL8)
+                {
+                    // The parallel copy leaves the stack empty before control leaves the predecessor.
+                    use_end -= 1;
+                    boundaries[use_end] |= BUSTER_X87_TRANSFER_BOUNDARY;
+                }
                 uint32_t store = BUSTER_X87_TRANSFER_NONE;
                 uint32_t load = BUSTER_X87_TRANSFER_NONE;
                 uint32_t stores = 0;
@@ -5182,7 +5233,7 @@ static Tier1EmitError tier1_emit_cfg_order_check(const Tier1SelectPlan* plan, co
 
 // The CFG consumer's whole function: problem, allocation, frame and records, out of line, so that tier1_emit_function's
 // straight-line path compiles as it did without it.
-static __attribute__((noinline)) Tier1EmitError tier1_emit_cfg_function(const Tier1SelectPlan* plan, const Tier1EmitOptions* options, const uint8_t* allowed_forms, Arena* output, Arena* scratch, Tier1EmitResult* emitted, uint32_t* error_node)
+static __attribute__((noinline)) Tier1EmitError tier1_emit_cfg_function(const Tier1SelectPlan* plan, const IrCfg* verified_cfg, const Tier1EmitOptions* options, const uint8_t* allowed_forms, Arena* output, Arena* scratch, Tier1EmitResult* emitted, uint32_t* error_node)
 {
     emitted->general = true;
     // A target without AVX512VL (#1281) has no EVEX form of a 16- or 32-byte vector: its moves, spills and kernels take
@@ -5194,7 +5245,7 @@ static __attribute__((noinline)) Tier1EmitError tier1_emit_cfg_function(const Ti
     // A target without AVX (#141's SSE targets) allows no VEX move of an xmm register.
     emitted->prepared.sse = !x86_target_form_allowed(allowed_forms, X86_FORM_VMOVDQU_X_XM128);
     emitted->prepared.zmm = x86_target_form_allowed(allowed_forms, X86_FORM_VMOVDQA64_Z_ZM512);
-    Tier1EmitError error = tier1_emit_cfg_problem(plan, options, output, scratch, emitted);
+    Tier1EmitError error = tier1_emit_cfg_problem(plan, verified_cfg, options, output, scratch, emitted);
     const Tier1CfgInput problem = emitted->cfg_input;
     if (error == TIER1_EMIT_OK)
     {

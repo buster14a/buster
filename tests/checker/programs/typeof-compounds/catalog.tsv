@@ -1,0 +1,12 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+typeof-compound-unevaluated-call-and-update	typeof-compound-unevaluated-call-and-update.c	-	typeof-compound-unevaluated-call-and-update
+typeof-compound-unevaluated-record-and-inferred-array	typeof-compound-unevaluated-record-and-inferred-array.c	-	typeof-compound-unevaluated-record-and-inferred-array
+# A variably modified typeof operand is evaluated, so its compound initializer's effects run. The same operand
+# with a fixed type is unevaluated; both forms must agree with Clang's code on every input.
+typeof-variably-modified-compound-operand-is-evaluated	typeof-variably-modified-compound-operand-is-evaluated.c	-	typeof-variably-modified-compound-operand-is-evaluated
+typeof-fixed-compound-operand-is-unevaluated	typeof-fixed-compound-operand-is-unevaluated.c	-	typeof-fixed-compound-operand-is-unevaluated
+typeof-variably-modified-compound-operand-without-initializer	typeof-variably-modified-compound-operand-without-initializer.c	-	typeof-variably-modified-compound-operand-without-initializer
+# The operand is evaluated before the declared object's initializer, as Clang orders a declaration's effects.
+typeof-variably-modified-operand-precedes-initializer	typeof-variably-modified-operand-precedes-initializer.c	-	typeof-variably-modified-operand-precedes-initializer
+typeof-fixed-operand-does-not-precede-initializer	typeof-fixed-operand-does-not-precede-initializer.c	-	typeof-fixed-operand-does-not-precede-initializer

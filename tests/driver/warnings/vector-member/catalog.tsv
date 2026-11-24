@@ -1,0 +1,8 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+vector-member-diagnostics-through-dot-and-arrow	vector-member-diagnostics-through-dot-and-arrow.c	0	8	0	-	-	vector member diagnostics through dot and arrow
+vector-component-characters-and-bounds	vector-component-characters-and-bounds.c	0	16	0	-	-	vector component characters and bounds
+vector-duplicate-lvalues-and-element-addresses	vector-duplicate-lvalues-and-element-addresses.c	0	10	0	-	-	vector duplicate lvalues and element addresses
+swizzle-aliases-exclude-fields-and-typeof-aliases	swizzle-aliases-exclude-fields-and-typeof-aliases.c	0	3	0	-	-	swizzle aliases exclude fields and typeof aliases
+swizzle-result-names-an-aligned-vector-typedef	swizzle-result-names-an-aligned-vector-typedef.c	0	3	0	-	-	swizzle result names an aligned vector typedef
+valid-vector-members-and-ordinary-records	valid-vector-members-and-ordinary-records.c	0	0	0	syntax-only	-	valid vector members and ordinary records

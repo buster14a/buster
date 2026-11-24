@@ -264,8 +264,10 @@ benchmarks, reusing one build and the existing shared lock. Pull requests never
 run it (#2055, the owner's choice on 2026-11-10): hosted correctness qualifies a
 pull request, and native correctness and measurements run on its merged
 first-parent state in the nightly window. The required aggregate passes a pull
-request on its hosted rows and says so. All correctness builds run
-the same suite inventory, `tools/ci/correctness.tests`. Failed, cancelled or
+request on its hosted rows and says so. Hosted rows and full native runs share `tools/ci/correctness.tests`.
+A backlog state reusing its exact merge-queue candidate's successful full vector
+contract runs `tools/ci/znver5-smoke.tests` on the measured binary. Snapshot and
+manual full runs exercise the complete native inventory. Failed, cancelled or
 skipped hosted tests cannot queue the hardware job; failed native tests cannot
 start benchmarks. A pull request's run stops at its first failure: its test rows
 fail fast, each shard stops at its first failing command (`parallel
@@ -356,10 +358,20 @@ there at a time, so everything takes one lock:
     passed, each built as the job builds it.
   - The file's count is this job's build's (`BUSTER_HOST_ARCH=znver5`) on this
     host. A toolchain's upgrade moves it, and states it the same way.
-- A pull request that changes the checker's sources (the `changes` job's
-  `checker` output isn't `false`) also compares `-c sqlite3.c` by its base and
-  by its tree ("Compare check-expressions with the pull request's base over
-  placements", #1050). Each is linked at four within-page placements of
+- On a checker pull request, plain hosted vector shard 2 builds the first
+  parent of the tested merge while shard 1 builds the merge revision. Shard 2
+  compiles the same frozen `sqlite3.c` with both compilers and compares the
+  objects (#1572).
+  A change classified as diagnostic-only by `sqlite_stable` requires
+  byte-identical objects. For other checker changes, a byte difference
+  produces a GitHub warning with both file sizes. Growth or shrinkage
+  greater than 10% of the base object's bytes fails the shard. This allows
+  localized lowering changes such as #1376 while flagging large changes
+  across the amalgamation. Run `bash tests/ci/compare-sqlite-objects.sh`
+  to check the size boundaries and the diagnostic-only rule.
+- The 9700X placement benchmark ("Compare check-expressions with the pull
+  request's base over placements", #1050) uses the same object check.
+  Each compiler is linked at four within-page placements of
   `main_unit_checker.c` (`./build.sh shifts --checker-placements`).
   For an older base, both sides use the legacy ordinary `.text` sweep.
   The step then runs:
@@ -370,10 +382,7 @@ there at a time, so everything takes one lock:
   - the checker's functions' samples;
   - the forwarding failures by function.
 
-  When only selected diagnostic sources, tests and documentation change, the
-  resulting objects must be identical; other checker changes may legitimately
-  change code generation, so differences are reported with both object sizes
-  and the comparison continues (#1376, #1572). It takes about 90 s
+  The placement benchmark takes about 90 s
   (`docs/c-checker.md`, "The per-node machinery").
 - The `changes` job's selector is `tools/ci/changes.c`, with those tables:
   the job builds it with the hosted runner's `cc`, then `--self-test` checks it
@@ -831,3 +840,22 @@ Read [the metric definitions, configuration and replay recipe](../ci.md#ci-laten
 before interpreting results. Run `bash tests/ci/timings.sh` for the network-free
 regressions. Store raw live evidence in `buster-performance`, not this
 repository's retired `docs/measurements` path.
+
+## Requested and nightly paired checker reports
+
+A trusted author can request a SQLite checker comparison by dispatching
+`9700x.yml` on the PR branch with purpose `full` and `paired_base` set to a
+full commit SHA from protected main. The dispatch measures its resolved head
+SHA. The existing nightly snapshot and checker-selected backlog runs use their
+first parent. The build barrier prepares both revisions and their four checker
+placements in the shared CPU budget. The existing host lock covers the native
+capture. The hosted coverage job evaluates the sealed observations.
+
+The run summary gives the paired verdict and independent-unit count. Dispatched
+runs retain `paired-verdict-ATTEMPT`, and a capture also produces
+`paired-checker-ATTEMPT` for evidence transfer to buster-performance. A skipped
+capture reports unmeasured coverage. A requested comparison that failed during
+preparation or capture reports incomplete coverage. Ordinary PRs and the merge
+queue use their existing correctness checks. The nightly ledger continues to
+record which jobs ran. Baseline promotion uses the explicit two-reference
+decision in the [paired reader guide](../performance/readers.md#input-identity-and-baseline-promotion).

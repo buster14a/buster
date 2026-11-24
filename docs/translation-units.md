@@ -484,6 +484,20 @@ So a units lane does six things:
   where they find it resident; a unit whose lane has another to compile
   gives them back in whole huge pages by the same test
   (`check_units_unit_left`), which `--shared-parts` doesn't count.
+  A lane that previously admitted a larger unit can use its surplus credit
+  to keep up to 8 MiB of scratch through these two discards (#1213). The
+  prefix ends on a huge-page boundary within the surplus. A waiting lane,
+  an oversized sole holder, and a unit with no successor get the existing
+  discard policy. Giving the credit back still discards the lane's pages.
+
+  Small type tables and their hash indexes can use the unused base pages at
+  the start of the lane's arena. The table initializes its builtins and
+  sentinels, each appended record, and every hash bucket before lookup.
+  A borrowed index has a separate cursor for rehashing. Larger tables and
+  constrained reservations use their own mappings. A lane reserves storage
+  for retained link bytes only when linking, and for retained metadata when
+  linking or emitting dependencies.
+
 - **It pools the arenas its units release** (`arena_pool`, which only the
   units' lanes set): `arena_release` frees an arena's pages with
   `MADV_DONTNEED`, which takes the address space's lock for reading and leaves

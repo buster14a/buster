@@ -1,0 +1,23 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+bit-int-arithmetic	bit-int-arithmetic.c	-	bit-int-arithmetic
+bit-int-switches-fields-and-overflow-destinations	bit-int-switches-fields-and-overflow-destinations.c	-	bit-int-switches-fields-and-overflow-destinations
+bit-int-memory-and-calls	bit-int-memory-and-calls.c	-	bit-int-memory-and-calls
+# Updates of storage whose bits past the width a union's other member or a character type set: the old value is read
+# as clang reads it, from its width alone, through a member, an address-taken local and a global, by shifts,
+# division, remainder and postfix increments, whose old value is the result (#534's review).
+bit-int-updates-of-noncanonical-storage	bit-int-updates-of-noncanonical-storage.c	-	bit-int-updates-of-noncanonical-storage
+# Of classes as wide as int and long (_BitInt(30), unsigned _BitInt(30) and _BitInt(60)): casts of locals whose bits past
+# the width a character type set, which the batch's templates (c_check_program_batch.c) would read as the class's, and
+# conversions to one from a type of its class, which change its bits though their classes are the same.
+bit-int-class-wide-casts-and-conversions	bit-int-class-wide-casts-and-conversions.c	-	bit-int-class-wide-casts-and-conversions
+# Of 65 to 128 bits, in the 128-bit classes (#137): every operation, kept extended from the width as the narrow ones
+# are, libgcc's division and conversions to and from double, constants past 64 bits, storage whose bits past the
+# width a union's bytes set, a switch, a pointer's update, and calls: an argument split between r9 and the stack.
+bit-int-128-bit-classes	bit-int-128-bit-classes.c	-	bit-int-128-bit-classes
+# Folded constants of 65 to 127 bits, which the checker gives as their width's bits: extended from the width, so that
+# a negative one's conversion to a 128-bit integer and its compare read its value.
+bit-int-128-bit-negative-constants	bit-int-128-bit-negative-constants.c	-	bit-int-128-bit-negative-constants
+# C23's bit-precise constants (#768): each one's type, by _Generic, a weight of its own, and their values past 64 bits
+# at run time (without digit separators, which C17 doesn't lex: the source fixture "bit-precise constants" has them).
+bit-precise-constants	bit-precise-constants.c	-	bit-precise-constants

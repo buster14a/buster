@@ -79,3 +79,10 @@ requirements. [Command index](README.md).
   guide](../../docs/c-inline-assembly.md) has the placement, the substitution, the
   helper's frame, naked functions, names, file-scope assembly, the refusals and
   what is pending.
+
+
+The C driver's `-S` mode also preserves constant offset markers after
+substitution. A raw `->` marker uses a zero-width asm body anchored at its
+emitted record. A standalone `.ascii` marker retains the byte range that the
+assembler gives its directive in the helper. The [driver guide](driver.md#-s-1362)
+describes the supported operands and output.

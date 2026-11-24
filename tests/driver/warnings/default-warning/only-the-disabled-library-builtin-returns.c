@@ -1,0 +1,1 @@
+void exit(int);void abort(void);int f(void){exit(0);}int g(void){abort();}

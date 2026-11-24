@@ -456,9 +456,14 @@ static void check_test_driver_body_regions(CheckTest* test)
         same = same && (lists.order == NULL || (lists.offsets[0] == 0 && total == lists.offsets[body_count]));
         for (uint32_t b = 0; same && b < body_count; b += 1)
         {
-            check_common_body_reached(&program, bodies + b, lists, seen, queue);
+            const uint32_t reached = check_common_body_reached(&program, bodies + b, lists, seen, queue);
             check_common_body_reached(&program, bodies + b, (CheckCommonBodyRegions){ 0 }, scanned, queue);
-            same = memcmp(seen, scanned, bodies[b].count) == 0;
+            uint32_t marked = 0;
+            for (uint32_t i = 0; i < bodies[b].count; i += 1)
+            {
+                marked += scanned[i] != 0;
+            }
+            same = reached == marked && memcmp(seen, scanned, bodies[b].count) == 0;
             listed += lists.order != NULL && bodies[b].entry_count < bodies[b].count && lists.offsets[b + 1] != lists.offsets[b];
         }
         arena_pop_to(&scratch, length);

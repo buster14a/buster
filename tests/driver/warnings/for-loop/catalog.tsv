@@ -1,0 +1,28 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+condition-variables-a-for-loop-never-changes-and-steps-its-heade	for-loop-forms-source.c	25	0	3	-	-Wfor-loop-analysis	condition variables a for loop never changes, and steps its header and its body repeat
+wloop-analysis-holds-wfor-loop-analysis	for-loop-forms-source.c	25	0	3	-	-Wloop-analysis	-Wloop-analysis holds -Wfor-loop-analysis
+wfor-loop-analysis-is-off-by-default	for-loop-forms-source.c	2	0	0	-	-	-Wfor-loop-analysis is off by default
+wall-s-for-loop-warnings-follow-their-bodies-own-nested-loops-fi	for-loop-order-source.c	9	0	4	-	-Wall	-Wall's for loop warnings follow their bodies' own, nested loops' first
+# Review on #1811: statement expressions, static selections and the builtins clang leaves unvisited in a condition.
+conditions-with-statement-expressions-selections-and-unvisited-b	conditions-with-statement-expressions-selections-and-unvisited-b.c	11	0	0	-	-Wfor-loop-analysis	conditions with statement expressions, selections and unvisited builtins, and selections in the body
+# Review on #1811: the condition's and the increment's first tokens' pragmas, and many variables and nodes.
+pragmas-at-the-condition-and-the-increment-and-long-conditions	pragmas-at-the-condition-and-the-increment-and-long-conditions.c	4	0	1	-	-Wfor-loop-analysis	pragmas at the condition and the increment, and long conditions
+# Second review on #1811: the unevaluated-argument builtins' operands in the body and the increment, and loops nested
+# in a statement expression that leads a condition.
+unvisited-builtins-operands-after-the-condition-and-loops-in-a-c	unvisited-builtins-operands-after-the-condition-and-loops-in-a-c.c	10	0	0	-	-Wfor-loop-analysis	unvisited builtins' operands after the condition, and loops in a condition's statement expression
+# #1821: a write in a GNU statement expression clang's visitor never reaches changes no loop variable: one in an
+# unevaluated operand (sizeof, _Alignof, typeof, an unevaluated-argument builtin's call, a sizeof's type name's
+# bounds), nested or not, or in a static selection's other arm, as a return, a break or a goto there is none.
+# One in a selected arm, in a bound or in an initializer is.
+# #1821: loops whose variables only statement expressions in unevaluated operands write.
+statement-expressions-in-unevaluated-operands	for-loop-unevaluated-source.c	23	0	0	-	-Wfor-loop-analysis -Wno-unevaluated-expression	statement expressions in unevaluated operands
+statement-expressions-in-unevaluated-operands-in-c23	for-loop-unevaluated-source.c	23	0	0	c23	-Wfor-loop-analysis -Wno-unevaluated-expression	statement expressions in unevaluated operands in C23
+statement-expressions-in-unevaluated-operands-under-wall	for-loop-unevaluated-source.c	23	0	0	-	-Wall -Wno-unevaluated-expression	statement expressions in unevaluated operands under -Wall
+statement-expressions-in-unevaluated-operands-under-wall-wextra	for-loop-unevaluated-source.c	24	0	0	-	-Wall -Wextra -Wno-unevaluated-expression	statement expressions in unevaluated operands under -Wall -Wextra
+# Review on #1896: static selections nested in statement expressions nested in static selections, each arm chosen or
+# not, with writes and jumps; and __builtin_choose_expr's.
+nested-selections-in-statement-expressions	for-loop-nested-selections-source.c	7	0	0	-	-Wfor-loop-analysis -Wno-unevaluated-expression	nested selections in statement expressions
+nested-selections-in-statement-expressions-in-c23	for-loop-nested-selections-source.c	7	0	0	c23	-Wfor-loop-analysis -Wno-unevaluated-expression	nested selections in statement expressions in C23
+nested-selections-in-statement-expressions-under-wall-wextra	for-loop-nested-selections-source.c	7	0	0	-	-Wall -Wextra -Wno-unevaluated-expression	nested selections in statement expressions under -Wall -Wextra
+werror-for-loop-analysis-and-a-pragma	for-loop-order-source.c	2	7	4	-	-Werror=for-loop-analysis -Wall	-Werror=for-loop-analysis and a pragma

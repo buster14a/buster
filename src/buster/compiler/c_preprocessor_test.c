@@ -821,20 +821,26 @@ static bool pp_test_run(Preprocessor* pp, InternTable* table, const PPOptions* o
     return result;
 }
 
+static bool pp_test_scalar_compile(const PPOptions* options, const char* path, const Preprocessor* vector, bool vector_ran, const char* label);
+
+// The recorded vector compile is the reference for the scalar compile and the replay checks.
 // A run as the drivers make one, with its history deferred (PPOptions.defer_history), against one that records it, both
 // by the vectorized kernels without expansion starts: the same stream, errors and warnings, and the same diagnostics
 // printed byte for byte, notes and all (the deferred run prints its own by recording the history at its end); then a
 // diagnostic at the first output token a macro made (or the last token) through pp_diagnose_output, which records the
 // deferred history first, printed alike; and the same history, with nothing more printed. Returns whether they agree.
-static bool pp_test_deferred_history(const PPOptions* options, const char* path, const char* label)
+static bool pp_test_compile_kernels(const PPOptions* options, const char* path, const char* name, bool frozen)
 {
     static InternTable tables[2];
     static Preprocessor runs[2];
     char* texts[2] = { 0, 0 };
     size_t lengths[2] = { 0, 0 };
-    FILE* streams[2];
-    bool ready[2];
-    for (uint32_t k = 0; k < 2; k += 1)
+    FILE* streams[2] = { 0, 0 };
+    bool ready[2] = { false, false };
+    char label[4200];
+    snprintf(label, sizeof(label), "%s (as a compile runs it)", name);
+    bool scalar_matches = true;
+    for (uint32_t k = 0; scalar_matches && k < 2; k += 1)
     {
         PPOptions run = *options;
         run.scalar = false;
@@ -844,18 +850,23 @@ static bool pp_test_deferred_history(const PPOptions* options, const char* path,
         streams[k] = open_memstream(&texts[k], &lengths[k]);
         run.diagnostics = streams[k];
         ready[k] = streams[k] != 0 && intern_initialize(&tables[k]) && pp_initialize(&runs[k], &run, &tables[k]);
-        if (ready[k])
-        {
-            pp_run(&runs[k], path);
-        }
+        const bool ran = ready[k] && pp_run(&runs[k], path);
         if (streams[k] != 0)
         {
             fflush(streams[k]);
         }
+        if (k == 0)
+        {
+            // The recorded vector run serves both comparisons. Forward its initial diagnostics as the scalar run does.
+            run.diagnostics = options->diagnostics;
+            FILE* output = run.diagnostics != 0 ? run.diagnostics : stderr;
+            scalar_matches = ready[k] && (lengths[k] == 0 || fwrite(texts[k], 1, lengths[k], output) == lengths[k]) &&
+                             pp_test_scalar_compile(&run, path, &runs[k], ran, label) && (!frozen || pp_kernel_digest_check(&runs[k], "compile", name));
+        }
     }
-    bool result = ready[0] && ready[1] && pp_tokens_same(&runs[0].output, &runs[1].output) && runs[0].errors == runs[1].errors &&
+    bool result = scalar_matches && ready[1] && pp_tokens_same(&runs[0].output, &runs[1].output) && runs[0].errors == runs[1].errors &&
                   runs[0].warnings == runs[1].warnings && lengths[0] == lengths[1] && (lengths[0] == 0 || memcmp(texts[0], texts[1], lengths[0]) == 0);
-    if (!result)
+    if (scalar_matches && !result)
     {
         printf("%s: with its history deferred, a run gives other tokens or diagnostics (%u and %u errors, %u and %u warnings, %zu and %zu bytes printed)\n",
                label, runs[0].errors, runs[1].errors, runs[0].warnings, runs[1].warnings, lengths[0], lengths[1]);
@@ -1025,35 +1036,22 @@ static bool pp_test_invocation_places(const Preprocessor* a, const char* label)
     return result;
 }
 
-// Both kernels again as a compile runs them, without the expansion starts that -E's line markers need: the main loop
-// takes some direct paths only then (pp_expand_file_direct, pp_emit_simple), so the streams, the expansion history and
-// the statistics (but the timing ones) must agree in this configuration too, and the vectorized run's with its history
-// deferred, as the drivers run it (pp_test_deferred_history). Returns whether they do.
-static bool pp_test_compile_kernels(const PPOptions* options, const char* path, const char* name, bool frozen)
+// Compare the scalar compile with the recorded vector compile before the deferred-history probe adds a diagnostic.
+static bool pp_test_scalar_compile(const PPOptions* options, const char* path, const Preprocessor* vector, bool vector_ran, const char* label)
 {
-    static InternTable tables[2];
-    static Preprocessor runs[2];
-    bool ready[2];
-    bool ran[2];
-    for (uint32_t k = 0; k < 2; k += 1)
+    static InternTable table;
+    static Preprocessor scalar;
+    PPOptions run = *options;
+    run.scalar = true;
+    const bool ready = intern_initialize(&table) && pp_initialize(&scalar, &run, &table);
+    const bool ran = ready && pp_run(&scalar, path);
+    bool result = ready && pp_same_streams(vector, &scalar, label);
+    if (result && (vector_ran != ran || vector->errors != scalar.errors || vector->warnings != scalar.warnings))
     {
-        PPOptions run = *options;
-        run.scalar = k == 1;
-        run.expansion_starts = false;
-        run.timing = true;
-        ready[k] = intern_initialize(&tables[k]) && pp_initialize(&runs[k], &run, &tables[k]);
-        ran[k] = ready[k] && pp_run(&runs[k], path);
-    }
-    char label[4200];
-    snprintf(label, sizeof(label), "%s (as a compile runs it)", name);
-    bool result = ready[0] && ready[1] && pp_same_streams(&runs[0], &runs[1], label) && (!frozen || pp_kernel_digest_check(&runs[0], "compile", name));
-    if (result && (ran[0] != ran[1] || runs[0].errors != runs[1].errors || runs[0].warnings != runs[1].warnings))
-    {
-        printf("%s: the vectorized and scalar kernels give %u and %u errors and %u and %u warnings\n", label, runs[0].errors, runs[1].errors, runs[0].warnings,
-               runs[1].warnings);
+        printf("%s: the vectorized and scalar kernels give %u and %u errors and %u and %u warnings\n", label, vector->errors, scalar.errors, vector->warnings, scalar.warnings);
         result = false;
     }
-    PPStatistics statistics[2] = { runs[0].statistics, runs[1].statistics };
+    PPStatistics statistics[2] = { vector->statistics, scalar.statistics };
     for (uint32_t k = 0; k < 2; k += 1)
     {
         statistics[k].include_ticks = 0;
@@ -1064,16 +1062,13 @@ static bool pp_test_compile_kernels(const PPOptions* options, const char* path, 
         printf("%s: the vectorized and scalar kernels count different statistics\n", label);
         result = false;
     }
-    result = result && pp_test_system_levels(&runs[0], &runs[1], label) && pp_test_invocation_places(&runs[0], label);
-    for (uint32_t k = 0; k < 2; k += 1)
+    result = result && pp_test_system_levels(vector, &scalar, label) && pp_test_invocation_places(vector, label);
+    if (ready)
     {
-        if (ready[k])
-        {
-            pp_release(&runs[k]);
-        }
-        intern_release(&tables[k]);
+        pp_release(&scalar);
     }
-    return result && pp_test_deferred_history(options, path, label);
+    intern_release(&table);
+    return result;
 }
 
 // The text -E prints for a run, in memory (null if it fails); `free` it.
@@ -1119,22 +1114,19 @@ static bool pp_compare_printed_spellings(Preprocessor* pp, const PPSpellings* ou
     return result;
 }
 
-// The text -E prints for a run, which must lex into the stream's spellings (with the EOF boundary above), and with a
-// built-in case's `key` give its recorded digest; the text with line markers must print too (clang checks the markers:
-// pp_test_markers).
-static bool pp_test_printed(Preprocessor* pp, const PPSpellings* ours, const char* name, const char* key)
+// Check the unmarked text against the stream's spellings and the built-in case's digest, when supplied.
+// Return the line-marked text for the marker and Clang checks. The caller frees it.
+static bool pp_test_printed(Preprocessor* pp, const PPSpellings* ours, const char* name, const char* key, String8* marked)
 {
     size_t length = 0;
     char* text = pp_test_print(pp, false, &length);
-    size_t marked_length = 0;
-    char* marked = pp_test_print(pp, true, &marked_length);
-    bool result = text != 0 && marked != 0;
+    marked->pointer = pp_test_print(pp, true, &marked->length);
+    bool result = text != 0 && marked->pointer != 0;
     if (!result && !pp_test_quiet)
     {
         printf("%s: -E can't print the run%s\n", name, text != 0 ? " with line markers" : "");
     }
     result = result && (key == 0 || pp_kernel_digest_matches(pp_kernel_fold(0xcbf29ce484222325ull, text, length), "print", key));
-    free(marked);
     PPSpellings printed = { 0 };
     if (result && (pp->options.dump_defines || pp->options.dump_includes))
     {
@@ -1267,6 +1259,8 @@ static PPClangOutput pp_test_clang_process(const char* executable, char** argume
 }
 
 #if !defined(BUSTER_UNIT) || BUSTER_UNIT == BUSTER_UNIT_FRONTEND
+
+#include <poll.h>
 
 // Legacy fixture callers may compare the partial output of an intentionally rejected case. File-oracle callers
 // inspect PPClangOutput.status instead: a rejection is an explicit skip, a process/I/O failure is a failed run.
@@ -1523,8 +1517,6 @@ static bool pp_compare_placed(const PPPlaced* ours, const PPPlaced* theirs, cons
     return result;
 }
 
-// Our line markers against clang's (`theirs`, from pp_test_clang): the vectorized printer's text with markers must
-// place every token as clang's does.
 // Whether line [at, end) of a printed text is one of -dD's or -dI's directives (pp_print_events): a #define, an #undef,
 // or an include that ends in clang's ` /* clang -E -dI */`.
 static bool pp_test_directive_line(const char* text, size_t at, size_t end)
@@ -1621,21 +1613,19 @@ static void pp_test_directive_lines(char* text, size_t length, FILE* listing, co
 }
 
 // -dD's and -dI's directives in our text with line markers against clang's, where each is and what it says
-// (pp_test_directive_lines), then clang's blanked, as ours are for the comparisons of the tokens.
-static bool pp_test_dumped_directives(Preprocessor* pp, char* clang_text, size_t clang_length, const char* name)
+// (pp_test_directive_lines). Blank both texts' directives as they are collected so their remaining tokens keep their places.
+static bool pp_test_dumped_directives(const Preprocessor* pp, String8 marked, char* clang_text, size_t clang_length, const char* name)
 {
-    size_t length = 0;
-    char* text = pp_test_print(pp, true, &length);
     char* ours = 0;
     char* theirs = 0;
     size_t ours_length = 0;
     size_t theirs_length = 0;
     FILE* ours_stream = open_memstream(&ours, &ours_length);
     FILE* theirs_stream = open_memstream(&theirs, &theirs_length);
-    bool result = text != 0 && ours_stream != 0 && theirs_stream != 0;
+    bool result = ours_stream != 0 && theirs_stream != 0;
     if (result)
     {
-        pp_test_directive_lines(text, length, ours_stream, pp->options.predefines_path);
+        pp_test_directive_lines(marked.pointer, marked.length, ours_stream, pp->options.predefines_path);
         pp_test_directive_lines(clang_text, clang_length, theirs_stream, 0);
     }
     if (ours_stream != 0)
@@ -1651,24 +1641,17 @@ static bool pp_test_dumped_directives(Preprocessor* pp, char* clang_text, size_t
     {
         printf("%s: -dD's or -dI's directives differ from clang's:\n  ours:\n%s  clang's:\n%s", name, ours, theirs);
     }
-    free(text);
     free(ours);
     free(theirs);
     return result;
 }
 
-static bool pp_test_placed(Preprocessor* pp, const PPPlaced* theirs, const char* name)
+// The marked texts must place every token alike. In dump modes pp_test_dumped_directives has blanked the directives in both.
+static bool pp_test_placed(const Preprocessor* pp, String8 marked, const PPPlaced* theirs, const char* name)
 {
-    size_t length = 0;
-    char* text = pp_test_print(pp, true, &length);
-    if (text != 0 && (pp->options.dump_defines || pp->options.dump_includes))
-    {
-        pp_test_directive_lines(text, length, 0, 0);
-    }
     PPPlaced ours = { 0 };
-    const bool result = text != 0 && pp_placed_tokens((const uint8_t*)text, length, pp->split_kinds, pp_test_lex_flags(pp), &ours) && pp_compare_placed(&ours, theirs, name, "clang");
+    const bool result = pp_placed_tokens((const uint8_t*)marked.pointer, marked.length, pp->split_kinds, pp_test_lex_flags(pp), &ours) && pp_compare_placed(&ours, theirs, name, "clang");
     pp_placed_release(&ours);
-    free(text);
     return result;
 }
 
@@ -1717,12 +1700,6 @@ struct PPTestCase
 #include <dirent.h>
 #include <fcntl.h>
 #include <limits.h>
-
-// 4,096 'A's: an identifier, and a header name too long for any path (#254's review), which the history's cases use.
-#define BUSTER_PP_TEST_A64 "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-#define BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64 BUSTER_PP_TEST_A64
-#define BUSTER_PP_TEST_A4096 BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A512 BUSTER_PP_TEST_A512
-_Static_assert(sizeof(BUSTER_PP_TEST_A4096) == 4097, "BUSTER_PP_TEST_A4096 must be 4,096 letters");
 
 // Runtime header queries may get their identity through a macro. Raw-looking header bytes remain header bytes;
 // earlier and later macro definitions keep the prepared view that supplied their token indexes. Its own check
@@ -1774,6 +1751,8 @@ struct PPTestFixtures
 {
     Arena storage;
     PPTestCase* cases;
+    uint8_t* rows;
+    size_t row_size;
     const char** identifiers;
     uint32_t count;
     PPTestFile* files;
@@ -1971,7 +1950,7 @@ static bool pp_test_fixture_lines(PPTestFixtures* fixtures, const char* director
             if (valid && !line(fixtures, directory, fields, number))
             {
                 char reason[sizeof(fixtures->problem)];
-                snprintf(reason, sizeof(reason), "%s", fixtures->problem);
+                snprintf(reason, sizeof(reason), "%s", fixtures->problem[0] != 0 ? fixtures->problem : "invalid case metadata");
                 snprintf(fixtures->problem, sizeof(fixtures->problem), "%s line %u: %s", path, number, reason);
                 valid = false;
             }
@@ -2076,6 +2055,52 @@ static bool pp_test_fixture_text(PPTestFixtures* fixtures, const char* directory
     uint64_t length = 0;
     *text = valid ? pp_test_fixture_read(fixtures, path, false, &length) : 0;
     return *text != 0;
+}
+
+// The smaller suites keep their own row types and execution loops. They share the catalog bounds,
+// raw text reader and orphan check with the main regression cases. All rows live until the suite ends.
+static void* pp_test_fixture_row(PPTestFixtures* fixtures, const char* id)
+{
+    bool valid = pp_test_fixture_word(id) && fixtures->count < BUSTER_PP_TEST_FIXTURE_CASES;
+    for (uint32_t i = 0; valid && i < fixtures->count; i += 1)
+    {
+        valid = strcmp(id, fixtures->identifiers[i]) != 0;
+    }
+    void* row = NULL;
+    if (valid)
+    {
+        row = fixtures->rows + fixtures->row_size * fixtures->count;
+        memset(row, 0, fixtures->row_size);
+        fixtures->identifiers[fixtures->count++] = id;
+    }
+    else
+    {
+        snprintf(fixtures->problem, sizeof(fixtures->problem), "invalid or duplicate case ID '%s'", id);
+    }
+    return row;
+}
+
+static bool pp_test_fixture_table(PPTestFixtures* fixtures, const char* suite, const char* header, uint32_t fields, size_t row_size,
+                                  bool (*read_row)(PPTestFixtures*, const char*, char**, uint32_t), const char** probe)
+{
+    *fixtures = (PPTestFixtures){
+        .storage = arena_reserve(UINT64_C(1) << 27),
+        .row_size = row_size,
+    };
+    fixtures->rows = arena_push(&fixtures->storage, row_size * BUSTER_PP_TEST_FIXTURE_CASES, 8);
+    fixtures->named = arena_push(&fixtures->storage, sizeof(*fixtures->named) * BUSTER_PP_TEST_FIXTURE_CASES * 4, 8);
+    fixtures->identifiers = arena_push(&fixtures->storage, sizeof(*fixtures->identifiers) * BUSTER_PP_TEST_FIXTURE_CASES, 8);
+    char directory[PATH_MAX];
+    const int length = snprintf(directory, sizeof(directory), "%s/preprocessor/%s", pp_test_fixture_root, suite);
+    const bool ready = length >= 0 && (size_t)length < sizeof(directory) && fixtures->rows != NULL && fixtures->named != NULL && fixtures->identifiers != NULL;
+    const bool valid = ready && (probe == NULL || pp_test_fixture_text(fixtures, directory, "probe", ".c", probe)) &&
+                       pp_test_fixture_lines(fixtures, directory, header, fields, read_row) && fixtures->count != 0 && pp_test_fixture_orphans(fixtures, directory);
+    if (!valid)
+    {
+        fprintf(stderr, "%s/catalog.tsv: %s\n", directory, fixtures->problem[0] ? fixtures->problem : "empty or invalid fixture table");
+        fixtures->count = 0;
+    }
+    return valid;
 }
 
 // A count flag's decimal value, 1 to UINT32_MAX, in `*value`; false for another value or a repeated flag.
@@ -2239,9 +2264,9 @@ static bool pp_test_write_file(const char* path, const char* text)
 
 // Writes a case's files into its directory (other.h, and the others with their directories, or links); returns the
 // main file's path (in `path`).
-static bool pp_test_write_case(const PPTestCase* test, const char* directory, char* path, uint32_t capacity)
+static bool pp_test_write_named_case(const PPTestCase* test, const char* directory, const char* name, char* path, uint32_t capacity)
 {
-    snprintf(path, capacity, "%s/case.c", directory);
+    snprintf(path, capacity, "%s/%s", directory, name);
     bool result = pp_test_write_file(path, test->source);
     char other[4096];
     if (result && test->other != 0)
@@ -2273,12 +2298,20 @@ static bool pp_test_write_case(const PPTestCase* test, const char* directory, ch
     return result;
 }
 
+static bool pp_test_write_case(const PPTestCase* test, const char* directory, char* path, uint32_t capacity)
+{
+    return pp_test_write_named_case(test, directory, "case.c", path, capacity);
+}
+
 // Removes the files pp_test_write_case wrote besides case.c, and their directories, innermost first.
 static void pp_test_remove_case(const PPTestCase* test, const char* directory)
 {
     char path[4096];
-    snprintf(path, sizeof(path), "%s/other.h", directory);
-    unlink(path);
+    if (test->other != NULL)
+    {
+        snprintf(path, sizeof(path), "%s/other.h", directory);
+        unlink(path);
+    }
     for (uint32_t i = 0; test->files != 0 && test->files[i].path != 0; i += 1)
     {
         snprintf(path, sizeof(path), "%s/%s", directory, test->files[i].path);
@@ -2342,10 +2375,8 @@ static int pp_test_arguments(const PPTestCase* test, const char* directory, cons
 
 // A case's text with line markers (PPTestCase.markers, %d for its directory) against the vectorized printer's, byte for
 // byte: the first line that differs is printed.
-static bool pp_test_markers(Preprocessor* pp, const PPTestCase* test, const char* directory)
+static bool pp_test_markers(const char* text, size_t length, const PPTestCase* test, const char* directory)
 {
-    size_t length = 0;
-    char* text = pp_test_print(pp, true, &length);
     char* wanted = 0;
     size_t wanted_length = 0;
     FILE* stream = open_memstream(&wanted, &wanted_length);
@@ -2380,7 +2411,6 @@ static bool pp_test_markers(Preprocessor* pp, const PPTestCase* test, const char
         printf("%s: the line markers differ at byte %zu:\n  ours   %.*s\n  wanted %.*s\n", test->name, at, (int)((ours_end != 0 ? ours_end : text + length) - (text + line)),
                text + line, (int)((wanted_end != 0 ? wanted_end : wanted + wanted_length) - (wanted + line)), wanted + line);
     }
-    free(text);
     free(wanted);
     return result;
 }
@@ -2399,29 +2429,29 @@ struct PPTestSystemCase
     bool inexact;
 };
 
-static const PPTestSystemCase pp_test_system_cases[] = {
-    // A system header's macros, a paste and a stringification in it, invoked in the main file, and the main file's
-    // macro in the header: each token is where its outermost invocation is.
-    { "macros across a system header", "#define USERMAC 1\n#include <s.h>\nSYSMAC SYSFN(a) CALLS USERMAC CAT(x, y) STR(q)\n",
-      "#define SYSMAC user_token\n#define SYSFN(x) [x]\n#define CALLS USERMAC\n#define CAT(a, b) a ## b\n#define STR(x) #x\n"
-      "int header = SYSMAC + USERMAC + CALLS + CAT(1, 2);\n",
-      "sssssssssssuuuuuuuu" },
-    { "line markers", "#define USER(x) x\n# 1 \"fake-system.h\" 3\n#define SYS(x) (x)\nSYS(1) USER(2)\n# 5 \"main.c\"\nSYS(3) USER(4)\n", "", "ssssuuuu" },
-    { "an extern C header's line marker", "# 1 \"c-header.h\" 3 4\n#define E(x) x\nE(1) e\n", "", "ee" },
-    { "#pragma GCC system_header", "#define MAINMAC main_value\n#include \"other.h\"\nint c = BEFORE;\n",
-      "#define BEFORE before_value\nint a = BEFORE;\n#pragma GCC system_header\nint b = BEFORE + MAINMAC;\n", "uuuuusssssssuuuuu" },
-    // A line marker read while the arguments of a system header's F are collected in the user's file: F's body is where
-    // the invocation starts, before the marker, and its argument where it is read, after it; the runs would have both
-    // after it, and the body's own place is the system header. The second F is all after the marker.
-    { "a line marker among an invocation's arguments", "# 1 \"sys.h\" 3\n#define F(x) [x]\n# 5 \"user.c\"\nF(\n# 10 \"s.h\" 3\na) F(b)\n", "",
-      "ususss", true },
-};
+static bool pp_test_system_row(PPTestFixtures* table, const char* dir, char** fields, uint32_t line)
+{
+    (void)line;
+    PPTestSystemCase* row = pp_test_fixture_row(table, fields[0]);
+    bool valid = row != NULL && (strcmp(fields[1], "exact") == 0 || strcmp(fields[1], "inexact") == 0);
+    if (valid)
+    {
+        row->name = fields[2];
+        row->inexact = strcmp(fields[1], "inexact") == 0;
+        valid = pp_test_fixture_text(table, dir, fields[0], ".c", &row->source) && pp_test_fixture_text(table, dir, fields[0], ".h", &row->header) &&
+                pp_test_fixture_text(table, dir, fields[0], ".expected", &row->levels) && strspn(row->levels, "use") == strlen(row->levels);
+    }
+    return valid;
+}
 
-// Each of pp_test_system_cases, preprocessed as a compile runs it with its history: both paths must give its levels, or
+// Each system-level case, preprocessed as a compile runs it with its history: both paths must give its levels, or
 // its runs must say they can't. Returns whether every case does.
 static bool pp_test_system_case_levels(const char* directory)
 {
-    uint32_t failures = 0;
+    PPTestFixtures fixtures;
+    const bool loaded = pp_test_fixture_table(&fixtures, "system-levels", "buster-fixtures v1 preprocessor-system-levels", 3, sizeof(PPTestSystemCase), pp_test_system_row, NULL);
+    const PPTestSystemCase* cases = (const PPTestSystemCase*)fixtures.rows;
+    uint32_t failures = !loaded;
     char system[4096];
     char header[4096];
     char other[4096];
@@ -2431,9 +2461,9 @@ static bool pp_test_system_case_levels(const char* directory)
     snprintf(other, sizeof(other), "%s/other.h", directory);
     snprintf(path, sizeof(path), "%s/system-levels.c", directory);
     const bool made = mkdir(system, 0700) == 0 || errno == EEXIST;
-    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(pp_test_system_cases); c += 1)
+    for (uint32_t c = 0; c < fixtures.count; c += 1)
     {
-        const PPTestSystemCase* test = &pp_test_system_cases[c];
+        const PPTestSystemCase* test = &cases[c];
         static InternTable table;
         static Preprocessor pp;
         Arena arena = arena_reserve(1ull << 20);
@@ -2477,7 +2507,8 @@ static bool pp_test_system_case_levels(const char* directory)
     unlink(header);
     unlink(other);
     rmdir(system);
-    printf("system levels: %u of %lu cases written by hand differ\n", failures, (unsigned long)BUSTER_ARRAY_LENGTH(pp_test_system_cases));
+    printf("system levels: %u of %lu cases written by hand differ\n", failures, (unsigned long)fixtures.count);
+    arena_release(&fixtures.storage);
     return failures == 0;
 }
 
@@ -2554,21 +2585,23 @@ static bool pp_test_case(const PPTestCase* test, const char* directory, bool wit
     {
         PPSpellings ours = { 0 };
         PPSpellings expected = { 0 };
+        String8 marked = { 0 };
         result = pp_stream_spellings(&runs[0], &ours) && pp_text_spellings((const uint8_t*)test->expected, strlen(test->expected), runs[0].split_kinds, pp_test_lex_flags(&runs[0]), &expected) &&
-                 pp_compare_spellings(&runs[0], &ours, &expected, test->name, "wanted") && pp_test_printed(&runs[0], &ours, test->name, key) &&
-                 (test->markers == 0 || pp_test_markers(&runs[0], test, directory));
+                 pp_compare_spellings(&runs[0], &ours, &expected, test->name, "wanted") && pp_test_printed(&runs[0], &ours, test->name, key, &marked) &&
+                 (test->markers == 0 || pp_test_markers(marked.pointer, marked.length, test, directory));
         if (result && with_clang)
         {
             size_t length;
             char* clang_text = pp_test_clang(arguments, argument_count, path, 0, &length);
             PPPlaced theirs = { 0 };
             const bool plain = !runs[0].options.dump_defines && !runs[0].options.dump_includes;
-            result = clang_text != 0 && (plain || pp_test_dumped_directives(&runs[0], clang_text, length, test->name)) &&
+            result = clang_text != 0 && (plain || pp_test_dumped_directives(&runs[0], marked, clang_text, length, test->name)) &&
                      pp_placed_tokens((const uint8_t*)clang_text, length, runs[0].split_kinds, pp_test_lex_flags(&runs[0]), &theirs) &&
-                     pp_compare_printed_spellings(&runs[0], &ours, &theirs.spellings, test->name, "clang") && pp_test_placed(&runs[0], &theirs, test->name);
+                     pp_compare_printed_spellings(&runs[0], &ours, &theirs.spellings, test->name, "clang") && pp_test_placed(&runs[0], marked, &theirs, test->name);
             pp_placed_release(&theirs);
             free(clang_text);
         }
+        free(marked.pointer);
         arena_release(&ours.arena);
         arena_release(&expected.arena);
     }
@@ -4065,7 +4098,8 @@ static bool pp_test_file_output(const PPOptions* base, const char* path, bool wi
                   pp_test_compile_kernels(&options, path, path, false);
     *tokens += runs[0].output.count;
     PPSpellings ours = { 0 };
-    result = result && pp_stream_spellings(&runs[0], &ours) && pp_test_printed(&runs[0], &ours, path, 0);
+    String8 marked = { 0 };
+    result = result && pp_stream_spellings(&runs[0], &ours) && pp_test_printed(&runs[0], &ours, path, 0, &marked);
     if (result && with_clang)
     {
         // -dD's and -dI's directives against clang's, then blanked in a copy of clang's text (pp_test_dumped_directives).
@@ -4077,12 +4111,13 @@ static bool pp_test_file_output(const PPOptions* base, const char* path, bool wi
         }
         const char* clang_text = dumped ? copy : text;
         PPPlaced theirs = { 0 };
-        result = clang_text != 0 && (!dumped || pp_test_dumped_directives(&runs[0], copy, length, path)) &&
+        result = clang_text != 0 && (!dumped || pp_test_dumped_directives(&runs[0], marked, copy, length, path)) &&
                  pp_placed_tokens((const uint8_t*)clang_text, length, runs[0].split_kinds, pp_test_lex_flags(&runs[0]), &theirs) &&
-                 pp_compare_spellings(&runs[0], &ours, &theirs.spellings, path, "clang") && pp_test_placed(&runs[0], &theirs, path);
+                 pp_compare_spellings(&runs[0], &ours, &theirs.spellings, path, "clang") && pp_test_placed(&runs[0], marked, &theirs, path);
         pp_placed_release(&theirs);
         free(copy);
     }
+    free(marked.pointer);
     if (guards != 0)
     {
         *guards += runs[0].statistics.skipped_guards;
@@ -5519,122 +5554,54 @@ struct PPTestOptionSet
     const char* refused;
 };
 
-static const PPTestOptionSet pp_test_option_sets[] = {
-    // Refused: each family buster doesn't follow, where its last option turns it on; -fzvector whatever follows it (clang's
-    // driver ignores -fno-zvector); and the options without a -fno- form.
-    { { "-fms-extensions" }, "-fms-extensions" },
-    { { "-fno-ms-extensions", "-fms-extensions" }, "-fms-extensions" },
-    { { "-fms-compatibility" }, "-fms-compatibility" },
-    { { "-fborland-extensions" }, "-fborland-extensions" },
-    { { "-fno-declspec", "-fdeclspec" }, "-fdeclspec" },
-    { { "-fzvector" }, "-fzvector" },
-    { { "-fzvector", "-fno-zvector" }, "-fzvector" },
-    // clang's -mzvector is -fzvector (predefines_alias), and -mno-zvector is -fno-zvector.
-    { { "-mzvector" }, "-fzvector" },
-    { { "-mzvector", "-mno-zvector" }, "-fzvector" },
-    { { "-fno-zos-extensions", "-fzos-extensions" }, "-fzos-extensions" },
-    { { "-ffixed-point" }, "-ffixed-point" },
-    { { "-fdefer-ts" }, "-fdefer-ts" },
-    { { "-fno-directives-only", "-fdirectives-only" }, "-fdirectives-only" },
-    { { "-fkeep-system-includes" }, "-fkeep-system-includes" },
-    { { "-fminimize-whitespace" }, "-fminimize-whitespace" },
-    { { "-fuse-line-directives" }, "-fuse-line-directives" },
-    { { "-frewrite-includes" }, "-frewrite-includes" },
-    { { "-frewrite-imports" }, "-frewrite-imports" },
-    // clang fails without the module it would otherwise build into its cache, so that nothing is written.
-    { { "-fno-implicit-modules", "-fno-modules", "-fmodules" }, "-fmodules" },
-    { { "-fimplicit-module-maps" }, "-fimplicit-module-maps" },
-    { { "-fbuiltin-module-map" }, "-fbuiltin-module-map" },
-    { { "-fmodule-name=probe" }, "-fmodule-name=probe" },
-    { { "-fmodule-map-file=%d/missing.modulemap" }, "-fmodule-map-file=" },
-    { { "-fdriver-only" }, "-fdriver-only" },
-    { { "-fproc-stat-report" }, "-fproc-stat-report" },
-    { { "-fmacro-prefix-map=%d=/remapped" }, "-fmacro-prefix-map=" },
-    { { "-ffile-prefix-map=%d=/remapped" }, "-ffile-prefix-map=" },
-    { { "-fexec-charset=UTF-8", "-fexec-charset=latin1" }, "-fexec-charset=latin1" },
-    { { "-finput-charset=UTF8" }, "-finput-charset=UTF8" },
-    // Taken: the modeled families, each refused family turned off again, -fzvector in assembly, digraphs on and off in
-    // any mode (c89 with them is C94, and C94 without them c89: #288), and raw strings off (buster lexes none), each in
-    // c17, where clang's lexes none either (a GNU mode's would differ); and UTF-8 charsets in any case.
-    { { "-std=c17", "-fgnu-keywords" }, 0 },
-    { { "-std=c17", "-fno-raw-string-literals", "-fraw-string-literals" }, 0 },
-    { { "-std=gnu89", "-fraw-string-literals" }, 0 },
-    { { "-std=gnu99", "-fraw-string-literals", "-fno-raw-string-literals", "-fraw-string-literals" }, 0 },
-    { { "-std=gnu23", "-fno-raw-string-literals" }, 0 },
-    { { "-x", "assembler-with-cpp", "-fno-raw-string-literals" }, 0 },
-    { { "-std=gnu17", "-fno-raw-string-literals", "-fno-asm" }, 0 },
-    { { "-std=c17", "-fno-dollars-in-identifiers" }, 0 },
-    { { "-std=c17", "-fno-signed-char" }, 0 },
-    { { "-std=c17", "-funsigned-char", "-fno-unsigned-char" }, 0 },
-    { { "-std=c17", "-fms-extensions", "-fno-ms-extensions" }, 0 },
-    { { "-std=c17", "-fms-compatibility", "-fno-ms-compatibility" }, 0 },
-    { { "-std=c17", "-fborland-extensions", "-fno-borland-extensions" }, 0 },
-    { { "-std=c17", "-fdeclspec", "-fno-declspec" }, 0 },
-    { { "-std=c17", "-fno-zvector" }, 0 },
-    { { "-std=c17", "-mno-zvector" }, 0 },
-    { { "-std=c17", "-x", "assembler-with-cpp", "-fzvector" }, 0 },
-    { { "-std=c17", "-fzos-extensions", "-fno-zos-extensions" }, 0 },
-    { { "-std=c17", "-ffixed-point", "-fno-fixed-point" }, 0 },
-    { { "-std=c17", "-fdefer-ts", "-fno-defer-ts" }, 0 },
-    { { "-std=c17", "-fno-digraphs", "-fdigraphs" }, 0 },
-    { { "-std=gnu89", "-fno-raw-string-literals", "-fdigraphs" }, 0 },
-    { { "-std=c17", "-fdigraphs", "-fno-digraphs" }, 0 },
-    { { "-std=c89", "-fdigraphs" }, 0 },
-    { { "-std=iso9899:199409", "-fno-digraphs" }, 0 },
-    { { "-std=iso9899:199409" }, 0 },
-    { { "-std=c89" }, 0 },
-    { { "-std=gnu17", "-fraw-string-literals", "-fno-raw-string-literals" }, 0 },
-    { { "-std=c17", "-fshort-wchar", "-fno-short-wchar" }, 0 },
-    // -fshort-wchar is predefines_option's, which #if's wide character constants follow.
-    { { "-std=c17", "-fno-short-wchar", "-fshort-wchar" }, 0 },
-    { { "-std=c17", "-fdirectives-only", "-fno-directives-only" }, 0 },
-    { { "-std=c17", "-fkeep-system-includes", "-fno-keep-system-includes" }, 0 },
-    { { "-std=c17", "-fminimize-whitespace", "-fno-minimize-whitespace" }, 0 },
-    { { "-std=c17", "-fuse-line-directives", "-fno-use-line-directives" }, 0 },
-    { { "-std=c17", "-frewrite-includes", "-fno-rewrite-includes" }, 0 },
-    { { "-std=c17", "-frewrite-imports", "-fno-rewrite-imports" }, 0 },
-    { { "-std=c17", "-fmodules", "-fno-modules" }, 0 },
-    { { "-std=c17", "-fimplicit-module-maps", "-fno-implicit-module-maps" }, 0 },
-    { { "-std=c17", "-fmodules-driver" }, 0 },
-    { { "-std=c17", "-fexec-charset=latin1", "-fexec-charset=UTF-8" }, 0 },
-    { { "-std=c17", "-finput-charset=Utf-8" }, 0 },
-};
+static bool pp_test_option_row(PPTestFixtures* table, const char* directory, char** fields, uint32_t line)
+{
+    (void)directory;
+    (void)line;
+    PPTestOptionSet* row = pp_test_fixture_row(table, fields[0]);
+    char* arguments = fields[2];
+    uint32_t count = 0;
+    bool valid = row != NULL && strlen(arguments) < 1000;
+    if (valid)
+    {
+        row->refused = strcmp(fields[1], "-") == 0 ? NULL : fields[1];
+    }
+    while (valid && arguments != NULL)
+    {
+        char* argument = strsep(&arguments, " ");
+        valid = *argument != 0 && count < BUSTER_PP_TEST_SET_ARGUMENTS;
+        if (valid)
+        {
+            row->arguments[count++] = argument;
+        }
+    }
+    return valid;
+}
 
-// What the families change in clang's -E: the names that are keywords under them, '$', digraphs and __STDC_VERSION__
-// (C94's with -fdigraphs in c89), "//" comments (none in c89 and C94), raw strings, character constants' signs,
-// __FILE__ (remapped) and __MODULE__ (named), and a system header for the output modes and the modules.
-static const char pp_test_option_probe[] =
-    "#include <stddef.h>\n"
-    "__is_identifier(__int64) __is_identifier(_pascal) __is_identifier(__declspec) __is_identifier(__vector) __is_identifier(__ptr32)\n"
-    "__is_identifier(_Accum) __is_identifier(_Defer) __is_identifier(asm) __is_identifier(typeof)\n"
-    "#define bb BB\naa$bb 1$bb\n"
-    "%:define DIGRAPH __STDC_VERSION__\nDIGRAPH <: :> <%= a //* c */ b x // y\n"
-    "#define R RR\n#define LR LRR\n#define uR uRR\n#define UR URR\n#define u8R u8RR\n"
-    "R\"x(raw)x\" LR\"(l)\" uR\"(u)\" UR\"(U)\" u8R\"(8)\"\n"
-    "#if (L'\\0' - 1) < 0\nwide_signed\n#endif\n"
-    "#if '\\xff' < 0\nchar_signed\n#endif\n"
-    "__FILE__ __MODULE__\n";
-
-// pp_test_option_sets: each set refused or taken as it says. With --clang, clang's -E of pp_test_option_probe must
+// Each option set is refused or taken as it says. With --clang, clang's -E of probe.c must
 // change with each refused set (from the set's -std= alone, or from no options), which is why buster refuses it, and
 // each taken set must give clang's tokens, by both kernels.
 static bool pp_test_option_refusals(const char* directory, bool with_clang)
 {
     char path[4096];
     snprintf(path, sizeof(path), "%s/options.c", directory);
-    bool result = pp_test_write_file(path, pp_test_option_probe);
+    PPTestFixtures table;
+    const char* probe = NULL;
+    bool result = pp_test_fixture_table(&table, "option-refusals", "buster-fixtures v1 preprocessor-option-refusals", 3, sizeof(PPTestOptionSet), pp_test_option_row, &probe) &&
+                  pp_test_write_file(path, probe);
+    const PPTestOptionSet* sets = (const PPTestOptionSet*)table.rows;
     uint32_t wrong = 0;
     uint32_t unchanged = 0;
     uint32_t different = 0;
     uint32_t refused_count = 0;
     // clang's -E of the probe with each base a refused set is compared with (its -std=, or none: "" here), run once each.
-    const char* base_keys[4] = { 0 };
-    PPClangOutput bases[4];
-    memset(bases, 0, sizeof(bases));
+    const char** base_keys = arena_push(&table.storage, sizeof(*base_keys) * table.count, 8);
+    PPClangOutput* bases = arena_push(&table.storage, sizeof(*bases) * table.count, 8);
+    result = result && base_keys != NULL && bases != NULL;
     uint32_t base_count = 0;
-    for (uint32_t s = 0; result && s < BUSTER_ARRAY_LENGTH(pp_test_option_sets); s += 1)
+    for (uint32_t s = 0; result && s < table.count; s += 1)
     {
-        const PPTestOptionSet* set = &pp_test_option_sets[s];
+        const PPTestOptionSet* set = &sets[s];
         char text[16384];
         char* arguments[BUSTER_PP_TEST_SET_ARGUMENTS + 1];
         char shown[1024];
@@ -5645,14 +5612,30 @@ static bool pp_test_option_refusals(const char* directory, bool with_clang)
         {
             // The argument with %d replaced by the directory.
             arguments[n] = text + used;
-            for (const char* at = set->arguments[n]; *at != 0 && used + 4200 < sizeof(text); at += 1)
+            for (const char* at = set->arguments[n]; *at != 0; at += 1)
             {
-                const bool directory_here = at[0] == '%' && at[1] == 'd';
-                used += directory_here ? (uint32_t)snprintf(text + used, sizeof(text) - used, "%s", directory) : (uint32_t)snprintf(text + used, sizeof(text) - used, "%c", *at);
-                at += directory_here;
+                const bool substitute = at[0] == '%' && at[1] == 'd';
+                const size_t size = substitute ? strlen(directory) : 1;
+                if (used + size >= sizeof(text))
+                {
+                    result = false;
+                    break;
+                }
+                memcpy(text + used, substitute ? directory : at, size);
+                used += (uint32_t)size;
+                at += substitute;
             }
-            used += 1;
+            if (!result)
+            {
+                break;
+            }
+            text[used++] = 0;
             shown_used += (uint32_t)snprintf(shown + shown_used, sizeof(shown) - shown_used, "%s%s", n != 0 ? " " : "", set->arguments[n]);
+        }
+        if (!result)
+        {
+            fprintf(stderr, "option-refusals: expanded arguments for %s exceed the staging buffer\n", table.identifiers[s]);
+            break;
         }
         arguments[n] = path;
         Arena arena = arena_reserve(1ull << 20);
@@ -5675,8 +5658,20 @@ static bool pp_test_option_refusals(const char* directory, bool with_clang)
         if (with_clang && right && set->refused != 0)
         {
             // clang's -E with the set, and with its -std= alone or nothing: with the oracle's own messages caught.
-            const int base = strncmp(arguments[0], "-std=", 5) == 0;
-            const char* key = base != 0 ? set->arguments[0] : "";
+            char* standard = NULL;
+            const char* key = "";
+            for (int i = 0; i < n && strcmp(arguments[i], "--") != 0; i += 1)
+            {
+                if (pp_option_takes_value(arguments[i]))
+                {
+                    i += 1;
+                }
+                else if (strncmp(arguments[i], "-std=", 5) == 0 || strcmp(arguments[i], "-ansi") == 0)
+                {
+                    standard = arguments[i];
+                    key = set->arguments[i];
+                }
+            }
             uint32_t b = 0;
             while (b < base_count && strcmp(base_keys[b], key) != 0)
             {
@@ -5684,16 +5679,16 @@ static bool pp_test_option_refusals(const char* directory, bool with_clang)
             }
             const int keep = pp_test_catch_stderr(&caught);
             PPClangOutput with = pp_test_clang_process("clang", arguments, n, path, false);
-            if (b == base_count && b < BUSTER_ARRAY_LENGTH(bases))
+            if (b == base_count)
             {
                 base_keys[b] = key;
-                bases[b] = pp_test_clang_process("clang", arguments, base, path, false);
+                bases[b] = pp_test_clang_process("clang", &standard, standard != NULL, path, false);
                 base_count += 1;
             }
             pp_test_release_stderr(keep, caught, messages, sizeof(messages));
-            const PPClangOutput* without = b < base_count ? &bases[b] : 0;
-            const bool changed = without != 0 && (with.status != without->status || with.length != without->length ||
-                                                  (with.length != 0 && memcmp(with.text, without->text, with.length) != 0));
+            const PPClangOutput* without = &bases[b];
+            const bool changed = with.status != without->status || with.length != without->length ||
+                                 (with.length != 0 && memcmp(with.text, without->text, with.length) != 0);
             if (!changed)
             {
                 printf("option sets: clang's -E doesn't change with %s, which buster refuses\n", shown);
@@ -5729,13 +5724,14 @@ static bool pp_test_option_refusals(const char* directory, bool with_clang)
         free(bases[b].diagnostics);
     }
     unlink(path);
-    printf("option sets: %u of %lu refused or taken wrongly", wrong, (unsigned long)BUSTER_ARRAY_LENGTH(pp_test_option_sets));
+    printf("option sets: %u of %lu refused or taken wrongly", wrong, (unsigned long)table.count);
     if (with_clang)
     {
         printf(", %u of %u refused ones change nothing in clang's -E and %u of %lu taken ones differ from clang's", unchanged, refused_count, different,
-               (unsigned long)BUSTER_ARRAY_LENGTH(pp_test_option_sets) - refused_count);
+               (unsigned long)table.count - refused_count);
     }
     printf("\n");
+    arena_release(&table.storage);
     return result && wrong == 0 && unchanged == 0 && different == 0;
 }
 
@@ -7417,6 +7413,27 @@ static PPTestChildCounts pp_test_child_part(const PPTestChildren* children, uint
     return counts;
 }
 
+// A child writes its counts after it has finished its work and stopped its Clang server. A closed pipe also
+// frees a slot. Leave the counts and output in place for test_process_finish to collect in input order.
+static uint32_t pp_test_finished_files(struct pollfd* pipes, uint32_t count)
+{
+    int ready;
+    do
+    {
+        ready = poll(pipes, count, -1);
+    } while (ready < 0 && errno == EINTR);
+    uint32_t finished = 0;
+    for (uint32_t i = 0; ready > 0 && i < count; i += 1)
+    {
+        if (pipes[i].revents != 0)
+        {
+            pipes[i].fd = -1;
+            finished += 1;
+        }
+    }
+    return finished;
+}
+
 // The work's parts, at most one per CPU at once (#465): each in a child process (test_process.c) with a directory of
 // its own (directory/headers-N, cases-N or files-N), its output printed in the parts' order and its counts sent back.
 // Returns their counts added up, with the first part's system_inexact_first that has one.
@@ -7427,13 +7444,42 @@ static PPTestChildCounts pp_test_children(const PPTestChildren* children)
     const uint32_t running = cpus < parts ? cpus : parts;
     TestProcess processes[BUSTER_PP_TEST_CHILDREN];
     PPTestChildCounts total = { .result = parts == children->parts };
+    struct pollfd pipes[BUSTER_PP_TEST_CHILDREN];
+    uint32_t active = 0;
     uint32_t started = 0;
     for (uint32_t finished = 0; finished < parts; finished += 1)
     {
-        while (started < parts && started - finished < running)
+        while (started < parts)
         {
+            if (active == running)
+            {
+                if (children->work != PP_TEST_CHILD_FILES || pipes[finished].fd < 0)
+                {
+                    break;
+                }
+                const uint32_t done = pp_test_finished_files(pipes + finished, started - finished);
+                if (done == 0)
+                {
+                    break;
+                }
+                active -= done;
+                if (pipes[finished].fd < 0)
+                {
+                    break;
+                }
+            }
             if (test_process_start(&processes[started]))
             {
+                // Only the parent collects older parts. Give their descriptors back before opening this part's files.
+                for (uint32_t i = finished; i < started; i += 1)
+                {
+                    if (processes[i].pid > 0)
+                    {
+                        fclose(processes[i].output);
+                        fclose(processes[i].errors);
+                        close(processes[i].result);
+                    }
+                }
                 char own[4200];
                 static const char* const kinds[] = { "headers", "cases", "files" };
                 snprintf(own, sizeof(own), "%s/%s-%u", children->directory, kinds[children->work], started);
@@ -7453,8 +7499,18 @@ static PPTestChildCounts pp_test_children(const PPTestChildren* children)
                 }
                 test_process_exit(&processes[started], &counts, sizeof(counts));
             }
+            if (processes[started].pid < 0 && started > finished)
+            {
+                // Buffered output can fill a low descriptor limit. Collect the oldest part before retrying.
+                PPTestChildCounts unused;
+                test_process_finish(&processes[started], &unused, sizeof(unused));
+                break;
+            }
+            pipes[started] = (struct pollfd){ .fd = processes[started].pid > 0 ? processes[started].result : -1, .events = POLLIN };
+            active += pipes[started].fd >= 0;
             started += 1;
         }
+        active -= pipes[finished].fd >= 0;
         PPTestChildCounts counts;
         const bool ran = test_process_finish(&processes[finished], &counts, sizeof(counts));
         if (!ran)

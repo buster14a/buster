@@ -2332,8 +2332,8 @@ static bool check_deferred_merge(CheckDeferred* deferred, CheckInputReader* read
             reader->query_types,
             reader->incomplete_array_types,
             reader->selection_types,
-            reader->tag_types,
-            reader->declaration_bases,
+            reader->tag_types.dense,
+            reader->declaration_bases.dense,
         },
     };
     // The id columns of the tables some body appended to: a table no body appended to maps each id to itself, and its

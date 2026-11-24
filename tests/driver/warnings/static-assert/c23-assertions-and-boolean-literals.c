@@ -1,0 +1,11 @@
+enum { K = 2 };
+static_assert(K == 3);
+static_assert(true == (K == 3));
+static_assert((K == 3) == true);
+static_assert((K == 2) && (K == 3) && 1, "x");
+static_assert(((K == 2) && (1 && K > 5)), "y");
+static_assert(nullptr != nullptr, "z");
+static_assert(K + 0u == 3, "w");
+static_assert((K == 2) && !K, "v");
+static_assert(sizeof(long double) == 4);
+static_assert(1 ? K == 3 : 0);

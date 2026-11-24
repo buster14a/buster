@@ -1,0 +1,1 @@
+void abort(void);int f(void){abort();}

@@ -1,0 +1,10 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+# The wrapped result at every width the graph folds, grouped by three past three digits, and its type: an operand's
+# typedef when only that operand has the result's type, canonical when both do.
+overflow-results-and-types	overflow-results-and-types.c	10	0	0	warning-text	-	overflow results and types
+# _BitInt results, past 128 bits too (check_wide_text's digits). Syntax only: clang's -c cannot compile a
+# _BitInt(70) static initializer.
+overflow-results-of-bit-precise-types	overflow-results-of-bit-precise-types.c	3	0	0	c23,warning-text,syntax-only	-	overflow results of bit-precise types
+# What only the constant reader reads: an enumerator's value, a static assertion's condition, a case label.
+overflow-results-the-constant-reader-folds	overflow-results-the-constant-reader-folds.c	5	0	0	warning-text	-	overflow results the constant reader folds

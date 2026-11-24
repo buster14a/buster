@@ -1,0 +1,4 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+parameters-typedefs	parameters-typedefs.c	0	7	0	-	-	parameters' typedefs
+parameters-typedefs-by-place	parameters-typedefs-by-place.c	0	19	2	-	-	parameters' typedefs by place

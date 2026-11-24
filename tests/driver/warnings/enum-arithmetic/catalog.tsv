@@ -1,0 +1,32 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+# #1829: exercise vector chunks and a scalar tail while preserving same-enum and integer fallbacks.
+enumerator-coercion-across-9-completed-definitions	enumerator-coercion-across-9-completed-definitions.c	2	0	0	-	-	enumerator coercion across 9 completed definitions
+enumerator-coercion-across-17-completed-definitions	enumerator-coercion-across-17-completed-definitions.c	3	0	0	-	-	enumerator coercion across 17 completed definitions
+# The nearest opening definition is an already-closed inner enum for OuterLast and PeerLast.
+# This exercises check_common_enum_coerced's linear fallback, not its binary-search fast path.
+enumerator-coercion-with-nested-definitions-and-closed-inner-sco	enumerator-coercion-with-nested-definitions-and-closed-inner-sco.c	1	0	0	-	-	enumerator coercion with nested definitions and closed inner scopes
+comparisons-of-different-enumerations-warn-by-default-at-their-o	enum-mix-source.c	3	0	0	-	-	comparisons of different enumerations warn by default, at their operators
+wenum-conversion-s-arithmetic-bitwise-conditional-and-floating-m	enum-mix-source.c	19	0	1	-	-Wenum-conversion	-Wenum-conversion's arithmetic, bitwise, conditional and floating mixes
+wanon-enum-enum-conversion-and-wenum-float-conversion-alone	enum-mix-source.c	12	0	0	-	-Wanon-enum-enum-conversion -Wenum-float-conversion	-Wanon-enum-enum-conversion and -Wenum-float-conversion alone
+werror-enum-compare-with-wenum-enum-conversion	enum-mix-source.c	10	2	1	-	-Werror=enum-compare -Wenum-enum-conversion	-Werror=enum-compare with -Wenum-enum-conversion
+wenum-conversion-enables-its-implemented-enum-diagnostics	wenum-conversion-enables-its-implemented-enum-diagnostics.c	11	0	0	-	-Wenum-conversion	-Wenum-conversion enables its implemented enum diagnostics
+# Review on #1809: a comparison's operands are rvalues, and a GNU `?:`'s omitted operand is its promoted condition.
+qualified-comparisons-and-gnu-omitted-conditional-operands	qualified-comparisons-and-gnu-omitted-conditional-operands.c	5	0	0	-	-	qualified comparisons and GNU omitted conditional operands
+qualified-comparisons-and-gnu-omitted-conditional-operands-under	qualified-comparisons-and-gnu-omitted-conditional-operands.c	12	0	0	-	-Wenum-conversion -Wanon-enum-enum-conversion	qualified comparisons and GNU omitted conditional operands under -Wenum-conversion
+# Operands of an enumeration type that are no named variable: members, calls, casts, subscripts, dereferences and
+# comma operators' (CheckStream.enum_operands).
+enumeration-mixes-of-forms-by-default	enum-forms-source.c	4	0	0	-	-	enumeration mixes of forms, by default
+enumeration-mixes-of-forms-under-wenum-conversion	enum-forms-source.c	9	0	0	-	-Wenum-conversion -Wanon-enum-enum-conversion	enumeration mixes of forms under -Wenum-conversion
+enumeration-mixes-of-forms-under-w	enum-forms-source.c	0	0	0	-	-w	enumeration mixes of forms under -w
+# The constant reader's operators (CHECK_WARNING_EVENT_ENUM_MIX): array bounds of declarators, type names and members,
+# a bit-field's width, enumerators' values, and a _Static_assert's and an initializer's, which the graph holds too.
+enumeration-mixes-of-bounds-by-default	enum-bounds-source.c	2	0	0	-	-	enumeration mixes of bounds, by default
+enumeration-mixes-of-bounds-under-wenum-conversion	enum-bounds-source.c	12	0	0	-	-Wenum-conversion -Wanon-enum-enum-conversion	enumeration mixes of bounds under -Wenum-conversion
+enumeration-mixes-of-bounds-under-w	enum-bounds-source.c	0	0	0	-	-w	enumeration mixes of bounds under -w
+enumeration-mixes-of-constants-by-default	enum-constants-source.c	2	0	0	-	-	enumeration mixes of constants, by default
+enumeration-mixes-of-constants-under-wenum-conversion	enum-constants-source.c	10	0	0	-	-Wenum-conversion -Wanon-enum-enum-conversion	enumeration mixes of constants under -Wenum-conversion
+enumeration-mixes-of-constants-under-w	enum-constants-source.c	0	0	0	-	-w	enumeration mixes of constants under -w
+werror-enum-compare-in-array-bounds-and-bit-field-widths	enum-constants-source.c	0	2	0	-	-Werror=enum-compare	-Werror=enum-compare in array bounds and bit-field widths
+opposite-mappings-for-unnamed-and-typedef-named-macro-enums	opposite-mappings-for-unnamed-and-typedef-named-macro-enums.c	2	0	0	-	-	opposite mappings for unnamed and typedef-named macro enums
+pragmas-map-the-enumeration-warnings-at-their-operators	pragmas-map-the-enumeration-warnings-at-their-operators.c	3	0	0	-	-	pragmas map the enumeration warnings at their operators

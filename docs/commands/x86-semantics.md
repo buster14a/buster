@@ -113,6 +113,8 @@ page, RSP is its own stack, and a fault names the record. The checks:
     scatter (EVEX's opmask, VEX's vector mask), vpblendvb's /is4 register, a
     masked zero idiom and vp2intersect's pair, each also everything without
     the opmask column;
+  - the seven Key Locker forms' XMM reads and writes, plain and with FS, GS or SS,
+    with and without the opmask column (#3510).
   - the substitutions' legality for every set of live flags;
   - uncovered forms, which must get the conservative record;
 - the immediate's contract on every covered form with an immediate and about
@@ -129,11 +131,11 @@ page, RSP is its own stack, and a fault names the record. The checks:
     live flags;
   - every candidate chosen by some request;
 - `x86_choose_forms` and `x86_instructions_effects` (with and without the
-  opmasks) on random inputs: their outputs' digest at seed 1 and 20,000 items,
-  frozen while the scalar twins #2924 deleted still agreed; each item alone
-  against the batch; and every column ending at a `PROT_NONE` page at every
-  count to 100;
-  a change to the covered forms, their effects or the choice rows moves the
+  opmasks) on random inputs. The seed-1 digest covers 20,000 items and was
+  originally frozen against the scalar twins, then updated for #3510. Each
+  item alone must match its batch result. The page-edge check ends every
+  column at a `PROT_NONE` page for every count to 100.
+  A change to the covered forms, their effects or the choice rows moves the
   digest (`BUSTER_X86_SEMANTICS_TEST_COLUMNS_DIGEST`): the PR that makes it
   re-records the value its own test prints, and what vouches for the new
   value is the same run's execution check of every covered form, its new

@@ -1,0 +1,1 @@
+static const int x=5; _Static_assert(__builtin_popcount(x)==2, "const object"); static int s=__builtin_popcount(x); int bound[__builtin_popcount(x)]; enum { F=__builtin_ffs(x) }; struct W { int field:__builtin_popcount(x); }; int f(void) { const int y=6; switch (0) { case __builtin_popcount(y)-2: return 1; } return bound[0]+s; }

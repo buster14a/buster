@@ -1,0 +1,1 @@
+int tested(int n){long a=n,b=n+1,c=n+2,d=n+3,e=n+4,f=n+5,g=n+6,h=n+7;for(int i=0;i<2;i++){__asm__ volatile("movq $-1, %%rbx\n\tmovq $-2, %%r12\n\tmovq $-3, %%r13\n\tmovq $-4, %%r14\n\tmovq $-5, %%r15" : : : "rbx","r12","r13","r14","r15");a+=b;b+=c;c+=d*i;}return (int)(a*3+b*5+c*7+d*11+e*13+f*17+g*19+h*23);}

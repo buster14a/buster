@@ -1,0 +1,1 @@
+int tested(int n){int x=2;int y=(n>0&&++x);int z=(n<0||++x);int q=n?x++:++x;return x*1000+y*100+z*10+q;}

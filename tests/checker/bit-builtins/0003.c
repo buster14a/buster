@@ -1,0 +1,15 @@
+typedef unsigned _BitInt(200) U;
+typedef unsigned _BitInt(256) V;
+_Static_assert(__builtin_popcountg((U)-1) == 200 && __builtin_clzg((U)1) == 199 && __builtin_ctzg((U)1 << 150) == 150, "");
+_Static_assert(__builtin_clzg((U)0, 7) == 7 && __builtin_ctzg((U)0, -1) == -1 && __builtin_bitreverseg((U)1) == (U)1 << 199, "");
+_Static_assert(__builtin_bswapg((V)0xff) == (V)0xff << 248 && __builtin_stdc_rotate_left((U)1, 201) == 2, "");
+_Static_assert(__builtin_stdc_rotate_right((U)1, 1) == (U)1 << 199 && __builtin_stdc_rotate_left((U)3, (_BitInt(300))-1) == ((U)1 << 199 | 1), "");
+_Static_assert(__builtin_stdc_rotate_left((unsigned)1, (_BitInt(300))33) == 2, "");
+_Static_assert(__builtin_stdc_bit_floor((U)1 << 170 | 5) == (U)1 << 170 && __builtin_stdc_bit_ceil((U)1 << 170 | 5) == (U)1 << 171, "");
+_Static_assert(__builtin_stdc_bit_ceil((U)1 << 199 | 1) == 0 && __builtin_stdc_bit_ceil((U)0) == 1 && __builtin_stdc_bit_ceil((U)1 << 150) == (U)1 << 150, "");
+_Static_assert(__builtin_stdc_bit_width((U)1 << 150) == 151 && __builtin_stdc_has_single_bit((U)1 << 150), "");
+_Static_assert(__builtin_stdc_leading_ones(~(U)0 >> 3 ^ ~(U)0) == 3 && __builtin_stdc_trailing_ones((U)0x7f) == 7, "");
+_Static_assert(__builtin_stdc_first_leading_zero(~(U)0 >> 3 ^ ~(U)0) == 4 && __builtin_stdc_first_trailing_one((U)1 << 150) == 151, "");
+_Static_assert(__builtin_stdc_count_zeros((U)7) == 197 && __builtin_stdc_first_leading_one((U)0) == 0, "");
+int a[__builtin_popcountg((V)-1)];
+static U s = __builtin_bitreverseg((U)0xf0);

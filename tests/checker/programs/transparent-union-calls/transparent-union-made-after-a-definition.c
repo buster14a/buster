@@ -1,0 +1,1 @@
+union U{int*a;long*b;};int f(union U u){return *u.a;}int early(union U u){return f(u);}typedef union U T __attribute__((transparent_union));int late(int*p){return f(p)+f((long*)p);}int tested(int n){int x=n;union U u={&x};return early(u)+late(&x)*3;}

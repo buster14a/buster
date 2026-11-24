@@ -653,10 +653,17 @@ callees" above has it, cached a cut expansion that the lane's later bodies took,
 and the lanes take bodies in an order their timing decides. #1770's review found
 it: a chain of 20 wrappers made several different objects by `--lanes 4`. Each
 lane now finds the graph's strongly connected components by an iterative Tarjan
-search (`check_tier0_inline_prepare`). A callee in a cycle isn't inlined, and its
-own calls of the cycle stay calls, whichever member a lane met first. That is
-fewer inlined calls than clang's, which unrolls a cycle once. Every other callee
-is settled after the callees it calls. Its height is one more than the highest
+search (`check_tier0_inline_prepare`). For a component with mutually recursive
+callees, count the call sites inside the component that target each member.
+A member with two or more such sites stays out of line, so two branches cannot
+double the copied code at every link. These members break every cycle inside
+a larger component. In a ring with one call per link, keep calls to the member
+with the largest body index. This leaves one recursive call per trip around
+the ring, within the splice's usual limits. Direct self-calls stay calls.
+The counts reuse Tarjan's low links. Its iterative search can then prepare
+the remaining members as it would any acyclic chain.
+
+Each remaining callee is settled after the callees it can expand. Its height is one more than the highest
 of those that expand, and one past `BUSTER_CHECK_TIER0_INLINE_DEPTH` (16) isn't
 inlined (its own calls are). A callee also needs a target its caller's includes,
 and a body with a planned naked function isn't one. `test-checker-driver`'s
@@ -706,9 +713,8 @@ was refused, and where the id named another symbol the call went there. Every
 part is renumbered now where either tier inlines; the driver fixture's
 `__int128` division is the regression.
 
-The callees that stay are those whose call Tier 0 keeps where clang inlines it:
-a cycle's members (clang unrolls a cycle once) and the shapes the splice
-refuses. Those are, by default, several returns and a result in memory (step 5's
+At step 3, Tier 0 kept every member of a cycle and the shapes the splice
+refuses. Those shapes include, by default, several returns and a result in memory (step 5's
 shapes, below); and always labels or a jump table (a dense `switch`), `ALLOCA` (a
 variable-length array), a by-value aggregate argument past 256 bytes, and the
 others "Eligibility" lists. On step 3's driver fixture the object defined 5 local

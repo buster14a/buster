@@ -1,0 +1,8 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+# Each list warns at its first `[` under -pedantic: on a tag, a member, a declaration, a parameter, a declarator, an
+# enumerator, a statement, an empty one, and a pointer's.
+c23-attribute-lists-before-c23	c23-attribute-lists-before-c23.c	15	0	0	warning-text	-pedantic	C23 attribute lists before C23
+# -Wc23-extensions alone gives them, and they're ignored by default.
+c23-attribute-lists-under-wc23-extensions	c23-attribute-lists-under-wc23-extensions.c	2	0	0	warning-text	-Wc23-extensions	C23 attribute lists under -Wc23-extensions
+c23-attribute-lists-by-default	c23-attribute-lists-under-wc23-extensions.c	0	0	0	warning-text	-	C23 attribute lists by default

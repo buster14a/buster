@@ -70,7 +70,9 @@ static bool pp_test_print_offsets(void)
 static bool pp_print_test_printed(Preprocessor* pp, const char* key)
 {
     PPSpellings ours = { 0 };
-    const bool result = pp_stream_spellings(pp, &ours) && pp_test_printed(pp, &ours, key, key);
+    String8 marked = { 0 };
+    const bool result = pp_stream_spellings(pp, &ours) && pp_test_printed(pp, &ours, key, key, &marked);
+    free(marked.pointer);
     arena_release(&ours.arena);
     return result;
 }

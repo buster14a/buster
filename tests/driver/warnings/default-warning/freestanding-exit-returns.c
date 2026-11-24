@@ -1,0 +1,1 @@
+void exit(int);int f(void){exit(0);}

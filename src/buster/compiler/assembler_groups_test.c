@@ -247,6 +247,83 @@ static void asm_test_group_section_attributes(AsmTest* test)
     }
 }
 
+static void asm_test_linked_section_names(AsmTest* test)
+{
+    static const char* const ambiguous[] =
+    {
+        "tests/assembly-output/linked-section-ambiguous.s",
+        "tests/assembly-output/linked-section-forward.s",
+        "tests/assembly-output/linked-section-ordinary-first.s",
+    };
+    Arena files = arena_reserve(65536);
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(ambiguous); i += 1)
+    {
+        files.length = 0;
+        const String8 source = object_test_read_file(&files, ambiguous[i]);
+        asm_test_check(test, source.pointer != 0, "read linked section ambiguity fixture", ambiguous[i]);
+        if (source.pointer != 0)
+        {
+            const AsmResult assembled = asm_test_pair(test, source, 0, X86_ARCH_BASELINE);
+            asm_test_check(test, assembled.error != 0 && strcmp(assembled.error, "ambiguous section name in expression") == 0,
+                           "mixed linked and ordinary section names stay ambiguous", ambiguous[i]);
+        }
+    }
+    files.length = 0;
+    const char* path = "tests/assembly-output/linked-section-references.s";
+    const String8 source = object_test_read_file(&files, path);
+    asm_test_check(test, source.pointer != 0, "read linked section reference fixture", path);
+    if (source.pointer != 0)
+    {
+        AsmResult assembled = asm_test_pair(test, source, 1, X86_ARCH_BASELINE);
+        if (assembled.error == 0)
+        {
+            const Object object = asm_object(&assembled, BUSTER_S8("linked-section-references.s"), &test->vector);
+            ObjectView view;
+            char error[256] = {0};
+            const bool opened = object.error == OBJECT_ERROR_NONE && object_view_open(&view, object.bytes, object.size, false, error, sizeof(error));
+            bool relocations = false;
+            bool signature = false;
+            for (uint32_t i = 1; opened && i < view.section_count; i += 1)
+            {
+                const Elf64_Shdr* section = &view.sections[i];
+                if (section->sh_type == SHT_GROUP)
+                {
+                    const Elf64_Sym* symbol = &view.symbols[section->sh_info];
+                    const uint64_t target = object_view_symbol_section(&view, section->sh_info);
+                    signature = symbol->st_info == ELF64_ST_INFO(STB_LOCAL, STT_NOTYPE) && target < view.section_count &&
+                                strcmp(object_view_section_name(&view, target), ".text.pick") == 0 &&
+                                strcmp(object_view_symbol_name(&view, section->sh_info), "pick") == 0;
+                }
+                if (section->sh_type == SHT_RELA && strcmp(object_view_section_name(&view, section->sh_info), ".data") == 0)
+                {
+                    static const char* const targets[] =
+                    {
+                        "123patch",
+                        ".",
+                        ".data",
+                    };
+                    const Elf64_Rela* rows = (const Elf64_Rela*)(view.file + section->sh_offset);
+                    relocations = section->sh_size == sizeof(*rows) * BUSTER_ARRAY_LENGTH(targets);
+                    for (uint32_t r = 0; relocations && r < BUSTER_ARRAY_LENGTH(targets); r += 1)
+                    {
+                        const uint64_t info = rows[r].r_info;
+                        const uint64_t symbol = ELF64_R_SYM(info);
+                        const uint64_t target = object_view_symbol_section(&view, symbol);
+                        const uint64_t offset = sizeof(uint64_t) * r;
+                        const int64_t addend = r == 2 ? (int64_t)offset : 0;
+                        relocations = rows[r].r_offset == offset && rows[r].r_addend == addend && ELF64_R_TYPE(info) == R_X86_64_64 &&
+                                      ELF64_ST_TYPE(view.symbols[symbol].st_info) == STT_SECTION && target < view.section_count &&
+                                      strcmp(object_view_section_name(&view, target), targets[r]) == 0;
+                    }
+                }
+            }
+            asm_test_check(test, opened && relocations, "quoted table references and the location counter retain their ELF targets", error);
+            asm_test_check(test, opened && signature, "COMDAT signature retains its ordinary definition", error);
+        }
+    }
+    arena_release(&files);
+}
+
 static bool asm_test_partition_matches(const AsmParser* parser, const uint32_t* expected, uint32_t count)
 {
     bool match = parser->result.error == 0 && parser->fragment_count == count && memcmp(parser->fragment_order, expected, count * sizeof(uint32_t)) == 0;

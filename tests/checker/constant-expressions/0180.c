@@ -1,0 +1,1 @@
+static const int x=5; static const int *const p=&x; static const unsigned long size=sizeof x; enum { E=__atomic_always_lock_free(size,p) }; _Static_assert(E==1 && __atomic_always_lock_free(size,p), "atomic const objects");

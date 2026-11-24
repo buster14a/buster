@@ -53,23 +53,7 @@ static void check_test_direct_initializers(CheckTest* test, const char* clang)
     check_init_test_source_language(test, "auto x __attribute__((unused)) =3;", NULL, 0, true, false, clang, c23);
     check_init_test_source_language(test, "auto x __attribute__((unused)) (3,4);", NULL, 0, false, false, clang, c23);
     // Both objects share the differential executable; an explicit asm name must be local to each object.
-    check_test_program_source(test,
-        "int absent(void);int g;static int global __asm__(\"renamed_global\") (4);int tested(int n){g=0;int x __attribute__((unused)) (n+3,g++,absent());"
-        "int y __asm__(\"local_y\") (x*2);return x+y+g*100+global;}", "direct-first-argument-only", clang);
-    check_test_program_source(test,
-        "int absent(void);int tested(int n){int a=0;int x __attribute__((unused)) ((a++,n+3),a++,absent());"
-        "int y __attribute__((unused)) (n? a++,n+4 : n-2,absent());int z=n? a++,n+4 : n-2;return a*100+x+y+z;}", "direct-nested-comma-and-conditional", clang);
-    // A discarded later argument's VLA type must not evaluate its bound: Clang checks it but does not run it.
-    check_test_program_source(test,
-        "int tested(int n){int x __attribute__((unused)) (3,sizeof(int[n++]));return x+100*n;}", "direct-unused-vla-bound", clang);
-    check_test_program_source(test,
-        "int tested(int n){struct P{int a,b;};struct P a={n,n+7};"
-        "struct P b __attribute__((unused)) (a,n++);int *p __attribute__((unused)) (&b.a);"
-        "char text[] __attribute__((unused)) (\"abc\");return *p+b.b+text[1]+sizeof text;}", "direct-aggregate-pointer-and-string", clang);
-    check_test_program_source(test,
-        "int tested(int n){int sum=0;for(int i __attribute__((unused)) (0);i<n+4;i++)sum+=i;"
-        "int a __attribute__((unused)) (sizeof a),b __attribute__((unused)) (a+2);"
-        "__auto_type c __attribute__((unused)) (b);return sum+a+b+c;}", "direct-scope-for-and-deduction", clang);
+    check_test_program_suite(test, "checker/programs/direct-initializers", clang);
 }
 
 #endif

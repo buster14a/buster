@@ -63,36 +63,91 @@ static void check_test_driver_redefinitions(CheckTest* test, const char* clang, 
     };
     char path[PATH_MAX];
     snprintf(path, sizeof(path), "%s/redefinition.c", directory);
-    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(fixtures); f += 1)
+    static const char* const sources[] =
     {
-        const bool written = parse_test_write(path, fixtures[f], strlen(fixtures[f]));
-        char* reference[] = { (char*)clang, "-std=gnu23", "-fsyntax-only", "-fno-caret-diagnostics", path, NULL };
+        "tests/driver/const-redefinitions.c",
+        "tests/driver/designated-redefinition.c",
+    };
+    for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(fixtures) + BUSTER_ARRAY_LENGTH(sources); f += 1)
+    {
+        const bool embedded = f < BUSTER_ARRAY_LENGTH(fixtures);
+        char* source = embedded ? path : (char*)sources[f - BUSTER_ARRAY_LENGTH(fixtures)];
+        const bool available = embedded ? parse_test_write(source, fixtures[f], strlen(fixtures[f])) : access(source, R_OK) == 0;
+        char* reference[] =
+        {
+            (char*)clang,
+            "-std=gnu23",
+            "-fsyntax-only",
+            "-fno-caret-diagnostics",
+            source,
+            NULL,
+        };
         char* expected = NULL;
-        const int oracle = written ? check_test_driver_spawn(reference, &expected) : -1;
-        check_test_expect(test, written && oracle == 1 && expected != NULL, "redefinition oracle rejects original source");
+        const int oracle = available ? check_test_driver_spawn(reference, &expected) : -1;
+        check_test_expect(test, available && oracle == 1 && expected != NULL, "redefinition oracle rejects original source");
         bool printed = false;
         for (uint32_t schedule = 0; expected != NULL && schedule < 2; schedule += 1)
         {
-            for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+            char* arguments[] =
             {
-                char* arguments[] = { (char*)executable, "-std=gnu23", "-fsyntax-only", "-fno-caret-diagnostics", path,
-                                      "--lanes", schedule != 0 ? "3" : "1", scalar != 0 ? "--scalar" : NULL, NULL };
-                char* actual = NULL;
-                const int status = check_test_driver_spawn(arguments, &actual);
-                const bool same = status == oracle && actual != NULL && strcmp(actual, expected) == 0;
-                char description[128];
-                snprintf(description, sizeof(description), "redefinition %u schedule %u path %u: complete Clang diagnostics", f, schedule, scalar);
-                check_test_expect(test, same, description);
-                if (!same && !printed)
-                {
-                    fprintf(stderr, "%s: status %d (Clang %d)\nBuster:\n%s\nClang:\n%s\n", description, status, oracle,
-                            actual != NULL ? actual : "<no output>", expected);
-                    printed = true;
-                }
-                free(actual);
+                (char*)executable,
+                "-std=gnu23",
+                "-fsyntax-only",
+                "-fno-caret-diagnostics",
+                source,
+                "--lanes",
+                schedule != 0 ? "3" : "1",
+                NULL,
+            };
+            char* actual = NULL;
+            const int status = check_test_driver_spawn(arguments, &actual);
+            const bool same = status == oracle && actual != NULL && strcmp(actual, expected) == 0;
+            char description[128];
+            snprintf(description, sizeof(description), "redefinition %u schedule %u: complete Clang diagnostics", f, schedule);
+            check_test_expect(test, same, description);
+            if (!same && !printed)
+            {
+                fprintf(stderr, "%s: status %d (Clang %d)\nBuster:\n%s\nClang:\n%s\n", description, status, oracle,
+                        actual != NULL ? actual : "<no output>", expected);
+                printed = true;
             }
+            free(actual);
         }
         free(expected);
     }
     check_test_expect(test, unlink(path) == 0, "redefinition fixture removed");
+
+    char designator_source[] = "tests/driver/invalid-designator-redefinition.c";
+    char* recovery_arguments[] =
+    {
+        (char*)executable,
+        "-std=gnu23",
+        "-fsyntax-only",
+        "-fno-caret-diagnostics",
+        designator_source,
+        NULL,
+    };
+    char* diagnostics = NULL;
+    const int status = check_test_driver_spawn(recovery_arguments, &diagnostics);
+    const char* index = diagnostics != NULL ? strstr(diagnostics, "error: invalid or unsupported declaration") : NULL;
+    check_test_expect(test, status == 1 && index != NULL && strstr(index, "error: redefinition of 'later'") != NULL,
+                      "a rejected designator reports its error and leaves the next redefinition visible");
+    free(diagnostics);
+
+    char string_source[] = "tests/driver/invalid-string-redefinition.c";
+    recovery_arguments[4] = string_source;
+    diagnostics = NULL;
+    const int string_status = check_test_driver_spawn(recovery_arguments, &diagnostics);
+    const char* later = diagnostics != NULL ? strstr(diagnostics, "error: redefinition of 'later'") : NULL;
+    const char* direct = diagnostics != NULL ? strstr(diagnostics, "error: redefinition of 'direct'") : NULL;
+    const char* trailing = direct != NULL ? strstr(direct, "error: hex escape sequence out of range") : NULL;
+    check_test_expect(test, string_status == 1 && trailing != NULL && later != NULL && trailing < later &&
+                      check_test_implicit_count(diagnostics, "error: hex escape sequence out of range") == 6 &&
+                      check_test_implicit_count(diagnostics, "error: invalid universal character") == 1 &&
+                      check_test_implicit_count(diagnostics, ": error: ") == 14,
+                      "rejected strings, including nested compound literals, are diagnosed once before the next redefinition");
+    check_test_expect(test, diagnostics != NULL &&
+                      check_test_implicit_count(diagnostics, "warning: use of GNU 'missing =' extension in designator") == 1,
+                      "a canceled compound literal still prepares its sibling designator");
+    free(diagnostics);
 }

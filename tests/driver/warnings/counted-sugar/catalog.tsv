@@ -1,0 +1,19 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+counted-by-family-sugar	counted-by-family-sugar.c	0	6	0	-	-	counted_by family sugar
+counted-by-sugar-of-targets-and-siblings	counted-by-sugar-of-targets-and-siblings.c	0	8	2	-	-	counted_by sugar of targets and siblings
+# A member's specifiers' typedef past a GNU attribute list, whose arguments' names are no specifier (#2417: an
+# invalid counted_by's count printed as the member's typedef), and kept in the counted sugar (`'const T *
+# __counted_by(n)'`).
+counted-by-sugar-with-typedefs	counted-by-sugar-with-typedefs.c	0	5	0	-	-	counted_by sugar with typedefs
+counted-by-sugar-of-qualified-typedefs	counted-by-sugar-of-qualified-typedefs.c	0	3	0	-	-	counted_by sugar of qualified typedefs
+# The operands of every other error that prints their types (#1842's 3c, check_driver_operand_type): binary and
+# unary operators', a `.`'s base, an array's assignment and increment, sizeof's, a subtraction's, a conditional's
+# and a switch's; through parentheses, a comma's right operand, a conditional of the same member's arms, `*&`, an
+# increment, a struct's copy's member and a flexible array's decay.
+counted-by-sugar-of-operands	counted-by-sugar-of-operands.c	1	18	0	-	-	counted_by sugar of operands
+# A call's callee, a `.`'s base, `&`'s operand, one member on both sides (the second without its a.k.a.), a statement
+# expression's value, an initializer's member target, -Wformat's argument, -Wnon-literal-null-conversion's assigned
+# and initialized member, an ordered comparison's and a pointer type mismatch's operands (#1842's 3c); and the
+# pointer arithmetic on a use that is clang's "cannot use" error, which reports nothing else (#1842's 3d).
+counted-by-sugar-of-callees-targets-and-warnings	counted-by-sugar-of-callees-targets-and-warnings.c	5	10	2	-	-	counted_by sugar of callees, targets and warnings

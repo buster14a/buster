@@ -4115,9 +4115,9 @@ static const BindTestStaticSource bind_test_static_sources[] = {
                   "    double* values = malloc(16 * sizeof(double));\n"
                   "    for (int i = 0; i < 16; i += 1) values[i] = strtod(\"2.5\", 0) * (16 - i);\n"
                   "    qsort(values, 16, sizeof(double), compare);\n"
-                  "    char line[128];\n"
-                  "    snprintf(line, sizeof(line), \"%s %.3f %g %s\", argv[0], values[0], values[15], getenv(\"HOME\") != 0 ? \"home\" : \"none\");\n"
-                  "    printf(\"%zu %s\\n\", strlen(line), line + strlen(argv[0]));\n"
+                  "    char suffix[128];\n"
+                  "    snprintf(suffix, sizeof(suffix), \" %.3f %g %s\", values[0], values[15], getenv(\"HOME\") != 0 ? \"home\" : \"none\");\n"
+                  "    printf(\"%zu %s\\n\", strlen(argv[0]) + strlen(suffix), suffix);\n"
                   "    free(values);\n"
                   "    return argc - 1;\n"
                   "}\n",

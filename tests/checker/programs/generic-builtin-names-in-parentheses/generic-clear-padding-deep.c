@@ -1,0 +1,33 @@
+void *memset(void *, int, unsigned long);static unsigned long long h;static void mix(unsigned long long v){h=h*31+v;}
+struct L0{char c;int i;};struct L1{char c;struct L0 in;short s;};struct L2{char c;struct L1 in;short s;};
+struct L3{char c;struct L2 in;short s;};struct L4{char c;struct L3 in;short s;};struct L5{char c;struct L4 in;short s;};
+struct L6{char c;struct L5 in;short s;};struct L7{char c;struct L6 in;short s;};struct L8{char c;struct L7 in;short s;};
+struct L9{char c;struct L8 in;short s;};struct L10{char c;struct L9 in;short s;};struct L11{char c;struct L10 in;short s;};
+struct L12{char c;struct L11 in;short s;};struct L13{char c;struct L12 in;short s;};struct L14{char c;struct L13 in;short s;};
+struct L15{char c;struct L14 in;short s;};struct L16{char c;struct L15 in;short s;};struct L17{char c;struct L16 in;short s;};
+struct L18{char c;struct L17 in;short s;};struct L19{char c;struct L18 in;short s;};struct L20{char c;struct L19 in;short s;};
+struct L21{char c;struct L20 in;short s;};struct L22{char c;struct L21 in;short s;};struct L23{char c;struct L22 in;short s;};
+struct L24{char c;struct L23 in;short s;};struct L25{char c;struct L24 in;short s;};struct L26{char c;struct L25 in;short s;};
+struct L27{char c;struct L26 in;short s;};struct L28{char c;struct L27 in;short s;};struct L29{char c;struct L28 in;short s;};
+struct L30{struct L29 in[2];char t;};struct L31{char c;struct L30 in;short s;};struct L32{char c;struct L31 in;short s;};
+struct L33{char c;struct L32 in;short s;};struct L34{char c;struct L33 in;short s;};struct L35{char c;struct L34 in;short s;};
+struct L36{char c;struct L35 in;short s;};struct L37{char c;struct L36 in;short s;};struct L38{char c;struct L37 in;short s;};
+struct L39{char c;struct L38 in;short s;};struct L40{char c;struct L39 in;short s;};struct L41{char c;struct L40 in;short s;};
+struct L42{char c;struct L41 in;short s;};struct L43{char c;struct L42 in;short s;};struct L44{char c;struct L43 in;short s;};
+struct L45{char c;struct L44 in;short s;};struct L46{char c;struct L45 in;short s;};struct L47{char c;struct L46 in;short s;};
+struct L48{char c;struct L47 in;short s;};struct L49{char c;struct L48 in;short s;};struct L50{char c;struct L49 in;short s;};
+struct L51{char c;struct L50 in;short s;};struct L52{char c;struct L51 in;short s;};struct L53{char c;struct L52 in;short s;};
+struct L54{char c;struct L53 in;short s;};struct L55{char c;struct L54 in;short s;};struct L56{char c;struct L55 in;short s;};
+struct L57{char c;struct L56 in;short s;};struct L58{char c;struct L57 in;short s;};struct L59{char c;struct L58 in;short s;};
+struct L60{struct L59 in[2];char t;};struct L61{char c;struct L60 in;short s;};struct L62{char c;struct L61 in;short s;};
+struct L63{char c;struct L62 in;short s;};struct L64{char c;struct L63 in;short s;};struct L65{char c;struct L64 in;short s;};
+struct L66{char c;struct L65 in;short s;};struct L67{char c;struct L66 in;short s;};struct L68{char c;struct L67 in;short s;};
+struct L69{char c;struct L68 in;short s;};struct L70{char c;struct L69 in;short s;};struct L71{char c;struct L70 in;short s;};
+struct L72{char c;struct L71 in;short s;};struct L73{char c;struct L72 in;short s;};struct L74{char c;struct L73 in;short s;};
+struct L75{char c;struct L74 in;short s;};struct L76{char c;struct L75 in;short s;};struct L77{char c;struct L76 in;short s;};
+struct L78{char c;struct L77 in;short s;};struct L79{char c;struct L78 in;short s;};struct L80{char c;struct L79 in;short s;};
+struct L81{char c;struct L80 in;short s;};struct L82{char c;struct L81 in;short s;};struct L83{char c;struct L82 in;short s;};
+struct L84{char c;struct L83 in;short s;};struct L85{char c;struct L84 in;short s;};struct L86{char c;struct L85 in;short s;};
+struct L87{char c;struct L86 in;short s;};struct L88{char c;struct L87 in;short s;};struct L89{char c;struct L88 in;short s;};
+static struct L89 deep;int tested(int n){h=(unsigned)n;memset(&deep,0xff,sizeof deep);__builtin_clear_padding(&deep);
+for(unsigned long i=0;i<sizeof deep;i++)mix(((const unsigned char*)&deep)[i]);return (int)(h^(h>>32));}

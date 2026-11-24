@@ -1,0 +1,25 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+# A sole outer modification may read its own target. A nested modification, or a sibling use,
+# still diagnoses the offending operator with its original macro expansion.
+sole-volatile-modifications-and-nested-unsequenced-accesses	unsequenced-sole-source.c	3	0	2	-	-Wno-everything -Wunsequenced	sole volatile modifications and nested unsequenced accesses
+# Every operator's sequencing: assignments, increments, calls, commas, logical operators and conditionals with and
+# without constant first operands, members and elements (no variables), GNU conditionals, and brace initializers, each
+# list one full expression (a range's value once per element).
+unsequenced-modifications-and-reads-by-operator	unsequenced-operators-source.c	27	0	0	syntax-only	-	unsequenced modifications and reads by operator
+# (-c can't compile a range designator.)
+unsequenced-modifications-and-reads-by-operator-in-c23-under-wal	unsequenced-operators-source.c	28	0	0	c23,syntax-only	-Wall -Wextra	unsequenced modifications and reads by operator in C23 under -Wall -Wextra
+wno-sequence-point-holds-wunsequenced	unsequenced-operators-source.c	5	0	0	syntax-only	-Wno-sequence-point	-Wno-sequence-point holds -Wunsequenced
+werror-unsequenced	unsequenced-operators-source.c	5	20	0	syntax-only	-Werror=unsequenced	-Werror=unsequenced
+# The scans' lanes (#2924): a modification and a read of x with 0 to 20 constants between them, in roots of even and
+# of odd node counts (a negation), so that the read takes each of check_unseq_repeats' 16 lanes; the same in a call's
+# argument, where the increment is the root's only modification, so that its mark (check_unseq_marks) takes each lane
+# (an assignment's root is marked by its = whatever its increment's mark); and each compound assignment as a root's
+# only modification of x, ^= (the operators' range's end) among them.
+unsequenced-modifications-and-reads-on-every-lane-of-the-scans	unsequenced-lanes-source.c	94	0	0	-	-	unsequenced modifications and reads on every lane of the scans
+# Where it warns: a conditional's arm in an assignment's value (#1953's), a macro's argument, statement expressions'
+# values and statements, unevaluated operands and builtins, loop headers and conditions, a pragma's region, beside
+# constant conversions, and none in unreachable code.
+unsequenced-accesses-by-context	unsequenced-contexts-source.c	19	0	1	-	-	unsequenced accesses by context
+unsequenced-accesses-by-context-in-c23-under-wall-wextra	unsequenced-contexts-source.c	19	0	1	c23	-Wall -Wextra	unsequenced accesses by context in C23 under -Wall -Wextra
+wunsequenced-alone	unsequenced-contexts-source.c	10	0	1	-	-Wno-everything -Wunsequenced	-Wunsequenced alone

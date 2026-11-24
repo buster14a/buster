@@ -1,0 +1,1 @@
+int tested(int n){struct P{int a,b;};struct P a={n,n+7};struct P b __attribute__((unused)) (a,n++);int *p __attribute__((unused)) (&b.a);char text[] __attribute__((unused)) ("abc");return *p+b.b+text[1]+sizeof text;}

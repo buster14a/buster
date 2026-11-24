@@ -1,0 +1,14 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+shared-code-and-data	shared-code-and-data.c	-	shared-code-and-data
+external-code-and-data	external-code-and-data.c	-	external-code-and-data
+unreferenced-tls-definition	unreferenced-tls-definition.c	-	unreferenced-tls-definition
+thread-local-references	thread-local-references.c	-	thread-local-references
+unevaluated-references	unevaluated-references.c	-	unevaluated-references
+gnu-byte-pointer-stride	gnu-byte-pointer-stride.c	-	gnu-byte-pointer-stride
+switch-range-and-fallthrough	switch-range-and-fallthrough.c	-	switch-range-and-fallthrough
+# Jump tables (#136's item 7), each switch swept past its cases on both sides: holes, defaults in the middle and
+# none, fallthrough, GNU ranges, negative and unsigned values at their types' ends, nested tables, and in loops.
+switch-table-dense	switch-table-dense.c	-	switch-table-dense
+switch-table-ranges	switch-table-ranges.c	-	switch-table-ranges
+switch-table-unsigned-ends	switch-table-unsigned-ends.c	-	switch-table-unsigned-ends

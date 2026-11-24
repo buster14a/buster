@@ -2,7 +2,7 @@ function (i1, i128) -> i128 {
 b0:
   %0 = param.i1 0
   %1 = param.i128 1
-  %2 = cbr.void %0, b1, b2
+  %2 = cbr.void %0, b1, b2 predictable
 b1:
   %3 = const.i128 0x00000000000000010000000000000000
   %4 = br.void b3
