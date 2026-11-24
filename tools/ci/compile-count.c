@@ -8,14 +8,14 @@
 //
 //   compile-count sum PROFILE...
 //       Each profile's count and its name, a line each.
-//   compile-count check --base-statement FILE --head-statement FILE --base PROFILE... --head PROFILE...
+//   compile-count check [--statement FILE]... --base PROFILE... --head PROFILE...
 //       The verdict on a change (head) against its base. A side's count is the median of its profiles' counts. The
-//       change moves the count by its percentage of the base's. A statement is the last line of
-//       tools/ci/compile-count.txt that isn't empty or a comment, "PERCENT what moved it": the change states a move
-//       when its line isn't its base's, and states none otherwise. Only the change's line is read as a statement: its
-//       base's is compared as text, so that a base without the file, or with a line that is no statement, holds no
-//       later change back (each then states a move, and is judged by it). The change passes when its move is within
-//       half a percent of what it states, above or below.
+//       change moves the count by its percentage of the base's. Each FILE is one of the change's statements: a file of
+//       tools/ci/compile-count/ that the change adds or changes (tools/ci/compile-count.sh finds them), whose last line
+//       that isn't empty or a comment is "PERCENT what moved it". The change states the sum of its statements'
+//       percentages, and nothing where it has none. Each change states in a file of its own, not in one line that
+//       every change replaces, so that two changes that state moves don't conflict. The change passes when its move is
+//       within half a percent of what it states, above or below.
 //   compile-count statement FILE
 //       A statement file's percentage and its line, where it has a well-formed one.
 //   compile-count --self-test
@@ -64,6 +64,8 @@
 #define BUSTER_COUNT_STATED_MAXIMUM 1000000
 #define BUSTER_COUNT_MAXIMUM (1ull << 40)
 #define BUSTER_COUNT_LINE_BYTES 512u
+// A change's statement files at most.
+#define BUSTER_COUNT_STATEMENTS 16u
 
 typedef enum CountStatus CountStatus;
 enum CountStatus
@@ -202,10 +204,8 @@ static const char* profile_count(const uint8_t* bytes, size_t length, uint64_t* 
 
 // The statement of a statement file's `length` bytes: its last line that isn't empty or a comment (#). True when the
 // text has no such line (an empty statement), or has one that starts with a percentage: an optional sign, digits, at
-// most three more after a point and an optional percent sign, then a space or the line's end. With `text_only` (a
-// base's file, whose line is only compared) the line is taken whatever it holds, as much of it as a statement's line
-// may be long, and its percentage is 0 where it has none.
-static bool statement_parse(const char* text, size_t length, bool text_only, CountStatement* statement)
+// most three more after a point and an optional percent sign, then a space or the line's end.
+static bool statement_parse(const char* text, size_t length, CountStatement* statement)
 {
     bool valid = true;
     size_t line_start = 0;
@@ -278,16 +278,12 @@ static bool statement_parse(const char* text, size_t length, bool text_only, Cou
         }
         const bool ended = at == found_length || line[at] == ' ' || line[at] == '\t';
         const int64_t stated = whole * 1000 + thousandths;
-        const bool well_formed = whole_digits > 0 && fraction_digits <= 3 && (!point || fraction_digits > 0) && ended && stated <= BUSTER_COUNT_STATED_MAXIMUM && found_length < BUSTER_COUNT_LINE_BYTES;
-        valid = well_formed || text_only;
+        valid = whole_digits > 0 && fraction_digits <= 3 && (!point || fraction_digits > 0) && ended && stated <= BUSTER_COUNT_STATED_MAXIMUM && found_length < BUSTER_COUNT_LINE_BYTES;
         if (valid)
         {
-            // A base's line past the longest a statement holds is cut there: no statement's line equals it then, its
-            // length being one no statement has.
-            const size_t kept = found_length < BUSTER_COUNT_LINE_BYTES ? found_length : BUSTER_COUNT_LINE_BYTES - 1;
-            memcpy(statement->line, line, kept);
-            statement->length = well_formed ? found_length : found_length < BUSTER_COUNT_LINE_BYTES ? found_length : BUSTER_COUNT_LINE_BYTES;
-            statement->stated = !well_formed ? 0 : negative ? -stated : stated;
+            memcpy(statement->line, line, found_length);
+            statement->length = found_length;
+            statement->stated = negative ? -stated : stated;
         }
     }
     return valid;
@@ -360,22 +356,14 @@ static void count_proposal(int64_t thousandths, char* text, size_t capacity)
     snprintf(text, capacity, "%c%" PRId64 ".%02" PRId64 " what moved it", thousandths < 0 ? '-' : '+', magnitude / 100, magnitude % 100);
 }
 
-// A whole file's bytes, allocated, and their count; NULL with a message on stderr when it can't be read. *missing says
-// that it doesn't exist, where the caller allows that (no message then).
-static uint8_t* file_read(const char* path, size_t* length, bool* missing)
+// A whole file's bytes, allocated, and their count; NULL with a message on stderr when it can't be read.
+static uint8_t* file_read(const char* path, size_t* length)
 {
     uint8_t* bytes = NULL;
     FILE* file = fopen(path, "rb");
     if (file == NULL)
     {
-        if (missing != NULL && errno == ENOENT)
-        {
-            *missing = true;
-        }
-        else
-        {
-            fprintf(stderr, "compile-count: can't open %s: %s\n", path, strerror(errno));
-        }
+        fprintf(stderr, "compile-count: can't open %s: %s\n", path, strerror(errno));
     }
     else
     {
@@ -421,7 +409,7 @@ static uint8_t* file_read(const char* path, size_t* length, bool* missing)
 static bool file_count(const char* path, uint64_t* count)
 {
     size_t length = 0;
-    uint8_t* bytes = file_read(path, &length, NULL);
+    uint8_t* bytes = file_read(path, &length);
     bool counted = false;
     if (bytes != NULL)
     {
@@ -436,29 +424,40 @@ static bool file_count(const char* path, uint64_t* count)
     return counted;
 }
 
-// A statement file's statement. A base's (`base`) is its line as text, an empty one where the file doesn't exist; a
-// change's must be there and be well formed.
-static bool file_statement(const char* path, bool base, CountStatement* statement)
+// A statement file's statement: the file must be there, and its line well formed and there.
+static bool file_statement(const char* path, CountStatement* statement)
 {
     size_t length = 0;
-    bool missing = false;
-    uint8_t* bytes = file_read(path, &length, base ? &missing : NULL);
+    uint8_t* bytes = file_read(path, &length);
     bool read = false;
     if (bytes != NULL)
     {
-        read = statement_parse((const char*)bytes, length, base, statement);
+        read = statement_parse((const char*)bytes, length, statement);
         if (!read)
         {
             fprintf(stderr, "compile-count: %s: its last line that isn't a comment must start with a percentage, as in \"+7.02 what moved the count\"\n", path);
         }
+        else if (statement->length == 0)
+        {
+            fprintf(stderr, "compile-count: %s has no statement line\n", path);
+            read = false;
+        }
         free(bytes);
     }
-    else if (missing)
-    {
-        memset(statement, 0, sizeof(*statement));
-        read = true;
-    }
     return read;
+}
+
+// The sum of `count` statements' percentages into *sum. False where it is past the most one change states.
+static bool statement_sum(const CountStatement* statements, size_t count, int64_t* sum)
+{
+    int64_t total = 0;
+    for (size_t i = 0; i < count; i += 1)
+    {
+        // Each is at most BUSTER_COUNT_STATED_MAXIMUM, and there are at most BUSTER_COUNT_STATEMENTS of them.
+        total += statements[i].stated;
+    }
+    *sum = total;
+    return total >= -BUSTER_COUNT_STATED_MAXIMUM && total <= BUSTER_COUNT_STATED_MAXIMUM;
 }
 
 static int command_sum(int argument_count, char** arguments)
@@ -486,12 +485,7 @@ static int command_sum(int argument_count, char** arguments)
 static int command_statement(const char* path)
 {
     CountStatement statement = { 0 };
-    int status = file_statement(path, false, &statement) ? COUNT_PASSED : COUNT_UNUSABLE;
-    if (status == COUNT_PASSED && statement.length == 0)
-    {
-        fprintf(stderr, "compile-count: %s has no statement line\n", path);
-        status = COUNT_UNUSABLE;
-    }
+    const int status = file_statement(path, &statement) ? COUNT_PASSED : COUNT_UNUSABLE;
     if (status == COUNT_PASSED)
     {
         char stated[32];
@@ -509,27 +503,26 @@ static void side_print(const char* name, const CountSide* side)
 static int command_check(int argument_count, char** arguments)
 {
     int status = COUNT_PASSED;
-    const char* base_statement_path = NULL;
-    const char* head_statement_path = NULL;
+    const char* statement_paths[BUSTER_COUNT_STATEMENTS];
+    size_t statement_count = 0;
     CountSide base = { 0 };
     CountSide head = { 0 };
     CountSide* side = NULL;
     for (int i = 0; i < argument_count && status == COUNT_PASSED; i += 1)
     {
         const char* argument = arguments[i];
-        const bool takes_value = strcmp(argument, "--base-statement") == 0 || strcmp(argument, "--head-statement") == 0;
-        if (takes_value && i + 1 < argument_count)
+        const bool statement = strcmp(argument, "--statement") == 0;
+        if (statement && i + 1 < argument_count && statement_count < BUSTER_COUNT_STATEMENTS)
         {
-            if (strcmp(argument, "--base-statement") == 0)
-            {
-                base_statement_path = arguments[i + 1];
-            }
-            else
-            {
-                head_statement_path = arguments[i + 1];
-            }
+            statement_paths[statement_count] = arguments[i + 1];
+            statement_count += 1;
             side = NULL;
             i += 1;
+        }
+        else if (statement)
+        {
+            fprintf(stderr, "compile-count: check: a --statement without its file, or more than %u of them\n", BUSTER_COUNT_STATEMENTS);
+            status = COUNT_UNUSABLE;
         }
         else if (strcmp(argument, "--base") == 0)
         {
@@ -539,7 +532,7 @@ static int command_check(int argument_count, char** arguments)
         {
             side = &head;
         }
-        else if (side != NULL && !takes_value && side->runs < BUSTER_COUNT_RUNS)
+        else if (side != NULL && side->runs < BUSTER_COUNT_RUNS)
         {
             status = file_count(argument, &side->counts[side->runs]) ? COUNT_PASSED : COUNT_UNUSABLE;
             side->runs += 1;
@@ -550,26 +543,35 @@ static int command_check(int argument_count, char** arguments)
             status = COUNT_UNUSABLE;
         }
     }
-    if (status == COUNT_PASSED && (base_statement_path == NULL || head_statement_path == NULL || !side_reduce(&base) || !side_reduce(&head)))
+    if (status == COUNT_PASSED && (!side_reduce(&base) || !side_reduce(&head)))
     {
-        fprintf(stderr, "usage: compile-count check --base-statement FILE --head-statement FILE --base PROFILE... --head PROFILE... (at most %u profiles a side)\n", BUSTER_COUNT_RUNS);
+        fprintf(stderr, "usage: compile-count check [--statement FILE]... --base PROFILE... --head PROFILE... (at most %u statements, and %u profiles a side)\n", BUSTER_COUNT_STATEMENTS, BUSTER_COUNT_RUNS);
         status = COUNT_UNUSABLE;
     }
-    CountStatement base_statement = { 0 };
-    CountStatement head_statement = { 0 };
-    if (status == COUNT_PASSED && (!file_statement(base_statement_path, true, &base_statement) || !file_statement(head_statement_path, false, &head_statement)))
+    CountStatement statements[BUSTER_COUNT_STATEMENTS];
+    for (size_t i = 0; i < statement_count && status == COUNT_PASSED; i += 1)
     {
-        status = COUNT_UNUSABLE;
+        status = file_statement(statement_paths[i], &statements[i]) ? COUNT_PASSED : COUNT_UNUSABLE;
     }
-    if (status == COUNT_PASSED && head_statement.length == 0)
+    int64_t stated_sum = 0;
+    if (status == COUNT_PASSED && !statement_sum(statements, statement_count, &stated_sum))
     {
-        fprintf(stderr, "compile-count: %s has no statement line\n", head_statement_path);
+        char sum[32];
+        count_percent(stated_sum, sum, sizeof(sum));
+        fprintf(stderr, "compile-count: the change's statements add up to %s, past the most one change states (%d%%)\n", sum, BUSTER_COUNT_STATED_MAXIMUM / 1000);
         status = COUNT_UNUSABLE;
     }
     if (status == COUNT_PASSED)
     {
         side_print("the base's compile", &base);
         side_print("the change's compile", &head);
+        for (size_t i = 0; i < statement_count; i += 1)
+        {
+            char percent[32];
+            count_percent(statements[i].stated, percent, sizeof(percent));
+            const char* name = strrchr(statement_paths[i], '/');
+            printf("compile-count: the change's statement %s: %s (\"%s\")\n", name != NULL ? name + 1 : statement_paths[i], percent, statements[i].line);
+        }
         if (!side_steady(&base) || !side_steady(&head))
         {
             printf("compile-count: UNUSABLE: runs of one executable are more than 0.05%% apart, so the count can't hold a band of half a percent\n");
@@ -578,8 +580,8 @@ static int command_check(int argument_count, char** arguments)
     }
     if (status == COUNT_PASSED)
     {
-        const bool states = base_statement.length != head_statement.length || memcmp(base_statement.line, head_statement.line, head_statement.length) != 0;
-        const CountVerdict verdict = count_judge(base.median, head.median, states, head_statement.stated);
+        const bool states = statement_count > 0;
+        const CountVerdict verdict = count_judge(base.median, head.median, states, stated_sum);
         char moved[32];
         char stated[32];
         char proposal[64];
@@ -589,7 +591,7 @@ static int command_check(int argument_count, char** arguments)
         status = verdict.status;
         if (status == COUNT_PASSED && states)
         {
-            printf("compile-count: passed: the change states %s (\"%s\") and moves the count by %s\n", stated, head_statement.line, moved);
+            printf("compile-count: passed: the change states %s and moves the count by %s\n", stated, moved);
         }
         else if (status == COUNT_PASSED)
         {
@@ -597,11 +599,11 @@ static int command_check(int argument_count, char** arguments)
         }
         else if (states)
         {
-            printf("compile-count: FAILED: the change states %s (\"%s\") and moves the count by %s, more than half a percent from it. Its line in tools/ci/compile-count.txt states its own move against its base, \"%s\", or stays its base's where it moves the count less than half a percent\n", stated, head_statement.line, moved, proposal);
+            printf("compile-count: FAILED: the change states %s and moves the count by %s, more than half a percent from it. Its statements in tools/ci/compile-count/ state its own move against its base, \"%s\", or it has none where it moves the count less than half a percent\n", stated, moved, proposal);
         }
         else
         {
-            printf("compile-count: FAILED: the change moves the count by %s and doesn't state it. A change that means to move the compile's work, a feature's cost or a cut's gain, replaces the line of tools/ci/compile-count.txt with its own: \"%s\"\n", moved, proposal);
+            printf("compile-count: FAILED: the change moves the count by %s and doesn't state it. A change that means to move the compile's work, a feature's cost or a cut's gain, states it in a file of its own, tools/ci/compile-count/NAME.txt, NAME its branch's last part: \"%s\"\n", moved, proposal);
         }
     }
     return status;
@@ -844,7 +846,7 @@ static void test_statements(void)
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i += 1)
     {
         CountStatement statement;
-        const bool valid = statement_parse(cases[i].text, strlen(cases[i].text), false, &statement);
+        const bool valid = statement_parse(cases[i].text, strlen(cases[i].text), &statement);
         const bool same = valid == cases[i].valid && (!valid || (statement.stated == cases[i].stated && statement.length == strlen(cases[i].line) && memcmp(statement.line, cases[i].line, statement.length) == 0));
         test_expect(same, cases[i].text);
     }
@@ -852,19 +854,24 @@ static void test_statements(void)
     memset(longest, 'x', sizeof(longest));
     memcpy(longest, "+1.0 ", 5);
     CountStatement statement;
-    test_expect(statement_parse(longest, BUSTER_COUNT_LINE_BYTES - 1, false, &statement) && statement.length == BUSTER_COUNT_LINE_BYTES - 1, "the longest line a statement holds");
-    test_expect(!statement_parse(longest, BUSTER_COUNT_LINE_BYTES, false, &statement), "a line past the longest is refused");
-    // A base's line is text alone: one that is no statement is taken, with no percentage, and one past the longest is
-    // cut, at a length no statement's line has.
-    static const char* const loose[] = { "the count rose", "+7.0234 a fourth digit", "+7.25: a colon", "1e3" };
-    for (size_t i = 0; i < sizeof(loose) / sizeof(loose[0]); i += 1)
+    test_expect(statement_parse(longest, BUSTER_COUNT_LINE_BYTES - 1, &statement) && statement.length == BUSTER_COUNT_LINE_BYTES - 1, "the longest line a statement holds");
+    test_expect(!statement_parse(longest, BUSTER_COUNT_LINE_BYTES, &statement), "a line past the longest is refused");
+
+    // A change's statements add up, to the most one change states either way.
+    CountStatement several[BUSTER_COUNT_STATEMENTS] = { { .stated = 7000 }, { .stated = -3000 } };
+    int64_t sum = 1;
+    test_expect(statement_sum(several, 0, &sum) && sum == 0, "no statements state nothing");
+    test_expect(statement_sum(several, 2, &sum) && sum == 4000, "two statements add up");
+    several[0].stated = BUSTER_COUNT_STATED_MAXIMUM;
+    several[1].stated = 0;
+    test_expect(statement_sum(several, 2, &sum) && sum == BUSTER_COUNT_STATED_MAXIMUM, "statements that add up to the most");
+    several[1].stated = 1;
+    test_expect(!statement_sum(several, 2, &sum), "statements that add up past the most are refused");
+    for (size_t i = 0; i < BUSTER_COUNT_STATEMENTS; i += 1)
     {
-        const bool taken = statement_parse(loose[i], strlen(loose[i]), true, &statement);
-        test_expect(taken && statement.stated == 0 && statement.length == strlen(loose[i]) && memcmp(statement.line, loose[i], statement.length) == 0, loose[i]);
+        several[i].stated = -BUSTER_COUNT_STATED_MAXIMUM;
     }
-    test_expect(statement_parse("-3.00 a cut", 11, true, &statement) && statement.stated == -3000 && statement.length == 11, "a base's well-formed line keeps its percentage");
-    test_expect(statement_parse(longest, sizeof(longest), true, &statement) && statement.length == BUSTER_COUNT_LINE_BYTES && statement.line[BUSTER_COUNT_LINE_BYTES - 1] == 0, "a base's line past the longest is cut");
-    test_expect(statement_parse("# only a comment\n", 17, true, &statement) && statement.length == 0, "a base without a line states nothing");
+    test_expect(!statement_sum(several, BUSTER_COUNT_STATEMENTS, &sum) && sum == -(int64_t)BUSTER_COUNT_STATEMENTS * BUSTER_COUNT_STATED_MAXIMUM, "the most statements, each the most cut, are summed whole and refused");
 }
 
 typedef struct CountTestVerdict CountTestVerdict;
@@ -888,7 +895,7 @@ static void test_verdicts(void)
         { 1000000, 1005001, false, 0, COUNT_FAILED, 500 },
         { 1000000, 995000, false, 0, COUNT_PASSED, -500 },
         { 1000000, 994999, false, 0, COUNT_FAILED, -500 },
-        // A statement that nothing reads (the line is the base's) doesn't excuse a move.
+        // A percentage the change doesn't state doesn't excuse a move.
         { 1000000, 1070000, false, 7000, COUNT_FAILED, 7000 },
         // Stated: half a percent around the statement, above and below.
         { 1000000, 1070000, true, 7000, COUNT_PASSED, 7000 },
@@ -950,9 +957,9 @@ static void test_verdicts(void)
     char proposal[64];
     CountStatement proposed;
     count_proposal(7250, proposal, sizeof(proposal));
-    test_expect(strcmp(proposal, "+7.25 what moved it") == 0 && statement_parse(proposal, strlen(proposal), false, &proposed) && proposed.stated == 7250, "a rise's proposed line, which states it");
+    test_expect(strcmp(proposal, "+7.25 what moved it") == 0 && statement_parse(proposal, strlen(proposal), &proposed) && proposed.stated == 7250, "a rise's proposed line, which states it");
     count_proposal(-1305, proposal, sizeof(proposal));
-    test_expect(strcmp(proposal, "-1.31 what moved it") == 0 && statement_parse(proposal, strlen(proposal), false, &proposed) && proposed.stated == -1310, "a cut's proposed line, to the nearest hundredth");
+    test_expect(strcmp(proposal, "-1.31 what moved it") == 0 && statement_parse(proposal, strlen(proposal), &proposed) && proposed.stated == -1310, "a cut's proposed line, to the nearest hundredth");
     count_proposal(-1304, proposal, sizeof(proposal));
     test_expect(strcmp(proposal, "-1.30 what moved it") == 0, "a cut's proposed line, rounded down");
 }
@@ -1021,7 +1028,7 @@ int main(int argument_count, char** arguments)
     }
     else
     {
-        fprintf(stderr, "usage: compile-count sum PROFILE... | check --base-statement FILE --head-statement FILE --base PROFILE... --head PROFILE... | statement FILE | --self-test | --fixture FILE COUNT\n");
+        fprintf(stderr, "usage: compile-count sum PROFILE... | check [--statement FILE]... --base PROFILE... --head PROFILE... | statement FILE | --self-test | --fixture FILE COUNT\n");
     }
     return status;
 }

@@ -9,9 +9,11 @@
 #
 #   compile-count.sh check BASE HEAD CORPUS WORK
 #       BASE and HEAD are checkouts of the change's base and of the change, CORPUS the frozen corpus
-#       (tools/ci/fetch-corpus.sh), WORK a directory for the builds and the profiles. Prints the verdict, with
-#       GitHub's annotation for a failure, and adds it to the step's summary. Exits as compile-count does: 0 passed,
-#       1 the change moves the count and doesn't state it, or misstates it, 2 nothing could be judged.
+#       (tools/ci/fetch-corpus.sh), WORK a directory for the builds and the profiles. The change's statements are the
+#       files of HEAD's tools/ci/compile-count/ (*.txt) that BASE doesn't hold the same: the ones it adds or changes. A
+#       file it deletes states nothing. Prints the verdict, with GitHub's annotation for a failure, and adds it to the
+#       step's summary. Exits as compile-count does: 0 passed, 1 the change moves the count and doesn't state it, or
+#       misstates it, 2 nothing could be judged.
 #   compile-count.sh build TREE DIRECTORY
 #       DIRECTORY/compiler, the instrumented executable of the checkout TREE: its own sources and Release flags
 #       (./build.sh print-sources, print-compile-flags), compiled at -O0 without debug information. The counters are
@@ -129,14 +131,22 @@ count()
 
 check()
 {
-    local base=$1 head=$2 corpus=$3 work=$4 status=0 one
+    local base=$1 head=$2 corpus=$3 work=$4 status=0 one file
+    local -a statements=()
     mkdir -p "$work"
+    # Each change states in a file of its own, so that two changes that state moves don't conflict; a file the base
+    # holds the same is an earlier change's. (A pattern that matches nothing stays itself, which is no file.)
+    for file in "$head"/tools/ci/compile-count/*.txt; do
+        if [ -f "$file" ] && ! cmp -s -- "$file" "$base/tools/ci/compile-count/${file##*/}"; then
+            statements+=(--statement "$file")
+        fi
+    done
     cc -std=c17 -O2 -Wall -Wextra -Werror -o "$work/compile-count" "$head/tools/ci/compile-count.c" || die "check: compile-count.c didn't build"
     build "$base" "$work/base"
     build "$head" "$work/head"
     count "$work/base/compiler" "$corpus" "$work" base
     count "$work/head/compiler" "$corpus" "$work" head
-    "$work/compile-count" check --base-statement "$base/tools/ci/compile-count.txt" --head-statement "$head/tools/ci/compile-count.txt" \
+    "$work/compile-count" check "${statements[@]}" \
         --base "$work/base-1.profraw" "$work/base-2.profraw" "$work/base-3.profraw" \
         --head "$work/head-1.profraw" "$work/head-2.profraw" "$work/head-3.profraw" > "$work/verdict.txt" || status=$?
     one=$("$work/compile-count" sum "$work/base-one.profraw" "$work/head-one.profraw" | cut -f 1 | paste -s -d ' ') || die "check: the one-function unit's profiles have no count"
