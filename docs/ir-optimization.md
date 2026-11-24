@@ -564,7 +564,13 @@ pressure policy (`hoist`, #2719); the loop vectorizer (`vectorize`, #2743: [its
 guide](tier1-loop-vectorization.md)); the unroller (`+unroll`, #2755); and the optimizer,
 which runs SCCP, the identities, value numbering with memory (`+memory`,
 #2718), dead-code removal, CFG cleanup and its merges and layout, then the
-final verification that selection reads. `--tier1-passes=` turns each pass on
+final verification that selection reads. When promotion has already verified the
+input with dominance, the driver tracks whether later passes borrow it or
+rewrite it. Optimizer preparation can reuse the proof for the same revision.
+An in-place rewrite invalidates it, and `--verify` checks the input afresh.
+The final verifier checks the rewritten function before selection.
+
+`--tier1-passes=` turns each pass on
 or off ([the Tier 1 guide](tier1.md)). By default SCCP, dead-code removal, CFG
 cleanup, the merges, the inlining, the switches of constants, the
 vector/mask-only passes and the loop vectorizer run; unrestricted LICM and its pressure policy

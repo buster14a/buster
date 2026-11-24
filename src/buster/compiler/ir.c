@@ -1525,7 +1525,23 @@ static const uint8_t ir_rule_table[BUSTER_IR_OP_TABLE] = { BUSTER_IR_ROWS(BUSTER
 #define BUSTER_IR_TERM_ROW(op, uses, fields, types, rule, term) [op] = term,
 static const uint8_t ir_terminator_table[BUSTER_IR_OP_TABLE] = { BUSTER_IR_ROWS(BUSTER_IR_TERM_ROW) };
 #undef BUSTER_IR_TERM_ROW
+// The row verifier needs these five properties together. Keep the scalar tables for their individual users.
+enum
+{
+    IR_BATCH_USES = IR_TYPE_COUNT,
+    IR_BATCH_FIELDS = IR_BATCH_USES + 3,
+    IR_BATCH_TERM = IR_BATCH_FIELDS + 3,
+    IR_BATCH_RULE = IR_BATCH_TERM + 1,
+};
+#define BUSTER_IR_BATCH_ROW(op, uses, fields, types, rule, term) \
+    [op] = (types) | ((uint32_t)(uses) << IR_BATCH_USES) | ((uint32_t)(fields) << IR_BATCH_FIELDS) | \
+           ((uint32_t)(term) << IR_BATCH_TERM) | ((uint32_t)(rule) << IR_BATCH_RULE),
+static const uint32_t ir_batch_table[BUSTER_IR_OP_TABLE] = { BUSTER_IR_ROWS(BUSTER_IR_BATCH_ROW) };
+#undef BUSTER_IR_BATCH_ROW
 #undef BUSTER_IR_ROWS
+_Static_assert(IR_BATCH_RULE < 32 && IR_RULE_SCATTER <= (UINT32_MAX >> IR_BATCH_RULE), "packed row descriptors must fit a word");
+_Static_assert((BUSTER_IR_OP_TABLE & (BUSTER_IR_OP_TABLE - 1)) == 0, "opcode lookup masks require a power of two");
+
 _Static_assert(IR_OP_COUNT <= BUSTER_IR_OP_TABLE, "IR opcode tables must fit two byte-permute registers");
 
 static bool ir_vector_type(uint32_t type)
@@ -2219,8 +2235,6 @@ static IrCheck ir_check_shape(const IrFunction* f)
     return check;
 }
 
-// Exact one-instruction oracle. The vector path calls this only for exceptional rules or a failing batch to obtain
-// the same first error. It never reads a value's type until its ID and the enclosing columns have been checked.
 // Whether an operation's flags and alignment_log2 are its IrMetadata's (#1840): a plain operation's flags none, its
 // lanes (ir_lane_valid), an intrinsic's kind's own (checked by its rule) or a stack save's frame flag, and its alignment
 // 0. The opcode is valid.
@@ -2234,7 +2248,8 @@ static bool ir_check_metadata(uint32_t op, uint8_t flags, uint8_t alignment_log2
     return flags_valid && alignment_log2 <= ir_metadata_alignment[metadata];
 }
 
-static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
+// Reproduce the first column error for a lane that failed the batch checks, before reading any operand type.
+static IrCheck ir_check_row_fields(const IrFunction* f, uint32_t i)
 {
     const uint32_t op = f->op[i];
     const uint32_t type = f->type[i];
@@ -2258,7 +2273,6 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
     {
         check.error = IR_ERROR_METADATA;
     }
-    uint32_t operand_types[3] = { 0 };
     const uint32_t operands[3] = {
         a,
         b,
@@ -2272,16 +2286,35 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
             {
                 check = ir_check(IR_ERROR_OPERAND, i, p);
             }
-            else
-            {
-                operand_types[p] = f->type[operands[p]];
-            }
         }
+    }
+    return check;
+}
+
+// The batch checks every fixed operand's bounds and type before passing fields_checked. A non-plain
+// opcode can still impose metadata rules on zero flags (for example an atomic read/modify/write).
+static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i, bool fields_checked)
+{
+    const uint32_t op = f->op[i];
+    IrCheck check = ir_check(IR_OK, i, 0);
+    if (!fields_checked)
+    {
+        check = ir_check_row_fields(f, i);
+    }
+    else if (ir_metadata_table[op] != IR_METADATA_PLAIN && !ir_check_metadata(op, f->flags[i], f->alignment_log2[i]))
+    {
+        check.error = IR_ERROR_METADATA;
     }
     if (check.error == IR_OK)
     {
-        const uint32_t ta = operand_types[0];
-        const uint32_t tb = operand_types[1];
+        const uint32_t type = f->type[i];
+        const uint32_t a = f->a[i];
+        const uint32_t b = f->b[i];
+        const uint32_t c = f->c[i];
+        const uint32_t operands = ir_operand_table[op];
+        const uint32_t ta = (operands & 1) != 0 ? f->type[a] : 0;
+        const uint32_t tb = (operands & 2) != 0 ? f->type[b] : 0;
+        const uint32_t tc = (operands & 4) != 0 ? f->type[c] : 0;
         bool valid = true;
         switch (ir_rule_table[op])
         {
@@ -2298,7 +2331,7 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
             case IR_RULE_SHIFT: valid = ta == type && (ir_vector_type(type) ? tb == type : ir_integer(tb) && f->flags[i] == 0); break;
             case IR_RULE_ICMP: valid = ta == tb && c < IR_PREDICATE_COUNT && (ir_integer(ta) || (ta == IR_PTR && c <= IR_NE)); break;
             case IR_RULE_FCMP: valid = ta == tb && ir_floating(ta) && c <= IR_GE; break;
-            case IR_RULE_SELECT: valid = ta == IR_I1 && tb == type && operand_types[2] == type; break;
+            case IR_RULE_SELECT: valid = ta == IR_I1 && tb == type && tc == type; break;
             case IR_RULE_TRUNC: valid = ir_integer(ta) && ir_type_bits[ta] > ir_type_bits[type]; break;
             case IR_RULE_EXTEND: valid = ir_integer(ta) && ir_type_bits[ta] < ir_type_bits[type]; break;
             case IR_RULE_FTRUNC: valid = ir_floating(ta) && ir_type_bits[ta] > ir_type_bits[type]; break;
@@ -2326,7 +2359,7 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
                 valid = ir_vector_type(ta) && ta == tb && c < (ir_simd_lane_floating((IrSimdLane)f->flags[i]) ? IR_GE + 1u : (uint32_t)IR_PREDICATE_COUNT) &&
                         type == ir_lane_mask(ta, f->flags[i]);
                 break;
-            case IR_RULE_VECTOR_SELECT: valid = ir_vector_type(type) && ta == ir_lane_mask(type, f->flags[i]) && tb == type && operand_types[2] == type; break;
+            case IR_RULE_VECTOR_SELECT: valid = ir_vector_type(type) && ta == ir_lane_mask(type, f->flags[i]) && tb == type && tc == type; break;
             case IR_RULE_SLOT: valid = a < f->slot_count && (op != IR_LIFETIME || b <= 1); break;
             case IR_RULE_FENCE: valid = (a & ~(BUSTER_IR_FENCE_ORDER | BUSTER_IR_FENCE_SIGNAL)) == 0 && (a & BUSTER_IR_FENCE_ORDER) <= BUSTER_IR_FENCE_SEQ_CST; break;
             case IR_RULE_INTRINSIC:
@@ -2525,14 +2558,14 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i)
                         ir_atomic_access(type, f->alignment_log2[i]);
             } break;
             // A masked load's mask at its lanes and passthrough of its type, and a masked store's vector and mask so.
-            case IR_RULE_MASKED_LOAD: valid = ta == IR_PTR && ir_vector_type(type) && tb == ir_lane_mask(type, f->flags[i]) && operand_types[2] == type; break;
-            case IR_RULE_MASKED_STORE: valid = ta == IR_PTR && ir_vector_type(tb) && operand_types[2] == ir_lane_mask(tb, f->flags[i]); break;
+            case IR_RULE_MASKED_LOAD: valid = ta == IR_PTR && ir_vector_type(type) && tb == ir_lane_mask(type, f->flags[i]) && tc == type; break;
+            case IR_RULE_MASKED_STORE: valid = ta == IR_PTR && ir_vector_type(tb) && tc == ir_lane_mask(tb, f->flags[i]); break;
             // A gather's index of an element per lane, of 32 or 64 bits, and its mask at its lanes (#1840).
-            case IR_RULE_GATHER: valid = ta == IR_PTR && ir_vector_type(type) && ir_gather_index_valid(type, f->flags[i], tb) && operand_types[2] == ir_lane_mask(type, f->flags[i]); break;
+            case IR_RULE_GATHER: valid = ta == IR_PTR && ir_vector_type(type) && ir_gather_index_valid(type, f->flags[i], tb) && tc == ir_lane_mask(type, f->flags[i]); break;
             // A fused multiply-add's three operands are its result's type (#1840). A vector's lanes are floats or
             // doubles (#2806); a scalar's flags stay clear.
             case IR_RULE_FMA:
-                valid = ta == type && tb == type && operand_types[2] == type &&
+                valid = ta == type && tb == type && tc == type &&
                         (ir_vector_type(type) ? ir_lane_valid(op, f->flags[i]) : f->flags[i] == 0);
                 break;
             // A scatter's (#1840) `c` is its two extra values' index, no kind's: its stored vector's lanes, a dword's or a
@@ -2663,7 +2696,7 @@ static __m512i ir_operand_types(const IrFunction* f, __m512i low, __m512i high, 
 // A bit for every row needing the scalar semantic check. The common arithmetic, comparison, selection and memory
 // rules are checked here. Operand types are in-register byte permutes (ir_operand_types), whose invalid and unused
 // lanes are zero as the scalar gather's were.
-static __mmask16 ir_check_batch(const IrFunction* f, __m512i head, uint32_t first, uint32_t count, __mmask16* terminators)
+static __mmask16 ir_check_batch(const IrFunction* f, __m512i head, uint32_t first, uint32_t count, __mmask16* terminators, __mmask16* fields_checked)
 {
     const __mmask16 active = (__mmask16)((1u << count) - 1u);
     const __m128i op_bytes = _mm_maskz_loadu_epi8(active, f->op + first);
@@ -2674,19 +2707,13 @@ static __mmask16 ir_check_batch(const IrFunction* f, __m512i head, uint32_t firs
     const __m512i a = _mm512_maskz_loadu_epi32(active, f->a + first);
     const __m512i b = _mm512_maskz_loadu_epi32(active, f->b + first);
     const __m512i c = _mm512_maskz_loadu_epi32(active, f->c + first);
-    const __m512i operands = ir_lookup_bytes(ir_operand_table, op_bytes);
-    const __m512i fields = ir_lookup_bytes(ir_field_table, op_bytes);
-    const __m512i rules = ir_lookup_bytes(ir_rule_table, op_bytes);
-    const __m512i terms = ir_lookup_bytes(ir_terminator_table, op_bytes);
-    // The result types' 128 words, 32 opcodes per permute, chosen by the opcode's bits 5 and 6.
-    const __m512i allowed_first = _mm512_permutex2var_epi32(_mm512_loadu_si512(ir_result_table), op, _mm512_loadu_si512(ir_result_table + 16));
-    const __m512i allowed_second = _mm512_permutex2var_epi32(_mm512_loadu_si512(ir_result_table + 32), op, _mm512_loadu_si512(ir_result_table + 48));
-    const __m512i allowed_third = _mm512_permutex2var_epi32(_mm512_loadu_si512(ir_result_table + 64), op, _mm512_loadu_si512(ir_result_table + 80));
-    const __m512i allowed_fourth = _mm512_permutex2var_epi32(_mm512_loadu_si512(ir_result_table + 96), op, _mm512_loadu_si512(ir_result_table + 112));
-    const __mmask16 odd = _mm512_test_epi32_mask(op, _mm512_set1_epi32(32));
-    const __m512i allowed_low = _mm512_mask_blend_epi32(odd, allowed_first, allowed_second);
-    const __m512i allowed_high = _mm512_mask_blend_epi32(odd, allowed_third, allowed_fourth);
-    const __m512i allowed = _mm512_mask_blend_epi32(_mm512_test_epi32_mask(op, _mm512_set1_epi32(64)), allowed_low, allowed_high);
+    // Mask untrusted opcodes before the table read. The original opcode still determines the diagnostic.
+    const __m512i descriptor = _mm512_i32gather_epi32(_mm512_and_si512(op, _mm512_set1_epi32(BUSTER_IR_OP_TABLE - 1)), ir_batch_table, 4);
+    const __m512i operands = _mm512_srli_epi32(descriptor, IR_BATCH_USES);
+    const __m512i fields = _mm512_srli_epi32(descriptor, IR_BATCH_FIELDS);
+    const __m512i rules = _mm512_srli_epi32(descriptor, IR_BATCH_RULE);
+    const __m512i terms = _mm512_srli_epi32(descriptor, IR_BATCH_TERM);
+    const __m512i allowed = descriptor;
     const __m512i one = _mm512_set1_epi32(1);
     const __m512i none = _mm512_set1_epi32(-1);
     const __m512i limit = _mm512_set1_epi32((int)f->instruction_count);
@@ -2707,8 +2734,11 @@ static __mmask16 ir_check_batch(const IrFunction* f, __m512i head, uint32_t firs
     bad |= use_b & over_b;
     bad |= use_c & over_c;
     // The gather's lane condition, computed once: a used operand whose index is in bounds.
-    const __mmask16 valid_a = use_a & ~over_a;
-    const __mmask16 valid_b = use_b & ~over_b;
+    const __mmask16 ret = _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_RET));
+    const __mmask16 valid_a = (use_a | ret) & ~over_a;
+    // ADDRESS has an optional I64 index. Read its type under the same bounds mask as a required operand.
+    const __mmask16 address = _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_ADDRESS));
+    const __mmask16 valid_b = (use_b | address) & ~over_b;
     const __mmask16 valid_c = use_c & ~over_c;
     const __mmask16 memory = _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_LOAD)) | _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_STORE));
     bad |= memory & (_mm512_test_epi32_mask(flags, _mm512_set1_epi32(~BUSTER_IR_VOLATILE)) | _mm512_cmpgt_epu32_mask(align, _mm512_set1_epi32(31)));
@@ -2748,8 +2778,46 @@ static __mmask16 ir_check_batch(const IrFunction* f, __m512i head, uint32_t firs
     // (a nonzero flag is deferred above; this is fadd's default I32, which no lanes are).
     const __mmask16 vector_result = _mm512_cmpge_epu32_mask(type, _mm512_set1_epi32(IR_V4I32)) & _mm512_cmple_epu32_mask(type, _mm512_set1_epi32(IR_V16I32));
     bad |= vector_result & _mm512_cmpge_epu32_mask(op, _mm512_set1_epi32(IR_FADD)) & _mm512_cmple_epu32_mask(op, _mm512_set1_epi32(IR_FDIV));
-    const __mmask16 defer = ~(same | shift | icmp | fcmp | select | memory | no_rule);
-    return active & (bad | defer);
+    // On a valid producer row the batch already proved the opcode, result type, fields, flags and fixed operands.
+    // Finish the common remaining rules here. A lane failing any predicate still takes the exact diagnostic path.
+    __mmask16 proved = same | shift | icmp | fcmp | select | memory | no_rule;
+    const __m512i blocks = _mm512_set1_epi32((int)f->block_count);
+    proved |= _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_BR)) & _mm512_cmplt_epu32_mask(a, blocks);
+    proved |= _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_CBR)) & _mm512_cmpeq_epi32_mask(ta, _mm512_set1_epi32(IR_I1)) &
+              _mm512_cmplt_epu32_mask(_mm512_max_epu32(b, c), blocks);
+    proved |= _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_STACK_ADDR)) & _mm512_cmplt_epu32_mask(a, _mm512_set1_epi32((int)f->slot_count));
+    proved |= _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_SYMBOL_ADDR)) & _mm512_cmpneq_epi32_mask(a, _mm512_setzero_si512()) &
+              _mm512_cmplt_epu32_mask(a, _mm512_set1_epi32((int)f->symbol_count));
+    proved |= address & _mm512_cmpeq_epi32_mask(ta, _mm512_set1_epi32(IR_PTR)) & _mm512_cmplt_epu32_mask(c, _mm512_set1_epi32((int)f->address_count)) &
+              (_mm512_cmpeq_epi32_mask(b, none) | _mm512_cmpeq_epi32_mask(tb, _mm512_set1_epi32(IR_I64)));
+
+    // The integer types are ordered by increasing width. The result mask already restricts TRUNC and EXTEND to integers.
+    proved |= a_integer & ((_mm512_cmpeq_epi32_mask(rules, _mm512_set1_epi32(IR_RULE_TRUNC)) & _mm512_cmpgt_epu32_mask(ta, type)) |
+                           (_mm512_cmpeq_epi32_mask(rules, _mm512_set1_epi32(IR_RULE_EXTEND)) & _mm512_cmplt_epu32_mask(ta, type)));
+    proved |= ~vector_result & ((_mm512_cmpeq_epi32_mask(rules, _mm512_set1_epi32(IR_RULE_FROM_INT)) & a_integer) |
+                                (_mm512_cmpeq_epi32_mask(rules, _mm512_set1_epi32(IR_RULE_FROM_FLOAT)) & a_float));
+    proved |= _mm512_cmpeq_epi32_mask(rules, _mm512_set1_epi32(IR_RULE_FROM_POINTER)) & _mm512_cmpeq_epi32_mask(ta, _mm512_set1_epi32(IR_PTR));
+    proved |= ret & (f->result_type == IR_VOID ? _mm512_cmpeq_epi32_mask(a, none) :
+                     _mm512_cmpeq_epi32_mask(ta, _mm512_set1_epi32((int)f->result_type)));
+    const __m512i extra = _mm512_set1_epi32((int)f->extra_count);
+    proved |= _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_PHI)) & _mm512_cmpneq_epi32_mask(b, _mm512_setzero_si512()) &
+              _mm512_cmple_epu32_mask(a, extra) & _mm512_cmple_epu32_mask(b, _mm512_srli_epi32(_mm512_sub_epi32(extra, a), 1));
+
+    // Constants have a side-table payload. Only lanes with a valid type and in-bounds index may read it.
+    uint32_t constants = active & ~bad & _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_CONST)) &
+                         _mm512_cmplt_epu32_mask(a, _mm512_set1_epi32((int)f->constant_count));
+    while (constants != 0)
+    {
+        const uint32_t lane = (uint32_t)__builtin_ctz(constants);
+        constants &= constants - 1;
+        const uint32_t i = first + lane;
+        if (ir_constant_fits(f->constants[f->a[i]], f->type[i]))
+        {
+            proved |= (__mmask16)(1u << lane);
+        }
+    }
+    *fields_checked = active & ~bad;
+    return active & (bad | ~proved);
 }
 
 // The verifier's and the derived arrays' hot functions (this one, ir_cfg_validated, ir_check_dominance, ir_verify
@@ -2777,14 +2845,15 @@ static __attribute__((noinline, aligned(64))) IrCheck ir_check_rows(const IrFunc
             block += 1;
         }
         __mmask16 actual = 0;
-        uint32_t pending = ir_check_batch(f, head, first, count, &actual);
+        __mmask16 fields_checked = 0;
+        uint32_t pending = ir_check_batch(f, head, first, count, &actual, &fields_checked);
         const uint32_t bad_terms = actual ^ expected;
         pending |= bad_terms;
         while (check.error == IR_OK && pending != 0)
         {
             const uint32_t lane = (uint32_t)__builtin_ctz(pending);
             pending &= pending - 1;
-            check = ir_check_instruction(f, first + lane);
+            check = ir_check_instruction(f, first + lane, (fields_checked & (1u << lane)) != 0);
             if (check.error == IR_OK && (bad_terms & (1u << lane)) != 0)
             {
                 check = ir_check(IR_ERROR_TERMINATOR, first + lane, 0);
@@ -3235,7 +3304,7 @@ static __mmask16 ir_dominance_earlier(const IrCfg* cfg, const IrDominance* domin
     return bad;
 }
 
-// The lanes of 16 instructions, from `first`, whose operands the exact check must decide: a phi's, a call's and a
+// The lanes of 16 instructions, from `first`, whose operands the exact check must decide: a phi's, call's, scatter's or
 // ternary intrinsic's, whose operands are in extra; a use at or after its instruction, an error within the block; and,
 // with a dominator tree, a use of an earlier block's value whose block doesn't dominate the use's. Any other use is of
 // an earlier value of its own block, which needs nothing more (#786).
@@ -3257,7 +3326,8 @@ static __mmask16 ir_dominance_batch(const IrFunction* f, const IrCfg* cfg, const
     const __mmask16 ternary = _mm_mask_cmpeq_epi8_mask(active, op, _mm_set1_epi8(IR_INTRINSIC)) &
                              _mm512_cmpge_epu32_mask(kind, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_TERNARY)) &
                              _mm512_cmplt_epu32_mask(kind, _mm512_set1_epi32(BUSTER_IR_INTRINSIC_TERNARY_END));
-    const __mmask16 extra = _mm_mask_cmpeq_epi8_mask(active, op, _mm_set1_epi8(IR_PHI)) | _mm_mask_cmpeq_epi8_mask(active, op, _mm_set1_epi8(IR_CALL)) | _mm_mask_cmpeq_epi8_mask(active, op, _mm_set1_epi8(IR_CALL_INDIRECT)) | ternary;
+    const __mmask16 extra = _mm_mask_cmpeq_epi8_mask(active, op, _mm_set1_epi8(IR_PHI)) | _mm_mask_cmpeq_epi8_mask(active, op, _mm_set1_epi8(IR_CALL)) | _mm_mask_cmpeq_epi8_mask(active, op, _mm_set1_epi8(IR_CALL_INDIRECT)) |
+                           _mm_mask_cmpeq_epi8_mask(active, op, _mm_set1_epi8(IR_SCATTER)) | ternary;
     const __mmask16 direct = active & ~extra;
     const __mmask16 use_a = direct & (_mm512_test_epi32_mask(operands, one) | (_mm512_test_epi32_mask(optional, one) & _mm512_cmpneq_epi32_mask(a, none)));
     const __mmask16 use_b = direct & (_mm512_test_epi32_mask(operands, two) | (_mm512_test_epi32_mask(optional, two) & _mm512_cmpneq_epi32_mask(b, none)));
@@ -3371,7 +3441,7 @@ static __attribute__((unused)) IrCheck ir_verify_dominance(const IrFunction* f, 
     return check;
 }
 
-static IrCheck ir_check_graph(const IrFunction* f, const IrCfg* cfg, Arena* scratch, const IrDominance* dominance)
+static IrCheck ir_check_joins(const IrFunction* f, const IrCfg* cfg, Arena* scratch, const IrDominance* dominance)
 {
     IrCheck check = ir_check(IR_OK, BUSTER_IR_NONE, 0);
     bool ok = true;
@@ -3404,6 +3474,12 @@ static IrCheck ir_check_graph(const IrFunction* f, const IrCfg* cfg, Arena* scra
             check = ir_check_join(f, cfg, scratch, seen, first + lane);
         }
     }
+    return check;
+}
+
+static IrCheck ir_check_graph(const IrFunction* f, const IrCfg* cfg, Arena* scratch, const IrDominance* dominance)
+{
+    IrCheck check = ir_check_joins(f, cfg, scratch, dominance);
     if (check.error == IR_OK)
     {
         check = ir_check_dominance(f, cfg, dominance);
@@ -3416,10 +3492,11 @@ static IrCheck ir_check_graph(const IrFunction* f, const IrCfg* cfg, Arena* scra
     return check;
 }
 
-// Full structural verification with its CFG retained for the next consumer of the same immutable revision.
+// Validate rows and joins before publishing the CFG. A caller that will check uses against a tree
+// can defer local ordering to that same walk. Until then the CFG is valid for graph analysis only.
 // The arenas are distinct: scratch is restored on every path; a failed check restores arena and leaves result
 // untouched. No proof or graph survives mutation, even when the function's pointers and counts stay equal.
-static __attribute__((unused)) IrCheck ir_verify_cfg(const IrFunction* f, Arena* arena, Arena* scratch, IrCfg* result)
+static IrCheck ir_prepare_cfg(const IrFunction* f, Arena* arena, Arena* scratch, IrCfg* result, bool check_order)
 {
     const uint64_t mark = arena->length;
     const uint64_t temporary = scratch->length;
@@ -3439,7 +3516,7 @@ static __attribute__((unused)) IrCheck ir_verify_cfg(const IrFunction* f, Arena*
     }
     if (check.error == IR_OK)
     {
-        check = ir_check_graph(f, &cfg, scratch, 0);
+        check = check_order ? ir_check_graph(f, &cfg, scratch, NULL) : ir_check_joins(f, &cfg, scratch, NULL);
     }
     if (check.error == IR_OK)
     {
@@ -3453,7 +3530,45 @@ static __attribute__((unused)) IrCheck ir_verify_cfg(const IrFunction* f, Arena*
     return check;
 }
 
-static __attribute__((noinline, aligned(64))) IrCheck ir_verify(const IrFunction* f, Arena* scratch, const IrDominance* dominance)
+static __attribute__((unused)) IrCheck ir_verify_cfg(const IrFunction* f, Arena* arena, Arena* scratch, IrCfg* result)
+{
+    return ir_prepare_cfg(f, arena, scratch, result, true);
+}
+
+// A freshly lowered function generally has no phi or switch and defines each value before its use.
+// After shape and row validation these facts suffice for the structural graph check: branch targets are
+// in bounds, each terminator has at most two successors, and even a same-block use is ordered. Inspect
+// the actual rows and every side-table operand. A forward use can be valid across blocks, so leave it
+// and graphs with join, switch or indirect-branch obligations to the full verifier.
+static bool ir_lowered_ordered(const IrFunction* f)
+{
+    bool ordered = f->block_count <= UINT32_MAX / 2;
+    for (uint64_t start = 0; ordered && start < f->instruction_count; start += BUSTER_IR_VECTOR_COUNT)
+    {
+        const uint32_t first = (uint32_t)start;
+        const uint32_t remaining = f->instruction_count - first;
+        const uint32_t count = remaining < BUSTER_IR_VECTOR_COUNT ? remaining : BUSTER_IR_VECTOR_COUNT;
+        const __mmask16 active = (__mmask16)((1u << count) - 1u);
+        const __m128i op = _mm_maskz_loadu_epi8(active, f->op + first);
+        ordered = (_mm_cmpeq_epi8_mask(op, _mm_set1_epi8(IR_PHI)) | _mm_cmpeq_epi8_mask(op, _mm_set1_epi8(IR_SWITCH)) |
+                   _mm_cmpeq_epi8_mask(op, _mm_set1_epi8(IR_BR_INDIRECT))) == 0;
+        uint32_t pending = ordered ? ir_dominance_batch(f, NULL, NULL, first, count) : 0;
+        while (ordered && pending != 0)
+        {
+            const uint32_t row = first + (uint32_t)__builtin_ctz(pending);
+            pending &= pending - 1;
+            const uint64_t uses = ir_operand_count(f, row);
+            for (uint32_t k = 0; ordered && k < uses; k += 1)
+            {
+                // A non-phi consumes every operand in its own block. Only its definition ID is needed here.
+                ordered = ir_operand(f, row, k, 0).value < row;
+            }
+        }
+    }
+    return ordered;
+}
+
+static __attribute__((noinline, aligned(64))) IrCheck ir_verify_path(const IrFunction* f, Arena* scratch, const IrDominance* dominance, bool lowered)
 {
     const uint64_t mark = scratch->length;
     IrCheck check = ir_check_shape(f);
@@ -3461,17 +3576,22 @@ static __attribute__((noinline, aligned(64))) IrCheck ir_verify(const IrFunction
     {
         check = ir_check_rows(f);
     }
-    IrCfg cfg = { 0 };
-    if (check.error == IR_OK)
+    if (check.error == IR_OK && !(lowered && dominance == NULL && ir_lowered_ordered(f)))
     {
+        IrCfg cfg = { 0 };
         check.error = ir_cfg_validated(f, scratch, scratch, &cfg);
-    }
-    if (check.error == IR_OK)
-    {
-        check = ir_check_graph(f, &cfg, scratch, dominance);
+        if (check.error == IR_OK)
+        {
+            check = ir_check_graph(f, &cfg, scratch, dominance);
+        }
     }
     arena_pop_to(scratch, mark);
     return check;
+}
+
+static IrCheck ir_verify(const IrFunction* f, Arena* scratch, const IrDominance* dominance)
+{
+    return ir_verify_path(f, scratch, dominance, false);
 }
 
 
