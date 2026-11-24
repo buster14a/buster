@@ -1987,163 +1987,207 @@ static BUSTER_DIRECT_HOT const uint8_t* fast_lex_one(FastPP* pp, const uint8_t* 
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// AVX-512 dead #if / #ifdef region skipper: skips until matching #elif/#else/#endif at depth 0
-// WITHOUT lexing or interning ANY tokens inside the dead branch!
-
-// Returns directive kind (FPP_KW_ELIF/ELSE/ENDIF/ELIFDEF/ELIFNDEF) when leaving dead region,
-// with f->ptr positioned immediately after the directive keyword (ready to parse #elif condition or EOL).
-// Vectorized dead #if/#ifdef skipper: scans 64 bytes at a time, ONLY breaking out of the
-// AVX-512 loop when '#', '/', '"', or '\'' actually appears (ignores plain '\n' in bulk!).
+// The text of a conditional group that is not taken: nothing in it is lexed. fast_pp_skip_inactive looks for the
+// directive that ends the group, 64 bytes at a time, and leaves the loop only at a '#' that is the first character of
+// its line and at the start of a comment.
+//
+// Returns the directive (FPP_KW_ELIF, ELSE, ENDIF, ELIFDEF, ELIFNDEF) with f->ptr just after its keyword, or 0 where the
+// file ends first.
+//
+// Per block, in masks:
+// - a line's first character: the line starts (after each newline, and the block's first byte when the text before it
+//   ended in a line's leading blanks) added to the blanks carry through each line's leading blanks to it;
+// - a comment's start, seen at its second character: a '*' or a '/' after a '/' (the '/' may be the last byte of the
+//   block before, so no byte past the block is read);
+// - what a literal may hide: a quote taints the bytes after it up to a newline that no backslash precedes, by the
+//   same carry. A '#' or a comment's start in tainted bytes is rare, and is decided by scanning that line's literal the
+//   way this function always did (to its closing quote or its line's end, a backslash taking the next character).
+// Everything else (a '#' inside a line, a lone '/', quotes with nothing after them to hide) is passed in bulk.
+// f->at_bol is false after a directive; where the file ends first the compile fails and nothing reads it.
 static BUSTER_DIRECT_HOT uint8_t fast_pp_skip_inactive(FastPP* pp, FastIncludeFile* f)
 {
     const uint8_t* p = f->ptr;
     const uint8_t* const end = f->end;
     uint32_t line = f->line;
-    bool bol = f->at_bol;
     uint32_t nested = 0;
     uint8_t found_kw = 0;
+    // What crosses a block's end.
+    uint64_t bol_in = f->at_bol ? 1u : 0u;   // the text before p ends in a line's leading blanks
+    uint64_t taint_in = 0;                   // a quote is before p on its line
+    uint64_t backslash_in = 0;               // the byte before p is a backslash
+    uint64_t slash_in = 0;                   // the byte before p is a '/'
+    uint64_t slash_first = 0;                // ... which is its line's first character
+    uint64_t slash_tainted = 0;              // ... and is tainted
+    const uint8_t* clean_from = p;           // no literal is open here: where the last decision left the text
+    bool done = false;
 
     const __m512i v_nl = _mm512_set1_epi8('\n');
     const __m512i v_hash = _mm512_set1_epi8('#');
     const __m512i v_slash = _mm512_set1_epi8('/');
+    const __m512i v_star = _mm512_set1_epi8('*');
     const __m512i v_dq = _mm512_set1_epi8('"');
     const __m512i v_sq = _mm512_set1_epi8('\'');
+    const __m512i v_bs = _mm512_set1_epi8('\\');
+    const __m512i v_space = _mm512_set1_epi8(' ');
+    const __m512i v_tab = _mm512_set1_epi8('\t');
+    const __m512i v_four = _mm512_set1_epi8(4);
 
-    while (p < end && !pp->bailout)
+    while (p < end && !done)
     {
         uint32_t avail = 0;
         const __m512i v = fast_load64_bounded(p, end, &avail);
-        const __mmask64 valid_mask = avail == 64u ? ~UINT64_C(0) : ((UINT64_C(1) << avail) - 1u);
-        const __mmask64 nls = _mm512_cmpeq_epi8_mask(v, v_nl) & valid_mask;
-        const __mmask64 hashes = _mm512_cmpeq_epi8_mask(v, v_hash) & valid_mask;
-        const __mmask64 slashes = _mm512_cmpeq_epi8_mask(v, v_slash) & valid_mask;
-        const __mmask64 quotes = (_mm512_cmpeq_epi8_mask(v, v_dq) | _mm512_cmpeq_epi8_mask(v, v_sq)) & valid_mask;
-        const __mmask64 interesting = hashes | slashes | quotes;
+        const __mmask64 valid = _bzhi_u64(~UINT64_C(0), avail);
+        const __mmask64 nl = _mm512_cmpeq_epi8_mask(v, v_nl);
+        const __mmask64 hash = _mm512_cmpeq_epi8_mask(v, v_hash);
+        const __mmask64 slash = _mm512_cmpeq_epi8_mask(v, v_slash);
+        const __mmask64 star = _mm512_cmpeq_epi8_mask(v, v_star);
+        const __mmask64 quote = _mm512_cmpeq_epi8_mask(v, v_dq) | _mm512_cmpeq_epi8_mask(v, v_sq);
+        const __mmask64 backslash = _mm512_cmpeq_epi8_mask(v, v_bs);
+        // Blanks are fast_char_class's 8: ' ', and '\t' '\v' '\f' '\r' (9 to 13 without the newline). The bytes past
+        // the file's end count as blanks, so that what is carried out of the block is the state at the file's end.
+        const __mmask64 blank = _mm512_cmpeq_epi8_mask(v, v_space) | (_mm512_cmple_epu8_mask(_mm512_sub_epi8(v, v_tab), v_four) & ~nl) | ~valid;
 
-        if (__builtin_expect(interesting == 0, 1))
+        const __mmask64 starts = (nl << 1) | bol_in;
+        unsigned long long lead_sum = 0;
+        const uint64_t lead_out = _addcarry_u64(0, blank, starts & blank, &lead_sum);
+        const __mmask64 first = (starts | lead_sum) & ~blank;
+
+        const __mmask64 opens = (star | slash) & ((slash << 1) | slash_in);
+
+        const __mmask64 passes = ~(nl & ~((backslash << 1) | backslash_in));
+        unsigned long long taint_sum = 0;
+        const uint64_t taint_out = _addcarry_u64((unsigned char)taint_in, passes, quote, &taint_sum);
+        const __mmask64 tainted = passes & ~taint_sum;
+
+        const __mmask64 directives = hash & first;
+        const __mmask64 events = (directives | opens) & valid;
+        if (__builtin_expect(events == 0, 1))
         {
-            if (nls != 0)
-            {
-                line += (uint32_t)__builtin_popcountll(nls);
-                const uint32_t last_nl = 63u - (uint32_t)__builtin_clzll(nls);
-                // Check if only hspace after last_nl
-                const uint8_t* after = p + last_nl + 1u;
-                bol = true;
-                while (after < p + avail)
-                {
-                    if ((fast_char_class[*after] & 8u) == 0) { bol = false; break; }
-                    after += 1;
-                }
-            }
-            else if (bol)
-            {
-                for (uint32_t i = 0; i < avail; i += 1)
-                {
-                    if ((fast_char_class[p[i]] & 8u) == 0) { bol = false; break; }
-                }
-            }
+            line += (uint32_t)__builtin_popcountll(nl);
+            bol_in = lead_out | (nl >> 63);
+            taint_in = taint_out;
+            backslash_in = backslash >> 63;
+            slash_in = slash >> 63;
+            slash_first = first >> 63;
+            slash_tainted = tainted >> 63;
             p += avail;
-            continue;
         }
+        else
+        {
+            const uint32_t pos = (uint32_t)__builtin_ctzll(events);
+            const bool directive = ((directives >> pos) & 1u) != 0;
+            // A comment's event is at its second character.
+            const uint32_t slash_pos = pos - 1u;
+            const uint8_t* const at = directive ? p + pos : p + pos - 1;
+            const bool at_first = directive || (pos != 0 ? ((first >> slash_pos) & 1u) != 0 : slash_first != 0);
+            const bool at_tainted = directive ? ((tainted >> pos) & 1u) != 0 : (pos != 0 ? ((tainted >> slash_pos) & 1u) != 0 : slash_tainted != 0);
+            line += (uint32_t)__builtin_popcountll(nl & _bzhi_u64(~UINT64_C(0), pos));
+            // What the decision leaves: no literal open, and nothing carried.
+            const uint8_t* next = at;
+            uint64_t next_bol = 0;
+            bool decided = false;
 
-        // Handle first interesting char in this 64-byte block
-        const uint32_t pos = (uint32_t)__builtin_ctzll(interesting);
-        const __mmask64 before_mask = pos == 0 ? 0u : ((UINT64_C(1) << pos) - 1u);
-        const __mmask64 before_nls = nls & before_mask;
-        if (before_nls != 0)
-        {
-            line += (uint32_t)__builtin_popcountll(before_nls);
-            const uint32_t last_nl = 63u - (uint32_t)__builtin_clzll(before_nls);
-            bol = true;
-            for (uint32_t i = last_nl + 1u; i < pos; i += 1)
+            if (__builtin_expect(at_tainted, 0))
             {
-                if ((fast_char_class[p[i]] & 8u) == 0) { bol = false; break; }
-            }
-        }
-        else if (bol)
-        {
-            for (uint32_t i = 0; i < pos; i += 1)
-            {
-                if ((fast_char_class[p[i]] & 8u) == 0) { bol = false; break; }
-            }
-        }
-
-        p += pos;
-        const uint8_t ch = *p;
-        if (ch == '#')
-        {
-            p += 1;
-            if (bol)
-            {
-                p = fast_skip_hspace(p, end);
-                if (p < end && (fast_char_class[*p] & 2u) != 0)
+                // The line's start (a newline that no backslash precedes, as above), no further back than where the
+                // text was last left with no literal open, and the first quote from there.
+                const uint8_t* s = at;
+                while (s > clean_from && !(s[-1] == '\n' && !(s - 1 > clean_from && s[-2] == '\\')))
                 {
-                    const uint32_t len = fast_scan_ident_len(p, end);
+                    s -= 1;
+                }
+                while (s < at && *s != '"' && *s != '\'')
+                {
+                    s += 1;
+                }
+                if (s < at)
+                {
+                    // The newlines between the quote and here are counted again by the literal's scan.
+                    for (const uint8_t* c = s; c < at; c += 1)
+                    {
+                        line -= *c == '\n' ? 1u : 0u;
+                    }
+                    const uint8_t quote_char = *s;
+                    s += 1;
+                    while (s < end && *s != quote_char && *s != '\n')
+                    {
+                        if (*s == '\\' && s + 1 < end)
+                        {
+                            if (s[1] == '\n') { line += 1u; }
+                            s += 2;
+                        }
+                        else
+                        {
+                            s += 1;
+                        }
+                    }
+                    if (s < end && *s == quote_char) { s += 1; }
+                    next = s;
+                    decided = true;
+                }
+            }
+
+            if (!decided && directive)
+            {
+                next = fast_skip_hspace(at + 1, end);
+                if (next < end && (fast_char_class[*next] & 2u) != 0)
+                {
+                    const uint32_t len = fast_scan_ident_len(next, end);
                     uint8_t kw = 0;
-                    if (len == 2u && p[0] == 'i' && p[1] == 'f') { kw = FPP_KW_IF; }
-                    else if (len == 5u && memcmp(p, "ifdef", 5) == 0) { kw = FPP_KW_IFDEF; }
-                    else if (len == 6u && memcmp(p, "ifndef", 6) == 0) { kw = FPP_KW_IFNDEF; }
-                    else if (len == 5u && memcmp(p, "endif", 5) == 0) { kw = FPP_KW_ENDIF; }
-                    else if (len == 4u && memcmp(p, "else", 4) == 0) { kw = FPP_KW_ELSE; }
-                    else if (len == 4u && memcmp(p, "elif", 4) == 0) { kw = FPP_KW_ELIF; }
-                    else if (len == 7u && memcmp(p, "elifdef", 7) == 0) { kw = FPP_KW_ELIFDEF; }
-                    else if (len == 8u && memcmp(p, "elifndef", 8) == 0) { kw = FPP_KW_ELIFNDEF; }
-                    p += len;
+                    if (len == 2u && next[0] == 'i' && next[1] == 'f') { kw = FPP_KW_IF; }
+                    else if (len == 5u && memcmp(next, "ifdef", 5) == 0) { kw = FPP_KW_IFDEF; }
+                    else if (len == 6u && memcmp(next, "ifndef", 6) == 0) { kw = FPP_KW_IFNDEF; }
+                    else if (len == 5u && memcmp(next, "endif", 5) == 0) { kw = FPP_KW_ENDIF; }
+                    else if (len == 4u && memcmp(next, "else", 4) == 0) { kw = FPP_KW_ELSE; }
+                    else if (len == 4u && memcmp(next, "elif", 4) == 0) { kw = FPP_KW_ELIF; }
+                    else if (len == 7u && memcmp(next, "elifdef", 7) == 0) { kw = FPP_KW_ELIFDEF; }
+                    else if (len == 8u && memcmp(next, "elifndef", 8) == 0) { kw = FPP_KW_ELIFNDEF; }
+                    next += len;
                     if (kw == FPP_KW_IF || kw == FPP_KW_IFDEF || kw == FPP_KW_IFNDEF)
                     {
                         nested += 1u;
                     }
                     else if (kw == FPP_KW_ENDIF)
                     {
-                        if (nested == 0) { found_kw = kw; bol = false; break; }
-                        nested -= 1u;
+                        if (nested == 0) { found_kw = kw; done = true; }
+                        else { nested -= 1u; }
                     }
                     else if (nested == 0 && (kw == FPP_KW_ELSE || kw == FPP_KW_ELIF || kw == FPP_KW_ELIFDEF || kw == FPP_KW_ELIFNDEF))
                     {
                         found_kw = kw;
-                        bol = false;
-                        break;
+                        done = true;
                     }
                 }
-                bol = false;
             }
-        }
-        else if (ch == '/')
-        {
-            if (p + 1 < end && p[1] == '*')
+            else if (!decided)
             {
-                p = fast_skip_block_comment(p + 2, end, &line);
-                if (p == NULL) { fast_pp_bail(pp, "unterminated comment in skip"); p = end; break; }
-            }
-            else if (p + 1 < end && p[1] == '/')
-            {
-                p = fast_skip_line_comment(p + 2, end, &line);
-            }
-            else
-            {
-                p += 1;
-                bol = false;
-            }
-        }
-        else
-        {
-            // '"' or '\''
-            const uint8_t quote = ch;
-            bol = false;
-            p += 1;
-            while (p < end && *p != quote && *p != '\n')
-            {
-                if (*p == '\\' && p + 1 < end)
+                // A comment is a blank: the line's first character may still follow it. Its lines are counted apart, so
+                // that the loop's count stays in a register.
+                uint32_t comment_lines = 0;
+                next_bol = at_first ? 1u : 0u;
+                if (at[1] == '*')
                 {
-                    if (p[1] == '\n') { line += 1u; }
-                    p += 2;
+                    next = fast_skip_block_comment(at + 2, end, &comment_lines);
+                    if (next == NULL)
+                    {
+                        fast_pp_bail(pp, "unterminated comment in skip");
+                        next = end;
+                        done = true;
+                    }
                 }
                 else
                 {
-                    p += 1;
+                    next = fast_skip_line_comment(at + 2, end, &comment_lines);
                 }
+                line += comment_lines;
             }
-            if (p < end && *p == quote) { p += 1; }
+
+            p = next;
+            clean_from = next;
+            bol_in = next_bol;
+            taint_in = 0;
+            backslash_in = 0;
+            slash_in = 0;
         }
     }
 
@@ -2153,7 +2197,7 @@ static BUSTER_DIRECT_HOT uint8_t fast_pp_skip_inactive(FastPP* pp, FastIncludeFi
     }
     f->ptr = p;
     f->line = line;
-    f->at_bol = bol;
+    f->at_bol = bol_in != 0 && found_kw == 0;
     return found_kw;
 }
 
