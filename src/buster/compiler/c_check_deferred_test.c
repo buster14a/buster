@@ -680,6 +680,10 @@ static bool check_deferred_test_sparse_pages(void)
         BUSTER_ARENA_HUGE_PAGE_BYTES,
     };
     const bool was_busy = arena_pages_busy;
+    // Not a busy host's medium pages (arena_pages_medium, #2536), whose huge pages each start with a base page: test-lanes
+    // has those.
+    const bool was_medium = arena_pages_medium;
+    arena_pages_medium = false;
     bool valid = true;
     for (uint32_t reading = 0; valid && reading < 4; reading += 1)
     {
@@ -734,6 +738,7 @@ static bool check_deferred_test_sparse_pages(void)
         }
     }
     arena_pages_busy = was_busy;
+    arena_pages_medium = was_medium;
     Arena empty = check_input_sparse_arena(0, 0, true);
     Arena oversized = check_input_sparse_arena(BUSTER_ARENA_MAX_CAPACITY + 1, 0, true);
     valid = valid && empty.base == 0 && empty.capacity == 0 && oversized.base == 0 && oversized.capacity == 0;

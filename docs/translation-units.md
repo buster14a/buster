@@ -879,6 +879,65 @@ this one advises the arenas alone.
   32 MB, had medians 6.5% to 8.7% above main's alone and 3.9% to 4.6% below
   main's at 8.
 
+### Medium pages on a busy host (#2536)
+
+Base pages keep a busy host's arenas out of pages the other cores' traffic
+evicts before they are written, and pay for it in the kernel: a compile of
+`sqlite3.c` takes 56,000 faults, each with its own entry and bookkeeping, and
+at eight compiles at once that is 229 M kernel cycles a compile beside 967 M
+of its own.
+Linux 6.8 and later have sizes between a base page and 2 MB, each with a knob
+of its own (`/sys/kernel/mm/transparent_hugepage/hugepages-64kB/enabled`), off
+unless the host's owner turns them on. Where the host is busy and that knob
+says `madvise` or `always` (or `inherit`, with huge pages on),
+`arena_medium_offered`, the arenas take pages of 64 KB (`arena_pages_medium`)
+where an idle host's take 2 MB: a fault brings 16 pages, each still cleared
+close to its first write.
+
+- **Mechanism.** The arenas are advised as an idle host's, and the first page
+  of each 2 MB of their huge pages is advised a base page as a commit reaches
+  it ([the arenas' pages](arena-memory.md#page-sizes)), so the kernel finds no
+  2 MB to take and gives the next size it has. The kernel has no advice that
+  names a size; the mappings' shape is the only one a process has.
+- **Which size.** On the 9700X, eight compiles of `sqlite3.c` at once, one
+  hold of the lock, the knobs set for the hold alone ([the
+  record](https://github.com/buster14a/buster-performance/tree/d5c242144a03078d91bff31219cbee1c5ebaeb13/docs/measurements/all-core-tiles-2536-2026-11-23)'s
+  `pages-sizes`):
+
+  | pages | MB/s | kernel cycles a compile | faults |
+  | --- | ---: | ---: | ---: |
+  | base (`busy`) | 323.3 | 229.3 M | 56,056 |
+  | 16 KB | 325.1 | 245.8 M | 24,169 |
+  | 32 KB | 326.0 | 240.2 M | 19,094 |
+  | 64 KB | 338.9 | 192.0 M | 17,132 |
+  | 128 KB | 338.5 | 195.6 M | 17,258 |
+
+  The two smaller sizes fault less than base pages and cost the kernel more;
+  64 KB and 128 KB are equal, and 64 KB clears less ahead of the writes.
+- **The policy as built.** The same executable with the knob `never` and
+  `madvise`, three passes in turn in one hold (the record's `pages-final`):
+
+  | | knob `never` | knob `madvise` |
+  | --- | ---: | ---: |
+  | eight at once, MB/s | 325.9 | 337.1 |
+  | their kernel cycles a compile | 234.0 M | 196.8 M |
+  | their faults | 56,060 | 17,137 |
+  | their reports | 96 `busy` | 96 `medium` |
+  | their peak resident set | 188.0 MB | 193.9 MB |
+  | one alone, ms | 114.97 | 114.19 |
+
+  3.4% more at eight, the objects the same bytes. A compile alone is not
+  busy and keeps its 2 MB pages; the knob gives its few mappings that no 2 MB
+  page fits 64 KB pages too (4,586 faults against 5,636).
+- **Who decides.** The host's owner, by the knob: the compiler turns nothing
+  on, and reads the knob only on a busy host, a file or two at the process's
+  start. Without the knob, or with it `never`, a busy host's arenas take base
+  pages as before. A compile alone keeps its 2 MB pages, which are better
+  there (114.6 ms against 118.7 with 64 KB pages forced).
+- **Tests.** `BUSTER_TEST_MEDIUM_PAGES=1` or `0` decides the knob's reading
+  for them. `--time-stages` reports `medium` for this case, and `test-lanes`
+  reads the mappings back.
+
 ## The link
 
 A unit that links keeps its link (`check_units_keep`): its code and data as

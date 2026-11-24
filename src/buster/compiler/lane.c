@@ -274,6 +274,33 @@ bool arena_pages_busy;
 #else
 static bool arena_pages_busy;
 #endif
+// Whether the arenas take the kernel's medium pages (#2536): on a busy host that gives them (arena_medium_offered), the
+// pages of 64 KB where an idle host's arenas take huge pages, and base pages where those take base pages. The arenas are
+// then advised as on an idle host, and the first page of each 2 MB of their huge pages is advised a base page as its
+// commit reaches it (arena_medium_split), so that no mapping covers a whole 2 MB and the kernel's largest page there
+// is the next size it has: a fault takes 16 pages where a busy host's base pages took one, each cleared as it is first
+// written still, and none of 2 MB that the other cores' traffic evicts before the arena writes it. An arena of tables
+// stays base pages, as on a busy host: its tables are committed whole. --time-stages reports `medium`.
+// arena_page_policy sets it once, before the process starts any thread; main.c's units share it.
+#if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
+extern bool arena_pages_medium;
+#elif defined(BUSTER_UNIT)
+bool arena_pages_medium;
+#else
+static bool arena_pages_medium;
+#endif
+// The most 2 MB of its arenas a process keeps out of huge pages so (16 GB), and how many it has: each leaves two
+// mappings where there was one, and a process may have vm.max_map_count of them (65,530 unless the host raised it),
+// past which the kernel refuses a commit. Past this budget an arena's further bytes take 2 MB pages, as an idle
+// host's. Counted as they are made and never given back, so a process that reuses its arenas reaches it early.
+#define BUSTER_ARENA_MEDIUM_SPLITS 8192u
+#if defined(BUSTER_UNIT) && BUSTER_UNIT != BUSTER_UNIT_DRIVER
+extern uint32_t arena_medium_splits;
+#elif defined(BUSTER_UNIT)
+uint32_t arena_medium_splits;
+#else
+static uint32_t arena_medium_splits;
+#endif
 // Whether the exit helper may ask the kernel for huge pages of the executable's own pages (#2873, lane_exit_probe):
 // transparent huge pages are on for the whole process (not PR_SET_THP_DISABLE: a virtual machine, BUSTER_HUGE_PAGES=0,
 // or the process that started this one), and the kernel says how a process mapped a range in one call (PAGEMAP_SCAN,
@@ -879,6 +906,23 @@ static Arena arena_reserve_growing(uint64_t capacity, uint64_t requested, uint64
     return result;
 }
 
+// Keeps the huge-advised bytes [from, to) of `mapping` out of 2 MB pages (arena_pages_medium): the first page of each
+// 2 MB that starts in them, from a huge-page boundary, is advised a base page. The kernel takes a 2 MB page only where
+// one mapping covers all of it, and the advice splits the mapping there, so the largest page it gives the rest is the
+// next size the host has enabled. Within the process's budget of them (BUSTER_ARENA_MEDIUM_SPLITS), which any thread
+// may draw on.
+static void arena_medium_split(uint8_t* mapping, uint64_t from, uint64_t to)
+{
+    uintptr_t at = ((uintptr_t)mapping + from + BUSTER_ARENA_HUGE_PAGE_BYTES - 1) & ~(uintptr_t)(BUSTER_ARENA_HUGE_PAGE_BYTES - 1);
+    const uintptr_t end = (uintptr_t)mapping + to;
+    while (at < end && __atomic_load_n(&arena_medium_splits, __ATOMIC_RELAXED) < BUSTER_ARENA_MEDIUM_SPLITS)
+    {
+        __atomic_fetch_add(&arena_medium_splits, 1, __ATOMIC_RELAXED);
+        madvise((void*)at, BUSTER_ARENA_PAGE_BYTES, MADV_NOHUGEPAGE);
+        at += BUSTER_ARENA_HUGE_PAGE_BYTES;
+    }
+}
+
 // Maps [from, to) of a growing arena's mapping, writable, in place, with the page advice its reservation would give
 // those bytes (arena_reserve_policy, arena_commit): huge past its base pages, unless the host is busy, and base pages
 // below them where those are 2 MB or more.
@@ -911,6 +955,10 @@ static bool arena_extend(Arena* arena, uint8_t* mapping, uint64_t from, uint64_t
             const uint64_t begin = from > small_end ? from : small_end;
             madvise(mapping + begin, to - begin, MADV_HUGEPAGE);
             arena->huge = true;
+            if (arena_pages_medium)
+            {
+                arena_medium_split(mapping, begin, to);
+            }
         }
         __atomic_store_n(&arena_slots.bytes[arena_slot_of(mapping)], to, __ATOMIC_RELEASE);
     }
@@ -1186,7 +1234,7 @@ static Arena arena_reserve_tables(ArenaTable* tables, uint32_t count)
             {
                 madvise(mapping + offset, bytes, MADV_NOHUGEPAGE);
             }
-            for (uint32_t i = 0; !arena_pages_busy && i < count; i += 1)
+            for (uint32_t i = 0; !arena_pages_busy && !arena_pages_medium && i < count; i += 1)
             {
                 if (ends[i] > smalls[i])
                 {
@@ -1294,6 +1342,69 @@ static bool arena_host_busy(void)
     return result;
 }
 
+// The medium page a busy host's arenas take, in kB: the size whose knob arena_medium_offered reads. On the 9700X, eight
+// compiles of sqlite3.c at once spend 229 M kernel cycles each with base pages, 192 M with pages of 64 KB and 196 M with
+// 128 KB, but 246 M and 240 M with 16 and 32 KB, which fault less and cost more (#2536's record,
+// all-core-tiles-2536-2026-11-23).
+#define BUSTER_ARENA_MEDIUM_PAGE_KB 64
+
+// Whether `length` bytes of a transparent huge page knob's text ("always inherit [madvise] never") select `word`.
+static bool arena_knob_selects(const char* text, uint64_t length, const char* word)
+{
+    const uint64_t size = strlen(word);
+    bool result = false;
+    for (uint64_t i = 0; !result && i + size + 2 <= length; i += 1)
+    {
+        result = text[i] == '[' && memcmp(text + i + 1, word, size) == 0 && text[i + 1 + size] == ']';
+    }
+    return result;
+}
+
+// Whether the host gives a mapping advised huge pages, where no page of 2 MB fits, pages of BUSTER_ARENA_MEDIUM_PAGE_KB
+// (Linux 6.8's sizes between a base page and 2 MB): its knob for that size,
+// /sys/kernel/mm/transparent_hugepage/hugepages-64kB/enabled, says `always` or `madvise`, or `inherit` where the knob
+// for every size (enabled) doesn't say `never`. A kernel without the knob gives none. BUSTER_TEST_MEDIUM_PAGES ("1" or
+// "0") decides instead, for tests. Read only on a busy host, a file or two.
+static bool arena_medium_offered(void)
+{
+    const char* forced = getenv("BUSTER_TEST_MEDIUM_PAGES");
+    bool result = forced != 0 && strcmp(forced, "1") == 0;
+    if (forced == 0)
+    {
+        char text[64];
+        char path[96];
+        snprintf(path, sizeof(path), "/sys/kernel/mm/transparent_hugepage/hugepages-%ukB/enabled", (unsigned)BUSTER_ARENA_MEDIUM_PAGE_KB);
+        int file = open(path, O_RDONLY | O_CLOEXEC);
+        ssize_t length = file >= 0 ? read(file, text, sizeof(text)) : -1;
+        if (file >= 0)
+        {
+            close(file);
+        }
+        const uint64_t size = length > 0 ? (uint64_t)length : 0;
+        result = arena_knob_selects(text, size, "always") || arena_knob_selects(text, size, "madvise");
+        if (arena_knob_selects(text, size, "inherit"))
+        {
+            file = open("/sys/kernel/mm/transparent_hugepage/enabled", O_RDONLY | O_CLOEXEC);
+            length = file >= 0 ? read(file, text, sizeof(text)) : -1;
+            if (file >= 0)
+            {
+                close(file);
+            }
+            const uint64_t every = length > 0 ? (uint64_t)length : 0;
+            result = arena_knob_selects(text, every, "always") || arena_knob_selects(text, every, "madvise");
+        }
+    }
+    return result;
+}
+
+// A busy host's arenas take medium pages where the host gives them (`offered`), and base pages elsewhere; an idle
+// host's, neither.
+static void arena_pages_choose(bool busy, bool offered)
+{
+    arena_pages_medium = busy && offered;
+    arena_pages_busy = busy && !offered;
+}
+
 // Whether `release`, the kernel's (uname's), is Linux 6.7 or later, whose MAP_STACK maps a region VM_NOHUGEPAGE: its
 // major and minor numbers, compared in order. A release that doesn't start with them is taken for an older kernel.
 static bool arena_kernel_maps_stack_base_pages(const char* release)
@@ -1336,7 +1447,8 @@ static void arena_page_policy(const char* setting)
     const bool on = setting != 0 && strcmp(setting, "1") == 0;
     // Asked only where neither the setting nor the machine decides: off as the process was started.
     const bool inherited = !off && !on && !virtual_machine && prctl(PR_GET_THP_DISABLE, 0, 0, 0, 0) != 0;
-    arena_pages_busy = !off && !on && !virtual_machine && !inherited && arena_host_busy();
+    const bool busy = !off && !on && !virtual_machine && !inherited && arena_host_busy();
+    arena_pages_choose(busy, busy && arena_medium_offered());
     arena_executable_huge_pages = recent && !off && !(virtual_machine && !on) && !inherited;
     if (off || (virtual_machine && !on))
     {
@@ -1565,6 +1677,10 @@ static bool arena_commit(Arena* arena, uint64_t end)
             {
                 madvise(mapping + small_end, arena->mapping_bytes - small_end, MADV_HUGEPAGE);
                 arena->huge = true;
+            }
+            if (arena_pages_medium && arena->capacity > arena->small && target > small_end)
+            {
+                arena_medium_split(mapping, committed > small_end ? committed : small_end, target);
             }
         }
         else

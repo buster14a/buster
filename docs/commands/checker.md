@@ -121,7 +121,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   limit, 60 s) runs as a child (#2263);
   every other run is a child as before: a response file's, a jobserver dry
   run's, and one whose process-start inputs (`BUSTER_HUGE_PAGES`,
-  `BUSTER_TEST_HOST_BUSY`, the lanes' test hooks, the transparent huge pages
+  `BUSTER_TEST_HOST_BUSY`, `BUSTER_TEST_MEDIUM_PAGES`, the lanes' test hooks, the transparent huge pages
   setting) differ from the test's own at its start. `--differential` also
   runs each such command as a child and fails on a difference in a complete server reply's status or
   output. A request with no complete reply uses the child's result without a differential comparison (#2421).
