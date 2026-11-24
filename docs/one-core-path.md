@@ -4264,11 +4264,20 @@ instruction selection, encoding, branch-sizing, and link-object passes, `c_direc
 with private unity fragments `c_direct_lex.c`, `c_direct_x86.c`, `c_direct_types.c`, `c_direct_cc.c`) compiles clean
 single-TU `-c` C17/C23 object builds directly from `mmap`'d source bytes to an ELF64 `.o` file in one pass:
 
-- **Fused 64-byte AVX-512 lexer and preprocessor (`c_direct_lex.c`):** scans 64 bytes per iteration with fused
-  whitespace/special-character masks, branchless 2-character punctuator folding, inline 2-to-4-digit integer parsing, a
-  16 K-slot L2 identifier cache backed by a 64-way AVX-512 SwissTable, and in-place expansion for empty, 1-token,
-  0-param-use (`assert`/`testcase`), 1-param identity-wrapper (`ALWAYS`/`NEVER`), and short constant macros without
-  leaving the vector loop. Macro expansion is strictly iterative (`call_stack` + `arg_buf`, zero recursion).
+- **Lexer and preprocessor (`c_direct_lex.c`):** the text becomes raw tokens (kind, first byte, length) a window of
+  2,048 at a time, in blocks of exactly 64 bytes (`fast_pp_lex_window`): one class table's lookup and a bit test a
+  class, the two-character punctuators from the two characters' classes at even places of each run of candidates, and
+  kinds, first bytes and lengths packed by three compresses and an expand. A block does no branch on its tokens and
+  carries what crosses its end in registers; it stops only at a byte that needs a decision (a comment, a directive, a
+  literal, a splice), and a token the masks cannot decide (`<<=`, a `.` before a digit, a number that goes on past its
+  digits) stays in the window marked for `fast_lex_one`. The emitter (`fast_pp_emit_window`) stores 64 kinds at a time
+  and visits the identifiers, numbers and literals: a 16 K-slot L2 identifier cache backed by a 64-way AVX-512
+  SwissTable, inline 2-to-4-digit integers, and in-place expansion for empty, 1-token, 0-param-use
+  (`assert`/`testcase`), 1-param identity-wrapper (`ALWAYS`/`NEVER`) and short constant macros. Directives and macro
+  arguments read the same window (`fast_pp_read_tok`). An inactive group is skipped by masks too
+  (`fast_pp_skip_inactive`): each line's first character, a comment's start and what a literal may hide, 64 bytes a
+  step. Macro expansion is strictly iterative (`call_stack` + `arg_buf`, zero recursion). `test-direct` lexes its
+  cases at every offset of a block.
 - **Direct one-pass parser, type checker, and SysV AMD64 emitter (`c_direct_types.c`, `c_direct_cc.c`, `c_direct_x86.c`):**
   uses compact 32-bit `FastType` handles, AVX-512 `vpcmpeqd` 16-wide struct-member search (`<= 64` fields, hash table
   above), iterative operator-precedence expression compilation directly into x86-64 machine bytes, lazy `EFLAGS`
@@ -4299,6 +4308,35 @@ raw logs in
 | Peak RSS (1c / 8c) | 240.6 / 188.8 MiB | **38.0 / 29.5 MiB** | **6.3x / 6.4x less** |
 | Object size (`.o`) | 2,061,432 B | **2,056,840 B** | **-0.22%** (`one.w0.o == eight.w7.o`) |
 | Generated code (`speedtest1 --size 20 --memdb`) | 0.403 s (`clang -O0` 0.559 s) | **0.513 s** | **8.2% faster than `clang -O0`** |
+
+### The front's profile and redesign (2026-11-25)
+
+Where the direct path's time goes on the same unit, and what the window lexer, the masks' skipper and two copies
+removed from the parser changed; the profile, every step's readings, the scripts and what was measured and not kept
+are in
+[buster-performance](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/direct-speed-2850-2026-11-24).
+
+| 9700X, `sqlite3.c`, CPU 2 | main `1c5287c3` | this | |
+| --- | ---: | ---: | ---: |
+| the product's `-c`, wall (21 rotated runs) | 18.75 ms | **17.71 ms** | -5.5% |
+| user cycles | 92.5 M | **87.1 M** | -5.9% |
+| mispredicted branches | 1.082 M | **0.959 M** | -11.4% |
+| user instructions | 231.3 M | 234.3 M | +1.3% |
+| lexing and preprocessing (the harness's stage) | 8.41 ms | **7.55 ms** | -10.2% |
+| parsing and generating code | 9.18 ms | 9.19 ms | |
+| object | `ff67ee92...` | the same | |
+
+- **The profile is flat.** On main the pipeline's slots were 28% retired ops, 43% without an op from the front end, 14%
+  flushed after mispredicted branches and 14% backend stalls; the hottest function had 23% of the cycles and the
+  twelfth 2%. A token costs about 330 instructions and 1.5 mispredicted branches, through code of about 100 KB.
+- **What did not pay,** measured: a profile-guided build of the unit (-4.4%, all of it in the code generator, and the
+  ceiling of what placing its code can give); `-O2`, `-Os`, alignment and inlining flags (nothing); copying a value a
+  field at a time so that no load waits on a store (360 K fewer such loads, 1.2% slower: they are not on the critical
+  path); directive lines lexed inside the window (a third of the windows, the same time).
+- **What is left in the front,** by its share of the compile's cycles: the emitter's identifier lookups and the
+  expansion stack's loop (12.6%), the window's lexer (8.6%), the expansion engine (4.6%), the directives' and
+  arguments' reader (4.3%), interning (3.7%: every identifier of more than 16 bytes goes to the table), the skipper
+  (2.3%).
 
 ## Related
 

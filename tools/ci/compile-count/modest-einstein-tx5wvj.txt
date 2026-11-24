@@ -1,0 +1,1 @@
++0.60 the direct path lexes by windows: a block runs every one of its regions whatever its tokens (#2850)
