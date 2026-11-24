@@ -1212,8 +1212,9 @@ Every `9700x.yml` run has an `evidence` job, which must succeed:
   source is a successful merge-queue run in this repository, its Integration
   qualification passed and it has one successful explicit vector verdict
   covering plain, address, thread and memory. The record names the mode
-  (`native_evidence=smoke`) and run ID (`native_source`). A partial API read,
-  a plain-only source or missing qualification keeps the full native inventory.
+  (`native_evidence=smoke`) and run ID (`native_source`). An incomplete API
+  read reruns the hosted rows and keeps the full native inventory. A
+  plain-only source or missing vector qualification also keeps the full native inventory.
   The snapshot and manual full dispatch also run the full native inventory.
 
   The smoke exercises lexer masks and page edges, baked backend tables,

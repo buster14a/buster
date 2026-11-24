@@ -391,9 +391,17 @@ for variant in qualified snapshot skipped-gate failed-vector duplicate-vector wr
         wrong-repository) jq '.workflow_runs[0].head_repository.id=42' "$work/queue-run.json" > "$fixtures/runs-head-$docs.json" ;;
         wrong-sha) jq --arg sha "$merge" '.workflow_runs[0].head_sha=$sha' "$work/queue-run.json" > "$fixtures/runs-head-$docs.json" ;;
         failed-run) jq '.workflow_runs[0].conclusion="failure"' "$work/queue-run.json" > "$fixtures/runs-head-$docs.json" ;;
-        partial-jobs) touch "$fixtures/jobs-810.json.partial" ;;
+        partial-jobs)
+            # The newer run returned a failed first page. Losing the next page cannot license reuse of run 810.
+            jq '.workflow_runs += [.workflow_runs[0] | .id=811]' "$work/queue-run.json" > "$fixtures/runs-head-$docs.json"
+            jq '.jobs[0].conclusion="failure"' "$work/qualified-jobs.json" > "$fixtures/jobs-811.json"
+            touch "$fixtures/jobs-811.json.partial" ;;
     esac
     NIGHTLY_NOW=$(madrid '2026-11-04 04:10') GITHUB_EVENT_NAME=workflow_dispatch GITHUB_SHA=$docs EVIDENCE_PURPOSE=$purpose EVIDENCE_HARDWARE=admit EVIDENCE_SNAPSHOT=$head run_evidence "$history"
+    if [ "$variant" = partial-jobs ]; then
+        expect_line "$GITHUB_OUTPUT" 'hosted=run' 'a partial newer listing cannot hide a failure behind an older pass'
+        expect_line "$GITHUB_OUTPUT" 'hosted_source=' 'no run is reused after a failed page'
+    fi
     if [ "$variant" = qualified ]; then
         expect_line "$GITHUB_OUTPUT" 'native=smoke' 'qualified backlog runs the measured binary smoke'
         expect_line "$GITHUB_OUTPUT" 'native_source=810' 'the record identifies the qualifying run'
@@ -402,7 +410,7 @@ for variant in qualified snapshot skipped-gate failed-vector duplicate-vector wr
         expect_line "$GITHUB_OUTPUT" 'native_source=' "$variant claims no vector replacement"
     fi
 done
-rm -f "$fixtures/jobs-810.json.partial" "$fixtures/runs-head-$docs.json"
+rm -f "$fixtures/jobs-811.json.partial" "$fixtures/runs-head-$docs.json"
 
 # --- The aggregate's coverage check for a merge-queue candidate (#1430), against this run's jobs ---
 

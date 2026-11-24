@@ -185,10 +185,10 @@ evidence()
                         fi
                         local verdict
                         verdict=$("$tool" hosted --commit "$commit" --exclude "$run" < "$facts" || printf 'hosted\tnone\t0\n')
-                        if [ "$(cut -f 2 <<< "$verdict")" = reused ]; then
+                        if [ "$complete" = true ] && [ "$(cut -f 2 <<< "$verdict")" = reused ]; then
                             hosted=reused
                             hosted_source=$(cut -f 3 <<< "$verdict")
-                            if [ "$purpose" = backlog ] && [ "$complete" = true ] && [ "$(cut -f 4 <<< "$verdict")" = vector ]; then
+                            if [ "$purpose" = backlog ] && [ "$(cut -f 4 <<< "$verdict")" = vector ]; then
                                 native=smoke
                                 native_source=$hosted_source
                             fi
