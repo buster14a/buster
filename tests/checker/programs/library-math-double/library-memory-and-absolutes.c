@@ -1,0 +1,1 @@
+int tested(int n){int*p=__builtin_malloc(16*sizeof(int));for(int i=0;i<16;i++)p[i]=i*n;p=__builtin_realloc(p,64*sizeof(int));int r=p[15];__builtin_free(p);long*q=__builtin_calloc(8,sizeof(long));r+=(int)q[7];__builtin_free(q);return r+__builtin_abs(n-7)*3+(int)__builtin_labs(-(long)n)*5+(int)__builtin_llabs((long long)n*-3)*7;}

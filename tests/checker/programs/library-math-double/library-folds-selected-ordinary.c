@@ -1,0 +1,1 @@
+unsigned long strlen(const char*);static unsigned long strlen(int x) __attribute__((overloadable)){return 100+(x&7);}int tested(int n){return (int)strlen("abcd")+(int)strlen(n);}

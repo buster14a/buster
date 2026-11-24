@@ -1,0 +1,1 @@
+int tested(int n){__asm__("lonely:");return n;}

@@ -1,0 +1,1 @@
+int size(int n,int(*p)[n]){n+=7;return (int)sizeof(*p)+n;}int tested(int n){return size(n+10,0);}

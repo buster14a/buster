@@ -1,0 +1,1 @@
+static int add(int a,int b){int r;__asm__("leal (%1,%2), %0" : "=r"(r) : "r"(a), "r"(b));return r;}static int scaled(int a,int b){int r;__asm__("leal 3(%1,%2,4), %0" : "=r"(r) : "r"(a), "r"(b));return r;}int tested(int n){return add(n,2*n)*7+scaled(n,5)+add(-n,n);}

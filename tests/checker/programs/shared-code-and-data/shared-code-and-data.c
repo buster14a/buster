@@ -1,0 +1,1 @@
+int global=7;int helper(int x){global+=x;return global;}int tested(int n){int a=helper(n);global+=2;return a*3+global;}

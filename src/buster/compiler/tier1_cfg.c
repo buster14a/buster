@@ -16,6 +16,8 @@
 //    Each value's phi occurrences supply P directly, without another blocks-by-values matrix. The global values are
 //    solved 512 at a time, one vector row per block, and each block's live-in and live-out values kept as ascending
 //    lists (tier1_cfg_live_sets), so that the rows take blocks * 256 bytes however many values are global (#1384).
+//    Where the groups' dense solves would sweep more than BUSTER_TIER1_CFG_SPARSE_ROWS block rows, each group is solved
+//    instead by a worklist over the blocks its values touch alone (tier1_cfg_live_group_sparse), into the same lists.
 // 2. A value gets an interval per block it is defined in or live into, from its definition or the block's start to its
 //    last use or the block's end, and an unused definition one position. A block continues its layout predecessor's
 //    ranges when it has no phis and every value live into it leaves that predecessor live: then every value of its
@@ -231,11 +233,14 @@ struct Tier1CfgAllocation
     uint32_t edge_local_values;
     // Bit c: a move uses class c's temporary slot, which the frame must then reserve.
     uint8_t temp_slots;
-    // dataflow_liveness's sweeps, over every group of global values (tier1_cfg_live_sets).
+    // dataflow_liveness's sweeps, over every group of global values (tier1_cfg_live_sets), or with sparse_liveness the
+    // worklist's block visits.
     uint64_t liveness_iterations;
-    // The four liveness matrices of one group, at most 256 bytes a block, excluding CFG columns and the allocator's
-    // other working state.
+    // The four liveness matrices of one group, at most 256 bytes a block, or with sparse_liveness the most rows one
+    // group touched, 256 bytes each; excluding CFG columns and the allocator's other working state.
     uint64_t liveness_bytes;
+    // Whether the groups were solved by the worklist over their touched blocks (tier1_cfg_live_group_sparse, #1384).
+    uint8_t sparse_liveness;
     // The entries of the blocks' live-in and live-out lists, which hold the liveness the groups' matrices leave.
     uint64_t live_entries;
     uint64_t retained_bytes;
@@ -1697,6 +1702,227 @@ static void tier1_cfg_live_seeds(const Tier1CfgInput* input, const uint32_t* hom
     }
 }
 
+// Past this many block rows swept, blocks times groups, the groups are solved sparsely: a group's dense solve sweeps
+// every block's row whatever its values touch, so a function of many short ranges, more than one group of them, took
+// time growing with blocks times values (allocating #1353's function of 16,000 scoped loops took 306 ms, of 4,000 25 ms;
+// sparsely, 59 and 12 ms). A function of up to 512 global values, one group, never is. The bound is the work the dense
+// solves would do, not a storage limit: "Sparse groups" in docs/commands/tier1-cfg.md has the measurements.
+#define BUSTER_TIER1_CFG_SPARSE_ROWS (1u << 16)
+
+// One block's row in a sparse group: its definitions, the group's values live into it and out of it, and those live into
+// it not yet sent on to its predecessors.
+typedef struct Tier1CfgLiveRow Tier1CfgLiveRow;
+struct __attribute__((aligned(64))) Tier1CfgLiveRow
+{
+    __m512i def;
+    __m512i in;
+    __m512i out;
+    __m512i pending;
+};
+
+// A sparse group's state, and tier1_cfg_live_sets' columns it counts into or fills.
+typedef struct Tier1CfgSparse Tier1CfgSparse;
+struct Tier1CfgSparse
+{
+    const Tier1CfgInput* input;
+    const uint32_t* home;
+    const uint32_t* dense_values;
+    const uint32_t* blocks_of;
+    const uint32_t* phi_offsets;
+    const uint32_t* phi_sources;
+    // The group's rows, in the order it touched their blocks, one a block at most: block b's is row_of[b] where stamps[b]
+    // is the group's generation.
+    Tier1CfgLiveRow* rows;
+    uint32_t* row_blocks;
+    uint32_t* row_of;
+    uint32_t* stamps;
+    // The blocks whose pending rows are nonzero, each once.
+    uint32_t* work;
+    uint32_t generation;
+    uint32_t row_count;
+    uint32_t peak_rows;
+    uint64_t visits;
+    uint32_t* in_offsets;
+    uint32_t* out_offsets;
+    uint8_t* continues;
+    uint8_t* home_out;
+    uint32_t* in_cursors;
+    uint32_t* out_cursors;
+    uint32_t* in_values;
+    uint8_t* in_out;
+    uint32_t* out_values;
+};
+
+static __m512i tier1_cfg_sparse_bit(uint32_t bit)
+{
+    return _mm512_maskz_set1_epi64((__mmask8)(1u << (bit >> 6)), (long long)(UINT64_C(1) << (bit & 63)));
+}
+
+static bool tier1_cfg_sparse_any(__m512i bits)
+{
+    return _mm512_test_epi64_mask(bits, bits) != 0;
+}
+
+// Block b's row in the current group, an empty one where the group hasn't touched the block yet.
+static Tier1CfgLiveRow* tier1_cfg_sparse_row(Tier1CfgSparse* sparse, uint32_t block)
+{
+    if (sparse->stamps[block] != sparse->generation)
+    {
+        const uint32_t r = sparse->row_count;
+        sparse->row_count += 1;
+        sparse->stamps[block] = sparse->generation;
+        sparse->row_of[block] = r;
+        sparse->row_blocks[r] = block;
+        sparse->rows[r] = (Tier1CfgLiveRow){
+            .def = _mm512_setzero_si512(),
+            .in = _mm512_setzero_si512(),
+            .out = _mm512_setzero_si512(),
+            .pending = _mm512_setzero_si512(),
+        };
+    }
+    return sparse->rows + sparse->row_of[block];
+}
+
+// One group of tier1_cfg_live_sets, the dense ids [first, last), solved over the blocks its values touch alone: the
+// least solution of the equations dataflow_liveness solves, IN[b] = USE[b] | (OUT[b] & ~DEF[b]) and OUT[b] the union of
+// b's successors' IN, then OUT[b] |= the operands b passes. A row exists only for a value's home, its uses' blocks, the
+// blocks passing it to a phi and those it is found live into; a block's newly live values go to each predecessor once,
+// as one OR of 512 bits, and a predecessor whose IN grows waits for its turn. The order the blocks are taken in changes
+// the work, not the solution, so the lists are those of the dense solve. Then the group's rows, as the dense rows are
+// read: without `fill`, counted into in_offsets[b + 1] and out_offsets[b + 1], with `continues` narrowed and each value's
+// home_out set; with it, stored at the cursors. False where a value is live into the entry or into its own home, which
+// isn't SSA. Out of line: the dense groups' code stays as it was.
+static __attribute__((noinline)) bool tier1_cfg_live_group_sparse(Tier1CfgSparse* sparse, uint32_t first, uint32_t last, bool fill)
+{
+    const Tier1CfgInput* const input = sparse->input;
+    const uint32_t* const home = sparse->home;
+    const uint32_t* const dense_values = sparse->dense_values;
+    sparse->generation += 1;
+    if (sparse->generation == 0)
+    {
+        memset(sparse->stamps, 0, (uint64_t)input->block_count * sizeof(uint32_t));
+        sparse->generation = 1;
+    }
+    sparse->row_count = 0;
+    for (uint32_t i = first; i < last; i += 1)
+    {
+        const uint32_t v = dense_values[i];
+        const __m512i bit = tier1_cfg_sparse_bit(i - first);
+        Tier1CfgLiveRow* defining = tier1_cfg_sparse_row(sparse, home[v]);
+        defining->def = _mm512_or_si512(defining->def, bit);
+        for (uint32_t u = input->use_offsets[v]; u < input->use_offsets[v + 1]; u += 1)
+        {
+            const uint32_t block = sparse->blocks_of != 0 ? sparse->blocks_of[input->use_positions[u]] : tier1_cfg_block_of(input, input->use_positions[u]);
+            if (block != home[v])
+            {
+                Tier1CfgLiveRow* reading = tier1_cfg_sparse_row(sparse, block);
+                reading->in = _mm512_or_si512(reading->in, bit);
+            }
+        }
+        for (uint32_t k = sparse->phi_offsets[i]; k < sparse->phi_offsets[i + 1]; k += 1)
+        {
+            if (sparse->phi_sources[k] != home[v])
+            {
+                Tier1CfgLiveRow* passing = tier1_cfg_sparse_row(sparse, sparse->phi_sources[k]);
+                passing->in = _mm512_or_si512(passing->in, bit);
+            }
+        }
+    }
+    uint32_t waiting = 0;
+    for (uint32_t r = 0; r < sparse->row_count; r += 1)
+    {
+        sparse->rows[r].pending = sparse->rows[r].in;
+        if (tier1_cfg_sparse_any(sparse->rows[r].in))
+        {
+            sparse->work[waiting] = sparse->row_blocks[r];
+            waiting += 1;
+        }
+    }
+    while (waiting != 0)
+    {
+        waiting -= 1;
+        const uint32_t block = sparse->work[waiting];
+        Tier1CfgLiveRow* row = sparse->rows + sparse->row_of[block];
+        const __m512i delta = row->pending;
+        row->pending = _mm512_setzero_si512();
+        sparse->visits += fill ? 0 : 1;
+        for (uint32_t p = input->predecessor_offsets[block]; p < input->predecessor_offsets[block + 1]; p += 1)
+        {
+            const uint32_t predecessor = input->predecessors[p];
+            Tier1CfgLiveRow* before = tier1_cfg_sparse_row(sparse, predecessor);
+            const __m512i added = _mm512_andnot_si512(before->out, delta);
+            if (tier1_cfg_sparse_any(added))
+            {
+                before->out = _mm512_or_si512(before->out, added);
+                const __m512i fresh = _mm512_andnot_si512(_mm512_or_si512(before->def, before->in), added);
+                if (tier1_cfg_sparse_any(fresh))
+                {
+                    if (!tier1_cfg_sparse_any(before->pending))
+                    {
+                        sparse->work[waiting] = predecessor;
+                        waiting += 1;
+                    }
+                    before->in = _mm512_or_si512(before->in, fresh);
+                    before->pending = _mm512_or_si512(before->pending, fresh);
+                }
+            }
+        }
+    }
+    // The same edge uses join OUT even where their defining block kills propagation to IN.
+    bool valid = true;
+    for (uint32_t i = first; i < last; i += 1)
+    {
+        const uint32_t v = dense_values[i];
+        const __m512i bit = tier1_cfg_sparse_bit(i - first);
+        for (uint32_t k = sparse->phi_offsets[i]; k < sparse->phi_offsets[i + 1]; k += 1)
+        {
+            Tier1CfgLiveRow* passing = tier1_cfg_sparse_row(sparse, sparse->phi_sources[k]);
+            passing->out = _mm512_or_si512(passing->out, bit);
+        }
+        const Tier1CfgLiveRow* defining = sparse->rows + sparse->row_of[home[v]];
+        const bool entry = sparse->stamps[0] == sparse->generation && tier1_cfg_sparse_any(_mm512_and_si512(sparse->rows[sparse->row_of[0]].in, bit));
+        valid = valid && !entry && !tier1_cfg_sparse_any(_mm512_and_si512(defining->in, bit));
+        sparse->home_out[v] = fill ? sparse->home_out[v] : tier1_cfg_sparse_any(_mm512_and_si512(defining->out, bit));
+    }
+    sparse->peak_rows = sparse->row_count > sparse->peak_rows ? sparse->row_count : sparse->peak_rows;
+    for (uint32_t r = 0; valid && r < sparse->row_count; r += 1)
+    {
+        const Tier1CfgLiveRow* row = sparse->rows + r;
+        const uint32_t b = sparse->row_blocks[r];
+        if (!fill)
+        {
+            const bool after = b != 0 && sparse->stamps[b - 1] == sparse->generation;
+            const __m512i previous_out = after ? sparse->rows[sparse->row_of[b - 1]].out : _mm512_setzero_si512();
+            sparse->in_offsets[b + 1] += (uint32_t)_mm512_reduce_add_epi64(_mm512_popcnt_epi64(row->in));
+            sparse->out_offsets[b + 1] += (uint32_t)_mm512_reduce_add_epi64(_mm512_popcnt_epi64(row->out));
+            sparse->continues[b] = sparse->continues[b] && !tier1_cfg_sparse_any(_mm512_andnot_si512(previous_out, row->in));
+        }
+        else
+        {
+            uint64_t in[BUSTER_DATAFLOW_VECTOR_WORDS] __attribute__((aligned(64)));
+            uint64_t out[BUSTER_DATAFLOW_VECTOR_WORDS] __attribute__((aligned(64)));
+            _mm512_store_si512((void*)in, row->in);
+            _mm512_store_si512((void*)out, row->out);
+            for (uint32_t w = 0; w < BUSTER_DATAFLOW_VECTOR_WORDS; w += 1)
+            {
+                for (uint64_t bits = in[w]; bits != 0; bits &= bits - 1)
+                {
+                    const uint32_t bit = (uint32_t)__builtin_ctzll(bits);
+                    sparse->in_values[sparse->in_cursors[b]] = dense_values[first + w * 64 + bit];
+                    sparse->in_out[sparse->in_cursors[b]] = (out[w] >> bit) & 1;
+                    sparse->in_cursors[b] += 1;
+                }
+                for (uint64_t bits = out[w]; bits != 0; bits &= bits - 1)
+                {
+                    sparse->out_values[sparse->out_cursors[b]] = dense_values[first + w * 64 + (uint32_t)__builtin_ctzll(bits)];
+                    sparse->out_cursors[b] += 1;
+                }
+            }
+        }
+    }
+    return valid;
+}
+
 // The global values' liveness in groups of BUSTER_DATAFLOW_VECTOR_BITS dense ids, each solved by dataflow_liveness in
 // one vector row per block, so that its four matrices take blocks * 256 bytes however many values are global (#1384):
 // a short-lived value used one block after its definition no longer widens every block's rows. Liveness is per value,
@@ -1705,14 +1931,17 @@ static void tier1_cfg_live_seeds(const Tier1CfgInput* input, const uint32_t* hom
 // block-major lists, ascending since the groups go in dense id order, which is value order; with more than one group,
 // each is solved again for the fill rather than kept. A global phi operand joins its predecessor's use row unless that
 // block is its home, and its predecessor's out row after the solve, even where it is (the USE |= P & ~D, OUT |= P of
-// 1. above). A value live into the entry or into its own home is not SSA: INVALID. Failure restores the scratch arena.
-static Tier1CfgError tier1_cfg_live_sets(const Tier1CfgInput* input, const uint32_t* home, const uint32_t* dense, const uint32_t* dense_values, uint32_t dense_count, const uint32_t* blocks_of, Arena* scratch, Tier1CfgLiveSets* live, uint64_t* iterations, uint64_t* matrix_bytes)
+// 1. above). A value live into the entry or into its own home is not SSA: INVALID. Past BUSTER_TIER1_CFG_SPARSE_ROWS,
+// or with `force_sparse` (the tests'), every group is solved by tier1_cfg_live_group_sparse instead, with no dense rows,
+// and *sparse says so. Failure restores the scratch arena.
+static Tier1CfgError tier1_cfg_live_sets(const Tier1CfgInput* input, const uint32_t* home, const uint32_t* dense, const uint32_t* dense_values, uint32_t dense_count, const uint32_t* blocks_of, bool force_sparse, Arena* scratch, Tier1CfgLiveSets* live, uint64_t* iterations, uint64_t* matrix_bytes, uint8_t* sparse)
 {
     const uint64_t mark = scratch->length;
     Tier1CfgError error = TIER1_CFG_CAPACITY;
     const uint32_t blocks = input->block_count;
     const uint32_t groups = (uint32_t)(((uint64_t)dense_count + BUSTER_DATAFLOW_VECTOR_BITS - 1) / BUSTER_DATAFLOW_VECTOR_BITS);
     const uint32_t width = dense_count < BUSTER_DATAFLOW_VECTOR_BITS ? dense_count : BUSTER_DATAFLOW_VECTOR_BITS;
+    const bool sparse_groups = groups != 0 && (force_sparse || (groups > 1 && (uint64_t)blocks * groups > BUSTER_TIER1_CFG_SPARSE_ROWS));
     // Each dense id's phi occurrences, by their predecessors, counted then filled.
     uint32_t* phi_offsets = arena_push_array(scratch, (uint64_t)dense_count + 2, sizeof(uint32_t), _Alignof(uint32_t));
     bool ready = phi_offsets != 0;
@@ -1763,13 +1992,43 @@ static Tier1CfgError tier1_cfg_live_sets(const Tier1CfgInput* input, const uint3
     uint8_t* home_out = ready ? arena_push(scratch, (uint64_t)input->value_count + 1, 1) : 0;
     uint8_t* continues = ready ? arena_push(scratch, (uint64_t)blocks + 1, 1) : 0;
     Dataflow liveness = { 0 };
-    ready = ready && in_offsets != 0 && out_offsets != 0 && in_cursors != 0 && out_cursors != 0 && home_out != 0 && continues != 0 && dataflow_create(scratch, blocks, width, input->edge_count, &liveness);
+    Tier1CfgSparse solver = {
+        .input = input,
+        .home = home,
+        .dense_values = dense_values,
+        .blocks_of = blocks_of,
+        .phi_offsets = phi_offsets,
+        .phi_sources = phi_sources,
+        .in_offsets = in_offsets,
+        .out_offsets = out_offsets,
+        .continues = continues,
+        .home_out = home_out,
+        .in_cursors = in_cursors,
+        .out_cursors = out_cursors,
+    };
+    if (ready && sparse_groups)
+    {
+        solver.rows = arena_push_array(scratch, blocks, sizeof(Tier1CfgLiveRow), _Alignof(Tier1CfgLiveRow));
+        solver.row_blocks = arena_push_array(scratch, blocks, sizeof(uint32_t), _Alignof(uint32_t));
+        solver.row_of = arena_push_array(scratch, blocks, sizeof(uint32_t), _Alignof(uint32_t));
+        solver.stamps = arena_push_array(scratch, blocks, sizeof(uint32_t), _Alignof(uint32_t));
+        solver.work = arena_push_array(scratch, blocks, sizeof(uint32_t), _Alignof(uint32_t));
+        ready = solver.rows != 0 && solver.row_blocks != 0 && solver.row_of != 0 && solver.stamps != 0 && solver.work != 0;
+        if (ready)
+        {
+            memset(solver.stamps, 0, (uint64_t)blocks * sizeof(uint32_t));
+        }
+    }
+    ready = ready && in_offsets != 0 && out_offsets != 0 && in_cursors != 0 && out_cursors != 0 && home_out != 0 && continues != 0 && (sparse_groups || dataflow_create(scratch, blocks, width, input->edge_count, &liveness));
     if (ready)
     {
         memset(in_offsets, 0, ((uint64_t)blocks + 1) * sizeof(uint32_t));
         memset(out_offsets, 0, ((uint64_t)blocks + 1) * sizeof(uint32_t));
         memset(home_out, 0, (uint64_t)input->value_count + 1);
         memset(continues, 1, (uint64_t)blocks + 1);
+    }
+    if (ready && !sparse_groups)
+    {
         memcpy(liveness.successor_offsets, input->successor_offsets, ((uint64_t)blocks + 1) * sizeof(uint32_t));
         if (input->edge_count != 0)
         {
@@ -1811,8 +2070,17 @@ static Tier1CfgError tier1_cfg_live_sets(const Tier1CfgInput* input, const uint3
             out_values = ready ? arena_push_array(scratch, out_run + 1, sizeof(uint32_t), _Alignof(uint32_t)) : 0;
             in_out = ready ? arena_push(scratch, in_run + 1, 1) : 0;
             ready = ready && in_values != 0 && out_values != 0 && in_out != 0;
+            solver.in_values = in_values;
+            solver.in_out = in_out;
+            solver.out_values = out_values;
         }
-        for (uint32_t g = 0; ready && valid && g < groups; g += 1)
+        for (uint32_t g = 0; ready && valid && sparse_groups && g < groups; g += 1)
+        {
+            const uint32_t first = g * BUSTER_DATAFLOW_VECTOR_BITS;
+            const uint32_t last = dense_count - first < BUSTER_DATAFLOW_VECTOR_BITS ? dense_count : first + BUSTER_DATAFLOW_VECTOR_BITS;
+            valid = tier1_cfg_live_group_sparse(&solver, first, last, pass == 1);
+        }
+        for (uint32_t g = 0; ready && valid && !sparse_groups && g < groups; g += 1)
         {
             const uint32_t first = g * BUSTER_DATAFLOW_VECTOR_BITS;
             const uint32_t last = dense_count - first < BUSTER_DATAFLOW_VECTOR_BITS ? dense_count : first + BUSTER_DATAFLOW_VECTOR_BITS;
@@ -1891,8 +2159,9 @@ static Tier1CfgError tier1_cfg_live_sets(const Tier1CfgInput* input, const uint3
             .home_out = home_out,
             .continues = continues,
         };
-        *iterations = sweeps;
-        *matrix_bytes = 4 * (uint64_t)blocks * words * sizeof(uint64_t);
+        *iterations = sparse_groups ? solver.visits : sweeps;
+        *matrix_bytes = sparse_groups ? (uint64_t)solver.peak_rows * sizeof(Tier1CfgLiveRow) : 4 * (uint64_t)blocks * words * sizeof(uint64_t);
+        *sparse = sparse_groups;
         error = TIER1_CFG_OK;
     }
     else
@@ -2374,8 +2643,9 @@ struct Tier1CfgPrepared
 };
 
 // Validation, homes and dense values, hints, liveness, block lists and the intervals (1. and 2. above), for `input`'s
-// problem. Failure restores both arenas.
-static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output, Arena* scratch, Tier1CfgPrepared* prepared)
+// problem, the liveness's groups sparse where `force_sparse` says (the tests') or past BUSTER_TIER1_CFG_SPARSE_ROWS.
+// Failure restores both arenas.
+static Tier1CfgError tier1_cfg_prepare_path(const Tier1CfgInput* input, Arena* output, Arena* scratch, Tier1CfgPrepared* prepared, bool force_sparse)
 {
     Tier1CfgError error = TIER1_CFG_INVALID;
     const uint64_t output_saved = output != 0 ? output->length : 0;
@@ -2519,7 +2789,7 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
         Tier1CfgLiveSets live = { 0 };
         if (ready)
         {
-            const Tier1CfgError solved = tier1_cfg_live_sets(input, home, dense, dense_values, dense_count, blocks_of, scratch, &live, &candidate.liveness_iterations, &candidate.liveness_bytes);
+            const Tier1CfgError solved = tier1_cfg_live_sets(input, home, dense, dense_values, dense_count, blocks_of, force_sparse, scratch, &live, &candidate.liveness_iterations, &candidate.liveness_bytes, &candidate.sparse_liveness);
             ready = solved == TIER1_CFG_OK;
             error = solved == TIER1_CFG_INVALID ? TIER1_CFG_INVALID : error;
             candidate.cross_block_values = dense_count;
@@ -2973,6 +3243,11 @@ static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output
         }
     }
     return error;
+}
+
+static Tier1CfgError tier1_cfg_prepare(const Tier1CfgInput* input, Arena* output, Arena* scratch, Tier1CfgPrepared* prepared)
+{
+    return tier1_cfg_prepare_path(input, output, scratch, prepared, false);
 }
 
 // A problem's registers in the prepared intervals' allocator input: its classes' registers and its clobbers, which
@@ -3459,12 +3734,12 @@ static void tier1_cfg_release(const Tier1CfgPrepared* prepared, Arena* scratch)
     arena_pop_to(scratch, prepared->scratch_saved);
 }
 
-// The three in a row, for the input's own problem.
-static Tier1CfgError tier1_cfg_allocate_impl(const Tier1CfgInput* input, Arena* output, Arena* scratch, Tier1CfgAllocation* result)
+// The three in a row, for the input's own problem, the liveness sparse where `force_sparse` says (the tests').
+static Tier1CfgError tier1_cfg_allocate_impl(const Tier1CfgInput* input, Arena* output, Arena* scratch, Tier1CfgAllocation* result, bool force_sparse)
 {
     Tier1CfgPrepared prepared = { 0 };
     Tier1CfgAllocation candidate = { 0 };
-    Tier1CfgError error = result != 0 ? tier1_cfg_prepare(input, output, scratch, &prepared) : TIER1_CFG_INVALID;
+    Tier1CfgError error = result != 0 ? tier1_cfg_prepare_path(input, output, scratch, &prepared, force_sparse) : TIER1_CFG_INVALID;
     const bool held = error == TIER1_CFG_OK;
     error = held ? tier1_cfg_assign(input, &prepared, 0, output, &candidate) : error;
     error = error == TIER1_CFG_OK ? tier1_cfg_finish(input, &prepared, output, scratch, &candidate) : error;
@@ -3483,7 +3758,13 @@ static Tier1CfgError tier1_cfg_allocate_impl(const Tier1CfgInput* input, Arena* 
 
 static __attribute__((unused)) Tier1CfgError tier1_cfg_allocate(const Tier1CfgInput* input, Arena* output, Arena* scratch, Tier1CfgAllocation* result)
 {
-    return tier1_cfg_allocate_impl(input, output, scratch, result);
+    return tier1_cfg_allocate_impl(input, output, scratch, result, false);
+}
+
+// The tests force the sparse groups (tier1_cfg_live_group_sparse) on every case, as well as past the bound.
+static __attribute__((unused)) Tier1CfgError tier1_cfg_allocate_sparse(const Tier1CfgInput* input, Arena* output, Arena* scratch, Tier1CfgAllocation* result)
+{
+    return tier1_cfg_allocate_impl(input, output, scratch, result, true);
 }
 
 // Whether each value's registers lie in its class's, and its definition's in its allowed ones: tier1_cfg_input_valid's

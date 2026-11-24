@@ -1,0 +1,1 @@
+int absent(void);int g;static int global __asm__("renamed_global") (4);int tested(int n){g=0;int x __attribute__((unused)) (n+3,g++,absent());int y __asm__("local_y") (x*2);return x+y+g*100+global;}

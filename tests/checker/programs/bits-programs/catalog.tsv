@@ -1,0 +1,8 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+bits-every-builtin-of-boundary-values	bits-every-builtin-of-boundary-values.c	-	bits-every-builtin-of-boundary-values
+bits-bitint-enumeration-bool-and-bit-field-operands	bits-bitint-enumeration-bool-and-bit-field-operands.c	-	bits-bitint-enumeration-bool-and-bit-field-operands
+bits-rotations-by-counts-of-every-type	bits-rotations-by-counts-of-every-type.c	-	bits-rotations-by-counts-of-every-type
+bits-carry-chains-of-every-width	bits-carry-chains-of-every-width.c	-	bits-carry-chains-of-every-width
+bits-folds-and-operands-evaluated-once-in-order	bits-folds-and-operands-evaluated-once-in-order.c	-	bits-folds-and-operands-evaluated-once-in-order
+bits-wide-operands-results-and-counts	bits-wide-operands-results-and-counts.c	-	bits-wide-operands-results-and-counts

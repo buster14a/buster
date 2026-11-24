@@ -1,0 +1,5 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+bit-field-initializers-and-neighbors	bit-field-initializers-and-neighbors.c	-	bit-field-initializers-and-neighbors
+bit-field-signedness-and-selection	bit-field-signedness-and-selection.c	-	bit-field-signedness-and-selection
+bit-field-packed-spans	bit-field-packed-spans.c	-	bit-field-packed-spans

@@ -1,0 +1,11 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+asm-goto-label-data	asm-goto-label-data.c	-	asm-goto-label-data
+# The x87's operands the lowering doesn't place: f's register of the compiler's choice; an integer; shapes off the
+# stack's top, which clang's code refuses too (an input at st(1) without one at st(0), a clobber below the stack's
+# top), and two inputs at st(0), which clang compiles as one register's; and an x87 register named in the template,
+# which the assembler doesn't parse.
+# f's inputs (#147): below the fixed operands, each in a register of its own that the template names, none popped;
+# with outputs the template pushes early-clobbered, as GCC's rules for f inputs require (clang's code without the &
+# pops the wrong register after the template).
+asm-x87-any	asm-x87-any.c	-	asm-x87-any

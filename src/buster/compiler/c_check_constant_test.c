@@ -3,7 +3,7 @@
 // Original declaration-time expression fixtures, checked by both parser/checker paths and installed Clang.
 // The FILE-sized arithmetic is authored from the target sizes; no system header or external fixture is copied.
 
-static void check_test_program_source(CheckTest* test, const char* source, const char* name, const char* clang);
+static void check_test_program_suite(CheckTest* test, const char* suite, const char* clang);
 
 static void check_test_constant_parameter_names(CheckTest* test)
 {
@@ -1007,12 +1007,5 @@ static __attribute__((noinline)) void check_test_constant_sources(CheckTest* tes
     {
         rmdir(directory);
     }
-    check_test_program_source(test,
-        "int tested(int n) { int x=n; int y=__builtin_types_compatible_p(__typeof__((int){++x}), int);"
-        "return x*100 + y*10 + (int)sizeof(__typeof__((int){x+=5})); }",
-        "typeof-compound-immediate-unevaluated-call-and-update", clang);
-    check_test_program_source(test,
-        "struct S { int x; }; int tested(int n) { int x=n;"
-        "__typeof__((__typeof__((struct S){++x})){++x}) s={3}; return x*10 + s.x; }",
-        "typeof-compound-nested-type-unevaluated-record", clang);
+    check_test_program_suite(test, "checker/programs/constant-sources", clang);
 }

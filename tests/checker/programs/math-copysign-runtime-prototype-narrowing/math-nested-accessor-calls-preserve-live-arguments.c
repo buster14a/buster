@@ -1,0 +1,1 @@
+int visits;double next(int n){visits++;return (double)(n+4);}double mix(double a,int b,float c,double d){return a+b+c+d;}int tested(int n){visits=0;double a=mix(0.5,2,__builtin_copysignf((float)n,-1.0f),__builtin_sqrt(next(n)));double b=__builtin_sqrt(__builtin_sqrt((double)(n+4)*16.0));return (int)(a+b)+visits*100;}

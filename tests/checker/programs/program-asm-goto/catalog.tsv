@@ -1,0 +1,13 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+asm-goto-labels	asm-goto-labels.c	-	asm-goto-labels
+asm-goto-outputs	asm-goto-outputs.c	-	asm-goto-outputs
+# Bodies that branch straight to their labels (#2351): a label right after the statement, a template's own branch to
+# its end, an always_inline function's statement spliced twice, one under a value of its expression (whose dispatch
+# stays), and one in a loop of live values in callee-saved registers.
+asm-goto-direct	asm-goto-direct.c	-	asm-goto-direct
+# Bodies with outputs that branch straight to their labels (#2351), each exit through its own copy of the stores: two
+# labels and the fall-through, each reading the outputs; a + output and a flag output; a memory output's address (an
+# x87 output is left out: clang 23's FP stackifier crashes on one in asm goto); a template's own branch to its end; an always_inline function's statement called twice; and one
+# in a loop of live values in callee-saved registers.
+asm-goto-direct-outputs	asm-goto-direct-outputs.c	-	asm-goto-direct-outputs

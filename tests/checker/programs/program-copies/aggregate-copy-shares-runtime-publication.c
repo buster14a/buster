@@ -1,0 +1,1 @@
+struct S{char c[513];};static struct S a,b;int tested(int n){a.c[512]=(char)n;b=a;return __builtin_isnan(__builtin_sqrt((double)n))+b.c[512];}

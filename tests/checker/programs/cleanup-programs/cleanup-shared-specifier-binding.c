@@ -1,0 +1,1 @@
+static unsigned trace;static void note(int*p){trace=trace*31u+(unsigned)*p;}static void bump(int*p){trace=trace*31u+(unsigned)*p;*p+=100;}int tested(int n){trace=0;int r;{__attribute__((cleanup(note))) int note=n,other=n+1;r=note+other;}return r^(int)trace;}

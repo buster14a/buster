@@ -1,0 +1,1 @@
+typedef union __attribute__((transparent_union)){int*p;long*q;}P;static long peek(P x){return *x.p;}int tested(int n){int x=n*3;long y=n;return (int)(peek((P)&x)+peek((P)(long*)&y)*7+((P)&x).p[0]*11);}

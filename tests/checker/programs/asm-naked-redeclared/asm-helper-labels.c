@@ -1,0 +1,1 @@
+extern int external_data;int external_helper(int);int tested(int n){int v;__asm__ volatile("jmp 1f\n.Lforty_two:\n\tmovl $42, %%eax\n\taddl %%edi, %%eax\n\tret\n1:" ::: "rax");__asm__ volatile("movl %1, %%edi\n\tcall .Lforty_two\n\tmovl %%eax, %0" : "=r"(v) : "r"(n): "rax","rcx","rdx","rsi","rdi","r8","r9","r10","r11","memory","cc");return v+external_helper(0);}

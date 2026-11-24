@@ -2348,7 +2348,7 @@ declaration's history.
 
 `test-preprocessor` runs every case and file once more as the drivers run it,
 with the vectorized kernels, no expansion starts and the history deferred
-(`pp_test_deferred_history`). The stream, the counts of errors and warnings and
+(`pp_test_compile_kernels`). The stream, the counts of errors and warnings and
 the printed diagnostics must be the recording run's, byte for byte; once
 `pp_history_ensure` records the history, it must be the recording run's too,
 with nothing more printed. In the fuzz batch, the vectorized run as a compile

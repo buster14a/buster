@@ -1,0 +1,1 @@
+int tested(int n){int x=0,y=1;if(n){x=2;}else x=3;while(n){if(x)break;n--;}do x++;while(x<4);for(int i=0;i<n;i++){if(i==1)continue;x+=i;}return x+y;}

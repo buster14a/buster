@@ -1,0 +1,1 @@
+static __attribute__((naked,noinline)) long twice(long x){__asm__("leaq (%rdi,%rdi), %rax\n\tret\nthrice_entry:\n\tleaq (%rdi,%rdi,2), %rax\n\tret\n");}static long thrice_address(void){long a;__asm__("leaq thrice_entry(%%rip), %0" : "=r"(a));return a;}int tested(int n){long (*f)(long)=(long (*)(long))thrice_address();return (int)(twice(n)*10+f(n));}

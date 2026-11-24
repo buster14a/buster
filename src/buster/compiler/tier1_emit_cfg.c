@@ -1248,121 +1248,179 @@ static bool tier1_emit_cfg_incoming(const Tier1EmitResult* emitted, uint64_t pas
     return found;
 }
 
-// Each frame object's lifetime over tier1_cfg's positions (#177), into `starts` and `ends` by slot: its whole function
-// for an object without lifetime markers (IR_LIFETIME), and for one with them the hull of the positions where some path
-// from a start reaches without an end. That forward problem is backward liveness on the reversed CFG, which dataflow.c
-// solves (its vector path or its scalar twin): a block's last marker of the object a use where it starts and a
-// definition where it ends, so that the fixpoint's in row is the object's state after the block and its out row the one
-// before it. The hull takes each block's start where the object is live before it, its end where the object is live
-// after it, and each marker's own position: an access through the object's address, at a node between a start and an
-// end on some path, has its positions inside. Scratch keeps the dataflow's rows; the caller restores it.
+typedef struct Tier1LifetimeMarker Tier1LifetimeMarker;
+struct Tier1LifetimeMarker
+{
+    uint32_t block;
+    uint32_t node;
+};
+
+typedef struct Tier1LifetimeRow Tier1LifetimeRow;
+struct Tier1LifetimeRow
+{
+    __m512i seen;
+    __m512i pending;
+};
+
+// A group's rows start empty. Only initialize the blocks its markers or live edges reach.
+static Tier1LifetimeRow* tier1_emit_lifetime_row(Tier1LifetimeRow* rows, uint32_t* stamps, uint32_t group, uint32_t block)
+{
+    Tier1LifetimeRow* row = &rows[block];
+    if (stamps[block] != group + 1)
+    {
+        row->seen = _mm512_setzero_si512();
+        row->pending = _mm512_setzero_si512();
+        stamps[block] = group + 1;
+    }
+    return row;
+}
+
+// One vector of independent objects. A block's last marker determines its exit state regardless of its entry state.
+// Mark all such bits as seen and enqueue the starts. For unmarked bits, the first live incoming edge makes the exit
+// live. Each (block, object) exit is propagated once, including around back edges and in disconnected components.
+static void tier1_emit_lifetime_group(const IrFunction* function, const Tier1CfgInput* input, const Tier1LifetimeMarker* markers, uint32_t count, uint32_t group, Tier1LifetimeRow* rows, uint32_t* stamps, uint32_t* work, uint32_t* starts, uint32_t* ends)
+{
+    uint32_t queued = 0;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        // Markers are in reverse instruction order within the group.
+        const uint32_t block = markers[i].block;
+        const uint32_t node = markers[i].node;
+        const uint32_t bit_index = function->a[node] % BUSTER_DATAFLOW_VECTOR_BITS;
+        const uint32_t word = bit_index / 64;
+        const uint64_t bit = UINT64_C(1) << (bit_index % 64);
+        Tier1LifetimeRow* row = tier1_emit_lifetime_row(rows, stamps, group, block);
+        uint64_t* seen = (uint64_t*)&row->seen;
+        if ((seen[word] & bit) == 0)
+        {
+            seen[word] |= bit;
+            if (function->b[node] == 0)
+            {
+                if (_mm512_test_epi64_mask(row->pending, row->pending) == 0)
+                {
+                    work[queued++] = block;
+                }
+                ((uint64_t*)&row->pending)[word] |= bit;
+            }
+        }
+    }
+
+    const uint32_t* const offsets = input->successor_offsets;
+    const uint32_t* const successors = input->successors;
+    const uint32_t* const positions = input->block_starts;
+    while (queued != 0)
+    {
+        const uint32_t block = work[--queued];
+        const __m512i delta = rows[block].pending;
+        rows[block].pending = _mm512_setzero_si512();
+        // Every bit in delta is live at this exit and at each successor's entry, even one whose first marker ends it.
+        // Fold those positions into the hull together. A terminal block contributes only its exit.
+        uint32_t low = UINT32_MAX;
+        uint32_t high = positions[block + 1];
+        for (uint32_t edge = offsets[block]; edge < offsets[block + 1]; edge += 1)
+        {
+            const uint32_t next = successors[edge];
+            const uint32_t entry = positions[next];
+            low = entry < low ? entry : low;
+            high = entry + 1 > high ? entry + 1 : high;
+            Tier1LifetimeRow* row = tier1_emit_lifetime_row(rows, stamps, group, next);
+            const __m512i fresh = _mm512_andnot_si512(row->seen, delta);
+            if (_mm512_test_epi64_mask(fresh, fresh) != 0)
+            {
+                if (_mm512_test_epi64_mask(row->pending, row->pending) == 0)
+                {
+                    work[queued++] = next;
+                }
+                row->seen = _mm512_or_si512(row->seen, fresh);
+                row->pending = _mm512_or_si512(row->pending, fresh);
+            }
+        }
+        for (uint32_t word = 0; word < BUSTER_DATAFLOW_VECTOR_WORDS; word += 1)
+        {
+            for (uint64_t bits = (uint64_t)delta[word]; bits != 0; bits &= bits - 1)
+            {
+                const uint32_t slot = group * BUSTER_DATAFLOW_VECTOR_BITS + word * 64 + (uint32_t)__builtin_ctzll(bits);
+                starts[slot] = low < starts[slot] ? low : starts[slot];
+                ends[slot] = high > ends[slot] ? high : ends[slot];
+            }
+        }
+    }
+}
+
+// Frame coloring uses the layout hull of each object's lifetime (#177). Markers give the within-block endpoints.
+// Only a live exit can extend that hull across blocks. Solve groups of up to 512 slots in the same rows (#1384).
 static Tier1EmitError tier1_emit_cfg_lifetimes(const IrFunction* function, const Tier1CfgInput* input, Arena* scratch, uint32_t* starts, uint32_t* ends)
 {
+    const uint64_t saved = scratch->length;
     const uint32_t objects = function->slot_count;
     const uint32_t blocks = input->block_count;
-    const uint32_t added = blocks - function->block_count;
+    const uint32_t ir_blocks = function->block_count;
+    const uint32_t instructions = function->instruction_count;
+    const uint32_t groups = (uint32_t)(((uint64_t)objects + BUSTER_DATAFLOW_VECTOR_BITS - 1) / BUSTER_DATAFLOW_VECTOR_BITS);
     bool ok = true;
-    uint32_t* ids = objects != 0 ? ir_allocate(scratch, objects, 4, &ok) : 0;
-    Tier1EmitError error = ok ? TIER1_EMIT_OK : TIER1_EMIT_MEMORY;
-    uint32_t marked = 0;
-    for (uint32_t o = 0; error == TIER1_EMIT_OK && o < objects; o += 1)
+    uint32_t* offsets = ir_allocate(scratch, groups, sizeof(uint32_t), &ok);
+    uint32_t count = 0;
+    for (uint32_t node = 0; ok && objects != 0 && node < instructions; node += 1)
     {
-        ids[o] = BUSTER_IR_NONE;
-        starts[o] = 0;
-        ends[o] = input->position_count;
-    }
-    for (uint32_t node = 0; error == TIER1_EMIT_OK && node < function->instruction_count; node += 1)
-    {
-        if (function->op[node] == IR_LIFETIME && ids[function->a[node]] == BUSTER_IR_NONE)
+        if (function->op[node] == IR_LIFETIME)
         {
-            ids[function->a[node]] = marked++;
+            offsets[function->a[node] / BUSTER_DATAFLOW_VECTOR_BITS] += 1;
+            count += 1;
         }
     }
-    Dataflow lifetimes = { 0 };
-    if (error == TIER1_EMIT_OK && marked != 0)
+    if (ok && count != 0)
     {
-        ok = dataflow_create(scratch, blocks, marked, input->edge_count, &lifetimes);
+        Tier1LifetimeMarker* markers = arena_push_array(scratch, count, sizeof(*markers), _Alignof(Tier1LifetimeMarker));
+        Tier1LifetimeRow* rows = arena_push_array(scratch, blocks, sizeof(*rows), _Alignof(Tier1LifetimeRow));
+        uint32_t* work = arena_push_array(scratch, blocks, sizeof(*work), _Alignof(uint32_t));
+        uint32_t* stamps = ir_allocate(scratch, blocks, sizeof(*stamps), &ok);
+        ok = ok && markers != 0 && rows != 0 && work != 0;
         if (ok)
         {
-            memcpy(lifetimes.successor_offsets, input->predecessor_offsets, ((uint64_t)blocks + 1) * sizeof(uint32_t));
-            if (input->edge_count != 0)
+            memset(starts, 0xff, (uint64_t)objects * sizeof(*starts));
+            memset(ends, 0, (uint64_t)objects * sizeof(*ends));
+            for (uint32_t group = 1; group < groups; group += 1)
             {
-                memcpy(lifetimes.successors, input->predecessors, (uint64_t)input->edge_count * sizeof(uint32_t));
+                offsets[group] += offsets[group - 1];
             }
-            ok = dataflow_postorder(&lifetimes, scratch);
+            const uint32_t added = blocks - ir_blocks;
+            for (uint32_t b = 0; b < ir_blocks; b += 1)
+            {
+                const uint32_t first = function->block_offsets[b];
+                const uint32_t end = function->block_offsets[b + 1];
+                for (uint32_t node = first; node < end; node += 1)
+                {
+                    if (function->op[node] == IR_LIFETIME)
+                    {
+                        const uint32_t slot = function->a[node];
+                        const uint32_t position = input->block_starts[b + added] + 2 * (node - first);
+                        starts[slot] = function->b[node] == 0 && position < starts[slot] ? position : starts[slot];
+                        ends[slot] = position + 1 > ends[slot] ? position + 1 : ends[slot];
+                        markers[--offsets[slot / BUSTER_DATAFLOW_VECTOR_BITS]] = (Tier1LifetimeMarker){ .block = b + added, .node = node };
+                    }
+                }
+            }
+            for (uint32_t group = 0; group < groups; group += 1)
+            {
+                const uint32_t end = group + 1 < groups ? offsets[group + 1] : count;
+                if (end != offsets[group])
+                {
+                    tier1_emit_lifetime_group(function, input, markers + offsets[group], end - offsets[group], group, rows, stamps, work, starts, ends);
+                }
+            }
         }
-        error = ok ? TIER1_EMIT_OK : TIER1_EMIT_MEMORY;
     }
-    if (error == TIER1_EMIT_OK && marked != 0)
+    for (uint32_t slot = 0; ok && slot < objects; slot += 1)
     {
-        for (uint32_t b = 0; b < function->block_count; b += 1)
+        // Unmarked objects and objects with only end markers retain the whole function.
+        if (count == 0 || starts[slot] == UINT32_MAX)
         {
-            uint64_t* use = lifetimes.use + (uint64_t)(b + added) * lifetimes.row_words;
-            uint64_t* def = lifetimes.def + (uint64_t)(b + added) * lifetimes.row_words;
-            for (uint32_t node = function->block_offsets[b]; node < function->block_offsets[b + 1]; node += 1)
-            {
-                if (function->op[node] == IR_LIFETIME)
-                {
-                    const uint32_t id = ids[function->a[node]];
-                    const uint64_t bit = UINT64_C(1) << (id & 63);
-                    const bool start = function->b[node] == 0;
-                    use[id >> 6] = start ? use[id >> 6] | bit : use[id >> 6] & ~bit;
-                    def[id >> 6] = start ? def[id >> 6] & ~bit : def[id >> 6] | bit;
-                }
-            }
-        }
-        (void)dataflow_liveness(&lifetimes);
-        uint32_t* low = ir_allocate(scratch, marked, 4, &ok);
-        uint32_t* high = ir_allocate(scratch, marked, 4, &ok);
-        error = ok ? TIER1_EMIT_OK : TIER1_EMIT_MEMORY;
-        for (uint32_t id = 0; error == TIER1_EMIT_OK && id < marked; id += 1)
-        {
-            low[id] = UINT32_MAX;
-            high[id] = 0;
-        }
-        for (uint32_t cb = 0; error == TIER1_EMIT_OK && cb < blocks; cb += 1)
-        {
-            const uint64_t* before = lifetimes.out + (uint64_t)cb * lifetimes.row_words;
-            const uint64_t* after = lifetimes.in + (uint64_t)cb * lifetimes.row_words;
-            for (uint64_t word = 0; word < lifetimes.row_words; word += 1)
-            {
-                for (uint64_t bits = before[word]; bits != 0; bits &= bits - 1)
-                {
-                    const uint32_t id = (uint32_t)(word * 64 + (uint64_t)__builtin_ctzll(bits));
-                    low[id] = input->block_starts[cb] < low[id] ? input->block_starts[cb] : low[id];
-                    high[id] = input->block_starts[cb] + 1 > high[id] ? input->block_starts[cb] + 1 : high[id];
-                }
-                for (uint64_t bits = after[word]; bits != 0; bits &= bits - 1)
-                {
-                    const uint32_t id = (uint32_t)(word * 64 + (uint64_t)__builtin_ctzll(bits));
-                    high[id] = input->block_starts[cb + 1] > high[id] ? input->block_starts[cb + 1] : high[id];
-                }
-            }
-        }
-        for (uint32_t b = 0; error == TIER1_EMIT_OK && b < function->block_count; b += 1)
-        {
-            for (uint32_t node = function->block_offsets[b]; node < function->block_offsets[b + 1]; node += 1)
-            {
-                if (function->op[node] == IR_LIFETIME)
-                {
-                    const uint32_t id = ids[function->a[node]];
-                    const uint32_t position = input->block_starts[b + added] + 2 * (node - function->block_offsets[b]);
-                    low[id] = function->b[node] == 0 && position < low[id] ? position : low[id];
-                    high[id] = position + 1 > high[id] ? position + 1 : high[id];
-                }
-            }
-        }
-        for (uint32_t o = 0; error == TIER1_EMIT_OK && o < objects; o += 1)
-        {
-            const uint32_t id = ids[o];
-            if (id != BUSTER_IR_NONE && low[id] < high[id])
-            {
-                starts[o] = low[id];
-                ends[o] = high[id];
-            }
+            starts[slot] = 0;
+            ends[slot] = input->position_count;
         }
     }
-    return error;
+    arena_pop_to(scratch, saved);
+    return ok ? TIER1_EMIT_OK : TIER1_EMIT_MEMORY;
 }
 
 // The frame: each slot over its values' intervals' hull (a phi's widened to its predecessors' ends), the general

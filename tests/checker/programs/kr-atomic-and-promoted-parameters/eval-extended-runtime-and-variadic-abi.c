@@ -1,0 +1,3 @@
+static int inspect(int n,...){__builtin_va_list ap;__builtin_va_start(ap,n);double f=__builtin_va_arg(ap,double);long double d=__builtin_va_arg(ap,long double);__builtin_va_end(ap);return (int)(f*8)+(int)(d-0x1p53L);}
+#pragma clang fp eval_method(extended)
+static double fixed(double x){return x;}static long double extra(double x){return (x+1.0)-x;}int tested(int n){volatile float f=(float)n/4.0f;volatile double d=0x1p53;long double a=extra(d);long double b=fixed(d+1.0)-d;return (int)a*4096+(int)b*256+inspect(2,f,d)+n;}

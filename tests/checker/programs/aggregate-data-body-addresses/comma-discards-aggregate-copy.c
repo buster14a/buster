@@ -1,0 +1,1 @@
+union A{unsigned long i;long double f;void*p;};int tested(int n){union A arg,list[4];int type[4]={0};for(int i=0;i<4;i++)list[i].f=n*0.5L+i;int k=n&3;arg.f=0;if(n>=0)type[k]=n,arg=list[k];else (k,5);return (int)(arg.f*4)+type[k]*100;}

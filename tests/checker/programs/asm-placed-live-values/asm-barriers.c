@@ -1,0 +1,1 @@
+int tested(int n){int x=n*3;__asm__ volatile("" : : "r"(x) : "memory");__asm__ volatile("" ::: "memory");int y=n;__asm__("" : "+r"(y));__asm__ volatile("" : : "m"(x), "r"(&y) : "memory");__asm__ volatile("# %0 %1" : : "r"(x), "m"(y));int t;__asm__("" : "=r"(t) : "0"(n+5));return x+y*2+t*3;}

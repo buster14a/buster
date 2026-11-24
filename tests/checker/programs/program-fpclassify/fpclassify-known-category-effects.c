@@ -1,0 +1,1 @@
+int seen;int mark(int n){seen+=1<<(3*n);return n;}int tested(int n){seen=0;int r=__builtin_fpclassify(mark(1),mark(2),mark(3),mark(4),mark(5),(seen++,1.0));return seen*10+r+n;}

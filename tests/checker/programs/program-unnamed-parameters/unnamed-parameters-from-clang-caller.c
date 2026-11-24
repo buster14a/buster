@@ -1,0 +1,1 @@
+int external_unnamed_apply(long(*)(int,double,int,double,long),int);long callback(int,double,int i,double d,long tail){return i*3+(long)(d*2)+tail;}int tested(int n){return external_unnamed_apply(callback,n&31);}

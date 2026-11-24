@@ -1,0 +1,15 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+asm-naked-redeclared	asm-naked-redeclared.c	-	asm-naked-redeclared
+# Templates that name symbols: the harness's function and data, the unit's static function and data, and a .L label
+# one statement's template defines and another's takes the address of.
+asm-symbol-references	asm-symbol-references.c	-	asm-symbol-references
+# Numeric labels and `.` as data (#1845), and a loop's branch to a numeric label: the template assembled whole, as
+# a template of directives is, its labels' distances as clang's.
+asm-numeric-data	asm-numeric-data.c	-	asm-numeric-data
+# A label inside a helper's template at its exact record: another statement's template calls the snippet it marks,
+# which the first template jumps over.
+asm-helper-labels	asm-helper-labels.c	-	asm-helper-labels
+# A naked function's references beside a body's call of a runtime function (__divti3), in a unit of so few symbols
+# that its names' indices fall among the runtime's provisional symbols, which aren't theirs.
+asm-naked-runtime	asm-naked-runtime.c	-	asm-naked-runtime
