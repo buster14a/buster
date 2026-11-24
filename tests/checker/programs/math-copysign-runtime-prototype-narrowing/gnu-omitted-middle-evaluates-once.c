@@ -1,0 +1,1 @@
+int visits;int next(int n){visits++;return n;}int tested(int n){visits=0;int x=n;double a=x++?:2.5;int b=next(n)?:next(7);int c=(visits++,3)?:next(9);return (int)(a*4)+b+c+x+visits*100;}

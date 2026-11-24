@@ -1,0 +1,4 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+musttail-shapes	musttail-shapes.c	-	musttail-shapes
+musttail-external-callees	musttail-external-callees.c	-	musttail-external-callees

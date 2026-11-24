@@ -484,6 +484,8 @@ struct CheckBuiltinMiscEffect
     bool writes_memory;
     bool allocates_stack;
     bool alignment_offset_known;
+    uint8_t expect_bias;
+    uint64_t expected_value;
     // cpu_supports's word and bit, or cpu_is's field and value (CheckBuiltinMiscResult.cpu_test).
     uint64_t cpu_test;
 };
@@ -2744,6 +2746,8 @@ static void check_graph_special_action(TypeTable* types, const CheckGraph* graph
             .writes_memory = checked.writes_memory,
             .allocates_stack = checked.allocates_stack,
             .alignment_offset_known = checked.alignment_offset_known,
+            .expect_bias = checked.expect_bias,
+            .expected_value = checked.expected_value,
             .cpu_test = checked.cpu_test,
         };
     }

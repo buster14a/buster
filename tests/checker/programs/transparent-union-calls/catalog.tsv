@@ -1,0 +1,13 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+transparent-union-calls	transparent-union-calls.c	-	transparent-union-calls
+transparent-union-variadic	transparent-union-variadic.c	-	transparent-union-variadic
+transparent-union-stack	transparent-union-stack.c	-	transparent-union-stack
+# glibc's socket addresses' shape (__SOCKADDR_ARG with _GNU_SOURCE): restrict pointers to structs of one layout and a
+# pointer to const void, which a void pointer selects the first of, called directly, through a pointer of the
+# union's function type and through one of the first member's, which passes as it does.
+transparent-union-pointers	transparent-union-pointers.c	-	transparent-union-pointers
+# A union made transparent after a function definition, whose classification clang's code keeps by the function's
+# type from where it first met it: taken where the union's first member passes as the union does (pointers), and
+# refused by name where it doesn't (a struct of floats beside one of ints).
+transparent-union-made-after-a-definition	transparent-union-made-after-a-definition.c	-	transparent-union-made-after-a-definition

@@ -143,6 +143,15 @@ requirements. [Command index](README.md).
   mapped the executable's code and read-only data and asks the kernel for huge pages of the 2 MB ranges it used
   (#2873, `lane_exit_look`; `BUSTER_EXECUTABLE_HUGE_PAGES=0` turns both off): the
   [build guide](build.md#the-executable-in-huge-pages) has what that takes and saves.
+  `BUSTER_ARENA_POOL=DIRECTORY` has the command's arena, its output's and its scratch keep their pages in a file of
+  the directory from one compile to the next (#2850, warm arenas: `lane.c`'s `arena_reserve_warm`), so that a compile
+  finds them resident where the kernel would clear fresh ones: 7.3 ms of sqlite3.c's 113 on the 9700X, with the
+  directory on a tmpfs mounted `huge=always`. Off unless the variable names a directory; a file that can't be claimed (another process
+  holds each, the directory is on no tmpfs or on one that gives base pages, the file is another user's or open to
+  others) leaves the command as without it, and so does a tmpfs that runs out of room, from the commit it refuses on.
+  The object and the diagnostics are the same either way. [Arena memory](../arena-memory.md#warm-arenas-2850) has the
+  claim, the slots and what the files hold, and the tests' switches (`BUSTER_TEST_ARENA_FILL`,
+  `BUSTER_TEST_ARENA_BASE_PAGES`).
   The checker reads
   a unit in source order; `--deferred-bodies` reads its function bodies apart on
   those lanes too (#113's deferred reader, `check_input_deferred_compile`), where
@@ -534,14 +543,27 @@ was.
 The emission keeps each function's records for it (`CheckProgramLanes.assembly`,
 `CheckProgramCode.assembly_code`: copies of the records and branch columns in
 the emission's output arena, after branch sizing) and runs the bodies in one
-window (`--emit-window` is 0 under `-S`), whose records it keeps whole; nothing
-else changes, and a command without `-S` copies nothing.
+window (`--emit-window` is 0 under `-S`). Only assembly output requests these copies.
+
+With `-g`, the assembly contains the same DWARF 5 section contributions as
+`-c -g`, including the line program, scopes, address table, ranges and
+variable location lists. Section offsets use symbolic `.long` directives.
+Function and variable addresses use `.quad` directives referring to local
+labels on their definitions. These references survive linking several units
+and linking code or data in named sections.
+
+For inline assembly with integer constant inputs, `-S` preserves a single
+`.ascii "…"` directive after operand substitution, including the literal text
+that kernel build scripts extract. It retains the directive in the helper
+where `-c` places its bytes. A single raw `->…` line is also supported.
+The compiler emits it at the statement's instruction boundary so a script
+can read it directly from the assembly listing. Both forms accept basic asm
+or extended asm with no outputs, clobbers or goto labels.
 
 What it doesn't print yet it refuses by name, before the source is read where
 the options say so, and otherwise naming the source and the symbol:
 
-- debug information (`-g`) and inline assembly (asm statements, naked
-  functions, file-scope assembly): the design's stages 3 and 4;
+- other inline assembly statements, naked functions and file-scope assembly;
 - thread-local storage, section groups, multiversioned functions' resolvers,
   and the other refusals of the sink below;
 - assembly and linker inputs beside the C sources.
@@ -623,9 +645,10 @@ The form contract, which its tests hold GNU as to:
   its visibility and the linker allocates its storage. The writer prints a
   patchable function's exact NOP sled around its function label, with a
   pointer to the sled's start in a writable linked-order table section.
-  GNU as assembles those sections using `"awo"`, an associated label and
-  `unique` to keep same-name entries distinct. Buster's assembler does not
-  read this section syntax yet.
+  Buster's assembler and GNU as read those sections using `"awo"`, an
+  associated label and `unique` to keep same-name entries distinct. The writer
+  quotes section names with dollar signs. Buster's assembler also accepts a
+  table whose name matches an ordinary symbol, a spelling GNU as 2.44 refuses.
 
 What the sink doesn't print yet it refuses with the reason naming it
 (`ASSEMBLY_UNSUPPORTED`): thread-local storage, section groups, other
@@ -664,9 +687,13 @@ PC-relative reference to a local symbol in the same section, such as
 `call helper@PLT` to a static function. The comparator applies those
 relocations in both objects before checking the bytes. GNU as also lists an undefined
 `_GLOBAL_OFFSET_TABLE_` in an object with a GOT reference, which the comparison
-skips. The same comparison covers patchable entries at both tiers, including
-several table sections with the same name and entries associated with
-different code sections. The reassembled program must link and run.
+skips. The patchable-entry fixture compares Buster's reassembled objects at
+both tiers and GNU as's with `--cross-check`. It includes several table sections
+with the same name and entries associated with different code sections. Each
+reassembled program must link and run. A second fixture compares sections
+named after functions with Buster's direct object emission, in both orders of
+the table and the function definition. It also checks relocations to undefined
+function and data symbols whose names match tables.
 Then the form sweep: every form the matcher admits for a target of every
 feature but the branches (whose targets are labels, the program fixture's), two
 random records each, printed and assembled each in a 16-byte slot of its own,

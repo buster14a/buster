@@ -1,0 +1,27 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+assignments-truncate-constants-by-their-bit-fields-widths-and-si	assignments-truncate-constants-by-their-bit-fields-widths-and-si.c	9	0	0	-	-	assignments truncate constants by their bit-fields' widths and signedness
+a-negated-or-complemented-constant-keeps-its-significant-bits	a-negated-or-complemented-constant-keeps-its-significant-bits.c	5	0	0	-	-	a negated or complemented constant keeps its significant bits
+a-computed-negative-constant-truncates-in-an-unsigned-bit-field	a-computed-negative-constant-truncates-in-an-unsigned-bit-field.c	4	0	0	-	-	a computed negative constant truncates in an unsigned bit-field, and fitting flags stay quiet
+# _BitInt constants past 128 bits (#1447, c_check_wide.c): their values change in narrower types, signed, unsigned
+# and wider than 128 bits, in decimal; a sign flip into a signed target is reported at once, as clang's.
+constants-past-128-bits-change-value-in-narrower-types	constants-past-128-bits-change-value-in-narrower-types.c	11	0	0	-	-	constants past 128 bits change value in narrower types
+# A declarator after a specifier's parentheses is evaluated (#1447): `_BitInt(100) n = e;` (and `typeof(int) y = e;`) keeps
+# its conversion's warnings, which an operand of typeof's own drops.
+a-declarator-after-typeof-s-or-bitint-s-parentheses-keeps-its-wa	a-declarator-after-typeof-s-or-bitint-s-parentheses-keeps-its-wa.c	2	0	0	-	-	a declarator after typeof's or _BitInt's parentheses keeps its warnings
+an-assignment-s-truncation-leaves-out-its-constant-conversion-an	an-assignment-s-truncation-leaves-out-its-constant-conversion-an.c	13	0	0	-	-	an assignment's truncation leaves out its constant conversion and follows clang's walk
+typedefs-enumerations-members-through-pointers-and-wide-bit-fiel	typedefs-enumerations-members-through-pointers-and-wide-bit-fiel.c	10	0	0	-	-	typedefs, enumerations, members through pointers and wide bit-fields
+initializers-truncate-in-member-order-before-their-conversions	initializers-truncate-in-member-order-before-their-conversions.c	18	0	0	-	-	initializers truncate in member order before their conversions
+an-initializer-s-truncation-stands-at-its-value-s-grouping-paren	an-initializer-s-truncation-stands-at-its-value-s-grouping-paren.c	12	0	0	-	-	an initializer's truncation stands at its value's grouping parenthesis
+initializers-keep-their-ordinary-constant-conversions	initializers-keep-their-ordinary-constant-conversions.c	14	0	0	-	-	initializers keep their ordinary constant conversions
+unions-nested-records-compound-literals-unreachable-and-unevalua	unions-nested-records-compound-literals-unreachable-and-unevalua.c	9	0	0	-	-	unions, nested records, compound literals, unreachable and unevaluated initializers
+bit-field-truncation-s-default-groups	bitfield-groups-source.c	3	0	0	-	-	bit-field truncation's default groups
+wno-conversion-silences-constant-and-bit-field-truncation-warnin	bitfield-groups-source.c	0	0	0	-	-Wno-conversion	-Wno-conversion silences constant and bit-field truncation warnings
+wno-non-gcc-silences-constant-and-bit-field-truncation-warnings	bitfield-groups-source.c	0	0	0	-	-Wno-non-gcc	-Wno-non-gcc silences constant and bit-field truncation warnings
+wno-bitfield-constant-conversion-keeps-the-constant-conversion	bitfield-groups-source.c	1	0	0	-	-Wno-bitfield-constant-conversion	-Wno-bitfield-constant-conversion keeps the constant conversion
+wno-single-bit-bitfield-constant-conversion-keeps-the-others	bitfield-groups-source.c	2	0	0	-	-Wno-single-bit-bitfield-constant-conversion	-Wno-single-bit-bitfield-constant-conversion keeps the others
+werror-bitfield-constant-conversion-promotes-both-bit-field-warn	bitfield-groups-source.c	1	2	0	-	-Werror=bitfield-constant-conversion	-Werror=bitfield-constant-conversion promotes both bit-field warnings
+werror-constant-conversion-promotes-all-three	bitfield-groups-source.c	0	3	0	-	-Werror=constant-conversion	-Werror=constant-conversion promotes all three
+wconstant-conversion-enables-all-three-after-wno-everything	bitfield-groups-source.c	3	0	0	-	-Wno-everything -Wconstant-conversion	-Wconstant-conversion enables all three after -Wno-everything
+wsingle-bit-bitfield-constant-conversion-re-enables-its-own-afte	bitfield-groups-source.c	1	0	0	-	-Wno-constant-conversion -Wsingle-bit-bitfield-constant-conversion	-Wsingle-bit-bitfield-constant-conversion re-enables its own after -Wno-constant-conversion
+source-policy-reaches-bit-field-truncation	source-policy-reaches-bit-field-truncation.c	1	1	0	-	-	source policy reaches bit-field truncation

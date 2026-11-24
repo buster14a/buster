@@ -234,6 +234,7 @@ struct CheckProgramAsm
     // The statement it plans (CheckInput.asm_statements): its index, but in a target_clones copy's plan (#2247).
     uint32_t statement;
     CheckAsmPlace* places;
+    AssemblyInline* presentation;
     const char* reason;
     String8* names;
     CheckProgramAsmLabel* labels;
@@ -2038,13 +2039,15 @@ static void check_asm_unit_number(Arena* output, int64_t value, bool* valid)
 }
 
 // Records `records[0, count)` as the bytes they encode, a `.byte` line of them each (check_asm_unit_helper).
-static void check_asm_unit_records(Arena* output, const X86Instruction* records, uint32_t count, bool* valid)
+static uint32_t check_asm_unit_records(Arena* output, const X86Instruction* records, uint32_t count, bool* valid)
 {
+    uint32_t size = 0;
     for (uint32_t r = 0; *valid && r < count; r += 1)
     {
         uint8_t bytes[BUSTER_X86_ENCODER_CAPACITY(1)];
         const int64_t length = x86_encode(records + r, 1, bytes, sizeof(bytes), 0, 0);
         *valid = length > 0 && length <= 15;
+        size += *valid ? (uint32_t)length : 0;
         check_asm_unit_text(output, ".byte ", valid);
         for (int64_t b = 0; *valid && b < length; b += 1)
         {
@@ -2052,6 +2055,7 @@ static void check_asm_unit_records(Arena* output, const X86Instruction* records,
             check_asm_unit_text(output, b + 1 < length ? "," : "\n", valid);
         }
     }
+    return size;
 }
 
 // `.Lbuster_goto_S_` and its label's number, or `tail` for the exits' common tail.
@@ -2079,7 +2083,7 @@ static void check_asm_unit_goto(Arena* output, uint32_t statement, uint32_t labe
 // MMX, opmask, pair and x87 outputs' stores, the x87 pops, the exit into eax, and the epilogue. Its code is its default
 // text section's atom, at AsmResult.entry_atom. A failure keeps nothing.
 static AsmResult check_asm_unit_helper(const CheckAsmPlace* places, uint32_t count, const uint8_t stores[2], bool block, uint32_t saved, uint32_t pops, uint32_t statement,
-                                       uint32_t labels, uint8_t exit, String8 text, const X86MatchIndex* index, Arena* output, Arena* scratch)
+                                       uint32_t labels, uint8_t exit, String8 text, const X86MatchIndex* index, AssemblyInline* presentation, Arena* output, Arena* scratch)
 {
     const uint64_t mark = output->length;
     const uint64_t scratch_mark = scratch->length;
@@ -2088,7 +2092,11 @@ static AsmResult check_asm_unit_helper(const CheckAsmPlace* places, uint32_t cou
     const Tier0Code code = check_asm_helper_code(places, count, &empty, saved, stores, block, pops, 0, 0, labels, exit, &first, scratch);
     bool valid = code.error == TIER0_OK;
     check_asm_unit_text(output, ".att_syntax prefix\n", &valid);
-    check_asm_unit_records(output, code.records, valid ? first : 0, &valid);
+    const uint32_t prefix = check_asm_unit_records(output, code.records, valid ? first : 0, &valid);
+    if (presentation != NULL)
+    {
+        presentation->offset = prefix;
+    }
     check_asm_unit_bytes(output, text.pointer, text.length, &valid);
     // The template may have left another syntax or another section behind; the helper's stores and epilogue are its own
     // default text section's.
@@ -2553,6 +2561,50 @@ static bool check_asm_row(const CheckProgram* program, uint32_t s, const CheckAs
         *row = candidate;
     }
     return placed;
+}
+
+// A constant extraction statement can contain an .ascii string, or a raw -> line which an
+// extraction script consumes before assembly. Only admit a complete statement: a following
+// instruction, label or section switch needs its own placement and sizing.
+static bool check_asm_marker(String8 text, bool* raw)
+{
+    uint64_t at = 0;
+    while (at < text.length && strchr(" \t\r\n", text.pointer[at]) != NULL && text.pointer[at] != 0)
+    {
+        at += 1;
+    }
+    *raw = text.length - at >= 2 && memcmp(text.pointer + at, "->", 2) == 0;
+    bool match = *raw;
+    if (*raw)
+    {
+        while (at < text.length && text.pointer[at] != '\n' && text.pointer[at] != '\r' && text.pointer[at] != 0)
+        {
+            at += 1;
+        }
+    }
+    else if (text.length - at > 6 && memcmp(text.pointer + at, ".ascii", 6) == 0)
+    {
+        at += 6;
+        while (at < text.length && (text.pointer[at] == ' ' || text.pointer[at] == '\t'))
+        {
+            at += 1;
+        }
+        if (at < text.length && text.pointer[at] == '"')
+        {
+            at += 1;
+            while (at < text.length && text.pointer[at] != '"' && text.pointer[at] != '\n' && text.pointer[at] != 0)
+            {
+                at += text.pointer[at] == '\\' && at + 1 < text.length ? 2 : 1;
+            }
+            match = at < text.length && text.pointer[at] == '"';
+            at += match;
+        }
+    }
+    while (at < text.length && strchr(" \t\r\n", text.pointer[at]) != NULL && text.pointer[at] != 0)
+    {
+        at += 1;
+    }
+    return match && at == text.length;
 }
 
 static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, uint32_t p, const CheckAsmCheckedOperand* operands, const X86MatchIndex* index,
@@ -3145,12 +3197,33 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
     {
         reason = check_asm_substitute(statement, places, program->identifiers, p, scratch, &text, &valid);
     }
+    bool constant_marker = program->assembly_text && valid && reason == NULL && statement->output_count == 0 && statement->clobber_count == 0 && !statement->is_goto;
+    for (uint32_t k = 0; constant_marker && k < count; k += 1)
+    {
+        constant_marker = places[k].kind == BUSTER_CHECK_ASM_CONSTANT;
+    }
+    bool raw_marker = false;
+    if (constant_marker && check_asm_marker(text, &raw_marker))
+    {
+        plan->presentation = BUSTER_ARENA_PUSH_ARRAY(output, AssemblyInline, 1);
+        char* copy = arena_push(output, text.length, 1);
+        valid = plan->presentation != NULL && copy != NULL;
+        if (valid)
+        {
+            memcpy(copy, text.pointer, text.length);
+            *plan->presentation = (AssemblyInline){ .text = { .pointer = copy, .length = text.length }, .statement = p };
+        }
+    }
+    else
+    {
+        raw_marker = false;
+    }
     AsmCode code = { 0 };
     AsmResult unit = { 0 };
     bool unit_assembled = false;
     bool returns = false;
     const uint64_t code_mark = output->length;
-    if (valid && reason == NULL)
+    if (valid && reason == NULL && !raw_marker)
     {
         code = asm_assemble_code(text, index, (AsmOptions){ .integrated = true }, output, scratch);
         if (code.error != NULL && code.directive)
@@ -3213,9 +3286,13 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
                 // The template's own code is a helper's: discard its standalone assembly and assemble the whole helper, its
                 // frame and operand block around the template. An asm goto's labels are its jumps' targets alone.
                 const uint32_t labels = statement->is_goto ? statement->label_count : 0;
+                if (plan->presentation != NULL)
+                {
+                    plan->presentation->size = body.link.atoms.size[body.entry_atom];
+                }
                 arena_pop_to(output, body_mark);
                 unit = reason == NULL ? check_asm_unit_helper(places, count, stores, block != 0, taken & BUSTER_CHECK_ASM_CALLEE_SAVED, pops, p, labels, exit, text, index,
-                                                              output, scratch) :
+                                                              plan->presentation, output, scratch) :
                                         (AsmResult){ .error = reason };
                 unit_assembled = unit.error == NULL;
                 reason = unit.error != NULL && strstr(unit.error, "arena exhausted") == NULL ? unit.error : NULL;
@@ -3293,7 +3370,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         code = (AsmCode){ 0 };
         goto_count = 0;
         unit = check_asm_unit_helper(places, count, stores, block != 0, taken & BUSTER_CHECK_ASM_CALLEE_SAVED, pops, p, statement->label_count, exit, text, index,
-                                     output, scratch);
+                                     NULL, output, scratch);
         unit_assembled = unit.error == NULL;
         reason = unit.error != NULL && strstr(unit.error, "arena exhausted") == NULL ? unit.error : NULL;
         valid = unit.error == NULL || reason != NULL;
@@ -3358,7 +3435,22 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         place->kind = place->kind != BUSTER_CHECK_ASM_HELD && !barrier ? place->kind : place->written ? BUSTER_CHECK_ASM_MEMORY : BUSTER_CHECK_ASM_VECTOR;
         place->packed = place->packed && !barrier;
     }
-    if (valid && reason == NULL && unit_assembled)
+    if (valid && reason == NULL && raw_marker)
+    {
+        // A zero-width asm body with one presentation anchor. Tier 0 carries the label's
+        // record through branch sizing. The emitter distinguishes it from ordinary asm names.
+        plan->inlined = true;
+        plan->inline_passed = true;
+        plan->inline_label_records = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, 1);
+        plan->inline_label_names = BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, 1);
+        valid = plan->inline_label_records != NULL && plan->inline_label_names != NULL;
+        if (valid)
+        {
+            plan->inline_label_records[0] = 0;
+            // check_program_asm_names assigns the anchor its index after ordinary names.
+        }
+    }
+    else if (valid && reason == NULL && unit_assembled)
     {
         const bool unit_code = unit.entry_code;
         helper->code = (Tier0Code){ .error = TIER0_OK };
@@ -3563,6 +3655,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
         // A refusal keeps nothing but itself.
         arena_pop_to(output, output_mark);
         plan->places = 0;
+        plan->presentation = NULL;
         plan->names = 0;
         plan->labels = 0;
         plan->unit = (AsmResult){ 0 };
@@ -4051,7 +4144,7 @@ static bool check_program_asm_names(CheckProgramAsms* result, const CheckProgram
     const uint64_t scratch_mark = scratch->length;
     uint32_t* table = total != 0 && total < (UINT32_C(1) << 30) ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, slots) : 0;
     CheckAsmName* names = table != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, CheckAsmName, total) : 0;
-    const bool valid = total == 0 || (table != 0 && names != 0);
+    bool valid = total == 0 || (table != 0 && names != 0);
     uint32_t count = 0;
     if (valid && total != 0)
     {
@@ -4168,6 +4261,12 @@ static bool check_program_asm_names(CheckProgramAsms* result, const CheckProgram
     for (uint32_t s = 0; valid && s < statements; s += 1)
     {
         CheckProgramAsm* plan = result->plans + s;
+        if (plan->inlined && plan->presentation != NULL)
+        {
+            // Real label indices occupy [0, count). Anchor indices follow them.
+            valid = (uint64_t)count + plan->presentation->statement <= UINT32_MAX;
+            plan->inline_label_names[0] = count + plan->presentation->statement;
+        }
         uint32_t kept = 0;
         for (uint32_t k = 0; plan->planned && plan->reason == NULL && plan->inlined && k < plan->label_count; k += 1)
         {

@@ -1,0 +1,1 @@
+int missing(void); int tested(int n) { int x=n; __typeof__((int){missing() + ++x}) a=3; return x+a; }

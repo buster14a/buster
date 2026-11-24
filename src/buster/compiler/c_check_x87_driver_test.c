@@ -7,6 +7,7 @@
 
 static const char check_test_x87_source[] =
     "extern volatile int marker; long double x87_pending(void) { return 0.5L + (marker = 1, 2.0L); }\n"
+    "void x87_raw(long double *out, const long double *p) { *out = *p; }\n"
     "void x87_add(long double *out, const long double *p) { *out = p[0] + p[1]; }\n"
     "void x87_chain(long double *out, const long double *p) { *out = p[0] * p[1] + p[2]; }\n"
     "void x87_order(long double *out, const long double *p) { *out = (p[0] - p[1]) / (p[2] - p[3]); }\n"
@@ -56,6 +57,23 @@ static const char check_test_x87_harness[] =
     "static void reference(unsigned kind, long double *out, const long double *p) {\n"
     "if(kind==0) *out=p[0]+p[1]; else if(kind==1) *out=p[0]*p[1]+p[2];\n"
     "else if(kind==2) *out=(p[0]-p[1])/(p[2]-p[3]); else *out=p[0]*0.5L+p[1]; }\n"
+    "void x87_raw(long double *,const long double *);\n"
+    "static unsigned raw_transfers(void) {\n"
+    "    static const unsigned long long significands[]={0,1,0x7fffffffffffffffULL,1ULL<<63,(1ULL<<63)+1,0xc000000000000001ULL,~0ULL};\n"
+    "    static const unsigned short exponents[]={0,1,0x3fff,0x7ffe,0x7fff};\n"
+    "    unsigned errors=0;\n"
+    "    for(unsigned i=0;i<7;++i) for(unsigned j=0;j<5;++j) for(unsigned sign=0;sign<2;++sign) {\n"
+    "        long double input,home,expected,got;\n"
+    "        unsigned short exponent=exponents[j]|(sign<<15), actual_status, reference_status;\n"
+    "        memcpy(&input,&significands[i],8); memcpy((unsigned char*)&input+8,&exponent,2);\n"
+    "        __asm__ volatile(\"fnclex; fldt %3; fstpt %0; fldt %0; fstpt %1; fnstsw %2\"\n"
+    "                         : \"=m\"(home),\"=m\"(expected),\"=m\"(reference_status) : \"m\"(input) : \"st\",\"memory\");\n"
+    "        __asm__ volatile(\"fnclex\"); x87_raw(&got,&input);\n"
+    "        __asm__ volatile(\"fnstsw %0\" : \"=m\"(actual_status));\n"
+    "        errors += memcmp(&got,&expected,10)!=0 || ((actual_status^reference_status)&0x3a7f)!=0;\n"
+    "    }\n"
+    "    return errors;\n"
+    "}\n"
     "int main(void) { alarm(10); unsigned errors=0; unsigned short saved,after;\n"
     "__asm__ volatile(\"fnstcw %0\":\"=m\"(saved));\n"
     "static const unsigned short precision[]={0,0x200,0x300};\n"
@@ -65,6 +83,7 @@ static const char check_test_x87_harness[] =
     "for(unsigned p=0;p<3;++p) for(unsigned r=0;r<4;++r) {\n"
     "unsigned short control=(saved&~0xf00u)|0x3fu|precision[p]|(r<<10);\n"
     "__asm__ volatile(\"fnclex; fldcw %0\"::\"m\"(control));\n"
+    "errors+=raw_transfers();\n"
     "for(unsigned i=0;i<4;++i) for(unsigned k=0;k<4;++k) {\n"
     "long double actual,expected; unsigned short actual_flags,expected_flags;\n"
     "__asm__ volatile(\"fnclex\"); functions[k](&actual,inputs[i]);\n"
@@ -151,7 +170,7 @@ static void check_test_driver_x87(CheckTest* test, const char* clang, const char
             }
             free(text);
         }
-        if (status == 0 && tier1)
+        if (status == 0)
         {
             // At each normal-range or precision boundary, decode the load width at the consumer.
             // A literal that would be subnormal at the narrower width needs its wider representation.

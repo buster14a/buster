@@ -1,0 +1,11 @@
+buster-fixtures v1 checker-sources
+0001	0001.c	gnu23	stdc library: result types and folds
+0002	0002.c	gnu23	stdc library: a block's declaration and a const parameter
+0003	0003.c	rejected,gnu23	stdc library: a pointer's argument
+0004	0004.c	rejected,gnu23	stdc library: a struct's argument
+0005	0005.c	rejected,gnu23	stdc library: two arguments
+0006	0006.c	rejected,gnu23	stdc library: another prototype's declaration is no constant
+0007	0007.c	gnu23	stdc library: another prototype's declaration is called
+0008	0008.c	rejected,gnu23	stdc library: a static function is no constant
+0009	0009.c	rejected	stdc library: C17's declaration is no constant
+0010	0010.c	-	stdc library: C17's declaration is called

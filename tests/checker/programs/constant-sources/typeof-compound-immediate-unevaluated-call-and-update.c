@@ -1,0 +1,1 @@
+int tested(int n) { int x=n; int y=__builtin_types_compatible_p(__typeof__((int){++x}), int);return x*100 + y*10 + (int)sizeof(__typeof__((int){x+=5})); }

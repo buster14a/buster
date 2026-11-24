@@ -1,0 +1,1 @@
+int f(int x,int y){if(y?2:3)return 1;if(y?2:0)return 2;if(y?0:1)return 3;if(y?-1:3)return 4;if(y?(2):3)return 5;if(y?2u:3u)return 6;if(y?2:3u)return 7;if(y?:3)return 8;if(y?1:3)return 9;return !(y?6:7);}

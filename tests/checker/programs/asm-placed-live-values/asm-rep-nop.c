@@ -1,0 +1,1 @@
+int tested(int n){__asm__ volatile("rep nop\n\trep; nop" : : : "memory");return n+1;}

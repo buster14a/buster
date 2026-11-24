@@ -1661,7 +1661,7 @@ static void tier0_test_x87_transfer_input(Tier0TestX87Program* program, uint32_t
 static void tier0_test_x87_transfers(Tier0TestTally* tally, const Tier0TestX87Abi* abi, Tier0TestX87Shared* shared)
 {
     static const char* const names[] = { "direct sum", "ordered chain", "duplicate", "kept local store", "kept pointer store", "raw copy", "fence" };
-    static const uint32_t stores[] = { 3, 5, 5, 5, 6, 2, 5 };
+    static const uint32_t stores[] = { 1, 1, 2, 3, 4, 1, 2 };
     static const uint32_t precision[] = { 0, 2, 3 };
     Arena arena = arena_reserve(1ull << 24);
     uint8_t* image = calloc(2, 4 * BUSTER_TIER0_TEST_PAGE);

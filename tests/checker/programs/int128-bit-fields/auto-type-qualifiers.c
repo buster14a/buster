@@ -1,0 +1,1 @@
+int tested(int n){int v=n;_Atomic __auto_type a=v;a+=2;a*=3;__auto_type restrict p=&v;*p+=a;const _Atomic __auto_type b=n*1.25;__auto_type*restrict q=&v;volatile _Atomic __auto_type c=n,d=n+1;c+=d;return a+*p+*q+(int)(b*4)+c+(int)sizeof(_Atomic(long)[2]);}

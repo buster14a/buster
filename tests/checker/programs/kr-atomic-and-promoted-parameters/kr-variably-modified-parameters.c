@@ -1,0 +1,1 @@
+int sum(n,m,a)int n,m;int a[n][m];{int s=0;for(int i=0;i<n;i++)for(int j=0;j<m;j++)s+=a[i][j];return s+(int)sizeof(a[0]);}int last(a,n)int n;int a[n];{return a[n-1];}int fp(n,p)int n;int (*p)[n+1];{return (int)sizeof(*p)+(*p)[n];}int tested(int n){int a[2][3]={{1,2,3},{4,5,n}};int b[4]={1,2,3,n};return sum(2,3,a)*1000+last(b,4)*100+fp(3,&b);}

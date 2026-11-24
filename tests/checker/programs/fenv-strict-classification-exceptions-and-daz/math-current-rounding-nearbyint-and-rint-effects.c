@@ -1,0 +1,2 @@
+#pragma STDC FENV_ACCESS ON
+int change_rounding(int);int clear_fp(void);int fp_state(void);int tested(int n){change_rounding(n);double d=(double)n+0.625;float f=(float)n-0.375f;clear_fp();double a=__builtin_nearbyint(d);int ea=fp_state();clear_fp();double b=__builtin_rint(d);int eb=fp_state();clear_fp();float c=__builtin_nearbyintf(f);int ec=fp_state();clear_fp();float e=__builtin_rintf(f);int ed=fp_state();change_rounding(0);return (int)a+(int)b*3+(int)c*7+(int)e*11+ea*1000+eb*100+ec*10000+ed*100000;}

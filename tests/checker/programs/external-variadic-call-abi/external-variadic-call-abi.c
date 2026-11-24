@@ -1,0 +1,1 @@
+int snprintf(char*,unsigned long,const char*,...);char text[64];int tested(int n){int length=snprintf(text,64,"%d %.1f",n,(float)n+0.5f);return length*100+text[0];}

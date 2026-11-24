@@ -20,6 +20,16 @@
 // oracle, on NaNs (a payload's too), signed zeros, infinities and both conditions.
 
 static const char check_test_tier1_if_convert_header[] =
+    "long if_rare_code(long a, long b);\n"
+    "long if_variable_compare(long a, long b);\n"
+    "long if_likely(long a, long b);\n"
+    "long if_unlikely(long a, long b);\n"
+    "long if_probability(long a, long b);\n"
+    "long if_rare_bool(long a, long b);\n"
+    "long if_balanced(long a, long b);\n"
+    "long if_rare_integer(long a, long b);\n"
+    "long if_dynamic(long a, long b, volatile long* expected);\n"
+    "long if_mixed_hints(long a, long b, long z);\n"
     "long if_max(long a, long b);\n"
     "unsigned long if_umax(unsigned long a, unsigned long b);\n"
     "long if_clamp(long x, long lo, long hi);\n"
@@ -42,29 +52,6 @@ static const char check_test_tier1_if_convert_header[] =
     "int if_runmax(const int* a, int n);\n"
     "unsigned long if_reload_call(const unsigned long* p);\n";
 
-static const char check_test_tier1_if_convert_source[] =
-    "#include \"tier1-if-convert.h\"\n"
-    "long if_max(long a, long b) { return a > b ? a : b; }\n"
-    "unsigned long if_umax(unsigned long a, unsigned long b) { return a > b ? a : b; }\n"
-    "long if_clamp(long x, long lo, long hi) { long y = x < lo ? lo : x; return y > hi ? hi : y; }\n"
-    "unsigned long if_add(unsigned long sum, unsigned long x, int take) { if (take) sum += x; return sum; }\n"
-    "unsigned long if_both(unsigned long a, unsigned long b, int take) { return take ? a + b : a - b; }\n"
-    "int if_bool(int a, int b) { return (a < 7 && b > 9) || (a == 11 && b == 13); }\n"
-    "unsigned long if_sum(const unsigned long* p, unsigned n, unsigned long mask) { unsigned long sum = 0; for (unsigned i = 0; i < n; i += 1) { unsigned long x = p[i]; if (x & mask) sum += x; } return sum; }\n"
-    "unsigned long if_load(int take, const unsigned long* p) { return take ? *p : 9; }\n"
-    "unsigned long if_div(int take, unsigned long a, unsigned long b) { return take ? a / b : 11; }\n"
-    "unsigned long if_shift(int take, unsigned long a, unsigned b) { return take ? a << b : 13; }\n"
-    "unsigned long if_effects(int take, volatile unsigned long* p, unsigned long x) { if (take) { *p = x; return *p; } return 17; }\n"
-    "unsigned long if_call(int take, unsigned long x) { return take ? other_effect(x) : 19; }\n"
-    "long if_nested(long x) { return x < 0 ? 0 : x > 255 ? 255 : x; }\n"
-    "_Bool if_and(int a, int b) { return a < 128 && b < 128; }\n"
-    "int if_andor(int a, int b, int c) { return (a < b) && (b < c || c == 0); }\n"
-    "_Bool if_andor_bool(int a, int b, int c) { return (a < b) && (b < c || c == 0); }\n"
-    "long if_condsum(const int* a, int n) { long s = 0; for (int i = 0; i < n; i++) if (a[i] > 128) s += a[i]; return s; }\n"
-    "long if_abssum(const int* a, int n) { long s = 0; for (int i = 0; i < n; i++) s += a[i] > 128 ? a[i] : -a[i]; return s; }\n"
-    "int if_runmax(const int* a, int n) { int m = 0; for (int i = 0; i < n; i++) m = a[i] > m ? a[i] : m; return m; }\n"
-    "unsigned long if_reload_call(const unsigned long* p) { unsigned long v = *p; unsigned long w = other_effect(v); return v > 3 ? *p + w : w; }\n";
-
 static const char check_test_tier1_if_convert_other[] =
     "#include <stdio.h>\n"
     "#include \"tier1-if-convert.h\"\n"
@@ -73,9 +60,21 @@ static const char check_test_tier1_if_convert_other[] =
     "int main(void)\n"
     "{\n"
     "    const long edges[9] = { (-9223372036854775807L - 1L), -9223372036854775807L, -10, -1, 0, 1, 10, 9223372036854775806L, 9223372036854775807L };\n"
+    "    volatile long expected = 0;\n"
     "    unsigned long h = 0;\n"
     "    for (unsigned i = 0; i < 9; i += 1) for (unsigned j = 0; j < 9; j += 1)\n"
     "    {\n"
+    "        h = h * 31 + (unsigned long)if_rare_code(edges[i], edges[j]);\n"
+    "        h = h * 31 + (unsigned long)if_variable_compare(edges[i], edges[j]);\n"
+    "        h = h * 31 + (unsigned long)if_likely(edges[i], edges[j]);\n"
+    "        h = h * 31 + (unsigned long)if_unlikely(edges[i], edges[j]);\n"
+    "        h = h * 31 + (unsigned long)if_probability(edges[i], edges[j]);\n"
+    "        h = h * 31 + (unsigned long)if_rare_bool(edges[i], edges[j]);\n"
+    "        h = h * 31 + (unsigned long)if_balanced(edges[i], edges[j]);\n"
+    "        h = h * 31 + (unsigned long)if_rare_integer(edges[i], edges[j]);\n"
+    "        h = h * 31 + (unsigned long)if_dynamic(edges[i], edges[j], &expected);\n"
+    "        h = h * 31 + (unsigned long)if_mixed_hints(edges[i], edges[j], 3);\n"
+    "        h += (unsigned long)expected;\n"
     "        h = h * 31 + (unsigned long)if_max(edges[i], edges[j]);\n"
     "        h = h * 31 + if_umax((unsigned long)edges[i], (unsigned long)edges[j]);\n"
     "        h = h * 31 + (unsigned long)if_clamp(edges[i], -7, 11);\n"
@@ -504,15 +503,27 @@ static void check_test_driver_tier1_float_select(CheckTest* test, const char* cl
 
 static void check_test_driver_tier1_if_convert(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
-    check_test_driver_tier1_units(test, clang, executable, directory, "tier1-if-convert", "safe conditional values'", check_test_tier1_if_convert_header,
-                                  check_test_tier1_if_convert_source, check_test_tier1_if_convert_other, NULL, true, 0);
+    const int descriptor = open("tests/driver/tier1_if_convert.c", O_RDONLY | O_CLOEXEC);
+    char* unit = NULL;
+    const bool loaded = descriptor >= 0 && check_test_driver_read_file(descriptor, &unit);
+    if (descriptor >= 0)
+    {
+        close(descriptor);
+    }
+    check_test_expect(test, loaded, "if-conversion C fixture loads");
+    if (loaded)
+    {
+        check_test_driver_tier1_units(test, clang, executable, directory, "tier1-if-convert", "safe conditional values'", check_test_tier1_if_convert_header,
+                                      unit, check_test_tier1_if_convert_other, NULL, true, 0);
+    }
     // Keep the code-shape oracle independent of textual disassembly and of the selector's IR rule numbers.
     char header[512];
     char source[512];
     snprintf(header, sizeof(header), "%s/tier1-if-convert.h", directory);
     snprintf(source, sizeof(source), "%s/tier1-if-convert.c", directory);
     const bool written = parse_test_write(header, check_test_tier1_if_convert_header, sizeof(check_test_tier1_if_convert_header) - 1) &&
-                         parse_test_write(source, check_test_tier1_if_convert_source, sizeof(check_test_tier1_if_convert_source) - 1);
+                         loaded && parse_test_write(source, unit, strlen(unit));
+    free(unit);
     enum
     {
         CHECK_TEST_IF_CONVERT_RECORDS = 512,
@@ -529,6 +540,54 @@ static void check_test_driver_tier1_if_convert(CheckTest* test, const char* clan
             .name = "if_max",
             .selects = 1,
             .branches = 0,
+        },
+        {
+            .name = "if_rare_code",
+            .branches = 1,
+        },
+        {
+            .name = "if_variable_compare",
+            .selects = 1,
+        },
+        {
+            .name = "if_likely",
+            .selects = 0,
+            .branches = 1,
+        },
+        {
+            .name = "if_unlikely",
+            .selects = 0,
+            .branches = 1,
+        },
+        {
+            .name = "if_probability",
+            .selects = 0,
+            .branches = 1,
+        },
+        {
+            .name = "if_rare_bool",
+            .selects = 0,
+            .branches = 1,
+        },
+        {
+            .name = "if_balanced",
+            .selects = 1,
+            .branches = 0,
+        },
+        {
+            .name = "if_rare_integer",
+            .selects = 1,
+            .branches = 0,
+        },
+        {
+            .name = "if_dynamic",
+            .selects = 1,
+            .branches = 0,
+        },
+        {
+            .name = "if_mixed_hints",
+            .selects = 1,
+            .branches = 1,
         },
         {
             .name = "if_umax",
@@ -638,11 +697,12 @@ static void check_test_driver_tier1_if_convert(CheckTest* test, const char* clan
             }
             const bool guarded = shapes[function].branches == UINT32_MAX;
             const bool truth = shapes[function].truth;
-            const bool selected = truth ? tested == 0 : selects >= shapes[function].selects;
+            const bool kept = !guarded && shapes[function].branches != 0 && shapes[function].selects == 0;
+            const bool selected = truth ? tested == 0 : kept ? selects == 0 : selects >= shapes[function].selects;
             char message[256];
             snprintf(message, sizeof(message), "if-conversion %s has %s (path %u)", shapes[function].name,
-                     guarded ? "a guarding conditional branch" : truth ? "no select of a tested truth value and no conditional branch" :
-                     shapes[function].branches == 0 ? "cmov and no conditional branch" : "cmov and only its loop's conditional branch", path);
+                     kept ? "its predicted branch and no cmov" : guarded ? "a guarding conditional branch" : truth ? "no select of a tested truth value and no conditional branch" :
+                     shapes[function].branches == 0 ? "cmov and no conditional branch" : "cmov and one conditional branch", path);
             check_test_expect(test, count != 0 && selected && (guarded ? branches != 0 : branches == shapes[function].branches), message);
         }
         unlink(object);

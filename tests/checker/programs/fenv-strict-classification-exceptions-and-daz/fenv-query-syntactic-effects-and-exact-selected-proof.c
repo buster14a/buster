@@ -1,0 +1,2 @@
+#pragma STDC FENV_ACCESS ON
+int visits;int next(void){visits++;return 7;}int clear_fp(void);int fp_state(void);int tested(int n){visits=0;clear_fp();int a=__builtin_constant_p(1?1.0/3.0:next());int b=__builtin_constant_p((0&&next())+1.0/3.0);int c=__builtin_constant_p(1?1.0/2.0:next());int d=__builtin_constant_p(1?1.0/3.0:n++);int f=fp_state();return a*100000+b*10000+c*1000+d*100+visits*10+f+n;}

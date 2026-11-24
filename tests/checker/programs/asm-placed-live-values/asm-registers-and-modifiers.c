@@ -1,0 +1,1 @@
+int tested(int n){int x=n;__asm__("addl $1, %0" : "+r"(x));long a=n,b=2*n,r;__asm__("leaq (%1,%2), %0" : "=r"(r) : "r"(a), "r"(b));int t;__asm__("incl %0" : "=r"(t) : "0"(n));int i;__asm__("movl %1, %0\n\taddl %2, %0" : "=&r"(i) : "i"(40), "r"(n));long w=0;__asm__("movq %q1, %0\n\tmovb %b1, %b0" : "=&r"(w) : "r"(n));return x*7+(int)r*3+t*5+i+(int)(w&0xffff);}

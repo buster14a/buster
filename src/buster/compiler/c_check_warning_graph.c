@@ -1237,8 +1237,7 @@ static void check_warning_graph_pointer_cast(CheckInputReader* reader, const Che
     const bool from_pointer = from == BUSTER_TYPE_KIND_POINTER || array || from == BUSTER_TYPE_KIND_FUNCTION;
     const bool narrower = from_pointer && integer != BUSTER_TYPE_BOOL &&
                           (kind == BUSTER_TYPE_KIND_INTEGER || kind == BUSTER_TYPE_KIND_ENUM || kind == BUSTER_TYPE_KIND_BIT_INT) && type_size(types, integer) < 8;
-    const uint32_t open = narrower && close < parser->tokens.count && parser->tree.roles[close] == PARSE_ROLE_CLOSE_CAST ?
-                          check_warning_graph_void_opener(parser, close) : BUSTER_CHECK_NONE;
+    const uint32_t open = narrower ? check_warning_graph_void_opener(parser, close) : BUSTER_CHECK_NONE;
     // (The operand as the cast reads it, which clang prints: an array's or a function's after its decay, without sugar.)
     const TypeId source = open >= parser->tokens.count ? 0 : array ? type_pointer(types, type_element(types, plain)) :
                           from == BUSTER_TYPE_KIND_FUNCTION ? type_pointer(types, written) : written;
@@ -1289,8 +1288,7 @@ static void check_warning_graph_int_pointer_cast(CheckInputReader* reader, const
     const bool atomic = stripped != 0 && type_kind(types, stripped) == BUSTER_TYPE_KIND_ATOMIC;
     const TypeId pointer = atomic ? type_unqualified(type_conversion_operand(types, stripped)) : stripped;
     const bool to_pointer = pointer != 0 && type_kind(types, type_strip_aligned(types, pointer)) == BUSTER_TYPE_KIND_POINTER;
-    const uint32_t open = narrow && !ice && to_pointer && close < parser->tokens.count && parser->tree.roles[close] == PARSE_ROLE_CLOSE_CAST ?
-                          check_warning_graph_void_opener(parser, close) : BUSTER_CHECK_NONE;
+    const uint32_t open = narrow && !ice && to_pointer ? check_warning_graph_void_opener(parser, close) : BUSTER_CHECK_NONE;
     if (open < parser->tokens.count)
     {
         const TypeId pointee = type_unqualified(type_strip_aligned(types, type_element(types, type_strip_aligned(types, pointer))));
@@ -1362,8 +1360,7 @@ static void check_warning_graph_union_cast(CheckInputReader* reader, const Check
     const uint32_t close = graph->tokens[node];
     const bool to_union = node < stream->count && (stream->conversions[node].operands[0].flags & BUSTER_CHECK_CONVERT_TO_UNION) != 0 &&
                           stream->diagnostics[node] == CHECK_DIAG_NONE;
-    const uint32_t open = to_union && close < parser->tokens.count && parser->tree.roles[close] == PARSE_ROLE_CLOSE_CAST ?
-                          check_warning_graph_void_opener(parser, close) : BUSTER_CHECK_NONE;
+    const uint32_t open = to_union ? check_warning_graph_void_opener(parser, close) : BUSTER_CHECK_NONE;
     if (open < parser->tokens.count)
     {
         const uint32_t completion = graph->source_positions[node];
@@ -1395,8 +1392,7 @@ static void check_warning_graph_nonscalar_cast(CheckInputReader* reader, const C
     const uint8_t kind = target != 0 ? type_kind(types, type_unqualified(type_strip_aligned(types, target))) : BUSTER_TYPE_KIND_NONE;
     const bool same = (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION) && node < stream->count &&
                       (stream->conversions[node].operands[0].flags & BUSTER_CHECK_CONVERT_TO_UNION) == 0 && stream->diagnostics[node] == CHECK_DIAG_NONE;
-    const uint32_t open = same && close < parser->tokens.count && parser->tree.roles[close] == PARSE_ROLE_CLOSE_CAST ?
-                          check_warning_graph_void_opener(parser, close) : BUSTER_CHECK_NONE;
+    const uint32_t open = same ? check_warning_graph_void_opener(parser, close) : BUSTER_CHECK_NONE;
     if (open < parser->tokens.count)
     {
         const uint32_t completion = graph->source_positions[node];
@@ -1843,7 +1839,7 @@ static bool check_input_warning_graph(CheckInput* input, const Parser* parser, T
                     // the event is not asked. (The node machine's test of this warning has the same rule,
                     // node_census_constant_logical.)
                     const bool boolean = check_warning_logical_boolean(graph->ops[graph->operand1[node]]);
-                    if (check_action_is_integer(types, left) && check_action_is_integer(types, right) &&
+                    if ((!boolean || input->default_path_counts != NULL) && check_action_is_integer(types, left) && check_action_is_integer(types, right) &&
                         type_unqualified(type_strip_aligned(types, left)) != BUSTER_TYPE_BOOL &&
                         !check_warning_graph_macro(parser, token) &&
                         !check_input_logical_enumerator(&staged, parser, token != 0 ? token - 1 : BUSTER_CHECK_NONE, token) &&
@@ -1920,8 +1916,9 @@ static bool check_input_warning_graph(CheckInput* input, const Parser* parser, T
                 {
                     check_warning_graph_char_subscript(&reader, stream, node);
                 }
-                else if (op == CHECK_OP_CAST)
+                else if (op == CHECK_OP_CAST && token < parser->tokens.count && parser->tree.roles[token] == PARSE_ROLE_CLOSE_CAST)
                 {
+                    // All four diagnostics describe a written cast. Discard wrappers use the same graph op.
                     check_warning_graph_pointer_cast(&reader, stream, node);
                     check_warning_graph_int_pointer_cast(&reader, stream, node);
                     check_warning_graph_union_cast(&reader, stream, node);

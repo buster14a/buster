@@ -1,0 +1,48 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+# Narrowing at builtin parameter edges, including nested calls and a group of controls.
+# Suppress fabsf's independent -Wabsolute-value diagnostic so these cases isolate the argument conversions.
+builtin-floating-parameter-conversions	builtin-float-arguments-source.c	15	0	0	node-window	-Wno-absolute-value -Wimplicit-float-conversion	builtin floating parameter conversions
+builtin-floating-parameter-conversions-with-the-warning-disabled	builtin-float-arguments-source.c	0	0	0	node-window	-Wno-absolute-value -Wimplicit-float-conversion -Wno-implicit-float-conversion	builtin floating parameter conversions with the warning disabled
+# Conversions to a lower floating rank in every place clang checks one: initializers (scalar, brace, designated, nested,
+# file scope), assignments, arguments (a prototype's, not a variadic or an unprototyped one's), returns, a conditional's
+# arms and a comma's result, macros' arguments and bodies, typedefs and qualifiers, complex types, _Float16 and __bf16,
+# compound assignments, constants that convert exactly or don't, and unreachable and short-circuited code.
+floating-conversions-to-a-lower-rank-by-default	float-conversions-source.c	2	0	0	-	-	floating conversions to a lower rank, by default
+floating-conversions-to-a-lower-rank-under-wimplicit-float-conve	float-conversions-source.c	60	0	3	-	-Wimplicit-float-conversion	floating conversions to a lower rank under -Wimplicit-float-conversion
+floating-conversions-to-a-lower-rank-under-wall-wimplicit-float	float-conversions-source.c	60	0	3	-	-Wall -Wimplicit-float-conversion	floating conversions to a lower rank under -Wall -Wimplicit-float-conversion
+floating-conversions-to-a-lower-rank-wimplicit-float-conversion	float-conversions-source.c	2	0	0	-	-Wimplicit-float-conversion -Wno-implicit-float-conversion	floating conversions to a lower rank, -Wimplicit-float-conversion then -Wno-implicit-float-conversion
+# One of each, for promotion to errors below the error limit.
+floating-conversions-to-a-lower-rank-under-wconversion-wno-conve	float-small-source.c	1	0	0	-	-Wconversion -Wno-conversion	floating conversions to a lower rank under -Wconversion -Wno-conversion
+werror-implicit-float-conversion	float-small-source.c	1	2	0	-	-Werror=implicit-float-conversion	-Werror=implicit-float-conversion
+werror-literal-range-with-wimplicit-float-conversion	float-small-source.c	2	1	0	-	-Werror=literal-range -Wimplicit-float-conversion	-Werror=literal-range with -Wimplicit-float-conversion
+# Floating comparisons with a literal: in an array bound, an enumerator, a static assertion, a bit-field width, sizeof,
+# typeof, a case label, unreachable and unevaluated code, each operand order, casts implicit and explicit, every floating
+# type, macros, and the forms that are no CastExpr or no FloatingLiteral (a sign, an unconverted literal, an ordering).
+floating-comparisons-with-a-literal-by-default	float-comparisons-source.c	39	0	1	-	-	floating comparisons with a literal, by default
+floating-comparisons-with-a-literal-under-wall	float-comparisons-source.c	39	0	1	-	-Wall	floating comparisons with a literal under -Wall
+floating-comparisons-with-a-literal-in-c23	float-comparisons-source.c	39	0	1	c23	-	floating comparisons with a literal in C23
+floating-comparisons-with-a-literal-under-wno-literal-range	float-comparisons-source.c	2	0	0	-	-Wno-literal-range	floating comparisons with a literal under -Wno-literal-range
+# Nothing to warn of: widening and same-rank conversions, explicit casts, an _Atomic target, exact constants (const
+# objects' too), and sizeof's operand.
+floating-controls-by-default	float-controls-source.c	1	0	0	-	-	floating controls, by default
+floating-controls-under-wall-wimplicit-float-conversion	float-controls-source.c	1	0	0	-	-Wall -Wimplicit-float-conversion	floating controls under -Wall -Wimplicit-float-conversion
+# Diagnostic pragmas map both warnings where they are reported, macros' expansions too.
+floating-precision-pragmas-by-default	float-pragmas-source.c	6	1	3	-	-	floating precision pragmas, by default
+floating-precision-pragmas-under-wimplicit-float-conversion	float-pragmas-source.c	9	1	3	-	-Wimplicit-float-conversion	floating precision pragmas under -Wimplicit-float-conversion
+# What -Weverything gives of these sources' kind where every other warning it enables is avoided (-Wdouble-promotion's
+# implicit widening, -Wfloat-equal's comparisons, -Wmissing-prototypes' declarations).
+floating-precision-and-comparisons-under-weverything	float-everything-source.c	7	0	0	-	-Weverything	floating precision and comparisons under -Weverything
+# Review cases (#3361): -Wliteral-range's _Atomic operands, read through their value type, in the graph and in the
+# constant reader; compound assignments' computation types, with the right operand after its own promotion and the
+# left one unpromoted (__fp16's against an integer as float), printed as converted (an __fp16 one with an __bf16 one is
+# left out: clang 23.1.4's backend can't lower it at -c); and commas whose right operand is an
+# assignment or a value computed from one, which clang's evaluator doesn't fold, beside ones it does; and an _Atomic
+# typedef's right operand, spelled by its value type's sugar.
+floating-review-cases-by-default	float-review-source.c	13	0	0	-	-	floating review cases, by default
+floating-review-cases-under-wimplicit-float-conversion	float-review-source.c	25	0	0	-	-Wimplicit-float-conversion	floating review cases under -Wimplicit-float-conversion
+# `#pragma clang fp eval_method(extended)` converts a double or float literal to long double, so only a long double one
+# is still a literal to CheckFloatComparison: in the constant reader and in a body.
+floating-comparisons-under-eval-method-extended	float-eval-extended-source.c	2	0	0	-	-	floating comparisons under eval_method(extended)
+# `#pragma clang fp eval_method(double)` widens a compound assignment's right operand, not its left one.
+floating-compound-assignments-under-eval-method-double-and-wimpl	float-eval-double-source.c	4	0	0	-	-Wimplicit-float-conversion	floating compound assignments under eval_method(double) and -Wimplicit-float-conversion

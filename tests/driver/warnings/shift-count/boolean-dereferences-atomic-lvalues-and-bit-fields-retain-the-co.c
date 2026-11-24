@@ -1,0 +1,1 @@
+struct S{_Bool n:1;};void a(_Bool*p){*p<<=1;*p>>=7;}void b(_Bool*p){*p<<=8;*p>>=8;}void c(_Atomic(_Bool)*p){*p<<=1;*p>>=7;}void d(_Atomic(_Bool)*p){*p<<=8;*p>>=8;}void e(struct S*p){p->n<<=1;p->n>>=7;}void f(struct S*p){p->n<<=8;p->n>>=8;}

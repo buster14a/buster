@@ -1,0 +1,4 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+typeof-compound-immediate-unevaluated-call-and-update	typeof-compound-immediate-unevaluated-call-and-update.c	-	typeof-compound-immediate-unevaluated-call-and-update
+typeof-compound-nested-type-unevaluated-record	typeof-compound-nested-type-unevaluated-record.c	-	typeof-compound-nested-type-unevaluated-record

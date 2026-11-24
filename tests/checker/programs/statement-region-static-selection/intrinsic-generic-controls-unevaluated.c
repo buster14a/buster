@@ -1,0 +1,1 @@
+int missing(void);int tested(int n){int x=n;int a=_Generic(__builtin_rotateleft8(x++,missing()),unsigned char:3,default:7);int b=_Generic(__builtin_ia32_rdpid(),unsigned:5,default:9);int c=_Generic(__builtin_ia32_pause(),int:11,default:13);return x+a+b+c;}

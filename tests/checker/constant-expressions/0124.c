@@ -1,0 +1,1 @@
+typedef long Time; int f(int select) { return select ? sizeof(Time) : __builtin_offsetof(struct { char c; Time value; },value); } _Static_assert(__builtin_offsetof(struct {char c; Time value;},value)==8, "anonymous offset");

@@ -3571,7 +3571,8 @@ static bool check_input_attribute_ignored_lists(CheckInputReader* reader, uint32
                 memset(reader->ignored + t, 1, outer + 1 - t);
             }
             const bool tag = kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM;
-            const uint32_t skipped = tag && reader->tag_ends != NULL && reader->tag_ends[t] > t ? reader->tag_ends[t] :
+            const uint32_t tag_end = tag && check_input_memo_present(reader, reader->tag_ends) ? check_input_memo_get(reader, reader->tag_ends, t) : 0;
+            const uint32_t skipped = tag_end > t ? tag_end :
                                      (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE) && parser->tree.parents[t] > t ? parser->tree.parents[t] + 1 : t + 1;
             t = outer != BUSTER_CHECK_NONE && outer > t ? outer + 1 : skipped;
         }
@@ -8436,7 +8437,7 @@ static bool check_input_swift_cf_error(CheckInputReader* reader, TypeId record)
         for (uint32_t selected = check_input_attributed_group(all, first, end); !found && selected != 0; selected &= selected - 1)
         {
             const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
-            const CheckInputAttributes* attributes = type_unqualified(reader->tag_types[token]) == type_unqualified(record) ?
+            const CheckInputAttributes* attributes = type_unqualified(check_input_memo_get(reader, reader->tag_types, token)) == type_unqualified(record) ?
                                                      check_input_attributes_at(reader->output, token) : NULL;
             for (uint32_t i = 0; !found && attributes != NULL && i < attributes->count; i += 1)
             {

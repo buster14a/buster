@@ -1,0 +1,3 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+atomic-accesses-direct-and-helper-widths-orders-and-implicit	atomic-accesses-direct-and-helper-widths-orders-and-implicit.c	-	atomic-accesses-direct-and-helper-widths-orders-and-implicit

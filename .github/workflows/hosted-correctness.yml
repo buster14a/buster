@@ -280,14 +280,18 @@ jobs:
           printf 'Configuration: %s, linker %s\n' "$BUSTER_SANITIZER" "$BUSTER_LINKER"
           test "$BUSTER_LINKER" = "$([ "$BUSTER_SANITIZER" = none ] && echo auto || echo lld)"
 
-      # Build the PR base on plain shard 2 while shard 1 builds the merge revision.
+      # Build the tested merge's first parent on plain shard 2 while shard 1 builds the merge.
+      # The event's base SHA can lag behind the base GitHub used to create the merge commit.
       - name: Build the checker PR base for the SQLite object comparison
         if: inputs.compare-sqlite && env.BUSTER_VECTOR_ITEM == 'n2'
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          test "$(git rev-parse HEAD^1)" = "$BASE_SHA"
-          git worktree add --detach "$RUNNER_TEMP/sqlite-base" "$BASE_SHA"
+          if ! base="$(git rev-parse --verify 'HEAD^1^{commit}')" ||
+             ! git rev-parse --verify 'HEAD^2^{commit}' >/dev/null; then
+            printf '%s\n' '::error::The SQLite comparison needs both parents of the checked-out pull request merge.'
+            exit 1
+          fi
+          printf 'SQLite comparison base %s (first parent of %s)\n' "$base" "$(git rev-parse HEAD)"
+          git worktree add --detach "$RUNNER_TEMP/sqlite-base" "$base"
           cd "$RUNNER_TEMP/sqlite-base"
           ./build.sh --config Release --jobs "$(nproc)"
 
@@ -403,18 +407,11 @@ jobs:
         # lexer's vector kernels, every byte of it (no part needs the scalar lexer), and checks the tokens against the
         # scalar twin's.
         if: env.BUSTER_SHARD != ''
-        run: |
-          draw="$RUNNER_TEMP/vector-draw"
-          mapfile -d '' -t host_flags < <(./build.sh print-host-flags)
-          test "${#host_flags[@]}" -gt 0
-          clang "${host_flags[@]}" -Isrc -E -include src/buster/compiler/host_isa.h -x c /dev/null -o /dev/null
-          "$BUSTER_COMPILER" benchmark-lexer src/buster/compiler/x86_64_encoder.c 2>&1 | tee "$draw/kernels"
-          kernels=$(grep -x 'corpus: 0 files differ, 0 files (0.00% of bytes) need the scalar lexer for a part' "$draw/kernels")
-          {
-              printf 'target\t%s\n' "${host_flags[*]}"
-              printf 'host-vector\t1\n'
-              printf 'kernels\tbenchmark-lexer x86_64_encoder.c: %s\n' "${kernels#corpus: }"
-          } >> "$draw/record"
+        run: bash tools/ci/vector-kernels.sh src/buster/compiler/x86_64_encoder.c "$RUNNER_TEMP/vector-draw"
+
+      - name: Prove that vector mismatches and tail failures reject an assigned item
+        if: inputs.host_arch == 'vector' && env.BUSTER_VECTOR_ITEM == 'n1'
+        run: bash tests/ci/vector-seeds.sh
 
       - name: Check out reviewed first-party performance fixtures and acceptance harnesses
         # With the qualification below, on the daily and dispatched runs and on pull requests that change the readers
@@ -442,6 +439,7 @@ jobs:
           reader_harness="$reader_root/docs/measurements/performance-first-party-2026-10-25"
           bash tools/performance/build.sh
           build/performance/bmf --self-test
+          build/performance/paired --self-test
           clang -std=c17 -D_GNU_SOURCE -O2 -g -Wall -Wextra -Werror \
             -I tools/performance "$reader_harness/validate.c" -o build/performance/test-first-party
           build/performance/test-first-party "$reader_fixture" "$reader_root" \
@@ -923,6 +921,27 @@ jobs:
       run:
         shell: bash
     steps:
+      # The draw's script and its artifact runtime, from this commit through git, not the REST API: the API's hourly
+      # limit is the whole repository's, and fetching the script in every candidate, collector and verdict helped
+      # exhaust it (#2309).
+      - name: Fetch the vector draw's script from this commit
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ github.sha }}
+          path: .vector-draw-script
+          persist-credentials: false
+          sparse-checkout: |
+            tools/ci/vector-draw.sh
+            .github/actions/vector-runtime
+          sparse-checkout-cone-mode: false
+
+      # This job starts as the last draw's job ends, sooner than the run's listing names what that job uploaded last
+      # (tools/ci/vector-draw.sh settle): the download lists the run's artifacts once.
+      - name: Wait until the run's listing names the request ledgers the verdict requires
+        uses: ./.vector-draw-script/.github/actions/vector-runtime
+        with:
+          script: bash .vector-draw-script/tools/ci/vector-draw.sh settle
+
       # Every attempt's: a rerun of the failed jobs keeps its earlier attempt's assignments. Not the products
       # (vector-product-...), which only their configurations' items read.
       - name: Download the vector row's draws, assignments and evidence
@@ -930,17 +949,6 @@ jobs:
         with:
           pattern: ${{ inputs.host_arch }}-O${{ inputs.optimization }}-*
           path: ${{ runner.temp }}/vector-records
-
-      # The draw's script, from this commit through git, not the REST API: the API's hourly limit is the whole
-      # repository's, and fetching the script in every candidate, collector and verdict helped exhaust it (#2309).
-      - name: Fetch the vector draw's script from this commit
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          ref: ${{ github.sha }}
-          path: .vector-draw-script
-          persist-credentials: false
-          sparse-checkout: tools/ci/vector-draw.sh
-          sparse-checkout-cone-mode: false
 
       - name: Require one passing qualified execution of each vector item
         env:

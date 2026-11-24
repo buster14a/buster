@@ -1,0 +1,1 @@
+typedef int v4si __attribute__((vector_size(16)));static _Thread_local v4si tv={9,8,7,6};int tested(int n){char*tp=__builtin_thread_pointer();v4si __seg_fs*p=(v4si __seg_fs*)((char*)&tv-tp);v4si v=*p;v4si k={n,n+1,n+2,n+3};*p=v*k;*p+=k;v=*p;return v[0]+v[1]*3+v[2]*5+v[3]*7+tv[n&3];}

@@ -1,0 +1,11 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+counted-by-pointee-incomplete	counted-by-pointee-incomplete.c	0	5	10	-	-	counted_by pointee incomplete
+counted-by-pointee-completed-later	counted-by-pointee-completed-later.c	0	5	10	-	-	counted_by pointee completed later
+# Initializations (#1842's 3d, CheckInitCounted): "cannot initialize" at each value the member takes, a file scope
+# object's and a compound literal's too, and "cannot implicitly initialize" where a list of its record leaves it out:
+# at explicit braces' `}`, at the last value a brace elision took, and at the end of the designation that made a
+# designator's list, each when the braces that fill it in close (`o1`'s and `o2`'s are out of source order), once
+# a GNU range element; a typedef's anonymous record by the typedef's name; none for a sized_by member, an object
+# with no initializer, a copy, or a pointee completed before.
+counted-by-initializations-of-an-incomplete-pointee	counted-by-initializations-of-an-incomplete-pointee.c	0	19	38	-	-	counted_by initializations of an incomplete pointee

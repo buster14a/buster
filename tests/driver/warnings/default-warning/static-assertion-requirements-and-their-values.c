@@ -1,0 +1,17 @@
+enum { A = 3 };
+_Static_assert(A == 4, "a");
+_Static_assert(1 && A > 2 && (A < 3 || A > 5), "b");
+_Static_assert(-A == 4 && 1, "c");
+_Static_assert('a' == A, "d");
+_Static_assert(1.5 + A < 2.0, "e");
+_Static_assert((_Bool)A == 0, "f");
+_Static_assert(A + 0u > 5u, "g");
+_Static_assert((char)A == 'b', "h");
+_Static_assert((char)200 == (char)'\n', "i");
+_Static_assert(A < 1 == 1, "j");
+_Static_assert(A - 3, "k");
+_Static_assert(0x80000000 == A + 3000000000, "l");
+_Static_assert(1e300 * A == 0.1f, "m");
+_Static_assert(1e-5 * A == 1e5, "n");
+_Static_assert(sizeof A == sizeof (A) + sizeof(int), "o");
+_Static_assert(__alignof__(A) == 2 * _Alignof(int), "p");

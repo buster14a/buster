@@ -7587,26 +7587,36 @@ and unevaluated scans with their definitions at every length to 300. The tree
 tests also compare the root bitmap with an independent edge walk on valid and
 rejected trees and verify cached and uncached root enumeration.
 
-The expression walk starts only at a root that reaches something or whose
-discarded expression may get the statement's unused-value warning, and enters
-only the subtrees that hold its walk's bit; every warning keeps its order. The default-ignored warnings' work runs only
-where the command line or a source pragma may enable them: the comparison bit
-for `-Wsign-compare` (and, while `-Wtautological-constant-out-of-range-compare`
-is on and `-Wsign-compare` off, only for a comparison whose constant is out of
-the other operand's range, `check_common_range_out`: the reach scan's 16-node
-operator blocks (`check_common_next_reach_op`) compress their comparisons
-into a list, and its batches of 16 (`check_common_range_lanes`) gather the
-operands' value flags, types, operators and payload values, testing only the
-lanes of a comparison one of whose operands is an integer constant expression,
-where the other one, if only one is, is neither an `int` or `long` class
-builtin that covers the constant's type nor a narrow builtin compared with an
-`int` or `unsigned` constant in its range, but for a boolean operator's; the
-scalar path, the twin, tests every comparison; #2451), a plain `x = y` for `-Wself-assign`, and the
-`-Wuninitialized` pass for it and `-Wunused-but-set-parameter`, as Clang skips
-an analysis whose diagnostics are ignored. The token passes find their roles
-and kinds 64 tokens at a time, the node passes their operators 16 nodes at a
-time through an operator bitset, and `-Wuninitialized`'s declaration loops a
-sparse column's next entry by its directory (`check_sparse_next`).
+The expression walk starts at roots that reach a candidate or discard a value
+that may warn. The comparison pass uses the shared operator masks.
+`-Wsign-compare` takes every comparison. When it is off and
+`-Wtautological-constant-out-of-range-compare` is on,
+`check_common_range_candidates` collects a bounded batch of comparison nodes.
+`check_common_range_lanes` tests up to 16 at a time using the operands' ICE
+flags, types, operators and constant values (#2451). It checks the remaining
+candidates' ranges and marks their ancestors. A floating conversion on the
+same comparison can still set its own reach bit. Its range is tested once.
+
+The floating-conversion scan also reads the result types of 16 operators at
+a time. A unary sign or ordinary arithmetic operation with a successfully
+checked builtin integer result has no floating operand conversion. Other
+checks on the same operator, such as division by zero, keep their own mask.
+
+On a tree, each operand has one reader and one conversion edge. When the
+warning walk visits a call, it reads the target type at the current argument
+index and carries it in the deferred conversion frame. Even when only the
+last argument warns, the walk reads the argument list in linear time. A
+graph with shared operands uses the existing first-matching-edge lookup.
+
+The token passes find roles and kinds 64 tokens at a time. A plain assignment
+is a candidate for `-Wself-assign` when the command line or a source pragma
+enables it. The `-Wuninitialized` and `-Wunused-but-set-parameter` analysis
+finds declarations through the sparse column directory (`check_sparse_next`).
+The control-flow queue counts each reached entry once. A fully reached body
+needs no further scan. For other bodies, the evaluation pass takes the zero
+bytes in the reachability marks 64 entries at a time and clears their
+expression roots and initializer values.
+
 A static selection's unselected arms and controlling expression
 (`check_common_unselected_roots`, which `check_common_evaluated` and the
 returned-address check use) are the roots inside its range, from past its

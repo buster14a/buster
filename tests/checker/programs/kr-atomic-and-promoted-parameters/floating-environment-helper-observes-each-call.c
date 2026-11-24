@@ -1,0 +1,1 @@
+int change_rounding(int);int tested(int n){change_rounding(n);int a=__builtin_flt_rounds();change_rounding(n+1);int b=__builtin_flt_rounds();change_rounding(0);return a*10+b;}

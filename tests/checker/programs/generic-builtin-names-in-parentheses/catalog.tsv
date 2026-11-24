@@ -1,0 +1,31 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+generic-builtin-names-in-parentheses	generic-builtin-names-in-parentheses.c	-	generic-builtin-names-in-parentheses
+# __builtin_clear_padding (#148): the bytes of objects filled with ones, then cleared, against clang's build: a struct's
+# holes and tail, bit-fields' unused bits and an unnamed one, a union's bytes no member holds, an x87 long double's last
+# six, a _BitInt's high bits, an atomic struct's, an ext vector's tail, an anonymous member's, arrays of structs in a
+# loop (and of arrays), a volatile object, and a variable length array, which clang's code leaves as it is; an element
+# past 4 KiB, and elements whose stores are many, a table's loop's (#1842).
+generic-clear-padding	generic-clear-padding.c	-	generic-clear-padding
+# __builtin_clear_padding of arrays whose types carry sugar (#1842's 1b), which clang's walk keeps as they are: a
+# typedef's array, typeof's, a pointer declared with parentheses (`(*p)[2]`, a parameter's too, through `*pp`), a
+# typedef of such a pointer, an array of a typedef's array, a subscript into one, and a member of a typedef's array, whose
+# record's other padding is cleared; an array of a typedef's struct is cleared.
+generic-clear-padding-sugar	generic-clear-padding-sugar.c	-	generic-clear-padding-sugar
+# __builtin_clear_padding of arrays reached through a cast's type name, a call's result and a member (#1842's 1b): an
+# array a pointer of a type name or a return type points to is written with sugar (a declarator's parentheses, a
+# typedef, typeof), and clang keeps it; an element subscripted out of one, and a pointer to a record, it clears; a
+# member's own declarator decides, through `.` and `->`, and a member pointer's too.
+generic-clear-padding-sugar-reached	generic-clear-padding-sugar-reached.c	-	generic-clear-padding-sugar-reached
+# __builtin_clear_padding of a typedef's arrays subscripted out of a cast's pointer (#1842): the cast's typedef
+# specifier writes its level with sugar, and clang keeps it, and the typedef's own declaration decides below it (a
+# typedef of the typedef's arrays, its element); a typedef of a record, and a plain type name's rows, it clears.
+generic-clear-padding-cast-typedef	generic-clear-padding-cast-typedef.c	-	generic-clear-padding-cast-typedef
+# __builtin_clear_padding of a type nested 90 levels (#1842), past the walk's first room, whose stack grows: before, past
+# 64 levels it was refused, and its frame written past the stack.
+generic-clear-padding-deep	generic-clear-padding-deep.c	-	generic-clear-padding-deep
+# __builtin_clear_padding's repeats in each of their forms (#1842), against clang's build: two inner arrays in place,
+# each a nest of loops of its stores; an array of four levels, the nest's most; one of six, past them, in the table's
+# loop; and an array of a record of 50 runs, too many to make in place, its repeats the table's too; each alone and as
+# an array's element.
+generic-clear-padding-loops	generic-clear-padding-loops.c	-	generic-clear-padding-loops

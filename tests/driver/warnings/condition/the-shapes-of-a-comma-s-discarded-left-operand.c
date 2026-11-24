@@ -1,0 +1,14 @@
+void a(int x) __attribute__((diagnose_if((x == 1, x), "m", "warning")));
+void b(int x) __attribute__((diagnose_if((x < 1, x), "m", "warning")));
+void d(int x) __attribute__((diagnose_if((-x, x), "m", "warning")));
+void e(int x) __attribute__((diagnose_if((x ? 1 : 2, x), "m", "warning")));
+void f(int x) __attribute__((diagnose_if((sizeof x, x), "m", "warning")));
+void g(int x) __attribute__((diagnose_if(((long)x, x), "m", "warning")));
+void h(int x) __attribute__((diagnose_if((x && 1, x), "m", "warning")));
+void i(int x) __attribute__((diagnose_if((0, x), "m", "warning")));
+void j(int x) __attribute__((diagnose_if((1, 2), "m", "warning")));
+void k(int x) __attribute__((diagnose_if(((x, 1), x), "m", "warning")));
+void l(int x) __attribute__((diagnose_if(((x, 0), x > 1), "m", "warning")));
+void m(int x) __attribute__((diagnose_if((x != 1, x), "m", "warning")));
+void n(int x) __attribute__((enable_if((x, 1), "m")));
+void o(int x) __attribute__((diagnose_if((x ? 1 : x++, x), "m", "warning")));

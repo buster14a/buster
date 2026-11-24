@@ -629,7 +629,7 @@ predecessor of the next.
 
 `tier1_cfg_current_slots` finds, for each block, the values whose slots hold
 them at its start whatever their ranges' places there: a forward
-must-analysis over the dense values, after slot sharing. Once stored, a
+must-analysis over spill candidates, after slot sharing. Once stored, a
 value's slot holds it while it lives: an SSA value never changes, and slots
 are shared only by values never live at once. So, with SLOT[b] the values
 with a slot fragment in block b (an edge or a transition stored them there,
@@ -642,13 +642,15 @@ with the entry's IN, and that of a block without predecessors, empty. A
 value is live into no block its definition is in, so `LIVE_IN` drops what an
 earlier iteration of a loop stored before the value's next definition. The
 candidates are the values with a slot that are live into some block, read
-from their own intervals, solved as the liveness is since #1384, 512 at a time in
-one AVX-512 row a block (`dataflow.c`'s rows), so that the rows take
-blocks * 256 bytes however many values have slots. A group keeps OUT beside
-IN, so that an edge is a load and an AND, starts every IN full but the
-entry's and those of blocks without predecessors, and sweeps the blocks in
-reverse postorder until none changes. In layout order, where a loop's
-header follows its body, `sqlite3VdbeExec` took 7 sweeps.
+from their own intervals and solved in groups of 512. A group allocates
+three 512-bit masks per block containing a live entry or spill fragment.
+The first mask starts with the live entries. Intersecting those bits with
+each predecessor's exit removes unsupported entries. The second mask records
+local spills, which keep a slot current at exit even if it was lost at entry.
+The third collects any exit losses until a worklist sends them to successors.
+Each exit bit can be lost only once. An untouched block has an empty exit.
+Both output passes visit only the group's touched blocks, and the next group
+reuses their storage.
 
 - **The edges.** An edge leaves out a store of a value from a register into
   its own slot where the slot is current at the predecessor's exit: current at

@@ -1,0 +1,2 @@
+#pragma STDC FENV_ACCESS ON
+double fp_special(int);float fp_specialf(int);int set_math_errno(int);int get_math_errno(void);int clear_fp(void);int fp_state(void);int tested(int n){double x=fp_special(n);float y=fp_specialf(n);set_math_errno(7);clear_fp();double a=__builtin_sqrt(x);int e=get_math_errno(),f=fp_state();set_math_errno(7);clear_fp();float b=__builtin_sqrtf(y);int g=get_math_errno(),h=fp_state();return e*100000+f*10000+g*100+h+__builtin_isnan(a)*3+__builtin_isinf(a)*5+__builtin_signbit(a)*7+__builtin_isnan(b)*11+__builtin_isinf(b)*13+__builtin_signbit(b)*17;}

@@ -33,6 +33,7 @@
 #: cpu 1 0.87 Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz
 #: unmeasured Test the early driver feedback corpus
 #: unmeasured Test deterministic work and growth contracts [1 CPU]
+#: unmeasured Compile the frozen sqlite3.c and c-testsuite's programs with their warm arenas filled, to the same objects
 #: unmeasured Test -S of c-testsuite's programs against -c and GNU as
 #: unmeasured Test the caret display against clang
 #: derived Test the semantic driver's diagnostics and emission against clang (part 1 of 16)
@@ -239,6 +240,7 @@
 6.6 Compile c-testsuite's programs as the units of one command [8 CPUs]
 57.6 Test the driver's commands of several source files [8 CPUs]
 18.4 Test mixed-tier single- and multi-file determinism [8 CPUs]
+9.9 Compile the frozen sqlite3.c and c-testsuite's programs with their warm arenas filled, to the same objects
 33.1 Test c-testsuite's programs end to end [4 CPUs]
 41.1 Test c-testsuite's programs with Tier 1's code [4 CPUs]
 9.9 Test -S of c-testsuite's programs against -c and GNU as

@@ -1,0 +1,1 @@
+int tested(int n){long a=n,b=n+1,c=n+2,d=n+3,e=n+4,f=n+5,g=n+6;long r;for(int i=0;i<3;i++){__asm__("movq %1, %%rbx\n\tmovq %%rbx, %%r12\n\tleaq 1(%%r12), %0" : "=r"(r) : "r"(a+i) : "rbx","r12");a=r-i;}long t=a+({long u;__asm__("movq %1, %0\n\tnegq %0" : "=r"(u) : "r"(b));u;})+c*d;return (int)(t+e*f+g);}

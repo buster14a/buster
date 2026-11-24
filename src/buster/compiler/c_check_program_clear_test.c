@@ -467,30 +467,5 @@ static void check_test_program_clears(CheckTest* test, const char* clang)
              "dirty(n);t=t*3+tail(&c);dirty(n);t=t*3+narrow(&c);return (int)(t%%1000003);}",
              dirty);
     check_test_program_source(test, source, "initializer-vectors-on-dirty-stack", clang);
-    check_test_program_source(test,
-        "struct S{long a[40];int flags;};static int calls;"
-        "static struct S make(int n){struct S s;for(int i=0;i<40;i++)s.a[i]=n+i;s.flags=n;calls=calls*3+1;return s;}"
-        "static struct S change(struct S s,int n){s.a[3]+=n;s.flags+=n;calls=calls*3+2;return s;}"
-        "static struct S(*choose(int n))(int){calls=calls*3+(n&1);return make;}"
-        "static struct S self(struct S*p,int n){p->flags=n+9;struct S s=make(p->flags);return s;}"
-        "int tested(int n){calls=0;struct S a=change(make(n),n+1);struct S b=choose(n)(n+2);"
-        "_Alignas(64) struct S c=make(n+3);volatile struct S v=make(n+4);struct S d=self(&d,n+5);"
-        "struct S e=make(n+6);e=change(e,n+7);"
-        "int bad=a.a[3]!=2L*n+4||a.flags!=2*n+1||b.a[39]!=n+41L||b.flags!=n+2||"
-        "c.a[0]!=n+3L||((unsigned long)&c&63)!=0||v.a[39]!=n+43L||v.flags!=n+4||d.flags!=n+14||"
-        "e.a[3]!=2L*n+16||e.flags!=2*n+13;return bad?123456+bad:calls;}",
-        "initializer-call-nesting-aliases-and-alignment", clang);
-    // Members, elements, labels around in-place calls, and a backward goto whose callee's argument reads the earlier
-    // visit's object through an escaped pointer, which keeps its copy.
-    check_test_program_source(test,
-        "struct S{long a[40];int flags;};struct O{struct S s;};union W{struct S s;long l[41];};static int calls;"
-        "static struct S make(int n){struct S s;for(int i=0;i<40;i++)s.a[i]=n+i;s.flags=n;calls=calls*3+1;return s;}"
-        "static long sum(const struct S*s){long t=s->flags;for(int i=0;i<40;i++)t+=s->a[i]*(i+1);return t;}"
-        "int tested(int n){calls=0;long r=0;struct O o={make(n)};r+=sum(&o.s);struct S a[1]={make(n+1)};r+=sum(a);"
-        "union W w={make(n+2)};r+=sum(&w.s);struct O d={.s=make(n+3)};r+=sum(&d.s)*2;"
-        "for(int i=0;i<3;i++){if(i==1)goto skip;r+=i;skip:;}{struct S x=make(n+4);r+=sum(&x)*3;}"
-        "for(struct S y=make(n+5);y.flags<n+8;y.flags++){if(y.flags==n+6)goto next;r+=sum(&y);next:;}"
-        "struct S*seen=0;int visits=0;again:;struct S b=make(seen!=0?(int)seen->a[1]+1:n);seen=&b;if(++visits<3)goto again;"
-        "r+=sum(&b)*5;if(n<-1000)goto out;{struct S z=make(n+9);r+=sum(&z)*7;}out:return (int)(r%1000003)+calls%1009;}",
-        "initializer-call-members-labels-and-reentry", clang);
+    check_test_program_suite(test, "checker/programs/program-clears", clang);
 }

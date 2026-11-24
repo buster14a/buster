@@ -186,17 +186,15 @@ static bool check_test_common_candidate_case(const CheckOp* ops, uint32_t count)
     return same;
 }
 
-// The listed scan can find no reach candidates while appending more than 16 out-of-range comparisons. The drain must
-// mark all of them, including the final partial vector, instead of testing only the first 16.
+// Multiple comparison batches followed by a partial vector, with no other reach candidates.
 static void check_test_common_candidate_comparison_tail(CheckTest* test)
 {
-    enum { COUNT = 144, BLOCKS = 9 };
+    enum { COUNT = 399, BLOCKS = (COUNT + 15) / 16 };
     CheckOp ops[COUNT] = { 0 };
     uint32_t left[COUNT] = { 0 };
     uint32_t right[COUNT] = { 0 };
     uint32_t parents[COUNT];
     uint8_t reach[COUNT] = { 0 };
-    uint32_t comparisons[COUNT + 16] = { 0 };
     CheckValue values[COUNT] = { 0 };
     uint16_t masks[BLOCKS * CHECK_COMMON_CANDIDATE_COUNT] = { 0 };
     for (uint32_t node = 0; node < COUNT; node += 1)
@@ -208,7 +206,7 @@ static void check_test_common_candidate_comparison_tail(CheckTest* test)
         }
         else if (node % 3 == 1)
         {
-            values[node] = (CheckValue){ .type = BUSTER_TYPE_INT, .flags = BUSTER_CHECK_ICE, .constant_kind = CHECK_CONSTANT_INTEGER, .integer = 300 };
+            values[node] = (CheckValue){ .type = BUSTER_TYPE_INT, .flags = BUSTER_CHECK_ICE, .constant_kind = CHECK_CONSTANT_INTEGER, .integer = node % 2 != 0 ? 300 : 42 };
         }
         else
         {
@@ -226,20 +224,16 @@ static void check_test_common_candidate_comparison_tail(CheckTest* test)
     TypeTable types = { 0 };
     const bool ready = type_initialize(&types, &type_storage, &type_index, capacity);
     const CheckCommonCandidates candidates = { .count = COUNT, .blocks = BLOCKS, .masks = masks };
-    CheckCommonScan scan = { 0 };
-    uint32_t listed = 0;
-    uint32_t tested = 0;
-    const uint32_t next = check_common_next_reach_op(&graph, &candidates, false, false, false, false, comparisons, &listed, &scan);
     if (ready)
     {
-        check_common_range_drain(&graph, &stream, &types, parents, reach, comparisons, &tested, listed);
+        check_common_range_candidates(&graph, &stream, &types, parents, reach, &candidates);
     }
-    bool same = ready && next == COUNT && listed == 48 && tested == listed;
+    bool same = ready;
     for (uint32_t node = 2; node < COUNT; node += 3)
     {
-        same &= (reach[node] & BUSTER_CHECK_REACH_SIGN) != 0;
+        same &= ((reach[node] & BUSTER_CHECK_REACH_SIGN) != 0) == (node % 2 == 0);
     }
-    check_test_expect(test, same, "common candidates: drain every comparison after the last reach candidate");
+    check_test_expect(test, same, "common candidates: range warnings across comparison batches and a partial tail");
     arena_release(&type_index);
     arena_release(&type_storage);
 }

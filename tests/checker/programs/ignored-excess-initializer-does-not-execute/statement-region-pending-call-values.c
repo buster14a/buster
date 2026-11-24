@@ -1,0 +1,1 @@
+int helper(int a,int b,int c){return a*100+b*10+c;}int tested(int n){int x=0;int z=helper(n,({x++;n+2;}),({int y=n*2;y+3;}));return z+x;}

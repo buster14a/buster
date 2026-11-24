@@ -1,0 +1,6 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+library-builtins-named-outside-calls	library-builtins-named-outside-calls.c	0	6	3	-	-	library builtins named outside calls
+library-builtins-named-outside-calls-before-c99	library-builtins-named-outside-calls-before-c99.c	2	2	2	-	-std=gnu89	library builtins named outside calls before C99
+# Before C99 the implicit declarations are warnings, so -Werror's errors carry clang's "-Werror," prefix.
+implicit-declarations-before-c99-with-wall	implicit-declarations-before-c99-with-wall.c	2	0	1	-	-std=gnu89 -Wall	implicit declarations before C99, with -Wall

@@ -133,25 +133,29 @@ static bool check_common_candidates_build(const CheckGraph* graph, Arena* scratc
     return valid;
 }
 
+// Refill one bounded batch from a class's contiguous masks. Consumers can take the nodes individually or run a
+// vector kernel over the batch. The final nonempty block can add up to 16 entries to the list.
+static void check_common_candidate_list(const CheckCommonCandidates* candidates, CheckCommonCandidate kind, CheckCommonScan* scan)
+{
+    const uint32_t count = candidates->count;
+    const uint16_t* masks = candidates->masks + (uint64_t)kind * candidates->blocks;
+    scan->taken = 0;
+    scan->listed = 0;
+    while (scan->listed < BUSTER_CHECK_SCAN_ITEMS && scan->next < count)
+    {
+        const uint32_t first = scan->next;
+        const uint32_t live = count - first < 16 ? count - first : 16;
+        check_common_scan_list(scan, first, masks[first / 16]);
+        scan->next = first + live;
+    }
+}
+
 // A class's candidates in ascending node order, from a successfully built index.
 static uint32_t check_common_next_candidate(const CheckCommonCandidates* candidates, CheckCommonCandidate kind, CheckCommonScan* scan)
 {
-    const uint32_t count = candidates->count;
-    const uint16_t* masks = candidates->masks;
-    const uint64_t column = (uint64_t)kind * candidates->blocks;
-    if (scan->taken == scan->listed)
+    if (scan->taken == scan->listed && scan->next < candidates->count)
     {
-        scan->taken = 0;
-        scan->listed = 0;
-        while (scan->listed < BUSTER_CHECK_SCAN_ITEMS && scan->next < count)
-        {
-            const uint32_t first = scan->next;
-            const uint32_t live = count - first < 16 ? count - first : 16;
-            const uint32_t selected = masks[column + first / 16];
-            scan->next = first + live;
-            check_common_scan_list(scan, first, (__mmask16)selected);
-        }
+        check_common_candidate_list(candidates, kind, scan);
     }
-    const uint32_t result = check_common_scan_listed(scan, count);
-    return result;
+    return check_common_scan_listed(scan, candidates->count);
 }

@@ -1,0 +1,8 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+asm-mmx-x87	asm-mmx-x87.c	-	asm-mmx-x87
+asm-mmx-directives	asm-mmx-directives.c	-	asm-mmx-directives
+# An __m64 in an MMX register (#1846, the owner's decision on #1447): an object's 8 bytes, read through its address,
+# as an input, a `+` operand and an early-clobbered output; an input of no object (an rvalue, a call's) through a copy's.
+asm-mmx-vector	asm-mmx-vector.c	-	asm-mmx-vector
+asm-mmx-vector-value	asm-mmx-vector-value.c	-	asm-mmx-vector-value

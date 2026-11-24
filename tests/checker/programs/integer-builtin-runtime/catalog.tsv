@@ -1,0 +1,34 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+integer-builtin-runtime	integer-builtin-runtime.c	-	integer-builtin-runtime
+overflow-runtime-widths	overflow-runtime-widths.c	-	overflow-runtime-widths
+overflow-destination-once-and-folded-store	overflow-destination-once-and-folded-store.c	-	overflow-destination-once-and-folded-store
+overflow-selected-effects	overflow-selected-effects.c	-	overflow-selected-effects
+# #1385's recipes and rows: signed longs' sums, differences and products as the operation and seto (the generic and
+# the typed builtins), unsigned longs' carries and 128-bit products, ints' 64-bit operations, and mixed
+# signedness, an unsigned 32-bit product past 2^63 into a _BitInt(63) and long, and bool and signed char
+# destinations, of boundary values around each width (check_test_program_source_native_bounds checks the rows).
+overflow-instruction-rows	overflow-instruction-rows.c	-	overflow-instruction-rows
+# The overflow builtins of _BitInts of 65 to 127 bits (#1447), as operands and destinations, beside 128-bit, long,
+# int and char ones, of boundary values around each width: each overflow, the stored value and the destination's
+# bytes as clang stores them, extended from its width, hashed.
+bit-int-65-to-127-overflow	bit-int-65-to-127-overflow.c	-	bit-int-65-to-127-overflow
+# The overflow builtins of _BitInts past 128 bits (#1447), as operands and destinations, beside 129-, 128-bit, long,
+# int, char and _Bool ones: sums and differences signed and unsigned, unsigned products, of boundary values around
+# each width; each overflow and the destination's bytes, its bits past the width extended as clang stores them,
+# hashed.
+bit-int-past-128-overflow	bit-int-past-128-overflow.c	-	bit-int-past-128-overflow
+# A switch on a _BitInt past 128 bits (#2220): its cases' values limb by limb, signed and unsigned, of 129, 200 and 256
+# bits, with GNU ranges across limbs, negative values, a value only the top limb tells from another and one only a
+# low limb does; each value's case, of boundary values around each case's, hashed.
+bit-int-past-128-switch	bit-int-past-128-switch.c	-	bit-int-past-128-switch
+# The generic and C23 bit builtins of _BitInts past 128 bits (#1447), limb by limb, of boundary values, single bits and
+# random ones: counts, reversals, byte swaps, bit_floor and bit_ceil, and rotations of a power of two's width by
+# counts of every width (clang's code generator can't compile another width's, which tier1-bits checks), and narrower
+# values' by counts past 128 bits; each result and the bytes of each value, hashed.
+bit-int-past-128-bit-builtins	bit-int-past-128-bit-builtins.c	-	bit-int-past-128-bit-builtins
+vla-typedef-captures-bound-once	vla-typedef-captures-bound-once.c	-	vla-typedef-captures-bound-once
+vla-declaration-span-scopes-and-commas	vla-declaration-span-scopes-and-commas.c	-	vla-declaration-span-scopes-and-commas
+vla-declarator-and-initializer-order	vla-declarator-and-initializer-order.c	-	vla-declarator-and-initializer-order
+vla-parameter-bound-capture	vla-parameter-bound-capture.c	-	vla-parameter-bound-capture
+vla-inline-typename-captures	vla-inline-typename-captures.c	-	vla-inline-typename-captures

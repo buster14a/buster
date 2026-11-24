@@ -1,0 +1,1 @@
+int absent(void);int tested(int n){int a=0;int x __attribute__((unused)) ((a++,n+3),a++,absent());int y __attribute__((unused)) (n? a++,n+4 : n-2,absent());int z=n? a++,n+4 : n-2;return a*100+x+y+z;}

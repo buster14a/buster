@@ -169,21 +169,29 @@ evidence()
                         hardware=skip
                         reason=deferred
                     else
-                        local facts="$work/hosted.tsv" found
+                        local facts="$work/hosted.tsv" found complete=true
                         : > "$facts"
                         if "$gh" api "repos/$repository/actions/workflows/9700x.yml/runs?head_sha=$commit&per_page=50" > "$work/runs.json"; then
                             runs_facts < "$work/runs.json" >> "$facts"
                             for found in $(jq -r '.workflow_runs[]? | select(.status == "completed" and (.event == "push" or .event == "workflow_dispatch" or .event == "merge_group")) | .id' "$work/runs.json"); do
                                 if [ "$found" != "$run" ]; then
-                                    fetch_jobs "$found" >> "$facts" || true
+                                    if fetch_jobs "$found" > "$work/jobs.tsv"; then
+                                        cat "$work/jobs.tsv" >> "$facts"
+                                    else
+                                        complete=false
+                                    fi
                                 fi
                             done
                         fi
                         local verdict
                         verdict=$("$tool" hosted --commit "$commit" --exclude "$run" < "$facts" || printf 'hosted\tnone\t0\n')
-                        if [ "$(cut -f 2 <<< "$verdict")" = reused ]; then
+                        if [ "$complete" = true ] && [ "$(cut -f 2 <<< "$verdict")" = reused ]; then
                             hosted=reused
                             hosted_source=$(cut -f 3 <<< "$verdict")
+                            if [ "$purpose" = backlog ] && [ "$(cut -f 4 <<< "$verdict")" = vector ]; then
+                                native=smoke
+                                native_source=$hosted_source
+                            fi
                         fi
                         local bound=30 window
                         if [ "$purpose" = backlog ]; then

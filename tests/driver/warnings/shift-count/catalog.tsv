@@ -1,0 +1,126 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+# Under -fwrapv, or -fno-strict-overflow without -fno-wrapv, signed overflow is defined, and clang's DiagnoseBadShiftValues
+# warns of neither a shift's result nor its negative left operand; its counts' warnings stay (#1447).
+shift-values-without-fwrapv	shift-wrapv-source.c	9	0	0	-	-	shift values without -fwrapv
+fwrapv-defines-shift-values	shift-wrapv-source.c	3	0	0	-	-fwrapv	-fwrapv defines shift values
+fno-strict-overflow-defines-shift-values	shift-wrapv-source.c	3	0	0	-	-fno-strict-overflow	-fno-strict-overflow defines shift values
+fno-wrapv-after-fno-strict-overflow-keeps-shift-values-warnings	shift-wrapv-source.c	9	0	0	-	-fno-strict-overflow -fno-wrapv	-fno-wrapv after -fno-strict-overflow keeps shift values' warnings
+nonconstant-int-operands-retain-left-and-right-shift-count-warni	nonconstant-int-operands-retain-left-and-right-shift-count-warni.c	2	0	0	-	-	nonconstant int operands retain left and right shift count warnings
+negative-counts-do-not-require-a-constant-left-operand	negative-counts-do-not-require-a-constant-left-operand.c	2	0	0	-	-	negative counts do not require a constant left operand
+ordinary-integer-widths-use-the-promoted-left-type	ordinary-integer-widths-use-the-promoted-left-type.c	2	0	0	-	-	ordinary integer widths use the promoted left type
+narrow-integer-operands-promote-before-count-validation	narrow-integer-operands-promote-before-count-validation.c	1	0	0	-	-	narrow integer operands promote before count validation
+128-bit-values-and-counts-retain-their-complete-widths	128-bit-values-and-counts-retain-their-complete-widths.c	2	0	0	-	-	128-bit values and counts retain their complete widths
+bit-precise-operands-use-their-value-width-rather-than-storage-b	bit-precise-operands-use-their-value-width-rather-than-storage-b.c	2	0	0	c23	-	bit-precise operands use their value width rather than storage bytes
+narrow-bit-fields-use-their-integer-promotion	narrow-bit-fields-use-their-integer-promotion.c	1	0	0	-	-	narrow bit-fields use their integer promotion
+compound-shifts-use-the-original-lvalue-width	compound-shifts-use-the-original-lvalue-width.c	3	0	0	-	-	compound shifts use the original lvalue width
+compound-shifts-retain-negative-count-diagnostics	compound-shifts-retain-negative-count-diagnostics.c	1	0	0	-	-	compound shifts retain negative count diagnostics
+atomic-compound-shifts-use-the-underlying-integer-width	atomic-compound-shifts-use-the-underlying-integer-width.c	1	0	0	-	-	atomic compound shifts use the underlying integer width
+boolean-shifts-distinguish-promoted-ordinary-width-from-compound	boolean-shifts-distinguish-promoted-ordinary-width-from-compound.c	4	0	0	-	-	Boolean shifts distinguish promoted ordinary width from compound storage width
+boolean-dereferences-atomic-lvalues-and-bit-fields-retain-the-co	boolean-dereferences-atomic-lvalues-and-bit-fields-retain-the-co.c	6	0	0	-	-	Boolean dereferences atomic lvalues and bit-fields retain the compound byte boundary
+boolean-count-width-refinement-does-not-change-negative-warnings	boolean-count-width-refinement-does-not-change-negative-warnings.c	4	0	0	-	-	Boolean count width refinement does not change negative warnings in any shift form
+non-boolean-compound-storage-and-bit-precise-value-width-boundar	non-boolean-compound-storage-and-bit-precise-value-width-boundar.c	12	0	0	c23	-	non-Boolean compound storage and bit-precise value-width boundaries remain distinct
+compound-bit-field-counts-use-the-declared-integer-type	compound-bit-field-counts-use-the-declared-integer-type.c	1	0	0	-	-	compound bit-field counts use the declared integer type
+computed-and-explicitly-converted-count-constants-are-checked-in	computed-and-explicitly-converted-count-constants-are-checked-in.c	3	0	0	-	-	computed and explicitly converted count constants are checked independently
+signed-and-unsigned-count-conversions-determine-the-warning-fami	signed-and-unsigned-count-conversions-determine-the-warning-fami.c	2	0	0	-	-	signed and unsigned count conversions determine the warning family
+bit-precise-count-signedness-is-retained	bit-precise-count-signedness-is-retained.c	2	0	0	c23	-	bit-precise count signedness is retained
+unknown-and-in-range-counts-remain-quiet	unknown-and-in-range-counts-remain-quiet.c	0	0	0	-	-	unknown and in-range counts remain quiet
+a-known-payload-with-side-effects-is-not-a-constant-count	a-known-payload-with-side-effects-is-not-a-constant-count.c	0	0	0	-	-	a known payload with side effects is not a constant count
+effects-in-the-left-operand-do-not-suppress-a-constant-count-war	effects-in-the-left-operand-do-not-suppress-a-constant-count-war.c	2	0	0	-	-	effects in the left operand do not suppress a constant count warning
+fully-constant-shifts-retain-one-diagnostic-each	fully-constant-shifts-retain-one-diagnostic-each.c	2	0	0	-	-	fully constant shifts retain one diagnostic each
+constant-and-runtime-shift-diagnostics-share-expression-order	constant-and-runtime-shift-diagnostics-share-expression-order.c	2	0	0	-	-	constant and runtime shift diagnostics share expression order
+runtime-shift-diagnostics-can-precede-retained-constant-diagnost	runtime-shift-diagnostics-can-precede-retained-constant-diagnost.c	2	0	0	-	-	runtime shift diagnostics can precede retained constant diagnostics
+retained-shifts-share-statement-order-with-runtime-and-unused-va	retained-shifts-share-statement-order-with-runtime-and-unused-va.c	4	0	0	-	-	retained shifts share statement order with runtime and unused-value diagnostics
+a-failed-program-retains-its-already-collected-constant-shift-di	a-failed-program-retains-its-already-collected-constant-shift-di.c	1	1	0	-	-	a failed program retains its already collected constant shift diagnostic
+sizeof-operands-do-not-diagnose-runtime-shift-counts	sizeof-operands-do-not-diagnose-runtime-shift-counts.c	0	0	0	-	-	sizeof operands do not diagnose runtime shift counts
+typeof-and-alignof-operands-do-not-diagnose-runtime-shift-counts	typeof-and-alignof-operands-do-not-diagnose-runtime-shift-counts.c	0	0	0	-	-	typeof and alignof operands do not diagnose runtime shift counts
+generic-controlling-expressions-do-not-diagnose-runtime-shift-co	generic-controlling-expressions-do-not-diagnose-runtime-shift-co.c	0	0	0	-	-	generic controlling expressions do not diagnose runtime shift counts
+unselected-generic-arms-retain-queued-shift-count-diagnostics	unselected-generic-arms-retain-queued-shift-count-diagnostics.c	1	0	0	-	-	unselected generic arms retain queued shift-count diagnostics
+a-selected-generic-arm-before-an-unselected-arm-keeps-diagnostic	a-selected-generic-arm-before-an-unselected-arm-keeps-diagnostic.c	2	0	0	-	-	a selected generic arm before an unselected arm keeps diagnostic order
+a-retained-constant-diagnostic-in-an-unselected-generic-arm-prec	a-retained-constant-diagnostic-in-an-unselected-generic-arm-prec.c	2	0	0	-	-	a retained constant diagnostic in an unselected generic arm precedes the selected arm
+an-unreachable-generic-selection-still-diagnoses-its-detached-ar	an-unreachable-generic-selection-still-diagnoses-its-detached-ar.c	1	0	0	-	-	an unreachable generic selection still diagnoses its detached arm
+logical-and-inside-a-detached-generic-arm-retains-its-queued-cou	logical-and-inside-a-detached-generic-arm-retains-its-queued-cou.c	1	0	0	-	-	logical and inside a detached generic arm retains its queued count warning
+logical-or-inside-a-detached-generic-arm-retains-its-queued-coun	logical-or-inside-a-detached-generic-arm-retains-its-queued-coun.c	1	0	0	-	-	logical or inside a detached generic arm retains its queued count warning
+an-ordinary-conditional-inside-a-detached-generic-arm-retains-it	an-ordinary-conditional-inside-a-detached-generic-arm-retains-it.c	1	0	0	-	-	an ordinary conditional inside a detached generic arm retains its queued count warning
+sizeof-suppresses-counts-inside-and-around-detached-generic-arms	sizeof-suppresses-counts-inside-and-around-detached-generic-arms.c	0	0	0	-	-	sizeof suppresses counts inside and around detached generic arms
+typeof-suppresses-counts-inside-and-around-detached-generic-arms	typeof-suppresses-counts-inside-and-around-detached-generic-arms.c	0	0	0	-	-	typeof suppresses counts inside and around detached generic arms
+a-detached-arm-precedes-a-later-statement-s-count-diagnostic	a-detached-arm-precedes-a-later-statement-s-count-diagnostic.c	2	0	0	-	-	a detached arm precedes a later statement's count diagnostic
+a-detached-arm-under-a-conditional-precedes-the-next-operand-s-c	a-detached-arm-under-a-conditional-precedes-the-next-operand-s-c.c	2	0	0	-	-	a detached arm under a conditional precedes the next operand's count diagnostic
+unselected-ordinary-conditional-arms-do-not-diagnose-runtime-shi	unselected-ordinary-conditional-arms-do-not-diagnose-runtime-shi.c	0	0	0	-	-	unselected ordinary conditional arms do not diagnose runtime shift counts
+short-circuited-logical-operands-do-not-diagnose-runtime-shift-c	short-circuited-logical-operands-do-not-diagnose-runtime-shift-c.c	0	0	0	-	-	short-circuited logical operands do not diagnose runtime shift counts
+unselected-choose-arms-retain-queued-shift-count-diagnostics	unselected-choose-arms-retain-queued-shift-count-diagnostics.c	1	0	0	-	-	unselected choose arms retain queued shift-count diagnostics
+unselected-generic-statement-values-publish-each-shift-form-exac	unselected-generic-statement-values-publish-each-shift-form-exac.c	4	0	0	-	-	unselected generic statement values publish each shift form exactly once
+unselected-choose-statement-values-publish-each-shift-form-exact	unselected-choose-statement-values-publish-each-shift-form-exact.c	4	0	0	-	-	unselected choose statement values publish each shift form exactly once
+detached-statement-initializers-retain-their-single-shift-diagno	detached-statement-initializers-retain-their-single-shift-diagno.c	2	0	0	-	-	detached statement initializers retain their single shift diagnostic
+standalone-and-selected-statement-values-retain-one-legitimate-c	standalone-and-selected-statement-values-retain-one-legitimate-c.c	4	0	0	-	-	standalone and selected statement values retain one legitimate count diagnostic
+nested-detached-statement-selections-share-count-ownership-witho	nested-detached-statement-selections-share-count-ownership-witho.c	2	0	0	-	-	nested detached statement selections share count ownership without dropping warnings
+detached-negative-statement-counts-publish-once-in-both-static-s	detached-negative-statement-counts-publish-once-in-both-static-s.c	2	0	0	-	-	detached negative statement counts publish once in both static selections
+unreachable-owners-still-publish-their-detached-statement-count	unreachable-owners-still-publish-their-detached-statement-count.c	2	0	0	-	-	unreachable owners still publish their detached statement count once
+count-ownership-retains-adjacent-unused-value-diagnostics-and-so	count-ownership-retains-adjacent-unused-value-diagnostics-and-so.c	5	0	0	-	-	count ownership retains adjacent unused-value diagnostics and source order
+unevaluated-and-in-range-detached-statement-values-remain-quiet	unevaluated-and-in-range-detached-statement-values-remain-quiet.c	0	0	0	-	-	unevaluated and in-range detached statement values remain quiet
+distinct-detached-macro-expansions-retain-one-count-group-and-no	distinct-detached-macro-expansions-retain-one-count-group-and-no.c	2	0	2	-	-	distinct detached macro expansions retain one count group and note each
+a-selected-choose-arm-before-an-unselected-arm-keeps-diagnostic	a-selected-choose-arm-before-an-unselected-arm-keeps-diagnostic.c	2	0	0	-	-	a selected choose arm before an unselected arm keeps diagnostic order
+a-selected-choose-arm-after-an-unselected-arm-keeps-diagnostic-o	a-selected-choose-arm-after-an-unselected-arm-keeps-diagnostic-o.c	2	0	0	-	-	a selected choose arm after an unselected arm keeps diagnostic order
+an-unreachable-choose-selection-still-diagnoses-its-detached-arm	an-unreachable-choose-selection-still-diagnoses-its-detached-arm.c	1	0	0	-	-	an unreachable choose selection still diagnoses its detached arm
+logical-and-inside-a-detached-choose-arm-retains-its-queued-coun	logical-and-inside-a-detached-choose-arm-retains-its-queued-coun.c	1	0	0	-	-	logical and inside a detached choose arm retains its queued count warning
+logical-or-inside-a-detached-choose-arm-retains-its-queued-count	logical-or-inside-a-detached-choose-arm-retains-its-queued-count.c	1	0	0	-	-	logical or inside a detached choose arm retains its queued count warning
+an-ordinary-conditional-inside-a-detached-choose-arm-retains-its	an-ordinary-conditional-inside-a-detached-choose-arm-retains-its.c	1	0	0	-	-	an ordinary conditional inside a detached choose arm retains its queued count warning
+sizeof-suppresses-counts-inside-and-around-detached-choose-arms	sizeof-suppresses-counts-inside-and-around-detached-choose-arms.c	0	0	0	-	-	sizeof suppresses counts inside and around detached choose arms
+typeof-suppresses-counts-inside-and-around-detached-choose-arms	typeof-suppresses-counts-inside-and-around-detached-choose-arms.c	0	0	0	-	-	typeof suppresses counts inside and around detached choose arms
+generic-controllers-suppress-counts-throughout-nested-static-sel	generic-controllers-suppress-counts-throughout-nested-static-sel.c	0	0	0	-	-	generic controllers suppress counts throughout nested static selections
+generic-controllers-nested-inside-detached-arms-still-suppress-c	generic-controllers-nested-inside-detached-arms-still-suppress-c.c	0	0	0	-	-	generic controllers nested inside detached arms still suppress counts
+static-assertions-suppress-count-diagnostics-in-detached-static	static-assertions-suppress-count-diagnostics-in-detached-static.c	0	0	0	-	-	static assertions suppress count diagnostics in detached static-selection arms
+case-values-suppress-count-diagnostics-in-detached-static-select	case-values-suppress-count-diagnostics-in-detached-static-select.c	0	0	0	-	-	case values suppress count diagnostics in detached static-selection arms
+a-file-scope-constexpr-initializer-suppresses-detached-count-dia	a-file-scope-constexpr-initializer-suppresses-detached-count-dia.c	0	0	0	c23	-	a file-scope constexpr initializer suppresses detached count diagnostics
+a-local-constexpr-initializer-retains-detached-count-diagnostics	a-local-constexpr-initializer-retains-detached-count-diagnostics.c	1	0	0	c23	-	a local constexpr initializer retains detached count diagnostics
+an-omitted-middle-conditional-diagnoses-its-shared-condition-onc	an-omitted-middle-conditional-diagnoses-its-shared-condition-onc.c	1	0	0	-	-	an omitted-middle conditional diagnoses its shared condition once
+an-omitted-middle-conditional-in-a-detached-arm-diagnoses-its-sh	an-omitted-middle-conditional-in-a-detached-arm-diagnoses-its-sh.c	1	0	0	-	-	an omitted-middle conditional in a detached arm diagnoses its shared condition once
+a-selected-statement-expression-retains-its-dead-shift-s-suppres	a-selected-statement-expression-retains-its-dead-shift-s-suppres.c	0	0	0	-	-	a selected statement expression retains its dead shift's suppression
+selected-conditional-operands-still-diagnose-their-counts	selected-conditional-operands-still-diagnose-their-counts.c	2	0	0	-	-	selected conditional operands still diagnose their counts
+dead-statements-do-not-diagnose-runtime-shift-counts	dead-statements-do-not-diagnose-runtime-shift-counts.c	0	0	0	-	-	dead statements do not diagnose runtime shift counts
+reachable-statement-arms-diagnose-their-counts	reachable-statement-arms-diagnose-their-counts.c	2	0	0	-	-	reachable statement arms diagnose their counts
+vector-shifts-retain-their-separate-count-semantics	vector-shifts-retain-their-separate-count-semantics.c	0	0	0	syntax-only	-	vector shifts retain their separate count semantics
+# Baseline x86-64 cannot lower this vector shift; the ordinary expression still checks warning exclusion.
+macro-shift-counts-retain-expansion-notes	macro-shift-counts-retain-expansion-notes.c	1	0	1	-	-	macro shift counts retain expansion notes
+a-comma-s-discarded-left-operand-warns-where-clang-builds-it-bef	a-comma-s-discarded-left-operand-warns-where-clang-builds-it-bef.c	2	0	0	-	-	a comma's discarded left operand warns where clang builds it, before a later shift count
+commas-counts-and-divisions-keep-their-build-order-within-one-ex	commas-counts-and-divisions-keep-their-build-order-within-one-ex.c	14	0	0	-	-	commas, counts and divisions keep their build order within one expression
+a-comma-s-marker-precedes-the-constant-conversions-its-full-expr	a-comma-s-marker-precedes-the-constant-conversions-its-full-expr.c	5	0	0	-	-	a comma's marker precedes the constant conversions its full expression completes
+statement-conditions-and-for-increments-warn-before-their-bodies	statement-conditions-and-for-increments-warn-before-their-bodies.c	16	0	0	-	-	statement conditions and for increments warn before their bodies
+a-declarator-s-initializer-warns-before-the-later-declarators	a-declarator-s-initializer-warns-before-the-later-declarators.c	2	0	0	-	-	a declarator's initializer warns before the later declarators'
+comma-and-count-ordering-under-wall	comma-and-count-ordering-under-wall.c	4	0	0	-	-Wall	comma and count ordering under -Wall
+# A statement expression's statements warn where clang builds them (#1447): between what its enclosing expression built
+# before it and after it, its last value once.
+a-statement-expression-s-statements-warn-between-its-enclosing-e	a-statement-expression-s-statements-warn-between-its-enclosing-e.c	18	0	0	-	-	a statement expression's statements warn between its enclosing expression's operands
+a-statement-expression-s-last-value-warns-once	a-statement-expression-s-last-value-warns-once.c	8	0	0	-	-	a statement expression's last value warns once
+a-statement-expression-s-conditions-warn-before-their-bodies-and	a-statement-expression-s-conditions-warn-before-their-bodies-and.c	8	0	0	-	-	a statement expression's conditions warn before their bodies and its later statements
+statement-expressions-order-under-wall	statement-expressions-order-under-wall.c	6	0	0	-	-Wall	statement expressions' order under -Wall
+unused-value-suppression-keeps-the-reordered-counts	unused-value-suppression-keeps-the-reordered-counts.c	3	0	0	-	-Wno-unused-value	unused-value suppression keeps the reordered counts
+overflow-count-suppression-preserves-the-negative-count-family	overflow-count-suppression-preserves-the-negative-count-family.c	1	0	0	-	-Wno-shift-count-overflow	overflow count suppression preserves the negative count family
+negative-count-suppression-preserves-the-overflow-count-family	overflow-count-suppression-preserves-the-negative-count-family.c	1	0	0	-	-Wno-shift-count-negative	negative count suppression preserves the overflow count family
+specific-count-warning-promotion-rejects-object-publication	specific-count-warning-promotion-rejects-object-publication.c	0	1	0	-	-Werror=shift-count-overflow	specific count warning promotion rejects object publication
+source-diagnostic-push-and-pop-preserve-shift-count-policy	source-diagnostic-push-and-pop-preserve-shift-count-policy.c	1	0	0	-	-	source diagnostic push and pop preserve shift count policy
+# A folded shift's own warnings (#1447): clang's DiagnoseBadShiftValues words -Wshift-negative-value and
+# -Wshift-overflow, and only the former and the counts are runtime-behavior ones, deferred to the function's end
+# and dropped where no path reaches.
+folded-shifts-word-their-overflow-and-negative-left-operands-as	folded-shifts-word-their-overflow-and-negative-left-operands-as.c	5	0	0	-	-	folded shifts word their overflow and negative left operands as clang does
+a-folded-negative-shift-waits-for-the-function-s-end-while-its-o	a-folded-negative-shift-waits-for-the-function-s-end-while-its-o.c	4	0	0	-	-	a folded negative shift waits for the function's end while its overflow does not
+a-body-s-shift-overflow-precedes-a-later-shift-precedence-warnin	a-body-s-shift-overflow-precedes-a-later-shift-precedence-warnin.c	2	0	1	-	-	a body's shift overflow precedes a later shift precedence warning
+unreachable-and-unevaluated-shift-overflow-keeps-its-source-orde	unreachable-and-unevaluated-shift-overflow-keeps-its-source-orde.c	4	0	2	-	-	unreachable and unevaluated shift overflow keeps its source order
+shift-overflow-warns-before-a-deferred-negative-shift-and-a-late	shift-overflow-warns-before-a-deferred-negative-shift-and-a-late.c	3	0	1	-	-	shift overflow warns before a deferred negative shift and a later precedence warning
+source-suppression-of-shift-overflow-preserves-later-precedence	source-suppression-of-shift-overflow-preserves-later-precedence.c	1	0	1	-	-	source suppression of shift overflow preserves later precedence diagnostics
+unreachable-folded-shifts-drop-their-runtime-warnings-and-keep-t	unreachable-folded-shifts-drop-their-runtime-warnings-and-keep-t.c	3	0	0	-	-	unreachable folded shifts drop their runtime warnings and keep their overflow
+constant-contexts-leave-a-folded-negative-shift-to-the-constant	constant-contexts-leave-a-folded-negative-shift-to-the-constant.c	1	0	0	-	-	constant contexts leave a folded negative shift to the constant evaluation
+an-unreachable-promoted-folded-shift-neither-reports-nor-rejects	an-unreachable-promoted-folded-shift-neither-reports-nor-rejects.c	0	0	0	-	-Werror=shift-negative-value -Werror=shift-count-overflow	an unreachable promoted folded shift neither reports nor rejects the unit
+a-reachable-promoted-folded-shift-rejects-the-unit	a-reachable-promoted-folded-shift-rejects-the-unit.c	0	1	0	-	-Werror=shift-negative-value	a reachable promoted folded shift rejects the unit
+source-policy-reaches-folded-shifts-runtime-and-immediate-warnin	source-policy-reaches-folded-shifts-runtime-and-immediate-warnin.c	2	1	0	-	-	source policy reaches folded shifts' runtime and immediate warnings
+# Review on #1778: clang has no CFG block for an unselected static-selection arm, and its Sema evaluates a reachable
+# statement's folded condition, whose range our program drops.
+unselected-static-selection-arms-keep-their-folded-negative-shif	unselected-static-selection-arms-keep-their-folded-negative-shif.c	4	0	0	-	-	unselected static-selection arms keep their folded negative shifts
+a-reachable-statement-s-folded-condition-keeps-its-shifts-warnin	a-reachable-statement-s-folded-condition-keeps-its-shifts-warnin.c	7	0	1	-	-	a reachable statement's folded condition keeps its shifts' warnings and an unreached one drops them
+# Re-review on #1778: a static selection's unselected roots never stand for a folded condition's statement.
+a-folded-condition-before-a-static-selection-keeps-its-shifts-wa	a-folded-condition-before-a-static-selection-keeps-its-shifts-wa.c	6	0	0	-	-	a folded condition before a static selection keeps its shifts' warnings in its place
+# Re-review on #1778: an unselected static-selection arm's shifts warn in the selection's order, not its root's.
+unselected-static-selection-arms-folded-shifts-warn-in-their-ord	unselected-static-selection-arms-folded-shifts-warn-in-their-ord.c	6	0	0	-	-	unselected static-selection arms' folded shifts warn in their order
+# Re-review on #1778: a folded condition's statement whose arm has no expression is reached where its place is.
+a-folded-condition-with-an-empty-arm-keeps-its-shifts-warnings-o	a-folded-condition-with-an-empty-arm-keeps-its-shifts-warnings-o.c	8	0	0	-	-	a folded condition with an empty arm keeps its shifts' warnings only where its place is reached
+a-unit-with-an-error-keeps-its-folded-shifts-runtime-warnings	a-unit-with-an-error-keeps-its-folded-shifts-runtime-warnings.c	3	1	0	-	-	a unit with an error keeps its folded shifts' runtime warnings

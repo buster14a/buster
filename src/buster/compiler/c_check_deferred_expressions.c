@@ -390,8 +390,9 @@ static bool check_deferred_expression_parallel(const CheckInputReader* reader, u
             valid = kind != PARSE_KIND_AMPAMP;
             if (kind == PARSE_KIND_SIZEOF)
             {
-                const TypeId type = reader->query_types[token] != 0 ? reader->query_types[token] : reader->sizeof_types[token];
-                valid = parser->tokens.names[token] == C_NAME_SIZEOF && reader->sizeof_types[token] != 0 &&
+                const TypeId operand = check_input_memo_get(reader, reader->sizeof_types, token);
+                const TypeId type = reader->query_types[token] != 0 ? reader->query_types[token] : operand;
+                valid = parser->tokens.names[token] == C_NAME_SIZEOF && operand != 0 &&
                         type != 0 && !check_input_vla_runtime_size(reader->types, type);
             }
         }

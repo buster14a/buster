@@ -167,32 +167,5 @@ static void check_test_program_copies(CheckTest* test, const char* clang)
                  "return (int)(value+floating*4)+ds*100+ss*1000;}", execution_sizes[i]);
         check_test_program_source(test, source, name, clang);
     }
-    check_test_program_source(test,
-        "struct S{unsigned char c[513];};static volatile struct S a,b;"
-        "int tested(int n){for(int i=0;i<513;i++)a.c[i]=(unsigned char)(n+i);b=a;b=b;"
-        "struct S r=a;b=r;return (b=a).c[512]+r.c[0];}", "aggregate-copy-volatile-accesses", clang);
-    check_test_program_source(test,
-        "struct S{volatile unsigned char c[3][171];};static struct S a,b;"
-        "struct S returned(void){return a;}"
-        "int tested(int n){for(int i=0;i<3;i++)for(int j=0;j<171;j++)a.c[i][j]=(unsigned char)(n+i+j);"
-        "b=a;b=b;struct S r=returned();return b.c[2][170]+r.c[0][0];}",
-        "aggregate-copy-volatile-array-subobjects", clang);
-    check_test_program_source(test,
-        "struct S{unsigned char c[513];};static struct S a;"
-        "int tested(int n){for(int i=0;i<513;i++)a.c[i]=(unsigned char)(n+i);"
-        "volatile struct S r=a;return r.c[0]+r.c[512];}",
-        "aggregate-copy-volatile-initializer-destination", clang);
-    check_test_program_source(test,
-        "extern void* memmove(void*,const void*,unsigned long);struct S{char c[513];};static struct S a,b;"
-        "int tested(int n){for(int i=0;i<513;i++)a.c[i]=(char)(n+i);b=a;return (b=a).c[512]+b.c[0];}",
-        "aggregate-copy-declared-runtime", clang);
-    check_test_program_source(test,
-        "struct S{char c[513];};static struct S a,b;int tested(int n){a.c[512]=(char)n;b=a;"
-        "return __builtin_isnan(__builtin_sqrt((double)n))+b.c[512];}",
-        "aggregate-copy-shares-runtime-publication", clang);
-    check_test_program_source(test,
-        "struct S{char c[1025];};struct S pass(struct S s){struct S r=s;return r;}"
-        "int tested(int n){struct S a;for(int i=0;i<1025;i++)a.c[i]=(char)(n+i);struct S b=pass(a);"
-        "for(int i=0;i<1025;i++)if(a.c[i]!=b.c[i])return -1003;return b.c[1024];}",
-        "aggregate-copy-argument-initializer-return", clang);
+    check_test_program_suite(test, "checker/programs/program-copies", clang);
 }
