@@ -51,3 +51,4 @@ buster-fixtures v1 preprocessor-directives
 0049	c23	-	extra tokens on #elifdef
 0050	-	-	after #line
 0051	-	-	digraphs and splices
+header-diagnostic-percent	gnu17	header,expected	percent text in header and main diagnostics

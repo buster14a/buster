@@ -793,8 +793,8 @@ static bool pp_directive_test_structure_row(PPTestFixtures* table, const char* d
     return valid;
 }
 
-// Existing nonempty suffix goldens start at the first location's colon. A full golden can name
-// either staged file at every diagnostic location using the same %d directory marker as line-marker fixtures.
+// In a full diagnostic transcript, normalize the staged directory only at a location: at the start of a line or
+// after the include-trace prefix. Messages, including every percent character, are compared byte for byte.
 static bool pp_directive_test_expected(const char* actual, const char* wanted, const char* directory, const char* path)
 {
     bool same = true;
@@ -806,21 +806,25 @@ static bool pp_directive_test_expected(const char* actual, const char* wanted, c
     }
     else
     {
+        static const char trace[] = "In file included from ";
         const size_t length = strlen(directory);
-        while (same && *wanted != 0)
+        while (same && *actual != 0)
         {
-            if (strncmp(wanted, "%d/", 3) == 0)
+            const size_t prefix = strncmp(actual, trace, sizeof(trace) - 1) == 0 ? sizeof(trace) - 1 : 0;
+            const char* location = actual + prefix;
+            if (strncmp(location, directory, length) == 0 && location[length] == '/')
             {
-                same = strncmp(actual, directory, length) == 0;
-                actual += same ? length : 0;
-                wanted += 2;
+                same = strncmp(wanted, actual, prefix) == 0 && strncmp(wanted + prefix, "%d/", 3) == 0;
+                actual = location + length;
+                wanted += same ? prefix + 2 : 0;
             }
-            else
+            size_t line = strcspn(actual, "\n");
+            line += actual[line] == '\n';
+            same = same && strncmp(wanted, actual, line) == 0;
+            if (same)
             {
-                wanted += wanted[0] == '%' && wanted[1] == '%';
-                same = *actual == *wanted;
-                actual += same;
-                wanted += 1;
+                actual += line;
+                wanted += line;
             }
         }
     }

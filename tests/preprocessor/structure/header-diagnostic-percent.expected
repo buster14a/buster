@@ -1,0 +1,3 @@
+In file included from %d/structure.c:1:
+%d/structure.h:1:2: error: header progress %% and %d/structure.h and %%d/path
+%d/structure.c:2:2: error: main progress %% and %d/path
