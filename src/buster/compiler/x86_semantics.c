@@ -3168,9 +3168,10 @@ static __attribute__((unused)) uint64_t x86_register_resource(uint8_t value, boo
 #define BUSTER_X86_EFFECTS_RARE ((uint64_t)BUSTER_X86_EFFECTS_RARE_PROPERTIES << 48)
 
 // The rare records of a call that x86_instructions_effects_lanes has stored (it found one), completed in place, 8 at a
-// time: the terms the common block leaves out. Each block's lanes' effects records and operand bytes are read again (a
-// lane's qwords broadcast into it under its mask, no array in memory), its rare lanes found as the common block finds
-// them, and those lanes completed:
+// time: the terms the common block leaves out. A block whose lanes' forms have no rare property (their records'
+// properties alone) is passed over; another's lanes' effects records and operand bytes are read again (a lane's qwords
+// broadcast into it under its mask, no array in memory), its rare lanes found as the common block finds them, and those
+// lanes completed:
 //   - the x87's state and control word, and vzeroupper's ZMM0 to ZMM15 (properties' bits 8 to 10, a register lookup):
 //     the common rare records', which need nothing else;
 //   - RARE's and IMPLICIT_VECTORS' records' operands, where a block has one:
@@ -3194,6 +3195,18 @@ static __attribute__((noinline)) void x86_effects_rare_records(const X86Instruct
     {
         const uint64_t left = count - first;
         const uint32_t lanes = left >= 8 ? 8 : (uint32_t)left;
+        // Whether any lane's form has a rare property, its properties alone (2 bytes of its record): most blocks of a
+        // long call have none.
+        uint32_t candidates = 0;
+        for (uint32_t lane = 0; lane < lanes; lane += 1)
+        {
+            const X86Effects* effects = &x86_effects_records[x86_effects_by_form[instructions[first + lane].form & BUSTER_X86_FORM_NUMBER]];
+            candidates |= (effects->properties & BUSTER_X86_EFFECTS_RARE_PROPERTIES) != 0 ? 1u : 0u;
+        }
+        if (candidates == 0)
+        {
+            continue;
+        }
         __m512i facts = zero;
         __m512i details = zero;
         uint64_t packed = 0;
