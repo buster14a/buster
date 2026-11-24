@@ -97,45 +97,63 @@ Embedded-rounding forms mask the length bits used for rounding. Missing trailing
 bytes are excluded from signature comparison so an incomplete candidate still
 receives the correct truncation result.
 
-The default path additionally compresses VEX/EVEX signature lookup. Each bucket
-checks its common bits once; `PEXT` packs the remaining varying bits into an
-exact-size cell table. A unique cell names a candidate, an empty cell rejects it,
-and an ambiguous cell retains the ordered SIMD scan. Wildcard rows populate all
-matching cells. Incomplete headers still take the ordinary matcher so missing
-signature bytes do not turn truncation into unsupported input. Candidate construction
-and operand validation remain mandatory after a direct lookup.
+One decoder decodes every instruction, 16 at a time (#3451). A window is the 128
+bytes from the decode's position, masked to the slice:
 
-The matcher classifies 64 input bytes at once using two nibble-table byte
-shuffles and a mask intersection. It reuses the prefix mask across instructions
-and matches eight candidate signatures in one vector comparison, taking the first
-complete match in catalogue order.
-For ordinary operand classes, initialization packs register/decorator masks and
-memory admission into a small descriptor. Parsing establishes consistent addressing
-modes, base/index bounds, immediate widths and high-byte/REX exclusion; the compact
-checks validate the remaining constraints. Special classes, VSIB, grouped registers
-and other exceptional relationships retain the full validator.
+- **Lengths.** The length pass computes each of the window's first 64 positions'
+  length as if an instruction started there. It finds the position's prefix run
+  (a REX ends it; FWAIT prefixes only a waiting x87 form), the REX, `0F`, `0F 38`
+  and `0F 3A` escapes, and VEX (`C5`, `C4`), XOP (`8F`) and EVEX (`62`) headers.
+  It then adds the opcode's tail: ModRM, SIB and displacement from their bytes,
+  plus the trailing immediate and relative bytes. Each bucket (family, map,
+  opcode) has a tail descriptor fitted to its forms and checked against every
+  one at initialization (`x86_decode_tails`): a ModRM byte or not, the trailing
+  bytes, and the trailing bytes with 66, with REX.W, and on the ModRM digits
+  that carry an immediate (F6's and F7's /0 and /1). A fixed byte after the
+  opcode (`0F 01 D0`, `D9 E8`) has mod 3, so it is as long as a ModRM. The
+  descriptors become `VPERMB` tables: legacy maps 0 and 1 by opcode, VEX's and
+  EVEX's map 1 by opcode, every other map uniform. One bucket's forms disagree
+  in a way the descriptor can't hold: `0F 78`, whose unprefixed and F2 forms
+  differ in immediates. Its positions get no hint.
+- **Starts.** Up to 16 starts follow from position 0 through the hints, by
+  pointer jumping: four steps of `VPERMB` doubling. A position without a hint
+  ends the chain after itself. The next window starts at the last hint's end,
+  so the next length pass doesn't wait for this window's lanes. A branch takes
+  the lanes' own end when one failed or wasn't its hint's length.
+- **Headers and keys.** The lanes read their prefixes as the header rules have
+  them: segment overrides and 67 once each, up to four other prefixes, and
+  Clang's 66 and CS padding before `0F 1F`. They also read the VEX, XOP or
+  EVEX fields. Each lane's key is compact, 24 bits: the first three prefixes as
+  3-bit codes (none, 66, F2, F3, F0, 2E, 3E, 9B: the bytes forms' keys hold),
+  W, L, b, pp, the byte where ModRM sits, and the memory bit.
+- **Forms.** Every bucket's signatures are indexed over the compact keys: the
+  common bits are checked once, and `PEXT` of the varying bits (14 at most)
+  names a cell. A cell holds no form, one row, or, for the 80 ambiguous cells,
+  a list of rows in catalogue order. A lane takes its cell's row; a lane with a
+  list takes its rows in rounds until one decodes. A lane whose opcode is its
+  input's last byte matches its bucket's signatures on the bits it has.
+- **Operands, checks and status.** Each row's lane data is one 16-byte entry:
+  its encoding, widths and operand flags, and its compact checks. It is loaded
+  a lane at a time and transposed into vectors, not gathered: Zen 5's gathers
+  are microcoded, and a vector load of scalar stores waits for all of them.
+  Operands, the compact checks, truncation (`TRUNCATED` where a supported
+  encoding runs past the input, `UNSUPPORTED` past 15 bytes) and the header
+  rules' statuses are computed in the lanes. A row outside the compact checks
+  takes the encoder's validator. A lane starting with FWAIT whose waiting form
+  failed is FWAIT alone, one byte.
+- **Records.** The lanes' records are transposed into 24-byte records and
+  written with masked stores: the lanes before the first that failed, and none
+  after one whose length wasn't its hint.
 
-The default `batched` AVX-512 path computes speculative instruction lengths at
-64 byte positions in parallel. A 256-byte opcode metadata table is derived
-from unprefixed one-byte catalogue forms whose layouts agree. Two 128-byte
-in-register lookups select ModRM/immediate metadata; byte masks derive optional
-REX, SIB and displacement lengths. A short dependency walk chooses up to sixteen
-reachable starts. An independently derived direct-admission table selects only
-unambiguous ordinary legacy forms. `VPERMB` extracts fields at those starts;
-registers, SIB modes, signed displacements and immediates are constructed in lanes.
-Scalar loads select table entries and scalar stores publish the 24-byte records;
-costly gather/scatter instructions are avoided. Unknown or ambiguous rows use the
-ordinary matcher, and a disagreement resumes at the actual decoded boundary.
-The same classification/length window is reused across fallbacks. Hints alone
-never authorize an unchecked read, record or skipped input byte.
+Hints alone never authorize an unchecked read, record or skipped input byte.
 
 Every vector source load is masked to the logical slice, including overlapping
 windows and zero-length tails. Neither input padding nor readable bytes after
 the slice are required. Output stores publish one complete record at a time
 within capacity. Initialization must finish before concurrent readers begin;
 the public initializer also initializes the encoder's validation prerequisites.
-It allocates two retained regions: the exact padded signature arrays and compressed
-index cells. Initialization returns false on allocation failure, releases a partial
+It allocates three retained regions: the exact padded signature arrays, the lane
+index's cells and its candidate lists. Initialization returns false on allocation failure, releases a partial
 allocation and permits a later retry. Storage lasts for the process; no reset or
 destructor is provided. Tables are read-only thereafter and decode calls allocate nothing. Source and
 output record storage must not overlap; in-place expansion is unsupported.
@@ -252,6 +270,35 @@ control) were as fast as its vector arms or up to 2.3% faster unbatched, and
 2.9% faster than the default path on the all-VEX/EVEX vector mix, as PR #240
 found below; the default path keeps the vector arms. The sections below are
 history: their tables name the removed controls.
+
+## One decoder (#3451)
+
+`x86_decode_one`, the one-instruction-at-a-time decoder the batch fell back to, and
+the batch's direct-admission table are gone: one vector decoder decodes every lane,
+as "Data layout and vector work" describes. #3451's census found
+`x86_decode_one` took 29% of the compiler's own `.text` (1.99M of 6.92M
+instructions), 83% of it VEX, EVEX or lengths the old one-byte table didn't have.
+Extending the batch alone to the `0F` map and leaving the rest to
+`x86_decode_one` gained on real code but lost on the synthetic streams whichever
+way the window's lanes were split. The records are in buster-performance under
+`docs/measurements/scalar-paths-removal-2924-2026-11-17/`. On the 9700X, decode
+alone, ns an instruction, against main `d6daf644d`:
+
+| Stream | main | one decoder |
+| --- | ---: | ---: |
+| synthetic ordinary | 7.52 | 7.28 |
+| synthetic VEX/EVEX | 26.8 | 9.5 |
+| the compiler's `.text` | 13.03 | 9.03 |
+| `main.c`'s `-c` object | 11.33 | 10.13 |
+| `main.c`'s `--tier1` object | 10.03 | 8.97 |
+
+The tests check the lane index against a scan of each bucket's signatures, and
+every supported form's hint against its encoded length. The decoder's contract
+checks hold for every catalogue instance and generated, mutated and random
+stream. While the change was made, every `x86_disassemble` call of the test
+command was also run through the old decoder, and none differed. The sections
+below describe the decoder before it: the "default", "batched" and "matcher"
+paths, the direct-admission table and the remaining-costs notes are history.
 
 ## Recorded validation
 

@@ -33,7 +33,9 @@ aren't a second decoder: the encoder's bytes for generated streams, a prefix tab
 for the classifier, hand-written semantic fixtures, and the decoder's contract on
 every decode (records tile the input, each decodes alone to itself, slices keep
 their records, a stop decodes alone the same, text is the same at every capacity
-that holds it, listing columns written by the test). [The design
+that holds it, listing columns written by the test), the lane index against a
+scan of each bucket's signatures, and the length pass's hint against every
+supported form's encoded length (#3451). [The design
 notes](../x86-64-disassembler.md#validation-and-measurement) list them. Keep the
 fixtures and guarded tails. Benchmarks separate decode from decode plus formatting
 or listing and include `--file raw.text` and `--phase decode|classify|format|listing`.
