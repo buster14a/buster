@@ -6,4 +6,4 @@
 # A change that means to move it, a feature's cost or a cut's gain, replaces the line below with its own: its move in
 # percent of its base's count, as the step prints it, and what moved it. Every other change leaves this file alone;
 # the line then still states the last move, which no later change is held to.
--10.83 the expression warnings' searches where a message stands (#1340)
+-2.24 the reach scan's filter (#1340)
