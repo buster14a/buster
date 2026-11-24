@@ -1,0 +1,1 @@
+int f(int);int f(a)char a;{return a;}int g(void){return f(1,2);}

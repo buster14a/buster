@@ -1,0 +1,4 @@
+#ifndef G
+#define G
+guarded
+#endif

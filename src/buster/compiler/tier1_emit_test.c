@@ -221,7 +221,7 @@ static void tier1_emit_test_pressure(Tier1EmitTest* test)
                 IrFunction function;
                 const bool created = tier1_emit_test_fixture(test, &function);
                 tier1_emit_test_expect(test, created, "construct original pressure IR");
-                for (uint32_t vector = 0; created && vector < 2; vector += 1)
+                if (created)
                 {
                     uint32_t ordinary_spills = 0;
                     for (uint32_t remat = 0; remat < 2; remat += 1)
@@ -236,7 +236,6 @@ static void tier1_emit_test_pressure(Tier1EmitTest* test)
                                 .certify = true,
                                 .register_mask = (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI),
                                 .frame_flags = size % 3 == 0 ? 0 : size % 3 == 1 ? BUSTER_TIER1_FRAME_KEEP_POINTER : BUSTER_TIER1_FRAME_NO_RED_ZONE | BUSTER_TIER1_FRAME_PROBE_STACK,
-                                .vector = vector != 0,
                                 .rematerialize = remat != 0,
                             };
                             Tier1EmitResult emitted;
@@ -245,7 +244,7 @@ static void tier1_emit_test_pressure(Tier1EmitTest* test)
                             tier1_emit_test_expect(test, error == TIER1_EMIT_OK, "liveness, allocation, frame and fragment emission succeed");
                             if (error != TIER1_EMIT_OK && test->failures < 20)
                             {
-                                fprintf(stderr, "  emission error=%u node=%u vector=%u remat=%u\n", error, node, vector, remat);
+                                fprintf(stderr, "  emission error=%u node=%u remat=%u\n", error, node, remat);
                             }
                             tier1_emit_test_expect(test, test->scratch.length == scratch_mark, "complete emission returns scratch");
                             if (error == TIER1_EMIT_OK)
@@ -301,7 +300,7 @@ static void tier1_emit_test_failures(Tier1EmitTest* test)
         const uint64_t scratch_mark = test->scratch.length;
         for (uint32_t failure = 0; failure < 4; failure += 1)
         {
-            Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .vector = true, .rematerialize = true, .certify = true };
+            Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .rematerialize = true, .certify = true };
             Tier1EmitError wanted = TIER1_EMIT_INVALID;
             Arena limited = test->output;
             uint8_t* denied = calloc(X86_FORM_COUNT, 1);
@@ -350,7 +349,7 @@ static void tier1_emit_test_failures(Tier1EmitTest* test)
         if (ready)
         {
             // The entry is its own loop's header: the CFG consumer puts a block before it and jumps back to the loop.
-            const Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .vector = true, .certify = true };
+            const Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .certify = true };
             Tier1EmitResult output;
             const bool emitted = tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &output, &node) == TIER1_EMIT_OK;
             tier1_emit_test_expect(test, emitted, "a loop through the entry goes through the CFG consumer");
@@ -368,7 +367,7 @@ static void tier1_emit_test_failures(Tier1EmitTest* test)
     ready = ir_create(&test->input, &empty_sizes, &function) == IR_OK && tier1_select_plan(&function, 0, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
     if (ready)
     {
-        const Tier1EmitOptions options = { .vector = true, .certify = true };
+        const Tier1EmitOptions options = { .certify = true };
         Tier1EmitResult output;
         const Tier1EmitError error = tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &output, &node);
         tier1_emit_test_expect(test, error == TIER1_EMIT_OK && output.code.count == 0 && output.allocation.spill_count == 0, "empty pipeline accepts null columns");
@@ -990,158 +989,154 @@ static void tier1_emit_test_objects(Tier1EmitTest* test)
 {
     for (uint32_t shape = 0; shape < 13; shape += 1)
     {
-        for (uint32_t vector = 0; vector < 2; vector += 1)
+        for (uint32_t flags = 0; flags < (shape >= 5 ? 4 : shape == 2 ? 2 : 1); flags += 1)
         {
-            for (uint32_t flags = 0; flags < (shape >= 5 ? 4 : shape == 2 ? 2 : 1); flags += 1)
+            test->terms = shape;
+            IrFunction function = { 0 };
+            const bool created = tier1_emit_test_object_fixture(test, shape, &function);
+            tier1_emit_test_expect(test, created, "construct original object IR");
+            Tier1SelectPlan plan;
+            uint32_t node = BUSTER_IR_NONE;
+            // Every non-entry block is an immediate child of entry: the preheader's one successor or the two
+            // comparison exits. Cross-block uses, including the exits' returned parameters, need this proof.
+            uint32_t dominance_enter[3] = { 0, 1, 2 };
+            uint32_t dominance_leave[3] = { function.block_count, 2, 3 };
+            const IrDominance dominance = { .enter = dominance_enter, .leave = dominance_leave, .block_count = function.block_count };
+            const Tier1SelectError selected = created ? tier1_select_plan(&function, function.block_count > 1 ? &dominance : 0, &test->output, &test->scratch, &plan, &node) : TIER1_SELECT_ERROR_INVALID;
+            tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "select real object IR");
+            if (selected == TIER1_SELECT_OK)
             {
-                test->terms = shape;
-                IrFunction function = { 0 };
-                const bool created = tier1_emit_test_object_fixture(test, shape, &function);
-                tier1_emit_test_expect(test, created, "construct original object IR");
-                Tier1SelectPlan plan;
-                uint32_t node = BUSTER_IR_NONE;
-                // Every non-entry block is an immediate child of entry: the preheader's one successor or the two
-                // comparison exits. Cross-block uses, including the exits' returned parameters, need this proof.
-                uint32_t dominance_enter[3] = { 0, 1, 2 };
-                uint32_t dominance_leave[3] = { function.block_count, 2, 3 };
-                const IrDominance dominance = { .enter = dominance_enter, .leave = dominance_leave, .block_count = function.block_count };
-                const Tier1SelectError selected = created ? tier1_select_plan(&function, function.block_count > 1 ? &dominance : 0, &test->output, &test->scratch, &plan, &node) : TIER1_SELECT_ERROR_INVALID;
-                tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "select real object IR");
-                if (selected == TIER1_SELECT_OK)
+                Tier1EmitDiagnostic diagnostic = { 0 };
+                const Tier1EmitOptions options = {
+                    .certify = true,
+                    .diagnostic = &diagnostic,
+                    .register_mask = tier1_liveness_register_mask(),
+                    .frame_flags = (flags & 1) != 0 ? BUSTER_TIER1_FRAME_KEEP_POINTER : 0,
+                    .rematerialize = flags < 2,
+                };
+                Tier1EmitResult emitted;
+                const uint64_t scratch_mark = test->scratch.length;
+                const Tier1EmitError error = tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node);
+                if (error != TIER1_EMIT_OK && test->failures < 20)
                 {
-                    Tier1EmitDiagnostic diagnostic = { 0 };
-                    const Tier1EmitOptions options = {
-                        .certify = true,
-                        .diagnostic = &diagnostic,
-                        .register_mask = tier1_liveness_register_mask(),
-                        .frame_flags = (flags & 1) != 0 ? BUSTER_TIER1_FRAME_KEEP_POINTER : 0,
-                        .vector = vector != 0,
-                        .rematerialize = flags < 2,
-                    };
-                    Tier1EmitResult emitted;
-                    const uint64_t scratch_mark = test->scratch.length;
-                    const Tier1EmitError error = tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node);
-                    if (error != TIER1_EMIT_OK && test->failures < 20)
-                    {
-                        fprintf(stderr, "tier1-emit: object emission (shape=%u, vector=%u, frame_flags=0x%x, error=%u, error_node=%u, cause=%u, cause_error=%u)\n",
-                                shape, vector, options.frame_flags, (unsigned)error, node, (unsigned)diagnostic.cause, diagnostic.error);
-                    }
-                    tier1_emit_test_expect(test, error == TIER1_EMIT_OK, "object pipeline emits through the CFG consumer");
-                    if (error == TIER1_EMIT_OK)
-                    {
-                        tier1_emit_test_expect(test, emitted.general, "a frame object takes the CFG consumer");
-                        bool covered = true;
-                        for (uint32_t n = 0; n < function.instruction_count; n += 1)
-                        {
-                            covered &= function.op[n] != IR_STACK_ADDR || (plan.covered[n] != 0) == !(shape == 6 && n == 2);
-                        }
-                        tier1_emit_test_expect(test, covered, "every folded object address leaves no lea");
-                        uint32_t object_leas = 0;
-                        for (uint32_t n = 0; n < function.instruction_count; n += 1)
-                        {
-                            object_leas += plan.covered[n] == 0 && plan.patterns[n].rule == TIER1_RULE_STACK_ADDRESS;
-                        }
-                        tier1_emit_test_expect(test, object_leas == (shape == 6 ? 1u : 0u), "only an escaping object address keeps its lea");
-                        if (shape == 3)
-                        {
-                            tier1_emit_test_expect(test, !plan.covered[3] && plan.patterns[6].stack_object == 0 &&
-                                                           (plan.covered[7] ? plan.patterns[8].stack_object : plan.patterns[7].stack_object) == 0,
-                                                   "shared displaced address remains for its escape while both memory users fold it");
-                        }
-                        if (shape == 6)
-                        {
-                            tier1_emit_test_expect(test, plan.patterns[4].stack_object == 1 && plan.patterns[5].stack_object == 1 &&
-                                                           (plan.covered[7] ? plan.patterns[8].stack_object : plan.patterns[7].stack_object) == 0,
-                                                   "shared frame address remains for a pointer store and its folded memory uses keep their own objects");
-                        }
-                        if (shape == 8)
-                        {
-                            int32_t offset = 0;
-                            const uint32_t first = emitted.code.node_first[5];
-                            const uint32_t end = emitted.code.node_first[6];
-                            const X86Instruction* record = end > first ? &emitted.code.records[end - 1] : 0;
-                            tier1_emit_test_expect(test, !plan.covered[5] && plan.patterns[5].stack_object == 1 && plan.patterns[5].displacement == 0 &&
-                                                           tier1_emit_cfg_object(&function, &emitted, 1, &offset) && offset != 0 && record != 0 &&
-                                                           record->form == X86_FORM_LEA_R64_M && record->mode == BUSTER_X86_MEMORY_BASE_INDEX(0) &&
-                                                           record->rm == (uint8_t)emitted.frame.base_register && record->displacement == offset,
-                                                   "an escaping indexed frame address keeps its lea and the frame's nonzero final displacement");
-                        }
-                        bool placed = true;
-                        uint32_t compared = 0;
-                        int32_t low = INT32_MAX;
-                        int32_t high = INT32_MIN;
-                        for (uint32_t n = 0; n < function.instruction_count; n += 1)
-                        {
-                            const Tier1SelectPattern* pattern = &plan.patterns[n];
-                            const uint32_t rule = pattern->rule;
-                            const bool memory = !plan.covered[n] && pattern->stack_object != BUSTER_IR_NONE &&
-                                                (rule == TIER1_RULE_LOAD || rule == TIER1_RULE_LOAD_ADDRESS || rule == TIER1_RULE_STORE || rule == TIER1_RULE_STORE_ADDRESS || rule == TIER1_RULE_ADDRESS ||
-                                                 rule == TIER1_RULE_LOAD_OPERAND || pattern->compare_memory);
-                            if (memory)
-                            {
-                                const uint32_t first = emitted.code.node_first[n];
-                                const uint32_t span = emitted.code.node_first[n + 1] - first;
-                                int32_t offset = 0;
-                                const bool found = span != 0 && tier1_emit_cfg_object(&function, &emitted, pattern->stack_object, &offset);
-                                int32_t total = 0;
-                                const X86Instruction* record = found && !__builtin_add_overflow(offset, pattern->displacement, &total) ? &emitted.code.records[first + span - 1] : 0;
-                                if (rule == TIER1_RULE_LOAD_OPERAND && record != 0 && (record->mode & BUSTER_X86_MODE_MEMORY) == 0)
-                                {
-                                    // A commutative operation whose destination is the address's index loads into it first, then
-                                    // takes its other operand (#2602).
-                                    record = &emitted.code.records[first];
-                                }
-                                if (pattern->compare_memory && record != 0)
-                                {
-                                    record = 0;
-                                    uint32_t accesses = 0;
-                                    bool consumed = false;
-                                    for (uint32_t r = first; r < first + span; r += 1)
-                                    {
-                                        const X86Instruction* candidate = &emitted.code.records[r];
-                                        const X86Effects* effects = x86_effects(candidate->form);
-                                        if (effects->operation == X86_OPERATION_CMP && (candidate->mode & BUSTER_X86_MODE_MEMORY) != 0)
-                                        {
-                                            record = candidate;
-                                            accesses += 1;
-                                            placed &= effects->width == (shape == 10 ? 1 : shape == 12 ? 2 : 8);
-                                        }
-                                        consumed |= record != 0 && effects->operation == (shape >= 11 ? X86_OPERATION_JCC : X86_OPERATION_SETCC);
-                                    }
-                                    compared += 1;
-                                    placed &= accesses == 1 && consumed && (rule == TIER1_RULE_BRANCH_COMPARE) == (shape >= 11);
-                                }
-                                placed &= record != 0 && record->rm == (uint8_t)emitted.frame.base_register && record->displacement == total;
-                                low = record != 0 && total < low ? total : low;
-                                high = record != 0 && total > high ? total : high;
-                            }
-                        }
-                        tier1_emit_test_expect(test, placed, "each folded memory operand reads the frame base at object plus walked displacement");
-                        if (shape == 0)
-                        {
-                            tier1_emit_test_expect(test, placed && low < 128 && high >= 128, "the emitted displacements straddle the 8-bit edge");
-                        }
-                        if (shape == 2 || shape == 7 || shape == 8 || shape == 10 || shape == 12)
-                        {
-                            tier1_emit_test_expect(test, emitted.frame.realigned, "the over-aligned object realigns the frame");
-                        }
-                        if (shape >= 9)
-                        {
-                            bool folded = true;
-                            for (uint32_t n = 0; n < function.instruction_count; n += 1)
-                            {
-                                folded &= function.op[n] != IR_LOAD || plan.covered[n] != 0;
-                            }
-                            tier1_emit_test_expect(test, compared == 1 && folded, "one frame-object CMP covers the load before its boolean result or branch");
-                            tier1_emit_test_expect(test, emitted.frame.frame_pointer == (shape == 10 || shape == 12 || (flags & 1) != 0), "comparison fixtures keep the requested or realignment frame pointer");
-                        }
-                        tier1_emit_test_expect(test, test->scratch.length == scratch_mark, "object emission returns scratch");
-                        tier1_emit_test_execute_object(test, shape, &function, &emitted);
-                    }
+                    fprintf(stderr, "tier1-emit: object emission (shape=%u, frame_flags=0x%x, error=%u, error_node=%u, cause=%u, cause_error=%u)\n",
+                            shape, options.frame_flags, (unsigned)error, node, (unsigned)diagnostic.cause, diagnostic.error);
                 }
-                arena_pop_to(&test->output, 0);
-                arena_pop_to(&test->input, 0);
+                tier1_emit_test_expect(test, error == TIER1_EMIT_OK, "object pipeline emits through the CFG consumer");
+                if (error == TIER1_EMIT_OK)
+                {
+                    tier1_emit_test_expect(test, emitted.general, "a frame object takes the CFG consumer");
+                    bool covered = true;
+                    for (uint32_t n = 0; n < function.instruction_count; n += 1)
+                    {
+                        covered &= function.op[n] != IR_STACK_ADDR || (plan.covered[n] != 0) == !(shape == 6 && n == 2);
+                    }
+                    tier1_emit_test_expect(test, covered, "every folded object address leaves no lea");
+                    uint32_t object_leas = 0;
+                    for (uint32_t n = 0; n < function.instruction_count; n += 1)
+                    {
+                        object_leas += plan.covered[n] == 0 && plan.patterns[n].rule == TIER1_RULE_STACK_ADDRESS;
+                    }
+                    tier1_emit_test_expect(test, object_leas == (shape == 6 ? 1u : 0u), "only an escaping object address keeps its lea");
+                    if (shape == 3)
+                    {
+                        tier1_emit_test_expect(test, !plan.covered[3] && plan.patterns[6].stack_object == 0 &&
+                                                       (plan.covered[7] ? plan.patterns[8].stack_object : plan.patterns[7].stack_object) == 0,
+                                               "shared displaced address remains for its escape while both memory users fold it");
+                    }
+                    if (shape == 6)
+                    {
+                        tier1_emit_test_expect(test, plan.patterns[4].stack_object == 1 && plan.patterns[5].stack_object == 1 &&
+                                                       (plan.covered[7] ? plan.patterns[8].stack_object : plan.patterns[7].stack_object) == 0,
+                                               "shared frame address remains for a pointer store and its folded memory uses keep their own objects");
+                    }
+                    if (shape == 8)
+                    {
+                        int32_t offset = 0;
+                        const uint32_t first = emitted.code.node_first[5];
+                        const uint32_t end = emitted.code.node_first[6];
+                        const X86Instruction* record = end > first ? &emitted.code.records[end - 1] : 0;
+                        tier1_emit_test_expect(test, !plan.covered[5] && plan.patterns[5].stack_object == 1 && plan.patterns[5].displacement == 0 &&
+                                                       tier1_emit_cfg_object(&function, &emitted, 1, &offset) && offset != 0 && record != 0 &&
+                                                       record->form == X86_FORM_LEA_R64_M && record->mode == BUSTER_X86_MEMORY_BASE_INDEX(0) &&
+                                                       record->rm == (uint8_t)emitted.frame.base_register && record->displacement == offset,
+                                               "an escaping indexed frame address keeps its lea and the frame's nonzero final displacement");
+                    }
+                    bool placed = true;
+                    uint32_t compared = 0;
+                    int32_t low = INT32_MAX;
+                    int32_t high = INT32_MIN;
+                    for (uint32_t n = 0; n < function.instruction_count; n += 1)
+                    {
+                        const Tier1SelectPattern* pattern = &plan.patterns[n];
+                        const uint32_t rule = pattern->rule;
+                        const bool memory = !plan.covered[n] && pattern->stack_object != BUSTER_IR_NONE &&
+                                            (rule == TIER1_RULE_LOAD || rule == TIER1_RULE_LOAD_ADDRESS || rule == TIER1_RULE_STORE || rule == TIER1_RULE_STORE_ADDRESS || rule == TIER1_RULE_ADDRESS ||
+                                             rule == TIER1_RULE_LOAD_OPERAND || pattern->compare_memory);
+                        if (memory)
+                        {
+                            const uint32_t first = emitted.code.node_first[n];
+                            const uint32_t span = emitted.code.node_first[n + 1] - first;
+                            int32_t offset = 0;
+                            const bool found = span != 0 && tier1_emit_cfg_object(&function, &emitted, pattern->stack_object, &offset);
+                            int32_t total = 0;
+                            const X86Instruction* record = found && !__builtin_add_overflow(offset, pattern->displacement, &total) ? &emitted.code.records[first + span - 1] : 0;
+                            if (rule == TIER1_RULE_LOAD_OPERAND && record != 0 && (record->mode & BUSTER_X86_MODE_MEMORY) == 0)
+                            {
+                                // A commutative operation whose destination is the address's index loads into it first, then
+                                // takes its other operand (#2602).
+                                record = &emitted.code.records[first];
+                            }
+                            if (pattern->compare_memory && record != 0)
+                            {
+                                record = 0;
+                                uint32_t accesses = 0;
+                                bool consumed = false;
+                                for (uint32_t r = first; r < first + span; r += 1)
+                                {
+                                    const X86Instruction* candidate = &emitted.code.records[r];
+                                    const X86Effects* effects = x86_effects(candidate->form);
+                                    if (effects->operation == X86_OPERATION_CMP && (candidate->mode & BUSTER_X86_MODE_MEMORY) != 0)
+                                    {
+                                        record = candidate;
+                                        accesses += 1;
+                                        placed &= effects->width == (shape == 10 ? 1 : shape == 12 ? 2 : 8);
+                                    }
+                                    consumed |= record != 0 && effects->operation == (shape >= 11 ? X86_OPERATION_JCC : X86_OPERATION_SETCC);
+                                }
+                                compared += 1;
+                                placed &= accesses == 1 && consumed && (rule == TIER1_RULE_BRANCH_COMPARE) == (shape >= 11);
+                            }
+                            placed &= record != 0 && record->rm == (uint8_t)emitted.frame.base_register && record->displacement == total;
+                            low = record != 0 && total < low ? total : low;
+                            high = record != 0 && total > high ? total : high;
+                        }
+                    }
+                    tier1_emit_test_expect(test, placed, "each folded memory operand reads the frame base at object plus walked displacement");
+                    if (shape == 0)
+                    {
+                        tier1_emit_test_expect(test, placed && low < 128 && high >= 128, "the emitted displacements straddle the 8-bit edge");
+                    }
+                    if (shape == 2 || shape == 7 || shape == 8 || shape == 10 || shape == 12)
+                    {
+                        tier1_emit_test_expect(test, emitted.frame.realigned, "the over-aligned object realigns the frame");
+                    }
+                    if (shape >= 9)
+                    {
+                        bool folded = true;
+                        for (uint32_t n = 0; n < function.instruction_count; n += 1)
+                        {
+                            folded &= function.op[n] != IR_LOAD || plan.covered[n] != 0;
+                        }
+                        tier1_emit_test_expect(test, compared == 1 && folded, "one frame-object CMP covers the load before its boolean result or branch");
+                        tier1_emit_test_expect(test, emitted.frame.frame_pointer == (shape == 10 || shape == 12 || (flags & 1) != 0), "comparison fixtures keep the requested or realignment frame pointer");
+                    }
+                    tier1_emit_test_expect(test, test->scratch.length == scratch_mark, "object emission returns scratch");
+                    tier1_emit_test_execute_object(test, shape, &function, &emitted);
+                }
             }
+            arena_pop_to(&test->output, 0);
+            arena_pop_to(&test->input, 0);
         }
     }
 }
@@ -1246,73 +1241,69 @@ static void tier1_emit_test_lifetimes(Tier1EmitTest* test)
 {
     for (uint32_t shape = 0; shape < 4; shape += 1)
     {
-        for (uint32_t vector = 0; vector < 2; vector += 1)
+        IrFunction function;
+        const bool created = tier1_emit_test_lifetime_fixture(test, shape, &function);
+        tier1_emit_test_expect(test, created && ir_verify(&function, &test->scratch, 0).error == IR_OK, "construct lifetime IR");
+        Tier1SelectPlan plan;
+        uint32_t node = BUSTER_IR_NONE;
+        // Shape 2's dominator tree: the entry block over both of the others, whose values they read.
+        uint32_t dominance_enter[3] = { 0, 1, 2 };
+        uint32_t dominance_leave[3] = { 3, 2, 3 };
+        const IrDominance tree = { .enter = dominance_enter, .leave = dominance_leave, .block_count = 3 };
+        const Tier1SelectError selected = created ? tier1_select_plan(&function, shape == 2 ? &tree : 0, &test->output, &test->scratch, &plan, &node) :
+                                                    TIER1_SELECT_ERROR_INVALID;
+        tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "select lifetime IR");
+        if (selected == TIER1_SELECT_OK)
         {
-            IrFunction function;
-            const bool created = tier1_emit_test_lifetime_fixture(test, shape, &function);
-            tier1_emit_test_expect(test, created && ir_verify(&function, &test->scratch, 0).error == IR_OK, "construct lifetime IR");
-            Tier1SelectPlan plan;
-            uint32_t node = BUSTER_IR_NONE;
-            // Shape 2's dominator tree: the entry block over both of the others, whose values they read.
-            uint32_t dominance_enter[3] = { 0, 1, 2 };
-            uint32_t dominance_leave[3] = { 3, 2, 3 };
-            const IrDominance tree = { .enter = dominance_enter, .leave = dominance_leave, .block_count = 3 };
-            const Tier1SelectError selected = created ? tier1_select_plan(&function, shape == 2 ? &tree : 0, &test->output, &test->scratch, &plan, &node) :
-                                                        TIER1_SELECT_ERROR_INVALID;
-            tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "select lifetime IR");
-            if (selected == TIER1_SELECT_OK)
+            const Tier1EmitOptions options = {
+                .certify = true,
+                .register_mask = tier1_liveness_register_mask(),
+                .rematerialize = true,
+            };
+            Tier1EmitResult emitted;
+            const uint64_t scratch_mark = test->scratch.length;
+            const Tier1EmitError error = tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node);
+            tier1_emit_test_expect(test, error == TIER1_EMIT_OK && emitted.general, "lifetime markers take the CFG consumer");
+            if (error == TIER1_EMIT_OK)
             {
-                const Tier1EmitOptions options = {
-                    .certify = true,
-                    .register_mask = tier1_liveness_register_mask(),
-                    .vector = vector != 0,
-                    .rematerialize = true,
-                };
-                Tier1EmitResult emitted;
-                const uint64_t scratch_mark = test->scratch.length;
-                const Tier1EmitError error = tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node);
-                tier1_emit_test_expect(test, error == TIER1_EMIT_OK && emitted.general, "lifetime markers take the CFG consumer");
-                if (error == TIER1_EMIT_OK)
+                int32_t first = 0;
+                int32_t second = 0;
+                const bool found = tier1_emit_cfg_object(&function, &emitted, 0, &first) && tier1_emit_cfg_object(&function, &emitted, 1, &second);
+                const bool apart = shape == 0 || shape == 3;
+                tier1_emit_test_expect(test, found && (apart ? first == second : first != second && (first - second >= 64 || second - first >= 64)),
+                                       shape == 3 ? "an object only markers refer to shares its row by its markers" :
+                                       apart ? "objects whose lifetimes don't meet share a frame row" : "objects whose lifetimes meet take rows of their own");
+                tier1_emit_test_expect(test, test->scratch.length == scratch_mark, "lifetime emission returns scratch");
+                Tier1SelectCode* code = &emitted.code;
+                const uint64_t capacity = BUSTER_X86_ENCODER_CAPACITY(code->count);
+                const uint64_t bytes = (capacity + 4095) & ~UINT64_C(4095);
+                void* executable = mmap(0, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                uint32_t* offsets = malloc((uint64_t)code->count * sizeof(uint32_t));
+                bool ready = executable != MAP_FAILED && offsets != 0;
+                if (ready)
                 {
-                    int32_t first = 0;
-                    int32_t second = 0;
-                    const bool found = tier1_emit_cfg_object(&function, &emitted, 0, &first) && tier1_emit_cfg_object(&function, &emitted, 1, &second);
-                    const bool apart = shape == 0 || shape == 3;
-                    tier1_emit_test_expect(test, found && (apart ? first == second : first != second && (first - second >= 64 || second - first >= 64)),
-                                           shape == 3 ? "an object only markers refer to shares its row by its markers" :
-                                           apart ? "objects whose lifetimes don't meet share a frame row" : "objects whose lifetimes meet take rows of their own");
-                    tier1_emit_test_expect(test, test->scratch.length == scratch_mark, "lifetime emission returns scratch");
-                    Tier1SelectCode* code = &emitted.code;
-                    const uint64_t capacity = BUSTER_X86_ENCODER_CAPACITY(code->count);
-                    const uint64_t bytes = (capacity + 4095) & ~UINT64_C(4095);
-                    void* executable = mmap(0, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-                    uint32_t* offsets = malloc((uint64_t)code->count * sizeof(uint32_t));
-                    bool ready = executable != MAP_FAILED && offsets != 0;
-                    if (ready)
-                    {
-                        const BranchSizingCheck checked = branch_sizing_validate(code->records, code->count, code->branches, code->targets, code->branch_count);
-                        ready = checked.error == BRANCH_SIZING_OK && size_branches(code->records, code->count, code->branches, code->targets, code->branch_count, offsets).error == BRANCH_SIZING_OK;
-                        ready = ready && x86_target_validate(test->allowed, code->records, code->count) == code->count && x86_encode(code->records, code->count, executable, capacity, 0, 0) > 0;
-                        ready = ready && mprotect(executable, bytes, PROT_READ | PROT_EXEC) == 0;
-                    }
-                    tier1_emit_test_expect(test, ready, "lifetime fixture encodes and maps");
-                    uint64_t random = UINT64_C(0x5a17e7e5d1ce0001) + shape;
-                    for (uint32_t sample = 0; ready && sample < 32; sample += 1)
-                    {
-                        const uint64_t a = tier1_emit_test_random(&random);
-                        const uint64_t b = tier1_emit_test_random(&random) | 1;
-                        tier1_emit_test_expect(test, tier1_emit_test_call(executable, a, b) == a + b, "native lifetime fixture returns a + b");
-                    }
-                    if (executable != MAP_FAILED)
-                    {
-                        munmap(executable, bytes);
-                    }
-                    free(offsets);
+                    const BranchSizingCheck checked = branch_sizing_validate(code->records, code->count, code->branches, code->targets, code->branch_count);
+                    ready = checked.error == BRANCH_SIZING_OK && size_branches(code->records, code->count, code->branches, code->targets, code->branch_count, offsets).error == BRANCH_SIZING_OK;
+                    ready = ready && x86_target_validate(test->allowed, code->records, code->count) == code->count && x86_encode(code->records, code->count, executable, capacity, 0, 0) > 0;
+                    ready = ready && mprotect(executable, bytes, PROT_READ | PROT_EXEC) == 0;
                 }
+                tier1_emit_test_expect(test, ready, "lifetime fixture encodes and maps");
+                uint64_t random = UINT64_C(0x5a17e7e5d1ce0001) + shape;
+                for (uint32_t sample = 0; ready && sample < 32; sample += 1)
+                {
+                    const uint64_t a = tier1_emit_test_random(&random);
+                    const uint64_t b = tier1_emit_test_random(&random) | 1;
+                    tier1_emit_test_expect(test, tier1_emit_test_call(executable, a, b) == a + b, "native lifetime fixture returns a + b");
+                }
+                if (executable != MAP_FAILED)
+                {
+                    munmap(executable, bytes);
+                }
+                free(offsets);
             }
-            arena_pop_to(&test->output, 0);
-            arena_pop_to(&test->input, 0);
         }
+        arena_pop_to(&test->output, 0);
+        arena_pop_to(&test->input, 0);
     }
 }
 
@@ -1321,56 +1312,52 @@ static void tier1_emit_test_lifetimes(Tier1EmitTest* test)
 static void tier1_emit_test_object_overflow(Tier1EmitTest* test)
 {
     const IrSizes sizes = { .instruction_count = 15, .block_count = 1, .constant_count = 1, .slot_count = 2, .parameter_count = 2 };
-    for (uint32_t vector = 0; vector < 2; vector += 1)
+    IrFunction function;
+    const bool created = ir_create(&test->input, &sizes, &function) == IR_OK;
+    tier1_emit_test_expect(test, created, "create overflowing displacement IR");
+    if (created)
     {
-        IrFunction function;
-        const bool created = ir_create(&test->input, &sizes, &function) == IR_OK;
-        tier1_emit_test_expect(test, created, "create overflowing displacement IR");
-        if (created)
-        {
-            function.result_type = IR_I64;
-            function.parameter_types[0] = IR_I64;
-            function.parameter_types[1] = IR_I64;
-            function.block_offsets[1] = 15;
-            function.slots[0] = (IrSlot){ .size = 8, .alignment = 8, .type = IR_I64, .flags = BUSTER_IR_SLOT_ADDRESS_TAKEN };
-            function.slots[1] = (IrSlot){ .size = 8, .alignment = 8, .type = IR_I64, .flags = BUSTER_IR_SLOT_ADDRESS_TAKEN };
-            function.constants[0].low = UINT64_C(0x7fffffff);
-            tier1_emit_test_node(&function, 0, IR_PARAM, IR_I64, 0, BUSTER_IR_NONE);
-            tier1_emit_test_node(&function, 1, IR_PARAM, IR_I64, 1, BUSTER_IR_NONE);
-            tier1_emit_test_node(&function, 2, IR_STACK_ADDR, IR_PTR, 0, BUSTER_IR_NONE);
-            tier1_emit_test_node(&function, 3, IR_PTRTOINT, IR_I64, 2, BUSTER_IR_NONE);
-            tier1_emit_test_node(&function, 4, IR_CONST, IR_I64, 0, BUSTER_IR_NONE);
-            tier1_emit_test_node(&function, 5, IR_ADD, IR_I64, 3, 4);
-            tier1_emit_test_node(&function, 6, IR_INTTOPTR, IR_PTR, 5, BUSTER_IR_NONE);
-            tier1_emit_test_node(&function, 7, IR_LOAD, IR_I64, 6, BUSTER_IR_NONE);
-            tier1_emit_test_node(&function, 8, IR_STACK_ADDR, IR_PTR, 1, BUSTER_IR_NONE);
-            tier1_emit_test_node(&function, 9, IR_PTRTOINT, IR_I64, 8, BUSTER_IR_NONE);
-            tier1_emit_test_node(&function, 10, IR_ADD, IR_I64, 9, 4);
-            tier1_emit_test_node(&function, 11, IR_INTTOPTR, IR_PTR, 10, BUSTER_IR_NONE);
-            tier1_emit_test_node(&function, 12, IR_LOAD, IR_I64, 11, BUSTER_IR_NONE);
-            tier1_emit_test_node(&function, 13, IR_ADD, IR_I64, 7, 12);
-            tier1_emit_test_node(&function, 14, IR_RET, IR_VOID, 13, BUSTER_IR_NONE);
-        }
-        Tier1SelectPlan plan;
-        uint32_t node = BUSTER_IR_NONE;
-        const Tier1SelectError selected = created ? tier1_select_plan(&function, 0, &test->output, &test->scratch, &plan, &node) : TIER1_SELECT_ERROR_INVALID;
-        tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "select overflowing displacement IR");
-        if (created && selected == TIER1_SELECT_OK)
-        {
-            const Tier1EmitOptions options = {
-                .certify = true,
-                .register_mask = tier1_liveness_register_mask(),
-                .frame_flags = BUSTER_TIER1_FRAME_NO_RED_ZONE,
-                .vector = vector != 0,
-                .rematerialize = true,
-            };
-            Tier1EmitResult emitted;
-            const Tier1EmitError error = tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node);
-            tier1_emit_test_expect(test, error == TIER1_EMIT_FRAME, "a displacement past 32 bits refuses emission");
-        }
-        arena_pop_to(&test->output, 0);
-        arena_pop_to(&test->input, 0);
+        function.result_type = IR_I64;
+        function.parameter_types[0] = IR_I64;
+        function.parameter_types[1] = IR_I64;
+        function.block_offsets[1] = 15;
+        function.slots[0] = (IrSlot){ .size = 8, .alignment = 8, .type = IR_I64, .flags = BUSTER_IR_SLOT_ADDRESS_TAKEN };
+        function.slots[1] = (IrSlot){ .size = 8, .alignment = 8, .type = IR_I64, .flags = BUSTER_IR_SLOT_ADDRESS_TAKEN };
+        function.constants[0].low = UINT64_C(0x7fffffff);
+        tier1_emit_test_node(&function, 0, IR_PARAM, IR_I64, 0, BUSTER_IR_NONE);
+        tier1_emit_test_node(&function, 1, IR_PARAM, IR_I64, 1, BUSTER_IR_NONE);
+        tier1_emit_test_node(&function, 2, IR_STACK_ADDR, IR_PTR, 0, BUSTER_IR_NONE);
+        tier1_emit_test_node(&function, 3, IR_PTRTOINT, IR_I64, 2, BUSTER_IR_NONE);
+        tier1_emit_test_node(&function, 4, IR_CONST, IR_I64, 0, BUSTER_IR_NONE);
+        tier1_emit_test_node(&function, 5, IR_ADD, IR_I64, 3, 4);
+        tier1_emit_test_node(&function, 6, IR_INTTOPTR, IR_PTR, 5, BUSTER_IR_NONE);
+        tier1_emit_test_node(&function, 7, IR_LOAD, IR_I64, 6, BUSTER_IR_NONE);
+        tier1_emit_test_node(&function, 8, IR_STACK_ADDR, IR_PTR, 1, BUSTER_IR_NONE);
+        tier1_emit_test_node(&function, 9, IR_PTRTOINT, IR_I64, 8, BUSTER_IR_NONE);
+        tier1_emit_test_node(&function, 10, IR_ADD, IR_I64, 9, 4);
+        tier1_emit_test_node(&function, 11, IR_INTTOPTR, IR_PTR, 10, BUSTER_IR_NONE);
+        tier1_emit_test_node(&function, 12, IR_LOAD, IR_I64, 11, BUSTER_IR_NONE);
+        tier1_emit_test_node(&function, 13, IR_ADD, IR_I64, 7, 12);
+        tier1_emit_test_node(&function, 14, IR_RET, IR_VOID, 13, BUSTER_IR_NONE);
     }
+    Tier1SelectPlan plan;
+    uint32_t node = BUSTER_IR_NONE;
+    const Tier1SelectError selected = created ? tier1_select_plan(&function, 0, &test->output, &test->scratch, &plan, &node) : TIER1_SELECT_ERROR_INVALID;
+    tier1_emit_test_expect(test, selected == TIER1_SELECT_OK, "select overflowing displacement IR");
+    if (created && selected == TIER1_SELECT_OK)
+    {
+        const Tier1EmitOptions options = {
+            .certify = true,
+            .register_mask = tier1_liveness_register_mask(),
+            .frame_flags = BUSTER_TIER1_FRAME_NO_RED_ZONE,
+            .rematerialize = true,
+        };
+        Tier1EmitResult emitted;
+        const Tier1EmitError error = tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &emitted, &node);
+        tier1_emit_test_expect(test, error == TIER1_EMIT_FRAME, "a displacement past 32 bits refuses emission");
+    }
+    arena_pop_to(&test->output, 0);
+    arena_pop_to(&test->input, 0);
 }
 
 // #989's review: a node's sequence at its room and past it, in a consumer. `node` takes no-ops before its records
@@ -1435,7 +1422,7 @@ static uint32_t tier1_emit_test_overlong_node(Tier1EmitTest* test, Tier1SelectPl
 // #989's review: both consumers refuse a node's sequence past its room. The straight-line consumer on the pressure
 // fixture and the CFG consumer on s = a + b, then s < b (unsigned) ? s ^ a : s - b, whose branch's comparison is its
 // sequence's conditional jump's (its comparison, the jump and the jump to the other block: three records): every node
-// that writes records, by both paths.
+// that writes records.
 static void tier1_emit_test_overlong(Tier1EmitTest* test)
 {
     test->terms = 3;
@@ -1476,7 +1463,7 @@ static void tier1_emit_test_overlong(Tier1EmitTest* test)
             }
         }
         tier1_emit_test_expect(test, ready, "overlong fixture is valid IR");
-        for (uint32_t vector = 0; ready && vector < 2; vector += 1)
+        if (ready)
         {
             IrDominance dominance;
             const bool dominated = branching == 0 || tier1_terminal_dominance(test, &function, &dominance);
@@ -1484,7 +1471,7 @@ static void tier1_emit_test_overlong(Tier1EmitTest* test)
             uint32_t node = BUSTER_IR_NONE;
             const bool planned = dominated && tier1_select_plan(&function, branching != 0 ? &dominance : 0, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
             tier1_emit_test_expect(test, planned, "overlong fixture selects");
-            const Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .vector = vector != 0, .certify = true };
+            const Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .certify = true };
             Tier1EmitResult base;
             const bool based = planned && tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &base, &node) == TIER1_EMIT_OK && base.general == (branching != 0);
             tier1_emit_test_expect(test, based, "overlong fixture emits through its consumer");

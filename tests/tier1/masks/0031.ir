@@ -1,0 +1,75 @@
+function (ptr) -> void {
+b0:
+  %0 = param.ptr 0
+  %1 = address.ptr %0 offset=0
+  %2 = load.v8i32 %1 align=4
+  %3 = address.ptr %0 offset=4
+  %4 = load.v8i32 %3 align=4
+  %5 = address.ptr %0 offset=8
+  %6 = load.v8i32 %5 align=4
+  %7 = address.ptr %0 offset=12
+  %8 = load.v8i32 %7 align=4
+  %9 = address.ptr %0 offset=16
+  %10 = load.v8i32 %9 align=4
+  %11 = address.ptr %0 offset=20
+  %12 = load.v8i32 %11 align=4
+  %13 = address.ptr %0 offset=24
+  %14 = load.v8i32 %13 align=4
+  %15 = address.ptr %0 offset=28
+  %16 = load.v8i32 %15 align=4
+  %17 = address.ptr %0 offset=32
+  %18 = load.v8i32 %17 align=4
+  %19 = address.ptr %0 offset=36
+  %20 = load.v8i32 %19 align=4
+  %21 = address.ptr %0 offset=40
+  %22 = load.v8i32 %21 align=4
+  %23 = address.ptr %0 offset=44
+  %24 = load.v8i32 %23 align=4
+  %25 = address.ptr %0 offset=48
+  %26 = load.v8i32 %25 align=4
+  %27 = address.ptr %0 offset=52
+  %28 = load.v8i32 %27 align=4
+  %29 = address.ptr %0 offset=56
+  %30 = load.v8i32 %29 align=4
+  %31 = address.ptr %0 offset=60
+  %32 = load.v8i32 %31 align=4
+  %33 = address.ptr %0 offset=64
+  %34 = load.v8i32 %33 align=4
+  %35 = xor.v8i32 %2, %34
+  %36 = sub.v8i32 %35, %32
+  %37 = mul.v8i32 %36, %30
+  %38 = add.v8i32 %37, %28
+  %39 = xor.v8i32 %38, %26
+  %40 = sub.v8i32 %39, %24
+  %41 = mul.v8i32 %40, %22
+  %42 = add.v8i32 %41, %20
+  %43 = xor.v8i32 %42, %18
+  %44 = sub.v8i32 %43, %16
+  %45 = mul.v8i32 %44, %14
+  %46 = add.v8i32 %45, %12
+  %47 = xor.v8i32 %46, %10
+  %48 = sub.v8i32 %47, %8
+  %49 = mul.v8i32 %48, %6
+  %50 = add.v8i32 %49, %4
+  %51 = xor.v8i32 %34, %32
+  %52 = add.v8i32 %51, %30
+  %53 = xor.v8i32 %52, %28
+  %54 = add.v8i32 %53, %26
+  %55 = xor.v8i32 %54, %24
+  %56 = add.v8i32 %55, %22
+  %57 = xor.v8i32 %56, %20
+  %58 = add.v8i32 %57, %18
+  %59 = xor.v8i32 %58, %16
+  %60 = add.v8i32 %59, %14
+  %61 = xor.v8i32 %60, %12
+  %62 = add.v8i32 %61, %10
+  %63 = xor.v8i32 %62, %8
+  %64 = add.v8i32 %63, %6
+  %65 = xor.v8i32 %64, %4
+  %66 = add.v8i32 %65, %2
+  %67 = address.ptr %0 offset=128
+  %68 = store.void %67, %50 align=1
+  %69 = address.ptr %0 offset=192
+  %70 = store.void %69, %66 align=1
+  %71 = ret.void
+}

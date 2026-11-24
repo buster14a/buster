@@ -1,0 +1,143 @@
+function (ptr) -> void {
+b0:
+  %0 = param.ptr 0
+  %1 = address.ptr %0 offset=0
+  %2 = load.v4i32 %1 align=1
+  %3 = address.ptr %0 offset=16
+  %4 = load.v4i32 %3 align=1
+  %5 = add.v4i32 %2, %4
+  %6 = sub.v4i32 %2, %4
+  %7 = mul.v4i32 %2, %4
+  %8 = and.v4i32 %2, %4
+  %9 = or.v4i32 %2, %4
+  %10 = xor.v4i32 %2, %4
+  %11 = not.v4i32 %2
+  %12 = copy.v4i32 %11
+  %13 = vcmp.m8 %5, %4 eq
+  %14 = vselect.v4i32 %13, %6, %10
+  %15 = xor.v4i32 %12, %14
+  %16 = vcmp.m8 %6, %9 ne
+  %17 = vselect.v4i32 %16, %7, %11
+  %18 = add.v4i32 %15, %17
+  %19 = vcmp.m8 %7, %4 lt
+  %20 = vselect.v4i32 %19, %8, %5
+  %21 = sub.v4i32 %18, %20
+  %22 = vcmp.m8 %8, %11 le
+  %23 = vselect.v4i32 %22, %9, %6
+  %24 = xor.v4i32 %21, %23
+  %25 = vcmp.m8 %9, %4 gt
+  %26 = vselect.v4i32 %25, %10, %7
+  %27 = add.v4i32 %24, %26
+  %28 = vcmp.m8 %10, %6 ge
+  %29 = vselect.v4i32 %28, %11, %8
+  %30 = sub.v4i32 %27, %29
+  %31 = vcmp.m8 %11, %4 ult
+  %32 = vselect.v4i32 %31, %5, %9
+  %33 = xor.v4i32 %30, %32
+  %34 = vcmp.m8 %5, %8 ule
+  %35 = vselect.v4i32 %34, %6, %10
+  %36 = add.v4i32 %33, %35
+  %37 = vcmp.m8 %6, %4 ugt
+  %38 = vselect.v4i32 %37, %7, %11
+  %39 = sub.v4i32 %36, %38
+  %40 = vcmp.m8 %7, %10 uge
+  %41 = vselect.v4i32 %40, %8, %5
+  %42 = xor.v4i32 %39, %41
+  %43 = address.ptr %0 offset=128
+  %44 = store.void %43, %42 align=1
+  %45 = address.ptr %0 offset=242
+  %46 = store.void %45, %25 align=1
+  %47 = address.ptr %0 offset=32
+  %48 = load.v8i32 %47 align=1
+  %49 = address.ptr %0 offset=64
+  %50 = load.v8i32 %49 align=1
+  %51 = add.v8i32 %48, %50
+  %52 = sub.v8i32 %48, %50
+  %53 = mul.v8i32 %48, %50
+  %54 = and.v8i32 %48, %50
+  %55 = or.v8i32 %48, %50
+  %56 = xor.v8i32 %48, %50
+  %57 = not.v8i32 %48
+  %58 = copy.v8i32 %57
+  %59 = vcmp.m8 %51, %50 eq
+  %60 = vselect.v8i32 %59, %52, %56
+  %61 = xor.v8i32 %58, %60
+  %62 = vcmp.m8 %52, %55 ne
+  %63 = vselect.v8i32 %62, %53, %57
+  %64 = add.v8i32 %61, %63
+  %65 = vcmp.m8 %53, %50 lt
+  %66 = vselect.v8i32 %65, %54, %51
+  %67 = sub.v8i32 %64, %66
+  %68 = vcmp.m8 %54, %57 le
+  %69 = vselect.v8i32 %68, %55, %52
+  %70 = xor.v8i32 %67, %69
+  %71 = vcmp.m8 %55, %50 gt
+  %72 = vselect.v8i32 %71, %56, %53
+  %73 = add.v8i32 %70, %72
+  %74 = vcmp.m8 %56, %52 ge
+  %75 = vselect.v8i32 %74, %57, %54
+  %76 = sub.v8i32 %73, %75
+  %77 = vcmp.m8 %57, %50 ult
+  %78 = vselect.v8i32 %77, %51, %55
+  %79 = xor.v8i32 %76, %78
+  %80 = vcmp.m8 %51, %54 ule
+  %81 = vselect.v8i32 %80, %52, %56
+  %82 = add.v8i32 %79, %81
+  %83 = vcmp.m8 %52, %50 ugt
+  %84 = vselect.v8i32 %83, %53, %57
+  %85 = sub.v8i32 %82, %84
+  %86 = vcmp.m8 %53, %56 uge
+  %87 = vselect.v8i32 %86, %54, %51
+  %88 = xor.v8i32 %85, %87
+  %89 = address.ptr %0 offset=144
+  %90 = store.void %89, %88 align=1
+  %91 = address.ptr %0 offset=243
+  %92 = store.void %91, %74 align=1
+  %93 = address.ptr %0 offset=0
+  %94 = load.v16i32 %93 align=1
+  %95 = address.ptr %0 offset=64
+  %96 = load.v16i32 %95 align=1
+  %97 = add.v16i32 %94, %96
+  %98 = sub.v16i32 %94, %96
+  %99 = mul.v16i32 %94, %96
+  %100 = and.v16i32 %94, %96
+  %101 = or.v16i32 %94, %96
+  %102 = xor.v16i32 %94, %96
+  %103 = not.v16i32 %94
+  %104 = copy.v16i32 %103
+  %105 = vcmp.m16 %97, %96 eq
+  %106 = vselect.v16i32 %105, %98, %102
+  %107 = xor.v16i32 %104, %106
+  %108 = vcmp.m16 %98, %101 ne
+  %109 = vselect.v16i32 %108, %99, %103
+  %110 = add.v16i32 %107, %109
+  %111 = vcmp.m16 %99, %96 lt
+  %112 = vselect.v16i32 %111, %100, %97
+  %113 = sub.v16i32 %110, %112
+  %114 = vcmp.m16 %100, %103 le
+  %115 = vselect.v16i32 %114, %101, %98
+  %116 = xor.v16i32 %113, %115
+  %117 = vcmp.m16 %101, %96 gt
+  %118 = vselect.v16i32 %117, %102, %99
+  %119 = add.v16i32 %116, %118
+  %120 = vcmp.m16 %102, %98 ge
+  %121 = vselect.v16i32 %120, %103, %100
+  %122 = sub.v16i32 %119, %121
+  %123 = vcmp.m16 %103, %96 ult
+  %124 = vselect.v16i32 %123, %97, %101
+  %125 = xor.v16i32 %122, %124
+  %126 = vcmp.m16 %97, %100 ule
+  %127 = vselect.v16i32 %126, %98, %102
+  %128 = add.v16i32 %125, %127
+  %129 = vcmp.m16 %98, %96 ugt
+  %130 = vselect.v16i32 %129, %99, %103
+  %131 = sub.v16i32 %128, %130
+  %132 = vcmp.m16 %99, %102 uge
+  %133 = vselect.v16i32 %132, %100, %97
+  %134 = xor.v16i32 %131, %133
+  %135 = address.ptr %0 offset=176
+  %136 = store.void %135, %134 align=1
+  %137 = address.ptr %0 offset=240
+  %138 = store.void %137, %114 align=2
+  %139 = ret.void
+}

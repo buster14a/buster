@@ -6545,8 +6545,8 @@ small one.
   type's kind looks both up in 64-byte tables with `vpermb`, and the few whose
   kind doesn't settle them (an aligned typedef's, an enum's, a `_BitInt`'s, a
   complex type's, and the builtins) take the rules, `check_lower_type_class`
-  and `check_lower_type_facts`, which its twin,
-  `check_lower_classify_types_scalar`, applies to every type. The bodies read
+  and `check_lower_type_facts`, which `test-checker`'s definition applies to
+  every type. The bodies read
   the table (`check_lower_class`, `check_lower_facts`), which has a row per type
   of the unit's table, as the lowering makes none: 4,740 for `sqlite3.c`.
 - **The checked value in place.** Each expansion copied its node's 96-byte

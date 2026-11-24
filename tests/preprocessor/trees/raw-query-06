@@ -1,0 +1,6 @@
+#ifndef RAW_GUARD
+#define RAW_GUARD
+#if RAW_QUERY(<R"(x>) // )"
+guarded
+#endif
+#endif

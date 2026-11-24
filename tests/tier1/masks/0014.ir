@@ -1,0 +1,198 @@
+function (ptr) -> void {
+b0:
+  %0 = param.ptr 0
+  %1 = address.ptr %0 offset=0
+  %2 = load.v4i32 %1 align=1
+  %3 = address.ptr %0 offset=112
+  %4 = load.v4i32 %3 align=1
+  %5 = xor.v4i32 %2, %4
+  %6 = add.v16i8 %2, %4
+  %7 = sub.v16i8 %2, %4
+  %8 = vcmp.m16 %2, %7 eq lanes=i8
+  %9 = vselect.v16i8 %8, %6, %7
+  %10 = xor.v4i32 %5, %9
+  %11 = vcmp.m16 %7, %4 ne lanes=i8
+  %12 = vselect.v16i8 %11, %7, %6
+  %13 = xor.v4i32 %10, %12
+  %14 = vcmp.m16 %2, %4 lt lanes=i8
+  %15 = vselect.v16i8 %14, %6, %7
+  %16 = xor.v4i32 %13, %15
+  %17 = vcmp.m16 %7, %6 le lanes=i8
+  %18 = vselect.v16i8 %17, %7, %6
+  %19 = xor.v4i32 %16, %18
+  %20 = vcmp.m16 %2, %4 gt lanes=i8
+  %21 = vselect.v16i8 %20, %6, %7
+  %22 = xor.v4i32 %19, %21
+  %23 = vcmp.m16 %7, %4 ge lanes=i8
+  %24 = vselect.v16i8 %23, %7, %6
+  %25 = xor.v4i32 %22, %24
+  %26 = vcmp.m16 %2, %7 ult lanes=i8
+  %27 = vselect.v16i8 %26, %6, %7
+  %28 = xor.v4i32 %25, %27
+  %29 = vcmp.m16 %7, %4 ule lanes=i8
+  %30 = vselect.v16i8 %29, %7, %6
+  %31 = xor.v4i32 %28, %30
+  %32 = vcmp.m16 %2, %4 ugt lanes=i8
+  %33 = vselect.v16i8 %32, %6, %7
+  %34 = xor.v4i32 %31, %33
+  %35 = vcmp.m16 %7, %6 uge lanes=i8
+  %36 = vselect.v16i8 %35, %7, %6
+  %37 = xor.v4i32 %34, %36
+  %38 = xor.v4i32 %37, %6
+  %39 = xor.v4i32 %38, %7
+  %40 = add.v8i16 %2, %4
+  %41 = sub.v8i16 %2, %4
+  %42 = mul.v8i16 %2, %4
+  %43 = vconst.v4i32 0x001f001f001f001f001f001f001f001f
+  %44 = and.v4i32 %4, %43
+  %45 = shl.v8i16 %2, %44
+  %46 = lshr.v8i16 %2, %44
+  %47 = ashr.v8i16 %2, %44
+  %48 = vcmp.m8 %2, %41 eq lanes=i16
+  %49 = vselect.v8i16 %48, %40, %41
+  %50 = xor.v4i32 %39, %49
+  %51 = vcmp.m8 %41, %4 ne lanes=i16
+  %52 = vselect.v8i16 %51, %41, %42
+  %53 = xor.v4i32 %50, %52
+  %54 = vcmp.m8 %2, %4 lt lanes=i16
+  %55 = vselect.v8i16 %54, %42, %45
+  %56 = xor.v4i32 %53, %55
+  %57 = vcmp.m8 %45, %46 le lanes=i16
+  %58 = vselect.v8i16 %57, %45, %46
+  %59 = xor.v4i32 %56, %58
+  %60 = vcmp.m8 %2, %4 gt lanes=i16
+  %61 = vselect.v8i16 %60, %46, %47
+  %62 = xor.v4i32 %59, %61
+  %63 = vcmp.m8 %47, %4 ge lanes=i16
+  %64 = vselect.v8i16 %63, %47, %40
+  %65 = xor.v4i32 %62, %64
+  %66 = vcmp.m8 %2, %41 ult lanes=i16
+  %67 = vselect.v8i16 %66, %40, %41
+  %68 = xor.v4i32 %65, %67
+  %69 = vcmp.m8 %41, %4 ule lanes=i16
+  %70 = vselect.v8i16 %69, %41, %42
+  %71 = xor.v4i32 %68, %70
+  %72 = vcmp.m8 %2, %4 ugt lanes=i16
+  %73 = vselect.v8i16 %72, %42, %45
+  %74 = xor.v4i32 %71, %73
+  %75 = vcmp.m8 %45, %46 uge lanes=i16
+  %76 = vselect.v8i16 %75, %45, %46
+  %77 = xor.v4i32 %74, %76
+  %78 = xor.v4i32 %77, %40
+  %79 = xor.v4i32 %78, %41
+  %80 = xor.v4i32 %79, %42
+  %81 = xor.v4i32 %80, %45
+  %82 = xor.v4i32 %81, %46
+  %83 = xor.v4i32 %82, %47
+  %84 = add.v2i64 %2, %4
+  %85 = sub.v2i64 %2, %4
+  %86 = mul.v2i64 %2, %4
+  %87 = vconst.v4i32 0x000000000000007f000000000000007f
+  %88 = and.v4i32 %4, %87
+  %89 = shl.v2i64 %2, %88
+  %90 = lshr.v2i64 %2, %88
+  %91 = ashr.v2i64 %2, %88
+  %92 = vcmp.m8 %2, %85 eq lanes=i64
+  %93 = vselect.v2i64 %92, %84, %85
+  %94 = xor.v4i32 %83, %93
+  %95 = vcmp.m8 %85, %4 ne lanes=i64
+  %96 = vselect.v2i64 %95, %85, %86
+  %97 = xor.v4i32 %94, %96
+  %98 = vcmp.m8 %2, %4 lt lanes=i64
+  %99 = vselect.v2i64 %98, %86, %89
+  %100 = xor.v4i32 %97, %99
+  %101 = vcmp.m8 %89, %90 le lanes=i64
+  %102 = vselect.v2i64 %101, %89, %90
+  %103 = xor.v4i32 %100, %102
+  %104 = vcmp.m8 %2, %4 gt lanes=i64
+  %105 = vselect.v2i64 %104, %90, %91
+  %106 = xor.v4i32 %103, %105
+  %107 = vcmp.m8 %91, %4 ge lanes=i64
+  %108 = vselect.v2i64 %107, %91, %84
+  %109 = xor.v4i32 %106, %108
+  %110 = vcmp.m8 %2, %85 ult lanes=i64
+  %111 = vselect.v2i64 %110, %84, %85
+  %112 = xor.v4i32 %109, %111
+  %113 = vcmp.m8 %85, %4 ule lanes=i64
+  %114 = vselect.v2i64 %113, %85, %86
+  %115 = xor.v4i32 %112, %114
+  %116 = vcmp.m8 %2, %4 ugt lanes=i64
+  %117 = vselect.v2i64 %116, %86, %89
+  %118 = xor.v4i32 %115, %117
+  %119 = vcmp.m8 %89, %90 uge lanes=i64
+  %120 = vselect.v2i64 %119, %89, %90
+  %121 = xor.v4i32 %118, %120
+  %122 = xor.v4i32 %121, %84
+  %123 = xor.v4i32 %122, %85
+  %124 = xor.v4i32 %123, %86
+  %125 = xor.v4i32 %124, %89
+  %126 = xor.v4i32 %125, %90
+  %127 = xor.v4i32 %126, %91
+  %128 = fadd.v4f32 %2, %4
+  %129 = fsub.v4f32 %2, %4
+  %130 = fmul.v4f32 %2, %4
+  %131 = fdiv.v4f32 %2, %4
+  %132 = vcmp.m8 %2, %129 eq lanes=f32
+  %133 = vselect.v4f32 %132, %128, %129
+  %134 = xor.v4i32 %127, %133
+  %135 = vcmp.m8 %129, %4 ne lanes=f32
+  %136 = vselect.v4f32 %135, %129, %130
+  %137 = xor.v4i32 %134, %136
+  %138 = vcmp.m8 %2, %4 lt lanes=f32
+  %139 = vselect.v4f32 %138, %130, %131
+  %140 = xor.v4i32 %137, %139
+  %141 = vcmp.m8 %131, %128 le lanes=f32
+  %142 = vselect.v4f32 %141, %131, %128
+  %143 = xor.v4i32 %140, %142
+  %144 = vcmp.m8 %2, %4 gt lanes=f32
+  %145 = vselect.v4f32 %144, %128, %129
+  %146 = xor.v4i32 %143, %145
+  %147 = vcmp.m8 %129, %4 ge lanes=f32
+  %148 = vselect.v4f32 %147, %129, %130
+  %149 = xor.v4i32 %146, %148
+  %150 = xor.v4i32 %149, %128
+  %151 = xor.v4i32 %150, %129
+  %152 = xor.v4i32 %151, %130
+  %153 = xor.v4i32 %152, %131
+  %154 = fadd.v2f64 %2, %4
+  %155 = fsub.v2f64 %2, %4
+  %156 = fmul.v2f64 %2, %4
+  %157 = fdiv.v2f64 %2, %4
+  %158 = vcmp.m8 %2, %155 eq lanes=f64
+  %159 = vselect.v2f64 %158, %154, %155
+  %160 = xor.v4i32 %153, %159
+  %161 = vcmp.m8 %155, %4 ne lanes=f64
+  %162 = vselect.v2f64 %161, %155, %156
+  %163 = xor.v4i32 %160, %162
+  %164 = vcmp.m8 %2, %4 lt lanes=f64
+  %165 = vselect.v2f64 %164, %156, %157
+  %166 = xor.v4i32 %163, %165
+  %167 = vcmp.m8 %157, %154 le lanes=f64
+  %168 = vselect.v2f64 %167, %157, %154
+  %169 = xor.v4i32 %166, %168
+  %170 = vcmp.m8 %2, %4 gt lanes=f64
+  %171 = vselect.v2f64 %170, %154, %155
+  %172 = xor.v4i32 %169, %171
+  %173 = vcmp.m8 %155, %4 ge lanes=f64
+  %174 = vselect.v2f64 %173, %155, %156
+  %175 = xor.v4i32 %172, %174
+  %176 = xor.v4i32 %175, %154
+  %177 = xor.v4i32 %176, %155
+  %178 = xor.v4i32 %177, %156
+  %179 = xor.v4i32 %178, %157
+  %180 = address.ptr %0 offset=240
+  %181 = store.void %180, %179 align=1
+  %182 = address.ptr %0 offset=128
+  %183 = store.void %182, %158 align=1
+  %184 = address.ptr %0 offset=129
+  %185 = store.void %184, %161 align=1
+  %186 = address.ptr %0 offset=130
+  %187 = store.void %186, %164 align=1
+  %188 = address.ptr %0 offset=131
+  %189 = store.void %188, %167 align=1
+  %190 = address.ptr %0 offset=132
+  %191 = store.void %190, %170 align=1
+  %192 = address.ptr %0 offset=133
+  %193 = store.void %192, %173 align=1
+  %194 = ret.void
+}

@@ -42,7 +42,7 @@ struct IrOptimizeOptions
     // and SCALAR force a twin on every size: tests and benchmarks request them so each stays checked everywhere.
     uint32_t path;
     // The twin the internals run, resolved from `path` and the function's size by ir_optimize. The modules that call
-    // the internal pieces without ir_optimize set it directly (ir_optimize_licm.c, ir_optimize_sroa.c).
+    // the internal pieces without ir_optimize set it directly (ir_optimize_sroa.c).
     bool scalar;
 };
 
@@ -84,6 +84,15 @@ struct IrOptimizeWork
     // What ir_optimize_prepare's dominator analysis gives past the tree (DominatorOptions.outputs): 0, or LICM's natural
     // loops (#2719), which would otherwise take the analysis a second time.
     uint32_t dominator_outputs;
+    // Set before ir_optimize_prepare where the function needs no verification (#2719: Tier 1's LICM and value numbering on
+    // the promoted function, which promotion verified and the passes since, threading and if-conversion among them, take
+    // as verified, as these two now do; the optimizer after them verifies what reaches it): the preparation builds its
+    // CFG without the structural verifier's shape, row and graph checks and doesn't check its operands' dominance. A
+    // pass's own result is still verified where it rewrites the function.
+    bool validated;
+    // Set before ir_optimize_prepare by a pass that reads no use list (#2719: LICM's pressure policy in a function
+    // without an undef, whose taint is all it reads them for): the preparation builds none, and `uses` stays empty.
+    bool without_uses;
     uint8_t* states;
     IrConstant* values;
     // Allocated lazily by the first SIMD transfer; scalar functions keep their two-word lattice and no wide map.
@@ -1051,7 +1060,16 @@ static uint8_t ir_optimize_transfer(const IrOptimizeWork* work, uint32_t i, IrCo
         {
             const uint8_t left_state = work->states[a];
             const uint8_t right_state = work->states[b];
-            if (left_state == IROPT_OVERDEFINED || right_state == IROPT_OVERDEFINED)
+            // An `and` of an undef is zero (#3424), as LLVM folds it: the undef may be zero, and the result is then zero
+            // whatever the other operand is. Not the undef itself, whose bits the `and`'s other operand clears: SROA's
+            // eightbytes (ir_sroa_widen) clear a field's bits in a word no store wrote before, an undef after promotion,
+            // and an undef that reaches a phi has no definition, so a register holding whatever it held.
+            if (operation == IROPT_FOLD_AND && (f->op[a] == IR_UNDEF || f->op[b] == IR_UNDEF))
+            {
+                result = IROPT_CONSTANT;
+                *value = (IrConstant){ 0 };
+            }
+            else if (left_state == IROPT_OVERDEFINED || right_state == IROPT_OVERDEFINED)
             {
                 result = IROPT_OVERDEFINED;
             }
@@ -1409,12 +1427,9 @@ static bool ir_optimize_root(const IrOptimizeWork* work, uint32_t i)
 #define BUSTER_IR_OPTIMIZE_RIGHT_ONES 16u
 #define BUSTER_IR_OPTIMIZE_LEFT_ONES 32u
 // A conversion back to its operand's operand's type (#3311): a bitcast of a bitcast, and a truncation of an extension.
-// SROA's eightbytes (ir_sroa_widen) carry a double's bits as an i64 and a narrow field's as its extension.
+// SROA's eightbytes (ir_sroa_widen) carry a double's bits as an i64 and a narrow field's as its extension. An `and` of
+// an undef is no identity: SCCP folds it to zero (ir_optimize_transfer, #3424).
 #define BUSTER_IR_OPTIMIZE_ROUND_TRIP 64u
-// An `and` whose operand is zero is that operand (#3311): SCCP folds a constant's, so this is an undef's, which these
-// identities take as zero (ir_optimize_known), as Tier 1 selects it (TIER1_RULE_CONSTANT's zero). SROA's eightbytes
-// (ir_sroa_widen) clear a field's bits in a word no store wrote before, an undef after promotion.
-#define BUSTER_IR_OPTIMIZE_ABSORB 128u
 static const uint8_t ir_optimize_identity_kinds[BUSTER_IR_OP_TABLE] = {
     [IR_BITCAST] = BUSTER_IR_OPTIMIZE_ROUND_TRIP,
     [IR_TRUNC] = BUSTER_IR_OPTIMIZE_ROUND_TRIP,
@@ -1428,7 +1443,7 @@ static const uint8_t ir_optimize_identity_kinds[BUSTER_IR_OP_TABLE] = {
     [IR_MUL] = BUSTER_IR_OPTIMIZE_RIGHT_ONE | BUSTER_IR_OPTIMIZE_LEFT_ONE,
     [IR_UDIV] = BUSTER_IR_OPTIMIZE_RIGHT_ONE,
     [IR_SDIV] = BUSTER_IR_OPTIMIZE_RIGHT_ONE,
-    [IR_AND] = BUSTER_IR_OPTIMIZE_RIGHT_ONES | BUSTER_IR_OPTIMIZE_LEFT_ONES | BUSTER_IR_OPTIMIZE_ABSORB,
+    [IR_AND] = BUSTER_IR_OPTIMIZE_RIGHT_ONES | BUSTER_IR_OPTIMIZE_LEFT_ONES,
 };
 
 // The identities' candidates among `count` (at most 64) operations, a bit each: their opcodes' kinds by a 128-byte
@@ -1455,7 +1470,8 @@ static uint64_t ir_optimize_identity_candidates(const uint8_t* operations, uint3
 }
 
 // Whether SCCP knows `value`, of `type`'s bits (I1 to I64), is `expected` (zero, one or all ones) at those bits; or, for
-// zero, whether it is an undef (#3311), which may be any value, and which Tier 1 selects as zero.
+// zero, whether it is an undef (#3311), which may be any value, zero among them: an `or`, `xor` or `add` of one is its
+// other operand. Never the value forwarded in its place (#3424): an undef that reaches a phi has no definition.
 static bool ir_optimize_known(const IrOptimizeWork* work, uint32_t value, uint32_t type, uint64_t expected)
 {
     const uint32_t bits = ir_type_bits[type];
@@ -1483,8 +1499,8 @@ static uint32_t ir_optimize_identity_source(const IrOptimizeWork* work, const ui
 {
     const IrFunction* f = work->function;
     const uint32_t kind = ir_optimize_identity_kinds[f->op[i]];
-    // Its operands through the identities found before it (#3311), whose values they are: an `or` of an `and` that an
-    // undef absorbed is the `or`'s other operand.
+    // Its operands through the identities found before it (#3311), whose values they are: an `or` of an `and` of a zero
+    // extension that keeps its bits is that extension's `or`.
     uint32_t a = f->a[i];
     uint32_t b = f->b[i];
     for (uint32_t step = 0; forward != 0 && step < 4; step += 1)
@@ -1500,9 +1516,7 @@ static uint32_t ir_optimize_identity_source(const IrOptimizeWork* work, const ui
     const uint32_t inner = (kind & BUSTER_IR_OPTIMIZE_ROUND_TRIP) != 0 && a < f->instruction_count ? f->a[a] : BUSTER_IR_NONE;
     const bool round = inner < f->instruction_count && f->type[inner] == type &&
                        ((f->op[i] == IR_BITCAST && f->op[a] == IR_BITCAST) || (f->op[i] == IR_TRUNC && (f->op[a] == IR_ZEXT || f->op[a] == IR_SEXT)));
-    const bool absorbed_right = (kind & BUSTER_IR_OPTIMIZE_ABSORB) != 0 && ir_optimize_known(work, b, type, 0);
-    const bool absorbed_left = (kind & BUSTER_IR_OPTIMIZE_ABSORB) != 0 && ir_optimize_known(work, a, type, 0);
-    const uint32_t result = right ? a : left ? b : round ? inner : absorbed_right ? b : absorbed_left ? a : BUSTER_IR_NONE;
+    const uint32_t result = right ? a : left ? b : round ? inner : BUSTER_IR_NONE;
     return result;
 }
 
@@ -1750,8 +1764,9 @@ static __attribute__((aligned(64))) IrCheck ir_optimize_prepare(IrOptimizeWork* 
     work->scratch = scratch;
     work->scalar = scalar;
     // Retain the CFG built by the structural verifier. No input changes before the optimizer consumes it, so
-    // rebuilding the same graph here would repeat its edge enumeration, deduplication and instruction map.
-    IrCheck check = ir_verify_cfg(function, scratch, output, &work->cfg);
+    // rebuilding the same graph here would repeat its edge enumeration, deduplication and instruction map. A verified
+    // function (`validated`) has its CFG built alone.
+    IrCheck check = work->validated ? ir_check(ir_cfg_validated(function, scratch, output, &work->cfg), BUSTER_IR_NONE, 0) : ir_verify_cfg(function, scratch, output, &work->cfg);
     if (check.error == IR_OK && !simd && ir_function_has_simd(function))
     {
         check.error = IR_ERROR_UNSUPPORTED;
@@ -1763,7 +1778,7 @@ static __attribute__((aligned(64))) IrCheck ir_optimize_prepare(IrOptimizeWork* 
         check = ir_check(IR_ERROR_PHI, 0, 0);
     }
     // The use lists consume the same verified revision without repeating its shape, row or graph checks.
-    if (check.error == IR_OK)
+    if (check.error == IR_OK && !work->without_uses)
     {
         check.error = ir_uses_validated(function, scratch, output, &work->uses);
     }
@@ -1787,7 +1802,7 @@ static __attribute__((aligned(64))) IrCheck ir_optimize_prepare(IrOptimizeWork* 
                       status == DOMINATOR_MATRIX_LIMIT  ? IR_ERROR_UNSUPPORTED :
                                                           IR_ERROR_DOMINANCE;
     }
-    if (check.error == IR_OK)
+    if (check.error == IR_OK && !work->validated)
     {
         check = ir_optimize_check_reachable(function, &work->cfg, &work->dominators);
     }

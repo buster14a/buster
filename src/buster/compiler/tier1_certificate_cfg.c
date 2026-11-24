@@ -22,7 +22,8 @@
 //   fragments' locations. Each edge carries its resolved moves in order, a slot-to-slot move through its class's scratch
 //   register as the consumers make it, and the successor's phis as simultaneous renames. Each block's certificate is
 //   where the allocation keeps each value its intervals carry into the block (tier1_cfg_entry_location), a recipe's
-//   availability for a value it recomputes there. Only the allocation's shape is validated here; its meaning is the
+//   availability for a value it recomputes there, and each slot the allocation asserts current there besides
+//   (tier1_cfg_current_slots, #2553), whose stores its edges leave out. Only the allocation's shape is validated here; its meaning is the
 //   checker's to prove.
 //
 // Storage: the registers the source declares for each class that has values (allocatable, scratch and the fixed
@@ -622,6 +623,34 @@ static Tier1CertError tier1_certificate_cfg(const Tier1CfgInput* input, const Ti
                         fill[b] += 1;
                         tally.recipe_facts += kind == BUSTER_TIER1_ALLOCATE_REMATERIALIZE;
                     }
+                }
+            }
+        }
+        // And the slots the allocation holds current at a block's start besides those places (tier1_cfg_current_slots,
+        // #2553), whose stores the edges leave out: each proved on every edge into the block.
+        for (uint32_t b = 0; error == TIER1_CERT_OK && result->current_slot_offsets != 0 && b < blocks; b += 1)
+        {
+            for (uint32_t k = result->current_slot_offsets[b]; error == TIER1_CERT_OK && numbers[b] != BUSTER_CERT_NONE && k < result->current_slot_offsets[b + 1]; k += 1)
+            {
+                if (pass == 0)
+                {
+                    fact_offsets[b + 1] += 1;
+                }
+                else
+                {
+                    const uint32_t v = result->current_slots[k];
+                    const bool slotted = v < input->value_count && allocation->spill_ids[v] < allocation->spill_count;
+                    const uint32_t location = slotted ? tier1_cert_cfg_storage(&build, BUSTER_TIER1_CFG_SPILL + allocation->spill_ids[v]) : BUSTER_CERT_NONE;
+                    error = location != BUSTER_CERT_NONE ? error : TIER1_CERT_TRANSITION;
+                    if (error != TIER1_CERT_OK)
+                    {
+                        tier1_cert_cfg_refuse(&build, b, v, input->block_starts[b]);
+                    }
+                    facts[fill[b]] = (Tier1CertFact){
+                        .value = v,
+                        .location = location,
+                    };
+                    fill[b] += 1;
                 }
             }
         }

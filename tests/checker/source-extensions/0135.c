@@ -1,0 +1,1 @@
+int f(x)_Atomic(const int) x;{return x;}

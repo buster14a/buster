@@ -1,0 +1,1 @@
+enum{A=9};int f(x)enum E{A=3}x;{return x+A;}int a[A];_Static_assert(sizeof a==9*sizeof(int),"scope");

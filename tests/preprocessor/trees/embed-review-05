@@ -1,0 +1,4 @@
+unsigned char b[] = {
+#pragma GCC system_header
+  #embed "hi.txt" limit(1) suffix(, 300)
+};

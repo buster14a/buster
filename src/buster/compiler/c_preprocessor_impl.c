@@ -2661,6 +2661,11 @@ static bool pp_compile_macro(Preprocessor* pp, PPMacroId id)
     macro->flags |= simple ? BUSTER_PP_MACRO_SIMPLE : 0;
     macro->order_count = (uint16_t)(in_order ? order_count : 0);
     macro->name_count = (uint16_t)(simple ? name_count : 0);
+    // The order's entries were written past the items before the macro was known to keep them (a __VA_OPT__ after a
+    // parameter drops them), and a compile that fails gives its items back: how far the items were written, for what
+    // clears them by more than their count (pp_root_tables).
+    const uint32_t written = pp->item_count + order_count + (simple ? name_count : 0);
+    pp->item_peak = written > pp->item_peak ? written : pp->item_peak;
     pp->item_count += (in_order ? order_count : 0) + (simple ? name_count : 0);
     macro->item_count = result ? count : 0;
     macro->flags |= result ? BUSTER_PP_MACRO_COMPILED : 0;
@@ -14348,19 +14353,605 @@ static bool pp_initialize_once(Preprocessor* pp, const PPOptions* options, Inter
     return result;
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// The root image (#3070): c_preprocessor.c, at PPRoot, has what it is and what a release restores.
+
+// The bytes a root's arena reserves for its record and its image: the image of a prelude is about 100 KB.
+#define BUSTER_PP_ROOT_BYTES (1ull << 32)
+
+// Where the two arenas of scratch spellings are among a root's (pp_root_arenas).
+#define BUSTER_PP_ROOT_SCRATCH 4
+
+// The arenas a root keeps beside the tables', in PPRoot.arena_bytes' order. The last is the history's first tables',
+// which a unit without history doesn't have (its base is null): a table that outgrows its part of it moves to an arena
+// of its own, which the unit releases, and the image's pointers are to the parts.
+static void pp_root_arenas(Preprocessor* pp, Arena* arenas[BUSTER_PP_ROOT_ARENAS])
+{
+    arenas[0] = &pp->arena;
+    arenas[1] = &pp->columns[0];
+    arenas[2] = &pp->columns[1];
+    arenas[3] = &pp->columns[2];
+    arenas[BUSTER_PP_ROOT_SCRATCH] = &pp->scratch[0];
+    arenas[BUSTER_PP_ROOT_SCRATCH + 1] = &pp->scratch[1];
+    arenas[6] = &pp->history_initial;
+}
+
+// The tables of the unit's arena of tables (pp_initialize_once's plan) that a release restores by their counts, with the
+// counts `pp` has: all but macro_of, is_macro, poisoned and record_data, which pp_root_restore restores by what the
+// unit's records name, and a unit's own file cache, which a unit bound to a root doesn't have. One the unit didn't
+// reserve isn't listed. Returns how many there are. Every count but a stack's only grows while a unit runs, and no
+// table but a stack is written past its count (the items', past which a macro's compile writes, is their peak): one that
+// could be would be a stack here, or mark the unit (Preprocessor.root_unrestorable).
+static uint32_t pp_root_tables(const Preprocessor* pp, PPRootTable tables[BUSTER_PP_ROOT_TABLES])
+{
+    const uint32_t shift = pp->capacity_shift;
+    const uint64_t files = BUSTER_PP_MAX_FILES >> shift;
+    const uint64_t pushed = BUSTER_PP_MAX_PUSHED >> shift;
+    const uint64_t contexts = BUSTER_PP_MAX_CONTEXTS >> shift;
+    const uint64_t items = BUSTER_PP_MAX_ITEMS >> shift;
+    const uint64_t stack = (uint64_t)(BUSTER_PP_MAX_STACK_TOKENS >> shift) + BUSTER_PP_TOKEN_SLACK;
+    // The search directories' tables are the unit's only where it made its own list, not where it took the command's.
+    const bool own_search = (uintptr_t)pp->search.directories - (uintptr_t)pp->arrays[0].base < pp->arrays[0].capacity;
+    const uint64_t directories = pp->search.directory_count;
+    const PPTokens* arguments = &pp->arguments;
+    const PPTokens* captures = &pp->captures;
+    const PPTokens* expansions = &pp->expansions;
+    const PPRootTable all[] = {
+        { (uint8_t*)pp->ranges, sizeof(PPRange), pp->range_count, BUSTER_PP_MAX_RANGES >> shift, BUSTER_PP_ROOT_DENSE },
+        { (uint8_t*)pp->datas, sizeof(PPFileData), pp->data_count, files, BUSTER_PP_ROOT_DENSE },
+        { (uint8_t*)pp->dependencies, sizeof(DependencyFile), pp->dependency_count, files, BUSTER_PP_ROOT_DENSE },
+        { (uint8_t*)pp->files, sizeof(PPFile), pp->file_count, files, BUSTER_PP_ROOT_DENSE },
+        { (uint8_t*)pp->file_slots, sizeof(uint32_t), (uint64_t)pp->file_slot_mask + 1, BUSTER_PP_FILE_SLOTS >> shift, BUSTER_PP_ROOT_DENSE },
+        { own_search ? (uint8_t*)pp->search.directories : 0, sizeof(char*), directories, pushed, BUSTER_PP_ROOT_DENSE },
+        { own_search ? (uint8_t*)pp->search.directory_lengths : 0, sizeof(uint32_t), directories, pushed, BUSTER_PP_ROOT_DENSE },
+        { own_search ? (uint8_t*)pp->search.directory_system : 0, sizeof(uint8_t), directories, pushed, BUSTER_PP_ROOT_DENSE },
+        { (uint8_t*)pp->directory_entries, sizeof(FileCacheDirectory*), directories, pushed, BUSTER_PP_ROOT_DENSE },
+        { (uint8_t*)pp->line_directives, sizeof(PPLineDirective), pp->line_directive_count, BUSTER_PP_MAX_LINE_DIRECTIVES >> shift, BUSTER_PP_ROOT_DENSE },
+        { (uint8_t*)pp->expansion_starts, sizeof(PPExpansionStart), pp->expansion_start_count, (uint64_t)(BUSTER_PP_MAX_OUTPUT_TOKENS >> shift) + 1, BUSTER_PP_ROOT_DENSE },
+        { (uint8_t*)pp->silent_pragmas, sizeof(PPExpansionStart), pp->silent_pragma_count, BUSTER_PP_MAX_SILENT_PRAGMAS >> shift, BUSTER_PP_ROOT_DENSE },
+        { (uint8_t*)pp->embeds, sizeof(PPEmbed), pp->embed_count, BUSTER_PP_MAX_EMBEDS >> shift, BUSTER_PP_ROOT_DENSE },
+        { (uint8_t*)pp->macros, sizeof(PPMacro), pp->macro_count, BUSTER_PP_MAX_MACROS >> shift, BUSTER_PP_ROOT_DENSE },
+        { (uint8_t*)pp->items, sizeof(PPItem), pp->item_count > pp->item_peak ? pp->item_count : pp->item_peak, items, BUSTER_PP_ROOT_DENSE },
+        { (uint8_t*)pp->parameters, sizeof(IdentId), pp->parameter_count, items, BUSTER_PP_ROOT_DENSE },
+        { (uint8_t*)pp->templates, sizeof(PPTemplate), pp->template_count, BUSTER_PP_MAX_TEMPLATES >> shift, BUSTER_PP_ROOT_DENSE },
+        { (uint8_t*)pp->pushed_names, sizeof(IdentId), pp->pushed_count, pushed, BUSTER_PP_ROOT_STACK },
+        { (uint8_t*)pp->pushed_macros, sizeof(PPMacroId), pp->pushed_count, pushed, BUSTER_PP_ROOT_STACK },
+        { (uint8_t*)pp->contexts, sizeof(PPContext), pp->context_count, contexts, BUSTER_PP_ROOT_STACK },
+        { (uint8_t*)pp->conditionals, sizeof(PPConditional), pp->conditional_count, contexts, BUSTER_PP_ROOT_STACK },
+        { (uint8_t*)pp->invocations, sizeof(PPInvocation), pp->invocation_count, contexts, BUSTER_PP_ROOT_STACK },
+        { (uint8_t*)pp->argument_records, sizeof(PPArgument), pp->argument_record_count, BUSTER_PP_MAX_STACK_TOKENS >> shift, BUSTER_PP_ROOT_STACK },
+        { (uint8_t*)pp->capture_frames, sizeof(PPCapture), pp->capture_count, contexts, BUSTER_PP_ROOT_STACK },
+        { arguments->kinds, sizeof(uint8_t), arguments->count, stack, BUSTER_PP_ROOT_STACK },
+        { arguments->flags, sizeof(uint8_t), arguments->count, stack, BUSTER_PP_ROOT_STACK },
+        { (uint8_t*)arguments->values, sizeof(uint32_t), arguments->count, stack, BUSTER_PP_ROOT_STACK },
+        { (uint8_t*)arguments->locations, sizeof(uint32_t), arguments->count, stack, BUSTER_PP_ROOT_STACK },
+        { captures->kinds, sizeof(uint8_t), captures->count, stack, BUSTER_PP_ROOT_STACK },
+        { captures->flags, sizeof(uint8_t), captures->count, stack, BUSTER_PP_ROOT_STACK },
+        { (uint8_t*)captures->values, sizeof(uint32_t), captures->count, stack, BUSTER_PP_ROOT_STACK },
+        { (uint8_t*)captures->locations, sizeof(uint32_t), captures->count, stack, BUSTER_PP_ROOT_STACK },
+        { expansions->kinds, sizeof(uint8_t), expansions->count, stack, BUSTER_PP_ROOT_STACK },
+        { expansions->flags, sizeof(uint8_t), expansions->count, stack, BUSTER_PP_ROOT_STACK },
+        { (uint8_t*)expansions->values, sizeof(uint32_t), expansions->count, stack, BUSTER_PP_ROOT_STACK },
+        { (uint8_t*)expansions->locations, sizeof(uint32_t), expansions->count, stack, BUSTER_PP_ROOT_STACK },
+    };
+    _Static_assert(BUSTER_ARRAY_LENGTH(all) <= BUSTER_PP_ROOT_TABLES, "a root lists every table of the unit's that has a count");
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(all); i += 1)
+    {
+        tables[count] = all[i];
+        count += all[i].base != 0;
+    }
+    return count;
+}
+
+BUSTER_PREPROCESSOR_ENTRY PPRoot* pp_root_make(void)
+{
+    Arena storage = arena_reserve(BUSTER_PP_ROOT_BYTES);
+    PPRoot* root = arena_push(&storage, sizeof(PPRoot), _Alignof(PPRoot));
+    if (root != 0)
+    {
+        memset(root, 0, sizeof(*root));
+        root->storage = storage;
+    }
+    else
+    {
+        arena_release(&storage);
+    }
+    return root;
+}
+
+BUSTER_PREPROCESSOR_ENTRY void pp_root_release(PPRoot* root)
+{
+    if (root != 0)
+    {
+        if (root->state == PP_ROOT_CAPTURED)
+        {
+            Arena* kept[BUSTER_PP_ROOT_ARENAS];
+            pp_root_arenas(&root->image, kept);
+            for (uint32_t a = 0; a < BUSTER_PP_ROOT_ARENAS; a += 1)
+            {
+                arena_release(kept[a]);
+            }
+            arena_release(&root->image.arrays[0]);
+        }
+        // The record is in the arena it describes.
+        Arena storage = root->storage;
+        arena_release(&storage);
+    }
+}
+
+// The root's storage emptied to its record, and the root without an image.
+static void pp_root_forget(PPRoot* root, uint8_t state)
+{
+    arena_rewind(&root->storage, (uint64_t)((uint8_t*)(root + 1) - root->storage.base));
+    root->state = state;
+    root->table_count = 0;
+    root->macro_of = 0;
+    root->is_macro = 0;
+}
+
+// `bytes` bytes at `source` copied into the root's storage; null, and `*fits` false, if it has no room.
+static const uint8_t* pp_root_copy(PPRoot* root, const void* source, uint64_t bytes, bool* fits)
+{
+    uint8_t* copy = arena_push(&root->storage, bytes != 0 ? bytes : 1, 64);
+    if (copy != 0 && bytes != 0)
+    {
+        memcpy(copy, source, bytes);
+    }
+    *fits = *fits && copy != 0;
+    return copy;
+}
+
+// The prelude's macros are defined (pp_run_prelude) in a unit bound to an empty root: captures the unit's state as the
+// root's image, or refuses the root where an image can't hold it. An image holds a prelude that reported nothing, left
+// nothing open and gave no output, of a unit run from its file (pp_run: one read from memory may have pushed its bytes
+// first) that reads through a shared file cache, with no array past its tables (no table of the history that outgrew
+// its first), no -dD, -dI or -H record and no poisoned name. What the prelude's -include lines do isn't in it: each
+// unit runs them. A unit that records its history as it runs (-g's) has the history's first tables in it.
+static void pp_root_capture(Preprocessor* pp)
+{
+    PPRoot* root = pp->root;
+    const PPOptions* options = &pp->options;
+    const bool quiet = !pp->fatal && pp->errors == 0 && pp->warnings == 0 && pp->diagnostic_first == 0 && !pp->diagnostic_collection_failed && !pp->history_failed;
+    const bool closed = pp->output.count == 0 && pp->arguments.count == 0 && pp->captures.count == 0 && pp->expansions.count == 0 && pp->context_count == 0 &&
+                        pp->conditional_count == 0 && pp->invocation_count == 0 && pp->capture_count == 0 && pp->argument_record_count == 0 && pp->stream_count == 0 &&
+                        pp->limit_count == 0;
+    const bool plain = pp->history_path != 0 && !pp->owns_cache && options->files != 0 && pp->history_replay == 0 && pp->array_count == 1 &&
+                       pp->argument_link_arena.base == 0 && pp->arguments.origin_arena.base == 0 && pp->captures.origin_arena.base == 0 &&
+                       pp->expansions.origin_arena.base == 0 && pp->output_events == 0 && !options->dump_defines && !options->dump_includes && !options->show_includes &&
+                       pp->poison_count == 0 && !pp->root_unrestorable;
+    bool captured = quiet && closed && plain;
+    if (captured)
+    {
+        Arena* arenas[BUSTER_PP_ROOT_ARENAS];
+        pp_root_arenas(pp, arenas);
+        for (uint32_t a = 0; a < BUSTER_PP_ROOT_ARENAS; a += 1)
+        {
+            captured = captured && !arenas[a]->unaccounted;
+            root->arena_bytes[a] = arenas[a]->base != 0 ? pp_root_copy(root, arenas[a]->base, arenas[a]->length, &captured) : 0;
+        }
+        const uint32_t count = pp_root_tables(pp, root->tables);
+        root->table_count = count;
+        for (uint32_t t = 0; t < count; t += 1)
+        {
+            root->table_bytes[t] = pp_root_copy(root, root->tables[t].base, root->tables[t].count * root->tables[t].size, &captured);
+        }
+        const uint32_t ids = pp->table->count;
+        root->ids = ids;
+        root->macro_of = (const PPMacroId*)pp_root_copy(root, pp->macro_of, (uint64_t)ids * sizeof(PPMacroId), &captured);
+        root->is_macro = (const uint64_t*)pp_root_copy(root, pp->is_macro, ((uint64_t)ids + 63) / 64 * sizeof(uint64_t), &captured);
+        captured = captured && !pp->arrays[0].unaccounted;
+    }
+    if (captured)
+    {
+        root->image = *pp;
+        // The output is each unit's own (pp_root_resume), and a unit that starts from the image has its macros.
+        root->image.output = (PPTokens){ 0 };
+        root->image.root_resumed = true;
+        root->owner = pp;
+        root->table = pp->table;
+        root->files = pp->cache;
+        root->search = options->search;
+        root->preprocessed = options->preprocessed;
+        root->compact = arena_compact || arena_commit_refused;
+        root->state = PP_ROOT_CAPTURED;
+        root->captures += 1;
+    }
+    else
+    {
+        pp_root_forget(root, PP_ROOT_REFUSED);
+        root->live = false;
+        pp->root = 0;
+    }
+}
+
+// Whether a unit that `pp` is to run, with these options and intern table, starts from the root's image: the
+// preprocessor the image's own pointers are in, the table its names' ids are of, the file cache and the search
+// directories its files' records are of, and a prelude for the same kind of input, in reservations of the same shape.
+static bool pp_root_matches(const PPRoot* root, const Preprocessor* pp, const PPOptions* options, const InternTable* table)
+{
+    return root->owner == pp && root->table == table && root->files == options->files && root->search == options->search &&
+           root->preprocessed == options->preprocessed && root->compact == (arena_compact || arena_commit_refused);
+}
+
+// A unit's start from the root's image (pp_initialize's, for a unit pp_root_matches): the image, with the unit's own
+// options, time (pp_initialize_time, which the image has the first unit's of) and output, as pp_initialize_once gives
+// them. The phases' ticks are the unit's own too: it lexes no prelude. Returns false, as pp_initialize does, if the
+// output can't be reserved or the time can't be read; the unit stays bound, and its release gives the root its arenas
+// back.
+static bool pp_root_resume(Preprocessor* pp, PPRoot* root, const PPOptions* options)
+{
+    *pp = root->image;
+    root->live = true;
+    root->resumes += 1;
+    // (The image's history_deferred and history_quiet are these options': pp_initialize_once's.)
+    pp->options = *options;
+    pp->options.no_history |= pp->history_deferred;
+    memset(pp->ticks, 0, sizeof(pp->ticks));
+    const bool reserved = pp_tokens_reserve(&pp->output, (BUSTER_PP_MAX_OUTPUT_TOKENS >> pp->capacity_shift));
+    return reserved && pp_initialize_time(pp) && !pp->fatal;
+}
+
+// What a unit left of the image's state restored (c_preprocessor.c, at PPRoot): `now` are the unit's tables as
+// pp_root_tables lists them, which are the root's, with the unit's counts.
+static void pp_root_restore(PPRoot* root, Preprocessor* pp, const PPRootTable* now)
+{
+    const Preprocessor* image = &root->image;
+    // The tables by name, while the unit's records say which names it gave a macro: a name that had an id at the capture
+    // has the image's entry, copied back, and any other has one only through a record the unit made for it (pp_new_macro:
+    // a definition, a poisoned name's), since #undef and pop_macro give a name no macro or one of its earlier records.
+    // Scalar stores: on the 9700X scatters were no faster for a unit's macros (#3070's record, 1.8 to 1.9 ticks a macro
+    // either way).
+    const uint32_t ids = root->ids;
+    const uint32_t macro_count = pp->macro_count;
+    const PPMacro* macros = pp->macros;
+    PPMacroId* macro_of = pp->macro_of;
+    uint64_t* is_macro = pp->is_macro;
+    for (uint32_t m = image->macro_count; m < macro_count; m += 1)
+    {
+        const IdentId name = macros[m].name;
+        macro_of[name] = 0;
+        is_macro[name / 64] &= ~(1ull << (name % 64));
+    }
+    memcpy(macro_of, root->macro_of, (uint64_t)ids * sizeof(PPMacroId));
+    memcpy(is_macro, root->is_macro, ((uint64_t)ids + 63) / 64 * sizeof(uint64_t));
+    // A poisoned name that was a macro already has no record of its own: the bits of a unit that poisoned any, whole.
+    if (pp->poison_count != 0)
+    {
+        arena_clear((uint8_t*)pp->poisoned, ((uint64_t)pp->table->count + 63) / 64 * sizeof(uint64_t));
+    }
+    // The cache records' data: the unit's, cleared before its files' data are, and then the image's files'.
+    const uint32_t data_count = pp->data_count;
+    uint32_t* record_data = pp->record_data;
+    for (uint32_t d = 0; d < data_count; d += 1)
+    {
+        const uint32_t record = pp->datas[d].record;
+        if (record != BUSTER_PP_NONE)
+        {
+            record_data[record] = 0;
+        }
+    }
+    const uint32_t count = root->table_count;
+    for (uint32_t t = 0; t < count; t += 1)
+    {
+        const PPRootTable* was = &root->tables[t];
+        const uint64_t kept = was->count * was->size;
+        if (was->kind == BUSTER_PP_ROOT_DENSE && now[t].count > was->count)
+        {
+            arena_clear(was->base + kept, (now[t].count - was->count) * was->size);
+        }
+        memcpy(was->base, root->table_bytes[t], kept);
+    }
+    for (uint32_t d = 0; d < image->data_count; d += 1)
+    {
+        const uint32_t record = pp->datas[d].record;
+        if (record != BUSTER_PP_NONE)
+        {
+            record_data[record] = d + 1;
+        }
+    }
+    Arena* live[BUSTER_PP_ROOT_ARENAS];
+    Arena* kept[BUSTER_PP_ROOT_ARENAS];
+    pp_root_arenas(pp, live);
+    pp_root_arenas(&root->image, kept);
+    // The scratch spellings' arenas: a chunk is pushed whole and filled from its start, and a spelling is never written
+    // again (pp_scratch_in), so of the image's chunk a unit wrote the bytes past the image's, up to its own or, where it
+    // went on to another chunk, to the chunk's end; those are cleared, and the image's aren't copied back (64 KB of the
+    // 150 a release would copy, for the three spellings the predefines' start makes).
+    bool spellings[BUSTER_PP_ROOT_ARENAS] = { false };
+    for (uint32_t clean = 0; clean < 2; clean += 1)
+    {
+        const uint32_t range = image->scratch_range[clean];
+        if (range != BUSTER_PP_NONE)
+        {
+            uint8_t* chunk = (uint8_t*)pp->ranges[range].bytes;
+            const uint32_t was = image->scratch_used[clean];
+            const uint32_t now_used = pp->scratch_range[clean] == range ? pp->scratch_used[clean] : pp->ranges[range].length - 1;
+            arena_clear(chunk + was, now_used - was);
+            spellings[BUSTER_PP_ROOT_SCRATCH + clean] = true;
+        }
+    }
+    for (uint32_t a = 0; a < BUSTER_PP_ROOT_ARENAS; a += 1)
+    {
+        const uint64_t length = kept[a]->length;
+        if (live[a]->base != 0)
+        {
+            if (!spellings[a])
+            {
+                memcpy(live[a]->base, root->arena_bytes[a], length);
+            }
+            arena_rewind(live[a], length);
+        }
+        // The image's arena is the unit's, with what the unit committed.
+        *kept[a] = *live[a];
+    }
+}
+
+// The most pages pp_root_scan asks the kernel about at once.
+#define BUSTER_PP_ROOT_SCAN_PAGES (64u << 10)
+
+// A root's check reads kept memory as bytes, a record's padding among them, which MemorySanitizer counts as never
+// written though a copy carries it, and pages the kernel took back and gives again as zeros, whose shadow is what the
+// bytes before them left: the bytes it is about to read count as written.
+static void pp_root_readable(const void* bytes, uint64_t size)
+{
+#if __has_feature(memory_sanitizer)
+    __msan_unpoison(bytes, (size_t)size);
+#else
+    (void)bytes;
+    (void)size;
+#endif
+}
+
+// Whether `size` bytes of kept memory are the image's.
+static bool pp_root_same(const void* kept, const void* image, uint64_t size)
+{
+    pp_root_readable(kept, size);
+    pp_root_readable(image, size);
+    return memcmp(kept, image, size) == 0;
+}
+
+// A root's check and its poison (PPRoot.verify), over the bytes [begin, end) of a kept mapping, by the pages of them the
+// kernel has (mincore: a page it doesn't have is zero): with `poison` 0, returns the first byte that isn't zero, or null;
+// else fills them with `poison` and returns null.
+static const uint8_t* pp_root_scan(uint8_t* begin, uint8_t* end, uint8_t poison)
+{
+    const uint8_t* result = 0;
+    Scratch scratch = scratch_begin(0);
+    unsigned char* resident = arena_push(scratch.arena, BUSTER_PP_ROOT_SCAN_PAGES, 1);
+    uint8_t* page = (uint8_t*)((uintptr_t)begin & ~(uintptr_t)(BUSTER_ARENA_PAGE_BYTES - 1));
+    while (resident != 0 && result == 0 && page < end)
+    {
+        const uint64_t left = ((uint64_t)(end - page) + BUSTER_ARENA_PAGE_BYTES - 1) / BUSTER_ARENA_PAGE_BYTES;
+        const uint64_t pages = left < BUSTER_PP_ROOT_SCAN_PAGES ? left : BUSTER_PP_ROOT_SCAN_PAGES;
+        const bool asked = mincore(page, pages * BUSTER_ARENA_PAGE_BYTES, resident) == 0;
+        for (uint64_t p = 0; result == 0 && p < pages; p += 1)
+        {
+            // A page the kernel couldn't be asked about is read, as one it has.
+            if (!asked || (resident[p] & 1) != 0)
+            {
+                uint8_t* from = page + p * BUSTER_ARENA_PAGE_BYTES > begin ? page + p * BUSTER_ARENA_PAGE_BYTES : begin;
+                uint8_t* to = page + (p + 1) * BUSTER_ARENA_PAGE_BYTES < end ? page + (p + 1) * BUSTER_ARENA_PAGE_BYTES : end;
+                if (poison != 0)
+                {
+                    memset(from, poison, (uint64_t)(to - from));
+                }
+                pp_root_readable(from, (uint64_t)(to - from));
+                for (const uint8_t* byte = from; poison == 0 && result == 0 && byte < to; byte += 1)
+                {
+                    result = *byte != 0 ? byte : 0;
+                }
+            }
+        }
+        page += pages * BUSTER_ARENA_PAGE_BYTES;
+    }
+    scratch_end(scratch);
+    return result;
+}
+
+// Notes the first difference a root's check finds (PPRoot.mismatch), and counts each.
+static __attribute__((format(printf, 2, 3))) void pp_root_mismatch(PPRoot* root, const char* format, ...)
+{
+    if (root->mismatches == 0)
+    {
+        va_list arguments;
+        va_start(arguments, format);
+        vsnprintf(root->mismatch, sizeof(root->mismatch), format, arguments);
+        va_end(arguments);
+    }
+    root->mismatches += 1;
+}
+
+// A root's check after a release restored it (PPRoot.verify): every byte of the memory it keeps is the image's, or zero
+// where the image has none, as a unit that started without a root would have it after its prelude; and what a stack
+// keeps past its count is filled with the root's pattern, so that a unit that read it would read no earlier unit's bytes.
+static void pp_root_check(PPRoot* root, Preprocessor* pp)
+{
+    Arena* kept[BUSTER_PP_ROOT_ARENAS];
+    pp_root_arenas(&root->image, kept);
+    for (uint32_t a = 0; a < BUSTER_PP_ROOT_ARENAS; a += 1)
+    {
+        const Arena* arena = kept[a];
+        const uint64_t length = arena->length;
+        const uint64_t writable = arena->committed > arena->mapping_offset ? arena->committed - arena->mapping_offset : 0;
+        if (arena->base != 0 && !pp_root_same(arena->base, root->arena_bytes[a], length))
+        {
+            pp_root_mismatch(root, "arena %u differs from the image within its %llu bytes", a, (unsigned long long)length);
+        }
+        const uint8_t* dirty = arena->base != 0 && writable > length ? pp_root_scan(arena->base + length, arena->base + writable, 0) : 0;
+        if (dirty != 0)
+        {
+            pp_root_mismatch(root, "arena %u has a byte at %llu, past the image's %llu", a, (unsigned long long)(dirty - arena->base), (unsigned long long)length);
+        }
+    }
+    for (uint32_t t = 0; t < root->table_count; t += 1)
+    {
+        const PPRootTable* table = &root->tables[t];
+        const uint64_t bytes = table->count * table->size;
+        uint8_t* end = table->base + table->capacity * table->size;
+        if (!pp_root_same(table->base, root->table_bytes[t], bytes))
+        {
+            pp_root_mismatch(root, "table %u differs from the image within its %llu entries", t, (unsigned long long)table->count);
+        }
+        const uint8_t* dirty = pp_root_scan(table->base + bytes, end, table->kind == BUSTER_PP_ROOT_STACK ? root->poison : 0);
+        if (dirty != 0 && table->kind == BUSTER_PP_ROOT_DENSE)
+        {
+            pp_root_mismatch(root, "table %u has a byte in entry %llu, past the image's %llu", t, (unsigned long long)((uint64_t)(dirty - table->base) / table->size),
+                             (unsigned long long)table->count);
+        }
+    }
+    // The tables by name: the image's entries for its ids and none past them; no poisoned name; and the image's files'
+    // records' data alone.
+    const uint64_t ids = root->ids;
+    const uint64_t limit = intern_id_limit(pp->table);
+    const uint64_t words = (ids + 63) / 64;
+    uint8_t* macro_of = (uint8_t*)pp->macro_of;
+    uint8_t* is_macro = (uint8_t*)pp->is_macro;
+    uint8_t* poisoned = (uint8_t*)pp->poisoned;
+    if (!pp_root_same(macro_of, root->macro_of, ids * sizeof(PPMacroId)) || !pp_root_same(is_macro, root->is_macro, words * sizeof(uint64_t)))
+    {
+        pp_root_mismatch(root, "a name of the image's %llu has another macro than the image's", (unsigned long long)ids);
+    }
+    const uint8_t* named = pp_root_scan(macro_of + ids * sizeof(PPMacroId), macro_of + limit * sizeof(PPMacroId), 0);
+    const uint8_t* marked = pp_root_scan(is_macro + words * sizeof(uint64_t), is_macro + limit / 64 * sizeof(uint64_t), 0);
+    if (named != 0 || marked != 0)
+    {
+        pp_root_mismatch(root, "name %llu, past the image's %llu, has a macro", (unsigned long long)(named != 0 ? (uint64_t)(named - macro_of) / sizeof(PPMacroId) :
+                                                                                                                  (uint64_t)(marked - is_macro) * 8), (unsigned long long)ids);
+    }
+    if (pp_root_scan(poisoned, poisoned + limit / 64 * sizeof(uint64_t), 0) != 0)
+    {
+        pp_root_mismatch(root, "a name is poisoned");
+    }
+    const Preprocessor* image = &root->image;
+    uint32_t* record_data = pp->record_data;
+    for (uint32_t d = 0; d < image->data_count; d += 1)
+    {
+        const uint32_t record = image->datas[d].record;
+        if (record != BUSTER_PP_NONE && record_data[record] == d + 1)
+        {
+            record_data[record] = 0;
+        }
+        else if (record != BUSTER_PP_NONE)
+        {
+            pp_root_mismatch(root, "the image's file %u isn't its cache record's data", d);
+        }
+    }
+    const uint8_t* recorded = pp_root_scan((uint8_t*)record_data, (uint8_t*)(record_data + BUSTER_PP_MAX_FILES), 0);
+    if (recorded != 0)
+    {
+        pp_root_mismatch(root, "cache record %llu has data that isn't the image's", (unsigned long long)((uint64_t)(recorded - (uint8_t*)record_data) / sizeof(uint32_t)));
+    }
+    for (uint32_t d = 0; d < image->data_count; d += 1)
+    {
+        const uint32_t record = image->datas[d].record;
+        if (record != BUSTER_PP_NONE)
+        {
+            record_data[record] = d + 1;
+        }
+    }
+}
+
+// A test's fault in what a root keeps after a restore (BUSTER_TEST_ROOT_DIRT's first character): a byte past an arena's
+// image ('a'), in the image's bytes of one ('i'), in a table's entry past its count ('t') or in its image's ('e'), a
+// macro for a name past the image's ('n'), a poisoned name ('p') and a cache record's data that isn't the image's ('r').
+static void pp_root_test_dirt(PPRoot* root, Preprocessor* pp, char kind)
+{
+    const Preprocessor* image = &root->image;
+    switch (kind)
+    {
+        case 'a': image->arena.base[image->arena.length + 5] = 1; break;
+        case 'i': image->arena.base[image->arena.length / 2] ^= 1; break;
+        case 't': ((uint8_t*)(pp->macros + image->macro_count))[3] = 1; break;
+        case 'e': pp->macros[image->macro_count / 2].location ^= 1; break;
+        case 'n': pp->macro_of[root->ids + 1] = 1; break;
+        case 'p': pp->poisoned[0] = 2; break;
+        case 'r': pp->record_data[BUSTER_PP_MAX_FILES - 1] = 1; break;
+        default: break;
+    }
+}
+
+BUSTER_PREPROCESSOR_ENTRY bool pp_root_park(Preprocessor* pp)
+{
+    PPRoot* root = pp->root;
+    bool result = false;
+    if (root->state == PP_ROOT_CAPTURED)
+    {
+        // The unit's arenas and tables must be the image's still, each with a writable extent it knows.
+        Arena* live[BUSTER_PP_ROOT_ARENAS];
+        Arena* kept[BUSTER_PP_ROOT_ARENAS];
+        PPRootTable now[BUSTER_PP_ROOT_TABLES];
+        pp_root_arenas(pp, live);
+        pp_root_arenas(&root->image, kept);
+        const uint32_t count = pp_root_tables(pp, now);
+        bool restorable = !pp->root_unrestorable && pp->array_count != 0 && pp->arrays[0].base == root->image.arrays[0].base && !pp->arrays[0].unaccounted &&
+                          count == root->table_count;
+        for (uint32_t a = 0; a < BUSTER_PP_ROOT_ARENAS; a += 1)
+        {
+            restorable = restorable && live[a]->base == kept[a]->base && !live[a]->unaccounted;
+        }
+        for (uint32_t t = 0; restorable && t < count; t += 1)
+        {
+            restorable = now[t].base == root->tables[t].base && (now[t].kind == BUSTER_PP_ROOT_STACK || now[t].count >= root->tables[t].count);
+        }
+        if (restorable)
+        {
+            pp_root_restore(root, pp, now);
+            if (root->verify)
+            {
+                // A test's fault (test-check-units): a byte the restore should have cleared or copied back, which the
+                // check must report. Read only by a checked release, which no compile's own command asks for.
+                const char* dirt = getenv("BUSTER_TEST_ROOT_DIRT");
+                if (dirt != 0)
+                {
+                    pp_root_test_dirt(root, pp, dirt[0]);
+                }
+                pp_root_check(root, pp);
+            }
+            result = true;
+        }
+        else
+        {
+            // Dropped: the unit releases its arenas, which the image's are, as one without a root does, and the next
+            // unit bound to the root captures again.
+            root->drops += 1;
+            pp_root_forget(root, root->drops < BUSTER_PP_ROOT_DROPS ? PP_ROOT_EMPTY : PP_ROOT_REFUSED);
+        }
+    }
+    root->live = false;
+    pp->root = 0;
+    return result;
+}
+
 BUSTER_PREPROCESSOR_ENTRY bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTable* table)
 {
-    const bool compact = arena_compact || arena_commit_refused;
-    const ArenaFailure failure = arena_failure;
-    bool result = pp_initialize_once(pp, options, table);
-    if (!result && !pp->fatal && !compact && (arena_compact || arena_commit_refused))
+    // The unit's root (#3070): one no other unit is bound to, for a unit that reads through a shared file cache.
+    PPRoot* root = options->root != 0 && !options->root->live && options->files != 0 ? options->root : 0;
+    bool result;
+    if (root != 0 && root->state == PP_ROOT_CAPTURED && pp_root_matches(root, pp, options, table))
     {
-        ArenaPool* pool = arena_pool;
-        arena_pool = 0;
-        pp_release(pp);
-        arena_pool = pool;
+        result = pp_root_resume(pp, root, options);
+    }
+    else
+    {
+        const bool compact = arena_compact || arena_commit_refused;
+        const ArenaFailure failure = arena_failure;
         result = pp_initialize_once(pp, options, table);
-        arena_failure = result ? failure : arena_failure;
+        if (!result && !pp->fatal && !compact && (arena_compact || arena_commit_refused))
+        {
+            ArenaPool* pool = arena_pool;
+            arena_pool = 0;
+            pp_release(pp);
+            arena_pool = pool;
+            result = pp_initialize_once(pp, options, table);
+            arena_failure = result ? failure : arena_failure;
+        }
+        // An empty root is this unit's to capture, where its prelude's macros are defined (pp_run_prelude).
+        if (result && root != 0 && root->state == PP_ROOT_EMPTY)
+        {
+            pp->root = root;
+            root->live = true;
+        }
     }
     return result;
 }
@@ -14465,8 +15056,9 @@ static bool pp_command_include_raw(Preprocessor* pp, const char* path)
     return result;
 }
 
-// Runs the main file, then gives the output's keywords their kinds. Returns false if there were errors.
-static bool pp_run_prelude(Preprocessor* pp)
+// The prelude's macros: the predefines (or PPOptions.predefines_path's), then the command line's -D and -U, whose buffer
+// stays the unit's for the -include lines (Preprocessor.command_line). Returns false as pp_run_prelude does.
+static bool pp_run_prelude_macros(Preprocessor* pp)
 {
     pp_warning_options_diagnose(pp);
     pp_unused_arguments_diagnose(pp);
@@ -14521,6 +15113,7 @@ static bool pp_run_prelude(Preprocessor* pp)
     fits &= room <= UINT32_MAX;
     result = result && !pp->fatal;
     char* command_line = result && fits ? arena_push(&pp->arena, room, 1) : 0;
+    pp->command_line = command_line;
     if (result && command_line == 0)
     {
         pp_diagnose(pp, PP_SEVERITY_FATAL, 0, fits ? "out of memory for the command line's -D, -U and -include options" : "the command line's -D, -U and -include options are too long");
@@ -14573,6 +15166,20 @@ static bool pp_run_prelude(Preprocessor* pp)
             pp_diagnose(pp, PP_SEVERITY_FATAL, 0, "can't make the file of the command line's -D and -U options: %s", pp_virtual_file_error(pp));
         }
     }
+    return result;
+}
+
+// Runs what comes before the main file (the comment above pp_command_line_length has what and how it fails). A unit that
+// started from a root's image has its macros already (pp_root_resume), and one bound to an empty root is captured where
+// they are defined (pp_root_capture, #3070); the -include lines are each unit's to run.
+static bool pp_run_prelude(Preprocessor* pp)
+{
+    bool result = pp->root_resumed ? !pp->fatal : pp_run_prelude_macros(pp);
+    if (result && pp->root != 0 && !pp->root_resumed)
+    {
+        pp_root_capture(pp);
+    }
+    char* command_line = pp->command_line;
     // The -include lines, in a file of their own named as clang's: its forced includes are in its <built-in> buffer,
     // after the command line's macros, which __BASE_FILE__ in a forced header gives. Without -include there is no file.
     if (result && pp->options.include_count != 0)
@@ -14773,6 +15380,8 @@ static void pp_history_record(Preprocessor* pp, bool report)
     options.timing = false;
     options.files = pp->cache;
     options.dependencies.enabled = false;
+    // The unit is bound to its root, if it has one, and a replay with history has another start.
+    options.root = 0;
     const bool initialized = replay != 0 && pp_initialize(replay, &options, pp->table);
     bool same = initialized;
     if (initialized)
@@ -15032,6 +15641,7 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_output_ensure(Preprocessor* pp)
         options.timing = false;
         options.files = pp->cache;
         options.dependencies.enabled = false;
+        options.root = 0;
         const bool initialized = replay != 0 && pp_initialize(replay, &options, pp->table);
         if (initialized)
         {

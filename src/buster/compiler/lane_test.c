@@ -945,12 +945,75 @@ static void lane_test_arena_pool_writable(LaneTestTally* tally)
     lane_test_expect(tally, waited && WIFEXITED(status) && WEXITSTATUS(status) == 0, "the checks of a pool's writable prefixes failed in their process");
 }
 
+// arena_clear and arena_rewind (#3070), for memory its owner keeps and knows the written extent of: a short stretch is
+// zero again with its pages kept and the bytes on each side of it as they were; of a stretch longer than
+// BUSTER_ARENA_CLEAR_BYTES, the first of them are cleared in place and the whole pages past them given back, with the
+// bytes on each side, in pages of their own or the stretch's, as they were; and a rewound arena has its length, the
+// bytes before it and nothing past it, with its peak at its length.
+static void lane_test_arena_clear(LaneTestTally* tally)
+{
+    const uint64_t page = BUSTER_ARENA_PAGE_BYTES;
+    const uint64_t long_bytes = BUSTER_ARENA_CLEAR_BYTES + 37 * page + 123;
+    const uint64_t bytes = long_bytes + 4 * page;
+    Arena arena = arena_reserve_small(BUSTER_LANE_TEST_LARGE_ARENA, 64 * BUSTER_ARENA_CLEAR_BYTES);
+    uint8_t* const memory = arena_push(&arena, bytes, page);
+    lane_test_expect(tally, memory != 0, "the cleared arena couldn't be reserved");
+    if (memory != 0)
+    {
+        // A short stretch that starts and ends inside pages.
+        memset(memory, 0x5a, bytes);
+        arena_clear(memory + 100, 3 * page + 11);
+        bool kept = true;
+        for (uint64_t i = 0; i < bytes; i += 1)
+        {
+            const bool cleared = i >= 100 && i < 100 + 3 * page + 11;
+            kept = kept && memory[i] == (cleared ? 0 : 0x5a);
+        }
+        lane_test_expect(tally, kept && lane_test_resident(memory + page) && lane_test_resident(memory + 2 * page),
+                         "a short stretch wasn't cleared in place, alone");
+        // A long one: its first bytes in place, and the whole pages past them back to the kernel.
+        memset(memory, 0x5a, bytes);
+        uint8_t* const begin = memory + page + 77;
+        arena_clear(begin, long_bytes);
+        kept = true;
+        for (uint64_t i = 0; i < bytes; i += 1)
+        {
+            const bool cleared = i >= page + 77 && i < page + 77 + long_bytes;
+            kept = kept && memory[i] == (cleared ? 0 : 0x5a);
+        }
+        lane_test_expect(tally, kept, "a long stretch wasn't cleared, alone");
+        // Reading them above mapped the zero page: cleared again, the pages past the first megabyte are the kernel's.
+        memset(memory, 0x5a, bytes);
+        arena_clear(begin, long_bytes);
+        uint8_t* const first_page = (uint8_t*)(((uintptr_t)begin + BUSTER_ARENA_CLEAR_BYTES + page - 1) & ~(uintptr_t)(page - 1));
+        uint8_t* const last_page = (uint8_t*)(((uintptr_t)begin + long_bytes) & ~(uintptr_t)(page - 1));
+        // (The page of the stretch's middle that is cleared in place: its start, as mincore asks for.)
+        const uint8_t* const middle_page = (const uint8_t*)(((uintptr_t)begin + BUSTER_ARENA_CLEAR_BYTES / 2) & ~(uintptr_t)(page - 1));
+        lane_test_expect(tally, lane_test_resident(middle_page) && !lane_test_resident(first_page) && !lane_test_resident(last_page - page) &&
+                                    lane_test_resident(last_page) && last_page[page - 1] == 0x5a && begin[-1] == 0x5a,
+                         "a long stretch didn't keep its first pages and give back the whole ones past them");
+        // Rewound: the bytes before the length stay, those up to the peak are zero, and the next pushes start there.
+        memset(memory, 0x5a, bytes);
+        arena_pop_to(&arena, 5 * page);
+        arena_rewind(&arena, 2 * page + 9);
+        bool rewound = arena.length == 2 * page + 9 && arena.peak == 2 * page + 9;
+        for (uint64_t i = 0; i < bytes; i += 1)
+        {
+            rewound = rewound && memory[i] == (i < 2 * page + 9 ? 0x5a : 0);
+        }
+        const uint8_t* const next = arena_push(&arena, 16, 1);
+        lane_test_expect(tally, rewound && next == memory + 2 * page + 9 && lane_test_zero(next, 16), "a rewound arena didn't keep its bytes to its length and none past it");
+    }
+    arena_release(&arena);
+}
+
 static bool lane_test_arenas(void)
 {
     LaneTestTally tally = { 0 };
     lane_test_stack_base_pages(&tally);
     lane_test_arena_regions(&tally);
     lane_test_arena_pool_writable(&tally);
+    lane_test_arena_clear(&tally);
 
     // /proc/loadavg's runnable tasks, which arena_host_busy compares with the CPUs online (#672).
     static const struct

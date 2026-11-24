@@ -9,13 +9,12 @@
 //   build/compiler test-ssa-source --self-test [--typed] [--tier1] [--keep]
 //
 // Each file's functions, as -c compiles them (ir_source_prepare, test-ir-source's preparation, with the program kept),
-// are lowered to the IR with every local in memory and promoted by both of ssa_ir.c's paths, each with ssa.c's verifier
-// on the core's result (ssa_ir_promote_verified: every use dominated by its definition, a phi operand per predecessor,
-// no trivial phi, and its reaching-definition equations), the vector path's constructor on every function its memory
-// bound admits; each promoted function's IR must have no trivial phi either (ssa_ir_phis). A file with a main is
-// then run by the shared IR's interpreter (#176) in each of the three forms, all locals in memory, the vector path's SSA
-// and the scalar path's, the three at once, each in a child process and a directory of its own with its standard output
-// and errors in a file (ssa_source_child): the three must end alike with the same output, a run the interpreter couldn't
+// are lowered to the IR with every local in memory and promoted, with ssa.c's verifier on the core's result
+// (ssa_ir_promote_verified: every use dominated by its definition, a phi operand per predecessor, no trivial phi, and
+// its reaching-definition equations); each promoted function's IR must have no trivial phi either (ssa_ir_phis). A file
+// with a main is then run by the shared IR's interpreter (#176) in each of its forms, all locals in memory and the SSA
+// (and the typed stream with --typed), at once, each in a child process and a directory of its own with its standard
+// output and errors in a file (ssa_source_child): they must end alike with the same output, a run the interpreter couldn't
 // finish fails, and where FILE.expected exists (c-testsuite's convention), each must exit with status 0 having written
 // its bytes.
 //
@@ -40,7 +39,7 @@
 // forms run at once on as many more as it can borrow. Their lines come in the items' order (ssa_source_items, #2658).
 //
 // The work directory is under $TMPDIR (or /tmp); --keep keeps it, as a failure does. The report has a line per file,
-// with its functions, each path's phis and its runs, a line per failure, and the totals; the exit status is 1 on any
+// with its functions, their phis and its runs, a line per failure, and the totals; the exit status is 1 on any
 // failure. It is a test outside the compile path, with no vector path of its own. Include after ir_source_test.c,
 // ssa_ir.c, interpreter_link.c, ir_interpreter.c, oracle_cache.c, c_testsuite.c (whose processes, files and directory
 // removal it takes) and ssa_source_generate.c.
@@ -55,13 +54,12 @@
 #include <sys/syscall.h>
 #include <sys/wait.h>
 
-// The forms a program runs in: its functions' IR with every local in memory, and promoted by each path.
+// The forms a program runs in: its functions' IR with every local in memory, promoted, and its typed stream.
 #define BUSTER_SSA_SOURCE_MEMORY 0
-#define BUSTER_SSA_SOURCE_VECTOR 1
-#define BUSTER_SSA_SOURCE_SCALAR 2
-#define BUSTER_SSA_SOURCE_TYPED 3
-#define BUSTER_SSA_SOURCE_IR_FORMS 3
-#define BUSTER_SSA_SOURCE_FORMS 4
+#define BUSTER_SSA_SOURCE_SSA 1
+#define BUSTER_SSA_SOURCE_TYPED 2
+#define BUSTER_SSA_SOURCE_IR_FORMS 2
+#define BUSTER_SSA_SOURCE_FORMS 3
 // A run's time limit by default, in seconds, and its interpreter's steps, which bound a run first: c-testsuite's 8
 // queens (00040.c), 0.05 s natively at -O0, takes 1.35 billion steps with every local in memory, 27 s on a Zen 4
 // laptop. A detector's build is many times slower: MSan's, which tracks origins, took from 226 s to past 600 s for that
@@ -77,8 +75,7 @@
 
 static const char* const ssa_source_forms[BUSTER_SSA_SOURCE_FORMS] = {
     "memory",
-    "vector",
-    "scalar",
+    "ssa",
     "typed",
 };
 
@@ -90,12 +87,12 @@ struct SsaSourceTotals
     uint64_t failed_files;
     uint64_t functions;
     uint64_t instructions;
-    // Each path's promoted instructions and phis (the vector path's, then the scalar path's).
-    uint64_t promoted[2];
-    uint64_t phis[2];
+    // The promoted instructions and phis.
+    uint64_t promoted;
+    uint64_t phis;
     // Functions that a lowering or a promotion refused, or whose promotion failed a check.
     uint64_t failures;
-    // Programs run in the three forms, those whose runs all gave the expected outcome, and the generated programs and
+    // Programs run in their forms, those whose runs all gave the expected outcome, and the generated programs and
     // those whose clang build couldn't be made or run.
     uint64_t programs;
     uint64_t passed;
@@ -657,7 +654,7 @@ static bool ssa_source_same(const SsaSourceRun* a, const SsaSourceRun* b)
 
 #include "ssa_source_native_test.c"
 
-// Runs the program in its three forms at once, each in a directory of its own under `work` (run-INDEX-FORM), and compares
+// Runs the program in its forms at once, each in a directory of its own under `work` (run-INDEX-FORM), and compares
 // them with each other and with `expected`, if any: whether they agree and give it, with each form's interpreter's steps
 // in `steps` (BUSTER_SSA_SOURCE_FORMS of them). The directories go unless the run fails or `keep`.
 static bool ssa_source_execute(const IrSourceFile* file, IrFunction* const* forms, uint32_t entry, const SsaSourceExpected* expected, const char* name, const char* work,
@@ -705,10 +702,10 @@ static bool ssa_source_execute(const IrSourceFile* file, IrFunction* const* form
             ssa_source_pool_give(limits->pool);
         }
     }
-    *steps = runs[0].result.steps;
-    steps[1] = runs[1].result.steps;
-    steps[2] = runs[2].result.steps;
-    steps[3] = runs[3].result.steps;
+    for (uint32_t form = 0; form < BUSTER_SSA_SOURCE_FORMS; form += 1)
+    {
+        steps[form] = runs[form].result.steps;
+    }
     for (uint32_t form = 0; statuses != 0 && form < form_count; form += 1)
     {
         statuses[form] = runs[form].status;
@@ -795,8 +792,8 @@ struct SsaSourceArenas
     Arena scratch;
 };
 
-// Checks `name` (a file read with `options`): its functions lowered and promoted by both paths with the SSA checks, and
-// with a main, its program run in the three forms against `expected` (or, without, FILE.expected if there is one), into
+// Checks `name` (a file read with `options`): its functions lowered and promoted with the SSA checks, and
+// with a main, its program run in its forms against `expected` (or, without, FILE.expected if there is one), into
 // `totals`, with the file's line and a line per failure. Its runs' directories in `work` are numbered `index`, which no
 // other file's runs of the command share. A file the preparation leaves out is counted and passes.
 static void ssa_source_file(SsaSourceTotals* totals, uint64_t index, const char* name, char** options, uint32_t option_count, const SsaSourceExpected* expected,
@@ -823,7 +820,7 @@ static void ssa_source_file(SsaSourceTotals* totals, uint64_t index, const char*
         printf("test-ssa-source: file=%s failed=\"memory ran out for its functions' IR\"\n", name);
     }
     uint64_t instructions = 0;
-    uint64_t phis[2] = { 0, 0 };
+    uint64_t phis = 0;
     uint32_t entry = UINT32_MAX;
     uint32_t failures = 0;
     for (uint32_t f = 0; checked && f < file.count; f += 1)
@@ -836,18 +833,18 @@ static void ssa_source_file(SsaSourceTotals* totals, uint64_t index, const char*
         IrCheck failed = lowered;
         const char* rule = "lowering";
         uint32_t path_failed = BUSTER_SSA_SOURCE_MEMORY;
-        for (uint32_t path = 0; promoted && path < 2; path += 1)
+        if (promoted)
         {
-            const uint32_t form = path == 0 ? BUSTER_SSA_SOURCE_VECTOR : BUSTER_SSA_SOURCE_SCALAR;
+            const uint32_t form = BUSTER_SSA_SOURCE_SSA;
             SsaCheck verified;
-            const IrCheck promotion = ssa_ir_promote_verified(&forms[BUSTER_SSA_SOURCE_MEMORY][f], path == 0, &arenas->forms[form], &arenas->scratch, &forms[form][f], &verified);
+            const IrCheck promotion = ssa_ir_promote_verified(&forms[BUSTER_SSA_SOURCE_MEMORY][f], &arenas->forms[form], &arenas->scratch, &forms[form][f], &verified);
             uint32_t trivial = 0;
             const uint32_t count = promotion.error == IR_OK ? ssa_ir_phis(&forms[form][f], &trivial) : 0;
             promoted = promotion.error == IR_OK && verified.error == SSA_OK && trivial == 0;
             if (promoted)
             {
-                phis[path] += count;
-                totals->promoted[path] += forms[form][f].instruction_count;
+                phis += count;
+                totals->promoted += forms[form][f].instruction_count;
             }
             else
             {
@@ -874,8 +871,7 @@ static void ssa_source_file(SsaSourceTotals* totals, uint64_t index, const char*
         totals->files += 1;
         totals->functions += file.count;
         totals->instructions += instructions;
-        totals->phis[0] += phis[0];
-        totals->phis[1] += phis[1];
+        totals->phis += phis;
     }
     // The program's run, where every function promoted and it has a main.
     const char* outcome = "none";
@@ -892,7 +888,7 @@ static void ssa_source_file(SsaSourceTotals* totals, uint64_t index, const char*
         const bool passed = ssa_source_execute(&file, forms, entry, wanted, name, work, index, limits, keep, steps, statuses, options, option_count, totals);
         totals->programs += 1;
         totals->passed += passed;
-        snprintf(counted, sizeof(counted), " steps=%" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64, steps[0], steps[1], steps[2], steps[3]);
+        snprintf(counted, sizeof(counted), " steps=%" PRIu64 "/%" PRIu64 "/%" PRIu64, steps[0], steps[1], steps[2]);
         for (uint32_t form = 0; form < BUSTER_SSA_SOURCE_FORMS; form += 1)
         {
             totals->steps[form] += steps[form];
@@ -902,8 +898,8 @@ static void ssa_source_file(SsaSourceTotals* totals, uint64_t index, const char*
     }
     if (checked)
     {
-        printf("test-ssa-source: file=%s functions=%u instructions=%" PRIu64 " phis=%" PRIu64 "/%" PRIu64 " failures=%u run=%s%s\n", name, file.count, instructions,
-               phis[0], phis[1], failures, outcome, counted);
+        printf("test-ssa-source: file=%s functions=%u instructions=%" PRIu64 " phis=%" PRIu64 " failures=%u run=%s%s\n", name, file.count, instructions, phis, failures,
+               outcome, counted);
     }
     fflush(stdout);
     arena_pop_to(&arenas->lowered, 0);
@@ -1013,10 +1009,8 @@ static void ssa_source_add(SsaSourceTotals* totals, const SsaSourceTotals* part)
     totals->failed_files += part->failed_files;
     totals->functions += part->functions;
     totals->instructions += part->instructions;
-    totals->promoted[0] += part->promoted[0];
-    totals->promoted[1] += part->promoted[1];
-    totals->phis[0] += part->phis[0];
-    totals->phis[1] += part->phis[1];
+    totals->promoted += part->promoted;
+    totals->phis += part->phis;
     totals->failures += part->failures;
     totals->programs += part->programs;
     totals->passed += part->passed;
@@ -1191,8 +1185,8 @@ static void ssa_source_items(SsaSourceTotals* totals, const SsaSourceItems* item
     free(generator);
 }
 
-// These controls use the actual C preparation, both promotions and the three child-process execution boundary, with
-// no expected-output sidecar. In particular, the timeout must be three real SIGALRM outcomes with empty records, not
+// These controls use the actual C preparation, the promotion and the child-process execution boundary, with
+// no expected-output sidecar. In particular, each form's timeout must be a real SIGALRM outcome with an empty record, not
 // a fabricated wait status or a direct test of the acceptance predicate. Keep the directories until the controls have
 // checked every record; an unexpected failure keeps the whole work directory through the command's usual cleanup.
 static bool ssa_source_execution_tests(SsaSourceArenas* arenas, const char* work, const SsaSourceLimits* requested)
@@ -1542,11 +1536,11 @@ static int run_ssa_source_tests(int count, char** arguments)
     if (valid)
     {
         printf("test-ssa-source: totals files=%" PRIu64 " left_out=%" PRIu64 " failed=%" PRIu64 " functions=%" PRIu64 " instructions=%" PRIu64
-               " promoted=%" PRIu64 "/%" PRIu64 " phis=%" PRIu64 "/%" PRIu64 " failures=%" PRIu64 " programs=%" PRIu64 " passed=%" PRIu64 " steps=%" PRIu64
-               "/%" PRIu64 "/%" PRIu64 "/%" PRIu64 " generated=%" PRIu64 " unbuilt=%" PRIu64 " native_programs=%" PRIu64 " native_passed=%" PRIu64
+               " promoted=%" PRIu64 " phis=%" PRIu64 " failures=%" PRIu64 " programs=%" PRIu64 " passed=%" PRIu64 " steps=%" PRIu64
+               "/%" PRIu64 "/%" PRIu64 " generated=%" PRIu64 " unbuilt=%" PRIu64 " native_programs=%" PRIu64 " native_passed=%" PRIu64
                " native_functions=%" PRIu64 "/%" PRIu64 "\n",
-               totals.files, totals.left_out, totals.failed_files, totals.functions, totals.instructions, totals.promoted[0], totals.promoted[1], totals.phis[0],
-               totals.phis[1], totals.failures, totals.programs, totals.passed, totals.steps[0], totals.steps[1], totals.steps[2], totals.steps[3], totals.generated, totals.unbuilt,
+               totals.files, totals.left_out, totals.failed_files, totals.functions, totals.instructions, totals.promoted, totals.phis,
+               totals.failures, totals.programs, totals.passed, totals.steps[0], totals.steps[1], totals.steps[2], totals.generated, totals.unbuilt,
                totals.native_programs, totals.native_passed, totals.native_functions[0], totals.native_functions[1]);
         oracle_cache_report(cache, "test-ssa-source");
         if (!keep && passed)

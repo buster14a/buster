@@ -1294,7 +1294,6 @@ static __attribute__((unused)) void main_driver_test_interfaces(void)
 
 static __attribute__((unused)) void main_x86_test_interfaces(void)
 {
-    (void)&x86_target_forms_scalar;
     (void)&branch_sizing_generate;
     (void)&branch_sizing_chain;
     (void)&x86_zen5_case_find;
@@ -1390,7 +1389,6 @@ static __attribute__((unused)) void main_checker_consumer_interfaces(void)
     (void)&asm_assemble_code;
     (void)&debug_finalize;
     (void)&x86_zen5_initialize;
-    (void)&x86_zen5_lookup_scalar;
     (void)&x86_zen5_lookup;
     (void)&c_environment_build;
     (void)&c_environment_lookup_batch;

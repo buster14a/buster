@@ -5,8 +5,8 @@
 // with block 1. Each join has two live phis that take the same parameter from block 2, forcing at least one real move
 // on each critical edge even when allocation coalesces one phi. Whichever logical successor is physically next,
 // block 2 needs one conditional branch and one jump: the next block's stub is last and falls through. Native execution
-// checks every integer predicate and C's six floating predicates, including unordered inputs, through both allocation
-// paths and frame-pointer modes. The alternate predecessor also executes, observing the other phi inputs.
+// checks every integer predicate and C's six floating predicates, including unordered inputs, in both frame-pointer
+// modes. The alternate predecessor also executes, observing the other phi inputs.
 
 static bool tier1_branch_layout_function(Tier1EmitTest* test, bool floating, uint32_t predicate, bool true_next, IrFunction* function)
 {
@@ -212,11 +212,10 @@ static void tier1_branch_layout_tests(Tier1EmitTest* test)
         const uint32_t predicates = floating != 0 ? IR_GE + 1 : IR_PREDICATE_COUNT;
         for (uint32_t predicate = 0; predicate < predicates; predicate += 1)
         {
-            for (uint32_t variant = 0; variant < 8; variant += 1)
+            for (uint32_t variant = 0; variant < 4; variant += 1)
             {
                 const bool true_next = (variant & 1) != 0;
-                const bool vector = (variant & 2) != 0;
-                const bool pointer = (variant & 4) != 0;
+                const bool pointer = (variant & 2) != 0;
                 IrFunction function;
                 const bool created = tier1_branch_layout_function(test, floating != 0, predicate, true_next, &function);
                 const bool valid = created && ir_verify(&function, &test->scratch, 0).error == IR_OK;
@@ -226,10 +225,9 @@ static void tier1_branch_layout_tests(Tier1EmitTest* test)
                 Tier1SelectPlan plan;
                 uint32_t node = BUSTER_IR_NONE;
                 const bool planned = dominated && tier1_select_plan(&function, &dominance, &test->output, &test->scratch, &plan, &node) == TIER1_SELECT_OK;
-                tier1_emit_test_expect(test, planned, "critical-edge layout fixture selects by both paths");
+                tier1_emit_test_expect(test, planned, "critical-edge layout fixture selects");
                 const Tier1EmitOptions options = {
                     .register_mask = (1u << X86_REGISTER_RAX) | (1u << X86_REGISTER_RDI) | (1u << X86_REGISTER_RSI),
-                    .vector = vector,
                     .rematerialize = true,
                     .certify = true,
                     .frame_flags = pointer ? BUSTER_TIER1_FRAME_KEEP_POINTER : 0,

@@ -2,14 +2,15 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // Original conservative loop-invariant motion (#139). Include after ir_optimize.c. Only total, side-effect-free,
-// undef-independent operations move into existing dedicated preheaders of reducible natural loops.
-// Vector readiness sweeps have an independent use-worklist twin and always complete before rewriting.
+// undef-independent operations move into existing dedicated preheaders of reducible natural loops. Each loop's movable
+// values are found by one walk of its own blocks, a value at a time (ir_licm_loop_walk, #2979): LICM's one
+// implementation (#2924). On the 9700X, under --tier1-passes=+all on sqlite3.c, Lua and musl, the whole-function vector
+// sweeps it replaced took 1.07 to 3.00 times its ticks and their worklist twin 1.35 to 1.85, in every size bin
+// (buster-performance's scalar-paths-removal-2924-2026-11-17/c-licm-2979).
 
 typedef struct IrLicmOptions IrLicmOptions;
 struct IrLicmOptions
 {
-    uint32_t sweep_limit;
-    bool scalar;
     // Move only the values of vector or mask type (#2781, Tier 1's default policy), each with the movable values its
     // operands are: the constants vector code builds at every use, without the general registers' longer live ranges
     // (#2719). A function without loops isn't classified, a loop that holds no such value is passed over, and each
@@ -19,10 +20,6 @@ struct IrLicmOptions
     // the interpreter's loop, and the function grew from 87 KB to 131 KB, 1,788 call stores more. A function where
     // nothing moves is returned as it was given: *result's function is the input's, and nothing is written to the output.
     bool vectors;
-    // Find each loop's movable values over the whole function, to the fixed point of their readiness (ir_licm_complete),
-    // in place of the walk of the loop's own blocks (ir_licm_loop_walk), whose exact oracle it is; with `vectors`, keep
-    // the vectors' candidates after (ir_licm_keep_vectors).
-    bool whole;
     // Move what pays for the register it holds through the loop (#2719, Tier 1's policy for functions without vector or
     // mask values; ir_licm_loop_pressure). Every value moved stays live from the preheader through the whole loop, which
     // Tier 1's allocation then spills where its registers run out:
@@ -33,9 +30,12 @@ struct IrLicmOptions
     //   users, selection folds it into an immediate or an address, or it costs nothing;
     // - a truth value stays: a branch tests its comparison's flags, where a hoisted one takes a register and a setcc;
     // - a loop moves at most BUSTER_IR_LICM_REGISTERS costly general-register values, less the ones live through it.
-    // A function where nothing moves is returned as it was given, as with `vectors`. It has no whole-function form:
-    // `whole` is ignored with it, and `vectors` takes precedence over it.
+    // A function where nothing moves is returned as it was given, as with `vectors`. `vectors` takes precedence over it.
     bool pressure;
+    // The function is verified already (IrOptimizeWork.validated, #2719: Tier 1's): its preparation builds the CFG and
+    // the loops without verifying it again, and with `pressure` and no undef, no use lists. A function the pass rewrites
+    // is verified as ever.
+    bool validated;
 };
 
 // IrLicmOptions.pressure's register budget: the general registers Tier 1 allocates past rsp, rbp and its scratch ones,
@@ -60,10 +60,9 @@ struct IrLicmResult
     uint32_t skipped_loops;
     // IrLicmOptions.pressure and .vectors: the eligible loops passed over because they hold a call.
     uint32_t called_loops;
-    uint64_t sweeps;
+    // The instructions the loop walks visited.
     uint64_t visits;
     uint64_t scratch_bytes;
-    bool fallback;
 };
 
 typedef struct IrLicmWork IrLicmWork;
@@ -87,8 +86,80 @@ struct IrLicmWork
 
 static __attribute__((unused)) IrLicmOptions ir_licm_options(void)
 {
-    const IrLicmOptions options = { .sweep_limit = 64 };
+    const IrLicmOptions options = { 0 };
     return options;
+}
+
+// IrLicmOptions.pressure's screen (#2719), before any analysis: whether a verified function may have a loop that holds no
+// call, the only loop the policy moves values out of. Every cycle has an edge to a block at or before its source (the
+// edge that leaves its last block in the function's order), and a loop without a call has a cycle of blocks that hold
+// no call (an IR_CALL or IR_CALL_INDIRECT, as ir_licm_analyze's bitset finds them). So a function where no such edge
+// joins two blocks without a call moves nothing under the policy, and Tier 1 passes it over without the preparation's
+// CFG, loop analysis and use lists; one where some edge does may still hold a call in each loop, which ir_licm_analyze
+// then finds. The operations go 64 at a time, a call's block by a cursor over the blocks' offsets that only goes
+// forward; the terminators of the blocks without a call are read one at a time, as ir_build_cfg reads them: there is
+// one a block, and a gather of them (64 uops on Zen 5) would cost more than the loads. True where the bitset doesn't
+// fit in `scratch`, which it leaves as it was.
+static __attribute__((unused)) bool ir_licm_pressure_screen(const IrFunction* f, Arena* scratch)
+{
+    const uint64_t mark = scratch->length;
+    const uint64_t words = ((uint64_t)f->block_count + 63) / 64;
+    bool ok = true;
+    uint64_t* callers = ir_allocate(scratch, words, sizeof(uint64_t), &ok);
+    uint32_t block = 0;
+    for (uint64_t first = 0; ok && words != 0 && first < f->instruction_count; first += 64)
+    {
+        const uint64_t count = f->instruction_count - first < 64 ? f->instruction_count - first : 64;
+        const __mmask64 valid = count == 64 ? UINT64_MAX : (UINT64_C(1) << count) - 1;
+        const __m512i operations = _mm512_maskz_loadu_epi8(valid, f->op + first);
+        __mmask64 calls = _mm512_mask_cmpeq_epi8_mask(valid, operations, _mm512_set1_epi8(IR_CALL)) | _mm512_mask_cmpeq_epi8_mask(valid, operations, _mm512_set1_epi8(IR_CALL_INDIRECT));
+        while (calls != 0)
+        {
+            const uint64_t call = first + (uint64_t)__builtin_ctzll(calls);
+            while (f->block_offsets[block + 1] <= call)
+            {
+                block += 1;
+            }
+            callers[block / 64] |= UINT64_C(1) << (block % 64);
+            calls &= calls - 1;
+        }
+    }
+    bool found = !ok;
+    for (uint64_t word = 0; !found && word < words; word += 1)
+    {
+        const uint64_t blocks = f->block_count - word * 64;
+        const uint64_t valid = blocks >= 64 ? UINT64_MAX : (UINT64_C(1) << blocks) - 1;
+        uint64_t sources = ~callers[word] & valid;
+        while (!found && sources != 0)
+        {
+            const uint32_t source = (uint32_t)(word * 64 + (uint64_t)__builtin_ctzll(sources));
+            const uint32_t last = f->block_offsets[source + 1] - 1;
+            const uint32_t edges = ir_successor_count(f, last);
+            for (uint32_t edge = 0; !found && edge < edges; edge += 1)
+            {
+                const uint32_t target = ir_successor(f, last, edge);
+                found = target <= source && (callers[target / 64] >> (target % 64) & 1) == 0;
+            }
+            sources &= sources - 1;
+        }
+    }
+    arena_pop_to(scratch, mark);
+    return found;
+}
+
+// Whether a function has an undef, whose users ir_licm_classify taints through the use lists: the operations 64 at a
+// time.
+static bool ir_licm_has_undef(const IrFunction* f)
+{
+    bool found = false;
+    for (uint64_t first = 0; !found && first < f->instruction_count; first += 64)
+    {
+        const uint64_t count = f->instruction_count - first < 64 ? f->instruction_count - first : 64;
+        const __mmask64 valid = count == 64 ? UINT64_MAX : (UINT64_C(1) << count) - 1;
+        const __m512i operations = _mm512_maskz_loadu_epi8(valid, f->op + first);
+        found = _mm512_mask_cmpeq_epi8_mask(valid, operations, _mm512_set1_epi8(IR_UNDEF)) != 0;
+    }
+    return found;
 }
 
 // IrLicmOptions.pressure's free kinds by operation (BUSTER_IR_LICM_FREE and _ARITHMETIC): a truncation and the pointer
@@ -211,142 +282,6 @@ static uint32_t ir_licm_preheader(const IrLicmWork* work, uint32_t loop)
         preheader = BUSTER_IR_NONE;
     }
     return preheader;
-}
-
-static void ir_licm_worklist(IrLicmWork* work)
-{
-    const IrFunction* f = work->ir.function;
-    for (uint32_t i = 0; i < f->instruction_count; i += 1)
-    {
-        if (work->candidate[i] != 0 && work->available[i] == 0)
-        {
-            ir_optimize_enqueue(&work->ir, i);
-        }
-    }
-    while (work->ir.queued_count != 0)
-    {
-        const uint32_t i = ir_optimize_dequeue(&work->ir);
-        const uint32_t mask = ir_value_mask3(f, i);
-        const bool ready = ((mask & 1) == 0 || work->available[f->a[i]] != 0) && ((mask & 2) == 0 || work->available[f->b[i]] != 0) && ((mask & 4) == 0 || work->available[ir_value_third(f, i)] != 0);
-        work->statistics.visits += 1;
-        if (ready && work->available[i] == 0)
-        {
-            work->available[i] = 1;
-            for (uint32_t use = work->ir.uses.offsets[i]; use < work->ir.uses.offsets[(uint64_t)i + 1]; use += 1)
-            {
-                const uint32_t user = work->ir.uses.uses[use].instruction;
-                if (work->candidate[user] != 0 && work->available[user] == 0)
-                {
-                    ir_optimize_enqueue(&work->ir, user);
-                }
-            }
-        }
-    }
-}
-
-static uint32_t ir_licm_sweep(IrLicmWork* work)
-{
-    const IrFunction* f = work->ir.function;
-    uint32_t progress = 0;
-    for (uint64_t first = 0; first < f->instruction_count; first += 16)
-    {
-        const uint32_t count = f->instruction_count - first < 16 ? f->instruction_count - first : 16;
-        const __mmask16 valid = (UINT32_C(1) << count) - 1;
-        const __m128i candidates = _mm_maskz_loadu_epi8(valid, work->candidate + first);
-        const __m512i available = _mm512_maskz_loadu_epi32(valid, work->available + first);
-        __mmask16 ready = valid & _mm_cmpneq_epi8_mask(candidates, _mm_setzero_si128()) & _mm512_cmpeq_epi32_mask(available, _mm512_setzero_si512());
-        __mmask16 operands[3] = { 0, 0, 0 };
-        for (uint32_t lane = 0; lane < count; lane += 1)
-        {
-            const uint32_t mask = ir_value_mask(f, first + lane);
-            for (uint32_t operand = 0; operand < 3; operand += 1)
-            {
-                operands[operand] |= ((mask >> operand) & 1) << lane;
-            }
-        }
-        const uint32_t* columns[] = { f->a, f->b, f->c };
-        for (uint32_t operand = 0; operand < 3; operand += 1)
-        {
-            const __mmask16 active = ready & operands[operand];
-            const __m512i indices = _mm512_maskz_loadu_epi32(active, columns[operand] + first);
-            const __m512i defined = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), active, indices, work->available, 4);
-            ready &= ~active | _mm512_cmpneq_epi32_mask(defined, _mm512_setzero_si512());
-        }
-        _mm512_mask_storeu_epi32(work->available + first, ready, _mm512_set1_epi32(1));
-        work->statistics.visits += count;
-        progress += (uint32_t)__builtin_popcount((uint32_t)ready);
-    }
-    work->statistics.sweeps += 1;
-    return progress;
-}
-
-// Readiness only changes from unavailable to available. Preserve the sweep's discoveries when switching to
-// the exact worklist; both reach the same least fixed point, before the separate motion-order pass.
-// Continue whole-function sweeps only while at least one value per 16 visited instructions becomes available.
-// This bounds productive sweeps by the vector width, rather than paying the whole sweep limit for a thin chain.
-static void ir_licm_complete(IrLicmWork* work, IrLicmOptions options)
-{
-    const uint32_t count = work->ir.function->instruction_count;
-    // AVX-512 dword gather indices are signed. Larger value spaces use the exact worklist path.
-    if (options.scalar || count > INT32_MAX)
-    {
-        work->statistics.fallback = work->statistics.fallback || !options.scalar;
-        ir_licm_worklist(work);
-    }
-    else
-    {
-        bool changed = true;
-        bool productive = true;
-        uint32_t sweeps = 0;
-        while (changed && productive && sweeps < options.sweep_limit)
-        {
-            const uint32_t progress = ir_licm_sweep(work);
-            changed = progress != 0;
-            productive = (uint64_t)progress * 16 >= count;
-            sweeps += 1;
-        }
-        if (changed)
-        {
-            work->statistics.fallback = true;
-            ir_licm_worklist(work);
-        }
-    }
-}
-
-// IrLicmOptions.whole's filter (#2781): of the loop's movable candidates, the available ones, those of vector or mask
-// type stay candidates, with the movable candidates their operands are, transitively (a splat's scalar, a shift's
-// count); every other candidate stays in the loop. The shared worklist, by both paths: what is kept is a few values.
-static void ir_licm_keep_vectors(IrLicmWork* work)
-{
-    const IrFunction* f = work->ir.function;
-    for (uint32_t i = 0; i < f->instruction_count; i += 1)
-    {
-        const bool movable = work->candidate[i] != 0 && work->available[i] != 0;
-        const bool kept = movable && f->type[i] >= IR_V4I32;
-        work->candidate[i] = (uint8_t)(kept ? 2 : movable ? 1 : 0);
-        if (kept)
-        {
-            ir_optimize_enqueue(&work->ir, i);
-        }
-    }
-    while (work->ir.queued_count != 0)
-    {
-        const uint32_t value = ir_optimize_dequeue(&work->ir);
-        const uint32_t mask = ir_value_mask3(f, value);
-        const uint32_t operands[3] = { f->a[value], f->b[value], (mask & 4) != 0 ? ir_value_third(f, value) : BUSTER_IR_NONE };
-        for (uint32_t k = 0; k < 3; k += 1)
-        {
-            if (((mask >> k) & 1) != 0 && work->candidate[operands[k]] == 1)
-            {
-                work->candidate[operands[k]] = 2;
-                ir_optimize_enqueue(&work->ir, operands[k]);
-            }
-        }
-    }
-    for (uint32_t i = 0; i < f->instruction_count; i += 1)
-    {
-        work->candidate[i] = work->candidate[i] == 2;
-    }
 }
 
 // The walk of one loop (#2781, #2979), over the loop's own blocks in place of the whole function: the motion of a
@@ -586,7 +521,6 @@ static IrError ir_licm_analyze(IrLicmWork* work, Arena* scratch, IrLicmOptions o
         }
         order[at] = loop;
     }
-    const IrFunction* f = work->ir.function;
     for (uint32_t at = 0; ok && at < work->loops.loop_count; at += 1)
     {
         const uint32_t loop = order[at];
@@ -618,39 +552,13 @@ static IrError ir_licm_analyze(IrLicmWork* work, Arena* scratch, IrLicmOptions o
                     ir_licm_loop_pressure(work, loop, preheader, at + 1);
                 }
             }
-            else if (held && options.vectors && !options.whole)
+            else if (held && options.vectors)
             {
                 ir_licm_loop_vectors(work, loop, preheader, at + 1, holders);
             }
-            else if (held && !options.whole)
-            {
-                ir_licm_loop_all(work, loop, preheader, at + 1);
-            }
             else if (held)
             {
-                for (uint32_t i = 0; i < f->instruction_count; i += 1)
-                {
-                    const bool inside = dominators_loop_contains(&work->loops, loop, work->destination[i]);
-                    work->candidate[i] = inside && work->safe[i] != 0;
-                    work->available[i] = !inside && dominators_dominates(&work->loops, work->destination[i], preheader);
-                }
-                ir_licm_complete(work, options);
-                if (options.vectors)
-                {
-                    ir_licm_keep_vectors(work);
-                }
-                for (uint32_t i = 0; i < f->instruction_count; i += 1)
-                {
-                    if (work->candidate[i] != 0 && work->available[i] != 0)
-                    {
-                        work->destination[i] = preheader;
-                        work->moves += 1;
-                        if (options.vectors && f->type[i] >= IR_V4I32)
-                        {
-                            holders[preheader / 64] |= UINT64_C(1) << (preheader % 64);
-                        }
-                    }
-                }
+                ir_licm_loop_all(work, loop, preheader, at + 1);
             }
         }
     }
@@ -844,9 +752,13 @@ static __attribute__((unused)) IrCheck ir_optimize_licm(const IrFunction* functi
     // The natural loops come with the preparation's dominator tree, from one analysis (#2719). A function past the loop
     // analysis' limits is refused (IR_ERROR_UNSUPPORTED), and goes on as it was.
     work.ir.dominator_outputs = BUSTER_DOMINATOR_LOOPS;
+    work.ir.validated = options.validated;
+    // IrLicmOptions.pressure reads the use lists only to taint what an undef reaches (ir_licm_classify): a verified
+    // function without one builds none.
+    work.ir.without_uses = options.validated && options.pressure && !options.vectors && !ir_licm_has_undef(function);
     if (output != scratch)
     {
-        check = ir_optimize_prepare(&work.ir, function, output, scratch, BUSTER_SCALAR_PATH(options.scalar), true);
+        check = ir_optimize_prepare(&work.ir, function, output, scratch, false, true);
     }
     if (check.error == IR_OK)
     {
@@ -902,7 +814,6 @@ static __attribute__((unused)) IrCheck ir_optimize_licm(const IrFunction* functi
         }
         IrOptimizeOptions rewrite = ir_optimize_options();
         rewrite.passes = 0;
-        rewrite.scalar = BUSTER_SCALAR_PATH(options.scalar);
         check.error = ir_optimize_rewrite(&work.ir, output, scratch, rewrite, &work.statistics.function);
     }
     if (rewritten && check.error == IR_OK)

@@ -134,7 +134,7 @@ static bool check_input_selection_type(CheckInputReader* reader, uint32_t first)
 // A selection that no association's type matches and that has no default (#2914, CHECK_INPUT_GENERIC_NO_MATCH), its
 // control in [first, separator): at the control's first token, its type after the lvalue conversion, with the
 // typedef its operand is written with where that conversion kept the type (`P q`'s 'P', not `const CI c`'s 'int').
-static void check_input_generic_no_match(CheckInputReader* reader, uint32_t first, uint32_t separator, const CheckValue* control, TypeId control_type)
+static void check_input_generic_no_match(CheckInputReader* reader, uint32_t first, uint32_t separator, uint32_t close, const CheckValue* control, TypeId control_type)
 {
     const Parser* parser = reader->parser;
     const uint32_t root = check_input_range_root(reader, first, separator);
@@ -143,6 +143,12 @@ static void check_input_generic_no_match(CheckInputReader* reader, uint32_t firs
     if (reader->output->report_count > before && root < parser->tokens.count && control_type == control->type)
     {
         reader->output->reports[before].type_spelling = check_input_token_type_spelling(reader->output, parser, root, parser->tree.roles[root] == PARSE_ROLE_CLOSE_CAST);
+    }
+    if (reader->output->report_count > before)
+    {
+        // (At the selection's `)`, after its associations' warnings, as clang's CreateGenericSelectionExpr gives it, #2914.)
+        reader->output->reports[before].completion = close + 1;
+        reader->output->reports[before].suborder = BUSTER_CHECK_GENERIC_SUBORDER_LAST;
     }
 }
 
@@ -158,6 +164,8 @@ static bool check_input_selection_generic(CheckInputReader* reader, uint32_t fir
     uint32_t association = separator + 1;
     // A second default or a type compatible with an earlier association's stopped the walk (#2914).
     bool duplicate = false;
+    // The associations of a type read so far (check_generic_suborder's ordinals).
+    uint32_t ordinal = 0;
     while (valid && association < close)
     {
         const uint32_t colon = check_constant_punctuation(parser, association, close, PARSE_KIND_COLON);
@@ -177,8 +185,9 @@ static bool check_input_selection_generic(CheckInputReader* reader, uint32_t fir
             valid = type != 0;
             if (valid)
             {
-                check_generic_unreachable(reader, association, colon, type);
+                check_generic_unreachable(reader, association, colon, type, close, ordinal);
             }
+            ordinal += 1;
             bool matches = false;
             const bool listed = valid && check_generic_association(reader, &seen, type, &matches);
             duplicate = valid && !listed && !reader->output->resource;
@@ -201,7 +210,7 @@ static bool check_input_selection_generic(CheckInputReader* reader, uint32_t fir
     }
     if (valid && chosen == BUSTER_CHECK_NONE)
     {
-        check_input_generic_no_match(reader, first, separator, control, control_type);
+        check_input_generic_no_match(reader, first, separator, close, control, control_type);
     }
     valid &= chosen != BUSTER_CHECK_NONE;
     if (valid)

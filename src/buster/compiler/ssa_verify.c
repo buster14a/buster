@@ -342,7 +342,7 @@ static SsaCheck ssa_verify(const SsaInput* input, const SsaResult* result, Arena
     SsaWork work = { 0 };
     if (check.error == SSA_OK)
     {
-        check.error = ssa_prepare(&work, input, scratch, false);
+        check.error = ssa_prepare(&work, input, scratch);
     }
     if (check.error == SSA_OK)
     {
@@ -357,7 +357,26 @@ static SsaCheck ssa_verify(const SsaInput* input, const SsaResult* result, Arena
     }
     if (check.error == SSA_OK)
     {
-        const bool locals = input->local_count == 0 || memcmp(result->promoted, work.result.promoted, input->local_count) == 0;
+        // Eligibility by its definition, apart from the constructors' ssa_promote: a scalar local, neither address-taken,
+        // volatile nor atomic, with no ADDRESS instruction of its own.
+        uint8_t* addressed = arena_push_array(scratch, input->local_count == 0 ? 1 : input->local_count, 1, 1);
+        bool locals = addressed != 0;
+        if (locals)
+        {
+            memset(addressed, 0, input->local_count);
+            for (uint32_t i = 0; i < input->instruction_count; i += 1)
+            {
+                if (input->kinds[i] == BUSTER_SSA_ADDRESS)
+                {
+                    addressed[input->locals[i]] = 1;
+                }
+            }
+        }
+        for (uint32_t local = 0; locals && local < input->local_count; local += 1)
+        {
+            const bool eligible = input->local_types[local] < BUSTER_SSA_TYPE_AGGREGATE && input->local_flags[local] == 0 && addressed[local] == 0;
+            locals = (result->promoted[local] != 0) == eligible && work.result.promoted[local] == result->promoted[local];
+        }
         const bool blocks = input->block_count == 0 || memcmp(result->reachable, work.result.reachable, input->block_count) == 0;
         const bool offsets = memcmp(result->predecessor_offsets, work.result.predecessor_offsets, ((uint64_t)input->block_count + 1) * sizeof(uint32_t)) == 0;
         const uint64_t bytes = (uint64_t)result->reachable_edge_count * sizeof(uint32_t);

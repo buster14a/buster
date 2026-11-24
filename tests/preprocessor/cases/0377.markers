@@ -1,0 +1,12 @@
+# 1 "%d/case.c"
+# 1 "%d/sys_indent.h" 1
+unsigned char b[] = {
+# 3 "%d/sys_indent.h" 3
+72, 300 };
+# 2 "%d/case.c" 2
+# 1 "%d/sys_blank.h" 1
+unsigned char c[] = {
+# 3 "%d/sys_blank.h" 3
+72, 300 };
+# 3 "%d/case.c" 2
+int after;

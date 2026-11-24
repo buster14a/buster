@@ -442,7 +442,7 @@ musl's 1,006 (`-c`, CPUs 0 to 7):
   `sqlite3.c` reach 2.9 times one's, at 268.73 bytes of DRAM traffic per
   source byte).
 
-So a units lane does five things:
+So a units lane does six things:
 
 - **It keeps its three big arenas** (the driver's arena, scratch and output,
   which the checker and the emission fill) from one unit to the next, emptied
@@ -593,6 +593,99 @@ So a units lane does five things:
 - **It holds its units to the memory** (#1109): each unit, once preprocessed,
   takes an estimate of its peak from what the lanes may hold at once, and
   waits for another lane to give memory back when it doesn't fit (below).
+- **It keeps its preprocessor's start** (#3070, "The root image" below): the
+  state after the predefines and the command line, captured by its first
+  unit, which its later units start from, in arenas that stay the lane's.
+
+### The root image
+
+Every unit of a command starts its preprocessor the same way: it reserves
+nine arenas, writes the predefines' text, lexes it and runs its 400
+definitions and the command line's, and at its release gives every arena's
+pages back to the kernel. On the 9700X, for 1,336 empty units with musl's
+options in one command ([the
+record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/root-image-3070-2026-11-23)),
+that was most of a unit's 322 thousand cycles: the predefines 28% of them,
+and of the 46 page faults and 17 `madvise` calls a unit, 33 and 7 were the
+preprocessor's arenas', its 9.6 GB of tables' among them, whose discard walks
+the page tables of every gigabyte a unit touched.
+
+A lane's root image (`PPRoot`, `c_preprocessor.c`; `PPOptions.root`) is its
+preprocessor's state where the prelude has run the predefines and the command
+line's `-D` and `-U` (`pp_run_prelude_macros`), captured by the lane's first
+unit (`pp_root_capture`): the `Preprocessor` itself, the bytes its arenas
+hold, each table's entries, and the macros' tables by name for the ids the
+intern table had. From then on the preprocessor's arenas are the root's. A
+unit's release gives them back with the image's state in them
+(`pp_root_park`), and the next unit's start is a copy of the image
+(`pp_root_resume`) with its own options, time and output. The image's
+pointers stay good because its memory stays where it was, and its names' ids
+because the lane's units share its intern table. The `-include` files are
+each unit's to run.
+
+- **What a release restores,** by where a unit can have written
+  (`pp_root_restore`):
+  - an arena: its bytes up to the image's length are copied back, and those
+    past it, up to its peak, are zero again (`arena_rewind`, `lane.c`:
+    cleared in place up to 1 MB, and past that their pages given back);
+  - a table with a count (the ranges, the files, the macros, their items,
+    ...): the image's entries are copied back and the unit's are zero again;
+  - a stack (the contexts, the conditionals, the token stacks, ...): the
+    image's entries are copied back and what is past them stays, as in the
+    lane's three arenas: a stack's entry is written before it is read;
+  - the tables by name: `macro_of` and `is_macro` are the image's for its
+    ids, and past them the entry of each macro record the unit made is zero
+    again (a name gets a macro only through a record made for it); the
+    poisoned names' bits of a unit that poisoned any are cleared whole; and
+    the cache records' data are those of the image's files.
+
+  This is the pool's rejected "keep the pages and clear them" (above, and
+  #3289's record) with the one thing it lacked: the owner knows what a unit
+  wrote, so a release clears a unit's own bytes, not every page any earlier
+  unit touched.
+- **What is never captured:** a prelude that reported anything (a `-D` that
+  redefines a macro warns in every unit, as before), left anything open or
+  gave output; a unit read from memory, or with a file cache of its own; `-dD`,
+  `-dI` and `-H`. A unit whose input is of the other kind than the image's
+  (a `.i` file's prelude has no `linux`) starts without the image, which
+  stays. A unit that records its history as it runs (`-g`'s) has the
+  history's first tables in its image.
+- **What drops an image:** a unit whose state its counts don't cover gives the
+  root nothing back and releases its arenas as before, and the next unit
+  captures again (`PPRoot.drops`; after 8, the lane stops): the checker's
+  repair of a malformed statement in a `do`'s body, which reads through a
+  copy of the preprocessor (`check_repair_preprocessor`), and an arena whose
+  commit failed. A diagnostic's replay of a unit (`pp_history_record`) is
+  another preprocessor, which starts without the root while the unit is
+  bound to it.
+- **The check:** `--poison-arenas` makes each release compare every byte of
+  the memory the root keeps with the image, by the pages the kernel has
+  (`pp_root_check`: a difference fails the unit, "the preprocessor's kept
+  state differs from its root image"), and fill what a stack keeps past its
+  count with the lanes' pattern. `--root-image=off` runs a command without
+  root images, for the tests' and the measurements' comparisons, and
+  `--time-stages` reports what the lanes' roots did ("root images: N
+  captured, N dropped, N starts from one").
+
+On the 9700X (CPU 2 for one lane and CPUs 2 to 5 for four, main `b7d0b5ed`
+in the same holds of the lock, the medians of 7 rounds; the record has the
+rounds, the profiles and the census of what a unit releases):
+
+| | main, M cycles | with the root image | paired by round |
+| --- | ---: | ---: | --- |
+| 1,336 empty units, one lane | 445.1 | 165.9 | −62.7%, lower in 7 of 7 |
+| musl's 1,336 units, one lane | 3,629.7 | 3,161.5 | −12.9%, 7 of 7 |
+| musl's 1,336 units, four lanes | 4,612.0 | 3,932.4 | −14.7%, 7 of 7 |
+| Lua's 34 units, one lane | 379.1 | 363.9 | −4.0%, 7 of 7 |
+
+The empty units' user instructions fall from 527 to 124 million, their faults
+from 61,783 to 15,112 and their `madvise` calls from 17 a unit to 10; musl's
+kernel cycles fall by a third on one lane and by 31% on four. Every object
+and diagnostic of every run is main's. What an empty unit still pays, above
+#3070's 101 thousand cycles a unit, is the arenas the other stages reserve
+and release for each unit (the parser's columns, the type table's, the
+checker's and the object's, and the preprocessor's output), their `memset`,
+the two files, and the restore's own copies, about 90 KB a unit.
 
 ### The units' memory
 

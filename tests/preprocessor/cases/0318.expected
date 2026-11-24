@@ -1,0 +1,8 @@
+#pragma ppf a
+yes
+#pragma ppf b
+5
+#pragma ppf c
+#pragma message("s")
+#pragma ppf d
+0 after

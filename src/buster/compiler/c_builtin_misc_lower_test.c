@@ -182,7 +182,7 @@ static bool cbuiltin_misc_lower_test_program(CBuiltinMiscLowerTestTally* tally, 
         result = cbuiltin_misc_lower_test_expect(tally, checked.error == TIER0_OK, checked.rule != 0 ? checked.rule : "typed validation", item);
         if (result)
         {
-            codes[path] = path == 0 ? tier0_compile_scalar(&function, arena) : tier0_compile(&function, arena);
+            codes[path] = tier0_compile(&function, arena);
             result = cbuiltin_misc_lower_test_expect(tally, codes[path].error == TIER0_OK && codes[path].reference_count == 0 &&
                 x86_validate(codes[path].records, codes[path].count) == codes[path].count, "native records", item);
         }

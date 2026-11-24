@@ -88,19 +88,15 @@ static void check_test_program_copies(CheckTest* test, const char* clang)
         TypeId* members = (TypeId*)(mapping + page) - count;
         memset(members, 0, count * sizeof(*members));
         TypeTable types = { .members = { .type = members, .count = count } };
-        for (uint32_t scalar = 0; scalar < 2; scalar += 1)
+        Arena unavailable = { 0 };
+        uint8_t fact = 0;
+        check_test_expect(test, check_lower_copy_type_facts(&types, 1, &fact, &unavailable), "a guarded no-volatile member tail needs no graph scratch");
+        if (count > 1)
         {
-            Arena unavailable = { 0 };
-            uint8_t fact = 0;
-            check_test_expect(test, check_lower_copy_type_facts(&types, 1, &fact, &unavailable, scalar != 0),
-                              "a guarded no-volatile member tail needs no graph scratch");
-            if (count > 1)
-            {
-                members[count - 1] = BUSTER_TYPE_VOLATILE;
-                check_test_expect(test, !check_lower_copy_type_facts(&types, 1, &fact, &unavailable, scalar != 0) && unavailable.length == 0,
-                                  "the final volatile member is detected and graph allocation failure is transactional");
-                members[count - 1] = 0;
-            }
+            members[count - 1] = BUSTER_TYPE_VOLATILE;
+            check_test_expect(test, !check_lower_copy_type_facts(&types, 1, &fact, &unavailable) && unavailable.length == 0,
+                              "the final volatile member is detected and graph allocation failure is transactional");
+            members[count - 1] = 0;
         }
     }
     if (mapping != MAP_FAILED)

@@ -1,0 +1,1 @@
+[[clang::overloadable]] long q(long); [[clang::overloadable]] char* q(char*); _Static_assert(_Generic(q((char*)0),char*:1,default:0),"standard"); long run(void){long (*p)(long) = &q; return (__extension__ q)(4) + p(5) + (&q)(6);}

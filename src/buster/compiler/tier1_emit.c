@@ -111,8 +111,6 @@ struct Tier1EmitOptions
     // With BUSTER_TIER1_FRAME_KEEP_POINTER in `frame_flags`: a function without calls keeps no frame pointer
     // (-momit-leaf-frame-pointer's leaf rule, #177; tier1_emit_frame_flags).
     bool omit_leaf_frame_pointer;
-    // The frame colorer's path (#2699): its vector path, or with false its scalar twin.
-    bool vector;
     bool rematerialize;
     // Retain each record's IR origin for source/debug publication, without changing allocation or code generation.
     // The CFG certificate also asks for origins, independently of this opt-in.
@@ -385,10 +383,11 @@ struct Tier1EmitResult
     // for an unknown row. Null without call-save rows or certification. These are untrusted entry assertions, not
     // proof: the code certificate checks each row's bytes on every incoming edge, alongside the allocated locations.
     uint32_t* entry_rows;
-    // Under certify, each block's values whose slots hold them at its start besides the registers their intervals put
-    // them in (#2870): block b's are entry_slots[entry_slot_offsets[b] .. entry_slot_offsets[b + 1]), the values (the CFG
-    // problem's) whose slot stamps a run of blocks carries into b (tier1_emit_phase), where a store into the slot is then
-    // left out. Untrusted entry assertions too, each proved on b's incoming edge from the predecessor's records.
+    // Under certify, each block's values whose slots hold them at its start besides the places their intervals put them
+    // in (#2870): block b's are entry_slots[entry_slot_offsets[b] .. entry_slot_offsets[b + 1]), the values (the CFG
+    // problem's) whose slot stamps a run of blocks carries into b (tier1_emit_phase), or that the allocation's current
+    // slots give b (tier1_cfg_current_slots, #2553), where a store into the slot is then left out. Untrusted entry
+    // assertions too, each proved on every edge into b from the predecessor's records.
     uint32_t* entry_slots;
     uint32_t* entry_slot_offsets;
     // Each node whose definition the consumer left out (tier1_emit_cfg_dead_definition), 1, else 0.
@@ -861,7 +860,8 @@ static X86Instruction tier1_emit_spill(const Tier1EmitPrepared* prepared, const 
 // With the CFG consumer's slot stamps, a store into a slot that already holds the value is left out (#2784): one a
 // transition stored the value into or reloaded it from earlier in the same run of blocks, each of whose blocks after the
 // first has the one before it as its only predecessor, so that control reaches each position of the run through all
-// those before it. An SSA value never changes, and no other value writes its slot while it lives: slots are shared only
+// those before it; or one the allocation finds current at the block's start on every path (tier1_cfg_current_slots,
+// #2553), whose stamps the consumer sets as the block starts. An SSA value never changes, and no other value writes its slot while it lives: slots are shared only
 // by values never live at once (tier1_cfg_share_slots). A range that waits in its slot (#2768) and is evicted again after
 // its reload otherwise stored the value straight back where it had just read it, as Lua's str_gsub did at its loop's
 // head, twice each iteration.
@@ -2161,7 +2161,7 @@ static Tier1EmitError tier1_emit_function_pass(const Tier1SelectPlan* plan, cons
         };
         if (error == TIER1_EMIT_OK)
         {
-            const Tier1FrameError framed = BUSTER_VECTOR_PATH(options->vector) ? tier1_frame_plan(&request, output, scratch, &emitted.frame) : tier1_frame_plan_scalar(&request, output, scratch, &emitted.frame);
+            const Tier1FrameError framed = tier1_frame_plan(&request, output, scratch, &emitted.frame);
             tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_FRAME, framed);
             error = framed == TIER1_FRAME_OK ? TIER1_EMIT_OK : framed == TIER1_FRAME_CAPACITY ? TIER1_EMIT_MEMORY : framed == TIER1_FRAME_OVERFLOW ? TIER1_EMIT_LIMIT : TIER1_EMIT_FRAME;
         }
