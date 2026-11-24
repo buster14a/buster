@@ -801,6 +801,56 @@ static inline uint32_t fast_ident_lookup_16(FastIdentTable* t, const uint8_t* p,
     return id;
 }
 
+// An identifier of more than 16 bytes, through the same cache: its key is its first and its last eight bytes and its
+// length, and where a slot has them the interned text is compared (the bytes between may differ). Without it every one
+// went to fast_ident_intern's table, four dependent loads: 21,500 of sqlite3.c's lookups, a quarter of them new names.
+static inline uint32_t fast_ident_lookup_long(FastIdentTable* t, const uint8_t* p, uint32_t len, uint8_t* out_kind)
+{
+    uint32_t id = 0;
+    uint8_t kind = FTOK_IDENT;
+    FastIdentCacheSlot* slot = NULL;
+    uint64_t w0 = 0;
+    uint64_t w1 = 0;
+    if (len <= 64u)
+    {
+        memcpy(&w0, p, 8);
+        memcpy(&w1, p + len - 8u, 8);
+        const uint64_t h = ((w0 ^ (w1 * UINT64_C(0x9e3779b97f4a7c15)) ^ ((uint64_t)len << 56)) * UINT64_C(0xbf58476d1ce4e5b9));
+        slot = t->cache + (uint32_t)(h >> (64u - BUSTER_FIDENT_CACHE_BITS));
+        if (((slot->w0 ^ w0) | (slot->w1 ^ w1) | ((uint64_t)slot->len ^ len)) == 0 && slot->id != 0)
+        {
+            // Masked loads: neither the text nor the interned copy has 64 bytes to read for certain.
+            const __mmask64 lanes = _bzhi_u64(~UINT64_C(0), len);
+            const __m512i text = _mm512_maskz_loadu_epi8(lanes, (const void*)p);
+            const __m512i interned = _mm512_maskz_loadu_epi8(lanes, (const void*)(t->strings + t->entries[slot->id].str_offset));
+            if (_mm512_cmpneq_epi8_mask(text, interned) == 0)
+            {
+                id = slot->id;
+                kind = slot->tok_kind;
+            }
+        }
+    }
+    if (id == 0)
+    {
+        id = fast_ident_intern(t, p, len);
+        if (id != 0)
+        {
+            const uint8_t kw = t->entries[id].kw_kind;
+            kind = kw != 0 ? kw : FTOK_IDENT;
+            if (slot != NULL)
+            {
+                slot->w0 = w0;
+                slot->w1 = w1;
+                slot->id = id;
+                slot->len = (uint8_t)len;
+                slot->tok_kind = kind;
+            }
+        }
+    }
+    *out_kind = kind;
+    return id;
+}
+
 static inline bool fast_ident_is_macro(const FastIdentTable* t, uint32_t id)
 {
     return (t->macro_bits[id >> 6] & (UINT64_C(1) << (id & 63u))) != 0;
@@ -4959,12 +5009,7 @@ static FastTok fast_pp_window_tok(FastPP* pp, const FastIncludeFile* f, uint32_t
         }
         else
         {
-            id = fast_ident_intern(&pp->idents, s, len);
-            if (id != 0)
-            {
-                const uint8_t kw = pp->idents.entries[id].kw_kind;
-                ident_kind = kw != 0 ? kw : FTOK_IDENT;
-            }
+            id = fast_ident_lookup_long(&pp->idents, s, len, &ident_kind);
         }
         if (__builtin_expect(id == 0, 0))
         {
@@ -5356,12 +5401,7 @@ static BUSTER_DIRECT_HOT void fast_pp_emit_window(FastPP* pp, FastIncludeFile* f
                 }
                 else
                 {
-                    id = fast_ident_intern(&pp->idents, s, len);
-                    if (id != 0)
-                    {
-                        const uint8_t kw = pp->idents.entries[id].kw_kind;
-                        ident_kind = kw != 0 ? kw : FTOK_IDENT;
-                    }
+                    id = fast_ident_lookup_long(&pp->idents, s, len, &ident_kind);
                 }
                 if (__builtin_expect(id == 0, 0))
                 {
