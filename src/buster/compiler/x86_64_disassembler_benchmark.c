@@ -62,6 +62,9 @@ static int x86_decode_benchmark_compare(const void* left, const void* right)
     return (a > b) - (a < b);
 }
 
+// The instructions a call decodes with --calls N (0: the whole stream in one call), to time calls of a few.
+static uint32_t x86_decode_benchmark_calls;
+
 // The disassembly workloads, phases and state-conditioned measurement loop are original project code.
 static uint64_t x86_decode_benchmark_pass(const uint8_t* source, uint32_t size, X86Decoded* decoded, uint32_t capacity, uint32_t phase, uint32_t repeats)
 {
@@ -78,7 +81,25 @@ static uint64_t x86_decode_benchmark_pass(const uint8_t* source, uint32_t size, 
         }
         else
         {
-            const X86DecodeResult result = x86_disassemble(source, size, decoded, capacity);
+            X86DecodeResult result = { 0 };
+            if (x86_decode_benchmark_calls == 0)
+            {
+                result = x86_disassemble(source, size, decoded, capacity);
+            }
+            else
+            {
+                // A call of N instructions at a time, each from where the last stopped.
+                bool more = true;
+                while (more && result.consumed < size)
+                {
+                    const uint64_t room = capacity - result.count < x86_decode_benchmark_calls ? capacity - result.count : x86_decode_benchmark_calls;
+                    const X86DecodeResult step = x86_disassemble(source + result.consumed, size - (uint32_t)result.consumed, decoded + result.count, room);
+                    result.count += step.count;
+                    result.consumed += step.consumed;
+                    result.status = step.status == X86_DECODE_OUTPUT_FULL ? X86_DECODE_OK : step.status;
+                    more = step.count != 0 && result.status == X86_DECODE_OK;
+                }
+            }
             // Retain every published record store even in the decode-only phase.
             __asm__ volatile("" : : "r"(decoded) : "memory");
             checksum += result.consumed + result.count + result.status;
@@ -197,6 +218,14 @@ int run_x86_disassembler_benchmark(int argc, char** argv)
             const unsigned long value = strtoul(argv[i], &end, 10);
             valid = valid && argv[i][0] >= '0' && argv[i][0] <= '9' && *end == 0 && value > 0 && value <= (1u << 24);
             iterations = value > 0 && value <= (1u << 24) ? (uint32_t)value : 0;
+        }
+        else if (strcmp(argv[i], "--calls") == 0 && i + 1 < argc)
+        {
+            i += 1;
+            char* end = 0;
+            const unsigned long value = strtoul(argv[i], &end, 10);
+            valid = valid && argv[i][0] >= '0' && argv[i][0] <= '9' && *end == 0 && value > 0 && value <= 1024;
+            x86_decode_benchmark_calls = value > 0 && value <= 1024 ? (uint32_t)value : 0;
         }
         else if (strcmp(argv[i], "--after-scalar") == 0 && i + 1 < argc)
         {
