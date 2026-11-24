@@ -265,17 +265,28 @@ static bool check_program_object_size_inline(const CheckInput* input, uint32_t d
     return attributes != NULL && attributes->object_sizes != NULL;
 }
 
+// The visibility of `object`'s symbol, as a symbol's flags have it (BUSTER_LINK_SYMBOL_VISIBILITY's bits): the one its
+// attributes or visibility pragmas give it (CheckInput.object_visibility: 0 for none given, else BUSTER_LINK_SYMBOL_DEFAULT's
+// 0 to PROTECTED's 3, plus 1), else -fvisibility='s where `defined` says the unit defines it (#3576,
+// CheckProgram.visibility), as clang gives its definitions of external linkage, and the default for a declaration.
+static uint8_t check_program_visibility(const CheckProgram* program, uint32_t object, bool defined)
+{
+    const CheckInput* input = program->input;
+    const uint8_t given = input->object_visibility != NULL ? input->object_visibility[object] : 0;
+    return given != 0 ? (uint8_t)((given - 1) << BUSTER_LINK_SYMBOL_VISIBILITY_SHIFT) : defined ? program->visibility : BUSTER_LINK_SYMBOL_DEFAULT;
+}
+
 // Whether another module may preempt `object`'s symbol (#2101): a declaration of external linkage and default
-// visibility, which a shared library's symbol is unless the unit's attributes or pragmas say otherwise, but a private
-// size wrapper (check_program_object_size_inline), whose symbol is the unit's own; a literal is never one. Clang's
-// -fPIC reaches such a symbol through its GOT and calls it through its PLT, wherever its definition is.
-static bool check_program_preemptible(const CheckProgram* program, uint32_t object)
+// visibility (check_program_visibility, with `defined` whether the unit defines it), which a shared library's symbol is
+// unless the unit's attributes, pragmas or -fvisibility= say otherwise, but a private size wrapper
+// (check_program_object_size_inline), whose symbol is the unit's own; a literal is never one. Clang's -fPIC reaches such
+// a symbol through its GOT and calls it through its PLT, wherever its definition is.
+static bool check_program_preemptible(const CheckProgram* program, uint32_t object, bool defined)
 {
     const uint32_t declaration = object < program->object_count ? program->object_declarations[object] : BUSTER_CHECK_NONE;
     const CheckInput* input = program->input;
     const bool named = declaration != BUSTER_CHECK_NONE && !check_input_bit(input->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND);
-    // object_visibility: 0 for none given, else the visibility (BUSTER_LINK_SYMBOL_DEFAULT's 0 to PROTECTED's 3) plus 1.
-    const bool visible = input->object_visibility == NULL || input->object_visibility[object] <= 1;
+    const bool visible = check_program_visibility(program, object, defined) == BUSTER_LINK_SYMBOL_DEFAULT;
     return named && visible && check_input_linkage(input->declaration_bits, declaration) == 2 && !check_program_object_size_inline(input, declaration);
 }
 

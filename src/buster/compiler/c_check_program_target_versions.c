@@ -1035,7 +1035,12 @@ static bool check_program_target_symbols(CheckProgramCode* code, const CheckProg
             continue;
         }
         const uint8_t binding = group->internal ? BUSTER_LINK_SYMBOL_LOCAL : BUSTER_LINK_SYMBOL_WEAK;
-        valid = check_program_cpu_add(link, check_program_target_name(program, group->first, NULL, 0, ".resolver", output), binding | BUSTER_LINK_SYMBOL_FUNCTION, true) != 0;
+        // The resolver and f.ifunc have the visibility of the group's own symbol, R or the body's, which -fvisibility=
+        // gives a definition (#3576) as clang gives every symbol of the function.
+        const SymbolId own = group->clones != 0 ? body : reference;
+        const uint8_t visibility = own != 0 && !group->internal ? link->symbols.flags[own] & BUSTER_LINK_SYMBOL_VISIBILITY : BUSTER_LINK_SYMBOL_DEFAULT;
+        valid = check_program_cpu_add(link, check_program_target_name(program, group->first, NULL, 0, ".resolver", output),
+                                      binding | visibility | BUSTER_LINK_SYMBOL_FUNCTION, true) != 0;
         for (uint32_t o = 0; valid && o < count; o += 1)
         {
             const String8 name = check_program_target_option_name(program, group, options + o, output);
@@ -1044,7 +1049,8 @@ static bool check_program_target_symbols(CheckProgramCode* code, const CheckProg
         }
         if (valid && group->clones != 0)
         {
-            valid = check_program_cpu_add(link, check_program_target_name(program, group->first, NULL, 0, ".ifunc", output), binding | BUSTER_LINK_SYMBOL_IFUNC, true) != 0;
+            valid = check_program_cpu_add(link, check_program_target_name(program, group->first, NULL, 0, ".ifunc", output), binding | visibility | BUSTER_LINK_SYMBOL_IFUNC,
+                                          true) != 0;
         }
         if (valid)
         {

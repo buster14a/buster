@@ -1070,11 +1070,13 @@ struct PredefinesOptions
     // What the sanitizers' rules read besides: the last of -mexecute-only, -mno-execute-only and their aliases -mpure-code
     // and -mno-pure-code (null for none), the last -flto value (-flto is "full", null for none or -fno-lto), the last
     // -fvisibility= value when no -fvisibility-ms-compat follows it, whether any -fvisibility= was given, and the last
-    // option of each -f/-fno- pair.
+    // option of each -f/-fno- pair. And whether the last of -fvisibility= and -fvisibility-ms-compat is the second, whose
+    // default visibility is hidden (#3576, predefines_default_visibility).
     const char* execute_only;
     const char* lto;
     const char* visibility;
     bool visibility_given;
+    bool visibility_ms_compat;
     uint8_t rtti;
     uint8_t wrapv;
     uint8_t wrapv_pointer;
@@ -2137,6 +2139,7 @@ static __attribute__((unused)) PredefinesParse predefines_option_match(Predefine
         const bool value = argument[12] == '=';
         options->visibility = value ? argument + 13 : 0;
         options->visibility_given |= value;
+        options->visibility_ms_compat = !value;
     }
     else if (match.exact == C_OPTION_FBLOCKS || match.exact == C_OPTION_FNO_BLOCKS)
     {
@@ -4086,6 +4089,21 @@ static uint8_t predefines_stack_protector(const PredefinesOptions* options)
 static __attribute__((unused)) uint8_t predefines_cf_protection(const PredefinesOptions* options)
 {
     return options->cf_protection & (BUSTER_PREDEFINES_CF_BRANCH | BUSTER_PREDEFINES_CF_RETURN);
+}
+
+// The visibility the unit's definitions of external linkage take where none of their own is given (#3576): the last of
+// -fvisibility= (whose value predefines_finish_options checked) and -fvisibility-ms-compat, as clang's driver reads them
+// (BUSTER_PREDEFINES_VISIBILITY_*). Internal visibility is hidden's, as clang lowers it on x86-64, and
+// -fvisibility-ms-compat is hidden's in C, whose types have no visibility of their own.
+#define BUSTER_PREDEFINES_VISIBILITY_DEFAULT 0u
+#define BUSTER_PREDEFINES_VISIBILITY_HIDDEN 1u
+#define BUSTER_PREDEFINES_VISIBILITY_PROTECTED 2u
+static __attribute__((unused)) uint8_t predefines_default_visibility(const PredefinesOptions* options)
+{
+    const char* value = options->visibility_ms_compat ? "hidden" : options->visibility != 0 ? options->visibility : "default";
+    return strcmp(value, "hidden") == 0 || strcmp(value, "internal") == 0 ? BUSTER_PREDEFINES_VISIBILITY_HIDDEN :
+           strcmp(value, "protected") == 0                                 ? BUSTER_PREDEFINES_VISIBILITY_PROTECTED :
+                                                                             BUSTER_PREDEFINES_VISIBILITY_DEFAULT;
 }
 
 // The stack protector the code has (#3558), which the lowering guards the functions by (Tier0Function.stack_protector):

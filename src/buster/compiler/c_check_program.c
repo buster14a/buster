@@ -323,6 +323,11 @@ struct CheckProgramOptions
     // thread-local by general- or local-dynamic accesses (check_program_object_access, c_check_program_tls.c). The
     // client sets it where its code may go into a shared library (-c, -S, -shared), the predefines decide.
     bool pic;
+    // The visibility of the unit's definitions of external linkage that neither an attribute nor a visibility pragma
+    // gives one (#3576, -fvisibility=, predefines_default_visibility): BUSTER_LINK_SYMBOL_DEFAULT, HIDDEN or PROTECTED, as
+    // a symbol's flags have it. The emission gives their symbols it, and position-independent code reaches them as
+    // definitions no other module preempts unless it is the default (check_program_visibility).
+    uint8_t visibility;
     // -fpatchable-function-entry=N[,M[,SECTION]] (#1447, predefines_patchable): the NOPs every function without a
     // patchable_function_entry attribute gets, `patchable_count` of them, `patchable_offset` before its symbol (none for a
     // count of 0), and the section of their entries for every function whose attribute names none (empty for
@@ -717,7 +722,7 @@ struct CheckProgram
     uint32_t constraint_capacity;
     uint64_t output_bytes;
     // CheckProgramOptions.unselected_operands, asm_helpers, asm_bodies, helper_forms, target, frame_pointer, probe_stack,
-    // stack_protector, cf_protection and pic.
+    // stack_protector, cf_protection, pic and visibility.
     bool unselected_operands;
     bool asm_helpers;
     bool asm_bodies;
@@ -729,6 +734,7 @@ struct CheckProgram
     uint8_t stack_protector;
     uint8_t cf_protection;
     bool pic;
+    uint8_t visibility;
     // The tokens the writer left out (#1108), as ranges, keys of their first token in the high half and their last in
     // the low, in token order: an if whose condition is an integer constant without side effects writes only the arm
     // it runs, without the condition, when no label or case of an outer switch enters the other, as clang -O0's code
@@ -6418,7 +6424,7 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
     *program = (CheckProgram){ .input = input, .stream = stream, .types = types, .parser = parser, .identifiers = options.identifiers,
                                .initializers = options.initializers, .asms = options.asms, .unselected_operands = options.unselected_operands,
                                .asm_helpers = options.asm_helpers, .asm_bodies = options.asm_bodies, .assembly_text = options.assembly_text, .helper_forms = options.helper_forms, .target = options.target, .frame_pointer = options.frame_pointer,
-                               .probe_stack = options.probe_stack, .stack_protector = options.stack_protector, .cf_protection = options.cf_protection, .pic = options.pic, .patchable_count = options.patchable_count, .patchable_offset = options.patchable_offset,
+                               .probe_stack = options.probe_stack, .stack_protector = options.stack_protector, .cf_protection = options.cf_protection, .pic = options.pic, .visibility = options.visibility, .patchable_count = options.patchable_count, .patchable_offset = options.patchable_offset,
                                .patchable_section = options.patchable_section, .initializer_references = options.initializer_references,
                                .initializer_reference_count = options.initializer_reference_count, .token = BUSTER_CHECK_NONE,
                                .diagnostic_position = BUSTER_CHECK_NONE };
