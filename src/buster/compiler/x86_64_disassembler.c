@@ -144,6 +144,9 @@ struct X86DecodeLaneIndex
 // Bits 28-31: the segments (none, FS, GS, SS) the form allows.
 #define BUSTER_X86_LANE_SEGMENTS 28
 static uint32_t x86_decode_lane_forms[X86_FORM_COUNT];
+// A row's lane form and its compact checks' words (X86DecodeCheck's registers, memory and flags), 16 bytes a row, for
+// the lane decoder's gathers.
+static uint32_t x86_decode_lane_rows[X86_FORM_COUNT][4] __attribute__((aligned(64)));
 static X86DecodeLaneIndex x86_decode_lane_indices[BUSTER_X86_DECODE_BUCKETS];
 static uint16_t* x86_decode_cells;
 static uint16_t* x86_decode_lists;
@@ -888,6 +891,13 @@ static bool x86_disassembler_initialize(void)
                 x86_decode_length_tables_initialize();
                 x86_decode_checks_initialize();
                 x86_decode_simple_initialize();
+                for (uint32_t row = 0; row < X86_FORM_COUNT; row += 1)
+                {
+                    x86_decode_lane_rows[row][0] = x86_decode_lane_forms[row];
+                    x86_decode_lane_rows[row][1] = x86_decode_checks[row].registers;
+                    x86_decode_lane_rows[row][2] = x86_decode_checks[row].memory;
+                    x86_decode_lane_rows[row][3] = x86_decode_checks[row].flags;
+                }
                 x86_disassembly_initialize();
                 x86_decode_entry_count = total;
                 x86_decode_initialized = true;
@@ -1901,28 +1911,28 @@ static uint32_t x86_decode_lanes(const X86DecodeWindow* window, uint64_t remaini
     __m512i done_tail = zero;
     __m512i done_length = zero;
     uint16_t done_address32 = 0;
+    for (uint32_t i = 0; i < count; i += 1)
+    {
+        rows[i] = ((pending >> i) & 1) != 0 ? lists[i][0] : 0;
+    }
     while (pending != 0)
     {
-        uint32_t lane_forms[16] = { 0 };
-        uint32_t check_registers[16] = { 0 };
-        uint32_t check_memory[16] = { 0 };
-        uint32_t check_flags[16] = { 0 };
-        uint16_t candidates = 0;
-        for (uint32_t i = 0; i < count; i += 1)
+        // A later round's candidates: the next on each pending lane's list.
+        for (uint32_t lanes = round != 0 ? pending : 0; lanes != 0; lanes &= lanes - 1)
         {
-            const uint16_t row = ((pending >> i) & 1) != 0 ? lists[i][round] : 0;
-            rows[i] = ((pending >> i) & 1) != 0 ? row : rows[i];
-            lane_forms[i] = x86_decode_lane_forms[row];
-            check_registers[i] = x86_decode_checks[row].registers;
-            check_memory[i] = x86_decode_checks[row].memory;
-            check_flags[i] = x86_decode_checks[row].flags;
-            candidates |= (uint16_t)((row != 0) << i);
+            const uint32_t i = (uint32_t)__builtin_ctz(lanes);
+            rows[i] = lists[i][round];
         }
-        // A lane out of candidates is UNSUPPORTED.
-        refused |= pending & ~candidates;
-        pending &= candidates;
-        const __m512i form = _mm512_loadu_si512(lane_forms);
         const __m512i row = _mm512_loadu_si512(rows);
+        // A lane out of candidates is UNSUPPORTED.
+        const uint16_t candidates = pending & _mm512_cmpneq_epi32_mask(row, zero);
+        refused |= pending & ~candidates;
+        pending = candidates;
+        const __m512i entry = _mm512_slli_epi32(row, 2);
+        const __m512i form = _mm512_mask_i32gather_epi32(zero, pending, entry, x86_decode_lane_rows, 4);
+        const __m512i check_registers = _mm512_mask_i32gather_epi32(zero, pending, _mm512_add_epi32(entry, one), x86_decode_lane_rows, 4);
+        const __m512i check_memory = _mm512_mask_i32gather_epi32(zero, pending, _mm512_add_epi32(entry, _mm512_set1_epi32(2)), x86_decode_lane_rows, 4);
+        const __m512i flags = _mm512_mask_i32gather_epi32(zero, pending, _mm512_add_epi32(entry, _mm512_set1_epi32(3)), x86_decode_lane_rows, 4);
         const uint16_t has_modrm = _mm512_test_epi32_mask(form, _mm512_set1_epi32(BUSTER_X86_LANE_MODRM));
         const uint16_t has_reg = _mm512_test_epi32_mask(form, _mm512_set1_epi32(BUSTER_X86_LANE_REG));
         const uint16_t plus = _mm512_test_epi32_mask(form, _mm512_set1_epi32(BUSTER_X86_LANE_PLUS));
@@ -2003,13 +2013,12 @@ static uint32_t x86_decode_lanes(const X86DecodeWindow* window, uint64_t remaini
         const uint16_t complete = _mm512_cmple_epu32_mask(at, end) & ~overlong;
         // The compact checks (x86_decode_valid); the other rows take the full validator.
         const __m512i fields = _mm512_or_si512(_mm512_or_si512(lane_reg, _mm512_slli_epi32(lane_rm, 8)), _mm512_or_si512(_mm512_slli_epi32(lane_vvvv, 16), _mm512_slli_epi32(lane_decorations, 24)));
-        const __m512i flags = _mm512_loadu_si512(check_flags);
         const uint16_t compact = _mm512_test_epi32_mask(flags, one);
         const uint16_t memory_mode = _mm512_test_epi32_mask(mode, _mm512_set1_epi32(BUSTER_X86_MODE_MEMORY));
         const __m512i allowed_shift = _mm512_add_epi32(_mm512_add_epi32(_mm512_set1_epi32(2), _mm512_maskz_mov_epi32(lane_address32, four)), segment);
         __m512i allowed = _mm512_maskz_mov_epi32(memory_mode, _mm512_sllv_epi32(one, allowed_shift));
         allowed = _mm512_mask_mov_epi32(allowed, ~memory_mode & _mm512_cmpeq_epi32_mask(segment, zero), _mm512_set1_epi32(2));
-        const __m512i check = _mm512_mask_blend_epi32(memory_mode, _mm512_loadu_si512(check_registers), _mm512_loadu_si512(check_memory));
+        const __m512i check = _mm512_mask_blend_epi32(memory_mode, check_registers, check_memory);
         const uint16_t zeroing = _mm512_test_epi32_mask(lane_decorations, _mm512_set1_epi32(BUSTER_X86_DECORATION_ZEROING));
         const uint16_t unmasked = _mm512_testn_epi32_mask(lane_decorations, _mm512_set1_epi32(BUSTER_X86_DECORATION_MASK));
         const uint16_t memory_zeroing = memory_mode & _mm512_test_epi32_mask(flags, _mm512_set1_epi32(1 << 10));
