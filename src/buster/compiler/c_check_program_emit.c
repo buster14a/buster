@@ -128,6 +128,11 @@ struct CheckProgramCode
     String8* patchable_sections;
     SymbolId patchable_symbol_base;
     uint32_t patchable_count;
+    // -fcf-protection's note (#3570, check_program_emit_property): an object's atom of read-only bytes, one
+    // NT_GNU_PROPERTY_TYPE_0 note whose GNU_PROPERTY_X86_FEATURE_1_AND says the code's IBT and SHSTK, which
+    // check_program_sections puts in .note.gnu.property (SHT_NOTE, SHF_ALLOC), as clang's object has it; 0 for none: a
+    // unit without the option, and an executable's link, whose linker writes no such note.
+    AtomId property_atom;
     CheckProgramStatus status;
     Tier0Error backend_error;
     CheckTier1Outcome tier1_failure;
@@ -1387,9 +1392,11 @@ struct CheckEmitBody
     // Only a failed frame verification retains its verdict, until the calling thread reports it in source order.
     const EmittedVerdict* frame_verdict;
     // patchable_function_entry's NOPs (#1447, check_program_emit_patchable): `sled` bytes at the start of `bytes`, `prefix`
-    // of them before the function's symbol; 0 for a function without them, the usual one.
+    // of them before the function's symbol; 0 for a function without them, the usual one. Indirect branch tracking's
+    // endbr64 at the symbol (#3570, CheckEmitRun.entry_marks) is among them: `endbr` its 4 bytes, or 0.
     uint32_t sled;
     uint32_t prefix;
+    uint32_t endbr;
 };
 
 // A part's steps (CheckLowerPart, the lowering's), and its first body whose backend failed (either tier) and whose code
@@ -1440,6 +1447,9 @@ struct CheckEmitRun
 {
     const CheckProgram* program;
     const Parser* parser;
+    // Indirect branch tracking's entries (#3570, check_program_branch_entries): per body, whether its function's code
+    // starts with an endbr64 (check_program_emit_code); null without -fcf-protection=branch or =full.
+    const uint8_t* entry_marks;
     const CheckLowerShared* shared;
     CheckProgramLowered* lowered;
     CheckProgramLanes* lanes;
@@ -1718,18 +1728,21 @@ static void check_program_emit_nops(uint8_t* bytes, uint32_t count)
 // Body `b`'s patchable_function_entry NOPs (#1447, check_program_patchable), once its code is encoded at `bytes`
 // (`length` of them, with `sled` bytes of room after them): the code moved past the sled, whose first `prefix` bytes are
 // one-byte NOPs before the function's symbol, as LLVM's emitNops writes them, and the rest the longest NOPs at its entry,
-// before its prologue (check_program_emit_nops). What refers into the code moves with it: its fixups' fields, its labels
+// before its prologue (check_program_emit_nops), after its endbr64 where indirect branch tracking marks it (#3570,
+// `endbr` its 4 bytes, else 0), which LLVM's entry has first. What refers into the code moves with it: its fixups' fields, its labels
 // and its templates' (from the atom's start, by the sled); its source rows and value spans (from the symbol, by the entry's
 // NOPs, the declaration's row at 0 left there, so that its line covers them) and its unwind descriptor's transitions and size,
 // whose entry rules (a row at 0) hold through the NOPs, as clang's FDE starts at the symbol. Out of line and cold: a unit
 // without the attribute or -fpatchable-function-entry never reaches it.
 static __attribute__((noinline, cold)) void check_program_emit_patchable(CheckEmitRun* run, CheckEmitBody* body, const EmittedCode* code, uint32_t b, uint8_t* bytes,
-                                                                        uint32_t length, uint32_t sled, uint32_t prefix, EmissionFrameRow* frame_rows)
+                                                                        uint32_t length, uint32_t sled, uint32_t prefix, uint32_t endbr, EmissionFrameRow* frame_rows)
 {
+    static const uint8_t endbr64[4] = { 0xf3, 0x0f, 0x1e, 0xfa };
     const uint32_t entry = sled - prefix;
     memmove(bytes + sled, bytes, length);
     memset(bytes, 0x90, prefix);
-    check_program_emit_nops(bytes + prefix, entry);
+    memcpy(bytes + prefix, endbr64, endbr);
+    check_program_emit_nops(bytes + prefix + endbr, entry - endbr);
     const uint64_t marked = check_program_emit_marked(code);
     for (uint64_t k = 0; k < marked; k += 1)
     {
@@ -1789,6 +1802,7 @@ static __attribute__((noinline, cold)) void check_program_emit_patchable(CheckEm
     }
     body->sled = sled;
     body->prefix = prefix;
+    body->endbr = endbr;
 }
 
 // Resolve optional optimized locations after branch sizing, then group by stable source local in one count/place/fill
@@ -1928,6 +1942,137 @@ static uint32_t check_program_emit_inline_of(const EmittedCode* code, uint32_t o
     return found;
 }
 
+// Indirect branch tracking's entries (#3570, -fcf-protection=branch and =full): per body, whether its function starts
+// with an endbr64, as LLVM's X86IndirectBranchTracking gives one to a function that an indirect call may reach: one of
+// external linkage, and one of internal linkage whose address the unit takes (Function::hasAddressTaken: a use that
+// isn't a direct call's callee). Taken here, over the whole unit before any body's code: a VALUE node of the graph
+// outside the callee of a direct call, which the lowering calls directly (check_lower_call_body's `direct`: a callee
+// whose value is its function's address, constant, without side effects), whose every VALUE node is that call's; an
+// alias's, ifunc's or weakref's target and base; and a function whose declarations have used, constructor, destructor,
+// interrupt, cpu_specific or retain, which a table of the object or the loader refers to. A reference the unit never
+// emits (a sizeof's operand, an arm clang leaves out) takes it too: an endbr64 more than clang's, never one fewer. The
+// graph's operators are compared 16 a vector, CALL's and VALUE's, and only the nodes found are read; a CALL's callee is
+// walked, at most BUSTER_CHECK_BRANCH_CALLEE nodes, past which its VALUE nodes count as taken. Every body's is marked
+// where the unit's references aren't all in its graph or columns: --node-bodies' taken bodies, a deferred lowering's
+// loop, and an overloaded function's address (#147), which names no one function here. Null for no room.
+#define BUSTER_CHECK_BRANCH_CALLEE 64u
+static __attribute__((noinline, cold)) uint8_t* check_program_branch_entries(const CheckProgram* program, bool deferred, Arena* output, Arena* scratch)
+{
+    const CheckInput* input = program->input;
+    const CheckGraph* graph = &input->graph;
+    const CheckStream* stream = program->stream;
+    const uint32_t count = program->body_count;
+    const uint32_t nodes = graph->count;
+    uint8_t* marks = BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, (uint64_t)count + 1);
+    const uint64_t mark = scratch->length;
+    uint8_t* taken = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)program->object_count + 1);
+    uint8_t* direct = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)nodes + 16);
+    uint32_t stack[BUSTER_CHECK_BRANCH_CALLEE];
+    // (`#pragma weak A = T` makes T an alias's base, #1849, which these columns don't name.)
+    bool all = input->node_bodies || deferred || stream == NULL;
+    for (uint32_t i = 0; input->symbol_pragmas != NULL && i < input->symbol_pragmas->count; i += 1)
+    {
+        all |= input->symbol_pragmas->records[i].alias_target != BUSTER_CHECK_NONE;
+    }
+    const bool room = marks != 0 && taken != 0 && direct != 0;
+    if (room)
+    {
+        memset(taken, 0, (uint64_t)program->object_count + 1);
+        memset(direct, 0, (uint64_t)nodes + 16);
+    }
+    // The direct calls' callees, their VALUE nodes marked `direct`.
+    for (uint32_t first = 0; room && !all && first < nodes; first += 16)
+    {
+        const __mmask16 lanes = nodes - first >= 16 ? (__mmask16)0xffff : (__mmask16)_bzhi_u32(0xffff, nodes - first);
+        const __m512i ops = _mm512_maskz_loadu_epi32(lanes, graph->ops + first);
+        uint32_t calls = (uint32_t)_mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_CALL));
+        while (calls != 0)
+        {
+            const uint32_t node = first + (uint32_t)__builtin_ctz(calls);
+            calls &= calls - 1;
+            const uint32_t callee = graph->operand0[node];
+            CheckValue value = callee < nodes && callee < stream->count ? check_stream_value(stream, callee) : (CheckValue){ 0 };
+            const uint32_t overload = check_program_builtin_index(stream->overloads, stream->overload_count, sizeof(CheckOverloadEffect), node);
+            value.constant_kind = overload != BUSTER_CHECK_NONE ? (uint8_t)CHECK_CONSTANT_ADDRESS : value.constant_kind;
+            value.object = overload != BUSTER_CHECK_NONE ? stream->overloads[overload].selected.object : value.object;
+            value.category = overload != BUSTER_CHECK_NONE ? (uint8_t)CHECK_FUNCTION : value.category;
+            value.flags = overload != BUSTER_CHECK_NONE ? 0 : value.flags;
+            value.offset = overload != BUSTER_CHECK_NONE ? 0 : value.offset;
+            // (A callee that is a function's own designator is called directly whatever its stream's value: a body the
+            // selection leaves out may have none.)
+            const CheckValue designator = callee < nodes && graph->ops[callee] == CHECK_OP_VALUE ? check_graph_leaf_value(graph, callee) : (CheckValue){ 0 };
+            const bool named = designator.category == CHECK_FUNCTION && designator.overload_head == 0 && designator.object != 0;
+            const bool called = named || (callee < nodes && value.category != CHECK_LVALUE && value.constant_kind == CHECK_CONSTANT_ADDRESS && value.object != 0 &&
+                                          value.offset == 0 && value.object < program->object_count && program->object_symbols[value.object] != 0 &&
+                                          (value.flags & (BUSTER_CHECK_SIDE_EFFECT | BUSTER_CHECK_FP_ENVIRONMENT)) == 0);
+            uint32_t depth = 0;
+            stack[depth] = callee;
+            depth += called ? 1 : 0;
+            while (depth != 0)
+            {
+                const uint32_t at = stack[--depth];
+                direct[at] = 1;
+                const uint32_t operands[3] = { graph->operand0[at], graph->operand1[at], graph->operand2[at] };
+                for (uint32_t k = 0; graph->ops[at] != CHECK_OP_VALUE && k < 3; k += 1)
+                {
+                    const bool push = operands[k] < nodes && depth < BUSTER_CHECK_BRANCH_CALLEE;
+                    stack[depth] = operands[k];
+                    depth += push ? 1 : 0;
+                }
+            }
+        }
+    }
+    // Every other VALUE node's object is taken: an overloaded one's names none, which takes every body's.
+    for (uint32_t first = 0; room && !all && first < nodes; first += 16)
+    {
+        const __mmask16 lanes = nodes - first >= 16 ? (__mmask16)0xffff : (__mmask16)_bzhi_u32(0xffff, nodes - first);
+        const __m512i ops = _mm512_maskz_loadu_epi32(lanes, graph->ops + first);
+        const __mmask16 called = _mm_test_epi8_mask(_mm_loadu_si128((const __m128i*)(direct + first)), _mm_set1_epi8(1));
+        uint32_t values = (uint32_t)(_mm512_mask_cmpeq_epi32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_VALUE)) & (__mmask16)~called);
+        while (values != 0)
+        {
+            const uint32_t node = first + (uint32_t)__builtin_ctz(values);
+            values &= values - 1;
+            const CheckValue leaf = check_graph_leaf_value(graph, node);
+            all |= leaf.overload_head != 0;
+            taken[leaf.object < program->object_count ? leaf.object : 0] = 1;
+        }
+    }
+    // The attributes' roots, and the aliases' targets and bases.
+    CheckProgramAttributed attributed = { 0 };
+    const bool listed = room && !all && check_program_attributed(input, scratch, &attributed);
+    all |= room && !listed;
+    for (uint32_t d = 0; listed && d < attributed.count; d += 1)
+    {
+        const uint32_t token = attributed.tokens[d];
+        const CheckInputAttributes* attributes = check_input_attributes_at(input, token);
+        const uint32_t object = input->objects[token] < program->object_count ? input->objects[token] : 0;
+        for (uint32_t i = 0; attributes != NULL && i < attributes->count; i += 1)
+        {
+            const CheckInputAttribute* attribute = attributes->records + i;
+            const CheckInputAttributeKind kind = attribute->kind;
+            const bool rooted = kind == CHECK_ATTRIBUTE_USED || kind == CHECK_ATTRIBUTE_CONSTRUCTOR || kind == CHECK_ATTRIBUTE_DESTRUCTOR || kind == CHECK_ATTRIBUTE_INTERRUPT ||
+                                kind == CHECK_ATTRIBUTE_CPU_SPECIFIC || kind == CHECK_ATTRIBUTE_RETAIN;
+            taken[object] |= rooted && !attribute->ignored ? 1 : 0;
+        }
+    }
+    for (uint32_t a = 0; room && a < program->alias_count; a += 1)
+    {
+        const CheckProgramAlias* alias = program->aliases + a;
+        taken[alias->target_object < program->object_count ? alias->target_object : 0] = 1;
+        taken[alias->aliasee < program->object_count ? alias->aliasee : 0] = 1;
+        taken[alias->base < program->object_count ? alias->base : 0] = 1;
+    }
+    for (uint32_t b = 0; room && b < count; b += 1)
+    {
+        const CheckProgramBody* body = program->bodies + b;
+        const bool external = check_input_linkage(input->declaration_bits, body->declaration) == 2;
+        marks[b] = all || external || (body->object < program->object_count && taken[body->object] != 0) ? 1 : 0;
+    }
+    arena_pop_to(scratch, mark);
+    return room ? marks : 0;
+}
+
 static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint32_t b)
 {
     const CheckProgram* program = run->program;
@@ -1967,7 +2112,9 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
     // them. A unit without the attribute or -fpatchable-function-entry reads two fields.
     const CheckProgramPatchable patchable = program->patchable_key_count != 0 || program->patchable_count != 0 ? check_program_patchable(program, b) :
                                                                                                                   (CheckProgramPatchable){ 0 };
-    const uint32_t sled = patchable.count;
+    // And indirect branch tracking's endbr64 at its entry (#3570, CheckEmitRun.entry_marks), before those NOPs.
+    const uint32_t endbr = run->entry_marks != NULL && run->entry_marks[b] != 0 ? 4 : 0;
+    const uint32_t sled = patchable.count + endbr;
     const uint64_t byte_capacity = BUSTER_X86_ENCODER_CAPACITY(code->count);
     const uint64_t before = bytes->length;
     uint8_t* encoded = arena_push(bytes, byte_capacity + sled, 16);
@@ -2079,7 +2226,7 @@ static bool check_program_emit_code(CheckEmitRun* run, CheckEmitLane* lane, uint
             }
             if (sled != 0)
             {
-                check_program_emit_patchable(run, body, code, b, encoded, (uint32_t)length, sled, patchable.offset, frame_rows);
+                check_program_emit_patchable(run, body, code, b, encoded, (uint32_t)length, sled, patchable.offset, endbr, frame_rows);
             }
         }
         else
@@ -3616,6 +3763,22 @@ static uint64_t check_program_emit_marked(const EmittedCode* code)
     return marked;
 }
 
+// -fcf-protection's note (#3570, CheckProgramCode.property_atom): an atom of 32 read-only bytes, 8-byte aligned, one
+// note of the System V gABI's layout (namesz 4, descsz 16, type NT_GNU_PROPERTY_TYPE_0, name "GNU") whose one property,
+// GNU_PROPERTY_X86_FEATURE_1_AND, has the code's bits: IBT (1) where its indirect branches' targets are marked
+// (-fcf-protection=branch), SHSTK (2) where its returns keep the shadow stack's rules (=return, which every code of
+// Tier 0's and Tier 1's does: no return address is written but by a call), both for =full, padded to 8 bytes, as clang's
+// X86AsmPrinter writes it. A linker sets the output's feature where every input has it. Returns false for no room.
+static bool check_program_emit_property(CheckProgramCode* result, const CheckProgram* program, Arena* bytes)
+{
+    const uint32_t words[8] = { 4, 16, 5, 0x00554e47u, 0xc0000002u, 4, program->cf_protection, 0 };
+    uint8_t* note = arena_push(bytes, sizeof(words), 8);
+    const AtomId atom = note != 0 ? link_add_atom(&result->link, BUSTER_LINK_CLASS_RODATA, 3, sizeof(words), memcpy(note, words, sizeof(words)), 0) : 0;
+    result->property_atom = atom;
+    result->status = atom != 0 ? result->status : CHECK_PROGRAM_RESOURCE;
+    return atom != 0;
+}
+
 // Body `b`'s patchable_function_entry entry (#1447), its function's atom `function` published: its label
 // (CheckProgramCode.patchable_symbol_base's next) defined at the atom's start, where its NOP sled begins, and an 8-byte
 // atom of writable data, zero, whose absolute fixup (R_X86_64_64 in an object, a relative relocation in a PIE) points there,
@@ -4316,7 +4479,7 @@ static int check_program_marker_order(const void* left, const void* right)
 
 // -S's copy of a body's records and branch columns (#1362), in `output`, which outlives the lanes' arenas the code is
 // in: what the assembly sink prints the body's atom from. Returns false if `output` can't hold them.
-static bool check_program_emit_keep_records(AssemblyCode* kept, const EmittedCode* code, uint32_t sled, Arena* output)
+static bool check_program_emit_keep_records(AssemblyCode* kept, const EmittedCode* code, uint32_t sled, uint32_t prefix, uint32_t endbr, Arena* output)
 {
     const uint32_t count = code->count;
     const uint32_t branch_count = code->branch_count;
@@ -4343,6 +4506,7 @@ static bool check_program_emit_keep_records(AssemblyCode* kept, const EmittedCod
             .count = count,
             .branch_count = branch_count,
             .sled = sled,
+            .endbr = endbr != 0 ? prefix + 1 : 0,
         };
     }
     return valid;
@@ -4528,6 +4692,22 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     if (run.bodies != 0)
     {
         memset(run.bodies, 0, (uint64_t)count * sizeof(CheckEmitBody));
+    }
+    // Indirect branch tracking's entries (#3570), from the whole unit's references before any body's code. Multiversioned
+    // functions' resolvers, which the loader calls through their IFUNCs, are byte templates without an endbr64 yet.
+    const bool tracking = valid && count != 0 && (program->cf_protection & BUSTER_PREDEFINES_CF_BRANCH) != 0;
+    if (tracking && (program->cpu_group_count != 0 || program->target_group_count != 0))
+    {
+        result->status = CHECK_PROGRAM_UNSUPPORTED;
+        result->reason = "multiversioned functions (target, target_clones, cpu_dispatch) with -fcf-protection=branch or =full (their resolvers' endbr64)";
+        result->token = program->cpu_group_count != 0 ? program->cpu_groups[0].first : program->target_groups[0].first;
+        valid = false;
+    }
+    run.entry_marks = tracking && valid ? check_program_branch_entries(program, loop != NULL, output, scratch) : NULL;
+    if (tracking && valid && run.entry_marks == NULL)
+    {
+        result->status = CHECK_PROGRAM_RESOURCE;
+        valid = false;
     }
     // The unit's inline callees (#1282, #1398), unless --tier1-no-inline and --tier0-no-inline keep every call: Tier 1's
     // with --tier1, and Tier 0's for the bodies it compiles. A unit without them runs one epoch.
@@ -5469,8 +5649,11 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     // And the thread-locals' accessors of position-independent code (#2101, check_program_emit_tls_atoms): an atom, a
     // symbol and its name and up to three fixups each.
     const uint64_t tls_room = valid ? shared.tls_count : 0;
+    // And -fcf-protection's note (#3570, check_program_emit_property), an atom.
+    const uint64_t property_room = program->cf_protection != 0 ? 1 : 0;
     const uint64_t atom_count = (uint64_t)data_capacity.atoms + count + helpers->count + pools->count + runtime.atoms + (frames != 0 ? 1 : 0) +
-                                (valid ? result->lowered.table_count : 0) + file_atoms + structor_count + unit_atoms + patched + cpu_atoms + literal_room + tls_room;
+                                (valid ? result->lowered.table_count : 0) + file_atoms + structor_count + unit_atoms + patched + cpu_atoms + literal_room + tls_room +
+                                property_room;
     const uint64_t fixup_count = (uint64_t)data_capacity.fixups + references + runtime.fixups + frames + table_entries + structor_count + unit_fixups + patched +
                                  cpu_fixups + 3 * tls_room;
     const uint64_t wide_count = (uint64_t)data_capacity.wide_addends + references + runtime.wide_addends + unit_wide;
@@ -6113,10 +6296,12 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             const char* reason = NULL;
             // (A naked function whose assembly takes directives has no NOP sled of patchable_function_entry's yet, #1447.)
             const bool patchable = source_body && patched != 0 && check_program_patchable(program, b).count != 0;
+            // (Nor an endbr64 of indirect branch tracking's, #3570.)
+            const bool tracked = source_body && run.entry_marks != NULL && run.entry_marks[b] != 0;
             // A naked function's own CFI (#1848): its rows are its unwind entry's, its unit's .eh_frame left out.
             const CheckProgramNaked* framed = source_body && asms->naked != 0 && asms->naked[b].framed ? asms->naked + b : NULL;
             const bool naked_frames = framed != NULL;
-            valid = symbol != 0 && !patchable &&
+            valid = symbol != 0 && !patchable && !tracked &&
                     check_program_emit_asm_unit(result, asms, unit, asm_symbols, symbol, result->unit_atoms, result->unit_sections,
                                                 &result->unit_atom_count, bytes, scratch, &entry_atom, &entry_bytes, &entry_length, naked_frames);
             if (valid && keep_records && unit_plan != NULL && unit_plan->presentation != NULL)
@@ -6129,7 +6314,9 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                 }
             }
             reason = patchable ? "patchable_function_entry on a naked function whose assembly takes directives" :
-                     valid ? NULL : "an inline assembly unit could not be published";
+                     tracked   ? "a naked function whose assembly takes directives, with -fcf-protection=branch or =full (its endbr64)" :
+                     valid     ? NULL :
+                                 "an inline assembly unit could not be published";
             if (valid)
             {
                 body->bytes = entry_bytes;
@@ -6169,7 +6356,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             }
             else
             {
-                result->status = patchable ? CHECK_PROGRAM_UNSUPPORTED : CHECK_PROGRAM_BACKEND;
+                result->status = patchable || tracked ? CHECK_PROGRAM_UNSUPPORTED : CHECK_PROGRAM_BACKEND;
                 result->reason = reason != NULL ? reason : "an inline assembly unit could not be published";
                 result->token = source_body ? program->bodies[b].declaration : BUSTER_CHECK_NONE;
                 valid = false;
@@ -6253,14 +6440,14 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             valid = atom != 0 && symbol != 0 && link_define_symbol(&result->link, symbol, atom, body->prefix, body->length - body->prefix) &&
                     link_add_code_fixups(&result->link, atom, code->records, record_count, body->fixup_ends,
                                          assembly ? check_program_emit_marked(code) : code->reference_count, code->references, code->reference_count);
-            if (valid && source_body && body->sled != 0)
+            if (valid && source_body && body->sled != body->endbr)
             {
                 valid = check_program_emit_patchable_entry(result, program, b, atom, bytes);
             }
             // -S prints the sled's bytes before the body's instruction records. Templates have no records here.
             if (valid && keep_records && !assembly && !body->windowed && atom < result->assembly_code_count)
             {
-                valid = check_program_emit_keep_records(&result->assembly_code[atom], code, body->sled, output);
+                valid = check_program_emit_keep_records(&result->assembly_code[atom], code, body->sled, body->prefix, body->endbr, output);
                 result->status = valid ? result->status : CHECK_PROGRAM_RESOURCE;
             }
             // The labels its templates define, each at its record's offset (its lane's, for a naked function): the
@@ -6409,6 +6596,11 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         }
     }
     check_clock_mark(stage_clock, CHECK_STAGE_UNWIND);
+    // -fcf-protection's note (#3570), in an object's link alone: an executable's linker (bind.c, import.c) writes none.
+    if (valid && program->cf_protection != 0 && binding == NULL && !kept)
+    {
+        valid = check_program_emit_property(result, program, bytes);
+    }
     // Each jump table, in .rodata: an entry per value, its label's offset from the table, which a PC32 fixup gives
     // (S + A - P, P the entry's place, A its offset in the table), as clang's .long .LBB - .LJTI entries are.
     for (uint32_t t = 0; valid && t < result->lowered.table_count; t += 1)
@@ -6853,7 +7045,7 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
     *table = 0;
     bool valid = true;
     if (placements != 0 || code->asm_atom_count != 0 || link->priorities.count > 1 || code->retained_count != 0 || code->unit_atom_count != 0 ||
-        program->cfstring_count != 0 || code->selectany_count != 0 || code->patchable_count != 0)
+        program->cfstring_count != 0 || code->selectany_count != 0 || code->patchable_count != 0 || code->property_atom != 0)
     {
         uint32_t refused = BUSTER_CHECK_NONE;
         const char* reason = NULL;
@@ -6900,6 +7092,14 @@ static bool check_program_sections(CheckProgramCode* code, const CheckProgram* p
                 descriptors[atom] = (ObjectAtomSection){ .name = name, .type = SHT_PROGBITS, .flags = SHF_ALLOC | SHF_WRITE | SHF_LINK_ORDER,
                                                          .link = code->patchable_functions[k] };
                 valid = valid && link_set_atom_section(link, atom, name);
+            }
+            // -fcf-protection's note (#3570, check_program_emit_property), as clang's object has it.
+            if (code->property_atom != 0)
+            {
+                static const char property_section[] = ".note.gnu.property";
+                const String8 name = { .pointer = (char*)property_section, .length = sizeof(property_section) - 1 };
+                descriptors[code->property_atom] = (ObjectAtomSection){ .name = name, .type = SHT_NOTE, .flags = SHF_ALLOC };
+                valid = valid && link_set_atom_section(link, code->property_atom, name);
             }
             *table = descriptors;
         }

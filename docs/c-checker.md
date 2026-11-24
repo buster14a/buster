@@ -220,13 +220,13 @@ existing language, include-path and macro-definition options.
 
 The semantic driver refuses unsupported hardening, instrumentation and ABI
 options by name rather than silently producing an object without them (#814).
-This includes CET, stack-clash checking (`-fstack-check`), GCC's
+This includes stack-clash checking (`-fstack-check`), GCC's
 `-fstack-protector-explicit`, `-pg`, function
 instrumentation and profile-generation forms, coverage flags, explicit TLS models, `-mno-red-zone`,
 `-fno-plt`, and the unsupported structure-return, short-double and
-wide-execution-character options. The last CET option decides that family, so
-`-fcf-protection=none` can turn it off. The stack protector's other options
-guard the code ("The stack protector" below, #3558). The other listed options are conservatively refused even if
+wide-execution-character options. The stack protector's other options
+guard the code ("The stack protector" below, #3558), and CET's mark it ("CET's
+protection" below, #3570), the last of each family deciding. The other listed options are conservatively refused even if
 a later argument would disable them. The separate `-E` preprocessor retains
 its predefined-macro behavior; it emits no object. This list does not cover
 sanitizer options.
@@ -2634,6 +2634,82 @@ functions with clang `-O0`'s on fixtures where the two rules agree, runs a
 smashed buffer to glibc's "stack smashing detected" abort at both tiers and by
 `musttail`, and checks that without the options, or with `-fno-stack-protector`
 last, the objects are byte for byte the default's.
+
+### CET's protection
+
+`-fcf-protection` (`=full`), `=branch` and `=return` mark the code as clang's
+does on x86-64 Linux (#3570); the last of them and `=none` decides. Every
+request takes them: distributions' package builds pass `-fcf-protection` by
+default on x86-64. `check_request_program_options` sets
+`CheckProgramOptions.cf_protection` from `predefines_cf_protection`, the bits
+the predefined `__CET__` says (`BUSTER_PREDEFINES_CF_BRANCH`, `_RETURN`).
+Without the options the objects are the default's bytes.
+
+**The note.** With either bit, `-c`'s object (and `-S`'s text) has a
+`.note.gnu.property` section (`SHT_NOTE`, `SHF_ALLOC`, 8-byte aligned) of one
+`NT_GNU_PROPERTY_TYPE_0` note whose `GNU_PROPERTY_X86_FEATURE_1_AND` is IBT for
+`branch` and SHSTK for `return`, clang's bytes
+(`check_program_emit_property`, `CheckProgramCode.property_atom`), which a
+linker ANDs over its inputs. `return` needs no code of its own: neither tier
+writes a return address but by a call. An executable that buster's own linker
+writes takes no note (its inputs' notes are dropped, `import.c`), so it stays
+unmarked.
+
+**Which entries.** Under `branch`, a function's code starts with an `endbr64`
+where an indirect call may reach it, as LLVM's `X86IndirectBranchTracking`
+gives one: a function of external linkage, and one of internal linkage whose
+address the unit takes (`check_program_branch_entries`, per body, before any
+body's code, into `CheckEmitRun.entry_marks`). Taken means a VALUE node of the
+graph outside a direct call's callee (one the lowering calls directly:
+`check_lower_call_body`'s `direct`, or a function's own designator), an alias's,
+ifunc's or weakref's target and base, and a declaration with `used`,
+`constructor`, `destructor`, `interrupt`, `cpu_specific` or `retain`. The
+graph's operators are found 16 a vector (CALL's, then VALUE's); a callee's
+nodes are walked to at most 64. A reference the unit never emits takes the
+function too: `(void)&f;`, a `sizeof`'s operand or an unselected `_Generic`
+arm give an `endbr64` clang's code hasn't, never one fewer. Every body is
+marked where the references aren't all in the graph: `--node-bodies`' taken
+bodies, a deferred lowering's loop, `#pragma weak A = T`, and an overloaded
+function's address. The `endbr64` is emitted with the encoded code, before
+`patchable_function_entry`'s entry NOPs as clang places it, through the same
+shift of the fixups, labels, rows and unwind events
+(`check_program_emit_patchable`), so either tier's code takes it.
+
+**Inside a body.** Tier 0 marks the rest after its passes
+(`tier0_mark_branches`, `Tier0Function.branch_tracking`): an `endbr64` right
+after each direct call of a function that returns twice
+(`Tier0Function.twice_symbols`: the callees `check_lower_calls_twice` names,
+and `__builtin_setjmp`'s leaf, whose `__builtin_longjmp` jumps back there), and
+at each label whose address the code takes, where a `goto *` lands; and each
+jump table's jump (`Tier0Function.table_jumps`) becomes `notrack jmp`, so its
+labels need none. The records are copied once with the `endbr64`s in place, and
+every index into them moves (branches and targets, references, entries,
+labels, asm labels, tail calls). The prologue stays the first records and the
+epilogue the last, as the unwind tables read them.
+
+**Tier 1 and inlining.** Tier 1 leaves a function with labels or
+`__builtin_setjmp` to Tier 0 under `branch` (admission's
+`BUSTER_CHECK_TIER1_TRACKED`), and its inliner doesn't expand such a callee;
+a caller of a function that returns twice is Tier 0's already. Tier 0's
+inliner splices no callee that calls a function that returns twice, so a
+spliced function's `twice_symbols` are its caller's.
+
+**Refused.** `nocf_check` under `branch`, part of its function's type there
+(a redeclaration without it conflicts) and dropping its `endbr64`, which the
+types don't hold; `__builtin_setjmp` and `__builtin_longjmp` under `return`,
+whose shadow stack's pointer LLVM's SjLj lowering saves and restores
+(`emitSetJmpShadowStackFix`, `emitLongJmpShadowStackFix`); multiversioned
+functions under `branch`, whose resolvers are byte templates without an
+`endbr64`; and a naked function whose assembly takes directives, where its
+`endbr64` is due.
+
+`test-checker-driver --cf-protection-only` (`c_check_cf_protection_driver_test.c`)
+compares each spelling's marks per function (an entry `endbr64`, the
+`endbr64`s and the `notrack` jumps) and note with clang `-O0`'s on a fixture of
+where they agree, by Tier 0 and `--tier1`; runs a program whose function
+pointers, setjmp, `__builtin_setjmp`, jump table and computed goto pass through
+the marks; checks the refusals; and checks that without the options, or with
+`-fcf-protection=none` last, the objects are the default's bytes.
 
 What the lowering covers past scalars (#145's programs):
 
@@ -10527,7 +10603,9 @@ arguments against the function. The checker now gives these as clang does.
     clang's error, with its note there; on a parameter and on a variable of
     local storage, clang's warnings, which ignore it.
   - `nocf_check` is clang's "ignored; use -fcf-protection" warning wherever it
-    is, whatever its arguments: the driver refuses `-fcf-protection`.
+    is, whatever its arguments, without `-fcf-protection=branch` or `=full`;
+    with them, where clang makes it part of its function's type, it is refused
+    by name ("CET's protection", #3570).
 
   clang's thread-safety analysis's attributes (`guarded_by`,
   `requires_capability`, `acquire_capability`, `capability` and the others,

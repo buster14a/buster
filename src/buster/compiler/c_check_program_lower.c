@@ -919,8 +919,10 @@ struct CheckLowerWriter
     // (Tier0Function.unwind_init).
     bool unwind_init;
     // Whether the body calls __builtin_setjmp, whose function keeps nothing in a callee-saved register
-    // (Tier0Function.returns_twice).
+    // (Tier0Function.returns_twice); and under indirect branch tracking (#3570), its leaf's symbol, after whose calls
+    // the longjmp's indirect jump comes back (Tier0Function.twice_symbols), or 0.
     bool returns_twice;
+    SymbolId setjmp_symbol;
     // Whether the body calls another function that returns twice (#1847, Tier0Function.calls_returns_twice), and
     // whether the unit may have one (CheckLowerShared.twice): a call asks then alone.
     bool calls_returns_twice;
@@ -14285,6 +14287,13 @@ static __attribute__((noinline)) void check_lower_x86_builtin(CheckLowerWriter* 
         {
             check_lower_unsupported(writer, cbuiltin_x86_helper_infos[leaf].refusal);
         }
+        else if ((leaf == CBUILTIN_X86_HELPER_SETJMP || leaf == CBUILTIN_X86_HELPER_LONGJMP) && (program->cf_protection & BUSTER_PREDEFINES_CF_RETURN) != 0)
+        {
+            // Under -fcf-protection=return and =full (#3570), LLVM's SjLj lowering keeps the shadow stack's pointer in the
+            // buffer and moves it back in the longjmp (emitSetJmpShadowStackFix, emitLongJmpShadowStackFix), which the
+            // leaves don't yet.
+            check_lower_unsupported(writer, "__builtin_setjmp and __builtin_longjmp with -fcf-protection=return or =full (the shadow stack's fix)");
+        }
         else if (cbuiltin_x86_helper_infos[leaf].amx != 0)
         {
             check_lower_amx_helper(writer, node, cbuiltin_x86_helper_infos + leaf);
@@ -14298,6 +14307,10 @@ static __attribute__((noinline)) void check_lower_x86_builtin(CheckLowerWriter* 
             // register a longjmp leaves as a deeper frame left it (Tier0Function.returns_twice).
             writer->returns_twice |= leaf == CBUILTIN_X86_HELPER_SETJMP;
             check_lower_helper(writer, node);
+            // Under indirect branch tracking (#3570), the leaf's calls return where the longjmp's jump comes back too, which
+            // Tier 0 marks (Tier0Function.twice_symbols): the call check_lower_helper made last.
+            const bool marked = leaf == CBUILTIN_X86_HELPER_SETJMP && (program->cf_protection & BUSTER_PREDEFINES_CF_BRANCH) != 0 && writer->call_count != 0;
+            writer->setjmp_symbol = marked ? writer->call_targets[writer->call_count - 1] : writer->setjmp_symbol;
         }
     }
     else if (check_lower_x86_named(info, "__builtin_unpredictable") && program->input->graph.argument_counts[node] == 1)
@@ -21960,6 +21973,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         writer->volatile_entries = false;
         writer->unwind_init = false;
         writer->returns_twice = false;
+        writer->setjmp_symbol = 0;
         writer->calls_returns_twice = false;
         writer->hidden_copy = 0;
         writer->eh_return = false;
@@ -22518,6 +22532,29 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         function->unwind_init = writer->unwind_init;
         function->returns_twice = writer->returns_twice;
         function->calls_returns_twice = writer->calls_returns_twice;
+        // Indirect branch tracking (#3570, -fcf-protection=branch and =full): the direct callees that return twice, whose
+        // calls' returns Tier 0 marks (Tier0Function.twice_symbols), as LLVM marks a call of a returns_twice function.
+        function->branch_tracking = (program->cf_protection & BUSTER_PREDEFINES_CF_BRANCH) != 0;
+        if (function->branch_tracking && (writer->calls_returns_twice || writer->setjmp_symbol != 0) && status->status == CHECK_PROGRAM_OK)
+        {
+            SymbolId* twice = BUSTER_ARENA_PUSH_ARRAY(output, SymbolId, (uint64_t)writer->call_count + 1);
+            uint32_t twice_count = 0;
+            for (uint32_t c = 0; twice != 0 && c < writer->call_count; c += 1)
+            {
+                const SymbolId symbol = writer->call_targets[c];
+                const uint32_t object = symbol != 0 && symbol <= program->symbol_count ? program->symbol_objects[symbol - 1] : 0;
+                const bool returns = (object != 0 && object < program->object_count && program->object_symbols[object] == symbol && check_lower_calls_twice(writer, object)) ||
+                                     (symbol != 0 && symbol == writer->setjmp_symbol);
+                twice[twice_count] = symbol;
+                twice_count += returns ? 1 : 0;
+            }
+            function->twice_symbols = twice;
+            function->twice_symbol_count = twice_count;
+            if (twice == 0)
+            {
+                check_lower_fail(writer, CHECK_PROGRAM_RESOURCE);
+            }
+        }
         function->hidden_copy = writer->hidden_copy;
         function->eh_return = writer->eh_return;
         // A preserving convention's registers (#147), which Tier 0's frame keeps but for a tail call's, __builtin_eh_return's

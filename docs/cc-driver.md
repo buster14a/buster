@@ -170,8 +170,9 @@ Clang's driver it takes precedence over `-static`, `-pie` and `-no-pie`, and
 refuses where it reaches a preemptible symbol directly or a thread-local by
 local-exec, as GNU ld refuses Clang's. `-fstack-protector`, `-fstack-protector-strong`
 and `-fstack-protector-all` guard the code (#3558, [the checker's guide](c-checker.md)'s
-"The stack protector"); control-flow-protection requests remain explicit
-refusals, not ignored security flags. `-S`, `-save-temps`, general object-input
+"The stack protector"), and `-fcf-protection` and its `=full`, `=branch` and
+`=return` mark it with `endbr64`, `notrack` and the object's
+`.note.gnu.property` (#3570, "CET's protection" there). `-S`, `-save-temps`, general object-input
 linking and macro-only forced includes (`-imacros`) are not added here. These
 limits mean **#1113 remains open**; dependency support alone does not make Buster
 a universal drop-in CC for CMake/autotools projects.

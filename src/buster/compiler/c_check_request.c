@@ -41,8 +41,6 @@ struct CheckRequestScan
 {
     // The first option that asks for code generation the driver doesn't implement (check_request_codegen_option).
     const char* codegen;
-    // The last -fcf-protection or -fcf-protection=VALUE, unless it is -fcf-protection=none.
-    const char* cf_protection;
     // The object and linkage options the producer doesn't implement, refused where the request emits code (#1124), each
     // family's last option deciding: the last -fvisibility= or -fvisibility-ms-compat (check_request_visibility), and
     // -ffunction-sections and -fdata-sections unless their -fno- forms follow them. -f[no-]common goes on to
@@ -77,8 +75,7 @@ typedef enum CheckRequestError
 {
     CHECK_REQUEST_ACCEPTED,
     // Code generation the driver doesn't implement: the first option of check_request_codegen_option's (or a bare
-    // -fvisibility), else -fcf-protection's that decides, else, for a request that emits code, the object and linkage
-    // options' (#1124).
+    // -fvisibility), else, for a request that emits code, the object and linkage options' (#1124).
     CHECK_REQUEST_CODEGEN,
     // Instrumentation the driver doesn't implement, for a request that emits code, from the resolved predefines rather
     // than from an enabling option, which a later -fno-sanitize= or -fno-openmp may have cancelled (#1112): a sanitizer,
@@ -183,8 +180,8 @@ static bool check_request_codegen_option(const char* argument, COptionMatch matc
     }
     // These complete spellings request the behavior already emitted. Exemptions are never prefixes: -mcmodel=small-bogus
     // and -fzero-call-used-regs=skip,all are still refused by name. Within these families, an earlier unsupported
-    // request isn't cancelled by a later inactive spelling; CET's family is resolved separately (check_request_scan) and
-    // does honor a later disabling spelling, and the stack protector's four spellings are taken (#3558).
+    // request isn't cancelled by a later inactive spelling. CET's family (#3570) and the stack protector's four spellings
+    // (#3558) are taken, the last of each deciding (pp_parse_options).
     static const uint16_t inactive[] = {
         C_OPTION_FTRIVIAL_AUTO_VAR_INIT_EQ_UNINITIALIZED,
         C_OPTION_FZERO_CALL_USED_REGS_EQ_SKIP,
@@ -252,9 +249,9 @@ static bool check_request_stack_protector(COptionMatch match)
 
 // Reads `argument`, one that is no option's value (pp_option_takes_value's), into `scan`: whether it goes on to
 // pp_parse_options. Only an option that asks for code generation the driver doesn't implement stays apart, since the
-// preprocessor doesn't model it; the stack protector's (which the code has), -fcf-protection's, the layout options and
-// the object and linkage options go on, for their predefined macros, and so does a bare -fvisibility, which clang
-// doesn't take. `match` is the argument's IDs (c_option_find).
+// preprocessor doesn't model it; the stack protector's and -fcf-protection's (which the code has, #3558 and #3570), the
+// layout options and the object and linkage options go on, for their predefined macros, and so does a bare
+// -fvisibility, which clang doesn't take. `match` is the argument's IDs (c_option_find).
 static bool check_request_scan_match(CheckRequestScan* scan, const char* argument, COptionMatch match)
 {
     bool passed = true;
@@ -276,7 +273,8 @@ static bool check_request_scan_match(CheckRequestScan* scan, const char* argumen
     }
     else if (match.exact == C_OPTION_FCF_PROTECTION || match.joined == C_OPTION_FCF_PROTECTION_EQ)
     {
-        scan->cf_protection = match.exact == C_OPTION_FCF_PROTECTION_EQ_NONE ? NULL : argument;
+        // CET's family (#3570): every request takes it, the last deciding (predefines_cf_protection), whose invalid value
+        // is pp_parse_options' clang-compatible error.
     }
     else if (match.exact == C_OPTION_FFUNCTION_SECTIONS || match.exact == C_OPTION_FNO_FUNCTION_SECTIONS)
     {
@@ -313,7 +311,7 @@ static CheckRequestRefusal check_request_refusal(const CheckRequestScan* scan, c
     const bool emits = code != CHECK_REQUEST_CODE_NONE;
     const char* visibility = check_request_visibility(scan->visibility) ? scan->visibility : NULL;
     const char* object = !emits ? NULL : visibility != NULL ? visibility : scan->function_sections != NULL ? scan->function_sections : scan->data_sections;
-    const char* codegen = scan->codegen != NULL ? scan->codegen : scan->cf_protection != NULL ? scan->cf_protection : object;
+    const char* codegen = scan->codegen != NULL ? scan->codegen : object;
     const bool sanitized = options != NULL && emits && options->predefines.sanitizers != 0;
     const bool covered = options != NULL && emits && options->predefines.sanitize_coverage;
     const bool parallel = options != NULL && emits && options->predefines.openmp_enabled;
@@ -503,6 +501,8 @@ static CheckProgramOptions check_request_program_options(const Preprocessor* pp,
     unit.probe_stack = predefines_stack_clash(&pp->options.predefines);
     // The stack protector the options ask for (#3558), which the lowering guards the functions by.
     unit.stack_protector = predefines_stack_guard(&pp->options.predefines);
+    // CET's protection the options ask for (#3570): the indirect branches' targets the code marks and the object's note.
+    unit.cf_protection = predefines_cf_protection(&pp->options.predefines);
     // -fPIC's and -fpic's code (#2101) where the client's output may go into a shared library: -fPIE's elsewhere, as a
     // link's executable takes them.
     unit.pic = unit.pic && (pp->options.predefines.pic == BUSTER_PREDEFINES_PIC_BIG || pp->options.predefines.pic == BUSTER_PREDEFINES_PIC_SMALL);
