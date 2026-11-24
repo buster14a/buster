@@ -4196,7 +4196,10 @@ static bool executable_test_bound_sections(const ExecutableTestDirectory* direct
         executable_test_expect(&tally, written && executable_test_runs(path.pointer, (const uint8_t*)"", 0), "the executable runs", lanes);
     }
     scratch_end(scratch);
-    unlink(path.pointer);
+    if (!directory->keep)
+    {
+        unlink(path.pointer);
+    }
     executable_test_link_end(&test);
     return executable_test_report(&tally);
 }
