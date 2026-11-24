@@ -1008,6 +1008,11 @@ static __attribute__((aligned(64))) bool ir_optimize_visit(IrOptimizeWork* work,
     return changed;
 }
 
+// A safety net, not a step verified IR takes: every value in an executable block has operands that dominate it, and a
+// phi's block became executable by an edge whose incoming value's block was executable before, so the worklist's fixed
+// point leaves none of them unknown. With a trap here, #2924's review found it never fired over the IR and Tier 1
+// suites, the metamorphic cases, test-ir-source --passes and c-testsuite's subset; it keeps a transfer that answers
+// unknown from known operands sound, by overdefining what is left and visiting its users again.
 static bool ir_optimize_settle_unknown(IrOptimizeWork* work, bool queue)
 {
     bool changed = false;
