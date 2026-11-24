@@ -1,0 +1,14 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+# Locals whose every use sets them, among the unused ones at each scope's end, in declaration order: plain,
+# compound and stepped writes, a static's, a struct's and a pointer's, a volatile's plain write; and those another
+# use reads (a member, an element, a read of itself, a tested write, a nested assignment, sizeof, typeof,
+# _Generic, a parenthesized target, a volatile's compound write, a statement expression's value).
+variables-set-but-not-used	variables-set-but-not-used.c	12	0	0	warning-text	-Wall	variables set but not used
+# A for header's clauses, an if's arms, a block's shadowing name, and a unit whose error drops its scope's.
+variables-set-but-not-used-in-control-statements	variables-set-but-not-used-in-control-statements.c	6	0	0	warning-text	-Wunused-but-set-variable	variables set but not used in control statements
+# A step or an assignment as a call's argument or an initializer's element is read; a comma operator's left
+# operand isn't.
+variables-stepped-in-argument-and-initializer-lists	variables-stepped-in-argument-and-initializer-lists.c	1	0	0	warning-text	-Wall	variables stepped in argument and initializer lists
+variables-set-but-not-used-in-a-rejected-unit	variables-set-but-not-used-in-a-rejected-unit.c	1	1	0	syntax-only	-Wall	variables set but not used in a rejected unit
+variables-set-but-not-used-by-default	variables-set-but-not-used-by-default.c	0	0	0	warning-text	-	variables set but not used by default

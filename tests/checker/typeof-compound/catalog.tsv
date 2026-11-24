@@ -1,0 +1,21 @@
+buster-fixtures v1 checker-sources
+0001	0001.c	-	scalar compound literal in a typeof declaration
+0002	0002.c	-	file-scope scalar compound literal in typeof
+0003	0003.c	-	record compound literal in a typeof declaration
+0004	0004.c	-	array compound literal keeps its array type
+0005	0005.c	-	inferred compound array bound is complete before typeof resumes
+0006	0006.c	-	designated compound array bound is complete before typeof resumes
+0007	0007.c	-	vector compound literal preserves its typedef type
+0008	0008.c	-	member of a compound literal supplies its own type
+0009	0009.c	-	multiple compound literals participate in operand conversions
+0010	0010.c	rejected	typeof retains compound literal const qualification
+0011	0011.c	rejected	typeof does not decay a compound array into an assignable pointer
+0012	0012.c	rejected	typeof still checks scalar compound designators
+0013	0013.c	rejected	typeof still checks out-of-bounds compound designators
+0014	0014.c	rejected	typeof still checks record compound designators
+0015	0015.c	rejected	typeof still binds compound initializer operands
+0016	0016.c	rejected	typeof rejects a compound literal bit-field operand
+0017	0017.c	gnu23	C23 typeof accepts compound arrays
+0018	0018.c	gnu23	C23 typeof_unqual removes compound scalar const
+0019	0019.c	rejected,gnu23	C23 typeof retains compound scalar const
+0020	0020.c	rejected,gnu23	C23 typeof_unqual also rejects a compound bit-field operand

@@ -209,82 +209,66 @@ static void check_test_function_name_fixture(CheckTest* test, const CheckFunctio
 
 static void check_test_function_name_semantics(CheckTest* test, const char* clang)
 {
-    const CheckSourceFixture fixtures[] =
-    {
-        {
-            .name = "predefined arrays participate in sizeof and typeof queries",
-            .source = "int f(void){_Static_assert(sizeof __func__==2,\"func\");_Static_assert(sizeof __FUNCTION__==2,\"function\");_Static_assert(sizeof __PRETTY_FUNCTION__==12,\"pretty\");_Static_assert(__builtin_types_compatible_p(__typeof__(__func__),const char[2]),\"type\");return 0;}\n",
-        },
-        {
-            .name = "pretty alias size is evaluated at declaration position",
-            .source = "typedef int I; I f(I x){_Static_assert(sizeof __PRETTY_FUNCTION__==7,\"pretty\");return x;}\n",
-        },
-        {
-            .name = "file scope predefined array lengths",
-            .source = "_Static_assert(sizeof __func__==1,\"func\");_Static_assert(sizeof __FUNCTION__==1,\"function\");_Static_assert(sizeof __PRETTY_FUNCTION__==10,\"pretty\");\n",
-        },
-        {
-            .name = "file scope cache survives intervening function",
-            .source = "const char *before=__PRETTY_FUNCTION__; int f(void){return sizeof __PRETTY_FUNCTION__;} const char *after=__PRETTY_FUNCTION__; _Static_assert(sizeof __func__==1,\"file\");\n",
-        },
-        {
-            .name = "predefined static array addresses initialize static pointers",
-            .source = "const char *f(void){static const char *p=__func__;return p;}\n",
-        },
-        {
-            .name = "address of predefined array retains array extent",
-            .source = "int f(void){const char (*p)[2]=&__func__;return (*p)[0];}\n",
-        },
-        {
-            .name = "predefined array characters are const",
-            .source = "int f(void){\n__func__[0]='x';\nreturn 0;}\n",
-            .rejected = true,
-        },
-        {
-            .name = "pretty array characters are const",
-            .source = "int f(void){\n__PRETTY_FUNCTION__[0]='x';\nreturn 0;}\n",
-            .rejected = true,
-        },
-        {
-            .name = "predefined arrays are not assignable",
-            .source = "int f(void){\n__func__=0;\nreturn 0;}\n",
-            .rejected = true,
-        },
-        {
-            .name = "predefined array declaration names cannot be replaced",
-            .source = "int f(void){\nint __func__;\nreturn 0;}\n",
-            .rejected = true,
-        },
-    };
-    enum { FILE_COUNT = BUSTER_ARRAY_LENGTH(fixtures) };
+    CheckTestFixtures catalog;
+    const uint32_t file_count = check_test_private_catalog(test, &catalog, "checker/function-name-semantics", NULL, 0, 0);
+    const CheckSourceFixture* fixtures = catalog.cases;
+    CheckTestOracleBatch batch;
+    const bool allocated = check_test_oracle_batch(test, &batch, &catalog.storage, file_count);
     char directory[] = "/tmp/buster-function-name-semantics-XXXXXX";
-    char paths[FILE_COUNT][256];
-    char* pointers[FILE_COUNT];
-    ParseTestClang outcomes[FILE_COUNT];
-    bool ready = mkdtemp(directory) != 0;
-    for (uint32_t i = 0; ready && i < FILE_COUNT; i += 1)
+    const bool created = allocated && mkdtemp(directory) != NULL;
+    bool ready = created;
+    for (uint32_t i = 0; ready && i < file_count; i += 1)
     {
-        snprintf(paths[i], sizeof(paths[i]), "%s/%u.c", directory, i);
-        pointers[i] = paths[i];
-        ready = parse_test_write(paths[i], fixtures[i].source, strlen(fixtures[i].source));
+        snprintf(batch.paths[i], sizeof(batch.paths[i]), "%s/%u.c", directory, i);
+        batch.pointers[i] = batch.paths[i];
+        ready = parse_test_write(batch.paths[i], fixtures[i].source, strlen(fixtures[i].source));
     }
     const char* arguments[] = { "-std=gnu17", "-fsyntax-only", "-w" };
-    ready = ready && parse_test_clang(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), pointers, FILE_COUNT, outcomes);
+    ready = ready && parse_test_clang(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), batch.pointers, file_count, batch.outcomes);
     check_test_expect(test, ready, "predefined-name semantic Clang oracle runs");
-    for (uint32_t i = 0; ready && i < FILE_COUNT; i += 1)
+    for (uint32_t i = 0; ready && i < file_count; i += 1)
     {
-        check_test_expect(test, outcomes[i].rejected == fixtures[i].rejected, "predefined-name semantic expectation agrees with Clang");
-        check_test_source(test, &fixtures[i], paths[i], &outcomes[i]);
+        check_test_expect(test, batch.outcomes[i].rejected == fixtures[i].rejected, "predefined-name semantic expectation agrees with Clang");
+        check_test_source(test, &fixtures[i], batch.paths[i], &batch.outcomes[i]);
     }
-    for (uint32_t i = 0; i < FILE_COUNT; i += 1)
+    for (uint32_t i = 0; created && i < file_count; i += 1)
     {
-        snprintf(paths[i], sizeof(paths[i]), "%s/%u.c", directory, i);
-        unlink(paths[i]);
+        snprintf(batch.paths[i], sizeof(batch.paths[i]), "%s/%u.c", directory, i);
+        unlink(batch.paths[i]);
     }
-    if (ready)
+    if (created)
     {
         rmdir(directory);
     }
+    arena_release(&catalog.storage);
+}
+
+// Octal escapes preserve the expected bytes when the Clang oracle embeds them in its string assertions.
+static const char* check_test_function_name_literal(Arena* storage, const char* text)
+{
+    const size_t length = strlen(text);
+    char* escaped = arena_push(storage, 4 * length + 1, 1);
+    if (escaped != NULL)
+    {
+        char* out = escaped;
+        for (size_t i = 0; i < length; i += 1)
+        {
+            const uint8_t byte = (uint8_t)text[i];
+            if (byte >= 32 && byte <= 126 && byte != '"' && byte != '\\' && byte != '?')
+            {
+                *out++ = (char)byte;
+            }
+            else
+            {
+                *out++ = '\\';
+                *out++ = (char)('0' + (byte >> 6));
+                *out++ = (char)('0' + ((byte >> 3) & 7));
+                *out++ = (char)('0' + (byte & 7));
+            }
+        }
+        *out = 0;
+    }
+    return escaped;
 }
 
 static __attribute__((noinline)) void check_test_function_names(CheckTest* test, const char* clang)
@@ -299,172 +283,74 @@ static __attribute__((noinline)) void check_test_function_names(CheckTest* test,
     memcpy(deep_pretty, "I ", 2);
     memset(deep_pretty + 2, '*', depth);
     memcpy(deep_pretty + 2 + depth, "f(void)", 8);
-    const CheckFunctionNameFixture fixtures[] =
+    CheckTestFixtures catalog;
+    bool loaded = check_test_fixtures_load_bound(&catalog, "checker/function-name-objects", NULL, 0, true);
+    const uint32_t count = loaded ? catalog.count + 1 : 0;
+    CheckFunctionNameFixture* fixtures = arena_push(&catalog.storage, sizeof(*fixtures) * count, 8);
+    loaded = loaded && fixtures != NULL;
+    for (uint32_t i = 0; loaded && i < catalog.count; i += 1)
     {
+        const CheckSourceFixture* row = catalog.cases + i;
+        char* name = catalog.expected[i];
+        char* newline = strchr(name, '\n');
+        char* end = newline != NULL ? strchr(newline + 1, '\n') : NULL;
+        loaded = name != newline && end != NULL && end > newline + 1 && end[1] == 0 &&
+                 !row->rejected && !row->unsupported && !row->extension && row->standard == 0 && !row->char_unsigned && !row->undecided &&
+                 row->capacity == NULL && row->overload_tables == 0;
+        if (loaded)
         {
-            .label = "plain prototype",
-            .source = "int f(void){NAMES;return 0;}\n",
-            .name = "f",
-            .pretty = "int f(void)",
-        },
+            *newline = 0;
+            *end = 0;
+            fixtures[i] = (CheckFunctionNameFixture){ row->name, row->source, name, newline + 1 };
+        }
+        else
         {
-            .label = "typedef return and parameter spelling",
-            .source = "typedef int I; I f(I x){NAMES;return x;}\n",
-            .name = "f",
-            .pretty = "I f(I)",
-        },
-        {
-            .label = "canonical scalar spelling and parameter qualifiers",
-            .source = "static inline unsigned long int f(signed int x, volatile const int y){NAMES;return x+y;}\n",
-            .name = "f",
-            .pretty = "unsigned long f(int, const volatile int)",
-        },
-        {
-            .label = "qualified pointer typedef and explicit pointers",
-            .source = "typedef int I; typedef int *P; P f(const P p,I *q,const I *r,I *const s){NAMES;return p;}\n",
-            .name = "f",
-            .pretty = "P f(const P, I *, const I *, I *const)",
-        },
-        {
-            .label = "array parameter adjustment drops outer alias",
-            .source = "typedef int A[4]; int f(A a,int b[const static 4],const int c[3]){NAMES;return 0;}\n",
-            .name = "f",
-            .pretty = "int f(int *, int *const, const int *)",
-        },
-        {
-            .label = "nested callbacks retain occurrence-specific aliases",
-            .source = "typedef int I; typedef int F(int); int f(F a,F *b,I (*c)(I),I (*(*d)(I))(I)){NAMES;return 0;}\n",
-            .name = "f",
-            .pretty = "int f(F *, F *, I (*)(I), I (*(*)(I))(I))",
-        },
-        {
-            .label = "callback unnamed qualifiers and pointer to array alias",
-            .source = "typedef int I; typedef int A[4]; typedef int *P; void f(int (*cb)(const int,const I,I *const,const P),A *p,const A *q){NAMES;}\n",
-            .name = "f",
-            .pretty = "void f(int (*)(const int, const I, I *const, const P), A *, const A *)",
-        },
-        {
-            .label = "function returning function pointer",
-            .source = "int (*f(void))(int){NAMES;return 0;}\n",
-            .name = "f",
-            .pretty = "int (*f(void))(int)",
-        },
-        {
-            .label = "function returning array pointer",
-            .source = "int (*f(void))[4]{NAMES;return 0;}\n",
-            .name = "f",
-            .pretty = "int (*f(void))[4]",
-        },
-        {
-            .label = "distinct return and nested parameter typedef occurrences",
-            .source = "typedef int I; typedef int J; I (*f(J (*x)(I)))(J){NAMES;return 0;}\n",
-            .name = "f",
-            .pretty = "I (*f(J (*)(I)))(J)",
-        },
-        {
-            .label = "variadic alias",
-            .source = "typedef int I; int f(I x,...){NAMES;return x;}\n",
-            .name = "f",
-            .pretty = "int f(I, ...)",
-        },
-        {
-            .label = "unprototyped definition",
-            .source = "void f(){NAMES;}\n",
-            .name = "f",
-            .pretty = "void f()",
-        },
-        {
-            .label = "record tag names",
-            .source = "struct S{int x;}; void f(struct S s){NAMES;}\n",
-            .name = "f",
-            .pretty = "void f(struct S)",
-        },
-        {
-            .label = "typedef already contains const",
-            .source = "typedef const int CI; CI f(CI x,volatile CI y){NAMES;return x;}\n",
-            .name = "f",
-            .pretty = "CI f(CI, volatile CI)",
-        },
-        {
-            .label = "typeof type and expression source spelling",
-            .source = "typedef int I; typeof(I) f(typeof(I) x,typeof(1) y){NAMES;return x;}\n",
-            .name = "f",
-            .pretty = "typeof(I) f(typeof(I), typeof (1))",
-        },
-        {
-            .label = "atomic types",
-            .source = "_Atomic(int) f(_Atomic(int) x){NAMES;return 0;}\n",
-            .name = "f",
-            .pretty = "_Atomic(int) f(_Atomic(int))",
-        },
-        {
-            .label = "typeof expression operator formatting",
-            .source = "int x; typeof(sizeof x) f(typeof(1?2:3) y){NAMES;return y;}\n",
-            .name = "f",
-            .pretty = "typeof (sizeof x) f(typeof (1 ? 2 : 3))",
-        },
-        {
-            .label = "attributes do not become signature suffixes",
-            .source = "__attribute__((visibility(\"hidden\"))) int f(int x) __attribute__((nonnull)){NAMES;return x;}\n",
-            .name = "f",
-            .pretty = "int f(int)",
-        },
-        {
-            .label = "macro-produced function identifier",
-            .source = "#define JOIN(a,b) a##b\nint JOIN(macro_,function)(void){NAMES;return 0;}\n",
-            .name = "macro_function",
-            .pretty = "int macro_function(void)",
-        },
-        {
-            .label = "body typedef shadow does not alter header spelling",
-            .source = "typedef int I; I f(I x){typedef long I;NAMES;return x;}\n",
-            .name = "f",
-            .pretty = "I f(I)",
-        },
-        {
-            .label = "deep pointer return grows explicit printer frames",
-            .source = deep_source,
-            .name = "f",
-            .pretty = deep_pretty,
-        },
-    };
-    enum { FILE_COUNT = BUSTER_ARRAY_LENGTH(fixtures) };
+            snprintf(catalog.problem, sizeof(catalog.problem), "%s requires no flags and two lines of expected names", catalog.files[i]);
+        }
+    }
+    check_test_expect(test, loaded, catalog.problem);
+    if (loaded)
+    {
+        fixtures[catalog.count] = (CheckFunctionNameFixture){ "deep pointer return grows explicit printer frames", deep_source, "f", deep_pretty };
+    }
+    CheckTestOracleBatch batch;
     char directory[] = "/tmp/buster-function-names-XXXXXX";
-    char paths[FILE_COUNT][256];
-    char* pointers[FILE_COUNT];
-    ParseTestClang outcomes[FILE_COUNT];
-    bool ready = mkdtemp(directory) != 0;
-    for (uint32_t i = 0; ready && i < FILE_COUNT; i += 1)
+    const bool created = loaded && check_test_oracle_batch(test, &batch, &catalog.storage, count) && mkdtemp(directory) != NULL;
+    bool ready = created;
+    for (uint32_t i = 0; ready && i < count; i += 1)
     {
         char source[8192];
         const CheckFunctionNameFixture* fixture = &fixtures[i];
-        const int length = snprintf(source, sizeof(source),
+        const char* name = check_test_function_name_literal(&catalog.storage, fixture->name);
+        const char* pretty = check_test_function_name_literal(&catalog.storage, fixture->pretty);
+        const int length = name == NULL || pretty == NULL ? -1 : snprintf(source, sizeof(source),
             "#define NAMES _Static_assert(__builtin_strcmp(__func__,\"%s\")==0,\"func\"); "
             "_Static_assert(__builtin_strcmp(__FUNCTION__,\"%s\")==0,\"function\"); "
             "_Static_assert(__builtin_strcmp(__PRETTY_FUNCTION__,\"%s\")==0,\"pretty\"); "
             "_Static_assert(__builtin_types_compatible_p(__typeof__(__PRETTY_FUNCTION__),const char[%zu]),\"array\")\n%s",
-            fixture->name, fixture->name, fixture->pretty, strlen(fixture->pretty) + 1, fixture->source);
-        snprintf(paths[i], sizeof(paths[i]), "%s/%u.c", directory, i);
-        pointers[i] = paths[i];
-        ready = length > 0 && length < (int)sizeof(source) && parse_test_write(paths[i], source, (uint32_t)length);
+            name, name, pretty, strlen(fixture->pretty) + 1, fixture->source);
+        snprintf(batch.paths[i], sizeof(batch.paths[i]), "%s/%u.c", directory, i);
+        batch.pointers[i] = batch.paths[i];
+        ready = length > 0 && length < (int)sizeof(source) && parse_test_write(batch.paths[i], source, (uint32_t)length);
     }
     const char* arguments[] = { "-std=gnu17", "-fsyntax-only", "-w" };
-    ready = ready && parse_test_clang(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), pointers, FILE_COUNT, outcomes);
+    ready = ready && parse_test_clang(clang, arguments, BUSTER_ARRAY_LENGTH(arguments), batch.pointers, count, batch.outcomes);
     check_test_expect(test, ready, "predefined-name Clang exact-byte oracle runs");
-    for (uint32_t i = 0; ready && i < FILE_COUNT; i += 1)
+    for (uint32_t i = 0; ready && i < count; i += 1)
     {
         char description[256];
         snprintf(description, sizeof(description), "%s: exact bytes and array type match Clang", fixtures[i].label);
-        check_test_expect(test, !outcomes[i].rejected, description);
+        check_test_expect(test, !batch.outcomes[i].rejected, description);
         check_test_function_name_fixture(test, &fixtures[i]);
     }
-    for (uint32_t i = 0; i < FILE_COUNT; i += 1)
+    for (uint32_t i = 0; created && i < count; i += 1)
     {
-        snprintf(paths[i], sizeof(paths[i]), "%s/%u.c", directory, i);
-        unlink(paths[i]);
+        snprintf(batch.paths[i], sizeof(batch.paths[i]), "%s/%u.c", directory, i);
+        unlink(batch.paths[i]);
     }
-    if (ready)
+    if (created)
     {
         rmdir(directory);
     }
+    arena_release(&catalog.storage);
 }

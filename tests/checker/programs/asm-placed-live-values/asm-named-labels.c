@@ -1,0 +1,1 @@
+int tested(int n){int r=0,k=(n&7)+1;__asm__(".Lcount%=:\n\tincl %1\n\tdecl %0\n\tjnz .Lcount%=" : "+r"(k), "+r"(r));__asm__ volatile("buster_place_%=:" : : : "memory");__asm__("buster_named_here:\n\taddl $3, %0" : "+r"(r));long p,q;__asm__("leaq buster_named_here(%%rip), %0" : "=r"(p));q=(long)&tested;return r*10+(p!=q&&p!=0)+n;}

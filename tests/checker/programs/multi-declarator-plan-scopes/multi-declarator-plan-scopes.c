@@ -1,0 +1,1 @@
+struct S{int x;};static int a=2,b=3,c=4;int tested(int n){int x=n,y=x+1,z=y+2;int r=x+y+z;{struct S p=(struct S){x},q={y};int i=p.x,j=q.x;r+=i+j;}for(int i=0,j=2;i<3;i++,j++){int u=i,v=j;r+=u+v;}int s=({int i=n+3,j=i+2;i+j;}),t=s+1;return r+s+t+a+b+c;}

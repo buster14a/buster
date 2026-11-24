@@ -2029,7 +2029,7 @@ static void tier1_emit_vex(const Tier1SelectPlan* plan, const uint8_t* allowed_f
 #include "tier1_certificate_emitted.c"
 #include "tier1_debug_straight.c"
 
-static Tier1EmitError tier1_emit_function_pass(const Tier1SelectPlan* plan, const Tier1EmitOptions* options, const uint8_t* allowed_forms, Arena* output, Arena* scratch, Tier1EmitResult* result, uint32_t* error_node,
+static Tier1EmitError tier1_emit_function_pass(const Tier1SelectPlan* plan, const IrCfg* verified_cfg, const Tier1EmitOptions* options, const uint8_t* allowed_forms, Arena* output, Arena* scratch, Tier1EmitResult* result, uint32_t* error_node,
                                                bool zero_upper)
 {
     const bool arguments = plan && plan->function && options && allowed_forms && output && scratch && output != scratch && output->base != scratch->base && result;
@@ -2061,11 +2061,11 @@ static Tier1EmitError tier1_emit_function_pass(const Tier1SelectPlan* plan, cons
     bool chain = error == TIER1_EMIT_OK && tier1_emit_cfg_chain(plan);
     if (error == TIER1_EMIT_OK && !chain)
     {
-        error = tier1_emit_cfg_function(plan, options, allowed_forms, output, scratch, &emitted, error_node);
+        error = tier1_emit_cfg_function(plan, verified_cfg, options, allowed_forms, output, scratch, &emitted, error_node);
     }
     if (error == TIER1_EMIT_OK && chain)
     {
-        const Tier1LivenessError live = tier1_liveness_build(plan, output, scratch, &emitted.liveness);
+        const Tier1LivenessError live = tier1_liveness_build_cfg(plan, verified_cfg, output, scratch, &emitted.liveness);
         tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_LIVENESS, live);
         error = live == TIER1_LIVENESS_OK ? TIER1_EMIT_OK : live == TIER1_LIVENESS_MEMORY ? TIER1_EMIT_MEMORY : live == TIER1_LIVENESS_LIMIT ? TIER1_EMIT_LIMIT : live == TIER1_LIVENESS_UNSUPPORTED ? TIER1_EMIT_UNSUPPORTED : TIER1_EMIT_INVALID;
     }
@@ -2094,7 +2094,7 @@ static Tier1EmitError tier1_emit_function_pass(const Tier1SelectPlan* plan, cons
             *options->diagnostic = (Tier1EmitDiagnostic){ 0 };
         }
         chain = false;
-        error = tier1_emit_cfg_function(plan, options, allowed_forms, output, scratch, &emitted, error_node);
+        error = tier1_emit_cfg_function(plan, verified_cfg, options, allowed_forms, output, scratch, &emitted, error_node);
     }
     if (error == TIER1_EMIT_OK && chain && (options->certify || options->sources))
     {
@@ -2242,17 +2242,22 @@ static bool tier1_emit_upper_likely(const IrFunction* function)
 // function again, as the code says, so that only a mispredicted function pays a second emission (one emission of every
 // function that names such a register cost main.c's compile 5.7% at -march=znver5 on the 9700X). Each pass, at a target
 // with AVX, makes its legacy SSE records their VEX twins (tier1_emit_vex) before certifying them.
-static __attribute__((unused)) Tier1EmitError tier1_emit_function(const Tier1SelectPlan* plan, const Tier1EmitOptions* options, const uint8_t* allowed_forms, Arena* output, Arena* scratch, Tier1EmitResult* result, uint32_t* error_node)
+static __attribute__((unused)) Tier1EmitError tier1_emit_function_cfg(const Tier1SelectPlan* plan, const IrCfg* verified_cfg, const Tier1EmitOptions* options, const uint8_t* allowed_forms, Arena* output, Arena* scratch, Tier1EmitResult* result, uint32_t* error_node)
 {
     const uint64_t output_mark = output != 0 ? output->length : 0;
     const bool clears = allowed_forms != 0 && x86_target_form_allowed(allowed_forms, X86_FORM_VZEROUPPER);
     const bool predicted = clears && plan != 0 && plan->function != 0 && tier1_emit_upper_likely(plan->function);
-    Tier1EmitError error = tier1_emit_function_pass(plan, options, allowed_forms, output, scratch, result, error_node, predicted);
+    Tier1EmitError error = tier1_emit_function_pass(plan, verified_cfg, options, allowed_forms, output, scratch, result, error_node, predicted);
     const bool dirty = error == TIER1_EMIT_OK && clears && x86_upper_dirty(result->code.records, result->code.count);
     if (error == TIER1_EMIT_OK && dirty != predicted)
     {
         arena_pop_to(output, output_mark);
-        error = tier1_emit_function_pass(plan, options, allowed_forms, output, scratch, result, error_node, dirty);
+        error = tier1_emit_function_pass(plan, verified_cfg, options, allowed_forms, output, scratch, result, error_node, dirty);
     }
     return error;
+}
+
+static __attribute__((unused)) Tier1EmitError tier1_emit_function(const Tier1SelectPlan* plan, const Tier1EmitOptions* options, const uint8_t* allowed_forms, Arena* output, Arena* scratch, Tier1EmitResult* result, uint32_t* error_node)
+{
+    return tier1_emit_function_cfg(plan, NULL, options, allowed_forms, output, scratch, result, error_node);
 }

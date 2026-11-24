@@ -1,0 +1,1 @@
+int data[8];int tested(int n){int s=0;for(int i=0;i<8;i++){data[i]=n+i;__asm__ volatile("mfence" ::: "memory");__asm__ volatile("prefetcht0 %0\n\tprefetchw %0" : : "m"(data[(i+1)&7]));__asm__ volatile("lfence\n\tpause\n\tsfence" ::: "memory");s+=data[i];}return s;}

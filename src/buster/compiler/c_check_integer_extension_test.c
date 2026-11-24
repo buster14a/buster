@@ -424,70 +424,12 @@ static __attribute__((noinline)) void check_test_integer_extensions(CheckTest* t
                       memmem(diagnostics.pointer, diagnostics.length, "GNU extension", sizeof("GNU extension") - 1) != NULL,
                       "Clang's explicit GNU-folding diagnostic preserves the strict-policy boundary");
     arena_release(&oracle_arena);
-    const CheckSourceFixture source_fixtures[] = {
-        {
-            .name = "GNU overflow enumeration retains target arithmetic",
-            .source = "enum { A=2147483647+1, B=(-2147483647-1)/-1, C=(-2147483647-1)%-1, D=-(-2147483647-1), E=-8<<1 }; _Static_assert(A==B && B==D && C==0 && E==-16,\"wrapped integers\");\n",
-        },
-        {
-            .name = "GNU constant array bound and raw attribute",
-            .source = "int a[((1<<32)==(-2147483647-1))*3]; typedef int I [[gnu::aligned(((1<<33)==(-2147483647-1))*16)]]; _Static_assert(sizeof a==12 && _Alignof(I)==16,\"folded bound and attribute\");\n",
-        },
-        {
-            .name = "GNU negative shifts and bit-precise type width",
-            .source = "typedef _BitInt((8>>-1)+1) I; enum { A=1<<-1, B=8>>32, C=-8<<-1 }; _Static_assert(sizeof(I)==4 && A==0 && B==0 && C==-4,\"reversed shifts\");\n",
-        },
-        {
-            .name = "GNU full-width overflow and shift constants",
-            .source = "_Static_assert((((__int128)1<<126)*2)==((__int128)1<<127),\"wide multiply\"); _Static_assert((-((__int128)1<<127))==((__int128)1<<127),\"wide negate\"); _Static_assert((((__int128)1<<127)/-1)==((__int128)1<<127),\"wide divide\"); _Static_assert((((__int128)1<<127)%-1)==0,\"wide remainder\"); _Static_assert(((unsigned __int128)1<<128)==((unsigned __int128)1<<127),\"wide saturation\");\n",
-        },
-        {
-            .name = "GNU complex integer product wraps its components",
-            .source = "static _Complex int value=(50000+0i)*(50000+0i); _Static_assert(__real__ ((50000+0i)*(50000+0i))==-1794967296,\"wrapped real component\"); _Static_assert(__imag__ ((50000+0i)*(50000+0i))==0,\"imaginary component\");\n",
-        },
-        {
-            .name = "GNU wrapped ICE zero remains a null pointer constant",
-            .source = "int *p=(1<<-1); int *q=(1<<-1)==0 ? (1<<-1) : (2<<-2); int f(void){int *r=(int)(1<<-1); return p==q && q==r;}\n",
-        },
-        {
-            .name = "GNU folded comma zero is not a null pointer constant",
-            .source = "int *p=(0,0);\n",
-            .rejected = true,
-        },
-        {
-            .name = "GNU computed floating zero is not a null pointer constant",
-            .source = "int *p=(int)(0.5-0.5);\n",
-            .rejected = true,
-        },
-        {
-            .name = "GNU statement expression zero is not a null pointer constant",
-            .source = "int f(void){int *p=({0;});return p==0;}\n",
-            .rejected = true,
-        },
-        {
-            .name = "sizeof retains invalid arithmetic operand constraints",
-            .source = "int f(void){return (int)sizeof(1+(void)0); }\n",
-            .rejected = true,
-        },
-        {
-            .name = "sizeof retains a selected builtin argument constraint",
-            .source = "int f(void){return (int)sizeof(__builtin_choose_expr(1,__builtin_add_overflow(1,2,1),0)); }\n",
-            .rejected = true,
-        },
-        {
-            .name = "sizeof retains an unselected builtin argument constraint",
-            .source = "int f(void){return (int)sizeof(__builtin_choose_expr(1,0,__builtin_add_overflow(1,2,1))); }\n",
-            .rejected = true,
-        },
-        {
-            .name = "GNU folding still rejects an evaluated zero divisor",
-            .source = "enum { A=1/0 };\n",
-            .rejected = true,
-        },
-    };
+    CheckTestFixtures catalog;
+    const uint32_t file_count = check_test_private_catalog(test, &catalog, "checker/integer-extension-sources", NULL, 0, 0);
+    const CheckSourceFixture* source_fixtures = catalog.cases;
     char* paths[] = { source_path };
     const char* source_arguments[] = { "-std=gnu17" };
-    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(source_fixtures); i += 1)
+    for (uint32_t i = 0; i < file_count; i += 1)
     {
         const CheckSourceFixture* fixture = source_fixtures + i;
         ParseTestClang outcome = { 0 };
@@ -499,6 +441,7 @@ static __attribute__((noinline)) void check_test_integer_extensions(CheckTest* t
             check_test_source(test, fixture, source_path, &outcome);
         }
     }
+    arena_release(&catalog.storage);
     if (directory_ready)
     {
         check_test_sizeof_warning_rows(test);

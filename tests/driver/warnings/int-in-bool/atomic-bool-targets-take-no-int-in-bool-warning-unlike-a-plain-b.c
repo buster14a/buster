@@ -1,0 +1,1 @@
+_Atomic _Bool fret(int x){return x<<1;}void take(_Atomic _Bool);void g(int x,int y){_Atomic _Bool l;l=x<<1;(void)l;_Atomic _Bool m=x<<2;_Atomic _Bool n=y?2:3;_Bool p=y?2:3;take(x<<3);(void)m;(void)n;(void)p;}

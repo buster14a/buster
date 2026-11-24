@@ -27,7 +27,7 @@
 // for SCCP/DCE/CFG cleanup to remove; it must still be one that could have moved (or a reused one), so that dropping it
 // drops no effect or fault.
 // Each arm moves at most four non-constant rows (its blocks hold at most 32 in all); their cost and two per select is
-// at most eight. These are conservative policy bounds, not measured latencies; IR_CBR has no branch probability.
+// at most eight. An explicitly predictable branch is excluded from the candidate mask.
 //
 // A join reached only by the region's two edges turns each phi into a select in place. A join with other
 // predecessors keeps its phis: each takes a new select row in the head for the region's two entries, which become one
@@ -270,14 +270,19 @@ static const uint8_t ir_if_convert_numbered[BUSTER_IR_OP_TABLE] = {
     [IR_LOAD] = 1,
 };
 
-static uint64_t ir_if_convert_candidates(const uint8_t* operations, uint32_t count)
+static uint64_t ir_if_convert_candidates(const uint8_t* operations, const uint8_t* flags, uint32_t count)
 {
     uint64_t candidates = 0;
     if (count != 0 && count <= BUSTER_IR_IF_CONVERT_BATCH)
     {
         const __mmask64 valid = UINT64_MAX >> (BUSTER_IR_IF_CONVERT_BATCH - count);
         const __m512i op = _mm512_maskz_loadu_epi8(valid, operations);
-        candidates = valid & _mm512_cmpeq_epi8_mask(op, _mm512_set1_epi8(IR_CBR));
+        const __mmask64 branches = valid & _mm512_cmpeq_epi8_mask(op, _mm512_set1_epi8(IR_CBR));
+        if (branches != 0)
+        {
+            const __m512i hints = _mm512_maskz_loadu_epi8(branches, flags);
+            candidates = branches & ~_mm512_test_epi8_mask(hints, _mm512_set1_epi8(BUSTER_IR_BRANCH_PREDICTABLE));
+        }
     }
     return candidates;
 }
@@ -1487,7 +1492,7 @@ static IrCheck ir_if_convert_round(const IrFunction* function, uint64_t first_ca
         for (uint64_t first = first_candidate; first < count; first += BUSTER_IR_IF_CONVERT_BATCH)
         {
             const uint32_t lanes = count - first < BUSTER_IR_IF_CONVERT_BATCH ? count - (uint32_t)first : BUSTER_IR_IF_CONVERT_BATCH;
-            uint64_t candidates = ir_if_convert_candidates(operations + first, lanes);
+            uint64_t candidates = ir_if_convert_candidates(operations + first, function->flags + first, lanes);
             while (candidates != 0)
             {
                 ir_if_convert_region(&work, (uint32_t)first + (uint32_t)__builtin_ctzll(candidates));
@@ -1535,7 +1540,7 @@ static IrCheck ir_if_convert(const IrFunction* function, Arena* output, Arena* s
         while (first_candidate < count && !candidate)
         {
             const uint32_t lanes = count - first_candidate < BUSTER_IR_IF_CONVERT_BATCH ? count - (uint32_t)first_candidate : BUSTER_IR_IF_CONVERT_BATCH;
-            candidate = ir_if_convert_candidates(operations + first_candidate, lanes) != 0;
+            candidate = ir_if_convert_candidates(operations + first_candidate, function->flags + first_candidate, lanes) != 0;
             first_candidate += candidate ? 0 : BUSTER_IR_IF_CONVERT_BATCH;
         }
     }

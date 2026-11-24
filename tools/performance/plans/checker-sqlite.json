@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "case": "sqlite3-syntax-only-cpu2",
+  "unit": "relative-layout",
+  "layouts": ["checker-0", "checker-16", "checker-32", "checker-48"],
+  "sessions": 1,
+  "rounds": 5,
+  "rounds_per_block": 1,
+  "copies": 2,
+  "warmups": 1,
+  "metrics": [
+    {"name": "wall_ms", "role": "primary", "budget_ppm": 10000},
+    {"name": "user_ms", "role": "diagnostic", "budget_ppm": 10000}
+  ]
+}

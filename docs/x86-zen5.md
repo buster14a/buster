@@ -334,6 +334,11 @@ measured as `FLDZ` is (a push and the `fstp st0` that pops it) by one `--missing
 every 1.1 cycles, one macro-op on the FP pipes
 ([the record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/x87-fld1-row-1387-2026-11-23)).
 
+The register transfers used by #1387 have one macro-op each. On the 9700X,
+the independent fixture issued one `FST ST(0)` every 2.00 cycles and one
+`FXCH ST(i)` every 0.50 cycles, exchanging occupied stack registers.
+[Measurement record](https://github.com/buster14a/buster-performance/blob/53e3d8d61b7edd0efcf8a033da10d6dcff7c8703/docs/measurements/x87-register-transfers-1387-2026-11-24/register-costs.txt).
+
 What the rows say, a few families (cycles; derived values in italics):
 
 | Family | Latency | Throughput | Macro-ops |

@@ -1,0 +1,40 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+logical-discard-reported-call-idioms	logical-discard-reported-call-idioms.c	0	0	0	-	-	logical discard reported call idioms
+logical-discard-reported-assignment-idioms	logical-discard-reported-assignment-idioms.c	0	0	0	-	-	logical discard reported assignment idioms
+logical-discard-value-only-controls	logical-discard-value-only-controls.c	2	0	0	-	-	logical discard value-only controls
+logical-discard-left-operands-accept-their-own-effects	logical-discard-left-operands-accept-their-own-effects.c	0	0	0	-	-	logical discard left operands accept their own effects
+logical-discard-right-writes-and-increments	logical-discard-right-writes-and-increments.c	0	0	0	-	-	logical discard right writes and increments
+logical-discard-nested-value-paths	logical-discard-nested-value-paths.c	0	0	0	-	-	logical discard nested value paths
+logical-discard-off-path-calls-still-warn	logical-discard-off-path-calls-still-warn.c	4	0	0	-	-	logical discard off-path calls still warn
+logical-discard-comma-result-and-literal-zero-paths	logical-discard-comma-result-and-literal-zero-paths.c	0	0	0	-	-	logical discard comma result and literal-zero paths
+logical-discard-comma-nonresult-effects-are-insufficient	logical-discard-comma-nonresult-effects-are-insufficient.c	2	0	0	-	-	logical discard comma nonresult effects are insufficient
+logical-discard-conditional-value-arms	logical-discard-conditional-value-arms.c	0	0	0	-	-	logical discard conditional value arms
+logical-discard-conditional-condition-is-insufficient	logical-discard-conditional-condition-is-insufficient.c	2	0	0	-	-	logical discard conditional condition is insufficient
+logical-discard-explicit-nonvoid-casts-and-unary-values-still-wa	logical-discard-explicit-nonvoid-casts-and-unary-values-still-wa.c	2	0	0	-	-	logical discard explicit nonvoid casts and unary values still warn
+logical-discard-statement-expression-follows-final-result	logical-discard-statement-expression-follows-final-result.c	1	0	0	-	-	logical discard statement expression follows final result
+logical-discard-selected-value-paths	logical-discard-selected-value-paths.c	0	0	0	-	-	logical discard selected value paths
+logical-discard-direct-volatile-reads	logical-discard-direct-volatile-reads.c	0	0	0	-	-	logical discard direct volatile reads
+logical-discard-values-computed-from-volatile-reads-still-warn	logical-discard-values-computed-from-volatile-reads-still-warn.c	2	0	0	-	-	logical discard values computed from volatile reads still warn
+logical-discard-short-circuited-effects-remain-syntactically-qui	logical-discard-short-circuited-effects-remain-syntactically-qui.c	0	0	0	-	-	logical discard short-circuited effects remain syntactically quiet
+logical-discard-attributed-calls-keep-their-result-obligation	logical-discard-attributed-calls-keep-their-result-obligation.c	4	0	0	-	-	logical discard attributed calls keep their result obligation
+logical-discard-inherited-contracts-survive-a-bare-redeclaration	logical-discard-inherited-contracts-survive-a-bare-redeclaration.c	3	0	0	-	-	logical discard inherited contracts survive a bare redeclaration
+logical-discard-contracts-follow-source-visible-declaration-snap	logical-discard-contracts-follow-source-visible-declaration-snap.c	1	0	0	-	-	logical discard contracts follow source-visible declaration snapshots
+logical-discard-a-block-contract-does-not-escape-its-scope	logical-discard-a-block-contract-does-not-escape-its-scope.c	1	0	0	-	-	logical discard a block contract does not escape its scope
+logical-discard-each-contract-kind-inherits-independently	logical-discard-each-contract-kind-inherits-independently.c	2	0	0	-	-	logical discard each contract kind inherits independently
+logical-discard-direct-function-designator-wrappers	logical-discard-direct-function-designator-wrappers.c	0	0	0	-	-	logical discard direct function designator wrappers
+logical-discard-typedef-result-contracts-retain-baseline-warning	logical-discard-typedef-result-contracts-retain-baseline-warning.c	1	0	0	-	-	logical discard typedef result contracts retain baseline warnings
+logical-discard-nested-typedef-result-contracts-retain-baseline	logical-discard-nested-typedef-result-contracts-retain-baseline.c	1	0	0	-	-	logical discard nested typedef result contracts retain baseline warnings
+logical-discard-typeof-result-contracts-retain-baseline-warnings	logical-discard-typeof-result-contracts-retain-baseline-warnings.c	1	0	0	-	-	logical discard typeof result contracts retain baseline warnings
+logical-discard-a-body-local-typedef-contract-survives-requested	logical-discard-a-body-local-typedef-contract-survives-requested.c	1	0	0	-	-	logical discard a body-local typedef contract survives requested lanes
+logical-discard-warning-specific-source-policy	logical-discard-warning-specific-source-policy.c	1	0	0	-	-	logical discard warning-specific source policy
+logical-discard-command-line-warning-suppression	logical-discard-command-line-warning-suppression.c	0	0	0	-	-Wno-unused-value	logical discard command-line warning suppression
+logical-discard-ordinary-library-calls-accept-discard	logical-discard-ordinary-library-calls-accept-discard.c	0	0	0	-	-	logical discard ordinary library calls accept discard
+logical-discard-implicit-builtin-contracts-retain-warnings	logical-discard-implicit-builtin-contracts-retain-warnings.c	7	0	0	-	-	logical discard implicit builtin contracts retain warnings
+logical-discard-disabling-builtins-drops-implicit-contracts	logical-discard-implicit-builtin-contracts-retain-warnings.c	0	0	0	-	-fno-builtin	logical discard disabling builtins drops implicit contracts
+logical-discard-per-name-builtin-disabling-retains-other-contrac	logical-discard-per-name-builtin-disabling-retains-other-contrac.c	1	0	0	-	-fno-builtin-abs	logical discard per-name builtin disabling retains other contracts
+logical-discard-freestanding-declarations-have-no-implicit-contr	logical-discard-freestanding-declarations-have-no-implicit-contr.c	0	0	0	-	-ffreestanding	logical discard freestanding declarations have no implicit contracts
+logical-discard-internal-library-spellings-remain-ordinary-funct	logical-discard-internal-library-spellings-remain-ordinary-funct.c	0	0	0	-	-	logical discard internal library spellings remain ordinary functions
+logical-discard-explicit-library-contracts-remain-effective	logical-discard-explicit-library-contracts-remain-effective.c	2	0	0	-	-	logical discard explicit library contracts remain effective
+logical-discard-explicit-contracts-survive-builtin-disabling	logical-discard-explicit-library-contracts-remain-effective.c	2	0	0	-	-fno-builtin	logical discard explicit contracts survive builtin disabling
+logical-discard-ordinary-calls-retain-their-policy-when-freestan	logical-discard-ordinary-calls-retain-their-policy-when-freestan.c	0	0	0	-	-ffreestanding	logical discard ordinary calls retain their policy when freestanding

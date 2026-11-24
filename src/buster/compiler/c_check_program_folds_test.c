@@ -138,9 +138,5 @@ static void check_test_program_folds(CheckTest* test, const char* clang)
     intern_release(&identifiers);
     // Folded homes against writes through pointers to them, natively against clang: x's home read into x + 1 before *q
     // stores 7 into it, x = x op v with x written through q between, and a value read before a call that changes it.
-    check_test_program_source(test,
-                              "static int set(int*p,int v){*p=v;return v;}"
-                              "int tested(int n){int x=n;int*q=&x;int y=x+1;*q=7;int z=x*2;x=x+n;q[0]+=n;x=x-(*q>>1);"
-                              "int w=x;int s=set(q,n+3);return y+z+x+w+s+(*q==x);}",
-                              "folded-homes-and-interfering-stores", clang);
+    check_test_program_suite(test, "checker/programs/program-folds", clang);
 }

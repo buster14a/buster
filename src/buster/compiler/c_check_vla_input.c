@@ -104,7 +104,7 @@ static bool check_input_vla_defines(const CheckInputReader* reader, uint32_t fir
             const uint32_t after = parser->tree.parents[token] + 1;
             region_end = after > region_end ? after : region_end;
         }
-        if ((kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM) && reader->tag_types[token] == 0)
+        if ((kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM) && check_input_memo_get(reader, reader->tag_types, token) == 0)
         {
             const uint32_t body = check_input_tag_body(parser, token, end);
             const bool definition = body < end && parser->tokens.kinds[body] == PARSE_KIND_L_BRACE;
@@ -336,7 +336,7 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
                 arena_pop_to(reader->scratch, input->mark);
             }
         }
-        else if (valid && check_input_vla_walked(reader, open, first, end, parameter))
+        else if (valid && ((parser->tokens.flags[open] | parser->tokens.flags[end]) & BUSTER_PARSE_MEMBER_RECOVERY) == 0 && check_input_vla_walked(reader, open, first, end, parameter))
         {
             walked = true;
         }
@@ -431,6 +431,11 @@ static bool check_input_vla_bound(CheckInputReader* reader, uint32_t open, uint3
     // Only the completed sizeof type tells whether its size is runtime: a pointer to the variable array still has a
     // constant size. check_input_declarator rejects the completed runtime-sized query, preserving its initializer's
     // diagnostic. A cast's value and an _Alignof's result need no bound, and no VLA is captured for any of these.
+    if (valid && *kind == BUSTER_TYPE_KIND_VARIABLE_ARRAY && (parser->tokens.flags[open] & BUSTER_PARSE_MEMBER_RECOVERY) != 0)
+    {
+        // No member was declared, so this bound has no storage or runtime evaluation.
+        *kind = BUSTER_TYPE_KIND_INCOMPLETE_ARRAY;
+    }
     bool unevaluated = member;
     if (valid && *kind == BUSTER_TYPE_KIND_VARIABLE_ARRAY && !parameter && !star && reader->function_body == BUSTER_CHECK_NONE && name >= parser->tokens.count)
     {

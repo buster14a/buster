@@ -793,7 +793,7 @@ static void tier1_storage_parameter_tests(Tier1EmitTest* test)
                         if (error == TIER1_EMIT_CERTIFICATE)
                         {
                             Tier1EmitResult raw = { 0 };
-                            if (tier1_emit_cfg_function(&plan, &options, test->allowed, &test->output, &test->scratch, &raw, &failed) == TIER1_EMIT_OK)
+                            if (tier1_emit_cfg_function(&plan, NULL, &options, test->allowed, &test->output, &test->scratch, &raw, &failed) == TIER1_EMIT_OK)
                             {
                                 Tier1CertReport report = { 0 };
                                 Tier1CertEmittedStats stats = { 0 };

@@ -1,0 +1,6 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+initializer-call-nesting-aliases-and-alignment	initializer-call-nesting-aliases-and-alignment.c	-	initializer-call-nesting-aliases-and-alignment
+# Members, elements, labels around in-place calls, and a backward goto whose callee's argument reads the earlier
+# visit's object through an escaped pointer, which keeps its copy.
+initializer-call-members-labels-and-reentry	initializer-call-members-labels-and-reentry.c	-	initializer-call-members-labels-and-reentry

@@ -1,0 +1,1 @@
+__attribute__((naked)) long add3(long a,long b,long c){__asm__("leaq (%rdi,%rsi), %rax\n\taddq %rdx, %rax\n\tret");}__attribute__((naked)) long seven(void){__asm__("movl %0, %%eax\n\tret" : : "i"(7));}int tested(int n){return (int)add3(n,2*n,7)+(int)seven()*100;}

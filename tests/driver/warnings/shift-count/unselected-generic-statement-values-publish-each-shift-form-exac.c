@@ -1,0 +1,1 @@
+int a(int x){return _Generic(x,int:0,default:({x<<32;}));}int b(int x){return _Generic(x,int:0,default:({x>>32;}));}int c(int x){return _Generic(x,int:0,default:({x<<=32;}));}int d(int x){return _Generic(x,int:0,default:({x>>=32;}));}

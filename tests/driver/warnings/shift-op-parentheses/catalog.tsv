@@ -1,0 +1,7 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+# An unparenthesized `+` or `-` as either operand of a `<<` or `>>`, the left one first, at it; through a macro's
+# argument with the macro's note; not a parenthesized one, a multiplication, or a compound assignment's.
+additions-in-shifts	additions-in-shifts.c	9	0	11	-	-	additions in shifts
+# In constant contexts, beside the shift's own count warning, in an unevaluated operand.
+additions-in-shifts-in-other-places	additions-in-shifts-in-other-places.c	6	0	6	-	-	additions in shifts in other places

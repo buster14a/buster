@@ -1,0 +1,9 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+kr-definitions	kr-definitions.c	-	kr-definitions
+# clang's cpu_specific and cpu_dispatch (#1447): versions of one CPU, of two and of none (generic), their
+# dispatcher's resolver (weak IFUNCs f.ifunc and f), and a static group's, each called through the resolver.
+cpu-dispatch-versions	cpu-dispatch-versions.c	-	cpu-dispatch-versions
+# #659: the ABI receives promoted values; reads, writes and addresses in the body use the declared objects.
+# The integer and SSE banks both overflow onto the stack, and the aggregate result reserves the hidden prefix.
+kr-promoted-integers-addressed-and-stack	kr-promoted-integers-addressed-and-stack.c	-	kr-promoted-integers-addressed-and-stack

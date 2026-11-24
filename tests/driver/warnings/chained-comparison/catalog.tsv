@@ -1,0 +1,6 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+# A relational comparison whose left operand is one, unparenthesized, at the outer operator, an error that -w
+# leaves; not an equality's, a parenthesized one or a relational right operand.
+chained-comparisons	chained-comparisons.c	0	5	0	-	-	chained comparisons
+chained-comparisons-demoted	chained-comparisons-demoted.c	1	0	0	-	-Wno-error=parentheses	chained comparisons demoted

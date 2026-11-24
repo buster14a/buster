@@ -1,0 +1,40 @@
+typedef int I;
+struct s { const int a; int b; };
+struct in { const int a; int z; };
+struct ct { const struct in in; int q; };
+struct w { struct ct ct; struct in in2; int k; };
+struct p { const int *cp; int *const pc; struct s *ps; };
+const struct s *f(void);
+const int g(void);
+struct t { struct s s; int k; };
+void use(void)
+{
+    struct s x = { 1, 2 }, y = { 3, 4 };
+    x.a = 2;
+    x.b = 2;
+    const struct ct ct = { { 1, 2 }, 3 };
+    ct.in.a = 1;
+    struct ct m = { { 1, 2 }, 3 };
+    m.in.a = 1;
+    m.in.z = 1;
+    f()->b = 3;
+    x = y;
+    struct w ww = { 0 }, w2 = { 0 };
+    ww = w2;
+    ww.ct = w2.ct;
+    struct p pp = { 0 };
+    *pp.cp = 1;
+    pp.pc = 0;
+    pp.ps->a = 1;
+    x.a++;
+    --m.in.a;
+    x.a += 1;
+    struct t tt = { 0 };
+    tt.s = x;
+    *f() = x;
+    struct s *px = &x;
+    *px = y;
+    px->a = 4;
+    const I ci = 0;
+    ci = 1;
+}

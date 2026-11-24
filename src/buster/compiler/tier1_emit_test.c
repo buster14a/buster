@@ -1554,6 +1554,18 @@ static void tier1_emit_test_overlong(Tier1EmitTest* test)
             const Tier1EmitOptions options = { .register_mask = tier1_liveness_register_mask(), .certify = true };
             Tier1EmitResult base;
             const bool based = planned && tier1_emit_function(&plan, &options, test->allowed, &test->output, &test->scratch, &base, &node) == TIER1_EMIT_OK && base.general == (branching != 0);
+            if (based)
+            {
+                const uint64_t mark = test->output.length;
+                IrCfg cfg = { 0 };
+                Tier1EmitResult retained = { 0 };
+                const bool emitted = ir_verify_cfg(&function, &test->input, &test->scratch, &cfg).error == IR_OK &&
+                                     tier1_emit_function_cfg(&plan, &cfg, &options, test->allowed, &test->output, &test->scratch, &retained, &node) == TIER1_EMIT_OK;
+                tier1_emit_test_expect(test, emitted && retained.general == base.general && retained.code.count == base.code.count &&
+                                      memcmp(retained.code.records, base.code.records, (size_t)base.code.count * sizeof(*base.code.records)) == 0,
+                                      "emission with the verified CFG matches rebuilding every instruction record");
+                arena_pop_to(&test->output, mark);
+            }
             tier1_emit_test_expect(test, based, "overlong fixture emits through its consumer");
             uint32_t swept = 0;
             for (uint32_t n = 0; based && n < function.instruction_count; n += 1)

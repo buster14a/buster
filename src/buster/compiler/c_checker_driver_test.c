@@ -1189,17 +1189,111 @@ static bool check_test_driver_needed(const char* path, char* names, uint64_t cap
     return valid;
 }
 
+// Each row supplies an ID followed by the files the specialized driver check consumes, in the role
+// order named by its header. The checker-owned harness stages them in its existing temporary layout.
+enum { CHECK_DRIVER_PROGRAM_INPUTS = 16 };
+
+typedef struct CheckDriverProgramInput CheckDriverProgramInput;
+struct CheckDriverProgramInput
+{
+    const char* bytes;
+    uint64_t length;
+};
+
+typedef void CheckDriverProgramRun(CheckTest*, const char*, const char*, const char*, const CheckDriverProgramInput*);
+
+// Adapters that consume C strings reject interior NULs. Length-aware staging writes the raw bytes.
+static const char* check_test_driver_input_text(CheckTest* test, const CheckDriverProgramInput* input)
+{
+    check_test_expect(test, memchr(input->bytes, 0, input->length) == NULL, "the driver input consumed as a C string has no interior NUL");
+    return input->bytes;
+}
+
+static void check_test_driver_programs(CheckTest* test, const char* clang, const char* executable, const char* directory, const char* suite,
+                                       const char* roles, CheckDriverProgramRun* run)
+{
+    CheckTestFixtures storage = { .storage = arena_reserve(UINT64_C(1) << 26) };
+    const char** ids = arena_push(&storage.storage, sizeof(*ids) * CHECK_TEST_FIXTURE_CASES, 8);
+    storage.files = arena_push(&storage.storage, sizeof(*storage.files) * CHECK_TEST_FIXTURE_CASES * CHECK_DRIVER_PROGRAM_INPUTS, 8);
+    char folder[PATH_MAX];
+    int size = snprintf(folder, sizeof(folder), "%s/driver/programs/%s", check_test_fixture_root, suite);
+    char path[PATH_MAX + 132];
+    snprintf(path, sizeof(path), "%s/catalog.tsv", folder);
+    uint64_t length = 0;
+    char* catalog = check_test_fixture_read(&storage, path, &length);
+    bool valid = size >= 0 && (size_t)size < sizeof(folder) && ids != NULL && storage.files != NULL &&
+                 catalog != NULL && length != 0 && catalog[length - 1] == '\n';
+    char header[512];
+    size = snprintf(header, sizeof(header), "buster-fixtures v1 driver-programs\t%s", roles);
+    valid = valid && size >= 0 && (size_t)size < sizeof(header) && strcmp(strsep(&catalog, "\n"), header) == 0;
+    uint32_t inputs = 1;
+    for (const char* at = roles; *at != 0; at += 1)
+    {
+        inputs += *at == '\t';
+    }
+    valid = valid && inputs <= CHECK_DRIVER_PROGRAM_INPUTS;
+    uint32_t cases = 0;
+    uint32_t line = 1;
+    const uint64_t mark = storage.storage.length;
+    while (valid && *catalog != 0)
+    {
+        char* row = strsep(&catalog, "\n");
+        line += 1;
+        if (*row == '#')
+        {
+            continue;
+        }
+        const char* id = strsep(&row, "\t");
+        valid = check_test_fixture_word(id, 64) && cases < CHECK_TEST_FIXTURE_CASES;
+        for (uint32_t i = 0; valid && i < cases; i += 1)
+        {
+            valid = strcmp(id, ids[i]) != 0;
+        }
+        CheckDriverProgramInput files[CHECK_DRIVER_PROGRAM_INPUTS];
+        for (uint32_t i = 0; valid && i < inputs; i += 1)
+        {
+            const char* file = strsep(&row, "\t");
+            const char* suffix = file != NULL ? strrchr(file, '.') : NULL;
+            valid = suffix != NULL && check_test_fixture_word(file, 128) &&
+                    (strcmp(suffix, ".c") == 0 || strcmp(suffix, ".h") == 0 || strcmp(suffix, ".expected") == 0);
+            if (valid)
+            {
+                snprintf(path, sizeof(path), "%s/%s", folder, file);
+                files[i].bytes = check_test_fixture_read_bytes(&storage, path, true, &files[i].length);
+                storage.files[storage.count++] = file;
+                valid = files[i].bytes != NULL;
+            }
+        }
+        valid = valid && row == NULL;
+        if (valid)
+        {
+            ids[cases++] = id;
+            const uint64_t failures = test->failures;
+            run(test, clang, executable, directory, files);
+            if (test->failures != failures)
+            {
+                fprintf(stderr, "%s/catalog.tsv line %u: driver case '%s' failed\n", folder, line, id);
+            }
+            arena_pop_to(&storage.storage, mark);
+        }
+    }
+    valid = valid && cases != 0 && check_test_fixture_orphans(&storage, folder);
+    if (!valid)
+    {
+        fprintf(stderr, "%s/catalog.tsv line %u: %s\n", folder, line, storage.problem[0] ? storage.problem : "invalid driver program catalog");
+    }
+    check_test_expect(test, valid, "driver program catalog is complete and well formed");
+}
+
 // The driver's -l libraries, through the production command (#145): a program that calls libm's functions, takes
 // one's address and reads libm's signgam (data, through its GOT slot), linked with -lm by both paths into the same bytes,
 // that runs and prints what this executable's own libm computes, needing libm.so.6 before libc.so.6; one that calls
 // none, with -lm, needing libc.so.6 alone; and the refusals, each named: no -lm and a library no directory has.
 // An archive containing only its empty symbol index adds nothing and links the plain program (#1470).
-static void check_test_driver_libraries(CheckTest* test, const char* executable, const char* directory)
+static void check_test_driver_libraries(CheckTest* test, const char* clang, const char* executable, const char* directory, const CheckDriverProgramInput* inputs)
 {
-    static const char program[] = "#include <math.h>\n#include <stdio.h>\ndouble (*pick)(double) = cos;\n"
-                                  "int main(void) { double logarithm = lgamma(-0.5); printf(\"%f %f %f %f %f %d\\n\", sin(2), sqrt(2.0), pow(2.0, 10.0), "
-                                  "pick(0.5), logarithm, signgam); return 0; }\n";
-    static const char plain[] = "int puts(const char*);\nint main(void) { puts(\"plain\"); return 0; }\n";
+    const char* program = check_test_driver_input_text(test, inputs + 0);
+    const char* plain = check_test_driver_input_text(test, inputs + 1);
     static const char archive[] = "!<arch>\n/               0           0     0     644     4         `\n\0\0\0\0";
     char source[256];
     char plain_source[256];
@@ -1212,7 +1306,7 @@ static void check_test_driver_libraries(CheckTest* test, const char* executable,
     snprintf(outputs[0], sizeof(outputs[0]), "%s/math", directory);
     snprintf(outputs[1], sizeof(outputs[1]), "%s/math-scalar", directory);
     snprintf(plain_output, sizeof(plain_output), "%s/plain", directory);
-    const bool written = parse_test_write(source, program, sizeof(program) - 1) && parse_test_write(plain_source, plain, sizeof(plain) - 1) &&
+    const bool written = parse_test_write(source, program, inputs[0].length) && parse_test_write(plain_source, plain, inputs[1].length) &&
                          parse_test_write(archive_path, archive, sizeof(archive) - 1);
     check_test_expect(test, written, "library programs written");
     char* text = NULL;
@@ -1389,107 +1483,24 @@ static void check_test_driver_static_label(CheckTest* test, const char* executab
 // the bodies' controls, #2536's step 2.2); then the ticks' line. A unit of overloads has no scan, one of one function the
 // same references everywhere, and one of constant arms tells the writer's dropped arms from the pass's: a constant
 // switch's dead case, which only the writer leaves out. Each object is the one without the option.
-static void check_test_driver_selection_census(CheckTest* test, const char* executable, const char* directory)
+static void check_test_driver_selection_census(CheckTest* test, const char* clang, const char* executable, const char* directory, const CheckDriverProgramInput* inputs)
 {
-    static const char program[] = "static int arm(void) { return 1; }\n"
-                                  "static int association(void) { return 2; }\n"
-                                  "static int operand(void) { return 3; }\n"
-                                  "static void release(int* p) { (void)p; }\n"
-                                  "static char buffer[8];\n"
-                                  "int main(int argc, char** argv)\n"
-                                  "{\n"
-                                  "    int r = 0;\n"
-                                  "    if (0)\n"
-                                  "    {\n"
-                                  "        r = arm();\n"
-                                  "    }\n"
-                                  "    r += _Generic(r, long: association, default: operand)() == 3;\n"
-                                  "    r += 1 ? 0 : operand();\n"
-                                  "    r += (int)sizeof \"literal\";\n"
-                                  "    __builtin_memcpy(buffer, argv[0], 4);\n"
-                                  "    {\n"
-                                  "        __attribute__((cleanup(release))) int held = argc;\n"
-                                  "        r += held;\n"
-                                  "    }\n"
-                                  "    return r;\n"
-                                  "}\n";
-    static const char overloads[] = "static int __attribute__((overloadable)) pick(int x) { return x; }\n"
-                                    "static int __attribute__((overloadable)) pick(double x) { return (int)x; }\n"
-                                    "int main(void) { return pick(1); }\n";
-    static const char plain[] = "int main(void) { return 0; }\n";
+    const char* program = check_test_driver_input_text(test, inputs + 0);
+    const char* overloads = check_test_driver_input_text(test, inputs + 1);
+    const char* plain = check_test_driver_input_text(test, inputs + 2);
     // A constant switch's dead case, which the writer leaves out and the pass keeps, a constant if's dead else, which both
     // leave out, and an if (0)'s arm that a goto enters, which both keep.
-    static const char arms[] = "static int dead_case(void) { return 7; }\n"
-                               "static int live_case(void) { return 8; }\n"
-                               "static int else_arm(void) { return 9; }\n"
-                               "static int entered(void) { return 10; }\n"
-                               "int main(int argc, char** argv)\n"
-                               "{\n"
-                               "    int r = 0;\n"
-                               "    (void)argv;\n"
-                               "    switch (2)\n"
-                               "    {\n"
-                               "    case 1:\n"
-                               "        r = dead_case();\n"
-                               "        break;\n"
-                               "    case 2:\n"
-                               "        r = live_case();\n"
-                               "        break;\n"
-                               "    }\n"
-                               "    if (1)\n"
-                               "    {\n"
-                               "        r += 1;\n"
-                               "    }\n"
-                               "    else\n"
-                               "    {\n"
-                               "        r += else_arm();\n"
-                               "    }\n"
-                               "    if (argc > 5)\n"
-                               "    {\n"
-                               "        goto inside;\n"
-                               "    }\n"
-                               "    if (0)\n"
-                               "    {\n"
-                               "    inside:\n"
-                               "        r += entered();\n"
-                               "    }\n"
-                               "    return r;\n"
-                               "}\n";
+    const char* arms = check_test_driver_input_text(test, inputs + 3);
     // A builtin that only an unevaluated operand reaches (#2536's step 2.2c.3, part 2), which the candidates' pass lists and
     // the bodies don't, with a helper the bodies' plan hasn't and the errno function its runtime preparation needs.
-    static const char unevaluated[] = "int main(int argc, char** argv)\n"
-                                      "{\n"
-                                      "    (void)argv;\n"
-                                      "    _Static_assert(_Generic(__builtin_sqrt((double)argc), double: 1, default: 0), \"unevaluated\");\n"
-                                      "    return argc;\n"
-                                      "}\n";
+    const char* unevaluated = check_test_driver_input_text(test, inputs + 4);
     // Compound literals in a static local's initializer (#2536's step 2.2c.3, part 3), whose leaves the candidates' pass
     // reaches and the references' walk, which takes static initializers as data, doesn't: its compound literals differ.
-    static const char static_compound[] = "typedef struct { char* pointer; unsigned long length; } S8;\n"
-                                          "int f(void)\n"
-                                          "{\n"
-                                          "    static const S8 gaps[] = { (S8){ \"a\", 1 }, (S8){ \"bc\", 2 } };\n"
-                                          "    S8 local = (S8){ \"d\", 1 };\n"
-                                          "    return (int)(gaps[1].length + local.length);\n"
-                                          "}\n";
+    const char* static_compound = check_test_driver_input_text(test, inputs + 5);
     // A constant switch's dead case that declares a local (#2536's step 2.2c.4, part 1): the writer leaves the case out and
     // the pass keeps it, so that a lowering over the pass's ranges would place the local the writer's leave out.
-    static const char switch_local[] = "int g(char* p);\n"
-                                       "int f(int x)\n"
-                                       "{\n"
-                                       "    switch (0)\n"
-                                       "    {\n"
-                                       "    case 1:\n"
-                                       "    {\n"
-                                       "        char unreached[256];\n"
-                                       "        return g(unreached);\n"
-                                       "    }\n"
-                                       "    default:\n"
-                                       "        break;\n"
-                                       "    }\n"
-                                       "    return x;\n"
-                                       "}\n";
-    static const char* const sources[] = { program, overloads, plain, arms, unevaluated, static_compound, switch_local };
+    const char* switch_local = check_test_driver_input_text(test, inputs + 6);
+    const char* const sources[] = { program, overloads, plain, arms, unevaluated, static_compound, switch_local };
     static const char* const expected[][9] = {
         {
             "selection-census\tbodies\t5\tdropped\t1\tselected-bodies\t3\t",
@@ -1614,82 +1625,27 @@ static void check_test_driver_selection_census(CheckTest* test, const char* exec
 // symbols reported; on one whose candidates keep a body the exact selection doesn't (a function only _Generic's other
 // association names), the exact selection serves; on a plain one it serves without extras. By both paths, each object
 // the one without the option.
-static void check_test_driver_provisional_selection(CheckTest* test, const char* executable, const char* directory)
+static void check_test_driver_provisional_selection(CheckTest* test, const char* clang, const char* executable, const char* directory, const CheckDriverProgramInput* inputs)
 {
-    static const char externs[] = "extern int unused_extern(void);\n"
-                                  "static const char kept_text[] = \"kept\";\n"
-                                  "static int helper(int x) { return x + 1; }\n"
-                                  "int main(int argc, char** argv)\n"
-                                  "{\n"
-                                  "    (void)argv;\n"
-                                  "    int r = _Generic(argc, long: unused_extern, default: helper)(argc);\n"
-                                  "    const char* s = _Generic(argc, long: \"only in an unselected association\", default: kept_text);\n"
-                                  "    return r + s[0];\n"
-                                  "}\n";
-    static const char statics[] = "static int counter = 7;\n"
-                                  "static int other[4];\n"
-                                  "int main(int argc, char** argv)\n"
-                                  "{\n"
-                                  "    (void)argv;\n"
-                                  "    int* p = _Generic(argc, long: &counter, default: other);\n"
-                                  "    return p[0];\n"
-                                  "}\n";
-    static const char body[] = "static int association(void) { return 2; }\n"
-                               "static int operand(void) { return 3; }\n"
-                               "int main(void) { return _Generic(1, long: association, default: operand)(); }\n";
-    static const char plain[] = "int main(void) { return 0; }\n";
+    const char* externs = check_test_driver_input_text(test, inputs + 0);
+    const char* statics = check_test_driver_input_text(test, inputs + 1);
+    const char* body = check_test_driver_input_text(test, inputs + 2);
+    const char* plain = check_test_driver_input_text(test, inputs + 3);
     // The candidates' builtins (#2536's step 2.2c.3, part 2): a helper that only an unevaluated operand reaches, which the
     // candidates' pass takes and the bodies don't, so that their helpers differ; the same helper reached by a call too,
     // whose plan is the bodies'; and a target("default") group, whose state the tail before the loop took over the
     // candidates' references (#2536's step 2.2c.2), which the emission refused before check_program_target_states.
-    static const char unevaluated[] = "int main(int argc, char** argv)\n"
-                                      "{\n"
-                                      "    (void)argv;\n"
-                                      "    _Static_assert(_Generic(__builtin_sqrt((double)argc), double: 1, default: 0), \"unevaluated\");\n"
-                                      "    return argc;\n"
-                                      "}\n";
-    static const char evaluated[] = "int main(int argc, char** argv)\n"
-                                    "{\n"
-                                    "    (void)argv;\n"
-                                    "    _Static_assert(_Generic(__builtin_sqrt((double)argc), double: 1, default: 0), \"unevaluated\");\n"
-                                    "    return (int)__builtin_sqrt((double)argc);\n"
-                                    "}\n";
+    const char* unevaluated = check_test_driver_input_text(test, inputs + 4);
+    const char* evaluated = check_test_driver_input_text(test, inputs + 5);
     // A static local's initializer's compound literals, which the candidates' pass reaches and the references don't, so that
     // the pools' compound literals differ; and an asm statement, whose plan is the controls' (#2536's step 2.2c.3, part 3).
-    static const char static_compound[] = "typedef struct { char* pointer; unsigned long length; } S8;\n"
-                                          "int f(void)\n"
-                                          "{\n"
-                                          "    static const S8 gaps[] = { (S8){ \"a\", 1 }, (S8){ \"bc\", 2 } };\n"
-                                          "    S8 local = (S8){ \"d\", 1 };\n"
-                                          "    return (int)(gaps[1].length + local.length);\n"
-                                          "}\n";
-    static const char assembly[] = "int f(int x)\n"
-                                   "{\n"
-                                   "    int y;\n"
-                                   "    __asm__(\"movl %1, %0\" : \"=r\"(y) : \"r\"(x));\n"
-                                   "    return y;\n"
-                                   "}\n";
+    const char* static_compound = check_test_driver_input_text(test, inputs + 6);
+    const char* assembly = check_test_driver_input_text(test, inputs + 7);
     // A constant switch's dead case that declares a local (#2536's step 2.2c.4, part 1), which the lowering over the pass's
     // ranges would place: its frame would differ.
-    static const char switch_local[] = "int g(char* p);\n"
-                                       "int f(int x)\n"
-                                       "{\n"
-                                       "    switch (0)\n"
-                                       "    {\n"
-                                       "    case 1:\n"
-                                       "    {\n"
-                                       "        char unreached[256];\n"
-                                       "        return g(unreached);\n"
-                                       "    }\n"
-                                       "    default:\n"
-                                       "        break;\n"
-                                       "    }\n"
-                                       "    return x;\n"
-                                       "}\n";
-    static const char target[] = "int g(int x) { return x; }\n"
-                                 "__attribute__((used, target(\"default\"))) int h(int x) { return x + 1; }\n"
-                                 "int caller(int x) { return h(x); }\n";
-    static const char* const sources[] = { externs, statics, statics, body, plain, unevaluated, evaluated, target, static_compound, assembly, switch_local };
+    const char* switch_local = check_test_driver_input_text(test, inputs + 8);
+    const char* target = check_test_driver_input_text(test, inputs + 9);
+    const char* const sources[] = { externs, statics, statics, body, plain, unevaluated, evaluated, target, static_compound, assembly, switch_local };
     static const bool debug[] = { false, false, true, false, false, false, false, false, false, false, false };
     static const char* const expected[] = {
         "provisional-selection\tused\t1\textra-symbols\t2\n",
@@ -1770,35 +1726,16 @@ static void check_test_driver_drop_reports(char* text)
 // plain -c's, and its report says whether the windowed code served: a unit whose provisional selection doesn't serve (a
 // constant switch's local, #2536's step 2.2c.4, part 1) or whose emission refuses a body takes the exact selection's
 // emission after the loop, and a body's error stops the unit before either.
-static void check_test_driver_windowed_loop(CheckTest* test, const char* executable, const char* directory)
+static void check_test_driver_windowed_loop(CheckTest* test, const char* clang, const char* executable, const char* directory, const CheckDriverProgramInput* inputs)
 {
-    static const char plain[] = "int g(int x) { return x * 2; }\n"
-                                "int main(int argc, char** argv) { (void)argv; return g(argc); }\n";
-    static const char naked[] = "__attribute__((naked)) void n(void) { __asm__(\"ret\"); }\n"
-                                "int main(void) { n(); return 0; }\n";
-    static const char switch_local[] = "int g(char* p);\n"
-                                       "int f(int x)\n"
-                                       "{\n"
-                                       "    switch (0)\n"
-                                       "    {\n"
-                                       "    case 1:\n"
-                                       "    {\n"
-                                       "        char unreached[256];\n"
-                                       "        return g(unreached);\n"
-                                       "    }\n"
-                                       "    default:\n"
-                                       "        break;\n"
-                                       "    }\n"
-                                       "    return x;\n"
-                                       "}\n";
-    static const char region[] = "int f(int x) { return ({ static int k; k += x; k; }); }\n";
-    static const char callee[] = "static inline __attribute__((always_inline)) int sq(int x) { return x * x; }\n"
-                                 "int a(int x) { return sq(x) + 1; }\n"
-                                 "int b(int x) { return sq(x) - 1; }\n";
-    static const char error[] = "int a(void) { return 1; }\n"
-                                "int b(void) { break; }\n";
+    const char* plain = check_test_driver_input_text(test, inputs + 0);
+    const char* naked = check_test_driver_input_text(test, inputs + 1);
+    const char* switch_local = check_test_driver_input_text(test, inputs + 2);
+    const char* region = check_test_driver_input_text(test, inputs + 3);
+    const char* callee = check_test_driver_input_text(test, inputs + 4);
+    const char* error = check_test_driver_input_text(test, inputs + 5);
     static const char refused[] = "float f(float* p) { return __atomic_fetch_add(p, 1.0f, __ATOMIC_SEQ_CST); }\n";
-    static const char* const sources[] = { plain, naked, switch_local, region, callee, error, refused };
+    const char* const sources[] = { plain, naked, switch_local, region, callee, error, refused };
     static const char* const expected[] = {
         "windowed-loop\tserved\t1\n",
         "windowed-loop\tserved\t1\n",
@@ -1860,25 +1797,12 @@ static void check_test_driver_windowed_loop(CheckTest* test, const char* executa
 // parsed as one (--parse-tile=0): type names declared, hidden and declared again from tile to tile; an old-style
 // definition, whose parameter declarations end no tile; a declaration a tile's end cuts short, which sends the unit to be
 // parsed as one; and a syntax error, which the scalar parser reports as it does alone. test-parser compares the trees.
-static void check_test_driver_parse_tiles(CheckTest* test, const char* executable, const char* directory)
+static void check_test_driver_parse_tiles(CheckTest* test, const char* clang, const char* executable, const char* directory, const CheckDriverProgramInput* inputs)
 {
-    static const char names[] = "typedef int T;\n"
-                                "T f1(T x) { T y = x; return y; }\n"
-                                "int f2(void) { typedef char T; T c = 1; return c; }\n"
-                                "T g1;\n"
-                                "int f3(void) { int T = 3; return T; }\n"
-                                "typedef T U, *V;\n"
-                                "U f4(V v) { return *v; }\n"
-                                "struct S { U m; } s = { 1 };\n"
-                                "int main(void) { T t = 2; return f1(t) + f2() + f3() + f4(&t) + s.m + g1; }\n";
-    static const char old_style[] = "int k(a, b) int a; char b; { return a + b; }\n"
-                                    "int after;\n"
-                                    "int main(void) { return k(1, 2) + after; }\n";
-    static const char cut_short[] = "int f(a) __attribute__((unused)) int a; { return 0; }\n"
-                                    "int main(void) { return f(1); }\n";
-    static const char error[] = "int a(void) { return 1; }\n"
-                                "int b(void) { return 2 }\n"
-                                "int c(void) { return 3; }\n";
+    const char* names = check_test_driver_input_text(test, inputs + 0);
+    const char* old_style = check_test_driver_input_text(test, inputs + 1);
+    const char* cut_short = check_test_driver_input_text(test, inputs + 2);
+    const char* error = check_test_driver_input_text(test, inputs + 3);
     // By tiles of 16 tokens the second tile declares a predeclared type's name and is refused for its old-style
     // definition; the unit as one, which its last declaration sends to the scalar parser, then reads the cast in the
     // first tile by the name's meaning before any tile ran.
@@ -1886,7 +1810,7 @@ static void check_test_driver_parse_tiles(CheckTest* test, const char* executabl
                                   "typedef __int128 __int128_t;\n"
                                   "int g(a) int a; { return a; }\n"
                                   "__attribute__((unused)) typedef int W;\n";
-    static const char* const sources[] = { names, old_style, cut_short, error, refused };
+    const char* const sources[] = { names, old_style, cut_short, error, refused };
     static const char* const labels[] = { "type names from tile to tile", "an old-style definition", "a declaration cut short", "a syntax error",
                                           "a refused tile that declared a predeclared type's name" };
     static const char* const tiles[] = { "--parse-tile=1", "--parse-tile=16", "--parse-tile=4096" };
@@ -1998,22 +1922,10 @@ static void check_test_driver_codegen_refusals(CheckTest* test, const char* exec
     unlink(object);
 }
 
-static void check_test_driver_asm_symbols(CheckTest* test, const char* executable, const char* directory)
+static void check_test_driver_asm_symbols(CheckTest* test, const char* clang, const char* executable, const char* directory, const CheckDriverProgramInput* inputs)
 {
-    static const char program[] =
-        "static __attribute__((used)) const char message[] = \"naked\";\n"
-        "static __attribute__((naked, noinline)) long twice(long x)\n"
-        "{\n"
-        "    __asm__(\"leaq (%rdi,%rdi), %rax\\n\\tret\\nthrice:\\n\\tleaq (%rdi,%rdi,2), %rax\\n\\tret\\n\");\n"
-        "}\n"
-        "static long thrice_address(void) { long a; __asm__(\"leaq thrice(%%rip), %0\" : \"=r\"(a)); return a; }\n"
-        "int main(void)\n"
-        "{\n"
-        "    long (*f)(long) = (long (*)(long))thrice_address();\n"
-        "    __asm__ volatile(\"leaq message(%%rip), %%rdi\\n\\tcall puts\" ::: \"rax\", \"rcx\", \"rdx\", \"rsi\", \"rdi\", \"r8\", \"r9\", \"r10\", \"r11\", \"memory\");\n"
-        "    return (int)(twice(5) + f(7)) - 31;\n"
-        "}\n";
-    static const char refused[] = "int tested(int n) { __asm__(\"tested: nop\"); return n; }\n";
+    const char* program = check_test_driver_input_text(test, inputs + 0);
+    const char* refused = check_test_driver_input_text(test, inputs + 1);
     char source[256];
     char refused_source[256];
     char outputs[2][256];
@@ -2023,8 +1935,8 @@ static void check_test_driver_asm_symbols(CheckTest* test, const char* executabl
     snprintf(outputs[0], sizeof(outputs[0]), "%s/asm_symbols", directory);
     snprintf(outputs[1], sizeof(outputs[1]), "%s/asm_symbols_scalar", directory);
     snprintf(object, sizeof(object), "%s/asm_label_symbol.o", directory);
-    const bool written = object_write_file(source, (const uint8_t*)program, sizeof(program) - 1) == OBJECT_ERROR_NONE &&
-                         object_write_file(refused_source, (const uint8_t*)refused, sizeof(refused) - 1) == OBJECT_ERROR_NONE;
+    const bool written = object_write_file(source, (const uint8_t*)program, inputs[0].length) == OBJECT_ERROR_NONE &&
+                         object_write_file(refused_source, (const uint8_t*)refused, inputs[1].length) == OBJECT_ERROR_NONE;
     char* text = NULL;
     for (uint32_t path = 0; written && path < 2; path += 1)
     {
@@ -2129,18 +2041,10 @@ static void check_test_driver_libgcc(CheckTest* test, const char* executable, co
 // body keeps its own instruction set though bodies before it aren't selected. A BMI2 function after an unselected one, in
 // a baseline unit, must get BMI2 (an executable that runs where the host has it, by both paths into the same bytes); and
 // a function with vectors after an unselected one whose attribute turns AVX-512VL off, in a znver5 unit, the unit's.
-static void check_test_driver_target_selection(CheckTest* test, const char* executable, const char* directory)
+static void check_test_driver_target_selection(CheckTest* test, const char* clang, const char* executable, const char* directory, const CheckDriverProgramInput* inputs)
 {
-    static const char bmi2[] =
-        "static int unused(int x){return x*3;}\n"
-        "__attribute__((target(\"bmi2\"))) static unsigned deposit(unsigned x,unsigned m){return __builtin_ia32_pdep_si(x,m);}\n"
-        "static int also_unused(int x){return x+1;}\n"
-        "int main(void){volatile unsigned x=0x5u,m=0xf0f0u;return deposit(x,m)==0x50u?0:1;}\n";
-    static const char vectors[] =
-        "typedef int v4si __attribute__((vector_size(16)));\n"
-        "__attribute__((target(\"no-avx512vl\"))) static int scalar_only(int x){return x*5;}\n"
-        "static int sum(int n){v4si a={n,1,2,3},b={4,5,6,7};a=a+b;return a[0]+a[3];}\n"
-        "int main(void){volatile int n=1;return sum(n)==15?0:1;}\n";
+    const char* bmi2 = check_test_driver_input_text(test, inputs + 0);
+    const char* vectors = check_test_driver_input_text(test, inputs + 1);
     char sources[2][256];
     char outputs[3][256];
     snprintf(sources[0], sizeof(sources[0]), "%s/target-selection-bmi2.c", directory);
@@ -2148,7 +2052,7 @@ static void check_test_driver_target_selection(CheckTest* test, const char* exec
     snprintf(outputs[0], sizeof(outputs[0]), "%s/target-selection", directory);
     snprintf(outputs[1], sizeof(outputs[1]), "%s/target-selection-scalar", directory);
     snprintf(outputs[2], sizeof(outputs[2]), "%s/target-selection-vectors.o", directory);
-    const bool written = parse_test_write(sources[0], bmi2, sizeof(bmi2) - 1) && parse_test_write(sources[1], vectors, sizeof(vectors) - 1);
+    const bool written = parse_test_write(sources[0], bmi2, inputs[0].length) && parse_test_write(sources[1], vectors, inputs[1].length);
     check_test_expect(test, written, "the target attributes' selection programs written");
     bool linked = written;
     for (uint32_t path = 0; written && path < 2; path += 1)
@@ -2200,136 +2104,16 @@ static uint8_t* check_test_driver_read_aligned(const char* path, uint64_t* lengt
 // masked move, SSSE3's and SSE2's), which clang 23's <immintrin.h> writes as builtins of generic 8-byte vectors, linked
 // for znver5 by both paths into the same bytes (its 8-bit shuffles take AVX-512 VBMI), and printing, where the host has
 // the AVX-512 features its rows take, what clang -O0's build of it for x86-64-v4 prints.
-static void check_test_driver_mmx(CheckTest* test, const char* clang, const char* executable, const char* directory)
+static void check_test_driver_mmx(CheckTest* test, const char* clang, const char* executable, const char* directory, const CheckDriverProgramInput* inputs)
 {
-    static const char program[] = "#include <immintrin.h>\n"
-                                  "#include <stdio.h>\n"
-                                  "#include <string.h>\n"
-                                  "static void show(const char* name, __m64 v) { long long x; memcpy(&x, &v, 8); printf(\"%s %016llx\\n\", name, x); }\n"
-                                  "static void show128(const char* name, __m128i v) { long long x[2]; memcpy(x, &v, 16); printf(\"%s %016llx %016llx\\n\", name, x[1], x[0]); }\n"
-                                  "static void showps(const char* name, __m128 v) { float x[4]; memcpy(x, &v, 16); printf(\"%s %g %g %g %g\\n\", name, x[0], x[1], x[2], x[3]); }\n"
-                                  "static void showpd(const char* name, __m128d v) { double x[2]; memcpy(x, &v, 16); printf(\"%s %g %g\\n\", name, x[0], x[1]); }\n"
-                                  "int main(int argc, char** argv)\n"
-                                  "{\n"
-                                  "    (void)argv;\n"
-                                  "    int n = argc + 6;\n"
-                                  "    __m64 a = _mm_set_pi8((char)n, 2, 3, 4, (char)(n * 7), 6, 7, (char)-n);\n"
-                                  "    __m64 b = _mm_set_pi16((short)(n * 1000), -3, 7, (short)n);\n"
-                                  "    __m128 f = _mm_setr_ps(1.5f, -2.25f, (float)n, 100.75f);\n"
-                                  "    __m128d d = _mm_setr_pd(-7.5, (double)n * 3.25);\n"
-                                  "    show(\"add8\", _mm_add_pi8(a, b));\n"
-                                  "    show(\"add16\", _mm_add_pi16(a, b));\n"
-                                  "    show(\"add32\", _mm_add_pi32(a, b));\n"
-                                  "    show(\"sub8\", _mm_sub_pi8(a, b));\n"
-                                  "    show(\"adds8\", _mm_adds_pi8(a, b));\n"
-                                  "    show(\"addsu8\", _mm_adds_pu8(a, b));\n"
-                                  "    show(\"subs16\", _mm_subs_pi16(a, b));\n"
-                                  "    show(\"madd\", _mm_madd_pi16(a, b));\n"
-                                  "    show(\"mulhi\", _mm_mulhi_pi16(a, b));\n"
-                                  "    show(\"mullo\", _mm_mullo_pi16(a, b));\n"
-                                  "    show(\"and\", _mm_and_si64(a, b));\n"
-                                  "    show(\"andnot\", _mm_andnot_si64(a, b));\n"
-                                  "    show(\"or\", _mm_or_si64(a, b));\n"
-                                  "    show(\"xor\", _mm_xor_si64(a, b));\n"
-                                  "    show(\"cmpeq8\", _mm_cmpeq_pi8(a, a));\n"
-                                  "    show(\"cmpgt16\", _mm_cmpgt_pi16(a, b));\n"
-                                  "    show(\"cmpgt32\", _mm_cmpgt_pi32(b, a));\n"
-                                  "    show(\"packs16\", _mm_packs_pi16(a, b));\n"
-                                  "    show(\"packs32\", _mm_packs_pi32(a, b));\n"
-                                  "    show(\"packsu16\", _mm_packs_pu16(a, b));\n"
-                                  "    show(\"unpackhi8\", _mm_unpackhi_pi8(a, b));\n"
-                                  "    show(\"unpacklo8\", _mm_unpacklo_pi8(a, b));\n"
-                                  "    show(\"unpackhi32\", _mm_unpackhi_pi32(a, b));\n"
-                                  "    show(\"unpacklo16\", _mm_unpacklo_pi16(a, b));\n"
-                                  "    show(\"sll16\", _mm_sll_pi16(a, _mm_cvtsi32_si64(3)));\n"
-                                  "    show(\"slli32\", _mm_slli_pi32(a, 5));\n"
-                                  "    show(\"sllsi64\", _mm_sll_si64(a, _mm_cvtsi32_si64(9)));\n"
-                                  "    show(\"srai16\", _mm_srai_pi16(b, 2));\n"
-                                  "    show(\"sra32\", _mm_sra_pi32(b, _mm_cvtsi32_si64(4)));\n"
-                                  "    show(\"srli64\", _mm_srli_si64(a, 12));\n"
-                                  "    show(\"srl16\", _mm_srl_pi16(b, _mm_cvtsi32_si64(1)));\n"
-                                  "    show(\"cvt\", _mm_cvtsi32_si64(n * 3));\n"
-                                  "    printf(\"to32 %d\\n\", _mm_cvtsi64_si32(a));\n"
-                                  "    printf(\"to64 %lld\\n\", _mm_cvtm64_si64(b));\n"
-                                  "    show(\"from64\", _mm_cvtsi64_m64((long long)n << 40));\n"
-                                  "    show(\"set1\", _mm_set1_pi16((short)n));\n"
-                                  "    show(\"set1b\", _mm_set1_pi8((char)(n + 100)));\n"
-                                  "    show(\"setr\", _mm_setr_pi32(n, -n));\n"
-                                  "    show(\"zero\", _mm_setzero_si64());\n"
-                                  "    show(\"avg8\", _mm_avg_pu8(a, b));\n"
-                                  "    show(\"avg16\", _mm_avg_pu16(a, b));\n"
-                                  "    showps(\"cvtpi32ps\", _mm_cvtpi32_ps(f, b));\n"
-                                  "    show(\"cvtps32\", _mm_cvtps_pi32(f));\n"
-                                  "    show(\"cvttps32\", _mm_cvttps_pi32(f));\n"
-                                  "    showps(\"cvtpi8\", _mm_cvtpi8_ps(a));\n"
-                                  "    showps(\"cvtpu8\", _mm_cvtpu8_ps(a));\n"
-                                  "    showps(\"cvtpi16\", _mm_cvtpi16_ps(b));\n"
-                                  "    showps(\"cvtpu16\", _mm_cvtpu16_ps(b));\n"
-                                  "    showps(\"cvtpi32x2\", _mm_cvtpi32x2_ps(a, b));\n"
-                                  "    show(\"cvtps16\", _mm_cvtps_pi16(f));\n"
-                                  "    show(\"cvtps8\", _mm_cvtps_pi8(f));\n"
-                                  "    __m64 mem[2] = { a, b };\n"
-                                  "    showps(\"loadh\", _mm_loadh_pi(f, &mem[0]));\n"
-                                  "    showps(\"loadl\", _mm_loadl_pi(f, &mem[1]));\n"
-                                  "    _mm_storeh_pi(&mem[0], f);\n"
-                                  "    _mm_storel_pi(&mem[1], f);\n"
-                                  "    show(\"storeh\", mem[0]);\n"
-                                  "    show(\"storel\", mem[1]);\n"
-                                  "    show(\"max16\", _mm_max_pi16(a, b));\n"
-                                  "    show(\"maxu8\", _mm_max_pu8(a, b));\n"
-                                  "    show(\"min16\", _mm_min_pi16(a, b));\n"
-                                  "    show(\"minu8\", _mm_min_pu8(a, b));\n"
-                                  "    printf(\"movemask %d\\n\", _mm_movemask_pi8(a));\n"
-                                  "    show(\"mulhu16\", _mm_mulhi_pu16(a, b));\n"
-                                  "    show(\"sad\", _mm_sad_pu8(a, b));\n"
-                                  "    __m64 stream;\n"
-                                  "    _mm_stream_pi(&stream, a);\n"
-                                  "    show(\"stream\", stream);\n"
-                                  "    char bytes[16] = { 0 };\n"
-                                  "    _mm_maskmove_si64(a, _mm_set_pi8(-1, 0, -1, 0, -1, 0, -1, -1), bytes + 3);\n"
-                                  "    printf(\"maskmove\");\n"
-                                  "    for (int i = 0; i < 16; i++)\n"
-                                  "    {\n"
-                                  "        printf(\" %d\", bytes[i]);\n"
-                                  "    }\n"
-                                  "    printf(\"\\n\");\n"
-                                  "    show(\"shuffle16\", _mm_shuffle_pi16(b, 0x1b));\n"
-                                  "    show(\"abs8\", _mm_abs_pi8(a));\n"
-                                  "    show(\"abs16\", _mm_abs_pi16(b));\n"
-                                  "    show(\"abs32\", _mm_abs_pi32(b));\n"
-                                  "    show(\"hadd16\", _mm_hadd_pi16(a, b));\n"
-                                  "    show(\"hadd32\", _mm_hadd_pi32(a, b));\n"
-                                  "    show(\"hadds16\", _mm_hadds_pi16(a, b));\n"
-                                  "    show(\"hsub16\", _mm_hsub_pi16(a, b));\n"
-                                  "    show(\"hsub32\", _mm_hsub_pi32(a, b));\n"
-                                  "    show(\"hsubs16\", _mm_hsubs_pi16(a, b));\n"
-                                  "    show(\"maddubs\", _mm_maddubs_pi16(a, b));\n"
-                                  "    show(\"mulhrs\", _mm_mulhrs_pi16(a, b));\n"
-                                  "    show(\"shuffle8\", _mm_shuffle_pi8(a, b));\n"
-                                  "    show(\"sign8\", _mm_sign_pi8(a, b));\n"
-                                  "    show(\"sign16\", _mm_sign_pi16(a, b));\n"
-                                  "    show(\"sign32\", _mm_sign_pi32(a, b));\n"
-                                  "    show(\"addsi64\", _mm_add_si64(a, b));\n"
-                                  "    show(\"subsi64\", _mm_sub_si64(a, b));\n"
-                                  "    show(\"mulsu32\", _mm_mul_su32(a, b));\n"
-                                  "    show(\"cvtpd32\", _mm_cvtpd_pi32(d));\n"
-                                  "    show(\"cvttpd32\", _mm_cvttpd_pi32(d));\n"
-                                  "    showpd(\"cvtpi32pd\", _mm_cvtpi32_pd(b));\n"
-                                  "    show(\"movepi64\", _mm_movepi64_pi64(_mm_set_epi64x(n, -n)));\n"
-                                  "    show128(\"movpi64\", _mm_movpi64_epi64(a));\n"
-                                  "    show128(\"set1epi64\", _mm_set1_epi64(b));\n"
-                                  "    show128(\"setepi64\", _mm_set_epi64(a, b));\n"
-                                  "    show128(\"setrepi64\", _mm_setr_epi64(a, b));\n"
-                                  "    _mm_empty();\n"
-                                  "    return 0;\n"
-                                  "}\n";
+    const char* program = check_test_driver_input_text(test, inputs + 0);
     char source[256];
     char outputs[3][256];
     snprintf(source, sizeof(source), "%s/mmx.c", directory);
     snprintf(outputs[0], sizeof(outputs[0]), "%s/mmx", directory);
     snprintf(outputs[1], sizeof(outputs[1]), "%s/mmx-scalar", directory);
     snprintf(outputs[2], sizeof(outputs[2]), "%s/mmx-clang", directory);
-    const bool written = parse_test_write(source, program, sizeof(program) - 1);
+    const bool written = parse_test_write(source, program, inputs[0].length);
     check_test_expect(test, written, "the MMX intrinsics' program written");
     bool linked = written;
     for (uint32_t path = 0; written && path < 2; path += 1)
@@ -2382,98 +2166,16 @@ static void check_test_driver_mmx(CheckTest* test, const char* clang, const char
 // arithmetic, conversions from integers, loads, stores and moves of them, F16C's _cvtsh_ss and AVX512-BF16's
 // conversions), linked for sapphirerapids by both paths into the same bytes, and printing, where the host has AVX512-FP16
 // and AVX512-BF16, what clang -O0's build of it prints.
-static void check_test_driver_halves(CheckTest* test, const char* clang, const char* executable, const char* directory)
+static void check_test_driver_halves(CheckTest* test, const char* clang, const char* executable, const char* directory, const CheckDriverProgramInput* inputs)
 {
-    static const char program[] = "#include <immintrin.h>\n"
-                                  "#include <stdio.h>\n"
-                                  "#include <string.h>\n"
-                                  "static void show(const char* name, const void* p, unsigned long n) { const unsigned short* x = p; printf(\"%s\", name); for (unsigned long i = 0; i < n / 2; i++) printf(\" %04x\", x[i]); printf(\"\\n\"); }\n"
-                                  "static void showh(const char* name, _Float16 h) { show(name, &h, 2); }\n"
-                                  "int main(int argc, char** argv)\n"
-                                  "{\n"
-                                  "    (void)argv;\n"
-                                  "    int n = argc + 6;\n"
-                                  "    _Float16 a = (_Float16)n / (_Float16)3, b = (_Float16)-2.5, c = (_Float16)(n * 1000);\n"
-                                  "    __m128h v = _mm_set_ph(a, b, c, 2, 3, 4, 5, (_Float16)n);\n"
-                                  "    __m128h s = _mm_set_sh(b);\n"
-                                  "    show(\"set\", &v, 16);\n"
-                                  "    __m128h r = _mm_setr_ph(a, b, c, 2, 3, 4, 5, (_Float16)n);\n"
-                                  "    show(\"setr\", &r, 16);\n"
-                                  "    __m128h one = _mm_set1_ph(a);\n"
-                                  "    show(\"set1\", &one, 16);\n"
-                                  "    __m128h zero = _mm_setzero_ph();\n"
-                                  "    show(\"zero\", &zero, 16);\n"
-                                  "    show(\"set_sh\", &s, 16);\n"
-                                  "    showh(\"cvtsh_h\", _mm_cvtsh_h(v));\n"
-                                  "    __m128h t = _mm_add_sh(v, s);\n"
-                                  "    show(\"add_sh\", &t, 16);\n"
-                                  "    t = _mm_sub_sh(v, s);\n"
-                                  "    show(\"sub_sh\", &t, 16);\n"
-                                  "    t = _mm_mul_sh(v, s);\n"
-                                  "    show(\"mul_sh\", &t, 16);\n"
-                                  "    t = _mm_div_sh(v, s);\n"
-                                  "    show(\"div_sh\", &t, 16);\n"
-                                  "    t = _mm_cvti32_sh(v, -n * 77);\n"
-                                  "    show(\"cvti32_sh\", &t, 16);\n"
-                                  "    t = _mm_cvti64_sh(v, (long long)n * 999999);\n"
-                                  "    show(\"cvti64_sh\", &t, 16);\n"
-                                  "    t = _mm_cvtu32_sh(v, (unsigned)n * 3001u);\n"
-                                  "    show(\"cvtu32_sh\", &t, 16);\n"
-                                  "    t = _mm_cvtu64_sh(v, (unsigned long long)n << 40);\n"
-                                  "    show(\"cvtu64_sh\", &t, 16);\n"
-                                  "    _Float16 memory[2] = { c, a };\n"
-                                  "    t = _mm_load_sh(&memory[1]);\n"
-                                  "    show(\"load_sh\", &t, 16);\n"
-                                  "    _mm_store_sh(&memory[0], v);\n"
-                                  "    show(\"store_sh\", memory, 4);\n"
-                                  "    t = _mm_move_sh(v, s);\n"
-                                  "    show(\"move_sh\", &t, 16);\n"
-                                  "    __m256h w = _mm256_set_ph(a, b, c, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, (_Float16)n);\n"
-                                  "    show(\"set256\", &w, 32);\n"
-                                  "    w = _mm256_setr_ph(a, b, c, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, (_Float16)n);\n"
-                                  "    show(\"setr256\", &w, 32);\n"
-                                  "    w = _mm256_set1_ph(b);\n"
-                                  "    show(\"set1_256\", &w, 32);\n"
-                                  "    showh(\"cvtsh_h256\", _mm256_cvtsh_h(_mm256_set1_ph(c)));\n"
-                                  "    w = _mm256_setzero_ph();\n"
-                                  "    show(\"zero256\", &w, 32);\n"
-                                  "    __m512h z = _mm512_set1_ph(c);\n"
-                                  "    show(\"set1_512\", &z, 64);\n"
-                                  "    z = _mm512_set_ph(a, b, c, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, (_Float16)n);\n"
-                                  "    show(\"set512\", &z, 64);\n"
-                                  "    z = _mm512_setr_ph(a, b, c, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, (_Float16)n);\n"
-                                  "    show(\"setr512\", &z, 64);\n"
-                                  "    showh(\"cvtsh_h512\", _mm512_cvtsh_h(z));\n"
-                                  "    z = _mm512_setzero_ph();\n"
-                                  "    show(\"zero512\", &z, 64);\n"
-                                  "    float f = _cvtsh_ss((unsigned short)(0x3c00 + n));\n"
-                                  "    show(\"cvtsh_ss\", &f, 4);\n"
-                                  "    __bf16 bf = _mm_cvtness_sbh((float)n / 3.0f);\n"
-                                  "    show(\"cvtness_sbh\", &bf, 2);\n"
-                                  "    float back = _mm_cvtsbh_ss(bf);\n"
-                                  "    show(\"cvtsbh_ss\", &back, 4);\n"
-                                  "    __m512h u = _mm512_setr_ph(a, b, c, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, (_Float16)-n, (_Float16)n);\n"
-                                  "    showh(\"reduce_add_ph\", _mm_reduce_add_ph(v));\n"
-                                  "    showh(\"reduce_mul_ph\", _mm_reduce_mul_ph(v));\n"
-                                  "    showh(\"reduce_max_ph\", _mm_reduce_max_ph(v));\n"
-                                  "    showh(\"reduce_min_ph\", _mm_reduce_min_ph(v));\n"
-                                  "    showh(\"reduce_add_ph256\", _mm256_reduce_add_ph(_mm512_castph512_ph256(u)));\n"
-                                  "    showh(\"reduce_mul_ph256\", _mm256_reduce_mul_ph(_mm512_castph512_ph256(u)));\n"
-                                  "    showh(\"reduce_max_ph256\", _mm256_reduce_max_ph(_mm512_castph512_ph256(u)));\n"
-                                  "    showh(\"reduce_min_ph256\", _mm256_reduce_min_ph(_mm512_castph512_ph256(u)));\n"
-                                  "    showh(\"reduce_add_ph512\", _mm512_reduce_add_ph(u));\n"
-                                  "    showh(\"reduce_mul_ph512\", _mm512_reduce_mul_ph(u));\n"
-                                  "    showh(\"reduce_max_ph512\", _mm512_reduce_max_ph(u));\n"
-                                  "    showh(\"reduce_min_ph512\", _mm512_reduce_min_ph(u));\n"
-                                  "    return 0;\n"
-                                  "}\n";
+    const char* program = check_test_driver_input_text(test, inputs + 0);
     char source[256];
     char outputs[3][256];
     snprintf(source, sizeof(source), "%s/halves.c", directory);
     snprintf(outputs[0], sizeof(outputs[0]), "%s/halves", directory);
     snprintf(outputs[1], sizeof(outputs[1]), "%s/halves-scalar", directory);
     snprintf(outputs[2], sizeof(outputs[2]), "%s/halves-clang", directory);
-    const bool written = parse_test_write(source, program, sizeof(program) - 1);
+    const bool written = parse_test_write(source, program, inputs[0].length);
     check_test_expect(test, written, "the half-precision intrinsics' program written");
     bool linked = written;
     for (uint32_t path = 0; written && path < 2; path += 1)
@@ -2536,247 +2238,9 @@ static void check_test_driver_halves(CheckTest* test, const char* clang, const c
 // through a pointer that a call returns, an unprototyped one, one that takes a double and one that counts its calls,
 // the rest of the arguments evaluated again for each call: by the direct path, by --scalar and by --tier1 with and
 // without it, each printing what clang's build does.
-static void check_test_driver_dump_struct(CheckTest* test, const char* clang, const char* executable, const char* directory)
+static void check_test_driver_dump_struct(CheckTest* test, const char* clang, const char* executable, const char* directory, const CheckDriverProgramInput* inputs)
 {
-    static const char program[] =
-                                  "#include <stdarg.h>\n"
-                                  "#include <stddef.h>\n"
-                                  "#include <stdint.h>\n"
-                                  "#include <stdio.h>\n"
-                                  "#include <string.h>\n"
-                                  "typedef struct { int q; short r; } Anon;\n"
-                                  "typedef struct Point { int x, y; } Point;\n"
-                                  "enum Color { RED, GREEN };\n"
-                                  "enum Neg { MINUS = -1 };\n"
-                                  "typedef enum { A1, B1 } AnonE;\n"
-                                  "typedef unsigned long mysize;\n"
-                                  "typedef size_t wrapped;\n"
-                                  "typedef const char *cstr;\n"
-                                  "typedef cstr cstr2;\n"
-                                  "typedef float V4 __attribute__((vector_size(16)));\n"
-                                  "typedef int I4 __attribute__((vector_size(16)));\n"
-                                  "typedef int E2 __attribute__((ext_vector_type(2)));\n"
-                                  "typedef double D2 __attribute__((vector_size(16)));\n"
-                                  "typedef signed char C16 __attribute__((vector_size(16)));\n"
-                                  "typedef long L2 __attribute__((vector_size(16)));\n"
-                                  "typedef unsigned short S8 __attribute__((vector_size(16)));\n"
-                                  "struct S {\n"
-                                  "    _Bool b; char c; signed char sc; unsigned char uc; short s; unsigned short us;\n"
-                                  "    int i; unsigned u; long l; unsigned long ul; long long ll; unsigned long long ull;\n"
-                                  "    float f; double d; long double ld;\n"
-                                  "    const char *str; char *mstr; signed char *sstr; const unsigned char *ustr; void *vp; int *ip; cstr2 s2; const cstr cs;\n"
-                                  "    int arr[3]; char carr[4];\n"
-                                  "    uint32_t u32; size_t sz; wrapped wsz; mysize ms; int8_t i8; ptrdiff_t pd; intmax_t im; uintmax_t um;\n"
-                                  "    enum Color col; enum Neg ng; AnonE ae;\n"
-                                  "    Point p; Anon an; struct Point *pp; const volatile int cvi;\n"
-                                  "    int bf : 3; unsigned ubf : 5; int : 4; _Bool bb : 1; long long lbf : 40; unsigned long long ubig : 63; enum Color cbf : 2;\n"
-                                  "    struct { int ia; union { int ib; float fc; }; struct { char deep; }; };\n"
-                                  "    struct { int named_in; } named;\n"
-                                  "    union U { int x; char y; } un;\n"
-                                  "    __int128 i128; _Complex double cd; _Atomic int at; int (*fp)(int); unsigned _BitInt(40) ub; Point pts[2];\n"
-                                  "    V4 v4; I4 i4;\n"
-                                  "};\n"
-                                  "struct __attribute__((packed)) Packed { char a; int b : 7; unsigned c : 20; long long d; };\n"
-                                  "struct Vec { E2 e; D2 d; C16 c; L2 l; S8 s; };\n"
-                                  "struct O { struct I { int a; } i; struct { int b; struct { int c; } deep; } un; union { int d; } u2; };\n"
-                                  "typedef struct { struct { int e; } in; } T;\n"
-                                  "#define AS1 __attribute__((address_space(1)))\n"
-                                  "#define ASA __attribute__((address_space(1)))\n"
-                                  "#define ASN(n) __attribute__((address_space(n)))\n"
-                                  "typedef AS1 int T1;\n"
-                                  "struct Spaces { AS1 int *f; ASA int *g; __attribute__((address_space(1))) int *h; ASN(3) char *i; T1 *t; AS1 int *const *pp; int AS1 *w, *v; };\n"
-                                  "static const char *base;\n"
-                                  "static int pr(int tag, const char *f, ...)\n"
-                                  "{\n"
-                                  "    va_list ap;\n"
-                                  "    va_start(ap, f);\n"
-                                  "    printf(\"<%d>\", tag);\n"
-                                  "    for (const char *p = f; *p; p++)\n"
-                                  "    {\n"
-                                  "        if (*p != '%') { putchar(*p); continue; }\n"
-                                  "        char spec[32]; int n = 0; spec[n++] = *p++;\n"
-                                  "        while (strchr(\"-+ #0123456789.\", *p)) spec[n++] = *p++;\n"
-                                  "        int v = 0; if (*p == 'v') { v = 1; p++; while (*p >= '0' && *p <= '9') p++; }\n"
-                                  "        char len[3] = { 0 }; int ln = 0; while (strchr(\"hlLzjt\", *p)) len[ln++] = *p, spec[n++] = *p++;\n"
-                                  "        char c = *p; spec[n++] = c; spec[n] = 0;\n"
-                                  "        if (v && c == 'f') { V4 x = va_arg(ap, V4); printf(\"[%g %g %g %g]\", x[0], x[1], x[2], x[3]); }\n"
-                                  "        else if (v) { I4 x = va_arg(ap, I4); printf(\"[%d %d %d %d]\", x[0], x[1], x[2], x[3]); }\n"
-                                  "        else if (c == 's') { const char *s = va_arg(ap, const char *); printf(spec, s ? s : \"(null)\"); }\n"
-                                  "        else if (c == 'p') { const char *q = va_arg(ap, const char *); if (q) printf(\"@%ld\", (long)(q - base)); else printf(\"nil\"); }\n"
-                                  "        else if (c == 'f' && len[0] == 'L') printf(spec, va_arg(ap, long double));\n"
-                                  "        else if (c == 'f') printf(spec, va_arg(ap, double));\n"
-                                  "        else if (!strcmp(len, \"ll\")) printf(spec, va_arg(ap, long long));\n"
-                                  "        else if (len[0] == 'l' || len[0] == 'z' || len[0] == 'j' || len[0] == 't') printf(spec, va_arg(ap, long));\n"
-                                  "        else printf(spec, va_arg(ap, int));\n"
-                                  "    }\n"
-                                  "    va_end(ap);\n"
-                                  "    return 0;\n"
-                                  "}\n"
-                                  "static int calls;\n"
-                                  "static int next(void) { return calls++; }\n"
-                                  "typedef int (*P)(int, const char *, ...);\n"
-                                  "static P get(void) { printf(\"get\\n\"); return pr; }\n"
-                                  "static int kr();\n"
-                                  "static int kr(tag, f) int tag; const char *f; { printf(\"kr %d %s\", tag, f); return 0; }\n"
-                                  "struct Ctx { int calls; };\n"
-                                  "static int counted(struct Ctx *c, const char *f, ...) { (void)f; c->calls++; return 0; }\n"
-                                  "static void prefixed(double x, const char *f, ...) { va_list ap; va_start(ap, f); printf(\"[%g] \", x); vprintf(f, ap); va_end(ap); }\n"
-                                  "static void scoped(int a, const char *b, ...)\n"
-                                  "{\n"
-                                  "    (void)b;\n"
-                                  "    typedef struct { uint16_t w; } Word;\n"
-                                  "    struct Local { uint32_t u; size_t z; Word word; struct { int q; } in; } l = { 1, 2, { 3 }, { a } };\n"
-                                  "    __builtin_dump_struct(&l, printf);\n"
-                                  "    __builtin_dump_struct(&l.in, printf);\n"
-                                  "    struct { struct { int k; } in; } r = { { a } };\n"
-                                  "    __builtin_dump_struct(&r.in, printf);\n"
-                                  "}\n"
-                                  "static void old_style(a) int a; { struct Old { struct { int k; } in; } r = { { a } }; __builtin_dump_struct(&r.in, printf); }\n"
-                                  "typedef int Arr4[4];\n"
-                                  "static void spelled(size_t n, cstr text, uint8_t *bytes, const size_t c, Arr4 arr, int (*cb)(size_t), int plain, ...)\n"
-                                  "{\n"
-                                  "    (void)n; (void)text; (void)bytes; (void)c; (void)arr; (void)cb;\n"
-                                  "    struct Spelled { struct { int k; } in; } r = { { plain } };\n"
-                                  "    __builtin_dump_struct(&r.in, printf);\n"
-                                  "}\n"
-                                  "typedef const int CI;\n"
-                                  "typedef int *const PC;\n"
-                                  "struct Qualified { CI ci; PC pc; const CI cci; volatile CI vci; CI const cic; };\n"
-                                  "static void qualified(CI x, PC p, const struct { int values[4]; } *const arg)\n"
-                                  "{\n"
-                                  "    (void)x; (void)p; (void)arg;\n"
-                                  "    struct Inner { struct { int n; } inner; } r = { { x } };\n"
-                                  "    __builtin_dump_struct(&r.inner, printf);\n"
-                                  "}\n"
-                                  "typedef int I;\n"
-                                  "struct Placed { int (*a)(I); I (*b)(int); I c, (*d)(long), e; I (*(*f)(int))(I); size_t (*h)(const char *, ...); int (*k)(void); };\n"
-                                  "static void placed_return(int (*cb)(I))\n"
-                                  "{\n"
-                                  "    (void)cb;\n"
-                                  "    struct Outer1 { struct { int value; } inner; } r = { { 1 } };\n"
-                                  "    __builtin_dump_struct(&r.inner, printf);\n"
-                                  "}\n"
-                                  "static void placed_parameter(I (*cb)(int), I (*(*nested)(int))(I), ...)\n"
-                                  "{\n"
-                                  "    (void)cb; (void)nested;\n"
-                                  "    struct Outer2 { struct { int value; } inner; } r = { { 2 } };\n"
-                                  "    __builtin_dump_struct(&r.inner, printf);\n"
-                                  "}\n"
-                                  "typedef int (*FP)(int);\n"
-                                  "typedef int A4[4];\n"
-                                  "struct Repeated { int (*(*a)(FP))(int); FP (*b)(int (*)(int)); A4 *p; int (*q)[4]; A4 *(*r)(int (*)[4]); };\n"
-                                  "static void repeated(int (*(*cb)(FP))(int), int (*(*rev)(int (*)(int)))(FP))\n"
-                                  "{\n"
-                                  "    (void)cb; (void)rev;\n"
-                                  "    struct Outer3 { struct { int x; } inner; } r = { { 3 } };\n"
-                                  "    __builtin_dump_struct(&r.inner, printf);\n"
-                                  "}\n"
-                                  "struct Pointee { struct { int x; } *p; void (*fn)(struct { int w; } *); };\n"
-                                  "struct Top2 { struct M { struct { int deep; } u; } m; struct { int x; } y; };\n"
-                                  "static struct S s;\n"
-                                  "#define F1(a) int a##0, a##1, a##2, a##3, a##4, a##5, a##6, a##7, a##8, a##9;\n"
-                                  "#define F2(a) F1(a##0) F1(a##1) F1(a##2) F1(a##3) F1(a##4) F1(a##5) F1(a##6) F1(a##7) F1(a##8) F1(a##9)\n"
-                                  "#define F3(a) F2(a##0) F2(a##1) F2(a##2) F2(a##3) F2(a##4) F2(a##5) F2(a##6) F2(a##7) F2(a##8) F2(a##9)\n"
-                                  "static struct Big { F3(f0) F3(f1) F3(f2) F3(f3) F3(f4) } big;\n"
-                                  "static unsigned long big_hash = 14695981039346656037ul;\n"
-                                  "static int big_lines;\n"
-                                  "static int hashed(const char *format, ...)\n"
-                                  "{\n"
-                                  "    char line[256];\n"
-                                  "    va_list list;\n"
-                                  "    va_start(list, format);\n"
-                                  "    int length = vsnprintf(line, sizeof(line), format, list);\n"
-                                  "    va_end(list);\n"
-                                  "    for (int i = 0; i < length && i < (int)sizeof(line); i += 1) { big_hash = (big_hash ^ (unsigned char)line[i]) * 1099511628211ul; }\n"
-                                  "    big_lines += 1;\n"
-                                  "    return length;\n"
-                                  "}\n"
-                                  "struct Three { long a, b, c; };\n"
-                                  "struct Context { int tag; char pad[20]; };\n"
-                                  "typedef int Lanes __attribute__((vector_size(16)));\n"
-                                  "static struct Three by_value(const char *format, ...) { va_list list; va_start(list, format); vprintf(format, list); va_end(list); struct Three t = { 1, 2, 3 }; return t; }\n"
-                                  "static int with_context(struct Context c, const char *format, ...) { va_list list; va_start(list, format); printf(\"[%d]\", c.tag); vprintf(format, list); va_end(list); return 0; }\n"
-                                  "static __int128 with_wide(__int128 k, const char *format, ...) { va_list list; va_start(list, format); printf(\"<%d>\", (int)(k >> 64)); vprintf(format, list); va_end(list); return k; }\n"
-                                  "static _Float16 with_half(_Float16 h, const char *format, ...) { va_list list; va_start(list, format); printf(\"<%g>\", (double)h); vprintf(format, list); va_end(list); return h; }\n"
-                                  "static Lanes with_lanes(Lanes v, const char *format, ...) { va_list list; va_start(list, format); printf(\"<%d>\", v[3]); vprintf(format, list); va_end(list); return v; }\n"
-                                  "static _Complex double with_complex(const char *format, ...) { va_list list; va_start(list, format); vprintf(format, list); va_end(list); return __builtin_complex(1.0, 2.0); }\n"
-                                  "static int with_long_double(long double k, const char *format, ...) { va_list list; va_start(list, format); printf(\"<%Lg>\", k); vprintf(format, list); va_end(list); return 0; }\n"
-                                  "static struct Packed packed = { 'z', -5, 99999, -77 };\n"
-                                  "int main(int argc, char **argv)\n"
-                                  "{\n"
-                                  "    (void)argv;\n"
-                                  "    int n = argc;\n"
-                                  "    base = (const char *)&s;\n"
-                                  "    s.b = 1; s.c = -3; s.sc = -4; s.uc = 250; s.s = -300; s.us = 65000; s.i = -7 * n; s.u = 4000000000u; s.l = -8; s.ul = 9; s.ll = -10; s.ull = 11;\n"
-                                  "    s.f = 1.5f; s.d = -2.25; s.ld = 3.125L; s.str = \"hello\"; s.mstr = \"a string longer than thirty-two characters for sure\"; s.vp = &s.i;\n"
-                                  "    s.s2 = \"two\"; s.u32 = 5; s.sz = 6; s.wsz = 7; s.ms = 8; s.i8 = -9; s.pd = -10; s.im = -11; s.um = 12; s.col = GREEN; s.ng = MINUS; s.ae = B1;\n"
-                                  "    s.p.x = 1; s.p.y = 2; s.an.q = 3; s.an.r = 4; s.pp = &s.p; s.bf = -2; s.ubf = 17; s.bb = 1; s.lbf = -12345678901LL; s.ubig = 0x7fffffffffffffffULL;\n"
-                                  "    s.cbf = GREEN; s.ia = 13; s.ib = 14; s.deep = 'x'; s.named.named_in = 15; s.un.x = 0x41; s.v4 = (V4){ 1, 2, 3, 4 }; s.i4 = (I4){ -1, 2, -3, 4 };\n"
-                                  "    __builtin_dump_struct(&s, pr, 1);\n"
-                                  "    __builtin_dump_struct(&s.p, printf);\n"
-                                  "    Anon an = { 5, 6 };\n"
-                                  "    __builtin_dump_struct(&an, printf);\n"
-                                  "    union U u = { 0x42 };\n"
-                                  "    __builtin_dump_struct(&u, printf);\n"
-                                  "    struct Spaces spaces = { 0 };\n"
-                                  "    __builtin_dump_struct(&spaces, printf);\n"
-                                  "    __builtin_dump_struct(&s.named, pr, next());\n"
-                                  "    printf(\"calls=%d\\n\", calls);\n"
-                                  "    __builtin_dump_struct(&an, get(), calls++);\n"
-                                  "    printf(\"calls=%d\\n\", calls);\n"
-                                  "    __builtin_dump_struct(&s.p, kr, 2);\n"
-                                  "    __builtin_dump_struct(&packed, printf);\n"
-                                  "    struct Vec v = { { 1, 2 }, { 1.5, -2.5 }, { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 }, { 7, -8 }, { 1, 2, 3, 4, 5, 6, 7, 8 } };\n"
-                                  "    __builtin_dump_struct(&v, printf);\n"
-                                  "    struct O o = { { 1 }, { 2, { 3 } }, { 4 } };\n"
-                                  "    T t = { { 5 } };\n"
-                                  "    struct { int z; } local = { 6 };\n"
-                                  "    __builtin_dump_struct(&o.i, printf);\n"
-                                  "    __builtin_dump_struct(&o.un, printf);\n"
-                                  "    __builtin_dump_struct(&o.un.deep, printf);\n"
-                                  "    __builtin_dump_struct(&o.u2, printf);\n"
-                                  "    __builtin_dump_struct(&t.in, printf);\n"
-                                  "    __builtin_dump_struct(&local, printf);\n"
-                                  "    __builtin_dump_struct(&o, printf);\n"
-                                  "    struct Ctx c = { 0 };\n"
-                                  "    __builtin_dump_struct(&o, counted, &c);\n"
-                                  "    printf(\"counted=%d\\n\", c.calls);\n"
-                                  "    __builtin_dump_struct(&o.i, prefixed, 1.5f);\n"
-                                  "    const struct Point *cp = &s.p;\n"
-                                  "    __builtin_dump_struct(cp, printf);\n"
-                                  "    scoped(n, \"x\");\n"
-                                  "    old_style(n);\n"
-                                  "    struct Top2 top2 = { { { 7 } }, { 8 } };\n"
-                                  "    __builtin_dump_struct(&top2.m.u, printf);\n"
-                                  "    __builtin_dump_struct(&top2.y, printf);\n"
-                                  "    struct Pointee pointee;\n"
-                                  "    __typeof__(*pointee.p) pointed = { 42 };\n"
-                                  "    pointee.p = &pointed;\n"
-                                  "    __builtin_dump_struct(pointee.p, printf);\n"
-                                  "    spelled(1, \"t\", 0, 2, 0, 0, n);\n"
-                                  "    struct Qualified q = { 1, 0, 2, 3, 4 };\n"
-                                  "    __builtin_dump_struct(&q, printf);\n"
-                                  "    qualified(n, 0, 0);\n"
-                                  "    struct Placed placed = { 0 };\n"
-                                  "    __builtin_dump_struct(&placed, printf);\n"
-                                  "    placed_return(0);\n"
-                                  "    placed_parameter(0, 0);\n"
-                                  "    struct Repeated repeated_fields = { 0 };\n"
-                                  "    __builtin_dump_struct(&repeated_fields, printf);\n"
-                                  "    repeated(0, 0);\n"
-                                  "    struct Context context = { 7 };\n"
-                                  "    __builtin_dump_struct(&s.p, by_value);\n"
-                                  "    __builtin_dump_struct(&s.p, with_context, context);\n"
-                                  "    __builtin_dump_struct(&s.p, with_wide, (__int128)n << 64);\n"
-                                  "    __builtin_dump_struct(&s.p, with_half, (_Float16)0.5f * (_Float16)n);\n"
-                                  "    __builtin_dump_struct(&s.p, with_lanes, (Lanes){ 1, 2, 3, n });\n"
-                                  "    __builtin_dump_struct(&s.p, with_complex);\n"
-                                  "    __builtin_dump_struct(&s.p, with_long_double, 2.5L * n);\n"
-                                  "    big.f0000 = 1; big.f2345 = -2; big.f4999 = n;\n"
-                                  "    __builtin_dump_struct(&big, hashed);\n"
-                                  "    printf(\"big=%lx lines=%d\\n\", big_hash, big_lines);\n"
-                                  "    return 0;\n"
-                                  "}\n";
+    const char* program = check_test_driver_input_text(test, inputs + 0);
     char source[256];
     char outputs[5][256];
     snprintf(source, sizeof(source), "%s/dump_struct.c", directory);
@@ -2784,7 +2248,7 @@ static void check_test_driver_dump_struct(CheckTest* test, const char* clang, co
     {
         snprintf(outputs[o], sizeof(outputs[o]), "%s/dump_struct-%u", directory, o);
     }
-    const bool written = parse_test_write(source, program, sizeof(program) - 1);
+    const bool written = parse_test_write(source, program, inputs[0].length);
     check_test_expect(test, written, "the record dumps' program written");
     char* text = NULL;
     char* const reference[] = { (char*)clang, "-O0", "-w", "-o", outputs[4], source, NULL };
@@ -2832,61 +2296,9 @@ static void check_test_driver_dump_struct(CheckTest* test, const char* clang, co
 // plain and of an _Atomic argument), beside a complex long double's and an _Atomic int's, whose reads each line evaluates
 // again (their atomic plans past the nodes' own, CheckLowerInitializers.extra_atomics): by the direct path, by --scalar
 // and by --tier1 with and without it, each printing what clang -O0's build does.
-static void check_test_driver_dump_struct_rest(CheckTest* test, const char* clang, const char* executable, const char* directory)
+static void check_test_driver_dump_struct_rest(CheckTest* test, const char* clang, const char* executable, const char* directory, const CheckDriverProgramInput* inputs)
 {
-    static const char program[] =
-        "#include <stdarg.h>\n"
-        "#include <stdio.h>\n"
-        "struct S { int a; double b; };\n"
-        "struct A { int x; int y; };\n"
-        "struct B { char x[3]; };\n"
-        "typedef union __attribute__((transparent_union)) { int* i; const char* c; } U;\n"
-        "static int calls;\n"
-        "static int pr(_Complex double z, const char* f, ...) { va_list ap; va_start(ap, f); printf(\"(%g,%g)\", __real__ z, __imag__ z); vprintf(f, ap); va_end(ap); return 0; }\n"
-        "static int pf(_Complex float z, int k, const char* f, ...) { va_list ap; va_start(ap, f); printf(\"(%g,%g,%d)\", __real__ z, __imag__ z, k); vprintf(f, ap); va_end(ap); return 0; }\n"
-        "static int pl(_Complex long double z, const char* f, ...) { va_list ap; va_start(ap, f); printf(\"(%Lg,%Lg)\", __real__ z, __imag__ z); vprintf(f, ap); va_end(ap); return 0; }\n"
-        "static int pi(_Complex int z, const char* f, ...) { va_list ap; va_start(ap, f); printf(\"(%d,%d)\", __real__ z, __imag__ z); vprintf(f, ap); va_end(ap); return 0; }\n"
-        "static int pd(double d, const char* f, ...) { va_list ap; va_start(ap, f); printf(\"(%g)\", d); vprintf(f, ap); va_end(ap); return 0; }\n"
-        "static int pv(int k, ...) { va_list ap; va_start(ap, k); _Complex double z = va_arg(ap, _Complex double); printf(\"<%d|%g,%g>\", k, __real__ z, __imag__ z); calls++; va_end(ap); return 0; }\n"
-        "static int pvf(int k, ...) { va_list ap; va_start(ap, k); _Complex float z = va_arg(ap, _Complex float); _Complex long double w = va_arg(ap, _Complex long double); printf(\"<%d|%g,%g|%Lg,%Lg>\", k, __real__ z, __imag__ z, __real__ w, __imag__ w); calls++; va_end(ap); return 0; }\n"
-        "static int pu(U u, const char* f, ...) { va_list ap; va_start(ap, f); printf(\"[%d]\", *u.i); vprintf(f, ap); va_end(ap); return 0; }\n"
-        "static int pa(_Atomic struct A a, const char* f, ...) { struct A v = a; va_list ap; va_start(ap, f); printf(\"[%d,%d]\", v.x, v.y); vprintf(f, ap); va_end(ap); return 0; }\n"
-        "static int pb(_Atomic struct B a, const char* f, ...) { struct B v = a; va_list ap; va_start(ap, f); printf(\"[%d%d%d]\", v.x[0], v.x[1], v.x[2]); vprintf(f, ap); va_end(ap); return 0; }\n"
-        "static int pk(int k, const char* f, ...) { va_list ap; va_start(ap, f); printf(\"{%d}\", k); vprintf(f, ap); va_end(ap); return 0; }\n"
-        "static _Complex double next(int* n) { *n += 1; return *n + 0.5i; }\n"
-        "int main(void) {\n"
-        "    struct S s = { 1, 2.5 };\n"
-        "    _Complex double z = 1.0 + 2.0i;\n"
-        "    _Complex float zf = 3.0f - 1.0if;\n"
-        "    int n = 0;\n"
-        "    __builtin_dump_struct(&s, pr, z);\n"
-        "    __builtin_dump_struct(&s, pr, zf);\n"
-        "    __builtin_dump_struct(&s, pf, z, 7);\n"
-        "    __builtin_dump_struct(&s, pl, (_Complex long double)(5.0L + 6.0iL));\n"
-        "    __builtin_dump_struct(&s, pi, (_Complex int)(3 + 4i));\n"
-        "    __builtin_dump_struct(&s, pr, 9);\n"
-        "    __builtin_dump_struct(&s, pd, z);\n"
-        "    __builtin_dump_struct(&s, pr, next(&n));\n"
-        "    __builtin_dump_struct(&s, pv, 1, z);\n"
-        "    __builtin_dump_struct(&s, pvf, 2, zf, (_Complex long double)(7.0L - 8.0iL));\n"
-        "    int k = 42;\n"
-        "    U u;\n"
-        "    u.i = &k;\n"
-        "    struct A a = { 3, 4 };\n"
-        "    struct B b = { { 5, 6, 7 } };\n"
-        "    _Atomic struct A aa = a;\n"
-        "    __builtin_dump_struct(&s, pu, &k);\n"
-        "    __builtin_dump_struct(&s, pu, u);\n"
-        "    __builtin_dump_struct(&s, pu, (const char*)&k);\n"
-        "    __builtin_dump_struct(&s, pu, (void*)&k);\n"
-        "    __builtin_dump_struct(&s, pa, a);\n"
-        "    __builtin_dump_struct(&s, pb, b);\n"
-        "    __builtin_dump_struct(&s, pa, aa);\n"
-        "    _Atomic int ai = 7;\n"
-        "    __builtin_dump_struct(&s, pk, ai);\n"
-        "    printf(\"n=%d calls=%d\\n\", n, calls);\n"
-        "    return 0;\n"
-        "}\n";
+    const char* program = check_test_driver_input_text(test, inputs + 0);
     char source[256];
     char outputs[5][256];
     snprintf(source, sizeof(source), "%s/dump_struct_rest.c", directory);
@@ -2894,7 +2306,7 @@ static void check_test_driver_dump_struct_rest(CheckTest* test, const char* clan
     {
         snprintf(outputs[o], sizeof(outputs[o]), "%s/dump_struct_rest-%u", directory, o);
     }
-    const bool written = parse_test_write(source, program, sizeof(program) - 1);
+    const bool written = parse_test_write(source, program, inputs[0].length);
     check_test_expect(test, written, "the dumps' rest program written");
     char* text = NULL;
     char* const reference[] = { (char*)clang, "-O0", "-w", "-o", outputs[4], source, NULL };
@@ -2940,49 +2352,9 @@ static void check_test_driver_dump_struct_rest(CheckTest* test, const char* clan
 // clang's code makes an ordinary call; its callee, chain and argument each evaluated once, without a fixed order), built by both paths at
 // Tier 0 and Tier 1 (--tier1 --verify, whose certificate checks each call's sequence), each the output of clang -O0's
 // build of the same program.
-static void check_test_driver_static_chain(CheckTest* test, const char* clang, const char* executable, const char* directory)
+static void check_test_driver_static_chain(CheckTest* test, const char* clang, const char* executable, const char* directory, const CheckDriverProgramInput* inputs)
 {
-    static const char program[] = "#include <stdio.h>\n"
-                                  "struct S { long a, b, c; };\n"
-                                  "__attribute__((naked, noinline)) long read_chain(void) { __asm__(\"movq %r10, %rax\\n\\tret\"); }\n"
-                                  "__attribute__((naked, noinline)) long chain_plus(long x) { __asm__(\"leaq (%r10,%rdi), %rax\\n\\tret\"); }\n"
-                                  "__attribute__((naked, noinline)) long chain_sum7(long a, long b, long c, long d, long e, long f, long g) { __asm__(\"leaq (%rdi,%rsi), %rax\\n\\taddq %rdx, %rax\\n\\taddq %rcx, %rax\\n\\taddq %r8, %rax\\n\\taddq %r9, %rax\\n\\taddq 8(%rsp), %rax\\n\\taddq %r10, %rax\\n\\tret\"); }\n"
-                                  "__attribute__((naked, noinline)) double chain_double(double x) { __asm__(\"cvtsi2sdq %r10, %xmm1\\n\\taddsd %xmm1, %xmm0\\n\\tret\"); }\n"
-                                  "__attribute__((naked, noinline)) struct S chain_struct(void) { __asm__(\"movq %rdi, %rax\\n\\tmovq %r10, (%rdi)\\n\\tmovq $2, 8(%rdi)\\n\\tmovq $3, 16(%rdi)\\n\\tret\"); }\n"
-                                  "__attribute__((naked, noinline)) long chain_variadic(int n, ...) { __asm__(\"movq %r10, %rax\\n\\taddq %rsi, %rax\\n\\tret\"); }\n"
-                                  "static int evaluated[3];\n"
-                                  "static long (*pick(long (*f)(long)))(long) { evaluated[0] += 1; return f; }\n"
-                                  "static char* chain_of(char* p) { evaluated[1] += 1; return p; }\n"
-                                  "static long arg(long x) { evaluated[2] += 1; return x; }\n"
-                                  "static char buffer[64];\n"
-                                  "static void target(void) {}\n"
-                                  "__attribute__((noinline)) long t_direct(char* p) { return __builtin_call_with_static_chain(read_chain(), p); }\n"
-                                  "__attribute__((noinline)) long t_plus(long x, char* p) { return __builtin_call_with_static_chain(chain_plus(x), p); }\n"
-                                  "__attribute__((noinline)) long t_swap(char* x, long p) { return __builtin_call_with_static_chain(chain_plus(p), x); }\n"
-                                  "__attribute__((noinline)) long t_sum(char* p) { return __builtin_call_with_static_chain(chain_sum7(1, 2, 3, 4, 5, 6, 7), p); }\n"
-                                  "__attribute__((noinline)) long t_indirect(long (*f)(long), char* p, long x) { return __builtin_call_with_static_chain(f(x), p); }\n"
-                                  "__attribute__((noinline)) long t_indirect_r10(char* p, long (*f)(long), long x) { return __builtin_call_with_static_chain(f(x), p) + 1; }\n"
-                                  "__attribute__((noinline)) long t_variadic(char* p) { return __builtin_call_with_static_chain(chain_variadic(1, 30L), p); }\n"
-                                  "__attribute__((noinline)) long t_variadic_indirect(long (*g)(int, ...), char* p) { return __builtin_call_with_static_chain(g(1, 5L), p); }\n"
-                                  "__attribute__((noinline)) long t_loop(char* p, int n) { long s = 0; for (int i = 0; i < n; i++) s += __builtin_call_with_static_chain(chain_plus(i), p + i); return s; }\n"
-                                  "__attribute__((noinline)) long t_tail(long x, char* p) { __attribute__((musttail)) return __builtin_call_with_static_chain(chain_plus(x), p); }\n"
-                                  "int main(int argc, char** argv)\n"
-                                  "{\n"
-                                  "    (void)argv;\n"
-                                  "    char array[4];\n"
-                                  "    long k = argc;\n"
-                                  "    printf(\"%d %d %d\\n\", __builtin_call_with_static_chain(read_chain(), buffer) == (long)buffer, __builtin_call_with_static_chain(read_chain(), array) == (long)array, __builtin_call_with_static_chain(read_chain(), target) == (long)target);\n"
-                                  "    printf(\"%ld %ld %g\\n\", __builtin_call_with_static_chain(chain_plus(5 * k), (char*)100), __builtin_call_with_static_chain(chain_sum7(1, 2, 3, 4, 5, 6, 7), (char*)1000), __builtin_call_with_static_chain(chain_double(0.5), (char*)2));\n"
-                                  "    struct S s = __builtin_call_with_static_chain(chain_struct(), (char*)7);\n"
-                                  "    printf(\"%ld %ld %ld %ld\\n\", s.a, s.b, s.c, __builtin_call_with_static_chain(chain_variadic(1, 30L), (char*)12));\n"
-                                  "    long (*volatile f)(long) = chain_plus;\n"
-                                  "    long (*g)(int, ...) = chain_variadic;\n"
-                                  "    long q = __builtin_call_with_static_chain(pick(f)(arg(k)), chain_of((char*)40));\n"
-                                  "    printf(\"%ld %d%d%d %ld\\n\", q, evaluated[0], evaluated[1], evaluated[2], __builtin_call_with_static_chain(g(1, 5L), (char*)6));\n"
-                                  "    printf(\"%ld %ld %ld %ld %ld\\n\", t_direct((char*)9), t_plus(5, (char*)100), t_swap((char*)100, 5), t_sum((char*)1000), t_indirect(chain_plus, (char*)40, k));\n"
-                                  "    printf(\"%ld %ld %ld %ld %ld\\n\", t_indirect_r10((char*)40, chain_plus, k), t_variadic((char*)12), t_variadic_indirect(chain_variadic, (char*)6), t_loop((char*)10, 4), t_tail(5, (char*)300));\n"
-                                  "    return evaluated[0] != 1 || evaluated[1] != 1 || evaluated[2] != 1;\n"
-                                  "}\n";
+    const char* program = check_test_driver_input_text(test, inputs + 0);
     char source[256];
     char outputs[5][256];
     snprintf(source, sizeof(source), "%s/static_chain.c", directory);
@@ -2990,7 +2362,7 @@ static void check_test_driver_static_chain(CheckTest* test, const char* clang, c
     {
         snprintf(outputs[k], sizeof(outputs[k]), "%s/static_chain-%u", directory, k);
     }
-    const bool written = parse_test_write(source, program, sizeof(program) - 1);
+    const bool written = parse_test_write(source, program, inputs[0].length);
     check_test_expect(test, written, "the static chain's program written");
     char* text = NULL;
     char* const reference[] = { (char*)clang, "-O0", "-o", outputs[4], source, NULL };
@@ -3055,137 +2427,9 @@ static void check_test_driver_static_chain(CheckTest* test, const char* clang, c
 // one); and a vector expression holding a value under __builtin_trap, a terminal helper's. The runner keeps rsp 16-byte
 // aligned at its call, as the ABI asks. Built by both paths at Tier 0 (with --verify, whose verifier proves its frame
 // events) and with --tier1 --verify (Tier 0's frame, which Tier 1 falls back to), each the output of clang -O0's build.
-static void check_test_driver_eh_return(CheckTest* test, const char* clang, const char* executable, const char* directory)
+static void check_test_driver_eh_return(CheckTest* test, const char* clang, const char* executable, const char* directory, const CheckDriverProgramInput* inputs)
 {
-    static const char program[] = "#include <stdarg.h>\n"
-                                  "#include <stdio.h>\n"
-                                  "#include <string.h>\n"
-                                  "long seen[8];\n"
-                                  "long before;\n"
-                                  "void* target;\n"
-                                  "__attribute__((naked, noinline)) long run(long offset)\n"
-                                  "{\n"
-                                  "    __asm__(\n"
-                                  "        \"pushq %rbx\\npushq %r12\\npushq %r13\\npushq %r14\\npushq %r15\\n\"\n"
-                                  "        \"movq $0x0b0b, %rbx\\nmovq $0x0c0c, %r12\\nmovq $0x0d0d, %r13\\nmovq $0x0e0e, %r14\\nmovq $0x0f0f, %r15\\n\"\n"
-                                  "        \"subq $48, %rsp\\n\"\n"
-                                  "        \"movq %rsp, before(%rip)\\n\"\n"
-                                  "        \"leaq handler(%rip), %rsi\\n\"\n"
-                                  "        \"movq $77, %rdx\\nxorl %eax, %eax\\n\"\n"
-                                  "        \"movq $6, 0(%rsp)\\nmovq $7, 8(%rsp)\\nmovq $8, 16(%rsp)\\nmovq $9, 24(%rsp)\\n\"\n"
-                                  "        \"call *target(%rip)\\n\"\n"
-                                  "        \"movq %rbx, seen+16(%rip)\\nmovq %r12, seen+24(%rip)\\nmovq %r13, seen+32(%rip)\\nmovq %r14, seen+40(%rip)\\n\"\n"
-                                  "        \"movq %r15, seen+48(%rip)\\nmovq %rsp, seen+56(%rip)\\n\"\n"
-                                  "        \"jmp 1f\\n\"\n"
-                                  "        \"handler:\\n\"\n"
-                                  "        \"movq %rax, seen+0(%rip)\\nmovq %rdx, seen+8(%rip)\\nmovq %rbx, seen+16(%rip)\\nmovq %r12, seen+24(%rip)\\n\"\n"
-                                  "        \"movq %r13, seen+32(%rip)\\nmovq %r14, seen+40(%rip)\\nmovq %r15, seen+48(%rip)\\nmovq %rsp, seen+56(%rip)\\n\"\n"
-                                  "        \"movq before(%rip), %rsp\\nxorl %eax, %eax\\n\"\n"
-                                  "        \"1:\\naddq $48, %rsp\\n\"\n"
-                                  "        \"popq %r15\\npopq %r14\\npopq %r13\\npopq %r12\\npopq %rbx\\nret\\n\");\n"
-                                  "}\n"
-                                  "static volatile long sink;\n"
-                                  "static volatile int pick;\n"
-                                  "__attribute__((noinline)) static long churn(long x) { sink = x; return x * 7; }\n"
-                                  "__attribute__((noinline)) void thrower(long offset, void* h)\n"
-                                  "{\n"
-                                  "    __builtin_unwind_init();\n"
-                                  "    long a = churn(offset), b = churn(a + 1), c = churn(b + 2), d = churn(c + 3), e = churn(d + 4), f = churn(e + 5);\n"
-                                  "    sink = a + b + c + d + e + f;\n"
-                                  "    long* frame = __builtin_frame_address(0);\n"
-                                  "    frame[-7] = 0x7a7a + offset;\n"
-                                  "    frame[-6] = 0x6d6d + offset;\n"
-                                  "    if (pick) { frame[-7] = 0x5151 + offset; __builtin_eh_return(offset, h); }\n"
-                                  "    __builtin_eh_return(offset, h);\n"
-                                  "}\n"
-                                  "__attribute__((noinline)) void vthrower(long offset, void* h, ...)\n"
-                                  "{\n"
-                                  "    __builtin_unwind_init();\n"
-                                  "    va_list ap;\n"
-                                  "    va_start(ap, h);\n"
-                                  "    long extra = va_arg(ap, long);\n"
-                                  "    va_end(ap);\n"
-                                  "    long* frame = __builtin_frame_address(0);\n"
-                                  "    frame[-7] = 0x2a2a + offset + extra;\n"
-                                  "    frame[-6] = 0x3b3b + churn(extra);\n"
-                                  "    if (pick) __builtin_eh_return(offset + extra - 77, h);\n"
-                                  "    __builtin_eh_return(offset, h);\n"
-                                  "}\n"
-                                  "__attribute__((noinline)) long ethrower(long offset, void* h)\n"
-                                  "{\n"
-                                  "    __builtin_unwind_init();\n"
-                                  "    long* frame = __builtin_frame_address(0);\n"
-                                  "    frame[-7] = 0x3c3c + offset;\n"
-                                  "    frame[-6] = 0x4d4d + offset;\n"
-                                  "    if (pick) return (long)sink * 2 + churn(offset) * (__builtin_eh_return(offset, h), 3);\n"
-                                  "    return churn(offset + 1) + (__builtin_eh_return(offset, (char*)h + 0), 1);\n"
-                                  "}\n"
-                                  "__attribute__((noinline)) long tailee(long offset, void* h) { sink = offset * 3; return offset + 1000 + (h != 0); }\n"
-                                  "__attribute__((noinline)) long mthrower(long offset, void* h)\n"
-                                  "{\n"
-                                  "    __builtin_unwind_init();\n"
-                                  "    long* frame = __builtin_frame_address(0);\n"
-                                  "    frame[-7] = 0x5e5e + offset;\n"
-                                  "    frame[-6] = 0x6f6f + churn(offset);\n"
-                                  "    if (pick) __builtin_eh_return(offset, h);\n"
-                                  "    __attribute__((musttail)) return tailee(offset, h);\n"
-                                  "}\n"
-                                  "static int variant;\n"
-                                  "struct S { double a; long b; };\n"
-                                  "struct Big { long a, b, c, d; };\n"
-                                  "typedef double V2 __attribute__((vector_size(16)));\n"
-                                  "__attribute__((noinline)) static double fchurn(long x) { sink = x; return x * 0.5; }\n"
-                                  "__attribute__((noinline)) static struct S schurn(long x) { sink = x + 100; return (struct S){ x * 0.25, x }; }\n"
-                                  "__attribute__((noinline)) static V2 vchurn(long x) { sink = x + 200; return (V2){ x * 0.5, 3.0 }; }\n"
-                                  "__attribute__((noinline)) long cthrower(long offset, void* h)\n"
-                                  "{\n"
-                                  "    __builtin_unwind_init();\n"
-                                  "    long* frame = __builtin_frame_address(0);\n"
-                                  "    frame[-7] = 0x1111 + offset + variant;\n"
-                                  "    frame[-6] = 0x2222 + offset;\n"
-                                  "    if (variant == 0) return (long)(fchurn(offset) + (sink + 1 ? (__builtin_eh_return(offset, h), 1.0) : 2.0));\n"
-                                  "    if (variant == 1) return (long)((long double)fchurn(offset + 1) * 3.0L + (sink + 1 && (__builtin_eh_return(offset, h), 1)));\n"
-                                  "    if (variant == 2) return schurn(offset).b + ({ struct S t = schurn(offset + 2); t.b >= 0 ? (__builtin_eh_return(offset, h), 0) : 9; });\n"
-                                  "    if (variant == 3) return (long)(vchurn(offset) * (__builtin_eh_return(offset, h), (V2){ 1.0, 2.0 }))[0];\n"
-                                  "    return (long)fchurn(offset) + ((void)sink, (__builtin_eh_return(offset, h), 5));\n"
-                                  "}\n"
-                                  "__attribute__((noinline)) long big_tailee(long offset, void* h, struct Big b) { sink = b.a + 10 * b.b + 100 * b.c + 1000 * b.d; return offset + 2000 + (h != 0); }\n"
-                                  "__attribute__((noinline)) long bthrower(long offset, void* h, struct Big b)\n"
-                                  "{\n"
-                                  "    __builtin_unwind_init();\n"
-                                  "    long* frame = __builtin_frame_address(0);\n"
-                                  "    frame[-7] = 0x7e7e + offset + b.a;\n"
-                                  "    frame[-6] = 0x8f8f + churn(b.d);\n"
-                                  "    if (pick) __builtin_eh_return(offset, h);\n"
-                                  "    __attribute__((musttail)) return big_tailee(offset, h, (struct Big){ b.d, b.c, b.b, b.a });\n"
-                                  "}\n"
-                                  "__attribute__((noinline)) V2 trapping(V2 a, int go) { return go ? vchurn(2) * (__builtin_trap(), (V2){ 1.0, 2.0 }) : a + 1.0; }\n"
-                                  "__attribute__((noinline)) void maybe(long offset, void* h, int go)\n"
-                                  "{\n"
-                                  "    __builtin_unwind_init();\n"
-                                  "    if (go) __builtin_eh_return(offset, h);\n"
-                                  "    sink = 5;\n"
-                                  "}\n"
-                                  "int main(void)\n"
-                                  "{\n"
-                                  "    void* const functions[6] = { (void*)thrower, (void*)vthrower, (void*)ethrower, (void*)mthrower, (void*)cthrower, (void*)bthrower };\n"
-                                  "    for (int k = 0; k < 6; k += 1)\n"
-                                  "    {\n"
-                                  "        target = functions[k];\n"
-                                  "        for (long offset = 0; offset <= 32; offset += 8)\n"
-                                  "        {\n"
-                                  "            memset(seen, 0, sizeof(seen));\n"
-                                  "            pick = (offset & 8) != 0;\n"
-                                  "            variant = (int)(offset / 8);\n"
-                                  "            long r = run(offset & ~8);\n"
-                                  "            printf(\"%d %ld rax=%lx rdx=%lx rbx=%lx r12=%lx r13=%lx r14=%lx r15=%lx sp=%ld sink=%ld\\n\", k, r, seen[0], seen[1], seen[2], seen[3], seen[4], seen[5], seen[6], seen[7] - before, sink);\n"
-                                  "        }\n"
-                                  "    }\n"
-                                  "    printf(\"trapping %g\\n\", trapping((V2){ 4.0, 5.0 }, 0)[1]);\n"
-                                  "    maybe(0, 0, 0);\n"
-                                  "    printf(\"normal return %ld\\n\", sink);\n"
-                                  "    return 0;\n"
-                                  "}\n";
+    const char* program = check_test_driver_input_text(test, inputs + 0);
     char source[256];
     char outputs[5][256];
     snprintf(source, sizeof(source), "%s/eh_return.c", directory);
@@ -3193,7 +2437,7 @@ static void check_test_driver_eh_return(CheckTest* test, const char* clang, cons
     {
         snprintf(outputs[k], sizeof(outputs[k]), "%s/eh_return-%u", directory, k);
     }
-    const bool written = parse_test_write(source, program, sizeof(program) - 1);
+    const bool written = parse_test_write(source, program, inputs[0].length);
     check_test_expect(test, written, "the eh_return program written");
     char* text = NULL;
     char* const reference[] = { (char*)clang, "-O0", "-o", outputs[4], source, NULL };
@@ -3251,29 +2495,9 @@ static void check_test_driver_eh_return(CheckTest* test, const char* clang, cons
 // widths, a mask's by an integer's CONVERT, since no CONST has one. Built for x86-64-v4 by both paths at Tier 0 and with
 // --tier1, all with --verify, and, where the host has the features, printing what clang -O0's build prints (the eh_return
 // functions' results through a global: clang's epilogue pops the saved rax over a returned one).
-static void check_test_driver_dead_vectors(CheckTest* test, const char* clang, const char* executable, const char* directory)
+static void check_test_driver_dead_vectors(CheckTest* test, const char* clang, const char* executable, const char* directory, const CheckDriverProgramInput* inputs)
 {
-    static const char program[] = "#include <immintrin.h>\n"
-                                  "#include <stdio.h>\n"
-                                  "static volatile int go;\n"
-                                  "static volatile long sink;\n"
-                                  "__attribute__((noinline)) __mmask16 kand_trap(__mmask16 k) { return go ? __builtin_ia32_kandhi(k, (__builtin_trap(), k)) : (__mmask16)(k + 1); }\n"
-                                  "__attribute__((noinline)) __m512i select_trap(__m512i a, __m512i b, __mmask16 k) { return go ? (__m512i)__builtin_ia32_selectd_512(k, (__v16si)a, (__builtin_trap(), (__v16si)b)) : b; }\n"
-                                  "__attribute__((noinline)) __m512i add_trap(__m512i a, __m512i b) { return go ? (__m512i)((__v16si)a + (__builtin_trap(), (__v16si)b)) : a; }\n"
-                                  "__attribute__((noinline)) __m256i add_trap256(__m256i a, __m256i b) { return go ? (__m256i)((__v8si)a + (__builtin_trap(), (__v8si)b)) : b; }\n"
-                                  "__attribute__((noinline)) void eh_mask(long offset, void* h, __mmask16 k) { __builtin_unwind_init(); sink = go ? (long)__builtin_ia32_kandhi(k, (__builtin_eh_return(offset, h), k)) : (long)k; }\n"
-                                  "__attribute__((noinline)) void eh_vector(long offset, void* h, __m512i a) { __builtin_unwind_init(); sink = go ? ((__v16si)a + (__builtin_eh_return(offset, h), (__v16si)a))[0] : ((__v16si)a)[1]; }\n"
-                                  "int main(void)\n"
-                                  "{\n"
-                                  "    __m512i a = _mm512_set1_epi32(3), b = _mm512_set1_epi32(4);\n"
-                                  "    __m256i c = _mm256_set1_epi32(5);\n"
-                                  "    printf(\"%d %d %d %d\\n\", (int)kand_trap(6), _mm512_reduce_add_epi32(select_trap(a, b, 7)), _mm512_reduce_add_epi32(add_trap(a, b)), ((__v8si)add_trap256(c, c))[0]);\n"
-                                  "    eh_mask(0, 0, 9);\n"
-                                  "    long m = sink;\n"
-                                  "    eh_vector(0, 0, a);\n"
-                                  "    printf(\"%ld %ld\\n\", m, sink);\n"
-                                  "    return 0;\n"
-                                  "}\n";
+    const char* program = check_test_driver_input_text(test, inputs + 0);
     char source[256];
     char outputs[5][256];
     snprintf(source, sizeof(source), "%s/dead_vectors.c", directory);
@@ -3281,7 +2505,7 @@ static void check_test_driver_dead_vectors(CheckTest* test, const char* clang, c
     {
         snprintf(outputs[k], sizeof(outputs[k]), "%s/dead_vectors-%u", directory, k);
     }
-    const bool written = parse_test_write(source, program, sizeof(program) - 1);
+    const bool written = parse_test_write(source, program, inputs[0].length);
     check_test_expect(test, written, "the dead vectors' program written");
     const uint64_t required = BUSTER_X86_FEATURE(AVX512F) | BUSTER_X86_FEATURE(AVX512BW) | BUSTER_X86_FEATURE(AVX512CD) | BUSTER_X86_FEATURE(AVX512DQ) |
                               BUSTER_X86_FEATURE(AVX512VL);
@@ -3358,33 +2582,11 @@ static void check_test_driver_dead_vectors(CheckTest* test, const char* clang, c
 // libgcc_s.so.1.
 static bool check_test_driver_has_gcc_s(void);
 
-static void check_test_driver_split_stack(CheckTest* test, const char* executable, const char* directory)
+static void check_test_driver_split_stack(CheckTest* test, const char* clang, const char* executable, const char* directory, const CheckDriverProgramInput* inputs)
 {
-    static const char split[] = "extern void __splitstack_getcontext(void* context[10]);\n"
-                                "int main(void)\n"
-                                "{\n"
-                                "    void* context[10];\n"
-                                "    __splitstack_getcontext(context);\n"
-                                "    return 0;\n"
-                                "}\n";
-    static const char backtrace[] = "#include <stdio.h>\n"
-                                    "struct _Unwind_Context;\n"
-                                    "typedef int (*Trace)(struct _Unwind_Context* context, void* argument);\n"
-                                    "extern int _Unwind_Backtrace(Trace trace, void* argument);\n"
-                                    "static int count(struct _Unwind_Context* context, void* argument)\n"
-                                    "{\n"
-                                    "    (void)context;\n"
-                                    "    *(int*)argument += 1;\n"
-                                    "    return 0;\n"
-                                    "}\n"
-                                    "int main(void)\n"
-                                    "{\n"
-                                    "    int frames = 0;\n"
-                                    "    _Unwind_Backtrace(count, &frames);\n"
-                                    "    printf(\"%d\\n\", frames > 0);\n"
-                                    "    return 0;\n"
-                                    "}\n";
-    static const struct
+    const char* split = check_test_driver_input_text(test, inputs + 0);
+    const char* backtrace = check_test_driver_input_text(test, inputs + 1);
+    const struct
     {
         const char* name;
         const char* source;
@@ -3626,31 +2828,15 @@ static void check_test_driver_damaged_snapshot(CheckTest* test, const char* exec
 // libgcc.a's __mulsc3, __muldc3, __mulxc3, __divsc3, __divdc3 and __divxc3 (#133's lowering). Linked by both paths into
 // the same bytes, needing libc.so.6 alone (the members join the executable), it must print every part's bits (%a) as
 // this executable, built by clang, computes them.
-static void check_test_driver_complex(CheckTest* test, const char* executable, const char* directory)
+static void check_test_driver_complex(CheckTest* test, const char* clang, const char* executable, const char* directory, const CheckDriverProgramInput* inputs)
 {
-    static const char program[] = "#include <stdio.h>\n"
-                                  "static volatile double ar = 1.5, ai = -2.25, br = 0.5, bi = 3.0;\n"
-                                  "static volatile float fr = 2.0f, fi = 0.5f;\n"
-                                  "static volatile long double lr = 1.25L, li = -0.75L;\n"
-                                  "int main(void)\n"
-                                  "{\n"
-                                  "    _Complex double a = ar + ai * 1.0i, b = br + bi * 1.0i;\n"
-                                  "    _Complex float f = fr + fi * 1.0fi, g = fi - fr * 1.0fi;\n"
-                                  "    _Complex long double l = lr + li * 1.0Li, m = li + lr * 1.0Li;\n"
-                                  "    _Complex double p = a * b, q = a / b, r = ar / b;\n"
-                                  "    _Complex float s = f * g, t = f / g;\n"
-                                  "    _Complex long double u = l * m, v = l / m;\n"
-                                  "    printf(\"%a %a %a %a %a %a %a %a %a %a %La %La %La %La\\n\", __real__ p, __imag__ p, __real__ q, __imag__ q, __real__ r,\n"
-                                  "           __imag__ r, (double)__real__ s, (double)__imag__ s, (double)__real__ t, (double)__imag__ t, __real__ u, __imag__ u,\n"
-                                  "           __real__ v, __imag__ v);\n"
-                                  "    return 0;\n"
-                                  "}\n";
+    const char* program = check_test_driver_input_text(test, inputs + 0);
     char source[256];
     char outputs[2][256];
     snprintf(source, sizeof(source), "%s/complex.c", directory);
     snprintf(outputs[0], sizeof(outputs[0]), "%s/complex", directory);
     snprintf(outputs[1], sizeof(outputs[1]), "%s/complex-scalar", directory);
-    const bool written = parse_test_write(source, program, sizeof(program) - 1);
+    const bool written = parse_test_write(source, program, inputs[0].length);
     check_test_expect(test, written, "complex program written");
     char* text = NULL;
     bool linked = written;
@@ -3809,54 +2995,9 @@ static bool check_test_driver_temporaries(const uint8_t* bytes, uint64_t length,
 // reference rewritten once. Compiled with -c by both paths into the same bytes. The object holds no symbol of the
 // lowering's (.Lbuster_switch_N, .Lbuster_case_N), its tables' 17 entries are relocations against .text's section
 // symbol, and linked by clang it prints what the test's clang build computes, as does the direct path's executable.
-static void check_test_driver_switch_tables(CheckTest* test, const char* clang, const char* executable, const char* directory)
+static void check_test_driver_switch_tables(CheckTest* test, const char* clang, const char* executable, const char* directory, const CheckDriverProgramInput* inputs)
 {
-    static const char program[] = "#include <stdio.h>\n"
-                                  "static int dense(int x)\n"
-                                  "{\n"
-                                  "    int result = -1;\n"
-                                  "    switch (x)\n"
-                                  "    {\n"
-                                  "        case 0: result = 3; break;\n"
-                                  "        case 1: result = 5; break;\n"
-                                  "        case 2: result = 7; break;\n"
-                                  "        case 3: result = 11; break;\n"
-                                  "        case 5: result = 13; break;\n"
-                                  "        case 7: result = 17; break;\n"
-                                  "        default: break;\n"
-                                  "    }\n"
-                                  "    return result;\n"
-                                  "}\n"
-                                  "static int wide(long x)\n"
-                                  "{\n"
-                                  "    int result = 0;\n"
-                                  "    switch (x)\n"
-                                  "    {\n"
-                                  "        case -3: result += 1;\n"
-                                  "        case -2: result += 2; break;\n"
-                                  "        case 0 ... 2: result += 4; break;\n"
-                                  "        case 4: result += 8;\n"
-                                  "        case 5: result += 16; break;\n"
-                                  "        default: result += 100; break;\n"
-                                  "    }\n"
-                                  "    return result;\n"
-                                  "}\n"
-                                  "static unsigned long long quotient(unsigned __int128 n, unsigned long long d)\n"
-                                  "{\n"
-                                  "    return (unsigned long long)(n / d);\n"
-                                  "}\n"
-                                  "int main(void)\n"
-                                  "{\n"
-                                  "    unsigned sum = 0;\n"
-                                  "    for (int i = -4; i < 10; i++)\n"
-                                  "    {\n"
-                                  "        sum = sum * 31 + (unsigned)dense(i);\n"
-                                  "        sum = sum * 7 + (unsigned)wide(i - 2);\n"
-                                  "        sum = sum * 3 + (unsigned)quotient(((unsigned __int128)(unsigned)(i + 5) << 70) + 12345, 1000003);\n"
-                                  "    }\n"
-                                  "    printf(\"%u\\n\", sum);\n"
-                                  "    return 0;\n"
-                                  "}\n";
+    const char* program = check_test_driver_input_text(test, inputs + 0);
     char source[256];
     char objects[2][256];
     char linked_path[256];
@@ -3866,7 +3007,7 @@ static void check_test_driver_switch_tables(CheckTest* test, const char* clang, 
     snprintf(objects[1], sizeof(objects[1]), "%s/switch-tables-scalar.o", directory);
     snprintf(linked_path, sizeof(linked_path), "%s/switch-tables-linked", directory);
     snprintf(direct_path, sizeof(direct_path), "%s/switch-tables-direct", directory);
-    const bool written = parse_test_write(source, program, sizeof(program) - 1);
+    const bool written = parse_test_write(source, program, inputs[0].length);
     check_test_expect(test, written, "jump tables' program written");
     char* text = NULL;
     bool compiled = written;
@@ -3918,26 +3059,9 @@ static void check_test_driver_switch_tables(CheckTest* test, const char* clang, 
 // #1122: __start_SEC and __stop_SEC over the sections of C identifiers, which GNU ld and lld define: a registry of
 // three entries with an alignment, a section of one, and a weak reference to a missing one, by -c's object that cc
 // links, by the direct path and by --tier1, each printing clang's build's output.
-static void check_test_driver_section_bounds(CheckTest* test, const char* clang, const char* executable, const char* directory)
+static void check_test_driver_section_bounds(CheckTest* test, const char* clang, const char* executable, const char* directory, const CheckDriverProgramInput* inputs)
 {
-    static const char program[] = "#include <stdio.h>\n"
-                                  "struct entry { long value; const char* name; };\n"
-                                  "__attribute__((section(\"bst_sec\"), aligned(16))) struct entry e0 = { 11, \"a\" };\n"
-                                  "__attribute__((aligned(16))) long between = 99;\n"
-                                  "__attribute__((section(\"bst_sec\"), aligned(16))) struct entry e1 = { 22, \"b\" };\n"
-                                  "__attribute__((section(\"bst_sec\"), aligned(16))) struct entry e2 = { 33, \"c\" };\n"
-                                  "__attribute__((section(\"bst_one\"))) int one = 5;\n"
-                                  "extern struct entry __start_bst_sec[], __stop_bst_sec[];\n"
-                                  "extern int __start_bst_one[], __stop_bst_one[];\n"
-                                  "extern int __start_bst_missing[] __attribute__((weak));\n"
-                                  "int main(void)\n"
-                                  "{\n"
-                                  "    long total = 0;\n"
-                                  "    for (struct entry* e = __start_bst_sec; e < __stop_bst_sec; e += 1) total += e->value;\n"
-                                  "    printf(\"%ld %ld %d %d %ld %d\\n\", total, (long)(__stop_bst_sec - __start_bst_sec), one, (int)(__stop_bst_one - __start_bst_one),\n"
-                                  "           between, __start_bst_missing == 0);\n"
-                                  "    return 0;\n"
-                                  "}\n";
+    const char* program = inputs[0].bytes;
     char source[256];
     char object[256];
     char linked_path[256];
@@ -3949,7 +3073,7 @@ static void check_test_driver_section_bounds(CheckTest* test, const char* clang,
     {
         snprintf(direct_path[path], sizeof(direct_path[path]), "%s/section-bounds-%u", directory, path);
     }
-    const bool written = parse_test_write(source, program, sizeof(program) - 1);
+    const bool written = parse_test_write(source, program, inputs[0].length);
     check_test_expect(test, written, "the section bounds fixture is written");
     char reference[256];
     snprintf(reference, sizeof(reference), "%s/section-bounds-clang", directory);
@@ -4015,58 +3139,11 @@ static bool check_test_driver_file_holds(const char* path, const char* needle)
     return result;
 }
 
-static void check_test_driver_cfstrings(CheckTest* test, const char* clang, const char* executable, const char* directory)
+static void check_test_driver_cfstrings(CheckTest* test, const char* clang, const char* executable, const char* directory, const CheckDriverProgramInput* inputs)
 {
-    static const char unit[] =
-        "static const void* never_called(void) { return __builtin___CFStringMakeConstantString(\"only\"); }\n"
-        "static const void* never_read = __builtin___CFStringMakeConstantString(\"initial\");\n"
-        "static unsigned long long h; static void mix(unsigned long long v) { h = h * 31 + v; }\n"
-        "typedef struct { const int* isa; int flags; const char* str; long length; } CF;\n"
-        "static const void* s1 = __builtin___CFStringMakeConstantString(\"hello\");\n"
-        "static const void* s2 = __builtin___NSStringMakeConstantString(\"hello\");\n"
-        "static long as_long = (long)__builtin___CFStringMakeConstantString(\"x\");\n"
-        "static const char* shifted = (const char*)__builtin___CFStringMakeConstantString(\"y\") + 8;\n"
-        "static const void* other(void) { return __builtin___CFStringMakeConstantString(\"hello\"); }\n"
-        "const int* class_reference(void);\n"
-        "static void bytes(const CF* c)\n"
-        "{\n"
-        "    mix(c->isa == class_reference()); mix((unsigned)c->flags); mix((unsigned long)c->length);\n"
-        "    if (c->flags == 0x7d0) { const unsigned short* u = (const unsigned short*)c->str; for (long i = 0; i <= c->length; i++) mix(u[i]); }\n"
-        "    else { for (long i = 0; i <= c->length; i++) mix((unsigned char)c->str[i]); }\n"
-        "}\n"
-        "int tested(int n)\n"
-        "{\n"
-        "    h = (unsigned)n;\n"
-        "    const CF* a = (const CF*)__builtin___CFStringMakeConstantString(\"hello\");\n"
-        "    mix(a == s1); mix(a == s2); mix(a == other()); mix((long)a == as_long);\n"
-        "    mix((const CF*)as_long == (const CF*)__builtin___CFStringMakeConstantString(\"x\"));\n"
-        "    mix(shifted == (const char*)__builtin___CFStringMakeConstantString(\"y\") + 8);\n"
-        "    bytes(a); bytes((const CF*)__builtin___CFStringMakeConstantString(\"\"));\n"
-        "    bytes((const CF*)__builtin___CFStringMakeConstantString(\"h\\xc3\\xa9llo \\xf0\\x9f\\x98\\x80\"));\n"
-        "    bytes((const CF*)__builtin___CFStringMakeConstantString(\"a\\0b\"));\n"
-        "    bytes((const CF*)__builtin___CFStringMakeConstantString(\"cut \\xc3\\x28 here\"));\n"
-        "    bytes((const CF*)__builtin___CFStringMakeConstantString((\"pa\" \"ren\")));\n"
-        "    bytes((const CF*)__builtin___CFStringMakeConstantString((const char*)\"cast\"));\n"
-        "    bytes((const CF*)__builtin___NSStringMakeConstantString(\"ns\"));\n"
-        "    bytes((const CF*)__builtin___CFStringMakeConstantString(\"only\"));\n"
-        "    bytes((const CF*)__builtin___CFStringMakeConstantString(\"initial\"));\n"
-        "    mix(__builtin___NSStringMakeConstantString(\"ns\") == __builtin___CFStringMakeConstantString(\"ns\"));\n"
-        "    mix(__builtin___CFStringMakeConstantString(\"a\\0b\") != __builtin___CFStringMakeConstantString(\"a\"));\n"
-        "    mix(__builtin___CFStringMakeConstantString(\"abc\")->length * 10 + sizeof(*__builtin___CFStringMakeConstantString(\"q\")));\n"
-        "    return (int)(h ^ (h >> 32));\n"
-        "}\n";
-    static const char driver[] =
-        "#include <stdio.h>\n"
-        "int __CFConstantStringClassReference[4];\n"
-        "const int* class_reference(void) { return __CFConstantStringClassReference; }\n"
-        "int tested(int);\n"
-        "int main(void) { printf(\"%d %d\\n\", tested(3), tested(-2)); return 0; }\n";
-    static const char declared[] =
-        "extern const int __CFConstantStringClassReference[];\n"
-        "typedef struct { const int* isa; int flags; const char* str; long length; } CF;\n"
-        "const int* class_reference(void);\n"
-        "int tested(int n) { const CF* c = (const CF*)__builtin___CFStringMakeConstantString(\"d\"); return n + (c->isa == class_reference()) * 10 +\n"
-        "(c->isa == __CFConstantStringClassReference) * 100 + (int)c->length * 1000; }\n";
+    const char* unit = check_test_driver_input_text(test, inputs + 0);
+    const char* driver = inputs[1].bytes;
+    const char* declared = check_test_driver_input_text(test, inputs + 2);
     for (uint32_t variant = 0; variant < 2; variant += 1)
     {
         char source[256];
@@ -4080,7 +3157,7 @@ static void check_test_driver_cfstrings(CheckTest* test, const char* clang, cons
         snprintf(reference, sizeof(reference), "%s/cfstrings-clang", directory);
         snprintf(linked, sizeof(linked), "%s/cfstrings-linked", directory);
         const char* program = variant == 0 ? unit : declared;
-        const bool written = parse_test_write(source, program, strlen(program)) && parse_test_write(main_source, driver, sizeof(driver) - 1);
+        const bool written = parse_test_write(source, program, strlen(program)) && parse_test_write(main_source, driver, inputs[1].length);
         check_test_expect(test, written, "the constant CFStrings' fixture is written");
         char* text = NULL;
         char* clang_arguments[] = { (char*)clang, "-O0", "-w", "-o", reference, source, main_source, NULL };
@@ -4118,14 +3195,14 @@ static void check_test_driver_cfstrings(CheckTest* test, const char* clang, cons
         unlink(reference);
     }
     // Its files' names hold no "cfstring", which the object is searched for.
-    static const char unreferenced[] = "int main(void) { return sizeof(__builtin___CFStringMakeConstantString(\"x\")) != sizeof(void *); }\n";
+    const char* unreferenced = check_test_driver_input_text(test, inputs + 3);
     char source[256];
     char object[256];
     char linked[256];
     snprintf(source, sizeof(source), "%s/constant-string-sizeof.c", directory);
     snprintf(object, sizeof(object), "%s/constant-string-sizeof.o", directory);
     snprintf(linked, sizeof(linked), "%s/constant-string-sizeof", directory);
-    const bool written = parse_test_write(source, unreferenced, sizeof(unreferenced) - 1);
+    const bool written = parse_test_write(source, unreferenced, inputs[3].length);
     check_test_expect(test, written, "the unreferenced CFString's fixture is written");
     for (uint32_t path = 0; written && path < 4; path += 1)
     {
@@ -4160,15 +3237,11 @@ static void check_test_driver_cfstrings(CheckTest* test, const char* clang, cons
 // #1122's own program, one atom in the section, whose count is 1: by clang, by -c's object that cc links, by the direct
 // path and by --tier1 with and without its scalar twin, each printing "5 1"; and a strong reference to a section that
 // doesn't exist, which stays undefined, as GNU ld and lld leave it.
-static void check_test_driver_section_bounds_exact(CheckTest* test, const char* clang, const char* executable, const char* directory)
+static void check_test_driver_section_bounds_exact(CheckTest* test, const char* clang, const char* executable, const char* directory, const CheckDriverProgramInput* inputs)
 {
-    static const char program[] = "#include <stdio.h>\n"
-                                  "__attribute__((section(\"mysec\"))) int in_sec = 5;\n"
-                                  "extern int __start_mysec[], __stop_mysec[];\n"
-                                  "int main(void) { printf(\"%d %d\\n\", in_sec, (int)(__stop_mysec - __start_mysec)); return 0; }\n";
-    static const char missing_program[] = "extern int __start_bst_absent[];\n"
-                                          "int main(void) { return __start_bst_absent != 0; }\n";
-    static const char expected[] = "5 1\n";
+    const char* program = inputs[0].bytes;
+    const char* missing_program = inputs[1].bytes;
+    const char* expected = check_test_driver_input_text(test, inputs + 2);
     char source[256];
     char missing_source[256];
     char object[256];
@@ -4184,7 +3257,7 @@ static void check_test_driver_section_bounds_exact(CheckTest* test, const char* 
     {
         snprintf(direct_path[path], sizeof(direct_path[path]), "%s/section-bounds-exact-%u", directory, path);
     }
-    const bool written = parse_test_write(source, program, sizeof(program) - 1);
+    const bool written = parse_test_write(source, program, inputs[0].length);
     check_test_expect(test, written, "#1122's fixture is written");
     char* text = NULL;
     char* clang_arguments[] = { (char*)clang, "-O0", "-o", reference, source, NULL };
@@ -4218,7 +3291,7 @@ static void check_test_driver_section_bounds_exact(CheckTest* test, const char* 
                           option_names[path]);
         unlink(direct_path[path]);
     }
-    const bool missing_written = parse_test_write(missing_source, missing_program, sizeof(missing_program) - 1);
+    const bool missing_written = parse_test_write(missing_source, missing_program, inputs[1].length);
     check_test_expect(test, missing_written, "the missing section's fixture is written");
     char* missing_arguments[] = { (char*)executable, "-o", direct_path[0], missing_source, NULL };
     const int missing_status = missing_written ? check_test_driver_spawn(missing_arguments, &text) : -1;
@@ -4290,33 +3363,10 @@ static void check_test_driver_section_bounds_rooted(CheckTest* test, const char*
 // The statics of a bound section, by plain bound names ("24 5", gcc's), and by bound names an asm label gives other
 // identifiers (#1187's review): the label is the bound's linkage name, so its section's members are rooted all the same
 // ("1 3 2", gcc's).
-static void check_test_driver_section_bounds_static(CheckTest* test, const char* executable, const char* directory)
+static void check_test_driver_section_bounds_static(CheckTest* test, const char* clang, const char* executable, const char* directory, const CheckDriverProgramInput* inputs)
 {
-    static const char program[] = "#include <stdio.h>\n"
-                                  "struct entry { long value; };\n"
-                                  "static __attribute__((section(\"st_sec\"), aligned(16))) struct entry s0 = { 7 };\n"
-                                  "static __attribute__((section(\"st_sec\"), aligned(16))) struct entry s1 = { 8 };\n"
-                                  "__attribute__((section(\"st_sec\"), aligned(16))) struct entry g0 = { 9 };\n"
-                                  "extern struct entry __start_st_sec[], __stop_st_sec[];\n"
-                                  "int main(void)\n"
-                                  "{\n"
-                                  "    long total = 0;\n"
-                                  "    for (struct entry* e = __start_st_sec; e < __stop_st_sec; e += 1) total += e->value;\n"
-                                  "    printf(\"%ld %ld\\n\", total, (long)(__stop_st_sec - __start_st_sec));\n"
-                                  "    return 0;\n"
-                                  "}\n";
-    static const char renamed[] = "#include <stdio.h>\n"
-                                  "__attribute__((section(\"mreg\"))) static int a = 1;\n"
-                                  "__attribute__((section(\"mreg\"))) static int b = 2;\n"
-                                  "extern int begin[] __asm__(\"__start_mreg\");\n"
-                                  "extern int end[] __asm__(\"__stop_mreg\");\n"
-                                  "int main(void)\n"
-                                  "{\n"
-                                  "    int total = 0;\n"
-                                  "    for (int* p = begin; p < end; p++) total += *p;\n"
-                                  "    printf(\"%d %d %td\\n\", a, total, end - begin);\n"
-                                  "    return 0;\n"
-                                  "}\n";
+    const char* program = check_test_driver_input_text(test, inputs + 0);
+    const char* renamed = check_test_driver_input_text(test, inputs + 1);
     check_test_driver_section_bounds_rooted(test, executable, directory, program, "section-bounds-static", "24 5\n", "the section's statics");
     check_test_driver_section_bounds_rooted(test, executable, directory, renamed, "section-bounds-renamed", "1 3 2\n", "the statics of an asm-labelled bound");
 }
@@ -4325,25 +3375,10 @@ static void check_test_driver_section_bounds_static(CheckTest* test, const char*
 // second run's start is its section's alignment's, not the alignment its first member's. GNU ld and lld align the run
 // as its output section's; a run that only aligned its first member to the member's own would start inside the first
 // section's alignment gap, changing the span the bounds report.
-static void check_test_driver_section_bounds_align(CheckTest* test, const char* executable, const char* directory)
+static void check_test_driver_section_bounds_align(CheckTest* test, const char* clang, const char* executable, const char* directory, const CheckDriverProgramInput* inputs)
 {
-    static const char program[] = "#include <stdio.h>\n"
-                                  "#include <stdint.h>\n"
-                                  "__attribute__((section(\"aaa\"), aligned(16), used)) int a0 = 1;\n"
-                                  "__attribute__((section(\"aaa\"), aligned(4), used)) int a1 = 2;\n"
-                                  "__attribute__((section(\"bbb\"), aligned(4), used)) int b0 = 3;\n"
-                                  "__attribute__((section(\"bbb\"), aligned(16), used)) int b1 = 4;\n"
-                                  "extern char __start_aaa[], __stop_aaa[], __start_bbb[], __stop_bbb[];\n"
-                                  "int main(void)\n"
-                                  "{\n"
-                                  "    printf(\"aaa start%%16=%lu span=%ld; bbb start%%16=%lu span=%ld\\n\",\n"
-                                  "           (unsigned long)((uintptr_t)__start_aaa % 16),\n"
-                                  "           (long)(__stop_aaa - __start_aaa),\n"
-                                  "           (unsigned long)((uintptr_t)__start_bbb % 16),\n"
-                                  "           (long)(__stop_bbb - __start_bbb));\n"
-                                  "    return 0;\n"
-                                  "}\n";
-    static const char expected[] = "aaa start%16=0 span=8; bbb start%16=0 span=20\n";
+    const char* program = inputs[0].bytes;
+    const char* expected = check_test_driver_input_text(test, inputs + 1);
     char source[256];
     char object[256];
     char linked_path[256];
@@ -4355,7 +3390,7 @@ static void check_test_driver_section_bounds_align(CheckTest* test, const char* 
     {
         snprintf(direct_path[path], sizeof(direct_path[path]), "%s/section-bounds-align-%u", directory, path);
     }
-    const bool written = parse_test_write(source, program, sizeof(program) - 1);
+    const bool written = parse_test_write(source, program, inputs[0].length);
     check_test_expect(test, written, "the two sections' fixture is written");
     char* text = NULL;
     char* object_arguments[] = { (char*)executable, "-c", "-o", object, source, NULL };
@@ -4398,7 +3433,7 @@ static void check_test_driver_section_bounds_align(CheckTest* test, const char* 
 #define BUSTER_CHECK_TEST_DRIVER_MEMBERS 2000
 #define BUSTER_CHECK_TEST_DRIVER_RECORDS 300
 
-static void check_test_driver_members(CheckTest* test, const char* clang, const char* executable, const char* directory)
+static void check_test_driver_members(CheckTest* test, const char* clang, const char* executable, const char* directory, const CheckDriverProgramInput* inputs)
 {
     const uint64_t capacity = UINT64_C(1) << 20;
     char* program = malloc(capacity);
@@ -4485,8 +3520,8 @@ static void check_test_driver_members(CheckTest* test, const char* clang, const 
     check_test_expect(test, ran[0], "clang's build of the members' program runs");
     check_test_expect(test, ran[0] && ran[1] && strcmp(captured[1], captured[0]) == 0, "clang's link of the members' object prints what clang's build prints");
     check_test_expect(test, ran[0] && ran[2] && strcmp(captured[2], captured[0]) == 0, "the direct path's members' program prints what clang's build prints");
-    static const char swizzle[] = "typedef float v4 __attribute__((ext_vector_type(4)));\nfloat f(v4* p) { return (*p).y; }\n";
-    const bool swizzle_written = parse_test_write(source, swizzle, sizeof(swizzle) - 1);
+    const char* swizzle = inputs[0].bytes;
+    const bool swizzle_written = parse_test_write(source, swizzle, inputs[0].length);
     for (uint32_t path = 0; swizzle_written && path < 2; path += 1)
     {
         char* const vector_arguments[] = { (char*)executable, "-c", "-o", objects[0], source, NULL };
@@ -4499,8 +3534,8 @@ static void check_test_driver_members(CheckTest* test, const char* clang, const 
         text = NULL;
     }
     // `p->y` (#1447's finding): the checker takes it as `(*p).y`, and the lowering refuses it as it refuses that.
-    static const char arrow[] = "typedef float v4 __attribute__((ext_vector_type(4)));\nfloat f(v4* p) { return p->y; }\n";
-    const bool arrow_written = parse_test_write(source, arrow, sizeof(arrow) - 1);
+    const char* arrow = inputs[1].bytes;
+    const bool arrow_written = parse_test_write(source, arrow, inputs[1].length);
     for (uint32_t path = 0; arrow_written && path < 4; path += 1)
     {
         char* const vector_arguments[] = { (char*)executable, path < 2 ? "-fsyntax-only" : "-c", "-o", objects[0], source, NULL };
@@ -4531,17 +3566,10 @@ static void check_test_driver_members(CheckTest* test, const char* clang, const 
 // misalign them: a global one, which clang -O2's code clears with movaps through its `extern` declaration, a static one
 // it clears through a pointer it may assume aligned, and a thread-local one it clears through its own declaration. The
 // object, the same by both paths, linked with clang's must run to 0, where it faulted on the first movaps before.
-static void check_test_driver_array_alignment(CheckTest* test, const char* clang, const char* executable, const char* directory)
+static void check_test_driver_array_alignment(CheckTest* test, const char* clang, const char* executable, const char* directory, const CheckDriverProgramInput* inputs)
 {
-    static const char program[] = "char pad1 = 1;\nchar big[64];\nchar pad2 = 2;\nstatic char pad3 = 3;\nstatic char hidden[48];\n"
-                                  "_Thread_local char pad4 = 4;\n_Thread_local char tls[32];\n"
-                                  "char* hidden_address(void) { return hidden; }\nvoid clear_all(void);\n"
-                                  "int main(void)\n{\n    big[0] = 1;\n    hidden[47] = 2;\n    tls[31] = 3;\n    clear_all();\n"
-                                  "    return big[0] + hidden[47] + tls[31] + pad1 + pad2 + pad3 + pad4 - 10;\n}\n";
-    static const char clear[] = "extern char big[64];\nextern _Thread_local char tls[32];\nchar* hidden_address(void);\n"
-                                "void clear_all(void)\n{\n    char* hidden = __builtin_assume_aligned(hidden_address(), 16);\n"
-                                "    for (int i = 0; i < 64; i += 1) big[i] = 0;\n    for (int i = 0; i < 48; i += 1) hidden[i] = 0;\n"
-                                "    for (int i = 0; i < 32; i += 1) tls[i] = 0;\n}\n";
+    const char* program = check_test_driver_input_text(test, inputs + 0);
+    const char* clear = check_test_driver_input_text(test, inputs + 1);
     char sources[2][256];
     char objects[3][256];
     char linked[256];
@@ -4551,7 +3579,7 @@ static void check_test_driver_array_alignment(CheckTest* test, const char* clang
     snprintf(objects[1], sizeof(objects[1]), "%s/alignment-scalar.o", directory);
     snprintf(objects[2], sizeof(objects[2]), "%s/alignment-clear.o", directory);
     snprintf(linked, sizeof(linked), "%s/alignment-linked", directory);
-    const bool written = parse_test_write(sources[0], program, sizeof(program) - 1) && parse_test_write(sources[1], clear, sizeof(clear) - 1);
+    const bool written = parse_test_write(sources[0], program, inputs[0].length) && parse_test_write(sources[1], clear, inputs[1].length);
     check_test_expect(test, written, "the arrays' alignment program is written");
     char* text = NULL;
     char* const vector_arguments[] = { (char*)executable, "-c", "-o", objects[0], sources[0], NULL };
@@ -5037,12 +4065,12 @@ static void check_test_dependency_admission(CheckTest* test, const char* directo
 // b_func, with -lB on the line or without it. clang builds the libraries, and each program runs, finding them through
 // LD_LIBRARY_PATH. Then -lA alone for main calling a_func, where nothing defines libA's b_func: refused, naming libA and
 // b_func, as GNU ld and lld refuse it (--no-allow-shlib-undefined), where the program would fail to load.
-static void check_test_driver_dependencies(CheckTest* test, const char* clang, const char* executable, const char* directory)
+static void check_test_driver_dependencies(CheckTest* test, const char* clang, const char* executable, const char* directory, const CheckDriverProgramInput* inputs)
 {
-    static const char a_source[] = "int b_func(void);\nint a_func(void) { return b_func() + 1; }\n";
-    static const char b_source[] = "int b_func(void) { return 41; }\n";
-    static const char program[] = "int a_func(void);\nint main(void) { return a_func() == 42 ? 0 : 1; }\n";
-    static const char defines_b[] = "int a_func(void);\nint b_func(void) { return 9; }\nint main(void) { return a_func() == 10 ? 0 : 1; }\n";
+    const char* a_source = inputs[0].bytes;
+    const char* b_source = inputs[1].bytes;
+    const char* program = inputs[2].bytes;
+    const char* defines_b = check_test_driver_input_text(test, inputs + 3);
     char a_path[256];
     char b_path[256];
     char source[256];
@@ -5061,8 +4089,8 @@ static void check_test_driver_dependencies(CheckTest* test, const char* clang, c
     snprintf(library_ab, sizeof(library_ab), "%s/libAB.so", directory);
     snprintf(output, sizeof(output), "%s/uses_a", directory);
     snprintf(search, sizeof(search), "LD_LIBRARY_PATH=%s", directory);
-    const bool written = parse_test_write(a_path, a_source, sizeof(a_source) - 1) && parse_test_write(b_path, b_source, sizeof(b_source) - 1) &&
-                         parse_test_write(source, program, sizeof(program) - 1) && parse_test_write(defines_source, defines_b, sizeof(defines_b) - 1);
+    const bool written = parse_test_write(a_path, a_source, inputs[0].length) && parse_test_write(b_path, b_source, inputs[1].length) &&
+                         parse_test_write(source, program, inputs[2].length) && parse_test_write(defines_source, defines_b, inputs[3].length);
     // libB.so, libA.so without a DT_NEEDED for libB, and libAB.so with one (libB.so, which has no soname).
     char* const build_b[] = { (char*)clang, "-shared", "-fPIC", "-o", library_b, b_path, NULL };
     char* const build_a[] = { (char*)clang, "-shared", "-fPIC", "-o", library_a, a_path, NULL };
@@ -5139,34 +4167,13 @@ static void check_test_driver_dependencies(CheckTest* test, const char* clang, c
 // with -lplain_needs beside -lhelper, in either order, a library main calls too whose DT_NEEDED names libgcc_s.so.1, the
 // loader loads it for that one, and GNU ld writes no entry of the executable's own for it. On a system without
 // libgcc_s.so.1 (check_test_driver_has_gcc_s), -lhelper is refused, naming the library and the name.
-static void check_test_driver_unwinder_dependency(CheckTest* test, const char* clang, const char* executable, const char* directory)
+static void check_test_driver_unwinder_dependency(CheckTest* test, const char* clang, const char* executable, const char* directory, const CheckDriverProgramInput* inputs)
 {
-    static const char helper_source[] = "struct _Unwind_Context;\n"
-                                        "typedef int (*Trace)(struct _Unwind_Context* context, void* argument);\n"
-                                        "extern int _Unwind_Backtrace(Trace trace, void* argument);\n"
-                                        "static int frame(struct _Unwind_Context* context, void* argument)\n"
-                                        "{\n"
-                                        "    (void)context;\n"
-                                        "    *(int*)argument += 1;\n"
-                                        "    return 0;\n"
-                                        "}\n"
-                                        "int helper(void)\n"
-                                        "{\n"
-                                        "    int frames = 0;\n"
-                                        "    _Unwind_Backtrace(frame, &frames);\n"
-                                        "    return frames >= 2 ? 0 : 1;\n"
-                                        "}\n";
-    static const char program[] = "int helper(void);\nint main(void) { return helper(); }\n";
-    static const char plain_source[] = "int plain(void) { return 0; }\n";
-    static const char both[] = "int helper(void);\nint plain(void);\nint main(void) { return helper() + plain(); }\n";
-    static const char defines[] = "int helper(void);\n"
-                                  "int _Unwind_Backtrace(void* trace, void* argument)\n"
-                                  "{\n"
-                                  "    (void)trace;\n"
-                                  "    *(int*)argument = 7;\n"
-                                  "    return 0;\n"
-                                  "}\n"
-                                  "int main(void) { return helper(); }\n";
+    const char* helper_source = inputs[0].bytes;
+    const char* program = check_test_driver_input_text(test, inputs + 1);
+    const char* plain_source = inputs[2].bytes;
+    const char* both = inputs[3].bytes;
+    const char* defines = inputs[4].bytes;
     const bool unwinder = check_test_driver_has_gcc_s();
     char helper_path[256];
     char helper_object[256];
@@ -5202,9 +4209,9 @@ static void check_test_driver_unwinder_dependency(CheckTest* test, const char* c
         pclose(found);
     }
     gcc_s[located ? strcspn(gcc_s, "\n") : 0] = 0;
-    const bool written = parse_test_write(helper_path, helper_source, sizeof(helper_source) - 1) && parse_test_write(source, program, sizeof(program) - 1) &&
-                         parse_test_write(defines_source, defines, sizeof(defines) - 1) && parse_test_write(plain_path, plain_source, sizeof(plain_source) - 1) &&
-                         parse_test_write(both_source, both, sizeof(both) - 1);
+    const bool written = parse_test_write(helper_path, helper_source, inputs[0].length) && parse_test_write(source, program, inputs[1].length) &&
+                         parse_test_write(defines_source, defines, inputs[4].length) && parse_test_write(plain_path, plain_source, inputs[2].length) &&
+                         parse_test_write(both_source, both, inputs[3].length);
     char* const compile[] = { (char*)clang, "-O2", "-fPIC", "-c", "-o", helper_object, helper_path, NULL };
     char* const link_alone[] = { "ld", "-shared", "--eh-frame-hdr", "-soname", "libhelper.so", "-o", library, helper_object, NULL };
     char* const link_needs[] = { "ld", "-shared", "--eh-frame-hdr", "-soname", "libhelper_needs.so", "-o", library_needs, helper_object, gcc_s, NULL };
@@ -5294,10 +4301,10 @@ static void check_test_driver_unwinder_dependency(CheckTest* test, const char* c
 
 // A library that a linker script names by its path, without a soname (#398's review): its DT_NEEDED entry is that
 // path, as GNU ld and lld write it, so that the program loads it with no search path.
-static void check_test_driver_script_path(CheckTest* test, const char* clang, const char* executable, const char* directory)
+static void check_test_driver_script_path(CheckTest* test, const char* clang, const char* executable, const char* directory, const CheckDriverProgramInput* inputs)
 {
-    static const char c_source[] = "int c_func(void) { return 7; }\n";
-    static const char program[] = "int c_func(void);\nint main(void) { return c_func() == 7 ? 0 : 1; }\n";
+    const char* c_source = inputs[0].bytes;
+    const char* program = inputs[1].bytes;
     char private_directory[256];
     char scripts[256];
     char c_path[256];
@@ -5316,8 +4323,8 @@ static void check_test_driver_script_path(CheckTest* test, const char* clang, co
     snprintf(output, sizeof(output), "%s/uses_c", directory);
     snprintf(script_text, sizeof(script_text), "INPUT(%s)\n", library_c);
     snprintf(expected, sizeof(expected), "%s libc.so.6", library_c);
-    const bool made = mkdir(private_directory, 0755) == 0 && mkdir(scripts, 0755) == 0 && parse_test_write(c_path, c_source, sizeof(c_source) - 1) &&
-                      parse_test_write(script, script_text, strlen(script_text)) && parse_test_write(source, program, sizeof(program) - 1);
+    const bool made = mkdir(private_directory, 0755) == 0 && mkdir(scripts, 0755) == 0 && parse_test_write(c_path, c_source, inputs[0].length) &&
+                      parse_test_write(script, script_text, strlen(script_text)) && parse_test_write(source, program, inputs[1].length);
     char* const build[] = { (char*)clang, "-shared", "-fPIC", "-o", library_c, c_path, NULL };
     char* const link[] = { (char*)executable, "-o", output, source, "-L", scripts, "-lwrap", NULL };
     char* const run[] = { output, NULL };
@@ -5503,11 +4510,11 @@ static bool check_test_driver_change_need(const char* from, const char* to, cons
 // the direct link's DT_NEEDED, or refuse, as the direct link does, with the foreign resolver's words for needs that
 // don't read ("malformed input in libA.so"), and a refusal of either route leaves the output that was there. clang
 // builds the libraries with version scripts.
-static void check_test_driver_versions(CheckTest* test, const char* clang, const char* executable, const char* directory)
+static void check_test_driver_versions(CheckTest* test, const char* clang, const char* executable, const char* directory, const CheckDriverProgramInput* inputs)
 {
-    static const char a_source[] = "int foo(void);\nint a_func(void) { return foo(); }\n";
-    static const char program[] = "int a_func(void);\nint main(void) { return a_func() == 11 ? 0 : 1; }\n";
-    static const char defines_foo[] = "int a_func(void);\nint foo(void) { return 11; }\nint main(void) { return a_func() == 11 ? 0 : 1; }\n";
+    const char* a_source = inputs[0].bytes;
+    const char* program = check_test_driver_input_text(test, inputs + 1);
+    const char* defines_foo = inputs[2].bytes;
     // The libB the libA is built against, four libBs to link with, and two libCs: a name, source, version script and
     // library each (DIRECTORY/NAME/lib<LIBRARY>.so, whose soname is its file's name).
     static const char* const variants[][4] = {
@@ -5593,7 +4600,7 @@ static void check_test_driver_versions(CheckTest* test, const char* clang, const
           "libc.so.6", "GLIBC_9.9.9", "bglibc/libB.so" },
     };
     // The object that makes a link a mixed one, which nothing refers to.
-    static const char extra_source[] = "int versioned_extra = 1;\n";
+    const char* extra_source = inputs[3].bytes;
     // What a refused link must leave at its output.
     static const char old_output[] = "the output before the link\n";
     char path[3][320];
@@ -5613,8 +4620,8 @@ static void check_test_driver_versions(CheckTest* test, const char* clang, const
     snprintf(outputs[0][1], sizeof(outputs[0][1]), "%s/versioned-scalar", directory);
     snprintf(outputs[1][0], sizeof(outputs[1][0]), "%s/versioned-mixed", directory);
     snprintf(outputs[1][1], sizeof(outputs[1][1]), "%s/versioned-mixed-scalar", directory);
-    bool built = parse_test_write(a_path, a_source, sizeof(a_source) - 1) && parse_test_write(sources[0], program, sizeof(program) - 1) &&
-                 parse_test_write(sources[1], defines_foo, sizeof(defines_foo) - 1) && parse_test_write(extra[0], extra_source, sizeof(extra_source) - 1);
+    bool built = parse_test_write(a_path, a_source, inputs[0].length) && parse_test_write(sources[0], program, inputs[1].length) &&
+                 parse_test_write(sources[1], defines_foo, inputs[2].length) && parse_test_write(extra[0], extra_source, inputs[3].length);
     char* text = NULL;
     char* const build_extra[] = { (char*)clang, "-c", "-o", extra[1], extra[0], NULL };
     built = built && check_test_driver_spawn(build_extra, &text) == 0;
@@ -5816,7 +4823,7 @@ static void check_test_driver_versions(CheckTest* test, const char* clang, const
 // paths, or name the library and missing reference and preserve the old output. The two-reference cases define
 // either name in the executable: whichever reference the library reader puts first, satisfying it must not hide
 // the other one. Libraries built without the runtime have genuinely unversioned references, including getpid.
-static void check_test_driver_unversioned_libraries(CheckTest* test, const char* clang, const char* executable, const char* directory)
+static void check_test_driver_unversioned_libraries(CheckTest* test, const char* clang, const char* executable, const char* directory, const CheckDriverProgramInput* inputs)
 {
     enum
     {
@@ -5839,10 +4846,10 @@ static void check_test_driver_unversioned_libraries(CheckTest* test, const char*
         "int u_second(void) { return 11; }\n",
         "",
     };
-    static const char calls[] = "int u_func(void);\nint main(void) { return u_func() == 11 ? 0 : 1; }\n";
-    static const char calls_hidden[] = "int u_func(void);\nint main(void) { return u_value() == 22 && u_func() == 11 ? 0 : 1; }\n";
-    static const char unused[] = "int main(void) { return 0; }\n";
-    static const char extra_source[] = "int unversioned_extra = 1;\n";
+    const char* calls = check_test_driver_input_text(test, inputs + 0);
+    const char* calls_hidden = check_test_driver_input_text(test, inputs + 1);
+    const char* unused = check_test_driver_input_text(test, inputs + 2);
+    const char* extra_source = inputs[3].bytes;
     static const char old_output[] = "the output before the unversioned link\n";
     static const struct
     {
@@ -6119,7 +5126,7 @@ static void check_test_driver_unversioned_libraries(CheckTest* test, const char*
             snprintf(outputs[route][scalar], sizeof(outputs[route][scalar]), "%s/unversioned-%u-%u", directory, route, scalar);
         }
     }
-    bool built = parse_test_write(fixture, extra_source, sizeof(extra_source) - 1);
+    bool built = parse_test_write(fixture, extra_source, inputs[3].length);
     char* text = NULL;
     char* const build_extra[] = {
         (char*)clang,
@@ -6273,15 +5280,15 @@ static void check_test_driver_unversioned_libraries(CheckTest* test, const char*
 }
 
 // Compiler identification is an action, while an option operand that spells an action is still an operand.
-static void check_test_driver_identification(CheckTest* test, const char* executable, const char* directory)
+static void check_test_driver_identification(CheckTest* test, const char* clang, const char* executable, const char* directory, const CheckDriverProgramInput* inputs)
 {
     char compiler[PATH_MAX];
     char source[256];
     char object[256];
     snprintf(source, sizeof(source), "%s/identity.c", directory);
     snprintf(object, sizeof(object), "%s/--version", directory);
-    static const char program[] = "int value = 42;\n";
-    const bool made = realpath(executable, compiler) != NULL && parse_test_write(source, program, sizeof(program) - 1);
+    const char* program = inputs[0].bytes;
+    const bool made = realpath(executable, compiler) != NULL && parse_test_write(source, program, inputs[0].length);
     char* const version[] = { compiler, "-O2", "--version", source, NULL };
     char* const machine[] = { compiler, "-dumpmachine", NULL };
     char* const target[] = { compiler, "-target", "x86_64-acme-linux-gnu", "-dumpmachine", NULL };
@@ -6349,15 +5356,15 @@ static void check_test_driver_identification(CheckTest* test, const char* execut
 }
 
 // Layout flags not implemented by the checker must not silently produce objects with another ABI.
-static void check_test_driver_layout_options(CheckTest* test, const char* executable, const char* directory)
+static void check_test_driver_layout_options(CheckTest* test, const char* clang, const char* executable, const char* directory, const CheckDriverProgramInput* inputs)
 {
-    static const char program[] = "enum E { A, B }; struct S { char c; int i; }; int value;\n";
+    const char* program = inputs[0].bytes;
     static const char sentinel[] = "existing output";
     char source[256];
     char object[256];
     snprintf(source, sizeof(source), "%s/layout.c", directory);
     snprintf(object, sizeof(object), "%s/layout.o", directory);
-    const bool written = parse_test_write(source, program, sizeof(program) - 1);
+    const bool written = parse_test_write(source, program, inputs[0].length);
     static const struct
     {
         const char* first;
@@ -6548,14 +5555,14 @@ static void check_test_driver_link_failure_messages(CheckTest* test)
 
 // A large BSS atom is accepted without writing gigabytes; the program maps the zero-fill at run time. Both driver paths
 // must write it.
-static void check_test_driver_link_layout_error(CheckTest* test, const char* executable, const char* directory)
+static void check_test_driver_link_layout_error(CheckTest* test, const char* clang, const char* executable, const char* directory, const CheckDriverProgramInput* inputs)
 {
-    static const char source_text[] = "char gbig[3L << 30]; int main(void) { gbig[(3L << 30) - 1] = 42; return gbig[(3L << 30) - 1] != 42; }\n";
+    const char* source_text = inputs[0].bytes;
     char source[256];
     char output[256];
     snprintf(source, sizeof(source), "%s/large-bss.c", directory);
     snprintf(output, sizeof(output), "%s/large-bss", directory);
-    const bool made = parse_test_write(source, source_text, sizeof(source_text) - 1);
+    const bool made = parse_test_write(source, source_text, inputs[0].length);
     for (uint32_t scalar = 0; scalar < 2; scalar += 1)
     {
         char* const vector[] = { (char*)executable, "-o", output, source, NULL };
@@ -6574,10 +5581,10 @@ static void check_test_driver_link_layout_error(CheckTest* test, const char* exe
     unlink(source);
     // Two .bss atoms whose first is too large: the second is past the references' reach, and a fixup to it is refused
     // with the atom and the limit.
-    static const char far_text[] = "char a[3L << 30]; char b[3L << 30]; int main(void) { return b[0]; }\n";
+    const char* far_text = inputs[1].bytes;
     snprintf(source, sizeof(source), "%s/far-bss.c", directory);
     snprintf(output, sizeof(output), "%s/far-bss", directory);
-    const bool far_made = parse_test_write(source, far_text, sizeof(far_text) - 1);
+    const bool far_made = parse_test_write(source, far_text, inputs[1].length);
     for (uint32_t scalar = 0; scalar < 2; scalar += 1)
     {
         char* const vector[] = { (char*)executable, "-o", output, source, NULL };
@@ -6595,9 +5602,9 @@ static void check_test_driver_link_layout_error(CheckTest* test, const char* exe
 }
 
 // -E is an action at any argument position, but an option's value can spell -E without selecting that action.
-static void check_test_driver_preprocess_action(CheckTest* test, const char* executable, const char* directory)
+static void check_test_driver_preprocess_action(CheckTest* test, const char* clang, const char* executable, const char* directory, const CheckDriverProgramInput* inputs)
 {
-    static const char program[] = "#define VALUE 42\nint value = VALUE;\n";
+    const char* program = inputs[0].bytes;
     char compiler[PATH_MAX];
     char source[256];
     char output[256];
@@ -6605,7 +5612,7 @@ static void check_test_driver_preprocess_action(CheckTest* test, const char* exe
     snprintf(source, sizeof(source), "%s/action.c", directory);
     snprintf(output, sizeof(output), "%s/action.i", directory);
     snprintf(operand, sizeof(operand), "%s/-E", directory);
-    const bool made = realpath(executable, compiler) != NULL && parse_test_write(source, program, sizeof(program) - 1);
+    const bool made = realpath(executable, compiler) != NULL && parse_test_write(source, program, inputs[0].length);
     char* const first[] = { compiler, "-E", "-P", "-o", output, source, NULL };
     char* const later[] = { compiler, "-O2", "-I", (char*)directory, "-E", "-P", "-o", output, source, NULL };
     char* const after[] = { compiler, "-c", "-P", source, "-E", "-o", output, NULL };
@@ -6657,8 +5664,8 @@ static void check_test_driver_preprocess_action(CheckTest* test, const char* exe
                       "an input after -- is not an option; -E is read as a file");
     free(text);
     // Both entry points must apply command-line policy to #if's ungrouped conversion warning.
-    static const char conversion[] = "#if -1 > 0u\nint a;\n#endif\n";
-    const bool conversion_made = parse_test_write(source, conversion, sizeof(conversion) - 1);
+    const char* conversion = check_test_driver_input_text(test, inputs + 1);
+    const bool conversion_made = parse_test_write(source, conversion, inputs[1].length);
     for (uint32_t action = 0; action < 2; action += 1)
     {
         for (uint32_t policy = 0; policy < 4; policy += 1)
@@ -6684,11 +5691,11 @@ static void check_test_driver_preprocess_action(CheckTest* test, const char* exe
 #include "c_check_instrumentation_driver_test.c"
 
 // Code generation flags must not silently produce an object without the requested hardening or instrumentation.
-static void check_test_driver_unsupported_codegen(CheckTest* test, const char* executable, const char* directory)
+static void check_test_driver_unsupported_codegen(CheckTest* test, const char* clang, const char* executable, const char* directory, const CheckDriverProgramInput* inputs)
 {
     check_test_driver_pic(test, executable, directory);
     check_test_driver_instrumentation(test, executable, directory);
-    static const char source_text[] = "int main(void) { return 0; }\n";
+    const char* source_text = inputs[0].bytes;
     static const char sentinel[] = "unchanged output\n";
     static const char* const options[] = {
         "-fstack-protector", "-fstack-protector-strong", "-fstack-protector-all", "-fstack-protector-explicit",
@@ -6707,7 +5714,7 @@ static void check_test_driver_unsupported_codegen(CheckTest* test, const char* e
     snprintf(source, sizeof(source), "%s/codegen-flags.c", directory);
     snprintf(output, sizeof(output), "%s/codegen-flags.o", directory);
     snprintf(named, sizeof(named), "%s/-pg", directory);
-    const bool made = realpath(executable, compiler) != NULL && parse_test_write(source, source_text, sizeof(source_text) - 1);
+    const bool made = realpath(executable, compiler) != NULL && parse_test_write(source, source_text, inputs[0].length);
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(options); i += 1)
     {
         const bool saved = made && parse_test_write(output, sentinel, sizeof(sentinel) - 1);
@@ -6766,11 +5773,11 @@ static void check_test_driver_unsupported_codegen(CheckTest* test, const char* e
 // Options that take the next argument as their value keep it, however it is spelled (#398's review): run in the test's
 // directory (env -C), `-o -lresult -include -local.h -I -Lheaders` writes -lresult from a program that needs the forced
 // include's macro and a header that only -Lheaders has, and the program runs.
-static void check_test_driver_option_values(CheckTest* test, const char* executable, const char* directory)
+static void check_test_driver_option_values(CheckTest* test, const char* clang, const char* executable, const char* directory, const CheckDriverProgramInput* inputs)
 {
-    static const char header_text[] = "#define VALUE 3\n";
-    static const char forced_text[] = "#define LOCAL 4\n";
-    static const char program[] = "#include \"h.h\"\nint main(void) { return VALUE + LOCAL == 7 ? 0 : 1; }\n";
+    const char* header_text = inputs[0].bytes;
+    const char* forced_text = inputs[1].bytes;
+    const char* program = inputs[2].bytes;
     char compiler[PATH_MAX];
     char headers[256];
     char header[256];
@@ -6783,8 +5790,8 @@ static void check_test_driver_option_values(CheckTest* test, const char* executa
     snprintf(source, sizeof(source), "%s/values.c", directory);
     snprintf(output, sizeof(output), "%s/-lresult", directory);
     // The compiler runs in the test's directory, so its path must not be relative to this one.
-    const bool made = realpath(executable, compiler) != NULL && mkdir(headers, 0755) == 0 && parse_test_write(header, header_text, sizeof(header_text) - 1) &&
-                      parse_test_write(forced, forced_text, sizeof(forced_text) - 1) && parse_test_write(source, program, sizeof(program) - 1);
+    const bool made = realpath(executable, compiler) != NULL && mkdir(headers, 0755) == 0 && parse_test_write(header, header_text, inputs[0].length) &&
+                      parse_test_write(forced, forced_text, inputs[1].length) && parse_test_write(source, program, inputs[2].length);
     char* const link[] = { "env", "-C", (char*)directory, compiler, "values.c", "-o", "-lresult", "-include", "-local.h", "-I", "-Lheaders", NULL };
     char* const run[] = { output, NULL };
     char* text = NULL;
@@ -7060,7 +6067,7 @@ static void check_test_driver_clock_reader(CheckTest* test)
     check_test_driver_clock_printer(test);
 }
 
-static void check_test_driver_cpu_pinning(CheckTest* test, const char* executable, const char* directory)
+static void check_test_driver_cpu_pinning(CheckTest* test, const char* clang, const char* executable, const char* directory, const CheckDriverProgramInput* inputs)
 {
     uint64_t allowed[BUSTER_LANE_CPU_MASK_WORDS] = { 0 };
     const long bytes = syscall(SYS_sched_getaffinity, 0, sizeof(allowed), allowed);
@@ -7085,8 +6092,8 @@ static void check_test_driver_cpu_pinning(CheckTest* test, const char* executabl
     snprintf(cpu_list, sizeof(cpu_list), "%u", cpus[0]);
     snprintf(duplicate, sizeof(duplicate), "%u,%u", cpus[0], cpus[0]);
     snprintf(receipt, sizeof(receipt), "lane-pin\tindex=0\texpected=%u\tobserved=%u\tstatus=0", cpus[0], cpus[0]);
-    static const char program[] = "int f(int x) { return x * 2; }\n";
-    const bool made = count > 0 && parse_test_write(source, program, sizeof(program) - 1);
+    const char* program = inputs[0].bytes;
+    const bool made = count > 0 && parse_test_write(source, program, inputs[0].length);
     char* const plain[] = { (char*)executable, "--lanes", "1", "-c", source, "-o", reference, NULL };
     char* const one[] = { (char*)executable, "--lanes", "1", "--lane-cpus", cpu_list, "--time-stages", "-c", source, "-o", pinned, NULL };
     char* text = NULL;
@@ -7141,13 +6148,10 @@ static void check_test_driver_cpu_pinning(CheckTest* test, const char* executabl
 // --time-stages (#518): an object compiled with it must be the bytes compiled without it, which prints no report, and
 // its report must account for every stage once, adding up to its total; so must the direct path's, whose executable
 // runs, with -g too, whose DWARF and static data are stages of their own, and -fsyntax-only's, which emits nothing.
-static void check_test_driver_time_stages(CheckTest* test, const char* executable, const char* directory)
+static void check_test_driver_time_stages(CheckTest* test, const char* clang, const char* executable, const char* directory, const CheckDriverProgramInput* inputs)
 {
     check_test_driver_clock_reader(test);
-    static const char program[] = "#include <stdio.h>\n"
-                                  "static int table[4] = { 1, 2, 3, 4 };\n"
-                                  "static int sum(int n) { int s = 0; for (int i = 0; i < n; i++) s += table[i & 3]; return s; }\n"
-                                  "int main(void) { printf(\"%d\\n\", sum(10)); return sum(4) == 10 ? 0 : 1; }\n";
+    const char* program = check_test_driver_input_text(test, inputs + 0);
     char compiler[PATH_MAX];
     char source[256];
     char plain[256];
@@ -7157,7 +6161,7 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
     snprintf(plain, sizeof(plain), "%s/time_stages_plain.o", directory);
     snprintf(timed, sizeof(timed), "%s/time_stages_timed.o", directory);
     snprintf(linked, sizeof(linked), "%s/time_stages", directory);
-    const bool made = realpath(executable, compiler) != NULL && parse_test_write(source, program, sizeof(program) - 1);
+    const bool made = realpath(executable, compiler) != NULL && parse_test_write(source, program, inputs[0].length);
     char* const compile_plain[] = { compiler, "-c", source, "-o", plain, NULL };
     char* const compile_timed[] = { compiler, "-c", "--time-stages", source, "-o", timed, NULL };
     char* const link[] = { compiler, "--time-stages", source, "-o", linked, NULL };
@@ -7304,14 +6308,13 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
     // again (pp_history_ensure), and nothing asks for it: `history-replays` reads 0, here for statements a macro's body
     // writes that could not warn (an assignment, an update, a call, a cast to void). A discarded value a macro's body
     // writes is quiet by that history (check_common_unused_quiet), so its unit reads 1, and says nothing either.
-    static const char once_text[] = "#define STORE(p, v) (*(p) = (v))\n#define BUMP(p) ((*(p))++)\n#define CALL(f, p) f(p)\n#define DROP(v) ((void)(v))\n"
-                                    "int h(int* p);\nint f(int* p)\n{\n    STORE(p, 1);\n    BUMP(p);\n    CALL(h, p);\n    DROP(*p);\n    return *p;\n}\n";
-    static const char twice_text[] = "#define SUM(a, b) ((a) + (b))\nint g(int a, int b)\n{\n    SUM(a, b);\n    return a;\n}\n";
+    const char* once_text = inputs[1].bytes;
+    const char* twice_text = inputs[2].bytes;
     char once_source[256];
     char twice_source[256];
     snprintf(once_source, sizeof(once_source), "%s/time_stages_once.c", directory);
     snprintf(twice_source, sizeof(twice_source), "%s/time_stages_twice.c", directory);
-    const bool replays_made = made && parse_test_write(once_source, once_text, sizeof(once_text) - 1) && parse_test_write(twice_source, twice_text, sizeof(twice_text) - 1);
+    const bool replays_made = made && parse_test_write(once_source, once_text, inputs[1].length) && parse_test_write(twice_source, twice_text, inputs[2].length);
     char* const once[] = { compiler, "-fsyntax-only", "--time-stages", once_source, NULL };
     char* const twice[] = { compiler, "-fsyntax-only", "--time-stages", twice_source, NULL };
     const int once_status = replays_made ? check_test_driver_spawn(once, &text) : -1;
@@ -7424,31 +6427,11 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
     unlink(thp_path);
     // So does a program interpret-c runs in the compiler's own process (#1561's review): it reads its THP_enabled as a
     // program its parent started would, but where BUSTER_HUGE_PAGES or the virtual machine's rule decides.
-    static const char thp_program[] = "#include <stdio.h>\n"
-                                      "#include <string.h>\n"
-                                      "int main(void)\n"
-                                      "{\n"
-                                      "    FILE* file = fopen(\"/proc/self/status\", \"r\");\n"
-                                      "    char line[256];\n"
-                                      "    int found = 0;\n"
-                                      "    while (file != 0 && fgets(line, sizeof(line), file) != 0)\n"
-                                      "    {\n"
-                                      "        if (strncmp(line, \"THP_enabled:\", 12) == 0)\n"
-                                      "        {\n"
-                                      "            fputs(line, stdout);\n"
-                                      "            found = 1;\n"
-                                      "        }\n"
-                                      "    }\n"
-                                      "    if (file != 0)\n"
-                                      "    {\n"
-                                      "        fclose(file);\n"
-                                      "    }\n"
-                                      "    return found ? 0 : 1;\n"
-                                      "}\n";
+    const char* thp_program = inputs[3].bytes;
     char thp_source[256];
     snprintf(thp_source, sizeof(thp_source), "%s/time_stages_thp.c", directory);
     char* const interpreted[] = { compiler, "interpret-c", thp_source, NULL };
-    const bool thp_written = parse_test_write(thp_source, thp_program, sizeof(thp_program) - 1);
+    const bool thp_written = parse_test_write(thp_source, thp_program, inputs[3].length);
     // The variable unset, then "1", with the busy test forced and the parent's huge pages on.
     const char* interpreted_settings[] = { NULL, "1" };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(interpreted_settings); i += 1)
@@ -7571,6 +6554,155 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
     for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(files); f += 1)
     {
         unlink(files[f]);
+    }
+}
+
+// Warm arenas (#2850, lane.c's arena_reserve_warm): a compile's object is the same whatever its warm arenas held before
+// it. The command's three are filled with a pattern (BUSTER_TEST_ARENA_FILL), without a file and with one, and then hold
+// what that compile left (BUSTER_ARENA_POOL alone, twice: the second finds the first's own bytes), for one unit and for
+// a command of two; --time-stages says how many of the command's arenas are warm. The file's cases need a tmpfs the
+// test may write, /dev/shm, whose base pages a command takes only with the tests' switch
+// (BUSTER_TEST_ARENA_BASE_PAGES): the last case, without it, has no warm arena.
+static void check_test_driver_warm_arenas(CheckTest* test, const char* executable, const char* directory)
+{
+    static const char unit_text[] = "struct pair { int first; long second; };\n"
+                                    "enum shade { RED, GREEN = 4, BLUE };\n"
+                                    "static const char* const names[] = { \"red\", \"green\", \"blue\" };\n"
+                                    "extern int printf(const char*, ...);\n"
+                                    "static long total(const struct pair* pairs, int count)\n"
+                                    "{\n"
+                                    "    long sum = 0;\n"
+                                    "    for (int i = 0; i < count; i += 1)\n"
+                                    "    {\n"
+                                    "        sum += pairs[i].first * 3 + pairs[i].second;\n"
+                                    "    }\n"
+                                    "    return sum;\n"
+                                    "}\n"
+                                    "int shade_of(int value)\n"
+                                    "{\n"
+                                    "    switch (value & 3)\n"
+                                    "    {\n"
+                                    "    case 0: return RED;\n"
+                                    "    case 1: return GREEN;\n"
+                                    "    default: return BLUE;\n"
+                                    "    }\n"
+                                    "}\n"
+                                    "int report(int value)\n"
+                                    "{\n"
+                                    "    struct pair pairs[3] = { { value, 2 }, { 3, value }, { 5, 6 } };\n"
+                                    "    const int shade = shade_of(value);\n"
+                                    "    return printf(\"%s %ld\\n\", names[shade == GREEN ? 1 : shade == BLUE ? 2 : 0], total(pairs, 3));\n"
+                                    "}\n";
+    static const char other_text[] = "int report(int value);\nint main(void)\n{\n    return report(7) > 0 ? 0 : 1;\n}\n";
+    char* compiler = (char*)executable;
+    char source[PATH_MAX];
+    char other[PATH_MAX];
+    char pool[PATH_MAX];
+    char pool_file[PATH_MAX + 32];
+    char objects[6][PATH_MAX];
+    char others[2][PATH_MAX];
+    snprintf(source, sizeof(source), "%s/warm_unit.c", directory);
+    snprintf(other, sizeof(other), "%s/warm_other.c", directory);
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(objects); i += 1)
+    {
+        snprintf(objects[i], sizeof(objects[i]), "%s/warm_unit_%u.o", directory, i);
+    }
+    const bool made = parse_test_write(source, unit_text, sizeof(unit_text) - 1) && parse_test_write(other, other_text, sizeof(other_text) - 1);
+    snprintf(pool, sizeof(pool), "/dev/shm/buster-warm-XXXXXX");
+    const bool pooled = mkdtemp(pool) != NULL;
+    snprintf(pool_file, sizeof(pool_file), "%s/buster-arena-0", pool);
+    if (!pooled)
+    {
+        printf("  warm arenas: no /dev/shm to write a file in: the file's cases are skipped\n");
+    }
+    // Whether /dev/shm gives a file huge pages, which the file's block size says: then a command takes it unasked.
+    struct stat probed = { 0 };
+    const int probe = pooled ? open(pool_file, O_RDWR | O_CREAT | O_CLOEXEC, 0600) : -1;
+    const bool huge = probe >= 0 && fstat(probe, &probed) == 0 && probed.st_blksize >= (2 << 20);
+    if (probe >= 0)
+    {
+        close(probe);
+    }
+    // Each case's directory (or none), whether its arenas are filled, and the warm arenas its report states.
+    typedef struct CheckTestWarm CheckTestWarm;
+    struct CheckTestWarm
+    {
+        bool file;
+        bool fill;
+        bool base_pages;
+        const char* warm;
+    };
+    static const CheckTestWarm cases[] = {
+        { false, false, false, "\ntime-process\twarm-arenas\t0\n" },
+        { false, true, false, "\ntime-process\twarm-arenas\t3\n" },
+        { true, true, true, "\ntime-process\twarm-arenas\t3\n" },
+        { true, false, true, "\ntime-process\twarm-arenas\t3\n" },
+        { true, false, true, "\ntime-process\twarm-arenas\t3\n" },
+        // /dev/shm's base pages, which no command takes unasked.
+        { true, false, false, "\ntime-process\twarm-arenas\t0\n" },
+    };
+    bool same = made;
+    bool stated = made;
+    for (uint32_t c = 0; made && c < BUSTER_ARRAY_LENGTH(cases); c += 1)
+    {
+        if (!cases[c].file || pooled)
+        {
+            char* const compile[] = { compiler, "-c", "--time-stages", "-o", objects[c], source, NULL };
+            char* text = NULL;
+            const bool switched = (cases[c].file ? setenv("BUSTER_ARENA_POOL", pool, 1) : unsetenv("BUSTER_ARENA_POOL")) == 0 &&
+                                  (cases[c].fill ? setenv("BUSTER_TEST_ARENA_FILL", "1", 1) : unsetenv("BUSTER_TEST_ARENA_FILL")) == 0 &&
+                                  setenv("BUSTER_TEST_ARENA_BASE_PAGES", cases[c].base_pages ? "1" : "0", 1) == 0;
+            const int status = switched ? check_test_driver_spawn(compile, &text) : -1;
+            const char* warm = cases[c].file && !cases[c].base_pages && huge ? cases[1].warm : cases[c].warm;
+            stated = stated && status == 0 && text != NULL && strstr(text, warm) != NULL;
+            same = same && status == 0 && (c == 0 || check_test_driver_same_files(objects[0], objects[c]));
+            if (status != 0 || text == NULL || strstr(text, warm) == NULL)
+            {
+                printf("  warm arenas: case %u: status %d: %s\n", c, status, text != NULL ? text : "");
+            }
+            free(text);
+        }
+    }
+    // The file holds what the compiles wrote, and is no other user's to read.
+    struct stat status = { 0 };
+    const bool kept = !pooled || (stat(pool_file, &status) == 0 && (status.st_mode & 0777) == 0600 && status.st_blocks != 0);
+    // A command of two units, whose lanes' arenas are their own: the command's are warm and each object is the same.
+    bool units = made;
+    for (uint32_t c = 0; made && c < 2; c += 1)
+    {
+        snprintf(others[c], sizeof(others[c]), "%s/warm_units_%u", directory, c);
+        char* const link[] = { compiler, "-o", others[c], source, other, NULL };
+        char* text = NULL;
+        const bool switched = (c == 1 && pooled ? setenv("BUSTER_ARENA_POOL", pool, 1) : unsetenv("BUSTER_ARENA_POOL")) == 0 &&
+                              (c == 1 ? setenv("BUSTER_TEST_ARENA_FILL", "1", 1) : unsetenv("BUSTER_TEST_ARENA_FILL")) == 0 &&
+                              setenv("BUSTER_TEST_ARENA_BASE_PAGES", "1", 1) == 0;
+        const int linked = switched ? check_test_driver_spawn(link, &text) : -1;
+        units = units && linked == 0 && (c == 0 || check_test_driver_same_files(others[0], others[1]));
+        if (linked != 0)
+        {
+            printf("  warm arenas: two units, case %u: status %d: %s\n", c, linked, text != NULL ? text : "");
+        }
+        free(text);
+    }
+    unsetenv("BUSTER_ARENA_POOL");
+    unsetenv("BUSTER_TEST_ARENA_FILL");
+    unsetenv("BUSTER_TEST_ARENA_BASE_PAGES");
+    check_test_expect(test, stated, "--time-stages states the command's warm arenas: none unasked, and its three with a pool's directory or a fill");
+    check_test_expect(test, same, "a unit's object is the same whatever its warm arenas held: a pattern, or what the last compile left in the pool's file");
+    check_test_expect(test, kept, "the pool's file holds what the compiles wrote, closed to other users");
+    check_test_expect(test, units, "a command of two units links the same executable with its arenas warm and filled");
+    unlink(source);
+    unlink(other);
+    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(objects); i += 1)
+    {
+        unlink(objects[i]);
+    }
+    unlink(others[0]);
+    unlink(others[1]);
+    if (pooled)
+    {
+        unlink(pool_file);
+        rmdir(pool);
     }
 }
 
@@ -8176,14 +7308,10 @@ static bool check_test_driver_files_equal(const char* first, const char* second)
 }
 
 // Both ordinary and scalar object emission must agree on a parameter's binding and the local alias shadowing it.
-static void check_test_driver_named_declarations(CheckTest* test, const char* clang, const char* executable, const char* directory)
+static void check_test_driver_named_declarations(CheckTest* test, const char* clang, const char* executable, const char* directory, const CheckDriverProgramInput* inputs)
 {
-    static const char valid_source[] =
-        "typedef unsigned short Word; typedef Word *Ptr;\n"
-        "int fold(Word first, const Word *next, Ptr *last);\n"
-        "int fold(Word first,const Word *next,Ptr *last){ Word local=first; const Word *p=next;\n"
-        "  {typedef long Word; Word extra=**last; local+=extra;} return local+*p; }\n";
-    static const char invalid_source[] = "typedef int Word; int bad(Word first,int first){return first;}\n";
+    const char* valid_source = check_test_driver_input_text(test, inputs + 0);
+    const char* invalid_source = check_test_driver_input_text(test, inputs + 1);
     char source[192], general[192], ordinary[192];
     snprintf(source, sizeof(source), "%s/named-declarations.c", directory);
     snprintf(general, sizeof(general), "%s/named-scalar.o", directory);
@@ -9429,13 +8557,9 @@ static uint32_t check_test_elf_defined(const CheckTestElf* elf, const char* name
 
 // Late attributes are diagnosed at each attribute, with a note at the definition rather than an intervening
 // declaration. Compare exact source coordinates and wording with clang for both checker paths.
-static void check_test_driver_late_attributes(CheckTest* test, const char* clang, const char* executable, const char* directory)
+static void check_test_driver_late_attributes(CheckTest* test, const char* clang, const char* executable, const char* directory, const CheckDriverProgramInput* inputs)
 {
-    static const char source_text[] =
-        "static int f(void) __attribute__((used));\n"
-        "static int f(void){return 1;}\n"
-        "static int f(void) __attribute__((used, constructor(100)));\n"
-        "static int f(void) __attribute__((constructor(200),used));\n";
+    const char* source_text = inputs[0].bytes;
     static const char* const messages[] = {
         ":3:41: warning: attribute declaration must precede definition [-Wignored-attributes]",
         ":4:35: warning: attribute declaration must precede definition [-Wignored-attributes]",
@@ -9444,7 +8568,7 @@ static void check_test_driver_late_attributes(CheckTest* test, const char* clang
     char source[256], object[256];
     snprintf(source, sizeof(source), "%s/late-attributes.c", directory);
     snprintf(object, sizeof(object), "%s/late-attributes.o", directory);
-    const bool written = parse_test_write(source, source_text, sizeof(source_text) - 1);
+    const bool written = parse_test_write(source, source_text, inputs[0].length);
     for (uint32_t route = 0; route < 3; route += 1)
     {
         char* arguments[] = { (char*)(route == 0 ? clang : executable), "-std=gnu17", route == 0 ? "-fno-caret-diagnostics" : route == 1 ? "--scalar" : "-std=gnu17",
@@ -9468,19 +8592,9 @@ static void check_test_driver_late_attributes(CheckTest* test, const char* clang
 
 // Syntax-only: alias symbol emission is separate. Literal note coordinates distinguish the alias/body definitions
 // from every intervening prototype, across repeated ignored attributes and independent linked entities.
-static void check_test_driver_alias_late_attributes(CheckTest* test, const char* clang, const char* executable, const char* directory)
+static void check_test_driver_alias_late_attributes(CheckTest* test, const char* clang, const char* executable, const char* directory, const CheckDriverProgramInput* inputs)
 {
-    static const char source_text[] =
-        "int g(void){return 1;}\n"
-        "int h(void) __attribute__((alias(\"g\")));\n"
-        "int h(void);\n"
-        "int h(void);\n"
-        "int h(void) __attribute__((used));\n"
-        "int h(void);\n"
-        "int h(void) __attribute__((used));\n"
-        "int body(void){return 2;}\n"
-        "int body(void);\n"
-        "int body(void) __attribute__((used));\n";
+    const char* source_text = inputs[0].bytes;
     static const char* const messages[] = {
         ":5:28: warning: attribute declaration must precede definition [-Wignored-attributes]",
         ":7:28: warning: attribute declaration must precede definition [-Wignored-attributes]",
@@ -9493,7 +8607,7 @@ static void check_test_driver_alias_late_attributes(CheckTest* test, const char*
     _Static_assert(BUSTER_ARRAY_LENGTH(messages) == BUSTER_ARRAY_LENGTH(counts), "every diagnostic has an expected count");
     char source[256];
     snprintf(source, sizeof(source), "%s/alias-late-attributes.c", directory);
-    const bool written = parse_test_write(source, source_text, sizeof(source_text) - 1);
+    const bool written = parse_test_write(source, source_text, inputs[0].length);
     for (uint32_t route = 0; route < 3; route += 1)
     {
         char* arguments[] = { (char*)(route == 0 ? clang : executable), "-std=gnu17", route == 0 ? "-fno-caret-diagnostics" : route == 1 ? "--scalar" : "-std=gnu17",
@@ -9520,22 +8634,9 @@ static void check_test_driver_alias_late_attributes(CheckTest* test, const char*
 }
 
 // Definitions and redeclarations use the same GNU89 rule in -c and direct linking as their predefined macro reports.
-static void check_test_driver_inline_modes(CheckTest* test, const char* clang, const char* executable, const char* directory)
+static void check_test_driver_inline_modes(CheckTest* test, const char* clang, const char* executable, const char* directory, const CheckDriverProgramInput* inputs)
 {
-    static const char source_text[] =
-        "__inline__ int plain(int x){return x+1;} extern __inline__ int ext(int x){return x+2;}"
-        "__inline__ int prior(int); extern __inline__ int prior(int x){return x+3;}"
-        "extern __inline__ int after(int x){return x+4;} __inline__ int after(int);"
-        "extern __inline__ __attribute__((gnu_inline)) int attr(int x){return x+5;}"
-        "__inline__ __attribute__((gnu_inline)) int attrprior(int); extern __inline__ int attrprior(int x){return x+7;}"
-        "extern __inline__ __attribute__((gnu_inline)) int attraft(int x){return x+8;} __inline__ int attraft(int);"
-        "extern __inline__ int block(int x){return x+9;}"
-        "static __inline__ int local(int x){return x+6;}"
-        "static int late_used(void){return 1;} static int late_used(void) __attribute__((used,retain,constructor,destructor));"
-        "static int late_weak(void){return 1;} static int late_weak(void) __attribute__((weak));"
-        "static int early_used(void) __attribute__((used)); static int early_used(void){return 1;} static int early_used(void) __attribute__((used));"
-        "__inline__ int late_gnu(int x){return x;} __inline__ int late_gnu(int x) __attribute__((gnu_inline));"
-        "int use(int x){__inline__ int block(int);return plain(x)+ext(x)+prior(x)+after(x)+attr(x)+attrprior(x)+attraft(x)+block(x)+local(x);}\n";
+    const char* source_text = inputs[0].bytes;
     static const char* const names[] = { "plain", "ext", "prior", "after", "attr", "attrprior", "attraft", "block", "local", "late_used", "late_weak", "early_used", "late_gnu", "use" };
     static const struct { const char* standard; const char* flag; const char* last; } modes[] = {
         { "-std=gnu89", "-w", "-w" }, { "-std=gnu89", "-fno-gnu89-inline", "-w" },
@@ -9548,7 +8649,7 @@ static void check_test_driver_inline_modes(CheckTest* test, const char* clang, c
     snprintf(source, sizeof(source), "%s/inline-modes.c", directory);
     snprintf(ours_path, sizeof(ours_path), "%s/inline-ours.o", directory);
     snprintf(clang_path, sizeof(clang_path), "%s/inline-clang.o", directory);
-    const bool written = parse_test_write(source, source_text, sizeof(source_text) - 1);
+    const bool written = parse_test_write(source, source_text, inputs[0].length);
     for (uint32_t m = 0; m < BUSTER_ARRAY_LENGTH(modes); m += 1)
     {
         for (uint32_t scalar = 0; scalar < 2; scalar += 1)
@@ -9577,10 +8678,10 @@ static void check_test_driver_inline_modes(CheckTest* test, const char* clang, c
             arena_release(&arena);
         }
     }
-    static const char direct_source[] = "inline int f(void){return 7;} int main(void){return f();}\n";
+    const char* direct_source = inputs[1].bytes;
     char direct_path[256];
     snprintf(direct_path, sizeof(direct_path), "%s/inline-direct", directory);
-    const bool direct_written = parse_test_write(source, direct_source, sizeof(direct_source) - 1);
+    const bool direct_written = parse_test_write(source, direct_source, inputs[1].length);
     char* direct[] = { (char*)executable, "-std=gnu89", "-o", direct_path, source, NULL };
     char* text = NULL;
     const int built = direct_written ? check_test_driver_spawn(direct, &text) : -1;
@@ -9631,10 +8732,10 @@ static void check_test_driver_inline_modes(CheckTest* test, const char* clang, c
         unlink(same_source);
     }
     // The same shape is still a redefinition where GNU inline doesn't apply.
-    static const char same_conflict[] = "extern inline int same(void){return 1;} int same(void){return 2;}\n";
+    const char* same_conflict = inputs[2].bytes;
     char conflict_source[256];
     snprintf(conflict_source, sizeof(conflict_source), "%s/inline-conflict.c", directory);
-    const bool conflict_written = parse_test_write(conflict_source, same_conflict, sizeof(same_conflict) - 1);
+    const bool conflict_written = parse_test_write(conflict_source, same_conflict, inputs[2].length);
     char* conflict[] = { (char*)executable, "-std=c17", "-fsyntax-only", conflict_source, NULL };
     char* conflict_text = NULL;
     const int conflict_status = conflict_written ? check_test_driver_spawn(conflict, &conflict_text) : -1;
@@ -9643,13 +8744,13 @@ static void check_test_driver_inline_modes(CheckTest* test, const char* clang, c
     check_test_expect(test, conflict_status == 1 && conflict_said, "C17 keeps the extern inline followed by a definition a redefinition");
     unlink(conflict_source);
 
-    static const char header_user[] = "extern inline int value(void){return 99;} int main(void){return value();}\n";
-    static const char external_body[] = "int value(void){return 7;}\n";
+    const char* header_user = inputs[3].bytes;
+    const char* external_body = inputs[4].bytes;
     char second[256], second_object[256];
     snprintf(second, sizeof(second), "%s/inline-other.c", directory);
     snprintf(second_object, sizeof(second_object), "%s/inline-other.o", directory);
-    const bool pair_written = parse_test_write(source, header_user, sizeof(header_user) - 1) &&
-                              parse_test_write(second, external_body, sizeof(external_body) - 1);
+    const bool pair_written = parse_test_write(source, header_user, inputs[3].length) &&
+                              parse_test_write(second, external_body, inputs[4].length);
     char* first_compile[] = { (char*)executable, "-std=gnu89", "-c", "-o", ours_path, source, NULL };
     char* second_compile[] = { (char*)executable, "-std=gnu89", "-c", "-o", second_object, second, NULL };
     char* link[] = { (char*)clang, "-o", direct_path, ours_path, second_object, NULL };
@@ -9740,20 +8841,17 @@ static bool check_test_driver_same_sections(const char* ours_path, const char* t
 
 // #1250: the admitted exact q/Q subset must survive source-to-object emission.
 // Compare a named data section with clang for both checker paths and both routes.
-static void check_test_driver_quad_literals(CheckTest* test, const char* clang, const char* executable, const char* directory)
+static void check_test_driver_quad_literals(CheckTest* test, const char* clang, const char* executable, const char* directory, const CheckDriverProgramInput* inputs)
 {
 #if BUSTER_CHECK_HAVE_QUAD_READER
-    static const char code[] =
-        "__float128 values[] __attribute__((section(\".quad_literals\"))) = {\n"
-        "  0.0q, -0.0Q, 1.5q, -0x1.8p0Q, 0x1.0000000000000002p0q,\n"
-        "  0x1p-16445Q, 0x1.fffffffffffffffep16383Q };\n";
+    const char* code = inputs[0].bytes;
     const char* arguments[] = { "-std=gnu17" };
     const CheckCorpusSymbols oracle = { .clang = clang, .arguments = arguments, .argument_count = BUSTER_ARRAY_LENGTH(arguments), .directory = directory };
     char source[PATH_MAX], theirs[PATH_MAX], ours[PATH_MAX];
     snprintf(source, sizeof(source), "%s/quad-literals.c", directory);
     snprintf(theirs, sizeof(theirs), "%s/quad-literals-clang.o", directory);
     snprintf(ours, sizeof(ours), "%s/quad-literals.o", directory);
-    const bool reference = parse_test_write(source, code, sizeof(code) - 1) && check_corpus_clang_object(&oracle, source, theirs);
+    const bool reference = parse_test_write(source, code, inputs[0].length) && check_corpus_clang_object(&oracle, source, theirs);
     check_test_expect(test, reference, "quad literals: clang writes the reference object");
     const uint32_t routes = executable != NULL ? 4u : 2u;
     for (uint32_t route = 0; reference && route < routes; route += 1)
@@ -9844,15 +8942,9 @@ static bool check_test_driver_same_text(const char* ours_path, const char* their
 // Tier 0's on both paths, so each path's --tier1 control proves the no--O baseline is Tier 0;
 // every -O spelling must then produce exactly that baseline's .text. Conversely, --tier1
 // requests Tier 1 even when -O0 is present, as its report and the control's .text show.
-static void check_test_driver_optimization_tier(CheckTest* test, const char* executable, const char* directory)
+static void check_test_driver_optimization_tier(CheckTest* test, const char* clang, const char* executable, const char* directory, const CheckDriverProgramInput* inputs)
 {
-    static const char code[] =
-        "int optimization_mapping(int x)\n"
-        "{\n"
-        "    int y = x + 1;\n"
-        "    int z = y * 3;\n"
-        "    return z - y;\n"
-        "}\n";
+    const char* code = inputs[0].bytes;
     static const char* const levels[] = { NULL, "-O0", "-O1", "-O2", "-O3", "-Os", "-Oz", "-Og", "-Ofast", "-O" };
     static const char* const tier1_option[] = { "--tier1" };
     char source[PATH_MAX], baseline[PATH_MAX], control[PATH_MAX], candidate[PATH_MAX];
@@ -9860,7 +8952,7 @@ static void check_test_driver_optimization_tier(CheckTest* test, const char* exe
     snprintf(baseline, sizeof(baseline), "%s/optimization-tier-base.o", directory);
     snprintf(control, sizeof(control), "%s/optimization-tier-tier1.o", directory);
     snprintf(candidate, sizeof(candidate), "%s/optimization-tier-test.o", directory);
-    const bool written = parse_test_write(source, code, sizeof(code) - 1);
+    const bool written = parse_test_write(source, code, inputs[0].length);
     check_test_expect(test, written, "optimization tier: source fixture is available");
     const uint32_t routes = executable != NULL ? 2u : 1u;
     for (uint32_t route = 0; written && route < routes; route += 1)
@@ -10380,19 +9472,15 @@ static void check_test_preprocessor_failed_output(CheckTest* test, const char* d
 // isfpclass of a vector of long doubles (#148): clang accepts it, its result a vector of __int128 whose lanes are the
 // element's 16 bytes. The lowering's int and long long lane stores can't hold those, so it must refuse by name rather
 // than write garbage; a vector of floats still compiles, as the guard against refusing too much.
-static void check_test_driver_float_classify(CheckTest* test, const char* executable, const char* directory)
+static void check_test_driver_float_classify(CheckTest* test, const char* clang, const char* executable, const char* directory, const CheckDriverProgramInput* inputs)
 {
     char source[PATH_MAX];
     char object[PATH_MAX];
     snprintf(source, sizeof(source), "%s/classify-vector.c", directory);
     snprintf(object, sizeof(object), "%s/classify-vector.o", directory);
-    static const char refused[] = "typedef long double v2ld __attribute__((vector_size(32)));\n"
-                                  "typedef __int128 v2i __attribute__((vector_size(32)));\n"
-                                  "v2i f(v2ld v)\n{\nreturn __builtin_isfpclass(v, 0x108);\n}\n";
-    static const char accepted[] = "typedef float v4f __attribute__((vector_size(16)));\n"
-                                   "typedef int v4i __attribute__((vector_size(16)));\n"
-                                   "v4i f(v4f v)\n{\nreturn __builtin_isfpclass(v, 0x108);\n}\n";
-    bool written = parse_test_write(source, refused, sizeof(refused) - 1);
+    const char* refused = check_test_driver_input_text(test, inputs + 0);
+    const char* accepted = inputs[1].bytes;
+    bool written = parse_test_write(source, refused, inputs[0].length);
     for (uint32_t path = 0; written && path < 2; path += 1)
     {
         char* text = NULL;
@@ -10404,7 +9492,7 @@ static void check_test_driver_float_classify(CheckTest* test, const char* execut
                                       "isfpclass of a vector of long doubles is refused, not miscompiled, scalar");
         free(text);
     }
-    written = written && parse_test_write(source, accepted, sizeof(accepted) - 1);
+    written = written && parse_test_write(source, accepted, inputs[1].length);
     for (uint32_t path = 0; written && path < 2; path += 1)
     {
         char* text = NULL;
@@ -10556,6 +9644,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         if (strcmp(argv[i], "--clang") == 0 && i + 1 < argc)
         {
             clang = argv[++i];
+        }
+        else if (strcmp(argv[i], "--fixtures") == 0 && i + 1 < argc)
+        {
+            check_test_fixture_root = argv[++i];
         }
         else if (strcmp(argv[i], "--executable") == 0 && i + 1 < argc)
         {
@@ -11264,8 +10356,8 @@ static int run_checker_driver_tests(int argc, char** argv)
     if (temporary && initializer_diagnostics_only)
     {
         check_test_driver_warning_catalog(&test, clang, executable != NULL ? executable : "./build/compiler", directory, "checker/initializer-comma");
-        check_test_driver_warning_catalog_language(&test, clang, executable != NULL ? executable : "./build/compiler", directory,
-                                                   "checker/initializer-comma", true);
+        check_test_driver_warning_catalog_run(&test, clang, executable != NULL ? executable : "./build/compiler", directory,
+                                                   "checker/initializer-comma", false, true);
     }
     if (temporary && auto_qualifiers_only)
     {
@@ -11746,7 +10838,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             if (!lazy)
             {
-                check_test_driver_named_declarations(&test, clang, executable, directory);
+                check_test_driver_programs(&test, clang, executable, directory, "named-declarations", "valid-source.c\tinvalid-source.c", check_test_driver_named_declarations);
             }
             check_test_driver_lazy(&test, clang, executable, directory);
         }
@@ -11772,7 +10864,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         }
         if (!lazy && check_test_driver_takes())
         {
-            check_test_driver_quad_literals(&test, clang, executable, directory);
+            check_test_driver_programs(&test, clang, executable, directory, "quad-literals", "code.c", check_test_driver_quad_literals);
         }
         if (!lazy && check_test_driver_takes_weighing(1900))
         {
@@ -11792,7 +10884,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         }
         if (!lazy && check_test_driver_takes())
         {
-            check_test_driver_optimization_tier(&test, executable, directory);
+            check_test_driver_programs(&test, clang, executable, directory, "optimization-tier", "code.c", check_test_driver_optimization_tier);
         }
         if (executable != NULL)
         {
@@ -11812,7 +10904,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             }
             if (!lazy && check_test_driver_takes())
             {
-                check_test_driver_libraries(&test, executable, directory);
+                check_test_driver_programs(&test, clang, executable, directory, "libraries", "program.c\tplain.c", check_test_driver_libraries);
             }
             if (!lazy && check_test_driver_takes())
             {
@@ -11971,15 +11063,15 @@ static int run_checker_driver_tests(int argc, char** argv)
             }
             if (!lazy && check_test_driver_takes())
             {
-                check_test_driver_inline_modes(&test, clang, executable, directory);
+                check_test_driver_programs(&test, clang, executable, directory, "inline-modes", "source-text.c\tdirect-source.c\tsame-conflict.c\theader-user.c\texternal-body.c", check_test_driver_inline_modes);
             }
             if (!lazy && check_test_driver_takes())
             {
-                check_test_driver_late_attributes(&test, clang, executable, directory);
+                check_test_driver_programs(&test, clang, executable, directory, "late-attributes", "source-text.c", check_test_driver_late_attributes);
             }
             if (!lazy && check_test_driver_takes())
             {
-                check_test_driver_alias_late_attributes(&test, clang, executable, directory);
+                check_test_driver_programs(&test, clang, executable, directory, "alias-late-attributes", "source-text.c", check_test_driver_alias_late_attributes);
             }
             // An asm label after a definition (#2936): clang's warning at the label's string, noted at the definition, among
             // its declaration's other diagnostics, whole, in each policy, mode, lane request and reader.
@@ -12066,7 +11158,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             }
             if (!lazy && check_test_driver_takes())
             {
-                check_test_driver_complex(&test, executable, directory);
+                check_test_driver_programs(&test, clang, executable, directory, "complex", "program.c", check_test_driver_complex);
             }
             if (!lazy && check_test_driver_takes())
             {
@@ -12074,51 +11166,51 @@ static int run_checker_driver_tests(int argc, char** argv)
             }
             if (!lazy && check_test_driver_takes())
             {
-                check_test_driver_target_selection(&test, executable, directory);
+                check_test_driver_programs(&test, clang, executable, directory, "target-selection", "bmi2.c\tvectors.c", check_test_driver_target_selection);
             }
             if (!lazy && check_test_driver_takes())
             {
-                check_test_driver_mmx(&test, clang, executable, directory);
+                check_test_driver_programs(&test, clang, executable, directory, "mmx", "program.c", check_test_driver_mmx);
             }
             if (!lazy && check_test_driver_takes())
             {
-                check_test_driver_halves(&test, clang, executable, directory);
+                check_test_driver_programs(&test, clang, executable, directory, "halves", "program.c", check_test_driver_halves);
             }
             if (!lazy && check_test_driver_takes())
             {
-                check_test_driver_dump_struct(&test, clang, executable, directory);
-                check_test_driver_dump_struct_rest(&test, clang, executable, directory);
+                check_test_driver_programs(&test, clang, executable, directory, "dump-struct", "program.c", check_test_driver_dump_struct);
+                check_test_driver_programs(&test, clang, executable, directory, "dump-struct-rest", "program.c", check_test_driver_dump_struct_rest);
             }
             if (!lazy && check_test_driver_takes())
             {
-                check_test_driver_static_chain(&test, clang, executable, directory);
+                check_test_driver_programs(&test, clang, executable, directory, "static-chain", "program.c", check_test_driver_static_chain);
             }
             if (!lazy && check_test_driver_takes())
             {
-                check_test_driver_eh_return(&test, clang, executable, directory);
+                check_test_driver_programs(&test, clang, executable, directory, "eh-return", "program.c", check_test_driver_eh_return);
             }
             if (!lazy && check_test_driver_takes())
             {
-                check_test_driver_dead_vectors(&test, clang, executable, directory);
+                check_test_driver_programs(&test, clang, executable, directory, "dead-vectors", "program.c", check_test_driver_dead_vectors);
             }
             if (!lazy && check_test_driver_takes())
             {
-                check_test_driver_switch_tables(&test, clang, executable, directory);
+                check_test_driver_programs(&test, clang, executable, directory, "switch-tables", "program.c", check_test_driver_switch_tables);
             }
             if (!lazy && check_test_driver_takes())
             {
-                check_test_driver_section_bounds(&test, clang, executable, directory);
-                check_test_driver_section_bounds_exact(&test, clang, executable, directory);
-                check_test_driver_section_bounds_static(&test, executable, directory);
-                check_test_driver_section_bounds_align(&test, executable, directory);
+                check_test_driver_programs(&test, clang, executable, directory, "section-bounds", "program.c", check_test_driver_section_bounds);
+                check_test_driver_programs(&test, clang, executable, directory, "section-bounds-exact", "program.c\tmissing-program.c\texpected.expected", check_test_driver_section_bounds_exact);
+                check_test_driver_programs(&test, clang, executable, directory, "section-bounds-static", "program.c\trenamed.c", check_test_driver_section_bounds_static);
+                check_test_driver_programs(&test, clang, executable, directory, "section-bounds-align", "program.c\texpected.expected", check_test_driver_section_bounds_align);
             }
             if (!lazy && check_test_driver_takes())
             {
-                check_test_driver_members(&test, clang, executable, directory);
+                check_test_driver_programs(&test, clang, executable, directory, "members", "swizzle.c\tarrow.c", check_test_driver_members);
             }
             if (!lazy && check_test_driver_takes())
             {
-                check_test_driver_array_alignment(&test, clang, executable, directory);
+                check_test_driver_programs(&test, clang, executable, directory, "array-alignment", "program.c\tclear.c", check_test_driver_array_alignment);
             }
             if (!lazy && check_test_driver_takes())
             {
@@ -12352,26 +11444,26 @@ static int run_checker_driver_tests(int argc, char** argv)
             }
             if (!lazy && check_test_driver_takes())
             {
-                check_test_driver_float_classify(&test, executable, directory);
+                check_test_driver_programs(&test, clang, executable, directory, "float-classify", "refused.c\taccepted.c", check_test_driver_float_classify);
             }
             if (!lazy && check_test_driver_takes())
             {
-                check_test_driver_asm_symbols(&test, executable, directory);
+                check_test_driver_programs(&test, clang, executable, directory, "asm-symbols", "program.c\trefused.c", check_test_driver_asm_symbols);
                 check_test_driver_setjmp_held(&test, executable, directory);
                 check_test_driver_static_label(&test, executable, directory);
-                check_test_driver_selection_census(&test, executable, directory);
-                check_test_driver_provisional_selection(&test, executable, directory);
-                check_test_driver_windowed_loop(&test, executable, directory);
-                check_test_driver_parse_tiles(&test, executable, directory);
+                check_test_driver_programs(&test, clang, executable, directory, "selection-census", "program.c\toverloads.c\tplain.c\tarms.c\tunevaluated.c\tstatic-compound.c\tswitch-local.c", check_test_driver_selection_census);
+                check_test_driver_programs(&test, clang, executable, directory, "provisional-selection", "externs.c\tstatics.c\tbody.c\tplain.c\tunevaluated.c\tevaluated.c\tstatic-compound.c\tassembly.c\tswitch-local.c\ttarget.c", check_test_driver_provisional_selection);
+                check_test_driver_programs(&test, clang, executable, directory, "windowed-loop", "plain.c\tnaked.c\tswitch-local.c\tregion.c\tcallee.c\terror.c", check_test_driver_windowed_loop);
+                check_test_driver_programs(&test, clang, executable, directory, "parse-tiles", "names.c\told-style.c\tcut-short.c\terror.c", check_test_driver_parse_tiles);
                 check_test_driver_codegen_refusals(&test, executable, directory);
             }
             if (!lazy && check_test_driver_takes())
             {
-                check_test_driver_cfstrings(&test, clang, executable, directory);
+                check_test_driver_programs(&test, clang, executable, directory, "cfstrings", "unit.c\tdriver.c\tdeclared.c\tunreferenced.c", check_test_driver_cfstrings);
             }
             if (!lazy && check_test_driver_takes())
             {
-                check_test_driver_split_stack(&test, executable, directory);
+                check_test_driver_programs(&test, clang, executable, directory, "split-stack", "split.c\tbacktrace.c", check_test_driver_split_stack);
             }
             if (!lazy && check_test_driver_takes())
             {
@@ -12381,24 +11473,24 @@ static int run_checker_driver_tests(int argc, char** argv)
             {
                 check_test_dependency_identities(&test, directory);
                 check_test_dependency_admission(&test, directory);
-                check_test_driver_dependencies(&test, clang, executable, directory);
+                check_test_driver_programs(&test, clang, executable, directory, "dependencies", "a-source.c\tb-source.c\tprogram.c\tdefines-b.c", check_test_driver_dependencies);
             }
             if (!lazy && check_test_driver_takes())
             {
-                check_test_driver_unwinder_dependency(&test, clang, executable, directory);
+                check_test_driver_programs(&test, clang, executable, directory, "unwinder-dependency", "helper-source.c\tprogram.c\tplain-source.c\tboth.c\tdefines.c", check_test_driver_unwinder_dependency);
             }
             if (!lazy && check_test_driver_takes())
             {
-                check_test_driver_script_path(&test, clang, executable, directory);
+                check_test_driver_programs(&test, clang, executable, directory, "script-path", "c-source.c\tprogram.c", check_test_driver_script_path);
             }
             if (!lazy && check_test_driver_takes_weighing(230))
             {
-                check_test_driver_versions(&test, clang, executable, directory);
-                check_test_driver_unversioned_libraries(&test, clang, executable, directory);
+                check_test_driver_programs(&test, clang, executable, directory, "versions", "a-source.c\tprogram.c\tdefines-foo.c\textra-source.c", check_test_driver_versions);
+                check_test_driver_programs(&test, clang, executable, directory, "unversioned-libraries", "calls.c\tcalls-hidden.c\tunused.c\textra-source.c", check_test_driver_unversioned_libraries);
             }
             if (!lazy && check_test_driver_takes())
             {
-                check_test_driver_option_values(&test, executable, directory);
+                check_test_driver_programs(&test, clang, executable, directory, "option-values", "header-text.h\tforced-text.h\tprogram.c", check_test_driver_option_values);
             }
             if (!lazy && check_test_driver_takes())
             {
@@ -12406,7 +11498,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             }
             if (!lazy && check_test_driver_takes())
             {
-                check_test_driver_identification(&test, executable, directory);
+                check_test_driver_programs(&test, clang, executable, directory, "identification", "program.c", check_test_driver_identification);
             }
             if (!lazy && check_test_driver_takes_weighing(660))
             {
@@ -12418,7 +11510,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             }
             if (!lazy && check_test_driver_takes_weighing(320))
             {
-                check_test_driver_unsupported_codegen(&test, executable, directory);
+                check_test_driver_programs(&test, clang, executable, directory, "unsupported-codegen", "source-text.c", check_test_driver_unsupported_codegen);
             }
             if (!lazy && check_test_driver_takes())
             {
@@ -12426,20 +11518,21 @@ static int run_checker_driver_tests(int argc, char** argv)
             }
             if (!lazy && check_test_driver_takes())
             {
-                check_test_driver_preprocess_action(&test, executable, directory);
+                check_test_driver_programs(&test, clang, executable, directory, "preprocess-action", "program.c\tconversion.c", check_test_driver_preprocess_action);
             }
             if (!lazy && check_test_driver_takes())
             {
-                check_test_driver_layout_options(&test, executable, directory);
+                check_test_driver_programs(&test, clang, executable, directory, "layout-options", "program.c", check_test_driver_layout_options);
             }
             if (!lazy && check_test_driver_takes())
             {
-                check_test_driver_link_layout_error(&test, executable, directory);
+                check_test_driver_programs(&test, clang, executable, directory, "link-layout-error", "source-text.c\tfar-text.c", check_test_driver_link_layout_error);
             }
             if (!lazy && check_test_driver_takes())
             {
-                check_test_driver_time_stages(&test, executable, directory);
-                check_test_driver_cpu_pinning(&test, executable, directory);
+                check_test_driver_programs(&test, clang, executable, directory, "time-stages", "program.c\tonce-text.c\ttwice-text.c\tthp-program.c", check_test_driver_time_stages);
+                check_test_driver_warm_arenas(&test, executable, directory);
+                check_test_driver_programs(&test, clang, executable, directory, "cpu-pinning", "program.c", check_test_driver_cpu_pinning);
             }
         }
     }

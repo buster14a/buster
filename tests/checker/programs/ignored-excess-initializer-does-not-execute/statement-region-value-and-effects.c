@@ -1,0 +1,1 @@
+int tested(int n){int x=0;int y=5+({int z=n;x++;z+x;});return x*100+y;}

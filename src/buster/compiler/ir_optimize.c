@@ -1412,7 +1412,8 @@ static __attribute__((aligned(64))) IrCheck ir_optimize_prepare(IrOptimizeWork* 
     // Retain the CFG built by the structural verifier. No input changes before the optimizer consumes it, so
     // rebuilding the same graph here would repeat its edge enumeration, deduplication and instruction map. A verified
     // function (`validated`) has its CFG built alone.
-    IrCheck check = work->validated ? ir_check(ir_cfg_validated(function, scratch, output, &work->cfg), BUSTER_IR_NONE, 0) : ir_verify_cfg(function, scratch, output, &work->cfg);
+    IrCheck check = work->validated ? ir_check(ir_cfg_validated(function, scratch, output, &work->cfg), BUSTER_IR_NONE, 0) : ir_prepare_cfg(function, scratch, output, &work->cfg, false);
+    const bool needs_order = !work->validated && check.error == IR_OK;
     if (check.error == IR_OK && !simd && ir_function_has_simd(function))
     {
         check.error = IR_ERROR_UNSUPPORTED;
@@ -1422,11 +1423,6 @@ static __attribute__((aligned(64))) IrCheck ir_optimize_prepare(IrOptimizeWork* 
     if (check.error == IR_OK && function->block_count != 0 && function->op[0] == IR_PHI)
     {
         check = ir_check(IR_ERROR_PHI, 0, 0);
-    }
-    // The use lists consume the same verified revision without repeating its shape, row or graph checks.
-    if (check.error == IR_OK && !work->without_uses)
-    {
-        check.error = ir_uses_validated(function, scratch, output, &work->uses);
     }
     if (check.error == IR_OK)
     {
@@ -1448,9 +1444,33 @@ static __attribute__((aligned(64))) IrCheck ir_optimize_prepare(IrOptimizeWork* 
                       status == DOMINATOR_MATRIX_LIMIT  ? IR_ERROR_UNSUPPORTED :
                                                           IR_ERROR_DOMINANCE;
     }
-    if (check.error == IR_OK && !work->validated)
+    if (needs_order)
     {
-        check = ir_optimize_check_reachable(function, &work->cfg, &work->dominators);
+        // The tree reads only the verified CFG. One operand walk now proves both local order and
+        // reachable dominance. A dead cross-block use is legal here; use the original diagnostic order
+        // for an inconclusive walk, or when admission or tree construction failed.
+        const IrDominance tree = {
+            .block_count = function->block_count,
+            .enter = work->dominators.preorder,
+            .leave = work->dominators.subtree_end,
+        };
+        if (check.error != IR_OK || ir_check_dominance(function, &work->cfg, &tree).error != IR_OK)
+        {
+            const IrCheck local = ir_check_dominance(function, &work->cfg, NULL);
+            if (local.error != IR_OK)
+            {
+                check = local;
+            }
+            else if (check.error == IR_OK)
+            {
+                check = ir_optimize_check_reachable(function, &work->cfg, &work->dominators);
+            }
+        }
+    }
+    // The use lists consume the same verified revision without repeating its shape, row or graph checks.
+    if (check.error == IR_OK && !work->without_uses)
+    {
+        check.error = ir_uses_validated(function, scratch, output, &work->uses);
     }
     if (check.error == IR_OK)
     {
@@ -1893,6 +1913,7 @@ static __attribute__((aligned(64))) IrError ir_optimize_rewrite(IrOptimizeWork* 
                             else if (op == IR_BR || ((op == IR_CBR || op == IR_SWITCH) && target != BUSTER_IR_NONE))
                             {
                                 candidate.op[out] = IR_BR;
+                                candidate.flags[out] = 0;
                                 candidate.a[out] = blocks[threads[target]];
                                 candidate.b[out] = BUSTER_IR_NONE;
                                 candidate.c[out] = BUSTER_IR_NONE;

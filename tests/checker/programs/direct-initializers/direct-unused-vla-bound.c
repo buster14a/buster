@@ -1,0 +1,1 @@
+int tested(int n){int x __attribute__((unused)) (3,sizeof(int[n++]));return x+100*n;}

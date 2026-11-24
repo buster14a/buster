@@ -1,0 +1,7 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+# A string literal and an operand of integer, boolean or enumeration type, in either order, at the `+`, the operand's
+# type as written (a typedef's, __size_t's sugar); not through parentheses, not a subtraction, not a pointer.
+integers-added-to-string-literals	integers-added-to-string-literals.c	11	0	11	-	-	integers added to string literals
+# At file scope, in a macro, and before an operand's own warning.
+integers-added-to-string-literals-in-other-places	integers-added-to-string-literals-in-other-places.c	6	0	7	-	-	integers added to string literals in other places

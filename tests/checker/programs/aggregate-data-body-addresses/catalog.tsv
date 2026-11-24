@@ -1,0 +1,24 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+aggregate-data-body-addresses	aggregate-data-body-addresses.c	-	aggregate-data-body-addresses
+# Frame objects: local arrays, structs and unions (#145's c-testsuite programs). dirty() first leaves nonzero bytes
+# where inner's frame goes, so that an initializer's implicit zeros must be written.
+local-arrays	local-arrays.c	-	local-arrays
+local-initializer-zeros	local-initializer-zeros.c	-	local-initializer-zeros
+aggregate-assignment-copies	aggregate-assignment-copies.c	-	aggregate-assignment-copies
+aggregate-values-and-compounds	aggregate-values-and-compounds.c	-	aggregate-values-and-compounds
+# A discarded comma discards its right operand too: musl's vfwprintf.c copies a union with a long double so, and
+# a folded comma's constant is nothing (#440).
+comma-discards-aggregate-copy	comma-discards-aggregate-copy.c	-	comma-discards-aggregate-copy
+# An aggregate assignment's value, the destination's address, read after its copy by another copy, a load at
+# offset 0, a return, a conditional's arm, and after the pieces of a copy past 256 bytes (#440).
+aggregate-assignment-values	aggregate-assignment-values.c	-	aggregate-assignment-values
+indirect-calls	indirect-calls.c	-	indirect-calls
+# A statement region makes the lowering track the stack, where an indirect call pops the address it calls too:
+# returns and joins after one must find nothing left behind (#377's review).
+indirect-calls-tracked	indirect-calls-tracked.c	-	indirect-calls-tracked
+narrow-truth-values	narrow-truth-values.c	-	narrow-truth-values
+# Bit-fields (#145's 00218): reads sign- or zero-extend, stores truncate and keep the neighbors' bits, whose
+# bytes (3, 5 and 8 of them here) are accessed as pieces; an assignment's value is the field's as it now reads.
+bit-field-reads-and-stores	bit-field-reads-and-stores.c	-	bit-field-reads-and-stores
+bit-field-updates	bit-field-updates.c	-	bit-field-updates

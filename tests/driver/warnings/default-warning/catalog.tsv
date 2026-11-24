@@ -1,0 +1,682 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+# Attributes a header chooses by feature tests (#3306): each __has_attribute answers 1 where the checker consumes the
+# attribute, so the unit gets clang's -Wformat, -Wunused-result, -Wdeprecated-declarations with the message, the const
+# and pure calls' -Wunused-value, no -Wreturn-type after a noreturn call and no -Wunused-variable for an unused static.
+attributes-chosen-by-has-attribute	feature-tested-attributes-source.c	5	0	2	-	-	attributes chosen by __has_attribute
+attributes-chosen-by-has-attribute-under-wall-wextra	feature-tested-attributes-source.c	5	0	2	-	-Wall -Wextra	attributes chosen by __has_attribute under -Wall -Wextra
+atomic-record-accesses-default-to-errors-after-the-body-s-struct	atomic-access-source.c	0	5	0	syntax-only	-	atomic record accesses default to errors after the body's structural errors
+c23-atomic-record-accesses-default-to-deferred-errors	atomic-access-source.c	0	5	0	c23,syntax-only	-	C23 atomic record accesses default to deferred errors
+atomic-record-accesses-can-be-demoted-independently-of-structura	atomic-access-source.c	4	1	0	syntax-only	-Wno-error=atomic-access	atomic record accesses can be demoted independently of structural errors
+atomic-record-warning-suppression-keeps-structural-recovery	atomic-access-source.c	0	1	0	syntax-only	-Wno-atomic-access	atomic record warning suppression keeps structural recovery
+demoted-atomic-struct-and-union-accesses-retain-their-member-typ	atomic-access-valid-source.c	7	0	0	-	-Wno-error=atomic-access	demoted atomic struct and union accesses retain their member types and compile
+suppressed-atomic-accesses-retain-member-types-in-code-and-uneva	atomic-access-valid-source.c	0	0	0	-	-Wno-atomic-access	suppressed atomic accesses retain member types in code and unevaluated queries
+atomic-member-errors-follow-a-file-initializer-s-own-constant-er	atomic-member-errors-follow-a-file-initializer-s-own-constant-er.c	0	2	0	syntax-only	-	atomic member errors follow a file initializer's own constant error
+an-atomic-member-s-constant-address-still-queues-its-runtime-dia	an-atomic-member-s-constant-address-still-queues-its-runtime-dia.c	0	1	0	syntax-only	-	an atomic member's constant address still queues its runtime diagnostic
+atomic-member-lookup-errors-name-the-underlying-record-before-th	atomic-member-lookup-errors-name-the-underlying-record-before-th.c	0	2	0	syntax-only	-	atomic member lookup errors name the underlying record before the atomic diagnostic
+nested-ordinary-members-do-not-repeat-an-enclosing-atomic-access	nested-ordinary-members-do-not-repeat-an-enclosing-atomic-access.c	0	2	0	syntax-only	-	nested ordinary members do not repeat an enclosing atomic access diagnostic
+atomic-member-diagnostics-follow-runtime-reachability	atomic-member-diagnostics-follow-runtime-reachability.c	0	3	0	syntax-only	-	atomic member diagnostics follow runtime reachability
+demoted-atomic-diagnostics-retain-cfg-reachability-in-later-bodi	atomic-member-diagnostics-follow-runtime-reachability.c	1	0	0	syntax-only	-Wno-error=atomic-access	demoted atomic diagnostics retain CFG reachability in later bodies
+a-structural-error-flushes-unreachable-atomic-member-diagnostics	a-structural-error-flushes-unreachable-atomic-member-diagnostics.c	0	2	0	syntax-only	-	a structural error flushes unreachable atomic member diagnostics
+atomic-member-diagnostic-pragmas-preserve-ignored-warning-and-er	atomic-member-diagnostic-pragmas-preserve-ignored-warning-and-er.c	1	1	0	syntax-only	-	atomic member diagnostic pragmas preserve ignored warning and error mappings
+quiet-bodies-skip-their-atomic-queue-while-global-addresses-reta	quiet-bodies-skip-their-atomic-queue-while-global-addresses-reta.c	0	1	0	syntax-only	-w	quiet bodies skip their atomic queue while global addresses retain the default error
+a-quiet-source-error-pragma-re-enables-a-global-atomic-access-bu	a-quiet-source-error-pragma-re-enables-a-global-atomic-access-bu.c	0	1	0	syntax-only	-w -Wno-atomic-access	a quiet source error pragma re-enables a global atomic access but not a valid body's queue
+a-global-atomic-error-flushes-a-later-quiet-body-s-queued-access	a-global-atomic-error-flushes-a-later-quiet-body-s-queued-access.c	0	2	0	syntax-only	-w	a global atomic error flushes a later quiet body's queued accesses
+a-prior-common-semantic-error-flushes-a-later-atomic-queue	a-prior-common-semantic-error-flushes-a-later-atomic-queue.c	0	2	0	syntax-only	-	a prior common semantic error flushes a later atomic queue
+# A failed static assertion's requirement and its operands' values (#1447, check_semantic_assert): the first
+# false term of a conjunction, literals printed as clang's StmtPrinter prints them (`2147483648U`, `'\x00'`,
+# `2.`, `1.0E+10`), `sizeof (x)`, `__alignof`, and the "expression evaluates to" note where an operand isn't
+# obvious, a plain char's value as `'<0xC8>' (0xC8, -56)`, floats at APFloat's default precision.
+static-assertion-requirements-and-their-values	static-assertion-requirements-and-their-values.c	0	16	14	-	-	static assertion requirements and their values
+# (Apart, as clang stops at 20 errors.)
+static-assertion-requirements-and-their-values-literals-and-conj	static-assertion-requirements-and-their-values-literals-and-conj.c	0	11	4	-	-	static assertion requirements and their values, literals and conjunctions
+static-assertion-requirements-and-their-values-in-c23	static-assertion-requirements-and-their-values-in-c23.c	0	9	6	c23	-	static assertion requirements and their values in C23
+# A statement expression's statements are evaluated as it is (#1447, check_common_statement_roots): a
+# short-circuited operand's, a constant conditional's other arm's, a constant if's and unreachable code's give
+# none of their runtime or unused-value warnings, as clang's CFG leaves their blocks unreachable.
+statements-of-unevaluated-statement-expressions	statements-of-unevaluated-statement-expressions.c	0	0	0	-	-Wall -Wextra	statements of unevaluated statement expressions
+# A body with statement expressions keeps its unreachable-code proof (#1447, check_common_unreachable).
+unreachable-code-in-a-body-with-statement-expressions	unreachable-code-in-a-body-with-statement-expressions.c	0	0	0	-	-Wall -Wextra	unreachable code in a body with statement expressions
+reachable-statement-expressions-jumps-out-of-them-and-returns-in	reachable-statement-expressions-jumps-out-of-them-and-returns-in.c	16	0	0	-	-Wall -Wextra	reachable statement expressions, jumps out of them and returns inside them
+wuninitialized-in-unevaluated-statement-expressions	wuninitialized-in-unevaluated-statement-expressions.c	2	0	1	-	-Wall -Wextra	-Wuninitialized in unevaluated statement expressions
+# An enclosing construct's warning comes after the diagnostics its operands gave as clang built them (#1941): a
+# condition's -Wparentheses at its `)` or `;`, a call's -Wformat from its `)`, a bitwise operator's precedence and a
+# logical not's at their right operand's end; a statement expression's and a nested call's warnings first. A call
+# argument's -Wformat is at its callee.
+enclosing-warnings-follow-their-operands-diagnostics	enclosing-warnings-follow-their-operands-diagnostics.c	19	0	14	-	-Wall	enclosing warnings follow their operands' diagnostics
+enclosing-warnings-follow-their-operands-diagnostics-in-c23-unde	enclosing-warnings-follow-their-operands-diagnostics.c	19	0	14	c23	-Wall -Wextra	enclosing warnings follow their operands' diagnostics in C23 under -Wextra
+# Clang's DiagRuntimeBehavior drops a runtime warning in an array bound (ConstantEvaluated), a variable array's
+# too, and in an unevaluated operand's statement expression: shift counts, divisions, sign comparisons, constant
+# conversions and array indexes; a comma's unused value stays (#1447, check_common_bound).
+runtime-warnings-in-array-bounds-and-unevaluated-statement-expre	runtime-warnings-in-array-bounds-and-unevaluated-statement-expre.c	3	0	0	-	-Wall -Wextra	runtime warnings in array bounds and unevaluated statement expressions
+runtime-warnings-in-array-bounds-and-unevaluated-statement-31	runtime-warnings-in-array-bounds-and-unevaluated-statement-expre.c	3	0	0	c23	-	runtime warnings in array bounds and unevaluated statement expressions in C23
+return-flow-conservative-no-fallthrough-and-reachable-fallthroug	return-flow-conservative-no-fallthrough-and-reachable-fallthroug.c	1	0	0	-	-	return flow conservative no-fallthrough and reachable fallthrough
+floating-literal-file-and-local-initializers	floating-literal-file-and-local-initializers.c	2	0	0	-	-	floating literal file and local initializers
+# An enumeration or an _Atomic target takes neither -Wliteral-conversion nor -Wconstant-conversion in clang (#1447,
+# review on #1453): only a builtin type, qualified or not, does.
+conversion-warnings-skip-enumeration-and-atomic-targets	conversion-warnings-skip-enumeration-and-atomic-targets.c	6	0	0	-	-	conversion warnings skip enumeration and atomic targets
+# A brace element's destination is _Atomic by its declared type, which its plan part records stripped (#1447).
+conversion-warnings-skip-atomic-initializer-elements	conversion-warnings-skip-atomic-initializer-elements.c	2	0	0	-	-	conversion warnings skip atomic initializer elements
+# A return's or a prototype argument's _Atomic destination too, for either warning, beside the int, char and
+# plain parameter ones that still warn (review on #1453).
+conversion-warnings-skip-atomic-returns-and-arguments	conversion-warnings-skip-atomic-returns-and-arguments.c	3	0	0	-	-	conversion warnings skip atomic returns and arguments
+# An enumeration takes -Wconstant-conversion by its integer type's range, though not -Wliteral-conversion, in
+# every position (review on #1453). (A brace element takes neither yet: #1759.)
+constant-conversions-to-enumerations	constant-conversions-to-enumerations.c	6	0	0	c23	-	constant conversions to enumerations
+# An assignment's or an increment's value is no constant to clang's evaluator (#1447), in a list's element too
+# (`{ y = 300 }`), but a comma's right operand is.
+no-constant-conversion-of-an-assignment-s-value	no-constant-conversion-of-an-assignment-s-value.c	2	0	0	-	-	no constant conversion of an assignment's value
+# -Wunreachable-code-generic-assoc (#1447): an association of array type or a qualified one (an address space's,
+# restrict, a typedef's const spelled as its typedef), at its type's first token past the qualifiers, at file
+# scope and in a body, in sizeof's operand too; not _Atomic.
+generic-associations-never-selected	generic-associations-never-selected.c	9	0	0	-	-	generic associations never selected
+generic-associations-never-selected-without-wunreachable-code	generic-associations-never-selected-without-wunreachable-code.c	0	0	0	-	-Wno-unreachable-code	generic associations never selected, without -Wunreachable-code
+# An association's type name is read as a cast's (#1447): objc_gc's qualifier, which the warning names, and
+# objc_ownership's warning on a type it doesn't apply to.
+attributes-in-generic-association-types	attributes-in-generic-association-types.c	4	0	0	-	-	attributes in generic association types
+floating-literal-assignment-return-and-call-conversions	floating-literal-assignment-return-and-call-conversions.c	3	0	0	-	-	floating literal assignment return and call conversions
+# A truth context converts a floating literal to _Bool (#147): conditions, `!`, `&&`, `||` and a conditional's first
+# operand, in unreachable code and short-circuited operands too; never a conditional's arms, a comma's result or
+# sizeof's operand.
+floating-literal-truth-contexts	floating-literal-truth-contexts.c	13	0	0	-	-	floating literal truth contexts
+# A static assertion's condition is a truth context too, warned where clang's parser reads it: between a declaration's
+# initializer and a later statement's, at file scope, and in unreachable code.
+floating-literal-static-assertions	floating-literal-static-assertions.c	7	0	0	-	-	floating literal static assertions
+floating-literal-source-formats	floating-literal-source-formats.c	3	0	0	-	-	floating literal source formats
+floating-literal-array-and-record-initializer-elements	floating-literal-array-and-record-initializer-elements.c	3	0	0	-	-	floating literal array and record initializer elements
+floating-literal-local-brace-initializer-order	floating-literal-local-brace-initializer-order.c	3	0	0	-	-	floating literal local brace initializer order
+floating-literal-scalar-and-aggregate-declaration-order	floating-literal-scalar-and-aggregate-declaration-order.c	4	0	0	-	-	floating literal scalar and aggregate declaration order
+floating-literal-range-initializer-conversions	floating-literal-range-initializer-conversions.c	4	0	0	-	-	floating literal range initializer conversions
+floating-literal-decimal-and-hexadecimal-spelling	floating-literal-decimal-and-hexadecimal-spelling.c	3	0	0	-	-	floating literal decimal and hexadecimal spelling
+floating-literal-adjacent-integer-precision	floating-literal-adjacent-integer-precision.c	2	0	0	-	-	floating literal adjacent integer precision
+floating-literal-call-argument-subtrees-follow-right-to-left-con	floating-literal-call-argument-subtrees-follow-right-to-left-con.c	6	0	0	-	-	floating literal call argument subtrees follow right to left conversion order
+floating-literal-nested-call-and-comma-conversions-are-emitted-o	floating-literal-nested-call-and-comma-conversions-are-emitted-o.c	6	0	0	-	-	floating literal nested call and comma conversions are emitted once
+binary-operand-calls-visit-literal-conversions-right-to-left	binary-operand-calls-visit-literal-conversions-right-to-left.c	2	0	0	-	-	binary operand calls visit literal conversions right to left
+comma-assignment-conversions-visit-the-right-operand-first	comma-assignment-conversions-visit-the-right-operand-first.c	2	0	0	-	-	comma assignment conversions visit the right operand first
+# A brace initializer's or a compound literal's element is checked for -Warray-bounds only by an operator above
+# its subscript, as clang's CheckArrayAccess of the full expression sees the initializer list (#2252).
+brace-elements-array-bounds-only-under-an-operator	brace-elements-array-bounds-only-under-an-operator.c	5	0	4	-	-	brace elements' array bounds only under an operator
+reverse-conversions-precede-source-ordered-bounds-and-unused-res	reverse-conversions-precede-source-ordered-bounds-and-unused-res.c	6	0	2	-	-	reverse conversions precede source ordered bounds and unused results
+reverse-conversions-preserve-each-inner-comma-marker-before-its	reverse-conversions-preserve-each-inner-comma-marker-before-its.c	6	0	2	-	-	reverse conversions preserve each inner comma marker before its bounds warning
+comma-integer-call-conversions-follow-the-same-reverse-walk	comma-integer-call-conversions-follow-the-same-reverse-walk.c	2	0	0	-	-	comma integer call conversions follow the same reverse walk
+brace-initializer-conversions-precede-nested-call-conversions	brace-initializer-conversions-precede-nested-call-conversions.c	4	0	0	-	-	brace initializer conversions precede nested call conversions
+unreachable-return-and-local-initializer-retain-literal-conversi	unreachable-return-and-local-initializer-retain-literal-conversi.c	2	0	0	-	-	unreachable return and local initializer retain literal conversion warnings
+unreachable-call-conversion-precedes-the-later-reachable-convers	unreachable-call-conversion-precedes-the-later-reachable-convers.c	2	0	0	-	-	unreachable call conversion precedes the later reachable conversion
+unreachable-literal-conversions-do-not-enable-runtime-warning-fa	unreachable-literal-conversions-do-not-enable-runtime-warning-fa.c	1	0	0	-	-	unreachable literal conversions do not enable runtime warning families
+short-circuited-and-conditional-call-literals-remain-source-chec	short-circuited-and-conditional-call-literals-remain-source-chec.c	2	0	0	-	-	short-circuited and conditional call literals remain source checks
+conditional-call-arms-retain-literal-conversions	conditional-call-arms-retain-literal-conversions.c	2	0	0	-	-	conditional call arms retain literal conversions
+comma-conditional-arms-do-not-acquire-outer-conversion	comma-conditional-arms-do-not-acquire-outer-conversion.c	0	0	0	c23	-Werror=literal-conversion	comma conditional arms do not acquire outer conversion
+nested-comma-and-conditional-comma-results-do-not-inherit-litera	nested-comma-and-conditional-comma-results-do-not-inherit-litera.c	0	0	0	c23	-Werror=literal-conversion	nested comma and conditional comma results do not inherit literal conversion
+integer-conversion-of-comma-results-uses-the-whole-result-expres	integer-conversion-of-comma-results-uses-the-whole-result-expres.c	4	0	0	-	-	integer conversion of comma results uses the whole result expression
+top-level-comma-still-receives-outer-conversion	top-level-comma-still-receives-outer-conversion.c	1	0	0	-	-	top level comma still receives outer conversion
+unevaluated-sizeof-and-generic-arms-suppress-literal-conversions	unevaluated-sizeof-and-generic-arms-suppress-literal-conversions.c	0	0	0	-	-	unevaluated sizeof and generic arms suppress literal conversions
+conditional-literal-arms-inherit-initializer-and-return-targets	conditional-literal-arms-inherit-initializer-and-return-targets.c	6	0	0	-	-	conditional literal arms inherit initializer and return targets
+conditional-brace-initializer-and-unreachable-argument-targets	conditional-brace-initializer-and-unreachable-argument-targets.c	4	0	0	-	-	conditional brace initializer and unreachable argument targets
+conditional-integer-conversions-retain-selected-arm-pruning	conditional-integer-conversions-retain-selected-arm-pruning.c	2	0	0	-	-	conditional integer conversions retain selected-arm pruning
+nested-integer-argument-conversions-follow-right-to-left-order	nested-integer-argument-conversions-follow-right-to-left-order.c	2	0	0	-	-	nested integer argument conversions follow right to left order
+unreachable-integer-conversion-families-remain-suppressed	unreachable-integer-conversion-families-remain-suppressed.c	1	0	0	-	-	unreachable integer conversion families remain suppressed
+# An unreachable initializer's barriers outlive its body's scratch (#1447): the next body's marks and queue
+# must not reuse them, which made a later body's initialized variables "uninitialized when used here".
+unreachable-initializer-barriers-outlive-their-body	unreachable-initializer-barriers-outlive-their-body.c	0	0	0	-	-Wall	unreachable initializer barriers outlive their body
+initializers-after-return-retain-only-literal-source-conversions	initializers-after-return-retain-only-literal-source-conversions.c	1	0	0	-	-	initializers after return retain only literal source conversions
+# Clang reports a literal conversion at once, as its full expression completes (Sema::Diag), while constant
+# conversions, shift counts and division by zero wait for their function's end (DiagRuntimeBehavior); at file scope a
+# declarator's constant conversion follows its literal ones. The whole output is clang's, in clang's order.
+a-truth-context-s-literal-conversion-precedes-the-body-s-shift-c	a-truth-context-s-literal-conversion-precedes-the-body-s-shift-c.c	4	0	0	-	-	a truth context's literal conversion precedes the body's shift counts
+literal-conversions-report-at-once-before-the-body-s-deferred-co	literal-conversions-report-at-once-before-the-body-s-deferred-co.c	7	0	0	-	-	literal conversions report at once before the body's deferred conversions and shift counts
+# A divisor clang's EvaluateAsInt finds zero through a const object's initializer (#1447,
+# check_common_zero_divisor): a scalar's, an element's, a member's, through parentheses and casts, at file and
+# block scope; not a volatile's, a non-const's or one initialized at run time, and none in unreachable code.
+division-by-a-const-object-s-zero	division-by-a-const-object-s-zero.c	10	0	0	-	-	division by a const object's zero
+division-by-a-const-object-s-zero-in-c23-under-wall	division-by-a-const-object-s-zero.c	10	0	0	c23	-Wall	division by a const object's zero in C23 under -Wall
+literal-conversions-precede-selection-arms-shift-counts-and-divi	literal-conversions-precede-selection-arms-shift-counts-and-divi.c	7	0	0	-	-	literal conversions precede selection arms' shift counts and division by zero
+argument-and-conditional-arm-literal-conversions-precede-deferre	argument-and-conditional-arm-literal-conversions-precede-deferre.c	5	0	0	-	-	argument and conditional-arm literal conversions precede deferred constant conversions
+literal-conversions-in-unreachable-and-short-circuited-code-prec	literal-conversions-in-unreachable-and-short-circuited-code-prec.c	8	0	0	-	-	literal conversions in unreachable and short-circuited code precede deferred shift counts
+file-scope-literal-conversions-keep-each-declarator-s-order-with	file-scope-literal-conversions-keep-each-declarator-s-order-with.c	10	0	0	-	-	file-scope literal conversions keep each declarator's order with constant conversions
+unreachable-code-keeps-literal-conversions-in-each-full-expressi	unreachable-code-keeps-literal-conversions-in-each-full-expressi.c	5	0	0	-	-	unreachable code keeps literal conversions in each full expression's conversion order
+floating-literal-boolean-conversions	floating-literal-boolean-conversions.c	2	0	0	-	-	floating literal boolean conversions
+floating-literal-out-of-range-conversions	floating-literal-out-of-range-conversions.c	3	0	0	-	-	floating literal out of range conversions
+floating-literal-macro-expansion-note	floating-literal-macro-expansion-note.c	1	0	1	-	-	floating literal macro expansion note
+floating-literal-parentheses-retain-the-literal-warning	floating-literal-parentheses-retain-the-literal-warning.c	3	0	0	-	-	floating literal parentheses retain the literal warning
+explicit-and-nonliteral-floating-conversions-stay-quiet-by-defau	explicit-and-nonliteral-floating-conversions-stay-quiet-by-defau.c	0	0	0	-	-	explicit and nonliteral floating conversions stay quiet by default
+floating-literal-conversion-group-disabled	floating-literal-conversion-group-disabled.c	0	0	0	-	-Wno-literal-conversion	floating literal conversion group disabled
+# A block's declaration with linkage (an extern object, a function) belongs to the translation unit in clang, so
+# it is never an unused variable or function; the block's own static, register and automatic objects are (#1447).
+a-block-s-extern-declarations-are-never-unused	a-block-s-extern-declarations-are-never-unused.c	4	0	0	-	-Wall	a block's extern declarations are never unused
+# A variable with an applied cleanup is used, as clang's ShouldDiagnoseUnusedDecl has it (#1881): one declarator's,
+# a specifier's on several declarators, and one never read but assigned; another declarator of the declaration is
+# still unused. (A file-scope variable whose cleanup is ignored is unused too, but its -Wignored-attributes would
+# be an error before it under the sweep's -Werror, after which clang gives no file-scope unused warning.)
+a-cleanup-variable-is-never-unused	a-cleanup-variable-is-never-unused.c	1	0	0	-	-Wall	a cleanup variable is never unused
+# A use through a block's declaration with linkage uses the outer entity it redeclares, through nested blocks too;
+# a block's extern that nothing uses leaves a file-scope static unused (#1447).
+a-use-through-a-block-s-extern-declaration-uses-the-outer-entity	a-use-through-a-block-s-extern-declaration-uses-the-outer-entity.c	1	0	0	-	-Wall	a use through a block's extern declaration uses the outer entity
+# Clang's error at a block's extern declarator with an initializer, __private_extern__ too, not a generic one.
+a-block-s-extern-declaration-with-an-initializer	a-block-s-extern-declaration-with-an-initializer.c	0	1	0	-	-	a block's extern declaration with an initializer
+a-block-s-private-extern-declaration-with-an-initializer	a-block-s-private-extern-declaration-with-an-initializer.c	0	1	0	-	-	a block's private extern declaration with an initializer
+floating-literal-conversion-parent-group-disabled	floating-literal-conversion-group-disabled.c	0	0	0	-	-Wno-conversion	floating literal conversion parent group disabled
+floating-literal-conversion-source-policy	floating-literal-conversion-source-policy.c	0	1	0	-	-	floating literal conversion source policy
+float-conversion-error-does-not-promote-literal-conversion	floating-literal-conversion-group-disabled.c	1	0	0	-	-Werror=float-conversion	float conversion error does not promote literal conversion
+float-conversion-disabled-does-not-suppress-literal-conversion	floating-literal-conversion-group-disabled.c	1	0	0	-	-Wno-float-conversion	float conversion disabled does not suppress literal conversion
+literal-disabled-before-float-conversion-error	floating-literal-conversion-group-disabled.c	0	0	0	-	-Wno-literal-conversion -Werror=float-conversion	literal disabled before float conversion error
+literal-error-after-float-conversion-disabled	floating-literal-conversion-group-disabled.c	0	1	0	-	-Wno-float-conversion -Werror=literal-conversion	literal error after float conversion disabled
+float-conversion-source-policy-does-not-promote-literal-conversi	float-conversion-source-policy-does-not-promote-literal-conversi.c	1	0	0	-	-	float conversion source policy does not promote literal conversion
+literal-source-policy-remains-disabled-across-float-conversion-e	literal-source-policy-remains-disabled-across-float-conversion-e.c	0	0	0	-	-	literal source policy remains disabled across float conversion error
+struct-brace-initializer-members-warn-of-constant-conversions-at	struct-brace-initializer-members-warn-of-constant-conversions-at.c	2	0	0	-	-	struct brace initializer members warn of constant conversions at file and block scope
+array-nested-and-designated-brace-initializers-warn-in-clang-s-r	array-nested-and-designated-brace-initializers-warn-in-clang-s-r.c	8	0	0	-	-	array, nested and designated brace initializers warn in clang's reverse order
+brace-constant-conversions-follow-their-values-runtime-warnings	brace-constant-conversions-follow-their-values-runtime-warnings.c	9	0	0	-	-	brace constant conversions follow their values' runtime warnings, arms, commas and ranges
+brace-constant-conversions-skip-unreachable-code-and-keep-clang	brace-constant-conversions-skip-unreachable-code-and-keep-clang.c	4	0	0	-	-	brace constant conversions skip unreachable code and keep clang's unsigned and bit-pattern exemptions
+same-width-brace-constants-warn-at-once-except-into-a-character	same-width-brace-constants-warn-at-once-except-into-a-character.c	7	0	0	-	-	same-width brace constants warn at once, except into a character element
+same-width-scalar-constants-warn-at-once-before-a-body-s-queued	same-width-scalar-constants-warn-at-once-before-a-body-s-queued.c	4	0	0	-	-	same-width scalar constants warn at once, before a body's queued warnings
+a-file-scope-shift-count-follows-its-declarator-s-literal-conver	a-file-scope-shift-count-follows-its-declarator-s-literal-conver.c	2	0	0	-	-	a file-scope shift count follows its declarator's literal conversions
+file-scope-declarators-queue-shift-counts-and-constant-conversio	file-scope-declarators-queue-shift-counts-and-constant-conversio.c	12	0	0	-	-	file-scope declarators queue shift counts and constant conversions to their own ends
+# A comma's left operand's -Wunused-value in a file-scope initializer is queued to the declarator's end with its
+# operands' shift counts, in the order clang builds them (#1943); a brace initializer's values walk in
+# initializer order, before its conversions, in a function too.
+comma-and-shift-warnings-in-initializers-in-clang-s-order	comma-and-shift-warnings-in-initializers-in-clang-s-order.c	34	0	0	-	-Wall	comma and shift warnings in initializers in clang's order
+comma-warnings-in-initializers-in-clang-s-order-without-shift-co	comma-and-shift-warnings-in-initializers-in-clang-s-order.c	24	0	0	c23,syntax-only	-Wno-shift-count-overflow	comma warnings in initializers in clang's order without shift counts
+# (clang 23's C23 mode can't compile these static initializers: "cannot compile this static initializer yet".)
+literal-conversions-precede-constant-conversions-in-one-brace-in	literal-conversions-precede-constant-conversions-in-one-brace-in.c	9	0	0	-	-	literal conversions precede constant conversions in one brace initializer
+brace-members-of-an-enumeration-warn-by-its-integer-type-s-range	brace-members-of-an-enumeration-warn-by-its-integer-type-s-range.c	2	0	0	c23	-	brace members of an enumeration warn by its integer type's range
+brace-parts-of-a-constant-shift-warn-of-its-changed-value-and-in	brace-parts-of-a-constant-shift-warn-of-its-changed-value-and-in.c	8	0	0	-	-	brace parts of a constant shift warn of its changed value, and into _Bool of its truth
+a-compound-literal-s-constant-conversions-follow-its-full-expres	a-compound-literal-s-constant-conversions-follow-its-full-expres.c	9	0	0	-	-	a compound literal's constant conversions follow its full expression's counts, in conditions and increments too
+atomic-brace-elements-and-members-take-no-constant-conversion	atomic-brace-elements-and-members-take-no-constant-conversion.c	0	0	0	-	-	_Atomic brace elements and members take no constant conversion
+brace-constant-conversion-suppression-keeps-literal-conversions	brace-constant-conversion-suppression-keeps-literal-conversions.c	2	0	0	-	-Wno-constant-conversion	brace constant conversion suppression keeps literal conversions
+brace-constant-conversion-promotion-rejects-object-publication	brace-constant-conversion-promotion-rejects-object-publication.c	0	1	0	-	-Werror=constant-conversion	brace constant conversion promotion rejects object publication
+file-initializer-discards-pointer-qualifiers-at-its-declaration	file-initializer-discards-pointer-qualifiers-at-its-declaration.c	1	0	0	-	-	file initializer discards pointer qualifiers at its declaration
+local-initializer-discards-pointer-qualifiers	local-initializer-discards-pointer-qualifiers.c	1	0	0	-	-	local initializer discards pointer qualifiers
+assignment-discards-pointer-qualifiers	assignment-discards-pointer-qualifiers.c	1	0	0	-	-	assignment discards pointer qualifiers
+return-discards-pointer-qualifiers-at-its-expression	return-discards-pointer-qualifiers-at-its-expression.c	1	0	0	-	-	return discards pointer qualifiers at its expression
+discarded-pointer-qualifiers-follow-named-policy	file-initializer-discards-pointer-qualifiers-at-its-declaration.c	0	0	0	-	-Wno-incompatible-pointer-types-discards-qualifiers	discarded pointer qualifiers follow named policy
+discarded-pointer-qualifiers-honor-source-severity	discarded-pointer-qualifiers-honor-source-severity.c	0	1	0	-	-	discarded pointer qualifiers honor source severity
+discarded-pointer-qualifiers-retain-typedef-spellings	discarded-pointer-qualifiers-retain-typedef-spellings.c	1	0	0	-	-	discarded pointer qualifiers retain typedef spellings
+discarded-array-qualifiers-retain-the-source-array-type	discarded-array-qualifiers-retain-the-source-array-type.c	1	0	0	-	-	discarded array qualifiers retain the source array type
+discarded-pointer-qualifiers-retain-outer-const-spelling	discarded-pointer-qualifiers-retain-outer-const-spelling.c	3	0	0	-	-	discarded pointer qualifiers retain outer const spelling
+plain-char-pointer-initializer-and-return-conversion	plain-char-pointer-initializer-and-return-conversion.c	2	0	0	-	-	plain char pointer initializer and return conversion
+direct-call-qualifier-warnings-retain-named-and-unnamed-paramete	direct-call-qualifier-warnings-retain-named-and-unnamed-paramete.c	2	0	2	-	-	direct call qualifier warnings retain named and unnamed parameter notes
+direct-call-parameter-note-uses-the-visible-redeclaration	direct-call-parameter-note-uses-the-visible-redeclaration.c	1	0	1	-	-	direct call parameter note uses the visible redeclaration
+empty-list-redeclaration-retains-conversion-checks-without-a-par	empty-list-redeclaration-retains-conversion-checks-without-a-par.c	1	0	0	-	-Wno-deprecated-non-prototype	empty-list redeclaration retains conversion checks without a parameter note
+closed-block-prototype-supplies-no-parameter-note-to-an-unprotot	closed-block-prototype-supplies-no-parameter-note-to-an-unprotot.c	0	0	0	-	-Wno-deprecated-non-prototype	closed-block prototype supplies no parameter note to an unprototyped call
+function-pointer-variable-call-has-no-parameter-declaration-note	function-pointer-variable-call-has-no-parameter-declaration-note.c	1	0	0	-	-	function pointer variable call has no parameter declaration note
+function-pointer-typedef-and-parameter-calls-have-no-declaration	function-pointer-typedef-and-parameter-calls-have-no-declaration.c	2	0	0	-	-	function pointer typedef and parameter calls have no declaration notes
+dereferenced-and-cast-callees-have-no-parameter-declaration-note	dereferenced-and-cast-callees-have-no-parameter-declaration-note.c	2	0	0	-	-	dereferenced and cast callees have no parameter declaration notes
+pointer-argument-warning-is-located-at-the-expression-beginning	pointer-argument-warning-is-located-at-the-expression-beginning.c	1	0	1	-	-	pointer argument warning is located at the expression beginning
+nested-pointer-qualifier-wording-includes-the-parameter-note	nested-pointer-qualifier-wording-includes-the-parameter-note.c	1	0	1	-	-	nested pointer qualifier wording includes the parameter note
+pointer-call-macro-expansion-precedes-its-parameter-note	pointer-call-macro-expansion-precedes-its-parameter-note.c	1	0	2	-	-	pointer call macro expansion precedes its parameter note
+mixed-pointer-conversion-groups-follow-argument-order	mixed-pointer-conversion-groups-follow-argument-order.c	4	0	4	-	-	mixed pointer conversion groups follow argument order
+plain-char-signedness-overrides-an-array-qualifier-discard	plain-char-signedness-overrides-an-array-qualifier-discard.c	1	0	1	-	-	plain char signedness overrides an array qualifier discard
+pointer-parameter-notes-skip-intervening-scalar-and-callback-par	pointer-parameter-notes-skip-intervening-scalar-and-callback-par.c	2	0	2	-	-	pointer parameter notes skip intervening scalar and callback parameters
+pointer-parameter-type-spelling-belongs-to-its-own-specifiers	pointer-parameter-type-spelling-belongs-to-its-own-specifiers.c	2	0	2	-	-	pointer parameter type spelling belongs to its own specifiers
+pointer-call-qualifiers-and-signedness-obey-independent-group-po	pointer-call-qualifiers-and-signedness-obey-independent-group-po.c	1	0	1	-	-Wno-incompatible-pointer-types-discards-qualifiers	pointer call qualifiers and signedness obey independent group policy
+pointer-call-warning-promotion-retains-its-parameter-note	pointer-call-warning-promotion-retains-its-parameter-note.c	0	1	1	-	-	pointer call warning promotion retains its parameter note
+nested-pointer-initialization-assignment-and-return-wording	nested-pointer-initialization-assignment-and-return-wording.c	3	0	0	-	-	nested pointer initialization assignment and return wording
+nonconstant-file-initializer	nonconstant-file-initializer.c	0	1	0	-	-	nonconstant file initializer
+nonconstant-aggregate-initializer-element	nonconstant-aggregate-initializer-element.c	0	1	0	-	-	nonconstant aggregate initializer element
+nonconstant-static-local-initializer	nonconstant-static-local-initializer.c	0	1	0	-	-	nonconstant static local initializer
+duplicate-qualifiers-and-declaration-specifiers	duplicate-qualifiers-and-declaration-specifiers.c	7	0	0	-	-	duplicate qualifiers and declaration specifiers
+duplicate-function-specifiers	duplicate-function-specifiers.c	2	0	0	-	-	duplicate function specifiers
+duplicate-separated-noreturn-specifiers	duplicate-separated-noreturn-specifiers.c	2	0	0	-	-	duplicate separated noreturn specifiers
+duplicate-parameter-and-pointer-qualifiers	duplicate-parameter-and-pointer-qualifiers.c	2	0	0	-	-	duplicate parameter and pointer qualifiers
+duplicate-specifiers-in-operand-type-names	duplicate-specifiers-in-operand-type-names.c	7	0	0	warning-text	-	duplicate specifiers in operand type names
+# An enum base's const and volatile (#1952): clang's -Wunderlying-cv-qualifier-ignored once per base, at its first
+# token that isn't a qualifier, a typedef's qualifiers too, and no stand-alone declaration's warning for them.
+enum-underlying-type-qualifiers	enum-underlying-type-qualifiers.c	13	0	0	warning-text	-	enum underlying type qualifiers
+enum-underlying-type-qualifiers-under-wall	enum-underlying-type-qualifiers.c	13	0	0	warning-text	-Wall	enum underlying type qualifiers under -Wall
+enum-underlying-type-qualifiers-under-w	enum-underlying-type-qualifiers.c	0	0	0	-	-w	enum underlying type qualifiers under -w
+enum-underlying-type-qualifiers-as-errors	enum-underlying-type-qualifiers-as-errors.c	0	1	0	-	-Werror=underlying-cv-qualifier-ignored	enum underlying type qualifiers as errors
+enum-underlying-type-qualifiers-disabled	enum-underlying-type-qualifiers-as-errors.c	0	0	0	-	-Wno-underlying-cv-qualifier-ignored	enum underlying type qualifiers disabled
+enum-underlying-atomic-qualifier-is-a-default-error	enum-underlying-atomic-qualifier-is-a-default-error.c	0	2	0	-	-	enum underlying atomic qualifier is a default error
+enum-underlying-atomic-qualifier-can-be-demoted	enum-underlying-atomic-qualifier-is-a-default-error.c	2	0	0	-	-Wno-error=underlying-atomic-qualifier-ignored	enum underlying atomic qualifier can be demoted
+enum-underlying-atomic-qualifier-can-be-suppressed	enum-underlying-atomic-qualifier-is-a-default-error.c	0	0	0	-	-Wno-underlying-atomic-qualifier-ignored	enum underlying atomic qualifier can be suppressed
+enum-underlying-atomic-qualifier-stays-an-error-under-w	enum-underlying-atomic-qualifier-stays-an-error-under-w.c	0	1	0	-	-w	enum underlying atomic qualifier stays an error under -w
+# An enum's fixed base in a declaration with a declarator (#2213): clang's -Welaborated-enum-base, an error by default,
+# at the `:`, after which the declaration is an elaborated reference: a new name declared with the base (a later
+# body's "previously declared with fixed underlying type"), a visible enum's base ignored; the base's own warnings.
+an-enum-base-with-a-declarator	an-enum-base-with-a-declarator.c	2	7	1	-	-	an enum base with a declarator
+an-enum-base-with-a-declarator-demoted	an-enum-base-with-a-declarator.c	6	3	1	-	-Wno-error=elaborated-enum-base -Werror=underlying-cv-qualifier-ignored	an enum base with a declarator demoted
+an-enum-base-with-a-declarator-ignored	an-enum-base-with-a-declarator.c	0	1	1	-	-Wno-elaborated-enum-base -w	an enum base with a declarator ignored
+an-enum-base-with-a-declarator-under-w	an-enum-base-with-a-declarator.c	0	7	1	-	-w	an enum base with a declarator under -w
+# An object left an array of unknown bound by its tentative definitions (#2238): clang's
+# -Wtentative-definition-array once per object, at its last tentative definition, in the order of its first one,
+# before the unit's unused warnings; none for a defined or completed one, an extern one, or under the pragma.
+tentative-array-definitions	tentative-array-definitions.c	11	0	0	warning-text	-Wall	tentative array definitions
+tentative-array-definitions-in-c23	tentative-array-definitions.c	11	0	0	c23,warning-text	-Wall	tentative array definitions in C23
+tentative-array-definitions-under-w	tentative-array-definitions.c	0	0	0	-	-w	tentative array definitions under -w
+tentative-array-definitions-as-errors	tentative-array-definitions-as-errors.c	0	2	0	-	-Werror=tentative-definition-array	tentative array definitions as errors
+tentative-array-definitions-disabled	tentative-array-definitions-disabled.c	0	0	0	-	-Wno-tentative-definition-array	tentative array definitions disabled
+# Clang's loop over the tentative definitions has no error test: a rejected unit warns too, a definition after
+# the error included.
+tentative-array-definitions-in-a-rejected-unit	tentative-array-definitions-in-a-rejected-unit.c	4	1	0	-	-Wall	tentative array definitions in a rejected unit
+# The unit's end in clang's order (#2238): -Wundefined-internal, the tentative arrays, the unused declarations;
+# under -Werror the first promoted one leaves out the unused ones.
+unit-end-order	unit-end-order.c	4	0	1	warning-text	-Wall	unit end order
+# A promoted graph warning, published after the reader's, is an error before -Wundefined-internal (#2238).
+unit-end-after-a-promoted-graph-warning	unit-end-after-a-promoted-graph-warning.c	3	0	1	warning-text	-Wall	unit end after a promoted graph warning
+# A block's promoted unused variable is an error before the unit's end (#2238).
+unit-end-after-a-promoted-scope-warning	unit-end-after-a-promoted-scope-warning.c	3	0	0	warning-text	-Wall	unit end after a promoted scope warning
+duplicate-declaration-specifier-group-disabled	duplicate-declaration-specifier-group-disabled.c	0	0	0	-	-Wno-duplicate-decl-specifier	duplicate declaration specifier group disabled
+duplicate-declaration-specifier-source-policy	duplicate-declaration-specifier-source-policy.c	0	0	0	-	-	duplicate declaration specifier source policy
+noreturn-fall-off	noreturn-fall-off.c	1	0	0	-	-	noreturn fall off
+noreturn-explicit-return	noreturn-explicit-return.c	1	0	0	-	-	noreturn explicit return
+noreturn-valued-return	noreturn-valued-return.c	1	0	0	-	-	noreturn valued return
+noreturn-dead-explicit-return	noreturn-dead-explicit-return.c	1	0	0	-	-	noreturn dead explicit return
+noreturn-ordinary-call-can-return	noreturn-ordinary-call-can-return.c	1	0	0	-	-	noreturn ordinary call can return
+noreturn-call-ends-the-path	noreturn-call-ends-the-path.c	0	0	0	-	-	noreturn call ends the path
+noreturn-partial-terminal-path	noreturn-partial-terminal-path.c	1	0	0	-	-	noreturn partial terminal path
+noreturn-trap-ends-the-path	noreturn-trap-ends-the-path.c	0	0	0	-	-	noreturn trap ends the path
+noreturn-cast-terminal-path	noreturn-cast-terminal-path.c	0	0	0	-	-	noreturn cast terminal path
+noreturn-partial-cast-terminal-path	noreturn-partial-cast-terminal-path.c	1	0	0	-	-	noreturn partial cast terminal path
+noreturn-partial-trap-path	noreturn-partial-trap-path.c	1	0	0	-	-	noreturn partial trap path
+noreturn-independent-of-return-type-warning-policy	noreturn-fall-off.c	1	0	0	-	-Wno-return-type	noreturn independent of return type warning policy
+noreturn-call-when-return-type-warnings-are-disabled	noreturn-call-ends-the-path.c	0	0	0	-	-Wno-return-type	noreturn call when return-type warnings are disabled
+noreturn-group-disabled	noreturn-explicit-return.c	0	0	0	-	-Wno-invalid-noreturn	noreturn group disabled
+noreturn-source-policy	noreturn-source-policy.c	0	0	0	-	-	noreturn source policy
+scalar-return-fall-off-after-ordinary-call	scalar-return-fall-off-after-ordinary-call.c	1	0	0	-	-	scalar return fall off after ordinary call
+scalar-return-partial-terminal-path	scalar-return-partial-terminal-path.c	1	0	0	-	-	scalar return partial terminal path
+scalar-return-terminal-call	scalar-return-terminal-call.c	0	0	0	-	-	scalar return terminal call
+scalar-return-partial-trap-path	scalar-return-partial-trap-path.c	1	0	0	-	-	scalar return partial trap path
+private-extern-declarations	private-extern-declarations.c	2	0	2	-	-	private extern declarations
+private-extern-definitions	private-extern-definitions.c	0	0	0	-	-	private extern definitions
+private-extern-direct-initializer-after-attribute	private-extern-direct-initializer-after-attribute.c	0	0	0	-	-	private extern direct initializer after attribute
+private-extern-thread-local-declaration	private-extern-thread-local-declaration.c	1	0	1	-	-	private extern thread local declaration
+private-extern-redeclarations	private-extern-redeclarations.c	3	0	3	-	-	private extern redeclarations
+private-extern-multiple-declarators	private-extern-multiple-declarators.c	2	0	2	-	-	private extern multiple declarators
+private-extern-duplicate-specifier	private-extern-duplicate-specifier.c	2	0	1	-	-	private extern duplicate specifier
+private-extern-group-disabled	private-extern-group-disabled.c	0	0	0	-	-Wno-private-extern	private extern group disabled
+private-extern-source-policy	private-extern-source-policy.c	0	0	0	-	-	private extern source policy
+first-block-annotation-survives-its-own-later-bare-declaration	first-block-annotation-survives-its-own-later-bare-declaration.c	1	0	0	-	-fno-builtin	first block annotation survives its own later bare declaration
+first-bare-block-extern-does-not-export-a-later-block-annotation	first-bare-block-extern-does-not-export-a-later-block-annotation.c	0	0	0	-	-fno-builtin	first bare block extern does not export a later block annotation
+all-supported-explicit-format-builtins-keep-their-source-argumen	all-supported-explicit-format-builtins-keep-their-source-argumen.c	5	0	0	-	-ffreestanding -fno-builtin	all supported explicit format builtins keep their source argument indexes
+explicit-format-receipts-follow-interleaved-unrelated-intrinsic	explicit-format-receipts-follow-interleaved-unrelated-intrinsic.c	1	0	0	-	-fno-builtin	explicit format receipts follow interleaved unrelated intrinsic calls
+first-block-extern-format-contract-reaches-the-first-file-declar	first-block-extern-format-contract-reaches-the-first-file-declar.c	1	0	0	-	-fno-builtin	first block extern format contract reaches the first file declaration
+later-file-declaration-does-not-import-a-nested-outer-redeclarat	later-file-declaration-does-not-import-a-nested-outer-redeclarat.c	0	0	0	-	-fno-builtin	later file declaration does not import a nested outer redeclaration annotation
+middle-format-annotation-survives-a-final-bare-declaration	middle-format-annotation-survives-a-final-bare-declaration.c	1	0	0	-	-fno-builtin	middle format annotation survives a final bare declaration
+later-format-annotation-does-not-change-an-earlier-call	later-format-annotation-does-not-change-an-earlier-call.c	1	0	0	-	-	later format annotation does not change an earlier call
+block-format-inheritance-follows-the-visible-declaration	block-format-inheritance-follows-the-visible-declaration.c	1	0	0	-	-	block format inheritance follows the visible declaration
+bare-format-inheritance-preserves-unrelated-declaration-attribut	bare-format-inheritance-preserves-unrelated-declaration-attribut.c	1	0	0	-	-	bare format inheritance preserves unrelated declaration attributes
+hosted-plain-format-names-retain-inferred-checks	format-plain-source.c	5	0	0	-	-	hosted plain format names retain inferred checks
+freestanding-plain-format-names-have-no-inferred-contract	format-plain-source.c	0	0	0	-	-ffreestanding	freestanding plain format names have no inferred contract
+global-no-builtin-disables-plain-format-inference	format-plain-source.c	0	0	0	-	-fno-builtin	global no builtin disables plain format inference
+per-name-exclusions-disable-all-four-supported-format-names	format-plain-source.c	0	0	0	-	-fno-builtin-printf -fno-builtin-fprintf -fno-builtin-sprintf -fno-builtin-snprintf	per name exclusions disable all four supported format names
+printf-exclusion-preserves-the-other-names	format-plain-source.c	4	0	0	-	-fno-builtin-printf	printf exclusion preserves the other names
+snprintf-exclusion-disables-its-embedded-nul-check-too	format-plain-source.c	3	0	0	-	-fno-builtin-snprintf	snprintf exclusion disables its embedded NUL check too
+builtin-exclusions-match-the-whole-name	format-plain-source.c	5	0	0	-	-fno-builtin-print	builtin exclusions match the whole name
+later-builtin-option-restores-plain-format-inference	format-plain-source.c	5	0	0	-	-fno-builtin -fbuiltin	later builtin option restores plain format inference
+later-no-builtin-option-disables-plain-format-inference	format-plain-source.c	0	0	0	-	-fbuiltin -fno-builtin	later no builtin option disables plain format inference
+# The first attribute survives a bare redeclaration; the second is attached after a bare declaration.
+# A non-library name with a different format index keeps its source contract under the same options.
+freestanding-preserves-explicit-and-redeclared-format-contracts	format-attributed-source.c	3	0	0	-	-ffreestanding	freestanding preserves explicit and redeclared format contracts
+global-no-builtin-preserves-explicit-and-redeclared-format-contr	format-attributed-source.c	3	0	0	-	-fno-builtin	global no builtin preserves explicit and redeclared format contracts
+per-name-exclusions-preserve-explicit-and-redeclared-format-cont	format-attributed-source.c	3	0	0	-	-fno-builtin-printf -fno-builtin-snprintf	per name exclusions preserve explicit and redeclared format contracts
+plain-dprintf-needs-an-explicit-format-contract	plain-dprintf-needs-an-explicit-format-contract.c	0	0	0	-	-	plain dprintf needs an explicit format contract
+attributed-dprintf-remains-checked-when-builtins-are-disabled	attributed-dprintf-remains-checked-when-builtins-are-disabled.c	1	0	0	-	-ffreestanding -fno-builtin -fno-builtin-dprintf	attributed dprintf remains checked when builtins are disabled
+explicit-builtin-printf-remains-checked-when-builtins-are-disabl	explicit-builtin-printf-remains-checked-when-builtins-are-disabl.c	1	0	0	-	-ffreestanding -fno-builtin -fno-builtin-printf	explicit builtin printf remains checked when builtins are disabled
+local-printf-function-pointer-has-no-inferred-format-contract	local-printf-function-pointer-has-no-inferred-format-contract.c	0	0	0	-	-	local printf function pointer has no inferred format contract
+valid-plain-format-calls-retain-a-quiet-twin	valid-plain-format-calls-retain-a-quiet-twin.c	0	0	0	-	-	valid plain format calls retain a quiet twin
+one-parenthesized-comparison-does-not-hide-the-other-warning	one-parenthesized-comparison-does-not-hide-the-other-warning.c	2	0	4	-	-	one parenthesized comparison does not hide the other warning
+parenthesized-eager-chain-leaves-outer-precedence-visible	parenthesized-eager-chain-leaves-outer-precedence-visible.c	1	0	2	-	-	parenthesized eager chain leaves outer precedence visible
+constant-initializer-comparison-pairs	constant-initializer-comparison-pairs.c	0	0	0	-	-	constant initializer comparison pairs
+constant-initializer-single-comparisons	constant-initializer-single-comparisons.c	2	0	4	-	-	constant initializer single comparisons
+enum-comparison-pairs	enum-comparison-pairs.c	0	0	0	-	-	enum comparison pairs
+enum-single-comparisons	enum-single-comparisons.c	2	0	4	-	-	enum single comparisons
+unevaluated-comparison-pairs	unevaluated-comparison-pairs.c	0	0	0	-	-	unevaluated comparison pairs
+unevaluated-single-comparison	unevaluated-single-comparison.c	1	0	2	-	-	unevaluated single comparison
+unselected-generic-comparison-pair	unselected-generic-comparison-pair.c	0	0	0	-	-	unselected generic comparison pair
+unselected-generic-single-comparison	unselected-generic-single-comparison.c	1	0	2	-	-	unselected generic single comparison
+two-relational-operands-of-each-bitwise-operator	two-relational-operands-of-each-bitwise-operator.c	0	0	0	-	-	two relational operands of each bitwise operator
+two-equality-operands-of-each-bitwise-operator	two-equality-operands-of-each-bitwise-operator.c	0	0	0	-	-	two equality operands of each bitwise operator
+mixed-equality-and-relational-operands	mixed-equality-and-relational-operands.c	0	0	0	-	-	mixed equality and relational operands
+eager-chains-of-three-comparisons	eager-chains-of-three-comparisons.c	0	0	0	-	-	eager chains of three comparisons
+mixed-eager-bitwise-chains	mixed-eager-bitwise-chains.c	0	0	0	-	-	mixed eager bitwise chains
+bare-bitwise-operand-suppresses-comparison-precedence	bare-bitwise-operand-suppresses-comparison-precedence.c	0	0	0	-	-	bare bitwise operand suppresses comparison precedence
+parenthesized-comparisons-are-explicit	parenthesized-comparisons-are-explicit.c	0	0	0	-	-	parenthesized comparisons are explicit
+relational-left-operand-still-warns-once-per-operator	relational-left-operand-still-warns-once-per-operator.c	3	0	6	-	-	relational left operand still warns once per operator
+relational-right-operand-still-warns-once-per-operator	relational-right-operand-still-warns-once-per-operator.c	3	0	6	-	-	relational right operand still warns once per operator
+equality-left-operand-still-warns-once-per-operator	equality-left-operand-still-warns-once-per-operator.c	3	0	6	-	-	equality left operand still warns once per operator
+equality-right-operand-still-warns-once-per-operator	equality-right-operand-still-warns-once-per-operator.c	3	0	6	-	-	equality right operand still warns once per operator
+parenthesized-bitwise-operand-does-not-suppress-warning	parenthesized-bitwise-operand-does-not-suppress-warning.c	2	0	4	-	-	parenthesized bitwise operand does not suppress warning
+nondecimal-literal-conversion-bit-patterns-and-lossy-controls	nondecimal-literal-conversion-bit-patterns-and-lossy-controls.c	8	0	0	c23	-	nondecimal literal conversion bit patterns and lossy controls
+nondecimal-conversion-with-unsigned-plain-char	nondecimal-conversion-with-unsigned-plain-char.c	1	0	0	-	-funsigned-char	nondecimal conversion with unsigned plain char
+# Clang points at the cast, while the existing checker points at its literal. Compare the complete
+# warning text and severity, apart from that independent location discrepancy.
+explicit-cast-does-not-receive-literal-exemption	explicit-cast-does-not-receive-literal-exemption.c	1	0	0	warning-text	-funsigned-char	explicit cast does not receive literal exemption
+nonliteral-integer-zero-pointer-conversion	nonliteral-integer-zero-pointer-conversion.c	1	0	0	-	-	nonliteral integer zero pointer conversion
+overflowing-double-literal	overflowing-double-literal.c	1	0	0	-	-	overflowing double literal
+underflowing-float-literal	underflowing-float-literal.c	1	0	0	-	-	underflowing float literal
+ordered-pointer-integer-comparison	ordered-pointer-integer-comparison.c	1	0	0	-	-	ordered pointer integer comparison
+ordinary-declaration-declares-nothing	ordinary-declaration-declares-nothing.c	1	0	0	-	-	ordinary declaration declares nothing
+untagged-record-declares-nothing	untagged-record-declares-nothing.c	1	0	0	-	-	untagged record declares nothing
+plain-complex-has-an-inferred-element-type	plain-complex-has-an-inferred-element-type.c	1	0	0	-	-	plain complex has an inferred element type
+member-declaration-declares-nothing	member-declaration-declares-nothing.c	1	0	0	-	-	member declaration declares nothing
+untagged-enum-member-declares-its-enumerators	untagged-enum-member-declares-its-enumerators.c	0	0	0	-	-	untagged enum member declares its enumerators
+anonymous-union-member-declares-a-member	anonymous-union-member-declares-a-member.c	0	0	0	-	-	anonymous union member declares a member
+named-tag-member-declares-nothing	named-tag-member-declares-nothing.c	1	0	0	-	-	named tag member declares nothing
+typedef-without-a-declarator-requires-a-name	typedef-without-a-declarator-requires-a-name.c	1	0	0	-	-	typedef without a declarator requires a name
+typedef-of-a-named-record-without-a-declarator-requires-a-name	typedef-of-a-named-record-without-a-declarator-requires-a-name.c	1	0	0	-	-	typedef of a named record without a declarator requires a name
+typedef-of-a-named-enum-without-a-declarator-requires-a-name	typedef-of-a-named-enum-without-a-declarator-requires-a-name.c	1	0	0	-	-	typedef of a named enum without a declarator requires a name
+extern-on-a-tag-declaration-is-ignored	extern-on-a-tag-declaration-is-ignored.c	1	0	0	-	-	extern on a tag declaration is ignored
+static-on-a-tag-declaration-is-ignored	static-on-a-tag-declaration-is-ignored.c	1	0	0	-	-	static on a tag declaration is ignored
+const-on-a-tag-declaration-is-ignored	const-on-a-tag-declaration-is-ignored.c	1	0	0	-	-	const on a tag declaration is ignored
+qualified-ordinary-declaration-declares-nothing	qualified-ordinary-declaration-declares-nothing.c	1	0	0	-	-	qualified ordinary declaration declares nothing
+flexible-record-member-is-not-last	flexible-record-member-is-not-last.c	1	0	0	-	-	flexible record member is not last
+external-inline-contains-modifiable-static-local	external-inline-contains-modifiable-static-local.c	1	0	1	-	-	external inline contains modifiable static local
+leading-attribute-keeps-the-inline-note-at-the-declaration	leading-attribute-keeps-the-inline-note-at-the-declaration.c	1	0	1	-	-	leading attribute keeps the inline note at the declaration
+leading-extension-keeps-the-inline-note-after-it	leading-extension-keeps-the-inline-note-after-it.c	1	0	1	-	-	leading extension keeps the inline note after it
+trailing-attribute-keeps-the-inline-note-at-its-first-declaratio	trailing-attribute-keeps-the-inline-note-at-its-first-declaratio.c	1	0	1	-	-	trailing attribute keeps the inline note at its first declaration
+used-internal-function-has-no-definition	used-internal-function-has-no-definition.c	1	0	1	-	-	used internal function has no definition
+evaluated-sizeof-vla-bound-use-precedes-a-later-call	evaluated-sizeof-vla-bound-use-precedes-a-later-call.c	1	0	1	-	-	evaluated sizeof VLA bound use precedes a later call
+evaluated-sizeof-vla-bound-use-is-a-use-alone	evaluated-sizeof-vla-bound-use-is-a-use-alone.c	1	0	1	-	-	evaluated sizeof VLA bound use is a use alone
+evaluated-sizeof-vla-bound-use-in-an-addition	evaluated-sizeof-vla-bound-use-in-an-addition.c	1	0	1	-	-	evaluated sizeof VLA bound use in an addition
+evaluated-alignof-vla-bound-use	evaluated-alignof-vla-bound-use.c	1	0	1	-	-	evaluated alignof VLA bound use
+evaluated-conditional-vla-bound-use	evaluated-conditional-vla-bound-use.c	1	0	1	-	-	evaluated conditional VLA bound use
+evaluated-comma-vla-bound-use	evaluated-comma-vla-bound-use.c	1	0	1	-	-	evaluated comma VLA bound use
+undefined-batch-follows-first-use-and-survives-its-own-promotion	undefined-batch-follows-first-use-and-survives-its-own-promotion.c	2	0	2	-	-	undefined batch follows first use and survives its own promotion
+earlier-promoted-literal-error-suppresses-final-undefined-batch	earlier-promoted-literal-error-suppresses-final-undefined-batch.c	2	0	1	-	-	earlier promoted literal error suppresses final undefined batch
+mapped-sparse-error-retains-same-body-return-analysis	mapped-sparse-error-retains-same-body-return-analysis.c	1	1	0	-	-Werror=non-literal-null-conversion	mapped sparse error retains same body return analysis
+pre-c23-definition-omits-parameter-name	pre-c23-definition-omits-parameter-name.c	1	0	0	-	-	pre C23 definition omits parameter name
+literal-zero-pointer-conversion-is-quiet	literal-zero-pointer-conversion-is-quiet.c	0	0	0	-	-	literal zero pointer conversion is quiet
+nonzero-subnormal-literal-is-quiet	nonzero-subnormal-literal-is-quiet.c	0	0	0	-	-	nonzero subnormal literal is quiet
+exact-literal-zero-with-a-small-exponent-is-quiet	exact-literal-zero-with-a-small-exponent-is-quiet.c	0	0	0	-	-	exact literal zero with a small exponent is quiet
+explicit-complex-element-type-is-quiet	explicit-complex-element-type-is-quiet.c	0	0	0	-	-	explicit complex element type is quiet
+terminal-flexible-record-member-is-quiet	terminal-flexible-record-member-is-quiet.c	0	0	0	-	-	terminal flexible record member is quiet
+external-inline-constant-static-local-is-quiet	external-inline-constant-static-local-is-quiet.c	0	0	0	-	-	external inline constant static local is quiet
+later-internal-definition-discharges-the-warning	later-internal-definition-discharges-the-warning.c	0	0	0	-	-	later internal definition discharges the warning
+unevaluated-internal-function-reference-is-quiet	unevaluated-internal-function-reference-is-quiet.c	0	0	0	-	-	unevaluated internal function reference is quiet
+c23-definition-may-omit-parameter-name	pre-c23-definition-omits-parameter-name.c	0	0	0	c23	-	C23 definition may omit parameter name
+# clang's extra `;` of attribute lists alone (#1447): only the C23 lists warn, whatever the GNU lists' order.
+attribute-only-declaration-warns-only-for-its-c23-lists	attribute-only-declaration-warns-only-for-its-c23-lists.c	8	0	0	c23	-	attribute-only declaration warns only for its C23 lists
+attribute-only-declaration-s-gnu-lists-stay-quiet-without-ignore	attribute-only-declaration-s-gnu-lists-stay-quiet-without-ignore.c	1	0	0	c23	-Wno-ignored-attributes	attribute-only declaration's GNU lists stay quiet without ignored-attribute warnings
+null-conversion-source-push-pop-retains-named-policy	null-conversion-source-push-pop-retains-named-policy.c	1	0	0	-	-	null conversion source push pop retains named policy
+empty-declaration-source-error-is-promoted	empty-declaration-source-error-is-promoted.c	0	1	0	-	-	empty declaration source error is promoted
+unnamed-parameter-source-suppression-is-scoped	unnamed-parameter-source-suppression-is-scoped.c	1	0	0	-	-	unnamed parameter source suppression is scoped
+named-no-error-overrides-global-warning-promotion	nonliteral-integer-zero-pointer-conversion.c	1	0	0	-	-Werror -Wno-error=non-literal-null-conversion	named no error overrides global warning promotion
+everything-does-not-restore-an-explicitly-disabled-diagnostic	nonliteral-integer-zero-pointer-conversion.c	0	0	0	-	-Wno-everything -Weverything -Wno-missing-variable-declarations	everything does not restore an explicitly disabled diagnostic
+later-broad-suppression-disables-a-named-diagnostic	nonliteral-integer-zero-pointer-conversion.c	0	0	0	-	-Wnon-literal-null-conversion -Wno-everything	later broad suppression disables a named diagnostic
+later-named-diagnostic-overrides-broad-suppression	nonliteral-integer-zero-pointer-conversion.c	1	0	0	-	-Wno-everything -Wnon-literal-null-conversion	later named diagnostic overrides broad suppression
+everything-retains-a-named-suppression	nonliteral-integer-zero-pointer-conversion.c	0	0	0	-	-Wno-non-literal-null-conversion -Weverything -Wno-missing-variable-declarations	everything retains a named suppression
+system-warning-families-are-suppressed-by-default	system-warning-families-are-suppressed-by-default.c	0	0	0	-	-	system warning families are suppressed by default
+system-warning-opt-in-enables-sparse-families	system-warning-families-are-suppressed-by-default.c	4	0	0	-	-Wsystem-headers	system warning opt in enables sparse families
+user-expansion-of-a-system-macro-retains-diagnostic-notes	user-expansion-of-a-system-macro-retains-diagnostic-notes.c	1	0	1	-	-	user expansion of a system macro retains diagnostic notes
+# An indirection through a pointer to void (#147, -Wvoid-ptr-dereference): its operand's type as written (a typedef
+# kept, top-level qualifiers dropped), in dead code too; not right after a unary `&` nor in sizeof's or alignof's
+# operand.
+void-pointer-dereferences	void-pointer-dereferences.c	10	0	0	-	-	void pointer dereferences
+# A dereference of a null pointer constant (#1447, -Wnull-dereference): read or assigned (a compound assignment's
+# too, a cast to void's operand too), through casts (a void pointer's, a constant expression's), with clang's note;
+# not its address, a member of it, its increment, a volatile one, a pointer variable's, a subscript, sizeof's
+# operand, nor unreachable code.
+null-pointer-dereferences	null-pointer-dereferences.c	9	0	9	-	-	null pointer dereferences
+# A nullptr_t operand is a null pointer constant too (#1447, C23): `nullptr` and a nullptr_t variable through casts,
+# not a volatile target.
+null-pointer-dereferences-of-nullptr	null-pointer-dereferences-of-nullptr.c	4	0	4	c23	-	null pointer dereferences of nullptr
+# Unreachable initializers (#1447): after a return, in a constant false branch and in a `while (0)`'s body,
+# clang's runtime behavior's warnings (array bounds, division by zero, null dereference) stay silent.
+runtime-warnings-skip-unreachable-initializers	runtime-warnings-skip-unreachable-initializers.c	0	0	0	-	-	runtime warnings skip unreachable initializers
+# An unreachable initializer's barriers outlive its body's scratch (#1447): the next body's marks and queue
+# must not reuse them, which made a later body's initialized variables "uninitialized when used here".
+unreachable-initializer-barriers-outlive-their-body-322	unreachable-initializer-barriers-outlive-their-body.c	0	0	0	-	-Wall	unreachable initializer barriers outlive their body
+# A compound literal's unnamed object is no variable for -Wuninitialized (#1447): its own value, at its closing
+# `}`, is no read within its own initialization. Scalar, pointer, array and struct literals in initializers and
+# assignments, at file scope, in loops, under `&` and nested, say nothing.
+compound-literals-are-no-variables-for-wuninitialized	compound-literals-are-no-variables-for-wuninitialized.c	0	0	0	-	-Wall	compound literals are no variables for -Wuninitialized
+# The variables a compound literal's initializer reads keep their warnings (#1447): an uninitialized one is used
+# here, directly or through a nested literal or an assignment's, and the declared variable itself inside its
+# own initializer's literal, braced or not, is used within its own initialization.
+compound-literal-initializers-keep-their-variables-uninitialized	compound-literal-initializers-keep-their-variables-uninitialized.c	7	0	4	-	-Wall	compound literal initializers keep their variables' uninitialized reads
+# A logical operator one operand decides though the other isn't known (#1447, clang's CFG tryEvaluateBool):
+# `x && 0` and `x || 1`, through `!` and casts, prune the arm they leave out for the runtime warnings and for
+# -Wreturn-type alike; `x && (x || 1)` and `x && 1` decide nothing.
+short-circuit-conditions-one-operand-decides	short-circuit-conditions-one-operand-decides.c	2	0	0	-	-	short-circuit conditions one operand decides
+# The same conditions prune a conditional's arm and a logical operator's right operand (#1447, clang's CFG builder
+# in VisitConditionalOperator and VisitLogicalOperator): `n && 1` and `n || 0` decide nothing.
+short-circuit-operands-one-operand-decides	short-circuit-operands-one-operand-decides.c	2	0	1	-	-	short-circuit operands one operand decides
+# Clang decides by the context its parser is in (#147): an unselected _Generic association or choose_expr operand in
+# an alignof's operand is unevaluated with it, as are a _Generic's controlling expression and a statement
+# expression in sizeof's; an array declarator's bound, in a sizeof's type name too, is evaluated; and a sizeof of a
+# variable array's element evaluates its operand.
+void-pointer-dereferences-by-context	void-pointer-dereferences-by-context.c	12	0	0	-	-	void pointer dereferences by context
+# A file-scope declaration of attribute lists and `__extension__`s alone is clang's extra `;` (#1447), which says
+# nothing but its C23 lists' ignored-attribute warnings; GNU attributes after an `__extension__` are specifiers,
+# which declare nothing. A declaration's leading attribute lists, C23's and GNU's in any order, go on past its
+# `__extension__`s.
+file-scope-extension-markers-after-attributes	file-scope-extension-markers-after-attributes.c	3	0	0	c23	-	file-scope extension markers after attributes
+# `__extension__`s before a static assertion (#1447), at file scope and in a block: the assertion, checked.
+extension-markers-before-static-assertions	extension-markers-before-static-assertions.c	0	2	0	-	-	extension markers before static assertions
+# An assignment to a const variable, through an array's subscripts or a record's members to it, or through a
+# pointer to a const record (#147): the variable named with its declared type and the "declared const here" note at
+# its name; a pointer's target is the generic error.
+const-variable-assignments	const-variable-assignments.c	0	10	8	-	-	const variable assignments
+# Arithmetic on a pointer to an incomplete type (#147): clang's message of the pointee as written, a subscript's at
+# its `[`, and the "forward declaration" note at the tag's declaring name.
+incomplete-pointer-arithmetic	incomplete-pointer-arithmetic.c	0	11	11	-	-	incomplete pointer arithmetic
+independent-bodies-retain-source-order-at-requested-lanes	independent-bodies-retain-source-order-at-requested-lanes.c	3	0	0	-	-	independent bodies retain source order at requested lanes
+# A GNU statement expression in an unevaluated operand (#147): its statements are the graph's roots, but clang drops
+# the unused-result and runtime-behavior warnings in sizeof's, _Alignof's, __alignof__'s and typeof's operands
+# (check_common_unevaluated). None of these statement expressions has a side effect, which clang's
+# -Wunevaluated-expression would report.
+statement-expression-results-in-sizeof-operands	statement-expression-results-in-sizeof-operands.c	0	0	0	-	-	statement expression results in sizeof operands
+unused-results-in-unevaluated-statement-expressions	unused-results-in-unevaluated-statement-expressions.c	1	0	0	-	-	unused results in unevaluated statement expressions
+runtime-behavior-warnings-in-unevaluated-statement-expressions	runtime-behavior-warnings-in-unevaluated-statement-expressions.c	0	0	0	-	-Wsign-compare	runtime behavior warnings in unevaluated statement expressions
+# A statement expression whose value is unevaluated has no node evaluated either (check_common_region_evaluation):
+# -Wuninitialized reads none of its reads and writes. `sizeof ({ ... })`'s `(` is the statement expression's own.
+uninitialized-variables-in-unevaluated-statement-expressions	uninitialized-variables-in-unevaluated-statement-expressions.c	2	0	2	-	-Wall -Wno-unevaluated-expression	uninitialized variables in unevaluated statement expressions
+# A statement expression whose value is unevaluated has no node evaluated either (check_common_region_evaluation):
+# -Wuninitialized reads none of its reads and writes. `sizeof ({ ... })`'s `(` is the statement expression's own.
+uninitialized-variables-in-unevaluated-statement-expressions-und	uninitialized-variables-in-unevaluated-statement-expressions.c	3	0	2	c23	-Wall -Wextra -Wno-unevaluated-expression	uninitialized variables in unevaluated statement expressions under -Wextra in C23
+# A statement expression in a static selection's chosen operand is evaluated where the selection is: its
+# statements, roots of their own, are left out of the selection's unselected roots (#2023), so -Wuninitialized
+# reads them and an initializer's -Wconstant-conversion is given; nested in another selection's other operand,
+# they stay unselected.
+statement-expressions-in-a-chosen-selection-operand-are-evaluate	statement-expressions-in-a-chosen-selection-operand-are-evaluate.c	5	0	4	-	-Wall	statement expressions in a chosen selection operand are evaluated
+# A discarded statement expression's comparison value warns as clang's DiagnoseUnusedExprResult of the statement
+# expression does (#1447): "expression result unused", no comparison's note, queued after the statements before it,
+# in its own -Wunused-value rather than -Wunused-comparison; a statement's own comparison keeps its warning.
+a-discarded-statement-expression-s-comparison-value	a-discarded-statement-expression-s-comparison-value.c	11	0	1	-	-	a discarded statement expression's comparison value
+a-discarded-statement-expression-s-comparison-value-under-wno-un	a-discarded-statement-expression-s-comparison-value.c	10	0	0	c23	-Wno-unused-comparison	a discarded statement expression's comparison value under -Wno-unused-comparison in C23
+typeof-statement-expressions-are-unevaluated	typeof-statement-expressions-are-unevaluated.c	0	0	0	-	-Wself-assign	typeof statement expressions are unevaluated
+# The evaluated controls: a statement expression outside the operand, sizeof's own discarded result, and array
+# bounds, which clang evaluates as constant expressions even in a sizeof's type name or in a declaration inside its
+# statement expression, until a nested sizeof makes them unevaluated again.
+evaluated-statement-expressions-and-array-bounds-keep-their-warn	evaluated-statement-expressions-and-array-bounds-keep-their-warn.c	6	0	1	-	-	evaluated statement expressions and array bounds keep their warnings
+# A sizeof of an expression of variable array type evaluates it after all (clang's TransformToPotentiallyEvaluated),
+# which the contexts mark TRANSFORMED; a statement expression whose value decays to a pointer is no variable array,
+# and stays unevaluated. (A statement expression inside a variable array's operand isn't supported yet.)
+a-statement-expression-decaying-from-a-variable-array-stays-unev	a-statement-expression-decaying-from-a-variable-array-stays-unev.c	0	0	0	-	-	a statement expression decaying from a variable array stays unevaluated
+# -Wsign-compare's operands keep their declared typedef's spelling (#1100): a parameter's typedef, a cast's,
+# and sizeof's `__size_t`, each with clang's (aka) of what the sugar hides; the same sugar survives the
+# operands' shared-type arithmetic.
+sign-compare-operands-keep-their-typedef-spelling	sign-compare-operands-keep-their-typedef-spelling.c	10	0	0	-	-Wsign-compare	sign-compare operands keep their typedef spelling
+# A format argument keeps its declared typedef's spelling (#1100), with the (aka) of what it hides.
+format-arguments-keep-their-typedef-spelling	format-arguments-keep-their-typedef-spelling.c	6	0	0	-	-Wformat	format arguments keep their typedef spelling
+# A fixed-parameter conversion must not transfer the source cast's typedef to the converted pointer.
+format-fixed-conversion-does-not-borrow-source-typedef	format-fixed-conversion-does-not-borrow-source-typedef.c	1	0	0	-	-Wformat -Wno-gcc-compat -Wno-non-literal-null-conversion	format fixed conversion does not borrow source typedef
+# A for clause's value in parentheses is the clause's (#1447): clang's IgnoreParens finds the discarded comma,
+# its operand of no effect and its literal 0 idiom through them, in the init and the increment; the condition's
+# value is read.
+parenthesized-comma-for-clauses-discard-their-values	parenthesized-comma-for-clauses-discard-their-values.c	14	0	1	-	-	parenthesized comma for clauses discard their values
+# Clang's Sema gives -Wself-assign as it builds each assignment, so it sorts among the statement's other warnings
+# by place, in unreachable code and in a conditional's or a _Generic's unselected arm too, and before the condition's
+# -Wparentheses at one assignment; types other than int's are spelled.
+self-assignments-in-source-order-among-other-warnings	self-assignments-in-source-order-among-other-warnings.c	15	0	4	-	-Wself-assign	self-assignments in source order among other warnings
+# __float128 literals (#1250): each value its binary128 bits', printed at 35 digits, a -0's sign too (as every
+# format's), and the format's own limits.
+float128-literal-conversions-and-limits	float128-literal-conversions-and-limits.c	15	0	0	-	-	__float128 literal conversions and limits
+# Clang's ActOnFinishFunctionBody gives a function's unused parameters after its body scope's unused variables
+# and before its missing return.
+unused-parameters-after-the-body-s-unused-variables	unused-parameters-after-the-body-s-unused-variables.c	8	0	0	-	-Wall -Wextra	unused parameters after the body's unused variables
+# Files that line markers enter (#1954): each diagnostic in one prints clang's "In file included from" chain of the
+# markers' lines when it differs from the last one's, nested, after a flag 2 returns, and for a system header's
+# (silent here) and a user file's entered from the same presumed line; the main file's, the preprocessor's error
+# after them, none.
+include-stacks-of-files-line-markers-enter	include-stacks-of-files-line-markers-enter.c	5	1	0	-	-	include stacks of files line markers enter
+# Clang takes the overflow builtins of _BitInts past 128 bits (#1447) but mul_overflow's of a signed one, as an
+# operand or the destination, at that argument, the first of them alone; an unsigned one's product, and a signed
+# one's sum and difference, are taken.
+mul-overflow-of-a-signed-bitint-past-128-bits	mul-overflow-of-a-signed-bitint-past-128-bits.c	0	5	0	-	-	mul_overflow of a signed _BitInt past 128 bits
+# A tag a prototype's list declares first (#1447, clang's ActOnTag): -Wvisibility at its name (an unnamed enum's
+# keyword), in a definition's list, a nested prototype's (not one the outer list declares already), a member's, a
+# block's and a bound's, a definition shadowing a file-scope tag; a list's redefinition, with its note, and an
+# enum's, which is an unnamed one's too. Not one declared outside, nor an unnamed record.
+tags-declared-in-a-prototype-s-list	tags-declared-in-a-prototype-s-list.c	22	0	2	-	-	tags declared in a prototype's list
+# C23's definitions there are no warning: a compatible definition outside may redefine them.
+tags-declared-in-a-prototype-s-list-under-c23	tags-declared-in-a-prototype-s-list-under-c23.c	10	0	0	c23	-	tags declared in a prototype's list under C23
+# -Wvisibility's policy: its option and a source pragma.
+prototype-tag-visibility-policy	prototype-tag-visibility-policy.c	0	0	0	-	-Wno-visibility	prototype tag visibility policy
+prototype-tag-visibility-pragma	prototype-tag-visibility-pragma.c	3	0	1	-	-	prototype tag visibility pragma
+# C23 records redefined with other attributes (#1447): clang's -Wodr is an error by default; ignored, the
+# definitions are compatible, and the name keeps the first's type (its layout, which the assertions read).
+odr-attribute-differences-ignored	odr-attribute-differences-ignored.c	0	0	0	c23	-Wno-odr	odr attribute differences ignored
+# Demoted, each is a warning with its note at the attribute the earlier list has.
+odr-attribute-differences-demoted	odr-attribute-differences-ignored.c	2	0	2	c23	-Wno-error=odr	odr attribute differences demoted
+# Source pragmas: ignored for one, a warning for another (one -Werror leaves), and the default error after them.
+odr-attribute-differences-under-pragmas	odr-attribute-differences-under-pragmas.c	1	1	3	c23	-	odr attribute differences under pragmas
+# In a system header (here a line marker's), clang ignores it, error or not, without -Wsystem-headers; the name
+# keeps the first definition's type.
+odr-attribute-differences-in-a-system-header	odr-attribute-differences-in-a-system-header.c	0	0	0	c23	-	odr attribute differences in a system header
+# A C23 parameter list's compatible redefinition of its own record (#1869) declares the first's type: the body
+# reads both parameters and a pointer to it as one type, compiled on every path.
+c23-parameter-list-redefines-its-record-compatibly	c23-parameter-list-redefines-its-record-compatibly.c	0	0	0	c23	-	C23 parameter list redefines its record compatibly
+# `#pragma pack`'s own warnings (#1849): clang's parser's for malformed directives, at the token they name or past
+# the line's last, and Sema's at the directive (a bad value, a name and a value to pop, an empty stack's pop,
+# show's value: the default's 8, a pack value, options align's).
+pragma-pack-syntax-and-sema-warnings	pragma-pack-syntax-and-sema-warnings.c	14	0	0	-	-	pragma pack syntax and Sema warnings
+# A push left open at the unit's end (#1849): one warning each, the innermost first, the innermost with clang's
+# note at the reset that left the default value.
+pragma-pack-pushes-left-open-at-the-end	pragma-pack-pushes-left-open-at-the-end.c	2	0	1	-	-	pragma pack pushes left open at the end
+# The note of a push that no directive set a value after has no place (#1849), which the oracle's count of
+# located notes leaves out; the complete output compares it.
+pragma-pack-push-left-open-without-a-value	pragma-pack-push-left-open-without-a-value.c	1	0	0	-	-	pragma pack push left open without a value
+# Sema's show after a function comes after the function's own warnings (#1849): clang handles the annotation at
+# the top level.
+pragma-pack-show-after-a-function-s-warnings	pragma-pack-show-after-a-function-s-warnings.c	2	0	0	-	-Wall	pragma pack show after a function's warnings
+# The unit's end in clang's Sema::ActOnEndOfTranslationUnit order (#2141): an unterminated pack push, #pragma
+# weak's undeclared identifier, an internal function used but not defined, then the unused file-scope
+# declarations, each after the function's own unused local.
+unit-end-warnings-in-clang-s-order	unit-end-warnings-in-clang-s-order.c	6	0	1	-	-Wall	unit end warnings in clang's order
+# Clang diagnoses the unused file-scope declarations only where no error occurred (#2141): under -Werror the
+# undefined internal function's error leaves them out, and alone they reject the unit themselves.
+unit-end-unused-declarations-after-an-error	unit-end-unused-declarations-after-an-error.c	3	0	1	-	-Wall	unit end unused declarations after an error
+# An ignored attribute's warning that -Werror promotes is an error too, so clang's ActOnEndOfTranslationUnit gives
+# the unused file-scope variable no warning after it (#2232); without -Werror both warnings are given.
+unit-end-unused-declarations-after-a-promoted-ignored-attribute	unit-end-unused-declarations-after-a-promoted-ignored-attribute.c	2	0	0	-	-Wall	unit end unused declarations after a promoted ignored attribute
+# GCC's cast to a union (#2301, clang's CheckCStyleCast): from a member's unqualified type after the operand's
+# lvalue conversion (a qualified, an array's and a char's), -Wgnu-union-cast at the cast's `(` under -pedantic;
+# from no member's type the error "cast to union type from type 'T' not present in union", the operand's type
+# with its sugar; and a cast to a struct from another type "used type 'T' where arithmetic or pointer type is
+# required", at the `(` too.
+casts-to-unions	casts-to-unions.c	4	3	0	-	-pedantic	casts to unions
+# A record's casts (#2375, clang's CheckCStyleCast): to its own type -Wpedantic's "C99 forbids casting nonscalar type
+# 'T' to the same type" at the cast's `(`, the type as written (a typedef's and a qualified one's); and to an
+# arithmetic or pointer type the error "operand of type 'T' where arithmetic or pointer type is required" at the
+# operand's first token, its type after lvalue conversion (a typedef's sugar kept, a const typedef's dropped).
+casts-of-records	casts-of-records.c	7	10	0	-	-pedantic	casts of records
+# The same error for a cast to an atomic scalar type from a record, and to a scalar from an atomic cast's rvalue
+# (#2375, #2230), its type '_Atomic(int)'.
+casts-of-records-and-atomic-rvalues-to-atomic-types	casts-of-records-and-atomic-rvalues-to-atomic-types.c	0	4	0	-	-	casts of records and atomic rvalues to atomic types
+# An initializer list's diagnostics in clang's InitListChecker order (#2914): its subobjects' conversion errors,
+# excess elements and overrides as the walk meets them, then the completed initializer's -Wliteral-conversion;
+# a default error's conversion (-Wint-conversion) leaves the list valid, and its excess elements warned, where a
+# hard one's (double to a pointer) doesn't; at file scope, in a body, in arrays.
+initializer-list-diagnostics-in-walk-order	initializer-list-diagnostics-in-walk-order.c	16	9	1	-	-	initializer list diagnostics in walk order
+# A builtin's call is made after its argument's failed conversion that clang only warns of by default as an error
+# (#2914): its result's own conversion is checked, as an ordinary call's is.
+builtin-results-after-a-failed-argument	builtin-results-after-a-failed-argument.c	0	4	1	-	-	builtin results after a failed argument
+# A discarded comparison's -Wunused-comparison follows the comparison's own warnings (#2914): clang's
+# DiagnoseUnusedExprResult runs at the full expression's end.
+unused-comparisons-after-the-comparison-s-warnings	unused-comparisons-after-the-comparison-s-warnings.c	8	0	2	-	-	unused comparisons after the comparison's warnings
+# -Wcompare-distinct-pointer-types and -Wpointer-integer-compare name both operands' types (#2914): each after its
+# lvalue conversion (an array's decay, a const's dropped), not the comparison's to their common type, a typedef's
+# sugar kept; ordered and equality comparisons, function pointers, a conditional's condition.
+comparisons-operand-types	comparisons-operand-types.c	12	0	0	-	-	comparisons' operand types
+# A cast between a pointer and a floating or complex type (#2914, clang's CheckCStyleCast), at the operand's first
+# token: "pointer cannot be cast to type 'T'", the target as written (an _Atomic one's value type), from a pointer,
+# an array's or a function's decay; "operand of type 'T' cannot be cast to a pointer type", the operand's type after
+# its lvalue conversion (a typedef's sugar kept, a const's dropped).
+casts-between-pointers-and-floating-types	casts-between-pointers-and-floating-types.c	0	20	0	-	-	casts between pointers and floating types
+# A _Generic selection that matches no association and has no default (#2914): clang's "controlling expression
+# type 'T' not compatible with any generic association type" at the controlling expression's first token, its
+# type after the lvalue conversion (a typedef's sugar kept, a const typedef's dropped, an array's decay), at file
+# scope too.
+generic-selections-that-match-no-association	generic-selections-that-match-no-association.c	0	8	0	-	-	generic selections that match no association
+# A cast to or from nullptr_t that C23 6.5.4p4 doesn't allow (#2914, clang's err_bad_cstyle_cast_generic), at the
+# operand's first token: "cannot cast an object of type 'S' to 'T'", the other side's sugar kept (a typedef's, the
+# operand's after its lvalue conversion) and nullptr_t's dropped, an _Atomic target's value type; and the casts
+# it allows, to a pointer, bool or void and from a nullptr_t.
+casts-to-and-from-nullptr-t	casts-to-and-from-nullptr-t.c	0	17	0	c23	-	casts to and from nullptr_t
+# A null pointer constant cast to nullptr_t (#2914): an integer constant expression's zero, a character's, an
+# enumerator's, false and (void *)0, at file scope as a static object's constant too.
+null-pointer-constants-cast-to-nullptr-t	null-pointer-constants-cast-to-nullptr-t.c	0	0	0	c23	-	null pointer constants cast to nullptr_t
+# A _Generic selection's duplicate associations (#2914, clang's CreateGenericSelectionExpr and its parser): each
+# type compatible with an earlier one's, for every earlier one, at the later type name past its qualifiers with
+# "compatible type 'T' specified here" at the earlier; a second default alone, its parser stopping there; in a
+# body, at file scope, in an array bound, a case label and a static assertion.
+generic-selections-duplicate-associations	generic-selections-duplicate-associations.c	2	15	15	c23	-	generic selections' duplicate associations
+# -Wabsolute-value (#2914, clang's CheckAbsoluteValueFunction): an unsigned argument's, a larger one's of the function's kind,
+# another kind's, each with its replacement's note (the header's where it is undeclared, none where a declaration of it isn't the
+# library's), of builtins, library functions and a parenthesized callee; and what it leaves alone (bool, a _Complex's cabs with a
+# floating argument too small for any).
+absolute-value-functions-arguments	absolute-value-functions-arguments.c	21	0	20	c23	-	absolute value functions' arguments
+# -Wabsolute-value's pointer, array and function forms (#2914), after their argument's -Wint-conversion error, of builtins and
+# library functions.
+absolute-value-functions-of-pointers	absolute-value-functions-of-pointers.c	5	5	2	c23	-	absolute value functions of pointers
+# -Wint-to-pointer-cast and -Wint-to-void-pointer-cast (#2914, clang's checkIntToPointerCast): a typedef's sugar on either side,
+# the target's qualifiers dropped and an _Atomic one's value type, in sizeof, of a bit-field and a _BitInt; none of bool, an
+# enumeration, a wide integer or an integer constant expression.
+casts-to-pointers-from-narrower-integers	casts-to-pointers-from-narrower-integers.c	24	0	0	c23	-	casts to pointers from narrower integers
+# A builtin's later arguments' conversion errors after a default error's (#2914, GatherArgumentsForCall), none after a hard one,
+# and a size_t parameter as clang spells it, '__size_t' (aka 'unsigned long').
+builtins-later-failed-arguments	builtins-later-failed-arguments.c	0	14	0	c23	-	builtins' later failed arguments
+# A floating builtin's argument that doesn't convert to its prototype's parameter (#2914): "passing 'T' to parameter of
+# incompatible type 'U'" at the argument; and the integer absolute value builtins' -Wint-conversion.
+floating-builtins-prototypes	floating-builtins-prototypes.c	2	7	0	c23	-	floating builtins' prototypes
+# An initializer list at file scope with a default error keeps its other parts' conversion warnings, as at block scope (#2914):
+# the rejected view casts the failed part's source.
+file-scope-initializers-beside-errors	file-scope-initializers-beside-errors.c	9	5	0	c23	-	file-scope initializers beside errors
+# A _Generic selection's diagnostics in clang's CreateGenericSelectionExpr order at its `)` (#2914): each association's
+# -Wunreachable-code-generic-assoc, then its type's errors against later associations', and the no-match error after them.
+generic-selections-diagnostics-in-clang-s-order	generic-selections-diagnostics-in-clang-s-order.c	8	6	5	c23	-	generic selections' diagnostics in clang's order
+# A GNU attribute's argument a stray token follows (#2914, clang's ParseGNUAttributeArgs and ParseGNUAttributes): "expected ')'"
+# twice, a third where more of the list follows, and the declaration's "extraneous ')' before ';'"; no undeclared name's error.
+attributes-stray-argument-tokens-after-declarators	attributes-stray-argument-tokens-after-declarators.c	0	13	0	c23	-	attributes' stray argument tokens after declarators
+# The same with the declaration's other ends (#2914): "expected ';' after top level declarator" and a function's body.
+attributes-stray-argument-tokens-before-declarators-ends	attributes-stray-argument-tokens-before-declarators-ends.c	0	12	0	c23	-	attributes' stray argument tokens before declarators' ends
+# The same in members and a block (#2914), the unit's later warnings given as clang's recovery reads on.
+attributes-stray-argument-tokens-in-members-and-blocks	attributes-stray-argument-tokens-in-members-and-blocks.c	2	9	0	c23	-	attributes' stray argument tokens in members and blocks
+# On functions (#2914): the body's error by the declarator's derivation, after its other attributes too, not a function
+# pointer's, not after an asm label or a later declarator; a definition's skip to the next `;` leaves `kept` undeclared.
+attributes-stray-argument-tokens-on-functions	attributes-stray-argument-tokens-on-functions.c	0	16	0	c23	-	attributes' stray argument tokens on functions
+# The list's attributes before the failed one stay (#2914): the declarator's deprecation is warned of at its uses.
+attributes-stray-argument-tokens-after-kept-attributes	attributes-stray-argument-tokens-after-kept-attributes.c	2	6	2	c23	-	attributes' stray argument tokens after kept attributes
+# A definition at the unit's end, without a `;` to skip to (#2914).
+attributes-stray-argument-tokens-at-the-unit-s-end	attributes-stray-argument-tokens-at-the-unit-s-end.c	0	3	0	c23	-	attributes' stray argument tokens at the unit's end
+unit-end-unused-declarations-alone	unit-end-unused-declarations-alone.c	2	0	0	-	-Wall	unit end unused declarations alone
+# GNU's designators (#2202), as clang's parser warns of them: an array designation without its `=` (at the value) and
+# an old-style field designator (at its name), on by default, before the value's own conversion warnings; an array
+# range (at its `...`), -pedantic's; all -Wgnu-designator's, under -Wgnu, and a pragma's ignored region drops them.
+gnu-designators-by-default	gnu-designator-source.c	11	0	0	-	-	GNU designators by default
+gnu-designators-under-pedantic	gnu-designator-source.c	13	0	0	-	-pedantic	GNU designators under -pedantic
+gnu-designators-under-pedantic-errors	gnu-designator-source.c	2	11	0	-	-pedantic-errors	GNU designators under -pedantic-errors
+gnu-designators-under-wno-gnu-designator	gnu-designator-source.c	2	0	0	-	-Wno-gnu-designator	GNU designators under -Wno-gnu-designator
+gnu-designators-under-wno-gnu-wgnu-designator	gnu-designator-source.c	13	0	0	-	-Wno-gnu -Wgnu-designator	GNU designators under -Wno-gnu -Wgnu-designator
+# Automatic const objects without an initializer (#2168): -Wdefault-const-init-var-unsafe of a const type, an
+# array's, a typedef's ('volatile CI[2]' (aka ...)), a pointer's; -Wdefault-const-init-field-unsafe of a struct with a
+# const member, nested, with its note; both of a const struct; none of a union, an array of structs, an extern or
+# an initialized one; static storage's off by default.
+default-initialized-const-objects	default-initialized-const-objects.c	12	0	4	-	-	default-initialized const objects
+# A struct's const member through a union member and an anonymous struct; none of a union itself.
+const-members-through-unions-and-anonymous-structs	const-members-through-unions-and-anonymous-structs.c	2	0	2	-	-	const members through unions and anonymous structs
+# A bit-field, a const struct member, a typedef's; not a const array member nor a flexible array member; a
+# variable array's and an _Atomic's const objects.
+const-members-kinds	const-members-kinds.c	7	0	3	-	-	const members' kinds
+# -Wc++-compat adds -Wdefault-const-init-var of static storage, and the unsafe ones' "and is incompatible with
+# C++".
+default-initialized-const-objects-and-wc-compat	default-initialized-const-objects.c	15	0	4	-	-Wc++-compat	default-initialized const objects and -Wc++-compat
+# A file scope's const object warns once, at the unit's end, at its last tentative definition, with its type
+# completed (`'const int[1]'`), after its tentative array's warning, in the order of their first tentative
+# definitions; none where a later declaration initializes it.
+tentative-const-definitions	tentative-const-definitions.c	11	0	0	-	-Wall -Wdefault-const-init	tentative const definitions
+# The words follow -Wc++-compat's pragma, which holds the unsafe warnings too.
+wc-compat-by-source-pragma	wc-compat-by-source-pragma.c	1	0	0	-	-	-Wc++-compat by source pragma
+# A tentative definition's -Wdefault-const-init-var at the unit's end, after the undefined internal functions'
+# and before the unused declarations'.
+tentative-definitions-const-objects-at-the-unit-s-end	tentative-definitions-const-objects-at-the-unit-s-end.c	7	0	1	-	-Wall -Wdefault-const-init -Wunused	tentative definitions' const objects at the unit's end

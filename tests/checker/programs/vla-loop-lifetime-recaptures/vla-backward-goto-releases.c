@@ -1,0 +1,1 @@
+int tested(int n){int k=0;long s=0;again:;int a[2000+(n&3)];a[1999]=k;s+=a[1999];if(++k<10000)goto again;return (int)(s%1000003)+(int)sizeof a;}

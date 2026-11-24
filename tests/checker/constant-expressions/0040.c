@@ -1,0 +1,1 @@
+typedef int V __attribute__((vector_size(16))); V a; int n; enum { A=sizeof(__builtin_nontemporal_load(&a)), B=sizeof(__builtin_nontemporal_store(a,&a)), C=sizeof(__builtin_nondeterministic_value(++n)) }; _Static_assert(A==16 && B==1 && C==4, "vector memory types");

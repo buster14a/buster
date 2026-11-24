@@ -1,0 +1,58 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+generic-folds-launder-and-the-cfa	generic-folds-launder-and-the-cfa.c	-	generic-folds-launder-and-the-cfa
+# The leaves: debugtrap's trap, which a SIGTRAP handler counts and returns past; the cycle counter, which doesn't go
+# back, and the steady one's 0; the thread pointer, which glibc's TCB holds at its own address; the stack address,
+# below a local; rsp's DWARF register; the no-ops' arguments, evaluated once, in order; and the inline copy's and fill's
+# bytes.
+generic-leaves	generic-leaves.c	-	generic-leaves
+# The unwinder's table of DWARF registers' sizes, over a buffer's bytes; each rounding mode in the x87's control word
+# and MXCSR, and a division rounded by it; the pointer's value; the values unwind_init leaves; and verbose_trap's
+# SIGILL, in a child process.
+generic-rounding-unwinder-and-trap	generic-rounding-unwinder-and-trap.c	-	generic-rounding-unwinder-and-trap
+# __builtin_unwind_init's function saves the callee-saved registers rbx and r12 to r15 in its prologue, as clang's
+# does (#1126's review), where a function that doesn't call it, and uses none of them, saves none: the leading pushes
+# of each function's code, read by the program itself (past an endbr64, and a frame pointer's move).
+generic-unwind-init-saves	generic-unwind-init-saves.c	-	generic-unwind-init-saves
+# __builtin_counted_by_ref (#148): stores through the count's address, of an `->`'s and a `.`'s access, of a count in an
+# anonymous struct's enclosing record, and a null void * of a flexible array member of no count; and
+# __builtin_dynamic_object_size of clang's counted_by forms, at counts below zero and above: a flexible array member,
+# its element's address (and through a char *), another member's (an array's element too), a counted pointer and a
+# sized_by one, a count in the enclosing record, mode 3's 0, and __builtin_object_size, which ignores the count.
+generic-counted-by	generic-counted-by.c	-	generic-counted-by
+# __builtin_available (#148): 1 for every platform's spec on Linux, in conditions, negated, as a value, through its
+# type's queries, which never run it, and in a loop's condition.
+generic-available	generic-available.c	-	generic-available
+# The alloca variants' bytes and alignments, in a loop whose allocations each stay apart; the checks' values; the
+# annotation's integer, once evaluated; and addressof's and function_start's addresses, of a local, a member, an
+# array, a function, and in static data.
+generic-alloca-checks-and-addresses	generic-alloca-checks-and-addresses.c	-	generic-alloca-checks-and-addresses
+# __builtin_function_start of a function's address and its casts, in static data and at run time, the function's start
+# (#1126's review).
+generic-function-start-of-addresses	generic-function-start-of-addresses.c	-	generic-function-start-of-addresses
+# __builtin_FILE_NAME's and __FILE_NAME__'s component of presumed names, as clang's llvm::sys::path::filename takes it
+# (#1126's review): a root's, a trailing separator's ".", a network root name's, an empty name's and a plain path's.
+generic-file-name-components	generic-file-name-components.c	-	generic-file-name-components
+# The builtins of a place (#148): __builtin_LINE's and __builtin_COLUMN's, through a macro, in an enumerator, an
+# _Static_assert and a static initializer; __builtin_FILE's, __builtin_FILE_NAME's and __builtin_FUNCTION's strings, at
+# file scope ("" for the function) and in one, after a #line that names the file; and the queries of a type,
+# __builtin_vectorelements' (of a vector, an extended vector type and an expression) and
+# __builtin_omp_required_simd_align's. (The oracle's tested is a macro's oracle_tested, so a function's name is a
+# helper's.)
+generic-source-places-and-type-queries	generic-source-places-and-type-queries.c	-	generic-source-places-and-type-queries
+# __builtin_setjmp and __builtin_longjmp (#148): a longjmp through eight frames of their own, after which a local the
+# function didn't change keeps its value and a volatile one has its last, four times over, and the callee-saved
+# registers the harness keeps across tested come back as they were; and the buffer's first word, the frame address.
+generic-setjmp-longjmp	generic-setjmp-longjmp.c	-	generic-setjmp-longjmp
+# A value an expression holds across __builtin_setjmp's call, which a longjmp's resumption finds, though calls after it
+# saved values of their own below their arguments (#1242's review): an int's, a double's beside an int's, and nested
+# operands of a call, each resumed once; and a control that holds none.
+generic-setjmp-held-values	generic-setjmp-held-values.c	-	generic-setjmp-held-values
+# A long double's, an __int128's and vectors' values held across __builtin_setjmp's call in their depths' slots, which
+# calls before the longjmp reuse (#1843): the call snapshots them and puts them back. A 256-bit int vector and a
+# 512-bit float vector, and the three classes nested in one expression.
+generic-setjmp-held-wide	generic-setjmp-held-wide.c	-	generic-setjmp-held-wide
+# A deep expression's values held across __builtin_setjmp's call in their deep slots, integer and floating, and a mask
+# on the mask stack in its slot (#2465), which expressions before the longjmp reuse: the call snapshots them and puts
+# them back. The mask's runs where AVX-512F is.
+generic-setjmp-held-deep	generic-setjmp-held-deep.c	-	generic-setjmp-held-deep

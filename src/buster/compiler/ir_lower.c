@@ -3460,7 +3460,7 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
             candidate.symbol_count = symbol_count;
             if (check.error == IR_OK)
             {
-                check = ir_verify(&candidate, scratch, 0);
+                check = ir_verify_path(&candidate, scratch, NULL, true);
             }
         }
     }

@@ -501,7 +501,7 @@ static void tier1_emit_cfg_recipes(const Tier1SelectPlan* plan, const Tier1EmitR
 // The plan's allocation problem, in `output`, which the result keeps (see the header), with the maps between nodes and
 // values and the prepared columns the shared helpers read: recipes and sizes by node, the calls' save rows, and the
 // frame's columns (a node's slot, each caller-save row, then the temporary slot).
-static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const Tier1EmitOptions* options, Arena* output, Arena* scratch, Tier1EmitResult* emitted)
+static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const IrCfg* verified_cfg, const Tier1EmitOptions* options, Arena* output, Arena* scratch, Tier1EmitResult* emitted)
 {
     const IrFunction* function = plan->function;
     const uint32_t count = function->instruction_count;
@@ -512,7 +512,7 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
     IrCfg cfg = { 0 };
     if (error == TIER1_EMIT_OK)
     {
-        const IrError built = ir_build_cfg(function, output, scratch, &cfg);
+        const IrError built = tier1_liveness_cfg(function, verified_cfg, output, scratch, &cfg);
         tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_IR, built);
         error = built == IR_OK ? TIER1_EMIT_OK : built == IR_ERROR_MEMORY ? TIER1_EMIT_MEMORY : built == IR_ERROR_LIMIT ? TIER1_EMIT_LIMIT : TIER1_EMIT_INVALID;
     }
@@ -2337,35 +2337,6 @@ static X86Instruction tier1_emit_cfg_x87_memory(uint32_t form, uint8_t base, int
     return (X86Instruction){ .form = (uint16_t)form, .rm = base, .mode = BUSTER_X86_MEMORY_BASE, .displacement = displacement };
 }
 
-// The exact binary32 or binary64 encoding of a finite normal (and signed zero), or the original
-// extended significand. A narrower subnormal would introduce a denormal-operand exception on FLD.
-static uint16_t tier1_emit_cfg_x87_literal_bits(IrConstant constant, uint64_t* bits)
-{
-    const uint32_t exponent = (uint16_t)constant.high & 0x7fffu;
-    const uint64_t sign = (uint16_t)constant.high >> 15;
-    const bool normal = (constant.low >> 63) != 0;
-    uint16_t form = X86_FORM_FLD_M80;
-    *bits = constant.low;
-    if (exponent == 0 && constant.low == 0)
-    {
-        *bits = sign << 31;
-        form = X86_FORM_FLD_M32;
-    }
-    else if (normal && exponent >= 16383 - 126 && exponent <= 16383 + 127 && (constant.low & ((UINT64_C(1) << 40) - 1)) == 0)
-    {
-        const uint64_t fraction = (constant.low >> 40) & 0x7fffffu;
-        *bits = (sign << 31) | ((uint64_t)(exponent - (16383 - 127)) << 23) | fraction;
-        form = X86_FORM_FLD_M32;
-    }
-    else if (normal && exponent >= 16383 - 1022 && exponent <= 16383 + 1023 && (constant.low & 0x7ffu) == 0)
-    {
-        const uint64_t fraction = (constant.low >> 11) & ((UINT64_C(1) << 52) - 1);
-        *bits = (sign << 63) | ((uint64_t)(exponent - (16383 - 1023)) << 52) | fraction;
-        form = X86_FORM_FLD_M64;
-    }
-    return form;
-}
-
 // x87 constants still wait at their original consumers. FLDZ and FLD1 push positive zero and one
 // directly. The displacement of a memory constant names its pool index until the record is appended.
 static X86Instruction tier1_emit_cfg_x87_load(Tier1EmitResult* emitted, uint32_t value, uint8_t base, int32_t offset)
@@ -2379,10 +2350,10 @@ static X86Instruction tier1_emit_cfg_x87_load(Tier1EmitResult* emitted, uint32_t
                            emitted->symbol_access_count <= BUSTER_TIER1_EMIT_LITERAL;
         const IrConstant constant = valid ? function->constants[index] : (IrConstant){ 0 };
         uint64_t bits = 0;
-        const uint16_t form = tier1_emit_cfg_x87_literal_bits(constant, &bits);
-        if (valid && form == X86_FORM_FLD_M32 && (bits == 0 || bits == UINT32_C(0x3f800000)))
+        const uint16_t form = x87_literal_bits(constant.low, (uint16_t)constant.high, &bits);
+        if (valid && (form == X86_FORM_FLDZ || form == X86_FORM_FLD1))
         {
-            record = (X86Instruction){ .form = (uint16_t)(bits == 0 ? X86_FORM_FLDZ : X86_FORM_FLD1) };
+            record = (X86Instruction){ .form = form };
         }
         else
         {
@@ -3741,10 +3712,32 @@ static uint64_t tier1_emit_cfg_x87_node_records(const Tier1SelectPlan* plan, uin
     return records;
 }
 
-// Optional transport of a canonical F80 result to its sole consumer (#1387). Use the complete IR use list, including
+// A phi reads its incoming object in the emitted edge copy. Within a predecessor with one successor,
+// the unconditional terminator owns that copy and the following jump, if any.
+static uint32_t tier1_emit_cfg_x87_consumer(const Tier1EmitResult* emitted, const Tier1SelectPlan* plan, uint32_t node, IrUse use)
+{
+    const IrFunction* function = plan->function;
+    const uint32_t user = use.instruction;
+    uint32_t consumer = plan->patterns[user].rule == TIER1_RULE_X87 && function->op[user] != IR_PHI ? user : BUSTER_IR_NONE;
+    if (function->op[user] == IR_PHI && use.operand >= 3)
+    {
+        const uint32_t source = function->extra[function->a[user] + (uint64_t)(use.operand - 3) * 2];
+        const uint32_t terminator = function->block_offsets[source + 1] - 1;
+        const uint32_t block = source + emitted->cfg_input.block_count - function->block_count;
+        const uint32_t edge = emitted->cfg_input.successor_offsets[block];
+        if (node >= function->block_offsets[source] && node < terminator && function->op[terminator] == IR_BR &&
+            emitted->cfg_input.successor_offsets[block + 1] == edge + 1 && emitted->cfg.edge_placements[edge] == TIER1_CFG_EDGE_PREDECESSOR)
+        {
+            consumer = terminator;
+        }
+    }
+    return consumer;
+}
+
+// Optional transport of an F80 result to its sole consumer (#1387). Use the complete IR use list, including
 // repeated operands, calls and phi edges. Only the selected producer's own private store and the selected consumer's
-// matching load are annotated; raw loads and constants are excluded from forwarding. The shared record proof
-// preserves both waiting points and every metadata index, and declines barriers, right operands and excess pressure.
+// matching load are annotated. The shared record proof preserves both waiting points and every metadata index,
+// and declines barriers, unresolved operand order and excess pressure.
 static void tier1_emit_cfg_x87_transfers(const Tier1SelectPlan* plan, Tier1EmitResult* emitted, uint32_t records, const uint32_t* block_first, uint32_t blocks, Arena* output, Arena* scratch)
 {
     const IrFunction* function = plan->function;
@@ -3755,13 +3748,12 @@ static void tier1_emit_cfg_x87_transfers(const Tier1SelectPlan* plan, Tier1EmitR
     uint32_t* tokens = ok ? ir_allocate(scratch, (uint64_t)records + 1, 4, &ok) : 0;
     uint8_t* eligible = ok ? ir_allocate(scratch, (uint64_t)records + 1, 1, &ok) : 0;
     uint8_t* boundaries = ok ? ir_allocate(scratch, (uint64_t)records + 1, 1, &ok) : 0;
-    uint8_t* canonical = ok ? ir_allocate(scratch, (uint64_t)nodes + 1, 1, &ok) : 0;
+
     if (ok)
     {
         memset(tokens, 0xff, ((uint64_t)records + 1) * 4);
         memset(eligible, 0, (uint64_t)records + 1);
         memset(boundaries, 0, (uint64_t)records + 1);
-        memset(canonical, 0, (uint64_t)nodes + 1);
         boundaries[0] = BUSTER_X87_TRANSFER_BOUNDARY | BUSTER_X87_TRANSFER_CUT;
         boundaries[records] = BUSTER_X87_TRANSFER_BOUNDARY | BUSTER_X87_TRANSFER_CUT;
         for (uint32_t b = 0; b < blocks; b += 1)
@@ -3773,11 +3765,6 @@ static void tier1_emit_cfg_x87_transfers(const Tier1SelectPlan* plan, Tier1EmitR
             const uint32_t first = emitted->code.node_first[node];
             const uint32_t end = node + 1 < nodes ? emitted->code.node_first[node + 1] : records;
             const uint32_t op = function->op[node];
-            const uint32_t a = function->a[node];
-            const bool arithmetic = op == IR_FADD || op == IR_FSUB || op == IR_FMUL || op == IR_FDIV;
-            const bool converts = op == IR_SITOFP || op == IR_UITOFP || op == IR_FEXT;
-            const bool copied = (op == IR_COPY || op == IR_FNEG) && a < node && canonical[a] != 0;
-            canonical[node] = function->type[node] == IR_F80 && (arithmetic || converts || copied);
             boundaries[first] |= BUSTER_X87_TRANSFER_BOUNDARY;
             boundaries[end] |= BUSTER_X87_TRANSFER_BOUNDARY;
             const bool barrier = (function->flags[node] & BUSTER_IR_OBSERVABLE) != 0 || op == IR_PHI ||
@@ -3791,16 +3778,22 @@ static void tier1_emit_cfg_x87_transfers(const Tier1SelectPlan* plan, Tier1EmitR
         for (uint32_t node = 0; node < nodes; node += 1)
         {
             const bool single = uses.offsets[node + 1] - uses.offsets[node] == 1;
-            const uint32_t user = single ? uses.uses[uses.offsets[node]].instruction : BUSTER_IR_NONE;
-            const bool candidate = canonical[node] != 0 && single && user < nodes && !plan->covered[node] && !plan->covered[user] &&
-                                   plan->patterns[node].rule == TIER1_RULE_X87 && plan->patterns[user].rule == TIER1_RULE_X87;
+            const bool producer = function->type[node] == IR_F80 && single && !plan->covered[node] && plan->patterns[node].rule == TIER1_RULE_X87;
+            const uint32_t user = producer ? tier1_emit_cfg_x87_consumer(emitted, plan, node, uses.uses[uses.offsets[node]]) : BUSTER_IR_NONE;
+            const bool candidate = user < nodes && !plan->covered[user];
             int32_t offset = 0;
             if (candidate && tier1_emit_cfg_x87_offset(function, emitted, node, &offset))
             {
                 const uint32_t first = emitted->code.node_first[node];
                 const uint32_t end = node + 1 < nodes ? emitted->code.node_first[node + 1] : records;
                 const uint32_t use_first = emitted->code.node_first[user];
-                const uint32_t use_end = user + 1 < nodes ? emitted->code.node_first[user + 1] : records;
+                uint32_t use_end = user + 1 < nodes ? emitted->code.node_first[user + 1] : records;
+                if (function->op[user] == IR_BR && use_end > use_first && emitted->code.records[use_end - 1].form == X86_FORM_JMP_REL8)
+                {
+                    // The parallel copy leaves the stack empty before control leaves the predecessor.
+                    use_end -= 1;
+                    boundaries[use_end] |= BUSTER_X87_TRANSFER_BOUNDARY;
+                }
                 uint32_t store = BUSTER_X87_TRANSFER_NONE;
                 uint32_t load = BUSTER_X87_TRANSFER_NONE;
                 uint32_t stores = 0;
@@ -5240,7 +5233,7 @@ static Tier1EmitError tier1_emit_cfg_order_check(const Tier1SelectPlan* plan, co
 
 // The CFG consumer's whole function: problem, allocation, frame and records, out of line, so that tier1_emit_function's
 // straight-line path compiles as it did without it.
-static __attribute__((noinline)) Tier1EmitError tier1_emit_cfg_function(const Tier1SelectPlan* plan, const Tier1EmitOptions* options, const uint8_t* allowed_forms, Arena* output, Arena* scratch, Tier1EmitResult* emitted, uint32_t* error_node)
+static __attribute__((noinline)) Tier1EmitError tier1_emit_cfg_function(const Tier1SelectPlan* plan, const IrCfg* verified_cfg, const Tier1EmitOptions* options, const uint8_t* allowed_forms, Arena* output, Arena* scratch, Tier1EmitResult* emitted, uint32_t* error_node)
 {
     emitted->general = true;
     // A target without AVX512VL (#1281) has no EVEX form of a 16- or 32-byte vector: its moves, spills and kernels take
@@ -5252,7 +5245,7 @@ static __attribute__((noinline)) Tier1EmitError tier1_emit_cfg_function(const Ti
     // A target without AVX (#141's SSE targets) allows no VEX move of an xmm register.
     emitted->prepared.sse = !x86_target_form_allowed(allowed_forms, X86_FORM_VMOVDQU_X_XM128);
     emitted->prepared.zmm = x86_target_form_allowed(allowed_forms, X86_FORM_VMOVDQA64_Z_ZM512);
-    Tier1EmitError error = tier1_emit_cfg_problem(plan, options, output, scratch, emitted);
+    Tier1EmitError error = tier1_emit_cfg_problem(plan, verified_cfg, options, output, scratch, emitted);
     const Tier1CfgInput problem = emitted->cfg_input;
     if (error == TIER1_EMIT_OK)
     {

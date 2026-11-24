@@ -1,0 +1,4 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+asm-flag-objects	asm-flag-objects.c	-	asm-flag-objects
+asm-flag-mixed	asm-flag-mixed.c	-	asm-flag-mixed

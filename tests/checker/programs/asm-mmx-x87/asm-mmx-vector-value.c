@@ -1,0 +1,1 @@
+typedef long long m64 __attribute__((vector_size(8)));static m64 made(int n){m64 v={n*7};return v;}int tested(int n){m64 v={n};long r;__asm__("movq %1, %0" : "=r"(r) : "y"(v+v));long q;__asm__("movq %1, %0" : "=r"(q) : "y"(made(n)));__asm__ volatile("emms");return (int)r+(int)q*3;}

@@ -411,7 +411,7 @@ _Static_assert(BUSTER_CHECK_TIER1_UNROLL_OUTCOMES == IR_UNROLL_OUTCOME_COUNT, "a
 // (SCCP, dead-code removal, CFG cleanup and its merges as --tier1-passes= leaves them), whose function goes to `output`
 // and its verified analysis to `analyses` under `revision`. check_tier1_passes ends with them, and so does a candidate's
 // own code that the unroller changed after its summary (check_tier1_unroll_own).
-static CheckTier1Outcome check_tier1_sink_optimize(CheckTier1Lane* lane, IrFunction* function, bool certify, const CheckTier1Fault* fault, Arena* output, Arena* analyses,
+static CheckTier1Outcome check_tier1_sink_optimize(CheckTier1Lane* lane, IrFunction* function, bool verified, bool certify, const CheckTier1Fault* fault, Arena* output, Arena* analyses,
                                                    IrVerifiedRevision* revision, CheckTier1Passes* passes)
 {
     Arena* scratch = &lane->scratch;
@@ -442,7 +442,10 @@ static CheckTier1Outcome check_tier1_sink_optimize(CheckTier1Lane* lane, IrFunct
         IrOptimizeOptions options = ir_optimize_options();
         options.passes = (on & (BUSTER_IR_OPTIMIZE_SCCP | BUSTER_IR_OPTIMIZE_DCE | BUSTER_IR_OPTIMIZE_CFG | BUSTER_IR_OPTIMIZE_MERGE)) | BUSTER_IR_OPTIMIZE_LAYOUT |
                         BUSTER_IR_OPTIMIZE_IDENTITY | ((on & BUSTER_CHECK_TIER1_PASS_MEMORY) != 0 ? BUSTER_IR_OPTIMIZE_MEMORY : 0);
-        const IrCheck check = ir_optimize_verified(function, output, analyses, scratch, options, revision, &passes->optimized, &passes->analysis);
+        // Promotion checks its result with dominance. Each step either retains a proof of this exact
+        // revision or invalidates it. A new sink order and --verify both require fresh preparation.
+        const IrCheck check = ir_optimize_verified_path(function, output, analyses, scratch, options, revision, &passes->optimized, &passes->analysis,
+                                                       verified && !certify && passes->sunk == 0);
         outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, check.error, check.instruction, check.detail, fault);
         outcome.dominance_checked = check.dominance_checked;
         outcome.operation = check.instruction < function->instruction_count ? function->op[check.instruction] : IR_OP_COUNT;
@@ -593,6 +596,7 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
         outcome.operation = check.instruction < promoted.instruction_count ? promoted.op[check.instruction] : IR_OP_COUNT;
         stage = outcome.stage;
     }
+    bool verified = !certify && !wide.split;
     // The 128-bit integers' frame objects in registers (#3299): the checker gives an __int128 local, parameter and
     // temporary a 16-byte object, which the lowering copies by 8-byte pieces and reads and writes whole, so that promotion
     // keeps it in memory and each operation's value went through its slot. The split makes every access of such an object
@@ -634,13 +638,14 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
         outcome.operation = check.instruction < wide.function.instruction_count ? wide.function.op[check.instruction] : IR_OP_COUNT;
         stage = outcome.stage;
         wide.function = stage == CHECK_TIER1_COMPILED ? pieces.function : wide.function;
+        verified &= !pieces.split;
     }
     if (stage == CHECK_TIER1_COMPILED)
     {
         // The lane owns these columns, including the borrowed promoted columns when no wide split was needed.
         // No later consumer reads their old operands and no analysis revision has been published. Simplify before
         // optimizer preparation builds uses, then let its DCE and final SSA verification consume the new operands.
-        ir_truth_simplify(&wide.function);
+        ir_truth_simplify_rules(&wide.function, false, &verified);
     }
     if (stage == CHECK_TIER1_COMPILED)
     {
@@ -655,6 +660,7 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
         stage = outcome.stage;
         if (stage == CHECK_TIER1_COMPILED && threaded.rounds != 0)
         {
+            verified = false;
             wide.function = threaded.function;
             ir_truth_simplify(&wide.function);
         }
@@ -669,6 +675,7 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
         outcome.operation = check.instruction < wide.function.instruction_count ? wide.function.op[check.instruction] : IR_OP_COUNT;
         stage = outcome.stage;
         wide.function = stage == CHECK_TIER1_COMPILED ? converted.function : wide.function;
+        verified &= converted.regions == 0;
     }
     // #3298's switches whose arms only give constants (ir_switch_table.c): the dispatch's jump table holds the constants
     // and the dispatch loads its value, in steps[6] with if-conversion's result, whose arms it then leaves to the
@@ -683,6 +690,7 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
         wide.function = stage == CHECK_TIER1_COMPILED ? switched.function : wide.function;
         passes->table_values = stage == CHECK_TIER1_COMPILED ? switched.values : NULL;
         passes->tables_converted = stage == CHECK_TIER1_COMPILED ? switched.converted : 0;
+        verified &= switched.converted == 0;
     }
     // --tier1-passes=+numbering (#2719's measurement): the solver on the promoted function under the pressure policy
     // (IrGvnOptions.pressure), in steps[13], after if-conversion and before LICM, where it sees the values promotion made
@@ -709,6 +717,7 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
             outcome.operation = check.instruction < wide.function.instruction_count ? wide.function.op[check.instruction] : IR_OP_COUNT;
             wide.function = outcome.stage == CHECK_TIER1_COMPILED && check.error == IR_OK ? numbered_ssa.function : wide.function;
             passes->gvn_removed += check.error == IR_OK ? numbered_ssa.removed : 0;
+            verified |= check.error == IR_OK && check.dominance_checked;
         }
         stage = outcome.stage;
     }
@@ -740,6 +749,7 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
             outcome = check_tier1_step(CHECK_TIER1_OPTIMIZATION, CHECK_TIER1_CAUSE_IR, error, check.instruction, check.detail, NULL);
             outcome.operation = check.instruction < wide.function.instruction_count ? wide.function.op[check.instruction] : IR_OP_COUNT;
             wide.function = outcome.stage == CHECK_TIER1_COMPILED && check.error == IR_OK ? moved.function : wide.function;
+            verified |= check.error == IR_OK && check.dominance_checked;
             passes->licm_moved = check.error == IR_OK ? moved.moved : 0;
         }
         stage = outcome.stage;
@@ -756,6 +766,7 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
         outcome.operation = check.instruction < wide.function.instruction_count ? wide.function.op[check.instruction] : IR_OP_COUNT;
         stage = outcome.stage;
         wide.function = stage == CHECK_TIER1_COMPILED && vectorized.changed ? vectorized.function : wide.function;
+        verified &= !vectorized.changed;
         const uint32_t counts[BUSTER_CHECK_TIER1_VECTORIZE_COUNTS] = {
             vectorized.loops,
             vectorized.vectorized,
@@ -782,6 +793,7 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
         outcome.operation = check.instruction < wide.function.instruction_count ? wide.function.op[check.instruction] : IR_OP_COUNT;
         stage = outcome.stage;
         wide.function = stage == CHECK_TIER1_COMPILED && check.error == IR_OK ? unrolled.function : wide.function;
+        verified &= unrolled.outcomes[IR_UNROLL_UNROLLED] == 0;
         for (uint32_t k = 0; check.error == IR_OK && k < IR_UNROLL_OUTCOME_COUNT; k += 1)
         {
             passes->unroll_outcomes[k] = (uint16_t)(unrolled.outcomes[k] < UINT16_MAX ? unrolled.outcomes[k] : UINT16_MAX);
@@ -808,10 +820,11 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
         stage = outcome.stage;
         passes->pre_blocks = schedule_stats.segments;
         passes->pre_moved = schedule_stats.moved;
+        verified = false;
     }
     if (stage == CHECK_TIER1_COMPILED)
     {
-        outcome = check_tier1_sink_optimize(lane, &wide.function, certify, fault, output, analyses, revision, passes);
+        outcome = check_tier1_sink_optimize(lane, &wide.function, verified, certify, fault, output, analyses, revision, passes);
     }
     return outcome;
 }
@@ -840,7 +853,7 @@ static CheckTier1Outcome check_tier1_unroll_own(CheckTier1Lane* lane, bool certi
     {
         IrFunction function = unrolled.function;
         *revision = (IrVerifiedRevision){ 0 };
-        outcome = check_tier1_sink_optimize(lane, &function, certify, fault, &lane->steps[2], &lane->steps[3], revision, passes);
+        outcome = check_tier1_sink_optimize(lane, &function, false, certify, fault, &lane->steps[2], &lane->steps[3], revision, passes);
     }
     return outcome;
 }
@@ -1126,7 +1139,7 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
             .sources = sources,
         };
         uint32_t node = BUSTER_IR_NONE;
-        Tier1EmitError error = tier1_emit_function(&plan, &options, lane->allowed, &lane->steps[1], scratch, &emitted, &node);
+        Tier1EmitError error = tier1_emit_function_cfg(&plan, &analysis.cfg, &options, lane->allowed, &lane->steps[1], scratch, &emitted, &node);
         bool forced_nested = false;
         if (error == TIER1_EMIT_OK && fault != NULL && fault->stage == CHECK_TIER1_EMISSION && fault->cause != CHECK_TIER1_CAUSE_EMISSION)
         {

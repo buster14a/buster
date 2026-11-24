@@ -477,7 +477,11 @@ static IrSizes BUSTER_IR_TYPED_EMIT_NAME(const Tier0Function* input, IrType resu
                 ir_typed_spill(&sink, plan, stack, classes, depth, input->local_count);
                 const uint32_t target = plan->entry_blocks[value] + 1;
                 const uint32_t next = b + 2;
-                ir_typed_emit(&sink, IR_CBR, IR_VOID, condition, kind == BUSTER_TYPED_BRANCH_TRUE ? target : next, kind == BUSTER_TYPED_BRANCH_TRUE ? next : target, 0);
+                const uint32_t branch = ir_typed_emit(&sink, IR_CBR, IR_VOID, condition, kind == BUSTER_TYPED_BRANCH_TRUE ? target : next, kind == BUSTER_TYPED_BRANCH_TRUE ? next : target, 0);
+                if (output != NULL && input->predictable_branches != NULL && ((input->predictable_branches[i / 64] >> (i % 64)) & 1) != 0)
+                {
+                    output->flags[branch] = BUSTER_IR_BRANCH_PREDICTABLE;
+                }
                 terminated = true;
                 break;
             }

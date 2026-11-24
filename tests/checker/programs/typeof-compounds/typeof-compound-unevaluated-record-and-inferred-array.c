@@ -1,0 +1,1 @@
+struct S { int x; }; int tested(int n) { int x=n; __typeof__((struct S){++x}) s={3};__typeof__((int[]){++x,++x,++x}) a={1,2,4}; return x+s.x+a[2]+sizeof(a); }

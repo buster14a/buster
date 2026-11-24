@@ -1,0 +1,1 @@
+int tested(int n){unsigned long a=(unsigned long)n,b=3,out=0;int overflow=__builtin_umull_overflow(a++,b++,&out);return (int)(out%97)+overflow*100+(int)(a%13)+(int)b;}
