@@ -1559,6 +1559,9 @@ _Static_assert(C_NAME_BUILTIN_COLUMN < C_NAME_IS_NOTHROW_DESTRUCTIBLE && C_NAME_
 // A specifier's type query finishes at the token, or a designator's, a selection's type, a va_arg's or a builtin's type
 // name starts there (specifier_finishes, designator_valid, selection_type_ends, vararg_types, builtin_type_ends).
 #define BUSTER_CHECK_RESOLVE_QUERY 0x20u
+// Designator states 0 and 1 are absent and resolved. These two still need their index expressions checked.
+#define BUSTER_CHECK_DESIGNATOR_PENDING 2u
+#define BUSTER_CHECK_DESIGNATOR_PENDING_REJECTED 3u
 // Before the expressions' walk (check_input_expressions), the token's classes (check_input_expression_classes):
 // The expressions' walk may act at the token: it has children, a sparse column has an entry for it, or its role or
 // kind is one the walk acts at.
@@ -13554,11 +13557,12 @@ static void check_input_implicit_late_attributes(CheckInputReader* reader, uint3
 static void check_input_invalid_initializer(CheckInputReader* reader, uint32_t token, uint32_t point)
 {
     const Parser* parser = reader->parser;
-    if (point < parser->tokens.count && reader->initializer_declarations[point] == token)
+    const uint32_t count = parser->tokens.count;
+    if (point < count && reader->initializer_declarations[point] == token)
     {
         // A direct initializer's closing parenthesis owns its conversion and reads the opening from the metadata.
         const uint32_t close = parser->tree.roles[point] == PARSE_ROLE_OPEN_GROUP ? parser->tree.parents[point] : BUSTER_CHECK_NONE;
-        if (close < parser->tokens.count && reader->initializer_declarations[close] == token)
+        if (close < count && reader->initializer_declarations[close] == token)
         {
             reader->initializers[close] = 0;
             reader->initializer_declarations[close] = BUSTER_CHECK_NONE;
@@ -15036,7 +15040,9 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
                 continue;
             }
         }
-        if (BUSTER_CHECK_RESOLVE_RARE(mark, BUSTER_CHECK_RESOLVE_QUERY) && BUSTER_CHECK_RARE(reader, designator_valid, i) == 2 && !check_input_initializer_designator(reader, i))
+        const uint8_t designator = BUSTER_CHECK_RESOLVE_RARE(mark, BUSTER_CHECK_RESOLVE_QUERY) ? BUSTER_CHECK_RARE(reader, designator_valid, i) : 0;
+        if (designator >= BUSTER_CHECK_DESIGNATOR_PENDING &&
+            !check_input_initializer_designator(reader, i, designator == BUSTER_CHECK_DESIGNATOR_PENDING_REJECTED))
         {
             break;
         }

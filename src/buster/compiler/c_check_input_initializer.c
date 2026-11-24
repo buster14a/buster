@@ -25,6 +25,17 @@ static __attribute__((noinline, cold)) void check_input_gnu_designator(CheckInpu
     check_input_warning_once(reader, &event);
 }
 
+// Diagnostics in a rejected initializer cannot stop resolution of later declarations.
+static bool check_input_initializer_recover(CheckInputReader* reader, uint32_t before)
+{
+    CheckInput* const input = reader->output;
+    if (input->report_count > before && !check_input_recover_reports(reader, before))
+    {
+        input->resource = true;
+    }
+    return !input->resource;
+}
+
 static bool check_input_initializer_prepare_slow(CheckInputReader* reader, uint32_t assignment, bool initialize)
 {
     const Parser* parser = reader->parser;
@@ -86,7 +97,7 @@ static bool check_input_initializer_prepare_slow(CheckInputReader* reader, uint3
                 check_input_rare_claim(reader, &reader->designator_indices[token]);
                 reader->designator_indices[token] = close;
                 check_input_rare_claim(reader, &reader->designator_valid[token]);
-                reader->designator_valid[token] = 2;
+                reader->designator_valid[token] = initialize ? BUSTER_CHECK_DESIGNATOR_PENDING : BUSTER_CHECK_DESIGNATOR_PENDING_REJECTED;
                 check_input_visit(reader, token, BUSTER_CHECK_RESOLVE_QUERY);
                 check_input_rare_claim(reader, &reader->designator_ranges[token]);
                 reader->designator_ranges[token] = range;
@@ -172,6 +183,7 @@ static bool check_input_initializer_prepare_slow(CheckInputReader* reader, uint3
 
 static bool check_input_initializer_prepare(CheckInputReader* reader, uint32_t assignment, bool initialize)
 {
+    const uint32_t before = reader->output->report_count;
     const bool compact = initialize && check_input_literal_table_prepare(reader, assignment);
     const bool valid = compact || (!reader->output->resource && check_input_initializer_prepare_slow(reader, assignment, initialize));
     if (valid && initialize)
@@ -179,10 +191,14 @@ static bool check_input_initializer_prepare(CheckInputReader* reader, uint32_t a
         const uint32_t declaration = reader->initializer_declarations[assignment];
         check_input_noderef_set(reader->output, assignment, check_input_noderef_at(reader->output, declaration));
     }
+    if (!initialize)
+    {
+        check_input_initializer_recover(reader, before);
+    }
     return valid;
 }
 
-static bool check_input_initializer_designator(CheckInputReader* reader, uint32_t token)
+static bool check_input_initializer_designator(CheckInputReader* reader, uint32_t token, bool rejected)
 {
     const uint32_t close = (uint32_t)reader->designator_indices[token];
     const uint32_t range = reader->designator_ranges[token];
@@ -191,6 +207,7 @@ static bool check_input_initializer_designator(CheckInputReader* reader, uint32_
     // Its undeclared names are clang's errors at each one (#1447, check_constant_name), which end the walk; clang drops the
     // initializer list there.
     const uint32_t named = reader->constant_named;
+    const uint32_t before = reader->output->report_count;
     CheckConstantFailure failure = { .token = BUSTER_CHECK_NONE, .callee = BUSTER_CHECK_NONE };
     reader->constant_names = CHECK_CONSTANT_NAMES_REPORT;
     reader->constant_failure = &failure;
@@ -224,6 +241,11 @@ static bool check_input_initializer_designator(CheckInputReader* reader, uint32_
     {
         // Its failure's error in clang's words (#1447).
         check_input_constant_failure_report(reader, &failure, token + 1, token + 1);
+    }
+    if (rejected && !valid)
+    {
+        reader->designator_valid[token] = 0;
+        valid = check_input_initializer_recover(reader, before);
     }
     return valid;
 }
