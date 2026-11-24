@@ -63,9 +63,11 @@ static bool check_test_driver_warning_text_matches(const char* actual, const cha
     return match;
 }
 
-// #1340's quiet roots (c_check_quiet_roots_driver_test.c): the counts of the log's lines of their rule, summed; false where a line of them doesn't parse or the log
-// has none.
-static bool check_test_driver_quiet_roots_counts(const char* log, uint64_t* roots, uint64_t* quiet, uint64_t* acted)
+// #1340's quiet roots (c_check_quiet_roots_driver_test.c): the counts of the log's lines of their rule, summed; false where
+// a line of them doesn't parse or the log has none. With `one_command`, the log is one command's, which writes one line,
+// or two alike where --differential runs it in this process and as a child too (#2071): the counts are that line's, and
+// lines that differ are false.
+static bool check_test_driver_quiet_roots_counts(const char* log, bool one_command, uint64_t* roots, uint64_t* quiet, uint64_t* acted)
 {
     *roots = 0;
     *quiet = 0;
@@ -82,9 +84,11 @@ static bool check_test_driver_quiet_roots_counts(const char* log, uint64_t* root
         if (strncmp(line, "default-path: roots=", 20) == 0)
         {
             valid = sscanf(line, "default-path: roots=%llu of-them-quiet=%llu of-them-a-visit-that-acted=%llu", &line_roots, &line_quiet, &line_acted) == 3;
-            *roots += line_roots;
-            *quiet += line_quiet;
-            *acted += line_acted;
+            const bool repeated = one_command && lines != 0;
+            valid &= !repeated || (*roots == line_roots && *quiet == line_quiet && *acted == line_acted);
+            *roots = repeated ? *roots : *roots + line_roots;
+            *quiet = repeated ? *quiet : *quiet + line_quiet;
+            *acted = repeated ? *acted : *acted + line_acted;
             lines += 1;
         }
     }
@@ -282,7 +286,7 @@ static void check_test_driver_warning_fixtures_dealt(CheckTest* test, const char
     uint64_t visited_roots = 0;
     uint64_t visited_quiet = 0;
     uint64_t visited_acted = 0;
-    visits_written = visits_written && (swept == 0 || check_test_driver_quiet_roots_counts(visits, &visited_roots, &visited_quiet, &visited_acted));
+    visits_written = visits_written && (swept == 0 || check_test_driver_quiet_roots_counts(visits, false, &visited_roots, &visited_quiet, &visited_acted));
     check_test_expect(test, visits_written && visited_acted == 0, "over the sweep's fixtures no quiet root's visit acted");
     if (!visits_written || visited_acted != 0)
     {

@@ -52,7 +52,7 @@ static bool check_test_driver_quiet_roots_pair(const char* executable, const cha
     setenv("BUSTER_TEST_DEFAULT_PATH_LOG", log, 1);
     const int visited_status = written ? check_test_driver_buster_command(arguments[1], &visited_text, false, executable != NULL) : -1;
     unsetenv("BUSTER_TEST_DEFAULT_PATH_LOG");
-    const bool counted = check_test_driver_quiet_roots_counts(log, roots, quiet, acted);
+    const bool counted = check_test_driver_quiet_roots_counts(log, true, roots, quiet, acted);
     const bool same = plain_status >= 0 && plain_status == visited_status && plain_text != NULL && visited_text != NULL && strcmp(plain_text, visited_text) == 0 &&
                       (!object || plain_status != 0 || check_test_driver_same_files(plain, visited));
     if (!same || !counted)
