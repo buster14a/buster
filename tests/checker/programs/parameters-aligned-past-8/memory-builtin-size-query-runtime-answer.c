@@ -1,0 +1,2 @@
+#pragma STDC FENV_ACCESS ON
+int clear_fp(void);int fp_state(void);unsigned char a[2]={7,9},b[2];int tested(int n){b[0]=b[1]=0;clear_fp();__builtin_memcpy(b,a,__builtin_constant_p(1.0/3.0));return b[0]+b[1]*256+fp_state()*65536;}

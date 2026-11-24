@@ -1,0 +1,73 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+int128-bit-fields	int128-bit-fields.c	-	int128-bit-fields
+# Long double values kept in temporaries, which frame objects of their own now hold (as the 128-bit integers').
+long-double-temporaries	long-double-temporaries.c	-	long-double-temporaries
+# Complex values (#133): double's sums, differences, products and quotients (libgcc's __muldc3 and __divdc3 for two
+# complex operands, a real one kept real), negation, the conjugate and equality, with infinities, NaNs and a zero
+# divisor; (inf + inf i) times 1, whose inline product's two NaNs __muldc3 recovers as infinities. Each part's bits
+# folded, so that signed zeros count.
+complex-arithmetic	complex-arithmetic.c	-	complex-arithmetic
+# Complex float's and long double's, and mixed: __mulsc3, __divsc3, __mulxc3 and __divxc3, each part's bits folded.
+complex-float-and-long-double	complex-float-and-long-double.c	-	complex-float-and-long-double
+# Complex values' ++ and -- (#147, C2y's): one added to or subtracted from the real part, prefix and postfix, of
+# double's, float's, long double's and a complex int's, through a pointer and an array element; a postfix one's
+# value the object before it.
+complex-increments	complex-increments.c	-	complex-increments
+# __auto_type's _Atomic and restrict, its deduced type's (#1844): an atomic int's compound assignments and a const
+# atomic double's value, a restrict pointer's and a pointer declarator's restrict, and two declarators of one type.
+auto-type-qualifiers	auto-type-qualifiers.c	-	auto-type-qualifiers
+# Complex values passed and returned (in xmm registers, in st0 and st1, on the stack), in structs, read by va_arg,
+# through a function pointer, and in arrays.
+complex-calls-and-varargs	complex-calls-and-varargs.c	-	complex-calls-and-varargs
+# Compound assignments into complex, double, int, _Bool and long long destinations, conversions between the complex
+# types, ?:, and truth tests in conditions.
+complex-updates-and-truth	complex-updates-and-truth.c	-	complex-updates-and-truth
+# Complex globals, a static local and an array's elements, from static data, updated each call; a compound
+# literal, and folded constants.
+complex-static-data-and-constants	complex-static-data-and-constants.c	-	complex-static-data-and-constants
+# GNU's complex integer types (#137), each from _Complex signed char to _Complex unsigned long long: sums, differences,
+# products (ac - bd, ad + bc), quotients by clang's formula ((ac + bd) / (cc + dd), a real operand's imaginary part 0,
+# wrapped to the element's width before the division), negation, the conjugate, equality and truth, in 8 and 16 bits
+# as clang computes them; compound assignments, conversions to and from the scalar and floating complex types,
+# globals, and calls passing and returning them, va_arg among them.
+complex-integers	complex-integers.c	-	complex-integers
+# The complex types of __int128 and of _BitInts of up to 128 bits, which the usual arithmetic conversions make (#137):
+# the same operations in Tier 0's 128-bit classes, with libgcc's __divti3 and __udivti3 in their quotients, and a
+# _BitInt's parts kept extended from its width (a narrow one's computed in 32 bits); calls passing and returning
+# them (in memory, and in a register for 4 bytes), va_arg, globals, compound assignments and conversions.
+complex-wide-integers	complex-wide-integers.c	-	complex-wide-integers
+# __float128 (#137): a frame object of its 16 bytes, passed and returned as SSE, SSEUP in a vector register (va_arg
+# too), its sums, differences, products and quotients libgcc's __addtf3 ... __divtf3, its comparisons libgcc's against
+# 0 (a NaN's too), its negation a copy's sign bit, its truth __netf2's, and its conversions libgcc's, to and from
+# float, double and long double and the integers of every width (through int to unsigned __int128, the _BitInts and
+# _Bool among them); a global, and compound assignments of a __float128 and of real destinations.
+float128	float128.c	-	float128
+# A __float128's increments and decrements (#147): libgcc's __addtf3 and __subtf3 of 1.0, a prefix one's value the
+# object after it and a postfix one's a copy from before it, of locals, a global and through a pointer.
+float128-increments	float128-increments.c	-	float128-increments
+# Complex values' ++ and -- of aggregate parts (#1447): a _Complex __float128's and a complex _BitInt's past 128
+# bits, whose real part alone is stepped (a -0.0 imaginary part stays -0.0), prefix and postfix, of locals and
+# through a pointer; a postfix one's value a copy of the object before it.
+complex-aggregate-increments	complex-aggregate-increments.c	-	complex-aggregate-increments
+# A __float128's __imag__ (#837's review): zero, folded where its operand has no effect and a frame object of zeros
+# after the operand where it has, returned directly and passed as arguments. Before the fix, the folded one was
+# refused and the other was an address of 0.
+float128-imaginary	float128-imaginary.c	-	float128-imaginary
+# _BitInts past 128 bits (#137): frame objects of their 64-bit limbs, of 129 to 2,100 bits (whose copies past 256
+# bytes call memmove), signed and unsigned: every operation a limb at a time, libgcc's __mulbitint3 and
+# __divmodbitint4 for products, quotients and remainders, shifts by constant and variable counts of other types (a
+# _BitInt's past 128 bits among them), compares of the top limbs signed or not, counts of shifts of narrower values, conversions to and from the
+# integers of every width, _Bool and the floating types (libgcc's __floatbitint* and __fix*bitint), between widths,
+# compound assignments (of real and complex floating values too, computed in their types and converted back),
+# increments, zero-initialized globals, members and arrays, and calls passing and returning them in memory, va_arg
+# among them. It is clean under clang's UBSan on every input.
+bit-int-past-128-bits	bit-int-past-128-bits.c	-	bit-int-past-128-bits
+# Their constants (#1447, c_check_wide.c): literals past 128 bits in every radix and with separators, and the 129-bit
+# ones a signed value with its top bit set needs; globals, statics, members and array elements initialized with
+# folded constants (the static data writes their limbs, extended past the width); and locals the lowering takes
+# as folded limbs. Every operator folds: sums, differences and negations, products, quotients and remainders of
+# either sign, the bitwise ones, shifts by narrow and wide counts and narrow values by wide ones, compares, truth
+# (!, &&, ||, ?:, if) and conversions to and from narrower integers, other widths, the floating types and back,
+# with integer constant expressions of them as array bounds and enumerators.
+bit-int-past-128-bits-constants	bit-int-past-128-bits-constants.c	-	bit-int-past-128-bits-constants

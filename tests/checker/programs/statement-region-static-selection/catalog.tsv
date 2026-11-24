@@ -1,0 +1,19 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+statement-region-static-selection	statement-region-static-selection.c	-	statement-region-static-selection
+intrinsic-generic-controls-unevaluated	intrinsic-generic-controls-unevaluated.c	-	intrinsic-generic-controls-unevaluated
+# GNU C's labels as values (#133): an interpreter's dispatch through a static table of labels' addresses, a computed goto
+# through a local and through ?:, the addresses compared, and a computed goto out of a variable-length array's block.
+labels-as-values-dispatch	labels-as-values-dispatch.c	-	labels-as-values-dispatch
+# A computed goto's operand is the whole expression after its `*` (#431's review): through ?: of an int's condition,
+# a void *'s sum, a comma and an assignment, each where `*` taken as the operand's prefix would read another value.
+labels-as-values-whole-operand	labels-as-values-whole-operand.c	-	labels-as-values-whole-operand
+# #1447: a scalar compound literal's value in a static object's initializer, at file scope and in a function.
+scalar-compound-literals-in-static-initializers	scalar-compound-literals-in-static-initializers.c	-	scalar-compound-literals-in-static-initializers
+# #1447: GNU's relative jump table, the difference of two labels' addresses in a static initializer, through the
+# conversions clang keeps (to unsigned, through long, in a long array), dispatched by a computed goto.
+label-differences-in-static-initializers	label-differences-in-static-initializers.c	-	label-differences-in-static-initializers
+# GNU C's local labels (#147): a macro's statement expression with a label of its own, expanded twice, whose value is
+# its labeled last statement's; nested blocks' lists beside the function's label of the same name; a local label's
+# address; and a goto to a statement expression's last statement under two labels.
+local-labels	local-labels.c	-	local-labels

@@ -1,0 +1,6 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+statement-region-floating-pending-value	statement-region-floating-pending-value.c	-	statement-region-floating-pending-value
+statement-region-mixed-pending-stack-classes	statement-region-mixed-pending-stack-classes.c	-	statement-region-mixed-pending-stack-classes
+statement-region-inner-goto-outer-region	statement-region-inner-goto-outer-region.c	-	statement-region-inner-goto-outer-region
+statement-region-selected-and-unevaluated	statement-region-selected-and-unevaluated.c	-	statement-region-selected-and-unevaluated

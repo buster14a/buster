@@ -1,0 +1,2 @@
+#define FIND(a,k)({__label__ found;int i_=0;for(;i_<4;i_++)if((a)[i_]==(k))goto found;i_=-1;found:i_;})
+int tested(int n){int t[4]={3,n,7,n*2};int r=FIND(t,7)*10+FIND(t,n*2);{__label__ again,done;int k=n&3;again:if(k-->0){r+=5;goto again;}goto done;done:;}{__label__ again;void*p=&&again;int k=2;again:r+=k;if(--k>0)goto*p;}int e=0;r+=({int v=n;if(v>5)goto out;v*=2;out:x:e++,v+1;})+e*1000;if(r<0)goto again;return r;again:return -r;}

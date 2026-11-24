@@ -1,0 +1,1 @@
+int missing(void);int tested(int n){int x=0;int y=(n&&({x++;n+2;}))||({x+=2;0;});return x*100+y+(int)sizeof(({missing();n;}));}

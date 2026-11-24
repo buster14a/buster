@@ -1,0 +1,1 @@
+int tested(int n){int x=9;int a=0&&__builtin_add_overflow(1,2,(int*)0);int b=n?__builtin_add_overflow(n,7,&x):__builtin_mul_overflow(3,4,&x);return a+b+x+(int)sizeof(__builtin_add_overflow(7,8,&x));}

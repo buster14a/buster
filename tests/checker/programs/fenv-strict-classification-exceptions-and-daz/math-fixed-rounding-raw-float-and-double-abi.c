@@ -1,0 +1,1 @@
+int tested(int n){double d=(double)n+0.625;float f=(float)n-0.375f;return (int)__builtin_ceil(d)+(int)__builtin_floor(d)*3+(int)__builtin_trunc(d)*7+(int)__builtin_ceilf(f)*11+(int)__builtin_floorf(f)*13+(int)__builtin_truncf(f)*17;}

@@ -1,0 +1,1 @@
+int tested(int n){n+=10;typedef int A[n++];A a;int x=n;{A b;__typeof__(int[n++]) c,d;x+=(int)sizeof b+(int)sizeof c+(int)sizeof d;}int(*p)[n++],(*q)[n++];return x+n+(int)sizeof a+(int)sizeof *p+(int)sizeof *q;}

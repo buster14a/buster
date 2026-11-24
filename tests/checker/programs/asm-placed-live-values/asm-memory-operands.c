@@ -1,0 +1,1 @@
+struct S{int a;long b[3];};int g;int tested(int n){struct S s={n,{1,2,3}};int arr[4]={n,n+1,n+2,n+3};__asm__("incl %0" : "+m"(s.a));__asm__("addq $5, %0" : "+m"(s.b[1]));__asm__("negl %0" : "+m"(arr[n&3]));__asm__("movl %1, %0" : "=m"(g) : "r"(n*9));int*p=&arr[1];__asm__("subl $2, %0" : "+m"(*p));return s.a+(int)s.b[1]+arr[0]+arr[1]+arr[2]+arr[3]+g;}

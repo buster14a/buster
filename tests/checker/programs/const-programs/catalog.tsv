@@ -1,0 +1,9 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+const-object-whole-replacement-drops-effectful-aggregate-rvalue	const-object-whole-replacement-drops-effectful-aggregate-rvalue.c	-	const-object-whole-replacement-drops-effectful-aggregate-rvalue
+const-object-whole-aggregate-replacement-drops-runtime-effect	const-object-whole-aggregate-replacement-drops-runtime-effect.c	-	const-object-whole-aggregate-replacement-drops-runtime-effect
+const-object-overridden-range-effect-is-not-executed	const-object-overridden-range-effect-is-not-executed.c	-	const-object-overridden-range-effect-is-not-executed
+const-object-partial-aggregate-base-retains-runtime-effect	const-object-partial-aggregate-base-retains-runtime-effect.c	-	const-object-partial-aggregate-base-retains-runtime-effect
+const-object-dead-initializer-effect-is-not-executed	const-object-dead-initializer-effect-is-not-executed.c	-	const-object-dead-initializer-effect-is-not-executed
+const-object-case-label-and-static-initializer-values	const-object-case-label-and-static-initializer-values.c	-	const-object-case-label-and-static-initializer-values
+const-pointer-target-and-converted-static-values	const-pointer-target-and-converted-static-values.c	-	const-pointer-target-and-converted-static-values

@@ -1,0 +1,1 @@
+typedef struct{int x;long y;}P;static __auto_type auto_sp=(P){1,2L};__auto_type auto_gp=(P){5,6L};int tested(int n){static __auto_type bp=(P){3,4L};__auto_type lp=(P){n,7L};bp.x+=n;return auto_sp.x+(int)auto_sp.y*3+auto_gp.x*5+(int)auto_gp.y*7+bp.x*11+(int)bp.y*13+lp.x*17+(int)lp.y*19;}

@@ -118,13 +118,7 @@ static __attribute__((noinline)) void check_test_semantic_context_sources(CheckT
     {
         rmdir(directory);
     }
-    check_test_program_source(test,
-        "static int left(void) { const int k=7; return __builtin_expect(__builtin_popcount(k),0); }"
-        "static int right(void) { const int k=8; return __builtin_expect(__builtin_popcount(k),0); }"
-        "int tested(int n) { volatile unsigned v=(unsigned)n; _Atomic(unsigned) a=(unsigned)n;"
-        "unsigned x=v; v=x+1; __c11_atomic_store(&a,x+2,5);"
-        "return left()*100+right()*10+(int)__builtin_popcount(v)+(int)__builtin_popcount(__c11_atomic_load(&a,5)); }",
-        "semantic-context-distinct-bodies-runtime-volatile-atomic", clang);
+    check_test_program_suite(test, "checker/programs/semantic-context-sources", clang);
 }
 
 #endif

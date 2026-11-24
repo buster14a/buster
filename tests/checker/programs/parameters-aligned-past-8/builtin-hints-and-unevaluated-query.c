@@ -1,0 +1,1 @@
+int tested(int n){int x=0;__builtin_memset((void*)0,7,0);__builtin_memcpy((void*)0,(void*)0,0);long y=__builtin_expect((x++,n),(x++,1));__builtin_prefetch(&x);return (int)y+x+__builtin_constant_p(n++);}

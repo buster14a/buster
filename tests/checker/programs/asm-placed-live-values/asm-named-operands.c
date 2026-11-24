@@ -1,0 +1,1 @@
+int tested(int n){int r;__asm__("movl %[in], %[out]\n\tsubl $3, %[out]" : [out] "=r"(r) : [in] "r"(n));int s=n;__asm__("addl %[k], %[v]" : [v] "+r"(s) : [k] "g"(7));return r*11+s;}

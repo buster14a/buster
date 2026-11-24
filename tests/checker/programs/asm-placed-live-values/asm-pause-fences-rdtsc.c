@@ -1,0 +1,1 @@
+int tested(int n){unsigned lo,hi;__asm__ volatile("pause\n\tlfence\n\tmfence\n\tsfence\n\trdtsc" : "=a"(lo), "=d"(hi) : : "memory");return (lo!=0 || hi!=0)+n;}

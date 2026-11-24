@@ -1,0 +1,29 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+statement-region-void-and-typeof	statement-region-void-and-typeof.c	-	statement-region-void-and-typeof
+statement-region-typeof-local-declarations-unevaluated	statement-region-typeof-local-declarations-unevaluated.c	-	statement-region-typeof-local-declarations-unevaluated
+statement-region-void-prefix	statement-region-void-prefix.c	-	statement-region-void-prefix
+# Long double (#136, #137): its locals and parameters frame objects, its values on the x87 through their slots, its
+# constants in each function's table, compares, every conversion (to and from unsigned long past 2^63 too), calls
+# passing it on the stack and returning it in st0 (a struct of one too), va_arg of it, and updates of it in memory.
+long-double-arithmetic-and-conversions	long-double-arithmetic-and-conversions.c	-	long-double-arithmetic-and-conversions
+long-double-memory-and-calls	long-double-memory-and-calls.c	-	long-double-memory-and-calls
+# A call's result object, which a hidden pointer passes, aligned to the result's canonical type (16 for a union of a
+# long double) though an aligned typedef says 1: va_arg's 8-byte object between the calls' objects puts one of them 8
+# bytes off a multiple of 16 if their alignment were the typedef's. (Clang passes a variable of the typedef's type as
+# the pointer itself, at the typedef's alignment, so the variables here are of the union's.)
+hidden-result-canonical-alignment	hidden-result-canonical-alignment.c	-	hidden-result-canonical-alignment
+# The direct member access needs a canonical-aligned return temporary too. The helper reports a misaligned
+# hidden result in its first byte; its Buster-only expected result is independent of Clang's weaker alignment.
+hidden-result-direct-temporary-alignment	hidden-result-direct-temporary-alignment.c	-	hidden-result-direct-temporary-alignment
+long-double-complex-struct-results	long-double-complex-struct-results.c	-	long-double-complex-struct-results
+long-double-indirect-and-unprototyped-calls	long-double-indirect-and-unprototyped-calls.c	-	long-double-indirect-and-unprototyped-calls
+# The 128-bit integers (#133, #136): Tier 0's I128 and U128, their locals and parameters frame objects, every operation
+# and conversion (to and from every integer class and floating type, the floating ones and division as libgcc's calls),
+# constants of every shape (one CONST of either extension, and halves), shifts by counts of every class, updates of
+# locals, globals and memory, calls passing them in register pairs and on the stack and returning them, va_arg of them
+# from registers and the overflow area, and temporaries of them (statement expressions, ?: without its middle operand,
+# a switch on one).
+int128-arithmetic-and-conversions	int128-arithmetic-and-conversions.c	-	int128-arithmetic-and-conversions
+int128-memory-and-calls	int128-memory-and-calls.c	-	int128-memory-and-calls
+int128-temporaries	int128-temporaries.c	-	int128-temporaries

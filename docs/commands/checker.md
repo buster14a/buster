@@ -935,6 +935,14 @@ programs that `check_test_constant_conversions`
 (`c_check_constant_conversion_test.c`) runs natively against clang by
 `check_test_program_source`, whose catalog names select the checks of their
 entries and code ([the lowering guide](lowering.md#node-templates-1048)).
+The ordinary native program groups in `tests/checker/programs/` use the
+checker-source catalog format and the `test-checker --fixtures` root. A
+catalog occupies one call site so its rows inherit the same feature gates,
+shard, and position relative to generated and structural checks. Append a
+program with its stable name and the flag `-` or `unsigned-char`. Each
+program runs through the native harness against Clang. Existing names also
+select the original per-program machine-code assertions.
+
 `tests/checker/branch-conditions` (#2883) is too: three programs that
 `check_test_branch_conditions` (`c_check_branch_condition_test.c`) runs the same
 way ([the lowering guide](lowering.md#conditions-as-branches-2883)), the third

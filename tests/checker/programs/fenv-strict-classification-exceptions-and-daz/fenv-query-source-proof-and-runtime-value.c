@@ -1,0 +1,2 @@
+#pragma STDC FENV_ACCESS ON
+_Static_assert(__builtin_constant_p(1.0/3.0)==1,"source proof");int clear_fp(void);int fp_state(void);int tested(int n){clear_fp();int a=__builtin_constant_p(1.0/3.0);int f=fp_state();return (a+1)*100+f+n;}
