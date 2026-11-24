@@ -19,6 +19,8 @@
 #ifndef BUSTER_CHECK_LAZY_TREE_INCLUDED
 #define BUSTER_CHECK_LAZY_TREE_INCLUDED 1
 
+#include "gather.h"
+
 #define BUSTER_CHECK_LAZY_TREE_OPAQUE UINT32_C(0x80000000)
 #define BUSTER_CHECK_LAZY_TREE_KEEP UINT32_C(0x40000000)
 #define BUSTER_CHECK_LAZY_TREE_BODY UINT32_C(0x3fffffff)
@@ -32,8 +34,8 @@ typedef enum CheckLazyTreeUse
 } CheckLazyTreeUse;
 
 // The 64 (or `count`) tokens from `first`' mask: an asm keyword, a GNU attribute's role, or a name whose target is set.
-// The names' targets come by gathers of signed 32-bit indices: an id past INT32_MAX takes a second gather from the table's
-// upper half, whose indices are the id less 2^31.
+// The names' targets come by gathers at unsigned indices (buster_gather_u32): an id past INT32_MAX from the table's upper
+// half.
 static __attribute__((noinline)) uint64_t check_lazy_tree_mask(const Parser* parser, const uint32_t* targets, uint32_t names, uint32_t first, uint32_t count)
 {
     const uint64_t live = count == 64 ? UINT64_MAX : (UINT64_C(1) << count) - 1;
@@ -50,13 +52,7 @@ static __attribute__((noinline)) uint64_t check_lazy_tree_mask(const Parser* par
         const __mmask16 active = remaining < 16 ? (__mmask16)((1u << remaining) - 1) : (__mmask16)UINT16_MAX;
         const __m512i keys = _mm512_maskz_loadu_epi32(active, ids + first + lane);
         const __mmask16 bounded = _mm512_mask_cmplt_epu32_mask(active, keys, _mm512_set1_epi32((int32_t)names));
-        const __mmask16 upper = _mm512_mask_test_epi32_mask(bounded, keys, _mm512_set1_epi32(INT32_MIN));
-        __m512i values = _mm512_mask_i32gather_epi32(_mm512_setzero_si512(), bounded & (__mmask16)~upper, keys, targets, 4);
-        if (upper != 0)
-        {
-            const __m512i high = _mm512_xor_si512(keys, _mm512_set1_epi32(INT32_MIN));
-            values = _mm512_mask_i32gather_epi32(values, upper, high, targets + UINT32_C(0x80000000), 4);
-        }
+        const __m512i values = buster_gather_u32(_mm512_setzero_si512(), bounded, keys, targets);
         const __mmask16 named = _mm512_mask_cmpneq_epi32_mask(bounded, values, _mm512_setzero_si512());
         mask |= (uint64_t)named << lane;
     }
