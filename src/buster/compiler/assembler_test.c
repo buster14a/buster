@@ -1836,6 +1836,24 @@ static int run_assembler_tests(int count, char** arguments)
             }
             asm_test_check(&test, found, "a label of 100 bytes with '.' and '9' past its first 64 is one name", named.error);
         }
+        // The lexer's string and comment scans at their edges (asm_scan_string, asm_scan_block_comment): a backslash on the
+        // 64th byte a string's scan reads escapes the next block's first byte, here a '"'; and "/*/" opens a comment that
+        // only the "*/" after it closes, not its own '/'.
+        {
+            char edge[256];
+            const int edge_length = snprintf(edge, sizeof(edge), ".data\n.ascii \"%.63s\\\"x\"\n", "abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabc");
+            const AsmResult escaped = asm_assemble((String8){.pointer = edge, .length = (uint64_t)edge_length}, test.index, (AsmOptions){0}, &test.vector);
+            bool kept = false;
+            for (uint32_t a = 1; escaped.error == 0 && a < escaped.link.atoms.count; a += 1)
+            {
+                kept |= escaped.link.atoms.size[a] == 65 && escaped.link.atoms.bytes[a][63] == '"' && escaped.link.atoms.bytes[a][64] == 'x';
+            }
+            asm_test_check(&test, kept, "a backslash on a string scan's 64th byte escapes the next block's '\"'", escaped.error);
+            static const char slash[] = ".text\n/*/ nop */ ret\n";
+            const AsmResult commented = asm_assemble(BUSTER_S8(slash), test.index, (AsmOptions){0}, &test.vector);
+            asm_test_check(&test, commented.error == 0 && commented.link.atoms.count == 2 && commented.link.atoms.size[1] == 1 && commented.link.atoms.bytes[1][0] == 0xc3,
+                           "\"/*/\" leaves its comment open until the \"*/\" after it", commented.error);
+        }
         // A section past the 256 MiB layout limit, by fills of 128, 128 and 4 MiB between two labels: the first addresses
         // (asm_relax_first) name the fill that crosses it, the third.
         static const char oversized_section[] = ".data\nbefore:\n.zero 0x8000000\n.zero 0x8000000\n.zero 0x400000\nafter:\n.quad after-before\n";
