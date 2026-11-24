@@ -507,10 +507,11 @@ static uint32_t asm_word_length(const uint8_t* source, uint32_t length)
 // a block), a lone '/', NUL and bytes from 0x80 up. Each is found by 64-byte scans; the token it makes is appended, and
 // the offset after it returned. A line comment ends before its '\n', which the next block takes. The scans read blocks
 // from `origin`, the block in which the lexer met the rare byte at `at` (origin <= at < origin + 64), with the bits below
-// where the token's scan starts cleared, so that their first load waits on the block's address and not on `at`.
+// where the token's scan starts cleared; that block's bytes are `first`, the lexer's own load of them, so a token that
+// ends in its block costs no load.
 
 // The first offset from `from` of a '\n', reading blocks from `origin` (origin <= from), or `length`.
-static uint32_t asm_scan_line_end(const uint8_t* source, uint32_t length, uint32_t origin, uint32_t from)
+static uint32_t asm_scan_line_end(const uint8_t* source, uint32_t length, uint32_t origin, __m512i first, uint32_t from)
 {
     uint32_t result = length;
     uint32_t block = origin;
@@ -518,7 +519,7 @@ static uint32_t asm_scan_line_end(const uint8_t* source, uint32_t length, uint32
     while (block < length && result == length)
     {
         const uint32_t n = length - block < 64 ? length - block : 64;
-        const __m512i bytes = _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, n), source + block);
+        const __m512i bytes = block == origin ? first : _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, n), source + block);
         const uint64_t found = _mm512_mask_cmpeq_epi8_mask(_bzhi_u64(~0ull, n) & ~below, bytes, _mm512_set1_epi8('\n'));
         result = found != 0 ? block + (uint32_t)__builtin_ctzll(found) : result;
         block += n;
@@ -531,7 +532,7 @@ static uint32_t asm_scan_line_end(const uint8_t* source, uint32_t length, uint32
 // after it whatever it is (a line end too), as GNU as reads one. The escaped bytes of each 64 come from its runs of
 // backslashes by one addition (simdjson's method); a run that escapes past a block's end escapes the next block's
 // first byte. Returns the offset past the closing '"', or the '\n' or end that leaves it open.
-static uint32_t asm_scan_string(const uint8_t* source, uint32_t length, uint32_t origin, uint32_t at, bool* closed)
+static uint32_t asm_scan_string(const uint8_t* source, uint32_t length, uint32_t origin, __m512i first, uint32_t at, bool* closed)
 {
     uint32_t result = length;
     uint32_t block = origin;
@@ -541,7 +542,7 @@ static uint32_t asm_scan_string(const uint8_t* source, uint32_t length, uint32_t
     {
         const uint32_t n = length - block < 64 ? length - block : 64;
         const __mmask64 valid = _bzhi_u64(~0ull, n) & ~below;
-        const __m512i bytes = _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, n), source + block);
+        const __m512i bytes = block == origin ? first : _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, n), source + block);
         const uint64_t ends = _mm512_mask_cmpeq_epi8_mask(valid, bytes, _mm512_set1_epi8('"')) | _mm512_mask_cmpeq_epi8_mask(valid, bytes, _mm512_set1_epi8('\n'));
         // A run of backslashes escapes the byte after it when the run, less a first backslash the previous block
         // escaped, has odd length: adding each run's odd-position start to the backslashes carries through the run
@@ -564,7 +565,7 @@ static uint32_t asm_scan_string(const uint8_t* source, uint32_t length, uint32_t
 
 // A block comment from its "/*" at `at`: through the first "*/" from the byte after its '*' on, its line ends
 // appended as '\n' tokens (statements end at them). Returns the offset past the "*/", or `length` with *closed false.
-static uint32_t asm_scan_block_comment(AsmParser* parser, const uint8_t* source, uint32_t length, uint32_t origin, uint32_t at, bool* closed)
+static uint32_t asm_scan_block_comment(AsmParser* parser, const uint8_t* source, uint32_t length, uint32_t origin, __m512i first, uint32_t at, bool* closed)
 {
     uint32_t result = length;
     uint32_t block = origin;
@@ -574,7 +575,7 @@ static uint32_t asm_scan_block_comment(AsmParser* parser, const uint8_t* source,
     {
         const uint32_t n = length - 1 - block < 64 ? length - 1 - block : 64;
         const __mmask64 valid = _bzhi_u64(~0ull, n) & ~below;
-        const __m512i here = _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, n), source + block);
+        const __m512i here = block == origin ? first : _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, n), source + block);
         const __m512i next = _mm512_maskz_loadu_epi8(_bzhi_u64(~0ull, n), source + block + 1);
         const uint64_t close = _mm512_mask_cmpeq_epi8_mask(valid, here, _mm512_set1_epi8('*')) & _mm512_mask_cmpeq_epi8_mask(valid, next, _mm512_set1_epi8('/'));
         uint64_t lines = _mm512_mask_cmpeq_epi8_mask(valid, here, _mm512_set1_epi8('\n'));
@@ -592,14 +593,17 @@ static uint32_t asm_scan_block_comment(AsmParser* parser, const uint8_t* source,
     return result;
 }
 
-static uint32_t asm_lex_rare(AsmParser* parser, const uint8_t* source, uint32_t length, uint32_t origin, uint32_t at)
+// Inlined into asm_lex_vector's block loop: a call there costs the loop its vector constants, which every ZMM register's
+// being caller-saved spills and reloads around it, and made a 1-byte string or comment a line lex 5-15% slower on the
+// 9700X than the scalar walk it replaced.
+static inline __attribute__((always_inline)) uint32_t asm_lex_rare(AsmParser* parser, const uint8_t* source, uint32_t length, uint32_t origin, __m512i first, uint32_t at)
 {
     const uint8_t byte = source[at];
     uint32_t end = at + 1;
     if (byte == '"')
     {
         bool closed = false;
-        end = asm_scan_string(source, length, origin, at, &closed);
+        end = asm_scan_string(source, length, origin, first, at, &closed);
         if (!closed)
         {
             asm_fail(parser, at, "unterminated string");
@@ -608,12 +612,12 @@ static uint32_t asm_lex_rare(AsmParser* parser, const uint8_t* source, uint32_t 
     }
     else if (byte == '#' || (byte == '/' && end < length && source[end] == '/'))
     {
-        end = asm_scan_line_end(source, length, origin, at);
+        end = asm_scan_line_end(source, length, origin, first, at);
     }
     else if (byte == '/' && end < length && source[end] == '*')
     {
         bool closed = false;
-        end = asm_scan_block_comment(parser, source, length, origin, at, &closed);
+        end = asm_scan_block_comment(parser, source, length, origin, first, at, &closed);
         if (!closed)
         {
             asm_fail(parser, at, "unterminated block comment");
@@ -731,21 +735,18 @@ static void asm_lex_vector(AsmParser* parser)
             asm_lex_store(parser->tokens + parser->token_count, starts, ends, kinds, start_count, at);
             parser->token_count += start_count;
             at += n;
-            // The rare byte that ended this block's tokens starts its own here, from the block already at hand.
-            if (special != 0)
-            {
-                at = asm_lex_rare(parser, source, length, origin, at);
-            }
         }
-        else if (asm_word_byte(source[at]))
+        else if (special == 0)
         {
+            // A word as long as the block, which no special byte ends.
             const uint32_t end = at + asm_word_length(source + at, length - at);
             parser->tokens[parser->token_count++] = (AsmToken){.start = at, .end = end, .kind = BUSTER_ASM_WORD};
             at = end;
         }
-        else
+        // The rare byte that ended this block's tokens, or began the block, starts its own here, from the block at hand.
+        if (special != 0)
         {
-            at = asm_lex_rare(parser, source, length, at, at);
+            at = asm_lex_rare(parser, source, length, origin, bytes, at);
         }
     }
     parser->tokens[parser->token_count] = (AsmToken){.start = length, .end = length, .kind = 0};
