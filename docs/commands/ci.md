@@ -264,9 +264,12 @@ at its start (the one-function unit's count shows it). The 9700X's step,
 "Hold sqlite3.c's compile to its instructions' baseline" below, and its
 timings stay what tell of those, after a merge.
 
-The step is advisory (`continue-on-error`) until its hosted runs have shown
-the specification's two other predictions: runs within 0.05% on the runners
-drawn, and the step under 12 minutes.
+The step is advisory (`continue-on-error`) until hosted runs of other changes
+have shown the specification's two other predictions: runs within 0.05% on the
+runners drawn, and the step under 12 minutes. Its own pull request's two runs
+did, on an EPYC 9V45 and a 9V74: three runs 0.0004% apart in 46 s, and three
+identical runs in 66 s. The two runners' counts were 0.00005% apart; the
+check compares none across runners.
 
 ```sh
 bash tests/ci/compile-count.sh                      # in the CI glue fixtures job: the reader, the verdicts, fake checkouts
