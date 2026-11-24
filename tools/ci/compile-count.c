@@ -26,10 +26,10 @@
 // The raw profile is the format clang 23.1.4 writes for a 64-bit little-endian target, version 11: 19 words of header
 // (the magic, the version, the binary identifiers' bytes, the data records' count, the padding before the counters, the
 // counters' count, then 13 words of sizes and addresses of what follows the counters, which this doesn't read), the
-// binary identifiers, the data records of 72 bytes each, the padding, and the counters, a word each. The first six
-// words and the sections' order are as LLVM's "Instrumentation Profile Format" documents them; version 11's header
-// length, its record's size and the place of a record's count of counters (32 bits at byte 56) are read off the files
-// clang 23.1.4 writes, of which the self-test holds one. The records' counts add up to the header's: profile_count
+// binary identifiers, the data records of 72 bytes each, the padding, and the counters, a word each. The header's
+// leading fields and the sections' order are as LLVM's "Instrumentation Profile Format" documents them (its diagrams
+// leave the padding words out); version 11's header length, its record's size and the place of a record's count of
+// counters (32 bits at byte 56) are read off the files clang 23.1.4 writes, of which the self-test holds one. The records' counts add up to the header's: profile_count
 // checks that, so a file laid out otherwise is refused rather than misread. Another version is refused by its number;
 // a toolchain's upgrade that changes it changes this reader with it.
 //
