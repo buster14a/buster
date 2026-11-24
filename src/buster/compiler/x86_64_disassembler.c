@@ -1145,7 +1145,7 @@ static X86DecodeResult x86_disassemble(const uint8_t* source, uint64_t size, X86
                     bool consistent = true;
                     // The batch's lanes in order, each lane it refused decoded alone.
                     X86Decoded lanes[16];
-                    const uint32_t direct = x86_decode_simple_batch(source + start, span, offsets, lengths, count, (uint32_t)start, lanes);
+                    const uint32_t direct = count >= 2 ? x86_decode_simple_batch(source + start, span, offsets, lengths, count, (uint32_t)start, lanes) : 0;
                     for (uint32_t i = 0; i < count && consistent && result.status == X86_DECODE_OK; i += 1)
                     {
                         const uint32_t at = offsets[i];
