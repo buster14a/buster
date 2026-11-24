@@ -7590,6 +7590,12 @@ flags, types, operators and constant values (#2451). It checks the remaining
 candidates' ranges and marks their ancestors. A floating conversion on the
 same comparison can still set its own reach bit. Its range is tested once.
 
+On a tree, each operand has one reader and one conversion edge. When the
+warning walk visits a call, it reads the target type at the current argument
+index and carries it in the deferred conversion frame. Even when only the
+last argument warns, the walk reads the argument list in linear time. A
+graph with shared operands uses the existing first-matching-edge lookup.
+
 The token passes find roles and kinds 64 tokens at a time. A plain assignment
 is a candidate for `-Wself-assign` when the command line or a source pragma
 enables it. The `-Wuninitialized` and `-Wunused-but-set-parameter` analysis

@@ -6277,7 +6277,7 @@ static void check_common_range_candidates(const CheckGraph* graph, const CheckSt
 }
 
 // The other reach candidates, including comparisons when their signedness or an operand conversion needs a test.
-static uint32_t check_common_next_reach_op(const CheckGraph* graph, const CheckCommonCandidates* candidates, bool sign_compare, bool atomic_access,
+static uint32_t check_common_next_reach_op(const CheckGraph* graph, const CheckStream* stream, const CheckCommonCandidates* candidates, bool sign_compare, bool atomic_access,
                                            bool float_precision, bool edges, CheckCommonScan* scan)
 {
     const uint32_t count = graph->count;
@@ -6321,8 +6321,20 @@ static uint32_t check_common_next_reach_op(const CheckGraph* graph, const CheckC
                 const __m512i sign = _mm512_sub_epi32(ops, _mm512_set1_epi32(CHECK_OP_POSITIVE));
                 const __m512i arithmetic = _mm512_sub_epi32(ops, _mm512_set1_epi32(CHECK_OP_ADD));
                 const __m512i compound = _mm512_sub_epi32(ops, _mm512_set1_epi32(CHECK_OP_ADD_ASSIGN));
-                selected |= _mm512_mask_cmple_epu32_mask(lanes, sign, _mm512_set1_epi32(CHECK_OP_NEGATIVE - CHECK_OP_POSITIVE)) |
-                            _mm512_mask_cmple_epu32_mask(lanes, arithmetic, _mm512_set1_epi32(CHECK_OP_DIVIDE - CHECK_OP_ADD)) |
+                // Unary signs and ordinary arithmetic with a builtin integer result cannot convert an operand
+                // to floating point. A pointer difference also has an integer result and two pointer operands.
+                // The contiguous result types let one load screen the block. Other warnings keep their own mask.
+                __mmask16 numeric = lanes;
+                if (stream->value_types != NULL && stream->diagnostics != NULL && stream->dense_values == NULL && first + live <= stream->count)
+                {
+                    const __m512i types = _mm512_maskz_loadu_epi32(lanes, stream->value_types + first);
+                    const __mmask16 integers = _mm512_mask_cmpge_epu32_mask(lanes, types, _mm512_set1_epi32(BUSTER_TYPE_BOOL)) &
+                                                _mm512_mask_cmplt_epu32_mask(lanes, types, _mm512_set1_epi32(BUSTER_TYPE_BF16));
+                    const __m512i diagnostics = _mm512_maskz_loadu_epi32(lanes, stream->diagnostics + first);
+                    numeric &= (__mmask16)~_mm512_mask_cmpeq_epi32_mask(integers, diagnostics, _mm512_set1_epi32(CHECK_DIAG_NONE));
+                }
+                selected |= _mm512_mask_cmple_epu32_mask(numeric, sign, _mm512_set1_epi32(CHECK_OP_NEGATIVE - CHECK_OP_POSITIVE)) |
+                            _mm512_mask_cmple_epu32_mask(numeric, arithmetic, _mm512_set1_epi32(CHECK_OP_DIVIDE - CHECK_OP_ADD)) |
                             _mm512_mask_cmple_epu32_mask(lanes, compound, _mm512_set1_epi32(CHECK_OP_DIVIDE_ASSIGN - CHECK_OP_ADD_ASSIGN)) |
                             _mm512_mask_cmpge_epu32_mask(lanes, ops, _mm512_set1_epi32(CHECK_OP_SELECT)) | compares;
             }
@@ -13098,9 +13110,9 @@ static bool check_common_facts(const CheckInput* input, const CheckStream* strea
         }
         CheckCommonScan owners = { 0 };
         const bool edges = enabled->promotion || enabled->int_float || enabled->const_int_float;
-        for (uint32_t node = check_common_next_reach_op(graph, candidates, enabled->sign_compare, enabled->atomic_access, enabled->float_precision, edges, &owners);
+        for (uint32_t node = check_common_next_reach_op(graph, stream, candidates, enabled->sign_compare, enabled->atomic_access, enabled->float_precision, edges, &owners);
              node < count;
-             node = check_common_next_reach_op(graph, candidates, enabled->sign_compare, enabled->atomic_access, enabled->float_precision, edges, &owners))
+             node = check_common_next_reach_op(graph, stream, candidates, enabled->sign_compare, enabled->atomic_access, enabled->float_precision, edges, &owners))
         {
             uint8_t bits = check_common_own_reach(parser, graph, stream, types, node, &own);
             if (self_assigns != NULL && check_common_self_assign_candidate(graph, node))
