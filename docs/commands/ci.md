@@ -358,9 +358,10 @@ there at a time, so everything takes one lock:
     passed, each built as the job builds it.
   - The file's count is this job's build's (`BUSTER_HOST_ARCH=znver5`) on this
     host. A toolchain's upgrade moves it, and states it the same way.
-- On a checker pull request, plain hosted vector shard 2 builds the PR's
-  base while shard 1 builds the merge revision. Shard 2 compiles the same
-  frozen `sqlite3.c` with both compilers and compares the objects (#1572).
+- On a checker pull request, plain hosted vector shard 2 builds the first
+  parent of the tested merge while shard 1 builds the merge revision. Shard 2
+  compiles the same frozen `sqlite3.c` with both compilers and compares the
+  objects (#1572).
   A change classified as diagnostic-only by `sqlite_stable` requires
   byte-identical objects. For other checker changes, a byte difference
   produces a GitHub warning with both file sizes. Growth or shrinkage
@@ -839,3 +840,22 @@ Read [the metric definitions, configuration and replay recipe](../ci.md#ci-laten
 before interpreting results. Run `bash tests/ci/timings.sh` for the network-free
 regressions. Store raw live evidence in `buster-performance`, not this
 repository's retired `docs/measurements` path.
+
+## Requested and nightly paired checker reports
+
+A trusted author can request a SQLite checker comparison by dispatching
+`9700x.yml` on the PR branch with purpose `full` and `paired_base` set to a
+full commit SHA from protected main. The dispatch measures its resolved head
+SHA. The existing nightly snapshot and checker-selected backlog runs use their
+first parent. The build barrier prepares both revisions and their four checker
+placements in the shared CPU budget. The existing host lock covers the native
+capture. The hosted coverage job evaluates the sealed observations.
+
+The run summary gives the paired verdict and independent-unit count. Dispatched
+runs retain `paired-verdict-ATTEMPT`, and a capture also produces
+`paired-checker-ATTEMPT` for evidence transfer to buster-performance. A skipped
+capture reports unmeasured coverage. A requested comparison that failed during
+preparation or capture reports incomplete coverage. Ordinary PRs and the merge
+queue use their existing correctness checks. The nightly ledger continues to
+record which jobs ran. Baseline promotion uses the explicit two-reference
+decision in the [paired reader guide](../performance/readers.md#input-identity-and-baseline-promotion).

@@ -1476,8 +1476,27 @@ static void check_units_test_root_image(CheckUnitsTestTally* tally, const char* 
         { "a file of predefines, each release checked", { "--lanes", "1", "--poison-arenas", "--predefines", "../root_predefines.h", NULL },
           { "../root_0.c", "../root_1.c", "../root_2.c", "../root_3.c", NULL }, 0, 1, 0, 3 },
         { "a file of predefines that declares", { "--lanes", "1", "--predefines", "../root_declares.h", NULL }, { "../root_0.c", "../root_1.c", "../root_2.c", NULL }, 0, 0, 0, 0 },
-        // (Without attested declarations, whose second reading of a unit with a syntax error prints no parser's error.)
-        { "a unit its lane's root is dropped for", { "--lanes", "1", "--attested=off", NULL }, { "../root_repaired.c", "../root_0.c", "../root_1.c", "../root_2.c", NULL }, 1, 2, 1, 2 },
+        {
+            .name = "a unit its lane's root is dropped for",
+            .options =
+            {
+                "--lanes",
+                "1",
+                NULL,
+            },
+            .units =
+            {
+                "../root_repaired.c",
+                "../root_0.c",
+                "../root_1.c",
+                "../root_2.c",
+                NULL,
+            },
+            .failing = 1,
+            .captures = 2,
+            .drops = 1,
+            .starts = 2,
+        },
     };
     // The time's units spell one time in every run.
     const char* epoch = getenv("SOURCE_DATE_EPOCH");
@@ -1869,6 +1888,29 @@ static bool check_units_test_memory_report(const char* errors, unsigned long lon
 // the slow unit's lane, the last to stop taking units, keeps its pages for the exit.
 static void check_units_test_memory(CheckUnitsTestTally* tally, const char* executable, const char* directory)
 {
+    // A lane's base is a base-page prefix short of a huge-page boundary. The extra scratch must
+    // fit its unused credit after rounding, even when that credit ends one byte short of a boundary.
+    CheckUnitsLane* lane = calloc(1, sizeof(*lane));
+    check_units_test_expect(tally, lane != NULL, "allocate the scratch credit fixture", NULL);
+    if (lane != NULL)
+    {
+        CheckUnitsMemory budget = { .limit = UINT64_MAX };
+        const uint64_t huge = BUSTER_ARENA_HUGE_PAGE_BYTES;
+        const uint64_t prefix = BUSTER_ARENA_SMALL_BYTES;
+        lane->scratch.base = (uint8_t*)(uintptr_t)(2 * huge - prefix);
+        lane->memory = &budget;
+        lane->unit_need = check_units_estimate(100);
+        lane->held = lane->unit_need + 2 * huge + prefix - 1;
+        check_units_test_expect(tally, check_units_scratch_floor(lane) == huge + prefix, "round kept scratch down within the lane's credit", NULL);
+        lane->held = lane->unit_need + 10 * huge;
+        check_units_test_expect(tally, check_units_scratch_floor(lane) == 3 * huge + prefix, "bound kept scratch after a larger unit", NULL);
+        budget.waiting = 1;
+        check_units_test_expect(tally, check_units_scratch_floor(lane) == 0, "yield scratch when another lane waits", NULL);
+        budget.waiting = 0;
+        budget.limit = lane->held - 1;
+        check_units_test_expect(tally, check_units_scratch_floor(lane) == 0, "yield scratch when a unit exceeds the budget", NULL);
+        free(lane);
+    }
     char memory_directory[PATH_MAX];
     char path[PATH_MAX];
     char errors_path[PATH_MAX];

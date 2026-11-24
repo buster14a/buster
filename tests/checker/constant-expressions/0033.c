@@ -1,0 +1,1 @@
+typedef int I4 __attribute__((vector_size(16))); typedef float F4 __attribute__((vector_size(16))); I4 a; enum { N=sizeof(__builtin_convertvector(a,__typeof__(__builtin_convertvector(a,F4)))) }; _Static_assert(N==16, "nested destination type job");

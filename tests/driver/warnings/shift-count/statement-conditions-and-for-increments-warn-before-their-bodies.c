@@ -1,0 +1,1 @@
+int a(int x,int y){if((x,y))return x<<32;return 0;}int b(int x){while(x<<40){x=1/0;}return 0;}int c(int x){switch(x<<40){case 1:x=1/0;}return 0;}int d(int x){for(;;x<<40){x=1/0;}}int e(int x){if(x<<41)x=1/0;else if(x<<42)x=2/0;return 0;}int f(int x){if(x){if(x<<40)x=1/0;}else x=2/0;return 0;}

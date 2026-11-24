@@ -131,207 +131,13 @@ static __attribute__((noinline)) void check_test_enum_sources(CheckTest* test, c
     }
     snprintf(many_values + length, sizeof(many_values) - length,
              ",Proof=(E511>>100)==1 }; _Static_assert(E0==7 && E511==518 && Proof==1,\"retained wide chain\");\n");
-    const CheckSourceFixture fixtures[] =
-    {
-        {
-            .name = "enum expression completes anonymous record",
-            .source = "enum { N=sizeof(struct { char x; int y; }) }; _Static_assert(N==8,\"record query\");\n",
-        },
-        {
-            .name = "enum inline record keeps earlier operand event order",
-            .source = "enum { P=4, N=P+__builtin_offsetof(struct { char p[P]; int y; },y) }; _Static_assert(N==8,\"ordered enum record uses\");\n",
-        },
-        {
-            .name = "enum inline tag identity survives subsequent expression use",
-            .source = "enum { P=4, N=P+sizeof(struct S { char a[P]; })+sizeof(struct S) }; _Static_assert(N==12 && sizeof(struct S)==4,\"tag completion identity\");\n",
-        },
-        {
-            .name = "enum inline nested enumerator visible after its declaration",
-            .source = "enum { N=sizeof(struct { enum { A=3 } e; int x[A]; })+A }; _Static_assert(N==19 && A==3,\"nested ordinary declaration\");\n",
-        },
-        {
-            .name = "enum inline record resolves header attributes before body",
-            .source = "enum { A=8, N=A+sizeof(struct __attribute__((aligned(A))) S { int x; }) }; _Static_assert(N==16 && _Alignof(struct S)==8,\"header attributes\");\n",
-        },
-        {
-            .name = "enum inline record nested inside outer tag attribute",
-            .source = "enum { N=sizeof(struct __attribute__((aligned(sizeof(struct { long x; })))) S { int x; }) }; _Static_assert(N==8,\"nested header record job\");\n",
-        },
-        {
-            .name = "deep enum and record source jobs use explicit frames",
-            .source = nested_records,
-        },
-        {
-            .name = "enum inline record diagnoses missing member bound at use",
-            .source = "enum { N=sizeof(struct {\nchar a[\nMISSING];\n}) };\n",
-            .rejected = true,
-        },
-        {
-            .name = "long provisional enum chain retains exact high bits until completion",
-            .source = many_values,
-        },
-        {
-            .name = "wide unsigned enumerator used after completion",
-            .source = "enum E { A=0x80000000, B }; _Static_assert(A==2147483648U && B==2147483649U,\"values\"); "
-                      "_Static_assert(_Generic(A,unsigned:1,default:0),\"common type\"); unsigned f(void){return B;}\n",
-        },
-        {
-            .name = "all completed enumerators share signed common type",
-            .source = "enum E { A=0x80000000, B, C=-1 }; _Static_assert(A==2147483648L && B==2147483649L && C==-1,\"values\"); "
-                      "_Static_assert(_Generic(A,long:1,default:0) && _Generic(C,long:1,default:0),\"common type\");\n",
-        },
-        {
-            .name = "signed int successor has provisional long and completed unsigned int",
-            .source = "enum E { A=2147483647, B, C=_Generic(B,long:2,default:9) }; _Static_assert(C==2,\"provisional\"); "
-                      "_Static_assert(_Generic(A,unsigned:1,default:0) && _Generic(B,unsigned:1,default:0),\"completed\");\n",
-        },
-        {
-            .name = "unsigned int successor widens to unsigned long",
-            .source = "enum E { A=0xffffffff, B, C=_Generic(B,unsigned long:2,default:9) }; _Static_assert(B==4294967296UL && C==2,\"successor\"); "
-                      "_Static_assert(_Generic(A,unsigned long:1,default:0) && _Generic(C,unsigned long:1,default:0),\"completed\");\n",
-        },
-        {
-            .name = "explicit wide expression retains its provisional type",
-            .source = "enum E { A=2147483648LL, B=_Generic(A,long long:1,default:9) }; _Static_assert(B==1,\"provisional\"); "
-                      "_Static_assert(_Generic(A,unsigned:1,default:0),\"completed\");\n",
-        },
-        {
-            .name = "small explicit expression enumerators all become int",
-            .source = "enum E { A=7ULL, B=(unsigned _BitInt(33))8, C=_Generic(A,int:1,default:9)+_Generic(B,int:2,default:9) }; "
-                      "_Static_assert(C==3 && _Generic(A,int:1,default:0) && _Generic(B,int:1,default:0),\"small values\");\n",
-        },
-        {
-            .name = "negative provisional successor keeps wide expression type",
-            .source = "enum E { A=-2147483649LL, B, C=_Generic(B,long long:1,default:9) }; "
-                      "_Static_assert(B==(-2147483647-1) && C==1 && _Generic(C,long:1,default:0),\"negative\");\n",
-        },
-        {
-            .name = "signed bit precise successor widens by value width",
-            .source = "enum E { A=(signed _BitInt(33))4294967295LL, B, C=_Generic(B,long:1,default:9) }; "
-                      "_Static_assert(B==4294967296UL && C==1 && _Generic(A,unsigned long:1,default:0),\"bit precise\");\n",
-        },
-        {
-            .name = "unsigned bit precise successor widens by value width",
-            .source = "enum E { A=(unsigned _BitInt(33))8589934591ULL, B, C=_Generic(B,unsigned long:1,default:9) }; "
-                      "_Static_assert(B==8589934592UL && C==1,\"bit precise\");\n",
-        },
-        {
-            .name = "unsigned largest successor wraps without host overflow",
-            .source = "enum E { A=0xffffffffffffffffULL, B, C=_Generic(B,unsigned long long:1,default:9) }; "
-                      "_Static_assert(A==0xffffffffffffffffUL && B==0 && C==1 && _Generic(A,unsigned long:1,default:0),\"largest\");\n",
-        },
-        {
-            .name = "signed largest successor wraps without host overflow",
-            .source = "enum E { A=9223372036854775807LL, B, C=_Generic(B,long long:1,default:9) }; "
-                      "_Static_assert(B==(-9223372036854775807LL-1) && C==1 && _Generic(A,long:1,default:0),\"largest signed\");\n",
-        },
-        {
-            .name = "mixed unsigned maximum and negative enum values",
-            .source = "enum E { A=0xffffffffffffffffULL, B=-1 }; _Static_assert(A==-1 && B==-1 && "
-                      "_Generic(A,long long:1,default:0),\"common signed representation\");\n",
-        },
-        {
-            .name = "128 bit provisional positive values retain upper bits",
-            .source = "enum E { A=(unsigned __int128)1<<100, B=A>>100, C=_Generic(A,unsigned __int128:7,default:9) }; "
-                      "_Static_assert(A==0 && B==1 && C==7 && _Generic(A,unsigned long long:1,default:0),\"wide exact\");\n",
-        },
-        {
-            .name = "128 bit provisional negative values retain sign",
-            .source = "enum E { A=-((__int128)1<<100), B=(A>>100)==-1, C=_Generic(A,__int128:7,default:9) }; "
-                      "_Static_assert(A==0 && B==1 && C==7 && _Generic(A,long long:1,default:0),\"negative exact\");\n",
-        },
-        {
-            .name = "128 bit unsigned successor retains provisional width",
-            .source = "enum E { A=~(unsigned __int128)0, B, C=_Generic(B,unsigned __int128:7,default:9) }; "
-                      "_Static_assert(A==0xffffffffffffffffULL && B==0 && C==7,\"wide successor\");\n",
-        },
-        {
-            .name = "packed enum layout preserves int enumerator types",
-            .source = "enum __attribute__((packed)) E { A=0, B=255 }; "
-                      "_Static_assert(sizeof(enum E)==1 && _Alignof(enum E)==1 && _Generic(A,int:1,default:0),\"packed\");\n",
-        },
-        {
-            .name = "aligned enum layout and wide constant types",
-            .source = "enum __attribute__((aligned(16))) E { A=0x80000000 }; "
-                      "_Static_assert(sizeof(enum E)==4 && _Alignof(enum E)==16 && _Generic(A,unsigned:1,default:0),\"aligned\");\n",
-        },
-        {
-            // #1447: clang applies a fixed enum's aligned attribute after its body, which nothing asked its layout before.
-            .name = "fixed enum aligned after its body",
-            .source = "enum E : char { A, B } __attribute__((aligned(8))); enum __attribute__((aligned(2))) I : char { I0 } __attribute__((aligned(8))); "
-                      "enum H : int { H0 } __attribute__((aligned(2))); struct S { char c; enum E e; }; "
-                      "enum : short { K0 } __attribute__((aligned(4))) k; "
-                      "_Static_assert(sizeof(enum E)==1 && _Alignof(enum E)==8 && _Alignof(enum I)==8 && _Alignof(enum H)==2 && sizeof(struct S)==16 && "
-                      "__alignof__(k)==4,\"late alignment\");\n",
-        },
-        {
-            .name = "nested record enum chains remain separate",
-            .source = "struct S { enum E { A=0x80000000, B } x; enum F { C=-1, D } y; }; "
-                      "_Static_assert(B==2147483649U && D==0 && sizeof(struct S)==8,\"nested chains\");\n",
-        },
-        {
-            .name = "enumerator attributes preserve declaration identity",
-            .source = "enum E { A __attribute__((deprecated))=0x80000000, B=A+1 }; _Static_assert(B==2147483649U,\"attribute\");\n",
-        },
-        {
-            .name = "enumerator ignored layout attributes preserve scalar type",
-            .source = "enum E { A __attribute__((packed,noreturn,vector_size(16)))=0x80000000 }; "
-                      "_Static_assert(_Generic(A,unsigned:1,default:0),\"ignored attributes\");\n",
-        },
-        {
-            .name = "enumerator aligned attribute preserves declared alignment",
-            .source = "enum E { A __attribute__((aligned(8)))=0x80000000 }; "
-                      "_Static_assert(__alignof__(A)==8 && _Generic(A,unsigned:1,default:0),\"alignment\");\n",
-        },
-        {
-            .name = "enumerator mode attribute has an invalid subject",
-            .source = "enum E { A __attribute__((mode(QI)))=1 };\n",
-            .rejected = true,
-        },
-        {
-            .name = "enumerator ext vector attribute is ignored",
-            .source = "enum E { A __attribute__((ext_vector_type(4)))=1 }; _Static_assert(_Generic(A,int:1,default:0),\"scalar type\");\n",
-        },
-        {
-            .name = "enum completion distinguishes small value in a wide set",
-            .source = "enum E { A=1ULL<<63, B=3 }; _Static_assert(_Generic(B,unsigned long:1,default:0) && B==3,\"whole set\");\n",
-        },
-        {
-            .name = "later enum can use completed earlier common type",
-            .source = "enum E { A=0x80000000 }; enum F { B=_Generic(A,unsigned:7,default:9) }; "
-                      "_Static_assert(B==7 && _Generic(B,int:1,default:0),\"source order\");\n",
-        },
-        {
-            .name = "enumerator shadowing restores completed outer value",
-            .source = "enum { A=0x80000000 }; int f(void){ { enum { A=7 }; _Static_assert(A==7,\"inner\"); } "
-                      "_Static_assert(A==2147483648U,\"outer\"); return 0;}\n",
-        },
-        {
-            .name = "enumerator still rejects noninteger floating value",
-            .source = "enum E { A=1.5 };\n",
-            .rejected = true,
-        },
-        {
-            .name = "enumerator still rejects evaluated division by zero",
-            .source = "enum E {\n A=\n 1/0\n};\n",
-            .rejected = true,
-        },
-        {
-            .name = "enumerator still rejects runtime object value",
-            .source = "int n;\nenum E {\n A=n\n};\n",
-            .rejected = true,
-        },
-        {
-            .name = "enumerator still rejects same scope duplicate",
-            .source = "enum E { A=0x80000000, A=1 };\n",
-            .rejected = true,
-        },
-        {
-            .name = "enumerator still rejects incomplete enum size",
-            .source = "enum E { A=sizeof(enum E) };\n",
-            .rejected = true,
-        },
+    CheckTestFixtures catalog;
+    const CheckTestBoundSource bindings[] = {
+        { "@nested-records", nested_records },
+        { "@many-values", many_values },
     };
+    const uint32_t file_count = check_test_private_catalog(test, &catalog, "checker/enum-sources", bindings, BUSTER_ARRAY_LENGTH(bindings), 0);
+    const CheckSourceFixture* fixtures = catalog.cases;
     char directory[] = "/tmp/buster-checker-enum-XXXXXX";
     const bool directory_ready = mkdtemp(directory) != NULL;
     char path[160];
@@ -342,7 +148,7 @@ static __attribute__((noinline)) void check_test_enum_sources(CheckTest* test, c
     snprintf(error_path, sizeof(error_path), "%s/err", directory);
     char* paths[] = { path };
     const char* arguments[] = { "-std=gnu17" };
-    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
+    for (uint32_t i = 0; i < file_count; i += 1)
     {
         const CheckSourceFixture* fixture = fixtures + i;
         ParseTestClang outcome = { 0 };
@@ -354,6 +160,7 @@ static __attribute__((noinline)) void check_test_enum_sources(CheckTest* test, c
             check_test_source(test, fixture, path, &outcome);
         }
     }
+    arena_release(&catalog.storage);
     const char warning_source[] = "enum E { A=0xffffffffffffffffULL, B };\n";
     char* warning_arguments[] = { (char*)clang, "-std=gnu17", "-fsyntax-only", "-Werror=enum-too-large", path, NULL };
     const bool warning_oracle = directory_ready && parse_test_write(path, warning_source, sizeof(warning_source) - 1) &&

@@ -1,0 +1,33 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+# An ordinary call's count error (#1921): clang's "too few/too many arguments to function call" with the counts, too
+# many at the first extra argument, and the "declared here" note where the callee is a function's name, through
+# parentheses and `&`, a typedef's function too; none for a pointer's or a member's.
+ordinary-calls-argument-counts	ordinary-calls-argument-counts.c	0	11	8	-	-	ordinary calls' argument counts
+# A callee whose declaration names its only parameter: clang's "single argument 'a'" words, the latest declaration's
+# name, and a variadic one's "at least argument"; an unnamed one keeps the counts.
+single-named-parameter	single-named-parameter.c	0	7	7	-	-	single named parameter
+# Builtins' count errors (#1860): each family's count, exact or a bound as clang's checkArgCountRange and
+# checkArgCountAtLeast word it, too many at the first extra argument but "at most" at the `)`, a scoped atomic's
+# count with its scope, and va_start's operands.
+builtin-argument-counts	builtin-argument-counts.c	0	46	0	-	-ferror-limit=0	builtin argument counts
+# The unary, overflow and complex part builtins, whose wrong count the reader reports (#1860).
+unary-and-overflow-builtin-counts	unary-and-overflow-builtin-counts.c	0	10	0	-	-	unary and overflow builtin counts
+# Passing arguments without a prototype (#1994): at the call's `(`, naming a direct callee, "a function" for a
+# pointer; a K&R definition's too few and too many at the call's `)`.
+calls-without-a-prototype	calls-without-a-prototype.c	10	0	0	-	-	calls without a prototype
+# In C23 `()` is a prototype (#1994): the count error and its note.
+c23-empty-parameter-lists	c23-empty-parameter-lists.c	0	3	3	c23	-	C23 empty parameter lists
+# A call the constant reader checks (a typeof's, an array bound's, an unevaluated sizeof's operand): the same words,
+# its named only parameter's too (check_constant_failure_error).
+a-constant-reader-s-variadic-call	a-constant-reader-s-variadic-call.c	0	1	1	-	-	a constant reader's variadic call
+an-array-bound-s-call	an-array-bound-s-call.c	0	1	1	-	-	an array bound's call
+an-unevaluated-operand-s-call	an-unevaluated-operand-s-call.c	0	1	1	-	-	an unevaluated operand's call
+# A call's later arguments that don't convert either (#2413, check_graph_report_arguments): each its own error at its
+# argument, with its parameter's note, after an error-by-default conversion (incompatible pointers, an integer and a
+# pointer); a hard error (incompatible types, another address space) is the call's last.
+two-failed-argument-conversions	two-failed-argument-conversions.c	0	2	2	-	-	two failed argument conversions
+failed-argument-conversions-until-a-hard-error	failed-argument-conversions-until-a-hard-error.c	0	9	6	-	-	failed argument conversions until a hard error
+# A call's conversion warnings and errors in argument order (#2481): an earlier argument's error before a later
+# one's -Wpointer-sign, both after the warnings of an inner call its arguments build.
+argument-conversions-in-order	argument-conversions-in-order.c	4	7	11	-	-	argument conversions in order

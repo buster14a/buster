@@ -366,7 +366,19 @@ static void tier1_liveness_envelopes(const IrFunction* function, const Dataflow*
     }
 }
 
-static __attribute__((unused)) Tier1LivenessError tier1_liveness_build(const Tier1SelectPlan* plan, Arena* output, Arena* scratch, Tier1Liveness* result)
+// The C driver retains the verified revision's exact CFG through emission. Other callers take
+// the ordinary validating CFG builder. Neither consumer stores pointers into the borrowed graph.
+static IrError tier1_liveness_cfg(const IrFunction* function, const IrCfg* verified_cfg, Arena* arena, Arena* scratch, IrCfg* result)
+{
+    if (verified_cfg == NULL)
+    {
+        return ir_build_cfg(function, arena, scratch, result);
+    }
+    *result = *verified_cfg;
+    return IR_OK;
+}
+
+static __attribute__((unused)) Tier1LivenessError tier1_liveness_build_cfg(const Tier1SelectPlan* plan, const IrCfg* verified_cfg, Arena* output, Arena* scratch, Tier1Liveness* result)
 {
     const bool arguments = plan && plan->function && output && scratch && output != scratch && output->base != scratch->base && result;
     Tier1LivenessError error = arguments ? TIER1_LIVENESS_OK : TIER1_LIVENESS_INVALID;
@@ -382,7 +394,7 @@ static __attribute__((unused)) Tier1LivenessError tier1_liveness_build(const Tie
     }
     if (error == TIER1_LIVENESS_OK)
     {
-        const IrError cfg_error = ir_build_cfg(function, scratch, output, &cfg);
+        const IrError cfg_error = tier1_liveness_cfg(function, verified_cfg, scratch, output, &cfg);
         if (cfg_error != IR_OK)
         {
             error = cfg_error == IR_ERROR_MEMORY ? TIER1_LIVENESS_MEMORY : TIER1_LIVENESS_INVALID;
@@ -537,6 +549,11 @@ static __attribute__((unused)) Tier1LivenessError tier1_liveness_build(const Tie
         }
     }
     return error;
+}
+
+static __attribute__((unused)) Tier1LivenessError tier1_liveness_build(const Tier1SelectPlan* plan, Arena* output, Arena* scratch, Tier1Liveness* result)
+{
+    return tier1_liveness_build_cfg(plan, NULL, output, scratch, result);
 }
 
 #endif

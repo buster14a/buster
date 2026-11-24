@@ -1,0 +1,18 @@
+enum { K = 2, Z = 0 };
+_Static_assert(K - 2, "a");
+_Static_assert(K && Z, "b");
+_Static_assert(Z || Z, "c");
+_Static_assert(K == -3, "d");
+_Static_assert(-K == 3, "e");
+_Static_assert(1.5 == K, "f");
+_Static_assert((_Bool)K == 0, "g");
+_Static_assert((K) == (3), "h");
+_Static_assert(K & 1, "i");
+_Static_assert('a' == K, "j");
+_Static_assert((signed char)-1 == K, "k");
+_Static_assert(K == 3 && 1, "l");
+_Static_assert(!K, "m");
+_Static_assert(K < 1u, "n");
+_Static_assert(0x7fffffffffffffffLL == K, "o");
+_Static_assert((unsigned char)200 == K, "p");
+_Static_assert((char)'\n' == K, "q");

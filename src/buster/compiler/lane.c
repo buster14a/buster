@@ -89,6 +89,7 @@
 #include <sys/syscall.h>
 #include <sys/vfs.h>
 #include <sys/utsname.h>
+#include <sys/uio.h>
 #include <elf.h>
 #include <linux/futex.h>
 
@@ -230,6 +231,9 @@ static _Thread_local uint64_t arena_small_floor;
 // the smallest mapping that holds its capacity with the same base pages and page layout, the latest released of those; a
 // full pool evicts its oldest arena.
 #define BUSTER_ARENA_POOL_SLOTS 256
+#define BUSTER_ARENA_DISCARD_RANGES 16
+// Linux imports at most MAX_RW_COUNT bytes from an iovec on this 4 KiB-page host.
+#define BUSTER_ARENA_DISCARD_BYTES ((uint64_t)INT_MAX & ~(BUSTER_ARENA_PAGE_BYTES - 1))
 typedef struct ArenaPool ArenaPool;
 struct ArenaPool
 {
@@ -245,6 +249,14 @@ struct ArenaPool
     bool opened;
     int maps;
     uint64_t address_share;
+    // During unit teardown the next pending slots past count belong to the pool, but are not yet zero.
+    // Their ranges are flushed before any slot is taken, evicted, or the lane gives back its memory.
+    bool batching;
+    bool tried_pidfd;
+    int pidfd;
+    uint32_t pending;
+    uint64_t pending_bytes;
+    struct iovec ranges[BUSTER_ARENA_DISCARD_RANGES];
     // The releases so far, and the one that put each arena here.
     uint64_t clock;
     uint64_t released[BUSTER_ARENA_POOL_SLOTS];
@@ -749,11 +761,83 @@ static __attribute__((unused)) void arena_report_failure(FILE* stream, const cha
             (unsigned long long)(failure.bytes != 0 ? failure.bytes : requested), strerror(failure.error != 0 ? failure.error : ENOMEM), limit);
 }
 
+// Finish the pending suffix. The kernel may stop within a range. Repeat that entire discard and each
+// subsequent one while the pool still owns them. Only a completely reset mapping becomes reusable.
+static void arena_pool_finish_discards(ArenaPool* pool, uint64_t advised)
+{
+    const uint32_t first = pool->count;
+    for (uint32_t i = 0; i < pool->pending; i += 1)
+    {
+        const struct iovec range = pool->ranges[i];
+        const bool done = advised >= range.iov_len;
+        advised = done ? advised - range.iov_len : 0;
+        const Arena* arena = &pool->arenas[first + i];
+        if (done || madvise(range.iov_base, range.iov_len, MADV_DONTNEED) == 0)
+        {
+            if (pool->count != first + i)
+            {
+                pool->arenas[pool->count] = *arena;
+                pool->released[pool->count] = pool->released[first + i];
+            }
+            pool->count += 1;
+        }
+        else
+        {
+            munmap(arena->base - arena->mapping_offset, arena->mapping_bytes);
+        }
+    }
+    pool->pending = 0;
+    pool->pending_bytes = 0;
+}
+
+// A seccomp filter may terminate the process for either optional syscall. Read the current thread's
+// mode before trying them. If procfs cannot confirm that it is unfiltered, use ordinary madvise.
+static int arena_pool_open_pidfd(void)
+{
+    const int file = open("/proc/thread-self/status", O_RDONLY | O_CLOEXEC);
+    char status[4096];
+    const ssize_t size = file >= 0 ? read(file, status, sizeof(status) - 1) : -1;
+    if (file >= 0)
+    {
+        close(file);
+    }
+    status[size > 0 ? size : 0] = 0;
+    return strstr(status, "\nSeccomp:\t0\n") != 0 ? (int)syscall(SYS_pidfd_open, getpid(), 0) : -1;
+}
+
+static void arena_pool_flush(ArenaPool* pool)
+{
+    if (pool != 0 && pool->pending != 0)
+    {
+        long advised = 0;
+        if (pool->pending > 1)
+        {
+            if (!pool->tried_pidfd)
+            {
+                pool->pidfd = arena_pool_open_pidfd();
+                pool->tried_pidfd = true;
+            }
+            if (pool->pidfd >= 0)
+            {
+                advised = syscall(SYS_process_madvise, pool->pidfd, pool->ranges, pool->pending, MADV_DONTNEED, 0);
+                // Linux before 6.13 does not accept this advice for self. A sandbox can deny the call too.
+                if (advised < 0 && (errno == EINVAL || errno == ENOSYS || errno == EPERM || errno == EACCES || errno == EOPNOTSUPP))
+                {
+                    close(pool->pidfd);
+                    pool->pidfd = -1;
+                }
+            }
+        }
+        arena_pool_finish_discards(pool, advised > 0 ? (uint64_t)advised : 0);
+    }
+}
+
 // The pooled arena a reservation of `capacity` bytes, `small` of them base pages, takes, or BUSTER_ARENA_POOL_SLOTS for
 // none: of those with the same base pages and page layout, huge pages past `small` or none, the same tables' layout
 // (Arena.layout) and room for the capacity, the smallest, released last.
-static uint32_t arena_pool_choose(const ArenaPool* pool, uint64_t capacity, uint64_t small, uint64_t layout)
+static uint32_t arena_pool_choose(ArenaPool* pool, uint64_t capacity, uint64_t small, uint64_t layout)
 {
+    arena_pool_flush(pool);
     const uint32_t count = pool != 0 ? pool->count : 0;
     const bool huge = capacity > small;
     uint32_t slot = BUSTER_ARENA_POOL_SLOTS;
@@ -1618,13 +1702,38 @@ static void arena_release(Arena* arena)
         const bool protected = pool != 0 && !arena->unaccounted &&
                                (arena->committed == committed || mprotect(mapping + begin, arena->committed - begin, PROT_NONE) == 0);
         // Where the prefix stays writable, its pages alone (#3070), and elsewhere the whole mapping's.
-        const uint64_t extent = protected && pool->keeps_commits ? arena_pool_writable(pool, mapping, bytes, arena->committed) : bytes;
-        const bool pooled = protected && (extent == 0 || madvise(mapping, extent, MADV_DONTNEED) == 0);
+        uint64_t extent = bytes;
+        if (protected && pool->keeps_commits)
+        {
+            // A full reservation, in particular a group of fixed tables, cannot be pushed further by a copy.
+            extent = arena->committed >= arena->mapping_offset + arena->reserved ? arena->committed :
+                     arena_pool_writable(pool, mapping, bytes, arena->committed);
+        }
+        // Bytes before begin have never been writable. Even an arena with no pushes can have a nonzero guard.
+        const uint64_t length = extent > begin ? extent - begin : 0;
+        const bool batchable = protected && pool->batching && pool->keeps_commits && (!pool->tried_pidfd || pool->pidfd >= 0) &&
+                               length != 0 && length <= BUSTER_ARENA_DISCARD_BYTES;
+        // A direct release or eviction must preserve release order. A large range takes one ordinary madvise.
+        if (pool != 0 && pool->pending != 0 && (!batchable || pool->count + pool->pending == BUSTER_ARENA_POOL_SLOTS ||
+            pool->pending == BUSTER_ARENA_DISCARD_RANGES || length > BUSTER_ARENA_DISCARD_BYTES - pool->pending_bytes))
+        {
+            arena_pool_flush(pool);
+        }
+        const bool queued = batchable && pool->count < BUSTER_ARENA_POOL_SLOTS && (!pool->tried_pidfd || pool->pidfd >= 0);
+        const bool pooled = protected && (queued || length == 0 || madvise(mapping + begin, length, MADV_DONTNEED) == 0);
         if (pooled)
         {
             // A free slot, or else the one whose arena was released longest ago, which is unmapped.
-            uint32_t slot = pool->count;
-            if (pool->count == BUSTER_ARENA_POOL_SLOTS)
+            uint32_t slot = pool->count + pool->pending;
+            if (queued)
+            {
+                pool->ranges[pool->pending++] = (struct iovec){
+                    .iov_base = mapping + begin,
+                    .iov_len = length,
+                };
+                pool->pending_bytes += length;
+            }
+            else if (pool->count == BUSTER_ARENA_POOL_SLOTS)
             {
                 slot = 0;
                 for (uint32_t i = 1; i < pool->count; i += 1)
@@ -1653,7 +1762,7 @@ static void arena_release(Arena* arena)
                 .layout = arena->layout,
             };
         }
-        else if (!arena_release_keeps(arena, mapping))
+        else if (pool != 0 || !arena_release_keeps(arena, mapping))
         {
             munmap(mapping, bytes);
         }
@@ -1663,7 +1772,7 @@ static void arena_release(Arena* arena)
 
 static void arena_pool_release(ArenaPool* pool)
 {
-    for (uint32_t i = 0; i < pool->count; i += 1)
+    for (uint32_t i = 0; i < pool->count + pool->pending; i += 1)
     {
         munmap(pool->arenas[i].base - pool->arenas[i].mapping_offset, pool->arenas[i].mapping_bytes);
     }
@@ -1671,6 +1780,14 @@ static void arena_pool_release(ArenaPool* pool)
     {
         close(pool->maps);
     }
+    if (pool->tried_pidfd && pool->pidfd >= 0)
+    {
+        close(pool->pidfd);
+    }
+    pool->tried_pidfd = false;
+    pool->batching = false;
+    pool->pending = 0;
+    pool->pending_bytes = 0;
     pool->count = 0;
     pool->limits = false;
     pool->opened = false;

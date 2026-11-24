@@ -425,7 +425,8 @@ static bool memory_layout_refusal(void)
 // reservations or read/write commits, avoiding a guessed RLIMIT_AS floor that a smaller compiler can pass. Operation 3
 // refuses, as Valgrind may, inaccessible reservations of 8 to 64 GiB with EINVAL: of a unit's, only the preprocessor's
 // arena of tables (pp_initialize_once, 9.65 GB in its full shape with the stacks' columns), between its 4 GiB arenas and
-// its 64 GiB ones, whose refusal the compact shape must take in.
+// its 64 GiB ones, whose refusal the compact shape must take in. Operation 4 terminates a child that tries the
+// optional vector-discard syscalls: filtered commands must use ordinary madvise from their first batch.
 static bool memory_refuse(uint32_t operation)
 {
     const struct sock_filter layout[] = {
@@ -447,8 +448,31 @@ static bool memory_refuse(uint32_t operation)
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | ENOMEM),
         BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
     };
-    const struct sock_fprog filter = operation == 3 ? (struct sock_fprog){ .len = sizeof(layout) / sizeof(layout[0]), .filter = (struct sock_filter*)layout } :
-                                                      (struct sock_fprog){ .len = sizeof(instructions) / sizeof(instructions[0]), .filter = (struct sock_filter*)instructions };
+    const struct sock_filter discards[] = {
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_pidfd_open, 1, 0),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_process_madvise, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+    };
+    struct sock_fprog filter = {
+        .len = sizeof(instructions) / sizeof(instructions[0]),
+        .filter = (struct sock_filter*)instructions,
+    };
+    if (operation == 3)
+    {
+        filter = (struct sock_fprog){
+            .len = sizeof(layout) / sizeof(layout[0]),
+            .filter = (struct sock_filter*)layout,
+        };
+    }
+    if (operation == 4)
+    {
+        filter = (struct sock_fprog){
+            .len = sizeof(discards) / sizeof(discards[0]),
+            .filter = (struct sock_filter*)discards,
+        };
+    }
     return prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) == 0 && prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &filter) == 0;
 }
 
@@ -651,6 +675,20 @@ static bool memory_commands(char* compiler, const char* directory, bool valgrind
         snprintf(log, sizeof(log), "%s/executable.log", directory);
         char* run[] = { output, 0 };
         valid = memory_command(run, log, RLIM_INFINITY, RLIM_INFINITY, 0);
+    }
+    if (!valgrind && !strict && ready)
+    {
+        char* filtered[] = {
+            compiler,
+            "--lanes",
+            "1",
+            "-fsyntax-only",
+            source,
+            source,
+            0,
+        };
+        snprintf(log, sizeof(log), "%s/filtered-discards.log", directory);
+        valid = memory_command(filtered, log, RLIM_INFINITY, RLIM_INFINITY, 4) && valid;
     }
     valid = (valgrind || memory_large_unit(compiler, directory, strict)) && valid;
     // Preserve logs and products on failure so that CI's artifact identifies the actual refused allocation.

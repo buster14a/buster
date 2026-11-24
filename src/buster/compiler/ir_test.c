@@ -68,12 +68,48 @@ static void ir_test_instruction(IrFunction* function, uint32_t id, IrOp op, IrTy
     function->c[id] = c;
 }
 
+// Exercise the scalar diagnostic for every row, including lanes the batch accepted without calling it.
+// Shape must already have passed, so the row columns and nonempty block ranges can be traversed.
+static IrCheck ir_test_scalar_rows(const IrFunction* f)
+{
+    for (uint32_t b = 0; b < f->block_count; b += 1)
+    {
+        const uint32_t end = f->block_offsets[b + 1];
+        for (uint32_t i = f->block_offsets[b]; i < end; i += 1)
+        {
+            const IrCheck row = ir_check_instruction(f, i, false);
+            if (row.error != IR_OK)
+            {
+                return row;
+            }
+            if ((ir_terminator_table[f->op[i]] != 0) != (i == end - 1))
+            {
+                return ir_check(IR_ERROR_TERMINATOR, i, 0);
+            }
+        }
+    }
+    return ir_check(IR_OK, BUSTER_IR_NONE, 0);
+}
+
 static void ir_test_pair(IrTestTally* tally, const IrFunction* function, Arena* scratch, const IrDominance* dominance, bool expected_valid, const char* message)
 {
     const uint64_t mark = scratch->length;
     const IrCheck verified = ir_verify(function, scratch, dominance);
     ir_test_expect(tally, scratch->length == mark, "the verifier retained scratch");
     ir_test_expect(tally, (verified.error == IR_OK) == expected_valid, message);
+    if (dominance == NULL)
+    {
+        if (ir_check_shape(function).error == IR_OK)
+        {
+            const IrCheck rows = ir_check_rows(function);
+            const IrCheck scalar = ir_test_scalar_rows(function);
+            ir_test_expect(tally, rows.error == scalar.error && rows.instruction == scalar.instruction && rows.detail == scalar.detail,
+                           "batched rows match the scalar error, row and operand");
+        }
+        const IrCheck lowered = ir_verify_path(function, scratch, NULL, true);
+        ir_test_expect(tally, lowered.error == verified.error && lowered.instruction == verified.instruction && lowered.detail == verified.detail &&
+                              !lowered.dominance_checked && scratch->length == mark, "lowering verification disagrees with fresh CFG verification");
+    }
     // The diagnostic itself is checked against the frozen digest of every verdict (BUSTER_IR_TEST_VERDICTS_DIGEST).
     ir_test_fold(&tally->verdicts, (uint64_t)verified.error | (uint64_t)verified.dominance_checked << 8 | (uint64_t)verified.detail << 16 | (uint64_t)verified.instruction << 32);
     if (expected_valid && dominance != 0)
@@ -286,6 +322,18 @@ static void ir_test_basic(IrTestTally* tally, Arena* memory, Arena* scratch)
         ir_test_pair(tally, &function, scratch, 0, false, "same-instruction use accepted");
         function.a[1] = 2;
         ir_test_pair(tally, &function, scratch, 0, false, "void or later definition accepted as an operand");
+        function.a[1] = 0;
+        // The first lane's invalid type must be diagnosed before its constant payload is examined, even
+        // if a later lane in this batch also fails. The width check includes the high half of a constant.
+        function.type[0] = UINT8_MAX;
+        function.a[1] = UINT32_MAX;
+        IrCheck constant = ir_verify(&function, scratch, NULL);
+        ir_test_expect(tally, constant.error == IR_ERROR_TYPE && constant.instruction == 0, "invalid constant type lost first-error precedence");
+        function.type[0] = IR_I64;
+        function.constants[0].high = 1;
+        constant = ir_verify(&function, scratch, NULL);
+        ir_test_expect(tally, constant.error == IR_ERROR_TYPE && constant.instruction == 0, "an I64 constant with high bits was accepted");
+        function.constants[0].high = 0;
         function.a[1] = 0;
         function.a[0] = 1;
         ir_test_pair(tally, &function, scratch, 0, false, "out-of-range constant index accepted");
@@ -974,6 +1022,16 @@ static void ir_test_calls_memory(IrTestTally* tally, Arena* memory, Arena* scrat
         ir_test_instruction(&function, 7, IR_CALL_INDIRECT, IR_I64, 4, 1, BUSTER_IR_NONE);
         ir_test_instruction(&function, 8, IR_RET, IR_VOID, 7, BUSTER_IR_NONE, BUSTER_IR_NONE);
         ir_test_pair(tally, &function, scratch, 0, true, "valid calls, volatile memory and scaled address rejected");
+        function.b[5] = BUSTER_IR_NONE;
+        ir_test_expect(tally, ir_verify(&function, scratch, NULL).error == IR_OK, "an address must allow an absent index");
+        const uint32_t invalid_indices[] = { 1, function.instruction_count, UINT32_MAX - 1 };
+        for (uint32_t k = 0; k < sizeof(invalid_indices) / sizeof(invalid_indices[0]); k += 1)
+        {
+            function.b[5] = invalid_indices[k];
+            const IrCheck address = ir_verify(&function, scratch, NULL);
+            ir_test_expect(tally, address.error == IR_ERROR_TYPE && address.instruction == 5, "an address index must name an in-bounds I64");
+        }
+        function.b[5] = 0;
         // #1059's atomic accesses: an order on an atomic access alone, and one its kind takes (a store's relaxed, release or
         // seq_cst; a load's relaxed, consume, acquire or seq_cst), volatile or not.
         function.flags[2] = BUSTER_IR_ATOMIC | 5u << BUSTER_IR_ORDER_SHIFT;

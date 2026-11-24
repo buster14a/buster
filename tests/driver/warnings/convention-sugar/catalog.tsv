@@ -1,0 +1,17 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+calling-convention-macro-names	calling-convention-macro-names.c	0	7	0	-	-	calling convention macro names
+calling-conventions-as-written-and-canonical	calling-conventions-as-written-and-canonical.c	0	8	0	-	-	calling conventions as written and canonical
+# A declaration's convention as its type sugar keeps it (c_check_type_sugar_input.c): clang's AttributedType where
+# the attribute is written, inside the ParenType of a pointer's group (`'__attribute__((preserve_most))  void
+# ((*))(void)'`), its macro's MacroQualifiedType, the attribute a macro in a group before `*` writes dropped with
+# its function's modified type (`void (MS *r)(void)`'s `'MS void (*)(void)'`), a pointer's own, and the ones
+# reached through `*` and `&`.
+declarator-convention-sugar	declarator-convention-sugar.c	1	16	0	-	-	declarator convention sugar
+# Every placement: a const pointer's group and its own `* const`, a pointer to pointer's inner `*`, arrays, a
+# function returning a pointer, a function-like macro, a group's sysv_abi, specifiers', C23 lists before the
+# specifiers (the whole type's) and after the declarator, a local's, and assignments' targets.
+convention-sugar-placements	convention-sugar-placements.c	1	17	0	-	-	convention sugar placements
+# Each convention's AttributedType spelling, explicit sysv_abi and cdecl too, which the canonical type doesn't
+# keep; and no_caller_saved_registers beside one, with which clang rebuilds the type without its sugar.
+convention-attribute-spellings	convention-attribute-spellings.c	0	17	0	-	-	convention attribute spellings

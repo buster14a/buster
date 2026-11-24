@@ -1021,6 +1021,94 @@ static bool lane_test_kernel_at_least(uint64_t major, uint64_t minor)
     return named && (numbers[0] > major || (numbers[0] == major && numbers[1] >= minor));
 }
 
+// A reservation during teardown must see completed resets. Exercise a short return within the second
+// range and a refused fallback as well: the latter mapping must disappear without losing its neighbour.
+static void lane_test_pool_discards(LaneTestTally* tally, ArenaPool* pool)
+{
+    const uint64_t bytes = 2 * BUSTER_ARENA_PAGE_BYTES;
+    for (uint32_t pass = 0; pass < 3; pass += 1)
+    {
+        Arena arenas[3];
+        uint8_t* data[3];
+        bool ready = true;
+        for (uint32_t i = 0; i < 3; i += 1)
+        {
+            arenas[i] = arena_reserve(bytes);
+            data[i] = arena_push(&arenas[i], bytes, 1);
+            if (data[i] != NULL)
+            {
+                memset(data[i], 0x5a, bytes);
+            }
+            ready &= data[i] != NULL;
+        }
+        pool->batching = true;
+        for (uint32_t i = 0; i < 3; i += 1)
+        {
+            arena_release(&arenas[i]);
+        }
+        ready &= pool->count == 0 && pool->pending == 3;
+        lane_test_expect(tally, ready, "a pending discard was published before reset");
+        if (ready && pass == 1)
+        {
+            const struct iovec first = pool->ranges[0];
+            const bool prefix = madvise(first.iov_base, first.iov_len, MADV_DONTNEED) == 0 &&
+                                madvise(pool->ranges[1].iov_base, BUSTER_ARENA_PAGE_BYTES, MADV_DONTNEED) == 0;
+            lane_test_expect(tally, prefix, "could not set up a short batch discard");
+            arena_pool_finish_discards(pool, prefix ? first.iov_len + BUSTER_ARENA_PAGE_BYTES : 0);
+        }
+        if (ready && pass == 2)
+        {
+            // madvise refuses an unaligned address; the arena's original mapping is still owned.
+            pool->ranges[1].iov_base = data[1] + 1;
+            arena_pool_finish_discards(pool, 0);
+            unsigned char resident;
+            lane_test_expect(tally, pool->count == 2 && mincore(data[1], BUSTER_ARENA_PAGE_BYTES, &resident) < 0 && errno == ENOMEM,
+                             "a failed reset kept its mapping");
+        }
+        const uint32_t expected = pass == 2 ? 2 : 3;
+        for (uint32_t i = 0; ready && i < expected; i += 1)
+        {
+            arenas[i] = arena_reserve(bytes);
+            const uint32_t source = pass == 2 && i == 1 ? 0 : 2 - i;
+            lane_test_expect(tally, arenas[i].base == data[source] && lane_test_zero(arena_push(&arenas[i], bytes, 1), bytes),
+                             "a batched mapping was reused out of order or before its pages were zero");
+        }
+        pool->batching = false;
+        for (uint32_t i = 0; i < 3; i += 1)
+        {
+            arena_release(&arenas[i]);
+        }
+        arena_pool_release(pool);
+    }
+    // Without a writable-prefix query these two ranges exceed MAX_RW_COUNT together, and the third
+    // exceeds it on its own. Only one page per mapping needs backing.
+    Arena wide[3];
+    uint8_t* first[3];
+    for (uint32_t i = 0; i < 3; i += 1)
+    {
+        wide[i] = arena_reserve((i == 2 ? 3ull : 1ull) << 30);
+        first[i] = arena_push(&wide[i], 1, 1);
+        if (first[i] != NULL)
+        {
+            first[i][0] = 0xa5;
+        }
+    }
+    pool->opened = true;
+    pool->maps = -1;
+    pool->batching = true;
+    arena_release(&wide[0]);
+    arena_release(&wide[1]);
+    lane_test_expect(tally, pool->count == 1 && pool->pending == 1 && pool->pending_bytes <= BUSTER_ARENA_DISCARD_BYTES,
+                     "two large ranges overfilled the discard vector");
+    arena_release(&wide[2]);
+    lane_test_expect(tally, pool->count == 3 && pool->pending == 0, "an oversized range entered the discard vector");
+    for (uint32_t i = 0; i < 3; i += 1)
+    {
+        lane_test_expect(tally, first[i] != NULL && !lane_test_resident(first[i]), "a large mapping kept its written page");
+    }
+    arena_pool_release(pool);
+}
+
 // A pool's releases free the pages of their arenas' writable prefixes alone (#3070, arena_pool_writable), where commit
 // isn't charged. The prefix is the arena's commit where no copy of it committed further, which one query answers; a
 // released arena's pages there are freed, and it is taken again zero. A copy that commits past the arena's commit and
@@ -1040,6 +1128,7 @@ static void lane_test_arena_pool_writable_child(LaneTestTally* tally)
     };
     static ArenaPool pool;
     arena_pool = &pool;
+    lane_test_pool_discards(tally, &pool);
     for (uint32_t asked = 0; asked < 2; asked += 1)
     {
         // The second round's pool can't ask, as on a kernel without PROCMAP_QUERY.

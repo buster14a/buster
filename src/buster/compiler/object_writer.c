@@ -152,7 +152,9 @@ struct ObjectDebug
 // slices, not NUL-terminated strings. A non-null table must cover every atom including id 0. A descriptor with
 // SHF_LINK_ORDER names in `link` an atom of its unit and of an earlier class, whose section is its sh_link (#1447:
 // patchable_function_entry's entries, linked to their functions'), and descriptors of other links are other sections, as
-// clang's object has one per function; any other descriptor's `link` is 0.
+// clang's object has one per function; any other descriptor's `link` is 0. An explicit `identity` keeps otherwise
+// equal descriptors in separate sections, as the assembler needs for linked-order sections naming different labels
+// in the same input section.
 typedef struct ObjectAtomSection ObjectAtomSection;
 struct ObjectAtomSection
 {
@@ -161,6 +163,7 @@ struct ObjectAtomSection
     uint64_t flags;
     uint64_t entry_size;
     AtomId link;
+    uint32_t identity;
 };
 
 typedef struct ObjectOptions ObjectOptions;
@@ -889,13 +892,13 @@ static bool object_section_is_default(const ObjectAtomSection* section, uint8_t 
     const uint64_t length = format->name_length;
     return section->name.length == 0 ||
            (section->name.length == length && memcmp(section->name.pointer, format->name, length) == 0 && section->type == format->type &&
-            section->flags == format->flags && section->entry_size == format->entry_size);
+            section->flags == format->flags && section->entry_size == format->entry_size && section->identity == 0);
 }
 
 static bool object_sections_equal(const ObjectAtomSection* a, const ObjectAtomSection* b)
 {
     return a->name.length == b->name.length && a->type == b->type && a->flags == b->flags && a->entry_size == b->entry_size && a->link == b->link &&
-           memcmp(a->name.pointer, b->name.pointer, a->name.length) == 0;
+           a->identity == b->identity && memcmp(a->name.pointer, b->name.pointer, a->name.length) == 0;
 }
 
 // The class's atoms from `begin` to `end` of the unit's (`unit_atoms`, in id order), written to the same places of
@@ -938,7 +941,8 @@ static bool object_group_atoms(const ObjectBuilder* builder, uint8_t class, cons
             {
                 // (A linked section's atom too: a unit's patchable function entries share a name, one section a function.)
                 const uint64_t hash = (descriptor != 0 ? link_hash((const uint8_t*)descriptor->name.pointer, descriptor->name.length) ^ descriptor->flags ^
-                                       ((uint64_t)descriptor->type << 32) ^ ((uint64_t)descriptor->link * UINT64_C(0xc2b2ae3d27d4eb4f)) : 0) ^
+                                       ((uint64_t)descriptor->type << 32) ^ ((uint64_t)descriptor->link * UINT64_C(0xc2b2ae3d27d4eb4f)) ^
+                                       ((uint64_t)descriptor->identity * UINT64_C(0x165667b19e3779f9)) : 0) ^
                                       ((uint64_t)membership * UINT64_C(0x9e3779b97f4a7c15));
                 uint64_t slot = hash & (capacity - 1);
                 while (slots[slot] != 0)

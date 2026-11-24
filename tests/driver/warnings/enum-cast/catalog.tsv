@@ -1,0 +1,43 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+initializers-assignments-arms-commas-arguments-and-returns-conve	enum-cast-contexts-source.c	16	0	0	-	-	initializers, assignments, arms, commas, arguments and returns convert between enumerations
+file-scope-brace-compound-literal-and-unreachable-conversions-be	enum-cast-forms-source.c	28	0	0	-	-	file-scope, brace, compound literal and unreachable conversions between enumerations, and pragmas
+wno-implicit-enum-enum-cast	enum-cast-forms-source.c	2	0	0	-	-Wno-implicit-enum-enum-cast	-Wno-implicit-enum-enum-cast
+wenum-conversion-holds-wimplicit-enum-enum-cast	enum-cast-forms-source.c	28	0	0	-	-Wenum-conversion	-Wenum-conversion holds -Wimplicit-enum-enum-cast
+werror-implicit-enum-enum-cast	enum-cast-forms-source.c	0	20	0	-	-Werror=implicit-enum-enum-cast	-Werror=implicit-enum-enum-cast
+# The review's reproducers on #1827 (#1447). A unit whose enumerations are named only by typedefs (clang's name for
+# linkage), and its a.k.a. spellings; a qualified typedef names none, an aligned one does; a typedef that spells a record's
+# definition prints its keyword in an a.k.a.; the C23 underlying types' widths, where a constant that doesn't fit warns
+# of its constant conversion alone and a wider variable of nothing; where each leaf reports (a _Generic's selected
+# association, an inner comma's operator, a member's name, a postfix operator); and a bit-field's width.
+enumerations-named-only-by-typedefs	enum-cast-typedef-source.c	5	0	0	-	-	enumerations named only by typedefs
+typedef-aliases-of-anonymous-enumerations-and-their-a-k-a	enum-cast-typedef-aliases-source.c	6	1	0	-	-	typedef aliases of anonymous enumerations and their a.k.a.
+a-qualified-typedef-names-no-anonymous-tag-an-aligned-one-does	enum-cast-qualified-source.c	2	3	0	-	-	a qualified typedef names no anonymous tag, an aligned one does
+a-typedef-that-spells-an-anonymous-record-s-definition-prints-it	enum-cast-aka-source.c	0	3	0	-	-	a typedef that spells an anonymous record's definition prints its keyword in an a.k.a.
+c23-underlying-types-constant-and-width-ranges	enum-cast-widths-source.c	17	0	0	c23	-	C23 underlying types: constant and width ranges
+where-a-selection-s-a-comma-s-and-a-parenthesized-leaf-report	enum-cast-locations-source.c	15	0	0	-	-	where a selection's, a comma's and a parenthesized leaf report
+where-assignments-increments-casts-calls-members-and-bit-fields	enum-cast-leaves-source.c	14	0	0	-	-	where assignments, increments, casts, calls, members and bit-fields report
+# Enumeration definitions nested in an enumerator's value: an outer enumerator after an inner definition closes, and
+# inner ones after both (check_common_enum_coerced's search, #1923).
+enumerators-of-definitions-nested-in-an-enumerator-s-value	enum-cast-nested-source.c	9	0	0	-	-	enumerators of definitions nested in an enumerator's value
+# The order of conversions in a conditional's arms (#1895, clang's CheckConditionalOperand): each arm's own conversions
+# before the arm's, the condition's first and the true arm's before the false one's, through nested conditionals, comma
+# arms, a selection, a known condition's pruned arm, a _Bool target, unreachable code and a return.
+conversions-in-a-conditional-s-arms-in-clang-s-order	enum-cast-arm-order-source.c	36	0	0	-	-	conversions in a conditional's arms, in clang's order
+# The same order for a conditional passed as an argument (review on #1967): a prototype's enumeration and constant
+# conversions, two arguments, nested arms, a known condition's pruned arm, a _Bool parameter and unreachable code; and a
+# _Generic's conditional arm, whose arms carry the conversion as a conditional's do.
+conversions-in-a-conditional-argument-s-arms-in-clang-s-order	enum-cast-argument-order-source.c	35	0	0	-	-	conversions in a conditional argument's arms, in clang's order
+# A leaf a macro's argument writes shows that argument's macro, unless the conversion's context (an assignment's operator,
+# a declarator, a call, a return) is written in the same argument too (#1447, clang's rangesInsideSameMacroArgExpansion):
+# nested arguments, a two-parameter macro's, a conditional macro's arms, a brace initializer's.
+macro-arguments-notes	enum-cast-macro-arguments-source.c	11	0	9	-	-	macro arguments' notes
+macro-arguments-notes-in-conditionals-initializers-and-calls	enum-cast-macro-forms-source.c	11	0	11	-	-	macro arguments' notes in conditionals, initializers and calls
+# A selection that folds to an enumerator converts that enumerator's enumeration (#1447): an assignment's, a return's,
+# an argument's, an initializer's and a conditional arm's, a nested selection's and one in parentheses; another
+# enumeration's variable, an anonymous enumeration's enumerator and an integer constant give none.
+selections-that-fold-to-enumerators	enum-cast-selection-source.c	10	0	0	-	-	selections that fold to enumerators
+selections-that-fold-to-enumerators-in-c23	enum-cast-selection-source.c	10	0	0	c23	-	selections that fold to enumerators in C23
+# A unit that names neither an enumerator nor an enumeration's variable (#1447): its enumerations' values reach the
+# conversions through members, calls' results and casts, which the gate (CheckInput.enum_names) opens for too.
+a-unit-s-enumerations-reached-only-through-members-calls-and-cas	enum-cast-unnamed-source.c	5	0	0	-	-	a unit's enumerations reached only through members, calls and casts

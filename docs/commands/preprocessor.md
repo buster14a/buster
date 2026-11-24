@@ -113,6 +113,33 @@ headers/corpora, manifest identities, CI subset and on-demand commands.
 [--keep] [--seed N] [--count N] [--part K/N] [--fixtures DIR] [options] [file...]`,
 or `test-preprocessor --tables path...`:
 
+- Auxiliary suites use the same fixture root and keep their existing section and
+  oracle. Under `preprocessor/`, each suite's `catalog.tsv` starts with
+  `buster-fixtures v1 preprocessor-<kind>`. Every row starts with a unique ID.
+  The remaining tab-separated fields are:
+  - `system-levels`: exactness and name, with `ID.c`, `ID.h` and the token levels
+    in `ID.expected` (`u`, `s`, `e`).
+  - `history`: flags (`header`, `parser`, both, or `-`) and name, with `ID.c` and
+    an optional `ID.h`.
+  - `raw-errors`, `structure`, `messages` and `definitions` (kind `directives`):
+    standard (or `-`), flags (`header`, `expected`, both, or `-`) and name.
+    `ID.c` is staged as `structure.c`. The flags select `ID.h` and the exact
+    diagnostic in `ID.expected`. A leading `:` continues the staged main file
+    path. A full transcript can use `%d/structure.c` and `%d/structure.h`
+    for locations at the start of a diagnostic line or after `In file included from `.
+    The message itself is compared byte for byte, including `%d/` and `%%`.
+    An empty golden expects silence.
+  - `guards`: tree ID, expected guard skips, expected pragma-once skips and
+    name. `ID.c` runs as `guard.c` beside that tree's files and links.
+    A new display name also needs its `guards/NAME` entry in the frozen
+    `tests/preprocessor-kernels/digests.tsv` using the recording procedure
+    below. The catalog, files and digest are all runtime data.
+  - `option-refusals`: the expected refusal substring (or `-` for acceptance)
+    and space-separated option arguments, with `%d` for the temporary directory.
+    All rows preprocess the same `probe.c`.
+  Add ordinary cases to these catalogs. Generated stress inputs, lifetime tests
+  and kernel comparisons stay in their C runners.
+
 - without files, the 419 built-in cases (`pp_test_cases`), runtime data
   (#2053): `tests/preprocessor/cases/catalog.tsv` (`buster-fixtures v1
   preprocessor-cases`: ID, STANDARD, FLAGS, OPTIONS and NAME a line; FLAGS

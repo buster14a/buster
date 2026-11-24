@@ -254,7 +254,7 @@ static bool check_input_thread_capability(CheckInputReader* reader, TypeId type,
         for (uint32_t selected = check_input_attributed_group(attributes, first, end); !marked && selected != 0; selected &= selected - 1)
         {
             const uint32_t token = first + (uint32_t)__builtin_ctz(selected);
-            marked = type_unqualified(check_input_memo_get(&reader->tag_types, token)) == type_unqualified(record) &&
+            marked = type_unqualified(check_input_memo_get(reader, reader->tag_types, token)) == type_unqualified(record) &&
                      check_input_thread_marked(reader, check_input_attributes_at(reader->output, token));
         }
     }

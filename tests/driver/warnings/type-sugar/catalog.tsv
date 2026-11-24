@@ -1,0 +1,91 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+aligned-typedefs-retain-their-names-in-conversions-and-incomplet	aligned-typedefs-retain-their-names-in-conversions-and-incomplet.c	0	4	1	-	-	aligned typedefs retain their names in conversions and incomplete arrays
+an-aligned-typedef-names-an-array-element-whose-size-is-not-a-mu	an-aligned-typedef-names-an-array-element-whose-size-is-not-a-mu.c	0	1	0	-	-	an aligned typedef names an array element whose size is not a multiple of its alignment
+aligned-typedefs-retain-their-own-and-outer-qualifiers-without-n	aligned-typedefs-retain-their-own-and-outer-qualifiers-without-n.c	0	4	0	-	-	aligned typedefs retain their own and outer qualifiers without naming plain neighbors
+a-qualified-aligned-typedef-names-its-incomplete-array-element	a-qualified-aligned-typedef-names-its-incomplete-array-element.c	0	1	1	-	-	a qualified aligned typedef names its incomplete array element
+a-decayed-function-typedef-survives-pointer-arithmetic-at-file-s	a-decayed-function-typedef-survives-pointer-arithmetic-at-file-s.c	0	2	0	-	-	a decayed function typedef survives pointer arithmetic at file scope
+function-typedefs-survive-both-addition-orders-subtraction-and-a	function-typedefs-survive-both-addition-orders-subtraction-and-a.c	0	7	0	-	-	function typedefs survive both addition orders subtraction and address operations
+function-pointer-typedefs-in-members-parameters-and-casts-keep-t	function-pointer-typedefs-in-members-parameters-and-casts-keep-t.c	0	4	0	-	-	function pointer typedefs in members parameters and casts keep their spelling
+# A dereference's or subscript's operand keeps the typedef its object's declaration chain names at that level
+# (check_driver_spelling_chain): a vector reached through a pointer typedef prints its own typedef, a typedef
+# inside a typedef its inner name, a parameter's array typedef its element's.
+typedef-chains-through-dereferences-and-subscripts	typedef-chains-through-dereferences-and-subscripts.c	1	9	0	-	-	typedef chains through dereferences and subscripts
+# A member's operand keeps its member declarator's typedef (check_semantic_member_token): through `.`, `->`,
+# anonymous members, a member's own dereference and subscript, and a const record's or member's qualifiers.
+member-typedefs-in-operand-errors	member-typedefs-in-operand-errors.c	0	13	0	-	-	member typedefs in operand errors
+# A typedef of a qualified type names the element of its array (type_print_element_qualifiers): clang's
+# `'CI[2]' (aka 'const int[2]')`, in the const variable's error and an increment's.
+qualified-typedefs-of-array-elements	qualified-typedefs-of-array-elements.c	0	5	2	-	-	qualified typedefs of array elements
+# A qualifier written again beside a qualified typedef (check_input_typedef_sugar) prints over its name, as
+# clang's qualifiers over a typedef's sugar do (`'const CI[1]' (aka 'const int[1]')`); a typedef of fewer
+# qualifiers than its level's names it under the others (`'volatile CI[2]'`).
+qualifiers-written-again-over-a-qualified-typedef	qualifiers-written-again-over-a-qualified-typedef.c	3	9	1	-	-Wsign-compare	qualifiers written again over a qualified typedef
+# A format argument prints its type as clang's lvalue conversion leaves it (check_common_format_value): without
+# its top-level qualifiers, so a typedef that holds them itself prints desugared (`CI`'s `'int'`), and an array
+# decays to a pointer to its qualified element (`'const int *'`).
+format-arguments-value-types	format-arguments-value-types.c	14	0	0	-	-	format arguments' value types
+# A target address space one macro writes throughout the unit prints by the macro (check_driver_space_macros,
+# clang's MacroQualifiedType): before its level, with that level's other qualifiers after its specifier; a
+# function-like macro by its invocation, nested macros by the outermost; a typedef's a.k.a. spells it out.
+address-space-macro-names	address-space-macro-names.c	0	11	0	-	-	address space macro names
+# Each declaration's own address space macro (#1447 item 2, check_driver_space_scope): two macros of one space and a
+# direct spelling, in the address space errors' operands (an assignment's, an initialization's, a return's, a call's,
+# a nested pointer's, and both operands of non-overlapping spaces' arithmetic); a typedef's by the unit's.
+address-space-macros-per-declaration	address-space-macros-per-declaration.c	0	17	2	-	-	address space macros per declaration
+address-space-macros-of-one-declaration	address-space-macros-of-one-declaration.c	0	4	0	-	-	address space macros of one declaration
+# A failed conversion's types, by each declaration's macro, and no "dereference with *" where the pointee's space
+# differs from the target's (compareTypesSimple's compatiblyIncludes).
+address-space-macros-in-conversions	address-space-macros-in-conversions.c	0	6	1	-	-	address space macros in conversions
+# No macro names a space where clang's FindLocsWithCommonFileID finds none: a predefined macro's (`__seg_gs`, and
+# a user macro over it) and an attribute list that isn't its macro's whole expansion.
+address-spaces-no-macro-names	address-spaces-no-macro-names.c	0	5	0	-	-	address spaces no macro names
+# Several warnings of one pass print by the macros, each event after the first reading the pass's map
+# (check_driver_spelling_ready builds it below the events' marks).
+address-space-macro-names-in-several-warnings-of-one-pass	address-space-macro-names-in-several-warnings-of-one-pass.c	4	0	0	-	-	address space macro names in several warnings of one pass
+# The same through incompatible pointer conversions' errors.
+address-space-macro-names-in-several-conversion-errors	address-space-macro-names-in-several-conversion-errors.c	0	4	0	-	-	address space macro names in several conversion errors
+# A space written directly with an integer suffix is that space's direct spelling: the macro another declaration
+# writes it with names neither.
+address-spaces-written-directly-with-integer-suffixes	address-spaces-written-directly-with-integer-suffixes.c	0	2	0	-	-	address spaces written directly with integer suffixes
+# An operand that isn't a plain integer constant (`1+0`) may write any space: no macro names one.
+address-spaces-written-with-a-constant-expression	address-spaces-written-with-a-constant-expression.c	0	1	0	-	-	address spaces written with a constant expression
+# A multidimensional array's qualifiers pass through each element array to the typedef that names them.
+qualified-typedefs-of-multidimensional-array-elements	qualified-typedefs-of-multidimensional-array-elements.c	0	4	0	-	-	qualified typedefs of multidimensional array elements
+# Warnings' operands keep their member's typedef (check_common_operand_spelling): -Wsign-compare's, -Wformat's
+# and -Wenum-compare's, through `.`, `->` and a member array's subscript.
+member-typedefs-in-warning-operands	member-typedefs-in-warning-operands.c	8	0	0	-	-Wsign-compare	member typedefs in warning operands
+# clang's desugarForDiagnostic doesn't look inside an _Atomic (check_driver_atomic_value): a typedef that is an
+# atomic's value type gives no a.k.a.
+typedefs-inside-atomic	typedefs-inside-atomic.c	0	5	0	-	-	typedefs inside _Atomic
+# A typeof's operand prints as written (#1837, check_driver_typeof_text): an expression as clang's StmtPrinter
+# does, with expression spacing (`'typeof (x + 1) *'`), and a type name with its typedef names (`'typeof(L *)'`).
+typeof-expressions-and-type-names-with-typedefs	typeof-expressions-and-type-names-with-typedefs.c	0	11	0	-	-	typeof expressions and type names with typedefs
+# The same in C23, with GNU's spellings, typeof_unqual, a nested typeof, a call, a cast and a string literal.
+typeof-expressions-in-c23	typeof-expressions-in-c23.c	0	7	0	c23	-	typeof expressions in C23
+# A member's own declarator's specifiers spell its type (#1837, check_semantic_member_token): a conversion's
+# source through `&` and `*` (check_driver_pointer_spelling), an assignment's member target, and the null pointer
+# warning's.
+member-typedefs-and-typeofs-in-conversions	member-typedefs-and-typeofs-in-conversions.c	0	5	0	-	-	member typedefs and typeofs in conversions
+member-typedefs-as-conversion-sources-and-targets	member-typedefs-as-conversion-sources-and-targets.c	0	15	2	-	-	member typedefs as conversion sources and targets
+member-typedefs-in-null-pointer-warnings	member-typedefs-in-null-pointer-warnings.c	5	0	0	-	-Wsign-compare	member typedefs in null pointer warnings
+# A compound literal's type name spells its value's type (#1812, check_input_token_type_spelling): through `&`, a
+# decay, a member, -Wformat's and -Wsign-compare's operands.
+compound-literals-typedefs	compound-literals-typedefs.c	3	6	0	-	-Wsign-compare	compound literals' typedefs
+# GNU's array initialized by a compound literal of another array type: the literal's typedef as written.
+an-array-literal-s-typedef-in-its-mismatch	an-array-literal-s-typedef-in-its-mismatch.c	0	3	0	-	-	an array literal's typedef in its mismatch
+# A null pointer constant argument's warning prints its parameter's type with the typedef the callee's declaration
+# writes (#1100, check_input_parameter_spelling): a function's, a function pointer object's (through `*`), its
+# typedef'd function type's and a member's own parameter list; a variadic argument has none.
+call-arguments-parameter-typedefs-in-null-pointer-warnings	call-arguments-parameter-typedefs-in-null-pointer-warnings.c	13	0	0	-	-	call arguments' parameter typedefs in null pointer warnings
+# A conversion's target keeps the typedef its declaration writes (#1447): an enumeration conversion's parameter
+# (check_input_call_parameter_spelling), and an initializer subobject's member or element, found by its offset
+# from the initialized object (check_semantic_subobject_spelling), in -Wimplicit-enum-enum-cast and in a failed
+# conversion's error alike.
+parameter-member-and-element-targets-typedefs	parameter-member-and-element-targets-typedefs.c	14	5	0	-	-	parameter, member and element targets' typedefs
+# A discarded call whose callee has no function's name keeps its return type's typedef (#1447,
+# check_common_ignored_callee): a member's, an element's, a call's result's, a comma's and a conditional's value
+# and a pointer to a pointer's dereference, each by the typedef past its declarator's `*`.
+nodiscard-return-typedefs-through-nameless-callees	nodiscard-return-typedefs-through-nameless-callees.c	10	0	0	-	-Wall	nodiscard return typedefs through nameless callees
+# The same callees whose pointer returns another type: no warning.
+nameless-callees-of-unmarked-return-types	nameless-callees-of-unmarked-return-types.c	1	0	0	-	-Wall	nameless callees of unmarked return types

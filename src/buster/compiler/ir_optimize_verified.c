@@ -62,8 +62,8 @@ static __attribute__((unused)) bool ir_verified_current(const IrVerifiedAnalysis
 }
 
 // The shared verifier's exact shape, row, phi, switch and SSA checks, with its CFG retained instead of rebuilt.
-// The graph check preserves the structural boundary before dominance construction. The final check validates the
-// new tree and full dominance, including same-block order; unchanged phi/switch metadata is not checked again.
+// Graph construction consumes only checked block boundaries, edges and joins. The check against the new
+// tree decides local order and cross-block dominance together before anything publishes the revision.
 // Both use ir.c's verifier, not a weaker optimizer-specific substitute.
 // On failure neither result nor the analysis arena is published; scratch is restored on every path. The analysis
 // and scratch arenas must be distinct; aliasing them is an argument error, refused before either is touched.
@@ -72,7 +72,8 @@ static IrCheck ir_verified_build(const IrFunction* function, Arena* analyses, Ar
     const uint64_t analysis_mark = analyses->length;
     const uint64_t scratch_mark = scratch->length;
     IrVerifiedAnalysis candidate = { 0 };
-    IrCheck check = ir_verify_cfg(function, analyses, scratch, &candidate.cfg);
+    IrCheck check = ir_prepare_cfg(function, analyses, scratch, &candidate.cfg, false);
+    const bool have_graph = check.error == IR_OK;
     if (check.error == IR_OK)
     {
         candidate.shape_checks += 1;
@@ -108,6 +109,15 @@ static IrCheck ir_verified_build(const IrFunction* function, Arena* analyses, Ar
         candidate.dominance_checks += 1;
         check = ir_verify_dominance(function, &candidate.cfg, &dominance);
     }
+    if (check.error != IR_OK && have_graph)
+    {
+        // The structural verifier reported same-block use-order errors before tree or cross-block errors.
+        const IrCheck order = ir_check_dominance(function, &candidate.cfg, NULL);
+        if (order.error != IR_OK)
+        {
+            check = order;
+        }
+    }
     if (check.error == IR_OK)
     {
         candidate.arena = analyses;
@@ -131,13 +141,13 @@ static IrCheck ir_verified_build(const IrFunction* function, Arena* analyses, Ar
 // descriptors outside their storage. The revision belongs to this function's scope, not a process-wide cache.
 // Publication is atomic at the C API boundary: result and analysis are unchanged on failure, and the old revision
 // is invalidated even on failure. No pass currently preserves this product across a mutation.
-static __attribute__((unused, aligned(64))) IrCheck ir_optimize_verified(const IrFunction* function, Arena* output, Arena* analyses, Arena* scratch, IrOptimizeOptions options, IrVerifiedRevision* revision, IrOptimizeResult* result, IrVerifiedAnalysis* analysis)
+static __attribute__((unused, aligned(64))) IrCheck ir_optimize_verified_path(const IrFunction* function, Arena* output, Arena* analyses, Arena* scratch, IrOptimizeOptions options, IrVerifiedRevision* revision, IrOptimizeResult* result, IrVerifiedAnalysis* analysis, bool validated)
 {
     const uint64_t output_mark = output->length;
     const uint64_t analysis_mark = analyses->length;
     const uint64_t scratch_mark = scratch->length;
     ir_verified_invalidate(revision);
-    IrOptimizeWork work = { 0 };
+    IrOptimizeWork work = { .validated = validated };
     IrVerifiedAnalysis candidate = { 0 };
     IrCheck check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, options.passes);
     if (revision->number != UINT64_MAX && output != scratch && analyses != scratch && analyses != output &&
@@ -220,6 +230,11 @@ static __attribute__((unused, aligned(64))) IrCheck ir_optimize_verified(const I
     }
     arena_pop_to(scratch, scratch_mark);
     return check;
+}
+
+static __attribute__((unused, aligned(64))) IrCheck ir_optimize_verified(const IrFunction* function, Arena* output, Arena* analyses, Arena* scratch, IrOptimizeOptions options, IrVerifiedRevision* revision, IrOptimizeResult* result, IrVerifiedAnalysis* analysis)
+{
+    return ir_optimize_verified_path(function, output, analyses, scratch, options, revision, result, analysis, false);
 }
 
 #endif

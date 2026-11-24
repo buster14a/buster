@@ -836,10 +836,12 @@ static void profile_test_time_runs(ProfileTest* test)
     bool ok = mkdtemp(directory) != 0;
     char log[64];
     char flag[64];
+    char output[64];
     char first[160];
     char second[160];
     char changing[160];
     snprintf(log, sizeof(log), "%s/log", directory);
+    snprintf(output, sizeof(output), "%s/output", directory);
     snprintf(flag, sizeof(flag), "%s/flag", directory);
     snprintf(first, sizeof(first), "echo a >> %s", log);
     snprintf(second, sizeof(second), "echo b >> %s; exit 3", log);
@@ -847,7 +849,7 @@ static void profile_test_time_runs(ProfileTest* test)
     char* arguments[] = { "-c", first, "-c", second, "-c", changing };
     const uint64_t starts[] = { 0, 2, 4 };
     const uint64_t counts[] = { 2, 2, 2 };
-    const int null = open("/dev/null", O_WRONLY | O_CLOEXEC);
+    const int fd = open(output, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
     const char* executables[] = { "/bin/sh" };
     const char* const names[] = { "sh" };
     const uint64_t builds[] = { 0 };
@@ -866,20 +868,23 @@ static void profile_test_time_runs(ProfileTest* test)
         .runs = 3,
         .warmups = 1,
         .after_scalar_ms = 1,
-        .output = null,
+        .output = fd,
     };
-    ok = ok && null != -1 && profile_time_runs(&test->arena, &t) == 0;
+    ok = ok && fd != -1 && profile_time_runs(&test->arena, &t) == 0;
     String8 text = ok ? profile_read_file(&test->arena, log) : (String8){ 0 };
     ok = ok && text.length == 16 && memcmp(text.pointer, "a\nb\na\nb\nb\na\na\nb\n", 16) == 0;
+    const String8 report = ok ? profile_read_file(&test->arena, output) : (String8){ 0 };
+    ok = ok && profile_find(report, profile_string("time-runs: completed warmups: rounds=1 slots=2\nrun 1 list ")) < report.length;
     t.starts = starts + 2;
     t.list_count = 1;
     ok = ok && profile_time_runs(&test->arena, &t) == 3;
     executables[0] = "/nonexistent/compiler";
     ok = ok && profile_time_runs(&test->arena, &t) == 4;
-    if (null != -1)
+    if (fd != -1)
     {
-        close(null);
+        close(fd);
     }
+    unlink(output);
     unlink(log);
     unlink(flag);
     rmdir(directory);

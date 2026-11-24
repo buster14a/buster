@@ -1,0 +1,1 @@
+int f(int x,int y,unsigned u){if((1)<<2)return 1;if(1<<(2))return 2;if(1u<<31)return 3;if(u<<2)return 4;if((char)x<<2)return 5;if((_Bool)(x<<2))return 6;if(y?(x<<2):0)return 7;if((y,x<<2))return 8;return 0;}

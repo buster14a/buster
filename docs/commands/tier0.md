@@ -30,8 +30,9 @@ requirements. [Command index](README.md).
   access column reaches the symbols a unit doesn't define through their GOT
   slots, and thread-locals by local-exec or initial-exec. Long double's values
   (class F80) live in a 16-byte frame slot per integer depth, each entry of
-  them deferred: loaded onto the x87, computed and stored back, its locals and
-  parameters objects and its constants an optional column. The 128-bit
+  them deferred. A sole consumer in the same region can take the value on
+  the x87 stack. The object pipeline loads literals at their x87 consumers
+  and uses a full-width nonwaiting copy when control flow requires a home. The 128-bit
   integers (I128 and U128, `__int128`'s) live in the same slots, each entry of
   them deferred too, their halves through scratch registers; a front end
   divides them, converts them to and from floating values and passes them

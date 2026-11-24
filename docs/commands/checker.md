@@ -66,6 +66,11 @@ unused-warning fixtures also check exact scope-completion tokens.
   does, at clang's places (#1127), and only a refusal runs them; a constant
   before a unit's first syntax error, which only the parse reached, is checked
   first, so that its error is clang's first (`c_checker_driver.c`);
+  after a missing statement terminator or a malformed record member, the
+  diagnostic reparse also retains completed expression operands, array bounds
+  and bit-field widths for lookup in their original scope (#1249). A misplaced
+  member bracket keeps its source location and is diagnosed after its bound.
+  The original parse failure still prevents object emission;
   its expression graph's walk has a vector path, the coded walk
   (`c_check_expression_input.c`, #1038), which acts at the compacted tokens by
   each one's class, numbers their nodes into a batch whose columns it writes 16
@@ -865,6 +870,16 @@ the readers scan packed keys in source order.
 
 ## Runtime fixtures
 
+Complete driver programs, companion headers and expected output live under
+`tests/driver/programs/SUITE/`. Each catalog starts with
+`buster-fixtures v1 driver-programs` and the suite's input roles, separated
+by tabs. Each later row supplies a stable ID and a filename for each role,
+in header order. Rows may share files. Add a row to run the same compile,
+link, native execution and output checks on another complete case. The
+runner stages input under the original logical filenames. Hardware and
+toolchain gates, temporary output paths and independent oracles remain in
+the specialized C check.
+
 The default-warning driver sweeps read `tests/driver/warnings/SUITE/catalog.tsv`.
 Use `test-checker-driver --fixtures DIR` to select the root containing
 `driver/` and `checker/`. Each v2 catalog starts with
@@ -961,6 +976,32 @@ are no generated cases.
 | `source-extensions` | 254 | the start of `check_test_source_extensions` (`c_check_source_test.c`) |
 | `transparent` | 8 | the end of `check_test_transparent_calls` (`c_check_transparent_test.c`) |
 | `transparent-types` | 17 | the end of `check_test_transparent_types` (`c_check_transparent_type_test.c`) |
+
+The following private oracles read the same case format at their original
+call sites. They retain their temporary filenames, diagnostic policies and
+scalar/vector comparisons.
+
+| Suite | Cases | Oracle detail |
+| --- | ---: | --- |
+| `constant-expressions` | 190 | Includes the full-width Clang/GCC probe and generated nested expressions |
+| `enum-sources` | 41 | Each case runs as `enum.c` |
+| `vla-sources` | 51 | Includes the generated repeated-size expression |
+| `const-objects` | 63 | The sparse-array probe retains its independent smaller Clang input |
+| `bit-builtins` | 30 | GNU17 Clang oracle per char signedness, with the recorded checker standard |
+| `stdc-bit-builtins` | 10 | Groups by GNU17 or GNU23 |
+| `typeof-compound` | 20 | Groups by GNU17 or GNU23 |
+| `function-name-semantics` | 10 | Retains the quiet Clang syntax check |
+| `integer-extension-sources` | 13 | Stages each source as `oracle.c` |
+| `context-selections` | 8 | Stages each source as `selection-N.c` |
+| `atomic-vector-constraints` | 2 | Individual Clang and checker runs |
+| `function-name-objects` | 20 | `FILE.c.expected` supplies the plain name and pretty signature on two newline-terminated lines |
+
+Add an ordinary regression by adding a catalog row and its files. In suites
+with generators or independently modeled inputs, the FILE column can also name
+a C-defined `@name`. Each binding must occur exactly once. Generated inputs
+stay at the catalog positions the original oracle used. The deep function-name
+case still follows the 20 ordinary cases. The integer fold operation/operand
+model and its generated expected bits remain in the integer checker.
 
 `tests/checker/overload-placeholders` (#2935) is a warning catalog of
 `test-checker-driver`'s (`check_test_driver_warning_catalog`, as

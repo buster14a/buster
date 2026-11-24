@@ -354,6 +354,9 @@ _Static_assert(BUSTER_PARSE_RECOVERED_TYPE == BUSTER_PP_NAME_LINE, "private pars
 // arguments still produce diagnostics; the repaired closer must not make the attribute applicable. The parser
 // does not need the preprocessor printer's NAME_SPACE/NAME_LINE flags, so conversion clears those two bits first.
 #define BUSTER_PARSE_DROPPED_ATTRIBUTE 0x20u
+// On an opening bracket a diagnostic view reads a nameless member's array bound. On a ']' or ';' it
+// retained the preceding member operand up to a malformed tail. The original delimiters keep their sources.
+#define BUSTER_PARSE_MEMBER_RECOVERY BUSTER_PARSE_DROPPED_ATTRIBUTE
 #define BUSTER_PARSE_PP_FLAGS ((uint8_t)~(BUSTER_PP_NAME_SPACE | BUSTER_PP_NAME_LINE))
 _Static_assert(BUSTER_PARSE_DROPPED_ATTRIBUTE == BUSTER_PP_NAME_SPACE, "private parser flag cleared during preprocessing-token conversion");
 // An argument can synchronize at a comma or at the end of a call, group or subscript.
@@ -882,8 +885,8 @@ struct ParseDiagnostic
     // The failed argument belongs directly to a block expression statement's call. Only this parser-proven form
     // can end that call at a semicolon without also abandoning an initializer, return expression or enclosing call.
     bool call_statement;
-    // A recovered orphan closer follows this complete expression, [begin, token). Zero means none. Its parser
-    // diagnostics are conditional: an unresolved name can make Clang skip that closer without diagnosing it.
+    // First token of a completed operand before a recovered statement or member delimiter. Zero means none.
+    // An unusable operand can make Clang skip the delimiter without diagnosing it.
     uint32_t recovery_expression_begin;
     // The callee can precede the diagnostic, where an argument is a type instead of an expression.
     uint32_t resume_callee;
@@ -930,7 +933,7 @@ struct ParseDiagnostic
     // view decides which (check_driver_typo_edits).
     bool probe;
     // A tentative typo's tail that a recovery view left out (CheckPrefixTails, check_driver_typo_tail), or an orphan
-    // closer skipped because of an unresolved name (check_driver_orphan_diagnostics), marked after the final reading.
+    // closer skipped because of an unresolved name (check_driver_recovery_diagnostics), marked after the final reading.
     bool tail;
 };
 

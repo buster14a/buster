@@ -344,7 +344,7 @@ static bool check_tag_enum_compatible(CheckInputReader* reader, const CheckTagFr
             const uint32_t at_name = new_name < parser->tokens.count ? new_name : frame->token;
             if (compatible)
             {
-                check_input_memo_set(reader, &reader->tag_types, frame->token, earlier);
+                check_input_memo_set(reader, reader->tag_types, frame->token, earlier);
             }
             else if (differ < shorter)
             {

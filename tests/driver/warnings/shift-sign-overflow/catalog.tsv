@@ -1,0 +1,14 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+# A nonnegative signed left operand shifted exactly into its promoted type's sign bit, at file scope, in a body,
+# in an enumerator, a bound, an unevaluated operand and unreachable code; a typedef's spelling; not an unsigned
+# shift, one short of the sign bit, a negative left operand's or an over-wide count's.
+shifts-into-the-sign-bit	shifts-into-the-sign-bit.c	13	0	0	-	-Wshift-sign-overflow	shifts into the sign bit
+# The constant reader's shifts, which no graph node holds: enumerators, file-scope and member bounds, a static
+# assertion's, a block's enumerator and bound; a cast's typedef spelling; a 128-bit and a long shift.
+shifts-into-the-sign-bit-in-constants	shifts-into-the-sign-bit-in-constants.c	8	0	0	-	-Wshift-sign-overflow	shifts into the sign bit in constants
+# Off by default, and a pragma's; none under -fwrapv.
+shift-sign-overflow-policies	shift-sign-overflow-policies.c	1	0	0	-	-	shift sign overflow policies
+# A bit-precise type's own width: its sign bit, not a byte's.
+shift-sign-overflow-of-bit-precise-types	shift-sign-overflow-of-bit-precise-types.c	3	0	0	c23	-Weverything -Wno-missing-prototypes -Wno-pre-c23-compat	shift sign overflow of bit-precise types
+shift-sign-overflow-under-fwrapv	shift-sign-overflow-under-fwrapv.c	0	0	0	-	-Wshift-sign-overflow -fwrapv	shift sign overflow under -fwrapv

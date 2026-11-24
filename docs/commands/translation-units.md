@@ -153,7 +153,7 @@ missing and non-directory corpora. CI's inventory runs it on
 `tests/units/root-image` with `--option --lanes --option 1` (#3070): units
 that each leave the preprocessor's starting state another way, compiled one
 after another from one lane's root image, and those with syntax errors
-(`errors/`) with `--attested=off`. With `--generate DIR` it writes a program
+(`errors/`) with default attestation. With `--generate DIR` it writes a program
 of synth's shape (512 units of 200 functions by default) for measurements,
 and tests nothing.
 [docs/translation-units.md](../../docs/translation-units.md) has the design and the

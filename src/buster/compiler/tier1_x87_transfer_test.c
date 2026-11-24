@@ -36,7 +36,7 @@ static void tier1_x87_transfer_proof(Tier1WideTest* test)
     const X87TransferStats vector = x87_transfer_records(chosen, 6, tokens, eligible, boundaries, true);
     const X87TransferStats scalar = x87_transfer_records(twin, 6, tokens, eligible, boundaries, false);
     tier1_wide_test_expect(test, vector.pairs == 1 && scalar.pairs == 1 && memcmp(chosen, twin, sizeof(chosen)) == 0, "both transport paths replace the single private round trip alike");
-    tier1_wide_test_expect(test, chosen[3].form == X86_FORM_FLD_ST && chosen[4].form == X86_FORM_FSTP_ST && x87_transfer_verify(original, chosen, tokens, eligible, 0, 6), "the duplicate and pop preserve both waiting points and pass independent replay");
+    tier1_wide_test_expect(test, chosen[3].form == X86_FORM_FST_ST && chosen[4].form == X86_FORM_FXCH_ST && x87_transfer_verify(original, chosen, tokens, eligible, 0, 6), "the register store and exchange preserve both waiting points and pass independent replay");
     for (uint32_t mutant = 0; mutant < 9; mutant += 1)
     {
         memcpy(twin, chosen, sizeof(twin));
@@ -80,7 +80,22 @@ static void tier1_x87_transfer_proof(Tier1WideTest* test)
         eligible[3] = 1;
         tokens[4] = 3;
     }
-    // Extra baseline stack entries sit above the retained duplicate pair: depth six fits exactly, seven/eight do not.
+    // The integer staging store before FILD may touch the edge of the private ten-byte slot.
+    original[6] = original[5];
+    original[5] = original[4];
+    tokens[4] = BUSTER_X87_TRANSFER_NONE;
+    tokens[5] = 3;
+    boundaries[6] = 0;
+    boundaries[7] = BUSTER_X87_TRANSFER_BOUNDARY;
+    for (uint32_t variant = 0; variant < 3; variant += 1)
+    {
+        const uint32_t base = variant == 2 ? X86_REGISTER_RBP : X86_REGISTER_RSP;
+        original[4] = tier1_x87_transfer_memory(X86_FORM_MOV_RM32_R32, base, variant == 0 ? 41 : 42);
+        memcpy(chosen, original, sizeof(original));
+        const X87TransferStats result = x87_transfer_records(chosen, 7, tokens, eligible, boundaries, true);
+        tier1_wide_test_expect(test, result.pairs == (variant == 1), "only a provably disjoint integer store can cross the private x87 transfer");
+    }
+    // One retained register leaves seven available for the intervening sequence.
     for (uint32_t pressure = 6; pressure <= 8; pressure += 1)
     {
         const uint32_t load = 4 + pressure * 2;
@@ -102,7 +117,7 @@ static void tier1_x87_transfer_proof(Tier1WideTest* test)
         original[load + 1] = tier1_x87_transfer_memory(X86_FORM_FSTP_M80, X86_REGISTER_RDX, 0);
         memcpy(chosen, original, sizeof(original));
         const X87TransferStats stats = x87_transfer_records(chosen, count, tokens, eligible, boundaries, true);
-        tier1_wide_test_expect(test, stats.pairs == (pressure == 6) && (pressure == 6 || memcmp(chosen, original, sizeof(original)) == 0), "the complete physical depth includes both retained copies and rejects overflow transactionally");
+        tier1_wide_test_expect(test, stats.pairs == (pressure <= 7) && (pressure <= 7 || memcmp(chosen, original, sizeof(original)) == 0), "the complete physical depth includes the retained register and rejects overflow transactionally");
         // A hidden overlapping read cannot be waved through by giving it no token.
         if (pressure == 6)
         {
@@ -173,13 +188,23 @@ static void tier1_x87_transfer_emission(Tier1WideTest* test)
         "  %5 = fmul.f80 %1, %3\n",
     };
     static const uint32_t values[] = { 5, 7, 6, 6, 5 };
-    static const uint32_t pairs[] = { 1, 3, 1, 1, 0 };
-    static const uint32_t stores[] = { 3, 3, 4, 4, 4 };
-    for (uint32_t fixture = 0; fixture < BUSTER_ARRAY_LENGTH(operations); fixture += 1)
+    static const uint32_t pairs[] = { 3, 3, 3, 3, 2, 2 };
+    static const uint32_t stores[] = { 1, 3, 2, 2, 2, 3 };
+    for (uint32_t fixture = 0; fixture < BUSTER_ARRAY_LENGTH(pairs); fixture += 1)
     {
         char text[1024];
-        snprintf(text, sizeof(text), "function (ptr) -> void {\nb0:\n  %%0 = param.ptr 0\n  %%1 = load.f80 %%0 align=16\n  %%2 = address.ptr %%0 offset=16\n  %%3 = load.f80 %%2 align=16\n  %%4 = address.ptr %%0 offset=256\n%s  %%%u = store.void %%4, %%%u align=16%s\n  %%%u = ret.void\n}\n",
-                 operations[fixture], values[fixture] + 1, values[fixture], fixture == 4 ? " volatile" : "", values[fixture] + 2);
+        if (fixture == BUSTER_ARRAY_LENGTH(operations))
+        {
+            strcpy(text, "function (ptr, i64) -> void {\nb0:\n  %0 = param.ptr 0\n  %1 = param.i64 1\n  %2 = const.i64 0x0\n"
+                         "  %3 = icmp.i1 %1, %2 ne\n  %4 = cbr.void %3, b1, b2\nb1:\n  %5 = load.f80 %0 align=16\n  %6 = br.void b3\n"
+                         "b2:\n  %7 = address.ptr %0 offset=16\n  %8 = load.f80 %7 align=16\n  %9 = br.void b3\nb3:\n"
+                         "  %10 = phi.f80 [%5, b1], [%8, b2]\n  %11 = store.void %0, %10 align=16\n  %12 = ret.void\n}\n");
+        }
+        else
+        {
+            snprintf(text, sizeof(text), "function (ptr) -> void {\nb0:\n  %%0 = param.ptr 0\n  %%1 = load.f80 %%0 align=16\n  %%2 = address.ptr %%0 offset=16\n  %%3 = load.f80 %%2 align=16\n  %%4 = address.ptr %%0 offset=256\n%s  %%%u = store.void %%4, %%%u align=16%s\n  %%%u = ret.void\n}\n",
+                     operations[fixture], values[fixture] + 1, values[fixture], fixture == 4 ? " volatile" : "", values[fixture] + 2);
+        }
         const uint64_t mark = test->output.length;
         IrFunction function = { 0 };
         bool ok = tier1_wide_test_parse(test, "canonical x87 transport", text, &function);
@@ -196,17 +221,17 @@ static void tier1_x87_transfer_emission(Tier1WideTest* test)
             Tier1EmitResult emitted = { 0 };
             const Tier1EmitError error = ok ? tier1_emit_function(&plan, &options, test->baseline, &test->output, &test->scratch, &emitted, &failed) : TIER1_EMIT_INVALID;
             ok = ok && tier1_wide_test_expect(test, error == TIER1_EMIT_OK, "emit the canonical-result transport fixture");
-            uint32_t duplicates = 0;
-            uint32_t pops = 0;
+            uint32_t retained = 0;
+            uint32_t exchanges = 0;
             uint32_t memory_stores = 0;
             for (uint32_t r = 0; ok && r < emitted.code.count; r += 1)
             {
                 const uint32_t form = emitted.code.records[r].form & BUSTER_X86_FORM_NUMBER;
-                duplicates += form == X86_FORM_FLD_ST;
-                pops += form == X86_FORM_FSTP_ST;
+                retained += form == X86_FORM_FST_ST;
+                exchanges += form == X86_FORM_FXCH_ST;
                 memory_stores += form == X86_FORM_FSTP_M80;
             }
-            tier1_wide_test_expect(test, ok && duplicates == pairs[fixture] && pops == pairs[fixture] && memory_stores == stores[fixture], "only sole canonical left-consumer/store pairs lose their private memory transfers");
+            tier1_wide_test_expect(test, ok && retained == pairs[fixture] && exchanges == pairs[fixture] && memory_stores == stores[fixture], "single-use operands stay in x87 registers in their original order");
             arena_pop_to(&test->output, path_mark);
         }
         arena_pop_to(&test->output, mark);

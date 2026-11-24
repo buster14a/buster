@@ -1,0 +1,1 @@
+_Static_assert(((_Float16)2048+(_Float16)1)-(_Float16)2048==0,"half midpoint");_Static_assert(((__bf16)256+(__bf16)1)-(__bf16)256==0,"bf16 midpoint");_Static_assert((_Float16)0x1p-24+(_Float16)0x1p-24==(_Float16)0x1p-23,"half subnormal");_Static_assert((__bf16)0x1p-133+(__bf16)0x1p-133==(__bf16)0x1p-132,"bf16 subnormal");
