@@ -10235,6 +10235,9 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 }
 #include "c_check_initializer_warning_test.c"
 #include "c_check_warning_driver_test.c"
+#include "c_check_expression_warnings_driver_test.c"
+#include "c_check_call_warnings_driver_test.c"
+#include "c_check_syntax_warning_driver_test.c"
 #include "c_check_redefinition_driver_test.c"
 #include "c_check_logical_unused_driver_test.c"
 #include "c_check_condition_driver_test.c"
@@ -10498,6 +10501,7 @@ static int run_checker_driver_tests(int argc, char** argv)
     const char* executable = NULL;
     bool lazy = false;
     bool sign_compare_only = false;
+    bool common_warnings_only = false;
     // --uninitialized-only: loop initialization diagnostics with an admitted two-lane reader (#1391).
     bool uninitialized_only = false;
     // --cpu-dispatch-only: the cpu_specific and cpu_dispatch section alone (#1447).
@@ -10560,6 +10564,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         else if (strcmp(argv[i], "--executable") == 0 && i + 1 < argc)
         {
             executable = argv[++i];
+        }
+        else if (strcmp(argv[i], "--common-warnings-only") == 0)
+        {
+            common_warnings_only = true;
         }
         else if (strcmp(argv[i], "--sign-compare-only") == 0)
         {
@@ -10704,7 +10712,7 @@ static int run_checker_driver_tests(int argc, char** argv)
             options = false;
         }
     }
-    const uint32_t focuses = (uint32_t)sign_compare_only + (uint32_t)uninitialized_only + (uint32_t)cpu_dispatch_only + (uint32_t)target_versions_only + (uint32_t)semantic_recovery_only +
+    const uint32_t focuses = (uint32_t)common_warnings_only + (uint32_t)sign_compare_only + (uint32_t)uninitialized_only + (uint32_t)cpu_dispatch_only + (uint32_t)target_versions_only + (uint32_t)semantic_recovery_only +
                              (uint32_t)type_sugar_only + (uint32_t)asm_definitions_only + (uint32_t)call_counts_only + (uint32_t)fp_contract_only +
                              (uint32_t)operand_diagnostics_only + (uint32_t)label_attributes_only + (uint32_t)attribute_recovery_only + (uint32_t)assert_bool_only +
                              (uint32_t)malformed_calls_only + (uint32_t)record_extensions_only + (uint32_t)auto_qualifiers_only + (uint32_t)query_bool_only +
@@ -11203,6 +11211,12 @@ static int run_checker_driver_tests(int argc, char** argv)
     char directory[] = "/tmp/buster-checker-driver-XXXXXX";
     const bool temporary = options && mkdtemp(directory) != NULL;
     check_test_expect(&test, temporary, "driver test directory is available");
+    if (temporary && common_warnings_only)
+    {
+        check_test_driver_expression_warnings(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
+        check_test_driver_call_warnings(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
+        check_test_driver_syntax_warnings(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
+    }
     if (temporary && sign_compare_only)
     {
         check_test_driver_sign_compare(&test, clang, executable, directory);
@@ -11493,6 +11507,9 @@ static int run_checker_driver_tests(int argc, char** argv)
         if (!lazy)
         {
             check_test_driver_default_warnings(&test, clang, executable, directory);
+            check_test_driver_expression_warnings(&test, clang, executable, directory);
+            check_test_driver_call_warnings(&test, clang, executable, directory);
+            check_test_driver_syntax_warnings(&test, clang, executable, directory);
         }
         if (!lazy && check_test_driver_takes())
         {

@@ -63,7 +63,7 @@ static bool check_test_common_candidate(CheckCommonCandidate kind, CheckOp op)
         } break;
         case CHECK_COMMON_CANDIDATE_CALL:
         {
-            result = op == CHECK_OP_CALL || op == CHECK_OP_BUILTIN_X86;
+            result = op == CHECK_OP_CALL || op == CHECK_OP_BUILTIN_X86 || op == CHECK_OP_BUILTIN_MISC;
         } break;
         case CHECK_COMMON_CANDIDATE_SELECT:
         {

@@ -381,6 +381,17 @@ static const uint8_t node_census_warning_classes[CHECK_WARNING_ID_COUNT] = {
     [CHECK_WARNING_ID_ABSOLUTE_VALUE] = NODE_CENSUS_WARNING_TESTED,
     [CHECK_WARNING_ID_INT_TO_POINTER_CAST] = NODE_CENSUS_WARNING_TESTED,
     [CHECK_WARNING_ID_INT_TO_VOID_POINTER_CAST] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_TAUTOLOGICAL_SELF_COMPARE] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_POINTER_BOOL_CONVERSION] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_TAUTOLOGICAL_POINTER_COMPARE] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_STRING_COMPARE] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_NONNULL] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_FORTIFY_SOURCE] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_SIZEOF_POINTER_MEMACCESS] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_PARENTHESES_EQUALITY] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_SWITCH_BOOL] = NODE_CENSUS_WARNING_OUTSIDE,
+    [CHECK_WARNING_ID_CHAR_SUBSCRIPTS] = NODE_CENSUS_WARNING_TESTED,
+    [CHECK_WARNING_ID_SIZEOF_ARRAY_ARGUMENT] = NODE_CENSUS_WARNING_EVENTS,
 };
 
 // Which of the warnings the silence tests stand for the unit enables anywhere (check_common_enabled): the actions' warning
@@ -392,6 +403,14 @@ struct NodeCensusPolicy
     uint32_t action_ignored_bits;
     bool enums;
     bool sign_compare;
+    bool self_compare;
+    bool string_compare;
+    bool pointer_compare;
+    bool pointer_bool;
+    bool parentheses_equality;
+    bool char_subscript;
+    bool fortify;
+    bool sizeof_memaccess;
     bool pointer_casts;
     // -Wint-to-pointer-cast or -Wint-to-void-pointer-cast (#2914, node_census_int_pointer_cast).
     bool int_pointer_casts;
@@ -528,6 +547,7 @@ struct NodeCensusScratch
     uint8_t own_quiet_pairs[64];
     uint8_t own_tree_marks[128];
     uint8_t own_tree_firsts[128];
+    uint8_t common_operators[64];
     uint8_t own_tree_sends[128];
     uint8_t own_roots[128];
     // Whether a call may be left out of the loop's list: not in a unit whose calls' test has something for each
@@ -645,6 +665,14 @@ static NodeCensusPolicy node_census_policy(const Preprocessor* pp, const CheckIn
                    check_common_enabled(pp, input, CHECK_WARNING_ID_ENUM_FLOAT_CONVERSION, false) ||
                    check_common_enabled(pp, input, CHECK_WARNING_ID_ANON_ENUM_ENUM_CONVERSION, false) ||
                    check_common_enabled(pp, input, CHECK_WARNING_ID_IMPLICIT_ENUM_ENUM_CAST, false);
+    policy.self_compare = check_common_enabled(pp, input, CHECK_WARNING_ID_TAUTOLOGICAL_SELF_COMPARE, false);
+    policy.string_compare = check_common_enabled(pp, input, CHECK_WARNING_ID_STRING_COMPARE, false);
+    policy.pointer_compare = check_common_enabled(pp, input, CHECK_WARNING_ID_TAUTOLOGICAL_POINTER_COMPARE, false);
+    policy.pointer_bool = check_common_enabled(pp, input, CHECK_WARNING_ID_POINTER_BOOL_CONVERSION, false);
+    policy.parentheses_equality = check_common_enabled(pp, input, CHECK_WARNING_ID_PARENTHESES_EQUALITY, false);
+    policy.fortify = check_common_enabled(pp, input, CHECK_WARNING_ID_FORTIFY_SOURCE, false);
+    policy.sizeof_memaccess = check_common_enabled(pp, input, CHECK_WARNING_ID_SIZEOF_POINTER_MEMACCESS, false);
+    policy.char_subscript = check_common_enabled(pp, input, CHECK_WARNING_ID_CHAR_SUBSCRIPTS, true);
     policy.sign_compare = check_common_enabled(pp, input, CHECK_WARNING_ID_SIGN_COMPARE, true);
     policy.int_pointer_casts = check_common_enabled(pp, input, CHECK_WARNING_ID_INT_TO_POINTER_CAST, false) ||
                                check_common_enabled(pp, input, CHECK_WARNING_ID_INT_TO_VOID_POINTER_CAST, false);
@@ -1105,7 +1133,7 @@ static const CheckInputAttributeKind node_census_callee_kinds[] = {
     CHECK_ATTRIBUTE_FORMAT, CHECK_ATTRIBUTE_FORMAT_ARG, CHECK_ATTRIBUTE_SENTINEL, CHECK_ATTRIBUTE_RETURNS_TWICE, CHECK_ATTRIBUTE_DIAGNOSE_IF,
     CHECK_ATTRIBUTE_ENABLE_IF, CHECK_ATTRIBUTE_ERROR, CHECK_ATTRIBUTE_WARNING, CHECK_ATTRIBUTE_DEPRECATED, CHECK_ATTRIBUTE_UNAVAILABLE,
     CHECK_ATTRIBUTE_OVERLOADABLE, CHECK_ATTRIBUTE_PASS_OBJECT_SIZE, CHECK_ATTRIBUTE_PASS_DYNAMIC_OBJECT_SIZE, CHECK_ATTRIBUTE_THREAD_SAFETY,
-    CHECK_ATTRIBUTE_NODEREF, CHECK_ATTRIBUTE_INTERRUPT,
+    CHECK_ATTRIBUTE_NODEREF, CHECK_ATTRIBUTE_INTERRUPT, CHECK_ATTRIBUTE_NONNULL, CHECK_ATTRIBUTE_RETURNS_NONNULL,
 };
 
 static const CheckInputAttributeKind node_census_result_kinds[] = {
@@ -2067,8 +2095,271 @@ static inline uint64_t node_census_leaf(const NodeCensusScratch* s, uint32_t nod
     return (compound ? UINT64_C(1) << NODE_CENSUS_COMPOUND_LITERAL : 0) | (flagged ? UINT64_C(1) << NODE_CENSUS_DECLARATION : 0);
 }
 
-// The tests of node `node` of the current expression (`root` its root, `context` its root's kind), as bits of
-// NodeCensusTest.
+// The common warnings inspect the written operands before conversion. Keep their candidates on the
+// graph path, where declaration history, source grouping and call contracts are available.
+static bool node_census_common_candidate(const NodeCensusPolicy* policy, CheckOp op)
+{
+    const bool truth = op == CHECK_OP_NOT || op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR ||
+                       op == CHECK_OP_CONDITION || op == CHECK_OP_CONDITIONAL;
+    return ((policy->self_compare || policy->string_compare || policy->pointer_compare || policy->parentheses_equality) && node_census_comparison(op)) ||
+           (policy->pointer_bool && (truth || op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE || op == CHECK_OP_CONVERT || op == CHECK_OP_CALL)) ||
+           ((policy->fortify || policy->sizeof_memaccess) && op == CHECK_OP_CALL) || (policy->char_subscript && op == CHECK_OP_SUBSCRIPT);
+}
+
+// The packed window holds an expression's operands consecutively and its control root separately.
+// Read the same type, object and null-constant facts there as in the stream or T's reader-time records.
+typedef struct NodeCommonWindow NodeCommonWindow;
+struct NodeCommonWindow
+{
+    const NodeFactsRecord* operands;
+    const NodeFactsRecord* root_record;
+    uint32_t first;
+    uint32_t count;
+    uint32_t root;
+};
+
+static inline const NodeFactsRecord* node_common_record(const NodeCommonWindow* window, uint32_t node)
+{
+    return node == window->root ? window->root_record :
+           node - window->first < window->count ? &window->operands[node - window->first] : NULL;
+}
+
+static inline TypeId node_common_type(const NodeCensusScratch* s, const NodeCommonWindow* window, uint32_t node)
+{
+    if (window == NULL)
+    {
+        return node_view_type(s, node);
+    }
+    const NodeFactsRecord* record = node_common_record(window, node);
+    return record != NULL ? record->type : 0;
+}
+
+static inline uint32_t node_common_object(const NodeCensusScratch* s, const NodeCommonWindow* window, uint32_t node)
+{
+    if (window == NULL)
+    {
+        return node_view_object(s, node);
+    }
+    const NodeFactsRecord* record = node_common_record(window, node);
+    return record != NULL ? record->object : 0;
+}
+
+static inline CheckValue node_common_value(const NodeCensusScratch* s, const NodeCommonWindow* window, uint32_t node)
+{
+    if (window == NULL)
+    {
+        return node_view_value(s, node);
+    }
+    const NodeFactsRecord* record = node_common_record(window, node);
+    return record == NULL ? (CheckValue){ 0 } : (CheckValue){
+        .type = record->type, .flags = record->flags, .constant_kind = (record->standing >> 2) & 7u, .integer = record->payload,
+    };
+}
+
+// The pointer's source form, before its truth conversion or comparison. Ordinary pointer
+// variables can be null. Only pointer parameters and call results can acquire a nonnull contract.
+static bool node_census_known_pointer(const NodeCensusScratch* s, const NodeCommonWindow* window, uint32_t node)
+{
+    const CheckProgram* program = s->program;
+    const CheckInput* input = program->input;
+    const CheckGraph* graph = &input->graph;
+    node = check_common_bool_expression(graph, node);
+    const CheckOp op = node < graph->count ? graph->ops[node] : CHECK_OP_COUNT;
+    const uint8_t kind = node < graph->count ? node_census_kind(program->types, node_common_type(s, window, node)) : BUSTER_TYPE_KIND_NONE;
+    bool candidate = op == CHECK_OP_ADDRESS || kind == BUSTER_TYPE_KIND_FUNCTION || type_kind_is_array(kind);
+    if (kind == BUSTER_TYPE_KIND_POINTER && (op == CHECK_OP_CALL || op == CHECK_OP_VALUE))
+    {
+        const uint32_t named = op == CHECK_OP_CALL ? check_common_callee_source(graph, graph->operand0[node], NULL) : node;
+        const uint32_t decl = named < graph->count ? node_census_declaration(program, graph->tokens[named]) : BUSTER_CHECK_NONE;
+        if (op == CHECK_OP_CALL)
+        {
+            candidate = check_expression_attribute(input, decl, CHECK_ATTRIBUTE_RETURNS_NONNULL, BUSTER_CHECK_NONE) != NULL;
+        }
+        else if (decl < input->token_count)
+        {
+            const uint32_t parameter = check_common_sparse_get(input->parameters, decl);
+            if (parameter != BUSTER_CHECK_NONE)
+            {
+                const uint32_t opening = check_common_sparse_get(input->declaration_bodies, decl);
+                const uint32_t function = opening < input->token_count ? check_common_sparse_get(input->body_declarations, opening) : BUSTER_CHECK_NONE;
+                candidate = check_expression_attribute(input, decl, CHECK_ATTRIBUTE_NONNULL, BUSTER_CHECK_NONE) != NULL ||
+                            check_expression_attribute(input, function, CHECK_ATTRIBUTE_NONNULL, parameter) != NULL;
+            }
+        }
+    }
+    return candidate;
+}
+
+// The fortify pass needs a known destination and a known length. A pointer read has no extent.
+// A whole named array or addressed object has its type's size; retain offset paths for the graph's object-size walk.
+static bool node_common_fortify(const NodeCensusScratch* s, const NodeCommonWindow* window, uint32_t call, const CheckMemoryCall* memory)
+{
+    const CheckGraph* graph = &s->program->input->graph;
+    const TypeTable* types = s->program->types;
+    const uint32_t length = memory->fortify == CHECK_FORTIFY_STRING || memory->fortify == CHECK_FORTIFY_BZERO ? 1u : 2u;
+    if (graph->argument_counts[call] <= length)
+    {
+        return false;
+    }
+    const uint32_t* arguments = graph->argument_nodes + graph->argument_offsets[call];
+    uint32_t dest = check_expression_uncast(graph, arguments[memory->fortify == CHECK_FORTIFY_BCOPY ? 1u : 0u]);
+    if (dest >= graph->count)
+    {
+        return false;
+    }
+    const bool address = graph->ops[dest] == CHECK_OP_ADDRESS;
+    dest = address ? graph->operand0[dest] : dest;
+    const CheckOp op = dest < graph->count ? graph->ops[dest] : CHECK_OP_COUNT;
+    const TypeId type = dest < graph->count ? node_common_type(s, window, dest) : 0;
+    if (!address && !type_kind_is_array(node_census_kind(types, type)) && op != CHECK_OP_ADD && op != CHECK_OP_SUBTRACT)
+    {
+        return false;
+    }
+    const uint32_t amount = arguments[length];
+    if (memory->fortify == CHECK_FORTIFY_STRING)
+    {
+        return true;
+    }
+    if (amount >= graph->count)
+    {
+        return false;
+    }
+    const CheckValue size = node_common_value(s, window, amount);
+    const bool whole = op == CHECK_OP_VALUE && type != 0 && type_is_complete(types, type);
+    uint32_t width = 0;
+    bool signed_type = false;
+    return size.constant_kind == CHECK_CONSTANT_INTEGER && check_action_integer_type(types, size.type, &width, &signed_type) && width <= 128 &&
+           (!whole || (uint64_t)check_common_integer_value(&size, width, signed_type) > type_size(types, type));
+}
+
+static bool node_census_common_warning(const NodeCensusScratch* s, const NodeCommonWindow* window, uint32_t node)
+{
+    const CheckProgram* program = s->program;
+    const CheckGraph* graph = &program->input->graph;
+    const CheckOp op = graph->ops[node];
+    const NodeCensusPolicy* policy = &s->policy;
+    bool candidate = false;
+    if (node_census_common_candidate(policy, op))
+    {
+        const bool comparison = node_census_comparison(op);
+        const uint32_t a = comparison ? check_common_bool_expression(graph, graph->operand0[node]) : graph->operand0[node];
+        const uint32_t b = comparison ? check_common_bool_expression(graph, graph->operand1[node]) : graph->operand1[node];
+        const TypeId left = a < graph->count ? node_common_type(s, window, a) : 0;
+        const TypeId right = b < graph->count ? node_common_type(s, window, b) : 0;
+        if (comparison && a < graph->count && b < graph->count)
+        {
+            const CheckOp first = graph->ops[a];
+            const CheckOp second = graph->ops[b];
+            const uint32_t decl = first == CHECK_OP_VALUE && second == CHECK_OP_VALUE ? node_census_declaration(program, graph->tokens[a]) : BUSTER_CHECK_NONE;
+            const bool same = first == second && (first == CHECK_OP_MEMBER || first == CHECK_OP_ARROW || first == CHECK_OP_SUBSCRIPT ||
+                              (decl != BUSTER_CHECK_NONE && (decl == node_census_declaration(program, graph->tokens[b]) ||
+                               (node_common_object(s, window, a) != 0 && node_common_object(s, window, a) == node_common_object(s, window, b)))));
+            const uint8_t left_kind = node_census_kind(program->types, left);
+            const uint8_t right_kind = node_census_kind(program->types, right);
+            candidate = policy->self_compare && (same || (type_kind_is_array(left_kind) && type_kind_is_array(right_kind)) ||
+                        (left_kind == BUSTER_TYPE_KIND_POINTER && right_kind == BUSTER_TYPE_KIND_POINTER &&
+                         (first == CHECK_OP_ADD || second == CHECK_OP_ADD)));
+            candidate |= policy->string_compare && (node_census_string(program, check_expression_uncast(graph, a)) ||
+                                                    node_census_string(program, check_expression_uncast(graph, b)));
+            if (policy->pointer_compare && (op == CHECK_OP_EQUAL || op == CHECK_OP_NOT_EQUAL))
+            {
+                const CheckValue x = node_common_value(s, window, a);
+                const CheckValue y = node_common_value(s, window, b);
+                candidate |= (check_action_null(program->types, &x, 0) && node_census_known_pointer(s, window, b)) ||
+                             (check_action_null(program->types, &y, 0) && node_census_known_pointer(s, window, a));
+            }
+            if (policy->parentheses_equality && op == CHECK_OP_EQUAL)
+            {
+                const Parser* parser = program->parser;
+                uint32_t token = graph->tokens[node];
+                uint32_t parent = check_common_parent(parser, token);
+                if (parent < parser->tokens.count && parser->tree.roles[parent] == PARSE_ROLE_CLOSE_GROUP)
+                {
+                    do
+                    {
+                        token = parent;
+                        parent = check_common_parent(parser, token);
+                    }
+                    while (parent < parser->tokens.count && parent != token && parser->tree.roles[parent] == PARSE_ROLE_CLOSE_GROUP);
+                    candidate |= parent < parser->tokens.count && (parser->tree.roles[parent] == PARSE_ROLE_CLOSE_CONDITION ||
+                                                                   check_common_for_condition(parser, token, parent));
+                }
+            }
+        }
+        else if (op == CHECK_OP_SUBSCRIPT)
+        {
+            candidate = node_census_base(program->types, left) == BUSTER_TYPE_CHAR || node_census_base(program->types, right) == BUSTER_TYPE_CHAR;
+        }
+        else if (op == CHECK_OP_ASSIGN || op == CHECK_OP_INITIALIZE || op == CHECK_OP_CONVERT)
+        {
+            const uint32_t source = op == CHECK_OP_ASSIGN ? b : a;
+            candidate = node_census_base(program->types, node_common_type(s, window, node)) == BUSTER_TYPE_BOOL &&
+                        node_census_known_pointer(s, window, source);
+        }
+        else if (op == CHECK_OP_CALL)
+        {
+            const uint32_t callee = check_common_callee_source(graph, a, NULL);
+            const uint32_t decl = callee < graph->count ? node_census_declaration(program, graph->tokens[callee]) : BUSTER_CHECK_NONE;
+            if (decl < program->input->token_count && program->input->declaration_kinds[decl] == C_BINDING_FUNCTION)
+            {
+                const uint32_t name = program->parser->tokens.names[decl];
+                const String8 spelling = { .pointer = (char*)intern_bytes(s->pp->table, name), .length = intern_length(s->pp->table, name) };
+                const CheckMemoryCall* memory = check_common_memory_call(spelling);
+                if (memory != NULL)
+                {
+                    candidate = policy->fortify && memory->fortify != CHECK_FORTIFY_NONE && check_input_linkage(program->input->declaration_bits, decl) == 2 &&
+                                pp_library_builtin(&s->pp->options, (const uint8_t*)spelling.pointer, (uint32_t)spelling.length) && node_common_fortify(s, window, node, memory);
+                    if (policy->sizeof_memaccess && memory->pointers != 0 && memory->size_index < graph->argument_counts[node])
+                    {
+                        const uint32_t size = check_common_call_unconverted(graph, graph->argument_nodes[graph->argument_offsets[node] + memory->size_index]);
+                        const uint32_t operand = size < graph->count && graph->ops[size] == CHECK_OP_SIZEOF ? graph->operand0[size] : BUSTER_CHECK_NONE;
+                        candidate |= operand < graph->count && node_census_kind(program->types, node_common_type(s, window, operand)) == BUSTER_TYPE_KIND_POINTER;
+                    }
+                }
+            }
+            const TypeId function = node_census_function_type(program->types, left);
+            uint32_t count = 0;
+            const TypeId* parameters = function != 0 ? type_parameters(program->types, function, &count) : NULL;
+            for (uint32_t i = 0; policy->pointer_bool && !candidate && i < count && i < graph->argument_counts[node]; i += 1)
+            {
+                const uint32_t argument = graph->argument_nodes[graph->argument_offsets[node] + i];
+                candidate = argument < graph->count && node_census_base(program->types, parameters[i]) == BUSTER_TYPE_BOOL &&
+                            node_census_known_pointer(s, window, argument);
+            }
+        }
+        else
+        {
+            const bool both = op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR;
+            candidate = node_census_known_pointer(s, window, a) || (both && node_census_known_pointer(s, window, b));
+        }
+    }
+    return candidate;
+}
+
+// Most records have no common expression warning. Select their opcodes 64 at a time before inspecting operands.
+static uint64_t node_common_range(const NodeCensusScratch* s, const NodeCommonWindow* window, const uint8_t* codes, uint32_t first, uint32_t count)
+{
+    const __m512i candidates = _mm512_loadu_si512(s->common_operators);
+    for (uint32_t at = 0; at < count; at += 64)
+    {
+        const uint32_t live = count - at;
+        const uint64_t lanes = live >= 64 ? UINT64_MAX : (UINT64_C(1) << live) - 1;
+        const __m512i ops = _mm512_and_si512(_mm512_maskz_loadu_epi8(lanes, codes + at), _mm512_set1_epi8(0x7f));
+        uint64_t mask = lanes & _mm512_movepi8_mask(_mm512_permutexvar_epi8(ops, candidates)) &
+                        _mm512_cmplt_epu8_mask(ops, _mm512_set1_epi8(64));
+        while (mask != 0)
+        {
+            if (node_census_common_warning(s, window, first + at + (uint32_t)__builtin_ctzll(mask)))
+            {
+                return UINT64_C(1) << NODE_CENSUS_UNMODELED;
+            }
+            mask &= mask - 1;
+        }
+    }
+    return 0;
+}
+
+// The tests of the current expression's node, as bits of NodeCensusTest.
 static uint64_t node_census_node(NodeCensusScratch* s, uint32_t node, uint32_t root, NodeCensusRoot context)
 {
     const CheckProgram* program = s->program;
@@ -2090,6 +2381,7 @@ static uint64_t node_census_node(NodeCensusScratch* s, uint32_t node, uint32_t r
     const uint32_t token = graph->tokens[node];
     uint64_t tests = 0;
     // The set.
+    tests |= node_census_common_warning(s, NULL, node) ? UINT64_C(1) << NODE_CENSUS_UNMODELED : 0;
     tests |= !node_census_coded(op) ? UINT64_C(1) << NODE_CENSUS_OPERATOR : 0;
     tests |= (type_bits & BUSTER_NODE_CENSUS_TYPE_SPECIAL) != 0 ? UINT64_C(1) << NODE_CENSUS_TYPE : 0;
     tests |= types->atomic_records && (op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW) && node_view_atomic_member(s, node) ?
@@ -2217,7 +2509,7 @@ static uint64_t node_census_node(NodeCensusScratch* s, uint32_t node, uint32_t r
     {
         parentheses |= check_common_bitwise_precedence(parser, token, parent);
     }
-    parentheses |= policy->logical_not && op == CHECK_OP_NOT && check_common_comparison_role(parent_role) && token < parent;
+    parentheses |= policy->logical_not && op == CHECK_OP_NOT && (check_common_comparison_role(parent_role) || parent_role == PARSE_ROLE_BITWISE_AND) && token < parent;
     const bool shift = op == CHECK_OP_SHIFT_LEFT || op == CHECK_OP_SHIFT_RIGHT;
     for (uint32_t i = 0; policy->shift_parentheses && shift && i < 2; i += 1)
     {
@@ -2946,6 +3238,10 @@ static void node_tests_tables(NodeCensusScratch* s, const TypeTable* types)
         // The operators the CFG builder's observer may hear of (node_census_tautology) under its warnings.
         const bool tautology = op == CHECK_OP_EQUAL || op == CHECK_OP_NOT_EQUAL || op == CHECK_OP_BIT_OR || op == CHECK_OP_LOGICAL_AND ||
                                op == CHECK_OP_LOGICAL_OR;
+        if (code < 64)
+        {
+            s->common_operators[code] = node_census_common_candidate(policy, op) ? 0x80 : 0;
+        }
         const bool always = op == CHECK_OP_CALL || op == CHECK_OP_CONDITIONAL || op == CHECK_OP_COMMA ||
                             !node_census_coded(op) || (types->atomic_records && (op == CHECK_OP_MEMBER || op == CHECK_OP_ARROW)) ||
                             (policy->sign_compare && comparison) || (policy->self_assign && op == CHECK_OP_ASSIGN) || (policy->tautology && tautology) ||
@@ -2980,7 +3276,7 @@ static void node_tests_tables(NodeCensusScratch* s, const TypeTable* types)
                                         op == CHECK_OP_CONVERT ? BUSTER_NODE_TESTS_QUIET_CONVERT : BUSTER_NODE_TESTS_QUIET_NONE);
         const bool bitwise = op == CHECK_OP_BIT_AND || op == CHECK_OP_BIT_OR || op == CHECK_OP_BIT_XOR;
         s->own_tree_marks[code] = (uint8_t)(op == CHECK_OP_NOT ? BUSTER_NODE_TESTS_TREE_NOT : op == CHECK_OP_ASSIGN ? BUSTER_NODE_TESTS_TREE_ASSIGN : 0);
-        s->own_tree_firsts[code] = (uint8_t)(comparison ? BUSTER_NODE_TESTS_TREE_NOT : op == CHECK_OP_CONDITION ? BUSTER_NODE_TESTS_TREE_ASSIGN : 0);
+        s->own_tree_firsts[code] = (uint8_t)(comparison || op == CHECK_OP_BIT_AND ? BUSTER_NODE_TESTS_TREE_NOT : op == CHECK_OP_CONDITION ? BUSTER_NODE_TESTS_TREE_ASSIGN : 0);
         s->own_tree_sends[code] = bitwise || op == CHECK_OP_CAST ? BUSTER_NODE_TESTS_OPERAND_COMPARISON : 0;
         s->own_roots[code] = (uint8_t)node_census_root_kind(op);
     }
@@ -3004,7 +3300,7 @@ static __attribute__((noinline)) uint64_t node_tests_tree(const NodeCensusScratc
     const bool head = parent_role == PARSE_ROLE_CLOSE_CONDITION || parent_role == PARSE_ROLE_CLOSE_FOR ||
                       (grandparent < token_count && parser->tree.roles[grandparent] == PARSE_ROLE_CLOSE_FOR);
     bool parentheses = check_common_comparison_role(role) && policy->parentheses && bitwise && check_common_bitwise_precedence(parser, token, parent);
-    parentheses |= op == CHECK_OP_NOT && policy->logical_not && check_common_comparison_role(parent_role) && token < parent;
+    parentheses |= op == CHECK_OP_NOT && policy->logical_not && (check_common_comparison_role(parent_role) || parent_role == PARSE_ROLE_BITWISE_AND) && token < parent;
     if (op == CHECK_OP_ASSIGN && policy->parentheses && head && role == PARSE_ROLE_ASSIGN && parser->tokens.kinds[token] == PARSE_KIND_EQUAL)
     {
         const bool for_condition = check_common_for_condition(parser, token, parent);
@@ -3335,6 +3631,8 @@ static uint64_t node_tests_expression(NodeCensusScratch* s, uint32_t root, NodeC
     s->own_types = loop->types;
     s->own_properties = loop->properties;
     uint64_t tests = loop->tests;
+    tests |= node_common_range(s, NULL, codes, first, count - 1);
+    tests |= node_census_common_warning(s, NULL, root) ? UINT64_C(1) << NODE_CENSUS_UNMODELED : 0;
     // The tree's tests, of the operands of each operator listed for them: each reads its own token's parent.
     uint64_t read[BUSTER_NODE_MACHINE_MOST / 64 + 1];
     for (uint32_t word = 0; s->own_tree_verify && word < words; word += 1)
@@ -4987,6 +5285,15 @@ static void node_tests_window_chunk(NodeCensusReader* tests, struct NodeFactsRea
             const uint32_t addresses = (context == NODE_CENSUS_ROOT_RETURN) & return_address & ((set & (BUSTER_NODE_TESTS_SET_ADDRESS | BUSTER_NODE_TESTS_SET_ARRAY)) != 0);
             const uint32_t listed = (lists != 0) | !rooted | (unsequenced & (sequenced ^ 1)) | ((context == NODE_CENSUS_ROOT_STATEMENT) & discards) | addresses |
                                     ((state->placed[e] & BUSTER_NODE_FACTS_PLACED_WARNED) != 0);
+            if (listed == 0)
+            {
+                const NodeCommonWindow window = {
+                    .operands = state->facts.records + first, .root_record = state->facts.records + record,
+                    .first = state->firsts[e], .count = size, .root = root,
+                };
+                bits |= node_common_range(s, &window, front->ops + first, window.first, size);
+                bits |= node_census_common_warning(s, &window, root) ? UINT64_C(1) << NODE_CENSUS_UNMODELED : 0;
+            }
             bits |= fixed | (context == NODE_CENSUS_ROOT_OTHER ? UINT64_C(1) << NODE_CENSUS_CONTROL : 0);
             // A `for`'s clause, under -Wfor-loop-analysis alone, which lists most expressions (-Wall's other warnings):
             // its two loads are for those with nothing listed.
