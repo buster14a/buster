@@ -104,7 +104,7 @@ static bool check_input_vla_defines(const CheckInputReader* reader, uint32_t fir
             const uint32_t after = parser->tree.parents[token] + 1;
             region_end = after > region_end ? after : region_end;
         }
-        if ((kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM) && check_input_memo_get(&reader->tag_types, token) == 0)
+        if ((kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM) && check_input_memo_get(reader, reader->tag_types, token) == 0)
         {
             const uint32_t body = check_input_tag_body(parser, token, end);
             const bool definition = body < end && parser->tokens.kinds[body] == PARSE_KIND_L_BRACE;

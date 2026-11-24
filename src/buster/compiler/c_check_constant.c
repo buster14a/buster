@@ -635,7 +635,7 @@ static TypeId check_constant_enum_operand(const CheckConstantInput* input, uint3
             }
             const bool found = opening != BUSTER_CHECK_NONE && parser->tokens.kinds[keyword] == PARSE_KIND_ENUM && check_input_enum_opening(reader, keyword) == opening;
             const uint32_t found_close = found ? close : BUSTER_CHECK_NONE;
-            const TypeId found_type = found ? check_input_memo_get(&reader->tag_types, keyword) : 0;
+            const TypeId found_type = found ? check_input_memo_get(reader, reader->tag_types, keyword) : 0;
             // (Only a found enumeration is kept: inside its own definition its tag may not be read yet.)
             reader->enum_keys[slot] = found ? declaration + 1 : reader->enum_keys[slot];
             reader->enum_closes[slot] = found ? found_close : reader->enum_closes[slot];
@@ -1213,11 +1213,11 @@ static TypeId check_constant_specifiers(CheckConstantInput* input, uint32_t* cur
             }
             else if (kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM)
             {
-                const TypeId selected = check_input_memo_get(&reader->tag_types, i);
+                const TypeId selected = check_input_memo_get(reader, reader->tag_types, i);
                 valid &= selected != 0 && base == 0;
                 base = selected;
                 named_type = true;
-                i = selected != 0 ? check_input_memo_get(&reader->tag_ends, i) - 1 : i;
+                i = selected != 0 ? check_input_memo_get(reader, reader->tag_ends, i) - 1 : i;
             }
             else if (kind == PARSE_KIND_TYPE)
             {
@@ -1340,7 +1340,7 @@ static TypeId check_constant_specifiers(CheckConstantInput* input, uint32_t* cur
         }
         else if (kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM)
         {
-            const uint32_t end = check_input_memo_get(&reader->tag_ends, token);
+            const uint32_t end = check_input_memo_get(reader, reader->tag_ends, token);
             token = end > token ? end : token + 1;
         }
         else if (kind == PARSE_KIND_L_PAREN && parser->tree.parents[token] > token && parser->tree.parents[token] < i)
@@ -2156,12 +2156,12 @@ static uint32_t check_constant_completed_tag(CheckConstantInput* input, uint32_t
     const Parser* parser = reader->parser;
     uint32_t end = token;
     const uint8_t kind = parser->tokens.kinds[token];
-    const TypeId tag = input->syntax[token - input->first] && (kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM) ? check_input_memo_get(&reader->tag_types, token) : 0;
+    const TypeId tag = input->syntax[token - input->first] && (kind == PARSE_KIND_STRUCT || kind == PARSE_KIND_ENUM) ? check_input_memo_get(reader, reader->tag_types, token) : 0;
     if (tag != 0)
     {
         const uint32_t body = check_input_tag_body(parser, token, input->end);
         const uint32_t close = body < input->end && parser->tokens.kinds[body] == PARSE_KIND_L_BRACE ? parser->tree.parents[body] : input->end;
-        const uint32_t after = check_input_memo_get(&reader->tag_ends, token);
+        const uint32_t after = check_input_memo_get(reader, reader->tag_ends, token);
         if (body < close && close < after && after <= input->end && type_is_complete(reader->types, tag))
         {
             memset(input->syntax + token - input->first, 1, after - token);
@@ -2182,7 +2182,7 @@ static bool check_constant_tag_finish(CheckConstantInput* input, uint32_t positi
         const uint32_t token = next - 1;
         const bool definition = input->deferred_tags && position < input->end &&
                                 input->reader->parser->tokens.kinds[position] == PARSE_KIND_L_BRACE;
-        valid = (input->cached ? check_input_memo_get(&input->reader->tag_types, token) : check_input_tag_identity(input->reader, token, input->end, definition)) != 0;
+        valid = (input->cached ? check_input_memo_get(input->reader, input->reader->tag_types, token) : check_input_tag_identity(input->reader, token, input->end, definition)) != 0;
         if (valid && definition)
         {
             input->pending_tag = token;
@@ -4273,9 +4273,9 @@ static bool check_constant_evaluate(CheckConstantInput* input)
                     // Publish once, while this enclosing operand is folded. This is only the operand's type for
                     // VLA routing, not an explicit query type or a substitute for the graph's constraint checks.
                     const TypeId operand = action.type != 0 ? action.type : action.operands[0].type;
-                    if (check_input_memo_get(&reader->sizeof_types, token) != operand)
+                    if (check_input_memo_get(reader, reader->sizeof_types, token) != operand)
                     {
-                        check_input_memo_set(reader, &reader->sizeof_types, token, operand);
+                        check_input_memo_set(reader, reader->sizeof_types, token, operand);
                     }
                 }
                 check_constant_warning_operands(input, &action, first, count);

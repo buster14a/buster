@@ -1365,13 +1365,16 @@ Five columns still accounted for 1,041 first-write pages. The `sizeof` operand
 types used 318 pages, the tag types and ends used 351, and the declaration bases
 and specifiers used 372. [Column census and first change](https://github.com/buster14a/buster-performance/tree/dd3544b/docs/measurements/sparse-columns-1167-2026-11-16)
 
-In source order, these five columns share a pool in the reader's base-page
-arena. The first nonzero write in a group of 16 tokens takes one 64-byte block.
-Each directory entry indexes the pool, so writes far apart in the source can
-share a physical page. Complementing each value makes the pool's empty block
-read as zero, including at the end-of-input sentinel. The reader releases the
-pool before emission. Deferred readers use contiguous arrays for the parallel
-body writes and the subsequent TypeId remap.
+In source order, the five columns share three directories in the reader's
+base-page arena. Each directory entry covers 16 tokens. The first nonzero
+`sizeof` operand type takes one 64-byte block. A tag type and its end share
+a directory entry, as do a declaration base and its specifier. Writing either
+member of a pair takes two adjacent blocks, and each member can still be set
+independently. The reader clears the directories up front to avoid a second
+page fault when it writes an entry it has already read. Complementing the
+stored values makes the pool's empty blocks read as zero, including at the
+end-of-input sentinel. The reader releases the pool before emission. Deferred
+readers keep contiguous arrays for parallel body writes and the TypeId remap.
 
 ### The preprocessor's output before the backend (#628)
 
