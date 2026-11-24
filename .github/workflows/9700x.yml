@@ -695,15 +695,20 @@ jobs:
       - name: Parse the compiler source on the native vector build
         run: '"$BUSTER_COMPILER" parse -fsyntax-only -march="$BUSTER_HOST_ARCH" -Isrc -fwrapv -funsigned-char --predefines build/predefines.h -DBUSTER_COMPLETE_DRIVER=1 src/buster/compiler/main.c'
 
-      - name: Run complete native vector correctness before benchmarks
+      - name: Run native vector correctness before benchmarks
+        env:
+          NATIVE_MODE: ${{ needs.evidence.outputs.native }}
         id: native
-        # Not on pull requests (#1272): their hosted rows cover correctness, and native correctness runs after the
-        # merge, on main's push and the scheduled and nightly runs, before their measurements.
+        # Backlog states with exact full vector evidence run the measured binary's smoke. All other admitted
+        # states run the complete inventory. Both must pass before any measurement.
         if: github.event_name != 'pull_request'
         run: |
           # The record tells a correctness failure here (started, never passed) from a measurement's after it.
           printf 'native=started\n' >> "$GITHUB_OUTPUT"
-          taskset -c 0-7 "$BUSTER_COMPILER" parallel --github --jobs 8 --timeout 600 < tools/ci/correctness.tests
+          suite=tools/ci/correctness.tests
+          if [ "$NATIVE_MODE" = smoke ]; then suite=tools/ci/znver5-smoke.tests; fi
+          printf 'Native correctness inventory: %s\n' "$suite"
+          taskset -c 0-7 "$BUSTER_COMPILER" parallel --github --jobs 8 --timeout 600 < "$suite"
           printf 'native=passed\n' >> "$GITHUB_OUTPUT"
           oracle="${XDG_CACHE_HOME:-$HOME/.cache}/buster/oracle"
           if [ "$BUSTER_ORACLE_CACHE" = check ] && [ -d "$oracle" ]; then

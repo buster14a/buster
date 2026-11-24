@@ -138,6 +138,10 @@ if [ -n "$fixture" ]; then
     key=$(basename "$fixture")
     count=$(( $(cat "$FIXTURES/count-$key" 2> /dev/null || echo 0) + 1 ))
     printf '%s\n' "$count" > "$FIXTURES/count-$key"
+    if [ -f "$fixture.partial" ]; then
+        cat "$fixture" # A valid first page, followed by a transport failure.
+        exit 1
+    fi
     if [ -f "$fixture.$count.fail" ]; then
         printf '{"message":"Server Error","status":"502"}\n'
         printf 'gh: Server Error (HTTP 502)\n' >&2
@@ -367,7 +371,38 @@ JSON
 NIGHTLY_NOW=$(madrid '2026-11-04 04:10') GITHUB_EVENT_NAME=workflow_dispatch GITHUB_SHA=$docs EVIDENCE_PURPOSE=backlog EVIDENCE_HARDWARE=admit EVIDENCE_SNAPSHOT=$head run_evidence "$history"
 expect_line "$GITHUB_OUTPUT" 'hosted=reused' 'a backlog run reuses the plain rows of its commit'"'"'s merge-queue run'
 expect_line "$GITHUB_OUTPUT" 'hosted_source=810' 'naming the candidate'"'"'s run'
-rm -f "$fixtures/runs-head-$docs.json"
+expect_line "$GITHUB_OUTPUT" 'native=run' 'legacy plain shards alone require full native correctness'
+
+# Only the selected source run can supply the full vector verdict and aggregate.
+vector='Tests on Ubuntu 26.04 (vector, none address thread memory, O3) / Vector row verdict (Clang 23, none address thread memory, O3)'
+jq --arg name "$vector" '.jobs += [ {name:$name,status:"completed",conclusion:"success"},
+    {name:"Integration qualification",status:"completed",conclusion:"success"} ]' "$fixtures/jobs-810.json" > "$work/qualified-jobs.json"
+cp "$fixtures/runs-head-$docs.json" "$work/queue-run.json"
+for variant in qualified snapshot skipped-gate failed-vector duplicate-vector wrong-caller wrong-repository wrong-sha failed-run partial-jobs; do
+    cp "$work/qualified-jobs.json" "$fixtures/jobs-810.json"
+    cp "$work/queue-run.json" "$fixtures/runs-head-$docs.json"
+    purpose=backlog
+    case "$variant" in
+        snapshot) purpose=snapshot ;;
+        skipped-gate) jq '.jobs[-1].conclusion="skipped"' "$work/qualified-jobs.json" > "$fixtures/jobs-810.json" ;;
+        failed-vector) jq '.jobs[-2].conclusion="failure"' "$work/qualified-jobs.json" > "$fixtures/jobs-810.json" ;;
+        duplicate-vector) jq '.jobs += [.jobs[-2] | .name |= sub("Clang 23";"Clang 24")]' "$work/qualified-jobs.json" > "$fixtures/jobs-810.json" ;;
+        wrong-caller) jq '.jobs[-2].name |= sub("vector, ";"native, ")' "$work/qualified-jobs.json" > "$fixtures/jobs-810.json" ;;
+        wrong-repository) jq '.workflow_runs[0].head_repository.id=42' "$work/queue-run.json" > "$fixtures/runs-head-$docs.json" ;;
+        wrong-sha) jq --arg sha "$merge" '.workflow_runs[0].head_sha=$sha' "$work/queue-run.json" > "$fixtures/runs-head-$docs.json" ;;
+        failed-run) jq '.workflow_runs[0].conclusion="failure"' "$work/queue-run.json" > "$fixtures/runs-head-$docs.json" ;;
+        partial-jobs) touch "$fixtures/jobs-810.json.partial" ;;
+    esac
+    NIGHTLY_NOW=$(madrid '2026-11-04 04:10') GITHUB_EVENT_NAME=workflow_dispatch GITHUB_SHA=$docs EVIDENCE_PURPOSE=$purpose EVIDENCE_HARDWARE=admit EVIDENCE_SNAPSHOT=$head run_evidence "$history"
+    if [ "$variant" = qualified ]; then
+        expect_line "$GITHUB_OUTPUT" 'native=smoke' 'qualified backlog runs the measured binary smoke'
+        expect_line "$GITHUB_OUTPUT" 'native_source=810' 'the record identifies the qualifying run'
+    else
+        expect_line "$GITHUB_OUTPUT" 'native=run' "$variant retains the complete native suite"
+        expect_line "$GITHUB_OUTPUT" 'native_source=' "$variant claims no vector replacement"
+    fi
+done
+rm -f "$fixtures/jobs-810.json.partial" "$fixtures/runs-head-$docs.json"
 
 # --- The aggregate's coverage check for a merge-queue candidate (#1430), against this run's jobs ---
 
@@ -708,17 +743,51 @@ printf '#!/bin/sh\nexit 1\n' > "$work/identity-bin/pacman"
 test -z "$(identity)" || fail 'without a package database no identity is recorded'
 grep -Fq '(software: no package database)' "$work/identity.log" || fail 'and the warning says why'
 
+# The native step from the workflow: observe the inventory passed to the real command line and its failure marker.
+awk '/^        id: native$/ { step = 1 }
+    step && /^        run: \|$/ { body = 1; next }
+    body && /^      - name: / { exit }
+    body { sub(/^          /, ""); print }' "$root/.github/workflows/9700x.yml" > "$work/native-step.sh"
+mkdir "$work/native-bin"
+cat > "$work/native-bin/taskset" <<'SH'
+#!/bin/sh
+test "$*" = '-c 0-7 measured-compiler parallel --github --jobs 8 --timeout 600' || exit 2
+cat > "$OBSERVED_SUITE"
+exit "$FIXTURE_STATUS"
+SH
+chmod +x "$work/native-bin/taskset"
+for mode in smoke run; do
+    suite=tools/ci/correctness.tests
+    if [ "$mode" = smoke ]; then suite=tools/ci/znver5-smoke.tests; fi
+    for expected in 0 1; do
+        : > "$GITHUB_OUTPUT"
+        result=0
+        OBSERVED_SUITE="$work/observed.tests" BUSTER_COMPILER=measured-compiler BUSTER_ORACLE_CACHE=use FIXTURE_STATUS=$expected \
+            PATH="$work/native-bin:$PATH" NATIVE_MODE=$mode bash -eo pipefail "$work/native-step.sh" > /dev/null || result=$?
+        cmp "$work/observed.tests" "$suite" || fail "$mode selected the wrong inventory"
+        [ "$result" = "$expected" ] || fail "$mode lost the suite exit status"
+        expect_line "$GITHUB_OUTPUT" 'native=started' 'both inventories record their start'
+        if [ "$expected" = 0 ]; then
+            expect_line "$GITHUB_OUTPUT" 'native=passed' 'the suite passed'
+        else
+            expect_no_match "$GITHUB_OUTPUT" '^native=passed' 'the failed suite cannot qualify measurements'
+        fi
+    done
+done
+
 # --- The record job, in this repository's checkout ---
 
 : > "$GITHUB_OUTPUT"
 RECORD_REPOSITORY=1421805693 RECORD_RUN=41 RECORD_ATTEMPT=1 RECORD_EVENT=workflow_dispatch RECORD_DISPATCH_PURPOSE=backlog \
     RECORD_REQUEST=20261104.9.1.admit RECORD_MODE=on RECORD_CODE=true RECORD_MEASURE=,lexer, \
     CHANGES_OUTPUTS='{"code":"true","checker":"true","zen5":"false","measure":",lexer,"}' RECORD_CHANGES_RESULT=success \
-    RECORD_EVIDENCE_RESULT=success RECORD_SCOPE=plain RECORD_HOSTED=reused RECORD_HOSTED_SOURCE=40 RECORD_HARDWARE=admit \
+    RECORD_EVIDENCE_RESULT=success RECORD_SCOPE=plain RECORD_HOSTED=reused RECORD_HOSTED_SOURCE=40 RECORD_NATIVE_EVIDENCE=smoke RECORD_NATIVE_SOURCE=40 RECORD_HARDWARE=admit \
     RECORD_HARDWARE_REASON=admitted RECORD_TEST_RESULT=skipped RECORD_FUZZ_RESULT=skipped RECORD_BENCHMARK_RESULT=success \
     RECORD_WINDOW=open RECORD_NATIVE=passed RECORD_HOST=9700X/6.17/0xb40/gcc-15/glibc_2.42/sw-0123456789abcdef \
     bash tools/ci/nightly.sh record "$work/record-job" > /dev/null
 expect_line "$GITHUB_OUTPUT" 'outcome=complete' 'a backlog run that measured is complete'
+expect_line "$work/record-job/record.tsv" $'native_evidence\tsmoke' 'a smoke run identifies its native inventory'
+expect_line "$work/record-job/record.tsv" $'native_source\t40' 'a smoke run cites the full hosted source'
 expect_line "$work/record-job/record.tsv" $'gates\tchecker' 'the record names the selector'"'"'s true outputs'
 # A merge-queue candidate's record (#1430), in a checkout of GitHub's merge: its base, and its pull request's head as
 # the merge's second parent. It passes through the aggregate alone.

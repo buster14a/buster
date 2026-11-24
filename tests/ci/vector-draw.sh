@@ -343,7 +343,7 @@ evidence()
     [ -n "$product" ] || { if [ "${item:1}" = 1 ]; then product="built $sha"; else product="installed $sha"; fi; }
     mkdir -p "$records/$p-$at-evidence-$item"
     record "$level" "$candidate" "Intel Xeon 8370C" qualified "$records/$p-$at-evidence-$item/record"
-    printf 'decision\t%s\ntarget\t-march=x86-64-v4\nhost-vector\t1\nkernels\tok\nitem\t%s\nconfiguration\t%s\nshard\t%s\nproduct\t%s\nsuite\tpassed\n' \
+    printf 'decision\t%s\ntarget\t-march=x86-64-v4\nhost-vector\t1\nkernels\tbenchmark-lexer x86_64_encoder.c: 0 files differ, 0 files (0.00%% of bytes) need the scalar lexer for a part\nitem\t%s\nconfiguration\t%s\nshard\t%s\nproduct\t%s\nsuite\tpassed\n' \
         "$decision" "$item" "$BUSTER_VECTOR_CONFIGURATIONS" "${item:1}" "$product" >> "$records/$p-$at-evidence-$item/record"
     ledger "$p-$at-rest-draw-$level-$candidate" take 0
     if [[ "$product" == installed\ * ]]; then ledger "$p-$at-rest-draw-$level-$candidate" product 0; fi
@@ -403,6 +403,14 @@ grep -q "Item(s) n2 have no single passing" "$work/log" || fail "another candida
 evidence 1 n2 1 5
 sed -i '/^kernels/d' "$records/$p-1-evidence-n2/record"
 if verdict; then fail 'evidence without the kernels passes'; fi
+for field in cpu target; do
+    evidence 1 n2 1 5
+    sed -i "/^${field}\t/d" "$records/$p-1-evidence-n2/record"
+    if verdict; then fail "evidence without $field passes"; fi
+done
+evidence 1 n2 1 5
+sed -i 's/0 files differ/1 files differ/' "$records/$p-1-evidence-n2/record"
+if verdict; then fail 'a nonempty kernel mismatch passes'; fi
 evidence 1 n2 1 5
 evidence 1 n1 1 3 'took n1' "installed $sha"
 if verdict; then fail "an item 1 that installed its product passes"; fi

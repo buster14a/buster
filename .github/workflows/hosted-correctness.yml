@@ -372,18 +372,11 @@ jobs:
         # lexer's vector kernels, every byte of it (no part needs the scalar lexer), and checks the tokens against the
         # scalar twin's.
         if: env.BUSTER_SHARD != ''
-        run: |
-          draw="$RUNNER_TEMP/vector-draw"
-          mapfile -d '' -t host_flags < <(./build.sh print-host-flags)
-          test "${#host_flags[@]}" -gt 0
-          clang "${host_flags[@]}" -Isrc -E -include src/buster/compiler/host_isa.h -x c /dev/null -o /dev/null
-          "$BUSTER_COMPILER" benchmark-lexer src/buster/compiler/x86_64_encoder.c 2>&1 | tee "$draw/kernels"
-          kernels=$(grep -x 'corpus: 0 files differ, 0 files (0.00% of bytes) need the scalar lexer for a part' "$draw/kernels")
-          {
-              printf 'target\t%s\n' "${host_flags[*]}"
-              printf 'host-vector\t1\n'
-              printf 'kernels\tbenchmark-lexer x86_64_encoder.c: %s\n' "${kernels#corpus: }"
-          } >> "$draw/record"
+        run: bash tools/ci/vector-kernels.sh src/buster/compiler/x86_64_encoder.c "$RUNNER_TEMP/vector-draw"
+
+      - name: Prove that vector mismatches and tail failures reject an assigned item
+        if: inputs.host_arch == 'vector' && env.BUSTER_VECTOR_ITEM == 'n1'
+        run: bash tests/ci/vector-seeds.sh
 
       - name: Check out reviewed first-party performance fixtures and acceptance harnesses
         # With the qualification below, on the daily and dispatched runs and on pull requests that change the readers

@@ -36,7 +36,12 @@ Each drawn item, native or vector, records its target and predicate, then runs `
 over `x86_64_encoder.c`; the entire input must use vector lexer kernels and
 match the scalar twin. This is direct execution evidence for that lexer input,
 not a counter proving that every vector implementation ran. The verdict
-requires a passing qualified execution of every item.
+requires a passing qualified execution of every item. The plain vector
+builder also runs the [seeded failure fixture](../tests/ci/vector-seeds.sh).
+It compiles the same lexer comparison with two test-only changes to masked
+loads. One changes a plus token to minus. The other drops the 65th byte.
+Each input passes with the seed disabled. With the seed enabled, the
+comparison reports a mismatch and the draw verdict fails the assigned item.
 
 The full suites use the same inventory, sharded by row-specific costs: four
 items a configuration.
@@ -82,8 +87,9 @@ compiler. Those options alone do not establish host-vector execution.
   [sanitizer policy](ci.md#sanitizer-builds-and-detection-policy).
 - The vector target uses generic x86-64-v4 tuning, not the measured `znver5`
   binary; hosted virtual machines also have different CPU, OS and page-policy
-  behavior. Native 9700X correctness and performance remain separate nightly
-  or dispatched evidence. Neither the hosted row nor this map establishes
+  behavior. Each nightly snapshot runs the full native suite. A backlog state
+  with qualifying full hosted evidence runs the [native smoke](../tools/ci/znver5-smoke.tests)
+  and its selected measurements. Other backlog states run the full native suite. Neither the hosted row nor this map establishes
   native performance or complete Zen 5 equivalence.
 - The full SQLite Tcl suite is nightly, outside the ordinary hosted inventory.
   Self-host qualification is a separate workflow, with a bounded smoke and a

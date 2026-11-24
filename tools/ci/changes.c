@@ -3948,6 +3948,8 @@ static bool changes_vector_policy(Text row, Text host_isa, Text settings, Text p
         "\n      - name: Record that the vector builder has finished publishing\n        if: ${{ always() && inputs.host_arch == 'vector' && env.BUSTER_VECTOR_BUILDER == '1' }}\n",
         "\n          name: ${{ steps.probe.outputs.prefix }}-builder-${{ env.BUSTER_SANITIZER }}-ended\n          path: ${{ runner.temp }}/vector-draw/record\n          overwrite: false\n",
         "\n          if [ \"$path\" != vector ]; then\n",
+        "\n        run: bash tools/ci/vector-kernels.sh src/buster/compiler/x86_64_encoder.c \"$RUNNER_TEMP/vector-draw\"\n",
+        "\n        if: inputs.host_arch == 'vector' && env.BUSTER_VECTOR_ITEM == 'n1'\n        run: bash tests/ci/vector-seeds.sh\n",
     };
     for (uint32_t i = 0; i < sizeof(required) / sizeof(required[0]); i += 1)
     {

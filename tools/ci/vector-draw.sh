@@ -813,7 +813,8 @@ verdict()
             if [ -e "$name" ] && [ "$(field level "$name") $(field candidate "$name")" = "$holder" ] &&
                 [ "$(field probe "$name")" = qualified ] && [ "$(field suite "$name")" = passed ] && [ "$(field item "$name")" = "$item" ] &&
                 [ "$(field configuration "$name")" = "$configuration" ] && [ "$(field shard "$name")" = "${item:1}" ] &&
-                { [ "$row_arch" = job ] || { [ "$(field host-vector "$name")" = 1 ] && [ -n "$(field kernels "$name")" ] &&
+                { [ "$row_arch" = job ] || { [ "$(field host-vector "$name")" = 1 ] && [ -n "$(field target "$name")" ] && [ -n "$(field cpu "$name")" ] &&
+                    [ "$(field kernels "$name")" = "benchmark-lexer x86_64_encoder.c: 0 files differ, 0 files (0.00% of bytes) need the scalar lexer for a part" ] &&
                     [[ "$(field product "$name")" =~ ^$built\ [0-9a-f]{64}$ ]]; }; } &&
                 [[ "$(field decision "$name")" == "took $item"* ]]; then
                 passing=$((passing + 1))
