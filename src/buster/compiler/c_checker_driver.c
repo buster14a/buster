@@ -10869,6 +10869,53 @@ static bool check_driver_provisional_check(CheckProgramSelection* provisional, c
     return usable;
 }
 
+// --branch-truth-census (#1340), a test option: that the bit check_program_branch_truth asks before its fold
+// (check_cfg_decidable) is sound on this unit, with every node asked every way a condition is, not only the ones a walk
+// asks. Each node as a condition of its own (a statement's), each logical operator's and each conditional's first
+// operand as its operator's, and each node's tryEvaluateBool, as written and parenthesized, under an observer with no
+// cache, which hears every event: a node whose bit is clear must be undecided by all of them and fire no event. One line
+// on stderr: the nodes, those whose bit is set and those some form decides or fires an event at; the same of the
+// conditions (the CONDITION nodes and those first operands); and `unsound`, the nodes with a clear bit that a form
+// decided, which fails the compile where it isn't 0.
+static bool check_driver_branch_truth_census(const CheckProgram* program)
+{
+    const CheckGraph* graph = &program->input->graph;
+    const uint32_t count = graph->count;
+    uint32_t kept = 0;
+    uint32_t decided = 0;
+    uint32_t conditions = 0;
+    uint32_t condition_kept = 0;
+    uint32_t condition_decided = 0;
+    uint32_t events = 0;
+    uint32_t unsound = 0;
+    for (uint32_t node = 0; node < count; node += 1)
+    {
+        const CheckOp op = graph->ops[node];
+        const bool first = op == CHECK_OP_LOGICAL_AND || op == CHECK_OP_LOGICAL_OR || op == CHECK_OP_CONDITIONAL;
+        const uint32_t operand = first ? graph->operand0[node] : BUSTER_CHECK_NONE;
+        bool truth = false;
+        CheckCfgObserver observer = { 0 };
+        const bool own = check_program_branch_fold(program, node, node, &truth);
+        const bool bare = check_cfg_try(program, node, node, true, &observer) != BUSTER_CHECK_CFG_UNKNOWN;
+        const bool enclosed = check_cfg_try(program, node, node, false, &observer) != BUSTER_CHECK_CFG_UNKNOWN;
+        const bool found = own || bare || enclosed || observer.count != 0;
+        const bool bit = check_program_decidable(program, node);
+        const bool operand_found = operand < count && check_program_branch_fold(program, node, operand, &truth);
+        const bool operand_bit = operand < count && check_program_decidable(program, operand);
+        const bool condition = op == CHECK_OP_CONDITION;
+        events += observer.count;
+        kept += bit ? 1 : 0;
+        decided += found ? 1 : 0;
+        conditions += (condition ? 1 : 0) + (operand < count ? 1 : 0);
+        condition_kept += (condition && bit ? 1 : 0) + (operand_bit ? 1 : 0);
+        condition_decided += (condition && own ? 1 : 0) + (operand_found ? 1 : 0);
+        unsound += (found && !bit ? 1 : 0) + (operand_found && !operand_bit ? 1 : 0);
+    }
+    fprintf(stderr, "branch-truth-census\tnodes\t%u\tkept\t%u\tdecided\t%u\tevents\t%u\tconditions\t%u\tkept\t%u\tdecided\t%u\tbits\t%d\tunsound\t%u\n", count, kept, decided,
+            events, conditions, condition_kept, condition_decided, program->decidable != NULL, unsound);
+    return unsound == 0;
+}
+
 // --selection-census's builtins (#2536's step 2.2c.3, part 2), a line of its own: the exact selection's builtins
 // (CheckProgram.builtin_nodes of its bodies) and those of the candidates' pass in the same bodies
 // (CheckProgram.census_pass_builtins), with the candidates' extra and missing ones, and whether the helpers
@@ -12157,6 +12204,9 @@ struct CheckDriverCommand
     // --selection-census (#2536's step 2.1): the candidates' references beside the exact ones, and their selection where
     // they differ, reported on stderr (check_driver_selection_census).
     bool selection_census;
+    // --branch-truth-census (#1340): the bit before a branch condition's fold checked against the fold at every node
+    // (check_driver_branch_truth_census).
+    bool branch_truth_census;
     // --provisional-selection (#2536's step 2.2b): -c's code numbered by the candidates' selection, its extra symbols
     // left out of the object (check_driver_provisional_check).
     bool provisional_selection;
@@ -14481,6 +14531,10 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     check_driver_x86_reports(checking, recovered, pp, &input, reported, &types, quiet);
                     if (program_checked)
                     {
+                        if (command->branch_truth_census && program.status == CHECK_PROGRAM_OK)
+                        {
+                            result = check_driver_branch_truth_census(&program) ? result : 1;
+                        }
                         // A repaired view keeps complete original statements alone; a prefix keeps its original
                         // lookahead for warnings deferred to its final body's end (CheckCommonView, #2406).
                         check_common_view = repairing ? check_driver_common_view(&repair, recovered) :
@@ -15283,6 +15337,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     bool root_image = true;
     bool invalid_root_image = false;
     bool selection_census = false;
+    bool branch_truth_census = false;
     bool provisional_selection = false;
     bool windowed_loop = false;
     uint32_t parse_tile_tokens = BUSTER_PARSE_TILE_TOKENS;
@@ -15733,6 +15788,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         {
             selection_census = true;
         }
+        else if (match.exact == C_OPTION_BRANCH_TRUTH_CENSUS)
+        {
+            branch_truth_census = true;
+        }
         else if (match.exact == C_OPTION_PROVISIONAL_SELECTION)
         {
             provisional_selection = true;
@@ -16085,6 +16144,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         .poison_arenas = poison_arenas,
         .root_image = root_image,
         .selection_census = selection_census,
+        .branch_truth_census = branch_truth_census,
         .provisional_selection = provisional_selection,
         .windowed_loop = windowed_loop,
         .shared_parts = shared_parts,

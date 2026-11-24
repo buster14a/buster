@@ -565,6 +565,9 @@ struct CheckProgram
     // a function whose calls --tier1 expanded (#2541 step 2, check_tier1_inline_rooted).
     const uint32_t* initializer_references;
     uint32_t initializer_reference_count;
+    // Per node, whether a rule of clang's CFG builder's may decide it as a condition (check_cfg_decidable, #1340): a bit
+    // each, clear where check_program_branch_truth answers unknown without its fold. Null asks every fold.
+    const uint64_t* decidable;
     uint32_t* builtin_nodes;
     uint32_t* asm_offsets;
     uint32_t* asm_targets;
@@ -6420,6 +6423,7 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
              (options.prepared_data->declaration_count == 0 || options.prepared_data->declaration_keys != NULL)));
     program->object_count = count + 1;
     program->status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_INVALID;
+    program->decidable = valid ? check_cfg_decidable(program, output, scratch) : NULL;
     uint32_t exit_capacity = 0;
     const uint64_t cleanup_room = valid ? check_program_cleanup_room(parser, input, &exit_capacity) : 0;
     // The exits through cleanups' chains, their records' plans and their dispatches' destinations (#1370).

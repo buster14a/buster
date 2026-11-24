@@ -9418,6 +9418,7 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 #include "c_check_enum_arithmetic_driver_test.c"
 #include "c_check_float_precision_driver_test.c"
 #include "c_check_vla_fold_driver_test.c"
+#include "c_check_branch_truth_driver_test.c"
 #include "c_check_for_loop_driver_test.c"
 #include "c_check_enum_cast_driver_test.c"
 #include "c_check_type_safety_driver_test.c"
@@ -9656,6 +9657,8 @@ static int run_checker_driver_tests(int argc, char** argv)
     bool assert_diagnostics_only = false;
     // --unused-comparison-only: discarded comparisons' assignment-note eligibility (#2906).
     bool unused_comparison_only = false;
+    // --branch-truth-only: the bit before a branch condition's fold against the fold (#1340).
+    bool branch_truth_only = false;
     // --float-precision-only: -Wimplicit-float-conversion's and -Wliteral-range's floating comparisons (#1875).
     bool float_precision_only = false;
     // --constant-logical-only: logical constant diagnostics and their construction-time policy (#2900).
@@ -9746,6 +9749,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         else if (strcmp(argv[i], "--query-bool-only") == 0)
         {
             query_bool_only = true;
+        }
+        else if (strcmp(argv[i], "--branch-truth-only") == 0)
+        {
+            branch_truth_only = true;
         }
         else if (strcmp(argv[i], "--assert-diagnostics-only") == 0)
         {
@@ -9843,7 +9850,7 @@ static int run_checker_driver_tests(int argc, char** argv)
                              (uint32_t)operand_diagnostics_only + (uint32_t)label_attributes_only + (uint32_t)attribute_recovery_only + (uint32_t)assert_bool_only +
                              (uint32_t)malformed_calls_only + (uint32_t)record_extensions_only + (uint32_t)auto_qualifiers_only + (uint32_t)query_bool_only +
                              (uint32_t)run_modes_only + (uint32_t)correctness_edges_only + (uint32_t)imaginary_bit_int_only + (uint32_t)unused_comparison_only + (uint32_t)assert_diagnostics_only +
-                             (uint32_t)float_precision_only +
+                             (uint32_t)float_precision_only + (uint32_t)branch_truth_only +
                              (uint32_t)constant_logical_only + (uint32_t)pic_only + (uint32_t)string_plus_only + (uint32_t)initializer_diagnostics_only;
     options &= focuses <= 1 && (focuses == 0 || (!lazy && check_driver_part.count == 1));
     // One focused section's alone: the others' gates take `focused` as --sign-compare-only's did.
@@ -10425,6 +10432,10 @@ static int run_checker_driver_tests(int argc, char** argv)
     {
         check_test_driver_unused_comparisons(&test, clang, executable, directory);
     }
+    if (temporary && branch_truth_only)
+    {
+        check_test_driver_branch_truth(&test, clang, executable, directory);
+    }
     if (temporary && float_precision_only)
     {
         check_test_driver_float_precision(&test, clang, executable, directory);
@@ -10841,6 +10852,11 @@ static int run_checker_driver_tests(int argc, char** argv)
             {
                 .check = check_test_driver_sizeof_array_decay,
                 .weight = 47,
+            },
+            // The bit before a branch condition's fold (#1340), against the fold at every node.
+            {
+                .check = check_test_driver_branch_truth,
+                .weight = 600,
             },
         };
         for (uint32_t s = 0; !lazy && s < BUSTER_ARRAY_LENGTH(sweeps); s += 1)
