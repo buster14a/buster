@@ -13453,7 +13453,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
         if (ready && lazy_system_headers && !prefix_only)
         {
             uint32_t eager_bodies = 0;
-            const bool eager = check_lazy_eager(checking, checking_pp, scalar, &eager_bodies);
+            const bool eager = check_lazy_eager(checking, checking_pp, &eager_bodies);
             if (eager)
             {
                 lazy = (CheckLazy)

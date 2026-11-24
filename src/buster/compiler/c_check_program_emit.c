@@ -2282,17 +2282,14 @@ static __attribute__((noinline)) CheckTier1Outcome check_program_emit_tier1(Chec
 #define BUSTER_CHECK_EMIT_SELECTANY 0x40u
 
 // The definitions of the unit's objects, an initializer's or a tentative one, for its symbols' commons: a pass over the
-// tokens that declare objects of static storage, few of a unit's, 64 at a time (check_program_object_access's scan; the
-// scalar path, `scalar`, takes every token), which only a unit with a common attribute, or compiled with -fcommon, pays
-// for.
-static void check_program_emit_commons(const CheckProgram* program, uint8_t* commons, bool scalar)
+// tokens that declare objects of static storage, few of a unit's, 64 at a time (check_program_object_access's scan),
+// which only a unit with a common attribute, or compiled with -fcommon, pays for.
+static void check_program_emit_commons(const CheckProgram* program, uint8_t* commons)
 {
-    (void)scalar;
     const CheckInput* input = program->input;
     for (uint32_t first = 0; first < input->token_count; first += 64)
     {
-        const uint64_t lanes = BUSTER_SCALAR_PATH(scalar) ? check_input_scan_all(first, input->token_count) :
-                                        check_input_scan_bit(input->declaration_bits, first, input->token_count, BUSTER_CHECK_BITS_STATIC);
+        const uint64_t lanes = check_input_scan_bit(input->declaration_bits, first, input->token_count, BUSTER_CHECK_BITS_STATIC);
         for (uint64_t selected = lanes; selected != 0; selected &= selected - 1)
         {
             const uint32_t token = first + (uint32_t)__builtin_ctzll(selected);
@@ -3957,10 +3954,9 @@ static UnwindError check_asm_unit_frame(uint32_t saved, uint32_t frame, uint32_t
 // check_data_prepare selects them), its aliases and ifuncs (#147), its literals and whatever has no external linkage
 // but a weakref's own symbol, a weak reference to another's name (check_program_alias_external). The emission's column
 // (check_program_emit_lanes) and check_program_access's share it. The objects it defines are found among the tokens
-// that define or tentatively define, few of a unit's (#592), 64 at a time (the scalar path, `scalar`, takes every token).
-static void check_program_object_access(const CheckProgram* program, uint8_t* access, uint8_t* defined, bool scalar)
+// that define or tentatively define, few of a unit's (#592), 64 at a time.
+static void check_program_object_access(const CheckProgram* program, uint8_t* access, uint8_t* defined)
 {
-    (void)scalar;
     const CheckInput* input = program->input;
     // Only symbols' objects are consumed below or by the linker's external-name collection.
     for (uint32_t s = 0; s < program->symbol_count; s += 1)
@@ -4172,7 +4168,7 @@ static bool check_program_access(CheckProgramCode* code, const CheckProgram* pro
     if (valid)
     {
         memset(access, BUSTER_TIER0_ACCESS_DIRECT, access_count);
-        check_program_object_access(program, access, defined, false);
+        check_program_object_access(program, access, defined);
         for (uint32_t r = 0; r < lowered->runtime_symbol_count; r += 1)
         {
             const CheckLowerRuntime runtime = (CheckLowerRuntime)lowered->runtime_order[r];
@@ -4427,7 +4423,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     if (valid)
     {
         memset(access, BUSTER_TIER0_ACCESS_DIRECT, access_count);
-        check_program_object_access(program, access, defined, BUSTER_SCALAR_PATH(scalar));
+        check_program_object_access(program, access, defined);
         access[shared.provisional_runtimes + CHECK_LOWER_RUNTIME_ERRNO] = BUSTER_TIER0_ACCESS_GOT;
         access[shared.provisional_runtimes + CHECK_LOWER_RUNTIME_MEMCPY] = BUSTER_TIER0_ACCESS_GOT;
     }
@@ -5032,7 +5028,7 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
     common |= program->input->common_tentatives;
     if (valid && common)
     {
-        check_program_emit_commons(program, commons, BUSTER_SCALAR_PATH(scalar));
+        check_program_emit_commons(program, commons);
     }
     // A loader_uninitialized variable of external linkage that common or -fcommon (without nocommon or a section) would
     // make common is a weak definition, as clang's code has it (#147).
@@ -6345,13 +6341,13 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
         }
         // (No frame is kept where the only ones are the room of accessors no body reached, #2101: no table then.)
         UnwindOutput tables = { .location_capacity = kept, .shared = true };
-        valid = valid && (kept == 0 || unwind_write(run.frames, kept, &tables, BUSTER_SCALAR_PATH(scalar)) == UNWIND_ERROR_CAPACITY);
+        valid = valid && (kept == 0 || unwind_write(run.frames, kept, &tables) == UNWIND_ERROR_CAPACITY);
         uint32_t* locations = valid && kept != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, kept) : 0;
         uint8_t* table_bytes = valid && kept != 0 ? arena_push(bytes, tables.size, 8) : 0;
         tables.bytes = table_bytes;
         tables.capacity = tables.size;
         tables.locations = locations;
-        valid = valid && (kept == 0 || (locations != 0 && table_bytes != 0 && unwind_write(run.frames, kept, &tables, BUSTER_SCALAR_PATH(scalar)) == UNWIND_OK));
+        valid = valid && (kept == 0 || (locations != 0 && table_bytes != 0 && unwind_write(run.frames, kept, &tables) == UNWIND_OK));
         const AtomId atom = valid && kept != 0 ? link_add_atom(&result->link, BUSTER_LINK_CLASS_EH_FRAME, 3, tables.size, table_bytes, 0) : 0;
         valid = valid && (kept == 0 || atom != 0);
         for (uint32_t f = 0; valid && f < kept; f += 1)

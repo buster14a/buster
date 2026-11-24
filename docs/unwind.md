@@ -233,7 +233,7 @@ programs use the same encoding rule. A row at the current PC adds no advance;
 remembering a state still takes none. Only the representation changes: each
 rule takes effect at the same instruction boundary as before.
 
-`unwind_write(functions, count, output, exact)` fills caller-owned byte and
+`unwind_write(functions, count, output)` fills caller-owned byte and
 location slices. A capacity result reports the required byte size while
 preserving both slices. Other errors preserve the output descriptor too. Inputs
 and the two output slices must be disjoint. Empty input needs no storage.
@@ -259,8 +259,8 @@ pairs of more functions), and an executable's index takes one CIE and its FDEs
 in its vector path. A shared batch is the pairs' less 40 bytes per function but
 the first.
 
-The scalar writer appends the CIE and instructions independently. The vector
-writer classifies eight descriptors, forms CFA LEB bytes and expands original
+The exact writer appends a function's instructions one by one after the CIE's
+bytes (`unwind_cie`, which every path copies). The vector writer classifies eight descriptors, forms CFA LEB bytes and expands original
 templates of FDEs with byte permutations. Its 384 shapes cover 64 save masks
 and no allocation or one of five CFA LEB widths. The advance opcodes, deltas,
 FDE length, CIE pointer, function range and CFA bytes fill the templates' holes.
@@ -414,15 +414,16 @@ explicit fixture rows do not establish automatic source-row production.
 loop and pointer work. It compares the same vector Tier0 producer, branch sizing
 and encoding with no CFI, scalar analysis/emission, vector analysis/emission,
 and the C driver's: the published frame and the vector writer's batch with one
-CIE (`published`), whose descriptors must be the analyzer's and whose bytes the
-exact writer's.
+CIE (`published`), whose descriptors must be the analyzer's.
 Per-function allocation and cleanup are inside timing. Program generation,
 signature assignment, initialization and byte-identity preflight are outside.
 It reports 21-pass median and range, nanoseconds and user cycles per typed entry,
 whole-unit time, code/CFI bytes and temporary arena use. Options are
 `--functions N`, `--only baseline|vector|published` and `--after-scalar MS`.
-The latter runs the exact CFI writer alone before every timed path, with the
-same duration for each; it does not condition with the vector backend chain.
+The latter runs the CFI writer alone (`unwind_write` of the analyzer's
+descriptions) before every timed path, with the same duration for each; it does
+not condition with the vector backend chain. (Until #2924 it ran the exact
+writer, which `unwind_write`'s `exact` selected for every function.)
 
 All builds, tests and measurements use the approved 9700X through the shared
 lock; measurements use CPU 2. File I/O, source-map production, parsing and

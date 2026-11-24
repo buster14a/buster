@@ -2070,10 +2070,10 @@ static bool check_test_program_sparse(const CheckProgram* program, const CheckDa
             expected[group->clones] = group->clones != 0 ? group->resolved : expected[group->clones];
         }
     }
-    for (uint32_t path = 0; same && path < 2; path += 1)
+    if (same)
     {
         memset(defined, 0xa5, (uint64_t)program->object_count + 1);
-        check_program_object_access(program, access, defined, path == 0);
+        check_program_object_access(program, access, defined);
         for (uint32_t s = 0; same && s < program->symbol_count; s += 1)
         {
             const uint32_t object = program->symbol_objects[s];

@@ -530,8 +530,8 @@ static bool check_data_sort_fixups(CheckDataPlan* plan, Arena* scratch)
 }
 
 // Only bytes owned by this write are inspected. Bit-fields can begin/end inside a byte; the bulk is a bounded
-// byte slice with no readable padding. The scalar twin is also used for tiny slices, including scalar constants.
-static bool check_data_nonzero_bits(const uint8_t* bytes, uint64_t begin, uint64_t end, bool scalar)
+// byte slice with no readable padding, 64 bytes at a time, and a byte at a time past the last block.
+static bool check_data_nonzero_bits(const uint8_t* bytes, uint64_t begin, uint64_t end)
 {
     uint8_t nonzero = 0;
     if (begin < end && (begin % 8) != 0)
@@ -542,14 +542,11 @@ static bool check_data_nonzero_bits(const uint8_t* bytes, uint64_t begin, uint64
     }
     const uint64_t byte_end = end / 8;
     uint64_t byte = begin / 8;
-    if (!scalar && nonzero == 0 && byte_end - byte >= 64)
+    while (nonzero == 0 && byte_end - byte >= 64)
     {
-        while (nonzero == 0 && byte_end - byte >= 64)
-        {
-            const __m512i block = _mm512_loadu_si512(bytes + byte);
-            nonzero = _mm512_test_epi64_mask(block, block) != 0;
-            byte += 64;
-        }
+        const __m512i block = _mm512_loadu_si512(bytes + byte);
+        nonzero = _mm512_test_epi64_mask(block, block) != 0;
+        byte += 64;
     }
     for (; nonzero == 0 && byte < byte_end; byte += 1)
     {
@@ -584,8 +581,8 @@ static uint32_t check_data_boundary_position(const uint64_t* boundaries, uint32_
 // Reuse the existing stable scalar/vector radix kernel, whose key is the high 32-bit half. Rotate once to sort
 // the low half, then restore and sort the high half. Both buffers remain count-bounded; no gather/scatter is added.
 // The 9700X comparison retains scalar passes for small/mid sets and vector passes at the measured large-set
-// threshold. Production skips constant halves; the independent scalar oracle deliberately takes all eight passes.
-static uint64_t* check_data_sort_boundaries(uint64_t* keys, uint64_t* temporary, uint32_t count, bool scalar)
+// threshold. A half whose keys are all equal takes no pass.
+static uint64_t* check_data_sort_boundaries(uint64_t* keys, uint64_t* temporary, uint32_t count)
 {
     for (uint32_t half = 0; half < 2; half += 1)
     {
@@ -600,9 +597,9 @@ static uint64_t* check_data_sort_boundaries(uint64_t* keys, uint64_t* temporary,
         }
         const uint32_t varying = any ^ every;
         uint64_t* sorted = keys;
-        if (scalar || varying != 0)
+        if (varying != 0)
         {
-            sorted = c_bindings_sort(keys, temporary, count, !scalar && count >= BUSTER_CHECK_DATA_VECTOR_BOUNDARIES, varying);
+            sorted = c_bindings_sort(keys, temporary, count, count >= BUSTER_CHECK_DATA_VECTOR_BOUNDARIES, varying);
         }
         temporary = sorted == keys ? temporary : keys;
         keys = sorted;
@@ -694,7 +691,7 @@ static CheckDataStatus check_data_initializer_nonzero(const TypeTable* types, co
     }
     if (status == CHECK_DATA_OK)
     {
-        boundaries = check_data_sort_boundaries(boundaries, temporary, count, false);
+        boundaries = check_data_sort_boundaries(boundaries, temporary, count);
     }
     uint32_t unique = 0;
     for (uint32_t i = 0; status == CHECK_DATA_OK && i < count; i += 1)
@@ -721,7 +718,7 @@ static CheckDataStatus check_data_initializer_nonzero(const TypeTable* types, co
             if (part->kind != CHECK_INIT_CLEAR)
             {
                 const uint8_t* bytes = part->kind == CHECK_INIT_BYTES ? part->bytes : values + (uint64_t)(i - 1) * value_stride;
-                *nonzero = check_data_nonzero_bits(bytes, boundaries[at] - part->bit_offset, boundaries[at + 1] - part->bit_offset, false);
+                *nonzero = check_data_nonzero_bits(bytes, boundaries[at] - part->bit_offset, boundaries[at + 1] - part->bit_offset);
             }
             next[at] = check_init_uncovered(next, at + 1);
             at = next[at];
@@ -1040,7 +1037,7 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
             }
             else if (!direct && part->kind == CHECK_INIT_BYTES && size != 0)
             {
-                part_nonzero = check_data_nonzero_bits(part->bytes, 0, size * 8, false);
+                part_nonzero = check_data_nonzero_bits(part->bytes, 0, size * 8);
             }
         }
         else if (part->kind == CHECK_INIT_VALUE && part->bit_width == 0 && size > 16 && check_data_wide_type(types, part->type))
@@ -1048,7 +1045,7 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
             // A _BitInt past 128 bits (#1447): its bytes, in place or in its slot.
             uint8_t* encoded = direct ? plan->bytes + offset : values + (uint64_t)i * value_stride;
             status = check_data_wide_value(types, &part->value, part->type, encoded, size);
-            part_nonzero = status == CHECK_DATA_OK && !direct && check_data_nonzero_bits(encoded, 0, size * 8, false);
+            part_nonzero = status == CHECK_DATA_OK && !direct && check_data_nonzero_bits(encoded, 0, size * 8);
         }
         else if (part->kind == CHECK_INIT_VALUE)
         {
@@ -1106,7 +1103,7 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
                     uint8_t* encoded = values + (uint64_t)i * value_stride;
                     check_data_copy_scalar(encoded, scalar.bytes, scalar.size);
                     const uint64_t bits = part->bit_width != 0 ? part->bit_width : size * 8;
-                    part_nonzero = check_data_nonzero_bits(encoded, 0, bits, false);
+                    part_nonzero = check_data_nonzero_bits(encoded, 0, bits);
                 }
                 if (part->bit_width == 0 && scalar.object != 0 && live_parts[i])
                 {
@@ -1328,7 +1325,7 @@ static bool check_data_emit(const TypeTable* types, const CheckStream* stream, c
             memset(definitions, 0, words * sizeof(*definitions));
         }
     }
-    if (result->status == CHECK_DATA_OK && !check_data_string_pool(types, objects, count, object_symbols, object_count, link, false, scratch, &canonical))
+    if (result->status == CHECK_DATA_OK && !check_data_string_pool(types, objects, count, object_symbols, object_count, link, scratch, &canonical))
     {
         result->status = CHECK_DATA_RESOURCE;
     }
