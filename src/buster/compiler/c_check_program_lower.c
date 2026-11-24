@@ -19196,7 +19196,7 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
                     .branch_count = plan->inline_branch_count,
                     .label_records = plan->inline_label_records,
                     .label_names = plan->inline_label_names,
-                    .label_count = plan->label_count,
+                    .label_count = plan->presentation != NULL ? 1 : plan->label_count,
                     .exits = plan->inline_exits,
                     .goto_labels = plan->inline_goto_labels,
                     .result = returned != 0 ? (uint8_t)(returned->reg + 1) : 0,

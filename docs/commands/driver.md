@@ -543,14 +543,27 @@ was.
 The emission keeps each function's records for it (`CheckProgramLanes.assembly`,
 `CheckProgramCode.assembly_code`: copies of the records and branch columns in
 the emission's output arena, after branch sizing) and runs the bodies in one
-window (`--emit-window` is 0 under `-S`), whose records it keeps whole; nothing
-else changes, and a command without `-S` copies nothing.
+window (`--emit-window` is 0 under `-S`). Only assembly output requests these copies.
+
+With `-g`, the assembly contains the same DWARF 5 section contributions as
+`-c -g`, including the line program, scopes, address table, ranges and
+variable location lists. Section offsets use symbolic `.long` directives.
+Function and variable addresses use `.quad` directives referring to local
+labels on their definitions. These references survive linking several units
+and linking code or data in named sections.
+
+For inline assembly with integer constant inputs, `-S` preserves a single
+`.ascii "…"` directive after operand substitution, including the literal text
+that kernel build scripts extract. It retains the directive in the helper
+where `-c` places its bytes. A single raw `->…` line is also supported.
+The compiler emits it at the statement's instruction boundary so a script
+can read it directly from the assembly listing. Both forms accept basic asm
+or extended asm with no outputs, clobbers or goto labels.
 
 What it doesn't print yet it refuses by name, before the source is read where
 the options say so, and otherwise naming the source and the symbol:
 
-- debug information (`-g`) and inline assembly (asm statements, naked
-  functions, file-scope assembly): the design's stages 3 and 4;
+- other inline assembly statements, naked functions and file-scope assembly;
 - thread-local storage, section groups, multiversioned functions' resolvers,
   and the other refusals of the sink below;
 - assembly and linker inputs beside the C sources.

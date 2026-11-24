@@ -10300,11 +10300,15 @@ static SymbolId check_driver_atom_symbol(const Link* link, AtomId atom)
 // (check_driver_object_build: the link, checked, its `sections` and its temporaries), pushed on `text`, named after
 // `source_path` and written to `output_path` ("-" for standard output), as -c writes its object. A unit with what the
 // sink doesn't print yet is an error that names it, and writes nothing.
-static bool check_driver_assembly_text(CheckProgramCode* code, const CheckProgram* program, ObjectAtomSection* sections, const char* source_path, const char* output_path,
-                                       Arena* text, Arena* scratch, FILE* errors)
+static bool check_driver_assembly_text(CheckProgramCode* code, const CheckProgram* program, ObjectAtomSection* sections, const ObjectDebug* debug,
+                                       const char* source_path, const char* output_path, Arena* text, Arena* scratch, FILE* errors)
 {
     const CheckProgramAsms* asms = &code->lowered.asms;
-    const bool inline_assembly = asms->plan_count != 0 || asms->naked != 0 || asms->file_assembled || code->asm_atom_count != 0 || code->unit_atom_count != 0;
+    bool inline_assembly = asms->naked != NULL || asms->file_assembled;
+    for (uint32_t p = 0; !inline_assembly && p < asms->plan_count; p += 1)
+    {
+        inline_assembly = asms->plans[p].planned && asms->plans[p].presentation == NULL;
+    }
     const bool multiversioned = program->cpu_group_count != 0 || program->target_group_count != 0;
     const char* refusal = inline_assembly ? "inline assembly" : multiversioned ? "multiversioned functions (target, target_clones, cpu_dispatch)" : 0;
     uint8_t* temporary = 0;
@@ -10314,6 +10318,7 @@ static bool check_driver_assembly_text(CheckProgramCode* code, const CheckProgra
     {
         const AssemblyView view = {
             .link = &code->link,
+            .debug = debug,
             .code = code->assembly_code,
             .code_count = code->assembly_code_count,
             .sections = sections,
@@ -11090,7 +11095,7 @@ static bool check_driver_object_finish(CheckDriverCode* state, const CheckProgra
     else if (valid && lanes != NULL && lanes->assembly)
     {
         // -S (#1362): the unit's assembly where -c writes its object, its text on the emission's output arena.
-        valid = check_driver_assembly_text(&code, program, sections, source_path, output_path, &state->output, scratch, errors);
+        valid = check_driver_assembly_text(&code, program, sections, debug ? &dwarf.object : NULL, source_path, output_path, &state->output, scratch, errors);
         check_clock_mark(stage_clock, CHECK_STAGE_OBJECT_WRITE);
     }
     else if (valid)
@@ -14232,6 +14237,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         .lifetimes = lanes != NULL && lanes->tier1 && !lanes->tier1_no_lifetimes,
                         // Tier 1's IR takes asm bodies (#1839), not a statement's row.
                         .asm_bodies = lanes != NULL && lanes->tier1,
+                        .assembly_text = lanes != NULL && lanes->assembly,
                         .helper_forms = lanes != NULL ? lanes->helper_forms : 0,
                         .selection_census = command->selection_census,
                         .candidates = command->provisional_selection,
@@ -16086,10 +16092,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             arena_report_failure(stderr, "named-library arguments", (uint64_t)(count + 1) * sizeof(String8));
         }
     }
-    else if (emit_assembly && (source_rows || mixed_inputs))
+    else if (emit_assembly && mixed_inputs)
     {
         // What -S doesn't print yet (#1362's later stages), before any source is read.
-        fprintf(stderr, "error: -S %s\n", source_rows ? "doesn't print debug information yet (-g)" : "takes C sources alone, without assembly or linker inputs");
+        fprintf(stderr, "error: -S takes C sources alone, without assembly or linker inputs\n");
     }
     else if (invalid_tier1)
     {
