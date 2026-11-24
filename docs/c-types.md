@@ -262,7 +262,13 @@ retains the prior direct-member scan and anonymous-member search. The original
 `c_check_designator_lookup_test.c` fixtures cover scan/index boundaries, wide
 records, exhausted capacity, missing names and anonymous-union continuation;
 the source fixtures compare independent bytes with emitted ELF and Clang.
-This change has not yet been measured end to end on the 9700X.
+On the locked 9700X, 24 rotated Release `-c` runs of `b1a07174` and
+`02949d09` gave median wall times of 6.518 and 3.712 ms for a record with
+4,096 direct fields designated in reverse order. Four such initializers in
+one translation unit took 20.509 and 8.435 ms, with 481.1 and 112.7 million
+retired user instructions. Both builds and Clang emitted identical initializer
+bytes. The [measurement record](https://github.com/buster14a/buster-performance/tree/ac0d93398a53c58d687e9215c9efc7ebe11cc47f/docs/measurements/designator-lookup-1498-2026-11-24) includes 16-field controls
+and a record with 1,024 promoted member names.
 
 **Measured together with the consumers.** On the locked 9700X, CPU 2, main
 `92c025e7` against `7a0597bf`, eight alternating `perf stat -r 3` rounds of
