@@ -66,6 +66,11 @@ unused-warning fixtures also check exact scope-completion tokens.
   does, at clang's places (#1127), and only a refusal runs them; a constant
   before a unit's first syntax error, which only the parse reached, is checked
   first, so that its error is clang's first (`c_checker_driver.c`);
+  after a missing statement terminator or a malformed record member, the
+  diagnostic reparse also retains completed expression operands, array bounds
+  and bit-field widths for lookup in their original scope (#1249). A misplaced
+  member bracket keeps its source location and is diagnosed after its bound.
+  The original parse failure still prevents object emission;
   its expression graph's walk has a vector path, the coded walk
   (`c_check_expression_input.c`, #1038), which acts at the compacted tokens by
   each one's class, numbers their nodes into a batch whose columns it writes 16

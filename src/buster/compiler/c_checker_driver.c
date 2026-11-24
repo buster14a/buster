@@ -12506,58 +12506,82 @@ static uint32_t check_driver_view_token(const Parser* view, const Parser* origin
 // which exclude a statement expression's nonvalue statements, and follow the missing name's parents. A call keeps
 // a usable recovery expression for an invalid argument, but not for a missing callee; semantic type errors likewise
 // need not make an expression unusable. Neither a report merely inside the source span nor a graph error proves it.
-static void check_driver_orphan_diagnostics(const Parser* original, const Parser* checking, const CheckInput* input,
-                                             ParseDiagnostic* diagnostics, uint32_t diagnostic_count)
+static bool check_driver_unusable_statement(const Parser* original, const Parser* recovered, const Parser* checking, const CheckInput* input, const ParseDiagnostic* diagnostic)
 {
     const uint32_t count = checking->tokens.count;
-    for (uint32_t d = 0; input->diagnostic_limits != NULL && d < diagnostic_count; d += 1)
+    const uint32_t first = check_driver_view_token(recovered, original, diagnostic->recovery_expression_begin);
+    uint32_t root = BUSTER_CHECK_NONE;
+    uint32_t terminator = first;
+    for (uint32_t steps = 0; terminator < count && checking->tree.roles[terminator] != PARSE_ROLE_TERMINATOR && steps < count; steps += 1)
+    {
+        root = terminator;
+        terminator = checking->tree.parents[terminator];
+    }
+    // A missing ';' was inserted at the closer's source; an extraneous ')' before ';' kept that original ';'.
+    const bool extraneous = diagnostic->message == PARSE_MESSAGE_EXTRANEOUS_BEFORE_SEMI;
+    const uint32_t token = diagnostic->token;
+    const uint32_t semi = diagnostic->message == PARSE_MESSAGE_EXPECTED_SEMI_AFTER_RETURN ? diagnostic->publication :
+                          token < original->tokens.count ? token + (uint32_t)extraneous : original->tokens.count;
+    const bool statement = first < count && root < input->token_count && terminator < count && first < terminator &&
+                           checking->tree.roles[terminator] == PARSE_ROLE_TERMINATOR && checking->tokens.kinds[terminator] == PARSE_KIND_SEMI &&
+                           semi < original->tokens.count &&
+                           (!extraneous || original->tokens.kinds[semi] == PARSE_KIND_SEMI) &&
+                           parse_source_index(&checking->tokens, terminator) == parse_source_index(&original->tokens, semi);
+    const bool has_limits = input->diagnostic_limits != NULL;
+    const bool cut = statement && (has_limits ? input->diagnostic_limits[root] < terminator : original->tokens.kinds[token] != PARSE_KIND_R_PAREN);
+    bool unusable = false;
+    for (uint32_t r = 0; cut && !unusable && r < input->report_count; r += 1)
+    {
+        const CheckInputReport* report = input->reports + r;
+        const uint32_t missing = report->token;
+        const bool corrected = (report->detail & (CHECK_TYPO_STATEMENT | CHECK_TYPO_BUILTIN)) != 0;
+        bool path = report->message == CHECK_INPUT_UNDECLARED && !corrected && missing >= first && missing < terminator;
+        uint32_t at = missing;
+        bool reached = false;
+        for (uint32_t steps = 0; path && !reached && at < count && steps < count; steps += 1)
+        {
+            // A hidden earlier statement's error does not cut the statement expression around it. Test each
+            // ancestor, so a different error elsewhere in the root cannot make that hidden error propagate.
+            // A synthetically closed prefix has no per-subtree limits. Its original, evaluated operators
+            // still propagate a failed lookup. Stop at any other construct, including a statement expression.
+            path = at < input->token_count && (has_limits ? input->diagnostic_limits[at] <= missing :
+                   check_driver_operand_path_role(checking->tree.roles[at], checking->tokens.kinds[at]));
+            if (path && checking->tree.roles[at] == PARSE_ROLE_CLOSE_CALL)
+            {
+                const uint32_t open = check_driver_child_before(checking, at, PARSE_ROLE_OPEN_CALL, first, at);
+                path = open < count && missing < open;
+            }
+            reached = at == root;
+            at = checking->tree.parents[at];
+        }
+        unusable = path && reached;
+    }
+    return unusable;
+}
+
+// In a width or bound an uncorrected lookup or an invalid literal leaves no expression for Clang's parser to
+// finish. A nonconstant value, a corrected name and a type error with a recovery expression still expect the delimiter.
+static void check_driver_recovery_diagnostics(const Parser* original, const Parser* recovered, const Parser* checking, const CheckInput* input,
+                                               ParseDiagnostic* diagnostics, uint32_t diagnostic_count)
+{
+    for (uint32_t d = 0; d < diagnostic_count; d += 1)
     {
         ParseDiagnostic* diagnostic = diagnostics + d;
-        const uint32_t first = !diagnostic->tail && diagnostic->recovery_expression_begin != 0 ?
-                               check_driver_view_token(checking, original, diagnostic->recovery_expression_begin) : BUSTER_CHECK_NONE;
-        uint32_t root = BUSTER_CHECK_NONE;
-        uint32_t terminator = first;
-        for (uint32_t steps = 0; terminator < count && checking->tree.roles[terminator] != PARSE_ROLE_TERMINATOR && steps < count; steps += 1)
-        {
-            root = terminator;
-            terminator = checking->tree.parents[terminator];
-        }
-        // A missing ';' was inserted at the closer's source; an extraneous ')' before ';' kept that original ';'.
-        const bool extraneous = diagnostic->message == PARSE_MESSAGE_EXTRANEOUS_BEFORE_SEMI;
+        const uint32_t begin = diagnostic->recovery_expression_begin;
         const uint32_t token = diagnostic->token;
-        const uint32_t semi = token < original->tokens.count ? token + (uint32_t)extraneous : original->tokens.count;
-        const bool statement = first < count && root < input->token_count && terminator < count && first < terminator &&
-                               checking->tree.roles[terminator] == PARSE_ROLE_TERMINATOR && checking->tokens.kinds[terminator] == PARSE_KIND_SEMI &&
-                               semi < original->tokens.count && original->tokens.kinds[token] == PARSE_KIND_R_PAREN &&
-                               (!extraneous || original->tokens.kinds[semi] == PARSE_KIND_SEMI) &&
-                               parse_source_index(&checking->tokens, terminator) == parse_source_index(&original->tokens, semi);
-        const bool cut = statement && input->diagnostic_limits[root] < terminator;
-        bool unusable = false;
-        for (uint32_t r = 0; cut && !unusable && r < input->report_count; r += 1)
+        if (begin != 0 && begin < token && token < original->tokens.count && !diagnostic->tail)
         {
-            const CheckInputReport* report = input->reports + r;
-            const uint32_t missing = report->token;
-            const bool corrected = (report->detail & (CHECK_TYPO_STATEMENT | CHECK_TYPO_BUILTIN)) != 0;
-            bool path = report->message == CHECK_INPUT_UNDECLARED && !corrected && missing >= first && missing < terminator;
-            uint32_t at = missing;
-            bool reached = false;
-            for (uint32_t steps = 0; path && !reached && at < count && steps < count; steps += 1)
+            if (diagnostic->message == PARSE_MESSAGE_EXPECTED_R_SQUARE || diagnostic->message == PARSE_MESSAGE_EXPECTED_SEMI_AT_END_OF_DECLARATION_LIST)
             {
-                // A hidden earlier statement's error does not cut the statement expression around it. Test each
-                // ancestor, so a different error elsewhere in the root cannot make that hidden error propagate.
-                path = at < input->token_count && input->diagnostic_limits[at] <= missing;
-                if (path && checking->tree.roles[at] == PARSE_ROLE_CLOSE_CALL)
-                {
-                    const uint32_t open = check_driver_child_before(checking, at, PARSE_ROLE_OPEN_CALL, first, at);
-                    path = open < count && missing < open;
-                }
-                reached = at == root;
-                at = checking->tree.parents[at];
+                // A repair retains the recovered prefix verbatim. Its synthetic closers have no ordered source.
+                const uint32_t first = check_driver_view_token(recovered, original, begin);
+                diagnostic->tail = first < input->token_count && input->invalid_member_operands != NULL && input->invalid_member_operands[first] != 0;
             }
-            unusable = path && reached;
+            else if (original->tokens.kinds[token] == PARSE_KIND_R_PAREN || diagnostic->message == PARSE_MESSAGE_EXPECTED_SEMI_AFTER_RETURN)
+            {
+                diagnostic->tail = check_driver_unusable_statement(original, recovered, checking, input, diagnostic);
+            }
         }
-        // Mark only after every typo reparse: the final printer omits these, just as it omits a skipped typo tail.
-        diagnostic->tail |= unusable;
     }
 }
 
@@ -12948,7 +12972,7 @@ static uint32_t check_driver_skip_end(const Parser* parser, uint32_t token, bool
 
 // The edits a pass's reports ask for (CheckDriverTypoEdits): `checking` the view checked, `input` its reading, and
 // `diagnostics` its parse's, at the original's tokens. Whether any edit is new.
-static bool check_driver_typo_edits(CheckDriverTypoEdits* edits, const Parser* original, const Parser* checking, const CheckInput* input,
+static bool check_driver_typo_edits(CheckDriverTypoEdits* edits, const Parser* original, const Parser* recovered, const Parser* checking, const CheckInput* input,
                                     const ParseDiagnostic* diagnostics, uint32_t diagnostic_count, const InternTable* table)
 {
     static const ParseKeywordKind kinds[] =
@@ -12998,6 +13022,53 @@ static bool check_driver_typo_edits(CheckDriverTypoEdits* edits, const Parser* o
             added = true;
         }
     }
+    // A statement whose expression has an undeclared name that no correction took: its rest is left out.
+    uint32_t first_removed = count;
+    for (uint32_t d = 0; d < diagnostic_count; d += 1)
+    {
+        const ParseDiagnostic* diagnostic = diagnostics + d;
+        const uint32_t at = diagnostic->token;
+        uint32_t first = diagnostic->probe && at != 0 && at < count ? at - 1 : BUSTER_CHECK_NONE;
+        // (The name's call's `(`: the name before the group, matched backwards.)
+        uint32_t depth = 0;
+        while (first < count && first != 0 && (depth != 0 || original->tokens.kinds[first] == PARSE_KIND_R_PAREN))
+        {
+            const uint8_t kind = original->tokens.kinds[first];
+            depth += kind == PARSE_KIND_R_PAREN ? 1u : 0u;
+            depth -= kind == PARSE_KIND_L_PAREN && depth != 0 ? 1u : 0u;
+            first -= 1;
+        }
+        // (Not where the name is corrected: the statement is read again.)
+        for (uint32_t e = 0; first < count && e < edits->count; e += 1)
+        {
+            first = edits->edits[e].token == first && edits->edits[e].end == 0 ? BUSTER_CHECK_NONE : first;
+        }
+        bool undeclared = false;
+        for (uint32_t r = 0; first < count && r < input->report_count; r += 1)
+        {
+            const CheckInputReport* report = input->reports + r;
+            const bool corrected = (report->detail & (CHECK_TYPO_STATEMENT | CHECK_TYPO_BUILTIN)) != 0;
+            const uint32_t token = report->message == CHECK_INPUT_UNDECLARED && !corrected ? check_driver_original_token(original, checking, report->token) :
+                                   BUSTER_CHECK_NONE;
+            undeclared |= token >= first && token < at;
+        }
+        // A completed compound expression has the same recovery when its value depends on an unresolved operand.
+        if (!diagnostic->probe && diagnostic->message == PARSE_MESSAGE_EXPECTED_SEMI_AFTER_EXPRESSION &&
+            diagnostic->recovery_expression_begin != 0 && at < count && original->tokens.kinds[at] != PARSE_KIND_R_PAREN)
+        {
+            undeclared = check_driver_unusable_statement(original, recovered, checking, input, diagnostic);
+        }
+        const uint32_t end = undeclared ? check_driver_skip_end(original, at, false) : BUSTER_CHECK_NONE;
+        if (end < count && original->tokens.kinds[end] == PARSE_KIND_SEMI && end > at)
+        {
+            const CheckPrefixEdit edit = { .token = at, .end = end, .name = 0, .kind = 0 };
+            if (check_driver_typo_add(edits, edit, 0, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, false))
+            {
+                first_removed = at < first_removed ? at : first_removed;
+                added = true;
+            }
+        }
+    }
     // (Each report's, then each parameter's unknown type name's, CheckInput.parameter_typo_tokens.)
     for (uint32_t r = 0; r < input->report_count + input->parameter_typo_count; r += 1)
     {
@@ -13030,47 +13101,12 @@ static bool check_driver_typo_edits(CheckDriverTypoEdits* edits, const Parser* o
         {
             name = predefined ? original->predeclared[type] : type < count ? original->tokens.names[type] : 0;
         }
-        if (token < count && name != 0 && kind != PARSE_KIND_UNKNOWN && original->tokens.kinds[token] == PARSE_KIND_IDENTIFIER)
+        // A skipped tail may have introduced a builtin or declaration. Look up later corrections again in the edited view.
+        if (token < first_removed && name != 0 && kind != PARSE_KIND_UNKNOWN && original->tokens.kinds[token] == PARSE_KIND_IDENTIFIER)
         {
             const CheckPrefixEdit edit = { .token = token, .end = 0, .name = name, .kind = kind };
             const uint32_t special = (predefined ? CHECK_TYPO_PREDEFINED : 0u) | (builtin ? CHECK_TYPO_BUILTIN : 0u);
             added |= check_driver_typo_add(edits, edit, keyword | special, keyword != 0 ? BUSTER_CHECK_NONE : type, BUSTER_CHECK_NONE, parameter);
-        }
-    }
-    // A probe's statement whose expression has an undeclared name that no correction took: its rest is left out.
-    for (uint32_t d = 0; d < diagnostic_count; d += 1)
-    {
-        const ParseDiagnostic* diagnostic = diagnostics + d;
-        const uint32_t at = diagnostic->token;
-        uint32_t first = diagnostic->probe && at != 0 && at < count ? at - 1 : BUSTER_CHECK_NONE;
-        // (The name's call's `(`: the name before the group, matched backwards.)
-        uint32_t depth = 0;
-        while (first < count && first != 0 && (depth != 0 || original->tokens.kinds[first] == PARSE_KIND_R_PAREN))
-        {
-            const uint8_t kind = original->tokens.kinds[first];
-            depth += kind == PARSE_KIND_R_PAREN ? 1u : 0u;
-            depth -= kind == PARSE_KIND_L_PAREN && depth != 0 ? 1u : 0u;
-            first -= 1;
-        }
-        // (Not where the name is corrected: the statement is read again.)
-        for (uint32_t e = 0; first < count && e < edits->count; e += 1)
-        {
-            first = edits->edits[e].token == first && edits->edits[e].end == 0 ? BUSTER_CHECK_NONE : first;
-        }
-        bool undeclared = false;
-        for (uint32_t r = 0; first < count && r < input->report_count; r += 1)
-        {
-            const CheckInputReport* report = input->reports + r;
-            const bool corrected = (report->detail & (CHECK_TYPO_STATEMENT | CHECK_TYPO_BUILTIN)) != 0;
-            const uint32_t token = report->message == CHECK_INPUT_UNDECLARED && !corrected ? check_driver_original_token(original, checking, report->token) :
-                                   BUSTER_CHECK_NONE;
-            undeclared |= token >= first && token < at;
-        }
-        const uint32_t end = undeclared ? check_driver_skip_end(original, at, false) : BUSTER_CHECK_NONE;
-        if (end < count && original->tokens.kinds[end] == PARSE_KIND_SEMI && end > at)
-        {
-            const CheckPrefixEdit edit = { .token = at, .end = end, .name = 0, .kind = 0 };
-            added |= check_driver_typo_add(edits, edit, 0, BUSTER_CHECK_NONE, BUSTER_CHECK_NONE, false);
         }
     }
     edits->source_count = 0;
@@ -13543,7 +13579,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             // check_attested_again, where the corrections are made.)
             for (uint32_t pass = 1; pass < BUSTER_CHECK_DRIVER_TYPO_PASSES && ready && !input.resource && (input.report_count != 0 || parse_failed) &&
                                     check_attested_parse(attested, parser) == parser &&
-                                    check_driver_typo_edits(&typo_edits, parser, checking, &input, recovered != parser ? resumed.diagnostics : parser->diagnostics,
+                                    check_driver_typo_edits(&typo_edits, parser, recovered, checking, &input, recovered != parser ? resumed.diagnostics : parser->diagnostics,
                                                             recovered != parser ? resumed.diagnostic_count : parser->diagnostic_count, pp->table);
                  pass += 1)
             {
@@ -13634,7 +13670,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             }
             if (ready && parse_failed && recovered != parser && !input.resource)
             {
-                check_driver_orphan_diagnostics(parser, checking, &input, resumed.diagnostics, resumed.diagnostic_count);
+                check_driver_recovery_diagnostics(parser, recovered, checking, &input, resumed.diagnostics, resumed.diagnostic_count);
             }
             check_clock_mark(stage_clock, CHECK_STAGE_CHECK_INPUT);
             // The parse's and the reader's pages of the scratch, 82 MB of sqlite3.c's, which check-expressions and
