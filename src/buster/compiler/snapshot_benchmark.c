@@ -200,7 +200,7 @@ static uint64_t snapshot_benchmark_bind(const Runtime* runtime, LinkProgram* ref
     LinkProgram program;
     bool result = link_program_generate_begin(&program, options, extra, name_bytes, atom_bytes) && arena.base != 0;
     const uint64_t begin_start = executable_now();
-    result = result && bind_begin(&bind, &program.link, runtime, BIND_PATH_VECTOR, &program.bytes, options.units, &arena);
+    result = result && bind_begin(&bind, &program.link, runtime, &program.bytes, options.units, &arena);
     const uint64_t begin_end = executable_now();
     result = result && link_program_generate_atoms(&program);
     const uint64_t end_start = executable_now();
@@ -423,7 +423,7 @@ static bool snapshot_benchmark_kind(RuntimeKind kind, const char* parent, uint64
         Bind bind = { 0 };
         LinkProgram program;
         const bool bound = link_program_generate_begin(&program, options, extra, name_bytes, atom_bytes) && arena.base != 0 &&
-                           bind_begin(&bind, &program.link, &warm, BIND_PATH_VECTOR, &program.bytes, options.units, &arena) && link_program_generate_atoms(&program) &&
+                           bind_begin(&bind, &program.link, &warm, &program.bytes, options.units, &arena) && link_program_generate_atoms(&program) &&
                            bind_end(&bind, &program.link);
         const uint64_t d = bound ? snapshot_benchmark_checks(&warm, &bind, &checked) : 0;
         link_program_release(&program);
