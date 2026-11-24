@@ -14383,6 +14383,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         .scalar = scalar,
                         .return_warnings = !quiet && return_warning,
                         .noreturn_warnings = !quiet,
+                        .branch_truths = command->branch_truth_census,
                         // Tier 1's frame shares its objects' slots by their blocks' lifetimes (#177).
                         .lifetimes = lanes != NULL && lanes->tier1 && !lanes->tier1_no_lifetimes,
                         // Tier 1's IR takes asm bodies (#1839), not a statement's row.
