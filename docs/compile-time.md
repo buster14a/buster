@@ -2583,8 +2583,7 @@ has the scripts, every variant's counts, the call and taken-branch samples, and 
 sites are tests that run once a visited token or a graph node and are rarely true. Clang's static layout put their
 bodies on the path and jumped around them.
 
-**How it was counted.** The counts are exact taken branches of the compiler's own layout, with no hardware counters. The
-host was a Xeon VM without a PMU, and the 9700X wasn't reachable.
+**How the sites were counted.** The per-site counts come from instrumenting the compiler's own layout in a Xeon VM.
 
 - The build was `znver5`, linked with `--emit-relocs`.
 - `llvm-bolt -instrument -strict` (LLVM 23) counted every edge of the build's own code for sqlite3.c's
@@ -2682,13 +2681,27 @@ Then after it merged main `8c9c5bf0` (`d9d9d32f`, measured as `a6405c80`, which 
 
 In both, `-c`'s objects of sqlite3.c and main.c were byte for byte main's. Against `8c9c5bf0`, the sites' own lines
 counted as above but for `check_input_expression_coded`'s. Its visit's test took 98 thousand more jumps, as the
-layout around it changed, while the compiled function, with what it inlines, fell 18% (4.36 M to 3.57 M). The 9700X's cycles over placements (`time-runs
---copies`, #509) aren't measured yet, so whether a change pays in time is still open.
+layout around it changed, while the compiled function, with what it inlines, fell 18% (4.36 M to 3.57 M).
+
+**The integrated change on the 9700X.** The November 5 run compared merge `c79fd007` with its first parent
+`e36740b8`. At every candidate placement, taken branches and user cycles fell below the best reference placement
+on all three workloads. The perf counts use the least of three runs at each placement, averaged over four placements.
+
+| Frozen workload | Taken branches | User cycles (range over placements) | Median wall time (range over placements and copies) |
+| --- | ---: | ---: | ---: |
+| SQLite `-fsyntax-only` | 138.94 M → 125.66 M (−9.56%) | −1.01% (−2.14% to −0.40%) | −0.68% (−1.21% to +0.04%) |
+| SQLite `-c` | −8.78% | −0.80% (−1.31% to −0.41%) | −0.47% (−1.24% to +0.05%) |
+| 139 musl units, `-c` | −6.42% | −0.49% (−0.91% to −0.21%) | −0.35% (−0.94% to −0.02%) |
+
+All eight executables produced the same 140 objects byte for byte. All 528 timed processes succeeded.
+The wall-time ranges across individual copies overlap for both SQLite workloads.
+[Hardware counts, timings and qualification receipts](https://github.com/buster14a/buster-performance/tree/0319f6096190ad5bf485cae04599cedf5c4763b5/docs/measurements/layout-hints-1175-2026-11-03/9700x)
 
 **The gap that remains.** By #880's counts, `ex_ret_brn_tkn` (calls and returns included) fell 33% with the profile's
 layout alone, and 44% with the whole profile. From main's 67 M, this change's 15.0 M fewer taken branches bring it to
 about 32% below #880's 77.4 M. That is near the layout's share, but about 8.6 M short of the whole profile's 43.7 M,
-which is mostly the profile's inlining.
+which is mostly the profile's inlining. This estimate uses #880's baseline. The November 5 pair measured
+the integrated source changes alone. A direct gap to PGO on that pair would require a matched profiled build.
 
 The largest remainders, at this change:
 
