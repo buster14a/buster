@@ -356,9 +356,10 @@ there at a time, so everything takes one lock:
     passed, each built as the job builds it.
   - The file's count is this job's build's (`BUSTER_HOST_ARCH=znver5`) on this
     host. A toolchain's upgrade moves it, and states it the same way.
-- On a checker pull request, plain hosted vector shard 2 builds the PR's
-  base while shard 1 builds the merge revision. Shard 2 compiles the same
-  frozen `sqlite3.c` with both compilers and compares the objects (#1572).
+- On a checker pull request, plain hosted vector shard 2 builds the first
+  parent of the tested merge while shard 1 builds the merge revision. Shard 2
+  compiles the same frozen `sqlite3.c` with both compilers and compares the
+  objects (#1572).
   A change classified as diagnostic-only by `sqlite_stable` requires
   byte-identical objects. For other checker changes, a byte difference
   produces a GitHub warning with both file sizes. Growth or shrinkage
