@@ -955,6 +955,8 @@
     X(FSTP_M32, MEMORY, U, 256, 512, U, U, 512, 768, 0x40, 0x26, 0x19) \
     X(FSTP_M64, MEMORY, U, 256, 512, U, U, 512, 768, 0x40, 0x26, 0x19) \
     X(FSTP_M80, MEMORY, U, 1280, 4096, U, U, 2560, 0, 0x40, 0x26, 0x19) \
+    X(FST_ST, REGISTER, U, U, U, U, U, U, U, 0, 0, 0) \
+    X(FXCH_ST, REGISTER, U, U, U, U, U, U, U, 0, 0, 0) \
     X(FSTP_ST, REGISTER, U, 360, 256, U, U, 256, 160, 0x40, 0x26, 0x19) \
     X(FILD_M32, MEMORY, U, 280, 256, U, U, 256, 256, 0x40, 0x26, 0x19) \
     X(FILD_M64, MEMORY, U, 280, 256, U, U, 256, 256, 0x40, 0x26, 0x19) \
