@@ -1117,7 +1117,7 @@ static struct NodeProducer* node_producer_begin(struct NodeAlone* alone, CheckIn
             const uint32_t brace = check_input_enum_opening(reader, token);
             if (brace != BUSTER_CHECK_NONE)
             {
-                producer->enums[producer->enum_count] = (CheckInputEnumDefinition){ .type = check_input_memo_get(&reader->tag_types, token), .open = brace, .close = parser->tree.parents[brace] };
+                producer->enums[producer->enum_count] = (CheckInputEnumDefinition){ .type = check_input_memo_get(reader, reader->tag_types, token), .open = brace, .close = parser->tree.parents[brace] };
                 producer->enum_count += 1;
             }
         }

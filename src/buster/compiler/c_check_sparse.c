@@ -67,7 +67,7 @@ struct CheckSparseColumn
     // An entry for each 16 tokens, and one past the last 16 with an entry, which check_sparse_vector may read: its block
     // in `blocks`, 0 for none.
     uint32_t* directory;
-    // The pool's blocks (CheckSparsePool.blocks).
+    // The pool's blocks, advanced one block for the second field of a paired reader memo.
     uint32_t* blocks;
 };
 
@@ -198,19 +198,24 @@ static __attribute__((unused)) uint32_t check_sparse_take(CheckSparsePool* pool,
     return block;
 }
 
-// Writes `value` at `token` of `column`, whose blocks are `pool`'s.
-static __attribute__((unused)) void check_sparse_set(CheckSparsePool* pool, CheckSparseColumn column, uint32_t token, uint32_t value)
+// A pair shares its directory and reserves two blocks at once. Each view points at its own half.
+static __attribute__((unused)) void check_sparse_set_blocks(CheckSparsePool* pool, CheckSparseColumn column, uint32_t token, uint32_t value, uint32_t width)
 {
     uint32_t* entry = column.directory + (token >> BUSTER_CHECK_SPARSE_SHIFT);
     uint32_t block = pool->shared ? __atomic_load_n(entry, __ATOMIC_ACQUIRE) : *entry;
     if ((block == 0 || block == BUSTER_CHECK_SPARSE_CLAIMED) && value != BUSTER_CHECK_NONE)
     {
-        block = check_sparse_take(pool, entry, 1);
+        block = check_sparse_take(pool, entry, width);
     }
     if (block != 0 && block != BUSTER_CHECK_SPARSE_CLAIMED)
     {
-        pool->blocks[((uint64_t)block << BUSTER_CHECK_SPARSE_SHIFT) | (token & (BUSTER_CHECK_SPARSE_TOKENS - 1))] = value;
+        column.blocks[((uint64_t)block << BUSTER_CHECK_SPARSE_SHIFT) | (token & (BUSTER_CHECK_SPARSE_TOKENS - 1))] = value;
     }
+}
+
+static __attribute__((unused)) void check_sparse_set(CheckSparsePool* pool, CheckSparseColumn column, uint32_t token, uint32_t value)
+{
+    check_sparse_set_blocks(pool, column, token, value, 1);
 }
 
 // Writes `value` at `token` of the wide `column`, whose blocks are `pool`'s, as check_sparse_set.
@@ -277,12 +282,14 @@ static __attribute__((unused)) bool check_sparse_reserve_wide(Arena* arena, Chec
     return valid;
 }
 
-// Upper bound including the three pushes' alignment padding for non-shared narrow columns.
-static __attribute__((unused)) uint64_t check_sparse_bytes(uint32_t count, uint32_t columns)
+// Upper bound including the three pushes' alignment padding for a non-shared pool.
+static __attribute__((unused)) uint64_t check_sparse_bytes(uint32_t count, uint32_t columns, uint32_t wides)
 {
-    const uint64_t entries = check_sparse_slots(count) * columns;
+    const uint64_t slots = check_sparse_slots(count);
+    const uint64_t entries = slots * ((uint64_t)columns + wides);
+    const uint64_t blocks = slots * ((uint64_t)columns + 2 * (uint64_t)wides) + (wides != 0 ? 2 : 1);
     return sizeof(CheckSparsePool) + _Alignof(CheckSparsePool) - 1 + entries * sizeof(uint32_t) + 63 +
-           (entries + 1) * BUSTER_CHECK_SPARSE_TOKENS * sizeof(uint32_t) + 63;
+           blocks * BUSTER_CHECK_SPARSE_TOKENS * sizeof(uint32_t) + 63;
 }
 
 // Room for `columns` columns alone, as check_sparse_reserve_wide.

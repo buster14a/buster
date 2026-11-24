@@ -1365,13 +1365,28 @@ Five columns still accounted for 1,041 first-write pages. The `sizeof` operand
 types used 318 pages, the tag types and ends used 351, and the declaration bases
 and specifiers used 372. [Column census and first change](https://github.com/buster14a/buster-performance/tree/dd3544b/docs/measurements/sparse-columns-1167-2026-11-16)
 
-In source order, these five columns share a pool in the reader's base-page
-arena. The first nonzero write in a group of 16 tokens takes one 64-byte block.
-Each directory entry indexes the pool, so writes far apart in the source can
-share a physical page. Complementing each value makes the pool's empty block
-read as zero, including at the end-of-input sentinel. The reader releases the
-pool before emission. Deferred readers use contiguous arrays for the parallel
-body writes and the subsequent TypeId remap.
+In source order, the five columns share three directories in the reader's
+base-page arena. Each directory entry covers 16 tokens. The first nonzero
+`sizeof` operand type takes one 64-byte block. A tag type and its end share
+a directory entry, as do a declaration base and its specifier. Writing either
+member of a pair takes two adjacent blocks, and each member can still be set
+independently. The reader clears the directories up front to avoid a second
+page fault when it writes an entry it has already read. Complementing the
+stored values makes the pool's empty blocks read as zero, including at the
+end-of-input sentinel. The reader releases the pool before emission. Deferred
+readers keep contiguous arrays for parallel body writes and the TypeId remap.
+
+The reader-only change saved 879 more arena faults on main `7515714d0`.
+Declaration checking set the compile's peak after the reader released its
+pool. For a source-order compile with at least one huge page of scratch reuse,
+the driver now rounds the end of its 96-byte-per-token allowance down to a
+whole page. The discard protects all live scratch. Against the same revision
+with both steps removed, the arena took 3,972 faults before and 2,030 after.
+Across twelve interleaved pairs, median savings per SQLite compile were
+5.10 million kernel cycles, 5.00 million total cycles and 1,960 KiB of peak
+RSS. The final change alone, against main including step one, saved 2.17
+million kernel cycles, 1.26 million total cycles and 1,956 KiB of peak RSS.
+[9700X counters, fault traces and output comparisons](https://github.com/buster14a/buster-performance/tree/1f655876d9474db55032d83e6f0a19e18742cda9/docs/measurements/reader-memos-1167-2026-11-24)
 
 ### The preprocessor's output before the backend (#628)
 
