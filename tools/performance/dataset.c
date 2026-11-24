@@ -38,6 +38,7 @@ struct PerfDataset
     uint64_t cells_compared;
     uint64_t loaded_bytes;
     size_t native_only_tables;
+    bool manifest_validated;
     char root[4096];
     const char *cache;
     const char *evidence_root;
@@ -679,6 +680,7 @@ static bool perf_dataset_load(PerfDataset *dataset, const char *path, const char
     PerfBuffer schema_bytes = {0};
     PerfJson schema = {0};
     result = result && perf_read_file(resolved, &bytes) && perf_json_parse(&dataset->document, perf_buffer_bytes(&bytes)) && perf_read_file(schema_path, &schema_bytes) && perf_json_parse(&schema, perf_buffer_bytes(&schema_bytes)) && perf_schema_validate(&schema, &dataset->document) && perf_metadata(&dataset->document);
+    dataset->manifest_validated = result;
     result = result && perf_resources_load(dataset) && perf_tables_load(dataset) && perf_relationships(dataset);
     if (!result)
     {

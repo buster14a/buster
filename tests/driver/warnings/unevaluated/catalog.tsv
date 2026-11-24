@@ -1,0 +1,23 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+# The operands the constant reader reads (#1447, check_warning_graph_constant_queries): array bounds at file scope, in a
+# record and in a block, an enumerator's value, a `_Generic` in a bound, beside a static assertion's and an initializer's.
+side-effects-in-the-constant-reader-s-unevaluated-operands	unevaluated-constant-source.c	8	0	0	-	-	side effects in the constant reader's unevaluated operands
+# Its forms: type names and a designator's `=` (none), sizeof without parentheses, alignof, a nested sizeof (none), a cast,
+# a comma, a call (none), a macro's increment (none), a subscript, a bit-field's width, a case label and _Alignas.
+side-effects-in-the-constant-reader-s-unevaluated-operands-forms	unevaluated-constant-forms-source.c	12	0	0	-	-	side effects in the constant reader's unevaluated operands: forms
+# The operators: assignments, increments, atomic builtins and a call's arguments, through every expression HasSideEffects
+# reads, and the operands it doesn't (a type, a nested sizeof, a selection's other arms, a variable array's operand).
+side-effects-in-unevaluated-operands	unevaluated-operators-source.c	32	0	0	-	-	side effects in unevaluated operands
+side-effects-in-unevaluated-operands-in-c23	unevaluated-operators-source.c	32	0	0	c23	-	side effects in unevaluated operands in C23
+side-effects-in-unevaluated-operands-under-wall-wextra	unevaluated-operators-source.c	33	0	0	-	-Wall -Wextra	side effects in unevaluated operands under -Wall -Wextra
+wno-unevaluated-expression	unevaluated-operators-source.c	1	0	0	-	-Wno-unevaluated-expression	-Wno-unevaluated-expression
+wno-unused-value-holds-wunevaluated-expression	unevaluated-operators-source.c	1	0	0	-	-Wno-unused-value	-Wno-unused-value holds -Wunevaluated-expression
+# GNU statement expressions: their statements as SideEffectFinder visits them.
+side-effects-in-statement-expressions-in-unevaluated-operands	unevaluated-statements-source.c	12	0	0	-	-	side effects in statement expressions in unevaluated operands
+side-effects-in-statement-expressions-under-wall	unevaluated-statements-source.c	13	0	0	-	-Wall	side effects in statement expressions under -Wall
+side-effects-in-statement-expressions-under-wall-wextra-in-c23	unevaluated-statements-source.c	13	0	0	c23	-Wall -Wextra	side effects in statement expressions under -Wall -Wextra in C23
+# Macros: an expression whose location a macro wrote, its argument's too, is no side effect.
+side-effects-macros-write	unevaluated-macros-source.c	7	0	0	-	-	side effects macros write
+side-effects-macros-write-under-wall-wextra	unevaluated-macros-source.c	8	0	0	-	-Wall -Wextra	side effects macros write under -Wall -Wextra
+werror-unevaluated-expression	unevaluated-macros-source.c	0	7	0	-	-Werror=unevaluated-expression	-Werror=unevaluated-expression

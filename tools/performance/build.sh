@@ -4,6 +4,8 @@ cd "$(dirname "$0")/../.."
 mkdir -p build/performance
 "${CC:-clang}" -std=c17 -D_GNU_SOURCE -O2 -g -Wall -Wextra -Werror \
     ${BUSTER_PERFORMANCE_CFLAGS:-} tools/performance/main.c -o build/performance/bmf
+"${CC:-clang}" -std=c17 -D_GNU_SOURCE -O2 -g -Wall -Wextra -Werror \
+    ${BUSTER_PERFORMANCE_CFLAGS:-} tools/performance/paired.c -lm -o build/performance/paired
 "${CC:-clang}" -std=c17 -O2 -g -Wall -Wextra -Werror \
     ${BUSTER_PERFORMANCE_CFLAGS:-} tools/performance/serve.c -o build/performance/serve
 "${CC:-clang}" -std=c17 -D_GNU_SOURCE -O2 -g -Wall -Wextra -Werror \

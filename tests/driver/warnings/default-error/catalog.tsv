@@ -1,0 +1,29 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+# Each group demoted: an initializer's, an assignment's, an argument's (with its parameter's note) and a return's
+# conversion, a function pointer's, and both -Wreturn-mismatch cases.
+default-error-conversions-demoted	default-error-bodies.c	8	0	1	-	-Wno-error=int-conversion -Wno-error=incompatible-pointer-types -Wno-error=return-mismatch	default-error conversions demoted
+# One group demoted (with its function pointers' group under it), the others errors still.
+default-error-conversions-one-group-demoted	default-error-bodies.c	3	5	1	-	-Wno-error=incompatible-pointer-types	default-error conversions, one group demoted
+# Ignored and demoted through the groups that hold them: -Wconversion, -Wnon-gcc, -Wreturn-type and -Wall.
+default-error-conversions-through-their-parent-groups	default-error-bodies.c	3	2	1	-	-Wno-error=non-gcc -Wno-incompatible-function-pointer-types -Wno-all	default-error conversions through their parent groups
+default-error-conversions-ignored	default-error-bodies.c	2	3	1	-	-Wno-int-conversion -Wno-error=return-type	default-error conversions ignored
+# File-scope and local initializers, braced, nested and a compound literal's, of each group.
+default-error-conversions-in-initializers	default-error-conversions-in-initializers.c	8	0	0	-	-Wno-error=int-conversion -Wno-error=incompatible-pointer-types	default-error conversions in initializers
+# A call's demoted arguments among its other conversion warnings, in its arguments' order (#2481).
+default-error-conversions-among-a-call-s-warnings	default-error-conversions-among-a-call-s-warnings.c	5	0	5	-	-Wno-error=int-conversion -Wno-error=incompatible-pointer-types	default-error conversions among a call's warnings
+# The conversion applies to the whole parenthesized argument (#2521), while its inner call, shift and comma
+# retain their own diagnostic locations and completion order.
+parenthesized-arguments-conversions-and-inner-expressions	parenthesized-argument-bodies.c	4	1	3	-	-	parenthesized arguments' conversions and inner expressions
+# Repeated groups, the ordinary unparenthesized control, a group around only the first operand and a cast.
+# Each call has one incompatible pointer and one signedness warning, with its parameter's note.
+nested-and-partial-argument-parentheses	nested-and-partial-argument-parentheses.c	3	3	6	-	-	nested and partial argument parentheses
+# Source parentheses outside an identity macro keep their own locations. An indirect call has no parameter
+# notes, and its const-pointer warning uses the same whole-argument beginning as its incompatible pointer.
+parenthesized-macro-and-indirect-call-arguments	parenthesized-macro-and-indirect-call-arguments.c	2	2	2	-	-	parenthesized macro and indirect-call arguments
+# The relaxed conversion's warning keeps the same opening token and place among the call's warnings.
+parenthesized-argument-conversions-demoted	parenthesized-argument-bodies.c	5	0	3	-	-Wno-error=incompatible-pointer-types	parenthesized argument conversions demoted
+# Mapping the groups by source pragma changes severity and visibility, retaining the same argument locations.
+parenthesized-argument-conversions-pragmas	parenthesized-argument-conversions-pragmas.c	4	1	5	-	-	parenthesized argument conversions' pragmas
+# Pragmas: a group's warning, ignored and error, and push and pop.
+default-error-conversions-pragmas	default-error-conversions-pragmas.c	4	1	0	-	-Wno-error=incompatible-pointer-types	default-error conversions' pragmas

@@ -1,0 +1,8 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+# A comma, an addition, a subtraction or an assignment whose operand decays to its type, through parentheses, each
+# such operand once; a member array, a dereferenced array pointer; not where the operator's type differs.
+sizeof-of-operators-on-decayed-arrays	sizeof-of-operators-on-decayed-arrays.c	13	0	0	-	-	sizeof of operators on decayed arrays
+# At file scope, in a macro, a typedef's spelling, a variable length and a const array; not alignof's operand, an
+# unparenthesized operand, an array parameter or a pointer.
+sizeof-of-operators-on-decayed-arrays-in-other-places	sizeof-of-operators-on-decayed-arrays-in-other-places.c	5	0	1	-	-	sizeof of operators on decayed arrays in other places

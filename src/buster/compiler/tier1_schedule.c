@@ -115,7 +115,7 @@ static bool tier1_schedule_is_pinned(Tier1ScheduleInput input, uint32_t index, u
     // Register transfers can replace compiler-private m80 spills/reloads (#1387). They keep the original waiting
     // points, even though they no longer carry a memory resource: no access may move before a pending x87 trap.
     const uint32_t form = instruction->form & BUSTER_X86_FORM_NUMBER;
-    const bool x87_transfer = form == X86_FORM_FLD_ST || form == X86_FORM_FSTP_ST;
+    const bool x87_transfer = form == X86_FORM_FLD_ST || form == X86_FORM_FSTP_ST || form == X86_FORM_FST_ST || form == X86_FORM_FXCH_ST;
     const bool operation = effects->operation == X86_OPERATION_NONE || effects->operation == X86_OPERATION_STORE_MXCSR || effects->operation == X86_OPERATION_ENDBR ||
                            effects->operation == X86_OPERATION_SYSTEM;
     const bool pinned = (input.pinned && input.pinned[index]) || operation || x87_transfer || instruction->decorations != 0 || (effects->properties & BUSTER_X86_EFFECT_FAULT) != 0 ||

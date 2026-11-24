@@ -1,0 +1,7 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+# At the `?`, naming both arms' types as written (a typedef's, an array's or a string's decayed pointer, function
+# pointers, records), a GNU `?:`'s left arm its condition; nested, parenthesized and through a macro.
+conditional-pointer-mismatches	conditional-pointer-mismatches.c	13	0	1	-	-	conditional pointer mismatches
+# At file scope, before the initializer's own error.
+a-file-scope-conditional-pointer-mismatch	a-file-scope-conditional-pointer-mismatch.c	1	1	0	-	-	a file-scope conditional pointer mismatch

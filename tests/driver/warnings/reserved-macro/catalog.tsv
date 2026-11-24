@@ -1,0 +1,11 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+# A #define's reserved name (`__x`, `_X`) and an #undef's, but not a feature-test macro clang lists, a lowercase or
+# a single underscore's.
+reserved-macro-names-and-the-feature-test-macros	reserved-macro-names-and-the-feature-test-macros.c	5	0	0	-	-Wreserved-macro-identifier	reserved macro names and the feature-test macros
+# An #undef of a feature-test macro, and before a definition's whitespace warning and an #undef's extra tokens.
+reserved-macro-names-before-the-directives-other-warnings	reserved-macro-names-before-the-directives-other-warnings.c	9	0	0	-	-Wreserved-identifier	reserved macro names before the directives' other warnings
+# None from a system header.
+reserved-macro-names-in-system-headers	reserved-macro-names-in-system-headers.c	1	0	0	-	-Wreserved-identifier	reserved macro names in system headers
+# Off by default; a pragma enables and ignores it, by its own name or its group's.
+reserved-macro-names-under-pragmas	reserved-macro-names-under-pragmas.c	2	0	0	-	-	reserved macro names under pragmas

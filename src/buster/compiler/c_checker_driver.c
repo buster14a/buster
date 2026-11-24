@@ -12230,6 +12230,7 @@ struct CheckDriverCommand
 typedef struct CheckUnitsKept CheckUnitsKept;
 static int check_driver_units(const CheckDriverCommand* command, char** inputs, uint32_t count, CheckProgramLanes* lanes, CheckClock* stage_clock, bool release);
 static void check_units_admit(struct CheckUnitsLane* lane, uint32_t tokens);
+static uint64_t check_units_scratch_floor(const struct CheckUnitsLane* lane);
 static bool check_units_discard_huge(struct CheckUnitsLane* lane);
 static bool check_units_unit_left(const struct CheckUnitsLane* lane);
 
@@ -13233,7 +13234,9 @@ static uint32_t check_driver_typo_errors(const CheckDriverTypoEdits* edits, cons
 // next unit would fault it in a base page at a time.
 static void check_driver_discard_scratch(Arena* scratch, CheckProgramLanes* lanes, uint64_t kept)
 {
-    arena_discard_past(scratch, kept, lanes != NULL && lanes->units_lane != NULL && check_units_unit_left(lanes->units_lane));
+    const bool whole = lanes != NULL && lanes->units_lane != NULL && check_units_unit_left(lanes->units_lane);
+    const uint64_t floor = whole ? check_units_scratch_floor(lanes->units_lane) : 0;
+    arena_discard_past(scratch, kept > floor ? kept : floor, whole);
 }
 
 // #2531's census (measure-attested, c_check_attested.c), the only command that sets check_driver_attested: a unit's
@@ -13267,6 +13270,29 @@ static void check_attested_summary(const CheckAttested* attested, uint64_t* coun
 // kept across processes gives too, for the tests.
 static uint64_t check_units_attested_last[CHECK_ATTESTED_SUMMARY];
 
+// The type table initializes its builtin columns, sentinels and buckets, and writes each new record before
+// publishing its index. It can reuse dirty storage. Fit a small table or index in the lane arena's base pages:
+// those pages already live to the end of the unit and the next unit reuses them. Larger sparse tables keep their
+// own page layout. An index needs its own bump cursor because a rehash pops its slots and grows them in place.
+static Arena check_driver_type_arena(Arena* workspace, uint64_t bytes, uint64_t small)
+{
+    Arena result = { 0 };
+    if (workspace != NULL && workspace->length <= workspace->small && bytes <= BUSTER_ARENA_SMALL_BYTES)
+    {
+        const uint64_t aligned = (workspace->length + BUSTER_TYPE_COLUMN_ALIGNMENT - 1) & ~(uint64_t)(BUSTER_TYPE_COLUMN_ALIGNMENT - 1);
+        if (aligned + bytes <= workspace->small)
+        {
+            result.base = arena_push(workspace, bytes, BUSTER_TYPE_COLUMN_ALIGNMENT);
+            result.capacity = bytes;
+        }
+    }
+    if (result.base == NULL)
+    {
+        result = arena_reserve_small(bytes, small);
+    }
+    return result;
+}
+
 static int check_driver_unit(const CheckDriverCommand* command, const PPOptions* options, const char* path, InternTable* identifiers, Preprocessor* pp,
                              Parser* parser, Arena* arena, Arena* scratch, Arena* output_arena, CheckProgramLanes* lanes, CheckClock* stage_clock,
                              uint64_t* pp_ticks, FILE* errors, CheckUnitsKept* kept, bool release, DependencyOutput* dependency, Arena* dependency_arena,
@@ -13276,6 +13302,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
     bool driver_fatal = false;
     Arena type_arena = { 0 };
     Arena index_arena = { 0 };
+    Arena* type_workspace = lanes != NULL && lanes->units_lane != NULL && arena_pool != NULL && arena_pool->keeps_commits &&
+                            arena_reservation_limit() == BUSTER_ARENA_MAX_CAPACITY ? arena : NULL;
 #if BUSTER_IN_UNIT(BUSTER_UNIT_CHECKER)
     // #2850's producer against the unit's diagnostics, where a test asks for it (BUSTER_TEST_NODE_BODIES_LOG, which the
     // command read: its options then have the producer's switch).
@@ -13475,8 +13503,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             const uint64_t type_bytes = type_capacity_bytes(capacity);
             const uint64_t index_bytes = type_index_capacity_bytes(capacity);
             const bool fail_types = check_driver_test_failed_types != NULL && strcmp(path, check_driver_test_failed_types) == 0;
-            type_arena = !fail_types ? arena_reserve_small(type_bytes, type_bytes) : (Arena){ 0 };
-            index_arena = !fail_types ? arena_reserve_small(index_bytes, BUSTER_TYPE_INDEX_SMALL_BYTES) : (Arena){ 0 };
+            type_arena = !fail_types ? check_driver_type_arena(type_workspace, type_bytes, type_bytes) : (Arena){ 0 };
+            index_arena = !fail_types ? check_driver_type_arena(type_workspace, index_bytes, BUSTER_TYPE_INDEX_SMALL_BYTES) : (Arena){ 0 };
             ready = !fail_types && capacity.types != 0 && type_initialize(&types, &type_arena, &index_arena, capacity);
             if (!ready)
             {
@@ -13649,8 +13677,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                     arena_release(&index_arena);
                     const uint64_t type_bytes = type_capacity_bytes(again);
                     const uint64_t index_bytes = type_index_capacity_bytes(again);
-                    type_arena = arena_reserve_small(type_bytes, type_bytes);
-                    index_arena = arena_reserve_small(index_bytes, BUSTER_TYPE_INDEX_SMALL_BYTES);
+                    type_arena = check_driver_type_arena(type_workspace, type_bytes, type_bytes);
+                    index_arena = check_driver_type_arena(type_workspace, index_bytes, BUSTER_TYPE_INDEX_SMALL_BYTES);
                     types = (TypeTable){ 0 };
                     ready = original_pragmas_ready && again.types != 0 && type_initialize(&types, &type_arena, &index_arena, again);
                     if (!ready)
@@ -13685,7 +13713,15 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             // what they and check_program push into it again (BUSTER_CHECK_DRIVER_SCRATCH_REUSE): the parse's tokens, so
             // that a unit read as its view (#2531) keeps what it would have kept read whole, which its next unit's parse
             // pushes as far again.
-            check_driver_discard_scratch(scratch, lanes, scratch->length + BUSTER_CHECK_DRIVER_SCRATCH_REUSE * (uint64_t)parser->tokens.count);
+            const uint64_t reuse = BUSTER_CHECK_DRIVER_SCRATCH_REUSE * (uint64_t)parser->tokens.count;
+            uint64_t scratch_kept = scratch->length + reuse;
+            if (!deferring && reuse >= BUSTER_ARENA_HUGE_PAGE_BYTES)
+            {
+                // Retain whole pages within the source reader's reuse allowance. arena_discard_past
+                // rounds its boundary up to avoid splitting a huge page and protects all live bytes.
+                scratch_kept -= ((uintptr_t)scratch->base + scratch_kept) & (BUSTER_ARENA_HUGE_PAGE_BYTES - 1);
+            }
+            check_driver_discard_scratch(scratch, lanes, scratch_kept);
             if (stage_clock != NULL && deferring)
             {
                 stage_clock->deferred = true;
@@ -14286,6 +14322,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                         // (#777).
                         .discard_huge = lanes != NULL && lanes->units_lane != NULL && check_units_discard_huge(lanes->units_lane),
                         // (A unit read as its view keeps what the parse's tokens the view leaves out would have taken.)
+                        .discard_floor = lanes != NULL ? check_units_scratch_floor(lanes->units_lane) : 0,
                         .discard_keep = parser->tokens.count > checking->tokens.count ?
                                         BUSTER_CHECK_DRIVER_SCRATCH_REUSE * (uint64_t)(parser->tokens.count - checking->tokens.count) : 0,
                     });
@@ -14856,10 +14893,20 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
     }
     if (release)
     {
+        ArenaPool* pool = arena_pool;
+        if (pool != NULL)
+        {
+            pool->batching = true;
+        }
         parse_release(parser);
         pp_release(pp);
         arena_release(&index_arena);
         arena_release(&type_arena);
+        if (pool != NULL)
+        {
+            arena_pool_flush(pool);
+            pool->batching = false;
+        }
     }
     return result;
 }

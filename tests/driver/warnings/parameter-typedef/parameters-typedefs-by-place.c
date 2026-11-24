@@ -1,0 +1,42 @@
+typedef int I;
+typedef I J;
+typedef const int CI;
+typedef void (*F)(I);
+typedef void G(I);
+struct S { int x; };
+typedef struct S T;
+void take(void (*cb)(I));
+void takef(F f);
+void h(I a, ...);
+void k(void);
+int (*a)(I), (*b)(J *, T);
+G *gp;
+I (*ret)(I);
+void (*arr[2])(I);
+void (*pp)(CI *, I);
+void (*kr)();
+void use(int n, int *ip)
+{
+    void (*q)(I) = ip;
+    int *p;
+    p = h;
+    p = a;
+    p = b;
+    p = gp;
+    p = ret;
+    p = arr;
+    p = arr[0];
+    p = *arr;
+    p = pp;
+    q = ip;
+    take(ip);
+    takef(ip);
+    p = take;
+    p = k;
+    p = kr;
+    void (*vla)(int (*)[2], I) = 0;
+    p = vla;
+    void (*na)(I, J (*)(T)) = 0;
+    p = na;
+    p = &na;
+}

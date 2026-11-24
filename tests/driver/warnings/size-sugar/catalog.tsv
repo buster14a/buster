@@ -1,0 +1,4 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+library-builtins-size-t	library-builtins-size-t.c	0	12	3	-	-	library builtins' __size_t
+size-t-through-arithmetic	size-t-through-arithmetic.c	0	11	1	-	-	__size_t through arithmetic

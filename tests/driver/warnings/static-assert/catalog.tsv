@@ -1,0 +1,25 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+# A failed assertion of a binary operator but `||` notes its sides' values at the operator (clang's
+# DiagnoseStaticAssertDetails), where a side isn't a literal: casts, sizeof, arithmetic, enumeration constants.
+comparisons-sides-evaluated	comparisons-sides-evaluated.c	0	8	7	-	-	comparisons' sides evaluated
+# An `&&`'s first failing conjunct is the requirement, at it (findFailedBooleanCondition); integer literals print
+# by value and suffix (StmtPrinter's `1U`, `9223372036854775807LL`); a negative side, a char, a bool.
+failing-conjuncts-and-literal-spellings	failing-conjuncts-and-literal-spellings.c	0	17	14	-	-	failing conjuncts and literal spellings
+# A plain char's value as a character literal with its code unit and value (escapes, `<U+0000>`, `<0xFF>`), a
+# bool's `false`, an unsigned long long's and an __int128's values.
+character-and-integer-values	character-and-integer-values.c	0	13	13	-	-	character and integer values
+# The same with -funsigned-char: a char past 0x7F is positive.
+character-values-of-unsigned-char	character-and-integer-values.c	0	13	13	-	-funsigned-char	character values of unsigned char
+# Floating sides and literals as llvm's APFloat::toString spells them: `100`, `0.5`, `0.10000000000000001`,
+# `1.0E+10`; a literal's trailing `.` and its `F` (`2.`, `1.5F`).
+floating-values-and-literals	floating-values-and-literals.c	0	12	12	-	-	floating values and literals
+# C23's static_assert without a message, `nullptr`, and no note for a boolean value compared with `true` or
+# `false` (isKnownToHaveBooleanValue); `(bool)` casts.
+c23-assertions-and-boolean-literals	c23-assertions-and-boolean-literals.c	0	10	5	c23	-	C23 assertions and boolean literals
+# A boolean literal beside a value that isn't known to be boolean is noted.
+c23-boolean-literal-sides	c23-boolean-literal-sides.c	0	5	3	c23	-	C23 boolean literal sides
+# A static assertion among a structure's or a union's members (#2264), which declares none: checked as a block's,
+# a failing one's details too, and the members around it kept.
+static-assertions-among-members	static-assertions-among-members.c	0	1	1	-	-	static assertions among members
+c23-static-assertions-among-members	c23-static-assertions-among-members.c	0	0	0	c23	-	C23 static assertions among members

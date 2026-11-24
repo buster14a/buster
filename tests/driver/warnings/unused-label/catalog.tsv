@@ -1,0 +1,16 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+# A label no goto or address names, a statement expression's too, and a local label's at its `__label__` list;
+# one named by a goto, an address or an inner list's own label isn't; unused and maybe_unused mark one used.
+unused-labels	unused-labels.c	8	0	0	c23	-Wall	unused labels
+# Clang sorts a function body's unused declarations by place as it pops its scope: its labels among its own
+# variables, after an inner block's, before the body's runtime warnings.
+unused-labels-among-a-body-s-unused-variables	unused-labels-among-a-body-s-unused-variables.c	17	0	0	-	-Wall	unused labels among a body's unused variables
+# A function with an error warns of no unused label, as of no unused variable; a pragma ignores one.
+unused-labels-beside-errors-and-pragmas	unused-labels-beside-errors-and-pragmas.c	2	1	0	-	-Wunused-label	unused labels beside errors and pragmas
+# A goto whose jump into a statement expression is an error still uses its label, which the recovery's view
+# leaves out with the goto; an unused variable of that function still warns, as the jump's error isn't its scope's.
+a-label-an-erroneous-goto-names	a-label-an-erroneous-goto-names.c	2	1	1	-	-Wall	a label an erroneous goto names
+# An asm goto's labels are used as a goto's are: the function's, and a local label its block's list declares,
+# not one of the same name in another scope.
+labels-an-asm-goto-names	labels-an-asm-goto-names.c	3	0	0	-	-Wall	labels an asm goto names

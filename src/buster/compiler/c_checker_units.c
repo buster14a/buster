@@ -141,6 +141,8 @@ struct CheckUnitsLane
     ArenaPool pool;
     CheckUnitsMemory* memory;
     uint64_t held;
+    // Estimated bytes of the current unit within held (check_units_admit).
+    uint64_t unit_need;
     // The run whose units the lane takes, which tells its unit's checker whether a unit is left to take
     // (check_units_discard_huge), and the lane's units whose checker gave its scratch's pages back in whole huge pages,
     // for one (--shared-parts' report).
@@ -2139,6 +2141,24 @@ static uint64_t check_units_estimate(uint32_t tokens)
     return (uint64_t)tokens * BUSTER_CHECK_UNITS_TOKEN_BYTES + BUSTER_CHECK_UNITS_UNIT_BYTES;
 }
 
+// A lane admits its largest unit so far. While a smaller one runs, reuse up to four huge pages of
+// scratch out of the difference already charged to this lane. Round down so that the discard's
+// whole-page boundary fits that credit too. A waiting lane gets the usual release.
+static uint64_t check_units_scratch_floor(const CheckUnitsLane* lane)
+{
+    uint64_t floor = 0;
+    if (lane != NULL && lane->held > lane->unit_need && lane->held <= lane->memory->limit &&
+        __atomic_load_n(&lane->memory->waiting, __ATOMIC_ACQUIRE) == 0)
+    {
+        const uint64_t spare = lane->held - lane->unit_need;
+        const uint64_t limit = 4 * BUSTER_ARENA_HUGE_PAGE_BYTES;
+        const uintptr_t base = (uintptr_t)lane->scratch.base;
+        const uintptr_t end = (base + (spare < limit ? spare : limit)) & ~(BUSTER_ARENA_HUGE_PAGE_BYTES - 1);
+        floor = end > base ? end - base : 0;
+    }
+    return floor;
+}
+
 // Takes `need` bytes of the run's memory for a lane that holds `held` of it, in place of those: true if they fit beside
 // what the other lanes hold, or no other lane holds any.
 static bool check_units_memory_take(CheckUnitsMemory* memory, uint64_t held, uint64_t need)
@@ -2206,6 +2226,7 @@ static void check_units_admit(CheckUnitsLane* lane, uint32_t tokens)
         __atomic_sub_fetch(&memory->waiting, 1, __ATOMIC_ACQ_REL);
     }
     lane->held = memory != NULL && need > lane->held ? need : lane->held;
+    lane->unit_need = need;
 }
 
 // The lanes' setup: the intern table and the file cache a lane's units share, the arenas they take turns with, and the
@@ -2218,9 +2239,18 @@ static bool check_units_lane_ready(CheckUnitsLane* lane, const CheckDriverComman
         lane->arena = arena_reserve(1ull << 36);
         lane->scratch = arena_reserve(1ull << 36);
         lane->output = arena_reserve(1ull << 36);
-        lane->kept = lane->kept.base != 0 ? lane->kept : arena_reserve(1ull << 36);
-        lane->kept_bytes = lane->kept_bytes.base != 0 ? lane->kept_bytes : arena_reserve(1ull << 36);
-        lane->ready = lane->arena.base != 0 && lane->scratch.base != 0 && lane->output.base != 0 && lane->kept.base != 0 && lane->kept_bytes.base != 0 &&
+        // Only a link's bytes and metadata, or a unit's deferred dependency output, outlive the unit.
+        const bool keep = command->link || command->options.dependencies.enabled;
+        if (keep && lane->kept.base == NULL)
+        {
+            lane->kept = arena_reserve(1ull << 36);
+        }
+        if (command->link && lane->kept_bytes.base == NULL)
+        {
+            lane->kept_bytes = arena_reserve(1ull << 36);
+        }
+        lane->ready = lane->arena.base != NULL && lane->scratch.base != NULL && lane->output.base != NULL &&
+                      (!keep || lane->kept.base != NULL) && (!command->link || lane->kept_bytes.base != NULL) &&
                       intern_initialize(&lane->identifiers) && file_cache_initialize(&lane->cache, &lane->identifiers, pp_prepare_options(&command->options));
         lane->failed = !lane->ready;
         // Its root image, which a lane does without (#3070); --poison-arenas checks what it keeps after each unit.
@@ -2729,14 +2759,8 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
             order[i] = (uint32_t)sorted[i];
         }
         const bool named = !command->emit_object || command->output != NULL || check_units_objects(units, count, command->assembly ? ".s" : ".o", &arena);
-        // The tables every unit's code reads, which the first to need them would build: built here, before the lanes,
-        // which then only read them. The parser's are the front end's home's (main.c), which parse_initialize builds.
-        // The parser starts zeroed: a refusal of the units' objects' names skips its initialization, and its release
-        // then releases nothing.
-        Parser tables_parser = { 0 };
-        const ParseOptions tables_options = { .scalar = command->scalar, .tree_only = true };
-        bool ready = named && parse_initialize(&tables_parser, &tables_options, command->options.language);
-        parse_release(&tables_parser);
+        // Initialize the front end's shared tables before any lane reads them.
+        bool ready = named && parse_tables_initialize();
         const bool emitting = command->emit_object || command->link;
         if (ready && emitting && !tier0_initialized)
         {

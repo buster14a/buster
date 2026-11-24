@@ -1,0 +1,2 @@
+#ident "x"
+int a;

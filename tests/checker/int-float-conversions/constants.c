@@ -34,3 +34,9 @@ float constants(int i, float f, unsigned long long u)
     a = 1 / 0;
     return a + (float)d + (float)l + (float)q + h + b + 16777217;
 }
+
+void take_mixed(double, int, float, double, ...);
+void argument_edges(void)
+{
+    take_mixed(9007199254740993LL, 16777217, 16777217, 9007199254740995LL, 16777217);
+}

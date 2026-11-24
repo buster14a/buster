@@ -53,12 +53,12 @@ static bool check_input_packed_names(CheckInputReader* reader, CheckInputPackedN
                 const uint32_t width = count - first < 16 ? count - first : 16;
                 const __mmask16 active = (__mmask16)_bzhi_u32(0xffff, width);
                 const CheckInputMemo* tags = &reader->tag_types;
-                uint32_t present = tags->dense == NULL ? check_sparse_below(tags->sparse, first, count, BUSTER_CHECK_NONE) :
+                uint32_t present = reader->memo_pool != NULL ? check_sparse_below(tags->sparse->column, first, count, BUSTER_CHECK_NONE) :
                                    _mm512_mask_cmpneq_epi32_mask(active, _mm512_maskz_loadu_epi32(active, tags->dense + first), _mm512_setzero_si512());
                 while (present != 0)
                 {
                     const uint32_t token = first + (uint32_t)__builtin_ctz(present);
-                    const TypeId type = check_input_memo_get(&reader->tag_types, token);
+                    const TypeId type = check_input_memo_get(reader, reader->tag_types, token);
                     const uint8_t kind = type_kind(reader->types, type);
                     if (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION)
                     {

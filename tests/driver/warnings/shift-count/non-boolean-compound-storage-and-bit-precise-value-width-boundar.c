@@ -1,0 +1,1 @@
+void a(unsigned char x){x<<=7;x>>=7;x<<=8;x>>=8;}void b(unsigned short x){x<<=15;x>>=15;x<<=16;x>>=16;}unsigned _BitInt(1) c(unsigned _BitInt(1) x){return (x<<0)+(x>>0)+(x<<1)+(x>>1);}void d(unsigned _BitInt(1) x){x<<=0;x>>=0;x<<=1;x>>=1;}unsigned _BitInt(3) e(unsigned _BitInt(3) x){return (x<<2)+(x>>2)+(x<<3)+(x>>3);}void f(unsigned _BitInt(3) x){x<<=2;x>>=2;x<<=3;x>>=3;}

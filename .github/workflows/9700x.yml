@@ -19,6 +19,10 @@ on:
         type: choice
         options: [full, backlog, snapshot]
         default: full
+      paired_base:
+        description: 'Optional for full dispatch on a trusted PR branch. Compare this revision with the supplied full base SHA.'
+        type: string
+        default: ''
       hardware:
         description: 'backlog/snapshot: admit (measure in the window) or defer (hosted qualification alone)'
         type: choice
@@ -222,6 +226,7 @@ jobs:
       contents: read
       actions: read
     outputs:
+      paired_base: ${{ steps.paired_base.outputs.sha }}
       scope: ${{ steps.decide.outputs.scope }}
       hosted: ${{ steps.decide.outputs.hosted }}
       hosted_source: ${{ steps.decide.outputs.hosted_source }}
@@ -244,6 +249,25 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 2
           persist-credentials: false
+
+      - name: Resolve the paired comparison before hardware admission
+        id: paired_base
+        if: github.event_name == 'workflow_dispatch' && ((inputs.purpose == 'full' && inputs.paired_base != '') || inputs.purpose == 'snapshot' || inputs.purpose == 'backlog')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_BASE: ${{ inputs.paired_base }}
+          PURPOSE: ${{ inputs.purpose }}
+        run: |
+          base=$(git rev-parse HEAD^1)
+          if [[ "$PURPOSE" == full ]]; then
+            [[ "$REQUESTED_BASE" =~ ^[0-9a-f]{40}$ ]]
+            # Only build references from protected main on the shared host.
+            relation=$(gh api "repos/$GITHUB_REPOSITORY/compare/$REQUESTED_BASE...main" --jq .status)
+            [[ "$relation" == ahead || "$relation" == identical ]]
+            base=$REQUESTED_BASE
+          fi
+          [[ "$base" =~ ^[0-9a-f]{40}$ ]]
+          printf 'sha=%s\n' "$base" >> "$GITHUB_OUTPUT"
 
       - name: Decide reuse and hardware admission
         id: decide
@@ -476,11 +500,13 @@ jobs:
       window: ${{ steps.window.outputs.window }}
       native: ${{ steps.native.outputs.native }}
       host: ${{ steps.host.outputs.host }}
+      paired_artifact: ${{ steps.paired_upload.outputs.artifact-id }}
     defaults:
       run:
         shell: bash
     env:
       BUSTER_HOST_ARCH: znver5
+      PAIRED_BASE: ${{ (inputs.purpose != 'backlog' || needs.changes.outputs.checker != 'false') && needs.evidence.outputs.paired_base || '' }}
       # Nothing here reads the executable's debug information (docs/commands/build.md); the inventory's own build.sh
       # calls share the build's tree.
       BUSTER_DEBUG_INFO: '0'
@@ -673,8 +699,8 @@ jobs:
         # The required PR-base compiler and checker placements are prepared here too (#1662). One physical-core
         # budget covers both revisions and the oracle; every process finishes before measurements. See docs/ci-builds.md.
         env:
-          AB_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          AB_CHECKER: ${{ github.event_name == 'pull_request' && needs.changes.outputs.checker != 'false' }}
+          AB_BASE_SHA: ${{ env.PAIRED_BASE || github.event.pull_request.base.sha }}
+          AB_CHECKER: ${{ env.PAIRED_BASE != '' || (github.event_name == 'pull_request' && needs.changes.outputs.checker != 'false') }}
           AB_TIER1: ${{ github.event_name == 'pull_request' && needs.changes.outputs.tier1_programs != 'false' }}
         run: bash tools/ci/build-benchmarks.sh
 
@@ -1284,6 +1310,24 @@ jobs:
             taskset -c 2 perf stat -r 11 -e cycles:u,instructions:u,branch-misses:u,cache-references:u,cache-misses:u \
               -- ./build/compiler $transitions "${options[@]}" -o "$RUNNER_TEMP/counted.o"
           done
+
+      - name: Capture the paired checker comparison
+        id: paired_capture
+        if: env.PAIRED_BASE != ''
+        continue-on-error: true
+        env:
+          PAIRED_HOST: ${{ steps.host.outputs.host }}
+        run: bash tools/ci/paired-checker.sh
+
+      - name: Retain this paired attempt for hosted analysis
+        continue-on-error: true
+        id: paired_upload
+        if: always() && steps.paired_capture.outcome != 'skipped' && env.PAIRED_BASE != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: paired-checker-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/paired-checker/
+          if-no-files-found: warn
 
       - name: Compare check-expressions with the pull request's base over placements
         # #1050's measure: sqlite3.c's -c by the base and by this tree, each over four placements of its checker unit
@@ -2207,6 +2251,41 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 2
           persist-credentials: false
+
+      - name: Retrieve this attempt's paired observations
+        continue-on-error: true
+        if: needs.benchmarks.outputs.paired_artifact != ''
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          artifact-ids: ${{ needs.benchmarks.outputs.paired_artifact }}
+          path: ${{ runner.temp }}/paired-checker
+          merge-multiple: true
+
+      - name: Report paired performance coverage
+        continue-on-error: true
+        env:
+          REQUEST: ${{ needs.benchmarks.result != 'skipped' && needs.evidence.outputs.paired_base != '' && (inputs.purpose != 'backlog' || needs.changes.outputs.checker != 'false') }}
+          BASE: ${{ needs.evidence.outputs.paired_base || github.event.pull_request.base.sha }}
+          ARTIFACT: ${{ needs.benchmarks.outputs.paired_artifact }}
+        run: |
+          report="$RUNNER_TEMP/paired-verdict.json"
+          if [[ -n "$ARTIFACT" ]]; then
+            cc -std=c17 -D_GNU_SOURCE -O2 tools/performance/paired.c -lm -o "$RUNNER_TEMP/paired"
+            "$RUNNER_TEMP/paired" report tools/performance/plans/checker-sqlite.json "$RUNNER_TEMP/paired-checker/manifest.bmf.json" > "$report" || test -s "$report"
+          else
+            verdict=not_measured
+            if [[ "$REQUEST" == true ]]; then verdict=invalid_incomplete; fi
+            jq -n --arg sha "$GITHUB_SHA" --arg base "$BASE" --arg v "$verdict" '{base_source:$base,case:"sqlite3-syntax-only-cpu2",candidate_source:$sha,identity:null,verdict:$v,independent_units:0}' > "$report"
+          fi
+          jq -r '"Paired SQLite checker comparison for `" + env.GITHUB_SHA + "` — **" + .verdict + "** (" + (.independent_units|tostring) + " independent units)."' "$report" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Retain this paired verdict
+        continue-on-error: true
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: paired-verdict-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/paired-verdict.json
 
       - name: Write the coverage record
         id: record

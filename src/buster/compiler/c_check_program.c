@@ -342,6 +342,8 @@ struct CheckProgramOptions
     // what its columns would have taken for the parse's tokens the view leaves out, which its next unit's parse and
     // reader push as far again (without it, each viewed unit gave back huge pages that the next one took fresh, cleared).
     uint64_t discard_keep;
+    // An absolute scratch prefix covered by the lane's unused admission credit (#1213).
+    uint64_t discard_floor;
 };
 
 typedef struct CheckProgramCase CheckProgramCase;
@@ -6527,7 +6529,8 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
     // parse and reader fault the part in again a base page at a time, as each later unit does.
     if (valid && options.discard_huge)
     {
-        arena_discard_past(scratch, scratch->length + options.discard_keep, true);
+        const uint64_t kept = scratch->length + options.discard_keep;
+        arena_discard_past(scratch, kept > options.discard_floor ? kept : options.discard_floor, true);
     }
     else if (valid)
     {

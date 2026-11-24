@@ -870,6 +870,16 @@ the readers scan packed keys in source order.
 
 ## Runtime fixtures
 
+Complete driver programs, companion headers and expected output live under
+`tests/driver/programs/SUITE/`. Each catalog starts with
+`buster-fixtures v1 driver-programs` and the suite's input roles, separated
+by tabs. Each later row supplies a stable ID and a filename for each role,
+in header order. Rows may share files. Add a row to run the same compile,
+link, native execution and output checks on another complete case. The
+runner stages input under the original logical filenames. Hardware and
+toolchain gates, temporary output paths and independent oracles remain in
+the specialized C check.
+
 The default-warning driver sweeps read `tests/driver/warnings/SUITE/catalog.tsv`.
 Use `test-checker-driver --fixtures DIR` to select the root containing
 `driver/` and `checker/`. Each v2 catalog starts with

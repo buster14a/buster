@@ -1,0 +1,5 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+# A `<<` of literals and a conditional of integer literals as a static assertion's condition, at file scope, among
+# a record's members and in a block, where the shift's count gives no warning of its own; a runtime one's does.
+static-assertions-conditions-converted-to-booleans	static-assertions-conditions-converted-to-booleans.c	7	0	0	warning-text	-	static assertions' conditions converted to booleans
