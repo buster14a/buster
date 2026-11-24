@@ -253,6 +253,7 @@ static void asm_test_linked_section_names(AsmTest* test)
     {
         "tests/assembly-output/linked-section-ambiguous.s",
         "tests/assembly-output/linked-section-forward.s",
+        "tests/assembly-output/linked-section-ordinary-first.s",
     };
     Arena files = arena_reserve(65536);
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(ambiguous); i += 1)
@@ -305,9 +306,12 @@ static void asm_test_linked_section_names(AsmTest* test)
                     relocations = section->sh_size == sizeof(*rows) * BUSTER_ARRAY_LENGTH(targets);
                     for (uint32_t r = 0; relocations && r < BUSTER_ARRAY_LENGTH(targets); r += 1)
                     {
-                        const uint64_t symbol = ELF64_R_SYM(rows[r].r_info);
+                        const uint64_t info = rows[r].r_info;
+                        const uint64_t symbol = ELF64_R_SYM(info);
                         const uint64_t target = object_view_symbol_section(&view, symbol);
-                        relocations = rows[r].r_offset == sizeof(uint64_t) * r && ELF64_R_TYPE(rows[r].r_info) == R_X86_64_64 &&
+                        const uint64_t offset = sizeof(uint64_t) * r;
+                        const int64_t addend = r == 2 ? (int64_t)offset : 0;
+                        relocations = rows[r].r_offset == offset && rows[r].r_addend == addend && ELF64_R_TYPE(info) == R_X86_64_64 &&
                                       ELF64_ST_TYPE(view.symbols[symbol].st_info) == STT_SECTION && target < view.section_count &&
                                       strcmp(object_view_section_name(&view, target), targets[r]) == 0;
                     }

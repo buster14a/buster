@@ -923,7 +923,13 @@ static uint32_t asm_symbol_scoped(AsmParser* parser, String8 name, uint32_t loca
         else
         {
             result = parser->symbol_count++;
-            parser->symbols[result] = (AsmSymbol){.name = name, .location = location, .internal = internal, .section_only = section_only};
+            parser->symbols[result] = (AsmSymbol)
+            {
+                .name = name,
+                .location = location,
+                .internal = internal,
+                .section_only = section_only,
+            };
             if (!internal && name.length != 0 && name.pointer[0] == '.')
             {
                 const uint32_t section = asm_find_section(parser, name, 0);
