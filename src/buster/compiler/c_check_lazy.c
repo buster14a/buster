@@ -146,6 +146,54 @@ static bool check_lazy_system(const Preprocessor* pp, uint32_t token)
     return system;
 }
 
+// The compile driver defers expansion history. Like pp_system_levels, a file token has its spelling's level,
+// and a macro token has the level of its invocation's output run. The planner only asks at a definition's
+// declarator, opening brace and header start. Find that run without constructing a token-wide level column.
+// The driver records history first if a system-level transition inside a macro made the runs inexact.
+static bool check_lazy_definition_system(const Preprocessor* pp, uint32_t token)
+{
+    bool system = false;
+    if (!pp->history_deferred)
+    {
+        system = check_lazy_system(pp, token);
+    }
+    else if (token < pp->output.count && !pp->system_runs_inexact)
+    {
+        uint8_t level = BUSTER_PP_USER_FILE;
+        if ((pp->output.flags[token] & BUSTER_PP_FROM_MACRO) == 0)
+        {
+            level = pp_system_level_at(pp, pp->output.locations[token]);
+        }
+        else
+        {
+            uint32_t low = 0;
+            uint32_t high = pp->system_run_count;
+            while (low < high)
+            {
+                const uint32_t middle = low + (high - low) / 2;
+                if (pp->system_runs[middle].token <= token)
+                {
+                    low = middle + 1;
+                }
+                else
+                {
+                    high = middle;
+                }
+            }
+            level = low != 0 ? pp->system_runs[low - 1].level : BUSTER_PP_USER_FILE;
+        }
+        system = level != BUSTER_PP_USER_FILE;
+    }
+    return system;
+}
+
+// A deferred unit sets no_history during preprocessing. It can still supply exact system levels from its
+// runs or record its history on demand. An explicitly history-free unit must retain every body.
+static bool check_lazy_missing_history(const Preprocessor* pp)
+{
+    return pp->options.no_history && !pp->history_deferred && pp->history == NULL;
+}
+
 static bool check_lazy_name(const InternTable* names, IdentId id, const char* expected)
 {
     bool equal = id != 0 && id < names->count;
@@ -286,7 +334,7 @@ static bool check_lazy_replay(CheckLazy* result, const Parser* parser, const Pre
             {
                 const uint32_t name = parser->tokens.names[declaration];
                 row->flags = check_lazy_header(parser, pp, firsts[declaration], row->begin, &bindings);
-                const bool system = check_lazy_system(pp, parse_source_index(&parser->tokens, declaration)) && check_lazy_system(pp, parse_source_index(&parser->tokens, row->begin));
+                const bool system = check_lazy_definition_system(pp, parse_source_index(&parser->tokens, declaration)) && check_lazy_definition_system(pp, parse_source_index(&parser->tokens, row->begin));
                 row->flags |= system ? BUSTER_CHECK_LAZY_SYSTEM : 0;
                 if (targets[name] != 0)
                 {
@@ -296,7 +344,7 @@ static bool check_lazy_replay(CheckLazy* result, const Parser* parser, const Pre
                 targets[name] = body + 1;
             }
         }
-        bool opaque = pp->options.no_history;
+        bool opaque = check_lazy_missing_history(pp);
         for (uint32_t token = 0; token < count; token += 1)
         {
             opaque |= parser->tokens.kinds[token] == PARSE_KIND_ASM;
@@ -414,18 +462,21 @@ static bool check_lazy_eager(const Parser* parser, const Preprocessor* pp, uint3
     const uint32_t* const names = valid ? parser->tokens.names : NULL;
     static const char* const spellings[] = { "alias", "__alias__", "ifunc", "__ifunc__", "cleanup", "__cleanup__" };
     IdentId opaque_names[BUSTER_ARRAY_LENGTH(spellings)] = { 0 };
-    bool opaque = valid && pp->options.no_history;
+    bool opaque = valid && check_lazy_missing_history(pp);
     for (uint32_t name = 0; valid && !opaque && name < BUSTER_ARRAY_LENGTH(spellings); name += 1)
     {
         opaque_names[name] = intern_find(pp->table, (const uint8_t*)spellings[name], (uint32_t)strlen(spellings[name]));
     }
     uint32_t bodies = 0;
-    for (uint64_t block = 0; block < count; block += 64)
+    for (uint64_t block = 0; block < count && (!opaque || selected != NULL); block += 64)
     {
         const uint32_t live = count - block < 64 ? (uint32_t)(count - block) : 64;
         const __mmask64 active = live == 64 ? UINT64_MAX : (UINT64_C(1) << live) - 1;
-        const __m512i role = _mm512_maskz_loadu_epi8(active, roles + block);
-        bodies += (uint32_t)__builtin_popcountll(_mm512_mask_cmpeq_epi8_mask(active, role, _mm512_set1_epi8(PARSE_ROLE_OPEN_BODY)));
+        if (selected != NULL)
+        {
+            const __m512i role = _mm512_maskz_loadu_epi8(active, roles + block);
+            bodies += (uint32_t)__builtin_popcountll(_mm512_mask_cmpeq_epi8_mask(active, role, _mm512_set1_epi8(PARSE_ROLE_OPEN_BODY)));
+        }
         if (!opaque)
         {
             const __m512i kind = _mm512_maskz_loadu_epi8(active, kinds + block);
@@ -442,7 +493,10 @@ static bool check_lazy_eager(const Parser* parser, const Preprocessor* pp, uint3
             }
         }
     }
-    *selected = opaque ? bodies : 0;
+    if (selected != NULL)
+    {
+        *selected = opaque ? bodies : 0;
+    }
     return opaque;
 }
 

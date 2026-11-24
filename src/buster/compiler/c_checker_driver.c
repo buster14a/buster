@@ -13449,7 +13449,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
         if (ready && lazy_system_headers && !prefix_only)
         {
             uint32_t eager_bodies = 0;
-            const bool eager = check_lazy_eager(checking, checking_pp, &eager_bodies);
+            const bool eager = check_lazy_eager(checking, checking_pp, stage_clock != NULL ? &eager_bodies : NULL);
             if (eager)
             {
                 lazy = (CheckLazy)
@@ -13464,7 +13464,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             }
             else
             {
-                ready = check_lazy_plan(&lazy, checking, checking_pp, arena, scratch, scalar);
+                ready = (!checking_pp->history_deferred || !checking_pp->system_runs_inexact || pp_history_ensure(checking_pp)) &&
+                        check_lazy_plan(&lazy, checking, checking_pp, arena, scratch, scalar);
             }
             if (!ready)
             {
@@ -15873,14 +15874,13 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     // The preprocessor's phases' ticks in pp_run, for the report.
     uint64_t pp_ticks[PP_PHASE_COUNT] = { 0 };
     // The expansion history is recorded only when something asks for it (PPOptions.defer_history): a diagnostic, and the
-    // system-header judgment of a unit whose runs can't make it (check_input_system_tokens). --scalar judges by the
-    // history, and -flazy-system-headers reads every declaration's, so they record it as the unit runs; so does a link or
-    // an object with -g, whose rows read every function's tokens' expansion places (c_check_debug.c), rather than
-    // preprocessing the unit again for them.
+    // system-header judgment of a unit whose runs can't make it (check_input_system_tokens, check_lazy_definition_system).
+    // Record history up front for --scalar, debug line rows, and lazy links. A link can consult a system declaration's
+    // original expansion when diagnosing an undefined library symbol after the backend releases the output.
     const bool source_rows = parsed && (link || emit_object) && (options.predefines.debug || options.predefines.debug_modules);
     // The functions' unwind tables, as clang has them: by default, unless freestanding or an option turns them off.
     const bool unwind_tables = parsed && predefines_unwind_tables(&options.predefines, options.freestanding);
-    options.defer_history = !lazy_system_headers && !scalar && !source_rows;
+    options.defer_history = !scalar && !source_rows && !(lazy_system_headers && link);
     // (-g skips too: a unit's DWARF describes what its definitions reach, check_debug_value_roots, which a skipped
     // declaration is not.)
     const uint8_t command_attested = (uint8_t)(scalar ? CHECK_ATTESTED_MODE_OFF : attested);

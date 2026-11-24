@@ -8266,6 +8266,27 @@ static void check_test_driver_lazy(CheckTest* test, const char* clang, const cha
             false,
         },
         {
+            "a system macro expanded in user code retains the invalid body",
+            "#pragma GCC system_header\n#define DEF(name) static int name(void){return missing;}\n",
+            "#include \"lazy.h\"\nDEF(ordinary)\n",
+            true,
+            true,
+        },
+        {
+            "a user macro expanded in a system header can defer its body",
+            "#pragma GCC system_header\nDEF(hidden)\n",
+            "#define DEF(name) static int name(void){return missing;}\n#include \"lazy.h\"\nint f(void){return 3;}\n",
+            true,
+            false,
+        },
+        {
+            "a system transition inside a macro argument uses the invocation's history",
+            "",
+            "#define DEF(x) static int hidden(void){return missing;}\n# 1 \"sys.h\" 3\nDEF(\n# 2 \"user.c\"\n0)\nint f(void){return 3;}\n",
+            true,
+            false,
+        },
+        {
             "a file-scope address retains a system body in both modes",
             "#pragma GCC system_header\nstatic int used(void){return 7;}\nstatic int unused(void){return 99;}\n",
             "#include \"lazy.h\"\nint (*pointer)(void)=used; int f(void){return 3;}\n",
