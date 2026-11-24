@@ -38,6 +38,12 @@ requirements. [Command index](README.md).
   (`selection-census-statements`, step 2.2c.3's), and its left-out ranges
   against the writer's, with whether the lowering's locals over each are the
   same (`selection-census-ranges`, step 2.2c.4's),
+  `--branch-truth-census` checking the bit before a branch condition's fold
+  against the fold at every node of the unit, asked every way a condition is
+  (#1340's test option, `check_cfg_decidable`: one line on stderr with the
+  nodes and conditions the bit keeps and the fold decides, and `unsound`, the
+  nodes with a clear bit that the fold decided or an observer heard, which
+  fails the compile where it isn't 0; no change to the object),
   `--provisional-selection` numbering -c's code by that pass's selection, made
   before the bodies' loop and filled in after it, its extra symbols
   placeholders the object leaves out, its builtins, initializers' plans, asm
