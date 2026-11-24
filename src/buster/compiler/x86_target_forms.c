@@ -9,9 +9,9 @@
 #include "buster/compiler/x86_target.c"
 
 // Bit 63 denotes a classified row; absent initializers remain unavailable. The maps and the builder come from the same
-// canonical rows. The full-width requirements keep all 64 feature bits (x86_target_requirement's metadata and the
-// extended rows' exact pass); the vector table projects the currently used feature bits to 32 bits, halving its read
-// working set. No run-time initialization or allocation is needed.
+// canonical rows. The full-width requirements keep all 64 feature bits (x86_target_requirement's metadata); the vector
+// table projects the currently used feature bits to 32 bits, halving its read working set. No run-time initialization
+// or allocation is needed.
 // The rows that need a feature past the projection (BUSTER_X86_TARGET_EXTENDED's, last in x86_target_rows.c) are
 // the vector builder's rare case: their compact words carry BUSTER_X86_TARGET_COMPACT_EXTENDED, which no target
 // has, and their rest words (x86_target_rest_requirements, 0 for every other form) the features past the projection,
@@ -224,7 +224,7 @@ BUSTER_X86_TARGET_DATA const uint64_t x86_target_classified_requirements[BUSTER_
 // Update the projection deliberately before adding such a row; the exhaustive tests also check every round trip.
 #define BUSTER_X86_TARGET_REQUIREMENT(name, required) _Static_assert(((required) & ~BUSTER_X86_TARGET_COMPACT_FEATURES) == 0, "target requirement cannot be compacted: " #name); _Static_assert(((required) & BUSTER_X86_TARGET_KNOWN) != 0, "explicit target row must be classified: " #name);
 // An extended row needs a feature past the projection (a compactable one belongs to the vector loop) and comes after
-// every compact row, where the exact pass reads it.
+// every compact row (the policy test reads them there).
 #define BUSTER_X86_TARGET_EXTENDED(name, required) _Static_assert(((required) & ~BUSTER_X86_TARGET_COMPACT_FEATURES) != 0, "extended target row is compactable: " #name); _Static_assert(((required) & BUSTER_X86_TARGET_KNOWN) != 0, "explicit target row must be classified: " #name); _Static_assert(BUSTER_X86_TARGET_SLOT_##name >= BUSTER_X86_TARGET_COMPACT_COUNT, "extended target rows come after the compact rows: " #name);
 #include "buster/compiler/x86_target_rows.c"
 #undef BUSTER_X86_TARGET_EXTENDED
