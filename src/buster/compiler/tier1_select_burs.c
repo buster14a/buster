@@ -915,6 +915,10 @@ static bool tier1_burs_link(const Tier1SelectForest* forest, uint32_t node)
 // The vector classifier gathers an address's offset and its scale from its 16-byte record.
 _Static_assert(sizeof(IrAddress) == 16 && offsetof(IrAddress, offset) == 0 && offsetof(IrAddress, scale) == 8, "IrAddress's layout, which tier1_burs_classify_vector gathers");
 
+// The vector classifier gathers a frame object's size, alignment, and type and flags dword from its 16-byte slot record.
+_Static_assert(sizeof(IrSlot) == 16 && offsetof(IrSlot, size) == 0 && offsetof(IrSlot, alignment) == 8 && offsetof(IrSlot, type) == 12 && offsetof(IrSlot, flags) == 13,
+    "IrSlot's layout, which tier1_burs_classify_vector gathers");
+
 static bool tier1_burs_displacement(const IrFunction* function, uint32_t node)
 {
     const IrAddress operand = function->addresses[function->c[node]];
@@ -1070,8 +1074,8 @@ static __m256i tier1_burs_constant_bits_vector(__m512i value, __m512i width)
 
 // The nodes' operators and visible children, 16 at a time, a node's operator its tier1_burs_classify_node's. Each node's operation,
 // type and flags go first into one 32-bit word (`words`, `count` of them), whose gathers then stay in the columns; the
-// children's columns are gathered by their indices where those are nodes. A frame object's address, whose slot the
-// class reads, takes the scalar classifier.
+// children's columns are gathered by their indices where those are nodes, a frame object's slot record and an address's
+// displacement too.
 static void tier1_burs_classify_vector(const Tier1SelectForest* forest, const uint32_t* users, uint32_t* words, uint32_t* classes, uint32_t* kids)
 {
     const IrFunction* function = forest->function;
@@ -1185,9 +1189,8 @@ static void tier1_burs_classify_vector(const Tier1SelectForest* forest, const ui
         result = _mm512_mask_mov_epi32(result, store, _mm512_set1_epi32(TIER1_BURS_OP_STORE));
         // Addresses by their index, where their displacement fits (tier1_burs_displacement): the offset, which an index
         // that isn't a constant leaves alone, and a constant index's scaled value added. Where the constant or the offset
-        // doesn't fit 32 bits, which may still sum to a displacement that does, the scalar classifier decides.
+        // doesn't fit 32 bits, which may still sum to a displacement that does, the exact 64-bit arithmetic below decides.
         const __mmask16 address = active & _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_ADDRESS));
-        uint32_t exact = 0;
         if (address != 0)
         {
             const __m512i zero = _mm512_setzero_si512();
@@ -1214,7 +1217,41 @@ static void tier1_burs_classify_vector(const Tier1SelectForest* forest, const ui
                 const __mmask16 sum_fits = (__mmask16)(_mm512_cmpeq_epi64_mask(_mm512_srai_epi64(_mm512_slli_epi64(sum_low, 32), 32), sum_low) |
                                                        ((uint32_t)_mm512_cmpeq_epi64_mask(_mm512_srai_epi64(_mm512_slli_epi64(sum_high, 32), 32), sum_high) << 8));
                 covered |= small & sum_fits;
-                exact = constant_index & ~small;
+                // A constant or an offset past 32 bits, which may still sum to a disp32 (tier1_burs_displacement):
+                // the product of the constant and the scale (at most 255) exactly, by 32-bit limbs of the constant's
+                // magnitude, refused where it overflows 64 bits; then the sum, refused where it overflows; then the
+                // disp32's range.
+                const __mmask16 large = constant_index & ~small;
+                if (large != 0)
+                {
+                    const __m512i scales[2] = {
+                        _mm512_cvtepu32_epi64(_mm512_castsi512_si256(scale)),
+                        _mm512_cvtepu32_epi64(_mm512_extracti64x4_epi64(scale, 1)),
+                    };
+                    const __m512i values[2] = { value_low, value_high };
+                    const __m512i offsets[2] = { offset_low, offset_high };
+                    uint32_t fits = 0;
+                    for (uint32_t half = 0; half < 2; half += 1)
+                    {
+                        const __mmask8 negative = _mm512_movepi64_mask(values[half]);
+                        const __m512i magnitude = _mm512_mask_sub_epi64(values[half], negative, _mm512_setzero_si512(), values[half]);
+                        const __m512i low = _mm512_mul_epu32(magnitude, scales[half]);
+                        const __m512i high = _mm512_mul_epu32(_mm512_srli_epi64(magnitude, 32), scales[half]);
+                        // The magnitude's bits from 32 up, and those below: it fits an int64 under 2^63, or at exactly
+                        // 2^63 when negative.
+                        const __m512i top = _mm512_add_epi64(high, _mm512_srli_epi64(low, 32));
+                        const __m512i limit = _mm512_set1_epi64(INT64_C(1) << 31);
+                        const __mmask8 product_fits = _mm512_cmplt_epu64_mask(top, limit) |
+                                                      (negative & _mm512_cmpeq_epi64_mask(top, limit) & _mm512_testn_epi64_mask(low, _mm512_set1_epi64(0xffffffff)));
+                        const __m512i product = _mm512_mullo_epi64(values[half], scales[half]);
+                        const __m512i sum = _mm512_add_epi64(product, offsets[half]);
+                        // A signed addition overflows where both terms have one sign and the sum the other.
+                        const __mmask8 sum_overflow = _mm512_movepi64_mask(_mm512_andnot_si512(_mm512_xor_si512(product, offsets[half]), _mm512_xor_si512(sum, product)));
+                        const __mmask8 disp32 = _mm512_cmpeq_epi64_mask(_mm512_srai_epi64(_mm512_slli_epi64(sum, 32), 32), sum);
+                        fits |= (uint32_t)(product_fits & ~sum_overflow & disp32) << (half * 8);
+                    }
+                    covered |= large & (__mmask16)fits;
+                }
             }
             const __mmask16 no_index = covered & _mm512_cmpeq_epi32_mask(b, none);
             result = _mm512_mask_mov_epi32(result, covered, _mm512_set1_epi32(TIER1_BURS_OP_ADDR_IDX));
@@ -1270,10 +1307,32 @@ static void tier1_burs_classify_vector(const Tier1SelectForest* forest, const ui
         const __mmask16 copy = adjacent & _mm512_mask_cmpeq_epi32_mask(active, type, _mm512_set1_epi32(IR_I1)) & _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_COPY)) &
                                _mm512_cmpeq_epi32_mask(_mm512_and_si512(a_word, byte), _mm512_set1_epi32(IR_FCMP));
         result = _mm512_mask_mov_epi32(result, copy, _mm512_set1_epi32(TIER1_BURS_OP_COPY_TRUTH));
+        // A frame object's address (tier1_select_stack_object): a slot of the function's, not the variadic overflow
+        // area, within the planner's object bounds; SLOT_X in the entry block. Its record's size, alignment and flags
+        // are gathered from the slot's 16 bytes.
+        const __mmask16 slot_address = _mm512_mask_cmplt_epu32_mask(active & _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_STACK_ADDR)), a,
+            _mm512_set1_epi32((int)function->slot_count));
+        if (slot_address != 0)
+        {
+            const __m512i zero = _mm512_setzero_si512();
+            const __m512i record = _mm512_slli_epi32(a, 1);
+            const __m512i size_low = _mm512_mask_i32gather_epi64(zero, (__mmask8)slot_address, _mm512_castsi512_si256(record), function->slots, 8);
+            const __m512i size_high = _mm512_mask_i32gather_epi64(zero, (__mmask8)(slot_address >> 8), _mm512_extracti64x4_epi64(record, 1), function->slots, 8);
+            const __m512i tail = _mm512_mask_i32gather_epi32(zero, slot_address, _mm512_slli_epi32(a, 4), (const uint8_t*)function->slots + offsetof(IrSlot, alignment), 1);
+            // The type and flags bytes and the padding after them: a dword inside the 16-byte record.
+            const __m512i flags = _mm512_srli_epi32(_mm512_mask_i32gather_epi32(zero, slot_address, _mm512_slli_epi32(a, 4), (const uint8_t*)function->slots + offsetof(IrSlot, type), 1), 8);
+            const __m512i bytes = _mm512_set1_epi64((long long)BUSTER_TIER1_SELECT_MAX_OBJECT_BYTES);
+            const __mmask16 sized = (__mmask16)(_mm512_cmple_epu64_mask(size_low, bytes) | ((uint32_t)_mm512_cmple_epu64_mask(size_high, bytes) << 8));
+            const __mmask16 object = slot_address & sized & _mm512_cmple_epu32_mask(tail, _mm512_set1_epi32((int)BUSTER_TIER1_SELECT_MAX_OBJECT_ALIGNMENT)) &
+                                     _mm512_testn_epi32_mask(flags, _mm512_set1_epi32(BUSTER_IR_SLOT_OVERFLOW_AREA));
+            const __mmask16 entry = object & _mm512_cmpeq_epi32_mask(block, zero);
+            result = _mm512_mask_mov_epi32(result, object, _mm512_set1_epi32(TIER1_BURS_OP_SLOT));
+            result = _mm512_mask_mov_epi32(result, entry, _mm512_set1_epi32(TIER1_BURS_OP_SLOT_X));
+        }
         _mm512_mask_storeu_epi32(classes + first, active, result);
-        // A frame object's address, and an address the vector rule leaves: the scalar classifier's, which reads its slot
-        // or its displacement.
-        uint32_t slots = (active & _mm512_cmpeq_epi32_mask(op, _mm512_set1_epi32(IR_STACK_ADDR))) | exact | equal;
+        // A floating == or != (#2922): tier1_burs_equality's, whose select's recurrence is tier1_select_recurrent's
+        // bounded walk, which candidate generation shares (#3450's record has its census).
+        uint32_t slots = equal;
         while (slots != 0)
         {
             const uint32_t lane = (uint32_t)__builtin_ctz(slots);
