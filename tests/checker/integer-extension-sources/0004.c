@@ -1,0 +1,1 @@
+_Static_assert((((__int128)1<<126)*2)==((__int128)1<<127),"wide multiply"); _Static_assert((-((__int128)1<<127))==((__int128)1<<127),"wide negate"); _Static_assert((((__int128)1<<127)/-1)==((__int128)1<<127),"wide divide"); _Static_assert((((__int128)1<<127)%-1)==0,"wide remainder"); _Static_assert(((unsigned __int128)1<<128)==((unsigned __int128)1<<127),"wide saturation");

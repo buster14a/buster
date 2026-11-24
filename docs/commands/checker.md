@@ -962,6 +962,32 @@ are no generated cases.
 | `transparent` | 8 | the end of `check_test_transparent_calls` (`c_check_transparent_test.c`) |
 | `transparent-types` | 17 | the end of `check_test_transparent_types` (`c_check_transparent_type_test.c`) |
 
+The following private oracles read the same case format at their original
+call sites. They retain their temporary filenames, diagnostic policies and
+scalar/vector comparisons.
+
+| Suite | Cases | Oracle detail |
+| --- | ---: | --- |
+| `constant-expressions` | 190 | Includes the full-width Clang/GCC probe and generated nested expressions |
+| `enum-sources` | 41 | Each case runs as `enum.c` |
+| `vla-sources` | 51 | Includes the generated repeated-size expression |
+| `const-objects` | 63 | The sparse-array probe retains its independent smaller Clang input |
+| `bit-builtins` | 30 | GNU17 Clang oracle per char signedness, with the recorded checker standard |
+| `stdc-bit-builtins` | 10 | Groups by GNU17 or GNU23 |
+| `typeof-compound` | 20 | Groups by GNU17 or GNU23 |
+| `function-name-semantics` | 10 | Retains the quiet Clang syntax check |
+| `integer-extension-sources` | 13 | Stages each source as `oracle.c` |
+| `context-selections` | 8 | Stages each source as `selection-N.c` |
+| `atomic-vector-constraints` | 2 | Individual Clang and checker runs |
+| `function-name-objects` | 20 | `FILE.c.expected` supplies the plain name and pretty signature on two newline-terminated lines |
+
+Add an ordinary regression by adding a catalog row and its files. In suites
+with generators or independently modeled inputs, the FILE column can also name
+a C-defined `@name`. Each binding must occur exactly once. Generated inputs
+stay at the catalog positions the original oracle used. The deep function-name
+case still follows the 20 ordinary cases. The integer fold operation/operand
+model and its generated expected bits remain in the integer checker.
+
 `tests/checker/overload-placeholders` (#2935) is a warning catalog of
 `test-checker-driver`'s (`check_test_driver_warning_catalog`, as
 `initializer-comma` is: `buster-fixtures v1 checker-warnings`, then FILE,

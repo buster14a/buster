@@ -1,0 +1,43 @@
+buster-fixtures v1 checker-sources
+0001	0001.c	-	enum expression completes anonymous record
+0002	0002.c	-	enum inline record keeps earlier operand event order
+0003	0003.c	-	enum inline tag identity survives subsequent expression use
+0004	0004.c	-	enum inline nested enumerator visible after its declaration
+0005	0005.c	-	enum inline record resolves header attributes before body
+0006	0006.c	-	enum inline record nested inside outer tag attribute
+0007	@nested-records	-	deep enum and record source jobs use explicit frames
+0008	0008.c	rejected	enum inline record diagnoses missing member bound at use
+0009	@many-values	-	long provisional enum chain retains exact high bits until completion
+0010	0010.c	-	wide unsigned enumerator used after completion
+0011	0011.c	-	all completed enumerators share signed common type
+0012	0012.c	-	signed int successor has provisional long and completed unsigned int
+0013	0013.c	-	unsigned int successor widens to unsigned long
+0014	0014.c	-	explicit wide expression retains its provisional type
+0015	0015.c	-	small explicit expression enumerators all become int
+0016	0016.c	-	negative provisional successor keeps wide expression type
+0017	0017.c	-	signed bit precise successor widens by value width
+0018	0018.c	-	unsigned bit precise successor widens by value width
+0019	0019.c	-	unsigned largest successor wraps without host overflow
+0020	0020.c	-	signed largest successor wraps without host overflow
+0021	0021.c	-	mixed unsigned maximum and negative enum values
+0022	0022.c	-	128 bit provisional positive values retain upper bits
+0023	0023.c	-	128 bit provisional negative values retain sign
+0024	0024.c	-	128 bit unsigned successor retains provisional width
+0025	0025.c	-	packed enum layout preserves int enumerator types
+0026	0026.c	-	aligned enum layout and wide constant types
+# #1447: clang applies a fixed enum's aligned attribute after its body, which nothing asked its layout before.
+0027	0027.c	-	fixed enum aligned after its body
+0028	0028.c	-	nested record enum chains remain separate
+0029	0029.c	-	enumerator attributes preserve declaration identity
+0030	0030.c	-	enumerator ignored layout attributes preserve scalar type
+0031	0031.c	-	enumerator aligned attribute preserves declared alignment
+0032	0032.c	rejected	enumerator mode attribute has an invalid subject
+0033	0033.c	-	enumerator ext vector attribute is ignored
+0034	0034.c	-	enum completion distinguishes small value in a wide set
+0035	0035.c	-	later enum can use completed earlier common type
+0036	0036.c	-	enumerator shadowing restores completed outer value
+0037	0037.c	rejected	enumerator still rejects noninteger floating value
+0038	0038.c	rejected	enumerator still rejects evaluated division by zero
+0039	0039.c	rejected	enumerator still rejects runtime object value
+0040	0040.c	rejected	enumerator still rejects same scope duplicate
+0041	0041.c	rejected	enumerator still rejects incomplete enum size
