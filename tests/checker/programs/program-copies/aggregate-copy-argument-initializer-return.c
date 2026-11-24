@@ -1,0 +1,1 @@
+struct S{char c[1025];};struct S pass(struct S s){struct S r=s;return r;}int tested(int n){struct S a;for(int i=0;i<1025;i++)a.c[i]=(char)(n+i);struct S b=pass(a);for(int i=0;i<1025;i++)if(a.c[i]!=b.c[i])return -1003;return b.c[1024];}

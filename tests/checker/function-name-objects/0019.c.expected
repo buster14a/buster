@@ -1,0 +1,2 @@
+macro_function
+int macro_function(void)

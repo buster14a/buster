@@ -1,0 +1,5 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+union-cast-values	union-cast-values.c	-	union-cast-values
+union-cast-static	union-cast-static.c	-	union-cast-static
+union-cast-transparent	union-cast-transparent.c	-	union-cast-transparent

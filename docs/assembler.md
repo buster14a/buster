@@ -330,7 +330,7 @@ Directives:
 
 | Purpose | Supported directives |
 | --- | --- |
-| Sections | `.text`, `.data`, `.bss`, named `.section` with `a/w/x/M/S/T/G` flags, `@progbits`/`@nobits`/`@note`/`@init_array`/`@fini_array`, merge entry sizes (merged strings of 1-, 2- and 4-byte characters); `.pushsection`/`.popsection` and `.previous` switch and return |
+| Sections | `.text`, `.data`, `.bss`, named `.section` with `a/w/x/M/S/T/G` flags or linked-order `"awo"`, `@progbits`/`@nobits`/`@note`/`@init_array`/`@fini_array`, merge entry sizes (merged strings of 1-, 2- and 4-byte characters); `.pushsection`/`.popsection` and `.previous` switch and return |
 | Symbols | `.globl`/`.global`, `.local`, `.weak`, `.hidden`, `.protected`, `.internal`, `.type` (`function/object/tls_object/notype`, prefixed by `@` or `%`), `.size`; `.comm` and `.lcomm` (below) |
 | Constants | `.equ`/`.set` (absolute and defined before use, and either may reassign; or a symbol plus a constant, below), `.equiv` (rejects redefinition) |
 | Data | `.byte`, `.word`/`.short`/`.value`, `.long`/`.int`, `.quad`, `.uleb128`, `.sleb128`, `.ascii`, `.asciz`/`.string`, `.base64` (GNU as 2.43's, which GCC 15 writes for string literals: groups of four characters, `=` padding the last), `.zero`, `.skip`/`.space` (each with an optional fill byte: clang writes `.zero 16,63`) |
@@ -371,6 +371,19 @@ are diagnosed once multiple section identities have that name: GNU as versions
 and size directives naming a section are diagnosed before or after its
 declaration: the object writer does not yet preserve these section-symbol
 attributes.
+
+Standalone assembly accepts the patchable-entry table's linked-order syntax
+from `-S`, `.section name,"awo",@progbits,label[,unique,ID]`. The label may
+be defined later and must belong to an earlier section class. Each combination
+of section name, associated symbol and optional ID selects its own section,
+even when several targets lie in the same code section. The object writes the
+associated section's index in `sh_link`. Ordinary symbol definitions and
+explicit symbol directives take precedence over a linked-order table of the
+same name. A section reference can select a uniquely named table and is
+diagnosed when the name ultimately identifies multiple sections. Quote names
+such as `"123patch"` and `"."` to reference their sections. The unquoted `.`
+is the location counter. A defined ordinary COMDAT signature also takes
+precedence over a linked-order table with the same name.
 
 `.set name, symbol + constant` (#1115: GCC's constant pools write one entry
 within another, `.set .LC4,.LC11+4`) is an alias, which may come before its

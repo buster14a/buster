@@ -1,0 +1,1 @@
+int tested(int n){int sum=0;for(int i __attribute__((unused)) (0);i<n+4;i++)sum+=i;int a __attribute__((unused)) (sizeof a),b __attribute__((unused)) (a+2);__auto_type c __attribute__((unused)) (b);return sum+a+b+c;}

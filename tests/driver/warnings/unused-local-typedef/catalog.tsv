@@ -1,0 +1,17 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+source-enables-unused-binding-warnings-with-default-command-line	source-enables-unused-binding-warnings-with-default-command-line.c	2	0	0	-	-	source enables unused binding warnings with default command-line policy
+# Unused block typedefs, a variable array's with a comma bound and a pointer to one among them, and one a
+# declaration's specifiers use.
+a-block-s-unused-typedefs-a-variable-array-s-among-them	a-block-s-unused-typedefs-a-variable-array-s-among-them.c	5	0	0	-	-Wall	a block's unused typedefs, a variable array's among them
+# Given at the unit's end in source order, after the bodies' unused variables and runtime warnings: an inner
+# block's, a tag's typedef, shadowing ones; not an attribute unused one or a used one.
+unused-typedefs-at-the-unit-s-end	unused-typedefs-at-the-unit-s-end.c	10	0	0	-	-Wall	unused typedefs at the unit's end
+# After the tentative arrays' and the unused file-scope declarations' warnings, under their gate: none after
+# an error -Werror made before them.
+unused-typedefs-after-the-unused-file-scope-declarations	unused-typedefs-after-the-unused-file-scope-declarations.c	6	0	0	-	-Wall	unused typedefs after the unused file-scope declarations
+# An unused function's error under -Werror comes after the gate, so the typedefs' still follow.
+unused-typedefs-after-an-unused-function	unused-typedefs-after-an-unused-function.c	3	0	0	-	-Wall	unused typedefs after an unused function
+# Uses in another typedef, sizeof, a cast, an inner block, a prototype, a statement expression and a
+# declarator list; a macro's typedef comes last; a pragma ignores one.
+unused-typedefs-uses	unused-typedefs-uses.c	4	0	0	-	-Wall	unused typedefs' uses

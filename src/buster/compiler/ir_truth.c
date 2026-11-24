@@ -209,7 +209,19 @@ static uint64_t ir_truth_candidates(const uint8_t* operations, const uint8_t* ty
     return valid & _mm512_cmpeq_epi8_mask(op, _mm512_set1_epi8(IR_ICMP)) & _mm512_cmpeq_epi8_mask(type, _mm512_set1_epi8(IR_I1));
 }
 
-static uint32_t ir_truth_simplify_rules(IrFunction* function, bool values)
+// The former operand dominates the rewritten comparison. Each copy or extension on its path has
+// one ordinary input that dominates it. If that path ends at an ICMP, both of that ICMP's operands
+// therefore dominate the root. Check the actual written pair against that source, in operand order.
+static bool ir_truth_inherits_operands(const IrFunction* f, uint32_t root, uint32_t former)
+{
+    const uint32_t source = ir_truth_unextend(f, former).value;
+    return source < f->instruction_count && source != root && f->op[source] == IR_ICMP &&
+           f->a[root] == f->a[source] && f->b[root] == f->b[source];
+}
+
+// Only the ordinary ICMP simplification can preserve a supplied proof. It edits a, b and the
+// predicate of the root alone. The row diagnostic checks the actual result before the proof is reused.
+static uint32_t ir_truth_simplify_rules(IrFunction* function, bool values, bool* verified)
 {
     const uint32_t count = function->instruction_count;
     const uint8_t* const operations = function->op;
@@ -223,8 +235,17 @@ static uint32_t ir_truth_simplify_rules(IrFunction* function, bool values)
         {
             const uint32_t lane = (uint32_t)__builtin_ctzll(candidates);
             const uint32_t root = (uint32_t)first + lane;
+            const uint32_t old_a = function->a[root];
+            const uint32_t old_b = function->b[root];
             const bool rewritten = ir_truth_rewrite(function, root);
-            changed += rewritten || (values && ir_truth_rewrite_value(function, root));
+            const bool edited = rewritten || (values && ir_truth_rewrite_value(function, root));
+            if (edited && verified != NULL && *verified)
+            {
+                *verified = rewritten && function->op[root] == IR_ICMP && function->type[root] == IR_I1 &&
+                            ir_check_instruction(function, root, false).error == IR_OK &&
+                            (ir_truth_inherits_operands(function, root, old_a) || ir_truth_inherits_operands(function, root, old_b));
+            }
+            changed += edited;
             candidates &= candidates - 1;
         }
     }
@@ -233,12 +254,12 @@ static uint32_t ir_truth_simplify_rules(IrFunction* function, bool values)
 
 static __attribute__((unused)) uint32_t ir_truth_simplify(IrFunction* function)
 {
-    return ir_truth_simplify_rules(function, false);
+    return ir_truth_simplify_rules(function, false, NULL);
 }
 
 static __attribute__((unused)) uint32_t ir_truth_simplify_values(IrFunction* function)
 {
-    return ir_truth_simplify_rules(function, true);
+    return ir_truth_simplify_rules(function, true, NULL);
 }
 
 #endif

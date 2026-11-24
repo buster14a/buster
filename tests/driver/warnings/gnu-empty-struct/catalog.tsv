@@ -1,0 +1,8 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+# Empty structs and unions, and those of unnamed bit-fields alone, at their keyword: a typedef's, a nested one's
+# before its enclosing record's, a block's and a member's; an anonymous member names none but counts.
+records-without-named-members	records-without-named-members.c	8	0	0	warning-text	-pedantic	records without named members
+# -Wgnu-empty-struct and -Wgnu give them; they're ignored by default.
+records-without-named-members-under-wgnu	records-without-named-members-under-wgnu.c	2	0	0	warning-text	-Wgnu	records without named members under -Wgnu
+records-without-named-members-by-default	records-without-named-members-under-wgnu.c	0	0	0	warning-text	-	records without named members by default

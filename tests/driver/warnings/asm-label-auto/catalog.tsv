@@ -1,0 +1,11 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+# An object of automatic storage, `auto` or none, an array, a VLA, a struct, each declarator of a list, in a nested
+# block, a label of several strings and escapes; not a register variable's, a static's, an extern's, a function's or
+# a typedef's, nor a file-scope object's.
+asm-labels-on-automatic-variables	asm-labels-on-automatic-variables.c	8	0	0	-	-	asm labels on automatic variables
+# A for statement's declarations (#2419): each declarator's label, after a pointer's or a parenthesized declarator,
+# with attributes after it; a register variable's is no automatic one's.
+asm-labels-in-for-statements-declarations	asm-labels-in-for-statements-declarations.c	6	0	0	-	-	asm labels in for statements' declarations
+# C23's `auto` of an inferred type and constexpr objects.
+asm-labels-on-c23-automatic-variables	asm-labels-on-c23-automatic-variables.c	2	0	0	c23	-	asm labels on C23 automatic variables

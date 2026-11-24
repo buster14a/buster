@@ -1,0 +1,1 @@
+int tested(int n){int a=n,b=n*2,si=0;unsigned ui=0;long long sll=0;int r=__builtin_sadd_overflow(a++,b++,&si)*1000+__builtin_usub_overflow(3u,4u,&ui)*100+__builtin_smulll_overflow(3037000500LL,3037000500LL,&sll)*10;r+=__builtin_ssub_overflow(-2147483647-1,1,&si)+si%1000;return r+a+b+(int)(ui%1000)+(int)(sll%1000);}

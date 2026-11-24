@@ -1,0 +1,2 @@
+#pragma STDC FENV_ACCESS ON
+int change_rounding(int);int clear_fp(void);int fp_state(void);int tested(int n){change_rounding(n);clear_fp();1.0/3.0;int f=fp_state();clear_fp();int a=(1.0+0x1p-53>1.0)?7:3;int b=(1.0+0x1p-53>1.0)&&++a;int c=(1.0+0x1p-53>1.0)||++a;change_rounding(0);return f*1000+a*100+b*10+c;}

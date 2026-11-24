@@ -1,0 +1,16 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+# Used: expanded (in a #if line too), named by #ifdef or a live `defined`. Unused: named only in an unexpanded body or
+# a dead `defined`, a function-like name without its (, a definition #undef or a redefinition replaces.
+basic-unused-macros	basic-unused-macros.c	8	0	0	-	-Wunused-macros	basic unused macros
+# The main file's own definitions only, not those after a line marker that enters a file or makes a system header;
+# and an #undef there of a main file's macro, which warns, and its redefinition, which takes it out.
+sys-unused-macros	sys-unused-macros.c	2	0	0	-	-Wunused-macros	sys unused macros
+# Off by default: a pragma enables, promotes and ignores it, read at each definition's place.
+prag-unused-macros	prag-unused-macros.c	2	1	0	-	-	prag unused macros
+# The warnings left at the main file's end, in the order of clang's set of places, through its growth and #undefs.
+order-unused-macros	order-unused-macros.c	47	0	0	-	-Wunused-macros	order unused macros
+# #pragma pop_macro takes the replaced definition's place out silently, and an #undef after a pop warns again.
+push-unused-macros	push-unused-macros.c	3	0	0	-	-Wunused-macros	push unused macros
+# Not in -Wall.
+unused-macros-under-wall	unused-macros-under-wall.c	0	0	0	-	-Wall	unused macros under -Wall

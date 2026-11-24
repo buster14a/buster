@@ -1,0 +1,8 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+variable-array-bounds-and-anonymous-tags-in-operand-errors	variable-array-bounds-and-anonymous-tags-in-operand-errors.c	0	9	0	-	-	variable array bounds and anonymous tags in operand errors
+variable-array-bounds-of-macros-calls-members-and-typedefs	variable-array-bounds-of-macros-calls-members-and-typedefs.c	0	15	0	-	-	variable array bounds of macros, calls, members and typedefs
+variable-array-bounds-in-conversions	variable-array-bounds-in-conversions.c	0	5	1	-	-	variable array bounds in conversions
+# A cast's builtin type keywords print as clang's TypePrinter spells the type (check_semantic_builtin_spelling):
+# `(unsigned)n` is `(unsigned int)n`, `(long unsigned)n` `(unsigned long)n`, `(signed)1` `(int)1`.
+cast-type-names-in-variable-array-bounds	cast-type-names-in-variable-array-bounds.c	0	8	0	-	-	cast type names in variable array bounds

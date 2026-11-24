@@ -59,45 +59,10 @@ static __attribute__((noinline)) void check_test_semantic_context_sources(CheckT
             unlink(path);
         }
     }
-    const CheckSourceFixture selections[] = {
-        {
-            .name = "context: unselected discarded read is not evaluated",
-            .source = "int m; static const int k=7; enum { E=1 ? __builtin_popcount(k) : (m,3) }; _Static_assert(E==3, \"\");\n",
-        },
-        {
-            .name = "context: selected discarded read is unevaluable",
-            .source = "int m; static int x=(m,3);\n",
-            .rejected = true,
-        },
-        {
-            .name = "context: unselected arithmetic fault is deferred",
-            .source = "static const int k=7; enum { E=1 ? __builtin_popcount(k) : 1/0 }; _Static_assert(E==3, \"\");\n",
-        },
-        {
-            .name = "context: selected arithmetic fault is diagnosed",
-            .source = "enum { E=0 ? 3 : 1/0 };\n",
-            .rejected = true,
-        },
-        {
-            .name = "context: inactive union address is not a read",
-            .source = "union U { int i; unsigned u; }; static const union U v={.i=7}; static const unsigned *p=&v.u;\n",
-        },
-        {
-            .name = "context: inactive union member cannot supply a receipt",
-            .source = "union U { int i; unsigned u; }; static const union U v={.i=7}; enum { E=__builtin_popcount(v.u) };\n",
-            .rejected = true,
-        },
-        {
-            .name = "context: qualifier-only pointer path retains receipt evidence",
-            .source = "static const int k=7; enum { E=__builtin_popcount(*(const int *)&k) }; _Static_assert(E==3, \"\");\n",
-        },
-        {
-            .name = "context: void round trip cannot recreate receipt evidence",
-            .source = "static const int k=7; enum { E=__builtin_popcount(*(const int *)(const void *)&k) };\n",
-            .rejected = true,
-        },
-    };
-    for (uint32_t i = 0; created && i < BUSTER_ARRAY_LENGTH(selections); i += 1)
+    CheckTestFixtures catalog;
+    const uint32_t file_count = check_test_private_catalog(test, &catalog, "checker/context-selections", NULL, 0, 0);
+    const CheckSourceFixture* selections = catalog.cases;
+    for (uint32_t i = 0; created && i < file_count; i += 1)
     {
         char path[256];
         const int path_length = snprintf(path, sizeof(path), "%s/selection-%u.c", directory, i);
@@ -118,13 +83,8 @@ static __attribute__((noinline)) void check_test_semantic_context_sources(CheckT
     {
         rmdir(directory);
     }
-    check_test_program_source(test,
-        "static int left(void) { const int k=7; return __builtin_expect(__builtin_popcount(k),0); }"
-        "static int right(void) { const int k=8; return __builtin_expect(__builtin_popcount(k),0); }"
-        "int tested(int n) { volatile unsigned v=(unsigned)n; _Atomic(unsigned) a=(unsigned)n;"
-        "unsigned x=v; v=x+1; __c11_atomic_store(&a,x+2,5);"
-        "return left()*100+right()*10+(int)__builtin_popcount(v)+(int)__builtin_popcount(__c11_atomic_load(&a,5)); }",
-        "semantic-context-distinct-bodies-runtime-volatile-atomic", clang);
+    arena_release(&catalog.storage);
+    check_test_program_suite(test, "checker/programs/semantic-context-sources", clang);
 }
 
 #endif

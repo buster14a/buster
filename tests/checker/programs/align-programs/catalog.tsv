@@ -1,0 +1,13 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+align-integers-of-every-width-by-every-alignment	align-integers-of-every-width-by-every-alignment.c	-	align-integers-of-every-width-by-every-alignment
+align-128-bit-and-wide-bit-int-sources-and-alignments	align-128-bit-and-wide-bit-int-sources-and-alignments.c	-	align-128-bit-and-wide-bit-int-sources-and-alignments
+# _BitInts past 128 bits (#1447) as sources, limb by limb (check_lower_align_limbs), signed and unsigned, of 129, 200 and
+# 256 bits, by alignments of every width up to 128 bits (a wider one is refused by name); the results' bytes hashed.
+align-bit-int-sources-past-128-bits	align-bit-int-sources-past-128-bits.c	-	align-bit-int-sources-past-128-bits
+# Addresses in static data and frames, folded and at run time: offsets from n, and the arrays' own alignment (#978).
+align-addresses-in-static-data-and-frames	align-addresses-in-static-data-and-frames.c	-	align-addresses-in-static-data-and-frames
+# expect's and expect_with_probability's arguments: each once, in order, where the first argument is unknown; neither
+# where it folds, a const local's constant initializer among them, the expected value's call dropped, as clang's code
+# drops it.
+expect-arguments-evaluated-once-or-not-at-all	expect-arguments-evaluated-once-or-not-at-all.c	-	expect-arguments-evaluated-once-or-not-at-all

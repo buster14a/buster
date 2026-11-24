@@ -1371,12 +1371,12 @@ static bool check_semantic_requirement_types(const Parser* parser, Preprocessor*
     valid &= !needed || reader.field != NULL; \
     if (needed && valid) { memset(reader.field, fill, slots * sizeof(element)); }
     BUSTER_CHECK_REQUIREMENT_COLUMN(enum_values, unsigned __int128, 0);
-    BUSTER_CHECK_REQUIREMENT_COLUMN(tag_types, TypeId, 0);
-    BUSTER_CHECK_REQUIREMENT_COLUMN(tag_ends, uint32_t, 0);
+    BUSTER_CHECK_REQUIREMENT_COLUMN(tag_types.dense, TypeId, 0);
+    BUSTER_CHECK_REQUIREMENT_COLUMN(tag_ends.dense, uint32_t, 0);
     BUSTER_CHECK_REQUIREMENT_COLUMN(builtins, uint16_t, 0);
     BUSTER_CHECK_REQUIREMENT_COLUMN(selected_tokens, uint32_t, 0xff);
     BUSTER_CHECK_REQUIREMENT_COLUMN(query_types, TypeId, 0);
-    BUSTER_CHECK_REQUIREMENT_COLUMN(sizeof_types, TypeId, 0);
+    BUSTER_CHECK_REQUIREMENT_COLUMN(sizeof_types.dense, TypeId, 0);
     BUSTER_CHECK_REQUIREMENT_COLUMN(constant_present, uint32_t, 0);
     BUSTER_CHECK_REQUIREMENT_COLUMN(ignored, uint8_t, 0);
     BUSTER_CHECK_REQUIREMENT_COLUMN(warning_suppressed, uint8_t, 0);
@@ -1427,8 +1427,8 @@ static bool check_semantic_requirement_types(const Parser* parser, Preprocessor*
                 const uint32_t declaration = named ? after : token;
                 const uint32_t body = check_input_tag_body(parser, token, count);
                 const uint32_t close = body < count && parser->tokens.kinds[body] == PARSE_KIND_L_BRACE ? parser->tree.parents[body] : count;
-                reader.tag_types[token] = staged.declared_types[declaration];
-                reader.tag_ends[token] = close < count ? close + 1 : named ? after + 1 : after;
+                reader.tag_types.dense[token] = staged.declared_types[declaration];
+                reader.tag_ends.dense[token] = close < count ? close + 1 : named ? after + 1 : after;
             }
             const uint32_t open = token + 1;
             const uint32_t close = open < count && parser->tokens.kinds[open] == PARSE_KIND_L_PAREN ? parser->tree.parents[open] : count;

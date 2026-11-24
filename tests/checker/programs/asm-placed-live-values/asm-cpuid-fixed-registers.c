@@ -1,0 +1,1 @@
+int tested(int n){unsigned a,b,c,d;__asm__ volatile("cpuid" : "=a"(a),"=b"(b),"=c"(c),"=d"(d) : "0"(0u),"2"(0u));return (int)((b^c^d)&0xffff)+n;}

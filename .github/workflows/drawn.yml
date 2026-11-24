@@ -642,21 +642,30 @@ jobs:
       run:
         shell: bash
     steps:
-      # Every attempt's: a rerun of the failed jobs keeps its earlier attempt's assignments.
-      - name: Download the vector row's draws, assignments and evidence
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          pattern: ${{ inputs.row }}-*
-          path: ${{ runner.temp }}/vector-records
-
       - name: Fetch the vector draw's script from this commit
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           ref: ${{ github.sha }}
           path: .vector-draw-script
           persist-credentials: false
-          sparse-checkout: tools/ci/vector-draw.sh
+          sparse-checkout: |
+            tools/ci/vector-draw.sh
+            .github/actions/vector-runtime
           sparse-checkout-cone-mode: false
+
+      # This job starts as the last draw's job ends, sooner than the run's listing names what that job uploaded last
+      # (tools/ci/vector-draw.sh settle): the download lists the run's artifacts once.
+      - name: Wait until the run's listing names the request ledgers the verdict requires
+        uses: ./.vector-draw-script/.github/actions/vector-runtime
+        with:
+          script: bash .vector-draw-script/tools/ci/vector-draw.sh settle
+
+      # Every attempt's: a rerun of the failed jobs keeps its earlier attempt's assignments.
+      - name: Download the vector row's draws, assignments and evidence
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: ${{ inputs.row }}-*
+          path: ${{ runner.temp }}/vector-records
 
       - name: Require one passing qualified execution of each vector item
         env:

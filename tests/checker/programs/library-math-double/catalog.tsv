@@ -1,0 +1,44 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+library-math-double	library-math-double.c	-	library-math-double
+library-math-float-long-double-powi	library-math-float-long-double-powi.c	-	library-math-float-long-double-powi
+library-math-float128	library-math-float128.c	-	library-math-float128
+# The __fp16 forms (#148): their arguments convert to __fp16 and their values are __fp16's; clang's code calls
+# sinf16 and its kin by name, which the unit defines here (of _Float16, whose values pass as __fp16's do), and
+# computes the others in float (ceilf16's ceilf), fma's in double, fabsf16's and copysignf16's bits.
+library-math-half	library-math-half.c	-	library-math-half
+# The FILE builtins (#148), whose prototypes take the unit's FILE: fprintf, the fortified __fprintf_chk and vfprintf and
+# __vfprintf_chk through variadic helpers write a temporary file, which fscanf and vfscanf read back.
+library-file	library-file.c	-	library-file
+library-complex	library-complex.c	-	library-complex
+# Each pointer a call returns, as its offset in the array it points into, or -1 for none: the arrays' addresses
+# differ between the program and its oracle.
+library-strings	library-strings.c	-	library-strings
+# The wide characters stay positive, and the comparisons' signs alone are used: glibc's x86 wcscmp variants
+# disagree on whether a negative wchar_t is less than a positive one, and which variant runs depends on the
+# strings' addresses, so a negative one's comparison changed sign from run to run (the 9700X job's n=-3 with
+# ASLR). Their magnitudes differ too, by one or more (the hosted runner's n=-3), so only the sign is a value.
+library-wide	library-wide.c	-	library-wide
+library-formatted	library-formatted.c	-	library-formatted
+library-memory-and-absolutes	library-memory-and-absolutes.c	-	library-memory-and-absolutes
+# The plain library builtins the code computes in place of their calls (#1373), as clang -O0's code computes their
+# intrinsics: memcpy, memmove and memset of each constant size to one past BUSTER_CBUILTIN_LIBRARY_INLINE_BYTES, whose
+# bytes and values must be the library's, memmove's ranges overlapping by up to 9 bytes in either direction and
+# memset's values negative and wider than a byte, constant and not; memmove of each size from 34 to one past
+# BUSTER_CBUILTIN_LIBRARY_MOVE_INLINE_BYTES, by COPY's move form, between unaligned ranges that overlap by up to 65 bytes,
+# forward and backward; a musttail return of a memcpy; abs, labs and llabs, plain and __builtin_, of their extremes
+# but the undefined ones; and fabs, fabsf, fabsl, copysign, copysignf and copysignl, plain, and __builtin_copysign,
+# __builtin_copysignf and __builtin_copysignl, of the harness's special values, signaling NaNs among them, bit for
+# bit.
+library-computed-inline	library-computed-inline.c	-	library-computed-inline
+# The folds in code: clang's -1, 0 or 1 of constant strings, where the library's functions return the differences
+# (glibc's strcmp("a", "c") is -2), through __builtin_X and the plain declarations; a const array's string; and a
+# call with a side effect, which neither folds.
+library-folds-in-code	library-folds-in-code.c	-	library-folds-in-code
+# An unrelated overload set puts ordinary declarations through overload selection too (#1234). Each plain
+# fold still lowers without a call, including the original strlen case, on both checker and lowering paths.
+# Keep the overload definitions private: the paired oracle renames ordinary global identifiers, not mangled names.
+library-folds-beside-overloads	library-folds-beside-overloads.c	-	library-folds-beside-overloads
+library-folds-selected-ordinary	library-folds-selected-ordinary.c	-	library-folds-selected-ordinary
+library-overloads-remain-calls	library-overloads-remain-calls.c	-	library-overloads-remain-calls
+library-folds-preserve-overload-argument-effects	library-folds-preserve-overload-argument-effects.c	-	library-folds-preserve-overload-argument-effects

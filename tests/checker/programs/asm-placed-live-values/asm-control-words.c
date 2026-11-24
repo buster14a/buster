@@ -1,0 +1,1 @@
+int tested(int n){unsigned short c,d;__asm__ volatile("fnstcw %0" : "=m"(c));d=c;__asm__ volatile("fldcw %0" : : "m"(d));unsigned short s;__asm__ volatile("fnclex\n\tfnstsw %0" : "=m"(s));unsigned m,k;__asm__ volatile("stmxcsr %0" : "=m"(m));k=m;__asm__ volatile("ldmxcsr %0" : : "m"(k));return (int)c+(int)(s&0x3f)+(int)(m&0xffc0)+n;}

@@ -1,0 +1,1 @@
+char*text="abc";int tested(int n){return text[1]+n;}

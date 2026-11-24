@@ -152,7 +152,9 @@ struct ObjectDebug
 // slices, not NUL-terminated strings. A non-null table must cover every atom including id 0. A descriptor with
 // SHF_LINK_ORDER names in `link` an atom of its unit and of an earlier class, whose section is its sh_link (#1447:
 // patchable_function_entry's entries, linked to their functions'), and descriptors of other links are other sections, as
-// clang's object has one per function; any other descriptor's `link` is 0.
+// clang's object has one per function; any other descriptor's `link` is 0. An explicit `identity` keeps otherwise
+// equal descriptors in separate sections, as the assembler needs for linked-order sections naming different labels
+// in the same input section.
 typedef struct ObjectAtomSection ObjectAtomSection;
 struct ObjectAtomSection
 {
@@ -161,6 +163,7 @@ struct ObjectAtomSection
     uint64_t flags;
     uint64_t entry_size;
     AtomId link;
+    uint32_t identity;
 };
 
 typedef struct ObjectOptions ObjectOptions;
@@ -889,13 +892,13 @@ static bool object_section_is_default(const ObjectAtomSection* section, uint8_t 
     const uint64_t length = format->name_length;
     return section->name.length == 0 ||
            (section->name.length == length && memcmp(section->name.pointer, format->name, length) == 0 && section->type == format->type &&
-            section->flags == format->flags && section->entry_size == format->entry_size);
+            section->flags == format->flags && section->entry_size == format->entry_size && section->identity == 0);
 }
 
 static bool object_sections_equal(const ObjectAtomSection* a, const ObjectAtomSection* b)
 {
     return a->name.length == b->name.length && a->type == b->type && a->flags == b->flags && a->entry_size == b->entry_size && a->link == b->link &&
-           memcmp(a->name.pointer, b->name.pointer, a->name.length) == 0;
+           a->identity == b->identity && memcmp(a->name.pointer, b->name.pointer, a->name.length) == 0;
 }
 
 // The class's atoms from `begin` to `end` of the unit's (`unit_atoms`, in id order), written to the same places of
@@ -938,7 +941,8 @@ static bool object_group_atoms(const ObjectBuilder* builder, uint8_t class, cons
             {
                 // (A linked section's atom too: a unit's patchable function entries share a name, one section a function.)
                 const uint64_t hash = (descriptor != 0 ? link_hash((const uint8_t*)descriptor->name.pointer, descriptor->name.length) ^ descriptor->flags ^
-                                       ((uint64_t)descriptor->type << 32) ^ ((uint64_t)descriptor->link * UINT64_C(0xc2b2ae3d27d4eb4f)) : 0) ^
+                                       ((uint64_t)descriptor->type << 32) ^ ((uint64_t)descriptor->link * UINT64_C(0xc2b2ae3d27d4eb4f)) ^
+                                       ((uint64_t)descriptor->identity * UINT64_C(0x165667b19e3779f9)) : 0) ^
                                       ((uint64_t)membership * UINT64_C(0x9e3779b97f4a7c15));
                 uint64_t slot = hash & (capacity - 1);
                 while (slots[slot] != 0)
@@ -1464,10 +1468,8 @@ static bool object_debug_contribution(String8 section, uint64_t at, uint32_t hea
 // debug.c writes, its headers and its contributions' places, which keeps a malformed one's relocations inside its
 // sections, at its own contributions and on the unit's definitions; they don't decode the DIEs past the compile unit
 // DIE's section offsets, the abbreviations' contents, the line programs' opcodes or the range lists' entries.
-static bool object_debug_valid(const ObjectBuilder* builder)
+static bool object_debug_valid(const ObjectDebug* debug, const Link* link, uint32_t owning_unit)
 {
-    const ObjectDebug* debug = builder->debug;
-    const Link* link = builder->link;
     bool valid = true;
     for (uint32_t section = 0; section < BUSTER_OBJECT_DEBUG_SECTIONS; section += 1)
     {
@@ -1554,9 +1556,10 @@ static bool object_debug_valid(const ObjectBuilder* builder)
     for (uint32_t a = 0; valid && a < debug->extra.address_count; a += 1)
     {
         const NativeDebugAddress address = debug->extra.addresses[a];
-        valid = address.symbol < link->symbols.count && builder->units->symbol_info[address.symbol] >> 32 == builder->unit;
+        valid = address.symbol < link->symbols.count;
         const AtomId atom = valid ? link->symbols.atom[address.symbol] : 0;
-        valid = valid && atom != 0 && atom < link->atoms.count && (link->symbols.flags[address.symbol] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_OBJECT &&
+        valid = valid && atom != 0 && atom < link->atoms.count && link->atoms.unit[atom] == owning_unit &&
+                (link->symbols.flags[address.symbol] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_OBJECT &&
                 link->symbols.value[address.symbol] <= link->atoms.size[atom] && address.addend <= link->atoms.size[atom] - link->symbols.value[address.symbol];
     }
     uint64_t previous_end = 0;
@@ -1564,12 +1567,13 @@ static bool object_debug_valid(const ObjectBuilder* builder)
     {
         const SymbolId symbol = debug->functions[function];
         const uint64_t offset = debug->line_addresses[function];
-        valid = symbol != 0 && symbol < link->symbols.count && builder->units->symbol_info[symbol] >> 32 == builder->unit && offset >= 3 && offset >= previous_end &&
+        valid = symbol != 0 && symbol < link->symbols.count && offset >= 3 && offset >= previous_end &&
                 offset + 8 <= line.length;
         if (valid)
         {
             const AtomId atom = link->symbols.atom[symbol];
-            valid = link->atoms.class[atom] == BUSTER_LINK_CLASS_TEXT && (link->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_FUNCTION &&
+            valid = atom != 0 && atom < link->atoms.count && link->atoms.unit[atom] == owning_unit && link->atoms.class[atom] == BUSTER_LINK_CLASS_TEXT &&
+                    (link->symbols.flags[symbol] & BUSTER_LINK_SYMBOL_TYPE) == BUSTER_LINK_SYMBOL_FUNCTION &&
                     link->symbols.value[symbol] < link->atoms.size[atom] && line.pointer[offset - 3] == 0 && line.pointer[offset - 2] == 9 && line.pointer[offset - 1] == 2;
         }
         previous_end = offset + 8;
@@ -1582,7 +1586,7 @@ static bool object_debug_valid(const ObjectBuilder* builder)
 static bool object_count_debug(ObjectBuilder* builder)
 {
     const ObjectDebug* debug = builder->debug;
-    const bool result = debug == 0 || object_debug_valid(builder);
+    const bool result = debug == 0 || object_debug_valid(debug, builder->link, builder->unit);
     memset(builder->debug_relocations, 0, sizeof(builder->debug_relocations));
     memset(builder->debug_symbol, 0, sizeof(builder->debug_symbol));
     if (debug != 0 && result)

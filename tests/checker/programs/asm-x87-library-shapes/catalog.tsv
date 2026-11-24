@@ -1,0 +1,30 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+asm-x87-library-shapes	asm-x87-library-shapes.c	-	asm-x87-library-shapes
+# Each shape of the x87's operands, by the rules clang's code follows (LLVM's stackifier): two outputs from st(0)
+# (fsincos), a matching input popped with st(1)'s clobbered input (fyl2x) and with st(1)'s kept one, which the helper
+# pops (fscale), outputs of a template that pushes them (fld1, fldpi into a double), a float's and a double's
+# operands, and templates of no instructions.
+asm-x87-shapes	asm-x87-shapes.c	-	asm-x87-shapes
+# x87 operands named in templates (#1115): t's is %st and u's %st(1), as GCC and clang print them, which the
+# assembler reads, with AT&T's operations on the stack's top (D8's forms, not reversed) and a comment.
+asm-x87-named-operations	asm-x87-named-operations.c	-	asm-x87-named-operations
+# A float's and a double's signaling NaNs through `+t` in templates of no instructions: their helper passes them
+# through the x87's stack as clang's code does, whose fld quiets them and raises the invalid operation (masked). The
+# results' bits and the status word's flag after fnclex, and a long double's value, must be clang's build's.
+asm-x87-empty-signaling	asm-x87-empty-signaling.c	-	asm-x87-empty-signaling
+# Templates that take directives besides the syntax switches: alignment and fill, data bytes, section switches, and
+# symbol bindings and absolute assignments (asm_assemble's, #812). Data and hand-encoded bytes are a helper's code;
+# alignment and section-only templates publish atoms and call nothing. The bytes are jumped over, the sections'
+# records are read, and the absolute value is an immediate. clang's build of the same source must print the same.
+asm-directives	asm-directives.c	-	asm-directives
+# Templates that take directives with the record helper's own loads and stores (#1839's item 10,
+# check_asm_unit_helper): x87 operands (one of directives alone among them, whose helper passes its value through the
+# x87's stack), flag outputs (one of directives alone, whose object is set), and asm goto's labels, by name and number,
+# with an output reaching a label. clang's build of the same source must print the same.
+asm-directives-helper	asm-directives-helper.c	-	asm-directives-helper
+# loop and jrcxz to the template's own labels (#1839's item 4): asm bodies whose rel8 displacements the assembler
+# fixed, a loop summing rcx's counts down, a jrcxz skipping a store, and a loop and a jrcxz in one template; and one
+# whose jrcxz jumps over a je (which branch sizing sizes), which the whole assembler takes. clang's build must print
+# the same.
+asm-loop-bodies	asm-loop-bodies.c	-	asm-loop-bodies

@@ -9,14 +9,15 @@ its 9700X performance evidence remain separate acceptance work.
 
 ## The stage boundary
 
-Call `tier1_liveness_build(plan, output, scratch, vector, result)` after a
+Call `tier1_liveness_build(plan, output, scratch, result)` after a
 successful `tier1_select_plan`, or `tier1_select_plan_verified` for IR its
 caller has verified with that dominance, as the C driver's `--tier1` plans
 `ir_optimize`'s result. The `Tier1SelectPlan` and its `IrFunction` are
 immutable for the call. Dominance for any cross-block operand has already been
 checked, by the selector or by that caller's verification. The adapter
-validates the IR shape and selected-use
-ranges again, but does not invent a dominance proof or repair an invalid plan.
+checks the selected-use ranges. The C driver supplies the CFG of the same
+verified revision to straight-line and general CFG emission. Standalone callers
+build a fresh CFG. The liveness and allocation results own their data in both paths.
 Recompute the plan and liveness after any IR, CFG or pattern change.
 
 The producer's effective-use CSR is essential. For example, if a shift at node

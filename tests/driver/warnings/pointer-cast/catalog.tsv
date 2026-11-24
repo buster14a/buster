@@ -1,0 +1,12 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+# Every source a pointer has (an object, an array and a function that decay, a string literal, an address, a pointer to
+# void through a typedef), every integer target (enumerations, typedefs, _BitInt, and _Bool, long and __int128, which
+# don't warn), in unevaluated operands, a macro's body, a file-scope sizeof and a _Static_assert, and before a shift's
+# own warning.
+casts-from-pointers-to-narrower-integers	pointer-cast-source.c	19	0	1	-	-	casts from pointers to narrower integers
+casts-from-pointers-to-narrower-integers-in-c23-under-wall-wextr	pointer-cast-source.c	19	0	1	c23	-Wall -Wextra	casts from pointers to narrower integers in C23 under -Wall -Wextra
+wno-pointer-to-int-cast-holds-the-enumerations-and-void-s	pointer-cast-source.c	1	0	0	-	-Wno-pointer-to-int-cast	-Wno-pointer-to-int-cast holds the enumerations' and void's
+wno-void-pointer-to-int-cast-holds-wvoid-pointer-to-enum-cast	pointer-cast-source.c	15	0	0	-	-Wno-void-pointer-to-int-cast	-Wno-void-pointer-to-int-cast holds -Wvoid-pointer-to-enum-cast
+wno-pointer-to-enum-cast-holds-wvoid-pointer-to-enum-cast	pointer-cast-source.c	17	0	1	-	-Wno-pointer-to-enum-cast	-Wno-pointer-to-enum-cast holds -Wvoid-pointer-to-enum-cast
+werror-pointer-to-int-cast-with-wno-everything-wvoid-pointer-to	pointer-cast-source.c	0	18	1	-	-Wno-everything -Wvoid-pointer-to-enum-cast -Werror=pointer-to-int-cast	-Werror=pointer-to-int-cast with -Wno-everything -Wvoid-pointer-to-enum-cast

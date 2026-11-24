@@ -1,0 +1,1 @@
+int a(int x){return __builtin_choose_expr(0,({x<<32;}),0);}int b(int x){return __builtin_choose_expr(0,({x>>32;}),0);}int c(int x){return __builtin_choose_expr(0,({x<<=32;}),0);}int d(int x){return __builtin_choose_expr(0,({x>>=32;}),0);}

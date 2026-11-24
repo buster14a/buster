@@ -1,0 +1,1 @@
+_Thread_local int counter=9;_Thread_local long wide[4];int tested(int n){counter+=n;wide[n&3]+=counter;int*p=&counter;return *p*2+(int)wide[(n+1)&3];}

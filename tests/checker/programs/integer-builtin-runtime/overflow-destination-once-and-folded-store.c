@@ -1,0 +1,1 @@
+int saved;int visits;int*slot(void){visits++;return &saved;}int tested(int n){visits=0;int a=__builtin_sub_overflow(n,7,slot());int b=__builtin_add_overflow(7,8,&saved);return visits*100+a*10+b+saved;}

@@ -1,0 +1,6 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+alias-functions	alias-functions.c	-	alias-functions
+alias-objects	alias-objects.c	-	alias-objects
+alias-ifuncs	alias-ifuncs.c	-	alias-ifuncs
+alias-weakrefs	alias-weakrefs.c	-	alias-weakrefs

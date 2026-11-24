@@ -18,11 +18,13 @@ requirements. [Command index](README.md).
   Its frame objects share slots by their blocks' lifetimes, which `--tier1` asks
   the checked program for (`c_check_program_lifetime.c`: a block a jump enters
   past its opening keeps its objects' whole-function lifetimes) and the IR
-  carries as `lifetime` markers, colored by the CFG consumer over `dataflow.c`'s
-  fixpoint on the reversed CFG (`tier1_emit_cfg_lifetimes`; the frame guide's
-  "Slot sharing between objects"); `test-tier1-emit` checks shared and separate
-  rows natively, and `test-checker-driver`'s lifetime fixture smaller frames
-  than `--tier1-no-lifetimes`' against clang.
+  carries as `lifetime` markers. The CFG consumer propagates live exits in
+  groups of 512 slots before coloring (`tier1_emit_cfg_lifetimes`, described
+  under "Slot sharing between objects" in the frame guide). `test-tier1-emit`
+  checks shared and separate rows natively and checks 2,049 loop-local slots'
+  intervals with 384 KiB of scratch. The `test-checker-driver` lifetime
+  fixture checks frame sizes with and without lifetime markers and runs the
+  compiled programs against clang.
   `test-tier1-frame` checks independent pressure/layout/prologue oracles,
   preparation's class numbers and event order against their definition, that
   the ordered coloring pass's colors are a pointer-jumping oracle's (#2699), and
@@ -59,6 +61,10 @@ requirements. [Command index](README.md).
   one; its frame and state are unchanged.
 
 ## Lifetime planning on deep trees (#1355)
+
+Only a nested block can own lifetime entries. If the token roles contain no
+`PARSE_ROLE_CLOSE_BLOCK`, the checker skips the lifetime columns and walks.
+Parameters and locals in the function body's own scope live for the whole function.
 
 `check_program_lifetime_blocks` reads immutable parent/role columns and
 memoizes each token's nearest enclosing block, resetting at function bodies.

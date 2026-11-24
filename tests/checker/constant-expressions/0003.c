@@ -1,0 +1,1 @@
+_Static_assert(__builtin_isnan((_Float16)__builtin_inf()+(_Float16)-__builtin_inf()) && !__builtin_signbit((_Float16)__builtin_inf()+(_Float16)-__builtin_inf()),"half NaN");_Static_assert(__builtin_isnan((__bf16)__builtin_inf()+(__bf16)-__builtin_inf()) && !__builtin_signbit((__bf16)__builtin_inf()+(__bf16)-__builtin_inf()),"bf16 NaN");

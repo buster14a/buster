@@ -1,0 +1,1 @@
+void g(void) { int y; char c = y = 1000; char d[1] = { y = 300 }; unsigned char u = (y += 1, 300); char e = y++; char f = (y = 1, 400); _Bool b = (y = 2); float fl = (y = 16777217); (void)c; (void)d; (void)u; (void)e; (void)f; (void)b; (void)fl; }

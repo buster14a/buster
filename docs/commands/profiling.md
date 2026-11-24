@@ -169,3 +169,11 @@ start's code order");
 perf and objdump commands that make their inputs. Run `ab` itself outside the
 9700X's lock, with `--lock ~/buster-fast-bench/exclusive.sh`, which takes it
 for each run. The 9700X job's test step runs the tests.
+
+## Regression verdicts
+
+The native `build/performance/paired` reader consumes bounded `time-runs`
+captures with an identical-base control. Its plan fixes whether a unit is a
+matched relative layout or a Williams-ordered block. The JSON report gives
+absolute timings, paired effects, uncertainty, the practical budget and the
+control result. [Reader, calibration and baseline commands](../performance/readers.md#paired-performance-verdicts)

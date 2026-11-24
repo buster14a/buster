@@ -38,6 +38,55 @@ static int check_test_fortify_execute(const char* executable)
     return result;
 }
 
+// This is a buster driver diagnostic. The libc and compiler comparisons below independently test the checks it retains.
+static void check_test_fortify_warning(CheckTest* test, const char* executable, char* source, char* output)
+{
+    static const struct
+    {
+        const char* name;
+        const char* prelude;
+        const char* mode;
+        const char* options[3];
+        unsigned warnings;
+        bool rejected;
+    } cases[] =
+    {
+        { "object", "", "-c", { "-D_FORTIFY_SOURCE=2" }, 1 },
+        { "assembly", "", "-S", { "--tier1", "-D_FORTIFY_SOURCE=3" }, 1 },
+        { "executable", "", "-O2", { "-D_FORTIFY_SOURCE" }, 1 },
+        { "source expression", "#define N(x) ((x) + 1)\n#define _FORTIFY_SOURCE N(1U)\n", "-c", { NULL }, 1 },
+        { "disabled", "", "-c", { "-D_FORTIFY_SOURCE=(1-1)" } },
+        { "unused non-integer definition", "", "-c", { "-D_FORTIFY_SOURCE=\"unused\"", "-Werror" } },
+        { "negative", "", "-c", { "-D_FORTIFY_SOURCE=-1" } },
+        { "undefined", "", "-c", { "-D_FORTIFY_SOURCE=2", "-U_FORTIFY_SOURCE" } },
+        { "syntax only", "", "-fsyntax-only", { "-D_FORTIFY_SOURCE=2", "-Werror" } },
+        { "preprocessing only", "", "-E", { "-D_FORTIFY_SOURCE=2", "-Werror" } },
+        { "promoted", "", "-c", { "-D_FORTIFY_SOURCE=2", "-Werror" }, 1, true },
+        { "suppressed", "", "-c", { "-D_FORTIFY_SOURCE=3", "-Werror", "-Wno-fortify-source" } },
+        { "glibc selected before undef", "#define _FORTIFY_SOURCE 2\n#include <features.h>\n#undef _FORTIFY_SOURCE\n", "-c", { NULL }, 1 },
+    };
+    for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(cases); c += 1)
+    {
+        char unit[256];
+        const int length = snprintf(unit, sizeof(unit), "%sint main(void){return 0;}\n", cases[c].prelude);
+        const bool written = length > 0 && (size_t)length < sizeof(unit) && parse_test_write(source, unit, (size_t)length);
+        char* arguments[] = { (char*)executable, "-O2", (char*)cases[c].mode, source, "-o", output,
+                              (char*)cases[c].options[0], (char*)cases[c].options[1], (char*)cases[c].options[2], NULL };
+        char* text = NULL;
+        unlink(output);
+        const int status = written ? check_test_driver_spawn(arguments, &text) : -1;
+        const char* match = text != NULL ? strstr(text, "_FORTIFY_SOURCE protection is incomplete") : NULL;
+        const bool once = match != NULL && strstr(match + 1, "_FORTIFY_SOURCE protection is incomplete") == NULL;
+        const bool diagnosed = cases[c].warnings == 0 ? match == NULL : once;
+        const bool accepted = status == 0 && !cases[c].rejected;
+        const bool rejected = status > 0 && cases[c].rejected && access(output, F_OK) != 0;
+        char description[128];
+        snprintf(description, sizeof(description), "fortification diagnostic: %s", cases[c].name);
+        check_test_expect(test, diagnosed && (accepted || rejected), description);
+        free(text);
+    }
+}
+
 static void check_test_driver_fortify(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     static const struct
@@ -304,6 +353,7 @@ static void check_test_driver_fortify(CheckTest* test, const char* clang, const 
     snprintf(object, sizeof(object), "%s/fortify.o", directory);
     snprintf(names_file, sizeof(names_file), "%s/fortify.names", directory);
     snprintf(other_source, sizeof(other_source), "%s/fortify-other.c", directory);
+    check_test_fortify_warning(test, executable, source, object);
     for (uint32_t c = 0; c < BUSTER_ARRAY_LENGTH(cases); c += 1)
     {
         const bool written = parse_test_write(source, cases[c].source, strlen(cases[c].source));

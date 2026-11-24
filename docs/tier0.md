@@ -450,7 +450,7 @@ stack) and returns in st0; a struct of one returns in st0, and a struct of a `_C
   (`Tier0Frame.memory_area`: a slot per integer depth after the fixed slots, in a function with long double values). An entry
   loads its operands from their slots onto the x87 stack, computes, and stores its result into its slot, leaving the x87
   stack empty. Every F80 entry is deferred: emitted by `tier0_emit_x87` and counted by `tier0_count_x87`, an entry at a
-  time, as calls are. After emission, the bounded transfer pass below may keep a canonical single-use result across
+  time, as calls are. After emission, the bounded transfer pass below may keep single-use operands across
   consecutive entries; calls, joins and unsupported sequences retain the empty-stack convention.
 - **Its locals and parameters are objects** of 16 bytes aligned to 16, and its globals are reached through their
   addresses: there is no `GLOBAL`, `STORE_GLOBAL` or `SET_GLOBAL` of F80, and a front end reads a global with `LOAD` and
@@ -459,8 +459,10 @@ stack) and returns in st0; a struct of one returns in st0, and a struct of a `_C
   the value's slot: a front end's locals of the class, and its temporaries of it, objects of their own. A parameter's
   home is its incoming stack slot, whose place is a multiple of 16.
 - **Its constants** are an optional column of the function's (`x87_constants`, `x87_constant_count` values of two words:
-  the significand, then the sign and exponent), which `CONST F80` indexes. A constant is three immediate stores into its
-  slot.
+  the significand, then the sign and exponent), which `CONST F80` indexes. The object pipeline uses the same exact literal classifier as Tier 1.
+  A straight-line consumer loads its constant directly. A value that crosses a join or needs a writable home gets
+  a nonwaiting 16-byte copy into its private slot. Record-only callers can opt into the pool by setting
+  `pool_x87_constants` and resolving the corresponding `Tier0Code.literals` references.
 - **A function says whether it has long double values** (`Tier0Function.x87`: an entry of class F80, or a long double
   result), which its producer knows as it writes them. Only such a function has the slots, and only its compile looks
   for long double's entries: selection, measuring and the deferred entries' emitter are each written once with the flag
@@ -487,22 +489,16 @@ Each truncation restores the control word it changed, which the convention has c
 **Private transfers (#1387).** `tier0_x87_transfers` assigns a distinct token to each private F80 spill generation and
 counts its actual reloads through the typed stack's lifetimes. A destructive consumer admits a token only after one
 read; `DUP`, kept stores and values carried across labels or calls keep their homes when another use can follow.
-Arithmetic and widening conversions produce canonical results, and a copy or negation may carry that fact forward.
-Raw F80 loads, local-object reads and constant materialization retain their first transfer: their signaling-NaN and
-unsupported-encoding behavior is outside this optimization's proof. Deep-slot functions keep baseline emission.
+Deep-slot functions keep their memory homes.
 
-The shared `x87_transfer.c` planner examines regions of at most 64 records. It can replace a canonical private
-`fstpt` with `fld st(0)` and its sole subsequent `fldt` with `fstp st(0)` when that reload begins with the baseline x87
-stack empty. The two register copies preserve both original waiting points; one pair may be live, and the planner
-checks that intervening instructions never push physical depth past eight. Every arithmetic operation, source load,
-destination write and operand order stays in place. An independent symbolic replay validates the proposal before
-publication. Calls, control/environment operations, memory effects other than admitted x87 transfers, mandatory
-fences and unknown records end a region. Record counts and indices stay fixed, so entry rows, branches, relocations,
-separate scalar/vector measuring and frame metadata keep their existing contracts. A rejected plan or scratch
-allocation leaves the original records intact.
+The shared planner keeps a private store as a full-width `fst st(0)` and takes the value at its original reload
+with `fxch st(i)`. It checks the eight-register depth at every instruction and replays operand identities, memory
+accesses and the exit stack before accepting a region of up to 64 records. An unrepresentable order falls back to
+memory. Calls, control and environment operations, volatile accesses and unknown instructions bound the region.
+The record indices still name the original source and frame events.
 
 `test-tier0` checks direct destination stores, ordered subtraction/division chains, duplicate uses, both kinds of kept
-stores, raw-copy and fence fallbacks, and scalar/vector record equality. Native arithmetic fixtures compare all four
+stores, raw copies and fence boundaries, and scalar/vector record equality. Native arithmetic fixtures compare all four
 rounding modes and all three supported precision settings with explicit full-width C intermediates, including result
 bytes, exception flags, empty-stack state and preserved control words. A driver fixture also checks that a pending
 unmasked x87 exception does not trap at a literal before an intervening volatile store.

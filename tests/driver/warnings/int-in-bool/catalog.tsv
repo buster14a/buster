@@ -1,0 +1,15 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+a-literal-conversion-and-a-shift-in-one-logical-expression-keep	a-literal-conversion-and-a-shift-in-one-logical-expression-keep.c	2	0	0	-	-	a literal conversion and a shift in one logical expression keep clang's order
+a-shift-in-a-boolean-context-warns-under-wall	a-literal-conversion-and-a-shift-in-one-logical-expression-keep.c	3	0	0	-	-Wall	a shift in a boolean context warns under -Wall
+shifts-converted-to-bool-through-conditions-logical-operators-as	shifts-converted-to-bool-through-conditions-logical-operators-as.c	12	0	0	-	-Wall	shifts converted to _Bool through conditions, logical operators, assignments, calls and returns
+literal-shifts-converted-to-bool-always-evaluate-to-one-truth-by	literal-shifts-converted-to-bool-always-evaluate-to-one-truth-by.c	9	0	0	-	-	literal shifts converted to _Bool always evaluate to one truth by default
+parenthesized-literals-unsigned-shifts-casts-and-conditional-arm	parenthesized-literals-unsigned-shifts-casts-and-conditional-arm.c	4	0	0	-	-Wall	parenthesized literals, unsigned shifts, casts and conditional arms take no warning of their own
+conditionals-of-integer-constants-always-true-except-the-0-and-1	conditionals-of-integer-constants-always-true-except-the-0-and-1.c	5	0	0	-	-	conditionals of integer constants always true, except the 0 and 1 idioms, casts and parentheses
+file-scope-and-brace-initializers-of-bool-warn-at-once-in-clang	file-scope-and-brace-initializers-of-bool-warn-at-once-in-clang.c	6	0	0	-	-Wall	file-scope and brace initializers of _Bool warn at once in clang's order
+macro-operands-unreachable-code-short-circuits-and-static-assert	macro-operands-unreachable-code-short-circuits-and-static-assert.c	6	0	2	-	-Wall	macro operands, unreachable code, short circuits and static assertions warn too
+atomic-bool-targets-take-no-int-in-bool-warning-unlike-a-plain-b	atomic-bool-targets-take-no-int-in-bool-warning-unlike-a-plain-b.c	1	0	0	-	-Wall	_Atomic _Bool targets take no int-in-bool warning, unlike a plain _Bool
+int-in-bool-context-suppression-keeps-the-tautological-forms	int-in-bool-context-suppression-keeps-the-tautological-forms.c	2	0	0	-	-Wall -Wno-int-in-bool-context	int-in-bool-context suppression keeps the tautological forms
+tautological-compare-suppression-keeps-int-in-bool-context	int-in-bool-context-suppression-keeps-the-tautological-forms.c	2	0	0	-	-Wall -Wno-tautological-compare	tautological-compare suppression keeps int-in-bool-context
+wno-most-drops-both-groups	int-in-bool-context-suppression-keeps-the-tautological-forms.c	0	0	0	-	-Wall -Wno-most	-Wno-most drops both groups
+tautological-constant-compare-promotion-rejects-object-publicati	tautological-constant-compare-promotion-rejects-object-publicati.c	0	1	0	-	-Werror=tautological-constant-compare	tautological constant compare promotion rejects object publication

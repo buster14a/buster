@@ -382,7 +382,7 @@ static bool assembly_test_same_objects(AssemblyTest* test, const uint8_t* ours_b
     {
         memcpy(ours, ours_bytes, ours_size);
     }
-    bool passed = ours != 0 && theirs.pointer != 0 && object_view_open(&ours_view, ours, ours_size, false, error, error_size) &&
+    bool passed = ours != 0 && theirs.pointer != 0 && asm_test_ordered_object(&ours_view, (String8){ .pointer = (char*)ours, .length = ours_size }, false, &test->scratch, error, error_size) &&
                   asm_test_gnu_object(&theirs_view, theirs, &test->scratch, error, error_size);
     if (passed)
     {
@@ -1004,11 +1004,11 @@ static bool assembly_test_same_file(AssemblyTest* test, const char* path, const 
 }
 
 // -S of one c-testsuite program (#1362's stage 2 acceptance), by this executable (`compiler`) with `tier1` or not: its
-// text must assemble with GNU as into -c's object, but for the form contract's normalizations
-// (assembly_test_same_objects), and the program linked from GNU as's object must print the expected output and exit 0.
+// text must reassemble into -c's object, with the form contract's normalizations (assembly_test_same_objects).
+// The program linked from the reassembled object must print the expected output and exit 0.
 // Returns whether it passed, with the first failure in `error`.
-static bool assembly_test_c_program(AssemblyTest* test, const char* compiler, const char* source, const char* expected, const char* name, bool tier1, char* error,
-                                    uint64_t error_size)
+static bool assembly_test_c_program(AssemblyTest* test, const char* compiler, const char* source, const char* expected, const char* name, bool tier1,
+                                    bool own_assembler, char* error, uint64_t error_size)
 {
     char text_path[PATH_MAX];
     char object_path[PATH_MAX];
@@ -1027,15 +1027,25 @@ static bool assembly_test_c_program(AssemblyTest* test, const char* compiler, co
     assembly_test_compile_arguments(test, assembly, compiler, tier1, "-S", text_path, source);
     assembly_test_compile_arguments(test, object, compiler, tier1, "-c", object_path, source);
     char* assembler[] = { "as", "--64", "-o", reassembled_path, text_path, 0 };
+    char* buster[] = { (char*)compiler, "assemble", "-o", reassembled_path, text_path, 0 };
     // (Some of the programs call libm's functions, which the direct path's C link brings and an object's link names.)
     char* link[] = { (char*)compiler, "-o", program_path, reassembled_path, "-lm", 0 };
     char* program[] = { program_path, 0 };
     unlink(reassembled_path);
-    bool passed = object_test_run(assembly, output_path, errors_path) == 0;
     snprintf(error, error_size, "-S failed (see %s)", errors_path);
-    passed = passed && object_test_run(object, output_path, errors_path) == 0;
-    snprintf(error, error_size, passed ? "GNU as didn't assemble %s (see %s)" : "-c failed (see %s)", passed ? text_path : errors_path, errors_path);
-    passed = passed && oracle_epoch_file(text_path) && asm_test_tool(assembler, reassembled_path, output_path, errors_path) == 0;
+    bool passed = object_test_run(assembly, output_path, errors_path) == 0;
+    if (passed)
+    {
+        snprintf(error, error_size, "-c failed (see %s)", errors_path);
+        passed = object_test_run(object, output_path, errors_path) == 0;
+    }
+    if (passed)
+    {
+        const char* tool = own_assembler ? "Buster's assembler" : "GNU as";
+        snprintf(error, error_size, "%s didn't assemble %s (see %s)", tool, text_path, errors_path);
+        passed = own_assembler ? object_test_run(buster, output_path, errors_path) == 0 :
+                                 oracle_epoch_file(text_path) && asm_test_tool(assembler, reassembled_path, output_path, errors_path) == 0;
+    }
     if (passed)
     {
         const uint64_t mark = test->scratch.length;
@@ -1052,7 +1062,7 @@ static bool assembly_test_c_program(AssemblyTest* test, const char* compiler, co
     if (passed)
     {
         passed = assembly_test_run_in(program, test->directory, output_path, errors_path) == 0 && assembly_test_same_file(test, output_path, expected);
-        snprintf(error, error_size, "the program linked from GNU as's object didn't print %s and exit 0 (see %s)", expected, output_path);
+        snprintf(error, error_size, "the reassembled program didn't print %s and exit 0 (see %s)", expected, output_path);
     }
     if (passed && !test->keep)
     {
@@ -1066,37 +1076,33 @@ static bool assembly_test_c_program(AssemblyTest* test, const char* compiler, co
     return passed;
 }
 
-// Exercise multiple same-name table sections, including two associated with .text and one with named code. The
-// comparison checks their sh_link and relocations, as well as the NOP bytes and the function symbols in their sleds.
-static void assembly_test_patchable(AssemblyTest* test)
+// Compare sh_link and relocations as well as the NOP bytes and the function symbols in their sleds.
+static void assembly_test_patchable(AssemblyTest* test, const char* source, const char* fixture, bool cross_check)
 {
-    static const char fixture[] =
-        "__attribute__((noinline, patchable_function_entry(18,4))) int first(int x) { return x + 3; }\n"
-        "__attribute__((noinline, patchable_function_entry(6,6), section(\".text.patchable\"))) int second(int x) { return first(x) + 1; }\n"
-        "__attribute__((noinline, patchable_function_entry(3))) int third(int x) { return second(x) * 2; }\n"
-        "__attribute__((noinline, patchable_function_entry(7,1,\".custom.patch\"))) static int fourth(int x) { return third(x) + 2; }\n"
-        "int main(int argc, char** argv) { return fourth(argc) != 12; }\n";
     char compiler[PATH_MAX];
     const ssize_t length = readlink("/proc/self/exe", compiler, sizeof(compiler) - 1);
     compiler[length > 0 ? length : 0] = 0;
-    char source[PATH_MAX];
     char expected[PATH_MAX];
-    snprintf(source, sizeof(source), "%s/patchable-input.c", test->directory);
     snprintf(expected, sizeof(expected), "%s/patchable-expected.txt", test->directory);
-    const bool ready = length > 0 && object_write_file(source, (const uint8_t*)fixture, sizeof(fixture) - 1) == OBJECT_ERROR_NONE &&
+    const bool ready = length > 0 && access(source, R_OK) == 0 &&
                        object_write_file(expected, (const uint8_t*)"", 0) == OBJECT_ERROR_NONE;
-    assembly_test_check(test, ready, "write patchable function entry fixture", 0);
+    assembly_test_check(test, ready, "prepare patchable function entry fixture", source);
     for (uint32_t tier = 0; ready && tier < 2; tier += 1)
     {
-        char name[32];
+        char name[64];
         char error[512] = { 0 };
-        snprintf(name, sizeof(name), "patchable-tier%u", tier);
-        const bool same = assembly_test_c_program(test, compiler, source, expected, name, tier != 0, error, sizeof(error));
-        assembly_test_check(test, same, "patchable entry tables, code and symbols round-trip through GNU as", error);
+        snprintf(name, sizeof(name), "%s-tier%u-buster", fixture, tier);
+        const bool buster = assembly_test_c_program(test, compiler, source, expected, name, tier != 0, true, error, sizeof(error));
+        assembly_test_check(test, buster, "patchable entry tables, code and symbols round-trip through Buster", error);
+        if (cross_check)
+        {
+            snprintf(name, sizeof(name), "%s-tier%u-gnu", fixture, tier);
+            const bool gnu = assembly_test_c_program(test, compiler, source, expected, name, tier != 0, false, error, sizeof(error));
+            assembly_test_check(test, gnu, "patchable entry tables, code and symbols round-trip through GNU as", error);
+        }
     }
     if (!test->keep)
     {
-        unlink(source);
         unlink(expected);
     }
 }
@@ -1145,6 +1151,83 @@ static bool assembly_test_compare(AssemblyTest* test, const char* compiler, cons
     return passed;
 }
 
+// Kernel-style extraction consumes the substituted source spelling. The raw variant intentionally
+// cannot assemble. The .ascii variant can, including the DWARF for the ordinary code beside it.
+static void assembly_test_markers(AssemblyTest* test, const char* compiler)
+{
+    static const char fixture[] =
+        "struct layout { char tag; long value; };\n"
+        "#ifdef RAW\n#define MARK(x) \"\\n->\" x\n#else\n#define MARK(x) \"\\n.ascii \\\"->\" x \"\\\"\"\n#endif\n"
+        "void offsets(void) {\n"
+        "  __asm__ volatile(MARK(\"VALUE %0\") : : \"i\"(__builtin_offsetof(struct layout, value)));\n"
+        "  if (0) __asm__ volatile(MARK(\"DEAD\") : :);\n"
+        "  __asm__ volatile(MARK(\"SIZE %c[size]\") : : [size] \"i\"(sizeof(struct layout)));\n}\n"
+        "static int state = 1;\n"
+        "__attribute__((noinline,section(\".text.work\"))) int work(int input) { int result = input + state; state = result; return result; }\n"
+        "int main(void) { return work(4) != 5; }\n";
+    char source[PATH_MAX];
+    char output[PATH_MAX];
+    char errors[PATH_MAX];
+    char object[PATH_MAX];
+    char control[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/offsets.c", test->directory);
+    snprintf(output, sizeof(output), "%s/offsets.s", test->directory);
+    snprintf(errors, sizeof(errors), "%s/offsets.err", test->directory);
+    snprintf(object, sizeof(object), "%s/offsets.o", test->directory);
+    snprintf(control, sizeof(control), "%s/offsets-direct.o", test->directory);
+    const bool ready = object_write_file(source, (const uint8_t*)fixture, sizeof(fixture) - 1) == OBJECT_ERROR_NONE;
+    assembly_test_check(test, ready, "write inline assembly marker fixture", NULL);
+    for (uint32_t tier = 0; ready && tier < 2; tier += 1)
+    {
+        for (uint32_t raw = 0; raw < 2; raw += 1)
+        {
+            char* args[] = { (char*)compiler, "-g", raw ? "-DRAW" : "-URAW", "-S", "-o", "-", source, tier ? "--tier1" : NULL, NULL };
+            const bool compiled = object_test_run(args, output, errors) == 0;
+            const uint64_t mark = test->scratch.length;
+            const String8 text = compiled ? object_test_read_file(&test->scratch, output) : (String8){ 0 };
+            const char* value = raw ? "\n->VALUE $8\n" : "\n.ascii \"->VALUE $8\"\n";
+            const char* size = raw ? "\n->SIZE 16\n" : "\n.ascii \"->SIZE 16\"\n";
+            const char* first = text.pointer != NULL ? memmem(text.pointer, text.length, value, strlen(value)) : NULL;
+            const char* second = text.pointer != NULL ? memmem(text.pointer, text.length, size, strlen(size)) : NULL;
+            const bool extracted = first != NULL && second != NULL && first < second && memmem(text.pointer, text.length, "->DEAD", 6) == NULL;
+            assembly_test_check(test, compiled && extracted, "extract checked offsets in source order at both tiers", errors);
+            arena_pop_to(&test->scratch, mark);
+            if (raw)
+            {
+                char* direct[] = { (char*)compiler, "-c", "-DRAW", source, "-o", object, tier ? "--tier1" : NULL, NULL };
+                assembly_test_check(test, object_test_run(direct, "/dev/null", errors) == 1, "direct object emission still diagnoses raw marker text", errors);
+            }
+            else
+            {
+                char* reassemble[] = { (char*)compiler, "-c", output, "-o", object, NULL };
+                char* direct[] = { (char*)compiler, "-g", "-c", source, "-o", control, tier ? "--tier1" : NULL, NULL };
+                const bool built = compiled && object_test_run(reassemble, "/dev/null", errors) == 0 && object_test_run(direct, "/dev/null", errors) == 0;
+                const String8 expected = built ? object_test_read_file(&test->scratch, control) : (String8){ 0 };
+                const String8 actual = built ? object_test_read_file(&test->scratch, object) : (String8){ 0 };
+                char difference[512] = { 0 };
+                const bool same = expected.pointer != NULL && assembly_test_same_objects(test, (const uint8_t*)expected.pointer, expected.length, actual, difference, sizeof(difference));
+                assembly_test_check(test, same, "Buster preserves offset marker bytes, DWARF and relocations", built ? difference : errors);
+                arena_pop_to(&test->scratch, mark);
+            }
+        }
+        // Exercise section offsets, global addresses, function addresses and value location lists.
+        AssemblyTest options = *test;
+        options.options[0] = "-g";
+        options.option_count = 1;
+        char error[512] = { 0 };
+        const bool same = assembly_test_compare(&options, compiler, source, tier ? "offsets-debug-1" : "offsets-debug-0", tier != 0, error, sizeof(error));
+        assembly_test_check(test, same, "GNU as preserves offset marker bytes, DWARF and relocations", error);
+    }
+    if (!test->keep)
+    {
+        unlink(source);
+        unlink(output);
+        unlink(errors);
+        unlink(object);
+        unlink(control);
+    }
+}
+
 // --c-testsuite DIRECTORY --subset FILE: assembly_test_c_program for each program the subset lists (its lines of digits
 // alone, as test-c-testsuite reads it), at Tier 0 and with --tier1.
 static void assembly_test_c_testsuite(AssemblyTest* test, const char* directory, const char* subset)
@@ -1176,7 +1259,7 @@ static void assembly_test_c_testsuite(AssemblyTest* test, const char* directory,
                 char name[64];
                 snprintf(name, sizeof(name), "%s-tier%u", line, tier);
                 char error[512] = { 0 };
-                const bool ok = assembly_test_c_program(test, compiler, source, expected, name, tier == 1, error, sizeof(error));
+                const bool ok = assembly_test_c_program(test, compiler, source, expected, name, tier == 1, false, error, sizeof(error));
                 char detail[640];
                 snprintf(detail, sizeof(detail), "%s.c at Tier %u: %s", line, tier, error);
                 assembly_test_check(test, ok, "c-testsuite", detail);
@@ -1268,9 +1351,11 @@ static int run_assembly_output_tests(int count, char** arguments)
         assembly_test_refusal(&test, ASSEMBLY_TEST_TARGETLESS, ASSEMBLY_INVALID, "a relative branch without a target");
         assembly_test_refusal(&test, ASSEMBLY_TEST_TLS_FIXUP, ASSEMBLY_UNSUPPORTED, "thread-local storage");
         assembly_test_refusal(&test, ASSEMBLY_TEST_BND_CALL, ASSEMBLY_UNSUPPORTED, "GNU as encodes otherwise");
+        assembly_test_patchable(&test, "tests/assembly-output/patchable.c", "patchable", test.cross_check);
+        // GNU as refuses a section named after an ordinary symbol. Compare this spelling with direct object emission.
+        assembly_test_patchable(&test, "tests/assembly-output/patchable-collisions.c", "patchable-collisions", false);
         if (test.cross_check)
         {
-            assembly_test_patchable(&test);
             assembly_test_forms(&test, 2);
         }
         if (c_testsuite != 0)
@@ -1278,8 +1363,16 @@ static int run_assembly_output_tests(int count, char** arguments)
             assembly_test_c_testsuite(&test, c_testsuite, subset);
         }
         char compiler[PATH_MAX];
-        const ssize_t length = compared_count != 0 ? readlink("/proc/self/exe", compiler, sizeof(compiler) - 1) : 0;
+        const ssize_t length = compared_count != 0 || test.cross_check ? readlink("/proc/self/exe", compiler, sizeof(compiler) - 1) : 0;
         compiler[length > 0 ? length : 0] = 0;
+        if (test.cross_check)
+        {
+            assembly_test_check(&test, length > 0, "locate the compiler for offset marker tests", NULL);
+            if (length > 0)
+            {
+                assembly_test_markers(&test, compiler);
+            }
+        }
         for (uint32_t i = 0; i < compared_count; i += 1)
         {
             for (uint32_t tier = 0; tier < 2; tier += 1)

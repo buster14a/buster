@@ -420,6 +420,8 @@ typedef enum CheckLowerTaskKind
     // A condition's `!`, `&&` or `||` (or a statement's CONDITION over one) evaluated as branches (check_lower_branch, #2883):
     // `node` the operator, `value` the label it branches to where its truth is `address`, the next entry where it isn't.
     CHECK_LOWER_BRANCH,
+    // Emit the conditional branch of kind node to label value and mark its typed entry.
+    CHECK_LOWER_PREDICTABLE_BRANCH,
     CHECK_LOWER_BUILTIN,
     CHECK_LOWER_BUILTIN_MISC,
     CHECK_LOWER_BUILTIN_FLOAT,
@@ -735,6 +737,10 @@ struct CheckLowerWriter
     uint8_t* kinds;
     uint8_t* classes;
     uint64_t* values;
+    // Bits of the emitted conditional branches whose expectations favor keeping them. Only the
+    // first predictable_words have been initialized for this body.
+    uint64_t* predictable_branches;
+    uint32_t predictable_words;
     // Each entry's source token (CheckProgramLowered.entry_tokens), when `sources` asks for them: the entries before
     // `filled` have theirs, and the ones after it take `source` when it next changes (check_lower_settle).
     uint32_t* tokens;
@@ -12898,6 +12904,76 @@ static bool check_lower_branch_condition(const CheckProgram* program, uint32_t n
     return found;
 }
 
+static bool check_lower_expect_node(const CheckGraph* graph, uint32_t node)
+{
+    return graph->ops[node] == CHECK_OP_BUILTIN_MISC && (graph->members[node] == CBUILTIN_EXPECT || graph->members[node] == CBUILTIN_EXPECT_WITH_PROBABILITY);
+}
+
+// A test of an expectation, directly or as one side of an integer comparison to a constant.
+// A frequent value predicts any such test. A rare value predicts its own equality test, or
+// any test of a boolean when the rare value is one of its two alternatives.
+static bool check_lower_predictable(const CheckProgram* program, uint32_t node)
+{
+    const CheckGraph* graph = &program->input->graph;
+    const CheckStream* stream = program->stream;
+    while (graph->ops[node] == CHECK_OP_CONDITION || graph->ops[node] == CHECK_OP_NOT)
+    {
+        node = graph->operand0[node];
+    }
+    const CheckOp op = graph->ops[node];
+    bool equality = true;
+    uint64_t compared = 0; // A direct truth test compares the result to zero.
+    if (op >= CHECK_OP_LESS && op <= CHECK_OP_NOT_EQUAL)
+    {
+        const uint32_t left = graph->operand0[node];
+        const uint32_t right = graph->operand1[node];
+        const bool first = check_lower_expect_node(graph, left);
+        if (first || check_lower_expect_node(graph, right))
+        {
+            CheckValue other = check_stream_value(stream, first ? right : left);
+            check_action_convert_value(program->types, &other, stream->conversions[node].operands[first ? 1 : 0].type, node);
+            if (other.constant_kind == CHECK_CONSTANT_INTEGER && other.fault == CHECK_FAULT_NONE && (other.flags & BUSTER_CHECK_SIDE_EFFECT) == 0)
+            {
+                node = first ? left : right;
+                compared = (uint64_t)other.integer;
+                equality = op == CHECK_OP_EQUAL || op == CHECK_OP_NOT_EQUAL;
+            }
+        }
+    }
+    bool predictable = false;
+    if (check_lower_expect_node(graph, node))
+    {
+        const uint32_t index = check_program_builtin_index(stream->misc, stream->misc_count, sizeof(CheckBuiltinMiscEffect), node);
+        if (index != BUSTER_CHECK_NONE)
+        {
+            const CheckBuiltinMiscEffect* hint = stream->misc + index;
+            predictable = hint->expect_bias == CHECK_EXPECT_FREQUENT;
+            if (hint->expect_bias == CHECK_EXPECT_RARE)
+            {
+                const uint32_t argument = graph->argument_nodes[graph->argument_offsets[node]];
+                const CheckOp producer = graph->ops[argument];
+                const bool boolean = type_unqualified(check_stream_type(stream, argument)) == BUSTER_TYPE_BOOL ||
+                                     (producer >= CHECK_OP_LESS && producer <= CHECK_OP_NOT_EQUAL) || producer == CHECK_OP_NOT ||
+                                     producer == CHECK_OP_LOGICAL_AND || producer == CHECK_OP_LOGICAL_OR;
+                predictable = (equality && hint->expected_value == compared) || (boolean && hint->expected_value <= 1);
+            }
+        }
+    }
+    return predictable;
+}
+
+static void check_lower_conditional_branch(CheckLowerWriter* writer, uint32_t condition, uint8_t kind, uint32_t target)
+{
+    if (writer->predictable_branches != NULL && condition < writer->program->stream->count && check_lower_predictable(writer->program, condition))
+    {
+        check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_PREDICTABLE_BRANCH, .node = kind, .value = target });
+    }
+    else
+    {
+        check_lower_instruction(writer, kind, BUSTER_TYPED_CLASS_I32, target);
+    }
+}
+
 // Operand `operand` of `node`, of converted type `type`, as a condition: a branch to `target` where its truth is `sense`.
 // A `!`, `&&` or `||` is a BRANCH task of its own (check_lower_branch); any other operand is its value, its truth and the
 // branch, as check_lower_logical tests its operands.
@@ -12911,7 +12987,7 @@ static void check_lower_branch_operand(CheckLowerWriter* writer, uint32_t node, 
     }
     else
     {
-        check_lower_instruction(writer, sense ? BUSTER_TYPED_BRANCH_TRUE : BUSTER_TYPED_BRANCH_FALSE, BUSTER_TYPED_CLASS_I32, target);
+        check_lower_conditional_branch(writer, child, sense ? BUSTER_TYPED_BRANCH_TRUE : BUSTER_TYPED_BRANCH_FALSE, target);
         check_lower_truth(writer, type, false);
         check_lower_operand(writer, node, operand, false, type);
     }
@@ -13062,7 +13138,7 @@ static inline __attribute__((always_inline)) void check_lower_logical(CheckLower
         }
         else
         {
-            check_lower_instruction(writer, op == CHECK_OP_LOGICAL_OR ? BUSTER_TYPED_BRANCH_TRUE : BUSTER_TYPED_BRANCH_FALSE, BUSTER_TYPED_CLASS_I32, alternate);
+            check_lower_conditional_branch(writer, a, op == CHECK_OP_LOGICAL_OR ? BUSTER_TYPED_BRANCH_TRUE : BUSTER_TYPED_BRANCH_FALSE, alternate);
             check_lower_truth(writer, type_a, false);
             if (reuse)
             {
@@ -17520,6 +17596,21 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
         {
             check_lower_branch(writer, node, (uint32_t)(value >> 32), (flags & 1) != 0);
         }
+        else if (kind == CHECK_LOWER_PREDICTABLE_BRANCH)
+        {
+            check_lower_emit(writer, (uint8_t)node, BUSTER_TYPED_CLASS_I32, (uint32_t)(value >> 32));
+            if (writer->output->status == CHECK_PROGRAM_OK)
+            {
+                const uint32_t entry = writer->count - 1;
+                const uint32_t word = entry / 64;
+                if (word >= writer->predictable_words)
+                {
+                    memset(writer->predictable_branches + writer->predictable_words, 0, (word + 1 - writer->predictable_words) * sizeof(uint64_t));
+                    writer->predictable_words = word + 1;
+                }
+                writer->predictable_branches[word] |= UINT64_C(1) << (entry % 64);
+            }
+        }
         else if (kind == CHECK_LOWER_BUILTIN)
         {
             check_lower_builtin_emit(writer, check_lower_task_unpack(*task));
@@ -19105,7 +19196,7 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
                     .branch_count = plan->inline_branch_count,
                     .label_records = plan->inline_label_records,
                     .label_names = plan->inline_label_names,
-                    .label_count = plan->label_count,
+                    .label_count = plan->presentation != NULL ? 1 : plan->label_count,
                     .exits = plan->inline_exits,
                     .goto_labels = plan->inline_goto_labels,
                     .result = returned != 0 ? (uint8_t)(returned->reg + 1) : 0,
@@ -19674,8 +19765,7 @@ static void check_lower_control(CheckLowerWriter* writer, uint32_t index)
     {
         if (control.kind != CHECK_CONTROL_EVALUATE)
         {
-            check_lower_instruction(writer, control.kind == CHECK_CONTROL_BRANCH_FALSE ? BUSTER_TYPED_BRANCH_FALSE : BUSTER_TYPED_BRANCH_TRUE, BUSTER_TYPED_CLASS_I32,
-                                    control.target);
+            check_lower_conditional_branch(writer, control.node, control.kind == CHECK_CONTROL_BRANCH_FALSE ? BUSTER_TYPED_BRANCH_FALSE : BUSTER_TYPED_BRANCH_TRUE, control.target);
         }
         writer->statement = control.kind == CHECK_CONTROL_EVALUATE ? control.node : BUSTER_CHECK_NONE;
         if (control.node != BUSTER_CHECK_NONE)
@@ -20033,6 +20123,7 @@ struct CheckLowerShared
     // Whether every body tracks its typed stack: a program with a terminal helper (check_lower_terminate) or a
     // __builtin_eh_return (check_lower_eh_unwind), whose calls within an expression discard the values under them.
     bool terminal;
+    bool has_expectation;
     bool scalar;
     // #1048's node templates (c_check_program_templates.c): whether the program may take them (no -g tokens, _BitInt
     // type or overloaded address), and whether its writers do: on the vector path, or where the caller asks
@@ -20738,9 +20829,10 @@ static bool check_lower_prepare(CheckLowerShared* shared, CheckProgramLowered* l
     // A unit that calls __builtin_eh_return tracks its stacks too, for one within an expression (check_lower_eh_unwind). A
     // refused program may have no stream.
     const uint32_t misc_count = program->status == CHECK_PROGRAM_OK && program->stream != 0 ? program->stream->misc_count : 0;
-    for (uint32_t i = 0; i < misc_count && !shared->terminal; i += 1)
+    for (uint32_t i = 0; i < misc_count; i += 1)
     {
-        shared->terminal = program->stream->misc[i].runtime_builtin == CBUILTIN_EH_RETURN;
+        shared->terminal |= program->stream->misc[i].runtime_builtin == CBUILTIN_EH_RETURN;
+        shared->has_expectation |= program->stream->misc[i].expect_bias != CHECK_EXPECT_UNKNOWN;
     }
     // File-scope assembly lowers no code: the planning assembles it (check_program_asm_plan_file, #619), the emission
     // publishes it.
@@ -21098,6 +21190,10 @@ static bool check_lower_writer_begin(CheckLowerWriter* writer, CheckLowerAbi* ab
     BUSTER_CHECK_LOWER_COLUMN(kinds, uint8_t, capacity);
     BUSTER_CHECK_LOWER_COLUMN(classes, uint8_t, capacity);
     BUSTER_CHECK_LOWER_COLUMN(values, uint64_t, capacity);
+    if (shared->has_expectation || shared->deferred)
+    {
+        BUSTER_CHECK_LOWER_COLUMN(predictable_branches, uint64_t, (capacity + 63ull) / 64);
+    }
     BUSTER_CHECK_LOWER_COLUMN(tokens, uint32_t, sources ? capacity : 1);
     BUSTER_CHECK_LOWER_COLUMN(task_sources, uint32_t, sources ? capacity : 1);
     BUSTER_CHECK_LOWER_COLUMN(labels, uint32_t, capacity);
@@ -21617,6 +21713,7 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         Tier0Function* function = &lowered->functions[b];
         *function = (Tier0Function){ 0 };
         writer->count = 0;
+        writer->predictable_words = 0;
         writer->label_entry_count = 0;
         writer->table_jump_count = 0;
         writer->lifetime_count = 0;
@@ -22163,6 +22260,12 @@ static inline __attribute__((always_inline)) void check_lower_part_body(CheckLow
         BUSTER_CHECK_LOWER_COPY(kinds, kinds, uint8_t, writer->count);
         BUSTER_CHECK_LOWER_COPY(classes, classes, uint8_t, writer->count);
         BUSTER_CHECK_LOWER_COPY(values, values, uint64_t, writer->count);
+        if (writer->predictable_words != 0)
+        {
+            const uint32_t words = (writer->count + 63u) / 64;
+            memset(writer->predictable_branches + writer->predictable_words, 0, (words - writer->predictable_words) * sizeof(uint64_t));
+            BUSTER_CHECK_LOWER_COPY(predictable_branches, predictable_branches, uint64_t, words);
+        }
         BUSTER_CHECK_LOWER_COPY(local_classes, local_classes, uint8_t, writer->local_count);
         BUSTER_CHECK_LOWER_COPY(local_flags, local_flags, uint8_t, writer->local_count);
         if (writer->objects)

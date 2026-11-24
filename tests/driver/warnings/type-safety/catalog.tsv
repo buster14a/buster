@@ -1,0 +1,9 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+wtype-safety-s-calls	type-safety-calls-source.c	25	0	0	-	-	-Wtype-safety's calls
+wtype-safety-s-calls-with-an-unsigned-plain-char	type-safety-calls-source.c	25	0	0	-	-funsigned-char	-Wtype-safety's calls with an unsigned plain char
+wtype-safety-s-calls-in-c23	type-safety-calls-source.c	25	0	0	c23	-	-Wtype-safety's calls in C23
+wno-type-safety	type-safety-calls-source.c	1	0	0	-	-Wno-type-safety	-Wno-type-safety
+werror-type-safety	type-safety-calls-source.c	0	20	0	-	-Werror=type-safety	-Werror=type-safety
+# clang's error limit stops it at its twentieth error, before the other warning.
+registered-values-in-source-order-a-pragma-and-redeclarations-ru	type-safety-order-source.c	8	0	0	-	-	registered values in source order, a pragma and redeclarations' rules

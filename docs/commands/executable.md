@@ -399,6 +399,13 @@ last file scribbled over, every other time over poisoned scratch memory: the
 files must be byte-identical. A link without general- or local-dynamic TLS
 accesses is then written once more over the bytes the last write left, its
 loads and calls relaxed already, and must come out the same.
+
+For profiling, set `BUSTER_TEST_PROFILE_DIR` to an existing writable absolute
+directory. The static and static PIE test images get separate paths under it and
+remain available after the test exits. The older `BUSTER_CHECKER_PROFILE_DIR`
+name also works. An explicit `--directory` selects another parent for the
+retained test directory. Keep the directory through symbol processing.
+
 Each file is read back and checked by the test's own rules:
 
 - the headers: `_start` the entry, no `PT_INTERP`, a `PT_NOTE` with the start

@@ -1,0 +1,64 @@
+buster-fixtures v1 checker-sources
+0001	0001.c	-	a whole replacement discards an effectful aggregate rvalue retaining an object ID
+0002	0002.c	-	a whole aggregate replacement makes an earlier aggregate call dead
+0003	0003.c	rejected	sizeof a VLA type does not make a later const object constant
+0004	0004.c	rejected	a const bound in a sizeof type-name keeps its variable array type
+0005	0005.c	rejected	static initialization cannot consume sizeof a variable array type
+0006	0006.c	-	overridden file-scope nonconstant writes do not poison final const value
+0007	0007.c	rejected	scalar field coverage does not kill an aggregate-copy base expression
+0008	0008.c	rejected	an equal-sized nested child is not a whole replacement of its parent
+0009	0009.c	-	fully overridden scalar GNU range expressions are dead
+0010	0010.c	-	an automatic address can be consumed by a direct constant read
+0011	0011.c	-	automatic array addresses can be consumed without publishing a pointer value
+0012	0012.c	rejected	a const pointer initialized by automatic array decay is not constant evidence
+0013	0013.c	-	overridden effectful initializer is absent from the final value
+0014	0014.c	-	overridden effects do not poison another surviving aggregate member
+0015	0015.c	-	aggregate subobject copies clip implicit zero coverage
+0016	@check-const-sparse-source	-	sparse const arrays do not materialize their declared extent
+0017	0017.c	-	automatic const array retains a source-only address path
+0018	0018.c	rejected	automatic object addresses do not make a const pointer initializer constant
+0019	0019.c	-	builtin expect retains its own ICE contract after a const read
+0020	0020.c	-	floating comparison builtin inherits GNU const-read evidence
+0021	0021.c	rejected	choose expression retains its stricter ICE requirement
+0022	0022.c	-	const scalar becomes a GNU enumerator value
+0023	0023.c	-	const scalar folds a file-scope array bound
+0024	0024.c	-	automatic const scalar folds a case label
+0025	0025.c	-	const unsigned scalar folds a bit-field width
+0026	0026.c	-	const scalar folds a static assertion
+0027	0027.c	-	const scalar supplies a static initializer
+0028	0028.c	-	const record member folds an enumerator
+0029	0029.c	-	completed const initializer chains retain converted values
+0030	0030.c	-	const nested array member folds a selected element
+0031	0031.c	-	const union folds its active member
+0032	0032.c	rejected	const union inactive member cannot borrow active bytes
+0033	0033.c	-	const floating object converts in a static initializer
+0034	0034.c	-	const pointer object retains a symbolic target in a static initializer
+0035	0035.c	-	const pointer object can designate another completed const object
+0036	0036.c	-	const pointer retains string-literal bytes for a constant element read
+0037	0037.c	rejected	a folded const-object zero is not an ICE-form null pointer constant
+0038	0038.c	rejected	mutable scalar initialization is not const-object evidence
+0039	0039.c	rejected	volatile const scalar cannot supply a constant value
+0040	0040.c	rejected	a future initializer cannot satisfy an earlier const-object read
+0041	0041.c	rejected	const initializer cycles remain nonconstant
+0042	0042.c	rejected	a mutable local shadow does not reuse the outer const receipt
+0043	0043.c	rejected	uninitialized automatic const object has no retained value
+0044	0044.c	rejected	an evaluated side effect prevents folding a const-object expression
+0045	0045.c	rejected	a runtime const initializer does not become a constant receipt
+0046	0046.c	rejected	a mutable array index cannot select a constant element
+0047	0047.c	rejected	a one-past const array element is not a readable constant subobject
+0048	0048.c	rejected	another effectful aggregate member prevents a partial constant receipt
+0049	0049.c	rejected	a mutable pointer object cannot supply a constant dereference
+0050	0050.c	-	const atomic scalar may be read during explicit constant evaluation
+0051	0051.c	-	const record atomic member may be read during explicit constant evaluation
+0052	0052.c	-	an enumerator resets const-object provenance to an ordinary ICE zero
+0053	0053.c	rejected	a const member does not make its mutable defining record constant
+0054	0054.c	rejected	a const member does not make its mutable defining union constant
+0055	0055.c	-	const atomic scalar supplies a static initializer without becoming a runtime load
+0056	0056.c	-	implicit const record members retain initialization zeros
+0057	0057.c	-	implicit const array elements retain initialization zeros
+0058	0058.c	-	const record value copy preserves explicit and implicit subobjects
+0059	0059.c	-	an inactive union member's address remains a valid symbolic pointer
+0060	0060.c	rejected	dereferencing a pointer to an inactive union member remains nonconstant
+0061	0061.c	rejected	same-type inactive union members cannot share constant-read proof
+0062	0062.c	-	const nonbyte bit-field values retain their stored bits
+0063	0063.c	rejected	a block-scope const bound remains a variable-length array type

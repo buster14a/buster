@@ -1,0 +1,9 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+# "expression evaluates to" with a const object's value its initializer gives: a scalar's, in an operand's
+# arithmetic, a member's, an element's, a block's static's and a char's (as a character).
+static-assertions-of-const-objects	static-assertions-of-const-objects.c	0	6	6	syntax-only	-	static assertions of const objects
+# The requirement as clang's printer prints it (#2482): a compound literal's completed array bound, a _Generic's
+# `int: 1` associations, and no note where a selection's chosen operand is a literal; a record or enumeration a
+# type name defines by its name, or `(unnamed at f.c:1:2)`, without its body.
+static-assertion-requirements-of-selections-compound-literals-an	static-assertion-requirements-of-selections-compound-literals-an.c	0	10	8	syntax-only	-	static assertion requirements of selections, compound literals and defined tags
