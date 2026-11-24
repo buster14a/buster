@@ -35,7 +35,8 @@ struct S {
     __int128 i128; _Complex double cd; _Atomic int at; int (*fp)(int); unsigned _BitInt(40) ub; Point pts[2];
     V4 v4; I4 i4;
 };
-struct __attribute__((packed)) Packed { char a; int b : 7; unsigned c : 20; long long d; };
+struct __attribute__((packed)) WideFields { unsigned long long a : 61, b : 60; long long c : 58; };
+struct __attribute__((packed)) Packed { char a; int b : 7; unsigned c : 20; long long d; struct WideFields inner; };
 struct Vec { E2 e; D2 d; C16 c; L2 l; S8 s; };
 struct O { struct I { int a; } i; struct { int b; struct { int c; } deep; } un; union { int d; } u2; };
 typedef struct { struct { int e; } in; } T;
@@ -160,7 +161,7 @@ static _Float16 with_half(_Float16 h, const char *format, ...) { va_list list; v
 static Lanes with_lanes(Lanes v, const char *format, ...) { va_list list; va_start(list, format); printf("<%d>", v[3]); vprintf(format, list); va_end(list); return v; }
 static _Complex double with_complex(const char *format, ...) { va_list list; va_start(list, format); vprintf(format, list); va_end(list); return __builtin_complex(1.0, 2.0); }
 static int with_long_double(long double k, const char *format, ...) { va_list list; va_start(list, format); printf("<%Lg>", k); vprintf(format, list); va_end(list); return 0; }
-static struct Packed packed = { 'z', -5, 99999, -77 };
+static struct Packed packed = { 'z', -5, 99999, -77, { 0x123456789abcdef0ULL, 0xfedcba987654321ULL, -0x123456789abcdLL } };
 int main(int argc, char **argv)
 {
     (void)argv;

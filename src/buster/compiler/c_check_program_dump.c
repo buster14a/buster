@@ -954,6 +954,7 @@ static void check_lower_dump_record(CheckLowerDumpBuilder* builder, TypeId recor
         // anonymous member's, which has no lines of its own.
         uint32_t indent;
         bool anonymous;
+        bool is_volatile;
         // Its body's `}` and the place its next member's declarator is looked for from (check_lower_dump_member).
         uint32_t close;
         uint32_t cursor;
@@ -962,11 +963,17 @@ static void check_lower_dump_record(CheckLowerDumpBuilder* builder, TypeId recor
     const TypeTable* types = program->types;
     Frame stack[BUSTER_CHECK_DUMP_DEPTH];
     uint32_t depth = 0;
-    const CheckLowerDumpOperand header = check_lower_dump_operand_string(check_lower_dump_canonical(builder, record));
+    const CheckLowerDumpOperand header = check_lower_dump_operand_string(check_lower_dump_canonical(builder, type_unqualified(record)));
     check_lower_dump_line(builder, "%s", &header, 1);
     check_lower_dump_line(builder, " {\n", NULL, 0);
     const uint32_t first_tag = types->types.index[type_index(record)];
-    stack[depth++] = (Frame){ .tag = first_tag, .indent = BUSTER_CHECK_NONE, .close = builder->closes[first_tag], .cursor = builder->opens[first_tag] + 1 };
+    stack[depth++] = (Frame){
+        .tag = first_tag,
+        .indent = BUSTER_CHECK_NONE,
+        .is_volatile = (type_qualifiers(record) & BUSTER_TYPE_VOLATILE) != 0,
+        .close = builder->closes[first_tag],
+        .cursor = builder->opens[first_tag] + 1,
+    };
     while (depth != 0 && builder->refusal == NULL)
     {
         Frame* top = stack + depth - 1;
@@ -992,6 +999,7 @@ static void check_lower_dump_record(CheckLowerDumpBuilder* builder, TypeId recor
             const uint32_t name = types->members.name[member];
             const bool bits = (types->members.flags[member] & BUSTER_TYPE_MEMBER_BIT_FIELD) != 0;
             const TypeId type = types->members.type[member];
+            const bool is_volatile = top->is_volatile || (type_qualifiers(type) & BUSTER_TYPE_VOLATILE) != 0;
             const TypeId bare = type_unqualified(type_strip_aligned(types, type));
             const uint8_t kind = type_kind(types, bare);
             const bool record_kind = kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION;
@@ -1002,8 +1010,16 @@ static void check_lower_dump_record(CheckLowerDumpBuilder* builder, TypeId recor
             if (name == 0 && !bits && record_kind && depth < BUSTER_CHECK_DUMP_DEPTH)
             {
                 // An anonymous struct or union: its fields, at this record's level.
-                stack[depth++] = (Frame){ .tag = inner, .offset = offset, .depth = top->depth, .indent = top->indent, .anonymous = true,
-                                          .close = builder->closes[inner], .cursor = builder->opens[inner] + 1 };
+                stack[depth++] = (Frame){
+                    .tag = inner,
+                    .offset = offset,
+                    .depth = top->depth,
+                    .indent = top->indent,
+                    .anonymous = true,
+                    .is_volatile = is_volatile,
+                    .close = builder->closes[inner],
+                    .cursor = builder->opens[inner] + 1,
+                };
             }
             else if (name == 0 && !bits && record_kind)
             {
@@ -1030,8 +1046,15 @@ static void check_lower_dump_record(CheckLowerDumpBuilder* builder, TypeId recor
                 {
                     check_lower_dump_line(builder, format, operands, count);
                     check_lower_dump_line(builder, " {\n", NULL, 0);
-                    stack[depth++] = (Frame){ .tag = inner, .offset = offset, .depth = field_depth, .indent = indent, .close = builder->closes[inner],
-                                              .cursor = builder->opens[inner] + 1 };
+                    stack[depth++] = (Frame){
+                        .tag = inner,
+                        .offset = offset,
+                        .depth = field_depth,
+                        .indent = indent,
+                        .is_volatile = is_volatile,
+                        .close = builder->closes[inner],
+                        .cursor = builder->opens[inner] + 1,
+                    };
                 }
                 else if (record_kind)
                 {
@@ -1045,8 +1068,13 @@ static void check_lower_dump_record(CheckLowerDumpBuilder* builder, TypeId recor
                     {
                         strcat(format, " ");
                         strcat(format, specifier);
-                        operands[count++] = (CheckLowerDumpOperand){ .kind = CHECK_LOWER_DUMP_VALUE, .value = offset, .type = bare, .width = width,
-                                                                     .promoted = check_lower_dump_promoted(types, bare, width) };
+                        operands[count++] = (CheckLowerDumpOperand){
+                            .kind = CHECK_LOWER_DUMP_VALUE,
+                            .value = offset,
+                            .type = bare | (is_volatile ? BUSTER_TYPE_VOLATILE : 0),
+                            .promoted = check_lower_dump_promoted(types, bare, width),
+                            .bit_member = bits ? member : 0,
+                        };
                     }
                     else
                     {
@@ -1116,7 +1144,7 @@ static bool check_lower_dump_plan(CheckLowerInitializers* pools, CheckLowerDumpB
                                                                                                                 check_stream_type(stream, graph->argument_nodes[first])) : 0;
     const uint8_t pointer_kind = pointer != 0 ? type_kind(types, pointer) : BUSTER_TYPE_KIND_NONE;
     const TypeId record = pointer_kind == BUSTER_TYPE_KIND_POINTER || type_kind_is_array(pointer_kind) ?
-                          type_unqualified(type_strip_aligned(types, types->types.base[type_index(pointer)])) : 0;
+                          type_strip_aligned(types, types->types.base[type_index(pointer)]) : 0;
     const uint8_t record_kind = record != 0 ? type_kind(types, record) : BUSTER_TYPE_KIND_NONE;
     uint64_t reevaluated = 0;
     for (uint32_t a = 1; a < count && reevaluated != UINT32_MAX; a += 1)
