@@ -69,7 +69,7 @@ static const char* dependency_destination(const DependencyOptions* options, cons
 
 // Preparation owns no filesystem resources. The output is either a complete rule in arena or remains empty.
 static bool dependency_prepare(DependencyOutput* output, const DependencyOptions* options, const DependencyFile* files, uint32_t file_count, const char* source,
-                               const char* primary, bool scalar, Arena* arena, FILE* errors)
+                               const char* primary, Arena* arena, FILE* errors)
 {
     *output = (DependencyOutput){ 0 };
     bool result = true;
@@ -87,7 +87,6 @@ static bool dependency_prepare(DependencyOutput* output, const DependencyOptions
             .file_count = file_count,
             .include_system = options->include_system,
             .phony = options->phony,
-            .scalar = scalar,
             .omit_source = input_stdin,
         };
         uint64_t length = 0;
