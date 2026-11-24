@@ -3623,13 +3623,15 @@ so the question became what its loops wait on.
   each over the batch, so that every store is long in the cache when read,
   was 0.09 ms slower.
 - **What landed from it** (#3486, every object's bytes unchanged; `-c
-  sqlite3.c`, main, the first piece and both built from one tree, medians of
-  30 with the order rotated every round): selection's words gathered a block
-  ahead, `tier0` 3.660 to 3.616 ms; then the five loads without their
-  stores, 3.616 to 3.582, with branch sizing 0.392 to 0.380 behind the
-  driver's copies. The second piece's gate was 0.10 ms, from the samples:
-  missed, and its premise refuted; it stays as the exact 0.03 ms it
-  measured. The row is 6.33 to 6.23 ms.
+  sqlite3.c` on main `d4a6eb540`, that main, the first piece and both built
+  from one tree, medians of 30 with the order rotated every round):
+  selection's words gathered a block ahead, `tier0` 3.660 to 3.616 ms; then
+  the five loads without their stores, 3.616 to 3.582, with branch sizing
+  0.392 to 0.380 behind the driver's copies. The second piece's gate was
+  0.10 ms, from the samples: missed, and its premise refuted; it stays as
+  the exact 0.03 ms it measured. The row is 6.33 to 6.23 ms. Of the five,
+  the counts' zeroing merged as #2972's `tier0_clear`, which main had by
+  then.
 - **An A/B in a fixed order reads the second executable 0.01 to 0.03 ms
   high on `tier0`.** The same executable read 3.644 as the second of a pair
   and 3.604 as the first, an hour apart; rotated among three it read 3.616.
