@@ -411,6 +411,7 @@ jobs:
           reader_harness="$reader_root/docs/measurements/performance-first-party-2026-10-25"
           bash tools/performance/build.sh
           build/performance/bmf --self-test
+          build/performance/paired --self-test
           clang -std=c17 -D_GNU_SOURCE -O2 -g -Wall -Wextra -Werror \
             -I tools/performance "$reader_harness/validate.c" -o build/performance/test-first-party
           build/performance/test-first-party "$reader_fixture" "$reader_root" \

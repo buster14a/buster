@@ -228,6 +228,13 @@ for event in push workflow_dispatch; do
     test ! -d "$directory/base"
     bash "$helper" cleanup "$directory"
 done
+reset_case paired-dispatch
+export GITHUB_EVENT_NAME=workflow_dispatch PAIRED_BASE="$base_sha" AB_BASE_SHA="$base_sha" AB_CHECKER=true AB_TIER1=false
+bash "$helper"
+directory=$(sed -n 's/^BUSTER_BENCHMARK_BUILDS=//p' "$GITHUB_ENV")
+test "$(git -C "$directory/base" rev-parse HEAD)" = "$PAIRED_BASE"
+bash "$helper" cleanup "$directory"
+unset PAIRED_BASE
 export GITHUB_EVENT_NAME=pull_request
 
 for side in head base oracle; do

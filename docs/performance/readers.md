@@ -106,3 +106,128 @@ unavailable-inference reason, rather than an automatic regression label.
 without a package or test framework. `build/performance/serve DIRECTORY PORT`
 serves a prepared static tree on localhost for those checks. Production Pages
 is static and does not run that server.
+
+## Paired performance verdicts
+
+Build the first-party `paired` reader with `bash tools/performance/build.sh`.
+It consumes a frozen sampling plan and a v1 benchmark manifest. The plan for
+the nightly and requested SQLite checker comparison is
+[`checker-sqlite.json`](../../tools/performance/plans/checker-sqlite.json).
+
+```sh
+build/performance/paired --self-test
+build/performance/paired report PLAN.json manifest.bmf.json > verdict.json
+```
+
+The report command validates the manifest and its resources with the native BMF
+reader. A remote resource can be resolved with `--evidence-root DIRECTORY`.
+A valid comparison, including one reporting regression or inconclusive, exits
+zero. Invalid input exits nonzero. A readable plan still produces a JSON
+verdict on missing, damaged or incomplete evidence. JSON null denotes an
+unrecoverable identity. A planned manifest with identities and no observations
+reports `not_measured`.
+
+### Population and decision
+
+Version 1 covers a single case with one argument list and three time-runs
+builds, in order: `main`, `head` and `main-again`. The last build repeats the
+base source and every base binary. The reader checks the declared count, role,
+layout, round, copy, Williams order, zero exit status and successful end of
+each invocation. It accepts wall, user and system milliseconds. PMU and profile
+fields supply no verdict inputs. The reader checks BMF byte lengths and SHA-256
+before interpreting observations.
+
+Choose the plan before running either revision. Each metric has a role and a
+lower-is-better regression budget in parts per million. The plan fixes the
+number of sessions, rounds, copies, warmups and ordered layout IDs. Total
+processes including warmups are bounded by
+`3 × sessions × layouts × copies × (warmups + rounds)`. The checked-in recipe
+uses four verified checker offsets, two copies, one warmup, five measured
+rounds and a 90-second capture limit. This is 144 processes and **four** units.
+Its initial practical wall-time budget is 1%. User time is diagnostic.
+Changing the budget changes the series.
+
+- For a layout-sensitive case, `unit: relative-layout` uses one matched
+  relative code layout per unit. The producer must establish the relative
+  offsets or link orders. Distinct hashes alone cannot establish layout
+  variation. Copies, inner rounds and repeated sessions all contribute to
+  the median for the same layout.
+- For a layout-insensitive case, `unit: block` uses one executable pair and
+  one complete Williams-ordered block per unit. `rounds_per_block` specifies
+  the contiguous rounds in each block and must divide each session exactly.
+  Persistent binary placement and host drift limit inference across blocks.
+- Each entry in a metric's `units` array gives the absolute medians for
+  base, candidate and same-base control, in that order. The point estimate is
+  the mean of the paired log ratios. Exponentiate it to obtain the geometric
+  mean ratio. The report includes the percentage effect and the interval on
+  the log scale.
+- The paired Student interval assumes approximately normal independent
+  unit effects. Degrees of freedom are rounded down to the next tabulated
+  value and critical values are rounded up. A Bonferroni adjustment covers
+  the declared primary metrics and the two references at 95% family
+  confidence. Diagnostic intervals are descriptive. Selected offsets,
+  autocorrelated blocks and small populations limit the interpretation.
+- An upper bound at or below the budget passes. A lower bound above the
+  budget establishes regression. A bound crossing the budget or fewer than
+  two units gives an inconclusive comparison. Both bounds on every primary
+  A/A ratio must fit the symmetric multiplicative budget. A control crossing
+  either limit makes the campaign inconclusive. With qualified controls,
+  any primary regression determines the verdict, and certification requires
+  every primary to pass. A missing or invalid primary prevents certification.
+- Stop at the declared budget. Interrupted pairs and failed processes give
+  `invalid_incomplete`. Report a retest as a separate attempt with its own
+  plan and identities. The reader never accumulates units across reports.
+
+The archived demonstration replayed three Benchpress invocations. The control
+raised zero regression alerts in three comparisons, and two controls fit the
+symmetric budget. The third made the candidate verdict inconclusive. The
+original runs shared the same layouts and host. These counts describe observed
+false-alert behavior and give little precision about its frequency in future
+runs. The retrospective budgets and partial toolchain provenance limit this
+example to a demonstration. [Frozen plans, source and binary identities, raw observations and reports](https://github.com/buster14a/buster-performance/tree/e88d0fb8762465660c9564bd886a5d4473c1e382/docs/measurements/paired-verdicts-2037-2026-11-24)
+
+### Input identity and baseline promotion
+
+The manifest's `extensions.paired` object binds the SHA-256 of the plan's
+original bytes (`plan_sha256`) and content identities for `harness`, `recipe`,
+`toolchain`, `corpus` and `host`. These six digests determine the series.
+Each role has a Git `source` ID and an ordered `binaries` array of SHA-256s
+corresponding to the plan's layouts. The `observations` resource has format
+`time-runs-v1` and contains the unmodified time-runs text. The producer
+checks its source revisions, binary digests and environment before timing.
+The report retains the manifest ID, observation digest, identities, sample
+plan and number of complete units. Keep the manifests and evidence with the
+history in buster-performance.
+
+```sh
+mkdir series-history
+build/performance/paired record PLAN.json series-history SOURCE_SHA latest.bmf.json anchor.bmf.json
+```
+
+The first promotion requires a complete, calibrated self-comparison at the
+chosen seed. Supply the same manifest twice when latest and anchor coincide.
+For subsequent revisions, provide fresh, matched comparisons against both the
+latest accepted binary set and the original fixed anchor. Both manifests must
+be measured, cover the same candidate, match the stored references and pass
+the complete primary plan. For example, consecutive 1.5% losses pass against
+successive references with a 2% budget. The second candidate costs 3.02%
+against the fixed anchor and its promotion fails.
+
+Use a dedicated trusted directory for each series. The command records each
+decision in a numbered, hash-linked JSON file, including both reports, the
+candidate source supplied by the caller, a link to its prior attempt and the
+resulting anchor and latest build IDs. Its exit status indicates whether the
+decision was durably recorded. Read `promoted` for the decision. A directory
+lock serializes writers. An atomic create preserves earlier events. An exact
+retry returns the existing event. A previous adverse attempt for the same
+source prevents promotion by a later favorable retest. Git preserves the
+archived event files and both input manifests.
+
+For a changed toolchain, host, corpus, recipe or harness, initialize a new
+series. To establish overlap for a case, run the same common source pair over
+the same relative layouts and plan in both environments, then run
+`paired overlap PLAN.json OLD_MANIFEST NEW_MANIFEST`. Both within-series
+comparisons must qualify. The bridge also checks the paired old/new absolute
+values for each common build against the symmetric primary budgets. Its JSON
+and exit status record overlap qualification for that case. Keep both histories
+and their anchors.

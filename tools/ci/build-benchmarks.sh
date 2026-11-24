@@ -56,7 +56,7 @@ case "${AB_CHECKER:?}:${AB_TIER1:?}" in
 esac
 base=false
 if [ "$AB_CHECKER" = true ] || [ "$AB_TIER1" = true ]; then
-    [ "${GITHUB_EVENT_NAME:?}" = pull_request ]
+    [[ "${GITHUB_EVENT_NAME:?}" == pull_request || ( "$GITHUB_EVENT_NAME" == workflow_dispatch && -n "${PAIRED_BASE:-}" && "$PAIRED_BASE" == "${AB_BASE_SHA:-}" ) ]]
     [[ "${AB_BASE_SHA:-}" =~ ^[0-9a-f]{40}$ ]]
     base=true
 fi

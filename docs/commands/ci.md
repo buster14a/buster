@@ -831,3 +831,22 @@ Read [the metric definitions, configuration and replay recipe](../ci.md#ci-laten
 before interpreting results. Run `bash tests/ci/timings.sh` for the network-free
 regressions. Store raw live evidence in `buster-performance`, not this
 repository's retired `docs/measurements` path.
+
+## Requested and nightly paired checker reports
+
+A trusted author can request a SQLite checker comparison by dispatching
+`9700x.yml` on the PR branch with purpose `full` and `paired_base` set to a
+full commit SHA from protected main. The dispatch measures its resolved head
+SHA. The existing nightly snapshot and checker-selected backlog runs use their
+first parent. The build barrier prepares both revisions and their four checker
+placements in the shared CPU budget. The existing host lock covers the native
+capture. The hosted coverage job evaluates the sealed observations.
+
+The run summary gives the paired verdict and independent-unit count. Dispatched
+runs retain `paired-verdict-ATTEMPT`, and a capture also produces
+`paired-checker-ATTEMPT` for evidence transfer to buster-performance. A skipped
+capture reports unmeasured coverage. A requested comparison that failed during
+preparation or capture reports incomplete coverage. Ordinary PRs and the merge
+queue use their existing correctness checks. The nightly ledger continues to
+record which jobs ran. Baseline promotion uses the explicit two-reference
+decision in the [paired reader guide](../performance/readers.md#input-identity-and-baseline-promotion).
