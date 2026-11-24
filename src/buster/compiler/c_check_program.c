@@ -267,6 +267,8 @@ struct CheckProgramOptions
     // A void function can also fall off despite its noreturn declaration. Its warning group is independent of
     // -Wreturn-type, so turning the latter off must not remove this analysis.
     bool noreturn_warnings;
+    // Make the conditions' bits (CheckProgram.decidable) though neither walk above runs: --branch-truth-census' reader.
+    bool branch_truths;
     // Also references in the operands of &&, || and ?: that a constant condition never evaluates, which no emission
     // needs: test-checker-corpus --symbols' model of the references clang -O0's code has (#129). An if whose condition
     // is a constant leaves its dead arm out whatever this says (CheckProgram.dropped_ranges).
@@ -569,7 +571,8 @@ struct CheckProgram
     const uint32_t* initializer_references;
     uint32_t initializer_reference_count;
     // Per node, whether a rule of clang's CFG builder's may decide it as a condition (check_cfg_decidable, #1340): a bit
-    // each, clear where check_program_branch_truth answers unknown without its fold. Null asks every fold.
+    // each, clear where check_program_branch_truth answers unknown without its fold. Null asks every fold: a program
+    // whose options name no reader of a branch's truth (check_program_begin) has none.
     const uint64_t* decidable;
     uint32_t* builtin_nodes;
     uint32_t* asm_offsets;
@@ -6460,7 +6463,13 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
              (options.prepared_data->declaration_count == 0 || options.prepared_data->declaration_keys != NULL)));
     program->object_count = count + 1;
     program->status = valid ? CHECK_PROGRAM_OK : CHECK_PROGRAM_INVALID;
-    program->decidable = valid ? check_cfg_decidable(program, output, scratch) : NULL;
+    // The conditions' bits, where something will ask a branch's truth: the return-flow walks here, and the warnings'
+    // passes that a command with them runs after this (the driver asks for the walks exactly then). A command without
+    // warnings (-w) asks none and pays for no bits; a reader it still runs finds none and asks every fold, as before
+    // the bits existed. They are made here, whole, before any reader and any lane exists, and never after: no reader
+    // sees them half made, and none makes them.
+    const bool asked = options.return_warnings || options.noreturn_warnings || options.branch_truths;
+    program->decidable = valid && asked ? check_cfg_decidable(program, output, scratch) : NULL;
     uint32_t exit_capacity = 0;
     const uint64_t cleanup_room = valid ? check_program_cleanup_room(parser, input, &exit_capacity) : 0;
     // The exits through cleanups' chains, their records' plans and their dispatches' destinations (#1370).

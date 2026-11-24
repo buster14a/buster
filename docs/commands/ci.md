@@ -220,17 +220,23 @@ The verdict:
 - A change may move the count by **half a percent**, above or below, without
   saying so.
 - A change that means to move it further, a feature's cost or a cut's gain,
-  **states its move**: it replaces the line of `tools/ci/compile-count.txt`
-  with its own, the move in percent of its base's count and what moved it.
-  The failing step prints the line to write (`+7.25 what moved it`). The
-  change is then held to within half a percent of what it states.
-- A line a change leaves alone states nothing. It is the last move stated,
-  and no later change is held to it.
+  **states its move** in a file of its own,
+  `tools/ci/compile-count/NAME.txt`, NAME being its branch's last part. The
+  file's last line that isn't empty or a comment (`#`) is the move in percent
+  of its base's count and what moved it. The failing step prints the line to
+  write (`+7.25 what moved it`). The change is then held to within half a
+  percent of what it states.
+- A change's statements are the `*.txt` files there that it adds or changes
+  against its base; their percentages add up. Files its base holds the same
+  are earlier changes' statements, and no later change is held to them. A
+  change may delete them: a file it deletes states nothing.
+- Each change states in its own file because one shared line, which every
+  stating change replaced, made any two open changes that stated moves
+  conflict.
 - Runs of one executable more than 0.05% apart are no verdict (exit status
   2), and neither are a build that fails, an executable that writes no
-  profile and a change whose statement file has no well-formed line. The
-  base's line is only compared as text: a base without the file, or with a
-  line that is no statement, holds no later change back.
+  profile, and a statement file with no well-formed line. The CI glue
+  fixtures check every statement file in the tree is well formed.
 - The step is skipped where the change touches none of the compiler's
   sources, its build, the count's own files, the toolchain's pin, the
   corpus's fetch or the row's workflow.

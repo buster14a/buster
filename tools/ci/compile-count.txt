@@ -1,9 +1,0 @@
-# The move a change states of the compile's count (#2850; docs/commands/ci.md, "The compile's count before the merge").
-# The count is the sum of the instrumented compiler's region counters after one compile of the frozen sqlite3.c;
-# "Count the compile against its base's" takes it of every pull request and merge-queue candidate that changes what it
-# reads, and of its base. A change that moves it by more than half a percent, above or below, states its move here.
-#
-# A change that means to move it, a feature's cost or a cut's gain, replaces the line below with its own: its move in
-# percent of its base's count, as the step prints it, and what moved it. Every other change leaves this file alone;
-# the line then still states the last move, which no later change is held to.
--1.76 the common warnings' quiet roots left out of their loop (#1340)
