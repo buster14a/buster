@@ -711,6 +711,43 @@ jobs:
               find "$oracle" -mindepth 1 -type d -empty -delete
           fi
 
+      - name: Check out the baseline compiler for issue 1387
+        if: github.event_name == 'workflow_dispatch' && inputs.purpose == 'full' && github.ref == 'refs/heads/measure/1387-kernel-timings'
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          repository: buster14a/buster
+          ref: 7515714d05caa655e8c2e1e2776e07aa9b8058df
+          persist-credentials: false
+          path: build/x87-base
+
+      - name: Check out the fixed long double timing harness
+        if: github.event_name == 'workflow_dispatch' && inputs.purpose == 'full' && github.ref == 'refs/heads/measure/1387-kernel-timings'
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          repository: buster14a/buster-performance
+          ref: d57315b7acfb1f1bbf473c27da329444f25df85d
+          persist-credentials: false
+          path: build/x87-harness
+          sparse-checkout: docs/measurements/x87-register-transfers-1387-2026-11-24
+
+      - name: Run matched long double benchmarks on CPU 2
+        if: github.event_name == 'workflow_dispatch' && inputs.purpose == 'full' && github.ref == 'refs/heads/measure/1387-kernel-timings'
+        run: |
+          (cd build/x87-base && taskset -c 0-7 ./build.sh --config Release --jobs 8)
+          mkdir -p "$RUNNER_TEMP/x87-1387"
+          root=build/x87-harness/docs/measurements/x87-register-transfers-1387-2026-11-24
+          bash "$root/run.sh" build/x87-base/build/compiler build/compiler "$RUNNER_TEMP/x87-1387" | tee "$RUNNER_TEMP/x87-1387/observations.txt"
+
+      - name: Archive long double timing evidence
+        if: github.event_name == 'workflow_dispatch' && inputs.purpose == 'full' && github.ref == 'refs/heads/measure/1387-kernel-timings'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: x87-register-transfers-1387
+          path: |
+            ${{ runner.temp }}/x87-1387/observations.txt
+            ${{ runner.temp }}/x87-1387/*.asm
+            ${{ runner.temp }}/x87-1387/*-perf.csv
+
       - name: Benchmark the C lexer on the repository sources
         if: env.MEASURE == 'all' || contains(env.MEASURE, ',lexer,')
         run: |
