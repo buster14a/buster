@@ -1120,7 +1120,8 @@ static uint32_t x86_decode_lanes(const X86DecodeWindow* window, uint64_t remaini
         const bool matched = open_lane && next_byte && (keys[i] & index->common_mask) == index->common_key;
         const uint32_t cell = matched ? x86_decode_cells[index->first + _pext_u32(keys[i], index->varying)] : 0;
         const bool list = (cell & BUSTER_X86_DECODE_LIST) != 0;
-        lists[i] = x86_decode_lists + (cell & ~BUSTER_X86_DECODE_LIST);
+        // (A row's cell points at list 0, never read: a row past the lists' end is no pointer into them.)
+        lists[i] = x86_decode_lists + (list ? cell & ~BUSTER_X86_DECODE_LIST : 0);
         rows[i] = list ? lists[i][0] : cell;
         listed |= (uint16_t)((uint32_t)list << i);
         pending |= (uint16_t)((uint32_t)(matched || (open_lane && !next_byte)) << i);
