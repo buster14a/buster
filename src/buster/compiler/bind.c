@@ -564,6 +564,25 @@ static bool bind_piece_fits(const Bind* bind, const Link* link, uint32_t piece)
            names->capacity - names->length >= end.name_bytes - begin.name_bytes && bind->bytes->capacity - bind->bytes->length >= atom_bytes;
 }
 
+// A piece's columns copied and cleared 64 bytes at a time by masked moves, inline: a piece of a few records joins
+// with a dozen of these, which as libc calls cost more than the records' moves.
+static void bind_copy(void* to, const void* from, uint64_t bytes)
+{
+    for (uint64_t i = 0; i < bytes; i += 64)
+    {
+        const __mmask64 lanes = _bzhi_u64(UINT64_MAX, bytes - i < 64 ? bytes - i : 64);
+        _mm512_mask_storeu_epi8((uint8_t*)to + i, lanes, _mm512_maskz_loadu_epi8(lanes, (const uint8_t*)from + i));
+    }
+}
+
+static void bind_clear(void* to, uint64_t bytes)
+{
+    for (uint64_t i = 0; i < bytes; i += 64)
+    {
+        _mm512_mask_storeu_epi8((uint8_t*)to + i, _bzhi_u64(UINT64_MAX, bytes - i < 64 ? bytes - i : 64), _mm512_setzero_si512());
+    }
+}
+
 // The vector path's join: each table's columns copied as a block (see the orientation comment).
 static void bind_join_block(Bind* bind, Link* link, uint32_t piece)
 {
@@ -591,7 +610,7 @@ static void bind_join_block(Bind* bind, Link* link, uint32_t piece)
     const uint64_t name_bytes = end.name_bytes - begin.name_bytes;
     const uint8_t* source = runtime_piece_names(runtime, piece) + begin.name_bytes;
     uint8_t* copy = arena_push(link->name_arena, name_bytes, 1);
-    memcpy(copy, source, name_bytes);
+    bind_copy(copy, source, name_bytes);
     const __m512i moved = _mm512_set1_epi64((long long)((uintptr_t)copy - (uintptr_t)source + runtime->byte_delta));
     for (uint32_t i = 0; i < name_count; i += BUSTER_BIND_BATCH)
     {
@@ -599,20 +618,20 @@ static void bind_join_block(Bind* bind, Link* link, uint32_t piece)
         const __m512i pointers = _mm512_maskz_loadu_epi64(lanes, from->names.bytes + begin.names + i);
         _mm512_mask_storeu_epi64(link->names.bytes + name_first + i, lanes, _mm512_add_epi64(pointers, moved));
     }
-    memcpy(link->names.length + name_first, from->names.length + begin.names, name_count * sizeof(uint32_t));
-    memcpy(link->names.hash + name_first, from->names.hash + begin.names, name_count * sizeof(uint64_t));
+    bind_copy(link->names.length + name_first, from->names.length + begin.names, name_count * sizeof(uint32_t));
+    bind_copy(link->names.hash + name_first, from->names.hash + begin.names, name_count * sizeof(uint64_t));
     link->names.count += name_count;
 
     // Atoms: units and fixup ranges moved sixteen at a time, bytes copied one atom at a time.
     LinkAtoms* atoms = &link->atoms;
-    memcpy(atoms->class + atom_first, from->atoms.class + begin.atoms, atom_count);
-    memcpy(atoms->alignment_log2 + atom_first, from->atoms.alignment_log2 + begin.atoms, atom_count);
-    memcpy(atoms->size + atom_first, from->atoms.size + begin.atoms, atom_count * sizeof(uint64_t));
-    memcpy(atoms->fixup_count + atom_first, from->atoms.fixup_count + begin.atoms, atom_count * sizeof(uint32_t));
+    bind_copy(atoms->class + atom_first, from->atoms.class + begin.atoms, atom_count);
+    bind_copy(atoms->alignment_log2 + atom_first, from->atoms.alignment_log2 + begin.atoms, atom_count);
+    bind_copy(atoms->size + atom_first, from->atoms.size + begin.atoms, atom_count * sizeof(uint64_t));
+    bind_copy(atoms->fixup_count + atom_first, from->atoms.fixup_count + begin.atoms, atom_count * sizeof(uint32_t));
     // A runtime atom's section isn't one of the program's, and the snapshot doesn't keep its name: no __start_ or
     // __stop_ reference can bound it (the runtime's sections' names aren't C identifiers).
-    memset(atoms->section + atom_first, 0, atom_count * sizeof(*atoms->section));
-    memset(atoms->address + atom_first, 0, atom_count * sizeof(uint64_t));
+    bind_clear(atoms->section + atom_first, atom_count * sizeof(*atoms->section));
+    bind_clear(atoms->address + atom_first, atom_count * sizeof(uint64_t));
     for (uint32_t i = 0; i < atom_count; i += 16)
     {
         const __mmask16 lanes = (__mmask16)_bzhi_u32(0xffff, atom_count - i < 16 ? atom_count - i : 16);
@@ -676,10 +695,10 @@ static void bind_join_block(Bind* bind, Link* link, uint32_t piece)
         _mm256_mask_storeu_epi32(bind->symbols + first, lanes, _mm512_cvtepi64_epi32(_mm512_mask_blend_epi64(fresh, owner, fresh_ids)));
         added += fresh_count;
     }
-    memset(symbols->got_slot + symbol_first, 0, added * sizeof(uint32_t));
-    memset(symbols->dynamic_index + symbol_first, 0, added * sizeof(uint32_t));
-    memset(symbols->version + symbol_first, 0, added * sizeof(uint16_t));
-    memset(symbols->reference + symbol_first, 0, added * sizeof(uint32_t));
+    bind_clear(symbols->got_slot + symbol_first, added * sizeof(uint32_t));
+    bind_clear(symbols->dynamic_index + symbol_first, added * sizeof(uint32_t));
+    bind_clear(symbols->version + symbol_first, added * sizeof(uint16_t));
+    bind_clear(symbols->reference + symbol_first, added * sizeof(uint32_t));
     symbols->count += added;
     // The names of the fresh global symbols are theirs now; the others join their link symbols.
     for (uint32_t i = 0; taken != 0 && i < symbol_count; i += 1)
@@ -711,14 +730,14 @@ static void bind_join_block(Bind* bind, Link* link, uint32_t piece)
         const __m512i prioritized = _mm512_maskz_loadu_epi32(lanes, from->priorities.atom + begin.priorities + i);
         _mm512_mask_storeu_epi32(priorities->atom + priorities->count + i, lanes, _mm512_add_epi32(prioritized, _mm512_set1_epi32((int)atom_delta)));
     }
-    memcpy(priorities->priority + priorities->count, from->priorities.priority + begin.priorities, priority_count * sizeof(uint16_t));
+    bind_copy(priorities->priority + priorities->count, from->priorities.priority + begin.priorities, priority_count * sizeof(uint16_t));
     priorities->count += priority_count;
 
     // Fixups: offsets and kinds copied, wide addends' indices moved sixteen at a time, targets through the symbols' link
     // symbols by scalar loads, and the wide addends copied.
     LinkFixups* fixups = &link->fixups;
-    memcpy(fixups->offset + fixup_first, from->fixups.offset + begin.fixups, fixup_count * sizeof(uint32_t));
-    memcpy(fixups->kind + fixup_first, from->fixups.kind + begin.fixups, fixup_count);
+    bind_copy(fixups->offset + fixup_first, from->fixups.offset + begin.fixups, fixup_count * sizeof(uint32_t));
+    bind_copy(fixups->kind + fixup_first, from->fixups.kind + begin.fixups, fixup_count);
     for (uint32_t i = 0; i < fixup_count; i += 16)
     {
         const __mmask16 lanes = (__mmask16)_bzhi_u32(0xffff, fixup_count - i < 16 ? fixup_count - i : 16);
@@ -732,7 +751,7 @@ static void bind_join_block(Bind* bind, Link* link, uint32_t piece)
     {
         fixups->target[fixup_first + i] = bind->symbols[from->fixups.target[begin.fixups + i]];
     }
-    memcpy(fixups->wide_addends + fixups->wide_count, from->fixups.wide_addends + begin.wide_addends, wide_count * sizeof(int64_t));
+    bind_copy(fixups->wide_addends + fixups->wide_count, from->fixups.wide_addends + begin.wide_addends, wide_count * sizeof(int64_t));
     fixups->count += fixup_count;
     fixups->wide_count += wide_count;
 }
