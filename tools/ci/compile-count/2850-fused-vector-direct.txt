@@ -1,0 +1,1 @@
+-83.30 fused AVX-512 direct-to-ELF64 compiler fast path (#2850)

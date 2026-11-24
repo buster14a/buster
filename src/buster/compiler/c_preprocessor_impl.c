@@ -13697,6 +13697,24 @@ static uint32_t pp_predefines(const PPOptions* options, char* buffer, uint32_t* 
     return length;
 }
 
+BUSTER_PREPROCESSOR_ENTRY bool pp_build_predefines(const PPOptions* options, Arena* arena, char** out_buffer, uint32_t* out_length, uint32_t* flt_eval_method)
+{
+    bool ok = false;
+    char* buffer = arena_push(arena, BUSTER_PP_PREDEFINES_BYTES + 64u, 16);
+    if (buffer != NULL)
+    {
+        const uint32_t length = pp_predefines(options, buffer, flt_eval_method);
+        if (length <= BUSTER_PP_PREDEFINES_BYTES)
+        {
+            buffer[length] = '\0';
+            *out_buffer = buffer;
+            *out_length = length;
+            ok = true;
+        }
+    }
+    return ok;
+}
+
 // A file that isn't on disk (the predefines, the command line, the forced includes' lines), at a name in angle brackets,
 // and what it is for line markers: clang's predefines are a system header, and the rest of its <built-in> buffer, the
 // command line's and the forced includes', isn't. Returns its PPFile.

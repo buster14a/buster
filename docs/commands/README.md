@@ -46,7 +46,7 @@ table are entry points, not an exhaustive list of every subtest or flag.
 | `test-differential, test-differential-harness` | `differential.c` | [differential](differential.md) |
 | `test-dominators, benchmark-dominators` | `dominators.c` | [dominators](dominators.md) |
 | `test-emission-metadata` | `emission_metadata.c` | [emission-metadata](emission-metadata.md) |
-| `-E, parse, -fsyntax-only, -c, -S` | `main.c` | [driver](driver.md) |
+| `-E, parse, -fsyntax-only, -c, -S, test-direct` | `main.c`, `c_direct.c` | [driver](driver.md) |
 | `test-assembly-output` (the assembly sink) | `assembly_output.c` | [driver](driver.md#the-assembly-sink-1362) |
 | `test-emitted-code` | `emitted_code.c` | [emission](emission.md) |
 | `test-executable, test-dynamic, test-static` | `executable.c` | [executable](executable.md) |

@@ -194,6 +194,8 @@ int run_lane_benchmark(int argc, char** argv);
 int run_dataflow_benchmark(int argc, char** argv);
 // The tier-neutral emission metadata protocol's tests, for test-emission-metadata.
 int run_emission_metadata_tests(int argc, char** argv);
+// Fused AVX-512 direct-to-ELF64 C17 compiler (#2850).
+#include "buster/compiler/c_direct.h"
 
 // Entry-rooted dominance, frontiers and natural loops over borrowed CFG columns.
 #if BUSTER_BACKEND_CONSUMER
@@ -2569,6 +2571,12 @@ static __attribute__((noinline)) int main_command(int argc, char** argv, bool* f
     else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-carets") == 0)
     {
         result = run_caret_tests(argc - 2, argv + 2);
+    }
+#endif
+#if BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER)
+    else if (BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER) && argc >= 2 && strcmp(argv[1], "test-direct") == 0)
+    {
+        result = run_c_direct_tests(argc - 2, argv + 2);
     }
 #endif
 #if BUSTER_IN_UNIT(BUSTER_UNIT_DRIVER)
