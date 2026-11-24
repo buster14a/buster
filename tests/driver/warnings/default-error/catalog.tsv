@@ -45,3 +45,21 @@ array-decay-refused-no-return-type	array-decay-refused.c	4	12	3	-	-Wno-return-ty
 array-decay-refused-no-error-return-type	array-decay-refused.c	4	12	3	-	-Wno-error=return-type	array decay refused with -Wno-error=return-type
 array-decay-refused-no-return-mismatch	array-decay-refused.c	4	12	3	-	-Wno-return-mismatch	array decay refused with -Wno-return-mismatch
 array-decay-refused-demoted	array-decay-refused.c	16	0	3	-	-Wno-error=int-conversion -Wno-error=incompatible-pointer-types	array decay refused with -Wno-error=int-conversion -Wno-error=incompatible-pointer-types
+# #3565: an _Atomic pointer read as its plain pointer, the recheck's third lvalue conversion: a file-scope, a
+# member's, an array element's, a parameter's and a dereferenced one, a const one and a volatile pointer, initializing
+# (braced and not), assigned, passed and returned, to their pointer, to void * and to _Bool, under each option that
+# relaxes a default-error group.
+atomic-lvalue-accepted-no-int-conversion	atomic-lvalue-accepted.c	0	0	0	-	-Wno-int-conversion	atomic lvalue accepted with -Wno-int-conversion
+atomic-lvalue-accepted-no-error-int-conversion	atomic-lvalue-accepted.c	0	0	0	-	-Wno-error=int-conversion	atomic lvalue accepted with -Wno-error=int-conversion
+atomic-lvalue-accepted-no-return-type	atomic-lvalue-accepted.c	0	0	0	-	-Wno-return-type	atomic lvalue accepted with -Wno-return-type
+atomic-lvalue-accepted-no-error-return-type	atomic-lvalue-accepted.c	0	0	0	-	-Wno-error=return-type	atomic lvalue accepted with -Wno-error=return-type
+atomic-lvalue-accepted-no-return-mismatch	atomic-lvalue-accepted.c	0	0	0	-	-Wno-return-mismatch	atomic lvalue accepted with -Wno-return-mismatch
+atomic-lvalue-accepted-all-extra-no-return-type	atomic-lvalue-accepted.c	0	0	0	-	-Wall -Wextra -Wno-return-type	atomic lvalue accepted with -Wall -Wextra -Wno-return-type
+# What its read still can't convert to: another pointer type an error, a discarded qualifier a warning, an integer
+# as -Wint-conversion says.
+atomic-lvalue-refused-no-int-conversion	atomic-lvalue-refused.c	4	4	2	-	-Wno-int-conversion	atomic lvalue refused with -Wno-int-conversion
+atomic-lvalue-refused-no-error-int-conversion	atomic-lvalue-refused.c	6	4	3	-	-Wno-error=int-conversion	atomic lvalue refused with -Wno-error=int-conversion
+atomic-lvalue-refused-no-return-type	atomic-lvalue-refused.c	4	6	3	-	-Wno-return-type	atomic lvalue refused with -Wno-return-type
+atomic-lvalue-refused-no-error-return-type	atomic-lvalue-refused.c	4	6	3	-	-Wno-error=return-type	atomic lvalue refused with -Wno-error=return-type
+atomic-lvalue-refused-no-return-mismatch	atomic-lvalue-refused.c	4	6	3	-	-Wno-return-mismatch	atomic lvalue refused with -Wno-return-mismatch
+atomic-lvalue-refused-demoted	atomic-lvalue-refused.c	10	0	3	-	-Wno-error=int-conversion -Wno-error=incompatible-pointer-types	atomic lvalue refused with -Wno-error=int-conversion -Wno-error=incompatible-pointer-types
