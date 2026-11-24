@@ -9,8 +9,7 @@
 //   build/compiler test-ir-source --passes [preprocessor options] file...
 //
 // For each function, its lowered form L (both lowerings must agree, as test-ir-source requires) and L promoted, P:
-// - SROA on L with Tier 1's options (#1282's simd and flagged), vector and scalar: the same function, or the same
-//   refusal; a split function must promote.
+// - SROA on L with Tier 1's options (#1282's simd and flagged), one path since #2924: a split function must promote.
 // - #866's solver on L: the acyclic numbering against its complete-refinement oracle (IrGvnOptions.complete), which must
 //   give the same function, and against the scalar available-expression twin, which must accept the function and remove
 //   no more instructions than the partition (it doesn't see cyclic congruences): the semantic comparison, as the solver's
@@ -165,17 +164,11 @@ static void ir_source_passes_function(IrSourcePassTotals* totals, const char* fi
         options.simd = true;
         options.flagged = true;
         IrSroaResult vector = { 0 };
-        IrSroaResult scalar = { 0 };
         const IrCheck vector_check = ir_optimize_sroa(lowered, output, scratch, options, &vector);
-        options.scalar = true;
-        const IrCheck scalar_check = ir_optimize_sroa(lowered, twin, scratch, options, &scalar);
-        const bool succeeded = vector_check.error == IR_OK && scalar_check.error == IR_OK;
-        const bool same = succeeded && vector.split_slots == scalar.split_slots && vector.fields == scalar.fields && ir_source_passes_equal(&vector.function, &scalar.function);
         IrFunction split = { 0 };
-        const bool promotes = !same || ssa_ir_promote(&vector.function, promotion, scratch, &split).error == IR_OK;
-        ir_source_passes_record(totals, IR_SOURCE_PASS_SROA, file, name, vector_check, scalar_check, same, promotes, vector.split_slots != 0, vector.split_slots);
+        const bool promotes = vector_check.error != IR_OK || ssa_ir_promote(&vector.function, promotion, scratch, &split).error == IR_OK;
+        ir_source_passes_record(totals, IR_SOURCE_PASS_SROA, file, name, vector_check, vector_check, true, promotes, vector.split_slots != 0, vector.split_slots);
         arena_pop_to(output, output_mark);
-        arena_pop_to(twin, twin_mark);
         arena_pop_to(promotion, promotion_mark);
     }
     // #866's solver, before promotion: the acyclic numbering, its exact oracle and the scalar semantic twin.
@@ -653,7 +646,6 @@ static Tier0BenchmarkReading ir_source_passes_run(IrSourcePass pass, bool scalar
             IrSroaOptions options = ir_sroa_options();
             options.simd = true;
             options.flagged = true;
-            options.scalar = scalar;
             IrSroaResult result = { 0 };
             check = ir_optimize_sroa(&corpus->lowered[f], output, scratch, options, &result);
         }

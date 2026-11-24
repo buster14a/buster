@@ -188,7 +188,6 @@ static IrCheck ir_optimize_text_transform(const IrOptimizeTextFixture* fixture, 
     else if (fixture->pass == IR_OPTIMIZE_TEXT_SROA || fixture->pass == IR_OPTIMIZE_TEXT_SROA_WIDEN)
     {
         IrSroaOptions options = ir_sroa_options();
-        options.scalar = scalar;
         options.flagged = fixture->pass == IR_OPTIMIZE_TEXT_SROA_WIDEN;
         options.widen = fixture->pass == IR_OPTIMIZE_TEXT_SROA_WIDEN;
         IrSroaResult pass = { 0 };

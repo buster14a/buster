@@ -105,7 +105,7 @@ static void ir_stack_test_consumers(IrLowerTestTally* tally, const IrFunction* f
             }
             case 4:
             {
-                const IrSroaOptions options = { .scalar = scalar != 0 };
+                const IrSroaOptions options = { 0 };
                 IrSroaResult result = { 0 };
                 check = ir_optimize_sroa(function, output, scratch, options, &result);
                 transformed = result.function;
@@ -243,7 +243,7 @@ static void ir_stack_test_chain(IrLowerTestTally* tally, const IrFunction* funct
             }
             case 4:
             {
-                const IrSroaOptions options = { .scalar = scalar != 0 };
+                const IrSroaOptions options = { 0 };
                 IrSroaResult result = { 0 };
                 check = ir_optimize_sroa(&current, output, scratch, options, &result);
                 next = result.function;

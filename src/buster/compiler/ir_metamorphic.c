@@ -731,7 +731,7 @@ static IrMetaFailure ir_meta_optimize(const IrFunction* function, uint32_t pass,
     }
     else if (pass == 7)
     {
-        const IrSroaOptions options = { .scalar = scalar };
+        const IrSroaOptions options = { 0 };
         IrSroaResult optimized = { 0 };
         check = ir_optimize_sroa(function, output, scratch, options, &optimized);
         if (check.error == IR_OK)

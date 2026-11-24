@@ -744,7 +744,6 @@ static bool check_tier1_inline_expand(CheckTier1Lane* lane, const CheckTier1Inli
     if (aggregates || (*vectors && ir_function_has_vectors(&current)) || current.parameter_passed != 0)
     {
         IrSroaOptions options = ir_sroa_options();
-        options.scalar = scalar;
         options.simd = true;
         options.flagged = true;
         options.widen = true;

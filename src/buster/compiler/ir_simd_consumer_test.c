@@ -164,7 +164,7 @@ static void ir_simd_mask_consumer_test(IrTestTally* tally, Arena* input, Arena* 
                 ir_test_expect(tally, checked.error == IR_OK && licm.function.instruction_count == function.instruction_count && scratch->length == 0, "LICM preserves mask loads and stores");
                 arena_pop_to(output, 0);
                 IrSroaResult sroa = { .function.instruction_count = 123 };
-                const IrSroaOptions sroa_options = { .scalar = scalar != 0 };
+                const IrSroaOptions sroa_options = { 0 };
                 checked = ir_optimize_sroa(&function, output, scratch, sroa_options, &sroa);
                 ir_test_expect(tally, checked.error == IR_ERROR_UNSUPPORTED && sroa.function.instruction_count == 123 && output->length == 0 && scratch->length == 0, "SROA refuses masks");
                 const uint32_t symbols[1] = { 1 };
@@ -387,7 +387,7 @@ static int run_ir_simd_tests(int argc, char** argv)
                            "LICM takes SIMD and preserves a vector constant's payload");
             arena_pop_to(&output, 0);
             IrSroaResult sroa = { .function.instruction_count = 123 };
-            const IrSroaOptions sroa_options = { .scalar = scalar != 0 };
+            const IrSroaOptions sroa_options = { 0 };
             checked = ir_optimize_sroa(&function, &output, &scratch, sroa_options, &sroa);
             ir_test_expect(&tally, checked.error == IR_ERROR_UNSUPPORTED && sroa.function.instruction_count == 123 && output.length == 0 && scratch.length == 0,
                            "SROA refuses unsupported SIMD rather than splitting wide values as unrelated scalars");

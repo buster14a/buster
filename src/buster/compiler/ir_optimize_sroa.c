@@ -24,8 +24,6 @@
 typedef struct IrSroaOptions IrSroaOptions;
 struct IrSroaOptions
 {
-    // The verified optimizer's passes' twin, in the preparation and the dead-code rewrite (#2924's C9g removes it).
-    bool scalar;
     bool simd;
     bool flagged;
     // #3311: the eightbytes of slots read and written at mixed widths (ir_sroa_widen), and a register-class aggregate

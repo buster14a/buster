@@ -160,30 +160,26 @@ static void ir_inline_test_by_value(IrInlineTest* test, Arena* input, Arena* out
                 IrFunction inlined = *out;
                 ir_inline_test_expect(test, ir_inline_simd_run(&inlined, 1, seed, bytes, scratch) && memcmp(bytes, expected, sizeof(bytes)) == 0, "the inlined caller runs as the unit");
                 // SROA (#1282's options) and promotion leave the parameter's accesses alone: two loads and a store.
-                for (uint32_t path = 0; path < 2; path += 1)
-                {
-                    IrSroaOptions sroa = ir_sroa_options();
-                    sroa.scalar = path == 1;
-                    sroa.simd = true;
-                    sroa.flagged = true;
-                    IrSroaResult split = { 0 };
-                    const uint64_t mark = output->length;
-                    const IrCheck checked = ir_optimize_sroa(&inlined, output, scratch, sroa, &split);
-                    IrFunction promoted = { 0 };
-                    // Promotion's output owns no input: the twin's arena, emptied after.
-                    const uint64_t twin_mark = twin->length;
-                    const IrCheck promotion = checked.error == IR_OK ? ssa_ir_promote(&split.function, twin, scratch, &promoted) : checked;
-                    // Copied by integers, an argument's slot has eight i64 stores beside the callee's vector load: SROA
-                    // keeps it, and the copies stay memory, correctly.
-                    ir_inline_test_expect(test, checked.error == IR_OK && promotion.error == IR_OK && (copies != 0 || (split.refused_slots == 0 && split.split_slots == 8)),
-                                          "SROA takes every slot of the expansion");
-                    ir_inline_test_expect(test, promotion.error == IR_OK && (copies != 0 || (promoted.slot_count == 0 && ir_inline_simd_count(&promoted, IR_LOAD) == 2 && ir_inline_simd_count(&promoted, IR_STORE) == 1)),
-                                          "promotion leaves no copy of a by-value vector");
-                    ir_inline_test_expect(test, promotion.error == IR_OK && ir_inline_simd_run(&promoted, 1, seed, bytes, scratch) && memcmp(bytes, expected, sizeof(bytes)) == 0,
-                                          "the promoted caller runs as the unit");
-                    arena_pop_to(twin, twin_mark);
-                    arena_pop_to(output, mark);
-                }
+                IrSroaOptions sroa = ir_sroa_options();
+                sroa.simd = true;
+                sroa.flagged = true;
+                IrSroaResult split = { 0 };
+                const uint64_t split_mark = output->length;
+                const IrCheck checked = ir_optimize_sroa(&inlined, output, scratch, sroa, &split);
+                IrFunction promoted = { 0 };
+                // Promotion's output owns no input: the twin's arena, emptied after.
+                const uint64_t twin_mark = twin->length;
+                const IrCheck promotion = checked.error == IR_OK ? ssa_ir_promote(&split.function, twin, scratch, &promoted) : checked;
+                // Copied by integers, an argument's slot has eight i64 stores beside the callee's vector load: SROA
+                // keeps it, and the copies stay memory, correctly.
+                ir_inline_test_expect(test, checked.error == IR_OK && promotion.error == IR_OK && (copies != 0 || (split.refused_slots == 0 && split.split_slots == 8)),
+                                      "SROA takes every slot of the expansion");
+                ir_inline_test_expect(test, promotion.error == IR_OK && (copies != 0 || (promoted.slot_count == 0 && ir_inline_simd_count(&promoted, IR_LOAD) == 2 && ir_inline_simd_count(&promoted, IR_STORE) == 1)),
+                                      "promotion leaves no copy of a by-value vector");
+                ir_inline_test_expect(test, promotion.error == IR_OK && ir_inline_simd_run(&promoted, 1, seed, bytes, scratch) && memcmp(bytes, expected, sizeof(bytes)) == 0,
+                                      "the promoted caller runs as the unit");
+                arena_pop_to(twin, twin_mark);
+                arena_pop_to(output, split_mark);
                 // Without its options, SROA keeps SIMD functions' and address-taken slots' refusals (#139's contract).
                 IrSroaResult refused = { 0 };
                 const uint64_t mark = output->length;
@@ -476,43 +472,39 @@ static void ir_inline_test_assembled(IrInlineTest* test, Arena* input, Arena* ou
             }
             uint8_t bytes[192];
             ir_inline_test_expect(test, ir_inline_simd_run(&function, 1, seed, bytes, scratch) && memcmp(bytes, expected, sizeof(bytes)) == 0, "an assembled vector's fixture runs as its lanes say");
-            for (uint32_t path = 0; path < 2; path += 1)
+            IrSroaOptions sroa = ir_sroa_options();
+            sroa.simd = true;
+            sroa.flagged = true;
+            IrSroaResult split = { 0 };
+            const IrCheck checked = ir_optimize_sroa(&function, output, scratch, sroa, &split);
+            IrFunction promoted = { 0 };
+            const IrCheck promotion = checked.error == IR_OK ? ssa_ir_promote(&split.function, twin, scratch, &promoted) : checked;
+            ir_inline_test_expect(test, checked.error == IR_OK && promotion.error == IR_OK, "SROA and promotion take an assembled vector's function");
+            if (checked.error == IR_OK && promotion.error == IR_OK)
             {
-                IrSroaOptions sroa = ir_sroa_options();
-                sroa.scalar = path == 1;
-                sroa.simd = true;
-                sroa.flagged = true;
-                IrSroaResult split = { 0 };
-                const IrCheck checked = ir_optimize_sroa(&function, output, scratch, sroa, &split);
-                IrFunction promoted = { 0 };
-                const IrCheck promotion = checked.error == IR_OK ? ssa_ir_promote(&split.function, twin, scratch, &promoted) : checked;
-                ir_inline_test_expect(test, checked.error == IR_OK && promotion.error == IR_OK, "SROA and promotion take an assembled vector's function");
-                if (checked.error == IR_OK && promotion.error == IR_OK)
+                ir_inline_test_expect(test, split.assembled == (kind == 0 ? 2u : kind == 1 ? 1u : 0u), "the block's stores decide a vector load where they are constants or one scalar, and only there");
+                if (kind == 0)
                 {
-                    ir_inline_test_expect(test, split.assembled == (kind == 0 ? 2u : kind == 1 ? 1u : 0u), "the block's stores decide a vector load where they are constants or one scalar, and only there");
-                    if (kind == 0)
-                    {
-                        // The parameter's load, two splats of it and their stores.
-                        ir_inline_test_expect(test, promoted.slot_count == 0 && ir_inline_simd_count(&promoted, IR_LOAD) == 1 && ir_inline_simd_count(&promoted, IR_STORE) == 2 &&
-                                                  ir_inline_simd_count(&promoted, IR_INTRINSIC) == 2,
-                                              "a splat's 64 stores and its loads are two splats of the scalar");
-                    }
-                    else if (kind == 1)
-                    {
-                        ir_inline_test_expect(test, promoted.slot_count == 0 && ir_inline_simd_count(&promoted, IR_LOAD) == 0 && ir_inline_simd_count(&promoted, IR_STORE) == 1 &&
-                                                  ir_inline_simd_count(&promoted, IR_VCONST) == 1 && promoted.vector_constant_count == 1 &&
-                                                  memcmp(promoted.vector_constants[0].words, expected + 64, 64) == 0,
-                                              "a zeroed object's constant stores are one vector constant of their bytes");
-                    }
-                    else
-                    {
-                        ir_inline_test_expect(test, ir_inline_simd_count(&promoted, IR_VCONST) == 0 && ir_inline_simd_count(&promoted, IR_INTRINSIC) == 0, "two scalars' lanes stay stores and a load");
-                    }
-                    ir_inline_test_expect(test, ir_inline_simd_run(&promoted, 1, seed, bytes, scratch) && memcmp(bytes, expected, sizeof(bytes)) == 0, "the promoted function runs as the fixture");
+                    // The parameter's load, two splats of it and their stores.
+                    ir_inline_test_expect(test, promoted.slot_count == 0 && ir_inline_simd_count(&promoted, IR_LOAD) == 1 && ir_inline_simd_count(&promoted, IR_STORE) == 2 &&
+                                              ir_inline_simd_count(&promoted, IR_INTRINSIC) == 2,
+                                          "a splat's 64 stores and its loads are two splats of the scalar");
                 }
-                arena_pop_to(twin, 0);
-                arena_pop_to(output, 0);
+                else if (kind == 1)
+                {
+                    ir_inline_test_expect(test, promoted.slot_count == 0 && ir_inline_simd_count(&promoted, IR_LOAD) == 0 && ir_inline_simd_count(&promoted, IR_STORE) == 1 &&
+                                              ir_inline_simd_count(&promoted, IR_VCONST) == 1 && promoted.vector_constant_count == 1 &&
+                                              memcmp(promoted.vector_constants[0].words, expected + 64, 64) == 0,
+                                          "a zeroed object's constant stores are one vector constant of their bytes");
+                }
+                else
+                {
+                    ir_inline_test_expect(test, ir_inline_simd_count(&promoted, IR_VCONST) == 0 && ir_inline_simd_count(&promoted, IR_INTRINSIC) == 0, "two scalars' lanes stay stores and a load");
+                }
+                ir_inline_test_expect(test, ir_inline_simd_run(&promoted, 1, seed, bytes, scratch) && memcmp(bytes, expected, sizeof(bytes)) == 0, "the promoted function runs as the fixture");
             }
+            arena_pop_to(twin, 0);
+            arena_pop_to(output, 0);
         }
         arena_pop_to(input, 0);
     }

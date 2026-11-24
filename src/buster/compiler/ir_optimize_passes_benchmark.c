@@ -39,7 +39,6 @@ static bool ir_pass_benchmark_once(const IrFunction* input, Arena* output, Arena
     else if (pass == 2)
     {
         IrSroaOptions options = ir_sroa_options();
-        options.scalar = scalar;
         IrSroaResult run = { 0 };
         check = ir_optimize_sroa(input, output, scratch, options, &run);
         candidate.function = run.function;

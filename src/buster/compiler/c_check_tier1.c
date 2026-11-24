@@ -608,7 +608,6 @@ static CheckTier1Outcome check_tier1_passes(CheckTier1Lane* lane, const CheckTie
     if (stage == CHECK_TIER1_COMPILED && wide.split)
     {
         IrSroaOptions options = ir_sroa_options();
-        options.scalar = scalar;
         options.simd = true;
         options.flagged = true;
         IrSroaResult fields = { 0 };
@@ -957,7 +956,6 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     if (stage == CHECK_TIER1_COMPILED && !own && !sroa && ((!expanding && lowered.parameter_passed != 0) || scalar_arguments != 0))
     {
         IrSroaOptions options = ir_sroa_options();
-        options.scalar = scalar;
         options.simd = true;
         options.flagged = true;
         options.widen = true;
@@ -981,7 +979,6 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     if (stage == CHECK_TIER1_COMPILED && sroa)
     {
         IrSroaOptions options = ir_sroa_options();
-        options.scalar = scalar;
         options.simd = true;
         options.flagged = true;
         options.widen = true;
