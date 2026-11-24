@@ -1,0 +1,62 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+generic-microsoft-va-arg	generic-microsoft-va-arg.c	-	generic-microsoft-va-arg
+# __builtin_infer_alloc_token (#148) against clang's build: the tokens of scalars, pointers, arrays, function pointers,
+# records with and without pointers (through members, nested records and uintptr_t's typedefs), typedef-named and
+# nested records, an atomic and a qualified type, by sizeof's type or its expression's, through arithmetic and a
+# variable's initializer, and the fallback 0 of no type; arguments never run. (An unnamed record's name holds its file's
+# path, which differs between this build's source and clang's.)
+generic-infer-alloc-token	generic-infer-alloc-token.c	-	generic-infer-alloc-token
+# __builtin_os_log_format's buffers against clang's build (#148, the bytes of clang's helper's stores): privacy
+# annotations (sensitive over a later public), scalars of each promoted size, %m and %%, a string's count from its
+# precision's argument and from a constant, %.8P, masks, a field width and a precision of arguments, a double, a
+# pointer, and an array (its address, compared in place, since the two builds place it apart); buffer sizes of
+# positions, of a %P without its length and of missing data; and escaped percent signs, with specifiers past the
+# format's NUL that take nothing (#1329).
+generic-os-log	generic-os-log.c	-	generic-os-log
+# __builtin_os_log_format's data in its items' order (#148, as clang's emitBuiltinOSLogFormat evaluates it): positions
+# that take the data out of order (their calls' order checked), data no item takes (its call never made), data taken
+# again where no side effect ran since (a field width's and a precision's argument too); and data of 16 bytes or of
+# 2, unpromoted: a long double's 10 bytes then zeros, an __int128, a 16-byte vector, _Float16 and __bf16 (an __fp16 as
+# a double), and signed _BitInts narrower than their classes, zero-extended from their widths, as clang stores them.
+generic-os-log-order	generic-os-log-order.c	-	generic-os-log-order
+# __builtin_os_log_format's data evaluated once an item (#148, as clang's emitBuiltinOSLogFormat evaluates each item's
+# expression): data taken again after a side effect ran, and an item's call made again; and a __float128's 16 bytes
+# and a 2-byte vector's, read as they are evaluated.
+generic-os-log-reevaluated	generic-os-log-reevaluated.c	-	generic-os-log-reevaluated
+# __builtin_os_log_format past the operands' 32-bit mask (#1785, clang's BuiltinOSLogFormat takes up to 255 data
+# arguments): 40 data arguments, those past the 32nd of other types and one a call of a static function nothing else
+# names (so the program reaches it through the full mask), positions past the 32nd, and 255 data arguments, the most
+# clang takes, each with its buffer's size.
+generic-os-log-many	generic-os-log-many.c	-	generic-os-log-many
+# __builtin_dump_struct (#148): clang's calls of the printer, a line each, hashed by a printer that reads each format's
+# operands as its conversions say (a pointer as its offset from the record): the record's name, each field's type
+# name as its declaration spells it (typedefs kept, an unnamed record's "struct (unnamed)"), its name, a bit-field's
+# width, and its value promoted (bool, the character types, the integers, size_t's %zu, an enum's underlying type,
+# the floating types, strings of at most 32 characters, pointers) or its address (an array, an __int128, a complex);
+# nested records' fields deeper, anonymous members' flattened, unnamed bit-fields skipped; the printer and the rest
+# of the arguments evaluated again for each call (a call through a pointer, the rest's side effects), the record
+# once; a union's dump, a nested record's and a typedef'd unnamed record's.
+generic-dump-struct	generic-dump-struct.c	-	generic-dump-struct
+# __builtin_invoke (#148): calls through it, of a function, a pointer, a member and a variadic function, each argument
+# evaluated once, as the call's.
+generic-invoke	generic-invoke.c	-	generic-invoke
+# clang's type traits of C (#148), their values in code: of complete, incomplete and variably modified types.
+generic-type-traits	generic-type-traits.c	-	generic-type-traits
+# __builtin_vectorelements of a comma expression (#1126's review), its last operand's type, none of its operands
+# evaluated (a call among them).
+generic-vectorelements-of-comma-expressions	generic-vectorelements-of-comma-expressions.c	-	generic-vectorelements-of-comma-expressions
+# A place through macros (#1126's review): clang's SourceLocExpr reads getExpansionRange(...).getEnd(), the outermost
+# expansion's end: a function-like invocation's closing parenthesis (on a later line too), an object-like macro's
+# name, a nested one's outer invocation, an argument's invocation (of a builtin and of another macro), in constant
+# expressions and at run time, before and after a #line. (The first #line keeps the lines the oracle's added macro
+# would shift.)
+generic-source-places-through-macros	generic-source-places-through-macros.c	-	generic-source-places-through-macros
+# __builtin_complex (#148): its folds in static data (signed zeros, an infinity, a NaN, a const object's value, long
+# double's and _Float16's) and in an enumerator, and its values at run time, of each real floating type, from
+# qualified, aligned and volatile operands, evaluated once each, in order, and taken apart, multiplied and summed.
+generic-complex	generic-complex.c	-	generic-complex
+# __arithmetic_fence's values of each floating type, a complex one and a vector, and in static data; the xray events
+# and __warn_memset_zero_len, whose arguments never run; and
+# trivially_relocate's moves, overlapping ones among them, of ints, doubles and arrays of ints, with its destination.
+generic-fence-events-and-relocate	generic-fence-events-and-relocate.c	-	generic-fence-events-and-relocate

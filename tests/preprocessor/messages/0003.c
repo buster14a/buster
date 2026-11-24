@@ -1,0 +1,2 @@
+#warning /* comment */ x   	
+#error '

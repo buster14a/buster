@@ -370,7 +370,9 @@ does are there.
   so that it makes the object `-c` does). The emission builds the callees' table once a unit
   for either tier (`check_tier1_inline_table`), and a unit with a callee runs
   #1282's two epochs (`CheckEmitRun.inline_table`): every part's lowering, then
-  every part's code.
+  every part's code. A simple ring of mutually recursive callees expands up to
+  its closing call, subject to the same depth and shape limits. The choice of
+  closing target is independent of lane and window order.
 - With `--tier0-inline-shapes` (step 5, off by default), a callee may have
   several returns, each a jump to its copy's end, and a result in memory, the
   hidden pointer bound to the call's result object (`tier0_inline_site_valid`).
@@ -401,9 +403,9 @@ as `-c`'s option does (CI runs the fixture both ways). Without a file it takes
 the driver fixture below at x86-64-v4 (under a second), checks that at least 20
 calls were inlined, and folds the spliced streams (every column and the starts)
 into a digest that must equal the frozen one of its run
-(`BUSTER_TIER0_INLINE_TEST_DIGEST` and `_SHAPES_DIGEST`, taken where the splice's
-vector path and its former scalar twin gave the same bytes, #2924; a change to
-the splice, the lowering or the fixture moves them, and the run prints its own).
+(`BUSTER_TIER0_INLINE_TEST_DIGEST` and `_SHAPES_DIGEST`). The driver fixture
+also checks which recursive callees survive in the object and compares program
+output with clang -O0.
 Before the files it checks the splice's fills and Tier 1's unit-stage scan for
 the candidates whose address code takes (`check_tier1_inline_addressed_entries`)
 against their definitions on random columns, the scan at every count to 200

@@ -1,0 +1,1 @@
+typedef int V __attribute__((vector_size(16))); V a; enum { N=sizeof(__builtin_shufflevector(a,a,(2147483647+1)<0,1,2,3)) }; typedef int T [[gnu::aligned(sizeof(__builtin_shufflevector(a,a,(2147483647+1)<0,1,2,3)))]]; _Static_assert(N==16 && _Alignof(T)==16,"GNU lexical shuffle index");

@@ -4303,6 +4303,17 @@ static bool check_program_emit_literals(CheckEmitLiterals* literals, const Emitt
     return valid;
 }
 
+// Tier 0 numbers asm bodies in lowering order. Emit markers in final instruction order,
+// breaking ties at the same zero-width boundary by the source occurrence.
+static int check_program_marker_order(const void* left, const void* right)
+{
+    const AssemblyInline* a = left;
+    const AssemblyInline* b = right;
+    const uint64_t x = (uint64_t)a->offset << 32 | a->statement;
+    const uint64_t y = (uint64_t)b->offset << 32 | b->statement;
+    return (x > y) - (x < y);
+}
+
 // -S's copy of a body's records and branch columns (#1362), in `output`, which outlives the lanes' arenas the code is
 // in: what the assembly sink prints the body's atom from. Returns false if `output` can't hold them.
 static bool check_program_emit_keep_records(AssemblyCode* kept, const EmittedCode* code, uint32_t sled, Arena* output)
@@ -6108,6 +6119,15 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             valid = symbol != 0 && !patchable &&
                     check_program_emit_asm_unit(result, asms, unit, asm_symbols, symbol, result->unit_atoms, result->unit_sections,
                                                 &result->unit_atom_count, bytes, scratch, &entry_atom, &entry_bytes, &entry_length, naked_frames);
+            if (valid && keep_records && unit_plan != NULL && unit_plan->presentation != NULL)
+            {
+                valid = entry_atom < result->assembly_code_count;
+                if (valid)
+                {
+                    result->assembly_code[entry_atom].templates = unit_plan->presentation;
+                    result->assembly_code[entry_atom].template_count = 1;
+                }
+            }
             reason = patchable ? "patchable_function_entry on a naked function whose assembly takes directives" :
                      valid ? NULL : "an inline assembly unit could not be published";
             if (valid)
@@ -6263,12 +6283,38 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             for (uint32_t k = 0; valid && source_body && !assembly && k < code->asm_label_count; k += 1)
             {
                 const uint32_t name = code->asm_label_names[k];
+                const uint32_t p = name - asms->name_count;
+                if (keep_records && name >= asms->name_count && p < asms->plan_count && asms->plans[p].presentation != NULL)
+                {
+                    // A dead body has no record. Its text is absent just as its instructions are.
+                    if (body->asm_offsets[k] != UINT32_MAX)
+                    {
+                        AssemblyCode* kept = result->assembly_code + atom;
+                        if (kept->templates == NULL)
+                        {
+                            kept->templates = BUSTER_ARENA_PUSH_ARRAY(output, AssemblyInline, code->asm_label_count);
+                        }
+                        valid = kept->templates != NULL;
+                        if (valid)
+                        {
+                            AssemblyInline piece = *asms->plans[p].presentation;
+                            piece.offset = body->asm_offsets[k];
+                            kept->templates[kept->template_count++] = piece;
+                        }
+                    }
+                    continue;
+                }
                 const SymbolId label = name < asms->name_count ? asm_symbols[name] : 0;
                 valid = label != 0 && body->asm_offsets[k] != UINT32_MAX && link_define_symbol(&result->link, label, atom, body->asm_offsets[k], 0);
                 if (valid)
                 {
                     result->link.symbols.source[label] = BUSTER_LINK_SOURCE_PROGRAM;
                 }
+            }
+            if (valid && keep_records && result->assembly_code[atom].template_count > 1)
+            {
+                AssemblyCode* kept = result->assembly_code + atom;
+                qsort(kept->templates, kept->template_count, sizeof(AssemblyInline), check_program_marker_order);
             }
             // Each label at its resolved offset, after branch sizing, including an absent label's entry placeholder.
             for (uint32_t k = 0; valid && source_body && k < code->label_count; k += 1)

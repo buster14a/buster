@@ -1,0 +1,1 @@
+extern void* memmove(void*,const void*,unsigned long);struct S{char c[513];};static struct S a,b;int tested(int n){for(int i=0;i<513;i++)a.c[i]=(char)(n+i);b=a;return (b=a).c[512]+b.c[0];}

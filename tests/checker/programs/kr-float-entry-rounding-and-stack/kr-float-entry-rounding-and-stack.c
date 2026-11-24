@@ -1,0 +1,1 @@
+double f(a,b,c,d,e,f,g,h,i,j)float a,b,c,d,e,f,g,h,i,j;{float *p=&j;*p+=1;return a+b+c+d+e+f+g+h+i+j;}int roundtrip(x)float x;{float *p=&x;return (int)(*p-16777216.0f);}int tested(int n){return (int)f(0.1,1.2,2.3,3.4,4.5,5.6,6.7,7.8,8.9,(double)(n&255)+0.1)+roundtrip(16777217.0);}

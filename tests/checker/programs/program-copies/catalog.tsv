@@ -1,0 +1,8 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+aggregate-copy-volatile-accesses	aggregate-copy-volatile-accesses.c	-	aggregate-copy-volatile-accesses
+aggregate-copy-volatile-array-subobjects	aggregate-copy-volatile-array-subobjects.c	-	aggregate-copy-volatile-array-subobjects
+aggregate-copy-volatile-initializer-destination	aggregate-copy-volatile-initializer-destination.c	-	aggregate-copy-volatile-initializer-destination
+aggregate-copy-declared-runtime	aggregate-copy-declared-runtime.c	-	aggregate-copy-declared-runtime
+aggregate-copy-shares-runtime-publication	aggregate-copy-shares-runtime-publication.c	-	aggregate-copy-shares-runtime-publication
+aggregate-copy-argument-initializer-return	aggregate-copy-argument-initializer-return.c	-	aggregate-copy-argument-initializer-return

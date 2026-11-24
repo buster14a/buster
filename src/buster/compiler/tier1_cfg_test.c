@@ -176,6 +176,10 @@ struct Tier1CfgTestTally
     // The values whose column sets were probed (tier1_cfg_test_column_sets), and the most in one problem.
     uint64_t column_values;
     uint32_t column_widest;
+    // #1384: cases allocated again with the liveness's groups solved sparsely (tier1_cfg_live_group_sparse), every
+    // field the same as the dense groups', and the cases and fixtures whose sparse live lists matched the walk.
+    uint64_t sparse_cases;
+    uint64_t sparse_lists;
 };
 
 static void tier1_cfg_test_expect(Tier1CfgTestTally* tally, bool condition, const char* message)
@@ -1200,11 +1204,32 @@ static void tier1_cfg_test_slots_edited(const Tier1CfgAllocation* result, uint32
     offsets[blocks] = count;
 }
 
+// Whether the sparse groups (#1384) allocate `input` as the dense ones did, `dense` with `error`: the same outcome and
+// every field tier1_cfg_differs compares, but for the two solves' own counters. The output arena is left as it was.
+static bool tier1_cfg_test_sparse_same(const Tier1CfgInput* input, Tier1CfgError error, const Tier1CfgAllocation* dense, Arena* output, Arena* scratch)
+{
+    const uint64_t mark = output->length;
+    Tier1CfgAllocation sparse = { 0 };
+    const Tier1CfgError sparse_error = tier1_cfg_allocate_sparse(input, output, scratch, &sparse);
+    bool same = sparse_error == error;
+    if (same && error == TIER1_CFG_OK)
+    {
+        same = sparse.sparse_liveness == (sparse.cross_block_values != 0) && sparse.liveness_bytes <= (uint64_t)input->block_count * sizeof(Tier1CfgLiveRow);
+        sparse.liveness_bytes = dense->liveness_bytes;
+        sparse.liveness_iterations = dense->liveness_iterations;
+        same = same && tier1_cfg_differs(input, dense, &sparse) == 0;
+    }
+    arena_pop_to(output, mark);
+    return same;
+}
+
 static void tier1_cfg_test_case(Tier1CfgTestTally* tally, const Tier1CfgInput* input, Arena* output, Arena* scratch, const char* name, bool mutate, uint8_t temp_slots, uint32_t split_moves, bool must_allocate)
 {
     const uint64_t output_saved = output->length;
     Tier1CfgAllocation result = { 0 };
     const Tier1CfgError error = tier1_cfg_allocate(input, output, scratch, &result);
+    tier1_cfg_test_expect(tally, tier1_cfg_test_sparse_same(input, error, &result, output, scratch), "the sparse liveness groups allocate as the dense ones do");
+    tally->sparse_cases += 1;
     for (uint32_t o = 0; o < input->phi_operand_offsets[input->phi_count]; o += 1)
     {
         tally->undefined_operands += input->phi_operands[o] == BUSTER_TIER1_CFG_NONE;
@@ -2496,16 +2521,241 @@ static void tier1_cfg_test_lists_case(Tier1CfgTestTally* tally, const Tier1CfgIn
 {
     const uint64_t output_mark = output->length;
     const uint64_t scratch_mark = scratch->length;
-    Tier1CfgPrepared prepared = { 0 };
-    if (tier1_cfg_prepare(input, output, scratch, &prepared) == TIER1_CFG_OK)
+    for (uint32_t form = 0; form < 2; form += 1)
     {
-        uint64_t entries = 0;
-        tier1_cfg_test_expect(tally, tier1_cfg_test_live_lists(input, &prepared, scratch, &entries), "a generated case's live lists are each value's walk back to its home");
-        tier1_cfg_test_expect(tally, prepared.candidate.live_entries == entries, "a generated case's live lists hold its realized memberships");
-        tier1_cfg_release(&prepared, scratch);
+        Tier1CfgPrepared prepared = { 0 };
+        if (tier1_cfg_prepare_path(input, output, scratch, &prepared, form == 1) == TIER1_CFG_OK)
+        {
+            uint64_t entries = 0;
+            const bool walked = tier1_cfg_test_live_lists(input, &prepared, scratch, &entries);
+            tier1_cfg_test_expect(tally, walked, form == 0 ? "a generated case's live lists are each value's walk back to its home" : "a generated case's sparse live lists are each value's walk back to its home");
+            tier1_cfg_test_expect(tally, prepared.candidate.live_entries == entries, "a generated case's live lists hold its realized memberships");
+            tally->sparse_lists += form == 1 && walked;
+            tier1_cfg_release(&prepared, scratch);
+        }
+        tier1_cfg_test_expect(tally, scratch->length == scratch_mark, "the list check restores scratch");
     }
-    tier1_cfg_test_expect(tally, scratch->length == scratch_mark, "the list check restores scratch");
     arena_pop_to(output, output_mark);
+}
+
+// #1353's shape, a function of `loops` loops one after another, each with its own counter: the entry defines `a` and the
+// sum's first value; loop k's header (block 1 + 2k) has the phis i_k (undefined from before the loop) and s_k, and reads `a`;
+// its latch (2 + 2k) reads both and defines their next values, which only its back edge passes; the last header's other
+// successor, the exit, reads the last sum. So `a`, every i_k and every s_k are global values: 2 * loops + 1 of them, over
+// 2 * loops + 2 blocks, each live in a few blocks but `a`, which is live in all. Its columns are on `output`.
+static bool tier1_cfg_test_loops(Arena* output, uint32_t loops, Tier1CfgInput* input)
+{
+    const uint32_t blocks = 2 * loops + 2;
+    const uint32_t exit_block = blocks - 1;
+    const uint32_t edges = 3 * loops + 1;
+    const uint32_t values = 4 * loops + 2;
+    const uint32_t uses = 3 * loops + 1;
+    uint32_t* starts = arena_push_array(output, blocks + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* successor_offsets = arena_push_array(output, blocks + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* successors = arena_push_array(output, edges, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* predecessor_offsets = arena_push_array(output, blocks + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* predecessors = arena_push_array(output, edges, sizeof(uint32_t), _Alignof(uint32_t));
+    uint8_t* classes = arena_push(output, values, 1);
+    uint32_t* allowed = arena_push_array(output, values, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* definitions = arena_push_array(output, values, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* use_offsets = arena_push_array(output, values + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* use_positions = arena_push_array(output, uses, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* phi_offsets = arena_push_array(output, blocks + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* phi_values = arena_push_array(output, 2 * loops, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* phi_operand_offsets = arena_push_array(output, 2 * loops + 1, sizeof(uint32_t), _Alignof(uint32_t));
+    uint32_t* phi_operands = arena_push_array(output, 4 * loops, sizeof(uint32_t), _Alignof(uint32_t));
+    const bool built = loops != 0 && starts != 0 && successor_offsets != 0 && successors != 0 && predecessor_offsets != 0 && predecessors != 0 && classes != 0 && allowed != 0 && definitions != 0 && use_offsets != 0 &&
+                       use_positions != 0 && phi_offsets != 0 && phi_values != 0 && phi_operand_offsets != 0 && phi_operands != 0;
+    if (built)
+    {
+        for (uint32_t b = 0; b <= blocks; b += 1)
+        {
+            starts[b] = b * 4;
+        }
+        // The entry's one successor, then each header's latch and next header (or the exit), each latch's header.
+        uint32_t edge = 0;
+        for (uint32_t b = 0; b < blocks; b += 1)
+        {
+            successor_offsets[b] = edge;
+            const bool header = b != 0 && b != exit_block && (b & 1) != 0;
+            const bool latch = b != 0 && b != exit_block && (b & 1) == 0;
+            if (b == 0 || header)
+            {
+                successors[edge] = b == 0 ? 1 : b + 1;
+                edge += 1;
+            }
+            if (header)
+            {
+                successors[edge] = b + 2;
+                edge += 1;
+            }
+            if (latch)
+            {
+                successors[edge] = b - 1;
+                edge += 1;
+            }
+        }
+        successor_offsets[blocks] = edge;
+        // A header's predecessors are the block before the loop and its latch, in that order; a latch's, its header;
+        // the exit's, the last header.
+        edge = 0;
+        for (uint32_t b = 0; b < blocks; b += 1)
+        {
+            predecessor_offsets[b] = edge;
+            const bool header = b != 0 && b != exit_block && (b & 1) != 0;
+            if (header)
+            {
+                predecessors[edge] = b == 1 ? 0 : b - 2;
+                predecessors[edge + 1] = b + 1;
+                edge += 2;
+            }
+            else if (b != 0)
+            {
+                predecessors[edge] = b - 1 - (b == exit_block ? 1 : 0);
+                edge += 1;
+            }
+        }
+        predecessor_offsets[blocks] = edge;
+        for (uint32_t v = 0; v < values; v += 1)
+        {
+            classes[v] = BUSTER_TIER1_ALLOCATE_GPR;
+            allowed[v] = 0xf;
+        }
+        // a, the first sum; then per loop i_k, s_k at the header's start and s_k's and i_k's next values in the latch.
+        definitions[0] = 1;
+        definitions[1] = 2;
+        uint32_t use = 0;
+        use_offsets[0] = 0;
+        for (uint32_t k = 0; k < loops; k += 1)
+        {
+            use_positions[use] = starts[1 + 2 * k] + 1;
+            use += 1;
+        }
+        use_offsets[1] = use;
+        use_offsets[2] = use;
+        for (uint32_t k = 0; k < loops; k += 1)
+        {
+            const uint32_t header = 1 + 2 * k;
+            const uint32_t latch = header + 1;
+            const uint32_t i = 2 + 4 * k;
+            definitions[i] = starts[header];
+            definitions[i + 1] = starts[header];
+            definitions[i + 2] = starts[latch] + 1;
+            definitions[i + 3] = starts[latch] + 2;
+            use_positions[use] = starts[latch];
+            use_offsets[i + 1] = use + 1;
+            use_positions[use + 1] = starts[latch];
+            use += 2;
+            if (k + 1 == loops)
+            {
+                use_positions[use] = starts[exit_block] + 1;
+                use += 1;
+            }
+            use_offsets[i + 2] = use;
+            use_offsets[i + 3] = use;
+            use_offsets[i + 4] = use;
+            phi_values[2 * k] = i;
+            phi_values[2 * k + 1] = i + 1;
+            phi_operand_offsets[2 * k] = 4 * k;
+            phi_operand_offsets[2 * k + 1] = 4 * k + 2;
+            phi_operands[4 * k] = BUSTER_TIER1_CFG_NONE;
+            phi_operands[4 * k + 1] = i + 3;
+            phi_operands[4 * k + 2] = k == 0 ? 1 : i - 3;
+            phi_operands[4 * k + 3] = i + 2;
+        }
+        phi_operand_offsets[2 * loops] = 4 * loops;
+        // Two phis in each header before block b: the headers are the odd blocks below the exit.
+        for (uint32_t b = 0; b <= blocks; b += 1)
+        {
+            phi_offsets[b] = 2 * (b / 2 < loops ? b / 2 : loops);
+        }
+        *input = (Tier1CfgInput){
+            .block_starts = starts,
+            .successor_offsets = successor_offsets,
+            .successors = successors,
+            .predecessor_offsets = predecessor_offsets,
+            .predecessors = predecessors,
+            .classes = classes,
+            .allowed_registers = allowed,
+            .definitions = definitions,
+            .use_offsets = use_offsets,
+            .use_positions = use_positions,
+            .phi_offsets = phi_offsets,
+            .phi_values = phi_values,
+            .phi_operand_offsets = phi_operand_offsets,
+            .phi_operands = phi_operands,
+            .block_count = blocks,
+            .edge_count = edges,
+            .value_count = values,
+            .use_count = uses,
+            .phi_count = 2 * loops,
+            .position_count = starts[blocks],
+            .registers = {
+                0xf,
+                0,
+                0,
+            },
+            .scratch_registers = {
+                11,
+                15,
+                0,
+            },
+        };
+    }
+    return built;
+}
+
+
+// #1353's scoped loops, past the bound: at 3,000 and 6,000 loops (6,001 and 12,001 global values over 6,002 and 12,002
+// blocks) the groups must be sparse, give live lists equal to tier1_cfg_test_live_lists' walk, and visit blocks and
+// touch rows in proportion to the loops: at most 2.2 times as many for twice the loops, where the dense groups would
+// sweep four times the block rows. The smaller sizes, one and several groups under the bound, compare both forms' lists
+// with the walk and run as whole cases.
+static void tier1_cfg_test_scoped_loops(Tier1CfgTestTally* tally, Arena* output, Arena* scratch)
+{
+    const uint32_t sizes[] = {
+        1,
+        255,
+        1200,
+        3000,
+        6000,
+    };
+    uint64_t visits[BUSTER_ARRAY_LENGTH(sizes)] = { 0 };
+    uint64_t rows[BUSTER_ARRAY_LENGTH(sizes)] = { 0 };
+    for (uint32_t k = 0; k < BUSTER_ARRAY_LENGTH(sizes); k += 1)
+    {
+        const uint64_t saved = output->length;
+        Tier1CfgInput input;
+        const bool built = tier1_cfg_test_loops(output, sizes[k], &input);
+        tier1_cfg_test_expect(tally, built, "scoped-loop fixture memory");
+        if (built)
+        {
+            const uint64_t mark = scratch->length;
+            Tier1CfgPrepared prepared = { 0 };
+            const Tier1CfgError error = tier1_cfg_prepare(&input, output, scratch, &prepared);
+            const uint32_t global = 2 * sizes[k] + 1;
+            const uint32_t groups = (global + 511) / 512;
+            const bool past = groups > 1 && (uint64_t)input.block_count * groups > BUSTER_TIER1_CFG_SPARSE_ROWS;
+            tier1_cfg_test_expect(tally, error == TIER1_CFG_OK && prepared.candidate.cross_block_values == global && prepared.candidate.sparse_liveness == past, "the scoped loops' groups are sparse past the bound alone");
+            if (error == TIER1_CFG_OK)
+            {
+                uint64_t entries = 0;
+                tier1_cfg_test_expect(tally, tier1_cfg_test_live_lists(&input, &prepared, scratch, &entries) && prepared.candidate.live_entries == entries, "the scoped loops' live lists are each value's walk back to its home");
+                visits[k] = prepared.candidate.liveness_iterations;
+                rows[k] = prepared.candidate.liveness_bytes / sizeof(Tier1CfgLiveRow);
+                tier1_cfg_release(&prepared, scratch);
+            }
+            tier1_cfg_test_expect(tally, scratch->length == mark, "the scoped loops' preparation restores scratch");
+            if (sizes[k] <= 1200)
+            {
+                tier1_cfg_test_lists_case(tally, &input, output, scratch);
+                tier1_cfg_test_case(tally, &input, output, scratch, "scoped loops", sizes[k] == 255, 0, 0, true);
+            }
+        }
+        arena_pop_to(output, saved);
+    }
+    const uint32_t last = BUSTER_ARRAY_LENGTH(sizes) - 1;
+    tier1_cfg_test_expect(tally, visits[last - 1] != 0 && visits[last] * 10 <= visits[last - 1] * 22 && rows[last] * 10 <= rows[last - 1] * 22, "the sparse groups' work grows with the loops");
 }
 
 // #1384's genuinely nonlocal values: a ladder of n rungs, block 2i defining t_i and branching to 2i + 1 and 2i + 2, block
@@ -2693,7 +2943,8 @@ static void tier1_cfg_test_nonlocal_storage(Tier1CfgTestTally* tally, Arena* out
                 const Tier1CfgAllocation* result = &prepared.candidate;
                 const uint32_t groups = (n + 1 + 511) / 512;
                 tier1_cfg_test_expect(tally, result->cross_block_values == n + 1 && result->edge_local_values == 0, "every ladder rung's value is global");
-                tier1_cfg_test_expect(tally, result->liveness_bytes == (uint64_t)blocks * 256, "global values take one group's matrices, 256 bytes a block");
+                tier1_cfg_test_expect(tally, result->sparse_liveness == ((uint64_t)blocks * groups > BUSTER_TIER1_CFG_SPARSE_ROWS && groups > 1), "the ladder's groups are sparse past the bound alone");
+                tier1_cfg_test_expect(tally, result->sparse_liveness ? result->liveness_bytes <= (uint64_t)blocks * 256 : result->liveness_bytes == (uint64_t)blocks * 256, "global values take one group's matrices, 256 bytes a block, or fewer sparse rows");
                 tier1_cfg_test_expect(tally, result->liveness_iterations >= groups, "each group of global values is solved");
                 uint64_t entries = 0;
                 tier1_cfg_test_expect(tally, tier1_cfg_test_live_lists(&input, &prepared, &bounded, &entries), "the groups' live lists are each value's walk back to its home");
@@ -3937,6 +4188,7 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
             tier1_cfg_test_argument_exclusions(&tally, &output, &scratch, true);
             tier1_cfg_test_phi_storage(&tally, &output, &scratch);
             tier1_cfg_test_nonlocal_storage(&tally, &output, &scratch);
+            tier1_cfg_test_scoped_loops(&tally, &output, &scratch);
             tier1_cfg_test_current_slots(&tally, &output, &scratch);
             tier1_cfg_test_edge_views(&tally, &scratch);
             tier1_cfg_test_wide_edges(&tally, &output, &scratch);
@@ -3995,6 +4247,8 @@ static __attribute__((unused)) int run_tier1_cfg_tests(int argc, char** argv)
         tier1_cfg_test_expect(&tally, tally.shape_mutants != 0 && tally.shape_killed == tally.shape_mutants && tally.shape_refused == tally.shape_mutants, "every malformed shape fails both checkers");
         printf("test-tier1-cfg: %" PRIu64 " checks, %" PRIu64 " failures; %" PRIu64 " allocations, %" PRIu64 " constraint refusals; %" PRIu64 " moves, %" PRIu64 " at splits, %" PRIu64 " through the scratch register, %" PRIu64 " split edges, %" PRIu64 " spilled values, %" PRIu64 " allocations with a temporary slot; %" PRIu64 " mask moves, %" PRIu64 " at splits, %" PRIu64 " spilled masks; mutants rejected: %" PRIu64 " of %" PRIu64 " interference, %" PRIu64 " of %" PRIu64 " order, %" PRIu64 " of %" PRIu64 " definition, %" PRIu64 " of %" PRIu64 " split destination, %" PRIu64 " of %" PRIu64 " k0, %" PRIu64 " of %" PRIu64 " shared slot; %" PRIu64 " values in a phi web's slot, %" PRIu64 " entries left to their recipes, %" PRIu64 " carried, %" PRIu64 " of %" PRIu64 " carried mutants rejected; %" PRIu64 " current slots, %" PRIu64 " of %" PRIu64 " current-slot mutants rejected (seed=%" PRIu64 ", count=%" PRIu64 ")\n", tally.checks, tally.failures, tally.allocations, tally.constraints, tally.moves, tally.split_moves, tally.scratch_moves, tally.split_edges, tally.spills, tally.temp_slot_cases, tally.mask_moves, tally.mask_split_moves, tally.mask_spills, tally.interference_killed, tally.interference_mutants, tally.order_killed, tally.order_mutants, tally.definition_killed, tally.definition_mutants, tally.destination_killed, tally.destination_mutants, tally.k0_killed, tally.k0_mutants, tally.slot_killed, tally.slot_mutants, tally.shared_slots, tally.unread_entries, tally.carried_entries, tally.carried_killed, tally.carried_mutants, tally.current_slots, tally.current_killed, tally.current_mutants, seed, count);
         printf("test-tier1-cfg: certificates: %" PRIu64 " proved (%" PRIu64 " by the oracle too), %" PRIu64 " facts, %" PRIu64 " edits, %" PRIu64 " operands, %" PRIu64 " renames; mutants refused: %" PRIu64 " interference, %" PRIu64 " order, %" PRIu64 " definition, %" PRIu64 " split destination, %" PRIu64 " k0, %" PRIu64 " shared slot, %" PRIu64 " of %" PRIu64 " shape; %" PRIu64 " refused by the certificate alone, %" PRIu64 " by the verifier alone\n", tally.certificates, tally.oracle_certificates, tally.certificate_facts, tally.certificate_edits, tally.certificate_operands, tally.certificate_renames, tally.interference_refused, tally.order_refused, tally.definition_refused, tally.destination_refused, tally.k0_refused, tally.slot_refused, tally.shape_refused, tally.shape_mutants, tally.certificate_only, tally.verifier_only);
+        tier1_cfg_test_expect(&tally, tally.sparse_cases >= tally.allocations + tally.constraints && tally.sparse_lists != 0, "every case allocated again, and the generated cases' lists walked, with the sparse groups (#1384)");
+        printf("test-tier1-cfg: sparse liveness groups (#1384): %" PRIu64 " cases allocated the same as by the dense groups, %" PRIu64 " sparse live lists equal to the walk\n", tally.sparse_cases, tally.sparse_lists);
         printf("test-tier1-cfg: given dominator trees (#2611): %" PRIu64 " CFGs' anchors the same with and without an added entry, %" PRIu64 " blocks anchored at a latch\n", tally.given_trees, tally.given_latches);
         tier1_cfg_test_expect(&tally, tally.given_latches != 0, "some given tree's block takes a latch laid out before it (#2611)");
         printf("test-tier1-cfg: fixed sequences (#2767): %" PRIu64 " ranges avoid their registers, %" PRIu64 " readers' ranges across their own\n", tally.avoiding_ranges, tally.reading_ranges);

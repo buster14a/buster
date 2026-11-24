@@ -1,0 +1,33 @@
+buster-fixtures v1 checker-sources
+0001	0001.c	-	bits: result types
+0002	0002.c	-	bits: folds in constant contexts
+# Past 128 bits (#1447): the generic and C23 builtins of constants of a _BitInt past 128 bits fold by its limbs
+# (c_check_wide.c), rotations by narrow and wide counts, and a narrow value's rotation by a wide count.
+0003	0003.c	gnu23	bits: folds past 128 bits
+0004	0004.c	rejected,gnu23	bits: clzg of a zero past 128 bits without a fallback is no constant
+0005	0005.c	-	bits: folds through const objects (#990)
+0006	0006.c	rejected	bits: fold of a volatile object is no constant
+0007	0007.c	rejected	bits: fold of a mutable object is no constant
+0008	0008.c	rejected	bits: clzg of zero without a fallback is no constant
+0009	0009.c	rejected	bits: popcountg of an int
+0010	0010.c	rejected	bits: popcountg of plain char where it is signed
+0011	0011.c	unsigned-char	bits: popcountg of plain char where it is unsigned
+0012	0012.c	rejected	bits: a stdc builtin of a bool
+0013	0013.c	rejected	bits: a stdc builtin of an enumeration
+0014	0014.c	rejected	bits: clzg's fallback of a long
+0015	0015.c	rejected	bits: ctzg's fallback of an unsigned int
+0016	0016.c	-	bits: clzg's fallback of a 31-bit unsigned bit-field
+0017	0017.c	rejected	bits: clzg's fallback of a 32-bit unsigned bit-field
+0018	0018.c	-	bits: clzg's fallback of an enumeration of int
+0019	0019.c	rejected	bits: a rotation of an int
+0020	0020.c	rejected	bits: a rotation by a float
+0021	0021.c	rejected	bits: bswapg of a 24-bit _BitInt
+0022	0022.c	rejected	bits: bitreverseg of a float
+0023	0023.c	-	bits: a carry of the other signedness
+0024	0024.c	-	bits: a carry of a const pointee
+0025	0025.c	rejected	bits: a carry of another width
+0026	0026.c	rejected	bits: a carry of an int
+0027	0027.c	rejected	bits: a carry chain of three arguments
+0028	0028.c	rejected	bits: bitreverse32 of a pointer
+0029	0029.c	-	bits: bitreverse32 of a double
+0030	0030.c	rejected	bits: clzg of three arguments

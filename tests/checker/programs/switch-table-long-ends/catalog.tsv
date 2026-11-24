@@ -1,0 +1,5 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+switch-table-long-ends	switch-table-long-ends.c	-	switch-table-long-ends
+switch-table-nested-loop	switch-table-nested-loop.c	-	switch-table-nested-loop
+switch-table-enum-char	switch-table-enum-char.c	-	switch-table-enum-char

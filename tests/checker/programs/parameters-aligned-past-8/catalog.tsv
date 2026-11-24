@@ -1,0 +1,32 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+parameters-aligned-past-8	parameters-aligned-past-8.c	-	parameters-aligned-past-8
+memory-builtin-runtime-loops	memory-builtin-runtime-loops.c	-	memory-builtin-runtime-loops
+memory-builtin-wide-runtime	memory-builtin-wide-runtime.c	-	memory-builtin-wide-runtime
+memory-builtin-small-constants-and-effects	memory-builtin-small-constants-and-effects.c	-	memory-builtin-small-constants-and-effects
+memory-builtin-runtime-size-under-fenv	memory-builtin-runtime-size-under-fenv.c	-	memory-builtin-runtime-size-under-fenv
+memory-builtin-size-query-runtime-answer	memory-builtin-size-query-runtime-answer.c	-	memory-builtin-size-query-runtime-answer
+builtin-hints-and-unevaluated-query	builtin-hints-and-unevaluated-query.c	-	builtin-hints-and-unevaluated-query
+# __builtin_alloca (#148), as clang -O0's dynamic alloca: sizes rounded up to 16 (the second allocation 32 bytes below
+# the first), one among a call's stack arguments, one of no bytes, in a loop, and the first's bytes intact after them.
+alloca-runtime	alloca-runtime.c	-	alloca-runtime
+# An allocation after a block's first variable-length array is released with it, at the block's end and at a
+# continue, a break or a goto out of it, as clang's stackrestore releases it: each loop of 20,000 allocations of 8 KB
+# would take 160 MB of stack without the releases.
+alloca-released-with-variable-length-arrays	alloca-released-with-variable-length-arrays.c	-	alloca-released-with-variable-length-arrays
+# #1447: a variable-length array declared in a for statement's clause is released where the statement ends, and
+# one in a statement expression's block after the expression's value is kept: 20,000 arrays of 4 KB each would take
+# 80 MB of stack without the releases. A break, a continue and a goto leave them.
+variable-length-arrays-in-for-clauses-and-statement-expressions	variable-length-arrays-in-for-clauses-and-statement-expressions.c	-	variable-length-arrays-in-for-clauses-and-statement-expressions
+# #1447: C23's `= {}` of a variable-length array clears it whole, on a stack an earlier array dirtied.
+variable-length-array-empty-initializer	variable-length-array-empty-initializer.c	-	variable-length-array-empty-initializer
+# #1447: a bound whose statement expression holds a declaration, an if, a goto and a label.
+variable-length-array-bounds-with-statements	variable-length-array-bounds-with-statements.c	-	variable-length-array-bounds-with-statements
+# Allocations in a realigned frame (an object aligned to 64) and in a variadic definition, whose va_arg reads the
+# incoming areas the allocation moved rsp past.
+alloca-realigned-and-variadic	alloca-realigned-and-variadic.c	-	alloca-realigned-and-variadic
+# __builtin_frame_address(0) and __builtin_return_address(0) (#148), as clang -O0's frame has them: the frame
+# address a multiple of 16 above the locals, the return address the word above it, a callee's saved rbp the caller's
+# frame address (in a realigned frame too), a callee's frame below its caller's, return addresses the same at one call
+# and different at two, after the caller's start, and the frame address unmoved by an allocation.
+frame-builtins	frame-builtins.c	-	frame-builtins

@@ -639,6 +639,8 @@ struct Tier0Function
     const uint8_t* classes;
     const uint64_t* values;
     uint32_t count;
+    // Optional bit per typed entry. A set bit on a conditional branch asks Tier 1 to keep it.
+    const uint64_t* predictable_branches;
     const uint8_t* local_classes;
     const uint8_t* local_flags;
     uint32_t local_count;

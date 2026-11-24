@@ -206,17 +206,18 @@ static const char asm_test_kmov[] =
     "kmovd %k4,%k3\nkmovd 4(%rdi),%k5\nkmovd %k6,(%r12)\nkmovd %r10d,%k7\nkmovd %k0,%eax\n"
     "kmovq %k2,%k1\nkmovq 2240(%rdi),%k0\nkmovq %k0,2240(%rdi)\nkmovq %r11,%k3\nkmovq %k7,%r14\n";
 
-static bool asm_test_gnu_object(ObjectView* view, String8 bytes, Arena* scratch, char* error, uint64_t error_size)
+static bool asm_test_ordered_object(ObjectView* view, String8 bytes, bool foreign, Arena* scratch, char* error, uint64_t error_size)
 {
     // GAS appends relaxed branch relocations after ones made during parsing. ELF permits that order; the shared
-    // comparator expects offset order. Normalize only the GNU copy, using the importer's already tested sorter.
-    // Instruction bytes, relocation fields/targets/addends, and Buster's own relocation order remain checked.
+    // comparator expects offset order. The native DWARF writer groups .debug_info relocations by target kind.
+    // For a native object normalize only that section, preserving the order checks on instructions and data.
     ImportElf elf;
     bool valid = import_elf(&elf, bytes, ET_REL).error == IMPORT_ERROR_NONE;
     for (uint32_t index = 1; valid && index < elf.section_count; index += 1)
     {
         const Elf64_Shdr header = import_section_header(&elf, index);
-        if (header.sh_type == SHT_RELA)
+        String8 name;
+        if (header.sh_type == SHT_RELA && (foreign || (import_section_name(&elf, &header, &name) && import_equal(name, ".rela.debug_info"))))
         {
             uint64_t count = 0;
             valid = import_table(&header, sizeof(Elf64_Rela), &count) && count <= UINT32_MAX && import_within(bytes.length, header.sh_offset, header.sh_size);
@@ -235,9 +236,14 @@ static bool asm_test_gnu_object(ObjectView* view, String8 bytes, Arena* scratch,
     }
     if (!valid)
     {
-        snprintf(error, error_size, "cannot normalize GNU as relocation order");
+        snprintf(error, error_size, "cannot normalize relocation order");
     }
-    return valid && object_view_open(view, (const uint8_t*)bytes.pointer, bytes.length, true, error, error_size);
+    return valid && object_view_open(view, (const uint8_t*)bytes.pointer, bytes.length, foreign, error, error_size);
+}
+
+static bool asm_test_gnu_object(ObjectView* view, String8 bytes, Arena* scratch, char* error, uint64_t error_size)
+{
+    return asm_test_ordered_object(view, bytes, true, scratch, error, error_size);
 }
 
 static bool asm_test_oracle(AsmTest* test, const char* source, const char* directory, X86Architecture architecture)

@@ -841,6 +841,11 @@ static double parallel_seconds(uint64_t nanoseconds)
     return (double)nanoseconds / (double)BUSTER_PARALLEL_NANOSECONDS;
 }
 
+static uint64_t parallel_timeval_nanoseconds(struct timeval time)
+{
+    return (uint64_t)time.tv_sec * BUSTER_PARALLEL_NANOSECONDS + (uint64_t)time.tv_usec * 1000;
+}
+
 // KiB as whole MiB, rounded up: a process that touched any memory reports at least 1.
 static uint64_t parallel_mebibytes(uint64_t kibibytes)
 {
@@ -1086,7 +1091,7 @@ static void parallel_start(const ParallelCommand* command, const ParallelOptions
 // Builds a command's part of the report at the arena's end: its heading, with its outcome and time, then what it wrote,
 // read from its capture, which is then closed, so that only running commands hold one. Returns whether the arena held
 // it; a part it can't hold is parallel_lost_part.
-static bool parallel_render(Arena* arena, const ParallelCommand* command, const ParallelOptions* options, ParallelResult* result)
+static bool parallel_render(Arena* arena, const ParallelCommand* command, const ParallelOptions* options, ParallelResult* result, const struct rusage* usage)
 {
     char outcome[BUSTER_PARALLEL_OUTCOME_BYTES];
     parallel_outcome(result, options, outcome, sizeof(outcome));
@@ -1097,6 +1102,15 @@ static bool parallel_render(Arena* arena, const ParallelCommand* command, const 
                                  : parallel_append(arena, "== ", 3) && parallel_append(arena, command->title.pointer, command->title.length) && parallel_append(arena, ": ", 2) &&
                                        parallel_append(arena, outcome_text.pointer, outcome_text.length);
     built = built && parallel_append(arena, "\n", 1);
+    // Keep the heading that costs collect reads. The runner can give these times even when a command times out
+    // before it prints its own counters.
+    if (usage != 0)
+    {
+        char split[96];
+        const int length = snprintf(split, sizeof(split), "CPU time %.1f s user, %.1f s system\n",
+                                    parallel_seconds(parallel_timeval_nanoseconds(usage->ru_utime)), parallel_seconds(parallel_timeval_nanoseconds(usage->ru_stime)));
+        built = built && length > 0 && (size_t)length < sizeof(split) && parallel_append(arena, split, (uint64_t)length);
+    }
     struct stat stats;
     const uint64_t size = built && result->capture >= 0 && fstat(result->capture, &stats) == 0 && stats.st_size > 0 ? (uint64_t)stats.st_size : 0;
     char* bytes = size != 0 ? arena_push(arena, size, 1) : 0;
@@ -1282,14 +1296,6 @@ static void parallel_output_write(ParallelOutput* output, String8 part, uint64_t
     }
 }
 
-// The user and system time in a process's resource usage, in nanoseconds.
-static uint64_t parallel_cpu_time(const struct rusage* usage)
-{
-    const uint64_t seconds = (uint64_t)usage->ru_utime.tv_sec + (uint64_t)usage->ru_stime.tv_sec;
-    const uint64_t microseconds = (uint64_t)usage->ru_utime.tv_usec + (uint64_t)usage->ru_stime.tv_usec;
-    return seconds * BUSTER_PARALLEL_NANOSECONDS + microseconds * 1000;
-}
-
 // Reaps every running command whose shell has ended, at `now`, after killing whatever it left in its process group (its
 // shell, a zombie until it is reaped, still holds the group's id), and builds its part of the report. Returns how many it
 // reaped, whose CPUs it takes from *used and whose peaks from *memory_used; sets *full when the arena can't hold a part.
@@ -1315,7 +1321,7 @@ static uint64_t parallel_reap(Arena* arena, const ParallelList* list, const Para
                 waited = wait4(result->pid, &status, 0, &usage);
             } while (waited < 0 && errno == EINTR);
             result->status = status;
-            result->cpu = waited == result->pid ? parallel_cpu_time(&usage) : 0;
+            result->cpu = waited == result->pid ? parallel_timeval_nanoseconds(usage.ru_utime) + parallel_timeval_nanoseconds(usage.ru_stime) : 0;
             result->memory = waited == result->pid && usage.ru_maxrss > 0 ? (uint64_t)usage.ru_maxrss : 0;
             result->skipped = waited == result->pid && WIFEXITED(status) && WEXITSTATUS(status) == BUSTER_PARALLEL_SKIP_STATUS && !result->timed_out;
             result->passed = waited == result->pid && WIFEXITED(status) && WEXITSTATUS(status) == 0 && !result->timed_out;
@@ -1326,7 +1332,7 @@ static uint64_t parallel_reap(Arena* arena, const ParallelList* list, const Para
             result->end = now;
             *used -= result->cpus;
             *memory_used -= list->commands[i].peak;
-            *full = !parallel_render(arena, &list->commands[i], options, result) || *full;
+            *full = !parallel_render(arena, &list->commands[i], options, result, waited == result->pid ? &usage : 0) || *full;
             reaped += 1;
         }
     }
@@ -1501,7 +1507,7 @@ static ParallelSummary parallel_run(Arena* arena, const ParallelList* list, cons
             // A command that couldn't start has ended.
             if (result->state == PARALLEL_STATE_ENDED)
             {
-                summary.memory_full = !parallel_render(arena, &list->commands[started], options, result) || summary.memory_full;
+                summary.memory_full = !parallel_render(arena, &list->commands[started], options, result, 0) || summary.memory_full;
             }
             started += 1;
             // One that couldn't start has failed.
@@ -1512,7 +1518,7 @@ static ParallelSummary parallel_run(Arena* arena, const ParallelList* list, cons
             // The run's end: what didn't start, a stop signal that came as the last command ended, then the summary.
             for (uint64_t i = started; i < list->count; i += 1)
             {
-                summary.memory_full = !parallel_render(arena, &list->commands[i], options, &results[i]) || summary.memory_full;
+                summary.memory_full = !parallel_render(arena, &list->commands[i], options, &results[i], 0) || summary.memory_full;
             }
             parallel_take_signals(signal_fd, results, started, false, &stops, &summary, &output);
             summary.elapsed = parallel_clock() - origin;

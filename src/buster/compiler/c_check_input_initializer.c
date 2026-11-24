@@ -25,7 +25,76 @@ static __attribute__((noinline, cold)) void check_input_gnu_designator(CheckInpu
     check_input_warning_once(reader, &event);
 }
 
-static bool check_input_initializer_prepare_slow(CheckInputReader* reader, uint32_t assignment)
+// Diagnostics in a rejected initializer cannot stop resolution of later declarations.
+static bool check_input_initializer_recover(CheckInputReader* reader, uint32_t before)
+{
+    CheckInput* const input = reader->output;
+    if (input->report_count > before && !check_input_recover_reports(reader, before))
+    {
+        input->resource = true;
+    }
+    return !input->resource;
+}
+
+typedef struct CheckInputRejectedInitializer CheckInputRejectedInitializer;
+struct CheckInputRejectedInitializer
+{
+    uint32_t first;
+    uint32_t end;
+};
+
+// The malformed compound's body cannot supply an object. Leave its finish link intact so other jobs still run.
+static void check_input_initializer_discard_compound(CheckInputReader* reader, uint32_t closing)
+{
+    const uint32_t declaration = reader->initializer_declarations[closing];
+    if (declaration < reader->parser->tokens.count && check_input_bit(reader->declaration_bits, declaration, BUSTER_CHECK_BITS_COMPOUND))
+    {
+        check_input_invalid_initializer(reader, declaration, declaration);
+        reader->initializer_declarations[closing] = BUSTER_CHECK_NONE;
+        reader->output->declarations[declaration] = BUSTER_CHECK_NONE;
+        reader->declaration_kinds[declaration] = 0;
+        reader->declared_types[declaration] = 0;
+        reader->objects[declaration] = 0;
+        reader->declaration_bits[declaration] = 0;
+        check_sparse_set(reader->output->sparse_pool, reader->output->declaration_bodies, declaration, BUSTER_CHECK_NONE);
+    }
+}
+
+// Preparation and the source walk share recovery for strings in rejected initializers. Skip a refused
+// concatenation and the expressions that need its value, while still checking sibling operands.
+static const CheckInitString* check_input_initializer_string(CheckInputReader* reader, uint32_t token, CheckInputRejectedInitializer rejected)
+{
+    const bool recover = rejected.first <= token && token < rejected.end;
+    const uint32_t before = recover ? reader->output->report_count : 0;
+    const CheckInitString* string = check_input_string(reader, token);
+    if (recover && string == NULL && reader->output->report_count > before)
+    {
+        const Parser* parser = reader->parser;
+        const uint32_t count = parser->tokens.count;
+        const uint8_t* kinds = parser->tokens.kinds;
+        const uint8_t* roles = parser->tree.roles;
+        const uint32_t* parents = parser->tree.parents;
+        const bool literal = kinds[token] == PARSE_KIND_STRING;
+        uint32_t end = token + 1;
+        while (literal && end < count && kinds[end] == PARSE_KIND_STRING)
+        {
+            end += 1;
+        }
+        memset(reader->ignored + token, 1, end - token);
+        for (uint32_t parent = parents[token]; rejected.first <= parent && parent < rejected.end && !reader->ignored[parent]; parent = parents[parent])
+        {
+            reader->ignored[parent] = true;
+            if (roles[parent] == PARSE_ROLE_CLOSE_COMPOUND_BODY)
+            {
+                check_input_initializer_discard_compound(reader, parent);
+            }
+        }
+        check_input_initializer_recover(reader, before);
+    }
+    return string;
+}
+
+static bool check_input_initializer_prepare_slow(CheckInputReader* reader, uint32_t assignment, bool initialize, CheckInputRejectedInitializer rejected)
 {
     const Parser* parser = reader->parser;
     const uint32_t declaration = reader->initializer_declarations[assignment];
@@ -86,7 +155,7 @@ static bool check_input_initializer_prepare_slow(CheckInputReader* reader, uint3
                 check_input_rare_claim(reader, &reader->designator_indices[token]);
                 reader->designator_indices[token] = close;
                 check_input_rare_claim(reader, &reader->designator_valid[token]);
-                reader->designator_valid[token] = 2;
+                reader->designator_valid[token] = initialize ? BUSTER_CHECK_DESIGNATOR_PENDING : BUSTER_CHECK_DESIGNATOR_PENDING_REJECTED;
                 check_input_visit(reader, token, BUSTER_CHECK_RESOLVE_QUERY);
                 check_input_rare_claim(reader, &reader->designator_ranges[token]);
                 reader->designator_ranges[token] = range;
@@ -126,10 +195,20 @@ static bool check_input_initializer_prepare_slow(CheckInputReader* reader, uint3
                 reader->initializers[token] = 3;
             }
             item = false;
-            if (kind == PARSE_KIND_STRING)
+            if (kind == PARSE_KIND_STRING && initialize)
             {
-                valid = check_input_string(reader, token) != 0;
-                string_refused = !valid;
+                const bool accepted = check_input_initializer_string(reader, token, rejected) != NULL;
+                string_refused |= !accepted;
+                valid = accepted || (rejected.first <= token && token < rejected.end && !reader->output->resource);
+                if (!accepted && valid)
+                {
+                    // Recovery consumed this concatenation. Prepare its siblings even though the object cannot finish.
+                    do
+                    {
+                        token += 1;
+                    } while (token < end && parser->tokens.kinds[token] == PARSE_KIND_STRING);
+                    continue;
+                }
             }
             if (kind == PARSE_KIND_L_PAREN || kind == PARSE_KIND_L_SQUARE || kind == PARSE_KIND_L_BRACE)
             {
@@ -147,7 +226,7 @@ static bool check_input_initializer_prepare_slow(CheckInputReader* reader, uint3
     // An array whose initializer is parenthesized may be a compound literal's (GNU's, check_input_initializer_finish).
     const bool parenthesized = parser->tokens.kinds[begin] == PARSE_KIND_L_PAREN && type_kind_is_array(type_kind(reader->types, type_strip_aligned(reader->types, type)));
     // (A variable whose type tags register its initializer's value, #1447, c_check_type_safety_input.c, finishes too.)
-    if (valid && (incomplete || parenthesized || check_const_eligible(reader->types, type) || check_input_auto_type(reader->types, type) ||
+    if (valid && !string_refused && initialize && (incomplete || parenthesized || check_const_eligible(reader->types, type) || check_input_auto_type(reader->types, type) ||
                   (BUSTER_CHECK_RARE(reader, declaration_flags, declaration) & BUSTER_CHECK_DECLARATION_DEDUCED) != 0 ||
                   (reader->type_tag_attributes && check_type_tags_pending(reader->output, declaration) != NULL)))
     {
@@ -167,22 +246,27 @@ static bool check_input_initializer_prepare_slow(CheckInputReader* reader, uint3
     {
         check_input_report(reader, assignment, CHECK_INPUT_DECLARATION);
     }
-    return valid;
+    return valid && !string_refused;
 }
 
-static bool check_input_initializer_prepare(CheckInputReader* reader, uint32_t assignment)
+static bool check_input_initializer_prepare(CheckInputReader* reader, uint32_t assignment, bool initialize, CheckInputRejectedInitializer rejected)
 {
-    const bool compact = check_input_literal_table_prepare(reader, assignment);
-    const bool valid = compact || (!reader->output->resource && check_input_initializer_prepare_slow(reader, assignment));
-    if (valid)
+    const uint32_t before = reader->output->report_count;
+    const bool compact = initialize && check_input_literal_table_prepare(reader, assignment);
+    const bool valid = compact || (!reader->output->resource && check_input_initializer_prepare_slow(reader, assignment, initialize, rejected));
+    if (valid && initialize)
     {
         const uint32_t declaration = reader->initializer_declarations[assignment];
         check_input_noderef_set(reader->output, assignment, check_input_noderef_at(reader->output, declaration));
     }
+    if (!initialize)
+    {
+        check_input_initializer_recover(reader, before);
+    }
     return valid;
 }
 
-static bool check_input_initializer_designator(CheckInputReader* reader, uint32_t token)
+static bool check_input_initializer_designator(CheckInputReader* reader, uint32_t token, bool rejected)
 {
     const uint32_t close = (uint32_t)reader->designator_indices[token];
     const uint32_t range = reader->designator_ranges[token];
@@ -191,6 +275,7 @@ static bool check_input_initializer_designator(CheckInputReader* reader, uint32_
     // Its undeclared names are clang's errors at each one (#1447, check_constant_name), which end the walk; clang drops the
     // initializer list there.
     const uint32_t named = reader->constant_named;
+    const uint32_t before = reader->output->report_count;
     CheckConstantFailure failure = { .token = BUSTER_CHECK_NONE, .callee = BUSTER_CHECK_NONE };
     reader->constant_names = CHECK_CONSTANT_NAMES_REPORT;
     reader->constant_failure = &failure;
@@ -224,6 +309,11 @@ static bool check_input_initializer_designator(CheckInputReader* reader, uint32_
     {
         // Its failure's error in clang's words (#1447).
         check_input_constant_failure_report(reader, &failure, token + 1, token + 1);
+    }
+    if (rejected && !valid)
+    {
+        reader->designator_valid[token] = 0;
+        valid = check_input_initializer_recover(reader, before);
     }
     return valid;
 }
@@ -592,7 +682,7 @@ static __attribute__((noinline)) TypeId check_input_auto_type_finish(CheckInputR
         {
             // C23's later declarators deduce the same type (6.7.9), and __auto_type's as clang deduces them: clang reports
             // the difference at the declaration.
-            const uint32_t group = reader->declaration_specifiers[declaration];
+            const uint32_t group = check_input_memo_get(&reader->declaration_specifiers, declaration);
             const TypeId previous = group < parser->tokens.count ? reader->declaration_deduced[group] : 0;
             const uint32_t first = previous != 0 ? reader->declaration_deduced_first[group] : BUSTER_CHECK_NONE;
             if (previous != 0 && first < parser->tokens.count && type_same_canonical(types, previous, deduced_base) != TYPE_ANSWER_YES)

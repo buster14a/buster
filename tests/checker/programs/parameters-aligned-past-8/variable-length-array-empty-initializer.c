@@ -1,0 +1,1 @@
+int tested(int n){int m=n&7,s=0;{char d[m+4096];for(int i=0;i<m+4096;i++)d[i]=7;s+=d[m];}{int c[m+1000]={};for(int i=0;i<m+1000;i++)s+=c[i]+1;}{long e[2][m+3]={};s+=(int)e[1][m+2]+(int)sizeof e;}return s;}

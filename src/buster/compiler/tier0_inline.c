@@ -1462,7 +1462,8 @@ static bool tier0_inline(const Tier0InlineInput* input, Arena* arena, Tier0Inlin
         g.segments = plan.segments;
         g.volatiles = plan.volatiles;
         g.vector_bytes = plan.transport;
-        // Lifetimes are ir_lower's alone (Tier 0 ignores them), and G reaches only Tier 0.
+        // Entry-indexed IR annotations belong to the original streams. This splice reaches only Tier 0.
+        g.predictable_branches = NULL;
         g.lifetime_entries = 0;
         g.lifetime_locals = 0;
         g.lifetime_count = 0;

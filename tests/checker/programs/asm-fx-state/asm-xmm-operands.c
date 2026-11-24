@@ -1,0 +1,1 @@
+int tested(int n){double d=n*0.5,e=n+0.25;__asm__("addpd %1, %0" : "+x"(d) : "x"(e));float f=(float)n,g;__asm__("movaps %1, %0\n\taddps %1, %0" : "=&x"(g) : "x"(f));return (int)(d*4)+(int)(g*2);}

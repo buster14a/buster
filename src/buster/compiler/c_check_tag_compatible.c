@@ -642,8 +642,7 @@ static bool check_input_tag_compatible(CheckInputReader* reader, uint32_t keywor
         }
         if (valid && compatible && !odr)
         {
-            check_input_rare_claim(reader, &reader->tag_types[keyword]);
-            reader->tag_types[keyword] = earlier;
+            check_input_memo_set(reader, &reader->tag_types, keyword, earlier);
         }
         else if (valid)
         {

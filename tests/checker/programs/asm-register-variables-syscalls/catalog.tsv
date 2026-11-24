@@ -1,0 +1,12 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+asm-register-variables-syscalls	asm-register-variables-syscalls.c	-	asm-register-variables-syscalls
+# Each shape of a register variable's operand, as clang places it: an input in the variable's register whatever its
+# letters ("a"), through a cast that keeps its width, by a 32-bit name of a 64-bit register and as an int's 32-bit
+# name; outputs in their variables' registers, a memory output's among them; a `+` operand in a callee-saved one; a
+# matching input in its variable's register, not its output's; an XMM register's; and a template of no instructions.
+asm-register-variables	asm-register-variables.c	-	asm-register-variables
+# Register variables in high byte registers (#1846), loaded and stored by their names and printed by them (by the
+# register's other names under a modifier): a `+` one, an input by its modifiers, an output, a matching input in
+# its output's, and a short in "ah", which clang's code takes as ax.
+asm-register-variables-high	asm-register-variables-high.c	-	asm-register-variables-high

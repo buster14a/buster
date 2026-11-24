@@ -1,0 +1,8 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+ignored-excess-initializer-does-not-execute	ignored-excess-initializer-does-not-execute.c	-	ignored-excess-initializer-does-not-execute
+statement-region-value-and-effects	statement-region-value-and-effects.c	-	statement-region-value-and-effects
+statement-region-pending-call-values	statement-region-pending-call-values.c	-	statement-region-pending-call-values
+statement-region-return-escape	statement-region-return-escape.c	-	statement-region-return-escape
+statement-region-goto-escape	statement-region-goto-escape.c	-	statement-region-goto-escape
+statement-region-loop-escape	statement-region-loop-escape.c	-	statement-region-loop-escape

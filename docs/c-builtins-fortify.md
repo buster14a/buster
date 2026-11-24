@@ -171,6 +171,13 @@ The lowering now expands a direct call of such a wrapper in its caller
 The two tiers both lower from the expanded typed stream, so `-c`, `--tier1`,
 `-S`, `-g` and an executable all take the checks.
 
+When compiling an object, assembly, or an executable, buster warns once per
+translation unit that requests a positive `_FORTIFY_SOURCE` level. The warning
+also applies if glibc selected a positive level before the source undefined the
+macro. Use `-Werror=fortify-source` to reject a build with these limits, or
+`-Wno-fortify-source` to acknowledge them. Syntax-only and preprocessing-only
+commands skip this code-generation diagnostic.
+
 What stays unchecked:
 
 - **Two of glibc's longer wrappers.** Of the 71 `__fortify_function`

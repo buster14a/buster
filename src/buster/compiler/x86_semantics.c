@@ -2875,20 +2875,19 @@ static __attribute__((unused)) uint32_t x86_effects_control(const X86Effects* ef
     return effects->kinds >> 4;
 }
 
-// The vector registers an IMPLICIT_VECTORS form reads and writes besides its roles', XMM0 at bit 0, each write's rest
-// as KEEP_UPPER says (LLVM's X86InstrKL.td has the same): aesencwide128kl to aesdecwide256kl read and write XMM0 to
-// XMM7, their 8 blocks; encodekey128 reads its key from XMM0 and writes its handle to XMM0 to XMM2 and zeros to XMM4 to
-// XMM6, encodekey256 its key from XMM0 and XMM1 and its handle to XMM0 to XMM3; and loadiwkey reads its integrity key
-// from XMM0. Both are 0 for every other form.
-static __attribute__((unused)) void x86_implicit_vectors(uint32_t form, uint32_t* reads, uint32_t* writes)
-{
-    const uint32_t number = form & BUSTER_X86_FORM_NUMBER;
-    const bool wide = number >= X86_FORM_AESENCWIDE128KL_M384 && number <= X86_FORM_AESDECWIDE256KL_M512;
-    const bool key128 = number == X86_FORM_ENCODEKEY128_R32_R32;
-    const bool key256 = number == X86_FORM_ENCODEKEY256_R32_R32;
-    *reads = wide ? 0xffu : key256 ? 0x03u : key128 || number == X86_FORM_LOADIWKEY_X_X ? 0x01u : 0;
-    *writes = wide ? 0xffu : key256 ? 0x7fu : key128 ? 0x77u : 0;
-}
+// Key Locker's implicit XMM0 to XMM7, with reads in the low byte and writes in the next. The seven rows fit in one
+// register for the effects pass. The intrinsics trace uses the same sets before KEEP_UPPER adds reads of destinations.
+#define BUSTER_X86_KEY_LOCKER(form, reads, writes) [X86_FORM_##form - X86_FORM_AESENCWIDE128KL_M384] = (reads) | ((writes) << 8)
+static const uint64_t x86_implicit_vectors[8] = {
+    BUSTER_X86_KEY_LOCKER(AESENCWIDE128KL_M384, 0xff, 0xff),
+    BUSTER_X86_KEY_LOCKER(AESDECWIDE128KL_M384, 0xff, 0xff),
+    BUSTER_X86_KEY_LOCKER(AESENCWIDE256KL_M512, 0xff, 0xff),
+    BUSTER_X86_KEY_LOCKER(AESDECWIDE256KL_M512, 0xff, 0xff),
+    BUSTER_X86_KEY_LOCKER(ENCODEKEY128_R32_R32, 0x01, 0x77),
+    BUSTER_X86_KEY_LOCKER(ENCODEKEY256_R32_R32, 0x03, 0x7f),
+    BUSTER_X86_KEY_LOCKER(LOADIWKEY_X_X, 0x01, 0x00),
+};
+#undef BUSTER_X86_KEY_LOCKER
 
 // ---------------------------------------------------------------------------------------------------------------------
 // The immediate's contract
@@ -3181,7 +3180,7 @@ static __attribute__((unused)) uint64_t x86_register_resource(uint8_t value, boo
 //     - a VEX gather's mask, vvvv, which it reads and clears, and its destination, which keeps what the mask leaves;
 //     - a VSIB operand's index, a vector register, where the common block took a general one: a VSIB form reads no
 //       general register but its base, so the index's is dropped and the base's kept;
-//     - Key Locker's vector registers that no role names (x86_implicit_vectors' sets);
+//     - Key Locker's vector registers that no role names (x86_implicit_vectors);
 //     - with `opmasks`, vp2intersect's opmask pair (an even register and the next) and a gather's or a scatter's record
 //       opmask, which it clears.
 // A KEEP_UPPER form reads every vector register these add to its writes, as the common block's do. Apart from the
@@ -3254,7 +3253,21 @@ static __attribute__((noinline)) void x86_effects_rare_records(const X86Instruct
         __m512i added_write = _mm512_permutexvar_epi64(rare_index, _mm512_loadu_si512(x86_rare_writes));
         const __mmask8 implicit = rare & _mm512_test_epi64_mask(properties, _mm512_set1_epi64(BUSTER_X86_EFFECT_IMPLICIT_VECTORS));
         const __mmask8 operands = rare & _mm512_test_epi64_mask(properties, _mm512_set1_epi64(BUSTER_X86_EFFECT_RARE));
-        if ((implicit | operands) != 0)
+        if (implicit != 0)
+        {
+            // Reduce each form to its row as in x86_semantics_row. GS is two table lengths and FS is one, so the two
+            // subtractions also remove SS (three lengths). Only Key Locker lanes contribute to the lookup.
+            const __m512i number = _mm512_and_si512(_mm512_srli_epi64(high, 32), _mm512_set1_epi64(BUSTER_X86_FORM_NUMBER));
+            const __m512i gs = _mm512_set1_epi64(BUSTER_X86_FORM_GS);
+            const __m512i fs = _mm512_set1_epi64(BUSTER_X86_FORM_FS);
+            __m512i row = _mm512_mask_sub_epi64(number, _mm512_cmpge_epu64_mask(number, gs), number, gs);
+            row = _mm512_mask_sub_epi64(row, _mm512_cmpge_epu64_mask(row, fs), row, fs);
+            const __m512i slot = _mm512_sub_epi64(row, _mm512_set1_epi64(X86_FORM_AESENCWIDE128KL_M384));
+            const __m512i vectors = _mm512_maskz_permutexvar_epi64(implicit, slot, _mm512_loadu_si512(x86_implicit_vectors));
+            added_read = _mm512_or_si512(added_read, _mm512_slli_epi64(_mm512_and_si512(vectors, bytes), BUSTER_X86_RESOURCE_VECTOR_SHIFT));
+            added_write = _mm512_or_si512(added_write, _mm512_slli_epi64(_mm512_srli_epi64(vectors, 8), BUSTER_X86_RESOURCE_VECTOR_SHIFT));
+        }
+        if (operands != 0)
         {
             const __mmask8 vsib = operands & (__mmask8)_pext_u64(packed, 0x0101010101010101ull * BUSTER_X86_EFFECT_OPERAND_VSIB);
             const __mmask8 vex_gather = vsib & (__mmask8)_pext_u64(packed, 0x0101010101010101ull * BUSTER_X86_EFFECT_OPERAND_VEX);
@@ -3266,7 +3279,6 @@ static __attribute__((noinline)) void x86_effects_rare_records(const X86Instruct
             const __m512i index = _mm512_and_si512(_mm512_srli_epi64(high, 16), bytes);
             const __m512i mode = _mm512_and_si512(_mm512_srli_epi64(high, 24), bytes);
             const __m512i vvvv = _mm512_and_si512(_mm512_srli_epi64(high, 48), bytes);
-            const __m512i number = _mm512_and_si512(_mm512_srli_epi64(high, 32), _mm512_set1_epi64(BUSTER_X86_FORM_NUMBER));
             // An /is4 register.
             added_read = _mm512_mask_or_epi64(added_read, is4, added_read,
                                               _mm512_sllv_epi64(one, _mm512_add_epi64(_mm512_and_si512(_mm512_srli_epi64(low, 4), fifteen), vector_shift)));
@@ -3275,20 +3287,6 @@ static __attribute__((noinline)) void x86_effects_rare_records(const X86Instruct
             const __m512i destination = _mm512_sllv_epi64(one, _mm512_add_epi64(_mm512_and_si512(reg, fifteen), vector_shift));
             added_read = _mm512_mask_or_epi64(added_read, vex_gather, added_read, _mm512_or_si512(mask_vector, destination));
             added_write = _mm512_mask_or_epi64(added_write, vex_gather, added_write, mask_vector);
-            // Key Locker's implicit vector registers.
-            const __mmask8 wide = implicit & _mm512_cmpge_epu64_mask(number, _mm512_set1_epi64(X86_FORM_AESENCWIDE128KL_M384)) &
-                                  _mm512_cmple_epu64_mask(number, _mm512_set1_epi64(X86_FORM_AESDECWIDE256KL_M512));
-            const __mmask8 key128 = implicit & _mm512_cmpeq_epi64_mask(number, _mm512_set1_epi64(X86_FORM_ENCODEKEY128_R32_R32));
-            const __mmask8 key256 = implicit & _mm512_cmpeq_epi64_mask(number, _mm512_set1_epi64(X86_FORM_ENCODEKEY256_R32_R32));
-            const __mmask8 integrity = implicit & _mm512_cmpeq_epi64_mask(number, _mm512_set1_epi64(X86_FORM_LOADIWKEY_X_X));
-            __m512i implicit_reads = _mm512_maskz_mov_epi64(wide, _mm512_set1_epi64(0xff));
-            implicit_reads = _mm512_mask_mov_epi64(implicit_reads, key256, _mm512_set1_epi64(0x03));
-            implicit_reads = _mm512_mask_mov_epi64(implicit_reads, key128 | integrity, _mm512_set1_epi64(0x01));
-            __m512i implicit_writes = _mm512_maskz_mov_epi64(wide, _mm512_set1_epi64(0xff));
-            implicit_writes = _mm512_mask_mov_epi64(implicit_writes, key256, _mm512_set1_epi64(0x7f));
-            implicit_writes = _mm512_mask_mov_epi64(implicit_writes, key128, _mm512_set1_epi64(0x77));
-            added_read = _mm512_or_si512(added_read, _mm512_slli_epi64(implicit_reads, BUSTER_X86_RESOURCE_VECTOR_SHIFT));
-            added_write = _mm512_or_si512(added_write, _mm512_slli_epi64(implicit_writes, BUSTER_X86_RESOURCE_VECTOR_SHIFT));
             // A VSIB operand's index: its vector register for the general one, the base's general register kept, where the
             // common block took them (a memory operand it accesses or whose address it takes).
             const __m512i role_rm = _mm512_srli_epi64(facts, 32 + BUSTER_X86_ROLE_BITS);
@@ -3307,7 +3305,6 @@ static __attribute__((noinline)) void x86_effects_rare_records(const X86Instruct
                 const __mmask8 opmask_reg = _mm512_test_epi64_mask(properties, _mm512_set1_epi64(BUSTER_X86_EFFECT_OPMASK_REG)) & pair;
                 const __m512i pair_registers = _mm512_sllv_epi64(_mm512_set1_epi64(3), _mm512_and_si512(reg, _mm512_set1_epi64(6)));
                 __m512i opmask = _mm512_cvtepu16_epi64(_mm_maskz_loadu_epi16(rare, opmasks + first));
-                opmask = _mm512_mask_or_epi64(opmask, opmask_reg & _mm512_test_epi64_mask(role_reg, _mm512_set1_epi64(BUSTER_X86_ROLE_READ)), opmask, pair_registers);
                 opmask = _mm512_mask_or_epi64(opmask, opmask_reg & _mm512_test_epi64_mask(role_reg, _mm512_set1_epi64(BUSTER_X86_ROLE_WRITE)), opmask,
                                               _mm512_slli_epi64(pair_registers, 8));
                 opmask = _mm512_mask_or_epi64(opmask, masked & vsib, opmask, _mm512_slli_epi64(_mm512_sllv_epi64(one, mask_number), 8));

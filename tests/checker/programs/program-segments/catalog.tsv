@@ -1,0 +1,42 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+segment-thread-locals	segment-thread-locals.c	-	segment-thread-locals
+segment-vectors	segment-vectors.c	-	segment-vectors
+segment-gs-globals	segment-gs-globals.c	-	segment-gs-globals
+# The atomic builtins a direct plan takes (#1059): loads and stores (a seq_cst store's xchg), lock xadd, xchg,
+# lock cmpxchg, a bitwise or a minimum's loop of a LOAD and lock cmpxchg, __sync's, C11's, test-and-set's xchg.
+segment-atomics	segment-atomics.c	-	segment-atomics
+# Bit-fields: their unit's pieces read and written through %fs (check_lower_bit_unit, check_lower_bit_store), a unit of
+# 1, 2, 4 and 8 bytes and one of 3 bytes' pieces, signed and unsigned, by assignments, updates and increments.
+segment-bit-fields	segment-bit-fields.c	-	segment-bit-fields
+# A vector's elements through the vector's override (check_lower_element_segment), which their own type has lost: read,
+# assigned, compound-assigned, incremented and decremented, of ints, floats and shorts, at constant and variable indices,
+# through `(*p)[i]` and `p[0][i]`.
+segment-vector-elements	segment-vector-elements.c	-	segment-vector-elements
+# Half-precision values, whose loads and stores are a U16's (c_check_program_half.c): _Float16's and __bf16's, read,
+# assigned, compound-assigned, incremented and decremented, through %fs.
+segment-half-precision	segment-half-precision.c	-	segment-half-precision
+# %ss's space (258), whose base 64-bit mode ignores, so that a flat address cast to it reaches its object: clang's 36 on
+# each access, of integers, floating values, long double, __int128, vectors and their elements, members and bit-fields,
+# the direct atomic plans, and globals in the space (RIP-relative, `ss:x(%rip)`).
+segment-ss	segment-ss.c	-	segment-ss
+# Aggregates (#1447): a read of a struct's, a union's or a complex value's object in a segment is a copy of its bytes
+# through the override to a frame object (check_lower_segment_read), whose address its consumers take (a copy, a call's
+# argument, a register return, a conditional's forwarding); a struct's assignment into one copies through it
+# (check_lower_copy_segmented), and its value is the stored bytes. Sizes of 8, 13 and 24 bytes, in %fs and %ss.
+segment-aggregates	segment-aggregates.c	-	segment-aggregates
+# Complex values, __float128s and _BitInts (#1447): a complex value's store (a copy through the override), its updates
+# and a real object's update by a complex value (check_lower_segment_update: the object copied to a frame object,
+# updated there and copied back), its parts as lvalues (check_lower_element_segment: `__real__ *p` read, stored and
+# updated), a __float128's and a wide _BitInt's updates the same way, and a narrow _BitInt's read, store and update,
+# whose LOAD and STORE take the override as an integer's do. In %fs and %ss.
+segment-complex-bit-int	segment-complex-bit-int.c	-	segment-complex-bit-int
+# _Atomic lvalues (#1447): their plans' direct accesses take the override (CheckLowerAtomic.segment), as clang's code has
+# it: a load's mov, a store's xchg, an increment's or an addition's lock xadd, another update's loop of a load and lock
+# cmpxchg (a double's too), of 1, 2, 4 and 8 bytes; a struct's library calls (__atomic_load, __atomic_store) take its
+# address as it is, as clang's do, which in %ss (whose base is 0) is the object's.
+segment-atomic-lvalues	segment-atomic-lvalues.c	-	segment-atomic-lvalues
+# A vector of bool's elements (#1447): the byte that holds each bit read, and read and written for an assignment,
+# through the vector's override (check_lower_transport_bit_read, check_lower_transport_bit_store), of 8 and 64 bits, in
+# %fs and %ss.
+segment-bool-vectors	segment-bool-vectors.c	-	segment-bool-vectors

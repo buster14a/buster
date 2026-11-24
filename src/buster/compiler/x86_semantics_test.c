@@ -1160,6 +1160,50 @@ static bool x86_semantics_check_resolved(void)
         x86_semantics_expect(&tally, reads == cases[i].reads && writes == cases[i].writes, "%s: reads %#llx and writes %#llx, not %#llx and %#llx", cases[i].what,
                              (unsigned long long)reads, (unsigned long long)writes, (unsigned long long)cases[i].reads, (unsigned long long)cases[i].writes);
     }
+    // The seven Key Locker forms with implicit XMM operands, plain and with each segment override (#3510).
+    // ENCODEKEY keeps the upper bits of every vector it writes, so those registers also appear in its resolved reads.
+    const uint64_t xmm0 = BUSTER_X86_RESOURCE_VECTOR(0);
+    const uint64_t wide_reads = 0xff * xmm0 | BUSTER_X86_RESOURCE_GPR(0) | memory;
+    const uint64_t wide_writes = 0xff * xmm0 | status;
+    const X86SemanticsResolved key_locker[] = {
+        { { .form = X86_FORM_AESENCWIDE128KL_M384, .mode = BUSTER_X86_MEMORY_BASE }, wide_reads, wide_writes },
+        { { .form = X86_FORM_AESDECWIDE128KL_M384, .mode = BUSTER_X86_MEMORY_BASE }, wide_reads, wide_writes },
+        { { .form = X86_FORM_AESENCWIDE256KL_M512, .mode = BUSTER_X86_MEMORY_BASE }, wide_reads, wide_writes },
+        { { .form = X86_FORM_AESDECWIDE256KL_M512, .mode = BUSTER_X86_MEMORY_BASE }, wide_reads, wide_writes },
+        { { .form = X86_FORM_ENCODEKEY128_R32_R32, .reg = 1, .rm = 2 }, 0x77 * xmm0 | BUSTER_X86_RESOURCE_GPR(2), 0x77 * xmm0 | BUSTER_X86_RESOURCE_GPR(1) | status },
+        { { .form = X86_FORM_ENCODEKEY256_R32_R32, .reg = 1, .rm = 2 }, 0x7f * xmm0 | BUSTER_X86_RESOURCE_GPR(2), 0x7f * xmm0 | BUSTER_X86_RESOURCE_GPR(1) | status },
+        { { .form = X86_FORM_LOADIWKEY_X_X, .reg = 8, .rm = 9 }, xmm0 | BUSTER_X86_RESOURCE_VECTOR(8) | BUSTER_X86_RESOURCE_VECTOR(9) | BUSTER_X86_RESOURCE_GPR(0), status },
+    };
+    const uint16_t offsets[] = { 0, BUSTER_X86_FORM_FS, BUSTER_X86_FORM_GS, BUSTER_X86_FORM_SS };
+    for (uint32_t s = 0; s < BUSTER_ARRAY_LENGTH(offsets); s += 1)
+    {
+        X86Instruction records[BUSTER_ARRAY_LENGTH(key_locker)];
+        uint64_t reads[BUSTER_ARRAY_LENGTH(key_locker)];
+        uint64_t writes[BUSTER_ARRAY_LENGTH(key_locker)];
+        uint16_t opmasks[BUSTER_ARRAY_LENGTH(key_locker)] = { 0 };
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(records); i += 1)
+        {
+            records[i] = key_locker[i].record;
+            records[i].form += offsets[s];
+        }
+        for (uint32_t path = 0; path < 2; path += 1)
+        {
+            if (path == 0)
+            {
+                x86_instructions_effects(records, BUSTER_ARRAY_LENGTH(records), reads, writes);
+            }
+            else
+            {
+                x86_instructions_effects_opmasks(records, BUSTER_ARRAY_LENGTH(records), reads, writes, opmasks);
+            }
+            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(records); i += 1)
+            {
+                x86_semantics_expect(&tally, reads[i] == key_locker[i].reads && writes[i] == key_locker[i].writes && opmasks[i] == 0,
+                                     "%s segment %u%s: reads %#llx, writes %#llx, opmasks %#x", x86_semantics_test_name(records[i].form), s,
+                                     path ? " with opmasks" : "", (unsigned long long)reads[i], (unsigned long long)writes[i], opmasks[i]);
+            }
+        }
+    }
     // The opmask registers' effects (#760), each by both paths with `opmasks` (bits 0 to 7 read, 8 to 15 written), and
     // without them everything: a record with an opmask, or a form with an opmask register, reads and writes every resource.
     typedef struct X86SemanticsOpmaskCase X86SemanticsOpmaskCase;
@@ -3003,9 +3047,9 @@ static void x86_semantics_random_columns(uint64_t seed, uint32_t count, uint16_t
     }
 }
 
-// The random columns' outputs at seed 1 and 20,000 items (x86_semantics_check_columns' digest), frozen on 2026-11-23
-// while the scalar twins (deleted by #2924) still agreed with the vector paths on every item.
-#define BUSTER_X86_SEMANTICS_TEST_COLUMNS_DIGEST UINT64_C(0x29cb9333cc73944d)
+// Seed 1, 20,000 records. This covers the implicit XMM effects of segment-overridden Key Locker
+// forms and the x87 stack effects of FXCH. Check every form on the host when updating this digest.
+#define BUSTER_X86_SEMANTICS_TEST_COLUMNS_DIGEST UINT64_C(0xe90dd1a2b25b0ac5)
 
 static uint64_t x86_semantics_fold(uint64_t digest, const void* bytes, uint64_t size)
 {

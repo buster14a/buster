@@ -1,0 +1,10 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+asm-lock-prefix-statements	asm-lock-prefix-statements.c	-	asm-lock-prefix-statements
+# The forms of musl's x86_64 math (src/math/x86_64), in functions of this test's own: sqrtsd and sqrtss, cvtsd2si and
+# cvtss2si into 64- and 32-bit registers under MXCSR's rounding, and a magnitude's mask, all ones (pcmpeqd) shifted
+# right (psrlq, psrld), and-ed in (andps).
+asm-sse-scalar-math	asm-sse-scalar-math.c	-	asm-sse-scalar-math
+# dr_flac's lzcnt, `rep; bsr` in GCC's dialect alternatives (the AT&T one, `bsrq %1, %0`), and tzcnt so: their bytes
+# (F3 0F BD and BC), which run as the scans where the processor has no LZCNT or BMI (of operands never zero, alike).
+asm-rep-bsr	asm-rep-bsr.c	-	asm-rep-bsr

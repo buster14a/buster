@@ -1,0 +1,1 @@
+struct T{unsigned char a,b,c;};int take(x)_Atomic struct T x;{struct T v=x;return v.a+v.b*3+v.c*7;}int f(a,b,c,d)_Atomic int a;_Atomic unsigned char b;_Atomic float c;float d;{a+=2;b+=3;c+=0.5f;return a+b+(int)(c*10+d*10);}int tested(int n){struct T t={(unsigned char)n,5,7};return f(n&255,259,1.25,3.7)+take(t);}

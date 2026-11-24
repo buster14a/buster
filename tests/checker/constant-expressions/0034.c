@@ -1,0 +1,1 @@
+typedef int V __attribute__((vector_size(16))); V a; enum { N=sizeof(__builtin_convertvector(a,float __attribute__((vector_size(16))))) }; typedef int T [[gnu::aligned(sizeof(__builtin_convertvector(a,float __attribute__((vector_size(16))))))]]; _Static_assert(N==16 && _Alignof(T)==16, "abstract vector destination");

@@ -3395,6 +3395,7 @@ struct CheckTestFixtures
     Arena storage;
     CheckSourceFixture* cases;
     const char** files;
+    char** expected;
     uint32_t count;
     char problem[512];
 };
@@ -3408,8 +3409,8 @@ static const TypeCapacity* check_test_fixture_capacity(const char* name)
 }
 
 // The bytes of the file at `path`, NUL-terminated, in `storage`, and their count in `length`; null, with the reason in
-// `fixtures->problem`, when it can't be read, is larger than CHECK_TEST_FIXTURE_BYTES or holds a NUL.
-static char* check_test_fixture_read(CheckTestFixtures* fixtures, const char* path, uint64_t* length)
+// `fixtures->problem`, when it can't be read, is larger than CHECK_TEST_FIXTURE_BYTES or, for text, holds a NUL.
+static char* check_test_fixture_read_bytes(CheckTestFixtures* fixtures, const char* path, bool binary, uint64_t* length)
 {
     char* bytes = 0;
     const int file = open(path, O_RDONLY | O_CLOEXEC);
@@ -3438,7 +3439,7 @@ static char* check_test_fixture_read(CheckTestFixtures* fixtures, const char* pa
         {
             snprintf(fixtures->problem, sizeof(fixtures->problem), "can't read %s whole", path);
         }
-        else if (memchr(buffer, 0, size) != 0)
+        else if (!binary && memchr(buffer, 0, size) != 0)
         {
             snprintf(fixtures->problem, sizeof(fixtures->problem), "%s holds a NUL byte", path);
         }
@@ -3454,6 +3455,11 @@ static char* check_test_fixture_read(CheckTestFixtures* fixtures, const char* pa
         close(file);
     }
     return bytes;
+}
+
+static char* check_test_fixture_read(CheckTestFixtures* fixtures, const char* path, uint64_t* length)
+{
+    return check_test_fixture_read_bytes(fixtures, path, false, length);
 }
 
 // Whether `text` is 1 to `limit` letters, digits, '.', '_' and '-'.
@@ -3553,7 +3559,10 @@ static bool check_test_fixture_orphans(CheckTestFixtures* fixtures, const char* 
         bool named = strcmp(name, ".") == 0 || strcmp(name, "..") == 0 || strcmp(name, "catalog.tsv") == 0;
         for (uint32_t i = 0; !named && i < fixtures->count; i += 1)
         {
-            named = strcmp(fixtures->files[i], name) == 0;
+            const char* source = fixtures->files[i];
+            const size_t length = strlen(source);
+            named = source[0] != '@' && (strcmp(source, name) == 0 ||
+                    (fixtures->expected != NULL && strncmp(source, name, length) == 0 && strcmp(name + length, ".expected") == 0));
         }
         if (!named)
         {
@@ -3568,10 +3577,19 @@ static bool check_test_fixture_orphans(CheckTestFixtures* fixtures, const char* 
     return clean;
 }
 
+// A private source generator or an independently modeled oracle probe, selected by its @name.
+typedef struct CheckTestBoundSource CheckTestBoundSource;
+struct CheckTestBoundSource
+{
+    const char* name;
+    const char* source;
+};
+
 // The cases of the catalog `suite` (a directory under the fixture root), and their sources; false, with the reason in
 // `fixtures->problem`, when any of it is wrong (the file's first comment).
-static bool check_test_fixtures_load(CheckTestFixtures* fixtures, const char* suite)
+static bool check_test_fixtures_load_bound(CheckTestFixtures* fixtures, const char* suite, const CheckTestBoundSource* bindings, uint32_t binding_count, bool with_expected)
 {
+    uint32_t used_bindings = 0;
     *fixtures = (CheckTestFixtures){ .storage = arena_reserve(UINT64_C(1) << 28) };
     char directory[PATH_MAX];
     char path[PATH_MAX + 64];
@@ -3580,8 +3598,12 @@ static bool check_test_fixtures_load(CheckTestFixtures* fixtures, const char* su
     fixtures->cases = arena_push(&fixtures->storage, sizeof(CheckSourceFixture) * CHECK_TEST_FIXTURE_CASES, 8);
     fixtures->files = arena_push(&fixtures->storage, sizeof(const char*) * CHECK_TEST_FIXTURE_CASES, 8);
     const char** identifiers = arena_push(&fixtures->storage, sizeof(const char*) * CHECK_TEST_FIXTURE_CASES, 8);
+    if (with_expected)
+    {
+        fixtures->expected = arena_push(&fixtures->storage, sizeof(*fixtures->expected) * CHECK_TEST_FIXTURE_CASES, 8);
+    }
     uint64_t length = 0;
-    char* catalog = fixtures->cases != 0 && fixtures->files != 0 && identifiers != 0 ? check_test_fixture_read(fixtures, path, &length) : 0;
+    char* catalog = fixtures->cases != 0 && fixtures->files != 0 && identifiers != 0 && (!with_expected || fixtures->expected != NULL) ? check_test_fixture_read(fixtures, path, &length) : 0;
     bool valid = catalog != 0;
     if (valid && (length == 0 || catalog[length - 1] != '\n'))
     {
@@ -3617,8 +3639,21 @@ static bool check_test_fixtures_load(CheckTestFixtures* fixtures, const char* su
                 count += 1;
             }
             const size_t file_length = count == 4 ? strlen(fields[1]) : 0;
-            valid = count == 4 && check_test_fixture_word(fields[0], 64) && check_test_fixture_word(fields[1], 128) && file_length > 2 &&
-                    strcmp(fields[1] + file_length - 2, ".c") == 0 && fields[3][0] != 0 && fixtures->count < CHECK_TEST_FIXTURE_CASES;
+            const char* bound_source = NULL;
+            if (count == 4 && fields[1][0] == '@')
+            {
+                for (uint32_t i = 0; i < binding_count; i += 1)
+                {
+                    if (strcmp(fields[1], bindings[i].name) == 0)
+                    {
+                        bound_source = bindings[i].source;
+                        break;
+                    }
+                }
+            }
+            const bool source_file = file_length > 2 && check_test_fixture_word(fields[1], 128) && strcmp(fields[1] + file_length - 2, ".c") == 0;
+            valid = count == 4 && check_test_fixture_word(fields[0], 64) && (source_file || bound_source != NULL) &&
+                    fields[3][0] != 0 && fixtures->count < CHECK_TEST_FIXTURE_CASES;
             if (!valid)
             {
                 snprintf(fixtures->problem, sizeof(fixtures->problem), "%s line %u isn't ID, FILE.c, FLAGS and NAME, tab-separated", path, line);
@@ -3637,13 +3672,24 @@ static bool check_test_fixtures_load(CheckTestFixtures* fixtures, const char* su
                 *fixture = (CheckSourceFixture){ .name = fields[3] };
                 valid = check_test_fixture_flags(fixtures, fields[2], fixture, line);
             }
-            if (valid)
+            if (valid && bound_source != NULL)
+            {
+                fixture->source = bound_source;
+                used_bindings += 1;
+            }
+            else if (valid)
             {
                 char source_path[PATH_MAX + 256];
                 snprintf(source_path, sizeof(source_path), "%s/%s", directory, fields[1]);
                 uint64_t source_length = 0;
                 fixture->source = check_test_fixture_read(fixtures, source_path, &source_length);
                 valid = fixture->source != 0;
+                if (valid && with_expected)
+                {
+                    snprintf(source_path, sizeof(source_path), "%s/%s.expected", directory, fields[1]);
+                    fixtures->expected[fixtures->count] = check_test_fixture_read(fixtures, source_path, &source_length);
+                    valid = fixtures->expected[fixtures->count] != NULL;
+                }
             }
             if (valid)
             {
@@ -3659,7 +3705,65 @@ static bool check_test_fixtures_load(CheckTestFixtures* fixtures, const char* su
         snprintf(fixtures->problem, sizeof(fixtures->problem), "%s names no case", path);
         valid = false;
     }
+    if (valid && used_bindings != binding_count)
+    {
+        snprintf(fixtures->problem, sizeof(fixtures->problem), "%s names %u of the %u bound source cases", path, used_bindings, binding_count);
+        valid = false;
+    }
     return valid && check_test_fixture_orphans(fixtures, directory);
+}
+
+static bool check_test_fixtures_load(CheckTestFixtures* fixtures, const char* suite)
+{
+    return check_test_fixtures_load_bound(fixtures, suite, NULL, 0, false);
+}
+
+enum
+{
+    CHECK_TEST_CATALOG_GNU23 = 1,
+    CHECK_TEST_CATALOG_UNSIGNED_CHAR = 2,
+};
+
+// These private oracles keep their own staging paths and command lines. Reject a dialect that the caller cannot stage.
+static uint32_t check_test_private_catalog(CheckTest* test, CheckTestFixtures* catalog, const char* suite, const CheckTestBoundSource* bindings, uint32_t binding_count,
+                                           uint32_t dialects)
+{
+    bool valid = check_test_fixtures_load_bound(catalog, suite, bindings, binding_count, false);
+    for (uint32_t i = 0; valid && i < catalog->count; i += 1)
+    {
+        const CheckSourceFixture* fixture = catalog->cases + i;
+        valid = (fixture->standard == 0 || (fixture->standard == 2023 && (dialects & CHECK_TEST_CATALOG_GNU23) != 0)) &&
+                (!fixture->char_unsigned || (dialects & CHECK_TEST_CATALOG_UNSIGNED_CHAR) != 0);
+        if (!valid)
+        {
+            snprintf(catalog->problem, sizeof(catalog->problem), "%s: no oracle command for the requested dialect", fixture->name);
+        }
+    }
+    char message[sizeof(catalog->problem) + 128];
+    snprintf(message, sizeof(message), "%s: %s", suite, catalog->problem);
+    check_test_expect(test, valid, message);
+    return valid ? catalog->count : 0;
+}
+
+typedef struct CheckTestOracleBatch CheckTestOracleBatch;
+struct CheckTestOracleBatch
+{
+    char (*paths)[256];
+    char** pointers;
+    uint32_t* indices;
+    ParseTestClang* outcomes;
+};
+
+// One numbered temporary file per case. Pointers, indices and outcomes can be reused for each oracle command.
+static bool check_test_oracle_batch(CheckTest* test, CheckTestOracleBatch* batch, Arena* storage, uint32_t count)
+{
+    batch->paths = arena_push(storage, sizeof(*batch->paths) * count, 8);
+    batch->pointers = arena_push(storage, sizeof(*batch->pointers) * count, 8);
+    batch->indices = arena_push(storage, sizeof(*batch->indices) * count, 8);
+    batch->outcomes = arena_push(storage, sizeof(*batch->outcomes) * count, 8);
+    const bool ready = count != 0 && batch->paths != NULL && batch->pointers != NULL && batch->indices != NULL && batch->outcomes != NULL;
+    check_test_expect(test, ready, "source oracle staging arrays are available");
+    return ready;
 }
 
 // A suite of runtime source fixtures (#2053) under the fixture root, checked as the shared ones are but without their

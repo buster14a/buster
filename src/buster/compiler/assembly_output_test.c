@@ -382,7 +382,7 @@ static bool assembly_test_same_objects(AssemblyTest* test, const uint8_t* ours_b
     {
         memcpy(ours, ours_bytes, ours_size);
     }
-    bool passed = ours != 0 && theirs.pointer != 0 && object_view_open(&ours_view, ours, ours_size, false, error, error_size) &&
+    bool passed = ours != 0 && theirs.pointer != 0 && asm_test_ordered_object(&ours_view, (String8){ .pointer = (char*)ours, .length = ours_size }, false, &test->scratch, error, error_size) &&
                   asm_test_gnu_object(&theirs_view, theirs, &test->scratch, error, error_size);
     if (passed)
     {
@@ -1145,6 +1145,83 @@ static bool assembly_test_compare(AssemblyTest* test, const char* compiler, cons
     return passed;
 }
 
+// Kernel-style extraction consumes the substituted source spelling. The raw variant intentionally
+// cannot assemble. The .ascii variant can, including the DWARF for the ordinary code beside it.
+static void assembly_test_markers(AssemblyTest* test, const char* compiler)
+{
+    static const char fixture[] =
+        "struct layout { char tag; long value; };\n"
+        "#ifdef RAW\n#define MARK(x) \"\\n->\" x\n#else\n#define MARK(x) \"\\n.ascii \\\"->\" x \"\\\"\"\n#endif\n"
+        "void offsets(void) {\n"
+        "  __asm__ volatile(MARK(\"VALUE %0\") : : \"i\"(__builtin_offsetof(struct layout, value)));\n"
+        "  if (0) __asm__ volatile(MARK(\"DEAD\") : :);\n"
+        "  __asm__ volatile(MARK(\"SIZE %c[size]\") : : [size] \"i\"(sizeof(struct layout)));\n}\n"
+        "static int state = 1;\n"
+        "__attribute__((noinline,section(\".text.work\"))) int work(int input) { int result = input + state; state = result; return result; }\n"
+        "int main(void) { return work(4) != 5; }\n";
+    char source[PATH_MAX];
+    char output[PATH_MAX];
+    char errors[PATH_MAX];
+    char object[PATH_MAX];
+    char control[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/offsets.c", test->directory);
+    snprintf(output, sizeof(output), "%s/offsets.s", test->directory);
+    snprintf(errors, sizeof(errors), "%s/offsets.err", test->directory);
+    snprintf(object, sizeof(object), "%s/offsets.o", test->directory);
+    snprintf(control, sizeof(control), "%s/offsets-direct.o", test->directory);
+    const bool ready = object_write_file(source, (const uint8_t*)fixture, sizeof(fixture) - 1) == OBJECT_ERROR_NONE;
+    assembly_test_check(test, ready, "write inline assembly marker fixture", NULL);
+    for (uint32_t tier = 0; ready && tier < 2; tier += 1)
+    {
+        for (uint32_t raw = 0; raw < 2; raw += 1)
+        {
+            char* args[] = { (char*)compiler, "-g", raw ? "-DRAW" : "-URAW", "-S", "-o", "-", source, tier ? "--tier1" : NULL, NULL };
+            const bool compiled = object_test_run(args, output, errors) == 0;
+            const uint64_t mark = test->scratch.length;
+            const String8 text = compiled ? object_test_read_file(&test->scratch, output) : (String8){ 0 };
+            const char* value = raw ? "\n->VALUE $8\n" : "\n.ascii \"->VALUE $8\"\n";
+            const char* size = raw ? "\n->SIZE 16\n" : "\n.ascii \"->SIZE 16\"\n";
+            const char* first = text.pointer != NULL ? memmem(text.pointer, text.length, value, strlen(value)) : NULL;
+            const char* second = text.pointer != NULL ? memmem(text.pointer, text.length, size, strlen(size)) : NULL;
+            const bool extracted = first != NULL && second != NULL && first < second && memmem(text.pointer, text.length, "->DEAD", 6) == NULL;
+            assembly_test_check(test, compiled && extracted, "extract checked offsets in source order at both tiers", errors);
+            arena_pop_to(&test->scratch, mark);
+            if (raw)
+            {
+                char* direct[] = { (char*)compiler, "-c", "-DRAW", source, "-o", object, tier ? "--tier1" : NULL, NULL };
+                assembly_test_check(test, object_test_run(direct, "/dev/null", errors) == 1, "direct object emission still diagnoses raw marker text", errors);
+            }
+            else
+            {
+                char* reassemble[] = { (char*)compiler, "-c", output, "-o", object, NULL };
+                char* direct[] = { (char*)compiler, "-g", "-c", source, "-o", control, tier ? "--tier1" : NULL, NULL };
+                const bool built = compiled && object_test_run(reassemble, "/dev/null", errors) == 0 && object_test_run(direct, "/dev/null", errors) == 0;
+                const String8 expected = built ? object_test_read_file(&test->scratch, control) : (String8){ 0 };
+                const String8 actual = built ? object_test_read_file(&test->scratch, object) : (String8){ 0 };
+                char difference[512] = { 0 };
+                const bool same = expected.pointer != NULL && assembly_test_same_objects(test, (const uint8_t*)expected.pointer, expected.length, actual, difference, sizeof(difference));
+                assembly_test_check(test, same, "Buster preserves offset marker bytes, DWARF and relocations", built ? difference : errors);
+                arena_pop_to(&test->scratch, mark);
+            }
+        }
+        // Exercise section offsets, global addresses, function addresses and value location lists.
+        AssemblyTest options = *test;
+        options.options[0] = "-g";
+        options.option_count = 1;
+        char error[512] = { 0 };
+        const bool same = assembly_test_compare(&options, compiler, source, tier ? "offsets-debug-1" : "offsets-debug-0", tier != 0, error, sizeof(error));
+        assembly_test_check(test, same, "GNU as preserves offset marker bytes, DWARF and relocations", error);
+    }
+    if (!test->keep)
+    {
+        unlink(source);
+        unlink(output);
+        unlink(errors);
+        unlink(object);
+        unlink(control);
+    }
+}
+
 // --c-testsuite DIRECTORY --subset FILE: assembly_test_c_program for each program the subset lists (its lines of digits
 // alone, as test-c-testsuite reads it), at Tier 0 and with --tier1.
 static void assembly_test_c_testsuite(AssemblyTest* test, const char* directory, const char* subset)
@@ -1278,8 +1355,16 @@ static int run_assembly_output_tests(int count, char** arguments)
             assembly_test_c_testsuite(&test, c_testsuite, subset);
         }
         char compiler[PATH_MAX];
-        const ssize_t length = compared_count != 0 ? readlink("/proc/self/exe", compiler, sizeof(compiler) - 1) : 0;
+        const ssize_t length = compared_count != 0 || test.cross_check ? readlink("/proc/self/exe", compiler, sizeof(compiler) - 1) : 0;
         compiler[length > 0 ? length : 0] = 0;
+        if (test.cross_check)
+        {
+            assembly_test_check(&test, length > 0, "locate the compiler for offset marker tests", NULL);
+            if (length > 0)
+            {
+                assembly_test_markers(&test, compiler);
+            }
+        }
         for (uint32_t i = 0; i < compared_count; i += 1)
         {
             for (uint32_t tier = 0; tier < 2; tier += 1)
