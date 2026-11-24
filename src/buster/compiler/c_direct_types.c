@@ -743,7 +743,8 @@ static inline void fast_cc_scope_leave(FastCCState* cc, uint32_t mark)
     cc->scope_depth -= 1u;
 }
 
-static uint32_t fast_cc_sym_bind(FastCCState* cc, uint32_t id, FastSym sym)
+// Inlined: the caller's record is then built where it is kept, with no copy of fields just stored one by one.
+static inline __attribute__((always_inline)) uint32_t fast_cc_sym_bind(FastCCState* cc, uint32_t id, FastSym sym)
 {
     uint32_t idx = 0;
     if (id < cc->env_cap && cc->sym_count < cc->sym_cap)
@@ -1777,7 +1778,10 @@ struct FastDeclaratorResult
 // struct/union tags — NEVER calls fast_cc_parse_record_iter so the call graph stays strictly acyclic!).
 static BUSTER_DIRECT_HOT FastType fast_cc_parse_scalar_or_tag_specs(FastCCState* cc, FastDeclSpecs* out_specs)
 {
-    FastDeclSpecs sp = { 0 };
+    // Filled where the caller reads it: a copy of a record written a field at a time waits on those stores.
+    FastDeclSpecs local_specs;
+    FastDeclSpecs* const sp = out_specs != NULL ? out_specs : &local_specs;
+    *sp = (FastDeclSpecs){ 0 };
     uint32_t saw_void = 0, saw_char = 0, saw_short = 0, saw_int = 0, saw_long = 0;
     uint32_t saw_float = 0, saw_double = 0, saw_signed = 0, saw_unsigned = 0, saw_bool = 0;
     bool has_explicit_type = false;
@@ -1786,16 +1790,16 @@ static BUSTER_DIRECT_HOT FastType fast_cc_parse_scalar_or_tag_specs(FastCCState*
     while (cc->pos < cc->tcount && !cc->bailout)
     {
         const uint8_t k = fast_cc_peek(cc);
-        if (k == FTOK_KW_TYPEDEF) { sp.is_typedef = 1u; cc->pos += 1u; }
-        else if (k == FTOK_KW_STATIC) { sp.is_static = 1u; cc->pos += 1u; }
-        else if (k == FTOK_KW_EXTERN) { sp.is_extern = 1u; cc->pos += 1u; }
-        else if (k == FTOK_KW_INLINE) { sp.is_inline = 1u; cc->pos += 1u; }
+        if (k == FTOK_KW_TYPEDEF) { sp->is_typedef = 1u; cc->pos += 1u; }
+        else if (k == FTOK_KW_STATIC) { sp->is_static = 1u; cc->pos += 1u; }
+        else if (k == FTOK_KW_EXTERN) { sp->is_extern = 1u; cc->pos += 1u; }
+        else if (k == FTOK_KW_INLINE) { sp->is_inline = 1u; cc->pos += 1u; }
         else if (k == FTOK_KW_REGISTER || k == FTOK_KW_AUTO || k == FTOK_KW_EXTENSION) { cc->pos += 1u; }
-        else if (k == FTOK_KW_NORETURN) { sp.is_noreturn = 1u; cc->pos += 1u; }
-        else if (k == FTOK_KW_CONST) { sp.is_const = 1u; cc->pos += 1u; }
-        else if (k == FTOK_KW_VOLATILE) { sp.is_volatile = 1u; cc->pos += 1u; }
+        else if (k == FTOK_KW_NORETURN) { sp->is_noreturn = 1u; cc->pos += 1u; }
+        else if (k == FTOK_KW_CONST) { sp->is_const = 1u; cc->pos += 1u; }
+        else if (k == FTOK_KW_VOLATILE) { sp->is_volatile = 1u; cc->pos += 1u; }
         else if (k == FTOK_KW_RESTRICT) { cc->pos += 1u; }
-        else if (k == FTOK_KW_ATTRIBUTE) { fast_cc_parse_attributes(cc, &sp.attr); }
+        else if (k == FTOK_KW_ATTRIBUTE) { fast_cc_parse_attributes(cc, &sp->attr); }
         else if (k == FTOK_KW_ALIGNAS)
         {
             cc->pos += 1u;
@@ -1807,12 +1811,12 @@ static BUSTER_DIRECT_HOT FastType fast_cc_parse_scalar_or_tag_specs(FastCCState*
                     bool tok_ok = false;
                     const FastType at = fast_cc_parse_simple_typename_leaf(cc, &tok_ok);
                     const uint32_t al = ftype_align(cc, at);
-                    if (al > sp.attr.aligned) { sp.attr.aligned = al; }
+                    if (al > sp->attr.aligned) { sp->attr.aligned = al; }
                 }
                 else
                 {
                     const int64_t al = fast_cc_const_int_expr(cc, false);
-                    if (al > (int64_t)sp.attr.aligned && al <= 4096) { sp.attr.aligned = (uint32_t)al; }
+                    if (al > (int64_t)sp->attr.aligned && al <= 4096) { sp->attr.aligned = (uint32_t)al; }
                 }
                 if (fast_cc_peek(cc) == FTOK_RPAREN) { cc->pos += 1u; }
             }
@@ -1839,7 +1843,7 @@ static BUSTER_DIRECT_HOT FastType fast_cc_parse_scalar_or_tag_specs(FastCCState*
         }
         else if (k == FTOK_KW_FLOAT128 || k == FTOK_KW_FLOAT16 || k == FTOK_KW_COMPLEX)
         {
-            sp.is_unsupported_type = 1u;
+            sp->is_unsupported_type = 1u;
             has_explicit_type = true;
             explicit_type = k == FTOK_KW_FLOAT16 ? FTYPE_UNSUP2 : FTYPE_UNSUP16;
             cc->pos += 1u;
@@ -1903,7 +1907,7 @@ static BUSTER_DIRECT_HOT FastType fast_cc_parse_scalar_or_tag_specs(FastCCState*
     else if (saw_double)
     {
         res = saw_long ? FTYPE_UNSUP16 : FTYPE_F64;
-        if (saw_long) { sp.is_long_double = 1u; sp.is_unsupported_type = 1u; }
+        if (saw_long) { sp->is_long_double = 1u; sp->is_unsupported_type = 1u; }
     }
     else if (saw_char)
     {
@@ -1916,21 +1920,20 @@ static BUSTER_DIRECT_HOT FastType fast_cc_parse_scalar_or_tag_specs(FastCCState*
     else if (saw_unsigned) { res = FTYPE_U32; }
     else { res = FTYPE_I32; }
 
-    if (sp.attr.mode_size != 0)
+    if (sp->attr.mode_size != 0)
     {
         const bool u = saw_unsigned != 0;
-        if (sp.attr.mode_float) { res = sp.attr.mode_size == 4u ? FTYPE_F32 : FTYPE_F64; }
-        else if (sp.attr.mode_size == 1u) { res = u ? FTYPE_U8 : FTYPE_I8; }
-        else if (sp.attr.mode_size == 2u) { res = u ? FTYPE_U16 : FTYPE_I16; }
-        else if (sp.attr.mode_size == 4u) { res = u ? FTYPE_U32 : FTYPE_I32; }
-        else if (sp.attr.mode_size == 8u) { res = u ? FTYPE_U64 : FTYPE_I64; }
-        else { sp.is_unsupported_type = 1u; }
+        if (sp->attr.mode_float) { res = sp->attr.mode_size == 4u ? FTYPE_F32 : FTYPE_F64; }
+        else if (sp->attr.mode_size == 1u) { res = u ? FTYPE_U8 : FTYPE_I8; }
+        else if (sp->attr.mode_size == 2u) { res = u ? FTYPE_U16 : FTYPE_I16; }
+        else if (sp->attr.mode_size == 4u) { res = u ? FTYPE_U32 : FTYPE_I32; }
+        else if (sp->attr.mode_size == 8u) { res = u ? FTYPE_U64 : FTYPE_I64; }
+        else { sp->is_unsupported_type = 1u; }
     }
 
-    if (sp.is_const) { res = ftype_with_const(res); }
-    if (sp.is_volatile) { res |= ftype_is_complex(res) ? BUSTER_FTYPE_CVOL : BUSTER_FTYPE_SCALAR_VOL; }
-    sp.type = res;
-    if (out_specs != NULL) { *out_specs = sp; }
+    if (sp->is_const) { res = ftype_with_const(res); }
+    if (sp->is_volatile) { res |= ftype_is_complex(res) ? BUSTER_FTYPE_CVOL : BUSTER_FTYPE_SCALAR_VOL; }
+    sp->type = res;
     return res;
 }
 
@@ -2810,7 +2813,10 @@ static FastType fast_cc_parse_record_iter(FastCCState* cc, bool is_union, bool a
 // Level 8: Full declaration specifiers (supports struct/union/enum definitions, storage classes, attributes, _Alignas).
 static BUSTER_DIRECT_HOT FastType fast_cc_parse_decl_specs(FastCCState* cc, FastDeclSpecs* out_specs)
 {
-    FastDeclSpecs sp = { 0 };
+    // Filled where the caller reads it: a copy of a record written a field at a time waits on those stores.
+    FastDeclSpecs local_specs;
+    FastDeclSpecs* const sp = out_specs != NULL ? out_specs : &local_specs;
+    *sp = (FastDeclSpecs){ 0 };
     uint32_t saw_void = 0, saw_char = 0, saw_short = 0, saw_int = 0, saw_long = 0;
     uint32_t saw_float = 0, saw_double = 0, saw_signed = 0, saw_unsigned = 0, saw_bool = 0;
     bool has_explicit_type = false;
@@ -2819,16 +2825,16 @@ static BUSTER_DIRECT_HOT FastType fast_cc_parse_decl_specs(FastCCState* cc, Fast
     while (cc->pos < cc->tcount && !cc->bailout)
     {
         const uint8_t k = fast_cc_peek(cc);
-        if (k == FTOK_KW_TYPEDEF) { sp.is_typedef = 1u; cc->pos += 1u; }
-        else if (k == FTOK_KW_STATIC) { sp.is_static = 1u; cc->pos += 1u; }
-        else if (k == FTOK_KW_EXTERN) { sp.is_extern = 1u; cc->pos += 1u; }
-        else if (k == FTOK_KW_INLINE) { sp.is_inline = 1u; cc->pos += 1u; }
+        if (k == FTOK_KW_TYPEDEF) { sp->is_typedef = 1u; cc->pos += 1u; }
+        else if (k == FTOK_KW_STATIC) { sp->is_static = 1u; cc->pos += 1u; }
+        else if (k == FTOK_KW_EXTERN) { sp->is_extern = 1u; cc->pos += 1u; }
+        else if (k == FTOK_KW_INLINE) { sp->is_inline = 1u; cc->pos += 1u; }
         else if (k == FTOK_KW_REGISTER || k == FTOK_KW_AUTO || k == FTOK_KW_EXTENSION) { cc->pos += 1u; }
-        else if (k == FTOK_KW_NORETURN) { sp.is_noreturn = 1u; cc->pos += 1u; }
-        else if (k == FTOK_KW_CONST) { sp.is_const = 1u; cc->pos += 1u; }
-        else if (k == FTOK_KW_VOLATILE) { sp.is_volatile = 1u; cc->pos += 1u; }
+        else if (k == FTOK_KW_NORETURN) { sp->is_noreturn = 1u; cc->pos += 1u; }
+        else if (k == FTOK_KW_CONST) { sp->is_const = 1u; cc->pos += 1u; }
+        else if (k == FTOK_KW_VOLATILE) { sp->is_volatile = 1u; cc->pos += 1u; }
         else if (k == FTOK_KW_RESTRICT) { cc->pos += 1u; }
-        else if (k == FTOK_KW_ATTRIBUTE) { fast_cc_parse_attributes(cc, &sp.attr); }
+        else if (k == FTOK_KW_ATTRIBUTE) { fast_cc_parse_attributes(cc, &sp->attr); }
         else if (k == FTOK_KW_ALIGNAS)
         {
             cc->pos += 1u;
@@ -2840,12 +2846,12 @@ static BUSTER_DIRECT_HOT FastType fast_cc_parse_decl_specs(FastCCState* cc, Fast
                     bool tok_ok = false;
                     const FastType at = fast_cc_parse_simple_typename_leaf(cc, &tok_ok);
                     const uint32_t al = ftype_align(cc, at);
-                    if (al > sp.attr.aligned) { sp.attr.aligned = al; }
+                    if (al > sp->attr.aligned) { sp->attr.aligned = al; }
                 }
                 else
                 {
                     const int64_t al = fast_cc_const_int_expr(cc, false);
-                    if (al > (int64_t)sp.attr.aligned && al <= 4096) { sp.attr.aligned = (uint32_t)al; }
+                    if (al > (int64_t)sp->attr.aligned && al <= 4096) { sp->attr.aligned = (uint32_t)al; }
                 }
                 if (fast_cc_peek(cc) == FTOK_RPAREN) { cc->pos += 1u; }
             }
@@ -2877,7 +2883,7 @@ static BUSTER_DIRECT_HOT FastType fast_cc_parse_decl_specs(FastCCState* cc, Fast
         }
         else if (k == FTOK_KW_FLOAT128 || k == FTOK_KW_FLOAT16 || k == FTOK_KW_COMPLEX)
         {
-            sp.is_unsupported_type = 1u;
+            sp->is_unsupported_type = 1u;
             has_explicit_type = true;
             explicit_type = k == FTOK_KW_FLOAT16 ? FTYPE_UNSUP2 : FTYPE_UNSUP16;
             cc->pos += 1u;
@@ -2924,7 +2930,7 @@ static BUSTER_DIRECT_HOT FastType fast_cc_parse_decl_specs(FastCCState* cc, Fast
     else if (saw_double)
     {
         res = saw_long ? FTYPE_UNSUP16 : FTYPE_F64;
-        if (saw_long) { sp.is_long_double = 1u; sp.is_unsupported_type = 1u; }
+        if (saw_long) { sp->is_long_double = 1u; sp->is_unsupported_type = 1u; }
     }
     else if (saw_char)
     {
@@ -2938,21 +2944,20 @@ static BUSTER_DIRECT_HOT FastType fast_cc_parse_decl_specs(FastCCState* cc, Fast
     else { res = FTYPE_I32; }
 
     // Apply __attribute__((__mode__(...))) overrides (used by glibc stdint/math headers!)
-    if (sp.attr.mode_size != 0)
+    if (sp->attr.mode_size != 0)
     {
         const bool u = saw_unsigned != 0;
-        if (sp.attr.mode_float) { res = sp.attr.mode_size == 4u ? FTYPE_F32 : FTYPE_F64; }
-        else if (sp.attr.mode_size == 1u) { res = u ? FTYPE_U8 : FTYPE_I8; }
-        else if (sp.attr.mode_size == 2u) { res = u ? FTYPE_U16 : FTYPE_I16; }
-        else if (sp.attr.mode_size == 4u) { res = u ? FTYPE_U32 : FTYPE_I32; }
-        else if (sp.attr.mode_size == 8u) { res = u ? FTYPE_U64 : FTYPE_I64; }
-        else { sp.is_unsupported_type = 1u; }
+        if (sp->attr.mode_float) { res = sp->attr.mode_size == 4u ? FTYPE_F32 : FTYPE_F64; }
+        else if (sp->attr.mode_size == 1u) { res = u ? FTYPE_U8 : FTYPE_I8; }
+        else if (sp->attr.mode_size == 2u) { res = u ? FTYPE_U16 : FTYPE_I16; }
+        else if (sp->attr.mode_size == 4u) { res = u ? FTYPE_U32 : FTYPE_I32; }
+        else if (sp->attr.mode_size == 8u) { res = u ? FTYPE_U64 : FTYPE_I64; }
+        else { sp->is_unsupported_type = 1u; }
     }
 
-    if (sp.is_const) { res = ftype_with_const(res); }
-    if (sp.is_volatile) { res |= ftype_is_complex(res) ? BUSTER_FTYPE_CVOL : BUSTER_FTYPE_SCALAR_VOL; }
-    sp.type = res;
-    if (out_specs != NULL) { *out_specs = sp; }
+    if (sp->is_const) { res = ftype_with_const(res); }
+    if (sp->is_volatile) { res |= ftype_is_complex(res) ? BUSTER_FTYPE_CVOL : BUSTER_FTYPE_SCALAR_VOL; }
+    sp->type = res;
     return res;
 }
 
