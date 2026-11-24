@@ -567,6 +567,7 @@ struct PPTokens
 typedef struct Preprocessor Preprocessor;
 
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_prepare_search(PPSearchDirectories* search, Arena* arena, const PPOptions* options);
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_build_predefines(const PPOptions* options, Arena* arena, char** out_buffer, uint32_t* out_length, uint32_t* flt_eval_method);
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_initialize(Preprocessor* pp, const PPOptions* options, InternTable* table);
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_run(Preprocessor* pp, const char* main_path);
 BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_run_source(Preprocessor* pp, const char* name, const uint8_t* bytes, uint32_t length);

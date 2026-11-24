@@ -89,7 +89,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   [--lazy-system-headers | --cpu-dispatch-only | --pic-only | --stack-protector-only | --target-versions-only | --type-sugar-only |
   --asm-definitions-only | --call-counts-only | --fp-contract-only | --imaginary-bit-int-only | --operand-diagnostics-only | --label-attributes-only |
   --attribute-recovery-only | --initializer-diagnostics-only | --malformed-calls-only | --string-plus-only | --assert-bool-only | --assert-diagnostics-only | --query-bool-only | --constant-logical-only | --quiet-roots-only | --unused-comparison-only |
-  --float-precision-only | --branch-truth-only |
+  --float-precision-only | --reach-filter-only | --branch-truth-only |
   --record-extensions-only | --auto-qualifiers-only |
   --run-modes-only | --common-warnings-only] [--in-process] [--clang-server PATH]
   [--differential] [--carets | --carets-all]` and `test-checker-asm`

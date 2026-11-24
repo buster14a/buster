@@ -3111,6 +3111,16 @@ static int run_check_units_tests(int argc, char** argv)
     snprintf(directory, sizeof(directory), "%s/buster-check-units-XXXXXX", temporary);
     const bool made = parsed && mkdtemp(directory) != NULL;
     check_units_test_expect(&tally, made, "make the test's directory", directory);
+    // Multi-unit invariance checks compare Tier 0 single-unit objects against Tier 0 multi-unit/lane objects
+    // byte-for-byte; disable the separate direct-to-ELF64 fast path (#2850) while this suite runs.
+    const char* prev_no_direct = getenv("BUSTER_NO_DIRECT");
+    const bool had_no_direct = prev_no_direct != NULL;
+    char saved_no_direct[64] = { 0 };
+    if (had_no_direct)
+    {
+        snprintf(saved_no_direct, sizeof(saved_no_direct), "%s", prev_no_direct);
+    }
+    setenv("BUSTER_NO_DIRECT", "1", 1);
     if (made && corpus != NULL)
     {
         check_units_test_corpus(&tally, executable, corpus, options, option_count, directory);
@@ -3156,5 +3166,13 @@ static int run_check_units_tests(int argc, char** argv)
         printf("  kept %s\n", directory);
     }
     printf("check units: %llu checks, %llu failures\n", (unsigned long long)tally.checks, (unsigned long long)tally.failures);
+    if (had_no_direct)
+    {
+        setenv("BUSTER_NO_DIRECT", saved_no_direct, 1);
+    }
+    else
+    {
+        unsetenv("BUSTER_NO_DIRECT");
+    }
     return tally.failures == 0 ? 0 : 1;
 }

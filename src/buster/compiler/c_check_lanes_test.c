@@ -3421,6 +3421,16 @@ static void check_tier1_test_refused_reach(CheckLanesTestTally* tally, const cha
 
 static int run_check_lanes_tests(int argc, char** argv)
 {
+    // Lane and deferred-body invariance checks compare Tier 0 single-lane objects against Tier 0 multi-lane/deferred
+    // objects byte-for-byte; disable the separate direct-to-ELF64 fast path (#2850) while this suite runs.
+    const char* prev_no_direct = getenv("BUSTER_NO_DIRECT");
+    const bool had_no_direct = prev_no_direct != NULL;
+    char saved_no_direct[64] = { 0 };
+    if (had_no_direct)
+    {
+        snprintf(saved_no_direct, sizeof(saved_no_direct), "%s", prev_no_direct);
+    }
+    setenv("BUSTER_NO_DIRECT", "1", 1);
     CheckLanesTestTally tally = { .random = 0x9e3779b97f4a7c15ull };
     const char* executable = "/proc/self/exe";
     bool keep = false;
@@ -3543,5 +3553,13 @@ static int run_check_lanes_tests(int argc, char** argv)
         }
     }
     printf("check lanes: %llu checks, %llu failures\n", (unsigned long long)tally.checks, (unsigned long long)tally.failures);
+    if (had_no_direct)
+    {
+        setenv("BUSTER_NO_DIRECT", saved_no_direct, 1);
+    }
+    else
+    {
+        unsetenv("BUSTER_NO_DIRECT");
+    }
     return tally.failures == 0 ? 0 : 1;
 }

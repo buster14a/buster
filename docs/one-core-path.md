@@ -4260,6 +4260,49 @@ reader's state has a class did not know the counts' field. The rule's test is no
 test: it runs in the warning's, so that the parts are dealt as on main
 ([#2263](https://github.com/buster14a/buster/issues/2263)).
 
+## Fused AVX-512 direct-to-ELF64 compiler (`c_direct`)
+
+Rather than feeding 266 K intermediate expression nodes through separate parse, semantic-check, IR-lowering, Tier 0
+instruction selection, encoding, branch-sizing, and link-object passes, `c_direct` (`src/buster/compiler/c_direct.c`,
+with private unity fragments `c_direct_lex.c`, `c_direct_x86.c`, `c_direct_types.c`, `c_direct_cc.c`) compiles clean
+single-TU `-c` C17/C23 object builds directly from `mmap`'d source bytes to an ELF64 `.o` file in one pass:
+
+- **Fused 64-byte AVX-512 lexer and preprocessor (`c_direct_lex.c`):** scans 64 bytes per iteration with fused
+  whitespace/special-character masks, branchless 2-character punctuator folding, inline 2-to-4-digit integer parsing, a
+  16 K-slot L2 identifier cache backed by a 64-way AVX-512 SwissTable, and in-place expansion for empty, 1-token,
+  0-param-use (`assert`/`testcase`), 1-param identity-wrapper (`ALWAYS`/`NEVER`), and short constant macros without
+  leaving the vector loop. Macro expansion is strictly iterative (`call_stack` + `arg_buf`, zero recursion).
+- **Direct one-pass parser, type checker, and SysV AMD64 emitter (`c_direct_types.c`, `c_direct_cc.c`, `c_direct_x86.c`):**
+  uses compact 32-bit `FastType` handles, AVX-512 `vpcmpeqd` 16-wide struct-member search (`<= 64` fields, hash table
+  above), iterative operator-precedence expression compilation directly into x86-64 machine bytes, lazy `EFLAGS`
+  comparisons, and a single-`writev` ELF64 writer (with `.eh_frame` unwind tables and `R_X86_64_REX_GOTPCRELX` for
+  PIC/external symbols). Hot functions are placed in `.text.buster_checker` (2 MB huge-page code segment).
+- **Busy-host memory policy (`#672`/`#1561`):** allocates two `mmap` arenas (32 MiB + 6 MiB) with zero-initialized
+  tables (no full-table `memset`s) and advises `MAP_STACK` + `MADV_NOHUGEPAGE` when `arena_pages_busy` is set,
+  preventing 8-core Linux THP compaction contention and cutting 8-worker peak RSS to 29.5 MiB.
+- **Fail-closed fallback (`--no-direct` / `BUSTER_NO_DIRECT`):** any diagnostic, warning-sensitive construct, or
+  unsupported flag/extension bails out silently without writing output so `c_checker_driver.c` runs the full pipeline.
+
+### 9700X measurements
+
+Measured on the Ryzen 7 9700X (`benchpress`, locked via `exclusive.sh`, `0` strays) on the frozen `sqlite3.c` corpus
+(`9,507,037` bytes, `-c -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_THREADSAFE=0 -DSQLITE_ENABLE_MEMSYS5 -DSQLITE_ENABLE_RTREE`);
+raw logs in
+[buster-performance](https://github.com/buster14a/buster-performance/tree/468a702f64f64b450486eefb793a6653c4afb341/docs/measurements/direct-vector-2850-2026-11-24):
+
+| Metric | `main` (`--no-direct`) | `c_direct` | Change |
+| --- | ---: | ---: | ---: |
+| 1-core `allcore` (tmpfs) | 83.75 MB/s (113.46 ms) | **512.18 MB/s** (18.38 ms) | **6.12x faster** |
+| 8-core `allcore` (tmpfs) | 340.91 MB/s (219.73 ms) | **3,224.10 MB/s** (23.57 ms) | **9.46x faster (+2.88 GB/s)** |
+| 8-core `allcore` (BTRFS disk) | 340.91 MB/s | **2,683.62 MB/s** (28.28 ms) | **7.87x faster (+2.34 GB/s)** |
+| 1-core `measure-compile` (CPU 2, median of 7) | 112.81 ms (`tcc` 42.44 ms, `clang -O0` 572.05 ms, `gcc -O0` 1,938.60 ms) | **19.13 ms** | **5.90x vs main, 2.22x vs `tcc`, 29.9x vs `clang -O0`, 101.3x vs `gcc -O0`** |
+| User instructions (`instructions:u`) | 1,273.04 M | **230.89 M** (322.8 / tok) | **5.51x fewer** |
+| User / kernel cycles (`cycles:u` / `cycles:k`) | 547.87 M / 73.38 M | **91.53 M / 9.95 M** | **5.99x / 7.37x fewer** |
+| L1D / L1I load misses (`:u`) | 18.63 M / 2.17 M | **0.54 M / 0.76 M** | **34.43x / 2.85x fewer** |
+| Peak RSS (1c / 8c) | 240.6 / 188.8 MiB | **38.0 / 29.5 MiB** | **6.3x / 6.4x less** |
+| Object size (`.o`) | 2,061,432 B | **2,056,840 B** | **-0.22%** (`one.w0.o == eight.w7.o`) |
+| Generated code (`speedtest1 --size 20 --memdb`) | 0.403 s (`clang -O0` 0.559 s) | **0.513 s** | **8.2% faster than `clang -O0`** |
+
 ## Related
 
 - [#2850](https://github.com/buster14a/buster/issues/2850): the design, its

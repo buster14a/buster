@@ -15261,6 +15261,11 @@ typedef enum CheckDriverWarm
 // several source files (#152), it compiles each of them (check_driver_units): -c writes each one's object, and the link
 // one executable of them all.
 // Only main's terminal routes pass release false; every reusable caller releases its mappings before returning.
+static void check_driver_direct_mark_stage(void* context, uint32_t stage_id)
+{
+    check_clock_mark((CheckClock*)context, (CheckStage)stage_id);
+}
+
 static int check_driver_command(int count, char** arguments, bool executable, bool release, bool* announced)
 {
     arena_failure = (ArenaFailure){ 0 };
@@ -15332,6 +15337,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     // --node-bodies (#2850): the function bodies the node machine's producer takes before the reader's walk are written
     // from its tapes, where the unit is compiled to an object on one lane without -g.
     bool node_bodies = false;
+    bool no_direct = false;
     bool dump = false;
     bool dump_static = false;
     bool emit_object = false;
@@ -15438,6 +15444,9 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     lanes->slow_lane = slow_lane != NULL ? (uint32_t)strtoul(slow_lane, &slow_end, 10) : 0;
     lanes->slow_microseconds = slow_end != NULL && *slow_end == ',' ? (uint32_t)strtoul(slow_end + 1, NULL, 10) : 0;
     bool invalid_lanes = false;
+    bool emit_window_seen = false;
+    bool parse_tile_seen = false;
+    bool worker_budget_seen = false;
     uint32_t pinned_cpus[BUSTER_CHECK_EMIT_MAX_LANES] = { 0 };
     uint32_t pinned_cpu_count = 0;
     bool pinned_cpus_seen = false;
@@ -15650,6 +15659,10 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         {
             node_bodies = true;
         }
+        else if (c_option_is(arguments[i], "--no-direct"))
+        {
+            no_direct = true;
+        }
         else if (match.exact == C_OPTION_CHECK_TRANSITIONS)
         {
             check_transitions = true;
@@ -15773,6 +15786,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         {
             // #2536's step 1: one lane's emission by windows of about N tokens (check_program_emit_windows); 0 is one
             // window as long as the unit, and BUSTER_CHECK_EMIT_WINDOW_TOKENS the default.
+            emit_window_seen = true;
             const char* value = arguments[i] + 14;
             uint64_t tokens = 0;
             const bool known = check_driver_unsigned_decimal(value, UINT32_MAX, &tokens);
@@ -15787,6 +15801,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         {
             // #2536: each unit's parse by tiles of about N tokens (parse_vector_tiles); 0 is the unit as one tile, and
             // BUSTER_PARSE_TILE_TOKENS the default.
+            parse_tile_seen = true;
             const char* value = arguments[i] + 13;
             uint64_t tokens = 0;
             const bool known = check_driver_unsigned_decimal(value, UINT32_MAX, &tokens);
@@ -15799,6 +15814,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         }
         else if (match.exact == C_OPTION_WORKER_BUDGET || match.joined == C_OPTION_WORKER_BUDGET_EQ)
         {
+            worker_budget_seen = true;
             const char* value = arguments[i][15] == '=' ? arguments[i] + 16 : i + 1 < count ? arguments[++i] : NULL;
             uint64_t workers = 0;
             invalid_lanes |= !check_driver_unsigned_decimal(value, BUSTER_CHECK_EMIT_MAX_LANES, &workers) || workers == 0;
@@ -16295,36 +16311,147 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
                 fprintf(stderr, "warning: %s: unrecognized suffix; treating as linker input\n", inputs[i]);
             }
         }
-        // --tier1's tables, before any lane may compile a unit (x86_zen5_initialize's contract).
-        if (lanes->tier1 && !check_tier1_ready)
+        // Fused AVX-512 direct-to-ELF64 fast path (#2850) for clean single-TU -c object builds.
+        // Bails out cleanly (writing nothing) on any diagnostic, warning-sensitive construct, or unsupported flag/extension.
+        int direct_status = 1;
+        const bool direct_eligible =
+            emit_object && !link && !emit_assembly && !no_direct &&
+            getenv("BUSTER_NO_DIRECT") == NULL && getenv("SOURCE_DATE_EPOCH") == NULL &&
+            input_count == 1 && !mixed_inputs && input_kinds[0].kind == CHECK_DRIVER_INPUT_C &&
+            !input_kinds[0].preprocessed && !options.stdin_ready &&
+            (output == NULL || strcmp(output, "-") != 0) &&
+            !scalar && !verify && !check_transitions && !dump && !dump_static && !source_rows &&
+            !lanes->tier1 && !lazy_system_headers && !deferred_bodies && !node_bodies &&
+            !node_window && !node_window_constants && !node_window_assignments && !default_path_checked &&
+            attested_memo == NULL && command_attested != CHECK_ATTESTED_MODE_VERIFY &&
+            !options.dependencies.enabled && !options.trigraphs && !options.no_builtin &&
+            options.no_builtin_function_count == 0 && !options.no_external_files && !options.assembly &&
+            !options.system_header_warnings && options.semantic_warning_option_count == 0 &&
+            !command.warning_errors && command.return_error == 0 && !id_ordered &&
+            (!lanes->every_lane || lanes->lanes <= 1) && !worker_budget_seen && !worker_budget.dry_run &&
+            units_memory == 0 && !poison_arenas && !lower_all && !pinned_cpus_seen &&
+            !emit_window_seen && !parse_tile_seen && !lanes->deferred_lowering &&
+            !lanes->tier0_no_inline && !lanes->tier0_no_hold && !lanes->tier0_inline_shapes &&
+            lanes->helper_forms == 0 && getenv("BUSTER_TEST_NODE_BODIES") == NULL &&
+            !selection_census && !branch_truth_census && !provisional_selection && !windowed_loop && !shared_parts && !helper_report &&
+            !options.predefines.common && !options.predefines.short_wchar &&
+            (!options.predefines.visibility_given || (options.predefines.visibility != NULL && strcmp(options.predefines.visibility, "default") == 0)) &&
+            predefines_stack_guard(&options.predefines) == BUSTER_PREDEFINES_SSP_OFF &&
+            predefines_frame_pointer(&options.predefines) == BUSTER_PREDEFINES_FRAME_POINTER_NONE &&
+            !predefines_stack_clash(&options.predefines) &&
+            options.predefines.patchable_function_entry == NULL && options.predefines.sanitizers == 0 &&
+            !options.predefines.sanitize_coverage && !options.predefines.openmp && !options.predefines.blocks &&
+            options.predefines.cf_protection == 0 &&
+            request.function_sections == NULL && request.data_sections == NULL &&
+            request.short_enums == NULL && request.packed_bare == NULL && request.packed_value == NULL &&
+            options.language.standard >= 1999;
+        if (direct_eligible)
         {
-            check_tier1_ready = x86_zen5_initialize() && tier1_select_initialize();
+            PPSearchDirectories direct_search = { 0 };
+            const uint64_t arena_mark = arena.length;
+            const uint64_t scratch_mark = scratch.length;
+            bool direct_ready = pp_prepare_search(&direct_search, &scratch, &options);
+            char* predef_buf = NULL;
+            uint32_t predef_len = 0;
+            uint32_t flt_eval_method = 0;
+            if (direct_ready && options.predefines_path == NULL)
+            {
+                direct_ready = pp_build_predefines(&options, &scratch, &predef_buf, &predef_len, &flt_eval_method);
+            }
+            if (direct_ready)
+            {
+                const bool direct_pic = options.predefines.pic != BUSTER_PREDEFINES_PIC_OFF;
+                uint32_t direct_tokens = 0;
+                const CDirectRequest direct_req = {
+                    .input_path = path,
+                    .output_path = output,
+                    .predefines_text = predef_buf,
+                    .predefines_length = predef_len,
+                    .flt_eval_method = flt_eval_method,
+                    .predefines_path = options.predefines_path,
+                    .directories = (const char* const*)direct_search.directories,
+                    .directory_system = direct_search.directory_system,
+                    .directory_count = direct_search.directory_count,
+                    .angled_first = direct_search.angled_first,
+                    .macros = options.macros,
+                    .macro_count = options.macro_count,
+                    .includes = options.includes,
+                    .include_count = options.include_count,
+                    .pic = direct_pic,
+                    .unwind_tables = unwind_tables,
+                    .unsigned_char = options.predefines.char_unsigned,
+                    .c23 = options.language.standard >= 2023,
+                    .quiet = quiet || options.suppress_warnings,
+                    .release = release,
+                    .avoid_huge_pages = arena_pages_busy,
+                    .mark_stage = stage_clock != NULL ? check_driver_direct_mark_stage : NULL,
+                    .clock_context = stage_clock,
+                    .stage_setup = CHECK_STAGE_SETUP,
+                    .stage_preprocess = CHECK_STAGE_PREPROCESS,
+                    .stage_codegen = CHECK_STAGE_TIER0,
+                    .stage_object_write = CHECK_STAGE_OBJECT_WRITE,
+                    .out_token_count = &direct_tokens,
+                };
+                direct_status = c_direct_try_compile(&direct_req);
+                if (direct_status == 0 && stage_clock != NULL)
+                {
+                    stage_clock->tokens = direct_tokens;
+                }
+            }
+            if (direct_status == 0)
+            {
+                check_clock_lanes(stage_clock, 1, 1);
+                result = 0;
+            }
+            else if (direct_status < 0)
+            {
+                result = 1;
+            }
+            else
+            {
+                arena_pop_to(&scratch, scratch_mark);
+                arena_pop_to(&arena, arena_mark);
+                if (stage_clock != NULL)
+                {
+                    check_clock_start(stage_clock);
+                    stage_clock->pages_busy = arena_pages_busy;
+                    stage_clock->pages_medium = arena_pages_medium;
+                }
+            }
         }
-        // The command runs on its session's lanes (#905), which start here, after its options and before any source is
-        // read (check_driver_run).
-        CheckDriverRun run = {
-            .command = &command,
-            .inputs = inputs,
-            .input_count = input_count,
-            .path = path,
-            .lanes = lanes,
-            .pinned_cpus = pinned_cpus_seen ? pinned_cpus : NULL,
-            .stage_clock = stage_clock,
-            .pp_ticks = pp_ticks,
-            .arena = &arena,
-            .scratch = &scratch,
-            .output_arena = &output_arena,
-            .release = release,
-            .result = 1,
-        };
-        result = check_driver_run(&run, announced);
-        if (tier1_report)
+        if (direct_status == 1)
         {
-            check_tier1_print_report(stderr, &lanes->tier1_report);
-        }
-        if (helper_report)
-        {
-            check_helper_print_report(stderr, &lanes->helper_report);
+            // --tier1's tables, before any lane may compile a unit (x86_zen5_initialize's contract).
+            if (lanes->tier1 && !check_tier1_ready)
+            {
+                check_tier1_ready = x86_zen5_initialize() && tier1_select_initialize();
+            }
+            // The command runs on its session's lanes (#905), which start here, after its options and before any source is
+            // read (check_driver_run).
+            CheckDriverRun run = {
+                .command = &command,
+                .inputs = inputs,
+                .input_count = input_count,
+                .path = path,
+                .lanes = lanes,
+                .pinned_cpus = pinned_cpus_seen ? pinned_cpus : NULL,
+                .stage_clock = stage_clock,
+                .pp_ticks = pp_ticks,
+                .arena = &arena,
+                .scratch = &scratch,
+                .output_arena = &output_arena,
+                .release = release,
+                .result = 1,
+            };
+            result = check_driver_run(&run, announced);
+            if (tier1_report)
+            {
+                check_tier1_print_report(stderr, &lanes->tier1_report);
+            }
+            if (helper_report)
+            {
+                check_helper_print_report(stderr, &lanes->helper_report);
+            }
         }
     }
     if (release)

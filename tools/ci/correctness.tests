@@ -939,7 +939,7 @@ rm -rf "$directory"
 # make an 80-byte frame, resolved. A command without files prints its usage and fails.
 directory=$(mktemp -d)
 printf 'int g(char*);\nint f(int x) { char b[4096]; b[x & 4095] = 1; return g(b); }\nint leaf(int x) { return x + 1; }\n' > "$directory/f.c"
-"$BUSTER_COMPILER" -c -o "$directory/t0.o" "$directory/f.c"
+"$BUSTER_COMPILER" --no-direct -c -o "$directory/t0.o" "$directory/f.c"
 "$BUSTER_COMPILER" -c -fno-omit-frame-pointer -o "$directory/t0fp.o" "$directory/f.c"
 "$BUSTER_COMPILER" --tier1 --tier1-strict -c -fno-omit-frame-pointer -o "$directory/t1fp.o" "$directory/f.c"
 "$BUSTER_COMPILER" --tier1 --tier1-strict -c -fno-omit-frame-pointer -momit-leaf-frame-pointer -o "$directory/t1leaf.o" "$directory/f.c"
