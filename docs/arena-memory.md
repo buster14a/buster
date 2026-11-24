@@ -358,6 +358,18 @@ is bounded, under strict overcommit (`vm.overcommit_memory` 2) or a finite
 `RLIMIT_DATA`, release reprotects the prefix inaccessible first, returning its
 charge, and discards the whole mapping.
 
+At the end of a translation unit, the lane collects up to 16 of these writable
+ranges in its pool. Fully committed reservations already bound every copy's
+writes. Other reservations still need the writable-prefix query. The pool
+excludes the inaccessible leading guard and submits at most 2 GiB minus a
+page to a self `process_madvise(MADV_DONTNEED)` call. Larger individual
+ranges use ordinary `madvise`. The pending mappings enter the reusable set
+only after the reset completes. A short result repeats the first incomplete
+range and all remaining ranges with ordinary advice. A failed reset unmaps
+the original mapping. Reservations and the end of unit teardown flush the
+batch before reuse or memory admission. A kernel or sandbox that declines
+the vector call uses ordinary advice for the rest of the pool's lifetime.
+
 Clearing a released arena's pages in place and keeping them, rather than
 discarding them, was measured and rejected (#3070). Found by `PAGEMAP_SCAN`,
 the pages that hold anything are exact for a private anonymous mapping, but
