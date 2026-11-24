@@ -209,11 +209,10 @@ static void ir_optimize_layout_test_loop(IrOptimizeTest* test, Arena* input, Are
     IrFunction f = { 0 };
     const bool created = ir_optimize_test_loop(input, &f);
     ir_optimize_test_expect(test, created, "layout loop fixture allocation");
-    for (uint32_t path = 0; created && path < 2; path += 1)
+    if (created)
     {
         IrOptimizeOptions options = ir_optimize_options();
         options.passes = BUSTER_IR_OPTIMIZE_LAYOUT;
-        options.path = path != 0 ? BUSTER_IR_OPTIMIZE_SCALAR : BUSTER_IR_OPTIMIZE_VECTOR;
         IrOptimizeResult result = { 0 };
         const IrCheck check = ir_optimize(&f, output, scratch, options, &result);
         bool rotated = check.error == IR_OK && result.function.block_count == 4;
@@ -247,8 +246,8 @@ static void ir_optimize_test_layout(IrOptimizeTest* test)
         ir_optimize_test_expect(test, created, "layout reversed-chain allocation");
         if (created)
         {
-            ir_optimize_test_compare(test, &f, &vector, &scalar, &scratch, BUSTER_IR_OPTIMIZE_LAYOUT);
-            ir_optimize_test_compare(test, &f, &vector, &scalar, &scratch, 15);
+            ir_optimize_test_compare(test, &f, &vector, &scratch, BUSTER_IR_OPTIMIZE_LAYOUT);
+            ir_optimize_test_compare(test, &f, &vector, &scratch, 15);
             IrOptimizeOptions options = ir_optimize_options();
             options.passes = BUSTER_IR_OPTIMIZE_LAYOUT;
             IrOptimizeResult result = { 0 };
@@ -296,28 +295,28 @@ static void ir_optimize_test_layout(IrOptimizeTest* test)
         ir_optimize_test_expect(test, created, "layout irreducible fixture allocation");
         for (uint32_t passes = 0; created && passes < 16; passes += 1)
         {
-            ir_optimize_test_compare(test, &f, &vector, &scalar, &scratch, passes);
+            ir_optimize_test_compare(test, &f, &vector, &scratch, passes);
         }
         arena_pop_to(&input, 0);
         const bool aggregate = ir_optimize_layout_test_aggregate(&input, &f);
         ir_optimize_test_expect(test, aggregate, "layout aggregate-call fixture allocation");
         for (uint32_t passes = BUSTER_IR_OPTIMIZE_LAYOUT; aggregate && passes < 16; passes += 1)
         {
-            ir_optimize_test_compare(test, &f, &vector, &scalar, &scratch, passes);
+            ir_optimize_test_compare(test, &f, &vector, &scratch, passes);
         }
         arena_pop_to(&input, 0);
         const bool simd = ir_optimize_layout_test_vector(&input, &f);
         ir_optimize_test_expect(test, simd, "layout vector-payload fixture allocation");
         for (uint32_t passes = BUSTER_IR_OPTIMIZE_LAYOUT; simd && passes < 16; passes += 1)
         {
-            ir_optimize_test_simd_rewrite(test, &f, &vector, &scalar, &scratch, passes);
+            ir_optimize_test_simd_rewrite(test, &f, &vector, &scratch, passes);
         }
         arena_pop_to(&input, 0);
         const bool switched = ir_optimize_layout_test_switch(&input, &f);
         ir_optimize_test_expect(test, switched, "layout relocated-switch fixture allocation");
         for (uint32_t passes = BUSTER_IR_OPTIMIZE_LAYOUT; switched && passes < 16; passes += 1)
         {
-            ir_optimize_test_compare(test, &f, &vector, &scalar, &scratch, passes);
+            ir_optimize_test_compare(test, &f, &vector, &scratch, passes);
         }
         if (switched)
         {

@@ -149,8 +149,9 @@ The loader validates branch layout, baseline target forms, ordered symbolic
 references, both encoders' bytes and field ends, label bounds and rel32 ranges
 before making code executable. Each comparison runs in a child with a five-second
 alarm; a fault, timeout, missing compile or result mismatch fails the command.
-The suite requires 640 native differential pairs (1,280 native results), reported
-separately from the original fixtures' counters. `--cross-check` still adds Clang's
+The suite requires 320 native differential pairs (640 native results), each
+fixture with and without rematerialization (#2924 removed the optimizer twin
+that once doubled them), reported separately from the original fixtures' counters. `--cross-check` still adds Clang's
 `-O0`/`-O2` comparison for the original seventeen fixtures; it does not turn the
 boundary suite into an external Clang cross-check or a performance benchmark.
 

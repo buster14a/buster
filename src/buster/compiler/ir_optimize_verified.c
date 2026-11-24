@@ -125,7 +125,7 @@ static IrCheck ir_verified_build(const IrFunction* function, Arena* analyses, Ar
 
 // A deliberately separate orchestration entry point while the existing validating/rebuilding path remains the
 // comparison control. There is no second optimization algorithm: every preparation, SCCP, DCE and rewrite kernel
-// is shared with ir_optimize. Tests compare all pass masks and both forced twins, including AUTO.
+// is shared with ir_optimize. Tests compare all pass masks.
 //
 // The three arenas and the input columns must be disjoint; result, analysis and revision are distinct live
 // descriptors outside their storage. The revision belongs to this function's scope, not a process-wide cache.
@@ -141,12 +141,9 @@ static __attribute__((unused, aligned(64))) IrCheck ir_optimize_verified(const I
     IrVerifiedAnalysis candidate = { 0 };
     IrCheck check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, options.passes);
     if (revision->number != UINT64_MAX && output != scratch && analyses != scratch && analyses != output &&
-        options.path <= BUSTER_IR_OPTIMIZE_SCALAR &&
         (options.passes & ~BUSTER_IR_OPTIMIZE_PASSES) == 0)
     {
-        options.scalar = options.path == BUSTER_IR_OPTIMIZE_SCALAR ||
-                         (options.path == BUSTER_IR_OPTIMIZE_AUTO && (options.scalar || ir_optimize_auto_scalar(function)));
-        check = ir_optimize_prepare(&work, function, output, scratch, BUSTER_SCALAR_PATH(options.scalar), true);
+        check = ir_optimize_prepare(&work, function, output, scratch, true);
     }
     if (check.error == IR_OK)
     {
@@ -158,14 +155,7 @@ static __attribute__((unused, aligned(64))) IrCheck ir_optimize_verified(const I
         }
         if ((options.passes & BUSTER_IR_OPTIMIZE_SCCP) != 0)
         {
-            if (options.scalar)
-            {
-                ir_optimize_sccp_worklist(&work);
-            }
-            else
-            {
-                ir_optimize_sccp_sweeps(&work, options.sweep_limit);
-            }
+            ir_optimize_sccp_worklist(&work);
         }
         else
         {

@@ -1069,9 +1069,8 @@ static uint32_t ir_memory_walk(IrMemoryWork* m, IrMemoryEntry* entries, uint32_t
 
 // Value numbering with memory on the optimizer's work, after SCCP and the identities: the loads it forwards go to
 // work->forward (made here where the identities made none), their number to `forwarded`. Its other columns are scratch's
-// and go before it returns. Its vector phases run whatever the AUTO policy's size bound (work->scalar): they have no
-// set-up that small functions don't repay (the verifier's rule too, #786). Returns false where scratch has no room for
-// them.
+// and go before it returns. Its vector phases run at every size: they have no set-up that small functions don't repay
+// (the verifier's rule too, #786). Returns false where scratch has no room for them.
 static bool ir_optimize_memory(IrOptimizeWork* work, Arena* scratch, uint32_t* forwarded)
 {
     const IrFunction* f = work->function;

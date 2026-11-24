@@ -697,7 +697,6 @@ static IrMetaFailure ir_meta_optimize(const IrFunction* function, uint32_t pass,
     else if (pass <= 4)
     {
         IrOptimizeOptions options = ir_optimize_options();
-        options.path = scalar ? BUSTER_IR_OPTIMIZE_SCALAR : BUSTER_IR_OPTIMIZE_VECTOR;
         // The combination is Tier 1's: the three passes and CFG cleanup's merges (#139), with value numbering with memory
         // (#2718, --tier1-passes=+memory).
         options.passes = pass == 1 ? BUSTER_IR_OPTIMIZE_SCCP : pass == 2 ? BUSTER_IR_OPTIMIZE_DCE :
@@ -732,7 +731,7 @@ static IrMetaFailure ir_meta_optimize(const IrFunction* function, uint32_t pass,
     }
     else if (pass == 7)
     {
-        const IrSroaOptions options = { .scalar = scalar };
+        const IrSroaOptions options = { 0 };
         IrSroaResult optimized = { 0 };
         check = ir_optimize_sroa(function, output, scratch, options, &optimized);
         if (check.error == IR_OK)

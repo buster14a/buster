@@ -121,11 +121,9 @@ static IrReduceObservation ir_reduce_oracle(const IrFunction* function, const Ir
                 if (expected.status == INTERPRETER_OK)
                 {
                     result.status = IR_REDUCE_OBSERVED;
-                    for (uint32_t path = 0; result.status == IR_REDUCE_OBSERVED && result.failure.kind == 0 && path < 2; path += 1)
                     {
                         IrOptimizeOptions options = ir_optimize_options();
                         options.passes = oracle->passes;
-                        options.path = path != 0 ? BUSTER_IR_OPTIMIZE_SCALAR : BUSTER_IR_OPTIMIZE_VECTOR;
                         IrOptimizeResult optimized = { 0 };
                         const IrCheck check = ir_optimize(function, &optimized_storage, &execution, options, &optimized);
                         if (check.error != IR_OK)
@@ -158,7 +156,7 @@ static IrReduceObservation ir_reduce_oracle(const IrFunction* function, const Ir
                                 else if (actual.status != INTERPRETER_OK)
                                 {
                                     result.failure = (IrReduceFailure){ .kind = IR_REDUCE_FAILURE_EXECUTION, .pass = oracle->passes,
-                                        .detail = (uint32_t)actual.status << 1 | path };
+                                        .detail = (uint32_t)actual.status << 1 };
                                 }
                                 else
                                 {
@@ -175,7 +173,7 @@ static IrReduceObservation ir_reduce_oracle(const IrFunction* function, const Ir
                                     if (!value || !memory)
                                     {
                                         result.failure = (IrReduceFailure){ .kind = !value ? IR_REDUCE_FAILURE_RESULT : IR_REDUCE_FAILURE_MEMORY,
-                                            .pass = oracle->passes, .detail = path };
+                                            .pass = oracle->passes };
                                     }
                                 }
                             }
