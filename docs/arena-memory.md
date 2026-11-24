@@ -509,8 +509,8 @@ BUSTER_ARENA_POOL=/path/to/pool ./build/compiler -c unit.c
   untouched arena's bytes for zero clears for itself there (the reader's
   columns, `check_input_run`; the run's output, `CheckOptions.fresh_output`),
   and no other code may read a byte of a warm arena before writing it. That
-  costs sqlite3.c 10.1 million instructions, about 1 ms, against the 3.7 the
-  pages save. The compiler's output depends on none of those bytes:
+  costs sqlite3.c 10.1 million instructions, about 1 ms, less than the pages
+  save (below). The compiler's output depends on none of those bytes:
   `BUSTER_TEST_ARENA_FILL=1` writes 0xA5 over each warm arena's memory as it is
   committed, with or without a directory, and the object must be the same.
 - **Commits.** A commit allocates its pages in the file first (`fallocate`,
@@ -529,17 +529,36 @@ BUSTER_ARENA_POOL=/path/to/pool ./build/compiler -c unit.c
   on a shared mapping drops the page table's entries and leaves the file's
   pages as they were.
 - **What it holds.** A file only grows, to the most its slots' arenas have
-  committed, which is more than they wrote: sqlite3.c's two commit 432 MB and
-  write 130, since the reader pushes columns it fills in part. An ordinary
+  committed, which is more than they wrote: sqlite3.c's command's arena and
+  its output's commit 432 MB and write 130, since the reader pushes columns it
+  fills in part, and with the scratch the file is 528 MB. An ordinary
   arena's committed pages cost nothing until they are written; a warm arena's
   are allocated, so that no later touch can fail, and the second compile into
   a file clears the ones the first left unwritten, once. The mount's `size=`
   bounds the pool, and removing the files frees it. The files hold the memory
   of the user's last compiles, readable by that user alone.
 
-The C driver's command reserves its arena and its output's arena warm
-(`check_driver_command`): 130 MB of sqlite3.c's. `--time-stages` reports how
-many of the command's arenas are warm (`warm-arenas`).
+The C driver's command reserves its three arenas warm
+(`check_driver_command`). On the 9700X, sqlite3.c's fresh `-c` on one lane,
+seven rounds a hold, every round lower:
+
+| the command's arenas | elapsed | against main | kernel cycles |
+| --- | ---: | ---: | ---: |
+| ordinary (main `939732da`) | 112.93 ms | | 74.9 M |
+| its arena and its output's warm | 109.40 ms | -3.74 ms | 50.7 M |
+| and its scratch | 105.76 ms | -7.34 ms | 32.7 M |
+
+The arena and the output's hold what the reader and the expressions' run
+write, 130 MB, and their stages' own clearing is 10.1 million instructions of
+the compile. The scratch costs nothing in instructions: no code takes it for
+zero past its first pushes, and the driver gives its pages back between the
+stages (`check_driver_discard_scratch`, #628), which the next stage then
+takes cleared again. Warm, the discards do nothing and the pages stay, so the
+command's peak resident set is 28 MB more (282 MB against 254). The first
+compile into an empty file takes 142 ms and the second 125; Lua's 34 files,
+each a process, take 28% fewer kernel cycles on the pages sqlite3.c left.
+`--time-stages` reports how many of the command's arenas are warm
+(`warm-arenas`).
 
 The tests' switches: `BUSTER_TEST_ARENA_FILL=1` fills the command's warm
 arenas, with or without a directory, and `BUSTER_TEST_ARENA_BASE_PAGES=1`

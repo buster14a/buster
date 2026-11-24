@@ -392,8 +392,8 @@ static __attribute__((unused)) void arena_discard_past(Arena* arena, uint64_t ke
 //     what the file holds of it is then the process's own, as an ordinary arena's, for the rest of its use.
 //   - Release unmaps the arena, whose pages stay in the file; its discards (arena_discard) do nothing, and arena_clear
 //     clears its bytes in place. The file only grows, to the most its slots' arenas have committed, which is more than
-//     they wrote (sqlite3.c's two commit 432 MB and write 130): the mount's size is what bounds the pool, and removing
-//     the files frees it.
+//     they wrote (sqlite3.c's command's arena and its output's commit 432 MB and write 130): the mount's size is what
+//     bounds the pool, and removing the files frees it.
 #define BUSTER_ARENA_WARM_SLOTS 8
 #define BUSTER_ARENA_WARM_SLOT_BYTES (1ull << 40)
 #define BUSTER_ARENA_WARM_FILES 64

@@ -15079,6 +15079,7 @@ typedef enum CheckDriverWarm
 {
     CHECK_DRIVER_WARM_ARENA,
     CHECK_DRIVER_WARM_OUTPUT,
+    CHECK_DRIVER_WARM_SCRATCH,
 } CheckDriverWarm;
 
 // The semantic driver: `compiler check` (`executable` false) checks, and with -c writes an object; the default C command
@@ -15108,13 +15109,16 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
     worker_budget_initialize(&worker_budget, getenv("MAKEFLAGS"), BUSTER_CHECK_EMIT_MAX_LANES);
     int result = 1;
     const uint64_t reservation_bytes = UINT64_C(1) << 36;
-    // The command's arena and its output's are warm where BUSTER_ARENA_POOL names a directory (#2850, arena_reserve_warm):
-    // they hold what a unit's reader and its expressions' run write, 131 MB of sqlite3.c's, which a compile then finds
-    // in the file the last one left rather than in pages the kernel clears: 3.7 ms of its 114 on the 9700X. Both stages
-    // ask whether their arena is untouched before they take a byte of it for zero (CheckOptions.fresh_output,
-    // check_input_run), which a warm arena never is. The tests' switches: BUSTER_TEST_ARENA_FILL=1 has a compile find a
-    // pattern there, with or without a directory, and BUSTER_TEST_ARENA_BASE_PAGES=1 takes a directory on a tmpfs of
-    // base pages, which a compile is slower by.
+    // The command's three arenas are warm where BUSTER_ARENA_POOL names a directory (#2850, arena_reserve_warm): a
+    // compile then finds their pages in the file the last one left rather than in pages the kernel clears. Its arena
+    // and its output's hold what a unit's reader and its expressions' run write, 130 MB of sqlite3.c's: 3.7 ms of its
+    // 113 on the 9700X. Both stages ask whether their arena is untouched before they take a byte of it for zero
+    // (CheckOptions.fresh_output, check_input_run), which a warm arena never is. The scratch, which no code takes for
+    // zero past its first pushes, is given back to the kernel between the stages and cleared again for the next
+    // (check_driver_discard_scratch): warm, it keeps its pages, another 3.6 ms, and the command's peak resident set is
+    // 28 MB more. The tests' switches: BUSTER_TEST_ARENA_FILL=1 has a compile find a pattern in the three, with or
+    // without a directory, and BUSTER_TEST_ARENA_BASE_PAGES=1 takes a directory on a tmpfs of base pages, which a
+    // compile is slower by.
     const char* warm_directory = getenv("BUSTER_ARENA_POOL");
     const char* warm_fill = getenv("BUSTER_TEST_ARENA_FILL");
     const char* warm_base_pages = getenv("BUSTER_TEST_ARENA_BASE_PAGES");
@@ -15122,9 +15126,9 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
                                 (warm_base_pages != NULL && strcmp(warm_base_pages, "1") == 0 ? BUSTER_ARENA_WARM_BASE_PAGES : 0);
     const bool warm_begun = arena_warm_begin(warm_directory != NULL && warm_directory[0] != 0 ? warm_directory : NULL, warm_flags);
     Arena arena = arena_reserve_warm(reservation_bytes, CHECK_DRIVER_WARM_ARENA);
-    Arena scratch = arena_reserve(reservation_bytes);
+    Arena scratch = arena_reserve_warm(reservation_bytes, CHECK_DRIVER_WARM_SCRATCH);
     Arena output_arena = arena_reserve_warm(reservation_bytes, CHECK_DRIVER_WARM_OUTPUT);
-    clock_storage.warm_arenas = (arena.warm != 0 ? 1 : 0) + (output_arena.warm != 0 ? 1 : 0);
+    clock_storage.warm_arenas = (arena.warm != 0 ? 1 : 0) + (scratch.warm != 0 ? 1 : 0) + (output_arena.warm != 0 ? 1 : 0);
     // The command fails at once if one of them can't be reserved, though a command of several units uses only the first.
     const bool reserved = arena.base != NULL && scratch.base != NULL && output_arena.base != NULL;
     char** filtered = arena_push_array(&arena, (uint64_t)count + 1, sizeof(char*), _Alignof(char*));

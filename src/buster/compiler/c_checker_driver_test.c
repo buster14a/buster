@@ -7555,7 +7555,7 @@ static void check_test_driver_time_stages(CheckTest* test, const char* executabl
 }
 
 // Warm arenas (#2850, lane.c's arena_reserve_warm): a compile's object is the same whatever its warm arenas held before
-// it. The command's two are filled with a pattern (BUSTER_TEST_ARENA_FILL), without a file and with one, and then hold
+// it. The command's three are filled with a pattern (BUSTER_TEST_ARENA_FILL), without a file and with one, and then hold
 // what that compile left (BUSTER_ARENA_POOL alone, twice: the second finds the first's own bytes), for one unit and for
 // a command of two; --time-stages says how many of the command's arenas are warm. The file's cases need a tmpfs the
 // test may write, /dev/shm, whose base pages a command takes only with the tests' switch
@@ -7631,10 +7631,10 @@ static void check_test_driver_warm_arenas(CheckTest* test, const char* executabl
     };
     static const CheckTestWarm cases[] = {
         { false, false, false, "\ntime-process\twarm-arenas\t0\n" },
-        { false, true, false, "\ntime-process\twarm-arenas\t2\n" },
-        { true, true, true, "\ntime-process\twarm-arenas\t2\n" },
-        { true, false, true, "\ntime-process\twarm-arenas\t2\n" },
-        { true, false, true, "\ntime-process\twarm-arenas\t2\n" },
+        { false, true, false, "\ntime-process\twarm-arenas\t3\n" },
+        { true, true, true, "\ntime-process\twarm-arenas\t3\n" },
+        { true, false, true, "\ntime-process\twarm-arenas\t3\n" },
+        { true, false, true, "\ntime-process\twarm-arenas\t3\n" },
         // /dev/shm's base pages, which no command takes unasked.
         { true, false, false, "\ntime-process\twarm-arenas\t0\n" },
     };
@@ -7684,7 +7684,7 @@ static void check_test_driver_warm_arenas(CheckTest* test, const char* executabl
     unsetenv("BUSTER_ARENA_POOL");
     unsetenv("BUSTER_TEST_ARENA_FILL");
     unsetenv("BUSTER_TEST_ARENA_BASE_PAGES");
-    check_test_expect(test, stated, "--time-stages states the command's warm arenas: none unasked, and its two with a pool's directory or a fill");
+    check_test_expect(test, stated, "--time-stages states the command's warm arenas: none unasked, and its three with a pool's directory or a fill");
     check_test_expect(test, same, "a unit's object is the same whatever its warm arenas held: a pattern, or what the last compile left in the pool's file");
     check_test_expect(test, kept, "the pool's file holds what the compiles wrote, closed to other users");
     check_test_expect(test, units, "a command of two units links the same executable with its arenas warm and filled");

@@ -143,10 +143,10 @@ requirements. [Command index](README.md).
   mapped the executable's code and read-only data and asks the kernel for huge pages of the 2 MB ranges it used
   (#2873, `lane_exit_look`; `BUSTER_EXECUTABLE_HUGE_PAGES=0` turns both off): the
   [build guide](build.md#the-executable-in-huge-pages) has what that takes and saves.
-  `BUSTER_ARENA_POOL=DIRECTORY` has the command's arena and its output's keep their pages in a file of the directory
-  from one compile to the next (#2850, warm arenas: `lane.c`'s `arena_reserve_warm`), so that a compile finds them
-  resident where the kernel would clear fresh ones: 3.7 ms of sqlite3.c's 114 on the 9700X, with the directory on a
-  tmpfs mounted `huge=always`. Off unless the variable names a directory; a file that can't be claimed (another process
+  `BUSTER_ARENA_POOL=DIRECTORY` has the command's arena, its output's and its scratch keep their pages in a file of
+  the directory from one compile to the next (#2850, warm arenas: `lane.c`'s `arena_reserve_warm`), so that a compile
+  finds them resident where the kernel would clear fresh ones: 7.3 ms of sqlite3.c's 113 on the 9700X, with the
+  directory on a tmpfs mounted `huge=always`. Off unless the variable names a directory; a file that can't be claimed (another process
   holds each, the directory is on no tmpfs or on one that gives base pages, the file is another user's or open to
   others) leaves the command as without it, and so does a tmpfs that runs out of room, from the commit it refuses on.
   The object and the diagnostics are the same either way. [Arena memory](../arena-memory.md#warm-arenas-2850) has the
