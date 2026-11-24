@@ -327,9 +327,7 @@ static int run_ir_reduce(int argc, char** argv)
     const char* demo = NULL;
     const char* directory = NULL;
     const char* revision = NULL;
-    bool scalar = false;
     bool valid = true;
-    (void)scalar;
     for (int i = 0; valid && i < argc; i += 1)
     {
         const char* option = argv[i];
@@ -340,7 +338,6 @@ static int run_ir_reduce(int argc, char** argv)
         else if (strcmp(option, "--scalar") == 0)
         {
             // Since #2924 it selects nothing; it stays accepted until the drivers' flags go.
-            scalar = true;
         }
         else if (option[0] == '-' && i + 1 < argc)
         {
