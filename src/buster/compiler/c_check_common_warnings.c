@@ -12658,15 +12658,14 @@ static void check_common_assertion_reach(const CheckGraph* graph, const CheckStr
 // has two readers, or one reading it twice (each edge writes its child's entry, and only distinct children's entries
 // count as many as the edges). 16 nodes at a time: each operand slot's present children and their nodes compressed to
 // the front and written a child at a time (two edges that write one child fail the count, whatever order they write
-// in), and the arguments of the nodes whose operators have them, found from the same 16 operators; the last nodes, fewer
-// than 16, one at a time.
+// in), and the arguments of the nodes whose operators have them, found from the same 16 operators; the last step masked
+// to the nodes left.
 static bool check_common_parents(const CheckGraph* graph, uint32_t* parents, uint64_t* roots)
 {
     const uint32_t count = graph->count;
     memset(parents, 0xff, ((uint64_t)count + 1) * sizeof(uint32_t));
     uint64_t edges = 0;
     bool ordered = true;
-    uint32_t node = 0;
     const bool arguments = graph->argument_offsets != NULL && graph->argument_counts != NULL;
     // The operators with arguments, a bit each, as check_graph_has_arguments has them: a lane's word a permute away.
     uint32_t argued[(CHECK_OP_COUNT + 31) / 32] = { 0 };
@@ -12681,13 +12680,15 @@ static bool check_common_parents(const CheckGraph* graph, uint32_t* parents, uin
     const uint32_t* slots[] = { graph->operand0, graph->operand1, graph->operand2 };
     _Alignas(64) uint32_t packed_children[16];
     _Alignas(64) uint32_t packed_nodes[16];
-    for (; count - node >= 16; node += 16)
+    for (uint32_t node = 0; node < count; node += 16)
     {
+        const uint32_t left = count - node;
+        const __mmask16 valid = left >= 16 ? (__mmask16)0xffff : (__mmask16)((1u << left) - 1);
         const __m512i nodes = _mm512_add_epi32(_mm512_set1_epi32((int)node), lanes);
         for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(slots); i += 1)
         {
-            const __m512i children = _mm512_loadu_si512(slots[i] + node);
-            const __mmask16 edge = _mm512_cmplt_epu32_mask(children, limit);
+            const __m512i children = _mm512_maskz_loadu_epi32(valid, slots[i] + node);
+            const __mmask16 edge = _mm512_mask_cmplt_epu32_mask(valid, children, limit);
             const uint32_t present = (uint32_t)__builtin_popcount(edge);
             ordered &= _mm512_mask_cmplt_epu32_mask(edge, children, nodes) == edge;
             edges += present;
@@ -12701,10 +12702,10 @@ static bool check_common_parents(const CheckGraph* graph, uint32_t* parents, uin
                 parents[packed_children[k]] = packed_nodes[k];
             }
         }
-        const __m512i ops = _mm512_loadu_si512(graph->ops + node);
+        const __m512i ops = _mm512_maskz_loadu_epi32(valid, graph->ops + node);
         const __m512i word = _mm512_permutexvar_epi32(_mm512_srli_epi32(ops, 5), words);
         const __m512i bit = _mm512_sllv_epi32(_mm512_set1_epi32(1), _mm512_and_si512(ops, _mm512_set1_epi32(31)));
-        for (uint32_t argued_lanes = arguments ? _mm512_test_epi32_mask(word, bit) : 0; argued_lanes != 0; argued_lanes &= argued_lanes - 1)
+        for (uint32_t argued_lanes = arguments ? _mm512_mask_test_epi32_mask(valid, word, bit) : 0; argued_lanes != 0; argued_lanes &= argued_lanes - 1)
         {
             const uint32_t at = node + (uint32_t)__builtin_ctz(argued_lanes);
             for (uint32_t a = 0; a < graph->argument_counts[at]; a += 1)
@@ -12713,28 +12714,6 @@ static bool check_common_parents(const CheckGraph* graph, uint32_t* parents, uin
                 const bool edge = argument < count;
                 ordered &= !edge || argument < at;
                 parents[edge ? argument : count] = at;
-                edges += edge;
-            }
-        }
-    }
-    for (; node < count; node += 1)
-    {
-        const uint32_t operands[] = { graph->operand0[node], graph->operand1[node], graph->operand2[node] };
-        for (uint32_t o = 0; o < BUSTER_ARRAY_LENGTH(operands); o += 1)
-        {
-            const bool edge = operands[o] < count;
-            ordered &= !edge || operands[o] < node;
-            parents[edge ? operands[o] : count] = node;
-            edges += edge;
-        }
-        if (arguments && check_graph_has_arguments(graph->ops[node]))
-        {
-            for (uint32_t a = 0; a < graph->argument_counts[node]; a += 1)
-            {
-                const uint32_t argument = graph->argument_nodes[graph->argument_offsets[node] + a];
-                const bool edge = argument < count;
-                ordered &= !edge || argument < node;
-                parents[edge ? argument : count] = node;
                 edges += edge;
             }
         }

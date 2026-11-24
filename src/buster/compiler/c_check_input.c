@@ -17063,22 +17063,32 @@ static void check_input_tentative_arrays(CheckInputReader* reader, uint32_t limi
 // with the token count. The separate frame retains every check and the vector path (#1610).
 static __attribute__((noinline)) void check_input_system_token_map(uint8_t* tokens, const uint32_t* sources, uint32_t count, const uint8_t* levels, uint32_t limit)
 {
-    uint32_t token = 0;
-    // 16 tokens at a time (#529): their sources, clamped, gather four bytes each at their levels, of which the low one is
-    // the level. The loop after it takes the last tokens.
-    for (; count - token >= 16; token += 16)
+    // 16 tokens at a time (#529), the last step masked to the tokens left: their sources, clamped, gather four bytes each
+    // at their levels, of which the low one is the level.
+    for (uint32_t token = 0; token < count; token += 16)
     {
-        const __m512i source = _mm512_min_epu32(_mm512_loadu_si512(sources + token), _mm512_set1_epi32((int32_t)limit));
-        const __m512i level = _mm512_and_si512(_mm512_i32gather_epi32(source, levels, 1), _mm512_set1_epi32(0xff));
-        const __mmask16 marked = _mm512_cmpeq_epi32_mask(level, _mm512_set1_epi32(BUSTER_PP_SYSTEM_FILE)) |
-                                 _mm512_cmpeq_epi32_mask(level, _mm512_set1_epi32(BUSTER_PP_EXTERN_C_FILE));
-        _mm_storeu_si128((__m128i*)(tokens + token), _mm_maskz_set1_epi8(marked, 1));
+        const uint32_t left = count - token;
+        const __mmask16 valid = left >= 16 ? (__mmask16)0xffff : (__mmask16)((1u << left) - 1);
+        const __m512i source = _mm512_min_epu32(_mm512_maskz_loadu_epi32(valid, sources + token), _mm512_set1_epi32((int32_t)limit));
+        const __m512i level = _mm512_and_si512(_mm512_mask_i32gather_epi32(_mm512_setzero_si512(), valid, source, levels, 1), _mm512_set1_epi32(0xff));
+        const __mmask16 marked = _mm512_mask_cmpeq_epi32_mask(valid, level, _mm512_set1_epi32(BUSTER_PP_SYSTEM_FILE)) |
+                                 _mm512_mask_cmpeq_epi32_mask(valid, level, _mm512_set1_epi32(BUSTER_PP_EXTERN_C_FILE));
+        _mm_mask_storeu_epi8(tokens + token, valid, _mm_maskz_set1_epi8(marked, 1));
     }
-    for (; token < count; token += 1)
+}
+
+// Each token's mark from its level byte (`levels`, a byte a token): 1 for a system or extern "C" file's, 64 at a time, the
+// last step masked to the tokens left.
+static void check_input_level_marks(uint8_t* tokens, const uint8_t* levels, uint32_t count)
+{
+    for (uint32_t token = 0; token < count; token += 64)
     {
-        const uint32_t source = sources[token];
-        const uint8_t level = levels[source < limit ? source : limit];
-        tokens[token] = level == BUSTER_PP_SYSTEM_FILE || level == BUSTER_PP_EXTERN_C_FILE;
+        const uint32_t left = count - token;
+        const __mmask64 valid = left >= 64 ? ~(__mmask64)0 : ((__mmask64)1 << left) - 1;
+        const __m512i level = _mm512_maskz_loadu_epi8(valid, levels + token);
+        const __mmask64 marked = _mm512_mask_cmpeq_epi8_mask(valid, level, _mm512_set1_epi8(BUSTER_PP_SYSTEM_FILE)) |
+                                 _mm512_mask_cmpeq_epi8_mask(valid, level, _mm512_set1_epi8(BUSTER_PP_EXTERN_C_FILE));
+        _mm512_mask_storeu_epi8(tokens + token, valid, _mm512_maskz_set1_epi8(marked, 1));
     }
 }
 
@@ -17140,19 +17150,7 @@ static void check_input_system_tokens(CheckInputReader* reader, Preprocessor* pp
     }
     if (mapped != NULL)
     {
-        // 64 tokens at a time; the loop after it takes the last ones.
-        uint32_t token = 0;
-        for (; count - token >= 64; token += 64)
-        {
-            const __m512i level = _mm512_loadu_si512(mapped + token);
-            const __mmask64 marked = _mm512_cmpeq_epi8_mask(level, _mm512_set1_epi8(BUSTER_PP_SYSTEM_FILE)) |
-                                     _mm512_cmpeq_epi8_mask(level, _mm512_set1_epi8(BUSTER_PP_EXTERN_C_FILE));
-            _mm512_storeu_si512(tokens + token, _mm512_maskz_set1_epi8(marked, 1));
-        }
-        for (; token < count; token += 1)
-        {
-            tokens[token] = mapped[token] == BUSTER_PP_SYSTEM_FILE || mapped[token] == BUSTER_PP_EXTERN_C_FILE;
-        }
+        check_input_level_marks(tokens, mapped, count);
         memset(tokens + count, 0, 4);
     }
     if (levels != NULL)
@@ -17173,10 +17171,7 @@ static void check_input_system_tokens(CheckInputReader* reader, Preprocessor* pp
         memset(levels + limit + 1, 0, 3);
         if (parser->tokens.identity_sources)
         {
-            for (uint32_t i = 0; i < count; i += 1)
-            {
-                tokens[i] = levels[i] == BUSTER_PP_SYSTEM_FILE || levels[i] == BUSTER_PP_EXTERN_C_FILE;
-            }
+            check_input_level_marks(tokens, levels, count);
         }
         else
         {
