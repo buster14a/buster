@@ -24,7 +24,7 @@
 //   rule's kind (tier1_burs_pick), whose walks fill its fields. A node whose operator the grammar doesn't cover, or whose
 //   rule names a candidate the walks didn't make (a walk past BUSTER_TIER1_SELECT_WALK), takes maximal munch's
 //   (tier1_select_munch): the common fallback for what the tables don't cover. An address whose
-//   displacement doesn't fit 32 bits is no fold's: its class is the REG leaf's (tier1_burs_displacement), whose pattern is
+//   displacement doesn't fit 32 bits is no fold's: its class is the REG leaf's (the tests' tier1_burs_displacement), whose pattern is
 //   munch's, the one candidate it has (its constant index in a register, #141) or none, so that both paths take or refuse
 //   it alike. Classification, labeling and rule lookup are vector kernels; the tests check them against their definitions
 //   (tier1_select_burs_test.c's equations, tier1_burs_displacement and tier1_select_stack_object). The cover is
@@ -877,9 +877,6 @@ static __attribute__((unused)) bool tier1_select_initialized(void)
     return __atomic_load_n(&tier1_burs_status, __ATOMIC_ACQUIRE) == 2;
 }
 
-// Whether an address's displacement, its constant index scaled and its offset, fits a disp32: the condition of its lea's
-// candidate (tier1_select_candidates). An address past it has no candidate, and its class is the munch's, which refuses
-// it wherever the walks would.
 // The vector classifier gathers an address's offset and its scale from its 16-byte record.
 _Static_assert(sizeof(IrAddress) == 16 && offsetof(IrAddress, offset) == 0 && offsetof(IrAddress, scale) == 8, "IrAddress's layout, which tier1_burs_classify_vector gathers");
 
@@ -887,17 +884,6 @@ _Static_assert(sizeof(IrAddress) == 16 && offsetof(IrAddress, offset) == 0 && of
 // flags) from its 16-byte slot record.
 _Static_assert(sizeof(IrSlot) == 16 && offsetof(IrSlot, size) == 0 && offsetof(IrSlot, alignment) == 8 && offsetof(IrSlot, type) == 12 && offsetof(IrSlot, flags) == 13,
     "IrSlot's layout, which tier1_burs_classify_vector gathers");
-
-static bool tier1_burs_displacement(const IrFunction* function, uint32_t node)
-{
-    const IrAddress operand = function->addresses[function->c[node]];
-    const uint32_t b = function->b[node];
-    uint64_t constant = 0;
-    const bool constant_index = b != BUSTER_IR_NONE && tier1_select_constant(function, b, &constant);
-    int64_t displacement = 0;
-    return !__builtin_mul_overflow((int64_t)(constant_index ? constant : 0), (int64_t)operand.scale, &displacement) && !__builtin_add_overflow(displacement, operand.offset, &displacement) &&
-           displacement == (int64_t)(int32_t)displacement;
-}
 
 // A floating == or !='s operator (#2922): FCMP_EQ, which a select takes by two cmovs where it is the select's condition
 // directly or through its I1 copy right after it, but the REG leaf's, as on #2791, where that select's values recur through

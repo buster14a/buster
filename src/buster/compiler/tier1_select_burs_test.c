@@ -116,6 +116,20 @@ static bool tier1_burs_test_equation(uint32_t count, const uint32_t* classes, co
     return states[node] == state && rules[node] == tier1_burs_state_rules[states[node] * TIER1_BURS_NONTERMINALS + tier1_burs_goal[op]];
 }
 
+// The definition of an address's displacement fitting a disp32 (its constant index scaled, plus its offset, in exact
+// arithmetic): the condition of its lea's candidate (tier1_select_candidates). An address past it has no candidate, and
+// its class is the REG leaf's; tier1_burs_classify_vector's limbs must agree with it.
+static bool tier1_burs_displacement(const IrFunction* function, uint32_t node)
+{
+    const IrAddress operand = function->addresses[function->c[node]];
+    const uint32_t b = function->b[node];
+    uint64_t constant = 0;
+    const bool constant_index = b != BUSTER_IR_NONE && tier1_select_constant(function, b, &constant);
+    int64_t displacement = 0;
+    return !__builtin_mul_overflow((int64_t)(constant_index ? constant : 0), (int64_t)operand.scale, &displacement) && !__builtin_add_overflow(displacement, operand.offset, &displacement) &&
+           displacement == (int64_t)(int32_t)displacement;
+}
+
 // Checks `function` (verified, with dominance) into `check`: its children, states and rules against their definitions,
 // and the candidates of the grammar's classes.
 static void tier1_burs_check_function(Tier1BursCheck* check, const IrFunction* function, const IrDominance* dominance, Arena* scratch)
