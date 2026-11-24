@@ -71,26 +71,11 @@ static int check_test_driver_pic_command(const char* executable, const char* sou
 }
 
 // #1124: object/linkage options must not silently change nothing. Like PIC, valid requests are harmless to
-// non-emitting actions; output actions refuse the effective setting before publishing even the first unit.
+// non-emitting actions; output actions refuse the effective setting before publishing even the first unit. The default
+// visibility's options are taken (#3576, check_test_driver_default_visibility), the last of them deciding.
 static void check_test_driver_object_options(CheckTest* test, const char* executable, const char* directory)
 {
     static const char* const flags[][2] = {
-        {
-            "-fvisibility=hidden",
-            "-fvisibility=default",
-        },
-        {
-            "-fvisibility=protected",
-            "-fvisibility=default",
-        },
-        {
-            "-fvisibility=internal",
-            "-fvisibility=default",
-        },
-        {
-            "-fvisibility-ms-compat",
-            "-fvisibility=default",
-        },
         {
             "-ffunction-sections",
             "-fno-function-sections",
@@ -213,7 +198,7 @@ static void check_test_driver_object_options(CheckTest* test, const char* execut
         check_test_expect(test, alone_status == 1 && text != NULL && strstr(text, "invalid value") != NULL && access(output, F_OK) != 0, label);
         free(text);
     }
-    // The effective non-default value is named, not an earlier malformed spelling that clang ignores.
+    // The effective value decides, not an earlier malformed spelling that clang ignores (#3576).
     static const char* const effective[][2] = {
         { "-fvisibility=bogus", "-fvisibility=hidden" },
         { "-fvisibility=", "-fvisibility=protected" },
@@ -227,12 +212,10 @@ static void check_test_driver_object_options(CheckTest* test, const char* execut
             effective[i][1],
         };
         char* text = NULL;
-        char expected[160];
-        snprintf(expected, sizeof(expected), "unsupported code generation option '%s'", effective[i][1]);
         unlink(output);
         const int status = check_test_driver_pic_command(executable, source, output, false, BUSTER_CHECK_PIC_OBJECT, options, BUSTER_ARRAY_LENGTH(options), &text);
-        snprintf(label, sizeof(label), "effective visibility %s is refused by name", effective[i][1]);
-        check_test_expect(test, status == 1 && text != NULL && strstr(text, expected) != NULL && access(output, F_OK) != 0, label);
+        snprintf(label, sizeof(label), "effective visibility %s after a malformed one is taken", effective[i][1]);
+        check_test_expect(test, status == 0 && access(output, F_OK) == 0, label);
         free(text);
     }
     // -fvisibility-ms-compat is clang's hidden default and participates in the same last-option state.
@@ -254,8 +237,7 @@ static void check_test_driver_object_options(CheckTest* test, const char* execut
     unlink(output);
     const int default_ms_status = check_test_driver_pic_command(executable, source, output, false, BUSTER_CHECK_PIC_OBJECT, default_then_ms_compat,
                                                                 BUSTER_ARRAY_LENGTH(default_then_ms_compat), &text);
-    check_test_expect(test, default_ms_status == 1 && text != NULL && strstr(text, "unsupported code generation option '-fvisibility-ms-compat'") != NULL &&
-                           access(output, F_OK) != 0, "an effective -fvisibility-ms-compat is refused by name");
+    check_test_expect(test, default_ms_status == 0 && access(output, F_OK) == 0, "an effective -fvisibility-ms-compat is taken (#3576)");
     free(text);
     // Clang has no bare -fvisibility; ours refuses it, and a later default does not turn it into an option.
     const char* bare_visibility[] = { "-fvisibility" };

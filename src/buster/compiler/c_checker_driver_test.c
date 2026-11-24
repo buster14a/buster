@@ -9644,6 +9644,8 @@ static int run_checker_driver_tests(int argc, char** argv)
     bool stack_protector_only = false;
     // --cf-protection-only: CET's section alone (#3570, check_test_driver_cf_protection).
     bool cf_protection_only = false;
+    // --visibility-only: visibility's section alone, its pragmas' and -fvisibility='s (#3576, check_test_driver_visibility).
+    bool visibility_only = false;
     // --target-versions-only: GNU multiversioning's target and target_clones section alone (#1838).
     bool target_versions_only = false;
     // --semantic-recovery-only: the semantic error recovery section alone (#1447).
@@ -9739,6 +9741,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         else if (strcmp(argv[i], "--cf-protection-only") == 0)
         {
             cf_protection_only = true;
+        }
+        else if (strcmp(argv[i], "--visibility-only") == 0)
+        {
+            visibility_only = true;
         }
         else if (strcmp(argv[i], "--target-versions-only") == 0)
         {
@@ -9878,7 +9884,7 @@ static int run_checker_driver_tests(int argc, char** argv)
                              (uint32_t)run_modes_only + (uint32_t)correctness_edges_only + (uint32_t)imaginary_bit_int_only + (uint32_t)unused_comparison_only + (uint32_t)assert_diagnostics_only +
                              (uint32_t)float_precision_only + (uint32_t)reach_filter_only + (uint32_t)branch_truth_only +
                              (uint32_t)constant_logical_only + (uint32_t)pic_only + (uint32_t)string_plus_only + (uint32_t)initializer_diagnostics_only +
-                             (uint32_t)stack_protector_only + (uint32_t)cf_protection_only;
+                             (uint32_t)stack_protector_only + (uint32_t)cf_protection_only + (uint32_t)visibility_only;
     options &= focuses <= 1 && (focuses == 0 || (!lazy && check_driver_part.count == 1));
     // One focused section's alone: the others' gates take `focused` as --sign-compare-only's did.
     const bool focused = focuses != 0;
@@ -10406,6 +10412,10 @@ static int run_checker_driver_tests(int argc, char** argv)
     if (temporary && cf_protection_only)
     {
         check_test_driver_cf_protection(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
+    }
+    if (temporary && visibility_only)
+    {
+        check_test_driver_visibility(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
     }
     if (temporary && target_versions_only)
     {

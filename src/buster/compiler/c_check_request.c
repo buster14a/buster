@@ -42,10 +42,9 @@ struct CheckRequestScan
     // The first option that asks for code generation the driver doesn't implement (check_request_codegen_option).
     const char* codegen;
     // The object and linkage options the producer doesn't implement, refused where the request emits code (#1124), each
-    // family's last option deciding: the last -fvisibility= or -fvisibility-ms-compat (check_request_visibility), and
-    // -ffunction-sections and -fdata-sections unless their -fno- forms follow them. -f[no-]common goes on to
-    // pp_parse_options as any other option does: common definitions are emitted (#147, c_predefines.c).
-    const char* visibility;
+    // family's last option deciding: -ffunction-sections and -fdata-sections unless their -fno- forms follow them.
+    // -f[no-]common goes on to pp_parse_options as any other option does: common definitions are emitted (#147,
+    // c_predefines.c), and so do -fvisibility= and -fvisibility-ms-compat, whose default visibility the code has (#3576).
     const char* function_sections;
     const char* data_sections;
     // The last -fshort-enums, unless -fno-short-enums follows it.
@@ -75,7 +74,8 @@ typedef enum CheckRequestError
 {
     CHECK_REQUEST_ACCEPTED,
     // Code generation the driver doesn't implement: the first option of check_request_codegen_option's (or a bare
-    // -fvisibility), else, for a request that emits code, the object and linkage options' (#1124).
+    // -fvisibility), else, for a request that emits code, the object and linkage options' (#1124): function and data
+    // sections.
     CHECK_REQUEST_CODEGEN,
     // Instrumentation the driver doesn't implement, for a request that emits code, from the resolved predefines rather
     // than from an enabling option, which a later -fno-sanitize= or -fno-openmp may have cancelled (#1112): a sanitizer,
@@ -227,16 +227,6 @@ static bool check_request_pack_value(const char* digits, uint64_t* value)
     return valid;
 }
 
-// Whether the last -fvisibility= or -fvisibility-ms-compat, `option` (or null), changes the default visibility the
-// producer doesn't implement: -fvisibility-ms-compat, and hidden, protected or internal. Only the last counts, as clang's
-// driver reads them; a malformed last value is pp_parse_options' clang-compatible invalid-value error.
-static bool check_request_visibility(const char* option)
-{
-    const char* value = option != NULL ? option + sizeof("-fvisibility") - 1 : "";
-    return option != NULL && (strcmp(option, "-fvisibility-ms-compat") == 0 || strcmp(value, "=hidden") == 0 || strcmp(value, "=protected") == 0 ||
-                              strcmp(value, "=internal") == 0);
-}
-
 // Whether `match` is one of the stack protector's options the code has (#3558, predefines_stack_guard):
 // -fstack-protector, -fstack-protector-strong, -fstack-protector-all and -fno-stack-protector, which pp_parse_options
 // resolves and every request takes. The family's other spellings (GCC's -fstack-protector-explicit, a misspelling) stay
@@ -249,9 +239,9 @@ static bool check_request_stack_protector(COptionMatch match)
 
 // Reads `argument`, one that is no option's value (pp_option_takes_value's), into `scan`: whether it goes on to
 // pp_parse_options. Only an option that asks for code generation the driver doesn't implement stays apart, since the
-// preprocessor doesn't model it; the stack protector's and -fcf-protection's (which the code has, #3558 and #3570), the
-// layout options and the object and linkage options go on, for their predefined macros, and so does a bare
-// -fvisibility, which clang doesn't take. `match` is the argument's IDs (c_option_find).
+// preprocessor doesn't model it; the stack protector's, -fcf-protection's and -fvisibility='s (which the code has, #3558,
+// #3570 and #3576), the layout options and the object and linkage options go on, for their predefined macros, and so
+// does a bare -fvisibility, which clang doesn't take. `match` is the argument's IDs (c_option_find).
 static bool check_request_scan_match(CheckRequestScan* scan, const char* argument, COptionMatch match)
 {
     bool passed = true;
@@ -286,7 +276,8 @@ static bool check_request_scan_match(CheckRequestScan* scan, const char* argumen
     }
     else if (match.exact == C_OPTION_FVISIBILITY_MS_COMPAT || match.joined == C_OPTION_FVISIBILITY_EQ)
     {
-        scan->visibility = argument;
+        // The default visibility (#3576): every request takes it, the last deciding (predefines_default_visibility),
+        // whose invalid value is pp_parse_options' clang-compatible error.
     }
     else if (match.exact == C_OPTION_FVISIBILITY)
     {
@@ -309,8 +300,7 @@ static CheckRequestRefusal check_request_refusal(const CheckRequestScan* scan, c
 {
     CheckRequestRefusal result = { .error = CHECK_REQUEST_ACCEPTED };
     const bool emits = code != CHECK_REQUEST_CODE_NONE;
-    const char* visibility = check_request_visibility(scan->visibility) ? scan->visibility : NULL;
-    const char* object = !emits ? NULL : visibility != NULL ? visibility : scan->function_sections != NULL ? scan->function_sections : scan->data_sections;
+    const char* object = !emits ? NULL : scan->function_sections != NULL ? scan->function_sections : scan->data_sections;
     const char* codegen = scan->codegen != NULL ? scan->codegen : object;
     const bool sanitized = options != NULL && emits && options->predefines.sanitizers != 0;
     const bool covered = options != NULL && emits && options->predefines.sanitize_coverage;
@@ -506,6 +496,11 @@ static CheckProgramOptions check_request_program_options(const Preprocessor* pp,
     // -fPIC's and -fpic's code (#2101) where the client's output may go into a shared library: -fPIE's elsewhere, as a
     // link's executable takes them.
     unit.pic = unit.pic && (pp->options.predefines.pic == BUSTER_PREDEFINES_PIC_BIG || pp->options.predefines.pic == BUSTER_PREDEFINES_PIC_SMALL);
+    // -fvisibility='s (#3576): the visibility of the definitions that give none, as a symbol's flags have it.
+    const uint8_t visibility = predefines_default_visibility(&pp->options.predefines);
+    unit.visibility = visibility == BUSTER_PREDEFINES_VISIBILITY_HIDDEN    ? BUSTER_LINK_SYMBOL_HIDDEN :
+                      visibility == BUSTER_PREDEFINES_VISIBILITY_PROTECTED ? BUSTER_LINK_SYMBOL_PROTECTED :
+                                                                             BUSTER_LINK_SYMBOL_DEFAULT;
     // -fpatchable-function-entry's NOPs (#1447), which predefines_finish_options checked: every function's without the
     // attribute, and the section of every entry whose attribute names none.
     const char* section = 0;
@@ -560,6 +555,9 @@ static CheckRequestReceipt check_request_receipt(const Preprocessor* pp, const c
     // computes: mixed in where it is set alone, so that every other request's digest stays what it was.
     digest = target.prefer_256 ? check_request_mix_word(digest, 41, 1) : digest;
     digest = target.slow_unaligned_16 ? check_request_mix_word(digest, 40, 1) : digest;
+    // A default visibility other than default (#3576), which changes the code but no macro, mixed in the same way.
+    const uint8_t visibility = predefines_default_visibility(predefines);
+    digest = visibility != BUSTER_PREDEFINES_VISIBILITY_DEFAULT ? check_request_mix_word(digest, 42, visibility) : digest;
     digest = check_request_mix_word(digest, 4, (uint64_t)language.standard << 32 | (uint64_t)language.gnu << 16 | (uint64_t)language.gnu_keywords << 8 | language.digraphs);
     const uint64_t lexical = (uint64_t)options->freestanding | (uint64_t)options->no_builtin << 1 | (uint64_t)options->undefine << 2 | (uint64_t)options->trigraphs << 3 |
                              (uint64_t)options->assembly << 4 | (uint64_t)options->clang_features << 5 | (uint64_t)options->no_standard_includes << 6 |

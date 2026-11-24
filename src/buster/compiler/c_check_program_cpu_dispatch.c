@@ -442,7 +442,11 @@ static bool check_program_cpu_symbols(CheckProgramCode* code, const CheckProgram
             continue;
         }
         const uint8_t binding = group->internal ? BUSTER_LINK_SYMBOL_LOCAL : BUSTER_LINK_SYMBOL_WEAK;
-        valid = check_program_cpu_add(link, check_program_cpu_name(program, group->first, -1, ".resolver", output), binding | BUSTER_LINK_SYMBOL_FUNCTION, true) != 0;
+        // The resolver has f.ifunc's visibility, which -fvisibility= gives a definition (#3576) as clang gives every
+        // symbol of the function.
+        const uint8_t visibility = group->internal ? BUSTER_LINK_SYMBOL_DEFAULT : link->symbols.flags[alias] & BUSTER_LINK_SYMBOL_VISIBILITY;
+        valid = check_program_cpu_add(link, check_program_cpu_name(program, group->first, -1, ".resolver", output),
+                                      binding | visibility | BUSTER_LINK_SYMBOL_FUNCTION, true) != 0;
         const uint32_t cpus = check_program_cpu_rows(program, dispatch, rows, BUSTER_CHECK_PROGRAM_CPU_LIST);
         for (uint32_t c = 0; valid && c < cpus; c += 1)
         {

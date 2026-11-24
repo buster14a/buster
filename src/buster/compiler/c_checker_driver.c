@@ -16335,7 +16335,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             lanes->helper_forms == 0 && getenv("BUSTER_TEST_NODE_BODIES") == NULL &&
             !selection_census && !branch_truth_census && !provisional_selection && !windowed_loop && !shared_parts && !helper_report &&
             !options.predefines.common && !options.predefines.short_wchar &&
-            (!options.predefines.visibility_given || (options.predefines.visibility != NULL && strcmp(options.predefines.visibility, "default") == 0)) &&
+            predefines_default_visibility(&options.predefines) == BUSTER_PREDEFINES_VISIBILITY_DEFAULT &&
             predefines_stack_guard(&options.predefines) == BUSTER_PREDEFINES_SSP_OFF &&
             predefines_frame_pointer(&options.predefines) == BUSTER_PREDEFINES_FRAME_POINTER_NONE &&
             !predefines_stack_clash(&options.predefines) &&
