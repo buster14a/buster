@@ -292,6 +292,46 @@ alone, ns an instruction, against main `d6daf644d`:
 | `main.c`'s `-c` object | 11.33 | 10.13 |
 | `main.c`'s `--tier1` object | 10.03 | 8.97 |
 
+Its tables are built once and baked into the executable (`buster_baked`,
+`baked.c`), so a process starts with them. Building them took 13.6 ms a process at
+first, against main's 1.43 ms, which made `measure-frames` 25% to 132% slower on
+real objects. Two changes fixed it. Each entry now writes only the cells it
+matches, instead of every cell testing every entry of its bucket twice, and the
+tails are built one bucket at a time. That brought setup to about 2.4 ms. Then
+baking: initialization's scratch (the cells' counts, and the address32
+templates the checks read) is an anonymous mapping, freed after, since the bake
+refuses writes to the image's own memory, the allocator's state among them.
+With a 32-bit address, the full validator's room test reads the address32
+templates, which no process now builds for the disassembler. A baked bitset
+of the 520 forms without room answers it, and the test checks the bitset
+against `x86_form_lacks_room`. The baked section grows from 6.5 MB to 8.05 MB.
+On the 9700X, median user cycles of 5 interleaved rounds against main:
+
+| Run | main | one decoder, baked |
+| --- | ---: | ---: |
+| `-c` of `sqlite3.c` | 550.7M | 547.5M |
+| `-c --tier1` of `sqlite3.c` | 3,441.2M | 3,439.6M |
+| `-c` of `main.c` | 3,027.9M | 3,015.1M |
+| `-c --tier1` of `main.c` | 7,591.3M | 7,578.1M |
+| `measure-frames` of `sqlite3.c`'s `-c` object | 49.8M | 43.4M |
+| `measure-frames` of `main.c`'s `--tier1` object | 60.8M | 52.1M |
+| `measure-frames` of 363 musl members | 16.8M | 8.6M |
+
+Decoding a few instructions a call still costs the window's fixed work, a
+dependent chain of about 600 cycles that a narrower window doesn't shorten.
+`benchmark-x86-disassembler --phase decode --calls N`, in ns an instruction:
+
+| N | main | one decoder |
+| ---: | ---: | ---: |
+| 1 | 31.5 | 99 to 101 |
+| 2 | 21.5 to 21.8 | 49.7 to 51.9 |
+| 4 | 13.5 | 26.0 to 26.6 |
+| 8 | 9.1 to 9.2 | 13.8 to 14.1 |
+| 16 | 8.5 to 8.7 | 7.7 to 8.2 |
+
+The compiler's own callers decode more at once: `measure-frames` a function a
+call (`frame_measure.c`), `disassemble` the whole file in batches of records.
+
 The tests check the lane index against a scan of each bucket's signatures, and
 every supported form's hint against its encoded length. The decoder's contract
 checks hold for every catalogue instance and generated, mutated and random
