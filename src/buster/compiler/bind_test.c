@@ -900,6 +900,7 @@ typedef enum BindTestRule
     BIND_TEST_RULE_PROGRAM_UNDEFINED,
     BIND_TEST_RULE_WEAK_DATA_START,
     BIND_TEST_RULE_WEAK_ABSOLUTE_DATA_START,
+    BIND_TEST_RULE_ABSOLUTE,
     BIND_TEST_RULE_WEAK_INIT,
     BIND_TEST_RULE_WEAK_INIT_DEFINED,
     BIND_TEST_RULE_HIDDEN_REFERENCE,
@@ -934,6 +935,7 @@ static const char* const bind_test_rule_names[] = {
     "a symbol of the program's that it never defines",
     "a weak definition of data_start, which Scrt1.o, before the program in link order, defines weakly",
     "a weak absolute definition of data_start, which Scrt1.o defines weakly before it",
+    "a strong absolute definition of a name nothing else defines",
     "a weak definition of _init, which crti.o defines strongly",
     "a weak definition of _init with its atom before bind_begin",
     "a hidden reference to puts, which only libc.so.6 defines",
@@ -1039,6 +1041,14 @@ static void bind_test_rule_link(BindTestRuleLink* rule, const Runtime* runtime, 
     else if (which == BIND_TEST_RULE_WEAK_ABSOLUTE_DATA_START)
     {
         symbols[0] = bind_test_weak_absolute(test, "data_start");
+    }
+    else if (which == BIND_TEST_RULE_ABSOLUTE)
+    {
+        symbols[0] = bind_test_symbol(test, "buster_absolute", global_reference, BUSTER_LINK_SOURCE_ABSOLUTE);
+        if (symbols[0] != 0)
+        {
+            test->link.symbols.value[symbols[0]] = 123;
+        }
     }
     else if (which == BIND_TEST_RULE_WEAK_INIT || which == BIND_TEST_RULE_WEAK_INIT_DEFINED)
     {
@@ -1241,6 +1251,12 @@ static bool bind_test_rule_holds(const BindTestRuleLink* rule, const Runtime* ru
         // and lld.
         result = rule->ended && bind_test_global(link, "data_start") == first && unit == 1 + RUNTIME_OBJECT_START && symbols->source[first] == BUSTER_LINK_SOURCE_RUNTIME_ARCHIVE &&
                  weak && bind_test_same_place(link, first, "__data_start");
+    }
+    else if (which == BIND_TEST_RULE_ABSOLUTE)
+    {
+        // The program's own definition: binding neither looks its name up nor moves it (bind_resolve's mask of the
+        // program's, the linker's and absolute sources).
+        result = rule->ended && atom == 0 && symbols->source[first] == BUSTER_LINK_SOURCE_ABSOLUTE && symbols->value[first] == 123 && !weak;
     }
     else if (which == BIND_TEST_RULE_WEAK_INIT || which == BIND_TEST_RULE_WEAK_INIT_DEFINED)
     {
