@@ -256,21 +256,21 @@ static bool x86_decode_form_tail(const X86FormDescription* form, bool* slot, uin
 // it can't hold is left unknown, and its lanes' lengths come from their forms.
 static void x86_decode_tails_initialize(void)
 {
-    static int8_t tails[BUSTER_X86_DECODE_BUCKETS][2][2][8];
-    static int8_t slots[BUSTER_X86_DECODE_BUCKETS];
-    static bool broken[BUSTER_X86_DECODE_BUCKETS];
-    memset(tails, -1, sizeof(tails));
-    memset(slots, -1, sizeof(slots));
-    memset(broken, 0, sizeof(broken));
-    for (uint32_t pass = 0; pass < 2; pass += 1)
+    x86_decode_tails_unknown = 0;
+    // A bucket at a time, from its entries (a PR form's in each of its eight buckets).
+    for (uint32_t bucket = 0; bucket < BUSTER_X86_DECODE_BUCKETS; bucket += 1)
     {
-        for (uint32_t row = 1; row < X86_FORM_COUNT; row += 1)
+        const X86DecodeBucket entries = x86_decode_buckets[bucket];
+        int8_t tails[2][2][8];
+        int8_t slot_seen = -1;
+        bool broken = false;
+        memset(tails, -1, sizeof(tails));
+        x86_decode_tails[bucket] = 0;
+        for (uint32_t pass = 0; entries.count != 0 && pass < 2; pass += 1)
         {
-            const X86FormDescription* form = &x86_form_descriptions[row];
-            if (x86_decode_form_supported(row))
+            for (uint32_t j = 0; j < entries.count; j += 1)
             {
-                uint32_t index;
-                const uint32_t map = x86_decode_form_map(form, &index);
+                const X86FormDescription* form = &x86_form_descriptions[x86_decode_forms[entries.first + j]];
                 bool slot;
                 uint32_t trailing;
                 const bool fits = x86_decode_form_tail(form, &slot, &trailing);
@@ -278,83 +278,73 @@ static void x86_decode_tails_initialize(void)
                 const uint32_t wide = form->family == BUSTER_X86_FAMILY_LEGACY && form->w;
                 const uint32_t word = form->family == BUSTER_X86_FAMILY_LEGACY && x86_form_has_prefix(form, 0x66) && !wide;
                 const bool digit = (form->encoding & BUSTER_X86_ENCODING_DIGIT) != 0;
-                const uint32_t count = form->encoding == BUSTER_X86_ENCODING_PR && index + 1 == form->opcode_bytes ? 8 : 1;
-                for (uint32_t i = 0; i < count; i += 1)
+                for (uint32_t d = 0; d < 8; d += 1)
                 {
-                    const uint32_t bucket = x86_decode_bucket(form->family, map, x86_opcode_byte(form, index) | i);
-                    for (uint32_t d = 0; d < 8; d += 1)
+                    if (!digit || d == (form->encoding & 7u))
                     {
-                        if (!digit || d == (form->encoding & 7u))
+                        if (pass == 0)
                         {
-                            if (pass == 0)
-                            {
-                                int8_t* entry = &tails[bucket][word][wide][d];
-                                broken[bucket] = broken[bucket] || !fits || (*entry != -1 && *entry != (int8_t)trailing) || (slots[bucket] != -1 && slots[bucket] != (int8_t)slot);
-                                *entry = (int8_t)trailing;
-                                slots[bucket] = (int8_t)slot;
-                            }
-                            else
-                            {
-                                const uint32_t tail = x86_decode_tails[bucket];
-                                const uint32_t predicted = ((tail >> (16 + d)) & 1) == 0 ? tail & 15 : wide ? (tail >> 12) & 15 : word ? (tail >> 8) & 15 : (tail >> 4) & 15;
-                                broken[bucket] = broken[bucket] || predicted != trailing || ((tail >> 24) & 1) != (uint32_t)slot;
-                            }
+                            int8_t* entry = &tails[word][wide][d];
+                            broken = broken || !fits || (*entry != -1 && *entry != (int8_t)trailing) || (slot_seen != -1 && slot_seen != (int8_t)slot);
+                            *entry = (int8_t)trailing;
+                            slot_seen = (int8_t)slot;
+                        }
+                        else
+                        {
+                            const uint32_t tail = x86_decode_tails[bucket];
+                            const uint32_t predicted = ((tail >> (16 + d)) & 1) == 0 ? tail & 15 : wide ? (tail >> 12) & 15 : word ? (tail >> 8) & 15 : (tail >> 4) & 15;
+                            broken = broken || predicted != trailing || ((tail >> 24) & 1) != (uint32_t)slot;
                         }
                     }
                 }
             }
-        }
-        for (uint32_t bucket = 0; pass == 0 && bucket < BUSTER_X86_DECODE_BUCKETS; bucket += 1)
-        {
-            // A digit whose defined trailing bytes don't depend on 66 or W, and agree with the last such digit's (from
-            // 7 down: F6's and F7's immediates are on 0 and 1), is outside the mask; the others are inside it, and must
-            // agree with one another.
-            int32_t outside = -1;
-            uint32_t mask = 0;
-            for (uint32_t k = 0; k < 8; k += 1)
+            if (pass == 0)
             {
-                const uint32_t d = 7 - k;
-                const int8_t plain = tails[bucket][0][0][d];
-                const int8_t word = tails[bucket][1][0][d];
-                const int8_t wide = tails[bucket][0][1][d];
-                const int8_t value = plain != -1 ? plain : word != -1 ? word : wide;
-                const bool constant = value != -1 && (plain == -1 || plain == value) && (word == -1 || word == value) && (wide == -1 || wide == value);
-                if (constant && (outside == -1 || outside == value))
+                // A digit whose defined trailing bytes don't depend on 66 or W, and agree with the last such digit's (from
+                // 7 down: F6's and F7's immediates are on 0 and 1), is outside the mask; the others are inside it, and must
+                // agree with one another.
+                int32_t outside = -1;
+                uint32_t mask = 0;
+                for (uint32_t k = 0; k < 8; k += 1)
                 {
-                    outside = value;
+                    const uint32_t d = 7 - k;
+                    const int8_t plain = tails[0][0][d];
+                    const int8_t word = tails[1][0][d];
+                    const int8_t wide = tails[0][1][d];
+                    const int8_t value = plain != -1 ? plain : word != -1 ? word : wide;
+                    const bool constant = value != -1 && (plain == -1 || plain == value) && (word == -1 || word == value) && (wide == -1 || wide == value);
+                    if (constant && (outside == -1 || outside == value))
+                    {
+                        outside = value;
+                    }
+                    else if (value != -1)
+                    {
+                        mask |= 1u << d;
+                    }
                 }
-                else if (value != -1)
+                int32_t inside[3] = { -1, -1, -1 };
+                for (uint32_t d = 0; d < 8; d += 1)
                 {
-                    mask |= 1u << d;
+                    const int8_t values[3] = { tails[0][0][d], tails[1][0][d], tails[0][1][d] };
+                    for (uint32_t k = 0; ((mask >> d) & 1) != 0 && k < 3; k += 1)
+                    {
+                        broken = broken || (values[k] != -1 && inside[k] != -1 && inside[k] != values[k]);
+                        inside[k] = values[k] != -1 ? values[k] : inside[k];
+                    }
                 }
+                // A combination no form has (an unprefixed one where every form has 66) takes a defined one's value.
+                inside[0] = inside[0] != -1 ? inside[0] : inside[1] != -1 ? inside[1] : inside[2] != -1 ? inside[2] : 0;
+                inside[1] = inside[1] != -1 ? inside[1] : inside[0];
+                inside[2] = inside[2] != -1 ? inside[2] : inside[0];
+                outside = outside != -1 ? outside : 0;
+                const bool used = slot_seen != -1;
+                x86_decode_tails[bucket] = used && !broken ? (1u << 31) | ((uint32_t)slot_seen << 24) | (mask << 16) | ((uint32_t)inside[2] << 12) | ((uint32_t)inside[1] << 8) |
+                                                                      ((uint32_t)inside[0] << 4) | (uint32_t)outside
+                                                                : 0;
             }
-            int32_t inside[3] = { -1, -1, -1 };
-            for (uint32_t d = 0; d < 8; d += 1)
-            {
-                const int8_t values[3] = { tails[bucket][0][0][d], tails[bucket][1][0][d], tails[bucket][0][1][d] };
-                for (uint32_t k = 0; ((mask >> d) & 1) != 0 && k < 3; k += 1)
-                {
-                    broken[bucket] = broken[bucket] || (values[k] != -1 && inside[k] != -1 && inside[k] != values[k]);
-                    inside[k] = values[k] != -1 ? values[k] : inside[k];
-                }
-            }
-            // A combination no form has (an unprefixed one where every form has 66) takes a defined one's value.
-            inside[0] = inside[0] != -1 ? inside[0] : inside[1] != -1 ? inside[1] : inside[2] != -1 ? inside[2] : 0;
-            inside[1] = inside[1] != -1 ? inside[1] : inside[0];
-            inside[2] = inside[2] != -1 ? inside[2] : inside[0];
-            outside = outside != -1 ? outside : 0;
-            const bool used = slots[bucket] != -1;
-            x86_decode_tails[bucket] = used && !broken[bucket] ? (1u << 31) | ((uint32_t)slots[bucket] << 24) | (mask << 16) | ((uint32_t)inside[2] << 12) | ((uint32_t)inside[1] << 8) |
-                                                                  ((uint32_t)inside[0] << 4) | (uint32_t)outside
-                                                            : 0;
         }
-    }
-    x86_decode_tails_unknown = 0;
-    for (uint32_t bucket = 0; bucket < BUSTER_X86_DECODE_BUCKETS; bucket += 1)
-    {
-        x86_decode_tails[bucket] = broken[bucket] ? 0 : x86_decode_tails[bucket];
-        x86_decode_tails_unknown += slots[bucket] != -1 && x86_decode_tails[bucket] == 0;
-
+        x86_decode_tails[bucket] = broken ? 0 : x86_decode_tails[bucket];
+        x86_decode_tails_unknown += slot_seen != -1 && x86_decode_tails[bucket] == 0;
     }
 }
 
@@ -532,60 +522,65 @@ static bool x86_decode_lane_indices_initialize(void)
             cells += valid ? 1u << __builtin_popcount(index->varying) : 0;
         }
     }
-    x86_decode_cells = valid ? malloc((uint64_t)cells * sizeof(*x86_decode_cells)) : 0;
-    valid = valid && x86_decode_cells != 0;
-    // Each cell's matching entries, in catalogue order: twice, to count the lists' room (an ambiguous cell's candidates
-    // and their end; entry 0 is no list's), then to fill them.
+    // Each cell's matching entries, in catalogue order. An entry matches the cells whose varying bits inside its mask
+    // are its key's, so it walks just those (the subsets of its free bits): once to count each cell's matches and keep
+    // its first, and again, for the cells with more than one, to fill their lists (each ended by 0; list 0 is no one's).
+    x86_decode_cells = valid ? calloc(cells, sizeof(*x86_decode_cells)) : 0;
+    uint32_t* counts = valid ? calloc(cells, sizeof(uint32_t)) : 0;
+    valid = valid && x86_decode_cells != 0 && counts != 0;
     uint16_t* lists = 0;
     uint32_t used = 1;
+    // The buckets with an ambiguous cell, the only ones the second pass walks.
+    uint64_t ambiguous_buckets[(BUSTER_X86_DECODE_BUCKETS + 63) / 64] = { 0 };
     for (uint32_t pass = 0; valid && pass < 2; pass += 1)
     {
-        lists = pass == 1 ? malloc(sizeof(uint16_t) * used) : 0;
-        valid = pass == 0 || lists != 0;
-        used = 1;
-        for (uint32_t b = 0; valid && b < BUSTER_X86_DECODE_BUCKETS; b += 1)
+        for (uint32_t b = 0; b < BUSTER_X86_DECODE_BUCKETS; b += 1)
         {
-            const X86DecodeBucket bucket = x86_decode_buckets[b];
+            const X86DecodeBucket bucket = pass == 0 || ((ambiguous_buckets[b / 64] >> (b % 64)) & 1) != 0 ? x86_decode_buckets[b] : (X86DecodeBucket){ 0 };
             const X86DecodeLaneIndex* index = &x86_decode_lane_indices[b];
-            const uint32_t count = bucket.count != 0 ? 1u << __builtin_popcount(index->varying) : 0;
-            for (uint32_t cell = 0; cell < count; cell += 1)
+            for (uint32_t j = 0; j < bucket.count; j += 1)
             {
-                const uint32_t key = index->common_key | _pdep_u32(cell, index->varying);
-                uint32_t matches = 0;
-                uint16_t row = 0;
-                for (uint32_t j = 0; j < bucket.count; j += 1)
+                const uint32_t entry = bucket.first + j;
+                const uint32_t mask = x86_decode_compact(x86_decode_masks[entry], true);
+                const uint32_t base = _pext_u32(x86_decode_compact(x86_decode_keys[entry], false) & mask, index->varying);
+                const uint32_t free_cells = _pext_u32(~mask, index->varying);
+                const uint16_t row = x86_decode_forms[entry];
+                uint32_t subset = 0;
+                bool walking = true;
+                while (walking)
                 {
-                    const uint32_t entry = bucket.first + j;
-                    if ((key & x86_decode_compact(x86_decode_masks[entry], true)) == x86_decode_compact(x86_decode_keys[entry], false))
+                    const uint32_t cell = index->first + (base | subset);
+                    if (pass == 0)
                     {
-                        row = x86_decode_forms[entry];
-                        matches += 1;
+                        x86_decode_cells[cell] = counts[cell] == 0 ? row : x86_decode_cells[cell];
+                        ambiguous_buckets[b / 64] |= (uint64_t)(counts[cell] != 0) << (b % 64);
+                        counts[cell] += 1;
                     }
-                }
-                const uint32_t list = used;
-                for (uint32_t j = 0; pass == 1 && matches > 1 && j < bucket.count; j += 1)
-                {
-                    const uint32_t entry = bucket.first + j;
-                    if ((key & x86_decode_compact(x86_decode_masks[entry], true)) == x86_decode_compact(x86_decode_keys[entry], false))
+                    else if ((x86_decode_cells[cell] & BUSTER_X86_DECODE_LIST) != 0)
                     {
-                        lists[used] = x86_decode_forms[entry];
-                        used += 1;
+                        lists[counts[cell]] = row;
+                        counts[cell] += 1;
                     }
+                    subset = (subset - free_cells) & free_cells;
+                    walking = subset != 0;
                 }
-                if (pass == 1 && matches > 1)
-                {
-                    lists[used] = 0;
-                    x86_decode_cells[index->first + cell] = (uint16_t)(BUSTER_X86_DECODE_LIST | list);
-                }
-                else if (pass == 1)
-                {
-                    x86_decode_cells[index->first + cell] = row;
-                }
-                used = pass == 0 ? used + (matches > 1 ? matches + 1 : 0) : used + (matches > 1);
-                valid = valid && list < BUSTER_X86_DECODE_LIST;
             }
         }
+        // Between the passes: each ambiguous cell's list starts where the previous one's end left off, and its count
+        // becomes its write position.
+        for (uint32_t cell = 0; pass == 0 && cell < cells; cell += 1)
+        {
+            const uint32_t list = used;
+            const bool ambiguous = counts[cell] > 1;
+            x86_decode_cells[cell] = ambiguous ? (uint16_t)(BUSTER_X86_DECODE_LIST | list) : x86_decode_cells[cell];
+            used += ambiguous ? counts[cell] + 1 : 0;
+            counts[cell] = list;
+            valid = valid && list < BUSTER_X86_DECODE_LIST;
+        }
+        lists = pass == 0 && valid ? calloc(used, sizeof(uint16_t)) : lists;
+        valid = valid && lists != 0;
     }
+    free(counts);
     x86_decode_lists = lists;
     x86_decode_cell_count = cells;
     x86_decode_list_count = used;
