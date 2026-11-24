@@ -201,7 +201,7 @@ static void check_debug_test_rows(CheckDebugTestTally* tally)
     printf("  raw rows: %u functions, %llu rows, each path's at PROT_NONE pages\n", 131 + 64, (unsigned long long)rows_checked);
 }
 
-// The kept rows' twins on random rows (see the file's comment).
+// The kept rows against a definition of keeping, on random rows (see the file's comment).
 static void check_debug_test_keep(CheckDebugTestTally* tally)
 {
     uint64_t kept_total = 0;
@@ -225,41 +225,46 @@ static void check_debug_test_keep(CheckDebugTestTally* tally)
             line = line > INT32_MAX ? 7 : line;
         }
         const uint64_t room = (uint64_t)count + BUSTER_CHECK_DEBUG_SLACK;
-        uint32_t* scalar_offsets = calloc(room, sizeof(uint32_t));
-        uint32_t* scalar_lines = calloc(room, sizeof(uint32_t));
-        uint32_t* scalar_keys = calloc(room, sizeof(uint32_t));
-        ready = ready && scalar_offsets != 0 && scalar_lines != 0 && scalar_keys != 0;
+        uint32_t* kept_offsets = calloc(room, sizeof(uint32_t));
+        uint32_t* kept_lines = calloc(room, sizeof(uint32_t));
+        uint32_t* kept_keys = calloc(room, sizeof(uint32_t));
+        uint32_t* meant_rows = calloc(room, sizeof(uint32_t));
+        ready = ready && kept_offsets != 0 && kept_lines != 0 && kept_keys != 0 && meant_rows != 0;
         // The body's start: a row's offset, or none.
         const uint32_t body = count != 0 && check_debug_test_random(tally) % 4 != 0 ? (uint32_t)(check_debug_test_random(tally) % count) * 3 : UINT32_MAX;
         if (ready)
         {
-            const uint32_t scalar = check_debug_keep(offsets, keys, lines, count, body, scalar_offsets, scalar_lines, scalar_keys);
+            const uint32_t kept = check_debug_keep(offsets, keys, lines, count, body, kept_offsets, kept_lines, kept_keys);
             char detail[96];
-            snprintf(detail, sizeof(detail), "%u rows, %u kept", count, scalar);
-            // The kept rows against what keeping means: rows in a file, each line at most INT32_MAX and its file or line
-            // unlike the one kept before it, but the body's row; and every row in a file whose line or file changes kept.
-            bool meant = true;
-            for (uint32_t i = 0; meant && i < scalar; i += 1)
-            {
-                meant = scalar_keys[i] != BUSTER_CHECK_DEBUG_NO_FILE && scalar_lines[i] <= INT32_MAX &&
-                        (i == 0 || scalar_lines[i] != scalar_lines[i - 1] || scalar_keys[i] != scalar_keys[i - 1] || scalar_offsets[i] == body);
-            }
-            uint32_t changes = 0;
+            snprintf(detail, sizeof(detail), "%u rows, %u kept", count, kept);
+            // What keeping means, a row at a time: every row in a file, its line at most INT32_MAX, whose file or line
+            // differs from the last such row's, and the body's row.
+            uint32_t meant = 0;
             uint32_t last_line = UINT32_MAX;
             uint32_t last_key = BUSTER_CHECK_DEBUG_NO_FILE;
             for (uint32_t i = 0; i < count; i += 1)
             {
                 const bool eligible = keys[i] != BUSTER_CHECK_DEBUG_NO_FILE && lines[i] <= INT32_MAX;
-                changes += eligible && (lines[i] != last_line || keys[i] != last_key || offsets[i] == body) ? 1 : 0;
+                const bool keep = eligible && (lines[i] != last_line || keys[i] != last_key || offsets[i] == body);
+                meant_rows[meant] = i;
+                meant += keep ? 1 : 0;
                 last_line = eligible ? lines[i] : last_line;
                 last_key = eligible ? keys[i] : last_key;
             }
-            check_debug_test_expect(tally, meant && changes == scalar, "the kept rows' file or line changes from row to row", detail);
-            kept_total += scalar;
+            // Each kept row is the row meant, with that row's offset, file and line.
+            bool same = meant == kept;
+            for (uint32_t i = 0; same && i < kept; i += 1)
+            {
+                const uint32_t row = meant_rows[i];
+                same = kept_offsets[i] == offsets[row] && kept_keys[i] == keys[row] && kept_lines[i] == lines[row];
+            }
+            check_debug_test_expect(tally, same, "the kept rows are the rows whose file or line changes, and the body's", detail);
+            kept_total += kept;
         }
-        free(scalar_keys);
-        free(scalar_lines);
-        free(scalar_offsets);
+        free(meant_rows);
+        free(kept_keys);
+        free(kept_lines);
+        free(kept_offsets);
         for (uint32_t g = 0; g < 3; g += 1)
         {
             check_debug_test_unguard(&guards[g]);

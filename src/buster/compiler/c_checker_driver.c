@@ -11016,7 +11016,7 @@ static void check_driver_object_release(CheckDriverCode* state, CheckProgramLane
 // the static data, the sections, the debug information and the object, or the kept link.
 static bool check_driver_object_finish(CheckDriverCode* state, const CheckProgram* program, const CheckDataPrepared* data, const Parser* parser,
                                        Preprocessor* pp, TypeTable* types, const char* source_path, const char* output_path,
-                                       bool scalar, bool dump_static, bool debug, CheckProgramLanes* lanes, Arena* scratch,
+                                       bool dump_static, bool debug, CheckProgramLanes* lanes, Arena* scratch,
                                        CheckClock* stage_clock, FILE* errors, CheckUnitsKept* kept, bool foreign, bool* fatal)
 {
     // The link adds pragma alias names through &state->output. DWARF and section descriptors must advance the same arena.
@@ -11131,7 +11131,7 @@ static bool check_driver_object(const CheckProgram* program, const CheckDataPrep
 {
     CheckDriverCode state;
     check_driver_object_code(&state, program, data->capacity, parser, pp, scalar, verify, debug, unwind, lanes, scratch, stage_clock, kept, foreign);
-    return check_driver_object_finish(&state, program, data, parser, pp, types, source_path, output_path, scalar, dump_static, debug, lanes, scratch, stage_clock,
+    return check_driver_object_finish(&state, program, data, parser, pp, types, source_path, output_path, dump_static, debug, lanes, scratch, stage_clock,
                                       errors, kept, foreign, fatal);
 }
 
@@ -14620,7 +14620,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                             {
                                 windowed = object_path == 0;
                                 result = object_path != 0 && check_driver_object_finish(&windowed_code, &provisional.program, &selected.data, checking, pp, &types, path,
-                                                                                         object_path, scalar, dump_static, source_rows, lanes, scratch, stage_clock,
+                                                                                         object_path, dump_static, source_rows, lanes, scratch, stage_clock,
                                                                                          errors, kept, command->mixed_inputs, &driver_fatal) ? 0 : 1;
                             }
                             else

@@ -4,7 +4,7 @@
 //
 // benchmark-check-debug [--functions N] [--seed N] [--runs N] [--only rows|lines|keep|build|emit] [--path vector|scalar]
 // [--after-scalar MS] [--directives] [--print PATH]: the C driver's source rows (#395, c_check_debug.c), each pass by its
-// vector path and its exact twin. --directives gives the generated program the test's #lines (an eighth of the
+// vector path and, for rows and lines, its exact path (keep and build have one path, timed on both sides). --directives gives the generated program the test's #lines (an eighth of the
 // functions under a #line of a name of its own, and some inside bodies), as generated C has them. --print writes the
 // generated program to PATH and measures nothing, for timing whole compiles of it with -g and without. Include after c_check_debug_test.c, whose generator and pipeline it takes, and c_check_source_benchmark.c, whose
 // clock and median it shares.
@@ -18,7 +18,7 @@
 // - emit: check_program_emit of that program with the raw rows and without, by the vector path, per typed entry: what
 //   -g adds to the emission (the entries' tokens copied out of the lowering and the raw rows).
 //
-// Before timing, each pass's paths must give the same rows, lines, kept rows and sections. Each sample takes the pass
+// Before timing, the rows and the lines must be the same by both paths, and the unit must build. Each sample takes the pass
 // over every function once; the report gives the medians of --runs (21) runs, the paths taking turns. --path times one
 // path alone, back to back (the other path's median, and the emission's change, then read n/a), and --after-scalar MS
 // runs the exact twin for MS ms before each sample of the vector path
@@ -385,32 +385,12 @@ static int run_check_debug_benchmark(int argc, char** argv)
         same = same && memcmp(benchmark.keys[0], benchmark.keys[1], (uint64_t)rows->count * sizeof(uint32_t)) == 0 &&
                memcmp(benchmark.lines[0], benchmark.lines[1], (uint64_t)rows->count * sizeof(uint32_t)) == 0;
         benchmark.kept[0] = check_debug_benchmark_keep(&benchmark, 0);
-        benchmark.kept[1] = check_debug_benchmark_keep(&benchmark, 1);
-        same = same && benchmark.kept[0] == benchmark.kept[1] && memcmp(benchmark.kept_offsets[0], benchmark.kept_offsets[1], benchmark.kept[0] * sizeof(uint32_t)) == 0 &&
-               memcmp(benchmark.kept_lines[0], benchmark.kept_lines[1], benchmark.kept[0] * sizeof(uint32_t)) == 0 &&
-               memcmp(benchmark.kept_keys[0], benchmark.kept_keys[1], benchmark.kept[0] * sizeof(uint32_t)) == 0;
-        CheckDebug debugs[2];
-        bool built = true;
-        uint8_t* sections[2][BUSTER_DEBUG_SECTIONS] = { { 0 } };
-        uint64_t sizes[2][BUSTER_DEBUG_SECTIONS] = { { 0 } };
-        for (uint32_t side = 0; side < 2; side += 1)
-        {
-            // Made again without popping, so that both units' sections are there to compare.
-            built &= check_debug_build(&debugs[side], program, rows, &parser, &pp, &benchmark.unit.output, &benchmark.unit.scratch);
-            for (uint32_t section = 0; built && section < BUSTER_DEBUG_SECTIONS; section += 1)
-            {
-                sections[side][section] = debugs[side].output.sections[section].bytes;
-                sizes[side][section] = debugs[side].output.sections[section].size;
-            }
-        }
-        for (uint32_t section = 0; built && section < BUSTER_DEBUG_SECTIONS; section += 1)
-        {
-            built = sizes[0][section] == sizes[1][section] && memcmp(sections[0][section], sections[1][section], sizes[0][section]) == 0;
-        }
+        CheckDebug debug;
+        const bool built = check_debug_benchmark_build(&benchmark, 1, &debug);
         same = same && built && check_debug_benchmark_emit(&benchmark, true) && check_debug_benchmark_emit(&benchmark, false);
         if (!same)
         {
-            fprintf(stderr, "benchmark-check-debug: the vector paths don't give the exact paths' rows, lines, kept rows or sections\n");
+            fprintf(stderr, "benchmark-check-debug: the rows' or the lines' vector path doesn't give its exact path's, or the unit or the emission fails\n");
         }
     }
     if (same)
