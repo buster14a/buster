@@ -1,0 +1,1 @@
+int a[(int)(1.0+2.0)]; struct S {int a[(1,3)];}; void f(void){struct T {int a[(int)(1.0+2.0)];}; _Static_assert(sizeof(struct T)==12,"member fold");} _Static_assert(sizeof a==12 && sizeof(struct S)==12,"array folds");

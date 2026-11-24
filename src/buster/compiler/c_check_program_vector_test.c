@@ -843,27 +843,14 @@ static void check_test_program_segments(CheckTest* test, const char* clang)
 // Initializer validation keeps atomic rvalue identity while storage uses the underlying vector bytes.
 static void check_test_program_atomic_vector_constraints(CheckTest* test, const char* clang)
 {
-    static const CheckSourceFixture fixtures[] = {
-        {
-            "atomic vector initializers keep the declared destination",
-            "typedef int V __attribute__((vector_size(16)));_Atomic(V) make(V);"
-            "int f(void){_Atomic(V) a=(V){1,2,3,4};V b=a;_Atomic(V) c=make(b);V d=c;return b[0]+d[0];}",
-            false,
-            false,
-        },
-        {
-            "atomic vector rvalues do not initialize plain vectors",
-            "typedef int V __attribute__((vector_size(16)));_Atomic(V) make(V);"
-            "V f(void){V x=make((V){1,2,3,4});return x;}",
-            true,
-            false,
-        },
-    };
+    CheckTestFixtures catalog;
+    const uint32_t file_count = check_test_private_catalog(test, &catalog, "checker/atomic-vector-constraints", NULL, 0, 0);
+    const CheckSourceFixture* fixtures = catalog.cases;
     char directory[] = "/tmp/buster-atomic-vector-XXXXXX";
     const bool created = mkdtemp(directory) != NULL;
     check_test_expect(test, created, "atomic vector constraint directory");
     const char* arguments[] = { "-std=gnu17" };
-    for (uint32_t i = 0; created && i < BUSTER_ARRAY_LENGTH(fixtures); i += 1)
+    for (uint32_t i = 0; created && i < file_count; i += 1)
     {
         char path[128];
         snprintf(path, sizeof(path), "%s/%u.c", directory, i);
@@ -882,6 +869,7 @@ static void check_test_program_atomic_vector_constraints(CheckTest* test, const 
     {
         rmdir(directory);
     }
+    arena_release(&catalog.storage);
 }
 
 // Differential baseline coverage: exact source and -march shared with Clang, both lowering and Tier 0 paths.

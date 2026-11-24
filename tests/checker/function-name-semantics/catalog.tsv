@@ -1,0 +1,11 @@
+buster-fixtures v1 checker-sources
+0001	0001.c	-	predefined arrays participate in sizeof and typeof queries
+0002	0002.c	-	pretty alias size is evaluated at declaration position
+0003	0003.c	-	file scope predefined array lengths
+0004	0004.c	-	file scope cache survives intervening function
+0005	0005.c	-	predefined static array addresses initialize static pointers
+0006	0006.c	-	address of predefined array retains array extent
+0007	0007.c	rejected	predefined array characters are const
+0008	0008.c	rejected	pretty array characters are const
+0009	0009.c	rejected	predefined arrays are not assignable
+0010	0010.c	rejected	predefined array declaration names cannot be replaced

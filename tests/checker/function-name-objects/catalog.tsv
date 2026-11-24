@@ -1,0 +1,22 @@
+buster-fixtures v1 checker-sources
+# The .c.expected companion contains the plain function name and its pretty signature, one line each.
+0001	0001.c	-	plain prototype
+0002	0002.c	-	typedef return and parameter spelling
+0003	0003.c	-	canonical scalar spelling and parameter qualifiers
+0004	0004.c	-	qualified pointer typedef and explicit pointers
+0005	0005.c	-	array parameter adjustment drops outer alias
+0006	0006.c	-	nested callbacks retain occurrence-specific aliases
+0007	0007.c	-	callback unnamed qualifiers and pointer to array alias
+0008	0008.c	-	function returning function pointer
+0009	0009.c	-	function returning array pointer
+0010	0010.c	-	distinct return and nested parameter typedef occurrences
+0011	0011.c	-	variadic alias
+0012	0012.c	-	unprototyped definition
+0013	0013.c	-	record tag names
+0014	0014.c	-	typedef already contains const
+0015	0015.c	-	typeof type and expression source spelling
+0016	0016.c	-	atomic types
+0017	0017.c	-	typeof expression operator formatting
+0018	0018.c	-	attributes do not become signature suffixes
+0019	0019.c	-	macro-produced function identifier
+0020	0020.c	-	body typedef shadow does not alter header spelling

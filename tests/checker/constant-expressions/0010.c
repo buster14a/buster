@@ -1,0 +1,1 @@
+typedef int V __attribute__((vector_size(16))); V a,b; V f(void){return _Generic(0,int:__builtin_choose_expr(1,a,b),default:b);} int g(void){_Generic(0,int:__builtin_choose_expr(0,b,a),default:b)[0]=9; return a[0];}
