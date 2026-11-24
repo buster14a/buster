@@ -89,7 +89,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   [--lazy-system-headers | --cpu-dispatch-only | --pic-only | --stack-protector-only | --target-versions-only | --type-sugar-only |
   --asm-definitions-only | --call-counts-only | --fp-contract-only | --imaginary-bit-int-only | --operand-diagnostics-only | --label-attributes-only |
   --attribute-recovery-only | --initializer-diagnostics-only | --malformed-calls-only | --string-plus-only | --assert-bool-only | --assert-diagnostics-only | --query-bool-only | --constant-logical-only | --quiet-roots-only | --unused-comparison-only |
-  --float-precision-only |
+  --float-precision-only | --branch-truth-only |
   --record-extensions-only | --auto-qualifiers-only |
   --run-modes-only | --common-warnings-only] [--in-process] [--clang-server PATH]
   [--differential] [--carets | --carets-all]` and `test-checker-asm`
@@ -229,6 +229,15 @@ unused-warning fixtures also check exact scope-completion tokens.
   arithmetic diagnostics on newly folded const reads are isolated in that row;
   direct invalid arithmetic and its diagnostic order have a separate full-output
   fixture.
+  `--branch-truth-only` runs the check of the bit before a branch condition's
+  fold (#1340, `check_cfg_decidable` in `c_check_program_cfg.c`), which the
+  default run has as one of its sweeps: a node whose bit is clear is one the
+  fold leaves undecided and at which clang's CFG builder's rules fire no event,
+  by the driver's `--branch-truth-census` over a unit with a condition for each
+  rule the bit is derived from and each shape it rejects and over
+  `tests/checker/cfg-pruning`'s units (their counts frozen), over every unit of
+  `tests/driver/warnings` that compiles alone, and over generated units of
+  random conditions (`c_check_branch_truth_driver_test.c`).
   `--query-bool-only` runs the original `tests/driver/query_bool_*.c` sources for
   boolean conversions in erased query/type expressions and successful selections
   (#2899). Complete Clang diagnostics cover integer and floating conditions,
