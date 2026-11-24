@@ -1,4 +1,6 @@
 buster-fixtures v1 preprocessor-directives
+# Diagnostic messages are original source text, including comments and trailing blanks. A skipped directive still
+# belongs to raw excluded input; an active one must not let its comment text swallow the source after its newline.
 0001	-	-	an active warning's comment text
 0002	-	-	an active error's comment text
 0003	-	-	comments, quotes and trailing blanks

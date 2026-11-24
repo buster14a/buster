@@ -1,4 +1,5 @@
 buster-fixtures v1 preprocessor-directives
+# Fixtures of #define's and #undef's constraints and of redefinitions (C 6.10.4, #121), reported as clang reports them.
 0001	-	-	'#' without a parameter
 0002	-	-	'##' at either end
 0003	-	-	__VA_OPT__

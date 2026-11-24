@@ -5567,11 +5567,6 @@ struct PPTestOptionSet
     const char* refused;
 };
 
-// What the families change in clang's -E: the names that are keywords under them, '$', digraphs and __STDC_VERSION__
-// (C94's with -fdigraphs in c89), "//" comments (none in c89 and C94), raw strings, character constants' signs,
-// __FILE__ (remapped) and __MODULE__ (named), and a system header for the output modes and the modules.
-
-
 static bool pp_test_option_row(PPTestFixtures* table, const char* directory, char** fields, uint32_t line)
 {
     (void)directory;

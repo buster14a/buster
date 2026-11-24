@@ -1,4 +1,7 @@
 buster-fixtures v1 preprocessor-option-refusals
+# What the families change in clang's -E: the names that are keywords under them, '$', digraphs and __STDC_VERSION__
+# (C94's with -fdigraphs in c89), "//" comments (none in c89 and C94), raw strings, character constants' signs,
+# __FILE__ (remapped) and __MODULE__ (named), and a system header for the output modes and the modules.
 # Refused: each family buster doesn't follow, where its last option turns it on; -fzvector whatever follows it (clang's
 # driver ignores -fno-zvector); and the options without a -fno- form.
 0001	-fms-extensions	-fms-extensions

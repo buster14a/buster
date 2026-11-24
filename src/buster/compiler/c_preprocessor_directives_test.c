@@ -676,15 +676,6 @@ struct PPDirectiveTestStructure
     const char* diagnostic;
 };
 
-// Original raw-string inputs; Clang is an external diagnostic/location oracle, including suppressed contexts.
-
-// Diagnostic messages are original source text, including comments and trailing blanks. A skipped directive still
-// belongs to raw excluded input; an active one must not let its comment text swallow the source after its newline.
-
-
-// Fixtures of #define's and #undef's constraints and of redefinitions (C 6.10.4, #121), reported as clang reports them.
-
-
 // Runs a command (`argv`, ended by a null) with CPATH and C_INCLUDE_PATH unset and its standard input /dev/null: what
 // it writes to standard output and to standard error go to `*output` and `*errors` (each may be null to drop it), in
 // memory (null if it doesn't run). A clang run goes through the clang server where test-preprocessor has one
@@ -784,7 +775,6 @@ static int64_t pp_directive_test_clang_guards(char** arguments, int argument_cou
     return result;
 }
 
-// Each fixture by both kernels, whose diagnostics must be the same, and with clang, clang's.
 static bool pp_directive_test_structure_row(PPTestFixtures* table, const char* directory, char** fields, uint32_t line)
 {
     (void)line;
@@ -803,6 +793,7 @@ static bool pp_directive_test_structure_row(PPTestFixtures* table, const char* d
     return valid;
 }
 
+// Each fixture by both kernels, whose diagnostics must be the same, and with clang, clang's.
 static bool pp_directive_test_diagnostics(const char* suite, const char* label, const char* directory, bool with_clang)
 {
     PPTestFixtures catalog;
@@ -940,8 +931,7 @@ static bool pp_directive_test_predefines_origin(const char* directory)
     return result;
 }
 
-// A guard fixture: the main source, its files (a name and its text, or for a link "->target" (symbolic) or "=>target"
-// (hard) to another of them; ended by a null name), and how many inclusions it skips by guards and by #pragma once.
+// The main source, its catalogued include tree and the expected guard and pragma-once skip counts.
 typedef struct PPDirectiveTestGuard PPDirectiveTestGuard;
 struct PPDirectiveTestGuard
 {
