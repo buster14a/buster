@@ -1,0 +1,8 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+kr-float-entry-rounding-and-stack	kr-float-entry-rounding-and-stack.c	-	kr-float-entry-rounding-and-stack
+kr-promoted-parameters-hidden-result	kr-promoted-parameters-hidden-result.c	-	kr-promoted-parameters-hidden-result
+kr-promoted-aligned-and-volatile	kr-promoted-aligned-and-volatile.c	-	kr-promoted-aligned-and-volatile
+kr-prior-later-prototypes-and-pointers	kr-prior-later-prototypes-and-pointers.c	-	kr-prior-later-prototypes-and-pointers
+kr-unused-promoted-parameter-capacity	kr-unused-promoted-parameter-capacity.c	-	kr-unused-promoted-parameter-capacity
+kr-promoted-atomic-parameter-objects	kr-promoted-atomic-parameter-objects.c	-	kr-promoted-atomic-parameter-objects

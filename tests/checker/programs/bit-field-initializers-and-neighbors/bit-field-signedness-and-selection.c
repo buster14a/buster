@@ -1,0 +1,1 @@
+enum E{E0=0,E1=200,E2};enum F{F0=-3,F1=3};struct G{enum E e:8;enum F f:3;unsigned char c:3;signed char s:4;unsigned short h:10;_Bool b:1;};int tested(int n){struct G g={E2,F0,5,-2,1000,1};g.e=(enum E)(E1+n);g.f=n&1?F0:F1;g.s=(signed char)n;_Generic(0,int:g.h)=(unsigned short)(n*77);g.c++;int t=(g.b?g.s:0)+g.c*2;return (int)g.e+(int)g.f*3+g.c+g.s*5+g.h+g.b*7+t*11+(g.e>E1)*13;}

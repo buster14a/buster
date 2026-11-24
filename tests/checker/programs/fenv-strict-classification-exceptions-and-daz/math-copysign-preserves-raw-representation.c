@@ -1,0 +1,1 @@
+double fp_special(int);float fp_specialf(int);unsigned long fp_bits(double);unsigned fp_bitsf(float);int tested(int n){double x=fp_special(n);float y=fp_specialf(n);return (int)(fp_bits(__builtin_copysign(x,(double)n))%997)+(int)(fp_bitsf(__builtin_copysignf(y,(float)n))%991);}

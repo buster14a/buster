@@ -1,0 +1,1 @@
+int calls;double make(int n){calls++;return n<0?-__builtin_inf():n==0?-0.0:(double)(-n)-0.25;}int tested(int n){calls=0;double d=__builtin_fabs(make(n));float f=__builtin_fabsf((float)n-7.5f);return __builtin_isinf_sign(make(n))*1000+(__builtin_isinf(d)?31:(int)(d*4))+(int)(f*2)+calls*100;}

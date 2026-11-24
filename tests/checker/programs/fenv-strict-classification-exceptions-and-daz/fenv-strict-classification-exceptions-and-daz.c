@@ -1,0 +1,2 @@
+#pragma STDC FENV_ACCESS ON
+int clear_fp(void);int fp_state(void);int change_daz(int);double fp_special(int);int tested(int n){int old=change_daz(n);double x=fp_special(n);clear_fp();int a=__builtin_fpclassify(11,22,33,44,55,x);int f=fp_state();clear_fp();int b=__builtin_isinf_sign(x);int g=fp_state();change_daz(old);return a*1000+f*100+b*10+g;}

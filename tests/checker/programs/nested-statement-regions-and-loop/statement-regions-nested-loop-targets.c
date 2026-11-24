@@ -1,0 +1,2 @@
+#define W(e) ({int w_=(e);w_;})
+int tested(int n){int x=0;for(int i=0;i<8;i++){x+=({int a=({int b=({if(i==2)continue;if(i==6+n%3)break;i;});b*2;});a+1;});x+=({int s=0;for(int j=0;j<5;j++){s+=({int c=({if(j==1)continue;if(j==3+(n&1))break;j;});c+1;});}s;});switch(i&3){case 0:x+=({int d=({if(n>4)break;5;});d;});x+=100;break;case 1:x+=({int e=({if(i==5)continue;7;});e;});break;default:x+=({int t=0;do{t+=({int g=({if(t>3+(n&3))break;2;});g;});}while(t<10);t;});}x+=W(W(W(W(W(W(W(W(({if(i==4&&n<0)continue;i*3;})))))))));}return x;}

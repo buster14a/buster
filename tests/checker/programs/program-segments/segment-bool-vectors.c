@@ -1,0 +1,2 @@
+#define SS __attribute__((address_space(258)))
+typedef _Bool B8 __attribute__((ext_vector_type(8)));typedef _Bool B64 __attribute__((ext_vector_type(64)));static _Thread_local B8 tb={1,0,1,1,0,0,1,0};static B64 gb;int tested(int n){B8 __seg_fs*p=(B8 __seg_fs*)((char*)&tb-(char*)__builtin_thread_pointer());B64 SS*q=(B64 SS*)&gb;int r=0;for(int i=0;i<8;i++)r=r*2+(*p)[i];(*p)[1]=n&1;(*p)[2]=0;(*q)[40]=1;(*q)[n&63]=(*p)[3];for(int i=0;i<8;i++)r=r*3+(*p)[i];r+=(*q)[40]*5+(*q)[n&63]*7+(*q)[0];return r+tb[1]+gb[40];}

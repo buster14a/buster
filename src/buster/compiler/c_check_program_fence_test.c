@@ -195,12 +195,5 @@ static void check_test_program_fences(CheckTest* test, const char* clang)
     // Natively against clang: every order and scope, a fence in an expression, in a statement expression and in a loop,
     // and the helpers' fences (a dynamic order, an order past seq_cst and an argument whose increment runs once) beside
     // the direct ones.
-    check_test_program_source(test,
-                              "int g;static int k;int order(int o){__atomic_thread_fence(o);return o;}"
-                              "int tested(int n){int a=0;g=n;__atomic_thread_fence(__ATOMIC_SEQ_CST);a+=g;__atomic_thread_fence(__ATOMIC_ACQUIRE);"
-                              "__atomic_signal_fence(__ATOMIC_RELEASE);a+=(__atomic_thread_fence(__ATOMIC_ACQ_REL),g*2);__sync_synchronize();"
-                              "__c11_atomic_thread_fence(__ATOMIC_SEQ_CST);__c11_atomic_signal_fence(__ATOMIC_RELAXED);"
-                              "__c11_atomic_thread_fence((k++,__ATOMIC_SEQ_CST));__atomic_thread_fence(7);__atomic_thread_fence(__ATOMIC_CONSUME);"
-                              "a+=order(n&3)+k;a+=n*({__atomic_thread_fence(__ATOMIC_SEQ_CST);__atomic_signal_fence(__ATOMIC_ACQUIRE);g+1;});for(int i=0;i<n%5;i++){__atomic_thread_fence(__ATOMIC_SEQ_CST);a+=i;__atomic_signal_fence(__ATOMIC_SEQ_CST);}return a;}",
-                              "fences-direct-and-helper-orders-and-scopes", clang);
+    check_test_program_suite(test, "checker/programs/program-fences", clang);
 }

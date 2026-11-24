@@ -45,7 +45,28 @@ on the calling thread, and the collective checks run on groups of 1, 2, 3 and
   releases (#3070, `arena_pool_writable`): an arena's writable prefix its
   commit, its written pages freed and the arena taken again zero, a copy's
   commit past it found, its page freed and read zero again, and without
-  `PROCMAP_QUERY` the whole mapping's pages freed;
+  `PROCMAP_QUERY` the whole mapping's pages freed; and, each case in a child
+  of its own, warm arenas (#2850, `arena_reserve_warm`,
+  [arena memory](../arena-memory.md#warm-arenas-2850)): in a file of a tmpfs
+  (`/dev/shm`, or `$XDG_RUNTIME_DIR`; skipped with a line where neither can be
+  written), the claimed file held and closed to others, a warm arena from a
+  huge page's boundary and never untouched, the ordinary arenas a taken slot,
+  a slot past the last and a capacity of base pages get, a commit of whole
+  huge pages allocated in the file, a long clear in place, a discard that
+  unmaps nothing (no fault to read the pages again), a rewind, a slot's next
+  arena finding its last one's bytes, a refused allocation after which the
+  arena goes on in the process's own memory with its bytes kept and the
+  file's unwritten, a file that can't be mapped leaving an ordinary arena, a
+  forked process taking none of its parent's file and claiming the next for
+  itself, the unlocked file free with the claim standing, the claim's end
+  doing nothing under a reserved arena and then closing the file, and the
+  process beginning again by other flags; a
+  directory that isn't there, a file open to others, a directory of no tmpfs
+  and, without the tests' flag, one of a tmpfs's base pages (and as root
+  another user's file), each leaving ordinary arenas and ending so that the
+  process can begin again; and the fill, a commit a quarter past what is
+  committed, each commit's bytes the
+  pattern once, whichever copy of the arena commits;
 - `lane_range` and `lane_range_by_cost` for every count from 0 to 1,000, with
   seven cost patterns: the parts must cover the items in lane order, and each
   item must go to the lane whose share of the total cost holds its midpoint;

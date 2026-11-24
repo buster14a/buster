@@ -1,0 +1,57 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+vla-loop-lifetime-recaptures	vla-loop-lifetime-recaptures.c	-	vla-loop-lifetime-recaptures
+# Variable-length arrays' objects: their strides and sizes from the extents their declarations captured, and the
+# stack they take released at their scopes' ends, by continue, break and goto out of them, and by a goto back before
+# their declaration. Each loop takes 20,000 arrays of about 4 KB or 10,000 of 8 KB: 80 MB, past the 8 MB stack, if
+# one release is missing.
+vla-objects-strides-and-sizes	vla-objects-strides-and-sizes.c	-	vla-objects-strides-and-sizes
+vla-parameter-strides	vla-parameter-strides.c	-	vla-parameter-strides
+vla-scope-releases	vla-scope-releases.c	-	vla-scope-releases
+vla-backward-goto-releases	vla-backward-goto-releases.c	-	vla-backward-goto-releases
+vla-continue-through-switch	vla-continue-through-switch.c	-	vla-continue-through-switch
+# Objects aligned past 16 bytes, in realigned frames (Tier0Frame.alignment_log2): arrays, structs, a long double and
+# scalars (values aligned past 8 bytes are objects too), their addresses' low bits, which must be 0, in the result.
+objects-aligned-past-16	objects-aligned-past-16.c	-	objects-aligned-past-16
+# Escapes clang takes that the checker's fast decoding refuses (#1447, check_literal_strings_extended): delimited ones
+# (\x{...}, \o{...}, \u{...}), unknown ones (their character) and GNU's \E, in strings of each width and in
+# character constants, their values against clang's build.
+extended-escapes	extended-escapes.c	-	extended-escapes
+# Named universal character names (#1447, unicode_name_strict): names, aliases and names made by rule (CJK,
+# Hangul, Egyptian), in strings of each width, character constants, an identifier and a macro's name, their values
+# against clang's build.
+named-universal-character-names	named-universal-character-names.c	-	named-universal-character-names
+# x86's force_align_arg_pointer (#1447, Tier0Function.realign_stack): a function entered with rsp 8 bytes off a call's
+# alignment (an inline asm call that aligns rsp below the red zone, then moves it by 8) realigns its frame, so that
+# an object aligned to 16 is; with a call of its own and with a variable-length array (a realigned frame with a
+# base, r15). Without the attribute, such an object's address is 8 bytes off.
+force-align-arg-pointer	force-align-arg-pointer.c	-	force-align-arg-pointer
+# patchable_function_entry (#1447, check_program_emit_patchable): each function's NOP sled, its first M bytes one-byte
+# NOPs before its symbol and the rest the longest NOPs at its entry (one of 15 bytes and the rest past 15), hashed
+# through the function's address; a redeclaration's count, a 0 that makes none, and a call of each, whose code
+# comes after its sled, against clang's build.
+patchable-function-entry	patchable-function-entry.c	-	patchable-function-entry
+# clang's NEON vectors on x86-64 (#1447): GNU vectors of a kind of their own, laid out, passed and computed as GNU
+# vectors of their element and count, to and from which those convert; a polynomial one, and a NEON vector a mode
+# attribute keeps.
+neon-vectors	neon-vectors.c	-	neon-vectors
+# Variable-length arrays aligned past 16 bytes (their storage rounded up within a larger allocation), beside a fixed
+# object aligned to 128 (a realigned frame with a base, r15, since the arrays move rsp), across calls with stack
+# arguments whose outgoing area the allocations keep aligned.
+vlas-aligned-past-16	vlas-aligned-past-16.c	-	vlas-aligned-past-16
+# A variable-length array aligned to 64 allocated below a guard array, while calls with two stack arguments put the
+# outgoing area 16 bytes past the realigned frame's alignment: its storage, rounded up from the allocation's
+# address, must leave the guard's bytes as they were (the allocation's room, its alignment less 16 bytes more).
+vlas-aligned-past-16-room	vlas-aligned-past-16-room.c	-	vlas-aligned-past-16-room
+# Structs aligned to 32 and 64 passed by value (on a stack aligned to them at the call, which realigns the caller's
+# frame) and returned (through a hidden pointer), the parameters' addresses aligned.
+aggregates-aligned-past-16-by-value	aggregates-aligned-past-16-by-value.c	-	aggregates-aligned-past-16-by-value
+# A variadic definition whose named argument is aligned to 32 (on its caller's stack, aligned to 32 at the call): its
+# incoming area so aligned, and the unnamed arguments after it, each read at its own alignment.
+variadic-named-argument-aligned-past-16	variadic-named-argument-aligned-past-16.c	-	variadic-named-argument-aligned-past-16
+# Calls whose outgoing areas are aligned to 32 (of clang's callee in the harness, which takes its arguments in place),
+# from functions with no object aligned past 16, whose frames the calls alone realign: two of frames 16 bytes apart,
+# so that a frame left unrealigned would put one of their areas off 32. (After a variable-length array, clang's code
+# rounds the allocation to 16 alone and its call's area may be off 32, where Tier 0's keeps the frame's alignment: a
+# test of its own, tier0_deep_test.c's base, checks that.)
+calls-aligned-past-16	calls-aligned-past-16.c	-	calls-aligned-past-16

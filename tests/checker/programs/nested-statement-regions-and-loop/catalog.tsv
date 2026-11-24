@@ -1,0 +1,6 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+nested-statement-regions-and-loop	nested-statement-regions-and-loop.c	-	nested-statement-regions-and-loop
+# #2995: GNU breaks and continues in statement expressions nested in each other, in loops and switches inside
+# regions, a do statement's body, and nine regions deep; each region's targets reuse its enclosing tokens' answers.
+statement-regions-nested-loop-targets	statement-regions-nested-loop-targets.c	-	statement-regions-nested-loop-targets

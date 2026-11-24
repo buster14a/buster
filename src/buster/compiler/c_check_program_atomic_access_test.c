@@ -183,18 +183,5 @@ static void check_test_program_atomic_accesses(CheckTest* test, const char* clan
     // Natively against clang: loads and stores of every width and order, the C11 forms, a pointer's, an implicit
     // object's loads, stores and updates (its compare-exchange loop's first load direct), a volatile object's, and the
     // helpers' among them (a dynamic order, a scoped family's, a floating object's).
-    check_test_program_source(test,
-                              "_Atomic int ai;_Atomic long al;_Atomic char ac;_Atomic float af;static volatile short vs;int* gp;"
-                              "int tested(int n){char c;short s;int i;long l;int*p;int o=n&3?__ATOMIC_ACQUIRE:__ATOMIC_SEQ_CST;"
-                              "__atomic_store_n(&c,(char)n,__ATOMIC_RELAXED);__atomic_store_n(&s,(short)(n*3),__ATOMIC_RELEASE);"
-                              "__atomic_store_n(&i,n*5,__ATOMIC_SEQ_CST);__atomic_store_n(&l,(long)n<<40,__ATOMIC_SEQ_CST);"
-                              "__atomic_store_n(&gp,&i,__ATOMIC_RELEASE);p=__atomic_load_n(&gp,__ATOMIC_CONSUME);"
-                              "long r=__atomic_load_n(&c,__ATOMIC_RELAXED)+__atomic_load_n(&s,__ATOMIC_ACQUIRE)+__atomic_load_n(p,__ATOMIC_SEQ_CST)+"
-                              "(__atomic_load_n(&l,__ATOMIC_ACQUIRE)>>40)+__atomic_load_n(&i,o);"
-                              "__c11_atomic_store(&ai,n,__ATOMIC_SEQ_CST);r+=__c11_atomic_load(&ai,__ATOMIC_ACQUIRE);"
-                              "ai=(int)r;al=r*7;ac=(char)n;ai+=3;al-=n;ac++;r+=ai+al+ac;"
-                              "__atomic_store_n(&vs,(short)n,__ATOMIC_RELEASE);r+=__atomic_load_n(&vs,__ATOMIC_ACQUIRE);"
-                              "af=(float)n;r+=(long)(__c11_atomic_load(&af,__ATOMIC_ACQUIRE)*2);"
-                              "r+=__scoped_atomic_load_n(&i,__ATOMIC_ACQUIRE,0);return (int)r;}",
-                              "atomic-accesses-direct-and-helper-widths-orders-and-implicit", clang);
+    check_test_program_suite(test, "checker/programs/program-atomic-accesses", clang);
 }

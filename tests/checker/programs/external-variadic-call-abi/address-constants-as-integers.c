@@ -1,0 +1,1 @@
+volatile int lock;long sys(long n,long a){return n*3+(a&7);}long base(void){return (long)&lock;}int tested(int n){long a=(long)&lock;long b=(long)(&lock+2);int c=(int)(long)&lock;return (int)(b-a)+(c==(int)a)+(base()==a)+(int)sys(n,(long)&lock)-(int)((long)&lock&7);}

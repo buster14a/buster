@@ -1,0 +1,1 @@
+int f(x,y)volatile float x;short y __attribute__((aligned(32)));{float a=x;short *p=&y;*p+=1;return (int)(a*10)+y+((unsigned long)p&31);}int tested(int n){return f((double)(n&255)+0.125,65539);}

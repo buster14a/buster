@@ -1,0 +1,1 @@
+struct S{unsigned char c[513];};static volatile struct S a,b;int tested(int n){for(int i=0;i<513;i++)a.c[i]=(unsigned char)(n+i);b=a;b=b;struct S r=a;b=r;return (b=a).c[512]+r.c[0];}

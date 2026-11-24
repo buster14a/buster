@@ -1,0 +1,72 @@
+buster-fixtures v1 checker-sources
+# ID	FILE	FLAGS	NAME
+asm-placed-live-values	asm-placed-live-values.c	-	asm-placed-live-values
+# Tied operands and early clobbers: a matching input narrower than its output (zero-extended), an output the template
+# writes before it reads its inputs (=&r), two early-clobbered outputs, a short + register and narrow outputs (a byte
+# from %b, a bool from setz), a constant, and an address computed from two registers.
+asm-placed-tied-early	asm-placed-tied-early.c	-	asm-placed-tied-early
+# Memory operands: a + one under a locked add, a + register and a struct member's under xadd and xchg, an output of
+# memory, an array element whose index has a side effect (evaluated once), and a memory input.
+asm-placed-memory	asm-placed-memory.c	-	asm-placed-memory
+# The flags: a template that changes them (cc) inside a condition's chain, a compare and setl of the template's own,
+# and a not in a loop's body, between the loop's compares.
+asm-placed-flags	asm-placed-flags.c	-	asm-placed-flags
+# XMM operands of floats and doubles, with floating values live across them: sqrtsd into an output of its own, a +
+# float's mulss, conversions to and from a general register, and a + double under an expression of live values.
+asm-placed-floating	asm-placed-floating.c	-	asm-placed-floating
+# Fences, pause and prefetches in a loop, beside a store and a load across them.
+asm-placed-fences	asm-placed-fences.c	-	asm-placed-fences
+# Asm bodies in their callers (#1839), against clang's build: always_inline wrappers of rdtsc and cpuid, which Tier 0's
+# splicing copies into a caller with a body of its own, in a loop of eight live values; cpuid under an expression 11
+# values deep, whose rbx holds one of them (saved around the body), and 18 deep (the deep slots); and a syscall's.
+asm-bodies	asm-bodies.c	-	asm-bodies
+# hlt, musl's a_crash (#2351's survey), an asm body that writes nothing: on a path the inputs never take, beside a
+# loop of live values.
+asm-hlt-body	asm-hlt-body.c	-	asm-hlt-body
+# Register outputs returned by their bodies' call rows (#2144): a `+r` int's shift by a "c" count, an `=r` long's, the
+# first of cpuid's four outputs (the others stored), an output named twice with a memory input of its object, a
+# local whose address is taken, each in a loop of live values; beside outputs that keep their stores (a global, an
+# object through a pointer, a short), one under a statement expression 11 values deep, and an always_inline
+# function's spliced twice.
+asm-body-results	asm-body-results.c	-	asm-body-results
+# Asm bodies of templates with their own labels and branches (#1839): a backward loop (decl and jnz), a forward jmp over a store, a template whose branches go to its end (the stores), and a byte copy's loop of
+# two pointers, each in a loop of live values, against clang's build.
+asm-body-branches	asm-body-branches.c	-	asm-body-branches
+# Templates of no instructions, the compiler barriers: their operands evaluated, and nothing called. A comment with
+# operands substituted into it assembles to nothing too.
+asm-barriers	asm-barriers.c	-	asm-barriers
+# Registers of a class, a matching input, an early clobber, an integer constant, and the size modifiers.
+asm-registers-and-modifiers	asm-registers-and-modifiers.c	-	asm-registers-and-modifiers
+# Operands by name, and g taking a constant.
+asm-named-operands	asm-named-operands.c	-	asm-named-operands
+# Fixed registers: cpuid's, with rbx (callee-saved) among them, and matching inputs.
+asm-cpuid-fixed-registers	asm-cpuid-fixed-registers.c	-	asm-cpuid-fixed-registers
+# clang's cpuid.h on x86-64: dialect alternatives, %q1, and rbx swapped with an operand's register; into array elements.
+asm-cpuid-header-form	asm-cpuid-header-form.c	-	asm-cpuid-header-form
+# The x87's control and status words and MXCSR through memory operands, outputs and inputs.
+asm-control-words	asm-control-words.c	-	asm-control-words
+# syscall (getpid), with an input sharing its output's fixed register, a + operand, and register clobbers.
+asm-syscall	asm-syscall.c	-	asm-syscall
+asm-pause-fences-rdtsc	asm-pause-fences-rdtsc.c	-	asm-pause-fences-rdtsc
+asm-rep-nop	asm-rep-nop.c	-	asm-rep-nop
+# Branches to the template's own labels: %='s labels forward, a numeric one backward in a loop.
+asm-local-branches	asm-local-branches.c	-	asm-local-branches
+# Named labels placed in their caller (#1839): a loop back to a %= label, a label of a template of no instructions (a
+# place in the caller's code), and a global label another template refers to as data, each address within the
+# caller's code.
+asm-named-labels	asm-named-labels.c	-	asm-named-labels
+asm-label-no-instructions	asm-label-no-instructions.c	-	asm-label-no-instructions
+# Private labels (#2351's gap 4): always_inline functions whose templates' `.L%=` labels no other template refers
+# to, each spliced twice into one caller by Tier 0, every copy's branches its own; and a loop back to one.
+asm-private-labels-inlined	asm-private-labels-inlined.c	-	asm-private-labels-inlined
+# Callee-saved clobbers inside a loop of live values, and a statement expression's asm under a live value.
+asm-callee-saved-clobbers	asm-callee-saved-clobbers.c	-	asm-callee-saved-clobbers
+# Every callee-saved register but rbp clobbered with values of the template's own, under eight live values, which
+# Tier 0 keeps in callee-saved registers across the call: the helper must restore them.
+asm-callee-saved-live	asm-callee-saved-live.c	-	asm-callee-saved-live
+# Memory operands: members, elements at a runtime index, a global, and through a pointer.
+asm-memory-operands	asm-memory-operands.c	-	asm-memory-operands
+# Outputs of every width into globals and a pointer, and the high byte (%h).
+asm-output-widths	asm-output-widths.c	-	asm-output-widths
+# rsp's alignment at the template (16, as clang -O0's function bodies have it), and basic asm statements.
+asm-alignment	asm-alignment.c	-	asm-alignment

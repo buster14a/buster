@@ -1,0 +1,1 @@
+int tested(int n){unsigned lo,hi;__asm__ volatile("xgetbv" : "=a"(lo),"=d"(hi) : "c"(0));return (int)(lo&0xff)+(int)hi+n;}

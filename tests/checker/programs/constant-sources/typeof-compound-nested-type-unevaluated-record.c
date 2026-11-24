@@ -1,0 +1,1 @@
+struct S { int x; }; int tested(int n) { int x=n;__typeof__((__typeof__((struct S){++x})){++x}) s={3}; return x*10 + s.x; }

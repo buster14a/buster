@@ -1,0 +1,1 @@
+static int calls;static unsigned long strlen(const char*s) __attribute__((overloadable)){calls++;return 30+(unsigned char)s[0];}static unsigned long strlen(int x) __attribute__((overloadable)){calls+=3;return x&7;}int tested(int n){calls=0;unsigned long a=strlen("abcd"),b=strlen(n);return (int)(a+10*b)+1000*calls;}

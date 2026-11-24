@@ -1,0 +1,1 @@
+int*__errno_location(void);int tested(int n){*__errno_location()=7;double x=__builtin_sqrt((double)n);return *__errno_location()+(__builtin_isnan(x)?100:(int)x);}

@@ -1,0 +1,1 @@
+void terminal_probe(void){__builtin_trap();}int tested(int n){if(n==999)__builtin_trap();if(n==998)return 7+(__builtin_unreachable(),1);return n+3;}

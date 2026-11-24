@@ -1,0 +1,1 @@
+int visits;int next(int n){visits++;return n;}int tested(int n){visits=0;volatile int x=n;int a=__imag__(next(n));int b=__imag__(x++);__real__ x+=3;return a+b+x+visits*100;}

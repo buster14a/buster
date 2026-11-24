@@ -1,0 +1,1 @@
+int values[4]={3,7,11,19};struct S{int x;int*p;};struct S saved={5,values};int tested(volatile int n){struct S*p=&saved;return p->x+saved.p[(unsigned)n%4]+values[2];}
