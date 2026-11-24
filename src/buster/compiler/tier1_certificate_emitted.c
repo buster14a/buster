@@ -244,9 +244,10 @@ struct Tier1CertEmittedStep
 };
 
 // The immediates' requests a check takes the emitted records' forms for until x86_choose_forms checks them, 32 at a
-// time (its batch) and at the end (tier1_cert_emitted_choices_check): a request alone would pay a whole batch's work
-// (#2924). Each entry is a request (row, value, context, destination), the record the code holds for it, and that
-// record's index; `canonical` compares as tier1_cert_emitted_exactly does, else byte by byte.
+// time (its batch), before any other refusal and at the end (tier1_cert_emitted_choices_check): a request alone would
+// pay a whole batch's work (#2924). Each entry is a request (row, value, context, destination), the record the code holds
+// for it, and the record a refusal of it names (the certificate's: the node's first, as an immediate compared at once
+// names); `canonical` compares as tier1_cert_emitted_exactly does, else byte by byte.
 #define BUSTER_CERT_EMITTED_CHOICES 32u
 typedef struct Tier1CertEmittedChoices Tier1CertEmittedChoices;
 struct Tier1CertEmittedChoices
@@ -347,12 +348,19 @@ struct Tier1CertEmittedBuild
 static const uint8_t tier1_cert_emitted_callee[6] = { X86_REGISTER_RBX, X86_REGISTER_RBP, X86_REGISTER_R12, X86_REGISTER_R13, X86_REGISTER_R14, X86_REGISTER_R15 };
 #define BUSTER_CERT_EMITTED_PSEUDO 7u
 
+static bool tier1_cert_emitted_choices_check(Tier1CertEmittedChoices* choices, uint32_t* failed);
+
+// Records the first reason that stops the code's decoding. The requests still held come first: each was taken from a
+// kernel compared before this refusal, so a refused one is the earlier failure (KERNEL at its node's first record), as it
+// is where each request is checked at once.
 static bool tier1_cert_emitted_refuse(Tier1CertEmittedBuild* build, Tier1CertEmittedReason reason, uint32_t record)
 {
+    uint32_t failed = UINT32_MAX;
+    const bool held = build->stats->reason != TIER1_CERT_EMITTED_OK || build->choices.count == 0 || tier1_cert_emitted_choices_check(&build->choices, &failed);
     if (build->stats->reason == TIER1_CERT_EMITTED_OK)
     {
-        build->stats->reason = reason;
-        build->stats->record = record;
+        build->stats->reason = held ? reason : TIER1_CERT_EMITTED_KERNEL;
+        build->stats->record = held ? record : failed;
     }
     return false;
 }
@@ -3148,7 +3156,6 @@ static bool tier1_cert_emitted_run(Tier1CertEmittedBuild* build, uint32_t node, 
     valid = valid && (tier1_cert_emitted_kernel(build, node, &kernel) || tier1_cert_emitted_refuse(build, TIER1_CERT_EMITTED_KERNEL, r));
     build->step_next = calls ? build->step_before : build->step_next;
     X86Instruction found[BUSTER_CERT_EMITTED_KERNEL];
-    uint32_t found_at[BUSTER_CERT_EMITTED_KERNEL];
     uint32_t found_count = 0;
     uint32_t at = r;
     bool epilogue = false;
@@ -3165,7 +3172,6 @@ static bool tier1_cert_emitted_run(Tier1CertEmittedBuild* build, uint32_t node, 
         {
             valid = tier1_cert_emitted_take_reference(build, at, found_count == kernel.referenced ? &kernel.reference : 0);
             found[found_count] = emitted->code.records[at];
-            found_at[found_count] = at;
             found_count += 1;
             at += 1;
             // After the epilogue, the ret ends the run.
@@ -3200,7 +3206,7 @@ static bool tier1_cert_emitted_run(Tier1CertEmittedBuild* build, uint32_t node, 
     for (uint32_t k = 0; valid && k < found_count; k += 1)
     {
         valid = k == kernel.request ? tier1_cert_emitted_choices_defer(&build->choices, kernel.request_row, kernel.request_value, kernel.request_context,
-                                                                       kernel.request_destination, found[k], found_at[k], &failed)
+                                                                       kernel.request_destination, found[k], r, &failed)
                                     : tier1_cert_emitted_exactly(found[k], kernel.records[k]);
     }
     valid = valid || tier1_cert_emitted_refuse(build, TIER1_CERT_EMITTED_KERNEL, failed);
@@ -4291,8 +4297,10 @@ static Tier1CertEmittedReason tier1_certificate_emitted_records(const Tier1Selec
         }
     }
     // The requests still held.
+    // A refusal checked them already; a walk stopped without one checks them here, so no held failure goes unreported.
     uint32_t failed = UINT32_MAX;
-    valid = valid && (tier1_cert_emitted_choices_check(&build.choices, &failed) || tier1_cert_emitted_refuse(&build, TIER1_CERT_EMITTED_KERNEL, failed));
+    const bool held = build.choices.count == 0 || tier1_cert_emitted_choices_check(&build.choices, &failed);
+    valid = (held || tier1_cert_emitted_refuse(&build, TIER1_CERT_EMITTED_KERNEL, failed)) && valid;
     valid = valid && (build.location_count <= BUSTER_CERT_MAX_RECORDS || tier1_cert_emitted_refuse(&build, TIER1_CERT_EMITTED_CAPACITY, UINT32_MAX));
     if (valid)
     {

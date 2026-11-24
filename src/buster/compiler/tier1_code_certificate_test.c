@@ -760,6 +760,38 @@ static void tier1_code_certificate_compile(Tier1EmitTest* test, bool remateriali
             tier1_emit_test_expect(test, refused, "a value's store before a call and its load after it left out fail the code's certificate: the callee may change its register");
         }
     }
+    // p0 & 1's and given its imm32 form: refused at its node, KERNEL at the node's first record, as a form checked at
+    // once is; and still there, not at a later refusal, with the last record (the second return's ret) made a nop.
+    uint32_t immediate = UINT32_MAX;
+    for (uint32_t r = 0; certified && r < emitted.code.count; r += 1)
+    {
+        const X86Instruction record = emitted.code.records[r];
+        immediate = immediate == UINT32_MAX && record.form == X86_FORM_AND_RM64_IMM8 && record.immediate == 1 ? r : immediate;
+    }
+    tier1_emit_test_expect(test, !certified || immediate != UINT32_MAX, "the call fixture ands p0 with 1 by its imm8 form");
+    for (uint32_t late = 0; certified && immediate != UINT32_MAX && late < 2; late += 1)
+    {
+        const uint32_t last = emitted.code.count - 1;
+        const X86Instruction saved = emitted.code.records[immediate];
+        const X86Instruction ending = emitted.code.records[last];
+        emitted.code.records[immediate] = x86_choice_instruction(X86_FORM_AND_RM64_IMM32, (X86Instruction){ .rm = saved.rm }, 1);
+        emitted.code.records[last] = late != 0 ? (X86Instruction){ .form = X86_FORM_NOP } : ending;
+        Tier1CertEmittedStats stats = { 0 };
+        const Tier1CertEmittedReason reason = tier1_certificate_emitted_check(&plan, &emitted, &test->output, &test->scratch, 0, &stats);
+        emitted.code.records[immediate] = saved;
+        emitted.code.records[last] = ending;
+        uint32_t head = immediate;
+        while (head > 0 && emitted.origins[head - 1] == emitted.origins[immediate])
+        {
+            head -= 1;
+        }
+        const bool first = reason == TIER1_CERT_EMITTED_KERNEL && stats.reason == TIER1_CERT_EMITTED_KERNEL && stats.record == head;
+        if (!first)
+        {
+            printf("  the and's imm32 form%s: reason %u at record %u, its node from %u\n", late != 0 ? " and a nop for the last ret" : "", (unsigned)reason, stats.record, head);
+        }
+        tier1_emit_test_expect(test, first, "an immediate's wrong form refuses at its node, before any later refusal (#2924's deferred choices)");
+    }
     // The frame's rows, [low, high) from rsp, moved below rsp, where the call's callee may write them.
     int32_t low = INT32_MAX;
     int32_t high = INT32_MIN;
@@ -2450,10 +2482,42 @@ static void tier1_code_certificate_choices(Tier1EmitTest* test)
     }
 }
 
+// A refusal of a lower class (VECTOR: the code goes uncertified, not refused) behind a held request of a wrong form:
+// the held request is the earlier failure and refuses, KERNEL at its record, as it would checked at once. A right form
+// held leaves the refusal as given.
+static void tier1_code_certificate_choices_held(Tier1EmitTest* test)
+{
+    const uint16_t row = (uint16_t)x86_choice_row(X86_OPERATION_ADD, 8);
+    const uint16_t context = BUSTER_X86_CONTEXT_REGISTER | BUSTER_X86_FLAGS_STATUS;
+    const int64_t value = 7;
+    uint16_t form = X86_FORM_NONE;
+    x86_choose_forms(&row, &value, &context, 1, &form);
+    for (uint32_t wrong = 0; wrong < 2; wrong += 1)
+    {
+        Tier1CertEmittedStats stats = { 0 };
+        Tier1CertEmittedBuild build = {
+            .stats = &stats,
+            .choices = { .canonical = true },
+        };
+        const X86Instruction record = x86_choice_instruction(wrong != 0 ? X86_FORM_ADD_RM64_IMM32 : form, (X86Instruction){ .rm = X86_REGISTER_RBX }, value);
+        uint32_t failed = UINT32_MAX;
+        const bool held = tier1_cert_emitted_choices_defer(&build.choices, row, value, context, X86_REGISTER_RBX, record, 5, &failed);
+        const bool refused = !tier1_cert_emitted_refuse(&build, TIER1_CERT_EMITTED_VECTOR, 9);
+        const bool passed = held && refused && build.choices.count == 0 &&
+                            (wrong != 0 ? stats.reason == TIER1_CERT_EMITTED_KERNEL && stats.record == 5 : stats.reason == TIER1_CERT_EMITTED_VECTOR && stats.record == 9);
+        if (!passed)
+        {
+            printf("  a %s form held before a VECTOR refusal: reason %u at record %u\n", wrong != 0 ? "wrong" : "right", (unsigned)stats.reason, stats.record);
+        }
+        tier1_emit_test_expect(test, passed, "a held request's wrong form refuses before a later, lower refusal");
+    }
+}
+
 static void tier1_code_certificate_tests(Tier1EmitTest* test)
 {
     Tier1CodeCertificateCounts counts = { 0 };
     tier1_code_certificate_choices(test);
+    tier1_code_certificate_choices_held(test);
     tier1_code_certificate_aggregate_copy(test);
     tier1_code_certificate_frame_copy(test);
     for (uint32_t variant = 0; variant < 4; variant += 1)

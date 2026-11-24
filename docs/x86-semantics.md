@@ -456,8 +456,8 @@ Each consumer reads the tables rather than keeping a copy of their rules:
   most aren't covered (the shadow stack's, RDRAND, the FS and GS bases' writes,
   WBINVD, INVPCID), and the harness can't run many of them.
 - **Tier 1's selector** (#141, `tier1_select.c`) chooses its immediates' forms
-  by the rows, a function's requests 32 at a time through `x86_choose_forms`
-  (on the scalar path each as it comes, a count of 1), and every record it emits
+  by the rows, a function's requests 32 at a time through `x86_choose_forms`,
+  and every record it emits
   has a covered form, which its tests check; the scheduler (#172,
   `tier1_schedule.c`) builds its dependency graph from the resolved effects.
 - **The unwind tables' analyzer** (`unwind_tier0.c`) refuses a function with an
@@ -918,7 +918,8 @@ each in a rotating order, the medians of their medians in cycles per record on
   to the scalar twin (the first head) cost 20%: clang -O2's AVX-512 code has
   many, and so has the benchmark's mix.
 
-**The scalar twin** (`--only effects-scalar`, the same five processes): main
+**The scalar twin** (`--only effects-scalar`, the same five processes; the twin
+and that path were deleted by #2924, #3499, so this is a dated record): main
 48.81 and 48.28 cycles per record at 164.6 instructions; the head, with a test per
 x87 or vzeroupper property, 47.97 and 47.51 at 189.9; with what they add from a
 table of their bits, as the final head takes it, 46.74 and 46.27 at 179.0. It resolves
