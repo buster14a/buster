@@ -39,6 +39,7 @@
     ENTRY(END_OF_OPTIONS, "--") \
     ENTRY(ATTESTED_MEMO_EQ, "--attested-memo=") \
     ENTRY(ATTESTED_EQ, "--attested=") \
+    ENTRY(BRANCH_TRUTH_CENSUS, "--branch-truth-census") \
     ENTRY(BUSTER_HEADERS, "--buster-headers") \
     ENTRY(CHECK_TRANSITIONS, "--check-transitions") \
     ENTRY(CLANG_FEATURES, "--clang-features") \
