@@ -501,7 +501,7 @@ static void tier1_emit_cfg_recipes(const Tier1SelectPlan* plan, const Tier1EmitR
 // The plan's allocation problem, in `output`, which the result keeps (see the header), with the maps between nodes and
 // values and the prepared columns the shared helpers read: recipes and sizes by node, the calls' save rows, and the
 // frame's columns (a node's slot, each caller-save row, then the temporary slot).
-static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const Tier1EmitOptions* options, Arena* output, Arena* scratch, Tier1EmitResult* emitted)
+static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const IrCfg* verified_cfg, const Tier1EmitOptions* options, Arena* output, Arena* scratch, Tier1EmitResult* emitted)
 {
     const IrFunction* function = plan->function;
     const uint32_t count = function->instruction_count;
@@ -512,7 +512,7 @@ static Tier1EmitError tier1_emit_cfg_problem(const Tier1SelectPlan* plan, const 
     IrCfg cfg = { 0 };
     if (error == TIER1_EMIT_OK)
     {
-        const IrError built = ir_build_cfg(function, output, scratch, &cfg);
+        const IrError built = tier1_liveness_cfg(function, verified_cfg, output, scratch, &cfg);
         tier1_emit_diagnose(options, TIER1_EMIT_CAUSE_IR, built);
         error = built == IR_OK ? TIER1_EMIT_OK : built == IR_ERROR_MEMORY ? TIER1_EMIT_MEMORY : built == IR_ERROR_LIMIT ? TIER1_EMIT_LIMIT : TIER1_EMIT_INVALID;
     }
@@ -5182,7 +5182,7 @@ static Tier1EmitError tier1_emit_cfg_order_check(const Tier1SelectPlan* plan, co
 
 // The CFG consumer's whole function: problem, allocation, frame and records, out of line, so that tier1_emit_function's
 // straight-line path compiles as it did without it.
-static __attribute__((noinline)) Tier1EmitError tier1_emit_cfg_function(const Tier1SelectPlan* plan, const Tier1EmitOptions* options, const uint8_t* allowed_forms, Arena* output, Arena* scratch, Tier1EmitResult* emitted, uint32_t* error_node)
+static __attribute__((noinline)) Tier1EmitError tier1_emit_cfg_function(const Tier1SelectPlan* plan, const IrCfg* verified_cfg, const Tier1EmitOptions* options, const uint8_t* allowed_forms, Arena* output, Arena* scratch, Tier1EmitResult* emitted, uint32_t* error_node)
 {
     emitted->general = true;
     // A target without AVX512VL (#1281) has no EVEX form of a 16- or 32-byte vector: its moves, spills and kernels take
@@ -5194,7 +5194,7 @@ static __attribute__((noinline)) Tier1EmitError tier1_emit_cfg_function(const Ti
     // A target without AVX (#141's SSE targets) allows no VEX move of an xmm register.
     emitted->prepared.sse = !x86_target_form_allowed(allowed_forms, X86_FORM_VMOVDQU_X_XM128);
     emitted->prepared.zmm = x86_target_form_allowed(allowed_forms, X86_FORM_VMOVDQA64_Z_ZM512);
-    Tier1EmitError error = tier1_emit_cfg_problem(plan, options, output, scratch, emitted);
+    Tier1EmitError error = tier1_emit_cfg_problem(plan, verified_cfg, options, output, scratch, emitted);
     const Tier1CfgInput problem = emitted->cfg_input;
     if (error == TIER1_EMIT_OK)
     {

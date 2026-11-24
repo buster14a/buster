@@ -1139,7 +1139,7 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
             .sources = sources,
         };
         uint32_t node = BUSTER_IR_NONE;
-        Tier1EmitError error = tier1_emit_function(&plan, &options, lane->allowed, &lane->steps[1], scratch, &emitted, &node);
+        Tier1EmitError error = tier1_emit_function_cfg(&plan, &analysis.cfg, &options, lane->allowed, &lane->steps[1], scratch, &emitted, &node);
         bool forced_nested = false;
         if (error == TIER1_EMIT_OK && fault != NULL && fault->stage == CHECK_TIER1_EMISSION && fault->cause != CHECK_TIER1_CAUSE_EMISSION)
         {

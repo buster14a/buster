@@ -1419,6 +1419,7 @@ typedef enum IrRule
     IR_RULE_GATHER,
     IR_RULE_FMA,
     IR_RULE_SCATTER,
+    IR_RULE_COUNT,
 } IrRule;
 
 #define BUSTER_IR_INTS (((1u << (IR_I128 + 1)) - 1) & ~1u)
@@ -1539,7 +1540,7 @@ enum
 static const uint32_t ir_batch_table[BUSTER_IR_OP_TABLE] = { BUSTER_IR_ROWS(BUSTER_IR_BATCH_ROW) };
 #undef BUSTER_IR_BATCH_ROW
 #undef BUSTER_IR_ROWS
-_Static_assert(IR_BATCH_RULE < 32 && IR_RULE_SCATTER <= (UINT32_MAX >> IR_BATCH_RULE), "packed row descriptors must fit a word");
+_Static_assert(IR_BATCH_RULE < 32 && IR_RULE_COUNT - 1 <= (UINT32_MAX >> IR_BATCH_RULE), "packed row descriptors must fit a word");
 _Static_assert((BUSTER_IR_OP_TABLE & (BUSTER_IR_OP_TABLE - 1)) == 0, "opcode lookup masks require a power of two");
 
 _Static_assert(IR_OP_COUNT <= BUSTER_IR_OP_TABLE, "IR opcode tables must fit two byte-permute registers");
@@ -3267,21 +3268,42 @@ static IrCheck ir_check_use_batch(const IrUseBatch* batch, bool dominance)
 static IrCheck ir_check_operands(const IrFunction* f, const IrCfg* cfg, const IrDominance* dominance, uint32_t i)
 {
     IrCheck check = ir_check(IR_OK, BUSTER_IR_NONE, 0);
-    const uint64_t count = ir_operand_count(f, i);
-    const bool phi = f->op[i] == IR_PHI;
-    for (uint32_t p = 0; check.error == IR_OK && p < count; p += 1)
+    const uint32_t use_block = cfg->instruction_blocks[i];
+    if (f->op[i] == IR_PHI)
     {
-        const IrOperand operand = ir_operand(f, i, p, cfg->instruction_blocks[i]);
-        const uint32_t definition = cfg->instruction_blocks[operand.value];
-        const uint32_t position = phi ? f->block_offsets[operand.block + 1] - 1 : i;
-        bool invalid = operand.value >= position;
-        if (definition != operand.block)
+        // The join check proved that each input is non-void and belongs to a real predecessor edge.
+        // Within that predecessor any definition therefore precedes its void terminator.
+        for (uint32_t p = 0; dominance != NULL && check.error == IR_OK && p < f->b[i]; p += 1)
         {
-            invalid = dominance != 0 && (dominance->leave[definition] == 0 || dominance->leave[operand.block] == 0 || dominance->enter[definition] > dominance->enter[operand.block] || dominance->leave[definition] < dominance->leave[operand.block]);
+            const uint32_t at = f->a[i] + 2 * p;
+            const uint32_t predecessor = f->extra[at];
+            const uint32_t definition = cfg->instruction_blocks[f->extra[at + 1]];
+            if (definition != predecessor && (dominance->leave[definition] == 0 || dominance->leave[predecessor] == 0 ||
+                dominance->enter[definition] > dominance->enter[predecessor] || dominance->leave[definition] < dominance->leave[predecessor]))
+            {
+                check = ir_check(IR_ERROR_DOMINANCE, i, 3 + p);
+            }
         }
-        if (invalid)
+    }
+    else
+    {
+        const uint64_t count = ir_operand_count(f, i);
+        const uint32_t start = f->block_offsets[use_block];
+        const uint32_t end = f->block_offsets[use_block + 1];
+        for (uint32_t p = 0; check.error == IR_OK && p < count; p += 1)
         {
-            check = ir_check(IR_ERROR_DOMINANCE, i, operand.position);
+            const IrOperand operand = ir_operand(f, i, p, use_block);
+            bool invalid = operand.value >= i && operand.value < end;
+            if (dominance != NULL && (operand.value < start || operand.value >= end))
+            {
+                const uint32_t definition = cfg->instruction_blocks[operand.value];
+                invalid = dominance->leave[definition] == 0 || dominance->leave[use_block] == 0 ||
+                          dominance->enter[definition] > dominance->enter[use_block] || dominance->leave[definition] < dominance->leave[use_block];
+            }
+            if (invalid)
+            {
+                check = ir_check(IR_ERROR_DOMINANCE, i, operand.position);
+            }
         }
     }
     return check;
@@ -3474,6 +3496,10 @@ static IrCheck ir_check_joins(const IrFunction* f, const IrCfg* cfg, Arena* scra
             check = ir_check_join(f, cfg, scratch, seen, first + lane);
         }
     }
+    if (check.error == IR_OK)
+    {
+        check.instruction = BUSTER_IR_NONE;
+    }
     return check;
 }
 
@@ -3535,14 +3561,15 @@ static __attribute__((unused)) IrCheck ir_verify_cfg(const IrFunction* f, Arena*
     return ir_prepare_cfg(f, arena, scratch, result, true);
 }
 
-// A freshly lowered function generally has no phi or switch and defines each value before its use.
-// After shape and row validation these facts suffice for the structural graph check: branch targets are
-// in bounds, each terminator has at most two successors, and even a same-block use is ordered. Inspect
-// the actual rows and every side-table operand. A forward use can be valid across blocks, so leave it
-// and graphs with join, switch or indirect-branch obligations to the full verifier.
-static bool ir_lowered_ordered(const IrFunction* f)
+// A freshly lowered function typically has no phi and defines its values before their uses. After row
+// validation, edge capacity and distinct switch cases are the remaining graph obligations. A forward use
+// can still be valid across blocks; let the full CFG decide if this proof is inconclusive.
+static bool ir_lowered_ordered(const IrFunction* f, Arena* scratch)
 {
-    bool ordered = f->block_count <= UINT32_MAX / 2;
+    // Ordinary branches add at most two edges. For a switch or indirect branch, conservatively
+    // include every additional raw target; the full CFG builder can deduplicate if this exceeds the limit.
+    uint64_t edges = (uint64_t)f->block_count * 2;
+    bool ordered = edges <= UINT32_MAX;
     for (uint64_t start = 0; ordered && start < f->instruction_count; start += BUSTER_IR_VECTOR_COUNT)
     {
         const uint32_t first = (uint32_t)start;
@@ -3550,8 +3577,16 @@ static bool ir_lowered_ordered(const IrFunction* f)
         const uint32_t count = remaining < BUSTER_IR_VECTOR_COUNT ? remaining : BUSTER_IR_VECTOR_COUNT;
         const __mmask16 active = (__mmask16)((1u << count) - 1u);
         const __m128i op = _mm_maskz_loadu_epi8(active, f->op + first);
-        ordered = (_mm_cmpeq_epi8_mask(op, _mm_set1_epi8(IR_PHI)) | _mm_cmpeq_epi8_mask(op, _mm_set1_epi8(IR_SWITCH)) |
-                   _mm_cmpeq_epi8_mask(op, _mm_set1_epi8(IR_BR_INDIRECT))) == 0;
+        ordered = _mm_cmpeq_epi8_mask(op, _mm_set1_epi8(IR_PHI)) == 0;
+        uint32_t branches = _mm_cmpeq_epi8_mask(op, _mm_set1_epi8(IR_SWITCH)) | _mm_cmpeq_epi8_mask(op, _mm_set1_epi8(IR_BR_INDIRECT));
+        while (ordered && branches != 0)
+        {
+            const uint32_t row = first + (uint32_t)__builtin_ctz(branches);
+            branches &= branches - 1;
+            const uint32_t targets = ir_successor_count(f, row);
+            edges += targets > 2 ? targets - 2 : 0;
+            ordered = edges <= UINT32_MAX && (f->op[row] != IR_SWITCH || ir_switch_unique(f, row, scratch) == IR_OK);
+        }
         uint32_t pending = ordered ? ir_dominance_batch(f, NULL, NULL, first, count) : 0;
         while (ordered && pending != 0)
         {
@@ -3576,7 +3611,7 @@ static __attribute__((noinline, aligned(64))) IrCheck ir_verify_path(const IrFun
     {
         check = ir_check_rows(f);
     }
-    if (check.error == IR_OK && !(lowered && dominance == NULL && ir_lowered_ordered(f)))
+    if (check.error == IR_OK && !(lowered && dominance == NULL && ir_lowered_ordered(f, scratch)))
     {
         IrCfg cfg = { 0 };
         check.error = ir_cfg_validated(f, scratch, scratch, &cfg);

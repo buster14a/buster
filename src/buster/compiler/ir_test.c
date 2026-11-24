@@ -68,6 +68,29 @@ static void ir_test_instruction(IrFunction* function, uint32_t id, IrOp op, IrTy
     function->c[id] = c;
 }
 
+// Exercise the scalar diagnostic for every row, including lanes the batch accepted without calling it.
+// Shape must already have passed, so the row columns and nonempty block ranges can be traversed.
+static IrCheck ir_test_scalar_rows(const IrFunction* f)
+{
+    for (uint32_t b = 0; b < f->block_count; b += 1)
+    {
+        const uint32_t end = f->block_offsets[b + 1];
+        for (uint32_t i = f->block_offsets[b]; i < end; i += 1)
+        {
+            const IrCheck row = ir_check_instruction(f, i, false);
+            if (row.error != IR_OK)
+            {
+                return row;
+            }
+            if ((ir_terminator_table[f->op[i]] != 0) != (i == end - 1))
+            {
+                return ir_check(IR_ERROR_TERMINATOR, i, 0);
+            }
+        }
+    }
+    return ir_check(IR_OK, BUSTER_IR_NONE, 0);
+}
+
 static void ir_test_pair(IrTestTally* tally, const IrFunction* function, Arena* scratch, const IrDominance* dominance, bool expected_valid, const char* message)
 {
     const uint64_t mark = scratch->length;
@@ -76,6 +99,13 @@ static void ir_test_pair(IrTestTally* tally, const IrFunction* function, Arena* 
     ir_test_expect(tally, (verified.error == IR_OK) == expected_valid, message);
     if (dominance == NULL)
     {
+        if (ir_check_shape(function).error == IR_OK)
+        {
+            const IrCheck rows = ir_check_rows(function);
+            const IrCheck scalar = ir_test_scalar_rows(function);
+            ir_test_expect(tally, rows.error == scalar.error && rows.instruction == scalar.instruction && rows.detail == scalar.detail,
+                           "batched rows match the scalar error, row and operand");
+        }
         const IrCheck lowered = ir_verify_path(function, scratch, NULL, true);
         ir_test_expect(tally, lowered.error == verified.error && lowered.instruction == verified.instruction && lowered.detail == verified.detail &&
                               !lowered.dominance_checked && scratch->length == mark, "lowering verification disagrees with fresh CFG verification");
