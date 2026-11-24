@@ -3214,8 +3214,7 @@ with `BUSTER_SPLIT_MAIN`, in `dynamic_test_libgcc_s`), whose
 `generic-morestack.o` has general- and local-dynamic accesses, and an
 assembly fixture with each sequence through the PLT and the GOT, to its own
 thread-locals and to `libc.so.6`'s `errno` (`dynamic_test_tls_program`:
-status 53), on 1, 2, 3 and 8 lanes and by the exact twins into the same
-bytes, and without RELR; every access's bytes in the file must be the
+status 53), on 1, 2, 3 and 8 lanes into the same bytes, and without RELR; every access's bytes in the file must be the
 relaxation's (`dynamic_test_tls`), the PIE must need `libgcc_s.so.1`, both
 are compared with lld's links with `--cross-check`, and both run. A call of
 `__tls_get_addr` that no access makes (one whose fixup doesn't follow a
@@ -3226,7 +3225,7 @@ fixture calls it both ways with the executable's own module and offset,
 beside an access whose call the relaxation consumes (status 120). Only a
 static executable, where nothing defines it, still refuses such a call
 (`EXECUTABLE_ERROR_UNSUPPORTED`). `dynamic_test_tls_refusals` writes what a
-PIE refuses, by every lane count and the exact twins, without an output: the
+PIE refuses, by every lane count, without an output: the
 fixture without `__tls_get_addr` named (`EXECUTABLE_ERROR_RELOCATION` at its
 first access to `errno`); a local-dynamic access to `errno` binds, and
 `link_check` refuses it (`LINK_ERROR_BINDING`), before any write. `test-checker-driver` links a
@@ -3284,7 +3283,7 @@ Other records fail the link (`EXECUTABLE_ERROR_UNWIND`, naming the atom), and
 so does an initial location farther from the header than an int32 reaches,
 which GNU ld and lld refuse too.
 
-Three passes, each with an exact twin:
+Three passes (each had an exact twin until #2924 deleted them):
 
 - **The count, before the layout**, in the count phase. The lanes share the
   `.eh_frame` atoms by cost, an atom's fixups plus one, each lane taking a
@@ -3300,7 +3299,7 @@ Three passes, each with an exact twin:
   fixups must all be `PC32`s of an addend in the column, and the last must end
   at the atom's end or its terminator's start. An atom laid out otherwise
   (other CIEs or fixups among its records, a CIE with a personality) goes to
-  the exact walk, record by record, which is also what `exact` runs.
+  the walk, record by record.
 - **The table, once every symbol's reference is known**, in the dynamic
   phase (a static executable now has one too): each lane writes its share's
   entries, in `.eh_frame`'s order, from the lanes' counts before it. For an
@@ -3316,7 +3315,7 @@ Three passes, each with an exact twin:
   addresses go in their FDEs' order, as in a link of a compiler's objects
   without cold parts (a static executable's libc has them: "The static
   executable with libc"). Only if they aren't does it sort them, by an LSD
-  radix sort, stable, 8 bits a pass; the exact twin always sorts.
+  radix sort, stable, 8 bits a pass.
 
 On the 9700X (`benchmark-executable --only links`), each program in place,
 medians in µs, main's and then this one's (the median of three rounds,
