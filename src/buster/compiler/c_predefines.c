@@ -4078,6 +4078,16 @@ static uint8_t predefines_stack_protector(const PredefinesOptions* options)
     return requested == 0 || weaker ? BUSTER_PREDEFINES_SSP_DEFAULT : requested;
 }
 
+// CET's protection the code has (#3570): -fcf-protection's bits, the last of its spellings deciding (BUSTER_PREDEFINES_CF_*:
+// branch's, whose indirect branches' targets the code marks with endbr64, and return's, which no code needs), as the
+// predefined __CET__ says. An invalid last value is predefines_finish's error before any code is made.
+#define BUSTER_PREDEFINES_CF_BRANCH 1u
+#define BUSTER_PREDEFINES_CF_RETURN 2u
+static __attribute__((unused)) uint8_t predefines_cf_protection(const PredefinesOptions* options)
+{
+    return options->cf_protection & (BUSTER_PREDEFINES_CF_BRANCH | BUSTER_PREDEFINES_CF_RETURN);
+}
+
 // The stack protector the code has (#3558), which the lowering guards the functions by (Tier0Function.stack_protector):
 // the macros' (predefines_stack_protector) where an option of the four asks for one, and none without, whatever default
 // the macros take from the clang that built the compiler, so that a build's code never depends on that clang (the

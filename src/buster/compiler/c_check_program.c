@@ -312,6 +312,10 @@ struct CheckProgramOptions
     // The stack protector the code has (#3558, predefines_stack_protector's BUSTER_PREDEFINES_SSP_*, or 0 for none,
     // BUSTER_PREDEFINES_SSP_OFF's too): which functions the lowering guards (Tier0Function.stack_protector).
     uint8_t stack_protector;
+    // CET's protection (#3570, -fcf-protection, predefines_cf_protection's BUSTER_PREDEFINES_CF_* bits, 0 for none): with
+    // branch's, the indirect branches' targets the code marks with endbr64 (CheckProgram.cf_protection), and with either,
+    // the note -c's object carries.
+    uint8_t cf_protection;
     // Position-independent code for a shared library (#2101, -fPIC and -fpic where the code isn't a link's executable,
     // check_request_program_options): a symbol another module may preempt is reached through its GOT slot and a
     // thread-local by general- or local-dynamic accesses (check_program_object_access, c_check_program_tls.c). The
@@ -710,7 +714,7 @@ struct CheckProgram
     uint32_t constraint_capacity;
     uint64_t output_bytes;
     // CheckProgramOptions.unselected_operands, asm_helpers, asm_bodies, helper_forms, target, frame_pointer, probe_stack,
-    // stack_protector and pic.
+    // stack_protector, cf_protection and pic.
     bool unselected_operands;
     bool asm_helpers;
     bool asm_bodies;
@@ -720,6 +724,7 @@ struct CheckProgram
     uint8_t frame_pointer;
     bool probe_stack;
     uint8_t stack_protector;
+    uint8_t cf_protection;
     bool pic;
     // The tokens the writer left out (#1108), as ranges, keys of their first token in the high half and their last in
     // the low, in token order: an if whose condition is an integer constant without side effects writes only the arm
@@ -6410,7 +6415,7 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
     *program = (CheckProgram){ .input = input, .stream = stream, .types = types, .parser = parser, .identifiers = options.identifiers,
                                .initializers = options.initializers, .asms = options.asms, .unselected_operands = options.unselected_operands,
                                .asm_helpers = options.asm_helpers, .asm_bodies = options.asm_bodies, .assembly_text = options.assembly_text, .helper_forms = options.helper_forms, .target = options.target, .frame_pointer = options.frame_pointer,
-                               .probe_stack = options.probe_stack, .stack_protector = options.stack_protector, .pic = options.pic, .patchable_count = options.patchable_count, .patchable_offset = options.patchable_offset,
+                               .probe_stack = options.probe_stack, .stack_protector = options.stack_protector, .cf_protection = options.cf_protection, .pic = options.pic, .patchable_count = options.patchable_count, .patchable_offset = options.patchable_offset,
                                .patchable_section = options.patchable_section, .initializer_references = options.initializer_references,
                                .initializer_reference_count = options.initializer_reference_count, .token = BUSTER_CHECK_NONE,
                                .diagnostic_position = BUSTER_CHECK_NONE };

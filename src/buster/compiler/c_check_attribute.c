@@ -5066,9 +5066,19 @@ static bool check_input_attribute_read_item(CheckInputReader* reader, CheckInput
         }
         else if (valid && known && rule == 0 && check_input_attribute_equal(name, "nocf_check"))
         {
-            // clang takes nocf_check as a function type's, whose handler without -fcf-protection (which the driver refuses)
-            // warns that it ignores it, wherever it is and whatever its arguments (#147).
-            check_input_attribute_named_event(reader, &attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_NOCF_CHECK_IGNORED);
+            // clang takes nocf_check as a function type's, whose handler without -fcf-protection=branch or =full warns that
+            // it ignores it, wherever it is and whatever its arguments (#147). With them (#3570) it is part of its function's
+            // type (a redeclaration without it conflicts) and takes the function's endbr64 away, neither of which the
+            // types and the code have: refused.
+            const bool tracking = reader->pp != NULL && (reader->pp->options.predefines.cf_protection & BUSTER_PREDEFINES_CF_BRANCH) != 0;
+            if (tracking)
+            {
+                check_input_attribute_error(reader, attributes, attribute.name_token, attribute.end, CHECK_ATTRIBUTE_ERROR_UNKNOWN);
+            }
+            else
+            {
+                check_input_attribute_named_event(reader, &attribute, CHECK_WARNING_ID_IGNORED_ATTRIBUTES, CHECK_WARNING_EVENT_NOCF_CHECK_IGNORED);
+            }
             unknown = true;
         }
         else if (valid && known && check_input_attribute_generic(name, generic_fact, subjectless))

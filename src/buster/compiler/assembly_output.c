@@ -89,8 +89,10 @@ struct AssemblyCode
     const uint32_t* targets;
     uint32_t count;
     uint32_t branch_count;
-    // The patchable-entry bytes in the atom before its first instruction record.
+    // The patchable-entry bytes in the atom before its first instruction record; among them, indirect branch tracking's
+    // endbr64 (#3570), at its offset plus one (0 for none), which is printed as the instruction.
     uint32_t sled;
+    uint32_t endbr;
     AssemblyInline* templates;
     uint32_t template_count;
 };
@@ -1435,9 +1437,18 @@ static AssemblyError assembly_code(AssemblyText* text, const Link* link, const A
     {
         assembly_labels(text, link, names, defined, end, &cursor, at);
         const uint64_t next_label = cursor < end ? link->symbols.value[defined[cursor]] : sled;
-        const uint32_t stop = next_label < sled ? (uint32_t)next_label : sled;
-        assembly_plain_bytes(text, atom_bytes + at, stop - at);
-        at = stop;
+        const uint32_t marked = code->endbr != 0 ? code->endbr - 1 : UINT32_MAX;
+        const uint32_t until = next_label < sled ? (uint32_t)next_label : sled;
+        const uint32_t stop = at < marked && marked < until ? marked : until;
+        if (at == marked)
+        {
+            assembly_append(text, "\tendbr64\n");
+        }
+        else
+        {
+            assembly_plain_bytes(text, atom_bytes + at, stop - at);
+        }
+        at = at == marked ? at + 4 : stop;
     }
     uint32_t next_fixup = 0;
     uint32_t piece = 0;

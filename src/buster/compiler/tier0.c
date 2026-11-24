@@ -756,6 +756,15 @@ struct Tier0Function
     // guarded function to Tier 0 (check_tier1_compile).
     uint8_t stack_protector;
     SymbolId stack_check_fail;
+    // Indirect branch tracking (#3570, -fcf-protection=branch and =full, CET's IBT), as LLVM's X86IndirectBranchTracking
+    // and its jump tables' lowering have it (tier0_mark_branches): an endbr64 right after each direct call of a function
+    // that returns twice (one of `twice_symbols`, twice_symbol_count of them), where its longjmp's indirect jump comes back,
+    // and at each label whose address the code takes (label_tables' 0s), where a goto * lands; and each jump table's jump
+    // (table_jumps) a notrack jmp, so that its labels need none. The function's own entry's endbr64 is the emission's,
+    // which decides it by the unit's references (check_program_emit_code). Tier 1 leaves a function with labels to Tier 0.
+    bool branch_tracking;
+    const SymbolId* twice_symbols;
+    uint32_t twice_symbol_count;
     // The registers the function keeps for its caller past System V's callee-saved ones (#147, #1447): preserve_most's
     // and preserve_all's (and no_caller_saved_registers', as clang's x86 handlers keep them), but those its result returns
     // in, which the caller reads (tier0_preserved_general, tier0_preserved_vectors). `preserve_general` has a bit per
@@ -11750,12 +11759,173 @@ static Tier0Code tier0_conclude(Tier0Code code, Tier0Error error, Arena* output,
     return code;
 }
 
+// How many of the sorted `points` (`count` of them) are below `x`: a binary search.
+static uint32_t tier0_points_below(const uint32_t* points, uint32_t count, uint32_t x)
+{
+    uint32_t low = 0;
+    uint32_t high = count;
+    while (low < high)
+    {
+        const uint32_t middle = low + (high - low) / 2;
+        low = points[middle] < x ? middle + 1 : low;
+        high = points[middle] < x ? high : middle;
+    }
+    return low;
+}
+
+// A record index past the endbr64s inserted before `points` (tier0_mark_branches): a record's own index (its record moves
+// past every endbr64 inserted before it, `own`), or a place where something starts (a branch's target, a label's or an
+// entry's first record, `own` false), which stays on an endbr64 inserted there for a label, `leading`'s bit, and moves past
+// one inserted there for a call before it.
+static uint32_t tier0_points_shift(const uint32_t* points, const uint8_t* leading, uint32_t count, uint32_t x, bool own)
+{
+    const uint32_t below = tier0_points_below(points, count, x);
+    const bool at = below < count && points[below] == x;
+    return x + below + (at && (own || leading[below] == 0) ? 1 : 0);
+}
+
+// Indirect branch tracking's marks (#3570, Tier0Function.branch_tracking), out of line and cold: a function without it
+// never reaches them. Each table jump (table_jumps), its entry's JMP_RM64 through a register, becomes notrack jmp; then an
+// endbr64 is inserted at each label whose address the code takes (its first record, Tier0Code.label_records) and right after
+// each direct call of a function that returns twice (a CALL fixup's record whose target is one of twice_symbols), one
+// where both fall at a place, as LLVM's X86IndirectBranchTracking places them. Every index into the records moves with
+// them (tier0_points_shift): the branches' and their targets, the references', the entries', the labels', the asm
+// bodies' labels and the tail calls'. The prologue, which no label or call precedes, stays the code's first records,
+// and the epilogue its last, as the unwind tables read them. A new records column from `output`, with the vector
+// expansion's room past it as tier0_push_output gives it.
+static __attribute__((noinline, cold)) Tier0Error tier0_mark_branches(const Tier0Function* function, const Tier0Entries* entries, Arena* output, Tier0Code* code)
+{
+    Tier0Error error = TIER0_OK;
+    for (uint32_t t = 0; t < function->table_count; t += 1)
+    {
+        const uint32_t entry = function->table_jumps[t];
+        for (uint32_t r = entries->positions[entry]; r < entries->positions[entry + 1] && r < code->count; r += 1)
+        {
+            X86Instruction* record = &code->records[r];
+            const bool jump = record->form == X86_FORM_JMP_RM64 && record->mode == BUSTER_X86_REGISTER_DIRECT;
+            record->form = jump ? (uint16_t)X86_FORM_NOTRACK_JMP_R64 : record->form;
+        }
+    }
+    // The places: the taken labels' (leading, the label's own), then the returns' of calls that return twice.
+    uint32_t count = 0;
+    for (uint32_t k = 0; k < code->label_count; k += 1)
+    {
+        const bool taken = function->label_tables == 0 || function->label_tables[k] == 0;
+        count += taken && code->label_records[k] < code->count ? 1 : 0;
+    }
+    for (uint32_t i = 0; function->twice_symbol_count != 0 && i < code->reference_count; i += 1)
+    {
+        count += code->references[i].kind == BUSTER_LINK_FIXUP_CALL ? 1 : 0;
+    }
+    uint64_t* keys = count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint64_t, count) : 0;
+    error = count == 0 || keys != 0 ? TIER0_OK : TIER0_ERROR_MEMORY;
+    uint32_t found = 0;
+    for (uint32_t k = 0; keys != 0 && k < code->label_count; k += 1)
+    {
+        const bool taken = function->label_tables == 0 || function->label_tables[k] == 0;
+        if (taken && code->label_records[k] < code->count)
+        {
+            keys[found++] = (uint64_t)code->label_records[k] << 1 | 1;
+        }
+    }
+    for (uint32_t i = 0; keys != 0 && function->twice_symbol_count != 0 && i < code->reference_count; i += 1)
+    {
+        const LinkReference* reference = &code->references[i];
+        bool twice = false;
+        for (uint32_t k = 0; reference->kind == BUSTER_LINK_FIXUP_CALL && k < function->twice_symbol_count; k += 1)
+        {
+            twice |= function->twice_symbols[k] == reference->target;
+        }
+        const bool call = twice && reference->instruction < code->count && (code->records[reference->instruction].form & BUSTER_X86_FORM_NUMBER) == X86_FORM_CALL_REL32;
+        if (call)
+        {
+            keys[found++] = (uint64_t)(reference->instruction + 1) << 1;
+        }
+    }
+    // Sorted by place (insertion: they are few), one a place, leading where a label's is there.
+    for (uint32_t i = 1; i < found; i += 1)
+    {
+        const uint64_t key = keys[i];
+        uint32_t j = i;
+        while (j > 0 && keys[j - 1] > key)
+        {
+            keys[j] = keys[j - 1];
+            j -= 1;
+        }
+        keys[j] = key;
+    }
+    uint32_t* points = found != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, found) : 0;
+    uint8_t* leading = found != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint8_t, found) : 0;
+    error = error == TIER0_OK && (found == 0 || (points != 0 && leading != 0)) ? TIER0_OK : TIER0_ERROR_MEMORY;
+    uint32_t marks = 0;
+    for (uint32_t i = 0; error == TIER0_OK && i < found; i += 1)
+    {
+        const uint32_t place = (uint32_t)(keys[i] >> 1);
+        const bool fresh = marks == 0 || points[marks - 1] != place;
+        marks -= fresh ? 0 : 1;
+        leading[marks] = (uint8_t)((fresh ? 0 : leading[marks]) | (keys[i] & 1));
+        points[marks] = place;
+        marks += 1;
+    }
+    const uint64_t total = (uint64_t)code->count + marks;
+    X86Instruction* records = marks != 0 && error == TIER0_OK && total <= UINT32_MAX - BUSTER_TIER0_TEMPLATE_RECORDS ?
+                                  BUSTER_ARENA_PUSH_ARRAY(output, X86Instruction, total + BUSTER_TIER0_TEMPLATE_RECORDS) : 0;
+    error = marks == 0 || records != 0 ? error : TIER0_ERROR_MEMORY;
+    if (marks != 0 && records != 0)
+    {
+        memset(records + total, 0, BUSTER_TIER0_TEMPLATE_RECORDS * sizeof(X86Instruction));
+        uint32_t from = 0;
+        uint32_t to = 0;
+        for (uint32_t m = 0; m < marks; m += 1)
+        {
+            memcpy(records + to, code->records + from, (uint64_t)(points[m] - from) * sizeof(X86Instruction));
+            to += points[m] - from;
+            from = points[m];
+            records[to++] = tier0_instruction(X86_FORM_ENDBR64, 0, 0, 0, 0, 0);
+        }
+        memcpy(records + to, code->records + from, (uint64_t)(code->count - from) * sizeof(X86Instruction));
+        for (uint32_t i = 0; i < code->branch_count; i += 1)
+        {
+            code->branches[i] = tier0_points_shift(points, leading, marks, code->branches[i], true);
+            code->targets[i] = tier0_points_shift(points, leading, marks, code->targets[i], false);
+        }
+        for (uint32_t i = 0; i < code->reference_count; i += 1)
+        {
+            code->references[i].instruction = tier0_points_shift(points, leading, marks, code->references[i].instruction, true);
+        }
+        for (uint32_t e = 0; code->entry_records != 0 && e <= code->entry_count; e += 1)
+        {
+            code->entry_records[e] = tier0_points_shift(points, leading, marks, code->entry_records[e], false);
+        }
+        for (uint32_t k = 0; k < code->label_count; k += 1)
+        {
+            const uint32_t record = code->label_records[k];
+            code->label_records[k] = record <= code->count ? tier0_points_shift(points, leading, marks, record, false) : record;
+        }
+        for (uint32_t k = 0; k < code->asm_label_count; k += 1)
+        {
+            const uint32_t record = code->asm_label_records[k];
+            code->asm_label_records[k] = record <= code->count ? tier0_points_shift(points, leading, marks, record, false) : record;
+        }
+        for (uint32_t k = 0; k < code->tail_count; k += 1)
+        {
+            code->tail_records[k] = tier0_points_shift(points, leading, marks, code->tail_records[k], true);
+        }
+        code->records = records;
+        code->count = (uint32_t)total;
+    }
+    return error;
+}
+
 // The last of a job's passes: the labels' records and the tail calls' (tier0_label_records, tier0_tail_records), from
-// the positions measuring gave.
+// the positions measuring gave, then indirect branch tracking's marks where the function asks for them
+// (tier0_mark_branches, #3570).
 static void tier0_job_records(Tier0Job* job, Arena* output)
 {
     job->error = job->error == TIER0_OK ? tier0_label_records(job->function, &job->entries, output, &job->code) : job->error;
     job->error = job->error == TIER0_OK ? tier0_tail_records(job->function, &job->entries, output, &job->code) : job->error;
+    const bool tracking = __builtin_expect(job->function->branch_tracking, 0);
+    job->error = job->error == TIER0_OK && tracking ? tier0_mark_branches(job->function, &job->entries, output, &job->code) : job->error;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------

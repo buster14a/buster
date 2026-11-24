@@ -65,8 +65,8 @@ static CheckTier1Outcome check_tier1_failure(CheckTier1Stage stage, CheckTier1Ca
     switch (cause)
     {
         case CHECK_TIER1_CAUSE_ADMISSION:
-            category = error == BUSTER_CHECK_TIER1_NAKED || error == BUSTER_CHECK_TIER1_RETURNS_TWICE || error == BUSTER_CHECK_TIER1_GUARDED ? CHECK_TIER1_UNSUPPORTED :
-                                                                                                                                            category;
+            category = error == BUSTER_CHECK_TIER1_NAKED || error == BUSTER_CHECK_TIER1_RETURNS_TWICE || error == BUSTER_CHECK_TIER1_GUARDED ||
+                               error == BUSTER_CHECK_TIER1_TRACKED ? CHECK_TIER1_UNSUPPORTED : category;
             break;
         case CHECK_TIER1_CAUSE_IR:
             category = error == IR_ERROR_UNSUPPORTED ? CHECK_TIER1_UNSUPPORTED : error == IR_ERROR_MEMORY || error == IR_ERROR_LIMIT ? CHECK_TIER1_RESOURCE_FAILURE : category;
@@ -893,6 +893,14 @@ static CheckTier1Outcome check_tier1_compile(CheckTier1Lane* lane, const Tier0Fu
     if (stage == CHECK_TIER1_COMPILED && function->stack_protector == BUSTER_TIER0_GUARD_ON)
     {
         outcome = check_tier1_failure(CHECK_TIER1_LOWERING, CHECK_TIER1_CAUSE_ADMISSION, BUSTER_CHECK_TIER1_GUARDED, UINT32_MAX, 0);
+        stage = outcome.stage;
+    }
+    // So is a function whose indirect branches' targets are marked (#3570, Tier0Function.branch_tracking) where it has
+    // labels (a label's address, a jump table) or calls __builtin_setjmp: Tier 0 marks them (tier0_mark_branches), and
+    // Tier 1's code has no marks yet. Its entry's endbr64 is the emission's, either tier's.
+    if (stage == CHECK_TIER1_COMPILED && function->branch_tracking && (function->label_count != 0 || function->returns_twice))
+    {
+        outcome = check_tier1_failure(CHECK_TIER1_LOWERING, CHECK_TIER1_CAUSE_ADMISSION, BUSTER_CHECK_TIER1_TRACKED, UINT32_MAX, 0);
         stage = outcome.stage;
     }
     // A candidate whose summary is ready (#2541, c_check_tier1_inline.c's check_tier1_inline_own) goes on from it to

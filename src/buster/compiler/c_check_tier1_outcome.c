@@ -94,6 +94,9 @@ static const char* const check_tier1_call_kind_names[CHECK_TIER1_CALL_KIND_COUNT
 #define BUSTER_CHECK_TIER1_RETURNS_TWICE 2u
 // A function the stack protector guards (#3558, Tier0Function.stack_protector), whose guard Tier 0's frame keeps.
 #define BUSTER_CHECK_TIER1_GUARDED 3u
+// A function whose indirect branches' targets Tier 0 marks (#3570, Tier0Function.branch_tracking): labels, or
+// __builtin_setjmp.
+#define BUSTER_CHECK_TIER1_TRACKED 4u
 #define BUSTER_CHECK_TIER1_ARENA_RESERVE 1u
 #define BUSTER_CHECK_TIER1_ARENA_OUTPUT 2u
 #define BUSTER_CHECK_TIER1_FRAME_PUBLICATION 1u
