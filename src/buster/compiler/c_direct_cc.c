@@ -4450,7 +4450,7 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
             }
             if (k == FTOK_STR_LIT || k == FTOK_KW_FUNC)
             {
-                const char* sp = "";
+                const char* sp;
                 uint32_t slen = 0;
                 if (k == FTOK_STR_LIT)
                 {
@@ -6570,7 +6570,6 @@ static bool fast_cc_compile_unit(FastCCState* cc)
                     if (ds.is_unsupported_type) { fast_cc_bail(cc, "unsupported type in func def"); break; }
                     fast_cc_compile_func(cc, si, dr.param_names_start, dr.param_count);
                 }
-                first = false;
                 break; // function definition ends without ';'
             }
             first = false;

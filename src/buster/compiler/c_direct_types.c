@@ -989,6 +989,37 @@ static void fast_cc_parse_attributes(FastCCState* cc, FastAttrInfo* attr)
                     fast_cc_bail(cc, "vector_size attribute");
                     break;
                 }
+                else if ((len == 6u && memcmp(s, "target", 6) == 0) ||
+                         (len == 7u && memcmp(s, "flatten", 7) == 0) ||
+                         (len == 5u && memcmp(s, "naked", 5) == 0) ||
+                         (len == 15u && memcmp(s, "ext_vector_type", 15) == 0) ||
+                         (len == 17u && memcmp(s, "transparent_union", 17) == 0) ||
+                         (len == 9u && memcmp(s, "tls_model", 9) == 0) ||
+                         (len == 7u && memcmp(s, "regparm", 7) == 0) ||
+                         (len == 8u && memcmp(s, "fastcall", 8) == 0) ||
+                         (len == 7u && memcmp(s, "stdcall", 7) == 0) ||
+                         (len == 6u && memcmp(s, "ms_abi", 6) == 0) ||
+                         (len == 8u && memcmp(s, "sysv_abi", 8) == 0) ||
+                         (len == 9u && memcmp(s, "interrupt", 9) == 0) ||
+                         (len == 24u && memcmp(s, "patchable_function_entry", 24) == 0) ||
+                         (len == 5u && memcmp(s, "error", 5) == 0) ||
+                         (len == 7u && memcmp(s, "warning", 7) == 0) ||
+                         (len == 11u && memcmp(s, "unavailable", 11) == 0) ||
+                         (len == 9u && memcmp(s, "enable_if", 9) == 0) ||
+                         (len == 11u && memcmp(s, "diagnose_if", 11) == 0) ||
+                         (len == 12u && memcmp(s, "overloadable", 12) == 0) ||
+                         (len == 9u && memcmp(s, "selectany", 9) == 0) ||
+                         (len == 5u && memcmp(s, "ifunc", 5) == 0) ||
+                         (len == 7u && memcmp(s, "weakref", 7) == 0) ||
+                         (len == 8u && memcmp(s, "musttail", 8) == 0) ||
+                         (len == 18u && memcmp(s, "no_stack_protector", 18) == 0) ||
+                         (len == 13u && memcmp(s, "stack_protect", 13) == 0) ||
+                         (len == 6u && memcmp(s, "common", 6) == 0) ||
+                         (len == 8u && memcmp(s, "nocommon", 8) == 0))
+                {
+                    fast_cc_bail(cc, "unsupported codegen/diagnostic attribute");
+                    break;
+                }
                 else
                 {
                     // Benign annotation attribute (noinline, always_inline, format, nonnull, nothrow, pure, const, malloc, unused, deprecated, cold, fallthrough, warn_unused_result, alloc_align, alloc_size, no_sanitize_*, etc.)

@@ -16334,6 +16334,8 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             lanes->helper_forms == 0 && getenv("BUSTER_TEST_NODE_BODIES") == NULL &&
             !selection_census && !provisional_selection && !windowed_loop && !shared_parts && !helper_report &&
             !options.predefines.common && !options.predefines.short_wchar && !options.predefines.visibility_given &&
+            (options.predefines.stack_protector == 0 || options.predefines.stack_protector == BUSTER_PREDEFINES_SSP_OFF) &&
+            options.predefines.omit_frame_pointer == 0 && options.predefines.omit_leaf_frame_pointer == 0 &&
             options.predefines.stack_clash_protection != BUSTER_PREDEFINES_ON &&
             options.predefines.patchable_function_entry == NULL && options.predefines.sanitizers == 0 &&
             !options.predefines.sanitize_coverage && !options.predefines.openmp && !options.predefines.blocks &&
