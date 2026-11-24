@@ -1065,9 +1065,7 @@ and `crtn.o`. No name binds to a shared library.
   members don't depend on the order the walk visits them in. They are the
   members GNU ld 2.47 and lld 23.1 load for the same objects, which
   `test-bind --cross-check` reads from their traces.
-- **Two paths.** The exact path is a queue of members, each reference tested
-  against the link's symbols and the members needed so far, one at a time.
-  The vector path works in rounds over a bitset of the members. A round takes
+- **The closure** works in rounds over a bitset of the members. A round takes
   each member of its frontier and the member each of its references loads,
   16 references at a time (the first 16 of a member's without a branch:
   most members have fewer). That member comes from a column made at import
@@ -1075,15 +1073,19 @@ and `crtn.o`. No name binds to a shared library.
   loaded are compressed onto the round's list, which is marked after the
   round, a byte per member; the marks, 64 at a time, less the members needed
   already, are the next frontier's word. A name the program defines that a
-  member defines too must not load the member: the vector path compares each
+  member defines too must not load the member: the closure compares each
   batch's references with up to 16 such names in registers, and with more
-  leaves the closure to the exact path's. The generated programs define
-  none.
+  leaves the walk to a queue of members (`bind_closure_queue`), each
+  reference tested against the link's symbols and the members needed so far,
+  one at a time. The generated programs define none. #2924 deleted the exact
+  twin, which took every closure through the queue
+  ([record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/scalar-paths-removal-2924-2026-11-17/c-linker-bind));
+  the tables below that name an exact path are dated measurements of it.
 - **COMDAT groups:** the first group of each signature in link order joins. A
   later one's atoms don't, its definitions join as references of their names,
   and a fixup of an atom that joins to one of its local symbols is an error
   (`BIND_ERROR_DISCARDED`), as GNU ld's reference to a discarded section is.
-  A member with a group to discard joins a record at a time on either path.
+  A member with a group to discard joins a record at a time.
 - **What nothing defines:** `__tls_get_addr`, which the PIC members' general-
   and local-dynamic accesses call, stays undefined for the writer, whose
   relaxation to local-exec consumes the call. Any other strong reference to a
@@ -1161,9 +1163,9 @@ against the dynamic runtime with two of GNU ld's and lld's `-shared` rules:
   objects' and `libc_nonshared.a`'s global names are all hidden, and so are
   `libgcc.a`'s but for its decimal floating-point and split-stack members',
   so the exports are the program's (and those members', as GNU ld and lld
-  export them). The vector path takes 16 symbols at a time, a mask of their
+  export them). They are taken 16 symbols at a time, a mask of their
   flags', atoms' and sources' columns, compressed in a register and stored
-  with a mask of its count; its exact twin takes a symbol at a time.
+  with a mask of its count.
 
 `test-bind --cross-check` compiles three C libraries with `-fPIC` and compares
 binding with lld's `-shared` link of each: the same `.dynsym`, with the
@@ -1390,7 +1392,7 @@ and binds every name before any layout:
   mask of both bits set sends about one miss in a hundred, and every hit, to
   the index. Gathers pay here where the patch kernel's didn't: the alternative
   is two dependent scalar loads a symbol, and the filter's words stay in L1.
-- **Each object joins as a block** (the vector path). Its names' bytes are
+- **Each object joins as a block.** Its names' bytes are
   one run in the runtime's name arena, copied at once, with their pointers
   moved eight at a time. Its atoms' units and fixup ranges move sixteen at a
   time and their bytes are copied one atom at a time: an executable patches
@@ -1398,8 +1400,7 @@ and binds every name before any layout:
   new are compressed into place eight at a time, their ids an expand of
   consecutive ones, and the rest merge with the link's symbol of their name by
   scalar rules. Its fixups' targets move through the symbols' new ids by
-  scalar loads, in a pass of their own. The exact path adds the same records
-  one at a time through `link.c`'s checked adds.
+  scalar loads, in a pass of their own.
 - **Two definitions of a name** resolve as GNU ld and lld resolve them: a
   strong one takes a weak one's place, of two weak ones the first in link
   order stays (`Scrt1.o`'s, `crti.o`'s and `crtbeginS.o`'s come before the

@@ -2591,7 +2591,7 @@ static bool dynamic_test_unknown_version(const ExecutableTestDirectory* director
     LinkProgramOptions options[BUSTER_LINK_TEST_PROGRAMS];
     link_test_program_options(options, 1, 1);
     BindTestProgram bound = { 0 };
-    const bool bound_program = bind_test_program(&bound, runtime, options[5], BIND_PATH_VECTOR);
+    const bool bound_program = bind_test_program(&bound, runtime, options[5]);
     SymbolId import = 0;
     for (SymbolId symbol = 1; bound_program && import == 0 && symbol < bound.program.link.symbols.count; symbol += 1)
     {
@@ -2642,7 +2642,7 @@ static bool dynamic_test_programs(const ExecutableTestDirectory* directory, cons
         if (options[i].libc)
         {
             BindTestProgram bound;
-            const bool built = bind_test_program(&bound, runtime, options[i], BIND_PATH_VECTOR) && link_check(&bound.program.link) == LINK_ERROR_NONE;
+            const bool built = bind_test_program(&bound, runtime, options[i]) && link_check(&bound.program.link) == LINK_ERROR_NONE;
             dynamic_test_expect(&tally, built, "the program bound", i);
             dynamic_test_expect(&tally, !built || !workers || dynamic_test_filter_collisions(&bound.program.link) != 0, "pointers the filter takes for symbols outside the image", i);
             char path_bytes[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
@@ -2705,8 +2705,8 @@ static bool dynamic_test_cases(const ExecutableTestDirectory* directory, const R
     char path_bytes[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
     BindTestAtexit atexit_program;
     BindTestLibgcc libgcc_program;
-    bind_test_atexit(&atexit_program, runtime, BIND_PATH_VECTOR, true);
-    bind_test_libgcc(&libgcc_program, runtime, BIND_PATH_VECTOR, true);
+    bind_test_atexit(&atexit_program, runtime, true);
+    bind_test_libgcc(&libgcc_program, runtime, true);
     dynamic_test_expect(&tally, atexit_program.bound && libgcc_program.bound, "the atexit and libgcc programs bound", 0);
     for (uint32_t which = 0; which <= BIND_TEST_CASES + 1; which += 1)
     {
@@ -2716,7 +2716,7 @@ static bool dynamic_test_cases(const ExecutableTestDirectory* directory, const R
         const bool own = atexit || libgcc;
         if (!own)
         {
-            bind_test_case_program(&case_program, runtime, (BindTestCase)which, BIND_PATH_VECTOR, true);
+            bind_test_case_program(&case_program, runtime, (BindTestCase)which, true);
         }
         BindTestLink* test = atexit ? &atexit_program.test : libgcc ? &libgcc_program.test : &case_program.test;
         const bool bound = atexit ? atexit_program.bound : libgcc ? libgcc_program.bound : case_program.bound;
@@ -2846,7 +2846,7 @@ static void dynamic_test_exports_program(DynamicTestExports* program, const Runt
         program->functions[e] = bind_test_symbol(test, dynamic_test_export_names[e], BUSTER_LINK_SYMBOL_GLOBAL | BUSTER_LINK_SYMBOL_FUNCTION, program_source);
         built = program->functions[e] != 0;
     }
-    built = built && bind_begin(&test->bind, &test->link, runtime, BIND_PATH_VECTOR, &test->bytes, 1, &test->arena);
+    built = built && bind_begin(&test->bind, &test->link, runtime, &test->bytes, 1, &test->arena);
     // The names, one after another with their NULs, in an atom of STRINGS.
     uint32_t offsets[BUSTER_DYNAMIC_TEST_EXPORTS];
     uint64_t total = 0;
@@ -3020,7 +3020,7 @@ static void dynamic_test_imports_program(DynamicTestImports* program, const Runt
         }
     }
     built = built && program->count == BUSTER_DYNAMIC_TEST_IMPORTS;
-    built = built && bind_begin(&test->bind, &test->link, runtime, BIND_PATH_VECTOR, &test->bytes, 1, &test->arena);
+    built = built && bind_begin(&test->bind, &test->link, runtime, &test->bytes, 1, &test->arena);
     const X86Instruction main_code[] = {
         { .immediate = 0, .rm = X86_REGISTER_RAX, .form = X86_FORM_MOV_R32_IMM32 },
         { .form = X86_FORM_RET },
@@ -3237,7 +3237,7 @@ static void dynamic_test_small(DynamicTestSmallProgram* program, const Runtime* 
         test->link.symbols.value[absolute] = BUSTER_DYNAMIC_TEST_ABSOLUTE_VALUE;
     }
     built = main != 0 && weak != 0 && data != 0 && never != 0 && hidden != 0 && (!absolute_case || absolute != 0) &&
-            bind_begin(&test->bind, &test->link, runtime, BIND_PATH_VECTOR, &test->bytes, 1, &test->arena);
+            bind_begin(&test->bind, &test->link, runtime, &test->bytes, 1, &test->arena);
     // main: return 0, or for the weak pointers whether they aren't 0, for the odd pointer whether it isn't main's
     // address, or for the absolute symbol's whether it isn't its value: mov rdx, [rip + buster_data] (for the load
     // through the GOT, [rip + buster_absolute's slot]); lea rax, [rip + main] (for the leas, of buster_hidden or
@@ -3484,7 +3484,7 @@ static bool dynamic_test_shared_absolute_call(const ExecutableTestDirectory* dir
     {
         test.link.symbols.value[absolute] = BUSTER_DYNAMIC_TEST_ABSOLUTE_VALUE;
     }
-    built = absolute != 0 && never != 0 && bind_begin(&test.bind, &test.link, runtime, BIND_PATH_VECTOR, &test.bytes, 1, &test.arena);
+    built = absolute != 0 && never != 0 && bind_begin(&test.bind, &test.link, runtime, &test.bytes, 1, &test.arena);
     const X86Instruction code[] = {
         { .form = X86_FORM_CALL_REL32 | BUSTER_X86_FORM_FIXUP },
         { .form = X86_FORM_RET },
@@ -3532,7 +3532,7 @@ static void dynamic_test_shared_replacement(DynamicTestTally* tally, const Execu
     options.fini_functions = 0;
     options.filler = 0;
     BindTestProgram old;
-    const bool built = bind_test_program(&old, runtime, options, BIND_PATH_VECTOR) && link_check(&old.program.link) == LINK_ERROR_NONE;
+    const bool built = bind_test_program(&old, runtime, options) && link_check(&old.program.link) == LINK_ERROR_NONE;
     const uint8_t* old_saved = built ? executable_test_save(&old.program.link, scratch.arena) : 0;
     const uint8_t* new_saved = executable_test_save(&bound->program.link, scratch.arena);
     dynamic_test_expect(tally, built && old_saved != 0 && new_saved != 0, "the libraries for replacement", 0);
@@ -3622,7 +3622,7 @@ static bool dynamic_test_shared(const ExecutableTestDirectory* directory, const 
         const char* name = workers ? "a shared library, --functions workers" : link_test_shared_names[i];
         const char* directory_name = workers ? "shared-functions" : link_test_shared_directories[i];
         BindTestProgram bound;
-        const bool built = bind_test_program(&bound, runtime, options[i], BIND_PATH_VECTOR) && link_check(&bound.program.link) == LINK_ERROR_NONE;
+        const bool built = bind_test_program(&bound, runtime, options[i]) && link_check(&bound.program.link) == LINK_ERROR_NONE;
         dynamic_test_expect(&tally, built, "the library bound", i);
         char path_bytes[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
         const String8 path = executable_test_path(directory, directory_name, path_bytes);
@@ -4079,7 +4079,7 @@ static bool dynamic_test_shared_compiled(const ExecutableTestDirectory* director
         const String8 object = compiled ? object_test_read_file(scratch.arena, object_path) : (String8){ 0 };
         BindTestLink bound;
         const bool imported = object.pointer != 0 && bind_test_static_import(&bound, runtime, object);
-        const bool bound_ok = imported && bind_begin(&bound.bind, &bound.link, runtime, BIND_PATH_VECTOR, &bound.bytes, 1, &bound.arena) && bind_end(&bound.bind, &bound.link) &&
+        const bool bound_ok = imported && bind_begin(&bound.bind, &bound.link, runtime, &bound.bytes, 1, &bound.arena) && bind_end(&bound.bind, &bound.link) &&
                               link_check(&bound.link) == LINK_ERROR_NONE;
         dynamic_test_expect(&tally, bound_ok, "imported and bound", s);
         char path_bytes[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
@@ -4249,7 +4249,7 @@ static bool dynamic_test_libgcc_s(const ExecutableTestDirectory* directory, cons
         const String8 object = compiled ? object_test_read_file(scratch.arena, object_path) : (String8){ 0 };
         BindTestLink bound;
         const bool imported = object.pointer != 0 && bind_test_static_import(&bound, runtime, object);
-        const bool begun = imported && bind_begin(&bound.bind, &bound.link, runtime, BIND_PATH_VECTOR, &bound.bytes, 1, &bound.arena);
+        const bool begun = imported && bind_begin(&bound.bind, &bound.link, runtime, &bound.bytes, 1, &bound.arena);
         const bool ended = begun && bind_end(&bound.bind, &bound.link);
         const bool bound_ok = unwinder && ended && link_check(&bound.link) == LINK_ERROR_NONE;
         if (!unwinder)
@@ -4376,7 +4376,7 @@ static bool dynamic_test_section_bounds(const ExecutableTestDirectory* directory
     const String8 object = compiled ? object_test_read_file(scratch.arena, object_path) : (String8){ 0 };
     BindTestLink bound;
     const bool imported = object.pointer != 0 && bind_test_static_import(&bound, runtime, object);
-    const bool begun = imported && bind_begin(&bound.bind, &bound.link, runtime, BIND_PATH_VECTOR, &bound.bytes, 1, &bound.arena);
+    const bool begun = imported && bind_begin(&bound.bind, &bound.link, runtime, &bound.bytes, 1, &bound.arena);
     const bool ended = begun && bind_end(&bound.bind, &bound.link);
     const bool linked = ended && link_check(&bound.link) == LINK_ERROR_NONE;
     dynamic_test_expect(&tally, linked, "imported and bound", 0);
@@ -4514,7 +4514,7 @@ static bool dynamic_test_assemble(DynamicTestTally* tally, const ExecutableTestD
     dynamic_test_expect(tally, assembled, "cc assembles it", 0);
     const String8 object = assembled ? object_test_read_file(arena, object_path) : (String8){ 0 };
     *imported = object.pointer != 0 && bind_test_static_import(bound, runtime, object);
-    const bool begun = *imported && bind_begin(&bound->bind, &bound->link, runtime, BIND_PATH_VECTOR, &bound->bytes, 1, &bound->arena);
+    const bool begun = *imported && bind_begin(&bound->bind, &bound->link, runtime, &bound->bytes, 1, &bound->arena);
     const bool ended = begun && bind_end(&bound->bind, &bound->link);
     const LinkError checked = ended ? link_check(&bound->link) : LINK_ERROR_NONE;
     dynamic_test_expect(tally, ended && checked == expected, "bound, and link_check's answer", ended ? (uint64_t)checked : 1000);

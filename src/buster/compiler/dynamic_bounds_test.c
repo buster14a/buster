@@ -193,7 +193,7 @@ static bool dynamic_test_image_bounds(const ExecutableTestDirectory* directory, 
     const String8 object = compiled ? object_test_read_file(scratch.arena, object_path) : (String8){ 0 };
     BindTestLink bound = { 0 };
     const bool imported = object.pointer != 0 && bind_test_static_import(&bound, runtime, object);
-    const bool begun = imported && bind_begin(&bound.bind, &bound.link, runtime, BIND_PATH_VECTOR, &bound.bytes, 1, &bound.arena);
+    const bool begun = imported && bind_begin(&bound.bind, &bound.link, runtime, &bound.bytes, 1, &bound.arena);
     const bool ended = begun && bind_end(&bound.bind, &bound.link);
     const bool linked = ended && link_check(&bound.link) == LINK_ERROR_NONE;
     dynamic_test_expect(&tally, linked, "all twelve references bind in a dynamic executable", 0);

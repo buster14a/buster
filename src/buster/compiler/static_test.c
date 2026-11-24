@@ -1062,7 +1062,7 @@ static bool static_test_programs(const ExecutableTestDirectory* directory, const
         if (options[i].libc)
         {
             BindTestProgram bound;
-            const bool built = bind_test_program(&bound, runtime, options[i], BIND_PATH_VECTOR) && link_check(&bound.program.link) == LINK_ERROR_NONE;
+            const bool built = bind_test_program(&bound, runtime, options[i]) && link_check(&bound.program.link) == LINK_ERROR_NONE;
             static_test_expect(&tally, built, "the program bound", i);
             char path_bytes[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
             const String8 path = executable_test_path(directory, directory_name, path_bytes);
@@ -1109,7 +1109,7 @@ static bool static_test_large_bss(const ExecutableTestDirectory* directory, cons
     extra.wide_addends += 1;
     bound.arena = arena_reserve(BUSTER_BIND_TEST_BIND_BYTES);
     bool built = bound.arena.base != 0 && link_program_generate_begin(&bound.program, options[5], extra, name_bytes + 16, atom_bytes + 16);
-    built = built && bind_begin(&bound.bind, &bound.program.link, runtime, BIND_PATH_VECTOR, &bound.program.bytes, options[5].units, &bound.arena);
+    built = built && bind_begin(&bound.bind, &bound.program.link, runtime, &bound.program.bytes, options[5].units, &bound.arena);
     built = built && link_program_generate_atoms(&bound.program);
     Link* link = &bound.program.link;
     const uint64_t bytes = 3ull << 30;
@@ -1733,7 +1733,7 @@ static bool static_test_compiled(const ExecutableTestDirectory* directory, const
         BindTestLink test = { 0 };
         const bool imported = object.pointer != 0 && bind_test_static_import(&test, runtime, object);
         static_test_expect(&tally, !compiled || imported, "the object imported", s);
-        const bool bound = imported && bind_begin(&test.bind, &test.link, runtime, BIND_PATH_VECTOR, &test.bytes, 1, &test.arena) && bind_end(&test.bind, &test.link) &&
+        const bool bound = imported && bind_begin(&test.bind, &test.link, runtime, &test.bytes, 1, &test.arena) && bind_end(&test.bind, &test.link) &&
                            link_check(&test.link) == LINK_ERROR_NONE;
         static_test_expect(&tally, !imported || bound, "bound", test.bind.error);
         const String8 path = {
@@ -2017,7 +2017,7 @@ static bool static_test_assemble(BindTestLink* test, const ExecutableTestDirecto
     const String8 object = assembled ? object_test_read_file(arena, object_path) : (String8){ 0 };
     *imported = object.pointer != 0;
     const bool result = object.pointer != 0 && bind_test_static_import(test, runtime, object) &&
-                        bind_begin(&test->bind, &test->link, runtime, BIND_PATH_VECTOR, &test->bytes, 1, &test->arena) && bind_end(&test->bind, &test->link) &&
+                        bind_begin(&test->bind, &test->link, runtime, &test->bytes, 1, &test->arena) && bind_end(&test->bind, &test->link) &&
                         link_check(&test->link) == LINK_ERROR_NONE;
     if (!directory->keep)
     {
