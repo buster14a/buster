@@ -431,10 +431,15 @@ values solves once, as before, and liveness is per value, so allocations are
 unchanged. `cross_block_values`, `edge_local_values`, `liveness_bytes` and
 `live_entries` report the partition, the matrices' cost and the lists' entries.
 The matrix cost excludes CFG columns and other allocator state. Storage is linear
-for short-circuit chains and for short-lived nonlocal values alike. The solve's
-time is still `groups * blocks`, because each group sweeps every block (the
-[tier1-cfg guide](commands/tier1-cfg.md#liveness-storage-1384) has the
-measurements).
+for short-circuit chains and for short-lived nonlocal values alike. A group's
+dense solve sweeps every block, so where those sweeps would pass 65,536 block
+rows (`blocks * groups`, `BUSTER_TIER1_CFG_SPARSE_ROWS`) every group is solved
+instead by a worklist over the blocks its values touch
+(`tier1_cfg_live_group_sparse`), into the same lists and facts, and the time
+follows the live pairs rather than `groups * blocks`. A function of at most 512
+global values never is. `sparse_liveness` reports the form (the
+[tier1-cfg guide](commands/tier1-cfg.md#liveness-storage-1384) has the method
+and the measurements).
 
 The successor-edge-to-predecessor-ordinal column is built once in
 `O(blocks + edges)` and retained with the preparation. Its transpose is mapped
