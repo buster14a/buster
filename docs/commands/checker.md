@@ -845,6 +845,23 @@ So must the longer wrappers' (`fgets`, `fread`, `wcscpy`, `wcsncat`, `strlcpy`,
 result depends on glibc's version. One program runs those wrappers within their
 objects, against clang too.
 
+## Generic association lookup
+
+Both `_Generic` readers use the same association set. Up to 16 associations fit inline.
+Larger sets index enum tags by identity and ordinary function prototypes by return
+shape, arity, variadic flag, and the shapes of the first and last parameters.
+The integer/enum lists also admit candidates of the other kind. Old-style
+functions and functions with a directly passed union at a sampled position keep a
+broader list. Each lookup checks candidates in source order with `type_compatible_at`
+at the selection's source position, including after an enum completes or a union
+acquires its transparent attribute.
+
+`test-checker` counts duplicate and control queries on families of up to 257
+associations, checks mixed lists against the exact predicate, and checks both
+readers against Clang. Types with indistinguishable shapes can still require
+pairwise comparisons. When the directory exceeds the available scratch space,
+the readers scan packed keys in source order.
+
 ## Runtime fixtures
 
 `test-checker`'s shared source fixtures (`check_test_sources`) are

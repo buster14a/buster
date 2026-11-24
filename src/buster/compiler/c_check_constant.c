@@ -1803,7 +1803,7 @@ static uint32_t check_constant_punctuation(const Parser* parser, uint32_t first,
 // Sema none of the rest); or each association's type compatible with a later one's, for each association and then each
 // later one in order, the earlier's -Wunreachable-code-generic-assoc first (CreateGenericSelectionExpr's loop). Only an
 // invalid selection pays for this: its keys (check_generic_key) are compared 16 at a time and only a key's match asks
-// the exact compatibility, as the walk's set does. The association types are the expression reader's (selection_types)
+// the exact compatibility at the selection's source position. The association types are the expression reader's (selection_types)
 // or, with `input`, the constant reader's (check_constant_type).
 static void check_input_generic_duplicates(CheckInputReader* reader, CheckConstantInput* input, uint32_t separator, uint32_t close)
 {
