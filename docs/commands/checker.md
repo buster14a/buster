@@ -848,6 +848,26 @@ objects, against clang too.
 
 ## Runtime fixtures
 
+The default-warning driver sweeps read `tests/driver/warnings/SUITE/catalog.tsv`.
+Use `test-checker-driver --fixtures DIR` to select the root containing
+`driver/` and `checker/`. Each v2 catalog starts with
+`buster-fixtures v2 checker-warnings`. Rows have eight tab-separated fields.
+
+```text
+ID    FILE.c    WARNINGS    ERRORS    NOTES    FLAGS    OPTIONS    NAME
+```
+
+Use a stable ID and an adjacent source file. Several rows may name the same
+file to exercise different policies. The runner stages its exact bytes as
+`default-warning.c`. The three decimal counts describe the independent Clang
+result before promotion or suppression. FLAGS is a comma-separated list of
+`c23`, `syntax-only`, `warning-text` and `node-window`. OPTIONS holds up to
+four space-separated compiler arguments in order. Use `-` for either empty
+list. Lines beginning with `#` are comments. Add ordinary cases here in
+execution order. The default, condition and shift-count sweeps deal rows to
+the driver's parts. Generated matrices and diagnostic spelling comparisons
+run in their original C harnesses.
+
 `test-checker`'s shared source fixtures (`check_test_sources`) are
 runtime data (#2053): `tests/checker/sources/` holds `catalog.tsv` and one file
 a case, which the test reads when it runs, so that editing a case's source or

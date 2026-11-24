@@ -10706,6 +10706,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             clang = argv[++i];
         }
+        else if (strcmp(argv[i], "--fixtures") == 0 && i + 1 < argc)
+        {
+            check_test_fixture_root = argv[++i];
+        }
         else if (strcmp(argv[i], "--executable") == 0 && i + 1 < argc)
         {
             executable = argv[++i];
@@ -11413,8 +11417,8 @@ static int run_checker_driver_tests(int argc, char** argv)
     if (temporary && initializer_diagnostics_only)
     {
         check_test_driver_warning_catalog(&test, clang, executable != NULL ? executable : "./build/compiler", directory, "checker/initializer-comma");
-        check_test_driver_warning_catalog_language(&test, clang, executable != NULL ? executable : "./build/compiler", directory,
-                                                   "checker/initializer-comma", true);
+        check_test_driver_warning_catalog_run(&test, clang, executable != NULL ? executable : "./build/compiler", directory,
+                                                   "checker/initializer-comma", false, true);
     }
     if (temporary && auto_qualifiers_only)
     {
