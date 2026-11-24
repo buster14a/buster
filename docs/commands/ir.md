@@ -41,7 +41,7 @@ requirements. [Command index](README.md).
 checks bounded scalar IR programs against an independent arithmetic/memory
 model after ID renaming, pure-value reordering/insertion, CFG edge splitting,
 unreachable-block insertion and commutative operand exchange. The complete
-verifier, both text parsers and every admitted scalar/vector optimizer must
+verifier, the text parser and every admitted scalar/vector optimizer must
 preserve checked execution. The default six-case seed is in shared correctness
 CI; longer runs accept explicit time/step budgets and failure-artifact/replay
 options. `docs/ir-tools.md` records the precise subset, categories and source

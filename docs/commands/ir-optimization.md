@@ -18,7 +18,7 @@ requirements. [Command index](README.md).
   begin it), through the same steps, and its per-callee limits and caller-only
   rewrite); `test-ir-optimize` also runs
   #175's hand-written `tests/ir/optimize/*.ir` before/after pairs in the text form
-  through both parser paths, both twins, the canonical printer and the
+  through the parser, both twins, the canonical printer and the
   independent executor (`--print-text` prints them for review).
   #1729's join chains (arms of distinct constants, of the parameter's sums and
   of one constant, meeting at one phi) run through both twins against the
@@ -91,7 +91,7 @@ digest's: counts of comparisons (`count-u8`, `count-i32`), strided loads (`aos-s
 indices, `strided-pairs-i16`, `stride8-u8`, and `stride8-i64`, whose last element ends the interpreter's buffer, so a
 load past it faults) and a 32-bit index that wraps within a vector (`narrow-wrap`, whose input and result must fault
 alike).
-Each runs by both parser paths and the pass at six targets of every operation
+Each runs by the parser and the pass at six targets of every operation
 the IR has: at most 64, 32 and 16 bytes wide with masked moves, 64 bytes without
 them or masks from a general register, 64 bytes with them but no select of 32-
 or 64-bit lanes, and 64 bytes with them but no mask of 8 lanes or fewer from a

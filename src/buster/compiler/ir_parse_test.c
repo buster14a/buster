@@ -22,8 +22,11 @@ struct IrParseTest
     uint64_t checks;
     uint64_t failures;
     uint64_t functions;
-    // Every parse's diagnostic and published columns, in order: frozen in #2924 while the line scan's scalar twin agreed.
+    // The inline cases' diagnostics and published columns, in order: frozen in #2924 while the line scan's scalar twin
+    // agreed. Opcodes and types fold as their spellings, so renumbering either keeps it. The catalog's fixtures stay out
+    // (`catalog`): a new or edited fixture is its file alone (#2053), checked by reprint and coverage instead.
     uint64_t digest;
+    bool catalog;
     bool operations[IR_OP_COUNT];
     bool types[IR_TYPE_COUNT];
 };
@@ -58,7 +61,7 @@ static bool ir_parse_test_print(const IrFunction* function, String8 expected, Ar
     return equal;
 }
 
-#define BUSTER_IR_PARSE_TEST_DIGEST UINT64_C(0x15368917bf264be2)
+#define BUSTER_IR_PARSE_TEST_DIGEST UINT64_C(0x4aa02a17eaaa7b67)
 
 static void ir_parse_test_fold_bytes(uint64_t* digest, const void* bytes, uint64_t count)
 {
@@ -72,11 +75,11 @@ static void ir_parse_test_fold_bytes(uint64_t* digest, const void* bytes, uint64
 static void ir_parse_test_fold_result(IrParseTest* test, IrParseResult result, const IrFunction* function)
 {
     const uint64_t words[] = { result.error, result.consumed, result.offset, result.line, result.column };
-    for (uint32_t k = 0; k < sizeof(words) / sizeof(words[0]); k += 1)
+    for (uint32_t k = 0; !test->catalog && k < sizeof(words) / sizeof(words[0]); k += 1)
     {
         ir_test_fold(&test->digest, words[k]);
     }
-    if (result.error == IR_PARSE_OK)
+    if (!test->catalog && result.error == IR_PARSE_OK)
     {
         const uint64_t n = function->instruction_count;
         const uint64_t counts[] = { n, function->block_count, function->constant_count, function->extra_count, function->slot_count, function->address_count, function->call_count };
@@ -84,8 +87,13 @@ static void ir_parse_test_fold_result(IrParseTest* test, IrParseResult result, c
         {
             ir_test_fold(&test->digest, counts[k]);
         }
-        ir_parse_test_fold_bytes(&test->digest, function->op, n);
-        ir_parse_test_fold_bytes(&test->digest, function->type, n);
+        for (uint64_t i = 0; i < n; i += 1)
+        {
+            const char* op = ir_op_names[function->op[i]];
+            const char* type = ir_type_names[function->type[i]];
+            ir_parse_test_fold_bytes(&test->digest, op, strlen(op) + 1);
+            ir_parse_test_fold_bytes(&test->digest, type, strlen(type) + 1);
+        }
         ir_parse_test_fold_bytes(&test->digest, function->flags, n);
         ir_parse_test_fold_bytes(&test->digest, function->a, n * 4);
         ir_parse_test_fold_bytes(&test->digest, function->b, n * 4);
@@ -157,6 +165,7 @@ static void ir_parse_test_fixture(IrParseTest* test, const char* path, Arena* so
     ir_parse_test_expect(test, read, path);
     uint64_t position = 0;
     bool done = !read;
+    test->catalog = true;
     while (!done)
     {
         const uint64_t output_mark = output->length;
@@ -189,6 +198,7 @@ static void ir_parse_test_fixture(IrParseTest* test, const char* path, Arena* so
         }
         arena_pop_to(output, output_mark);
     }
+    test->catalog = false;
     arena_pop_to(source_arena, source_mark);
 }
 
@@ -618,6 +628,66 @@ static void ir_parse_test_comments(IrParseTest* test, Arena* output, Arena* scra
     arena_pop_to(output, output_mark);
 }
 
+// Runs of blank lines, LF and CRLF, 63 to 129 long, at every source alignment in a 64-byte block, so that runs cross
+// the newline scan's blocks; the closing brace replaced by '?' reports the line the run implies.
+static void ir_parse_test_newline_runs(IrParseTest* test, Arena* output, Arena* scratch)
+{
+    static const char head[] = "function () -> i64 {";
+    static const char body[] = "b0:\n%0 = const.i64 0x11\n%1 = ret.void %0\n}\n";
+    static const char canonical[] = "function () -> i64 {\nb0:\n  %0 = const.i64 0x00000000000000000000000000000011\n  %1 = ret.void %0\n}\n";
+    static const uint32_t runs[] = { 1, 63, 64, 65, 129 };
+    const String8 expected = {
+        .pointer = (char*)canonical,
+        .length = sizeof(canonical) - 1,
+    };
+    bool parsed_all = true;
+    bool printed_all = true;
+    bool located_all = true;
+    for (uint32_t r = 0; r < sizeof(runs) / sizeof(runs[0]); r += 1)
+    {
+        for (uint32_t crlf = 0; crlf < 2; crlf += 1)
+        {
+            for (uint32_t shift = 0; shift < 64; shift += 1)
+            {
+                const uint64_t output_mark = output->length;
+                const uint32_t newline = crlf + 1;
+                const uint64_t length = (sizeof(head) - 1) + (uint64_t)runs[r] * newline + (sizeof(body) - 1);
+                char* base = arena_push(output, length + 64, 64);
+                const uint64_t buffer_mark = output->length;
+                char* text = base + shift;
+                memcpy(text, head, sizeof(head) - 1);
+                char* cursor = text + sizeof(head) - 1;
+                for (uint32_t k = 0; k < runs[r]; k += 1)
+                {
+                    if (crlf != 0)
+                    {
+                        *cursor++ = '\r';
+                    }
+                    *cursor++ = '\n';
+                }
+                memcpy(cursor, body, sizeof(body) - 1);
+                const String8 source = {
+                    .pointer = text,
+                    .length = length,
+                };
+                IrFunction function;
+                const IrParseResult parsed = ir_parse_test_one(test, source, output, scratch, &function);
+                parsed_all = parsed_all && parsed.error == IR_PARSE_OK && parsed.consumed == length;
+                printed_all = printed_all && parsed.error == IR_PARSE_OK && ir_parse_test_print(&function, expected, scratch);
+                arena_pop_to(output, buffer_mark);
+                char* brace = text + length - 2;
+                *brace = '?';
+                const IrParseResult broken = ir_parse_test_one(test, source, output, scratch, &function);
+                located_all = located_all && broken.error != IR_PARSE_OK && broken.line == 4 + runs[r] && broken.offset == length - 2;
+                arena_pop_to(output, output_mark);
+            }
+        }
+    }
+    ir_parse_test_expect(test, parsed_all, "a run of blank lines across the scan's blocks was rejected");
+    ir_parse_test_expect(test, printed_all, "a run of blank lines across the scan's blocks changed the printed function");
+    ir_parse_test_expect(test, located_all, "an error after a run of blank lines reported another line or offset");
+}
+
 // Check every enum, including the invalid opcode and intrinsics absent from an individual fixture.
 static void ir_parse_test_spelling_table(IrParseTest* test, const char* const* names, const uint8_t* lengths, uint32_t count)
 {
@@ -853,6 +923,7 @@ static int run_ir_parse_tests(int argc, char** argv)
             ir_parse_test_invalid(&test, &output, &scratch);
             ir_parse_test_reachable(&test, &output, &scratch);
             ir_parse_test_comments(&test, &output, &scratch);
+            ir_parse_test_newline_runs(&test, &output, &scratch);
             ir_parse_test_locations(&test, &output, &scratch);
             ir_parse_test_normalization(&test, &output, &scratch);
             ir_parse_test_guards(&test, &output, &scratch);

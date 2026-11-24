@@ -37,7 +37,7 @@ no target features. #147's tail calls (`TAIL_CALL`) refuse with
 The stable printer's text is read back by `ir_parse.c` (#175).
 
 `test-ir-source --simd -march=x86-64-v4 tests/ir/vector-i32.c tests/ir/mask-builtins.c tests/ir/bmi-builtins.c tests/ir/vector-rows.c` checks actual C
-producers, both lowering paths and both text parsers. It explicitly requires
+producers, both lowering paths and the text parser. It explicitly requires
 promotion of a function with vectors (#141) and of one whose only SIMD values
 are masks (#179), as ordinary corpus mode requires promotion of every
 function. The shared
@@ -1324,8 +1324,8 @@ typed, not address-taken, two of one, both at once and aligned below 16.
 `tests/ir/labels.ir` and `tests/ir/aggregates.ir` are their canonical text, which
 `test-ir-parse` reads, prints back byte for byte and requires of every opcode.
 `tests/ir/optimize/` holds [#139](https://github.com/buster14a/buster/issues/139)'s
-before/after pairs in the same text form, which `test-ir-optimize` parses with
-both parser paths, runs through both optimizer twins, reprints byte for byte
+before/after pairs in the same text form, which `test-ir-optimize` parses,
+runs through both optimizer twins, reprints byte for byte
 and executes on both sides: [#175](https://github.com/buster14a/buster/issues/175)'s
 last acceptance item ([the tools guide](ir-tools.md#pass-fixtures-in-the-text-form)).
 
