@@ -3609,6 +3609,14 @@ static bool predefines_slow_unaligned(const char* name, uint32_t length)
     return slow;
 }
 
+// Selected with an AVX-512F target, these tunings prefer 256-bit memory operations in clang 23.1.4.
+static bool predefines_prefer_256(const char* tuning, size_t length)
+{
+    return predefines_name_in(tuning, length,
+        "x86-64-v4,skylake-avx512,skx,cascadelake,cooperlake,cannonlake,icelake-client,rocketlake,icelake-server,tigerlake,"
+        "sapphirerapids,graniterapids,graniterapids-d,emeraldrapids,diamondrapids,c86-4g-m7,c86-4g-m8");
+}
+
 static bool predefines_target(const PredefinesOptions* options, X86Target* target, X86Architecture* tune)
 {
     PredefinesFeatures features;
@@ -3629,7 +3637,19 @@ static bool predefines_target(const PredefinesOptions* options, X86Target* targe
     *tune = options->mtune != 0 ? predefines_x86_architecture(options->mtune) : X86_ARCH_BASELINE;
     // The tuning CPU: -mtune's, else -march's (x86-64's generic tuning without one).
     const char* tuning = options->mtune != 0 ? options->mtune : march;
-    target->slow_unaligned_16 = predefines_slow_unaligned(tuning, (uint32_t)strlen(tuning));
+    if (options->mtune == NULL && result && profile.architecture == X86_ARCH_NATIVE)
+    {
+        tuning = predefines_cpus[cpu].name;
+    }
+    else if (strcmp(tuning, "native") == 0)
+    {
+        PredefinesFeatures listed;
+        PredefinesFeatures detected;
+        tuning = predefines_host(&listed, &detected);
+    }
+    const uint32_t length = (uint32_t)strlen(tuning);
+    target->slow_unaligned_16 = predefines_slow_unaligned(tuning, length);
+    target->prefer_256 = predefines_prefer_256(tuning, length);
     return result;
 }
 
@@ -3758,6 +3778,7 @@ static __attribute__((unused)) X86Target predefines_function_target(const Predef
         }
     }
     const uint32_t tuning = name_lengths[1] != 0 ? 1 : 0;
+    result.prefer_256 = name_lengths[tuning] != 0 ? predefines_prefer_256(names[tuning], name_lengths[tuning]) : unit.prefer_256;
     result.slow_unaligned_16 = name_lengths[tuning] != 0 ? predefines_slow_unaligned(names[tuning], name_lengths[tuning]) : unit.slow_unaligned_16;
     return result;
 }

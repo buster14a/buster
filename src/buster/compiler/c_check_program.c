@@ -609,11 +609,8 @@ struct CheckProgram
     // Whether any declaration of a function has returns_twice. Whole-object call initializers (#1549) use this to
     // retain their separate result object in bodies that may reenter them. Null where no declaration has it.
     uint8_t* object_returns_twice;
-    // Per function object, what check_program_move_bytes reads of it (#1373), BUSTER_CHECK_PROGRAM_MOVE_*: a declaration's
-    // minsize attribute, not ignored, with which clang's code inlines a constant memmove in 4 stores of its pieces, not 8;
-    // and the instruction set and tuning of its first declaration's target attribute (AVX's pieces are 32 bytes, a slow
-    // unaligned 16-byte access's tuning's 8). Made before the references' pass (check_program_move_objects), in a unit that
-    // spells minsize or target alone; null where no declaration has either.
+    // Per function, the preferred move width of its target attribute, minsize, and whether several versions
+    // can have different widths. Used before body targets are available to decide which symbols to reference.
     uint8_t* object_move;
     // Per object, whether a declaration of it has an asm label, not ignored: clang's code calls a library builtin's
     // declaration of one by its label rather than compute it (#1373, check_program_call_computed). Made before the
@@ -4047,9 +4044,16 @@ static bool check_program_constant_operand(const CheckGraph* graph, const CheckS
 
 // CheckProgram.object_move's bits.
 #define BUSTER_CHECK_PROGRAM_MOVE_MINSIZE 1u
-#define BUSTER_CHECK_PROGRAM_MOVE_TARGET 2u
-#define BUSTER_CHECK_PROGRAM_MOVE_AVX 4u
-#define BUSTER_CHECK_PROGRAM_MOVE_SLOW 8u
+#define BUSTER_CHECK_PROGRAM_MOVE_VERSIONS 2u
+#define BUSTER_CHECK_PROGRAM_MOVE_WIDTH_MASK 0x78u
+
+static uint8_t check_program_move_width(X86Target target)
+{
+    const uint64_t features = target.features;
+    const bool slow = target.slow_unaligned_16 && (features & BUSTER_X86_FEATURE(SSE42)) == 0;
+    return (features & BUSTER_X86_FEATURE(AVX512F)) != 0 && !target.prefer_256 ? 64 :
+           (features & BUSTER_X86_FEATURE(AVX)) != 0 ? 32 : slow ? 8 : 16;
+}
 
 // CheckProgram.object_move: each function's minsize attribute and its first declaration's target attribute's instruction
 // set and tuning (predefines_function_target's, as check_program_targets resolves its body's), by one scan of the tokens
@@ -4062,7 +4066,7 @@ static bool check_program_move_objects(CheckProgram* program, const CheckProgram
     const IdentId minsize = identifiers != NULL ? intern_find(identifiers, (const uint8_t*)"minsize", 7) : 0;
     const IdentId target = identifiers != NULL ? intern_find(identifiers, (const uint8_t*)"target", 6) : 0;
     bool room = true;
-    for (uint32_t first = minsize != 0 || target != 0 ? check_input_attributed_next(input->attributes, 0, count) : count; room && first < count;
+    for (uint32_t first = minsize != 0 || target != 0 || input->target_multiversion || input->cpu_dispatch ? check_input_attributed_next(input->attributes, 0, count) : count; room && first < count;
          first = check_input_attributed_next(input->attributes, first + 16, count))
     {
         const uint32_t lanes = check_input_attributed_group(input->attributes, first, count);
@@ -4077,12 +4081,18 @@ static bool check_program_move_objects(CheckProgram* program, const CheckProgram
             {
                 const CheckInputAttribute* attribute = attributes->records + i;
                 const bool kept = !attribute->ignored && !attribute->subject_ignored;
+                // Keep the library reference until each multiversioned body has its actual instruction set.
+                if (kept && (attribute->kind == CHECK_ATTRIBUTE_TARGET_CLONES || attribute->kind == CHECK_ATTRIBUTE_CPU_SPECIFIC ||
+                             (attribute->kind == CHECK_ATTRIBUTE_TARGET && input->target_multiversion)))
+                {
+                    facts |= BUSTER_CHECK_PROGRAM_MOVE_VERSIONS;
+                }
                 facts |= kept && attribute->kind == CHECK_ATTRIBUTE_UNKNOWN && !attribute->keyword && attribute->name == minsize && minsize != 0 ?
                              BUSTER_CHECK_PROGRAM_MOVE_MINSIZE : 0;
                 int32_t cpu = -1;
                 const bool version = kept && attribute->kind == CHECK_ATTRIBUTE_TARGET && options->predefines != NULL && attribute->text.length < UINT32_MAX &&
-                                     (facts & BUSTER_CHECK_PROGRAM_MOVE_TARGET) == 0 &&
-                                     (program->object_move == NULL || (program->object_move[object] & BUSTER_CHECK_PROGRAM_MOVE_TARGET) == 0) &&
+                                     (facts & BUSTER_CHECK_PROGRAM_MOVE_WIDTH_MASK) == 0 &&
+                                     (program->object_move == NULL || (program->object_move[object] & BUSTER_CHECK_PROGRAM_MOVE_WIDTH_MASK) == 0) &&
                                      predefines_target_attribute(attribute->text.pointer, (uint32_t)attribute->text.length, &cpu) == PREDEFINES_TARGET_ATTRIBUTE_VERSION;
                 if (version)
                 {
@@ -4093,9 +4103,7 @@ static bool check_program_move_objects(CheckProgram* program, const CheckProgram
                     }
                     const X86Target own = predefines_function_target(options->predefines, &program->host, program->target, attribute->text.pointer,
                                                                      (uint32_t)attribute->text.length, cpu);
-                    const bool slow = own.slow_unaligned_16 && (own.features & BUSTER_X86_FEATURE(SSE42)) == 0;
-                    facts |= BUSTER_CHECK_PROGRAM_MOVE_TARGET | ((own.features & BUSTER_X86_FEATURE(AVX)) != 0 ? BUSTER_CHECK_PROGRAM_MOVE_AVX : 0) |
-                             (slow ? BUSTER_CHECK_PROGRAM_MOVE_SLOW : 0);
+                    facts |= check_program_move_width(own);
                 }
             }
             if (facts != 0 && program->object_move == NULL)
@@ -4154,25 +4162,18 @@ static bool check_program_labelled_objects(CheckProgram* program, Arena* output)
 
 static uint32_t check_program_token_body(const CheckProgram* program, uint32_t token);
 
-// The largest constant memmove that call `node` computes in place, as clang's code moves it inline at -O0 (#1373): 8
-// stores of its widest piece, 4 in a function with minsize (MaxStoresPerMemmove and its OptSize twin), the piece 32 bytes
-// with AVX, else 8 where the function's tuning has unaligned 16-byte accesses slow (X86Target.slow_unaligned_16) and its
-// instruction set has no SSE4.2 (with which LLVM takes them as fast: -march=x86-64-v2 -mtune=core2 inlines 128), else
-// 16; at most BUSTER_CBUILTIN_LIBRARY_MOVE_INLINE_BYTES, COPY's move form's. So 128 bytes at x86-64, 64 for core2's
-// tuning or with minsize, 32 for both. The function's facts are CheckProgram.object_move's, which the references' pass
-// and the lowering read alike; its target attribute's, else the unit's target.
-static uint64_t check_program_move_bytes(const CheckProgram* program, uint32_t node)
+// Before body targets are published the references pass uses the declaration's width. A multiversioned body keeps
+// the reference past 32 bytes since a narrower clone may need it. Code generation uses the actual body's target.
+static uint64_t check_program_move_bytes(const CheckProgram* program, uint32_t node, const X86Target* target)
 {
     const uint32_t body = check_program_token_body(program, program->input->graph.tokens[node]);
     const uint32_t declaration = body != 0 ? program->bodies[body - 1].declaration : BUSTER_CHECK_NONE;
     const uint32_t object = declaration < program->input->token_count ? program->input->objects[declaration] : 0;
     const uint8_t facts = program->object_move != NULL && object != 0 && object <= program->input->token_count ? program->object_move[object] : 0;
-    const bool own = (facts & BUSTER_CHECK_PROGRAM_MOVE_TARGET) != 0;
-    const bool avx = own ? (facts & BUSTER_CHECK_PROGRAM_MOVE_AVX) != 0 : (program->target.features & BUSTER_X86_FEATURE(AVX)) != 0;
-    const bool slow = own ? (facts & BUSTER_CHECK_PROGRAM_MOVE_SLOW) != 0 : program->target.slow_unaligned_16 && (program->target.features & BUSTER_X86_FEATURE(SSE42)) == 0;
-    const uint64_t piece = avx ? 32 : slow ? 8 : 16;
-    const uint64_t bytes = piece * ((facts & BUSTER_CHECK_PROGRAM_MOVE_MINSIZE) != 0 ? 4 : 8);
-    return bytes < BUSTER_CBUILTIN_LIBRARY_MOVE_INLINE_BYTES ? bytes : BUSTER_CBUILTIN_LIBRARY_MOVE_INLINE_BYTES;
+    const uint32_t width = facts & BUSTER_CHECK_PROGRAM_MOVE_WIDTH_MASK;
+    const uint32_t piece = target != NULL ? check_program_move_width(*target) : (facts & BUSTER_CHECK_PROGRAM_MOVE_VERSIONS) != 0 ? 0 :
+                           width != 0 ? width : check_program_move_width(program->target);
+    return piece * ((facts & BUSTER_CHECK_PROGRAM_MOVE_MINSIZE) != 0 ? 4u : 8u);
 }
 
 // The plain library builtin a call computes inline as clang -O0's code computes its intrinsic (#967, #1373), its row of
@@ -4183,14 +4184,14 @@ static uint64_t check_program_move_bytes(const CheckProgram* program, uint32_t n
 // label (EmitBuiltinExpr's BuiltinIDIfNoAsmLabel is 0 for it): CheckProgram.object_labelled. The references' pass and
 // the lowering ask for every call, so it reads no token: a search of the unit's declarations for each computed memcpy
 // took sqlite3.c's -c from 126 to 187 ms on the 9700X.
-static __attribute__((noinline)) uint32_t check_program_call_marked(const CheckProgram* program, uint32_t node)
+static __attribute__((noinline)) uint32_t check_program_call_marked(const CheckProgram* program, uint32_t node, const X86Target* target)
 {
     const CheckGraph* graph = &program->input->graph;
     const uint32_t member = graph->members[node];
     const uint32_t index = member & ~BUSTER_CHECK_LIBRARY_CALL;
     const bool library = (member & BUSTER_CHECK_LIBRARY_CALL) != 0 && index < BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS;
     const CBuiltinLibraryComputed computed = library ? cbuiltin_library_plain_folds[index].computed : CBUILTIN_LIBRARY_COMPUTED_NONE;
-    const bool memory = computed == CBUILTIN_LIBRARY_COMPUTED_COPY || computed == CBUILTIN_LIBRARY_COMPUTED_MOVE || computed == CBUILTIN_LIBRARY_COMPUTED_SET;
+    const bool memory = cbuiltin_library_computed_memory(computed);
     const bool unary = computed == CBUILTIN_LIBRARY_COMPUTED_ABSOLUTE || computed == CBUILTIN_LIBRARY_COMPUTED_FLOAT_ABSOLUTE;
     const uint32_t arity = memory ? 3 : unary ? 1 : 2;
     bool marked = computed != CBUILTIN_LIBRARY_COMPUTED_NONE && graph->argument_counts[node] == arity;
@@ -4200,7 +4201,7 @@ static __attribute__((noinline)) uint32_t check_program_call_marked(const CheckP
         const uint32_t size_node = graph->argument_nodes[graph->argument_offsets[node] + 2];
         marked = check_program_constant_operand(graph, program->stream, size_node, &size) && size <= cbuiltin_library_inline_bytes(computed);
         // A memmove past 32 bytes, as far as the function's tuning and minsize let clang's code inline it.
-        marked = marked && (computed != CBUILTIN_LIBRARY_COMPUTED_MOVE || size <= BUSTER_CBUILTIN_LIBRARY_INLINE_BYTES || size <= check_program_move_bytes(program, node));
+        marked = marked && (computed != CBUILTIN_LIBRARY_COMPUTED_MOVE || size <= BUSTER_CBUILTIN_LIBRARY_INLINE_BYTES || size <= check_program_move_bytes(program, node, target));
     }
     const uint32_t callee = marked && program->object_labelled != NULL ? graph->operand0[node] : BUSTER_CHECK_NONE;
     const uint32_t object = callee < graph->count ? check_stream_value(program->stream, callee).object : 0;
@@ -4224,10 +4225,10 @@ static __attribute__((noinline)) uint32_t check_program_call_marked(const CheckP
 
 // check_program_call_marked's answer for a call the reader marked, BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS for any other: the
 // references' pass and the lowering ask of every call, and most are unmarked.
-static inline __attribute__((always_inline)) uint32_t check_program_call_computed(const CheckProgram* program, uint32_t node)
+static inline __attribute__((always_inline)) uint32_t check_program_call_computed(const CheckProgram* program, uint32_t node, const X86Target* target)
 {
     const bool marked = (program->input->graph.members[node] & BUSTER_CHECK_LIBRARY_CALL) != 0;
-    return marked ? check_program_call_marked(program, node) : BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS;
+    return marked ? check_program_call_marked(program, node, target) : BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS;
 }
 
 // Whether a call has a plain library builtin's semantics of its own, which the node machine and its census leave to the
@@ -4241,7 +4242,7 @@ static __attribute__((unused)) bool check_program_call_library(const CheckProgra
     const uint32_t index = member & ~BUSTER_CHECK_LIBRARY_CALL;
     const bool marked = (member & BUSTER_CHECK_LIBRARY_CALL) != 0 && index < BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS;
     return marked && (cbuiltin_library_plain_folds[index].fold != CBUILTIN_LIBRARY_FOLD_NONE ||
-                      check_program_call_computed(program, node) != BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS);
+                      check_program_call_computed(program, node, NULL) != BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS);
 }
 
 static uint32_t check_program_references(CheckProgram* program, const CheckControl* controls, uint32_t count, uint32_t epoch,
@@ -4344,7 +4345,7 @@ static uint32_t check_program_references(CheckProgram* program, const CheckContr
                 }
                 // A plain fmax, memcpy or their kin that the code computes inline (#967, #1373, check_program_call_computed)
                 // references no function, as clang's code doesn't.
-                if (check_program_call_computed(program, node) != BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS)
+                if (check_program_call_computed(program, node, NULL) != BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS)
                 {
                     operands[0] = BUSTER_CHECK_NONE;
                 }
@@ -5578,7 +5579,7 @@ static void check_program_census_prune(const CheckProgram* program, uint32_t nod
     }
     else if (op == CHECK_OP_CALL)
     {
-        drop[0] = check_program_call_computed(program, node) != BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS;
+        drop[0] = check_program_call_computed(program, node, NULL) != BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS;
     }
     else if (!program->unselected_operands && operands[0] < graph->count)
     {

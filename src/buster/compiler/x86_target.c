@@ -182,6 +182,8 @@ struct X86Target
     // unaligned 16-byte accesses are slow without SSE4.2: clang's code then moves a constant memmove's bytes in 8-byte
     // pieces, and so inlines no more than 64 of them at -O0 (c_predefines.c's predefines_slow_unaligned, #1373).
     bool slow_unaligned_16;
+    // Prefer YMM to ZMM for memory operations even when AVX-512F is available.
+    bool prefer_256;
 };
 
 typedef struct X86CpuId X86CpuId;
@@ -263,7 +265,7 @@ static bool x86_target_parse(const char* name, size_t length, X86Target* target)
     {
         if (length == strlen(names[i]) && memcmp(name, names[i], length) == 0)
         {
-            X86Target result = { .architecture = (X86Architecture)i };
+            X86Target result = { .architecture = (X86Architecture)i, .prefer_256 = i == X86_ARCH_V4 };
             for (uint32_t f = 0; f < X86_FEATURE_COUNT; f += 1)
             {
                 result.features |= (uint64_t)(x86_features[f].level <= i + 1) << f;

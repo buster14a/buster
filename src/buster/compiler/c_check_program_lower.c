@@ -427,6 +427,8 @@ typedef enum CheckLowerTaskKind
     CHECK_LOWER_PREDICTABLE_BRANCH,
     CHECK_LOWER_BUILTIN,
     CHECK_LOWER_BUILTIN_MISC,
+    // Constant-size memcmp after argument evaluation: node is the byte count, type and value the pointer locals.
+    CHECK_LOWER_COMPARE_MEMORY,
     CHECK_LOWER_BUILTIN_FLOAT,
     CHECK_LOWER_BUILTIN_FLOAT_STRICT,
     CHECK_LOWER_CONSTANT,
@@ -8246,7 +8248,7 @@ static void check_lower_call(CheckLowerWriter* writer, uint32_t node)
 {
     const uint32_t wrapper = writer->program->wrapper_count != 0 ? check_lower_wrapper_of(writer, node) : BUSTER_CHECK_NONE;
     const bool expanded = wrapper != BUSTER_CHECK_NONE && check_lower_wrapper_call(writer, node, wrapper);
-    const uint32_t computed = !expanded ? check_program_call_computed(writer->program, node) : BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS;
+    const uint32_t computed = !expanded ? check_program_call_computed(writer->program, node, &writer->target) : BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS;
     if (expanded)
     {
         // The wrapper's expansion (#2983).
@@ -14002,12 +14004,91 @@ static void check_lower_piece_address(CheckLowerWriter* writer, uint32_t pointer
     check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, pointer);
 }
 
+// Compare in address order, using overlapping end pieces to stay within both objects. On little-endian x86 the
+// least set bit of the first unequal XOR identifies the byte to subtract. BSF is only reached for a nonzero XOR.
+static void check_lower_compare_memory(CheckLowerWriter* writer, uint32_t bytes, uint32_t left, uint32_t right)
+{
+    const uint32_t pointers[2] = { left, right };
+    const uint32_t piece = bytes >= 8 ? 8 : bytes >= 4 ? 4 : bytes >= 2 ? 2 : 1;
+    const uint8_t class = check_lower_piece_class(piece);
+    const uint8_t wide = piece == 8 ? BUSTER_TYPED_CLASS_U64 : BUSTER_TYPED_CLASS_U32;
+    if (bytes < 2)
+    {
+        if (bytes == 1)
+        {
+            for (uint32_t i = 0; i < 2; i += 1)
+            {
+                check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, pointers[i]);
+                check_lower_emit(writer, BUSTER_TYPED_LOAD, class, 0);
+                check_lower_emit(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I32, 0);
+            }
+            check_lower_emit(writer, BUSTER_TYPED_SUB, BUSTER_TYPED_CLASS_I32, 0);
+        }
+        else
+        {
+            check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, 0);
+        }
+    }
+    else
+    {
+        const uint32_t words[2] = {
+            check_lower_temporary(writer, wide),
+            check_lower_temporary(writer, wide),
+        };
+        const uint32_t shift = check_lower_temporary(writer, wide);
+        const uint32_t different = check_lower_label(writer);
+        const uint32_t end = check_lower_label(writer);
+        for (uint32_t p = 0; p < bytes; p += piece)
+        {
+            const uint32_t at = p + piece <= bytes ? p : bytes - piece;
+            for (uint32_t i = 0; i < 2; i += 1)
+            {
+                check_lower_emit(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, pointers[i]);
+                if (at != 0)
+                {
+                    check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, at);
+                    check_lower_emit(writer, BUSTER_TYPED_PTR_ADD, BUSTER_TYPED_CLASS_U64, 1);
+                }
+                check_lower_emit(writer, BUSTER_TYPED_LOAD, class, 0);
+                if (class != wide)
+                {
+                    check_lower_emit(writer, BUSTER_TYPED_CONVERT, wide, 0);
+                }
+                check_lower_emit(writer, BUSTER_TYPED_STORE_LOCAL, wide, words[i]);
+            }
+            check_lower_emit(writer, BUSTER_TYPED_NE, BUSTER_TYPED_CLASS_I32, 0);
+            check_lower_emit(writer, BUSTER_TYPED_BRANCH_TRUE, BUSTER_TYPED_CLASS_I32, different);
+        }
+        check_lower_emit(writer, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_I32, 0);
+        check_lower_emit(writer, BUSTER_TYPED_JUMP_VALUE, BUSTER_TYPED_CLASS_I32, end);
+        check_lower_place(writer, different);
+        check_lower_emit(writer, BUSTER_TYPED_LOCAL, wide, words[0]);
+        check_lower_emit(writer, BUSTER_TYPED_LOCAL, wide, words[1]);
+        check_lower_emit(writer, BUSTER_TYPED_XOR, wide, 0);
+        check_lower_emit(writer, BUSTER_TYPED_X86, wide, check_lower_bits_operation(writer, CBUILTIN_CTZ, wide, wide));
+        // Round the bit index (0..63) down to the first bit of its byte.
+        check_lower_emit(writer, BUSTER_TYPED_CONST, wide, 56);
+        check_lower_emit(writer, BUSTER_TYPED_AND, wide, 0);
+        check_lower_emit(writer, BUSTER_TYPED_SET_LOCAL, wide, shift);
+        for (uint32_t i = 0; i < 2; i += 1)
+        {
+            check_lower_emit(writer, BUSTER_TYPED_LOCAL, wide, words[i]);
+            check_lower_emit(writer, BUSTER_TYPED_LOCAL, wide, shift);
+            check_lower_emit(writer, BUSTER_TYPED_SHR, wide, 0);
+            check_lower_emit(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U8, 0);
+            check_lower_emit(writer, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_I32, 0);
+        }
+        check_lower_emit(writer, BUSTER_TYPED_SUB, BUSTER_TYPED_CLASS_I32, 0);
+        check_lower_place(writer, end);
+    }
+}
+
 // memcpy, memmove and memset of a constant size of at most cbuiltin_library_inline_bytes's, plain (#1373,
 // check_program_call_computed), as clang -O0's code computes llvm.memcpy of such a size: the destination's and the
 // source's operands (memset's value's) evaluated in order, each into a temporary; then memcpy's COPY of the size (its
 // ranges are apart, or the same, or the call is undefined), as __builtin_memcpy's recipe copies (c_builtin_misc_lower.c);
 // memmove's pieces, all loaded before any is stored, so that ranges that overlap in either direction move right: past
-// BUSTER_TIER0_COPY_NARROW_BYTES, COPY's move form (tier0_copy_moves, 16-byte pieces that Tier 0 holds in XMM registers),
+// BUSTER_TIER0_COPY_NARROW_BYTES, COPY's move form (tier0_copy_moves, at most eight pieces in vector registers),
 // else 8 bytes each, the last ending at the size, or below 8 bytes, the widest that fits at the start and one ending at
 // the size;
 // memset's stores of those pieces of its value's byte repeated, a constant value's computed here. The size, a constant,
@@ -14015,19 +14096,16 @@ static void check_lower_piece_address(CheckLowerWriter* writer, uint32_t pointer
 _Static_assert(BUSTER_CBUILTIN_LIBRARY_MOVE_INLINE_BYTES <= BUSTER_TIER0_MAX_MOVE_BYTES && BUSTER_CBUILTIN_LIBRARY_INLINE_BYTES == BUSTER_TIER0_COPY_NARROW_BYTES,
                "a computed memmove past the scalar pieces' bytes is COPY's move form");
 
-static void check_lower_library_memory(CheckLowerWriter* writer, uint32_t node, CBuiltinLibraryComputed computed)
+static void check_lower_library_memory(CheckLowerWriter* writer, uint32_t node, CBuiltinLibraryComputed computed, uint32_t bytes)
 {
     const CheckProgram* program = writer->program;
     const CheckGraph* graph = &program->input->graph;
     const CheckStream* stream = program->stream;
     const uint32_t first = graph->argument_offsets[node];
     const bool set = computed == CBUILTIN_LIBRARY_COMPUTED_SET;
-    uint64_t size = 0;
     uint64_t value = 0;
-    (void)check_program_constant_operand(graph, stream, graph->argument_nodes[first + 2], &size);
     const bool constant = set && check_program_constant_operand(graph, stream, graph->argument_nodes[first + 1], &value);
     const uint64_t pattern = (value & 0xff) * UINT64_C(0x0101010101010101);
-    const uint32_t bytes = (uint32_t)size;
     const uint32_t piece = bytes >= 8 ? 8 : bytes >= 4 ? 4 : bytes >= 2 ? 2 : 1;
     const uint8_t class = check_lower_piece_class(piece);
     const uint32_t count = bytes == 0 ? 0 : bytes >= 8 ? (bytes + 7) / 8 : bytes > piece ? 2 : 1;
@@ -14040,21 +14118,29 @@ static void check_lower_library_memory(CheckLowerWriter* writer, uint32_t node, 
     {
         pieces[p] = check_lower_temporary(writer, class);
     }
-    check_lower_convert(writer, stream->argument_conversions[first].type, check_stream_type(stream, node));
-    check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, destination);
-    if (computed == CBUILTIN_LIBRARY_COMPUTED_COPY && bytes != 0)
+    if (computed == CBUILTIN_LIBRARY_COMPUTED_COMPARE)
     {
-        check_lower_instruction(writer, BUSTER_TYPED_COPY, BUSTER_TYPED_CLASS_VOID, bytes);
+        check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_COMPARE_MEMORY, .node = bytes, .type = destination, .value = source });
+    }
+    else
+    {
+        check_lower_convert(writer, stream->argument_conversions[first].type, check_stream_type(stream, node));
+        check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, destination);
+    }
+    if ((computed == CBUILTIN_LIBRARY_COMPUTED_COPY && bytes != 0) || vectors)
+    {
+        uint64_t value = bytes;
+        if (vectors)
+        {
+            const uint32_t preferred = check_program_move_width(writer->target);
+            const uint32_t width = preferred == 64 && bytes < 64 ? 32 : preferred < 16 ? 16 : preferred;
+            value = tier0_move_value(bytes, width);
+        }
+        check_lower_instruction(writer, BUSTER_TYPED_COPY, BUSTER_TYPED_CLASS_VOID, value);
         check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, source);
         check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, destination);
     }
-    else if (vectors)
-    {
-        check_lower_instruction(writer, BUSTER_TYPED_COPY, BUSTER_TYPED_CLASS_VOID, BUSTER_TIER0_MOVE_VALUE(bytes));
-        check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, source);
-        check_lower_instruction(writer, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, destination);
-    }
-    else if (computed != CBUILTIN_LIBRARY_COMPUTED_COPY)
+    else if (set || computed == CBUILTIN_LIBRARY_COMPUTED_MOVE)
     {
         for (uint32_t p = count; p-- > 0;)
         {
@@ -14118,7 +14204,15 @@ static void check_lower_library_computed(CheckLowerWriter* writer, uint32_t node
         case CBUILTIN_LIBRARY_COMPUTED_COPY_SIGN: check_lower_library_sign(writer, node, true); break;
         case CBUILTIN_LIBRARY_COMPUTED_COPY:
         case CBUILTIN_LIBRARY_COMPUTED_MOVE:
-        case CBUILTIN_LIBRARY_COMPUTED_SET: check_lower_library_memory(writer, node, plain->computed); break;
+        case CBUILTIN_LIBRARY_COMPUTED_SET:
+        case CBUILTIN_LIBRARY_COMPUTED_COMPARE:
+        {
+            const CheckGraph* graph = &writer->program->input->graph;
+            uint64_t bytes = 0;
+            (void)check_program_constant_operand(graph, writer->program->stream, graph->argument_nodes[graph->argument_offsets[node] + 2], &bytes);
+            check_lower_library_memory(writer, node, plain->computed, (uint32_t)bytes);
+            break;
+        }
         default: check_lower_fail(writer, CHECK_PROGRAM_INVALID); break;
     }
 }
@@ -16868,7 +16962,14 @@ static inline __attribute__((always_inline)) void check_lower_expand(CheckLowerW
     else if (op == CHECK_OP_BUILTIN_MISC)
     {
         const CBuiltinId id = (CBuiltinId)graph->members[node];
-        if (id == CBUILTIN_TRAP || id == CBUILTIN_UNREACHABLE)
+        uint64_t bytes = 0;
+        const bool memory = id == CBUILTIN_MEMCMP || id == CBUILTIN_MEMMOVE;
+        if (memory && graph->argument_counts[node] == 3 && check_program_constant_operand(graph, stream, graph->argument_nodes[graph->argument_offsets[node] + 2], &bytes) &&
+            (bytes <= BUSTER_CBUILTIN_LIBRARY_INLINE_BYTES || (id == CBUILTIN_MEMMOVE && bytes <= check_program_move_bytes(program, node, &writer->target))))
+        {
+            check_lower_library_memory(writer, node, id == CBUILTIN_MEMCMP ? CBUILTIN_LIBRARY_COMPUTED_COMPARE : CBUILTIN_LIBRARY_COMPUTED_MOVE, (uint32_t)bytes);
+        }
+        else if (id == CBUILTIN_TRAP || id == CBUILTIN_UNREACHABLE)
         {
             check_lower_helper(writer, node);
         }
@@ -17675,6 +17776,10 @@ static inline __attribute__((always_inline)) void check_lower_drain_body(CheckLo
         {
             check_lower_miscellaneous_emit(writer, check_lower_task_unpack(*task));
         }
+        else if (kind == CHECK_LOWER_COMPARE_MEMORY)
+        {
+            check_lower_compare_memory(writer, node, type, (uint32_t)(value >> 32));
+        }
         else if (kind == CHECK_LOWER_BUILTIN_FLOAT || kind == CHECK_LOWER_BUILTIN_FLOAT_STRICT)
         {
             check_lower_floating_emit(writer, check_lower_task_unpack(*task));
@@ -18198,7 +18303,7 @@ static bool check_lower_call_forwards(const CheckLowerWriter* writer, uint32_t c
 {
     const CheckProgram* program = writer->program;
     const TypeTable* types = program->types;
-    const bool called = writer->forwards && check_program_call_computed(program, call) == BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS;
+    const bool called = writer->forwards && check_program_call_computed(program, call, &writer->target) == BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS;
     const TypeId result = called ? check_stream_type(program->stream, call) : 0;
     return called && type_unqualified(type_strip_aligned(types, result)) == type_unqualified(type_strip_aligned(types, writer->result)) &&
            type_size(types, result) == type_size(types, writer->result) && writer->abi_table->results[type_index(result)].kind == BUSTER_ABI_RESULT_MEMORY;
@@ -19614,7 +19719,7 @@ static void check_lower_tail_return(CheckLowerWriter* writer, uint32_t node)
     {
         call = graph->operand0[call];
     }
-    if (call < graph->count && graph->ops[call] == CHECK_OP_CALL && check_program_call_computed(writer->program, call) != BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS)
+    if (call < graph->count && graph->ops[call] == CHECK_OP_CALL && check_program_call_computed(writer->program, call, &writer->target) != BUSTER_CBUILTIN_LIBRARY_PLAIN_FOLDS)
     {
         // A musttail return of fmax, memcpy or their kin, which clang's code computes inline (#967, #1373) and returns as
         // any value.
