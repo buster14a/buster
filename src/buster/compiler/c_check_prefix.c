@@ -505,6 +505,12 @@ static bool check_prefix_resumes(const Parser* view, const ParseDiagnostic* diag
     }
     valid &= !diagnostic->resume_delete || diagnostic->resume_end != 0;
     valid &= diagnostic->resume_begin == 0 || (diagnostic->resume_delete && diagnostic->resume_end != 0);
+    if (valid && diagnostic->message == PARSE_MESSAGE_EXPECTED_MEMBER_NAME)
+    {
+        const uint32_t end = diagnostic->publication;
+        valid = at == diagnostic->token && view->tokens.kinds[at] == PARSE_KIND_L_SQUARE && end > at + 1 && end < view->tokens.count &&
+                view->tokens.kinds[end - 1] == PARSE_KIND_R_SQUARE && view->tokens.kinds[end] == PARSE_KIND_SEMI;
+    }
     valid &= diagnostic->resume_closers <= 2;
     valid &= diagnostic->resume_follow == 0 || diagnostic->resume_follow == PARSE_MESSAGE_EXPECTED_STATEMENT ||
              diagnostic->resume_follow == PARSE_MESSAGE_EXPECTED_SEMI_AT_END_OF_DECLARATION;
@@ -837,7 +843,7 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
             const uint32_t begin = diagnostic->resume_begin != 0 ? diagnostic->resume_begin : at;
             ordered &= !taken || begin > last;
             last = taken ? (diagnostic->resume_end != 0 ? diagnostic->resume_end - 1 : at) : last;
-            insert += taken && !diagnostic->resume_delete ? (diagnostic->resume_closers != 0 ? diagnostic->resume_closers : 1u) + (diagnostic->resume_follow != 0) : 0u;
+            insert += taken && !diagnostic->resume_delete && diagnostic->message != PARSE_MESSAGE_EXPECTED_MEMBER_NAME ? (diagnostic->resume_closers != 0 ? diagnostic->resume_closers : 1u) + (diagnostic->resume_follow != 0) : 0u;
             insert += taken && diagnostic->resume_delete ? diagnostic->resume_closers + diagnostic->resume_terminate : 0u;
             following += taken && diagnostic->resume_follow;
             const uint32_t attributes = taken ? check_prefix_call_attributes(diagnostic) : 0;
@@ -877,6 +883,7 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
             uint32_t pragma = 0;
             uint32_t unknown = 0;
             uint32_t dropped_declarator = BUSTER_PARSE_NONE;
+            uint32_t marked_member = BUSTER_PARSE_NONE;
             for (uint32_t d = 0; preserve_begin != 0 && d < current->diagnostic_count; d += 1)
             {
                 const ParseDiagnostic* diagnostic = diagnostics + d;
@@ -908,6 +915,10 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
                     memcpy(view->tokens.names + written, current->tokens.names + from, (uint64_t)length * sizeof(uint32_t));
                     parse_copy_sources(view->tokens.sources + written, &current->tokens, from, length);
                     memcpy(view->tokens.flags + written, current->tokens.flags + from, length);
+                    if (marked_member >= from && marked_member < to)
+                    {
+                        view->tokens.flags[written + marked_member - from] |= BUSTER_PARSE_MEMBER_RECOVERY;
+                    }
                     if (dropped_declarator >= from && dropped_declarator < to)
                     {
                         view->tokens.flags[written + dropped_declarator - from] |= BUSTER_PARSE_DROPPED_DECLARATOR;
@@ -1017,6 +1028,10 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
                                 written += 1;
                             }
                         }
+                        else if (diagnostic->message == PARSE_MESSAGE_EXPECTED_MEMBER_NAME)
+                        {
+                            marked_member = at;
+                        }
                         else if (!diagnostic->resume_delete)
                         {
                             const uint8_t kind = diagnostic->resume_colon ? PARSE_KIND_COLON :
@@ -1038,6 +1053,11 @@ static CheckPrefixStatus check_prefix_resume(CheckResumed* resumed, const Parser
                                 next_origin[written] = origin != 0 ? origin[source] : source;
                                 written += 1;
                             }
+                        }
+                        if (diagnostic->resume_delete && diagnostic->recovery_expression_begin != 0 &&
+                            (diagnostic->message == PARSE_MESSAGE_EXPECTED_R_SQUARE || diagnostic->message == PARSE_MESSAGE_EXPECTED_SEMI_AT_END_OF_DECLARATION_LIST))
+                        {
+                            marked_member = diagnostic->resume_end;
                         }
                         pending[pending_count] = check_prefix_original_diagnostic(diagnostic, origin, count, original_count);
                         pending_count += 1;

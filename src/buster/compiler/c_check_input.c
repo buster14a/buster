@@ -744,6 +744,9 @@ struct CheckInputReport
     // An undeclared name in an attribute's argument, whose attribute clang's parser drops and whose declaration stays
     // valid (#2251, #2468): a rejected unit's readings keep that declaration (check_driver_report_keeps_valid).
     bool attribute_name;
+    // From an original expression read before recovering its member delimiter. Its lookup, literal and bound errors
+    // are independent of any record closer appended by check_repair_make.
+    bool member_operand;
     // CHECK_INPUT_TAG_INCOMPATIBLE's bit-fields' widths, each plus one (0 for no bit-field), the second definition's in
     // the high half; else 0.
     uint32_t bit_widths;
@@ -1317,6 +1320,8 @@ struct CheckInput
     // at or after its subtree's first token in its declaration, so that every construct without a missing name keeps
     // its graph, and declarations without one their whole graph.
     uint32_t* diagnostic_limits;
+    // Allocated only when an operand in a diagnostic view cannot form an expression.
+    uint8_t* invalid_member_operands;
     uint32_t diagnostic_report_count;
     // Where the ordered walk ended: the unit's token count, or the token where a reader's error stopped it, after which
     // the reading found no declaration and gave no warning (#1447, check_driver_rejected_common); 0 where no walk ran
@@ -9318,8 +9323,26 @@ static void check_input_declarator_step(CheckInputReader* reader, CheckDeclarato
                 // kept for the next step, which reads the bound again from here.
                 frame->star_array |= star;
                 const uint32_t before = reader->output->report_count;
+                const bool unnamed = (parser->tokens.flags[i] & BUSTER_PARSE_MEMBER_RECOVERY) != 0;
                 valid = check_input_vla_bound(reader, i, bound, close, frame->name, frame->parameter_context || reader->kr_declarator, star, &run->bound, &run->definition,
                                               &part.kind, &part.extent, &part.zero_length, &part.fold_warning);
+                // A nameless array declares no field. Finish reading the member after its bound's diagnostics.
+                const uint32_t recovered = reader->output->recovered_count;
+                if (unnamed && !valid && run->definition == BUSTER_CHECK_NONE && check_input_recover_reports(reader, before))
+                {
+                    for (uint32_t r = recovered; r < reader->output->recovered_count; r += 1)
+                    {
+                        CheckInputReport* report = reader->output->recovered_reports + r;
+                        if (report->message == CHECK_INPUT_ARRAY_NEGATIVE || report->message == CHECK_INPUT_ARRAY_NON_INTEGER)
+                        {
+                            report->member_operand = true;
+                            report->completion = close + 1;
+                        }
+                    }
+                    valid = true;
+                    part.kind = BUSTER_TYPE_KIND_INCOMPLETE_ARRAY;
+                    memset(reader->ignored + i, 1, close - i + 1);
+                }
                 run->definition_end = run->definition != BUSTER_CHECK_NONE ? close : run->definition_end;
                 // A negative constant bound (#1447), or one of another type than an integer's (#2170): an invalid
                 // declaration, its array a stand-in of no element. So is a variable bound where none can be, a file-scope
@@ -10868,7 +10891,9 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                         CheckConstantFailure failure = { .token = BUSTER_CHECK_NONE, .callee = BUSTER_CHECK_NONE };
                         reader->constant_names = begin < i ? CHECK_CONSTANT_NAMES_RECOVER : CHECK_CONSTANT_NAMES_NONE;
                         reader->constant_failure = begin < i ? &failure : NULL;
-                        const bool read = check_input_constant(reader, begin, i, &bits);
+                        const bool repaired_width = (parser->tokens.flags[i] & BUSTER_PARSE_MEMBER_RECOVERY) != 0;
+                        CheckValue width_value = { 0 };
+                        const bool read = check_input_constant_value(reader, begin, i, &bits, &width_value);
                         reader->constant_names = CHECK_CONSTANT_NAMES_NONE;
                         reader->constant_failure = NULL;
                         if (read)
@@ -10876,17 +10901,31 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                             // Its comma operators' left operands' -Wunused-value, as a constant array bound's (#2202).
                             check_input_attribute_unused(reader, begin, i, true);
                         }
-                        const bool named = reader->constant_missing != missing;
+                        const bool invalid_operand = repaired_width && reader->output->invalid_member_operands != NULL &&
+                                                     reader->output->invalid_member_operands[begin] != 0;
+                        bool width_error = reader->constant_missing != missing || (invalid_operand && check_input_recover_reports(reader, width_reports));
                         // Its failure's error in clang's words (#1447).
-                        if (!read && !named && failure.diagnostic != CHECK_DIAG_NONE && reader->output->report_count == width_reports)
+                        if (!read && !width_error && failure.diagnostic != CHECK_DIAG_NONE && reader->output->report_count == width_reports)
                         {
                             check_input_constant_failure_report(reader, &failure, begin, begin);
                         }
-                        valid &= named || (read && bits >= 0 && bits <= UINT32_MAX);
-                        width = named ? BUSTER_TYPE_NOT_BIT_FIELD : (uint32_t)bits;
+                        else if (repaired_width && !read && !width_error && width_value.type != 0 && check_action_is_integer(reader->types, width_value.type) &&
+                                 reader->output->report_count == width_reports)
+                        {
+                            const uint32_t location = failure.token >= begin && failure.token < i ? failure.token : begin;
+                            check_input_report_argument(reader, location, CHECK_INPUT_CONSTANT_EXPRESSION, CHECK_ARGUMENT_NOT_ICE);
+                            if (reader->output->report_count > width_reports)
+                            {
+                                reader->output->reports[width_reports].member_operand = true;
+                                reader->output->reports[width_reports].completion = i - 1;
+                            }
+                            width_error = check_input_recover_reports(reader, width_reports);
+                        }
+                        valid &= width_error || (read && bits >= 0 && bits <= UINT32_MAX);
+                        width = width_error ? BUSTER_TYPE_NOT_BIT_FIELD : (uint32_t)bits;
                         // An unnamed one stays a member, unnamed, of its whole type, as clang's field (`long : zzz` aligns
                         // the record to 8), and declares something.
-                        widthless = named;
+                        widthless = width_error;
                         const uint32_t before = attributes != 0 ? attributes->count : 0;
                         valid = valid && (!attributed || check_input_read_attributes(reader, &i, frame->close, &attributes));
                         // Their function types' attributes, which meet the member's type (#147).
@@ -10945,7 +10984,9 @@ static bool check_input_tag_definition(CheckInputReader* reader, uint32_t token,
                         const uint32_t tag = anonymous ? reader->types->types.index[type_index(record)] : 0;
                         tag_only = !anonymous || reader->types->tags.name[tag] != 0;
                         valid &= tag_only || type_is_complete(reader->types, record);
-                        if (valid && tag_only && !declares)
+                        const bool missing_name = parser->tokens.kinds[declarator] == PARSE_KIND_L_SQUARE &&
+                                                  (parser->tokens.flags[declarator] & BUSTER_PARSE_MEMBER_RECOVERY) != 0;
+                        if (valid && tag_only && !declares && !missing_name)
                         {
                             check_input_warning(reader, CHECK_WARNING_ID_MISSING_DECLARATIONS, CHECK_WARNING_EVENT_EMPTY_DECLARATION,
                                                 frame->cursor, CHECK_WARNING_COMPLETE_AT_TOKEN, i);
