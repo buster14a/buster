@@ -36,6 +36,32 @@ static bool check_input_initializer_recover(CheckInputReader* reader, uint32_t b
     return !input->resource;
 }
 
+// The source walk reads strings in a rejected initializer. Ignore a refused concatenation's token run and its
+// dependent expressions so later visits do not read a value it could not supply. Sibling operands still get checked.
+static void check_input_initializer_rejected_string(CheckInputReader* reader, uint32_t token, uint32_t first, uint32_t limit)
+{
+    const uint32_t before = reader->output->report_count;
+    if (check_input_string(reader, token) == NULL && reader->output->report_count > before)
+    {
+        const Parser* parser = reader->parser;
+        const uint32_t count = parser->tokens.count;
+        const uint8_t* kinds = parser->tokens.kinds;
+        const uint32_t* parents = parser->tree.parents;
+        const bool literal = kinds[token] == PARSE_KIND_STRING;
+        uint32_t end = token + 1;
+        while (literal && end < count && kinds[end] == PARSE_KIND_STRING)
+        {
+            end += 1;
+        }
+        memset(reader->ignored + token, 1, end - token);
+        for (uint32_t parent = parents[token]; first <= parent && parent < limit && !reader->ignored[parent]; parent = parents[parent])
+        {
+            reader->ignored[parent] = true;
+        }
+        check_input_initializer_recover(reader, before);
+    }
+}
+
 static bool check_input_initializer_prepare_slow(CheckInputReader* reader, uint32_t assignment, bool initialize)
 {
     const Parser* parser = reader->parser;
@@ -137,7 +163,7 @@ static bool check_input_initializer_prepare_slow(CheckInputReader* reader, uint3
                 reader->initializers[token] = 3;
             }
             item = false;
-            if (kind == PARSE_KIND_STRING)
+            if (kind == PARSE_KIND_STRING && initialize)
             {
                 valid = check_input_string(reader, token) != 0;
                 string_refused = !valid;

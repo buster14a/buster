@@ -14935,6 +14935,8 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
     const bool modern = parser->language.standard >= 1999;
     CheckInputJumpContext jumps = { .next = begin };
     uint32_t visits = 0;
+    uint32_t rejected_initializer_begin = 0;
+    uint32_t rejected_initializer_end = 0;
     for (uint32_t i = begin; i <= end && reader->output->report_count == 0 && !reader->output->resource; i = check_input_resolve_next(reader, i, end))
     {
         visits += 1;
@@ -15164,7 +15166,8 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
             reader->initializer_declarations[i] != BUSTER_CHECK_NONE)
         {
             const uint32_t declaration = reader->initializer_declarations[i];
-            if (check_sparse_get(reader->output->initializer_ends, declaration) > reader->resolve_limit)
+            const uint32_t initializer_end = check_sparse_get(reader->output->initializer_ends, declaration);
+            if (initializer_end > reader->resolve_limit)
             {
                 reader->expression_limit = i < reader->expression_limit ? i : reader->expression_limit;
                 check_input_pragma_report(reader);
@@ -15175,6 +15178,13 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
             if (rejected)
             {
                 // Designators and their operands are prepared even though the rejected object cannot be initialized again.
+                // The direct form's trailing arguments are checked too, past its first argument's stored end.
+                const uint32_t stop = role == PARSE_ROLE_OPEN_GROUP && parent < parser->tokens.count ? parent : initializer_end;
+                if (i >= rejected_initializer_end)
+                {
+                    rejected_initializer_begin = i + 1;
+                }
+                rejected_initializer_end = stop > rejected_initializer_end ? stop : rejected_initializer_end;
                 check_input_invalid_initializer(reader, declaration, i);
             }
             else
@@ -15401,7 +15411,14 @@ static void check_input_resolve_range(CheckInputReader* reader, uint32_t begin, 
         }
         if (__builtin_expect((syntax & BUSTER_CHECK_SYNTAX_STRING) != 0, 0) && syntactic && !reader->ignored[i])
         {
-            check_input_string(reader, i);
+            if (rejected_initializer_begin <= i && i < rejected_initializer_end)
+            {
+                check_input_initializer_rejected_string(reader, i, rejected_initializer_begin, rejected_initializer_end);
+            }
+            else
+            {
+                check_input_string(reader, i);
+            }
         }
     }
     reader->output->resolve_visits += visits;

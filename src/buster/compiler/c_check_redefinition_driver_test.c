@@ -118,7 +118,7 @@ static void check_test_driver_redefinitions(CheckTest* test, const char* clang, 
     check_test_expect(test, unlink(path) == 0, "redefinition fixture removed");
 
     char designator_source[] = "tests/driver/invalid-designator-redefinition.c";
-    char* designator_arguments[] =
+    char* recovery_arguments[] =
     {
         (char*)executable,
         "-std=gnu23",
@@ -128,9 +128,23 @@ static void check_test_driver_redefinitions(CheckTest* test, const char* clang, 
         NULL,
     };
     char* diagnostics = NULL;
-    const int status = check_test_driver_spawn(designator_arguments, &diagnostics);
+    const int status = check_test_driver_spawn(recovery_arguments, &diagnostics);
     const char* index = diagnostics != NULL ? strstr(diagnostics, "error: invalid or unsupported declaration") : NULL;
     check_test_expect(test, status == 1 && index != NULL && strstr(index, "error: redefinition of 'later'") != NULL,
                       "a rejected designator reports its error and leaves the next redefinition visible");
+    free(diagnostics);
+
+    char string_source[] = "tests/driver/invalid-string-redefinition.c";
+    recovery_arguments[4] = string_source;
+    diagnostics = NULL;
+    const int string_status = check_test_driver_spawn(recovery_arguments, &diagnostics);
+    const char* later = diagnostics != NULL ? strstr(diagnostics, "error: redefinition of 'later'") : NULL;
+    const char* direct = diagnostics != NULL ? strstr(diagnostics, "error: redefinition of 'direct'") : NULL;
+    const char* trailing = direct != NULL ? strstr(direct, "error: hex escape sequence out of range") : NULL;
+    check_test_expect(test, string_status == 1 && trailing != NULL && later != NULL && trailing < later &&
+                      check_test_implicit_count(diagnostics, "error: hex escape sequence out of range") == 3 &&
+                      check_test_implicit_count(diagnostics, "error: invalid universal character") == 1 &&
+                      check_test_implicit_count(diagnostics, ": error: ") == 8,
+                      "rejected concatenated, grouped and direct strings are diagnosed once before the next redefinition");
     free(diagnostics);
 }
