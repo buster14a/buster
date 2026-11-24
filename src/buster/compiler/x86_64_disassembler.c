@@ -2118,18 +2118,30 @@ static X86DecodeResult x86_disassemble(const uint8_t* source, uint64_t size, X86
             uint8_t lengths[64];
             X86DecodeWindow window;
             x86_decode_lengths(source + start, remaining, lengths, &window);
-            // The starts: each lane's 15 bytes lie inside the window's 128.
-            uint8_t offsets[16] = {0};
-            uint32_t count = 0;
-            uint32_t end = 0;
-            bool known = true;
-            while (known && count < 16 && count < capacity - result.count && end < remaining && end < 64)
+            // The starts (each lane's 15 bytes lie inside the window's 128): lane i is the i-th instruction from 0
+            // through the hints, by pointer jumping. A position without a hint leads past the window (127), so the
+            // chain stops after it.
+            const __m512i positions = _mm512_set_epi8(63, 62, 61, 60, 59, 58, 57, 56, 55, 54, 53, 52, 51, 50, 49, 48, 47, 46, 45, 44, 43, 42, 41, 40, 39, 38, 37, 36, 35,
+                                                      34, 33, 32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6,
+                                                      5, 4, 3, 2, 1, 0);
+            const __m512i hints = _mm512_loadu_si512(lengths);
+            const __m512i past = _mm512_set1_epi8(127);
+            __m512i jump = _mm512_mask_add_epi8(past, _mm512_test_epi8_mask(hints, hints), positions, hints);
+            const __m512i lanes = _mm512_set_epi8(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                                                  0, 0, 0, 0, 0, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
+            __m512i at = _mm512_setzero_si512();
+            for (uint32_t k = 0; k < 4; k += 1)
             {
-                offsets[count] = (uint8_t)end;
-                count += 1;
-                known = lengths[end] != 0;
-                end += lengths[end];
+                at = _mm512_mask_mov_epi8(at, _mm512_test_epi8_mask(lanes, _mm512_set1_epi8((char)(1 << k))), _mm512_permutex2var_epi8(jump, at, past));
+                jump = _mm512_permutex2var_epi8(jump, jump, past);
             }
+            const uint64_t limit = remaining < 64 ? remaining : 64;
+            const uint64_t room = capacity - result.count < 16 ? capacity - result.count : 16;
+            const uint32_t inside = (uint32_t)(_mm512_cmplt_epu8_mask(at, _mm512_set1_epi8((char)limit)) & 0xffff);
+            const uint32_t reached = (uint32_t)__builtin_ctz(~inside);
+            const uint32_t count = reached < room ? reached : (uint32_t)room;
+            uint8_t offsets[16];
+            _mm_storeu_si128((__m128i*)offsets, _mm512_castsi512_si128(at));
             X86DecodeStatus status = X86_DECODE_OK;
             const uint32_t written = x86_decode_lanes(&window, remaining, offsets, lengths, count, start, output + result.count, &status);
             result.count += written;
