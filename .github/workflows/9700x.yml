@@ -711,6 +711,28 @@ jobs:
               find "$oracle" -mindepth 1 -type d -empty -delete
           fi
 
+      - name: Measure the two new x87 register forms for issue 1387
+        if: github.event_name == 'workflow_dispatch' && inputs.purpose == 'full' && github.ref == 'refs/heads/measure/1387-x87-register-costs'
+        run: |
+          probe="$RUNNER_TEMP/x87-probe-$GITHUB_RUN_ID"
+          git worktree add --detach "$probe" "$GITHUB_SHA"
+          trap 'git -C "$GITHUB_WORKSPACE" worktree remove --force "$probe"' EXIT
+          cd "$probe"
+          # Only the isolated measurement executable gets the pending rows. The normal build and
+          # its completeness tests use the regular checked-in cost table.
+          rows=src/buster/compiler/x86_zen5_rows.c
+          awk '/X\(FSTP_ST, REGISTER,/ {
+            print "    X(FST_ST, REGISTER, U, U, U, U, U, U, U, 0, 0, 0) " sprintf("%c",92)
+            print "    X(FXCH_ST, REGISTER, U, U, U, U, U, U, U, 0, 0, 0) " sprintf("%c",92)
+          } {print}' "$rows" > "$rows.new"
+          mv "$rows.new" "$rows"
+          taskset -c 0-7 ./build.sh --config Release --jobs 8
+          compiler=$(./build.sh print-output --config Release)
+          sha256sum "$compiler" "$rows" src/buster/compiler/x86_zen5_measure.c
+          for form in FST_ST FXCH_ST; do
+            taskset -c 2 "$compiler" measure-x86-zen5 --only "$form/REGISTER"
+          done
+
       - name: Benchmark the C lexer on the repository sources
         if: env.MEASURE == 'all' || contains(env.MEASURE, ',lexer,')
         run: |
