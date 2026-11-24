@@ -1568,8 +1568,9 @@ static void check_test_program_build_release(void)
 static bool check_test_program_execute_with_alignment(Link* link, const char* source, const char* oracle_source, bool mismatch, const char* clang,
                                                        bool char_unsigned, bool alignment_oracle, bool run_native, const char* standard, Arena* scratch)
 {
-    const char* profile_directory = getenv("BUSTER_CHECKER_PROFILE_DIR");
-    const bool profiling = profile_directory != 0 && *profile_directory != 0;
+    const char* profile_variable;
+    const char* profile_directory = test_profile_directory(&profile_variable);
+    const bool profiling = profile_directory != 0;
     char directory[PATH_MAX - sizeof("/checked.o") + 1];
     const int directory_length = snprintf(directory, sizeof(directory), "%s/buster-check-program-XXXXXX",
                                           profiling ? profile_directory : "/tmp");
@@ -1577,8 +1578,8 @@ static bool check_test_program_execute_with_alignment(Link* link, const char* so
     const bool created = fits && directory[0] == '/' && mkdtemp(directory) != 0;
     if (profiling && !created)
     {
-        fprintf(stderr, "test-checker: BUSTER_CHECKER_PROFILE_DIR must be an existing writable absolute directory: %s (%s)\n",
-                profile_directory, !fits ? "path too long" : directory[0] != '/' ? "relative path" : strerror(errno));
+        fprintf(stderr, "test-checker: %s must be an existing writable absolute directory: %s (%s)\n",
+                profile_variable, profile_directory, !fits ? "path too long" : directory[0] != '/' ? "relative path" : strerror(errno));
     }
     char object[PATH_MAX];
     char executable[PATH_MAX];

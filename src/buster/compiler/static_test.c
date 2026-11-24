@@ -2038,7 +2038,8 @@ static bool static_test_assemble(BindTestLink* test, const ExecutableTestDirecto
 // test-dynamic, a bisection over multiples of 64 bytes finds about the least room, and the rooms tried are every KB up
 // to it and every 64 bytes from 4 KB below it to 1 KB above. Every write starts from the atoms' bytes as binding left
 // them, since the relaxation rewrites the accesses.
-static void static_test_starved(StaticTestTally* tally, BindTestLink* test, const Runtime* runtime, String8 path, int status, Arena* arena)
+static void static_test_starved(StaticTestTally* tally, BindTestLink* test, const Runtime* runtime, String8 path, int status, Arena* arena,
+                                const ExecutableTestDirectory* profile)
 {
     static const uint32_t starved[][2] = {
         { 1, 0 },
@@ -2085,8 +2086,17 @@ static void static_test_starved(StaticTestTally* tally, BindTestLink* test, cons
         write.room = BUSTER_STATIC_TEST_MAX_ROOM;
         unlink(path.pointer);
         executable_test_restore(&test->link, saved);
-        const bool succeeded = enough && static_test_write_with(&write, &test->link, &test->bind, runtime, path, lanes, &result);
-        const StaticTestRun run = succeeded ? static_test_run(path.pointer) : (StaticTestRun){ 0 };
+        char run_bytes[BUSTER_EXECUTABLE_TEST_PATH_BYTES];
+        String8 run_path = path;
+        if (profile != 0)
+        {
+            // The rest of this test reuses and unlinks the path where refused writes must leave no file.
+            char name[32];
+            snprintf(name, sizeof(name), "starved-%u", c);
+            run_path = executable_test_path(profile, name, run_bytes);
+        }
+        const bool succeeded = enough && static_test_write_with(&write, &test->link, &test->bind, runtime, run_path, lanes, &result);
+        const StaticTestRun run = succeeded ? static_test_run(run_path.pointer) : (StaticTestRun){ 0 };
         static_test_expect(tally, enough, "a write with a megabyte to spare", c);
         static_test_expect(tally, wrong == UINT64_MAX, "a lane short of memory fails the link with no output", wrong);
         static_test_expect(tally, succeeded && run.exited && run.status == status, "then succeeds with room enough", c);
@@ -2098,7 +2108,7 @@ static void static_test_starved(StaticTestTally* tally, BindTestLink* test, cons
 
 // Each refusal of the runtime's kind refused by every lane count, naming its
 // symbol or fixup, without an output; then the starved lanes on the tls program, which runs with status 40.
-static bool static_test_refused(const ExecutableTestDirectory* directory, const Runtime* runtime)
+static bool static_test_refused(const ExecutableTestDirectory* directory, const Runtime* runtime, bool profiling)
 {
     const bool pie = static_test_pie(runtime);
     StaticTestTally tally = {
@@ -2144,7 +2154,7 @@ static bool static_test_refused(const ExecutableTestDirectory* directory, const 
     static_test_expect(&tally, bound, "the tls program bound", 0);
     if (bound)
     {
-        static_test_starved(&tally, &test, runtime, path, 40, scratch.arena);
+        static_test_starved(&tally, &test, runtime, path, 40, scratch.arena, profiling ? directory : 0);
     }
     if (imported)
     {
@@ -2160,8 +2170,11 @@ static int run_static_tests(int argc, char** argv)
     uint64_t seed = 1;
     uint64_t id_order = 153;
     uint64_t functions = BUSTER_EXECUTABLE_TEST_DEFAULT_FUNCTIONS;
-    const char* parent = oracle_temporary_directory();
-    bool keep = false;
+    const char* profile_variable;
+    const char* profile_directory = test_profile_directory(&profile_variable);
+    const bool profiling = profile_directory != 0;
+    const char* parent = profiling ? profile_directory : oracle_temporary_directory();
+    bool keep = profiling;
     bool cross_check = false;
     bool valid = true;
     for (int i = 0; i < argc; i += 1)
@@ -2213,6 +2226,10 @@ static int run_static_tests(int argc, char** argv)
     {
         fprintf(stderr, "usage: test-static [--seed N] [--id-order N] [--functions N] [--directory PATH] [--cross-check] [--keep]\n");
     }
+    else if (profiling && profile_directory[0] != '/')
+    {
+        fprintf(stderr, "test-static: %s must be an existing writable absolute directory: %s\n", profile_variable, profile_directory);
+    }
     else if (imported != RUNTIME_ERROR_NONE)
     {
         fprintf(stderr, "the static runtime didn't import: error %d, %s\n", (int)imported, runtime.failed_file);
@@ -2221,7 +2238,8 @@ static int run_static_tests(int argc, char** argv)
     {
         fprintf(stderr, "the static PIE's runtime didn't import: error %d, %s\n", (int)pie_imported, pie.failed_file);
     }
-    else if (length <= 0 || (uint64_t)length + 64 >= sizeof(directory.path) || mkdtemp(directory.path) == 0)
+    else if (length <= 0 || (uint64_t)length + 64 + (profiling ? sizeof("/static-pie") - 1 : 0) >= sizeof(directory.path) ||
+             mkdtemp(directory.path) == 0)
     {
         fprintf(stderr, "test-static: can't make a directory in %s\n", parent);
     }
@@ -2235,10 +2253,26 @@ static int run_static_tests(int argc, char** argv)
         for (uint32_t kind = 0; kind < 2; kind += 1)
         {
             const Runtime* tested = kind == 0 ? &runtime : &pie;
-            passed = static_test_programs(&directory, tested, seed, (uint32_t)functions) && passed;
-            passed = static_test_large_bss(&directory, tested, seed) && passed;
-            passed = static_test_compiled(&directory, tested, cross_check) && passed;
-            passed = static_test_refused(&directory, tested) && passed;
+            ExecutableTestDirectory variant = directory;
+            bool made = true;
+            if (profiling)
+            {
+                // Both runtimes otherwise publish executables such as libc-defaults to the same pathname.
+                snprintf(variant.path, sizeof(variant.path), "%s/%s", directory.path, kind == 0 ? "static" : "static-pie");
+                made = mkdir(variant.path, 0700) == 0;
+            }
+            if (made)
+            {
+                passed = static_test_programs(&variant, tested, seed, (uint32_t)functions) && passed;
+                passed = static_test_large_bss(&variant, tested, seed) && passed;
+                passed = static_test_compiled(&variant, tested, cross_check) && passed;
+                passed = static_test_refused(&variant, tested, profiling) && passed;
+            }
+            else
+            {
+                fprintf(stderr, "test-static: can't make %s: %s\n", variant.path, strerror(errno));
+                passed = false;
+            }
         }
         result = passed ? 0 : 1;
         if (keep)
