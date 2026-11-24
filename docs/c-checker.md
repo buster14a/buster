@@ -4298,7 +4298,8 @@ What the lowering covers past scalars (#145's programs):
   has the harness, counters and limitations.
   The lowering's preparation chains each struct's units once, from its first
   member (an anonymous struct's are its own, as clang's), into a column of 2
-  bytes per member: the member's bit in its unit and the unit's bytes. A
+  bytes per member encoding the member's bit in its first eight-byte chunk
+  and the number of bytes covered by the chunks it touches. A
   bit-field access reads its member's, the one its name finds
   (`check_lower_bit_unit_place`). A constant address of a field's lvalue
   (a local's or a global's, the checker's of the field's first byte) is its
@@ -4309,20 +4310,18 @@ What the lowering covers past scalars (#145's programs):
   units: a run's declared type at its first field, which the fields after it
   share while they start before its end (`{ unsigned x : 3, y : 7; unsigned
   short z : 5; }` an `i32` at 0 and an `i16` at 4), and an `ms_struct` union's
-  its declared type. A unit of 9 to 16 bytes (a packed run's `i72` to `i128`)
-  is its first 8 bytes and the rest's pieces, as clang's -O0 code moves it: a
-  field in one of the two takes that part alone, where clang's code moves both,
-  and a field across them both (a packed field of up to 64 bits off a byte
-  boundary in 9 bytes of its own is one, #2999) takes both, joined by shifts
-  on a read and split on a store (`check_lower_bit_wide`, out of line, apart
-  from the tasks' always-inlined store). A local's initializer stores a field
-  through its member's unit too, found by going down the object's elements and
-  members to it (`check_lower_bit_init_unit`), after the object's zeros, as
-  clang's initialization does, but in an object with a volatile part, whose
-  stores are its plan's. A unit wider than 16 bytes, an initializer's cleared
-  bits and `__builtin_dump_struct`'s reads take the bytes that hold the
-  field's bits. A field wider than
-  64 bits (a `_BitInt`'s) is refused. `c_check_program_bit_unit_test.c`
+  its declared type. Units wider than eight bytes are divided into eight-byte
+  chunks from the start of the unit. A shorter final chunk uses the pieces
+  that fit before the end. A field crossing a chunk boundary takes both
+  chunks, joined by shifts on a read and split on a store
+  (`check_lower_bit_wide`). A local initializer clears or sets a bit-field
+  through the unit found by walking its object's elements and members
+  (`check_lower_bit_init_unit`). A dump of a record keeps each bit-field's
+  member ID and uses its unit at the field's offset in the dumped object.
+  Initializers of objects with volatile parts retain their planned accesses.
+  Volatile dumps and volatile member accesses in units wider than 16 bytes
+  use the bytes holding the field's bits. A field wider than 64 bits is
+  refused. `c_check_program_bit_unit_test.c`
   checks each fixture's loads and stores against clang's units and runs them
   against clang's code.
 - **Variable-length arrays.** Their objects live on the stack, as clang's do.

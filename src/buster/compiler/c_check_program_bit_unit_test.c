@@ -7,8 +7,7 @@
 // are evaluated over symbolic addresses (check_test_bit_trace): every LOAD and SET of an integer class through its
 // record's address gives an offset and a width, and the distinct ones, in the order they first come, must be the unit's,
 // as clang 23's -O0 code reads and writes them. Units that are no integer (a packed run, a run before a member in
-// what would be the integer's last byte) are accessed as pieces of their bytes; a union's bit-fields, past the units'
-// model, keep the bytes that hold each field's bits. The constant addresses of a local's and a global's bit-fields
+// what would be the integer's last byte) are accessed as pieces of their bytes. The constant addresses of bit-fields
 // (CheckValue.offset, a field's first byte) are their units' too (check_lower_bit_constant_address). Tier 0 compiles each
 // function by both its paths to the same records. Natively against clang: the fixtures' records written, updated and
 // read, with their neighbors.
@@ -29,7 +28,7 @@ struct CheckTestBitValue
 
 // A function's accesses: the distinct reads ("r", offset, ':', bytes) and writes ("w") of an integer class through one
 // base, in the order they first come, separated by spaces; "?" for an access through another base or none followed, and
-// "!" for an entry this straight-line evaluation doesn't take (a call, a branch).
+// "!" for an entry this straight-line evaluation doesn't take. Volatile accesses are marked "v" and recorded every time.
 typedef struct CheckTestBitTrace CheckTestBitTrace;
 struct CheckTestBitTrace
 {
@@ -62,14 +61,14 @@ static void check_test_bit_append(CheckTestBitTrace* trace, const char* token)
 }
 
 // The access of `bytes` bytes at `address`: its token added where it is new, through the first base seen.
-static void check_test_bit_access(CheckTestBitTrace* trace, uint64_t* base, CheckTestBitValue address, uint32_t bytes, bool write)
+static void check_test_bit_access(CheckTestBitTrace* trace, uint64_t* base, CheckTestBitValue address, uint32_t bytes, bool write, bool is_volatile)
 {
     char token[32];
     const bool followed = address.base >= BUSTER_CHECK_TEST_BIT_ENTRY && (*base == 0 || *base == address.base);
     *base = followed && *base == 0 ? address.base : *base;
     if (followed)
     {
-        snprintf(token, sizeof(token), "%c%lld:%u", write ? 'w' : 'r', (long long)address.offset, bytes);
+        snprintf(token, sizeof(token), "%s%c%lld:%u", is_volatile ? "v" : "", write ? 'w' : 'r', (long long)address.offset, bytes);
     }
     else
     {
@@ -85,7 +84,7 @@ static void check_test_bit_access(CheckTestBitTrace* trace, uint64_t* base, Chec
         seen = span == length && memcmp(at, token, length) == 0;
         at += span + (end != NULL ? 1 : 0);
     }
-    if (!seen)
+    if (!seen || is_volatile)
     {
         check_test_bit_append(trace, token);
     }
@@ -122,6 +121,11 @@ static CheckTestBitTrace check_test_bit_trace(const Tier0Function* function, Are
             case BUSTER_TYPED_STORE_GLOBAL: pops = 1; pushes = true; break;
             case BUSTER_TYPED_SET_LOCAL: case BUSTER_TYPED_SET_GLOBAL: case BUSTER_TYPED_DISCARD: pops = 1; break;
             case BUSTER_TYPED_RETURN: pops = class != BUSTER_TYPED_CLASS_VOID ? 1 : 0; break;
+            case BUSTER_TYPED_CALL:
+                valid = value < function->call_count;
+                pops = valid ? function->call_argument_counts[value] + (function->call_targets[value] == 0) : 0;
+                pushes = class != BUSTER_TYPED_CLASS_VOID;
+                break;
             case BUSTER_TYPED_STORE: pops = 2; pushes = true; break;
             case BUSTER_TYPED_SET: pops = 2; break;
             default:
@@ -182,11 +186,11 @@ static CheckTestBitTrace check_test_bit_trace(const Tier0Function* function, Are
             const uint32_t bytes = check_test_bit_class_bytes(class);
             if (kind == BUSTER_TYPED_LOAD && bytes != 0)
             {
-                check_test_bit_access(&trace, &base, last, bytes, false);
+                check_test_bit_access(&trace, &base, last, bytes, false, (value & BUSTER_TYPED_ACCESS_VOLATILE) != 0);
             }
             if ((kind == BUSTER_TYPED_STORE || kind == BUSTER_TYPED_SET) && bytes != 0)
             {
-                check_test_bit_access(&trace, &base, first, bytes, true);
+                check_test_bit_access(&trace, &base, first, bytes, true, (value & BUSTER_TYPED_ACCESS_VOLATILE) != 0);
             }
             if (pushes)
             {
@@ -215,7 +219,9 @@ static void check_test_program_bit_units(CheckTest* test, const char* clang)
                                   "union U17{unsigned x:3;unsigned y:17;unsigned long long z:40;};union __attribute__((packed)) U3B{unsigned x:17;};"
                                   "struct __attribute__((ms_struct)) MS{unsigned x:3;unsigned y:7;unsigned short z:5;unsigned char w:4;};"
                                   "struct __attribute__((packed)) R{char c;unsigned long long a:60;unsigned b:20;};"
-                                  "struct __attribute__((packed)) Q12{unsigned a:30,b:30,c:30;};";
+                                  "struct __attribute__((packed)) Q12{unsigned a:30,b:30,c:30;};"
+                                  "struct __attribute__((packed)) Big{char head;unsigned long long a:51,b:40;signed long long c:60;unsigned d:25;char tail;};"
+                                  "struct D{struct B fields;volatile struct B observed;};void print(const char*,...);";
     static const char functions[] = "unsigned issue(struct B*b){b->y+=b->x;b->z^=b->w;return b->x+b->y+b->z+b->w;}"
                                     "void guard(struct G*p,unsigned v){p->x=v;p->x++;}"
                                     "void clipped(struct T*p){p->a+=1;}"
@@ -236,7 +242,12 @@ static void check_test_program_bit_units(CheckTest* test, const char* clang)
                                     "void discrete(struct MS*p){p->y=p->x;p->w=p->z;}"
                                     "void spans(struct R*p){p->a=p->b;}"
                                     "void twelve(struct Q12*p){p->c=p->a;}"
-                                    "unsigned initialized(unsigned n){struct B v={n,n+1,n+2,n+3};return v.w;}";
+                                    "unsigned initialized(unsigned n){struct B v={n,n+1,n+2,n+3};return v.w;}"
+                                    "void longrun(struct Big*p){p->c=p->d;p->b+=p->a;}"
+                                    "unsigned observed(volatile struct Big*p){return p->d;}"
+                                    "unsigned cleared(unsigned n){struct B v={.w=n,.z={}};return v.z+v.w;}"
+                                    "void dumped(struct D*p){__builtin_dump_struct(p,print);}"
+                                    "void observed_dump(volatile struct B*p){__builtin_dump_struct(p,print);}";
     typedef struct CheckTestBitCase CheckTestBitCase;
     struct CheckTestBitCase
     {
@@ -280,6 +291,11 @@ static void check_test_program_bit_units(CheckTest* test, const char* clang)
         { "spans", "r1:8 r9:2 w1:8" },
         { "twelve", "r0:8 w0:8 r8:4 w8:4" },
         { "initialized", "w0:4 r0:4" },
+        { "longrun", "r17:4 r21:2 r9:8 w9:8 w17:4 w21:2 r1:8 w1:8" },
+        { "observed", "vr19:4" },
+        { "cleared", "w0:4 r0:4" },
+        { "dumped", "r0:4 vr4:1 vr4:2 vr5:2 vr6:2" },
+        { "observed_dump", "vr0:1 vr0:2 vr1:2 vr2:2" },
     };
     const uint32_t count = BUSTER_ARRAY_LENGTH(cases);
     char source[sizeof(records) + sizeof(functions)];
@@ -343,6 +359,14 @@ static void check_test_program_bit_units(CheckTest* test, const char* clang)
     }
     pp_release(&pp);
     intern_release(&identifiers);
+    // The signed field crosses from the second eight-byte chunk into a six-byte tail. Both neighboring
+    // fields share a chunk with it, and the bytes either side of the unit belong to other members.
+    check_test_program_source(test,
+                              "struct __attribute__((packed)) Big{char head;unsigned long long a:51,b:40;signed long long c:60;unsigned d:25;char tail;};"
+                              "int tested(int n){struct Big v[2]={{1,2,3,-4,5,6},{7,0x123456789abcdULL,0x89abcdef01ULL,-1,0x1234567,8}};"
+                              "struct Big*p=&v[1];p->c=-0x123456789abcdLL*n;p->b+=p->d;p->d^=n;p->c++;"
+                              "return v[0].c+p->head+p->tail+(int)(p->a%997)+(int)(p->b%1009)+(int)(p->c%1013)+(int)(p->d%1021);}",
+                              "bit-field-unit-wide-tail", clang);
     // Natively against clang: each record's fields written, updated and read, through pointers, locals and a global, an
     // anonymous struct's and a nested record's, with their neighbors (G's guard, T's and A's chars, N's int) kept.
     check_test_program_source(test,

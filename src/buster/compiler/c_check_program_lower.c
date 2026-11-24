@@ -3933,14 +3933,13 @@ static void check_lower_fill(CheckLowerWriter* writer, const CheckInitPart* part
     }
 }
 
-// A bit-field's place: `width` bits, `shift` bits up from the start of its unit, the `bytes` bytes (1 to 8) from
+// A bit-field's place: `width` bits, `shift` bits up from the start of its unit, the `bytes` bytes (1 to 16) from
 // `first` bytes into its record that it is read and written through, never another member's (C11 makes those other
 // memory locations), as pieces (check_lower_piece) that make up one little-endian unit. A member access's unit is
 // clang's (check_lower_bit_unit_place, #1372), which the bit-fields of its run share, so that a read after a store to
-// any of them takes its bytes from that store, as does an initializer's value part (check_lower_bit_init_unit); other
-// places (an initializer's cleared bits, __builtin_dump_struct's reads) take the bytes that hold the field's bits, from
-// the one its first bit is in. A unit of 9 to 16 bytes is two parts (check_lower_bit_unit_apply), and `bytes` more than 8
-// only for a field across both (check_lower_bit_wide). Its value is in `class`, sign-extended
+// any of them takes its bytes from that store. Ordinary initializer and dump_struct accesses use the same units.
+// A field of at most 64 bits can touch two consecutive eight-byte chunks, the last possibly short. Only a field crossing
+// the boundary needs more than eight bytes (check_lower_bit_wide). Its value is in `class`, sign-extended
 // from its width when its type is signed (plain int bit-fields are, as in clang and GCC; an enum's are as its
 // underlying type is).
 typedef struct CheckLowerBitField CheckLowerBitField;
@@ -3978,19 +3977,21 @@ static bool check_lower_bit_place(const TypeTable* types, uint64_t offset, uint3
     return integer && width != 0 && width <= bits && width <= 64 && field->class < BUSTER_TYPED_CLASSES && field->class != BUSTER_TYPED_CLASS_VOID;
 }
 
-// A bit-field's unit in CheckLowerWriter.bit_units: BUSTER_CHECK_LOWER_BIT_UNIT, the member's bit in its unit (0 to 127)
-// and the unit's bytes (1 to 16) from BUSTER_CHECK_LOWER_BIT_UNIT_BYTES; 0 for a member that keeps the bytes that hold
-// its bits.
-#define BUSTER_CHECK_LOWER_BIT_UNIT 0x8000u
-#define BUSTER_CHECK_LOWER_BIT_UNIT_SHIFT 0x7fu
-#define BUSTER_CHECK_LOWER_BIT_UNIT_BYTES 7
+// A nonzero entry packs the field's shift within its first eight-byte chunk and the byte count of its touched
+// chunks (1 to 16). Volatile accesses to units wider than 16 bytes retain their original per-field footprint.
+#define BUSTER_CHECK_LOWER_BIT_UNIT_WIDE 0x8000u
+#define BUSTER_CHECK_LOWER_BIT_UNIT_BYTES 6
 
-// The column's entry of a bit-field of `width` bits at bit `own` of its record, in a unit of `bytes` bytes from bit
-// `first`: 0 where the unit doesn't start at a byte, is wider than 16 bytes or doesn't hold the field.
 static uint16_t check_lower_bit_unit_entry(uint64_t own, uint64_t first, uint32_t width, uint64_t bytes)
 {
-    const bool fits = bytes != 0 && bytes <= 16 && first % 8 == 0 && own >= first && own - first + width <= bytes * 8;
-    return fits ? (uint16_t)(BUSTER_CHECK_LOWER_BIT_UNIT | (own - first) | bytes << BUSTER_CHECK_LOWER_BIT_UNIT_BYTES) : 0;
+    const uint64_t bit = own - first;
+    const uint64_t chunk = bit / 64 * 8;
+    const uint32_t shift = (uint32_t)(bit % 64);
+    const uint32_t limit = width <= 64 - shift ? 8 : 16;
+    const uint64_t remaining = chunk < bytes ? bytes - chunk : 0;
+    const uint32_t span = remaining < limit ? (uint32_t)remaining : limit;
+    const bool fits = first % 8 == 0 && own >= first && width <= 64 && shift + width <= span * 8;
+    return fits ? (uint16_t)((bytes > 16 ? BUSTER_CHECK_LOWER_BIT_UNIT_WIDE : 0) | span << BUSTER_CHECK_LOWER_BIT_UNIT_BYTES | shift) : 0;
 }
 
 // Each member's access unit (#1372), made once, before the bodies, into `*units` from `arena` (left null where no member
@@ -4008,9 +4009,8 @@ static uint16_t check_lower_bit_unit_entry(uint64_t own, uint64_t first, uint32_
 //   - A union's: at 0, the integer of the field's width rounded up to a power of two bytes (getUIntNType), or for an
 //     ms_struct union its declared type's, and no more than the union's bytes (an array of them then): `unsigned x : 17`
 //     is an i32, an i24 in a packed union of 3 bytes.
-// A unit of 9 to 16 bytes is an integer LLVM's -O0 code moves as an i64 and the pieces of the rest (i72 as an i64 and an
-// i8, i96 as an i64 and an i32), which a field's accesses take (check_lower_bit_unit_apply). One wider than 16 bytes keeps
-// 0. A scalar pass over the members, once per unit; false where the arena can't hold the column.
+// A wide unit is divided into eight-byte chunks relative to its start and a bounded tail (i72 ends in an i8, i96
+// in an i32). Each member's entry describes just the chunks its bits touch. False where the arena can't hold the column.
 static bool check_lower_bit_units(const TypeTable* types, const AbiTable* abi, Arena* arena, uint16_t** units)
 {
     const uint32_t count = types->members.count;
@@ -4084,20 +4084,16 @@ static bool check_lower_bit_units(const TypeTable* types, const AbiTable* abi, A
 }
 
 // A field's place in the unit of column entry `unit` (check_lower_bit_units), the field `at` bits into the object its
-// address is relative to: the unit's first byte, the field's bit in it and its bytes. A unit of 9 to 16 bytes is its
-// first 8 bytes and the rest's pieces, as LLVM moves them: a field in one of the two is that part's, and one across them
-// both (check_lower_bit_wide). An entry of 0, or a unit that wouldn't start at a byte, leaves the place as it was.
+// address is relative to. Subtracting the chunk-relative shift preserves the offset of a nested record or array element.
 static void check_lower_bit_unit_apply(uint32_t unit, uint64_t at, CheckLowerBitField* field)
 {
-    const uint32_t shift = unit & BUSTER_CHECK_LOWER_BIT_UNIT_SHIFT;
-    const uint32_t bytes = unit >> BUSTER_CHECK_LOWER_BIT_UNIT_BYTES & 31;
-    const bool wide = bytes > 8;
-    const uint32_t skip = wide && shift >= 64 ? 8 : 0;
-    if ((unit & BUSTER_CHECK_LOWER_BIT_UNIT) != 0 && at >= shift && (at - shift) % 8 == 0)
+    const uint32_t shift = unit & 63;
+    const bool narrow = field->is_volatile && (unit & BUSTER_CHECK_LOWER_BIT_UNIT_WIDE) != 0;
+    if (unit != 0 && !narrow && at >= shift && (at - shift) % 8 == 0)
     {
-        field->first = (at - shift) / 8 + skip;
-        field->shift = shift - 8 * skip;
-        field->bytes = wide && shift + field->width <= 64 ? 8 : bytes - skip;
+        field->first = (at - shift) / 8;
+        field->shift = shift;
+        field->bytes = (unit & ~BUSTER_CHECK_LOWER_BIT_UNIT_WIDE) >> BUSTER_CHECK_LOWER_BIT_UNIT_BYTES;
     }
 }
 
@@ -4201,10 +4197,10 @@ static bool check_lower_bit_member(const CheckLowerWriter* writer, uint32_t node
                         check_lower_bit_place(program->types, stream->member_offsets[node], check_stream_value(stream, node).bit_width, type, field);
     if (placed)
     {
+        field->is_volatile = (type_qualifiers(type) & BUSTER_TYPE_VOLATILE) != 0;
         check_lower_bit_unit_place(writer, node, field);
     }
     field->segment = placed && __builtin_expect(writer->segments, 0) ? (uint8_t)(check_lower_segment_override(program->types, type) >> BUSTER_TYPED_ACCESS_SEGMENT_SHIFT) : 0;
-    field->is_volatile = placed && (type_qualifiers(type) & BUSTER_TYPE_VOLATILE) != 0;
     return placed;
 }
 
@@ -4239,7 +4235,7 @@ static void check_lower_bit_constant_address(CheckLowerWriter* writer, uint32_t 
 }
 
 // A place in a task's `type`: the shift in bits 0 to 5, the width less one in bits 6 to 11, the class in bits 12 to 15,
-// the sign in bit 16, the segment in bits 17 and 18, the unit's bytes less one (0 to 8) in bits 19 to 22 and whether it
+// the sign in bit 16, the segment in bits 17 and 18, the unit's bytes less one (0 to 15) in bits 19 to 22 and whether it
 // is volatile in bit 23. Its unit's first byte is in the address the task finds.
 static uint32_t check_lower_bit_pack(const CheckLowerBitField* field)
 {
@@ -10959,7 +10955,7 @@ static void check_lower_dump_struct(CheckLowerWriter* writer, uint32_t node)
         {
             const CheckLowerDumpOperand* operand = dump->operands + line->first + k;
             refused = operand->kind == CHECK_LOWER_DUMP_VALUE ? check_lower_dump_passed(writer, operand->promoted) : NULL;
-            refused = refused == NULL && operand->kind == CHECK_LOWER_DUMP_VALUE && operand->width == BUSTER_TYPE_NOT_BIT_FIELD &&
+            refused = refused == NULL && operand->kind == CHECK_LOWER_DUMP_VALUE && operand->bit_member == 0 &&
                       check_lower_class(writer, operand->type) >= BUSTER_TYPED_CLASSES ? "__builtin_dump_struct of a field this compiler doesn't load" : refused;
         }
     }
@@ -11031,16 +11027,21 @@ static void check_lower_dump_struct(CheckLowerWriter* writer, uint32_t node)
                 {
                     check_lower_dump_field_address(writer, base, operand->value / 8);
                 }
-                else if (operand->width != BUSTER_TYPE_NOT_BIT_FIELD)
+                else if (operand->bit_member != 0)
                 {
-                    // A bit-field's value, read from the address of its first byte.
+                    const uint32_t member = operand->bit_member;
                     CheckLowerBitField field = { 0 };
-                    if (!check_lower_bit_place(types, operand->value, operand->width, operand->type, &field))
+                    if (!check_lower_bit_place(types, operand->value, types->members.bit_width[member], operand->type, &field))
                     {
                         check_lower_unsupported(writer, "__builtin_dump_struct of a bit-field this compiler doesn't read");
                     }
                     else
                     {
+                        field.is_volatile = operand->is_volatile;
+                        if (writer->bit_units != NULL && !field.is_volatile)
+                        {
+                            check_lower_bit_unit_apply(writer->bit_units[member], operand->value, &field);
+                        }
                         check_lower_convert(writer, operand->type, operand->promoted);
                         check_lower_push(writer, (CheckLowerTask){ .kind = CHECK_LOWER_BIT_READ, .type = check_lower_bit_pack(&field) });
                         check_lower_dump_field_address(writer, base, field.first);
@@ -17716,10 +17717,9 @@ static void check_lower_object_part(CheckLowerWriter* writer, uint32_t plan, uin
     }
     else if (bits)
     {
-        // A field's value is stored through its member's unit, as clang's initialization does and as later accesses
-        // read it (#1372), but in an object with a volatile part, whose stores are the plan's.
+        // Both clearing and setting a field use its member's unit. A volatile object's stores retain the plan's footprint.
         const CheckInitializer* initializer = &writer->program->initializers->plans[plan];
-        if (write->kind == CHECK_INIT_VALUE && !check_lower_init_volatile_object(writer, initializer, destination))
+        if (!check_lower_init_volatile_object(writer, initializer, destination))
         {
             check_lower_bit_init_unit(writer, initializer->type, write->bit_offset, &field);
         }
