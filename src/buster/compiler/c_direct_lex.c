@@ -5466,6 +5466,50 @@ static BUSTER_DIRECT_HOT bool fast_pp_drain(FastPP* pp)
         if (__builtin_expect(pp->expand_depth > 0, 0))
         {
             FastExpandFrame* ef = pp->expand + (pp->expand_depth - 1u);
+            {
+                // The frame's tokens up to a macro's name, with the frame's place and the output's count in registers:
+                // an expansion's tokens are a quarter of sqlite3.c's, and this loop's iteration went through memory for
+                // both. A number's and a literal's kinds are fast_pp_emit_soa's to settle.
+                const FastTok* const toks = ef->toks;
+                const uint64_t* const macro_bits = pp->idents.macro_bits;
+                uint8_t* const out_kind = pp->out_kind;
+                uint32_t* const out_data = pp->out_data;
+                const uint32_t count = ef->count;
+                const uint32_t out_cap = pp->out_cap;
+                uint32_t pos = ef->pos;
+                uint32_t out_count = pp->out_count;
+                bool stop = false;
+                while (pos < count && !stop)
+                {
+                    const FastTok tok = toks[pos];
+                    const uint32_t kind = tok.kind;
+                    if ((kind == FTOK_IDENT || kind >= 64u) && (macro_bits[tok.data >> 6] & (UINT64_C(1) << (tok.data & 63u))) != 0)
+                    {
+                        stop = true;
+                    }
+                    else if (kind - FTOK_INT_LIT <= FTOK_STR_LIT - FTOK_INT_LIT || out_count >= out_cap)
+                    {
+                        pp->out_count = out_count;
+                        fast_pp_emit_soa(pp, tok);
+                        out_count = pp->out_count;
+                        pos += 1u;
+                        stop = pp->bailout;
+                    }
+                    else
+                    {
+                        out_kind[out_count] = (uint8_t)kind;
+                        out_data[out_count] = tok.data;
+                        out_count += 1u;
+                        pos += 1u;
+                    }
+                }
+                ef->pos = pos;
+                pp->out_count = out_count;
+                if (pp->bailout)
+                {
+                    break;
+                }
+            }
             if (ef->pos >= ef->count)
             {
                 if (ef->macro_ident != 0 && pp->hide_count > 0) { pp->hide_count -= 1u; }
