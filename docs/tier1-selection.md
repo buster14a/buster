@@ -580,37 +580,28 @@ patterns are:
   that st0 holds the first (`fld`). A long double argument whose call has ABI
   records takes its stack slots the same way.
 
-  After emission, `tier1_emit_cfg_x87_transfers` annotates canonical results
-  whose complete IR use list has exactly one occurrence. The shared
-  `x87_transfer.c` planner replaces an admitted private `fstpt`/`fldt` pair
-  with `fld st(0)`/`fstp st(0)`: the canonical result remains twice in the x87
-  registers until its consumer takes one copy. Both original waiting points
-  remain and all record indices, references and source/frame events stay
-  unchanged. The post scheduler pins these register transfers so a pending
-  exception cannot move across another effect when the memory operand goes
-  away. This removes the private memory round trip before a left-operand
-  consumer or a direct assignment without changing arithmetic order.
+  After emission, `tier1_emit_cfg_x87_transfers` identifies private transfers
+  whose complete IR use list has one occurrence. Both tiers use the same
+  planner. It replaces the private `fstpt` with `fst st(0)`, a store to a
+  full-width register, and the consuming `fldt` with `fxch st(i)`. Each
+  instruction still waits at its original position. The store retains the
+  architecture's floating-point store operation on raw inputs, including
+  signaling NaNs. The exchange places the operand at the top of the stack.
+  The post scheduler pins both instructions. See the FLD, FST/FSTP and FXCH
+  entries in the [AMD64 Architecture Programmer’s Manual, volume 5](https://docs.amd.com/api/khub/documents/w13cmcpL4f9MCT4WPN6eDg/content).
 
-  Each region has at most 64 original records and at most one live retained pair; the
-  complete physical depth, including both copies and intervening operations,
-  cannot exceed eight. An independent replay compares source snapshots,
-  operand identities, operations, private-home overlaps and exit depth before
-  publishing a region. The candidate scan has scalar and vector twins. Raw
-  F80 loads and constants retain their initial transfer because AMD's documented
-  signaling-NaN/unsupported-format store effects do not justify removing it.
-  Multiuse values, right operands under another live x87 value, conversions
-  with control-word changes, calls, inline assembly, volatile/atomic accesses,
-  control edges and unrecognized sequences retain the baseline. Frame homes
-  remain allocated for every fallback. Allocation failure drops this optional
-  plan and restores its scratch. The existing emitted x87 certificate refusal
-  remains; the transport replay does not claim decoded x87 certification.
+  Within a region of up to 64 records the planner simulates eight physical
+  x87 registers. Independent replay checks source snapshots, operand order,
+  observable stores, private-home overlaps and exit depth. If the full set
+  fails replay, the planner tries smaller sets. Calls, control edges and
+  environment observations end a region. Multiuse values and unrepresentable
+  permutations keep their homes. The proof preserves record indices for
+  branches, references and debug events.
 
-  `test-tier1-wide` adds exact transfer counts for direct stores, arithmetic
-  chains, repeated operands, right operands and volatile stores.
-  Its shared-helper fixtures reject mutated operations, stack indices,
-  source accesses, missing stores, false eligibility and hidden private-home
-  reads; depths eight and nine and guarded scalar/vector tails are checked.
-  Runtime speedup and full raw-load retention remain separate acceptance work.
+  `test-tier1-wide` checks direct stores, arithmetic chains, repeated and
+  right operands, volatility, overlapping slots and depth overflow. The
+  checker driver compares result bytes and x87 status for raw encodings
+  against the original memory transfers and checks pending exception order.
 - Call arguments and parameters take their places by the System V classes
   (`tier1_select_next_place`, #141): the k-th integer or pointer in the k-th of
   the six general argument registers, the k-th floating value in xmm k of eight,

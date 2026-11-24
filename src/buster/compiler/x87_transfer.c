@@ -1,21 +1,48 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// Bounded, exact transport of canonical x87 results between compiler-private homes (#1387). Include after the x86
-// encoder and semantics. The adapters identify each private definition by its FSTP record and certify a single use
-// of that definition. Raw F80 loads are deliberately not canonical: AMD's documented FSTP invalid-operation effects
-// do not justify removing their first memory transfer. Arithmetic results and conversions from scalar values are.
-//
-// Keep the result twice instead of storing it: FSTP m80 -> FLD ST(0), then its sole reload -> FSTP ST(0). Both original
-// waiting points remain, neither instruction converts the canonical value, and every other instruction stays in
-// place. The reload must begin with the baseline x87 stack empty. Only one such pair is live at a time; all intervening
-// x87 sequences run above its two copies. This costs no unmeasured form and changes no record index or metadata.
-//
-// Candidate stores are classified sixteen at a time, with an exact scalar twin. The ordered proof is bounded by a
-// 64-record region and eight physical registers. It independently replays the proposed records before publication.
+// Bounded transport between compiler-private x87 homes (#1387). Each adapter certifies a private store
+// and its one consuming reload. FST ST(0) keeps the full-width store at the original wait, including
+// its documented SNaN/unsupported-format effects. FXCH at the reload takes the saved operand in its
+// original order. Neither instruction narrows the value. Intel SDM vol. 2 and AMD APM vol. 5 describe
+// conversion for narrower destinations and no denormal exception for an extended FLD. The physical
+// stack is replayed before publication. Calls and control/environment observations cut regions.
 
 #ifndef BUSTER_X87_TRANSFER_INCLUDED
 #define BUSTER_X87_TRANSFER_INCLUDED
+
+// The exact binary32 or binary64 encoding of a finite normal (and signed zero), or the original
+// extended significand. A narrower subnormal would introduce a denormal-operand exception on FLD.
+static uint16_t x87_literal_bits(uint64_t low, uint16_t high, uint64_t* bits)
+{
+    const uint32_t exponent = high & 0x7fffu;
+    const uint64_t sign = high >> 15;
+    const bool normal = (low >> 63) != 0;
+    uint16_t form = X86_FORM_FLD_M80;
+    *bits = low;
+    if (exponent == 0 && low == 0)
+    {
+        *bits = sign << 31;
+        form = X86_FORM_FLD_M32;
+    }
+    else if (normal && exponent >= 16383 - 126 && exponent <= 16383 + 127 && (low & ((UINT64_C(1) << 40) - 1)) == 0)
+    {
+        const uint64_t fraction = (low >> 40) & 0x7fffffu;
+        *bits = (sign << 31) | ((uint64_t)(exponent - (16383 - 127)) << 23) | fraction;
+        form = X86_FORM_FLD_M32;
+    }
+    else if (normal && exponent >= 16383 - 1022 && exponent <= 16383 + 1023 && (low & 0x7ffu) == 0)
+    {
+        const uint64_t fraction = (low >> 11) & ((UINT64_C(1) << 52) - 1);
+        *bits = (sign << 63) | ((uint64_t)(exponent - (16383 - 1023)) << 52) | fraction;
+        form = X86_FORM_FLD_M64;
+    }
+    if (form == X86_FORM_FLD_M32 && (*bits == 0 || *bits == UINT32_C(0x3f800000)))
+    {
+        form = *bits == 0 ? X86_FORM_FLDZ : X86_FORM_FLD1;
+    }
+    return form;
+}
 
 #define BUSTER_X87_TRANSFER_NONE UINT32_MAX
 #define BUSTER_X87_TRANSFER_BOUNDARY 1u
@@ -39,13 +66,26 @@ typedef enum X87TransferKind
     X87_TRANSFER_UNARY,
 } X87TransferKind;
 
-// Plain register arithmetic and addresses may lie between the two waiting points. Keep all memory, calls, control,
-// SIMD, environment and unrecognized instructions outside a region, and never change a possible frame base there.
+// Plain integer loads and spills used to stage a signed int for FILD. Preserve the access
+// itself and reject indexed frame addresses, which cannot be checked for private-home overlap.
+static bool x87_transfer_integer_memory(const X86Instruction* record)
+{
+    const bool load = record->form == X86_FORM_MOV_R32_RM32;
+    const bool store = record->form == X86_FORM_MOV_RM32_R32;
+    const uint32_t protected = (1u << X86_REGISTER_RSP) | (1u << X86_REGISTER_RBP) | (1u << X86_REGISTER_R15);
+    const bool indexed = (record->mode & BUSTER_X86_MODE_INDEX) != 0 && record->index < 16 && record->rm < 16 &&
+                         ((protected >> record->index) & 1) == 0 && ((protected >> record->rm) & 1) == 0;
+    const bool address = record->mode == BUSTER_X86_MEMORY_BASE || (indexed && (record->mode & ~3u) == BUSTER_X86_MEMORY_BASE_INDEX(0));
+    return (load || store) && address && record->decorations == 0 && (!load || (record->reg < 16 && ((protected >> record->reg) & 1) == 0));
+}
+
+// Plain integer operations and the recognized memory transfers may lie between the two waiting points.
+// Calls, control, SIMD and environment operations end the region. Its possible frame bases must stay stable.
 static X87TransferKind x87_transfer_kind(const X86Instruction* record)
 {
     const uint32_t form = record->form & BUSTER_X86_FORM_NUMBER;
     X87TransferKind kind = X87_TRANSFER_STOP;
-    if (form == X86_FORM_NONE)
+    if (form == X86_FORM_NONE || x87_transfer_integer_memory(record))
     {
         kind = X87_TRANSFER_INTEGER;
     }
@@ -102,10 +142,17 @@ static bool x87_transfer_home(const X86Instruction* store, const X86Instruction*
 static bool x87_transfer_overlap(const X86Instruction* home, const X86Instruction* record)
 {
     const uint32_t form = record->form & BUSTER_X86_FORM_NUMBER;
-    const uint32_t bytes = form == X86_FORM_FLD_M80 || form == X86_FORM_FSTP_M80 ? 10 : form == X86_FORM_FLD_M32 || form == X86_FORM_FILD_M32 ? 4 :
-                           form == X86_FORM_FLD_M64 || form == X86_FORM_FILD_M64 ? 8 : 0;
+    const bool four = form == X86_FORM_FLD_M32 || form == X86_FORM_FILD_M32 || form == X86_FORM_MOV_R32_RM32 || form == X86_FORM_MOV_RM32_R32;
+    const uint32_t bytes = form == X86_FORM_FLD_M80 || form == X86_FORM_FSTP_M80 ? 10 : four ? 4 : form == X86_FORM_FLD_M64 || form == X86_FORM_FILD_M64 ? 8 : 0;
     const int64_t delta = (int64_t)record->displacement - home->displacement;
-    return bytes != 0 && record->mode == BUSTER_X86_MEMORY_BASE && record->rm == home->rm && delta < 10 && delta + bytes > 0;
+    const uint32_t bases = (1u << X86_REGISTER_RSP) | (1u << X86_REGISTER_RBP) | (1u << X86_REGISTER_R15);
+    const bool frame = record->rm < 16 && ((bases >> record->rm) & 1) != 0;
+    const bool indexed = (record->mode & BUSTER_X86_MODE_INDEX) != 0;
+    const bool frame_index = indexed && record->index < 16 && ((bases >> record->index) & 1) != 0;
+    // A compiler-private slot cannot escape. A second possible frame base or an indexed frame access
+    // has no provable displacement from the slot, so conservatively treat it as overlapping.
+    return bytes != 0 && (frame_index || (indexed && frame) || (record->mode == BUSTER_X86_MEMORY_BASE && frame &&
+                         (record->rm != home->rm || (delta < 10 && delta + bytes > 0))));
 }
 
 // A span begins and ends at an adapter's known-empty boundary. Its internal peak is checked independently below.
@@ -163,31 +210,29 @@ static uint64_t x87_transfer_candidates(const X86Instruction* records, const uin
     return candidates;
 }
 
-// Replay original operations and proposed records independently. Identities name source snapshots and arithmetic
-// results, never a numeric value: every operand, operation and observable access must match in its original order.
+// Independently replay both stacks. Values name original loads and arithmetic results. A resident
+// full-width store has its own identity: its destination can reflect the architecture's SNaN handling.
 static bool x87_transfer_verify(const X86Instruction* original, const X86Instruction* proposed, const uint32_t* tokens, const uint8_t* eligible, uint32_t first, uint32_t count)
 {
-    uint64_t before[8] = { 0 };
-    uint64_t after[8] = { 0 };
-    uint64_t homes[BUSTER_X87_TRANSFER_RECORDS] = { 0 };
-    uint32_t old_depth = 0;
-    uint32_t new_depth = 0;
-    uint32_t live = BUSTER_X87_TRANSFER_NONE;
+    uint64_t before[8], after[8], homes[BUSTER_X87_TRANSFER_RECORDS] = { 0 };
+    uint32_t old_depth = 0, new_depth = 0;
+    uint64_t live = 0;
     bool valid = count <= BUSTER_X87_TRANSFER_RECORDS;
     for (uint32_t r = 0; valid && r < count; r += 1)
     {
         const uint32_t token = tokens[first + r];
-        const bool local = token >= first && token - first < count;
+        const uint32_t home = token - first;
         const X87TransferKind kind = x87_transfer_kind(&original[r]);
         const bool same = memcmp(&original[r], &proposed[r], sizeof(X86Instruction)) == 0;
         const uint64_t identity = (uint64_t)first + r + 1;
-        // No unannotated reader or overlapping definition may observe an omitted store. Token identity alone is not
-        // a proof of private storage: check the actual memory ranges independently of the adapter's use certificate.
-        valid = live == BUSTER_X87_TRANSFER_NONE || !x87_transfer_overlap(&original[live - first], &original[r]) ||
-                (kind == X87_TRANSFER_LOAD && token == live && !same);
+        for (uint64_t held = live; valid && held != 0; held &= held - 1)
+        {
+            const uint32_t h = (uint32_t)__builtin_ctzll(held);
+            valid = !x87_transfer_overlap(&original[h], &original[r]) || (!same && kind == X87_TRANSFER_LOAD && home == h);
+        }
         if (valid && kind == X87_TRANSFER_LOAD)
         {
-            const uint64_t value = local && homes[token - first] != 0 ? homes[token - first] : identity;
+            const uint64_t value = home < count && homes[home] != 0 ? homes[home] : identity;
             valid = old_depth < 8;
             if (valid && same)
             {
@@ -199,14 +244,15 @@ static bool x87_transfer_verify(const X86Instruction* original, const X86Instruc
             }
             else if (valid)
             {
-                const X86Instruction pop = { .form = X86_FORM_FSTP_ST, .mode = BUSTER_X86_REGISTER_DIRECT };
-                valid = old_depth == 0 && new_depth == 2 && live == token && local && eligible[token] != 0 &&
-                        x87_transfer_home(&original[token - first], &original[r]) && memcmp(&proposed[r], &pop, sizeof(pop)) == 0 &&
-                        after[0] == value && after[1] == value;
+                const uint32_t index = proposed[r].rm;
+                const X86Instruction exchange = { .form = X86_FORM_FXCH_ST, .rm = (uint8_t)index, .mode = BUSTER_X86_REGISTER_DIRECT };
+                valid = home < count && ((live >> home) & 1) != 0 && x87_transfer_home(&original[home], &original[r]) &&
+                        memcmp(&proposed[r], &exchange, sizeof(exchange)) == 0 && index < new_depth && after[new_depth - 1 - index] == value;
                 if (valid)
                 {
-                    new_depth -= 1;
-                    live = BUSTER_X87_TRANSFER_NONE;
+                    after[new_depth - 1 - index] = after[new_depth - 1];
+                    after[new_depth - 1] = value;
+                    live &= ~(UINT64_C(1) << home);
                 }
             }
             if (valid)
@@ -217,9 +263,9 @@ static bool x87_transfer_verify(const X86Instruction* original, const X86Instruc
         else if (valid && kind == X87_TRANSFER_STORE)
         {
             valid = old_depth != 0 && new_depth != 0 && before[old_depth - 1] == after[new_depth - 1];
-            if (valid && local && token == first + r)
+            if (valid && home == r)
             {
-                homes[r] = before[old_depth - 1];
+                homes[r] = identity;
             }
             if (valid && same)
             {
@@ -227,14 +273,12 @@ static bool x87_transfer_verify(const X86Instruction* original, const X86Instruc
             }
             else if (valid)
             {
-                const X86Instruction duplicate = { .form = X86_FORM_FLD_ST, .mode = BUSTER_X86_REGISTER_DIRECT };
-                valid = old_depth == 1 && new_depth == 1 && live == BUSTER_X87_TRANSFER_NONE && token == first + r && eligible[token] != 0 &&
-                        memcmp(&proposed[r], &duplicate, sizeof(duplicate)) == 0;
+                const X86Instruction store = { .form = X86_FORM_FST_ST, .mode = BUSTER_X86_REGISTER_DIRECT };
+                valid = home == r && eligible[token] != 0 && memcmp(&store, &proposed[r], sizeof(store)) == 0;
                 if (valid)
                 {
-                    after[new_depth] = after[new_depth - 1];
-                    new_depth += 1;
-                    live = token;
+                    after[new_depth - 1] = identity;
+                    live |= UINT64_C(1) << r;
                 }
             }
             if (valid)
@@ -263,60 +307,113 @@ static bool x87_transfer_verify(const X86Instruction* original, const X86Instruc
             valid = kind == X87_TRANSFER_INTEGER && same;
         }
     }
-    return valid && old_depth == 0 && new_depth == 0 && live == BUSTER_X87_TRANSFER_NONE;
+    return valid && old_depth == 0 && new_depth == 0 && live == 0;
+}
+
+// The small physical stack contains a store's local record number while its value is parked there,
+// and NONE for an ordinary operand. A reload exchanges its saved value with st0 at its original wait.
+// The independent replay checks the complete operand order, including other values that exchange moved.
+static bool x87_transfer_plan(const X86Instruction* records, X86Instruction* proposed, const uint32_t* tokens, const uint8_t* eligible, uint32_t first, uint32_t count, uint64_t candidates)
+{
+    uint32_t stack[8];
+    uint32_t depth = 0;
+    bool valid = true;
+    memcpy(proposed, records, (uint64_t)count * sizeof(*proposed));
+    for (uint32_t r = 0; valid && r < count; r += 1)
+    {
+        const X87TransferKind kind = x87_transfer_kind(&records[r]);
+        const uint32_t home = tokens[first + r] - first;
+        if (kind == X87_TRANSFER_STORE && ((candidates >> r) & 1) != 0)
+        {
+            valid = depth != 0 && stack[depth - 1] == BUSTER_X87_TRANSFER_NONE;
+            if (valid)
+            {
+                proposed[r] = (X86Instruction){ .form = X86_FORM_FST_ST, .mode = BUSTER_X86_REGISTER_DIRECT };
+                stack[depth - 1] = r;
+            }
+        }
+        else if (kind == X87_TRANSFER_LOAD && home < count && ((candidates >> home) & 1) != 0)
+        {
+            uint32_t index = 0;
+            while (index < depth && stack[depth - 1 - index] != home)
+            {
+                index += 1;
+            }
+            valid = index < depth;
+            if (valid)
+            {
+                proposed[r] = (X86Instruction){ .form = X86_FORM_FXCH_ST, .rm = (uint8_t)index, .mode = BUSTER_X86_REGISTER_DIRECT };
+                stack[depth - 1 - index] = stack[depth - 1];
+                stack[depth - 1] = BUSTER_X87_TRANSFER_NONE;
+            }
+        }
+        else if (kind == X87_TRANSFER_LOAD)
+        {
+            valid = depth < 8;
+            if (valid)
+            {
+                stack[depth++] = BUSTER_X87_TRANSFER_NONE;
+            }
+        }
+        else if (kind == X87_TRANSFER_STORE || kind == X87_TRANSFER_BINARY)
+        {
+            const uint32_t operands = kind == X87_TRANSFER_BINARY ? 2 : 1;
+            valid = depth >= operands && stack[depth - 1] == BUSTER_X87_TRANSFER_NONE && stack[depth - operands] == BUSTER_X87_TRANSFER_NONE;
+            depth -= valid;
+        }
+    }
+    return valid && depth == 0 && x87_transfer_verify(records, proposed, tokens, eligible, first, count);
 }
 
 static uint32_t x87_transfer_region(X86Instruction* records, const uint32_t* tokens, const uint8_t* eligible, uint32_t first, uint32_t end, bool vector)
 {
     const uint32_t count = end - first;
     X86Instruction proposed[BUSTER_X87_TRANSFER_RECORDS];
-    uint8_t depths[BUSTER_X87_TRANSFER_RECORDS + 1] = { 0 };
-    memcpy(proposed, records + first, (uint64_t)count * sizeof(X86Instruction));
-    for (uint32_t r = 0; r < count; r += 1)
-    {
-        const X87TransferKind kind = x87_transfer_kind(&records[first + r]);
-        depths[r + 1] = (uint8_t)(depths[r] + (kind == X87_TRANSFER_LOAD) - (kind == X87_TRANSFER_STORE || kind == X87_TRANSFER_BINARY));
-    }
     uint64_t candidates = x87_transfer_candidates(records, tokens, eligible, first, count, vector);
+    uint64_t reads = 0, repeated = 0;
+    for (uint32_t r = 0; candidates != 0 && r < count; r += 1)
+    {
+        const uint32_t home = tokens[first + r] - first;
+        if (home < r && records[first + r].form == X86_FORM_FLD_M80)
+        {
+            const uint64_t bit = UINT64_C(1) << home;
+            repeated |= reads & bit;
+            reads |= bit;
+        }
+    }
+    candidates &= reads & ~repeated;
     uint32_t pairs = 0;
-    uint32_t available = 0;
-    while (candidates != 0)
+    if (candidates != 0)
     {
-        const uint32_t store = (uint32_t)__builtin_ctzll(candidates);
-        candidates &= candidates - 1;
-        uint32_t load = count;
-        uint32_t reads = 0;
-        uint32_t peak = 0;
-        for (uint32_t r = store + 1; r < count; r += 1)
+        uint64_t selected = candidates;
+        if (!x87_transfer_plan(records + first, proposed, tokens, eligible, first, count, selected))
         {
-            const bool named = tokens[first + r] == first + store;
-            load = named && reads == 0 ? r : load;
-            reads += named;
+            // Under pressure or an unrepresentable permutation, retain only independently proven pairs.
+            selected = 0;
+            for (uint64_t remaining = candidates; remaining != 0; remaining &= remaining - 1)
+            {
+                const uint64_t trial = selected | (remaining & -remaining);
+                if (x87_transfer_plan(records + first, proposed, tokens, eligible, first, count, trial))
+                {
+                    selected = trial;
+                }
+            }
+            if (selected != 0 && !x87_transfer_plan(records + first, proposed, tokens, eligible, first, count, selected))
+            {
+                selected = 0;
+            }
         }
-        for (uint32_t r = store + 1; r <= load && r < count; r += 1)
+        if (selected != 0)
         {
-            peak = depths[r] > peak ? depths[r] : peak;
-        }
-        const bool keep = store >= available && reads == 1 && load < count && depths[store] == 1 && depths[load] == 0 && peak <= 6 &&
-                          x87_transfer_home(&records[first + store], &records[first + load]);
-        if (keep)
-        {
-            proposed[store] = (X86Instruction){ .form = X86_FORM_FLD_ST, .mode = BUSTER_X86_REGISTER_DIRECT };
-            proposed[load] = (X86Instruction){ .form = X86_FORM_FSTP_ST, .mode = BUSTER_X86_REGISTER_DIRECT };
-            available = load + 1;
-            pairs += 1;
+            memcpy(records + first, proposed, (uint64_t)count * sizeof(*proposed));
+            pairs = (uint32_t)__builtin_popcountll(selected);
         }
     }
-    const bool verified = pairs != 0 && x87_transfer_verify(records + first, proposed, tokens, eligible, first, count);
-    if (verified)
-    {
-        memcpy(records + first, proposed, (uint64_t)count * sizeof(X86Instruction));
-    }
-    return verified ? pairs : 0;
+    return pairs;
 }
 
-// `tokens[r]` is the private FSTP definition's record, or NONE. `eligible[definition]` certifies a canonical value
-// whose one read consumes it. `boundaries` has count + 1 entries: empty-stack entry boundaries, plus mandatory cuts.
+// `tokens[r]` is the private FSTP definition's record, or NONE. `eligible[definition]` certifies that one read consumes
+// that value. `boundaries` has count + 1 entries: empty-stack entry boundaries, plus mandatory cuts.
 // Missing annotations, unsupported spans, a full stack and rejected proofs leave the original records unchanged.
 static X87TransferStats x87_transfer_records(X86Instruction* records, uint32_t count, const uint32_t* tokens, const uint8_t* eligible, const uint8_t* boundaries, bool vector)
 {

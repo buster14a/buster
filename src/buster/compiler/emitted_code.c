@@ -86,20 +86,6 @@ struct EmittedInline
     uint32_t local_count;
 };
 
-// A literal of a body's code (#2744): read-only bytes its code loads rip-relative, a vector constant of `width` bytes (16,
-// 32 or 64), its words little-endian, those past the width zero. A reference whose target is BUSTER_EMITTED_LITERAL + k
-// is to the code's literal k while the body compiles on its lane, which numbers no unit symbol: the emission's merge
-// gives each distinct literal of the unit an entry of its pool (.rodata.cst16, .rodata.cst32 or .rodata.cst64, aligned
-// to its width) and its symbol, and renames the references to it (check_program_emit_literals). No symbol of a unit
-// reaches the tag: the merge refuses a unit of as many.
-typedef struct EmittedLiteral EmittedLiteral;
-struct EmittedLiteral
-{
-    uint64_t words[8];
-    uint32_t width;
-};
-#define BUSTER_EMITTED_LITERAL 0x80000000u
-
 // A jump table whose entries are values (#3298, Tier 1's ir_switch_table.c): the lowering's table `table` (an index of
 // CheckProgramLowered.tables), whose dispatch loads its entries as a switch's constants, which the emission writes in
 // place of its labels' offsets, one 32-bit value per entry.
@@ -120,7 +106,7 @@ struct EmittedCode
     uint32_t branch_count;
     LinkReference* references;
     uint32_t reference_count;
-    // Its literals (EmittedLiteral, #2744): Tier 1's vector constants that its references name; none for Tier 0's.
+    // Its literals (EmittedLiteral, #2744): vector or x87 constants named by the references.
     const EmittedLiteral* literals;
     uint32_t literal_count;
     // Its jump tables of values (EmittedValueTable, #3298): Tier 1's; none for Tier 0's.
@@ -466,6 +452,8 @@ static EmittedCode emitted_from_tier0(const Tier0Code* code, bool frames, bool s
         .branch_count = code->branch_count,
         .references = code->references,
         .reference_count = code->reference_count,
+        .literals = code->literals,
+        .literal_count = code->literal_count,
         .label_records = code->label_records,
         .label_count = code->label_count,
         .asm_label_records = code->asm_label_records,
