@@ -111,20 +111,18 @@ static uint32_t asm_find_latest_section(const AsmParser* parser, String8 name)
     return result;
 }
 
-// An ordinary definition wins regardless of its order relative to a linked-order table.
+// Resolve only the pending intersections. A later ordinary definition or directive can still claim its name.
 static void asm_resolve_linked_section_names(AsmParser* parser)
 {
-    for (uint32_t i = 1; parser->linked_sections && parser->result.error == 0 && i < parser->symbol_count; i += 1)
+    for (uint32_t i = parser->pending_names; i != 0 && parser->result.error == 0; i = parser->symbols[i].pending_name_next - 1)
     {
         AsmSymbol* symbol = &parser->symbols[i];
-        if (symbol->referenced && !symbol->defined && !symbol->section_start && !symbol->internal && !symbol->section_attributes &&
-            symbol->common == 0 && symbol->view == 0)
+        if (!symbol->defined && !symbol->section_attributes && symbol->common == 0 && symbol->view == 0)
         {
-            const uint32_t id = asm_find_latest_section(parser, symbol->name);
-            const AsmSection* section = &parser->sections[id];
-            if (id != 0 && section->linked_symbol != 0 && !section->name_binds_section)
+            const uint32_t id = asm_name_section(parser, symbol->name);
+            if (id != 0)
             {
-                if (section->name_ambiguous)
+                if (parser->sections[id].name_ambiguous)
                 {
                     asm_fail(parser, symbol->location, "ambiguous section name in expression");
                 }
@@ -132,7 +130,12 @@ static void asm_resolve_linked_section_names(AsmParser* parser)
                 {
                     symbol->section_start = true;
                     symbol->section_index = id;
+                    symbol->flags = BUSTER_LINK_SYMBOL_LOCAL;
                 }
+            }
+            else if (symbol->section_only)
+            {
+                asm_fail(parser, symbol->location, "invalid symbol name");
             }
         }
     }
@@ -384,7 +387,7 @@ static void asm_section_directive(AsmParser* parser, uint32_t token, uint32_t en
                     }
                     if (parser->result.error == 0)
                     {
-                        const uint32_t signature = asm_symbol_scoped(parser, signature_name, parser->tokens[signature_token].start, false);
+                        const uint32_t signature = asm_symbol_scoped(parser, signature_name, parser->tokens[signature_token].start, false, false);
                         AsmSymbol* symbol = &parser->symbols[signature];
                         if (symbol->group != 0 && symbol->group_flags != flags)
                         {
@@ -463,11 +466,7 @@ static void asm_section_directive(AsmParser* parser, uint32_t token, uint32_t en
         section->declared = true;
         if (added)
         {
-            if (linked_symbol == 0)
-            {
-                asm_bind_forward_section(parser, name, id);
-            }
-            parser->linked_sections |= linked_symbol != 0;
+            asm_bind_forward_section(parser, name, id);
             asm_section_index(parser, id);
         }
         parser->previous_section = parser->section;
@@ -487,6 +486,12 @@ static bool asm_object_declares(const AsmSymbol* symbol)
            (!weak || symbol->used);
 }
 
+// A defined ordinary signature takes precedence over a linked-order section of the same name.
+static uint32_t asm_group_signature_section(const AsmParser* parser, const AsmSymbol* symbol)
+{
+    return symbol->defined ? asm_symbol_section(parser, symbol->name) : asm_name_section(parser, symbol->name);
+}
+
 static void asm_object_groups(AsmParser* parser)
 {
     Link* link = &parser->result.link;
@@ -498,7 +503,7 @@ static void asm_object_groups(AsmParser* parser)
             const AsmSymbol* symbol = &parser->symbols[i];
             if (symbol->group != 0)
             {
-                const uint32_t section = parser->section_name_slots != 0 ? asm_find_latest_section(parser, symbol->name) : asm_find_section(parser, symbol->name, 0);
+                const uint32_t section = asm_group_signature_section(parser, symbol);
                 if (section != 0 && parser->sections[section].atom == 0)
                 {
                     AsmSection* target = &parser->sections[section];
@@ -526,7 +531,7 @@ static void asm_object_groups(AsmParser* parser)
                     {
                         asm_fail(parser, symbol->location, "unsupported section group signature definition");
                     }
-                    const uint32_t section = parser->section_name_slots != 0 ? asm_find_latest_section(parser, symbol->name) : asm_find_section(parser, symbol->name, 0);
+                    const uint32_t section = asm_group_signature_section(parser, symbol);
                     const bool section_signature = section != 0;
                     if (section_signature && (parser->sections[section].name_ambiguous || symbol->explicit_binding || symbol->has_size || symbol->flags != 0))
                     {

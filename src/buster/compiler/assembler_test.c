@@ -1902,6 +1902,7 @@ static int run_assembler_tests(int count, char** arguments)
         }
         asm_test_lex_guard(&test);
         test.digesting = false;
+        asm_test_linked_section_names(&test);
         asm_test_line_directories(&test);
         if (seed == 1 && fuzz == 2000)
         {

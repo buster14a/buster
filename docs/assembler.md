@@ -379,7 +379,11 @@ of section name, associated symbol and optional ID selects its own section,
 even when several targets lie in the same code section. The object writes the
 associated section's index in `sh_link`. Ordinary symbol definitions and
 explicit symbol directives take precedence over a linked-order table of the
-same name. A bare section reference can select a uniquely named table.
+same name. A section reference can select a uniquely named table and is
+diagnosed when the name ultimately identifies multiple sections. Quote names
+such as `"123patch"` and `"."` to reference their sections. The unquoted `.`
+is the location counter. A defined ordinary COMDAT signature also takes
+precedence over a linked-order table with the same name.
 
 `.set name, symbol + constant` (#1115: GCC's constant pools write one entry
 within another, `.set .LC4,.LC11+4`) is an alias, which may come before its
