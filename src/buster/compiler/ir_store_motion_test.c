@@ -265,10 +265,8 @@ static void ir_store_motion_test_fixture(IrStoreMotionTest* test, const IrStoreM
     snprintf(path, sizeof(path), "tests/ir/store-motion/%s.ir", fixture->name);
     String8 text = { 0 };
     IrFunction function = { 0 };
-    IrFunction twin = { 0 };
-    const bool parsed = ir_optimize_text_read(path, source, &text) && ir_optimize_text_parse(text, input, execution, scratch, &function, &twin);
-    arena_pop_to(execution, 0);
-    ir_store_motion_test_expect(test, parsed, fixture->name, "the fixture is read and parsed alike by both parser paths");
+    const bool parsed = ir_optimize_text_read(path, source, &text) && ir_optimize_text_parse(text, input, scratch, &function);
+    ir_store_motion_test_expect(test, parsed, fixture->name, "the fixture is read and parsed");
     if (parsed)
     {
         const uint64_t om = output->length;
@@ -497,9 +495,7 @@ static void ir_store_motion_test_contract(IrStoreMotionTest* test, Arena* source
 {
     String8 text = { 0 };
     IrFunction function = { 0 };
-    IrFunction twin = { 0 };
-    const bool parsed = ir_optimize_text_read("tests/ir/store-motion/fields.ir", source, &text) && ir_optimize_text_parse(text, input, execution, scratch, &function, &twin);
-    arena_pop_to(execution, 0);
+    const bool parsed = ir_optimize_text_read("tests/ir/store-motion/fields.ir", source, &text) && ir_optimize_text_parse(text, input, scratch, &function);
     ir_store_motion_test_expect(test, parsed, "contract", "the fixture is read");
     if (parsed)
     {
@@ -595,9 +591,7 @@ static __attribute__((unused)) int run_ir_store_motion_tests(int argc, char** ar
                            images != NULL;
         ir_store_motion_test_expect(&test, ready, "setup", "the arenas and images are reserved");
         String8 text = { 0 };
-        IrFunction twin = { 0 };
-        const bool called = ready && ir_optimize_text_read("tests/ir/store-motion/callee.ir", &source, &text) && ir_optimize_text_parse(text, &callee, &execution, &scratch, &test.callee, &twin);
-        arena_pop_to(&execution, 0);
+        const bool called = ready && ir_optimize_text_read("tests/ir/store-motion/callee.ir", &source, &text) && ir_optimize_text_parse(text, &callee, &scratch, &test.callee);
         arena_pop_to(&source, 0);
         ir_store_motion_test_expect(&test, called, "setup", "the callee is read");
         for (uint32_t k = 0; called && k < BUSTER_ARRAY_LENGTH(ir_store_motion_test_fixtures); k += 1)

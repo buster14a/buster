@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// One-pass, nonrecursive reader for ir_print's per-function text. Include after ir.c and String8. ir_parse and its
-// scalar twin consume one function; consumed lets a caller read a sequence without retaining a module wrapper.
+// One-pass, nonrecursive reader for ir_print's per-function text. Include after ir.c and String8. ir_parse
+// consumes one function; consumed lets a caller read a sequence without retaining a module wrapper.
 // Newline classification is 64-byte SIMD work with exact masked tails; ordered line grammar writes geometric
 // scratch builders. Publication uses ir_create, transposes instruction rows into its exact columns, then verifies.
 // Output and scratch arenas, and the source slice, must be disjoint. Failure preserves the output view and arena;
@@ -97,7 +97,6 @@ struct IrParseState
 };
 
 static __attribute__((unused)) IrParseResult ir_parse(String8 source, Arena* output, Arena* scratch, IrFunction* result);
-static __attribute__((unused)) IrParseResult ir_parse_scalar(String8 source, Arena* output, Arena* scratch, IrFunction* result);
 
 static void ir_parse_fail(IrParseState* state, IrParseError error)
 {
@@ -1125,44 +1124,32 @@ static void ir_parse_instruction(IrParseState* state)
     ir_parse_append(state, &state->rows, &row);
 }
 
-static uint64_t ir_parse_line_end(IrParseState* state, uint64_t first, bool vector)
+static uint64_t ir_parse_line_end(IrParseState* state, uint64_t first)
 {
-    (void)vector;
-
     const String8 source = state->source;
     uint64_t end = first;
-    if (BUSTER_VECTOR_PATH(vector))
+    bool found = false;
+    while (!found)
     {
-        bool found = false;
-        while (!found)
+        if (state->scan_newlines != 0)
         {
-            if (state->scan_newlines != 0)
-            {
-                end = state->scan_first + (uint32_t)__builtin_ctzll(state->scan_newlines);
-                state->scan_newlines &= state->scan_newlines - 1;
-                found = true;
-            }
-            else if (state->scan_end == source.length)
-            {
-                end = source.length;
-                found = true;
-            }
-            else
-            {
-                state->scan_first = state->scan_end;
-                const uint32_t count = source.length - state->scan_first < 64 ? (uint32_t)(source.length - state->scan_first) : 64;
-                const __mmask64 active = count == 64 ? UINT64_MAX : (UINT64_C(1) << count) - 1;
-                const __m512i bytes = _mm512_maskz_loadu_epi8(active, source.pointer + state->scan_first);
-                state->scan_newlines = _mm512_cmpeq_epi8_mask(bytes, _mm512_set1_epi8('\n')) & active;
-                state->scan_end += count;
-            }
+            end = state->scan_first + (uint32_t)__builtin_ctzll(state->scan_newlines);
+            state->scan_newlines &= state->scan_newlines - 1;
+            found = true;
         }
-    }
-    else
-    {
-        while (end < source.length && source.pointer[end] != '\n')
+        else if (state->scan_end == source.length)
         {
-            end += 1;
+            end = source.length;
+            found = true;
+        }
+        else
+        {
+            state->scan_first = state->scan_end;
+            const uint32_t count = source.length - state->scan_first < 64 ? (uint32_t)(source.length - state->scan_first) : 64;
+            const __mmask64 active = count == 64 ? UINT64_MAX : (UINT64_C(1) << count) - 1;
+            const __m512i bytes = _mm512_maskz_loadu_epi8(active, source.pointer + state->scan_first);
+            state->scan_newlines = _mm512_cmpeq_epi8_mask(bytes, _mm512_set1_epi8('\n')) & active;
+            state->scan_end += count;
         }
     }
     return end;
@@ -1176,10 +1163,8 @@ static void ir_parse_copy(IrParseArray array, void* output)
     }
 }
 
-static void ir_parse_publish(IrParseState* state, Arena* output, bool vector, IrFunction* result)
+static void ir_parse_publish(IrParseState* state, Arena* output, IrFunction* result)
 {
-    (void)vector;
-
     const IrSizes sizes = {
         .instruction_count = state->rows.count,
         .block_count = state->blocks.count,
@@ -1262,10 +1247,8 @@ static void ir_parse_publish(IrParseState* state, Arena* output, bool vector, Ir
     }
 }
 
-static IrParseResult ir_parse_path(String8 source, Arena* output, Arena* scratch, IrFunction* result, bool vector)
+static IrParseResult ir_parse(String8 source, Arena* output, Arena* scratch, IrFunction* result)
 {
-    (void)vector;
-
     IrParseState state = {
         .source = source,
         .scratch = scratch,
@@ -1300,7 +1283,7 @@ static IrParseResult ir_parse_path(String8 source, Arena* output, Arena* scratch
     {
         state.cursor = next;
         state.line_start = next;
-        state.end = ir_parse_line_end(&state, next, BUSTER_VECTOR_PATH(vector));
+        state.end = ir_parse_line_end(&state, next);
         next = state.end + (state.end < source.length);
         if (!ir_parse_end_line(&state))
         {
@@ -1372,7 +1355,7 @@ static IrParseResult ir_parse_path(String8 source, Arena* output, Arena* scratch
         }
         else
         {
-            ir_parse_publish(&state, output, BUSTER_VECTOR_PATH(vector), result);
+            ir_parse_publish(&state, output, result);
         }
     }
     if (state.result.error != IR_PARSE_OK && output != 0 && output->length >= output_mark)
@@ -1386,14 +1369,3 @@ static IrParseResult ir_parse_path(String8 source, Arena* output, Arena* scratch
     return state.result;
 }
 
-static IrParseResult ir_parse_scalar(String8 source, Arena* output, Arena* scratch, IrFunction* result);
-
-static IrParseResult ir_parse(String8 source, Arena* output, Arena* scratch, IrFunction* result)
-{
-    return ir_parse_path(source, output, scratch, result, true);
-}
-
-static IrParseResult ir_parse_scalar(String8 source, Arena* output, Arena* scratch, IrFunction* result)
-{
-    return ir_parse_path(source, output, scratch, result, false);
-}

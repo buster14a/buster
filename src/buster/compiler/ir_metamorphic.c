@@ -568,63 +568,55 @@ static IrMetaFailure ir_meta_validate(const IrFunction* function, Arena* scratch
     return failure;
 }
 
-static IrMetaFailure ir_meta_parse_pair(String8 text, Arena* output, Arena* twin, Arena* scratch, IrFunction* result,
-                                       IrFunction* result_twin, IrMetaFailure invalid)
+static IrMetaFailure ir_meta_parse(String8 text, Arena* output, Arena* scratch, IrFunction* result, IrMetaFailure invalid)
 {
     const uint64_t output_mark = output->length;
-    const uint64_t twin_mark = twin->length;
     const uint64_t scratch_mark = scratch->length;
-    IrFunction parsed[2] = { 0 };
-    const IrParseResult vector = ir_parse(text, output, scratch, parsed);
-    const IrParseResult scalar = ir_parse_scalar(text, twin, scratch, parsed + 1);
-    IrMetaFailure failure = vector.error == IR_PARSE_OK && scalar.error == IR_PARSE_OK && vector.consumed == text.length && scalar.consumed == text.length ?
-                            IR_META_OK : vector.error == IR_PARSE_MEMORY || vector.error == IR_PARSE_LIMIT || scalar.error == IR_PARSE_MEMORY || scalar.error == IR_PARSE_LIMIT ?
-                            IR_META_RESOURCE : invalid;
+    IrFunction parsed = { 0 };
+    const IrParseResult parse = ir_parse(text, output, scratch, &parsed);
+    IrMetaFailure failure = parse.error == IR_PARSE_OK && parse.consumed == text.length ? IR_META_OK :
+                            parse.error == IR_PARSE_MEMORY || parse.error == IR_PARSE_LIMIT ? IR_META_RESOURCE : invalid;
     failure = scratch->length == scratch_mark ? failure : IR_META_VERIFY;
     if (failure == IR_META_OK)
     {
-        *result = parsed[0];
-        *result_twin = parsed[1];
+        *result = parsed;
     }
     else
     {
-        arena_pop_to(twin, twin_mark);
         arena_pop_to(output, output_mark);
         arena_pop_to(scratch, scratch_mark);
     }
     return failure;
 }
 
-static IrMetaFailure ir_meta_roundtrip(const IrFunction* function, Arena* text, Arena* output, Arena* twin, Arena* scratch, uint64_t* fingerprint)
+static IrMetaFailure ir_meta_roundtrip(const IrFunction* function, Arena* text, Arena* output, Arena* scratch, uint64_t* fingerprint)
 {
     const uint64_t text_mark = text->length;
     const uint64_t output_mark = output->length;
-    const uint64_t twin_mark = twin->length;
     String8 printed = { 0 };
     IrMetaFailure failure = ir_meta_print(function, text, scratch, &printed);
-    IrFunction parsed[2] = { 0 };
+    IrFunction parsed = { 0 };
     if (failure == IR_META_OK)
     {
-        failure = ir_meta_parse_pair(printed, output, twin, scratch, parsed, parsed + 1, IR_META_TEXT);
+        failure = ir_meta_parse(printed, output, scratch, &parsed, IR_META_TEXT);
     }
-    for (uint32_t path = 0; failure == IR_META_OK && path < 2; path += 1)
+    if (failure == IR_META_OK)
     {
-        String8 again = { 0 };
-        failure = ir_meta_validate(parsed + path, scratch);
-        if (failure == IR_META_OK)
-        {
-            failure = ir_meta_print(parsed + path, text, scratch, &again);
-        }
-        if (failure == IR_META_OK && !ir_meta_same_text(printed, again))
-        {
-            failure = IR_META_TEXT;
-        }
+        failure = ir_meta_validate(&parsed, scratch);
+    }
+    String8 again = { 0 };
+    if (failure == IR_META_OK)
+    {
+        failure = ir_meta_print(&parsed, text, scratch, &again);
+    }
+    if (failure == IR_META_OK && !ir_meta_same_text(printed, again))
+    {
+        failure = IR_META_TEXT;
     }
     if (failure == IR_META_OK && fingerprint != NULL)
     {
         *fingerprint = ir_meta_hash(*fingerprint, printed.pointer, printed.length);
     }
-    arena_pop_to(twin, twin_mark);
     arena_pop_to(output, output_mark);
     arena_pop_to(text, text_mark);
     return failure;
@@ -779,10 +771,9 @@ static IrMetaFailure ir_meta_campaign(const IrMetaOptions* options, IrMetaTally*
     Arena optimized = arena_reserve(BUSTER_IR_META_ARENA);
     Arena printed = arena_reserve(BUSTER_IR_META_ARENA);
     Arena parsed = arena_reserve(BUSTER_IR_META_ARENA);
-    Arena parsed_twin = arena_reserve(BUSTER_IR_META_ARENA);
     Arena scratch = arena_reserve(BUSTER_IR_META_ARENA);
     IrMetaFailure failure = original.base != NULL && transformed.base != NULL && twin.base != NULL && optimized.base != NULL &&
-                            printed.base != NULL && parsed.base != NULL && parsed_twin.base != NULL && scratch.base != NULL ? IR_META_OK : IR_META_RESOURCE;
+                            printed.base != NULL && parsed.base != NULL && scratch.base != NULL ? IR_META_OK : IR_META_RESOURCE;
     if (failure == IR_META_OK)
     {
         failure = ir_meta_contracts(tally, &original, &transformed, &scratch);
@@ -801,14 +792,13 @@ static IrMetaFailure ir_meta_campaign(const IrMetaOptions* options, IrMetaTally*
         IrMetaFailureRecord record = { .test = ir_meta_case(options->seed, options->first + number) };
         char source_text[BUSTER_IR_META_TEXT];
         IrFunction function = { 0 };
-        IrFunction function_twin = { 0 };
         if (!ir_meta_generate(&record.test, source_text, sizeof(source_text), &record.source))
         {
             failure = IR_META_GENERATION;
         }
         else
         {
-            failure = ir_meta_parse_pair(record.source, &original, &twin, &scratch, &function, &function_twin, IR_META_GENERATION);
+            failure = ir_meta_parse(record.source, &original, &scratch, &function, IR_META_GENERATION);
         }
         record.original = failure == IR_META_OK ? &function : NULL;
         if (failure == IR_META_OK && options->replay != NULL && !ir_meta_replay_one(options->replay, "original.ir", &function, record.source, &scratch))
@@ -818,7 +808,7 @@ static IrMetaFailure ir_meta_campaign(const IrMetaOptions* options, IrMetaTally*
         tally->checks += 1;
         if (failure == IR_META_OK)
         {
-            failure = ir_meta_roundtrip(&function, &printed, &parsed, &parsed_twin, &scratch, &tally->fingerprint);
+            failure = ir_meta_roundtrip(&function, &printed, &parsed, &scratch, &tally->fingerprint);
             tally->checks += 1;
         }
         tally->cases += failure == IR_META_OK;
@@ -913,7 +903,7 @@ static IrMetaFailure ir_meta_campaign(const IrMetaOptions* options, IrMetaTally*
                     }
                     if (failure == IR_META_OK)
                     {
-                        failure = ir_meta_roundtrip(&candidate, &printed, &parsed, &parsed_twin, &scratch, NULL);
+                        failure = ir_meta_roundtrip(&candidate, &printed, &parsed, &scratch, NULL);
                         tally->checks += 1;
                     }
                     static const uint64_t inputs[] = { 0, 1, 2, 3, 15, UINT64_MAX, UINT64_C(0x8000000000000000) };
@@ -963,7 +953,6 @@ static IrMetaFailure ir_meta_campaign(const IrMetaOptions* options, IrMetaTally*
         }
     }
     arena_release(&scratch);
-    arena_release(&parsed_twin);
     arena_release(&parsed);
     arena_release(&printed);
     arena_release(&optimized);

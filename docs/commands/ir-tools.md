@@ -6,8 +6,8 @@ requirements. [Command index](README.md).
 
 ## Module overview
 
-- `ir_parse.c` reads the shared printer format through bounded scalar/vector
-  paths. `test-ir-parse [--fixtures DIR]` checks canonical `.ir` fixtures
+- `ir_parse.c` reads the shared printer format with one bounded path, a
+  64-byte newline scan (#2924). `test-ir-parse [--fixtures DIR]` checks canonical `.ir` fixtures
   and diagnostics; its fixtures are `tests/ir/catalog.tsv`'s cases (runtime
   data, #2053: a line of ID, FILE and NAME each, under
   `buster-fixtures v1 ir-parse`), and every `.ir` file in `tests/ir` must be
