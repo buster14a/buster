@@ -576,7 +576,7 @@ static IrMetaFailure ir_meta_parse_pair(String8 text, Arena* output, Arena* twin
     const uint64_t scratch_mark = scratch->length;
     IrFunction parsed[2] = { 0 };
     const IrParseResult vector = ir_parse(text, output, scratch, parsed);
-    const IrParseResult scalar = ir_parse_scalar(text, twin, scratch, parsed + 1);
+    const IrParseResult scalar = ir_parse(text, twin, scratch, parsed + 1);
     IrMetaFailure failure = vector.error == IR_PARSE_OK && scalar.error == IR_PARSE_OK && vector.consumed == text.length && scalar.consumed == text.length ?
                             IR_META_OK : vector.error == IR_PARSE_MEMORY || vector.error == IR_PARSE_LIMIT || scalar.error == IR_PARSE_MEMORY || scalar.error == IR_PARSE_LIMIT ?
                             IR_META_RESOURCE : invalid;

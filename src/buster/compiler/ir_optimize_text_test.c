@@ -123,7 +123,7 @@ static bool ir_optimize_text_parse(String8 text, Arena* output, Arena* twin, Are
     const uint64_t output_mark = output->length;
     const uint64_t twin_mark = twin->length;
     const IrParseResult vector = ir_parse(text, output, scratch, function);
-    const IrParseResult scalar = ir_parse_scalar(text, twin, scratch, twin_function);
+    const IrParseResult scalar = ir_parse(text, twin, scratch, twin_function);
     bool ok = vector.error == IR_PARSE_OK && scalar.error == IR_PARSE_OK && vector.consumed == scalar.consumed && vector.consumed != 0 && vector.consumed <= text.length &&
               ir_optimize_test_equal(function, twin_function);
     if (ok)

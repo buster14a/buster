@@ -360,7 +360,7 @@ static IrMetaFailure ir_meta_contracts(IrMetaTally* tally, Arena* source, Arena*
     const uint64_t before_source = source->length;
     const uint64_t before_output = output->length;
     const IrParseResult vector = ir_parse(invalid_text, source, scratch, invalid);
-    const IrParseResult scalar = ir_parse_scalar(invalid_text, output, scratch, invalid + 1);
+    const IrParseResult scalar = ir_parse(invalid_text, output, scratch, invalid + 1);
     valid = ir_meta_expect(tally, vector.error == IR_PARSE_SYNTAX && scalar.error == IR_PARSE_SYNTAX && vector.offset == scalar.offset &&
                           vector.line == scalar.line && vector.column == scalar.column && vector.consumed == scalar.consumed &&
                           source->length == before_source && output->length == before_output && memcmp(invalid, saved, sizeof(invalid)) == 0,

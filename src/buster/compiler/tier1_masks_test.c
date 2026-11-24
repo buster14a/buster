@@ -1061,22 +1061,18 @@ static const char tier1_masks_test_words[] = "function (ptr) -> void {\n"
                                              "  %7 = ret.void\n"
                                              "}\n";
 
-// A function from IR text, by both of ir_parse.c's paths, which must agree, and its dominance (dominators.c's), in the
-// test's output arena.
+// A function from IR text, and its dominance (dominators.c's), in the test's output arena.
 static bool tier1_masks_test_dominance(Tier1MasksTest* test, const IrFunction* function, IrDominance* dominance);
 
 static bool tier1_masks_test_parse(Tier1MasksTest* test, const char* text, IrFunction* function, IrDominance* dominance)
 {
     const String8 source = { .pointer = (char*)text, .length = strlen(text) };
-    IrFunction twin;
-    const IrParseResult vector = ir_parse(source, &test->output, &test->scratch, function);
-    const IrParseResult scalar = ir_parse_scalar(source, &test->output, &test->scratch, &twin);
-    bool ok = tier1_masks_test_expect(test, vector.error == IR_PARSE_OK && scalar.error == IR_PARSE_OK && vector.consumed == scalar.consumed, "both IR parsers take the fixture");
+    const IrParseResult parsed = ir_parse(source, &test->output, &test->scratch, function);
+    const bool ok = tier1_masks_test_expect(test, parsed.error == IR_PARSE_OK, "the IR parser takes the fixture");
     if (!ok)
     {
-        printf("test-tier1-masks: parse error %u line %" PRIu64 ", scalar %u line %" PRIu64 "\n", (unsigned)vector.error, vector.line, (unsigned)scalar.error, scalar.line);
+        printf("test-tier1-masks: parse error %u line %" PRIu64 "\n", (unsigned)parsed.error, parsed.line);
     }
-    ok = ok && tier1_masks_test_expect(test, function->instruction_count == twin.instruction_count && memcmp(function->op, twin.op, function->instruction_count) == 0 && memcmp(function->type, twin.type, function->instruction_count) == 0, "both parsers make the same function");
     return ok && tier1_masks_test_dominance(test, function, dominance);
 }
 

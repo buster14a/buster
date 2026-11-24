@@ -532,20 +532,17 @@ static const char* const tier1_wide_test_refusals[] = {
     "}\n",
 };
 
-// A function from IR text, by both of ir_parse.c's paths, which must agree.
+// A function from IR text.
 static bool tier1_wide_test_parse(Tier1WideTest* test, const char* name, const char* text, IrFunction* function)
 {
     const String8 source = { .pointer = (char*)text, .length = strlen(text) };
-    IrFunction twin;
-    const IrParseResult vector = ir_parse(source, &test->output, &test->scratch, function);
-    const IrParseResult scalar = ir_parse_scalar(source, &test->output, &test->scratch, &twin);
-    bool ok = tier1_wide_test_expect(test, vector.error == IR_PARSE_OK && scalar.error == IR_PARSE_OK && vector.consumed == scalar.consumed, "both IR parsers take the program");
+    const IrParseResult parsed = ir_parse(source, &test->output, &test->scratch, function);
+    const bool ok = tier1_wide_test_expect(test, parsed.error == IR_PARSE_OK, "the IR parser takes the program");
     if (!ok)
     {
-        printf("test-tier1-wide: %s: parse error %u line %" PRIu64 ", scalar %u line %" PRIu64 "\n", name, (unsigned)vector.error, vector.line, (unsigned)scalar.error, scalar.line);
+        printf("test-tier1-wide: %s: parse error %u line %" PRIu64 "\n", name, (unsigned)parsed.error, parsed.line);
     }
-    return ok && tier1_wide_test_expect(test, function->instruction_count == twin.instruction_count && memcmp(function->op, twin.op, function->instruction_count) == 0 && memcmp(function->type, twin.type, function->instruction_count) == 0,
-                                        "both parsers make the same function");
+    return ok;
 }
 
 // A function's dominance, from its CFG, as the verifier and Tier 1's selection take it.

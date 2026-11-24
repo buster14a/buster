@@ -165,7 +165,7 @@ static IrReducePublication ir_reduce_driver_replay(const char* path, IrReduceOra
         String8 source = { 0 };
         IrFunction function = { 0 };
         const bool read = ir_reduce_driver_read(path, &text, &source);
-        const IrParseResult parsed = read ? ir_parse_scalar(source, &output, &checks, &function) : (IrParseResult){ .error = IR_PARSE_MEMORY };
+        const IrParseResult parsed = read ? ir_parse(source, &output, &checks, &function) : (IrParseResult){ .error = IR_PARSE_MEMORY };
         if (parsed.error != IR_PARSE_MEMORY && parsed.error != IR_PARSE_LIMIT)
         {
             result = IR_REDUCE_PUBLICATION_REFUSED;
@@ -249,7 +249,7 @@ static IrReducePublication ir_reduce_driver_bundle(const char* directory, const 
                 limits->execution_steps, limits->call_frames, oracle->passes, seed);
         fprintf(replay, " --expect-kind %u --expect-pass %u --expect-detail %u", reduced->failure.kind,
                 reduced->failure.pass, reduced->failure.detail);
-        // The independent publication check reparses with the scalar parser; replay that validated path.
+        // The driver's --scalar, which selects nothing since #2924, until the drivers' flags go.
         fputs(" --scalar", replay);
         if (oracle->verifier)
         {
@@ -329,6 +329,7 @@ static int run_ir_reduce(int argc, char** argv)
     const char* revision = NULL;
     bool scalar = false;
     bool valid = true;
+    (void)scalar;
     for (int i = 0; valid && i < argc; i += 1)
     {
         const char* option = argv[i];
@@ -338,6 +339,7 @@ static int run_ir_reduce(int argc, char** argv)
         }
         else if (strcmp(option, "--scalar") == 0)
         {
+            // Since #2924 it selects nothing; it stays accepted until the drivers' flags go.
             scalar = true;
         }
         else if (option[0] == '-' && i + 1 < argc)
@@ -458,8 +460,7 @@ static int run_ir_reduce(int argc, char** argv)
         bool ready = source.base != NULL && input.base != NULL && output.base != NULL && scratch.base != NULL &&
                      (demo != NULL || ir_reduce_driver_read(path, &source, &text));
         IrFunction function = { 0 };
-        const IrParseResult parsed = ready ? (scalar ? ir_parse_scalar(text, &input, &scratch, &function) :
-                                                        ir_parse(text, &input, &scratch, &function)) : (IrParseResult){ .error = IR_PARSE_MEMORY };
+        const IrParseResult parsed = ready ? ir_parse(text, &input, &scratch, &function) : (IrParseResult){ .error = IR_PARSE_MEMORY };
         ready = ready && parsed.error == IR_PARSE_OK && parsed.consumed == text.length;
         if (ready && oracle.argument_count == 0 && function.parameter_count <= BUSTER_ARRAY_LENGTH(oracle.arguments))
         {
