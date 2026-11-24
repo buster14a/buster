@@ -425,7 +425,10 @@ static void tier1_select_test_burs_fixtures(Tier1SelectTest* test)
 // class must have its candidate, and both classes must occur.
 static void tier1_select_test_burs_addresses(Tier1SelectTest* test)
 {
-    static const int64_t values[] = { 0, 1, -1, 7, INT32_MAX, INT32_MIN, (int64_t)INT32_MAX + 1, (int64_t)INT32_MIN - 1, INT64_C(1) << 28, -(INT64_C(1) << 28), INT64_C(1) << 40, -(INT64_C(1) << 40), INT64_MAX, INT64_MIN };
+    // Past 2^60 every scale's product meets 64 bits' edge: exactly 2^63 overflows, exactly -2^63 doesn't.
+    static const int64_t values[] = { 0, 1, -1, 7, INT32_MAX, INT32_MIN, (int64_t)INT32_MAX + 1, (int64_t)INT32_MIN - 1, INT64_C(1) << 28, -(INT64_C(1) << 28), INT64_C(1) << 40, -(INT64_C(1) << 40),
+                                      INT64_C(1) << 60, -(INT64_C(1) << 60), -(INT64_C(1) << 60) - 1, INT64_C(1) << 61, -(INT64_C(1) << 61), -(INT64_C(1) << 61) - 1, INT64_C(1) << 62, -(INT64_C(1) << 62),
+                                      -(INT64_C(1) << 62) - 1, INT64_MAX, INT64_MIN };
     static const int64_t offsets[] = { 0, 16, -16, INT32_MAX, INT32_MIN, (int64_t)INT32_MAX + 1, (int64_t)INT32_MIN - 1, -(INT64_C(1) << 40), INT64_C(1) << 40, -(INT64_C(1) << 31) + 8, INT64_MAX, INT64_MIN };
     static const uint32_t scales[] = { 1, 2, 4, 8 };
     const uint32_t value_count = BUSTER_ARRAY_LENGTH(values);
@@ -513,17 +516,20 @@ static void tier1_select_test_burs_slots(Tier1SelectTest* test)
             length += (uint64_t)snprintf(source + length, room - length, "  slot $%u size=%" PRIu64 " align=%u type=void flags=0x01\n", k,
                                          kind == 1 ? BUSTER_TIER1_SELECT_MAX_OBJECT_BYTES + 8 : (uint64_t)16, kind == 2 ? BUSTER_TIER1_SELECT_MAX_OBJECT_ALIGNMENT * 2u : 8u);
         }
+        // The bounds themselves, which are objects: exactly the largest size and exactly the largest alignment.
+        length += (uint64_t)snprintf(source + length, room - length, "  slot $21 size=%" PRIu64 " align=8 type=void flags=0x01\n  slot $22 size=16 align=%u type=void flags=0x01\n",
+                                     BUSTER_TIER1_SELECT_MAX_OBJECT_BYTES, BUSTER_TIER1_SELECT_MAX_OBJECT_ALIGNMENT);
         length += (uint64_t)snprintf(source + length, room - length, "b0:\n  %%0 = param.ptr 0\n  %%1 = param.i64 1\n");
-        for (uint32_t k = 0; k <= 20; k += 1)
+        for (uint32_t k = 0; k <= 22; k += 1)
         {
             length += (uint64_t)snprintf(source + length, room - length, "  %%%u = stack_addr.ptr $%u\n", k + 2, k);
         }
-        length += (uint64_t)snprintf(source + length, room - length, "  %%23 = br.void b1\nb1:\n");
-        for (uint32_t k = 0; k <= 20; k += 1)
+        length += (uint64_t)snprintf(source + length, room - length, "  %%25 = br.void b1\nb1:\n");
+        for (uint32_t k = 0; k <= 22; k += 1)
         {
-            length += (uint64_t)snprintf(source + length, room - length, "  %%%u = stack_addr.ptr $%u\n", k + 24, k);
+            length += (uint64_t)snprintf(source + length, room - length, "  %%%u = stack_addr.ptr $%u\n", k + 26, k);
         }
-        length += (uint64_t)snprintf(source + length, room - length, "  %%45 = ret.void %%0\n}\n");
+        length += (uint64_t)snprintf(source + length, room - length, "  %%49 = ret.void %%0\n}\n");
         valid = length < room;
     }
     IrFunction function = { 0 };
@@ -541,11 +547,47 @@ static void tier1_select_test_burs_slots(Tier1SelectTest* test)
             others += function.op[node] == IR_STACK_ADDR && !tier1_select_stack_object(&function, function.a[node]);
         }
     }
-    tier1_select_test_expect(test, check.functions == 1 && check.mismatches == 0 && check.addresses == 42 && objects == 12 && others == 30,
+    tier1_select_test_expect(test, check.functions == 1 && check.mismatches == 0 && check.addresses == 46 && objects == 16 && others == 30,
                              "frame objects' addresses: every class its slot's definition's, in both blocks");
     arena_release(&scratch);
     arena_release(&input);
     arena_release(&text);
+}
+
+// The exact edges, with their classes written out (#3493's review): a constant times 8 that is exactly 2^63 (overflows:
+// REG) and one just past -2^63 (REG), and frame objects of exactly the largest size and alignment (SLOT_X).
+static void tier1_select_test_burs_edges(Tier1SelectTest* test)
+{
+    static const char source[] = "function (ptr, i64) -> i64 {\n"
+                                 "  slot $0 size=268435456 align=8 type=void flags=0x01\n"
+                                 "  slot $1 size=16 align=1073741824 type=void flags=0x01\n"
+                                 "b0:\n"
+                                 "  %0 = param.ptr 0\n"
+                                 "  %1 = param.i64 1\n"
+                                 "  %2 = const.i64 0x00000000000000001000000000000000\n"
+                                 "  %3 = const.i64 0x0000000000000000efffffffffffffff\n"
+                                 "  %4 = address.ptr %0 + %2 * 8 offset=9223372036854775807\n"
+                                 "  %5 = address.ptr %0 + %3 * 8 offset=-9223372036854775808\n"
+                                 "  %6 = stack_addr.ptr $0\n"
+                                 "  %7 = stack_addr.ptr $1\n"
+                                 "  %8 = ret.void %1\n"
+                                 "}\n";
+    _Static_assert(BUSTER_TIER1_SELECT_MAX_OBJECT_BYTES == 268435456 && BUSTER_TIER1_SELECT_MAX_OBJECT_ALIGNMENT == 1073741824, "the edges' fixture names the planner's bounds");
+    Arena input = arena_reserve(UINT64_C(1) << 24);
+    Arena scratch = arena_reserve(UINT64_C(1) << 26);
+    IrFunction function = { 0 };
+    bool valid = input.base != 0 && scratch.base != 0 && ir_parse((String8){ .pointer = (char*)source, .length = sizeof(source) - 1 }, &input, &scratch, &function).error == IR_PARSE_OK &&
+                 ir_verify(&function, &scratch, 0).error == IR_OK;
+    tier1_select_test_expect(test, valid, "the edges' fixture parses and verifies");
+    Tier1BursCheck check = { 0 };
+    if (valid)
+    {
+        tier1_burs_check_function(&check, &function, 0, &scratch);
+        valid = !tier1_burs_displacement(&function, 4) && !tier1_burs_displacement(&function, 5) && tier1_select_stack_object(&function, 0) && tier1_select_stack_object(&function, 1);
+    }
+    tier1_select_test_expect(test, valid && check.mismatches == 0 && check.addresses == 4, "a product of exactly 2^63, one past -2^63, and the planner's exact bounds: their definitions' classes");
+    arena_release(&scratch);
+    arena_release(&input);
 }
 
 // Truth values' links at every lane of the classifier's 16: 32 chains of five nodes, (a < b) zero-extended, compared
@@ -594,6 +636,7 @@ static void tier1_select_test_burs(Tier1SelectTest* test)
     tier1_select_test_burs_fixtures(test);
     tier1_select_test_burs_addresses(test);
     tier1_select_test_burs_slots(test);
+    tier1_select_test_burs_edges(test);
     tier1_select_test_burs_links(test);
 }
 #endif
