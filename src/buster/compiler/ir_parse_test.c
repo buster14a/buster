@@ -22,6 +22,8 @@ struct IrParseTest
     uint64_t checks;
     uint64_t failures;
     uint64_t functions;
+    // Every parse's diagnostic and published columns, in order (#2924): frozen while the line scan's scalar twin agreed.
+    uint64_t digest;
     bool operations[IR_OP_COUNT];
     bool types[IR_TYPE_COUNT];
 };
@@ -120,6 +122,43 @@ static bool ir_parse_test_print(const IrFunction* function, String8 expected, Ar
     return equal;
 }
 
+#define BUSTER_IR_PARSE_TEST_DIGEST UINT64_C(0x15368917bf264be2)
+
+static void ir_parse_test_fold_bytes(uint64_t* digest, const void* bytes, uint64_t count)
+{
+    const uint8_t* source = bytes;
+    for (uint64_t k = 0; k < count; k += 1)
+    {
+        *digest = (*digest ^ source[k]) * UINT64_C(0x100000001b3);
+    }
+}
+
+static void ir_parse_test_fold_result(IrParseTest* test, IrParseResult result, const IrFunction* function)
+{
+    const uint64_t words[] = { result.error, result.consumed, result.offset, result.line, result.column };
+    for (uint32_t k = 0; k < sizeof(words) / sizeof(words[0]); k += 1)
+    {
+        ir_test_fold(&test->digest, words[k]);
+    }
+    if (result.error == IR_PARSE_OK)
+    {
+        const uint64_t n = function->instruction_count;
+        const uint64_t counts[] = { n, function->block_count, function->constant_count, function->extra_count, function->slot_count, function->address_count, function->call_count };
+        for (uint32_t k = 0; k < sizeof(counts) / sizeof(counts[0]); k += 1)
+        {
+            ir_test_fold(&test->digest, counts[k]);
+        }
+        ir_parse_test_fold_bytes(&test->digest, function->op, n);
+        ir_parse_test_fold_bytes(&test->digest, function->type, n);
+        ir_parse_test_fold_bytes(&test->digest, function->flags, n);
+        ir_parse_test_fold_bytes(&test->digest, function->a, n * 4);
+        ir_parse_test_fold_bytes(&test->digest, function->b, n * 4);
+        ir_parse_test_fold_bytes(&test->digest, function->c, n * 4);
+        ir_parse_test_fold_bytes(&test->digest, function->block_offsets, ((uint64_t)function->block_count + 1) * 4);
+        ir_parse_test_fold_bytes(&test->digest, function->extra, (uint64_t)function->extra_count * 4);
+    }
+}
+
 static IrParseResult ir_parse_test_pair(IrParseTest* test, String8 source, Arena* output, Arena* twin_output, Arena* scratch, IrFunction* function)
 {
     const uint64_t output_mark = output->length;
@@ -132,6 +171,7 @@ static IrParseResult ir_parse_test_pair(IrParseTest* test, String8 source, Arena
     memcpy(saved, function, sizeof(saved));
     const IrParseResult vector = ir_parse(source, output, scratch, function);
     ir_parse_test_expect(test, scratch->length == scratch_mark, "vector parse retained scratch");
+    ir_parse_test_fold_result(test, vector, function);
     const IrParseResult scalar = ir_parse_scalar(source, twin_output, scratch, &twin);
     ir_parse_test_expect(test, scratch->length == scratch_mark, "scalar parse retained scratch");
     ir_parse_test_expect(test, ir_parse_test_diagnostic(vector, scalar), "parser twins disagree on the complete diagnostic");
@@ -876,7 +916,7 @@ static int run_ir_parse_tests(int argc, char** argv)
         Arena output = arena_reserve(BUSTER_IR_PARSE_TEST_BYTES);
         Arena twin_output = arena_reserve(BUSTER_IR_PARSE_TEST_BYTES);
         Arena scratch = arena_reserve(BUSTER_IR_PARSE_TEST_BYTES);
-        IrParseTest test = { 0 };
+        IrParseTest test = { .digest = UINT64_C(0xcbf29ce484222325) };
         const bool ready = source.base != 0 && output.base != 0 && twin_output.base != 0 && scratch.base != 0;
         ir_parse_test_expect(&test, ready, "test arenas could not be reserved");
         if (ready)
@@ -912,6 +952,11 @@ static int run_ir_parse_tests(int argc, char** argv)
                 preserved = preserved && output_prefix[byte] == 0xa5 && twin_prefix[byte] == 0xa5 && scratch_prefix[byte] == 0xa5;
             }
             ir_parse_test_expect(&test, preserved, "parser tests changed the caller's arena prefixes");
+            ir_parse_test_expect(&test, test.digest == BUSTER_IR_PARSE_TEST_DIGEST, "the parses' results have their frozen digest");
+            if (test.digest != BUSTER_IR_PARSE_TEST_DIGEST)
+            {
+                fprintf(stderr, "IR parser: digest %#018" PRIx64 "\n", test.digest);
+            }
         }
         fprintf(stderr, "IR parser: %" PRIu64 " checks, %" PRIu64 " functions, %" PRIu64 " failures\n", test.checks, test.functions, test.failures);
         result = test.failures != 0;
