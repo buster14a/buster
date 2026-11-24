@@ -438,15 +438,61 @@ static void check_test_lazy_masks(CheckTest* test)
                 parser.tokens.kinds = kinds;
                 parser.tokens.names = names;
                 parser.tree.roles = roles;
-                // (The token-at-a-time mask is the fallback for a name count past the gathers' signed indices.)
-                const uint64_t scalar = check_lazy_tree_mask_scalar(&parser, targets, limit, first, count);
                 const uint64_t vector = check_lazy_tree_mask(&parser, targets, limit, first, count);
-                differences += scalar != expected || vector != expected;
+                differences += vector != expected;
                 cases += 1;
             }
         }
     }
-    check_test_expect(test, differences == 0 && cases == 1560, "lazy masks and their fallback match independent keys and roles at every guarded tail");
+    check_test_expect(test, differences == 0 && cases == 1560, "lazy masks match independent keys and roles at every guarded tail");
+    // A name table past the gathers' signed 32-bit indices (UINT32_MAX names, 16 GiB reserved, a few pages touched): ids
+    // on both sides of 2^31, in every lane of each 16, with targets set on some.
+    const uint64_t huge_bytes = (uint64_t)UINT32_MAX * sizeof(uint32_t);
+    uint32_t* huge = ready ? mmap(NULL, huge_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0) : MAP_FAILED;
+    uint32_t huge_cases = 0;
+    uint32_t huge_differences = 0;
+    if (huge != MAP_FAILED)
+    {
+        static const uint32_t huge_names[] =
+        {
+            3,
+            INT32_MAX,
+            UINT32_C(0x80000000),
+            UINT32_C(0x80000001),
+            UINT32_C(0xc0000000),
+            UINT32_MAX - 1,
+            UINT32_MAX,
+            UINT32_C(0x80000002),
+        };
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(huge_names); i += 1)
+        {
+            // Every other name's target set; UINT32_MAX is past the table, never named.
+            huge[huge_names[i] < UINT32_MAX ? huge_names[i] : 0] = huge_names[i] < UINT32_MAX && i % 2 == 0 ? 1u : 0u;
+        }
+        static Parser huge_parser;
+        for (uint32_t count = 1; count <= 64; count += 1)
+        {
+            uint8_t* kinds = mappings[KINDS] + page - count;
+            uint8_t* roles = mappings[ROLES] + page - count;
+            uint32_t* names = (uint32_t*)(mappings[NAMES] + page - (uint64_t)count * sizeof(uint32_t));
+            uint64_t expected = 0;
+            for (uint32_t lane = 0; lane < count; lane += 1)
+            {
+                const uint32_t which = (lane * 5 + count) % BUSTER_ARRAY_LENGTH(huge_names);
+                kinds[lane] = PARSE_KIND_IDENTIFIER;
+                roles[lane] = PARSE_ROLE_NONE;
+                names[lane] = huge_names[which];
+                expected |= huge_names[which] < UINT32_MAX && which % 2 == 0 ? UINT64_C(1) << lane : 0;
+            }
+            huge_parser.tokens.kinds = kinds;
+            huge_parser.tokens.names = names;
+            huge_parser.tree.roles = roles;
+            huge_differences += check_lazy_tree_mask(&huge_parser, huge, UINT32_MAX, 0, count) != expected;
+            huge_cases += 1;
+        }
+        munmap(huge, huge_bytes);
+    }
+    check_test_expect(test, huge != MAP_FAILED && huge_differences == 0 && huge_cases == 64, "lazy masks gather names past 2^31 from the table's upper half");
     for (uint32_t column = 0; column < COLUMNS; column += 1)
     {
         if (mappings[column] != MAP_FAILED)
@@ -454,7 +500,8 @@ static void check_test_lazy_masks(CheckTest* test)
             munmap(mappings[column], 2 * page);
         }
     }
-    printf("lazy name masks: %u cases, %u differences (guarded tails and name tables)\n", cases, differences);
+    printf("lazy name masks: %u cases, %u differences (guarded tails and name tables); past 2^31 names: %u cases, %u differences\n", cases, differences,
+           huge_cases, huge_differences);
 }
 
 static __attribute__((noinline)) void check_test_lazy(CheckTest* test)
