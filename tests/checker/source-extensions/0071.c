@@ -1,0 +1,1 @@
+_Static_assert(sizeof __func__==1,"file"); _Static_assert(sizeof __PRETTY_FUNCTION__==10,"top level"); int long_name(int n){_Static_assert(sizeof __func__==10,"name");static const char *p=__func__;return p[n]+__FUNCTION__[0]+__PRETTY_FUNCTION__[0];}

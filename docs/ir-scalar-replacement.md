@@ -6,8 +6,8 @@
 constructor. Include it after `ir_optimize.c` and call
 `ir_optimize_sroa(function, output, scratch, ir_sroa_options(), result)`.
 `IrSroaResult.function` is a fresh verified function containing typed scalar
-slots. Pass that result to the existing `ssa_ir_promote` or
-`ssa_ir_promote_scalar`, with a separate output arena, to obtain scalar SSA.
+slots. Pass that result to the existing `ssa_ir_promote`, with a separate
+output arena, to obtain scalar SSA.
 The split function must remain alive through promotion. This explicit
 composition respects the upstream promoter's independent-arena contract.
 Promotion additionally requires an entry block with no incoming edges;
@@ -23,12 +23,14 @@ displacements without host overflow. Every pointer use is then examined.
 Calls, returns, pointer comparisons/conversions, stored addresses, phis,
 selects and unknown indexed addresses exclude the whole source slot.
 Address-taken or volatile slot flags and any volatile access also exclude it.
-The vector path packs observed pointer uses from the stable sparse use list
-into 16-use SoA packets, then classifies memory, forwarding and escaped uses
-with opcode/position/flag masks. Partial packets flush explicitly. Scalar
-reduction applies escaped roots, including repeated roots in one packet.
-The scalar oracle independently enumerates instruction operands. Both paths
-consider the same reachable uses, and the complete scan precedes rewriting.
+The scan packs observed pointer uses from the stable sparse use list into
+16-use SoA packets, then classifies memory, forwarding and escaped uses with
+opcode/position/flag masks. Partial packets flush explicitly. Scalar reduction
+applies escaped roots, including repeated roots in one packet. It considers the
+reachable uses alone, and the complete scan precedes rewriting. Its scalar twin,
+which enumerated every instruction's operands, went in #2924: timed alone in
+Tier 1's pipeline on the 9700X, the scan took 0.94 to 0.98 of its time at every
+function size.
 
 A field key is the source slot, byte offset and scalar type. Every access must
 fit within the original slot. Distinct keys must have disjoint byte ranges;
@@ -69,9 +71,13 @@ owned by its output or scratch arena.
 
 `test-ir-sroa [--seed N]` is `run_ir_sroa_tests(argc, argv)`, with the command
 in `argv[0]`. Include it after `ir_optimize_sroa.c`,
-`ir_optimize_test.c` and upstream `ssa_ir.c`. The tests compare exact scalar
-and vector splitting, guarded interval queries, partial allocation rollback,
-and both upstream promotion algorithms. An independent byte-memory fixture
+`ir_optimize_test.c` and upstream `ssa_ir.c`. The tests check each fixture's
+expected fields and split slots, the uses scan's escapes on every lane of its
+16-use packets (one slot's uses at each count from 0 to 33, and 34 slots' uses
+sharing packets, six of them escaping off the packets' first lanes, with their
+counts and results derived by hand), the escape mask against its definition,
+guarded interval queries, partial allocation rollback, and upstream
+promotion. An independent byte-memory fixture
 interpreter checks returned values and faults for direct fields, pointer
 copies, checked negative offsets, randomized gaps, conditional stores and
 loops. Private nonescaping stores are excluded from the observable trace

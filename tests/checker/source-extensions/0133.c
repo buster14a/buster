@@ -1,0 +1,1 @@
+typedef short T;int f(a,b)const _Atomic(T) a;_Atomic(__typeof__(1.0f)) b;{return a+(int)b;}

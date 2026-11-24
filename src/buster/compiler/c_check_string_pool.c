@@ -7,7 +7,7 @@
 // frontend rewrite. Named arrays and predefined function-name arrays never set mergeable_string.
 //
 // Keys include the array type, requested alignment and every decoded byte, including embedded and final NULs.
-// The existing eight-string hash and radix sort have exact scalar twins. Hash collisions are sorted by the full
+// The eight-string hash (link_hash_names) and the radix sort key them. Hash collisions are sorted by the full
 // key with an iterative merge sort, never searched pairwise; equal-hash batches therefore remain O(n log n).
 // Inputs are borrowed and never changed. canonical is scratch-owned; NULL means every record owns its storage.
 // Temporary sorting storage is released before payload planning. All reads stay within each literal's size.
@@ -52,7 +52,7 @@ static int check_data_string_compare(const CheckDataObject* objects, uint32_t a,
 }
 
 // Hash up to BUSTER_LINK_HASH_BATCH records. Long literals use the same scalar hash without narrowing their length.
-static void check_data_string_hashes(const CheckDataObject* objects, const uint32_t* indices, uint32_t count, bool scalar, uint64_t* keys)
+static void check_data_string_hashes(const CheckDataObject* objects, const uint32_t* indices, uint32_t count, uint64_t* keys)
 {
     const uint8_t* pointers[BUSTER_LINK_HASH_BATCH];
     uint32_t lengths[BUSTER_LINK_HASH_BATCH];
@@ -63,14 +63,11 @@ static void check_data_string_hashes(const CheckDataObject* objects, const uint3
         pointers[i] = object->literal_bytes;
         lengths[i] = object->literal_size <= UINT32_MAX ? (uint32_t)object->literal_size : 0;
     }
-    if (!BUSTER_SCALAR_PATH(scalar))
-    {
-        link_hash_names(pointers, lengths, count, hashes);
-    }
+    link_hash_names(pointers, lengths, count, hashes);
     for (uint32_t i = 0; i < count; i += 1)
     {
         const CheckDataObject* object = objects + indices[i];
-        if (BUSTER_SCALAR_PATH(scalar) || object->literal_size > UINT32_MAX)
+        if (object->literal_size > UINT32_MAX)
         {
             hashes[i] = link_hash(object->literal_bytes, object->literal_size);
         }
@@ -117,7 +114,7 @@ static void check_data_string_collision_sort(const CheckDataObject* objects, uin
 
 static bool check_data_string_pool(const TypeTable* types, const CheckDataObject* objects, uint32_t count,
                                    const SymbolId* object_symbols, uint32_t object_count, const Link* link,
-                                   bool scalar, Arena* scratch, uint32_t** canonical)
+                                   Arena* scratch, uint32_t** canonical)
 {
     *canonical = NULL;
     // Each record's candidacy, found once (#3393): the count's pass and the hashes' read it.
@@ -148,7 +145,7 @@ static bool check_data_string_pool(const TypeTable* types, const CheckDataObject
                 indices[batch++] = i;
                 if (batch == BUSTER_LINK_HASH_BATCH)
                 {
-                    check_data_string_hashes(objects, indices, batch, scalar, keys + written);
+                    check_data_string_hashes(objects, indices, batch, keys + written);
                     written += batch;
                     batch = 0;
                 }
@@ -156,7 +153,7 @@ static bool check_data_string_pool(const TypeTable* types, const CheckDataObject
         }
         if (valid && batch != 0)
         {
-            check_data_string_hashes(objects, indices, batch, scalar, keys + written);
+            check_data_string_hashes(objects, indices, batch, keys + written);
         }
         uint64_t* sorted = valid ? c_bindings_sort(keys, temporary, strings, UINT32_MAX) : NULL;
         uint64_t* other = sorted == keys ? temporary : keys;

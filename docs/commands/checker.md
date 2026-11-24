@@ -384,6 +384,11 @@ unused-warning fixtures also check exact scope-completion tokens.
   `--part K/N` runs the K-th of N parts that the default run's sections and `check_test_programs`' programs are dealt
   to in turn (`CheckTestPart`); part 1 also runs the sections that share the run's type table and graph arenas.
   `--program-selection` selects the emission-selection, constant-if and constant-switch regressions alone.
+  Set `BUSTER_CHECKER_PROFILE_DIR` to an existing writable absolute directory when profiling the native checker
+  oracles. `test-checker` leaves each executed `run` ELF at its original path under that directory, so a profiler
+  can open it after the child exits. Set the variable in the profiler's launch environment when running the tests
+  through `compiler parallel`; the checker shards inherit it. Use a fresh directory per capture and remove it
+  after the profiler has processed the capture. Failed fixtures keep their usual diagnostic files.
   The switch fixtures (#1192, `c_check_program_switch_test.c`) cover matching/default/no-match dispatch,
   fallthrough, converted values, range ordering, label/declaration/inner-break fallbacks, nonfoldable selectors,
   nested scopes, cleanups, VLAs and dropped statics. The constant-if fixtures include #1194's
@@ -854,8 +859,9 @@ line is `buster-fixtures v1 checker-sources`; each later line not starting with
 - **FILE**, in the same directory, unique, ending in `.c`: the source's bytes as
   they are (no NUL; the runner writes a source to its first NUL, as it did);
 - **FLAGS**, comma-separated, or `-`: `rejected`, `unsupported`, `extension`,
-  `gnu23`, `unsigned-char`, `undecided`, `overload-tables`, `overload-none`,
-  and `capacity=NAME` for a type table `check_test_fixture_capacity` names;
+  one of `gnu89`, `gnu99` and `gnu23` (gnu17 without), `unsigned-char`,
+  `undecided`, `overload-tables`, `overload-none`, and `capacity=NAME` for a
+  type table `check_test_fixture_capacity` names;
 - **NAME**, what the case checks, which a failure prints.
 
 The cases run in the catalog's order, then the 64 generated ones. A missing or
@@ -893,23 +899,28 @@ no line passes, as above. A checker change that changes a recorded stream
 records again with `BUSTER_CHECK_RECORD_STREAM_DIGESTS=FILE`, every part and a
 whole run, a key with two digests `-`.
 
-Ten test files' own source tables, 599 cases, are runtime data in the same
+Thirteen test files' own source tables, 967 cases, are runtime data in the same
 format, a directory a suite under `tests/checker/`, which `check_test_suite`
 (`c_checker_test.c`) reads and runs. Each case is written to a file, clang
-`-fsyntax-only -std=gnu17` checks them all at once, and then each case's
-acceptance is compared with clang's and `check_test_source` checks both paths,
-as the tables' own loops did. There are no generated cases.
+`-fsyntax-only` checks them a run per dialect (`-std=gnu17` for the cases that
+name none, all at once; `gnu89`, `gnu99` or `gnu23`, and `-funsigned-char`,
+for those that do), and then each case's acceptance is compared with clang's
+and `check_test_source` checks both paths, as the tables' own loops did. There
+are no generated cases.
 
 | Suite | Cases | Runner (its test file) |
 | --- | ---: | --- |
 | `align` | 67 | `check_test_align_sources` (`c_check_program_align_test.c`) |
+| `attributes` | 59 | the end of `check_test_attribute_sources` (`c_check_attribute_test.c`) |
 | `classify` | 20 | `check_test_classify_sources` (`c_check_program_classify_test.c`) |
-| `cleanup` | 71 | `check_test_cleanup_sources` (`c_check_cleanup_test.c`) |
+| `cleanup` | 78 | `check_test_cleanup_sources` (`c_check_cleanup_test.c`) |
 | `const-alias` | 53 | `check_test_const_alias_sources` (`c_check_const_alias_test.c`) |
 | `float-constants` | 8 | `check_test_float_constant_sources` (`c_check_program_constants_test.c`) |
 | `generic-builtins` | 271 | `check_test_generic_builtin_sources` (`c_check_program_generic_builtins_test.c`) |
 | `library` | 21 | `check_test_library_sources` (`c_check_program_library_test.c`) |
 | `musttail` | 63 | `check_test_musttail_sources` (`c_check_musttail_test.c`) |
+| `overload` | 48 | `check_test_overload_sources` (`c_check_overload_test.c`) |
+| `source-extensions` | 254 | the start of `check_test_source_extensions` (`c_check_source_test.c`) |
 | `transparent` | 8 | the end of `check_test_transparent_calls` (`c_check_transparent_test.c`) |
 | `transparent-types` | 17 | the end of `check_test_transparent_types` (`c_check_transparent_type_test.c`) |
 
@@ -973,7 +984,10 @@ out).
 A table's comments are `#` lines of its catalog, above the cases they described.
 The other test files' tables stay C for now: they build their sources when they
 run, pair each case with data of their own, or pick cases by index (#2053 lists
-them).
+them). Outside the checker, Tier 1's mask IR (`tests/tier1/masks`,
+[the selection guide](../tier1-selection.md)) and the IR parser's canonical
+fixtures (`tests/ir/catalog.tsv`, [the IR tools guide](ir-tools.md)) are runtime
+data too.
 
 ## System-header token bitmap and MSan (#1610)
 

@@ -51,8 +51,9 @@ record resolves to its ID once (`x86_zen5_id`); consumers carry the byte as a
 column (`Tier1SelectCode.cost_ids`) and look up 32 at a time
 (`x86_zen5_lookup`): four banks of 64 16-bit entries, eight ZMM registers per
 column, a `vpermi2w` per bank and two blends by the ID's bits 6 and 7. Every
-byte indexes a slot, the slots past the rows unknown, so no ID wraps. The
-scalar twin (`x86_zen5_lookup_scalar`) is a load per ID.
+byte indexes a slot, the slots past the rows unknown, so no ID wraps. Since
+#2924 the lookup has no scalar twin; its tests check each output against the
+column's entry for its ID.
 
 ## Columns
 

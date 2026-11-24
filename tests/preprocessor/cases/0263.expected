@@ -1,0 +1,7 @@
+#pragma message("aA\012")
+#pragma message("b")
+#pragma message("cd")
+#pragma GCC warning "e"
+#pragma GCC warning "f"
+#pragma message("g")
+#pragma message("h")

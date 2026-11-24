@@ -57,6 +57,10 @@ requirements. [Command index](README.md).
   emission after the loop otherwise, the same bytes and diagnostics (step
   2.2c.4's test option, implying `--provisional-selection` and
   `--deferred-lowering`, which reports on stderr whether its code served),
+  `--parse-tile=N` parsing by tiles of about N tokens (4,096 by default), each
+  a run of top-level declarations taken through every parser kernel before the
+  next, 0 for the unit as one, the same tree ([the parser's tiles](../c-parser.md#tiles-2536),
+  #2536; `--time-stages` reports `parse-tiles` and `parse-tiles-refused`),
   `--tier1` compiling each function Tier 1's pipeline
   takes by Tier 1 and the others by Tier 0 (`c_check_tier1.c`, both tiers'
   code the emission's `EmittedCode`, #1056, their unwind tables alike; with `-g`
@@ -538,9 +542,8 @@ the options say so, and otherwise naming the source and the symbol:
 
 - debug information (`-g`) and inline assembly (asm statements, naked
   functions, file-scope assembly): the design's stages 3 and 4;
-- thread-local storage, section groups, patchable function
-  entries, multiversioned functions' resolvers, and the other refusals of the
-  sink below;
+- thread-local storage, section groups, multiversioned functions' resolvers,
+  and the other refusals of the sink below;
 - assembly and linker inputs beside the C sources.
 
 The unwind tables are the `.eh_frame` section's bytes with their symbolic
@@ -617,11 +620,16 @@ The form contract, which its tests hold GNU as to:
   sections, and `.string` and `.ascii` in string pools. For a tentative
   definition selected by `-fcommon` or the `common` attribute, the writer emits
   `.comm name, size, alignment` with the alignment in bytes. The symbol keeps
-  its visibility and the linker allocates its storage.
+  its visibility and the linker allocates its storage. The writer prints a
+  patchable function's exact NOP sled around its function label, with a
+  pointer to the sled's start in a writable linked-order table section.
+  GNU as assembles those sections using `"awo"`, an associated label and
+  `unique` to keep same-name entries distinct. Buster's assembler does not
+  read this section syntax yet.
 
 What the sink doesn't print yet it refuses with the reason naming it
-(`ASSEMBLY_UNSUPPORTED`): thread-local storage, section groups, linked-order
-sections, unique symbols, code without records (inline assembly's),
+(`ASSEMBLY_UNSUPPORTED`): thread-local storage, section groups, other
+linked-order section types and flags, unique symbols, code without records (inline assembly's),
 the C runtime's `.init` and `.fini` fragments, and fixups GNU as can't spell
 where they are. A view that contradicts itself (records that don't encode to
 their atom's bytes, a symbol inside an instruction, a branch without a target, a
@@ -656,7 +664,10 @@ PC-relative reference to a local symbol in the same section, such as
 `call helper@PLT` to a static function. The comparator applies those
 relocations in both objects before checking the bytes. GNU as also lists an undefined
 `_GLOBAL_OFFSET_TABLE_` in an object with a GOT reference, which the comparison
-skips. Then the form sweep: every form the matcher admits for a target of every
+skips. The same comparison covers patchable entries at both tiers, including
+several table sections with the same name and entries associated with
+different code sections. The reassembled program must link and run.
+Then the form sweep: every form the matcher admits for a target of every
 feature but the branches (whose targets are labels, the program fixture's), two
 random records each, printed and assembled each in a 16-byte slot of its own,
 must be the encoder's bytes; a form the installed GNU as doesn't know is counted

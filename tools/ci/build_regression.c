@@ -10,6 +10,7 @@
 //   ./build-regression --driver-only  # Small build.sh helper fixtures; does not configure or build the compiler.
 //   ./build-regression --parallel-codegen-only  # Small optimized-IR partition and dependency fixture.
 //   ./build-regression --develop-only  # The Develop configuration's checks alone, on the selected tree.
+//   ./build-regression --self-built-only  # BUSTER_SELF_BUILT's checks alone, on the selected tree.
 //   ./build-regression --ownership-only [COMPILER]  # Check an existing build's fixture ownership; builds nothing.
 //
 // It removes every tree under build/cmake (clean --all) and checks that
@@ -37,6 +38,9 @@
 //     benchmark units out with stand-ins that name Release, rebuilds an appended function's one part, writes the
 //     objects Release's executable writes, is what ./build.sh builds without --config, and after a series of edits is
 //     the same file a clean build makes;
+//   - BUSTER_SELF_BUILT=tests compiles Develop's test units by the Release executable without changing it, writes the
+//     objects Release's writes, runs their tests, recompiles a unit whose file changed and every one for a new
+//     previous stage, and refuses the Develop executable as its own previous stage;
 //   - BUSTER_BAKE reruns the post-link step alone, both ways, and BUSTER_LINKER the link;
 //   - a failed post-link step, a failed compile, an interrupt of the build's process group and a termination of
 //     build.sh alone publish nothing and leave nothing running, a clean of the tree during its build waits for the
@@ -755,9 +759,17 @@ static OwnershipUnits ownership_units(Text sources)
     return units;
 }
 
+// A unit's object, the one whose record Ninja keeps: its object library's compile in `config`
+// (CMakeFiles/buster_NAME.dir/CONFIG/src/buster/compiler/NAME.c.o), into `object`.
+static void ownership_object(char* object, size_t size, const char* name, const char* config)
+{
+    snprintf(object, size, "CMakeFiles/buster_%.*s.dir/%s/src/buster/compiler/%s.o", (int)strlen(name) - 2, name, config, name);
+}
+
 // Ninja supplies a flat transitive set. Retain all repository paths so arbitrary fixture descendants can be
 // classified after reading the graph. Validate the declared record size and self-source as well as VALID/mtime.
-static OwnershipIssue ownership_read(char* text, const char* directory, const char* config, const OwnershipUnits* units, OwnershipGraph* graph)
+// `objects` are the units' objects whose records the capture holds, index for index with `units`.
+static OwnershipIssue ownership_read(char* text, const char* directory, const OwnershipUnits* units, const char (*objects)[PATH_MAX], OwnershipGraph* graph)
 {
     OwnershipIssue issue = { 0 };
     memset(graph, 0, sizeof(*graph));
@@ -796,12 +808,12 @@ static OwnershipIssue ownership_read(char* text, const char* directory, const ch
                         {
                             unit += 1;
                         }
-                        char expected[PATH_MAX];
-                        snprintf(expected, sizeof(expected), "CMakeFiles/buster_%.*s.dir/%s/src/buster/compiler/%s", (int)strlen(name) - 2, name, config, name);
+                        // The record's object without its .o, as the line now reads.
+                        const size_t expected = unit < units->count ? strlen(objects[unit]) - 2 : 0;
                         char* end = 0;
                         errno = 0;
                         const unsigned long count = strtoul(marker + 8, &end, 10);
-                        if (unit == units->count || strcmp(line, expected) != 0 || strstr(marker + 8, " (VALID)") == 0 ||
+                        if (unit == units->count || strlen(line) != expected || strncmp(line, objects[unit], expected) != 0 || strstr(marker + 8, " (VALID)") == 0 ||
                             end == marker + 8 || *end != ',' || errno != 0 || count == 0 || count > UINT32_MAX)
                         {
                             issue = (OwnershipIssue){ .reason = "invalid or stale unity dependency record", .path = name };
@@ -1269,7 +1281,12 @@ static void check_ownership_fixtures(void)
             }
         }
         ownership_fixture_append(text, sizeof(text), &length, "%s", cases[test].extra);
-        OwnershipIssue issue = ownership_read(text, "/fixture", "Release", &units, &graph);
+        static char objects[BUSTER_OWNERSHIP_UNITS][PATH_MAX];
+        for (uint32_t unit = 0; unit < units.count; unit += 1)
+        {
+            ownership_object(objects[unit], sizeof(objects[unit]), units.names[unit], "Release");
+        }
+        OwnershipIssue issue = ownership_read(text, "/fixture", &units, (const char (*)[PATH_MAX])objects, &graph);
         if (issue.reason == 0)
         {
             issue = ownership_check(&units, &graph, shared, cases[test].shared);
@@ -1314,7 +1331,7 @@ static const OwnershipException ownership_exceptions[] = {
     { "src/buster/compiler/ir_source_test.c", "main_unit_backend.c main_unit_checker.c", "source preparation interface for IR commands; CHECKER owns its implementation", UINT64_C(0x8366575ba00f1461) },
     { "src/buster/compiler/tier1_select_test.c", "main_unit_backend.c main_unit_checker.c", "selection equality helper for backend and certificate checks", UINT64_C(0x71c71f12f96e31e5) },
     { "src/buster/compiler/tier1_select_burs_test.c", "main_unit_backend.c main_unit_checker.c", "BURS verification for backend and checker certificate benchmarks", UINT64_C(0x05e4109ff879494a) },
-    { "src/buster/compiler/tier1_select_source_benchmark.c", "main_unit_backend.c main_unit_checker.c", "source selection runner reused by checker certificate benchmarks", UINT64_C(0xda5e0fb1f328530d) },
+    { "src/buster/compiler/tier1_select_source_benchmark.c", "main_unit_backend.c main_unit_checker.c", "source selection runner reused by checker certificate benchmarks", UINT64_C(0x6b62df0759724469) },
     { "src/buster/compiler/bind_test.c", "main_unit_link.c main_unit_dynamic.c main_unit_executable.c", "bound-program builders for link, dynamic and executable fixtures", UINT64_C(0xf34bd6e22e26a890) },
     { "src/buster/compiler/branch_sizing_test.c", "main.c main_unit_x86.c", "process runner for driver semantics and x86 branch checks", UINT64_C(0x08ec91d539e1427a) },
     { "src/buster/compiler/c_builtin_test.c", "main_unit_types.c main_unit_check_builtins.c", "integer oracle for builtin actions and builtin type tests", UINT64_C(0x0a6a824fedab403e) },
@@ -1334,7 +1351,7 @@ static const OwnershipException ownership_exceptions[] = {
     { "src/buster/compiler/object_writer_test.c", ownership_main_units, "object metadata types and helpers used by shared symbol/source readers", UINT64_C(0x1753ed9d953b02d3) },
     { "src/buster/compiler/snapshot_test.c", "main_unit_executable.c main_unit_checker.c", "executable patch checks shared with checker debug tests", UINT64_C(0xf83ab1966416eae8) },
     { "src/buster/compiler/static_test.c", "main_unit_executable.c main_unit_dynamic.c", "static executable writer shared by executable and dynamic tests", UINT64_C(0xe0e54572562aaf20) },
-    { "src/buster/compiler/tier0_benchmark_measure.c", "main_unit_backend.c main_unit_checker.c", "counter utilities for backend IR and checker source benchmarks", UINT64_C(0x16670544301d2354) },
+    { "src/buster/compiler/tier0_benchmark_measure.c", "main_unit_backend.c main_unit_checker.c", "counter utilities for backend IR and checker source benchmarks", UINT64_C(0x19f550c607e8538c) },
     { "src/buster/compiler/x86_64_encoder_test.c", "main.c main_unit_x86.c main_unit_frontend.c main_unit_assembler.c main_unit_link.c main_unit_backend.c", "encoding/execute helpers for these six test families", UINT64_C(0xc4d128a61e85c6d3) },
     { "src/buster/compiler/x86_intrinsics_test.c", "main_unit_checker.c main_unit_x86.c", "object reading and instruction decoding for checker AMX and intrinsic tests", UINT64_C(0x83a1dc58c44b290a) },
     { "src/buster/compiler/x86_semantics_test.c", ownership_main_units, "form names for DRIVER/BACKEND and six forced-emission globals retained in all units", UINT64_C(0x929ee4e6ddcf62ef) },
@@ -1578,19 +1595,34 @@ static void check_ownership(const char* directory, const char* config)
     Text sources = capture(sources_argv);
     const OwnershipUnits units = ownership_units(sources);
     // Debug and Release share .ninja_deps. Ask for the selected objects explicitly in this one capture so no
-    // unrelated configuration's record can hide a missing selected record or count as another owner.
-    char objects[BUSTER_OWNERSHIP_UNITS][PATH_MAX];
+    // unrelated configuration's record can hide a missing selected record or count as another owner. A unit the
+    // configuration's link takes from the previous stage (BUSTER_SELF_BUILT, Develop/self/NAME.c.o) has its record
+    // there, the previous stage's dependency file's.
+    char link_output[64];
+    snprintf(link_output, sizeof(link_output), "%s/compiler.link", config);
+    char* query_argv[] = { "ninja", "-C", (char*)directory, "-f", ninja_file, "-t", "query", link_output, 0 };
+    Text link = capture(query_argv);
+    static char objects[BUSTER_OWNERSHIP_UNITS][PATH_MAX];
     char* deps_argv[BUSTER_OWNERSHIP_UNITS + 8] = { "ninja", "-C", (char*)directory, "-f", ninja_file, "-t", "deps" };
     for (uint32_t i = 0; i < units.count; i += 1)
     {
-        snprintf(objects[i], sizeof(objects[i]), "CMakeFiles/buster_%.*s.dir/%s/src/buster/compiler/%s.o",
-                 (int)strlen(units.names[i]) - 2, units.names[i], config, units.names[i]);
+        char self_built[PATH_MAX];
+        snprintf(self_built, sizeof(self_built), " %s/self/%s.o\n", config, units.names[i]);
+        if (strstr(link.data, self_built) != 0)
+        {
+            snprintf(objects[i], sizeof(objects[i]), "%s/self/%s.o", config, units.names[i]);
+        }
+        else
+        {
+            ownership_object(objects[i], sizeof(objects[i]), units.names[i], config);
+        }
         deps_argv[7 + i] = objects[i];
     }
     deps_argv[7 + units.count] = 0;
+    free(link.data);
     Text deps = capture(deps_argv);
     static OwnershipGraph graph;
-    ownership_report(&units, ownership_read(deps.data, root, config, &units, &graph));
+    ownership_report(&units, ownership_read(deps.data, root, &units, (const char (*)[PATH_MAX])objects, &graph));
     ownership_classify(&graph);
     OwnershipException active[sizeof(ownership_exceptions) / sizeof(ownership_exceptions[0])];
     const uint32_t exceptions = ownership_active_exceptions(fuzz, active);
@@ -2574,6 +2606,147 @@ static void check_develop(void)
     {
         fail("restoring the sources Develop's checks edited rebuilt Release's %s", names);
     }
+}
+
+// The number of the previous stage's objects in Develop/self (BUSTER_SELF_BUILT's units, the predefines aside).
+static uint32_t self_built_objects(void)
+{
+    char directory[PATH_MAX];
+    snprintf(directory, sizeof(directory), "%s/Develop/self", tree);
+    DIR* listing = opendir(directory);
+    uint32_t count = 0;
+    if (listing != 0)
+    {
+        for (struct dirent* entry = readdir(listing); entry != 0; entry = readdir(listing))
+        {
+            const size_t length = strlen(entry->d_name);
+            count += length > 4 && strcmp(entry->d_name + length - 4, ".c.o") == 0;
+        }
+        closedir(listing);
+    }
+    return count;
+}
+
+// BUSTER_SELF_BUILT (docs/commands/build.md, "Self-built units"; #2630): Develop's test units compiled by the tree's
+// Release executable, the previous stage, which it needs built (the caller builds it). The hybrid leaves Release as
+// it was and writes the same objects; its previous-stage units run their tests and pass the ownership check by their
+// own dependency records; nothing changed builds nothing; a file only they read recompiles its unit alone, and a new
+// previous stage all of them; the stage can't be the Develop executable itself, nor a unit a file Develop doesn't
+// build. Develop's outputs are cleaned first and at the end, as check_develop leaves them.
+static void check_self_built(void)
+{
+    char build_log[PATH_MAX];
+    snprintf(build_log, sizeof(build_log), "%s/build.log", work);
+    static const char* const tests[] = { "BUSTER_SELF_BUILT=tests", 0 };
+    const struct stat release_status = status_of(release);
+    BUILD("clean", "--config", "Develop");
+    BUILD_ENV(tests, "--config", "Develop");
+    const uint32_t built = occurrences(build_log, " with the previous stage");
+    if (built == 0 || built != self_built_objects() || occurrences(build_log, "Writing clang's predefined macros for the previous stage's units") != 1 ||
+        occurrences(build_log, "main_unit_backend's part") != 0 || occurrences(build_log, "main_unit_checker's part") == 0)
+    {
+        fail("BUSTER_SELF_BUILT=tests compiled %u units with the previous stage, for %u objects, or the backend's unit in parts, or not the checker's", built,
+             self_built_objects());
+    }
+    if (!same_file("build/compiler", develop) || !same_time(status_of(release), release_status))
+    {
+        fail("the self-built Develop build didn't publish its executable, or changed the Release executable");
+    }
+    static const char* const tiers[] = { 0, "--tier1" };
+    for (uint32_t i = 0; i < 2; i += 1)
+    {
+        char objects[2][PATH_MAX];
+        const char* compilers[2] = { release, develop };
+        for (uint32_t c = 0; c < 2; c += 1)
+        {
+            snprintf(objects[c], sizeof(objects[c]), "%s/self-object-%u-%u.o", work, i, c);
+            char* compile[] = { (char*)compilers[c], "-c", "tools/ci/build_regression.c", "-o", objects[c], (char*)tiers[i], 0 };
+            Text log = capture(compile);
+            free(log.data);
+        }
+        if (!same_bytes(objects[0], objects[1]))
+        {
+            fail("Release's and the self-built Develop's executables wrote different objects of tools/ci/build_regression.c%s%s", tiers[i] != 0 ? " with " : "",
+                 tiers[i] != 0 ? tiers[i] : "");
+        }
+    }
+    // Tests whose code the previous stage compiled: the link unit's, the types' and the emission metadata's own unit.
+    static const char* const commands[] = { "test-link", "test-types", "test-emission-metadata" };
+    for (uint32_t i = 0; i < sizeof(commands) / sizeof(commands[0]); i += 1)
+    {
+        char* test[] = { develop, (char*)commands[i], 0 };
+        Text log = capture(test);
+        free(log.data);
+    }
+    pass("BUSTER_SELF_BUILT=tests compiles %u of Develop's units with the Release executable, leaves Release as it was, writes Release's objects "
+         "and runs their tests",
+         built);
+    // The previous stage's dependency records are the units' ownership records in this configuration.
+    check_ownership(tree, "Develop");
+
+    static Snapshot before;
+    char names[8192];
+    snapshot(&before);
+    BUILD_ENV(tests, "--config", "Develop");
+    ran_since(&before, names, sizeof(names));
+    if (names[0] != 0)
+    {
+        fail("a self-built Develop build with nothing changed ran %s", names);
+    }
+    // differential.c is the backend's unit's alone: its time recompiles that unit by the previous stage, and no part.
+    const char* const backend_file = "src/buster/compiler/differential.c";
+    const struct stat backend_status = status_of(backend_file);
+    if (utimensat(AT_FDCWD, backend_file, 0, 0) != 0)
+    {
+        fail("can't update differential.c's time");
+    }
+    BUILD_ENV(tests, "--config", "Develop");
+    const struct timespec backend_times[2] = { backend_status.st_atim, backend_status.st_mtim };
+    if (utimensat(AT_FDCWD, backend_file, backend_times, 0) != 0)
+    {
+        fail("can't restore differential.c's time");
+    }
+    if (occurrences(build_log, "Building src/buster/compiler/main_unit_backend.c with the previous stage") != 1 ||
+        occurrences(build_log, " with the previous stage") != 1 || occurrences(build_log, "Optimizing and generating") != 0)
+    {
+        fail("differential.c's time didn't recompile the backend's unit alone by the previous stage");
+    }
+    // A new previous stage (its time) compiles every previous-stage unit again, and builds no Release.
+    if (utimensat(AT_FDCWD, release, 0, 0) != 0)
+    {
+        fail("can't update the Release executable's time");
+    }
+    BUILD_ENV(tests, "--config", "Develop");
+    if (occurrences(build_log, " with the previous stage") != built || occurrences(build_log, "Optimizing and generating") != 0)
+    {
+        fail("a new previous stage compiled %u units again, not %u", occurrences(build_log, " with the previous stage"), built);
+    }
+    pass("a self-built Develop build with nothing changed runs nothing, a file only its units read recompiles its unit, a new previous stage "
+         "all of them");
+
+    char stage[PATH_MAX];
+    snprintf(stage, sizeof(stage), "BUSTER_SELF_COMPILER=%s", develop);
+    const char* const itself[] = { "BUSTER_SELF_BUILT=tests", stage, 0 };
+    const int itself_status = build_with(itself, true, "--config", "Develop", (char*)0);
+    if (itself_status == 0 || occurrences(build_log, "is the Develop executable this build makes") != 1)
+    {
+        fail("BUSTER_SELF_COMPILER naming the Develop executable didn't fail");
+    }
+    static const char* const unknown[] = { "BUSTER_SELF_BUILT=main_unit_none.c", 0 };
+    const int unknown_status = build_with(unknown, true, "--config", "Develop", (char*)0);
+    if (unknown_status == 0 || occurrences(build_log, "BUSTER_SELF_BUILT's main_unit_none.c isn't") != 1)
+    {
+        fail("BUSTER_SELF_BUILT naming no unit Develop builds didn't fail");
+    }
+    BUILD("clean", "--config", "Develop");
+    snapshot(&before);
+    BUILD("build", "--config", "Release");
+    ran_since(&before, names, sizeof(names));
+    if (strstr(names, ".c.o") != 0)
+    {
+        fail("the self-built checks rebuilt Release's %s", names);
+    }
+    pass("BUSTER_SELF_COMPILER can't be the Develop executable, BUSTER_SELF_BUILT names units Develop builds, and Release stays as it was");
 }
 
 // The last line `argv` prints, without its newline: a command's result after what it says on stderr.
@@ -4258,9 +4431,11 @@ int main(int argc, char** argv)
     const bool codegen_only = argc == 2 && strcmp(argv[1], "--parallel-codegen-only") == 0;
     const bool ownership_only = (argc == 2 || argc == 3) && strcmp(argv[1], "--ownership-only") == 0;
     const bool develop_only = argc == 2 && strcmp(argv[1], "--develop-only") == 0;
-    if (argc != 1 && !flags_only && !commands_only && !driver_only && !ownership_only && !codegen_only && !develop_only)
+    const bool self_only = argc == 2 && strcmp(argv[1], "--self-built-only") == 0;
+    if (argc != 1 && !flags_only && !commands_only && !driver_only && !ownership_only && !codegen_only && !develop_only && !self_only)
     {
-        fail("usage: build-regression [--flags-only | --compile-commands-only | --driver-only | --parallel-codegen-only | --develop-only | --ownership-only [COMPILER]]");
+        fail("usage: build-regression [--flags-only | --compile-commands-only | --driver-only | --parallel-codegen-only | --develop-only | --self-built-only | "
+             "--ownership-only [COMPILER]]");
     }
     if (getcwd(root, sizeof(root)) == 0 || access("build.sh", X_OK) != 0)
     {
@@ -4296,7 +4471,7 @@ int main(int argc, char** argv)
         check_parallel_codegen();
         check_parallel_codegen_sanitizers();
     }
-    if (!ownership_only && !driver_only && !flags_only && !codegen_only && !develop_only)
+    if (!ownership_only && !driver_only && !flags_only && !codegen_only && !develop_only && !self_only)
     {
         check_compile_commands();
     }
@@ -4318,7 +4493,12 @@ int main(int argc, char** argv)
         BUILD("build", "--config", "Release");
         check_develop();
     }
-    if (!ownership_only && !driver_only && !commands_only && !codegen_only && !develop_only)
+    if (self_only)
+    {
+        BUILD("build", "--config", "Release");
+        check_self_built();
+    }
+    if (!ownership_only && !driver_only && !commands_only && !codegen_only && !develop_only && !self_only)
     {
         BUILD("clean");
         check_ignored_flags();
@@ -4328,6 +4508,7 @@ int main(int argc, char** argv)
             check_incremental();
             check_configurations();
             check_develop();
+            check_self_built();
             check_failures();
             check_presets_and_prints();
             check_experiments();

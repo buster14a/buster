@@ -382,7 +382,7 @@ patterns are:
   addition, a phi the walk reaches through phis alone before its addition, and
   no recurrence through phis or copies alone, or where only the select's result
   or its condition reaches the phi. `test-tier1-emit` compiles such functions,
-  and branches of each shape, through the CFG consumer with both frame planners, with every
+  and branches of each shape, through the CFG consumer, with every
   register and few, with and without a frame pointer, and with the select's
   values ending at it, where its result takes the register of the value it
   keeps, and runs them natively; and a loop of each predicate's select whose
@@ -1329,7 +1329,7 @@ allocation fragments, frame, records and spill/reload/rematerialization counts.
 All failure paths restore both arenas and preserve the result object. Transition
 events use count/prefix/fill CSR over bounded machine positions. Their ordered
 stores and copies are scalar emission work; the existing liveness, allocation,
-frame and rematerialization producers retain their vector/scalar paths. No
+frame and rematerialization producers are unchanged. No
 compile-time speedup is claimed for adding this consumer.
 
 ## AVX-512's masks (#179)
@@ -1391,8 +1391,19 @@ whose dead definitions read the marks. A mask recipe would need its own `kxor`,
 don't touch a mask, which keeps its opmask register across the sequence; their
 saves take the general call-save rows, before the masks' own.
 
-`test-tier1-masks [--seed N] [--print]` (`tier1_masks_test.c`) takes
-hand-written IR of masks through this path: each fixture is a function of a
+`test-tier1-masks [--seed N] [--print] [--fixtures DIR]` (`tier1_masks_test.c`)
+takes hand-written IR of masks through this path. The fixtures are runtime data
+(#2053): `tests/tier1/masks/` holds `catalog.tsv` and one `.ir` file a case,
+read from `tests/` under the working directory or `--fixtures DIR`, so that
+editing or adding a case rebuilds nothing. The catalog's first line is
+`buster-fixtures v1 tier1-masks`; each case is a line of ID, FILE, FLAGS and
+NAME, tab-separated, its flags `Tier1MasksFixture`'s fields (`count=N`,
+`spills`, `v3`, `rows=N` and the others the test file lists) and its C model
+and preparation by name (`model=NAME`, `prepare=NAME`), which stay compiled.
+A missing or malformed catalog, a missing file, a repeated ID or file, an
+unknown flag or name, a file no line names or an empty catalog fails the run,
+and no case runs. The refusals take the catalog's first case, "logic at every
+width". Each fixture is a function of a
 pointer to a 256-byte buffer, and of a count where it loops, that loads masks of
 every width from the buffer's first half and stores masks into its second half
 (the IR has no mask argument or result, and no conversion between a mask and an
@@ -1433,7 +1444,7 @@ And the refusals: a vector result at selection, a mask's `select` at
 selection, and at emission the baseline target (no opmask form) and AVX512F alone
 for the four widths (no `kandb`, `kmovd` or `kmovq`), where a function of word
 masks alone is taken; and each width's `kmov` forms, none for a width no mask
-has. `--print` prints each fixture's records by the vector path, as GNU as reads
+has. `--print` prints each fixture's records, as GNU as reads
 them.
 
 
@@ -1937,7 +1948,7 @@ complete function's records the same way.
 `test-tier1-emit` executes real pressure plans through liveness, allocation,
 frame planning, fragment emission, branch sizing and encoding. Original
 32/64-bit fixtures keep up to 600 values live with only three allocatable
-registers. Both paths run against an independent integer oracle with stored
+registers. They run against an independent integer oracle with stored
 values and with rematerialized constants, fixed/red-zone/frame-pointer frames,
 and stack probes. Independent allocation verification checks the produced
 fragments. Failures cover target denial, scratch-register conflicts, capacity
@@ -1966,22 +1977,20 @@ with constants rematerialized and not, and with every register and
 a few, against C's own division; both consumers must save values around the
 sequences.
 
-`benchmark-tier1-select [--steps N] [--functions N] [--only scalar|vector]
-[--after-scalar MS]` freezes original synthetic IR with a deterministic seed.
-Its chain, wide-frontier and live-pressure shapes report selection separately
-from the complete backend path: plan, selected-use liveness, required register
-positions, allocation, rematerialization recipes, frame planning, fragment and
-frame emission, branch sizing and encoding. Both rows select with the one
-selector (#2924); the scalar rows' emission and encoding take their twins, the
-encoder's the scalar one. Both paths are validated before timing. Samples alternate order, and report seven-sample
-medians of nanoseconds and invariant TSC ticks per IR instruction. TSC ticks
+`benchmark-tier1-select [--steps N] [--functions N]` freezes original synthetic
+IR with a deterministic seed. Its chain, wide-frontier and live-pressure shapes
+report selection separately from the complete backend path: plan, selected-use
+liveness, required register positions, allocation, rematerialization recipes,
+frame planning, fragment and frame emission, branch sizing and encoding, each by
+its one implementation (#2924). The pipeline is validated before timing. Samples
+report seven-sample medians of nanoseconds and invariant TSC ticks per IR
+instruction. TSC ticks
 are **not core cycles**. The output also reports actual record/code-byte counts,
 unknown model IDs, spill slots, stores, reloads, rematerialized copies, peak
 retained arena bytes and the maximum of liveness and transition scratch bounds.
 The latter is not a whole-pipeline peak-memory measurement.
 
-`benchmark-tier1-select-source [--only select] [--after-scalar MS]
-[preprocessor options] file...` (`tier1_select_source_benchmark.c`, #141) times
+`benchmark-tier1-select-source [preprocessor options] file...` (`tier1_select_source_benchmark.c`, #141) times
 selection on real C: every function `-c` compiles of the files, lowered, promoted
 and optimized as the C driver's `--tier1` takes it, with its dominance, outside
 the time; then `tier1_select_plan_verified` of each, as the driver plans it,
@@ -1989,14 +1998,12 @@ in 21 passes, as nanoseconds,
 core cycles, instructions and the throttle (PMCx1A0's umask 0x08, #199) per IR
 instruction and cycles per typed entry. A function a step before selection
 refuses, or selection refuses, is left out and counted; any other failure fails
-the command, which then reports no time. `--after-scalar MS` runs scalar integer
-work before each pass. Of the frozen `sqlite3.c`'s 2,668 functions, it selects the 2,666 that the driver's `--tier1-report` gives Tier 1 (478,163 IR
+the command, which then reports no time. Of the frozen `sqlite3.c`'s 2,668 functions, it selects the 2,666 that the driver's `--tier1-report` gives Tier 1 (478,163 IR
 instructions).
 
 Run each build, test and measurement on the approved 9700X under its shared
 `~/buster-fast-bench/exclusive.sh` lock, with owner/title/link metadata; pin each
-benchmark to CPU 2. Use separate fresh processes for sustained `--only vector`
-and `--only vector --after-scalar 200`, and compare both against scalar runs.
+benchmark to CPU 2, and use a separate fresh process for each run.
 Local runs are diagnostic only. The current slice supplies the reproducible
 measurement path; it does not establish a performance gain.
 

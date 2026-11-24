@@ -62,8 +62,8 @@ builtin lowering (#148).
 
 Include `x86_target_forms.c` after the encoder and build a byte table with
 `x86_target_forms(&target, allowed)`, where `allowed` has `X86_FORM_COUNT` bytes.
-It visits sixteen contiguous 32-bit feature-mask rows at once, using AVX-512 on the host;
-`x86_target_forms_scalar` is its exact twin. There is no gather, allocation or
+It visits sixteen contiguous 32-bit feature-mask rows at once, using AVX-512 on the host,
+its one implementation (its scalar twin went in #2924). There is no gather, allocation or
 change to the 16-byte `X86Instruction` or the encoder's templates. The rows that
 need a feature the 32-bit word doesn't project (AVX512BF16's, AVX512BITALG's,
 AVX512IFMA's, AVX512VBMI2's, AVX512VNNI's, AVX512VPOPCNTDQ's and AVX-VNNI's: 125,
@@ -73,11 +73,9 @@ and an exact pass over their full requirements then decides them.
 
 `x86_target_rows.c` is the single source for immutable policy data. The vector
 builder reads the compact32 table (33,408 bytes), and its exact pass the
-extended rows' full requirements and forms. The independent scalar
-reference keeps all 64 feature bits densely for 3,480 classified rows (27,840
-bytes), with their form indices (6,960 bytes). It clears all 8,352 output bytes
-then checks those complete requirements directly. Its loop stays scalar to
-avoid widening and extracting indices for byte stores.
+extended rows' full requirements and forms. The full requirements keep all 64
+feature bits densely for 3,480 classified rows (27,840 bytes), with their form
+indices (6,960 bytes).
 
 A uint16 inverse map (16,704 bytes) gives full-width metadata queries their
 canonical dense slot plus one. Zero means unknown, and the bounded query returns
@@ -182,7 +180,9 @@ taskset -c 2 ./build/compiler benchmark-x86-target
 Run each through `EXCLUSIVE_OWNER=... ~/buster-fast-bench/exclusive.sh` on the
 9700X. Tests cover synthetic CPUID/OS state, bounded target names, invalid
 options, all 65,536 encoded form values at six targets, random valid operands
-for every admitted form, scalar/vector table identity and protected page edges.
+for every admitted form, the table against its definition (each form allowed
+exactly when `x86_target_requirement` classifies it and the target covers that
+requirement) and protected page edges.
 They also cover every subset of each distinct requirement mask, each profile
 with each individual feature removed, and first-failure rejection for every
 form at all six profiles. Every raw feature bit alone, reserved target bits,
@@ -234,9 +234,9 @@ explicitly. GCC 16.2.1 has no `__INVPCID__` or `__RDPRU__` macro, and its named
 `znver5` omits `__SHSTK__`, which its native resolver reports on the 9700X.
 Those macro differences do not remove the actual target capabilities. Full
 predefined-preamble equality remains a Clang contract.
-The benchmark checks table equality before reporting 21 interleaved medians
-for building a whole table, including the scalar source as optimized by Clang.
-`--only scalar|avx512` isolates one path. `--after-predefines MS` emits target
+The benchmark checks the table against its definition before reporting 21
+medians for building a whole table (until #2924 it also timed the scalar twin,
+interleaved, with `--only scalar|avx512`). `--after-predefines MS` emits target
 macros for 100–300 ms before each sample, modeling the lighter configuration
 work preceding selection. `--iterations 1` isolates the initial table after
 that conditioning; the default 10,000 measures sustained repetition. Output
@@ -270,8 +270,8 @@ Each cell is **ns/table (core cycles/table)**.
 
 In the qword-expansion build, the scalar source took 441 ns for one table and
 435.9–438.9 ns/table for 10,000 tables after lighter work.
-The scalar source is a correctness oracle, not a claim of scalar machine code:
-Clang vectorized it with AVX-512 in both builds. Disassembly of the measured
+The scalar source was then the correctness oracle (its twin went in #2924), not
+a claim of scalar machine code: Clang vectorized it with AVX-512 in both builds. Disassembly of the measured
 binary confirms that direct byte packing removes `vpmovm2q`, `vpsrlq` and
 `vpmovqb`, using masked byte moves instead. It wins in sustained repetition and
 avoids the previous loss against optimized C after lighter work. These timings
@@ -282,7 +282,7 @@ Reproduce each command in a separate process under the shared lock, repeating
 the set across processes:
 
 ```sh
-taskset -c 2 ./build/compiler benchmark-x86-target --only avx512
+taskset -c 2 ./build/compiler benchmark-x86-target
 taskset -c 2 ./build/compiler benchmark-x86-target --after-predefines 100 --iterations 1
 taskset -c 2 ./build/compiler benchmark-x86-target --after-predefines 100
 ```
@@ -776,8 +776,8 @@ closed; encoder support alone does not make a form legal for a target.
 Build the table once for an unchanged target, retain it through all selecting
 consumers, and do not rebuild it per instruction. The complete table extent,
 not a caller-chosen short slice, is the output capacity. The record validator
-consumes a counted instruction array; scalar/vector table construction must
-agree, including final partial groups. Initialization/ownership is external.
+consumes a counted instruction array; table construction must match the
+table's definition, including final partial groups. Initialization/ownership is external.
 Disposition: retain the shared eligibility table and baseline default.
 `test-x86-target` validates policy and compiler predefines; [#180](https://github.com/buster14a/buster/issues/180)/[#141](https://github.com/buster14a/buster/issues/141) own
 integration of all real selectors and corpus ISA checks. Table-construction

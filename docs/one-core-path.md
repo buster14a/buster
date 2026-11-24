@@ -3537,6 +3537,116 @@ ms.
 **What the row needs** is still about 40 instructions an entry where Tier 0
 takes 165. No single pass holds the rest: emission is one fifth of it.
 
+## Step 4: what Tier 0's cycles wait on, and its passes over a window's bodies
+
+[The census](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier0-causes-2874-2026-11-23)
+and [the batches' record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier0-batches-2874-2026-11-23),
+[#2874](https://github.com/buster14a/buster/issues/2874). Main `b7d0b5ed`,
+`sqlite3.c`, the 9700X, CPU 2.
+
+**The census** counts what the processor did with each pass's cycles. An
+experiment patch stops Tier 0 after a pass and reads hardware counters around
+`benchmark-backend-source`'s loop, so a pass's count is a difference of two
+runs. The 9700X dispatches eight uops a cycle: a pass has eight slots a cycle.
+
+| | cycles | instructions | uops | slots retired | front end empty | back end stalled |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| every function, an entry | 49.7 | 151 | 167 | 42% | 34% | 20% |
+| functions under 64 entries, a body | 2,699 | 7,753 | 8,073 | 37% | 50% | 8% |
+| functions of 512 entries or more, an entry | 35.4 | 126 | 147 | 52% | 8% | 38% |
+
+- **A third of Tier 0's slots had no uop from the front end.** The passes
+  after selection were the ones starved: 73% of the homes' and frame's slots,
+  37% of measuring's and of emission's, 87% of the forms' choice.
+- **The cause is the size of the code a function's compile walks:** about 690
+  misses of the first-level instruction cache a function, 44 KB of code
+  fetched from the second level where the first holds 32 KB, 9.2 misses of
+  the op cache an entry, and 31% of the uops from the decoder.
+- **About 29% of Tier 0's cycles are a body's fixed part.** A long body takes
+  35.4 cycles an entry and the mean is 49.7: about 2,040 cycles a body. A body
+  under 64 entries costs 2,699 cycles and 7,753 instructions whatever its
+  size.
+- **In a long body** the loops stay in the op cache, and what is left is uops
+  (52%) and back-end stalls (38%). The three gathers are microcoded, 16 of
+  the 147 uops an entry.
+
+**The passes over a window's bodies** (tier0.md's "The two paths"): Tier 0's
+passes after fusion are functions of a job, and `tier0_compile_batch` runs
+each over every function of a batch before the next. The C driver's code half
+prepares a window's bodies (each one's tier and its inline splice), has Tier 0
+compile them together, then makes each body's code after Tier 0 in order.
+
+- **Exact:** every object is main's on `sqlite3.c` (with and without `-g`),
+  Lua, musl's units, `main.c` and `tests/**/*.c` (2,944 compiles), and at the
+  AVX targets (4,478). `test-tier0` compiles each program's functions in
+  batches and requires each one's own code.
+- **Cost:** `tier0` from 3.971 to 3.662 ms (medians of 11 in turn), 0.31 ms
+  less, and the row's stages from 6.74 to 6.37 ms: branch sizing, the encoder
+  and the unwind rows run 0.09 ms faster with no Tier 0 between two bodies.
+  The piece's gate was 0.40 ms less on `tier0`, refuted under 0.15: missed,
+  not refuted.
+- **The limits:** in one executable, a batch of one function reads 3.99 ms,
+  of two 3.88, of four 3.76, of eight 3.71, and of 32 functions or 2,048
+  entries 3.68. Larger batches read the same, and so do windows of 8,192
+  tokens.
+
+**After the batches**
+([the fixed cost's record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/tier0-fixed-cost-2874-2026-11-23)),
+on main `d4a6eb540`. In batches the back end stalls a third of Tier 0's slots,
+so the question became what its loops wait on.
+
+- **What moved nothing.** The three gathers as eight loads each: 10
+  microcoded uops an entry gone, `tier0` 3.695 against 3.683 ms. Emission's
+  choices, branches and references in scalar loops after its blocks: 0.11 ms
+  slower. Four reorderings of the passes' chains, a knob each (the labels'
+  bits from bytes, the depths' carry off the scan, the references in two
+  tables, emission's hole blocks a block ahead): within 0.02 ms of none.
+- **A memo of statements would not carry the front.** Keyed by what the
+  front's passes read of a statement, 66.4% of `sqlite3.c`'s entries are in a
+  statement seen before; with a table a unit, 51.8% of Lua's and 29.9% of
+  musl's. And the homes, measuring and emission depend on the function's
+  locals.
+- **A function's fixed cost is its instructions.** A line through nine bins
+  of `sqlite3.c`'s functions by size: 1,043 cycles a function and 34.9 an
+  entry, so 16% of Tier 0 is the functions' fixed work. A function of five
+  entries runs 5,119 instructions, 3.9 a cycle. The front's 64-entry blocks
+  are 0.25 M of its 6.1 M cycles: sharing blocks across a batch's functions
+  is not worth its machinery.
+- **Samples at a waiting load overstate it.** In the functions under 16
+  entries, `perf record` put 392 of 1,641 cycles a function at five loads,
+  each right after stores it cannot be forwarded from (a masked store, a
+  `memset` of under 64 bytes, a list stored a register at a time, a struct's
+  two fields, a second copy of a struct). Each one removed alone, behind a
+  knob, gained 9 to 28 cycles a function where it was sampled at 58 to 95,
+  and moved `tier0` in a compile by nothing measurable: the processor works
+  past the load, and retirement stops at it. Running the front's sub-passes
+  each over the batch, so that every store is long in the cache when read,
+  was 0.09 ms slower.
+- **What landed from it** (#3486, every object's bytes unchanged; `-c
+  sqlite3.c` on main `d4a6eb540`, that main, the first piece and both built
+  from one tree, medians of 30 with the order rotated every round):
+  selection's words gathered a block ahead, `tier0` 3.660 to 3.616 ms; then
+  the five loads without their stores, 3.616 to 3.582, with branch sizing
+  0.392 to 0.380 behind the driver's copies. The second piece's gate was
+  0.10 ms, from the samples: missed, and its premise refuted; it stays as
+  the exact 0.03 ms it measured. The row is 6.33 to 6.23 ms. Of the five,
+  the counts' zeroing merged as #2972's `tier0_clear`, which main had by
+  then.
+- **An A/B in a fixed order reads the second executable 0.01 to 0.03 ms
+  high on `tier0`.** The same executable read 3.644 as the second of a pair
+  and 3.604 as the first, an hour apart; rotated among three it read 3.616.
+  The pieces before this one were all the second of their pairs.
+
+**Against the step's gate.** The row is about 6.2 ms on `sqlite3.c`, 47
+cycles a token where the budget has 10: `tier0` 27 of them, and the stages
+after it (branch sizing, the encoder, the unwind rows, the unit's parts and
+the object) 20, twice the gate by themselves. Tier 0's cycles are spread over
+a dozen passes at four uops a cycle with no pass above a quarter, a function's
+fixed work is a sixth, and since the batches no local change has been worth
+more than 2%. The gate needs fewer uops an entry by a factor of about five,
+which is another machine for Tier 0's middle and for the emission after it,
+not these passes made faster.
+
 ## Step 5's first piece: a census of the kernel's time and fresh memory
 
 [The record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/kernel-census-2873-2026-11-16)

@@ -1,0 +1,4 @@
+logf(level, "start");
+logf(level, "n = %d\n", n);
+show("red, green and blue");
+((a < b) ? show("a < b") : emit("a is %d, b is %d", a, b));

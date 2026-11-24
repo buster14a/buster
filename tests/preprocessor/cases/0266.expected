@@ -1,0 +1,4 @@
+#pragma omp parallel num_threads(4)
+#pragma omp for 4
+#pragma ppf N
+#pragma STDC FP_CONTRACT N

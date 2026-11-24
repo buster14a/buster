@@ -47,6 +47,10 @@ struct NodeAlone
     uint32_t* body_openings;
     uint32_t body_count;
     uint32_t next_body;
+    // Every body's opening brace in the tokens' order, those of the list above among them (node_alone_openings): what the
+    // producer's setup reads in place of the unit's tokens.
+    const uint32_t* opened;
+    uint32_t opened_count;
     // The producer of a body's function without the walk (c_check_node_bodies.c, BUSTER_NODE_READER_PRODUCE), which decides
     // each body here; and whether it runs as a compile would (BUSTER_NODE_READER_PRODUCE_LEAN).
     struct NodeProducer* producer;
@@ -616,6 +620,42 @@ static NodeFrontTypes* node_alone_results(CheckInputReader* reader, const NodeFr
     return room ? types : NULL;
 }
 
+// The unit's tokens whose byte in `column` is `value`, in order, 64 tokens a scan: their count, and themselves into
+// `found` where it isn't null (room for the count). A unit has a body's opening brace or an `enum` among hundreds of
+// tokens, so the setup's passes over every token (five of them, 1.75 ms of `sqlite3.c`'s --node-bodies) are scans that
+// stop at those alone.
+static uint32_t node_alone_tokens(const uint8_t* column, uint32_t count, uint8_t value, uint32_t* found)
+{
+    uint32_t result = 0;
+    for (uint32_t first = 0; first < count; first += 64)
+    {
+        const uint64_t marked = check_input_scan_equal(column, first, count, value);
+        uint32_t at = result;
+        for (uint64_t rest = found != NULL ? marked : 0; rest != 0; rest &= rest - 1)
+        {
+            found[at] = first + (uint32_t)__builtin_ctzll(rest);
+            at += 1;
+        }
+        result += (uint32_t)__builtin_popcountll(marked);
+    }
+    return result;
+}
+
+// Whether postorder positions `first` to `end` - 1 hold tokens `low` to `high` alone, 16 positions a step.
+static bool node_alone_run(const uint32_t* postorder, uint32_t first, uint32_t end, uint32_t low, uint32_t high)
+{
+    __mmask16 outside = 0;
+    for (uint32_t position = first; position < end && outside == 0; position += 16)
+    {
+        const uint32_t length = end - position < 16 ? end - position : 16;
+        const __mmask16 lanes = (__mmask16)_bzhi_u32(0xffff, length);
+        const __m512i tokens = _mm512_maskz_loadu_epi32(lanes, postorder + position);
+        // A token below `low` wraps past `high` - `low`.
+        outside = _mm512_mask_cmpgt_epu32_mask(lanes, _mm512_sub_epi32(tokens, _mm512_set1_epi32((int32_t)low)), _mm512_set1_epi32((int32_t)(high - low)));
+    }
+    return outside == 0;
+}
+
 static struct NodeAlone* node_alone_begin(NodeFront* front, CheckInputReader* reader)
 {
     const Parser* parser = reader->parser;
@@ -633,11 +673,8 @@ static struct NodeAlone* node_alone_begin(NodeFront* front, CheckInputReader* re
     uint32_t* roots = compile ? NULL : arena_push_array(reader->arena, (uint64_t)count + 1, sizeof(uint32_t), _Alignof(uint32_t));
     uint32_t* control_roots = arena_push_array(reader->arena, (uint64_t)count + 1, sizeof(uint32_t), _Alignof(uint32_t));
     // A body an opening brace at most: the room for every one.
-    uint32_t bodies = 0;
-    for (uint32_t token = 0; token < count; token += 1)
-    {
-        bodies += parser->tree.roles[token] == PARSE_ROLE_OPEN_BODY;
-    }
+    const uint32_t bodies = node_alone_tokens(parser->tree.roles, count, PARSE_ROLE_OPEN_BODY, NULL);
+    uint32_t* opened = arena_push_array(reader->scratch, (uint64_t)bodies + 1, sizeof(uint32_t), _Alignof(uint32_t));
     uint32_t* firsts = arena_push_array(reader->scratch, (uint64_t)bodies + 1, sizeof(uint32_t), _Alignof(uint32_t));
     uint32_t* ends = arena_push_array(reader->scratch, (uint64_t)bodies + 1, sizeof(uint32_t), _Alignof(uint32_t));
     uint32_t* openings = arena_push_array(reader->scratch, (uint64_t)bodies + 1, sizeof(uint32_t), _Alignof(uint32_t));
@@ -646,7 +683,8 @@ static struct NodeAlone* node_alone_begin(NodeFront* front, CheckInputReader* re
     uint64_t* body_ticks = arena_push_array(reader->arena, 3 * ((uint64_t)bodies + 1), sizeof(uint64_t), _Alignof(uint64_t));
     uint8_t* body_scanned = arena_push_array(reader->arena, (uint64_t)bodies + 1, sizeof(uint8_t), 1);
     // (A compile's walk has no machine of its own and so no tests' state: node_machine_reader_begin.)
-    bool room = alone != NULL && own != NULL && report != NULL && (compile || roots != NULL) && control_roots != NULL && firsts != NULL && ends != NULL && openings != NULL &&
+    bool room = alone != NULL && own != NULL && report != NULL && (compile || roots != NULL) && control_roots != NULL && opened != NULL && firsts != NULL && ends != NULL &&
+                openings != NULL &&
                 verdict_openings != NULL && verdicts != NULL && body_ticks != NULL && body_scanned != NULL && typer != NULL && typer->types != NULL &&
                 (compile || typer->tests != NULL) && typer->types->sweep_refusals != NULL && typer->facts == NULL && reader->postorder != NULL &&
                 reader->postorder_positions != NULL;
@@ -663,18 +701,17 @@ static struct NodeAlone* node_alone_begin(NodeFront* front, CheckInputReader* re
         // The bodies in the order of their tokens, which is the postorder's for subtrees that share no token: a body's
         // closing brace is its opening one's parent and its subtree's last position.
         uint32_t last = 0;
-        for (uint32_t token = 0; token < count; token += 1)
+        alone->opened = opened;
+        alone->opened_count = node_alone_tokens(parser->tree.roles, count, PARSE_ROLE_OPEN_BODY, opened);
+        for (uint32_t body = 0; body < alone->opened_count; body += 1)
         {
-            const uint32_t closing = parser->tree.roles[token] == PARSE_ROLE_OPEN_BODY ? parser->tree.parents[token] : count;
+            const uint32_t token = opened[body];
+            const uint32_t closing = parser->tree.parents[token];
             if (closing < count && closing > token)
             {
                 const uint32_t end = reader->postorder_positions[closing] + 1;
                 const uint32_t size = closing - token + 1;
-                bool run = end >= size && end - size >= last;
-                for (uint32_t position = end - size; run && position < end; position += 1)
-                {
-                    run = reader->postorder[position] >= token && reader->postorder[position] <= closing;
-                }
+                const bool run = end >= size && end - size >= last && node_alone_run(reader->postorder, end - size, end, token, closing);
                 if (run)
                 {
                     firsts[alone->body_count] = end - size;

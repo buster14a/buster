@@ -23,9 +23,11 @@ requirements. [Command index](README.md).
   "Slot sharing between objects"); `test-tier1-emit` checks shared and separate
   rows natively, and `test-checker-driver`'s lifetime fixture smaller frames
   than `--tier1-no-lifetimes`' against clang.
-  `test-tier1-frame` checks independent pressure/layout/prologue oracles, that
-  both paths give identical slots and offsets (#2606), and that the ordered
-  coloring pass's colors are a pointer-jumping oracle's (#2699);
+  `test-tier1-frame` checks independent pressure/layout/prologue oracles,
+  preparation's class numbers and event order against their definition, that
+  the ordered coloring pass's colors are a pointer-jumping oracle's (#2699), and
+  the default run's plans against a frozen digest (#2924: the scalar twin is
+  gone, and with it `--only` and `--after-scalar`);
   `benchmark-tier1-frame` measures preparation, coloring, layout and total cost
   (`--count N` at a frame's size: a function's frames are small, and the rank
   sort takes up to 32 objects).

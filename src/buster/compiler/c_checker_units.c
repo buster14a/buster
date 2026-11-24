@@ -113,6 +113,13 @@ struct CheckUnitsMemory
     uint32_t most;
 };
 
+// What --time-stages reports of the lanes' root images (#3070): how many were captured, how many units started from
+// one, and how many times one was dropped (PPRoot).
+#define CHECK_UNITS_ROOT_CAPTURES 0
+#define CHECK_UNITS_ROOT_RESUMES 1
+#define CHECK_UNITS_ROOT_DROPS 2
+#define CHECK_UNITS_ROOT_COUNTS 3
+
 // A lane's state, which its units take turns with: the intern table and the file cache they preprocess with, a unit's
 // preprocessor, parser, memory and function lanes, the memory of the links it keeps, the pool of the arenas its units
 // release (arena_pool), and the part of the run's memory it holds (CheckUnitsMemory).
@@ -146,6 +153,13 @@ struct CheckUnitsLane
     bool attested_tried;
     // Its counts, kept past the state's close for --time-stages' report (check_attested_summary).
     uint64_t attested_counts[CHECK_ATTESTED_SUMMARY];
+    // The lane's root image (#3070, PPRoot): its preprocessor's state after the predefines and the command line's -D and
+    // -U, captured by its first unit, which its later units start from, and the preprocessor's arenas, which they give
+    // back at their release. Made with the lane's memory and released with it; null with --root-image=off, or where it
+    // couldn't be reserved, and then every unit starts and releases its preprocessor as a command of one unit does.
+    PPRoot* root;
+    // Its counts, kept past its release for --time-stages' report (check_units_root_counts).
+    uint64_t root_counts[CHECK_UNITS_ROOT_COUNTS];
 };
 
 #include "c_driver_mixed.c"
@@ -2209,8 +2223,27 @@ static bool check_units_lane_ready(CheckUnitsLane* lane, const CheckDriverComman
         lane->ready = lane->arena.base != 0 && lane->scratch.base != 0 && lane->output.base != 0 && lane->kept.base != 0 && lane->kept_bytes.base != 0 &&
                       intern_initialize(&lane->identifiers) && file_cache_initialize(&lane->cache, &lane->identifiers, pp_prepare_options(&command->options));
         lane->failed = !lane->ready;
+        // Its root image, which a lane does without (#3070); --poison-arenas checks what it keeps after each unit.
+        lane->root = lane->ready && command->root_image ? pp_root_make() : NULL;
+        if (lane->root != NULL)
+        {
+            lane->root->verify = command->poison_arenas;
+            lane->root->poison = command->poison_arenas ? BUSTER_CHECK_UNITS_POISON : 0;
+        }
     }
     return lane->ready;
+}
+
+// Adds the lane's root's counts to `counts` (CHECK_UNITS_ROOT_*), if it has one.
+static void check_units_root_counts(const CheckUnitsLane* lane, uint64_t* counts)
+{
+    const PPRoot* root = lane->root;
+    if (root != NULL)
+    {
+        counts[CHECK_UNITS_ROOT_CAPTURES] += root->captures;
+        counts[CHECK_UNITS_ROOT_RESUMES] += root->resumes;
+        counts[CHECK_UNITS_ROOT_DROPS] += root->drops;
+    }
 }
 
 // A lane's memory that the link doesn't read, its file cache, intern table, three arenas and its functions' lane 0's
@@ -2223,6 +2256,10 @@ static bool check_units_lane_ready(CheckUnitsLane* lane, const CheckDriverComman
 // Then it gives back what it held of the run's memory (check_units_memory_give).
 static void check_units_lane_release(CheckUnitsLane* lane)
 {
+    // The root's image names the table's ids and the cache's records: before them.
+    check_units_root_counts(lane, lane->root_counts);
+    pp_root_release(lane->root);
+    lane->root = NULL;
     file_cache_release(&lane->cache);
     intern_release(&lane->identifiers);
     check_attested_summary(lane->attested, lane->attested_counts);
@@ -2304,6 +2341,9 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
         options.probed_input = unit->probed ? unit->path : NULL;
         options.diagnostics = errors;
         options.preprocessed = unit->preprocessed;
+        // The lane's root image (#3070): its units' options are the command's but for the three above, the only ones
+        // PPOptions.root lets differ.
+        options.root = lane->root;
         unit->kept = (CheckUnitsKept){ .arena = &lane->kept, .bytes = &lane->kept_bytes };
         check_units_lane_functions(run, lane, errors, lane->functions.arenas[0].scratch);
         lane->memory = run->memory;
@@ -2350,6 +2390,14 @@ static void check_units_compile(const CheckUnitsRun* run, CheckUnitsLane* lane, 
             }
         }
         arena_small_floor = 0;
+        // --poison-arenas' check of what the lane's root keeps (PPRoot.verify): a difference from its image fails the unit.
+        if (lane->root != NULL && lane->root->mismatches != 0)
+        {
+            fprintf(errors, "fatal error: the preprocessor's kept state differs from its root image (%u places): %s\n", lane->root->mismatches, lane->root->mismatch);
+            lane->root->mismatches = 0;
+            unit->status = 1;
+            unit->fatal = true;
+        }
         // The unit's helper plan into the command's report (#1059), which the other lanes' units add to too.
         if (command->helper_report != NULL)
         {
@@ -2861,6 +2909,21 @@ static int check_driver_units(const CheckDriverCommand* command, char** inputs, 
                         outside != 0 ? 100.0 * (double)counts[CHECK_ATTESTED_SUMMARY_SKIPPED_TOKENS] / (double)outside : 0.0, counts[CHECK_ATTESTED_SUMMARY_VIEWS],
                         counts[CHECK_ATTESTED_SUMMARY_AGAIN],
                         counts[CHECK_ATTESTED_SUMMARY_HASHES], counts[CHECK_ATTESTED_SUMMARY_CONTRADICTIONS], counts[CHECK_ATTESTED_SUMMARY_UNLISTED]);
+            }
+            // The lanes' root images (#3070): those of the lanes that released theirs, and of the last one's state.
+            if (stage_clock != NULL && command->root_image)
+            {
+                uint64_t roots[CHECK_UNITS_ROOT_COUNTS] = { 0 };
+                for (uint32_t l = 0; l < active; l += 1)
+                {
+                    for (uint32_t c = 0; c < CHECK_UNITS_ROOT_COUNTS; c += 1)
+                    {
+                        roots[c] += states[l].root_counts[c];
+                    }
+                    check_units_root_counts(states + l, roots);
+                }
+                fprintf(stderr, "root images: %" PRIu64 " captured, %" PRIu64 " dropped, %" PRIu64 " starts from one\n", roots[CHECK_UNITS_ROOT_CAPTURES],
+                        roots[CHECK_UNITS_ROOT_DROPS], roots[CHECK_UNITS_ROOT_RESUMES]);
             }
             if (command->units_memory != 0)
             {

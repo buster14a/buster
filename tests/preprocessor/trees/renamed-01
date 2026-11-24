@@ -1,0 +1,3 @@
+int in_header;
+#line 50 "renamed.h"
+int after;

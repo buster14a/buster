@@ -301,6 +301,9 @@ struct PPSearchDirectories
     bool missing_headers;
 };
 
+// A units lane's root image (below, after Preprocessor): what PPOptions.root names.
+typedef struct PPRoot PPRoot;
+
 typedef struct PPOptions PPOptions;
 struct PPOptions
 {
@@ -509,6 +512,11 @@ struct PPOptions
     // keep_comments).
     bool keep_comments;
     bool keep_macro_comments;
+    // The root image the unit starts from and gives its state back to (#3070, PPRoot), or null: a units lane's, for its
+    // units in turn. Every preprocessor started with one root has the same options but `diagnostics`, `probed_input`
+    // and `preprocessed` (which the root compares), and the root's intern table and file cache: the root doesn't compare
+    // the others. At the end, so that the other fields keep their places (#2925).
+    PPRoot* root;
 };
 
 // Is '$' punctuation with these options (PPDollars)? The lexer takes it into identifiers and pp-numbers, and
@@ -1953,7 +1961,130 @@ struct Preprocessor
     // runs read (#2925).
     PPOutputEvent* output_events;
     PPOutputEvent* last_output_event;
+    // The root image the unit is bound to (#3070, PPRoot), or null: the one its options named, from its start until its
+    // release, which gives its arenas back to the root (pp_root_park). `root_resumed`: it started from the image, so its
+    // prelude's macros are defined already (pp_run_prelude). `root_unrestorable`: something left bytes in its arenas or
+    // tables that its counts don't cover (a copy of the preprocessor that may have pushed, check_repair_preprocessor), so
+    // its release drops the root instead. And the prelude's buffer for the command line's
+    // lines, which its -include lines are written in after them.
+    PPRoot* root;
+    char* command_line;
+    bool root_resumed;
+    bool root_unrestorable;
+    // The most items a macro's compile has written (pp_compile_macro), which can be past item_count.
+    uint32_t item_peak;
 };
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The root image (#3070; docs/translation-units.md, "The root image")
+//
+// A units lane compiles its units in turn with one intern table, one file cache and one set of options, and every one
+// of them started the same way: its preprocessor reserved nine arenas, made the predefines' text, lexed it, ran its 400
+// definitions and the command line's, and at its release gave the arenas' pages back to the kernel, its 9.6 GB of
+// tables among them, which the next unit faulted in again. On the 9700X that was most of an empty unit's cycles
+// (buster-performance's docs/measurements/root-image-3070-2026-11-23).
+//
+// With a root (PPOptions.root), the lane's first unit starts as before, and where its prelude has run the predefines
+// and the command line's -D and -U (pp_run_prelude), its preprocessor's state is captured (pp_root_capture): the
+// Preprocessor itself, the bytes its arenas hold, and each of its tables' entries. From then on the preprocessor's
+// arenas (BUSTER_PP_ROOT_ARENAS) and its arena of tables are the root's, not the unit's: a unit's release gives them back with the image's
+// state in them again (pp_root_park), and the next unit's start is a copy of the image (pp_root_resume), with its own
+// options, time and output. The image's pointers stay good because its memory stays where it was.
+//
+// What a release restores, by where a unit can have written:
+//   - an arena: its bytes up to the image's length are copied back, and those past it, up to its peak, are zero again
+//     (arena_rewind), as a fresh arena's are;
+//   - a table with a count (BUSTER_PP_ROOT_DENSE: the ranges, the files, the macros, ...): the image's entries are
+//     copied back and the unit's, up to its count, are zero again;
+//   - a stack (BUSTER_PP_ROOT_STACK: the contexts, the token stacks, ...): the image's entries are copied back, and what
+//     is past them stays, as in a units lane's own arenas: a stack's entry is written before it is read;
+//   - the tables by name (macro_of, is_macro): the image's, up to the ids the intern table had at the capture, are
+//     copied back, and past them the entry of each macro record the unit made is zero again; the poisoned names', of a
+//     unit that poisoned any, are cleared whole; and the cache records' data (record_data) are those of the image's files.
+//
+// A unit whose state can't be given back so (PPRoot's drop: `root_unrestorable`, a failed commit) releases its arenas
+// as before, and the next unit captures again. A prelude that reported anything, or left anything open, is never
+// captured: each unit then runs it, as before. The owner's `verify` (the driver's --poison-arenas) checks every byte of
+// the kept memory against the image after each release, and fills what a stack keeps past its count with a pattern.
+
+// How a release restores a table (above).
+#define BUSTER_PP_ROOT_DENSE 0
+#define BUSTER_PP_ROOT_STACK 1
+// The preprocessor's arenas a root keeps (the unit's, its three of columns, its two of scratch spellings and its
+// history's first tables') beside its arena of tables, and the most tables it lists.
+#define BUSTER_PP_ROOT_ARENAS 7
+#define BUSTER_PP_ROOT_TABLES 48
+// How many times a root is dropped before it stops capturing.
+#define BUSTER_PP_ROOT_DROPS 8
+
+typedef enum PPRootState
+{
+    // Nothing captured: the next unit bound to it captures at its prelude's end, or refuses it.
+    PP_ROOT_EMPTY,
+    PP_ROOT_CAPTURED,
+    // The prelude can't be captured for these options, or the root was dropped too often: units start as without one.
+    PP_ROOT_REFUSED,
+} PPRootState;
+
+// One of a preprocessor's tables, as pp_root_tables lists them: its entries' bytes, how many are written from its start
+// (a stack's: how many are in use), and how many it has room for.
+typedef struct PPRootTable PPRootTable;
+struct PPRootTable
+{
+    uint8_t* base;
+    uint64_t size;
+    uint64_t count;
+    uint64_t capacity;
+    uint8_t kind;
+};
+
+struct PPRoot
+{
+    uint8_t state;
+    // A unit is bound to it, from its start to its release: one at a time, so a second preprocessor started with the
+    // same options meanwhile (a diagnostic's replay of the unit) starts without it.
+    bool live;
+    // Its owner's (the driver's --poison-arenas): each release checks the kept memory against the image and fills the
+    // stacks past their counts with `poison`. The first difference found is described in `mismatch`, and counted.
+    bool verify;
+    uint8_t poison;
+    uint32_t drops;
+    uint32_t mismatches;
+    char mismatch[192];
+    // What it has done, for the tests and --time-stages.
+    uint64_t captures;
+    uint64_t resumes;
+    // The preprocessor it was captured from, the only one that resumes it (the image's pointers into the preprocessor
+    // itself are that one's), with its intern table, file cache, search directories, whether its input is preprocessed,
+    // and the shape of its reservations (lane.c's arena_compact and arena_commit_refused then).
+    Preprocessor* owner;
+    InternTable* table;
+    FileCache* files;
+    const PPSearchDirectories* search;
+    bool preprocessed;
+    bool compact;
+    // The image: the preprocessor after its prelude's macros, whose arenas (BUSTER_PP_ROOT_ARENAS and the tables') are
+    // the root's while no unit is bound; and in `storage`, after this record, the bytes each arena held, each table's
+    // entries, and macro_of's and is_macro's for the `ids` the intern table had.
+    Preprocessor image;
+    Arena storage;
+    const uint8_t* arena_bytes[BUSTER_PP_ROOT_ARENAS];
+    uint32_t table_count;
+    PPRootTable tables[BUSTER_PP_ROOT_TABLES];
+    const uint8_t* table_bytes[BUSTER_PP_ROOT_TABLES];
+    uint32_t ids;
+    const PPMacroId* macro_of;
+    const uint64_t* is_macro;
+};
+
+// A root, empty, in an arena of its own; null if it can't be reserved. Its owner gives it to its units' options, one unit
+// at a time, and releases it (pp_root_release) on the thread that ran them, once none is bound.
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) PPRoot* pp_root_make(void);
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) void pp_root_release(PPRoot* root);
+// A bound unit's release (pp_release_unit): gives the root its arenas back, restored to the image, and returns true; or
+// returns false, with the unit unbound, where the root holds none of them (nothing captured, or dropped), which the
+// caller then releases.
+BUSTER_PREPROCESSOR_ENTRY __attribute__((unused)) bool pp_root_park(Preprocessor* pp);
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Token stacks
@@ -6430,6 +6561,9 @@ BUSTER_PREPROCESSOR_ENTRY bool pp_initialize(Preprocessor* pp, const PPOptions* 
 
 static void pp_release_unit(Preprocessor* pp)
 {
+    // A unit bound to a root gives it the arenas the image is in (#3070), first, while its tables and counts say what it
+    // wrote; any other releases them, below.
+    const bool kept = pp->root != 0 && pp_root_park(pp);
     pp_tokens_release(&pp->output);
     pp_tokens_release(&pp->arguments);
     pp_tokens_release(&pp->captures);
@@ -6440,17 +6574,25 @@ static void pp_release_unit(Preprocessor* pp)
     {
         file_cache_release(pp->cache);
     }
-    arena_release(&pp->scratch[0]);
-    arena_release(&pp->scratch[1]);
-    arena_release(&pp->history_initial);
-    arena_release(&pp->arena);
-    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(pp->columns); i += 1)
-    {
-        arena_release(&pp->columns[i]);
-    }
-    for (uint32_t i = 0; i < pp->array_count; i += 1)
+    // The arrays reserved after the unit's tables, which a root doesn't keep.
+    for (uint32_t i = 1; i < pp->array_count; i += 1)
     {
         arena_release(&pp->arrays[i]);
+    }
+    if (!kept)
+    {
+        arena_release(&pp->history_initial);
+        arena_release(&pp->scratch[0]);
+        arena_release(&pp->scratch[1]);
+        arena_release(&pp->arena);
+        for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(pp->columns); i += 1)
+        {
+            arena_release(&pp->columns[i]);
+        }
+        if (pp->array_count != 0)
+        {
+            arena_release(&pp->arrays[0]);
+        }
     }
     *pp = (Preprocessor){ 0 };
 }

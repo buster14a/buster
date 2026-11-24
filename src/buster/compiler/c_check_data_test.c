@@ -1627,9 +1627,7 @@ static void check_data_test_zero_bits(CheckTest* test)
     {
         uint8_t* bytes = mapping + page - size;
         memset(bytes, 0, size);
-        check_test_expect(test, !check_data_nonzero_bits(bytes, 0, (uint64_t)size * 8, false) &&
-                               !check_data_nonzero_bits(bytes, 0, (uint64_t)size * 8, true),
-                          "zero byte scans agree at every vector tail and guarded end");
+        check_test_expect(test, !check_data_nonzero_bits(bytes, 0, (uint64_t)size * 8), "zero byte scans find no bit at every vector tail and guarded end");
         for (uint32_t tail = 0; size != 0 && tail < 8; tail += 1)
         {
             for (uint32_t head = 0; head < 8; head += 1)
@@ -1642,9 +1640,7 @@ static void check_data_test_zero_bits(CheckTest* test)
                     const uint64_t bit = positions[i];
                     bytes[bit / 8] = (uint8_t)(1u << (bit % 8));
                     const bool expected = bit >= begin && bit < end;
-                    check_test_expect(test, check_data_nonzero_bits(bytes, begin, end, false) == expected &&
-                                           check_data_nonzero_bits(bytes, begin, end, true) == expected,
-                                      "scalar/vector zero scans preserve partial-byte ownership");
+                    check_test_expect(test, check_data_nonzero_bits(bytes, begin, end) == expected, "zero scans preserve partial-byte ownership");
                     bytes[bit / 8] = 0;
                 }
             }

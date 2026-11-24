@@ -11,7 +11,9 @@ compiler wanted) and the **clean build** (a fresh clone, CI, a branch switch).
 ([Step 5, measured](#step-5-measured)) and, with the splitter taken further,
 again on 2026-11-15, by less ([Step 5, renewed](#step-5-renewed)): Release
 stays whole, and `BUSTER_RELEASE_PARTS=1` builds it in parts, at the owner's
-choice, for an edit loop with Release's optimization.
+choice, for an edit loop with Release's optimization. Lever 6, the compiler
+building its own units, is `BUSTER_SELF_BUILT` in Develop, for the units no
+compile runs (#2630; [the build guide's "Self-built units"](commands/build.md#self-built-units)).
 
 Every time below was measured on the Ryzen 7 9700X under its lock, at main
 `c5f0efb2` with the host's clang 23.1.1 and the build's eight jobs, unless the
@@ -501,6 +503,18 @@ build's flags, less `-O3`, `-Wall` and `-Werror`, as the self-host gate does:
 
 **Evidence.** Not Release. Its own gate is the self-host gate's: the hybrid's
 outputs are the clang-built compiler's, byte for byte.
+
+**Since then** (#2630): a compiler wholly self-built at Tier 1 passed
+`test-tier0` and the correctness inventory on 2026-11-13: the unsigned-floating
+failures were gone. The build has the lever as `BUSTER_SELF_BUILT` for Develop
+alone, with the tree's Release executable as the previous stage and clang's
+predefined macros, starting with the units whose code no compile runs (`tests`).
+Its first self-built units found a Tier 1 miscompile (#3424, fixed). On the
+9700X a clean Develop build took 27.7 s against 31.9 s, an edit of a file only
+those units read 2.9 s against 6.6 s, the compile path ran as before and the
+units' own tests 5.8% longer. The build guide's ["Self-built
+units"](commands/build.md#self-built-units) has the setting and its
+measurements.
 
 ### 7. A faster clang
 

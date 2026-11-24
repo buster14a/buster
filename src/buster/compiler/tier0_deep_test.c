@@ -3,7 +3,7 @@
 //
 // Values past Tier 0's depth tables (#136's item 6, tier0_select_deep), on the cases the generated programs reach
 // rarely or never: functions of one U64 parameter (x, in rdi) whose stacks fill their tables and then cross the line
-// with an entry of each kind, compiled by both paths into the same records, encoded by both encoders and run natively on
+// with an entry of each kind, compiled into valid records, encoded and run natively on
 // six inputs against this file's model of each. tier0_test.c includes it after tier0_x87_test.c, for its "deep" check.
 
 #define BUSTER_TIER0_TEST_DEEP_ENTRIES 256
@@ -465,36 +465,34 @@ static __attribute__((no_sanitize("function"))) void tier0_test_deep(Tier0TestTa
         function.result = result;
         const uint64_t mark = arena.length;
         const Tier0Check check = tier0_validate(&function);
-        const Tier0Code scalar = tier0_compile_scalar(&function, &arena);
         const Tier0Code vector = tier0_compile(&function, &arena);
-        ready = tier0_test_expect(tally, check.error == TIER0_OK && scalar.error == TIER0_OK && tier0_test_same_code(&scalar, &vector), "deep",
-                                  "%s: rule \"%s\" at %u, error %d at %u, or the paths differ", name, check.rule != 0 ? check.rule : "", check.node, scalar.error,
-                                  scalar.node);
+        ready = tier0_test_expect(tally, check.error == TIER0_OK && vector.error == TIER0_OK, "deep",
+                                  "%s: rule \"%s\" at %u, error %d at %u", name, check.rule != 0 ? check.rule : "", check.node, vector.error, vector.node);
         // Every case has deep entries, and only the frame pointer's two and the realigned frames' have push rbp; mov rbp,
         // rsp first, the realigned ones published as such (case 10's with its base).
-        const bool pointer = ready && scalar.count >= 2 && scalar.records[0].form == X86_FORM_PUSH_R64 && scalar.records[0].rm == X86_REGISTER_RBP &&
-                             scalar.records[1].form == X86_FORM_MOV_RM64_R64 && scalar.records[1].rm == X86_REGISTER_RBP;
+        const bool pointer = ready && vector.count >= 2 && vector.records[0].form == X86_FORM_PUSH_R64 && vector.records[0].rm == X86_REGISTER_RBP &&
+                             vector.records[1].form == X86_FORM_MOV_RM64_R64 && vector.records[1].rm == X86_REGISTER_RBP;
         const uint32_t realigned = c == 9 ? 6 : c == 10 ? 12 : 0;
-        ready = ready && tier0_test_expect(tally, scalar.deep != 0 && pointer == (c == 5 || c == 7 || c == 9 || c == 10) && scalar.frame_alignment_log2 == realigned &&
-                                                      scalar.frame_base == (c == 10),
-                                           "deep", "%s: %u deep entries, %s frame pointer, realigned to 2^%u%s", name, scalar.deep, pointer ? "a" : "no",
-                                           scalar.frame_alignment_log2, scalar.frame_base ? " with a base" : "");
-        uint64_t* reads = ready ? BUSTER_ARENA_PUSH_ARRAY(&arena, uint64_t, (uint64_t)scalar.count) : 0;
-        uint64_t* writes = ready ? BUSTER_ARENA_PUSH_ARRAY(&arena, uint64_t, (uint64_t)scalar.count) : 0;
-        ready = ready && tier0_test_expect(tally, reads != 0 && writes != 0 && tier0_test_deep_saved(scalar.records, scalar.count, reads, writes), "deep",
+        ready = ready && tier0_test_expect(tally, vector.deep != 0 && pointer == (c == 5 || c == 7 || c == 9 || c == 10) && vector.frame_alignment_log2 == realigned &&
+                                                      vector.frame_base == (c == 10),
+                                           "deep", "%s: %u deep entries, %s frame pointer, realigned to 2^%u%s", name, vector.deep, pointer ? "a" : "no",
+                                           vector.frame_alignment_log2, vector.frame_base ? " with a base" : "");
+        uint64_t* reads = ready ? BUSTER_ARENA_PUSH_ARRAY(&arena, uint64_t, (uint64_t)vector.count) : 0;
+        uint64_t* writes = ready ? BUSTER_ARENA_PUSH_ARRAY(&arena, uint64_t, (uint64_t)vector.count) : 0;
+        ready = ready && tier0_test_expect(tally, reads != 0 && writes != 0 && tier0_test_deep_saved(vector.records, vector.count, reads, writes), "deep",
                                            "%s: a callee-saved register written that the prologue doesn't push", name);
-        ready = ready && tier0_test_expect(tally, x86_validate(scalar.records, scalar.count) == scalar.count && scalar.reference_count == 0 &&
-                                                      branch_sizing_validate(scalar.records, scalar.count, scalar.branches, scalar.targets, scalar.branch_count).error ==
+        ready = ready && tier0_test_expect(tally, x86_validate(vector.records, vector.count) == vector.count && vector.reference_count == 0 &&
+                                                      branch_sizing_validate(vector.records, vector.count, vector.branches, vector.targets, vector.branch_count).error ==
                                                           BRANCH_SIZING_OK,
                                            "deep", "%s: an invalid record, a reference or an invalid branch column", name);
-        ready = ready && tier0_test_covered(tally, "deep", name, &scalar);
-        uint32_t* offsets = ready ? BUSTER_ARENA_PUSH_ARRAY(&arena, uint32_t, (uint64_t)scalar.count + 1) : 0;
-        const BranchSizing sizing = offsets != 0 ? size_branches(scalar.records, scalar.count, scalar.branches, scalar.targets, scalar.branch_count, offsets)
+        ready = ready && tier0_test_covered(tally, "deep", name, &vector);
+        uint32_t* offsets = ready ? BUSTER_ARENA_PUSH_ARRAY(&arena, uint32_t, (uint64_t)vector.count + 1) : 0;
+        const BranchSizing sizing = offsets != 0 ? size_branches(vector.records, vector.count, vector.branches, vector.targets, vector.branch_count, offsets)
                                                  : (BranchSizing){ 0 };
         ready = ready && tier0_test_expect(tally, offsets != 0 && sizing.error == BRANCH_SIZING_OK, "deep", "%s: the branches can't be sized", name);
-        const uint64_t room = BUSTER_X86_ENCODER_CAPACITY(scalar.count);
+        const uint64_t room = BUSTER_X86_ENCODER_CAPACITY(vector.count);
         uint8_t* page = region + BUSTER_TIER0_TEST_DEEP_PAGES * BUSTER_TIER0_TEST_PAGE * c;
-        const int64_t vector_length = ready && room <= BUSTER_TIER0_TEST_DEEP_PAGES * BUSTER_TIER0_TEST_PAGE ? x86_encode(scalar.records, scalar.count, page, room, 0, 0) : -1;
+        const int64_t vector_length = ready && room <= BUSTER_TIER0_TEST_DEEP_PAGES * BUSTER_TIER0_TEST_PAGE ? x86_encode(vector.records, vector.count, page, room, 0, 0) : -1;
         ready = ready && tier0_test_expect(tally, vector_length > 0, "deep",
                                            "%s: the encoder fails (%" PRId64 ")", name, vector_length);
         arena_pop_to(&arena, mark);

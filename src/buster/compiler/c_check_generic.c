@@ -108,11 +108,23 @@ static uint32_t check_generic_masks(const TypeId* keys, TypeId key)
     return matches | (empty << BUSTER_CHECK_GENERIC_GROUP);
 }
 
+// A selection's diagnostics' order at its `)` (#2914), clang's CreateGenericSelectionExpr's: each association in turn, by
+// `ordinal` among those of a type, its -Wunreachable-code-generic-assoc (`later` 0) and then its type's errors against later
+// associations' (`later` their ordinals plus one); the no-match error after them all (check_generic_suborder_last).
+static uint64_t check_generic_suborder(uint32_t ordinal, uint32_t later)
+{
+    return ((uint64_t)ordinal + 1u) << 32 | later;
+}
+
+#define BUSTER_CHECK_GENERIC_SUBORDER_LAST UINT64_C(0xffffffff00000000)
+
 // clang's -Wunreachable-code-generic-assoc (#1447, CreateGenericSelectionExpr): an association whose type name [first, end)
 // gives `type` of array type, or qualified (const, volatile, restrict, an address space or objc_gc's, not _Atomic), which
 // the controlling expression's lvalue conversion never selects. At the type name's first token that isn't a qualifier
-// (its TypeLoc's begin), once however often the selection is read.
-static void check_generic_unreachable(CheckInputReader* reader, uint32_t first, uint32_t end, TypeId type)
+// (its TypeLoc's begin), once however often the selection is read. It completes at the selection's `)`, `close`, in
+// clang's CreateGenericSelectionExpr order (#2914, check_generic_suborder): association `ordinal`'s, before its type's
+// errors against later ones'.
+static void check_generic_unreachable(CheckInputReader* reader, uint32_t first, uint32_t end, TypeId type, uint32_t close, uint32_t ordinal)
 {
     const Parser* parser = reader->parser;
     const TypeId plain = type != 0 ? type_strip_aligned(reader->types, type) : 0;
@@ -133,7 +145,8 @@ static void check_generic_unreachable(CheckInputReader* reader, uint32_t first, 
             .token = at,
             .source = BUSTER_CHECK_WARNING_NO_SOURCE,
             .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
-            .completion = end,
+            .completion = close + 1,
+            .suborder = check_generic_suborder(ordinal, 0),
             // (Its typedef's spelling, as the warnings' types take it: `CI` (aka 'const int').)
             .payload = { .name = check_input_typedef_spelling(reader->output, parser, end), .token = BUSTER_CHECK_WARNING_NO_SOURCE, .first_type = type,
                          .data = array ? 0u : 1u },

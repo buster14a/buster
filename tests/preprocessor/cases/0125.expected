@@ -1,0 +1,4 @@
+#pragma omp parallel for
+#pragma message("ab")
+"f\\g.c" 7
+"h\"i.c"

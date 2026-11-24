@@ -1,0 +1,1 @@
+struct S{int z;};int f(x)struct S{int a;}x;{struct S t={3};return x.a+t.z;}struct S after;

@@ -1,0 +1,1 @@
+int f(x,y)struct{int a;}x;union{int a;long b;}y;{return x.a+(int)y.b;}

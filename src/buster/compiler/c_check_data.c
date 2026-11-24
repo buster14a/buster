@@ -529,8 +529,8 @@ static bool check_data_sort_fixups(CheckDataPlan* plan, Arena* scratch)
 }
 
 // Only bytes owned by this write are inspected. Bit-fields can begin/end inside a byte; the bulk is a bounded
-// byte slice with no readable padding. The scalar twin is also used for tiny slices, including scalar constants.
-static bool check_data_nonzero_bits(const uint8_t* bytes, uint64_t begin, uint64_t end, bool scalar)
+// byte slice with no readable padding, 64 bytes at a time, and a byte at a time past the last block.
+static bool check_data_nonzero_bits(const uint8_t* bytes, uint64_t begin, uint64_t end)
 {
     uint8_t nonzero = 0;
     if (begin < end && (begin % 8) != 0)
@@ -541,14 +541,11 @@ static bool check_data_nonzero_bits(const uint8_t* bytes, uint64_t begin, uint64
     }
     const uint64_t byte_end = end / 8;
     uint64_t byte = begin / 8;
-    if (!scalar && nonzero == 0 && byte_end - byte >= 64)
+    while (nonzero == 0 && byte_end - byte >= 64)
     {
-        while (nonzero == 0 && byte_end - byte >= 64)
-        {
-            const __m512i block = _mm512_loadu_si512(bytes + byte);
-            nonzero = _mm512_test_epi64_mask(block, block) != 0;
-            byte += 64;
-        }
+        const __m512i block = _mm512_loadu_si512(bytes + byte);
+        nonzero = _mm512_test_epi64_mask(block, block) != 0;
+        byte += 64;
     }
     for (; nonzero == 0 && byte < byte_end; byte += 1)
     {
@@ -719,7 +716,7 @@ static CheckDataStatus check_data_initializer_nonzero(const TypeTable* types, co
             if (part->kind != CHECK_INIT_CLEAR)
             {
                 const uint8_t* bytes = part->kind == CHECK_INIT_BYTES ? part->bytes : values + (uint64_t)(i - 1) * value_stride;
-                *nonzero = check_data_nonzero_bits(bytes, boundaries[at] - part->bit_offset, boundaries[at + 1] - part->bit_offset, false);
+                *nonzero = check_data_nonzero_bits(bytes, boundaries[at] - part->bit_offset, boundaries[at + 1] - part->bit_offset);
             }
             next[at] = check_init_uncovered(next, at + 1);
             at = next[at];
@@ -1038,7 +1035,7 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
             }
             else if (!direct && part->kind == CHECK_INIT_BYTES && size != 0)
             {
-                part_nonzero = check_data_nonzero_bits(part->bytes, 0, size * 8, false);
+                part_nonzero = check_data_nonzero_bits(part->bytes, 0, size * 8);
             }
         }
         else if (part->kind == CHECK_INIT_VALUE && part->bit_width == 0 && size > 16 && check_data_wide_type(types, part->type))
@@ -1046,7 +1043,7 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
             // A _BitInt past 128 bits (#1447): its bytes, in place or in its slot.
             uint8_t* encoded = direct ? plan->bytes + offset : values + (uint64_t)i * value_stride;
             status = check_data_wide_value(types, &part->value, part->type, encoded, size);
-            part_nonzero = status == CHECK_DATA_OK && !direct && check_data_nonzero_bits(encoded, 0, size * 8, false);
+            part_nonzero = status == CHECK_DATA_OK && !direct && check_data_nonzero_bits(encoded, 0, size * 8);
         }
         else if (part->kind == CHECK_INIT_VALUE)
         {
@@ -1104,7 +1101,7 @@ static CheckDataStatus check_data_plan_object(const TypeTable* types, const Chec
                     uint8_t* encoded = values + (uint64_t)i * value_stride;
                     check_data_copy_scalar(encoded, scalar.bytes, scalar.size);
                     const uint64_t bits = part->bit_width != 0 ? part->bit_width : size * 8;
-                    part_nonzero = check_data_nonzero_bits(encoded, 0, bits, false);
+                    part_nonzero = check_data_nonzero_bits(encoded, 0, bits);
                 }
                 if (part->bit_width == 0 && scalar.object != 0 && live_parts[i])
                 {
@@ -1326,7 +1323,7 @@ static bool check_data_emit(const TypeTable* types, const CheckStream* stream, c
             memset(definitions, 0, words * sizeof(*definitions));
         }
     }
-    if (result->status == CHECK_DATA_OK && !check_data_string_pool(types, objects, count, object_symbols, object_count, link, false, scratch, &canonical))
+    if (result->status == CHECK_DATA_OK && !check_data_string_pool(types, objects, count, object_symbols, object_count, link, scratch, &canonical))
     {
         result->status = CHECK_DATA_RESOURCE;
     }

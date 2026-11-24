@@ -294,8 +294,9 @@ module), so that tools and the comparisons below read them alike.
 ## Straight-line expression templates (#624)
 
 `c_check_program_batch.c` handles reached operation fragments before the general
-task loop expands them. The original
-scalar expression expansion remains the oracle (`--scalar`). Since #1048 no
+task loop expands them. The general expansion, which the source rows' lowering
+(`-g`'s) takes alone, remains the oracle: `test-checker` compares every program
+fixture's functions by the two lowerings. Since #1048 no
 compile takes the fragments (`CheckLowerWriter.fragments`, which only their
 test sets): on the 9700X they cost `sqlite3.c`'s statements more than they
 saved ("The vector path's fast paths" below), and none takes the leaf path
@@ -780,8 +781,9 @@ or its update's destination, is `_Atomic` only where the type table has an
 `_Atomic` kind (an aligned typedef's base is a type of the table too), so a
 unit without one reads no node's type, and a unit with one takes the rules
 for every node. A vector builtin's node takes the rules for its lane calls.
-The loop is the scalar twin (`check_lower_node_counts_scalar`, which
-`--scalar` takes), and `test-checker` compares the two on every boundary
+The loop over every node by the rules (`check_lower_node_counts_scalar`) is
+the fallback for a stream whose columns the typed pass can't read, and
+`test-checker` compares the two on every boundary
 fixture of its program tests, among them a vector's libm builtins, an
 `_Atomic` global (the rules) and the atomic builtins on plain objects (the
 masks, whose fixture's table the test requires to have no `_Atomic` kind).
@@ -806,8 +808,8 @@ kind and branched on it, a branch whose outcome follows the branches' places
 among the entries: 4.7 M instructions over `sqlite3.c`'s 407,396 entries.
 `check_lower_resolve_labels` compares the kinds 64 at a time, and only the
 branches among them take their targets, in entry order, up to the first label
-without an entry, as its scalar twin (`check_lower_resolve_labels_scalar`)
-does. `test-checker` compares the two on random kinds at a page's end,
+without an entry. `test-checker` compares it with that definition on random
+kinds at a page's end,
 across the masks' tails, with labels that all have entries and with some that
 don't.
 
@@ -1044,8 +1046,8 @@ way (every variant's object was the base's):
   (a class from I8 to F64 and none of the facts whose rules go elsewhere,
   `check_lower_plain_scalar`), none a transparent union's, with such a
   result or void, now passes those checks and records its arguments by their
-  packed classes and facts alone, on the vector path, which has the table;
-  the scalar path keeps the helpers.
+  packed classes and facts alone, in any lowering with the table (all but
+  the source rows'); the source rows' lowering keeps the helpers.
 - **Compact locals.** Each body's locals were a list linked through every
   token (`local_first`, `local_next`), which the body's walks followed a
   dependent load at a time, twice. They are now a slice of one array in
@@ -1107,9 +1109,8 @@ on the base without the fragments (every variant's object was the base's):
   with the runtime functions the unit spells in a pass of its own over the
   declaring tokens (`check_lower_declared_runtimes`). The vector path now
   matches them in the locals' first pass over the same tokens
-  (`check_lower_declared_runtime`, the per-token test both use), which loads
-  the same columns; the scalar path keeps its pass over every token, its
-  twin.
+  (`check_lower_declared_runtime`, the per-token test), which loads the same
+  columns. (The scalar path's pass over every token went with #2924.)
 
 Every round of the two together was below every round of the base: `lower`
 0.29 ms lower.
@@ -1943,8 +1944,8 @@ ablation with main's file takes it back).
 The lowering visits the tokens that declare or start an initializer, which
 `check_program_declaring` gives 16 at a time with a register compress; the
 selection counts and numbers its needed objects 64 at a time
-(`check_program_needed_count`, `check_program_needed_number`); each has an exact
-scalar twin, which `test-checker` compares at `PROT_NONE` pages. The lowering's
+(`check_program_needed_count`, `check_program_needed_number`); `test-checker`
+compares each with its definition at `PROT_NONE` pages. The lowering's
 ABI table has rows for its type table's types alone (`abi_initialize_types`):
 the lowering makes no type, and classifies only the types it has rows for. The
 selection now reads the static declaration keys retained by `check_data_prepare`

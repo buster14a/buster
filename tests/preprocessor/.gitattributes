@@ -1,0 +1,3 @@
+# The preprocessor cases' bytes are their contracts (CRLF, trailing spaces, zero bytes, no final newline): no
+# end-of-line conversion touches them (#2053).
+* -text

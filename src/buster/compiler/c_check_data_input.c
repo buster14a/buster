@@ -129,9 +129,9 @@ static uint32_t check_data_latest(const CheckDataPrepared* prepared, uint32_t ob
 
 // The static data: each static object's last declaration, and for each one the unit defines or tentatively defines, in
 // object order, its definition, type, alignment and initializer's references; then the string literals. Few of a unit's
-// tokens declare a static object (#592), so the vector path finds them 64 tokens at a time (the scalar path, `scalar`,
-// takes every token), as keys of their object and token, which c_bindings_sort puts in object order, each object's
-// declarations in token order: no token-sized column is filled or read past them.
+// tokens declare a static object (#592), so it finds them 64 tokens at a time, as keys of their object and token, which
+// c_bindings_sort puts in object order, each object's declarations in token order: no token-sized column is filled or
+// read past them.
 // The canonical object of `object` among the `count` calls of `calls` (in object order), or `object` itself where it is no
 // call's: a reference to a call's object is its canonical record's (#148).
 static uint32_t check_data_cfstring_canonical(const CheckDataCFString* calls, uint32_t count, uint32_t object)
@@ -468,7 +468,7 @@ static bool check_data_prepare(CheckDataPrepared* result, const CheckInput* inpu
     uint32_t varying = 0;
     for (uint32_t first = 0; valid && first < count; first += 64)
     {
-        const uint64_t lanes = scalar ? check_input_scan_all(first, count) : check_input_scan_bit(input->declaration_bits, first, count, BUSTER_CHECK_BITS_STATIC);
+        const uint64_t lanes = check_input_scan_bit(input->declaration_bits, first, count, BUSTER_CHECK_BITS_STATIC);
         for (uint64_t selected = lanes; valid && selected != 0; selected &= selected - 1)
         {
             const uint32_t token = first + (uint32_t)__builtin_ctzll(selected);

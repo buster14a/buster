@@ -912,7 +912,6 @@ struct CheckControlWriter
     // cleanup or statement expression can query these token-indexed destinations while walking ancestors.
     bool all_loop_targets;
     bool loop_targets;
-    bool scalar_children;
     uint32_t* stops;
     uint32_t* repeats;
     // Each body's first region (by its opening token) and each region's next, or null for a unit without regions.
@@ -1590,14 +1589,12 @@ static void check_program_case(CheckProgram* program, const Parser* parser, uint
 }
 
 // The cases, numbered in token order with their switches' lists: AVX-512 finds the switch keywords and cases 64 tokens at a
-// time, to count the cases and then to check each in order; the rest and the `scalar` path test every token.
-static void check_program_cases(CheckProgram* program, const Parser* parser, uint32_t* first, uint32_t* next, uint32_t* map, Arena* output, Arena* scratch, bool scalar)
+// time, to count the cases and then to check each in order; the rest tests every token.
+static void check_program_cases(CheckProgram* program, const Parser* parser, uint32_t* first, uint32_t* next, uint32_t* map, Arena* output, Arena* scratch)
 {
-    (void)scalar;
-
     const CheckInput* input = program->input;
     const uint32_t tokens = input->token_count;
-    const uint32_t vector_end = BUSTER_SCALAR_PATH(scalar) ? 0 : tokens / 64 * 64;
+    const uint32_t vector_end = tokens / 64 * 64;
     uint32_t count = 0;
     for (uint32_t token = 0; token < vector_end; token += 64)
     {
@@ -2930,22 +2927,10 @@ static void check_control_children(CheckControlWriter* writer, uint32_t opening,
     for (uint32_t token = opening + 1; token < closing; token += 64)
     {
         const uint32_t count = closing - token < 64 ? closing - token : 64;
-        uint64_t labels = 0;
-        if (BUSTER_SCALAR_PATH(writer->scalar_children))
-        {
-            for (uint32_t lane = 0; lane < count; lane += 1)
-            {
-                const uint8_t role = roles[token + lane];
-                labels |= (uint64_t)(role == PARSE_ROLE_LABEL || role == PARSE_ROLE_CLOSE_CASE) << lane;
-            }
-        }
-        else
-        {
-            const uint64_t live = count == 64 ? UINT64_MAX : (UINT64_C(1) << count) - 1;
-            const __m512i block = _mm512_maskz_loadu_epi8(live, roles + token);
-            labels = live & (_mm512_cmpeq_epi8_mask(block, _mm512_set1_epi8(PARSE_ROLE_LABEL)) |
-                             _mm512_cmpeq_epi8_mask(block, _mm512_set1_epi8(PARSE_ROLE_CLOSE_CASE)));
-        }
+        const uint64_t live = count == 64 ? UINT64_MAX : (UINT64_C(1) << count) - 1;
+        const __m512i block = _mm512_maskz_loadu_epi8(live, roles + token);
+        uint64_t labels = live & (_mm512_cmpeq_epi8_mask(block, _mm512_set1_epi8(PARSE_ROLE_LABEL)) |
+                                  _mm512_cmpeq_epi8_mask(block, _mm512_set1_epi8(PARSE_ROLE_CLOSE_CASE)));
         for (; labels != 0; labels &= labels - 1)
         {
             const uint32_t position = token + (uint32_t)__builtin_ctzll(labels);
@@ -4447,15 +4432,13 @@ static uint32_t check_program_references(CheckProgram* program, const CheckContr
 }
 
 // Only units with resolved &&label expressions need this table. Scan their kind/role columns in bounded blocks;
-// scalar also handles the tail without requiring padding, and is the independent program path's exact twin.
-static void check_program_addressed(const Parser* parser, const CheckInput* input, uint8_t* addressed, bool scalar)
+// a token at a time for the tail past the last full block.
+static void check_program_addressed(const Parser* parser, const CheckInput* input, uint8_t* addressed)
 {
-    (void)scalar;
-
     const uint32_t count = input->token_count;
     memset(addressed, 0, (uint64_t)count + 1);
     uint32_t token = 0;
-    for (; !BUSTER_SCALAR_PATH(scalar) && count - token >= 64; token += 64)
+    for (; count - token >= 64; token += 64)
     {
         const __m512i kinds = _mm512_loadu_si512(parser->tokens.kinds + token);
         const __m512i roles = _mm512_loadu_si512(parser->tree.roles + token);
@@ -4484,36 +4467,20 @@ static void check_program_addressed(const Parser* parser, const CheckInput* inpu
 
 // The opening tokens of the bodies this program reads, in source order. The sparse column contains one entry per
 // definition. A deferred body belongs to its separate reading.
-static uint32_t check_program_openings(const CheckInput* input, uint32_t* openings, bool scalar)
+static uint32_t check_program_openings(const CheckInput* input, uint32_t* openings)
 {
-    (void)scalar;
-    uint32_t count = 0;
-    if (BUSTER_SCALAR_PATH(scalar))
+    uint32_t count = check_sparse_entries(input->body_declarations, 0, input->token_count, openings);
+    // (--node-bodies: a body its producer took is masked and still the program's, CheckInput.node_bodies.)
+    if (input->deferred_tokens != NULL && !input->node_bodies)
     {
-        for (uint32_t token = 0; token < input->token_count; token += 1)
+        uint32_t kept = 0;
+        for (uint32_t i = 0; i < count; i += 1)
         {
-            // (--node-bodies: a body its producer took is masked and still the program's, CheckInput.node_bodies.)
-            if (check_sparse_get(input->body_declarations, token) != BUSTER_CHECK_NONE &&
-                (input->deferred_tokens == NULL || input->deferred_tokens[token] == 0 || input->node_bodies))
-            {
-                openings[count++] = token;
-            }
+            const uint32_t token = openings[i];
+            openings[kept] = token;
+            kept += input->deferred_tokens[token] == 0;
         }
-    }
-    else
-    {
-        count = check_sparse_entries(input->body_declarations, 0, input->token_count, openings);
-        if (input->deferred_tokens != NULL && !input->node_bodies)
-        {
-            uint32_t kept = 0;
-            for (uint32_t i = 0; i < count; i += 1)
-            {
-                const uint32_t token = openings[i];
-                openings[kept] = token;
-                kept += input->deferred_tokens[token] == 0;
-            }
-            count = kept;
-        }
+        count = kept;
     }
     return count;
 }
@@ -4645,17 +4612,15 @@ static bool check_program_plans(CheckProgram* program, const Parser* parser, con
 
 // The variable-length arrays' objects, by their statements, and each block's first, from the last token back, so that the
 // lists are in declaration order and a block's last write is its first array (#530): AVX-512 finds the bodies' objects'
-// declarations 16 tokens at a time, whose types alone it asks; the rest and the `scalar` path ask every token.
+// declarations 16 tokens at a time, whose types alone it asks; the rest asks every token.
 static void check_program_allocations(CheckProgram* program, const Parser* parser, const TypeTable* types, uint32_t* allocation_first, uint32_t* allocation_next,
-                                      uint32_t* vla_blocks, uint32_t* vla_saves, const CheckProgramStatements* statements, bool scalar)
+                                      uint32_t* vla_blocks, uint32_t* vla_saves, const CheckProgramStatements* statements)
 {
-    (void)scalar;
-
     const CheckInput* input = program->input;
     const uint32_t count = input->token_count;
     const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
     uint32_t token = count;
-    for (; !BUSTER_SCALAR_PATH(scalar) && token >= BUSTER_CHECK_PROGRAM_LANES; token -= BUSTER_CHECK_PROGRAM_LANES)
+    for (; token >= BUSTER_CHECK_PROGRAM_LANES; token -= BUSTER_CHECK_PROGRAM_LANES)
     {
         const uint32_t base = token - BUSTER_CHECK_PROGRAM_LANES;
         const __m512i tokens = _mm512_add_epi32(_mm512_set1_epi32((int)base), lanes);
@@ -4706,14 +4671,12 @@ _Static_assert(CHECK_OP_BUILTIN_OVERFLOW > CHECK_OP_BUILTIN_UNARY && CHECK_OP_BU
 
 // The builtin nodes some body reached (`nodes`, nonzero), in node order, into `listed` when it isn't null; returns their
 // count. AVX-512 keeps the reached nodes from CHECK_OP_BUILTIN_UNARY on, 16 at a time, a few percent of a unit's, for
-// check_program_builtin_op; the rest and the `scalar` path test every node.
-static uint32_t check_program_builtins(const CheckGraph* graph, const uint32_t* nodes, uint32_t* listed, bool scalar)
+// check_program_builtin_op; the rest tests every node.
+static uint32_t check_program_builtins(const CheckGraph* graph, const uint32_t* nodes, uint32_t* listed)
 {
-    (void)scalar;
-
     uint32_t found = 0;
     uint32_t node = 0;
-    for (; !BUSTER_SCALAR_PATH(scalar) && graph->count - node >= BUSTER_CHECK_PROGRAM_LANES; node += BUSTER_CHECK_PROGRAM_LANES)
+    for (; graph->count - node >= BUSTER_CHECK_PROGRAM_LANES; node += BUSTER_CHECK_PROGRAM_LANES)
     {
         const __m512i ops = _mm512_loadu_si512(graph->ops + node);
         const __mmask16 candidates = _mm512_cmpge_epu32_mask(ops, _mm512_set1_epi32(CHECK_OP_BUILTIN_UNARY)) & _mm512_test_epi32_mask(_mm512_loadu_si512(nodes + node), _mm512_set1_epi32(-1));
@@ -4895,18 +4858,16 @@ static bool check_program_realign(const CheckProgram* program, uint32_t b)
 }
 
 // The static objects' declarations, needs, naked functions and target attributes, by object, in token order (#530):
-// AVX-512 finds the static declarations 16 tokens at a time; the rest and the `scalar` path test every token. Returns
+// AVX-512 finds the static declarations 16 tokens at a time; the rest tests every token. Returns
 // whether the naked functions' column had room.
-static bool check_program_static_objects(CheckProgram* program, uint8_t* needed, Arena* output, bool scalar, CheckProgramTargetEvents* events)
+static bool check_program_static_objects(CheckProgram* program, uint8_t* needed, Arena* output, CheckProgramTargetEvents* events)
 {
-    (void)scalar;
-
     const CheckInput* input = program->input;
     const uint32_t count = input->token_count;
     const __m512i lanes = _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15);
     bool room = true;
     uint32_t token = 0;
-    for (; !BUSTER_SCALAR_PATH(scalar) && count - token >= BUSTER_CHECK_PROGRAM_LANES; token += BUSTER_CHECK_PROGRAM_LANES)
+    for (; count - token >= BUSTER_CHECK_PROGRAM_LANES; token += BUSTER_CHECK_PROGRAM_LANES)
     {
         const __m512i tokens = _mm512_add_epi32(_mm512_set1_epi32((int)token), lanes);
         const __mmask16 declared = _mm512_cmpeq_epi32_mask(_mm512_loadu_si512(input->declarations + token), tokens) &
@@ -5226,8 +5187,8 @@ static CheckProgramPatchable check_program_patchable(const CheckProgram* program
 }
 
 // #442's kernels (c_check_program_select.c), which check_program numbers the needed objects' symbols with too.
-static uint32_t check_program_needed_count(const uint8_t* needed, uint32_t objects, bool scalar);
-static void check_program_needed_number(const uint8_t* needed, uint32_t objects, SymbolId* object_symbols, uint32_t* symbol_objects, bool scalar);
+static uint32_t check_program_needed_count(const uint8_t* needed, uint32_t objects);
+static void check_program_needed_number(const uint8_t* needed, uint32_t objects, SymbolId* object_symbols, uint32_t* symbol_objects);
 
 #include "c_check_x86_diagnostic.c"
 #include "c_check_target_feature.c"
@@ -5478,7 +5439,7 @@ static bool check_program_census_left_out(const uint64_t* arms, uint32_t arm_cou
 // greatest, which a cursor finds as the chunks go. A chunk with a token past the unit's (none of a body's) counts. No
 // other chunk has a node that names a body's object, takes a body's operand or holds a body's condition, so the pass's
 // scans skip them: on main.c, whose unit has the compiler's tables, more than half its nodes. Four vectors' least and
-// greatest lane by lane, then one reduction of each. AVX-512 only; the scalar path scans every node.
+// greatest lane by lane, then one reduction of each.
 static void check_program_census_touched(const CheckProgram* program, const uint32_t* declarations, const uint32_t* closings, uint32_t body_count, uint64_t* touched)
 {
     const CheckGraph* graph = &program->input->graph;
@@ -5717,20 +5678,18 @@ static inline __attribute__((always_inline)) void check_program_census_leaf(cons
 // a range of `arms` holds (a constant if's dropped arm): the builtins the bodies' references would list
 // (CheckProgram.builtin_nodes) and those the walk reaches no other way, in node order, into
 // CheckProgram.census_pass_builtins from `output`. With AVX-512 the ops of `touched`'s chunks 16 at a time, few of them
-// builtins, each of which takes the scalar test of its body; the rest and the `scalar` path one node at a time. False if
+// builtins, each of which takes the scalar test of its body; the rest one node at a time. False if
 // there's no room.
 static bool check_program_census_builtins(CheckProgram* program, const uint32_t* declarations, const uint32_t* closings, uint32_t body_count, const uint64_t* dead,
-                                          const uint64_t* arms, uint32_t arm_count, const uint64_t* touched, bool scalar, Arena* output, Arena* scratch)
+                                          const uint64_t* arms, uint32_t arm_count, const uint64_t* touched, Arena* output, Arena* scratch)
 {
-    (void)scalar;
-
     const CheckGraph* graph = &program->input->graph;
     const uint32_t node_count = graph->count;
     const uint64_t temporary = scratch->length;
     uint32_t* found = BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, (uint64_t)node_count + 1);
     uint32_t count = 0;
     uint32_t at = 0;
-    const uint64_t limit = BUSTER_SCALAR_PATH(scalar) || found == NULL ? 0 : node_count & ~UINT32_C(15);
+    const uint64_t limit = found == NULL ? 0 : node_count & ~UINT32_C(15);
     uint64_t node = check_program_census_next(touched, 0, limit);
     for (; node < limit; node = check_program_census_next(touched, node + 16, limit))
     {
@@ -5861,13 +5820,11 @@ static bool check_program_census_statements(CheckProgram* program, const uint32_
 // census stands for it. With `arms` (check_program_census_left_out's ranges), it leaves out their tokens' nodes, and with
 // `prune` the operands the walk leaves out: of sizeof and _Alignof, a constant condition's, a computed call's callee. Into
 // `census`, its runs in `output`. With AVX-512 the scans take 16 nodes at a time and, given `touched`
-// (check_program_census_touched), only its chunks; the rest and the `scalar` path one at a time. False if there's no room.
+// (check_program_census_touched), only its chunks; the rest one at a time. False if there's no room.
 static bool check_program_census_scan(CheckProgram* program, CheckProgramCensus* census, const Parser* parser, const uint32_t* openings, uint32_t body_count,
                                       const uint64_t* arms, uint32_t arm_count, bool prune, bool builtins, const uint64_t* touched, uint64_t* reference_items,
                                       uint64_t* reference_sort, bool scalar, Arena* output, Arena* scratch)
 {
-    (void)scalar;
-
     const CheckInput* input = program->input;
     const CheckGraph* graph = &input->graph;
     const uint32_t node_count = graph->count;
@@ -5911,9 +5868,9 @@ static bool check_program_census_scan(CheckProgram* program, CheckProgramCensus*
         const __m512i lane = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
         const __m512i zero = _mm512_setzero_si512();
         // A gather's index is signed: past 2^31 nodes, the scalar loop takes them all.
-        const uint32_t scanned = BUSTER_SCALAR_PATH(scalar) || node_count >= (UINT32_C(1) << 31) ? 0 : node_count & ~UINT32_C(15);
+        const uint32_t scanned = node_count >= (UINT32_C(1) << 31) ? 0 : node_count & ~UINT32_C(15);
         // The last block, `scanned`, scans nothing and takes what is pending.
-        for (uint64_t block = check_program_census_next(touched, 0, scanned); !BUSTER_SCALAR_PATH(scalar) && node_count < (UINT32_C(1) << 31) && block <= scanned;
+        for (uint64_t block = check_program_census_next(touched, 0, scanned); node_count < (UINT32_C(1) << 31) && block <= scanned;
              block = check_program_census_next(touched, block + 16, scanned))
         {
             const bool scanning = block < scanned;
@@ -5971,7 +5928,7 @@ static bool check_program_census_scan(CheckProgram* program, CheckProgramCensus*
     // With `builtins`, the builtin nodes the pass reaches too (check_program_census_builtins), and the automatic compound
     // literals its live leaves name, a mark a plan (check_program_census_compound), for its initializers' list after the
     // leaves (check_program_census_statements).
-    valid = valid && (!builtins || check_program_census_builtins(program, declarations, closings, body_count, dead, arms, arm_count, touched, scalar, output, scratch));
+    valid = valid && (!builtins || check_program_census_builtins(program, declarations, closings, body_count, dead, arms, arm_count, touched, output, scratch));
     const uint32_t plan_count = builtins && program->initializers != NULL ? program->initializers->count : 0;
     uint8_t* marks = valid && plan_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, plan_count) : NULL;
     valid = valid && (plan_count == 0 || marks != NULL);
@@ -5992,7 +5949,7 @@ static bool check_program_census_scan(CheckProgram* program, CheckProgramCensus*
         // the leaves of static objects, few, take the scalar step that finds their body. An object within 3 tokens of the
         // end, whose bit a dword gather would read past, takes it too; so does every leaf of a graph whose values are dense.
         const uint32_t count = input->token_count;
-        const bool gathered = !BUSTER_SCALAR_PATH(scalar) && graph->dense_leaves == NULL && graph->leaf_count < (UINT32_C(1) << 26) && count >= 4;
+        const bool gathered = graph->dense_leaves == NULL && graph->leaf_count < (UINT32_C(1) << 26) && count >= 4;
         const __m512i zero = _mm512_setzero_si512();
         const uint64_t limit = node_count & ~UINT32_C(15);
         for (node = gathered ? (uint32_t)check_program_census_next(touched, 0, limit) : node; gathered && node < limit;
@@ -6061,7 +6018,7 @@ static bool check_program_census_scan(CheckProgram* program, CheckProgramCensus*
                                           (near_end >> lane & 1) != 0 ? compounds : NULL, &compound_count);
             }
         }
-        for (; !BUSTER_SCALAR_PATH(scalar) && node_count - node >= 16; node += 16)
+        for (; node_count - node >= 16; node += 16)
         {
             const __mmask16 leaves = _mm512_cmpneq_epi32_mask(_mm512_loadu_si512(graph->leaf_slots + node), _mm512_set1_epi32((int)BUSTER_CHECK_NONE));
             for (uint32_t lanes = leaves; lanes != 0; lanes &= lanes - 1)
@@ -6197,8 +6154,6 @@ static uint32_t check_program_constant_if(const CheckProgram* program, const Par
 static uint32_t check_program_constant_arms(CheckControlWriter* writer, const uint32_t* openings, uint32_t body_count, const uint64_t* touched, uint64_t** found,
                                             bool scalar, Arena* scratch)
 {
-    (void)scalar;
-
     const Parser* parser = writer->parser;
     const CheckProgram* program = writer->program;
     const CheckInput* input = program->input;
@@ -6221,9 +6176,9 @@ static uint32_t check_program_constant_arms(CheckControlWriter* writer, const ui
     const __m512i lane = _mm512_set_epi32(15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0);
     const __m512i zero = _mm512_setzero_si512();
     // A gather's index is signed: past 2^31 nodes, the scalar loop takes them all.
-    const uint32_t scanned = BUSTER_SCALAR_PATH(scalar) || node_count >= (UINT32_C(1) << 31) ? 0 : node_count & ~UINT32_C(15);
+    const uint32_t scanned = node_count >= (UINT32_C(1) << 31) ? 0 : node_count & ~UINT32_C(15);
     // The last block, `scanned`, scans nothing and takes what is pending.
-    for (uint64_t block = check_program_census_next(touched, 0, scanned); !BUSTER_SCALAR_PATH(scalar) && node_count < (UINT32_C(1) << 31) && block <= scanned;
+    for (uint64_t block = check_program_census_next(touched, 0, scanned); node_count < (UINT32_C(1) << 31) && block <= scanned;
          block = check_program_census_next(touched, block + 16, scanned))
     {
         const __mmask16 conditions = block < scanned ?
@@ -6595,7 +6550,7 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
     uint32_t body_count = 0;
     if (valid)
     {
-        check_program_cases(program, parser, case_first, case_next, case_map, output, scratch, BUSTER_SCALAR_PATH(options.scalar));
+        check_program_cases(program, parser, case_first, case_next, case_map, output, scratch);
         // The children lists, source labels, stops and repeats are each body's, which check_control_begin fills.
         if (indexed)
         {
@@ -6624,7 +6579,7 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
         memset(needed, 0, (uint64_t)count + 1);
         if (addressed != 0)
         {
-            check_program_addressed(parser, input, addressed, BUSTER_SCALAR_PATH(options.scalar));
+            check_program_addressed(parser, input, addressed);
         }
         if (lifetime_first != 0)
         {
@@ -6659,7 +6614,7 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
                 region_first[body] = r;
             }
         }
-        body_count = check_program_openings(input, openings, BUSTER_SCALAR_PATH(options.scalar));
+        body_count = check_program_openings(input, openings);
         // A cpu_dispatch function's body, which clang ignores (#1447), is no body of the program's.
         uint32_t kept = 0;
         for (uint32_t b = 0; input->cpu_dispatch && b < body_count; b += 1)
@@ -6749,7 +6704,7 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
         }
         if (walks)
         {
-            check_program_allocations(program, parser, types, allocation_first, allocation_next, vla_blocks, vla_saves, &statements, BUSTER_SCALAR_PATH(options.scalar));
+            check_program_allocations(program, parser, types, allocation_first, allocation_next, vla_blocks, vla_saves, &statements);
         }
         for (uint32_t i = walks ? input->vla_count : 0; i-- > 0;)
         {
@@ -6868,7 +6823,6 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
         .source_labels = source_labels,
         .enterable_work = options.enterable_work,
         .all_loop_targets = all_loop_targets,
-        .scalar_children = options.scalar,
         .stops = stops,
         .repeats = repeats,
         .region_first = region_first,
@@ -6914,7 +6868,7 @@ static bool check_program_begin(CheckProgramRun* run, CheckProgram* program, con
         // The graph's blocks that hold a body's node (check_program_census_touched), which both scans keep to with AVX-512.
         // Only where the bodies' tokens are at most three quarters of the unit's: the marking reads every node's token,
         // which a unit of bodies (sqlite3.c's are 98.6% of its nodes) pays without a node to skip.
-        const bool blocked = scanned && !BUSTER_SCALAR_PATH(options.scalar) && body_count != 0;
+        const bool blocked = scanned && body_count != 0;
         uint32_t* bounds = blocked ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint32_t, 2 * (uint64_t)body_count) : NULL;
         valid = valid && (!blocked || bounds != NULL);
         uint64_t covered = 0;
@@ -7174,7 +7128,7 @@ static bool check_program_symbols(CheckProgramRun* run, uint8_t* needed, bool va
         // The naked functions' first declarations with the attribute, in token order (CheckProgram.object_naked): the
         // column comes with the unit's first one. And the functions' target attributes, which check_program_targets reads.
         const bool naked_room = options.prepared_data != NULL ? check_program_static_prepared(program, options.prepared_data, needed, output, events) :
-                                                              check_program_static_objects(program, needed, output, BUSTER_SCALAR_PATH(options.scalar), events);
+                                                              check_program_static_objects(program, needed, output, events);
         // The constant CFStrings' records' references, the last ones, are no roots (#148): a live record's are needed
         // (check_program_alias_number).
         const CheckDataPrepared* prepared = options.prepared_data;
@@ -7204,7 +7158,7 @@ static bool check_program_symbols(CheckProgramRun* run, uint8_t* needed, bool va
                                          check_program_aliases(program, events, needed, BUSTER_SCALAR_PATH(options.scalar), output, scratch));
         // Asm labels naming another object's symbol (#1979), whose objects take that symbol as the symbols are numbered.
         const bool labelled = aliased && (events->label_count == 0 || check_program_label_merges(program, events, BUSTER_SCALAR_PATH(options.scalar), output, scratch));
-        valid = naked_room && labelled && check_program_alias_number(program, needed, program->alias_states, BUSTER_SCALAR_PATH(options.scalar), output);
+        valid = naked_room && labelled && check_program_alias_number(program, needed, program->alias_states, output);
     }
     valid = valid && (events->weak_count == 0 || check_program_weak_late(program, events, BUSTER_SCALAR_PATH(options.scalar), output, scratch));
     if (valid && program->status == CHECK_PROGRAM_OK && !check_program_targets(program, &options, events, output, scratch))
@@ -7256,12 +7210,12 @@ static bool check_program_finish(CheckProgramRun* run)
         *options.lifetime_work += writer.lifetime_steps;
     }
     bool valid = run->valid && program->status == CHECK_PROGRAM_OK;
-    program->builtin_count = valid ? check_program_builtins(&input->graph, nodes, NULL, BUSTER_SCALAR_PATH(options.scalar)) : 0;
+    program->builtin_count = valid ? check_program_builtins(&input->graph, nodes, NULL) : 0;
     program->builtin_nodes = valid && program->builtin_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output, uint32_t, program->builtin_count) : 0;
     valid = valid && (program->builtin_count == 0 || program->builtin_nodes != 0);
     if (valid && program->builtin_count != 0)
     {
-        check_program_builtins(&input->graph, nodes, program->builtin_nodes, BUSTER_SCALAR_PATH(options.scalar));
+        check_program_builtins(&input->graph, nodes, program->builtin_nodes);
     }
     // The selection census (#2536's step 2.1), past the builtins' count, which reads the references' marks.
     if (valid && options.selection_census && program->status == CHECK_PROGRAM_OK)

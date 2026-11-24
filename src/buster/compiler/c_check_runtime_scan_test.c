@@ -7,6 +7,18 @@
 #ifndef BUSTER_C_CHECK_RUNTIME_SCAN_TEST_INCLUDED
 #define BUSTER_C_CHECK_RUNTIME_SCAN_TEST_INCLUDED
 
+// The lowering's runtime lookup over the declaring tokens, as the preparation's merged pass takes them
+// (check_lower_declared_runtime on each of `declaring`'s), or, with `full`, the independent traversal of every token.
+static void check_test_declared_runtimes(const CheckProgram* program, const uint32_t* declaring, uint32_t declaring_count, const IdentId* identifiers,
+                                         const uint16_t* runtimes, uint32_t spelled, SymbolId* symbols, bool full)
+{
+    const uint32_t count = full ? program->input->token_count : declaring_count;
+    for (uint32_t d = 0; d < count; d += 1)
+    {
+        check_lower_declared_runtime(program, full ? d : declaring[d], program->parser->tokens.names, identifiers, runtimes, spelled, symbols);
+    }
+}
+
 static void check_test_runtime_scan(CheckTest* test)
 {
     static const uint32_t larger[] = { 255, 256, 257, 1023 };
@@ -81,9 +93,9 @@ static void check_test_runtime_scan(CheckTest* test)
             const uint64_t mark = sparse.length;
             const CheckSparseColumn sparse_nodes = ready ? check_sparse_from_values(&sparse, nodes, count) : (CheckSparseColumn){ 0 };
             ready &= check_sparse_present(sparse_nodes);
-            for (uint32_t producer = 0; ready && producer < 2; producer += 1)
+            if (ready)
             {
-                const uint32_t declared = check_program_declaring(declarations, &sparse_nodes, 1, count, tokens, producer == 0);
+                const uint32_t declared = check_program_declaring(declarations, &sparse_nodes, 1, count, tokens);
                 uint32_t* compact = (uint32_t*)check_test_program_guarded(&maps[7], &sizes[7], (uint64_t)declared * sizeof(uint32_t));
                 ready &= compact != NULL;
                 if (ready)
@@ -96,8 +108,7 @@ static void check_test_runtime_scan(CheckTest* test)
                     {
                         SymbolId actual[CHECK_LOWER_RUNTIMES];
                         memcpy(actual, initial, sizeof(actual));
-                        check_lower_declared_runtimes(&program, path == 0 ? NULL : compact, declared, spelled_identifiers, spelled_runtimes, spelled, actual,
-                                                      path == 0);
+                        check_test_declared_runtimes(&program, path == 0 ? NULL : compact, declared, spelled_identifiers, spelled_runtimes, spelled, actual, path == 0);
                         check_test_expect(test, memcmp(actual, expected, sizeof(actual)) == 0,
                                           "compact and full runtime scans preserve first symbols, linkage, absent names and preseeded slots at protected tails");
                     }
@@ -140,12 +151,12 @@ static void check_test_runtime_scan(CheckTest* test)
     const IdentId identifiers[1] = { 77 };
     const uint16_t runtimes[1] = { CHECK_LOWER_RUNTIME_ERRNO + 1 };
     const CheckSparseColumn sparse_nodes = check_sparse_from_values(&sparse, nodes, 8);
-    const uint32_t declared = check_program_declaring(declarations, &sparse_nodes, 1, 8, tokens, false);
+    const uint32_t declared = check_program_declaring(declarations, &sparse_nodes, 1, 8, tokens);
     for (uint32_t path = 0; path < 2; path += 1)
     {
         SymbolId actual[CHECK_LOWER_RUNTIMES] = { 0 };
         actual[CHECK_LOWER_RUNTIME_ERRNO] = 123;
-        check_lower_declared_runtimes(&program, tokens, declared, identifiers, runtimes, 1, actual, path == 0);
+        check_test_declared_runtimes(&program, tokens, declared, identifiers, runtimes, 1, actual, path == 0);
         check_test_expect(test, check_sparse_present(sparse_nodes) && actual[CHECK_LOWER_RUNTIME_ERRNO + 1] == 51 && actual[CHECK_LOWER_RUNTIME_ERRNO] == 123,
                           "runtime lookup keeps the first nonzero external symbol and does not touch errno");
     }

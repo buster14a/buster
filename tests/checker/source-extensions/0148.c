@@ -1,0 +1,1 @@
+int f(x)struct S{int a;}x;{return x.a;}struct S after;

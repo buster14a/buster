@@ -1,0 +1,3 @@
+< a_end b pre_a_post "a" b > < _end b pre__post "" b > < a_end pre_a_post "a" > z1 z 1z 1 1
+< a_end b pre_a_post "a" b > a1 a 1a < _end pre__post "" > 1 1 < q r_end s pre_q r_post "q r" s > q r1 q r 1q r
+ONE2 1 1 1 [ONE3 1] [1 1]

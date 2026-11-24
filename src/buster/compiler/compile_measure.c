@@ -5,7 +5,8 @@
 // measure-compile (#518, #146): whole compiles, each a process of its own, and where their time goes.
 //
 //   build/compiler measure-compile [--runs N] [--warmups N] [--reference PATH [--reference-option OPTION]... |
-//                                  --variant OPTION]... [--directory DIR] [--keep] -- ARGUMENT...
+//                                  --variant OPTION]... [--directory DIR] [--keep]
+//                                  [--instructions-baseline FILE [--instructions-tolerance PARTS]] -- ARGUMENT...
 //
 // Runs this executable on ARGUMENT... -o DIR/default.o, the default compile, and on --time-stages ARGUMENT...
 // -o DIR/stages.o, whose report (c_check_clock.c) says where its time went; and each reference, four at most: a
@@ -30,6 +31,11 @@
 // every run's default and --time-stages objects must be the same bytes, and every report must be whole, or the command
 // fails. The caller pins it (taskset): the processes inherit its CPUs. DIR is a new directory under --directory
 // ($TMPDIR, or /tmp), removed at the end unless --keep.
+// With --instructions-baseline (#2850), the default compile's median user instructions are held to the count FILE
+// states (its first line that is not empty or a `#` comment, a decimal number alone): the command fails where the
+// median is more than PARTS parts a million of the baseline away from it, above or below (5,000, half a percent), where
+// FILE states none, and where the instructions are uncounted. A change that means to move the count states it by
+// writing the count the command prints into FILE. The count is one host's and one build's: the 9700X's, by its job.
 // docs/compile-time.md has the 9700X's numbers for sqlite3.c, against tcc, clang -O0 and gcc -O0.
 
 #include "buster/compiler/test_paths.h"
@@ -58,6 +64,10 @@ struct MeasureCompile
     uint32_t reference_count;
     uint32_t runs;
     uint32_t warmups;
+    // --instructions-baseline's file, or null, and the band around its count the default's median may be in, parts a
+    // million of the count.
+    const char* baseline;
+    uint32_t tolerance;
     char directory[PATH_MAX];
     char outputs[BUSTER_MEASURE_COMPILES][PATH_MAX];
     // Each compile's name: `default`, `time-stages`, and each reference's executable's base name and options (`clang
@@ -253,6 +263,43 @@ static void measure_compile_per_token(double milliseconds, double tsc_mhz, doubl
 }
 
 // The warm-ups and the rounds, then the report. Returns how many failures it found.
+// Where `measured` stands against `baseline` and the band of `tolerance` parts a million of it around it, the band's
+// ends in it: 0 inside, 1 above, -1 below.
+static int measure_compile_instructions(uint64_t measured, uint64_t baseline, uint32_t tolerance)
+{
+    const unsigned __int128 million = 1000000;
+    const unsigned __int128 within = tolerance < 1000000 ? tolerance : 1000000;
+    const unsigned __int128 scaled = (unsigned __int128)measured * million;
+    const unsigned __int128 high = (unsigned __int128)baseline * (million + tolerance);
+    const unsigned __int128 low = (unsigned __int128)baseline * (million - within);
+    return scaled > high ? 1 : scaled < low ? -1 : 0;
+}
+
+// The count `text` states: its first line that is not empty or a comment (`#` first), which must be a decimal number
+// alone, but for spaces around it. False where it has no such line, or the line is anything else.
+static bool measure_compile_baseline(const char* text, uint64_t* baseline)
+{
+    const char* at = text;
+    bool comment = true;
+    while (comment)
+    {
+        at += strspn(at, " \t\r\n");
+        comment = *at == '#';
+        at += comment ? strcspn(at, "\n") : 0;
+    }
+    const size_t digits = strspn(at, "0123456789");
+    uint64_t value = 0;
+    const bool counted = digits != 0 && digits <= 18;
+    for (size_t i = 0; counted && i < digits; i += 1)
+    {
+        value = value * 10 + (uint64_t)(at[i] - '0');
+    }
+    const char* rest = at + digits + strspn(at + digits, " \t\r");
+    const bool alone = *rest == '\n' || *rest == 0;
+    *baseline = counted && alone ? value : 0;
+    return counted && alone && value != 0;
+}
+
 static uint64_t measure_compile_run(Arena* arena, MeasureCompile* m)
 {
     printf("memory: wait4 peaks include pre-exec memory and waited descendants; executable-only peaks are not measured by wait4\n");
@@ -383,6 +430,42 @@ static uint64_t measure_compile_run(Arena* arena, MeasureCompile* m)
             printf(", uncounted\n");
         }
     }
+    if (failures == 0 && m->baseline != NULL)
+    {
+        // (BUSTER_TEST_MEASURE_INSTRUCTIONS, a test's switch: the count in the median's place, where no counter is.)
+        const char* forced = getenv("BUSTER_TEST_MEASURE_INSTRUCTIONS");
+        uint64_t forced_count = 0;
+        const bool supplied = forced != NULL && profile_decimal(profile_string(forced), &forced_count);
+        const bool counted = supplied || medians[0][7] >= 0;
+        const uint64_t measured = supplied ? forced_count : counted ? (uint64_t)medians[0][7] : 0;
+        const char* text = measure_compile_read(arena, m->baseline);
+        uint64_t baseline = 0;
+        const bool stated = text != NULL && measure_compile_baseline(text, &baseline);
+        if (!stated)
+        {
+            failures += 1;
+            printf("instructions: FAILED (%s states no baseline: a decimal count alone on its first line that is no comment)\n", m->baseline);
+        }
+        else if (!counted)
+        {
+            failures += 1;
+            printf("instructions: FAILED (the default compile's user instructions are uncounted, so nothing holds them to %s)\n", m->baseline);
+        }
+        else
+        {
+            const int side = measure_compile_instructions(measured, baseline, m->tolerance);
+            printf("instructions: the default compile's median is %llu user instructions, %+.3f%% of %s's %llu, whose band is %.3f%%\n",
+                   (unsigned long long)measured, ((double)measured - (double)baseline) * 100.0 / (double)baseline, m->baseline, (unsigned long long)baseline,
+                   (double)m->tolerance / 1e4);
+            if (side != 0)
+            {
+                failures += 1;
+                printf("instructions: FAILED (the default compile takes %s user instructions than the baseline's band holds; a change that means to "
+                       "states it: write %llu in %s)\n",
+                       side > 0 ? "more" : "fewer", (unsigned long long)measured, m->baseline);
+            }
+        }
+    }
     if (failures == 0)
     {
         printf("--time-stages costs %.3f ms (%.2f%%) of the default's median wall time\n", medians[1][0] - medians[0][0],
@@ -509,7 +592,7 @@ static void measure_compile_name(MeasureCompile* m, uint32_t c)
 static int run_measure_compile_command(int argc, char** argv)
 {
     Arena arena = arena_reserve(UINT64_C(1) << 32);
-    MeasureCompile m = { .runs = 11, .warmups = 1 };
+    MeasureCompile m = { .runs = 11, .warmups = 1, .tolerance = 5000 };
     const char* parent = oracle_temporary_directory();
     bool keep = false;
     bool valid = arena.base != 0;
@@ -557,6 +640,16 @@ static int run_measure_compile_command(int argc, char** argv)
             keep = true;
             i += 1;
         }
+        else if (strcmp(argv[i], "--instructions-baseline") == 0 && more)
+        {
+            m.baseline = argv[i + 1];
+            i += 2;
+        }
+        else if (strcmp(argv[i], "--instructions-tolerance") == 0 && more && profile_decimal(profile_string(argv[i + 1]), &value) && value <= 1000000)
+        {
+            m.tolerance = (uint32_t)value;
+            i += 2;
+        }
         else
         {
             valid = false;
@@ -573,7 +666,7 @@ static int run_measure_compile_command(int argc, char** argv)
     if (!valid)
     {
         fprintf(stderr, "usage: measure-compile [--runs N] [--warmups N] [--reference PATH [--reference-option OPTION]... | --variant OPTION]... "
-                        "[--directory DIR] [--keep] -- ARGUMENT...\n"
+                        "[--directory DIR] [--keep] [--instructions-baseline FILE [--instructions-tolerance PARTS]] -- ARGUMENT...\n"
                         "  at most %u references, each with at most %u options\n",
                 BUSTER_MEASURE_REFERENCES, BUSTER_MEASURE_REFERENCE_OPTIONS);
     }

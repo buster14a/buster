@@ -1,0 +1,5 @@
+# 1 "%d/case.c"
+# 1 "%d/other.h" 1
+# 2 "%d/case.c" 2
+[a b]
+after

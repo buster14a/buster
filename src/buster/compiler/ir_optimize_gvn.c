@@ -36,6 +36,10 @@ struct IrGvnOptions
     // without it. A function where nothing merges is returned as it was given: *result's function is the input's, and
     // nothing is written to the output.
     bool pressure;
+    // The function is verified already (IrOptimizeWork.validated, #2719: Tier 1's promoted function): its preparation
+    // builds the CFG, use lists and dominator tree without verifying it again. A function the pass rewrites is verified
+    // as ever.
+    bool validated;
 };
 
 // IrGvnOptions.pressure's free values by operation: each copy costs nothing at its user.
@@ -1058,6 +1062,7 @@ static __attribute__((unused)) IrCheck ir_optimize_gvn(const IrFunction* functio
     const uint64_t scratch_mark = scratch->length;
     IrGvnWork work = { 0 };
     IrCheck check = ir_check(IR_ERROR_METADATA, BUSTER_IR_NONE, 0);
+    work.ir.validated = options.validated;
     if (output != scratch)
     {
         check = ir_optimize_prepare(&work.ir, function, output, scratch, BUSTER_SCALAR_PATH(options.scalar), true);
