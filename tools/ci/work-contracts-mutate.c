@@ -56,9 +56,11 @@ static const WorkMutation work_mutations[] = {
         .after = "                result = true;\n",
     },
     {
+        // The dense construction forced, with its rows in one group however wide (#3449's buffer lifted): the blocks
+        // times locals tables #1353 bounded.
         .kind = "ssa-dense",
         .before = "        bounded |= !ssa_dense_fits(input);\n",
-        .after = "        bounded = false;\n",
+        .after = "        bounded = false;\n        row_bytes = UINT32_MAX;\n",
     },
 };
 
