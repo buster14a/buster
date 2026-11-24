@@ -7590,6 +7590,11 @@ flags, types, operators and constant values (#2451). It checks the remaining
 candidates' ranges and marks their ancestors. A floating conversion on the
 same comparison can still set its own reach bit. Its range is tested once.
 
+The floating-conversion scan also reads the result types of 16 operators at
+a time. A unary sign or ordinary arithmetic operation with a successfully
+checked builtin integer result has no floating operand conversion. Other
+checks on the same operator, such as division by zero, keep their own mask.
+
 On a tree, each operand has one reader and one conversion edge. When the
 warning walk visits a call, it reads the target type at the current argument
 index and carries it in the deferred conversion frame. Even when only the
