@@ -35,8 +35,9 @@ struct X86DisassemblyPlan
     uint8_t broadcast;
 };
 
-static X86DisassemblyPlan x86_disassembly_plans[X86_FORM_COUNT];
-static uint64_t x86_disassembly_registers[16][64];
+// Built with the decoder's tables and shared and baked as they are (x86_64_disassembler.c).
+BUSTER_X86_SHARED BUSTER_BAKED X86DisassemblyPlan x86_disassembly_plans[X86_FORM_COUNT];
+BUSTER_X86_SHARED BUSTER_BAKED uint64_t x86_disassembly_registers[16][64];
 
 static uint64_t x86_disassembly_token(const char* bytes, uint32_t length)
 {

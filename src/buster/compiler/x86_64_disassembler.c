@@ -2,8 +2,8 @@
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
 // Bounded decoding of the encoder catalogue's 64-bit encodings, including 32-bit addresses. Initialize
-// once before sharing the read-only tables. Initialization retains two compact allocated table regions; decoding
-// itself allocates nothing. Source and output storage must not overlap; no source padding is required.
+// once before sharing the read-only tables, which main.c's units share and the bake builds into the executable
+// (buster_baked, baked.c); neither initialization nor decoding retains an allocation. Source and output storage must not overlap; no source padding is required.
 // The decoder publishes complete records
 // before the first error; consumed is that error's byte offset. Unsupported can include valid instructions outside
 // this catalogue. Actual input lengths are retained, including non-shortest displacements and VEX prefixes.
@@ -24,7 +24,11 @@
 
 #define BUSTER_X86_DECODE_MAPS 11
 #define BUSTER_X86_DECODE_BUCKETS (3 * BUSTER_X86_DECODE_MAPS * 256)
-#define BUSTER_X86_DECODE_ENTRIES (X86_FORM_COUNT * 8 + BUSTER_X86_DECODE_BUCKETS * 7)
+// The tables' bounds, from the catalogue as it is (13,400 padded entries, 87,200 cells, lists of ~1,100 entries) with
+// room to grow; initialization fails, and test-x86-disassembler with it, when one is short.
+#define BUSTER_X86_DECODE_ENTRIES 16384
+#define BUSTER_X86_DECODE_CELLS 98304
+#define BUSTER_X86_DECODE_LIST_ENTRIES 4096
 
 typedef enum X86DecodeStatus
 {
@@ -68,17 +72,25 @@ struct X86DecodeCheck
     uint16_t flags;
 };
 
-static X86DecodeBucket x86_decode_buckets[BUSTER_X86_DECODE_BUCKETS];
-static uint64_t* x86_decode_keys;
-static uint64_t* x86_decode_masks;
-static uint16_t* x86_decode_forms;
-static uint64_t x86_decode_storage_bytes;
-static X86DecodeCheck x86_decode_checks[X86_FORM_COUNT];
+// The decoder's and the formatter's tables: main.c's units share them, as they share the encoder's templates
+// (x86_64_encoder.c's BUSTER_X86_SHARED), and the bake builds them (baked.c), so that a command starts with them; a
+// benchmark's unit has its own and builds them, which its initialization time measures.
+BUSTER_X86_SHARED BUSTER_BAKED X86DecodeBucket x86_decode_buckets[BUSTER_X86_DECODE_BUCKETS];
+// Each bucket's entries' keys, masks and forms, padded to eight entries a bucket.
+BUSTER_X86_SHARED BUSTER_BAKED uint64_t x86_decode_keys[BUSTER_X86_DECODE_ENTRIES] __attribute__((aligned(64)));
+BUSTER_X86_SHARED BUSTER_BAKED uint64_t x86_decode_masks[BUSTER_X86_DECODE_ENTRIES] __attribute__((aligned(64)));
+BUSTER_X86_SHARED BUSTER_BAKED uint16_t x86_decode_forms[BUSTER_X86_DECODE_ENTRIES] __attribute__((aligned(64)));
+BUSTER_X86_SHARED BUSTER_BAKED uint64_t x86_decode_storage_bytes;
+BUSTER_X86_SHARED BUSTER_BAKED X86DecodeCheck x86_decode_checks[X86_FORM_COUNT];
+// The forms (with their segment overrides, below BUSTER_X86_FORM_TEMPLATES) whose address32 template has no room for a
+// memory operand: the full validator's x86_form_lacks_room test with a 32-bit address, which reads the address32
+// encoder's templates, from a table the disassembler doesn't keep (x86_decode_checks_initialize).
+BUSTER_X86_SHARED BUSTER_BAKED uint64_t x86_decode_address32_cramped[BUSTER_X86_FORM_TEMPLATES / 64];
 // Each bucket's tail after its opcode (x86_decode_tails_initialize): bit 31 known, bit 24 a byte where ModRM sits
 // (ModRM, or a fixed opcode byte, whose mod is 3), bits 16-23 the ModRM digits whose trailing bytes (immediates,
 // relatives, 3DNow's operation byte) are bits 4-7 (8-11 with 66, 12-15 with W); the other digits' are bits 0-3.
-static uint32_t x86_decode_tails[BUSTER_X86_DECODE_BUCKETS];
-static uint32_t x86_decode_tails_unknown;
+BUSTER_X86_SHARED BUSTER_BAKED uint32_t x86_decode_tails[BUSTER_X86_DECODE_BUCKETS];
+BUSTER_X86_SHARED BUSTER_BAKED uint32_t x86_decode_tails_unknown;
 // Every bucket's index over its forms' compact keys (x86_decode_compact): the bits all its signatures share, the
 // varying bits a cell's number packs (PEXT), and its cells' first entry. A cell holds 0 for no form, a row, or
 // BUSTER_X86_DECODE_LIST | n for the candidates at x86_decode_lists[n], in catalogue order, ended by 0.
@@ -107,25 +119,25 @@ struct X86DecodeLaneIndex
 #define BUSTER_X86_LANE_NOP (1u << 27)
 // Bits 28-31: the segments (none, FS, GS, SS) the form allows.
 #define BUSTER_X86_LANE_SEGMENTS 28
-static uint32_t x86_decode_lane_forms[X86_FORM_COUNT];
+BUSTER_X86_SHARED BUSTER_BAKED uint32_t x86_decode_lane_forms[X86_FORM_COUNT];
 // A row's lane form and its compact checks' words (X86DecodeCheck's registers, memory, and flags with the row in the
 // high half), 16 bytes a row, which the lane decoder loads a lane at a time (x86_decode_lane_rows_load).
-static uint32_t x86_decode_lane_rows[X86_FORM_COUNT][4] __attribute__((aligned(64)));
-static X86DecodeLaneIndex x86_decode_lane_indices[BUSTER_X86_DECODE_BUCKETS] __attribute__((aligned(64)));
-static uint16_t* x86_decode_cells;
-static uint16_t* x86_decode_lists;
-static uint32_t x86_decode_cell_count;
-static uint32_t x86_decode_list_count;
+BUSTER_X86_SHARED BUSTER_BAKED uint32_t x86_decode_lane_rows[X86_FORM_COUNT][4] __attribute__((aligned(64)));
+BUSTER_X86_SHARED BUSTER_BAKED X86DecodeLaneIndex x86_decode_lane_indices[BUSTER_X86_DECODE_BUCKETS] __attribute__((aligned(64)));
+BUSTER_X86_SHARED BUSTER_BAKED uint16_t x86_decode_cells[BUSTER_X86_DECODE_CELLS];
+BUSTER_X86_SHARED BUSTER_BAKED uint16_t x86_decode_lists[BUSTER_X86_DECODE_LIST_ENTRIES];
+BUSTER_X86_SHARED BUSTER_BAKED uint32_t x86_decode_cell_count;
+BUSTER_X86_SHARED BUSTER_BAKED uint32_t x86_decode_list_count;
 // The length pass's tables, from x86_decode_tails (x86_decode_length_tables_initialize). A legacy opcode's byte in
 // maps 0 and 1: bits 0-3 its trailing bytes (15: no hint), bit 4 none but on digits 0 and 1, bit 5 four become eight
 // with REX.W, bit 6 four become two with 66, bit 7 a byte where ModRM sits. A vector opcode's byte in map 1: bits 0-1
 // VEX's (ModRM, an immediate byte), bits 2-3 EVEX's, bit 4 VEX's has no hint, bit 5 EVEX's. Every other map's
 // (family, map) is uniform: its byte is the legacy layout's, 0x0f for no hint, 0xff for map 1's tables.
-static uint8_t x86_decode_legacy_tails[2 * 256] __attribute__((aligned(64)));
-static uint8_t x86_decode_vector_tails[256] __attribute__((aligned(64)));
-static uint8_t x86_decode_map_tails[3 * BUSTER_X86_DECODE_MAPS];
-static bool x86_decode_initialized;
-static uint32_t x86_decode_entry_count;
+BUSTER_X86_SHARED BUSTER_BAKED uint8_t x86_decode_legacy_tails[2 * 256] __attribute__((aligned(64)));
+BUSTER_X86_SHARED BUSTER_BAKED uint8_t x86_decode_vector_tails[256] __attribute__((aligned(64)));
+BUSTER_X86_SHARED BUSTER_BAKED uint8_t x86_decode_map_tails[3 * BUSTER_X86_DECODE_MAPS];
+BUSTER_X86_SHARED BUSTER_BAKED bool x86_decode_initialized;
+BUSTER_X86_SHARED BUSTER_BAKED uint32_t x86_decode_entry_count;
 
 static void x86_disassembly_initialize(void);
 
@@ -406,8 +418,41 @@ static void x86_decode_length_tables_initialize(void)
     }
 }
 
-static void x86_decode_checks_initialize(void)
+// Initialization's scratch memory: an anonymous mapping rather than the heap, since the bake (baked.c) runs the
+// initializer and refuses writes to the image's memory outside buster_baked, which the allocator's own state is.
+static void* x86_decode_scratch(uint64_t bytes)
 {
+    void* pointer = mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    return pointer == MAP_FAILED ? NULL : pointer;
+}
+
+// Whether the form's template in `templates` (a mode's table, past its padding) has no room for its memory operand
+// (x86_form_lacks_room's test, on a table given rather than the mode's shared one).
+static bool x86_decode_lacks_room(const X86TemplateEntry* templates, uint32_t form, X86EncoderMode encoder)
+{
+    uint32_t flags;
+    memcpy(&flags, &templates[form & BUSTER_X86_FORM_NUMBER].template.bytes[BUSTER_X86_TEMPLATE_FLAGS_OFFSET], sizeof(flags));
+    const uint32_t row = (uint32_t)(x86_form_description(form) - x86_form_descriptions);
+    return (x86_form_description(form)->rm & BUSTER_X86_OPERAND_MEMORY) && (flags & BUSTER_X86_TEMPLATE_NO_MEMORY) && x86_form_exists_in_mode(row, encoder);
+}
+
+// The checks' 32-bit-address room flags read the address32 encoder's templates: its shared table where a command built
+// it, else a table built in scratch memory and dropped after (the bake builds the checks without the 4 MB table).
+static bool x86_decode_checks_initialize(void)
+{
+    const uint64_t table_bytes = (uint64_t)BUSTER_X86_TEMPLATE_TABLE * sizeof(X86TemplateEntry);
+    X86TemplateEntry* scratch = x86_encoder_initialized_address32 ? NULL : x86_decode_scratch(table_bytes);
+    const X86TemplateEntry* address32 = x86_encoder_initialized_address32 ? x86_mode_templates(X86_ENCODER_MODE_ADDRESS32) : scratch != NULL ? scratch + BUSTER_X86_TEMPLATE_PADDING : NULL;
+    const bool valid = address32 != NULL && (scratch == NULL || build_mode_templates(X86_ENCODER_MODE_ADDRESS32, scratch + BUSTER_X86_TEMPLATE_PADDING));
+    for (uint32_t form = 0; form < BUSTER_X86_FORM_TEMPLATES; form += 64)
+    {
+        uint64_t cramped = 0;
+        for (uint32_t k = 0; valid && k < 64; k += 1)
+        {
+            cramped |= (uint64_t)x86_decode_lacks_room(address32, form + k, X86_ENCODER_MODE_ADDRESS32) << k;
+        }
+        x86_decode_address32_cramped[form / 64] = cramped;
+    }
     // Raw parsing already establishes consistent modes, bounded general bases/indices, high-byte/REX exclusion,
     // immediate widths and relative ranges. For ordinary classes, the remaining checks are packed register and
     // decoration masks plus memory admission. Exceptional classes and relationships retain the full validator.
@@ -429,14 +474,15 @@ static void x86_decode_checks_initialize(void)
             check->flags = 1 | ((form->rm == 0 || (form->rm & BUSTER_X86_OPERAND_REGISTER)) ? 2 : 0);
             if (form->rm & BUSTER_X86_OPERAND_MEMORY)
             {
-                for (uint32_t address32 = 0; address32 < 2; address32 += 1)
+                for (uint32_t mode32 = 0; valid && mode32 < 2; mode32 += 1)
                 {
                     for (uint32_t segment = 0; segment <= BUSTER_X86_SEGMENT_SS; segment += 1)
                     {
                         const uint32_t number = row + segment * X86_FORM_COUNT;
-                        if (x86_form_has_segment(row, segment) && !x86_form_lacks_room(number, address32 ? X86_ENCODER_MODE_ADDRESS32 : X86_ENCODER_MODE_64))
+                        const bool lacks = mode32 ? x86_decode_lacks_room(address32, number, X86_ENCODER_MODE_ADDRESS32) : x86_form_lacks_room(number, X86_ENCODER_MODE_64);
+                        if (x86_form_has_segment(row, segment) && !lacks)
                         {
-                            check->flags |= 1u << (2 + address32 * 4 + segment);
+                            check->flags |= 1u << (2 + mode32 * 4 + segment);
                         }
                     }
                 }
@@ -444,6 +490,11 @@ static void x86_decode_checks_initialize(void)
             check->flags |= (form->syntax == X86_SYNTAX_RM_REG || form->syntax == X86_SYNTAX_RM_REG_IMM) ? 1u << 10 : 0;
         }
     }
+    if (scratch != NULL)
+    {
+        munmap(scratch, table_bytes);
+    }
+    return valid;
 }
 
 // Each row's lane descriptor (x86_decode_lane_forms), as x86_decode_candidate reads its form.
@@ -483,7 +534,7 @@ static void x86_decode_lane_forms_initialize(void)
 }
 
 // The lane index (x86_decode_lane_indices) over every bucket's entries' compact keys. False where a form's prefix byte
-// has no code, a bucket varies in more than 16 bits, or an allocation fails.
+// has no code, a bucket varies in more than 16 bits, the cells or the lists outgrow their bounds, or an allocation fails.
 static bool x86_decode_lane_indices_initialize(void)
 {
     bool valid = true;
@@ -525,10 +576,11 @@ static bool x86_decode_lane_indices_initialize(void)
     // Each cell's matching entries, in catalogue order. An entry matches the cells whose varying bits inside its mask
     // are its key's, so it walks just those (the subsets of its free bits): once to count each cell's matches and keep
     // its first, and again, for the cells with more than one, to fill their lists (each ended by 0; list 0 is no one's).
-    x86_decode_cells = valid ? calloc(cells, sizeof(*x86_decode_cells)) : 0;
-    uint32_t* counts = valid ? calloc(cells, sizeof(uint32_t)) : 0;
-    valid = valid && x86_decode_cells != 0 && counts != 0;
-    uint16_t* lists = 0;
+    valid = valid && cells <= BUSTER_X86_DECODE_CELLS;
+    memset(x86_decode_cells, 0, sizeof(x86_decode_cells));
+    memset(x86_decode_lists, 0, sizeof(x86_decode_lists));
+    uint32_t* counts = valid ? x86_decode_scratch((uint64_t)cells * sizeof(uint32_t)) : NULL;
+    valid = valid && counts != NULL;
     uint32_t used = 1;
     // The buckets with an ambiguous cell, the only ones the second pass walks.
     uint64_t ambiguous_buckets[(BUSTER_X86_DECODE_BUCKETS + 63) / 64] = { 0 };
@@ -558,7 +610,7 @@ static bool x86_decode_lane_indices_initialize(void)
                     }
                     else if ((x86_decode_cells[cell] & BUSTER_X86_DECODE_LIST) != 0)
                     {
-                        lists[counts[cell]] = row;
+                        x86_decode_lists[counts[cell]] = row;
                         counts[cell] += 1;
                     }
                     subset = (subset - free_cells) & free_cells;
@@ -577,11 +629,12 @@ static bool x86_decode_lane_indices_initialize(void)
             counts[cell] = list;
             valid = valid && list < BUSTER_X86_DECODE_LIST;
         }
-        lists = pass == 0 && valid ? calloc(used, sizeof(uint16_t)) : lists;
-        valid = valid && lists != 0;
+        valid = valid && used <= BUSTER_X86_DECODE_LIST_ENTRIES;
     }
-    free(counts);
-    x86_decode_lists = lists;
+    if (counts != NULL)
+    {
+        munmap(counts, (uint64_t)cells * sizeof(uint32_t));
+    }
     x86_decode_cell_count = cells;
     x86_decode_list_count = used;
     return valid;
@@ -589,8 +642,8 @@ static bool x86_decode_lane_indices_initialize(void)
 
 static bool x86_disassembler_initialize(void)
 {
-    bool result = (x86_encoder_initialized || x86_encoder_initialize()) &&
-                  (x86_encoder_initialized_address32 || x86_encoder_initialize_address32());
+    // A baked executable starts with the tables built; the checks build the address32 templates they read themselves.
+    bool result = x86_decode_initialized || x86_encoder_initialized || x86_encoder_initialize();
     if (result && !x86_decode_initialized)
     {
         memset(x86_decode_buckets, 0, sizeof(x86_decode_buckets));
@@ -619,16 +672,8 @@ static bool x86_disassembler_initialize(void)
         result = total <= BUSTER_X86_DECODE_ENTRIES;
         if (result)
         {
-            // One region sized from the actual padded buckets, rather than the catalogue's worst-case expansion.
-            // Padding each bucket to eight also aligns both 64-bit arrays for their vector loads.
-            x86_decode_storage_bytes = ((uint64_t)total * 18 + 63) & ~63ull;
-            x86_decode_keys = aligned_alloc(64, x86_decode_storage_bytes);
-            result = x86_decode_keys != 0;
-        }
-        if (result)
-        {
-            x86_decode_masks = x86_decode_keys + total;
-            x86_decode_forms = (uint16_t*)(x86_decode_masks + total);
+            // The entries' bytes in use (the benchmark's table size).
+            x86_decode_storage_bytes = (uint64_t)total * 18;
             for (uint32_t i = 0; i < total; i += 1)
             {
                 x86_decode_keys[i] = UINT64_MAX;
@@ -655,13 +700,12 @@ static bool x86_disassembler_initialize(void)
                     }
                 }
             }
-            result = x86_decode_lane_indices_initialize();
+            result = x86_decode_lane_indices_initialize() && x86_decode_checks_initialize();
             x86_decode_lane_forms_initialize();
             if (result)
             {
                 x86_decode_tails_initialize();
                 x86_decode_length_tables_initialize();
-                x86_decode_checks_initialize();
                 for (uint32_t row = 0; row < X86_FORM_COUNT; row += 1)
                 {
                     x86_decode_lane_rows[row][0] = x86_decode_lane_forms[row];
@@ -672,14 +716,6 @@ static bool x86_disassembler_initialize(void)
                 x86_disassembly_initialize();
                 x86_decode_entry_count = total;
                 x86_decode_initialized = true;
-            }
-            else
-            {
-                free(x86_decode_keys);
-                x86_decode_keys = 0;
-                x86_decode_masks = 0;
-                x86_decode_forms = 0;
-                x86_decode_storage_bytes = 0;
             }
         }
     }
@@ -1246,7 +1282,11 @@ static uint32_t x86_decode_lanes(const X86DecodeWindow* window, uint64_t remaini
                     memcpy(&instruction.displacement, &words[1][i], 4);
                     memcpy(&instruction.reg, &words[2][i], 4);
                     memcpy(&instruction.form, &words[3][i], 4);
-                    const bool lane_valid = ((lane_address32 >> i) & 1) != 0 ? x86_instruction_is_valid_address32(&instruction) : x86_instruction_is_valid(&instruction);
+                    // With a 32-bit address, the validator's room test reads templates the disassembler doesn't build; the
+                    // cramped forms' table answers it for a memory operand.
+                    const uint32_t number = instruction.form & BUSTER_X86_FORM_NUMBER;
+                    const bool cramped = (instruction.mode & BUSTER_X86_MODE_MEMORY) != 0 && ((x86_decode_address32_cramped[number / 64] >> (number % 64)) & 1) != 0;
+                    const bool lane_valid = ((lane_address32 >> i) & 1) != 0 ? !cramped && x86_instruction_is_valid_address32(&instruction) : x86_instruction_is_valid(&instruction);
                     accepted |= (uint16_t)((uint32_t)lane_valid << i);
                 }
             }
