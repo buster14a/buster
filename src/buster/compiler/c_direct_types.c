@@ -317,6 +317,11 @@ struct FastCCState
     uint32_t cur_va_fp_init;   // initial fp_offset (48 + 16 * num_fp_params)
     int32_t cur_va_overflow_off; // rbp + 16 + overflow_bytes
 
+    // Dead code (#3592): how many `if` branches around the statement are checked without code, and what the last
+    // branch condition folded to (BUSTER_FCONSTANT_*).
+    uint32_t dead;
+    uint8_t branch_constant;
+
     // GNU's alias attribute (#3592): the declarations that have one, and how many the attribute parser saw, so that one
     // anywhere else (a block, a parameter, a definition) leaves the direct path.
     FastAlias* aliases;
