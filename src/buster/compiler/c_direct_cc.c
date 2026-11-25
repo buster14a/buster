@@ -1881,7 +1881,20 @@ static FastArm fast_cc_arms_merge(FastArm a, FastArm b)
 // true or false (-Wtautological-constant-compare). For a condition, the operands of ! && || and conversion to _Bool.
 // And not an array, a function or an address, which is never null (-Wpointer-bool-conversion).
 // (A macro, not a function: every condition takes it.) 1 when quiet, else 0.
-#define BUSTER_FAST_CONDITION_QUIET(cc, v) \
+// The conditions BUSTER_FAST_CONDITION_QUIET may question, by the value's kind, type and marks alone: a comparison's
+// flags never; a record, enum, array or function by value, void or a type this path doesn't support, an address, a
+// function, or a constant shift's or a conditional's constant arms' value may (#3577).
+#define BUSTER_FAST_CONDITION_SUSPECT(v) \
+    ((uint32_t)((v)->kind != FVAL_FLAGS) & \
+     ((uint32_t)(((v)->type & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) == BUSTER_FTYPE_COMPLEX_BIT) | \
+      ((uint32_t)(((v)->type & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) == 0) & \
+       (uint32_t)((BUSTER_FAST_OTHER_SCALARS >> ((v)->type & BUSTER_FTYPE_SCALAR_MASK)) & 1u)) | \
+      (uint32_t)((v)->kind == FVAL_LOCAL_ADDR) | (uint32_t)((v)->kind == FVAL_GLOBAL_ADDR) | (uint32_t)((v)->kind == FVAL_GLOBAL) | \
+      (uint32_t)(((v)->marks & (BUSTER_FVAL_MARK_SHIFTED | BUSTER_FVAL_MARK_CONST_ARMS)) != 0)))
+// The scalar kinds of no operand class (void, the unsupported ones), a bit each.
+#define BUSTER_FAST_OTHER_SCALARS ((1u << FTYPE_VOID) | (1u << FTYPE_UNSUP16) | (1u << FTYPE_UNSUP2))
+#define BUSTER_FAST_CONDITION_QUIET(cc, v) (BUSTER_FAST_CONDITION_SUSPECT(v) == 0 || BUSTER_FAST_CONDITION_EXACT(cc, v))
+#define BUSTER_FAST_CONDITION_EXACT(cc, v) \
     ((((uint32_t)((v)->kind != FVAL_FLAGS) & (uint32_t)(BUSTER_FAST_OPERAND_CLASS(cc, (v)->type) == BUSTER_FOPERAND_OTHER)) | \
       ((uint32_t)((v)->type >> 31) & (uint32_t)(((v)->type & BUSTER_FTYPE_PTR_MASK) == 0) & \
        ((uint32_t)((cc)->ctypes[(v)->type & BUSTER_FTYPE_CIDX_MASK & BUSTER_FTYPE_COMPLEX_ALL((v)->type)].kind == FCTYPE_ARRAY) | \
@@ -2967,7 +2980,12 @@ static __attribute__((noinline)) void fast_cc_check_implicit_conv(FastCCState* c
     }
     // #3577: a struct or union converts to its own type alone, and nothing else (void included) converts to one. (A
     // scalar this path doesn't support, a long double, converts as the full pipeline converts it; code for one isn't made.)
-    if ((BUSTER_FAST_RECORD_OR_VOID(cc, dt) | BUSTER_FAST_RECORD_OR_VOID(cc, st)) & (uint32_t)(BUSTER_FTYPE_CODEGEN(dt) != BUSTER_FTYPE_CODEGEN(BUSTER_FTYPE_UNQUAL(st))))
+    const uint32_t record_or_void = (uint32_t)((dt & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) == BUSTER_FTYPE_COMPLEX_BIT) |
+                                    (uint32_t)((st & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) == BUSTER_FTYPE_COMPLEX_BIT) |
+                                    (uint32_t)((dt & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK)) == FTYPE_VOID) |
+                                    (uint32_t)((st & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK)) == FTYPE_VOID);
+    if (record_or_void != 0 &&
+        ((BUSTER_FAST_RECORD_OR_VOID(cc, dt) | BUSTER_FAST_RECORD_OR_VOID(cc, st)) & (uint32_t)(BUSTER_FTYPE_CODEGEN(dt) != BUSTER_FTYPE_CODEGEN(BUSTER_FTYPE_UNQUAL(st)))) != 0)
     {
         fast_cc_bail(cc, "conversion to or from a struct, union or void");
         return;
@@ -3737,6 +3755,7 @@ static uint8_t fast_cc_local_fold_class(const FastCCState* cc, FastType t, uint3
 // -field-unsafe (a const object, a struct or union with a const member, an array of const elements: a multidimensional
 // array's element is found by ftype_is_object_const's loop), else 0.
 #define BUSTER_FAST_UNINITIALIZED_CONST(cc, type, result) \
+    if (((type) & (BUSTER_FTYPE_CONST | BUSTER_FTYPE_COMPLEX_BIT)) != 0) \
     { \
         const uint32_t uc_object = (uint32_t)((uint32_t)(type) >> 31) & (uint32_t)(((type) & BUSTER_FTYPE_PTR_MASK) == 0); \
         const FastComplexType* uc_ct = (cc)->ctypes + ((type) & BUSTER_FTYPE_CIDX_MASK & (UINT32_C(0) - uc_object)); \

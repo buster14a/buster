@@ -1676,6 +1676,8 @@ static FastLexed fast_lex_number(FastPP* pp, const uint8_t* p, const uint8_t* en
     }
     else
     {
+        // #3577: past 2^64 - 1 the full pipeline's error; only 20 digits or more can get there.
+        const bool long_literal = dig_end - dig >= 20;
         while (dig < dig_end)
         {
             const uint8_t c = *dig++;
@@ -1684,7 +1686,10 @@ static FastLexed fast_lex_number(FastPP* pp, const uint8_t* p, const uint8_t* en
                 fast_pp_bail(pp, "invalid dec literal");
                 break;
             }
-            too_large |= (uint32_t)(val > (UINT64_MAX - (uint64_t)(c - '0')) / 10u);
+            if (long_literal)
+            {
+                too_large |= (uint32_t)(val > (UINT64_MAX - (uint64_t)(c - '0')) / 10u);
+            }
             val = val * 10u + (uint64_t)(c - '0');
         }
     }
