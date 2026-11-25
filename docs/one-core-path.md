@@ -4337,6 +4337,17 @@ single-TU `-c` C17/C23 object builds directly from `mmap`'d source bytes to an E
   register operand into `rax` (`cmpxchg`'s source into `rcx`), and a register output is stored at its own size after the
   instruction. Another constraint or order, sizes that differ, another clobber than `memory`, or `"=m"` of anything but
   `*p` leaves. 58 more of musl's units take the direct path in each mode (1,100 of 1,336).
+- **Dead arms (#3592's step 6d):** a `?:` whose condition folds to an integer constant, an `&&` or `||` whose constant
+  left side decides it, and an `if` whose condition folds have a dead side, which is checked as a `sizeof` operand is
+  (`eval_only`): no code, no symbol reference, a call's argument count and conversions checked but not its argument
+  types. The live arm's value is an rvalue in the common type, never a constant (`1 ? 0 : x` is no null pointer
+  constant), and a decided `&&` or `||` is 0 or 1 in a register. A dead `if` branch is checked so
+  (`FastCCState.dead`) only when `fast_cc_dead_simple` finds blocks, `if`s and expression statements in it; a
+  declaration, a jump, a loop, a switch, a label or an asm statement compiles it with code as before. musl's `isnan`,
+  `signbit` and `fpclassify` of a `float` or `double`, and its `FORCE_EVAL`, have a `long double` side; 51 more of its
+  units take the direct path in each mode (1,151 of 1,336), and musl's ctype macros (`0 ? isdigit(a) :
+  ...`) no longer reference the functions. Without code no value holds a register: `fval_release` frees none in
+  `eval_only`, where a `sizeof` operand's call freed `rax` under a live value (#3616).
 - **Fail-closed fallback (`--no-direct` / `BUSTER_NO_DIRECT`):** any diagnostic, warning-sensitive construct, or
   unsupported flag/extension bails out silently without writing output so `c_checker_driver.c` runs the full pipeline.
 

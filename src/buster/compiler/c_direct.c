@@ -2568,6 +2568,214 @@ static bool c_direct_test_unevaluated_registers(const char* obj_path)
     return ok;
 }
 
+typedef int (*CDirectTestPick)(int, int);
+typedef double (*CDirectTestMix)(int);
+typedef long (*CDirectTestWide)(int);
+typedef int (*CDirectTestSide)(int*);
+typedef int (*CDirectTestOne)(int);
+
+// Dead arms (#3592): a `?:` or an `if` whose condition is a constant checks its dead side as an operand of sizeof is,
+// with no code and no symbol, as the full pipeline drops it. musl's isnan(), signbit() and FORCE_EVAL() of a float or a
+// double have a long double side, a call that only code would refuse; and its a_ctz_l() names a_ctz_32 on a 64-bit
+// target. The live side keeps its value, in the common type, as an rvalue. A dead branch with a declaration, a jump, a
+// loop or a label has code as before; and a dead side's call is still checked, as a sizeof operand's is.
+static bool c_direct_test_dead_arms(const char* obj_path)
+{
+    static const char musl[] =
+        "int __fpclassifyl(long double);\n"
+        "int __signbitl(long double);\n"
+        "static __inline unsigned __FLOAT_BITS(float __f) { union {float __f; unsigned __i;} __u; __u.__f = __f; return __u.__i; }\n"
+        "static __inline unsigned long long __DOUBLE_BITS(double __f) { union {double __f; unsigned long long __i;} __u; __u.__f = __f; return __u.__i; }\n"
+        "#define isnan(x) ( sizeof(x) == sizeof(float) ? (__FLOAT_BITS(x) & 0x7fffffff) > 0x7f800000 : \\\n"
+        "    sizeof(x) == sizeof(double) ? (__DOUBLE_BITS(x) & -1ULL>>1) > 0x7ffULL<<52 : __fpclassifyl(x) == 0)\n"
+        "#define signbit(x) ( sizeof(x) == sizeof(float) ? (int)(__FLOAT_BITS(x)>>31) : \\\n"
+        "    sizeof(x) == sizeof(double) ? (int)(__DOUBLE_BITS(x)>>63) : __signbitl(x) )\n"
+        "static inline void fp_force_evalf(float x) { volatile float y; y = x; }\n"
+        "static inline void fp_force_eval(double x) { volatile double y; y = x; }\n"
+        "static inline void fp_force_evall(long double x) { volatile long double y; y = x; }\n"
+        "#define FORCE_EVAL(x) do { if (sizeof(x) == sizeof(float)) { fp_force_evalf(x); } \\\n"
+        "    else if (sizeof(x) == sizeof(double)) { fp_force_eval(x); } else { fp_force_evall(x); } } while(0)\n"
+        "static inline int a_ctz_32(unsigned x) { return (int)x; }\n"
+        "static inline int a_ctz_64(unsigned long x) { return (int)x; }\n"
+        "static inline int a_ctz_l(unsigned long x) { return (sizeof(long) < 8) ? a_ctz_32(x) : a_ctz_64(x); }\n"
+        "int t_isnan(double x) { return isnan(x); }\n"
+        "int t_signbitf(float x) { return signbit(x); }\n"
+        "double t_force(double x) { FORCE_EVAL(x); return x; }\n"
+        "int t_ctz(unsigned long x) { return a_ctz_l(x); }\n"
+        "int never_and(int);\n"
+        "int never_or(int);\n"
+        "int t_logic(int x) { return (0 && never_and(x)) + (1 || never_or(x)); }\n";
+    bool ok = c_direct_test_compile_source_keep(musl, obj_path, NULL, 0, NULL, NULL, NULL);
+    static const char* const present[] = { "__FLOAT_BITS", "__DOUBLE_BITS", "fp_force_eval", "a_ctz_64", "a_ctz_l" };
+    static const char* const absent[] = { "__fpclassifyl", "__signbitl", "fp_force_evall", "fp_force_evalf", "a_ctz_32", "never_and", "never_or" };
+    for (uint32_t i = 0; ok && i < (uint32_t)(sizeof(present) / sizeof(present[0])); i += 1)
+    {
+        ok = c_direct_test_symbol(obj_path, present[i]).count == 1u;
+    }
+    for (uint32_t i = 0; ok && i < (uint32_t)(sizeof(absent) / sizeof(absent[0])); i += 1)
+    {
+        ok = c_direct_test_symbol(obj_path, absent[i]).count == 0u;
+    }
+    if (!ok)
+    {
+        fprintf(stderr, "test-direct: musl's dead arms left the direct path or kept a symbol\n");
+    }
+
+    // The values, run: no function calls another, so that their section runs where it is copied.
+    static const char values[] =
+        "struct S { int a, b; };\n"
+        "int t_pick(int a, int b) { return 1 ? a : b; }\n"
+        "int t_pick0(int a, int b) { return 0 ? a : b; }\n"
+        "double t_mix(int a) { return 1 ? a : 2.5; }\n"
+        "double t_mix0(int a) { return 0 ? 2.5 : a; }\n"
+        "long t_wide(int a) { return sizeof(a) == 4 ? a : 1L; }\n"
+        "int t_side(int *p) { return 0 ? (*p = 7) : 3; }\n"
+        "int t_side1(int *p) { return 1 ? 4 : (*p = 7); }\n"
+        "int t_nest(int a) { return sizeof(a) == 8 ? 1 : sizeof(a) == 4 ? a + 1 : 3; }\n"
+        "int t_cmp(int a, int b) { return 1 ? a < b : 0; }\n"
+        "int t_rec(int a, int b) { struct S s = { a, b }; struct S t = { b, a }; return (0 ? s : t).b * 10 + (1 ? s : t).b; }\n"
+        "int t_if(int a) { if (sizeof(a) == 4) { a += 1; } else { a += 2; } return a; }\n"
+        "int t_if0(int a) { if (sizeof(a) == 8) { a += 1; } else { a += 2; } return a; }\n"
+        "int t_chain(int a) { if (sizeof(a) == 2) { a = 1; } else if (sizeof(a) == 4) { a = 2; } else { a = 3; } return a; }\n"
+        "int t_dangle(int a) { if (0) if (a) a = 5; else a = 6; return a; }\n"
+        "int t_inner(int a) { if (1) { a += 10; } else { if (a) { a = 2; } else { a = 3; } } return a; }\n"
+        "int t_void(int *p) { 1 ? (void)(*p = 1) : (void)(*p = 2); 0 ? (void)(*p += 5) : (void)(*p += 7); return *p; }\n"
+        "int t_logic(int *p) { return (0 && (*p = 5)) * 10 + (1 || (*p = 6)) + (0 && *p || 1) * 100; }\n"
+        "int t_after(int a) { if (1) { a += 1; } else { a = 7; } a = a * 3; if (0) { a = 9; } else { a += 2; } return a * 5 + 1; }\n";
+    ok = ok && c_direct_test_compile_source_keep(values, obj_path, NULL, 0, NULL, NULL, NULL);
+    if (!ok)
+    {
+        fprintf(stderr, "test-direct: constant conditions' values left the direct path\n");
+    }
+#if !__has_feature(memory_sanitizer)
+    static const char* const names[] = {
+        "t_pick", "t_pick0", "t_mix", "t_mix0", "t_wide", "t_side", "t_side1", "t_nest", "t_cmp", "t_rec",
+        "t_if", "t_if0", "t_chain", "t_dangle", "t_inner", "t_void", "t_logic", "t_after",
+    };
+    enum { count = sizeof(names) / sizeof(names[0]) };
+    void* mappings[count] = { 0 };
+    size_t mapped[count] = { 0 };
+    const void* code[count] = { 0 };
+    for (uint32_t i = 0; ok && i < (uint32_t)count; i += 1)
+    {
+        code[i] = c_direct_test_code(obj_path, names[i], mappings + i, mapped + i);
+        ok = code[i] != NULL;
+    }
+    if (ok)
+    {
+        int v = 1;
+        ok = ((CDirectTestPick)(uintptr_t)code[0])(3, 4) == 3 && ((CDirectTestPick)(uintptr_t)code[1])(3, 4) == 4 &&
+             ((CDirectTestMix)(uintptr_t)code[2])(-3) == -3.0 && ((CDirectTestMix)(uintptr_t)code[3])(5) == 5.0 &&
+             ((CDirectTestWide)(uintptr_t)code[4])(-2) == -2L && ((CDirectTestSide)(uintptr_t)code[5])(&v) == 3 && v == 1 &&
+             ((CDirectTestSide)(uintptr_t)code[6])(&v) == 4 && v == 1 && ((CDirectTestOne)(uintptr_t)code[7])(5) == 6 &&
+             ((CDirectTestPick)(uintptr_t)code[8])(1, 2) == 1 && ((CDirectTestPick)(uintptr_t)code[8])(2, 1) == 0 &&
+             ((CDirectTestPick)(uintptr_t)code[9])(3, 4) == 34 && ((CDirectTestOne)(uintptr_t)code[10])(1) == 2 &&
+             ((CDirectTestOne)(uintptr_t)code[11])(1) == 3 && ((CDirectTestOne)(uintptr_t)code[12])(0) == 2 &&
+             ((CDirectTestOne)(uintptr_t)code[13])(1) == 1 && ((CDirectTestOne)(uintptr_t)code[14])(1) == 11 &&
+             ((CDirectTestSide)(uintptr_t)code[15])(&v) == 8 && ((CDirectTestSide)(uintptr_t)code[16])(&v) == 101 && v == 8 &&
+             ((CDirectTestOne)(uintptr_t)code[17])(1) == 41;
+        if (!ok)
+        {
+            fprintf(stderr, "test-direct: constant conditions ran wrong\n");
+        }
+    }
+    for (uint32_t i = 0; i < (uint32_t)count; i += 1)
+    {
+        if (mappings[i] != NULL)
+        {
+            munmap(mappings[i], mapped[i]);
+        }
+    }
+#endif
+    unlink(obj_path);
+
+    // A dead branch with code the dead mode doesn't take compiles as before, its call kept; a simple one keeps none.
+    static const struct
+    {
+        const char* source;
+        uint32_t calls;
+    } branches[] = {
+        { "void never(int);\nint f(int a) { if (0) never(a); return a; }\n", 0u },
+        { "void never(int);\nint f(int a) { if (sizeof(a) == 4) { a += 1; } else { never(a); } return a; }\n", 0u },
+        { "void never(int);\nint f(int a) { if (0) { int z = a; never(z); } return a; }\n", 1u },
+        { "void never(int);\nint f(int a) { if (0) { never(a); return 1; } return a; }\n", 1u },
+        { "void never(int);\nint f(int a) { if (0) { while (a) never(a); } return a; }\n", 1u },
+        { "void never(int);\nint f(int a) { if (0) { l: never(a); } return a; }\n", 1u },
+        { "void never(int);\nint f(int a) { if (0) { switch (a) { case 1: never(a); } } return a; }\n", 1u },
+        { "void never(int);\nint f(int a) { if (1) { a += 1; } else { do never(a); while (a); } return a; }\n", 1u },
+        { "void never(int);\nint f(int a) { if (a) { never(a); } return a; }\n", 1u },
+        { "void never(int);\nint f(int a) { if (0) if (a) never(a); else return 1; return a; }\n", 1u },
+        { "void never(int);\nint f(int a) { if (0) { if (a) { never(a); } } else { a += 1; } return a; }\n", 0u },
+        { "void never(int);\nint f(int a) { if (1) { a += 1; } else { a += 2; } never(a); return a; }\n", 1u },
+        { "void never(int);\nint f(int a) { if (0) { a += 1; } never(a); return a; }\n", 1u },
+    };
+    for (uint32_t i = 0; ok && i < (uint32_t)(sizeof(branches) / sizeof(branches[0])); i += 1)
+    {
+        ok = c_direct_test_compile_source_keep(branches[i].source, obj_path, NULL, 0, NULL, NULL, NULL) &&
+             c_direct_test_symbol(obj_path, "never").count == branches[i].calls;
+        unlink(obj_path);
+        if (!ok)
+        {
+            fprintf(stderr, "test-direct: a dead branch's code is wrong: %s", branches[i].source);
+        }
+    }
+
+    // A dead side has no code: each pair's text is as long with a dead side that would have code as without it.
+    static const char* const same[][2] = {
+        { "int g(int);\nint f(int a) { if (0) { if (a) { a = g(a); } else { a = 2; } } return a; }\n",
+          "int g(int);\nint f(int a) { if (0) { } return a; }\n" },
+        { "int g(int);\nint f(int a) { if (1) { a += 1; } else { a = g(a); } return a; }\n",
+          "int g(int);\nint f(int a) { if (1) { a += 1; } else { } return a; }\n" },
+        { "int g(int);\nint f(int a) { return 1 ? a : g(a) + a * 3; }\n",
+          "int g(int);\nint f(int a) { return 1 ? a : 0; }\n" },
+        { "int g(int);\nint f(int a) { return 0 ? g(a) + a * 3 : a; }\n",
+          "int g(int);\nint f(int a) { return 0 ? 0 : a; }\n" },
+        { "int g(int);\nint f(int a) { return (0 && g(a)) + (1 || g(a + 1)); }\n",
+          "int g(int);\nint f(int a) { return (0 && 0) + (1 || 0); }\n" },
+        { "int g(int);\nint f(int a, int b, int c) { return a * b + (1 ? c : g(c)); }\n",
+          "int g(int);\nint f(int a, int b, int c) { return a * b + (0 ? g(c) : c); }\n" },
+    };
+    for (uint32_t i = 0; ok && i < (uint32_t)(sizeof(same) / sizeof(same[0])); i += 1)
+    {
+        uint32_t dead_text = 0;
+        uint32_t empty_text = 0;
+        ok = c_direct_test_compile_source(same[i][0], obj_path, 0, &dead_text, NULL) &&
+             c_direct_test_compile_source(same[i][1], obj_path, 0, &empty_text, NULL) && dead_text == empty_text;
+        if (!ok)
+        {
+            fprintf(stderr, "test-direct: a dead side has code (%u bytes against %u): %s", dead_text, empty_text, same[i][0]);
+        }
+    }
+
+    // What leaves: a dead side's call with the wrong arguments, a constant condition's value as an lvalue or a null
+    // pointer constant, and an undeclared name in a dead side.
+    static const char* const leaves[] = {
+        "int g(int);\nint f(void) { return 0 ? g(1, 2) : 0; }\n",
+        "int g(int);\nint f(void) { if (0) g(1, 2); return 0; }\n",
+        "int g(int *);\nint f(double *p) { return 0 ? g(p) : 0; }\n",
+        "int g(int *);\nint f(double *p) { if (0) { g(p); } return 0; }\n",
+        "int f(int a, int b) { (1 ? a : b) = 5; return a; }\n",
+        "int *f(int x) { return 1 ? 0 : x; }\n",
+        "int f(void) { return 0 ? undeclared(1) : 0; }\n",
+        "int f(void) { if (0) { undeclared(1); } return 0; }\n",
+        "struct S { int a; };\nint f(struct S s) { return 0 && s; }\n",
+        "struct S { int a; };\nvoid f(struct S s, struct S t) { (1 ? s : t).a = 5; }\n",
+        "struct S { int a; };\nvoid f(struct S s, struct S t) { (0 ? s : t).a = 5; }\n",
+        "int *f(int x) { return 0 && x; }\n",
+        "int *f(int x) { return 1 || x; }\n",
+        "int g(int);\nint f(void) { return 1 || g(1, 2); }\n",
+    };
+    for (uint32_t i = 0; ok && i < (uint32_t)(sizeof(leaves) / sizeof(leaves[0])); i += 1)
+    {
+        ok = c_direct_test_compile_source(leaves[i], obj_path, 1, NULL, NULL);
+        if (!ok)
+        {
+            fprintf(stderr, "test-direct: a dead side the direct path took: %s", leaves[i]);
+        }
+    }
+    return ok;
+}
+
 // What the dependency test expects of the records (#3592): the paths after the test's directory, in order, and the flags.
 typedef struct CDirectTestDependency CDirectTestDependency;
 struct CDirectTestDependency
@@ -3132,6 +3340,16 @@ int run_c_direct_tests(int argc, char** argv)
     else
     {
         fprintf(stderr, "test-direct: FAIL a sizeof operand's registers\n");
+        failed += 1u;
+    }
+
+    if (c_direct_test_dead_arms(obj_path))
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL dead arms of constant conditions\n");
         failed += 1u;
     }
 
