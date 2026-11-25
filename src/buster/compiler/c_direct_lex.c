@@ -311,7 +311,8 @@ struct FastIdentCacheSlot
     uint32_t id;
     uint8_t len;
     uint8_t tok_kind;   // FTOK_IDENT or FTOK_KW_*
-    uint16_t pad;
+    uint8_t macro;      // the name's bit in macro_bits (fast_ident_set_macro_bit keeps it)
+    uint8_t pad;
 };
 
 
@@ -392,7 +393,7 @@ struct FastIdentTable
 
     FastIdentCacheSlot* cache; // direct-mapped spelling cache for identifiers up to 64 bytes, 1 << cache_bits slots
     uint32_t cache_bits;
-    uint32_t cache_shift;      // 64 - cache_bits: a key's hash >> cache_shift is its slot
+    uint32_t cache_shift;      // 32 - cache_bits: a key's hash >> cache_shift is its slot
     uint32_t cache_grow_at;    // the count of names at which the cache grows (UINT32_MAX at its full size)
 
     FastArena* arena;
@@ -585,16 +586,17 @@ static uint32_t fast_ident_intern_cstr(FastIdentTable* t, const char* s)
 }
 
 // The cache's key hash, of a name's first eight bytes (masked to its length), its last eight (0 up to eight bytes) and
-// its length: fast_ident_lookup's, and fast_ident_cache_grow's for a slot's stored key. Its top cache_bits bits are the
-// slot. A macro rather than a function so that the compile's count has no call a lookup in it (#3592).
+// its length: fast_ident_lookup's, and fast_ident_cache_grow's for a slot's stored key. Its top cache_bits bits of 32
+// are the slot. Two CRC32 instructions where two multiplies, their two 64-bit constants and three shifts and xors were
+// nine (buster#3583). A macro rather than a function so that the compile's count has no call a lookup in it (#3592).
 #define BUSTER_FIDENT_CACHE_HASH(first, last, len) \
-    (((first) ^ ((last) * UINT64_C(0x9e3779b97f4a7c15)) ^ ((uint64_t)(len) << 56)) * UINT64_C(0xbf58476d1ce4e5b9))
+    ((uint32_t)_mm_crc32_u64(_mm_crc32_u64((uint64_t)(len), (first)), (last)))
 
 static void fast_ident_cache_set(FastIdentTable* t, FastIdentCacheSlot* cache, uint32_t bits)
 {
     t->cache = cache;
     t->cache_bits = bits;
-    t->cache_shift = 64u - bits;
+    t->cache_shift = 32u - bits;
     t->cache_grow_at = bits < BUSTER_FIDENT_CACHE_BITS ? BUSTER_FIDENT_CACHE_GROW_LOAD << bits : UINT32_MAX;
 }
 
@@ -612,7 +614,7 @@ static __attribute__((noinline)) bool fast_ident_cache_grow(FastIdentTable* t)
     if (grown)
     {
         const uint32_t old_count = 1u << old_bits;
-        const uint32_t new_shift = 64u - new_bits;
+        const uint32_t new_shift = 32u - new_bits;
         for (uint32_t i = 0; i < old_count; i += 1)
         {
             if (old_cache[i].id != 0)
@@ -808,7 +810,8 @@ static bool fast_ident_init(FastIdentTable* t, FastArena* arena, bool small)
 
 // An identifier is fully determined by its first and last words up to 16 bytes.
 // Only the short spelling needs a mask. Its caller guarantees eight readable bytes.
-static inline uint32_t fast_ident_lookup(FastIdentTable* t, const uint8_t* p, uint32_t len, uint8_t* out_kind)
+// `*out_macro` is whether the name is a macro: its slot's flag, or its bit where the slot did not hold it.
+static inline uint32_t fast_ident_lookup(FastIdentTable* t, const uint8_t* p, uint32_t len, uint8_t* out_kind, uint8_t* out_macro)
 {
     uint64_t first;
     memcpy(&first, p, sizeof(first));
@@ -821,10 +824,11 @@ static inline uint32_t fast_ident_lookup(FastIdentTable* t, const uint8_t* p, ui
     {
         memcpy(&last, p + len - 8u, sizeof(last));
     }
-    const uint64_t hash = BUSTER_FIDENT_CACHE_HASH(first, last, len);
+    const uint32_t hash = BUSTER_FIDENT_CACHE_HASH(first, last, len);
     FastIdentCacheSlot* slot = t->cache + (hash >> t->cache_shift);
     uint32_t id = 0;
     uint8_t kind = FTOK_IDENT;
+    uint8_t macro = 0;
     if (__builtin_expect(slot->len == len && slot->w0 == first && slot->w1 == last, 1))
     {
         bool equal = true;
@@ -839,6 +843,7 @@ static inline uint32_t fast_ident_lookup(FastIdentTable* t, const uint8_t* p, ui
         {
             id = slot->id;
             kind = slot->tok_kind;
+            macro = slot->macro;
         }
     }
     if (__builtin_expect(id == 0, 0))
@@ -848,6 +853,7 @@ static inline uint32_t fast_ident_lookup(FastIdentTable* t, const uint8_t* p, ui
         {
             const uint8_t kw = t->entries[id].kw_kind;
             kind = kw != 0 ? kw : FTOK_IDENT;
+            macro = (uint8_t)((t->macro_bits[id >> 6] >> (id & 63u)) & 1u);
             if (len <= 64u)
             {
                 if (__builtin_expect(t->count >= t->cache_grow_at, 0) && fast_ident_cache_grow(t))
@@ -859,10 +865,12 @@ static inline uint32_t fast_ident_lookup(FastIdentTable* t, const uint8_t* p, ui
                 slot->id = id;
                 slot->len = (uint8_t)len;
                 slot->tok_kind = kind;
+                slot->macro = macro;
             }
         }
     }
     *out_kind = kind;
+    *out_macro = macro;
     return id;
 }
 
@@ -871,6 +879,8 @@ static inline bool fast_ident_is_macro(const FastIdentTable* t, uint32_t id)
     return (t->macro_bits[id >> 6] & (UINT64_C(1) << (id & 63u))) != 0;
 }
 
+// A name's macro bit, and its cache slot's flag where the slot holds the name: the slot a lookup of its interned text
+// finds. The key's eight bytes from a short name's text are mapped: the cache follows the strings' buffer in the arena.
 static inline void fast_ident_set_macro_bit(FastIdentTable* t, uint32_t id, bool active)
 {
     const uint64_t mask = UINT64_C(1) << (id & 63u);
@@ -881,6 +891,25 @@ static inline void fast_ident_set_macro_bit(FastIdentTable* t, uint32_t id, bool
     else
     {
         t->macro_bits[id >> 6] &= ~mask;
+    }
+    const FastIdentEntry* const entry = t->entries + id;
+    const uint8_t* const text = (const uint8_t*)(t->strings + entry->str_offset);
+    const uint32_t length = entry->length;
+    uint64_t first = 0;
+    uint64_t last = 0;
+    memcpy(&first, text, sizeof(first));
+    if (length <= 8u)
+    {
+        first = _bzhi_u64(first, length * 8u);
+    }
+    else
+    {
+        memcpy(&last, text + length - 8u, sizeof(last));
+    }
+    FastIdentCacheSlot* const slot = t->cache + (BUSTER_FIDENT_CACHE_HASH(first, last, length) >> t->cache_shift);
+    if (slot->id == id)
+    {
+        slot->macro = active ? 1u : 0u;
     }
 }
 
@@ -1929,8 +1958,9 @@ static BUSTER_DIRECT_HOT const uint8_t* fast_lex_one(FastPP* pp, const uint8_t* 
                 break;
             }
             uint8_t kw_resolved = FTOK_IDENT;
+            uint8_t unused_macro = 0;
             const uint32_t id = ((size_t)(end - p) >= 8u) ?
-                                fast_ident_lookup(&pp->idents, p, len, &kw_resolved) :
+                                fast_ident_lookup(&pp->idents, p, len, &kw_resolved, &unused_macro) :
                                 fast_ident_intern(&pp->idents, p, len);
             if (__builtin_expect(id == 0, 0))
             {
@@ -5091,7 +5121,8 @@ static FastTok fast_pp_window_tok(FastPP* pp, const FastIncludeFile* f, uint32_t
     if (kind == FTOK_IDENT)
     {
         uint8_t ident_kind = FTOK_IDENT;
-        const uint32_t id = fast_ident_lookup(&pp->idents, s, len, &ident_kind);
+        uint8_t unused_macro = 0;
+        const uint32_t id = fast_ident_lookup(&pp->idents, s, len, &ident_kind, &unused_macro);
         if (__builtin_expect(id == 0, 0))
         {
             fast_pp_bail(pp, "ident table full");
@@ -5501,6 +5532,11 @@ static BUSTER_DIRECT_HOT void fast_pp_emit_window(FastPP* pp, FastIncludeFile* f
 {
     FastWindow* const w = &pp->win;
     const uint8_t* const base = f->base;
+    // The window's columns, in registers: the stores to out_kind may alias anything, and with the columns read through
+    // w each token loaded their addresses again.
+    const uint8_t* const win_kinds = w->kinds;
+    const uint32_t* const win_starts = w->starts;
+    const uint8_t* const win_lens = w->lens;
     uint8_t* const out_kind = pp->out_kind;
     uint32_t* const out_data = pp->out_data;
     const uint32_t out_limit = pp->out_cap - 64u;
@@ -5520,7 +5556,7 @@ static BUSTER_DIRECT_HOT void fast_pp_emit_window(FastPP* pp, FastIncludeFile* f
     while (i < n && out_count < out_limit && !leave)
     {
         const uint32_t cnt = n - i < 64u ? n - i : 64u;
-        const __m512i kv = _mm512_loadu_si512((const void*)(w->kinds + i));
+        const __m512i kv = _mm512_loadu_si512((const void*)(win_kinds + i));
         _mm512_storeu_si512((void*)(out_kind + out_count), kv);
         uint64_t work = (uint64_t)_mm512_cmple_epu8_mask(kv, v_work_max) & _bzhi_u64(~UINT64_C(0), cnt);
         uint32_t taken = cnt;
@@ -5529,13 +5565,16 @@ static BUSTER_DIRECT_HOT void fast_pp_emit_window(FastPP* pp, FastIncludeFile* f
             const uint32_t k = (uint32_t)__builtin_ctzll(work);
             work &= work - 1u;
             const uint32_t t = i + k;
-            const uint32_t kind = w->kinds[t];
-            const uint8_t* const s = base + w->starts[t];
-            const uint32_t len = w->lens[t];
+            const uint32_t kind = win_kinds[t];
+            const uint8_t* const s = base + win_starts[t];
+            const uint32_t len = win_lens[t];
             if (__builtin_expect(kind == FTOK_IDENT, 1))
             {
+                // Whether the name is a macro comes with its slot: the macro's branch, which mispredicts, waits for one
+                // load fewer (buster#3583).
                 uint8_t ident_kind = FTOK_IDENT;
-                const uint32_t id = fast_ident_lookup(&pp->idents, s, len, &ident_kind);
+                uint8_t is_macro = 0;
+                const uint32_t id = fast_ident_lookup(&pp->idents, s, len, &ident_kind, &is_macro);
                 if (__builtin_expect(id == 0, 0))
                 {
                     fast_pp_bail(pp, "ident table full");
@@ -5545,7 +5584,7 @@ static BUSTER_DIRECT_HOT void fast_pp_emit_window(FastPP* pp, FastIncludeFile* f
                 }
                 out_data[out_count + k] = id;
                 out_kind[out_count + k] = ident_kind;
-                if (__builtin_expect((macro_bits[id >> 6] & (UINT64_C(1) << (id & 63u))) != 0, 0))
+                if (__builtin_expect(is_macro != 0, 0))
                 {
                     // A one-token object macro (SQLITE_OK, OP_*) is replaced where it stands.
                     const uint32_t midx = pp->idents.entries[id].macro_idx;

@@ -700,11 +700,11 @@ static bool c_direct_test_tokens(const char* text, uint64_t length, uint8_t* kin
     return c_direct_test_tokens_sized(text, length, kinds, data, capacity, out_count, false);
 }
 
-// Whether every used slot of the cache is where its key's hash puts it, names an interned name of its key's length
-// and kind, and the cache has `bits`.
+// Whether every used slot of the cache is where its key's hash puts it, names an interned name of its key's length,
+// kind and macro bit, and the cache has `bits`.
 static bool c_direct_test_cache_consistent(const FastIdentTable* t, uint32_t bits)
 {
-    bool ok = t->cache_bits == bits && t->cache_shift == 64u - bits;
+    bool ok = t->cache_bits == bits && t->cache_shift == 32u - bits;
     for (uint32_t i = 0; ok && i < (1u << bits); i += 1)
     {
         const FastIdentCacheSlot* slot = t->cache + i;
@@ -712,7 +712,7 @@ static bool c_direct_test_cache_consistent(const FastIdentTable* t, uint32_t bit
         {
             const FastIdentEntry* entry = t->entries + slot->id;
             ok = slot->id <= t->count && entry->length == slot->len && slot->tok_kind == (entry->kw_kind != 0 ? entry->kw_kind : FTOK_IDENT) &&
-                 (BUSTER_FIDENT_CACHE_HASH(slot->w0, slot->w1, slot->len) >> t->cache_shift) == i;
+                 slot->macro == (uint8_t)fast_ident_is_macro(t, slot->id) && (BUSTER_FIDENT_CACHE_HASH(slot->w0, slot->w1, slot->len) >> t->cache_shift) == i;
         }
     }
     return ok;
@@ -754,6 +754,7 @@ static bool c_direct_test_ident_growth(void)
                 const uint32_t name_kind = (i + phase) % 3u;
                 const uint32_t length = c_direct_test_growth_name(name, name_kind, i);
                 uint8_t kind = 0;
+                uint8_t macro = 0;
                 const uint32_t before_bits = table.cache_bits;
                 const bool grows = table.count + 1u == table.cache_grow_at;
                 uint32_t held = 0;
@@ -761,8 +762,8 @@ static bool c_direct_test_ident_growth(void)
                 {
                     memcpy(before, table.cache, ((size_t)1 << before_bits) * sizeof(FastIdentCacheSlot));
                 }
-                ids[i] = fast_ident_lookup(&table, (const uint8_t*)name, length, &kind);
-                ok = ids[i] == seeded + i + 1u && kind == FTOK_IDENT;
+                ids[i] = fast_ident_lookup(&table, (const uint8_t*)name, length, &kind, &macro);
+                ok = ids[i] == seeded + i + 1u && kind == FTOK_IDENT && macro == 0;
                 if (grows)
                 {
                     // The cache grows as the names reach four times its slots, by two bits, and keeps every slot it had:
@@ -806,8 +807,9 @@ static bool c_direct_test_ident_growth(void)
                 char name[80] = { 0 };
                 const uint32_t length = c_direct_test_growth_name(name, (i + phase) % 3u, i);
                 uint8_t kind = 0;
-                const uint32_t id = fast_ident_lookup(&table, (const uint8_t*)name, length, &kind);
-                ok = id == ids[i] && kind == FTOK_IDENT;
+                uint8_t macro = 0;
+                const uint32_t id = fast_ident_lookup(&table, (const uint8_t*)name, length, &kind, &macro);
+                ok = id == ids[i] && kind == FTOK_IDENT && macro == 0;
             }
             ok = ok && table.count == seeded + names && c_direct_test_cache_consistent(&table, BUSTER_FIDENT_CACHE_BITS);
             // And the lookup finds them where the growth put them: with the table's control bytes cleared, a name its
@@ -830,8 +832,9 @@ static bool c_direct_test_ident_growth(void)
                 if (table.cache[BUSTER_FIDENT_CACHE_HASH(first, last, length) >> table.cache_shift].id == ids[i])
                 {
                     uint8_t kind = 0;
+                    uint8_t macro = 0;
                     cached += 1u;
-                    ok = fast_ident_lookup(&table, (const uint8_t*)name, length, &kind) == ids[i];
+                    ok = fast_ident_lookup(&table, (const uint8_t*)name, length, &kind, &macro) == ids[i];
                 }
             }
             ok = ok && cached > (1u << BUSTER_FIDENT_CACHE_BITS) / 2u;
@@ -884,6 +887,140 @@ static bool c_direct_test_ident_growth(void)
     free(data);
     free(kinds);
     free(text);
+    return ok;
+}
+
+// The cache slots' macro flags (buster#3583): a slot's flag follows fast_ident_set_macro_bit for the name the slot holds
+// and not for another name with the same slot, a name whose bit was set before its first lookup has the flag from the
+// bit, the cache stays consistent through all of it and through its growth, and a name that a #define makes a macro,
+// an #undef a name and another #define a macro again is read so where a window emits it.
+static bool c_direct_test_ident_macro_flags(void)
+{
+    FastArena arena = { 0 };
+    bool ok = fast_arena_init(&arena, UINT64_C(32) * 1024u * 1024u, true);
+    FastIdentTable table;
+    ok = ok && fast_ident_init(&table, &arena, true);
+    enum { longest = 40 };
+    uint32_t ids[longest + 1] = { 0 };
+    for (uint32_t length = 1; ok && length <= longest; length += 1)
+    {
+        char name[longest + 8] = { 0 };
+        for (uint32_t j = 0; j < length; j += 1)
+        {
+            name[j] = (char)('a' + (j * 7u + length) % 26u);
+        }
+        uint8_t kind = 0;
+        uint8_t macro = 1;
+        ids[length] = fast_ident_lookup(&table, (const uint8_t*)name, length, &kind, &macro);
+        ok = ids[length] != 0 && kind == FTOK_IDENT && macro == 0;
+        // Its bit both ways, read from its slot.
+        fast_ident_set_macro_bit(&table, ids[length], true);
+        ok = ok && fast_ident_lookup(&table, (const uint8_t*)name, length, &kind, &macro) == ids[length] && macro == 1u &&
+             c_direct_test_cache_consistent(&table, table.cache_bits);
+        fast_ident_set_macro_bit(&table, ids[length], false);
+        ok = ok && fast_ident_lookup(&table, (const uint8_t*)name, length, &kind, &macro) == ids[length] && macro == 0;
+    }
+    // A keyword's slot says it is a macro too (`#define inline __inline`).
+    const uint32_t keyword = ok ? fast_ident_intern_cstr(&table, "inline") : 0;
+    if (keyword != 0)
+    {
+        uint8_t kind = 0;
+        uint8_t macro = 1;
+        ok = fast_ident_lookup(&table, (const uint8_t*)"inline\0\0", 6u, &kind, &macro) == keyword && kind == FTOK_KW_INLINE && macro == 0;
+        fast_ident_set_macro_bit(&table, keyword, true);
+        ok = ok && fast_ident_lookup(&table, (const uint8_t*)"inline\0\0", 6u, &kind, &macro) == keyword && kind == FTOK_KW_INLINE && macro == 1u;
+    }
+    else
+    {
+        ok = false;
+    }
+    // A name interned without a lookup and made a macro: its first lookup fills its slot with the flag.
+    const uint32_t fresh = ok ? fast_ident_intern_cstr(&table, "a_fresh_macro") : 0;
+    if (fresh != 0)
+    {
+        uint8_t kind = 0;
+        uint8_t macro = 0;
+        fast_ident_set_macro_bit(&table, fresh, true);
+        ok = fast_ident_lookup(&table, (const uint8_t*)"a_fresh_macro", 13u, &kind, &macro) == fresh && macro == 1u;
+    }
+    else
+    {
+        ok = false;
+    }
+    // Two names with the same slot: the second's lookup takes the slot, and the first's bit leaves the second's flag.
+    char pair_names[2][16] = { { 0 } };
+    uint32_t pair_lengths[2] = { 0 };
+    uint32_t pair[2] = { 0 };
+    uint32_t seen_slots[512] = { 0 };
+    for (uint32_t i = 0; ok && pair[1] == 0 && i < 512u; i += 1)
+    {
+        char name[16] = { 0 };
+        const uint32_t length = (uint32_t)snprintf(name, sizeof(name), "c%u", i);
+        uint64_t first = 0;
+        memcpy(&first, name, sizeof(first));
+        seen_slots[i] = BUSTER_FIDENT_CACHE_HASH(_bzhi_u64(first, length * 8u), UINT64_C(0), length) >> table.cache_shift;
+        for (uint32_t j = 0; j < i && pair[1] == 0; j += 1)
+        {
+            if (seen_slots[j] == seen_slots[i])
+            {
+                uint8_t kind = 0;
+                uint8_t macro = 0;
+                pair_lengths[0] = (uint32_t)snprintf(pair_names[0], sizeof(pair_names[0]), "c%u", j);
+                pair_lengths[1] = length;
+                memcpy(pair_names[1], name, sizeof(name));
+                pair[0] = fast_ident_lookup(&table, (const uint8_t*)pair_names[0], pair_lengths[0], &kind, &macro);
+                pair[1] = fast_ident_lookup(&table, (const uint8_t*)pair_names[1], pair_lengths[1], &kind, &macro);
+            }
+        }
+    }
+    if (ok && pair[0] != 0 && pair[1] != 0 && pair[0] != pair[1])
+    {
+        uint8_t kind = 0;
+        uint8_t macro = 0;
+        fast_ident_set_macro_bit(&table, pair[0], true);
+        ok = fast_ident_lookup(&table, (const uint8_t*)pair_names[1], pair_lengths[1], &kind, &macro) == pair[1] && macro == 0 &&
+             fast_ident_lookup(&table, (const uint8_t*)pair_names[0], pair_lengths[0], &kind, &macro) == pair[0] && macro == 1u &&
+             c_direct_test_cache_consistent(&table, table.cache_bits);
+    }
+    else
+    {
+        ok = false;
+    }
+    // The flags through the cache's growth: every tenth name of 9,000 a macro.
+    for (uint32_t i = 0; ok && i < 9000u; i += 1)
+    {
+        char name[24] = { 0 };
+        const uint32_t length = (uint32_t)snprintf(name, sizeof(name), "grown_%u", i);
+        uint8_t kind = 0;
+        uint8_t macro = 0;
+        const uint32_t id = fast_ident_lookup(&table, (const uint8_t*)name, length, &kind, &macro);
+        ok = id != 0 && macro == 0;
+        if (ok && i % 10u == 0)
+        {
+            fast_ident_set_macro_bit(&table, id, true);
+        }
+    }
+    ok = ok && table.cache_bits > BUSTER_FIDENT_SMALL_CACHE_BITS && c_direct_test_cache_consistent(&table, table.cache_bits);
+    for (uint32_t i = 0; ok && i < 9000u; i += 1)
+    {
+        char name[24] = { 0 };
+        const uint32_t length = (uint32_t)snprintf(name, sizeof(name), "grown_%u", i);
+        uint8_t kind = 0;
+        uint8_t macro = 0;
+        ok = fast_ident_lookup(&table, (const uint8_t*)name, length, &kind, &macro) != 0 && macro == (i % 10u == 0 ? 1u : 0u);
+    }
+    fast_arena_destroy(&arena);
+
+    // Through the preprocessor: a name that is a macro, then not, then a macro again, read where a window emits it.
+    static const char text[] =
+        "int a_name_that_changes;\n#define a_name_that_changes 1\nx = a_name_that_changes;\n#undef a_name_that_changes\n"
+        "y = a_name_that_changes;\n#define a_name_that_changes 2\nz = a_name_that_changes;\n";
+    uint8_t kinds[64] = { 0 };
+    uint32_t data[64] = { 0 };
+    uint32_t count = 0;
+    ok = ok && c_direct_test_tokens(text, sizeof(text) - 1u, kinds, data, 64u, &count) && count == 15u &&
+         kinds[1] == FTOK_IDENT && c_direct_test_kind_is_number(kinds[5]) && data[5] == 1u && kinds[9] == FTOK_IDENT && data[9] == data[1] &&
+         c_direct_test_kind_is_number(kinds[13]) && data[13] == 2u;
     return ok;
 }
 
@@ -1631,6 +1768,16 @@ int run_c_direct_tests(int argc, char** argv)
     else
     {
         fprintf(stderr, "test-direct: FAIL identifier tables' growth\n");
+        failed += 1u;
+    }
+
+    if (c_direct_test_ident_macro_flags())
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL identifier cache's macro flags\n");
         failed += 1u;
     }
 
