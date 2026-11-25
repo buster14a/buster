@@ -2450,6 +2450,21 @@ static int c_direct_unit_tests(void)
         "    r += (x == y);\n"
         "    return r + (int)bf->f;\n"
         "}\n",
+
+        // 6. -Wunsequenced quiet (#3577): a modification that is the expression's last operator; each modified name once
+        // among the tokens; and, compiled again for the log, `&&` sequencing a reuse, a string literal's array, and more
+        // than four modifications.
+        "int sequenced_next(int v);\n"
+        "int sequenced(int x, int* p, int c, int a, int b, int d, int e) {\n"
+        "    x = x + 1;\n"
+        "    x += x;\n"
+        "    *p++ = c;\n"
+        "    a = b++;\n"
+        "    if ((c = sequenced_next(c)) == 0 && c == sequenced_next(x)) { return 1; }\n"
+        "    if ((d = (int)sizeof(\"a string literal\")) == 17 && d) { return d; }\n"
+        "    a = b = c = d = e = x;\n"
+        "    return a + b + *p;\n"
+        "}\n",
     };
 
     for (uint32_t i = 0; i < sizeof(valid_cases) / sizeof(valid_cases[0]); i += 1)
@@ -2493,6 +2508,11 @@ static int c_direct_unit_tests(void)
         // An object of incomplete type, and a for clause's const object left uninitialized.
         "int f(void) { struct T t; return 0; }\n",
         "int f(int n) { for (const int k; n; n--) { } return n; }\n",
+        // -Wunsequenced: a modification and a use the log finds unsequenced, compiled again for it; and an expression
+        // compiled again that declares a type, which its first compile declared already.
+        "int f(int i, int* a) { a[i] = i++; return i; }\n",
+        "int f(int x) { return x++ + x; }\n",
+        "int f(int x) { if ((x = 1) && x == (int)sizeof(struct S { int a; })) { return 1; } return 0; }\n",
     };
     for (uint32_t i = 0; i < sizeof(bail_cases) / sizeof(bail_cases[0]); i += 1)
     {

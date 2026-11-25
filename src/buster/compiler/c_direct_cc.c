@@ -6235,19 +6235,26 @@ static __attribute__((cold, noinline)) void fast_cc_expr_logged(FastCCState* cc,
 
 // #3577: the expression that ends at cc->pos compiled again from its first token (START) for its -Wunsequenced log, as a
 // compile with the log makes it: without code (eval_only, whose first level counts as evaluated: eval_base); its end
-// bails where the full pipeline warns. The types it makes (a string literal's array) are dropped after. False where it
-// bailed, or ended elsewhere than the first compile.
+// bails where the full pipeline warns. The types it makes (a string literal's array) are dropped after. One that
+// declares anything (a tag, an enumerator, a member, a parameter: its first compile declared it already, and the
+// second's types are dropped) is the full pipeline's, as is one that ends elsewhere than the first compile. False
+// where it bailed.
 static __attribute__((cold, noinline)) bool fast_cc_sequenced_again(FastCCState* cc, uint32_t start, bool stop_at_comma)
 {
     const uint32_t end = cc->pos;
     const uint32_t ctypes = cc->ctype_count;
+    const uint32_t declared = cc->sym_count + cc->undo_count + cc->member_count + cc->param_type_count + cc->param_name_count;
     cc->pos = start;
     fast_cc_expr_logged(cc, stop_at_comma);
-    cc->ctype_count = ctypes;
+    if (!cc->bailout && cc->sym_count + cc->undo_count + cc->member_count + cc->param_type_count + cc->param_name_count != declared)
+    {
+        fast_cc_bail(cc, "an expression compiled again for -Wunsequenced declares something");
+    }
     if (!cc->bailout && cc->pos != end)
     {
         fast_cc_bail(cc, "an expression compiled again for -Wunsequenced ends elsewhere");
     }
+    cc->ctype_count = ctypes;
     cc->pos = end;
     return !cc->bailout;
 }
