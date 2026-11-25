@@ -57,7 +57,7 @@ typedef struct FastBodyScan FastBodyScan;
 struct FastBodyScan
 {
     uint32_t end_pos;       // token index of matching '}' (UINT32_MAX if unmatched)
-    bool has_unsupported;   // saw asm, _Atomic, _Complex, __int128, _Float128, _Float16, float80, _Thread_local, typeof
+    bool has_unsupported;   // saw _Atomic, _Complex, __int128, _Float128, _Float16, float80, _Thread_local, typeof
     bool has_switch;
     bool has_goto;
 };
@@ -76,7 +76,6 @@ static FastBodyScan fast_cc_prescan_body(const FastCCState* cc, uint32_t start_p
 
     const __m512i v_lb = _mm512_set1_epi8((char)FTOK_LBRACE);
     const __m512i v_rb = _mm512_set1_epi8((char)FTOK_RBRACE);
-    const __m512i v_asm = _mm512_set1_epi8((char)FTOK_KW_ASM);
     const __m512i v_atm = _mm512_set1_epi8((char)FTOK_KW_ATOMIC);
     const __m512i v_cpx = _mm512_set1_epi8((char)FTOK_KW_COMPLEX);
     const __m512i v_i128 = _mm512_set1_epi8((char)FTOK_KW_INT128);
@@ -104,7 +103,6 @@ static FastBodyScan fast_cc_prescan_body(const FastCCState* cc, uint32_t start_p
         const uint64_t m_lb = (uint64_t)_mm512_mask_cmpeq_epi8_mask(valid, v, v_lb);
         const uint64_t m_rb = (uint64_t)_mm512_mask_cmpeq_epi8_mask(valid, v, v_rb);
         uint64_t m_unsup = (uint64_t)(
-            _mm512_mask_cmpeq_epi8_mask(valid, v, v_asm) |
             _mm512_mask_cmpeq_epi8_mask(valid, v, v_atm) |
             _mm512_mask_cmpeq_epi8_mask(valid, v, v_cpx) |
             _mm512_mask_cmpeq_epi8_mask(valid, v, v_f128) |
@@ -5802,6 +5800,186 @@ static __attribute__((noinline)) void fast_cc_emit_switch_dispatch(FastCCState* 
 }
 
 // Compile one complete function body starting at `cc->pos` == '{'!
+// ---------------------------------------------------------------------------------------------------------------------
+// GNU's inline assembly of musl's two shapes (#3592)
+//
+// `syscall`, as musl's __syscall0 to __syscall6 write it: the number in rax ("a"), the arguments in rdi, rsi and rdx
+// ("D", "S", "d") and in the local register variables r10, r8 and r9 ("r"), the result in rax ("=a"). And
+// `mov %%fs:0,%0`, __get_tp's thread pointer, into a register ("=r"). Each input is evaluated into a slot of its own
+// before any is loaded, so that loading one can't clobber another; then the instruction, then the output's store. A
+// statement keeps no value in a register across it, so rcx and r11, which `syscall` clobbers, and memory need nothing.
+// Any other template, operand, constraint or clobber leaves the direct path.
+
+#define BUSTER_FASM_NONE 0u
+#define BUSTER_FASM_SYSCALL 1u
+#define BUSTER_FASM_THREAD_POINTER 2u
+#define BUSTER_FASM_OPERANDS 8u
+
+// The register a local register variable's asm label names: one a function may clobber, so that loading it saves
+// nothing (rsp, rbp and the callee-saved registers aren't taken). UINT8_MAX for any other name.
+static uint8_t fast_cc_asm_register(const char* name, uint32_t length)
+{
+    static const char names[9][4] = { "rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11" };
+    static const uint8_t registers[9] = { FREG_RAX, FREG_RCX, FREG_RDX, FREG_RSI, FREG_RDI, FREG_R8, FREG_R9, FREG_R10, FREG_R11 };
+    uint8_t result = UINT8_MAX;
+    for (uint32_t i = 0; result == UINT8_MAX && i < 9u; i += 1)
+    {
+        result = strlen(names[i]) == length && memcmp(names[i], name, length) == 0 ? registers[i] : UINT8_MAX;
+    }
+    return result;
+}
+
+// Whether the token at `pos` is a literal spelled as its bytes, and those are `text`.
+static bool fast_cc_asm_literal_is(const FastCCState* cc, uint32_t pos, const char* text)
+{
+    bool result = pos < cc->tcount && cc->tk[pos] == FTOK_STR_LIT && fast_cc_literal_plain(cc, cc->td[pos]);
+    if (result)
+    {
+        const FastLitSlice sl = cc->pp->lit_slices[cc->td[pos]];
+        result = sl.length == strlen(text) && memcmp(cc->pp->lit_bytes + sl.offset, text, sl.length) == 0;
+    }
+    return result;
+}
+
+typedef struct FastAsmOperand FastAsmOperand;
+struct FastAsmOperand
+{
+    int32_t off;   // an input's slot, or the output's local, at [rbp + off]
+    uint8_t reg;
+};
+
+// One operand, "constraint" (expression). The output is a 64-bit integer or pointer local that isn't const ("=a",
+// "=r"). An input is an integer or pointer expression of up to 64 bits ("a", "D", "S", "d"), or a local register
+// variable ("r"), evaluated into a slot of its own. Its register, or UINT8_MAX where the direct path doesn't take the
+// operand.
+static uint8_t fast_cc_asm_operand(FastCCState* cc, bool output, FastAsmOperand* operand)
+{
+    const uint32_t at = cc->pos;
+    const bool named = at + 3u < cc->tcount && cc->tk[at + 1u] == FTOK_LPAREN && cc->tk[at + 2u] == FTOK_IDENT && cc->tk[at + 3u] == FTOK_RPAREN;
+    const uint32_t name = named ? cc->td[at + 2u] : 0u;
+    const uint32_t si = name != 0 && name < cc->env_cap ? cc->sym_cur[name] : 0u;
+    const FastSym* sym = cc->syms + si;
+    const bool local = si != 0 && sym->kind == FSYM_LOCAL && ftype_size(cc, sym->type) == 8u && (ftype_is_int(sym->type) || ftype_is_ptr(sym->type));
+    uint8_t reg = UINT8_MAX;
+    if (output && local && !ftype_is_const(sym->type) && (fast_cc_asm_literal_is(cc, at, "=a") || fast_cc_asm_literal_is(cc, at, "=r")))
+    {
+        reg = FREG_RAX;
+        operand->off = sym->stack_off;
+        cc->pos += 4u;
+    }
+    else if (!output)
+    {
+        if (fast_cc_asm_literal_is(cc, at, "a")) { reg = FREG_RAX; }
+        else if (fast_cc_asm_literal_is(cc, at, "D")) { reg = FREG_RDI; }
+        else if (fast_cc_asm_literal_is(cc, at, "S")) { reg = FREG_RSI; }
+        else if (fast_cc_asm_literal_is(cc, at, "d")) { reg = FREG_RDX; }
+        else if (fast_cc_asm_literal_is(cc, at, "r") && local && sym->asm_name != NULL) { reg = fast_cc_asm_register(sym->asm_name, sym->asm_name_len); }
+        reg = fast_cc_peek_at(cc, 1u) == FTOK_LPAREN ? reg : (uint8_t)UINT8_MAX;
+        if (reg != UINT8_MAX)
+        {
+            cc->pos += 2u;
+            FastVal value = { 0 };
+            fast_cc_expr(cc, false, false, false, false, 0, &value);
+            const bool fits = !cc->bailout && fast_cc_peek(cc) == FTOK_RPAREN && (ftype_is_int(value.type) || ftype_is_ptr(value.type)) &&
+                              ftype_size(cc, value.type) <= 8u;
+            if (fits)
+            {
+                operand->off = fast_cc_alloc_local(cc, 8u, 8u);
+                FastExprCtx ex;
+                fast_expr_ctx_reset(&ex, cc);
+                if (fval_holds_gp(&value)) { ex.gp_used |= (uint16_t)(1u << value.reg); }
+                FastVal slot = { .type = ftype_is_ptr(value.type) ? value.type : (FastType)FTYPE_I64, .kind = FVAL_LOCAL, .off = operand->off };
+                fval_store(&ex, &slot, &value, false, NULL);
+                fast_cc_reset_tmps(cc);
+                cc->pos += 1u;
+            }
+            reg = fits ? reg : (uint8_t)UINT8_MAX;
+        }
+    }
+    operand->reg = reg;
+    return reg;
+}
+
+static void fast_cc_asm_statement(FastCCState* cc)
+{
+    FastObj* obj = cc->obj;
+    cc->pos += 1u;
+    cc->pos += fast_cc_peek(cc) == FTOK_KW_VOLATILE ? 1u : 0u;
+    uint32_t shape = BUSTER_FASM_NONE;
+    if (fast_cc_peek(cc) == FTOK_LPAREN && fast_cc_asm_literal_is(cc, cc->pos + 1u, "syscall")) { shape = BUSTER_FASM_SYSCALL; }
+    else if (fast_cc_peek(cc) == FTOK_LPAREN && fast_cc_asm_literal_is(cc, cc->pos + 1u, "mov %%fs:0,%0")) { shape = BUSTER_FASM_THREAD_POINTER; }
+    bool ok = shape != BUSTER_FASM_NONE && fast_cc_peek_at(cc, 2u) == FTOK_COLON;
+    cc->pos += ok ? 3u : 0u;
+    // The one output: syscall's result is rax's.
+    FastAsmOperand operands[BUSTER_FASM_OPERANDS];
+    ok = ok && (shape != BUSTER_FASM_SYSCALL || fast_cc_asm_literal_is(cc, cc->pos, "=a")) && fast_cc_asm_operand(cc, true, operands) != UINT8_MAX;
+    uint32_t count = 1u;
+    uint32_t taken = 0;
+    if (ok && fast_cc_peek(cc) == FTOK_COLON)
+    {
+        cc->pos += 1u;
+        bool more = fast_cc_peek(cc) == FTOK_STR_LIT;
+        while (ok && more)
+        {
+            ok = count < BUSTER_FASM_OPERANDS && fast_cc_asm_operand(cc, false, operands + count) != UINT8_MAX &&
+                 (taken & (1u << operands[count].reg)) == 0;
+            taken |= ok ? 1u << operands[count].reg : 0u;
+            count += ok ? 1u : 0u;
+            more = ok && fast_cc_peek(cc) == FTOK_COMMA;
+            cc->pos += more ? 1u : 0u;
+        }
+    }
+    // A clobbered register can't hold an input: clang refuses that.
+    uint32_t clobbered = 0;
+    if (ok && fast_cc_peek(cc) == FTOK_COLON)
+    {
+        cc->pos += 1u;
+        bool more = fast_cc_peek(cc) == FTOK_STR_LIT;
+        while (ok && more)
+        {
+            const uint32_t at = cc->pos;
+            const bool rcx = fast_cc_asm_literal_is(cc, at, "rcx");
+            const bool r11 = fast_cc_asm_literal_is(cc, at, "r11");
+            ok = rcx || r11 || fast_cc_asm_literal_is(cc, at, "memory") || fast_cc_asm_literal_is(cc, at, "cc");
+            clobbered |= (rcx ? 1u << FREG_RCX : 0u) | (r11 ? 1u << FREG_R11 : 0u);
+            cc->pos += 1u;
+            more = ok && fast_cc_peek(cc) == FTOK_COMMA;
+            cc->pos += more ? 1u : 0u;
+        }
+    }
+    // syscall's number is in rax; the thread pointer takes no input.
+    ok = ok && fast_cc_peek(cc) == FTOK_RPAREN && fast_cc_peek_at(cc, 1u) == FTOK_SEMI && (taken & clobbered) == 0 &&
+         (shape == BUSTER_FASM_SYSCALL ? (taken & (1u << FREG_RAX)) != 0 : count == 1u);
+    if (!ok)
+    {
+        fast_cc_bail(cc, "asm statement");
+    }
+    else
+    {
+        for (uint32_t i = 1u; i < count; i += 1)
+        {
+            x86_load(obj, operands[i].reg, FREG_RBP, operands[i].off, 8u, false);
+        }
+        if (shape == BUSTER_FASM_SYSCALL)
+        {
+            x86_u8(obj, 0x0fu);
+            x86_u8(obj, 0x05u);
+        }
+        else
+        {
+            // mov rax, qword fs:[0]
+            x86_u8(obj, 0x64u);
+            x86_u8(obj, 0x48u);
+            x86_u8(obj, 0x8bu);
+            x86_u8(obj, 0x04u);
+            x86_u8(obj, 0x25u);
+            x86_u32(obj, 0u);
+        }
+        x86_store(obj, FREG_RBP, operands[0].off, FREG_RAX, 8u);
+        cc->pos += 2u;
+    }
+}
+
 static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym_idx, uint32_t param_names_start, uint16_t param_count)
 {
     FastObj* obj = cc->obj;
@@ -6291,6 +6469,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                 {
                     FastDeclaratorResult dr = { 0 };
                     if (!fast_cc_parse_declarator(cc, btype, false, &dr, false)) { break; }
+                    if (dr.attr.asm_label != NULL) { fast_cc_bail(cc, "asm label in a for's declaration"); break; }
                     const uint32_t lsi = dr.name_id != 0 ? fast_cc_sym_bind(cc, dr.name_id, (FastSym){ .kind = FSYM_LOCAL, .type = dr.type }) : 0u;
                     int32_t loff = 0;
                     if (fast_cc_peek(cc) == FTOK_ASSIGN)
@@ -6522,6 +6701,15 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                     fast_cc_bail(cc, "visibility attribute on a typedef");
                     break;
                 }
+                // A block's asm label names a local register variable (`register long r10 __asm__("r10")`, #3592): a
+                // `register` automatic 64-bit integer, in a register a function may clobber. Any other leaves.
+                if (dr.attr.asm_label != NULL &&
+                    ((ds.written & BUSTER_FSPEC_REGISTER) == 0 || ftype_size(cc, dr.type) != 8u ||
+                     !(ftype_is_int(dr.type) || ftype_is_ptr(dr.type)) || fast_cc_asm_register(dr.attr.asm_label, dr.attr.asm_label_len) == UINT8_MAX))
+                {
+                    fast_cc_bail(cc, "asm label on a block's declaration");
+                    break;
+                }
                 if (ds.is_typedef)
                 {
                     if (dr.name_id != 0)
@@ -6535,7 +6723,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                     // declaration it sees, with that one's linkage and attributes (C11 6.2.2p4), so it binds no symbol
                     // of its own (#3595). One that sees none (the file declares it later or never: symbol 0, of no
                     // kind), or that a local of the name hides, or that brings attributes of its own, is left to the
-                    // full pipeline. (An asm label never gets here: a body's statements leave at its __asm__.)
+                    // full pipeline. (Its asm label left above.)
                     if (ftype_is_func(dr.type))
                     {
                         fast_cc_check_main(cc, dr.name_id, dr.type);
@@ -6591,9 +6779,12 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                 }
                 else
                 {
-                    // Automatic local variable on stack (bind BEFORE initializer so `T *p = malloc(sizeof(*p))` works!)
+                    // Automatic local variable on stack (bind BEFORE initializer so `T *p = malloc(sizeof(*p))` works!).
+                    // A local register variable keeps its register's name for the asm statements that read it.
                     if (ds.is_unsupported_type || ftype_is_unsupported(dr.type)) { fast_cc_bail(cc, "unsupported local var type"); break; }
-                    const uint32_t lsi = dr.name_id != 0 ? fast_cc_sym_bind(cc, dr.name_id, (FastSym){ .kind = FSYM_LOCAL, .type = dr.type }) : 0u;
+                    const uint32_t lsi = dr.name_id != 0 ? fast_cc_sym_bind(cc, dr.name_id, (FastSym){
+                        .kind = FSYM_LOCAL, .type = dr.type, .asm_name = dr.attr.asm_label, .asm_name_len = dr.attr.asm_label_len,
+                    }) : 0u;
                     int32_t loff = 0;
                     if (fast_cc_peek(cc) == FTOK_ASSIGN)
                     {
@@ -6617,6 +6808,14 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
             }
             if (fast_cc_peek(cc) == FTOK_SEMI) { cc->pos += 1u; }
             else { fast_cc_bail(cc, "expected ; after local decl"); break; }
+            continue;
+        }
+
+        // 11b. An asm statement of the shapes fast_cc_asm_statement takes (#3592)
+        if (k == FTOK_KW_ASM)
+        {
+            fast_cc_asm_statement(cc);
+            if (cc->bailout) { break; }
             continue;
         }
 
