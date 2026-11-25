@@ -1444,7 +1444,6 @@ static FastType fast_cc_parse_simple_typename_leaf(FastCCState* cc, bool* out_ok
     {
         // #3577: `(*)`, its stars and qualifiers alone: anything else in it (an array of pointers, `[n]`) is a type the
         // skip doesn't read.
-        uint32_t d = 1u;
         cc->pos += 1u;
         while (fast_cc_peek(cc) == FTOK_STAR || fast_cc_peek(cc) == FTOK_KW_CONST || fast_cc_peek(cc) == FTOK_KW_VOLATILE ||
                fast_cc_peek(cc) == FTOK_KW_RESTRICT)
@@ -1456,13 +1455,13 @@ static FastType fast_cc_parse_simple_typename_leaf(FastCCState* cc, bool* out_ok
             fast_cc_bail(cc, "abstract declarator in a constant expression's type");
             return FTYPE_VOID;
         }
-        d = 0;
         cc->pos += 1u;
         if (fast_cc_peek(cc) == FTOK_LPAREN)
         {
             // #3577: a parameter list the skip doesn't check: a name (a repeated one, `void bad`) or a nested list is
             // the full pipeline's; type keywords, typedef names, qualifiers, `*` and `,` alone are the skip's.
-            d = 1u; cc->pos += 1u;
+            uint32_t d = 1u;
+            cc->pos += 1u;
             while (d > 0 && cc->pos < cc->tcount && !cc->bailout)
             {
                 const uint8_t pk = fast_cc_peek(cc);
