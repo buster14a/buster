@@ -16344,7 +16344,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             options.predefines.cf_protection == 0 &&
             request.function_sections == NULL && request.data_sections == NULL &&
             request.short_enums == NULL && request.packed_bare == NULL && request.packed_value == NULL &&
-            options.language.standard >= 1999;
+            options.language.standard >= 1999 && !predefines_gnu_inline(&options.predefines, options.language);
         if (direct_eligible)
         {
             PPSearchDirectories direct_search = { 0 };
