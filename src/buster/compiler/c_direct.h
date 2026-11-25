@@ -12,6 +12,18 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+// A file the unit read, for -MD and its kin (#3592): its path as the include search spelled it, whether the rule lists
+// it (the main file's record is read but not listed, as the full pipeline's pp_dependencies has it) and whether every
+// reading of it was a system header's.
+typedef struct CDirectDependency CDirectDependency;
+struct CDirectDependency
+{
+    const char* path;
+    uint32_t length;
+    bool used;
+    bool system;
+};
+
 typedef struct CDirectRequest CDirectRequest;
 struct CDirectRequest
 {
@@ -36,6 +48,8 @@ struct CDirectRequest
     bool strict_iso;                 // -std=cNN without GNU's extensions: `, ## __VA_ARGS__` and main as clang has them there
     bool no_gnu_keywords;            // asm, and typeof before C23, are identifiers (-std=cNN, -fno-gnu-keywords, -fno-asm)
     bool trigraphs;                  // trigraphs are replaced (-std=c99/c11/c17, -trigraphs): a unit that has one leaves
+    uint8_t raw_strings;             // raw string literals (#3600): 1 their R and LR forms (GNU's modes from C99, as the full
+                                     // pipeline's pp_raw_strings), 2 also u8R, uR and UR (from C11); a unit with one leaves
     bool quiet;                      // -w (suppress warnings)
     bool release;                    // release arenas before return (false for terminal CLI exit)
     bool avoid_huge_pages;           // busy host (#672/#1561): advise MADV_NOHUGEPAGE to avoid 8-core THP lock contention
@@ -46,6 +60,12 @@ struct CDirectRequest
     uint32_t stage_codegen;
     uint32_t stage_object_write;
     uint32_t* out_token_count;       // optional: receives preprocessed token count for --time-stages
+    // -MD and its kin (#3592): once the unit has compiled and before its object is written, the files it read, one
+    // record a file (by device and inode, under the first path it was read by) in the order of their first reading, as
+    // the full pipeline's pp_dependency_observe records them. A false return leaves the unit to the full pipeline.
+    // NULL collects nothing.
+    bool (*dependencies)(void* context, const CDirectDependency* files, uint32_t count);
+    void* dependency_context;
 };
 
 // Returns 0 on success (object written), 1 on clean bailout (nothing written -> caller runs full pipeline),

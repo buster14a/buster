@@ -67,7 +67,8 @@ static const char* dependency_destination(const DependencyOptions* options, cons
     return options->path != NULL ? options->path : options->only ? (output != NULL ? output : "-") : dependency_filename(arena, source, output, 'd');
 }
 
-// Preparation owns no filesystem resources. The output is either a complete rule in arena or remains empty.
+// Preparation owns no filesystem resources. The output is either a complete rule in arena or remains empty. A failure is
+// reported on `errors`, or not at all with NULL (the direct path's, whose unit then goes to the full pipeline, #3592).
 static bool dependency_prepare(DependencyOutput* output, const DependencyOptions* options, const DependencyFile* files, uint32_t file_count, const char* source,
                                const char* primary, Arena* arena, FILE* errors)
 {
@@ -105,7 +106,7 @@ static bool dependency_prepare(DependencyOutput* output, const DependencyOptions
         {
             *output = (DependencyOutput){ .path = path, .bytes = { .pointer = writing.pointer, .length = length } };
         }
-        else
+        else if (errors != NULL)
         {
             fprintf(errors, "error: can't construct dependency rule for '%s': invalid filename or exhausted capacity\n", source);
         }
