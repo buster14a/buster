@@ -2324,6 +2324,212 @@ static bool c_direct_test_asm(const char* obj_path)
     return ok;
 }
 
+// musl's atomics (arch/x86_64/atomic_arch.h, #3592's step 6c), compiled by the direct path and run in this process (not
+// under MSan, as the asm test): each shape on values a 32-bit operation and a 64-bit one would tell apart, and the shapes
+// that still leave.
+typedef int (*CDirectTestCas)(volatile int*, int, int);
+typedef void* (*CDirectTestCasPointer)(volatile void*, void*, void*);
+typedef int (*CDirectTestUpdate)(volatile int*, int);
+typedef void (*CDirectTestUpdateVoid)(volatile int*, int);
+typedef void (*CDirectTestUpdate64)(volatile unsigned long*, unsigned long);
+typedef void (*CDirectTestStep)(volatile int*);
+typedef int (*CDirectTestBits)(unsigned long);
+typedef long (*CDirectTestLong)(long);
+typedef void (*CDirectTestVoid)(void);
+typedef void (*CDirectTestPointerVoid)(void*);
+
+static bool c_direct_test_atomics(const char* obj_path)
+{
+    static const char source[] =
+        "int t_cas(volatile int *p, int t, int s)\n"
+        "{\n"
+        "    __asm__ __volatile__ (\"lock ; cmpxchg %3, %1\" : \"=a\"(t), \"=m\"(*p) : \"a\"(t), \"r\"(s) : \"memory\");\n"
+        "    return t;\n"
+        "}\n"
+        "void *t_cas_p(volatile void *p, void *t, void *s)\n"
+        "{\n"
+        "    __asm__( \"lock ; cmpxchg %3, %1\" : \"=a\"(t), \"=m\"(*(void *volatile *)p) : \"a\"(t), \"r\"(s) : \"memory\" );\n"
+        "    return t;\n"
+        "}\n"
+        "int t_swap(volatile int *p, int v)\n"
+        "{\n"
+        "    __asm__ __volatile__(\"xchg %0, %1\" : \"=r\"(v), \"=m\"(*p) : \"0\"(v) : \"memory\");\n"
+        "    return v;\n"
+        "}\n"
+        "int t_fetch_add(volatile int *p, int v)\n"
+        "{\n"
+        "    __asm__ __volatile__(\"lock ; xadd %0, %1\" : \"=r\"(v), \"=m\"(*p) : \"0\"(v) : \"memory\");\n"
+        "    return v;\n"
+        "}\n"
+        "void t_and(volatile int *p, int v) { __asm__ __volatile__(\"lock ; and %1, %0\" : \"=m\"(*p) : \"r\"(v) : \"memory\"); }\n"
+        "void t_or(volatile int *p, int v) { __asm__ __volatile__(\"lock ; or %1, %0\" : \"=m\"(*p) : \"r\"(v) : \"memory\"); }\n"
+        "void t_and_64(volatile unsigned long *p, unsigned long v) { __asm__ __volatile(\"lock ; and %1, %0\" : \"=m\"(*p) : \"r\"(v) : \"memory\"); }\n"
+        "void t_or_64(volatile unsigned long *p, unsigned long v) { __asm__ __volatile__(\"lock ; or %1, %0\" : \"=m\"(*p) : \"r\"(v) : \"memory\"); }\n"
+        "void t_inc(volatile int *p) { __asm__ __volatile__(\"lock ; incl %0\" : \"=m\"(*p) : \"m\"(*p) : \"memory\"); }\n"
+        "void t_dec(volatile int *p) { __asm__ __volatile__(\"lock ; decl %0\" : \"=m\"(*p) : \"m\"(*p) : \"memory\"); }\n"
+        "void t_store(volatile int *p, int x) { __asm__ __volatile__(\"mov %1, %0 ; lock ; orl $0,(%%rsp)\" : \"=m\"(*p) : \"r\"(x) : \"memory\"); }\n"
+        "void t_barrier(void) { __asm__ __volatile__( \"\" : : : \"memory\" ); }\n"
+        "void t_spin(void) { __asm__ __volatile__( \"pause\" : : : \"memory\" ); }\n"
+        "void t_crash(void) { __asm__ __volatile__( \"hlt\" : : : \"memory\" ); }\n"
+        "int t_ctz_64(unsigned long x) { __asm__( \"bsf %1,%0\" : \"=r\"(x) : \"r\"(x) ); return x; }\n"
+        "int t_clz_64(unsigned long x) { __asm__( \"bsr %1,%0 ; xor $63,%0\" : \"=r\"(x) : \"r\"(x) ); return x; }\n"
+        "void t_keep(void *d) { __asm__ __volatile__ (\"\" : : \"r\"(d) : \"memory\"); }\n"
+        "long t_through(long s) { __asm__ ( \"\" : \"+r\"(s) : : \"memory\" ); return s; }\n"
+        "int t_cas_twice(volatile int *p, int t, int s)\n"
+        "{\n"
+        "    __asm__ __volatile__ (\"lock ; cmpxchg %3, %1\" : \"=a\"(t), \"=m\"(*p) : \"a\"(t), \"r\"(s) : \"memory\");\n"
+        "    __asm__ __volatile__ (\"lock ; cmpxchg %3, %1\" : \"=a\"(t), \"=m\"(*p) : \"a\"(t), \"r\"(s) : \"memory\");\n"
+        "    return t;\n"
+        "}\n";
+    bool ok = c_direct_test_compile_source_keep(source, obj_path, NULL, 0, NULL, NULL, NULL);
+    if (!ok)
+    {
+        fprintf(stderr, "test-direct: musl's atomics left the direct path\n");
+    }
+#if !__has_feature(memory_sanitizer)
+    static const char* const names[] = {
+        "t_cas", "t_cas_p", "t_swap", "t_fetch_add", "t_and", "t_or", "t_and_64", "t_or_64", "t_inc", "t_dec",
+        "t_store", "t_barrier", "t_spin", "t_ctz_64", "t_clz_64", "t_keep", "t_through", "t_crash", "t_cas_twice",
+    };
+    enum { count = sizeof(names) / sizeof(names[0]) };
+    void* mappings[count] = { 0 };
+    size_t mapped[count] = { 0 };
+    const void* code[count] = { 0 };
+    for (uint32_t i = 0; ok && i < (uint32_t)count; i += 1)
+    {
+        code[i] = c_direct_test_code(obj_path, names[i], mappings + i, mapped + i);
+        ok = code[i] != NULL;
+    }
+    if (ok)
+    {
+        int x = 5;
+        ok = ((CDirectTestCas)(uintptr_t)code[0])(&x, 5, 7) == 5 && x == 7 && ((CDirectTestCas)(uintptr_t)code[0])(&x, 5, 9) == 7 && x == 7;
+        int a = 0;
+        int b = 0;
+        int c = 0;
+        void* volatile q = &a;
+        ok = ok && ((CDirectTestCasPointer)(uintptr_t)code[1])(&q, &a, &b) == &a && q == &b;
+        ok = ok && ((CDirectTestCasPointer)(uintptr_t)code[1])(&q, &a, &c) == &b && q == &b;
+        int y = 3;
+        ok = ok && ((CDirectTestUpdate)(uintptr_t)code[2])(&y, 8) == 3 && y == 8;
+        ok = ok && ((CDirectTestUpdate)(uintptr_t)code[3])(&y, 5) == 8 && y == 13;
+        ((CDirectTestUpdateVoid)(uintptr_t)code[4])(&y, 6);
+        ok = ok && y == 4;
+        ((CDirectTestUpdateVoid)(uintptr_t)code[5])(&y, 3);
+        ok = ok && y == 7;
+        // The 64-bit forms reach the high half; the 32-bit ones leave the word after them alone.
+        volatile unsigned long z = UINT64_C(0xf0f0f0f0f0f0f0f0);
+        ((CDirectTestUpdate64)(uintptr_t)code[6])(&z, UINT64_C(0xff00ff00ff00ff00));
+        ok = ok && z == UINT64_C(0xf000f000f000f000);
+        ((CDirectTestUpdate64)(uintptr_t)code[7])(&z, UINT64_C(0x0100000000000001));
+        ok = ok && z == UINT64_C(0xf100f000f000f001);
+        volatile int pair[2] = { 7, 100 };
+        ((CDirectTestStep)(uintptr_t)code[8])(pair);
+        ok = ok && pair[0] == 8 && pair[1] == 100;
+        ((CDirectTestStep)(uintptr_t)code[9])(pair);
+        ((CDirectTestStep)(uintptr_t)code[9])(pair);
+        ok = ok && pair[0] == 6 && pair[1] == 100;
+        ((CDirectTestUpdateVoid)(uintptr_t)code[10])(pair, -42);
+        ok = ok && pair[0] == -42 && pair[1] == 100;
+        ((CDirectTestVoid)(uintptr_t)code[11])();
+        ((CDirectTestVoid)(uintptr_t)code[12])();
+        // bsf and bsr on values with bits at both ends, which tell the two apart and a 32-bit operation from a 64-bit one.
+        ok = ok && ((CDirectTestBits)(uintptr_t)code[13])(UINT64_C(0x0100000000000080)) == 7 && ((CDirectTestBits)(uintptr_t)code[13])(UINT64_C(0x0300000000000000)) == 56;
+        ok = ok && ((CDirectTestBits)(uintptr_t)code[14])(1u) == 63 && ((CDirectTestBits)(uintptr_t)code[14])(UINT64_C(0x00000100000000ff)) == 23;
+        // A register output stored at its own size: the pointer beside it is read again.
+        int w = 5;
+        ok = ok && ((CDirectTestCas)(uintptr_t)code[18])(&w, 5, 7) == 7 && w == 7;
+        ((CDirectTestPointerVoid)(uintptr_t)code[15])(&y);
+        ok = ok && y == 7 && ((CDirectTestLong)(uintptr_t)code[16])(-123456789012L) == -123456789012L;
+        // The locks, which a single thread can't tell, by the instructions' bytes; and hlt, which faults outside the kernel
+        // and isn't run.
+        static const struct
+        {
+            uint8_t function;
+            uint8_t length;
+            uint8_t bytes[6];
+        } instructions[] = {
+            { 0, 4, { 0xf0, 0x0f, 0xb1, 0x0a } },
+            { 1, 5, { 0xf0, 0x48, 0x0f, 0xb1, 0x0a } },
+            { 2, 2, { 0x87, 0x02 } },
+            { 3, 4, { 0xf0, 0x0f, 0xc1, 0x02 } },
+            { 4, 3, { 0xf0, 0x21, 0x02 } },
+            { 5, 3, { 0xf0, 0x09, 0x02 } },
+            { 6, 4, { 0xf0, 0x48, 0x21, 0x02 } },
+            { 7, 4, { 0xf0, 0x48, 0x09, 0x02 } },
+            { 8, 3, { 0xf0, 0xff, 0x02 } },
+            { 9, 3, { 0xf0, 0xff, 0x0a } },
+            { 10, 6, { 0x89, 0x02, 0xf0, 0x83, 0x0c, 0x24 } },
+            { 12, 2, { 0xf3, 0x90 } },
+            { 17, 1, { 0xf4 } },
+        };
+        for (uint32_t i = 0; ok && i < (uint32_t)(sizeof(instructions) / sizeof(instructions[0])); i += 1)
+        {
+            const uint8_t* const bytes = (const uint8_t*)code[instructions[i].function];
+            bool found = false;
+            for (uint32_t at = 0; !found && at + instructions[i].length <= 128u; at += 1)
+            {
+                found = memcmp(bytes + at, instructions[i].bytes, instructions[i].length) == 0;
+            }
+            ok = found;
+        }
+        if (!ok)
+        {
+            fprintf(stderr, "test-direct: musl's atomics ran wrong\n");
+        }
+    }
+    for (uint32_t i = 0; i < (uint32_t)count; i += 1)
+    {
+        if (mappings[i] != NULL)
+        {
+            munmap(mappings[i], mapped[i]);
+        }
+    }
+#endif
+    unlink(obj_path);
+    // What leaves: another constraint or operand, a memory operand that isn't `*p` of a pointer local, sizes that differ,
+    // an operand too many or too few, a clobber besides memory, and anything after the operands.
+    static const char* const leaves[] = {
+        "int f(volatile int *p, int t, int s) { __asm__ (\"lock ; cmpxchg %3, %1\" : \"=r\"(t), \"=m\"(*p) : \"a\"(t), \"r\"(s) : \"memory\"); return t; }\n",
+        "int f(volatile int *p, int t, int s) { __asm__ (\"lock ; cmpxchg %3, %1\" : \"=a\"(t), \"=m\"(*p) : \"r\"(t), \"r\"(s) : \"memory\"); return t; }\n",
+        "int f(volatile int *p, int t, int s) { __asm__ (\"lock ; cmpxchg %3, %1\" : \"=a\"(t), \"=m\"(*p) : \"a\"(t), \"r\"(s)); return t; }\n",
+        "int f(volatile int *p, int t, int s) { __asm__ (\"lock ; cmpxchg %3, %1\" : \"=a\"(t), \"=m\"(p[1]) : \"a\"(t), \"r\"(s) : \"memory\"); return t; }\n",
+        "int f(volatile int *p, long t, long s) { __asm__ (\"lock ; cmpxchg %3, %1\" : \"=a\"(t), \"=m\"(*p) : \"a\"(t), \"r\"(s) : \"memory\"); return t; }\n",
+        "volatile int *g;\nint f(int t, int s) { __asm__ (\"lock ; cmpxchg %3, %1\" : \"=a\"(t), \"=m\"(*g) : \"a\"(t), \"r\"(s) : \"memory\"); return t; }\n",
+        "int f(volatile int *p, int t, int s) { __asm__ (\"lock ; cmpxchg %3, %1\" : \"=a\"(t), \"=m\"(*p) : \"a\"(t), \"r\"(s) : \"memory\", \"cc\"); return t; }\n",
+        "int f(volatile int *p, int t, int s) { __asm__ (\"lock ; cmpxchg %3, %1\" : \"=a\"(t), \"=m\"(*p) : \"a\"(t), \"r\"(s), \"r\"(s) : \"memory\"); return t; }\n",
+        "int f(volatile int *p, int v) { __asm__ (\"xchg %0, %1\" : \"=r\"(v), \"=m\"(*p) : \"r\"(v) : \"memory\"); return v; }\n",
+        "int f(volatile short *p, short v) { __asm__ (\"xchg %0, %1\" : \"=r\"(v), \"=m\"(*p) : \"0\"(v) : \"memory\"); return v; }\n",
+        "int f(volatile int *p, int v) { __asm__ (\"lock ; xadd %0, %1\" : \"=m\"(*p), \"=r\"(v) : \"0\"(v) : \"memory\"); return v; }\n",
+        "void f(volatile int *p, long v) { __asm__ (\"lock ; and %1, %0\" : \"=m\"(*p) : \"r\"(v) : \"memory\"); }\n",
+        "void f(volatile int *p, volatile int *q) { __asm__ (\"lock ; incl %0\" : \"=m\"(*p) : \"m\"(*q) : \"memory\"); }\n",
+        "void f(volatile int *p, int x) { __asm__ (\"mov %1, %0 ; lock ; orl $0,(%%rsp)\" : \"=m\"(*p) : \"a\"(x) : \"memory\"); }\n",
+        "void f(int x) { __asm__ (\"\" : \"=r\"(x)); }\n",
+        "void f(void) { __asm__ (\"pause\" : : \"r\"(1)); }\n",
+        "int f(unsigned long x) { __asm__ (\"bsf %1,%0\" : \"=r\"(x) : \"r\"(x) : \"memory\"); return x; }\n",
+        "int f(unsigned long x) { int r; __asm__ (\"bsf %1,%0\" : \"=r\"(r) : \"r\"(x)); return r; }\n",
+        "int f(double x) { __asm__ (\"bsf %1,%0\" : \"=r\"(x) : \"r\"(x)); return x; }\n",
+        "void f(volatile int *p) { __asm__ (\"lock ; incl %0\" : \"=m\"(*p) : \"m\"(*p) : \"memory\") p; }\n",
+        "void f(volatile int *p) { __asm__ (\"lock ; incl %0\" : \"=m\"(*(p)) : \"m\"(*p) : \"memory\"); }\n",
+        "void f(void) { __asm__ (\"lock ; cmpxchg8b %0\" : : : \"memory\"); }\n",
+        "void f(volatile int *p) { __asm__ (\"lock ; incl %0\" : \"=m\"(p) : \"m\"(p) : \"memory\"); }\n",
+        "void f(volatile int *p) { __asm__ (\"lock ; incl %0\" : \"=m\"(*(long)p) : \"m\"(*(long)p) : \"memory\"); }\n",
+        "int f(volatile int *p, int s) { const int t = 5; __asm__ (\"lock ; cmpxchg %3, %1\" : \"=a\"(t), \"=m\"(*p) : \"a\"(5), \"r\"(s) : \"memory\"); return t; }\n",
+        "long f(volatile long *p, double t, long s) { __asm__ (\"lock ; cmpxchg %3, %1\" : \"=a\"(t), \"=m\"(*p) : \"a\"(s), \"r\"(s) : \"memory\"); return s; }\n",
+        "void f(volatile long *p) { __asm__ (\"lock ; and %1, %0\" : \"=m\"(*p) : \"r\"(1.5) : \"memory\"); }\n",
+        "int f(volatile int *p, int t, long s) { __asm__ (\"lock ; cmpxchg %3, %1\" : \"=a\"(t), \"=m\"(*p) : \"a\"(t), \"r\"(s) : \"memory\"); return t; }\n",
+    };
+    for (uint32_t i = 0; ok && i < (uint32_t)(sizeof(leaves) / sizeof(leaves[0])); i += 1)
+    {
+        ok = c_direct_test_compile_source(leaves[i], obj_path, 1, NULL, NULL);
+        if (!ok)
+        {
+            fprintf(stderr, "test-direct: an atomic asm case the direct path took: %s", leaves[i]);
+        }
+    }
+    return ok;
+}
+
 // What the dependency test expects of the records (#3592): the paths after the test's directory, in order, and the flags.
 typedef struct CDirectTestDependency CDirectTestDependency;
 struct CDirectTestDependency
@@ -2868,6 +3074,16 @@ int run_c_direct_tests(int argc, char** argv)
     else
     {
         fprintf(stderr, "test-direct: FAIL inline assembly\n");
+        failed += 1u;
+    }
+
+    if (c_direct_test_atomics(obj_path))
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL musl's atomics' inline assembly\n");
         failed += 1u;
     }
 

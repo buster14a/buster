@@ -4328,6 +4328,15 @@ single-TU `-c` C17/C23 object builds directly from `mmap`'d source bytes to an E
   pointer labelled with a register a function may clobber (`rax`, `rcx`, `rdx`, `rsi`, `rdi`, `r8` to `r11`); it lives
   in its slot, and its register holds it only as an input. Any other template, operand, constraint, clobber or label
   leaves, and so does an input in a clobbered register or one register given twice, as clang refuses those.
+- **musl's atomics (#3592's step 6c):** the thirteen shapes of `arch/x86_64/atomic_arch.h` (`a_cas` and `a_cas_p`'s
+  `lock ; cmpxchg`, `a_swap`'s `xchg`, `a_fetch_add`'s `lock ; xadd`, `a_and` and `a_or` in 32 and 64 bits, `a_inc`,
+  `a_dec`, `a_store`'s `mov` and `lock ; orl $0,(%%rsp)`, `a_barrier`'s empty template, `a_spin`'s `pause`, `a_crash`'s
+  `hlt`, `a_ctz_64`'s `bsf` and `a_clz_64`'s `bsr ; xor $63`), and the empty templates of `explicit_bzero` (`"r"`) and
+  `__libc_start_main` (`"+r"`), each with its exact operands (`fast_cc_asm_atomic`). A memory operand is `*p` or
+  `*(T *)p` of a pointer local, whose size, 4 or 8 bytes, is the operation's; its address is loaded into `rdx`, the
+  register operand into `rax` (`cmpxchg`'s source into `rcx`), and a register output is stored at its own size after the
+  instruction. Another constraint or order, sizes that differ, another clobber than `memory`, or `"=m"` of anything but
+  `*p` leaves. 58 more of musl's units take the direct path in each mode (1,100 of 1,336).
 - **Fail-closed fallback (`--no-direct` / `BUSTER_NO_DIRECT`):** any diagnostic, warning-sensitive construct, or
   unsupported flag/extension bails out silently without writing output so `c_checker_driver.c` runs the full pipeline.
 
