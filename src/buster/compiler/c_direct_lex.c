@@ -286,12 +286,17 @@ static void* fast_arena_alloc(FastArena* a, uint64_t size, uint64_t align)
 // ---------------------------------------------------------------------------------------------------------------------
 // 64-Way AVX-512 SwissTable Identifier Interner
 
-#define BUSTER_FIDENT_SMALL_GROUPS 32u
+#define BUSTER_FIDENT_SMALL_GROUPS    64u
 #define BUSTER_FIDENT_RESERVED_GROUPS 512u
-#define BUSTER_FIDENT_MAX_IDS     49152u
-#define BUSTER_FIDENT_CACHE_BITS  14u
-#define BUSTER_FIDENT_CACHE_SIZE  (1u << BUSTER_FIDENT_CACHE_BITS)
-#define BUSTER_FIDENT_SMALL_CACHE_BITS 9u  // one 4 KiB page of spelling-cache entries
+#define BUSTER_FIDENT_MAX_IDS         49152u
+#define BUSTER_FIDENT_CACHE_BITS      14u
+// Small units start with 64 hash groups (20 KiB touched on demand) and 2,048 cache slots (16 KiB).
+// #3592 measured a unit with six standard headers on the 9700X. Starting with 64 groups saved two
+// hash-table rebuilds compared with 16 groups. Growing the spelling cache at four names per slot
+// reduced both user and kernel cycles compared with growing it at one name per slot.
+#define BUSTER_FIDENT_SMALL_CACHE_BITS 11u
+#define BUSTER_FIDENT_CACHE_GROW_BITS  2u
+#define BUSTER_FIDENT_CACHE_GROW_LOAD  4u
 
 typedef struct FastIdentCacheSlot FastIdentCacheSlot;
 struct FastIdentCacheSlot
@@ -365,7 +370,6 @@ struct FastIdentTable
     uint32_t* slots;           // slot -> 1-based IdentId (group_count * 64)
     uint32_t group_count;      // power of 2
     uint32_t group_mask;
-    uint32_t cache_shift;
     uint32_t grow_threshold;
 
     FastIdentEntry* entries;   // 1-based [1 .. count]
@@ -378,7 +382,10 @@ struct FastIdentTable
     uint64_t str_used;
     uint64_t str_cap;
 
-    FastIdentCacheSlot* cache; // direct-mapped spelling cache for identifiers up to 64 bytes
+    FastIdentCacheSlot* cache; // direct-mapped spelling cache for identifiers up to 64 bytes, 1 << cache_bits slots
+    uint32_t cache_bits;
+    uint32_t cache_shift;      // 64 - cache_bits: a key's hash >> cache_shift is its slot
+    uint32_t cache_grow_at;    // the count of names at which the cache grows (UINT32_MAX at its full size)
 
     FastArena* arena;
 };
@@ -450,7 +457,6 @@ static __attribute__((noinline)) bool fast_ident_grow(FastIdentTable* t)
 {
     // The small table already owns the entire initial reservation. Rebuild from entry hashes
     // in insertion order so growth needs neither the old slot array nor any new arena space.
-    // The spelling cache verifies its full key on lookup, including after its active range expands.
     const bool reuse = t->group_count < BUSTER_FIDENT_RESERVED_GROUPS;
     const uint32_t new_groups = reuse ? BUSTER_FIDENT_RESERVED_GROUPS : t->group_count * 2u;
     const uint64_t new_slots_count = (uint64_t)new_groups * 64u;
@@ -485,7 +491,6 @@ static __attribute__((noinline)) bool fast_ident_grow(FastIdentTable* t)
         t->ctrl = new_ctrl;
         t->slots = new_slots;
         t->group_count = new_groups;
-        t->cache_shift = 64u - BUSTER_FIDENT_CACHE_BITS;
         t->group_mask = new_mask;
         t->grow_threshold = (uint32_t)((new_slots_count * 3u) / 4u);
     }
@@ -573,12 +578,75 @@ static uint32_t fast_ident_intern_cstr(FastIdentTable* t, const char* s)
     return fast_ident_intern(t, (const uint8_t*)s, (uint32_t)strlen(s));
 }
 
-static bool fast_ident_init(FastIdentTable* t, FastArena* arena, bool small_source)
+// The cache's key hash, of a name's first eight bytes (masked to its length), its last eight (0 up to eight bytes) and
+// its length: fast_ident_lookup's, and fast_ident_cache_grow's for a slot's stored key. Its top cache_bits bits are the
+// slot. A macro rather than a function so that the compile's count has no call a lookup in it (#3592).
+#define BUSTER_FIDENT_CACHE_HASH(first, last, len) \
+    (((first) ^ ((last) * UINT64_C(0x9e3779b97f4a7c15)) ^ ((uint64_t)(len) << 56)) * UINT64_C(0xbf58476d1ce4e5b9))
+
+// Rebuild a cache slot's hash from the permanent spelling when the cache grows.
+static uint64_t fast_ident_cached_hash(const FastIdentTable* t, const FastIdentCacheSlot* slot)
+{
+    const char* spelling = t->strings + slot->offset;
+    const uint32_t len = slot->len;
+    uint64_t first;
+    uint64_t last = 0;
+    memcpy(&first, spelling, sizeof(first));
+    if (len <= 8u)
+    {
+        first = _bzhi_u64(first, len * 8u);
+    }
+    else
+    {
+        memcpy(&last, spelling + len - 8u, sizeof(last));
+    }
+    return BUSTER_FIDENT_CACHE_HASH(first, last, len);
+}
+
+static void fast_ident_cache_set(FastIdentTable* t, FastIdentCacheSlot* cache, uint32_t bits)
+{
+    t->cache = cache;
+    t->cache_bits = bits;
+    t->cache_shift = 64u - bits;
+    t->cache_grow_at = bits < BUSTER_FIDENT_CACHE_BITS ? BUSTER_FIDENT_CACHE_GROW_LOAD << bits : UINT32_MAX;
+}
+
+// Once there are four names per slot, rehash the occupied slots into a larger zero-filled block using their
+// permanent spellings. Distinct old slots have different hash prefixes, so they stay distinct at the larger size.
+// Returns whether the cache grew: a caller's slot pointer is then stale. Without room in the arena the cache stays.
+static __attribute__((noinline)) bool fast_ident_cache_grow(FastIdentTable* t)
+{
+    const uint32_t old_bits = t->cache_bits;
+    const uint32_t new_bits = old_bits + BUSTER_FIDENT_CACHE_GROW_BITS < BUSTER_FIDENT_CACHE_BITS ? old_bits + BUSTER_FIDENT_CACHE_GROW_BITS : BUSTER_FIDENT_CACHE_BITS;
+    FastIdentCacheSlot* const old_cache = t->cache;
+    FastIdentCacheSlot* const new_cache = new_bits > old_bits ? (FastIdentCacheSlot*)fast_arena_alloc(t->arena, ((uint64_t)1 << new_bits) * sizeof(FastIdentCacheSlot), 64) : NULL;
+    const bool grown = new_cache != NULL;
+    if (grown)
+    {
+        const uint32_t old_count = 1u << old_bits;
+        const uint32_t new_shift = 64u - new_bits;
+        for (uint32_t i = 0; i < old_count; i += 1)
+        {
+            if (old_cache[i].id != 0)
+            {
+                new_cache[fast_ident_cached_hash(t, &old_cache[i]) >> new_shift] = old_cache[i];
+            }
+        }
+        fast_ident_cache_set(t, new_cache, new_bits);
+    }
+    else
+    {
+        t->cache_grow_at = UINT32_MAX;
+    }
+    return grown;
+}
+
+// `small`: the tables at a small unit's sizes (BUSTER_FIDENT_SMALL_GROUPS), growing with its names.
+static bool fast_ident_init(FastIdentTable* t, FastArena* arena, bool small)
 {
     memset(t, 0, sizeof(*t));
     t->arena = arena;
-    t->cache_shift = 64u - (small_source ? BUSTER_FIDENT_SMALL_CACHE_BITS : BUSTER_FIDENT_CACHE_BITS);
-    t->group_count = small_source ? BUSTER_FIDENT_SMALL_GROUPS : BUSTER_FIDENT_RESERVED_GROUPS;
+    t->group_count = small ? BUSTER_FIDENT_SMALL_GROUPS : BUSTER_FIDENT_RESERVED_GROUPS;
     t->group_mask = t->group_count - 1u;
     const uint64_t slot_count = (uint64_t)BUSTER_FIDENT_RESERVED_GROUPS * 64u;
     t->grow_threshold = t->group_count * 48u;
@@ -591,7 +659,8 @@ static bool fast_ident_init(FastIdentTable* t, FastArena* arena, bool small_sour
     t->macro_bits = (uint64_t*)fast_arena_alloc(arena, ((uint64_t)t->capacity / 64u + 1u) * sizeof(uint64_t), 64);
     // A short cached spelling can be compared with one masked eight-byte word, even at the end.
     t->strings = (char*)fast_arena_alloc(arena, t->str_cap + 7u, 64);
-    t->cache = (FastIdentCacheSlot*)fast_arena_alloc(arena, (uint64_t)BUSTER_FIDENT_CACHE_SIZE * sizeof(FastIdentCacheSlot), 64);
+    const uint32_t cache_bits = small ? BUSTER_FIDENT_SMALL_CACHE_BITS : BUSTER_FIDENT_CACHE_BITS;
+    fast_ident_cache_set(t, (FastIdentCacheSlot*)fast_arena_alloc(arena, ((uint64_t)1 << cache_bits) * sizeof(FastIdentCacheSlot), 64), cache_bits);
 
     bool ok = t->ctrl != NULL && t->slots != NULL && t->entries != NULL && t->macro_bits != NULL && t->strings != NULL && t->cache != NULL;
     if (ok)
@@ -757,17 +826,15 @@ static inline uint32_t fast_ident_lookup(FastIdentTable* t, const uint8_t* p, ui
     uint64_t first;
     memcpy(&first, p, sizeof(first));
     uint64_t last = 0;
-    uint64_t hash;
     if (len <= 8u)
     {
         first = _bzhi_u64(first, len * 8u);
-        hash = first * UINT64_C(0xbf58476d1ce4e5b9);
     }
     else
     {
         memcpy(&last, p + len - 8u, sizeof(last));
-        hash = (first ^ (last * UINT64_C(0x9e3779b97f4a7c15)) ^ ((uint64_t)len << 56)) * UINT64_C(0xbf58476d1ce4e5b9);
     }
+    const uint64_t hash = BUSTER_FIDENT_CACHE_HASH(first, last, len);
     FastIdentCacheSlot* slot = t->cache + (hash >> t->cache_shift);
     uint32_t id = 0;
     uint8_t kind = FTOK_IDENT;
@@ -809,6 +876,10 @@ static inline uint32_t fast_ident_lookup(FastIdentTable* t, const uint8_t* p, ui
             kind = kw != 0 ? kw : FTOK_IDENT;
             if (len <= 64u)
             {
+                if (__builtin_expect(t->count >= t->cache_grow_at, 0) && fast_ident_cache_grow(t))
+                {
+                    slot = t->cache + (hash >> t->cache_shift);
+                }
                 slot->offset = t->entries[id].str_offset;
                 slot->id = (uint16_t)id;
                 slot->len = (uint8_t)len;
@@ -1201,6 +1272,9 @@ struct FastPP
     FastLitSlice* lit_slices;
     uint32_t lit_count;
     uint32_t lit_cap;
+    // One bit a literal: spelled with an encoding prefix or a numeric escape, which an attribute's string and an asm
+    // label can't take as their bytes (#3595). The arena's pages are zero, and only such a literal writes one.
+    uint64_t* lit_coded;
 
     // Macro definitions
     FastMacro* macros;
@@ -1664,6 +1738,7 @@ static FastLexed fast_lex_string(FastPP* pp, const uint8_t* p, const uint8_t* en
     uint32_t tok_extra = 0;
     uint32_t tok_data = 0;
     bool has_escape = false;
+    bool coded = prefix_kind != 0;
     uint32_t stopped = 0;
     p = fast_scan_string_close(p, end, &has_escape, &stopped);
     const bool closed = stopped == BUSTER_FSTRING_CLOSED;
@@ -1706,6 +1781,8 @@ static FastLexed fast_lex_string(FastPP* pp, const uint8_t* p, const uint8_t* en
                     }
                     else
                     {
+                        // A numeric escape (a backslash and x, an octal digit, u or U) is one clang refuses in an attribute.
+                        coded = coded || (q < q_end && (*q == 'x' || (*q >= '0' && *q <= '7') || *q == 'u' || *q == 'U'));
                         const uint32_t ch = fast_decode_escape(&q, q_end, &ok);
                         dst[out_len++] = (char)(ch & 0xffu);
                     }
@@ -1728,6 +1805,10 @@ static FastLexed fast_lex_string(FastPP* pp, const uint8_t* p, const uint8_t* en
         else
         {
             fast_pp_bail(pp, "lit_pool overflow");
+        }
+        if (coded)
+        {
+            pp->lit_coded[tok_data >> 6] |= UINT64_C(1) << (tok_data & 63u);
         }
     }
     return (FastLexed){ .p = p, .tok = fast_tok_make(tok_kind, flags_in, tok_extra, tok_data) };
@@ -4439,12 +4520,12 @@ static __attribute__((noinline)) void fast_pp_handle_directive(FastPP* pp, FastI
 // ---------------------------------------------------------------------------------------------------------------------
 // Main fused lex + preprocess loop: fills pp->out with the entire preprocessed token stream (or streams chunks)
 
-static bool fast_pp_init(FastPP* pp, FastArena* arena, FastArena* scratch, bool small_source)
+static bool fast_pp_init(FastPP* pp, FastArena* arena, FastArena* scratch, bool small)
 {
     // The owner places this state in fresh zero-filled arena storage.
     pp->arena = arena;
     pp->scratch = scratch;
-    bool ok = fast_ident_init(&pp->idents, arena, small_source);
+    bool ok = fast_ident_init(&pp->idents, arena, small);
     if (ok)
     {
         pp->out_cap = 1024u * 1024u;
@@ -4461,6 +4542,7 @@ static bool fast_pp_init(FastPP* pp, FastArena* arena, FastArena* scratch, bool 
         pp->num_pool = (uint64_t*)fast_arena_alloc(arena, (uint64_t)pp->num_cap * sizeof(uint64_t), 64);
         pp->lit_bytes = (char*)fast_arena_alloc(arena, pp->lit_bytes_cap, 64);
         pp->lit_slices = (FastLitSlice*)fast_arena_alloc(arena, (uint64_t)pp->lit_cap * sizeof(FastLitSlice), 64);
+        pp->lit_coded = (uint64_t*)fast_arena_alloc(arena, (uint64_t)pp->lit_cap / 8u, 64);
         pp->macros = (FastMacro*)fast_arena_alloc(arena, (uint64_t)BUSTER_FPP_MAX_MACROS * sizeof(FastMacro), 64);
         pp->macro_toks = (FastTok*)fast_arena_alloc(arena, (uint64_t)pp->macro_tok_cap * sizeof(FastTok), 64);
         pp->macro_params = (uint32_t*)fast_arena_alloc(arena, (uint64_t)pp->macro_param_cap * sizeof(uint32_t), 64);
@@ -4472,7 +4554,7 @@ static bool fast_pp_init(FastPP* pp, FastArena* arena, FastArena* scratch, bool 
         pp->win.lens = (uint8_t*)fast_arena_alloc(scratch, BUSTER_FWIN_CAPACITY + 64u, 64);
 
         ok = pp->out_kind != NULL && pp->out_data != NULL && pp->num_pool != NULL && pp->lit_bytes != NULL &&
-             pp->lit_slices != NULL && pp->macros != NULL && pp->macro_toks != NULL && pp->macro_params != NULL &&
+             pp->lit_slices != NULL && pp->lit_coded != NULL && pp->macros != NULL && pp->macro_toks != NULL && pp->macro_params != NULL &&
              pp->exp_buf != NULL && pp->arg_buf != NULL && pp->call_stack != NULL &&
              pp->win.kinds != NULL && pp->win.starts != NULL && pp->win.lens != NULL;
     }
