@@ -303,25 +303,6 @@ struct FastIdentCacheSlot
     uint16_t pad;
 };
 
-static const uint64_t fast_len_mask16[17][2] = {
-    { UINT64_C(0x0000000000000000), UINT64_C(0x0000000000000000) },
-    { UINT64_C(0x00000000000000ff), UINT64_C(0x0000000000000000) },
-    { UINT64_C(0x000000000000ffff), UINT64_C(0x0000000000000000) },
-    { UINT64_C(0x0000000000ffffff), UINT64_C(0x0000000000000000) },
-    { UINT64_C(0x00000000ffffffff), UINT64_C(0x0000000000000000) },
-    { UINT64_C(0x000000ffffffffff), UINT64_C(0x0000000000000000) },
-    { UINT64_C(0x0000ffffffffffff), UINT64_C(0x0000000000000000) },
-    { UINT64_C(0x00ffffffffffffff), UINT64_C(0x0000000000000000) },
-    { UINT64_C(0xffffffffffffffff), UINT64_C(0x0000000000000000) },
-    { UINT64_C(0xffffffffffffffff), UINT64_C(0x00000000000000ff) },
-    { UINT64_C(0xffffffffffffffff), UINT64_C(0x000000000000ffff) },
-    { UINT64_C(0xffffffffffffffff), UINT64_C(0x0000000000ffffff) },
-    { UINT64_C(0xffffffffffffffff), UINT64_C(0x00000000ffffffff) },
-    { UINT64_C(0xffffffffffffffff), UINT64_C(0x000000ffffffffff) },
-    { UINT64_C(0xffffffffffffffff), UINT64_C(0x0000ffffffffffff) },
-    { UINT64_C(0xffffffffffffffff), UINT64_C(0x00ffffffffffffff) },
-    { UINT64_C(0xffffffffffffffff), UINT64_C(0xffffffffffffffff) },
-};
 
 typedef struct FastIdentEntry FastIdentEntry;
 struct FastIdentEntry
@@ -398,7 +379,7 @@ struct FastIdentTable
     uint64_t str_used;
     uint64_t str_cap;
 
-    FastIdentCacheSlot* cache; // 16 KB L1D direct-mapped cache for len <= 16 identifiers
+    FastIdentCacheSlot* cache; // direct-mapped spelling cache for identifiers up to 64 bytes
 
     FastArena* arena;
 };
@@ -764,83 +745,54 @@ static bool fast_ident_init(FastIdentTable* t, FastArena* arena)
     return ok;
 }
 
-// Branchless inline lookup for identifiers of length 1..16 where 16 bytes are readable at `p`.
-static inline uint32_t fast_ident_lookup_16(FastIdentTable* t, const uint8_t* p, uint32_t len, uint8_t* out_kind)
+// An identifier is fully determined by its first and last words up to 16 bytes.
+// Only the short spelling needs a mask. Its caller guarantees eight readable bytes.
+static inline uint32_t fast_ident_lookup(FastIdentTable* t, const uint8_t* p, uint32_t len, uint8_t* out_kind)
 {
-    uint64_t w0 = 0;
-    uint64_t w1 = 0;
-    memcpy(&w0, p, 8);
-    memcpy(&w1, p + 8, 8);
-    w0 &= fast_len_mask16[len][0];
-    w1 &= fast_len_mask16[len][1];
-    const uint64_t h = ((w0 ^ (w1 * UINT64_C(0x9e3779b97f4a7c15)) ^ ((uint64_t)len << 56)) * UINT64_C(0xbf58476d1ce4e5b9));
-    const uint32_t slot_idx = (uint32_t)(h >> (64u - BUSTER_FIDENT_CACHE_BITS));
-    FastIdentCacheSlot* slot = t->cache + slot_idx;
-    uint32_t id;
-    if (__builtin_expect(((slot->w0 ^ w0) | (slot->w1 ^ w1) | ((uint64_t)slot->len ^ len)) == 0 && slot->id != 0, 1))
+    uint64_t first;
+    memcpy(&first, p, sizeof(first));
+    uint64_t last = 0;
+    uint64_t hash;
+    if (len <= 8u)
     {
-        id = slot->id;
-        *out_kind = slot->tok_kind;
+        first = _bzhi_u64(first, len * 8u);
+        hash = first * UINT64_C(0xbf58476d1ce4e5b9);
     }
     else
     {
-        id = fast_ident_intern(t, p, len);
-        uint8_t kind = FTOK_IDENT;
-        if (id != 0)
-        {
-            const uint8_t kw = t->entries[id].kw_kind;
-            kind = kw != 0 ? kw : FTOK_IDENT;
-            slot->w0 = w0;
-            slot->w1 = w1;
-            slot->id = id;
-            slot->len = (uint8_t)len;
-            slot->tok_kind = kind;
-        }
-        *out_kind = kind;
+        memcpy(&last, p + len - 8u, sizeof(last));
+        hash = (first ^ (last * UINT64_C(0x9e3779b97f4a7c15)) ^ ((uint64_t)len << 56)) * UINT64_C(0xbf58476d1ce4e5b9);
     }
-    return id;
-}
-
-// An identifier of more than 16 bytes, through the same cache: its key is its first and its last eight bytes and its
-// length, and where a slot has them the interned text is compared (the bytes between may differ). Without it every one
-// went to fast_ident_intern's table, four dependent loads: 21,500 of sqlite3.c's lookups, a quarter of them new names.
-static inline uint32_t fast_ident_lookup_long(FastIdentTable* t, const uint8_t* p, uint32_t len, uint8_t* out_kind)
-{
+    FastIdentCacheSlot* slot = t->cache + (hash >> (64u - BUSTER_FIDENT_CACHE_BITS));
     uint32_t id = 0;
     uint8_t kind = FTOK_IDENT;
-    FastIdentCacheSlot* slot = NULL;
-    uint64_t w0 = 0;
-    uint64_t w1 = 0;
-    if (len <= 64u)
+    if (__builtin_expect(slot->len == len && slot->w0 == first && slot->w1 == last, 1))
     {
-        memcpy(&w0, p, 8);
-        memcpy(&w1, p + len - 8u, 8);
-        const uint64_t h = ((w0 ^ (w1 * UINT64_C(0x9e3779b97f4a7c15)) ^ ((uint64_t)len << 56)) * UINT64_C(0xbf58476d1ce4e5b9));
-        slot = t->cache + (uint32_t)(h >> (64u - BUSTER_FIDENT_CACHE_BITS));
-        if (((slot->w0 ^ w0) | (slot->w1 ^ w1) | ((uint64_t)slot->len ^ len)) == 0 && slot->id != 0)
+        bool equal = true;
+        if (len > 16u)
         {
-            // Masked loads: neither the text nor the interned copy has 64 bytes to read for certain.
-            const __mmask64 lanes = _bzhi_u64(~UINT64_C(0), len);
-            const __m512i text = _mm512_maskz_loadu_epi8(lanes, (const void*)p);
-            const __m512i interned = _mm512_maskz_loadu_epi8(lanes, (const void*)(t->strings + t->entries[slot->id].str_offset));
-            if (_mm512_cmpneq_epi8_mask(text, interned) == 0)
-            {
-                id = slot->id;
-                kind = slot->tok_kind;
-            }
+            const __mmask64 bytes = _bzhi_u64(UINT64_MAX, len);
+            const __m512i text = _mm512_maskz_loadu_epi8(bytes, p);
+            const char* saved = t->strings + t->entries[slot->id].str_offset;
+            equal = _mm512_cmpneq_epi8_mask(text, _mm512_maskz_loadu_epi8(bytes, saved)) == 0;
+        }
+        if (equal)
+        {
+            id = slot->id;
+            kind = slot->tok_kind;
         }
     }
-    if (id == 0)
+    if (__builtin_expect(id == 0, 0))
     {
         id = fast_ident_intern(t, p, len);
         if (id != 0)
         {
             const uint8_t kw = t->entries[id].kw_kind;
             kind = kw != 0 ? kw : FTOK_IDENT;
-            if (slot != NULL)
+            if (len <= 64u)
             {
-                slot->w0 = w0;
-                slot->w1 = w1;
+                slot->w0 = first;
+                slot->w1 = last;
                 slot->id = id;
                 slot->len = (uint8_t)len;
                 slot->tok_kind = kind;
@@ -1890,8 +1842,8 @@ static BUSTER_DIRECT_HOT const uint8_t* fast_lex_one(FastPP* pp, const uint8_t* 
                 break;
             }
             uint8_t kw_resolved = FTOK_IDENT;
-            const uint32_t id = (len <= 16u && p + 16 <= end) ?
-                                fast_ident_lookup_16(&pp->idents, p, len, &kw_resolved) :
+            const uint32_t id = ((size_t)(end - p) >= 8u) ?
+                                fast_ident_lookup(&pp->idents, p, len, &kw_resolved) :
                                 fast_ident_intern(&pp->idents, p, len);
             if (__builtin_expect(id == 0, 0))
             {
@@ -1899,7 +1851,7 @@ static BUSTER_DIRECT_HOT const uint8_t* fast_lex_one(FastPP* pp, const uint8_t* 
                 p = end;
                 break;
             }
-            if (len > 16u || p + 16 > end)
+            if ((size_t)(end - p) < 8u)
             {
                 const uint8_t kw = pp->idents.entries[id].kw_kind;
                 kw_resolved = kw != 0 ? kw : FTOK_IDENT;
@@ -5002,15 +4954,7 @@ static FastTok fast_pp_window_tok(FastPP* pp, const FastIncludeFile* f, uint32_t
     if (kind == FTOK_IDENT)
     {
         uint8_t ident_kind = FTOK_IDENT;
-        uint32_t id;
-        if (__builtin_expect(len <= 16u, 1))
-        {
-            id = fast_ident_lookup_16(&pp->idents, s, len, &ident_kind);
-        }
-        else
-        {
-            id = fast_ident_lookup_long(&pp->idents, s, len, &ident_kind);
-        }
+        const uint32_t id = fast_ident_lookup(&pp->idents, s, len, &ident_kind);
         if (__builtin_expect(id == 0, 0))
         {
             fast_pp_bail(pp, "ident table full");
@@ -5295,6 +5239,28 @@ static inline bool fast_number_goes_on(const uint8_t* s, uint32_t len)
     return after == '.' || ((after == '+' || after == '-') && (last == 'e' || last == 'p'));
 }
 
+// Two to eight decimal digits from a window (at least eight bytes readable at the start).
+// Left-pad the digits with zeroes, then reduce adjacent pairs and groups of four in parallel.
+static inline bool fast_window_decimal(const uint8_t* s, uint32_t length, uint32_t* value)
+{
+    bool decimal = length <= 8u && s[0] != '0';
+    if (decimal)
+    {
+        uint64_t raw;
+        memcpy(&raw, s, sizeof(raw));
+        const uint64_t padded = (raw ^ UINT64_C(0x3030303030303030)) << ((8u - length) * 8u);
+        const __m128i digits = _mm_cvtsi64_si128((int64_t)padded);
+        decimal = _mm_cmpgt_epu8_mask(digits, _mm_set1_epi8(9)) == 0;
+        if (decimal)
+        {
+            const __m128i pairs = _mm_maddubs_epi16(digits, _mm_set1_epi16(0x010a));
+            const __m128i groups = _mm_madd_epi16(pairs, _mm_set1_epi32(0x00010064));
+            *value = (uint32_t)_mm_cvtsi128_si32(groups) * 10000u + (uint32_t)_mm_extract_epi32(groups, 1);
+        }
+    }
+    return decimal;
+}
+
 // One token of f's text by fast_lex_one, and what the drain does with it: the file's end, a directive, a macro's name.
 static void fast_pp_single_token(FastPP* pp, FastIncludeFile* f)
 {
@@ -5394,15 +5360,7 @@ static BUSTER_DIRECT_HOT void fast_pp_emit_window(FastPP* pp, FastIncludeFile* f
             if (__builtin_expect(kind == FTOK_IDENT, 1))
             {
                 uint8_t ident_kind = FTOK_IDENT;
-                uint32_t id;
-                if (__builtin_expect(len <= 16u, 1))
-                {
-                    id = fast_ident_lookup_16(&pp->idents, s, len, &ident_kind);
-                }
-                else
-                {
-                    id = fast_ident_lookup_long(&pp->idents, s, len, &ident_kind);
-                }
+                const uint32_t id = fast_ident_lookup(&pp->idents, s, len, &ident_kind);
                 if (__builtin_expect(id == 0, 0))
                 {
                     fast_pp_bail(pp, "ident table full");
@@ -5447,18 +5405,10 @@ static BUSTER_DIRECT_HOT void fast_pp_emit_window(FastPP* pp, FastIncludeFile* f
                 }
                 else
                 {
-                    // A decimal number of two to four digits (10, 16, 255, 1024) in place.
-                    uint32_t v = (uint32_t)(s[0] - '0');
-                    bool all_dig = len <= 4u && s[0] != '0';
-                    for (uint32_t di = 1u; all_dig && di < len; di += 1)
+                    uint32_t value;
+                    if (fast_window_decimal(s, len, &value))
                     {
-                        const uint32_t d = (uint32_t)(s[di] - '0');
-                        all_dig = d <= 9u;
-                        v = v * 10u + d;
-                    }
-                    if (all_dig)
-                    {
-                        out_data[out_count + k] = v;
+                        out_data[out_count + k] = value;
                     }
                     else
                     {

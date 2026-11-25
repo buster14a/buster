@@ -267,7 +267,7 @@ int c_direct_try_compile(const CDirectRequest* request)
 // Self-tests for `build/compiler test-direct`
 
 static bool c_direct_test_compile_source(const char* source, const char* obj_path, int expected_status,
-                                         uint32_t* out_text_len, uint32_t* out_sym_count)
+                                         const void* expected_rodata, size_t expected_bytes)
 {
     char src_path[256];
     snprintf(src_path, sizeof(src_path), "/tmp/buster_direct_test_%d.c", (int)getpid());
@@ -337,6 +337,13 @@ static bool c_direct_test_compile_source(const char* source, const char* obj_pat
     if (valid)
     {
         const Elf64_Shdr* sh = (const Elf64_Shdr*)(buf + eh->e_shoff);
+        if (expected_rodata != NULL)
+        {
+            valid = FSEC_RODATA < eh->e_shnum && sh[FSEC_RODATA].sh_size == expected_bytes &&
+                    sh[FSEC_RODATA].sh_offset <= (uint64_t)fsz &&
+                    expected_bytes <= (uint64_t)fsz - sh[FSEC_RODATA].sh_offset &&
+                    memcmp(buf + sh[FSEC_RODATA].sh_offset, expected_rodata, expected_bytes) == 0;
+        }
         for (uint16_t i = 0; i < eh->e_shnum; i += 1)
         {
             if (sh[i].sh_type == SHT_PROGBITS && (sh[i].sh_flags & SHF_EXECINSTR) != 0)
@@ -358,9 +365,7 @@ static bool c_direct_test_compile_source(const char* source, const char* obj_pat
         }
     }
     free(buf);
-    if (out_text_len != NULL) { *out_text_len = text_len; }
-    if (out_sym_count != NULL) { *out_sym_count = sym_count; }
-    return valid;
+    return valid && sym_count > 0 && (text_len > 0 || expected_rodata != NULL);
 }
 
 // The lexer's tests (#2850). A text's tokens must not depend on where its bytes fall in the lexer's 64-byte blocks, nor
@@ -772,9 +777,7 @@ int run_c_direct_tests(int argc, char** argv)
 
     for (uint32_t i = 0; i < sizeof(valid_cases) / sizeof(valid_cases[0]); i += 1)
     {
-        uint32_t tlen = 0;
-        uint32_t scnt = 0;
-        if (c_direct_test_compile_source(valid_cases[i], obj_path, 0, &tlen, &scnt) && tlen > 0 && scnt > 0)
+        if (c_direct_test_compile_source(valid_cases[i], obj_path, 0, NULL, 0))
         {
             passed += 1u;
         }
@@ -790,11 +793,15 @@ int run_c_direct_tests(int argc, char** argv)
         "#pragma push_macro(\"X\")\nint f(void) { return 0; }\n",
         "#error forced error\n",
         "int f(void) { return undeclared_xyz + 1; }\n",
+        "int f(int a, int b) { switch (a) { case 7: switch (b) { case 7: return 1; } case 7: return 2; } return 0; }",
+        "static inline int leaf(void) { return undeclared_xyz; }\n"
+        "static inline int bridge(void) { return leaf(); }\n"
+        "int root(void) { return bridge(); }\n",
         "const void* wide_str(void) { return L\"hello\"; }\n",
     };
     for (uint32_t i = 0; i < sizeof(bail_cases) / sizeof(bail_cases[0]); i += 1)
     {
-        if (c_direct_test_compile_source(bail_cases[i], obj_path, 1, NULL, NULL))
+        if (c_direct_test_compile_source(bail_cases[i], obj_path, 1, NULL, 0))
         {
             passed += 1u;
         }
@@ -803,6 +810,25 @@ int run_c_direct_tests(int argc, char** argv)
             fprintf(stderr, "test-direct: FAIL bailout case %u\n", i);
             failed += 1u;
         }
+    }
+
+    // The first block extends an incomplete array, the second overwrites it after a designator.
+    // The general evaluator handles the intervening expression and the final designator.
+    static const char table_source[] =
+        "const unsigned short table[] = { [2] = 77, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,"
+        " 9+7, [0] = 300, 101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,"
+        " [20] = 12345678 };";
+    static const uint16_t expected_table[] = {
+        300, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 14, 15, 16, 24910
+    };
+    if (c_direct_test_compile_source(table_source, obj_path, 0, expected_table, sizeof(expected_table)))
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL integer initializer bytes\n");
+        failed += 1u;
     }
 
     if (c_direct_test_lexer())

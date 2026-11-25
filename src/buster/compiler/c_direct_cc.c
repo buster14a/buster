@@ -278,6 +278,27 @@ static __attribute__((noinline)) const char* fast_cc_parse_string_lit(FastCCStat
     return dst;
 }
 
+// Each ready bit is a deferred body in declaration order. A symbol can have been referenced before
+// its definition arrives; that definition sets its own bit when it joins the table.
+static inline void fast_cc_ready_task(FastCCState* cc, uint32_t task)
+{
+    const uint32_t group = task >> 6;
+    cc->ready_tasks[group] |= UINT64_C(1) << (task & 63u);
+    cc->ready_groups |= UINT64_C(1) << group;
+}
+
+static inline void fast_cc_reference(FastCCState* cc, FastSym* sym)
+{
+    if (!sym->referenced)
+    {
+        sym->referenced = 1u;
+        for (uint32_t link = sym->deferred_task; link != 0; link = cc->deferred[link - 1u].previous_task)
+        {
+            fast_cc_ready_task(cc, link - 1u);
+        }
+    }
+}
+
 // Ensure a FastSym (GLOBAL or FUNC) has an ELF symbol in cc->obj (lazy creation avoids polluting .symtab with unused decls!)
 static uint32_t fast_cc_ensure_obj_sym(FastCCState* cc, uint32_t sym_idx)
 {
@@ -384,7 +405,7 @@ static void x86_emit_memzero_inline(FastObj* obj, uint32_t base_reg, int32_t bas
 
 static bool ftype_is_object_const(const FastCCState* cc, FastType t)
 {
-    while (ftype_is_array(cc, t))
+    while (ftype_is_array(t))
     {
         t = cc->ctypes[t & BUSTER_FTYPE_CIDX_MASK].inner;
     }
@@ -400,19 +421,19 @@ static bool ftype_contains_ptr(const FastCCState* cc, FastType t)
     while (sp > 0)
     {
         const FastType cur = stack[--sp];
-        if (ftype_is_ptr(cc, cur)) { return true; }
-        if (ftype_is_array(cc, cur))
+        if (ftype_is_ptr(cur)) { return true; }
+        if (ftype_is_array(cur))
         {
             if (sp < 64u) { stack[sp++] = cc->ctypes[cur & BUSTER_FTYPE_CIDX_MASK].inner; }
         }
-        else if (ftype_is_record(cc, cur))
+        else if (ftype_is_record(cur))
         {
             const FastComplexType* ct = cc->ctypes + (cur & BUSTER_FTYPE_CIDX_MASK);
             for (uint32_t i = 0; i < ct->count; i += 1)
             {
                 const FastType mt = cc->member_info[ct->start + i].type;
-                if (ftype_is_ptr(cc, mt)) { return true; }
-                if ((ftype_is_array(cc, mt) || ftype_is_record(cc, mt)) && sp < 64u)
+                if (ftype_is_ptr(mt)) { return true; }
+                if ((ftype_is_array(mt) || ftype_is_record(mt)) && sp < 64u)
                 {
                     stack[sp++] = mt;
                 }
@@ -443,8 +464,8 @@ static bool ftype_generic_match(const FastCCState* cc, FastType ctrl, FastType a
     if (cd != ad) { return false; }
     if (cd > 0)
     {
-        const bool c_pc = ftype_is_complex(ctrl) ? ((ctrl & BUSTER_FTYPE_CPCONST) != 0) : ((ctrl & BUSTER_FTYPE_SCALAR_PCONST) != 0);
-        const bool a_pc = ftype_is_complex(assoc) ? ((assoc & BUSTER_FTYPE_CPCONST) != 0) : ((assoc & BUSTER_FTYPE_SCALAR_PCONST) != 0);
+        const bool c_pc = (ctrl & BUSTER_FTYPE_PCONST) != 0;
+        const bool a_pc = (assoc & BUSTER_FTYPE_PCONST) != 0;
         if (c_pc != a_pc) { return false; }
     }
     if (ftype_is_complex(ctrl) != ftype_is_complex(assoc)) { return false; }
@@ -599,7 +620,7 @@ static void fsc_apply_op(FastCCState* cc, uint32_t op, FastStaticConst* vals, ui
     {
         if ((op == FTOK_PLUS || op == FTOK_MINUS) && a.sym_idx != 0 && b.sym_idx == 0 && b.is_float == 0)
         {
-            const uint32_t scale = ftype_is_ptr(cc, a.type) ? ftype_size(cc, ftype_deref(cc, a.type)) : 1u;
+            const uint32_t scale = ftype_is_ptr(a.type) ? ftype_size(cc, ftype_deref(cc, a.type)) : 1u;
             const int64_t delta = b.val * (int64_t)(scale != 0 ? scale : 1u);
             FastStaticConst r = a;
             r.val = op == FTOK_PLUS ? (a.val + delta) : (a.val - delta);
@@ -608,7 +629,7 @@ static void fsc_apply_op(FastCCState* cc, uint32_t op, FastStaticConst* vals, ui
         }
         if (op == FTOK_PLUS && b.sym_idx != 0 && a.sym_idx == 0 && a.is_float == 0)
         {
-            const uint32_t scale = ftype_is_ptr(cc, b.type) ? ftype_size(cc, ftype_deref(cc, b.type)) : 1u;
+            const uint32_t scale = ftype_is_ptr(b.type) ? ftype_size(cc, ftype_deref(cc, b.type)) : 1u;
             FastStaticConst r = b;
             r.val = b.val + a.val * (int64_t)(scale != 0 ? scale : 1u);
             vals[vsp - 2u] = r;
@@ -809,7 +830,7 @@ static __attribute__((noinline)) FastStaticConst fast_cc_eval_static_const(FastC
                 if (sym->kind == FSYM_FUNC)
                 {
                     if (sym->is_unsupported) { fast_cc_bail(cc, "unsupported func ref in static init"); break; }
-                    sym->referenced = 1u;
+                    fast_cc_reference(cc, sym);
                     const uint32_t obj_sym = fast_cc_ensure_obj_sym(cc, si);
                     while (inner_parens > 0 && fast_cc_peek(cc) == FTOK_RPAREN) { inner_parens -= 1u; cc->pos += 1u; }
                     if (vsp < 64u)
@@ -825,7 +846,7 @@ static __attribute__((noinline)) FastStaticConst fast_cc_eval_static_const(FastC
                 }
                 if (sym->kind == FSYM_GLOBAL)
                 {
-                    sym->referenced = 1u;
+                    fast_cc_reference(cc, sym);
                     FastType cur_t = sym->type;
                     int64_t byte_off = 0;
                     // Optional postfix `.field` and `[idx]` on `&g.field[i]` or `g.arr`
@@ -834,7 +855,7 @@ static __attribute__((noinline)) FastStaticConst fast_cc_eval_static_const(FastC
                         if (fast_cc_peek(cc) == FTOK_DOT)
                         {
                             cc->pos += 1u;
-                            if (!ftype_is_record(cc, cur_t) || fast_cc_peek(cc) != FTOK_IDENT)
+                            if (!ftype_is_record(cur_t) || fast_cc_peek(cc) != FTOK_IDENT)
                             {
                                 fast_cc_bail(cc, "bad static .field");
                                 break;
@@ -851,19 +872,19 @@ static __attribute__((noinline)) FastStaticConst fast_cc_eval_static_const(FastC
                             const int64_t idx = fast_cc_const_int_expr(cc, false);
                             if (fast_cc_peek(cc) != FTOK_RBRACKET) { fast_cc_bail(cc, "static [idx]"); break; }
                             cc->pos += 1u;
-                            if (!ftype_is_array(cc, cur_t)) { fast_cc_bail(cc, "static subscript non-array"); break; }
+                            if (!ftype_is_array(cur_t)) { fast_cc_bail(cc, "static subscript non-array"); break; }
                             cur_t = cc->ctypes[cur_t & BUSTER_FTYPE_CIDX_MASK].inner;
                             byte_off += idx * (int64_t)ftype_size(cc, cur_t);
                         }
                     }
                     while (inner_parens > 0 && fast_cc_peek(cc) == FTOK_RPAREN) { inner_parens -= 1u; cc->pos += 1u; }
-                    if (!took_addr && !ftype_is_array(cc, cur_t))
+                    if (!took_addr && !ftype_is_array(cur_t))
                     {
                         fast_cc_bail(cc, "non-const global value in static init");
                         break;
                     }
                     const uint32_t obj_sym = fast_cc_ensure_obj_sym(cc, si);
-                    const FastType ptr_t = ftype_is_array(cc, cur_t) ?
+                    const FastType ptr_t = ftype_is_array(cur_t) ?
                                            ftype_make_ptr(cc, cc->ctypes[cur_t & BUSTER_FTYPE_CIDX_MASK].inner) :
                                            ftype_make_ptr(cc, cur_t);
                     if (vsp < 64u)
@@ -1035,6 +1056,47 @@ static void fast_cc_write_static_scalar(FastCCState* cc, FastSecId sec, uint32_t
     }
 }
 
+// A full block of literal/comma pairs has no expressions or relocations. Extract the values from the
+// alternating token-data lanes and narrow them directly into the array. Leave the first other block
+// at the cursor for the initializer parser (including its bounds and designator handling).
+static uint32_t fast_cc_init_integer_run(FastCCState* cc, FastByteBuf* buf, uint64_t offset, FastType type,
+                                         uint32_t size, uint32_t remaining)
+{
+    const uint32_t scalar = type & BUSTER_FTYPE_SCALAR_MASK;
+    uint32_t count = 0;
+    if (!ftype_is_complex(type) && ftype_ptr_depth(type) == 0 && scalar >= FTYPE_I8 && scalar <= FTYPE_U64 &&
+        offset <= buf->len && offset <= buf->cap)
+    {
+        uint32_t limit = (buf->cap - (uint32_t)offset) / size;
+        if (remaining < limit) { limit = remaining; }
+        const uint32_t pairs = (cc->tcount - cc->pos) / 2u;
+        if (pairs < limit) { limit = pairs; }
+        const __m256i pattern = _mm256_set1_epi16((FTOK_COMMA << 8) | FTOK_INT_LIT);
+        const __m512i even = _mm512_setr_epi32(0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30);
+        while (count + 16u <= limit)
+        {
+            const uint32_t pos = cc->pos + count * 2u;
+            const __m256i kinds = _mm256_loadu_si256((const __m256i*)(cc->tk + pos));
+            if (_mm256_cmpneq_epi16_mask(kinds, pattern) != 0) { break; }
+            const __m512i lo = _mm512_loadu_si512(cc->td + pos);
+            const __m512i hi = _mm512_loadu_si512(cc->td + pos + 16u);
+            const __m512i values = _mm512_permutex2var_epi32(lo, even, hi);
+            uint8_t* dst = buf->data + offset + count * size;
+            if (size == 1u) { _mm_storeu_si128((__m128i*)dst, _mm512_cvtepi32_epi8(values)); }
+            else if (size == 2u) { _mm256_storeu_si256((__m256i*)dst, _mm512_cvtepi32_epi16(values)); }
+            else if (size == 4u) { _mm512_storeu_si512(dst, values); }
+            else
+            {
+                _mm512_storeu_si512(dst, _mm512_cvtepi32_epi64(_mm512_castsi512_si256(values)));
+                _mm512_storeu_si512(dst + 64u, _mm512_cvtepi32_epi64(_mm512_extracti64x4_epi64(values, 1)));
+            }
+            count += 16u;
+        }
+        cc->pos += count * 2u;
+    }
+    return count;
+}
+
 // Iterative static/global initializer: allocates storage in `.rodata` / `.data.rel.ro` / `.data`,
 // sizes incomplete arrays (`int a[] = {...}` or `char s[] = "..."`), and emits bytes + relocations!
 static __attribute__((noinline)) uint32_t fast_cc_init_static(FastCCState* cc, FastType* io_type, FastSecId sec, uint32_t align)
@@ -1063,7 +1125,7 @@ static __attribute__((noinline)) uint32_t fast_cc_init_static(FastCCState* cc, F
     if (sec == FSEC_DATA_REL_RO && align > cc->obj->data_rel_ro_align) { cc->obj->data_rel_ro_align = align; }
 
     // Fast path 1: `char s[] = "hello"` or `char s[N] = "hello"` (optionally braced `{"hello"}`)
-    const bool is_arr = ftype_is_array(cc, root_t);
+    const bool is_arr = ftype_is_array(root_t);
     if (is_arr && ftype_is_char_type(cc->ctypes[root_t & BUSTER_FTYPE_CIDX_MASK].inner) &&
         (fast_cc_peek(cc) == FTOK_STR_LIT ||
          (fast_cc_peek(cc) == FTOK_LBRACE && fast_cc_peek_at(cc, 1u) == FTOK_STR_LIT)))
@@ -1095,7 +1157,7 @@ static __attribute__((noinline)) uint32_t fast_cc_init_static(FastCCState* cc, F
     }
 
     // Fast path 2: scalar global `T x = expr;`
-    if (ftype_is_scalar(cc, root_t))
+    if (ftype_is_scalar(root_t))
     {
         const bool br = fast_cc_peek(cc) == FTOK_LBRACE;
         if (br) { cc->pos += 1u; }
@@ -1172,7 +1234,7 @@ static __attribute__((noinline)) uint32_t fast_cc_init_static(FastCCState* cc, F
                 if (fast_cc_peek(cc) == FTOK_DOT)
                 {
                     cc->pos += 1u;
-                    if (!ftype_is_record(cc, cur_t) || fast_cc_peek(cc) != FTOK_IDENT) { fast_cc_bail(cc, "static .designator"); break; }
+                    if (!ftype_is_record(cur_t) || fast_cc_peek(cc) != FTOK_IDENT) { fast_cc_bail(cc, "static .designator"); break; }
                     const uint32_t fid = fast_cc_data(cc);
                     cc->pos += 1u;
                     const FastComplexType* rec = cc->ctypes + (cur_t & BUSTER_FTYPE_CIDX_MASK);
@@ -1192,7 +1254,7 @@ static __attribute__((noinline)) uint32_t fast_cc_init_static(FastCCState* cc, F
                     const int64_t didx = fast_cc_const_int_expr(cc, false);
                     if (fast_cc_peek(cc) != FTOK_RBRACKET || didx < 0) { fast_cc_bail(cc, "static [designator]"); break; }
                     cc->pos += 1u;
-                    if (!ftype_is_array(cc, cur_t)) { fast_cc_bail(cc, "static [designator] non-array"); break; }
+                    if (!ftype_is_array(cur_t)) { fast_cc_bail(cc, "static [designator] non-array"); break; }
                     const FastComplexType* ar = cc->ctypes + (cur_t & BUSTER_FTYPE_CIDX_MASK);
                     const uint32_t esz = ftype_size(cc, ar->inner);
                     if (cur_t == f->type)
@@ -1214,7 +1276,7 @@ static __attribute__((noinline)) uint32_t fast_cc_init_static(FastCCState* cc, F
             if (fast_cc_peek(cc) == FTOK_ASSIGN) { cc->pos += 1u; }
             if (cc->bailout) { break; }
             // Initialize target `cur_t` at `cur_off`
-            if (ftype_is_scalar(cc, cur_t))
+            if (ftype_is_scalar(cur_t))
             {
                 const bool b2 = fast_cc_peek(cc) == FTOK_LBRACE;
                 if (b2) { cc->pos += 1u; }
@@ -1223,7 +1285,7 @@ static __attribute__((noinline)) uint32_t fast_cc_init_static(FastCCState* cc, F
                 fast_cc_write_static_scalar(cc, sec, cur_off, cur_t, cur_bf, v);
                 if (fast_cc_peek(cc) == FTOK_COMMA) { cc->pos += 1u; }
             }
-            else if (ftype_is_array(cc, cur_t) && ftype_is_char_type(cc->ctypes[cur_t & BUSTER_FTYPE_CIDX_MASK].inner) &&
+            else if (ftype_is_array(cur_t) && ftype_is_char_type(cc->ctypes[cur_t & BUSTER_FTYPE_CIDX_MASK].inner) &&
                      fast_cc_peek(cc) == FTOK_STR_LIT)
             {
                 uint32_t slen = 0;
@@ -1253,7 +1315,7 @@ static __attribute__((noinline)) uint32_t fast_cc_init_static(FastCCState* cc, F
         const FastMemberInfo* elem_bf = NULL;
         bool frame_done = false;
 
-        if (ftype_is_array(cc, f->type))
+        if (ftype_is_array(f->type))
         {
             const FastComplexType* ar = cc->ctypes + (f->type & BUSTER_FTYPE_CIDX_MASK);
             if (!f->is_incomplete_arr && f->idx >= ar->count)
@@ -1263,6 +1325,22 @@ static __attribute__((noinline)) uint32_t fast_cc_init_static(FastCCState* cc, F
             else
             {
                 const uint32_t esz = ftype_size(cc, ar->inner);
+                if (fast_cc_peek(cc) == FTOK_INT_LIT && fast_cc_peek_at(cc, 1u) == FTOK_COMMA)
+                {
+                    const uint64_t offset = f->base_off + (uint64_t)f->idx * esz;
+                    const uint32_t count = fast_cc_init_integer_run(cc, buf, offset, ar->inner, esz, ar->count - f->idx);
+                    if (count != 0)
+                    {
+                        f->idx += count;
+                        if (f->is_incomplete_arr && f->idx > f->max_elem)
+                        {
+                            f->max_elem = f->idx;
+                            const uint32_t end = (uint32_t)offset + count * esz;
+                            if (end > buf->len) { buf->len = end; }
+                        }
+                        continue;
+                    }
+                }
                 if (f->is_incomplete_arr && f->idx + 1u > f->max_elem)
                 {
                     const uint32_t need_end = f->base_off + (f->idx + 1u) * esz;
@@ -1275,7 +1353,7 @@ static __attribute__((noinline)) uint32_t fast_cc_init_static(FastCCState* cc, F
                 f->idx += 1u;
             }
         }
-        else if (ftype_is_record(cc, f->type))
+        else if (ftype_is_record(f->type))
         {
             const FastComplexType* rec = cc->ctypes + (f->type & BUSTER_FTYPE_CIDX_MASK);
             if (f->idx >= rec->count || (rec->kind == FCTYPE_UNION && f->idx >= 1u))
@@ -1313,7 +1391,7 @@ static __attribute__((noinline)) uint32_t fast_cc_init_static(FastCCState* cc, F
         }
 
         // String literal initializing nested `char[N]` field or array element!
-        if (ftype_is_array(cc, elem_t) && ftype_is_char_type(cc->ctypes[elem_t & BUSTER_FTYPE_CIDX_MASK].inner) &&
+        if (ftype_is_array(elem_t) && ftype_is_char_type(cc->ctypes[elem_t & BUSTER_FTYPE_CIDX_MASK].inner) &&
             fast_cc_peek(cc) == FTOK_STR_LIT)
         {
             uint32_t slen = 0;
@@ -1325,7 +1403,7 @@ static __attribute__((noinline)) uint32_t fast_cc_init_static(FastCCState* cc, F
             continue;
         }
 
-        if (ftype_is_scalar(cc, elem_t))
+        if (ftype_is_scalar(elem_t))
         {
             const bool b2 = fast_cc_peek(cc) == FTOK_LBRACE;
             if (b2) { cc->pos += 1u; }
@@ -1400,11 +1478,11 @@ struct FastVal
     uint8_t bf_off;
     uint8_t bf_width;
     uint8_t bf_unit;
-    uint8_t bf_signed;
-    uint8_t is_func_sym;   // 1 if FVAL_GLOBAL refers directly to a function symbol (enables direct `call sym`)
-    uint8_t is_lvalue;     // 1 if modifiable/addressable lvalue
-    uint8_t pad[2];
+    uint8_t bf_signed : 1;
+    uint8_t is_func_sym : 1;   // 1 if FVAL_GLOBAL refers directly to a function symbol (enables direct `call sym`)
+    uint8_t is_lvalue : 1;     // 1 if modifiable/addressable lvalue
 };
+_Static_assert(sizeof(FastVal) == 32, "expression stack entries fit one vector move");
 
 // Scratch register allocation order (RAX, R10, R11 first so ABI arg regs stay free longer!)
 static const uint8_t fast_gp_pool[9] = {
@@ -1716,7 +1794,7 @@ static BUSTER_DIRECT_HOT uint32_t fval_to_gp(FastExprCtx* ex, FastVal* v, bool c
         return r;
     }
 
-    if (v->kind == FVAL_SPILL && ftype_is_func(cc, v->type))
+    if (v->kind == FVAL_SPILL && ftype_is_func(v->type))
     {
         const uint32_t r = fval_alloc_gp(ex);
         x86_load(obj, r, FREG_RBP, v->off, 8u, false);
@@ -1724,7 +1802,7 @@ static BUSTER_DIRECT_HOT uint32_t fval_to_gp(FastExprCtx* ex, FastVal* v, bool c
     }
 
     // Arrays and lvalue functions decay to their address!
-    if (ftype_is_array(cc, v->type) || ftype_is_func(cc, v->type))
+    if (ftype_is_array(v->type) || ftype_is_func(v->type))
     {
         return fval_addr_to_gp(ex, v, consume);
     }
@@ -1927,7 +2005,7 @@ static BUSTER_DIRECT_HOT void fval_convert(FastExprCtx* ex, FastVal* v, FastType
     const FastType src_t = ftype_decay(cc, v->type);
     const FastType dst_u = ftype_unqual(dst_type);
     const FastType src_u = ftype_unqual(src_t);
-    if (src_u == dst_u && !ftype_is_array(cc, v->type) && !ftype_is_func(cc, v->type))
+    if (src_u == dst_u && !ftype_is_array(v->type) && !ftype_is_func(v->type))
     {
         v->type = dst_u;
         return;
@@ -2212,7 +2290,7 @@ static BUSTER_DIRECT_HOT void fval_convert(FastExprCtx* ex, FastVal* v, FastType
         return;
     }
     // Zero-cost decay of FVAL_LOCAL / FVAL_GLOBAL array or function to pointer (0 instructions, 0 spills!)
-    if ((ftype_is_array(cc, v->type) || ftype_is_func(cc, v->type)) && dsz == 8u)
+    if ((ftype_is_array(v->type) || ftype_is_func(v->type)) && dsz == 8u)
     {
         if (v->kind == FVAL_LOCAL) { v->kind = FVAL_LOCAL_ADDR; v->type = dst_u; v->is_lvalue = 0; return; }
         if (v->kind == FVAL_GLOBAL) { v->kind = FVAL_GLOBAL_ADDR; v->type = dst_u; v->is_lvalue = 0; return; }
@@ -2247,12 +2325,12 @@ static __attribute__((noinline)) void fast_cc_check_implicit_conv(FastCCState* c
 {
     const FastType dt = ftype_unqual(dst_t);
     const FastType st = ftype_decay(cc, src->type);
-    const bool dp = ftype_is_ptr(cc, dt);
-    const bool sp = ftype_is_ptr(cc, st);
+    const bool dp = ftype_is_ptr(dt);
+    const bool sp = ftype_is_ptr(st);
     if (dp && !sp)
     {
         // Only null pointer constant (integer literal 0) converts implicitly to a pointer!
-        if (!(ftype_is_int(cc, st) && src->kind == FVAL_IMM && src->imm == 0))
+        if (!(ftype_is_int(st) && src->kind == FVAL_IMM && src->imm == 0))
         {
             fast_cc_bail(cc, "implicit int-to-ptr conversion");
         }
@@ -2287,8 +2365,8 @@ static __attribute__((noinline)) void fast_cc_check_implicit_conv(FastCCState* c
         {
             const uint32_t db = du & BUSTER_FTYPE_SCALAR_MASK;
             const uint32_t sb = su & BUSTER_FTYPE_SCALAR_MASK;
-            const uint32_t ddepth = (du & BUSTER_FTYPE_SCALAR_PTR_MASK) >> BUSTER_FTYPE_SCALAR_PTR_SH;
-            const uint32_t sdepth = (su & BUSTER_FTYPE_SCALAR_PTR_MASK) >> BUSTER_FTYPE_SCALAR_PTR_SH;
+            const uint32_t ddepth = ftype_ptr_depth(du);
+            const uint32_t sdepth = ftype_ptr_depth(su);
             if (ddepth != sdepth || db != sb ||
                 ((du & BUSTER_FTYPE_SCALAR_CHAR) != (su & BUSTER_FTYPE_SCALAR_CHAR)))
             {
@@ -2336,7 +2414,7 @@ static BUSTER_DIRECT_HOT void fval_store(FastExprCtx* ex, FastVal* lhs, FastVal*
     }
 
     // Struct / union / 128-bit integer copy assignment
-    if (ftype_is_record(cc, lhs->type) || ftype_is_i128(lhs->type))
+    if (ftype_is_record(lhs->type) || ftype_is_i128(lhs->type))
     {
         if (ftype_is_i128(lhs->type)) { fval_convert(ex, rhs, ftype_unqual(lhs->type)); }
         const uint32_t sz = ftype_size(cc, lhs->type);
@@ -2604,8 +2682,8 @@ static BUSTER_DIRECT_HOT void fval_emit_binary(FastExprCtx* ex, uint8_t op, Fast
     fval_materialize_flags(ex, rhs);
     fval_materialize_flags(ex, lhs);
 
-    const bool lp = ftype_is_ptr(cc, lt);
-    const bool rp = ftype_is_ptr(cc, rt);
+    const bool lp = ftype_is_ptr(lt);
+    const bool rp = ftype_is_ptr(rt);
 
     // Pointer arithmetic: ptr + int, int + ptr, ptr - int, ptr - ptr
     if ((op == FTOK_PLUS || op == FTOK_MINUS) && (lp || rp))
@@ -3142,7 +3220,7 @@ static void fval_emit_incdec(FastExprCtx* ex, FastVal* lv, bool is_inc, bool is_
         new_r = fval_alloc_gp(ex);
         x86_mov_rr(obj, true, new_r, old_r);
     }
-    const bool is_ptr = ftype_is_ptr(cc, t);
+    const bool is_ptr = ftype_is_ptr(t);
     const int32_t step = is_ptr ? (int32_t)(ftype_size(cc, ftype_deref(cc, t)) != 0 ? ftype_size(cc, ftype_deref(cc, t)) : 1u) : 1;
     const bool w64 = ftype_size(cc, t) == 8u;
     if (ftype_is_bool(t))
@@ -3305,10 +3383,10 @@ static __attribute__((noinline)) void fval_emit_builtin_call(FastExprCtx* ex, ui
     }
     if (id == cc->id_atomic_load_n)
     {
-        if (argc < 2u || !ftype_is_ptr(cc, args[0].type)) { fast_cc_bail(cc, "atomic_load_n args"); return; }
+        if (argc < 2u || !ftype_is_ptr(args[0].type)) { fast_cc_bail(cc, "atomic_load_n args"); return; }
         const FastType pt = ftype_deref(cc, args[0].type);
         const uint32_t sz = ftype_size(cc, pt);
-        if (!ftype_is_int(cc, pt) && !ftype_is_ptr(cc, pt)) { fast_cc_bail(cc, "atomic_load_n type"); return; }
+        if (!ftype_is_int(pt) && !ftype_is_ptr(pt)) { fast_cc_bail(cc, "atomic_load_n type"); return; }
         if (sz != 1u && sz != 2u && sz != 4u && sz != 8u) { fast_cc_bail(cc, "atomic_load_n size"); return; }
         fval_release(ex, &args[1]);
         if (ex->eval_only > 0) { fval_release(ex, &args[0]); *out = (FastVal){ .type = pt, .kind = FVAL_REG }; return; }
@@ -3319,10 +3397,10 @@ static __attribute__((noinline)) void fval_emit_builtin_call(FastExprCtx* ex, ui
     }
     if (id == cc->id_atomic_store_n)
     {
-        if (argc < 3u || !ftype_is_ptr(cc, args[0].type)) { fast_cc_bail(cc, "atomic_store_n args"); return; }
+        if (argc < 3u || !ftype_is_ptr(args[0].type)) { fast_cc_bail(cc, "atomic_store_n args"); return; }
         const FastType pt = ftype_deref(cc, args[0].type);
         const uint32_t sz = ftype_size(cc, pt);
-        if (!ftype_is_int(cc, pt) && !ftype_is_ptr(cc, pt)) { fast_cc_bail(cc, "atomic_store_n type"); return; }
+        if (!ftype_is_int(pt) && !ftype_is_ptr(pt)) { fast_cc_bail(cc, "atomic_store_n type"); return; }
         if (sz != 1u && sz != 2u && sz != 4u && sz != 8u) { fast_cc_bail(cc, "atomic_store_n size"); return; }
         const bool need_fence = args[2].kind != FVAL_IMM || args[2].imm >= 5;
         fval_release(ex, &args[2]);
@@ -3378,7 +3456,7 @@ static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, F
             cc->ctypes[fc].inner = ret_t;
             cc->ctypes[fc].is_oldstyle = 1u;
             cc->ctypes[fc].complete = 1u;
-            si = fast_cc_sym_bind(cc, lid, (FastSym){ .kind = FSYM_FUNC, .storage = 2u, .type = BUSTER_FTYPE_COMPLEX_BIT | fc });
+            si = fast_cc_sym_bind(cc, lid, (FastSym){ .kind = FSYM_FUNC, .storage = 2u, .type = ftype_from_index(cc, fc) });
         }
         const uint32_t osym = fast_cc_ensure_obj_sym(cc, si);
         *callee = (FastVal){ .type = cc->syms[si].type, .kind = FVAL_GLOBAL, .sym_idx = osym, .is_func_sym = 1u };
@@ -3386,8 +3464,8 @@ static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, F
 
     // Resolve function type (handles both `func` and `func_ptr`!)
     FastType ft = callee->type;
-    if (ftype_is_ptr(cc, ft)) { ft = ftype_deref(cc, ft); }
-    if (!ftype_is_func(cc, ft))
+    if (ftype_is_ptr(ft)) { ft = ftype_deref(cc, ft); }
+    if (!ftype_is_func(ft))
     {
         fast_cc_bail(cc, "call to non-function");
         return;
@@ -3441,7 +3519,7 @@ static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, F
             // Default argument promotion for variadic / old-style args
             FastType at = ftype_decay(cc, args[i].type);
             if (ftype_is_float(at) && !ftype_is_f64(at)) { pt = FTYPE_F64; }
-            else if (ftype_is_int(cc, at) && ftype_size(cc, at) < 4u) { pt = FTYPE_I32; }
+            else if (ftype_is_int(at) && ftype_size(cc, at) < 4u) { pt = FTYPE_I32; }
             else { pt = ftype_unqual(at); }
         }
         if (ftype_is_unsupported(pt) || ftype_is_unsupported(args[i].type))
@@ -3449,7 +3527,7 @@ static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, F
             fast_cc_bail(cc, "unsupported call arg type");
             return;
         }
-        if (!ftype_is_record(cc, pt))
+        if (!ftype_is_record(pt))
         {
             fval_convert(ex, &args[i], pt);
             fval_spill_one(ex, &args[i]);
@@ -3463,7 +3541,7 @@ static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, F
     // Classify return type: hidden sret pointer in RDI if struct/union > 16B (or FABI_MEM)
     bool has_sret = false;
     int32_t sret_slot = 0;
-    if (ftype_is_record(cc, ret_t))
+    if (ftype_is_record(ret_t))
     {
         const FastComplexType* rct = cc->ctypes + (ret_t & BUSTER_FTYPE_CIDX_MASK);
         if (rct->abi_lo == FABI_MEM)
@@ -3488,7 +3566,7 @@ static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, F
     {
         const FastType at = args[i].type;
         locs[i] = (ArgLoc){ 0 };
-        if (ftype_is_record(cc, at))
+        if (ftype_is_record(at))
         {
             const FastComplexType* rct = cc->ctypes + (at & BUSTER_FTYPE_CIDX_MASK);
             locs[i].sz = rct->size;
@@ -3614,7 +3692,7 @@ static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, F
             }
             else if (args[i].kind == FVAL_LOCAL || args[i].kind == FVAL_SPILL)
             {
-                if (ftype_is_array(cc, args[i].type)) { x86_lea(obj, dst, FREG_RBP, args[i].off); }
+                if (ftype_is_array(args[i].type)) { x86_lea(obj, dst, FREG_RBP, args[i].off); }
                 else { x86_load(obj, dst, FREG_RBP, args[i].off, ftype_size(cc, args[i].type), ftype_is_signed(cc, args[i].type)); }
             }
             else
@@ -3660,7 +3738,7 @@ static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, F
     {
         *out = (FastVal){ .type = FTYPE_VOID, .kind = FVAL_VOID };
     }
-    else if (ftype_is_record(cc, ret_t))
+    else if (ftype_is_record(ret_t))
     {
         const FastComplexType* rct = cc->ctypes + (ret_t & BUSTER_FTYPE_CIDX_MASK);
         if (has_sret)
@@ -3828,7 +3906,7 @@ static __attribute__((noinline)) void fval_emit_va_arg(FastExprCtx* ex, FastVal*
         return;
     }
 
-    if (ftype_is_record(cc, arg_t))
+    if (ftype_is_record(arg_t))
     {
         const FastComplexType* rct = cc->ctypes + (arg_t & BUSTER_FTYPE_CIDX_MASK);
         const int32_t rslot = fast_cc_alloc_tmp(cc, rct->size < 16u ? 16u : rct->size, rct->align < 8u ? 8u : rct->align);
@@ -3936,10 +4014,10 @@ static BUSTER_DIRECT_HOT void fast_expr_reduce_top(FastExprCtx* ex, FastExprOp* 
         if (op == FEOP_DEREF)
         {
             const FastType dt = ftype_decay(cc, v->type);
-            if (!ftype_is_ptr(cc, dt)) { fast_cc_bail(cc, "deref non-pointer"); return; }
+            if (!ftype_is_ptr(dt)) { fast_cc_bail(cc, "deref non-pointer"); return; }
             const FastType elem = ftype_deref(cc, dt);
             if (ex->eval_only > 0) { *v = (FastVal){ .type = elem, .kind = FVAL_INDIRECT, .is_lvalue = 1u }; return; }
-            if (ftype_is_func(cc, elem))
+            if (ftype_is_func(elem))
             {
                 // `(*direct_func)` stays direct; `(*fn_ptr_lvalue)` MUST load the pointer from memory!
                 if (v->kind == FVAL_GLOBAL && v->is_func_sym)
@@ -4069,14 +4147,14 @@ static BUSTER_DIRECT_HOT void fast_expr_reduce_top(FastExprCtx* ex, FastExprOp* 
         const FastType else_t = ftype_decay(cc, else_v.type);
         FastType common_t = FTYPE_VOID;
         if (ftype_is_void(then_t) || ftype_is_void(else_t)) { common_t = FTYPE_VOID; }
-        else if (ftype_is_record(cc, then_t)) { common_t = then_t; }
-        else if (ftype_is_ptr(cc, then_t) && ftype_is_ptr(cc, else_t))
+        else if (ftype_is_record(then_t)) { common_t = then_t; }
+        else if (ftype_is_ptr(then_t) && ftype_is_ptr(else_t))
         {
             // Prefer non-void* pointer if the other is void*
             common_t = ftype_is_void(ftype_deref(cc, then_t)) ? else_t : then_t;
         }
-        else if (ftype_is_ptr(cc, then_t)) { common_t = then_t; }
-        else if (ftype_is_ptr(cc, else_t)) { common_t = else_t; }
+        else if (ftype_is_ptr(then_t)) { common_t = then_t; }
+        else if (ftype_is_ptr(else_t)) { common_t = else_t; }
         else { common_t = ftype_usual_arith(cc, then_t, else_t); }
 
         if (ex->eval_only > 0)
@@ -4095,7 +4173,7 @@ static BUSTER_DIRECT_HOT void fast_expr_reduce_top(FastExprCtx* ex, FastExprOp* 
             ex->vstack[ex->vsp++] = (FastVal){ .type = FTYPE_VOID, .kind = FVAL_VOID };
             return;
         }
-        if (ftype_is_record(cc, common_t))
+        if (ftype_is_record(common_t))
         {
             FastVal dst = { .type = common_t, .kind = FVAL_LOCAL, .off = cur.slot };
             fval_store(ex, &dst, &else_v, false, NULL);
@@ -4266,13 +4344,13 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
                     }
                     else if (sym->kind == FSYM_FUNC)
                     {
-                        if (ex.eval_only == 0) { sym->referenced = 1u; }
+                        if (ex.eval_only == 0) { fast_cc_reference(cc, sym); }
                         const uint32_t osym = ex.eval_only > 0 ? 0u : fast_cc_ensure_obj_sym(cc, si);
                         if (ex.vsp < 128u) { ex.vstack[ex.vsp++] = (FastVal){ .type = sym->type, .kind = FVAL_GLOBAL, .sym_idx = osym, .imm = 0, .is_func_sym = 1u }; }
                     }
                     else if (sym->kind == FSYM_GLOBAL)
                     {
-                        if (ex.eval_only == 0) { sym->referenced = 1u; }
+                        if (ex.eval_only == 0) { fast_cc_reference(cc, sym); }
                         const uint32_t osym = ex.eval_only > 0 ? 0u : fast_cc_ensure_obj_sym(cc, si);
                         if (ex.vsp < 128u) { ex.vstack[ex.vsp++] = (FastVal){ .type = sym->type, .kind = FVAL_GLOBAL, .sym_idx = osym, .imm = 0, .is_lvalue = 1u }; }
                     }
@@ -4347,7 +4425,7 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
                         if (osp >= 128u) { fast_cc_bail(cc, "expr op stack full"); break; }
                         ops[osp++] = (FastExprOp){ .op = FEOP_COMPOUND_LIT, .extra = 0u, .type = ct, .slot = slot };
                         // Handle optional designator `.field =` or `[idx] =` right before first element!
-                        if (fast_cc_peek(cc) == FTOK_DOT && ftype_is_record(cc, ct))
+                        if (fast_cc_peek(cc) == FTOK_DOT && ftype_is_record(ct))
                         {
                             cc->pos += 1u;
                             if (fast_cc_peek(cc) != FTOK_IDENT) { fast_cc_bail(cc, "compound lit .field"); break; }
@@ -4498,7 +4576,7 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
                 if (ex.vsp < 128u)
                 {
                     ex.vstack[ex.vsp++] = (FastVal){
-                        .type = ac != 0 ? (BUSTER_FTYPE_COMPLEX_BIT | ac) : ftype_make_ptr(cc, FTYPE_I8),
+                        .type = ac != 0 ? ftype_from_index(cc, ac) : ftype_make_ptr(cc, FTYPE_I8),
                         .kind = FVAL_GLOBAL,
                         .sym_idx = cc->obj->sec_sym_rodata_str,
                         .imm = (int64_t)ro_off,
@@ -4553,10 +4631,10 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
             if (is_arrow)
             {
                 rec_t = ftype_decay(cc, rec_t);
-                if (!ftype_is_ptr(cc, rec_t)) { fast_cc_bail(cc, "-> on non-ptr"); break; }
+                if (!ftype_is_ptr(rec_t)) { fast_cc_bail(cc, "-> on non-ptr"); break; }
                 rec_t = ftype_deref(cc, rec_t);
             }
-            if (!ftype_is_record(cc, rec_t)) { fast_cc_bail(cc, "member access on non-record"); break; }
+            if (!ftype_is_record(rec_t)) { fast_cc_bail(cc, "member access on non-record"); break; }
             const FastMemberInfo* mi = fast_struct_find_member(cc, rec_t & BUSTER_FTYPE_CIDX_MASK, fid);
             if (mi == NULL) { fast_cc_bail(cc, "unknown struct member"); break; }
             if (ex.eval_only > 0)
@@ -4654,12 +4732,12 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
             FastVal idx_v = ex.vstack[--ex.vsp];
             FastVal base_v = ex.vstack[--ex.vsp];
             // Support C commutative `i[a]`!
-            if (!ftype_is_ptr(cc, ftype_decay(cc, base_v.type)) && ftype_is_ptr(cc, ftype_decay(cc, idx_v.type)))
+            if (!ftype_is_ptr(ftype_decay(cc, base_v.type)) && ftype_is_ptr(ftype_decay(cc, idx_v.type)))
             {
                 FastVal tmp = base_v; base_v = idx_v; idx_v = tmp;
             }
             const FastType bt = ftype_decay(cc, base_v.type);
-            if (!ftype_is_ptr(cc, bt)) { fast_cc_bail(cc, "subscript non-pointer"); break; }
+            if (!ftype_is_ptr(bt)) { fast_cc_bail(cc, "subscript non-pointer"); break; }
             const FastType elem = ftype_deref(cc, bt);
             const uint32_t esz = ftype_size(cc, elem) != 0 ? ftype_size(cc, elem) : 1u;
             if (ex.eval_only > 0)
@@ -4671,12 +4749,12 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
             if (idx_v.kind == FVAL_IMM)
             {
                 const int64_t boff = idx_v.imm * (int64_t)esz;
-                if (ftype_is_array(cc, base_v.type) && base_v.kind == FVAL_LOCAL && boff >= INT32_MIN && boff <= INT32_MAX)
+                if (ftype_is_array(base_v.type) && base_v.kind == FVAL_LOCAL && boff >= INT32_MIN && boff <= INT32_MAX)
                 {
                     ex.vstack[ex.vsp++] = (FastVal){ .type = elem, .kind = FVAL_LOCAL, .off = base_v.off + (int32_t)boff, .is_lvalue = 1u };
                     continue;
                 }
-                if (ftype_is_array(cc, base_v.type) && base_v.kind == FVAL_GLOBAL)
+                if (ftype_is_array(base_v.type) && base_v.kind == FVAL_GLOBAL)
                 {
                     ex.vstack[ex.vsp++] = (FastVal){ .type = elem, .kind = FVAL_GLOBAL, .sym_idx = base_v.sym_idx, .imm = base_v.imm + boff, .is_lvalue = 1u };
                     continue;
@@ -4710,18 +4788,18 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
                 FastVal elem_v = ex.vstack[--ex.vsp];
                 if (ex.eval_only == 0)
                 {
-                    if (ftype_is_scalar(cc, cl.type))
+                    if (ftype_is_scalar(cl.type))
                     {
                         FastVal dst = { .type = cl.type, .kind = FVAL_LOCAL, .off = cl.slot };
                         fval_store(&ex, &dst, &elem_v, false, NULL);
                     }
-                    else if (ftype_is_array(cc, cl.type))
+                    else if (ftype_is_array(cl.type))
                     {
                         const FastType et = cc->ctypes[cl.type & BUSTER_FTYPE_CIDX_MASK].inner;
                         FastVal dst = { .type = et, .kind = FVAL_LOCAL, .off = cl.slot + (int32_t)(cl.extra * ftype_size(cc, et)) };
                         fval_store(&ex, &dst, &elem_v, false, NULL);
                     }
-                    else if (ftype_is_record(cc, cl.type))
+                    else if (ftype_is_record(cl.type))
                     {
                         const FastComplexType* rec = cc->ctypes + (cl.type & BUSTER_FTYPE_CIDX_MASK);
                         if (cl.extra < rec->count)
@@ -4819,7 +4897,7 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
 
             if (ex.eval_only == 0)
             {
-                if (ftype_is_record(cc, then_t))
+                if (ftype_is_record(then_t))
                 {
                     const FastComplexType* rct = cc->ctypes + (then_t & BUSTER_FTYPE_CIDX_MASK);
                     tern_slot = fast_cc_alloc_tmp(cc, rct->size, rct->align < 8u ? 8u : rct->align);
@@ -4891,13 +4969,13 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
                     FastVal elem_v = ex.vstack[--ex.vsp];
                     if (ex.eval_only == 0)
                     {
-                        if (ftype_is_array(cc, cl->type))
+                        if (ftype_is_array(cl->type))
                         {
                             const FastType et = cc->ctypes[cl->type & BUSTER_FTYPE_CIDX_MASK].inner;
                             FastVal dst = { .type = et, .kind = FVAL_LOCAL, .off = cl->slot + (int32_t)(cl->extra * ftype_size(cc, et)) };
                             fval_store(&ex, &dst, &elem_v, false, NULL);
                         }
-                        else if (ftype_is_record(cc, cl->type))
+                        else if (ftype_is_record(cl->type))
                         {
                             const FastComplexType* rec = cc->ctypes + (cl->type & BUSTER_FTYPE_CIDX_MASK);
                             if (cl->extra < rec->count)
@@ -4914,7 +4992,7 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
                     cl->extra += 1u;
                 }
                 cc->pos += 1u;
-                if (fast_cc_peek(cc) == FTOK_DOT && ftype_is_record(cc, cl->type))
+                if (fast_cc_peek(cc) == FTOK_DOT && ftype_is_record(cl->type))
                 {
                     cc->pos += 1u;
                     const FastComplexType* rec = cc->ctypes + (cl->type & BUSTER_FTYPE_CIDX_MASK);
@@ -5173,7 +5251,7 @@ static __attribute__((noinline)) int32_t fast_cc_init_local(FastCCState* cc, Fas
     if (extra_align > al) { al = extra_align; }
 
     // Fast path 1: `char s[] = "hello"` or `char s[N] = "hello"` (optionally braced)
-    const bool is_arr = ftype_is_array(cc, root_t);
+    const bool is_arr = ftype_is_array(root_t);
     if (is_arr && ftype_is_char_type(cc->ctypes[root_t & BUSTER_FTYPE_CIDX_MASK].inner) &&
         (fast_cc_peek(cc) == FTOK_STR_LIT ||
          (fast_cc_peek(cc) == FTOK_LBRACE && fast_cc_peek_at(cc, 1u) == FTOK_STR_LIT)))
@@ -5207,7 +5285,7 @@ static __attribute__((noinline)) int32_t fast_cc_init_local(FastCCState* cc, Fas
     }
 
     // Fast path 2: scalar or non-braced struct copy (`T x = expr;`)
-    if (ftype_is_scalar(cc, root_t) || (ftype_is_record(cc, root_t) && fast_cc_peek(cc) != FTOK_LBRACE))
+    if (ftype_is_scalar(root_t) || (ftype_is_record(root_t) && fast_cc_peek(cc) != FTOK_LBRACE))
     {
         const int32_t off = fast_cc_alloc_local(cc, ftype_size(cc, root_t), al);
         const bool br = fast_cc_peek(cc) == FTOK_LBRACE;
@@ -5296,7 +5374,7 @@ static __attribute__((noinline)) int32_t fast_cc_init_local(FastCCState* cc, Fas
                 if (fast_cc_peek(cc) == FTOK_DOT)
                 {
                     cc->pos += 1u;
-                    if (!ftype_is_record(cc, cur_t) || fast_cc_peek(cc) != FTOK_IDENT) { fast_cc_bail(cc, "local .designator"); break; }
+                    if (!ftype_is_record(cur_t) || fast_cc_peek(cc) != FTOK_IDENT) { fast_cc_bail(cc, "local .designator"); break; }
                     const FastComplexType* rec = cc->ctypes + (cur_t & BUSTER_FTYPE_CIDX_MASK);
                     const FastMemberInfo* mi = fast_struct_find_member(cc, cur_t & BUSTER_FTYPE_CIDX_MASK, fast_cc_data(cc));
                     if (mi == NULL) { fast_cc_bail(cc, "unknown local .designator"); break; }
@@ -5310,7 +5388,7 @@ static __attribute__((noinline)) int32_t fast_cc_init_local(FastCCState* cc, Fas
                 {
                     cc->pos += 1u;
                     const int64_t didx = fast_cc_const_int_expr(cc, false);
-                    if (fast_cc_peek(cc) != FTOK_RBRACKET || didx < 0 || !ftype_is_array(cc, cur_t)) { fast_cc_bail(cc, "local [designator]"); break; }
+                    if (fast_cc_peek(cc) != FTOK_RBRACKET || didx < 0 || !ftype_is_array(cur_t)) { fast_cc_bail(cc, "local [designator]"); break; }
                     cc->pos += 1u;
                     const FastComplexType* ar = cc->ctypes + (cur_t & BUSTER_FTYPE_CIDX_MASK);
                     if (cur_t == f->type) { f->idx = (uint32_t)didx + 1u; }
@@ -5321,14 +5399,14 @@ static __attribute__((noinline)) int32_t fast_cc_init_local(FastCCState* cc, Fas
             }
             if (fast_cc_peek(cc) == FTOK_ASSIGN) { cc->pos += 1u; }
             if (cc->bailout) { break; }
-            if (ftype_is_scalar(cc, cur_t) || (ftype_is_record(cc, cur_t) && fast_cc_peek(cc) != FTOK_LBRACE))
+            if (ftype_is_scalar(cur_t) || (ftype_is_record(cur_t) && fast_cc_peek(cc) != FTOK_LBRACE))
             {
                 FastVal dst = { .type = cur_t, .kind = cur_bf != NULL ? FVAL_BITFIELD : FVAL_LOCAL, .bf_base = FVAL_LOCAL, .off = cur_off };
                 if (cur_bf != NULL) { dst.bf_off = cur_bf->bit_offset; dst.bf_width = cur_bf->bit_width; dst.bf_unit = cur_bf->bit_unit_size; dst.bf_signed = cur_bf->bit_signed; }
                 fast_cc_store_expr_to_val(cc, dst, true);
                 if (fast_cc_peek(cc) == FTOK_COMMA) { cc->pos += 1u; }
             }
-            else if (ftype_is_array(cc, cur_t) && ftype_is_char_type(cc->ctypes[cur_t & BUSTER_FTYPE_CIDX_MASK].inner) &&
+            else if (ftype_is_array(cur_t) && ftype_is_char_type(cc->ctypes[cur_t & BUSTER_FTYPE_CIDX_MASK].inner) &&
                      fast_cc_peek(cc) == FTOK_STR_LIT)
             {
                 uint32_t slen = 0;
@@ -5360,7 +5438,7 @@ static __attribute__((noinline)) int32_t fast_cc_init_local(FastCCState* cc, Fas
         const FastMemberInfo* elem_bf = NULL;
         bool done = false;
 
-        if (ftype_is_array(cc, f->type))
+        if (ftype_is_array(f->type))
         {
             const FastComplexType* ar = cc->ctypes + (f->type & BUSTER_FTYPE_CIDX_MASK);
             if (f->idx >= ar->count) { done = true; }
@@ -5371,7 +5449,7 @@ static __attribute__((noinline)) int32_t fast_cc_init_local(FastCCState* cc, Fas
                 f->idx += 1u;
             }
         }
-        else if (ftype_is_record(cc, f->type))
+        else if (ftype_is_record(f->type))
         {
             const FastComplexType* rec = cc->ctypes + (f->type & BUSTER_FTYPE_CIDX_MASK);
             if (f->idx >= rec->count || (rec->kind == FCTYPE_UNION && f->idx >= 1u)) { done = true; }
@@ -5402,7 +5480,7 @@ static __attribute__((noinline)) int32_t fast_cc_init_local(FastCCState* cc, Fas
             break;
         }
 
-        if (ftype_is_array(cc, elem_t) && ftype_is_char_type(cc->ctypes[elem_t & BUSTER_FTYPE_CIDX_MASK].inner) &&
+        if (ftype_is_array(elem_t) && ftype_is_char_type(cc->ctypes[elem_t & BUSTER_FTYPE_CIDX_MASK].inner) &&
             fast_cc_peek(cc) == FTOK_STR_LIT)
         {
             uint32_t slen = 0;
@@ -5416,7 +5494,7 @@ static __attribute__((noinline)) int32_t fast_cc_init_local(FastCCState* cc, Fas
             continue;
         }
 
-        if (ftype_is_scalar(cc, elem_t))
+        if (ftype_is_scalar(elem_t))
         {
             const bool b2 = fast_cc_peek(cc) == FTOK_LBRACE;
             if (b2) { cc->pos += 1u; }
@@ -5437,7 +5515,7 @@ static __attribute__((noinline)) int32_t fast_cc_init_local(FastCCState* cc, Fas
             if (sp >= 32u) { fast_cc_bail(cc, "local init depth"); break; }
             st[sp++] = (LInitFrame){ .type = elem_t, .base_off = elem_off, .idx = 0, .braced = true };
         }
-        else if (ftype_is_record(cc, elem_t))
+        else if (ftype_is_record(elem_t))
         {
             // Could be a struct-typed expression OR brace-elided scalar elements! Check if expression evaluates to record?
             // Safe & fast: if next token is an identifier whose sym has record type `elem_t`, do struct copy; else brace-elide!
@@ -5495,12 +5573,15 @@ struct FastStmtFrame
     uint32_t step_pos;     // token index of for-step expr (UINT32_MAX if none)
 };
 
+#define BUSTER_FSWITCH_BUCKET_BITS 11u
+
 typedef struct FastSwitchCase FastSwitchCase;
 struct FastSwitchCase
 {
     int64_t val;
     uint32_t label_id;
-    uint32_t pad;
+    uint16_t previous;  // one-based index of the previous case in this bucket
+    uint16_t bucket;
 };
 
 typedef struct FastSwitchCtx FastSwitchCtx;
@@ -5656,7 +5737,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
     FastObj* obj = cc->obj;
     FastSym* fn_sym = cc->syms + sym_idx;
     const FastType fn_t = fn_sym->type;
-    if (!ftype_is_func(cc, fn_t)) { fast_cc_bail(cc, "compile non-func"); return; }
+    if (!ftype_is_func(fn_t)) { fast_cc_bail(cc, "compile non-func"); return; }
     const FastComplexType* fn = cc->ctypes + (fn_t & BUSTER_FTYPE_CIDX_MASK);
     const FastType ret_t = ftype_unqual(fn->inner);
     if (ftype_is_unsupported(ret_t)) { fast_cc_bail(cc, "unsupported return type"); return; }
@@ -5702,7 +5783,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
     int32_t stk_off = 16; // first stack parameter at [rbp + 16]
 
     // Hidden sret pointer for >16B struct return
-    if (ftype_is_record(cc, ret_t) && cc->ctypes[ret_t & BUSTER_FTYPE_CIDX_MASK].abi_lo == FABI_MEM)
+    if (ftype_is_record(ret_t) && cc->ctypes[ret_t & BUSTER_FTYPE_CIDX_MASK].abi_lo == FABI_MEM)
     {
         cc->cur_sret_off = fast_cc_alloc_local(cc, 8u, 8u);
         x86_store(obj, FREG_RBP, cc->cur_sret_off, FREG_RDI, 8u);
@@ -5742,7 +5823,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
         const uint32_t pname = i < param_count ? cc->param_names[param_names_start + i] : 0u;
         int32_t slot = 0;
 
-        if (ftype_is_record(cc, pt))
+        if (ftype_is_record(pt))
         {
             const FastComplexType* rct = cc->ctypes + (pt & BUSTER_FTYPE_CIDX_MASK);
             bool in_regs = false;
@@ -5819,6 +5900,11 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
     uint32_t sw_sp = 0;
     FastSwitchCase* sw_cases = (FastSwitchCase*)fast_arena_alloc(cc->scratch, 4096u * sizeof(FastSwitchCase), 8);
     uint32_t sw_case_used = 0;
+    uint16_t case_heads[1u << BUSTER_FSWITCH_BUCKET_BITS];
+    if (scan.has_switch)
+    {
+        memset(case_heads, 0, sizeof(case_heads));
+    }
     FastUserLabel* ulabels = (FastUserLabel*)fast_arena_alloc(cc->scratch, 512u * sizeof(FastUserLabel), 8);
     uint32_t ulabel_count = 0;
     bool saw_return_or_exit = false;
@@ -5920,7 +6006,12 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                 const FastSwitchCtx* sw = sw_stack + top->sw_idx;
                 fast_cc_emit_switch_dispatch(cc, sw, sw_cases + sw->case_start);
                 fast_label_bind(obj, top->lbl1); // break_lbl
-                sw_case_used = sw->case_start;
+                // Pop this switch's hash chains. An enclosing switch can already have a case in the same bucket.
+                while (sw_case_used > sw->case_start)
+                {
+                    const FastSwitchCase* entry = &sw_cases[--sw_case_used];
+                    case_heads[entry->bucket] = entry->previous;
+                }
                 sw_sp -= 1u;
                 break_sp -= 1u;
                 ssp -= 1u;
@@ -5952,9 +6043,12 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                 const uint32_t clbl = fast_label_new(obj);
                 fast_label_bind(obj, clbl);
                 FastSwitchCtx* cur_sw = sw_stack + (sw_sp - 1u);
-                for (uint32_t ci = 0; ci < cur_sw->case_count; ci += 1)
+                const uint64_t hash = (uint64_t)cv * UINT64_C(0x9e3779b97f4a7c15);
+                const uint16_t bucket = (uint16_t)(hash >> (64u - BUSTER_FSWITCH_BUCKET_BITS));
+                const uint16_t head = case_heads[bucket];
+                for (uint32_t link = head; link > cur_sw->case_start; link = sw_cases[link - 1u].previous)
                 {
-                    if (sw_cases[cur_sw->case_start + ci].val == cv)
+                    if (sw_cases[link - 1u].val == cv)
                     {
                         fast_cc_bail(cc, "duplicate case value");
                         break;
@@ -5963,7 +6057,13 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                 if (cc->bailout) { break; }
                 if (sw_case_used < 4096u)
                 {
-                    sw_cases[sw_case_used++] = (FastSwitchCase){ .val = cv, .label_id = clbl };
+                    sw_cases[sw_case_used++] = (FastSwitchCase){
+                        .val = cv,
+                        .label_id = clbl,
+                        .previous = head,
+                        .bucket = bucket,
+                    };
+                    case_heads[bucket] = (uint16_t)sw_case_used;
                     cur_sw->case_count += 1u;
                 }
                 else { fast_cc_bail(cc, "too many switch cases"); break; }
@@ -6264,7 +6364,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                 if (fval_holds_gp(&rv)) { ex.gp_used |= (uint16_t)(1u << rv.reg); }
                 if (fval_holds_xmm(&rv)) { ex.xmm_used |= (uint8_t)(1u << rv.reg); }
 
-                if (ftype_is_record(cc, ret_t))
+                if (ftype_is_record(ret_t))
                 {
                     const FastComplexType* rct = cc->ctypes + (ret_t & BUSTER_FTYPE_CIDX_MASK);
                     const uint32_t src_a = fval_addr_to_gp(&ex, &rv, true);
@@ -6342,7 +6442,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                         fast_cc_sym_bind(cc, dr.name_id, (FastSym){ .kind = FSYM_TYPEDEF, .type = dr.type });
                     }
                 }
-                else if (ftype_is_func(cc, dr.type))
+                else if (ftype_is_func(dr.type))
                 {
                     // Local extern function declaration
                     if (dr.name_id != 0)
@@ -6513,7 +6613,8 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
 static bool fast_cc_compile_unit(FastCCState* cc)
 {
     FastObj* obj = cc->obj;
-    FastBodyTask* deferred = (FastBodyTask*)fast_arena_alloc(cc->arena, 4096u * sizeof(FastBodyTask), 8);
+    FastBodyTask* deferred = (FastBodyTask*)fast_arena_alloc(cc->arena, BUSTER_FDEFERRED_LIMIT * sizeof(FastBodyTask), 8);
+    cc->deferred = deferred;
     uint32_t deferred_count = 0;
     if (deferred == NULL) { fast_cc_bail(cc, "deferred inline pool alloc"); return false; }
 
@@ -6552,7 +6653,7 @@ static bool fast_cc_compile_unit(FastCCState* cc)
             const uint8_t is_wk = (ds.attr.weak || dr.attr.weak) ? 1u : 0u;
 
             // Function definition!
-            if (first && ftype_is_func(cc, dr.type) && fast_cc_peek(cc) == FTOK_LBRACE)
+            if (first && ftype_is_func(dr.type) && fast_cc_peek(cc) == FTOK_LBRACE)
             {
                 const uint8_t stor = ds.is_static ? (ds.is_inline ? 4u : 1u) :
                                      (ds.is_inline && !ds.is_extern) ? 3u : 0u;
@@ -6585,12 +6686,15 @@ static bool fast_cc_compile_unit(FastCCState* cc)
                 {
                     const FastBodyScan bscan = fast_cc_prescan_body(cc, cc->pos);
                     if (bscan.end_pos == UINT32_MAX) { fast_cc_bail(cc, "unclosed inline body"); break; }
-                    if (deferred_count < 4096u)
+                    if (deferred_count < BUSTER_FDEFERRED_LIMIT)
                     {
-                        deferred[deferred_count++] = (FastBodyTask){
+                        deferred[deferred_count] = (FastBodyTask){
                             .sym_idx = si, .body_start = cc->pos, .body_end = bscan.end_pos,
                             .param_names_start = dr.param_names_start, .param_count = dr.param_count,
+                            .previous_task = cc->syms[si].deferred_task,
                         };
+                        if (cc->syms[si].referenced) { fast_cc_ready_task(cc, deferred_count); }
+                        cc->syms[si].deferred_task = (uint16_t)(++deferred_count);
                     }
                     else { fast_cc_bail(cc, "too many inline functions"); break; }
                     cc->pos = bscan.end_pos + 1u;
@@ -6615,7 +6719,7 @@ static bool fast_cc_compile_unit(FastCCState* cc)
                 }
             }
             // Function prototype
-            else if (ftype_is_func(cc, dr.type))
+            else if (ftype_is_func(dr.type))
             {
                 if (dr.name_id != 0)
                 {
@@ -6654,8 +6758,8 @@ static bool fast_cc_compile_unit(FastCCState* cc)
                 if (si != 0 && cc->syms[si].kind == FSYM_GLOBAL)
                 {
                     // Update incomplete array type or storage if redeclared!
-                    if (ftype_is_array(cc, cc->syms[si].type) && !cc->ctypes[cc->syms[si].type & BUSTER_FTYPE_CIDX_MASK].complete &&
-                        ftype_is_array(cc, dr.type) && cc->ctypes[dr.type & BUSTER_FTYPE_CIDX_MASK].complete)
+                    if (ftype_is_array(cc->syms[si].type) && !cc->ctypes[cc->syms[si].type & BUSTER_FTYPE_CIDX_MASK].complete &&
+                        ftype_is_array(dr.type) && cc->ctypes[dr.type & BUSTER_FTYPE_CIDX_MASK].complete)
                     {
                         cc->syms[si].type = dr.type;
                     }
@@ -6713,21 +6817,31 @@ static bool fast_cc_compile_unit(FastCCState* cc)
         if (cc->pos == tu_loop_pos && !cc->bailout) { fast_cc_bail(cc, "top-level decl stalled"); break; }
     }
 
-    // Fixed-point pass: compile any deferred `static inline` functions that were referenced!
-    bool progress = true;
-    while (progress && !cc->bailout)
+    // Visit newly reachable bodies in the same order as a forward scan: a reference to an earlier
+    // definition waits until the scan wraps. This preserves .text, symbol and relocation order.
+    uint32_t cursor = 0;
+    while (cc->ready_groups != 0 && !cc->bailout)
     {
-        progress = false;
-        for (uint32_t i = 0; i < deferred_count && !cc->bailout; i += 1)
+        uint32_t group = cursor >> 6;
+        uint64_t ready = cc->ready_tasks[group] & (UINT64_MAX << (cursor & 63u));
+        if (ready == 0)
         {
-            FastSym* s = cc->syms + deferred[i].sym_idx;
-            if (s->referenced != 0 && s->defined == 0)
-            {
-                if (s->is_unsupported) { fast_cc_bail(cc, "called unsupported static inline"); break; }
-                cc->pos = deferred[i].body_start;
-                fast_cc_compile_func(cc, deferred[i].sym_idx, deferred[i].param_names_start, deferred[i].param_count);
-                progress = true;
-            }
+            const uint64_t later = cc->ready_groups & ~_bzhi_u64(UINT64_MAX, group + 1u);
+            group = (uint32_t)__builtin_ctzll(later != 0 ? later : cc->ready_groups);
+            ready = cc->ready_tasks[group];
+        }
+        const uint32_t index = group * 64u + (uint32_t)__builtin_ctzll(ready);
+        cc->ready_tasks[group] ^= _blsi_u64(ready);
+        if (cc->ready_tasks[group] == 0) { cc->ready_groups &= ~(UINT64_C(1) << group); }
+        cursor = (index + 1u) % BUSTER_FDEFERRED_LIMIT;
+
+        const FastBodyTask* task = deferred + index;
+        const FastSym* sym = cc->syms + task->sym_idx;
+        if (!sym->defined)
+        {
+            if (sym->is_unsupported) { fast_cc_bail(cc, "called unsupported static inline"); break; }
+            cc->pos = task->body_start;
+            fast_cc_compile_func(cc, task->sym_idx, task->param_names_start, task->param_count);
         }
     }
 
