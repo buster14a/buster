@@ -1601,11 +1601,12 @@ struct CDirectTestSymbol
     uint8_t type;
     uint8_t visibility;
     uint16_t section;
+    uint64_t value;
     uint64_t size;
 };
 
 // The symbols named `name` in the object at `path`: how many, and the first one's binding, type, visibility, section
-// index and size.
+// index, value and size.
 static CDirectTestSymbol c_direct_test_symbol(const char* path, const char* name)
 {
     CDirectTestSymbol result = { 0 };
@@ -1645,6 +1646,7 @@ static CDirectTestSymbol c_direct_test_symbol(const char* path, const char* name
                         result.type = ELF64_ST_TYPE(symbols[k].st_info);
                         result.visibility = ELF64_ST_VISIBILITY(symbols[k].st_other);
                         result.section = symbols[k].st_shndx;
+                        result.value = symbols[k].st_value;
                         result.size = symbols[k].st_size;
                     }
                     result.count += 1u;
@@ -1756,6 +1758,111 @@ static bool c_direct_test_declarations(const char* obj_path)
         if (!ok)
         {
             fprintf(stderr, "test-direct: a declaration the direct path took: %s", leaves[i]);
+        }
+    }
+    return ok;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// GNU's alias attribute and typeof(name) (#3592)
+
+// Whether `alias` is defined where `target` is, with `bind` and `type`.
+static bool c_direct_test_alias_of(const char* path, const char* alias, const char* target, uint8_t bind, uint8_t type)
+{
+    const CDirectTestSymbol a = c_direct_test_symbol(path, alias);
+    const CDirectTestSymbol t = c_direct_test_symbol(path, target);
+    return a.count == 1u && t.count == 1u && a.bind == bind && a.type == type && t.type == type && a.section != SHN_UNDEF &&
+           a.section == t.section && a.value == t.value && a.size == t.size && t.size != 0;
+}
+
+// weak_alias(old, new) as musl writes it, of functions and objects: an alias of a function a header declared, of an
+// initialized and a tentative object, of a static function and of a static inline one only the alias reaches, one
+// declared before its target, and typeof of a typedef name. Each alias is defined at its target's place; an alias in
+// any other place, or of a target the unit doesn't define, leaves the direct path.
+static bool c_direct_test_aliases(const char* obj_path)
+{
+    static const char functions[] =
+        "char* crypt_like(const char* k);\n"
+        "char* __crypt_like(const char* k) { return (char*)k + 1; }\n"
+        "extern __typeof(__crypt_like) crypt_like __attribute__((__weak__, __alias__(\"__crypt_like\")));\n"
+        "char* use(void) { return crypt_like(\"xy\"); }\n"
+        "static int helper(void) { return 3; }\n"
+        "extern __typeof(helper) exported __attribute__((alias(\"helper\"), visibility(\"hidden\")));\n"
+        "static inline int tiny(void) { return 7; }\n"
+        "extern __typeof(tiny) tiny_alias __attribute__((alias(\"tiny\")));\n"
+        "int later(void);\n"
+        "extern __typeof(later) early __attribute__((alias(\"later\")));\n"
+        "int later(void) { return 9; }\n"
+        "int called(void);\n"
+        "int use_called(void) { return called(); }\n"
+        "int body(void) { return 5; }\n"
+        "extern __typeof(body) called __attribute__((weak, alias(\"body\")));\n";
+    static const char objects[] =
+        "char** __env_like = 0;\n"
+        "extern char** env_like;\n"
+        "extern __typeof(__env_like) env_like __attribute__((weak, alias(\"__env_like\")));\n"
+        "int counter;\n"
+        "extern __typeof(counter) count2 __attribute__((alias(\"counter\")));\n"
+        "const long table[3] = { 1, 2, 3 };\n"
+        "__typeof(table) table2 __attribute__((alias(\"table\")));\n"
+        "char*** where(void) { return &env_like; }\n"
+        "typedef long Wide;\n"
+        "__typeof(Wide) wide = 3;\n";
+    uint32_t text = 0;
+    uint32_t symbols = 0;
+    bool ok = c_direct_test_compile_source_keep(functions, obj_path, NULL, 0, &text, &symbols, NULL);
+    ok = ok && c_direct_test_alias_of(obj_path, "crypt_like", "__crypt_like", STB_WEAK, STT_FUNC) &&
+         c_direct_test_alias_of(obj_path, "exported", "helper", STB_GLOBAL, STT_FUNC) && c_direct_test_symbol(obj_path, "exported").visibility == STV_HIDDEN &&
+         c_direct_test_symbol(obj_path, "helper").bind == STB_LOCAL && c_direct_test_alias_of(obj_path, "tiny_alias", "tiny", STB_GLOBAL, STT_FUNC) &&
+         c_direct_test_alias_of(obj_path, "early", "later", STB_GLOBAL, STT_FUNC) &&
+         c_direct_test_alias_of(obj_path, "called", "body", STB_WEAK, STT_FUNC);
+    unlink(obj_path);
+    ok = ok && c_direct_test_compile_source_keep(objects, obj_path, NULL, 0, &text, &symbols, NULL);
+    ok = ok && c_direct_test_alias_of(obj_path, "env_like", "__env_like", STB_WEAK, STT_OBJECT) &&
+         c_direct_test_alias_of(obj_path, "count2", "counter", STB_GLOBAL, STT_OBJECT) &&
+         c_direct_test_alias_of(obj_path, "table2", "table", STB_GLOBAL, STT_OBJECT) && c_direct_test_symbol(obj_path, "wide").size == 8u;
+    unlink(obj_path);
+    static const char* const leaves[] = {
+        "int ext(void);\nextern __typeof(ext) a __attribute__((alias(\"ext\")));\n",
+        "extern int a __attribute__((alias(\"nothing\")));\n",
+        "int g(void) { return 0; }\nint __attribute__((alias(\"g\"))) f(void) { return 1; }\n",
+        "int g(void) { return 0; }\nint f(void) { extern int a __attribute__((alias(\"g\"))); return 0; }\n",
+        "int g(void) { return 0; }\nextern __typeof(g) a __attribute__((alias(g)));\n",
+        "int g(void) { return 0; }\nextern __typeof(g) a __attribute__((alias(\"g\" \"\")));\n",
+        "int g(void) { return 0; }\nextern __typeof(g) a __attribute__((alias(\"a b\")));\n",
+        "int g(void) { return 0; }\nextern __typeof(g) a __attribute__((alias(\"\")));\n",
+        "int g(void) { return 0; }\nextern __typeof(g) a __attribute__((alias(u8\"g\")));\n",
+        "int g(void) { return 0; }\nextern __typeof(g) a __attribute__((alias(\"\\x67\")));\n",
+        "int g(void) { return 0; }\nextern __typeof(g) a __asm__(\"b\") __attribute__((alias(\"g\")));\n",
+        "int g(void) { return 0; }\nstatic int f(void);\nextern __typeof(g) f __attribute__((alias(\"g\")));\n",
+        "inline int f(void) { return 7; }\nint g(void) { return 0; }\nextern __typeof(g) f __attribute__((alias(\"g\")));\n",
+        "int g(void) { return 0; }\nint h(void) __attribute__((alias(\"g\")));\nint h(void) { return 1; }\n",
+        "int g(void) { return 0; }\nint h(void) __attribute__((alias(\"g\")));\nint h(void) __attribute__((alias(\"g\")));\n",
+        "int g(void) { return 0; }\nint h(void) __attribute__((alias(\"g\")));\nint h(void) __attribute__((used));\n",
+        "int x = 1;\nextern __typeof(x) y __attribute__((alias(\"x\")));\nint y = 2;\n",
+        "int x = 1;\nextern __typeof(x) y __attribute__((alias(\"x\")));\nint y;\n",
+        "int g(void) { return 0; }\nstruct S { int x __attribute__((alias(\"g\"))); };\n",
+        "int g(void) { return 0; }\nvoid f(int x __attribute__((alias(\"g\"))));\n",
+        "int g = 1;\nint f(void) { static int s __attribute__((alias(\"g\"))); return s; }\n",
+        "int g(void) { return 0; }\nint f(void) { int x __attribute__((alias(\"g\"))) = 1; return x; }\n",
+        "int g(void) { return 0; }\ntypedef int T __attribute__((alias(\"g\")));\n",
+        "int g(void) { return 0; }\nstatic __typeof(g) a __attribute__((alias(\"g\")));\n",
+        "int g(void) { return 0; }\nextern __typeof(g) a __attribute__((alias(\"g\")));\nextern __typeof(g) b __attribute__((alias(\"a\")));\n",
+        "int x = 1;\nextern int f(void) __attribute__((alias(\"x\")));\n",
+        "int x = 1;\nextern __typeof(x) y __attribute__((alias(\"x\"))) = 2;\n",
+        "int x = 1;\nint y;\nextern __typeof(x) y __attribute__((alias(\"x\")));\n",
+        "int g(void) { return 0; }\nint f(void);\nint f(void) { return 1; }\nextern __typeof(g) f __attribute__((alias(\"g\")));\n",
+        "int g(void) __asm__(\"g_label\");\nint g(void) { return 0; }\nextern __typeof(g) a __attribute__((alias(\"g\")));\n",
+        "int x;\nunsigned __typeof(x) y;\n",
+        "__typeof(1 + 2) z;\n",
+        "__typeof(undeclared) z;\n",
+    };
+    for (uint32_t i = 0; ok && i < (uint32_t)(sizeof(leaves) / sizeof(leaves[0])); i += 1)
+    {
+        ok = c_direct_test_compile_source(leaves[i], obj_path, 1, NULL, NULL);
+        if (!ok)
+        {
+            fprintf(stderr, "test-direct: an alias case the direct path took: %s", leaves[i]);
         }
     }
     return ok;
@@ -1965,6 +2072,16 @@ int run_c_direct_tests(int argc, char** argv)
     else
     {
         fprintf(stderr, "test-direct: FAIL the driver's admission of the language modes and -w\n");
+        failed += 1u;
+    }
+
+    if (c_direct_test_aliases(obj_path))
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL aliases and typeof\n");
         failed += 1u;
     }
 

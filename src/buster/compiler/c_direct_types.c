@@ -136,6 +136,7 @@ struct FastSym
     uint8_t is_unsupported;
     uint8_t visibility_set; // a declaration gave the visibility, so another one that differs is clang's error (#3595)
     uint8_t inline_rules;   // BUSTER_FINLINE_*: what a function's declarations say of its inline definition (#3595)
+    uint8_t is_alias;       // an alias attribute defines it at the unit's end (#3592)
     FastType type;
     uint32_t ident_id;
     uint32_t obj_sym;      // symbol index in FastObj (for GLOBAL/FUNC)
@@ -193,6 +194,19 @@ struct FastBodyTask
 };
 
 #define BUSTER_FDEFERRED_LIMIT 4096u
+
+// A declaration with GNU's alias attribute (#3592): its symbol, defined at the end of the unit at its target's place,
+// and the target's name as the attribute spells it (the target's ELF name, which a C name without an asm label is).
+typedef struct FastAlias FastAlias;
+struct FastAlias
+{
+    uint32_t sym_idx;
+    uint32_t target_idx;   // the target's FastSym, found before the reachable bodies are compiled
+    const char* target;
+    uint32_t target_len;
+};
+
+#define BUSTER_FALIAS_LIMIT 1024u
 
 // Main compiler context shared across c_direct_types.c and c_direct_cc.c
 typedef struct FastCCState FastCCState;
@@ -302,6 +316,12 @@ struct FastCCState
     uint32_t cur_va_gp_init;   // initial gp_offset (8 * num_gp_params)
     uint32_t cur_va_fp_init;   // initial fp_offset (48 + 16 * num_fp_params)
     int32_t cur_va_overflow_off; // rbp + 16 + overflow_bytes
+
+    // GNU's alias attribute (#3592): the declarations that have one, and how many the attribute parser saw, so that one
+    // anywhere else (a block, a parameter, a definition) leaves the direct path.
+    FastAlias* aliases;
+    uint32_t alias_count;
+    uint32_t alias_attributes;
 
     // Cached .rodata constants (UINT32_MAX = not yet emitted)
     uint32_t ro_sign_f32_off;
@@ -986,8 +1006,26 @@ static void fast_cc_parse_attributes(FastCCState* cc, FastAttrInfo* attr)
                 }
                 else if (len == 5u && memcmp(s, "alias", 5) == 0 && fast_cc_peek(cc) == FTOK_LPAREN)
                 {
-                    fast_cc_bail(cc, "alias attribute");
-                    break;
+                    // alias("name"), a single literal spelled as its bytes (#3595); the declaration that has it is
+                    // fast_cc_compile_unit's to take, and cc->alias_attributes counts it so that no other place can.
+                    cc->pos += 1u;
+                    bool named = attr != NULL && fast_cc_peek(cc) == FTOK_STR_LIT && fast_cc_peek_at(cc, 1u) == FTOK_RPAREN &&
+                                 fast_cc_literal_plain(cc, fast_cc_data(cc));
+                    if (named)
+                    {
+                        // Any bytes: one that names no declared function or object leaves at fast_cc_alias_targets.
+                        const FastLitSlice sl = cc->pp->lit_slices[fast_cc_data(cc)];
+                        named = sl.length != 0;
+                        attr->alias_name = cc->pp->lit_bytes + sl.offset;
+                        attr->alias_len = sl.length;
+                    }
+                    cc->alias_attributes += 1u;
+                    if (!named)
+                    {
+                        fast_cc_bail(cc, "alias attribute's operand");
+                        break;
+                    }
+                    cc->pos += 2u;
                 }
                 else if (len == 7u && memcmp(s, "section", 7) == 0)
                 {
@@ -2878,6 +2916,7 @@ static BUSTER_DIRECT_HOT FastType fast_cc_parse_decl_specs(FastCCState* cc, Fast
     uint32_t saw_void = 0, saw_char = 0, saw_short = 0, saw_int = 0, saw_long = 0;
     uint32_t saw_float = 0, saw_double = 0, saw_signed = 0, saw_unsigned = 0, saw_bool = 0;
     bool has_explicit_type = false;
+    bool saw_typeof = false;
     FastType explicit_type = FTYPE_I32;
 
     while (cc->pos < cc->tcount && !cc->bailout)
@@ -2946,6 +2985,25 @@ static BUSTER_DIRECT_HOT FastType fast_cc_parse_decl_specs(FastCCState* cc, Fast
             explicit_type = k == FTOK_KW_FLOAT16 ? FTYPE_UNSUP2 : FTYPE_UNSUP16;
             cc->pos += 1u;
         }
+        else if (k == FTOK_KW_TYPEOF && !has_explicit_type && fast_cc_peek_at(cc, 1u) == FTOK_LPAREN &&
+                 fast_cc_peek_at(cc, 2u) == FTOK_IDENT && fast_cc_peek_at(cc, 3u) == FTOK_RPAREN)
+        {
+            // typeof(name) of a declared function, object or typedef name: its type, qualifiers and all, as GNU's
+            // weak_alias(old, new) asks of it (#3592). Any other operand leaves, as before.
+            const uint32_t id = cc->td[cc->pos + 2u];
+            const uint32_t si = id < cc->env_cap ? cc->sym_cur[id] : 0u;
+            const uint8_t kind = si != 0 ? cc->syms[si].kind : (uint8_t)FSYM_NONE;
+            if (kind != FSYM_FUNC && kind != FSYM_GLOBAL && kind != FSYM_LOCAL && kind != FSYM_TYPEDEF)
+            {
+                fast_cc_bail(cc, "unsupported type specifier");
+                break;
+            }
+            has_explicit_type = true;
+            saw_typeof = true;
+            explicit_type = cc->syms[si].type;
+            if (cc->syms[si].is_unsupported) { sp->is_unsupported_type = 1u; }
+            cc->pos += 4u;
+        }
         else if (k == FTOK_KW_ATOMIC || k == FTOK_KW_THREAD_LOCAL || k == FTOK_KW_TYPEOF)
         {
             fast_cc_bail(cc, "unsupported type specifier");
@@ -2977,6 +3035,12 @@ static BUSTER_DIRECT_HOT FastType fast_cc_parse_decl_specs(FastCCState* cc, Fast
         }
     }
 
+    // typeof(name) is the whole type: another type specifier or a mode attribute with it leaves.
+    if (saw_typeof && ((saw_void + saw_char + saw_short + saw_int + saw_long + saw_float + saw_double + saw_signed + saw_unsigned + saw_bool) != 0 ||
+                       sp->attr.mode_size != 0))
+    {
+        fast_cc_bail(cc, "type specifiers beside typeof");
+    }
     FastType res = FTYPE_I32;
     if (has_explicit_type)
     {
@@ -3063,10 +3127,11 @@ static bool fast_cc_init_state(FastCCState* cc, FastArena* arena, FastArena* scr
     cc->tag_cur = (uint32_t*)fast_arena_alloc(arena, (uint64_t)cc->env_cap * sizeof(uint32_t), 64);
     cc->syms = (FastSym*)fast_arena_alloc(arena, (uint64_t)cc->sym_cap * sizeof(FastSym), 64);
     cc->undo = (FastScopeUndo*)fast_arena_alloc(arena, (uint64_t)cc->undo_cap * sizeof(FastScopeUndo), 64);
+    cc->aliases = (FastAlias*)fast_arena_alloc(arena, (uint64_t)BUSTER_FALIAS_LIMIT * sizeof(FastAlias), 64);
 
     bool ok = cc->ctypes != NULL && cc->member_ids != NULL && cc->member_info != NULL && cc->member_hash != NULL &&
               cc->param_types != NULL && cc->param_names != NULL && cc->sym_cur != NULL && cc->tag_cur != NULL &&
-              cc->syms != NULL && cc->undo != NULL;
+              cc->syms != NULL && cc->undo != NULL && cc->aliases != NULL;
     if (ok)
     {
         // Reserve index 0 as sentinel in ctypes and syms (member_hash uses key == 0 from zero-filled mmap)
