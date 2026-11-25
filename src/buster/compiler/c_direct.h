@@ -56,6 +56,9 @@ struct CDirectRequest
     bool unwind_tables;
     bool unsigned_char;
     bool c23;
+    bool strict_iso;                 // -std=cNN without GNU's extensions: `, ## __VA_ARGS__` and main as clang has them there
+    bool no_gnu_keywords;            // asm, and typeof before C23, are identifiers (-std=cNN, -fno-gnu-keywords, -fno-asm)
+    bool trigraphs;                  // trigraphs are replaced (-std=c99/c11/c17, -trigraphs): a unit that has one leaves
     bool quiet;                      // -w (suppress warnings)
     bool release;                    // release arenas before return (false for terminal CLI exit)
     bool avoid_huge_pages;           // busy host (#672/#1561): advise MADV_NOHUGEPAGE to avoid 8-core THP lock contention

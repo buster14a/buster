@@ -15261,6 +15261,18 @@ typedef enum CheckDriverWarm
 // several source files (#152), it compiles each of them (check_driver_units): -c writes each one's object, and the link
 // one executable of them all.
 // Only main's terminal routes pass release false; every reusable caller releases its mappings before returning.
+// Whether a command's semantic warning options are `-w` alone (#3592), which the direct path takes: `-w` suppresses
+// every warning, the direct path then prints none, and a unit with an error leaves it for the full pipeline anyway.
+static bool check_driver_direct_warnings(const PPOptions* options)
+{
+    bool quiet = true;
+    for (uint32_t i = 0; i < options->semantic_warning_option_count; i += 1)
+    {
+        quiet = quiet && strcmp(options->semantic_warning_options[i], "-w") == 0;
+    }
+    return quiet;
+}
+
 static void check_driver_direct_mark_stage(void* context, uint32_t stage_id)
 {
     check_clock_mark((CheckClock*)context, (CheckStage)stage_id);
@@ -16379,9 +16391,9 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             !lanes->tier1 && !lazy_system_headers && !deferred_bodies && !node_bodies &&
             !node_window && !node_window_constants && !node_window_assignments && !default_path_checked &&
             attested_memo == NULL && command_attested != CHECK_ATTESTED_MODE_VERIFY &&
-            !options.dependencies.enabled && !options.trigraphs && !options.no_builtin &&
+            !options.dependencies.enabled && !options.no_builtin &&
             options.no_builtin_function_count == 0 && !options.no_external_files && !options.assembly &&
-            !options.system_header_warnings && options.semantic_warning_option_count == 0 &&
+            !options.system_header_warnings && check_driver_direct_warnings(&options) &&
             !command.warning_errors && command.return_error == 0 && !id_ordered &&
             (!lanes->every_lane || lanes->lanes <= 1) && !worker_budget_seen && !worker_budget.dry_run &&
             units_memory == 0 && !poison_arenas && !lower_all && !pinned_cpus_seen &&
@@ -16437,6 +16449,9 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
                     .unwind_tables = unwind_tables,
                     .unsigned_char = options.predefines.char_unsigned,
                     .c23 = options.language.standard >= 2023,
+                    .strict_iso = !options.language.gnu,
+                    .no_gnu_keywords = !c_language_gnu_keywords(options.language),
+                    .trigraphs = options.trigraphs,
                     .quiet = quiet || options.suppress_warnings,
                     .release = release,
                     .avoid_huge_pages = arena_pages_busy,

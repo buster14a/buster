@@ -279,7 +279,7 @@ same bytes, standard output and errors together; the first 20 differences
 print each run's first line that differs. A file is the direct path's where
 its default run exited 0 without a line in its bail log, and fewer such files
 than `--direct-floor` fail the run, as the comparison would leave the direct
-path out. CI runs it on `tests/` with a floor of 260 (282 of 4,578 files on
+path out. CI runs it on `tests/` with a floor of 260 (285 of 4,578 files on
 2026-11-25, 9.2 s on 4 CPUs in a Release build), in the sanitizer rows too,
 where a sanitizer's report in one run is a difference.
 

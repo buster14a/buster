@@ -1,1 +1,1 @@
--1.82 #3577: a conversion to its own type returns at once, attributes and one-word specifiers go by tables, which take more helper calls out than the direct path's diagnostic checks add
+-1.46 #3577: a conversion to its own type returns at once, attributes and one-word specifiers go by tables, which take more helper calls out than the direct path's diagnostic checks add
