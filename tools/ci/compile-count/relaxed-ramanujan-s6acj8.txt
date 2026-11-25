@@ -1,1 +1,1 @@
--4.41 the direct path reads directive lines and macro calls' arguments in bulk, and substitutes by copies (#3584)
+-4.55 the direct path reads directive lines and macro calls' arguments in bulk, and substitutes by copies (#3584)
