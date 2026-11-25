@@ -5353,6 +5353,38 @@ static __attribute__((noinline)) bool fast_pp_window_scalar(FastPP* pp, FastIncl
     return leave;
 }
 
+// Eight decimal literals interleaved with commas. Window token starts have at least 16 readable bytes.
+// Shift the first digit to leave zeros before it and discard bytes beyond the literal. Reduce digits
+// in pairs, then groups of four and eight. The comma lanes already have their output kinds.
+static inline bool fast_pp_decimal_pairs(const FastWindow* w, uint32_t t, const uint8_t* base, uint32_t* out)
+{
+    const __m128i kinds = _mm_loadu_si128((const __m128i*)(w->kinds + t));
+    const __m128i pair = _mm_set1_epi16(FTOK_INT_LIT | (FTOK_COMMA << 8));
+    bool decoded = false;
+    if (_mm_cmpeq_epi16_mask(kinds, pair) == UINT8_MAX)
+    {
+        const __m128i lengths = _mm_and_si128(_mm_loadu_si128((const __m128i*)(w->lens + t)), _mm_set1_epi16(255));
+        const __m512i len = _mm512_cvtepu16_epi64(lengths);
+        const __m512i starts = _mm512_and_si512(_mm512_loadu_si512(w->starts + t), _mm512_set1_epi64(UINT32_MAX));
+        const __m512i words = _mm512_i64gather_epi64(starts, base, 1);
+        const __m512i chars = _mm512_xor_si512(words, _mm512_set1_epi8('0'));
+        const __m512i shift = _mm512_slli_epi64(_mm512_sub_epi64(_mm512_set1_epi64(8), len), 3);
+        const __m512i digits = _mm512_sllv_epi64(chars, shift);
+        const __mmask8 leading_zero = _mm512_testn_epi64_mask(chars, _mm512_set1_epi64(255));
+        if (_mm512_cmpgt_epu64_mask(_mm512_sub_epi64(len, _mm512_set1_epi64(1)), _mm512_set1_epi64(7)) == 0 &&
+            (leading_zero & _mm512_cmpneq_epi64_mask(len, _mm512_set1_epi64(1))) == 0 &&
+            _mm512_cmpgt_epu8_mask(digits, _mm512_set1_epi8(9)) == 0)
+        {
+            const __m512i pairs = _mm512_maddubs_epi16(digits, _mm512_set1_epi16(0x010a));
+            const __m512i quads = _mm512_madd_epi16(pairs, _mm512_set1_epi32(0x00010064));
+            const __m512i values = _mm512_add_epi32(_mm512_mullo_epi32(quads, _mm512_set1_epi32(10000)), _mm512_srli_epi64(quads, 32));
+            _mm512_mask_storeu_epi32(out, 0x5555u, values);
+            decoded = true;
+        }
+    }
+    return decoded;
+}
+
 // Emits the window's tokens from its place on: 64 kinds a store, and a loop over the identifiers, numbers and
 // literals among them, which are the tokens with something to look up or convert. A macro's name stops the block: the
 // tokens before it stay, and fast_pp_window_macro says where the window goes on.
@@ -5441,7 +5473,11 @@ static BUSTER_DIRECT_HOT void fast_pp_emit_window(FastPP* pp, FastIncludeFile* f
             }
             else if (kind == FTOK_INT_LIT && !fast_number_goes_on(s, len))
             {
-                if (__builtin_expect(len == 1u, 1))
+                if (k + 16u <= cnt && fast_pp_decimal_pairs(w, t, base, out_data + out_count + k))
+                {
+                    work &= ~_bzhi_u64(UINT64_MAX, k + 16u);
+                }
+                else if (__builtin_expect(len == 1u, 1))
                 {
                     out_data[out_count + k] = (uint32_t)(s[0] - '0');
                 }

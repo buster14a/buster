@@ -157,7 +157,7 @@ struct FastSym
     const char* asm_name;  // optional __asm__("label") override
     uint32_t asm_name_len;
     uint8_t visibility;    // STV_DEFAULT / STV_HIDDEN / STV_PROTECTED
-    uint8_t pad_sym[3];
+    uint16_t deferred_body; // 1-based index of the most recent deferred definition
 };
 
 typedef struct FastScopeUndo FastScopeUndo;
@@ -181,16 +181,19 @@ struct FastMemberHash
     uint32_t pad;
 };
 
+// One summary bit per 64 deferred definitions.
+#define BUSTER_FDEFER_GROUPS 64u
+#define BUSTER_FDEFER_CAP (64u * BUSTER_FDEFER_GROUPS)
+
 // Recorded function body slice for compilation
 typedef struct FastBodyTask FastBodyTask;
 struct FastBodyTask
 {
     uint32_t sym_idx;
     uint32_t body_start;   // token index of '{'
-    uint32_t body_end;     // token index of matching '}'
     uint32_t param_names_start;
     uint16_t param_count;
-    uint16_t pad;
+    uint16_t previous;     // earlier deferred definition of the same symbol, 1-based
 };
 
 // Main compiler context shared across c_direct_types.c and c_direct_cc.c
@@ -237,6 +240,10 @@ struct FastCCState
     FastSym* syms;
     uint32_t sym_count;
     uint32_t sym_cap;
+
+    FastBodyTask* deferred;
+    uint64_t pending_bodies[BUSTER_FDEFER_GROUPS];
+    uint64_t pending_groups;
 
     // Scope undo stack
     FastScopeUndo* undo;
@@ -297,7 +304,6 @@ struct FastCCState
     uint32_t cur_va_gp_init;   // initial gp_offset (8 * num_gp_params)
     uint32_t cur_va_fp_init;   // initial fp_offset (48 + 16 * num_fp_params)
     int32_t cur_va_overflow_off; // rbp + 16 + overflow_bytes
-    uint32_t cur_func_sym_count_mark;
 
     // Cached .rodata constants (UINT32_MAX = not yet emitted)
     uint32_t ro_sign_f32_off;

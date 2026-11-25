@@ -266,8 +266,53 @@ int c_direct_try_compile(const CDirectRequest* request)
 // ---------------------------------------------------------------------------------------------------------------------
 // Self-tests for `build/compiler test-direct`
 
+typedef struct CDirectExpectedSymbol CDirectExpectedSymbol;
+struct CDirectExpectedSymbol
+{
+    const char* name;
+    const void* bytes; // data to compare, or NULL for functions in increasing text-offset order
+    uint32_t size;
+};
+
+static bool c_direct_test_symbols(const uint8_t* file, size_t size, const Elf64_Shdr* tables, uint32_t sections,
+                                  const Elf64_Shdr* symtab, const CDirectExpectedSymbol* expected)
+{
+    bool ok = symtab->sh_link < sections;
+    const Elf64_Shdr* names = ok ? tables + symtab->sh_link : NULL;
+    ok = ok && names->sh_offset <= size && names->sh_size <= size - names->sh_offset;
+    const Elf64_Sym* syms = (const Elf64_Sym*)(file + symtab->sh_offset);
+    uint64_t next_text = 0;
+    for (const CDirectExpectedSymbol* want = expected; ok && want->name != NULL; want += 1)
+    {
+        const size_t name_size = strlen(want->name) + 1u;
+        bool found = false;
+        for (size_t i = 0; i < symtab->sh_size / sizeof(*syms); i += 1)
+        {
+            const Elf64_Sym sym = syms[i];
+            if (sym.st_name > names->sh_size || name_size > names->sh_size - sym.st_name ||
+                memcmp(file + names->sh_offset + sym.st_name, want->name, name_size) != 0) { continue; }
+            if (sym.st_shndx == SHN_UNDEF || sym.st_shndx >= sections) { break; }
+            const Elf64_Shdr* sec = tables + sym.st_shndx;
+            if (sec->sh_offset > size || sec->sh_size > size - sec->sh_offset ||
+                sym.st_value > sec->sh_size || sym.st_size > sec->sh_size - sym.st_value) { break; }
+            if (want->bytes != NULL)
+            {
+                found = sym.st_size == want->size && memcmp(file + sec->sh_offset + sym.st_value, want->bytes, want->size) == 0;
+            }
+            else
+            {
+                found = ELF64_ST_TYPE(sym.st_info) == STT_FUNC && sym.st_size > 0 && sym.st_value >= next_text;
+                next_text = sym.st_value + sym.st_size;
+            }
+            break;
+        }
+        ok = found;
+    }
+    return ok;
+}
+
 static bool c_direct_test_compile_source(const char* source, const char* obj_path, int expected_status,
-                                         uint32_t* out_text_len, uint32_t* out_sym_count)
+                                         uint32_t* out_text_len, uint32_t* out_sym_count, const CDirectExpectedSymbol* expected)
 {
     char src_path[256];
     snprintf(src_path, sizeof(src_path), "/tmp/buster_direct_test_%d.c", (int)getpid());
@@ -334,6 +379,7 @@ static bool c_direct_test_compile_source(const char* source, const char* obj_pat
                  eh->e_shoff + (uint64_t)eh->e_shnum * sizeof(Elf64_Shdr) <= (uint64_t)fsz;
     uint32_t text_len = 0;
     uint32_t sym_count = 0;
+    bool matched = expected == NULL;
     if (valid)
     {
         const Elf64_Shdr* sh = (const Elf64_Shdr*)(buf + eh->e_shoff);
@@ -345,6 +391,12 @@ static bool c_direct_test_compile_source(const char* source, const char* obj_pat
             }
             if (sh[i].sh_type == SHT_SYMTAB)
             {
+                if (sh[i].sh_offset > (uint64_t)fsz || sh[i].sh_size > (uint64_t)fsz - sh[i].sh_offset)
+                {
+                    valid = false;
+                    break;
+                }
+                if (expected != NULL) { matched = c_direct_test_symbols(buf, (size_t)fsz, sh, eh->e_shnum, sh + i, expected); }
                 sym_count = (uint32_t)(sh[i].sh_size / sizeof(Elf64_Sym));
                 const Elf64_Sym* syms = (const Elf64_Sym*)(buf + sh[i].sh_offset);
                 // ELF invariant: all STB_LOCAL symbols MUST appear before sh_info, non-locals at >= sh_info!
@@ -360,7 +412,7 @@ static bool c_direct_test_compile_source(const char* source, const char* obj_pat
     free(buf);
     if (out_text_len != NULL) { *out_text_len = text_len; }
     if (out_sym_count != NULL) { *out_sym_count = sym_count; }
-    return valid;
+    return valid && matched;
 }
 
 // The lexer's tests (#2850). A text's tokens must not depend on where its bytes fall in the lexer's 64-byte blocks, nor
@@ -701,6 +753,42 @@ static bool c_direct_test_lexer(void)
     return ok;
 }
 
+static bool c_direct_test_tables_and_inline_bodies(const char* obj_path)
+{
+    static const char source[] =
+        "unsigned char bytes[] = {0,1,22,33,44,55,66,77,88,99,100,111,122,133,144,155,"
+        "0x1ff,030,8+2,[23]=7,[2]=99};\n"
+        "unsigned short rows[2][17] = {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,"
+        "17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,65537};\n"
+        "unsigned int decimals[] = {0,1,22,333,4444,55555,666666,7777777,88888888,"
+        "9,10,11,12,13,14,15,123456789,2.5,3+4};\n"
+        "unsigned long wide[] = {0xffffffffU,1,2,3,4,5,6,7,8,9,10,11,12,13,14,2147483648U,-2};\n"
+        "static inline int a(int), b(int), c(int), d(int);\n"
+        "static inline int a(int n){return n ? d(n-1) : 1;}\n"
+        "static inline int b(int n){return n ? a(n-1)+c(n-1) : 2;}\n"
+        "static inline int c(int n){return a(n); }\n"
+        "static inline int d(int n){return b(n); }\n"
+        "static inline int unused(void){return undeclared;}\n"
+        "int (*hook)(int)=b; int entry(int n){return hook(n); }\n";
+    static const uint8_t bytes[24] = {0,1,99,33,44,55,66,77,88,99,100,111,122,133,144,155,255,24,10,[23]=7};
+    static const uint16_t rows[34] = {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,1};
+    static const uint32_t decimals[] = {0,1,22,333,4444,55555,666666,7777777,88888888,9,10,11,12,13,14,15,123456789,2,7};
+    static const uint64_t wide[] = {UINT32_MAX,1,2,3,4,5,6,7,8,9,10,11,12,13,14,UINT32_C(2147483648),UINT64_MAX-1u};
+    static const CDirectExpectedSymbol expected[] = {
+        { "bytes", bytes, sizeof(bytes) },
+        { "rows", rows, sizeof(rows) },
+        { "decimals", decimals, sizeof(decimals) },
+        { "wide", wide, sizeof(wide) },
+        { "entry", NULL, 0 },
+        { "b", NULL, 0 },
+        { "c", NULL, 0 },
+        { "a", NULL, 0 },
+        { "d", NULL, 0 },
+        { NULL, NULL, 0 },
+    };
+    return c_direct_test_compile_source(source, obj_path, 0, NULL, NULL, expected);
+}
+
 int run_c_direct_tests(int argc, char** argv)
 {
     (void)argc;
@@ -774,7 +862,7 @@ int run_c_direct_tests(int argc, char** argv)
     {
         uint32_t tlen = 0;
         uint32_t scnt = 0;
-        if (c_direct_test_compile_source(valid_cases[i], obj_path, 0, &tlen, &scnt) && tlen > 0 && scnt > 0)
+        if (c_direct_test_compile_source(valid_cases[i], obj_path, 0, &tlen, &scnt, NULL) && tlen > 0 && scnt > 0)
         {
             passed += 1u;
         }
@@ -794,7 +882,7 @@ int run_c_direct_tests(int argc, char** argv)
     };
     for (uint32_t i = 0; i < sizeof(bail_cases) / sizeof(bail_cases[0]); i += 1)
     {
-        if (c_direct_test_compile_source(bail_cases[i], obj_path, 1, NULL, NULL))
+        if (c_direct_test_compile_source(bail_cases[i], obj_path, 1, NULL, NULL, NULL))
         {
             passed += 1u;
         }
@@ -803,6 +891,16 @@ int run_c_direct_tests(int argc, char** argv)
             fprintf(stderr, "test-direct: FAIL bailout case %u\n", i);
             failed += 1u;
         }
+    }
+
+    if (c_direct_test_tables_and_inline_bodies(obj_path))
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL initialized data or deferred function order\n");
+        failed += 1u;
     }
 
     if (c_direct_test_lexer())

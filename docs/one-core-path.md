@@ -4275,8 +4275,9 @@ single-TU `-c` C17/C23 object builds directly from `mmap`'d source bytes to an E
   literal, a splice), and a token the masks cannot decide (`<<=`, a `.` before a digit, a number that goes on past its
   digits) stays in the window marked for `fast_lex_one`. The emitter (`fast_pp_emit_window`) stores 64 kinds at a time
   and visits the identifiers, numbers and literals: a 16 K-slot L2 identifier cache backed by a 64-way AVX-512
-  SwissTable, inline 2-to-4-digit integers, and in-place expansion for empty, 1-token, 0-param-use
-  (`assert`/`testcase`), 1-param identity-wrapper (`ALWAYS`/`NEVER`) and short constant macros. Directives and macro
+  SwissTable, inline 2-to-4-digit integers, eight comma-separated decimal literals decoded together, and in-place
+  expansion for empty, 1-token, 0-param-use (`assert`/`testcase`), 1-param identity-wrapper (`ALWAYS`/`NEVER`)
+  and short constant macros. Directives and macro
   arguments read the same window (`fast_pp_read_tok`). An inactive group is skipped by masks too
   (`fast_pp_skip_inactive`): each line's first character, a comment's start and what a literal may hide, 64 bytes a
   step. Macro expansion is strictly iterative (`call_stack` + `arg_buf`, zero recursion). `test-direct` lexes its
@@ -4285,7 +4286,11 @@ single-TU `-c` C17/C23 object builds directly from `mmap`'d source bytes to an E
   uses compact 32-bit `FastType` handles, AVX-512 `vpcmpeqd` 16-wide struct-member search (`<= 64` fields, hash table
   above), iterative operator-precedence expression compilation directly into x86-64 machine bytes, lazy `EFLAGS`
   comparisons, and a single-`writev` ELF64 writer (with `.eh_frame` unwind tables and `R_X86_64_REX_GOTPCRELX` for
-  PIC/external symbols). Hot functions are placed in `.text.buster_checker` (2 MB huge-page code segment).
+  PIC/external symbols). Static integer arrays take sixteen complete literal initializers at a time within each row.
+  Expression stack entries take 24 bytes, and function-local symbol slots can be reused after the scope closes.
+  A two-level bitset tracks referenced inline definitions. Selecting the next body in source order and wrapping at
+  the end preserves the order of emitted functions and relocations. Hot functions are placed in
+  `.text.buster_checker` (2 MB huge-page code segment).
 - **Busy-host memory policy (`#672`/`#1561`):** allocates two `mmap` arenas (32 MiB + 6 MiB) with zero-initialized
   tables (no full-table `memset`s) and advises `MAP_STACK` + `MADV_NOHUGEPAGE` when `arena_pages_busy` is set,
   preventing 8-core Linux THP compaction contention and cutting 8-worker peak RSS to 29.5 MiB.
@@ -4341,6 +4346,14 @@ are in
   skipper (2.5%), interning new names (2.2%). The code generator's stage reads 1% slower here than on main although
   its source is the same but for the specifiers: its code lands at other addresses, and its time follows by that much
   between any two builds.
+
+### Integer tables, inline functions and local symbols
+
+Against `56490ed95` on the 9700X, a single-core compile was 2.06× faster for six musl iconv tables and 5.44× faster
+for a generated chain of 4,000 inline functions. Reusing symbol slots kept a generated file with 50,000 locals on
+the direct path, cutting its compile time from 52.496 ms to 4.773 ms. SQLite took 0.7–1.0% less time on one core
+and 1.5–2.0% less with four simultaneous compiles across two sessions.
+[Paired timings, hardware counters and object checks](https://github.com/buster14a/buster-performance/tree/d23854cf9a6e33bf484fab1917dfe73a6b77384f/docs/measurements/direct-benchpress-9700x-2026-11-25)
 
 ## Related
 

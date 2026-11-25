@@ -278,6 +278,25 @@ static __attribute__((noinline)) const char* fast_cc_parse_string_lit(FastCCStat
     return dst;
 }
 
+static inline void fast_cc_queue_body(FastCCState* cc, uint32_t index)
+{
+    const uint32_t group = index >> 6;
+    cc->pending_bodies[group] |= UINT64_C(1) << (index & 63u);
+    cc->pending_groups |= UINT64_C(1) << group;
+}
+
+static inline void fast_cc_reference_func(FastCCState* cc, FastSym* sym)
+{
+    if (!sym->referenced)
+    {
+        sym->referenced = 1u;
+        for (uint32_t body = sym->deferred_body; body != 0; body = cc->deferred[body - 1u].previous)
+        {
+            fast_cc_queue_body(cc, body - 1u);
+        }
+    }
+}
+
 // Ensure a FastSym (GLOBAL or FUNC) has an ELF symbol in cc->obj (lazy creation avoids polluting .symtab with unused decls!)
 static uint32_t fast_cc_ensure_obj_sym(FastCCState* cc, uint32_t sym_idx)
 {
@@ -809,7 +828,7 @@ static __attribute__((noinline)) FastStaticConst fast_cc_eval_static_const(FastC
                 if (sym->kind == FSYM_FUNC)
                 {
                     if (sym->is_unsupported) { fast_cc_bail(cc, "unsupported func ref in static init"); break; }
-                    sym->referenced = 1u;
+                    fast_cc_reference_func(cc, sym);
                     const uint32_t obj_sym = fast_cc_ensure_obj_sym(cc, si);
                     while (inner_parens > 0 && fast_cc_peek(cc) == FTOK_RPAREN) { inner_parens -= 1u; cc->pos += 1u; }
                     if (vsp < 64u)
@@ -1033,6 +1052,70 @@ static void fast_cc_write_static_scalar(FastCCState* cc, FastSecId sec, uint32_t
     {
         memcpy(buf->data + byte_off, &v.val, sz);
     }
+}
+
+// A literal followed by a comma is a complete initializer. Stop before expressions, designators,
+// the end of a brace-elided row, or the end of the output section.
+static uint32_t fast_cc_init_int_run(FastCCState* cc, FastType type, uint32_t size, FastByteBuf* buf, uint64_t offset, uint32_t remaining)
+{
+    const uint32_t scalar = type & BUSTER_FTYPE_SCALAR_MASK;
+    uint32_t count = 0;
+    if (!ftype_is_complex(type) && ftype_ptr_depth(type) == 0 && scalar >= FTYPE_I8 && scalar <= FTYPE_U64 && offset <= buf->len)
+    {
+        const uint32_t room = (buf->cap - (uint32_t)offset) / size;
+        const uint32_t pairs = (cc->tcount - cc->pos) / 2u;
+        uint32_t limit = remaining < room ? remaining : room;
+        if (pairs < limit)
+        {
+            limit = pairs;
+        }
+        const __m256i signed_pair = _mm256_set1_epi16(FTOK_INT_LIT | (FTOK_COMMA << 8));
+        const __m256i unsigned_pair = _mm256_set1_epi16(FTOK_INT_U32 | (FTOK_COMMA << 8));
+        const __m512i evens = _mm512_setr_epi32(0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30);
+        while (limit - count >= 16u)
+        {
+            const uint32_t pos = cc->pos + 2u * count;
+            const __m256i kinds = _mm256_loadu_si256((const __m256i*)(cc->tk + pos));
+            const __mmask16 signed_lanes = _mm256_cmpeq_epi16_mask(kinds, signed_pair);
+            if ((signed_lanes | _mm256_cmpeq_epi16_mask(kinds, unsigned_pair)) != UINT16_MAX)
+            {
+                break;
+            }
+            const __m512i lo = _mm512_loadu_si512(cc->td + pos);
+            const __m512i hi = _mm512_loadu_si512(cc->td + pos + 16u);
+            const __m512i values = _mm512_permutex2var_epi32(lo, evens, hi);
+            uint8_t* const dst = buf->data + offset + count * size;
+            if (size == 1u)
+            {
+                _mm_storeu_si128((__m128i*)dst, _mm512_cvtepi32_epi8(values));
+            }
+            else if (size == 2u)
+            {
+                _mm256_storeu_si256((__m256i*)dst, _mm512_cvtepi32_epi16(values));
+            }
+            else if (size == 4u)
+            {
+                _mm512_storeu_si512(dst, values);
+            }
+            else
+            {
+                const __m256i low = _mm512_castsi512_si256(values);
+                const __m256i high = _mm512_extracti64x4_epi64(values, 1);
+                const __m512i low64 = _mm512_mask_cvtepi32_epi64(_mm512_cvtepu32_epi64(low), (__mmask8)signed_lanes, low);
+                const __m512i high64 = _mm512_mask_cvtepi32_epi64(_mm512_cvtepu32_epi64(high), (__mmask8)(signed_lanes >> 8), high);
+                _mm512_storeu_si512(dst, low64);
+                _mm512_storeu_si512(dst + 64, high64);
+            }
+            count += 16u;
+        }
+        cc->pos += count * 2u;
+        const uint32_t end = (uint32_t)offset + count * size;
+        if (end > buf->len)
+        {
+            buf->len = end;
+        }
+    }
+    return count;
 }
 
 // Iterative static/global initializer: allocates storage in `.rodata` / `.data.rel.ro` / `.data`,
@@ -1263,6 +1346,21 @@ static __attribute__((noinline)) uint32_t fast_cc_init_static(FastCCState* cc, F
             else
             {
                 const uint32_t esz = ftype_size(cc, ar->inner);
+                if (ar->count - f->idx >= 16u && (fast_cc_peek(cc) == FTOK_INT_LIT || fast_cc_peek(cc) == FTOK_INT_U32) &&
+                    fast_cc_peek_at(cc, 1u) == FTOK_COMMA)
+                {
+                    const uint64_t offset = f->base_off + (uint64_t)f->idx * esz;
+                    const uint32_t count = fast_cc_init_int_run(cc, ar->inner, esz, buf, offset, ar->count - f->idx);
+                    if (count != 0)
+                    {
+                        f->idx += count;
+                        if (f->is_incomplete_arr && f->idx > f->max_elem)
+                        {
+                            f->max_elem = f->idx;
+                        }
+                        continue;
+                    }
+                }
                 if (f->is_incomplete_arr && f->idx + 1u > f->max_elem)
                 {
                     const uint32_t need_end = f->base_off + (f->idx + 1u) * esz;
@@ -1374,7 +1472,7 @@ typedef enum FastValKind
     FVAL_REG = 3,          // rvalue in GP register `reg`
     FVAL_XMM = 4,          // rvalue in XMM register `reg` (0..7)
     FVAL_LOCAL = 5,        // lvalue at [rbp + off]
-    FVAL_GLOBAL = 6,       // lvalue at ELF symbol `sym_idx` + `off`
+    FVAL_GLOBAL = 6,       // lvalue at ELF symbol `sym_idx` + `imm`
     FVAL_INDIRECT = 7,     // lvalue at [reg + off] (holds GP `reg`)
     FVAL_SPILL = 8,        // spilled rvalue at [rbp + off]
     FVAL_SPILL_ADDR = 9,   // spilled lvalue: address stored at [rbp + off], plus `addr_disp`
@@ -1391,20 +1489,30 @@ struct FastVal
     FastType type;
     uint8_t kind;          // FastValKind
     uint8_t reg;           // GP (0..15) or XMM (0..7)
-    uint8_t cc_code;       // FastCC for FVAL_FLAGS
-    uint8_t bf_base;       // FVAL_LOCAL / FVAL_GLOBAL / FVAL_INDIRECT / FVAL_SPILL_ADDR for FVAL_BITFIELD
-    int64_t imm;           // immediate value / float bits / global addend
-    uint32_t sym_idx;      // ELF sym index (FVAL_GLOBAL) or IdentId (FVAL_BUILTIN)
-    int32_t off;           // stack offset (LOCAL/SPILL/SPILL_ADDR) or mem disp (INDIRECT) or global addend
-    int32_t addr_disp;     // displacement after loading spilled address (FVAL_SPILL_ADDR)
+    uint8_t is_lvalue;
+    union
+    {
+        uint8_t cc_code;       // FVAL_FLAGS
+        uint8_t bf_base;       // address kind for FVAL_BITFIELD
+        uint8_t is_func_sym;   // FVAL_GLOBAL is a direct call target
+    };
+    union
+    {
+        int64_t imm;           // integer, float bits or global addend
+        struct
+        {
+            int32_t off;       // frame offset or indirect displacement
+            int32_t addr_disp; // displacement after reloading a spilled address
+        };
+    };
+    uint32_t sym_idx;          // ELF symbol or builtin IdentId
     uint8_t bf_off;
     uint8_t bf_width;
     uint8_t bf_unit;
     uint8_t bf_signed;
-    uint8_t is_func_sym;   // 1 if FVAL_GLOBAL refers directly to a function symbol (enables direct `call sym`)
-    uint8_t is_lvalue;     // 1 if modifiable/addressable lvalue
-    uint8_t pad[2];
 };
+
+_Static_assert(sizeof(FastVal) == 24u, "expression stack entry size");
 
 // Scratch register allocation order (RAX, R10, R11 first so ABI arg regs stay free longer!)
 static const uint8_t fast_gp_pool[9] = {
@@ -4266,7 +4374,7 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
                     }
                     else if (sym->kind == FSYM_FUNC)
                     {
-                        if (ex.eval_only == 0) { sym->referenced = 1u; }
+                        if (ex.eval_only == 0) { fast_cc_reference_func(cc, sym); }
                         const uint32_t osym = ex.eval_only > 0 ? 0u : fast_cc_ensure_obj_sym(cc, si);
                         if (ex.vsp < 128u) { ex.vstack[ex.vsp++] = (FastVal){ .type = sym->type, .kind = FVAL_GLOBAL, .sym_idx = osym, .imm = 0, .is_func_sym = 1u }; }
                     }
@@ -4586,25 +4694,18 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
                 const uint8_t bkind = v->kind;
                 if (mi->bit_width != 0)
                 {
-                    FastVal bf = {
-                        .type = mi->type, .kind = FVAL_BITFIELD, .bf_base = bkind,
-                        .reg = v->reg, .sym_idx = v->sym_idx, .imm = v->imm,
-                        .off = v->off, .addr_disp = v->addr_disp,
-                        .bf_off = mi->bit_offset, .bf_width = mi->bit_width,
-                        .bf_unit = mi->bit_unit_size, .bf_signed = mi->bit_signed, .is_lvalue = 1u,
-                    };
-                    if (bkind == FVAL_GLOBAL) { bf.imm += (int64_t)mi->byte_offset; }
-                    else if (bkind == FVAL_SPILL_ADDR) { bf.addr_disp += (int32_t)mi->byte_offset; }
-                    else { bf.off += (int32_t)mi->byte_offset; }
-                    *v = bf;
+                    v->kind = FVAL_BITFIELD;
+                    v->bf_base = bkind;
+                    v->bf_off = mi->bit_offset;
+                    v->bf_width = mi->bit_width;
+                    v->bf_unit = mi->bit_unit_size;
+                    v->bf_signed = mi->bit_signed;
+                    v->is_lvalue = 1u;
                 }
-                else
-                {
-                    v->type = mi->type;
-                    if (bkind == FVAL_GLOBAL) { v->imm += (int64_t)mi->byte_offset; }
-                    else if (bkind == FVAL_SPILL_ADDR) { v->addr_disp += (int32_t)mi->byte_offset; }
-                    else { v->off += (int32_t)mi->byte_offset; }
-                }
+                v->type = mi->type;
+                if (bkind == FVAL_GLOBAL) { v->imm += (int64_t)mi->byte_offset; }
+                else if (bkind == FVAL_SPILL_ADDR) { v->addr_disp += (int32_t)mi->byte_offset; }
+                else { v->off += (int32_t)mi->byte_offset; }
             }
             continue;
         }
@@ -5693,6 +5794,8 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
     cc->cur_va_fp_init = 48u;
     cc->cur_va_overflow_off = 16;
 
+    // After scope exit only file bindings survive. Relocations and static locals already use ELF indices.
+    const uint32_t file_sym_count = cc->sym_count;
     const uint32_t func_scope_mark = fast_cc_scope_enter(cc);
 
     // 4. SysV AMD64 parameter homing
@@ -5827,6 +5930,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
     {
         fast_cc_bail(cc, "func scratch full");
         fast_cc_scope_leave(cc, func_scope_mark);
+        cc->sym_count = file_sym_count;
         cc->scratch->used = scratch_mark;
         return;
     }
@@ -6504,6 +6608,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
     }
 
     fast_cc_scope_leave(cc, func_scope_mark);
+    cc->sym_count = file_sym_count;
     cc->scratch->used = scratch_mark;
 }
 
@@ -6513,9 +6618,9 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
 static bool fast_cc_compile_unit(FastCCState* cc)
 {
     FastObj* obj = cc->obj;
-    FastBodyTask* deferred = (FastBodyTask*)fast_arena_alloc(cc->arena, 4096u * sizeof(FastBodyTask), 8);
+    cc->deferred = (FastBodyTask*)fast_arena_alloc(cc->arena, BUSTER_FDEFER_CAP * sizeof(FastBodyTask), 8);
     uint32_t deferred_count = 0;
-    if (deferred == NULL) { fast_cc_bail(cc, "deferred inline pool alloc"); return false; }
+    if (cc->deferred == NULL) { fast_cc_bail(cc, "deferred inline pool alloc"); return false; }
 
     while (cc->pos < cc->tcount && fast_cc_peek(cc) != FTOK_EOF && !cc->bailout)
     {
@@ -6585,12 +6690,22 @@ static bool fast_cc_compile_unit(FastCCState* cc)
                 {
                     const FastBodyScan bscan = fast_cc_prescan_body(cc, cc->pos);
                     if (bscan.end_pos == UINT32_MAX) { fast_cc_bail(cc, "unclosed inline body"); break; }
-                    if (deferred_count < 4096u)
+                    if (deferred_count < BUSTER_FDEFER_CAP)
                     {
-                        deferred[deferred_count++] = (FastBodyTask){
-                            .sym_idx = si, .body_start = cc->pos, .body_end = bscan.end_pos,
-                            .param_names_start = dr.param_names_start, .param_count = dr.param_count,
+                        FastSym* sym = cc->syms + si;
+                        cc->deferred[deferred_count] = (FastBodyTask){
+                            .sym_idx = si,
+                            .body_start = cc->pos,
+                            .param_names_start = dr.param_names_start,
+                            .param_count = dr.param_count,
+                            .previous = sym->deferred_body,
                         };
+                        if (sym->referenced)
+                        {
+                            fast_cc_queue_body(cc, deferred_count);
+                        }
+                        deferred_count += 1u;
+                        sym->deferred_body = (uint16_t)deferred_count;
                     }
                     else { fast_cc_bail(cc, "too many inline functions"); break; }
                     cc->pos = bscan.end_pos + 1u;
@@ -6713,21 +6828,32 @@ static bool fast_cc_compile_unit(FastCCState* cc)
         if (cc->pos == tu_loop_pos && !cc->bailout) { fast_cc_bail(cc, "top-level decl stalled"); break; }
     }
 
-    // Fixed-point pass: compile any deferred `static inline` functions that were referenced!
-    bool progress = true;
-    while (progress && !cc->bailout)
+    // Visit referenced bodies in source order. A reference past the cursor joins this pass. A reference
+    // before it waits for the wrap. This preserves the original code, relocation and symbol ordering.
+    uint32_t cursor = 0;
+    while (cc->pending_groups != 0 && !cc->bailout)
     {
-        progress = false;
-        for (uint32_t i = 0; i < deferred_count && !cc->bailout; i += 1)
+        uint32_t group = cursor >> 6;
+        uint64_t bits = cc->pending_bodies[group] & (UINT64_MAX << (cursor & 63u));
+        if (bits == 0)
         {
-            FastSym* s = cc->syms + deferred[i].sym_idx;
-            if (s->referenced != 0 && s->defined == 0)
-            {
-                if (s->is_unsupported) { fast_cc_bail(cc, "called unsupported static inline"); break; }
-                cc->pos = deferred[i].body_start;
-                fast_cc_compile_func(cc, deferred[i].sym_idx, deferred[i].param_names_start, deferred[i].param_count);
-                progress = true;
-            }
+            const uint64_t later = cc->pending_groups & ~_bzhi_u64(UINT64_MAX, group + 1u);
+            group = (uint32_t)__builtin_ctzll(later != 0 ? later : cc->pending_groups);
+            bits = cc->pending_bodies[group];
+        }
+        const uint32_t slot = (uint32_t)__builtin_ctzll(bits);
+        const uint32_t index = 64u * group + slot;
+        cc->pending_bodies[group] &= ~(UINT64_C(1) << slot);
+        if (cc->pending_bodies[group] == 0) { cc->pending_groups &= ~(UINT64_C(1) << group); }
+        cursor = (index + 1u) % BUSTER_FDEFER_CAP;
+
+        const FastBodyTask body = cc->deferred[index];
+        const FastSym* sym = cc->syms + body.sym_idx;
+        if (!sym->defined)
+        {
+            if (sym->is_unsupported) { fast_cc_bail(cc, "called unsupported static inline"); break; }
+            cc->pos = body.body_start;
+            fast_cc_compile_func(cc, body.sym_idx, body.param_names_start, body.param_count);
         }
     }
 
