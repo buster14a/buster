@@ -4342,6 +4342,72 @@ are in
   its source is the same but for the specifiers: its code lands at other addresses, and its time follows by that much
   between any two builds.
 
+### The second profile: branch records, and what they changed (2026-11-25)
+
+The samples of the first profile put every function at the same share of the cycles, the instructions and the
+mispredicted branches. That evenness is the samples' skid. The 9700X's branch records (`perf record -b`) give the
+mispredicted branches by the branch's own address, and IBS (`ibs_op`) the retired ops by line; both are in
+[buster-performance](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/direct-speed-2850-2026-11-25)
+with the scripts and every reading below.
+
+| 9700X, `sqlite3.c`, CPU 2, the harness (9 rotated rounds) | main `56490ed9` | this | |
+| --- | ---: | ---: | ---: |
+| a compile, wall | 16.73 ms | **16.10 ms** | -3.8% |
+| user cycles | 83.99 M | **81.71 M** | -2.7% |
+| kernel cycles | 8.91 M | **7.66 M** | -14.0% |
+| user instructions | 229.4 M | 227.1 M | -1.0% |
+| mispredicted branches | 959 K | 931 K | -2.9% |
+| lexing and preprocessing | 7.17 ms | **6.88 ms** | -4.1% |
+| parsing and generating code | 9.19 ms | **8.97 ms** | -2.4% |
+| writing the object | 0.280 ms | **0.142 ms** | -49% |
+| preprocessed tokens | 715,306 | 672,690 | -6.0% |
+| object | `ff67ee92...` | the same | |
+
+The product's `-c` (znver5 builds of both, one compile a process, 21 rotated runs): 17.45 to **16.63 ms** (-4.7%),
+85.80 M to 82.93 M user cycles (-3.3%), 10.83 M to 9.36 M kernel cycles (-13.6%), the same object. Every object of
+the 6,201-unit corpus of the first record is the same as main's, 1,228 of them the direct path's.
+
+- **What a mispredicted branch and an instruction cost.** From steps whose objects are the same: 19,800 fewer
+  mispredicted branches were 0.37 M fewer cycles, **19 cycles each**, and an instruction is about 0.3 cycles. The
+  compile's 960 K mispredicted branches are a fifth of its cycles.
+- **Where the mispredicted branches are.** Twenty branches hold half of the taken ones, and all are a token's or a
+  value's kind: the expression loop's dispatch after an operand (23 K a compile, half of the times it is taken), the
+  emitter's four (a name that is a macro 19 K, a token that is no identifier 18 K, a name of more than 16 bytes 14 K,
+  a name the cache does not hold 7 K), a comment's last block (17 K), the statement loop's label and statement kinds
+  (20 K), an expression's first token (18 K), a symbol's kind (13 K), `fval_to_gp`'s value kind (10 K).
+- **What changed.**
+  - glibc's `assert` under `NDEBUG` is `(__ASSERT_VOID_CAST (0))`, six tokens. `fast_pp_handle_define`'s test for it
+    asked for five, so no `assert` was ever taken as the no-op it is: each of sqlite3.c's 5,327 pushed its body as an
+    expansion frame and `__ASSERT_VOID_CAST` as a second. With six, an `assert(...);` leaves its `;` and nothing
+    else: 42,616 fewer tokens for both stages, and the same object (a `((void)(0));` statement emitted no code).
+  - The object is written over the file that is there and cut to its length afterwards (`fast_obj_write_elf`):
+    `O_TRUNC` gave the old object's pages back and took as many again. A source is mapped with `MAP_POPULATE`. A path
+    the include search found no file at is remembered (`fast_pp_include_candidate`): a header of the third directory
+    was asked for in the first two at each of its includes.
+  - An identifier in an expression gets its value by its symbol's kind from two tables (`fast_cc_expr`), with no
+    branch on the kind: 19,800 fewer mispredicted branches.
+  - `FastVal` is 40 bytes of members (its last word was two bytes and six of padding), a binary operator reads its
+    operands where they stand on the value stack and writes its result there (`fast_expr_reduce_top`).
+- **Measured and not kept.**
+  - *The emitter as a pass without branches and a loop of events:* every token of a window resolved first (an
+    identifier's id from the cache, a number of one to four digits), with what is left (a new or long name, a macro,
+    a literal) as events taken in order. 10.7 M more instructions, 26 K **more** mispredicted branches, the lexing
+    stage 7.19 to 8.11 ms. The 69 K events' dispatch is less predictable than the four biased branches it replaced,
+    and resolving a window before its macros are known resolves arguments that are then skipped. The emitter's loop
+    is near its floor.
+  - *A comment skipped four blocks a step,* so that the block that ends it is a selection and not a branch: 3.6 M
+    more instructions for 4 K fewer mispredicted branches, 0.8 M more cycles.
+  - *A result written in place for store-to-load forwarding:* half of `fast_expr_reduce_top`'s cycle samples were on
+    the load of a result its callee had just written a field at a time. Writing it in place took 71 K forwarding
+    failures away and no cycle: the samples show where retirement waits, not what the compile waits for.
+  - `-mllvm -x86-cmov-converter=false` (-0.4%, inside the builds' spread) and `-fno-jump-tables` (+0.9%) on the unit.
+- **What is left.** Per compile: 930 K mispredicted branches (17.7 M cycles), most of them the kinds' dispatches of a
+  parser that takes a token at a time, and 227 M instructions in loops that are lean. No step above 1% was found
+  after these. What would move the total: fewer tokens through both stages, as the `assert` did (file-scope
+  prototypes that are never referenced are 43,659 of the 672,690, but parsing them late would accept an invalid one
+  silently); the profile-guided build of the first record (-4.4%); and the two stages on two threads, which the
+  one-CPU gauges would not see.
+
 ## Related
 
 - [#2850](https://github.com/buster14a/buster/issues/2850): the design, its
