@@ -901,17 +901,18 @@ static __attribute__((noinline)) FastStaticConst fast_cc_eval_static_const(FastC
                     break;
                 }
                 const uint32_t id = fast_cc_data(cc);
-                // Check float builtins `__builtin_inff()` / `__builtin_inf()` / `__builtin_nanf("")` / `__builtin_nan("")`
-                if (!took_addr && (id == cc->id_builtin_inff || id == cc->id_builtin_inf ||
-                                   id == cc->id_builtin_nanf || id == cc->id_builtin_nan) &&
+                // Check float builtins `__builtin_inff()` / `__builtin_inf()` / `__builtin_nanf("")` / `__builtin_nan("")`, and
+                // HUGE_VAL's `__builtin_huge_val()` and `__builtin_huge_valf()`, which are infinities too
+                if (!took_addr && (id == cc->id_builtin_inff || id == cc->id_builtin_inf || id == cc->id_builtin_huge_valf ||
+                                   id == cc->id_builtin_huge_val || id == cc->id_builtin_nanf || id == cc->id_builtin_nan) &&
                     fast_cc_peek_at(cc, 1u) == FTOK_LPAREN)
                 {
                     cc->pos += 2u;
                     while (cc->pos < cc->tcount && fast_cc_peek(cc) != FTOK_RPAREN) { cc->pos += 1u; }
                     if (fast_cc_peek(cc) == FTOK_RPAREN) { cc->pos += 1u; }
                     FastStaticConst fc = { 0 };
-                    if (id == cc->id_builtin_inff)      { fc.val = (int64_t)UINT32_C(0x7f800000); fc.is_float = 1u; fc.type = FTYPE_F32; }
-                    else if (id == cc->id_builtin_inf)  { fc.val = (int64_t)UINT64_C(0x7ff0000000000000); fc.is_float = 2u; fc.type = FTYPE_F64; }
+                    if (id == cc->id_builtin_inff || id == cc->id_builtin_huge_valf) { fc.val = (int64_t)UINT32_C(0x7f800000); fc.is_float = 1u; fc.type = FTYPE_F32; }
+                    else if (id == cc->id_builtin_inf || id == cc->id_builtin_huge_val) { fc.val = (int64_t)UINT64_C(0x7ff0000000000000); fc.is_float = 2u; fc.type = FTYPE_F64; }
                     else if (id == cc->id_builtin_nanf) { fc.val = (int64_t)UINT32_C(0x7fc00000); fc.is_float = 1u; fc.type = FTYPE_F32; }
                     else                                { fc.val = (int64_t)UINT64_C(0x7ff8000000000000); fc.is_float = 2u; fc.type = FTYPE_F64; }
                     if (vsp < 64u) { vals[vsp++] = fc; }
@@ -5121,7 +5122,8 @@ static uint32_t fast_cc_builtin_arity(const FastCCState* cc, uint32_t id)
              id == cc->id_builtin_ctzll || id == cc->id_builtin_bswap16 || id == cc->id_builtin_bswap32 || id == cc->id_builtin_bswap64 ||
              id == cc->id_builtin_popcount || id == cc->id_builtin_popcountll || id == cc->id_builtin_nan || id == cc->id_builtin_nanf ||
              id == cc->id_builtin_strlen) { arity = 1u; }
-    else if (id == cc->id_builtin_unreachable || id == cc->id_builtin_inf || id == cc->id_builtin_inff || id == cc->id_sync_synchronize) { arity = 0u; }
+    else if (id == cc->id_builtin_unreachable || id == cc->id_builtin_inf || id == cc->id_builtin_inff || id == cc->id_builtin_huge_val ||
+             id == cc->id_builtin_huge_valf || id == cc->id_sync_synchronize) { arity = 0u; }
     else if (id == cc->id_builtin_memcpy || id == cc->id_builtin_memset || id == cc->id_builtin_memmove || id == cc->id_builtin_memcmp) { arity = 3u; }
     else if (id == cc->id_atomic_load_n) { arity = 2u; }
     else if (id == cc->id_atomic_store_n) { arity = 3u; }
@@ -5153,8 +5155,8 @@ static __attribute__((noinline)) void fval_emit_builtin_call(FastExprCtx* ex, ui
         *out = (FastVal){ .type = FTYPE_VOID, .kind = FVAL_VOID };
         return;
     }
-    if (id == cc->id_builtin_inff) { *out = (FastVal){ .type = FTYPE_F32, .kind = FVAL_FIMM, .imm = (int64_t)UINT32_C(0x7f800000) }; return; }
-    if (id == cc->id_builtin_inf)  { *out = (FastVal){ .type = FTYPE_F64, .kind = FVAL_FIMM, .imm = (int64_t)UINT64_C(0x7ff0000000000000) }; return; }
+    if (id == cc->id_builtin_inff || id == cc->id_builtin_huge_valf) { *out = (FastVal){ .type = FTYPE_F32, .kind = FVAL_FIMM, .imm = (int64_t)UINT32_C(0x7f800000) }; return; }
+    if (id == cc->id_builtin_inf || id == cc->id_builtin_huge_val)  { *out = (FastVal){ .type = FTYPE_F64, .kind = FVAL_FIMM, .imm = (int64_t)UINT64_C(0x7ff0000000000000) }; return; }
     if (id == cc->id_builtin_nanf) { for (uint32_t i = 0; i < argc; i += 1) fval_release(ex, &args[i]); *out = (FastVal){ .type = FTYPE_F32, .kind = FVAL_FIMM, .imm = (int64_t)UINT32_C(0x7fc00000) }; return; }
     if (id == cc->id_builtin_nan)  { for (uint32_t i = 0; i < argc; i += 1) fval_release(ex, &args[i]); *out = (FastVal){ .type = FTYPE_F64, .kind = FVAL_FIMM, .imm = (int64_t)UINT64_C(0x7ff8000000000000) }; return; }
     if (id == cc->id_builtin_clzll || id == cc->id_builtin_clz || id == cc->id_builtin_ctzll || id == cc->id_builtin_ctz)
@@ -6839,6 +6841,7 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
                 }
                 if (id == cc->id_builtin_clzll || id == cc->id_builtin_clz || id == cc->id_builtin_ctzll ||
                     id == cc->id_builtin_ctz || id == cc->id_builtin_inff || id == cc->id_builtin_inf ||
+                    id == cc->id_builtin_huge_valf || id == cc->id_builtin_huge_val ||
                     id == cc->id_builtin_nanf || id == cc->id_builtin_nan || id == cc->id_builtin_expect ||
                     id == cc->id_builtin_constant_p || id == cc->id_builtin_unreachable ||
                     id == cc->id_builtin_bswap16 || id == cc->id_builtin_bswap32 || id == cc->id_builtin_bswap64 ||
@@ -7057,6 +7060,13 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
             }
             if (k == FTOK_STR_LIT || k == FTOK_KW_FUNC)
             {
+                // __PRETTY_FUNCTION__ is the function's signature in C, as clang prints it, and not its name (#3618):
+                // the full pipeline prints it. Without code too, since sizeof takes its length.
+                if (k == FTOK_KW_FUNC && fast_cc_data(cc) == cc->id_pretty_function)
+                {
+                    fast_cc_bail(cc, "__PRETTY_FUNCTION__");
+                    break;
+                }
                 const char* sp;
                 uint32_t slen = 0;
                 if (k == FTOK_STR_LIT)

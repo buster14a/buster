@@ -4350,6 +4350,10 @@ single-TU `-c` C17/C23 object builds directly from `mmap`'d source bytes to an E
   units take the direct path in each mode (1,151 of 1,336), and musl's ctype macros (`0 ? isdigit(a) :
   ...`) no longer reference the functions. Without code no value holds a register: `fval_release` frees none in
   `eval_only`, where a `sizeof` operand's call freed `rax` under a live value (#3616).
+- **Function names and `HUGE_VAL` (#3618, #3592):** `__func__` and `__FUNCTION__` are the function's name; a unit that
+  names `__PRETTY_FUNCTION__`, the signature as clang prints it in C, leaves for the full pipeline's printer, told apart
+  from the other two by its identifier (one token kind holds all three). `__builtin_huge_val()` and
+  `__builtin_huge_valf()`, glibc's `HUGE_VAL` and `HUGE_VALF`, fold to infinities as `__builtin_inf()` does.
 - **Fail-closed fallback (`--no-direct` / `BUSTER_NO_DIRECT`):** any diagnostic, warning-sensitive construct, or
   unsupported flag/extension bails out silently without writing output so `c_checker_driver.c` runs the full pipeline.
 
