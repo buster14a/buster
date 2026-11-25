@@ -4350,10 +4350,26 @@ single-TU `-c` C17/C23 object builds directly from `mmap`'d source bytes to an E
   units take the direct path in each mode (1,151 of 1,336), and musl's ctype macros (`0 ? isdigit(a) :
   ...`) no longer reference the functions. Without code no value holds a register: `fval_release` frees none in
   `eval_only`, where a `sizeof` operand's call freed `rax` under a live value (#3616).
-- **Function names and `HUGE_VAL` (#3618, #3592):** `__func__` and `__FUNCTION__` are the function's name; a unit that
-  names `__PRETTY_FUNCTION__`, the signature as clang prints it in C, leaves for the full pipeline's printer, told apart
-  from the other two by its identifier (one token kind holds all three). `__builtin_huge_val()` and
+- **Function names and `HUGE_VAL` (#3618, #3592):** `__func__` and `__FUNCTION__` are the function's name, told apart
+  from `__PRETTY_FUNCTION__` by its identifier (one token kind holds all three). `__builtin_huge_val()` and
   `__builtin_huge_valf()`, glibc's `HUGE_VAL` and `HUGE_VALF`, fold to infinities as `__builtin_inf()` does.
+- **`__PRETTY_FUNCTION__` (#3592, `c_direct_pretty.c`):** the signature as clang prints it in C, made from the
+  definition's tokens at the function's first use of it and kept for the rest of the function: the return and
+  parameter types as written (typedef names kept), parameters adjusted (an array to a pointer to its element with its
+  brackets' qualifiers, a function to a pointer, `va_list` to `struct __va_list_tag *`), a declarator's parentheses
+  kept, `(void)` and `()` as clang has them, no storage class or attribute: `void (*f(int, void (*)(int)))(int)`. A
+  declarator is read from its name outward by its parentheses' levels and a type printed by a stack of frames, since the
+  direct path has no recursion. What it can't print as clang does, or what the full pipeline prints otherwise (a
+  parameter's redundant parentheses, `()` after an earlier declaration, a parenthesized name), leaves.
+- **glibc's `assert` (#3592):** in GNU's modes it is a statement expression, `((void) sizeof ((e) ? 1 : 0),
+  __extension__ ({ if (e) ; else __assert_fail (...); }))`, and SQLite's `ALWAYS` and `NEVER` put one in an expression.
+  The direct path compiles no statement in an expression, so that shape alone is rewritten in place, where the
+  expression compiler or a dead branch's scan meets its `__extension__ ({`, as the conditional expression of as many
+  tokens that it computes: `__extension__ ((e) ? (void) 0 : __assert_fail (...))`. Any other statement expression
+  leaves. `__builtin_ceil`, `__builtin_floor` and their float forms are computed inline as the full pipeline's helper
+  computes them, on the bits: no library reference, no flag but a signaling NaN's, DAZ honored. A body nests up to 256
+  statement frames (`BUSTER_FSTMT_FRAMES`); an `else if` takes one. SQLite's `shell.c` takes the direct path with
+  these: 36.7 ms to 6.5 ms on the 9700X.
 - **Fail-closed fallback (`--no-direct` / `BUSTER_NO_DIRECT`):** any diagnostic, warning-sensitive construct, or
   unsupported flag/extension bails out silently without writing output so `c_checker_driver.c` runs the full pipeline.
 
