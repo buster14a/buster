@@ -1909,8 +1909,9 @@ static FastArm fast_cc_arms_merge(FastArm a, FastArm b)
        (uint32_t)((BUSTER_FARMS_VALUE(v) & (BUSTER_FARMS_ZERO | BUSTER_FARMS_NONZERO)) != (BUSTER_FARMS_ZERO | BUSTER_FARMS_NONZERO)))) == 0)
 
 // Whether a function symbol is one of the library's builtins that are const or pure (#3577: `abs`, `isalpha`), whose
-// discarded call the full pipeline warns of as of an attributed one: asked of the driver once a symbol (pad_sym[0]:
-// 0 not asked, 1 no, 2 yes), and only of a function with external linkage.
+// discarded call the full pipeline warns of as of an attributed one: asked of the driver at the symbol's first use by
+// name (its push_marks are BUSTER_FSYM_PUSH_UNASKED until then), and only of a function with external linkage. Its
+// push marks, then, PURE or none.
 static __attribute__((cold, noinline)) uint8_t fast_cc_library_pure_query(FastCCState* cc, FastSym* sym)
 {
     const FastIdentEntry* e = cc->pp->idents.entries + sym->ident_id;
@@ -1918,9 +1919,11 @@ static __attribute__((cold, noinline)) uint8_t fast_cc_library_pure_query(FastCC
     const bool pure = external && cc->pp->feature_query != NULL &&
                       cc->pp->feature_query(cc->pp->feature_context, C_DIRECT_QUERY_PURE_LIBRARY_FUNCTION,
                                             (const uint8_t*)(cc->pp->idents.strings + e->str_offset), e->length) != 0;
-    sym->pad_sym[0] = pure ? 2u : 1u;
-    return sym->pad_sym[0];
+    sym->push_marks = pure ? (uint8_t)BUSTER_FSYM_PUSH_PURE : 0u;
+    return sym->push_marks;
 }
+_Static_assert(BUSTER_FSYM_PUSH_PURE == BUSTER_FVAL_MARK_PURE && BUSTER_FSYM_PUSH_NONLITERAL == BUSTER_FVAL_MARK_NONLITERAL,
+               "a symbol's push marks are its value's");
 
 // Scratch register allocation order (RAX, R10, R11 first so ABI arg regs stay free longer!)
 static const uint8_t fast_gp_pool[9] = {
@@ -1962,25 +1965,26 @@ struct FastExprCtx
      (UINT64_C(0) - (uint64_t)((uint32_t)((v)->seq_start != 0) & ((uint32_t)((v)->kind == FVAL_LOCAL) | (uint32_t)((v)->kind == FVAL_GLOBAL)))))
 // An identity's hash bit in seq_bloom.
 #define BUSTER_FSEQ_BIT(identity) (UINT64_C(1) << ((uint64_t)(identity) * UINT64_C(0x9E3779B97F4A7C15) >> 58))
-// Log a naming (an evaluated use of a variable by name) where LOGGED (0 or 1); a modified variable's sets seq_hit. Every
-// name takes one: the hash is taken only once something was modified (seq_bloom), which few names see, behind a branch.
+// Log a naming where LOGGED (0 or 1: a use of a variable by name where evaluated); a modified variable's sets seq_hit.
+// Every name takes one: the hash is taken only once something was modified (seq_bloom), which few names see, behind a
+// branch.
 #define BUSTER_FSEQ_NAME(ex, identity, logged) \
     { \
-        const uint32_t seq_logged = (uint32_t)((ex)->eval_only == 0) & (uint32_t)(logged); \
         (ex)->seq_log[(ex)->seq_count & 63u] = (identity); \
         if (__builtin_expect((ex)->seq_bloom != 0, 0)) \
         { \
-            (ex)->seq_hit |= (uint32_t)(((ex)->seq_bloom & BUSTER_FSEQ_BIT(identity)) != 0) & seq_logged; \
+            (ex)->seq_hit |= (uint32_t)(((ex)->seq_bloom & BUSTER_FSEQ_BIT(identity)) != 0) & (uint32_t)(logged); \
         } \
-        (ex)->seq_count += seq_logged; \
+        (ex)->seq_count += (uint32_t)(logged); \
     }
 // A region's bounds, which the end's check reads when unknown ones (0) aren't counted.
 #define BUSTER_FSEQ_REGION(ex, lo, mid, hi) \
     ((ex)->seq_region[(ex)->seq_regions & 31u][0] = (uint8_t)(lo), (ex)->seq_region[(ex)->seq_regions & 31u][1] = (uint8_t)(mid), \
      (ex)->seq_region[(ex)->seq_regions & 31u][2] = (uint8_t)(hi), (ex)->seq_regions += (uint32_t)((lo) != 0) & (uint32_t)((mid) != 0))
-// The log's count + 1 as a seq_start, saturated past what one byte holds (and the log, which a hit then refuses);
-// branch-free, as every use of a variable takes one.
-#define BUSTER_FSEQ_MARK(ex) ((uint8_t)(((ex)->seq_count + 1u) | (UINT32_C(0) - (uint32_t)((ex)->seq_count >= 254u))))
+// The log's count + 1 as a seq_start or an operator's seq_mid, in the byte it fits: past 253 entries the positions
+// wrap, and the expression's end refuses a log that long once anything in it was modified (seq_bloom), as the log's
+// 64 entries would anyway. Every use of a variable and every operator takes one.
+#define BUSTER_FSEQ_MARK(ex) ((uint8_t)((ex)->seq_count + 1u))
 // Where an operator about to be pushed on OPS (OSP of them) has its left operand begin: the operator below's seq_mid, or
 // the expression's first entry; 0 where that operator doesn't keep it.
 #define BUSTER_FSEQ_BELOW(ops, osp) \
@@ -6107,7 +6111,7 @@ static __attribute__((cold, noinline)) bool fast_cc_push_flagged_symbol(FastCCSt
                                                .marks = BUSTER_FVAL_MARK_REGISTER, .seq_start = BUSTER_FSEQ_MARK(ex),
                                                .seq_ident = sym->ident_id };
         }
-        BUSTER_FSEQ_NAME(ex, sym->ident_id, 1u);
+        BUSTER_FSEQ_NAME(ex, sym->ident_id, (uint32_t)(ex->eval_only == 0));
         pushed = true;
     }
     else if (((uint32_t)(sym->kind != FSYM_FUNC) | (uint32_t)(next == FTOK_RPAREN) |
@@ -6188,19 +6192,20 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
                         fast_cc_bail(cc, "unexpected symbol kind in expr");
                         break;
                     }
-                    const uint32_t emitted = (uint32_t)(symbol_kind >= FSYM_GLOBAL) & (uint32_t)(ex.eval_only == 0);
+                    const uint32_t evaluated = (uint32_t)(ex.eval_only == 0);
+                    const uint32_t emitted = (uint32_t)(symbol_kind >= FSYM_GLOBAL) & evaluated;
                     if (emitted) { fast_cc_reference(cc, sym); }
                     uint32_t osym = sym->obj_sym & (0u - emitted);
                     if (__builtin_expect((emitted != 0) & (osym == 0), 0))
                     {
                         osym = fast_cc_ensure_obj_sym(cc, si);
                     }
-                    // #3577: a library function that is const or pure (asked of the driver once a function) makes a call
-                    // without an effect; an enumerator carries its enum (sec_off) in sym_idx, for -Wimplicit-enum-enum-cast;
-                    // a variable's use is logged for -Wunsequenced. Masks, as the kind above.
+                    // #3577: the symbol's marks (an enumerator's nonliteral, a library function's purity, asked of the driver
+                    // at its first use: a call without an effect); an enumerator carries its enum (sec_off) in sym_idx, for
+                    // -Wimplicit-enum-enum-cast; a variable's use is logged for -Wunsequenced. Masks, as the kind above.
                     const uint32_t function = (uint32_t)(symbol_kind == FSYM_FUNC);
-                    uint8_t library = sym->pad_sym[0];
-                    if (__builtin_expect(function & (uint32_t)(library == 0), 0)) { library = fast_cc_library_pure_query(cc, sym); }
+                    uint8_t push_marks = sym->push_marks;
+                    if (__builtin_expect((push_marks & BUSTER_FSYM_PUSH_UNASKED) != 0, 0)) { push_marks = fast_cc_library_pure_query(cc, sym); }
                     const uint32_t enumerator = (uint32_t)(symbol_kind == FSYM_ENUM_CONST);
                     // (FSYM_LOCAL and FSYM_GLOBAL are adjacent: a variable.)
                     const uint32_t variable = (uint32_t)(symbol_kind - (uint32_t)FSYM_LOCAL < 2u);
@@ -6214,12 +6219,12 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
                             .sym_idx = osym | (sym->sec_off & (UINT32_C(0) - enumerator)),
                             .is_func_sym = (uint8_t)function,
                             .is_lvalue = value_lvalues[symbol_kind],
-                            .marks = (uint8_t)((BUSTER_FVAL_MARK_NONLITERAL * enumerator) | (BUSTER_FVAL_MARK_PURE * (function & (uint32_t)(library == 2u)))),
+                            .marks = push_marks,
                             .seq_start = (uint8_t)(BUSTER_FSEQ_MARK(&ex) & (UINT32_C(0) - variable)),
                             .seq_ident = id,
                         };
                     }
-                    BUSTER_FSEQ_NAME(&ex, id, variable);
+                    BUSTER_FSEQ_NAME(&ex, id, variable & evaluated);
                     expect_val = false;
                     continue;
                 }
@@ -7165,7 +7170,7 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
     FastVal final_v = ex.vstack[0];
     // #3577: -Wunsequenced: a variable modified and named or modified again where nothing sequences the two (seq_hit, set
     // by the log, says where that may be).
-    if (ex.seq_hit != 0 && !fast_cc_sequenced(&ex))
+    if ((ex.seq_hit | ((uint32_t)(ex.seq_count >= 254u) & (uint32_t)(ex.seq_bloom != 0))) != 0 && !fast_cc_sequenced(&ex))
     {
         fast_cc_bail(cc, "modifications and uses of a variable the full pipeline's -Wunsequenced questions");
         return;

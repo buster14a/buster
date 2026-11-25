@@ -140,6 +140,12 @@ typedef enum FastSymKind
 #define BUSTER_FSYM_REGISTER    0x20u // a register variable: taking its address is an error
 #define BUSTER_FSYM_PURE        0x40u // __attribute__((const)) or ((pure)): a discarded call is -Wunused-value
 #define BUSTER_FSYM_ALIGNED     0x80u // a typedef with an alignment of its own, which this path keeps none of: a use is refused
+// A symbol's push_marks (#3577), the value marks (c_direct_cc.c's BUSTER_FVAL_MARK_*) a use by name gives without a
+// branch: an enumerator's is a nonliteral, a library function the driver calls const or pure is pure; and until a
+// function's purity is asked (fast_cc_library_pure_query, at its first use), UNASKED, a mark no use by name carries.
+#define BUSTER_FSYM_PUSH_UNASKED    0x01u
+#define BUSTER_FSYM_PUSH_PURE       0x10u
+#define BUSTER_FSYM_PUSH_NONLITERAL 0x20u
 // A parameter's name in cc->param_names, whose high bit marks one declared an array (#3577).
 #define BUSTER_FPARAM_NAME_MASK 0x7fffffffu
 
@@ -168,6 +174,7 @@ struct FastSym
     uint8_t use_flags;     // BUSTER_FSYM_*: what a use of the symbol must look at first (one test at every use)
     uint8_t visibility_set; // a declaration gave the visibility, so another one that differs is clang's error (#3595)
     uint8_t inline_rules;   // BUSTER_FINLINE_*: what a function's declarations say of its inline definition (#3595)
+    uint8_t push_marks;     // the marks a use by name gives its value (#3577): BUSTER_FSYM_PUSH_*
     FastType type;
     uint32_t ident_id;
     uint32_t obj_sym;      // symbol index in FastObj (for GLOBAL/FUNC)
@@ -897,6 +904,8 @@ static inline __attribute__((always_inline)) uint32_t fast_cc_sym_bind(FastCCSta
         idx = cc->sym_count++;
         sym.ident_id = id;
         sym.scope_depth = (uint8_t)depth;
+        sym.push_marks = (uint8_t)((BUSTER_FSYM_PUSH_UNASKED * (uint32_t)(sym.kind == FSYM_FUNC)) |
+                                   (BUSTER_FSYM_PUSH_NONLITERAL * (uint32_t)(sym.kind == FSYM_ENUM_CONST)));
         cc->syms[idx] = sym;
         if (cc->scope_depth > 0)
         {
