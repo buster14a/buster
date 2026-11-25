@@ -1,0 +1,1 @@
+-0.53 the specifier loops test register, auto and __extension__ in branches of their own, where one branch compared all three for every token (#3599), less step 4's declarator and main checks (#3592)
