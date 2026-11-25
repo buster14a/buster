@@ -788,7 +788,7 @@ static bool c_direct_test_ident_growth(void)
                 const uint32_t length = c_direct_test_growth_name(name, name_kind, i);
                 uint8_t kind = 0;
                 const uint32_t before_bits = table.cache_bits;
-                const bool grows = table.count + 1u == table.cache_grow_at;
+                const bool grows = table.count + 1u == table.cache_grow_at && before_bits <= BUSTER_FIDENT_CACHE_BITS;
                 uint32_t held = 0;
                 if (grows)
                 {
