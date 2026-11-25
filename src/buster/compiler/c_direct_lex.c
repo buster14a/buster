@@ -188,6 +188,25 @@ struct FastTok
     uint32_t data;    // ident_id (IDENT/KW), inline u32 or num_pool index (INT/FLOAT), lit_pool index (STR)
 };
 
+// A token made in a register and given back whole. A token written a field at a time and then loaded whole waits for
+// its stores to leave the store buffer: Zen 5 forwards a store to a load only when the load lies inside that one store
+// (#2850's profile on the 9700X: 956 K failed forwards a compile of sqlite3.c, a fifth of them fast_lex_one's token).
+static inline FastTok fast_tok_make(uint32_t kind, uint32_t flags, uint32_t extra, uint32_t data)
+{
+    const uint64_t bits = (uint64_t)(kind & 0xffu) | ((uint64_t)(flags & 0xffu) << 8) | ((uint64_t)(extra & 0xffffu) << 16) | ((uint64_t)data << 32);
+    FastTok tok;
+    memcpy(&tok, &bits, sizeof(tok));
+    return tok;
+}
+
+// A lexed literal and where its text ends, in two registers.
+typedef struct FastLexed FastLexed;
+struct FastLexed
+{
+    const uint8_t* p;
+    FastTok tok;
+};
+
 // Literal pool slice (for string literals and float/large-int source text)
 typedef struct FastLitSlice FastLitSlice;
 struct FastLitSlice
@@ -782,6 +801,56 @@ static inline uint32_t fast_ident_lookup_16(FastIdentTable* t, const uint8_t* p,
     return id;
 }
 
+// An identifier of more than 16 bytes, through the same cache: its key is its first and its last eight bytes and its
+// length, and where a slot has them the interned text is compared (the bytes between may differ). Without it every one
+// went to fast_ident_intern's table, four dependent loads: 21,500 of sqlite3.c's lookups, a quarter of them new names.
+static inline uint32_t fast_ident_lookup_long(FastIdentTable* t, const uint8_t* p, uint32_t len, uint8_t* out_kind)
+{
+    uint32_t id = 0;
+    uint8_t kind = FTOK_IDENT;
+    FastIdentCacheSlot* slot = NULL;
+    uint64_t w0 = 0;
+    uint64_t w1 = 0;
+    if (len <= 64u)
+    {
+        memcpy(&w0, p, 8);
+        memcpy(&w1, p + len - 8u, 8);
+        const uint64_t h = ((w0 ^ (w1 * UINT64_C(0x9e3779b97f4a7c15)) ^ ((uint64_t)len << 56)) * UINT64_C(0xbf58476d1ce4e5b9));
+        slot = t->cache + (uint32_t)(h >> (64u - BUSTER_FIDENT_CACHE_BITS));
+        if (((slot->w0 ^ w0) | (slot->w1 ^ w1) | ((uint64_t)slot->len ^ len)) == 0 && slot->id != 0)
+        {
+            // Masked loads: neither the text nor the interned copy has 64 bytes to read for certain.
+            const __mmask64 lanes = _bzhi_u64(~UINT64_C(0), len);
+            const __m512i text = _mm512_maskz_loadu_epi8(lanes, (const void*)p);
+            const __m512i interned = _mm512_maskz_loadu_epi8(lanes, (const void*)(t->strings + t->entries[slot->id].str_offset));
+            if (_mm512_cmpneq_epi8_mask(text, interned) == 0)
+            {
+                id = slot->id;
+                kind = slot->tok_kind;
+            }
+        }
+    }
+    if (id == 0)
+    {
+        id = fast_ident_intern(t, p, len);
+        if (id != 0)
+        {
+            const uint8_t kw = t->entries[id].kw_kind;
+            kind = kw != 0 ? kw : FTOK_IDENT;
+            if (slot != NULL)
+            {
+                slot->w0 = w0;
+                slot->w1 = w1;
+                slot->id = id;
+                slot->len = (uint8_t)len;
+                slot->tok_kind = kind;
+            }
+        }
+    }
+    *out_kind = kind;
+    return id;
+}
+
 static inline bool fast_ident_is_macro(const FastIdentTable* t, uint32_t id)
 {
     return (t->macro_bits[id >> 6] & (UINT64_C(1) << (id & 63u))) != 0;
@@ -1032,10 +1101,44 @@ struct FastIncludeFile
     uint32_t dir_idx;        // directory index where found (for #include_next)
     uint32_t cond_base;      // conditional stack depth on entry
     uint32_t guard_ident;    // candidate include guard macro ID (0 if none)
+    uint32_t serial;         // this push's number, which a window of its text carries (never 0)
     uint8_t guard_state;     // 0=start, 1=saw_ifndef, 2=saw_define, 3=invalidated, 4=closed
     bool at_bol;
     bool owned_mmap;
     bool is_system;
+};
+
+// A window of a file's raw tokens (#2850). The lexer's 64-byte loop writes it and does nothing else: no identifier is
+// looked up there and no macro asked about, so the loop has no per-token branch, and the readers below it (the bulk
+// emitter, the directives' and the macro arguments' reader) take their tokens from it and never lex a byte twice.
+// A token is its kind as the classifier gives it (FTOK_IDENT, FTOK_INT_LIT for a number's run, FTOK_STR_LIT and
+// FTOK_CHAR_LIT for a plain literal's opening quote, or a punctuator's), its first byte's offset in the file, and an
+// identifier's, a number's or a punctuator's length. Whatever the loop can't decide that way ends the window, and
+// fast_lex_one lexes the token there, as it lexes every token of a file's last 80 bytes.
+#define BUSTER_FWIN_CAPACITY       2048u
+#define BUSTER_FWIN_STOP_CAPACITY  0u   // full: the lexing goes on at lex_ptr
+#define BUSTER_FWIN_STOP_TAIL      1u   // fewer than 80 bytes are left at lex_ptr
+#define BUSTER_FWIN_STOP_DIRECTIVE 2u   // the '#' at lex_ptr starts a line
+#define BUSTER_FWIN_STOP_SCALAR    3u   // the token at lex_ptr is fast_lex_one's
+#define BUSTER_FWIN_STOP_EOL       4u   // a line's window: the newline that ends the line is at lex_ptr
+#define BUSTER_FWIN_STOP_BAIL      5u   // the compile bailed out
+// A window token's kind where the token is fast_lex_one's: its readers lex it there.
+#define BUSTER_FWIN_SCALAR         FTOK_EOF
+
+typedef struct FastWindow FastWindow;
+struct FastWindow
+{
+    uint8_t* kinds;          // capacity + 64 each: the loop stores whole vectors
+    uint32_t* starts;
+    uint8_t* lens;
+    uint32_t count;
+    uint32_t pos;            // the next token to take: every one before it starts before the file's ptr
+    uint32_t serial;         // the file's, or 0 for no window
+    uint32_t generation;     // counts the windows lexed, for a reader that takes a token back
+    const uint8_t* lex_ptr;  // the first byte past what the window covers
+    uint8_t stop;            // BUSTER_FWIN_STOP_*: what is at lex_ptr
+    bool lex_bol;            // whether lex_ptr starts a line
+    bool line_mode;          // lexed to its line's end only (a directive's line)
 };
 
 typedef struct FastCondFrame FastCondFrame;
@@ -1163,6 +1266,10 @@ struct FastPP
     uint32_t hide_ids[BUSTER_FPP_MAX_HIDE];
     uint32_t hide_count;
 
+    // The top file's raw tokens (FastWindow)
+    FastWindow win;
+    uint32_t file_serial;
+
     // Current source state
     uint32_t counter_val;
     const char* base_file;
@@ -1171,6 +1278,8 @@ struct FastPP
     bool unsigned_char;
     bool c23;
 };
+
+static void fast_pp_read_tok(FastPP* pp, FastIncludeFile* f, bool stop_at_eol, FastTok* out_tok);
 
 static __attribute__((cold, noinline)) void fast_pp_bail(FastPP* pp, const char* reason)
 {
@@ -1218,16 +1327,14 @@ static inline uint32_t fast_pp_add_lit(FastPP* pp, const char* bytes, uint32_t l
 // ---------------------------------------------------------------------------------------------------------------------
 // Fast single-token lexer from a byte buffer (handles splices, numbers, strings, punctuators, identifiers)
 
-// Parse integer or floating-point preprocessing number at [p, end).
-static const uint8_t* fast_lex_number(FastPP* pp, const uint8_t* p, const uint8_t* end, FastTok* tok)
+// Parse integer or floating-point preprocessing number at [p, end). `flags_in` are the token's flags so far.
+static FastLexed fast_lex_number(FastPP* pp, const uint8_t* p, const uint8_t* end, uint32_t flags_in)
 {
     const uint8_t* const start = p;
     // Fast path for single ASCII digit followed by non-ident/non-dot char (super common: 0, 1, 2, ...)
     if (__builtin_expect(p + 1 < end && (fast_char_class[p[1]] & 1u) == 0 && p[1] != '.' && p[1] != '\\' && p[1] != '\'', 1))
     {
-        tok->kind = FTOK_INT_LIT;
-        tok->data = (uint32_t)(p[0] - '0');
-        return p + 1;
+        return (FastLexed){ .p = p + 1, .tok = fast_tok_make(FTOK_INT_LIT, flags_in, 0, (uint32_t)(p[0] - '0')) };
     }
 
     bool is_float = false;
@@ -1288,22 +1395,24 @@ static const uint8_t* fast_lex_number(FastPP* pp, const uint8_t* p, const uint8_
     if (has_splice)
     {
         fast_pp_bail(pp, "spliced number");
-        return p;
+        return (FastLexed){ .p = p, .tok = fast_tok_make(FTOK_EOF, flags_in, 0, 0) };
     }
 
     const uint32_t len = (uint32_t)(p - start);
     if (is_float)
     {
-        tok->kind = FTOK_FLOAT_LIT;
+        uint32_t float_flags = flags_in;
+        uint32_t float_data = 0;
+        uint32_t float_extra = 0;
         // Check suffix f/F/l/L
         const uint8_t last = p[-1];
         if (last == 'f' || last == 'F')
         {
-            tok->flags |= BUSTER_FTOK_LONG; // f32
+            float_flags |= BUSTER_FTOK_LONG; // f32
         }
         else if (last == 'l' || last == 'L')
         {
-            tok->flags |= BUSTER_FTOK_LONGLONG; // f80 (long double)
+            float_flags |= BUSTER_FTOK_LONGLONG; // f80 (long double)
         }
         // Parse double immediately via strtod on small stack copy
         char buf[128];
@@ -1315,14 +1424,14 @@ static const uint8_t* fast_lex_number(FastPP* pp, const uint8_t* p, const uint8_
             const double d = strtod(buf, &ep);
             uint64_t bits = 0;
             memcpy(&bits, &d, 8);
-            tok->data = fast_pp_add_num(pp, bits);
-            tok->extra = (uint16_t)fast_pp_add_lit(pp, buf, len);
+            float_data = fast_pp_add_num(pp, bits);
+            float_extra = (uint16_t)fast_pp_add_lit(pp, buf, len);
         }
         else
         {
             fast_pp_bail(pp, "long float literal");
         }
-        return p;
+        return (FastLexed){ .p = p, .tok = fast_tok_make(FTOK_FLOAT_LIT, float_flags, float_extra, float_data) };
     }
 
     // Integer literal
@@ -1431,18 +1540,14 @@ static const uint8_t* fast_lex_number(FastPP* pp, const uint8_t* p, const uint8_
         }
     }
 
-    tok->kind = FTOK_INT_LIT;
-    tok->flags |= flags;
-    if (val <= UINT32_MAX)
+    uint32_t int_flags = flags_in | flags;
+    uint32_t int_data = (uint32_t)val;
+    if (val > UINT32_MAX)
     {
-        tok->data = (uint32_t)val;
+        int_flags |= BUSTER_FTOK_IN_POOL;
+        int_data = fast_pp_add_num(pp, val);
     }
-    else
-    {
-        tok->flags |= BUSTER_FTOK_IN_POOL;
-        tok->data = fast_pp_add_num(pp, val);
-    }
-    return p;
+    return (FastLexed){ .p = p, .tok = fast_tok_make(FTOK_INT_LIT, int_flags, 0, int_data) };
 }
 
 static inline uint64_t fast_tok_int_val(const FastPP* pp, FastTok tok)
@@ -1506,16 +1611,19 @@ static uint32_t fast_decode_escape(const uint8_t** pp_ptr, const uint8_t* end, b
     return val;
 }
 
-// Lex string literal starting at '"' using AVX-512 to scan for '"' or '\' or '\n'
-static const uint8_t* fast_lex_string(FastPP* pp, const uint8_t* p, const uint8_t* end, FastTok* tok, uint16_t prefix_kind)
+// Where the string literal whose text starts at `p` (past its opening quote) stops, by 64-byte scans for '"', '\\'
+// and '\n': at its closing quote, at a newline no backslash precedes, or at `end`. `*out_stopped` says which.
+#define BUSTER_FSTRING_CLOSED       0u
+#define BUSTER_FSTRING_NEWLINE      1u
+#define BUSTER_FSTRING_UNTERMINATED 2u
+
+static const uint8_t* fast_scan_string_close(const uint8_t* p, const uint8_t* end, bool* out_has_escape, uint32_t* out_stopped)
 {
-    p += 1; // skip opening '"'
-    const uint8_t* const start = p;
     const __m512i v_q = _mm512_set1_epi8('"');
     const __m512i v_bs = _mm512_set1_epi8('\\');
     const __m512i v_nl = _mm512_set1_epi8('\n');
     bool has_escape = false;
-    bool closed = false;
+    uint32_t stopped = BUSTER_FSTRING_UNTERMINATED;
 
     while (p < end)
     {
@@ -1530,7 +1638,7 @@ static const uint8_t* fast_lex_string(FastPP* pp, const uint8_t* p, const uint8_
             p += pos;
             if (*p == '"')
             {
-                closed = true;
+                stopped = BUSTER_FSTRING_CLOSED;
                 break;
             }
             else if (*p == '\\')
@@ -1552,12 +1660,33 @@ static const uint8_t* fast_lex_string(FastPP* pp, const uint8_t* p, const uint8_
             }
             else
             {
-                // Unescaped newline in string literal
-                fast_pp_bail(pp, "newline in string");
+                stopped = BUSTER_FSTRING_NEWLINE;
                 break;
             }
         }
         p += avail;
+    }
+    *out_has_escape = has_escape;
+    *out_stopped = stopped;
+    return p;
+}
+
+// Lex string literal starting at '"' using AVX-512 to scan for '"' or '\' or '\n'
+static FastLexed fast_lex_string(FastPP* pp, const uint8_t* p, const uint8_t* end, uint32_t flags_in, uint16_t prefix_kind)
+{
+    p += 1; // skip opening '"'
+    const uint8_t* const start = p;
+    uint32_t tok_kind = FTOK_EOF;
+    uint32_t tok_extra = 0;
+    uint32_t tok_data = 0;
+    bool has_escape = false;
+    uint32_t stopped = 0;
+    p = fast_scan_string_close(p, end, &has_escape, &stopped);
+    const bool closed = stopped == BUSTER_FSTRING_CLOSED;
+    if (stopped == BUSTER_FSTRING_NEWLINE)
+    {
+        // Unescaped newline in string literal
+        fast_pp_bail(pp, "newline in string");
     }
 
     if (!closed)
@@ -1568,11 +1697,11 @@ static const uint8_t* fast_lex_string(FastPP* pp, const uint8_t* p, const uint8_
     {
         const uint32_t raw_len = (uint32_t)(p - start);
         p += 1; // skip closing '"'
-        tok->kind = FTOK_STR_LIT;
-        tok->extra = prefix_kind;
+        tok_kind = FTOK_STR_LIT;
+        tok_extra = prefix_kind;
         if (!has_escape)
         {
-            tok->data = fast_pp_add_lit(pp, (const char*)start, raw_len);
+            tok_data = fast_pp_add_lit(pp, (const char*)start, raw_len);
         }
         else if (pp->lit_count < pp->lit_cap && pp->lit_bytes_used + raw_len + 1u <= pp->lit_bytes_cap)
         {
@@ -1610,23 +1739,24 @@ static const uint8_t* fast_lex_string(FastPP* pp, const uint8_t* p, const uint8_
             pp->lit_bytes_used += out_len + 1u;
             const uint32_t idx = pp->lit_count++;
             pp->lit_slices[idx] = (FastLitSlice){ .offset = off, .length = out_len };
-            tok->data = idx;
+            tok_data = idx;
         }
         else
         {
             fast_pp_bail(pp, "lit_pool overflow");
         }
     }
-    return p;
+    return (FastLexed){ .p = p, .tok = fast_tok_make(tok_kind, flags_in, tok_extra, tok_data) };
 }
 
 // Lex character literal starting at '\''
-static const uint8_t* fast_lex_char(FastPP* pp, const uint8_t* p, const uint8_t* end, FastTok* tok, uint16_t prefix_kind)
+static FastLexed fast_lex_char(FastPP* pp, const uint8_t* p, const uint8_t* end, uint32_t flags_in, uint16_t prefix_kind)
 {
     p += 1; // skip opening '\''
     uint32_t val = 0;
     uint32_t chars = 0;
     bool ok = true;
+    FastTok tok = fast_tok_make(FTOK_EOF, flags_in, 0, 0);
     while (p < end && *p != '\'' && *p != '\n' && ok)
     {
         uint32_t ch = 0;
@@ -1653,11 +1783,9 @@ static const uint8_t* fast_lex_char(FastPP* pp, const uint8_t* p, const uint8_t*
         {
             val = (uint32_t)(int32_t)(int8_t)(val & 0xffu);
         }
-        tok->kind = FTOK_CHAR_LIT;
-        tok->extra = prefix_kind;
-        tok->data = val;
+        tok = fast_tok_make(FTOK_CHAR_LIT, flags_in, prefix_kind, val);
     }
-    return p;
+    return (FastLexed){ .p = p, .tok = tok };
 }
 
 // Lex ONE raw preprocessing token from [p, end), updating *line_count and *at_bol.
@@ -1668,7 +1796,12 @@ static BUSTER_DIRECT_HOT const uint8_t* fast_lex_one(FastPP* pp, const uint8_t* 
 {
     uint8_t flags = 0;
     bool bol = *at_bol;
-    FastTok tok = { 0 };
+    // The token's fields stay in registers and are stored once, whole (fast_tok_make).
+    uint32_t tok_kind = FTOK_EOF;
+    uint32_t tok_flags = 0;
+    uint32_t tok_data = 0;
+    FastLexed literal = { 0 };
+    bool is_literal = false;
 
     for (;;)
     {
@@ -1680,7 +1813,6 @@ static BUSTER_DIRECT_HOT const uint8_t* fast_lex_one(FastPP* pp, const uint8_t* 
         }
         if (p >= end)
         {
-            tok.kind = FTOK_EOF;
             break;
         }
         const uint8_t c = *p;
@@ -1688,7 +1820,6 @@ static BUSTER_DIRECT_HOT const uint8_t* fast_lex_one(FastPP* pp, const uint8_t* 
         {
             if (stop_at_eol)
             {
-                tok.kind = FTOK_EOF;
                 break;
             }
             p += 1;
@@ -1712,7 +1843,6 @@ static BUSTER_DIRECT_HOT const uint8_t* fast_lex_one(FastPP* pp, const uint8_t* 
                 if (p == NULL)
                 {
                     fast_pp_bail(pp, "unterminated block comment");
-                    tok.kind = FTOK_EOF;
                     p = end;
                     break;
                 }
@@ -1732,7 +1862,7 @@ static BUSTER_DIRECT_HOT const uint8_t* fast_lex_one(FastPP* pp, const uint8_t* 
             flags |= BUSTER_FTOK_BOL;
         }
         bol = false;
-        tok.flags = flags;
+        tok_flags = flags;
 
         const uint8_t cls = fast_char_class[c];
         if ((cls & 2u) != 0)
@@ -1741,12 +1871,14 @@ static BUSTER_DIRECT_HOT const uint8_t* fast_lex_one(FastPP* pp, const uint8_t* 
             if (p + 1 < end && (c == 'L' || c == 'u' || c == 'U') && (p[1] == '"' || p[1] == '\''))
             {
                 const uint16_t pk = c == 'L' ? 1u : c == 'u' ? 2u : 3u;
-                p = p[1] == '"' ? fast_lex_string(pp, p + 1, end, &tok, pk) : fast_lex_char(pp, p + 1, end, &tok, pk);
+                literal = p[1] == '"' ? fast_lex_string(pp, p + 1, end, flags, pk) : fast_lex_char(pp, p + 1, end, flags, pk);
+                is_literal = true;
                 break;
             }
             if (c == 'u' && p + 2 < end && p[1] == '8' && (p[2] == '"' || p[2] == '\''))
             {
-                p = p[2] == '"' ? fast_lex_string(pp, p + 2, end, &tok, 4u) : fast_lex_char(pp, p + 2, end, &tok, 4u);
+                literal = p[2] == '"' ? fast_lex_string(pp, p + 2, end, flags, 4u) : fast_lex_char(pp, p + 2, end, flags, 4u);
+                is_literal = true;
                 break;
             }
             const uint32_t len = fast_scan_ident_len(p, end);
@@ -1754,7 +1886,6 @@ static BUSTER_DIRECT_HOT const uint8_t* fast_lex_one(FastPP* pp, const uint8_t* 
             if (__builtin_expect(p + len < end && p[len] == '\\', 0))
             {
                 fast_pp_bail(pp, "spliced identifier");
-                tok.kind = FTOK_EOF;
                 p = end;
                 break;
             }
@@ -1765,7 +1896,6 @@ static BUSTER_DIRECT_HOT const uint8_t* fast_lex_one(FastPP* pp, const uint8_t* 
             if (__builtin_expect(id == 0, 0))
             {
                 fast_pp_bail(pp, "ident table full");
-                tok.kind = FTOK_EOF;
                 p = end;
                 break;
             }
@@ -1774,24 +1904,27 @@ static BUSTER_DIRECT_HOT const uint8_t* fast_lex_one(FastPP* pp, const uint8_t* 
                 const uint8_t kw = pp->idents.entries[id].kw_kind;
                 kw_resolved = kw != 0 ? kw : FTOK_IDENT;
             }
-            tok.kind = kw_resolved;
-            tok.data = id;
+            tok_kind = kw_resolved;
+            tok_data = id;
             p += len;
             break;
         }
         if ((cls & 4u) != 0)
         {
-            p = fast_lex_number(pp, p, end, &tok);
+            literal = fast_lex_number(pp, p, end, flags);
+            is_literal = true;
             break;
         }
         if (c == '"')
         {
-            p = fast_lex_string(pp, p, end, &tok, 0);
+            literal = fast_lex_string(pp, p, end, flags, 0);
+            is_literal = true;
             break;
         }
         if (c == '\'')
         {
-            p = fast_lex_char(pp, p, end, &tok, 0);
+            literal = fast_lex_char(pp, p, end, flags, 0);
+            is_literal = true;
             break;
         }
 
@@ -1800,92 +1933,92 @@ static BUSTER_DIRECT_HOT const uint8_t* fast_lex_one(FastPP* pp, const uint8_t* 
         const uint8_t c2 = p + 2 < end ? p[2] : 0;
         switch (c)
         {
-            case '(': tok.kind = FTOK_LPAREN; p += 1; break;
-            case ')': tok.kind = FTOK_RPAREN; p += 1; break;
-            case '{': tok.kind = FTOK_LBRACE; p += 1; break;
-            case '}': tok.kind = FTOK_RBRACE; p += 1; break;
-            case '[': tok.kind = FTOK_LBRACKET; p += 1; break;
-            case ']': tok.kind = FTOK_RBRACKET; p += 1; break;
-            case ';': tok.kind = FTOK_SEMI; p += 1; break;
-            case ',': tok.kind = FTOK_COMMA; p += 1; break;
-            case '?': tok.kind = FTOK_QUESTION; p += 1; break;
-            case ':': tok.kind = FTOK_COLON; p += 1; break;
-            case '~': tok.kind = FTOK_TILDE; p += 1; break;
+            case '(': tok_kind = FTOK_LPAREN; p += 1; break;
+            case ')': tok_kind = FTOK_RPAREN; p += 1; break;
+            case '{': tok_kind = FTOK_LBRACE; p += 1; break;
+            case '}': tok_kind = FTOK_RBRACE; p += 1; break;
+            case '[': tok_kind = FTOK_LBRACKET; p += 1; break;
+            case ']': tok_kind = FTOK_RBRACKET; p += 1; break;
+            case ';': tok_kind = FTOK_SEMI; p += 1; break;
+            case ',': tok_kind = FTOK_COMMA; p += 1; break;
+            case '?': tok_kind = FTOK_QUESTION; p += 1; break;
+            case ':': tok_kind = FTOK_COLON; p += 1; break;
+            case '~': tok_kind = FTOK_TILDE; p += 1; break;
             case '.':
-                if (c1 >= '0' && c1 <= '9') { p = fast_lex_number(pp, p, end, &tok); }
-                else if (c1 == '.' && c2 == '.') { tok.kind = FTOK_ELLIPSIS; p += 3; }
-                else { tok.kind = FTOK_DOT; p += 1; }
+                if (c1 >= '0' && c1 <= '9') { literal = fast_lex_number(pp, p, end, flags); is_literal = true; }
+                else if (c1 == '.' && c2 == '.') { tok_kind = FTOK_ELLIPSIS; p += 3; }
+                else { tok_kind = FTOK_DOT; p += 1; }
                 break;
             case '-':
-                if (c1 == '>') { tok.kind = FTOK_ARROW; p += 2; }
-                else if (c1 == '-') { tok.kind = FTOK_DEC; p += 2; }
-                else if (c1 == '=') { tok.kind = FTOK_SUB_ASSIGN; p += 2; }
-                else { tok.kind = FTOK_MINUS; p += 1; }
+                if (c1 == '>') { tok_kind = FTOK_ARROW; p += 2; }
+                else if (c1 == '-') { tok_kind = FTOK_DEC; p += 2; }
+                else if (c1 == '=') { tok_kind = FTOK_SUB_ASSIGN; p += 2; }
+                else { tok_kind = FTOK_MINUS; p += 1; }
                 break;
             case '+':
-                if (c1 == '+') { tok.kind = FTOK_INC; p += 2; }
-                else if (c1 == '=') { tok.kind = FTOK_ADD_ASSIGN; p += 2; }
-                else { tok.kind = FTOK_PLUS; p += 1; }
+                if (c1 == '+') { tok_kind = FTOK_INC; p += 2; }
+                else if (c1 == '=') { tok_kind = FTOK_ADD_ASSIGN; p += 2; }
+                else { tok_kind = FTOK_PLUS; p += 1; }
                 break;
             case '*':
-                if (c1 == '=') { tok.kind = FTOK_MUL_ASSIGN; p += 2; }
-                else { tok.kind = FTOK_STAR; p += 1; }
+                if (c1 == '=') { tok_kind = FTOK_MUL_ASSIGN; p += 2; }
+                else { tok_kind = FTOK_STAR; p += 1; }
                 break;
             case '/':
-                if (c1 == '=') { tok.kind = FTOK_DIV_ASSIGN; p += 2; }
-                else { tok.kind = FTOK_SLASH; p += 1; }
+                if (c1 == '=') { tok_kind = FTOK_DIV_ASSIGN; p += 2; }
+                else { tok_kind = FTOK_SLASH; p += 1; }
                 break;
             case '%':
-                if (c1 == '=') { tok.kind = FTOK_MOD_ASSIGN; p += 2; }
-                else { tok.kind = FTOK_PERCENT; p += 1; }
+                if (c1 == '=') { tok_kind = FTOK_MOD_ASSIGN; p += 2; }
+                else { tok_kind = FTOK_PERCENT; p += 1; }
                 break;
             case '&':
-                if (c1 == '&') { tok.kind = FTOK_LAND; p += 2; }
-                else if (c1 == '=') { tok.kind = FTOK_AND_ASSIGN; p += 2; }
-                else { tok.kind = FTOK_AMP; p += 1; }
+                if (c1 == '&') { tok_kind = FTOK_LAND; p += 2; }
+                else if (c1 == '=') { tok_kind = FTOK_AND_ASSIGN; p += 2; }
+                else { tok_kind = FTOK_AMP; p += 1; }
                 break;
             case '|':
-                if (c1 == '|') { tok.kind = FTOK_LOR; p += 2; }
-                else if (c1 == '=') { tok.kind = FTOK_OR_ASSIGN; p += 2; }
-                else { tok.kind = FTOK_PIPE; p += 1; }
+                if (c1 == '|') { tok_kind = FTOK_LOR; p += 2; }
+                else if (c1 == '=') { tok_kind = FTOK_OR_ASSIGN; p += 2; }
+                else { tok_kind = FTOK_PIPE; p += 1; }
                 break;
             case '^':
-                if (c1 == '=') { tok.kind = FTOK_XOR_ASSIGN; p += 2; }
-                else { tok.kind = FTOK_CARET; p += 1; }
+                if (c1 == '=') { tok_kind = FTOK_XOR_ASSIGN; p += 2; }
+                else { tok_kind = FTOK_CARET; p += 1; }
                 break;
             case '!':
-                if (c1 == '=') { tok.kind = FTOK_NE; p += 2; }
-                else { tok.kind = FTOK_BANG; p += 1; }
+                if (c1 == '=') { tok_kind = FTOK_NE; p += 2; }
+                else { tok_kind = FTOK_BANG; p += 1; }
                 break;
             case '=':
-                if (c1 == '=') { tok.kind = FTOK_EQ; p += 2; }
-                else { tok.kind = FTOK_ASSIGN; p += 1; }
+                if (c1 == '=') { tok_kind = FTOK_EQ; p += 2; }
+                else { tok_kind = FTOK_ASSIGN; p += 1; }
                 break;
             case '<':
                 if (c1 == '<')
                 {
-                    if (c2 == '=') { tok.kind = FTOK_SHL_ASSIGN; p += 3; }
-                    else { tok.kind = FTOK_LSHIFT; p += 2; }
+                    if (c2 == '=') { tok_kind = FTOK_SHL_ASSIGN; p += 3; }
+                    else { tok_kind = FTOK_LSHIFT; p += 2; }
                 }
-                else if (c1 == '=') { tok.kind = FTOK_LE; p += 2; }
-                else { tok.kind = FTOK_LT; p += 1; }
+                else if (c1 == '=') { tok_kind = FTOK_LE; p += 2; }
+                else { tok_kind = FTOK_LT; p += 1; }
                 break;
             case '>':
                 if (c1 == '>')
                 {
-                    if (c2 == '=') { tok.kind = FTOK_SHR_ASSIGN; p += 3; }
-                    else { tok.kind = FTOK_RSHIFT; p += 2; }
+                    if (c2 == '=') { tok_kind = FTOK_SHR_ASSIGN; p += 3; }
+                    else { tok_kind = FTOK_RSHIFT; p += 2; }
                 }
-                else if (c1 == '=') { tok.kind = FTOK_GE; p += 2; }
-                else { tok.kind = FTOK_GT; p += 1; }
+                else if (c1 == '=') { tok_kind = FTOK_GE; p += 2; }
+                else { tok_kind = FTOK_GT; p += 1; }
                 break;
             case '#':
-                if (c1 == '#') { tok.kind = FTOK_HASHHASH; p += 2; }
-                else { tok.kind = FTOK_HASH; p += 1; }
+                if (c1 == '#') { tok_kind = FTOK_HASHHASH; p += 2; }
+                else { tok_kind = FTOK_HASH; p += 1; }
                 break;
             default:
-                tok.kind = FTOK_PP_OTHER;
-                tok.data = c;
+                tok_kind = FTOK_PP_OTHER;
+                tok_data = c;
                 p += 1;
                 break;
         }
@@ -1893,168 +2026,220 @@ static BUSTER_DIRECT_HOT const uint8_t* fast_lex_one(FastPP* pp, const uint8_t* 
     }
 
     *at_bol = bol;
-    *out_tok = tok;
+    if (is_literal)
+    {
+        *out_tok = literal.tok;
+        p = literal.p;
+    }
+    else
+    {
+        *out_tok = fast_tok_make(tok_kind, tok_flags, 0, tok_data);
+    }
     return p;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
-// AVX-512 dead #if / #ifdef region skipper: skips until matching #elif/#else/#endif at depth 0
-// WITHOUT lexing or interning ANY tokens inside the dead branch!
-
-// Returns directive kind (FPP_KW_ELIF/ELSE/ENDIF/ELIFDEF/ELIFNDEF) when leaving dead region,
-// with f->ptr positioned immediately after the directive keyword (ready to parse #elif condition or EOL).
-// Vectorized dead #if/#ifdef skipper: scans 64 bytes at a time, ONLY breaking out of the
-// AVX-512 loop when '#', '/', '"', or '\'' actually appears (ignores plain '\n' in bulk!).
+// The text of a conditional group that is not taken: nothing in it is lexed. fast_pp_skip_inactive looks for the
+// directive that ends the group, 64 bytes at a time, and leaves the loop only at a '#' that is the first character of
+// its line and at the start of a comment.
+//
+// Returns the directive (FPP_KW_ELIF, ELSE, ENDIF, ELIFDEF, ELIFNDEF) with f->ptr just after its keyword, or 0 where the
+// file ends first.
+//
+// Per block, in masks:
+// - a line's first character: the line starts (after each newline, and the block's first byte when the text before it
+//   ended in a line's leading blanks) added to the blanks carry through each line's leading blanks to it;
+// - a comment's start, seen at its second character: a '*' or a '/' after a '/' (the '/' may be the last byte of the
+//   block before, so no byte past the block is read);
+// - what a literal may hide: a quote taints the bytes after it up to a newline that no backslash precedes, by the
+//   same carry. A '#' or a comment's start in tainted bytes is rare, and is decided by scanning that line's literal the
+//   way this function always did (to its closing quote or its line's end, a backslash taking the next character).
+// Everything else (a '#' inside a line, a lone '/', quotes with nothing after them to hide) is passed in bulk.
+// f->at_bol is false after a directive; where the file ends first the compile fails and nothing reads it.
 static BUSTER_DIRECT_HOT uint8_t fast_pp_skip_inactive(FastPP* pp, FastIncludeFile* f)
 {
     const uint8_t* p = f->ptr;
     const uint8_t* const end = f->end;
     uint32_t line = f->line;
-    bool bol = f->at_bol;
     uint32_t nested = 0;
     uint8_t found_kw = 0;
+    // What crosses a block's end.
+    uint64_t bol_in = f->at_bol ? 1u : 0u;   // the text before p ends in a line's leading blanks
+    uint64_t taint_in = 0;                   // a quote is before p on its line
+    uint64_t backslash_in = 0;               // the byte before p is a backslash
+    uint64_t slash_in = 0;                   // the byte before p is a '/'
+    uint64_t slash_first = 0;                // ... which is its line's first character
+    uint64_t slash_tainted = 0;              // ... and is tainted
+    const uint8_t* clean_from = p;           // no literal is open here: where the last decision left the text
+    bool done = false;
 
     const __m512i v_nl = _mm512_set1_epi8('\n');
     const __m512i v_hash = _mm512_set1_epi8('#');
     const __m512i v_slash = _mm512_set1_epi8('/');
+    const __m512i v_star = _mm512_set1_epi8('*');
     const __m512i v_dq = _mm512_set1_epi8('"');
     const __m512i v_sq = _mm512_set1_epi8('\'');
+    const __m512i v_bs = _mm512_set1_epi8('\\');
+    const __m512i v_space = _mm512_set1_epi8(' ');
+    const __m512i v_tab = _mm512_set1_epi8('\t');
+    const __m512i v_four = _mm512_set1_epi8(4);
 
-    while (p < end && !pp->bailout)
+    while (p < end && !done)
     {
         uint32_t avail = 0;
         const __m512i v = fast_load64_bounded(p, end, &avail);
-        const __mmask64 valid_mask = avail == 64u ? ~UINT64_C(0) : ((UINT64_C(1) << avail) - 1u);
-        const __mmask64 nls = _mm512_cmpeq_epi8_mask(v, v_nl) & valid_mask;
-        const __mmask64 hashes = _mm512_cmpeq_epi8_mask(v, v_hash) & valid_mask;
-        const __mmask64 slashes = _mm512_cmpeq_epi8_mask(v, v_slash) & valid_mask;
-        const __mmask64 quotes = (_mm512_cmpeq_epi8_mask(v, v_dq) | _mm512_cmpeq_epi8_mask(v, v_sq)) & valid_mask;
-        const __mmask64 interesting = hashes | slashes | quotes;
+        const __mmask64 valid = _bzhi_u64(~UINT64_C(0), avail);
+        const __mmask64 nl = _mm512_cmpeq_epi8_mask(v, v_nl);
+        const __mmask64 hash = _mm512_cmpeq_epi8_mask(v, v_hash);
+        const __mmask64 slash = _mm512_cmpeq_epi8_mask(v, v_slash);
+        const __mmask64 star = _mm512_cmpeq_epi8_mask(v, v_star);
+        const __mmask64 quote = _mm512_cmpeq_epi8_mask(v, v_dq) | _mm512_cmpeq_epi8_mask(v, v_sq);
+        const __mmask64 backslash = _mm512_cmpeq_epi8_mask(v, v_bs);
+        // Blanks are fast_char_class's 8: ' ', and '\t' '\v' '\f' '\r' (9 to 13 without the newline). The bytes past
+        // the file's end count as blanks, so that what is carried out of the block is the state at the file's end.
+        const __mmask64 blank = _mm512_cmpeq_epi8_mask(v, v_space) | (_mm512_cmple_epu8_mask(_mm512_sub_epi8(v, v_tab), v_four) & ~nl) | ~valid;
 
-        if (__builtin_expect(interesting == 0, 1))
+        const __mmask64 starts = (nl << 1) | bol_in;
+        unsigned long long lead_sum = 0;
+        const uint64_t lead_out = _addcarry_u64(0, blank, starts & blank, &lead_sum);
+        const __mmask64 first = (starts | lead_sum) & ~blank;
+
+        const __mmask64 opens = (star | slash) & ((slash << 1) | slash_in);
+
+        const __mmask64 passes = ~(nl & ~((backslash << 1) | backslash_in));
+        unsigned long long taint_sum = 0;
+        const uint64_t taint_out = _addcarry_u64((unsigned char)taint_in, passes, quote, &taint_sum);
+        const __mmask64 tainted = passes & ~taint_sum;
+
+        const __mmask64 directives = hash & first;
+        const __mmask64 events = (directives | opens) & valid;
+        if (__builtin_expect(events == 0, 1))
         {
-            if (nls != 0)
-            {
-                line += (uint32_t)__builtin_popcountll(nls);
-                const uint32_t last_nl = 63u - (uint32_t)__builtin_clzll(nls);
-                // Check if only hspace after last_nl
-                const uint8_t* after = p + last_nl + 1u;
-                bol = true;
-                while (after < p + avail)
-                {
-                    if ((fast_char_class[*after] & 8u) == 0) { bol = false; break; }
-                    after += 1;
-                }
-            }
-            else if (bol)
-            {
-                for (uint32_t i = 0; i < avail; i += 1)
-                {
-                    if ((fast_char_class[p[i]] & 8u) == 0) { bol = false; break; }
-                }
-            }
+            line += (uint32_t)__builtin_popcountll(nl);
+            bol_in = lead_out | (nl >> 63);
+            taint_in = taint_out;
+            backslash_in = backslash >> 63;
+            slash_in = slash >> 63;
+            slash_first = first >> 63;
+            slash_tainted = tainted >> 63;
             p += avail;
-            continue;
         }
+        else
+        {
+            const uint32_t pos = (uint32_t)__builtin_ctzll(events);
+            const bool directive = ((directives >> pos) & 1u) != 0;
+            // A comment's event is at its second character.
+            const uint32_t slash_pos = pos - 1u;
+            const uint8_t* const at = directive ? p + pos : p + pos - 1;
+            const bool at_first = directive || (pos != 0 ? ((first >> slash_pos) & 1u) != 0 : slash_first != 0);
+            const bool at_tainted = directive ? ((tainted >> pos) & 1u) != 0 : (pos != 0 ? ((tainted >> slash_pos) & 1u) != 0 : slash_tainted != 0);
+            line += (uint32_t)__builtin_popcountll(nl & _bzhi_u64(~UINT64_C(0), pos));
+            // What the decision leaves: no literal open, and nothing carried.
+            const uint8_t* next = at;
+            uint64_t next_bol = 0;
+            bool decided = false;
 
-        // Handle first interesting char in this 64-byte block
-        const uint32_t pos = (uint32_t)__builtin_ctzll(interesting);
-        const __mmask64 before_mask = pos == 0 ? 0u : ((UINT64_C(1) << pos) - 1u);
-        const __mmask64 before_nls = nls & before_mask;
-        if (before_nls != 0)
-        {
-            line += (uint32_t)__builtin_popcountll(before_nls);
-            const uint32_t last_nl = 63u - (uint32_t)__builtin_clzll(before_nls);
-            bol = true;
-            for (uint32_t i = last_nl + 1u; i < pos; i += 1)
+            if (__builtin_expect(at_tainted, 0))
             {
-                if ((fast_char_class[p[i]] & 8u) == 0) { bol = false; break; }
-            }
-        }
-        else if (bol)
-        {
-            for (uint32_t i = 0; i < pos; i += 1)
-            {
-                if ((fast_char_class[p[i]] & 8u) == 0) { bol = false; break; }
-            }
-        }
-
-        p += pos;
-        const uint8_t ch = *p;
-        if (ch == '#')
-        {
-            p += 1;
-            if (bol)
-            {
-                p = fast_skip_hspace(p, end);
-                if (p < end && (fast_char_class[*p] & 2u) != 0)
+                // The line's start (a newline that no backslash precedes, as above), no further back than where the
+                // text was last left with no literal open, and the first quote from there.
+                const uint8_t* s = at;
+                while (s > clean_from && !(s[-1] == '\n' && !(s - 1 > clean_from && s[-2] == '\\')))
                 {
-                    const uint32_t len = fast_scan_ident_len(p, end);
+                    s -= 1;
+                }
+                while (s < at && *s != '"' && *s != '\'')
+                {
+                    s += 1;
+                }
+                if (s < at)
+                {
+                    // The newlines between the quote and here are counted again by the literal's scan.
+                    for (const uint8_t* c = s; c < at; c += 1)
+                    {
+                        line -= *c == '\n' ? 1u : 0u;
+                    }
+                    const uint8_t quote_char = *s;
+                    s += 1;
+                    while (s < end && *s != quote_char && *s != '\n')
+                    {
+                        if (*s == '\\' && s + 1 < end)
+                        {
+                            if (s[1] == '\n') { line += 1u; }
+                            s += 2;
+                        }
+                        else
+                        {
+                            s += 1;
+                        }
+                    }
+                    if (s < end && *s == quote_char) { s += 1; }
+                    next = s;
+                    decided = true;
+                }
+            }
+
+            if (!decided && directive)
+            {
+                next = fast_skip_hspace(at + 1, end);
+                if (next < end && (fast_char_class[*next] & 2u) != 0)
+                {
+                    const uint32_t len = fast_scan_ident_len(next, end);
                     uint8_t kw = 0;
-                    if (len == 2u && p[0] == 'i' && p[1] == 'f') { kw = FPP_KW_IF; }
-                    else if (len == 5u && memcmp(p, "ifdef", 5) == 0) { kw = FPP_KW_IFDEF; }
-                    else if (len == 6u && memcmp(p, "ifndef", 6) == 0) { kw = FPP_KW_IFNDEF; }
-                    else if (len == 5u && memcmp(p, "endif", 5) == 0) { kw = FPP_KW_ENDIF; }
-                    else if (len == 4u && memcmp(p, "else", 4) == 0) { kw = FPP_KW_ELSE; }
-                    else if (len == 4u && memcmp(p, "elif", 4) == 0) { kw = FPP_KW_ELIF; }
-                    else if (len == 7u && memcmp(p, "elifdef", 7) == 0) { kw = FPP_KW_ELIFDEF; }
-                    else if (len == 8u && memcmp(p, "elifndef", 8) == 0) { kw = FPP_KW_ELIFNDEF; }
-                    p += len;
+                    if (len == 2u && next[0] == 'i' && next[1] == 'f') { kw = FPP_KW_IF; }
+                    else if (len == 5u && memcmp(next, "ifdef", 5) == 0) { kw = FPP_KW_IFDEF; }
+                    else if (len == 6u && memcmp(next, "ifndef", 6) == 0) { kw = FPP_KW_IFNDEF; }
+                    else if (len == 5u && memcmp(next, "endif", 5) == 0) { kw = FPP_KW_ENDIF; }
+                    else if (len == 4u && memcmp(next, "else", 4) == 0) { kw = FPP_KW_ELSE; }
+                    else if (len == 4u && memcmp(next, "elif", 4) == 0) { kw = FPP_KW_ELIF; }
+                    else if (len == 7u && memcmp(next, "elifdef", 7) == 0) { kw = FPP_KW_ELIFDEF; }
+                    else if (len == 8u && memcmp(next, "elifndef", 8) == 0) { kw = FPP_KW_ELIFNDEF; }
+                    next += len;
                     if (kw == FPP_KW_IF || kw == FPP_KW_IFDEF || kw == FPP_KW_IFNDEF)
                     {
                         nested += 1u;
                     }
                     else if (kw == FPP_KW_ENDIF)
                     {
-                        if (nested == 0) { found_kw = kw; bol = false; break; }
-                        nested -= 1u;
+                        if (nested == 0) { found_kw = kw; done = true; }
+                        else { nested -= 1u; }
                     }
                     else if (nested == 0 && (kw == FPP_KW_ELSE || kw == FPP_KW_ELIF || kw == FPP_KW_ELIFDEF || kw == FPP_KW_ELIFNDEF))
                     {
                         found_kw = kw;
-                        bol = false;
-                        break;
+                        done = true;
                     }
                 }
-                bol = false;
             }
-        }
-        else if (ch == '/')
-        {
-            if (p + 1 < end && p[1] == '*')
+            else if (!decided)
             {
-                p = fast_skip_block_comment(p + 2, end, &line);
-                if (p == NULL) { fast_pp_bail(pp, "unterminated comment in skip"); p = end; break; }
-            }
-            else if (p + 1 < end && p[1] == '/')
-            {
-                p = fast_skip_line_comment(p + 2, end, &line);
-            }
-            else
-            {
-                p += 1;
-                bol = false;
-            }
-        }
-        else
-        {
-            // '"' or '\''
-            const uint8_t quote = ch;
-            bol = false;
-            p += 1;
-            while (p < end && *p != quote && *p != '\n')
-            {
-                if (*p == '\\' && p + 1 < end)
+                // A comment is a blank: the line's first character may still follow it. Its lines are counted apart, so
+                // that the loop's count stays in a register.
+                uint32_t comment_lines = 0;
+                next_bol = at_first ? 1u : 0u;
+                if (at[1] == '*')
                 {
-                    if (p[1] == '\n') { line += 1u; }
-                    p += 2;
+                    next = fast_skip_block_comment(at + 2, end, &comment_lines);
+                    if (next == NULL)
+                    {
+                        fast_pp_bail(pp, "unterminated comment in skip");
+                        next = end;
+                        done = true;
+                    }
                 }
                 else
                 {
-                    p += 1;
+                    next = fast_skip_line_comment(at + 2, end, &comment_lines);
                 }
+                line += comment_lines;
             }
-            if (p < end && *p == quote) { p += 1; }
+
+            p = next;
+            clean_from = next;
+            bol_in = next_bol;
+            taint_in = 0;
+            backslash_in = 0;
+            slash_in = 0;
         }
     }
 
@@ -2064,7 +2249,7 @@ static BUSTER_DIRECT_HOT uint8_t fast_pp_skip_inactive(FastPP* pp, FastIncludeFi
     }
     f->ptr = p;
     f->line = line;
-    f->at_bol = bol;
+    f->at_bol = bol_in != 0 && found_kw == 0;
     return found_kw;
 }
 
@@ -2145,6 +2330,7 @@ static bool fast_pp_push_memory(FastPP* pp, const char* name, const uint8_t* byt
                 .dir_idx = dir_idx,
                 .cond_base = pp->cond_depth,
                 .guard_ident = 0,
+                .serial = ++pp->file_serial,
                 .guard_state = 0,
                 .at_bol = true,
                 .owned_mmap = owned_mmap,
@@ -2343,7 +2529,7 @@ static bool fast_pp_next_raw_for_args(FastPP* pp, FastTok* out_tok, bool stop_at
     if (!got && allow_file && pp->file_depth > 0)
     {
         FastIncludeFile* f = pp->files + (pp->file_depth - 1u);
-        f->ptr = fast_lex_one(pp, f->ptr, f->end, &f->line, &f->at_bol, stop_at_eol, out_tok);
+        fast_pp_read_tok(pp, f, stop_at_eol, out_tok);
         got = out_tok->kind != FTOK_EOF;
     }
     return got;
@@ -2373,18 +2559,21 @@ static bool fast_pp_consume_lparen(FastPP* pp, bool stop_at_eol, uint32_t min_ex
         const uint8_t* saved_ptr = f->ptr;
         const uint32_t saved_line = f->line;
         const bool saved_bol = f->at_bol;
+        const uint32_t saved_generation = pp->win.generation;
+        const uint32_t saved_pos = pp->win.pos;
         FastTok peek = { 0 };
-        const uint8_t* next_ptr = fast_lex_one(pp, f->ptr, f->end, &f->line, &f->at_bol, stop_at_eol, &peek);
+        fast_pp_read_tok(pp, f, stop_at_eol, &peek);
         if (peek.kind == FTOK_LPAREN)
         {
-            f->ptr = next_ptr;
             found = true;
         }
         else
         {
+            // The token is given back: the file's position, and the window's place where the window is the same.
             f->ptr = saved_ptr;
             f->line = saved_line;
             f->at_bol = saved_bol;
+            pp->win.pos = pp->win.generation == saved_generation ? saved_pos : 0u;
         }
     }
     return found;
@@ -3547,7 +3736,7 @@ static void fast_pp_skip_to_eol(FastIncludeFile* f)
 static __attribute__((noinline)) void fast_pp_handle_define(FastPP* pp, FastIncludeFile* f)
 {
     FastTok name_tok = { 0 };
-    f->ptr = fast_lex_one(pp, f->ptr, f->end, &f->line, &f->at_bol, true, &name_tok);
+    fast_pp_read_tok(pp, f, true, &name_tok);
     if (name_tok.kind != FTOK_IDENT && !(name_tok.kind >= 64u && name_tok.kind < 126u))
     {
         fast_pp_bail(pp, "bad #define name");
@@ -3574,24 +3763,24 @@ static __attribute__((noinline)) void fast_pp_handle_define(FastPP* pp, FastIncl
     {
         f->ptr += 1; // skip '('
         FastTok pt = { 0 };
-        f->ptr = fast_lex_one(pp, f->ptr, f->end, &f->line, &f->at_bol, true, &pt);
+        fast_pp_read_tok(pp, f, true, &pt);
         while (pt.kind != FTOK_RPAREN && pt.kind != FTOK_EOF && !pp->bailout)
         {
             if (pt.kind == FTOK_ELLIPSIS)
             {
                 is_variadic = true;
-                f->ptr = fast_lex_one(pp, f->ptr, f->end, &f->line, &f->at_bol, true, &pt);
+                fast_pp_read_tok(pp, f, true, &pt);
                 break;
             }
             if (pt.kind == FTOK_IDENT || (pt.kind >= 64u && pt.kind < 126u))
             {
                 const uint32_t pid = pt.data;
-                f->ptr = fast_lex_one(pp, f->ptr, f->end, &f->line, &f->at_bol, true, &pt);
+                fast_pp_read_tok(pp, f, true, &pt);
                 if (pt.kind == FTOK_ELLIPSIS)
                 {
                     is_variadic = true;
                     vararg_name = pid;
-                    f->ptr = fast_lex_one(pp, f->ptr, f->end, &f->line, &f->at_bol, true, &pt);
+                    fast_pp_read_tok(pp, f, true, &pt);
                     break;
                 }
                 if (param_count < BUSTER_FPP_MAX_PARAMS)
@@ -3604,7 +3793,7 @@ static __attribute__((noinline)) void fast_pp_handle_define(FastPP* pp, FastIncl
                 }
                 if (pt.kind == FTOK_COMMA)
                 {
-                    f->ptr = fast_lex_one(pp, f->ptr, f->end, &f->line, &f->at_bol, true, &pt);
+                    fast_pp_read_tok(pp, f, true, &pt);
                 }
             }
             else
@@ -3626,7 +3815,7 @@ static __attribute__((noinline)) void fast_pp_handle_define(FastPP* pp, FastIncl
     for (;;)
     {
         FastTok bt = { 0 };
-        f->ptr = fast_lex_one(pp, f->ptr, f->end, &f->line, &f->at_bol, true, &bt);
+        fast_pp_read_tok(pp, f, true, &bt);
         if (bt.kind == FTOK_EOF)
         {
             break;
@@ -3818,7 +4007,7 @@ static bool fast_pp_eval_if_line(FastPP* pp, FastIncludeFile* f)
     for (;;)
     {
         FastTok t = { 0 };
-        f->ptr = fast_lex_one(pp, f->ptr, f->end, &f->line, &f->at_bol, true, &t);
+        fast_pp_read_tok(pp, f, true, &t);
         if (t.kind == FTOK_EOF)
         {
             break;
@@ -3874,7 +4063,7 @@ static __attribute__((noinline)) void fast_pp_handle_include(FastPP* pp, FastInc
         for (;;)
         {
             FastTok t = { 0 };
-            f->ptr = fast_lex_one(pp, f->ptr, f->end, &f->line, &f->at_bol, true, &t);
+            fast_pp_read_tok(pp, f, true, &t);
             if (t.kind == FTOK_EOF) { break; }
             if (rc < 128u) { raw[rc++] = t; }
         }
@@ -3923,7 +4112,7 @@ static __attribute__((noinline)) void fast_pp_handle_include(FastPP* pp, FastInc
 static __attribute__((noinline)) void fast_pp_handle_directive(FastPP* pp, FastIncludeFile* f)
 {
     FastTok kw_tok = { 0 };
-    f->ptr = fast_lex_one(pp, f->ptr, f->end, &f->line, &f->at_bol, true, &kw_tok);
+    fast_pp_read_tok(pp, f, true, &kw_tok);
     if (kw_tok.kind == FTOK_EOF)
     {
         fast_pp_skip_to_eol(f);
@@ -3955,7 +4144,7 @@ static __attribute__((noinline)) void fast_pp_handle_directive(FastPP* pp, FastI
         case FPP_KW_UNDEF:
         {
             FastTok nt = { 0 };
-            f->ptr = fast_lex_one(pp, f->ptr, f->end, &f->line, &f->at_bol, true, &nt);
+            fast_pp_read_tok(pp, f, true, &nt);
             if (nt.kind == FTOK_IDENT || (nt.kind >= 64u && nt.kind < 126u))
             {
                 pp->idents.entries[nt.data].macro_idx = 0;
@@ -3987,7 +4176,7 @@ static __attribute__((noinline)) void fast_pp_handle_directive(FastPP* pp, FastI
             else
             {
                 FastTok nt = { 0 };
-                f->ptr = fast_lex_one(pp, f->ptr, f->end, &f->line, &f->at_bol, true, &nt);
+                fast_pp_read_tok(pp, f, true, &nt);
                 if (nt.kind != FTOK_IDENT && !(nt.kind >= 64u && nt.kind < 126u))
                 {
                     fast_pp_bail(pp, "bad #ifdef name");
@@ -4045,14 +4234,14 @@ static __attribute__((noinline)) void fast_pp_handle_directive(FastPP* pp, FastI
         case FPP_KW_LINE:
         {
             FastTok lt = { 0 };
-            f->ptr = fast_lex_one(pp, f->ptr, f->end, &f->line, &f->at_bol, true, &lt);
+            fast_pp_read_tok(pp, f, true, &lt);
             if (lt.kind == FTOK_INT_LIT) { f->line = lt.data; }
             fast_pp_skip_to_eol(f);
         } break;
         case FPP_KW_PRAGMA:
         {
             FastTok pt = { 0 };
-            f->ptr = fast_lex_one(pp, f->ptr, f->end, &f->line, &f->at_bol, true, &pt);
+            fast_pp_read_tok(pp, f, true, &pt);
             if (pt.kind == FTOK_IDENT && pp->idents.entries[pt.data].pp_kw == FPP_KW_ONCE)
             {
                 FastGuardEntry* ge = fast_guard_lookup(pp, f->path, f->path_len, true);
@@ -4068,7 +4257,7 @@ static __attribute__((noinline)) void fast_pp_handle_directive(FastPP* pp, FastI
                 {
                     // Check if GCC system_header (safe to ignore) vs diagnostic/visibility (bail)
                     FastTok pt2 = { 0 };
-                    f->ptr = fast_lex_one(pp, f->ptr, f->end, &f->line, &f->at_bol, true, &pt2);
+                    fast_pp_read_tok(pp, f, true, &pt2);
                     const char* s2 = (pt2.kind == FTOK_IDENT || pt2.kind >= 64u) ?
                                      pp->idents.strings + pp->idents.entries[pt2.data].str_offset : "";
                     if (strcmp(s, "GCC") == 0 && strcmp(s2, "system_header") == 0)
@@ -4137,10 +4326,14 @@ static bool fast_pp_init(FastPP* pp, FastArena* arena, FastArena* scratch)
         pp->exp_buf = (FastTok*)fast_arena_alloc(scratch, (uint64_t)pp->exp_cap * sizeof(FastTok), 64);
         pp->arg_buf = (FastTok*)fast_arena_alloc(scratch, (uint64_t)pp->arg_cap * sizeof(FastTok), 64);
         pp->call_stack = (FastMacroCall*)fast_arena_alloc(scratch, (uint64_t)BUSTER_FPP_MAX_CALLS * sizeof(FastMacroCall), 64);
+        pp->win.kinds = (uint8_t*)fast_arena_alloc(scratch, BUSTER_FWIN_CAPACITY + 64u, 64);
+        pp->win.starts = (uint32_t*)fast_arena_alloc(scratch, (BUSTER_FWIN_CAPACITY + 64u) * sizeof(uint32_t), 64);
+        pp->win.lens = (uint8_t*)fast_arena_alloc(scratch, BUSTER_FWIN_CAPACITY + 64u, 64);
 
         ok = pp->out_kind != NULL && pp->out_data != NULL && pp->num_pool != NULL && pp->lit_bytes != NULL &&
              pp->lit_slices != NULL && pp->macros != NULL && pp->macro_toks != NULL && pp->macro_params != NULL &&
-             pp->exp_buf != NULL && pp->arg_buf != NULL && pp->call_stack != NULL;
+             pp->exp_buf != NULL && pp->arg_buf != NULL && pp->call_stack != NULL &&
+             pp->win.kinds != NULL && pp->win.starts != NULL && pp->win.lens != NULL;
     }
     return ok;
 }
@@ -4343,38 +4536,1020 @@ static inline const uint8_t* fast_pp_skip_unused_call_args(const uint8_t* p, con
     return NULL;
 }
 
-// Branchless 64-byte AVX-512 active lexer + preprocessor drain loop!
-// Uses 1-uop vpermi2b ASCII->FastTokKind + vpcompressb to emit ALL punctuators with ZERO branches
-// and ZERO scalar loop iterations, looping ONLY over identifier and number lanes!
-static BUSTER_DIRECT_HOT bool fast_pp_drain(FastPP* pp)
+// ---------------------------------------------------------------------------------------------------------------------
+// The window: the 64-byte loop writes raw tokens, and its readers take them (FastWindow, #2850)
+
+// A punctuator's length in bytes by its kind.
+static const uint8_t fast_punct_len[64] = {
+    [FTOK_LPAREN] = 1, [FTOK_RPAREN] = 1, [FTOK_LBRACE] = 1, [FTOK_RBRACE] = 1, [FTOK_LBRACKET] = 1, [FTOK_RBRACKET] = 1,
+    [FTOK_SEMI] = 1, [FTOK_COMMA] = 1, [FTOK_DOT] = 1, [FTOK_ARROW] = 2, [FTOK_ELLIPSIS] = 3, [FTOK_QUESTION] = 1,
+    [FTOK_COLON] = 1, [FTOK_TILDE] = 1, [FTOK_BANG] = 1, [FTOK_INC] = 2, [FTOK_DEC] = 2, [FTOK_PLUS] = 1, [FTOK_MINUS] = 1,
+    [FTOK_STAR] = 1, [FTOK_SLASH] = 1, [FTOK_PERCENT] = 1, [FTOK_AMP] = 1, [FTOK_PIPE] = 1, [FTOK_CARET] = 1,
+    [FTOK_LSHIFT] = 2, [FTOK_RSHIFT] = 2, [FTOK_LT] = 1, [FTOK_LE] = 2, [FTOK_GT] = 1, [FTOK_GE] = 2, [FTOK_EQ] = 2,
+    [FTOK_NE] = 2, [FTOK_LAND] = 2, [FTOK_LOR] = 2, [FTOK_ASSIGN] = 1, [FTOK_ADD_ASSIGN] = 2, [FTOK_SUB_ASSIGN] = 2,
+    [FTOK_MUL_ASSIGN] = 2, [FTOK_DIV_ASSIGN] = 2, [FTOK_MOD_ASSIGN] = 2, [FTOK_AND_ASSIGN] = 2, [FTOK_OR_ASSIGN] = 2,
+    [FTOK_XOR_ASSIGN] = 2, [FTOK_SHL_ASSIGN] = 3, [FTOK_SHR_ASSIGN] = 3, [FTOK_HASH] = 1, [FTOK_HASHHASH] = 2,
+};
+
+// The escapes a character constant of four bytes may hold ('\n', '\0', '\''): fast_decode_escape's one-byte ones.
+static const uint8_t fast_simple_escape[256] = {
+    ['n'] = 1, ['t'] = 1, ['r'] = 1, ['a'] = 1, ['b'] = 1, ['f'] = 1, ['v'] = 1, ['\\'] = 1, ['\''] = 1, ['"'] = 1,
+    ['?'] = 1, ['e'] = 1, ['0'] = 1, ['1'] = 1, ['2'] = 1, ['3'] = 1, ['4'] = 1, ['5'] = 1, ['6'] = 1, ['7'] = 1,
+};
+
+// The newlines in [p, end).
+static uint32_t fast_count_newlines(const uint8_t* p, const uint8_t* end)
 {
+    const __m512i v_nl = _mm512_set1_epi8('\n');
+    uint64_t count = 0;
+    while (p < end)
+    {
+        uint32_t avail = 0;
+        const __m512i v = fast_load64_bounded(p, end, &avail);
+        const __mmask64 valid_mask = avail == 64u ? ~UINT64_C(0) : ((UINT64_C(1) << avail) - 1u);
+        count += (uint64_t)__builtin_popcountll(_mm512_cmpeq_epi8_mask(v, v_nl) & valid_mask);
+        p += avail;
+    }
+    return (uint32_t)count;
+}
+
+// Moves f's text position forward to `target`, with its line: the bulk emitter leaves both behind while it takes the
+// window's tokens, and brings them up where something reads them (a directive, a macro's expansion, fast_lex_one).
+static inline void fast_pp_sync_file(FastIncludeFile* f, const uint8_t* target)
+{
+    if (f->ptr < target)
+    {
+        f->line += fast_count_newlines(f->ptr, target);
+        f->ptr = target;
+    }
+}
+
+// The punctuators of two characters by three tables: the first character's class times eight, the second character's
+// class, and the pair's kind by the two classes (0 where the two characters are no punctuator).
+_Alignas(64) static const uint8_t fast_pair_first[128] = {
+    ['-'] = 1 << 3, ['+'] = 2 << 3, ['*'] = 3 << 3, ['%'] = 4 << 3, ['&'] = 5 << 3, ['|'] = 6 << 3, ['^'] = 7 << 3,
+    ['<'] = 8 << 3, ['>'] = 9 << 3, ['='] = 10 << 3, ['!'] = 11 << 3,
+};
+
+_Alignas(64) static const uint8_t fast_pair_second[128] = {
+    ['='] = 1, ['>'] = 2, ['-'] = 3, ['+'] = 4, ['&'] = 5, ['|'] = 6, ['<'] = 7,
+};
+
+_Alignas(64) static const uint8_t fast_pair_kind[128] = {
+    [(1 << 3) | 2] = FTOK_ARROW, [(1 << 3) | 3] = FTOK_DEC, [(1 << 3) | 1] = FTOK_SUB_ASSIGN,
+    [(2 << 3) | 4] = FTOK_INC, [(2 << 3) | 1] = FTOK_ADD_ASSIGN,
+    [(3 << 3) | 1] = FTOK_MUL_ASSIGN,
+    [(4 << 3) | 1] = FTOK_MOD_ASSIGN,
+    [(5 << 3) | 5] = FTOK_LAND, [(5 << 3) | 1] = FTOK_AND_ASSIGN,
+    [(6 << 3) | 6] = FTOK_LOR, [(6 << 3) | 1] = FTOK_OR_ASSIGN,
+    [(7 << 3) | 1] = FTOK_XOR_ASSIGN,
+    [(8 << 3) | 7] = FTOK_LSHIFT, [(8 << 3) | 1] = FTOK_LE,
+    [(9 << 3) | 2] = FTOK_RSHIFT, [(9 << 3) | 1] = FTOK_GE,
+    [(10 << 3) | 1] = FTOK_EQ,
+    [(11 << 3) | 1] = FTOK_NE,
+};
+
+// A character's class for the window's lexer, one bit a property (bytes of 128 and more are told apart from the
+// byte's sign): fast_lex_one's whitespace, the newline, a byte that needs a decision (a comment's or an operator's '/',
+// '#', a quote, a backslash, and every character with no token kind), an identifier's or a number's character, a '.',
+// and what makes a '.' before it a number's or an ellipsis's (a digit, a '.'). test-direct checks it against
+// fast_ascii_to_kind and fast_char_class.
+#define BUSTER_FCLASS_SPACE    0x01u
+#define BUSTER_FCLASS_NEWLINE  0x02u
+#define BUSTER_FCLASS_SPECIAL  0x04u
+#define BUSTER_FCLASS_RUN      0x08u
+#define BUSTER_FCLASS_DOT      0x10u
+#define BUSTER_FCLASS_DOT_NEXT 0x20u
+_Alignas(64) static const uint8_t fast_lex_class[128] = {
+    0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x01, 0x03, 0x01, 0x01, 0x01, 0x04, 0x04,
+    0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04,
+    0x01, 0x00, 0x04, 0x04, 0x08, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x30, 0x04,
+    0x28, 0x28, 0x28, 0x28, 0x28, 0x28, 0x28, 0x28, 0x28, 0x28, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x04, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08,
+    0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x00, 0x04, 0x00, 0x00, 0x08,
+    0x04, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08,
+    0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x08, 0x00, 0x00, 0x00, 0x00, 0x04,
+};
+
+_Alignas(64) static const uint8_t fast_iota64_plus1[64] = {
+    1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15, 16,
+    17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32,
+    33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48,
+    49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64,
+};
+
+// Lexes a window of f's text from `p`, where a line starts if `bol`. A line's window (`line_mode`) ends at the newline
+// that ends the line, as fast_lex_one's stop_at_eol does. Its tokens are fast_lex_one's tokens of the same text, byte
+// for byte, or are marked as fast_lex_one's (BUSTER_FWIN_SCALAR), which the readers lex there:
+//   - a '.' before a digit or a '.', a two-character punctuator before a character that could go on with it ("<<=",
+//     ">>=") or at a block's last byte, an identifier or number of more than 255 bytes;
+//   - a number before a '.' or with an exponent's sign is a plain run here, and its readers look at the byte after it.
+// What it can't promise even that for ends the window (BUSTER_FWIN_STOP_SCALAR): a backslash, a byte that is neither
+// ASCII nor a C character, a literal with a prefix, a string a newline cuts, a character constant that isn't 'c' or a
+// one-byte escape.
+//
+// The loop steps 64 bytes at a time while a block holds none of the bytes that need a decision: the next block's
+// address doesn't wait for this block's masks, so the blocks' work overlaps. A block does no branch on its tokens and
+// reads nothing back from the window (a 64-byte store that crosses a cache line does not forward to a load on Zen 5):
+// what crosses its end is carried in registers: a run that goes on (its token's index and first byte; its length is
+// written when its end is found). The classes are one table's lookup and a bit test each; the two-character punctuators are a lookup by
+// the two characters' classes, taken at even places of each run of candidates (the longest match from the left); and
+// the tokens' kinds, first bytes and lengths are three compresses and an expand.
+static BUSTER_DIRECT_HOT void fast_pp_lex_window(FastPP* pp, const FastIncludeFile* f, const uint8_t* p, bool bol, bool line_mode)
+{
+    FastWindow* const w = &pp->win;
+    const uint8_t* const base = f->base;
+    const uint8_t* const end = f->end;
+    uint8_t* const wk = w->kinds;
+    uint32_t* const ws = w->starts;
+    uint8_t* const wl = w->lens;
     const __m512i v_lut_lo = _mm512_load_si512((const void*)(fast_ascii_to_kind));
     const __m512i v_lut_hi = _mm512_load_si512((const void*)(fast_ascii_to_kind + 64));
+    const __m512i v_class_lo = _mm512_load_si512((const void*)(fast_lex_class));
+    const __m512i v_class_hi = _mm512_load_si512((const void*)(fast_lex_class + 64));
+    const __m512i v_first_lo = _mm512_load_si512((const void*)(fast_pair_first));
+    const __m512i v_first_hi = _mm512_load_si512((const void*)(fast_pair_first + 64));
+    const __m512i v_second_lo = _mm512_load_si512((const void*)(fast_pair_second));
+    const __m512i v_second_hi = _mm512_load_si512((const void*)(fast_pair_second + 64));
+    const __m512i v_pair_lo = _mm512_load_si512((const void*)(fast_pair_kind));
+    const __m512i v_pair_hi = _mm512_load_si512((const void*)(fast_pair_kind + 64));
     const __m512i v_iota = _mm512_load_si512((const void*)fast_iota64);
-    const __m512i v_zero = _mm512_setzero_si512();
-    const __m512i v_nl = _mm512_set1_epi8('\n');
-    const __m512i v_slash = _mm512_set1_epi8('/');
-    const __m512i v_hash = _mm512_set1_epi8('#');
-    const __m512i v_dq = _mm512_set1_epi8('"');
-    const __m512i v_sq = _mm512_set1_epi8('\'');
-    const __m512i v_bs = _mm512_set1_epi8('\\');
-    const __m512i v_dot = _mm512_set1_epi8('.');
-    const __m512i v_eq = _mm512_set1_epi8('=');
-    const __m512i v_gt = _mm512_set1_epi8('>');
-    const __m512i v_lt = _mm512_set1_epi8('<');
-    const __m512i v_pl = _mm512_set1_epi8('+');
-    const __m512i v_mn = _mm512_set1_epi8('-');
-    const __m512i v_am = _mm512_set1_epi8('&');
-    const __m512i v_pi = _mm512_set1_epi8('|');
-    const __m512i v_tok_id = _mm512_set1_epi8(FTOK_IDENT);
-    const __m512i v_tok_num = _mm512_set1_epi8(FTOK_INT_LIT);
-    const __m512i v_tok_max_single = _mm512_set1_epi8(FTOK_COMMA); // LPAREN(6)..COMMA(13) are always 1-char safe!
+    const __m512i v_iota1 = _mm512_load_si512((const void*)fast_iota64_plus1);
+    const __m512i v_space_bit = _mm512_set1_epi8((char)BUSTER_FCLASS_SPACE);
+    const __m512i v_newline_bit = _mm512_set1_epi8((char)BUSTER_FCLASS_NEWLINE);
+    const __m512i v_special_bits = _mm512_set1_epi8((char)(BUSTER_FCLASS_SPECIAL | (line_mode ? BUSTER_FCLASS_NEWLINE : 0u)));
+    const __m512i v_run_bit = _mm512_set1_epi8((char)BUSTER_FCLASS_RUN);
+    const __m512i v_dot_bit = _mm512_set1_epi8((char)BUSTER_FCLASS_DOT);
+    const __m512i v_dot_next_bit = _mm512_set1_epi8((char)BUSTER_FCLASS_DOT_NEXT);
+    const uint64_t even_bits = UINT64_C(0x5555555555555555);
+    const uint64_t top_bit = UINT64_C(1) << 63;
+    // A slot past the window's tokens for the stores that have nothing to write.
+    const uint32_t spare = BUSTER_FWIN_CAPACITY + 63u;
+    uint32_t n = 0;
+    uint32_t stop = BUSTER_FWIN_STOP_CAPACITY;
+    uint32_t unused_line = 0;
+    // What crosses a block's end.
+    uint64_t run_carry = 0;      // 1 if the last byte's identifier or number goes on in this block
+    uint64_t tail_run = 0;       // 1 if the byte before this block is an identifier's or a number's
+    uint32_t open_idx = spare;   // the token whose run goes on
+    uint32_t open_start = 0;     // ... and its first byte's offset
 
+    while (n + 64u <= BUSTER_FWIN_CAPACITY)
+    {
+        if (__builtin_expect(p + 80 > end, 0))
+        {
+            // The identifiers' 16-byte loads and this loop's loads stay inside the file.
+            stop = BUSTER_FWIN_STOP_TAIL;
+            break;
+        }
+        const uint32_t block_offset = (uint32_t)(p - base);
+        const __m512i v = _mm512_loadu_si512((const void*)p);
+        const __m512i v1 = _mm512_loadu_si512((const void*)(p + 1));
+        const __m512i kinds_raw = _mm512_permutex2var_epi8(v_lut_lo, v, v_lut_hi);
+        const __m512i classes = _mm512_permutex2var_epi8(v_class_lo, v, v_class_hi);
+        // The tables are indexed by seven bits: a byte of 128 and more stops the block before any of its masks is used.
+        const __mmask64 special = _mm512_test_epi8_mask(classes, v_special_bits) | _mm512_movepi8_mask(v);
+        const __mmask64 space = _mm512_test_epi8_mask(classes, v_space_bit);
+        const __mmask64 newlines = _mm512_test_epi8_mask(classes, v_newline_bit);
+        const __mmask64 run_chars = _mm512_test_epi8_mask(classes, v_run_bit);
+        const __mmask64 dots = _mm512_test_epi8_mask(classes, v_dot_bit);
+        const __mmask64 dot_nexts = _mm512_test_epi8_mask(classes, v_dot_next_bit);
+        const uint32_t limit = (uint32_t)_tzcnt_u64(special);
+        const __mmask64 lmask = _bzhi_u64(~UINT64_C(0), limit);
+
+        // Identifiers' and numbers' runs. The byte after the block says whether the last run goes on.
+        const uint32_t next_byte = p[64];
+        const uint64_t next_run = fast_char_class[next_byte] & 1u;
+        const __mmask64 runs = run_chars & lmask;
+        const __mmask64 run_ends = runs & ~((runs >> 1) | (next_run << 63));
+        const __mmask64 run_starts = runs & ~((runs << 1) | run_carry);
+        const __mmask64 punct = ~(space | run_chars) & lmask;
+        // A character that goes with the one after it has that one among the block's lexed bytes, or is the block's last
+        // byte (whose token is fast_lex_one's below, whatever the next block's first byte is).
+        const __mmask64 with_next = punct & ((lmask >> 1) | top_bit);
+
+        // The two-character punctuators: a candidate wherever two characters' classes name one, and of each run of
+        // candidates the ones at even places from its start, since a taken pair uses up the next candidate's first
+        // character. The run's first candidate is free: no candidate is before it.
+        const __m512i pair_kinds = _mm512_permutex2var_epi8(v_pair_lo,
+                                                            _mm512_or_si512(_mm512_permutex2var_epi8(v_first_lo, v, v_first_hi),
+                                                                            _mm512_permutex2var_epi8(v_second_lo, v1, v_second_hi)),
+                                                            v_pair_hi);
+        const __mmask64 candidates = _mm512_test_epi8_mask(pair_kinds, pair_kinds) & with_next;
+        const __mmask64 candidate_starts = candidates & ~(candidates << 1);
+        const __mmask64 from_even = candidates & ~(candidates + (candidate_starts & even_bits));
+        const __mmask64 pairs = (from_even & even_bits) | (candidates & ~from_even & ~even_bits);
+        const __mmask64 tok_starts = (run_starts | punct) & ~(pairs << 1);
+        // fast_lex_one's tokens: a '.' before a digit or a '.', a pair before a candidate (the third character may
+        // go on with it) and a pair at the last byte (its second and third characters are not in this block: the next
+        // block lexes them as their own tokens, which fast_pp_window_pass passes or lexes again after this one).
+        const __mmask64 scalars = (dots & with_next & ((dot_nexts >> 1) | ((uint64_t)((fast_lex_class[next_byte & 127u] >> 5) & 1u) << 63))) |
+                                  (pairs & ((candidates >> 1) | top_bit));
+
+        // A run that came from the block before ends here, and its token's length is known (or the run goes on: the
+        // length so far, written again by the block that ends it). A length of more than a byte is fast_lex_one's.
+        const uint32_t first_end = (uint32_t)_tzcnt_u64(run_ends);
+        const uint32_t carried_idx = run_carry != 0 ? open_idx : spare;
+        const uint32_t carried_len = block_offset + first_end + 1u - open_start;
+        wl[carried_idx] = (uint8_t)carried_len;
+        wk[run_carry != 0 && carried_len > 255u ? open_idx : spare] = BUSTER_FWIN_SCALAR;
+
+        // The tokens' kinds and first bytes, packed. A run's length is the byte after its last less its first: those
+        // bytes, packed in the runs' order (without the end of the run that came from the block before), are spread
+        // back to the tokens that are runs. A punctuator has no length here: its kind's (fast_punct_len).
+        const uint32_t m_count = (uint32_t)__builtin_popcountll(tok_starts);
+        const __m512i kinds_vec = _mm512_mask_blend_epi8(pairs, kinds_raw, pair_kinds);
+        const __m512i comp_kinds = _mm512_maskz_compress_epi8(tok_starts, kinds_vec);
+        const __m512i comp_pos = _mm512_maskz_compress_epi8(tok_starts, v_iota);
+        const __mmask64 paired_ends = run_ends & ~(_blsi_u64(run_ends) & (0u - run_carry));
+        const __m512i comp_ends = _mm512_maskz_compress_epi8(paired_ends, v_iota1);
+        const __mmask64 run_lanes = _pext_u64(run_starts, tok_starts);
+        _mm512_storeu_si512((void*)(wk + n), comp_kinds);
+        _mm512_storeu_si512((void*)(wl + n), _mm512_sub_epi8(_mm512_maskz_expand_epi8(run_lanes, comp_ends), comp_pos));
+        const __m512i v_offset = _mm512_set1_epi32((int32_t)block_offset);
+        _mm512_storeu_si512((void*)(ws + n), _mm512_add_epi32(v_offset, _mm512_cvtepu8_epi32(_mm512_castsi512_si128(comp_pos))));
+        _mm512_storeu_si512((void*)(ws + n + 16u), _mm512_add_epi32(v_offset, _mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32(comp_pos, 1))));
+        if (__builtin_expect(m_count > 32u, 0))
+        {
+            _mm512_storeu_si512((void*)(ws + n + 32u), _mm512_add_epi32(v_offset, _mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32(comp_pos, 2))));
+            _mm512_storeu_si512((void*)(ws + n + 48u), _mm512_add_epi32(v_offset, _mm512_cvtepu8_epi32(_mm512_extracti32x4_epi32(comp_pos, 3))));
+        }
+        if (__builtin_expect(scalars != 0, 0))
+        {
+            uint64_t rest = scalars;
+            do
+            {
+                // Marked, with the bytes it has as the window splits the text: a pair's two, a '.' alone.
+                const uint32_t bit = (uint32_t)__builtin_ctzll(rest);
+                const uint32_t idx = n + (uint32_t)__builtin_popcountll(tok_starts & _bzhi_u64(~UINT64_C(0), bit));
+                wk[idx] = BUSTER_FWIN_SCALAR;
+                wl[idx] = (uint8_t)(1u + (uint32_t)((pairs >> bit) & 1u));
+                rest &= rest - 1u;
+            } while (rest != 0);
+        }
+
+        // What crosses into the next block: the last run, if the byte after the block goes on with it (its token is
+        // this block's last one, or still the one from before), and a pair that starts at the last byte.
+        const bool starts_run = run_starts != 0;
+        open_start = starts_run ? block_offset + 63u - (uint32_t)_lzcnt_u64(run_starts) : open_start;
+        open_idx = starts_run ? n + m_count - 1u : open_idx;
+        run_carry = (runs >> 63) & next_run;
+
+        // Whether a line starts after these bytes: a newline past the last byte that is no whitespace.
+        const __mmask64 solid = (~space) & lmask;
+        const __mmask64 chunk_nl = newlines & lmask;
+        bol = solid != 0 ? chunk_nl > solid : (bol || chunk_nl != 0);
+        n += m_count;
+
+        if (limit == 64u)
+        {
+            tail_run = runs >> 63;
+            p += 64;
+            continue;
+        }
+        p += limit;
+
+        // The byte that needs a decision. No run crosses into it, and no pair. What stands directly before it may
+        // belong with it: the identifier or number that ends there, which is the window's last token.
+        const bool after_run = limit != 0 ? ((runs >> (limit - 1u)) & 1u) != 0 : tail_run != 0;
+        const __mmask64 starts_before = run_starts & lmask;
+        const uint8_t* const run = base + (starts_before != 0 ? block_offset + 63u - (uint32_t)_lzcnt_u64(starts_before) : open_start);
+        tail_run = 0;
+        const uint8_t ch = p[0];
+        if (ch == '/')
+        {
+            const uint8_t ch1 = p[1];
+            if (ch1 == '*')
+            {
+                const uint8_t* after = fast_skip_block_comment(p + 2, end, &unused_line);
+                if (after == NULL)
+                {
+                    fast_pp_bail(pp, "unterminated block comment");
+                    stop = BUSTER_FWIN_STOP_BAIL;
+                    break;
+                }
+                p = after;
+                continue;
+            }
+            if (ch1 == '/')
+            {
+                p = fast_skip_line_comment(p + 2, end, &unused_line);
+                continue;
+            }
+            const uint32_t length = ch1 == '=' ? 2u : 1u;
+            wk[n] = ch1 == '=' ? FTOK_DIV_ASSIGN : FTOK_SLASH;
+            ws[n] = (uint32_t)(p - base);
+            wl[n] = (uint8_t)length;
+            n += 1u;
+            p += length;
+            bol = false;
+            continue;
+        }
+        if (ch == '#')
+        {
+            if (bol)
+            {
+                stop = BUSTER_FWIN_STOP_DIRECTIVE;
+                break;
+            }
+            // A '#' or '##' inside a line: a macro body's operator.
+            const uint32_t length = p[1] == '#' ? 2u : 1u;
+            wk[n] = length == 2u ? FTOK_HASHHASH : FTOK_HASH;
+            ws[n] = (uint32_t)(p - base);
+            wl[n] = (uint8_t)length;
+            n += 1u;
+            p += length;
+            continue;
+        }
+        if (ch == '\n')
+        {
+            // Only a line's window has the newline among these bytes.
+            stop = BUSTER_FWIN_STOP_EOL;
+            break;
+        }
+        // A literal's prefix (L"..", u8'c'), a number's digit separator, a spliced identifier or number: that token
+        // is fast_lex_one's too.
+        if (after_run)
+        {
+            const uint32_t run_len = (uint32_t)(p - run);
+            const bool prefix = (run_len == 1u && (run[0] == 'L' || run[0] == 'u' || run[0] == 'U')) ||
+                                (run_len == 2u && run[0] == 'u' && run[1] == '8');
+            const bool number = (fast_char_class[run[0]] & 4u) != 0;
+            if (ch == '\\' || (ch == '\'' && number) || ((ch == '"' || ch == '\'') && prefix))
+            {
+                n -= 1u;
+                p = run;
+                stop = BUSTER_FWIN_STOP_SCALAR;
+                break;
+            }
+        }
+        if (ch == '"')
+        {
+            bool has_escape = false;
+            uint32_t stopped = 0;
+            const uint8_t* const close = fast_scan_string_close(p + 1, end, &has_escape, &stopped);
+            if (stopped == BUSTER_FSTRING_CLOSED)
+            {
+                wk[n] = FTOK_STR_LIT;
+                ws[n] = (uint32_t)(p - base);
+                wl[n] = 0;
+                n += 1u;
+                p = close + 1;
+                bol = false;
+                continue;
+            }
+        }
+        else if (ch == '\'')
+        {
+            const uint8_t c1 = p[1];
+            uint32_t length = 0;
+            if (c1 != '\\' && c1 != '\'' && c1 != '\n' && p[2] == '\'')
+            {
+                length = 3u;
+            }
+            else if (c1 == '\\' && fast_simple_escape[p[2]] != 0 && p[3] == '\'')
+            {
+                length = 4u;
+            }
+            if (length != 0)
+            {
+                wk[n] = FTOK_CHAR_LIT;
+                ws[n] = (uint32_t)(p - base);
+                wl[n] = (uint8_t)length;
+                n += 1u;
+                p += length;
+                bol = false;
+                continue;
+            }
+        }
+        stop = BUSTER_FWIN_STOP_SCALAR;
+        break;
+    }
+
+    // A window never ends inside a run: one that goes on is lexed again by the next window.
+    if (run_carry != 0)
+    {
+        n = open_idx;
+        p = base + open_start;
+        bol = false;
+    }
+
+    w->count = n;
+    w->pos = 0;
+    w->serial = f->serial;
+    w->generation += 1u;
+    w->lex_ptr = p;
+    w->stop = (uint8_t)stop;
+    w->lex_bol = bol;
+    w->line_mode = line_mode;
+}
+
+// Passes the window's tokens that start before the file's byte `offset`. False where the last of them goes on past it:
+// what moved the position there split the text another way than the window (fast_lex_one takes "<<=" where the window
+// has "<<" and "=="; a pair at a block's last byte takes the first byte of the next block's pair), and the text is lexed
+// again from the position. A string has no length here: whatever passed its first byte took it whole.
+static inline bool fast_pp_window_pass(FastWindow* w, uint32_t offset)
+{
+    const uint32_t count = w->count;
+    const uint32_t* const starts = w->starts;
+    uint32_t i = w->pos;
+    bool whole = true;
+    while (i < count && starts[i] < offset)
+    {
+        i += 1u;
+    }
+    if (i > w->pos)
+    {
+        const uint32_t last = i - 1u;
+        const uint32_t kind = w->kinds[last];
+        uint32_t length = 1u;
+        if (kind > FTOK_STR_LIT && kind < 64u)
+        {
+            length = fast_punct_len[kind];
+        }
+        else if (kind != FTOK_STR_LIT)
+        {
+            length = w->lens[last];
+        }
+        whole = starts[last] + length <= offset;
+    }
+    w->pos = i;
+    return whole;
+}
+
+// Moves the window's place to the first token at or after f's text position, or drops the window where the position
+// is past it, inside one of its tokens, or it is another file's.
+static inline bool fast_pp_window_seek(FastPP* pp, const FastIncludeFile* f)
+{
+    FastWindow* const w = &pp->win;
+    const bool covers = w->serial == f->serial && f->ptr <= w->lex_ptr && fast_pp_window_pass(w, (uint32_t)(f->ptr - f->base));
+    if (!covers)
+    {
+        w->serial = 0;
+    }
+    return covers;
+}
+
+// The window's token `t` as fast_lex_one gives it, with `flags`; `*out_end` is where its text ends.
+static FastTok fast_pp_window_tok(FastPP* pp, const FastIncludeFile* f, uint32_t t, uint32_t flags, const uint8_t** out_end)
+{
+    const FastWindow* const w = &pp->win;
+    const uint8_t* const s = f->base + w->starts[t];
+    const uint32_t kind = w->kinds[t];
+    const uint32_t len = w->lens[t];
+    FastTok tok;
+    const uint8_t* text_end = s + len;
+    if (kind == FTOK_IDENT)
+    {
+        uint8_t ident_kind = FTOK_IDENT;
+        uint32_t id;
+        if (__builtin_expect(len <= 16u, 1))
+        {
+            id = fast_ident_lookup_16(&pp->idents, s, len, &ident_kind);
+        }
+        else
+        {
+            id = fast_ident_lookup_long(&pp->idents, s, len, &ident_kind);
+        }
+        if (__builtin_expect(id == 0, 0))
+        {
+            fast_pp_bail(pp, "ident table full");
+            tok = fast_tok_make(FTOK_EOF, flags, 0, 0);
+            text_end = f->end;
+        }
+        else
+        {
+            tok = fast_tok_make(ident_kind, flags, 0, id);
+        }
+    }
+    else if (kind == FTOK_INT_LIT)
+    {
+        const FastLexed lexed = fast_lex_number(pp, s, f->end, flags);
+        tok = lexed.tok;
+        text_end = lexed.p;
+    }
+    else if (kind == FTOK_STR_LIT)
+    {
+        const FastLexed lexed = fast_lex_string(pp, s, f->end, flags, 0);
+        tok = lexed.tok;
+        text_end = lexed.p;
+    }
+    else if (kind == FTOK_CHAR_LIT)
+    {
+        const FastLexed lexed = fast_lex_char(pp, s, f->end, flags, 0);
+        tok = lexed.tok;
+        text_end = lexed.p;
+    }
+    else
+    {
+        tok = fast_tok_make(kind, flags, 0, 0);
+        text_end = s + fast_punct_len[kind & 63u];
+    }
+    *out_end = text_end;
+    return tok;
+}
+
+// The next token of f's text for the directives and for a macro call's arguments: fast_lex_one's token and its state
+// after it (f->ptr, f->line, f->at_bol), from the window where the bytes before the token are horizontal space (and
+// newlines, for a reader that crosses lines). fast_lex_one lexes it where they hold a comment or a splice, and
+// wherever the window stops.
+static BUSTER_DIRECT_HOT void fast_pp_read_tok(FastPP* pp, FastIncludeFile* f, bool stop_at_eol, FastTok* out_tok)
+{
+    FastWindow* const w = &pp->win;
+    bool lexed_here = false;
+    bool done = false;
+    while (!done)
+    {
+        if (fast_pp_window_seek(pp, f))
+        {
+            if (w->pos < w->count)
+            {
+                const uint32_t t = w->pos;
+                const uint8_t* const s = f->base + w->starts[t];
+                const uint8_t* gap = f->ptr;
+                uint32_t flags = f->at_bol ? BUSTER_FTOK_BOL : 0u;
+                uint32_t newlines = 0;
+                bool plain = true;
+                bool at_eol = false;
+                while (gap < s)
+                {
+                    const uint8_t c = *gap;
+                    if (c == '\n')
+                    {
+                        if (stop_at_eol)
+                        {
+                            at_eol = true;
+                            break;
+                        }
+                        newlines += 1u;
+                        flags |= BUSTER_FTOK_SPACE | BUSTER_FTOK_BOL;
+                    }
+                    else if ((fast_char_class[c] & 8u) != 0)
+                    {
+                        flags |= BUSTER_FTOK_SPACE;
+                    }
+                    else
+                    {
+                        plain = false;
+                        break;
+                    }
+                    gap += 1;
+                }
+                if (at_eol)
+                {
+                    f->ptr = gap;
+                    *out_tok = fast_tok_make(FTOK_EOF, 0, 0, 0);
+                    return;
+                }
+                if (plain && w->kinds[t] != BUSTER_FWIN_SCALAR)
+                {
+                    const uint8_t* text_end = s;
+                    f->line += newlines;
+                    *out_tok = fast_pp_window_tok(pp, f, t, flags, &text_end);
+                    f->ptr = text_end;
+                    f->at_bol = false;
+                    w->pos = t + 1u;
+                    return;
+                }
+                done = true;
+            }
+            else if (w->stop == BUSTER_FWIN_STOP_CAPACITY)
+            {
+                fast_pp_lex_window(pp, f, w->lex_ptr, w->lex_bol, w->line_mode);
+                lexed_here = true;
+            }
+            else if (w->stop == BUSTER_FWIN_STOP_EOL && stop_at_eol)
+            {
+                // Nothing but space and comments up to the newline that ends the line.
+                fast_pp_sync_file(f, w->lex_ptr);
+                *out_tok = fast_tok_make(FTOK_EOF, 0, 0, 0);
+                return;
+            }
+            else
+            {
+                done = true;
+            }
+        }
+        else if (!lexed_here && f->ptr + 80 <= f->end)
+        {
+            fast_pp_lex_window(pp, f, f->ptr, f->at_bol, stop_at_eol);
+            lexed_here = true;
+        }
+        else
+        {
+            done = true;
+        }
+    }
+    f->ptr = fast_lex_one(pp, f->ptr, f->end, &f->line, &f->at_bol, stop_at_eol, out_tok);
+}
+
+// Goes on at byte `p` of f's text after a macro's name or its arguments: in the window where it reaches that far, or
+// with a new one from `p`, where no line starts.
+static inline void fast_pp_window_goto(FastPP* pp, FastIncludeFile* f, const uint8_t* p)
+{
+    FastWindow* const w = &pp->win;
+    if (!(w->serial == f->serial && p <= w->lex_ptr && fast_pp_window_pass(w, (uint32_t)(p - f->base))))
+    {
+        fast_pp_sync_file(f, p);
+        f->ptr = p;
+        f->at_bol = false;
+        w->serial = 0;
+    }
+}
+
+// A macro's name at the window's place, the tokens before it emitted: what the macro's kind asks for. Returns true
+// when the drain's loop has to go on (an expansion's frames wait, or the compile bailed out).
+static __attribute__((noinline)) bool fast_pp_window_macro(FastPP* pp, FastIncludeFile* f, uint32_t id, uint8_t kind)
+{
+    FastWindow* const w = &pp->win;
+    const uint32_t t = w->pos;
+    const uint8_t* const end = f->end;
+    const uint8_t* const after_name = f->base + w->starts[t] + w->lens[t];
+    const uint32_t out_limit = pp->out_cap - 64u;
+    const uint32_t fmidx = pp->idents.entries[id].macro_idx;
+    w->pos = t + 1u;
+    if (fmidx != 0)
+    {
+        const FastMacro* fm = pp->macros + fmidx;
+        const uint8_t fmode = fm->fast_mode;
+        // An empty object macro (SQLITE_API): its name goes.
+        if (fmode == 4u)
+        {
+            return false;
+        }
+        // A one-parameter identity wrapper (ALWAYS(x) is (x)): its name goes, and `(x)` is the window's next tokens.
+        if (fmode == 5u)
+        {
+            const uint8_t* q = after_name;
+            while (q < end && (*q == ' ' || *q == '\t')) { q += 1; }
+            if (q < end && *q == '(')
+            {
+                return false;
+            }
+        }
+        // A short constant object macro (NULL is ((void*)0)): its body's tokens.
+        if (fmode == 6u && pp->out_count + fm->body_count < out_limit)
+        {
+            const FastTok* const bt = pp->macro_toks + fm->body_start;
+            uint32_t out_count = pp->out_count;
+            for (uint32_t bi = 0; bi < fm->body_count; bi += 1)
+            {
+                pp->out_kind[out_count] = bt[bi].kind;
+                pp->out_data[out_count] = bt[bi].data;
+                out_count += 1u;
+            }
+            pp->out_count = out_count;
+            return false;
+        }
+        // A function-like macro whose body names no parameter (assert, testcase): its arguments are skipped by the
+        // parentheses' count, and no token of them is lexed.
+        if (fmode == 2u || fmode == 3u)
+        {
+            uint32_t skip_line = 0;
+            const uint8_t* after_args = fast_pp_skip_unused_call_args(after_name, end, &skip_line, fm->param_count, fm->is_variadic != 0);
+            if (after_args != NULL)
+            {
+                if (fm->body_count == 0)
+                {
+                    fast_pp_window_goto(pp, f, after_args);
+                    return false;
+                }
+                if (fmode == 3u)
+                {
+                    // `assert(...);` directly before its `;` leaves the `;` alone.
+                    const uint8_t* q = after_args;
+                    while (q < end && (*q == ' ' || *q == '\t')) { q += 1; }
+                    if (q < end && *q == ';')
+                    {
+                        fast_pp_window_goto(pp, f, q);
+                        return false;
+                    }
+                    if (pp->out_count + 6u < out_limit)
+                    {
+                        static const uint8_t v0_k[6] = { FTOK_LPAREN, FTOK_LPAREN, FTOK_KW_VOID, FTOK_RPAREN, FTOK_INT_LIT, FTOK_RPAREN };
+                        static const uint32_t v0_d[6] = { 0, 0, 0, 0, 0, 0 };
+                        memcpy(pp->out_kind + pp->out_count, v0_k, 6);
+                        memcpy(pp->out_data + pp->out_count, v0_d, 24);
+                        pp->out_count += 6u;
+                        fast_pp_window_goto(pp, f, after_args);
+                        return false;
+                    }
+                }
+                // A constant body: its tokens through the expansion stack, the arguments unread.
+                fast_pp_sync_file(f, after_args);
+                f->at_bol = false;
+                if (pp->expand_depth < BUSTER_FPP_MAX_EXPAND && pp->hide_count < BUSTER_FPP_MAX_HIDE)
+                {
+                    pp->hide_ids[pp->hide_count++] = id;
+                    pp->expand[pp->expand_depth++] = (FastExpandFrame){
+                        .toks = pp->macro_toks + fm->body_start,
+                        .pos = 0,
+                        .count = fm->body_count,
+                        .macro_ident = id,
+                        .saved_scratch = pp->exp_used,
+                    };
+                    return true;
+                }
+            }
+        }
+    }
+
+    // Any other macro: the expansion engine's, which reads its arguments through the window.
+    if (f->ptr <= after_name)
+    {
+        fast_pp_sync_file(f, after_name);
+    }
+    f->ptr = after_name;
+    f->at_bol = false;
+    FastTok rep = fast_tok_make(FTOK_EOF, 0, 0, 0);
+    const FastTok mtok = fast_tok_make(kind, 0, 0, id);
+    if (fast_pp_try_expand(pp, mtok, false, &rep))
+    {
+        if (rep.kind != FTOK_EOF)
+        {
+            fast_pp_emit_soa(pp, rep);
+        }
+        if (pp->expand_depth == 0 && !pp->bailout)
+        {
+            fast_pp_window_goto(pp, f, f->ptr);
+            f->at_bol = false;
+            return false;
+        }
+        return true;
+    }
+    // A function-like macro's name without its '(': the identifier itself.
+    pp->out_kind[pp->out_count] = kind;
+    pp->out_data[pp->out_count] = id;
+    pp->out_count += 1u;
+    fast_pp_window_goto(pp, f, f->ptr);
+    f->at_bol = false;
+    return pp->bailout;
+}
+
+// Whether the number whose run of digits and letters is s[0..len) goes on past it, as fast_lex_number takes it: a '.'
+// follows, or a sign after an exponent's letter.
+static inline bool fast_number_goes_on(const uint8_t* s, uint32_t len)
+{
+    const uint8_t after = s[len];
+    const uint8_t last = s[len - 1u] | 0x20u;
+    return after == '.' || ((after == '+' || after == '-') && (last == 'e' || last == 'p'));
+}
+
+// One token of f's text by fast_lex_one, and what the drain does with it: the file's end, a directive, a macro's name.
+static void fast_pp_single_token(FastPP* pp, FastIncludeFile* f)
+{
+    FastTok tok = { 0 };
+    f->ptr = fast_lex_one(pp, f->ptr, f->end, &f->line, &f->at_bol, false, &tok);
+    if (tok.kind == FTOK_EOF)
+    {
+        fast_pp_pop_file(pp);
+    }
+    else if (tok.kind == FTOK_HASH && (tok.flags & BUSTER_FTOK_BOL) != 0)
+    {
+        fast_pp_handle_directive(pp, f);
+    }
+    else
+    {
+        bool expanded = false;
+        if (f->guard_state == 0 || f->guard_state == 4u)
+        {
+            f->guard_state = 3u;
+        }
+        if ((tok.kind == FTOK_IDENT || tok.kind >= 64u) && fast_ident_is_macro(&pp->idents, tok.data))
+        {
+            FastTok rep = { 0 };
+            if (fast_pp_try_expand(pp, tok, false, &rep))
+            {
+                if (rep.kind != FTOK_EOF) { fast_pp_emit_soa(pp, rep); }
+                expanded = true;
+            }
+        }
+        if (!expanded)
+        {
+            fast_pp_emit_soa(pp, tok);
+        }
+    }
+}
+
+// The window's next token is fast_lex_one's, and the tokens before it are emitted: lexed and handled as the drain's
+// own tokens are, and the window goes on after it. Returns true when the drain's loop has to go on instead (an
+// expansion's frames wait, the file ended, the window is dropped, the compile bailed out).
+static __attribute__((noinline)) bool fast_pp_window_scalar(FastPP* pp, FastIncludeFile* f)
+{
+    FastWindow* const w = &pp->win;
+    const uint32_t depth = pp->file_depth;
+    bool leave = true;
+    fast_pp_sync_file(f, f->base + w->starts[w->pos]);
+    f->at_bol = false;
+    fast_pp_single_token(pp, f);
+    if (pp->file_depth != depth)
+    {
+        w->serial = 0;
+    }
+    else if (pp->expand_depth == 0 && !pp->bailout)
+    {
+        leave = !fast_pp_window_seek(pp, f);
+    }
+    return leave;
+}
+
+// Emits the window's tokens from its place on: 64 kinds a store, and a loop over the identifiers, numbers and
+// literals among them, which are the tokens with something to look up or convert. A macro's name stops the block: the
+// tokens before it stay, and fast_pp_window_macro says where the window goes on.
+static BUSTER_DIRECT_HOT void fast_pp_emit_window(FastPP* pp, FastIncludeFile* f)
+{
+    FastWindow* const w = &pp->win;
+    const uint8_t* const base = f->base;
+    uint8_t* const out_kind = pp->out_kind;
+    uint32_t* const out_data = pp->out_data;
+    const uint32_t out_limit = pp->out_cap - 64u;
+    const uint64_t* const macro_bits = pp->idents.macro_bits;
+    const __m512i v_work_max = _mm512_set1_epi8(FTOK_STR_LIT);
+    uint32_t out_count = pp->out_count;
+    uint32_t i = w->pos;
+    uint32_t n = w->count;
+    bool leave = false;
+
+    // Tokens that are no directive's: the file's include guard no longer covers the whole file.
+    if (f->guard_state == 0 || f->guard_state == 4u)
+    {
+        f->guard_state = 3u;
+    }
+
+    while (i < n && out_count < out_limit && !leave)
+    {
+        const uint32_t cnt = n - i < 64u ? n - i : 64u;
+        const __m512i kv = _mm512_loadu_si512((const void*)(w->kinds + i));
+        _mm512_storeu_si512((void*)(out_kind + out_count), kv);
+        uint64_t work = (uint64_t)_mm512_cmple_epu8_mask(kv, v_work_max) & _bzhi_u64(~UINT64_C(0), cnt);
+        uint32_t taken = cnt;
+        while (work != 0)
+        {
+            const uint32_t k = (uint32_t)__builtin_ctzll(work);
+            work &= work - 1u;
+            const uint32_t t = i + k;
+            const uint32_t kind = w->kinds[t];
+            const uint8_t* const s = base + w->starts[t];
+            const uint32_t len = w->lens[t];
+            if (__builtin_expect(kind == FTOK_IDENT, 1))
+            {
+                uint8_t ident_kind = FTOK_IDENT;
+                uint32_t id;
+                if (__builtin_expect(len <= 16u, 1))
+                {
+                    id = fast_ident_lookup_16(&pp->idents, s, len, &ident_kind);
+                }
+                else
+                {
+                    id = fast_ident_lookup_long(&pp->idents, s, len, &ident_kind);
+                }
+                if (__builtin_expect(id == 0, 0))
+                {
+                    fast_pp_bail(pp, "ident table full");
+                    taken = k;
+                    leave = true;
+                    break;
+                }
+                out_data[out_count + k] = id;
+                out_kind[out_count + k] = ident_kind;
+                if (__builtin_expect((macro_bits[id >> 6] & (UINT64_C(1) << (id & 63u))) != 0, 0))
+                {
+                    // A one-token object macro (SQLITE_OK, OP_*) is replaced where it stands.
+                    const uint32_t midx = pp->idents.entries[id].macro_idx;
+                    if (midx != 0)
+                    {
+                        const FastMacro* fm = pp->macros + midx;
+                        if (fm->fast_mode == 1u &&
+                            (fm->fast_kind != FTOK_IDENT ||
+                             (macro_bits[fm->fast_data >> 6] & (UINT64_C(1) << (fm->fast_data & 63u))) == 0))
+                        {
+                            out_kind[out_count + k] = fm->fast_kind;
+                            out_data[out_count + k] = fm->fast_data;
+                            continue;
+                        }
+                    }
+                    out_count += k;
+                    w->pos = t;
+                    pp->out_count = out_count;
+                    leave = fast_pp_window_macro(pp, f, id, ident_kind);
+                    out_count = pp->out_count;
+                    i = w->serial == f->serial ? w->pos : 0u;
+                    n = w->serial == f->serial ? w->count : 0u;
+                    taken = 0;
+                    break;
+                }
+            }
+            else if (kind == FTOK_INT_LIT && !fast_number_goes_on(s, len))
+            {
+                if (__builtin_expect(len == 1u, 1))
+                {
+                    out_data[out_count + k] = (uint32_t)(s[0] - '0');
+                }
+                else
+                {
+                    // A decimal number of two to four digits (10, 16, 255, 1024) in place.
+                    uint32_t v = (uint32_t)(s[0] - '0');
+                    bool all_dig = len <= 4u && s[0] != '0';
+                    for (uint32_t di = 1u; all_dig && di < len; di += 1)
+                    {
+                        const uint32_t d = (uint32_t)(s[di] - '0');
+                        all_dig = d <= 9u;
+                        v = v * 10u + d;
+                    }
+                    if (all_dig)
+                    {
+                        out_data[out_count + k] = v;
+                    }
+                    else
+                    {
+                        const FastLexed lexed = fast_lex_number(pp, s, s + len, 0);
+                        pp->out_count = out_count + k;
+                        fast_pp_emit_soa(pp, lexed.tok);
+                    }
+                }
+            }
+            else if (kind == FTOK_STR_LIT || kind == FTOK_CHAR_LIT)
+            {
+                const FastLexed lexed = kind == FTOK_STR_LIT ? fast_lex_string(pp, s, f->end, 0, 0) : fast_lex_char(pp, s, f->end, 0, 0);
+                pp->out_count = out_count + k;
+                fast_pp_emit_soa(pp, lexed.tok);
+            }
+            else
+            {
+                // fast_lex_one's token: one the window marked, or a number that goes on past its run.
+                out_count += k;
+                w->pos = t;
+                pp->out_count = out_count;
+                leave = fast_pp_window_scalar(pp, f);
+                out_count = pp->out_count;
+                i = w->serial == f->serial ? w->pos : 0u;
+                n = w->serial == f->serial ? w->count : 0u;
+                taken = 0;
+                break;
+            }
+        }
+        out_count += taken;
+        i += taken;
+        leave = leave || pp->bailout;
+    }
+    w->pos = i;
+    pp->out_count = out_count;
+}
+
+// The preprocessor's loop: an expansion's pending tokens first, then the top file's text, a window of raw tokens at a
+// time (FastWindow). A window's tokens are emitted in bulk; a directive, a token the window leaves to fast_lex_one and
+// a file's last bytes are handled where the window ends.
+static BUSTER_DIRECT_HOT bool fast_pp_drain(FastPP* pp)
+{
     while ((pp->file_depth > 0 || pp->expand_depth > 0) && !pp->bailout)
     {
         if (__builtin_expect(pp->expand_depth > 0, 0))
         {
             FastExpandFrame* ef = pp->expand + (pp->expand_depth - 1u);
+            {
+                // The frame's tokens up to a macro's name, with the frame's place and the output's count in registers:
+                // an expansion's tokens are a quarter of sqlite3.c's, and this loop's iteration went through memory for
+                // both. A number's and a literal's kinds are fast_pp_emit_soa's to settle.
+                const FastTok* const toks = ef->toks;
+                const uint64_t* const macro_bits = pp->idents.macro_bits;
+                uint8_t* const out_kind = pp->out_kind;
+                uint32_t* const out_data = pp->out_data;
+                const uint32_t count = ef->count;
+                const uint32_t out_cap = pp->out_cap;
+                uint32_t pos = ef->pos;
+                uint32_t out_count = pp->out_count;
+                bool stop = false;
+                while (pos < count && !stop)
+                {
+                    const FastTok tok = toks[pos];
+                    const uint32_t kind = tok.kind;
+                    if ((kind == FTOK_IDENT || kind >= 64u) && (macro_bits[tok.data >> 6] & (UINT64_C(1) << (tok.data & 63u))) != 0)
+                    {
+                        stop = true;
+                    }
+                    else if (kind - FTOK_INT_LIT <= FTOK_STR_LIT - FTOK_INT_LIT || out_count >= out_cap)
+                    {
+                        pp->out_count = out_count;
+                        fast_pp_emit_soa(pp, tok);
+                        out_count = pp->out_count;
+                        pos += 1u;
+                        stop = pp->bailout;
+                    }
+                    else
+                    {
+                        out_kind[out_count] = (uint8_t)kind;
+                        out_data[out_count] = tok.data;
+                        out_count += 1u;
+                        pos += 1u;
+                    }
+                }
+                ef->pos = pos;
+                pp->out_count = out_count;
+                if (pp->bailout)
+                {
+                    break;
+                }
+            }
             if (ef->pos >= ef->count)
             {
                 if (ef->macro_ident != 0 && pp->hide_count > 0) { pp->hide_count -= 1u; }
@@ -4429,7 +5604,7 @@ static BUSTER_DIRECT_HOT bool fast_pp_drain(FastPP* pp)
                     else
                     {
                         FastTok nt = { 0 };
-                        f->ptr = fast_lex_one(pp, f->ptr, f->end, &f->line, &f->at_bol, true, &nt);
+                        fast_pp_read_tok(pp, f, true, &nt);
                         const bool def = (nt.kind == FTOK_IDENT || nt.kind >= 64u) && fast_ident_is_macro(&pp->idents, nt.data);
                         cond = kw == FPP_KW_ELIFDEF ? def : !def;
                         fast_pp_skip_to_eol(f);
@@ -4444,605 +5619,67 @@ static BUSTER_DIRECT_HOT bool fast_pp_drain(FastPP* pp)
             continue;
         }
 
-        // Fast 64-byte AVX-512 branchless chunk loop! (Require +80 bytes readable so 16B ident loads never OOB!)
-        const uint8_t* p = f->ptr;
-        const uint8_t* const end = f->end;
-        if (__builtin_expect(p + 80 <= end && pp->out_count + 64u < pp->out_cap, 1))
+        // The window that covers f's position, or a new one from there.
+        FastWindow* const w = &pp->win;
+        if (!fast_pp_window_seek(pp, f) && f->ptr + 80 <= f->end && pp->out_count + 64u < pp->out_cap)
         {
-            uint32_t line = f->line;
-            bool bol = f->at_bol;
-            uint8_t* const out_kind = pp->out_kind;
-            uint32_t* const out_data = pp->out_data;
-            uint32_t out_count = pp->out_count;
-            const uint32_t out_limit = pp->out_cap - 64u;
-            const uint64_t* const macro_bits = pp->idents.macro_bits;
-            bool reload_outer = false;
-
-            while (p + 80 <= end && out_count < out_limit && !reload_outer && !pp->bailout)
+            if (f->at_bol)
             {
-                const __m512i v = _mm512_loadu_si512((const void*)p);
-                const __mmask64 non_ascii = _mm512_movepi8_mask(v);
-                const __mmask64 special = _mm512_cmpeq_epi8_mask(v, v_slash) | _mm512_cmpeq_epi8_mask(v, v_hash) |
-                                          _mm512_cmpeq_epi8_mask(v, v_dq) | _mm512_cmpeq_epi8_mask(v, v_sq) |
-                                          _mm512_cmpeq_epi8_mask(v, v_bs) | non_ascii;
-
-                // 1-uop vpermi2b classifies ALL 64 ASCII bytes simultaneously into FastTokKind!
-                const __m512i kinds_raw = _mm512_permutex2var_epi8(v_lut_lo, v, v_lut_hi);
-                const __mmask64 ws_mask = _mm512_cmpeq_epi8_mask(kinds_raw, v_zero);
-                const __mmask64 nl_mask = _mm512_cmpeq_epi8_mask(v, v_nl);
-
-                // Determine safe byte limit `limit <= 64`: stop before first special char!
-                uint32_t limit = special == 0 ? 64u : (uint32_t)__builtin_ctzll(special);
-                const __mmask64 pre_lim_mask = limit == 64u ? ~UINT64_C(0) : (limit == 0 ? 0u : ((UINT64_C(1) << limit) - 1u));
-
-                // Fast fused skip: if everything before special char is pure whitespace (including limit == 0),
-                // advance past whitespace AND handle comment / directive / string / '/' right here without reloading!
-                if (((~ws_mask) & pre_lim_mask) == 0)
+                // A directive at the line's start needs no window.
+                const uint8_t* const q = fast_skip_hspace(f->ptr, f->end);
+                if (q < f->end && *q == '#')
                 {
-                    const __mmask64 passed_nl = nl_mask & pre_lim_mask;
-                    if (passed_nl != 0)
-                    {
-                        line += (uint32_t)__builtin_popcountll(passed_nl);
-                        bol = true;
-                    }
-                    p += limit;
-                    if (limit == 64u)
-                    {
-                        continue;
-                    }
-                    const uint8_t ch = p[0];
-                    if (ch == '/')
-                    {
-                        const uint8_t ch1 = p[1];
-                        if (ch1 == '*')
-                        {
-                            const uint8_t* after = fast_skip_block_comment(p + 2, end, &line);
-                            if (after == NULL) { fast_pp_bail(pp, "unterminated block comment"); reload_outer = true; break; }
-                            p = after;
-                            continue;
-                        }
-                        if (ch1 == '/')
-                        {
-                            p = fast_skip_line_comment(p + 2, end, &line);
-                            continue;
-                        }
-                        if (f->guard_state == 0 || f->guard_state == 4u) { f->guard_state = 3u; }
-                        out_kind[out_count] = ch1 == '=' ? FTOK_DIV_ASSIGN : FTOK_SLASH;
-                        out_data[out_count] = 0;
-                        out_count += 1u;
-                        p += ch1 == '=' ? 2u : 1u;
-                        bol = false;
-                        continue;
-                    }
-                    if (ch == '#' && bol)
-                    {
-                        f->ptr = p + 1;
-                        f->line = line;
-                        f->at_bol = false;
-                        pp->out_count = out_count;
-                        fast_pp_handle_directive(pp, f);
-                        reload_outer = true;
-                        break;
-                    }
-                    if (ch == '"' || ch == '\'')
-                    {
-                        if (f->guard_state == 0 || f->guard_state == 4u) { f->guard_state = 3u; }
-                        FastTok stok = { 0 };
-                        p = ch == '"' ? fast_lex_string(pp, p, end, &stok, 0) : fast_lex_char(pp, p, end, &stok, 0);
-                        bol = false;
-                        pp->out_count = out_count;
-                        fast_pp_emit_soa(pp, stok);
-                        out_count = pp->out_count;
-                        continue;
-                    }
-                    // Fallback single token for '\\', mid-line '#', or non-ASCII
-                    f->ptr = p;
-                    f->line = line;
-                    f->at_bol = bol;
-                    pp->out_count = out_count;
-                    reload_outer = true;
+                    f->ptr = q + 1;
+                    f->at_bol = false;
+                    fast_pp_handle_directive(pp, f);
+                    continue;
+                }
+            }
+            fast_pp_lex_window(pp, f, f->ptr, f->at_bol, false);
+        }
+        if (w->serial == f->serial)
+        {
+            const bool room = pp->out_count + 64u < pp->out_cap;
+            if (w->pos < w->count)
+            {
+                if (room)
+                {
+                    fast_pp_emit_window(pp, f);
+                    continue;
+                }
+                // The output is nearly full: a token at a time from the window's next one, up to the overflow's bailout.
+                fast_pp_sync_file(f, f->base + w->starts[w->pos]);
+                f->at_bol = false;
+                w->serial = 0;
+            }
+            else if (w->stop == BUSTER_FWIN_STOP_CAPACITY && room)
+            {
+                fast_pp_lex_window(pp, f, w->lex_ptr, w->lex_bol, w->line_mode);
+                continue;
+            }
+            else
+            {
+                // The window's end: f's position there, and what stopped the lexing.
+                const uint32_t stop = w->stop;
+                fast_pp_sync_file(f, w->lex_ptr);
+                f->at_bol = w->lex_bol;
+                w->serial = 0;
+                if (stop == BUSTER_FWIN_STOP_DIRECTIVE)
+                {
+                    f->ptr += 1;
+                    f->at_bol = false;
+                    fast_pp_handle_directive(pp, f);
+                    continue;
+                }
+                if (pp->bailout)
+                {
                     break;
                 }
-
-                const __mmask64 id_start_chr = _mm512_cmpeq_epi8_mask(kinds_raw, v_tok_id);
-                const __mmask64 dig_chr = _mm512_cmpeq_epi8_mask(kinds_raw, v_tok_num);
-                const __mmask64 ident_cont = id_start_chr | dig_chr;
-
-                // Ensure we don't split a token at `limit`!
-                // If `limit == 64` and byte 63 is ident_cont or a potentially multi-char punctuator, cut back to last ws or 1-char punctuator!
-                const __mmask64 safe_cut_chars = ws_mask | (_mm512_cmpge_epu8_mask(kinds_raw, _mm512_set1_epi8(FTOK_LPAREN)) &
-                                                            _mm512_cmple_epu8_mask(kinds_raw, v_tok_max_single));
-                if (limit == 64u)
-                {
-                    if ((safe_cut_chars & (UINT64_C(1) << 63)) == 0)
-                    {
-                        // Cut at highest safe char < 63 (or if none, handle single long token via fallback)
-                        const __mmask64 cuts = safe_cut_chars & ((UINT64_C(1) << 63) - 1u);
-                        if (__builtin_expect(cuts == 0, 0))
-                        {
-                            f->ptr = p; f->line = line; f->at_bol = bol; pp->out_count = out_count;
-                            reload_outer = true;
-                            break;
-                        }
-                        limit = 64u - (uint32_t)__builtin_clzll(cuts);
-                    }
-                }
-                else
-                {
-                    // Special char at `limit`: if byte `limit-1` is part of an ident AND p[limit] is '\\' or quote (L".."),
-                    // pull `limit` back before that ident so fallback handles it!
-                    if (p[limit] == '\\' || p[limit] == '"' || p[limit] == '\'')
-                    {
-                        const __mmask64 cuts = safe_cut_chars & ((UINT64_C(1) << limit) - 1u);
-                        if (cuts == 0)
-                        {
-                            f->ptr = p; f->line = line; f->at_bol = bol; pp->out_count = out_count;
-                            reload_outer = true;
-                            break;
-                        }
-                        limit = 64u - (uint32_t)__builtin_clzll(cuts);
-                    }
-                }
-
-                const __mmask64 lim_mask = limit == 64u ? ~UINT64_C(0) : ((UINT64_C(1) << limit) - 1u);
-                if (((~ws_mask) & lim_mask) == 0)
-                {
-                    const __mmask64 passed_nl = nl_mask & lim_mask;
-                    if (passed_nl != 0)
-                    {
-                        line += (uint32_t)__builtin_popcountll(passed_nl);
-                        bol = true;
-                    }
-                    p += limit;
-                    continue;
-                }
-
-                // Check for dots (float literals `.5` / `1.5` or `...`): if dot is adjacent to digit or dot, handle cleanly via fallback!
-                const __mmask64 dot_mask = _mm512_cmpeq_epi8_mask(v, v_dot) & lim_mask;
-                if (__builtin_expect(dot_mask != 0, 0))
-                {
-                    const __mmask64 bad_dot = dot_mask & ((dig_chr >> 1) | (dig_chr << 1) | (dot_mask >> 1) | (dot_mask << 1));
-                    if (bad_dot != 0)
-                    {
-                        const uint32_t bad_pos = (uint32_t)__builtin_ctzll(bad_dot);
-                        const __mmask64 cuts = safe_cut_chars & (bad_pos == 0 ? 0u : ((UINT64_C(1) << bad_pos) - 1u));
-                        if (cuts == 0)
-                        {
-                            f->ptr = p; f->line = line; f->at_bol = bol; pp->out_count = out_count;
-                            reload_outer = true;
-                            break;
-                        }
-                        limit = 64u - (uint32_t)__builtin_clzll(cuts);
-                    }
-                }
-
-                const __mmask64 lmask = limit == 64u ? ~UINT64_C(0) : ((UINT64_C(1) << limit) - 1u);
-                const __mmask64 id_starts = ident_cont & ~(ident_cont << 1) & lmask;
-                const __mmask64 punct_mask = (~ws_mask) & (~ident_cont) & lmask;
-                __mmask64 tok_starts = id_starts | punct_mask;
-
-                // Branchless AVX-512 2-char punctuator folding for the hottest C operators (->, !=, <=, >=, &&, ||)!
-                const __mmask64 m_eq = _mm512_cmpeq_epi8_mask(v, v_eq);
-                const __mmask64 m_gt = _mm512_cmpeq_epi8_mask(v, v_gt);
-                const __mmask64 m_lt = _mm512_cmpeq_epi8_mask(v, v_lt);
-                const __mmask64 m_pl = _mm512_cmpeq_epi8_mask(v, v_pl);
-                const __mmask64 m_mn = _mm512_cmpeq_epi8_mask(v, v_mn);
-                const __mmask64 m_am = _mm512_cmpeq_epi8_mask(v, v_am);
-                const __mmask64 m_pi = _mm512_cmpeq_epi8_mask(v, v_pi);
-                const __mmask64 lmask_m1 = lmask >> 1;
-
-                const __mmask64 m_arrow = m_mn & ~(m_mn << 1) & (m_gt >> 1) & lmask_m1;
-                const __mmask64 m_ne    = _mm512_cmpeq_epi8_mask(v, _mm512_set1_epi8('!')) & (m_eq >> 1) & lmask_m1;
-                const __mmask64 m_le    = m_lt & ~(m_lt << 1) & (m_eq >> 1) & lmask_m1;
-                const __mmask64 m_ge    = m_gt & ~(m_gt << 1) & ~(m_mn << 1) & (m_eq >> 1) & lmask_m1;
-                const __mmask64 m_land  = m_am & ~(m_am << 1) & (m_am >> 1) & lmask_m1;
-                const __mmask64 m_lor   = m_pi & ~(m_pi << 1) & (m_pi >> 1) & lmask_m1;
-                const __mmask64 vec_folded = m_arrow | m_ne | m_le | m_ge | m_land | m_lor;
-
-                __m512i kinds_vec = kinds_raw;
-                if (vec_folded != 0)
-                {
-                    kinds_vec = _mm512_mask_blend_epi8(m_arrow, kinds_vec, _mm512_set1_epi8(FTOK_ARROW));
-                    kinds_vec = _mm512_mask_blend_epi8(m_ne,    kinds_vec, _mm512_set1_epi8(FTOK_NE));
-                    kinds_vec = _mm512_mask_blend_epi8(m_le,    kinds_vec, _mm512_set1_epi8(FTOK_LE));
-                    kinds_vec = _mm512_mask_blend_epi8(m_ge,    kinds_vec, _mm512_set1_epi8(FTOK_GE));
-                    kinds_vec = _mm512_mask_blend_epi8(m_land,  kinds_vec, _mm512_set1_epi8(FTOK_LAND));
-                    kinds_vec = _mm512_mask_blend_epi8(m_lor,   kinds_vec, _mm512_set1_epi8(FTOK_LOR));
-                    tok_starts &= ~(vec_folded << 1);
-                }
-
-                // Remaining rare 2-char / 3-char punctuators (==, ++, --, +=, -=, <<, >>, etc.)
-                const __mmask64 sec_cand = m_eq | m_gt | m_lt | m_pl | m_mn | m_am | m_pi;
-                __mmask64 pair_mask = (punct_mask & ~vec_folded & ~(vec_folded << 1)) & (sec_cand >> 1) & lmask_m1;
-                if (pair_mask != 0)
-                {
-                    _Alignas(64) uint8_t bk[64];
-                    _mm512_store_si512((void*)bk, kinds_vec);
-                    while (pair_mask != 0)
-                    {
-                        const uint32_t bi = (uint32_t)__builtin_ctzll(pair_mask);
-                        pair_mask &= pair_mask - 1u;
-                        if (bi + 1u >= limit) { continue; }
-                        const uint8_t c0 = p[bi];
-                        const uint8_t c1 = p[bi + 1u];
-                        uint8_t nk = 0;
-                        uint32_t consume = 0;
-                        if (c0 == '-' && c1 == '>') { nk = FTOK_ARROW; consume = 1u; }
-                        else if (c0 == '=' && c1 == '=') { nk = FTOK_EQ; consume = 1u; }
-                        else if (c0 == '!' && c1 == '=') { nk = FTOK_NE; consume = 1u; }
-                        else if (c0 == '<' && c1 == '=') { nk = FTOK_LE; consume = 1u; }
-                        else if (c0 == '>' && c1 == '=') { nk = FTOK_GE; consume = 1u; }
-                        else if (c0 == '&' && c1 == '&') { nk = FTOK_LAND; consume = 1u; }
-                        else if (c0 == '|' && c1 == '|') { nk = FTOK_LOR; consume = 1u; }
-                        else if (c0 == '+' && c1 == '+') { nk = FTOK_INC; consume = 1u; }
-                        else if (c0 == '-' && c1 == '-') { nk = FTOK_DEC; consume = 1u; }
-                        else if (c0 == '+' && c1 == '=') { nk = FTOK_ADD_ASSIGN; consume = 1u; }
-                        else if (c0 == '-' && c1 == '=') { nk = FTOK_SUB_ASSIGN; consume = 1u; }
-                        else if (c0 == '*' && c1 == '=') { nk = FTOK_MUL_ASSIGN; consume = 1u; }
-                        else if (c0 == '%' && c1 == '=') { nk = FTOK_MOD_ASSIGN; consume = 1u; }
-                        else if (c0 == '&' && c1 == '=') { nk = FTOK_AND_ASSIGN; consume = 1u; }
-                        else if (c0 == '|' && c1 == '=') { nk = FTOK_OR_ASSIGN; consume = 1u; }
-                        else if (c0 == '^' && c1 == '=') { nk = FTOK_XOR_ASSIGN; consume = 1u; }
-                        else if (c0 == '<' && c1 == '<')
-                        {
-                            if (bi + 2u < limit && p[bi + 2u] == '=') { nk = FTOK_SHL_ASSIGN; consume = 2u; }
-                            else { nk = FTOK_LSHIFT; consume = 1u; }
-                        }
-                        else if (c0 == '>' && c1 == '>')
-                        {
-                            if (bi + 2u < limit && p[bi + 2u] == '=') { nk = FTOK_SHR_ASSIGN; consume = 2u; }
-                            else { nk = FTOK_RSHIFT; consume = 1u; }
-                        }
-                        if (consume != 0)
-                        {
-                            bk[bi] = nk;
-                            tok_starts &= ~(UINT64_C(1) << (bi + 1u));
-                            pair_mask &= ~(UINT64_C(1) << (bi + 1u));
-                            if (consume == 2u)
-                            {
-                                tok_starts &= ~(UINT64_C(1) << (bi + 2u));
-                                pair_mask &= ~(UINT64_C(1) << (bi + 2u));
-                            }
-                        }
-                    }
-                    kinds_vec = _mm512_load_si512((const void*)bk);
-                }
-
-                // AVX-512 VPCOMPRESSB: pack ALL M tokens' kinds & byte positions in 2 instructions!!
-                const uint32_t m_count = (uint32_t)__builtin_popcountll(tok_starts);
-                if (__builtin_expect(m_count == 0, 0))
-                {
-                    const __mmask64 passed_nl = nl_mask & lmask;
-                    if (passed_nl != 0)
-                    {
-                        line += (uint32_t)__builtin_popcountll(passed_nl);
-                        bol = true;
-                    }
-                    p += limit;
-                    continue;
-                }
-                const __m512i comp_kinds = _mm512_maskz_compress_epi8(tok_starts, kinds_vec);
-                const __m512i comp_pos = _mm512_maskz_compress_epi8(tok_starts, v_iota);
-                _Alignas(64) uint8_t pos_arr[64];
-                _mm512_storeu_si512((void*)(out_kind + out_count), comp_kinds);
-                _mm512_store_si512((void*)pos_arr, comp_pos);
-
-                const __mmask64 m_valid = m_count == 64u ? ~UINT64_C(0) : ((UINT64_C(1) << m_count) - 1u);
-                __mmask64 id_lanes = _mm512_cmpeq_epi8_mask(comp_kinds, v_tok_id) & m_valid;
-                __mmask64 num_lanes = _mm512_cmpeq_epi8_mask(comp_kinds, v_tok_num) & m_valid;
-
-                // Guard invalidation (non-directive tokens present)
-                if (f->guard_state == 0 || f->guard_state == 4u) { f->guard_state = 3u; }
-
-                // Process ONLY identifier lanes (100% identifiers -> ZERO branches on token kind!)
-                uint32_t first_macro_lane = m_count;
-                uint32_t first_macro_id = 0;
-                uint8_t first_macro_kind = 0;
-                const uint64_t non_ident = ~ident_cont;
-                while (id_lanes != 0)
-                {
-                    const uint32_t k = (uint32_t)__builtin_ctzll(id_lanes);
-                    id_lanes &= id_lanes - 1u;
-                    const uint32_t b = pos_arr[k];
-                    const uint32_t len = (uint32_t)__builtin_ctzll(non_ident >> b);
-                    uint8_t kind = FTOK_IDENT;
-                    uint32_t id;
-                    if (__builtin_expect(len <= 16u, 1))
-                    {
-                        id = fast_ident_lookup_16(&pp->idents, p + b, len, &kind);
-                    }
-                    else
-                    {
-                        id = fast_ident_intern(&pp->idents, p + b, len);
-                        if (id != 0)
-                        {
-                            const uint8_t kw = pp->idents.entries[id].kw_kind;
-                            kind = kw != 0 ? kw : FTOK_IDENT;
-                        }
-                    }
-                    if (__builtin_expect(id == 0, 0))
-                    {
-                        fast_pp_bail(pp, "ident table full");
-                        reload_outer = true;
-                        break;
-                    }
-                    out_data[out_count + k] = id;
-                    out_kind[out_count + k] = kind;
-                    if (__builtin_expect((macro_bits[id >> 6] & (UINT64_C(1) << (id & 63u))) != 0, 0))
-                    {
-                        // ULTRA-FAST PATH: 1-token non-macro object macro (SQLITE_OK, SQLITE_PRIVATE, OP_*, MEM_*, etc.)
-                        // Replaced IN PLACE inside the 64-byte AVX-512 loop with ZERO breakout!
-                        const uint32_t midx = pp->idents.entries[id].macro_idx;
-                        if (midx != 0)
-                        {
-                            const FastMacro* fm = pp->macros + midx;
-                            if (fm->fast_mode == 1u &&
-                                (fm->fast_kind != FTOK_IDENT ||
-                                 (macro_bits[fm->fast_data >> 6] & (UINT64_C(1) << (fm->fast_data & 63u))) == 0))
-                            {
-                                out_kind[out_count + k] = fm->fast_kind;
-                                out_data[out_count + k] = fm->fast_data;
-                                continue;
-                            }
-                        }
-                        if (k < first_macro_lane)
-                        {
-                            first_macro_lane = k;
-                            first_macro_id = id;
-                            first_macro_kind = kind;
-                        }
-                        break; // Stop scanning identifiers past first general macro in this chunk!
-                    }
-                }
-
-                // Process ONLY number lanes before first_macro_lane (100% numbers -> ZERO branches on token kind!)
-                if (first_macro_lane < m_count)
-                {
-                    num_lanes &= first_macro_lane == 0 ? 0u : ((UINT64_C(1) << first_macro_lane) - 1u);
-                }
-                while (num_lanes != 0)
-                {
-                    const uint32_t k = (uint32_t)__builtin_ctzll(num_lanes);
-                    num_lanes &= num_lanes - 1u;
-                    const uint32_t b = pos_arr[k];
-                    const uint32_t len = (uint32_t)__builtin_ctzll(non_ident >> b);
-                    if (__builtin_expect(len == 1u, 1))
-                    {
-                        out_data[out_count + k] = (uint32_t)(p[b] - '0');
-                    }
-                    else if (len <= 4u && p[b] != '0')
-                    {
-                        // Fast inline 2..4 digit decimal integer (e.g. 10, 16, 32, 64, 100, 255, 1024)!
-                        uint32_t v = (uint32_t)(p[b] - '0');
-                        bool all_dig = true;
-                        for (uint32_t di = 1u; di < len; di += 1)
-                        {
-                            const uint32_t d = (uint32_t)(p[b + di] - '0');
-                            if (d > 9u) { all_dig = false; break; }
-                            v = v * 10u + d;
-                        }
-                        if (all_dig)
-                        {
-                            out_data[out_count + k] = v;
-                        }
-                        else
-                        {
-                            FastTok ntok = { 0 };
-                            (void)fast_lex_number(pp, p + b, p + b + len, &ntok);
-                            const uint32_t saved_oc = pp->out_count;
-                            pp->out_count = out_count + k;
-                            fast_pp_emit_soa(pp, ntok);
-                            pp->out_count = saved_oc;
-                        }
-                    }
-                    else
-                    {
-                        FastTok ntok = { 0 };
-                        (void)fast_lex_number(pp, p + b, p + b + len, &ntok);
-                        // Fast inline commit into slot out_count + k
-                        const uint32_t saved_oc = pp->out_count;
-                        pp->out_count = out_count + k;
-                        fast_pp_emit_soa(pp, ntok);
-                        pp->out_count = saved_oc;
-                    }
-                }
-
-                if (__builtin_expect(first_macro_lane < m_count, 0))
-                {
-                    // Commit tokens before the macro, expand the macro, and continue!
-                    const uint32_t mb = pos_arr[first_macro_lane];
-                    const uint32_t mlen = (uint32_t)__builtin_ctzll(non_ident >> mb);
-                    const __mmask64 pre_nl = nl_mask & (mb == 0 ? 0u : ((UINT64_C(1) << mb) - 1u));
-                    if (pre_nl != 0) { line += (uint32_t)__builtin_popcountll(pre_nl); }
-                    out_count += first_macro_lane;
-                    const uint8_t* after_name = p + mb + mlen;
-                    const uint32_t fmidx = pp->idents.entries[first_macro_id].macro_idx;
-                    if (fmidx != 0)
-                    {
-                        const FastMacro* fm = pp->macros + fmidx;
-                        const uint8_t fmode = fm->fast_mode;
-                        // ULTRA-FAST PATH: Empty object macro (SQLITE_API, SQLITE_APICALL, etc.)!
-                        if (fmode == 4u)
-                        {
-                            p = after_name;
-                            bol = false;
-                            continue;
-                        }
-                        // ULTRA-FAST PATH: 1-param identity-wrapper macro (ALWAYS(x)->(x), NEVER(x)->(x))!
-                        // Skip macro name and leave `(x)` in stream for AVX-512 to scan directly!
-                        if (fmode == 5u)
-                        {
-                            const uint8_t* q = after_name;
-                            while (q < end && (*q == ' ' || *q == '\t')) { q += 1; }
-                            if (q < end && *q == '(')
-                            {
-                                p = q;
-                                bol = false;
-                                continue;
-                            }
-                        }
-                        // ULTRA-FAST PATH: Short 2..8 token pure-constant object macro (NULL -> ((void*)0), (-1), etc.)!
-                        if (fmode == 6u && out_count + fm->body_count < out_limit)
-                        {
-                            const FastTok* const bt = pp->macro_toks + fm->body_start;
-                            for (uint32_t bi = 0; bi < fm->body_count; bi += 1)
-                            {
-                                out_kind[out_count] = bt[bi].kind;
-                                out_data[out_count] = bt[bi].data;
-                                out_count += 1u;
-                            }
-                            p = after_name;
-                            bol = false;
-                            continue;
-                        }
-                        // ULTRA-FAST PATH: 0-param-use function-like macro (assert(...), testcase(...), VVA_ONLY(...)!)
-                        // Skips balanced (...) with 64-byte AVX-512 without lexing or interning ANY dead argument tokens!
-                        if (fmode == 2u || fmode == 3u)
-                        {
-                            uint32_t skip_line = line;
-                            const uint8_t* after_args = fast_pp_skip_unused_call_args(after_name, end, &skip_line, fm->param_count, fm->is_variadic != 0);
-                            if (after_args != NULL)
-                            {
-                                p = after_args;
-                                line = skip_line;
-                                bol = false;
-                                if (fm->body_count == 0)
-                                {
-                                    continue; // Empty body (testcase/VVA_ONLY): ZERO tokens emitted, stay in AVX-512 loop!
-                                }
-                                if (fmode == 3u)
-                                {
-                                    // `assert(...);` -> when directly followed by `;`, elide `((void)(0))` completely (leaves `;`)!
-                                    const uint8_t* q = after_args;
-                                    while (q < end && (*q == ' ' || *q == '\t')) { q += 1; }
-                                    if (q < end && *q == ';')
-                                    {
-                                        p = q;
-                                        continue;
-                                    }
-                                    // Otherwise emit `((void)0)` directly into SoA stream without leaving AVX-512 loop!
-                                    if (out_count + 6u < out_limit)
-                                    {
-                                        static const uint8_t v0_k[6] = { FTOK_LPAREN, FTOK_LPAREN, FTOK_KW_VOID, FTOK_RPAREN, FTOK_INT_LIT, FTOK_RPAREN };
-                                        static const uint32_t v0_d[6] = { 0, 0, 0, 0, 0, 0 };
-                                        memcpy(out_kind + out_count, v0_k, 6);
-                                        memcpy(out_data + out_count, v0_d, 24);
-                                        out_count += 6u;
-                                        continue;
-                                    }
-                                }
-                                // Non-empty constant body: push constant body without lexing args!
-                                f->ptr = p;
-                                f->line = line;
-                                f->at_bol = false;
-                                pp->out_count = out_count;
-                                if (pp->expand_depth < BUSTER_FPP_MAX_EXPAND && pp->hide_count < BUSTER_FPP_MAX_HIDE)
-                                {
-                                    pp->hide_ids[pp->hide_count++] = first_macro_id;
-                                    pp->expand[pp->expand_depth++] = (FastExpandFrame){
-                                        .toks = pp->macro_toks + fm->body_start,
-                                        .pos = 0,
-                                        .count = fm->body_count,
-                                        .macro_ident = first_macro_id,
-                                        .saved_scratch = pp->exp_used,
-                                    };
-                                    reload_outer = true;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    f->ptr = after_name;
-                    f->line = line;
-                    f->at_bol = false;
-                    pp->out_count = out_count;
-                    FastTok rep = { 0 };
-                    const FastTok mtok = { .kind = first_macro_kind, .data = first_macro_id };
-                    if (fast_pp_try_expand(pp, mtok, false, &rep))
-                    {
-                        if (rep.kind != FTOK_EOF)
-                        {
-                            fast_pp_emit_soa(pp, rep);
-                            out_count = pp->out_count;
-                        }
-                        if (pp->expand_depth == 0 && !pp->bailout)
-                        {
-                            p = f->ptr;
-                            bol = false;
-                            continue;
-                        }
-                        reload_outer = true;
-                        break;
-                    }
-                    // Function-like macro without '(' -> keep identifier token and continue after it!
-                    out_kind[out_count] = first_macro_kind;
-                    out_data[out_count] = first_macro_id;
-                    out_count += 1u;
-                    p = f->ptr;
-                    bol = false;
-                    continue;
-                }
-
-                // Entire chunk succeeded cleanly! Update line count & bol for trailing newlines.
-                const __mmask64 chunk_nl = nl_mask & lmask;
-                if (chunk_nl != 0)
-                {
-                    line += (uint32_t)__builtin_popcountll(chunk_nl);
-                    const uint32_t last_nl = 63u - (uint32_t)__builtin_clzll(chunk_nl);
-                    const uint32_t last_tok = pos_arr[m_count - 1u];
-                    bol = last_nl > last_tok;
-                }
-                else
-                {
-                    bol = false;
-                }
-                out_count += m_count;
-                p += limit;
-            }
-            if (!reload_outer)
-            {
-                f->ptr = p;
-                f->line = line;
-                f->at_bol = bol;
-                pp->out_count = out_count;
-                continue;
-            }
-            if (pp->expand_depth > 0 || pp->bailout || pp->file_depth == 0 ||
-                (pp->cond_depth > pp->files[pp->file_depth - 1u].cond_base && pp->conds[pp->cond_depth - 1u].active == 0) ||
-                pp->files + (pp->file_depth - 1u) != f || f->ptr != p)
-            {
-                continue;
-            }
-            // Otherwise fall through to single-token fast_lex_one for this special/boundary token!
-        }
-
-        // Tail (< 64 bytes left in file) or fallback single token
-        FastTok tok = { 0 };
-        f->ptr = fast_lex_one(pp, f->ptr, f->end, &f->line, &f->at_bol, false, &tok);
-        if (tok.kind == FTOK_EOF)
-        {
-            fast_pp_pop_file(pp);
-            continue;
-        }
-        if (tok.kind == FTOK_HASH && (tok.flags & BUSTER_FTOK_BOL) != 0)
-        {
-            fast_pp_handle_directive(pp, f);
-            continue;
-        }
-        if (f->guard_state == 0 || f->guard_state == 4u)
-        {
-            f->guard_state = 3u;
-        }
-        if ((tok.kind == FTOK_IDENT || tok.kind >= 64u) && fast_ident_is_macro(&pp->idents, tok.data))
-        {
-            FastTok rep = { 0 };
-            if (fast_pp_try_expand(pp, tok, false, &rep))
-            {
-                if (rep.kind != FTOK_EOF) { fast_pp_emit_soa(pp, rep); }
-                continue;
             }
         }
-        fast_pp_emit_soa(pp, tok);
+
+        // A file's last bytes, and a token the window leaves to fast_lex_one.
+        fast_pp_single_token(pp, f);
     }
     return !pp->bailout;
 }

@@ -28,6 +28,7 @@
 #: cpu 1 0.87 Intel(R) Xeon(R) Platinum 8370C CPU @ 2.80GHz
 #: unmeasured Test the early driver feedback corpus
 #: unmeasured Test deterministic work and growth contracts [1 CPU]
+#: unmeasured Test the fused direct-to-object compiler [1 CPU]
 #: unmeasured Compile the frozen sqlite3.c and c-testsuite's programs with their warm arenas filled, to the same objects
 #: unmeasured Test -S of c-testsuite's programs against -c and GNU as
 #: unmeasured Test the caret display against clang
@@ -229,6 +230,7 @@
 91.1 Test SQLite's shell by both tiers against clang's [4 CPUs]
 350.4 Test SQLite's Tcl suite's pinned subset through testfixture by both tiers against clang's [4 CPUs]
 59.1 Test the direct path's executables [8 CPUs]
+23.7 Test the fused direct-to-object compiler [1 CPU]
 23.8 Test the lanes [8 CPUs]
 27.8 Test the per-file jobs on the repository's sources, flat [8 CPUs]
 3.3 Test the link representation [8 CPUs]

@@ -130,6 +130,12 @@ tcl=$(bash tools/ci/tcl-config.sh) || exit $?
     --subset tests/sqlite/testfixture-subset.txt --jobs "${CORES:-4}" --directory build
 == Test the direct path's executables [8 CPUs]
 "$BUSTER_COMPILER" test-executable
+== Test the fused direct-to-object compiler [1 CPU]
+# #2850: a plain -c's compiler of one pass (c_direct.c). Its sources compile to well-formed objects; what it must leave
+# to the full compiler writes nothing; and its lexer's tokens do not depend on where the text falls in the lexer's
+# 64-byte blocks: 103 token sequences at each of 131 offsets after the last comment or literal before them, between six
+# separators, with an inactive group whose lines meet the skipper's blocks at each offset too.
+"$BUSTER_COMPILER" test-direct
 == Test the lanes [8 CPUs]
 "$BUSTER_COMPILER" test-lanes
 == Test the per-file jobs on the repository's sources, flat [8 CPUs]
