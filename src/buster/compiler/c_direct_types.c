@@ -1849,9 +1849,62 @@ struct FastDeclaratorResult
     FastAttrInfo attr;
 };
 
+// The type of a declaration whose specifiers are one keyword of a scalar type, by keyword (64..127), and whether the
+// keyword is one. Char is signed here; -funsigned-char sets its low bit (FTYPE_I8 to FTYPE_U8).
+static const FastType fast_cc_single_keyword_types[64] = {
+    [FTOK_KW_VOID - 64] = FTYPE_VOID,
+    [FTOK_KW_CHAR - 64] = FTYPE_I8 | BUSTER_FTYPE_SCALAR_CHAR,
+    [FTOK_KW_SHORT - 64] = FTYPE_I16,
+    [FTOK_KW_INT - 64] = FTYPE_I32,
+    [FTOK_KW_LONG - 64] = FTYPE_I64 | BUSTER_FTYPE_SCALAR_LONG,
+    [FTOK_KW_FLOAT - 64] = FTYPE_F32,
+    [FTOK_KW_DOUBLE - 64] = FTYPE_F64,
+    [FTOK_KW_SIGNED - 64] = FTYPE_I32,
+    [FTOK_KW_UNSIGNED - 64] = FTYPE_U32,
+    [FTOK_KW_BOOL - 64] = FTYPE_BOOL,
+};
+#define BUSTER_FTOK_SCALAR_KEYWORDS (BUSTER_FTOK_BIT(FTOK_KW_VOID) | BUSTER_FTOK_BIT(FTOK_KW_CHAR) | BUSTER_FTOK_BIT(FTOK_KW_SHORT) | \
+    BUSTER_FTOK_BIT(FTOK_KW_INT) | BUSTER_FTOK_BIT(FTOK_KW_LONG) | BUSTER_FTOK_BIT(FTOK_KW_FLOAT) | BUSTER_FTOK_BIT(FTOK_KW_DOUBLE) | \
+    BUSTER_FTOK_BIT(FTOK_KW_SIGNED) | BUSTER_FTOK_BIT(FTOK_KW_UNSIGNED) | BUSTER_FTOK_BIT(FTOK_KW_BOOL))
+
+// Specifiers of one token, a scalar type's keyword or a typedef's name, before a token that isn't a specifier: 12,500
+// of sqlite3.c's 20,300 declarations and most of its parameters. They give the type alone, as both full parsers' loops
+// and their tables of keyword counts would; the token is taken and the specifiers filled when they are found (#3581).
+static inline __attribute__((always_inline)) bool fast_cc_specs_of_one_token(FastCCState* cc, FastDeclSpecs* out_specs, FastType* out_type)
+{
+    const uint32_t at = cc->pos;
+    uint32_t found = 0;
+    FastType type = FTYPE_I32;
+    if (at + 1u < cc->tcount)
+    {
+        const uint32_t k = cc->tk[at];
+        const uint32_t next = cc->tk[at + 1u];
+        const uint32_t next_specifies = (uint32_t)(next >= 64u) & (uint32_t)(BUSTER_FTOK_TYPE_START_KEYWORDS >> ((next - 64u) & 63u));
+        if (k == FTOK_IDENT)
+        {
+            const uint32_t id = cc->td[at];
+            found = (uint32_t)fast_cc_is_typedef_name(cc, id);
+            if (found != 0) { type = cc->syms[cc->sym_cur[id]].type; }
+        }
+        else
+        {
+            found = (uint32_t)(k >= 64u) & (uint32_t)(BUSTER_FTOK_SCALAR_KEYWORDS >> ((k - 64u) & 63u));
+            type = fast_cc_single_keyword_types[(k - 64u) & 63u] | ((uint32_t)(k == FTOK_KW_CHAR) & (uint32_t)cc->unsigned_char);
+        }
+        found &= (uint32_t)(next_specifies == 0) & (uint32_t)!cc->bailout;
+    }
+    if (found != 0)
+    {
+        if (out_specs != NULL) { *out_specs = (FastDeclSpecs){ .type = type }; }
+        cc->pos = at + 1u;
+        *out_type = type;
+    }
+    return found != 0;
+}
+
 // Level 5: Leaf declaration specifiers (handles scalars, typedefs, enums, attributes, _Alignas, and existing/forward
 // struct/union tags — NEVER calls fast_cc_parse_record_iter so the call graph stays strictly acyclic!).
-static BUSTER_DIRECT_HOT FastType fast_cc_parse_scalar_or_tag_specs(FastCCState* cc, FastDeclSpecs* out_specs)
+static __attribute__((noinline)) BUSTER_DIRECT_HOT FastType fast_cc_parse_scalar_or_tag_specs_full(FastCCState* cc, FastDeclSpecs* out_specs)
 {
     // Filled where the caller reads it: a copy of a record written a field at a time waits on those stores.
     FastDeclSpecs local_specs;
@@ -2012,9 +2065,16 @@ static BUSTER_DIRECT_HOT FastType fast_cc_parse_scalar_or_tag_specs(FastCCState*
     return res;
 }
 
+static inline __attribute__((always_inline)) FastType fast_cc_parse_scalar_or_tag_specs(FastCCState* cc, FastDeclSpecs* out_specs)
+{
+    FastType res = FTYPE_I32;
+    if (!fast_cc_specs_of_one_token(cc, out_specs, &res)) { res = fast_cc_parse_scalar_or_tag_specs_full(cc, out_specs); }
+    return res;
+}
+
 // Level 6: Parse ONE declarator (abstract or named) iteratively with ZERO recursion!
 // Handles nested `(*fp)(int, char*)`, `int *(*a[4])(void)`, `void (*signal(int, void(*)(int)))(int)`, etc.!
-static BUSTER_DIRECT_HOT bool fast_cc_parse_declarator(FastCCState* cc, FastType base_type, bool allow_abstract,
+static __attribute__((noinline)) BUSTER_DIRECT_HOT bool fast_cc_parse_declarator_full(FastCCState* cc, FastType base_type, bool allow_abstract,
                                      FastDeclaratorResult* out_res, bool record_param_names)
 {
     typedef struct DeclGroup DeclGroup;
@@ -2469,6 +2529,39 @@ static BUSTER_DIRECT_HOT bool fast_cc_parse_declarator(FastCCState* cc, FastType
     return !cc->bailout;
 }
 
+// A name with up to two plain `*` before it and nothing after it that the declarator would take (no `[`, `(`, asm
+// label or attribute): half of sqlite3.c's 23,000 declarators. Its type is the base's pointers, without the full
+// parser's groups and modifier lists (#3581).
+static inline __attribute__((always_inline)) bool fast_cc_parse_declarator(FastCCState* cc, FastType base_type, bool allow_abstract,
+                                                                          FastDeclaratorResult* out_res, bool record_param_names)
+{
+    const uint32_t at = cc->pos;
+    bool ok = false;
+    uint32_t stars = 0;
+    if (at + 4u < cc->tcount)
+    {
+        const uint8_t* const tk = cc->tk;
+        stars = (uint32_t)(tk[at] == FTOK_STAR);
+        stars += (uint32_t)(stars != 0) & (uint32_t)(tk[at + 1u] == FTOK_STAR);
+        const uint32_t name = at + stars;
+        const uint32_t after = tk[name + 1u];
+        const uint32_t plain = (uint32_t)(tk[name] == FTOK_IDENT) & (uint32_t)(after != FTOK_LBRACKET) & (uint32_t)(after != FTOK_LPAREN) &
+                               (uint32_t)(after != FTOK_KW_ASM) & (uint32_t)(after != FTOK_KW_ATTRIBUTE) & (uint32_t)(after != FTOK_KW_EXTENSION) &
+                               (uint32_t)!cc->bailout;
+        if (plain != 0)
+        {
+            FastType type = base_type;
+            for (uint32_t i = 0; i < stars; i += 1) { type = ftype_make_ptr(cc, type); }
+            *out_res = (FastDeclaratorResult){ .type = type, .name_id = cc->td[name] };
+            cc->pos = name + 1u;
+            ok = !cc->bailout;
+            stars = UINT32_MAX;
+        }
+    }
+    if (stars != UINT32_MAX) { ok = fast_cc_parse_declarator_full(cc, base_type, allow_abstract, out_res, record_param_names); }
+    return ok;
+}
+
 // Parse struct/union definition iteratively (supports arbitrarily nested anonymous & named structs/unions!)
 static FastType fast_cc_parse_record_iter(FastCCState* cc, bool is_union, bool allow_def)
 {
@@ -2886,7 +2979,7 @@ static FastType fast_cc_parse_record_iter(FastCCState* cc, bool is_union, bool a
 }
 
 // Level 8: Full declaration specifiers (supports struct/union/enum definitions, storage classes, attributes, _Alignas).
-static BUSTER_DIRECT_HOT FastType fast_cc_parse_decl_specs(FastCCState* cc, FastDeclSpecs* out_specs)
+static __attribute__((noinline)) BUSTER_DIRECT_HOT FastType fast_cc_parse_decl_specs_full(FastCCState* cc, FastDeclSpecs* out_specs)
 {
     // Filled where the caller reads it: a copy of a record written a field at a time waits on those stores.
     FastDeclSpecs local_specs;
@@ -3033,6 +3126,14 @@ static BUSTER_DIRECT_HOT FastType fast_cc_parse_decl_specs(FastCCState* cc, Fast
     if (sp->is_const) { res = ftype_with_const(res); }
     if (sp->is_volatile) { res |= BUSTER_FTYPE_VOL; }
     sp->type = res;
+    return res;
+}
+
+
+static inline __attribute__((always_inline)) FastType fast_cc_parse_decl_specs(FastCCState* cc, FastDeclSpecs* out_specs)
+{
+    FastType res = FTYPE_I32;
+    if (!fast_cc_specs_of_one_token(cc, out_specs, &res)) { res = fast_cc_parse_decl_specs_full(cc, out_specs); }
     return res;
 }
 

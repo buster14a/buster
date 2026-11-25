@@ -2459,6 +2459,37 @@ static __attribute__((noinline)) BUSTER_DIRECT_HOT void fval_convert_full(FastEx
     *v = (FastVal){ .type = dst_u, .kind = FVAL_REG, .reg = (uint8_t)g };
 }
 
+// An integer constant converted to another integer or a pointer is folded: truncated and extended to the target's size
+// and signedness, as the full function's fold does once its other cases are excluded (sqlite3.c: 19,000 a compile).
+// Floats, bool, 128-bit integers, void, the unsupported types, arrays, functions and sizeof's operands go to it.
+static __attribute__((noinline)) void fval_convert_constant(FastExprCtx* ex, FastVal* v, FastType dst_type)
+{
+    FastCCState* cc = ex->cc;
+    const FastType dst_u = ftype_unqual(dst_type);
+    const FastType src_u = ftype_unqual(v->type);
+    const uint32_t shape = v->type & (BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_KIND_MASK);
+    const uint32_t foldable = (uint32_t)!ftype_is_unsupported(dst_u) & (uint32_t)!ftype_is_unsupported(src_u) &
+                              (uint32_t)!ftype_is_void(dst_u) & (uint32_t)!ftype_is_float(dst_u) & (uint32_t)!ftype_is_bool(dst_u) &
+                              (uint32_t)!ftype_is_i128(dst_u) & (uint32_t)!ftype_is_i128(src_u) & (uint32_t)(ex->eval_only == 0) &
+                              (uint32_t)(shape != ((uint32_t)FCTYPE_ARRAY << BUSTER_FTYPE_KIND_SH)) &
+                              (uint32_t)(shape != ((uint32_t)FCTYPE_FUNC << BUSTER_FTYPE_KIND_SH));
+    if (foldable != 0)
+    {
+        uint64_t x = (uint64_t)v->imm;
+        const uint32_t dsz = ftype_size(cc, dst_u);
+        const bool dsgn = ftype_is_signed(cc, dst_u);
+        if (dsz == 1u) { x = dsgn ? (uint64_t)(int64_t)(int8_t)x : (x & 0xffu); }
+        else if (dsz == 2u) { x = dsgn ? (uint64_t)(int64_t)(int16_t)x : (x & 0xffffu); }
+        else if (dsz == 4u) { x = dsgn ? (uint64_t)(int64_t)(int32_t)x : (x & 0xffffffffu); }
+        v->imm = (int64_t)x;
+        v->type = dst_u;
+    }
+    else
+    {
+        fval_convert_full(ex, v, dst_type);
+    }
+}
+
 // A conversion to the value's own type changes nothing but its qualifiers: 82,000 of sqlite3.c's 116,000. Arrays and
 // functions decay, and void and the unsupported types have their own paths; those, and every other pair, go to the
 // full function (#3581).
@@ -2475,6 +2506,7 @@ static inline __attribute__((always_inline)) void fval_convert(FastExprCtx* ex, 
                            (uint32_t)(shape != ((uint32_t)FCTYPE_ARRAY << BUSTER_FTYPE_KIND_SH)) &
                            (uint32_t)(shape != ((uint32_t)FCTYPE_FUNC << BUSTER_FTYPE_KIND_SH)) & supported & not_void;
     if (plain != 0) { v->type = dst_u; }
+    else if (v->kind == FVAL_IMM) { fval_convert_constant(ex, v, dst_type); }
     else { fval_convert_full(ex, v, dst_type); }
 }
 
@@ -6191,8 +6223,13 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
             }
         }
 
+        // The statement's first token, read once: most statements have no label, and the tests below ask for it four
+        // times (#3581).
+        const uint32_t first_pos = cc->pos;
+        const uint8_t first = fast_cc_peek(cc);
+
         // Check closing '}' of active FSTK_BLOCK!
-        if (top->kind == FSTK_BLOCK && fast_cc_peek(cc) == FTOK_RBRACE)
+        if (top->kind == FSTK_BLOCK && first == FTOK_RBRACE)
         {
             cc->pos += 1u;
             fast_cc_scope_leave(cc, top->scope_mark);
@@ -6201,10 +6238,9 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
         }
 
         // Consume any leading `case expr :`, `default :`, or `label :` prefixes!
-        bool hit_block_end = false;
         while (!cc->bailout)
         {
-            const uint8_t pk = fast_cc_peek(cc);
+            const uint8_t pk = cc->pos == first_pos ? first : fast_cc_peek(cc);
             if (pk == FTOK_KW_CASE)
             {
                 if (sw_sp == 0) { fast_cc_bail(cc, "case outside switch"); break; }
@@ -6272,16 +6308,11 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
             break;
         }
         if (cc->bailout) { break; }
-        if (top->kind == FSTK_BLOCK && fast_cc_peek(cc) == FTOK_RBRACE)
-        {
-            hit_block_end = true;
-        }
-        if (hit_block_end) { continue; }
+        const uint8_t k = cc->pos == first_pos ? first : fast_cc_peek(cc);
+        if (top->kind == FSTK_BLOCK && k == FTOK_RBRACE) { continue; }
 
         // Mark non-block parent frame as now executing its single child statement!
         if (top->kind != FSTK_BLOCK) { top->entered_body = 1u; }
-
-        const uint8_t k = fast_cc_peek(cc);
 
         // 1. Nested compound block `{ ... }`
         if (k == FTOK_LBRACE)
