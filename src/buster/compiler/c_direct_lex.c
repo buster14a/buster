@@ -1158,10 +1158,11 @@ struct FastIncludeFile
     uint32_t cond_base;      // conditional stack depth on entry
     uint32_t guard_ident;    // candidate include guard macro ID (0 if none)
     uint32_t serial;         // this push's number, which a window of its text carries (never 0)
+    uint32_t dependency;     // -MD (#3592): the file's record + 1, when the request collects them
     uint8_t guard_state;     // 0=start, 1=saw_ifndef, 2=saw_define, 3=invalidated, 4=closed
     bool at_bol;
     bool owned_mmap;
-    bool is_system;
+    bool is_system;          // a system header's inclusion: the file's own level, or its includer's (#3592)
 };
 
 // A window of a file's raw tokens (#2850). The lexer's 64-byte loop writes it and does nothing else: no identifier is
@@ -1225,6 +1226,12 @@ struct FastGuardEntry
     uint8_t used;
     uint32_t guard_ident;
 };
+
+// -MD and its kin (#3592): the most files a unit that collects them may read; and in a guard entry's record (FastPP's
+// guard_dependencies), the bit that #pragma GCC system_header set, which makes the file a system header from then on,
+// in its later inclusions too (clang's MarkFileSystemHeader, the full pipeline's PPFile.system).
+#define BUSTER_FPP_MAX_DEPENDENCIES 4096u
+#define BUSTER_FPP_SYSTEM_PRAGMA    0x80000000u
 
 // A path an #include's search found no readable file at: the search asks once (#2850). A header that the third
 // directory holds is asked for in the first two each time it is included, 3 times in 4 of sqlite3.c's 290 includes.
@@ -1354,6 +1361,20 @@ struct FastPP
     // The top file's raw tokens (FastWindow)
     FastWindow win;
     uint32_t file_serial;
+
+    // -MD and its kin (#3592), when the request collects them (dependency_records isn't NULL): the files the unit read,
+    // a record each in the order of their first reading, and their devices and inodes, by which a file's record is found
+    // (fast_pp_dependency_find); a guard entry's record (by the entry's place), for an include its guard or #pragma once
+    // skips; the record the last file reading made or found; and the main file's record.
+    CDirectDependency* dependency_records;
+    uint64_t* dependency_devices;
+    uint64_t* dependency_inodes;
+    uint32_t* guard_dependencies;
+    uint32_t dependency_count;
+    uint32_t dependency_last;
+    uint32_t dependency_main;
+    // The main file's push (#pragma GCC system_header there is ignored, as clang ignores it), or 0 before it.
+    uint32_t main_serial;
 
     // Current source state
     uint32_t counter_val;
@@ -2477,6 +2498,94 @@ static bool fast_has_trigraph(const uint8_t* p, uint64_t len)
     return found;
 }
 
+// -MD and its kin (#3592): the tables of the files a unit reads, from the arena, whose pages are zero.
+static __attribute__((cold, noinline)) bool fast_pp_collect_dependencies(FastPP* pp)
+{
+    pp->dependency_records = (CDirectDependency*)fast_arena_alloc(pp->arena, (uint64_t)BUSTER_FPP_MAX_DEPENDENCIES * sizeof(CDirectDependency), 64);
+    pp->dependency_devices = (uint64_t*)fast_arena_alloc(pp->arena, (uint64_t)BUSTER_FPP_MAX_DEPENDENCIES * sizeof(uint64_t), 64);
+    pp->dependency_inodes = (uint64_t*)fast_arena_alloc(pp->arena, (uint64_t)BUSTER_FPP_MAX_DEPENDENCIES * sizeof(uint64_t), 64);
+    pp->guard_dependencies = (uint32_t*)fast_arena_alloc(pp->arena, (uint64_t)BUSTER_FPP_MAX_GUARDS * sizeof(uint32_t), 64);
+    const bool ok = pp->dependency_records != NULL && pp->dependency_devices != NULL && pp->dependency_inodes != NULL && pp->guard_dependencies != NULL;
+    pp->dependency_records = ok ? pp->dependency_records : NULL;
+    return ok;
+}
+
+// The record of the file with this device and inode, + 1, or 0 for none: eight records a step, their inodes and devices
+// compared as 64-bit lanes (#3592).
+static uint32_t fast_pp_dependency_find(const FastPP* pp, uint64_t device, uint64_t inode)
+{
+    const __m512i want_device = _mm512_set1_epi64((long long)device);
+    const __m512i want_inode = _mm512_set1_epi64((long long)inode);
+    uint32_t result = 0;
+    for (uint32_t i = 0; result == 0 && i < pp->dependency_count; i += 8u)
+    {
+        const uint32_t left = pp->dependency_count - i;
+        const __mmask8 live = left >= 8u ? (__mmask8)0xffu : (__mmask8)((1u << left) - 1u);
+        const __m512i devices = _mm512_maskz_loadu_epi64(live, (const void*)(pp->dependency_devices + i));
+        const __m512i inodes = _mm512_maskz_loadu_epi64(live, (const void*)(pp->dependency_inodes + i));
+        const uint32_t same = (uint32_t)(_mm512_mask_cmpeq_epi64_mask(live, devices, want_device) & _mm512_mask_cmpeq_epi64_mask(live, inodes, want_inode));
+        result = same != 0 ? i + (uint32_t)__builtin_ctz(same) + 1u : 0u;
+    }
+    return result;
+}
+
+// A reading of the file at `path` (`length` bytes), with the device and inode its stat gave, as a system header's or not
+// (#3592): a new record, under this spelling, or the file's, which a reading as a user file's makes a user file's, as the
+// full pipeline's pp_dependency_observe has it. Returns the record + 1, or 0 when the unit read more files than the
+// tables hold or memory ran out, and then the unit leaves.
+static __attribute__((cold, noinline)) uint32_t fast_pp_dependency_observe(FastPP* pp, const char* path, uint32_t length, const struct stat* status,
+                                                                          bool system)
+{
+    uint32_t result = fast_pp_dependency_find(pp, (uint64_t)status->st_dev, (uint64_t)status->st_ino);
+    if (result != 0)
+    {
+        pp->dependency_records[result - 1u].system &= system;
+    }
+    else if (pp->dependency_count < BUSTER_FPP_MAX_DEPENDENCIES)
+    {
+        char* const copy = (char*)fast_arena_alloc(pp->arena, (uint64_t)length + 1u, 1);
+        if (copy != NULL)
+        {
+            memcpy(copy, path, length);
+            copy[length] = '\0';
+            const uint32_t index = pp->dependency_count;
+            pp->dependency_records[index] = (CDirectDependency){
+                .path = copy,
+                .length = length,
+                .used = true,
+                .system = system,
+            };
+            pp->dependency_devices[index] = (uint64_t)status->st_dev;
+            pp->dependency_inodes[index] = (uint64_t)status->st_ino;
+            pp->dependency_count = index + 1u;
+            result = index + 1u;
+        }
+    }
+    if (result == 0)
+    {
+        fast_pp_bail(pp, "too many files for a dependency rule");
+    }
+    pp->dependency_last = result;
+    return result;
+}
+
+// A reading of the file a guard entry names, whose record the entry keeps (#3592): an include its guard or #pragma once
+// skips, or a __has_include, of a file the unit read before. An entry without a record leaves.
+static __attribute__((cold, noinline)) void fast_pp_dependency_again(FastPP* pp, const FastGuardEntry* ge, bool system)
+{
+    const uint32_t entry = pp->guard_dependencies[ge - pp->guards];
+    const uint32_t record = entry & ~BUSTER_FPP_SYSTEM_PRAGMA;
+    if (record != 0)
+    {
+        pp->dependency_records[record - 1u].system &= system || (entry & BUSTER_FPP_SYSTEM_PRAGMA) != 0;
+    }
+    else
+    {
+        fast_pp_bail(pp, "a file read without its dependency record");
+    }
+    pp->dependency_last = record;
+}
+
 static bool fast_pp_push_memory(FastPP* pp, const char* name, const uint8_t* bytes, uint64_t len, uint32_t dir_idx,
                                 bool owned_mmap, bool is_system)
 {
@@ -2539,6 +2648,10 @@ static void fast_pp_pop_file(FastPP* pp)
             if (ge != NULL)
             {
                 ge->guard_ident = f->guard_ident;
+                if (pp->dependency_records != NULL)
+                {
+                    pp->guard_dependencies[ge - pp->guards] = (pp->guard_dependencies[ge - pp->guards] & BUSTER_FPP_SYSTEM_PRAGMA) | f->dependency;
+                }
             }
         }
         if (f->owned_mmap && f->base != NULL && f->map_size != 0)
@@ -2548,14 +2661,23 @@ static void fast_pp_pop_file(FastPP* pp)
     }
 }
 
+// Reads the file at `path`, found in search directory `dir_idx` (UINT32_MAX for none), as a system header's inclusion or
+// not (`is_system`), unless its guard or #pragma once skips it. With -MD (#3592), the reading is recorded either way, as
+// the full pipeline's pp_enter_file observes a file before its guard.
 static bool fast_pp_open_and_push(FastPP* pp, const char* path, uint32_t path_len, uint32_t dir_idx, bool is_system)
 {
     // Check include-guard cache BEFORE open()!
     const FastGuardEntry* ge = fast_guard_lookup(pp, path, path_len, false);
     if (ge != NULL && (ge->once != 0 || (ge->guard_ident != 0 && fast_ident_is_macro(&pp->idents, ge->guard_ident))))
     {
+        if (pp->dependency_records != NULL)
+        {
+            fast_pp_dependency_again(pp, ge, is_system);
+        }
         return true; // Skipped with ZERO syscalls!
     }
+    // A file #pragma GCC system_header marked is a system header from its start.
+    is_system |= ge != NULL && pp->dependency_records != NULL && (pp->guard_dependencies[ge - pp->guards] & BUSTER_FPP_SYSTEM_PRAGMA) != 0;
     const int fd = open(path, O_RDONLY);
     bool ok = false;
     if (fd >= 0)
@@ -2563,11 +2685,16 @@ static bool fast_pp_open_and_push(FastPP* pp, const char* path, uint32_t path_le
         struct stat st;
         if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode))
         {
+            const uint32_t record = pp->dependency_records != NULL ? fast_pp_dependency_observe(pp, path, path_len, &st, is_system) : 0u;
             const uint64_t sz = (uint64_t)st.st_size;
             if (sz == 0)
             {
                 static const uint8_t empty_byte = 0;
                 ok = fast_pp_push_memory(pp, path, &empty_byte, 0, dir_idx, false, is_system);
+                if (ok)
+                {
+                    pp->files[pp->file_depth - 1u].dependency = record;
+                }
             }
             else
             {
@@ -2579,6 +2706,10 @@ static bool fast_pp_open_and_push(FastPP* pp, const char* path, uint32_t path_le
                     if (!ok)
                     {
                         (void)munmap(mem, sz);
+                    }
+                    else
+                    {
+                        pp->files[pp->file_depth - 1u].dependency = record;
                     }
                 }
             }
@@ -2712,6 +2843,39 @@ static bool fast_pp_resolve_include(FastPP* pp, const char* name, uint32_t name_
         }
     }
     return found;
+}
+
+// Whether `id` names a macro, for defined, #ifdef, #ifndef, #elifdef and #elifndef: a macro, or __has_include or
+// __has_include_next, which clang and the full pipeline define as builtin macros and this path answers (#3592: glibc's
+// <bits/statx.h> and <bits/unistd_ext.h> include other files where they aren't defined).
+static inline bool fast_pp_defined(const FastPP* pp, uint32_t id)
+{
+    const uint8_t pkw = pp->idents.entries[id].pp_kw;
+    return fast_ident_is_macro(&pp->idents, id) || pkw == FPP_KW_HAS_INCLUDE || pkw == FPP_KW_HAS_INCLUDE_NEXT;
+}
+
+// -MD (#3592): a __has_include that finds a file reads it, as the full pipeline's pp_builtin_value observes it, as much a
+// system header's as the file found (`system`) and the file that asks are. A file the unit read before has its guard
+// entry's record; another is stat'd for its device and inode, and one that isn't a regular file leaves (the search took
+// a directory, where the full pipeline's goes on).
+static __attribute__((cold, noinline)) void fast_pp_dependency_probe(FastPP* pp, const char* path, bool system)
+{
+    const bool level = system || (pp->file_depth != 0 && pp->files[pp->file_depth - 1u].is_system);
+    const uint32_t length = (uint32_t)strlen(path);
+    const FastGuardEntry* const ge = fast_guard_lookup(pp, path, length, false);
+    struct stat status;
+    if (ge != NULL)
+    {
+        fast_pp_dependency_again(pp, ge, level);
+    }
+    else if (stat(path, &status) == 0 && S_ISREG(status.st_mode))
+    {
+        (void)fast_pp_dependency_observe(pp, path, length, &status, level);
+    }
+    else
+    {
+        fast_pp_bail(pp, "__has_include found no regular file");
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -3755,7 +3919,7 @@ static bool fast_pp_expand_buffer(FastPP* pp, const FastTok* in_toks, uint32_t i
                 uint32_t is_def = 0;
                 if (nt.kind == FTOK_IDENT || (nt.kind >= 64u && nt.kind < 126u))
                 {
-                    is_def = fast_ident_is_macro(&pp->idents, nt.data) ? 1u : 0u;
+                    is_def = fast_pp_defined(pp, nt.data) ? 1u : 0u;
                 }
                 else
                 {
@@ -3856,6 +4020,12 @@ static bool fast_pp_expand_buffer(FastPP* pp, const FastTok* in_toks, uint32_t i
                             }
                             hname[hlen] = '\0';
                         }
+                        if (hlen == 0 && pp->dependency_records != NULL)
+                        {
+                            // An operand a macro names, which this path doesn't expand (#3608): the answer, and the
+                            // files read, may be the full pipeline's others.
+                            fast_pp_bail(pp, "__has_include of a macro with -MD");
+                        }
                         if (hlen > 0)
                         {
                             char tmp_path[1024];
@@ -3863,6 +4033,10 @@ static bool fast_pp_expand_buffer(FastPP* pp, const FastTok* in_toks, uint32_t i
                             bool sys = false;
                             val = fast_pp_resolve_include(pp, hname, hlen, angled,
                                                           pkw == FPP_KW_HAS_INCLUDE_NEXT, tmp_path, sizeof(tmp_path), &d, &sys) ? 1u : 0u;
+                            if (val != 0 && pp->dependency_records != NULL)
+                            {
+                                fast_pp_dependency_probe(pp, tmp_path, sys);
+                            }
                         }
                     }
                 }
@@ -4631,9 +4805,23 @@ static __attribute__((noinline)) void fast_pp_handle_include(FastPP* pp, FastInc
         fast_pp_bail(pp, "include file not found");
         return;
     }
-    if (!fast_pp_open_and_push(pp, resolved, (uint32_t)strlen(resolved), dir_idx, is_sys))
+    // An inclusion is as much a system header's as the file and its includer are (clang's HandleHeaderIncludeOrImport, the
+    // full pipeline's pp_dependency_observe): -MD's records see it (#3592).
+    if (!fast_pp_open_and_push(pp, resolved, (uint32_t)strlen(resolved), dir_idx, is_sys || f->is_system))
     {
         fast_pp_bail(pp, "include open failed");
+    }
+}
+
+// What follows a line marker's or #line's number: a file name, and a marker's flags, would change the system header level
+// -MD's records see (#3592) and __FILE__ (#3608), which this path doesn't follow, so a unit that collects the records
+// leaves at anything there.
+static inline void fast_pp_line_rest(FastPP* pp, const FastIncludeFile* f)
+{
+    const uint8_t* const rest = fast_skip_hspace(f->ptr, f->end);
+    if (pp->dependency_records != NULL && rest < f->end && *rest != '\n')
+    {
+        fast_pp_bail(pp, "a line marker's file name with -MD");
     }
 }
 
@@ -4652,6 +4840,7 @@ static __attribute__((noinline)) void fast_pp_handle_directive(FastPP* pp, FastI
         if (kw_tok.kind == FTOK_INT_LIT)
         {
             f->line = kw_tok.data;
+            fast_pp_line_rest(pp, f);
             fast_pp_skip_to_eol(pp, f);
             return;
         }
@@ -4710,7 +4899,7 @@ static __attribute__((noinline)) void fast_pp_handle_directive(FastPP* pp, FastI
                     fast_pp_bail(pp, "bad #ifdef name");
                     break;
                 }
-                const bool defined = fast_ident_is_macro(&pp->idents, nt.data);
+                const bool defined = fast_pp_defined(pp, nt.data);
                 cond = pkw == FPP_KW_IFDEF ? defined : !defined;
                 if (pkw == FPP_KW_IFNDEF && f->guard_state == 0 && pp->cond_depth == f->cond_base)
                 {
@@ -4764,6 +4953,7 @@ static __attribute__((noinline)) void fast_pp_handle_directive(FastPP* pp, FastI
             FastTok lt = { 0 };
             fast_pp_read_tok(pp, f, true, &lt);
             if (lt.kind == FTOK_INT_LIT) { f->line = lt.data; }
+            fast_pp_line_rest(pp, f);
             fast_pp_skip_to_eol(pp, f);
         } break;
         case FPP_KW_PRAGMA:
@@ -4774,6 +4964,10 @@ static __attribute__((noinline)) void fast_pp_handle_directive(FastPP* pp, FastI
             {
                 FastGuardEntry* ge = fast_guard_lookup(pp, f->path, f->path_len, true);
                 if (ge != NULL) { ge->once = 1u; }
+                if (ge != NULL && pp->dependency_records != NULL)
+                {
+                    pp->guard_dependencies[ge - pp->guards] = (pp->guard_dependencies[ge - pp->guards] & BUSTER_FPP_SYSTEM_PRAGMA) | f->dependency;
+                }
                 fast_pp_skip_to_eol(pp, f);
             }
             else if (pt.kind == FTOK_IDENT)
@@ -4794,7 +4988,16 @@ static __attribute__((noinline)) void fast_pp_handle_directive(FastPP* pp, FastI
                                      pp->idents.strings + pp->idents.entries[pt2.data].str_offset : "";
                     if (strcmp(s, "GCC") == 0 && strcmp(s2, "system_header") == 0)
                     {
-                        f->is_system = true;
+                        // The rest of the file is a system header, and so are the files it includes from here and the
+                        // file's later inclusions (-MD's records, #3592); clang and the full pipeline ignore it in the main
+                        // file.
+                        const bool marks = f->serial != pp->main_serial;
+                        f->is_system |= marks;
+                        FastGuardEntry* const ge = marks && pp->dependency_records != NULL ? fast_guard_lookup(pp, f->path, f->path_len, true) : NULL;
+                        if (ge != NULL)
+                        {
+                            pp->guard_dependencies[ge - pp->guards] = BUSTER_FPP_SYSTEM_PRAGMA | f->dependency;
+                        }
                         fast_pp_skip_to_eol(pp, f);
                     }
                     else if (strcmp(s, "push_macro") == 0 && f->path != NULL && strcmp(f->path, "<predefines>") == 0)
@@ -6449,7 +6652,7 @@ static BUSTER_DIRECT_HOT bool fast_pp_drain(FastPP* pp)
                     {
                         FastTok nt = { 0 };
                         fast_pp_read_tok(pp, f, true, &nt);
-                        const bool def = (nt.kind == FTOK_IDENT || nt.kind >= 64u) && fast_ident_is_macro(&pp->idents, nt.data);
+                        const bool def = (nt.kind == FTOK_IDENT || nt.kind >= 64u) && fast_pp_defined(pp, nt.data);
                         cond = kw == FPP_KW_ELIFDEF ? def : !def;
                         fast_pp_skip_to_eol(pp, f);
                     }
@@ -6538,10 +6741,18 @@ static bool fast_pp_run_buffer(FastPP* pp, const char* name, const char* bytes, 
     return ok;
 }
 
-static bool fast_pp_run_file(FastPP* pp, const char* path)
+// Runs the file at `path` to its end: the main file (`is_main`), or one before it (the predefines file, a system header's
+// as the full pipeline reads it, or an -include file, which `is_system` is when the search found it in a system directory).
+static bool fast_pp_run_file(FastPP* pp, const char* path, bool is_main, bool is_system)
 {
     pp->base_file = path;
-    bool ok = fast_pp_open_and_push(pp, path, (uint32_t)strlen(path), UINT32_MAX, false);
+    bool ok = fast_pp_open_and_push(pp, path, (uint32_t)strlen(path), UINT32_MAX, is_system);
+    if (ok && is_main)
+    {
+        // The main file's push, and -MD's record of it (#3592), which a guard of an -include file may have skipped.
+        pp->main_serial = pp->file_depth != 0 ? pp->files[pp->file_depth - 1u].serial : 0u;
+        pp->dependency_main = pp->dependency_last;
+    }
     if (ok)
     {
         ok = fast_pp_drain(pp);

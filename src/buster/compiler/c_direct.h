@@ -12,6 +12,18 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+// A file the unit read, for -MD and its kin (#3592): its path as the include search spelled it, whether the rule lists
+// it (the main file's record is read but not listed, as the full pipeline's pp_dependencies has it) and whether every
+// reading of it was a system header's.
+typedef struct CDirectDependency CDirectDependency;
+struct CDirectDependency
+{
+    const char* path;
+    uint32_t length;
+    bool used;
+    bool system;
+};
+
 typedef struct CDirectRequest CDirectRequest;
 struct CDirectRequest
 {
@@ -48,6 +60,12 @@ struct CDirectRequest
     uint32_t stage_codegen;
     uint32_t stage_object_write;
     uint32_t* out_token_count;       // optional: receives preprocessed token count for --time-stages
+    // -MD and its kin (#3592): once the unit has compiled and before its object is written, the files it read, one
+    // record a file (by device and inode, under the first path it was read by) in the order of their first reading, as
+    // the full pipeline's pp_dependency_observe records them. A false return leaves the unit to the full pipeline.
+    // NULL collects nothing.
+    bool (*dependencies)(void* context, const CDirectDependency* files, uint32_t count);
+    void* dependency_context;
 };
 
 // Returns 0 on success (object written), 1 on clean bailout (nothing written -> caller runs full pipeline),
