@@ -15,6 +15,7 @@
 #define BUSTER_C_DIRECT_CC_INCLUDED
 
 #include "buster/compiler/c_direct_types.c"
+#include "buster/compiler/c_direct_pretty.c"
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Level 9a: AVX-512 body pre-scanner, stack allocation, .rodata constants, inline copy/zero, ELF symbol binding
@@ -5104,6 +5105,111 @@ static void fval_emit_compound_assign(FastExprCtx* ex, uint8_t assign_op, FastVa
     fval_store(ex, lhs, &res, true, out);
 }
 
+// __builtin_ceil, __builtin_floor and their float forms (#3592), as the full pipeline computes them, with no library
+// reference: its helper (c_check_builtin_math.c's runtime ceil and floor) works on the bits, so that no flag but a
+// signaling NaN's invalid is raised, a NaN is quieted (x + x), a zero, an infinity and an integer come back as they are,
+// and a denormal with MXCSR's DAZ set is zero. A magnitude below 1 rounds to 0 or 1; another drops its fraction's bits
+// and adds a unit where its sign says. Every live value is spilled first, so the sequence takes rax, rcx, rdx and r8 to
+// r11 as it needs them; the result stays in the argument's register.
+static __attribute__((cold, noinline)) void fval_emit_round_builtin(FastExprCtx* ex, bool is_double, bool is_ceil, FastVal* args, uint32_t argc, FastVal* out)
+{
+    FastCCState* cc = ex->cc;
+    FastObj* obj = cc->obj;
+    const FastType ft = is_double ? FTYPE_F64 : FTYPE_F32;
+    if (argc != 1u || !(ftype_is_int(args[0].type) || ftype_is_float(args[0].type)) || ftype_is_unsupported(args[0].type))
+    {
+        fast_cc_bail(cc, "builtin ceil/floor operand");
+        return;
+    }
+    if (ex->eval_only > 0)
+    {
+        fval_release(ex, &args[0]);
+        *out = (FastVal){ .type = ft, .kind = FVAL_XMM };
+        return;
+    }
+    fval_convert(ex, &args[0], ft);
+    fval_spill_all(ex, ex->vsp, ex->arg_sp);
+    const uint32_t xr = fval_to_xmm(ex, &args[0], true);
+    const int32_t mxcsr = fast_cc_alloc_tmp(cc, 4u, 4u);
+    const bool w = is_double;
+    const uint64_t magnitude_mask = is_double ? UINT64_C(0x7fffffffffffffff) : UINT64_C(0x7fffffff);
+    const uint64_t infinity = is_double ? UINT64_C(0x7ff0000000000000) : UINT64_C(0x7f800000);
+    const uint64_t sign_mask = is_double ? UINT64_C(0x8000000000000000) : UINT64_C(0x80000000);
+    const uint64_t one = is_double ? UINT64_C(0x3ff0000000000000) : UINT64_C(0x3f800000);
+    const uint8_t mantissa = is_double ? 52u : 23u;
+    const int32_t integral = is_double ? 0x433 : 0x96;   // the exponent from which every value is an integer
+    const int32_t unit_exponent = is_double ? 0x3ff : 0x7f;
+    const uint32_t nan = fast_label_new(obj);
+    const uint32_t same = fast_label_new(obj);
+    const uint32_t zero = fast_label_new(obj);
+    const uint32_t normal = fast_label_new(obj);
+    const uint32_t small = fast_label_new(obj);
+    const uint32_t adjust = fast_label_new(obj);
+    const uint32_t signed_result = fast_label_new(obj);
+    const uint32_t done = fast_label_new(obj);
+    x86_mov_xmm_gpr(obj, w, false, xr, FREG_RAX);               // rax = the bits
+    x86_mov_ri(obj, w, FREG_R8, magnitude_mask);
+    x86_mov_rr(obj, w, FREG_RDX, FREG_RAX);
+    x86_alu_rr(obj, w, 0x21u, FREG_RDX, FREG_R8);               // rdx = |x|'s bits
+    x86_mov_ri(obj, w, FREG_R8, infinity);
+    x86_alu_rr(obj, w, 0x39u, FREG_RDX, FREG_R8);
+    x86_jcc_label(obj, FCC_A, nan);
+    x86_jcc_label(obj, FCC_E, same);
+    x86_alu_rr(obj, w, 0x85u, FREG_RDX, FREG_RDX);
+    x86_jcc_label(obj, FCC_E, same);
+    x86_mov_rr(obj, w, FREG_RCX, FREG_RDX);
+    x86_shift_ri(obj, w, 5u, FREG_RCX, mantissa);               // rcx = the exponent
+    x86_alu_ri(obj, false, 7u, FREG_RCX, integral);
+    x86_jcc_label(obj, FCC_AE, same);
+    x86_mov_ri(obj, w, FREG_R8, sign_mask);
+    x86_mov_rr(obj, w, FREG_R9, FREG_RAX);
+    x86_alu_rr(obj, w, 0x21u, FREG_R9, FREG_R8);                // r9 = the sign
+    x86_alu_rr(obj, false, 0x85u, FREG_RCX, FREG_RCX);
+    x86_jcc_label(obj, FCC_NE, normal);
+    x86_u8(obj, 0x0fu);                                         // stmxcsr [rbp + mxcsr]
+    x86_u8(obj, 0xaeu);
+    x86_u8(obj, 0x9du);
+    x86_u32(obj, (uint32_t)mxcsr);
+    x86_load(obj, FREG_R8, FREG_RBP, mxcsr, 4u, false);
+    x86_alu_ri(obj, false, 4u, FREG_R8, 0x40);                  // DAZ
+    x86_jcc_label(obj, FCC_NE, zero);
+    fast_label_bind(obj, normal);
+    x86_alu_ri(obj, false, 7u, FREG_RCX, unit_exponent);
+    x86_jcc_label(obj, FCC_B, small);
+    x86_mov_ri(obj, false, FREG_R10, (uint64_t)(uint32_t)integral);
+    x86_alu_rr(obj, false, 0x29u, FREG_R10, FREG_RCX);
+    x86_mov_rr(obj, false, FREG_RCX, FREG_R10);                 // cl = the fraction's width
+    x86_mov_ri(obj, w, FREG_R10, 1u);
+    x86_shift_cl(obj, w, 4u, FREG_R10);                         // r10 = the unit
+    x86_mov_rr(obj, w, FREG_R11, FREG_R10);
+    x86_alu_ri(obj, w, 5u, FREG_R11, 1);                        // r11 = the fraction's mask
+    x86_alu_rr(obj, w, 0x85u, FREG_RDX, FREG_R11);
+    x86_jcc_label(obj, FCC_E, same);
+    x86_f7(obj, w, 2u, FREG_R11);
+    x86_alu_rr(obj, w, 0x21u, FREG_RDX, FREG_R11);              // rdx = the magnitude without its fraction
+    x86_jmp_label(obj, adjust);
+    fast_label_bind(obj, small);
+    x86_alu_rr(obj, false, 0x31u, FREG_RDX, FREG_RDX);
+    x86_mov_ri(obj, w, FREG_R10, one);
+    fast_label_bind(obj, adjust);
+    // ceil adds the unit to a positive value, floor to a negative one.
+    x86_alu_rr(obj, w, 0x85u, FREG_R9, FREG_R9);
+    x86_jcc_label(obj, is_ceil ? FCC_NE : FCC_E, signed_result);
+    x86_alu_rr(obj, w, 0x01u, FREG_RDX, FREG_R10);
+    fast_label_bind(obj, signed_result);
+    x86_alu_rr(obj, w, 0x09u, FREG_RDX, FREG_R9);
+    x86_mov_xmm_gpr(obj, w, true, xr, FREG_RDX);
+    x86_jmp_label(obj, done);
+    fast_label_bind(obj, zero);
+    x86_mov_xmm_gpr(obj, w, true, xr, FREG_R9);
+    x86_jmp_label(obj, done);
+    fast_label_bind(obj, nan);
+    x86_sse_rr(obj, is_double, 0x58u, xr, xr);                  // quiets a NaN
+    fast_label_bind(obj, same);
+    fast_label_bind(obj, done);
+    *out = (FastVal){ .type = ft, .kind = FVAL_XMM, .reg = (uint8_t)xr };
+}
+
 // Emit recognized __builtin_* call (clz, ctz, bswap, popcount, expect, constant_p, unreachable, inf/nan, memcpy/memset/...)
 // Whether `t` is a va_list (#3577): __builtin_va_list, an array of one __va_list_tag, which decays to a pointer to it.
 static bool fast_cc_is_va_list(FastCCState* cc, FastType t)
@@ -5121,7 +5227,8 @@ static uint32_t fast_cc_builtin_arity(const FastCCState* cc, uint32_t id)
     else if (id == cc->id_builtin_constant_p || id == cc->id_builtin_clz || id == cc->id_builtin_clzll || id == cc->id_builtin_ctz ||
              id == cc->id_builtin_ctzll || id == cc->id_builtin_bswap16 || id == cc->id_builtin_bswap32 || id == cc->id_builtin_bswap64 ||
              id == cc->id_builtin_popcount || id == cc->id_builtin_popcountll || id == cc->id_builtin_nan || id == cc->id_builtin_nanf ||
-             id == cc->id_builtin_strlen) { arity = 1u; }
+             id == cc->id_builtin_strlen || id == cc->id_builtin_ceil || id == cc->id_builtin_floor || id == cc->id_builtin_ceilf ||
+             id == cc->id_builtin_floorf) { arity = 1u; }
     else if (id == cc->id_builtin_unreachable || id == cc->id_builtin_inf || id == cc->id_builtin_inff || id == cc->id_builtin_huge_val ||
              id == cc->id_builtin_huge_valf || id == cc->id_sync_synchronize) { arity = 0u; }
     else if (id == cc->id_builtin_memcpy || id == cc->id_builtin_memset || id == cc->id_builtin_memmove || id == cc->id_builtin_memcmp) { arity = 3u; }
@@ -5134,6 +5241,11 @@ static __attribute__((noinline)) void fval_emit_builtin_call(FastExprCtx* ex, ui
 {
     FastCCState* cc = ex->cc;
     FastObj* obj = cc->obj;
+    if (id == cc->id_builtin_ceil || id == cc->id_builtin_floor || id == cc->id_builtin_ceilf || id == cc->id_builtin_floorf)
+    {
+        fval_emit_round_builtin(ex, id == cc->id_builtin_ceil || id == cc->id_builtin_floor, id == cc->id_builtin_ceil || id == cc->id_builtin_ceilf, args, argc, out);
+        return;
+    }
     if (id == cc->id_builtin_expect)
     {
         if (argc < 1u) { fast_cc_bail(cc, "builtin_expect argc"); return; }
@@ -6527,6 +6639,77 @@ static BUSTER_DIRECT_HOT void fast_expr_reduce_top(FastExprCtx* ex, FastExprOp* 
     ex->vsp += 1u;
 }
 
+// glibc's assert in GNU's modes (#3592) is a statement expression:
+//     ((void) sizeof ((e) ? 1 : 0), __extension__ ({ if (e) ; else __assert_fail (#e, __FILE__, __LINE__, f); }))
+// and SQLite's ALWAYS and NEVER put one in an expression. The direct path compiles no statement in an expression, so
+// at `__extension__ ({`, with `start` at the __extension__, this shape alone is rewritten in place as the conditional
+// expression it computes, of as many tokens:
+//     __extension__ ((e) ? (void) 0 : __assert_fail (#e, __FILE__, __LINE__, f))
+// e is evaluated once in both, the call only where it is false, and the value is void in both, as __assert_fail's is.
+// Another statement expression keeps its tokens, and leaves the direct path at its `{`.
+static __attribute__((cold, noinline)) void fast_cc_assert_rewrite(FastCCState* cc, uint32_t start)
+{
+    uint8_t* const tk = (uint8_t*)cc->tk;
+    uint32_t* const td = (uint32_t*)cc->td;
+    // The matching closer of the opener at `at`, or UINT32_MAX.
+    uint32_t closes[2] = { UINT32_MAX, UINT32_MAX };
+    const uint32_t opens[2] = { start + 4u, 0 };
+    bool shape = start + 4u < cc->tcount && tk[start + 3u] == FTOK_KW_IF && tk[start + 4u] == FTOK_LPAREN;
+    for (uint32_t which = 0; which < 2u && shape; which += 1)
+    {
+        const uint32_t open = which == 0 ? opens[0] : closes[0] + 4u;
+        uint32_t depth = 0;
+        for (uint32_t i = open; i < cc->tcount; i += 1)
+        {
+            const uint8_t k = tk[i];
+            depth += (uint32_t)(k == FTOK_LPAREN || k == FTOK_LBRACKET || k == FTOK_LBRACE);
+            depth -= (uint32_t)(k == FTOK_RPAREN || k == FTOK_RBRACKET || k == FTOK_RBRACE);
+            if (depth == 0)
+            {
+                closes[which] = i;
+                break;
+            }
+        }
+        shape = closes[which] != UINT32_MAX && tk[closes[which]] == FTOK_RPAREN;
+        if (shape && which == 0)
+        {
+            const uint32_t c = closes[0];
+            shape = c + 4u < cc->tcount && tk[c + 1u] == FTOK_SEMI && tk[c + 2u] == FTOK_KW_ELSE && tk[c + 3u] == FTOK_IDENT &&
+                    td[c + 3u] == cc->id_assert_fail && tk[c + 4u] == FTOK_LPAREN;
+        }
+    }
+    const uint32_t call_end = closes[1] + 1u;
+    shape = shape && call_end + 2u < cc->tcount && tk[call_end] == FTOK_SEMI && tk[call_end + 1u] == FTOK_RBRACE && tk[call_end + 2u] == FTOK_RPAREN;
+    const uint32_t end = call_end + 3u;
+    uint8_t* kinds = shape ? (uint8_t*)fast_arena_alloc(cc->scratch, end - start, 1) : NULL;
+    uint32_t* datas = kinds != NULL ? (uint32_t*)fast_arena_alloc(cc->scratch, (uint64_t)(end - start) * sizeof(uint32_t), 4) : NULL;
+    if (datas != NULL)
+    {
+        // `( ( e ) ? ( void ) 0 : call )` after the __extension__, built aside and copied over the span.
+        const uint32_t cond_first = start + 5u;
+        const uint32_t cond_end = closes[0];
+        const uint32_t call_first = closes[0] + 3u;
+        uint32_t n = 0;
+        kinds[n] = FTOK_LPAREN; datas[n] = 0; n += 1u;
+        kinds[n] = FTOK_LPAREN; datas[n] = 0; n += 1u;
+        for (uint32_t i = cond_first; i < cond_end; i += 1) { kinds[n] = tk[i]; datas[n] = td[i]; n += 1u; }
+        kinds[n] = FTOK_RPAREN; datas[n] = 0; n += 1u;
+        kinds[n] = FTOK_QUESTION; datas[n] = 0; n += 1u;
+        kinds[n] = FTOK_LPAREN; datas[n] = 0; n += 1u;
+        kinds[n] = FTOK_KW_VOID; datas[n] = cc->id_void; n += 1u;
+        kinds[n] = FTOK_RPAREN; datas[n] = 0; n += 1u;
+        kinds[n] = FTOK_INT_LIT; datas[n] = 0; n += 1u;
+        kinds[n] = FTOK_COLON; datas[n] = 0; n += 1u;
+        for (uint32_t i = call_first; i < call_end; i += 1) { kinds[n] = tk[i]; datas[n] = td[i]; n += 1u; }
+        kinds[n] = FTOK_RPAREN; datas[n] = 0; n += 1u;
+        if (n == end - start - 1u)
+        {
+            memcpy(tk + start + 1u, kinds, n);
+            memcpy(td + start + 1u, datas, (uint64_t)n * sizeof(uint32_t));
+        }
+    }
+}
+
 // #3577: whether an expression's log (FastExprCtx's seq_*) is one the full pipeline's -Wunsequenced is quiet on: each
 // modification's variable named or modified elsewhere only where a region sequences the two, or, a naming, within the
 // modification's own operands. More entries than the log holds are refused; past the regions it keeps, fewer are apart.
@@ -6842,6 +7025,7 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
                 if (id == cc->id_builtin_clzll || id == cc->id_builtin_clz || id == cc->id_builtin_ctzll ||
                     id == cc->id_builtin_ctz || id == cc->id_builtin_inff || id == cc->id_builtin_inf ||
                     id == cc->id_builtin_huge_valf || id == cc->id_builtin_huge_val ||
+                    id == cc->id_builtin_ceil || id == cc->id_builtin_floor || id == cc->id_builtin_ceilf || id == cc->id_builtin_floorf ||
                     id == cc->id_builtin_nanf || id == cc->id_builtin_nan || id == cc->id_builtin_expect ||
                     id == cc->id_builtin_constant_p || id == cc->id_builtin_unreachable ||
                     id == cc->id_builtin_bswap16 || id == cc->id_builtin_bswap32 || id == cc->id_builtin_bswap64 ||
@@ -6864,7 +7048,15 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
                 cc->pos += 1u; expect_val = false; continue;
             }
 
-            if (k == FTOK_KW_EXTENSION) { cc->pos += 1u; continue; }
+            if (k == FTOK_KW_EXTENSION)
+            {
+                if (cc->pos + 2u < cc->tcount && cc->tk[cc->pos + 1u] == FTOK_LPAREN && cc->tk[cc->pos + 2u] == FTOK_LBRACE)
+                {
+                    fast_cc_assert_rewrite(cc, cc->pos);
+                }
+                cc->pos += 1u;
+                continue;
+            }
 
             // Check for `(`: could be cast `(T)expr`, compound literal `(T){...}`, or parenthesized `(expr)`!
             if (k == FTOK_LPAREN)
@@ -7060,18 +7252,19 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
             }
             if (k == FTOK_STR_LIT || k == FTOK_KW_FUNC)
             {
-                // __PRETTY_FUNCTION__ is the function's signature in C, as clang prints it, and not its name (#3618):
-                // the full pipeline prints it. Without code too, since sizeof takes its length.
-                if (k == FTOK_KW_FUNC && fast_cc_data(cc) == cc->id_pretty_function)
-                {
-                    fast_cc_bail(cc, "__PRETTY_FUNCTION__");
-                    break;
-                }
                 const char* sp;
                 uint32_t slen = 0;
                 if (k == FTOK_STR_LIT)
                 {
                     sp = fast_cc_parse_string_lit(cc, &slen);
+                }
+                else if (fast_cc_data(cc) == cc->id_pretty_function)
+                {
+                    // __PRETTY_FUNCTION__ is the function's signature in C, as clang prints it (#3618, #3592); a
+                    // definition it can't print so leaves the direct path.
+                    sp = fast_cc_pretty_function(cc, &slen);
+                    cc->pos += 1u;
+                    if (cc->bailout) { break; }
                 }
                 else
                 {
@@ -8358,6 +8551,11 @@ static bool fast_cc_fallthrough_placed(const FastCCState* cc, const FastStmtFram
     return placed;
 }
 
+// The statement frames a function body may nest (#3592): SQLite's shell.c's do_meta_command is an `else if` chain of 72
+// branches, a frame each.
+#define BUSTER_FSTMT_FRAMES 256u
+
+
 // An `if` with a constant condition (#3592): its dead branch is checked as an operand of sizeof is, with no code, when
 // fast_cc_dead_simple takes it. FastCCState.dead counts the branches being checked so around a statement.
 #define BUSTER_FDEAD_NONE 0u
@@ -8366,14 +8564,19 @@ static bool fast_cc_fallthrough_placed(const FastCCState* cc, const FastStmtFram
 #define BUSTER_FDEAD_ELSE 3u       // the else branch of a true condition is checked without code
 
 // The end of an expression's tokens, at `terminator` outside brackets, or UINT32_MAX where the tokens hold a statement
-// expression, which the statement compiler would compile, or end otherwise.
-static __attribute__((cold, noinline)) uint32_t fast_cc_dead_expression_end(const FastCCState* cc, uint32_t pos, uint8_t terminator)
+// expression, which the statement compiler would compile, or end otherwise. glibc's assert's is rewritten first, as
+// the expression compiler would rewrite it (fast_cc_assert_rewrite).
+static __attribute__((cold, noinline)) uint32_t fast_cc_dead_expression_end(FastCCState* cc, uint32_t pos, uint8_t terminator)
 {
     uint32_t depth = 0;
     uint32_t end = UINT32_MAX;
     bool ok = true;
     for (uint32_t i = pos; i < cc->tcount && ok && end == UINT32_MAX; i += 1)
     {
+        if (cc->tk[i] == FTOK_LBRACE && i >= 2u && cc->tk[i - 1u] == FTOK_LPAREN && cc->tk[i - 2u] == FTOK_KW_EXTENSION)
+        {
+            fast_cc_assert_rewrite(cc, i - 2u);
+        }
         const uint8_t k = cc->tk[i];
         const bool opens = k == FTOK_LPAREN || k == FTOK_LBRACKET || k == FTOK_LBRACE;
         const bool closes = k == FTOK_RPAREN || k == FTOK_RBRACKET || k == FTOK_RBRACE;
@@ -8392,7 +8595,7 @@ static __attribute__((cold, noinline)) uint32_t fast_cc_dead_expression_end(cons
 #define BUSTER_FDEAD_SCAN_IF 1u
 #define BUSTER_FDEAD_SCAN_ELSE 2u
 
-static __attribute__((cold, noinline)) bool fast_cc_dead_simple(const FastCCState* cc, uint32_t pos)
+static __attribute__((cold, noinline)) bool fast_cc_dead_simple(FastCCState* cc, uint32_t pos)
 {
     uint8_t frames[32];
     uint32_t depth = 0;
@@ -9413,6 +9616,8 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
     // 3. Reset per-function state
     cc->cur_func_sym = sym_idx;
     cc->cur_func_name_id = fn_sym->ident_id;
+    cc->cur_func_body_pos = cc->pos;
+    cc->cur_func_pretty = NULL;
     cc->cur_ret_type = ret_t;
     cc->cur_ret_label = fast_label_new(obj);
     cc->cur_sret_off = 0;
@@ -9554,7 +9759,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
     cc->scope_depth -= 1u;
 
     // 5. Iterative statement execution state machine!
-    FastStmtFrame sstack[64];
+    FastStmtFrame sstack[BUSTER_FSTMT_FRAMES];
     uint32_t ssp = 0;
 
     // Break / continue target stacks
@@ -9848,7 +10053,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
         // 1. Nested compound block `{ ... }`
         if (k == FTOK_LBRACE)
         {
-            if (ssp >= 64u) { fast_cc_bail(cc, "stmt nesting depth"); break; }
+            if (ssp >= BUSTER_FSTMT_FRAMES) { fast_cc_bail(cc, "stmt nesting depth"); break; }
             cc->pos += 1u;
             sstack[ssp++] = (FastStmtFrame){ .kind = FSTK_BLOCK, .scope_mark = fast_cc_scope_enter(cc) };
             continue;
@@ -9872,7 +10077,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
         // 4. `if (cond) stmt [else stmt]`
         if (k == FTOK_KW_IF)
         {
-            if (ssp >= 64u) { fast_cc_bail(cc, "stmt nesting depth"); break; }
+            if (ssp >= BUSTER_FSTMT_FRAMES) { fast_cc_bail(cc, "stmt nesting depth"); break; }
             const uint8_t if_labeled = (uint8_t)(cc->pos != prefix_start);
             cc->pos += 1u;
             if (fast_cc_peek(cc) != FTOK_LPAREN) { fast_cc_bail(cc, "expected ( after if"); break; }
@@ -9899,7 +10104,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
         // 5. `while (cond) stmt`
         if (k == FTOK_KW_WHILE)
         {
-            if (ssp >= 64u || break_sp >= 64u || cont_sp >= 64u) { fast_cc_bail(cc, "loop nesting depth"); break; }
+            if (ssp >= BUSTER_FSTMT_FRAMES || break_sp >= 64u || cont_sp >= 64u) { fast_cc_bail(cc, "loop nesting depth"); break; }
             cc->pos += 1u;
             if (fast_cc_peek(cc) != FTOK_LPAREN) { fast_cc_bail(cc, "expected ( after while"); break; }
             cc->pos += 1u;
@@ -9922,7 +10127,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
         // 6. `do stmt while (cond);`
         if (k == FTOK_KW_DO)
         {
-            if (ssp >= 64u || break_sp >= 64u || cont_sp >= 64u) { fast_cc_bail(cc, "loop nesting depth"); break; }
+            if (ssp >= BUSTER_FSTMT_FRAMES || break_sp >= 64u || cont_sp >= 64u) { fast_cc_bail(cc, "loop nesting depth"); break; }
             cc->pos += 1u;
             const uint32_t body_lbl = fast_label_new(obj);
             const uint32_t cont_lbl = fast_label_new(obj);
@@ -9939,7 +10144,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
         // 7. `for (init; cond; step) stmt`
         if (k == FTOK_KW_FOR)
         {
-            if (ssp >= 64u || break_sp >= 64u || cont_sp >= 64u) { fast_cc_bail(cc, "loop nesting depth"); break; }
+            if (ssp >= BUSTER_FSTMT_FRAMES || break_sp >= 64u || cont_sp >= 64u) { fast_cc_bail(cc, "loop nesting depth"); break; }
             cc->pos += 1u;
             if (fast_cc_peek(cc) != FTOK_LPAREN) { fast_cc_bail(cc, "expected ( after for"); break; }
             cc->pos += 1u;
@@ -10061,7 +10266,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
         // 8. `switch (expr) stmt`
         if (k == FTOK_KW_SWITCH)
         {
-            if (ssp >= 64u || sw_sp >= 16u || break_sp >= 64u) { fast_cc_bail(cc, "switch nesting depth"); break; }
+            if (ssp >= BUSTER_FSTMT_FRAMES || sw_sp >= 16u || break_sp >= 64u) { fast_cc_bail(cc, "switch nesting depth"); break; }
             cc->pos += 1u;
             if (fast_cc_peek(cc) != FTOK_LPAREN) { fast_cc_bail(cc, "expected ( after switch"); break; }
             cc->pos += 1u;
@@ -10843,6 +11048,7 @@ static bool fast_cc_compile_unit(FastCCState* cc)
                                      (ds.is_inline && !ds.is_extern) ? 3u : 0u;
                 // Reuse existing prototype FastSym if present at file scope!
                 uint32_t si = (dr.name_id < cc->env_cap) ? cc->sym_cur[dr.name_id] : 0u;
+                const uint8_t declared = (uint8_t)(si != 0 && cc->syms[si].kind == FSYM_FUNC);
                 if (si != 0 && cc->syms[si].kind == FSYM_FUNC)
                 {
                     // A pending inline definition allows a later one only as GNU's idiom: its extern inline one,
@@ -10914,8 +11120,8 @@ static bool fast_cc_compile_unit(FastCCState* cc)
                     if (deferred_count < BUSTER_FDEFERRED_LIMIT)
                     {
                         deferred[deferred_count] = (FastBodyTask){
-                            .sym_idx = si, .body_start = cc->pos,
-                            .param_names_start = dr.param_names_start, .param_count = dr.param_count,
+                            .sym_idx = si, .decl_start = tu_loop_pos, .body_start = cc->pos,
+                            .param_names_start = dr.param_names_start, .param_count = dr.param_count, .declared = declared,
                             .previous_task = cc->syms[si].deferred_task,
                         };
                         if (cc->syms[si].referenced == 1u && decide == 0) { fast_cc_ready_task(cc, deferred_count); }
@@ -10924,12 +11130,17 @@ static bool fast_cc_compile_unit(FastCCState* cc)
                     else { fast_cc_bail(cc, "too many inline functions"); break; }
                     // #3577: checked here, in its own scope, whether used or not.
                     if ((use_flags & BUSTER_FSYM_UNSUPPORTED) != 0) { fast_cc_bail(cc, "unsupported type in an inline definition"); break; }
+                    // (Its __PRETTY_FUNCTION__ reads the definition's tokens, as the compile does.)
+                    cc->cur_func_decl_pos = tu_loop_pos;
+                    cc->cur_func_declared = declared;
                     fast_cc_check_body(cc, si, dr.param_names_start, dr.param_count);
                     cc->pos = bscan.end_pos + 1u;
                 }
                 else
                 {
                     if (ds.is_unsupported_type) { fast_cc_bail(cc, "unsupported type in func def"); break; }
+                    cc->cur_func_decl_pos = tu_loop_pos;
+                    cc->cur_func_declared = declared;
                     fast_cc_compile_func(cc, si, dr.param_names_start, dr.param_count);
                 }
                 ended_by_body = true;
@@ -11170,6 +11381,8 @@ static bool fast_cc_compile_unit(FastCCState* cc)
         {
             if ((sym->use_flags & BUSTER_FSYM_UNSUPPORTED) != 0) { fast_cc_bail(cc, "called unsupported static inline"); break; }
             cc->pos = task->body_start;
+            cc->cur_func_decl_pos = task->decl_start;
+            cc->cur_func_declared = task->declared;
             fast_cc_compile_func(cc, task->sym_idx, task->param_names_start, task->param_count);
         }
     }

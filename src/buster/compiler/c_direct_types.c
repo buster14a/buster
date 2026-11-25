@@ -234,10 +234,12 @@ typedef struct FastBodyTask FastBodyTask;
 struct FastBodyTask
 {
     uint32_t sym_idx;
+    uint32_t decl_start;   // token index of the definition's specifiers (__PRETTY_FUNCTION__, #3592)
     uint32_t body_start;   // token index of '{'
     uint32_t param_names_start;
     uint16_t param_count;
     uint16_t previous_task;
+    uint8_t declared;      // a declaration came before the definition (__PRETTY_FUNCTION__)
 };
 
 #define BUSTER_FDEFERRED_LIMIT 4096u
@@ -321,6 +323,10 @@ struct FastCCState
     uint32_t id_builtin_huge_val;  // HUGE_VAL, __builtin_inf's value (#3592)
     uint32_t id_builtin_huge_valf;
     uint32_t id_builtin_inf;
+    uint32_t id_builtin_ceil;      // computed inline, as the full pipeline does (#3592)
+    uint32_t id_builtin_floor;
+    uint32_t id_builtin_ceilf;
+    uint32_t id_builtin_floorf;
     uint32_t id_builtin_nanf;
     uint32_t id_builtin_nan;
     uint32_t id_builtin_expect;
@@ -341,6 +347,8 @@ struct FastCCState
     uint32_t id_atomic_store_n;
     uint32_t id_main;
     uint32_t id_pretty_function; // __PRETTY_FUNCTION__, which shares __func__'s token kind (#3618)
+    uint32_t id_assert_fail;     // glibc's assert's (#3592)
+    uint32_t id_void;
     FastType va_list_type; // __builtin_va_list (array[1] of struct __va_list_tag)
     FastType va_list_tag_type;
 
@@ -358,6 +366,11 @@ struct FastCCState
     // Current function state (for c_direct_cc.c)
     uint32_t cur_func_sym;
     uint32_t cur_func_name_id;
+    uint32_t cur_func_decl_pos;    // the definition's first token, its specifiers' (__PRETTY_FUNCTION__, #3592)
+    uint32_t cur_func_body_pos;    // its body's `{`
+    const char* cur_func_pretty;   // its __PRETTY_FUNCTION__ once printed (c_direct_pretty.c), else NULL
+    uint32_t cur_func_pretty_length;
+    uint8_t cur_func_declared;     // a declaration came before the definition
     FastType cur_ret_type;
     uint32_t cur_ret_label;
     int32_t cur_sret_off;      // [rbp + cur_sret_off] hidden pointer for >16B struct return (0 if none)
@@ -2716,8 +2729,19 @@ static BUSTER_DIRECT_HOT bool fast_cc_parse_declarator(FastCCState* cc, FastType
                             cc->pos += 2u; // `(*`
                             uint32_t extra_ptrs = 1u;
                             while (fast_cc_peek(cc) == FTOK_STAR) { extra_ptrs += 1u; cc->pos += 1u; }
-                            // #3577: a qualifier of the pointer, or an array of them, which this form drops.
-                            if (fast_cc_peek(cc) == FTOK_KW_CONST || fast_cc_peek(cc) == FTOK_KW_RESTRICT || fast_cc_peek(cc) == FTOK_KW_VOLATILE)
+                            // #3577: a const or volatile of the pointer the parameter is (`int (* const p)(void)`), which
+                            // its type keeps for an assignment's check; one before another `*` (an inner pointer's) this
+                            // form would drop.
+                            bool fp_const = false;
+                            bool fp_volatile = false;
+                            while (fast_cc_peek(cc) == FTOK_KW_CONST || fast_cc_peek(cc) == FTOK_KW_VOLATILE)
+                            {
+                                fp_const = fp_const || fast_cc_peek(cc) == FTOK_KW_CONST;
+                                fp_volatile = fp_volatile || fast_cc_peek(cc) == FTOK_KW_VOLATILE;
+                                cc->pos += 1u;
+                            }
+                            // A restrict of a function's pointer is the full pipeline's error.
+                            if (fast_cc_peek(cc) == FTOK_STAR || fast_cc_peek(cc) == FTOK_KW_RESTRICT)
                             {
                                 fast_cc_bail(cc, "qualified function-pointer parameter");
                                 break;
@@ -2830,6 +2854,8 @@ static BUSTER_DIRECT_HOT bool fast_cc_parse_declarator(FastCCState* cc, FastType
                                     cc->ctypes[fp_cidx].complete = 1u;
                                     pt = ftype_from_index(cc, fp_cidx);
                                     for (uint32_t ep = 0; ep < extra_ptrs; ep += 1) { pt = ftype_make_ptr(cc, pt); }
+                                    if (fp_const) { pt = ftype_with_const(pt); }
+                                    if (fp_volatile) { pt = ftype_with_volatile(pt); }
                                     if (is_arr_fp) { pt = ftype_make_ptr(cc, pt); }
                                 }
                             }
@@ -2848,18 +2874,23 @@ static BUSTER_DIRECT_HOT bool fast_cc_parse_declarator(FastCCState* cc, FastType
                             declared_array = 1u;
                             uint32_t dims[8];
                             uint32_t ndim = 0;
+                            bool pointer_const = false;
+                            bool pointer_volatile = false;
                             while (fast_cc_peek(cc) == FTOK_LBRACKET && ndim < 8u)
                             {
                                 cc->pos += 1u;
-                                // #3577: a qualifier or static belongs to a parameter's first dimension alone.
+                                // #3577: a qualifier or static belongs to a parameter's first dimension alone, and its
+                                // const and volatile qualify the pointer the parameter is (`int x[const 3]` is an
+                                // `int *const x`, which an assignment checks).
                                 while (fast_cc_peek(cc) == FTOK_KW_STATIC || fast_cc_peek(cc) == FTOK_KW_CONST ||
                                        fast_cc_peek(cc) == FTOK_KW_RESTRICT || fast_cc_peek(cc) == FTOK_KW_VOLATILE)
                                 {
-                                    // const and volatile would qualify the parameter's pointer, which this form drops.
-                                    if (ndim != 0 || fast_cc_peek(cc) == FTOK_KW_CONST || fast_cc_peek(cc) == FTOK_KW_VOLATILE)
+                                    if (ndim != 0)
                                     {
                                         fast_cc_bail(cc, "qualifier in a parameter's array declarator");
                                     }
+                                    pointer_const = pointer_const || fast_cc_peek(cc) == FTOK_KW_CONST;
+                                    pointer_volatile = pointer_volatile || fast_cc_peek(cc) == FTOK_KW_VOLATILE;
                                     cc->pos += 1u;
                                 }
                                 uint32_t dc = UINT32_MAX;
@@ -2899,6 +2930,8 @@ static BUSTER_DIRECT_HOT bool fast_cc_parse_declarator(FastCCState* cc, FastType
                                 }
                             }
                             pt = ftype_make_ptr(cc, pt);
+                            if (pointer_const) { pt = ftype_with_const(pt); }
+                            if (pointer_volatile) { pt = ftype_with_volatile(pt); }
                         }
                         fast_cc_parse_attributes(cc, NULL);
                         // Array typedef param decays to pointer (e.g. `va_list ap`!)
@@ -3898,6 +3931,10 @@ static bool fast_cc_init_state(FastCCState* cc, FastArena* arena, FastArena* scr
         cc->id_builtin_ctz = fast_ident_intern_cstr(&pp->idents, "__builtin_ctz");
         cc->id_builtin_inff = fast_ident_intern_cstr(&pp->idents, "__builtin_inff");
         cc->id_builtin_inf = fast_ident_intern_cstr(&pp->idents, "__builtin_inf");
+        cc->id_builtin_ceil = fast_ident_intern_cstr(&pp->idents, "__builtin_ceil");
+        cc->id_builtin_floor = fast_ident_intern_cstr(&pp->idents, "__builtin_floor");
+        cc->id_builtin_ceilf = fast_ident_intern_cstr(&pp->idents, "__builtin_ceilf");
+        cc->id_builtin_floorf = fast_ident_intern_cstr(&pp->idents, "__builtin_floorf");
         cc->id_builtin_huge_val = fast_ident_intern_cstr(&pp->idents, "__builtin_huge_val");
         cc->id_builtin_huge_valf = fast_ident_intern_cstr(&pp->idents, "__builtin_huge_valf");
         cc->id_builtin_nanf = fast_ident_intern_cstr(&pp->idents, "__builtin_nanf");
@@ -3919,6 +3956,8 @@ static bool fast_cc_init_state(FastCCState* cc, FastArena* arena, FastArena* scr
         cc->id_atomic_load_n = fast_ident_intern_cstr(&pp->idents, "__atomic_load_n");
         cc->id_atomic_store_n = fast_ident_intern_cstr(&pp->idents, "__atomic_store_n");
         cc->id_main = fast_ident_intern_cstr(&pp->idents, "main");
+        cc->id_assert_fail = fast_ident_intern_cstr(&pp->idents, "__assert_fail");
+        cc->id_void = fast_ident_intern_cstr(&pp->idents, "void");
         cc->id_pretty_function = fast_ident_intern_cstr(&pp->idents, "__PRETTY_FUNCTION__");
         cc->ro_sign_f32_off = UINT32_MAX;
         cc->ro_sign_f64_off = UINT32_MAX;

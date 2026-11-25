@@ -2907,36 +2907,381 @@ static bool c_direct_test_huge_val(const char* obj_path)
 
 typedef int (*CDirectTestNone)(void);
 
-// __PRETTY_FUNCTION__ is the function's signature in C, as clang prints it, and the full pipeline prints it (#3618): a
-// unit that names it leaves, through a macro, in a sizeof and in a dead arm too. __func__ and __FUNCTION__ are the name.
+// The object file at `path` whole, malloc'd, its size into *size; NULL if it can't be read.
+static uint8_t* c_direct_test_file(const char* path, size_t* size)
+{
+    FILE* file = fopen(path, "rb");
+    uint8_t* bytes = NULL;
+    long length = 0;
+    if (file != NULL && fseek(file, 0, SEEK_END) == 0 && (length = ftell(file)) > (long)sizeof(Elf64_Ehdr) && fseek(file, 0, SEEK_SET) == 0)
+    {
+        bytes = (uint8_t*)malloc((size_t)length);
+        if (bytes != NULL && fread(bytes, 1, (size_t)length, file) != (size_t)length)
+        {
+            free(bytes);
+            bytes = NULL;
+        }
+    }
+    if (file != NULL)
+    {
+        fclose(file);
+    }
+    *size = bytes != NULL ? (size_t)length : 0u;
+    return bytes;
+}
+
+// The bytes of the section named `name` in an object's bytes, their count into *size; NULL without one.
+static const uint8_t* c_direct_test_section(const uint8_t* bytes, size_t size, const char* name, size_t* section_size)
+{
+    const uint8_t* result = NULL;
+    *section_size = 0;
+    const Elf64_Ehdr* header = (const Elf64_Ehdr*)bytes;
+    const bool sections = bytes != NULL && header->e_shoff + (uint64_t)header->e_shnum * sizeof(Elf64_Shdr) <= (uint64_t)size && header->e_shstrndx < header->e_shnum;
+    const Elf64_Shdr* table = sections ? (const Elf64_Shdr*)(bytes + header->e_shoff) : NULL;
+    for (uint16_t i = 0; sections && i < header->e_shnum && result == NULL; i += 1)
+    {
+        const uint64_t at = table[header->e_shstrndx].sh_offset + table[i].sh_name;
+        if (at + strlen(name) + 1u <= (uint64_t)size && strcmp((const char*)bytes + at, name) == 0 && table[i].sh_offset + table[i].sh_size <= (uint64_t)size)
+        {
+            result = bytes + table[i].sh_offset;
+            *section_size = (size_t)table[i].sh_size;
+        }
+    }
+    return result;
+}
+
+// __PRETTY_FUNCTION__ is the function's signature in C as clang prints it (#3618, #3592). The 32 strings are clang
+// 23's for the definitions in `source`, which the full pipeline prints alike; the lengths run in this process. A
+// definition the printer doesn't take, or that clang and the full pipeline print differently (a parenthesized name, `()`
+// after a declaration, a parameter's redundant parentheses), leaves. __func__ and __FUNCTION__ are the name.
 static bool c_direct_test_pretty_function(const char* obj_path)
 {
-    static const char* const leaves[] = {
-        "const char *f(int x) { return __PRETTY_FUNCTION__; }\n",
-        "unsigned long f(void) { return sizeof(__PRETTY_FUNCTION__); }\n",
-        "#define WHERE __PRETTY_FUNCTION__\nconst char *f(void) { return WHERE; }\n",
-        "const char *f(int x) { return 1 ? __func__ : __PRETTY_FUNCTION__; }\n",
+    static const char source[] =
+        "typedef struct Q Qrf;\n"
+        "typedef unsigned long long u64;\n"
+        "typedef int (*cb_t)(void*, int);\n"
+        "typedef int fn_t(int);\n"
+        "typedef __builtin_va_list va_list;\n"
+        "struct S { int a; };\n"
+        "union U { int a; };\n"
+        "enum E { E0 };\n"
+        "const char *names[33];\n"
+        "void p01(int a) { names[1] = __PRETTY_FUNCTION__; }\n"
+        "void p02(Qrf *p, const char *z, int a[10], unsigned long n) { names[2] = __PRETTY_FUNCTION__; }\n"
+        "int p03(void) { names[3] = __PRETTY_FUNCTION__; return 0; }\n"
+        "int p04() { names[4] = __PRETTY_FUNCTION__; return 0; }\n"
+        "void p05(int n, ...) { names[5] = __PRETTY_FUNCTION__; }\n"
+        "int (*p06(int x))(int) { names[6] = __PRETTY_FUNCTION__; return 0; }\n"
+        "void p07(const volatile int *p, int *restrict q, int *const r, char **argv, void *v, const void *cv) { names[7] = __PRETTY_FUNCTION__; }\n"
+        "const int p08(void) { names[8] = __PRETTY_FUNCTION__; return 0; }\n"
+        "const char *const p09(void) { names[9] = __PRETTY_FUNCTION__; return 0; }\n"
+        "void (*p10(int sig, void (*func)(int)))(int) { names[10] = __PRETTY_FUNCTION__; return 0; }\n"
+        "int (*p11(void))[3] { names[11] = __PRETTY_FUNCTION__; return 0; }\n"
+        "void p12(fn_t g, int x[const 3], int y[static restrict 2], char z[][2][3]) { names[12] = __PRETTY_FUNCTION__; }\n"
+        "static int p13(int x __attribute__((unused)), unsigned char c, long int l, int long m, unsigned u, signed s, short int si,\n"
+        "               long long int lli, unsigned long long ull) { names[13] = __PRETTY_FUNCTION__; return 0; }\n"
+        // (#3577: named, as the full pipeline wants a definition's parameters before C23; the names aren't printed.)
+        "void p14(void (*f)(void), int (*g)(), char (*h)[]) { names[14] = __PRETTY_FUNCTION__; }\n"
+        "void p15(va_list ap) { names[15] = __PRETTY_FUNCTION__; }\n"
+        "void p16(__builtin_va_list ap) { names[16] = __PRETTY_FUNCTION__; }\n"
+        "void p17(va_list *ap) { names[17] = __PRETTY_FUNCTION__; }\n"
+        "_Bool p18(_Bool b) { names[18] = __PRETTY_FUNCTION__; return b; }\n"
+        "void p19(signed char a, char b, unsigned char c, short d, unsigned short e) { names[19] = __PRETTY_FUNCTION__; }\n"
+        "void p20(enum E e, union U *u, struct S s) { names[20] = __PRETTY_FUNCTION__; }\n"
+        "void p21(const Qrf *p, Qrf const *q, Qrf *const r) { names[21] = __PRETTY_FUNCTION__; }\n"
+        "char *(*p22(int a))[4] { names[22] = __PRETTY_FUNCTION__; return 0; }\n"
+        "void p23(int (*fp)(int (*)(int), char *)) { names[23] = __PRETTY_FUNCTION__; }\n"
+        "void p24(int *(*arr)[5]) { names[24] = __PRETTY_FUNCTION__; }\n"
+        "void p25(char x[], const char y[], char *z[]) { names[25] = __PRETTY_FUNCTION__; }\n"
+        "void p26(int a[0x10], int b[2u]) { names[26] = __PRETTY_FUNCTION__; }\n"
+        "u64 *p27(cb_t cb) { names[27] = __PRETTY_FUNCTION__; return 0; }\n"
+        "void p28(int (* const p)(void)) { names[28] = __PRETTY_FUNCTION__; }\n"
+        "void p29(__int128 a, unsigned __int128 b) { names[29] = __PRETTY_FUNCTION__; }\n"
+        "static __inline__ float p30(float a, double b) { names[30] = __PRETTY_FUNCTION__; return a; }\n"
+        "int use(void) { return p13(0, 0, 0, 0, 0, 0, 0, 0, 0) + (int)p30(0, 0); }\n"
+        "void p31(int (*fp)(int, ...), int n, ...) { names[31] = __PRETTY_FUNCTION__; }\n"
+        "void p32(const char *const *volatile pp, int *restrict *q) { names[32] = __PRETTY_FUNCTION__; }\n";
+    static const char* const expected[] = {
+        "void p01(int)",
+        "void p02(Qrf *, const char *, int *, unsigned long)",
+        "int p03(void)",
+        "int p04()",
+        "void p05(int, ...)",
+        "int (*p06(int))(int)",
+        "void p07(const volatile int *, int *restrict, int *const, char **, void *, const void *)",
+        "const int p08(void)",
+        "const char *const p09(void)",
+        "void (*p10(int, void (*)(int)))(int)",
+        "int (*p11(void))[3]",
+        "void p12(fn_t *, int *const, int *restrict, char (*)[2][3])",
+        "int p13(int, unsigned char, long, long, unsigned int, int, short, long long, unsigned long long)",
+        "void p14(void (*)(void), int (*)(), char (*)[])",
+        "void p15(struct __va_list_tag *)",
+        "void p16(struct __va_list_tag *)",
+        "void p17(va_list *)",
+        "_Bool p18(_Bool)",
+        "void p19(signed char, char, unsigned char, short, unsigned short)",
+        "void p20(enum E, union U *, struct S)",
+        "void p21(const Qrf *, const Qrf *, Qrf *const)",
+        "char *(*p22(int))[4]",
+        "void p23(int (*)(int (*)(int), char *))",
+        "void p24(int *(*)[5])",
+        "void p25(char *, const char *, char **)",
+        "void p26(int *, int *)",
+        "u64 *p27(cb_t)",
+        "void p28(int (*const)(void))",
+        "void p29(__int128, unsigned __int128)",
+        "float p30(float, double)",
+        "void p31(int (*)(int, ...), int, ...)",
+        "void p32(const char *const *volatile, int *restrict *)",
     };
-    bool ok = true;
-    for (uint32_t i = 0; ok && i < (uint32_t)(sizeof(leaves) / sizeof(leaves[0])); i += 1)
+    bool printed = c_direct_test_compile_source_keep(source, obj_path, NULL, 0, NULL, NULL, NULL);
+    size_t size = 0;
+    uint8_t* bytes = printed ? c_direct_test_file(obj_path, &size) : NULL;
+    size_t strings_size = 0;
+    const uint8_t* strings = c_direct_test_section(bytes, size, ".rodata.str1.1", &strings_size);
+    // Each string, NUL-terminated, and nothing else.
+    size_t total = 0;
+    for (uint32_t i = 0; printed && i < (uint32_t)(sizeof(expected) / sizeof(expected[0])); i += 1)
     {
-        ok = c_direct_test_compile_source(leaves[i], obj_path, 1, NULL, NULL);
-        if (!ok)
+        const size_t length = strlen(expected[i]) + 1u;
+        bool found = false;
+        for (size_t at = 0; strings != NULL && !found && at + length <= strings_size; at += strlen((const char*)strings + at) + 1u)
+        {
+            found = memcmp(strings + at, expected[i], length) == 0;
+        }
+        printed = found;
+        total += length;
+        if (!found)
+        {
+            fprintf(stderr, "test-direct: __PRETTY_FUNCTION__ isn't \"%s\"\n", expected[i]);
+        }
+    }
+    printed = printed && total == strings_size;
+    free(bytes);
+    unlink(obj_path);
+
+    // The lengths, run: sizeof takes the string's.
+    static const char lengths[] =
+        "typedef struct Q Qrf;\n"
+        "int t_short(void) { return (int)sizeof(__PRETTY_FUNCTION__); }\n"
+        "int t_typed(Qrf *p, int a[3]) { return (int)sizeof(__PRETTY_FUNCTION__); }\n"
+        "#define WHERE __PRETTY_FUNCTION__\n"
+        "int t_macro(int x) { return (int)sizeof(WHERE) + x * 0; }\n"
+        "int t_dead(int x) { return 1 ? (int)sizeof(__func__) : (int)sizeof(__PRETTY_FUNCTION__); }\n"
+        "int t_func(void) { return (int)sizeof(__func__); }\n"
+        "int t_function(void) { return (int)sizeof(__FUNCTION__); }\n"
+        "typedef int T;\n"
+        "int t_shadowed(T x) { int T = 3; return (int)sizeof(__PRETTY_FUNCTION__) + T * 0 + x * 0; }\n"
+        "int t_empty() { return (int)sizeof(__PRETTY_FUNCTION__); }\n"
+        "int t_bool(_Bool b) { return (int)sizeof(__PRETTY_FUNCTION__) + b * 0; }\n";
+    // "int t_short(void)", "int t_typed(Qrf *, int *)", "int t_macro(int)", the names, "int t_shadowed(T)" (the
+    // typedef, which a local shadows in the body), and in C17 and C23 "int t_empty()" and "int t_empty(void)", "int
+    // t_bool(_Bool)" and "int t_bool(bool)".
+    bool measured = true;
+    for (uint32_t c23 = 0; measured && c23 < 2u; c23 += 1)
+    {
+        measured = c_direct_test_compile_source_with(lengths, obj_path, 0, NULL, 0, true, NULL, NULL, NULL, NULL, NULL, 0, (CDirectTestMode){ .c23 = c23 != 0 });
+#if !__has_feature(memory_sanitizer)
+        static const int sizes[2][9] = { { 18, 26, 17, 7, 7, 11, 18, 14, 18 }, { 18, 26, 17, 7, 7, 11, 18, 18, 17 } };
+        static const char* const functions[] = { "t_short", "t_typed", "t_macro", "t_dead", "t_func", "t_function", "t_shadowed", "t_empty", "t_bool" };
+        enum { count = sizeof(functions) / sizeof(functions[0]) };
+        void* mappings[count] = { 0 };
+        size_t mapped[count] = { 0 };
+        for (uint32_t i = 0; measured && i < (uint32_t)count; i += 1)
+        {
+            const void* code = c_direct_test_code(obj_path, functions[i], mappings + i, mapped + i);
+            measured = code != NULL && ((CDirectTestNone)(uintptr_t)code)() == sizes[c23][i];
+            if (!measured)
+            {
+                fprintf(stderr, "test-direct: sizeof(__PRETTY_FUNCTION__) in %s isn't %d (C%s)\n", functions[i], sizes[c23][i], c23 != 0 ? "23" : "17");
+            }
+        }
+        for (uint32_t i = 0; i < (uint32_t)count; i += 1)
+        {
+            if (mappings[i] != NULL)
+            {
+                munmap(mappings[i], mapped[i]);
+            }
+        }
+#endif
+        unlink(obj_path);
+    }
+
+    static const char* const leaves[] = {
+        "int (f)(int a) { return (int)sizeof(__PRETTY_FUNCTION__); }\n",
+        "int f(void);\nint f() { return (int)sizeof(__PRETTY_FUNCTION__); }\n",
+        "typedef int arr4[4];\nint f(arr4 a) { return (int)sizeof(__PRETTY_FUNCTION__); }\n",
+        "int f(int a[2 + 1]) { return (int)sizeof(__PRETTY_FUNCTION__); }\n",
+        "int f(struct { int a; } *p) { return (int)sizeof(__PRETTY_FUNCTION__); }\n",
+        "int f(int *p __attribute__((nonnull))) { return (int)sizeof(__PRETTY_FUNCTION__); }\n",
+        "int __attribute__((mode(DI))) f(void) { return (int)sizeof(__PRETTY_FUNCTION__); }\n",
+        "int f(__typeof__(1) a) { return (int)sizeof(__PRETTY_FUNCTION__); }\n",
+        "int f(int g(int)) { return (int)sizeof(__PRETTY_FUNCTION__); }\n",
+        "int f(int (*q)) { return (int)sizeof(__PRETTY_FUNCTION__); }\n",
+        "unsigned long n;\nint ((*f(void)))[3] { n = sizeof(__PRETTY_FUNCTION__); return 0; }\n",
+    };
+    bool left = true;
+    for (uint32_t i = 0; left && i < (uint32_t)(sizeof(leaves) / sizeof(leaves[0])); i += 1)
+    {
+        left = c_direct_test_compile_source(leaves[i], obj_path, 1, NULL, NULL);
+        if (!left)
         {
             fprintf(stderr, "test-direct: __PRETTY_FUNCTION__ took the direct path: %s", leaves[i]);
         }
     }
-    static const char names[] =
-        "int t_func(void) { return (int)sizeof(__func__); }\n"
-        "int t_function(void) { return (int)sizeof(__FUNCTION__); }\n";
-    bool named = c_direct_test_compile_source_keep(names, obj_path, NULL, 0, NULL, NULL, NULL);
+    if (!printed || !measured)
+    {
+        fprintf(stderr, "test-direct: __PRETTY_FUNCTION__ isn't clang's (%s)\n", printed ? "its length" : "its string");
+    }
+    return printed && measured && left;
+}
+
+// glibc's assert in GNU's modes is a statement expression (#3592), which the direct path takes in its one shape by
+// rewriting it as the conditional expression it computes: a unit with the shape, in a statement and in an expression
+// (SQLite's ALWAYS) and in a dead branch, compiles to the object of the same unit with that expression written out. A
+// statement expression of any other shape leaves.
+static bool c_direct_test_assert(const char* obj_path)
+{
+    static const char shaped[] =
+        "extern void __assert_fail(const char *assertion, const char *file, unsigned int line, const char *function);\n"
+        "#define assert(expr) ((void) sizeof ((expr) ? 1 : 0), __extension__ ({ if (expr) ; else __assert_fail (#expr, __FILE__, __LINE__, __extension__ __PRETTY_FUNCTION__); }))\n"
+        "#define ALWAYS(X) ((X) ? 1 : (assert(0), 0))\n"
+        "int t_stmt(int x) { assert(x > 0 && (x & 1) == 0); return x * 3; }\n"
+        "int t_expr(int *p, int x) { return ALWAYS(p != 0) ? p[x] : -x; }\n"
+        "int t_dead(int x) { if (0) { assert(x); } else { x += 1; } return x; }\n"
+        "int t_nested(int x) { assert((x ? x : 1) > 0); assert(x != 3); return x; }\n";
+    static const char written[] =
+        "extern void __assert_fail(const char *assertion, const char *file, unsigned int line, const char *function);\n"
+        "#define assert(expr) ((void) sizeof ((expr) ? 1 : 0), __extension__ ((expr) ? (void) 0 : __assert_fail (#expr, __FILE__, __LINE__, __extension__ __PRETTY_FUNCTION__)))\n"
+        "#define ALWAYS(X) ((X) ? 1 : (assert(0), 0))\n"
+        "int t_stmt(int x) { assert(x > 0 && (x & 1) == 0); return x * 3; }\n"
+        "int t_expr(int *p, int x) { return ALWAYS(p != 0) ? p[x] : -x; }\n"
+        "int t_dead(int x) { if (0) { assert(x); } else { x += 1; } return x; }\n"
+        "int t_nested(int x) { assert((x ? x : 1) > 0); assert(x != 3); return x; }\n";
+    char written_path[300];
+    snprintf(written_path, sizeof(written_path), "%s.written", obj_path);
+    bool ok = c_direct_test_compile_source_keep(shaped, obj_path, NULL, 0, NULL, NULL, NULL) &&
+              c_direct_test_compile_source_keep(written, written_path, NULL, 0, NULL, NULL, NULL);
+    size_t shaped_size = 0;
+    size_t written_size = 0;
+    uint8_t* shaped_bytes = ok ? c_direct_test_file(obj_path, &shaped_size) : NULL;
+    uint8_t* written_bytes = ok ? c_direct_test_file(written_path, &written_size) : NULL;
+    ok = shaped_bytes != NULL && written_bytes != NULL && shaped_size == written_size && memcmp(shaped_bytes, written_bytes, shaped_size) == 0;
+    // And it names __assert_fail and the signatures: the code has its call.
+    size_t strings_size = 0;
+    const uint8_t* strings = c_direct_test_section(shaped_bytes, shaped_size, ".rodata.str1.1", &strings_size);
+    ok = ok && strings != NULL && memmem(strings, strings_size, "int t_expr(int *, int)", 23) != NULL && c_direct_test_symbol(obj_path, "__assert_fail").count == 1u;
+    free(shaped_bytes);
+    free(written_bytes);
+    unlink(obj_path);
+    unlink(written_path);
+    if (!ok)
+    {
+        fprintf(stderr, "test-direct: glibc's assert compiles to another object than its conditional expression\n");
+    }
+    // After a comma, as glibc's has it, where the rewrite would happen: another callee, another statement after the
+    // call, another then branch.
+    static const char* const leaves[] = {
+        "int f(int x) { return ((void)0, __extension__ ({ int y = x; y + 1; })); }\n",
+        "extern void fail(void);\nint f(int x) { return ((void)0, __extension__ ({ if (x) ; else fail(); }), x); }\n",
+        "extern void __assert_fail(void);\nint f(int x) { return ((void)0, __extension__ ({ if (x) ; else __assert_fail(); x; }), x); }\n",
+        "extern void __assert_fail(void);\nint f(int x) { return ((void)0, __extension__ ({ if (x) x += 1; else __assert_fail(); }), x); }\n",
+        "int f(int x) { return ({ x + 1; }); }\n",
+    };
+    bool left = true;
+    for (uint32_t i = 0; left && i < (uint32_t)(sizeof(leaves) / sizeof(leaves[0])); i += 1)
+    {
+        left = c_direct_test_compile_source(leaves[i], obj_path, 1, NULL, NULL);
+        if (!left)
+        {
+            fprintf(stderr, "test-direct: a statement expression took the direct path: %s", leaves[i]);
+        }
+    }
+    return ok && left;
+}
+
+typedef double (*CDirectTestRound)(double);
+typedef float (*CDirectTestRoundf)(float);
+typedef double (*CDirectTestMixed)(double, int);
+typedef long (*CDirectTestLive)(long, double);
+
+// __builtin_ceil, __builtin_floor and their float forms (#3592) are computed inline as the full pipeline computes them:
+// each special input's result, run, is this process's own __builtin_ceil's or __builtin_floor's bits (clang's ceil and
+// floor, which match the full pipeline's helper), MXCSR's DAZ makes a denormal zero, and no exception flag is raised.
+static bool c_direct_test_round(const char* obj_path)
+{
+    static const char source[] =
+        "double t_ceil(double x) { return __builtin_ceil(x); }\n"
+        "double t_floor(double x) { return __builtin_floor(x); }\n"
+        "float t_ceilf(float x) { return __builtin_ceilf(x); }\n"
+        "float t_floorf(float x) { return __builtin_floorf(x); }\n"
+        "double t_mixed(double x, int n) { return __builtin_ceil(n) + __builtin_floor(x + x); }\n"
+        "long t_live(long a, double x) { return a * 3 + (long)__builtin_floor(x) + a * 5; }\n";
+    bool ok = c_direct_test_compile_source_keep(source, obj_path, NULL, 0, NULL, NULL, NULL);
 #if !__has_feature(memory_sanitizer)
-    void* mappings[2] = { 0 };
-    size_t mapped[2] = { 0 };
-    const void* func = named ? c_direct_test_code(obj_path, "t_func", mappings + 0, mapped + 0) : NULL;
-    const void* function = named ? c_direct_test_code(obj_path, "t_function", mappings + 1, mapped + 1) : NULL;
-    named = func != NULL && function != NULL && ((CDirectTestNone)(uintptr_t)func)() == 7 && ((CDirectTestNone)(uintptr_t)function)() == 11;
-    for (uint32_t i = 0; i < 2u; i += 1)
+    static const char* const names[] = { "t_ceil", "t_floor", "t_ceilf", "t_floorf", "t_mixed", "t_live" };
+    enum { count = sizeof(names) / sizeof(names[0]) };
+    void* mappings[count] = { 0 };
+    size_t mapped[count] = { 0 };
+    const void* code[count] = { 0 };
+    for (uint32_t i = 0; ok && i < (uint32_t)count; i += 1)
+    {
+        code[i] = c_direct_test_code(obj_path, names[i], mappings + i, mapped + i);
+        ok = code[i] != NULL;
+    }
+    static const uint64_t inputs[] = {
+        UINT64_C(0x7ff8000000000001), UINT64_C(0x7ff0000000000001), UINT64_C(0xfff4000000000000), UINT64_C(0x7ff0000000000000),
+        UINT64_C(0xfff0000000000000), UINT64_C(0), UINT64_C(0x8000000000000000), UINT64_C(1), UINT64_C(0x8000000000000001),
+        UINT64_C(0x000fffffffffffff), UINT64_C(0x3fe0000000000000), UINT64_C(0xbfe0000000000000), UINT64_C(0x3ff8000000000000),
+        UINT64_C(0xbff8000000000000), UINT64_C(0x4330000000000000), UINT64_C(0x432fffffffffffff), UINT64_C(0xc32fffffffffffff),
+        UINT64_C(0x3ff0000000000000), UINT64_C(0x400c000000000000), UINT64_C(0xc00c000000000000), UINT64_C(0x4415af1d78b58c40),
+        UINT64_C(0x3fefffffffffffff), UINT64_C(0xbfefffffffffffff), UINT64_C(0x3f50624dd2f1a9fc), UINT64_C(0xc0c3880000000001),
+    };
+    const unsigned int csr = _mm_getcsr();
+    for (uint32_t daz = 0; ok && daz < 2u; daz += 1)
+    {
+        for (uint32_t i = 0; ok && i < (uint32_t)(sizeof(inputs) / sizeof(inputs[0])); i += 1)
+        {
+            double bits = 0;
+            memcpy(&bits, &inputs[i], 8);
+            const volatile double x = bits;
+            const volatile float xf = (float)bits;
+            // This process's own results, in its default mode and stored before MXCSR changes: clang moves a
+            // computation it takes as pure across _mm_setcsr. With DAZ, a denormal is a zero of its sign.
+            const bool denormal = (inputs[i] & UINT64_C(0x7ff0000000000000)) == 0 && (inputs[i] & UINT64_C(0x000fffffffffffff)) != 0;
+            const uint64_t zero = inputs[i] & UINT64_C(0x8000000000000000);
+            double zero_value = 0;
+            memcpy(&zero_value, &zero, 8);
+            const volatile double ceil_theirs = daz != 0 && denormal ? zero_value : __builtin_ceil(x);
+            const volatile double floor_theirs = daz != 0 && denormal ? zero_value : __builtin_floor(x);
+            const volatile float ceilf_theirs = __builtin_ceilf(xf);
+            const volatile float floorf_theirs = __builtin_floorf(xf);
+            _mm_setcsr((csr & ~0x3fu & ~0x40u) | (daz != 0 ? 0x40u : 0u));
+            const double ceil_ours = ((CDirectTestRound)(uintptr_t)code[0])(x);
+            const double floor_ours = ((CDirectTestRound)(uintptr_t)code[1])(x);
+            const float ceilf_ours = ((CDirectTestRoundf)(uintptr_t)code[2])(xf);
+            const float floorf_ours = ((CDirectTestRoundf)(uintptr_t)code[3])(xf);
+            const unsigned int raised = _mm_getcsr() & 0x3fu;
+            _mm_setcsr(csr);
+            // The flags the inputs' signaling NaNs raise (invalid, once each way) are clang's too; none other is.
+            const bool signaling = (inputs[i] & UINT64_C(0x7ff8000000000000)) == UINT64_C(0x7ff0000000000000) && (inputs[i] & UINT64_C(0x000fffffffffffff)) != 0;
+            const double ceil_expected = ceil_theirs;
+            const double floor_expected = floor_theirs;
+            const float ceilf_expected = ceilf_theirs;
+            const float floorf_expected = floorf_theirs;
+            ok = memcmp(&ceil_ours, &ceil_expected, 8) == 0 && memcmp(&floor_ours, &floor_expected, 8) == 0 && memcmp(&ceilf_ours, &ceilf_expected, 4) == 0 &&
+                 memcmp(&floorf_ours, &floorf_expected, 4) == 0 && (signaling || raised == 0);
+            if (!ok)
+            {
+                fprintf(stderr, "test-direct: ceil or floor of %016llx (DAZ %u) differs (flags %#x)\n", (unsigned long long)inputs[i], daz, raised);
+            }
+        }
+    }
+    // An int argument converted, an expression's, and a value live in a register across the sequence.
+    ok = ok && ((CDirectTestMixed)(uintptr_t)code[4])(-2.75, -2) == -8.0 && ((CDirectTestMixed)(uintptr_t)code[4])(7.5, 7) == 22.0 &&
+         ((CDirectTestLive)(uintptr_t)code[5])(7, 2.5) == 58;
+    for (uint32_t i = 0; i < (uint32_t)count; i += 1)
     {
         if (mappings[i] != NULL)
         {
@@ -2945,11 +3290,72 @@ static bool c_direct_test_pretty_function(const char* obj_path)
     }
 #endif
     unlink(obj_path);
-    if (!named)
+    static const char* const leaves[] = {
+        "double f(void) { return __builtin_ceil(1.0, 2.0); }\n",
+        "double f(int *p) { return __builtin_floor(p); }\n",
+        "struct s { int a; };\ndouble f(struct s v) { return __builtin_ceil(v); }\n",
+    };
+    bool left = true;
+    for (uint32_t i = 0; left && i < (uint32_t)(sizeof(leaves) / sizeof(leaves[0])); i += 1)
     {
-        fprintf(stderr, "test-direct: __func__ or __FUNCTION__ isn't the name\n");
+        left = c_direct_test_compile_source(leaves[i], obj_path, 1, NULL, NULL);
+        if (!left)
+        {
+            fprintf(stderr, "test-direct: a ceil or floor that clang refuses took the direct path: %s", leaves[i]);
+        }
     }
-    return ok && named;
+    if (!ok)
+    {
+        fprintf(stderr, "test-direct: ceil and floor aren't the full pipeline's\n");
+    }
+    return ok && left;
+}
+
+typedef int (*CDirectTestChain)(int);
+
+// A function's statements nest up to BUSTER_FSTMT_FRAMES frames (#3592): an `else if` chain takes one a branch, and
+// SQLite's shell.c's do_meta_command has 72. A chain of 200 compiles and runs; one of 300 leaves.
+static bool c_direct_test_statement_depth(const char* obj_path)
+{
+    bool ok = true;
+    for (uint32_t round = 0; ok && round < 2u; round += 1)
+    {
+        const uint32_t branches = round == 0 ? 200u : 300u;
+        char* source = (char*)malloc(64u * branches + 128u);
+        ok = source != NULL;
+        size_t length = 0;
+        if (ok)
+        {
+            length += (size_t)sprintf(source + length, "int t_chain(int x)\n{\n    if (x == 0) { return 1000; }\n");
+            for (uint32_t i = 1; i < branches; i += 1)
+            {
+                length += (size_t)sprintf(source + length, "    else if (x == %u) { return %u; }\n", i, 1000u + i * 3u);
+            }
+            sprintf(source + length, "    else { return -1; }\n}\n");
+            ok = round == 0 ? c_direct_test_compile_source_keep(source, obj_path, NULL, 0, NULL, NULL, NULL) : c_direct_test_compile_source(source, obj_path, 1, NULL, NULL);
+        }
+#if !__has_feature(memory_sanitizer)
+        if (ok && round == 0)
+        {
+            void* mapping = NULL;
+            size_t mapped = 0;
+            const void* code = c_direct_test_code(obj_path, "t_chain", &mapping, &mapped);
+            ok = code != NULL && ((CDirectTestChain)(uintptr_t)code)(0) == 1000 && ((CDirectTestChain)(uintptr_t)code)(150) == 1450 &&
+                 ((CDirectTestChain)(uintptr_t)code)(199) == 1597 && ((CDirectTestChain)(uintptr_t)code)(200) == -1;
+            if (mapping != NULL)
+            {
+                munmap(mapping, mapped);
+            }
+        }
+#endif
+        unlink(obj_path);
+        free(source);
+        if (!ok)
+        {
+            fprintf(stderr, "test-direct: an else-if chain of %u branches %s\n", branches, round == 0 ? "didn't compile and run" : "took the direct path");
+        }
+    }
+    return ok;
 }
 
 typedef int (*CDirectTestThree)(int, int, int);
@@ -4275,6 +4681,36 @@ static int c_direct_unit_tests(void)
     else
     {
         fprintf(stderr, "test-direct: FAIL __PRETTY_FUNCTION__\n");
+        failed += 1u;
+    }
+
+    if (c_direct_test_assert(obj_path))
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL glibc's assert\n");
+        failed += 1u;
+    }
+
+    if (c_direct_test_round(obj_path))
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL ceil and floor\n");
+        failed += 1u;
+    }
+
+    if (c_direct_test_statement_depth(obj_path))
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL statement nesting\n");
         failed += 1u;
     }
 
