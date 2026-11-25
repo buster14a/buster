@@ -4095,23 +4095,25 @@ static __attribute__((noinline)) void fast_pp_handle_define(FastPP* pp, FastIncl
         }
         memmove(body, body + at, (size_t)(line_count - at) * sizeof(FastTok));
     }
-    // Each body token written again whole: the first without the space before it, a function-like macro's names
-    // with their parameter's number (0 for none).
     const uint32_t body_count = line_count - at;
     bool has_ops = false;
+    // The first token without the space before it. Its one-byte store doesn't forward to the loop's load of the whole
+    // token, but writing every token again whole measured 0.04 ms slower on sqlite3.c's 5,757 defines (#3584).
+    if (body_count != 0)
+    {
+        body[0].flags &= (uint8_t)~(BUSTER_FTOK_SPACE | BUSTER_FTOK_BOL);
+    }
     for (uint32_t i = 0; i < body_count; i += 1)
     {
         const FastTok bt = body[i];
-        const uint32_t flags = i == 0 ? bt.flags & ~(BUSTER_FTOK_SPACE | BUSTER_FTOK_BOL) : bt.flags;
-        uint32_t extra = bt.extra;
         has_ops = has_ops || bt.kind == FTOK_HASH || bt.kind == FTOK_HASHHASH;
         if (is_func && (bt.kind == FTOK_IDENT || (bt.kind >= 64u && bt.kind < 126u)))
         {
-            extra = 0;
+            uint16_t extra = 0;
             if (is_variadic && (pp->idents.entries[bt.data].pp_kw == FPP_KW_VA_ARGS ||
                                 (vararg_name != 0 && bt.data == vararg_name)))
             {
-                extra = param_count + 1u;
+                extra = (uint16_t)(param_count + 1u);
             }
             else if (is_variadic && pp->idents.entries[bt.data].pp_kw == FPP_KW_VA_OPT)
             {
@@ -4120,17 +4122,17 @@ static __attribute__((noinline)) void fast_pp_handle_define(FastPP* pp, FastIncl
             }
             else
             {
-                for (uint32_t k = 0; k < param_count; k += 1)
+                for (uint16_t k = 0; k < param_count; k += 1)
                 {
                     if (params[k] == bt.data)
                     {
-                        extra = k + 1u;
+                        extra = (uint16_t)(k + 1u);
                         break;
                     }
                 }
             }
+            body[i] = fast_tok_make(bt.kind, bt.flags, extra, bt.data);
         }
-        body[i] = fast_tok_make(bt.kind, flags, extra, bt.data);
     }
     pp->macro_tok_count = body_start + body_count;
     fast_pp_skip_to_eol(f);
