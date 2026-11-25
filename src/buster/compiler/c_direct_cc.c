@@ -3665,6 +3665,42 @@ static uint8_t fast_cc_local_fold_class(const FastCCState* cc, FastType t, uint3
     return result;
 }
 
+// #3577: an automatic object's rules, which a block's declaration and a for clause's take alike. Blocks, not functions,
+// whose counters would tick at every local.
+//
+// The fold class of local LSI of TYPE just initialized from tokens [START, cc->pos), where it is const (or an array,
+// whose element may be): a divisor naming it reads it (fast_cc_local_fold_class).
+#define BUSTER_FAST_LOCAL_FOLD(cc, lsi, type, start) \
+    { \
+        const uint32_t lf_complex = UINT32_C(0) - ((uint32_t)(type) >> 31); \
+        const uint32_t lf_foldable = (uint32_t)(((type) & BUSTER_FTYPE_CONST) != 0) | \
+                                     (uint32_t)((cc)->ctypes[(type) & BUSTER_FTYPE_CIDX_MASK & lf_complex].kind == FCTYPE_ARRAY); \
+        if ((lf_foldable & (uint32_t)((lsi) != 0)) != 0) \
+        { \
+            (cc)->syms[lsi].pad_sym[1] = fast_cc_local_fold_class((cc), (type), (start), (cc)->pos); \
+        } \
+    }
+// RESULT: 1 where an object of TYPE left uninitialized is the full pipeline's -Wdefault-const-init-var-unsafe or
+// -field-unsafe (a const object, a struct or union with a const member, an array of const elements: a multidimensional
+// array's element is found by ftype_is_object_const's loop), else 0.
+#define BUSTER_FAST_UNINITIALIZED_CONST(cc, type, result) \
+    { \
+        const uint32_t uc_object = (uint32_t)((uint32_t)(type) >> 31) & (uint32_t)(((type) & BUSTER_FTYPE_PTR_MASK) == 0); \
+        const FastComplexType* uc_ct = (cc)->ctypes + ((type) & BUSTER_FTYPE_CIDX_MASK & (UINT32_C(0) - uc_object)); \
+        const uint32_t uc_record_const = uc_object & (uint32_t)uc_ct->has_const_mbr & \
+                                         ((uint32_t)(uc_ct->kind == FCTYPE_STRUCT) | (uint32_t)(uc_ct->kind == FCTYPE_UNION)); \
+        const uint32_t uc_array = uc_object & (uint32_t)(uc_ct->kind == FCTYPE_ARRAY); \
+        const FastType uc_element = uc_ct->inner; \
+        const uint32_t uc_element_complex = BUSTER_FTYPE_COMPLEX_ALL(uc_element); \
+        const uint32_t uc_element_array = (uc_element_complex & 1u) & (uint32_t)((uc_element & BUSTER_FTYPE_PTR_MASK) == 0) & \
+                                          (uint32_t)((cc)->ctypes[uc_element & BUSTER_FTYPE_CIDX_MASK & uc_element_complex].kind == FCTYPE_ARRAY); \
+        (result) = (uint32_t)(((type) & BUSTER_FTYPE_CONST) != 0) | uc_record_const | (uc_array & (uint32_t)((uc_element & BUSTER_FTYPE_CONST) != 0)); \
+        if ((uc_array & uc_element_array) != 0) \
+        { \
+            (result) |= (uint32_t)ftype_is_object_const((cc), (type)); \
+        } \
+    }
+
 // #3577: whether a `+`'s operands are what the full pipeline's -Wstring-plus-int or -Wstring-plus-char reports (clang's
 // diagnoseStringPlusInt and diagnoseStringPlusChar): an unparenthesized string literal (op FTOK_STR_LIT) and an integer
 // (an enumeration or _Bool included), or an unparenthesized character literal (op FTOK_CHAR_LIT) and a pointer to, or an
@@ -5123,6 +5159,46 @@ struct FastExprOp
     uint8_t seq_mid2;
 };
 
+// #3577: whether compound literal CL stores its element of type ELEMENT at its position (extra: a member's index or an
+// element's) as the full pipeline does, quietly: within CL's type (a scalar's one element, an array's count, a record's
+// members; past them, -Wexcess-initializers), into a scalar or a record of the element's own type (an array or another
+// record would take its elements by brace elision, which this path doesn't do), and over nothing an earlier element
+// initialized (-Winitializer-overrides: fast_cc_init_overrides, from the positional element before a designator, lbl0,
+// and the positions initialized, lbl1 and lbl2, which it marks). The next positional element is then past it.
+static __attribute__((cold, noinline)) bool fast_cc_compound_element_quiet(const FastCCState* cc, FastExprOp* cl, FastType element)
+{
+    const uint32_t position = cl->extra;
+    const FastComplexType* ct = cc->ctypes + (cl->type & BUSTER_FTYPE_CIDX_MASK);
+    uint64_t touched = (uint64_t)cl->lbl1 | (uint64_t)cl->lbl2 << 32;
+    FastType target = cl->type;
+    int64_t target_bits = 0;
+    bool within = position == 0;
+    if (ftype_is_array(cl->type))
+    {
+        target = ct->inner;
+        target_bits = (int64_t)position * ftype_size(cc, target) * 8;
+        within = position < ct->count;
+    }
+    else if (ftype_is_record(cl->type))
+    {
+        within = position < ct->count;
+        if (within)
+        {
+            const FastMemberInfo* mi = cc->member_info + ct->start + position;
+            target = mi->type;
+            target_bits = (int64_t)mi->byte_offset * 8 + (mi->bit_width != 0 ? mi->bit_offset : 0);
+        }
+    }
+    const bool own_record = ftype_is_record(target) &&
+                            BUSTER_FTYPE_CODEGEN(BUSTER_FTYPE_UNQUAL(target)) == BUSTER_FTYPE_CODEGEN(BUSTER_FTYPE_UNQUAL(element));
+    const bool scalar = !ftype_is_array(target) && !ftype_is_record(target);
+    const bool quiet = within && (scalar || own_record) && !fast_cc_init_overrides(cc, cl->type, 0, cl->lbl0, &touched, position, target_bits);
+    cl->lbl0 = position + 1u;
+    cl->lbl1 = (uint32_t)touched;
+    cl->lbl2 = (uint32_t)(touched >> 32);
+    return quiet;
+}
+
 static inline uint8_t fast_expr_tok_prec(uint8_t k)
 {
     switch (k)
@@ -6023,12 +6099,19 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
                     {
                         // Compound literal `(T){ e0, e1, ... }` handled iteratively via FEOP_COMPOUND_LIT!
                         if (ftype_is_unsupported(ct)) { fast_cc_bail(cc, "unsupported compound literal type"); break; }
+                        // #3577: an array of unknown size (which its elements would size) or another incomplete type.
+                        if (BUSTER_FAST_OBJECT_INCOMPLETE(cc, ct, 0u) != 0) { fast_cc_bail(cc, "compound literal of an incomplete type"); break; }
                         cc->pos += 1u; // '{'
                         const uint32_t csz = ftype_size(cc, ct);
                         const uint32_t cal = ftype_align(cc, ct);
-                        const int32_t slot = ex.eval_only > 0 ? 0 : fast_cc_alloc_tmp(cc, csz, cal < 8u ? 8u : cal);
+                        // #3577: a compound literal lives to the end of its block, not of its statement (`p = &(int){ x };`
+                        // reads it after): a local's slot (each one's for the whole function), above the temporaries the
+                        // expression holds.
+                        int32_t slot = 0;
                         if (ex.eval_only == 0)
                         {
+                            cc->cur_frame_size = cc->cur_tmp_off;
+                            slot = fast_cc_alloc_local(cc, csz, cal < 8u ? 8u : cal);
                             fval_spill_all(&ex, ex.vsp, ex.arg_sp);
                             x86_emit_memzero_inline(cc->obj, FREG_RBP, slot, csz);
                         }
@@ -6051,7 +6134,9 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
                             if (mi == NULL) { fast_cc_bail(cc, "compound lit unknown field"); break; }
                             ops[osp - 1u].extra = (uint16_t)(mi - (cc->member_info + rec->start));
                             cc->pos += 1u;
-                            if (fast_cc_peek(cc) == FTOK_ASSIGN) { cc->pos += 1u; }
+                            // #3577: a designator of more than one member (`.a.b =`, `.a[0] =`) is refused.
+                            if (fast_cc_peek(cc) != FTOK_ASSIGN) { fast_cc_bail(cc, "compound literal designator"); break; }
+                            cc->pos += 1u;
                         }
                         continue;
                     }
@@ -6422,11 +6507,12 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
                 fast_expr_reduce_top(&ex, ops, &osp);
             }
             if (osp == 0 || ops[osp - 1u].op != FEOP_COMPOUND_LIT) { break; }
-            const FastExprOp cl = ops[--osp];
+            FastExprOp cl = ops[--osp];
             cc->pos += 1u;
             if (ex.vsp >= 1u)
             {
                 FastVal elem_v = ex.vstack[--ex.vsp];
+                if (!fast_cc_compound_element_quiet(cc, &cl, elem_v.type)) { fast_cc_bail(cc, "compound literal element the full pipeline questions"); break; }
                 if (ex.eval_only == 0)
                 {
                     if (ftype_is_scalar(cl.type))
@@ -6628,9 +6714,16 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
                 if (ex.vsp >= 1u)
                 {
                     FastVal elem_v = ex.vstack[--ex.vsp];
+                    if (!fast_cc_compound_element_quiet(cc, cl, elem_v.type)) { fast_cc_bail(cc, "compound literal element the full pipeline questions"); break; }
                     if (ex.eval_only == 0)
                     {
-                        if (ftype_is_array(cl->type))
+                        // #3577: a scalar's element before a trailing `,` (`(int){ 1, }`) too.
+                        if (ftype_is_scalar(cl->type))
+                        {
+                            FastVal dst = { .type = cl->type, .kind = FVAL_LOCAL, .off = cl->slot };
+                            fval_store(&ex, &dst, &elem_v, false, NULL);
+                        }
+                        else if (ftype_is_array(cl->type))
                         {
                             const FastType et = cc->ctypes[cl->type & BUSTER_FTYPE_CIDX_MASK].inner;
                             FastVal dst = { .type = et, .kind = FVAL_LOCAL, .off = cl->slot + (int32_t)(cl->extra * ftype_size(cc, et)) };
@@ -6662,7 +6755,9 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
                     if (mi == NULL) { fast_cc_bail(cc, "compound lit .field"); break; }
                     cl->extra = (uint16_t)(mi - (cc->member_info + rec->start));
                     cc->pos += 1u;
-                    if (fast_cc_peek(cc) == FTOK_ASSIGN) { cc->pos += 1u; }
+                    // #3577: a designator of more than one member (`.a.b =`, `.a[0] =`) is refused.
+                    if (fast_cc_peek(cc) != FTOK_ASSIGN) { fast_cc_bail(cc, "compound literal designator"); break; }
+                    cc->pos += 1u;
                 }
                 expect_val = true;
                 continue;
@@ -8326,24 +8421,40 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                     fast_cc_bail(cc, "for clause's declaration specifiers");
                     break;
                 }
+                // #3577: and the rules of a block's: a declaration declares something (fast_cc_tag_declaration_quiet);
+                // an object's type is supported and complete; a const local has a fold class, and is initialized.
+                if (fast_cc_peek(cc) == FTOK_SEMI && !fast_cc_tag_declaration_quiet(&ds)) { fast_cc_bail(cc, "declaration declares nothing"); break; }
                 while (cc->pos < cc->tcount && fast_cc_peek(cc) != FTOK_SEMI && !cc->bailout)
                 {
                     FastDeclaratorResult dr = { 0 };
                     if (!fast_cc_parse_declarator(cc, btype, false, &dr, false)) { break; }
-                    if (dr.attr.present != 0 || ftype_is_func(dr.type))
+                    const uint32_t initialized = (uint32_t)(fast_cc_peek(cc) == FTOK_ASSIGN);
+                    const uint32_t incomplete = BUSTER_FAST_OBJECT_INCOMPLETE(cc, dr.type, initialized);
+                    if (((uint32_t)(dr.attr.present != 0) | (uint32_t)ftype_is_func(dr.type) | (uint32_t)ds.is_unsupported_type |
+                         (uint32_t)ftype_is_unsupported(dr.type) | incomplete) != 0)
                     {
-                        fast_cc_bail(cc, "for clause's declarator");
+                        fast_cc_bail(cc, incomplete != 0 ? "object of incomplete type" : "for clause's declarator");
                         break;
                     }
                     const uint32_t lsi = dr.name_id != 0 ? fast_cc_sym_bind(cc, dr.name_id, (FastSym){ .kind = FSYM_LOCAL, .type = dr.type }) : 0u;
                     int32_t loff = 0;
-                    if (fast_cc_peek(cc) == FTOK_ASSIGN)
+                    if (initialized != 0)
                     {
                         cc->pos += 1u;
+                        const uint32_t init_start = cc->pos;
+                        cc->init_kind = FVAL_VOID;
                         loff = fast_cc_init_local(cc, &dr.type, ds.attr.aligned > dr.attr.aligned ? ds.attr.aligned : dr.attr.aligned);
+                        BUSTER_FAST_LOCAL_FOLD(cc, lsi, dr.type, init_start)
                     }
                     else
                     {
+                        uint32_t uninitialized_const = 0;
+                        BUSTER_FAST_UNINITIALIZED_CONST(cc, dr.type, uninitialized_const)
+                        if (uninitialized_const != 0)
+                        {
+                            fast_cc_bail(cc, "uninitialized const object or const member");
+                            break;
+                        }
                         loff = fast_cc_alloc_local(cc, ftype_size(cc, dr.type), ftype_align(cc, dr.type));
                     }
                     if (lsi != 0)
@@ -8628,6 +8739,8 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                 else if (ds.is_static)
                 {
                     // Local `static` variable: unique internal STB_LOCAL symbol in .rodata / .data / .data.rel.ro / .bss!
+                    // #3577: an object of incomplete type is the full pipeline's error.
+                    if (BUSTER_FAST_OBJECT_INCOMPLETE(cc, dr.type, fast_cc_peek(cc) == FTOK_ASSIGN) != 0) { fast_cc_bail(cc, "object of incomplete type"); break; }
                     char sname[96];
                     uint32_t nlen = 0;
                     const char* raw_n = dr.name_id != 0 ? fast_cc_ident_str(cc, dr.name_id, &nlen) : "s";
@@ -8669,49 +8782,32 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                 else
                 {
                     // Automatic local variable on stack (bind BEFORE initializer so `T *p = malloc(sizeof(*p))` works!)
-                    if (ds.is_unsupported_type || ftype_is_unsupported(dr.type)) { fast_cc_bail(cc, "unsupported local var type"); break; }
+                    // #3577: an object of incomplete type is the full pipeline's error.
+                    const uint32_t initialized = (uint32_t)(fast_cc_peek(cc) == FTOK_ASSIGN);
+                    const uint32_t incomplete = BUSTER_FAST_OBJECT_INCOMPLETE(cc, dr.type, initialized);
+                    if (((uint32_t)ds.is_unsupported_type | (uint32_t)ftype_is_unsupported(dr.type) | incomplete) != 0)
+                    {
+                        fast_cc_bail(cc, incomplete != 0 ? "object of incomplete type" : "unsupported local var type");
+                        break;
+                    }
                     // A register variable: a scalar's address is the full pipeline's error, which the use flag finds; an
                     // array's or a record's use takes it.
                     if (ds.is_register && !ftype_is_scalar(dr.type)) { fast_cc_bail(cc, "register aggregate"); break; }
                     const uint32_t lsi = dr.name_id != 0 ? fast_cc_sym_bind(cc, dr.name_id, (FastSym){
                         .kind = FSYM_LOCAL, .type = dr.type, .use_flags = (uint8_t)(ds.is_register * BUSTER_FSYM_REGISTER) }) : 0u;
                     int32_t loff = 0;
-                    if (fast_cc_peek(cc) == FTOK_ASSIGN)
+                    if (initialized != 0)
                     {
                         cc->pos += 1u;
                         const uint32_t init_start = cc->pos;
                         cc->init_kind = FVAL_VOID;
                         loff = fast_cc_init_local(cc, &dr.type, extra_al);
-                        // #3577: a const local's fold class, which a divisor naming it reads (or an array's, whose element may be).
-                        const uint32_t complex = UINT32_C(0) - (dr.type >> 31);
-                        const uint32_t foldable = (uint32_t)((dr.type & BUSTER_FTYPE_CONST) != 0) |
-                                                  (uint32_t)(cc->ctypes[dr.type & BUSTER_FTYPE_CIDX_MASK & complex].kind == FCTYPE_ARRAY);
-                        if ((foldable & (uint32_t)(lsi != 0)) != 0)
-                        {
-                            cc->syms[lsi].pad_sym[1] = fast_cc_local_fold_class(cc, dr.type, init_start, cc->pos);
-                        }
+                        BUSTER_FAST_LOCAL_FOLD(cc, lsi, dr.type, init_start)
                     }
                     else
                     {
-                        // #3577: a const object, a struct or union with a const member, or an array of const elements left
-                        // uninitialized is the full pipeline's -Wdefault-const-init-var-unsafe or -field-unsafe. A
-                        // multidimensional array's element is found by its own loop.
-                        const uint32_t complex = BUSTER_FTYPE_COMPLEX_ALL(dr.type);
-                        const uint32_t object = (complex & 1u) & (uint32_t)((dr.type & BUSTER_FTYPE_PTR_MASK) == 0);
-                        const FastComplexType* ct = cc->ctypes + (dr.type & BUSTER_FTYPE_CIDX_MASK & (UINT32_C(0) - object));
-                        const uint32_t top_const = (uint32_t)((dr.type & BUSTER_FTYPE_CONST) != 0);
-                        const uint32_t record_const = object & (uint32_t)ct->has_const_mbr & ((uint32_t)(ct->kind == FCTYPE_STRUCT) | (uint32_t)(ct->kind == FCTYPE_UNION));
-                        const uint32_t array = object & (uint32_t)(ct->kind == FCTYPE_ARRAY);
-                        const FastType element = ct->inner;
-                        const uint32_t element_complex = BUSTER_FTYPE_COMPLEX_ALL(element);
-                        const uint32_t element_const = (uint32_t)((element & ((BUSTER_FTYPE_CONST & element_complex) | (BUSTER_FTYPE_CONST & ~element_complex))) != 0);
-                        const uint32_t element_array = (element_complex & 1u) & (uint32_t)((element & BUSTER_FTYPE_PTR_MASK) == 0) &
-                                                       (uint32_t)(cc->ctypes[element & BUSTER_FTYPE_CIDX_MASK & element_complex].kind == FCTYPE_ARRAY);
-                        uint32_t uninitialized_const = top_const | record_const | (array & element_const);
-                        if ((array & element_array) != 0)
-                        {
-                            uninitialized_const |= (uint32_t)ftype_is_object_const(cc, dr.type);
-                        }
+                        uint32_t uninitialized_const = 0;
+                        BUSTER_FAST_UNINITIALIZED_CONST(cc, dr.type, uninitialized_const)
                         if (uninitialized_const != 0)
                         {
                             fast_cc_bail(cc, "uninitialized const object or const member");
@@ -9177,7 +9273,7 @@ static bool fast_cc_compile_unit(FastCCState* cc)
         if (s->kind == FSYM_GLOBAL && s->is_tentative != 0 && s->defined == 0)
         {
             if ((s->use_flags & BUSTER_FSYM_UNSUPPORTED) != 0) { fast_cc_bail(cc, "tentative unsupported global"); break; }
-            if (BUSTER_FAST_TYPE_INCOMPLETE(cc, s->type) != 0) { fast_cc_bail(cc, "tentative definition of an incomplete type"); break; }
+            if (BUSTER_FAST_OBJECT_INCOMPLETE(cc, s->type, 0u) != 0) { fast_cc_bail(cc, "tentative definition of an incomplete type"); break; }
             const uint32_t sz = ftype_size(cc, s->type);
             const uint32_t al = ftype_align(cc, s->type);
             const uint32_t boff = fast_obj_alloc_section(obj, FSEC_BSS, sz, al, NULL);

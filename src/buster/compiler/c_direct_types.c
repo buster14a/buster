@@ -560,6 +560,14 @@ static const uint8_t fast_operand_complex_class[8] = { 3, 3, 3, 0, 2, 2, 2, 3 };
      (uint32_t)((cc)->ctypes[(uint32_t)(t) & BUSTER_FTYPE_CIDX_MASK & BUSTER_FTYPE_COMPLEX_ALL(t)].kind != FCTYPE_FUNC) & \
      (uint32_t)((cc)->ctypes[(uint32_t)(t) & BUSTER_FTYPE_CIDX_MASK & BUSTER_FTYPE_COMPLEX_ALL(t)].kind != FCTYPE_PTR))
 
+// Whether an object can't have a type (#3577), the full pipeline's "variable has incomplete type": void, or a struct,
+// union, enum or array not (yet) complete; an array of unknown size takes its size from an initializer, where SIZED is
+// 1. Branch-free: every declarator asks.
+#define BUSTER_FAST_OBJECT_INCOMPLETE(cc, t, sized) \
+    ((BUSTER_FAST_TYPE_INCOMPLETE(cc, t) & \
+      ~((uint32_t)(sized) & (uint32_t)((cc)->ctypes[(uint32_t)(t) & BUSTER_FTYPE_CIDX_MASK & BUSTER_FTYPE_COMPLEX_ALL(t)].kind == FCTYPE_ARRAY))) | \
+     (uint32_t)(((uint32_t)(t) & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK)) == FTYPE_VOID))
+
 static inline uint32_t ftype_size(const FastCCState* cc, FastType t)
 {
     if (ftype_ptr_depth(t) > 0) { return 8u; }
