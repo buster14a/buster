@@ -3291,7 +3291,7 @@ static bool c_direct_test_statement_depth(const char* obj_path)
             {
                 length += (size_t)sprintf(source + length, "    else if (x == %u) { return %u; }\n", i, 1000u + i * 3u);
             }
-            length += (size_t)sprintf(source + length, "    else { return -1; }\n}\n");
+            sprintf(source + length, "    else { return -1; }\n}\n");
             ok = round == 0 ? c_direct_test_compile_source_keep(source, obj_path, NULL, 0, NULL, NULL, NULL) : c_direct_test_compile_source(source, obj_path, 1, NULL, NULL);
         }
 #if !__has_feature(memory_sanitizer)
