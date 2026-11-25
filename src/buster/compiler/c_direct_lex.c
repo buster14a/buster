@@ -1246,6 +1246,9 @@ struct FastPP
     FastLitSlice* lit_slices;
     uint32_t lit_count;
     uint32_t lit_cap;
+    // One bit a literal: spelled with an encoding prefix or a numeric escape, which an attribute's string and an asm
+    // label can't take as their bytes (#3595). The arena's pages are zero, and only such a literal writes one.
+    uint64_t* lit_coded;
 
     // Macro definitions
     FastMacro* macros;
@@ -1709,6 +1712,7 @@ static FastLexed fast_lex_string(FastPP* pp, const uint8_t* p, const uint8_t* en
     uint32_t tok_extra = 0;
     uint32_t tok_data = 0;
     bool has_escape = false;
+    bool coded = prefix_kind != 0;
     uint32_t stopped = 0;
     p = fast_scan_string_close(p, end, &has_escape, &stopped);
     const bool closed = stopped == BUSTER_FSTRING_CLOSED;
@@ -1751,6 +1755,8 @@ static FastLexed fast_lex_string(FastPP* pp, const uint8_t* p, const uint8_t* en
                     }
                     else
                     {
+                        // A numeric escape (a backslash and x, an octal digit, u or U) is one clang refuses in an attribute.
+                        coded = coded || (q < q_end && (*q == 'x' || (*q >= '0' && *q <= '7') || *q == 'u' || *q == 'U'));
                         const uint32_t ch = fast_decode_escape(&q, q_end, &ok);
                         dst[out_len++] = (char)(ch & 0xffu);
                     }
@@ -1773,6 +1779,10 @@ static FastLexed fast_lex_string(FastPP* pp, const uint8_t* p, const uint8_t* en
         else
         {
             fast_pp_bail(pp, "lit_pool overflow");
+        }
+        if (coded)
+        {
+            pp->lit_coded[tok_data >> 6] |= UINT64_C(1) << (tok_data & 63u);
         }
     }
     return (FastLexed){ .p = p, .tok = fast_tok_make(tok_kind, flags_in, tok_extra, tok_data) };
@@ -4398,6 +4408,7 @@ static bool fast_pp_init(FastPP* pp, FastArena* arena, FastArena* scratch, bool 
         pp->num_pool = (uint64_t*)fast_arena_alloc(arena, (uint64_t)pp->num_cap * sizeof(uint64_t), 64);
         pp->lit_bytes = (char*)fast_arena_alloc(arena, pp->lit_bytes_cap, 64);
         pp->lit_slices = (FastLitSlice*)fast_arena_alloc(arena, (uint64_t)pp->lit_cap * sizeof(FastLitSlice), 64);
+        pp->lit_coded = (uint64_t*)fast_arena_alloc(arena, (uint64_t)pp->lit_cap / 8u, 64);
         pp->macros = (FastMacro*)fast_arena_alloc(arena, (uint64_t)BUSTER_FPP_MAX_MACROS * sizeof(FastMacro), 64);
         pp->macro_toks = (FastTok*)fast_arena_alloc(arena, (uint64_t)pp->macro_tok_cap * sizeof(FastTok), 64);
         pp->macro_params = (uint32_t*)fast_arena_alloc(arena, (uint64_t)pp->macro_param_cap * sizeof(uint32_t), 64);
@@ -4409,7 +4420,7 @@ static bool fast_pp_init(FastPP* pp, FastArena* arena, FastArena* scratch, bool 
         pp->win.lens = (uint8_t*)fast_arena_alloc(scratch, BUSTER_FWIN_CAPACITY + 64u, 64);
 
         ok = pp->out_kind != NULL && pp->out_data != NULL && pp->num_pool != NULL && pp->lit_bytes != NULL &&
-             pp->lit_slices != NULL && pp->macros != NULL && pp->macro_toks != NULL && pp->macro_params != NULL &&
+             pp->lit_slices != NULL && pp->lit_coded != NULL && pp->macros != NULL && pp->macro_toks != NULL && pp->macro_params != NULL &&
              pp->exp_buf != NULL && pp->arg_buf != NULL && pp->call_stack != NULL &&
              pp->win.kinds != NULL && pp->win.starts != NULL && pp->win.lens != NULL;
     }

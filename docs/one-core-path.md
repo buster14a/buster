@@ -4405,6 +4405,39 @@ What changed:
   every process, a header's system calls, and the options and constructs that keep a build's units off the direct
   path altogether (`-MD`, `-Wall`, `-g`, a strict `-std=`).
 
+### A declaration's symbols (2026-11-25, #3595)
+
+The direct path's code is its own. A unit's symbols, though, must be the full pipeline's: their names, bindings,
+visibilities and which of them are defined. At main `f74b0b28` they weren't, in valid programs:
+
+- `-O1` and up, glibc's `extern inline` bodies were emitted, so two objects that include `<stdlib.h>` didn't link;
+- `__REDIRECT`'s labels (`""` and the name) were read as their first literal, so `scanf` and the 64-bit file
+  functions named their legacy symbols;
+- Lua's `visibility("internal")` was default rather than hidden.
+
+The direct path now gives those symbols as the full pipeline does:
+
+- **Inline definitions with external linkage** wait for the unit's end (`fast_cc_decide_inline_definitions`), which
+  reads all the function's declarations (`FastSym.inline_rules`). By GNU's rules (a declaration with `gnu_inline`), an
+  `extern inline` definition is emitted only beside a plain `inline` declaration. By C99's, a plain `inline` one is
+  emitted only beside a file-scope declaration without `inline` or with `extern`, called or not. Otherwise a call names
+  the external function. `-fgnu89-inline` keeps a unit off the direct path.
+- **An asm label is its literals joined**, as clang joins them.
+- **A later file-scope declaration's weak, visibility and label join its symbol's** (`fast_cc_join_declaration`).
+  `internal` is hidden, as clang emits it, and an explicit `default` overrides an earlier `hidden`.
+- **A block's declaration of a function or `extern` object** names the file-scope declaration it sees.
+- **Anything else leaves the direct path:** two visibilities or labels that differ, an attribute added after the
+  symbol's first use, a block declaration with nothing visible to name, and an operand the full pipeline refuses or
+  warns about. That last covers an empty label, an unknown visibility, one on a typedef, and a literal with an
+  encoding prefix or a numeric escape, which the lexer marks (`FastPP.lit_coded`).
+
+**Checked:** every unit of the corpus the direct path takes, compared by its symbols with `--no-direct`'s. What
+differs is only what this section doesn't claim:
+
+- objects initialized to zero in `.data` rather than `.bss`;
+- undefined references that only one side's code makes;
+- unused static functions kept.
+
 ## Related
 
 - [#2850](https://github.com/buster14a/buster/issues/2850): the design, its
