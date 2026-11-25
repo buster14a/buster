@@ -4463,8 +4463,12 @@ static __attribute__((noinline)) void fast_pp_handle_define(FastPP* pp, FastIncl
         {
             const uint32_t named = (uint32_t)(bt.kind == FTOK_IDENT) | ((uint32_t)(bt.kind >= 64u) & (uint32_t)(bt.kind < 126u));
             const uint32_t parameter = named & (uint32_t)is_func & (uint32_t)(bt.extra != 0);
-            body_bad |= (after_hash & (parameter ^ 1u)) |
-                        ((uint32_t)(vararg_name != 0) & named & (uint32_t)(pp->idents.entries[bt.data & (UINT32_C(0) - named)].pp_kw == FPP_KW_VA_ARGS));
+            body_bad |= after_hash & (parameter ^ 1u);
+            // __VA_ARGS__ in a macro whose variadic parameter has a name (rare: the identifier table is read for it alone).
+            if (vararg_name != 0 && named != 0 && pp->idents.entries[bt.data].pp_kw == FPP_KW_VA_ARGS)
+            {
+                body_bad = 1u;
+            }
             after_hash = (uint32_t)is_func & (uint32_t)(bt.kind == FTOK_HASH);
             last_pastes = (uint32_t)(bt.kind == FTOK_HASHHASH);
         }

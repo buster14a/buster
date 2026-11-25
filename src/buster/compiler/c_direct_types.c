@@ -2286,27 +2286,34 @@ static BUSTER_DIRECT_HOT FastType fast_cc_parse_scalar_or_tag_specs(FastCCState*
     // #3577: the type keywords make one of C's types, and what C allows once comes once. A list that names no type
     // (implicit int, an error since C99), two types, a keyword more often than C allows (`int int`, `long long long`,
     // `signed unsigned`, `const const`, two storage classes), or a combination C has none of (`long char`, `signed
-    // float`, `short long`, `_Complex int`, a sign after __int128) is the full pipeline's diagnostic. One branch-free
-    // expression, so that a valid list pays a few instructions and no branch.
+    // float`, `short long`, `_Complex int`, a sign after __int128) is the full pipeline's diagnostic.
     const uint32_t signs = saw_signed + saw_unsigned;
     const uint32_t named = (uint32_t)has_explicit_type;
-    const uint32_t bases = (uint32_t)(saw_void != 0) + (uint32_t)(saw_char != 0) + (uint32_t)(saw_int != 0) + (uint32_t)(saw_float != 0) +
-                           (uint32_t)(saw_double != 0) + (uint32_t)(saw_bool != 0) + named;
-    const uint32_t int128_first = (uint32_t)(int128_signs == signs);
-    const uint32_t specifiers_bad =
-        (uint32_t)(bases > 1u) | (uint32_t)(bases + saw_short + saw_long + signs == 0) |
-        (uint32_t)(saw_void > 1u) | (uint32_t)(saw_char > 1u) | (uint32_t)(saw_int > 1u) | (uint32_t)(saw_float > 1u) |
-        (uint32_t)(saw_double > 1u) | (uint32_t)(saw_bool > 1u) | (uint32_t)(saw_short > 1u) | (uint32_t)(saw_long > 2u) |
-        (uint32_t)(signs > 1u) | (uint32_t)(saw_complex > 1u) |
-        ((uint32_t)(saw_short != 0) & ((uint32_t)(saw_long != 0) | ((uint32_t)(bases != 0) & (uint32_t)(saw_int == 0)))) |
-        ((uint32_t)(saw_long != 0) & (uint32_t)(bases != 0) & (uint32_t)(saw_int == 0) & ((uint32_t)(saw_double == 0) | (uint32_t)(saw_long > 1u))) |
-        ((uint32_t)(signs != 0) & (uint32_t)(bases != 0) & (uint32_t)(saw_char == 0) & (uint32_t)(saw_int == 0) & (int128_first ^ 1u)) |
-        (named & (uint32_t)((saw_short | saw_long) != 0)) | ((uint32_t)(saw_complex != 0) & (uint32_t)((saw_float | saw_double) == 0)) |
-        (uint32_t)(storage > 1u) | (uint32_t)(saw_const > 1u) | (uint32_t)(saw_volatile > 1u) | (uint32_t)(saw_inline > 1u) |
-        (uint32_t)(saw_noreturn > 1u);
-    if (specifiers_bad != 0)
+    // Most lists are one type word (`int`, a typedef's name, a tag) with at most one storage class and qualifier of each
+    // kind, which C allows whatever the word: the whole check below runs for the other lists.
+    const uint32_t words = saw_void + saw_char + saw_short + saw_int + saw_long + saw_float + saw_double + saw_bool + signs + saw_complex + named;
+    const uint32_t one_word = (uint32_t)(words == 1u) & (uint32_t)(saw_complex == 0) &
+                              (uint32_t)((storage | saw_const | saw_volatile | saw_inline | saw_noreturn) < 2u);
+    if (one_word == 0)
     {
-        fast_cc_bail(cc, "declaration specifiers");
+        const uint32_t bases = (uint32_t)(saw_void != 0) + (uint32_t)(saw_char != 0) + (uint32_t)(saw_int != 0) + (uint32_t)(saw_float != 0) +
+                               (uint32_t)(saw_double != 0) + (uint32_t)(saw_bool != 0) + named;
+        const uint32_t int128_first = (uint32_t)(int128_signs == signs);
+        const uint32_t specifiers_bad =
+            (uint32_t)(bases > 1u) | (uint32_t)(bases + saw_short + saw_long + signs == 0) |
+            (uint32_t)(saw_void > 1u) | (uint32_t)(saw_char > 1u) | (uint32_t)(saw_int > 1u) | (uint32_t)(saw_float > 1u) |
+            (uint32_t)(saw_double > 1u) | (uint32_t)(saw_bool > 1u) | (uint32_t)(saw_short > 1u) | (uint32_t)(saw_long > 2u) |
+            (uint32_t)(signs > 1u) | (uint32_t)(saw_complex > 1u) |
+            ((uint32_t)(saw_short != 0) & ((uint32_t)(saw_long != 0) | ((uint32_t)(bases != 0) & (uint32_t)(saw_int == 0)))) |
+            ((uint32_t)(saw_long != 0) & (uint32_t)(bases != 0) & (uint32_t)(saw_int == 0) & ((uint32_t)(saw_double == 0) | (uint32_t)(saw_long > 1u))) |
+            ((uint32_t)(signs != 0) & (uint32_t)(bases != 0) & (uint32_t)(saw_char == 0) & (uint32_t)(saw_int == 0) & (int128_first ^ 1u)) |
+            (named & (uint32_t)((saw_short | saw_long) != 0)) | ((uint32_t)(saw_complex != 0) & (uint32_t)((saw_float | saw_double) == 0)) |
+            (uint32_t)(storage > 1u) | (uint32_t)(saw_const > 1u) | (uint32_t)(saw_volatile > 1u) | (uint32_t)(saw_inline > 1u) |
+            (uint32_t)(saw_noreturn > 1u);
+        if (specifiers_bad != 0)
+        {
+            fast_cc_bail(cc, "declaration specifiers");
+        }
     }
     FastType res = FTYPE_I32;
     if (has_explicit_type) { res = explicit_type; }
@@ -3519,27 +3526,34 @@ static BUSTER_DIRECT_HOT FastType fast_cc_parse_decl_specs(FastCCState* cc, Fast
     // #3577: the type keywords make one of C's types, and what C allows once comes once. A list that names no type
     // (implicit int, an error since C99), two types, a keyword more often than C allows (`int int`, `long long long`,
     // `signed unsigned`, `const const`, two storage classes), or a combination C has none of (`long char`, `signed
-    // float`, `short long`, `_Complex int`, a sign after __int128) is the full pipeline's diagnostic. One branch-free
-    // expression, so that a valid list pays a few instructions and no branch.
+    // float`, `short long`, `_Complex int`, a sign after __int128) is the full pipeline's diagnostic.
     const uint32_t signs = saw_signed + saw_unsigned;
     const uint32_t named = (uint32_t)has_explicit_type;
-    const uint32_t bases = (uint32_t)(saw_void != 0) + (uint32_t)(saw_char != 0) + (uint32_t)(saw_int != 0) + (uint32_t)(saw_float != 0) +
-                           (uint32_t)(saw_double != 0) + (uint32_t)(saw_bool != 0) + named;
-    const uint32_t int128_first = (uint32_t)(int128_signs == signs);
-    const uint32_t specifiers_bad =
-        (uint32_t)(bases > 1u) | (uint32_t)(bases + saw_short + saw_long + signs == 0) |
-        (uint32_t)(saw_void > 1u) | (uint32_t)(saw_char > 1u) | (uint32_t)(saw_int > 1u) | (uint32_t)(saw_float > 1u) |
-        (uint32_t)(saw_double > 1u) | (uint32_t)(saw_bool > 1u) | (uint32_t)(saw_short > 1u) | (uint32_t)(saw_long > 2u) |
-        (uint32_t)(signs > 1u) | (uint32_t)(saw_complex > 1u) |
-        ((uint32_t)(saw_short != 0) & ((uint32_t)(saw_long != 0) | ((uint32_t)(bases != 0) & (uint32_t)(saw_int == 0)))) |
-        ((uint32_t)(saw_long != 0) & (uint32_t)(bases != 0) & (uint32_t)(saw_int == 0) & ((uint32_t)(saw_double == 0) | (uint32_t)(saw_long > 1u))) |
-        ((uint32_t)(signs != 0) & (uint32_t)(bases != 0) & (uint32_t)(saw_char == 0) & (uint32_t)(saw_int == 0) & (int128_first ^ 1u)) |
-        (named & (uint32_t)((saw_short | saw_long) != 0)) | ((uint32_t)(saw_complex != 0) & (uint32_t)((saw_float | saw_double) == 0)) |
-        (uint32_t)(storage > 1u) | (uint32_t)(saw_const > 1u) | (uint32_t)(saw_volatile > 1u) | (uint32_t)(saw_inline > 1u) |
-        (uint32_t)(saw_noreturn > 1u);
-    if (specifiers_bad != 0)
+    // Most lists are one type word (`int`, a typedef's name, a tag) with at most one storage class and qualifier of each
+    // kind, which C allows whatever the word: the whole check below runs for the other lists.
+    const uint32_t words = saw_void + saw_char + saw_short + saw_int + saw_long + saw_float + saw_double + saw_bool + signs + saw_complex + named;
+    const uint32_t one_word = (uint32_t)(words == 1u) & (uint32_t)(saw_complex == 0) &
+                              (uint32_t)((storage | saw_const | saw_volatile | saw_inline | saw_noreturn) < 2u);
+    if (one_word == 0)
     {
-        fast_cc_bail(cc, "declaration specifiers");
+        const uint32_t bases = (uint32_t)(saw_void != 0) + (uint32_t)(saw_char != 0) + (uint32_t)(saw_int != 0) + (uint32_t)(saw_float != 0) +
+                               (uint32_t)(saw_double != 0) + (uint32_t)(saw_bool != 0) + named;
+        const uint32_t int128_first = (uint32_t)(int128_signs == signs);
+        const uint32_t specifiers_bad =
+            (uint32_t)(bases > 1u) | (uint32_t)(bases + saw_short + saw_long + signs == 0) |
+            (uint32_t)(saw_void > 1u) | (uint32_t)(saw_char > 1u) | (uint32_t)(saw_int > 1u) | (uint32_t)(saw_float > 1u) |
+            (uint32_t)(saw_double > 1u) | (uint32_t)(saw_bool > 1u) | (uint32_t)(saw_short > 1u) | (uint32_t)(saw_long > 2u) |
+            (uint32_t)(signs > 1u) | (uint32_t)(saw_complex > 1u) |
+            ((uint32_t)(saw_short != 0) & ((uint32_t)(saw_long != 0) | ((uint32_t)(bases != 0) & (uint32_t)(saw_int == 0)))) |
+            ((uint32_t)(saw_long != 0) & (uint32_t)(bases != 0) & (uint32_t)(saw_int == 0) & ((uint32_t)(saw_double == 0) | (uint32_t)(saw_long > 1u))) |
+            ((uint32_t)(signs != 0) & (uint32_t)(bases != 0) & (uint32_t)(saw_char == 0) & (uint32_t)(saw_int == 0) & (int128_first ^ 1u)) |
+            (named & (uint32_t)((saw_short | saw_long) != 0)) | ((uint32_t)(saw_complex != 0) & (uint32_t)((saw_float | saw_double) == 0)) |
+            (uint32_t)(storage > 1u) | (uint32_t)(saw_const > 1u) | (uint32_t)(saw_volatile > 1u) | (uint32_t)(saw_inline > 1u) |
+            (uint32_t)(saw_noreturn > 1u);
+        if (specifiers_bad != 0)
+        {
+            fast_cc_bail(cc, "declaration specifiers");
+        }
     }
     FastType res = FTYPE_I32;
     if (has_explicit_type)

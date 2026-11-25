@@ -1949,10 +1949,11 @@ struct FastExprCtx
 // An identity's hash bit in seq_bloom.
 #define BUSTER_FSEQ_BIT(identity) (UINT64_C(1) << ((uint64_t)(identity) * UINT64_C(0x9E3779B97F4A7C15) >> 58))
 // Log a naming (an evaluated use of a variable by name) where LOGGED (0 or 1); a modified variable's sets seq_hit. One
-// expression each, with no branch or block (a counter would tick at every use).
+// expression each; the hash is taken only once something was modified (seq_bloom), which few names see.
 #define BUSTER_FSEQ_NAME(ex, identity, logged) \
     ((ex)->seq_log[(ex)->seq_count & 63u] = (identity), \
-     (ex)->seq_hit |= (uint32_t)(((ex)->seq_bloom & BUSTER_FSEQ_BIT(identity)) != 0) & (uint32_t)((ex)->eval_only == 0) & (uint32_t)(logged), \
+     (ex)->seq_hit |= (uint32_t)((ex)->seq_bloom != 0 && ((ex)->seq_bloom & BUSTER_FSEQ_BIT(identity)) != 0) & \
+                      (uint32_t)((ex)->eval_only == 0) & (uint32_t)(logged), \
      (ex)->seq_count += (uint32_t)((ex)->eval_only == 0) & (uint32_t)(logged))
 // A region's bounds, which the end's check reads when unknown ones (0) aren't counted.
 #define BUSTER_FSEQ_REGION(ex, lo, mid, hi) \
@@ -1969,8 +1970,8 @@ struct FastExprCtx
 // #3577: log a modification of lvalue V, whose own operands' entries start at V's seq_start: a variable modified before
 // (its hash bit), named before its operands (the vector compare looks at the log's first 16; more of them set it too)
 // sets seq_hit. A variable by name alone (an lvalue an operator made, an element or a member, has no known start), as
-// the full pipeline follows. Straight-line, as every assignment and step logs one; and a block, not a function or a
-// loop, whose counter would tick at each.
+// the full pipeline follows. A block, not a function, whose counter would tick at each; the search runs where there is
+// something to find.
 #define BUSTER_FSEQ_MODIFY(ex, v) \
     { \
         const uint64_t seq_identity = BUSTER_FSEQ_LVALUE(v) & (UINT64_C(0) - (uint64_t)((v)->seq_start != 0)); \
@@ -1979,16 +1980,21 @@ struct FastExprCtx
         const uint32_t seq_own = (v)->seq_start; \
         /* Earlier entries outside the operands: [0, own - 1), or all of them where the start isn't known. */ \
         const uint32_t seq_earlier = seq_own - 1u + (uint32_t)(seq_own == 0) * (seq_count + 1u); \
-        const uint32_t seq_looked = seq_count ^ ((seq_earlier ^ seq_count) & (UINT32_C(0) - (uint32_t)(seq_earlier < seq_count))); \
-        const uint32_t seq_within = seq_looked ^ ((seq_looked ^ 16u) & (UINT32_C(0) - (uint32_t)(seq_looked > 16u))); \
-        const __mmask16 seq_valid = (__mmask16)_bzhi_u32(0xffffu, seq_within); \
-        const __m512i seq_wanted = _mm512_set1_epi64((long long)seq_identity); \
-        const __mmask8 seq_low = _mm512_mask_cmpeq_epi64_mask((__mmask8)seq_valid, _mm512_maskz_loadu_epi64((__mmask8)seq_valid, (ex)->seq_log), seq_wanted); \
-        const __mmask8 seq_high = _mm512_mask_cmpeq_epi64_mask((__mmask8)(seq_valid >> 8), \
-                                                               _mm512_maskz_loadu_epi64((__mmask8)(seq_valid >> 8), (ex)->seq_log + 8), seq_wanted); \
-        const uint32_t seq_named_before = (uint32_t)((seq_low | seq_high) != 0); \
-        const uint32_t seq_modified_before = (uint32_t)(((ex)->seq_bloom & BUSTER_FSEQ_BIT(seq_identity)) != 0); \
-        (ex)->seq_hit |= seq_tracked & (seq_named_before | seq_modified_before | (uint32_t)(seq_looked > 16u)); \
+        /* Only where there is something to find: entries before the operands, or an earlier modification (an */ \
+        /* assignment's lvalue is most often the expression's first name, and its first modification). */ \
+        if ((seq_tracked & ((uint32_t)(seq_earlier != 0) | (uint32_t)((ex)->seq_bloom != 0))) != 0) \
+        { \
+            const uint32_t seq_looked = seq_count ^ ((seq_earlier ^ seq_count) & (UINT32_C(0) - (uint32_t)(seq_earlier < seq_count))); \
+            const uint32_t seq_within = seq_looked ^ ((seq_looked ^ 16u) & (UINT32_C(0) - (uint32_t)(seq_looked > 16u))); \
+            const __mmask16 seq_valid = (__mmask16)_bzhi_u32(0xffffu, seq_within); \
+            const __m512i seq_wanted = _mm512_set1_epi64((long long)seq_identity); \
+            const __mmask8 seq_low = _mm512_mask_cmpeq_epi64_mask((__mmask8)seq_valid, _mm512_maskz_loadu_epi64((__mmask8)seq_valid, (ex)->seq_log), seq_wanted); \
+            const __mmask8 seq_high = _mm512_mask_cmpeq_epi64_mask((__mmask8)(seq_valid >> 8), \
+                                                                   _mm512_maskz_loadu_epi64((__mmask8)(seq_valid >> 8), (ex)->seq_log + 8), seq_wanted); \
+            const uint32_t seq_named_before = (uint32_t)((seq_low | seq_high) != 0); \
+            const uint32_t seq_modified_before = (uint32_t)(((ex)->seq_bloom & BUSTER_FSEQ_BIT(seq_identity)) != 0); \
+            (ex)->seq_hit |= seq_named_before | seq_modified_before | (uint32_t)(seq_looked > 16u); \
+        } \
         (ex)->seq_bloom |= BUSTER_FSEQ_BIT(seq_identity) & (UINT64_C(0) - (uint64_t)seq_tracked); \
         (ex)->seq_log[seq_count & 63u] = seq_identity; \
         (ex)->seq_own[seq_count & 63u] = (uint8_t)seq_own; \
@@ -2914,6 +2920,12 @@ static __attribute__((noinline)) void fast_cc_check_implicit_conv(FastCCState* c
 {
     const FastType dt = ftype_unqual(dst_t);
     const FastType st = ftype_decay(cc, src->type);
+    // #3577: a conversion to the source's own type questions nothing (no value changes, no qualifier is dropped, no enum
+    // or record is another), and most conversions are one: only the others take the checks below.
+    if (dt == BUSTER_FTYPE_UNQUAL(st))
+    {
+        return;
+    }
     // #3577: a constant's (or a conditional's constant arms') conversion the full pipeline questions; and one enum's
     // value into another's (-Wimplicit-enum-enum-cast). An integer constant (not an unsigned 64-bit one's bits) from
     // -128 to 127 into any integer, _Bool or floating type, and one in the int32 range into a 32- or 64-bit integer,
@@ -2923,18 +2935,17 @@ static __attribute__((noinline)) void fast_cc_check_implicit_conv(FastCCState* c
                               (uint32_t)((src->marks & BUSTER_FVAL_MARK_CONST_ARMS) != 0);
     const uint32_t dkind = dt & BUSTER_FTYPE_SCALAR_MASK;
     const uint32_t dst_scalar = (uint32_t)((dt & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) == 0);
-    const uint32_t skind = src->type & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK);
-    const uint32_t small = (uint32_t)(src->kind == FVAL_IMM) & dst_scalar & BUSTER_FAST_INT_SETTLED(src->imm, skind, dkind);
-    // A pointer target from a pointer constant, or from the literal 0; a floating constant into a floating type.
-    const uint32_t dst_pointer = (uint32_t)((dt & BUSTER_FTYPE_PTR_MASK) != 0);
-    const uint32_t src_pointer = (uint32_t)((src->type & BUSTER_FTYPE_PTR_MASK) != 0);
-    const uint32_t null_literal = (uint32_t)(src->kind == FVAL_IMM) & dst_pointer &
-                                  (src_pointer | ((uint32_t)(src->imm == 0) & (uint32_t)((src->marks & BUSTER_FVAL_MARK_NONLITERAL) == 0)));
-    const uint32_t floating = (uint32_t)(src->kind == FVAL_FIMM) & dst_scalar & ((uint32_t)(dkind == FTYPE_F32) | (uint32_t)(dkind == FTYPE_F64));
-    const uint32_t settled = small | null_literal | floating;
-    if ((constant & (settled ^ 1u)) != 0)
+    if (constant != 0)
     {
-        if (!fast_cc_constant_conversion_quiet(cc, dst_t, src))
+        const uint32_t skind = src->type & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK);
+        const uint32_t small = (uint32_t)(src->kind == FVAL_IMM) & dst_scalar & BUSTER_FAST_INT_SETTLED(src->imm, skind, dkind);
+        // A pointer target from a pointer constant, or from the literal 0; a floating constant into a floating type.
+        const uint32_t dst_pointer = (uint32_t)((dt & BUSTER_FTYPE_PTR_MASK) != 0);
+        const uint32_t src_pointer = (uint32_t)((src->type & BUSTER_FTYPE_PTR_MASK) != 0);
+        const uint32_t null_literal = (uint32_t)(src->kind == FVAL_IMM) & dst_pointer &
+                                      (src_pointer | ((uint32_t)(src->imm == 0) & (uint32_t)((src->marks & BUSTER_FVAL_MARK_NONLITERAL) == 0)));
+        const uint32_t floating = (uint32_t)(src->kind == FVAL_FIMM) & dst_scalar & ((uint32_t)(dkind == FTYPE_F32) | (uint32_t)(dkind == FTYPE_F64));
+        if ((small | null_literal | floating) == 0 && !fast_cc_constant_conversion_quiet(cc, dst_t, src))
         {
             fast_cc_bail(cc, "constant conversion the full pipeline questions");
             return;
@@ -3772,6 +3783,93 @@ static uint32_t fast_cc_string_plus(const FastCCState* cc, const FastVal* lhs, c
 }
 
 // Emit binary operator `op` on `lhs` and `rhs`, returning result in `*out`. Consumes `lhs` and `rhs`!
+// The operators whose operands compare: < > <= >= == !=, a bit each (#3577).
+#define BUSTER_FAST_COMPARISON_OPS ((UINT64_C(1) << FTOK_LT) | (UINT64_C(1) << FTOK_GT) | (UINT64_C(1) << FTOK_LE) | \
+                                    (UINT64_C(1) << FTOK_GE) | (UINT64_C(1) << FTOK_EQ) | (UINT64_C(1) << FTOK_NE))
+// The integer scalar kinds, _Bool to the 64-bit ones and __int128's, a bit each (#3577).
+#define BUSTER_FAST_INTEGER_KINDS (((1u << (FTYPE_U64 + 1u)) - (1u << FTYPE_BOOL)) | (1u << FTYPE_I128) | (1u << FTYPE_U128))
+// The scalar kinds a comparison with a constant may question (#3577): narrower than int (_Bool, the chars, the shorts),
+// and float, a bit each.
+#define BUSTER_FAST_QUESTIONED_KINDS ((1u << FTYPE_BOOL) | (1u << FTYPE_I8) | (1u << FTYPE_U8) | (1u << FTYPE_I16) | (1u << FTYPE_U16) | \
+                                      (1u << FTYPE_F32))
+
+// #3577: whether a binary operator's operands, of types LT and RT, are ones the full pipeline questions, where
+// fval_emit_binary's gate let them past: a comparison of a constant out of a narrower operand's range
+// (-Wtautological-constant-out-of-range-compare), of two enums' values (-Wenum-compare), of an array, a function or an
+// address with a null pointer constant (-Wtautological-pointer-compare), of a float with a double constant it may not
+// hold (-Wliteral-range); and under any operator, a bit-field of a 64-bit type and 32 bits or fewer, which promotes to
+// int where this path keeps its type.
+static __attribute__((noinline)) bool fast_cc_binary_questioned(const FastCCState* cc, uint8_t op, const FastVal* lhs, const FastVal* rhs, FastType lt, FastType rt)
+{
+    const uint32_t equality = (uint32_t)(op == FTOK_EQ) | (uint32_t)(op == FTOK_NE);
+    // A comparison of an integer constant with a value of a narrower range (_Bool, a char, a short, a boolean
+    // expression) that the constant is out of: -Wtautological-constant-out-of-range-compare. Branch-free: the side
+    // that isn't constant is picked by mask. A bit-field of a 64-bit type and 32 bits or fewer promotes to int,
+    // where this path keeps its type: refused under any operator.
+    static const int32_t range_lo[32] = { [FTYPE_BOOL] = 0, [FTYPE_I8] = -128, [FTYPE_I16] = -32768 };
+    static const int32_t range_hi[32] = { [FTYPE_BOOL] = 1, [FTYPE_I8] = 127, [FTYPE_U8] = 255, [FTYPE_I16] = 32767, [FTYPE_U16] = 65535 };
+    static const uint8_t range_narrow[32] = { [FTYPE_BOOL] = 1, [FTYPE_I8] = 1, [FTYPE_U8] = 1, [FTYPE_I16] = 1, [FTYPE_U16] = 1 };
+    const uint32_t comparison = (uint32_t)(op == FTOK_LT) | (uint32_t)(op == FTOK_GT) | (uint32_t)(op == FTOK_LE) | (uint32_t)(op == FTOK_GE) | equality;
+    const uint32_t l_const = (uint32_t)(lhs->kind == FVAL_IMM);
+    const uint32_t r_const = (uint32_t)(rhs->kind == FVAL_IMM);
+    const uint32_t pick_left = l_const & (r_const ^ 1u);            // the left side is the constant
+    const uint64_t left_mask = UINT64_C(0) - (uint64_t)pick_left;
+    const int64_t constant = (int64_t)(((uint64_t)rhs->imm & ~left_mask) | ((uint64_t)lhs->imm & left_mask));
+    const FastType other = (FastType)((lt & ~(uint32_t)left_mask) | (rt & (uint32_t)left_mask));
+    const uint32_t other_flags = (uint32_t)(((uint32_t)lhs->kind & ~(uint32_t)left_mask) | ((uint32_t)rhs->kind & (uint32_t)left_mask)) == FVAL_FLAGS;
+    const uint32_t other_scalar = (uint32_t)((other & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) == 0);
+    const uint32_t kind = other & BUSTER_FTYPE_SCALAR_MASK;
+    const uint32_t narrow = ((uint32_t)range_narrow[kind] & other_scalar) | other_flags;
+    const uint64_t flags_mask = UINT64_C(0) - (uint64_t)other_flags;
+    const int64_t lo = (int64_t)((uint64_t)(int64_t)range_lo[kind] & ~flags_mask);
+    const int64_t hi = (int64_t)(((uint64_t)(int64_t)range_hi[kind] & ~flags_mask) | (UINT64_C(1) & flags_mask));
+    const uint32_t out_of_range = comparison & (l_const ^ r_const) & narrow & ((uint32_t)(constant < lo) | (uint32_t)(constant > hi));
+    const uint32_t l_long = (uint32_t)((lt & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) == 0) & (uint32_t)((lt & BUSTER_FTYPE_SCALAR_MASK) - FTYPE_I64 <= 1u);
+    const uint32_t r_long = (uint32_t)((rt & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) == 0) & (uint32_t)((rt & BUSTER_FTYPE_SCALAR_MASK) - FTYPE_I64 <= 1u);
+    const uint32_t narrow_field = ((uint32_t)(lhs->kind == FVAL_BITFIELD) & l_long & (uint32_t)(lhs->bf_width <= 32u)) |
+                                  ((uint32_t)(rhs->kind == FVAL_BITFIELD) & r_long & (uint32_t)(rhs->bf_width <= 32u));
+    // -Wenum-compare: a comparison of two enums' values (an enumerator, whose enum rides in sym_idx, or a value of the
+    // enum's type) of different enums. (An unnamed enum's isn't warned of; refused the same.)
+    const uint32_t l_cidx = lt & BUSTER_FTYPE_CIDX_MASK & BUSTER_FTYPE_COMPLEX_ALL(lt) & (UINT32_C(0) - (uint32_t)((lt & BUSTER_FTYPE_PTR_MASK) == 0));
+    const uint32_t r_cidx = rt & BUSTER_FTYPE_CIDX_MASK & BUSTER_FTYPE_COMPLEX_ALL(rt) & (UINT32_C(0) - (uint32_t)((rt & BUSTER_FTYPE_PTR_MASK) == 0));
+    const uint32_t l_enum = (l_cidx & (UINT32_C(0) - (uint32_t)(cc->ctypes[l_cidx].kind == FCTYPE_ENUM))) | (lhs->sym_idx & (UINT32_C(0) - (uint32_t)(lhs->kind == FVAL_IMM)));
+    const uint32_t r_enum = (r_cidx & (UINT32_C(0) - (uint32_t)(cc->ctypes[r_cidx].kind == FCTYPE_ENUM))) | (rhs->sym_idx & (UINT32_C(0) - (uint32_t)(rhs->kind == FVAL_IMM)));
+    const uint32_t mixed_enums = comparison & (uint32_t)(l_enum != 0) & (uint32_t)(r_enum != 0) & (uint32_t)(l_enum != r_enum);
+    // -Wtautological-pointer-compare: an array's, a function's or an address's equality with a null pointer constant.
+    // (A weak function's isn't warned of; refused the same.)
+    const uint32_t l_kind = cc->ctypes[lhs->type & BUSTER_FTYPE_CIDX_MASK & BUSTER_FTYPE_COMPLEX_ALL(lhs->type)].kind;
+    const uint32_t r_kind = cc->ctypes[rhs->type & BUSTER_FTYPE_CIDX_MASK & BUSTER_FTYPE_COMPLEX_ALL(rhs->type)].kind;
+    const uint32_t l_aggregate = (uint32_t)(lhs->type >> 31) & (uint32_t)((lhs->type & BUSTER_FTYPE_PTR_MASK) == 0) &
+                                 ((uint32_t)(l_kind == FCTYPE_ARRAY) | (uint32_t)(l_kind == FCTYPE_FUNC));
+    const uint32_t r_aggregate = (uint32_t)(rhs->type >> 31) & (uint32_t)((rhs->type & BUSTER_FTYPE_PTR_MASK) == 0) &
+                                 ((uint32_t)(r_kind == FCTYPE_ARRAY) | (uint32_t)(r_kind == FCTYPE_FUNC));
+    // (is_func_sym shares its byte with other kinds' fields: a function designator's is FVAL_GLOBAL's.)
+    const uint32_t l_nonnull = l_aggregate | (uint32_t)(lhs->kind == FVAL_LOCAL_ADDR) | (uint32_t)(lhs->kind == FVAL_GLOBAL_ADDR) |
+                               ((uint32_t)(lhs->kind == FVAL_GLOBAL) & (uint32_t)(lhs->is_func_sym != 0));
+    const uint32_t r_nonnull = r_aggregate | (uint32_t)(rhs->kind == FVAL_LOCAL_ADDR) | (uint32_t)(rhs->kind == FVAL_GLOBAL_ADDR) |
+                               ((uint32_t)(rhs->kind == FVAL_GLOBAL) & (uint32_t)(rhs->is_func_sym != 0));
+    const uint32_t l_zero = (uint32_t)(lhs->kind == FVAL_IMM) & (uint32_t)(lhs->imm == 0);
+    const uint32_t r_zero = (uint32_t)(rhs->kind == FVAL_IMM) & (uint32_t)(rhs->imm == 0);
+    const uint32_t tautological = equality & ((l_nonnull & r_zero) | (r_nonnull & l_zero));
+    // -Wliteral-range: `==` or `!=` of a float (or a cast of one to double) and a double constant, which a float may not
+    // hold exactly (clang's CheckFloatComparison): asked where one is.
+    const uint32_t l_float = (uint32_t)((lt & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK)) == FTYPE_F32) | (uint32_t)lhs->float_cast;
+    const uint32_t r_float = (uint32_t)((rt & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK)) == FTYPE_F32) | (uint32_t)rhs->float_cast;
+    const uint32_t l_double = (uint32_t)(lhs->kind == FVAL_FIMM) & (uint32_t)((lt & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK)) == FTYPE_F64);
+    const uint32_t r_double = (uint32_t)(rhs->kind == FVAL_FIMM) & (uint32_t)((rt & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK)) == FTYPE_F64);
+    uint32_t float_literal = equality & ((l_float & r_double) | (r_float & l_double));
+    if (float_literal != 0)
+    {
+        const uint64_t bits = (uint64_t)(r_double != 0 ? rhs->imm : lhs->imm);
+        double value = 0.0;
+        memcpy(&value, &bits, sizeof(value));
+        // Out of float's range (or NaN) a float can't hold it; within, exactly where float's rounding gives it back.
+        const bool in_range = value >= -(double)__FLT_MAX__ && value <= (double)__FLT_MAX__;
+        float_literal = !in_range || (double)(float)value != value ? 1u : 0u;
+    }
+    return (out_of_range | narrow_field | mixed_enums | tautological | float_literal) != 0;
+}
+
 static BUSTER_DIRECT_HOT void fval_emit_binary(FastExprCtx* ex, uint8_t op, FastVal* lhs, FastVal* rhs, FastVal* out)
 {
     FastCCState* cc = ex->cc;
@@ -3787,6 +3885,11 @@ static BUSTER_DIRECT_HOT void fval_emit_binary(FastExprCtx* ex, uint8_t op, Fast
     // integers; + arithmetic, or a pointer and an integer; - those, or two pointers; < > <= >= arithmetic or two
     // pointers; == != those, or a pointer and a literal 0. A pair of classes (left * 4 + right) is a bit of the
     // operator's mask; two pointers must be to one type (fast_cc_pointer_pair_valid).
+    // Two integer scalars (no enum, pointer or record) are every operator's operands: the classes are looked up for the
+    // others alone.
+    const uint32_t integers = (uint32_t)(((lt | rt) & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) == 0) &
+                              (BUSTER_FAST_INTEGER_KINDS >> (lt & BUSTER_FTYPE_SCALAR_MASK)) & (BUSTER_FAST_INTEGER_KINDS >> (rt & BUSTER_FTYPE_SCALAR_MASK)) & 1u;
+    if (integers == 0)
     {
         const uint32_t lc = BUSTER_FAST_OPERAND_CLASS(cc, lt);
         const uint32_t rc = BUSTER_FAST_OPERAND_CLASS(cc, rt);
@@ -3808,72 +3911,31 @@ static BUSTER_DIRECT_HOT void fval_emit_binary(FastExprCtx* ex, uint8_t op, Fast
             fast_cc_bail(cc, "operands of distinct pointer types");
             return;
         }
-        // A comparison of an integer constant with a value of a narrower range (_Bool, a char, a short, a boolean
-        // expression) that the constant is out of: -Wtautological-constant-out-of-range-compare. Branch-free: the side
-        // that isn't constant is picked by mask. A bit-field of a 64-bit type and 32 bits or fewer promotes to int,
-        // where this path keeps its type: refused under any operator.
-        static const int32_t range_lo[32] = { [FTYPE_BOOL] = 0, [FTYPE_I8] = -128, [FTYPE_I16] = -32768 };
-        static const int32_t range_hi[32] = { [FTYPE_BOOL] = 1, [FTYPE_I8] = 127, [FTYPE_U8] = 255, [FTYPE_I16] = 32767, [FTYPE_U16] = 65535 };
-        static const uint8_t range_narrow[32] = { [FTYPE_BOOL] = 1, [FTYPE_I8] = 1, [FTYPE_U8] = 1, [FTYPE_I16] = 1, [FTYPE_U16] = 1 };
-        const uint32_t comparison = (uint32_t)(op == FTOK_LT) | (uint32_t)(op == FTOK_GT) | (uint32_t)(op == FTOK_LE) | (uint32_t)(op == FTOK_GE) | equality;
-        const uint32_t l_const = (uint32_t)(lhs->kind == FVAL_IMM);
-        const uint32_t r_const = (uint32_t)(rhs->kind == FVAL_IMM);
-        const uint32_t pick_left = l_const & (r_const ^ 1u);            // the left side is the constant
-        const uint64_t left_mask = UINT64_C(0) - (uint64_t)pick_left;
-        const int64_t constant = (int64_t)(((uint64_t)rhs->imm & ~left_mask) | ((uint64_t)lhs->imm & left_mask));
-        const FastType other = (FastType)((lt & ~(uint32_t)left_mask) | (rt & (uint32_t)left_mask));
-        const uint32_t other_flags = (uint32_t)(((uint32_t)lhs->kind & ~(uint32_t)left_mask) | ((uint32_t)rhs->kind & (uint32_t)left_mask)) == FVAL_FLAGS;
-        const uint32_t other_scalar = (uint32_t)((other & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) == 0);
-        const uint32_t kind = other & BUSTER_FTYPE_SCALAR_MASK;
-        const uint32_t narrow = ((uint32_t)range_narrow[kind] & other_scalar) | other_flags;
-        const uint64_t flags_mask = UINT64_C(0) - (uint64_t)other_flags;
-        const int64_t lo = (int64_t)((uint64_t)(int64_t)range_lo[kind] & ~flags_mask);
-        const int64_t hi = (int64_t)(((uint64_t)(int64_t)range_hi[kind] & ~flags_mask) | (UINT64_C(1) & flags_mask));
-        const uint32_t out_of_range = comparison & (l_const ^ r_const) & narrow & ((uint32_t)(constant < lo) | (uint32_t)(constant > hi));
-        const uint32_t l_long = (uint32_t)((lt & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) == 0) & (uint32_t)((lt & BUSTER_FTYPE_SCALAR_MASK) - FTYPE_I64 <= 1u);
-        const uint32_t r_long = (uint32_t)((rt & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) == 0) & (uint32_t)((rt & BUSTER_FTYPE_SCALAR_MASK) - FTYPE_I64 <= 1u);
-        const uint32_t narrow_field = ((uint32_t)(lhs->kind == FVAL_BITFIELD) & l_long & (uint32_t)(lhs->bf_width <= 32u)) |
-                                      ((uint32_t)(rhs->kind == FVAL_BITFIELD) & r_long & (uint32_t)(rhs->bf_width <= 32u));
-        // -Wenum-compare: a comparison of two enums' values (an enumerator, whose enum rides in sym_idx, or a value of the
-        // enum's type) of different enums. (An unnamed enum's isn't warned of; refused the same.)
-        const uint32_t l_cidx = lt & BUSTER_FTYPE_CIDX_MASK & BUSTER_FTYPE_COMPLEX_ALL(lt) & (UINT32_C(0) - (uint32_t)((lt & BUSTER_FTYPE_PTR_MASK) == 0));
-        const uint32_t r_cidx = rt & BUSTER_FTYPE_CIDX_MASK & BUSTER_FTYPE_COMPLEX_ALL(rt) & (UINT32_C(0) - (uint32_t)((rt & BUSTER_FTYPE_PTR_MASK) == 0));
-        const uint32_t l_enum = (l_cidx & (UINT32_C(0) - (uint32_t)(cc->ctypes[l_cidx].kind == FCTYPE_ENUM))) | (lhs->sym_idx & (UINT32_C(0) - (uint32_t)(lhs->kind == FVAL_IMM)));
-        const uint32_t r_enum = (r_cidx & (UINT32_C(0) - (uint32_t)(cc->ctypes[r_cidx].kind == FCTYPE_ENUM))) | (rhs->sym_idx & (UINT32_C(0) - (uint32_t)(rhs->kind == FVAL_IMM)));
-        const uint32_t mixed_enums = comparison & (uint32_t)(l_enum != 0) & (uint32_t)(r_enum != 0) & (uint32_t)(l_enum != r_enum);
-        // -Wtautological-pointer-compare: an array's, a function's or an address's equality with a null pointer constant.
-        // (A weak function's isn't warned of; refused the same.)
-        const uint32_t l_kind = cc->ctypes[lhs->type & BUSTER_FTYPE_CIDX_MASK & BUSTER_FTYPE_COMPLEX_ALL(lhs->type)].kind;
-        const uint32_t r_kind = cc->ctypes[rhs->type & BUSTER_FTYPE_CIDX_MASK & BUSTER_FTYPE_COMPLEX_ALL(rhs->type)].kind;
-        const uint32_t l_aggregate = (uint32_t)(lhs->type >> 31) & (uint32_t)((lhs->type & BUSTER_FTYPE_PTR_MASK) == 0) &
-                                     ((uint32_t)(l_kind == FCTYPE_ARRAY) | (uint32_t)(l_kind == FCTYPE_FUNC));
-        const uint32_t r_aggregate = (uint32_t)(rhs->type >> 31) & (uint32_t)((rhs->type & BUSTER_FTYPE_PTR_MASK) == 0) &
-                                     ((uint32_t)(r_kind == FCTYPE_ARRAY) | (uint32_t)(r_kind == FCTYPE_FUNC));
-        // (is_func_sym shares its byte with other kinds' fields: a function designator's is FVAL_GLOBAL's.)
-        const uint32_t l_nonnull = l_aggregate | (uint32_t)(lhs->kind == FVAL_LOCAL_ADDR) | (uint32_t)(lhs->kind == FVAL_GLOBAL_ADDR) |
-                                   ((uint32_t)(lhs->kind == FVAL_GLOBAL) & (uint32_t)(lhs->is_func_sym != 0));
-        const uint32_t r_nonnull = r_aggregate | (uint32_t)(rhs->kind == FVAL_LOCAL_ADDR) | (uint32_t)(rhs->kind == FVAL_GLOBAL_ADDR) |
-                                   ((uint32_t)(rhs->kind == FVAL_GLOBAL) & (uint32_t)(rhs->is_func_sym != 0));
-        const uint32_t l_zero = (uint32_t)(lhs->kind == FVAL_IMM) & (uint32_t)(lhs->imm == 0);
-        const uint32_t r_zero = (uint32_t)(rhs->kind == FVAL_IMM) & (uint32_t)(rhs->imm == 0);
-        const uint32_t tautological = equality & ((l_nonnull & r_zero) | (r_nonnull & l_zero));
-        // -Wliteral-range: `==` or `!=` of a float (or a cast of one to double) and a double constant, which a float may not
-        // hold exactly (clang's CheckFloatComparison): asked where one is.
-        const uint32_t l_float = (uint32_t)((lt & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK)) == FTYPE_F32) | (uint32_t)lhs->float_cast;
-        const uint32_t r_float = (uint32_t)((rt & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK)) == FTYPE_F32) | (uint32_t)rhs->float_cast;
-        const uint32_t l_double = (uint32_t)(lhs->kind == FVAL_FIMM) & (uint32_t)((lt & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK)) == FTYPE_F64);
-        const uint32_t r_double = (uint32_t)(rhs->kind == FVAL_FIMM) & (uint32_t)((rt & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK)) == FTYPE_F64);
-        uint32_t float_literal = equality & ((l_float & r_double) | (r_float & l_double));
-        if (float_literal != 0)
-        {
-            const uint64_t bits = (uint64_t)(r_double != 0 ? rhs->imm : lhs->imm);
-            double value = 0.0;
-            memcpy(&value, &bits, sizeof(value));
-            // Out of float's range (or NaN) a float can't hold it; within, exactly where float's rounding gives it back.
-            const bool in_range = value >= -(double)__FLT_MAX__ && value <= (double)__FLT_MAX__;
-            float_literal = !in_range || (double)(float)value != value ? 1u : 0u;
-        }
-        if ((out_of_range | narrow_field | mixed_enums | tautological | float_literal) != 0)
+    }
+    {
+        // #3577: the comparisons and operands the full pipeline questions (fast_cc_binary_questioned) have a constant
+        // against a narrow, flag, enum, aggregate, address or float operand, two enum values, or a bit-field: this gate
+        // reads the operands' kinds and types alone, in registers, and the exact check runs past it.
+        const uint32_t comparison = (uint32_t)(((UINT64_C(1) << (op & 63u)) & BUSTER_FAST_COMPARISON_OPS) != 0);
+        const uint32_t l_constant = (uint32_t)(lhs->kind == FVAL_IMM) | (uint32_t)(lhs->kind == FVAL_FIMM);
+        const uint32_t r_constant = (uint32_t)(rhs->kind == FVAL_IMM) | (uint32_t)(rhs->kind == FVAL_FIMM);
+        // (A scalar kind's bit, below the pointer and complex bits; a pointer's or a record's scalar bits are 0, void's.)
+        const uint32_t l_scalar = (uint32_t)((lt & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) == 0);
+        const uint32_t r_scalar = (uint32_t)((rt & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) == 0);
+        // An array, a function or an enum before decay (not a pointer to a record, which compares quietly).
+        const uint32_t l_aggregate = (uint32_t)((lhs->type & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) == BUSTER_FTYPE_COMPLEX_BIT);
+        const uint32_t r_aggregate = (uint32_t)((rhs->type & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) == BUSTER_FTYPE_COMPLEX_BIT);
+        const uint32_t l_special = (l_scalar & (BUSTER_FAST_QUESTIONED_KINDS >> (lt & BUSTER_FTYPE_SCALAR_MASK))) | (uint32_t)(lhs->kind == FVAL_FLAGS) |
+                                   l_aggregate | (uint32_t)(lhs->kind == FVAL_LOCAL_ADDR) | (uint32_t)(lhs->kind == FVAL_GLOBAL_ADDR) |
+                                   ((uint32_t)(lhs->kind == FVAL_GLOBAL) & (uint32_t)(lhs->is_func_sym != 0)) | (uint32_t)lhs->float_cast;
+        const uint32_t r_special = (r_scalar & (BUSTER_FAST_QUESTIONED_KINDS >> (rt & BUSTER_FTYPE_SCALAR_MASK))) | (uint32_t)(rhs->kind == FVAL_FLAGS) |
+                                   r_aggregate | (uint32_t)(rhs->kind == FVAL_LOCAL_ADDR) | (uint32_t)(rhs->kind == FVAL_GLOBAL_ADDR) |
+                                   ((uint32_t)(rhs->kind == FVAL_GLOBAL) & (uint32_t)(rhs->is_func_sym != 0)) | (uint32_t)rhs->float_cast;
+        const uint32_t l_enum = l_aggregate | ((uint32_t)(lhs->kind == FVAL_IMM) & (uint32_t)(lhs->sym_idx != 0));
+        const uint32_t r_enum = r_aggregate | ((uint32_t)(rhs->kind == FVAL_IMM) & (uint32_t)(rhs->sym_idx != 0));
+        const uint32_t questioned = (comparison & (((l_constant | r_constant) & (l_special | r_special) & 1u) | (l_enum & r_enum))) |
+                                    (uint32_t)(lhs->kind == FVAL_BITFIELD) | (uint32_t)(rhs->kind == FVAL_BITFIELD);
+        if (questioned != 0 && fast_cc_binary_questioned(cc, op, lhs, rhs, lt, rt))
         {
             fast_cc_bail(cc, "comparison or operand the full pipeline questions");
             return;
@@ -7000,17 +7062,17 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
             // one: a parenthesis, `*`, `&`, or an object that may fold to zero.
             const uint32_t compound_divide = (uint32_t)(k == FTOK_DIV_ASSIGN) | (uint32_t)(k == FTOK_MOD_ASSIGN);
             const uint32_t divide = (uint32_t)(k == FTOK_SLASH) | (uint32_t)(k == FTOK_PERCENT) | compound_divide;
-            const uint32_t first_at = cc->pos + (uint32_t)(cc->pos + 1u < cc->tcount);
-            const uint8_t first = cc->tk[first_at];
-            const uint32_t first_id = cc->td[first_at];
-            const uint32_t first_known = (uint32_t)(first_id < cc->env_cap);
-            const uint32_t first_si = cc->sym_cur[first_id * first_known] * first_known;
-            const uint32_t divisor_start = (uint32_t)(first == FTOK_LPAREN) | (uint32_t)(first == FTOK_STAR) | (uint32_t)(first == FTOK_AMP) |
-                                           (uint32_t)(first == FTOK_KW_EXTENSION) |
-                                           ((uint32_t)(first == FTOK_IDENT) & (uint32_t)(cc->syms[first_si].pad_sym[1] == BUSTER_FFOLD_ZERO));
-            if ((divide & divisor_start) != 0)
+            if (divide != 0)
             {
-                if (ex.eval_only == 0 && !cc->quiet && fast_cc_divisor_may_fold_zero(cc, cc->pos + 1u, compound_divide != 0))
+                const uint32_t first_at = cc->pos + (uint32_t)(cc->pos + 1u < cc->tcount);
+                const uint8_t first = cc->tk[first_at];
+                const uint32_t first_id = cc->td[first_at];
+                const uint32_t first_known = (uint32_t)(first_id < cc->env_cap);
+                const uint32_t first_si = cc->sym_cur[first_id * first_known] * first_known;
+                const uint32_t divisor_start = (uint32_t)(first == FTOK_LPAREN) | (uint32_t)(first == FTOK_STAR) | (uint32_t)(first == FTOK_AMP) |
+                                               (uint32_t)(first == FTOK_KW_EXTENSION) |
+                                               ((uint32_t)(first == FTOK_IDENT) & (uint32_t)(cc->syms[first_si].pad_sym[1] == BUSTER_FFOLD_ZERO));
+                if (divisor_start != 0 && ex.eval_only == 0 && !cc->quiet && fast_cc_divisor_may_fold_zero(cc, cc->pos + 1u, compound_divide != 0))
                 {
                     fast_cc_bail(cc, "a divisor that may fold to zero through a const object");
                     break;
