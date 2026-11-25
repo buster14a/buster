@@ -584,11 +584,12 @@ static uint32_t fast_ident_intern_cstr(FastIdentTable* t, const char* s)
     return fast_ident_intern(t, (const uint8_t*)s, (uint32_t)strlen(s));
 }
 
-// The cache's key hash, of a name's first eight bytes (masked to its length), its last eight (0 up to eight bytes) and
-// its length: fast_ident_lookup's, and fast_ident_cache_grow's for a slot's stored key. Its top cache_bits bits are the
-// slot. A macro rather than a function so that the compile's count has no call a lookup in it (#3592).
-#define BUSTER_FIDENT_CACHE_HASH(first, last, len) \
-    (((first) ^ ((last) * UINT64_C(0x9e3779b97f4a7c15)) ^ ((uint64_t)(len) << 56)) * UINT64_C(0xbf58476d1ce4e5b9))
+// The cache's key hash, of a name's first eight bytes (masked to its length) and, past eight bytes, its last eight and
+// its length (`mix`, BUSTER_FIDENT_CACHE_MIX; 0 up to eight bytes): fast_ident_lookup's, and fast_ident_cache_grow's for
+// a slot's stored key. Its top cache_bits bits are the slot. Macros rather than functions so that the compile's count
+// has no call a lookup in it (#3592).
+#define BUSTER_FIDENT_CACHE_MIX(last, len) (((last) * UINT64_C(0x9e3779b97f4a7c15)) ^ ((uint64_t)(len) << 56))
+#define BUSTER_FIDENT_CACHE_HASH(first, mix) (((first) ^ (mix)) * UINT64_C(0xbf58476d1ce4e5b9))
 
 static void fast_ident_cache_set(FastIdentTable* t, FastIdentCacheSlot* cache, uint32_t bits)
 {
@@ -617,7 +618,8 @@ static __attribute__((noinline)) bool fast_ident_cache_grow(FastIdentTable* t)
         {
             if (old_cache[i].id != 0)
             {
-                new_cache[BUSTER_FIDENT_CACHE_HASH(old_cache[i].w0, old_cache[i].w1, old_cache[i].len) >> new_shift] = old_cache[i];
+                const uint64_t mix = old_cache[i].len > 8u ? BUSTER_FIDENT_CACHE_MIX(old_cache[i].w1, old_cache[i].len) : 0u;
+                new_cache[BUSTER_FIDENT_CACHE_HASH(old_cache[i].w0, mix) >> new_shift] = old_cache[i];
             }
         }
         fast_ident_cache_set(t, new_cache, new_bits);
@@ -813,6 +815,7 @@ static inline uint32_t fast_ident_lookup(FastIdentTable* t, const uint8_t* p, ui
     uint64_t first;
     memcpy(&first, p, sizeof(first));
     uint64_t last = 0;
+    uint64_t mix = 0;
     if (len <= 8u)
     {
         first = _bzhi_u64(first, len * 8u);
@@ -820,8 +823,9 @@ static inline uint32_t fast_ident_lookup(FastIdentTable* t, const uint8_t* p, ui
     else
     {
         memcpy(&last, p + len - 8u, sizeof(last));
+        mix = BUSTER_FIDENT_CACHE_MIX(last, len);
     }
-    const uint64_t hash = BUSTER_FIDENT_CACHE_HASH(first, last, len);
+    const uint64_t hash = BUSTER_FIDENT_CACHE_HASH(first, mix);
     FastIdentCacheSlot* slot = t->cache + (hash >> t->cache_shift);
     uint32_t id = 0;
     uint8_t kind = FTOK_IDENT;
@@ -1223,6 +1227,9 @@ struct FastMacroCall
     uint8_t tok_flags;
     uint8_t state;
     bool allow_file;
+    // The variadic argument was left out (clang's isVarargsElidedUse): F(x) for F(x, ...), and F() for F(...) or
+    // F(x, ...). Only then does `, ## __VA_ARGS__` drop its comma; F(x,) passes an empty one and keeps it.
+    bool va_elided;
 };
 
 typedef struct FastPP FastPP;
@@ -1314,6 +1321,8 @@ struct FastPP
     const char* bailout_reason;
     bool unsigned_char;
     bool c23;
+    bool strict_iso;          // CDirectRequest.strict_iso: no GNU extensions (-std=cNN)
+    bool trigraphs;           // CDirectRequest.trigraphs: a file with a trigraph leaves the direct path
 };
 
 static void fast_pp_read_tok(FastPP* pp, FastIncludeFile* f, bool stop_at_eol, FastTok* out_tok);
@@ -2344,6 +2353,40 @@ static FastGuardEntry* fast_guard_lookup(FastPP* pp, const char* path, uint32_t 
     return result;
 }
 
+// Whether `len` bytes at `p` hold a trigraph, "??" and one of = ( / ) ' < ! > -, which a unit compiled with trigraphs
+// (-std=c99, c11 or c17, or -trigraphs) replaces in translation phase 1, comments and literals included, and the direct
+// path doesn't (#3592). 64 places a step from loads at p + i and p + i + 1, the last step's masked to `len`; where two
+// '?' meet, the byte after them by a 64-entry table on its low six bits, for the bytes 0x20 to 0x3f.
+_Alignas(64) static const uint8_t fast_trigraph_third[64] = {
+    ['!' & 63] = 1, ['\'' & 63] = 1, ['(' & 63] = 1, [')' & 63] = 1, ['-' & 63] = 1,
+    ['/' & 63] = 1, ['<' & 63] = 1, ['=' & 63] = 1, ['>' & 63] = 1,
+};
+
+static bool fast_has_trigraph(const uint8_t* p, uint64_t len)
+{
+    bool found = false;
+    const __m512i question = _mm512_set1_epi8('?');
+    const __m512i table = _mm512_load_si512((const void*)fast_trigraph_third);
+    for (uint64_t i = 0; !found && i + 2u < len; i += 64u)
+    {
+        const uint64_t left = len - i;
+        const __mmask64 first = left >= 64u ? ~UINT64_C(0) : _bzhi_u64(~UINT64_C(0), (uint32_t)left);
+        const __mmask64 second = left - 1u >= 64u ? ~UINT64_C(0) : _bzhi_u64(~UINT64_C(0), (uint32_t)(left - 1u));
+        const __m512i b0 = _mm512_maskz_loadu_epi8(first, (const void*)(p + i));
+        const __m512i b1 = _mm512_maskz_loadu_epi8(second, (const void*)(p + i + 1u));
+        const uint64_t pairs = _mm512_mask_cmpeq_epi8_mask(second, b0, question) & _mm512_mask_cmpeq_epi8_mask(second, b1, question);
+        if (pairs != 0)
+        {
+            const __mmask64 third = left - 2u >= 64u ? ~UINT64_C(0) : _bzhi_u64(~UINT64_C(0), (uint32_t)(left - 2u));
+            const __m512i b2 = _mm512_maskz_loadu_epi8(third, (const void*)(p + i + 2u));
+            const __m512i marks = _mm512_permutexvar_epi8(b2, table);
+            const uint64_t low = _mm512_cmpeq_epi8_mask(_mm512_and_si512(b2, _mm512_set1_epi8((char)0xc0)), _mm512_setzero_si512());
+            found = (pairs & third & low & _mm512_test_epi8_mask(marks, marks)) != 0;
+        }
+    }
+    return found;
+}
+
 static bool fast_pp_push_memory(FastPP* pp, const char* name, const uint8_t* bytes, uint64_t len, uint32_t dir_idx,
                                 bool owned_mmap, bool is_system)
 {
@@ -2351,6 +2394,11 @@ static bool fast_pp_push_memory(FastPP* pp, const char* name, const uint8_t* byt
     if (!ok)
     {
         fast_pp_bail(pp, "include depth exceeded");
+    }
+    else if (pp->trigraphs && fast_has_trigraph(bytes, len))
+    {
+        fast_pp_bail(pp, "trigraph");
+        ok = false;
     }
     else
     {
@@ -2966,12 +3014,13 @@ static inline FastMacroCall* fast_pp_call_start(FastPP* pp, FastTok tok, uint32_
     return root;
 }
 
-// A call's `arg_count` arguments are in exp_buf (cf->arg_starts, cf->arg_counts): their count checked against the macro's
-// parameters, an empty variable argument added where none was given, and the call moved on to its prescans. False where
-// the compile bailed out.
-static bool fast_pp_call_collected(FastPP* pp, FastMacroCall* cf, const FastMacro* m, uint32_t arg_count)
+// A call's `arg_count` arguments are in exp_buf (cf->arg_starts, cf->arg_counts), `saw_any` whether any token stood
+// between its parentheses: their count checked against the macro's parameters, an empty variable argument added where
+// none was given, and the call moved on to its prescans. False where the compile bailed out.
+static bool fast_pp_call_collected(FastPP* pp, FastMacroCall* cf, const FastMacro* m, uint32_t arg_count, bool saw_any)
 {
     const uint32_t max_named = m->param_count;
+    cf->va_elided = m->is_variadic && (arg_count == max_named || (max_named == 0 && !saw_any));
     if (max_named == 0 && !m->is_variadic)
     {
         if (arg_count > 1u || (arg_count == 1u && cf->arg_counts[0] != 0))
@@ -3208,8 +3257,9 @@ static BUSTER_DIRECT_HOT bool fast_pp_run_calls(FastPP* pp, FastTok* out_replace
         uint32_t bulk_count = 0;
         if (cf->state == 0 && fast_pp_frame_args(pp, cf, m, &bulk_count))
         {
-            // The arguments from the frame on top, in bulk.
-            fast_pp_call_collected(pp, cf, m, bulk_count);
+            // The arguments from the frame on top, in bulk. A call taken in bulk has its last argument recorded, so a
+            // token stood between its parentheses where it has two arguments or a first that isn't empty.
+            fast_pp_call_collected(pp, cf, m, bulk_count, bulk_count > 1u || cf->arg_counts[0] != 0);
         }
         else if (cf->state == 0)
         {
@@ -3276,7 +3326,7 @@ static BUSTER_DIRECT_HOT bool fast_pp_run_calls(FastPP* pp, FastTok* out_replace
                     saw_any_tok = true;
                 }
             }
-            if (pp->bailout || !fast_pp_call_collected(pp, cf, m, arg_count)) { break; }
+            if (pp->bailout || !fast_pp_call_collected(pp, cf, m, arg_count, saw_any_tok)) { break; }
         }
         else if (cf->state == 1u)
         {
@@ -3420,9 +3470,14 @@ static BUSTER_DIRECT_HOT bool fast_pp_run_calls(FastPP* pp, FastTok* out_replace
                 {
                     const FastTok next = body[i + 1u];
                     const bool next_is_param = (next.kind == FTOK_IDENT || next.kind >= 64u) && next.extra != 0;
-                    if (m->is_variadic && next_is_param && next.extra == (uint16_t)(max_named + 1u) && cf->arg_counts[max_named] == 0)
+                    const bool variadic_next = m->is_variadic && next_is_param && next.extra == (uint16_t)(max_named + 1u);
+                    const bool comma_before = pp->exp_used > subst_start && pp->exp_buf[pp->exp_used - 1u].kind == FTOK_COMMA;
+                    // GNU's `, ## __VA_ARGS__` drops the comma before a left-out variadic argument, as clang does
+                    // (TokenLexer::MaybeRemoveCommaBeforeVaArgs): not before an empty one, and without GNU's
+                    // extensions not where the variadic parameter is the macro's only one.
+                    if (variadic_next && cf->arg_counts[max_named] == 0 && cf->va_elided && !(pp->strict_iso && max_named == 0))
                     {
-                        if (pp->exp_used > subst_start && pp->exp_buf[pp->exp_used - 1u].kind == FTOK_COMMA)
+                        if (comma_before)
                         {
                             pp->exp_used -= 1u;
                         }
@@ -3436,7 +3491,9 @@ static BUSTER_DIRECT_HOT bool fast_pp_run_calls(FastPP* pp, FastTok* out_replace
                         if (rc > 0)
                         {
                             const FastTok* rt = pp->exp_buf + cf->arg_starts[pidx];
-                            if (pp->exp_used > subst_start)
+                            // And before a variadic argument with tokens it pastes nothing: the argument follows the
+                            // comma unexpanded (clang's VaArgsPseudoPaste, #3592), where `,` ## `x` would be no token.
+                            if (pp->exp_used > subst_start && !(variadic_next && comma_before))
                             {
                                 pp->exp_buf[pp->exp_used - 1u] = fast_pp_paste(pp, pp->exp_buf[pp->exp_used - 1u], rt[0]);
                                 for (uint32_t k = 1u; k < rc; k += 1)
@@ -4665,6 +4722,25 @@ static bool fast_pp_init(FastPP* pp, FastArena* arena, FastArena* scratch, bool 
     return ok;
 }
 
+// The language mode's part of the preprocessor (#3592): `c23` (C23's `true` in #if, typeof a keyword), `strict_iso`
+// (-std=cNN: clang's comma rule without GNU's extensions), `trigraphs` (a file with one leaves the direct path), and
+// without GNU's keywords asm, and typeof before C23, as identifiers (c_intern.c's c_name_is_keyword). Before any
+// lookup: the identifier cache keeps a name's kind from its first one.
+static void fast_pp_set_language(FastPP* pp, bool c23, bool strict_iso, bool no_gnu_keywords, bool trigraphs)
+{
+    pp->c23 = c23;
+    pp->strict_iso = strict_iso;
+    pp->trigraphs = trigraphs;
+    if (no_gnu_keywords)
+    {
+        pp->idents.entries[fast_ident_intern_cstr(&pp->idents, "asm")].kw_kind = 0;
+    }
+    if (no_gnu_keywords && !c23)
+    {
+        pp->idents.entries[fast_ident_intern_cstr(&pp->idents, "typeof")].kw_kind = 0;
+    }
+}
+
 static void fast_pp_add_dir(FastPP* pp, const char* dir, bool is_system)
 {
     if (pp->dir_count < BUSTER_FPP_MAX_DIRS && dir != NULL && dir[0] != '\0')
@@ -5811,7 +5887,8 @@ static __attribute__((noinline)) bool fast_pp_window_macro(FastPP* pp, FastInclu
             // The text goes on after the ')', with its line: the prescans and the body may ask for __LINE__.
             fast_pp_sync_file(f, f->base + w->starts[close] + 1u);
             w->pos = close + 1u;
-            expanded = fast_pp_call_collected(pp, root, pp->macros + fmidx, arg_count) && fast_pp_run_calls(pp, &rep);
+            expanded = fast_pp_call_collected(pp, root, pp->macros + fmidx, arg_count, arg_count > 1u || root->arg_counts[0] != 0) &&
+                       fast_pp_run_calls(pp, &rep);
         }
         else if (fast_pp_consume_lparen(pp, false, 0, true))
         {
