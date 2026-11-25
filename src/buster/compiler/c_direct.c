@@ -1286,6 +1286,177 @@ static bool c_direct_test_tables_and_inline_bodies(const char* obj_path)
     return c_direct_test_compile_source_with(source, obj_path, 0, NULL, 0, false, NULL, NULL, NULL, expected, NULL, 0);
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// The symbols of a declaration's attributes and of inline definitions, as the full pipeline gives them (#3595)
+
+typedef struct CDirectTestSymbol CDirectTestSymbol;
+struct CDirectTestSymbol
+{
+    uint32_t count;
+    uint8_t bind;
+    uint8_t type;
+    uint8_t visibility;
+    uint16_t section;
+    uint64_t size;
+};
+
+// The symbols named `name` in the object at `path`: how many, and the first one's binding, type, visibility, section
+// index and size.
+static CDirectTestSymbol c_direct_test_symbol(const char* path, const char* name)
+{
+    CDirectTestSymbol result = { 0 };
+    FILE* file = fopen(path, "rb");
+    uint8_t* bytes = NULL;
+    long size = 0;
+    if (file != NULL && fseek(file, 0, SEEK_END) == 0 && (size = ftell(file)) > (long)sizeof(Elf64_Ehdr) && fseek(file, 0, SEEK_SET) == 0)
+    {
+        bytes = (uint8_t*)malloc((size_t)size);
+        if (bytes != NULL && fread(bytes, 1, (size_t)size, file) != (size_t)size)
+        {
+            free(bytes);
+            bytes = NULL;
+        }
+    }
+    if (file != NULL)
+    {
+        fclose(file);
+    }
+    const Elf64_Ehdr* header = (const Elf64_Ehdr*)bytes;
+    const bool sections = bytes != NULL && header->e_shoff + (uint64_t)header->e_shnum * sizeof(Elf64_Shdr) <= (uint64_t)size;
+    for (uint16_t i = 0; sections && i < header->e_shnum; i += 1)
+    {
+        const Elf64_Shdr* table = (const Elf64_Shdr*)(bytes + header->e_shoff);
+        if (table[i].sh_type == SHT_SYMTAB && table[i].sh_link < header->e_shnum && table[i].sh_offset + table[i].sh_size <= (uint64_t)size)
+        {
+            const Elf64_Shdr* strings = table + table[i].sh_link;
+            const Elf64_Sym* symbols = (const Elf64_Sym*)(bytes + table[i].sh_offset);
+            for (uint64_t k = 1; k < table[i].sh_size / sizeof(Elf64_Sym); k += 1)
+            {
+                const uint64_t at = strings->sh_offset + symbols[k].st_name;
+                if (at + strlen(name) + 1u <= (uint64_t)size && strcmp((const char*)bytes + at, name) == 0)
+                {
+                    if (result.count == 0)
+                    {
+                        result.bind = ELF64_ST_BIND(symbols[k].st_info);
+                        result.type = ELF64_ST_TYPE(symbols[k].st_info);
+                        result.visibility = ELF64_ST_VISIBILITY(symbols[k].st_other);
+                        result.section = symbols[k].st_shndx;
+                        result.size = symbols[k].st_size;
+                    }
+                    result.count += 1u;
+                }
+            }
+        }
+    }
+    free(bytes);
+    return result;
+}
+
+typedef struct CDirectDeclarationCase CDirectDeclarationCase;
+struct CDirectDeclarationCase
+{
+    const char* source;
+    const char* name;     // the symbol the case is about
+    const char* absent;   // a name the object must not have, or NULL
+    uint8_t bind;
+    uint8_t visibility;
+    bool defined;
+};
+
+// Each case's symbol as the full pipeline gives it: one symbol of the name, its binding and visibility, defined or not.
+// The inline definitions follow C99's rules and gnu_inline's (an extern inline one with gnu_inline is never emitted, a
+// C99 one only where a declaration without inline or with extern makes it external, whether or not it is called); an
+// asm label is its literals joined (glibc's __REDIRECT is "" and the name); internal visibility is hidden, and a later
+// declaration's visibility and weak join the symbol's; a block's declaration of a function names the file's.
+static bool c_direct_test_declarations(const char* obj_path)
+{
+    static const CDirectDeclarationCase cases[] = {
+        { "inline int f(void){return 7;}\nint g(void){return f();}\n", "f", NULL, STB_GLOBAL, STV_DEFAULT, false },
+        { "inline int f(void){return 7;}\nint f(void);\nint g(void){return 1;}\n", "f", NULL, STB_GLOBAL, STV_DEFAULT, true },
+        { "inline int f(void);\nint g(void){return f();}\ninline int f(void){return 7;}\nextern int f(void);\n", "f", NULL, STB_GLOBAL, STV_DEFAULT, true },
+        { "inline int f(void);\ninline int f(void){return 7;}\nint (*p)(void) = f;\n", "f", NULL, STB_GLOBAL, STV_DEFAULT, false },
+        { "extern inline int f(void){return 7;}\n", "f", NULL, STB_GLOBAL, STV_DEFAULT, true },
+        { "extern inline __attribute__((gnu_inline)) int f(void){return 7;}\nint g(void){return f();}\n", "f", NULL, STB_GLOBAL, STV_DEFAULT, false },
+        { "extern __inline __attribute__ ((__gnu_inline__)) int f(void){return 7;}\nint g(void){return 1;}\n", "g", "f", STB_GLOBAL, STV_DEFAULT, true },
+        { "int f(void) __attribute__((gnu_inline));\nextern inline int f(void){return 7;}\nint g(void){return f();}\n", "f", NULL, STB_GLOBAL, STV_DEFAULT, false },
+        { "inline __attribute__((gnu_inline)) int f(void){return 7;}\nint g(void){return 1;}\n", "f", NULL, STB_GLOBAL, STV_DEFAULT, true },
+        { "extern inline __attribute__((gnu_inline)) int f(void){return 7;}\ninline int f(void);\nint g(void){return f();}\n", "f", NULL, STB_GLOBAL, STV_DEFAULT, true },
+        { "extern inline __attribute__((gnu_inline)) int f(void){return 7;}\nint f(void){return 8;}\nint g(void){return f();}\n", "f", NULL, STB_GLOBAL, STV_DEFAULT, true },
+        { "extern inline __attribute__((gnu_inline)) int f(void){return 7;}\nint f(void){return 8;}\ninline int f(void);\n", "f", NULL, STB_GLOBAL, STV_DEFAULT, true },
+        { "static int f(void);\ninline int f(void){return 7;}\nint g(void){return f();}\n", "f", NULL, STB_LOCAL, STV_DEFAULT, true },
+        { "static int f(void);\ninline int f(void){return 7;}\nint g(void){return 1;}\n", "g", "f", STB_GLOBAL, STV_DEFAULT, true },
+        { "inline int f(void);\nint g(void){return f();}\ninline int f(void){return 7;}\n", "f", NULL, STB_GLOBAL, STV_DEFAULT, false },
+        { "int scan(void) __asm__(\"\" \"__isoc99_scan\");\nint g(void){return scan();}\n", "__isoc99_scan", "scan", STB_GLOBAL, STV_DEFAULT, false },
+        { "int h(void) __asm__(\"a\" \"b\" \"c\");\nint h(void){return 0;}\n", "abc", "a", STB_GLOBAL, STV_DEFAULT, true },
+        { "int scan(void);\nint scan(void) __asm__(\"__isoc99_scan\");\nint g(void){return scan();}\n", "__isoc99_scan", "scan", STB_GLOBAL, STV_DEFAULT, false },
+        { "int g(void) __attribute__((visibility(\"internal\")));\nint g(void){return 0;}\n", "g", NULL, STB_GLOBAL, STV_HIDDEN, true },
+        { "__attribute__((visibility(\"hidden\"))) int g(void) __attribute__((visibility(\"default\")));\nint g(void){return 0;}\n", "g", NULL, STB_GLOBAL, STV_DEFAULT, true },
+        { "int g(void) __attribute__((visibility(\"default\"), visibility(\"hidden\")));\nint g(void){return 0;}\n", "g", NULL, STB_GLOBAL, STV_HIDDEN, true },
+        { "int g(void);\nint g(void) __attribute__((visibility(\"hidden\")));\nint g(void){return 0;}\n", "g", NULL, STB_GLOBAL, STV_HIDDEN, true },
+        { "int v;\nextern int v __attribute__((visibility(\"protected\")));\nint r(void){return v;}\n", "v", NULL, STB_GLOBAL, STV_PROTECTED, true },
+        { "int g(void);\nint g(void) __attribute__((weak));\nint g(void){return 0;}\n", "g", NULL, STB_WEAK, STV_DEFAULT, true },
+        { "int g(void);\nint g(void) __attribute__((weak));\nint f(void){return g();}\n", "g", NULL, STB_WEAK, STV_DEFAULT, false },
+        { "static int f(void){return 1;}\nint g(void){ int f(void); return f(); }\n", "f", NULL, STB_LOCAL, STV_DEFAULT, true },
+        { "int f(void){return 1;}\nint g(void){ int f(void); return f(); }\n", "f", NULL, STB_GLOBAL, STV_DEFAULT, true },
+        { "int x = 2;\nint g(void){ extern int x; return x; }\n", "x", NULL, STB_GLOBAL, STV_DEFAULT, true },
+    };
+    bool ok = true;
+    for (uint32_t i = 0; ok && i < (uint32_t)(sizeof(cases) / sizeof(cases[0])); i += 1)
+    {
+        const CDirectDeclarationCase* c = cases + i;
+        ok = c_direct_test_compile_source_keep(c->source, obj_path, NULL, 0, NULL, NULL, NULL);
+        const CDirectTestSymbol sym = c_direct_test_symbol(obj_path, c->name);
+        ok = ok && sym.count == 1u && sym.bind == c->bind && sym.visibility == c->visibility && (sym.section != SHN_UNDEF) == c->defined &&
+             (c->absent == NULL || c_direct_test_symbol(obj_path, c->absent).count == 0);
+        unlink(obj_path);
+        if (!ok)
+        {
+            fprintf(stderr, "test-direct: a declaration's symbol is not the full pipeline's: %s", c->source);
+        }
+    }
+    // What the full pipeline refuses or warns of, and what the direct path leaves to it.
+    static const char* const leaves[] = {
+        "int g(void) __asm__();\nint g(void){return 0;}\n",
+        "int g(void) __asm__(\"\");\nint g(void){return 0;}\n",
+        "int g(void) __asm__(\"\" \"\");\nint g(void){return 0;}\n",
+        "int g(void) __asm__(u8\"gg\");\nint g(void){return 0;}\n",
+        "int g(void) __asm__(\"g\\x67\");\nint g(void){return 0;}\n",
+        "int g(void) __attribute__((visibility(\"bogus\")));\nint g(void){return 0;}\n",
+        "int g(void) __attribute__((visibility(\"hidden\\n\")));\nint g(void){return 0;}\n",
+        "int g(void) __attribute__((visibility(\"\\x68idden\")));\nint g(void){return 0;}\n",
+        "int g(void) __attribute__((visibility(\"\\150idden\")));\nint g(void){return 0;}\n",
+        "int g(void) __attribute__((visibility(u8\"hidden\")));\nint g(void){return 0;}\n",
+        "int g(void) __attribute__((visibility(\"hid\" \"den\")));\nint g(void){return 0;}\n",
+        "int g(void) __attribute__((visibility(\"hidden\" \"x\")));\nint g(void){return 0;}\n",
+        "int g(void) __attribute__((visibility(\"hidden\", 1)));\nint g(void){return 0;}\n",
+        "int f(void){ L: __attribute__((visibility(\"hidden\"))); return 0; }\n",
+        "typedef int T __attribute__((visibility(\"hidden\")));\n",
+        "int f(void){ typedef int T __attribute__((visibility(\"hidden\"))); return 0; }\n",
+        "int g(void) __attribute__((visibility(\"hidden\")));\nint g(void) __attribute__((visibility(\"default\")));\n",
+        "int g(void) __asm__(\"a\");\nint g(void) __asm__(\"b\");\n",
+        "int g(void);\nint f(void){return g();}\nint g(void) __attribute__((visibility(\"hidden\")));\n",
+        "int g(void);\nint f(void){return g();}\nint g(void) __attribute__((weak));\n",
+        "int g(void);\nint f(void){return g();}\nint g(void) __asm__(\"h\");\n",
+        "inline int f(void){return 7;}\nint f(void){return 8;}\n",
+        "inline int f(void){return 7;}\nint f(void) __attribute__((gnu_inline));\n",
+        "extern inline __attribute__((gnu_inline)) int f(void){return 7;}\ninline int f(void){return 8;}\n",
+        "int g(void){ int f(void); return f(); }\n",
+        "int f(void);\nint g(void){ int f = 1; { int f(void); return f(); } }\n",
+        "int f(void){return 1;}\nint g(void){ int f = 2; { int f(void); } return f; }\n",
+        "int f(void);\nint g(void){ int f(void) __asm__(\"h\"); return f(); }\n",
+        "static int x = 1;\nint g(void){ extern int x; return x; }\n",
+    };
+    for (uint32_t i = 0; ok && i < (uint32_t)(sizeof(leaves) / sizeof(leaves[0])); i += 1)
+    {
+        ok = c_direct_test_compile_source(leaves[i], obj_path, 1, NULL, NULL);
+        if (!ok)
+        {
+            fprintf(stderr, "test-direct: a declaration the direct path took: %s", leaves[i]);
+        }
+    }
+    return ok;
+}
+
 int run_c_direct_tests(int argc, char** argv)
 {
     (void)argc;
@@ -1420,6 +1591,16 @@ int run_c_direct_tests(int argc, char** argv)
     else
     {
         fprintf(stderr, "test-direct: FAIL initialized data or deferred function order\n");
+        failed += 1u;
+    }
+
+    if (c_direct_test_declarations(obj_path))
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL declarations' symbols: inline definitions, labels, visibility, weak\n");
         failed += 1u;
     }
 
