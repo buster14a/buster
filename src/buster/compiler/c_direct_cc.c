@@ -6735,6 +6735,7 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
     ex.seq_count = 0;
     ex.seq_mod_count = 0;
     ex.seq_start_pos = cc->pos;
+    ex.cmp_pos = UINT32_MAX;
     if (logging)
     {
         ex.seq_hit = 0;
@@ -7864,6 +7865,7 @@ static inline void fast_expr_ctx_reset(FastExprCtx* ex, FastCCState* cc)
     ex->seq_bloom = 0;
     ex->seq_mod_count = 0;
     ex->seq_start_pos = cc->pos;
+    ex->cmp_pos = UINT32_MAX;
 }
 
 static void fast_cc_store_expr_to_val(FastCCState* cc, FastVal dst, bool stop_at_comma)
