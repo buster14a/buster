@@ -252,6 +252,7 @@ a preset's tree with `cmake --fresh --preset NAME`, or build it with
 | `BUSTER_BAKE` | `1` | `0` leaves the tables to be built when the executable runs |
 | `BUSTER_PGO` | `0` | `1` builds Release with a profile of the compiler's own compiles (below): a `-pgo` tree, Release alone |
 | `BUSTER_PGO_TRAIN` | none | with `BUSTER_PGO=1`, a bash script that trains the profile in place of those compiles |
+| `BUSTER_PGO_CORPUS` | none | with `BUSTER_PGO=1`, the frozen corpus `tools/ci/fetch-corpus.sh` writes, whose `sqlite3.c` trains the direct path's own profile (below) |
 | `BUSTER_TOOLCHAIN` | `ci` | `build.sh`'s alone: `ci` builds with CI's clang, CMake and Ninja ([The toolchain](#the-toolchain)), staged once where `PATH` hasn't them; `path` with `PATH`'s as found |
 | `BUSTER_PARALLEL_CODEGEN` | `auto` | CHECKER's and BACKEND's Release native code (a sanitizer build's too), and Develop's `main.c` units, in parallel parts (below): `auto` where the tools are, `1` requires them, `0` never |
 | `BUSTER_RELEASE_PARTS` | `0` | `1` builds Release's `main.c` units in parts before the optimizer, as Develop's, for a short edit with Release's optimization: a `-parts` tree, outside the 9700X job's floor ([Release in parts](#release-in-parts)) |
@@ -1397,6 +1398,32 @@ of your own, run in `pgo/` with `BUSTER_PGO_COMPILER` naming the instrumented
 executable. On the 9700X, the compiler's own sources gave a better profile
 than the frozen `sqlite3.c`, musl and c-testsuite of buster-performance#182
 ("The compiler's own code and a profile", `docs/compile-time.md`).
+
+The direct path's unit (`c_direct.c`, the compiler a plain `-c` of one file
+takes) has a profile of its own (#3582). None of the training's compiles takes
+the direct path: their `-Wall` and `-Werror` keep every unit off it, and
+without them every unit but one 12 KB test leaves it at the `#pragma clang
+diagnostic` lines of clang's intrinsic headers. In the compiler's profile
+every count of its code is zero, which made `sqlite3.c`'s `-c` take 4.8% more
+user cycles than without a profile. So the unit compiles without a profile,
+as in a plain Release build, unless `BUSTER_PGO_CORPUS` names the frozen
+corpus (`tools/ci/fetch-corpus.sh DIR`; the 9700X keeps it in
+`/var/lib/buster-9700x/corpora/preprocessor-391e729af658`): then the
+instrumented executable's plain `-c` of its `sqlite3.c`, with its headers,
+trains `pgo/direct.profdata`, which that unit compiles with. The
+other units' profile is the same either way. On the 9700X, against the same
+source without a profile, every object the same ([buster-performance
+`pgo-direct-3582-2026-11-25`](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/pgo-direct-3582-2026-11-25)):
+
+| user cycles | `BUSTER_PGO=1` before #3582 | without the corpus | with it |
+| --- | ---: | ---: | ---: |
+| `sqlite3.c`'s `-c`, the direct path | +4.8% | -0.1% | -3.2% |
+| Lua 5.4.8's 34 units without `-Wall -Wextra`, 29 direct | +0.1% | -3.4% | -5.0% |
+| musl's 1,336 units by `-std=gnu99`, 663 direct | -4.9% | -7.6% | -8.8% |
+| `sqlite3.c`'s `-c --no-direct` | -3.8% | -3.6% | -3.7% |
+| Lua's units with `-Wall -Wextra`, none direct | -8.4% | -8.3% | -8.3% |
+
+The corpus's training adds one compile of about a second.
 
 The mode isn't the default, and no CI job builds with it. Sanitizer builds and
 `lexer-variant` refuse it (the lexer variants change

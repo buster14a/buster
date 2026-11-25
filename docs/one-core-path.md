@@ -4355,9 +4355,10 @@ are in
   flushed after mispredicted branches and 14% backend stalls; the hottest function had 23% of the cycles and the
   twelfth 2%. A token costs about 330 instructions and 1.5 mispredicted branches, through code of about 100 KB.
 - **What did not pay,** measured: a profile-guided build of the unit (-4.4%, all of it in the code generator, and the
-  ceiling of what placing its code can give); `-O2`, `-Os`, alignment and inlining flags (nothing); copying a value a
-  field at a time so that no load waits on a store (360 K fewer such loads, 1.2% slower: they are not on the critical
-  path); directive lines lexed inside the window (a third of the windows, the same time).
+  ceiling of what placing its code can give; `BUSTER_PGO=1` with `BUSTER_PGO_CORPUS` builds it so, #3582); `-O2`,
+  `-Os`, alignment and inlining flags (nothing); copying a value a field at a time so that no load waits on a store
+  (360 K fewer such loads, 1.2% slower: they are not on the critical path); directive lines lexed inside the window (a
+  third of the windows, the same time).
 - **What is left in the front,** by its share of the compile's cycles: the emitter with its identifier lookups
   (13.2%), the window's lexer (8.3%), the expansion engine (5.1%), the directives' and arguments' reader (4.3%), the
   skipper (2.5%), interning new names (2.2%). The code generator's stage reads 1% slower here than on main although
