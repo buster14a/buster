@@ -11,6 +11,8 @@
 #include "buster/compiler/c_direct_cc.c"
 
 #include <sys/wait.h>
+#include <pthread.h>
+#include <time.h>
 
 // A unit is small unless its main file is this long (#3592). A small unit's arenas take base pages and its identifier
 // tables start small. The arenas' 55 tables each start in a region of their own, and under transparent huge pages a
@@ -2057,6 +2059,206 @@ static bool c_direct_test_raw_strings(const char* obj_path)
     return ok;
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// GNU's inline assembly of musl's two shapes (#3592)
+
+typedef long (*CDirectTestAsm0)(void);
+typedef long (*CDirectTestAsm1)(long);
+typedef long (*CDirectTestAsm2)(long, long);
+typedef long (*CDirectTestAsmPointer)(void*);
+
+// The object's code of `name`, at its place in a copy of its section that may run, or NULL when the object has no
+// such function or relocates its section. `*mapping` and `*mapped` are the copy, for munmap. The copy starts 64 bytes
+// into its pages: UndefinedBehaviorSanitizer's check of a call through a pointer reads the 8 bytes before the function.
+static const void* c_direct_test_code(const char* path, const char* name, void** mapping, size_t* mapped)
+{
+    const void* result = NULL;
+    const CDirectTestSymbol sym = c_direct_test_symbol(path, name);
+    FILE* file = sym.count == 1u && sym.type == STT_FUNC && sym.section != SHN_UNDEF ? fopen(path, "rb") : NULL;
+    uint8_t* bytes = NULL;
+    long size = 0;
+    if (file != NULL && fseek(file, 0, SEEK_END) == 0 && (size = ftell(file)) > (long)sizeof(Elf64_Ehdr) && fseek(file, 0, SEEK_SET) == 0)
+    {
+        bytes = (uint8_t*)malloc((size_t)size);
+        if (bytes != NULL && fread(bytes, 1, (size_t)size, file) != (size_t)size)
+        {
+            free(bytes);
+            bytes = NULL;
+        }
+    }
+    if (file != NULL)
+    {
+        fclose(file);
+    }
+    const Elf64_Ehdr* header = (const Elf64_Ehdr*)bytes;
+    const bool headers = bytes != NULL && header->e_shoff + (uint64_t)header->e_shnum * sizeof(Elf64_Shdr) <= (uint64_t)size && sym.section < header->e_shnum;
+    const Elf64_Shdr* table = headers ? (const Elf64_Shdr*)(bytes + header->e_shoff) : NULL;
+    bool relocated = false;
+    for (uint16_t i = 0; headers && i < header->e_shnum; i += 1)
+    {
+        relocated = relocated || ((table[i].sh_type == SHT_RELA || table[i].sh_type == SHT_REL) && table[i].sh_info == sym.section && table[i].sh_size != 0);
+    }
+    const Elf64_Shdr* section = headers && !relocated ? table + sym.section : NULL;
+    const bool fits = section != NULL && section->sh_type == SHT_PROGBITS && section->sh_offset + section->sh_size <= (uint64_t)size &&
+                      sym.value + sym.size <= section->sh_size;
+    const size_t length = fits ? (size_t)((64u + section->sh_size + 4095u) & ~(uint64_t)4095u) : 0u;
+    uint8_t* code = length != 0 ? (uint8_t*)mmap(NULL, length, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) : (uint8_t*)MAP_FAILED;
+    if (code != (uint8_t*)MAP_FAILED)
+    {
+        memcpy(code + 64, bytes + section->sh_offset, (size_t)section->sh_size);
+        if (mprotect(code, length, PROT_READ | PROT_EXEC) == 0)
+        {
+            result = code + 64 + sym.value;
+            *mapping = code;
+            *mapped = length;
+        }
+        else
+        {
+            munmap(code, length);
+        }
+    }
+    free(bytes);
+    return result;
+}
+
+// musl's shapes, run: syscall with no argument (getpid, whose number is an int), with two (munmap of a page and
+// clock_gettime, given a pointer), and with six of which three are local register variables (mmap of the page), and
+// the thread pointer against pthread_self's. Every other shape, operand,
+// constraint, clobber or label leaves the direct path. The functions call nothing, so that their section runs where it
+// is copied. MemorySanitizer can't see a result an uninstrumented function makes, so it only compiles them.
+static bool c_direct_test_asm(const char* obj_path)
+{
+    static const char source[] =
+        "long t_getpid(void)\n"
+        "{\n"
+        "    unsigned long ret;\n"
+        "    __asm__ __volatile__ (\"syscall\" : \"=a\"(ret) : \"a\"(39) : \"rcx\", \"r11\", \"memory\");\n"
+        "    return ret;\n"
+        "}\n"
+        "long t_mmap(long length)\n"
+        "{\n"
+        "    unsigned long ret;\n"
+        "    register long r10 __asm__(\"r10\") = 0x22;\n"
+        "    register long r8 __asm__(\"r8\") = -1;\n"
+        "    register long r9 __asm__(\"r9\") = 0;\n"
+        "    __asm__ __volatile__ (\"syscall\" : \"=a\"(ret) : \"a\"(9L), \"D\"(0L), \"S\"(length), \"d\"(3L), \"r\"(r10), \"r\"(r8), \"r\"(r9) : \"rcx\", \"r11\", \"memory\");\n"
+        "    return ret;\n"
+        "}\n"
+        "long t_munmap(long address, long length)\n"
+        "{\n"
+        "    unsigned long ret;\n"
+        "    __asm__ __volatile__ (\"syscall\" : \"=a\"(ret) : \"a\"(11L), \"D\"(address), \"S\"(length) : \"rcx\", \"r11\", \"memory\");\n"
+        "    return ret;\n"
+        "}\n"
+        "long t_clock(void* ts)\n"
+        "{\n"
+        "    unsigned long ret;\n"
+        "    __asm__ __volatile__ (\"syscall\" : \"=a\"(ret) : \"a\"(228L), \"D\"(1), \"S\"(ts) : \"rcx\", \"r11\", \"memory\", \"cc\");\n"
+        "    return ret;\n"
+        "}\n"
+        "long t_tp(void)\n"
+        "{\n"
+        "    unsigned long tp;\n"
+        "    __asm__ (\"mov %%fs:0,%0\" : \"=r\" (tp));\n"
+        "    return tp;\n"
+        "}\n";
+    bool ok = c_direct_test_compile_source_keep(source, obj_path, NULL, 0, NULL, NULL, NULL);
+#if !__has_feature(memory_sanitizer)
+    void* mappings[5] = { NULL, NULL, NULL, NULL, NULL };
+    size_t mapped[5] = { 0, 0, 0, 0, 0 };
+    const CDirectTestAsm0 getpid_direct = (CDirectTestAsm0)(uintptr_t)(ok ? c_direct_test_code(obj_path, "t_getpid", mappings + 0, mapped + 0) : NULL);
+    const CDirectTestAsm1 mmap_direct = (CDirectTestAsm1)(uintptr_t)(ok ? c_direct_test_code(obj_path, "t_mmap", mappings + 1, mapped + 1) : NULL);
+    const CDirectTestAsm2 munmap_direct = (CDirectTestAsm2)(uintptr_t)(ok ? c_direct_test_code(obj_path, "t_munmap", mappings + 2, mapped + 2) : NULL);
+    const CDirectTestAsm0 tp_direct = (CDirectTestAsm0)(uintptr_t)(ok ? c_direct_test_code(obj_path, "t_tp", mappings + 3, mapped + 3) : NULL);
+    const CDirectTestAsmPointer clock_direct = (CDirectTestAsmPointer)(uintptr_t)(ok ? c_direct_test_code(obj_path, "t_clock", mappings + 4, mapped + 4) : NULL);
+    ok = ok && getpid_direct != NULL && mmap_direct != NULL && munmap_direct != NULL && tp_direct != NULL && clock_direct != NULL;
+    ok = ok && getpid_direct() == (long)getpid() && tp_direct() == (long)(uintptr_t)pthread_self();
+    struct timespec now = { .tv_sec = -1, .tv_nsec = -1 };
+    ok = ok && clock_direct(&now) == 0 && now.tv_sec >= 0 && now.tv_nsec >= 0 && now.tv_nsec < 1000000000L;
+    const long page = ok ? mmap_direct(4096) : -1;
+    ok = ok && (unsigned long)page < (unsigned long)-4095L;
+    if (ok)
+    {
+        *(volatile char*)(uintptr_t)page = 1;
+        ok = munmap_direct(page, 4096) == 0;
+    }
+    for (uint32_t i = 0; i < 5u; i += 1)
+    {
+        if (mappings[i] != NULL)
+        {
+            munmap(mappings[i], mapped[i]);
+        }
+    }
+#endif
+    unlink(obj_path);
+    static const char* const leaves[] = {
+        "void f(void) { __asm__(\"nop\"); }\n",
+        "void f(void) { __asm__ volatile (\"sys\" \"call\" : : : \"memory\"); }\n",
+        "long f(void) { unsigned long r; __asm__ volatile (\"syscall\" : \"=r\"(r) : \"a\"(39L) : \"rcx\", \"r11\"); return r; }\n",
+        "long f(void) { unsigned long r; __asm__ volatile (\"syscall\" : \"=a\"(r) : \"D\"(1L) : \"rcx\", \"r11\"); return r; }\n",
+        "long f(void) { unsigned long r; __asm__ volatile (\"syscall\" : \"=a\"(r) : \"a\"(39L), \"b\"(1L) : \"rcx\", \"r11\"); return r; }\n",
+        "long f(void) { unsigned long r; __asm__ volatile (\"syscall\" : \"=a\"(r) : \"a\"(39L), \"D\"(1L), \"D\"(2L) : \"rcx\", \"r11\"); return r; }\n",
+        "long f(void) { unsigned long r; __asm__ volatile (\"syscall\" : \"=a\"(r) : \"a\"(39L) : \"rbx\"); return r; }\n",
+        "long f(long x) { unsigned long r; __asm__ volatile (\"syscall\" : \"=a\"(r) : \"a\"(39L), \"r\"(x)); return r; }\n",
+        "long f(void) { unsigned long r; register long b __asm__(\"rbx\") = 1; __asm__ volatile (\"syscall\" : \"=a\"(r) : \"a\"(39L), \"r\"(b)); return r; }\n",
+        "long f(void) { unsigned long r; register int i __asm__(\"r10\") = 1; __asm__ volatile (\"syscall\" : \"=a\"(r) : \"a\"(39L), \"r\"(i)); return r; }\n",
+        "long f(void) { unsigned long r; long m; __asm__ volatile (\"syscall\" : \"=a\"(r), \"=m\"(m) : \"a\"(39L)); return r; }\n",
+        "long f(void) { unsigned long r; __asm__ volatile (\"syscall\" : [out] \"=a\"(r) : \"a\"(39L)); return r; }\n",
+        "long f(void) { unsigned long r; __asm__ volatile (\"syscall\" : \"=a\"(r) : \"a\"(1.5)); return r; }\n",
+        "long f(void) { unsigned long t; __asm__ (\"mov %%fs:0,%0\" : \"=r\"(t) : \"a\"(1L)); return t; }\n",
+        "long f(void) { int t; __asm__ (\"mov %%fs:0,%0\" : \"=r\"(t)); return t; }\n",
+        "long f(void) { static long s __asm__(\"r10\"); return s; }\n",
+        "long f(void) { long l __asm__(\"r10\") = 1; return l; }\n",
+        "long f(void) { for (register long i __asm__(\"r10\") = 0; i < 2; i++) {} return 0; }\n",
+        "void f(void) { __asm__ goto (\"jmp %l0\" : : : : done); done: return; }\n",
+        "long g(long);\nlong f(void) { unsigned long r; __asm__ volatile (\"syscall\" : \"=a\"(r) : \"a\"(39L), \"D\"(g)(1)); return r; }\n",
+        "long f(void) { const unsigned long r = 0; __asm__ volatile (\"syscall\" : \"=a\"(r) : \"a\"(39L)); return r; }\n",
+        "long f(void) { unsigned long r; register long c __asm__(\"rcx\") = 1; __asm__ volatile (\"syscall\" : \"=a\"(r) : \"a\"(39L), \"r\"(c) : \"rcx\"); return r; }\n",
+        "long f(void) { unsigned long r; register long c __asm__(\"r11\") = 1; __asm__ volatile (\"syscall\" : \"=a\"(r) : \"a\"(39L), \"r\"(c) : \"memory\", \"r11\"); return r; }\n",
+        "long f(void)\n"
+        "{\n"
+        "    unsigned long r;\n"
+        "    register long a __asm__(\"r10\") = 0;\n"
+        "    register long b __asm__(\"r8\") = 0;\n"
+        "    register long c __asm__(\"r9\") = 0;\n"
+        "    register long d __asm__(\"r11\") = 0;\n"
+        "    __asm__ volatile (\"syscall\" : \"=a\"(r) : \"a\"(39L), \"D\"(0L), \"S\"(0L), \"d\"(0L), \"r\"(a), \"r\"(b), \"r\"(c), \"r\"(d));\n"
+        "    return r;\n"
+        "}\n",
+        "long f(void) { unsigned long r; __asm__ volatile (u8\"syscall\" : \"=a\"(r) : \"a\"(39L)); return r; }\n",
+        "unsigned long g;\nlong f(void) { __asm__ volatile (\"syscall\" : \"=a\"(g) : \"a\"(39L)); return g; }\n",
+        "long f(void) { double d; __asm__ (\"mov %%fs:0,%0\" : \"=r\"(d)); return (long)d; }\n",
+        "long f(void) { unsigned long t; __asm__ (\"mov %%fs:0,%0\" : \"=m\"(t)); return t; }\n",
+        "long f(void) { unsigned long t = 0; __asm__ (\"mov %%fs:0,%0\" : \"+r\"(t)); return t; }\n",
+        "extern long g __asm__(\"r10\");\nlong f(void) { unsigned long r; __asm__ volatile (\"syscall\" : \"=a\"(r) : \"a\"(39L), \"r\"(g)); return r; }\n",
+        "long f(void) { unsigned long r; __asm__ volatile (\"syscall\" : \"=a\"(r) : \"a\" - 39L)); return r; }\n",
+        "long f(void) { unsigned long r; __asm__ volatile (\"syscall\" : \"=a\"(r) : \"a\"(39L ; ); return r; }\n",
+        "long f(void) { unsigned long r; __asm__ volatile (\"syscall\" : \"=a\"(r : : \"a\"(39L)); return r; }\n",
+        "long f(void) { unsigned long r; __asm__ volatile (\"syscall\" : \"=a\"(r) : \"a\"((__int128)39)); return r; }\n",
+        "long f(void) { unsigned long r; __asm__ volatile (\"syscall\" , \"=a\"(r) : \"a\"(39L)); return r; }\n",
+        "long f(void) { unsigned long r; __asm__ volatile (\"syscall\" : \"=a\"(r) : \"a\"(39L)) r; return r; }\n",
+        "long f(void) { unsigned long r; __asm__ volatile volatile (\"syscall\" : \"=a\"(r) : \"a\"(39L)); return r; }\n",
+        "long f(void) { typedef long T __asm__(\"r10\"); return 0; }\n",
+        "long f(void) { extern long e __asm__(\"r10\"); return e; }\n",
+        "long f(void) { long g(void) __asm__(\"r10\"); return g(); }\n",
+        "long f(void) { register double d __asm__(\"r10\") = 1; return (long)d; }\n",
+        "long f(void) { unsigned long r; register long x __asm__(\"r1\") = 0; __asm__ volatile (\"syscall\" : \"=a\"(r) : \"a\"(39L), \"r\"(x)); return r; }\n",
+        "long f(void) { unsigned long r; __asm__ volatile (\"sys\" : \"=a\"(r) : \"a\"(39L)); return r; }\n",
+        "long f(void) { register int i __asm__(\"r10\") = 1; return i; }\n",
+        "long f(void) { register long x __asm__(\"r1\") = 0; return x; }\n",
+        "long f(void) { unsigned long r; __asm__ volatile (\"syscall\" : \"=a\"(r) : \"a\"(39L) ]; return r; }\n",
+    };
+    for (uint32_t i = 0; ok && i < (uint32_t)(sizeof(leaves) / sizeof(leaves[0])); i += 1)
+    {
+        ok = c_direct_test_compile_source(leaves[i], obj_path, 1, NULL, NULL);
+        if (!ok)
+        {
+            fprintf(stderr, "test-direct: an asm case the direct path took: %s", leaves[i]);
+        }
+    }
+    return ok;
+}
+
 int run_c_direct_tests(int argc, char** argv)
 {
     (void)argc;
@@ -2291,6 +2493,16 @@ int run_c_direct_tests(int argc, char** argv)
     else
     {
         fprintf(stderr, "test-direct: FAIL raw string literals and a directive's literals\n");
+        failed += 1u;
+    }
+
+    if (c_direct_test_asm(obj_path))
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL inline assembly\n");
         failed += 1u;
     }
 

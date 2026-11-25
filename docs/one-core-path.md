@@ -4317,6 +4317,14 @@ single-TU `-c` C17/C23 object builds directly from `mmap`'d source bytes to an E
   `/*` in a literal starts no comment, and a literal the line's end cuts leaves, as clang warns of one. At main
   `20f3573e`, `#pragma message("/* look")` and the code after it compiled to an object with no symbols. A
   `#pragma message` leaves, as clang warns of its text.
+- **musl's inline assembly (#3592's step 6b):** an asm statement of two shapes. One is musl's `syscall`: an `"=a"`
+  output; inputs `"a"`, `"D"`, `"S"` and `"d"`, or `"r"` of a local register variable; clobbers `rcx`, `r11`,
+  `memory` and `cc`. The other is its thread pointer, `mov %%fs:0,%0` with an `"=r"` or `"=a"` output
+  (`fast_cc_asm_statement`). Each input is evaluated into a slot of its own and loaded into its register just before
+  the instruction, and the output is stored from `rax`. A local register variable is a `register` 64-bit integer or
+  pointer labelled with a register a function may clobber (`rax`, `rcx`, `rdx`, `rsi`, `rdi`, `r8` to `r11`); it lives
+  in its slot, and its register holds it only as an input. Any other template, operand, constraint, clobber or label
+  leaves, and so does an input in a clobbered register or one register given twice, as clang refuses those.
 - **Fail-closed fallback (`--no-direct` / `BUSTER_NO_DIRECT`):** any diagnostic, warning-sensitive construct, or
   unsupported flag/extension bails out silently without writing output so `c_checker_driver.c` runs the full pipeline.
 
