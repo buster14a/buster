@@ -2067,6 +2067,7 @@ typedef long (*CDirectTestAsm1)(long);
 typedef long (*CDirectTestAsm2)(long, long);
 typedef long (*CDirectTestAsmPointer)(void*);
 
+#if !__has_feature(memory_sanitizer)
 // The object's code of `name`, at its place in a copy of its section that may run, or NULL when the object has no
 // such function or relocates its section. `*mapping` and `*mapped` are the copy, for munmap. The copy starts 64 bytes
 // into its pages: UndefinedBehaviorSanitizer's check of a call through a pointer reads the 8 bytes before the function.
@@ -2120,6 +2121,7 @@ static const void* c_direct_test_code(const char* path, const char* name, void**
     free(bytes);
     return result;
 }
+#endif
 
 // musl's shapes, run: syscall with no argument (getpid, whose number is an int), with two (munmap of a page and
 // clock_gettime, given a pointer), and with six of which three are local register variables (mmap of the page), and
