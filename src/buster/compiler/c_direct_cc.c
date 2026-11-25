@@ -1716,9 +1716,10 @@ struct FastVal
                            // a literal, outside parentheses (#3577)
     uint8_t float_cast;    // 1 for a cast of a float to a wider floating type, in any parentheses (#3577: -Wliteral-range)
     uint8_t seq_start;     // a variable by name (or in parentheses): its -Wunsequenced log entry + 1 (#3577); else 0
+    uint32_t seq_ident;    // ... and its name's identifier, the variable's identity in the log (where seq_start isn't 0)
 };
 
-// The expression value with #3577's four bytes (marks, op, float_cast, seq_start) past the 24 of #3594.
+// The expression value with #3577's eight bytes (marks, op, float_cast, seq_start, seq_ident) past the 24 of #3594.
 _Static_assert(sizeof(FastVal) == 32u, "expression stack entry size");
 
 // A value's marks (#3577), lost where an operator makes a new value: a register variable, whose address is an error; a
@@ -1952,22 +1953,26 @@ struct FastExprCtx
     uint8_t seq_region[32][3];
 };
 
-// #3577: a variable's identity for -Wunsequenced: a local's frame offset or a global's symbol and addend, which an lvalue
-// of it (its use by name, or the object a modification writes) has too; 0 for any other lvalue.
-#define BUSTER_FSEQ_LOCAL(off) ((UINT64_C(1) << 62) | (uint64_t)(uint32_t)(off))
-#define BUSTER_FSEQ_GLOBAL(sym, addend) ((UINT64_C(2) << 62) | ((uint64_t)(uint32_t)(sym) << 32) | (uint64_t)(uint32_t)(addend))
+// #3577: a variable's identity for -Wunsequenced is its name's identifier (never 0): an expression declares nothing, so
+// a name is one variable throughout it. An lvalue has one where it is a local or global variable by name (seq_start
+// isn't 0, and its seq_ident is the name's); any other lvalue has none (0).
 #define BUSTER_FSEQ_LVALUE(v) \
-    ((BUSTER_FSEQ_LOCAL((v)->off) & (UINT64_C(0) - (uint64_t)((v)->kind == FVAL_LOCAL))) | \
-     (BUSTER_FSEQ_GLOBAL((v)->sym_idx, (v)->imm) & (UINT64_C(0) - (uint64_t)((v)->kind == FVAL_GLOBAL))))
+    ((uint64_t)(v)->seq_ident & \
+     (UINT64_C(0) - (uint64_t)((uint32_t)((v)->seq_start != 0) & ((uint32_t)((v)->kind == FVAL_LOCAL) | (uint32_t)((v)->kind == FVAL_GLOBAL)))))
 // An identity's hash bit in seq_bloom.
 #define BUSTER_FSEQ_BIT(identity) (UINT64_C(1) << ((uint64_t)(identity) * UINT64_C(0x9E3779B97F4A7C15) >> 58))
-// Log a naming (an evaluated use of a variable by name) where LOGGED (0 or 1); a modified variable's sets seq_hit. One
-// expression each; the hash is taken only once something was modified (seq_bloom), which few names see.
+// Log a naming (an evaluated use of a variable by name) where LOGGED (0 or 1); a modified variable's sets seq_hit. Every
+// name takes one: the hash is taken only once something was modified (seq_bloom), which few names see, behind a branch.
 #define BUSTER_FSEQ_NAME(ex, identity, logged) \
-    ((ex)->seq_log[(ex)->seq_count & 63u] = (identity), \
-     (ex)->seq_hit |= (uint32_t)((ex)->seq_bloom != 0 && ((ex)->seq_bloom & BUSTER_FSEQ_BIT(identity)) != 0) & \
-                      (uint32_t)((ex)->eval_only == 0) & (uint32_t)(logged), \
-     (ex)->seq_count += (uint32_t)((ex)->eval_only == 0) & (uint32_t)(logged))
+    { \
+        const uint32_t seq_logged = (uint32_t)((ex)->eval_only == 0) & (uint32_t)(logged); \
+        (ex)->seq_log[(ex)->seq_count & 63u] = (identity); \
+        if (__builtin_expect((ex)->seq_bloom != 0, 0)) \
+        { \
+            (ex)->seq_hit |= (uint32_t)(((ex)->seq_bloom & BUSTER_FSEQ_BIT(identity)) != 0) & seq_logged; \
+        } \
+        (ex)->seq_count += seq_logged; \
+    }
 // A region's bounds, which the end's check reads when unknown ones (0) aren't counted.
 #define BUSTER_FSEQ_REGION(ex, lo, mid, hi) \
     ((ex)->seq_region[(ex)->seq_regions & 31u][0] = (uint8_t)(lo), (ex)->seq_region[(ex)->seq_regions & 31u][1] = (uint8_t)(mid), \
@@ -1987,7 +1992,7 @@ struct FastExprCtx
 // something to find.
 #define BUSTER_FSEQ_MODIFY(ex, v) \
     { \
-        const uint64_t seq_identity = BUSTER_FSEQ_LVALUE(v) & (UINT64_C(0) - (uint64_t)((v)->seq_start != 0)); \
+        const uint64_t seq_identity = BUSTER_FSEQ_LVALUE(v); \
         const uint32_t seq_tracked = (uint32_t)(seq_identity != 0); \
         const uint32_t seq_count = (ex)->seq_count; \
         const uint32_t seq_own = (v)->seq_start; \
@@ -3931,29 +3936,28 @@ static BUSTER_DIRECT_HOT void fval_emit_binary(FastExprCtx* ex, uint8_t op, Fast
             return;
         }
     }
+    // #3577: the comparisons and operands the full pipeline questions (fast_cc_binary_questioned) have a constant against
+    // a narrow, flag, enum, aggregate, address or float operand, two enum values, or a bit-field: a comparison or a
+    // bit-field alone looks further, at the operands' kinds and types, in registers, and the exact check runs past that.
+    const uint32_t comparison = (uint32_t)(((UINT64_C(1) << (op & 63u)) & BUSTER_FAST_COMPARISON_OPS) != 0);
+    const uint32_t kinds = (UINT32_C(1) << lhs->kind) | (UINT32_C(1) << rhs->kind);
+    if (((comparison | (kinds >> FVAL_BITFIELD)) & 1u) != 0)
     {
-        // #3577: the comparisons and operands the full pipeline questions (fast_cc_binary_questioned) have a constant
-        // against a narrow, flag, enum, aggregate, address or float operand, two enum values, or a bit-field: this gate
-        // reads the operands' kinds and types alone, in registers, and the exact check runs past it.
-        const uint32_t comparison = (uint32_t)(((UINT64_C(1) << (op & 63u)) & BUSTER_FAST_COMPARISON_OPS) != 0);
-        const uint32_t l_constant = (uint32_t)(lhs->kind == FVAL_IMM) | (uint32_t)(lhs->kind == FVAL_FIMM);
-        const uint32_t r_constant = (uint32_t)(rhs->kind == FVAL_IMM) | (uint32_t)(rhs->kind == FVAL_FIMM);
+        const uint32_t constant = (uint32_t)((kinds & ((UINT32_C(1) << FVAL_IMM) | (UINT32_C(1) << FVAL_FIMM))) != 0);
         // (A scalar kind's bit, below the pointer and complex bits; a pointer's or a record's scalar bits are 0, void's.)
         const uint32_t l_scalar = (uint32_t)((lt & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) == 0);
         const uint32_t r_scalar = (uint32_t)((rt & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) == 0);
         // An array, a function or an enum before decay (not a pointer to a record, which compares quietly).
         const uint32_t l_aggregate = (uint32_t)((lhs->type & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) == BUSTER_FTYPE_COMPLEX_BIT);
         const uint32_t r_aggregate = (uint32_t)((rhs->type & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) == BUSTER_FTYPE_COMPLEX_BIT);
-        const uint32_t l_special = (l_scalar & (BUSTER_FAST_QUESTIONED_KINDS >> (lt & BUSTER_FTYPE_SCALAR_MASK))) | (uint32_t)(lhs->kind == FVAL_FLAGS) |
-                                   l_aggregate | (uint32_t)(lhs->kind == FVAL_LOCAL_ADDR) | (uint32_t)(lhs->kind == FVAL_GLOBAL_ADDR) |
-                                   ((uint32_t)(lhs->kind == FVAL_GLOBAL) & (uint32_t)(lhs->is_func_sym != 0)) | (uint32_t)lhs->float_cast;
-        const uint32_t r_special = (r_scalar & (BUSTER_FAST_QUESTIONED_KINDS >> (rt & BUSTER_FTYPE_SCALAR_MASK))) | (uint32_t)(rhs->kind == FVAL_FLAGS) |
-                                   r_aggregate | (uint32_t)(rhs->kind == FVAL_LOCAL_ADDR) | (uint32_t)(rhs->kind == FVAL_GLOBAL_ADDR) |
-                                   ((uint32_t)(rhs->kind == FVAL_GLOBAL) & (uint32_t)(rhs->is_func_sym != 0)) | (uint32_t)rhs->float_cast;
+        const uint32_t special = (uint32_t)((kinds & ((UINT32_C(1) << FVAL_FLAGS) | (UINT32_C(1) << FVAL_LOCAL_ADDR) | (UINT32_C(1) << FVAL_GLOBAL_ADDR))) != 0) |
+                                 (l_scalar & (BUSTER_FAST_QUESTIONED_KINDS >> (lt & BUSTER_FTYPE_SCALAR_MASK))) |
+                                 (r_scalar & (BUSTER_FAST_QUESTIONED_KINDS >> (rt & BUSTER_FTYPE_SCALAR_MASK))) | l_aggregate | r_aggregate |
+                                 ((uint32_t)(lhs->kind == FVAL_GLOBAL) & (uint32_t)(lhs->is_func_sym != 0)) |
+                                 ((uint32_t)(rhs->kind == FVAL_GLOBAL) & (uint32_t)(rhs->is_func_sym != 0)) | (uint32_t)lhs->float_cast | (uint32_t)rhs->float_cast;
         const uint32_t l_enum = l_aggregate | ((uint32_t)(lhs->kind == FVAL_IMM) & (uint32_t)(lhs->sym_idx != 0));
         const uint32_t r_enum = r_aggregate | ((uint32_t)(rhs->kind == FVAL_IMM) & (uint32_t)(rhs->sym_idx != 0));
-        const uint32_t questioned = (comparison & (((l_constant | r_constant) & (l_special | r_special) & 1u) | (l_enum & r_enum))) |
-                                    (uint32_t)(lhs->kind == FVAL_BITFIELD) | (uint32_t)(rhs->kind == FVAL_BITFIELD);
+        const uint32_t questioned = (comparison & ((constant & special & 1u) | (l_enum & r_enum))) | ((kinds >> FVAL_BITFIELD) & 1u);
         if (questioned != 0 && fast_cc_binary_questioned(cc, op, lhs, rhs, lt, rt))
         {
             fast_cc_bail(cc, "comparison or operand the full pipeline questions");
@@ -6062,9 +6066,10 @@ static __attribute__((cold, noinline)) bool fast_cc_push_flagged_symbol(FastCCSt
         if (ex->vsp < 128u)
         {
             ex->vstack[ex->vsp++] = (FastVal){ .type = sym->type, .kind = FVAL_LOCAL, .off = sym->stack_off, .is_lvalue = 1u,
-                                               .marks = BUSTER_FVAL_MARK_REGISTER, .seq_start = BUSTER_FSEQ_MARK(ex) };
+                                               .marks = BUSTER_FVAL_MARK_REGISTER, .seq_start = BUSTER_FSEQ_MARK(ex),
+                                               .seq_ident = sym->ident_id };
         }
-        BUSTER_FSEQ_NAME(ex, BUSTER_FSEQ_LOCAL(sym->stack_off), 1u);
+        BUSTER_FSEQ_NAME(ex, sym->ident_id, 1u);
         pushed = true;
     }
     else if (((uint32_t)(sym->kind != FSYM_FUNC) | (uint32_t)(next == FTOK_RPAREN) |
@@ -6159,10 +6164,8 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
                     uint8_t library = sym->pad_sym[0];
                     if (__builtin_expect(function & (uint32_t)(library == 0), 0)) { library = fast_cc_library_pure_query(cc, sym); }
                     const uint32_t enumerator = (uint32_t)(symbol_kind == FSYM_ENUM_CONST);
-                    const uint32_t local = (uint32_t)(symbol_kind == FSYM_LOCAL);
-                    const uint32_t global = (uint32_t)(symbol_kind == FSYM_GLOBAL);
-                    const uint64_t identity = (BUSTER_FSEQ_LOCAL(sym->stack_off) & (UINT64_C(0) - (uint64_t)local)) |
-                                              (BUSTER_FSEQ_GLOBAL(osym, 0) & (UINT64_C(0) - (uint64_t)global));
+                    // (FSYM_LOCAL and FSYM_GLOBAL are adjacent: a variable.)
+                    const uint32_t variable = (uint32_t)(symbol_kind - (uint32_t)FSYM_LOCAL < 2u);
                     if (ex.vsp < 128u)
                     {
                         ex.vstack[ex.vsp++] = (FastVal){
@@ -6174,10 +6177,11 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
                             .is_func_sym = (uint8_t)function,
                             .is_lvalue = value_lvalues[symbol_kind],
                             .marks = (uint8_t)((BUSTER_FVAL_MARK_NONLITERAL * enumerator) | (BUSTER_FVAL_MARK_PURE * (function & (uint32_t)(library == 2u)))),
-                            .seq_start = (uint8_t)(BUSTER_FSEQ_MARK(&ex) * (local | global)),
+                            .seq_start = (uint8_t)(BUSTER_FSEQ_MARK(&ex) & (UINT32_C(0) - variable)),
+                            .seq_ident = id,
                         };
                     }
-                    BUSTER_FSEQ_NAME(&ex, identity, local | global);
+                    BUSTER_FSEQ_NAME(&ex, id, variable);
                     expect_val = false;
                     continue;
                 }
