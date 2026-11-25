@@ -260,6 +260,18 @@ checks are written for [the compile's count](ci.md#the-compiles-count-before-the
 comparisons combined bitwise with one rarely taken branch, cold functions for
 the rare cases, macros where a helper's entry would count at every use.
 
+`-Wunsequenced` keeps no log as an expression compiles. Only the variables its
+`++`, `--` and assignments modify are counted, by name. At the expression's end,
+none, or one whose modification is its last operator (an assignment's operands
+are evaluated before it stores), is quiet; so is each modified variable's name
+appearing once among the expression's tokens (a warning needs a second use or
+modification of the same variable). Any other expression, about 140 of
+sqlite3.c's 47,000, is compiled again from its first token without code, with
+the log of every use and sequence point, whose check is the full pipeline's
+(`fast_cc_sequenced_again`). The body is compiled twice, without the log and
+with it (`fast_cc_expr_compile`), so the common one carries none of it; that
+one level of recursion is `call_graph.c`'s allowed cycle.
+
 An inline function's body is checked where it is defined, in the scope it has
 there (a later declaration isn't visible to it), its code dropped. One with
 internal linkage is compiled again at the unit's end only where something

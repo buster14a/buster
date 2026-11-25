@@ -1975,6 +1975,14 @@ struct FastExprCtx
     uint16_t gp_used;      // bitmask of live GP scratch regs in vstack/call_args
     uint8_t xmm_used;      // bitmask of live XMM scratch regs (0..7)
     uint8_t eval_only;     // >0 inside sizeof(expr) / _Alignof(expr) / _Generic ctrl: emit ZERO machine code!
+    uint8_t eval_base;     // the eval_only level that is evaluated (#3577): 0, or 1 in a compile again (fast_cc_sequenced_again)
+    uint8_t seq_logging;   // #3577: 1 where the -Wunsequenced log below is kept (a compile again); 0 where seq_mod_* count
+    // #3577: without the log, the variables the expression's ++, -- and assignments modify (each lvalue's seq_ident; the
+    // first four), how many, and the expression's first token: the end decides from them, and compiles again for the log
+    // where they leave it open (fast_cc_sequenced_lazy).
+    uint32_t seq_mod_count;
+    uint32_t seq_mod_ids[4];
+    uint32_t seq_start_pos;
     // #3577: for -Wunsequenced, a log of the variables the expression names where evaluated and the lvalues its ++, --
     // and assignments modify, in order, by identity (BUSTER_FSEQ_*; 0 for an lvalue that isn't a variable by name): bit i
     // of seq_mods marks entry i a modification, seq_own its own operands' first entry + 1 (0 unknown). A variable modified
@@ -2003,63 +2011,115 @@ struct FastExprCtx
 // Every name takes one: the hash is taken only once something was modified (seq_bloom), which few names see, behind a
 // branch.
 #define BUSTER_FSEQ_NAME(ex, identity, logged) \
+    if (__builtin_expect((ex)->seq_logging != 0, 0)) \
     { \
-        (ex)->seq_log[(ex)->seq_count & 63u] = (identity); \
-        if (__builtin_expect((ex)->seq_bloom != 0, 0)) \
-        { \
-            (ex)->seq_hit |= (uint32_t)(((ex)->seq_bloom & BUSTER_FSEQ_BIT(identity)) != 0) & (uint32_t)(logged); \
-        } \
-        (ex)->seq_count += (uint32_t)(logged); \
+        fast_cc_seq_name(ex, identity, logged); \
     }
 // A region's bounds, which the end's check reads when unknown ones (0) aren't counted.
 #define BUSTER_FSEQ_REGION(ex, lo, mid, hi) \
-    ((ex)->seq_region[(ex)->seq_regions & 31u][0] = (uint8_t)(lo), (ex)->seq_region[(ex)->seq_regions & 31u][1] = (uint8_t)(mid), \
-     (ex)->seq_region[(ex)->seq_regions & 31u][2] = (uint8_t)(hi), (ex)->seq_regions += (uint32_t)((lo) != 0) & (uint32_t)((mid) != 0))
+    if (__builtin_expect((ex)->seq_logging != 0, 0)) \
+    { \
+        fast_cc_seq_region(ex, lo, mid, hi); \
+    }
 // The log's count + 1 as a seq_start or an operator's seq_mid, in the byte it fits: past 253 entries the positions
 // wrap, and the expression's end refuses a log that long once anything in it was modified (seq_bloom), as the log's
 // 64 entries would anyway. Every use of a variable and every operator takes one.
 #define BUSTER_FSEQ_MARK(ex) ((uint8_t)((ex)->seq_count + 1u))
 // Where an operator about to be pushed on OPS (OSP of them) has its left operand begin: the operator below's seq_mid, or
 // the expression's first entry; 0 where that operator doesn't keep it.
+// Both where the expression keeps the log (LOGGING, a constant of fast_cc_expr_compile); 0 where it doesn't.
+#define BUSTER_FSEQ_MARK_IF(ex, logging) ((uint8_t)((logging) ? BUSTER_FSEQ_MARK(ex) : 0u))
+#define BUSTER_FSEQ_BELOW_IF(ops, osp, logging) ((uint8_t)((logging) ? BUSTER_FSEQ_BELOW(ops, osp) : 0u))
 #define BUSTER_FSEQ_BELOW(ops, osp) \
     ((uint8_t)(((uint32_t)(ops)[(osp) - (uint32_t)((osp) != 0)].seq_mid & (UINT32_C(0) - (uint32_t)((osp) != 0))) | (uint32_t)((osp) == 0)))
 
-// #3577: log a modification of lvalue V, whose own operands' entries start at V's seq_start: a variable modified before
-// (its hash bit), named before its operands (the vector compare looks at the log's first 16; more of them set it too)
-// sets seq_hit. A variable by name alone (an lvalue an operator made, an element or a member, has no known start), as
-// the full pipeline follows. A block, not a function, whose counter would tick at each; the search runs where there is
-// something to find.
+// #3577: the seq_ident of the value a modification of a variable by name makes (no name's identifier): where it is the
+// expression's value, the modification is its last operator (BUSTER_FSEQ_RESULT of the lvalue, taken before).
+#define BUSTER_FSEQ_MODIFIED UINT32_C(0xffffffff)
+#define BUSTER_FSEQ_RESULT(v) (BUSTER_FSEQ_MODIFIED & (UINT32_C(0) - (uint32_t)((v)->seq_ident != 0)))
+
+// #3577: the -Wunsequenced log's work where it is kept (a compile again, seq_logging), out of the hot functions that
+// test for it: a name's entry (BUSTER_FSEQ_NAME), a sequence point's region (BUSTER_FSEQ_REGION), a modification
+// (BUSTER_FSEQ_MODIFY).
+static __attribute__((cold, noinline)) void fast_cc_seq_name(FastExprCtx* ex, uint32_t identity, uint32_t logged)
+{
+    ex->seq_log[ex->seq_count & 63u] = identity;
+    if (ex->seq_bloom != 0)
+    {
+        ex->seq_hit |= (uint32_t)((ex->seq_bloom & BUSTER_FSEQ_BIT(identity)) != 0) & logged;
+    }
+    ex->seq_count += logged;
+}
+
+static __attribute__((cold, noinline)) void fast_cc_seq_region(FastExprCtx* ex, uint32_t lo, uint32_t mid, uint32_t hi)
+{
+    ex->seq_region[ex->seq_regions & 31u][0] = (uint8_t)lo;
+    ex->seq_region[ex->seq_regions & 31u][1] = (uint8_t)mid;
+    ex->seq_region[ex->seq_regions & 31u][2] = (uint8_t)hi;
+    ex->seq_regions += (uint32_t)(lo != 0) & (uint32_t)(mid != 0);
+}
+
+// A use by name pushed (PUSHED) on the stack: a variable's (VARIABLE) entry + 1 as its seq_start, and its entry where
+// evaluated.
+static __attribute__((cold, noinline)) void fast_cc_seq_push(FastExprCtx* ex, uint32_t identity, uint32_t variable, uint32_t pushed)
+{
+    if (pushed != 0)
+    {
+        ex->vstack[ex->vsp - 1u].seq_start = (uint8_t)(BUSTER_FSEQ_MARK(ex) & (UINT32_C(0) - variable));
+    }
+    fast_cc_seq_name(ex, identity, variable & (uint32_t)(ex->eval_only == ex->eval_base));
+}
+
+// A modification of lvalue V, whose own operands' entries start at V's seq_start: a variable modified before (its hash
+// bit), named before its operands (the vector compare looks at the log's first 16; more of them set it too) sets
+// seq_hit. A variable by name alone (an lvalue an operator made, an element or a member, has no known start), as the
+// full pipeline follows. The search runs where there is something to find.
+static __attribute__((cold, noinline)) void fast_cc_seq_modify(FastExprCtx* ex, const FastVal* v)
+{
+    const uint64_t seq_identity = BUSTER_FSEQ_LVALUE(v);
+    const uint32_t seq_tracked = (uint32_t)(seq_identity != 0);
+    const uint32_t seq_count = ex->seq_count;
+    const uint32_t seq_own = v->seq_start;
+    // Earlier entries outside the operands: [0, own - 1), or all of them where the start isn't known.
+    const uint32_t seq_earlier = seq_own - 1u + (uint32_t)(seq_own == 0) * (seq_count + 1u);
+    // Only where there is something to find: entries before the operands, or an earlier modification (an assignment's
+    // lvalue is most often the expression's first name, and its first modification).
+    if (seq_tracked != 0)
+    {
+        if (((uint32_t)(seq_earlier != 0) | (uint32_t)(ex->seq_bloom != 0)) != 0)
+        {
+            const uint32_t seq_looked = seq_count ^ ((seq_earlier ^ seq_count) & (UINT32_C(0) - (uint32_t)(seq_earlier < seq_count)));
+            const uint32_t seq_within = seq_looked ^ ((seq_looked ^ 16u) & (UINT32_C(0) - (uint32_t)(seq_looked > 16u)));
+            const __mmask16 seq_valid = (__mmask16)_bzhi_u32(0xffffu, seq_within);
+            const __m512i seq_wanted = _mm512_set1_epi64((long long)seq_identity);
+            const __mmask8 seq_low = _mm512_mask_cmpeq_epi64_mask((__mmask8)seq_valid, _mm512_maskz_loadu_epi64((__mmask8)seq_valid, ex->seq_log), seq_wanted);
+            const __mmask8 seq_high = _mm512_mask_cmpeq_epi64_mask((__mmask8)(seq_valid >> 8),
+                                                                   _mm512_maskz_loadu_epi64((__mmask8)(seq_valid >> 8), ex->seq_log + 8), seq_wanted);
+            const uint32_t seq_named_before = (uint32_t)((seq_low | seq_high) != 0);
+            const uint32_t seq_modified_before = (uint32_t)((ex->seq_bloom & BUSTER_FSEQ_BIT(seq_identity)) != 0);
+            ex->seq_hit |= seq_named_before | seq_modified_before | (uint32_t)(seq_looked > 16u);
+        }
+        ex->seq_bloom |= BUSTER_FSEQ_BIT(seq_identity);
+    }
+    ex->seq_log[seq_count & 63u] = seq_identity;
+    ex->seq_own[seq_count & 63u] = (uint8_t)seq_own;
+    ex->seq_mods |= (uint64_t)seq_tracked << (seq_count & 63u);
+    ex->seq_count = seq_count + 1u;
+}
+
+// A modification of lvalue V: without the log, V's seq_ident counted where it isn't 0 (a variable by name's identifier;
+// a member and the comma's value clear it, as they clear seq_start, and any other lvalue with one only makes the end
+// look closer); with it, fast_cc_seq_modify. A block, not a function, whose counter would tick at each.
 #define BUSTER_FSEQ_MODIFY(ex, v) \
+    if (__builtin_expect((ex)->seq_logging == 0, 1)) \
     { \
-        const uint64_t seq_identity = BUSTER_FSEQ_LVALUE(v); \
-        const uint32_t seq_tracked = (uint32_t)(seq_identity != 0); \
-        const uint32_t seq_count = (ex)->seq_count; \
-        const uint32_t seq_own = (v)->seq_start; \
-        /* Earlier entries outside the operands: [0, own - 1), or all of them where the start isn't known. */ \
-        const uint32_t seq_earlier = seq_own - 1u + (uint32_t)(seq_own == 0) * (seq_count + 1u); \
-        /* Only where there is something to find: entries before the operands, or an earlier modification (an */ \
-        /* assignment's lvalue is most often the expression's first name, and its first modification). */ \
-        if (seq_tracked != 0) \
-        { \
-            if (((uint32_t)(seq_earlier != 0) | (uint32_t)((ex)->seq_bloom != 0)) != 0) \
-            { \
-                const uint32_t seq_looked = seq_count ^ ((seq_earlier ^ seq_count) & (UINT32_C(0) - (uint32_t)(seq_earlier < seq_count))); \
-                const uint32_t seq_within = seq_looked ^ ((seq_looked ^ 16u) & (UINT32_C(0) - (uint32_t)(seq_looked > 16u))); \
-                const __mmask16 seq_valid = (__mmask16)_bzhi_u32(0xffffu, seq_within); \
-                const __m512i seq_wanted = _mm512_set1_epi64((long long)seq_identity); \
-                const __mmask8 seq_low = _mm512_mask_cmpeq_epi64_mask((__mmask8)seq_valid, _mm512_maskz_loadu_epi64((__mmask8)seq_valid, (ex)->seq_log), seq_wanted); \
-                const __mmask8 seq_high = _mm512_mask_cmpeq_epi64_mask((__mmask8)(seq_valid >> 8), \
-                                                                       _mm512_maskz_loadu_epi64((__mmask8)(seq_valid >> 8), (ex)->seq_log + 8), seq_wanted); \
-                const uint32_t seq_named_before = (uint32_t)((seq_low | seq_high) != 0); \
-                const uint32_t seq_modified_before = (uint32_t)(((ex)->seq_bloom & BUSTER_FSEQ_BIT(seq_identity)) != 0); \
-                (ex)->seq_hit |= seq_named_before | seq_modified_before | (uint32_t)(seq_looked > 16u); \
-            } \
-            (ex)->seq_bloom |= BUSTER_FSEQ_BIT(seq_identity); \
-        } \
-        (ex)->seq_log[seq_count & 63u] = seq_identity; \
-        (ex)->seq_own[seq_count & 63u] = (uint8_t)seq_own; \
-        (ex)->seq_mods |= (uint64_t)seq_tracked << (seq_count & 63u); \
-        (ex)->seq_count = seq_count + 1u; \
+        const uint32_t seq_plain = (v)->seq_ident; \
+        (ex)->seq_mod_ids[(ex)->seq_mod_count & 3u] = seq_plain; \
+        (ex)->seq_mod_count += (uint32_t)(seq_plain != 0); \
+    } \
+    else \
+    { \
+        fast_cc_seq_modify(ex, v); \
     }
 
 static inline bool fval_holds_gp(const FastVal* v)
@@ -2974,6 +3034,12 @@ static __attribute__((cold, noinline)) bool fast_cc_bitfield_constant_quiet(Fast
 
 static bool fast_cc_types_redeclarable(const FastCCState* cc, FastType a, FastType b);
 
+// #3577: a conversion of SRC to its own type DST_T, a scalar's or a pointer's (whose decay is itself): the first return of
+// fast_cc_check_implicit_conv below, ahead of its call, which most conversions take.
+#define BUSTER_FAST_CONV_OWN(dst_t, src) \
+    ((uint32_t)(BUSTER_FTYPE_UNQUAL(dst_t) == BUSTER_FTYPE_UNQUAL((src)->type)) & \
+     (uint32_t)(((src)->type & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) != BUSTER_FTYPE_COMPLEX_BIT))
+
 // Soundness check for implicit conversions (assignment, initialization, prototype args, return).
 // Bails out cleanly to the full pipeline on C semantic errors (int<->ptr, incompatible pointers) or default warnings!
 static __attribute__((noinline)) void fast_cc_check_implicit_conv(FastCCState* cc, FastType dst_t, const FastVal* src)
@@ -3168,7 +3234,10 @@ static BUSTER_DIRECT_HOT void fval_store(FastExprCtx* ex, FastVal* lhs, FastVal*
         fast_cc_bail(cc, "unsupported type store");
         return;
     }
-    fast_cc_check_implicit_conv(cc, lhs->type, rhs);
+    if (BUSTER_FAST_CONV_OWN(lhs->type, rhs) == 0)
+    {
+        fast_cc_check_implicit_conv(cc, lhs->type, rhs);
+    }
     // #3577: a constant into a bit-field narrower than its value (-Wbitfield-constant-conversion, a one-bit signed
     // field's 1 too).
     if (((uint32_t)(lhs->kind == FVAL_BITFIELD) & ((uint32_t)(rhs->kind == FVAL_IMM) | (uint32_t)((rhs->marks & BUSTER_FVAL_MARK_CONST_ARMS) != 0))) != 0 &&
@@ -3858,6 +3927,17 @@ static uint32_t fast_cc_string_plus(const FastCCState* cc, const FastVal* lhs, c
 // and float, a bit each.
 #define BUSTER_FAST_QUESTIONED_KINDS ((1u << FTYPE_BOOL) | (1u << FTYPE_I8) | (1u << FTYPE_U8) | (1u << FTYPE_I16) | (1u << FTYPE_U16) | \
                                       (1u << FTYPE_F32))
+// #3577: a superset, in registers, of the comparisons of two integers that fast_cc_binary_operands_quiet questions (KINDS
+// is the operands' value kinds, a bit each): a constant against a flag value, an address, a narrow or float-cast operand
+// or a function; two constants (enumerators carry their enum); or an enum's value (an enum type before its conversion).
+#define BUSTER_FAST_INT_COMPARE_ASKED(lhs, rhs, lt, rt, kinds) \
+    (((((kinds) >> FVAL_IMM) | ((kinds) >> FVAL_FIMM)) & 1u & \
+      ((uint32_t)(((kinds) & ((UINT32_C(1) << FVAL_FLAGS) | (UINT32_C(1) << FVAL_LOCAL_ADDR) | (UINT32_C(1) << FVAL_GLOBAL_ADDR))) != 0) | \
+       ((BUSTER_FAST_QUESTIONED_KINDS >> ((lt) & BUSTER_FTYPE_SCALAR_MASK)) & 1u) | \
+       ((BUSTER_FAST_QUESTIONED_KINDS >> ((rt) & BUSTER_FTYPE_SCALAR_MASK)) & 1u) | \
+       (uint32_t)(((lhs)->is_func_sym | (rhs)->is_func_sym | (lhs)->float_cast | (rhs)->float_cast) != 0) | \
+       (uint32_t)((kinds) == (UINT32_C(1) << FVAL_IMM)))) | \
+     (uint32_t)((((lhs)->type | (rhs)->type) & BUSTER_FTYPE_COMPLEX_BIT) != 0))
 
 // #3577: whether a binary operator's operands, of types LT and RT, are ones the full pipeline questions, where
 // fval_emit_binary's gate let them past: a comparison of a constant out of a narrower operand's range
@@ -4015,13 +4095,19 @@ static BUSTER_DIRECT_HOT void fval_emit_binary(FastExprCtx* ex, uint8_t op, Fast
         return;
     }
     // #3577: the operands C allows each operator, and the comparisons and operands the full pipeline questions: two integer
-    // scalars (no enum, pointer or record) that aren't compared, nor a bit-field, are every operator's operands, and are
-    // never questioned; any other pair takes fast_cc_binary_operands_quiet.
+    // scalars (no enum, pointer or record) that aren't a bit-field are every operator's operands, and are questioned only
+    // compared, where a superset of what fast_cc_binary_operands_quiet questions is looked at first, in registers; any
+    // other pair takes it.
     const uint32_t integers = (uint32_t)(((lt | rt) & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) == 0) &
                               (BUSTER_FAST_INTEGER_KINDS >> (lt & BUSTER_FTYPE_SCALAR_MASK)) & (BUSTER_FAST_INTEGER_KINDS >> (rt & BUSTER_FTYPE_SCALAR_MASK)) & 1u;
     const uint32_t compared = (uint32_t)(((UINT64_C(1) << (op & 63u)) & BUSTER_FAST_COMPARISON_OPS) != 0);
-    const uint32_t bit_field = (uint32_t)(lhs->kind == FVAL_BITFIELD) | (uint32_t)(rhs->kind == FVAL_BITFIELD);
-    if (((integers ^ 1u) | compared | bit_field) != 0)
+    const uint32_t kinds = (UINT32_C(1) << lhs->kind) | (UINT32_C(1) << rhs->kind);
+    uint32_t asked = (integers ^ 1u) | ((kinds >> FVAL_BITFIELD) & 1u);
+    if ((asked == 0) & (compared != 0))
+    {
+        asked = BUSTER_FAST_INT_COMPARE_ASKED(lhs, rhs, lt, rt, kinds);
+    }
+    if (asked != 0)
     {
         if (!fast_cc_binary_operands_quiet(cc, op, lhs, rhs, lt, rt, integers))
         {
@@ -4612,8 +4698,14 @@ static void fval_emit_incdec(FastExprCtx* ex, FastVal* lv, bool is_inc, bool is_
         }
     }
     // #3577: a step in an unevaluated operand (sizeof's) is the full pipeline's -Wunevaluated-expression.
-    if (ex->eval_only > 0) { fast_cc_bail(cc, "side effect in an unevaluated operand"); return; }
+    if (ex->eval_only > ex->eval_base) { fast_cc_bail(cc, "side effect in an unevaluated operand"); return; }
     BUSTER_FSEQ_MODIFY(ex, lv)
+    // A compile again for the log (eval_base) makes no code.
+    if (ex->eval_only > 0)
+    {
+        *out = (FastVal){ .type = t, .kind = FVAL_REG };
+        return;
+    }
     fval_flush_flags(ex);
 
     // Load old value WITHOUT releasing `lv`!
@@ -4679,12 +4771,18 @@ static void fval_emit_compound_assign(FastExprCtx* ex, uint8_t assign_op, FastVa
     };
     const uint8_t bin_op = op_map[assign_op - FTOK_ADD_ASSIGN];
     // #3577: an assignment in an unevaluated operand (sizeof's) is the full pipeline's -Wunevaluated-expression.
-    if (ex->eval_only > 0)
+    if (ex->eval_only > ex->eval_base)
     {
         fast_cc_bail(ex->cc, "side effect in an unevaluated operand");
         return;
     }
     BUSTER_FSEQ_MODIFY(ex, lhs)
+    // A compile again for the log (eval_base) makes no code.
+    if (ex->eval_only > 0)
+    {
+        *out = (FastVal){ .type = ftype_unqual(lhs->type), .kind = FVAL_REG };
+        return;
+    }
     fval_materialize_flags(ex, rhs);
     // Load LHS without releasing its address register, compute `old op rhs`, then store into `lhs`!
     if (ftype_is_i128(lhs->type))
@@ -4989,7 +5087,10 @@ static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, F
         {
             if (i < fn->count)
             {
-                fast_cc_check_implicit_conv(cc, BUSTER_FTYPE_UNQUAL(cc->param_types[fn->start + i]), &args[i]);
+                if (BUSTER_FAST_CONV_OWN(cc->param_types[fn->start + i], &args[i]) == 0)
+                {
+                    fast_cc_check_implicit_conv(cc, BUSTER_FTYPE_UNQUAL(cc->param_types[fn->start + i]), &args[i]);
+                }
             }
             else if ((args[i].type & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK)) == FTYPE_VOID)
             {
@@ -5028,8 +5129,11 @@ static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, F
         if (i < fn->count)
         {
             pt = ftype_unqual(cc->param_types[fn->start + i]);
-            fast_cc_check_implicit_conv(cc, pt, &args[i]);
-            if (cc->bailout) { return; }
+            if (BUSTER_FAST_CONV_OWN(pt, &args[i]) == 0)
+            {
+                fast_cc_check_implicit_conv(cc, pt, &args[i]);
+                if (cc->bailout) { return; }
+            }
         }
         else
         {
@@ -5673,10 +5777,12 @@ static BUSTER_DIRECT_HOT void fast_expr_reduce_top(FastExprCtx* ex, FastExprOp* 
         }
         if (op == FEOP_PRE_INC || op == FEOP_PRE_DEC)
         {
+            const uint32_t seq_result = BUSTER_FSEQ_RESULT(v);
             FastVal res = { 0 };
             fval_emit_incdec(ex, v, op == FEOP_PRE_INC, false, &res);
             *v = res;
             v->marks = BUSTER_FVAL_MARK_EFFECT;
+            v->seq_ident = seq_result;
             return;
         }
         if (op == FEOP_UNARY_PLUS)
@@ -5973,6 +6079,7 @@ static BUSTER_DIRECT_HOT void fast_expr_reduce_top(FastExprCtx* ex, FastExprOp* 
         // #3577: the left operand's entries are sequenced before the right's.
         BUSTER_FSEQ_REGION(ex, cur.seq_lo, cur.seq_mid, BUSTER_FSEQ_MARK(ex));
         rhs->seq_start = 0;
+        rhs->seq_ident = 0;
         ex->vstack[ex->vsp++] = *rhs;
         return;
     }
@@ -5987,25 +6094,29 @@ static BUSTER_DIRECT_HOT void fast_expr_reduce_top(FastExprCtx* ex, FastExprOp* 
         }
         const uint32_t lhs_const = (uint32_t)((lhs->type & BUSTER_FTYPE_CONST) != 0);
         // And one in an unevaluated operand (sizeof's) is the full pipeline's -Wunevaluated-expression.
-        if (((uint32_t)(lhs->is_lvalue == 0) | lhs_const | record_const | (uint32_t)(ex->eval_only != 0)) != 0)
+        if (((uint32_t)(lhs->is_lvalue == 0) | lhs_const | record_const | (uint32_t)(ex->eval_only > ex->eval_base)) != 0)
         {
             fast_cc_bail(cc, "assign to const or non-lvalue, or in an unevaluated operand");
             return;
         }
+        const uint32_t seq_result = BUSTER_FSEQ_RESULT(lhs);
         BUSTER_FSEQ_MODIFY(ex, lhs)
         FastVal res = { 0 };
         fval_store(ex, lhs, rhs, true, &res);
         res.marks = BUSTER_FVAL_MARK_EFFECT;
         res.op = FTOK_ASSIGN;
+        res.seq_ident = seq_result;
         ex->vstack[ex->vsp++] = res;
         return;
     }
     if (tok >= FTOK_ADD_ASSIGN && tok <= FTOK_SHR_ASSIGN)
     {
+        const uint32_t seq_result = BUSTER_FSEQ_RESULT(lhs);
         FastVal res = { 0 };
         fval_emit_compound_assign(ex, tok, lhs, rhs, &res);
         res.marks = BUSTER_FVAL_MARK_EFFECT;
         res.op = tok;
+        res.seq_ident = seq_result;
         ex->vstack[ex->vsp++] = res;
         return;
     }
@@ -6117,9 +6228,72 @@ static __attribute__((cold, noinline)) bool fast_cc_sizeof_array_param(const Fas
     return result;
 }
 
-// Main iterative C17 expression compiler (ZERO recursion!).
-// If `is_branch` is true, emits a direct branch to `branch_label` and releases the result.
-// If `discard_result` is true, releases the result (used for expression statements).
+static __attribute__((cold, noinline)) void fast_cc_expr_logged(FastCCState* cc, bool stop_at_comma);
+
+// #3577: the expression that ends at cc->pos compiled again from its first token (START) for its -Wunsequenced log, as a
+// compile with the log makes it: without code (eval_only, whose first level counts as evaluated: eval_base); its end
+// bails where the full pipeline warns. The types it makes (a string literal's array) are dropped after. False where it
+// bailed, or ended elsewhere than the first compile.
+static __attribute__((cold, noinline)) bool fast_cc_sequenced_again(FastCCState* cc, uint32_t start, bool stop_at_comma)
+{
+    const uint32_t end = cc->pos;
+    const uint32_t ctypes = cc->ctype_count;
+    cc->pos = start;
+    fast_cc_expr_logged(cc, stop_at_comma);
+    cc->ctype_count = ctypes;
+    if (!cc->bailout && cc->pos != end)
+    {
+        fast_cc_bail(cc, "an expression compiled again for -Wunsequenced ends elsewhere");
+    }
+    cc->pos = end;
+    return !cc->bailout;
+}
+
+// #3577: -Wunsequenced for an expression compiled without the log that modified variables (EX's seq_mod_*) where the one
+// modification isn't its last operator: each modified variable's name once among the expression's tokens, and none
+// modified twice, is quiet (a warning needs another use or modification of the variable); else the expression is compiled
+// again for its log (fast_cc_sequenced_again). The tokens 64 at a time, in masks of the names and their identifiers.
+// False where it bailed.
+static __attribute__((cold, noinline)) bool fast_cc_sequenced_lazy(FastCCState* cc, const FastExprCtx* ex, bool stop_at_comma)
+{
+    const uint32_t count = ex->seq_mod_count;
+    const uint32_t start = ex->seq_start_pos;
+    const uint32_t end = cc->pos;
+    uint32_t once = (uint32_t)(count <= 4u);
+    for (uint32_t m = 0; m < count && m < 4u && once != 0; m += 1)
+    {
+        const uint32_t id = ex->seq_mod_ids[m];
+        const __m512i wanted = _mm512_set1_epi32((int)id);
+        const __m512i name = _mm512_set1_epi8((char)FTOK_IDENT);
+        uint32_t named = 0;
+        for (uint32_t at = start; at < end; at += 64u)
+        {
+            const uint32_t left = end - at;
+            const __mmask64 valid = _bzhi_u64(~UINT64_C(0), left < 64u ? left : 64u);
+            const __mmask64 names = _mm512_mask_cmpeq_epi8_mask(valid, _mm512_maskz_loadu_epi8(valid, cc->tk + at), name);
+            uint64_t same = 0;
+            for (uint32_t part = 0; part < 4u; part += 1)
+            {
+                const __mmask16 lanes = (__mmask16)(valid >> (part * 16u));
+                same |= (uint64_t)_mm512_mask_cmpeq_epi32_mask(lanes, _mm512_maskz_loadu_epi32(lanes, cc->td + at + part * 16u), wanted)
+                        << (part * 16u);
+            }
+            named += (uint32_t)__builtin_popcountll(names & same);
+        }
+        once &= (uint32_t)(named == 1u);
+        for (uint32_t earlier = 0; earlier < m; earlier += 1)
+        {
+            once &= (uint32_t)(ex->seq_mod_ids[earlier] != id);
+        }
+    }
+    bool quiet = once != 0;
+    if (!quiet)
+    {
+        quiet = fast_cc_sequenced_again(cc, start, stop_at_comma);
+    }
+    return quiet;
+}
+
 // Push a use of a symbol with use flags (#3577): a register variable as any local, marked so that `&` refuses it; a
 // function whose calls the full pipeline checks as any function, marked for a call by its name (nonnull,
 // warn_unused_result), where a format function's call is the full pipeline's, and so is a name in parentheses, which
@@ -6145,7 +6319,7 @@ static __attribute__((cold, noinline)) bool fast_cc_push_flagged_symbol(FastCCSt
                                                .marks = BUSTER_FVAL_MARK_REGISTER, .seq_start = BUSTER_FSEQ_MARK(ex),
                                                .seq_ident = sym->ident_id };
         }
-        BUSTER_FSEQ_NAME(ex, sym->ident_id, (uint32_t)(ex->eval_only == 0));
+        BUSTER_FSEQ_NAME(ex, sym->ident_id, (uint32_t)(ex->eval_only == ex->eval_base));
         pushed = true;
     }
     else if (((uint32_t)(sym->kind != FSYM_FUNC) | (uint32_t)(next == FTOK_RPAREN) |
@@ -6171,8 +6345,11 @@ static __attribute__((cold, noinline)) bool fast_cc_push_flagged_symbol(FastCCSt
     return pushed;
 }
 
-static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, bool discard_result,
-                         bool is_branch, bool branch_on_true, uint32_t branch_label, FastVal* out_val)
+// The expression compiler's body, made twice (#3577): without the -Wunsequenced log (LOGGING false: fast_cc_expr, every
+// expression), and with it, for an expression compiled again without code (fast_cc_expr_logged).
+static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCState* cc, bool stop_at_comma, bool discard_result, bool is_branch,
+                                                                      bool branch_on_true, uint32_t branch_label, FastVal* out_val,
+                                                                      const bool logging)
 {
     FastExprCtx ex;
     ex.cc = cc;
@@ -6180,12 +6357,21 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
     ex.arg_sp = 0;
     ex.gp_used = 0;
     ex.xmm_used = 0;
-    ex.eval_only = 0;
+    // #3577: an expression compiled again for its -Wunsequenced log (LOGGING, fast_cc_sequenced_again) makes no code and
+    // keeps the log; any other counts its modifications alone.
+    ex.eval_only = (uint8_t)logging;
+    ex.eval_base = (uint8_t)logging;
+    ex.seq_logging = (uint8_t)logging;
     ex.seq_count = 0;
-    ex.seq_hit = 0;
-    ex.seq_mods = 0;
-    ex.seq_regions = 0;
-    ex.seq_bloom = 0;
+    ex.seq_mod_count = 0;
+    ex.seq_start_pos = cc->pos;
+    if (logging)
+    {
+        ex.seq_hit = 0;
+        ex.seq_mods = 0;
+        ex.seq_regions = 0;
+        ex.seq_bloom = 0;
+    }
 
     FastExprOp ops[128];
     uint32_t osp = 0;
@@ -6243,7 +6429,8 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
                     const uint32_t enumerator = (uint32_t)(symbol_kind == FSYM_ENUM_CONST);
                     // (FSYM_LOCAL and FSYM_GLOBAL are adjacent: a variable.)
                     const uint32_t variable = (uint32_t)(symbol_kind - (uint32_t)FSYM_LOCAL < 2u);
-                    if (ex.vsp < 128u)
+                    const uint32_t pushed = (uint32_t)(ex.vsp < 128u);
+                    if (pushed != 0)
                     {
                         ex.vstack[ex.vsp++] = (FastVal){
                             .type = sym->type,
@@ -6254,11 +6441,14 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
                             .is_func_sym = (uint8_t)function,
                             .is_lvalue = value_lvalues[symbol_kind],
                             .marks = push_marks,
-                            .seq_start = (uint8_t)(BUSTER_FSEQ_MARK(&ex) & (UINT32_C(0) - variable)),
                             .seq_ident = id,
                         };
                     }
-                    BUSTER_FSEQ_NAME(&ex, id, variable & evaluated);
+                    // The log's entry where it is kept (a compile again, #3577): the value's seq_start is its place + 1.
+                    if (logging)
+                    {
+                        fast_cc_seq_push(&ex, id, variable, pushed);
+                    }
                     expect_val = false;
                     continue;
                 }
@@ -6330,7 +6520,7 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
                             continue;
                         }
                         if (osp >= 128u) { fast_cc_bail(cc, "expr op stack full"); break; }
-                        ops[osp++] = (FastExprOp){ .op = FEOP_COMPOUND_LIT, .extra = 0u, .type = ct, .slot = slot, .seq_mid = BUSTER_FSEQ_MARK(&ex) };
+                        ops[osp++] = (FastExprOp){ .op = FEOP_COMPOUND_LIT, .extra = 0u, .type = ct, .slot = slot, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) };
                         // Handle optional designator `.field =` or `[idx] =` right before first element!
                         if (fast_cc_peek(cc) == FTOK_DOT && ftype_is_record(ct))
                         {
@@ -6352,7 +6542,7 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
                     continue;
                 }
                 if (osp >= 128u) { fast_cc_bail(cc, "expr op stack full"); break; }
-                ops[osp++] = (FastExprOp){ .op = FEOP_LPAREN, .seq_mid = BUSTER_FSEQ_MARK(&ex) };
+                ops[osp++] = (FastExprOp){ .op = FEOP_LPAREN, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) };
                 cc->pos += 1u;
                 continue;
             }
@@ -6423,7 +6613,7 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
                 if (fast_cc_peek(cc) != FTOK_LPAREN) { fast_cc_bail(cc, "bad _Generic"); break; }
                 cc->pos += 1u;
                 if (osp >= 128u) { fast_cc_bail(cc, "expr op stack full"); break; }
-                ops[osp++] = (FastExprOp){ .op = FEOP_GENERIC_CTRL, .seq_mid = BUSTER_FSEQ_MARK(&ex) };
+                ops[osp++] = (FastExprOp){ .op = FEOP_GENERIC_CTRL, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) };
                 ex.eval_only += 1u;
                 continue;
             }
@@ -6439,7 +6629,7 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
                 const uint16_t vop = k == FTOK_KW_BUILTIN_VA_START ? FEOP_VA_START :
                                      k == FTOK_KW_BUILTIN_VA_ARG ? FEOP_VA_ARG :
                                      k == FTOK_KW_BUILTIN_VA_END ? FEOP_VA_END : FEOP_VA_COPY;
-                ops[osp++] = (FastExprOp){ .op = vop, .seq_mid = BUSTER_FSEQ_MARK(&ex) };
+                ops[osp++] = (FastExprOp){ .op = vop, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) };
                 continue;
             }
 
@@ -6605,6 +6795,7 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
                 }
                 // #3577: a member isn't its object by name, the variable -Wunsequenced follows (BUSTER_FSEQ_MODIFY).
                 v->seq_start = 0;
+                v->seq_ident = 0;
                 v->type = mi->type;
                 if (bkind == FVAL_GLOBAL) { v->imm += (int64_t)mi->byte_offset; }
                 else if (bkind == FVAL_SPILL_ADDR) { v->addr_disp += (int32_t)mi->byte_offset; }
@@ -6618,9 +6809,11 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
         {
             if (ex.vsp < 1u) { fast_cc_bail(cc, "postfix inc/dec"); break; }
             cc->pos += 1u;
+            const uint32_t seq_result = BUSTER_FSEQ_RESULT(&ex.vstack[ex.vsp - 1u]);
             FastVal res = { 0 };
             fval_emit_incdec(&ex, &ex.vstack[ex.vsp - 1u], k == FTOK_INC, true, &res);
             res.marks = BUSTER_FVAL_MARK_EFFECT;
+            res.seq_ident = seq_result;
             ex.vstack[ex.vsp - 1u] = res;
             continue;
         }
@@ -6629,7 +6822,7 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
         if (k == FTOK_LBRACKET)
         {
             if (osp >= 128u) { fast_cc_bail(cc, "expr op stack full"); break; }
-            ops[osp++] = (FastExprOp){ .op = FEOP_SUBSCRIPT, .seq_mid = BUSTER_FSEQ_MARK(&ex) };
+            ops[osp++] = (FastExprOp){ .op = FEOP_SUBSCRIPT, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) };
             cc->pos += 1u;
             expect_val = true;
             continue;
@@ -6639,7 +6832,7 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
         if (k == FTOK_LPAREN)
         {
             if (osp >= 128u) { fast_cc_bail(cc, "expr op stack full"); break; }
-            ops[osp++] = (FastExprOp){ .op = FEOP_CALL, .extra = 0u, .lbl0 = ex.arg_sp, .seq_mid = BUSTER_FSEQ_MARK(&ex) };
+            ops[osp++] = (FastExprOp){ .op = FEOP_CALL, .extra = 0u, .lbl0 = ex.arg_sp, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) };
             cc->pos += 1u;
             expect_val = true;
             continue;
@@ -6873,7 +7066,7 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
                 .op = FEOP_TERNARY_C, .extra = (uint16_t)(then_v.marks | ((uint32_t)then_arm.kind << 8) | ((uint32_t)then_arm.not_null_literal << 12)),
                 .lbl0 = (uint32_t)(uint64_t)then_arm.value, .lbl1 = then_tail_lbl, .lbl2 = end_lbl, .type = then_t,
                 .slot = ftype_is_record(then_t) ? tern_slot : (int32_t)(uint32_t)((uint64_t)then_arm.value >> 32),
-                .seq_lo = ops[osp - 1u].seq_lo, .seq_mid = ops[osp - 1u].seq_mid, .seq_mid2 = BUSTER_FSEQ_MARK(&ex),
+                .seq_lo = ops[osp - 1u].seq_lo, .seq_mid = ops[osp - 1u].seq_mid, .seq_mid2 = BUSTER_FSEQ_MARK_IF(&ex, logging),
             };
             cc->pos += 1u;
             expect_val = true;
@@ -6895,8 +7088,8 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
                 // Top-level comma operator
                 if (osp < 128u)
                 {
-                    const uint8_t below = BUSTER_FSEQ_BELOW(ops, osp);
-                    ops[osp++] = (FastExprOp){ .op = (uint16_t)(FEOP_TOK_BASE + FTOK_COMMA), .seq_lo = below, .seq_mid = BUSTER_FSEQ_MARK(&ex) };
+                    const uint8_t below = BUSTER_FSEQ_BELOW_IF(ops, osp, logging);
+                    ops[osp++] = (FastExprOp){ .op = (uint16_t)(FEOP_TOK_BASE + FTOK_COMMA), .seq_lo = below, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) };
                 }
                 cc->pos += 1u;
                 expect_val = true;
@@ -6910,7 +7103,7 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
                 fval_spill_one(&ex, &ex.vstack[ex.vsp - 1u]);
                 ex.call_args[ex.arg_sp++] = ex.vstack[--ex.vsp];
                 ops[osp - 1u].extra += 1u;
-                ops[osp - 1u].seq_mid = BUSTER_FSEQ_MARK(&ex);
+                ops[osp - 1u].seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging);
                 cc->pos += 1u;
                 expect_val = true;
                 continue;
@@ -6952,7 +7145,7 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
                     }
                     cl->extra += 1u;
                 }
-                cl->seq_mid = BUSTER_FSEQ_MARK(&ex);
+                cl->seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging);
                 cc->pos += 1u;
                 if (fast_cc_peek(cc) == FTOK_DOT && ftype_is_record(cl->type))
                 {
@@ -7013,7 +7206,7 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
                 }
                 const uint32_t win = match_pos != UINT32_MAX ? match_pos : def_pos;
                 if (win == UINT32_MAX || end_pos == UINT32_MAX) { fast_cc_bail(cc, "_Generic no match"); break; }
-                ops[osp++] = (FastExprOp){ .op = FEOP_GENERIC_SEL, .lbl0 = end_pos, .seq_mid = BUSTER_FSEQ_MARK(&ex) };
+                ops[osp++] = (FastExprOp){ .op = FEOP_GENERIC_SEL, .lbl0 = end_pos, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) };
                 cc->pos = win;
                 expect_val = true;
                 continue;
@@ -7090,8 +7283,8 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
             // Otherwise comma operator inside `(...)` or `[...]`
             if (osp < 128u)
             {
-                const uint8_t below = BUSTER_FSEQ_BELOW(ops, osp);
-                ops[osp++] = (FastExprOp){ .op = (uint16_t)(FEOP_TOK_BASE + FTOK_COMMA), .seq_lo = below, .seq_mid = BUSTER_FSEQ_MARK(&ex) };
+                const uint8_t below = BUSTER_FSEQ_BELOW_IF(ops, osp, logging);
+                ops[osp++] = (FastExprOp){ .op = (uint16_t)(FEOP_TOK_BASE + FTOK_COMMA), .seq_lo = below, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) };
             }
             cc->pos += 1u;
             expect_val = true;
@@ -7131,8 +7324,8 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
             }
             if (osp < 128u)
             {
-                const uint8_t below = BUSTER_FSEQ_BELOW(ops, osp);
-                ops[osp++] = (FastExprOp){ .op = (uint16_t)(FEOP_TOK_BASE + k), .lbl0 = sc_lbl, .seq_lo = below, .seq_mid = BUSTER_FSEQ_MARK(&ex) };
+                const uint8_t below = BUSTER_FSEQ_BELOW_IF(ops, osp, logging);
+                ops[osp++] = (FastExprOp){ .op = (uint16_t)(FEOP_TOK_BASE + k), .lbl0 = sc_lbl, .seq_lo = below, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) };
             }
         }
         else if (k == FTOK_QUESTION)
@@ -7151,8 +7344,8 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
             }
             if (osp < 128u)
             {
-                const uint8_t below = BUSTER_FSEQ_BELOW(ops, osp);
-                ops[osp++] = (FastExprOp){ .op = FEOP_TERNARY_Q, .lbl0 = else_lbl, .seq_lo = below, .seq_mid = BUSTER_FSEQ_MARK(&ex) };
+                const uint8_t below = BUSTER_FSEQ_BELOW_IF(ops, osp, logging);
+                ops[osp++] = (FastExprOp){ .op = FEOP_TERNARY_Q, .lbl0 = else_lbl, .seq_lo = below, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) };
             }
         }
         else
@@ -7178,7 +7371,7 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
                     break;
                 }
             }
-            if (osp < 128u) { ops[osp++] = (FastExprOp){ .op = (uint16_t)(FEOP_TOK_BASE + k), .seq_mid = BUSTER_FSEQ_MARK(&ex) }; }
+            if (osp < 128u) { ops[osp++] = (FastExprOp){ .op = (uint16_t)(FEOP_TOK_BASE + k), .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) }; }
         }
         cc->pos += 1u;
         expect_val = true;
@@ -7202,9 +7395,19 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
         return;
     }
     FastVal final_v = ex.vstack[0];
-    // #3577: -Wunsequenced: a variable modified and named or modified again where nothing sequences the two (seq_hit, set
-    // by the log, says where that may be).
-    if ((ex.seq_hit | ((uint32_t)(ex.seq_count >= 254u) & (uint32_t)(ex.seq_bloom != 0))) != 0 && !fast_cc_sequenced(&ex))
+    // #3577: -Wunsequenced. Without the log: no variable modified, or one whose modification is the expression's last
+    // operator (its operands are evaluated before it stores; BUSTER_FSEQ_MODIFIED), is quiet, and any other modification
+    // looks further (fast_cc_sequenced_lazy). With it (a compile again): a variable modified and named or modified again
+    // where nothing sequences the two (seq_hit, set by the log, says where that may be).
+    if (!logging)
+    {
+        if (ex.seq_mod_count != 0 && ((uint32_t)(ex.seq_mod_count != 1u) | (uint32_t)(final_v.seq_ident != BUSTER_FSEQ_MODIFIED)) != 0 &&
+            !fast_cc_sequenced_lazy(cc, &ex, stop_at_comma))
+        {
+            return;
+        }
+    }
+    else if ((ex.seq_hit | ((uint32_t)(ex.seq_count >= 254u) & (uint32_t)(ex.seq_bloom != 0))) != 0 && !fast_cc_sequenced(&ex))
     {
         fast_cc_bail(cc, "modifications and uses of a variable the full pipeline's -Wunsequenced questions");
         return;
@@ -7227,6 +7430,22 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
     }
 }
 
+// Main iterative C17 expression compiler (#3577: without the -Wunsequenced log; fast_cc_expr_compile).
+// If `is_branch` is true, emits a direct branch to `branch_label` and releases the result.
+// If `discard_result` is true, releases the result (used for expression statements).
+static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, bool discard_result,
+                         bool is_branch, bool branch_on_true, uint32_t branch_label, FastVal* out_val)
+{
+    fast_cc_expr_compile(cc, stop_at_comma, discard_result, is_branch, branch_on_true, branch_label, out_val, false);
+}
+
+// #3577: the expression at cc->pos compiled again without code for its -Wunsequenced log (fast_cc_sequenced_again); its
+// end bails where the full pipeline warns.
+static __attribute__((cold, noinline)) void fast_cc_expr_logged(FastCCState* cc, bool stop_at_comma)
+{
+    fast_cc_expr_compile(cc, stop_at_comma, false, false, false, 0u, NULL, true);
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Level 12: Iterative local variable initializer (ZERO recursion; calls fast_cc_expr only!)
 
@@ -7238,11 +7457,15 @@ static inline void fast_expr_ctx_reset(FastExprCtx* ex, FastCCState* cc)
     ex->gp_used = 0;
     ex->xmm_used = 0;
     ex->eval_only = 0;
+    ex->eval_base = 0;
+    ex->seq_logging = 0;
     ex->seq_count = 0;
     ex->seq_hit = 0;
     ex->seq_mods = 0;
     ex->seq_regions = 0;
     ex->seq_bloom = 0;
+    ex->seq_mod_count = 0;
+    ex->seq_start_pos = cc->pos;
 }
 
 static void fast_cc_store_expr_to_val(FastCCState* cc, FastVal dst, bool stop_at_comma)

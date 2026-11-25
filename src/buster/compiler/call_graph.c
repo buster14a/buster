@@ -70,6 +70,10 @@ static const CallGraphAllowed call_graph_allowed[] = {
     // Tokens' invocations and parenthesized groups, and an argument's invocation and tokens, are one level shallower,
     // and there are none at depth 0 (BUSTER_PPF_RANDOM_DEPTH, 3, at most).
     { .functions = BUSTER_S8_INIT("preprocessor_fuzz_random_argument preprocessor_fuzz_random_invocation preprocessor_fuzz_random_tokens") },
+    // The direct path's expression compiled again for its -Wunsequenced log (c_direct_cc.c, #3577): the body
+    // (fast_cc_expr_compile) without the log may compile its expression once more with it (fast_cc_sequenced_lazy,
+    // fast_cc_sequenced_again, fast_cc_expr_logged), and the body with the log never compiles again: two levels.
+    { .functions = BUSTER_S8_INIT("fast_cc_expr_compile fast_cc_expr_logged fast_cc_sequenced_again fast_cc_sequenced_lazy") },
 };
 
 typedef struct CallGraphInput CallGraphInput;
