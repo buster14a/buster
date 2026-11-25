@@ -6283,7 +6283,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                 FastDeclSpecs ds = { 0 };
                 const FastType btype = fast_cc_parse_decl_specs(cc, &ds);
                 // A for's declaration is of automatic objects; clang takes static, extern and typedef there too (#3599).
-                if ((BUSTER_FSPECS_WRITTEN(&ds) & ~(BUSTER_FSPEC_REGISTER | BUSTER_FSPEC_AUTO)) != 0)
+                if ((ds.written & ~(BUSTER_FSPEC_REGISTER | BUSTER_FSPEC_AUTO)) != 0)
                 {
                     fast_cc_bail(cc, "a for's declaration of a non-local");
                 }
@@ -6512,7 +6512,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                 FastDeclaratorResult dr = { 0 };
                 if (!fast_cc_parse_declarator(cc, btype, false, &dr, false) || !fast_cc_declarator_named(cc, dr.name_id)) { break; }
                 const uint32_t extra_al = ds.attr.aligned > dr.attr.aligned ? ds.attr.aligned : dr.attr.aligned;
-                if ((ds.is_inline | ds.is_noreturn) != 0 && (ds.is_typedef != 0 || !ftype_is_func(dr.type)))
+                if ((ds.written & (BUSTER_FSPEC_INLINE | BUSTER_FSPEC_NORETURN)) != 0 && (ds.is_typedef != 0 || !ftype_is_func(dr.type)))
                 {
                     fast_cc_bail(cc, "inline or _Noreturn on an object");
                     break;
@@ -6897,7 +6897,7 @@ static bool fast_cc_compile_unit(FastCCState* cc)
 
         FastDeclSpecs ds = { 0 };
         const FastType btype = fast_cc_parse_decl_specs(cc, &ds);
-        if ((BUSTER_FSPECS_WRITTEN(&ds) & (BUSTER_FSPEC_REGISTER | BUSTER_FSPEC_AUTO)) != 0) { fast_cc_bail(cc, "register or auto at file scope"); }
+        if ((ds.written & (BUSTER_FSPEC_REGISTER | BUSTER_FSPEC_AUTO)) != 0) { fast_cc_bail(cc, "register or auto at file scope"); }
         if (cc->bailout) { break; }
         if (fast_cc_peek(cc) == FTOK_SEMI) { cc->pos += 1u; continue; }
 
@@ -6906,7 +6906,7 @@ static bool fast_cc_compile_unit(FastCCState* cc)
         {
             FastDeclaratorResult dr = { 0 };
             if (!fast_cc_parse_declarator(cc, btype, false, &dr, first) || !fast_cc_declarator_named(cc, dr.name_id)) { break; }
-            if ((ds.is_inline | ds.is_noreturn) != 0 && (ds.is_typedef != 0 || !ftype_is_func(dr.type)))
+            if ((ds.written & (BUSTER_FSPEC_INLINE | BUSTER_FSPEC_NORETURN)) != 0 && (ds.is_typedef != 0 || !ftype_is_func(dr.type)))
             {
                 fast_cc_bail(cc, "inline or _Noreturn on an object");
                 break;
