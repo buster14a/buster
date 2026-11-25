@@ -19,11 +19,45 @@
 // ---------------------------------------------------------------------------------------------------------------------
 // Level 9a: AVX-512 body pre-scanner, stack allocation, .rodata constants, inline copy/zero, ELF symbol binding
 
+// A hosted program's main must return int without GNU's extensions (#3592): clang refuses `void main(void)` in
+// -std=c99, c11, c17 and c23, at file scope or in a block, and only warns in GNU's modes (c_check_input.c's
+// check_input_main). The direct path leaves such a declaration to the full pipeline, freestanding or not.
+static void fast_cc_check_main(FastCCState* cc, uint32_t name_id, FastType type)
+{
+    if (cc->pp->strict_iso && name_id != 0 && name_id == cc->id_main && ftype_is_func(type) &&
+        cc->ctypes[type & BUSTER_FTYPE_CIDX_MASK].inner != (FastType)FTYPE_I32)
+    {
+        fast_cc_bail(cc, "main returns other than int without GNU's extensions");
+    }
+}
+
+// A declaration's declarators name what they declare, and the comma after one is followed by another: `int , x;`,
+// `int x, ;`, `int (*)(void);` and the `, ,` that `__VA_ARGS__ ## __VA_ARGS__` makes of a comma are clang's errors, which
+// the direct path leaves to the full pipeline (#3592). Returns whether the declarator has a name.
+static bool fast_cc_declarator_named(FastCCState* cc, uint32_t name_id)
+{
+    if (name_id == 0)
+    {
+        fast_cc_bail(cc, "declarator without a name");
+    }
+    return name_id != 0;
+}
+
+// The comma between two declarators, and the declarator it promises.
+static void fast_cc_declarator_comma(FastCCState* cc)
+{
+    cc->pos += 1u;
+    if (fast_cc_peek(cc) == FTOK_SEMI)
+    {
+        fast_cc_bail(cc, "comma before the end of a declaration");
+    }
+}
+
 typedef struct FastBodyScan FastBodyScan;
 struct FastBodyScan
 {
     uint32_t end_pos;       // token index of matching '}' (UINT32_MAX if unmatched)
-    bool has_unsupported;   // saw asm, _Atomic, _Complex, __int128, _Float128, _Float16, float80, _Thread_local, typeof
+    bool has_unsupported;   // saw _Atomic, _Complex, __int128, _Float128, _Float16, float80, _Thread_local, typeof
     bool has_switch;
     bool has_goto;
 };
@@ -42,7 +76,6 @@ static FastBodyScan fast_cc_prescan_body(const FastCCState* cc, uint32_t start_p
 
     const __m512i v_lb = _mm512_set1_epi8((char)FTOK_LBRACE);
     const __m512i v_rb = _mm512_set1_epi8((char)FTOK_RBRACE);
-    const __m512i v_asm = _mm512_set1_epi8((char)FTOK_KW_ASM);
     const __m512i v_atm = _mm512_set1_epi8((char)FTOK_KW_ATOMIC);
     const __m512i v_cpx = _mm512_set1_epi8((char)FTOK_KW_COMPLEX);
     const __m512i v_i128 = _mm512_set1_epi8((char)FTOK_KW_INT128);
@@ -70,7 +103,6 @@ static FastBodyScan fast_cc_prescan_body(const FastCCState* cc, uint32_t start_p
         const uint64_t m_lb = (uint64_t)_mm512_mask_cmpeq_epi8_mask(valid, v, v_lb);
         const uint64_t m_rb = (uint64_t)_mm512_mask_cmpeq_epi8_mask(valid, v, v_rb);
         uint64_t m_unsup = (uint64_t)(
-            _mm512_mask_cmpeq_epi8_mask(valid, v, v_asm) |
             _mm512_mask_cmpeq_epi8_mask(valid, v, v_atm) |
             _mm512_mask_cmpeq_epi8_mask(valid, v, v_cpx) |
             _mm512_mask_cmpeq_epi8_mask(valid, v, v_f128) |
@@ -5768,6 +5800,497 @@ static __attribute__((noinline)) void fast_cc_emit_switch_dispatch(FastCCState* 
 }
 
 // Compile one complete function body starting at `cc->pos` == '{'!
+// ---------------------------------------------------------------------------------------------------------------------
+// GNU's inline assembly of musl's two shapes (#3592)
+//
+// `syscall`, as musl's __syscall0 to __syscall6 write it: the number in rax ("a"), the arguments in rdi, rsi and rdx
+// ("D", "S", "d") and in the local register variables r10, r8 and r9 ("r"), the result in rax ("=a"). And
+// `mov %%fs:0,%0`, __get_tp's thread pointer, into a register ("=r"). Each input is evaluated into a slot of its own
+// before any is loaded, so that loading one can't clobber another; then the instruction, then the output's store. A
+// statement keeps no value in a register across it, so rcx and r11, which `syscall` clobbers, and memory need nothing.
+// Any other template, operand, constraint or clobber leaves the direct path.
+
+#define BUSTER_FASM_NONE 0u
+#define BUSTER_FASM_SYSCALL 1u
+#define BUSTER_FASM_THREAD_POINTER 2u
+#define BUSTER_FASM_OPERANDS 8u
+
+// The register a local register variable's asm label names: one a function may clobber, so that loading it saves
+// nothing (rsp, rbp and the callee-saved registers aren't taken). UINT8_MAX for any other name.
+static uint8_t fast_cc_asm_register(const char* name, uint32_t length)
+{
+    static const char names[9][4] = { "rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11" };
+    static const uint8_t registers[9] = { FREG_RAX, FREG_RCX, FREG_RDX, FREG_RSI, FREG_RDI, FREG_R8, FREG_R9, FREG_R10, FREG_R11 };
+    uint8_t result = UINT8_MAX;
+    for (uint32_t i = 0; result == UINT8_MAX && i < 9u; i += 1)
+    {
+        result = strlen(names[i]) == length && memcmp(names[i], name, length) == 0 ? registers[i] : UINT8_MAX;
+    }
+    return result;
+}
+
+// Whether the token at `pos` is a literal spelled as its bytes, and those are `text`.
+static bool fast_cc_asm_literal_is(const FastCCState* cc, uint32_t pos, const char* text)
+{
+    bool result = pos < cc->tcount && cc->tk[pos] == FTOK_STR_LIT && fast_cc_literal_plain(cc, cc->td[pos]);
+    if (result)
+    {
+        const FastLitSlice sl = cc->pp->lit_slices[cc->td[pos]];
+        result = sl.length == strlen(text) && memcmp(cc->pp->lit_bytes + sl.offset, text, sl.length) == 0;
+    }
+    return result;
+}
+
+typedef struct FastAsmOperand FastAsmOperand;
+struct FastAsmOperand
+{
+    int32_t off;   // an input's slot, or the output's local, at [rbp + off]
+    uint8_t reg;
+};
+
+// One operand, "constraint" (expression). The output is a 64-bit integer or pointer local that isn't const ("=a",
+// "=r"). An input is an integer or pointer expression of up to 64 bits ("a", "D", "S", "d"), or a local register
+// variable ("r"), evaluated into a slot of its own. Its register, or UINT8_MAX where the direct path doesn't take the
+// operand.
+static uint8_t fast_cc_asm_operand(FastCCState* cc, bool output, FastAsmOperand* operand)
+{
+    const uint32_t at = cc->pos;
+    const bool named = at + 3u < cc->tcount && cc->tk[at + 1u] == FTOK_LPAREN && cc->tk[at + 2u] == FTOK_IDENT && cc->tk[at + 3u] == FTOK_RPAREN;
+    const uint32_t name = named ? cc->td[at + 2u] : 0u;
+    const uint32_t si = name != 0 && name < cc->env_cap ? cc->sym_cur[name] : 0u;
+    const FastSym* sym = cc->syms + si;
+    const bool local = si != 0 && sym->kind == FSYM_LOCAL && ftype_size(cc, sym->type) == 8u && (ftype_is_int(sym->type) || ftype_is_ptr(sym->type));
+    uint8_t reg = UINT8_MAX;
+    if (output && local && !ftype_is_const(sym->type) && (fast_cc_asm_literal_is(cc, at, "=a") || fast_cc_asm_literal_is(cc, at, "=r")))
+    {
+        reg = FREG_RAX;
+        operand->off = sym->stack_off;
+        cc->pos += 4u;
+    }
+    else if (!output)
+    {
+        if (fast_cc_asm_literal_is(cc, at, "a")) { reg = FREG_RAX; }
+        else if (fast_cc_asm_literal_is(cc, at, "D")) { reg = FREG_RDI; }
+        else if (fast_cc_asm_literal_is(cc, at, "S")) { reg = FREG_RSI; }
+        else if (fast_cc_asm_literal_is(cc, at, "d")) { reg = FREG_RDX; }
+        else if (fast_cc_asm_literal_is(cc, at, "r") && local && sym->asm_name != NULL) { reg = fast_cc_asm_register(sym->asm_name, sym->asm_name_len); }
+        reg = fast_cc_peek_at(cc, 1u) == FTOK_LPAREN ? reg : (uint8_t)UINT8_MAX;
+        if (reg != UINT8_MAX)
+        {
+            cc->pos += 2u;
+            FastVal value = { 0 };
+            fast_cc_expr(cc, false, false, false, false, 0, &value);
+            const bool fits = !cc->bailout && fast_cc_peek(cc) == FTOK_RPAREN && (ftype_is_int(value.type) || ftype_is_ptr(value.type)) &&
+                              ftype_size(cc, value.type) <= 8u;
+            if (fits)
+            {
+                operand->off = fast_cc_alloc_local(cc, 8u, 8u);
+                FastExprCtx ex;
+                fast_expr_ctx_reset(&ex, cc);
+                if (fval_holds_gp(&value)) { ex.gp_used |= (uint16_t)(1u << value.reg); }
+                FastVal slot = { .type = ftype_is_ptr(value.type) ? value.type : (FastType)FTYPE_I64, .kind = FVAL_LOCAL, .off = operand->off };
+                fval_store(&ex, &slot, &value, false, NULL);
+                fast_cc_reset_tmps(cc);
+                cc->pos += 1u;
+            }
+            reg = fits ? reg : (uint8_t)UINT8_MAX;
+        }
+    }
+    operand->reg = reg;
+    return reg;
+}
+
+// musl's atomics (arch/x86_64/atomic_arch.h, #3592's step 6c), each a template of its own with fixed operands, and the
+// empty template of a compiler barrier (a_barrier, explicit_bzero's input, __libc_start_main's "+r"). A memory operand
+// ("=m", "m") is `*p` or `*(T *)p` of a pointer local, whose value is loaded into rdx; the operation's size is what it
+// names, 4 or 8 bytes (incl and decl name 4). A register operand ("a", "r", "0", "=a", "=r") is rax, but cmpxchg's
+// source, which is rcx, and a register output is stored to its local after the instruction. As syscall's, each input is
+// evaluated into a slot of its own before any is loaded. A "+r" output is kept in its local, which the empty template
+// doesn't change.
+#define BUSTER_FASM_CAS 3u        // lock ; cmpxchg %3, %1              "=a"(t), "=m"(*p) : "a"(t), "r"(s)
+#define BUSTER_FASM_SWAP 4u       // xchg %0, %1                        "=r"(v), "=m"(*p) : "0"(v)
+#define BUSTER_FASM_FETCH_ADD 5u  // lock ; xadd %0, %1                 "=r"(v), "=m"(*p) : "0"(v)
+#define BUSTER_FASM_AND 6u        // lock ; and %1, %0                  "=m"(*p) : "r"(v)
+#define BUSTER_FASM_OR 7u         // lock ; or %1, %0                   "=m"(*p) : "r"(v)
+#define BUSTER_FASM_INC 8u        // lock ; incl %0                     "=m"(*p) : "m"(*p)
+#define BUSTER_FASM_DEC 9u        // lock ; decl %0                     "=m"(*p) : "m"(*p)
+#define BUSTER_FASM_STORE 10u     // mov %1, %0 ; lock ; orl $0,(%%rsp)  "=m"(*p) : "r"(x)
+#define BUSTER_FASM_EMPTY 11u     // (no instruction)                   "+r"(x) or "r"(x), or none
+#define BUSTER_FASM_PAUSE 12u     // pause
+#define BUSTER_FASM_HLT 13u       // hlt
+#define BUSTER_FASM_BSF 14u       // bsf %1,%0                          "=r"(x) : "r"(x)
+#define BUSTER_FASM_BSR 15u       // bsr %1,%0 ; xor $63,%0             "=r"(x) : "r"(x)
+
+static uint32_t fast_cc_asm_atomic_shape(const FastCCState* cc, uint32_t pos)
+{
+    static const char* const templates[] = {
+        "lock ; cmpxchg %3, %1",
+        "xchg %0, %1",
+        "lock ; xadd %0, %1",
+        "lock ; and %1, %0",
+        "lock ; or %1, %0",
+        "lock ; incl %0",
+        "lock ; decl %0",
+        "mov %1, %0 ; lock ; orl $0,(%%rsp)",
+        "",
+        "pause",
+        "hlt",
+        "bsf %1,%0",
+        "bsr %1,%0 ; xor $63,%0",
+    };
+    uint32_t shape = BUSTER_FASM_NONE;
+    for (uint32_t i = 0; shape == BUSTER_FASM_NONE && i < (uint32_t)(sizeof(templates) / sizeof(templates[0])); i += 1)
+    {
+        shape = fast_cc_asm_literal_is(cc, pos, templates[i]) ? BUSTER_FASM_CAS + i : BUSTER_FASM_NONE;
+    }
+    return shape;
+}
+
+// One operand of musl's atomics: its constraint as `kind` ('a' for "=a" or "a", 'r' for "=r" or "r", '+' for "+r", '0',
+// 'm' for "=m" or "m"); its slot, which is a memory operand's pointer local's, an output's local's or an input's own; and
+// its size, 4 or 8 bytes. False where the direct path doesn't take it.
+typedef struct FastAsmAtomicOperand FastAsmAtomicOperand;
+struct FastAsmAtomicOperand
+{
+    int32_t off;
+    uint32_t size;
+    uint8_t kind;
+};
+
+static bool fast_cc_asm_atomic_operand(FastCCState* cc, bool output, FastAsmAtomicOperand* operand)
+{
+    const uint32_t at = cc->pos;
+    uint8_t kind = 0;
+    if (output)
+    {
+        kind = fast_cc_asm_literal_is(cc, at, "=a") ? 'a' : fast_cc_asm_literal_is(cc, at, "=r") ? 'r' : fast_cc_asm_literal_is(cc, at, "+r") ? '+' : 0u;
+        kind = kind == 0 && fast_cc_asm_literal_is(cc, at, "=m") ? 'm' : kind;
+    }
+    else
+    {
+        kind = fast_cc_asm_literal_is(cc, at, "a") ? 'a' : fast_cc_asm_literal_is(cc, at, "r") ? 'r' : fast_cc_asm_literal_is(cc, at, "0") ? '0' : 0u;
+        kind = kind == 0 && fast_cc_asm_literal_is(cc, at, "m") ? 'm' : kind;
+    }
+    bool ok = kind != 0 && fast_cc_peek_at(cc, 1u) == FTOK_LPAREN;
+    cc->pos += ok ? 2u : 0u;
+    uint32_t size = 0;
+    if (ok && kind == 'm')
+    {
+        // `*p` or `*(T *)p`, p a pointer local: its slot holds the address.
+        ok = fast_cc_peek(cc) == FTOK_STAR;
+        cc->pos += ok ? 1u : 0u;
+        FastType pointer = 0;
+        if (ok && fast_cc_peek(cc) == FTOK_LPAREN && fast_cc_is_type_start(cc, cc->pos + 1u))
+        {
+            cc->pos += 1u;
+            bool parsed = false;
+            pointer = fast_cc_parse_typename(cc, &parsed);
+            ok = parsed && !cc->bailout && fast_cc_peek(cc) == FTOK_RPAREN && ftype_is_ptr(pointer);
+            cc->pos += ok ? 1u : 0u;
+        }
+        const uint32_t name = ok && fast_cc_peek(cc) == FTOK_IDENT ? cc->td[cc->pos] : 0u;
+        const uint32_t si = name != 0 && name < cc->env_cap ? cc->sym_cur[name] : 0u;
+        const FastSym* sym = cc->syms + si;
+        ok = si != 0 && sym->kind == FSYM_LOCAL && ftype_is_ptr(sym->type) && fast_cc_peek_at(cc, 1u) == FTOK_RPAREN;
+        size = ok ? ftype_size(cc, ftype_deref(cc, pointer != 0 ? pointer : sym->type)) : 0u;
+        operand->off = ok ? sym->stack_off : 0;
+        cc->pos += ok ? 2u : 0u;
+    }
+    else if (ok && output)
+    {
+        // A local integer or pointer, stored after the instruction ("=a", "=r") or left in place ("+r").
+        const uint32_t name = fast_cc_peek(cc) == FTOK_IDENT ? cc->td[cc->pos] : 0u;
+        const uint32_t si = name != 0 && name < cc->env_cap ? cc->sym_cur[name] : 0u;
+        const FastSym* sym = cc->syms + si;
+        ok = si != 0 && sym->kind == FSYM_LOCAL && (ftype_is_int(sym->type) || ftype_is_ptr(sym->type)) && !ftype_is_const(sym->type) &&
+             fast_cc_peek_at(cc, 1u) == FTOK_RPAREN;
+        size = ok ? ftype_size(cc, sym->type) : 0u;
+        operand->off = ok ? sym->stack_off : 0;
+        cc->pos += ok ? 2u : 0u;
+    }
+    else if (ok)
+    {
+        // An input's value, into a slot of its own.
+        FastVal value = { 0 };
+        fast_cc_expr(cc, false, false, false, false, 0, &value);
+        ok = !cc->bailout && fast_cc_peek(cc) == FTOK_RPAREN && (ftype_is_int(value.type) || ftype_is_ptr(value.type));
+        size = ok ? ftype_size(cc, value.type) : 0u;
+        if (ok)
+        {
+            operand->off = fast_cc_alloc_local(cc, 8u, 8u);
+            FastExprCtx ex;
+            fast_expr_ctx_reset(&ex, cc);
+            if (fval_holds_gp(&value)) { ex.gp_used |= (uint16_t)(1u << value.reg); }
+            FastVal slot = { .type = ftype_is_ptr(value.type) ? value.type : (FastType)FTYPE_I64, .kind = FVAL_LOCAL, .off = operand->off };
+            fval_store(&ex, &slot, &value, false, NULL);
+            fast_cc_reset_tmps(cc);
+            cc->pos += 1u;
+        }
+    }
+    ok = ok && (size == 4u || size == 8u);
+    operand->size = size;
+    operand->kind = ok ? kind : 0u;
+    return ok;
+}
+
+// The asm statement of musl's atomic `shape`, its template at the token at cc->pos; or leaves the direct path.
+static void fast_cc_asm_atomic(FastCCState* cc, uint32_t shape)
+{
+    FastObj* obj = cc->obj;
+    cc->pos += 1u;
+    FastAsmAtomicOperand outputs[2] = { { 0 } };
+    FastAsmAtomicOperand inputs[2] = { { 0 } };
+    uint32_t outs = 0;
+    uint32_t ins = 0;
+    bool memory = false;
+    bool ok = true;
+    // Outputs, inputs and clobbers ("memory" alone), any of them left out at the end.
+    for (uint32_t section = 0; ok && section < 3u && fast_cc_peek(cc) == FTOK_COLON; section += 1)
+    {
+        cc->pos += 1u;
+        bool more = fast_cc_peek(cc) == FTOK_STR_LIT;
+        while (ok && more)
+        {
+            if (section == 0u)
+            {
+                ok = outs < 2u && fast_cc_asm_atomic_operand(cc, true, outputs + outs);
+                outs += ok ? 1u : 0u;
+            }
+            else if (section == 1u)
+            {
+                ok = ins < 2u && fast_cc_asm_atomic_operand(cc, false, inputs + ins);
+                ins += ok ? 1u : 0u;
+            }
+            else
+            {
+                ok = fast_cc_asm_literal_is(cc, cc->pos, "memory");
+                memory |= ok;
+                cc->pos += ok ? 1u : 0u;
+            }
+            more = ok && fast_cc_peek(cc) == FTOK_COMMA;
+            cc->pos += more ? 1u : 0u;
+        }
+    }
+    const FastAsmAtomicOperand out = outputs[0];
+    const FastAsmAtomicOperand in = inputs[0];
+    // The memory operand: an exchange's second output, an update's only one.
+    const bool exchange = shape == BUSTER_FASM_CAS || shape == BUSTER_FASM_SWAP || shape == BUSTER_FASM_FETCH_ADD;
+    const bool update = shape == BUSTER_FASM_AND || shape == BUSTER_FASM_OR || shape == BUSTER_FASM_STORE || shape == BUSTER_FASM_INC || shape == BUSTER_FASM_DEC;
+    const FastAsmAtomicOperand place = exchange ? outputs[1] : out;
+    const uint32_t size = place.size;
+    switch (shape)
+    {
+        case BUSTER_FASM_CAS:
+            ok = ok && memory && outs == 2u && out.kind == 'a' && place.kind == 'm' && ins == 2u && in.kind == 'a' && inputs[1].kind == 'r' &&
+                 out.size == size && in.size == size && inputs[1].size == size;
+            break;
+        case BUSTER_FASM_SWAP:
+        case BUSTER_FASM_FETCH_ADD:
+            ok = ok && memory && outs == 2u && out.kind == 'r' && place.kind == 'm' && ins == 1u && in.kind == '0' && out.size == size && in.size == size;
+            break;
+        case BUSTER_FASM_AND:
+        case BUSTER_FASM_OR:
+        case BUSTER_FASM_STORE:
+            ok = ok && memory && outs == 1u && out.kind == 'm' && ins == 1u && in.kind == 'r' && in.size == size;
+            break;
+        case BUSTER_FASM_INC:
+        case BUSTER_FASM_DEC:
+            ok = ok && memory && outs == 1u && out.kind == 'm' && ins == 1u && in.kind == 'm' && in.off == out.off;
+            break;
+        case BUSTER_FASM_EMPTY:
+            ok = ok && (outs == 0u || (outs == 1u && out.kind == '+')) && (ins == 0u || (ins == 1u && in.kind == 'r'));
+            break;
+        case BUSTER_FASM_PAUSE:
+        case BUSTER_FASM_HLT:
+            ok = ok && outs == 0u && ins == 0u;
+            break;
+        default: // bsf, bsr
+            ok = ok && !memory && outs == 1u && out.kind == 'r' && ins == 1u && in.kind == 'r' && in.size == out.size;
+            break;
+    }
+    ok = ok && fast_cc_peek(cc) == FTOK_RPAREN && fast_cc_peek_at(cc, 1u) == FTOK_SEMI;
+    if (!ok)
+    {
+        fast_cc_bail(cc, "asm statement");
+    }
+    else
+    {
+        // REX.W for a 64-bit operation (bsf's and bsr's size is their output's, which `place` is).
+        const uint8_t wide = size == 8u ? 0x48u : 0u;
+        if (exchange || update)
+        {
+            x86_load(obj, FREG_RDX, FREG_RBP, place.off, 8u, false);
+        }
+        if (ins != 0u && in.kind != 'm' && shape != BUSTER_FASM_EMPTY)
+        {
+            x86_load(obj, FREG_RAX, FREG_RBP, in.off, 8u, false);
+        }
+        if (shape == BUSTER_FASM_CAS)
+        {
+            x86_load(obj, FREG_RCX, FREG_RBP, inputs[1].off, 8u, false);
+        }
+        // The instruction, its memory operand [rdx], its register eax or rax (ecx or rcx for cmpxchg's source).
+        static const uint8_t lock = 0xf0u;
+        switch (shape)
+        {
+            case BUSTER_FASM_CAS:
+            case BUSTER_FASM_FETCH_ADD:
+                x86_u8(obj, lock);
+                if (wide != 0u) { x86_u8(obj, wide); }
+                x86_u8(obj, 0x0fu);
+                x86_u8(obj, shape == BUSTER_FASM_CAS ? 0xb1u : 0xc1u);
+                x86_u8(obj, shape == BUSTER_FASM_CAS ? 0x0au : 0x02u);
+                break;
+            case BUSTER_FASM_SWAP:
+                if (wide != 0u) { x86_u8(obj, wide); }
+                x86_u8(obj, 0x87u);
+                x86_u8(obj, 0x02u);
+                break;
+            case BUSTER_FASM_AND:
+            case BUSTER_FASM_OR:
+                x86_u8(obj, lock);
+                if (wide != 0u) { x86_u8(obj, wide); }
+                x86_u8(obj, shape == BUSTER_FASM_AND ? 0x21u : 0x09u);
+                x86_u8(obj, 0x02u);
+                break;
+            case BUSTER_FASM_INC:
+            case BUSTER_FASM_DEC:
+                x86_u8(obj, lock);
+                x86_u8(obj, 0xffu);
+                x86_u8(obj, shape == BUSTER_FASM_INC ? 0x02u : 0x0au);
+                break;
+            case BUSTER_FASM_STORE:
+                // mov [rdx], eax; lock or dword [rsp], 0
+                if (wide != 0u) { x86_u8(obj, wide); }
+                x86_u8(obj, 0x89u);
+                x86_u8(obj, 0x02u);
+                x86_u8(obj, lock);
+                x86_u8(obj, 0x83u);
+                x86_u8(obj, 0x0cu);
+                x86_u8(obj, 0x24u);
+                x86_u8(obj, 0x00u);
+                break;
+            case BUSTER_FASM_PAUSE:
+                x86_u8(obj, 0xf3u);
+                x86_u8(obj, 0x90u);
+                break;
+            case BUSTER_FASM_HLT:
+                x86_u8(obj, 0xf4u);
+                break;
+            case BUSTER_FASM_BSF:
+            case BUSTER_FASM_BSR:
+                // bsf/bsr rax, rax; bsr's xor rax, 63
+                if (wide != 0u) { x86_u8(obj, wide); }
+                x86_u8(obj, 0x0fu);
+                x86_u8(obj, shape == BUSTER_FASM_BSF ? 0xbcu : 0xbdu);
+                x86_u8(obj, 0xc0u);
+                if (shape == BUSTER_FASM_BSR)
+                {
+                    if (wide != 0u) { x86_u8(obj, wide); }
+                    x86_u8(obj, 0x83u);
+                    x86_u8(obj, 0xf0u);
+                    x86_u8(obj, 0x3fu);
+                }
+                break;
+            default:
+                break;
+        }
+        // The register output: cmpxchg's rax, xchg's and xadd's register, bsf's and bsr's.
+        if (outs != 0u && (out.kind == 'a' || out.kind == 'r'))
+        {
+            x86_store(obj, FREG_RBP, out.off, FREG_RAX, out.size);
+        }
+        cc->pos += 2u;
+    }
+}
+
+static void fast_cc_asm_statement(FastCCState* cc)
+{
+    FastObj* obj = cc->obj;
+    cc->pos += 1u;
+    cc->pos += fast_cc_peek(cc) == FTOK_KW_VOLATILE ? 1u : 0u;
+    const uint32_t atomic = fast_cc_peek(cc) == FTOK_LPAREN ? fast_cc_asm_atomic_shape(cc, cc->pos + 1u) : BUSTER_FASM_NONE;
+    if (atomic != BUSTER_FASM_NONE)
+    {
+        cc->pos += 1u;
+        fast_cc_asm_atomic(cc, atomic);
+        return;
+    }
+    uint32_t shape = BUSTER_FASM_NONE;
+    if (fast_cc_peek(cc) == FTOK_LPAREN && fast_cc_asm_literal_is(cc, cc->pos + 1u, "syscall")) { shape = BUSTER_FASM_SYSCALL; }
+    else if (fast_cc_peek(cc) == FTOK_LPAREN && fast_cc_asm_literal_is(cc, cc->pos + 1u, "mov %%fs:0,%0")) { shape = BUSTER_FASM_THREAD_POINTER; }
+    bool ok = shape != BUSTER_FASM_NONE && fast_cc_peek_at(cc, 2u) == FTOK_COLON;
+    cc->pos += ok ? 3u : 0u;
+    // The one output: syscall's result is rax's.
+    FastAsmOperand operands[BUSTER_FASM_OPERANDS];
+    ok = ok && (shape != BUSTER_FASM_SYSCALL || fast_cc_asm_literal_is(cc, cc->pos, "=a")) && fast_cc_asm_operand(cc, true, operands) != UINT8_MAX;
+    uint32_t count = 1u;
+    uint32_t taken = 0;
+    if (ok && fast_cc_peek(cc) == FTOK_COLON)
+    {
+        cc->pos += 1u;
+        bool more = fast_cc_peek(cc) == FTOK_STR_LIT;
+        while (ok && more)
+        {
+            ok = count < BUSTER_FASM_OPERANDS && fast_cc_asm_operand(cc, false, operands + count) != UINT8_MAX &&
+                 (taken & (1u << operands[count].reg)) == 0;
+            taken |= ok ? 1u << operands[count].reg : 0u;
+            count += ok ? 1u : 0u;
+            more = ok && fast_cc_peek(cc) == FTOK_COMMA;
+            cc->pos += more ? 1u : 0u;
+        }
+    }
+    // A clobbered register can't hold an input: clang refuses that.
+    uint32_t clobbered = 0;
+    if (ok && fast_cc_peek(cc) == FTOK_COLON)
+    {
+        cc->pos += 1u;
+        bool more = fast_cc_peek(cc) == FTOK_STR_LIT;
+        while (ok && more)
+        {
+            const uint32_t at = cc->pos;
+            const bool rcx = fast_cc_asm_literal_is(cc, at, "rcx");
+            const bool r11 = fast_cc_asm_literal_is(cc, at, "r11");
+            ok = rcx || r11 || fast_cc_asm_literal_is(cc, at, "memory") || fast_cc_asm_literal_is(cc, at, "cc");
+            clobbered |= (rcx ? 1u << FREG_RCX : 0u) | (r11 ? 1u << FREG_R11 : 0u);
+            cc->pos += 1u;
+            more = ok && fast_cc_peek(cc) == FTOK_COMMA;
+            cc->pos += more ? 1u : 0u;
+        }
+    }
+    // syscall's number is in rax; the thread pointer takes no input.
+    ok = ok && fast_cc_peek(cc) == FTOK_RPAREN && fast_cc_peek_at(cc, 1u) == FTOK_SEMI && (taken & clobbered) == 0 &&
+         (shape == BUSTER_FASM_SYSCALL ? (taken & (1u << FREG_RAX)) != 0 : count == 1u);
+    if (!ok)
+    {
+        fast_cc_bail(cc, "asm statement");
+    }
+    else
+    {
+        for (uint32_t i = 1u; i < count; i += 1)
+        {
+            x86_load(obj, operands[i].reg, FREG_RBP, operands[i].off, 8u, false);
+        }
+        if (shape == BUSTER_FASM_SYSCALL)
+        {
+            x86_u8(obj, 0x0fu);
+            x86_u8(obj, 0x05u);
+        }
+        else
+        {
+            // mov rax, qword fs:[0]
+            x86_u8(obj, 0x64u);
+            x86_u8(obj, 0x48u);
+            x86_u8(obj, 0x8bu);
+            x86_u8(obj, 0x04u);
+            x86_u8(obj, 0x25u);
+            x86_u32(obj, 0u);
+        }
+        x86_store(obj, FREG_RBP, operands[0].off, FREG_RAX, 8u);
+        cc->pos += 2u;
+    }
+}
+
 static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym_idx, uint32_t param_names_start, uint16_t param_count)
 {
     FastObj* obj = cc->obj;
@@ -6248,10 +6771,16 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
             {
                 FastDeclSpecs ds = { 0 };
                 const FastType btype = fast_cc_parse_decl_specs(cc, &ds);
+                // A for's declaration is of automatic objects; clang takes static, extern and typedef there too (#3599).
+                if ((ds.written & ~(BUSTER_FSPEC_REGISTER | BUSTER_FSPEC_AUTO)) != 0)
+                {
+                    fast_cc_bail(cc, "a for's declaration of a non-local");
+                }
                 while (cc->pos < cc->tcount && fast_cc_peek(cc) != FTOK_SEMI && !cc->bailout)
                 {
                     FastDeclaratorResult dr = { 0 };
                     if (!fast_cc_parse_declarator(cc, btype, false, &dr, false)) { break; }
+                    if (dr.attr.asm_label != NULL) { fast_cc_bail(cc, "asm label in a for's declaration"); break; }
                     const uint32_t lsi = dr.name_id != 0 ? fast_cc_sym_bind(cc, dr.name_id, (FastSym){ .kind = FSYM_LOCAL, .type = dr.type }) : 0u;
                     int32_t loff = 0;
                     if (fast_cc_peek(cc) == FTOK_ASSIGN)
@@ -6471,11 +7000,25 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
             {
                 const uint32_t decl_start = cc->pos;
                 FastDeclaratorResult dr = { 0 };
-                if (!fast_cc_parse_declarator(cc, btype, false, &dr, false)) { break; }
+                if (!fast_cc_parse_declarator(cc, btype, false, &dr, false) || !fast_cc_declarator_named(cc, dr.name_id)) { break; }
                 const uint32_t extra_al = ds.attr.aligned > dr.attr.aligned ? ds.attr.aligned : dr.attr.aligned;
+                if ((ds.written & (BUSTER_FSPEC_INLINE | BUSTER_FSPEC_NORETURN)) != 0 && (ds.is_typedef != 0 || !ftype_is_func(dr.type)))
+                {
+                    fast_cc_bail(cc, "inline or _Noreturn on an object");
+                    break;
+                }
                 if (ds.is_typedef && (ds.attr.visibility_set || dr.attr.visibility_set))
                 {
                     fast_cc_bail(cc, "visibility attribute on a typedef");
+                    break;
+                }
+                // A block's asm label names a local register variable (`register long r10 __asm__("r10")`, #3592): a
+                // `register` automatic 64-bit integer, in a register a function may clobber. Any other leaves.
+                if (dr.attr.asm_label != NULL &&
+                    ((ds.written & BUSTER_FSPEC_REGISTER) == 0 || ftype_size(cc, dr.type) != 8u ||
+                     !(ftype_is_int(dr.type) || ftype_is_ptr(dr.type)) || fast_cc_asm_register(dr.attr.asm_label, dr.attr.asm_label_len) == UINT8_MAX))
+                {
+                    fast_cc_bail(cc, "asm label on a block's declaration");
                     break;
                 }
                 if (ds.is_typedef)
@@ -6491,7 +7034,11 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                     // declaration it sees, with that one's linkage and attributes (C11 6.2.2p4), so it binds no symbol
                     // of its own (#3595). One that sees none (the file declares it later or never: symbol 0, of no
                     // kind), or that a local of the name hides, or that brings attributes of its own, is left to the
-                    // full pipeline. (An asm label never gets here: a body's statements leave at its __asm__.)
+                    // full pipeline. (Its asm label left above.)
+                    if (ftype_is_func(dr.type))
+                    {
+                        fast_cc_check_main(cc, dr.name_id, dr.type);
+                    }
                     const uint32_t seen = dr.name_id < cc->env_cap ? cc->sym_cur[dr.name_id] : 0u;
                     const uint8_t kind = ftype_is_func(dr.type) ? (uint8_t)FSYM_FUNC : (uint8_t)FSYM_GLOBAL;
                     if (dr.name_id == 0 || cc->syms[seen].kind != kind || (kind == FSYM_GLOBAL && cc->syms[seen].storage == 1u) ||
@@ -6543,9 +7090,12 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                 }
                 else
                 {
-                    // Automatic local variable on stack (bind BEFORE initializer so `T *p = malloc(sizeof(*p))` works!)
+                    // Automatic local variable on stack (bind BEFORE initializer so `T *p = malloc(sizeof(*p))` works!).
+                    // A local register variable keeps its register's name for the asm statements that read it.
                     if (ds.is_unsupported_type || ftype_is_unsupported(dr.type)) { fast_cc_bail(cc, "unsupported local var type"); break; }
-                    const uint32_t lsi = dr.name_id != 0 ? fast_cc_sym_bind(cc, dr.name_id, (FastSym){ .kind = FSYM_LOCAL, .type = dr.type }) : 0u;
+                    const uint32_t lsi = dr.name_id != 0 ? fast_cc_sym_bind(cc, dr.name_id, (FastSym){
+                        .kind = FSYM_LOCAL, .type = dr.type, .asm_name = dr.attr.asm_label, .asm_name_len = dr.attr.asm_label_len,
+                    }) : 0u;
                     int32_t loff = 0;
                     if (fast_cc_peek(cc) == FTOK_ASSIGN)
                     {
@@ -6564,11 +7114,19 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                         cc->syms[lsi].stack_off = loff;
                     }
                 }
-                if (fast_cc_peek(cc) == FTOK_COMMA) { cc->pos += 1u; }
+                if (fast_cc_peek(cc) == FTOK_COMMA) { fast_cc_declarator_comma(cc); }
                 else if (cc->pos == decl_start && !cc->bailout) { fast_cc_bail(cc, "local decl stalled"); break; }
             }
             if (fast_cc_peek(cc) == FTOK_SEMI) { cc->pos += 1u; }
             else { fast_cc_bail(cc, "expected ; after local decl"); break; }
+            continue;
+        }
+
+        // 11b. An asm statement of the shapes fast_cc_asm_statement takes (#3592)
+        if (k == FTOK_KW_ASM)
+        {
+            fast_cc_asm_statement(cc);
+            if (cc->bailout) { break; }
             continue;
         }
 
@@ -6684,9 +7242,10 @@ static FastDeclJoin fast_cc_decl_join(const FastDeclSpecs* ds, const FastDeclara
 // A later file-scope declaration of a symbol joins its weak, visibility, asm label and inline spelling, as the full
 // pipeline's does (#3595). Two explicit visibilities or two labels that differ are clang's error; a change to a symbol
 // already in the object (used or defined before this declaration) is left to the full pipeline, whose rule differs by
-// attribute (a function's first linkage stays, its visibility doesn't); and so is a gnu_inline after a pending inline
-// definition, whose rule it would change.
-static void fast_cc_join_declaration(FastCCState* cc, uint32_t si, const FastDeclJoin* join)
+// attribute (a function's first linkage stays, its visibility doesn't), unless the declaration is an alias, which the
+// unit's end defines with its final binding and visibility (fast_cc_alias_define); and so is a gnu_inline after a
+// pending inline definition, whose rule it would change.
+static void fast_cc_join_declaration(FastCCState* cc, uint32_t si, const FastDeclJoin* join, bool alias)
 {
     FastSym* sym = cc->syms + si;
     const bool relabels = join->label != NULL && (sym->asm_name == NULL || sym->asm_name_len != join->label_len ||
@@ -6697,7 +7256,7 @@ static void fast_cc_join_declaration(FastCCState* cc, uint32_t si, const FastDec
     {
         fast_cc_bail(cc, "a declaration's visibility or label against an earlier one");
     }
-    else if (changes && sym->obj_sym != 0)
+    else if (changes && sym->obj_sym != 0 && !alias)
     {
         fast_cc_bail(cc, "an attribute after the symbol's first use");
     }
@@ -6734,6 +7293,90 @@ static void fast_cc_decide_inline_definitions(FastCCState* cc, uint32_t deferred
     }
 }
 
+// GNU's alias attribute (#3592): a file-scope declaration of a function or object with alias("target"), not a definition
+// and not static, is defined at the end of the unit at its target's place. Recorded where it is declared.
+static void fast_cc_alias_add(FastCCState* cc, uint32_t sym_idx, const FastAttrInfo* attr)
+{
+    if (cc->alias_count < BUSTER_FALIAS_LIMIT)
+    {
+        cc->aliases[cc->alias_count] = (FastAlias){ .sym_idx = sym_idx, .target = attr->alias_name, .target_len = attr->alias_len };
+        cc->alias_count += 1u;
+        cc->syms[sym_idx].is_alias = 1u;
+    }
+    else
+    {
+        fast_cc_bail(cc, "too many aliases");
+    }
+}
+
+// Before the reachable bodies are compiled: every alias attribute the parser saw was recorded by a file-scope declaration
+// of a function or object without an initializer (one anywhere else, on a definition, a typedef, an initialized object, in
+// a block, a member or a parameter, is not, and leaves here), and each
+// target is a function or object of its alias's kind, named without an asm label, not an alias itself, and declared by
+// now; the alias references it, so that a static inline target is compiled. clang refuses the rest, or the direct path
+// doesn't take them (a chain of aliases, a target whose ELF name its asm label gives).
+static void fast_cc_alias_targets(FastCCState* cc)
+{
+    if (cc->alias_count != cc->alias_attributes)
+    {
+        fast_cc_bail(cc, "alias attribute outside a file-scope declaration");
+    }
+    for (uint32_t i = 0; i < cc->alias_count && !cc->bailout; i += 1)
+    {
+        FastAlias* alias = cc->aliases + i;
+        const uint32_t id = fast_ident_intern(&cc->pp->idents, (const uint8_t*)alias->target, alias->target_len);
+        const uint32_t target = id != 0 && id < cc->env_cap ? cc->sym_cur[id] : 0u;
+        const uint8_t kind = cc->syms[alias->sym_idx].kind;
+        bool ok = target != 0 && target != alias->sym_idx && cc->syms[target].kind == kind && (kind == FSYM_FUNC || kind == FSYM_GLOBAL) &&
+                  cc->syms[target].asm_name == NULL;
+        for (uint32_t j = 0; ok && j < cc->alias_count; j += 1)
+        {
+            ok = cc->aliases[j].sym_idx != target;
+        }
+        if (ok)
+        {
+            alias->target_idx = target;
+            fast_cc_reference(cc, cc->syms + target);
+        }
+        else
+        {
+            fast_cc_bail(cc, "alias's target");
+        }
+    }
+}
+
+// After the tentative definitions: each alias is defined where its target is, the target's section, value and size,
+// with its own binding (weak with __weak__) and visibility. A target this unit doesn't define is clang's error.
+static void fast_cc_alias_define(FastCCState* cc)
+{
+    for (uint32_t i = 0; i < cc->alias_count && !cc->bailout; i += 1)
+    {
+        const FastAlias* alias = cc->aliases + i;
+        FastSym* target = cc->syms + alias->target_idx;
+        FastSym* sym = cc->syms + alias->sym_idx;
+        const uint32_t target_obj = target->defined != 0 ? fast_cc_ensure_obj_sym(cc, alias->target_idx) : 0u;
+        const uint32_t sym_obj = target_obj != 0 ? fast_cc_ensure_obj_sym(cc, alias->sym_idx) : 0u;
+        if (sym_obj != 0)
+        {
+            const FastObjSym place = cc->obj->syms[target_obj];
+            FastObjSym* out = cc->obj->syms + sym_obj;
+            out->section = place.section;
+            out->value = place.value;
+            out->size = place.size;
+            out->defined = 1u;
+            out->binding = sym->is_weak ? STB_WEAK : STB_GLOBAL;
+            out->visibility = sym->visibility;
+            sym->defined = 1u;
+            sym->section = target->section;
+            sym->sec_off = target->sec_off;
+        }
+        else
+        {
+            fast_cc_bail(cc, "alias of a target the unit doesn't define");
+        }
+    }
+}
+
 static bool fast_cc_compile_unit(FastCCState* cc)
 {
     FastObj* obj = cc->obj;
@@ -6764,6 +7407,7 @@ static bool fast_cc_compile_unit(FastCCState* cc)
 
         FastDeclSpecs ds = { 0 };
         const FastType btype = fast_cc_parse_decl_specs(cc, &ds);
+        if ((ds.written & (BUSTER_FSPEC_REGISTER | BUSTER_FSPEC_AUTO)) != 0) { fast_cc_bail(cc, "register or auto at file scope"); }
         if (cc->bailout) { break; }
         if (fast_cc_peek(cc) == FTOK_SEMI) { cc->pos += 1u; continue; }
 
@@ -6771,11 +7415,26 @@ static bool fast_cc_compile_unit(FastCCState* cc)
         while (cc->pos < cc->tcount && fast_cc_peek(cc) != FTOK_SEMI && !cc->bailout)
         {
             FastDeclaratorResult dr = { 0 };
-            if (!fast_cc_parse_declarator(cc, btype, false, &dr, first)) { break; }
+            if (!fast_cc_parse_declarator(cc, btype, false, &dr, first) || !fast_cc_declarator_named(cc, dr.name_id)) { break; }
+            if ((ds.written & (BUSTER_FSPEC_INLINE | BUSTER_FSPEC_NORETURN)) != 0 && (ds.is_typedef != 0 || !ftype_is_func(dr.type)))
+            {
+                fast_cc_bail(cc, "inline or _Noreturn on an object");
+                break;
+            }
             const uint32_t extra_al = ds.attr.aligned > dr.attr.aligned ? ds.attr.aligned : dr.attr.aligned;
             const bool body = first && ftype_is_func(dr.type) && fast_cc_peek(cc) == FTOK_LBRACE;
             const FastDeclJoin join = fast_cc_decl_join(&ds, &dr, ftype_is_func(dr.type), body);
+            const FastAttrInfo* alias = dr.attr.alias_name != NULL ? &dr.attr : ds.attr.alias_name != NULL ? &ds.attr : NULL;
 
+            if (!ds.is_typedef)
+            {
+                fast_cc_check_main(cc, dr.name_id, dr.type);
+            }
+            if (alias != NULL && (ds.is_static || ds.is_inline || join.label != NULL))
+            {
+                fast_cc_bail(cc, "alias attribute on a static, inline or labelled declaration");
+                break;
+            }
             // Function definition!
             if (body)
             {
@@ -6788,7 +7447,7 @@ static bool fast_cc_compile_unit(FastCCState* cc)
                     // A pending inline definition allows a later one only as GNU's idiom: its extern inline one,
                     // then the external definition, not inline (#3595).
                     const uint8_t pending = cc->syms[si].inline_rules & BUSTER_FINLINE_PENDING;
-                    if (cc->syms[si].defined != 0 || (pending != 0 && (pending != BUSTER_FINLINE_GNU_PENDING || ds.is_inline)))
+                    if (cc->syms[si].defined != 0 || cc->syms[si].is_alias != 0 || (pending != 0 && (pending != BUSTER_FINLINE_GNU_PENDING || ds.is_inline)))
                     {
                         fast_cc_bail(cc, "redefinition of function");
                         break;
@@ -6796,7 +7455,7 @@ static bool fast_cc_compile_unit(FastCCState* cc)
                     cc->syms[si].type = dr.type;
                     if (stor == 1u || stor == 4u) { cc->syms[si].storage = stor; }
                     if (ds.is_unsupported_type) { cc->syms[si].is_unsupported = 1u; }
-                    fast_cc_join_declaration(cc, si, &join);
+                    fast_cc_join_declaration(cc, si, &join, false);
                     if (cc->bailout) { break; }
                 }
                 else
@@ -6875,17 +7534,37 @@ static bool fast_cc_compile_unit(FastCCState* cc)
                         {
                             cc->syms[existing].type = dr.type;
                         }
-                        fast_cc_join_declaration(cc, existing, &join);
+                        // An alias of a function a header declared: not of one defined, static or with an inline
+                        // definition pending, which are clang's errors. An alias is a definition, so another alias, and
+                        // an attribute on a later declaration (the full pipeline's warning), leave too: any declaration
+                        // after an alias does.
+                        const FastSym* declared = cc->syms + existing;
+                        if (declared->is_alias != 0 ||
+                            (alias != NULL && (declared->defined != 0 || declared->storage == 1u || declared->storage == 4u ||
+                                               (declared->inline_rules & BUSTER_FINLINE_PENDING) != 0)))
+                        {
+                            fast_cc_bail(cc, "a declaration of an alias, or an alias of a defined or static function");
+                            break;
+                        }
+                        fast_cc_join_declaration(cc, existing, &join, alias != NULL);
+                        if (alias != NULL)
+                        {
+                            fast_cc_alias_add(cc, existing, alias);
+                        }
                     }
                     else
                     {
                         const uint8_t stor = ds.is_static ? 1u : 2u;
-                        fast_cc_sym_bind(cc, dr.name_id, (FastSym){
+                        const uint32_t si = fast_cc_sym_bind(cc, dr.name_id, (FastSym){
                             .kind = FSYM_FUNC, .storage = stor, .is_weak = join.weak, .visibility = join.visibility,
                             .visibility_set = join.visibility_set, .inline_rules = join.inline_rules,
                             .is_unsupported = ds.is_unsupported_type, .type = dr.type,
                             .asm_name = dr.attr.asm_label, .asm_name_len = dr.attr.asm_label_len,
                         });
+                        if (alias != NULL && si != 0)
+                        {
+                            fast_cc_alias_add(cc, si, alias);
+                        }
                     }
                 }
             }
@@ -6893,6 +7572,14 @@ static bool fast_cc_compile_unit(FastCCState* cc)
             else if (dr.name_id != 0)
             {
                 const bool has_init = fast_cc_peek(cc) == FTOK_ASSIGN;
+                const uint32_t declared = dr.name_id < cc->env_cap ? cc->sym_cur[dr.name_id] : 0u;
+                if ((declared != 0 && cc->syms[declared].kind == FSYM_GLOBAL && cc->syms[declared].is_alias != 0) ||
+                    (alias != NULL && declared != 0 && cc->syms[declared].kind == FSYM_GLOBAL &&
+                     (cc->syms[declared].defined != 0 || cc->syms[declared].is_tentative != 0 || cc->syms[declared].storage == 1u)))
+                {
+                    fast_cc_bail(cc, "a declaration of an alias, or an alias of a defined, tentative or static object");
+                    break;
+                }
                 const uint8_t stor = ds.is_static ? 1u : ds.is_extern ? 2u : 0u;
                 uint32_t si = dr.name_id < cc->env_cap ? cc->sym_cur[dr.name_id] : 0u;
                 if (si != 0 && cc->syms[si].kind == FSYM_GLOBAL)
@@ -6904,7 +7591,7 @@ static bool fast_cc_compile_unit(FastCCState* cc)
                         cc->syms[si].type = dr.type;
                     }
                     if (stor == 1u) { cc->syms[si].storage = 1u; }
-                    fast_cc_join_declaration(cc, si, &join);
+                    fast_cc_join_declaration(cc, si, &join, alias != NULL);
                     if (cc->bailout) { break; }
                 }
                 else
@@ -6944,19 +7631,24 @@ static bool fast_cc_compile_unit(FastCCState* cc)
                         obj->syms[osym].defined = 1u;
                     }
                 }
+                else if (alias != NULL)
+                {
+                    fast_cc_alias_add(cc, si, alias);
+                }
                 else if (!ds.is_extern)
                 {
                     cc->syms[si].is_tentative = 1u;
                 }
             }
 
-            if (fast_cc_peek(cc) == FTOK_COMMA) { cc->pos += 1u; }
+            if (fast_cc_peek(cc) == FTOK_COMMA) { fast_cc_declarator_comma(cc); }
             else { break; }
         }
         if (fast_cc_peek(cc) == FTOK_SEMI) { cc->pos += 1u; }
         if (cc->pos == tu_loop_pos && !cc->bailout) { fast_cc_bail(cc, "top-level decl stalled"); break; }
     }
 
+    fast_cc_alias_targets(cc);
     fast_cc_decide_inline_definitions(cc, deferred_count);
 
     // Visit newly reachable bodies in the same order as a forward scan: a reference to an earlier
@@ -7010,6 +7702,8 @@ static bool fast_cc_compile_unit(FastCCState* cc)
             }
         }
     }
+
+    fast_cc_alias_define(cc);
 
     return !cc->bailout && !obj->overflow;
 }

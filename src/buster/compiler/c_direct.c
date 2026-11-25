@@ -12,6 +12,8 @@
 
 #include <limits.h>
 #include <sys/wait.h>
+#include <pthread.h>
+#include <time.h>
 
 // A unit is small unless its main file is this long (#3592). A small unit's arenas take base pages and its identifier
 // tables start small. The arenas' 55 tables each start in a region of their own, and under transparent huge pages a
@@ -155,11 +157,12 @@ int c_direct_try_compile(const CDirectRequest* request)
     FastObj* obj = (FastObj*)fast_arena_alloc(&scratch, sizeof(FastObj), 64);
     FastCCState* cc = (FastCCState*)fast_arena_alloc(&scratch, sizeof(FastCCState), 64);
 
-    bool ok = pp != NULL && obj != NULL && cc != NULL && fast_pp_init(pp, &arena, &scratch, small);
+    bool ok = pp != NULL && obj != NULL && cc != NULL && fast_pp_init(pp, &arena, &scratch, small) &&
+              (request->dependencies == NULL || fast_pp_collect_dependencies(pp));
     if (ok)
     {
         pp->unsigned_char = request->unsigned_char;
-        pp->c23 = request->c23;
+        fast_pp_set_language(pp, request->c23, request->strict_iso, request->no_gnu_keywords, request->trigraphs, request->raw_strings);
         for (uint32_t i = 0; i < request->directory_count; i += 1)
         {
             fast_pp_add_dir(pp, request->directories[i], request->directory_system != NULL && request->directory_system[i] != 0);
@@ -177,7 +180,8 @@ int c_direct_try_compile(const CDirectRequest* request)
     {
         if (request->predefines_path != NULL)
         {
-            ok = fast_pp_run_file(pp, request->predefines_path);
+            // A system header's, as the full pipeline reads it (pp_run_prelude_macros).
+            ok = fast_pp_run_file(pp, request->predefines_path, false, true);
         }
         else if (request->predefines_text != NULL && request->predefines_length > 0)
         {
@@ -211,11 +215,11 @@ int c_direct_try_compile(const CDirectRequest* request)
             bool is_sys = false;
             if (access(inc, R_OK) == 0)
             {
-                ok = fast_pp_run_file(pp, inc);
+                ok = fast_pp_run_file(pp, inc, false, false);
             }
             else if (fast_pp_resolve_include(pp, inc, (uint32_t)strlen(inc), false, false, resolved, sizeof(resolved), &dir_idx, &is_sys, NULL))
             {
-                ok = fast_pp_run_file(pp, resolved);
+                ok = fast_pp_run_file(pp, resolved, false, is_sys);
             }
             else
             {
@@ -227,7 +231,7 @@ int c_direct_try_compile(const CDirectRequest* request)
     // 4. Main translation unit lex + preprocess
     if (ok)
     {
-        ok = fast_pp_run_file(pp, request->input_path);
+        ok = fast_pp_run_file(pp, request->input_path, true, false);
     }
 
     if (ok && request->out_token_count != NULL)
@@ -251,6 +255,17 @@ int c_direct_try_compile(const CDirectRequest* request)
     if (ok && request->mark_stage != NULL)
     {
         request->mark_stage(request->clock_context, request->stage_codegen);
+    }
+
+    // -MD and its kin (#3592): the files the unit read, of which the driver makes its rule now, so that a unit whose rule
+    // it can't make leaves before an object is written. The main file is read but not listed (pp_dependencies).
+    if (ok && request->dependencies != NULL)
+    {
+        if (pp->dependency_main != 0)
+        {
+            pp->dependency_records[pp->dependency_main - 1u].used = false;
+        }
+        ok = request->dependencies(request->dependency_context, pp->dependency_records, pp->dependency_count);
     }
 
     // 6. Direct single-writev ELF64 .o emission
@@ -333,14 +348,32 @@ static bool c_direct_test_symbols(const uint8_t* file, size_t size, const Elf64_
     return ok;
 }
 
+// A language mode for the tests (#3592): CDirectRequest's fields of the same names.
+typedef struct CDirectTestMode CDirectTestMode;
+struct CDirectTestMode
+{
+    bool c23;
+    bool strict_iso;
+    bool no_gnu_keywords;
+    bool trigraphs;
+    uint8_t raw_strings;
+};
+
 static bool c_direct_test_compile_source_with(const char* source, const char* obj_path, int expected_status, const char* const* directories,
                                               uint32_t directory_count, bool keep, uint32_t* out_text_len, uint32_t* out_sym_count,
-                                              uint64_t* out_header_end, const CDirectExpectedSymbol* expected, const void* expected_rodata, size_t expected_bytes);
+                                              uint64_t* out_header_end, const CDirectExpectedSymbol* expected, const void* expected_rodata, size_t expected_bytes,
+                                              CDirectTestMode mode);
+
+static bool c_direct_test_compile_mode(const char* source, const char* obj_path, int expected_status, uint32_t* out_text_len, uint32_t* out_sym_count,
+                                       CDirectTestMode mode)
+{
+    return c_direct_test_compile_source_with(source, obj_path, expected_status, NULL, 0, false, out_text_len, out_sym_count, NULL, NULL, NULL, 0, mode);
+}
 
 static bool c_direct_test_compile_source(const char* source, const char* obj_path, int expected_status,
                                          uint32_t* out_text_len, uint32_t* out_sym_count)
 {
-    return c_direct_test_compile_source_with(source, obj_path, expected_status, NULL, 0, false, out_text_len, out_sym_count, NULL, NULL, NULL, 0);
+    return c_direct_test_compile_source_with(source, obj_path, expected_status, NULL, 0, false, out_text_len, out_sym_count, NULL, NULL, NULL, 0, (CDirectTestMode){ 0 });
 }
 
 // A valid source's object, left at `obj_path` over what is there, with angled includes searched in `directories`;
@@ -348,12 +381,13 @@ static bool c_direct_test_compile_source(const char* source, const char* obj_pat
 static bool c_direct_test_compile_source_keep(const char* source, const char* obj_path, const char* const* directories, uint32_t directory_count,
                                               uint32_t* out_text_len, uint32_t* out_sym_count, uint64_t* out_header_end)
 {
-    return c_direct_test_compile_source_with(source, obj_path, 0, directories, directory_count, true, out_text_len, out_sym_count, out_header_end, NULL, NULL, 0);
+    return c_direct_test_compile_source_with(source, obj_path, 0, directories, directory_count, true, out_text_len, out_sym_count, out_header_end, NULL, NULL, 0, (CDirectTestMode){ 0 });
 }
 
 static bool c_direct_test_compile_source_with(const char* source, const char* obj_path, int expected_status, const char* const* directories,
                                               uint32_t directory_count, bool keep, uint32_t* out_text_len, uint32_t* out_sym_count,
-                                              uint64_t* out_header_end, const CDirectExpectedSymbol* expected, const void* expected_rodata, size_t expected_bytes)
+                                              uint64_t* out_header_end, const CDirectExpectedSymbol* expected, const void* expected_rodata, size_t expected_bytes,
+                                              CDirectTestMode mode)
 {
     char src_path[256];
     snprintf(src_path, sizeof(src_path), "/tmp/buster_direct_test_%d.c", (int)getpid());
@@ -390,7 +424,11 @@ static bool c_direct_test_compile_source_with(const char* source, const char* ob
         .pic = true,
         .unwind_tables = true,
         .unsigned_char = false,
-        .c23 = false,
+        .c23 = mode.c23,
+        .strict_iso = mode.strict_iso,
+        .no_gnu_keywords = mode.no_gnu_keywords,
+        .trigraphs = mode.trigraphs,
+        .raw_strings = mode.raw_strings,
         .quiet = true,
         .release = true,
     };
@@ -473,6 +511,7 @@ static bool c_direct_test_compile_source_with(const char* source, const char* ob
     if (out_sym_count != NULL) { *out_sym_count = sym_count; }
     return valid && matched && (expected_rodata == NULL || sym_count > 0);
 }
+
 
 // The lexer's tests (#2850). A text's tokens must not depend on where its bytes fall in the lexer's 64-byte blocks, nor
 // on what separates them: every case's text is lexed at every offset of a block and between spaces, newlines and
@@ -565,6 +604,9 @@ static const CDirectLexCase c_direct_lex_cases[] = {
     { "a/=b", 3, { FTOK_IDENT, FTOK_DIV_ASSIGN, FTOK_IDENT } },
     { "a/*c*/b", 2, { FTOK_IDENT, FTOK_IDENT } },
     { "a/**/+/***/b", 3, { FTOK_IDENT, FTOK_PLUS, FTOK_IDENT } },
+    { "a/*/ b */c", 2, { FTOK_IDENT, FTOK_IDENT } },
+    { "x/ *y/**/", 4, { FTOK_IDENT, FTOK_SLASH, FTOK_STAR, FTOK_IDENT } },
+    { "a*/**/b", 3, { FTOK_IDENT, FTOK_STAR, FTOK_IDENT } },
     { "\"str\"", 1, { FTOK_STR_LIT } },
     { "\"a\\\"b/*\"", 1, { FTOK_STR_LIT } },
     { "\"\"", 1, { FTOK_STR_LIT } },
@@ -608,7 +650,8 @@ static bool c_direct_test_kind_is_number(uint8_t kind)
 }
 
 // The preprocessor's tokens of `text`, at most `capacity` of them.
-static bool c_direct_test_tokens_sized(const char* text, uint64_t length, uint8_t* kinds, uint32_t* data, uint32_t capacity, uint32_t* out_count, bool small)
+static bool c_direct_test_tokens_mode(const char* text, uint64_t length, uint8_t* kinds, uint32_t* data, uint32_t capacity, uint32_t* out_count, bool small,
+                                      CDirectTestMode mode)
 {
     FastArena arena = { 0 };
     FastArena scratch = { 0 };
@@ -616,7 +659,12 @@ static bool c_direct_test_tokens_sized(const char* text, uint64_t length, uint8_
     if (ok)
     {
         FastPP* pp = (FastPP*)fast_arena_alloc(&scratch, sizeof(FastPP), 64);
-        ok = pp != NULL && fast_pp_init(pp, &arena, &scratch, small) && fast_pp_run_buffer(pp, "<test>", text, length) && pp->out_count <= capacity;
+        ok = pp != NULL && fast_pp_init(pp, &arena, &scratch, small);
+        if (ok)
+        {
+            fast_pp_set_language(pp, mode.c23, mode.strict_iso, mode.no_gnu_keywords, mode.trigraphs, mode.raw_strings);
+        }
+        ok = ok && fast_pp_run_buffer(pp, "<test>", text, length) && pp->out_count <= capacity;
         if (ok)
         {
             memcpy(kinds, pp->out_kind, pp->out_count);
@@ -700,6 +748,11 @@ static uint32_t c_direct_test_layout(char* buffer, uint32_t shift, const char* s
 }
 
 // The class table against the tables it restates.
+static bool c_direct_test_tokens_sized(const char* text, uint64_t length, uint8_t* kinds, uint32_t* data, uint32_t capacity, uint32_t* out_count, bool small)
+{
+    return c_direct_test_tokens_mode(text, length, kinds, data, capacity, out_count, small, (CDirectTestMode){ 0 });
+}
+
 static bool c_direct_test_tokens(const char* text, uint64_t length, uint8_t* kinds, uint32_t* data, uint32_t capacity, uint32_t* out_count)
 {
     return c_direct_test_tokens_sized(text, length, kinds, data, capacity, out_count, false);
@@ -717,7 +770,7 @@ static bool c_direct_test_cache_consistent(const FastIdentTable* t, uint32_t bit
         {
             const FastIdentEntry* entry = t->entries + slot->id;
             ok = slot->id <= t->count && entry->length == slot->len && slot->tok_kind == (entry->kw_kind != 0 ? entry->kw_kind : FTOK_IDENT) &&
-                 (BUSTER_FIDENT_CACHE_HASH(slot->w0, slot->w1, slot->len) >> t->cache_shift) == i;
+                 (BUSTER_FIDENT_CACHE_HASH(slot->w0, slot->len > 8u ? BUSTER_FIDENT_CACHE_MIX(slot->w1, slot->len) : 0u) >> t->cache_shift) == i;
         }
     }
     return ok;
@@ -760,7 +813,7 @@ static bool c_direct_test_ident_growth(void)
                 const uint32_t length = c_direct_test_growth_name(name, name_kind, i);
                 uint8_t kind = 0;
                 const uint32_t before_bits = table.cache_bits;
-                const bool grows = table.count + 1u == table.cache_grow_at;
+                const bool grows = table.count + 1u == table.cache_grow_at && before_bits <= BUSTER_FIDENT_CACHE_BITS;
                 uint32_t held = 0;
                 if (grows)
                 {
@@ -781,7 +834,8 @@ static bool c_direct_test_ident_growth(void)
                     {
                         if (before[slot].id != 0)
                         {
-                            const FastIdentCacheSlot* now = table.cache + (BUSTER_FIDENT_CACHE_HASH(before[slot].w0, before[slot].w1, before[slot].len) >> table.cache_shift);
+                            const uint64_t mix = before[slot].len > 8u ? BUSTER_FIDENT_CACHE_MIX(before[slot].w1, before[slot].len) : 0u;
+                            const FastIdentCacheSlot* now = table.cache + (BUSTER_FIDENT_CACHE_HASH(before[slot].w0, mix) >> table.cache_shift);
                             const bool same = now->id == before[slot].id && now->w0 == before[slot].w0 && now->w1 == before[slot].w1 && now->len == before[slot].len && now->tok_kind == before[slot].tok_kind;
                             held += 1u;
                             moved += same;
@@ -832,7 +886,8 @@ static bool c_direct_test_ident_growth(void)
                 {
                     memcpy(&last, name + length - 8u, sizeof(last));
                 }
-                if (table.cache[BUSTER_FIDENT_CACHE_HASH(first, last, length) >> table.cache_shift].id == ids[i])
+                const uint64_t mix = length > 8u ? BUSTER_FIDENT_CACHE_MIX(last, length) : 0u;
+                if (table.cache[BUSTER_FIDENT_CACHE_HASH(first, mix) >> table.cache_shift].id == ids[i])
                 {
                     uint8_t kind = 0;
                     cached += 1u;
@@ -1025,6 +1080,281 @@ static bool c_direct_test_small_unit(void)
     return !counted || (c_direct_test_unit_pages(0, true) && c_direct_test_unit_pages(BUSTER_FDIRECT_LARGE_UNIT_BYTES, false));
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// The language modes (#3592): -std=c99, c11, c17 and c23, -trigraphs, -fno-asm and -w
+
+// The trigraph scan at every offset of its blocks: each of the nine trigraphs, and "??" before a byte that makes none, at
+// offsets 0 to 130 of texts that end right after it, a byte later and 70 bytes later, so that its three bytes meet both
+// loads' block ends and the last block's masks; none past a text's end, however close, at the end of a page whose next
+// page is unmapped, where a load not masked to the text faults.
+static bool c_direct_test_trigraph_scan(void)
+{
+    static const char thirds[] = "=(/)'<!>-";
+    static const char others[] = "?a0 \n\"\\*.#`~";
+    const uint32_t third_count = (uint32_t)(sizeof(thirds) - 1u);
+    const uint32_t other_count = (uint32_t)(sizeof(others) - 1u);
+    uint8_t buffer[256];
+    bool ok = true;
+    for (uint32_t at = 0; ok && at <= 130u; at += 1)
+    {
+        for (uint32_t tail = 0; ok && tail < 3u; tail += 1)
+        {
+            const uint32_t extra = tail == 0 ? 0u : tail == 1 ? 1u : 70u;
+            for (uint32_t c = 0; ok && c < third_count + other_count; c += 1)
+            {
+                const bool trigraph = c < third_count;
+                memset(buffer, 'x', sizeof(buffer));
+                buffer[at] = '?';
+                buffer[at + 1u] = '?';
+                buffer[at + 2u] = (uint8_t)(trigraph ? thirds[c] : others[c - third_count]);
+                ok = fast_has_trigraph(buffer, at + 3u + extra) == trigraph && !fast_has_trigraph(buffer, at + 2u) && !fast_has_trigraph(buffer, at + 1u);
+            }
+        }
+    }
+    // "???" before "=" holds a trigraph a byte in, and "?" "?=" split by any byte none, nor a lone '?' two bytes
+    // before one of the nine.
+    ok = ok && fast_has_trigraph((const uint8_t*)"x??" "?=", 5) && !fast_has_trigraph((const uint8_t*)"?x?=?", 5) && !fast_has_trigraph((const uint8_t*)"", 0) &&
+         !fast_has_trigraph((const uint8_t*)"?x=", 3) && !fast_has_trigraph((const uint8_t*)"x?x(x", 5);
+    const long page = sysconf(_SC_PAGESIZE);
+    uint8_t* pages = page > 0 ? (uint8_t*)mmap(NULL, (size_t)page * 2u, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) : (uint8_t*)MAP_FAILED;
+    ok = ok && pages != (uint8_t*)MAP_FAILED && mprotect(pages + page, (size_t)page, PROT_NONE) == 0;
+    for (uint32_t length = 1; ok && length <= 130u; length += 1)
+    {
+        uint8_t* text = pages + page - length;
+        memset(text, '?', length);
+        ok = !fast_has_trigraph(text, length);
+        text[length - 1u] = '=';
+        ok = ok && fast_has_trigraph(text, length) == (length >= 3u);
+    }
+    if (pages != (uint8_t*)MAP_FAILED)
+    {
+        munmap(pages, (size_t)page * 2u);
+    }
+    return ok;
+}
+
+// A text's tokens in a mode against `expected`'s kinds (identifiers' ids aside): `, ## __VA_ARGS__` as clang has it.
+static bool c_direct_test_mode_expands(const char* text, const char* expected, CDirectTestMode mode)
+{
+    enum { capacity = 256 };
+    uint8_t kinds[capacity];
+    uint32_t data[capacity];
+    uint8_t want[capacity];
+    uint32_t want_data[capacity];
+    uint32_t count = 0;
+    uint32_t want_count = 0;
+    bool ok = c_direct_test_tokens_mode(text, strlen(text), kinds, data, capacity, &count, false, mode) &&
+              c_direct_test_tokens_mode(expected, strlen(expected), want, want_data, capacity, &want_count, false, mode);
+    return ok && count == want_count && memcmp(kinds, want, count) == 0;
+}
+
+// asm and typeof by mode: keywords with GNU's, identifiers without them but typeof in C23; their __ spellings always.
+static bool c_direct_test_mode_keywords(CDirectTestMode mode, const uint8_t* expected)
+{
+    static const char text[] = "asm typeof __asm__ __typeof__ __asm __typeof";
+    uint8_t kinds[16];
+    uint32_t data[16];
+    uint32_t count = 0;
+    const bool ok = c_direct_test_tokens_mode(text, sizeof(text) - 1u, kinds, data, 16u, &count, false, mode);
+    return ok && count == 6u && memcmp(kinds, expected, 6) == 0;
+}
+
+static bool c_direct_test_language_tokens(void)
+{
+    static const char macros[] =
+        "#define F(x, ...) f(x, ## __VA_ARGS__)\n"
+        "#define G(...) g(0, ## __VA_ARGS__)\n"
+        "#define H(x, ...) h(1, x ## __VA_ARGS__)\n"
+        "#define N(x, rest...) n(x, ## rest)\n"
+        "F(1) F(1,) F(1, 2) F(1, 2, 3) G() G( ) G(2) H() H(3) H(,4) N(1) N(1,) N(1, 2)\n";
+    // clang 23's -E: a left-out argument drops the comma, an empty one doesn't, one with tokens follows it unpasted, and
+    // without GNU's extensions G() keeps it.
+    static const char gnu[] = "f(1) f(1,) f(1, 2) f(1, 2, 3) g(0) g(0) g(0,2) h(1) h(1, 3) h(1, 4) n(1) n(1,) n(1, 2)";
+    static const char strict[] = "f(1) f(1,) f(1, 2) f(1, 2, 3) g(0,) g(0,) g(0,2) h(1) h(1, 3) h(1, 4) n(1) n(1,) n(1, 2)";
+    const CDirectTestMode gnu_mode = { 0 };
+    const CDirectTestMode c17 = { .strict_iso = true, .no_gnu_keywords = true, .trigraphs = true };
+    const CDirectTestMode c23 = { .c23 = true, .strict_iso = true, .no_gnu_keywords = true };
+    const CDirectTestMode gnu_no_asm = { .no_gnu_keywords = true };
+    bool ok = c_direct_test_mode_expands(macros, gnu, gnu_mode) && c_direct_test_mode_expands(macros, strict, c17) &&
+              c_direct_test_mode_expands(macros, strict, c23) && c_direct_test_mode_expands(macros, gnu, gnu_no_asm);
+    const uint8_t all[6] = { FTOK_KW_ASM, FTOK_KW_TYPEOF, FTOK_KW_ASM, FTOK_KW_TYPEOF, FTOK_KW_ASM, FTOK_KW_TYPEOF };
+    const uint8_t none[6] = { FTOK_IDENT, FTOK_IDENT, FTOK_KW_ASM, FTOK_KW_TYPEOF, FTOK_KW_ASM, FTOK_KW_TYPEOF };
+    const uint8_t typeof_only[6] = { FTOK_IDENT, FTOK_KW_TYPEOF, FTOK_KW_ASM, FTOK_KW_TYPEOF, FTOK_KW_ASM, FTOK_KW_TYPEOF };
+    ok = ok && c_direct_test_mode_keywords(gnu_mode, all) && c_direct_test_mode_keywords(c17, none) && c_direct_test_mode_keywords(gnu_no_asm, none) &&
+         c_direct_test_mode_keywords(c23, typeof_only) && c_direct_test_mode_keywords((CDirectTestMode){ .c23 = true }, all);
+    return ok;
+}
+
+// The modes' compiles: a trigraph anywhere, in the unit or a header, leaves the direct path where trigraphs are replaced;
+// asm and typeof name objects without GNU's keywords; F(1,) keeps its comma, so `f(1,)` leaves as the error it is; and a
+// main that doesn't return int leaves without GNU's extensions, at file scope or in a block, but not a typedef's name.
+static bool c_direct_test_language_compiles(const char* obj_path)
+{
+    const CDirectTestMode gnu = { 0 };
+    const CDirectTestMode c17 = { .strict_iso = true, .no_gnu_keywords = true, .trigraphs = true };
+    const CDirectTestMode c23 = { .c23 = true, .strict_iso = true, .no_gnu_keywords = true };
+    static const char in_string[] = "int g(void) { return (int)sizeof(\"?" "?=\"); }\n";
+    static const char in_comment[] = "/* a comment ?" "?/\n */\nint g(void) { return 1; }\n";
+    static const char not_one[] = "int g(void) { return (int)sizeof(\"??a ?? =\"); }\n";
+    bool ok = c_direct_test_compile_mode(in_string, obj_path, 1, NULL, NULL, c17) && c_direct_test_compile_mode(in_string, obj_path, 0, NULL, NULL, gnu) &&
+              c_direct_test_compile_mode(in_string, obj_path, 0, NULL, NULL, c23) && c_direct_test_compile_mode(in_comment, obj_path, 1, NULL, NULL, c17) &&
+              c_direct_test_compile_mode(not_one, obj_path, 0, NULL, NULL, c17);
+    char header[256];
+    char source[512];
+    snprintf(header, sizeof(header), "/tmp/buster_direct_trigraph_%d.h", (int)getpid());
+    snprintf(source, sizeof(source), "#include \"%s\"\nint g(void) { return G; }\n", header);
+    FILE* file = fopen(header, "wb");
+    ok = ok && file != NULL && fputs("/* ?" "?! */\n#define G 2\n", file) >= 0;
+    ok = file != NULL && fclose(file) == 0 && ok;
+    ok = ok && c_direct_test_compile_mode(source, obj_path, 1, NULL, NULL, c17) && c_direct_test_compile_mode(source, obj_path, 0, NULL, NULL, gnu);
+    unlink(header);
+    static const char keywords[] = "int typeof = 3;\nint asm(int x) { return x + typeof; }\nint g(void) { return asm(4); }\n";
+    ok = ok && c_direct_test_compile_mode(keywords, obj_path, 0, NULL, NULL, c17) && c_direct_test_compile_mode(keywords, obj_path, 1, NULL, NULL, gnu) &&
+         c_direct_test_compile_mode(keywords, obj_path, 1, NULL, NULL, c23);
+    // `__VA_ARGS__ ## __VA_ARGS__` of a comma is two commas, as in clang, and they declare nothing; nor do the other
+    // declarators without a name.
+    static const char commas[] = "#define G(...) __VA_ARGS__ ## __VA_ARGS__\nG(,)\nint g(void) { return 0; }\n";
+    static const char* const nameless[] = {
+        "int , x;\n", "int x, ;\n", "int (*)(void);\n", "int *;\n", "int g(void) { return 0; } ,\nint h(void) { return 1; }\n",
+        "int g(void) { int , x; return 0; }\n", "int g(void) { int x, ; return 0; }\n", "int g(void) { int *; return 0; }\n",
+    };
+    ok = ok && c_direct_test_compile_mode(commas, obj_path, 1, NULL, NULL, gnu);
+    for (uint32_t i = 0; ok && i < (uint32_t)(sizeof(nameless) / sizeof(nameless[0])); i += 1)
+    {
+        ok = c_direct_test_compile_mode(nameless[i], obj_path, 1, NULL, NULL, gnu);
+    }
+    static const char named[] = "int a, b, *c, (*d)(void), e[2];\nint g(void) { int x = 1, y, *z = &x; y = *z; return a + b + y + e[0]; }\n";
+    ok = ok && c_direct_test_compile_mode(named, obj_path, 0, NULL, NULL, gnu);
+    static const char empty_argument[] = "#define F(x, ...) f(x, ## __VA_ARGS__)\nint f(int a, ...) { return a; }\nint g(void) { return F(1,); }\n";
+    static const char left_out[] = "#define F(x, ...) f(x, ## __VA_ARGS__)\nint f(int a, ...) { return a; }\nint g(void) { return F(1); }\n";
+    ok = ok && c_direct_test_compile_mode(empty_argument, obj_path, 1, NULL, NULL, gnu) && c_direct_test_compile_mode(left_out, obj_path, 0, NULL, NULL, gnu) &&
+         c_direct_test_compile_mode(left_out, obj_path, 0, NULL, NULL, c17);
+    static const char void_main[] = "void main(void) { }\n";
+    static const char block_main[] = "int f(void) { void main(void); return 0; }\n";
+    static const char long_main[] = "long main(void) { return 0; }\n";
+    static const char int_main[] = "int main(void) { return 0; }\n";
+    static const char typedef_main[] = "typedef void main(void);\nint g(void) { return 0; }\n";
+    ok = ok && c_direct_test_compile_mode(void_main, obj_path, 1, NULL, NULL, c17) && c_direct_test_compile_mode(void_main, obj_path, 1, NULL, NULL, c23) &&
+         c_direct_test_compile_mode(void_main, obj_path, 0, NULL, NULL, gnu) && c_direct_test_compile_mode(block_main, obj_path, 1, NULL, NULL, c17) &&
+         c_direct_test_compile_mode(long_main, obj_path, 1, NULL, NULL, c17) && c_direct_test_compile_mode(int_main, obj_path, 0, NULL, NULL, c17) &&
+         c_direct_test_compile_mode(typedef_main, obj_path, 0, NULL, NULL, c17);
+    return ok;
+}
+
+// The driver's admission (#3592): `-c` of a unit by this executable in a child, without SOURCE_DATE_EPOCH and
+// BUSTER_NO_DIRECT, which keep any unit off the direct path; 1 where the direct path wrote the object, 0 where the full
+// pipeline did, -1 where neither did.
+static int c_direct_test_driver_path(const char* source_path, const char* object_path, const char* const* options, uint32_t option_count)
+{
+    char executable[4096];
+    const ssize_t length = readlink("/proc/self/exe", executable, sizeof(executable) - 1u);
+    int result = -1;
+    if (length > 0)
+    {
+        executable[length] = '\0';
+        const char* argv[16];
+        uint32_t argc = 0;
+        argv[argc++] = executable;
+        argv[argc++] = "-c";
+        for (uint32_t i = 0; i < option_count && argc < 12u; i += 1)
+        {
+            argv[argc++] = options[i];
+        }
+        argv[argc++] = source_path;
+        argv[argc++] = "-o";
+        argv[argc++] = object_path;
+        argv[argc] = NULL;
+        unlink(object_path);
+        fflush(NULL);
+        const pid_t child = fork();
+        if (child == 0)
+        {
+            unsetenv("SOURCE_DATE_EPOCH");
+            unsetenv("BUSTER_NO_DIRECT");
+            const int null = open("/dev/null", O_WRONLY);
+            if (null >= 0)
+            {
+                dup2(null, 1);
+                dup2(null, 2);
+            }
+            execv(executable, (char* const*)argv);
+            _exit(127);
+        }
+        int status = 0;
+        const bool exited = child > 0 && waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+        FILE* object = exited ? fopen(object_path, "rb") : NULL;
+        if (object != NULL)
+        {
+            static char bytes[1u << 16];
+            const size_t read = fread(bytes, 1, sizeof(bytes), object);
+            fclose(object);
+            result = memmem(bytes, read, "buster direct", 13) != NULL ? 1 : 0;
+        }
+        unlink(object_path);
+    }
+    return result;
+}
+
+static bool c_direct_test_admission(void)
+{
+    char plain[256];
+    char trigraph[256];
+    char keyword[256];
+    char comma[256];
+    char main_void[256];
+    char raw[256];
+    char object[256];
+    snprintf(plain, sizeof(plain), "/tmp/buster_direct_admit_%d.c", (int)getpid());
+    snprintf(trigraph, sizeof(trigraph), "/tmp/buster_direct_admit_tri_%d.c", (int)getpid());
+    snprintf(keyword, sizeof(keyword), "/tmp/buster_direct_admit_asm_%d.c", (int)getpid());
+    snprintf(comma, sizeof(comma), "/tmp/buster_direct_admit_comma_%d.c", (int)getpid());
+    snprintf(main_void, sizeof(main_void), "/tmp/buster_direct_admit_main_%d.c", (int)getpid());
+    snprintf(raw, sizeof(raw), "/tmp/buster_direct_admit_raw_%d.c", (int)getpid());
+    snprintf(object, sizeof(object), "/tmp/buster_direct_admit_%d.o", (int)getpid());
+    static const char plain_text[] = "int add(int a, int b) { return a + b; }\n";
+    static const char trigraph_text[] = "/* ?" "?= */\nint add(int a, int b) { return a + b; }\n";
+    static const char keyword_text[] = "int asm = 1;\nint get(void) { return asm; }\n";
+    static const char comma_text[] = "#define G(...) f(0, ## __VA_ARGS__)\nint f(int a, ...) { return a; }\nint get(void) { return G(); }\n";
+    static const char main_text[] = "void main(void) { }\n";
+    static const char raw_text[] = "#if 0\nR\"(\n#endif\nint y;\n#if 0\n)\"\n#endif\nint x;\n";
+    const char* const paths[6] = { plain, trigraph, keyword, comma, main_void, raw };
+    const char* const texts[6] = { plain_text, trigraph_text, keyword_text, comma_text, main_text, raw_text };
+    bool ok = true;
+    for (uint32_t i = 0; ok && i < 6u; i += 1)
+    {
+        FILE* file = fopen(paths[i], "wb");
+        ok = file != NULL && fputs(texts[i], file) >= 0;
+        ok = file != NULL && fclose(file) == 0 && ok;
+    }
+    static const char* const c17[] = { "-std=c17" };
+    static const char* const c99[] = { "-std=c99" };
+    static const char* const c11_w[] = { "-std=c11", "-w" };
+    static const char* const w[] = { "-w" };
+    static const char* const w_twice[] = { "-w", "-w" };
+    static const char* const w_wall[] = { "-w", "-Wall" };
+    static const char* const gnu17[] = { "-std=gnu17" };
+    static const char* const gnu17_trigraphs[] = { "-std=gnu17", "-trigraphs" };
+    static const char* const gnu17_no_asm[] = { "-std=gnu17", "-fno-asm" };
+    ok = ok && c_direct_test_driver_path(plain, object, c17, 1) == 1 && c_direct_test_driver_path(plain, object, c99, 1) == 1 &&
+         c_direct_test_driver_path(plain, object, c11_w, 2) == 1 && c_direct_test_driver_path(plain, object, w, 1) == 1 &&
+         c_direct_test_driver_path(plain, object, w_twice, 2) == 1 && c_direct_test_driver_path(plain, object, w_wall, 2) == 0;
+    ok = ok && c_direct_test_driver_path(trigraph, object, c17, 1) == 0 && c_direct_test_driver_path(trigraph, object, gnu17, 1) == 1 &&
+         c_direct_test_driver_path(trigraph, object, gnu17_trigraphs, 2) == 0;
+    ok = ok && c_direct_test_driver_path(keyword, object, c17, 1) == 1 && c_direct_test_driver_path(keyword, object, gnu17_no_asm, 2) == 1 &&
+         c_direct_test_driver_path(keyword, object, gnu17, 1) == -1;
+    // G() is g(0) in GNU's modes and the error g(0,) in -std=c17's, as is a main that returns void.
+    ok = ok && c_direct_test_driver_path(comma, object, gnu17, 1) == 1 && c_direct_test_driver_path(comma, object, c17, 1) == -1 &&
+         c_direct_test_driver_path(main_void, object, gnu17, 1) == 1 && c_direct_test_driver_path(main_void, object, c17, 1) == -1;
+    // A raw string literal in a skipped group (#3600): GNU's modes have them, so the full pipeline compiles the unit;
+    // -std=c17's don't, so the direct path does.
+    ok = ok && c_direct_test_driver_path(raw, object, gnu17, 1) == 0 && c_direct_test_driver_path(raw, object, c17, 1) == 1;
+    for (uint32_t i = 0; i < 6u; i += 1)
+    {
+        unlink(paths[i]);
+    }
+    return ok;
+}
+
 static bool c_direct_test_classes(void)
 {
     bool ok = true;
@@ -1035,8 +1365,12 @@ static bool c_direct_test_classes(void)
         const bool decided = c == '/' || c == '#' || c == '"' || c == '\'' || c == '\\' || (fast_ascii_to_kind[c] == 0 && !space);
         const uint32_t expected = (space ? BUSTER_FCLASS_SPACE : 0u) | (c == '\n' ? BUSTER_FCLASS_NEWLINE : 0u) |
                                   (decided ? BUSTER_FCLASS_SPECIAL : 0u) | (run ? BUSTER_FCLASS_RUN : 0u) |
-                                  (c == '.' ? BUSTER_FCLASS_DOT : 0u) | (c == '.' || (c >= '0' && c <= '9') ? BUSTER_FCLASS_DOT_NEXT : 0u);
+                                  (c == '.' ? BUSTER_FCLASS_DOT : 0u);
         ok = ok && fast_lex_class[c] == expected;
+        // The class of the byte after another: a punctuator's second character, a run's, what makes a '.' a number's.
+        const uint32_t expected_next = fast_pair_second[c] | (run ? BUSTER_FCLASS_RUN : 0u) |
+                                       (c == '.' || (c >= '0' && c <= '9') ? BUSTER_FCLASS_DOT : 0u);
+        ok = ok && fast_lex_next_class[c] == expected_next && fast_pair_second[c] < 8u;
         // A run's character has an identifier's or a number's kind, and every other character with a kind is a punctuator.
         ok = ok && run == (fast_ascii_to_kind[c] == FTOK_IDENT || fast_ascii_to_kind[c] == FTOK_INT_LIT);
         ok = ok && (fast_ascii_to_kind[c] <= FTOK_STR_LIT || fast_punct_len[fast_ascii_to_kind[c]] == 1u);
@@ -1116,6 +1450,49 @@ static bool c_direct_test_lexer(void)
                 fprintf(stderr, "test-direct: lexer: refused text %u was taken, shift %u\n", r, shift);
             }
         }
+    }
+    if (ok)
+    {
+        // A window's tokens start within 64 KB of its first byte: a comment that ends near that distance, and a stretch
+        // of blanks, a literal and a comment longer than it between tokens, which go on in the next window.
+        enum { long_size = 4 * 70000 + 400 };
+        char* const text = (char*)malloc(long_size);
+        uint32_t count = 0;
+        uint32_t length = 0;
+        ok = text != NULL;
+        if (ok)
+        {
+            memcpy(text, "a /*", 4);
+            length = 4u;
+            // The comment ends just short of 64 KB, so that the tokens after it are past it.
+            memset(text + length, 'x', 65530);
+            length += 65530u;
+            memcpy(text + length, "*/ b + c", 8);
+            length += 8u;
+            memset(text + length, ' ', 70000);
+            length += 70000u;
+            memcpy(text + length, "d \"", 3);
+            length += 3u;
+            memset(text + length, 'z', 70000);
+            length += 70000u;
+            memcpy(text + length, "\" e /*", 6);
+            length += 6u;
+            memset(text + length, '\n', 70000);
+            length += 70000u;
+            memcpy(text + length, "*/ b", 4);
+            length += 4u;
+            memset(text + length, ' ', 100);
+            length += 100u;
+            text[length++] = '\n';
+            ok = c_direct_test_tokens(text, length, kinds, data, capacity, &count) && count == 8u && kinds[0] == FTOK_IDENT &&
+                 kinds[1] == FTOK_IDENT && kinds[2] == FTOK_PLUS && kinds[3] == FTOK_IDENT && kinds[4] == FTOK_IDENT &&
+                 kinds[5] == FTOK_STR_LIT && kinds[6] == FTOK_IDENT && kinds[7] == FTOK_IDENT && data[7] == data[1] && data[1] != data[0];
+        }
+        if (!ok)
+        {
+            fprintf(stderr, "test-direct: lexer: tokens more than 64 KB apart\n");
+        }
+        free(text);
     }
     if (ok)
     {
@@ -1410,7 +1787,7 @@ static bool c_direct_test_tables_and_inline_bodies(const char* obj_path)
         { "d", NULL, 0 },
         { NULL, NULL, 0 },
     };
-    return c_direct_test_compile_source_with(source, obj_path, 0, NULL, 0, false, NULL, NULL, NULL, expected, NULL, 0);
+    return c_direct_test_compile_source_with(source, obj_path, 0, NULL, 0, false, NULL, NULL, NULL, expected, NULL, 0, (CDirectTestMode){ 0 });
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1424,11 +1801,12 @@ struct CDirectTestSymbol
     uint8_t type;
     uint8_t visibility;
     uint16_t section;
+    uint64_t value;
     uint64_t size;
 };
 
 // The symbols named `name` in the object at `path`: how many, and the first one's binding, type, visibility, section
-// index and size.
+// index, value and size.
 static CDirectTestSymbol c_direct_test_symbol(const char* path, const char* name)
 {
     CDirectTestSymbol result = { 0 };
@@ -1468,6 +1846,7 @@ static CDirectTestSymbol c_direct_test_symbol(const char* path, const char* name
                         result.type = ELF64_ST_TYPE(symbols[k].st_info);
                         result.visibility = ELF64_ST_VISIBILITY(symbols[k].st_other);
                         result.section = symbols[k].st_shndx;
+                        result.value = symbols[k].st_value;
                         result.size = symbols[k].st_size;
                     }
                     result.count += 1u;
@@ -1580,6 +1959,1000 @@ static bool c_direct_test_declarations(const char* obj_path)
         {
             fprintf(stderr, "test-direct: a declaration the direct path took: %s", leaves[i]);
         }
+    }
+    return ok;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// GNU's alias attribute and typeof(name) (#3592)
+
+// Whether `alias` is defined where `target` is, with `bind` and `type`.
+static bool c_direct_test_alias_of(const char* path, const char* alias, const char* target, uint8_t bind, uint8_t type)
+{
+    const CDirectTestSymbol a = c_direct_test_symbol(path, alias);
+    const CDirectTestSymbol t = c_direct_test_symbol(path, target);
+    return a.count == 1u && t.count == 1u && a.bind == bind && a.type == type && t.type == type && a.section != SHN_UNDEF &&
+           a.section == t.section && a.value == t.value && a.size == t.size && t.size != 0;
+}
+
+// weak_alias(old, new) as musl writes it, of functions and objects: an alias of a function a header declared, of an
+// initialized and a tentative object, of a static function and of a static inline one only the alias reaches, one
+// declared before its target, and typeof of a typedef name. Each alias is defined at its target's place; an alias in
+// any other place, or of a target the unit doesn't define, leaves the direct path.
+static bool c_direct_test_aliases(const char* obj_path)
+{
+    static const char functions[] =
+        "char* crypt_like(const char* k);\n"
+        "char* __crypt_like(const char* k) { return (char*)k + 1; }\n"
+        "extern __typeof(__crypt_like) crypt_like __attribute__((__weak__, __alias__(\"__crypt_like\")));\n"
+        "char* use(void) { return crypt_like(\"xy\"); }\n"
+        "static int helper(void) { return 3; }\n"
+        "extern __typeof(helper) exported __attribute__((alias(\"helper\"), visibility(\"hidden\")));\n"
+        "static inline int tiny(void) { return 7; }\n"
+        "extern __typeof(tiny) tiny_alias __attribute__((alias(\"tiny\")));\n"
+        "int later(void);\n"
+        "extern __typeof(later) early __attribute__((alias(\"later\")));\n"
+        "int later(void) { return 9; }\n"
+        "int called(void);\n"
+        "int use_called(void) { return called(); }\n"
+        "int body(void) { return 5; }\n"
+        "extern __typeof(body) called __attribute__((weak, alias(\"body\")));\n";
+    static const char objects[] =
+        "char** __env_like = 0;\n"
+        "extern char** env_like;\n"
+        "extern __typeof(__env_like) env_like __attribute__((weak, alias(\"__env_like\")));\n"
+        "int counter;\n"
+        "extern __typeof(counter) count2 __attribute__((alias(\"counter\")));\n"
+        "const long table[3] = { 1, 2, 3 };\n"
+        "__typeof(table) table2 __attribute__((alias(\"table\")));\n"
+        "char*** where(void) { return &env_like; }\n"
+        "typedef long Wide;\n"
+        "__typeof(Wide) wide = 3;\n";
+    uint32_t text = 0;
+    uint32_t symbols = 0;
+    bool ok = c_direct_test_compile_source_keep(functions, obj_path, NULL, 0, &text, &symbols, NULL);
+    ok = ok && c_direct_test_alias_of(obj_path, "crypt_like", "__crypt_like", STB_WEAK, STT_FUNC) &&
+         c_direct_test_alias_of(obj_path, "exported", "helper", STB_GLOBAL, STT_FUNC) && c_direct_test_symbol(obj_path, "exported").visibility == STV_HIDDEN &&
+         c_direct_test_symbol(obj_path, "helper").bind == STB_LOCAL && c_direct_test_alias_of(obj_path, "tiny_alias", "tiny", STB_GLOBAL, STT_FUNC) &&
+         c_direct_test_alias_of(obj_path, "early", "later", STB_GLOBAL, STT_FUNC) &&
+         c_direct_test_alias_of(obj_path, "called", "body", STB_WEAK, STT_FUNC);
+    unlink(obj_path);
+    ok = ok && c_direct_test_compile_source_keep(objects, obj_path, NULL, 0, &text, &symbols, NULL);
+    ok = ok && c_direct_test_alias_of(obj_path, "env_like", "__env_like", STB_WEAK, STT_OBJECT) &&
+         c_direct_test_alias_of(obj_path, "count2", "counter", STB_GLOBAL, STT_OBJECT) &&
+         c_direct_test_alias_of(obj_path, "table2", "table", STB_GLOBAL, STT_OBJECT) && c_direct_test_symbol(obj_path, "wide").size == 8u;
+    unlink(obj_path);
+    static const char* const leaves[] = {
+        "int ext(void);\nextern __typeof(ext) a __attribute__((alias(\"ext\")));\n",
+        "extern int a __attribute__((alias(\"nothing\")));\n",
+        "int g(void) { return 0; }\nint __attribute__((alias(\"g\"))) f(void) { return 1; }\n",
+        "int g(void) { return 0; }\nint f(void) { extern int a __attribute__((alias(\"g\"))); return 0; }\n",
+        "int g(void) { return 0; }\nextern __typeof(g) a __attribute__((alias(g)));\n",
+        "int g(void) { return 0; }\nextern __typeof(g) a __attribute__((alias(\"g\" \"\")));\n",
+        "int g(void) { return 0; }\nextern __typeof(g) a __attribute__((alias(\"a b\")));\n",
+        "int g(void) { return 0; }\nextern __typeof(g) a __attribute__((alias(\"\")));\n",
+        "int g(void) { return 0; }\nextern __typeof(g) a __attribute__((alias(u8\"g\")));\n",
+        "int g(void) { return 0; }\nextern __typeof(g) a __attribute__((alias(\"\\x67\")));\n",
+        "int g(void) { return 0; }\nextern __typeof(g) a __asm__(\"b\") __attribute__((alias(\"g\")));\n",
+        "int g(void) { return 0; }\nstatic int f(void);\nextern __typeof(g) f __attribute__((alias(\"g\")));\n",
+        "inline int f(void) { return 7; }\nint g(void) { return 0; }\nextern __typeof(g) f __attribute__((alias(\"g\")));\n",
+        "int g(void) { return 0; }\nint h(void) __attribute__((alias(\"g\")));\nint h(void) { return 1; }\n",
+        "int g(void) { return 0; }\nint h(void) __attribute__((alias(\"g\")));\nint h(void) __attribute__((alias(\"g\")));\n",
+        "int g(void) { return 0; }\nint h(void) __attribute__((alias(\"g\")));\nint h(void) __attribute__((used));\n",
+        "int x = 1;\nextern __typeof(x) y __attribute__((alias(\"x\")));\nint y = 2;\n",
+        "int x = 1;\nextern __typeof(x) y __attribute__((alias(\"x\")));\nint y;\n",
+        "int g(void) { return 0; }\nstruct S { int x __attribute__((alias(\"g\"))); };\n",
+        "int g(void) { return 0; }\nvoid f(int x __attribute__((alias(\"g\"))));\n",
+        "int g = 1;\nint f(void) { static int s __attribute__((alias(\"g\"))); return s; }\n",
+        "int g(void) { return 0; }\nint f(void) { int x __attribute__((alias(\"g\"))) = 1; return x; }\n",
+        "int g(void) { return 0; }\ntypedef int T __attribute__((alias(\"g\")));\n",
+        "int g(void) { return 0; }\nstatic __typeof(g) a __attribute__((alias(\"g\")));\n",
+        "int g(void) { return 0; }\nextern __typeof(g) a __attribute__((alias(\"g\")));\nextern __typeof(g) b __attribute__((alias(\"a\")));\n",
+        "int x = 1;\nextern int f(void) __attribute__((alias(\"x\")));\n",
+        "int x = 1;\nextern __typeof(x) y __attribute__((alias(\"x\"))) = 2;\n",
+        "int x = 1;\nint y;\nextern __typeof(x) y __attribute__((alias(\"x\")));\n",
+        "int g(void) { return 0; }\nint f(void);\nint f(void) { return 1; }\nextern __typeof(g) f __attribute__((alias(\"g\")));\n",
+        "int g(void) __asm__(\"g_label\");\nint g(void) { return 0; }\nextern __typeof(g) a __attribute__((alias(\"g\")));\n",
+        "int x;\nunsigned __typeof(x) y;\n",
+        "__typeof(1 + 2) z;\n",
+        "__typeof(undeclared) z;\n",
+    };
+    for (uint32_t i = 0; ok && i < (uint32_t)(sizeof(leaves) / sizeof(leaves[0])); i += 1)
+    {
+        ok = c_direct_test_compile_source(leaves[i], obj_path, 1, NULL, NULL);
+        if (!ok)
+        {
+            fprintf(stderr, "test-direct: an alias case the direct path took: %s", leaves[i]);
+        }
+    }
+    return ok;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// A declaration's specifiers that the direct path doesn't take (#3599)
+
+// A declaration without a type specifier is implicit int, which C99 refused, or C23's auto, whose type is its
+// initializer's; two storage classes, or one where none may stand, are refused or warned of; a for's static, extern or
+// typedef declaration declares no automatic object. Each leaves the direct path. What C17 and C23 take stays on it.
+static bool c_direct_test_specifiers(const char* obj_path)
+{
+    static const char* const leaves[] = {
+        "int f(void) { auto x = 1.5; return (int)x; }\n",
+        "static auto z = 2.5;\n",
+        "int f(void) { const x = 3; return x; }\n",
+        "static y = 4;\n",
+        "int f(a, b);\n",
+        "int g(void) { register static int z = 1; return z; }\n",
+        "static extern int u;\n",
+        "extern static int u;\n",
+        "typedef static int T;\n",
+        "int h(void) { auto static int s = 1; return s; }\n",
+        "static static int x;\n",
+        "register int w;\n",
+        "auto int v;\n",
+        "void k(static int p) { }\n",
+        "void k(auto int p) { }\n",
+        "void k(inline int p) { }\n",
+        "void k(_Noreturn int p) { }\n",
+        "void k(typedef int p) { }\n",
+        "void k(void (*cb)(static int)) { }\n",
+        "struct S { static int m; };\n",
+        "struct S { register int m; };\n",
+        "int f(void) { return sizeof(static int); }\n",
+        "int f(void) { for (static int i = 0; i < 2; i++) {} return 0; }\n",
+        "int f(void) { for (extern int i; ;) {} return 0; }\n",
+        "int f(void) { for (typedef int T; ;) {} return 0; }\n",
+        "int f(void) { inline int x = 0; return x; }\n",
+        "inline int g;\n",
+        "_Noreturn int h;\n",
+        "typedef inline int T;\n",
+        "typedef inline void F(void);\n",
+        "int f(void) { typedef _Noreturn void G(void); return 0; }\n",
+    };
+    static const char kept[] =
+        "int e;\n"
+        "void k(register int p) { (void)p; }\n"
+        "int f1(void) { int n = 0; for (register int i = 0; i < 2; i++) { n += i; } for (auto int j = 0; j < 2; j++) { n += j; } return n; }\n"
+        "int f2(void) { auto int x = 1; register long y = 2; static int z; extern int e; typedef int T; T t = 0; return x + (int)y + z + t + e; }\n"
+        "static inline int g(void) { return 1; }\n"
+        "_Noreturn void die(void);\n"
+        "typedef unsigned T2;\n"
+        "signed s;\n"
+        "unsigned u;\n"
+        "short sh;\n"
+        "long long ll;\n"
+        "int f3(void) { signed a = 1; unsigned b = 2; const long c = 3; return a + (int)b + (int)c + g(); }\n"
+        "struct S2 { unsigned : 3; int m; };\n"
+        "int f4(void) { return (int)sizeof(const int); }\n"
+        "void cb_user(void (*cb)(register int));\n"
+        "__extension__ typedef unsigned long long U64;\n";
+    bool ok = true;
+    for (uint32_t i = 0; ok && i < (uint32_t)(sizeof(leaves) / sizeof(leaves[0])); i += 1)
+    {
+        ok = c_direct_test_compile_source(leaves[i], obj_path, 1, NULL, NULL);
+        if (!ok)
+        {
+            fprintf(stderr, "test-direct: a declaration's specifiers the direct path took: %s", leaves[i]);
+        }
+    }
+    const CDirectTestMode c23 = { .c23 = true };
+    ok = ok && c_direct_test_compile_mode("int f(void) { auto x = 1.5; return (int)(x * 2); }\n", obj_path, 1, NULL, NULL, c23) &&
+         c_direct_test_compile_mode("static auto z = 2.5;\n", obj_path, 1, NULL, NULL, c23) &&
+         c_direct_test_compile_source(kept, obj_path, 0, NULL, NULL) && c_direct_test_compile_mode(kept, obj_path, 0, NULL, NULL, c23);
+    return ok;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Raw string literals (#3600) and the literals of a directive's line the direct path doesn't lex (#3603)
+
+typedef struct CDirectRawCase CDirectRawCase;
+struct CDirectRawCase
+{
+    const char* source;
+    uint8_t raw_strings;   // CDirectTestMode.raw_strings
+    int expected;          // 1: leaves the direct path; 0: its object defines `defined`
+    const char* defined;   // the symbols the object defines, separated by spaces
+};
+
+// Each case's status and symbols, and then a raw string literal's prefix, an "R" that ends an ordinary string and a
+// raw string after `#define R` or `#define LR`, at each offset of a block of the skipped group's scan and of the lexer's
+// windows. A window starts where 80 bytes are left, so the sources end in a comment of more.
+static bool c_direct_test_raw_strings(const char* obj_path)
+{
+    static const CDirectRawCase cases[] = {
+        { "#if 0\nR\"(\n#endif\nint y;\n#if 0\n)\"\n#endif\nint x;\n", 1, 1, NULL },
+        { "#if 0\nR\"(\n#endif\nint y;\n#if 0\n)\"\n#endif\nint x;\n", 0, 0, "x y" },
+        { "const char* s = R\"(x)\";\n", 1, 1, NULL },
+        { "#define R\nconst char* s = R\"(x)\";\n", 0, 0, "s" },
+        { "#define R\nconst char* s = R\"(x)\";\n", 1, 1, NULL },
+        { "const char* s = LR\"(x)\";\n", 1, 1, NULL },
+        { "const char* s = u8R\"(x)\";\n", 2, 1, NULL },
+        { "#define S R\"(x)\"\nint y;\n", 1, 1, NULL },
+        { "#if 0\nx = c ? \"R\" : \"W\";\n#endif\nint x;\n", 1, 0, "x" },
+        { "const char* p = \"R\"; const char* q = \"BAR\";\n", 1, 0, "p q" },
+        { "#if 0\nconst char* a = \"x\"; const char* b = \"R\";\n#endif\nint y;\n", 1, 0, "y" },
+        { "#if 0\nprintf(\"%s\", \"ERROR\"); f(\"R\",(int)x);\n#endif\nint z;\n", 1, 0, "z" },
+        { "#if 0\nchar c = 'R'; const char* d = \"\\\"R\\\"\";\n#endif\nint z;\n", 1, 0, "z" },
+        { "#if 0\na = \"x\" R\"(y)\";\n#endif\nint z;\n", 1, 1, NULL },
+        { "#if 0\na = xR\"(y)\";\n#endif\nint z;\n", 1, 0, "z" },
+        { "#if 0\na = 1R\"(y)\";\n#endif\nint z;\n", 1, 0, "z" },
+        { "#if 0\nLR\"(\n#endif\nint y;\n#if 0\n)\"\n#endif\nint x;\n", 1, 1, NULL },
+        { "#if 0\nu8R\"(\n#endif\nint y;\n#if 0\n)\"\n#endif\nint x;\n", 1, 0, "x y" },
+        { "#if 0\na = uR\"(y)\";\n#endif\nint z;\n", 1, 0, "z" },
+        { "#if 0\na = uR\"(y)\";\n#endif\nint z;\n", 2, 1, NULL },
+        { "#if 0\na = u8R\"(y)\";\n#endif\nint z;\n", 2, 1, NULL },
+        { "#if 0\n/* R\"( */ int a;\n#endif\nint z;\n", 1, 0, "z" },
+        { "#if 0\n// R\"(\n#endif\nint z;\n", 1, 0, "z" },
+        { "#pragma message(\"/* look\")\nint x = 1;\n", 1, 1, NULL },
+        { "#pragma foo \"/*\"\nint y = 2;\n/* */ int z = 3;\n", 1, 0, "y z" },
+        { "#pragma foo '/*'\nint y = 2;\n", 0, 0, "y" },
+        { "#line 5 \"a/*b.c\"\nint y = 2;\nint z = 3;\n", 0, 0, "y z" },
+        { "#pragma foo don't\nint y = 2;\n", 0, 1, NULL },
+        { "#if 1\nint y = 2;\n#endif // it's\nint z = 3;\n", 0, 0, "y z" },
+        { "#pragma foo R\"(x)\"\nint y = 2;\n", 1, 1, NULL },
+        { "#pragma foo R\"(x)\"\nint y = 2;\n", 0, 0, "y" },
+        { "#if 0\n#else // \"/*\"\nint y = 2;\n#endif\nint z = 3;\n", 0, 0, "y z" },
+        { "#if 0\na = \xc3\xa9R\"(y)\";\n#endif\nint z;\n", 1, 0, "z" },
+        { "#if 0\na = R'x'; /* c */\n#endif\nint z;\n", 1, 0, "z" },
+        { "#define LR\nconst char* s = LR\"(x)\";\n", 1, 1, NULL },
+        { "#define uR\nconst char* s = uR\"(x)\";\n", 1, 0, "s" },
+        { "#define u8R\nconst char* s = u8R\"(x)\";\n", 1, 0, "s" },
+        { "#define u8R\nconst char* s = u8R\"(x)\";\n", 2, 1, NULL },
+        { "int R = 1;\nint LR = 2;\nint f(void) { return R + LR; }\n", 2, 0, "R LR f" },
+        { "#pragma foo \"\\\"/*\"\nint y = 2;\n", 1, 0, "y" },
+    };
+    bool ok = true;
+    for (uint32_t i = 0; ok && i < (uint32_t)(sizeof(cases) / sizeof(cases[0])); i += 1)
+    {
+        const CDirectTestMode mode = { .raw_strings = cases[i].raw_strings };
+        ok = c_direct_test_compile_source_with(cases[i].source, obj_path, cases[i].expected, NULL, 0, true, NULL, NULL, NULL, NULL, NULL, 0, mode);
+        char names[64];
+        snprintf(names, sizeof(names), "%s", cases[i].defined != NULL ? cases[i].defined : "");
+        char* save = NULL;
+        for (char* name = strtok_r(names, " ", &save); ok && name != NULL; name = strtok_r(NULL, " ", &save))
+        {
+            const CDirectTestSymbol sym = c_direct_test_symbol(obj_path, name);
+            ok = sym.count == 1u && sym.section != SHN_UNDEF;
+        }
+        unlink(obj_path);
+        if (!ok)
+        {
+            fprintf(stderr, "test-direct: raw strings' case %u, raw %u\n", i, (unsigned)cases[i].raw_strings);
+        }
+    }
+    // A literal's line splice on a directive's line is a line: __LINE__ after it counts it, as it counts the lines of
+    // directives that end at their newline.
+    static const int32_t expected_line[] = { 3 };
+    ok = ok && c_direct_test_compile_source_with("#pragma foo \"a\\\nb\"\nconst int line = __LINE__;\n", obj_path, 0, NULL, 0, false, NULL, NULL, NULL,
+                                                 NULL, expected_line, sizeof(expected_line), (CDirectTestMode){ 0 });
+    static const int32_t expected_directive_line[] = { 4 };
+    ok = ok && c_direct_test_compile_source_with("#define X 1\n#ifdef X\n#endif\nconst int line = __LINE__;\n", obj_path, 0, NULL, 0, false, NULL, NULL,
+                                                 NULL, NULL, expected_directive_line, sizeof(expected_directive_line), (CDirectTestMode){ 0 });
+    const CDirectTestMode raw = { .raw_strings = 1u };
+    static const char tail[] = "/* ........................................................................................ */\n";
+    for (uint32_t k = 0; ok && k < 140u; k += 1)
+    {
+        char source[512];
+        snprintf(source, sizeof(source), "#if 0\n%*sR\"(\n#endif\nint y;\n#if 0\n)\"\n#endif\nint x;\n%s", (int)k, "", tail);
+        ok = c_direct_test_compile_mode(source, obj_path, 1, NULL, NULL, raw);
+        snprintf(source, sizeof(source), "#if 0\n%*sx = \"R\";\n#endif\nint z;\n%s", (int)k, "", tail);
+        ok = ok && c_direct_test_compile_mode(source, obj_path, 0, NULL, NULL, raw);
+        snprintf(source, sizeof(source), "#define R\n%*sconst char* s = R\"(x)\";\n%s", (int)k, "", tail);
+        ok = ok && c_direct_test_compile_mode(source, obj_path, 1, NULL, NULL, raw);
+        snprintf(source, sizeof(source), "#define LR\n%*sconst char* s = LR\"(x)\";\n%s", (int)k, "", tail);
+        ok = ok && c_direct_test_compile_mode(source, obj_path, 1, NULL, NULL, raw);
+        if (!ok)
+        {
+            fprintf(stderr, "test-direct: raw strings at offset %u\n", k);
+        }
+    }
+    return ok;
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// GNU's inline assembly of musl's two shapes (#3592)
+
+typedef long (*CDirectTestAsm0)(void);
+typedef long (*CDirectTestAsm1)(long);
+typedef long (*CDirectTestAsm2)(long, long);
+typedef long (*CDirectTestAsmPointer)(void*);
+
+#if !__has_feature(memory_sanitizer)
+// The object's code of `name`, at its place in a copy of its section that may run, or NULL when the object has no
+// such function or relocates its section. `*mapping` and `*mapped` are the copy, for munmap. The copy starts 64 bytes
+// into its pages: UndefinedBehaviorSanitizer's check of a call through a pointer reads the 8 bytes before the function.
+static const void* c_direct_test_code(const char* path, const char* name, void** mapping, size_t* mapped)
+{
+    const void* result = NULL;
+    const CDirectTestSymbol sym = c_direct_test_symbol(path, name);
+    FILE* file = sym.count == 1u && sym.type == STT_FUNC && sym.section != SHN_UNDEF ? fopen(path, "rb") : NULL;
+    uint8_t* bytes = NULL;
+    long size = 0;
+    if (file != NULL && fseek(file, 0, SEEK_END) == 0 && (size = ftell(file)) > (long)sizeof(Elf64_Ehdr) && fseek(file, 0, SEEK_SET) == 0)
+    {
+        bytes = (uint8_t*)malloc((size_t)size);
+        if (bytes != NULL && fread(bytes, 1, (size_t)size, file) != (size_t)size)
+        {
+            free(bytes);
+            bytes = NULL;
+        }
+    }
+    if (file != NULL)
+    {
+        fclose(file);
+    }
+    const Elf64_Ehdr* header = (const Elf64_Ehdr*)bytes;
+    const bool headers = bytes != NULL && header->e_shoff + (uint64_t)header->e_shnum * sizeof(Elf64_Shdr) <= (uint64_t)size && sym.section < header->e_shnum;
+    const Elf64_Shdr* table = headers ? (const Elf64_Shdr*)(bytes + header->e_shoff) : NULL;
+    bool relocated = false;
+    for (uint16_t i = 0; headers && i < header->e_shnum; i += 1)
+    {
+        relocated = relocated || ((table[i].sh_type == SHT_RELA || table[i].sh_type == SHT_REL) && table[i].sh_info == sym.section && table[i].sh_size != 0);
+    }
+    const Elf64_Shdr* section = headers && !relocated ? table + sym.section : NULL;
+    const bool fits = section != NULL && section->sh_type == SHT_PROGBITS && section->sh_offset + section->sh_size <= (uint64_t)size &&
+                      sym.value + sym.size <= section->sh_size;
+    const size_t length = fits ? (size_t)((64u + section->sh_size + 4095u) & ~(uint64_t)4095u) : 0u;
+    uint8_t* code = length != 0 ? (uint8_t*)mmap(NULL, length, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) : (uint8_t*)MAP_FAILED;
+    if (code != (uint8_t*)MAP_FAILED)
+    {
+        memcpy(code + 64, bytes + section->sh_offset, (size_t)section->sh_size);
+        if (mprotect(code, length, PROT_READ | PROT_EXEC) == 0)
+        {
+            result = code + 64 + sym.value;
+            *mapping = code;
+            *mapped = length;
+        }
+        else
+        {
+            munmap(code, length);
+        }
+    }
+    free(bytes);
+    return result;
+}
+#endif
+
+// musl's shapes, run: syscall with no argument (getpid, whose number is an int), with two (munmap of a page and
+// clock_gettime, given a pointer), and with six of which three are local register variables (mmap of the page), and
+// the thread pointer against pthread_self's. Every other shape, operand,
+// constraint, clobber or label leaves the direct path. The functions call nothing, so that their section runs where it
+// is copied. MemorySanitizer can't see a result an uninstrumented function makes, so it only compiles them.
+static bool c_direct_test_asm(const char* obj_path)
+{
+    static const char source[] =
+        "long t_getpid(void)\n"
+        "{\n"
+        "    unsigned long ret;\n"
+        "    __asm__ __volatile__ (\"syscall\" : \"=a\"(ret) : \"a\"(39) : \"rcx\", \"r11\", \"memory\");\n"
+        "    return ret;\n"
+        "}\n"
+        "long t_mmap(long length)\n"
+        "{\n"
+        "    unsigned long ret;\n"
+        "    register long r10 __asm__(\"r10\") = 0x22;\n"
+        "    register long r8 __asm__(\"r8\") = -1;\n"
+        "    register long r9 __asm__(\"r9\") = 0;\n"
+        "    __asm__ __volatile__ (\"syscall\" : \"=a\"(ret) : \"a\"(9L), \"D\"(0L), \"S\"(length), \"d\"(3L), \"r\"(r10), \"r\"(r8), \"r\"(r9) : \"rcx\", \"r11\", \"memory\");\n"
+        "    return ret;\n"
+        "}\n"
+        "long t_munmap(long address, long length)\n"
+        "{\n"
+        "    unsigned long ret;\n"
+        "    __asm__ __volatile__ (\"syscall\" : \"=a\"(ret) : \"a\"(11L), \"D\"(address), \"S\"(length) : \"rcx\", \"r11\", \"memory\");\n"
+        "    return ret;\n"
+        "}\n"
+        "long t_clock(void* ts)\n"
+        "{\n"
+        "    unsigned long ret;\n"
+        "    __asm__ __volatile__ (\"syscall\" : \"=a\"(ret) : \"a\"(228L), \"D\"(1), \"S\"(ts) : \"rcx\", \"r11\", \"memory\", \"cc\");\n"
+        "    return ret;\n"
+        "}\n"
+        "long t_tp(void)\n"
+        "{\n"
+        "    unsigned long tp;\n"
+        "    __asm__ (\"mov %%fs:0,%0\" : \"=r\" (tp));\n"
+        "    return tp;\n"
+        "}\n";
+    bool ok = c_direct_test_compile_source_keep(source, obj_path, NULL, 0, NULL, NULL, NULL);
+#if !__has_feature(memory_sanitizer)
+    void* mappings[5] = { NULL, NULL, NULL, NULL, NULL };
+    size_t mapped[5] = { 0, 0, 0, 0, 0 };
+    const CDirectTestAsm0 getpid_direct = (CDirectTestAsm0)(uintptr_t)(ok ? c_direct_test_code(obj_path, "t_getpid", mappings + 0, mapped + 0) : NULL);
+    const CDirectTestAsm1 mmap_direct = (CDirectTestAsm1)(uintptr_t)(ok ? c_direct_test_code(obj_path, "t_mmap", mappings + 1, mapped + 1) : NULL);
+    const CDirectTestAsm2 munmap_direct = (CDirectTestAsm2)(uintptr_t)(ok ? c_direct_test_code(obj_path, "t_munmap", mappings + 2, mapped + 2) : NULL);
+    const CDirectTestAsm0 tp_direct = (CDirectTestAsm0)(uintptr_t)(ok ? c_direct_test_code(obj_path, "t_tp", mappings + 3, mapped + 3) : NULL);
+    const CDirectTestAsmPointer clock_direct = (CDirectTestAsmPointer)(uintptr_t)(ok ? c_direct_test_code(obj_path, "t_clock", mappings + 4, mapped + 4) : NULL);
+    ok = ok && getpid_direct != NULL && mmap_direct != NULL && munmap_direct != NULL && tp_direct != NULL && clock_direct != NULL;
+    ok = ok && getpid_direct() == (long)getpid() && tp_direct() == (long)(uintptr_t)pthread_self();
+    struct timespec now = { .tv_sec = -1, .tv_nsec = -1 };
+    ok = ok && clock_direct(&now) == 0 && now.tv_sec >= 0 && now.tv_nsec >= 0 && now.tv_nsec < 1000000000L;
+    const long page = ok ? mmap_direct(4096) : -1;
+    ok = ok && (unsigned long)page < (unsigned long)-4095L;
+    if (ok)
+    {
+        *(volatile char*)(uintptr_t)page = 1;
+        ok = munmap_direct(page, 4096) == 0;
+    }
+    for (uint32_t i = 0; i < 5u; i += 1)
+    {
+        if (mappings[i] != NULL)
+        {
+            munmap(mappings[i], mapped[i]);
+        }
+    }
+#endif
+    unlink(obj_path);
+    static const char* const leaves[] = {
+        "void f(void) { __asm__(\"nop\"); }\n",
+        "void f(void) { __asm__ volatile (\"sys\" \"call\" : : : \"memory\"); }\n",
+        "long f(void) { unsigned long r; __asm__ volatile (\"syscall\" : \"=r\"(r) : \"a\"(39L) : \"rcx\", \"r11\"); return r; }\n",
+        "long f(void) { unsigned long r; __asm__ volatile (\"syscall\" : \"=a\"(r) : \"D\"(1L) : \"rcx\", \"r11\"); return r; }\n",
+        "long f(void) { unsigned long r; __asm__ volatile (\"syscall\" : \"=a\"(r) : \"a\"(39L), \"b\"(1L) : \"rcx\", \"r11\"); return r; }\n",
+        "long f(void) { unsigned long r; __asm__ volatile (\"syscall\" : \"=a\"(r) : \"a\"(39L), \"D\"(1L), \"D\"(2L) : \"rcx\", \"r11\"); return r; }\n",
+        "long f(void) { unsigned long r; __asm__ volatile (\"syscall\" : \"=a\"(r) : \"a\"(39L) : \"rbx\"); return r; }\n",
+        "long f(long x) { unsigned long r; __asm__ volatile (\"syscall\" : \"=a\"(r) : \"a\"(39L), \"r\"(x)); return r; }\n",
+        "long f(void) { unsigned long r; register long b __asm__(\"rbx\") = 1; __asm__ volatile (\"syscall\" : \"=a\"(r) : \"a\"(39L), \"r\"(b)); return r; }\n",
+        "long f(void) { unsigned long r; register int i __asm__(\"r10\") = 1; __asm__ volatile (\"syscall\" : \"=a\"(r) : \"a\"(39L), \"r\"(i)); return r; }\n",
+        "long f(void) { unsigned long r; long m; __asm__ volatile (\"syscall\" : \"=a\"(r), \"=m\"(m) : \"a\"(39L)); return r; }\n",
+        "long f(void) { unsigned long r; __asm__ volatile (\"syscall\" : [out] \"=a\"(r) : \"a\"(39L)); return r; }\n",
+        "long f(void) { unsigned long r; __asm__ volatile (\"syscall\" : \"=a\"(r) : \"a\"(1.5)); return r; }\n",
+        "long f(void) { unsigned long t; __asm__ (\"mov %%fs:0,%0\" : \"=r\"(t) : \"a\"(1L)); return t; }\n",
+        "long f(void) { int t; __asm__ (\"mov %%fs:0,%0\" : \"=r\"(t)); return t; }\n",
+        "long f(void) { static long s __asm__(\"r10\"); return s; }\n",
+        "long f(void) { long l __asm__(\"r10\") = 1; return l; }\n",
+        "long f(void) { for (register long i __asm__(\"r10\") = 0; i < 2; i++) {} return 0; }\n",
+        "void f(void) { __asm__ goto (\"jmp %l0\" : : : : done); done: return; }\n",
+        "long g(long);\nlong f(void) { unsigned long r; __asm__ volatile (\"syscall\" : \"=a\"(r) : \"a\"(39L), \"D\"(g)(1)); return r; }\n",
+        "long f(void) { const unsigned long r = 0; __asm__ volatile (\"syscall\" : \"=a\"(r) : \"a\"(39L)); return r; }\n",
+        "long f(void) { unsigned long r; register long c __asm__(\"rcx\") = 1; __asm__ volatile (\"syscall\" : \"=a\"(r) : \"a\"(39L), \"r\"(c) : \"rcx\"); return r; }\n",
+        "long f(void) { unsigned long r; register long c __asm__(\"r11\") = 1; __asm__ volatile (\"syscall\" : \"=a\"(r) : \"a\"(39L), \"r\"(c) : \"memory\", \"r11\"); return r; }\n",
+        "long f(void)\n"
+        "{\n"
+        "    unsigned long r;\n"
+        "    register long a __asm__(\"r10\") = 0;\n"
+        "    register long b __asm__(\"r8\") = 0;\n"
+        "    register long c __asm__(\"r9\") = 0;\n"
+        "    register long d __asm__(\"r11\") = 0;\n"
+        "    __asm__ volatile (\"syscall\" : \"=a\"(r) : \"a\"(39L), \"D\"(0L), \"S\"(0L), \"d\"(0L), \"r\"(a), \"r\"(b), \"r\"(c), \"r\"(d));\n"
+        "    return r;\n"
+        "}\n",
+        "long f(void) { unsigned long r; __asm__ volatile (u8\"syscall\" : \"=a\"(r) : \"a\"(39L)); return r; }\n",
+        "unsigned long g;\nlong f(void) { __asm__ volatile (\"syscall\" : \"=a\"(g) : \"a\"(39L)); return g; }\n",
+        "long f(void) { double d; __asm__ (\"mov %%fs:0,%0\" : \"=r\"(d)); return (long)d; }\n",
+        "long f(void) { unsigned long t; __asm__ (\"mov %%fs:0,%0\" : \"=m\"(t)); return t; }\n",
+        "long f(void) { unsigned long t = 0; __asm__ (\"mov %%fs:0,%0\" : \"+r\"(t)); return t; }\n",
+        "extern long g __asm__(\"r10\");\nlong f(void) { unsigned long r; __asm__ volatile (\"syscall\" : \"=a\"(r) : \"a\"(39L), \"r\"(g)); return r; }\n",
+        "long f(void) { unsigned long r; __asm__ volatile (\"syscall\" : \"=a\"(r) : \"a\" - 39L)); return r; }\n",
+        "long f(void) { unsigned long r; __asm__ volatile (\"syscall\" : \"=a\"(r) : \"a\"(39L ; ); return r; }\n",
+        "long f(void) { unsigned long r; __asm__ volatile (\"syscall\" : \"=a\"(r : : \"a\"(39L)); return r; }\n",
+        "long f(void) { unsigned long r; __asm__ volatile (\"syscall\" : \"=a\"(r) : \"a\"((__int128)39)); return r; }\n",
+        "long f(void) { unsigned long r; __asm__ volatile (\"syscall\" , \"=a\"(r) : \"a\"(39L)); return r; }\n",
+        "long f(void) { unsigned long r; __asm__ volatile (\"syscall\" : \"=a\"(r) : \"a\"(39L)) r; return r; }\n",
+        "long f(void) { unsigned long r; __asm__ volatile volatile (\"syscall\" : \"=a\"(r) : \"a\"(39L)); return r; }\n",
+        "long f(void) { typedef long T __asm__(\"r10\"); return 0; }\n",
+        "long f(void) { extern long e __asm__(\"r10\"); return e; }\n",
+        "long f(void) { long g(void) __asm__(\"r10\"); return g(); }\n",
+        "long f(void) { register double d __asm__(\"r10\") = 1; return (long)d; }\n",
+        "long f(void) { unsigned long r; register long x __asm__(\"r1\") = 0; __asm__ volatile (\"syscall\" : \"=a\"(r) : \"a\"(39L), \"r\"(x)); return r; }\n",
+        "long f(void) { unsigned long r; __asm__ volatile (\"sys\" : \"=a\"(r) : \"a\"(39L)); return r; }\n",
+        "long f(void) { register int i __asm__(\"r10\") = 1; return i; }\n",
+        "long f(void) { register long x __asm__(\"r1\") = 0; return x; }\n",
+        "long f(void) { unsigned long r; __asm__ volatile (\"syscall\" : \"=a\"(r) : \"a\"(39L) ]; return r; }\n",
+    };
+    for (uint32_t i = 0; ok && i < (uint32_t)(sizeof(leaves) / sizeof(leaves[0])); i += 1)
+    {
+        ok = c_direct_test_compile_source(leaves[i], obj_path, 1, NULL, NULL);
+        if (!ok)
+        {
+            fprintf(stderr, "test-direct: an asm case the direct path took: %s", leaves[i]);
+        }
+    }
+    return ok;
+}
+
+// musl's atomics (arch/x86_64/atomic_arch.h, #3592's step 6c), compiled by the direct path and run in this process (not
+// under MSan, as the asm test): each shape on values a 32-bit operation and a 64-bit one would tell apart, and the shapes
+// that still leave.
+typedef int (*CDirectTestCas)(volatile int*, int, int);
+typedef void* (*CDirectTestCasPointer)(volatile void*, void*, void*);
+typedef int (*CDirectTestUpdate)(volatile int*, int);
+typedef void (*CDirectTestUpdateVoid)(volatile int*, int);
+typedef void (*CDirectTestUpdate64)(volatile unsigned long*, unsigned long);
+typedef void (*CDirectTestStep)(volatile int*);
+typedef int (*CDirectTestBits)(unsigned long);
+typedef long (*CDirectTestLong)(long);
+typedef void (*CDirectTestVoid)(void);
+typedef void (*CDirectTestPointerVoid)(void*);
+
+static bool c_direct_test_atomics(const char* obj_path)
+{
+    static const char source[] =
+        "int t_cas(volatile int *p, int t, int s)\n"
+        "{\n"
+        "    __asm__ __volatile__ (\"lock ; cmpxchg %3, %1\" : \"=a\"(t), \"=m\"(*p) : \"a\"(t), \"r\"(s) : \"memory\");\n"
+        "    return t;\n"
+        "}\n"
+        "void *t_cas_p(volatile void *p, void *t, void *s)\n"
+        "{\n"
+        "    __asm__( \"lock ; cmpxchg %3, %1\" : \"=a\"(t), \"=m\"(*(void *volatile *)p) : \"a\"(t), \"r\"(s) : \"memory\" );\n"
+        "    return t;\n"
+        "}\n"
+        "int t_swap(volatile int *p, int v)\n"
+        "{\n"
+        "    __asm__ __volatile__(\"xchg %0, %1\" : \"=r\"(v), \"=m\"(*p) : \"0\"(v) : \"memory\");\n"
+        "    return v;\n"
+        "}\n"
+        "int t_fetch_add(volatile int *p, int v)\n"
+        "{\n"
+        "    __asm__ __volatile__(\"lock ; xadd %0, %1\" : \"=r\"(v), \"=m\"(*p) : \"0\"(v) : \"memory\");\n"
+        "    return v;\n"
+        "}\n"
+        "void t_and(volatile int *p, int v) { __asm__ __volatile__(\"lock ; and %1, %0\" : \"=m\"(*p) : \"r\"(v) : \"memory\"); }\n"
+        "void t_or(volatile int *p, int v) { __asm__ __volatile__(\"lock ; or %1, %0\" : \"=m\"(*p) : \"r\"(v) : \"memory\"); }\n"
+        "void t_and_64(volatile unsigned long *p, unsigned long v) { __asm__ __volatile(\"lock ; and %1, %0\" : \"=m\"(*p) : \"r\"(v) : \"memory\"); }\n"
+        "void t_or_64(volatile unsigned long *p, unsigned long v) { __asm__ __volatile__(\"lock ; or %1, %0\" : \"=m\"(*p) : \"r\"(v) : \"memory\"); }\n"
+        "void t_inc(volatile int *p) { __asm__ __volatile__(\"lock ; incl %0\" : \"=m\"(*p) : \"m\"(*p) : \"memory\"); }\n"
+        "void t_dec(volatile int *p) { __asm__ __volatile__(\"lock ; decl %0\" : \"=m\"(*p) : \"m\"(*p) : \"memory\"); }\n"
+        "void t_store(volatile int *p, int x) { __asm__ __volatile__(\"mov %1, %0 ; lock ; orl $0,(%%rsp)\" : \"=m\"(*p) : \"r\"(x) : \"memory\"); }\n"
+        "void t_barrier(void) { __asm__ __volatile__( \"\" : : : \"memory\" ); }\n"
+        "void t_spin(void) { __asm__ __volatile__( \"pause\" : : : \"memory\" ); }\n"
+        "void t_crash(void) { __asm__ __volatile__( \"hlt\" : : : \"memory\" ); }\n"
+        "int t_ctz_64(unsigned long x) { __asm__( \"bsf %1,%0\" : \"=r\"(x) : \"r\"(x) ); return x; }\n"
+        "int t_clz_64(unsigned long x) { __asm__( \"bsr %1,%0 ; xor $63,%0\" : \"=r\"(x) : \"r\"(x) ); return x; }\n"
+        "void t_keep(void *d) { __asm__ __volatile__ (\"\" : : \"r\"(d) : \"memory\"); }\n"
+        "long t_through(long s) { __asm__ ( \"\" : \"+r\"(s) : : \"memory\" ); return s; }\n"
+        "int t_cas_twice(volatile int *p, int t, int s)\n"
+        "{\n"
+        "    __asm__ __volatile__ (\"lock ; cmpxchg %3, %1\" : \"=a\"(t), \"=m\"(*p) : \"a\"(t), \"r\"(s) : \"memory\");\n"
+        "    __asm__ __volatile__ (\"lock ; cmpxchg %3, %1\" : \"=a\"(t), \"=m\"(*p) : \"a\"(t), \"r\"(s) : \"memory\");\n"
+        "    return t;\n"
+        "}\n";
+    bool ok = c_direct_test_compile_source_keep(source, obj_path, NULL, 0, NULL, NULL, NULL);
+    if (!ok)
+    {
+        fprintf(stderr, "test-direct: musl's atomics left the direct path\n");
+    }
+#if !__has_feature(memory_sanitizer)
+    static const char* const names[] = {
+        "t_cas", "t_cas_p", "t_swap", "t_fetch_add", "t_and", "t_or", "t_and_64", "t_or_64", "t_inc", "t_dec",
+        "t_store", "t_barrier", "t_spin", "t_ctz_64", "t_clz_64", "t_keep", "t_through", "t_crash", "t_cas_twice",
+    };
+    enum { count = sizeof(names) / sizeof(names[0]) };
+    void* mappings[count] = { 0 };
+    size_t mapped[count] = { 0 };
+    const void* code[count] = { 0 };
+    for (uint32_t i = 0; ok && i < (uint32_t)count; i += 1)
+    {
+        code[i] = c_direct_test_code(obj_path, names[i], mappings + i, mapped + i);
+        ok = code[i] != NULL;
+    }
+    if (ok)
+    {
+        int x = 5;
+        ok = ((CDirectTestCas)(uintptr_t)code[0])(&x, 5, 7) == 5 && x == 7 && ((CDirectTestCas)(uintptr_t)code[0])(&x, 5, 9) == 7 && x == 7;
+        int a = 0;
+        int b = 0;
+        int c = 0;
+        void* volatile q = &a;
+        ok = ok && ((CDirectTestCasPointer)(uintptr_t)code[1])(&q, &a, &b) == &a && q == &b;
+        ok = ok && ((CDirectTestCasPointer)(uintptr_t)code[1])(&q, &a, &c) == &b && q == &b;
+        int y = 3;
+        ok = ok && ((CDirectTestUpdate)(uintptr_t)code[2])(&y, 8) == 3 && y == 8;
+        ok = ok && ((CDirectTestUpdate)(uintptr_t)code[3])(&y, 5) == 8 && y == 13;
+        ((CDirectTestUpdateVoid)(uintptr_t)code[4])(&y, 6);
+        ok = ok && y == 4;
+        ((CDirectTestUpdateVoid)(uintptr_t)code[5])(&y, 3);
+        ok = ok && y == 7;
+        // The 64-bit forms reach the high half; the 32-bit ones leave the word after them alone.
+        volatile unsigned long z = UINT64_C(0xf0f0f0f0f0f0f0f0);
+        ((CDirectTestUpdate64)(uintptr_t)code[6])(&z, UINT64_C(0xff00ff00ff00ff00));
+        ok = ok && z == UINT64_C(0xf000f000f000f000);
+        ((CDirectTestUpdate64)(uintptr_t)code[7])(&z, UINT64_C(0x0100000000000001));
+        ok = ok && z == UINT64_C(0xf100f000f000f001);
+        volatile int pair[2] = { 7, 100 };
+        ((CDirectTestStep)(uintptr_t)code[8])(pair);
+        ok = ok && pair[0] == 8 && pair[1] == 100;
+        ((CDirectTestStep)(uintptr_t)code[9])(pair);
+        ((CDirectTestStep)(uintptr_t)code[9])(pair);
+        ok = ok && pair[0] == 6 && pair[1] == 100;
+        ((CDirectTestUpdateVoid)(uintptr_t)code[10])(pair, -42);
+        ok = ok && pair[0] == -42 && pair[1] == 100;
+        ((CDirectTestVoid)(uintptr_t)code[11])();
+        ((CDirectTestVoid)(uintptr_t)code[12])();
+        // bsf and bsr on values with bits at both ends, which tell the two apart and a 32-bit operation from a 64-bit one.
+        ok = ok && ((CDirectTestBits)(uintptr_t)code[13])(UINT64_C(0x0100000000000080)) == 7 && ((CDirectTestBits)(uintptr_t)code[13])(UINT64_C(0x0300000000000000)) == 56;
+        ok = ok && ((CDirectTestBits)(uintptr_t)code[14])(1u) == 63 && ((CDirectTestBits)(uintptr_t)code[14])(UINT64_C(0x00000100000000ff)) == 23;
+        // A register output stored at its own size: the pointer beside it is read again.
+        int w = 5;
+        ok = ok && ((CDirectTestCas)(uintptr_t)code[18])(&w, 5, 7) == 7 && w == 7;
+        ((CDirectTestPointerVoid)(uintptr_t)code[15])(&y);
+        ok = ok && y == 7 && ((CDirectTestLong)(uintptr_t)code[16])(-123456789012L) == -123456789012L;
+        // The locks, which a single thread can't tell, by the instructions' bytes; and hlt, which faults outside the kernel
+        // and isn't run.
+        static const struct
+        {
+            uint8_t function;
+            uint8_t length;
+            uint8_t bytes[6];
+        } instructions[] = {
+            { 0, 4, { 0xf0, 0x0f, 0xb1, 0x0a } },
+            { 1, 5, { 0xf0, 0x48, 0x0f, 0xb1, 0x0a } },
+            { 2, 2, { 0x87, 0x02 } },
+            { 3, 4, { 0xf0, 0x0f, 0xc1, 0x02 } },
+            { 4, 3, { 0xf0, 0x21, 0x02 } },
+            { 5, 3, { 0xf0, 0x09, 0x02 } },
+            { 6, 4, { 0xf0, 0x48, 0x21, 0x02 } },
+            { 7, 4, { 0xf0, 0x48, 0x09, 0x02 } },
+            { 8, 3, { 0xf0, 0xff, 0x02 } },
+            { 9, 3, { 0xf0, 0xff, 0x0a } },
+            { 10, 6, { 0x89, 0x02, 0xf0, 0x83, 0x0c, 0x24 } },
+            { 12, 2, { 0xf3, 0x90 } },
+            { 17, 1, { 0xf4 } },
+        };
+        for (uint32_t i = 0; ok && i < (uint32_t)(sizeof(instructions) / sizeof(instructions[0])); i += 1)
+        {
+            const uint8_t* const bytes = (const uint8_t*)code[instructions[i].function];
+            bool found = false;
+            for (uint32_t at = 0; !found && at + instructions[i].length <= 128u; at += 1)
+            {
+                found = memcmp(bytes + at, instructions[i].bytes, instructions[i].length) == 0;
+            }
+            ok = found;
+        }
+        if (!ok)
+        {
+            fprintf(stderr, "test-direct: musl's atomics ran wrong\n");
+        }
+    }
+    for (uint32_t i = 0; i < (uint32_t)count; i += 1)
+    {
+        if (mappings[i] != NULL)
+        {
+            munmap(mappings[i], mapped[i]);
+        }
+    }
+#endif
+    unlink(obj_path);
+    // What leaves: another constraint or operand, a memory operand that isn't `*p` of a pointer local, sizes that differ,
+    // an operand too many or too few, a clobber besides memory, and anything after the operands.
+    static const char* const leaves[] = {
+        "int f(volatile int *p, int t, int s) { __asm__ (\"lock ; cmpxchg %3, %1\" : \"=r\"(t), \"=m\"(*p) : \"a\"(t), \"r\"(s) : \"memory\"); return t; }\n",
+        "int f(volatile int *p, int t, int s) { __asm__ (\"lock ; cmpxchg %3, %1\" : \"=a\"(t), \"=m\"(*p) : \"r\"(t), \"r\"(s) : \"memory\"); return t; }\n",
+        "int f(volatile int *p, int t, int s) { __asm__ (\"lock ; cmpxchg %3, %1\" : \"=a\"(t), \"=m\"(*p) : \"a\"(t), \"r\"(s)); return t; }\n",
+        "int f(volatile int *p, int t, int s) { __asm__ (\"lock ; cmpxchg %3, %1\" : \"=a\"(t), \"=m\"(p[1]) : \"a\"(t), \"r\"(s) : \"memory\"); return t; }\n",
+        "int f(volatile int *p, long t, long s) { __asm__ (\"lock ; cmpxchg %3, %1\" : \"=a\"(t), \"=m\"(*p) : \"a\"(t), \"r\"(s) : \"memory\"); return t; }\n",
+        "volatile int *g;\nint f(int t, int s) { __asm__ (\"lock ; cmpxchg %3, %1\" : \"=a\"(t), \"=m\"(*g) : \"a\"(t), \"r\"(s) : \"memory\"); return t; }\n",
+        "int f(volatile int *p, int t, int s) { __asm__ (\"lock ; cmpxchg %3, %1\" : \"=a\"(t), \"=m\"(*p) : \"a\"(t), \"r\"(s) : \"memory\", \"cc\"); return t; }\n",
+        "int f(volatile int *p, int t, int s) { __asm__ (\"lock ; cmpxchg %3, %1\" : \"=a\"(t), \"=m\"(*p) : \"a\"(t), \"r\"(s), \"r\"(s) : \"memory\"); return t; }\n",
+        "int f(volatile int *p, int v) { __asm__ (\"xchg %0, %1\" : \"=r\"(v), \"=m\"(*p) : \"r\"(v) : \"memory\"); return v; }\n",
+        "int f(volatile short *p, short v) { __asm__ (\"xchg %0, %1\" : \"=r\"(v), \"=m\"(*p) : \"0\"(v) : \"memory\"); return v; }\n",
+        "int f(volatile int *p, int v) { __asm__ (\"lock ; xadd %0, %1\" : \"=m\"(*p), \"=r\"(v) : \"0\"(v) : \"memory\"); return v; }\n",
+        "void f(volatile int *p, long v) { __asm__ (\"lock ; and %1, %0\" : \"=m\"(*p) : \"r\"(v) : \"memory\"); }\n",
+        "void f(volatile int *p, volatile int *q) { __asm__ (\"lock ; incl %0\" : \"=m\"(*p) : \"m\"(*q) : \"memory\"); }\n",
+        "void f(volatile int *p, int x) { __asm__ (\"mov %1, %0 ; lock ; orl $0,(%%rsp)\" : \"=m\"(*p) : \"a\"(x) : \"memory\"); }\n",
+        "void f(int x) { __asm__ (\"\" : \"=r\"(x)); }\n",
+        "void f(void) { __asm__ (\"pause\" : : \"r\"(1)); }\n",
+        "int f(unsigned long x) { __asm__ (\"bsf %1,%0\" : \"=r\"(x) : \"r\"(x) : \"memory\"); return x; }\n",
+        "int f(unsigned long x) { int r; __asm__ (\"bsf %1,%0\" : \"=r\"(r) : \"r\"(x)); return r; }\n",
+        "int f(double x) { __asm__ (\"bsf %1,%0\" : \"=r\"(x) : \"r\"(x)); return x; }\n",
+        "void f(volatile int *p) { __asm__ (\"lock ; incl %0\" : \"=m\"(*p) : \"m\"(*p) : \"memory\") p; }\n",
+        "void f(volatile int *p) { __asm__ (\"lock ; incl %0\" : \"=m\"(*(p)) : \"m\"(*p) : \"memory\"); }\n",
+        "void f(void) { __asm__ (\"lock ; cmpxchg8b %0\" : : : \"memory\"); }\n",
+        "void f(volatile int *p) { __asm__ (\"lock ; incl %0\" : \"=m\"(p) : \"m\"(p) : \"memory\"); }\n",
+        "void f(volatile int *p) { __asm__ (\"lock ; incl %0\" : \"=m\"(*(long)p) : \"m\"(*(long)p) : \"memory\"); }\n",
+        "int f(volatile int *p, int s) { const int t = 5; __asm__ (\"lock ; cmpxchg %3, %1\" : \"=a\"(t), \"=m\"(*p) : \"a\"(5), \"r\"(s) : \"memory\"); return t; }\n",
+        "long f(volatile long *p, double t, long s) { __asm__ (\"lock ; cmpxchg %3, %1\" : \"=a\"(t), \"=m\"(*p) : \"a\"(s), \"r\"(s) : \"memory\"); return s; }\n",
+        "void f(volatile long *p) { __asm__ (\"lock ; and %1, %0\" : \"=m\"(*p) : \"r\"(1.5) : \"memory\"); }\n",
+        "int f(volatile int *p, int t, long s) { __asm__ (\"lock ; cmpxchg %3, %1\" : \"=a\"(t), \"=m\"(*p) : \"a\"(t), \"r\"(s) : \"memory\"); return t; }\n",
+    };
+    for (uint32_t i = 0; ok && i < (uint32_t)(sizeof(leaves) / sizeof(leaves[0])); i += 1)
+    {
+        ok = c_direct_test_compile_source(leaves[i], obj_path, 1, NULL, NULL);
+        if (!ok)
+        {
+            fprintf(stderr, "test-direct: an atomic asm case the direct path took: %s", leaves[i]);
+        }
+    }
+    return ok;
+}
+
+// What the dependency test expects of the records (#3592): the paths after the test's directory, in order, and the flags.
+typedef struct CDirectTestDependency CDirectTestDependency;
+struct CDirectTestDependency
+{
+    const char* path;
+    bool used;
+    bool system;
+};
+
+typedef struct CDirectTestDependencies CDirectTestDependencies;
+struct CDirectTestDependencies
+{
+    const char* directory;
+    const CDirectTestDependency* expected;
+    uint32_t expected_count;
+    bool accept;
+    bool called;
+    bool matched;
+};
+
+// CDirectRequest.dependencies for the test: whether the records are the expected ones (any, without a list), and the
+// test's answer.
+static bool c_direct_test_dependency_records(void* context, const CDirectDependency* files, uint32_t count)
+{
+    CDirectTestDependencies* const test = (CDirectTestDependencies*)context;
+    const size_t prefix = strlen(test->directory);
+    bool matched = test->expected == NULL || count == test->expected_count;
+    for (uint32_t i = 0; matched && test->expected != NULL && i < count; i += 1)
+    {
+        const CDirectTestDependency want = test->expected[i];
+        const bool absolute = want.path[0] == '/';
+        const size_t length = strlen(want.path);
+        matched = files[i].used == want.used && files[i].system == want.system && files[i].length == strlen(files[i].path) &&
+                  (absolute ? files[i].length == length && memcmp(files[i].path, want.path, length) == 0
+                            : files[i].length == prefix + 1u + length && memcmp(files[i].path, test->directory, prefix) == 0 && files[i].path[prefix] == '/' &&
+                                  memcmp(files[i].path + prefix + 1u, want.path, length) == 0);
+        if (!matched)
+        {
+            fprintf(stderr, "test-direct: dependency %u is %.*s (used %d, system %d), not %s (used %d, system %d)\n", i, (int)files[i].length, files[i].path,
+                    files[i].used, files[i].system, want.path, want.used, want.system);
+        }
+    }
+    if (test->expected != NULL && count != test->expected_count)
+    {
+        fprintf(stderr, "test-direct: %u dependency records, not %u\n", count, test->expected_count);
+    }
+    test->called = true;
+    test->matched = matched;
+    return test->accept;
+}
+
+// -MD's records (#3592) of a unit that reads its files every way the direct path reads them, against the full pipeline's
+// pp_dependency_observe: in the order of their first reading, one record a file (two spellings of one file make one,
+// under the first: sys/t.h, a system header's in s.h and the main file's by another spelling, is then a user file); a
+// file skipped by its guard or #pragma once, and one a __has_include finds, read too; a system
+// header's when every reading was one, where a reading (an include, a skip, a __has_include) is as much a system
+// header's as its includer is, and
+// #pragma GCC system_header makes the rest of a header one, and the header in its later inclusions, but is ignored in the
+// main file; the predefines file a system
+// header, an -include file one when the search found it in a system directory; the main file not used. Then a rule the
+// driver can't make leaves before the object is written, and so does a __has_include that finds a directory.
+static bool c_direct_test_dependencies(const char* obj_path)
+{
+    char directory[128];
+    snprintf(directory, sizeof(directory), "/tmp/buster_direct_deps_%d", (int)getpid());
+    static const char* const subdirectories[] = { "", "/inc", "/sys", "/inc/sub" };
+    static const struct
+    {
+        const char* name;
+        const char* text;
+    } files[] = {
+        { "predefs.h", "#define __x86_64__ 1\n#define __LP64__ 1\n#define __STDC__ 1\n#define __STDC_VERSION__ 201710L\n" },
+        { "forced.h", "int forced;\n" },
+        { "sys/sysforced.h", "int sysforced;\n" },
+        { "inc/g.h", "#ifndef G_H\n#define G_H\nint g;\n#endif\n" },
+        { "inc/o.h", "#pragma once\nint o;\n" },
+        { "inc/p.h", "int p;\n" },
+        { "sys/s.h", "#include \"t.h\"\n#include <u.h>\n#include <u.h>\n#include <q.h>\n#if __has_include(<p2.h>)\n#endif\n" },
+        { "inc/q.h", "#ifndef Q_H\n#define Q_H\n#pragma GCC system_header\nint q;\n#endif\n" },
+        { "inc/p2.h", "int p2;\n" },
+        { "sys/t.h", "int t;\n" },
+        { "inc/u.h", "#ifndef U_H\n#define U_H\nint u;\n#endif\n" },
+        { "inc/h.h", "#ifdef SECOND\n#include <k2.h>\n#endif\n#include <k.h>\n#pragma GCC system_header\n#include <w.h>\n" },
+        { "inc/k.h", "int k;\n" },
+        { "inc/k2.h", "int k2;\n" },
+        { "inc/w.h", "int w;\n" },
+        { "inc/m.h", "int m;\n" },
+        { "main.c",
+          "#include <g.h>\n"
+          "#include <g.h>\n"
+          "#include <o.h>\n"
+          "#include <o.h>\n"
+          "#if __has_include(<p.h>) && __has_include(<o.h>) && !__has_include(<absent.h>)\n"
+          "int probed;\n"
+          "#endif\n"
+          "#include <s.h>\n"
+          "#include \"sys/../sys/t.h\"\n"
+          "#include <u.h>\n"
+          "#include <q.h>\n"
+          "#include \"inc/../inc/g.h\"\n"
+          "#include <h.h>\n"
+          "#define SECOND\n"
+          "#include <h.h>\n"
+          "#pragma GCC system_header\n"
+          "#include <m.h>\n"
+          "int x;\n" },
+        { "dir.c", "#if __has_include(<sub>)\n#endif\nint x;\n" },
+    };
+    static const CDirectTestDependency expected[] = {
+        { "predefs.h", true, true },
+        { "forced.h", true, false },
+        { "sys/sysforced.h", true, true },
+        { "main.c", false, false },
+        { "inc/g.h", true, false },
+        { "inc/o.h", true, false },
+        { "inc/p.h", true, false },
+        { "sys/s.h", true, true },
+        { "sys/t.h", true, false },
+        { "inc/u.h", true, false },
+        { "inc/q.h", true, true },
+        { "inc/p2.h", true, true },
+        { "inc/h.h", true, false },
+        { "inc/k.h", true, false },
+        { "inc/w.h", true, true },
+        { "inc/k2.h", true, true },
+        { "inc/m.h", true, false },
+    };
+    char path[256];
+    bool ok = true;
+    for (uint32_t i = 0; i < sizeof(subdirectories) / sizeof(subdirectories[0]); i += 1)
+    {
+        snprintf(path, sizeof(path), "%s%s", directory, subdirectories[i]);
+        ok = mkdir(path, 0700) == 0 && ok;
+    }
+    for (uint32_t i = 0; ok && i < sizeof(files) / sizeof(files[0]); i += 1)
+    {
+        snprintf(path, sizeof(path), "%s/%s", directory, files[i].name);
+        FILE* const file = fopen(path, "wb");
+        ok = file != NULL && fputs(files[i].text, file) != EOF;
+        ok = (file == NULL || fclose(file) == 0) && ok;
+    }
+    char user[160];
+    char system[160];
+    char predefines[160];
+    char forced[160];
+    char main_path[160];
+    char dir_path[160];
+    snprintf(user, sizeof(user), "%s/inc", directory);
+    snprintf(system, sizeof(system), "%s/sys", directory);
+    snprintf(predefines, sizeof(predefines), "%s/predefs.h", directory);
+    snprintf(forced, sizeof(forced), "%s/forced.h", directory);
+    snprintf(main_path, sizeof(main_path), "%s/main.c", directory);
+    snprintf(dir_path, sizeof(dir_path), "%s/dir.c", directory);
+    const char* const directories[2] = { user, system };
+    static const uint8_t levels[2] = { 0, 1 };
+    const char* const includes[2] = { forced, "sysforced.h" };
+    CDirectTestDependencies test = {
+        .directory = directory,
+        .expected = expected,
+        .expected_count = (uint32_t)(sizeof(expected) / sizeof(expected[0])),
+        .accept = true,
+    };
+    CDirectRequest request = {
+        .input_path = main_path,
+        .output_path = obj_path,
+        .predefines_path = predefines,
+        .directories = directories,
+        .directory_system = levels,
+        .directory_count = 2,
+        .includes = includes,
+        .include_count = 2,
+        .pic = true,
+        .unwind_tables = true,
+        .quiet = true,
+        .release = true,
+        .dependencies = c_direct_test_dependency_records,
+        .dependency_context = &test,
+    };
+    unlink(obj_path);
+    ok = ok && c_direct_try_compile(&request) == 0 && test.called && test.matched && access(obj_path, F_OK) == 0;
+    // A rule the driver can't make: the unit leaves, and no object is written.
+    unlink(obj_path);
+    test = (CDirectTestDependencies){
+        .directory = directory,
+        .expected = expected,
+        .expected_count = (uint32_t)(sizeof(expected) / sizeof(expected[0])),
+    };
+    ok = ok && c_direct_try_compile(&request) == 1 && test.called && test.matched && access(obj_path, F_OK) != 0;
+    // What leaves when the unit collects records and compiles when it doesn't: a __has_include that finds a directory,
+    // which the full pipeline's search goes on past; a __has_include of a macro (#3608); and a line marker's or #line's
+    // file name, which would change the system header level.
+    static const char* const leaving[] = {
+        "#if __has_include(<sub>)\n#endif\nint x;\n",
+        "#define H <g.h>\n#if __has_include(H)\n#endif\nint x;\n",
+        "# 7 \"other.c\" 3\nint x;\n",
+        "#line 7 \"other.c\"\nint x;\n",
+    };
+    request.input_path = dir_path;
+    request.include_count = 0;
+    for (uint32_t i = 0; ok && i < sizeof(leaving) / sizeof(leaving[0]); i += 1)
+    {
+        FILE* const file = fopen(dir_path, "wb");
+        ok = file != NULL && fputs(leaving[i], file) != EOF;
+        ok = (file == NULL || fclose(file) == 0) && ok;
+        test = (CDirectTestDependencies){ .directory = directory, .accept = true };
+        request.dependencies = c_direct_test_dependency_records;
+        ok = ok && c_direct_try_compile(&request) == 1 && !test.called && access(obj_path, F_OK) != 0;
+        request.dependencies = NULL;
+        ok = ok && c_direct_try_compile(&request) == 0;
+        unlink(obj_path);
+        if (!ok)
+        {
+            fprintf(stderr, "test-direct: dependency case %u\n", i);
+        }
+    }
+    // A line marker's number alone, and #line's, change nothing a record sees. __has_include and __has_include_next are
+    // defined, as clang's builtin macros are, to defined, #ifdef, #ifndef, #elifdef and #elifndef: each case reads p.h
+    // where they are and k.h where they aren't.
+    static const char* const staying[] = {
+        "# 7\nint x;\n#include <p.h>\n",
+        "#line 7\nint x;\n#include <p.h>\n",
+        "#ifdef __has_include\n#include <p.h>\n#else\n#include <k.h>\n#endif\n",
+        "#ifndef __has_include_next\n#include <k.h>\n#else\n#include <p.h>\n#endif\n",
+        "#if defined(__has_include) && defined __has_include_next\n#include <p.h>\n#else\n#include <k.h>\n#endif\n",
+        "#if 0\n#elifdef __has_include\n#include <p.h>\n#else\n#include <k.h>\n#endif\n",
+        "#if 0\n#elifndef __has_include_next\n#include <k.h>\n#else\n#include <p.h>\n#endif\n",
+    };
+    for (uint32_t i = 0; ok && i < sizeof(staying) / sizeof(staying[0]); i += 1)
+    {
+        FILE* const file = fopen(dir_path, "wb");
+        ok = file != NULL && fputs(staying[i], file) != EOF;
+        ok = (file == NULL || fclose(file) == 0) && ok;
+        static const CDirectTestDependency alone[] = {
+            { "predefs.h", true, true },
+            { "dir.c", false, false },
+            { "inc/p.h", true, false },
+        };
+        test = (CDirectTestDependencies){ .directory = directory, .expected = alone, .expected_count = 3, .accept = true };
+        request.dependencies = c_direct_test_dependency_records;
+        ok = ok && c_direct_try_compile(&request) == 0 && test.called && test.matched;
+        unlink(obj_path);
+        if (!ok)
+        {
+            fprintf(stderr, "test-direct: dependency case %u that stays\n", i);
+        }
+    }
+    // The tables' bound: the predefines file, the main file and 4,094 headers fill them, and one more header leaves.
+    char* const many = (char*)malloc((size_t)BUSTER_FPP_MAX_DEPENDENCIES * 24u);
+    uint32_t written = 0;
+    for (uint32_t i = 0; ok && many != NULL && i + 1u < BUSTER_FPP_MAX_DEPENDENCIES; i += 1)
+    {
+        snprintf(path, sizeof(path), "%s/inc/sub/%u.h", directory, i);
+        FILE* const file = fopen(path, "wb");
+        ok = file != NULL && fclose(file) == 0;
+        written += ok ? 1u : 0u;
+    }
+    uint32_t length = 0;
+    for (uint32_t i = 0; ok && many != NULL && i + 2u < BUSTER_FPP_MAX_DEPENDENCIES; i += 1)
+    {
+        length += (uint32_t)snprintf(many + length, 24u, "#include <sub/%u.h>\n", i);
+    }
+    for (uint32_t extra = 0; ok && many != NULL && extra < 2u; extra += 1)
+    {
+        FILE* const file = fopen(dir_path, "wb");
+        ok = file != NULL && fwrite(many, 1, length, file) == length;
+        if (ok && extra != 0)
+        {
+            ok = fprintf(file, "#include <sub/%u.h>\n", BUSTER_FPP_MAX_DEPENDENCIES - 2u) > 0;
+        }
+        ok = (file == NULL || fclose(file) == 0) && ok;
+        test = (CDirectTestDependencies){ .directory = directory, .accept = true };
+        request.dependencies = c_direct_test_dependency_records;
+        const int status = ok ? c_direct_try_compile(&request) : -2;
+        ok = ok && status == (extra == 0 ? 0 : 1) && test.called == (extra == 0);
+        unlink(obj_path);
+        if (!ok)
+        {
+            fprintf(stderr, "test-direct: %u files read, status %d\n", BUSTER_FPP_MAX_DEPENDENCIES + extra, status);
+        }
+    }
+    ok = ok && many != NULL;
+    free(many);
+    for (uint32_t i = 0; i < written; i += 1)
+    {
+        snprintf(path, sizeof(path), "%s/inc/sub/%u.h", directory, i);
+        unlink(path);
+    }
+    for (uint32_t i = 0; i < sizeof(files) / sizeof(files[0]); i += 1)
+    {
+        snprintf(path, sizeof(path), "%s/%s", directory, files[i].name);
+        unlink(path);
+    }
+    for (uint32_t i = sizeof(subdirectories) / sizeof(subdirectories[0]); i > 0; i -= 1)
+    {
+        snprintf(path, sizeof(path), "%s%s", directory, subdirectories[i - 1u]);
+        rmdir(path);
     }
     return ok;
 }
@@ -1701,7 +3074,7 @@ int run_c_direct_tests(int argc, char** argv)
     static const uint16_t expected_table[] = {
         300, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 14, 15, 16, 24910
     };
-    if (c_direct_test_compile_source_with(table_source, obj_path, 0, NULL, 0, false, NULL, NULL, NULL, NULL, expected_table, sizeof(expected_table)))
+    if (c_direct_test_compile_source_with(table_source, obj_path, 0, NULL, 0, false, NULL, NULL, NULL, NULL, expected_table, sizeof(expected_table), (CDirectTestMode){ 0 }))
     {
         passed += 1u;
     }
@@ -1751,6 +3124,96 @@ int run_c_direct_tests(int argc, char** argv)
         failed += 1u;
     }
 
+    if (c_direct_test_trigraph_scan())
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL the trigraph scan\n");
+        failed += 1u;
+    }
+
+    if (c_direct_test_language_tokens())
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL the language modes' tokens\n");
+        failed += 1u;
+    }
+
+    if (c_direct_test_language_compiles(obj_path))
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL the language modes' compiles\n");
+        failed += 1u;
+    }
+
+    if (c_direct_test_admission())
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL the driver's admission of the language modes and -w\n");
+        failed += 1u;
+    }
+
+    if (c_direct_test_aliases(obj_path))
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL aliases and typeof\n");
+        failed += 1u;
+    }
+
+    if (c_direct_test_specifiers(obj_path))
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL a declaration's specifiers\n");
+        failed += 1u;
+    }
+
+    if (c_direct_test_raw_strings(obj_path))
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL raw string literals and a directive's literals\n");
+        failed += 1u;
+    }
+
+    if (c_direct_test_asm(obj_path))
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL inline assembly\n");
+        failed += 1u;
+    }
+
+    if (c_direct_test_atomics(obj_path))
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL musl's atomics' inline assembly\n");
+        failed += 1u;
+    }
+
     if (c_direct_test_ident_growth())
     {
         passed += 1u;
@@ -1788,6 +3251,16 @@ int run_c_direct_tests(int argc, char** argv)
     else
     {
         fprintf(stderr, "test-direct: FAIL the files' mappings kept, released, and released by a bailout\n");
+        failed += 1u;
+    }
+
+    if (c_direct_test_dependencies(obj_path))
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL -MD's records of the files a unit reads\n");
         failed += 1u;
     }
 

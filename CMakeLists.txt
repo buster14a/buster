@@ -58,6 +58,7 @@ set(BUSTER_FUZZ_ENTRY "" CACHE FILEPATH "The fuzzing entry's C file (src/buster/
 set(BUSTER_BAKE 1 CACHE STRING "0 leaves the backend's tables to be built when the executable runs")
 set(BUSTER_PGO 0 CACHE STRING "1 builds Release with a profile of the compiler's own compiles (Release alone)")
 set(BUSTER_PGO_TRAIN "" CACHE FILEPATH "A bash script that trains BUSTER_PGO's profile in place of the default compiles")
+set(BUSTER_PGO_CORPUS "" CACHE PATH "With BUSTER_PGO=1, the frozen corpus (tools/ci/fetch-corpus.sh) whose sqlite3.c trains the direct path's profile")
 set(BUSTER_PARALLEL_CODEGEN auto CACHE STRING "auto, 1 or 0: the two longest Release units' native code, and Develop's units, in parallel parts")
 set(BUSTER_RELEASE_PARTS 0 CACHE STRING "1 builds Release's main.c units in parts before the optimizer, as Develop's (a -parts tree)")
 set(BUSTER_SELF_BUILT "" CACHE STRING "The units Develop compiles with the previous stage: none, tests, or units' file names")
@@ -182,11 +183,19 @@ endif()
 # (BusterSettings.cmake), the Debug configuration's or the Develop configuration's (Release's optimization with line
 # tables), around the flags, then the definitions, as print-compile-flags prints them.
 # With BUSTER_PGO, the profile follows the flags, as -fprofile-instr-use; the trained profile is built before the
-# units and recompiles them when it changes.
+# units and recompiles them when it changes. The direct path's unit (c_direct.c, #2850), whose code the compiler's own
+# compiles never run, takes the direct path's own profile, trained on the corpus (BUSTER_PGO_CORPUS), or none (#3582):
+# the compiler's profile, where every count of that code is zero, made sqlite3.c's -c take 4.8% more user cycles on
+# the 9700X.
 set(pgo "${CMAKE_BINARY_DIR}/pgo")
 set(profile_use "")
+set(direct_profile_use "")
+set(buster_direct_unit c_direct)
 if(buster_pgo)
     set(profile_use "-fprofile-instr-use=${pgo}/compiler.profdata")
+    if(NOT buster_pgo_corpus STREQUAL "")
+        set(direct_profile_use "-fprofile-instr-use=${pgo}/direct.profdata")
+    endif()
 endif()
 buster_shell_group(develop_debug_group ${BUSTER_DEVELOP_CONFIGURATION_DEBUG} ${BUSTER_LINE_TABLES_CODEGEN})
 # The configurations whose debug information is line tables alone take BUSTER_LINE_TABLES_CODEGEN
@@ -197,13 +206,13 @@ if(buster_debug STREQUAL "-gline-tables-only")
     set(buster_release_line_tables ${BUSTER_LINE_TABLES_CODEGEN})
 endif()
 buster_shell_group(release_debug_group ${buster_debug} ${buster_release_line_tables})
-function(buster_unit_options target definitions)
+function(buster_unit_options target definitions profile)
     target_compile_options(${target} PRIVATE
         "$<$<CONFIG:Release>:${release_debug_group}>"
         "$<$<CONFIG:Debug>:${BUSTER_DEBUG_CONFIGURATION_DEBUG}>"
         "$<$<CONFIG:Develop>:${develop_debug_group}>"
         "${flags_group}"
-        ${profile_use}
+        ${profile}
         "$<IF:$<CONFIG:Debug>,${BUSTER_DEBUG_CONFIGURATION_OPTIMIZATION},${buster_optimization}>"
         ${definitions}
         "-fmacro-prefix-map=${CMAKE_SOURCE_DIR}/=")
@@ -355,7 +364,11 @@ foreach(index IN LISTS order)
     else()
         add_library(buster_${name} OBJECT "${source}")
     endif()
-    buster_unit_options(buster_${name} "${defines_group}")
+    set(unit_profile_use "${profile_use}")
+    if(name STREQUAL buster_direct_unit)
+        set(unit_profile_use "${direct_profile_use}")
+    endif()
+    buster_unit_options(buster_${name} "${defines_group}" "${unit_profile_use}")
     buster_codegen_split_unit("${name}" split)
     buster_unit_partitions("${name}" partitions)
     if(file IN_LIST buster_self_built AND NOT buster_release_parts)
@@ -406,7 +419,7 @@ foreach(variant IN LISTS lexer_variants)
     else()
         add_library(buster_lexer_variant_${name} OBJECT src/buster/compiler/c_lexer_variant.c)
         buster_shell_group(variant_group "-DBUSTER_LEXER_VARIANT_SOURCE=\"${path}\"" "-DBUSTER_LEXER_VARIANT_NAME=c_lexer_variant_${name}")
-        buster_unit_options(buster_lexer_variant_${name} "${variant_group}")
+        buster_unit_options(buster_lexer_variant_${name} "${variant_group}" "${profile_use}")
         list(APPEND lexer_objects "$<TARGET_OBJECTS:buster_lexer_variant_${name}>")
     endif()
 endforeach()
@@ -540,11 +553,46 @@ if(buster_pgo)
         DEPENDS ${trained} "${CMAKE_SOURCE_DIR}/cmake/BusterMergeProfile.cmake"
         COMMENT "Merging the profile"
         VERBATIM)
-    add_custom_target(pgo-profile DEPENDS "${pgo}/compiler.profdata")
+    set(profiles_built "${pgo}/compiler.profdata")
+    # The direct path's profile (#3582): the instrumented executable's plain -c of the corpus's sqlite3.c, which takes
+    # the direct path as a build's -c of a unit does, with the corpus's own headers. None of the compiler's own
+    # compiles takes it: their -Wall and -Werror keep a unit off it, and without them all but one small test leave it
+    # at the clang intrinsic headers' #pragma clang diagnostic. It is the direct path's unit's alone, whose code no
+    # other compile runs, so that the compiler's profile, which the other units take, is the same with it and without.
+    if(NOT buster_pgo_corpus STREQUAL "")
+        set(corpus "${buster_pgo_corpus}")
+        set(profiles "${pgo}/direct/profiles")
+        add_custom_command(OUTPUT "${pgo}/direct/train.stamp"
+            COMMAND "${CMAKE_COMMAND}" -E rm -rf "${profiles}"
+            COMMAND "${CMAKE_COMMAND}" -E make_directory "${profiles}/sqlite3"
+            COMMAND "${CMAKE_COMMAND}" -E env "LLVM_PROFILE_FILE=${profiles}/sqlite3/%p.profraw" "${pgo}/compiler" -c
+                "${corpus}/sqlite/sqlite3.c" -std=gnu17 -nostdinc -isystem "${corpus}/headers/usr/lib/clang/23/include"
+                -isystem "${corpus}/headers/usr/local/include" -isystem "${corpus}/headers/usr/include"
+                -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_THREADSAFE=0 -DSQLITE_ENABLE_MEMSYS5 -DSQLITE_ENABLE_RTREE
+                -o "${pgo}/direct/sqlite3.o"
+            COMMAND "${CMAKE_COMMAND}" -E touch "${pgo}/direct/train.stamp"
+            DEPENDS "${pgo}/compiler" "${corpus}/sqlite/sqlite3.c"
+            WORKING_DIRECTORY "${pgo}"
+            COMMENT "Training the direct path's profile on ${corpus}/sqlite/sqlite3.c"
+            VERBATIM)
+        add_custom_command(OUTPUT "${pgo}/direct.profdata"
+            COMMAND "${CMAKE_COMMAND}" "-DLLVM_PROFDATA=${BUSTER_LLVM_PROFDATA}" "-DPROFILES=${profiles}"
+                "-DDIRECTORIES=sqlite3" "-DOUTPUT=${pgo}/direct.profdata"
+                -P "${CMAKE_SOURCE_DIR}/cmake/BusterMergeProfile.cmake"
+            DEPENDS "${pgo}/direct/train.stamp" "${CMAKE_SOURCE_DIR}/cmake/BusterMergeProfile.cmake"
+            COMMENT "Merging the direct path's profile"
+            VERBATIM)
+        list(APPEND profiles_built "${pgo}/direct.profdata")
+    endif()
+    add_custom_target(pgo-profile DEPENDS ${profiles_built})
     foreach(name IN LISTS unit_names)
         list(FIND unit_names "${name}" index)
         list(GET BUSTER_SOURCES ${index} source)
-        set_source_files_properties("${source}" PROPERTIES OBJECT_DEPENDS "${pgo}/compiler.profdata")
+        if(NOT name STREQUAL buster_direct_unit)
+            set_source_files_properties("${source}" PROPERTIES OBJECT_DEPENDS "${pgo}/compiler.profdata")
+        elseif(NOT buster_pgo_corpus STREQUAL "")
+            set_source_files_properties("${source}" PROPERTIES OBJECT_DEPENDS "${pgo}/direct.profdata")
+        endif()
         # A unit a sanitizer tree leaves out has no target (#2639).
         if(TARGET buster_${name})
             add_dependencies(buster_${name} pgo-profile)

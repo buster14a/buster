@@ -4375,7 +4375,7 @@ static void check_parallel_codegen_compiler(void)
 {
     const char* const settings[] = {
         "BUSTER_PARALLEL_CODEGEN=1", "BUSTER_RELEASE_PARTS=1", "BUSTER_DEBUG_INFO=0", "BUSTER_SANITIZER=none",
-        "BUSTER_FUZZ_AVAILABLE=0", "BUSTER_FUZZ_ENTRY=", "BUSTER_PGO=0", "BUSTER_PGO_TRAIN=",
+        "BUSTER_FUZZ_AVAILABLE=0", "BUSTER_FUZZ_ENTRY=", "BUSTER_PGO=0", "BUSTER_PGO_TRAIN=", "BUSTER_PGO_CORPUS=",
         "BUSTER_BUILD_DEFINES=", 0,
     };
     BUILD_ENV(settings, "build", "--config", "Release");
