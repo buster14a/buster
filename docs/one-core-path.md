@@ -4267,20 +4267,23 @@ instruction selection, encoding, branch-sizing, and link-object passes, `c_direc
 with private unity fragments `c_direct_lex.c`, `c_direct_x86.c`, `c_direct_types.c`, `c_direct_cc.c`) compiles clean
 single-TU `-c` C17/C23 object builds directly from `mmap`'d source bytes to an ELF64 `.o` file in one pass:
 
-- **Lexer and preprocessor (`c_direct_lex.c`):** the text becomes raw tokens (kind, first byte, length) a window of
-  2,048 at a time, in blocks of exactly 64 bytes (`fast_pp_lex_window`): one class table's lookup and a bit test a
-  class, the two-character punctuators from the two characters' classes at even places of each run of candidates, and
-  kinds, first bytes and lengths packed by three compresses and an expand. A block does no branch on its tokens and
-  carries what crosses its end in registers; it stops only at a byte that needs a decision (a comment, a directive, a
-  literal, a splice), and a token the masks cannot decide (`<<=`, a `.` before a digit, a number that goes on past its
-  digits) stays in the window marked for `fast_lex_one`. The emitter (`fast_pp_emit_window`) stores 64 kinds at a time
-  and visits the identifiers, numbers and literals: a 16 K-slot L2 identifier cache backed by a 64-way AVX-512
-  SwissTable, inline 1-to-8-digit decimal integers, and in-place expansion for empty, 1-token, 0-param-use
-  (`assert`/`testcase`), 1-param identity-wrapper (`ALWAYS`/`NEVER`) and short constant macros. Directives and macro
-  arguments read the same window (`fast_pp_read_tok`). An inactive group is skipped by masks too
-  (`fast_pp_skip_inactive`): each line's first character, a comment's start and what a literal may hide, 64 bytes a
-  step. Macro expansion is strictly iterative (`call_stack` + `arg_buf`, zero recursion). `test-direct` lexes its
-  cases at every offset of a block.
+- **Lexer and preprocessor (`c_direct_lex.c`):** the text becomes raw tokens (kind, first byte from the window's,
+  length) a window of 2,048 at a time, in blocks of exactly 64 bytes (`fast_pp_lex_window`): a class table's lookup on
+  the block's bytes and another on the bytes one further on (runs' ends, a `.` that goes on as a number, a
+  punctuator's second character, without a shift across the block's end), the two-character punctuators from the two
+  characters' classes, and kinds, first bytes and last bytes packed by three compresses (a token's last byte is the
+  n-th one when its first is). Only where candidates touch (`<<=`, `a+++b`), one is at the block's last byte or a `.`
+  goes on, a rare branch takes them at even places of each run and marks them. A block carries what crosses its end in
+  registers; it stops only at a byte that needs a decision (a comment, a directive, a literal, a splice), and a
+  comment that closes in the same block is passed from the block's own bytes. A token the masks cannot decide (`<<=`,
+  a `.` before a digit, a number that goes on past its digits) stays in the window marked for `fast_lex_one`. The
+  emitter (`fast_pp_emit_window`) stores 64 kinds at a time and visits the identifiers, numbers and literals: a
+  16 K-slot L2 identifier cache backed by a 64-way AVX-512 SwissTable, inline 1-to-8-digit decimal integers, and
+  in-place expansion for empty, 1-token, 0-param-use (`assert`/`testcase`), 1-param identity-wrapper
+  (`ALWAYS`/`NEVER`) and short constant macros. Directives and macro arguments read the same window
+  (`fast_pp_read_tok`). An inactive group is skipped by masks too (`fast_pp_skip_inactive`): each line's first
+  character, a comment's start and what a literal may hide, 64 bytes a step. Macro expansion is strictly iterative
+  (`call_stack` + `arg_buf`, zero recursion). `test-direct` lexes its cases at every offset of a block.
 - **Direct one-pass parser, type checker, and SysV AMD64 emitter (`c_direct_types.c`, `c_direct_cc.c`, `c_direct_x86.c`):**
   uses compact 32-bit `FastType` handles, AVX-512 `vpcmpeqd` 16-wide struct-member search (`<= 64` fields, hash table
   above), iterative operator-precedence expression compilation directly into x86-64 machine bytes, lazy `EFLAGS`
