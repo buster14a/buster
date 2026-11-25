@@ -1580,8 +1580,11 @@ static inline bool fval_holds_xmm(const FastVal* v)
 
 static inline void fval_release(FastExprCtx* ex, const FastVal* v)
 {
-    if (fval_holds_gp(v)) { ex->gp_used &= (uint16_t)~(1u << v->reg); }
-    else if (fval_holds_xmm(v)) { ex->xmm_used &= (uint8_t)~(1u << v->reg); }
+    // Without code no value holds a register (#3616): the placeholders of a sizeof, _Alignof or _Generic operand say
+    // rax, and releasing one would free a live value's register.
+    const uint32_t live = 0u - (uint32_t)(ex->eval_only == 0);
+    if (fval_holds_gp(v)) { ex->gp_used &= (uint16_t)~((1u << v->reg) & live); }
+    else if (fval_holds_xmm(v)) { ex->xmm_used &= (uint8_t)~((1u << v->reg) & live); }
 }
 
 // Spill a single live FastVal in-place to a temporary stack slot, releasing its register/flags!

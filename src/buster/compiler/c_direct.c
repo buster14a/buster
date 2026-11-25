@@ -2530,6 +2530,44 @@ static bool c_direct_test_atomics(const char* obj_path)
     return ok;
 }
 
+typedef int (*CDirectTestThree)(int, int, int);
+
+// A sizeof operand has no code, and no value of it holds a register (#3616): releasing a call's argument or a comma's
+// left side there freed rax, under the live `a * b`, and the next value went into it.
+static bool c_direct_test_unevaluated_registers(const char* obj_path)
+{
+    static const char source[] =
+        "int t_pick(int a, int b) { return a + b; }\n"
+        "int t_call(int a, int b, int c) { return (a * b) + (int)sizeof(t_pick(a + 1, 0)) * c; }\n"
+        "int t_comma(int a, int b, int c) { return (a * b) + (int)sizeof((a + 1, c)) * c; }\n"
+        "int t_after(int a, int b, int c) { return (a * b) + c * (int)sizeof(t_pick(a - 1, b + 1)); }\n";
+    bool ok = c_direct_test_compile_source_keep(source, obj_path, NULL, 0, NULL, NULL, NULL);
+#if !__has_feature(memory_sanitizer)
+    static const char* const names[] = { "t_call", "t_comma", "t_after" };
+    enum { count = sizeof(names) / sizeof(names[0]) };
+    void* mappings[count] = { 0 };
+    size_t mapped[count] = { 0 };
+    for (uint32_t i = 0; ok && i < (uint32_t)count; i += 1)
+    {
+        const void* code = c_direct_test_code(obj_path, names[i], mappings + i, mapped + i);
+        ok = code != NULL && ((CDirectTestThree)(uintptr_t)code)(3, 2, 5) == 26;
+    }
+    for (uint32_t i = 0; i < (uint32_t)count; i += 1)
+    {
+        if (mappings[i] != NULL)
+        {
+            munmap(mappings[i], mapped[i]);
+        }
+    }
+#endif
+    unlink(obj_path);
+    if (!ok)
+    {
+        fprintf(stderr, "test-direct: a sizeof operand freed a live register\n");
+    }
+    return ok;
+}
+
 // What the dependency test expects of the records (#3592): the paths after the test's directory, in order, and the flags.
 typedef struct CDirectTestDependency CDirectTestDependency;
 struct CDirectTestDependency
@@ -3084,6 +3122,16 @@ int run_c_direct_tests(int argc, char** argv)
     else
     {
         fprintf(stderr, "test-direct: FAIL musl's atomics' inline assembly\n");
+        failed += 1u;
+    }
+
+    if (c_direct_test_unevaluated_registers(obj_path))
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL a sizeof operand's registers\n");
         failed += 1u;
     }
 
