@@ -2000,20 +2000,23 @@ struct FastExprCtx
         const uint32_t seq_earlier = seq_own - 1u + (uint32_t)(seq_own == 0) * (seq_count + 1u); \
         /* Only where there is something to find: entries before the operands, or an earlier modification (an */ \
         /* assignment's lvalue is most often the expression's first name, and its first modification). */ \
-        if ((seq_tracked & ((uint32_t)(seq_earlier != 0) | (uint32_t)((ex)->seq_bloom != 0))) != 0) \
+        if (seq_tracked != 0) \
         { \
-            const uint32_t seq_looked = seq_count ^ ((seq_earlier ^ seq_count) & (UINT32_C(0) - (uint32_t)(seq_earlier < seq_count))); \
-            const uint32_t seq_within = seq_looked ^ ((seq_looked ^ 16u) & (UINT32_C(0) - (uint32_t)(seq_looked > 16u))); \
-            const __mmask16 seq_valid = (__mmask16)_bzhi_u32(0xffffu, seq_within); \
-            const __m512i seq_wanted = _mm512_set1_epi64((long long)seq_identity); \
-            const __mmask8 seq_low = _mm512_mask_cmpeq_epi64_mask((__mmask8)seq_valid, _mm512_maskz_loadu_epi64((__mmask8)seq_valid, (ex)->seq_log), seq_wanted); \
-            const __mmask8 seq_high = _mm512_mask_cmpeq_epi64_mask((__mmask8)(seq_valid >> 8), \
-                                                                   _mm512_maskz_loadu_epi64((__mmask8)(seq_valid >> 8), (ex)->seq_log + 8), seq_wanted); \
-            const uint32_t seq_named_before = (uint32_t)((seq_low | seq_high) != 0); \
-            const uint32_t seq_modified_before = (uint32_t)(((ex)->seq_bloom & BUSTER_FSEQ_BIT(seq_identity)) != 0); \
-            (ex)->seq_hit |= seq_named_before | seq_modified_before | (uint32_t)(seq_looked > 16u); \
+            if (((uint32_t)(seq_earlier != 0) | (uint32_t)((ex)->seq_bloom != 0)) != 0) \
+            { \
+                const uint32_t seq_looked = seq_count ^ ((seq_earlier ^ seq_count) & (UINT32_C(0) - (uint32_t)(seq_earlier < seq_count))); \
+                const uint32_t seq_within = seq_looked ^ ((seq_looked ^ 16u) & (UINT32_C(0) - (uint32_t)(seq_looked > 16u))); \
+                const __mmask16 seq_valid = (__mmask16)_bzhi_u32(0xffffu, seq_within); \
+                const __m512i seq_wanted = _mm512_set1_epi64((long long)seq_identity); \
+                const __mmask8 seq_low = _mm512_mask_cmpeq_epi64_mask((__mmask8)seq_valid, _mm512_maskz_loadu_epi64((__mmask8)seq_valid, (ex)->seq_log), seq_wanted); \
+                const __mmask8 seq_high = _mm512_mask_cmpeq_epi64_mask((__mmask8)(seq_valid >> 8), \
+                                                                       _mm512_maskz_loadu_epi64((__mmask8)(seq_valid >> 8), (ex)->seq_log + 8), seq_wanted); \
+                const uint32_t seq_named_before = (uint32_t)((seq_low | seq_high) != 0); \
+                const uint32_t seq_modified_before = (uint32_t)(((ex)->seq_bloom & BUSTER_FSEQ_BIT(seq_identity)) != 0); \
+                (ex)->seq_hit |= seq_named_before | seq_modified_before | (uint32_t)(seq_looked > 16u); \
+            } \
+            (ex)->seq_bloom |= BUSTER_FSEQ_BIT(seq_identity); \
         } \
-        (ex)->seq_bloom |= BUSTER_FSEQ_BIT(seq_identity) & (UINT64_C(0) - (uint64_t)seq_tracked); \
         (ex)->seq_log[seq_count & 63u] = seq_identity; \
         (ex)->seq_own[seq_count & 63u] = (uint8_t)seq_own; \
         (ex)->seq_mods |= (uint64_t)seq_tracked << (seq_count & 63u); \
@@ -3894,25 +3897,19 @@ static __attribute__((noinline)) bool fast_cc_binary_questioned(const FastCCStat
     return (out_of_range | narrow_field | mixed_enums | tautological | float_literal) != 0;
 }
 
-static BUSTER_DIRECT_HOT void fval_emit_binary(FastExprCtx* ex, uint8_t op, FastVal* lhs, FastVal* rhs, FastVal* out)
+// #3577: a binary operator's operands, as fval_emit_binary's gate sends them (two integer scalars that aren't compared
+// or a bit-field don't come): false, with the bailout made, where the full pipeline's error or warning is.
+// (Out of line: its values would take fval_emit_binary's registers, whose every operator spilled them.)
+static __attribute__((noinline)) bool fast_cc_binary_operands_quiet(FastCCState* cc, uint8_t op, const FastVal* lhs, const FastVal* rhs,
+                                                                   FastType lt, FastType rt, uint32_t integers)
 {
-    FastCCState* cc = ex->cc;
-    FastObj* obj = cc->obj;
-    const FastType lt = ftype_decay(cc, lhs->type);
-    const FastType rt = ftype_decay(cc, rhs->type);
-    if (ftype_is_unsupported(lt) || ftype_is_unsupported(rt))
-    {
-        fast_cc_bail(cc, "unsupported type binary op");
-        return;
-    }
+    bool quiet = true;
     // #3577: the operands C allows each operator, or the full pipeline's error or warning: * / arithmetic; % & | ^ << >>
     // integers; + arithmetic, or a pointer and an integer; - those, or two pointers; < > <= >= arithmetic or two
     // pointers; == != those, or a pointer and a literal 0. A pair of classes (left * 4 + right) is a bit of the
     // operator's mask; two pointers must be to one type (fast_cc_pointer_pair_valid).
     // Two integer scalars (no enum, pointer or record) are every operator's operands: the classes are looked up for the
     // others alone.
-    const uint32_t integers = (uint32_t)(((lt | rt) & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) == 0) &
-                              (BUSTER_FAST_INTEGER_KINDS >> (lt & BUSTER_FTYPE_SCALAR_MASK)) & (BUSTER_FAST_INTEGER_KINDS >> (rt & BUSTER_FTYPE_SCALAR_MASK)) & 1u;
     if (integers == 0)
     {
         const uint32_t lc = BUSTER_FAST_OPERAND_CLASS(cc, lt);
@@ -3928,12 +3925,12 @@ static BUSTER_DIRECT_HOT void fval_emit_binary(FastExprCtx* ex, uint8_t op, Fast
         if ((refused & (null_pair ^ 1u)) != 0)
         {
             fast_cc_bail(cc, "operands of a binary operator");
-            return;
+            quiet = false;
         }
-        if (pair == BUSTER_FOPERAND_POINTER * 5u && lt != rt && !fast_cc_pointer_pair_valid(cc, op, lt, rt))
+        else if (pair == BUSTER_FOPERAND_POINTER * 5u && lt != rt && !fast_cc_pointer_pair_valid(cc, op, lt, rt))
         {
             fast_cc_bail(cc, "operands of distinct pointer types");
-            return;
+            quiet = false;
         }
     }
     // #3577: the comparisons and operands the full pipeline questions (fast_cc_binary_questioned) have a constant against
@@ -3941,7 +3938,7 @@ static BUSTER_DIRECT_HOT void fval_emit_binary(FastExprCtx* ex, uint8_t op, Fast
     // bit-field alone looks further, at the operands' kinds and types, in registers, and the exact check runs past that.
     const uint32_t comparison = (uint32_t)(((UINT64_C(1) << (op & 63u)) & BUSTER_FAST_COMPARISON_OPS) != 0);
     const uint32_t kinds = (UINT32_C(1) << lhs->kind) | (UINT32_C(1) << rhs->kind);
-    if (((comparison | (kinds >> FVAL_BITFIELD)) & 1u) != 0)
+    if (quiet && ((comparison | (kinds >> FVAL_BITFIELD)) & 1u) != 0)
     {
         const uint32_t constant = (uint32_t)((kinds & ((UINT32_C(1) << FVAL_IMM) | (UINT32_C(1) << FVAL_FIMM))) != 0);
         // (A scalar kind's bit, below the pointer and complex bits; a pointer's or a record's scalar bits are 0, void's.)
@@ -3961,6 +3958,34 @@ static BUSTER_DIRECT_HOT void fval_emit_binary(FastExprCtx* ex, uint8_t op, Fast
         if (questioned != 0 && fast_cc_binary_questioned(cc, op, lhs, rhs, lt, rt))
         {
             fast_cc_bail(cc, "comparison or operand the full pipeline questions");
+            quiet = false;
+        }
+    }
+    return quiet;
+}
+
+static BUSTER_DIRECT_HOT void fval_emit_binary(FastExprCtx* ex, uint8_t op, FastVal* lhs, FastVal* rhs, FastVal* out)
+{
+    FastCCState* cc = ex->cc;
+    FastObj* obj = cc->obj;
+    const FastType lt = ftype_decay(cc, lhs->type);
+    const FastType rt = ftype_decay(cc, rhs->type);
+    if (ftype_is_unsupported(lt) || ftype_is_unsupported(rt))
+    {
+        fast_cc_bail(cc, "unsupported type binary op");
+        return;
+    }
+    // #3577: the operands C allows each operator, and the comparisons and operands the full pipeline questions: two integer
+    // scalars (no enum, pointer or record) that aren't compared, nor a bit-field, are every operator's operands, and are
+    // never questioned; any other pair takes fast_cc_binary_operands_quiet.
+    const uint32_t integers = (uint32_t)(((lt | rt) & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) == 0) &
+                              (BUSTER_FAST_INTEGER_KINDS >> (lt & BUSTER_FTYPE_SCALAR_MASK)) & (BUSTER_FAST_INTEGER_KINDS >> (rt & BUSTER_FTYPE_SCALAR_MASK)) & 1u;
+    const uint32_t compared = (uint32_t)(((UINT64_C(1) << (op & 63u)) & BUSTER_FAST_COMPARISON_OPS) != 0);
+    const uint32_t bit_field = (uint32_t)(lhs->kind == FVAL_BITFIELD) | (uint32_t)(rhs->kind == FVAL_BITFIELD);
+    if (((integers ^ 1u) | compared | bit_field) != 0)
+    {
+        if (!fast_cc_binary_operands_quiet(cc, op, lhs, rhs, lt, rt, integers))
+        {
             return;
         }
     }
@@ -5517,12 +5542,20 @@ static BUSTER_DIRECT_HOT void fast_expr_reduce_top(FastExprCtx* ex, FastExprOp* 
                 [FEOP_DEREF] = 15u, [FEOP_ADDR] = 15u, [FEOP_PRE_INC] = 7u, [FEOP_PRE_DEC] = 7u, [FEOP_CAST] = 15u,
                 [FEOP_SIZEOF_UNARY] = 15u, [FEOP_ALIGNOF_UNARY] = 0u,
             };
-            const uint32_t operand = BUSTER_FAST_OPERAND_CLASS(cc, v->type);
-            const uint32_t sized = (uint32_t)(op == FEOP_SIZEOF_UNARY) & (BUSTER_FAST_TYPE_INCOMPLETE(cc, v->type) | (uint32_t)(v->kind == FVAL_BITFIELD));
-            if ((((unary_operands[op & 31u] >> operand) & 1u) == 0) | sized)
+            // (An operator that takes every class, or an integer scalar where integers are taken, is quiet without the
+            // class: sizeof aside, which measures.)
+            const uint32_t allowed = unary_operands[op & 31u];
+            const uint32_t integer_scalar = (uint32_t)((v->type & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) == 0) &
+                                            (BUSTER_FAST_INTEGER_KINDS >> (v->type & BUSTER_FTYPE_SCALAR_MASK));
+            if (((uint32_t)(op == FEOP_SIZEOF_UNARY) | ((uint32_t)(allowed != 15u) & ((integer_scalar & allowed & 1u) ^ 1u))) != 0)
             {
-                fast_cc_bail(cc, "operand of a unary operator");
-                return;
+                const uint32_t operand = BUSTER_FAST_OPERAND_CLASS(cc, v->type);
+                const uint32_t sized = (uint32_t)(op == FEOP_SIZEOF_UNARY) & (BUSTER_FAST_TYPE_INCOMPLETE(cc, v->type) | (uint32_t)(v->kind == FVAL_BITFIELD));
+                if ((((allowed >> operand) & 1u) == 0) | sized)
+                {
+                    fast_cc_bail(cc, "operand of a unary operator");
+                    return;
+                }
             }
         }
         if (op == FEOP_SIZEOF_UNARY || op == FEOP_ALIGNOF_UNARY)
@@ -5906,9 +5939,13 @@ static BUSTER_DIRECT_HOT void fast_expr_reduce_top(FastExprCtx* ex, FastExprOp* 
     }
     if (tok == FTOK_ASSIGN)
     {
-        // #3577: a struct or union with a const member can't be assigned either.
-        const uint32_t record_const = (uint32_t)(lhs->type >> 31) & (uint32_t)((lhs->type & BUSTER_FTYPE_PTR_MASK) == 0) &
-                                      (uint32_t)cc->ctypes[lhs->type & BUSTER_FTYPE_CIDX_MASK & (UINT32_C(0) - (lhs->type >> 31))].has_const_mbr;
+        // #3577: a struct or union with a const member can't be assigned either (its record looked at where the lvalue is
+        // a complex type that isn't a pointer).
+        uint32_t record_const = 0;
+        if (((uint32_t)(lhs->type >> 31) & (uint32_t)((lhs->type & BUSTER_FTYPE_PTR_MASK) == 0)) != 0)
+        {
+            record_const = (uint32_t)cc->ctypes[lhs->type & BUSTER_FTYPE_CIDX_MASK].has_const_mbr;
+        }
         const uint32_t lhs_const = (uint32_t)((lhs->type & BUSTER_FTYPE_CONST) != 0);
         // And one in an unevaluated operand (sizeof's) is the full pipeline's -Wunevaluated-expression.
         if (((uint32_t)(lhs->is_lvalue == 0) | lhs_const | record_const | (uint32_t)(ex->eval_only != 0)) != 0)
