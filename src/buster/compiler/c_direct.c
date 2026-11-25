@@ -712,7 +712,7 @@ static bool c_direct_test_cache_consistent(const FastIdentTable* t, uint32_t bit
         {
             const FastIdentEntry* entry = t->entries + slot->id;
             ok = slot->id <= t->count && entry->length == slot->len && slot->tok_kind == (entry->kw_kind != 0 ? entry->kw_kind : FTOK_IDENT) &&
-                 (BUSTER_FIDENT_CACHE_HASH(slot->w0, slot->w1, slot->len) >> t->cache_shift) == i;
+                 (BUSTER_FIDENT_CACHE_HASH(slot->w0, slot->len > 8u ? BUSTER_FIDENT_CACHE_MIX(slot->w1, slot->len) : 0u) >> t->cache_shift) == i;
         }
     }
     return ok;
@@ -776,7 +776,8 @@ static bool c_direct_test_ident_growth(void)
                     {
                         if (before[slot].id != 0)
                         {
-                            const FastIdentCacheSlot* now = table.cache + (BUSTER_FIDENT_CACHE_HASH(before[slot].w0, before[slot].w1, before[slot].len) >> table.cache_shift);
+                            const uint64_t mix = before[slot].len > 8u ? BUSTER_FIDENT_CACHE_MIX(before[slot].w1, before[slot].len) : 0u;
+                            const FastIdentCacheSlot* now = table.cache + (BUSTER_FIDENT_CACHE_HASH(before[slot].w0, mix) >> table.cache_shift);
                             const bool same = now->id == before[slot].id && now->w0 == before[slot].w0 && now->w1 == before[slot].w1 && now->len == before[slot].len && now->tok_kind == before[slot].tok_kind;
                             held += 1u;
                             moved += same;
@@ -827,7 +828,8 @@ static bool c_direct_test_ident_growth(void)
                 {
                     memcpy(&last, name + length - 8u, sizeof(last));
                 }
-                if (table.cache[BUSTER_FIDENT_CACHE_HASH(first, last, length) >> table.cache_shift].id == ids[i])
+                const uint64_t mix = length > 8u ? BUSTER_FIDENT_CACHE_MIX(last, length) : 0u;
+                if (table.cache[BUSTER_FIDENT_CACHE_HASH(first, mix) >> table.cache_shift].id == ids[i])
                 {
                     uint8_t kind = 0;
                     cached += 1u;

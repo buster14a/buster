@@ -584,11 +584,12 @@ static uint32_t fast_ident_intern_cstr(FastIdentTable* t, const char* s)
     return fast_ident_intern(t, (const uint8_t*)s, (uint32_t)strlen(s));
 }
 
-// The cache's key hash, of a name's first eight bytes (masked to its length), its last eight (0 up to eight bytes) and
-// its length: fast_ident_lookup's, and fast_ident_cache_grow's for a slot's stored key. Its top cache_bits bits are the
-// slot. A macro rather than a function so that the compile's count has no call a lookup in it (#3592).
-#define BUSTER_FIDENT_CACHE_HASH(first, last, len) \
-    (((first) ^ ((last) * UINT64_C(0x9e3779b97f4a7c15)) ^ ((uint64_t)(len) << 56)) * UINT64_C(0xbf58476d1ce4e5b9))
+// The cache's key hash, of a name's first eight bytes (masked to its length) and, past eight bytes, its last eight and
+// its length (`mix`, BUSTER_FIDENT_CACHE_MIX; 0 up to eight bytes): fast_ident_lookup's, and fast_ident_cache_grow's for
+// a slot's stored key. Its top cache_bits bits are the slot. Macros rather than functions so that the compile's count
+// has no call a lookup in it (#3592).
+#define BUSTER_FIDENT_CACHE_MIX(last, len) (((last) * UINT64_C(0x9e3779b97f4a7c15)) ^ ((uint64_t)(len) << 56))
+#define BUSTER_FIDENT_CACHE_HASH(first, mix) (((first) ^ (mix)) * UINT64_C(0xbf58476d1ce4e5b9))
 
 static void fast_ident_cache_set(FastIdentTable* t, FastIdentCacheSlot* cache, uint32_t bits)
 {
@@ -617,7 +618,8 @@ static __attribute__((noinline)) bool fast_ident_cache_grow(FastIdentTable* t)
         {
             if (old_cache[i].id != 0)
             {
-                new_cache[BUSTER_FIDENT_CACHE_HASH(old_cache[i].w0, old_cache[i].w1, old_cache[i].len) >> new_shift] = old_cache[i];
+                const uint64_t mix = old_cache[i].len > 8u ? BUSTER_FIDENT_CACHE_MIX(old_cache[i].w1, old_cache[i].len) : 0u;
+                new_cache[BUSTER_FIDENT_CACHE_HASH(old_cache[i].w0, mix) >> new_shift] = old_cache[i];
             }
         }
         fast_ident_cache_set(t, new_cache, new_bits);
@@ -813,6 +815,7 @@ static inline uint32_t fast_ident_lookup(FastIdentTable* t, const uint8_t* p, ui
     uint64_t first;
     memcpy(&first, p, sizeof(first));
     uint64_t last = 0;
+    uint64_t mix = 0;
     if (len <= 8u)
     {
         first = _bzhi_u64(first, len * 8u);
@@ -820,8 +823,9 @@ static inline uint32_t fast_ident_lookup(FastIdentTable* t, const uint8_t* p, ui
     else
     {
         memcpy(&last, p + len - 8u, sizeof(last));
+        mix = BUSTER_FIDENT_CACHE_MIX(last, len);
     }
-    const uint64_t hash = BUSTER_FIDENT_CACHE_HASH(first, last, len);
+    const uint64_t hash = BUSTER_FIDENT_CACHE_HASH(first, mix);
     FastIdentCacheSlot* slot = t->cache + (hash >> t->cache_shift);
     uint32_t id = 0;
     uint8_t kind = FTOK_IDENT;
