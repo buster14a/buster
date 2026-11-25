@@ -1138,6 +1138,10 @@ struct FastMacro
     uint8_t active;
     uint8_t fast_mode;       // 0=general, 1=inline 1-tok obj macro, 2=0-param-use func macro (assert/testcase/VVA_ONLY)
     uint8_t fast_kind;       // pre-encoded SoA kind when fast_mode == 1
+    uint16_t plain_count;    // a function-like macro's parameters its body names plainly (not after '#' or '##', not
+    uint32_t plain_start;    // before '##'), each once in the order of its first such name: macro_params[plain_start..]
+    uint16_t use_count;      // a body without '#' and '##': where each parameter's name stands (position << 8 | number),
+    uint8_t plain_subst;     // macro_params[plain_start + plain_count..], which the substitution copies around
 };
 
 typedef struct FastIncludeFile FastIncludeFile;
@@ -1166,8 +1170,8 @@ struct FastIncludeFile
 // emitter, the directives' and the macro arguments' reader) take their tokens from it and never lex a byte twice.
 // A token is its kind as the classifier gives it (FTOK_IDENT, FTOK_INT_LIT for a number's run, FTOK_STR_LIT and
 // FTOK_CHAR_LIT for a plain literal's opening quote, or a punctuator's), its first byte's offset from the window's
-// first byte (16 bits: a window's tokens start within 64 KB of it), and an identifier's, a number's or a punctuator's
-// length. Whatever the loop can't decide that way ends the window, and fast_lex_one lexes the token there, as it lexes
+// first byte (16 bits: a window's tokens start within 64 KB of it), and its length (a string's where a byte holds it,
+// else 0). Whatever the loop can't decide that way ends the window, and fast_lex_one lexes the token there, as it lexes
 // every token of a file's last 80 bytes.
 #define BUSTER_FWIN_CAPACITY       2048u
 // The window's arrays, one region: kinds, lengths, then first bytes' offsets from the window's first byte (16 bits),
@@ -1254,6 +1258,7 @@ typedef struct FastMacroCall FastMacroCall;
 struct FastMacroCall
 {
     uint32_t macro_id;
+    uint32_t macro_idx;      // its FastMacro's index, which no directive changes while the call runs
     uint32_t saved_exp_used;
     uint32_t saved_arg_used;
     uint32_t min_expand_depth;
@@ -1266,7 +1271,6 @@ struct FastMacroCall
     uint32_t arg_counts[BUSTER_FPP_MAX_PARAMS + 1u];
     uint32_t exp_arg_starts[BUSTER_FPP_MAX_PARAMS + 1u];
     uint32_t exp_arg_counts[BUSTER_FPP_MAX_PARAMS + 1u];
-    uint8_t exp_arg_done[BUSTER_FPP_MAX_PARAMS + 1u];
     uint8_t exp_arg_in_argbuf[BUSTER_FPP_MAX_PARAMS + 1u];
     uint8_t tok_flags;
     uint8_t state;
@@ -1385,6 +1389,7 @@ struct FastPP
 };
 
 static void fast_pp_read_tok(FastPP* pp, FastIncludeFile* f, bool stop_at_eol, FastTok* out_tok);
+static uint32_t fast_pp_read_line(FastPP* pp, FastIncludeFile* f, FastTok* out, uint32_t capacity);
 
 static __attribute__((cold, noinline)) void fast_pp_bail(FastPP* pp, const char* reason)
 {
@@ -3248,46 +3253,271 @@ static bool fast_pp_try_expand_nonfunc(FastPP* pp, FastTok tok, bool nested, Fas
     return true;
 }
 
-// Strictly iterative macro expansion (ZERO recursion, zero calls to fast_pp_expand_buffer!).
-// Uses pp->call_stack + pp->arg_buf for nested function-like macro argument prescanning.
-static BUSTER_DIRECT_HOT bool fast_pp_try_expand_ex(FastPP* pp, FastTok tok, bool stop_at_eol,
-                                                    uint32_t min_expand_depth, bool allow_file, FastTok* out_replacement)
+// A function-like macro's call whose '(' was read: the call stack's root, which collects the arguments next.
+static inline FastMacroCall* fast_pp_call_start(FastPP* pp, FastTok tok, uint32_t min_expand_depth, bool allow_file)
 {
-    bool is_func = false;
-    if (fast_pp_try_expand_nonfunc(pp, tok, false, out_replacement, &is_func))
-    {
-        return true;
-    }
-    if (!is_func)
-    {
-        return false;
-    }
-    if (!fast_pp_consume_lparen(pp, stop_at_eol, min_expand_depth, allow_file))
-    {
-        return false;
-    }
-
-    uint32_t cdepth = 1u;
-    FastMacroCall* root = pp->call_stack;
+    FastMacroCall* const root = pp->call_stack;
     root->macro_id = tok.data;
+    root->macro_idx = pp->idents.entries[tok.data].macro_idx;
     root->saved_exp_used = pp->exp_used;
     root->saved_arg_used = pp->arg_used;
     root->min_expand_depth = min_expand_depth;
     root->tok_flags = tok.flags;
     root->state = 0;
     root->allow_file = allow_file;
+    return root;
+}
 
+// A call's `arg_count` arguments are in exp_buf (cf->arg_starts, cf->arg_counts), `saw_any` whether any token stood
+// between its parentheses: their count checked against the macro's parameters, an empty variable argument added where
+// none was given, and the call moved on to its prescans. False where the compile bailed out.
+static bool fast_pp_call_collected(FastPP* pp, FastMacroCall* cf, const FastMacro* m, uint32_t arg_count, bool saw_any)
+{
+    const uint32_t max_named = m->param_count;
+    cf->va_elided = m->is_variadic && (arg_count == max_named || (max_named == 0 && !saw_any));
+    if (max_named == 0 && !m->is_variadic)
+    {
+        if (arg_count > 1u || (arg_count == 1u && cf->arg_counts[0] != 0))
+        {
+            fast_pp_bail(pp, "macro arg count mismatch");
+        }
+    }
+    else if (!m->is_variadic && arg_count != max_named)
+    {
+        fast_pp_bail(pp, "macro arg count mismatch");
+    }
+    else if (m->is_variadic && arg_count < max_named)
+    {
+        fast_pp_bail(pp, "variadic macro too few args");
+    }
+    else if (m->is_variadic && arg_count == max_named)
+    {
+        cf->arg_starts[max_named] = pp->exp_used;
+        cf->arg_counts[max_named] = 0;
+        arg_count += 1u;
+    }
+    if (!pp->bailout)
+    {
+        cf->arg_count = arg_count;
+        cf->scan_body_idx = 0;
+        cf->state = 1u;
+    }
+    return !pp->bailout;
+}
+
+_Alignas(64) static const uint8_t fast_iota64[64] = {
+    0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15,
+    16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
+    32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47,
+    48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63,
+};
+
+// `n` tokens from src to dst (which don't overlap), four a 32-byte load and store: the copies are read back soon, and
+// Zen 5 forwards a 32-byte store to a narrower load anywhere inside it.
+static inline void fast_tok_copy(FastTok* dst, const FastTok* src, uint32_t n)
+{
+    uint32_t k = 0;
+    for (; k + 4u <= n; k += 4u)
+    {
+        _mm256_storeu_si256((__m256i*)(void*)(dst + k), _mm256_loadu_si256((const __m256i*)(const void*)(src + k)));
+    }
+    for (; k < n; k += 1u)
+    {
+        dst[k] = src[k];
+    }
+}
+
+// The parentheses' depth after each of 64 tokens, `depth` before the first, from the tokens that are '(' and ')': a
+// prefix sum of +1 at a '(' and -1 at a ')', six steps of a shift across the register and an add (bytes: the depth
+// before 64 tokens stays below 64).
+static inline __m512i fast_paren_depths(uint64_t opens, uint64_t closes, uint32_t depth)
+{
+    const __m512i v_iota = _mm512_load_si512((const void*)fast_iota64);
+    const __m512i v_one = _mm512_set1_epi8(1);
+    __m512i v = _mm512_sub_epi8(_mm512_maskz_mov_epi8(opens, v_one), _mm512_maskz_mov_epi8(closes, v_one));
+    v = _mm512_mask_add_epi8(v, 1u, v, _mm512_set1_epi8((char)depth));
+    for (uint32_t shift = 1u; shift < 64u; shift *= 2u)
+    {
+        const __m512i from = _mm512_sub_epi8(v_iota, _mm512_set1_epi8((char)shift));
+        v = _mm512_add_epi8(v, _mm512_maskz_permutexvar_epi8(~UINT64_C(0) << shift, from, v));
+    }
+    return v;
+}
+
+// A call's closing ')' and its arguments' separating commas from 64 of its tokens' '(', ')' and ',' (bits; `live` the
+// tokens there are), `*io_depth` the depth before them: the ')' is the first token at depth 0 (fast_paren_depths), the
+// separators the commas at depth 1 before it, the first `named` arguments' of a variadic macro. The arguments found are
+// recorded in cf (their starts from `base`, `*io_start` the next one's, relative to the call's first token, and
+// `offset` this block's first token's place there). Returns the ')''s bit (0 where these tokens have none, and
+// *io_depth is the depth after them), or UINT64_MAX where the call isn't taken in bulk (more arguments than a call
+// holds, a depth past what the bytes count).
+static inline uint64_t fast_call_block(uint64_t opens, uint64_t closes, uint64_t commas, uint64_t live, uint32_t* io_depth,
+                                       const FastMacro* m, FastMacroCall* cf, uint32_t base, uint32_t offset, uint32_t* io_start,
+                                       uint32_t* io_arg_count)
+{
+    // Most calls hold no '(' before their first ')', at depth 1: that ')' closes the call, and every comma before it
+    // is at depth 1. Only the others wait on the prefix sum's chain of shifts.
+    const uint64_t first_close = _blsi_u64(closes & live);
+    const bool flat = *io_depth == 1u && (opens & live & (first_close - 1u)) == 0;
+    uint64_t closing = first_close;
+    uint64_t at_one = live;
+    uint32_t depth = 1u;
+    if (!flat)
+    {
+        const __m512i depths = fast_paren_depths(opens, closes, *io_depth);
+        closing = _blsi_u64(_mm512_testn_epi8_mask(depths, depths) & closes & live);
+        at_one = _mm512_cmpeq_epi8_mask(depths, _mm512_set1_epi8(1));
+        depth = (uint32_t)(int32_t)(int8_t)_mm_extract_epi8(_mm512_extracti32x4_epi32(depths, 3), 15);
+    }
+    uint64_t separators = commas & at_one & live & (closing - 1u);
+    uint32_t arg_count = *io_arg_count;
+    uint32_t arg_start = *io_start;
+    bool taken = true;
+    while (separators != 0 && taken && (m->is_variadic == 0 || arg_count < m->param_count))
+    {
+        const uint32_t at = offset + (uint32_t)__builtin_ctzll(separators);
+        separators &= separators - 1u;
+        taken = arg_count < BUSTER_FPP_MAX_PARAMS;
+        cf->arg_starts[arg_count] = base + arg_start;
+        cf->arg_counts[arg_count] = at - arg_start;
+        arg_count += taken ? 1u : 0u;
+        arg_start = at + 1u;
+    }
+    *io_depth = depth;
+    *io_start = arg_start;
+    *io_arg_count = arg_count;
+    return taken && (closing != 0 || depth < 64u) ? closing : UINT64_MAX;
+}
+
+// The last argument of a call taken in bulk, `span` tokens after its '(', and the arguments' count. An empty call of a
+// macro without parameters has one empty argument here, which fast_pp_call_collected takes as none.
+static inline uint32_t fast_call_last_arg(FastMacroCall* cf, uint32_t base, uint32_t span, uint32_t arg_start, uint32_t arg_count)
+{
+    cf->arg_starts[arg_count] = base + arg_start;
+    cf->arg_counts[arg_count] = span - arg_start;
+    return arg_count + 1u;
+}
+
+// A call's arguments from the expansion frame on top, where it holds the call to its ')' after the '(' it gave: the
+// tokens up to the ')' copied into exp_buf, the arguments split as fast_pp_window_args splits them, the frame's place
+// after the ')'. False, with nothing changed, where the call isn't taken in bulk (the frame is the call's caller's,
+// spent, or ends before the ')'); fast_pp_run_calls then reads the arguments a token at a time.
+static bool fast_pp_frame_args(FastPP* pp, FastMacroCall* cf, const FastMacro* m, uint32_t* out_arg_count)
+{
+    // The frame on top where the call has one of its own (a call from the file's text has none open).
+    const bool framed = pp->expand_depth > cf->min_expand_depth;
+    FastExpandFrame* const ef = framed ? pp->expand + (pp->expand_depth - 1u) : NULL;
+    const uint32_t first = framed ? ef->pos : 0u;
+    const uint32_t count = framed ? ef->count : 0u;
+    const uint32_t base_used = pp->exp_used;
+    const __m512i v_low = _mm512_set1_epi64(0xff);
+    const __m512i v_lparen = _mm512_set1_epi64(FTOK_LPAREN);
+    const __m512i v_rparen = _mm512_set1_epi64(FTOK_RPAREN);
+    const __m512i v_comma = _mm512_set1_epi64(FTOK_COMMA);
+    uint32_t depth = 1u;
+    uint32_t close = UINT32_MAX;
+    uint32_t arg_count = 0;
+    uint32_t arg_start = 0;
+    bool taken = first < count;
+    for (uint32_t b = first; taken && close == UINT32_MAX && b < count; b += 64u)
+    {
+        // The kinds of eight tokens a load, as bits.
+        const uint32_t lanes = count - b < 64u ? count - b : 64u;
+        uint64_t opens = 0;
+        uint64_t closes = 0;
+        uint64_t commas = 0;
+        for (uint32_t j = 0; j < lanes; j += 8u)
+        {
+            const __mmask8 present = (__mmask8)_bzhi_u32(0xffu, lanes - j);
+            const __m512i kinds = _mm512_and_si512(_mm512_maskz_loadu_epi64(present, (const void*)(ef->toks + b + j)), v_low);
+            opens |= (uint64_t)_mm512_mask_cmpeq_epi64_mask(present, kinds, v_lparen) << j;
+            closes |= (uint64_t)_mm512_mask_cmpeq_epi64_mask(present, kinds, v_rparen) << j;
+            commas |= (uint64_t)_mm512_mask_cmpeq_epi64_mask(present, kinds, v_comma) << j;
+        }
+        const uint64_t closing = fast_call_block(opens, closes, commas, _bzhi_u64(~UINT64_C(0), lanes), &depth, m, cf, base_used, b - first,
+                                                 &arg_start, &arg_count);
+        taken = closing != UINT64_MAX;
+        close = taken && closing != 0 ? b + (uint32_t)__builtin_ctzll(closing) : UINT32_MAX;
+    }
+    const uint32_t span = close - first;
+    taken = taken && close != UINT32_MAX && base_used + span <= pp->exp_cap;
+    if (taken)
+    {
+        *out_arg_count = fast_call_last_arg(cf, base_used, span, arg_start, arg_count);
+        fast_tok_copy(pp->exp_buf + base_used, ef->toks + first, span);
+        pp->exp_used = base_used + span;
+        ef->pos = close + 1u;
+    }
+    return taken;
+}
+
+// A call's body without '#' and '##' (FastMacro.plain_subst) with its parameters replaced: the stretches of body tokens
+// between the parameters' names (the macro's uses) and each name's prescanned argument copied into exp_buf, the
+// argument's first token with the name's BUSTER_FTOK_SPACE. False, with nothing written, where exp_buf has no room for
+// them all (fast_pp_run_calls's token loop then bails out where it runs out).
+static bool fast_pp_substitute_plain(FastPP* pp, const FastMacroCall* cf, const FastMacro* m, const FastTok* body)
+{
+    const uint32_t* const uses = pp->macro_params + m->plain_start + m->plain_count;
+    const uint32_t use_count = m->use_count;
+    uint32_t total = m->body_count - use_count;
+    for (uint32_t u = 0; u < use_count; u += 1)
+    {
+        total += cf->exp_arg_counts[uses[u] & 0xffu];
+    }
+    const bool room = pp->exp_used + total <= pp->exp_cap;
+    if (room)
+    {
+        FastTok* out = pp->exp_buf + pp->exp_used;
+        uint32_t i = 0;
+        for (uint32_t u = 0; u < use_count; u += 1)
+        {
+            const uint32_t at = uses[u] >> 8;
+            const uint32_t pidx = uses[u] & 0xffu;
+            const uint32_t count = cf->exp_arg_counts[pidx];
+            fast_tok_copy(out, body + i, at - i);
+            out += at - i;
+            if (count != 0)
+            {
+                const FastTok* const src = (cf->exp_arg_in_argbuf[pidx] != 0 ? pp->arg_buf : pp->exp_buf) + cf->exp_arg_starts[pidx];
+                fast_tok_copy(out, src, count);
+                // The first token again, whole, with the name's space.
+                const FastTok first = src[0];
+                out[0] = fast_tok_make(first.kind, (first.flags & ~BUSTER_FTOK_SPACE) | (body[at].flags & BUSTER_FTOK_SPACE), first.extra, first.data);
+                out += count;
+            }
+            i = at + 1u;
+        }
+        fast_tok_copy(out, body + i, m->body_count - i);
+        out += m->body_count - i;
+        pp->exp_used = (uint32_t)(out - pp->exp_buf);
+    }
+    return room;
+}
+
+// Strictly iterative macro expansion (ZERO recursion, zero calls to fast_pp_expand_buffer!): the call stack from its
+// root (fast_pp_call_start) on. Uses pp->call_stack + pp->arg_buf for nested function-like macro argument prescanning.
+static BUSTER_DIRECT_HOT bool fast_pp_run_calls(FastPP* pp, FastTok* out_replacement)
+{
+    uint32_t cdepth = 1u;
+    FastMacroCall* const root = pp->call_stack;
     while (cdepth > 0 && !pp->bailout)
     {
         FastMacroCall* cf = pp->call_stack + (cdepth - 1u);
-        const FastMacro* m = pp->macros + pp->idents.entries[cf->macro_id].macro_idx;
+        const FastMacro* m = pp->macros + cf->macro_idx;
         const uint32_t max_named = m->param_count;
         const FastTok* const body = pp->macro_toks + m->body_start;
         const uint32_t bcount = m->body_count;
 
-        if (cf->state == 0)
+        uint32_t bulk_count = 0;
+        if (cf->state == 0 && fast_pp_frame_args(pp, cf, m, &bulk_count))
         {
-            // Collect raw arguments into pp->exp_buf
+            // The arguments from the frame on top, in bulk. A call taken in bulk has its last argument recorded, so a
+            // token stood between its parentheses where it has two arguments or a first that isn't empty.
+            fast_pp_call_collected(pp, cf, m, bulk_count, bulk_count > 1u || cf->arg_counts[0] != 0);
+        }
+        else if (cf->state == 0)
+        {
+            // Collect raw arguments into pp->exp_buf, a token at a time
             uint32_t arg_count = 0;
             uint32_t cur_start = pp->exp_used;
             uint32_t paren_depth = 1u;
@@ -3350,105 +3580,47 @@ static BUSTER_DIRECT_HOT bool fast_pp_try_expand_ex(FastPP* pp, FastTok tok, boo
                     saw_any_tok = true;
                 }
             }
-            if (pp->bailout) { break; }
-
-            cf->va_elided = m->is_variadic && (arg_count == max_named || (max_named == 0 && !saw_any_tok));
-            if (max_named == 0 && !m->is_variadic)
-            {
-                if (arg_count > 1u || (arg_count == 1u && cf->arg_counts[0] != 0))
-                {
-                    fast_pp_bail(pp, "macro arg count mismatch");
-                    break;
-                }
-            }
-            else if (!m->is_variadic && arg_count != max_named)
-            {
-                fast_pp_bail(pp, "macro arg count mismatch");
-                break;
-            }
-            else if (m->is_variadic && arg_count < max_named)
-            {
-                fast_pp_bail(pp, "variadic macro too few args");
-                break;
-            }
-            else if (m->is_variadic && arg_count == max_named)
-            {
-                cf->arg_starts[max_named] = pp->exp_used;
-                cf->arg_counts[max_named] = 0;
-                arg_count += 1u;
-            }
-            cf->arg_count = arg_count;
-            cf->scan_body_idx = 0;
-            if (arg_count > 0)
-            {
-                memset(cf->exp_arg_done, 0, arg_count);
-                memset(cf->exp_arg_in_argbuf, 0, arg_count);
-            }
-            cf->state = 1u;
+            if (pp->bailout || !fast_pp_call_collected(pp, cf, m, arg_count, saw_any_tok)) { break; }
         }
         else if (cf->state == 1u)
         {
-            // Scan body for next parameter requiring prescan
+            // The next argument the body names plainly (the macro's plain list, fast_pp_handle_define): an empty one
+            // and one without an active macro's name are used as they are, any other is prescanned (state 2).
+            const uint32_t* const plain = pp->macro_params + m->plain_start;
             bool started_prescan = false;
-            while (cf->scan_body_idx < bcount)
+            while (cf->scan_body_idx < m->plain_count && !started_prescan && !pp->bailout)
             {
-                const uint32_t i = cf->scan_body_idx++;
-                const FastTok bt = body[i];
-                if ((bt.kind == FTOK_IDENT || bt.kind >= 64u) && bt.extra != 0)
+                const uint32_t pidx = plain[cf->scan_body_idx++];
+                const uint32_t ac = cf->arg_counts[pidx];
+                const FastTok* const raw = pp->exp_buf + cf->arg_starts[pidx];
+                cf->exp_arg_starts[pidx] = cf->arg_starts[pidx];
+                cf->exp_arg_counts[pidx] = ac;
+                cf->exp_arg_in_argbuf[pidx] = 0;
+                bool has_macro = false;
+                for (uint32_t k = 0; k < ac && !has_macro; k += 1)
                 {
-                    const uint32_t pidx = (uint32_t)bt.extra - 1u;
-                    const bool prev_op = i > 0 && (body[i - 1u].kind == FTOK_HASH || body[i - 1u].kind == FTOK_HASHHASH);
-                    const bool next_paste = i + 1u < bcount && body[i + 1u].kind == FTOK_HASHHASH;
-                    if (!prev_op && !next_paste && !cf->exp_arg_done[pidx])
-                    {
-                        cf->exp_arg_done[pidx] = 1u;
-                        const uint32_t ac = cf->arg_counts[pidx];
-                        if (ac == 0)
-                        {
-                            cf->exp_arg_starts[pidx] = cf->arg_starts[pidx];
-                            cf->exp_arg_counts[pidx] = 0;
-                            continue;
-                        }
-                        // Zero-copy fast path (~90% of macro args!): skip prescan if arg has NO active macro identifiers!
-                        const FastTok* raw = pp->exp_buf + cf->arg_starts[pidx];
-                        bool has_macro = false;
-                        for (uint32_t k = 0; k < ac; k += 1)
-                        {
-                            const FastTok rt = raw[k];
-                            if ((rt.kind == FTOK_IDENT || rt.kind >= 64u) &&
-                                (rt.flags & BUSTER_FTOK_BLUE) == 0 &&
-                                fast_ident_is_macro(&pp->idents, rt.data))
-                            {
-                                has_macro = true;
-                                break;
-                            }
-                        }
-                        if (!has_macro)
-                        {
-                            cf->exp_arg_starts[pidx] = cf->arg_starts[pidx];
-                            cf->exp_arg_counts[pidx] = ac;
-                            cf->exp_arg_in_argbuf[pidx] = 0;
-                            continue;
-                        }
-                        if (pp->expand_depth >= BUSTER_FPP_MAX_EXPAND)
-                        {
-                            fast_pp_bail(pp, "arg prescan depth");
-                            break;
-                        }
-                        cf->active_pidx = pidx;
-                        cf->arg_out_start = pp->arg_used;
-                        cf->base_expand_depth = pp->expand_depth;
-                        pp->expand[pp->expand_depth++] = (FastExpandFrame){
-                            .toks = raw,
-                            .pos = 0,
-                            .count = ac,
-                            .macro_ident = 0,
-                            .saved_scratch = UINT32_MAX,
-                        };
-                        cf->state = 2u;
-                        started_prescan = true;
-                        break;
-                    }
+                    const FastTok rt = raw[k];
+                    has_macro = (rt.kind == FTOK_IDENT || rt.kind >= 64u) && (rt.flags & BUSTER_FTOK_BLUE) == 0 &&
+                                fast_ident_is_macro(&pp->idents, rt.data);
+                }
+                if (has_macro && pp->expand_depth >= BUSTER_FPP_MAX_EXPAND)
+                {
+                    fast_pp_bail(pp, "arg prescan depth");
+                }
+                else if (has_macro)
+                {
+                    cf->active_pidx = pidx;
+                    cf->arg_out_start = pp->arg_used;
+                    cf->base_expand_depth = pp->expand_depth;
+                    pp->expand[pp->expand_depth++] = (FastExpandFrame){
+                        .toks = raw,
+                        .pos = 0,
+                        .count = ac,
+                        .macro_ident = 0,
+                        .saved_scratch = UINT32_MAX,
+                    };
+                    cf->state = 2u;
+                    started_prescan = true;
                 }
             }
             if (!started_prescan && !pp->bailout)
@@ -3495,6 +3667,7 @@ static BUSTER_DIRECT_HOT bool fast_pp_try_expand_ex(FastPP* pp, FastTok tok, boo
                         }
                         FastMacroCall* child = pp->call_stack + cdepth++;
                         child->macro_id = at.data;
+                        child->macro_idx = pp->idents.entries[at.data].macro_idx;
                         child->saved_exp_used = pp->exp_used;
                         child->saved_arg_used = pp->arg_used;
                         child->min_expand_depth = cf->base_expand_depth;
@@ -3530,9 +3703,11 @@ static BUSTER_DIRECT_HOT bool fast_pp_try_expand_ex(FastPP* pp, FastTok tok, boo
         }
         else
         {
-            // state == 3: Substitute body into pp->exp_buf, restore pp->arg_used, and push substituted frame!
+            // state == 3: Substitute body into pp->exp_buf, restore pp->arg_used, and push substituted frame! A body
+            // without '#' and '##' by copies (fast_pp_substitute_plain), any other a token at a time.
             const uint32_t subst_start = pp->exp_used;
-            for (uint32_t i = 0; i < bcount && !pp->bailout; i += 1)
+            const bool copied = m->plain_subst != 0 && fast_pp_substitute_plain(pp, cf, m, body);
+            for (uint32_t i = 0; i < bcount && !pp->bailout && !copied; i += 1)
             {
                 const FastTok bt = body[i];
                 if (bt.kind == FTOK_HASH && i + 1u < bcount &&
@@ -3642,7 +3817,9 @@ static BUSTER_DIRECT_HOT bool fast_pp_try_expand_ex(FastPP* pp, FastTok tok, boo
             {
                 if (pp->exp_used > subst_start)
                 {
-                    pp->exp_buf[subst_start].flags = (uint8_t)(pp->exp_buf[subst_start].flags | (cf->tok_flags & (BUSTER_FTOK_SPACE | BUSTER_FTOK_BOL)));
+                    // The whole token again: the frame reads it next, and a one-byte store would not forward to that.
+                    const FastTok first = pp->exp_buf[subst_start];
+                    pp->exp_buf[subst_start] = fast_tok_make(first.kind, first.flags | (cf->tok_flags & (BUSTER_FTOK_SPACE | BUSTER_FTOK_BOL)), first.extra, first.data);
                 }
                 pp->hide_ids[pp->hide_count++] = cf->macro_id;
                 pp->expand[pp->expand_depth++] = (FastExpandFrame){
@@ -3668,6 +3845,19 @@ static BUSTER_DIRECT_HOT bool fast_pp_try_expand_ex(FastPP* pp, FastTok tok, boo
     }
     out_replacement->kind = FTOK_EOF;
     return true;
+}
+
+static BUSTER_DIRECT_HOT bool fast_pp_try_expand_ex(FastPP* pp, FastTok tok, bool stop_at_eol,
+                                                    uint32_t min_expand_depth, bool allow_file, FastTok* out_replacement)
+{
+    bool is_func = false;
+    bool expanded = fast_pp_try_expand_nonfunc(pp, tok, false, out_replacement, &is_func);
+    if (!expanded && is_func && fast_pp_consume_lparen(pp, stop_at_eol, min_expand_depth, allow_file))
+    {
+        fast_pp_call_start(pp, tok, min_expand_depth, allow_file);
+        expanded = fast_pp_run_calls(pp, out_replacement);
+    }
+    return expanded;
 }
 
 static inline bool fast_pp_try_expand(FastPP* pp, FastTok tok, bool stop_at_eol, FastTok* out_replacement)
@@ -4219,28 +4409,40 @@ static __attribute__((noinline)) void fast_pp_handle_define(FastPP* pp, FastIncl
     bool is_variadic = false;
     uint32_t vararg_name = 0;
 
+    // The rest of the line, read in bulk where it stands (fast_pp_read_line): a function-like macro's parameters up to
+    // their ')', then the body, which moves to the start.
+    const uint32_t body_start = pp->macro_tok_count;
+    FastTok* const body = pp->macro_toks + body_start;
+    const uint32_t room = pp->macro_tok_cap - body_start > 16u ? pp->macro_tok_cap - body_start - 16u : 0u;
+    f->ptr += is_func ? 1 : 0;
+    const uint32_t line_count = fast_pp_read_line(pp, f, body, room);
+    if (line_count > room)
+    {
+        fast_pp_bail(pp, "macro_toks overflow");
+        return;
+    }
+    uint32_t at = 0;
     if (is_func)
     {
-        f->ptr += 1; // skip '('
-        FastTok pt = { 0 };
-        fast_pp_read_tok(pp, f, true, &pt);
+        const FastTok none = fast_tok_make(FTOK_EOF, 0, 0, 0);
+        FastTok pt = at < line_count ? body[at++] : none;
         while (pt.kind != FTOK_RPAREN && pt.kind != FTOK_EOF && !pp->bailout)
         {
             if (pt.kind == FTOK_ELLIPSIS)
             {
                 is_variadic = true;
-                fast_pp_read_tok(pp, f, true, &pt);
+                pt = at < line_count ? body[at++] : none;
                 break;
             }
             if (pt.kind == FTOK_IDENT || (pt.kind >= 64u && pt.kind < 126u))
             {
                 const uint32_t pid = pt.data;
-                fast_pp_read_tok(pp, f, true, &pt);
+                pt = at < line_count ? body[at++] : none;
                 if (pt.kind == FTOK_ELLIPSIS)
                 {
                     is_variadic = true;
                     vararg_name = pid;
-                    fast_pp_read_tok(pp, f, true, &pt);
+                    pt = at < line_count ? body[at++] : none;
                     break;
                 }
                 if (param_count < BUSTER_FPP_MAX_PARAMS)
@@ -4253,7 +4455,7 @@ static __attribute__((noinline)) void fast_pp_handle_define(FastPP* pp, FastIncl
                 }
                 if (pt.kind == FTOK_COMMA)
                 {
-                    fast_pp_read_tok(pp, f, true, &pt);
+                    pt = at < line_count ? body[at++] : none;
                 }
             }
             else
@@ -4267,40 +4469,32 @@ static __attribute__((noinline)) void fast_pp_handle_define(FastPP* pp, FastIncl
             fast_pp_bail(pp, "unterminated macro params");
             return;
         }
+        memmove(body, body + at, (size_t)(line_count - at) * sizeof(FastTok));
     }
-
-    const uint32_t body_start = pp->macro_tok_count;
+    const uint32_t body_count = line_count - at;
     bool has_ops = false;
-    bool first = true;
-    for (;;)
+    // The first token without the space before it. Its one-byte store doesn't forward to the loop's load of the whole
+    // token, but writing every token again whole measured 0.04 ms slower on sqlite3.c's 5,757 defines (#3584).
+    if (body_count != 0)
     {
-        FastTok bt = { 0 };
-        fast_pp_read_tok(pp, f, true, &bt);
-        if (bt.kind == FTOK_EOF)
-        {
-            break;
-        }
-        if (first)
-        {
-            bt.flags &= (uint8_t)~(BUSTER_FTOK_SPACE | BUSTER_FTOK_BOL);
-            first = false;
-        }
-        if (bt.kind == FTOK_HASH || bt.kind == FTOK_HASHHASH)
-        {
-            has_ops = true;
-        }
+        body[0].flags &= (uint8_t)~(BUSTER_FTOK_SPACE | BUSTER_FTOK_BOL);
+    }
+    for (uint32_t i = 0; i < body_count; i += 1)
+    {
+        const FastTok bt = body[i];
+        has_ops = has_ops || bt.kind == FTOK_HASH || bt.kind == FTOK_HASHHASH;
         if (is_func && (bt.kind == FTOK_IDENT || (bt.kind >= 64u && bt.kind < 126u)))
         {
-            bt.extra = 0;
+            uint16_t extra = 0;
             if (is_variadic && (pp->idents.entries[bt.data].pp_kw == FPP_KW_VA_ARGS ||
                                 (vararg_name != 0 && bt.data == vararg_name)))
             {
-                bt.extra = (uint16_t)(param_count + 1u);
+                extra = (uint16_t)(param_count + 1u);
             }
             else if (is_variadic && pp->idents.entries[bt.data].pp_kw == FPP_KW_VA_OPT)
             {
                 fast_pp_bail(pp, "__VA_OPT__");
-                break;
+                return;
             }
             else
             {
@@ -4308,23 +4502,69 @@ static __attribute__((noinline)) void fast_pp_handle_define(FastPP* pp, FastIncl
                 {
                     if (params[k] == bt.data)
                     {
-                        bt.extra = (uint16_t)(k + 1u);
+                        extra = (uint16_t)(k + 1u);
                         break;
                     }
                 }
             }
+            body[i] = fast_tok_make(bt.kind, bt.flags, extra, bt.data);
         }
-        if (pp->macro_tok_count < pp->macro_tok_cap)
+    }
+    pp->macro_tok_count = body_start + body_count;
+    fast_pp_skip_to_eol(pp, f);
+
+    // The parameters the body names plainly, by the walk fast_pp_run_calls's substitution makes: '#' and a parameter,
+    // and '##' and the token after it, are taken together, and a parameter before '##' takes its argument as written.
+    const uint32_t plain_start = pp->macro_param_count;
+    uint32_t plain_count = 0;
+    uint64_t named[2] = { 0, 0 };
+    uint32_t walk = 0;
+    while (is_func && walk < body_count)
+    {
+        const FastTok bt = body[walk];
+        const bool has_next = walk + 1u < body_count;
+        const bool next_param = has_next && (body[walk + 1u].kind == FTOK_IDENT || body[walk + 1u].kind >= 64u) && body[walk + 1u].extra != 0;
+        const bool param = (bt.kind == FTOK_IDENT || bt.kind >= 64u) && bt.extra != 0;
+        if ((bt.kind == FTOK_HASH && next_param) || (bt.kind == FTOK_HASHHASH && has_next))
         {
-            pp->macro_toks[pp->macro_tok_count++] = bt;
+            walk += 2u;
         }
         else
         {
-            fast_pp_bail(pp, "macro_toks overflow");
-            break;
+            const uint32_t pidx = param ? (uint32_t)bt.extra - 1u : 0u;
+            if (param && !(has_next && body[walk + 1u].kind == FTOK_HASHHASH) && ((named[pidx >> 6] >> (pidx & 63u)) & 1u) == 0)
+            {
+                named[pidx >> 6] |= UINT64_C(1) << (pidx & 63u);
+                if (pp->macro_param_count < pp->macro_param_cap)
+                {
+                    pp->macro_params[pp->macro_param_count++] = pidx;
+                    plain_count += 1u;
+                }
+                else
+                {
+                    fast_pp_bail(pp, "macro_params overflow");
+                }
+            }
+            walk += 1u;
         }
     }
-    fast_pp_skip_to_eol(pp, f);
+    // A body without '#' and '##' names each parameter plainly: where each name stands, for the substitution's copies
+    // (fast_pp_substitute_plain).
+    uint32_t use_count = 0;
+    bool plain_subst = is_func && !has_ops;
+    for (uint32_t i = 0; plain_subst && i < body_count; i += 1)
+    {
+        const FastTok bt = body[i];
+        if ((bt.kind == FTOK_IDENT || bt.kind >= 64u) && bt.extra != 0)
+        {
+            plain_subst = pp->macro_param_count < pp->macro_param_cap && use_count < UINT16_MAX;
+            if (plain_subst)
+            {
+                pp->macro_params[pp->macro_param_count++] = (i << 8) | ((uint32_t)bt.extra - 1u);
+                use_count += 1u;
+            }
+        }
+    }
 
     const uint32_t midx = ++pp->macro_count;
     const uint32_t bcnt = pp->macro_tok_count - body_start;
@@ -4458,6 +4698,10 @@ static __attribute__((noinline)) void fast_pp_handle_define(FastPP* pp, FastIncl
         .active = 1u,
         .fast_mode = fmode,
         .fast_kind = fkind,
+        .plain_count = (uint16_t)plain_count,
+        .plain_start = plain_start,
+        .use_count = (uint16_t)use_count,
+        .plain_subst = plain_subst ? 1u : 0u,
     };
     pp->idents.entries[name_id].macro_idx = midx;
     fast_ident_set_macro_bit(&pp->idents, name_id, true);
@@ -4465,19 +4709,13 @@ static __attribute__((noinline)) void fast_pp_handle_define(FastPP* pp, FastIncl
 
 static bool fast_pp_eval_if_line(FastPP* pp, FastIncludeFile* f)
 {
-    FastTok raw[512];
+    FastTok raw[512 + 16];
     FastTok expanded[1024];
-    uint32_t rc = 0;
-    for (;;)
+    uint32_t rc = fast_pp_read_line(pp, f, raw, 512u);
+    if (rc > 512u)
     {
-        FastTok t = { 0 };
-        fast_pp_read_tok(pp, f, true, &t);
-        if (t.kind == FTOK_EOF)
-        {
-            break;
-        }
-        if (rc < 512u) { raw[rc++] = t; }
-        else { fast_pp_bail(pp, "long #if line"); break; }
+        fast_pp_bail(pp, "long #if line");
+        rc = 512u;
     }
     fast_pp_skip_to_eol(pp, f);
     uint32_t ec = 0;
@@ -4808,7 +5046,7 @@ static bool fast_pp_init(FastPP* pp, FastArena* arena, FastArena* scratch, bool 
         pp->lit_bytes_cap = UINT64_C(512) * 1024u;
         pp->lit_cap = 32768u;
         pp->macro_tok_cap = 128u * 1024u;
-        pp->macro_param_cap = 16384u;
+        pp->macro_param_cap = 2u * pp->macro_tok_cap;
         pp->exp_cap = 32768u;
         pp->arg_cap = 16384u;
 
@@ -4910,13 +5148,6 @@ _Alignas(64) static const uint8_t fast_ascii_to_kind[128] = {
     ['|'] = FTOK_PIPE,
     ['}'] = FTOK_RBRACE,
     ['~'] = FTOK_TILDE,
-};
-
-_Alignas(64) static const uint8_t fast_iota64[64] = {
-    0,  1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15,
-    16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
-    32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47,
-    48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63,
 };
 
 static inline void fast_pp_emit_soa(FastPP* pp, FastTok tok)
@@ -5434,9 +5665,12 @@ static BUSTER_DIRECT_HOT void fast_pp_lex_window(FastPP* pp, const FastIncludeFi
             const uint8_t* const close = fast_scan_string_close(p + 1, end, &has_escape, &stopped);
             if (stopped == BUSTER_FSTRING_CLOSED)
             {
+                // Its length with both quotes where a byte holds it (fast_pp_window_convert sizes tokens by it), and 0
+                // for a longer one.
+                const uint64_t string_length = (uint64_t)(close + 1 - p);
                 wk[n] = FTOK_STR_LIT;
                 ws[n] = (uint16_t)(off - first_off);
-                wl[n] = 0;
+                wl[n] = (uint8_t)(string_length <= 255u ? string_length : 0u);
                 n += 1u;
                 off = (uint64_t)(close + 1 - base);
                 bol = false;
@@ -5585,6 +5819,219 @@ static FastTok fast_pp_window_tok(FastPP* pp, const FastIncludeFile* f, uint32_t
     }
     *out_end = text_end;
     return tok;
+}
+
+// Whether the number whose run of digits and letters is s[0..len) goes on past it, as fast_lex_number takes it: a '.'
+// follows, or a sign after an exponent's letter.
+static inline bool fast_number_goes_on(const uint8_t* s, uint32_t len)
+{
+    const uint8_t after = s[len];
+    const uint8_t last = s[len - 1u] | 0x20u;
+    return after == '.' || ((after == '+' || after == '-') && (last == 'e' || last == 'p'));
+}
+
+// The first of the window's tokens t0 to t1 that fast_pp_window_convert can't take, or t1: a token the window left to
+// fast_lex_one, a string longer than its length byte holds, and a number that goes on past its run (fast_lex_number
+// takes the '.' or the exponent's sign after it, which are the window's next tokens).
+static uint32_t fast_pp_window_limit(const FastWindow* w, const uint8_t* base, uint32_t t0, uint32_t t1)
+{
+    const __m512i v_string = _mm512_set1_epi8(FTOK_STR_LIT);
+    const __m512i v_number = _mm512_set1_epi8(FTOK_INT_LIT);
+    uint32_t limit = t1;
+    for (uint32_t t = t0; t < limit; t += 64u)
+    {
+        const __m512i kinds = _mm512_loadu_si512((const void*)(w->kinds + t));
+        const __m512i lens = _mm512_loadu_si512((const void*)(w->lens + t));
+        const __mmask64 live = _bzhi_u64(~UINT64_C(0), limit - t < 64u ? limit - t : 64u);
+        uint64_t refused = (_mm512_testn_epi8_mask(kinds, kinds) | (_mm512_cmpeq_epi8_mask(kinds, v_string) & _mm512_testn_epi8_mask(lens, lens))) & live;
+        uint64_t numbers = _mm512_cmpeq_epi8_mask(kinds, v_number) & live & (_blsi_u64(refused) - 1u);
+        while (numbers != 0)
+        {
+            const uint32_t k = (uint32_t)__builtin_ctzll(numbers);
+            numbers &= numbers - 1u;
+            if (fast_number_goes_on(base + w->origin + w->starts[t + k], w->lens[t + k]))
+            {
+                refused |= UINT64_C(1) << k;
+                numbers = 0;
+            }
+        }
+        limit = refused != 0 ? t + (uint32_t)__builtin_ctzll(refused) : limit;
+    }
+    return limit;
+}
+
+// The window's tokens t0 to t1 (none of them one fast_pp_window_limit refuses) as fast_lex_one gives them, into `out`
+// (room for 15 more), each with BUSTER_FTOK_SPACE where text stands between it and the token before it: blanks, a
+// comment, a newline (before the first, the text from *io_end; *io_end is set to where the last ends). No token gets
+// BUSTER_FTOK_BOL: the directives and the macro calls that take these tokens never ask (fast_pp_single_token asks
+// fast_lex_one's own token). Sixteen tokens at a time: their ends from the window's starts and lengths (a punctuator's
+// by its kind), the gaps by comparing each start with the end before it, and the tokens' kinds and flags made in
+// registers and stored whole; then the tokens with data, the identifiers to look up and the literals to convert, a
+// loop over their lanes.
+static void fast_pp_window_convert(FastPP* pp, const FastIncludeFile* f, uint32_t t0, uint32_t t1, const uint8_t** io_end, FastTok* out)
+{
+    const FastWindow* const w = &pp->win;
+    const uint8_t* const base = f->base;
+    const __m512i v_punct_len = _mm512_loadu_si512((const void*)fast_punct_len);
+    const __m512i v_space = _mm512_set1_epi64((int64_t)BUSTER_FTOK_SPACE << 8);
+    const __m128i v_one = _mm_set1_epi8(1);
+    const __m128i v_sized_max = _mm_set1_epi8(FTOK_STR_LIT - 1);
+    const __m512i v_origin = _mm512_set1_epi32((int32_t)w->origin);
+    __m512i v_ends = _mm512_set1_epi32((int32_t)(*io_end - base));
+    for (uint32_t t = t0; t < t1; t += 16u)
+    {
+        const uint32_t lanes = t1 - t < 16u ? t1 - t : 16u;
+        const __m128i kinds = _mm_loadu_si128((const __m128i*)(w->kinds + t));
+        const __m128i lens = _mm_loadu_si128((const __m128i*)(w->lens + t));
+        const __m512i starts = _mm512_add_epi32(v_origin, _mm512_cvtepu16_epi32(_mm256_loadu_si256((const __m256i*)(const void*)(w->starts + t))));
+        // Identifiers, numbers and literals (kinds 1 to 5) have the window's length.
+        const __mmask16 sized = _mm_cmple_epu8_mask(_mm_sub_epi8(kinds, v_one), v_sized_max);
+        const __m128i punct_len = _mm512_castsi512_si128(_mm512_permutexvar_epi8(_mm512_castsi128_si512(kinds), v_punct_len));
+        const __m512i ends = _mm512_add_epi32(starts, _mm512_cvtepu8_epi32(_mm_mask_blend_epi8(sized, punct_len, lens)));
+        const uint32_t space = (uint32_t)_mm512_cmpneq_epi32_mask(starts, _mm512_alignr_epi32(ends, v_ends, 15));
+        const __m512i low = _mm512_cvtepu8_epi64(kinds);
+        const __m512i high = _mm512_cvtepu8_epi64(_mm_unpackhi_epi64(kinds, kinds));
+        const __m512i low_tokens = _mm512_mask_or_epi64(low, (__mmask8)space, low, v_space);
+        const __m512i high_tokens = _mm512_mask_or_epi64(high, (__mmask8)(space >> 8), high, v_space);
+        // 32-byte stores: a token is read back soon, and Zen 5 forwards a 64-byte store to a narrower load only inside
+        // one of its halves and its first cache line.
+        FastTok* const o = out + (t - t0);
+        _mm256_storeu_si256((__m256i*)(void*)o, _mm512_castsi512_si256(low_tokens));
+        _mm256_storeu_si256((__m256i*)(void*)(o + 4), _mm512_extracti64x4_epi64(low_tokens, 1));
+        _mm256_storeu_si256((__m256i*)(void*)(o + 8), _mm512_castsi512_si256(high_tokens));
+        _mm256_storeu_si256((__m256i*)(void*)(o + 12), _mm512_extracti64x4_epi64(high_tokens, 1));
+        uint32_t work = (uint32_t)sized & _bzhi_u32(0xffffu, lanes);
+        while (work != 0)
+        {
+            const uint32_t k = (uint32_t)__builtin_ctz(work);
+            work &= work - 1u;
+            const uint32_t ti = t + k;
+            const uint8_t* const s = base + w->origin + w->starts[ti];
+            const uint32_t kind = w->kinds[ti];
+            const uint32_t flags = ((space >> k) & 1u) * BUSTER_FTOK_SPACE;
+            FastTok tok;
+            if (kind == FTOK_IDENT)
+            {
+                uint8_t ident_kind = FTOK_IDENT;
+                const uint32_t id = fast_ident_lookup(&pp->idents, s, w->lens[ti], &ident_kind);
+                if (__builtin_expect(id == 0, 0))
+                {
+                    fast_pp_bail(pp, "ident table full");
+                }
+                tok = fast_tok_make(ident_kind, flags, 0, id);
+            }
+            else if (kind == FTOK_INT_LIT)
+            {
+                tok = fast_lex_number(pp, s, f->end, flags).tok;
+            }
+            else if (kind == FTOK_STR_LIT)
+            {
+                tok = fast_lex_string(pp, s, f->end, flags, 0).tok;
+            }
+            else
+            {
+                tok = fast_lex_char(pp, s, f->end, flags, 0).tok;
+            }
+            o[k] = tok;
+        }
+        // The last token's end, which the next sixteen's first gap starts from.
+        v_ends = _mm512_permutexvar_epi32(_mm512_set1_epi32((int32_t)(lanes - 1u)), ends);
+    }
+    *io_end = base + (uint32_t)_mm_cvtsi128_si32(_mm512_castsi512_si128(v_ends));
+}
+
+// A function-like macro's call whose '(' is the window's token `lparen`, its arguments taken from the window in bulk:
+// where the window has the ')' that closes the call and none of the tokens before it is one fast_pp_window_convert
+// refuses, the tokens between are converted into exp_buf and the call's arguments (cf->arg_starts, cf->arg_counts,
+// *out_arg_count) are their stretches between the commas at depth 1 (a variadic macro's first param_count of them),
+// as fast_pp_run_calls's collection splits them. The ')' is the first token at depth 0 (fast_paren_depths). Returns
+// that ')''s index, or 0 where the call isn't taken here and nothing was converted.
+static uint32_t fast_pp_window_args(FastPP* pp, const FastIncludeFile* f, uint32_t lparen, const FastMacro* m, FastMacroCall* cf,
+                                    uint32_t* out_arg_count)
+{
+    const FastWindow* const w = &pp->win;
+    const uint32_t first = lparen + 1u;
+    const uint32_t count = w->count;
+    const uint32_t base_used = pp->exp_used;
+    const __m512i v_lparen = _mm512_set1_epi8(FTOK_LPAREN);
+    const __m512i v_rparen = _mm512_set1_epi8(FTOK_RPAREN);
+    const __m512i v_comma = _mm512_set1_epi8(FTOK_COMMA);
+    uint32_t depth = 1u;
+    uint32_t close = 0;
+    uint32_t arg_count = 0;
+    uint32_t arg_start = 0;
+    bool taken = true;
+    for (uint32_t b = first; taken && close == 0 && b < count; b += 64u)
+    {
+        const uint64_t live = _bzhi_u64(~UINT64_C(0), count - b < 64u ? count - b : 64u);
+        const __m512i kinds = _mm512_loadu_si512((const void*)(w->kinds + b));
+        const uint64_t closing = fast_call_block(_mm512_cmpeq_epi8_mask(kinds, v_lparen), _mm512_cmpeq_epi8_mask(kinds, v_rparen),
+                                                 _mm512_cmpeq_epi8_mask(kinds, v_comma), live, &depth, m, cf, base_used, b - first,
+                                                 &arg_start, &arg_count);
+        taken = closing != UINT64_MAX;
+        close = taken && closing != 0 ? b + (uint32_t)__builtin_ctzll(closing) : 0u;
+    }
+    const uint32_t span = close - first;
+    taken = taken && close != 0 && fast_pp_window_limit(w, f->base, first, close) == close && base_used + span + 16u <= pp->exp_cap;
+    if (taken)
+    {
+        *out_arg_count = fast_call_last_arg(cf, base_used, span, arg_start, arg_count);
+        const uint8_t* end = f->base + w->origin + w->starts[lparen] + 1u;
+        fast_pp_window_convert(pp, f, first, close, &end, pp->exp_buf + base_used);
+        pp->exp_used = base_used + span;
+    }
+    return taken ? close : 0u;
+}
+
+// The rest of a directive's line into `out` (room for `capacity` tokens and 15 more): the tokens fast_pp_read_tok
+// would give one at a time up to the line's end, the window's in bulk (fast_pp_window_convert) and fast_pp_read_tok's
+// where the window has none to give (a token it left to fast_lex_one, a splice, the window's end). Returns how many
+// tokens the line has, or capacity + 1 where it has more.
+static uint32_t fast_pp_read_line(FastPP* pp, FastIncludeFile* f, FastTok* out, uint32_t capacity)
+{
+    FastWindow* const w = &pp->win;
+    uint32_t n = 0;
+    bool done = false;
+    while (!done)
+    {
+        // A line's window ends where the line does: its tokens are the line's.
+        if (fast_pp_window_seek(pp, f) && w->line_mode && w->pos < w->count)
+        {
+            const uint32_t t0 = w->pos;
+            const uint32_t limit = fast_pp_window_limit(w, f->base, t0, w->count);
+            const uint32_t t1 = limit - t0 <= capacity - n ? limit : t0 + (capacity - n);
+            if (t1 > t0)
+            {
+                const uint8_t* end = f->ptr;
+                fast_pp_window_convert(pp, f, t0, t1, &end, out + n);
+                n += t1 - t0;
+                w->pos = t1;
+                fast_pp_sync_file(f, end);
+                f->at_bol = false;
+            }
+            // The line's end, where the window took it all: fast_pp_read_tok's end of the line.
+            done = t1 == w->count && w->stop == BUSTER_FWIN_STOP_EOL;
+            if (done)
+            {
+                fast_pp_sync_file(f, w->lex_ptr);
+            }
+        }
+        if (!done)
+        {
+            FastTok tok;
+            fast_pp_read_tok(pp, f, true, &tok);
+            if (tok.kind != FTOK_EOF)
+            {
+                if (n < capacity)
+                {
+                    out[n] = tok;
+                }
+                n += 1u;
+            }
+            done = tok.kind == FTOK_EOF || n > capacity || pp->bailout;
+        }
+    }
+    return n;
 }
 
 // The next token of f's text for the directives and for a macro call's arguments: fast_lex_one's token and its state
@@ -5798,7 +6245,8 @@ static __attribute__((noinline)) bool fast_pp_window_macro(FastPP* pp, FastInclu
         }
     }
 
-    // Any other macro: the expansion engine's, which reads its arguments through the window.
+    // Any other macro: the expansion engine's. A function-like macro's arguments come from the window in bulk where
+    // it has the whole call (fast_pp_window_args), and through fast_pp_read_tok otherwise.
     if (f->ptr <= after_name)
     {
         fast_pp_sync_file(f, after_name);
@@ -5807,7 +6255,29 @@ static __attribute__((noinline)) bool fast_pp_window_macro(FastPP* pp, FastInclu
     f->at_bol = false;
     FastTok rep = fast_tok_make(FTOK_EOF, 0, 0, 0);
     const FastTok mtok = fast_tok_make(kind, 0, 0, id);
-    if (fast_pp_try_expand(pp, mtok, false, &rep))
+    bool is_func = false;
+    bool expanded = fast_pp_try_expand_nonfunc(pp, mtok, false, &rep, &is_func);
+    if (!expanded && is_func)
+    {
+        const uint32_t lparen = t + 1u;
+        FastMacroCall* const root = fast_pp_call_start(pp, mtok, 0, true);
+        uint32_t arg_count = 0;
+        const uint32_t close = lparen < w->count && w->kinds[lparen] == FTOK_LPAREN ?
+                               fast_pp_window_args(pp, f, lparen, pp->macros + fmidx, root, &arg_count) : 0u;
+        if (close != 0)
+        {
+            // The text goes on after the ')', with its line: the prescans and the body may ask for __LINE__.
+            fast_pp_sync_file(f, f->base + w->origin + w->starts[close] + 1u);
+            w->pos = close + 1u;
+            expanded = fast_pp_call_collected(pp, root, pp->macros + fmidx, arg_count, arg_count > 1u || root->arg_counts[0] != 0) &&
+                       fast_pp_run_calls(pp, &rep);
+        }
+        else if (fast_pp_consume_lparen(pp, false, 0, true))
+        {
+            expanded = fast_pp_run_calls(pp, &rep);
+        }
+    }
+    if (expanded)
     {
         if (rep.kind != FTOK_EOF)
         {
@@ -5828,15 +6298,6 @@ static __attribute__((noinline)) bool fast_pp_window_macro(FastPP* pp, FastInclu
     fast_pp_window_goto(pp, f, f->ptr);
     f->at_bol = false;
     return pp->bailout;
-}
-
-// Whether the number whose run of digits and letters is s[0..len) goes on past it, as fast_lex_number takes it: a '.'
-// follows, or a sign after an exponent's letter.
-static inline bool fast_number_goes_on(const uint8_t* s, uint32_t len)
-{
-    const uint8_t after = s[len];
-    const uint8_t last = s[len - 1u] | 0x20u;
-    return after == '.' || ((after == '+' || after == '-') && (last == 'e' || last == 'p'));
 }
 
 // Two to eight decimal digits from a window (at least eight bytes readable at the start).

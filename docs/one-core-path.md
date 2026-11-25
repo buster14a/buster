@@ -4280,8 +4280,10 @@ single-TU `-c` C17/C23 object builds directly from `mmap`'d source bytes to an E
   emitter (`fast_pp_emit_window`) stores 64 kinds at a time and visits the identifiers, numbers and literals: a
   16 K-slot L2 identifier cache backed by a 64-way AVX-512 SwissTable, inline 1-to-8-digit decimal integers, and
   in-place expansion for empty, 1-token, 0-param-use (`assert`/`testcase`), 1-param identity-wrapper
-  (`ALWAYS`/`NEVER`) and short constant macros. Directives and macro arguments read the same window
-  (`fast_pp_read_tok`). An inactive group is skipped by masks too (`fast_pp_skip_inactive`): each line's first
+  (`ALWAYS`/`NEVER`) and short constant macros. A directive's line and a macro call's arguments are converted from
+  the same window in bulk, and read a token at a time (`fast_pp_read_tok`) only where the window can't give them
+  whole (["Macro calls and directives in bulk"](#macro-calls-and-directives-in-bulk-2026-11-25-3584)). An inactive
+  group is skipped by masks too (`fast_pp_skip_inactive`): each line's first
   character, a comment's start and what a literal may hide, 64 bytes a step. Macro expansion is strictly iterative
   (`call_stack` + `arg_buf`, zero recursion). `test-direct` lexes its cases at every offset of a block.
 - **Direct one-pass parser, type checker, and SysV AMD64 emitter (`c_direct_types.c`, `c_direct_cc.c`, `c_direct_x86.c`):**
@@ -4514,6 +4516,44 @@ came first; the census, every step's readings and the scripts are in
 - **What is left:** `fast_cc_expr`'s token loop (12.7% of the compile's ops), the statement loop (6.7%),
   `fval_emit_call`'s four passes over its arguments (4.5%), and 940 K mispredicted branches, most of them on a
   token's or a value's kind. Splitting `fast_expr_reduce_top` the same way measured nothing and was dropped.
+
+### Macro calls and directives in bulk (2026-11-25, #3584)
+
+After the window lexer, a directive's line and a function-like macro call's arguments were still read a token at a
+time (`fast_pp_read_tok`, 94,010 calls a compile of `sqlite3.c`), each call scanned its macro's body for the
+parameters to prescan (134,015 iterations), and a body was substituted a token at a time
+([record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/direct-bulk-3584-2026-11-25)).
+Now:
+
+- **A stretch of the window converts in bulk** (`fast_pp_window_convert`), sixteen tokens a step. Each token's end
+  comes from its start and length; a string's length is in the window now, where a byte holds it. The space before
+  a token is its start against the end before it, so no gap is scanned. Kinds and flags are made in registers, and a
+  loop visits the identifiers and literals. `fast_pp_window_limit` stops it before a token it can't take whole: one
+  the window left to `fast_lex_one`, a string past 255 bytes, a number that goes on past its run.
+- **A directive's line** (`fast_pp_read_line`): a `#define`'s parameters and body, an `#if`'s expression.
+- **A call's arguments** come from the window (`fast_pp_window_args`) or from the expansion frame on top
+  (`fast_pp_frame_args`). The `)` and the separating commas are found from the kinds as bits, with a prefix sum of the
+  parentheses' depth only where a `(` comes before the first `)`. A call across a window's end, or from an expansion
+  that ends before its `)`, is still read a token at a time.
+- **At `#define`** the body's plain parameters are listed (the prescan list), and for a body without `#` and `##`,
+  where each name stands: a call prescans from the list and substitutes by copies.
+
+| 9700X, `sqlite3.c`, CPU 2 | main `dced4e6b` | this | |
+| --- | ---: | ---: | ---: |
+| the product's `-c`, wall (21 rotated runs) | 16.450 ms | **16.210 ms** | -1.5% |
+| user cycles | 81.33 M | **80.03 M** | -1.6% |
+| user instructions | 220.05 M | **210.74 M** | -4.2% |
+| lexing and preprocessing (the harness's stage at main `20f3573e`, median of three code placements) | 6.953 ms | **6.756 ms** | -2.8% |
+| object | `f558aaf5...` | the same | |
+
+- **Measured and not kept:** the drain's loop over an expansion frame's tokens eight a step (frames are short and stop
+  at the next macro's name: slower than the token loop), and a `#define`'s body tokens all written again whole so
+  that no load waits on the first token's one-byte flag store (0.04 ms slower). Arguments from expansion frames in
+  bulk measured neutral, with fewer instructions.
+- **Checked:** the 7,556-unit corpus gives the same objects (1,860 of its units the direct path's). `test-direct` lays
+  out its macro calls and directives at every offset of a block, puts a call at each place across a window's end, and
+  checks `__LINE__` after calls and directives over lines. A round of single-line faults in the change fails it but
+  for four equivalent ones.
 
 ### Dependency files (2026-11-25, #3592)
 
