@@ -156,7 +156,8 @@ int c_direct_try_compile(const CDirectRequest* request)
     FastObj* obj = (FastObj*)fast_arena_alloc(&scratch, sizeof(FastObj), 64);
     FastCCState* cc = (FastCCState*)fast_arena_alloc(&scratch, sizeof(FastCCState), 64);
 
-    bool ok = pp != NULL && obj != NULL && cc != NULL && fast_pp_init(pp, &arena, &scratch, small);
+    bool ok = pp != NULL && obj != NULL && cc != NULL && fast_pp_init(pp, &arena, &scratch, small) &&
+              (request->dependencies == NULL || fast_pp_collect_dependencies(pp));
     if (ok)
     {
         pp->unsigned_char = request->unsigned_char;
@@ -178,7 +179,8 @@ int c_direct_try_compile(const CDirectRequest* request)
     {
         if (request->predefines_path != NULL)
         {
-            ok = fast_pp_run_file(pp, request->predefines_path);
+            // A system header's, as the full pipeline reads it (pp_run_prelude_macros).
+            ok = fast_pp_run_file(pp, request->predefines_path, false, true);
         }
         else if (request->predefines_text != NULL && request->predefines_length > 0)
         {
@@ -212,11 +214,11 @@ int c_direct_try_compile(const CDirectRequest* request)
             bool is_sys = false;
             if (access(inc, R_OK) == 0)
             {
-                ok = fast_pp_run_file(pp, inc);
+                ok = fast_pp_run_file(pp, inc, false, false);
             }
             else if (fast_pp_resolve_include(pp, inc, (uint32_t)strlen(inc), false, false, resolved, sizeof(resolved), &dir_idx, &is_sys))
             {
-                ok = fast_pp_run_file(pp, resolved);
+                ok = fast_pp_run_file(pp, resolved, false, is_sys);
             }
             else
             {
@@ -228,7 +230,7 @@ int c_direct_try_compile(const CDirectRequest* request)
     // 4. Main translation unit lex + preprocess
     if (ok)
     {
-        ok = fast_pp_run_file(pp, request->input_path);
+        ok = fast_pp_run_file(pp, request->input_path, true, false);
     }
 
     if (ok && request->out_token_count != NULL)
@@ -252,6 +254,17 @@ int c_direct_try_compile(const CDirectRequest* request)
     if (ok && request->mark_stage != NULL)
     {
         request->mark_stage(request->clock_context, request->stage_codegen);
+    }
+
+    // -MD and its kin (#3592): the files the unit read, of which the driver makes its rule now, so that a unit whose rule
+    // it can't make leaves before an object is written. The main file is read but not listed (pp_dependencies).
+    if (ok && request->dependencies != NULL)
+    {
+        if (pp->dependency_main != 0)
+        {
+            pp->dependency_records[pp->dependency_main - 1u].used = false;
+        }
+        ok = request->dependencies(request->dependency_context, pp->dependency_records, pp->dependency_count);
     }
 
     // 6. Direct single-writev ELF64 .o emission
@@ -2311,6 +2324,306 @@ static bool c_direct_test_asm(const char* obj_path)
     return ok;
 }
 
+// What the dependency test expects of the records (#3592): the paths after the test's directory, in order, and the flags.
+typedef struct CDirectTestDependency CDirectTestDependency;
+struct CDirectTestDependency
+{
+    const char* path;
+    bool used;
+    bool system;
+};
+
+typedef struct CDirectTestDependencies CDirectTestDependencies;
+struct CDirectTestDependencies
+{
+    const char* directory;
+    const CDirectTestDependency* expected;
+    uint32_t expected_count;
+    bool accept;
+    bool called;
+    bool matched;
+};
+
+// CDirectRequest.dependencies for the test: whether the records are the expected ones (any, without a list), and the
+// test's answer.
+static bool c_direct_test_dependency_records(void* context, const CDirectDependency* files, uint32_t count)
+{
+    CDirectTestDependencies* const test = (CDirectTestDependencies*)context;
+    const size_t prefix = strlen(test->directory);
+    bool matched = test->expected == NULL || count == test->expected_count;
+    for (uint32_t i = 0; matched && test->expected != NULL && i < count; i += 1)
+    {
+        const CDirectTestDependency want = test->expected[i];
+        const bool absolute = want.path[0] == '/';
+        const size_t length = strlen(want.path);
+        matched = files[i].used == want.used && files[i].system == want.system && files[i].length == strlen(files[i].path) &&
+                  (absolute ? files[i].length == length && memcmp(files[i].path, want.path, length) == 0
+                            : files[i].length == prefix + 1u + length && memcmp(files[i].path, test->directory, prefix) == 0 && files[i].path[prefix] == '/' &&
+                                  memcmp(files[i].path + prefix + 1u, want.path, length) == 0);
+        if (!matched)
+        {
+            fprintf(stderr, "test-direct: dependency %u is %.*s (used %d, system %d), not %s (used %d, system %d)\n", i, (int)files[i].length, files[i].path,
+                    files[i].used, files[i].system, want.path, want.used, want.system);
+        }
+    }
+    if (test->expected != NULL && count != test->expected_count)
+    {
+        fprintf(stderr, "test-direct: %u dependency records, not %u\n", count, test->expected_count);
+    }
+    test->called = true;
+    test->matched = matched;
+    return test->accept;
+}
+
+// -MD's records (#3592) of a unit that reads its files every way the direct path reads them, against the full pipeline's
+// pp_dependency_observe: in the order of their first reading, one record a file (two spellings of one file make one,
+// under the first: sys/t.h, a system header's in s.h and the main file's by another spelling, is then a user file); a
+// file skipped by its guard or #pragma once, and one a __has_include finds, read too; a system
+// header's when every reading was one, where a reading (an include, a skip, a __has_include) is as much a system
+// header's as its includer is, and
+// #pragma GCC system_header makes the rest of a header one, and the header in its later inclusions, but is ignored in the
+// main file; the predefines file a system
+// header, an -include file one when the search found it in a system directory; the main file not used. Then a rule the
+// driver can't make leaves before the object is written, and so does a __has_include that finds a directory.
+static bool c_direct_test_dependencies(const char* obj_path)
+{
+    char directory[128];
+    snprintf(directory, sizeof(directory), "/tmp/buster_direct_deps_%d", (int)getpid());
+    static const char* const subdirectories[] = { "", "/inc", "/sys", "/inc/sub" };
+    static const struct
+    {
+        const char* name;
+        const char* text;
+    } files[] = {
+        { "predefs.h", "#define __x86_64__ 1\n#define __LP64__ 1\n#define __STDC__ 1\n#define __STDC_VERSION__ 201710L\n" },
+        { "forced.h", "int forced;\n" },
+        { "sys/sysforced.h", "int sysforced;\n" },
+        { "inc/g.h", "#ifndef G_H\n#define G_H\nint g;\n#endif\n" },
+        { "inc/o.h", "#pragma once\nint o;\n" },
+        { "inc/p.h", "int p;\n" },
+        { "sys/s.h", "#include \"t.h\"\n#include <u.h>\n#include <u.h>\n#include <q.h>\n#if __has_include(<p2.h>)\n#endif\n" },
+        { "inc/q.h", "#ifndef Q_H\n#define Q_H\n#pragma GCC system_header\nint q;\n#endif\n" },
+        { "inc/p2.h", "int p2;\n" },
+        { "sys/t.h", "int t;\n" },
+        { "inc/u.h", "#ifndef U_H\n#define U_H\nint u;\n#endif\n" },
+        { "inc/h.h", "#ifdef SECOND\n#include <k2.h>\n#endif\n#include <k.h>\n#pragma GCC system_header\n#include <w.h>\n" },
+        { "inc/k.h", "int k;\n" },
+        { "inc/k2.h", "int k2;\n" },
+        { "inc/w.h", "int w;\n" },
+        { "inc/m.h", "int m;\n" },
+        { "main.c",
+          "#include <g.h>\n"
+          "#include <g.h>\n"
+          "#include <o.h>\n"
+          "#include <o.h>\n"
+          "#if __has_include(<p.h>) && __has_include(<o.h>) && !__has_include(<absent.h>)\n"
+          "int probed;\n"
+          "#endif\n"
+          "#include <s.h>\n"
+          "#include \"sys/../sys/t.h\"\n"
+          "#include <u.h>\n"
+          "#include <q.h>\n"
+          "#include \"inc/../inc/g.h\"\n"
+          "#include <h.h>\n"
+          "#define SECOND\n"
+          "#include <h.h>\n"
+          "#pragma GCC system_header\n"
+          "#include <m.h>\n"
+          "int x;\n" },
+        { "dir.c", "#if __has_include(<sub>)\n#endif\nint x;\n" },
+    };
+    static const CDirectTestDependency expected[] = {
+        { "predefs.h", true, true },
+        { "forced.h", true, false },
+        { "sys/sysforced.h", true, true },
+        { "main.c", false, false },
+        { "inc/g.h", true, false },
+        { "inc/o.h", true, false },
+        { "inc/p.h", true, false },
+        { "sys/s.h", true, true },
+        { "sys/t.h", true, false },
+        { "inc/u.h", true, false },
+        { "inc/q.h", true, true },
+        { "inc/p2.h", true, true },
+        { "inc/h.h", true, false },
+        { "inc/k.h", true, false },
+        { "inc/w.h", true, true },
+        { "inc/k2.h", true, true },
+        { "inc/m.h", true, false },
+    };
+    char path[256];
+    bool ok = true;
+    for (uint32_t i = 0; i < sizeof(subdirectories) / sizeof(subdirectories[0]); i += 1)
+    {
+        snprintf(path, sizeof(path), "%s%s", directory, subdirectories[i]);
+        ok = mkdir(path, 0700) == 0 && ok;
+    }
+    for (uint32_t i = 0; ok && i < sizeof(files) / sizeof(files[0]); i += 1)
+    {
+        snprintf(path, sizeof(path), "%s/%s", directory, files[i].name);
+        FILE* const file = fopen(path, "wb");
+        ok = file != NULL && fputs(files[i].text, file) != EOF;
+        ok = (file == NULL || fclose(file) == 0) && ok;
+    }
+    char user[160];
+    char system[160];
+    char predefines[160];
+    char forced[160];
+    char main_path[160];
+    char dir_path[160];
+    snprintf(user, sizeof(user), "%s/inc", directory);
+    snprintf(system, sizeof(system), "%s/sys", directory);
+    snprintf(predefines, sizeof(predefines), "%s/predefs.h", directory);
+    snprintf(forced, sizeof(forced), "%s/forced.h", directory);
+    snprintf(main_path, sizeof(main_path), "%s/main.c", directory);
+    snprintf(dir_path, sizeof(dir_path), "%s/dir.c", directory);
+    const char* const directories[2] = { user, system };
+    static const uint8_t levels[2] = { 0, 1 };
+    const char* const includes[2] = { forced, "sysforced.h" };
+    CDirectTestDependencies test = {
+        .directory = directory,
+        .expected = expected,
+        .expected_count = (uint32_t)(sizeof(expected) / sizeof(expected[0])),
+        .accept = true,
+    };
+    CDirectRequest request = {
+        .input_path = main_path,
+        .output_path = obj_path,
+        .predefines_path = predefines,
+        .directories = directories,
+        .directory_system = levels,
+        .directory_count = 2,
+        .includes = includes,
+        .include_count = 2,
+        .pic = true,
+        .unwind_tables = true,
+        .quiet = true,
+        .release = true,
+        .dependencies = c_direct_test_dependency_records,
+        .dependency_context = &test,
+    };
+    unlink(obj_path);
+    ok = ok && c_direct_try_compile(&request) == 0 && test.called && test.matched && access(obj_path, F_OK) == 0;
+    // A rule the driver can't make: the unit leaves, and no object is written.
+    unlink(obj_path);
+    test = (CDirectTestDependencies){
+        .directory = directory,
+        .expected = expected,
+        .expected_count = (uint32_t)(sizeof(expected) / sizeof(expected[0])),
+    };
+    ok = ok && c_direct_try_compile(&request) == 1 && test.called && test.matched && access(obj_path, F_OK) != 0;
+    // What leaves when the unit collects records and compiles when it doesn't: a __has_include that finds a directory,
+    // which the full pipeline's search goes on past; a __has_include of a macro (#3608); and a line marker's or #line's
+    // file name, which would change the system header level.
+    static const char* const leaving[] = {
+        "#if __has_include(<sub>)\n#endif\nint x;\n",
+        "#define H <g.h>\n#if __has_include(H)\n#endif\nint x;\n",
+        "# 7 \"other.c\" 3\nint x;\n",
+        "#line 7 \"other.c\"\nint x;\n",
+    };
+    request.input_path = dir_path;
+    request.include_count = 0;
+    for (uint32_t i = 0; ok && i < sizeof(leaving) / sizeof(leaving[0]); i += 1)
+    {
+        FILE* const file = fopen(dir_path, "wb");
+        ok = file != NULL && fputs(leaving[i], file) != EOF;
+        ok = (file == NULL || fclose(file) == 0) && ok;
+        test = (CDirectTestDependencies){ .directory = directory, .accept = true };
+        request.dependencies = c_direct_test_dependency_records;
+        ok = ok && c_direct_try_compile(&request) == 1 && !test.called && access(obj_path, F_OK) != 0;
+        request.dependencies = NULL;
+        ok = ok && c_direct_try_compile(&request) == 0;
+        unlink(obj_path);
+        if (!ok)
+        {
+            fprintf(stderr, "test-direct: dependency case %u\n", i);
+        }
+    }
+    // A line marker's number alone, and #line's, change nothing a record sees. __has_include and __has_include_next are
+    // defined, as clang's builtin macros are, to defined, #ifdef, #ifndef, #elifdef and #elifndef: each case reads p.h
+    // where they are and k.h where they aren't.
+    static const char* const staying[] = {
+        "# 7\nint x;\n#include <p.h>\n",
+        "#line 7\nint x;\n#include <p.h>\n",
+        "#ifdef __has_include\n#include <p.h>\n#else\n#include <k.h>\n#endif\n",
+        "#ifndef __has_include_next\n#include <k.h>\n#else\n#include <p.h>\n#endif\n",
+        "#if defined(__has_include) && defined __has_include_next\n#include <p.h>\n#else\n#include <k.h>\n#endif\n",
+        "#if 0\n#elifdef __has_include\n#include <p.h>\n#else\n#include <k.h>\n#endif\n",
+        "#if 0\n#elifndef __has_include_next\n#include <k.h>\n#else\n#include <p.h>\n#endif\n",
+    };
+    for (uint32_t i = 0; ok && i < sizeof(staying) / sizeof(staying[0]); i += 1)
+    {
+        FILE* const file = fopen(dir_path, "wb");
+        ok = file != NULL && fputs(staying[i], file) != EOF;
+        ok = (file == NULL || fclose(file) == 0) && ok;
+        static const CDirectTestDependency alone[] = {
+            { "predefs.h", true, true },
+            { "dir.c", false, false },
+            { "inc/p.h", true, false },
+        };
+        test = (CDirectTestDependencies){ .directory = directory, .expected = alone, .expected_count = 3, .accept = true };
+        request.dependencies = c_direct_test_dependency_records;
+        ok = ok && c_direct_try_compile(&request) == 0 && test.called && test.matched;
+        unlink(obj_path);
+        if (!ok)
+        {
+            fprintf(stderr, "test-direct: dependency case %u that stays\n", i);
+        }
+    }
+    // The tables' bound: the predefines file, the main file and 4,094 headers fill them, and one more header leaves.
+    char* const many = (char*)malloc((size_t)BUSTER_FPP_MAX_DEPENDENCIES * 24u);
+    uint32_t written = 0;
+    for (uint32_t i = 0; ok && many != NULL && i + 1u < BUSTER_FPP_MAX_DEPENDENCIES; i += 1)
+    {
+        snprintf(path, sizeof(path), "%s/inc/sub/%u.h", directory, i);
+        FILE* const file = fopen(path, "wb");
+        ok = file != NULL && fclose(file) == 0;
+        written += ok ? 1u : 0u;
+    }
+    uint32_t length = 0;
+    for (uint32_t i = 0; ok && many != NULL && i + 2u < BUSTER_FPP_MAX_DEPENDENCIES; i += 1)
+    {
+        length += (uint32_t)snprintf(many + length, 24u, "#include <sub/%u.h>\n", i);
+    }
+    for (uint32_t extra = 0; ok && many != NULL && extra < 2u; extra += 1)
+    {
+        FILE* const file = fopen(dir_path, "wb");
+        ok = file != NULL && fwrite(many, 1, length, file) == length;
+        if (ok && extra != 0)
+        {
+            ok = fprintf(file, "#include <sub/%u.h>\n", BUSTER_FPP_MAX_DEPENDENCIES - 2u) > 0;
+        }
+        ok = (file == NULL || fclose(file) == 0) && ok;
+        test = (CDirectTestDependencies){ .directory = directory, .accept = true };
+        request.dependencies = c_direct_test_dependency_records;
+        const int status = ok ? c_direct_try_compile(&request) : -2;
+        ok = ok && status == (extra == 0 ? 0 : 1) && test.called == (extra == 0);
+        unlink(obj_path);
+        if (!ok)
+        {
+            fprintf(stderr, "test-direct: %u files read, status %d\n", BUSTER_FPP_MAX_DEPENDENCIES + extra, status);
+        }
+    }
+    ok = ok && many != NULL;
+    free(many);
+    for (uint32_t i = 0; i < written; i += 1)
+    {
+        snprintf(path, sizeof(path), "%s/inc/sub/%u.h", directory, i);
+        unlink(path);
+    }
+    for (uint32_t i = 0; i < sizeof(files) / sizeof(files[0]); i += 1)
+    {
+        snprintf(path, sizeof(path), "%s/%s", directory, files[i].name);
+        unlink(path);
+    }
+    for (uint32_t i = sizeof(subdirectories) / sizeof(subdirectories[0]); i > 0; i -= 1)
+    {
+        snprintf(path, sizeof(path), "%s%s", directory, subdirectories[i - 1u]);
+        rmdir(path);
+    }
+    return ok;
+}
+
 int run_c_direct_tests(int argc, char** argv)
 {
     (void)argc;
@@ -2585,6 +2898,16 @@ int run_c_direct_tests(int argc, char** argv)
     else
     {
         fprintf(stderr, "test-direct: FAIL include search past a directory without the header\n");
+        failed += 1u;
+    }
+
+    if (c_direct_test_dependencies(obj_path))
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL -MD's records of the files a unit reads\n");
         failed += 1u;
     }
 

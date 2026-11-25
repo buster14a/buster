@@ -4441,7 +4441,8 @@ What changed:
   which needs the tables' first pages together: not done.
 - What a small unit still pays is #3592's: the process's own start (0.10 ms of the 0.27), the predefines lexed in
   every process, a header's system calls, and the options and constructs that keep a build's units off the direct
-  path altogether (`-MD`, `-Wall`, `-g`; a strict `-std=` takes it since #3592's step 4).
+  path altogether (`-Wall`, `-g`; a strict `-std=` takes it since #3592's step 4, and `-MD` and its kin since its
+  dependency files below).
 
 ### A declaration's symbols (2026-11-25, #3595)
 
@@ -4475,6 +4476,36 @@ differs is only what this section doesn't claim:
 - objects initialized to zero in `.data` rather than `.bss`;
 - undefined references that only one side's code makes;
 - unused static functions kept.
+
+### Dependency files (2026-11-25, #3592)
+
+`-MD`, `-MMD`, `-MF`, `-MT`, `-MQ` and `-MP` take the direct path, with the rule the full pipeline writes. The direct
+path records the files a unit reads, and the driver makes the rule from those records with the full pipeline's code
+(`dependency_prepare`), before the object is written, and publishes it after (`dependency_publish`). `-M` and `-MM`
+alone don't compile.
+
+- **A record a file**, by its device and inode, under the first path it was read by, in the order of the first
+  readings, as the full pipeline's `pp_dependency_observe` keeps them. The main file's isn't listed. An include that
+  its guard or `#pragma once` skips is a reading too (the guard entry keeps the file's record), and so is a
+  `__has_include` that finds a file. `fast_pp_dependency_find` compares eight records' devices and inodes a step.
+- **A system header's record** is one whose every reading was a system header's. A reading is as much a system
+  header's as the directory the search found it in and its includer are. `#pragma GCC system_header` makes the rest of
+  a header, and the header in its later inclusions, a system header's; in the main file it is ignored, as clang and the
+  full pipeline ignore it. The `--predefines` file is a system header, and an `-include` file is one when the search
+  found it in a system directory.
+- **`__has_include` and `__has_include_next` are defined** to `#ifdef`, `#ifndef`, `#elifdef`, `#elifndef` and
+  `defined`, as clang's builtin macros are. glibc's `<bits/statx.h>` and `<bits/unistd_ext.h>` test them, and include
+  `<linux/stat.h>` and `<linux/close_range.h>` where they are defined. The direct path read other headers than clang in
+  every unit with `_GNU_SOURCE` that includes `<sys/stat.h>` or `<unistd.h>`, `sqlite3.c` among them; their objects
+  are the same either way.
+- **What leaves** in a unit that collects records, where its records could differ from the full pipeline's:
+  - a `__has_include` that finds a directory, or names a macro (#3608);
+  - a line marker's or `#line`'s file name;
+  - more than 4,096 files;
+  - a rule the driver can't make, before any object is written.
+
+The full pipeline keeps a path's system header level from that path's first lookup, where clang takes each lookup's
+(#3613). There the direct path's `-MMD` rule is clang's, and lists a header the full pipeline's leaves out.
 
 ## Related
 
