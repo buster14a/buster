@@ -6888,6 +6888,18 @@ or with `--scalar` and for a unit whose runs can't say, by the expansion
 history (`pp_system_levels_history`); `docs/c-preprocessor.md`'s "System
 levels" has both.
 
+The initializer walker retains a braced scalar's, array element's or member's
+accepted pointer conversion warning before static-constant validation (#3563).
+Its sparse event records the original source type, selected destination and
+member spelling, including a member array's elements. Revisited compound literals
+and GNU ranges publish each source conversion once. The driver renders these
+events in initializer order under the source warning policy; unbraced scalar
+conversions stay with the expression graph. Argument warning replay preserves
+an array's qualifiers until `type_element` transfers them to the decayed pointee.
+The pointer-initializer driver catalogue compares complete Clang diagnostics,
+including typedefs, parenthesized and macro locations, parameter notes, promotion,
+suppression, rejected outputs and accepted scalar/vector object twins.
+
 An option or a pragma can demote or ignore those groups, as clang's (#1963).
 `-Wno-error=` makes one a warning, `-Wno-` drops it, and a pragma's `warning`,
 `ignored` or `error` sets it where it applies. Each group's parents count:

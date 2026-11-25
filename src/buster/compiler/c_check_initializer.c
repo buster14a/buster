@@ -352,6 +352,7 @@ struct CheckInitWalker
     uint32_t source_position;
     CheckInitWarningCollector* warnings;
     CheckWarningBuffer warning_events;
+    uint32_t warning_begin;
     uint32_t warning_completion;
     CheckInitHistoryNode** history_slots;
     uint32_t history_count;
@@ -661,6 +662,7 @@ static bool check_init_semantic_publish(CheckInitWalker* walker)
         const bool excess = event->kind == CHECK_WARNING_EVENT_MESSAGE && event->id == CHECK_WARNING_ID_EXCESS_INITIALIZERS;
         const bool repeated_excess = excess && (event->payload.data & CHECK_INIT_EXCESS_STRING) == 0;
         const bool once = selected || excess || event->kind == CHECK_WARNING_EVENT_MANY_SCALAR_BRACES || event->kind == CHECK_WARNING_EVENT_NON_LITERAL_NULL ||
+                          event->kind == CHECK_WARNING_EVENT_INITIALIZER_POINTER ||
                           event->kind == CHECK_WARNING_EVENT_NODEREF_CONVERSION;
         // GNU ranges diagnose each noderef removal and excess list tail, but a repeated overlong string once. Keep
         // those list repeats from this walk, but drop diagnostics already published by the graph or an earlier walk.
@@ -1231,6 +1233,25 @@ static __attribute__((noinline, cold)) uint32_t check_init_selected_member(const
     const bool inside = (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION) && frame->next < types->tags.member_count[tag];
     const uint32_t member = inside ? types->tags.member_begin[tag] + (uint32_t)frame->next : 0;
     return member != 0 && selected->offset == frame->offset + types->members.offset[member] ? member : 0;
+}
+
+// The nearest record member supplies a pointer conversion's destination spelling, including its array elements.
+static __attribute__((noinline, cold)) uint32_t check_init_pointer_member(const CheckInitWalker* walker)
+{
+    const TypeTable* types = walker->types;
+    uint32_t member = 0;
+    for (uint32_t depth = walker->depth; member == 0 && depth > 1; depth -= 1)
+    {
+        const CheckInitFrame* frame = walker->frames + depth - 1;
+        const TypeId record = type_strip_aligned(types, frame->type);
+        const uint8_t kind = type_kind(types, record);
+        if (kind == BUSTER_TYPE_KIND_STRUCT || kind == BUSTER_TYPE_KIND_UNION)
+        {
+            const uint32_t tag = types->types.index[type_index(record)];
+            member = frame->next < types->tags.member_count[tag] ? types->tags.member_begin[tag] + (uint32_t)frame->next : 0;
+        }
+    }
+    return member;
 }
 
 // Whether `member` is one a counted walk traces (CheckInitCounted): a counted_by or counted_by_or_null pointer to a tag
@@ -3327,6 +3348,28 @@ static void check_init_value(CheckInitWalker* walker, const CheckInitSelection* 
             }
             if (converted.diagnostic == CHECK_DIAG_NONE)
             {
+                const uint32_t pointer_warning = converted.warnings & (CHECK_WARNING_POINTER_SIGN | CHECK_WARNING_DISCARDED_QUALIFIERS);
+                if (pointer_warning != 0 && walker->parser->tokens.kinds[walker->warning_begin] == PARSE_KIND_L_BRACE)
+                {
+                    // The expression graph owns an unbraced scalar's conversion. A list's subobject conversion
+                    // is made only here; retain its already computed warning before static-constant validation.
+                    const CheckWarningEvent pointer = {
+                        .id = pointer_warning == CHECK_WARNING_POINTER_SIGN ? CHECK_WARNING_ID_POINTER_SIGN : CHECK_WARNING_ID_DISCARDED_QUALIFIERS,
+                        .kind = CHECK_WARNING_EVENT_INITIALIZER_POINTER,
+                        .token = token,
+                        .source = BUSTER_CHECK_WARNING_NO_SOURCE,
+                        .completion_kind = CHECK_WARNING_COMPLETE_AT_TOKEN,
+                        .completion = walker->warning_completion,
+                        .detail = check_init_pointer_member(walker),
+                        .payload = {
+                            .first_type = selected->type,
+                            .second_type = action.operands[0].type,
+                            .token = walker->warning_begin,
+                            .data = node,
+                        },
+                    };
+                    check_init_semantic_warning(walker, &pointer, NULL, 0);
+                }
                 CheckWarningEvent warning;
                 if (check_warning_null_event(walker->parser, walker->types, selected->type, action.operands,
                                               token, end, walker->warning_completion, &warning))
@@ -3825,6 +3868,7 @@ static bool check_initializer_plan_warnings(TypeTable* types, const Parser* pars
             .source_position = end,
             .warnings = warnings,
             .warning_events = { .arena = scratch },
+            .warning_begin = begin,
             .warning_completion = end,
             .history_enabled = warnings != NULL && warnings->sink != NULL && warnings->sink->events != NULL &&
                                check_init_history_needed(parser, begin, end),
