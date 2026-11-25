@@ -1550,6 +1550,320 @@ static bool c_direct_test_lexer(void)
     return ok;
 }
 
+// The macro calls' and the directives' tests (#3584). The directives' lines, the calls' arguments from the window and
+// from an expansion's frames are read in bulk, and a token at a time where the window can't give them whole; what
+// comes out must not depend on which. A case is a text and its output rendered (c_direct_test_render), each laid out at
+// every offset of a block with each separator at its '@'s (and the defines' at theirs): a '$' in the rendering is a
+// space where the uses' separator is text and nothing where it is empty, a '%' the same for the defines'. Then a call
+// at each place across a window's end, and texts whose __LINE__ fixes where a reader leaves its line.
+typedef struct CDirectMacroCase CDirectMacroCase;
+struct CDirectMacroCase
+{
+    const char* text;
+    const char* rendered;
+};
+
+// Strings longer than the window's length byte holds (fast_pp_window_convert refuses them).
+#define BUSTER_DIRECT_TEST_LONG_X "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" \
+    "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" \
+    "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+#define BUSTER_DIRECT_TEST_LONG_Y "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy" \
+    "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy" \
+    "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+
+static const char* const c_direct_macro_defines[] = {
+    "#define F(a,@b)@a@+@b",
+    "#define G(x)@F(x,@1)",
+    "#define ID(x)@x",
+    "#define S(x)@#x",
+    "#define XS(x)@S(x)",
+    "#define C(a,@b)@a@##@b",
+    "#define BODY @a@+@b",
+    "#define E0()@z",
+    "#define E1(a)@[a]",
+    "#define E2(a,@b)@[a@|@b]",
+    "#define V(...)@f(__VA_ARGS__)",
+    "#define W(a,@...)@g(a,@##@__VA_ARGS__)",
+    "#define NV(a,@rest...)@h(a,@rest)",
+    "#define P3(a,@b,@c)@c @b @a",
+    "#define K(int)@int@*@2",
+    "#define OPEN @F(",
+    "#define FN @F",
+    "#define TWICE(x)@x @x",
+    "#define LONGS @\"" BUSTER_DIRECT_TEST_LONG_Y "\"",
+    "#define NUMS @1.5@+@2e+3@+@0x1p-3",
+    "#define CHARS @'a'@'\\n'",
+    "#define MIX @x->y@<<=@z@...@\"s\"",
+    "#define LONGS2 @\"" BUSTER_DIRECT_TEST_LONG_Y "\"@+@1",
+    "#define WRAP(x)@[x]",
+    "#define CAT3(a,@b)@z a##b",
+    "#define NESTED @F((1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1),@2)",
+};
+
+static const CDirectMacroCase c_direct_macro_cases[] = {
+    { "F(1,@2)", "1 + 2" },
+    { "F(@a@,@b@)", "a + b" },
+    { "F(F(1,2),@3)", "1 + 2 + 3" },
+    { "F((1,@2),@(3))", "( 1 , 2 ) + ( 3 )" },
+    { "G(2)", "2 + 1" },
+    { "G(G(5))", "5 + 1 + 1" },
+    { "ID(ID(ID(7)))", "7" },
+    { "S(@a@+@b@)", "\"a$+$b\"" },
+    { "S(@\"q\"@)", "\"\"q\"\"" },
+    { "S(@F(1,@2)@)", "\"F(1,$2)\"" },
+    { "XS(BODY)", "\"a%+%b\"" },
+    { "XS(F(x,@y))", "\"x%+%y\"" },
+    { "C(x,@1)", "x1" },
+    { "C(,@y)", "y" },
+    { "C(x,@)", "x" },
+    { "C(<,@<=)", "<<=" },
+    { "E0()", "z" },
+    { "E0(@)", "z" },
+    { "E1()", "[ ]" },
+    { "E2(,)", "[ | ]" },
+    { "E2(,@y)", "[ | y ]" },
+    { "V()", "f ( )" },
+    { "V(1)", "f ( 1 )" },
+    { "V(1,@2,@3)", "f ( 1 , 2 , 3 )" },
+    { "W(1)", "g ( 1 )" },
+    { "NV(1,@2,@3)", "h ( 1 , 2 , 3 )" },
+    { "P3(1,@2,@3)", "3 2 1" },
+    { "K(5)", "5 * 2" },
+    { "OPEN @1,@2)", "1 + 2" },
+    { "FN@(3,@4)", "3 + 4" },
+    { "TWICE(F(1,@2))", "1 + 2 1 + 2" },
+    { "F(1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1,@2)", "1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 2" },
+    { "F(1.5,@2e+3)", "1.5 + 2000" },
+    { "F(0x1p-3,@'a')", "0.125 + 97" },
+    { "ID(\"" BUSTER_DIRECT_TEST_LONG_X "\")", "\"" BUSTER_DIRECT_TEST_LONG_X "\"" },
+    { "LONGS", "\"" BUSTER_DIRECT_TEST_LONG_Y "\"" },
+    { "NUMS", "1.5 + 2000 + 0.125" },
+    { "CHARS", "97 10" },
+    { "MIX", "x -> y <<= z ... \"s\"" },
+    { "F(@L'x',@2)", "120 + 2" },
+    { "F(a // c\n,@b)", "a + b" },
+    // '#' and '##' take their operand as written: it is not prescanned (no __COUNTER__ is spent there, no bad call
+    // bails out). An argument's first token takes its parameter's space, and a pasted token its left operand's.
+    { "S(__COUNTER__)@C(__COUNTER__ x,)@__COUNTER__", "\"__COUNTER__\" 0 x 1" },
+    { "S(@ID(a,@b)@)", "\"ID(a,$b)\"" },
+    { "XS(WRAP(@a))", "\"[a]\"" },
+    { "XS(CAT3(@x,1))", "\"z x1\"" },
+    { "S(@\"" BUSTER_DIRECT_TEST_LONG_X "\"@+@1@)", "\"\"" BUSTER_DIRECT_TEST_LONG_X "\"$+$1\"" },
+    { "XS(LONGS2)", "\"\"" BUSTER_DIRECT_TEST_LONG_Y "\"%+%1\"" },
+    { "F((1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1+1),@2)", "( 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 ) + 2" },
+    { "NESTED", "( 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 ) + 2" },
+};
+
+// The output of a preprocessor run, a token a word between single spaces: a name as it is spelled, an integer by its
+// value, a float with %g, a character constant by its code, a string's bytes between quotes, a punctuator as it is
+// spelled. False where the rendering doesn't fit.
+static bool c_direct_test_render(const FastPP* pp, char* out, uint32_t capacity)
+{
+    uint32_t n = 0;
+    bool ok = true;
+    for (uint32_t i = 0; ok && i < pp->out_count; i += 1)
+    {
+        const uint8_t kind = pp->out_kind[i];
+        const uint32_t data = pp->out_data[i];
+        char word[1024];
+        uint32_t length = 0;
+        if (kind == FTOK_INT_LIT || kind == FTOK_INT_U32 || kind == FTOK_CHAR_LIT)
+        {
+            length = (uint32_t)snprintf(word, sizeof(word), "%u", data);
+        }
+        else if (kind == FTOK_INT_I64 || kind == FTOK_INT_U64)
+        {
+            length = (uint32_t)snprintf(word, sizeof(word), "%llu", (unsigned long long)pp->num_pool[data]);
+        }
+        else if (kind == FTOK_FLOAT_LIT || kind == FTOK_FLOAT80)
+        {
+            double value = 0.0;
+            memcpy(&value, pp->num_pool + data, sizeof(value));
+            length = (uint32_t)snprintf(word, sizeof(word), "%g", value);
+        }
+        else if (kind == FTOK_STR_LIT)
+        {
+            const FastLitSlice slice = pp->lit_slices[data];
+            ok = slice.length + 2u < sizeof(word);
+            if (ok)
+            {
+                word[0] = '"';
+                memcpy(word + 1, pp->lit_bytes + slice.offset, slice.length);
+                word[slice.length + 1u] = '"';
+                length = slice.length + 2u;
+            }
+        }
+        else
+        {
+            const FastTok tok = fast_tok_make(kind, 0, 0, data);
+            length = fast_tok_to_text(pp, tok, word, sizeof(word));
+        }
+        ok = ok && length != 0 && n + length + 2u < capacity;
+        if (ok)
+        {
+            if (n != 0)
+            {
+                out[n++] = ' ';
+            }
+            memcpy(out + n, word, length);
+            n += length;
+        }
+    }
+    if (n < capacity)
+    {
+        out[n] = '\0';
+    }
+    return ok && n < capacity;
+}
+
+// The rendered output of preprocessing `text`; false where the preprocessor bails out.
+static bool c_direct_test_rendered(const char* text, uint64_t length, char* out, uint32_t capacity)
+{
+    FastArena arena = { 0 };
+    FastArena scratch = { 0 };
+    bool ok = fast_arena_init(&arena, UINT64_C(32) * 1024u * 1024u, true) && fast_arena_init(&scratch, UINT64_C(6) * 1024u * 1024u, true);
+    if (ok)
+    {
+        FastPP* pp = (FastPP*)fast_arena_alloc(&scratch, sizeof(FastPP), 64);
+        ok = pp != NULL && fast_pp_init(pp, &arena, &scratch, false) && fast_pp_run_buffer(pp, "<test>", text, length) &&
+             c_direct_test_render(pp, out, capacity);
+        if (!ok && pp != NULL && pp->bailout)
+        {
+            fprintf(stderr, "test-direct: macros: the preprocessor bailed out: %s\n", pp->bailout_reason);
+        }
+    }
+    fast_arena_destroy(&scratch);
+    fast_arena_destroy(&arena);
+    return ok;
+}
+
+// `text` with each '@' replaced by `separator`, appended at buffer[*io_length].
+static void c_direct_test_put(char* buffer, uint32_t* io_length, const char* text, const char* separator)
+{
+    uint32_t n = *io_length;
+    for (const char* c = text; *c != '\0'; c += 1)
+    {
+        if (*c == '@')
+        {
+            const uint32_t separator_length = (uint32_t)strlen(separator);
+            memcpy(buffer + n, separator, separator_length);
+            n += separator_length;
+        }
+        else
+        {
+            buffer[n++] = *c;
+        }
+    }
+    *io_length = n;
+}
+
+static bool c_direct_test_macros(void)
+{
+    enum { buffer_size = 262144, rendered_size = 65536 };
+    // The uses' separators and the defines' (which must not end a directive's line).
+    static const char* const separators[][2] = {
+        { "", "" }, { " ", " " }, { "\n", "/**/" }, { "/**/", "/* a comment\n over two lines */" }, { " \t ", "\t" },
+        { "\n\n// a line comment\n", " /* c */ " },
+    };
+    const uint32_t defines = (uint32_t)(sizeof(c_direct_macro_defines) / sizeof(c_direct_macro_defines[0]));
+    const uint32_t cases = (uint32_t)(sizeof(c_direct_macro_cases) / sizeof(c_direct_macro_cases[0]));
+    char* const buffer = (char*)malloc(buffer_size);
+    char* const expected = (char*)malloc(rendered_size);
+    char* const rendered = (char*)malloc(rendered_size);
+    bool ok = buffer != NULL && expected != NULL && rendered != NULL;
+    for (uint32_t s = 0; ok && s < sizeof(separators) / sizeof(separators[0]); s += 1)
+    {
+        for (uint32_t shift = 0; ok && shift < 131u; shift += 1)
+        {
+            uint32_t length = 0;
+            for (uint32_t d = 0; d < defines; d += 1)
+            {
+                memset(buffer + length, ' ', shift);
+                length += shift;
+                c_direct_test_put(buffer, &length, c_direct_macro_defines[d], separators[s][1]);
+                buffer[length++] = '\n';
+            }
+            uint32_t e = 0;
+            for (uint32_t i = 0; i < cases; i += 1)
+            {
+                memset(buffer + length, ' ', shift);
+                length += shift;
+                c_direct_test_put(buffer, &length, c_direct_macro_cases[i].text, separators[s][0]);
+                buffer[length++] = '\n';
+                for (const char* c = c_direct_macro_cases[i].rendered; *c != '\0'; c += 1)
+                {
+                    const bool use_space = *c == '$' && separators[s][0][0] != '\0';
+                    const bool define_space = *c == '%' && separators[s][1][0] != '\0';
+                    if (use_space || define_space || (*c != '$' && *c != '%'))
+                    {
+                        expected[e++] = use_space || define_space ? ' ' : *c;
+                    }
+                }
+                expected[e] = ' ';
+                e += c_direct_macro_cases[i].rendered[0] != '\0' ? 1u : 0u;
+            }
+            e -= e != 0 ? 1u : 0u;
+            expected[e] = '\0';
+            // The file's last 80 bytes are fast_lex_one's: the cases stand before them.
+            memset(buffer + length, ' ', 100);
+            length += 100u;
+            buffer[length++] = '\n';
+            ok = c_direct_test_rendered(buffer, length, rendered, rendered_size) && strcmp(rendered, expected) == 0;
+            if (!ok)
+            {
+                fprintf(stderr, "test-direct: macros: separators %u, shift %u:\n  got      %s\n  expected %s\n", s, shift, rendered, expected);
+            }
+        }
+    }
+    // A call at each place across a window's end: the window holds 2,048 tokens, cut at a block's.
+    for (uint32_t before = 1950u; ok && before < 2080u; before += 1)
+    {
+        uint32_t length = 0;
+        c_direct_test_put(buffer, &length, "#define F(a, b) a + b\n#define S(x) #x\n", "");
+        for (uint32_t i = 0; i < before; i += 1)
+        {
+            buffer[length++] = 'x';
+            buffer[length++] = ' ';
+        }
+        c_direct_test_put(buffer, &length, "F(1, F(2, 3)) S( a  +  b ) F(\"s\", 'c')", "");
+        memset(buffer + length, ' ', 100);
+        length += 100u;
+        buffer[length++] = '\n';
+        ok = c_direct_test_rendered(buffer, length, rendered, rendered_size) &&
+             strcmp(rendered + 2u * before, "1 + 2 + 3 \"a + b\" \"s\" + 99") == 0;
+        if (!ok)
+        {
+            fprintf(stderr, "test-direct: macros: a call after %u tokens: %s\n", before, rendered + 2u * before);
+        }
+    }
+    // Where a reader leaves the file's line: a call's arguments over lines (the line of its ')'), a define's line with
+    // a comment over two lines and a splice, an #if's.
+    static const CDirectMacroCase lines[] = {
+        { "#define L(x) x __LINE__\nL(\n1\n)\n__LINE__\n", "1 4 5" },
+        { "#define D1 1 /* a comment\nover two lines */ + 2\nD1 __LINE__\n", "1 + 2 3" },
+        { "#define D2 a \\\n+ b\nD2 __LINE__\n", "a + b 3" },
+        { "#if 1 /* c */ + \\\n2 == 3\nyes __LINE__\n#endif\n__LINE__\n", "yes 3 5" },
+        { "#define F(a, b) a b\nF(__LINE__,\n__LINE__) __LINE__\n", "3 3 3" },
+    };
+    for (uint32_t i = 0; ok && i < sizeof(lines) / sizeof(lines[0]); i += 1)
+    {
+        uint32_t length = 0;
+        c_direct_test_put(buffer, &length, lines[i].text, "");
+        memset(buffer + length, ' ', 100);
+        length += 100u;
+        buffer[length++] = '\n';
+        ok = c_direct_test_rendered(buffer, length, rendered, rendered_size) && strcmp(rendered, lines[i].rendered) == 0;
+        if (!ok)
+        {
+            fprintf(stderr, "test-direct: macros: lines case %u: %s\n", i, rendered);
+        }
+    }
+    free(rendered);
+    free(expected);
+    free(buffer);
+    return ok;
+}
+
 // An object written over a longer file that was there is the object and nothing after it (#2850: the file is not
 // truncated when it is opened).
 static bool c_direct_test_overwrite(const char* obj_path)
@@ -3425,6 +3739,9 @@ static int c_direct_unit_tests(void)
         "#pragma once\nint f(void) { return 0; }\n",
         "#pragma GCC system_header\nint f(void) { return 0; }\n",
         "#pragma unroll\nint f(void) { return 0; }\n",
+        // __VA_OPT__ in a macro that isn't variadic: the full pipeline's warning, object-like or function-like.
+        "#define X __VA_OPT__(1)\nint f(void) { return 0; }\n",
+        "#define F(a) __VA_OPT__(a)\nint f(void) { return 0; }\n",
         // -Wdangling-else: an else an inner if takes, in an outer if without one (directly, or through a loop's body).
         "int f(int a, int b) { if (a) if (b) return 1; else return 2; return 0; }\n",
         "int f(int a, int b, int c) { if (a) if (b) if (c) return 1; else return 2; return 0; }\n",
@@ -3488,6 +3805,16 @@ static int c_direct_unit_tests(void)
     else
     {
         fprintf(stderr, "test-direct: FAIL lexer\n");
+        failed += 1u;
+    }
+
+    if (c_direct_test_macros())
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL macro calls and directives\n");
         failed += 1u;
     }
 
