@@ -2844,6 +2844,28 @@ static bool c_direct_test_atomics(const char* obj_path)
     return ok;
 }
 
+// HUGE_VAL (#3592): glibc's math.h writes it __builtin_huge_val(), an infinity as __builtin_inf() is, in code and in a
+// static initializer; Lua's math and string libraries use it. The constants in .rodata: +inf as a double, the table's
+// +inf and -inf, and +inf as a float.
+static bool c_direct_test_huge_val(const char* obj_path)
+{
+    static const char source[] =
+        "double t_huge(void) { return __builtin_huge_val(); }\n"
+        "static const double table[2] = { __builtin_huge_val(), -__builtin_huge_val() };\n"
+        "double t_table(int i) { return table[i]; }\n"
+        "float t_hugef(void) { return __builtin_huge_valf(); }\n";
+    static const uint8_t rodata[28] = {
+        0, 0, 0, 0, 0, 0, 0xf0, 0x7f, 0, 0, 0, 0, 0, 0, 0xf0, 0x7f, 0, 0, 0, 0, 0, 0, 0xf0, 0xff, 0, 0, 0x80, 0x7f,
+    };
+    const bool ok = c_direct_test_compile_source_with(source, obj_path, 0, NULL, 0, false, NULL, NULL, NULL, NULL, rodata, sizeof(rodata),
+                                                      (CDirectTestMode){ 0 });
+    if (!ok)
+    {
+        fprintf(stderr, "test-direct: HUGE_VAL left the direct path or isn't an infinity\n");
+    }
+    return ok;
+}
+
 typedef int (*CDirectTestNone)(void);
 
 // __PRETTY_FUNCTION__ is the function's signature in C, as clang prints it, and the full pipeline prints it (#3618): a
@@ -3701,6 +3723,16 @@ int run_c_direct_tests(int argc, char** argv)
     else
     {
         fprintf(stderr, "test-direct: FAIL musl's atomics' inline assembly\n");
+        failed += 1u;
+    }
+
+    if (c_direct_test_huge_val(obj_path))
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL HUGE_VAL\n");
         failed += 1u;
     }
 

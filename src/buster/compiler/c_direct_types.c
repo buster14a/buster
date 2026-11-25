@@ -268,6 +268,8 @@ struct FastCCState
     uint32_t id_builtin_ctzll;
     uint32_t id_builtin_ctz;
     uint32_t id_builtin_inff;
+    uint32_t id_builtin_huge_val;  // HUGE_VAL, __builtin_inf's value (#3592)
+    uint32_t id_builtin_huge_valf;
     uint32_t id_builtin_inf;
     uint32_t id_builtin_nanf;
     uint32_t id_builtin_nan;
@@ -3218,6 +3220,8 @@ static bool fast_cc_init_state(FastCCState* cc, FastArena* arena, FastArena* scr
         cc->id_builtin_ctz = fast_ident_intern_cstr(&pp->idents, "__builtin_ctz");
         cc->id_builtin_inff = fast_ident_intern_cstr(&pp->idents, "__builtin_inff");
         cc->id_builtin_inf = fast_ident_intern_cstr(&pp->idents, "__builtin_inf");
+        cc->id_builtin_huge_val = fast_ident_intern_cstr(&pp->idents, "__builtin_huge_val");
+        cc->id_builtin_huge_valf = fast_ident_intern_cstr(&pp->idents, "__builtin_huge_valf");
         cc->id_builtin_nanf = fast_ident_intern_cstr(&pp->idents, "__builtin_nanf");
         cc->id_builtin_nan = fast_ident_intern_cstr(&pp->idents, "__builtin_nan");
         cc->id_builtin_expect = fast_ident_intern_cstr(&pp->idents, "__builtin_expect");
