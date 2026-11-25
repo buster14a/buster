@@ -1580,8 +1580,11 @@ static inline bool fval_holds_xmm(const FastVal* v)
 
 static inline void fval_release(FastExprCtx* ex, const FastVal* v)
 {
-    if (fval_holds_gp(v)) { ex->gp_used &= (uint16_t)~(1u << v->reg); }
-    else if (fval_holds_xmm(v)) { ex->xmm_used &= (uint8_t)~(1u << v->reg); }
+    // Without code no value holds a register (#3616): the placeholders of a sizeof, _Alignof or _Generic operand, or of
+    // a dead arm (#3592), say rax, and releasing one would free a live value's register.
+    const uint32_t live = 0u - (uint32_t)(ex->eval_only == 0);
+    if (fval_holds_gp(v)) { ex->gp_used &= (uint16_t)~((1u << v->reg) & live); }
+    else if (fval_holds_xmm(v)) { ex->xmm_used &= (uint8_t)~((1u << v->reg) & live); }
 }
 
 // Spill a single live FastVal in-place to a temporary stack slot, releasing its register/flags!
@@ -3489,6 +3492,21 @@ static __attribute__((noinline)) void fval_emit_builtin_call(FastExprCtx* ex, ui
     fast_cc_bail(cc, "unhandled builtin call");
 }
 
+// A call without code, in a sizeof or a dead arm (#3592), is checked as one with code is, but for its argument types: a
+// dead arm of musl's isnan() of a double calls __fpclassifyl(long double). Out of line: few calls are without code.
+static __attribute__((cold, noinline)) void fast_cc_check_call_without_code(FastCCState* cc, const FastComplexType* fn, const FastVal* args, uint32_t argc)
+{
+    if (!fn->is_oldstyle && ((!fn->is_variadic && argc != fn->count) || (fn->is_variadic && argc < fn->count)))
+    {
+        fast_cc_bail(cc, "call argument count mismatch");
+    }
+    const uint32_t checked = argc < fn->count ? argc : fn->count;
+    for (uint32_t i = 0; i < checked; i += 1)
+    {
+        fast_cc_check_implicit_conv(cc, ftype_unqual(cc->param_types[fn->start + i]), &args[i]);
+    }
+}
+
 // Emit full SysV AMD64 ABI function call (direct or indirect, 6 GP + 8 XMM + stack args, 1-16B & >16B structs, variadic!)
 static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, FastVal* args, uint32_t argc, uint32_t outer_arg_sp, FastVal* out)
 {
@@ -3541,6 +3559,7 @@ static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, F
 
     if (ex->eval_only > 0)
     {
+        fast_cc_check_call_without_code(cc, fn, args, argc);
         for (uint32_t i = 0; i < argc; i += 1) { fval_release(ex, &args[i]); }
         fval_release(ex, callee);
         *out = (FastVal){ .type = ret_t, .kind = ftype_is_void(ret_t) ? FVAL_VOID : FVAL_REG };
@@ -3875,11 +3894,17 @@ typedef enum FastExprOpKind
     FEOP_TOK_BASE = 64
 } FastExprOpKind;
 
+// What a condition folded to (#3592), in a `?:`'s FastExprOp.extra and in FastCCState.branch_constant. The dead side of
+// a constant condition is checked as an operand of sizeof is, with no code and no symbol.
+#define BUSTER_FCONSTANT_NONE 0u
+#define BUSTER_FCONSTANT_FALSE 1u
+#define BUSTER_FCONSTANT_TRUE 2u
+
 typedef struct FastExprOp FastExprOp;
 struct FastExprOp
 {
     uint16_t op;
-    uint16_t extra;        // arg_count (CALL), elem_idx (COMPOUND_LIT)
+    uint16_t extra;        // arg_count (CALL), elem_idx (COMPOUND_LIT), BUSTER_FCONSTANT_* (TERNARY_Q, TERNARY_C), decided (&&, ||)
     uint32_t lbl0;         // false/true/else_lbl, or arg_start (CALL), or end_pos (GENERIC_SEL)
     uint32_t lbl1;         // then_tail_lbl (TERNARY_C)
     uint32_t lbl2;         // end_lbl (TERNARY_C)
@@ -4038,6 +4063,61 @@ static __attribute__((noinline)) void fval_emit_va_arg(FastExprCtx* ex, FastVal*
     x86_load(obj, ptr, ptr, 0, ftype_size(cc, arg_t), ftype_is_signed(cc, arg_t));
     ex->gp_used &= (uint16_t)~((1u << ap) | (1u << ofs));
     *out = (FastVal){ .type = arg_t, .kind = FVAL_REG, .reg = (uint8_t)ptr };
+}
+
+// A constant condition's `?:` (#3592): the live arm is the value, in the common type and as an rvalue, as the branches'
+// join in fast_expr_reduce_top makes it. A live then arm's value is under the dead else arm's placeholder. Out of
+// line: few conditions are constants.
+static __attribute__((cold, noinline)) void fast_expr_constant_ternary(FastExprCtx* ex, uint32_t constant, FastVal else_v, FastType common_t)
+{
+    FastCCState* cc = ex->cc;
+    ex->eval_only = (uint8_t)(ex->eval_only - (constant == BUSTER_FCONSTANT_TRUE));
+    FastVal live = else_v;
+    bool ok = true;
+    if (constant == BUSTER_FCONSTANT_TRUE)
+    {
+        ok = ex->vsp >= 1u;
+        if (!ok) { fast_cc_bail(cc, "ternary stack underflow"); }
+        else { live = ex->vstack[--ex->vsp]; }
+    }
+    FastVal result = { .type = common_t, .kind = FVAL_VOID };
+    if (ok && ftype_is_void(common_t))
+    {
+        fval_release(ex, &live);
+    }
+    else if (ok && ftype_is_record(common_t))
+    {
+        const FastComplexType* rct = cc->ctypes + (common_t & BUSTER_FTYPE_CIDX_MASK);
+        result.kind = FVAL_LOCAL;
+        result.off = ex->eval_only > 0 ? 0 : fast_cc_alloc_tmp(cc, rct->size, rct->align < 8u ? 8u : rct->align);
+        FastVal dst = result;
+        fval_store(ex, &dst, &live, false, NULL);
+    }
+    else if (ok)
+    {
+        fval_convert(ex, &live, common_t);
+        const bool fp = ftype_is_float(common_t);
+        result.kind = fp ? FVAL_XMM : FVAL_REG;
+        result.reg = fp ? fval_to_xmm(ex, &live, true) : fval_to_gp(ex, &live, true);
+    }
+    if (ok) { ex->vstack[ex->vsp++] = result; }
+}
+
+// A left side of `&&` or `||` that decided the value (#3592): the dead right side must still be a scalar, and the value
+// is 0 for `&&` and 1 for `||`, an rvalue as the branches in fast_expr_reduce_top make it. Out of line, as above.
+static __attribute__((cold, noinline)) void fast_expr_decided_logic(FastExprCtx* ex, uint8_t tok, const FastVal* rhs)
+{
+    ex->eval_only -= 1u;
+    if (!ftype_is_scalar(ftype_decay(ex->cc, rhs->type)))
+    {
+        fast_cc_bail(ex->cc, "logical operand not scalar");
+    }
+    else
+    {
+        FastVal value = { .type = FTYPE_I32, .kind = FVAL_IMM, .imm = tok == FTOK_LOR };
+        const uint32_t reg = fval_to_gp(ex, &value, true);
+        ex->vstack[ex->vsp++] = (FastVal){ .type = FTYPE_I32, .kind = FVAL_REG, .reg = reg };
+    }
 }
 
 // Apply the top operator from `ops[--osp]` onto `ex->vstack`!
@@ -4222,6 +4302,12 @@ static BUSTER_DIRECT_HOT void fast_expr_reduce_top(FastExprCtx* ex, FastExprOp* 
         else if (ftype_is_ptr(else_t)) { common_t = else_t; }
         else { common_t = ftype_usual_arith(cc, then_t, else_t); }
 
+        if (cur.extra != BUSTER_FCONSTANT_NONE)
+        {
+            fast_expr_constant_ternary(ex, cur.extra, else_v, common_t);
+            return;
+        }
+
         if (ex->eval_only > 0)
         {
             ex->vstack[ex->vsp++] = (FastVal){ .type = common_t, .kind = ftype_is_void(common_t) ? FVAL_VOID : FVAL_REG };
@@ -4301,6 +4387,11 @@ static BUSTER_DIRECT_HOT void fast_expr_reduce_top(FastExprCtx* ex, FastExprOp* 
     {
         if (ex->vsp < 1u) { fast_cc_bail(cc, "logical stack underflow"); return; }
         FastVal rhs = ex->vstack[--ex->vsp];
+        if (cur.extra != 0)
+        {
+            fast_expr_decided_logic(ex, tok, &rhs);
+            return;
+        }
         if (ex->eval_only > 0)
         {
             ex->vstack[ex->vsp++] = (FastVal){ .type = FTYPE_I32, .kind = FVAL_REG };
@@ -4383,7 +4474,7 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
     ex.arg_sp = 0;
     ex.gp_used = 0;
     ex.xmm_used = 0;
-    ex.eval_only = 0;
+    ex.eval_only = (uint8_t)(cc->dead != 0);
 
     FastExprOp ops[128];
     uint32_t osp = 0;
@@ -4956,6 +5047,18 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
             }
             if (osp == 0 || ops[osp - 1u].op != FEOP_TERNARY_Q) { break; }
             if (ex.vsp < 1u) { fast_cc_bail(cc, "ternary then missing"); break; }
+            const uint32_t constant = ops[osp - 1u].extra;
+            if (constant != BUSTER_FCONSTANT_NONE)
+            {
+                // A live then arm's value stays on the stack, under the dead else arm's; a dead then arm's goes.
+                const FastType arm_t = ftype_decay(cc, ex.vstack[ex.vsp - 1u].type);
+                ex.vsp -= (uint32_t)(constant == BUSTER_FCONSTANT_FALSE);
+                ex.eval_only = (uint8_t)(ex.eval_only + (constant == BUSTER_FCONSTANT_TRUE) - (constant == BUSTER_FCONSTANT_FALSE));
+                ops[osp - 1u] = (FastExprOp){ .op = FEOP_TERNARY_C, .extra = (uint16_t)constant, .type = arm_t };
+                cc->pos += 1u;
+                expect_val = true;
+                continue;
+            }
             FastVal then_v = ex.vstack[--ex.vsp];
             const FastType then_t = ftype_decay(cc, then_v.type);
             const uint32_t else_lbl = ops[osp - 1u].lbl0;
@@ -5206,8 +5309,12 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
         if (k == FTOK_LAND || k == FTOK_LOR)
         {
             if (ex.vsp < 1u) { fast_cc_bail(cc, "logical lhs missing"); break; }
+            if (osp >= 128u) { fast_cc_bail(cc, "logical nesting depth"); break; }
             FastVal lhs = ex.vstack[--ex.vsp];
             uint32_t sc_lbl = 0;
+            // A constant left side that decides the value leaves the right side dead, checked without code (#3592).
+            const uint32_t decided = (uint32_t)((ex.eval_only == 0) & (lhs.kind == FVAL_IMM) & ((lhs.imm != 0) == (k == FTOK_LOR)));
+            ex.eval_only = (uint8_t)(ex.eval_only + decided);
             if (ex.eval_only == 0)
             {
                 // Spill everything below LHS so both branch paths have identical empty reg state!
@@ -5217,14 +5324,19 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
                 ex.gp_used = 0;
                 ex.xmm_used = 0;
             }
-            if (osp < 128u) { ops[osp++] = (FastExprOp){ .op = (uint16_t)(FEOP_TOK_BASE + k), .lbl0 = sc_lbl }; }
+            ops[osp++] = (FastExprOp){ .op = (uint16_t)(FEOP_TOK_BASE + k), .extra = (uint16_t)decided, .lbl0 = sc_lbl };
         }
         else if (k == FTOK_QUESTION)
         {
             if (ex.vsp < 1u) { fast_cc_bail(cc, "ternary cond missing"); break; }
+            if (osp >= 128u) { fast_cc_bail(cc, "ternary nesting depth"); break; }
             FastVal cond = ex.vstack[--ex.vsp];
             uint32_t else_lbl = 0;
-            if (ex.eval_only == 0)
+            // A constant condition takes no branch, and its dead arm is checked without code (#3592): musl's isnan()
+            // of a double has a long double arm, a call of __fpclassifyl.
+            const uint32_t constant = (uint32_t)((ex.eval_only == 0) & (cond.kind == FVAL_IMM)) * (BUSTER_FCONSTANT_FALSE + (uint32_t)(cond.imm != 0));
+            ex.eval_only = (uint8_t)(ex.eval_only + (constant == BUSTER_FCONSTANT_FALSE));
+            if ((ex.eval_only == 0) & (constant == BUSTER_FCONSTANT_NONE))
             {
                 fval_spill_all(&ex, ex.vsp, ex.arg_sp);
                 else_lbl = fast_label_new(cc->obj);
@@ -5232,7 +5344,7 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
                 ex.gp_used = 0;
                 ex.xmm_used = 0;
             }
-            if (osp < 128u) { ops[osp++] = (FastExprOp){ .op = FEOP_TERNARY_Q, .lbl0 = else_lbl }; }
+            ops[osp++] = (FastExprOp){ .op = FEOP_TERNARY_Q, .extra = (uint16_t)constant, .lbl0 = else_lbl };
         }
         else
         {
@@ -5262,6 +5374,7 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
     FastVal final_v = ex.vstack[0];
     if (is_branch)
     {
+        cc->branch_constant = (uint8_t)((uint32_t)(final_v.kind == FVAL_IMM) * (BUSTER_FCONSTANT_FALSE + (uint32_t)(final_v.imm != 0)));
         fval_branch(&ex, &final_v, branch_on_true, branch_label);
     }
     else if (discard_result)
@@ -5284,7 +5397,7 @@ static inline void fast_expr_ctx_reset(FastExprCtx* ex, FastCCState* cc)
     ex->arg_sp = 0;
     ex->gp_used = 0;
     ex->xmm_used = 0;
-    ex->eval_only = 0;
+    ex->eval_only = (uint8_t)(cc->dead != 0);
 }
 
 static void fast_cc_store_expr_to_val(FastCCState* cc, FastVal dst, bool stop_at_comma)
@@ -5633,6 +5746,7 @@ struct FastStmtFrame
 {
     uint8_t kind;
     uint8_t entered_body;
+    uint8_t dead;          // BUSTER_FDEAD_* (IF_THEN, IF_ELSE)
     uint16_t sw_idx;
     uint32_t lbl0;         // else_lbl / cond_lbl / body_lbl / dispatch_lbl
     uint32_t lbl1;         // break_lbl / cont_lbl / end_lbl
@@ -5642,6 +5756,113 @@ struct FastStmtFrame
 };
 
 #define BUSTER_FSWITCH_BUCKET_BITS 11u
+
+// An `if` with a constant condition (#3592): its dead branch is checked as an operand of sizeof is, with no code, when
+// fast_cc_dead_simple takes it. FastCCState.dead counts the branches being checked so around a statement.
+#define BUSTER_FDEAD_NONE 0u
+#define BUSTER_FDEAD_THEN 1u       // a false condition: the then branch is checked without code
+#define BUSTER_FDEAD_TRUE 2u       // a true condition: an else branch would be dead
+#define BUSTER_FDEAD_ELSE 3u       // the else branch of a true condition is checked without code
+
+// The end of an expression's tokens, at `terminator` outside brackets, or UINT32_MAX where the tokens hold a statement
+// expression, which the statement compiler would compile, or end otherwise.
+static __attribute__((cold, noinline)) uint32_t fast_cc_dead_expression_end(const FastCCState* cc, uint32_t pos, uint8_t terminator)
+{
+    uint32_t depth = 0;
+    uint32_t end = UINT32_MAX;
+    bool ok = true;
+    for (uint32_t i = pos; i < cc->tcount && ok && end == UINT32_MAX; i += 1)
+    {
+        const uint8_t k = cc->tk[i];
+        const bool opens = k == FTOK_LPAREN || k == FTOK_LBRACKET || k == FTOK_LBRACE;
+        const bool closes = k == FTOK_RPAREN || k == FTOK_RBRACKET || k == FTOK_RBRACE;
+        end = depth == 0 && k == terminator ? i : UINT32_MAX;
+        ok = !(k == FTOK_LBRACE && i > 0 && cc->tk[i - 1u] == FTOK_LPAREN) && (end != UINT32_MAX || depth != 0 || (!closes && k != FTOK_SEMI));
+        depth = depth + (uint32_t)opens - (uint32_t)closes;
+    }
+    return ok ? end : UINT32_MAX;
+}
+
+// Whether the statement at `pos` can be checked without code as a dead branch (#3592): blocks, `if`s and expression
+// statements, with no declaration, label, jump, loop, switch, asm or statement expression, which would need a frame
+// slot, a jump target or the statement compiler's code. Scalar and bounded: it reads only the dead branches of a unit's
+// constant `if` conditions, a few tokens each (musl's FORCE_EVAL has `{ fp_force_evall(x); }`).
+#define BUSTER_FDEAD_SCAN_BLOCK 0u
+#define BUSTER_FDEAD_SCAN_IF 1u
+#define BUSTER_FDEAD_SCAN_ELSE 2u
+
+static __attribute__((cold, noinline)) bool fast_cc_dead_simple(const FastCCState* cc, uint32_t pos)
+{
+    uint8_t frames[32];
+    uint32_t depth = 0;
+    bool ok = true;
+    bool ended = false;
+    bool done = false;
+    while (ok && !done)
+    {
+        const uint8_t k = pos < cc->tcount ? cc->tk[pos] : FTOK_EOF;
+        if (ended)
+        {
+            // After a statement, a block takes its next one and an `if` its else; an `if` without one more ends too.
+            if (depth == 0)
+            {
+                done = true;
+            }
+            else if (frames[depth - 1u] == BUSTER_FDEAD_SCAN_BLOCK)
+            {
+                ended = false;
+            }
+            else if (frames[depth - 1u] == BUSTER_FDEAD_SCAN_IF && k == FTOK_KW_ELSE)
+            {
+                frames[depth - 1u] = BUSTER_FDEAD_SCAN_ELSE;
+                pos += 1u;
+                ended = false;
+            }
+            else
+            {
+                depth -= 1u;
+            }
+        }
+        else if (k == FTOK_RBRACE && depth > 0 && frames[depth - 1u] == BUSTER_FDEAD_SCAN_BLOCK)
+        {
+            depth -= 1u;
+            pos += 1u;
+            ended = true;
+        }
+        else if (k == FTOK_LBRACE || k == FTOK_KW_IF)
+        {
+            const bool condition = k == FTOK_KW_IF && pos + 1u < cc->tcount && cc->tk[pos + 1u] == FTOK_LPAREN;
+            const uint32_t close = condition ? fast_cc_dead_expression_end(cc, pos + 2u, FTOK_RPAREN) : UINT32_MAX;
+            ok = depth < 32u && (k == FTOK_LBRACE || close != UINT32_MAX);
+            if (ok)
+            {
+                frames[depth] = k == FTOK_LBRACE ? BUSTER_FDEAD_SCAN_BLOCK : BUSTER_FDEAD_SCAN_IF;
+                depth += 1u;
+                pos = k == FTOK_LBRACE ? pos + 1u : close + 1u;
+            }
+        }
+        else if (k == FTOK_SEMI)
+        {
+            pos += 1u;
+            ended = true;
+        }
+        else
+        {
+            const bool statement = k == FTOK_KW_RETURN || k == FTOK_KW_BREAK || k == FTOK_KW_CONTINUE || k == FTOK_KW_GOTO ||
+                                   k == FTOK_KW_WHILE || k == FTOK_KW_DO || k == FTOK_KW_FOR || k == FTOK_KW_SWITCH ||
+                                   k == FTOK_KW_CASE || k == FTOK_KW_DEFAULT || k == FTOK_KW_ELSE || k == FTOK_KW_ASM ||
+                                   k == FTOK_KW_STATIC_ASSERT || k == FTOK_KW_ATTRIBUTE || k == FTOK_KW_EXTENSION ||
+                                   k == FTOK_RBRACE || k == FTOK_EOF;
+            const bool label = k == FTOK_IDENT && pos + 1u < cc->tcount && cc->tk[pos + 1u] == FTOK_COLON;
+            const uint32_t semicolon = statement || label ? UINT32_MAX : fast_cc_dead_expression_end(cc, pos, FTOK_SEMI);
+            ok = semicolon != UINT32_MAX && !fast_cc_is_type_start(cc, pos);
+            pos = ok ? semicolon + 1u : pos;
+            ended = true;
+        }
+    }
+    return ok;
+}
+
 
 typedef struct FastSwitchCase FastSwitchCase;
 struct FastSwitchCase
@@ -6326,6 +6547,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
     cc->cur_sret_off = 0;
     cc->cur_frame_size = 0;
     cc->cur_tmp_off = 0;
+    cc->dead = 0;
     cc->cur_max_frame = 0;
     cc->cur_max_call_stack = 0;
     cc->cur_va_save_off = 0;
@@ -6491,13 +6713,22 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
         {
             if (top->kind == FSTK_IF_THEN)
             {
+                cc->dead -= (uint32_t)(top->dead == BUSTER_FDEAD_THEN);
                 if (fast_cc_peek(cc) == FTOK_KW_ELSE)
                 {
                     cc->pos += 1u;
                     const uint32_t end_lbl = fast_label_new(obj);
-                    x86_jmp_label(obj, end_lbl);
+                    // No jump past a dead branch, or out of one: neither has code.
+                    bool dead_else = false;
+                    if (top->dead == BUSTER_FDEAD_TRUE)
+                    {
+                        dead_else = fast_cc_dead_simple(cc, cc->pos);
+                    }
+                    if ((cc->dead == 0) & !dead_else & (top->dead != BUSTER_FDEAD_THEN)) { x86_jmp_label(obj, end_lbl); }
+                    cc->dead += (uint32_t)dead_else;
                     fast_label_bind(obj, top->lbl0); // else_lbl
                     top->kind = FSTK_IF_ELSE;
+                    top->dead = (uint8_t)((uint32_t)dead_else * BUSTER_FDEAD_ELSE);
                     top->lbl0 = end_lbl;
                     top->entered_body = 0;
                     continue;
@@ -6508,6 +6739,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
             }
             if (top->kind == FSTK_IF_ELSE)
             {
+                cc->dead -= (uint32_t)(top->dead == BUSTER_FDEAD_ELSE);
                 fast_label_bind(obj, top->lbl0);
                 ssp -= 1u;
                 continue;
@@ -6715,7 +6947,17 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
             fast_cc_reset_tmps(cc);
             if (fast_cc_peek(cc) != FTOK_RPAREN) { fast_cc_bail(cc, "expected ) after if cond"); break; }
             cc->pos += 1u;
-            sstack[ssp++] = (FastStmtFrame){ .kind = FSTK_IF_THEN, .lbl0 = else_lbl };
+            // A constant condition's dead branch is checked without code where it's simple enough (#3592): musl's
+            // FORCE_EVAL of a double has a long double branch, a call of fp_force_evall.
+            const uint32_t constant = cc->branch_constant * (uint32_t)(cc->dead == 0);
+            bool dead_then = false;
+            if (constant == BUSTER_FCONSTANT_FALSE)
+            {
+                dead_then = fast_cc_dead_simple(cc, cc->pos);
+            }
+            cc->dead += (uint32_t)dead_then;
+            const uint8_t dead = (uint8_t)((uint32_t)dead_then * BUSTER_FDEAD_THEN + (uint32_t)(constant == BUSTER_FCONSTANT_TRUE) * BUSTER_FDEAD_TRUE);
+            sstack[ssp++] = (FastStmtFrame){ .kind = FSTK_IF_THEN, .dead = dead, .lbl0 = else_lbl };
             continue;
         }
 
