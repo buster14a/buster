@@ -142,6 +142,10 @@ int c_direct_try_compile(const CDirectRequest* request)
     {
         pp->unsigned_char = request->unsigned_char;
         pp->c23 = request->c23;
+        pp->feature_query = request->feature_query;
+        pp->feature_context = request->feature_context;
+        // __BASE_FILE__ is the main file's in a forced include too.
+        pp->base_file = request->input_path;
         for (uint32_t i = 0; i < request->directory_count; i += 1)
         {
             fast_pp_add_dir(pp, request->directories[i], request->directory_system != NULL && request->directory_system[i] != 0);
@@ -154,26 +158,32 @@ int c_direct_try_compile(const CDirectRequest* request)
         request->mark_stage(request->clock_context, request->stage_setup);
     }
 
-    // 1. Predefines
+    // 1. Predefines (their __STDC macros are builtins, #3577; a macro's text stays readable to the end)
     if (ok)
     {
+        pp->in_predefines = true;
         if (request->predefines_path != NULL)
         {
-            ok = fast_pp_run_file(pp, request->predefines_path);
+            ok = fast_pp_run_file(pp, request->predefines_path, false);
         }
         else if (request->predefines_text != NULL && request->predefines_length > 0)
         {
             ok = fast_pp_run_buffer(pp, "<predefines>", request->predefines_text, request->predefines_length);
-            if (ok)
+            char* eval_buf = ok ? (char*)fast_arena_alloc(&arena, 64u, 16) : NULL;
+            if (eval_buf != NULL)
             {
-                char eval_buf[64];
-                const int elen = snprintf(eval_buf, sizeof(eval_buf), "#define __FLT_EVAL_METHOD__ %u\n", request->flt_eval_method);
+                const int elen = snprintf(eval_buf, 64u, "#define __FLT_EVAL_METHOD__ %u\n", request->flt_eval_method);
                 if (elen > 0)
                 {
                     ok = fast_pp_run_buffer(pp, "<predefines>", eval_buf, (uint64_t)elen);
                 }
             }
+            else
+            {
+                ok = false;
+            }
         }
+        pp->in_predefines = false;
     }
 
     // 2. Command-line -D / -U macros
@@ -193,11 +203,11 @@ int c_direct_try_compile(const CDirectRequest* request)
             bool is_sys = false;
             if (access(inc, R_OK) == 0)
             {
-                ok = fast_pp_run_file(pp, inc);
+                ok = fast_pp_run_file(pp, inc, false);
             }
             else if (fast_pp_resolve_include(pp, inc, (uint32_t)strlen(inc), false, false, resolved, sizeof(resolved), &dir_idx, &is_sys))
             {
-                ok = fast_pp_run_file(pp, resolved);
+                ok = fast_pp_run_file(pp, resolved, false);
             }
             else
             {
@@ -209,7 +219,7 @@ int c_direct_try_compile(const CDirectRequest* request)
     // 4. Main translation unit lex + preprocess
     if (ok)
     {
-        ok = fast_pp_run_file(pp, request->input_path);
+        ok = fast_pp_run_file(pp, request->input_path, true);
     }
 
     if (ok && request->out_token_count != NULL)
@@ -254,9 +264,28 @@ int c_direct_try_compile(const CDirectRequest* request)
         }
     }
 
+    // The rule that refused, for a caller that asks (#3577): the first bail's reason, the compiler's or else the
+    // preprocessor's; a step that failed without one (a file that can't be read) is the setup's or the input's.
+    if (status == 1 && request->out_bail_reason != NULL)
+    {
+        const char* reason = "setup or input";
+        if (cc != NULL && cc->bailout && cc->bailout_reason != NULL)
+        {
+            reason = cc->bailout_reason;
+        }
+        else if (pp != NULL && pp->bailout && pp->bailout_reason != NULL)
+        {
+            reason = pp->bailout_reason;
+        }
+        *request->out_bail_reason = reason;
+    }
     // Always release on bailout (caller will run full pipeline) or when caller requests cleanup
     if (status != 0 || request->release)
     {
+        if (pp != NULL)
+        {
+            fast_pp_release_files(pp);
+        }
         fast_arena_destroy(&scratch);
         fast_arena_destroy(&arena);
     }

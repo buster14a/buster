@@ -12,6 +12,29 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+// What a builtin feature query (__has_attribute, __is_target_os, ...) in an #if asks (#3577): the driver answers it from
+// the full pipeline's tables (pp_feature), so that both paths take every #if alike.
+typedef enum CDirectQuery
+{
+    C_DIRECT_QUERY_HAS_ATTRIBUTE,
+    C_DIRECT_QUERY_HAS_BUILTIN,
+    C_DIRECT_QUERY_HAS_FEATURE,
+    C_DIRECT_QUERY_HAS_EXTENSION,
+    C_DIRECT_QUERY_HAS_C_ATTRIBUTE,
+    C_DIRECT_QUERY_HAS_DECLSPEC_ATTRIBUTE,
+    C_DIRECT_QUERY_HAS_CONSTEXPR_BUILTIN,
+    C_DIRECT_QUERY_IS_TARGET_ARCH,
+    C_DIRECT_QUERY_IS_TARGET_VENDOR,
+    C_DIRECT_QUERY_IS_TARGET_OS,
+    C_DIRECT_QUERY_IS_TARGET_ENVIRONMENT,
+    C_DIRECT_QUERY_IS_TARGET_VARIANT_OS,
+    C_DIRECT_QUERY_IS_TARGET_VARIANT_ENVIRONMENT,
+    C_DIRECT_QUERY_BUILDING_MODULE,
+    // Not a query of #if's: whether a function of that name, with external linkage, is one of the library's builtins
+    // that are const or pure (abs, isalpha, ...), whose discarded call the full pipeline warns of.
+    C_DIRECT_QUERY_PURE_LIBRARY_FUNCTION,
+} CDirectQuery;
+
 typedef struct CDirectRequest CDirectRequest;
 struct CDirectRequest
 {
@@ -43,6 +66,10 @@ struct CDirectRequest
     uint32_t stage_codegen;
     uint32_t stage_object_write;
     uint32_t* out_token_count;       // optional: receives preprocessed token count for --time-stages
+    const char** out_bail_reason;    // optional: on a bailout, receives the rule that refused (a static string, #3577)
+    // The full pipeline's answer to a feature query on a name as written (CDirectQuery, #3577); NULL refuses them all.
+    uint32_t (*feature_query)(void* context, uint32_t query, const uint8_t* name, uint32_t length);
+    void* feature_context;
 };
 
 // Returns 0 on success (object written), 1 on clean bailout (nothing written -> caller runs full pipeline),
