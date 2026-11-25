@@ -266,8 +266,27 @@ int c_direct_try_compile(const CDirectRequest* request)
 // ---------------------------------------------------------------------------------------------------------------------
 // Self-tests for `build/compiler test-direct`
 
+static bool c_direct_test_compile_source_with(const char* source, const char* obj_path, int expected_status, const char* const* directories,
+                                              uint32_t directory_count, bool keep, uint32_t* out_text_len, uint32_t* out_sym_count,
+                                              uint64_t* out_header_end);
+
 static bool c_direct_test_compile_source(const char* source, const char* obj_path, int expected_status,
                                          uint32_t* out_text_len, uint32_t* out_sym_count)
+{
+    return c_direct_test_compile_source_with(source, obj_path, expected_status, NULL, 0, false, out_text_len, out_sym_count, NULL);
+}
+
+// A valid source's object, left at `obj_path` over what is there, with angled includes searched in `directories`;
+// `*out_header_end` is where the object's section headers end, which is where the file must.
+static bool c_direct_test_compile_source_keep(const char* source, const char* obj_path, const char* const* directories, uint32_t directory_count,
+                                              uint32_t* out_text_len, uint32_t* out_sym_count, uint64_t* out_header_end)
+{
+    return c_direct_test_compile_source_with(source, obj_path, 0, directories, directory_count, true, out_text_len, out_sym_count, out_header_end);
+}
+
+static bool c_direct_test_compile_source_with(const char* source, const char* obj_path, int expected_status, const char* const* directories,
+                                              uint32_t directory_count, bool keep, uint32_t* out_text_len, uint32_t* out_sym_count,
+                                              uint64_t* out_header_end)
 {
     char src_path[256];
     snprintf(src_path, sizeof(src_path), "/tmp/buster_direct_test_%d.c", (int)getpid());
@@ -278,7 +297,11 @@ static bool c_direct_test_compile_source(const char* source, const char* obj_pat
     fclose(f);
     if (!wrote) { unlink(src_path); return false; }
 
-    unlink(obj_path);
+    if (!keep)
+    {
+        unlink(obj_path);
+    }
+    static const uint8_t system_directories[8] = { 1, 1, 1, 1, 1, 1, 1, 1 };
     static const char minimal_predefs[] =
         "#define __x86_64__ 1\n"
         "#define __LP64__ 1\n"
@@ -294,6 +317,9 @@ static bool c_direct_test_compile_source(const char* source, const char* obj_pat
         .predefines_text = minimal_predefs,
         .predefines_length = (uint32_t)(sizeof(minimal_predefs) - 1u),
         .flt_eval_method = 0,
+        .directories = directories,
+        .directory_system = system_directories,
+        .directory_count = directory_count <= 8u ? directory_count : 0u,
         .pic = true,
         .unwind_tables = true,
         .unsigned_char = false,
@@ -326,7 +352,10 @@ static bool c_direct_test_compile_source(const char* source, const char* obj_pat
     uint8_t* buf = (uint8_t*)malloc((size_t)fsz);
     if (buf == NULL || fread(buf, 1, (size_t)fsz, ef) != (size_t)fsz) { free(buf); fclose(ef); unlink(obj_path); return false; }
     fclose(ef);
-    unlink(obj_path);
+    if (!keep)
+    {
+        unlink(obj_path);
+    }
 
     const Elf64_Ehdr* eh = (const Elf64_Ehdr*)buf;
     bool valid = eh->e_ident[0] == 0x7fu && eh->e_ident[1] == 'E' && eh->e_ident[2] == 'L' && eh->e_ident[3] == 'F' &&
@@ -357,6 +386,7 @@ static bool c_direct_test_compile_source(const char* source, const char* obj_pat
             }
         }
     }
+    if (out_header_end != NULL) { *out_header_end = valid ? eh->e_shoff + (uint64_t)eh->e_shnum * sizeof(Elf64_Shdr) : 0u; }
     free(buf);
     if (out_text_len != NULL) { *out_text_len = text_len; }
     if (out_sym_count != NULL) { *out_sym_count = sym_count; }
@@ -385,6 +415,11 @@ static const CDirectLexCase c_direct_lex_cases[] = {
     { "an_identifier_of_more_than_two_hundred_and_fifty_five_bytes_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", 1, { FTOK_IDENT } },
     { "int", 1, { FTOK_KW_INT } },
     { "return", 1, { FTOK_KW_RETURN } },
+    // glibc's assert under NDEBUG, `(__ASSERT_VOID_CAST (0))`, in the window's text: nothing before a ';', and
+    // `((void)0)` elsewhere. (A file's last 80 bytes are fast_lex_one's, which expands it in full: these two cases
+    // stand in the first half for that.)
+    { "CHECK(a > b);", 1, { FTOK_SEMI } },
+    { "CHECK(a)", 6, { FTOK_LPAREN, FTOK_LPAREN, FTOK_KW_VOID, FTOK_RPAREN, BUSTER_DIRECT_TEST_NUMBER, FTOK_RPAREN } },
     { "0", 1, { BUSTER_DIRECT_TEST_NUMBER } },
     { "42", 1, { BUSTER_DIRECT_TEST_NUMBER } },
     { "0x1F", 1, { BUSTER_DIRECT_TEST_NUMBER } },
@@ -517,7 +552,8 @@ static bool c_direct_test_tokens(const char* text, uint64_t length, uint8_t* kin
 static uint32_t c_direct_test_layout(char* buffer, uint32_t shift, const char* separator)
 {
     static const char header[] =
-        "#define TWO 2\n#define ID(x) x\n#define EMPTY\n#define F(a, b) a+b\n#define STR(x) #x\n#define CAT(a, b) a ## b\n";
+        "#define TWO 2\n#define ID(x) x\n#define EMPTY\n#define F(a, b) a+b\n#define STR(x) #x\n#define CAT(a, b) a ## b\n"
+        "#define VOID_CAST (void)\n#define CHECK(x) (VOID_CAST (0))\n";
     static const char* const inactive[] = {
         "#if 0\n",
         "\"/*\" is no comment: #endif here ends no group\n",
@@ -701,6 +737,115 @@ static bool c_direct_test_lexer(void)
     return ok;
 }
 
+// An object written over a longer file that was there is the object and nothing after it (#2850: the file is not
+// truncated when it is opened).
+static bool c_direct_test_overwrite(const char* obj_path)
+{
+    static const char source[] = "int answer(void) { return 42; }\n";
+    uint32_t text_length = 0;
+    uint32_t symbol_count = 0;
+    bool ok = c_direct_test_compile_source_keep(source, obj_path, NULL, 0, &text_length, &symbol_count, NULL);
+    struct stat fresh = { 0 };
+    ok = ok && stat(obj_path, &fresh) == 0 && fresh.st_size > 0;
+    if (ok)
+    {
+        // Twice the object's size of bytes that are no ELF file, then the same compile over them.
+        FILE* const junk = fopen(obj_path, "wb");
+        ok = junk != NULL;
+        for (off_t i = 0; ok && i < fresh.st_size * 2; i += 1)
+        {
+            ok = fputc(0xa5, junk) != EOF;
+        }
+        ok = (junk == NULL || fclose(junk) == 0) && ok;
+        uint64_t header_end = 0;
+        ok = ok && c_direct_test_compile_source_keep(source, obj_path, NULL, 0, &text_length, &symbol_count, &header_end);
+        struct stat over = { 0 };
+        ok = ok && stat(obj_path, &over) == 0 && over.st_size == fresh.st_size && (uint64_t)over.st_size == header_end;
+    }
+    unlink(obj_path);
+    return ok;
+}
+
+// A header that the search's second directory holds, included twice: the first directory is asked once and
+// remembered as holding none (#2850), and both includes find the header. Then a header that the first directory does
+// hold, whose path falls in the remembered one's slot of the table: it is another path, and is found.
+static bool c_direct_test_include_search(const char* obj_path)
+{
+    char first[256];
+    char second[256];
+    char header[320];
+    char missing[320];
+    char other[320];
+    char source[512];
+    snprintf(first, sizeof(first), "/tmp/buster_direct_test_%d_a", (int)getpid());
+    snprintf(second, sizeof(second), "/tmp/buster_direct_test_%d_b", (int)getpid());
+    snprintf(header, sizeof(header), "%s/counted.h", second);
+    const uint32_t missing_length = (uint32_t)snprintf(missing, sizeof(missing), "%s/counted.h", first);
+    uint32_t other_number = 0;
+    bool collides = false;
+    while (!collides && other_number < 100000u)
+    {
+        other_number += 1u;
+        const uint32_t other_length = (uint32_t)snprintf(other, sizeof(other), "%s/other%u.h", first, other_number);
+        collides = ((fast_guard_hash(other, other_length) ^ fast_guard_hash(missing, missing_length)) & (BUSTER_FPP_MAX_MISSING - 1u)) == 0;
+    }
+    bool ok = collides && mkdir(first, 0700) == 0 && mkdir(second, 0700) == 0;
+    if (ok)
+    {
+        FILE* const file = fopen(header, "wb");
+        ok = file != NULL && fputs("COUNTED\n", file) != EOF;
+        ok = (file == NULL || fclose(file) == 0) && ok;
+        FILE* const other_file = fopen(other, "wb");
+        ok = other_file != NULL && fputs("COUNTED\n", other_file) != EOF && ok;
+        ok = (other_file == NULL || fclose(other_file) == 0) && ok;
+    }
+    if (ok)
+    {
+        // Each include adds one to the initializer: three of them make 3, which the object's .data holds.
+        snprintf(source, sizeof(source),
+                 "#define COUNTED +1\n"
+                 "int counted = 0\n"
+                 "#include <counted.h>\n"
+                 "#include <counted.h>\n"
+                 "#include <other%u.h>\n"
+                 ";\n", other_number);
+        const char* directories[2] = { first, second };
+        uint32_t text_length = 0;
+        uint32_t symbol_count = 0;
+        ok = c_direct_test_compile_source_keep(source, obj_path, directories, 2, &text_length, &symbol_count, NULL);
+        if (ok)
+        {
+            ok = false;
+            FILE* const object = fopen(obj_path, "rb");
+            if (object != NULL)
+            {
+                Elf64_Ehdr eh;
+                if (fread(&eh, 1, sizeof(eh), object) == sizeof(eh))
+                {
+                    for (uint16_t i = 0; i < eh.e_shnum && !ok; i += 1)
+                    {
+                        Elf64_Shdr sh;
+                        uint32_t value = 0;
+                        if (fseek(object, (long)(eh.e_shoff + (uint64_t)i * sizeof(sh)), SEEK_SET) == 0 && fread(&sh, 1, sizeof(sh), object) == sizeof(sh) &&
+                            sh.sh_type == SHT_PROGBITS && (sh.sh_flags & (SHF_WRITE | SHF_EXECINSTR)) == SHF_WRITE && sh.sh_size == 4u &&
+                            fseek(object, (long)sh.sh_offset, SEEK_SET) == 0 && fread(&value, 1, 4, object) == 4u)
+                        {
+                            ok = value == 3u;
+                        }
+                    }
+                }
+                fclose(object);
+            }
+        }
+    }
+    unlink(obj_path);
+    unlink(header);
+    unlink(other);
+    rmdir(second);
+    rmdir(first);
+    return ok;
+}
+
 int run_c_direct_tests(int argc, char** argv)
 {
     (void)argc;
@@ -812,6 +957,26 @@ int run_c_direct_tests(int argc, char** argv)
     else
     {
         fprintf(stderr, "test-direct: FAIL lexer\n");
+        failed += 1u;
+    }
+
+    if (c_direct_test_overwrite(obj_path))
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL an object over a longer file\n");
+        failed += 1u;
+    }
+
+    if (c_direct_test_include_search(obj_path))
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL include search past a directory without the header\n");
         failed += 1u;
     }
 

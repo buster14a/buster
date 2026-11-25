@@ -1161,6 +1161,17 @@ struct FastGuardEntry
     uint32_t guard_ident;
 };
 
+// A path an #include's search found no readable file at: the search asks once (#2850). A header that the third
+// directory holds is asked for in the first two each time it is included, 3 times in 4 of sqlite3.c's 290 includes.
+#define BUSTER_FPP_MAX_MISSING 1024u
+typedef struct FastMissingPath FastMissingPath;
+struct FastMissingPath
+{
+    uint32_t hash;           // 0 for an empty slot
+    uint32_t length;
+    const char* path;
+};
+
 typedef struct FastExpandFrame FastExpandFrame;
 struct FastExpandFrame
 {
@@ -1240,6 +1251,9 @@ struct FastPP
 
     // Include guard cache (open-addressed)
     FastGuardEntry guards[BUSTER_FPP_MAX_GUARDS];
+    // The paths the include search found nothing at (open-addressed)
+    FastMissingPath missing[BUSTER_FPP_MAX_MISSING];
+    uint32_t missing_count;
 
     // Mapped file cache (keep small number of system headers? Or unmap immediately on pop!)
     FastIncludeFile files[BUSTER_FPP_MAX_INCLUDES];
@@ -2388,7 +2402,8 @@ static bool fast_pp_open_and_push(FastPP* pp, const char* path, uint32_t path_le
             }
             else
             {
-                void* mem = mmap(NULL, sz, PROT_READ, MAP_PRIVATE, fd, 0);
+                // The whole file is read: its pages are mapped by this call and not by a fault each sixteen pages.
+                void* mem = mmap(NULL, sz, PROT_READ, MAP_PRIVATE | MAP_POPULATE, fd, 0);
                 if (mem != MAP_FAILED)
                 {
                     ok = fast_pp_push_memory(pp, path, (const uint8_t*)mem, sz, dir_idx, true, is_system);
@@ -2402,6 +2417,50 @@ static bool fast_pp_open_and_push(FastPP* pp, const char* path, uint32_t path_le
         (void)close(fd);
     }
     return ok;
+}
+
+// Whether the include search may take `path`: a file the unit has read already, or a readable one. A path that was
+// not is remembered, and not asked for again in this compile.
+static bool fast_pp_include_candidate(FastPP* pp, const char* path, uint32_t length)
+{
+    bool found = fast_guard_lookup(pp, path, length, false) != NULL;
+    if (!found)
+    {
+        const uint32_t hash = fast_guard_hash(path, length);
+        const uint32_t mask = BUSTER_FPP_MAX_MISSING - 1u;
+        uint32_t index = hash & mask;
+        bool known_missing = false;
+        FastMissingPath* slot = pp->missing + index;
+        while (slot->hash != 0)
+        {
+            if (slot->hash == hash && slot->length == length && memcmp(slot->path, path, length) == 0)
+            {
+                known_missing = true;
+                break;
+            }
+            index = (index + 1u) & mask;
+            slot = pp->missing + index;
+        }
+        if (!known_missing)
+        {
+            found = access(path, R_OK) == 0;
+            // Half full at most, so that a search for a free slot ends.
+            if (!found && pp->missing_count < BUSTER_FPP_MAX_MISSING / 2u)
+            {
+                char* const saved = (char*)fast_arena_alloc(pp->arena, (uint64_t)length + 1u, 1);
+                if (saved != NULL)
+                {
+                    memcpy(saved, path, length);
+                    saved[length] = '\0';
+                    slot->hash = hash;
+                    slot->length = length;
+                    slot->path = saved;
+                    pp->missing_count += 1u;
+                }
+            }
+        }
+    }
+    return found;
 }
 
 static bool fast_pp_resolve_include(FastPP* pp, const char* name, uint32_t name_len, bool angled, bool is_next,
@@ -2454,7 +2513,7 @@ static bool fast_pp_resolve_include(FastPP* pp, const char* name, uint32_t name_
                 memcpy(out_path + dlen, name, name_len);
                 out_path[dlen + name_len] = '\0';
                 const uint32_t total = dlen + name_len;
-                if (fast_guard_lookup(pp, out_path, total, false) != NULL || access(out_path, R_OK) == 0)
+                if (fast_pp_include_candidate(pp, out_path, total))
                 {
                     *out_dir_idx = UINT32_MAX;
                     *out_system = cur->is_system;
@@ -2475,7 +2534,7 @@ static bool fast_pp_resolve_include(FastPP* pp, const char* name, uint32_t name_
             memcpy(out_path + dlen + 1u, name, name_len);
             out_path[dlen + 1u + name_len] = '\0';
             const uint32_t total = dlen + 1u + name_len;
-            if (fast_guard_lookup(pp, out_path, total, false) != NULL || access(out_path, R_OK) == 0)
+            if (fast_pp_include_candidate(pp, out_path, total))
             {
                 *out_dir_idx = d;
                 *out_system = pp->dir_is_system[d] != 0;
@@ -3955,10 +4014,13 @@ static __attribute__((noinline)) void fast_pp_handle_define(FastPP* pp, FastIncl
             {
                 fmode = 3u;
             }
-            else if (bcnt == 5u && bt[0].kind == FTOK_LPAREN && bt[1].kind == FTOK_IDENT &&
+            else if (bcnt == 6u && bt[0].kind == FTOK_LPAREN && bt[1].kind == FTOK_IDENT &&
                      bt[2].kind == FTOK_LPAREN && bt[3].kind == FTOK_INT_LIT && bt[3].data == 0u &&
-                     bt[4].kind == FTOK_RPAREN)
+                     bt[4].kind == FTOK_RPAREN && bt[5].kind == FTOK_RPAREN)
             {
+                // glibc's `(__ASSERT_VOID_CAST (0))` is six tokens. The test here asked for five, so no assert was
+                // ever taken as the no-op it is: each of sqlite3.c's 5,327 went through the expansion stack, its body
+                // a frame and __ASSERT_VOID_CAST a second one (#2850).
                 const uint32_t cid = pp->idents.entries[bt[1].data].macro_idx;
                 if (cid != 0 && pp->macros[cid].active != 0 && pp->macros[cid].is_func == 0 &&
                     pp->macros[cid].body_count == 3u)
