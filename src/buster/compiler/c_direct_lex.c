@@ -26,6 +26,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>
@@ -234,8 +235,7 @@ static bool fast_arena_init(FastArena* a, uint64_t reserve_bytes, bool avoid_hug
     a->used = 0;
     a->committed = 0;
     a->reserved = 0;
-    // On a busy host (8 concurrent workers, #672/#1561), avoid Linux 2 MB THP buddy/compaction contention via
-    // MAP_STACK + MADV_NOHUGEPAGE; on an idle single-core run, inherit system THP for low minor-fault counts (#2850).
+    // Sparse small compiles and concurrent workers use base pages. Larger single-worker compiles inherit system THP.
     int flags = MAP_PRIVATE | MAP_ANONYMOUS;
 #ifdef MAP_STACK
     if (avoid_huge_pages)
@@ -286,23 +286,22 @@ static void* fast_arena_alloc(FastArena* a, uint64_t size, uint64_t align)
 // ---------------------------------------------------------------------------------------------------------------------
 // 64-Way AVX-512 SwissTable Identifier Interner
 
-#define BUSTER_FIDENT_INIT_GROUPS 512u   // 32,768 slots -> 32 KB ctrl + 128 KB ids = 160 KB (fits in L2!)
+#define BUSTER_FIDENT_SMALL_GROUPS 32u
+#define BUSTER_FIDENT_RESERVED_GROUPS 512u
 #define BUSTER_FIDENT_MAX_IDS     49152u
 #define BUSTER_FIDENT_CACHE_BITS  14u
-#define BUSTER_FIDENT_CACHE_SIZE  (1u << BUSTER_FIDENT_CACHE_BITS)  // 16384 entries * 24 B = 384 KB (fits Zen 5 1 MB L2!)
-#define BUSTER_FIDENT_CACHE_MASK  (BUSTER_FIDENT_CACHE_SIZE - 1u)
+#define BUSTER_FIDENT_CACHE_SIZE  (1u << BUSTER_FIDENT_CACHE_BITS)
+#define BUSTER_FIDENT_SMALL_CACHE_BITS 9u  // one 4 KiB page of spelling-cache entries
 
 typedef struct FastIdentCacheSlot FastIdentCacheSlot;
 struct FastIdentCacheSlot
 {
-    uint64_t w0;
-    uint64_t w1;
-    uint32_t id;
+    uint32_t offset;
+    uint16_t id;
     uint8_t len;
-    uint8_t tok_kind;   // FTOK_IDENT or FTOK_KW_*
-    uint16_t pad;
+    uint8_t tok_kind;
 };
-
+_Static_assert(sizeof(FastIdentCacheSlot) == 8u && BUSTER_FIDENT_MAX_IDS <= UINT16_MAX, "identifier cache layout");
 
 typedef struct FastIdentEntry FastIdentEntry;
 struct FastIdentEntry
@@ -366,7 +365,7 @@ struct FastIdentTable
     uint32_t* slots;           // slot -> 1-based IdentId (group_count * 64)
     uint32_t group_count;      // power of 2
     uint32_t group_mask;
-    uint32_t used_slots;
+    uint32_t cache_shift;
     uint32_t grow_threshold;
 
     FastIdentEntry* entries;   // 1-based [1 .. count]
@@ -449,14 +448,18 @@ static inline bool fast_ident_eq(const uint8_t* a, const uint8_t* b, uint32_t le
 
 static __attribute__((noinline)) bool fast_ident_grow(FastIdentTable* t)
 {
-    const uint32_t new_groups = t->group_count * 2u;
+    // The small table already owns the entire initial reservation. Rebuild from entry hashes
+    // in insertion order so growth needs neither the old slot array nor any new arena space.
+    // The spelling cache verifies its full key on lookup, including after its active range expands.
+    const bool reuse = t->group_count < BUSTER_FIDENT_RESERVED_GROUPS;
+    const uint32_t new_groups = reuse ? BUSTER_FIDENT_RESERVED_GROUPS : t->group_count * 2u;
     const uint64_t new_slots_count = (uint64_t)new_groups * 64u;
-    uint8_t* new_ctrl = (uint8_t*)fast_arena_alloc(t->arena, new_slots_count, 64);
-    uint32_t* new_slots = (uint32_t*)fast_arena_alloc(t->arena, new_slots_count * sizeof(uint32_t), 64);
+    uint8_t* new_ctrl = reuse ? t->ctrl : (uint8_t*)fast_arena_alloc(t->arena, new_slots_count, 64);
+    uint32_t* new_slots = reuse ? t->slots : (uint32_t*)fast_arena_alloc(t->arena, new_slots_count * sizeof(uint32_t), 64);
     bool ok = new_ctrl != NULL && new_slots != NULL;
     if (ok)
     {
-        memset(new_ctrl, 0, new_slots_count);
+        memset(new_ctrl, 0, reuse ? (uint64_t)t->group_count * 64u : new_slots_count);
         const uint32_t new_mask = new_groups - 1u;
         const __m512i v_zero = _mm512_setzero_si512();
         for (uint32_t id = 1u; id <= t->count; id += 1)
@@ -482,6 +485,7 @@ static __attribute__((noinline)) bool fast_ident_grow(FastIdentTable* t)
         t->ctrl = new_ctrl;
         t->slots = new_slots;
         t->group_count = new_groups;
+        t->cache_shift = 64u - BUSTER_FIDENT_CACHE_BITS;
         t->group_mask = new_mask;
         t->grow_threshold = (uint32_t)((new_slots_count * 3u) / 4u);
     }
@@ -493,7 +497,7 @@ static BUSTER_DIRECT_HOT uint32_t fast_ident_intern(FastIdentTable* t, const uin
     uint32_t result = 0;
     if (__builtin_expect(len <= 65535u, 1))
     {
-        if (__builtin_expect(t->used_slots >= t->grow_threshold, 0))
+        if (__builtin_expect(t->count >= t->grow_threshold, 0))
         {
             if (!fast_ident_grow(t))
             {
@@ -554,7 +558,6 @@ static BUSTER_DIRECT_HOT uint32_t fast_ident_intern(FastIdentTable* t, const uin
                     };
                     t->ctrl[slot] = h2;
                     t->slots[slot] = id;
-                    t->used_slots += 1u;
                     result = id;
                 }
                 break;
@@ -570,14 +573,15 @@ static uint32_t fast_ident_intern_cstr(FastIdentTable* t, const char* s)
     return fast_ident_intern(t, (const uint8_t*)s, (uint32_t)strlen(s));
 }
 
-static bool fast_ident_init(FastIdentTable* t, FastArena* arena)
+static bool fast_ident_init(FastIdentTable* t, FastArena* arena, bool small_source)
 {
     memset(t, 0, sizeof(*t));
     t->arena = arena;
-    t->group_count = BUSTER_FIDENT_INIT_GROUPS;
+    t->cache_shift = 64u - (small_source ? BUSTER_FIDENT_SMALL_CACHE_BITS : BUSTER_FIDENT_CACHE_BITS);
+    t->group_count = small_source ? BUSTER_FIDENT_SMALL_GROUPS : BUSTER_FIDENT_RESERVED_GROUPS;
     t->group_mask = t->group_count - 1u;
-    const uint64_t slot_count = (uint64_t)t->group_count * 64u;
-    t->grow_threshold = (uint32_t)((slot_count * 3u) / 4u);
+    const uint64_t slot_count = (uint64_t)BUSTER_FIDENT_RESERVED_GROUPS * 64u;
+    t->grow_threshold = t->group_count * 48u;
     t->capacity = BUSTER_FIDENT_MAX_IDS;
     t->str_cap = UINT64_C(1) * 1024u * 1024u;
 
@@ -585,7 +589,8 @@ static bool fast_ident_init(FastIdentTable* t, FastArena* arena)
     t->slots = (uint32_t*)fast_arena_alloc(arena, slot_count * sizeof(uint32_t), 64);
     t->entries = (FastIdentEntry*)fast_arena_alloc(arena, (uint64_t)t->capacity * sizeof(FastIdentEntry), 64);
     t->macro_bits = (uint64_t*)fast_arena_alloc(arena, ((uint64_t)t->capacity / 64u + 1u) * sizeof(uint64_t), 64);
-    t->strings = (char*)fast_arena_alloc(arena, t->str_cap, 64);
+    // A short cached spelling can be compared with one masked eight-byte word, even at the end.
+    t->strings = (char*)fast_arena_alloc(arena, t->str_cap + 7u, 64);
     t->cache = (FastIdentCacheSlot*)fast_arena_alloc(arena, (uint64_t)BUSTER_FIDENT_CACHE_SIZE * sizeof(FastIdentCacheSlot), 64);
 
     bool ok = t->ctrl != NULL && t->slots != NULL && t->entries != NULL && t->macro_bits != NULL && t->strings != NULL && t->cache != NULL;
@@ -763,18 +768,31 @@ static inline uint32_t fast_ident_lookup(FastIdentTable* t, const uint8_t* p, ui
         memcpy(&last, p + len - 8u, sizeof(last));
         hash = (first ^ (last * UINT64_C(0x9e3779b97f4a7c15)) ^ ((uint64_t)len << 56)) * UINT64_C(0xbf58476d1ce4e5b9);
     }
-    FastIdentCacheSlot* slot = t->cache + (hash >> (64u - BUSTER_FIDENT_CACHE_BITS));
+    FastIdentCacheSlot* slot = t->cache + (hash >> t->cache_shift);
     uint32_t id = 0;
     uint8_t kind = FTOK_IDENT;
-    if (__builtin_expect(slot->len == len && slot->w0 == first && slot->w1 == last, 1))
+    if (__builtin_expect(slot->len == len, 1))
     {
-        bool equal = true;
-        if (len > 16u)
+        const uint8_t* saved = (const uint8_t*)t->strings + slot->offset;
+        bool equal;
+        if (len <= 8u)
         {
-            const __mmask64 bytes = _bzhi_u64(UINT64_MAX, len);
-            const __m512i text = _mm512_maskz_loadu_epi8(bytes, p);
-            const char* saved = t->strings + t->entries[slot->id].str_offset;
-            equal = _mm512_cmpneq_epi8_mask(text, _mm512_maskz_loadu_epi8(bytes, saved)) == 0;
+            uint64_t word;
+            memcpy(&word, saved, 8);
+            equal = _bzhi_u64(word, len * 8u) == first;
+        }
+        else if (len <= 16u)
+        {
+            uint64_t saved_first;
+            uint64_t saved_last;
+            memcpy(&saved_first, saved, 8);
+            memcpy(&saved_last, saved + len - 8u, 8);
+            equal = first == saved_first && last == saved_last;
+        }
+        else
+        {
+            const __mmask64 mask = _bzhi_u64(UINT64_MAX, len);
+            equal = _mm512_mask_cmpneq_epi8_mask(mask, _mm512_maskz_loadu_epi8(mask, p), _mm512_maskz_loadu_epi8(mask, saved)) == 0;
         }
         if (equal)
         {
@@ -791,9 +809,8 @@ static inline uint32_t fast_ident_lookup(FastIdentTable* t, const uint8_t* p, ui
             kind = kw != 0 ? kw : FTOK_IDENT;
             if (len <= 64u)
             {
-                slot->w0 = first;
-                slot->w1 = last;
-                slot->id = id;
+                slot->offset = t->entries[id].str_offset;
+                slot->id = (uint16_t)id;
                 slot->len = (uint8_t)len;
                 slot->tok_kind = kind;
             }
@@ -1058,6 +1075,7 @@ struct FastIncludeFile
     bool at_bol;
     bool owned_mmap;
     bool is_system;
+    uint64_t scratch_mark;   // scratch offset before a buffered file, UINT64_MAX otherwise
 };
 
 // A window of a file's raw tokens (#2850). The lexer's 64-byte loop writes it and does nothing else: no identifier is
@@ -2299,6 +2317,7 @@ static bool fast_pp_push_memory(FastPP* pp, const char* name, const uint8_t* byt
                 .serial = ++pp->file_serial,
                 .guard_state = 0,
                 .at_bol = true,
+                .scratch_mark = UINT64_MAX,
                 .owned_mmap = owned_mmap,
                 .is_system = is_system,
             };
@@ -2324,6 +2343,10 @@ static void fast_pp_pop_file(FastPP* pp)
                 ge->guard_ident = f->guard_ident;
             }
         }
+        if (f->scratch_mark != UINT64_MAX)
+        {
+            pp->scratch->used = f->scratch_mark;
+        }
         if (f->owned_mmap && f->base != NULL && f->map_size != 0)
         {
             (void)munmap((void*)(uintptr_t)f->base, f->map_size);
@@ -2331,42 +2354,91 @@ static void fast_pp_pop_file(FastPP* pp)
     }
 }
 
-static bool fast_pp_open_and_push(FastPP* pp, const char* path, uint32_t path_len, uint32_t dir_idx, bool is_system)
+typedef struct FastSource FastSource;
+struct FastSource
 {
-    // Check include-guard cache BEFORE open()!
-    const FastGuardEntry* ge = fast_guard_lookup(pp, path, path_len, false);
-    if (ge != NULL && (ge->once != 0 || (ge->guard_ident != 0 && fast_ident_is_macro(&pp->idents, ge->guard_ident))))
-    {
-        return true; // Skipped with ZERO syscalls!
-    }
-    const int fd = open(path, O_RDONLY);
-    bool ok = false;
-    if (fd >= 0)
+    int fd;
+    uint64_t size;
+};
+
+static bool fast_source_open(FastSource* source, const char* path)
+{
+    source->fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+    if (source->fd >= 0)
     {
         struct stat st;
-        if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode))
+        if (fstat(source->fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size >= 0)
         {
-            const uint64_t sz = (uint64_t)st.st_size;
-            if (sz == 0)
+            source->size = (uint64_t)st.st_size;
+        }
+        else
+        {
+            (void)close(source->fd);
+            source->fd = -1;
+        }
+    }
+    return source->fd >= 0;
+}
+
+static bool fast_pp_push_source(FastPP* pp, const char* path, uint32_t dir_idx, bool is_system, const FastSource* source)
+{
+    const uint64_t size = source->size;
+    static const uint8_t empty = 0;
+    bool ok = false;
+    if (size == 0)
+    {
+        ok = fast_pp_push_memory(pp, path, &empty, 0, dir_idx, false, is_system);
+    }
+    else
+    {
+        // Buffer small files on the include stack. Siblings reuse the same scratch pages.
+        const uint64_t mark = pp->scratch->used;
+        uint8_t* bytes = size <= 32u * 1024u ? fast_arena_alloc(pp->scratch, size, 1u) : NULL;
+        if (bytes != NULL)
+        {
+            uint64_t done = 0;
+            while (done < size)
             {
-                static const uint8_t empty_byte = 0;
-                ok = fast_pp_push_memory(pp, path, &empty_byte, 0, dir_idx, false, is_system);
+                const ssize_t n = read(source->fd, bytes + done, (size_t)(size - done));
+                if (n > 0) { done += (uint64_t)n; }
+                else if (n == 0 || errno != EINTR) { break; }
             }
-            else
+            ok = done == size && fast_pp_push_memory(pp, path, bytes, size, dir_idx, false, is_system);
+            if (ok) { pp->files[pp->file_depth - 1u].scratch_mark = mark; }
+            else { pp->scratch->used = mark; }
+        }
+        else
+        {
+            void* mem = mmap(NULL, size, PROT_READ, MAP_PRIVATE | MAP_POPULATE, source->fd, 0);
+            if (mem != MAP_FAILED)
             {
-                // The whole file is read: its pages are mapped by this call and not by a fault each sixteen pages.
-                void* mem = mmap(NULL, sz, PROT_READ, MAP_PRIVATE | MAP_POPULATE, fd, 0);
-                if (mem != MAP_FAILED)
-                {
-                    ok = fast_pp_push_memory(pp, path, (const uint8_t*)mem, sz, dir_idx, true, is_system);
-                    if (!ok)
-                    {
-                        (void)munmap(mem, sz);
-                    }
-                }
+                ok = fast_pp_push_memory(pp, path, mem, size, dir_idx, true, is_system);
+                if (!ok) { (void)munmap(mem, size); }
             }
         }
-        (void)close(fd);
+    }
+    return ok;
+}
+
+static bool fast_pp_open_and_push(FastPP* pp, const char* path, uint32_t path_len, uint32_t dir_idx, bool is_system, const FastSource* opened)
+{
+    const FastGuardEntry* ge = fast_guard_lookup(pp, path, path_len, false);
+    bool ok = ge != NULL && (ge->once != 0 || (ge->guard_ident != 0 && fast_ident_is_macro(&pp->idents, ge->guard_ident)));
+    if (!ok)
+    {
+        if (opened != NULL)
+        {
+            ok = fast_pp_push_source(pp, path, dir_idx, is_system, opened);
+        }
+        else
+        {
+            FastSource source;
+            if (fast_source_open(&source, path))
+            {
+                ok = fast_pp_push_source(pp, path, dir_idx, is_system, &source);
+                (void)close(source.fd);
+            }
+        }
     }
     return ok;
 }
@@ -3744,6 +3816,14 @@ static void fast_pp_skip_to_eol(FastIncludeFile* f)
     f->at_bol = true;
 }
 
+static inline void fast_pp_bind_macro(FastPP* pp, uint32_t name_id, FastMacro macro)
+{
+    const uint32_t index = ++pp->macro_count;
+    pp->macros[index] = macro;
+    pp->idents.entries[name_id].macro_idx = index;
+    fast_ident_set_macro_bit(&pp->idents, name_id, true);
+}
+
 static __attribute__((noinline)) void fast_pp_handle_define(FastPP* pp, FastIncludeFile* f)
 {
     FastTok name_tok = { 0 };
@@ -3877,7 +3957,6 @@ static __attribute__((noinline)) void fast_pp_handle_define(FastPP* pp, FastIncl
     }
     fast_pp_skip_to_eol(f);
 
-    const uint32_t midx = ++pp->macro_count;
     const uint32_t bcnt = pp->macro_tok_count - body_start;
     uint8_t fmode = 0;
     uint8_t fkind = 0;
@@ -3998,7 +4077,7 @@ static __attribute__((noinline)) void fast_pp_handle_define(FastPP* pp, FastIncl
             }
         }
     }
-    pp->macros[midx] = (FastMacro){
+    fast_pp_bind_macro(pp, name_id, (FastMacro){
         .body_start = body_start,
         .body_count = bcnt,
         .fast_data = fdata,
@@ -4009,9 +4088,7 @@ static __attribute__((noinline)) void fast_pp_handle_define(FastPP* pp, FastIncl
         .active = 1u,
         .fast_mode = fmode,
         .fast_kind = fkind,
-    };
-    pp->idents.entries[name_id].macro_idx = midx;
-    fast_ident_set_macro_bit(&pp->idents, name_id, true);
+    });
 }
 
 static bool fast_pp_eval_if_line(FastPP* pp, FastIncludeFile* f)
@@ -4118,14 +4195,63 @@ static __attribute__((noinline)) void fast_pp_handle_include(FastPP* pp, FastInc
         fast_pp_bail(pp, "include file not found");
         return;
     }
-    if (!fast_pp_open_and_push(pp, resolved, (uint32_t)strlen(resolved), dir_idx, is_sys))
+    if (!fast_pp_open_and_push(pp, resolved, (uint32_t)strlen(resolved), dir_idx, is_sys, NULL))
     {
         fast_pp_bail(pp, "include open failed");
     }
 }
 
+// Predefines and generated headers often contain consecutive "#define name decimal" lines.
+// Accept only complete physical lines. All other replacements go through the directive reader.
+static bool fast_pp_decimal_defines(FastPP* pp, FastIncludeFile* f)
+{
+    const uint8_t* p = f->ptr; // just after '#'
+    const uint8_t* const end = f->end;
+    const uint8_t* const first = p;
+    while (end - p >= 11 && memcmp(p, "define ", 7) == 0 && (fast_char_class[p[7]] & 2u) != 0)
+    {
+        const uint8_t* const name = p + 7;
+        const uint32_t length = fast_scan_ident_len(name, end);
+        const uint8_t* q = name + length;
+        if (end - q < 3 || *q != ' ' || q[1] < '0' || q[1] > '9') { break; }
+        q += 1;
+        const uint8_t* const digits = q;
+        uint32_t value = 0;
+        do
+        {
+            value = value * 10u + (*q++ - '0');
+        } while (q < end && q - digits < 8 && *q >= '0' && *q <= '9');
+        if (q == end || *q != '\n' || (*digits == '0' && q - digits > 1) ||
+            pp->macro_count + 1u >= BUSTER_FPP_MAX_MACROS || pp->macro_tok_count >= pp->macro_tok_cap)
+        {
+            break;
+        }
+        const uint32_t id = fast_ident_intern(&pp->idents, name, length);
+        if (id == 0 || pp->idents.entries[id].kw_kind >= 126u) { break; }
+        const uint32_t body = pp->macro_tok_count++;
+        pp->macro_toks[body] = fast_tok_make(FTOK_INT_LIT, 0, 0, value);
+        fast_pp_bind_macro(pp, id, (FastMacro){
+            .body_start = body, .body_count = 1u, .fast_data = value,
+            .active = 1u, .fast_mode = 1u, .fast_kind = FTOK_INT_LIT,
+        });
+        if (f->guard_state == 1u && id == f->guard_ident) { f->guard_state = 2u; }
+        f->line += 1u;
+        f->ptr = q + 1;
+        if (f->ptr == end || *f->ptr != '#') { break; }
+        p = f->ptr + 1;
+    }
+    const bool consumed = f->ptr != first;
+    if (consumed)
+    {
+        f->at_bol = true;
+        pp->win.serial = 0;
+    }
+    return consumed;
+}
+
 static __attribute__((noinline)) void fast_pp_handle_directive(FastPP* pp, FastIncludeFile* f)
 {
+    if (fast_pp_decimal_defines(pp, f)) { return; }
     FastTok kw_tok = { 0 };
     fast_pp_read_tok(pp, f, true, &kw_tok);
     if (kw_tok.kind == FTOK_EOF)
@@ -4313,12 +4439,12 @@ static __attribute__((noinline)) void fast_pp_handle_directive(FastPP* pp, FastI
 // ---------------------------------------------------------------------------------------------------------------------
 // Main fused lex + preprocess loop: fills pp->out with the entire preprocessed token stream (or streams chunks)
 
-static bool fast_pp_init(FastPP* pp, FastArena* arena, FastArena* scratch)
+static bool fast_pp_init(FastPP* pp, FastArena* arena, FastArena* scratch, bool small_source)
 {
-    memset(pp, 0, sizeof(*pp));
+    // The owner places this state in fresh zero-filled arena storage.
     pp->arena = arena;
     pp->scratch = scratch;
-    bool ok = fast_ident_init(&pp->idents, arena);
+    bool ok = fast_ident_init(&pp->idents, arena, small_source);
     if (ok)
     {
         pp->out_cap = 1024u * 1024u;
@@ -5388,10 +5514,35 @@ static __attribute__((noinline)) bool fast_pp_window_scalar(FastPP* pp, FastIncl
     return leave;
 }
 
-// Eight decimal literals interleaved with commas. Window token starts have at least 16 readable bytes.
-// Shift the first digit to leave zeros before it and discard bytes beyond the literal. Reduce digits
-// in pairs, then groups of four and eight. The comma lanes already have their output kinds.
-static inline bool fast_pp_decimal_pairs(const FastWindow* w, uint32_t t, const uint8_t* base, uint32_t* out)
+// Each lane holds the one to eight digits after 0x. Left-padding with zero nibbles
+// lets the same reductions decode all eight widths and both letter cases.
+static inline bool fast_pp_hex_pairs(const uint8_t* base, __m512i starts, __m512i words, __m512i len, uint8_t* kinds_out, uint32_t* values_out)
+{
+    if (_mm512_cmpgt_epu64_mask(_mm512_sub_epi64(len, _mm512_set1_epi64(3)), _mm512_set1_epi64(7)) != 0)
+    {
+        return false;
+    }
+    const __m512i zero = _mm512_set1_epi8('0');
+    __m512i text = _mm512_srli_epi64(words, 16);
+    const __mmask8 wide = _mm512_cmpgt_epu64_mask(len, _mm512_set1_epi64(8));
+    if (wide != 0) { text = _mm512_mask_i64gather_epi64(text, wide, starts, base + 2, 1); }
+    const __m512i shift = _mm512_slli_epi64(_mm512_sub_epi64(_mm512_set1_epi64(10), len), 3);
+    const __m512i digit = _mm512_sllv_epi64(_mm512_sub_epi8(text, zero), shift);
+    const __m512i letter = _mm512_sllv_epi64(_mm512_sub_epi8(_mm512_or_si512(text, _mm512_set1_epi8(32)), _mm512_set1_epi8('a')), shift);
+    const __mmask64 alpha = _mm512_cmpgt_epu8_mask(digit, _mm512_set1_epi8(9));
+    if (_mm512_mask_cmpgt_epu8_mask(alpha, letter, _mm512_set1_epi8(5)) != 0) { return false; }
+    const __m512i nibbles = _mm512_mask_add_epi8(digit, alpha, letter, _mm512_set1_epi8(10));
+    const __m512i bytes = _mm512_maddubs_epi16(nibbles, _mm512_set1_epi16(0x0110));
+    const __m512i halves = _mm512_madd_epi16(bytes, _mm512_set1_epi32(0x00010100));
+    const __m512i values = _mm512_or_si512(_mm512_slli_epi32(halves, 16), _mm512_srli_epi64(halves, 32));
+    _mm512_mask_storeu_epi32(values_out, 0x5555u, values);
+    _mm_mask_storeu_epi8(kinds_out, _mm512_movepi32_mask(values) & 0x5555u, _mm_set1_epi8(FTOK_INT_U32));
+    return true;
+}
+
+// Eight comma-terminated literals. Each window start has at least 16 readable bytes.
+// Left-pad the digits within each word, then reduce pairs and groups of four in parallel.
+static inline bool fast_pp_integer_pairs(const FastWindow* w, uint32_t t, const uint8_t* base, uint8_t* kinds_out, uint32_t* values_out)
 {
     const __m128i kinds = _mm_loadu_si128((const __m128i*)(w->kinds + t));
     const __m128i pair = _mm_set1_epi16(FTOK_INT_LIT | (FTOK_COMMA << 8));
@@ -5402,7 +5553,13 @@ static inline bool fast_pp_decimal_pairs(const FastWindow* w, uint32_t t, const 
         const __m512i len = _mm512_cvtepu16_epi64(lengths);
         const __m512i starts = _mm512_and_si512(_mm512_loadu_si512(w->starts + t), _mm512_set1_epi64(UINT32_MAX));
         const __m512i words = _mm512_i64gather_epi64(starts, base, 1);
-        const __m512i chars = _mm512_xor_si512(words, _mm512_set1_epi8('0'));
+        const __m512i zero = _mm512_set1_epi8('0');
+        // Compare the first two bytes with "0X", folding the case of the second byte.
+        if (_mm512_cmpeq_epi64_mask(_mm512_and_si512(words, _mm512_set1_epi64(0xdfff)), _mm512_set1_epi64(0x5830)) == UINT8_MAX)
+        {
+            return fast_pp_hex_pairs(base, starts, words, len, kinds_out, values_out);
+        }
+        const __m512i chars = _mm512_xor_si512(words, zero);
         const __m512i shift = _mm512_slli_epi64(_mm512_sub_epi64(_mm512_set1_epi64(8), len), 3);
         const __m512i digits = _mm512_sllv_epi64(chars, shift);
         const __mmask8 leading_zero = _mm512_testn_epi64_mask(chars, _mm512_set1_epi64(255));
@@ -5411,9 +5568,9 @@ static inline bool fast_pp_decimal_pairs(const FastWindow* w, uint32_t t, const 
             _mm512_cmpgt_epu8_mask(digits, _mm512_set1_epi8(9)) == 0)
         {
             const __m512i pairs = _mm512_maddubs_epi16(digits, _mm512_set1_epi16(0x010a));
-            const __m512i quads = _mm512_madd_epi16(pairs, _mm512_set1_epi32(0x00010064));
-            const __m512i values = _mm512_add_epi32(_mm512_mullo_epi32(quads, _mm512_set1_epi32(10000)), _mm512_srli_epi64(quads, 32));
-            _mm512_mask_storeu_epi32(out, 0x5555u, values);
+            const __m512i groups = _mm512_madd_epi16(pairs, _mm512_set1_epi32(0x00010064));
+            const __m512i values = _mm512_add_epi32(_mm512_mullo_epi32(groups, _mm512_set1_epi32(10000)), _mm512_srli_epi64(groups, 32));
+            _mm512_mask_storeu_epi32(values_out, 0x5555u, values);
             decoded = true;
         }
     }
@@ -5500,7 +5657,7 @@ static BUSTER_DIRECT_HOT void fast_pp_emit_window(FastPP* pp, FastIncludeFile* f
             }
             else if (kind == FTOK_INT_LIT && !fast_number_goes_on(s, len))
             {
-                if (k + 16u <= cnt && fast_pp_decimal_pairs(w, t, base, out_data + out_count + k))
+                if (k + 16u <= cnt && fast_pp_integer_pairs(w, t, base, out_kind + out_count + k, out_data + out_count + k))
                 {
                     work &= ~_bzhi_u64(UINT64_MAX, k + 16u);
                 }
@@ -5736,6 +5893,8 @@ static BUSTER_DIRECT_HOT bool fast_pp_drain(FastPP* pp)
         // A file's last bytes, and a token the window leaves to fast_lex_one.
         fast_pp_single_token(pp, f);
     }
+    // A bailout can leave mapped parents below a buffered include.
+    while (pp->file_depth != 0) { fast_pp_pop_file(pp); }
     return !pp->bailout;
 }
 
@@ -5749,10 +5908,11 @@ static bool fast_pp_run_buffer(FastPP* pp, const char* name, const char* bytes, 
     return ok;
 }
 
-static bool fast_pp_run_file(FastPP* pp, const char* path)
+static bool fast_pp_run_file(FastPP* pp, const char* path, const FastSource* opened)
 {
     pp->base_file = path;
-    bool ok = fast_pp_open_and_push(pp, path, (uint32_t)strlen(path), UINT32_MAX, false);
+    bool ok = fast_pp_open_and_push(pp, path, (uint32_t)strlen(path), UINT32_MAX, false, opened);
+    if (opened != NULL) { (void)close(opened->fd); }
     if (ok)
     {
         ok = fast_pp_drain(pp);

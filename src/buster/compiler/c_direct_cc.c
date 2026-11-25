@@ -2019,7 +2019,7 @@ static uint32_t fval_to_xmm(FastExprCtx* ex, FastVal* v, bool consume)
 }
 
 // Convert FastVal `*v` in-place to `dst_type` (all scalar/pointer/float/bool C17 conversions, including exact u64<->fp!).
-static BUSTER_DIRECT_HOT void fval_convert(FastExprCtx* ex, FastVal* v, FastType dst_type)
+static BUSTER_DIRECT_HOT void fval_convert_value(FastExprCtx* ex, FastVal* v, FastType dst_type)
 {
     FastCCState* cc = ex->cc;
     FastObj* obj = cc->obj;
@@ -2349,6 +2349,14 @@ static BUSTER_DIRECT_HOT void fval_convert(FastExprCtx* ex, FastVal* v, FastType
         x86_extend(obj, g, g, dsz, dsgn);
     }
     *v = (FastVal){ .type = dst_u, .kind = FVAL_REG, .reg = (uint8_t)g };
+}
+
+static inline void fval_convert(FastExprCtx* ex, FastVal* v, FastType dst_type)
+{
+    if (v->type != dst_type || dst_type < FTYPE_BOOL || dst_type > FTYPE_U128)
+    {
+        fval_convert_value(ex, v, dst_type);
+    }
 }
 
 // Soundness check for implicit conversions (assignment, initialization, prototype args, return).
@@ -3457,7 +3465,7 @@ static __attribute__((noinline)) void fval_emit_builtin_call(FastExprCtx* ex, ui
 }
 
 // Emit full SysV AMD64 ABI function call (direct or indirect, 6 GP + 8 XMM + stack args, 1-16B & >16B structs, variadic!)
-static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, FastVal* args, uint32_t argc, uint32_t outer_arg_sp, FastVal* out)
+static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, FastVal* args, uint32_t argc, uint32_t outer_arg_sp)
 {
     FastCCState* cc = ex->cc;
     FastObj* obj = cc->obj;
@@ -3476,7 +3484,7 @@ static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, F
         else if (bid == cc->id_builtin_strlen)  { libc_name = "strlen";  ret_t = FTYPE_U64; }
         if (libc_name == NULL)
         {
-            fval_emit_builtin_call(ex, bid, args, argc, out);
+            fval_emit_builtin_call(ex, bid, args, argc, callee);
             return;
         }
         // Synthesize direct call to libc function!
@@ -3510,7 +3518,7 @@ static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, F
     {
         for (uint32_t i = 0; i < argc; i += 1) { fval_release(ex, &args[i]); }
         fval_release(ex, callee);
-        *out = (FastVal){ .type = ret_t, .kind = ftype_is_void(ret_t) ? FVAL_VOID : FVAL_REG };
+        *callee = (FastVal){ .type = ret_t, .kind = ftype_is_void(ret_t) ? FVAL_VOID : FVAL_REG };
         return;
     }
 
@@ -3768,14 +3776,14 @@ static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, F
     // Collect return value per SysV AMD64 ABI!
     if (ftype_is_void(ret_t))
     {
-        *out = (FastVal){ .type = FTYPE_VOID, .kind = FVAL_VOID };
+        *callee = (FastVal){ .type = FTYPE_VOID, .kind = FVAL_VOID };
     }
     else if (ftype_is_record(ret_t))
     {
         const FastComplexType* rct = cc->ctypes + (ret_t & BUSTER_FTYPE_CIDX_MASK);
         if (has_sret)
         {
-            *out = (FastVal){ .type = ret_t, .kind = FVAL_LOCAL, .off = sret_slot };
+            *callee = (FastVal){ .type = ret_t, .kind = FVAL_LOCAL, .off = sret_slot };
         }
         else
         {
@@ -3786,13 +3794,13 @@ static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, F
             else if (rct->abi_lo == FABI_SSE) { x86_sse_store(obj, true, FREG_RBP, rslot, fp_r++); }
             if (rct->abi_hi == FABI_INT) { x86_store(obj, FREG_RBP, rslot + 8, gp_r == 0 ? FREG_RAX : FREG_RDX, 8u); }
             else if (rct->abi_hi == FABI_SSE) { x86_sse_store(obj, true, FREG_RBP, rslot + 8, fp_r); }
-            *out = (FastVal){ .type = ret_t, .kind = FVAL_LOCAL, .off = rslot };
+            *callee = (FastVal){ .type = ret_t, .kind = FVAL_LOCAL, .off = rslot };
         }
     }
     else if (ftype_is_float(ret_t))
     {
         ex->xmm_used |= 1u; // XMM0
-        *out = (FastVal){ .type = ret_t, .kind = FVAL_XMM, .reg = 0u };
+        *callee = (FastVal){ .type = ret_t, .kind = FVAL_XMM, .reg = 0u };
     }
     else
     {
@@ -3800,8 +3808,18 @@ static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, F
         const uint32_t rsz = ftype_size(cc, ret_t);
         if (rsz < 4u) { x86_extend(obj, FREG_RAX, FREG_RAX, rsz, ftype_is_signed(cc, ret_t)); }
         ex->gp_used |= (1u << FREG_RAX);
-        *out = (FastVal){ .type = ret_t, .kind = FVAL_REG, .reg = FREG_RAX };
+        *callee = (FastVal){ .type = ret_t, .kind = FVAL_REG, .reg = FREG_RAX };
     }
+}
+
+// While the call is emitted, its callee sits just outside the live value stack.
+// The returned value occupies that same slot.
+static inline void fast_expr_finish_call(FastExprCtx* ex, uint32_t first_arg, uint32_t argc)
+{
+    FastVal* callee = &ex->vstack[--ex->vsp];
+    fval_emit_call(ex, callee, ex->call_args + first_arg, argc, first_arg);
+    ex->arg_sp = first_arg;
+    ex->vsp += 1u;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -4340,10 +4358,14 @@ static BUSTER_DIRECT_HOT void fast_expr_reduce_top(FastExprCtx* ex, FastExprOp* 
 
 // Main iterative C17 expression compiler (ZERO recursion!).
 // If `is_branch` is true, emits a direct branch to `branch_label` and releases the result.
-// If `discard_result` is true, releases the result (used for expression statements).
-static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, bool discard_result,
+// An expression statement has no output value.
+static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma,
                          bool is_branch, bool branch_on_true, uint32_t branch_label, FastVal* out_val)
 {
+    // The token stream and its extent remain fixed throughout code generation.
+    const uint8_t* const kinds = cc->tk;
+    const uint32_t* const data = cc->td;
+    const uint32_t token_count = cc->tcount;
     FastExprCtx ex;
     ex.cc = cc;
     ex.vsp = 0;
@@ -4356,15 +4378,15 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
     uint32_t osp = 0;
     bool expect_val = true;
 
-    while (cc->pos < cc->tcount && !cc->bailout)
+    while (cc->pos < token_count && !cc->bailout)
     {
-        const uint8_t k = fast_cc_peek(cc);
+        const uint8_t k = kinds[cc->pos];
         if (expect_val)
         {
             // HOT PATH #1 (>60% of expect_val tokens): Identifier (variable, enum constant, function, or recognized builtin)
             if (__builtin_expect(k == FTOK_IDENT, 1))
             {
-                const uint32_t id = fast_cc_data(cc);
+                const uint32_t id = data[cc->pos];
                 cc->pos += 1u;
                 const uint32_t si = id < cc->env_cap ? cc->sym_cur[id] : 0u;
                 if (__builtin_expect(si != 0, 1))
@@ -4424,7 +4446,7 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
             // HOT PATH #2: inline 32-bit integer literal
             if (k == FTOK_INT_LIT)
             {
-                if (ex.vsp < 128u) { ex.vstack[ex.vsp++] = (FastVal){ .type = FTYPE_I32, .kind = FVAL_IMM, .imm = (int64_t)(int32_t)fast_cc_data(cc) }; }
+                if (ex.vsp < 128u) { ex.vstack[ex.vsp++] = (FastVal){ .type = FTYPE_I32, .kind = FVAL_IMM, .imm = (int64_t)(int32_t)data[cc->pos] }; }
                 cc->pos += 1u; expect_val = false; continue;
             }
 
@@ -4634,11 +4656,7 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
             {
                 const FastExprOp cop = ops[--osp];
                 cc->pos += 1u;
-                FastVal callee = ex.vstack[--ex.vsp];
-                FastVal res = { 0 };
-                fval_emit_call(&ex, &callee, ex.call_args + cop.lbl0, 0u, cop.lbl0, &res);
-                ex.arg_sp = cop.lbl0;
-                ex.vstack[ex.vsp++] = res;
+                fast_expr_finish_call(&ex, cop.lbl0, 0u);
                 expect_val = false;
                 continue;
             }
@@ -4881,11 +4899,7 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
                 if (ex.vsp < 2u || ex.arg_sp >= 128u) { fast_cc_bail(cc, "call arg stack"); break; }
                 ex.call_args[ex.arg_sp++] = ex.vstack[--ex.vsp];
                 const uint32_t argc = ex.arg_sp - cop.lbl0;
-                FastVal callee = ex.vstack[--ex.vsp];
-                FastVal res = { 0 };
-                fval_emit_call(&ex, &callee, ex.call_args + cop.lbl0, argc, cop.lbl0, &res);
-                ex.arg_sp = cop.lbl0;
-                ex.vstack[ex.vsp++] = res;
+                fast_expr_finish_call(&ex, cop.lbl0, argc);
                 continue;
             }
             if (top == FEOP_VA_END)
@@ -5051,7 +5065,7 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
                 uint32_t match_pos = UINT32_MAX;
                 uint32_t def_pos = UINT32_MAX;
                 uint32_t end_pos = UINT32_MAX;
-                while (cc->pos < cc->tcount && !cc->bailout)
+                while (cc->pos < token_count && !cc->bailout)
                 {
                     bool is_def = false;
                     FastType assoc_t = FTYPE_VOID;
@@ -5069,7 +5083,7 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
                     else if (match_pos == UINT32_MAX && ftype_generic_match(cc, ctrl_t, assoc_t)) { match_pos = expr_pos; }
                     // Skip balanced tokens of this association expression up to `,` or `)` at depth 0
                     uint32_t bd = 0;
-                    while (cc->pos < cc->tcount)
+                    while (cc->pos < token_count)
                     {
                         const uint8_t ak = fast_cc_peek(cc);
                         if (bd == 0 && (ak == FTOK_COMMA || ak == FTOK_RPAREN)) { break; }
@@ -5101,7 +5115,7 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
                 cc->pos += 1u; // ','
                 // Skip second argument up to ')'
                 uint32_t bd = 0;
-                while (cc->pos < cc->tcount)
+                while (cc->pos < token_count)
                 {
                     const uint8_t ak = fast_cc_peek(cc);
                     if (bd == 0 && ak == FTOK_RPAREN) { cc->pos += 1u; break; }
@@ -5226,18 +5240,14 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
         fast_cc_bail(cc, "expression did not produce single value");
         return;
     }
-    FastVal final_v = ex.vstack[0];
     if (is_branch)
     {
-        fval_branch(&ex, &final_v, branch_on_true, branch_label);
-    }
-    else if (discard_result)
-    {
-        fval_release(&ex, &final_v);
+        ex.vsp = 0;
+        fval_branch(&ex, &ex.vstack[0], branch_on_true, branch_label);
     }
     else if (out_val != NULL)
     {
-        *out_val = final_v;
+        *out_val = ex.vstack[0];
     }
 }
 
@@ -5257,7 +5267,7 @@ static inline void fast_expr_ctx_reset(FastExprCtx* ex, FastCCState* cc)
 static void fast_cc_store_expr_to_val(FastCCState* cc, FastVal dst, bool stop_at_comma)
 {
     FastVal rhs = { 0 };
-    fast_cc_expr(cc, stop_at_comma, false, false, false, 0, &rhs);
+    fast_cc_expr(cc, stop_at_comma, false, false, 0, &rhs);
     if (cc->bailout) { return; }
     FastExprCtx ex;
     fast_expr_ctx_reset(&ex, cc);
@@ -6006,7 +6016,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                     break;
                 }
                 cc->pos += 2u;
-                fast_cc_expr(cc, false, false, true, true, top->lbl0, NULL); // jump back to body_lbl if true!
+                fast_cc_expr(cc, false, true, true, top->lbl0, NULL); // jump back to body_lbl if true!
                 fast_cc_reset_tmps(cc);
                 if (fast_cc_peek(cc) != FTOK_RPAREN) { fast_cc_bail(cc, "expected ) in do-while"); break; }
                 cc->pos += 1u;
@@ -6024,7 +6034,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                 {
                     const uint32_t save_after = cc->pos;
                     cc->pos = top->step_pos;
-                    fast_cc_expr(cc, false, true, false, false, 0, NULL);
+                    fast_cc_expr(cc, false, false, false, 0, NULL);
                     fast_cc_reset_tmps(cc);
                     cc->pos = save_after;
                 }
@@ -6187,7 +6197,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
             if (fast_cc_peek(cc) != FTOK_LPAREN) { fast_cc_bail(cc, "expected ( after if"); break; }
             cc->pos += 1u;
             const uint32_t else_lbl = fast_label_new(obj);
-            fast_cc_expr(cc, false, false, true, false, else_lbl, NULL);
+            fast_cc_expr(cc, false, true, false, else_lbl, NULL);
             fast_cc_reset_tmps(cc);
             if (fast_cc_peek(cc) != FTOK_RPAREN) { fast_cc_bail(cc, "expected ) after if cond"); break; }
             cc->pos += 1u;
@@ -6205,7 +6215,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
             const uint32_t cond_lbl = fast_label_new(obj);
             const uint32_t brk_lbl = fast_label_new(obj);
             fast_label_bind(obj, cond_lbl);
-            fast_cc_expr(cc, false, false, true, false, brk_lbl, NULL);
+            fast_cc_expr(cc, false, true, false, brk_lbl, NULL);
             fast_cc_reset_tmps(cc);
             if (fast_cc_peek(cc) != FTOK_RPAREN) { fast_cc_bail(cc, "expected ) after while cond"); break; }
             cc->pos += 1u;
@@ -6273,7 +6283,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
             }
             else
             {
-                fast_cc_expr(cc, false, true, false, false, 0, NULL);
+                fast_cc_expr(cc, false, false, false, 0, NULL);
                 fast_cc_reset_tmps(cc);
                 if (fast_cc_peek(cc) == FTOK_SEMI) { cc->pos += 1u; }
             }
@@ -6284,7 +6294,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
             // Cond clause
             if (fast_cc_peek(cc) != FTOK_SEMI)
             {
-                fast_cc_expr(cc, false, false, true, false, brk_lbl, NULL);
+                fast_cc_expr(cc, false, true, false, brk_lbl, NULL);
                 fast_cc_reset_tmps(cc);
             }
             if (fast_cc_peek(cc) != FTOK_SEMI) { fast_cc_bail(cc, "expected ; in for"); break; }
@@ -6322,7 +6332,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
             if (fast_cc_peek(cc) != FTOK_LPAREN) { fast_cc_bail(cc, "expected ( after switch"); break; }
             cc->pos += 1u;
             FastVal sv = { 0 };
-            fast_cc_expr(cc, false, false, false, false, 0, &sv);
+            fast_cc_expr(cc, false, false, false, 0, &sv);
             if (cc->bailout) { break; }
             const FastType st = ftype_promote_int(cc, sv.type);
             const int32_t slot = fast_cc_alloc_local(cc, 8u, 8u);
@@ -6387,7 +6397,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
             if (fast_cc_peek(cc) != FTOK_SEMI)
             {
                 FastVal rv = { 0 };
-                fast_cc_expr(cc, false, false, false, false, 0, &rv);
+                fast_cc_expr(cc, false, false, false, 0, &rv);
                 if (cc->bailout) { break; }
                 if (ftype_is_void(ret_t) && !ftype_is_void(rv.type))
                 {
@@ -6581,7 +6591,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
             cc->pos += 9u;
             continue;
         }
-        fast_cc_expr(cc, false, true, false, false, 0, NULL);
+        fast_cc_expr(cc, false, false, false, 0, NULL);
         fast_cc_reset_tmps(cc);
         if (fast_cc_peek(cc) == FTOK_SEMI) { cc->pos += 1u; }
         else { fast_cc_bail(cc, "expected ; after expr stmt"); break; }

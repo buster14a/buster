@@ -123,13 +123,18 @@ int c_direct_try_compile(const CDirectRequest* request)
         out_path = default_out;
     }
 
+    // Use the main file's existing open/stat to choose pages before any tables are touched.
+    FastSource main_source;
+    if (!fast_source_open(&main_source, request->input_path)) { return 1; }
+    const bool base_pages = request->avoid_huge_pages || main_source.size < 1024u * 1024u;
     FastArena arena = { 0 };
     FastArena scratch = { 0 };
-    if (!fast_arena_init(&arena, UINT64_C(32) * 1024u * 1024u, request->avoid_huge_pages) ||
-        !fast_arena_init(&scratch, UINT64_C(6) * 1024u * 1024u, request->avoid_huge_pages))
+    if (!fast_arena_init(&arena, UINT64_C(32) * 1024u * 1024u, base_pages) ||
+        !fast_arena_init(&scratch, UINT64_C(6) * 1024u * 1024u, base_pages))
     {
         fast_arena_destroy(&scratch);
         fast_arena_destroy(&arena);
+        (void)close(main_source.fd);
         return 1;
     }
 
@@ -137,7 +142,7 @@ int c_direct_try_compile(const CDirectRequest* request)
     FastObj* obj = (FastObj*)fast_arena_alloc(&scratch, sizeof(FastObj), 64);
     FastCCState* cc = (FastCCState*)fast_arena_alloc(&scratch, sizeof(FastCCState), 64);
 
-    bool ok = pp != NULL && obj != NULL && cc != NULL && fast_pp_init(pp, &arena, &scratch);
+    bool ok = pp != NULL && obj != NULL && cc != NULL && fast_pp_init(pp, &arena, &scratch, main_source.size <= 16u * 1024u);
     if (ok)
     {
         pp->unsigned_char = request->unsigned_char;
@@ -159,7 +164,7 @@ int c_direct_try_compile(const CDirectRequest* request)
     {
         if (request->predefines_path != NULL)
         {
-            ok = fast_pp_run_file(pp, request->predefines_path);
+            ok = fast_pp_run_file(pp, request->predefines_path, NULL);
         }
         else if (request->predefines_text != NULL && request->predefines_length > 0)
         {
@@ -193,11 +198,11 @@ int c_direct_try_compile(const CDirectRequest* request)
             bool is_sys = false;
             if (access(inc, R_OK) == 0)
             {
-                ok = fast_pp_run_file(pp, inc);
+                ok = fast_pp_run_file(pp, inc, NULL);
             }
             else if (fast_pp_resolve_include(pp, inc, (uint32_t)strlen(inc), false, false, resolved, sizeof(resolved), &dir_idx, &is_sys))
             {
-                ok = fast_pp_run_file(pp, resolved);
+                ok = fast_pp_run_file(pp, resolved, NULL);
             }
             else
             {
@@ -209,7 +214,11 @@ int c_direct_try_compile(const CDirectRequest* request)
     // 4. Main translation unit lex + preprocess
     if (ok)
     {
-        ok = fast_pp_run_file(pp, request->input_path);
+        ok = fast_pp_run_file(pp, request->input_path, &main_source);
+    }
+    else
+    {
+        (void)close(main_source.fd);
     }
 
     if (ok && request->out_token_count != NULL)
@@ -594,7 +603,7 @@ static bool c_direct_test_tokens(const char* text, uint64_t length, uint8_t* kin
     if (ok)
     {
         FastPP* pp = (FastPP*)fast_arena_alloc(&scratch, sizeof(FastPP), 64);
-        ok = pp != NULL && fast_pp_init(pp, &arena, &scratch) && fast_pp_run_buffer(pp, "<test>", text, length) && pp->out_count <= capacity;
+        ok = pp != NULL && fast_pp_init(pp, &arena, &scratch, true) && fast_pp_run_buffer(pp, "<test>", text, length) && pp->out_count <= capacity;
         if (ok)
         {
             memcpy(kinds, pp->out_kind, pp->out_count);
@@ -791,6 +800,29 @@ static bool c_direct_test_lexer(void)
         {
             fprintf(stderr, "test-direct: lexer: identifiers of 301 bytes\n");
         }
+    }
+    if (ok)
+    {
+        // These spellings have the same length, head and tail. Both identifiers must survive
+        // the in-place table growth triggered by the intervening macro definitions.
+        static const char names[] = "abcdefghAijklmnop abcdefghBijklmnop abcdefghAijklmnop\n";
+        uint32_t length = sizeof(names) - 1u;
+        memcpy(buffer, names, length);
+        for (uint32_t i = 0; i < 1800u; i += 1)
+        {
+            length += (uint32_t)snprintf(buffer + length, buffer_size - length, "#define VALUE_%u %u\n", i, i);
+        }
+        static const char tail[] = "VALUE_0 VALUE_1799\n";
+        memcpy(buffer + length, tail, sizeof(tail) - 1u);
+        length += sizeof(tail) - 1u;
+        memcpy(buffer + length, names, sizeof(names) - 1u);
+        length += sizeof(names) - 1u;
+        uint32_t count = 0;
+        ok = c_direct_test_tokens(buffer, length, kinds, data, capacity, &count) && count == 8u &&
+             kinds[0] == FTOK_IDENT && kinds[1] == FTOK_IDENT && data[0] != data[1] && data[0] == data[2] &&
+             kinds[3] == FTOK_INT_LIT && data[3] == 0u && kinds[4] == FTOK_INT_LIT && data[4] == 1799u &&
+             memcmp(data, data + 5u, 3u * sizeof(*data)) == 0;
+        if (!ok) { fprintf(stderr, "test-direct: lexer: identifiers across table growth\n"); }
     }
     free(first_data);
     free(data);
@@ -1068,6 +1100,30 @@ int run_c_direct_tests(int argc, char** argv)
     else
     {
         fprintf(stderr, "test-direct: FAIL integer initializer bytes\n");
+        failed += 1u;
+    }
+
+    // Widen mixed-case hex literals at every width, including unsigned 32-bit values.
+    // A suffixed literal, a wide literal and expressions make the window resume scalar decoding.
+    static const char hex_source[] =
+        "#define A 71\n#define B 0\n#define OCTAL 010\n#undef A\n#define A 91\n"
+        "const unsigned long long hex[] = { 0x0,0XA,0xff,0xAbC,0xF00D,0x12345,0xaBcDeF,0x7654321,"
+        "0x7fffffff,0X80000000,0xFFFFFFFF,0x00000000,0xB0,0XfF,0x1,0xC,"
+        "0xF0u,0x100000000,0x10+1,A,B,OCTAL,__LINE__,"
+        "0x1,0x2,0x3,0x4,0x5,0x6,0x7,0x8,0x9,};\n"
+        "/* Padding keeps the last hex group inside the SIMD window while the parser crosses the macro expansions. */\n";
+    static const uint64_t expected_hex[] = {
+        0, 10, 255, 2748, 61453, 74565, 11259375, 124076833,
+        2147483647, 2147483648, 4294967295, 0, 176, 255, 1, 12,
+        240, UINT64_C(4294967296), 17, 91, 0, 8, 6, 1, 2, 3, 4, 5, 6, 7, 8, 9,
+    };
+    if (c_direct_test_compile_source_with(hex_source, obj_path, 0, NULL, 0, false, NULL, NULL, NULL, NULL, expected_hex, sizeof(expected_hex)))
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL hexadecimal initializers and decimal macro definitions\n");
         failed += 1u;
     }
 

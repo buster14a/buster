@@ -533,17 +533,16 @@ static FastType ftype_deref(const FastCCState* cc, FastType t)
     return FTYPE_VOID;
 }
 
+// Only arrays and function designators decay. Keep pointer construction off the scalar path.
+static __attribute__((noinline)) FastType ftype_decay_designator(FastCCState* cc, FastType t)
+{
+    const FastType element = ftype_is_array(t) ? cc->ctypes[t & BUSTER_FTYPE_CIDX_MASK].inner : t;
+    return ftype_make_ptr(cc, element);
+}
+
 static inline FastType ftype_decay(FastCCState* cc, FastType t)
 {
-    if (ftype_is_array(t))
-    {
-        return ftype_make_ptr(cc, cc->ctypes[t & BUSTER_FTYPE_CIDX_MASK].inner);
-    }
-    if (ftype_is_func(t))
-    {
-        return ftype_make_ptr(cc, t);
-    }
-    return t;
+    return ftype_is_array(t) || ftype_is_func(t) ? ftype_decay_designator(cc, t) : t;
 }
 
 static inline FastType ftype_promote_int(const FastCCState* cc, FastType t)
@@ -2961,7 +2960,7 @@ static FastType fast_cc_parse_typename(FastCCState* cc, bool* out_ok)
 static bool fast_cc_init_state(FastCCState* cc, FastArena* arena, FastArena* scratch, FastPP* pp, FastObj* obj,
                                bool unsigned_char, bool quiet)
 {
-    memset(cc, 0, sizeof(*cc));
+    // The state, including deferred bodies, starts on fresh zero-filled scratch pages.
     cc->arena = arena;
     cc->scratch = scratch;
     cc->pp = pp;
