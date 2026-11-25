@@ -1235,7 +1235,7 @@ static bool c_direct_differential_compare(const char* work, uint32_t file, const
                 common -= 1u;
             }
             const char* const outputs[2] = { direct_output, full_output };
-            const char* const labels[2] = { "  by default", "--no-direct" };
+            const char* const labels[2] = { "    default", "--no-direct" };
             for (uint32_t side = 0; side < 2u; side += 1u)
             {
                 uint64_t end = common;

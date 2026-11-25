@@ -29,6 +29,7 @@
 #: unmeasured Test the early driver feedback corpus
 #: unmeasured Test deterministic work and growth contracts [1 CPU]
 #: unmeasured Test the fused direct-to-object compiler [1 CPU]
+#: unmeasured Compare the direct path with the full pipeline on tests/'s C files [4 CPUs]
 #: unmeasured Compile the frozen sqlite3.c and c-testsuite's programs with their warm arenas filled, to the same objects
 #: unmeasured Test -S of c-testsuite's programs against -c and GNU as
 #: unmeasured Test the caret display against clang
@@ -231,6 +232,7 @@
 334.5 Test SQLite's Tcl suite's pinned subset through testfixture by both tiers against clang's [4 CPUs]
 43.1 Test the direct path's executables [8 CPUs]
 25.9 Test the fused direct-to-object compiler [1 CPU]
+103.6 Compare the direct path with the full pipeline on tests/'s C files [4 CPUs]
 13.2 Test the lanes [8 CPUs]
 22.0 Test the per-file jobs on the repository's sources, flat [8 CPUs]
 2.0 Test the link representation [8 CPUs]

@@ -246,6 +246,40 @@ requirements. [Command index](README.md).
   A new test of the checker's goes inside them; a test whose own code is its
   time (a fuzzer's loop, an interpreter) doesn't.
 
+## The direct path's diagnostics (#3577)
+
+A plain `-c` of one C file goes first to the fused direct compiler
+(`c_direct.c`, #2850), which leaves the unit to the full pipeline, writing
+nothing, wherever its result could differ: a construct it doesn't compile, and
+anything the full pipeline diagnoses. Each default warning and error has a
+check that refuses the unit, so a compile's standard error and exit status are
+the full pipeline's alone, and the direct path only writes the object sooner.
+`BUSTER_TEST_DIRECT_BAILS=FILE` appends a line of the refusing rule and the
+input to FILE each time it refuses one (read on that fallback alone). The
+checks are written for [the compile's count](ci.md#the-compiles-count-before-the-merge):
+comparisons combined bitwise with one rarely taken branch, cold functions for
+the rare cases, macros where a helper's entry would count at every use.
+
+An inline function the main file defines is compiled where it is defined, as
+any other function there is. One an included file defines is checked there,
+in the scope it has there (a later declaration isn't visible to it), its code
+dropped, and compiled again at the unit's end only where something references
+it, so a header's unused helpers emit nothing. A C99 inline definition of
+external linkage is the full pipeline's.
+
+`./build/compiler test-direct --differential [--jobs N] [--direct-floor N]
+DIRECTORY...` compiles every C file under the directories with this
+executable twice, each run a child of its own (standard input `/dev/null`,
+without `BUSTER_NO_DIRECT` or `SOURCE_DATE_EPOCH`, which turn the direct path
+off): by default and with `--no-direct`. The two must exit alike and print the
+same bytes, standard output and errors together; the first 20 differences
+print each run's first line that differs. A file is the direct path's where
+its default run exited 0 without a line in its bail log, and fewer such files
+than `--direct-floor` fail the run, as the comparison would leave the direct
+path out. CI runs it on `tests/` with a floor of 260 (278 of 4,578 files on
+2026-11-25, 9.5 s on 4 CPUs in a Release build), in the sanitizer rows too,
+where a sanitizer's report in one run is a difference.
+
 ## Build-system integration (#1113)
 
 Dependency files (`-M`, `-MM`, `-MD`, `-MMD`, `-MF`, `-MT`, `-MQ` and `-MP`),
