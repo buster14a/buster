@@ -4013,6 +4013,9 @@ static int c_direct_unit_tests(void)
         "int f(const char* p) { return \"a\" == p; }\n",
         "int f(const char* p) { return p < ((const char*)\"z\"); }\n",
         "int f(int x) { if (0) { return x == x; } return 0; }\n",
+        // -Wundefined-internal of a static function a dead branch alone calls (#3592's without code): a use all the same.
+        "static int sf(void);\nint f(void) { return 0 ? sf() : 1; }\n",
+        "static int sf(void);\nint f(void) { if (0) { (void)sf(); } return 1; }\n",
     };
     for (uint32_t i = 0; i < sizeof(bail_cases) / sizeof(bail_cases[0]); i += 1)
     {

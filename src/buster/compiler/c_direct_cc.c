@@ -341,6 +341,17 @@ static inline void fast_cc_reference(FastCCState* cc, FastSym* sym)
     }
 }
 
+// #3577: a use without code where evaluated, in #3592's dead branch (or an expression compiled again for its log): the
+// unit's end counts it (-Wundefined-internal), as fast_cc_reference does a body's checked alone, and it readies no body
+// to emit, as no code refers to one. sizeof's operand is no use.
+static inline void fast_cc_reference_dead(FastSym* sym)
+{
+    if (sym->referenced == 0u && (sym->inline_rules & BUSTER_FINLINE_PENDING) == 0)
+    {
+        sym->referenced = 2u;
+    }
+}
+
 // Ensure a FastSym (GLOBAL or FUNC) has an ELF symbol in cc->obj (lazy creation avoids polluting .symtab with unused decls!)
 static uint32_t fast_cc_ensure_obj_sym(FastCCState* cc, uint32_t sym_idx)
 {
@@ -6699,6 +6710,7 @@ static __attribute__((cold, noinline)) bool fast_cc_push_flagged_symbol(FastCCSt
     else
     {
         if (ex->eval_only == 0) { fast_cc_reference(cc, sym); }
+        else if (ex->unevaluated == 0) { fast_cc_reference_dead(sym); }
         const uint32_t osym = ex->eval_only > 0 ? 0u : fast_cc_ensure_obj_sym(cc, si);
         const uint32_t called = (uint32_t)(next == FTOK_LPAREN);
         const uint8_t marks = (uint8_t)(called * ((BUSTER_FVAL_MARK_NONNULL * (uint32_t)((flags & BUSTER_FSYM_NONNULL) != 0)) |
@@ -6784,8 +6796,10 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
                         break;
                     }
                     const uint32_t evaluated = (uint32_t)(ex.eval_only == 0);
-                    const uint32_t emitted = (uint32_t)(symbol_kind >= FSYM_GLOBAL) & evaluated;
+                    const uint32_t global = (uint32_t)(symbol_kind >= FSYM_GLOBAL);
+                    const uint32_t emitted = global & evaluated;
                     if (emitted) { fast_cc_reference(cc, sym); }
+                    else if ((global & (uint32_t)(ex.unevaluated == 0)) != 0) { fast_cc_reference_dead(sym); }
                     uint32_t osym = sym->obj_sym & (0u - emitted);
                     if (__builtin_expect((emitted != 0) & (osym == 0), 0))
                     {

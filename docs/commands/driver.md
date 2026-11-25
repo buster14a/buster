@@ -272,6 +272,30 @@ the log of every use and sequence point, whose check is the full pipeline's
 with it (`fast_cc_expr_compile`), so the common one carries none of it; that
 one level of recursion is `call_graph.c`'s allowed cycle.
 
+An expression compiles without code (`eval_only`) in three places: an
+unevaluated operand (`sizeof`'s, `_Alignof`'s, `_Generic`'s controlling
+expression), the dead arm of a constant condition (#3592's dead branches) and
+the compile again for `-Wunsequenced`'s log. The checks are the same in all
+three but for what C's unevaluated operands alone change, which
+`FastExprCtx.unevaluated` counts: a side effect there is
+`-Wunevaluated-expression`, its names are not in the `-Wunsequenced` log, a
+discarded comma operand is quiet, a comparison's `-Wtautological-compare` and
+`-Wstring-compare` are quiet, and its names are no use. A value made without
+code keeps the kind, marks and constants the checks read (an object's address,
+a member's bit-field, a call's effect); a use in a dead branch counts for the
+unit's end (`-Wundefined-internal`) but readies no body. Probes of each
+diagnostic live, in `if (0)`, the else of `if (1)`, a constant `?:`'s arm, a
+decided `&&` or `||` and `sizeof`, against `--no-direct`, cover this.
+
+A comparison whose operands are two lvalues at one place reads its tokens
+(`fast_cc_same_paths`, from the operator's position in `FastExprOp.lbl2`):
+one access path on both sides, parentheses aside, is the full pipeline's
+self-comparison. So does a relational pointer sum (`fast_cc_sum_bounds`). A
+string literal keeps `BUSTER_FVAL_LASTING_STRING` through parentheses and casts
+for `-Wstring-compare`. The tokens don't say whether a macro made an operand,
+which takes the full pipeline's warning away: such a unit leaves the direct
+path.
+
 An inline function's body is checked where it is defined, in the scope it has
 there (a later declaration isn't visible to it), its code dropped. One with
 internal linkage is compiled again at the unit's end only where something
@@ -291,7 +315,7 @@ same bytes, standard output and errors together; the first 20 differences
 print each run's first line that differs. A file is the direct path's where
 its default run exited 0 without a line in its bail log, and fewer such files
 than `--direct-floor` fail the run, as the comparison would leave the direct
-path out. CI runs it on `tests/` with a floor of 260 (285 of 4,578 files on
+path out. CI runs it on `tests/` with a floor of 260 (286 of 4,578 files on
 2026-11-25, 9.2 s on 4 CPUs in a Release build), in the sanitizer rows too,
 where a sanitizer's report in one run is a difference.
 
