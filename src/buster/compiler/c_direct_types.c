@@ -166,6 +166,8 @@ struct FastSym
     uint8_t is_noreturn;
     uint8_t is_weak;
     uint8_t use_flags;     // BUSTER_FSYM_*: what a use of the symbol must look at first (one test at every use)
+    uint8_t visibility_set; // a declaration gave the visibility, so another one that differs is clang's error (#3595)
+    uint8_t inline_rules;   // BUSTER_FINLINE_*: what a function's declarations say of its inline definition (#3595)
     FastType type;
     uint32_t ident_id;
     uint32_t obj_sym;      // symbol index in FastObj (for GLOBAL/FUNC)
@@ -181,6 +183,17 @@ struct FastSym
                            // [1] a variable's BUSTER_FFOLD_*
     uint16_t deferred_task; // one-based index of a deferred definition, zero for other symbols
 };
+
+// A function's declarations, for whether its inline definition is emitted as C99's and GNU's rules say, as the full
+// pipeline decides it (#3595). GNU's rules (gnu_inline on a declaration, or -fgnu89-inline, which keeps a unit off the
+// direct path): an extern inline definition is the unit's only, unless a declaration is plain inline. C99's: an inline
+// definition without extern is the unit's only, unless a file-scope declaration lacks inline or has extern.
+#define BUSTER_FINLINE_GNU 1u            // a declaration has gnu_inline
+#define BUSTER_FINLINE_PLAIN 2u          // a declaration is inline without extern
+#define BUSTER_FINLINE_EXTERNAL 4u       // a file-scope declaration without a body lacks inline or has extern
+#define BUSTER_FINLINE_C99_PENDING 8u    // its definition is C99's inline one, decided at the unit's end
+#define BUSTER_FINLINE_GNU_PENDING 16u   // its definition is GNU's extern inline one, decided at the unit's end
+#define BUSTER_FINLINE_PENDING (BUSTER_FINLINE_C99_PENDING | BUSTER_FINLINE_GNU_PENDING)
 
 typedef struct FastScopeUndo FastScopeUndo;
 struct FastScopeUndo
@@ -967,7 +980,9 @@ struct FastAttrInfo
     uint8_t packed;
     uint8_t noreturn;
     uint8_t weak;
-    uint8_t visibility;   // 0=default, 1=hidden, 2=protected
+    uint8_t visibility;   // STV_DEFAULT / STV_HIDDEN (also "internal", as clang emits it) / STV_PROTECTED
+    uint8_t visibility_set; // a visibility attribute gave it; the last one of a list counts
+    uint8_t gnu_inline;
     uint8_t mode_size;    // 0=none, 1/2/4/8/16 (for __attribute__((__mode__(...))))
     uint8_t mode_float;
     // What the declaration that carries the list must check against what it declares (#3577): attributes of
@@ -995,7 +1010,8 @@ typedef enum FastAttrKind
 {
     FATTR_UNCHECKED = 0,  // the full pipeline's: unknown, or one whose meaning the direct path doesn't compile
     FATTR_ANYWHERE,       // unused, maybe_unused
-    FATTR_FUNCTION,       // nothrow, leaf, noinline, always_inline, gnu_inline, artificial, cold, hot, ...
+    FATTR_FUNCTION,       // nothrow, leaf, noinline, always_inline, artificial, cold, hot, ...
+    FATTR_GNU_INLINE,     // a function's, which its inline definition's rules read (#3595)
     FATTR_PURE,           // const, pure
     FATTR_MALLOC,
     FATTR_NORETURN,
@@ -1041,7 +1057,7 @@ static FastAttrKind fast_cc_attribute_kind(const char* s, uint32_t len)
         { "unused", 6, FATTR_ANYWHERE },
         { "maybe_unused", 12, FATTR_ANYWHERE },
         { "always_inline", 13, FATTR_FUNCTION },
-        { "gnu_inline", 10, FATTR_FUNCTION },
+        { "gnu_inline", 10, FATTR_GNU_INLINE },
         { "artificial", 10, FATTR_FUNCTION },
         { "cold", 4, FATTR_FUNCTION },
         { "hot", 3, FATTR_FUNCTION },
@@ -1065,6 +1081,13 @@ static FastAttrKind fast_cc_attribute_kind(const char* s, uint32_t len)
 }
 
 static int64_t fast_cc_const_int_expr(FastCCState* cc, bool stop_at_comma);
+
+// Whether a string literal is spelled as its bytes, without an encoding prefix or a numeric escape: the only operand
+// that clang reads as its bytes in an attribute's string and an asm label (#3595).
+static inline bool fast_cc_literal_plain(const FastCCState* cc, uint32_t literal)
+{
+    return ((cc->pp->lit_coded[literal >> 6] >> (literal & 63u)) & 1u) == 0;
+}
 
 // Skip or parse __attribute__((...)) sequence
 static void fast_cc_parse_attributes(FastCCState* cc, FastAttrInfo* attr)
@@ -1119,8 +1142,9 @@ static void fast_cc_parse_attributes(FastCCState* cc, FastAttrInfo* attr)
                 // pipeline's, and so is any attribute in a position whose declaration doesn't check the list.
                 const FastAttrKind kind = fast_cc_attribute_kind(s, len);
                 const bool has_args = fast_cc_peek(cc) == FTOK_LPAREN;
-                const bool bare = kind == FATTR_ANYWHERE || kind == FATTR_FUNCTION || kind == FATTR_PURE || kind == FATTR_MALLOC ||
-                                  kind == FATTR_NORETURN || kind == FATTR_WEAK || kind == FATTR_PACKED || kind == FATTR_UNUSED_RESULT;
+                const bool bare = kind == FATTR_ANYWHERE || kind == FATTR_FUNCTION || kind == FATTR_GNU_INLINE || kind == FATTR_PURE ||
+                                  kind == FATTR_MALLOC || kind == FATTR_NORETURN || kind == FATTR_WEAK || kind == FATTR_PACKED ||
+                                  kind == FATTR_UNUSED_RESULT;
                 if (kind == FATTR_UNCHECKED)
                 {
                     fast_cc_bail(cc, "unchecked attribute");
@@ -1137,11 +1161,13 @@ static void fast_cc_parse_attributes(FastCCState* cc, FastAttrInfo* attr)
                     break;
                 }
                 if (attr != NULL) { attr->present = 1u; }
-                if (kind == FATTR_FUNCTION || kind == FATTR_PURE || kind == FATTR_MALLOC || kind == FATTR_NORETURN || kind == FATTR_UNUSED_RESULT)
+                if (kind == FATTR_FUNCTION || kind == FATTR_GNU_INLINE || kind == FATTR_PURE || kind == FATTR_MALLOC || kind == FATTR_NORETURN ||
+                    kind == FATTR_UNUSED_RESULT)
                 {
                     attr->function_only = 1u;
                 }
                 if (kind == FATTR_PURE) { attr->pure = 1u; }
+                else if (kind == FATTR_GNU_INLINE) { attr->gnu_inline = 1u; }
                 else if (kind == FATTR_NORETURN) { attr->noreturn = 1u; }
                 else if (kind == FATTR_WEAK) { attr->weak = 1u; }
                 else if (kind == FATTR_PACKED) { attr->packed = 1u; }
@@ -1193,20 +1219,27 @@ static void fast_cc_parse_attributes(FastCCState* cc, FastAttrInfo* attr)
                 }
                 else if (kind == FATTR_VISIBILITY)
                 {
-                    bool known = has_args && fast_cc_peek_at(cc, 1u) == FTOK_STR_LIT && fast_cc_peek_at(cc, 2u) == FTOK_RPAREN;
-                    if (known)
+                    // visibility("default" | "hidden" | "internal" | "protected"), one literal spelled as its bytes;
+                    // internal is hidden, as clang emits it, and the last of a list counts. Any other is the full
+                    // pipeline's error or warning (#3595).
+                    uint8_t visibility = UINT8_MAX;
+                    if (has_args && fast_cc_peek_at(cc, 1u) == FTOK_STR_LIT && fast_cc_peek_at(cc, 2u) == FTOK_RPAREN &&
+                        fast_cc_literal_plain(cc, cc->td[cc->pos + 1u]))
                     {
                         const FastLitSlice sl = cc->pp->lit_slices[cc->td[cc->pos + 1u]];
                         const char* vs = cc->pp->lit_bytes + sl.offset;
-                        if (sl.length == 6u && memcmp(vs, "hidden", 6) == 0) { attr->visibility = STV_HIDDEN; }
-                        else if (sl.length == 9u && memcmp(vs, "protected", 9) == 0) { attr->visibility = STV_PROTECTED; }
-                        else if (!(sl.length == 7u && memcmp(vs, "default", 7) == 0)) { known = false; }
+                        if (sl.length == 7u && memcmp(vs, "default", 7) == 0) { visibility = STV_DEFAULT; }
+                        else if (sl.length == 6u && memcmp(vs, "hidden", 6) == 0) { visibility = STV_HIDDEN; }
+                        else if (sl.length == 8u && memcmp(vs, "internal", 8) == 0) { visibility = STV_HIDDEN; }
+                        else if (sl.length == 9u && memcmp(vs, "protected", 9) == 0) { visibility = STV_PROTECTED; }
                     }
-                    if (!known)
+                    if (visibility == UINT8_MAX)
                     {
-                        fast_cc_bail(cc, "visibility attribute's argument");
+                        fast_cc_bail(cc, "visibility attribute's operand");
                         break;
                     }
+                    attr->visibility = visibility;
+                    attr->visibility_set = 1u;
                     cc->pos += 3u;
                 }
                 else if (kind == FATTR_DEPRECATED)
@@ -1288,26 +1321,60 @@ static void fast_cc_parse_attributes(FastCCState* cc, FastAttrInfo* attr)
     }
 }
 
-// Parse optional `__asm__("label")` on extern/global declarations (glibc header symbol renaming)
+// Parse optional `__asm__("label")` on a declaration (glibc's symbol renaming). The label is its literals joined, as
+// clang joins them: glibc's __REDIRECT writes __asm__ ("" "__isoc99_scanf") (#3595). One literal with bytes is used
+// where it is; several are joined in the unit's arena, which outlives the body's scratch. An empty label, or a
+// literal with an encoding prefix or a numeric escape, is the full pipeline's error.
 static void fast_cc_parse_asm_label(FastCCState* cc, FastAttrInfo* attr)
 {
     if (fast_cc_peek(cc) == FTOK_KW_ASM && fast_cc_peek_at(cc, 1u) == FTOK_LPAREN)
     {
         cc->pos += 2u;
-        if (fast_cc_peek(cc) == FTOK_STR_LIT)
+        const uint32_t first = cc->pos;
+        uint32_t length = 0;
+        uint32_t pieces = 0;
+        uint32_t piece = first;
+        bool plain = true;
+        while (fast_cc_peek(cc) == FTOK_STR_LIT)
         {
-            const FastLitSlice sl = cc->pp->lit_slices[fast_cc_data(cc)];
+            const uint32_t literal = fast_cc_data(cc);
+            const uint32_t bytes = cc->pp->lit_slices[literal].length;
+            plain = plain && fast_cc_literal_plain(cc, literal);
+            pieces += bytes != 0 ? 1u : 0u;
+            piece = bytes != 0 ? cc->pos : piece;
+            length += bytes;
+            cc->pos += 1u;
+        }
+        const char* label = NULL;
+        if (fast_cc_peek(cc) == FTOK_RPAREN && length != 0 && plain && pieces == 1u)
+        {
+            label = cc->pp->lit_bytes + cc->pp->lit_slices[cc->td[piece]].offset;
+        }
+        else if (fast_cc_peek(cc) == FTOK_RPAREN && length != 0 && plain)
+        {
+            char* joined = (char*)fast_arena_alloc(cc->arena, length, 1);
+            uint32_t at = 0;
+            for (uint32_t i = first; joined != NULL && i < cc->pos; i += 1)
+            {
+                const FastLitSlice sl = cc->pp->lit_slices[cc->td[i]];
+                memcpy(joined + at, cc->pp->lit_bytes + sl.offset, sl.length);
+                at += sl.length;
+            }
+            label = joined;
+        }
+        if (label == NULL)
+        {
+            fast_cc_bail(cc, "asm label's operand");
+        }
+        else
+        {
             if (attr != NULL)
             {
-                attr->asm_label = cc->pp->lit_bytes + sl.offset;
-                attr->asm_label_len = sl.length;
+                attr->asm_label = label;
+                attr->asm_label_len = length;
             }
             cc->pos += 1u;
-            // Handle adjacent concatenated strings if any
-            while (fast_cc_peek(cc) == FTOK_STR_LIT) { cc->pos += 1u; }
         }
-        if (fast_cc_peek(cc) == FTOK_RPAREN) { cc->pos += 1u; }
-        else { fast_cc_bail(cc, "bad asm label"); }
     }
 }
 

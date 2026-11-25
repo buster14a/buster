@@ -140,7 +140,7 @@ tcl=$(bash tools/ci/tcl-config.sh) || exit $?
 # #3577: every C file under tests/ compiled with -c by default, which the direct path takes where it can and leaves to
 # the full pipeline where it can't, and with --no-direct, the full pipeline alone: each must exit alike and print the
 # same bytes, so that the direct path's diagnostics are the full pipeline's. The direct path must compile 260 of them
-# itself (278 of 4,578 on 2026-11-25), or the comparison would leave it out. In a sanitizer row, each compile runs
+# itself (282 of 4,578 on 2026-11-25), or the comparison would leave it out. In a sanitizer row, each compile runs
 # under the row's sanitizer, and a report of it is a difference.
 "$BUSTER_COMPILER" test-direct --differential --jobs "${CORES:-4}" --direct-floor 260 tests
 == Test the lanes [8 CPUs]

@@ -289,7 +289,8 @@ static inline void fast_cc_ready_task(FastCCState* cc, uint32_t task)
 
 static inline void fast_cc_reference(FastCCState* cc, FastSym* sym)
 {
-    if (sym->referenced != 1u)
+    // A pending inline definition (C99's or GNU's) is decided at the unit's end, not by a reference (#3595).
+    if (sym->referenced != 1u && (sym->inline_rules & BUSTER_FINLINE_PENDING) == 0)
     {
         // #3577: a use in an inline body compiled to be checked alone (fast_cc_check_body) is a use for the unit's end
         // (-Wundefined-internal), but readies no body to emit.
@@ -8060,20 +8061,17 @@ static __attribute__((noinline)) bool fast_cc_types_redeclarable(const FastCCSta
 }
 
 // Whether a file-scope function's second declaration (or its definition) may follow its first: one type, no mix of a
-// declaration without a prototype and one with parameters (-Wdeprecated-non-prototype), no internal linkage after
-// external, and no C99 inline definition that another declaration would make external. `storage` is the new one's.
+// declaration without a prototype and one with parameters (-Wdeprecated-non-prototype), and no internal linkage after
+// external. `storage` is the new one's. (An inline definition's linkage the unit's end decides, #3595.)
 static __attribute__((noinline)) bool fast_cc_function_redeclarable(const FastCCState* cc, const FastSym* old, FastType type, uint8_t storage)
 {
     const FastComplexType* of = cc->ctypes + (old->type & BUSTER_FTYPE_CIDX_MASK);
     const FastComplexType* nf = cc->ctypes + (type & BUSTER_FTYPE_CIDX_MASK);
     const uint32_t old_static = (uint32_t)(old->storage == 1u) | (uint32_t)(old->storage == 4u);
     const uint32_t new_static = (uint32_t)(storage == 1u) | (uint32_t)(storage == 4u);
-    const uint32_t old_external = (uint32_t)(old->storage == 0u) | (uint32_t)(old->storage == 2u);
-    const uint32_t new_external = (uint32_t)(storage == 0u) | (uint32_t)(storage == 2u);
     const uint32_t old_params = (uint32_t)(of->count != 0) | (uint32_t)of->is_variadic;
     const uint32_t new_params = (uint32_t)(nf->count != 0) | (uint32_t)nf->is_variadic;
     const uint32_t mixed = ((uint32_t)of->is_oldstyle & new_params) | ((uint32_t)nf->is_oldstyle & old_params);
-    const uint32_t inline_external = ((uint32_t)(old->storage == 3u) & new_external) | ((uint32_t)(storage == 3u) & old_external);
     // The common redeclaration, a prototype and its definition with the same parameters, compares as one block.
     const uint32_t alike = (uint32_t)(of->inner == nf->inner) & (uint32_t)(of->count == nf->count) &
                            (uint32_t)(of->is_variadic == nf->is_variadic) & (uint32_t)(of->is_oldstyle == nf->is_oldstyle);
@@ -8082,7 +8080,7 @@ static __attribute__((noinline)) bool fast_cc_function_redeclarable(const FastCC
     {
         same = fast_cc_types_redeclarable(cc, old->type, type);
     }
-    return (mixed | (new_static & (old_static ^ 1u)) | inline_external) == 0 && same;
+    return (mixed | (new_static & (old_static ^ 1u))) == 0 && same;
 }
 
 static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym_idx, uint32_t param_names_start, uint16_t param_count)
@@ -8905,11 +8903,16 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                 FastDeclaratorResult dr = { 0 };
                 if (!fast_cc_parse_declarator(cc, btype, false, &dr, false)) { break; }
                 const uint32_t extra_al = ds.attr.aligned > dr.attr.aligned ? ds.attr.aligned : dr.attr.aligned;
-                // #3577: a block's function or extern declaration names a file-scope entity the full pipeline checks
-                // against the file's; inline and _Noreturn belong to functions; and the attributes must be the kind's.
-                if ((ds.is_extern | ds.is_inline | ds.is_noreturn) != 0)
+                // #3577: inline and _Noreturn belong to file-scope functions, and a visibility on a typedef is the full
+                // pipeline's warning (#3595); the attributes must be the kind's.
+                if ((ds.is_inline | ds.is_noreturn) != 0)
                 {
-                    fast_cc_bail(cc, "block-scope extern, inline or _Noreturn declaration");
+                    fast_cc_bail(cc, "block-scope inline or _Noreturn declaration");
+                    break;
+                }
+                if (ds.is_typedef && (ds.attr.visibility_set || dr.attr.visibility_set))
+                {
+                    fast_cc_bail(cc, "visibility attribute on a typedef");
                     break;
                 }
                 if ((ds.attr.present | dr.attr.present) != 0)
@@ -8948,14 +8951,35 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                         }
                     }
                 }
-                else if (ftype_is_func(dr.type))
+                else if (ftype_is_func(dr.type) || ds.is_extern)
                 {
-                    fast_cc_bail(cc, "block-scope function declaration");
-                    break;
+                    // A block's declaration of a function or an extern object names the entity of the file-scope
+                    // declaration it sees, with that one's linkage and attributes (C11 6.2.2p4), so it binds no symbol
+                    // of its own (#3595). One that sees none (the file declares it later or never: symbol 0, of no
+                    // kind), or that a local of the name hides, or that brings attributes of its own, is left to the
+                    // full pipeline. (An asm label never gets here: a body's statements leave at its __asm__.) #3577:
+                    // so is one whose type the full pipeline checks against the file's and refuses.
+                    const uint32_t seen = dr.name_id < cc->env_cap ? cc->sym_cur[dr.name_id] : 0u;
+                    const uint8_t kind = ftype_is_func(dr.type) ? (uint8_t)FSYM_FUNC : (uint8_t)FSYM_GLOBAL;
+                    if (dr.name_id == 0 || cc->syms[seen].kind != kind || (kind == FSYM_GLOBAL && cc->syms[seen].storage == 1u) ||
+                        ds.is_static || ds.attr.present || dr.attr.present ||
+                        (kind == FSYM_FUNC && !fast_cc_function_redeclarable(cc, cc->syms + seen, dr.type, 2u)) ||
+                        (kind == FSYM_GLOBAL && !fast_cc_types_redeclarable(cc, cc->syms[seen].type, dr.type)))
+                    {
+                        fast_cc_bail(cc, "a block's declaration of a function or extern object");
+                        break;
+                    }
                 }
                 else if (ds.is_static)
                 {
                     // Local `static` variable: unique internal STB_LOCAL symbol in .rodata / .data / .data.rel.ro / .bss!
+                    // #3577: a modifiable one in an inline definition the unit's end decides (C99's plain one, GNU's extern
+                    // one, which the full pipeline may leave to another unit) is its -Wstatic-local-in-inline.
+                    if ((uint32_t)((cc->syms[cc->cur_func_sym].inline_rules & BUSTER_FINLINE_PENDING) != 0) & (uint32_t)!ftype_is_const(dr.type))
+                    {
+                        fast_cc_bail(cc, "a modifiable static local in an inline definition");
+                        break;
+                    }
                     // #3577: an object of incomplete type is the full pipeline's error.
                     if (BUSTER_FAST_OBJECT_INCOMPLETE(cc, dr.type, fast_cc_peek(cc) == FTOK_ASSIGN) != 0) { fast_cc_bail(cc, "object of incomplete type"); break; }
                     char sname[96];
@@ -9127,6 +9151,26 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
     cc->scratch->used = scratch_mark;
 }
 
+// #3577: whether the tokens of a body, [start, end), name a function or an object with internal linkage as the file sees
+// it where the body begins: an inline definition with external linkage that uses one is the full pipeline's
+// -Wstatic-in-inline (a static inline function aside, which it calls quietly). By the tokens: a parameter, a local or a
+// member of such a name refuses the definition too, and so does one the main file defines, which the full pipeline
+// shows nothing for.
+static __attribute__((cold, noinline)) bool fast_cc_body_names_internal(const FastCCState* cc, uint32_t start, uint32_t end)
+{
+    bool named = false;
+    for (uint32_t at = start; at < end && !named; at += 1u)
+    {
+        if (cc->tk[at] == FTOK_IDENT)
+        {
+            const uint32_t id = cc->td[at];
+            const FastSym* sym = cc->syms + (id < cc->env_cap ? cc->sym_cur[id] : 0u);
+            named = (sym->kind == FSYM_FUNC || sym->kind == FSYM_GLOBAL) && sym->storage == 1u;
+        }
+    }
+    return named;
+}
+
 // #3577: checks an inline function's body where it is defined, as the full pipeline does: in the scope there (a
 // declaration later in the unit isn't visible to it yet), and whether or not anything uses the function. The check
 // compiles the body, and then drops what the compile added: the object's code, data, relocations, unwind records and
@@ -9174,6 +9218,91 @@ static __attribute__((noinline)) void fast_cc_check_body(FastCCState* cc, uint32
 // ---------------------------------------------------------------------------------------------------------------------
 // Level 14: Translation unit driver (file-scope decls, deferred static inline fixed-point, tentative .bss!)
 
+// What a file-scope declaration gives its symbol beside its type (#3595): weak, an explicit visibility (the declarator's
+// over its specifiers', as the later one), an asm label, and its inline spelling (BUSTER_FINLINE_*).
+typedef struct FastDeclJoin FastDeclJoin;
+struct FastDeclJoin
+{
+    const char* label;
+    uint32_t label_len;
+    uint8_t visibility;
+    uint8_t visibility_set;
+    uint8_t weak;
+    uint8_t inline_rules;
+};
+
+static FastDeclJoin fast_cc_decl_join(const FastDeclSpecs* ds, const FastDeclaratorResult* dr, bool function, bool body)
+{
+    uint8_t rules = 0;
+    if (function)
+    {
+        rules |= (ds->attr.gnu_inline || dr->attr.gnu_inline) ? BUSTER_FINLINE_GNU : 0u;
+        rules |= (ds->is_inline && !ds->is_extern) ? BUSTER_FINLINE_PLAIN : 0u;
+        rules |= (!body && (!ds->is_inline || ds->is_extern)) ? BUSTER_FINLINE_EXTERNAL : 0u;
+    }
+    return (FastDeclJoin){
+        .label = dr->attr.asm_label,
+        .label_len = dr->attr.asm_label_len,
+        .visibility = dr->attr.visibility_set ? dr->attr.visibility : ds->attr.visibility,
+        .visibility_set = (ds->attr.visibility_set || dr->attr.visibility_set) ? 1u : 0u,
+        .weak = (ds->attr.weak || dr->attr.weak) ? 1u : 0u,
+        .inline_rules = rules,
+    };
+}
+
+// A later file-scope declaration of a symbol joins its weak, visibility, asm label and inline spelling, as the full
+// pipeline's does (#3595). Two explicit visibilities or two labels that differ are clang's error; a change to a symbol
+// already in the object (used or defined before this declaration) is left to the full pipeline, whose rule differs by
+// attribute (a function's first linkage stays, its visibility doesn't); and so is a gnu_inline after a pending inline
+// definition, whose rule it would change.
+static void fast_cc_join_declaration(FastCCState* cc, uint32_t si, const FastDeclJoin* join)
+{
+    FastSym* sym = cc->syms + si;
+    const bool relabels = join->label != NULL && (sym->asm_name == NULL || sym->asm_name_len != join->label_len ||
+                                                  memcmp(sym->asm_name, join->label, join->label_len) != 0);
+    const bool revisits = join->visibility_set != 0 && join->visibility != sym->visibility;
+    const bool changes = relabels || revisits || (join->weak != 0 && sym->is_weak == 0);
+    if ((revisits && sym->visibility_set != 0) || (relabels && sym->asm_name != NULL))
+    {
+        fast_cc_bail(cc, "a declaration's visibility or label against an earlier one");
+    }
+    else if (changes && sym->obj_sym != 0)
+    {
+        fast_cc_bail(cc, "an attribute after the symbol's first use");
+    }
+    else if ((join->inline_rules & BUSTER_FINLINE_GNU) != 0 && (sym->inline_rules & (BUSTER_FINLINE_GNU | BUSTER_FINLINE_PENDING)) == BUSTER_FINLINE_C99_PENDING)
+    {
+        fast_cc_bail(cc, "gnu_inline after an inline definition");
+    }
+    else
+    {
+        sym->is_weak |= join->weak;
+        sym->visibility = join->visibility_set != 0 ? join->visibility : sym->visibility;
+        sym->visibility_set |= join->visibility_set;
+        sym->asm_name = join->label != NULL ? join->label : sym->asm_name;
+        sym->asm_name_len = join->label != NULL ? join->label_len : sym->asm_name_len;
+        sym->inline_rules |= join->inline_rules;
+    }
+}
+
+// At the unit's end, C99's and GNU's inline definitions (#3595): one is emitted where the unit's declarations make it
+// external, whether or not it is referenced, and otherwise not at all, its references the external function's. GNU's
+// extern inline one beside the function's ordinary definition (its idiom) stays out: the bodies' visit skips a
+// defined function, as the full pipeline keeps the ordinary one.
+static void fast_cc_decide_inline_definitions(FastCCState* cc, uint32_t deferred_count)
+{
+    for (uint32_t i = 0; i < deferred_count; i += 1)
+    {
+        const uint8_t rules = cc->syms[cc->deferred[i].sym_idx].inline_rules;
+        const bool external = ((rules & BUSTER_FINLINE_C99_PENDING) != 0 && (rules & BUSTER_FINLINE_EXTERNAL) != 0) ||
+                              ((rules & BUSTER_FINLINE_GNU_PENDING) != 0 && (rules & BUSTER_FINLINE_PLAIN) != 0);
+        if (external)
+        {
+            fast_cc_ready_task(cc, i);
+        }
+    }
+}
+
 static bool fast_cc_compile_unit(FastCCState* cc)
 {
     FastObj* obj = cc->obj;
@@ -9216,10 +9345,9 @@ static bool fast_cc_compile_unit(FastCCState* cc)
             const uint32_t ctypes_before = cc->ctype_count;
             if (!fast_cc_parse_declarator(cc, btype, false, &dr, first)) { break; }
             const uint32_t extra_al = ds.attr.aligned > dr.attr.aligned ? ds.attr.aligned : dr.attr.aligned;
-            const uint8_t vis = dr.attr.visibility != 0 ? dr.attr.visibility : ds.attr.visibility;
-            const uint8_t is_wk = (ds.attr.weak || dr.attr.weak) ? 1u : 0u;
             const bool is_func = ftype_is_func(dr.type);
             const bool is_def = first && is_func && fast_cc_peek(cc) == FTOK_LBRACE;
+            const FastDeclJoin join = fast_cc_decl_join(&ds, &dr, is_func, is_def);
             // #3577: inline and _Noreturn belong to functions, and a _Noreturn body is the full pipeline's to check
             // (-Winvalid-noreturn); the attributes, where there are any, must be the declared kind's.
             if (((uint32_t)(ds.is_inline | ds.is_noreturn) &
@@ -9261,7 +9389,12 @@ static bool fast_cc_compile_unit(FastCCState* cc)
                 uint32_t si = (dr.name_id < cc->env_cap) ? cc->sym_cur[dr.name_id] : 0u;
                 if (si != 0 && cc->syms[si].kind == FSYM_FUNC)
                 {
-                    if (cc->syms[si].defined != 0)
+                    // A pending inline definition allows a later one only as GNU's idiom: its extern inline one,
+                    // then the external definition, not inline (#3595). (The extern inline body was checked where it
+                    // was defined, which leaves its symbol defined, not emitted: 2, #3577.)
+                    const uint8_t pending = cc->syms[si].inline_rules & BUSTER_FINLINE_PENDING;
+                    const bool gnu_idiom = pending == BUSTER_FINLINE_GNU_PENDING && !ds.is_inline;
+                    if (cc->syms[si].defined == 1u || ((uint32_t)(cc->syms[si].defined | pending) != 0 && !gnu_idiom))
                     {
                         fast_cc_bail(cc, "redefinition of function");
                         break;
@@ -9279,33 +9412,46 @@ static bool fast_cc_compile_unit(FastCCState* cc)
                     cc->ctypes[dr.type & BUSTER_FTYPE_CIDX_MASK].tag_ident |= cc->ctypes[cc->syms[si].type & BUSTER_FTYPE_CIDX_MASK].tag_ident;
                     cc->syms[si].type = dr.type;
                     if (stor == 1u || stor == 4u) { cc->syms[si].storage = stor; }
-                    if (is_wk) { cc->syms[si].is_weak = 1u; }
-                    if (vis != 0) { cc->syms[si].visibility = vis; }
                     cc->syms[si].use_flags |= use_flags;
+                    fast_cc_join_declaration(cc, si, &join);
+                    if (cc->bailout) { break; }
                 }
                 else
                 {
                     si = fast_cc_sym_bind(cc, dr.name_id, (FastSym){
-                        .kind = FSYM_FUNC, .storage = stor, .is_weak = is_wk, .visibility = vis,
+                        .kind = FSYM_FUNC, .storage = stor, .is_weak = join.weak, .visibility = join.visibility,
+                        .visibility_set = join.visibility_set, .inline_rules = join.inline_rules,
                         .use_flags = use_flags, .type = dr.type,
                         .asm_name = dr.attr.asm_label, .asm_name_len = dr.attr.asm_label_len,
                     });
                     if (cc->bailout) { break; }
                 }
 
-                // #3577: a C99 inline definition of external linkage (`inline`, neither `static` nor `extern`, nor an
-                // earlier `static`) is the unit's external definition only where another declaration in it makes it one;
-                // else the full pipeline's calls name the external symbol, which its object doesn't define. Refused.
-                if ((uint32_t)(stor == 3u) & (uint32_t)(cc->syms[si].storage != 1u) & (uint32_t)(cc->syms[si].storage != 4u))
+                // An inline definition with external linkage is C99's or GNU's (#3595): GNU's extern inline one and
+                // C99's plain one wait for the unit's end, which decides whether either is emitted; GNU's plain one and
+                // C99's extern one are external definitions, emitted here. With internal linkage (static, or a static
+                // declaration before it), an inline body waits for its first reference, so that unused helpers emit
+                // nothing. #3577: a body that waits is checked here (fast_cc_check_body), in the scope it has here,
+                // whether it is emitted or not.
+                const uint8_t storage = cc->syms[si].storage;
+                const bool internal = storage == 1u || storage == 4u;
+                const bool gnu = (cc->syms[si].inline_rules & BUSTER_FINLINE_GNU) != 0;
+                const uint8_t decide = !ds.is_inline || internal ? 0u :
+                                       gnu && ds.is_extern ? (uint8_t)BUSTER_FINLINE_GNU_PENDING :
+                                       !gnu && !ds.is_extern ? (uint8_t)BUSTER_FINLINE_C99_PENDING : 0u;
+                cc->syms[si].inline_rules |= decide;
+                // #3577: an inline definition with external linkage that names a static function or object is the full
+                // pipeline's -Wstatic-in-inline (fast_cc_body_names_internal).
+                if (ds.is_inline && !internal)
                 {
-                    fast_cc_bail(cc, "inline definition of external linkage");
-                    break;
+                    const FastBodyScan named = fast_cc_prescan_body(cc, cc->pos);
+                    if (named.end_pos == UINT32_MAX || fast_cc_body_names_internal(cc, cc->pos, named.end_pos))
+                    {
+                        fast_cc_bail(cc, "an inline definition with external linkage that names a static declaration");
+                        break;
+                    }
                 }
-                // An inline function an included file defines is deferred: compiled at the unit's end where something
-                // references it, so that a header's unused helpers emit nothing. #3577: one the main file defines is
-                // compiled here, as any other function there is; and a deferred one is checked here (fast_cc_check_body),
-                // in the scope it has here, whether used or not.
-                if ((stor == 4u || stor == 3u) && !fast_pp_token_in_main(cc->pp, cc->pos))
+                if ((ds.is_inline && internal) || decide != 0)
                 {
                     const FastBodyScan bscan = fast_cc_prescan_body(cc, cc->pos);
                     if (bscan.end_pos == UINT32_MAX) { fast_cc_bail(cc, "unclosed inline body"); break; }
@@ -9316,7 +9462,7 @@ static bool fast_cc_compile_unit(FastCCState* cc)
                             .param_names_start = dr.param_names_start, .param_count = dr.param_count,
                             .previous_task = cc->syms[si].deferred_task,
                         };
-                        if (cc->syms[si].referenced == 1u) { fast_cc_ready_task(cc, deferred_count); }
+                        if (cc->syms[si].referenced == 1u && decide == 0) { fast_cc_ready_task(cc, deferred_count); }
                         cc->syms[si].deferred_task = (uint16_t)(++deferred_count);
                     }
                     else { fast_cc_bail(cc, "too many inline functions"); break; }
@@ -9335,7 +9481,12 @@ static bool fast_cc_compile_unit(FastCCState* cc)
             }
             first = false;
 
-            // Typedef
+            // Typedef (a visibility on one is the full pipeline's warning, #3595)
+            if (ds.is_typedef && (ds.attr.visibility_set || dr.attr.visibility_set))
+            {
+                fast_cc_bail(cc, "visibility attribute on a typedef");
+                break;
+            }
             if (ds.is_typedef)
             {
                 if (dr.name_id != 0)
@@ -9397,21 +9548,18 @@ static bool fast_cc_compile_unit(FastCCState* cc)
                         {
                             cc->syms[existing].type = dr.type;
                         }
-                        if (dr.attr.asm_label != NULL)
-                        {
-                            cc->syms[existing].asm_name = dr.attr.asm_label;
-                            cc->syms[existing].asm_name_len = dr.attr.asm_label_len;
-                        }
                         // #3577: a later declaration's weak makes the symbol weak (the unit's end refuses one with
-                        // internal linkage).
-                        cc->syms[existing].is_weak |= is_wk;
+                        // internal linkage); its visibility and label join as #3595's.
+                        fast_cc_join_declaration(cc, existing, &join);
+                        if (cc->bailout) { break; }
                         cc->syms[existing].use_flags |= use_flags;
                     }
                     else
                     {
                         const uint8_t stor = ds.is_static ? 1u : 2u;
                         fast_cc_sym_bind(cc, dr.name_id, (FastSym){
-                            .kind = FSYM_FUNC, .storage = stor, .is_weak = is_wk, .visibility = vis,
+                            .kind = FSYM_FUNC, .storage = stor, .is_weak = join.weak, .visibility = join.visibility,
+                            .visibility_set = join.visibility_set, .inline_rules = join.inline_rules,
                             .use_flags = use_flags, .type = dr.type,
                             .asm_name = dr.attr.asm_label, .asm_name_len = dr.attr.asm_label_len,
                         });
@@ -9447,15 +9595,15 @@ static bool fast_cc_compile_unit(FastCCState* cc)
                         cc->syms[si].type = dr.type;
                     }
                     if (stor == 1u) { cc->syms[si].storage = 1u; }
-                    if (is_wk) { cc->syms[si].is_weak = 1u; }
-                    if (vis != 0) { cc->syms[si].visibility = vis; }
-                    if (dr.attr.asm_label != NULL) { cc->syms[si].asm_name = dr.attr.asm_label; cc->syms[si].asm_name_len = dr.attr.asm_label_len; }
                     cc->syms[si].use_flags |= use_flags;
+                    fast_cc_join_declaration(cc, si, &join);
+                    if (cc->bailout) { break; }
                 }
                 else
                 {
                     si = fast_cc_sym_bind(cc, dr.name_id, (FastSym){
-                        .kind = FSYM_GLOBAL, .storage = stor, .is_weak = is_wk, .visibility = vis,
+                        .kind = FSYM_GLOBAL, .storage = stor, .is_weak = join.weak, .visibility = join.visibility,
+                        .visibility_set = join.visibility_set,
                         .is_const_var = (ds.is_const || ftype_is_const(dr.type)) ? 1u : 0u,
                         .use_flags = use_flags, .type = dr.type,
                         .asm_name = dr.attr.asm_label, .asm_name_len = dr.attr.asm_label_len,
@@ -9505,6 +9653,8 @@ static bool fast_cc_compile_unit(FastCCState* cc)
         else if (!ended_by_body) { fast_cc_bail(cc, "expected ; after top-level declaration"); break; }
         if (cc->pos == tu_loop_pos && !cc->bailout) { fast_cc_bail(cc, "top-level decl stalled"); break; }
     }
+
+    fast_cc_decide_inline_definitions(cc, deferred_count);
 
     // Visit newly reachable bodies in the same order as a forward scan: a reference to an earlier
     // definition waits until the scan wraps. This preserves .text, symbol and relocation order.

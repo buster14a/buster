@@ -260,12 +260,15 @@ checks are written for [the compile's count](ci.md#the-compiles-count-before-the
 comparisons combined bitwise with one rarely taken branch, cold functions for
 the rare cases, macros where a helper's entry would count at every use.
 
-An inline function the main file defines is compiled where it is defined, as
-any other function there is. One an included file defines is checked there,
-in the scope it has there (a later declaration isn't visible to it), its code
-dropped, and compiled again at the unit's end only where something references
-it, so a header's unused helpers emit nothing. A C99 inline definition of
-external linkage is the full pipeline's.
+An inline function's body is checked where it is defined, in the scope it has
+there (a later declaration isn't visible to it), its code dropped. One with
+internal linkage is compiled again at the unit's end only where something
+references it, so unused helpers emit nothing; C99's and GNU's inline
+definitions with external linkage are emitted as the unit's end decides from
+all the function's declarations (#3595). Such a definition that names a static
+function or object (`-Wstatic-in-inline`), or that the unit's end decides and
+declares a modifiable static local (`-Wstatic-local-in-inline`), is the full
+pipeline's.
 
 `./build/compiler test-direct --differential [--jobs N] [--direct-floor N]
 DIRECTORY...` compiles every C file under the directories with this
@@ -276,8 +279,8 @@ same bytes, standard output and errors together; the first 20 differences
 print each run's first line that differs. A file is the direct path's where
 its default run exited 0 without a line in its bail log, and fewer such files
 than `--direct-floor` fail the run, as the comparison would leave the direct
-path out. CI runs it on `tests/` with a floor of 260 (278 of 4,578 files on
-2026-11-25, 9.5 s on 4 CPUs in a Release build), in the sanitizer rows too,
+path out. CI runs it on `tests/` with a floor of 260 (282 of 4,578 files on
+2026-11-25, 9.2 s on 4 CPUs in a Release build), in the sanitizer rows too,
 where a sanitizer's report in one run is a difference.
 
 ## Build-system integration (#1113)
