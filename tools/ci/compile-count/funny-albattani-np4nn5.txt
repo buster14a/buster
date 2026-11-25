@@ -1,0 +1,1 @@
+-0.53 the specifier loops ask each token for a storage class by one bit where five comparisons were (#3599), less step 4's declarator and main checks (#3592)

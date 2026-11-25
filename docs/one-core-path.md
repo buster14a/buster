@@ -4298,6 +4298,17 @@ single-TU `-c` C17/C23 object builds directly from `mmap`'d source bytes to an E
   - `, ## __VA_ARGS__` keeps its comma, unless the variadic argument is left out, or the macro's only parameter is
     variadic outside a strict mode;
   - a strict mode leaves on a `main` that doesn't return `int`.
+- **A declaration's specifiers (#3599):** a declaration without a type specifier leaves. That is implicit int, which
+  C99 refused, or C23's `auto` or GNU's `__auto_type`, whose type is the initializer's. So do:
+  - two storage classes, or one written twice (`fast_cc_storage_class`);
+  - `register` or `auto` at file scope;
+  - a parameter's storage class other than `register`, and a member's or a type name's;
+  - a `for`'s `static`, `extern` or `typedef` declaration;
+  - `inline` or `_Noreturn` on anything but a function.
+
+  At main `f74b0b28` each compiled. Under `-std=c23` `auto x = 1.5;` was an `int`; `for (static int i = 0; …)` made
+  `i` automatic; `__auto_type` after `_Alignas` compiled wrongly; and `__private_extern__ int x;` declared an `int`
+  named `__private_extern__`, then a default `x` where the full pipeline's is hidden.
 - **Fail-closed fallback (`--no-direct` / `BUSTER_NO_DIRECT`):** any diagnostic, warning-sensitive construct, or
   unsupported flag/extension bails out silently without writing output so `c_checker_driver.c` runs the full pipeline.
 

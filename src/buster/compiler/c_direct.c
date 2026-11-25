@@ -1868,6 +1868,80 @@ static bool c_direct_test_aliases(const char* obj_path)
     return ok;
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// A declaration's specifiers that the direct path doesn't take (#3599)
+
+// A declaration without a type specifier is implicit int, which C99 refused, or C23's auto, whose type is its
+// initializer's; two storage classes, or one where none may stand, are refused or warned of; a for's static, extern or
+// typedef declaration declares no automatic object. Each leaves the direct path. What C17 and C23 take stays on it.
+static bool c_direct_test_specifiers(const char* obj_path)
+{
+    static const char* const leaves[] = {
+        "int f(void) { auto x = 1.5; return (int)x; }\n",
+        "static auto z = 2.5;\n",
+        "int f(void) { const x = 3; return x; }\n",
+        "static y = 4;\n",
+        "int f(a, b);\n",
+        "int g(void) { register static int z = 1; return z; }\n",
+        "static extern int u;\n",
+        "extern static int u;\n",
+        "typedef static int T;\n",
+        "int h(void) { auto static int s = 1; return s; }\n",
+        "static static int x;\n",
+        "register int w;\n",
+        "auto int v;\n",
+        "void k(static int p) { }\n",
+        "void k(auto int p) { }\n",
+        "void k(inline int p) { }\n",
+        "void k(_Noreturn int p) { }\n",
+        "void k(typedef int p) { }\n",
+        "void k(void (*cb)(static int)) { }\n",
+        "struct S { static int m; };\n",
+        "struct S { register int m; };\n",
+        "int f(void) { return sizeof(static int); }\n",
+        "int f(void) { for (static int i = 0; i < 2; i++) {} return 0; }\n",
+        "int f(void) { for (extern int i; ;) {} return 0; }\n",
+        "int f(void) { for (typedef int T; ;) {} return 0; }\n",
+        "int f(void) { inline int x = 0; return x; }\n",
+        "inline int g;\n",
+        "_Noreturn int h;\n",
+        "typedef inline int T;\n",
+        "typedef inline void F(void);\n",
+        "int f(void) { typedef _Noreturn void G(void); return 0; }\n",
+    };
+    static const char kept[] =
+        "int e;\n"
+        "void k(register int p) { (void)p; }\n"
+        "int f1(void) { int n = 0; for (register int i = 0; i < 2; i++) { n += i; } for (auto int j = 0; j < 2; j++) { n += j; } return n; }\n"
+        "int f2(void) { auto int x = 1; register long y = 2; static int z; extern int e; typedef int T; T t = 0; return x + (int)y + z + t + e; }\n"
+        "static inline int g(void) { return 1; }\n"
+        "_Noreturn void die(void);\n"
+        "typedef unsigned T2;\n"
+        "signed s;\n"
+        "unsigned u;\n"
+        "short sh;\n"
+        "long long ll;\n"
+        "int f3(void) { signed a = 1; unsigned b = 2; const long c = 3; return a + (int)b + (int)c + g(); }\n"
+        "struct S2 { unsigned : 3; int m; };\n"
+        "int f4(void) { return (int)sizeof(const int); }\n"
+        "void cb_user(void (*cb)(register int));\n"
+        "__extension__ typedef unsigned long long U64;\n";
+    bool ok = true;
+    for (uint32_t i = 0; ok && i < (uint32_t)(sizeof(leaves) / sizeof(leaves[0])); i += 1)
+    {
+        ok = c_direct_test_compile_source(leaves[i], obj_path, 1, NULL, NULL);
+        if (!ok)
+        {
+            fprintf(stderr, "test-direct: a declaration's specifiers the direct path took: %s", leaves[i]);
+        }
+    }
+    const CDirectTestMode c23 = { .c23 = true };
+    ok = ok && c_direct_test_compile_mode("int f(void) { auto x = 1.5; return (int)(x * 2); }\n", obj_path, 1, NULL, NULL, c23) &&
+         c_direct_test_compile_mode("static auto z = 2.5;\n", obj_path, 1, NULL, NULL, c23) &&
+         c_direct_test_compile_source(kept, obj_path, 0, NULL, NULL) && c_direct_test_compile_mode(kept, obj_path, 0, NULL, NULL, c23);
+    return ok;
+}
+
 int run_c_direct_tests(int argc, char** argv)
 {
     (void)argc;
@@ -2082,6 +2156,16 @@ int run_c_direct_tests(int argc, char** argv)
     else
     {
         fprintf(stderr, "test-direct: FAIL aliases and typeof\n");
+        failed += 1u;
+    }
+
+    if (c_direct_test_specifiers(obj_path))
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL a declaration's specifiers\n");
         failed += 1u;
     }
 
