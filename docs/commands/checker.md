@@ -89,7 +89,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   [--lazy-system-headers | --cpu-dispatch-only | --pic-only | --stack-protector-only | --cf-protection-only | --visibility-only |
   --target-versions-only | --type-sugar-only |
   --asm-definitions-only | --call-counts-only | --fp-contract-only | --imaginary-bit-int-only | --operand-diagnostics-only | --label-attributes-only |
-  --attribute-recovery-only | --initializer-diagnostics-only | --malformed-calls-only | --string-plus-only | --assert-bool-only | --assert-diagnostics-only | --query-bool-only | --constant-logical-only | --unused-comparison-only |
+  --attribute-recovery-only | --initializer-diagnostics-only | --malformed-calls-only | --string-plus-only | --assert-bool-only | --assert-diagnostics-only | --query-bool-only | --constant-logical-only | --quiet-roots-only | --unused-comparison-only |
   --float-precision-only | --reach-filter-only | --branch-truth-only |
   --record-extensions-only | --auto-qualifiers-only |
   --run-modes-only | --common-warnings-only] [--in-process] [--clang-server PATH]
@@ -199,6 +199,15 @@ unused-warning fixtures also check exact scope-completion tokens.
   shared warning-policy, reader and requested-lane matrix. A separate safety
   fixture checks assertion errors, diagnostic counts and preserved output for
   complex attributed forms that deliberately retain their source spelling.
+  `--quiet-roots-only` runs `-Wunsequenced`'s fixtures and the quiet roots' checks (#1340,
+  `c_check_quiet_roots_driver_test.c`, [the design](../c-checker.md#the-quiet-roots-1340)): the common warnings' loop
+  leaves out the roots its classes call quiet, and `BUSTER_TEST_DEFAULT_PATH_LOG` visits every root all the same. A
+  unit of each kind of root, with frozen counts of its roots and its quiet ones and clang's diagnostics, and 48
+  generated units compile both ways to the same diagnostics, in the same order, and the same object, with no quiet
+  root's visit that acted; the unit and every other generated unit also behind a filler table of 8,400 tokens, past
+  which the reader leaves the statements' discard wrappers out. The
+  warning sweeps hold every fixture's compile with the switch to clang and to its own object the same way, and
+  `test-checker-driver` prints the sweeps' roots and quiet roots.
   `--constant-logical-only` runs the original `constant_logical_*.c` sources for
   `-Wconstant-logical-operand` (#2900). The standalone group is on by default.
   Integer logical operators warn for independently constant right operands other

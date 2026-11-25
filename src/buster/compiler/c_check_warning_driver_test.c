@@ -63,6 +63,42 @@ static bool check_test_driver_warning_text_matches(const char* actual, const cha
     return match;
 }
 
+// #1340's quiet roots (c_check_quiet_roots_driver_test.c): the counts of the log's lines of their rule, summed; false where
+// a line of them doesn't parse or the log has none. With `one_command`, the log is one command's, which writes one line,
+// or two alike where --differential runs it in this process and as a child too (#2071): the counts are that line's, and
+// lines that differ are false.
+static bool check_test_driver_quiet_roots_counts(const char* log, bool one_command, uint64_t* roots, uint64_t* quiet, uint64_t* acted)
+{
+    *roots = 0;
+    *quiet = 0;
+    *acted = 0;
+    FILE* file = fopen(log, "rb");
+    bool valid = file != NULL;
+    uint32_t lines = 0;
+    char line[512];
+    while (valid && fgets(line, sizeof(line), file) != NULL)
+    {
+        unsigned long long line_roots = 0;
+        unsigned long long line_quiet = 0;
+        unsigned long long line_acted = 0;
+        if (strncmp(line, "default-path: roots=", 20) == 0)
+        {
+            valid = sscanf(line, "default-path: roots=%llu of-them-quiet=%llu of-them-a-visit-that-acted=%llu", &line_roots, &line_quiet, &line_acted) == 3;
+            const bool repeated = one_command && lines != 0;
+            valid &= !repeated || (*roots == line_roots && *quiet == line_quiet && *acted == line_acted);
+            *roots = repeated ? *roots : *roots + line_roots;
+            *quiet = repeated ? *quiet : *quiet + line_quiet;
+            *acted = repeated ? *acted : *acted + line_acted;
+            lines += 1;
+        }
+    }
+    if (file != NULL)
+    {
+        fclose(file);
+    }
+    return valid && lines != 0;
+}
+
 // A warning sweep of `fixtures`. With `deal`, it is a long sweep (test-checker-driver --part, check_test_driver_takes):
 // each fixture is a unit of its own, which the caller doesn't deal; without it, the sweep is its caller's unit.
 static void check_test_driver_warning_fixtures_dealt(CheckTest* test, const char* clang, const char* executable, const char* directory,
@@ -73,8 +109,17 @@ static void check_test_driver_warning_fixtures_dealt(CheckTest* test, const char
     // test-checker-driver reports this sweep's time with each run mode (#2071, check_driver_run_modes).
     const uint64_t began = check_test_driver_nanoseconds();
     char source[PATH_MAX];
-    char objects[4][PATH_MAX];
+    char objects[5][PATH_MAX];
     snprintf(source, sizeof(source), "%s/default-warning.c", directory);
+    // #1340's quiet roots: each fixture's first compile again with the test's switch (BUSTER_TEST_DEFAULT_PATH_LOG), which
+    // visits every root of the common warnings' loop, held to clang's diagnostics and to the first compile's object as
+    // the others are; and the switch's counts over the sweep, of which no quiet root's visit acted
+    // (c_check_quiet_roots_driver_test.c). What the environment held of the switch is put back after each.
+    char visits[PATH_MAX];
+    snprintf(visits, sizeof(visits), "%s/default-warning-visits.log", directory);
+    const char* outer_visits = getenv("BUSTER_TEST_DEFAULT_PATH_LOG");
+    char* restored_visits = outer_visits != NULL ? strdup(outer_visits) : NULL;
+    bool visits_written = parse_test_write(visits, "", 0);
     for (uint32_t route = 0; route < BUSTER_ARRAY_LENGTH(objects); route += 1)
     {
         snprintf(objects[route], sizeof(objects[route]), "%s/default-warning-%u.o", directory, route);
@@ -130,22 +175,36 @@ static void check_test_driver_warning_fixtures_dealt(CheckTest* test, const char
                 for (uint32_t lane = 0; oracle_ready && lane < BUSTER_ARRAY_LENGTH(lanes); lane += 1)
                 {
                     const char* alternate = fixture->compare_node_window ? "--node-window-assignments" : "--scalar";
-                    for (uint32_t route = 0; route < 2; route += 1)
+                    const uint32_t routes = policy == 0 && lane == 0 && visits_written ? 3 : 2;
+                    for (uint32_t route = 0; route < routes; route += 1)
                     {
+                        const char* object = objects[route == 2 ? 4 : route];
                         arguments[0] = (char*)(executable != NULL ? executable : "/proc/self/exe");
-                        arguments[7] = objects[route];
+                        arguments[7] = (char*)object;
                         arguments[count] = "--lanes";
                         arguments[count + 1] = (char*)lanes[lane];
-                        arguments[count + 2] = route != 0 ? (char*)alternate : NULL;
+                        arguments[count + 2] = route == 1 ? (char*)alternate : NULL;
                         arguments[count + 3] = NULL;
-                        unlink(objects[route]);
+                        unlink(object);
                         static const char sentinel[] = "preserved-warning-output";
                         const bool preserve = mode != 0 && oracle == 1;
-                        const bool prior = !preserve || parse_test_write(objects[route], sentinel, sizeof(sentinel));
+                        const bool prior = !preserve || parse_test_write(object, sentinel, sizeof(sentinel));
                         char* actual = NULL;
+                        if (route == 2)
+                        {
+                            setenv("BUSTER_TEST_DEFAULT_PATH_LOG", visits, 1);
+                        }
                         const int status = check_test_driver_spawn(arguments, &actual);
+                        if (route == 2 && restored_visits != NULL)
+                        {
+                            setenv("BUSTER_TEST_DEFAULT_PATH_LOG", restored_visits, 1);
+                        }
+                        else if (route == 2)
+                        {
+                            unsetenv("BUSTER_TEST_DEFAULT_PATH_LOG");
+                        }
                         snprintf(description, sizeof(description), "%s policy=%u mode=%u lanes=%s %s: complete Clang diagnostics",
-                                 fixture->name, policy, mode, lanes[lane], route != 0 ? alternate : "default");
+                                 fixture->name, policy, mode, lanes[lane], route == 1 ? alternate : route == 2 ? "every root visited" : "default");
                         const char* expected_text = fixture->compare_warning_text ? strstr(expected, "warning: ") : NULL;
                         expected_text = fixture->compare_warning_text && expected_text == NULL ? strstr(expected, "error: ") : expected_text;
                         const char* actual_text = fixture->compare_warning_text && expected_text != NULL ?
@@ -178,7 +237,7 @@ static void check_test_driver_warning_fixtures_dealt(CheckTest* test, const char
                         }
                         if (preserve)
                         {
-                            FILE* retained = fopen(objects[route], "rb");
+                            FILE* retained = fopen(object, "rb");
                             char bytes[sizeof(sentinel)] = { 0 };
                             const bool unchanged = retained != NULL && fread(bytes, 1, sizeof(bytes), retained) == sizeof(bytes) &&
                                                    memcmp(bytes, sentinel, sizeof(bytes)) == 0 && fgetc(retained) == EOF;
@@ -190,7 +249,7 @@ static void check_test_driver_warning_fixtures_dealt(CheckTest* test, const char
                         }
                         else
                         {
-                            check_test_expect(test, (access(objects[route], F_OK) == 0) == (mode != 0 && status == 0),
+                            check_test_expect(test, (access(object, F_OK) == 0) == (mode != 0 && status == 0),
                                               "default warning policy controls object publication");
                         }
                         free(actual);
@@ -199,6 +258,11 @@ static void check_test_driver_warning_fixtures_dealt(CheckTest* test, const char
                     {
                         check_test_expect(test, check_test_driver_same_files(objects[0], objects[1]),
                                           "default warning source has identical objects through both routes at each lane request");
+                        if (routes == 3)
+                        {
+                            check_test_expect(test, check_test_driver_same_files(objects[0], objects[4]),
+                                              "default warning source has an identical object with every root visited");
+                        }
                         if (lane == 0)
                         {
                             check_test_expect(test, link(objects[0], objects[3]) == 0, "the first lane request retains a frozen object twin");
@@ -219,6 +283,20 @@ static void check_test_driver_warning_fixtures_dealt(CheckTest* test, const char
         }
     }
     unlink(source);
+    uint64_t visited_roots = 0;
+    uint64_t visited_quiet = 0;
+    uint64_t visited_acted = 0;
+    visits_written = visits_written && (swept == 0 || check_test_driver_quiet_roots_counts(visits, false, &visited_roots, &visited_quiet, &visited_acted));
+    check_test_expect(test, visits_written && visited_acted == 0, "over the sweep's fixtures no quiet root's visit acted");
+    if (!visits_written || visited_acted != 0)
+    {
+        fprintf(stderr, "test-checker-driver: quiet-roots: the warning sweep: roots %llu, quiet %llu, acted %llu\n", (unsigned long long)visited_roots,
+                (unsigned long long)visited_quiet, (unsigned long long)visited_acted);
+    }
+    check_driver_run_modes.sweep_roots += visited_roots;
+    check_driver_run_modes.sweep_quiet_roots += visited_quiet;
+    free(restored_visits);
+    unlink(visits);
     check_driver_run_modes.sweep_fixtures += swept;
     check_driver_run_modes.sweep_nanoseconds += check_test_driver_nanoseconds() - began;
 }

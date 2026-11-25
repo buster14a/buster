@@ -4201,6 +4201,9 @@ Three cuts were specified, built and paired, a commit each, and one is kept.
   (`check_warning_logical_boolean`, [`c-checker.md`](c-checker.md)): the warning is of an integer constant that is
   neither. `BUSTER_TEST_DEFAULT_PATH_LOG=FILE` is the tests' switch for it: the operand is replayed all the same, and
   the command writes a line to the file of how many, and of them how many give the warning's event or make a type.
+  The same switch is the quiet roots' ([#1340](https://github.com/buster14a/buster/issues/1340),
+  [`c-checker.md`](c-checker.md#the-quiet-roots-1340)): every root of the common warnings' loop is visited all the
+  same, and a second line counts the roots, the quiet ones and those of the quiet whose visit acted.
 - **R2, reverted.** The CFG's equality and relational checks asking first whether an operand is a literal with a `&`, a
   `|` or a boolean value beside it, before they work out the operands' common type: 19,134 of the 21,081 comparisons
   answered without it, and 1.7 M instructions of 1,276 fewer.
