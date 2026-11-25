@@ -3935,6 +3935,15 @@ static int c_direct_unit_tests(void)
         "    if (a) n += 4; else if (b) n += 5; else n -= 5;\n"
         "    return n;\n"
         "}\n",
+        // 8. Comparisons -Wtautological-compare and -Wstring-compare leave alone (#3577): two places alike but not one path
+        // (another pointer's member, a union's other member, a sum), a float with itself, a string literal inside sizeof,
+        // a pointer sum against another pointer.
+        "struct S { int a; };\nunion U { int i; int j; };\n"
+        "int compared(struct S* p, struct S* q, union U u, int x, double d, const char* cp, int* ip, int* end, unsigned n) {\n"
+        "    int r = (p->a == q->a) + (u.i == u.j) + (x == x + 1) + (x + 1 == x) + (d == d);\n"
+        "    r += (int)sizeof(x == x) + (int)sizeof(\"a\" == cp) + (ip + n < end) + (p->a < q->a);\n"
+        "    return r + (cp != 0);\n"
+        "}\n",
     };
 
     for (uint32_t i = 0; i < sizeof(valid_cases) / sizeof(valid_cases[0]); i += 1)
@@ -3993,6 +4002,17 @@ static int c_direct_unit_tests(void)
         // -Wdangling-else: an else an inner if takes, in an outer if without one (directly, or through a loop's body).
         "int f(int a, int b) { if (a) if (b) return 1; else return 2; return 0; }\n",
         "int f(int a, int b, int c) { if (a) if (b) if (c) return 1; else return 2; return 0; }\n",
+        // -Wtautological-compare: one path on both sides (in parentheses too), two arrays, a pointer sum and its pointer;
+        // and -Wstring-compare, through parentheses and casts; in a dead branch as well.
+        "int f(int x) { return x == x; }\n",
+        "int f(int x) { return (x) != x; }\n",
+        "struct S { int a; struct S* next; };\nint f(struct S* p) { return p->next->a < p->next->a; }\n",
+        "int g[4];\nint f(int i) { return g[i] >= g[i]; }\n",
+        "int a[4], b[4];\nint f(void) { return a == b; }\n",
+        "int f(int* p, unsigned n) { return p + n < p; }\n",
+        "int f(const char* p) { return \"a\" == p; }\n",
+        "int f(const char* p) { return p < ((const char*)\"z\"); }\n",
+        "int f(int x) { if (0) { return x == x; } return 0; }\n",
     };
     for (uint32_t i = 0; i < sizeof(bail_cases) / sizeof(bail_cases[0]); i += 1)
     {

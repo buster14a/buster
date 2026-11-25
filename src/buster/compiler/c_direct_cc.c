@@ -1747,13 +1747,18 @@ struct FastVal
     uint8_t marks;         // BUSTER_FVAL_MARK_*: what an operator on the value must refuse (#3577)
     uint8_t op;            // the binary operator (FTOK_*) that made it, FTOK_BANG for `!`, or FTOK_STR_LIT or FTOK_CHAR_LIT for
                            // a literal, outside parentheses (#3577)
-    uint8_t float_cast;    // 1 for a cast of a float to a wider floating type, in any parentheses (#3577: -Wliteral-range)
+    uint8_t lasting;       // BUSTER_FVAL_LASTING_*: what a value keeps in any parentheses (#3577)
     uint8_t seq_start;     // a variable by name (or in parentheses): its -Wunsequenced log entry + 1 (#3577); else 0
     uint32_t seq_ident;    // ... and its name's identifier, the variable's identity in the log (where seq_start isn't 0)
 };
 
-// The expression value with #3577's eight bytes (marks, op, float_cast, seq_start, seq_ident) past the 24 of #3594.
+// The expression value with #3577's eight bytes (marks, op, lasting, seq_start, seq_ident) past the 24 of #3594.
 _Static_assert(sizeof(FastVal) == 32u, "expression stack entry size");
+
+// A value's lasting marks (#3577), kept in parentheses: a cast of a float to a wider floating type (-Wliteral-range),
+// and a string literal, in casts too (-Wstring-compare, whose literal the full pipeline finds through them).
+#define BUSTER_FVAL_LASTING_FLOAT_CAST 0x01u
+#define BUSTER_FVAL_LASTING_STRING     0x02u
 
 // A value's marks (#3577), lost where an operator makes a new value: a register variable, whose address is an error; a
 // function whose call's null constant arguments are -Wnonnull; the result of a call whose discarding is -Wunused-result;
@@ -1982,6 +1987,7 @@ struct FastExprCtx
     uint32_t seq_mod_count;
     uint32_t seq_mod_ids[4];
     uint32_t seq_start_pos;
+    uint32_t cmp_pos;      // #3577: the token of the binary operator fval_emit_binary emits (fast_cc_comparison_reported)
     // #3577: for -Wunsequenced, a log of the variables the expression names where evaluated and the lvalues its ++, --
     // and assignments modify, in order, by identity (BUSTER_FSEQ_*; 0 for an lvalue that isn't a variable by name): bit i
     // of seq_mods marks entry i a modification, seq_own its own operands' first entry + 1 (0 unknown). A variable modified
@@ -3940,7 +3946,7 @@ static uint32_t fast_cc_string_plus(const FastCCState* cc, const FastVal* lhs, c
       ((uint32_t)(((kinds) & ((UINT32_C(1) << FVAL_FLAGS) | (UINT32_C(1) << FVAL_LOCAL_ADDR) | (UINT32_C(1) << FVAL_GLOBAL_ADDR))) != 0) | \
        ((BUSTER_FAST_QUESTIONED_KINDS >> ((lt) & BUSTER_FTYPE_SCALAR_MASK)) & 1u) | \
        ((BUSTER_FAST_QUESTIONED_KINDS >> ((rt) & BUSTER_FTYPE_SCALAR_MASK)) & 1u) | \
-       (uint32_t)(((lhs)->is_func_sym | (rhs)->is_func_sym | (lhs)->float_cast | (rhs)->float_cast) != 0) | \
+       (uint32_t)(((lhs)->is_func_sym | (rhs)->is_func_sym | (lhs)->lasting | (rhs)->lasting) != 0) | \
        (uint32_t)((kinds) == (UINT32_C(1) << FVAL_IMM)))) | \
      (uint32_t)((((lhs)->type | (rhs)->type) & BUSTER_FTYPE_COMPLEX_BIT) != 0))
 
@@ -4004,8 +4010,8 @@ static __attribute__((noinline)) bool fast_cc_binary_questioned(const FastCCStat
     const uint32_t tautological = equality & ((l_nonnull & r_zero) | (r_nonnull & l_zero));
     // -Wliteral-range: `==` or `!=` of a float (or a cast of one to double) and a double constant, which a float may not
     // hold exactly (clang's CheckFloatComparison): asked where one is.
-    const uint32_t l_float = (uint32_t)((lt & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK)) == FTYPE_F32) | (uint32_t)lhs->float_cast;
-    const uint32_t r_float = (uint32_t)((rt & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK)) == FTYPE_F32) | (uint32_t)rhs->float_cast;
+    const uint32_t l_float = (uint32_t)((lt & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK)) == FTYPE_F32) | (uint32_t)(lhs->lasting & BUSTER_FVAL_LASTING_FLOAT_CAST);
+    const uint32_t r_float = (uint32_t)((rt & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK)) == FTYPE_F32) | (uint32_t)(rhs->lasting & BUSTER_FVAL_LASTING_FLOAT_CAST);
     const uint32_t l_double = (uint32_t)(lhs->kind == FVAL_FIMM) & (uint32_t)((lt & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK)) == FTYPE_F64);
     const uint32_t r_double = (uint32_t)(rhs->kind == FVAL_FIMM) & (uint32_t)((rt & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK)) == FTYPE_F64);
     uint32_t float_literal = equality & ((l_float & r_double) | (r_float & l_double));
@@ -4021,11 +4027,257 @@ static __attribute__((noinline)) bool fast_cc_binary_questioned(const FastCCStat
     return (out_of_range | narrow_field | mixed_enums | tautological | float_literal) != 0;
 }
 
+// #3577: two lvalues at one place, their types, kinds and places (an object's frame offset, an address's addend and
+// symbol, an indirect member's displacement) alike: a comparison of them may be a self-comparison, which their tokens
+// decide (fast_cc_same_paths). 1 or 0, field by field (a vector load would miss the fields' recent stores).
+#define BUSTER_FAST_SAME_PLACE(lhs, rhs) \
+    ((uint32_t)((lhs)->type == (rhs)->type) & (uint32_t)((lhs)->kind == (rhs)->kind) & (uint32_t)((lhs)->imm == (rhs)->imm) & \
+     (uint32_t)((lhs)->sym_idx == (rhs)->sym_idx) & (uint32_t)(lhs)->is_lvalue & (uint32_t)(rhs)->is_lvalue)
+
+// #3577: a token's class in an access path as the full pipeline's check_expression_same compares one (a name, its
+// members by `.` and `->`, subscripts of an integer literal or a path, and parentheses): BUSTER_FPATH_OTHER for any
+// other token. fast_path_follows[a] holds b's bit where a path's token of class a may come right before one of class b,
+// BUSTER_FPATH_EDGE standing for the path's start (as a) and its end (as b).
+#define BUSTER_FPATH_OTHER 0u
+#define BUSTER_FPATH_NAME 1u
+#define BUSTER_FPATH_NUMBER 2u
+#define BUSTER_FPATH_MEMBER 3u
+#define BUSTER_FPATH_OPEN_SUB 4u
+#define BUSTER_FPATH_CLOSE_SUB 5u
+#define BUSTER_FPATH_OPEN_PAREN 6u
+#define BUSTER_FPATH_CLOSE_PAREN 7u
+#define BUSTER_FPATH_EDGE 8u
+#define BUSTER_FPATH_AFTER_CLOSE ((1u << BUSTER_FPATH_MEMBER) | (1u << BUSTER_FPATH_OPEN_SUB) | (1u << BUSTER_FPATH_CLOSE_SUB) | \
+                                  (1u << BUSTER_FPATH_CLOSE_PAREN) | (1u << BUSTER_FPATH_EDGE))
+
+static const uint16_t fast_path_follows[9] = {
+    [BUSTER_FPATH_NAME] = BUSTER_FPATH_AFTER_CLOSE,
+    [BUSTER_FPATH_NUMBER] = 1u << BUSTER_FPATH_CLOSE_SUB,
+    [BUSTER_FPATH_MEMBER] = 1u << BUSTER_FPATH_NAME,
+    [BUSTER_FPATH_OPEN_SUB] = (1u << BUSTER_FPATH_NAME) | (1u << BUSTER_FPATH_NUMBER) | (1u << BUSTER_FPATH_OPEN_PAREN),
+    [BUSTER_FPATH_CLOSE_SUB] = BUSTER_FPATH_AFTER_CLOSE,
+    [BUSTER_FPATH_OPEN_PAREN] = (1u << BUSTER_FPATH_NAME) | (1u << BUSTER_FPATH_OPEN_PAREN),
+    [BUSTER_FPATH_CLOSE_PAREN] = BUSTER_FPATH_AFTER_CLOSE,
+    [BUSTER_FPATH_EDGE] = (1u << BUSTER_FPATH_NAME) | (1u << BUSTER_FPATH_OPEN_PAREN),
+};
+
+static uint32_t fast_path_class(uint8_t k)
+{
+    uint32_t cls = BUSTER_FPATH_OTHER;
+    if (k == FTOK_IDENT) { cls = BUSTER_FPATH_NAME; }
+    else if (k == FTOK_INT_LIT) { cls = BUSTER_FPATH_NUMBER; }
+    else if (k == FTOK_DOT || k == FTOK_ARROW) { cls = BUSTER_FPATH_MEMBER; }
+    else if (k == FTOK_LBRACKET) { cls = BUSTER_FPATH_OPEN_SUB; }
+    else if (k == FTOK_RBRACKET) { cls = BUSTER_FPATH_CLOSE_SUB; }
+    else if (k == FTOK_LPAREN) { cls = BUSTER_FPATH_OPEN_PAREN; }
+    else if (k == FTOK_RPAREN) { cls = BUSTER_FPATH_CLOSE_PAREN; }
+    return cls;
+}
+
+// #3577: the end (one past its last token) of the access path that starts at POS, or POS where none does: its tokens in
+// an order fast_path_follows allows and its brackets matched. It ends before a token that continues it otherwise, or a
+// `)` or `]` it didn't open; one that leaves a bracket open is none.
+static uint32_t fast_cc_path_end(const FastCCState* cc, uint32_t pos)
+{
+    uint64_t subscripts = 0; // a bit a level open: 1 for `[`, 0 for `(`
+    uint32_t depth = 0;
+    uint32_t before = BUSTER_FPATH_EDGE;
+    uint32_t i = pos;
+    bool more = true;
+    while (more)
+    {
+        const uint32_t cls = i < cc->tcount ? fast_path_class(cc->tk[i]) : BUSTER_FPATH_OTHER;
+        const bool opens = cls == BUSTER_FPATH_OPEN_SUB || cls == BUSTER_FPATH_OPEN_PAREN;
+        const bool closes = cls == BUSTER_FPATH_CLOSE_SUB || cls == BUSTER_FPATH_CLOSE_PAREN;
+        more = cls != BUSTER_FPATH_OTHER && !(closes && depth == 0) && ((fast_path_follows[before] >> cls) & 1u) != 0 &&
+               depth < 64u && !(closes && (subscripts & 1u) != (uint64_t)(cls == BUSTER_FPATH_CLOSE_SUB));
+        if (more)
+        {
+            subscripts = opens ? (subscripts << 1) | (uint64_t)(cls == BUSTER_FPATH_OPEN_SUB) : closes ? subscripts >> 1 : subscripts;
+            depth = depth + (uint32_t)opens - (uint32_t)closes;
+            before = cls;
+            i += 1u;
+        }
+    }
+    const bool ok = i > pos && depth == 0 && ((fast_path_follows[before] >> BUSTER_FPATH_EDGE) & 1u) != 0;
+    return ok ? i : pos;
+}
+
+// #3577: the first token of the access path that ends just before END, or END where none does (fast_cc_path_end's,
+// read backward).
+static uint32_t fast_cc_path_begin(const FastCCState* cc, uint32_t end)
+{
+    uint64_t subscripts = 0; // a bit a level open: 1 for `]`, 0 for `)`
+    uint32_t depth = 0;
+    uint32_t after = BUSTER_FPATH_EDGE;
+    uint32_t i = end;
+    bool more = true;
+    while (more)
+    {
+        const uint32_t cls = i > 0 && i <= cc->tcount ? fast_path_class(cc->tk[i - 1u]) : BUSTER_FPATH_OTHER;
+        const bool opens = cls == BUSTER_FPATH_OPEN_SUB || cls == BUSTER_FPATH_OPEN_PAREN;
+        const bool closes = cls == BUSTER_FPATH_CLOSE_SUB || cls == BUSTER_FPATH_CLOSE_PAREN;
+        more = cls != BUSTER_FPATH_OTHER && !(opens && depth == 0) && ((fast_path_follows[cls] >> after) & 1u) != 0 &&
+               depth < 64u && !(opens && (subscripts & 1u) != (uint64_t)(cls == BUSTER_FPATH_OPEN_SUB));
+        if (more)
+        {
+            subscripts = closes ? (subscripts << 1) | (uint64_t)(cls == BUSTER_FPATH_CLOSE_SUB) : opens ? subscripts >> 1 : subscripts;
+            depth = depth + (uint32_t)closes - (uint32_t)opens;
+            after = cls;
+            i -= 1u;
+        }
+    }
+    const bool ok = i < end && depth == 0 && ((fast_path_follows[BUSTER_FPATH_EDGE] >> after) & 1u) != 0;
+    return ok ? i : end;
+}
+
+// #3577: whether the token K that comes right before (BEFORE) or after an operand's path makes the comparison OP's
+// operand more than the path: a prefix or a cast's `)` before it, a postfix or a call's `(` after it, a multiplicative,
+// additive or shift operator on either side, a relational one around an equality's operand, and one of OP's own
+// precedence before it (left to right). PREVIOUS is the token before K, which tells a binary `&` (looser) from a unary one.
+static bool fast_cc_path_bound_tighter(uint8_t k, uint8_t previous, uint8_t op, bool before)
+{
+    const bool equality = op == FTOK_EQ || op == FTOK_NE;
+    const bool relational_k = k == FTOK_LT || k == FTOK_GT || k == FTOK_LE || k == FTOK_GE;
+    const bool binary = k == FTOK_STAR || k == FTOK_SLASH || k == FTOK_PERCENT || k == FTOK_PLUS || k == FTOK_MINUS ||
+                        k == FTOK_LSHIFT || k == FTOK_RSHIFT || k == FTOK_INC || k == FTOK_DEC;
+    const bool operand_end = previous == FTOK_IDENT || previous == FTOK_INT_LIT || previous == FTOK_FLOAT_LIT || previous == FTOK_CHAR_LIT ||
+                             previous == FTOK_STR_LIT || previous == FTOK_RPAREN || previous == FTOK_RBRACKET;
+    const bool prefix = k == FTOK_BANG || k == FTOK_TILDE || k == FTOK_KW_SIZEOF || k == FTOK_KW_ALIGNOF || k == FTOK_RPAREN ||
+                        (k == FTOK_AMP && !operand_end);
+    const bool tighter = binary || (relational_k && (equality || before)) || (before && (prefix || (equality && (k == FTOK_EQ || k == FTOK_NE)))) ||
+                         (!before && k == FTOK_LPAREN);
+    return tighter;
+}
+
+// #3577: whether the comparison at AT (its token OP there) has one access path on both sides, parentheses aside: the
+// full pipeline's self-comparison (check_expression_same), asked where both operands are lvalues at one place. Where its
+// token isn't the comparison, it says so (failing closed).
+static __attribute__((cold, noinline)) bool fast_cc_same_paths(const FastCCState* cc, uint8_t op, uint32_t at)
+{
+    bool same = at >= cc->tcount || cc->tk[at] != op;
+    if (!same)
+    {
+        const uint32_t r_end = fast_cc_path_end(cc, at + 1u);
+        const uint32_t l_begin = fast_cc_path_begin(cc, at);
+        const uint8_t follower = r_end < cc->tcount ? cc->tk[r_end] : FTOK_EOF;
+        const uint8_t predecessor = l_begin > 0 ? cc->tk[l_begin - 1u] : FTOK_EOF;
+        const uint8_t before_predecessor = l_begin > 1u ? cc->tk[l_begin - 2u] : FTOK_EOF;
+        const bool paths = r_end > at + 1u && l_begin < at && !fast_cc_path_bound_tighter(follower, FTOK_EOF, op, false) &&
+                           !fast_cc_path_bound_tighter(predecessor, before_predecessor, op, true);
+        // The two token runs, parentheses skipped, alike in kind and data.
+        uint32_t l = l_begin;
+        uint32_t r = at + 1u;
+        bool alike = paths;
+        while (alike && (l < at || r < r_end))
+        {
+            while (l < at && (cc->tk[l] == FTOK_LPAREN || cc->tk[l] == FTOK_RPAREN)) { l += 1u; }
+            while (r < r_end && (cc->tk[r] == FTOK_LPAREN || cc->tk[r] == FTOK_RPAREN)) { r += 1u; }
+            const bool l_more = l < at;
+            const bool r_more = r < r_end;
+            alike = l_more == r_more && (!l_more || (cc->tk[l] == cc->tk[r] && cc->td[l] == cc->td[r]));
+            l += (uint32_t)l_more;
+            r += (uint32_t)r_more;
+        }
+        same = alike;
+    }
+    return same;
+}
+
+// #3577: -Wtautological-compare's pointer bounds (the full pipeline's check_expression_bounds): a sum `p + n` outside
+// parentheses on the left of `<` or `>=` (SUM_LEFT), or on the right of `>` or `<=`, whose pointer is the other side's
+// access path, for any offset (the full pipeline's is unsigned alone: this fails closed). True where the other side's
+// path is one of the access paths in the sum's tokens, up to the operators looser than `+`; and where the comparison's
+// token isn't at AT.
+static __attribute__((cold, noinline)) bool fast_cc_sum_bounds(const FastCCState* cc, uint8_t op, uint32_t at, bool sum_left)
+{
+    bool found = at >= cc->tcount || cc->tk[at] != op;
+    // The other side's path [b_begin, b_end).
+    uint32_t b_begin = at;
+    uint32_t b_end = at;
+    if (sum_left)
+    {
+        b_begin = at + 1u;
+        b_end = fast_cc_path_end(cc, b_begin);
+        const uint8_t follower = b_end < cc->tcount ? cc->tk[b_end] : FTOK_EOF;
+        b_end = fast_cc_path_bound_tighter(follower, FTOK_EOF, op, false) ? b_begin : b_end;
+    }
+    else
+    {
+        b_begin = fast_cc_path_begin(cc, at);
+        const uint8_t predecessor = b_begin > 0 ? cc->tk[b_begin - 1u] : FTOK_EOF;
+        const uint8_t before_predecessor = b_begin > 1u ? cc->tk[b_begin - 2u] : FTOK_EOF;
+        b_begin = fast_cc_path_bound_tighter(predecessor, before_predecessor, op, true) ? at : b_begin;
+    }
+    // The sum's tokens [s_begin, s_end): from the comparison to an operator looser than `+` or a bracket it didn't open.
+    uint32_t s_begin = sum_left ? at : at + 1u;
+    uint32_t s_end = sum_left ? at : at + 1u;
+    uint32_t depth = 0;
+    bool more = !found && b_end > b_begin;
+    while (more)
+    {
+        const uint32_t i = sum_left ? s_begin - 1u : s_end;
+        const bool inside = sum_left ? s_begin > 0 : s_end < cc->tcount;
+        const uint8_t k = inside ? cc->tk[i] : FTOK_EOF;
+        const bool opens = sum_left ? (k == FTOK_RPAREN || k == FTOK_RBRACKET) : (k == FTOK_LPAREN || k == FTOK_LBRACKET);
+        const bool closes = sum_left ? (k == FTOK_LPAREN || k == FTOK_LBRACKET) : (k == FTOK_RPAREN || k == FTOK_RBRACKET);
+        const bool looser = k == FTOK_EOF || k == FTOK_SEMI || k == FTOK_COMMA || k == FTOK_QUESTION || k == FTOK_COLON || k == FTOK_LBRACE ||
+                            k == FTOK_RBRACE || k == FTOK_ASSIGN || k == FTOK_LAND || k == FTOK_LOR || k == FTOK_PIPE || k == FTOK_CARET ||
+                            k == FTOK_AMP || k == FTOK_EQ || k == FTOK_NE || k == FTOK_LT || k == FTOK_GT || k == FTOK_LE || k == FTOK_GE ||
+                            (k >= FTOK_ADD_ASSIGN && k <= FTOK_SHR_ASSIGN);
+        more = inside && !(depth == 0 && (looser || closes)) && depth < 1024u;
+        if (more)
+        {
+            depth = depth + (uint32_t)opens - (uint32_t)closes;
+            s_begin -= (uint32_t)sum_left;
+            s_end += (uint32_t)!sum_left;
+        }
+    }
+    const uint32_t b_tokens = b_end - b_begin;
+    for (uint32_t j = s_begin; !found && j < s_end; j += 1u)
+    {
+        const uint32_t e = fast_cc_path_end(cc, j);
+        bool alike = e > j && e <= s_end;
+        uint32_t x = j;
+        uint32_t y = b_begin;
+        while (alike && (x < e || y < b_end))
+        {
+            while (x < e && (cc->tk[x] == FTOK_LPAREN || cc->tk[x] == FTOK_RPAREN)) { x += 1u; }
+            while (y < b_end && (cc->tk[y] == FTOK_LPAREN || cc->tk[y] == FTOK_RPAREN)) { y += 1u; }
+            const bool x_more = x < e;
+            const bool y_more = y < b_end;
+            alike = x_more == y_more && (!x_more || (cc->tk[x] == cc->tk[y] && cc->td[x] == cc->td[y]));
+            x += (uint32_t)x_more;
+            y += (uint32_t)y_more;
+        }
+        found = alike && b_tokens != 0;
+    }
+    return found;
+}
+
+// #3577: whether a comparison is one the full pipeline's -Wtautological-compare or -Wstring-compare reports where
+// evaluated: of two arrays; of a string literal (in parentheses or casts) and anything but a null pointer constant; of
+// one access path with itself, not floating (asked where the operands are lvalues at one place); or of a pointer sum and
+// its pointer (fast_cc_sum_bounds). AT is the comparison's token.
+static __attribute__((cold, noinline)) bool fast_cc_comparison_reported(const FastCCState* cc, uint8_t op, const FastVal* lhs, const FastVal* rhs,
+                                                                         FastType lt, FastType rt, uint32_t at)
+{
+    const bool arrays = ftype_is_array(lhs->type) && ftype_is_array(rhs->type);
+    const bool l_null = lhs->kind == FVAL_IMM && lhs->imm == 0;
+    const bool r_null = rhs->kind == FVAL_IMM && rhs->imm == 0;
+    const bool strings = ((lhs->lasting & BUSTER_FVAL_LASTING_STRING) != 0 && !r_null) || ((rhs->lasting & BUSTER_FVAL_LASTING_STRING) != 0 && !l_null);
+    const bool self = !arrays && !strings && BUSTER_FAST_SAME_PLACE(lhs, rhs) != 0 && !ftype_is_float(lt) && fast_cc_same_paths(cc, op, at);
+    const bool sum_left = lhs->op == FTOK_PLUS && ftype_is_ptr(lt) && (op == FTOK_LT || op == FTOK_GE);
+    const bool sum_right = rhs->op == FTOK_PLUS && ftype_is_ptr(rt) && (op == FTOK_GT || op == FTOK_LE);
+    const bool bounds = !arrays && !strings && !self && (sum_left || sum_right) && fast_cc_sum_bounds(cc, op, at, sum_left);
+    return arrays || strings || self || bounds;
+}
+
 // #3577: a binary operator's operands, as fval_emit_binary's gate sends them (two integer scalars that aren't compared
 // or a bit-field don't come): false, with the bailout made, where the full pipeline's error or warning is.
 // (Out of line: its values would take fval_emit_binary's registers, whose every operator spilled them.)
 static __attribute__((noinline)) bool fast_cc_binary_operands_quiet(FastCCState* cc, uint8_t op, const FastVal* lhs, const FastVal* rhs,
-                                                                   FastType lt, FastType rt, uint32_t integers)
+                                                                   FastType lt, FastType rt, uint32_t integers, uint32_t at, uint32_t evaluated)
 {
     bool quiet = true;
     // #3577: the operands C allows each operator, or the full pipeline's error or warning: * / arithmetic; % & | ^ << >>
@@ -4075,7 +4327,8 @@ static __attribute__((noinline)) bool fast_cc_binary_operands_quiet(FastCCState*
                                  (l_scalar & (BUSTER_FAST_QUESTIONED_KINDS >> (lt & BUSTER_FTYPE_SCALAR_MASK))) |
                                  (r_scalar & (BUSTER_FAST_QUESTIONED_KINDS >> (rt & BUSTER_FTYPE_SCALAR_MASK))) | l_aggregate | r_aggregate |
                                  ((uint32_t)(lhs->kind == FVAL_GLOBAL) & (uint32_t)(lhs->is_func_sym != 0)) |
-                                 ((uint32_t)(rhs->kind == FVAL_GLOBAL) & (uint32_t)(rhs->is_func_sym != 0)) | (uint32_t)lhs->float_cast | (uint32_t)rhs->float_cast;
+                                 ((uint32_t)(rhs->kind == FVAL_GLOBAL) & (uint32_t)(rhs->is_func_sym != 0)) |
+                                 (uint32_t)((lhs->lasting & BUSTER_FVAL_LASTING_FLOAT_CAST) != 0) | (uint32_t)((rhs->lasting & BUSTER_FVAL_LASTING_FLOAT_CAST) != 0);
         const uint32_t l_enum = l_aggregate | ((uint32_t)(lhs->kind == FVAL_IMM) & (uint32_t)(lhs->sym_idx != 0));
         const uint32_t r_enum = r_aggregate | ((uint32_t)(rhs->kind == FVAL_IMM) & (uint32_t)(rhs->sym_idx != 0));
         const uint32_t questioned = (comparison & ((constant & special & 1u) | (l_enum & r_enum))) | ((kinds >> FVAL_BITFIELD) & 1u);
@@ -4084,6 +4337,21 @@ static __attribute__((noinline)) bool fast_cc_binary_operands_quiet(FastCCState*
             fast_cc_bail(cc, "comparison or operand the full pipeline questions");
             quiet = false;
         }
+    }
+    // #3577: a comparison -Wtautological-compare or -Wstring-compare reports, where evaluated (not sizeof's operand):
+    // asked of two lvalues at one place, two non-pointer aggregates, a string literal or a relational pointer sum, the
+    // rest by fast_cc_comparison_reported.
+    const uint32_t relational = (uint32_t)(op == FTOK_LT) | (uint32_t)(op == FTOK_GT) | (uint32_t)(op == FTOK_LE) | (uint32_t)(op == FTOK_GE);
+    const uint32_t reported_asked = comparison & evaluated &
+                                    (BUSTER_FAST_SAME_PLACE(lhs, rhs) |
+                                     ((uint32_t)((lhs->type & rhs->type & BUSTER_FTYPE_COMPLEX_BIT) != 0) &
+                                      (uint32_t)(((lhs->type | rhs->type) & BUSTER_FTYPE_PTR_MASK) == 0)) |
+                                     (uint32_t)(((lhs->lasting | rhs->lasting) & BUSTER_FVAL_LASTING_STRING) != 0) |
+                                     (relational & ((uint32_t)(lhs->op == FTOK_PLUS) | (uint32_t)(rhs->op == FTOK_PLUS))));
+    if (quiet && reported_asked != 0 && fast_cc_comparison_reported(cc, op, lhs, rhs, lt, rt, at))
+    {
+        fast_cc_bail(cc, "a comparison the full pipeline's -Wtautological-compare or -Wstring-compare reports");
+        quiet = false;
     }
     return quiet;
 }
@@ -4110,11 +4378,11 @@ static BUSTER_DIRECT_HOT void fval_emit_binary(FastExprCtx* ex, uint8_t op, Fast
     uint32_t asked = (integers ^ 1u) | ((kinds >> FVAL_BITFIELD) & 1u);
     if ((asked == 0) & (compared != 0))
     {
-        asked = BUSTER_FAST_INT_COMPARE_ASKED(lhs, rhs, lt, rt, kinds);
+        asked = BUSTER_FAST_INT_COMPARE_ASKED(lhs, rhs, lt, rt, kinds) | BUSTER_FAST_SAME_PLACE(lhs, rhs);
     }
     if (asked != 0)
     {
-        if (!fast_cc_binary_operands_quiet(cc, op, lhs, rhs, lt, rt, integers))
+        if (!fast_cc_binary_operands_quiet(cc, op, lhs, rhs, lt, rt, integers, ex->cmp_pos, (uint32_t)(ex->unevaluated == 0)))
         {
             return;
         }
@@ -5459,7 +5727,7 @@ struct FastExprOp
     uint16_t extra;        // arg_count (CALL), elem_idx (COMPOUND_LIT), the then value's marks (TERNARY_C)
     uint32_t lbl0;         // false/true/else_lbl, or arg_start (CALL), or end_pos (GENERIC_SEL)
     uint32_t lbl1;         // then_tail_lbl (TERNARY_C)
-    uint32_t lbl2;         // end_lbl (TERNARY_C)
+    uint32_t lbl2;         // end_lbl (TERNARY_C), or a binary operator's token (#3577: ex->cmp_pos)
     FastType type;         // cast target, then_type (TERNARY_C), compound lit type
     int32_t slot;          // tern_slot or compound lit stack slot
     // #3577: the -Wunsequenced log's count + 1 where the operator's (right) operand begins: at its push, or a call's or a
@@ -5747,10 +6015,11 @@ static BUSTER_DIRECT_HOT void fast_expr_reduce_top(FastExprCtx* ex, FastExprOp* 
         FastVal* v = ex->vstack + (ex->vsp - 1u);
         // A unary operator's value has none of its operand's marks (#3577): `-g()` discards a value with no effect.
         const uint8_t vmarks = v->marks;
+        const uint8_t vlasting = v->lasting;
         const uint32_t from_float = (uint32_t)((v->type & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK)) == FTYPE_F32);
         v->marks = BUSTER_FVAL_MARK_NONLITERAL;
         v->op = 0;
-        v->float_cast = 0;
+        v->lasting = 0;
         // #3577: the operand C allows each, or the full pipeline's error or warning: + and - arithmetic, ~ an integer,
         // ! ++ -- a scalar; sizeof a complete type that isn't a bit-field's (void's and a function's are GNU's 1);
         // _Alignof of an expression is GNU's warning. Masks of the classes, by operator.
@@ -5802,7 +6071,9 @@ static BUSTER_DIRECT_HOT void fast_expr_reduce_top(FastExprCtx* ex, FastExprOp* 
             }
             fval_convert(ex, v, cur.type);
             v->is_lvalue = 0;
-            v->float_cast = (uint8_t)(from_float & (uint32_t)((cur.type & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK)) == FTYPE_F64));
+            v->lasting = (uint8_t)((BUSTER_FVAL_LASTING_FLOAT_CAST *
+                                    (from_float & (uint32_t)((cur.type & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK)) == FTYPE_F64))) |
+                                   (vlasting & BUSTER_FVAL_LASTING_STRING));
             // A cast to void is an effect a statement discards quietly; a discarded warn_unused_result call stays one.
             const uint32_t to_void = (uint32_t)((cur.type & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK)) == FTYPE_VOID);
             v->marks = (uint8_t)(((BUSTER_FVAL_MARK_EFFECT | (vmarks & BUSTER_FVAL_MARK_UNUSED_RESULT)) * to_void) |
@@ -6231,6 +6502,7 @@ static BUSTER_DIRECT_HOT void fast_expr_reduce_top(FastExprCtx* ex, FastExprOp* 
             return;
         }
     }
+    ex->cmp_pos = cur.lbl2;
     // The result where the left operand stands, which is where it goes. fval_emit_binary writes it once, as the last
     // thing it does, or bails out. A result in a local of this function was 40 cycles of waiting: the local is zeroed
     // through the stack pointer, written through fval_emit_binary's pointer and loaded through the stack pointer,
@@ -6802,6 +7074,7 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
                         .imm = (int64_t)ro_off,
                         .is_lvalue = 1u,
                         .op = (uint8_t)((uint32_t)FTOK_STR_LIT * (uint32_t)(k == FTOK_STR_LIT)),
+                        .lasting = (uint8_t)(BUSTER_FVAL_LASTING_STRING * (uint32_t)(k == FTOK_STR_LIT)),
                     };
                 }
                 expect_val = false;
@@ -7495,7 +7768,7 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
                     break;
                 }
             }
-            if (osp < 128u) { ops[osp++] = (FastExprOp){ .op = (uint16_t)(FEOP_TOK_BASE + k), .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) }; }
+            if (osp < 128u) { ops[osp++] = (FastExprOp){ .op = (uint16_t)(FEOP_TOK_BASE + k), .lbl2 = cc->pos, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) }; }
         }
         cc->pos += 1u;
         expect_val = true;
