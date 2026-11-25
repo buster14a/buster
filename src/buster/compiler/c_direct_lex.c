@@ -291,12 +291,14 @@ static void* fast_arena_alloc(FastArena* a, uint64_t size, uint64_t align)
 #define BUSTER_FIDENT_CACHE_BITS  14u    // 16384 entries * 24 B = 384 KB (fits Zen 5 1 MB L2!)
 // A small unit's tables (#3592): the hash table and the cache are written at hashed places, so at their full sizes the
 // 400 predefined names alone touch nearly every page of both, 135 page faults of a one-function unit's 359 on the 9700X.
-// They start at 16 groups (5 KB) and 2,048 slots (48 KB) and grow with the names: the table as it always did
+// They start at 64 groups (20 KB) and 2,048 slots (48 KB) and grow with the names: the table as it always did
 // (fast_ident_grow), the cache by fast_ident_cache_grow once the names are four times its slots. A page of the cache
 // costs a fault, about 2,700 cycles there, and a name that misses it a probe of the table: a unit of six standard
 // headers, whose 4,000 names are each looked up a few times, took 4.14 M user and 3.27 M kernel cycles with the cache
-// grown at as many names as slots and 4.04 M and 3.03 M at four times.
-#define BUSTER_FIDENT_SMALL_GROUPS     16u
+// grown at as many names as slots and 4.04 M and 3.03 M at four times. From 16 groups the table grew three times
+// under such a unit's names, 2% of musl's units' cycles: the same unit took 3.89 M and 3.03 M from 16 groups and
+// 3.79 M and 2.96 M from 64.
+#define BUSTER_FIDENT_SMALL_GROUPS     64u
 #define BUSTER_FIDENT_SMALL_CACHE_BITS 11u
 #define BUSTER_FIDENT_CACHE_GROW_BITS  2u
 #define BUSTER_FIDENT_CACHE_GROW_LOAD  4u

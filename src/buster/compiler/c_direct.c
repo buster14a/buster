@@ -621,7 +621,7 @@ static bool c_direct_test_cache_consistent(const FastIdentTable* t, uint32_t bit
 }
 
 // A small unit's identifier tables (#3592): the cache grows at 8,192 and at 32,768 names and keeps every slot it had,
-// the hash table grows from 16 groups, and a unit's tokens are the same from small tables and from full ones.
+// the hash table grows from its small start, and a unit's tokens are the same from small tables and from full ones.
 static bool c_direct_test_ident_growth(void)
 {
     uint32_t long_total = 0;

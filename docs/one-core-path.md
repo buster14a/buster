@@ -4352,7 +4352,7 @@ The profile above is one large unit's. A build is many small units, a process ea
 
 - **Huge pages.** The arenas' 55 tables each start in a region of their own, and a small unit writes the first page
   of each. Under transparent huge pages the kernel cleared 2 MB for most of the mapping's 2 MB regions: a
-  one-function unit took 0.76 ms, 3.54 M of its 4.23 M cycles the kernel's (`clear_page_erms` was 37.6% of the
+  one-function unit took 0.76 ms, 3.49 M of its 4.20 M cycles the kernel's (`clear_page_erms` was 37.6% of the
   process's samples).
 - **Tables written at hashed places.** With base pages the same unit still took 359 page faults, where a static
   `return 0` takes 27: the predefines' 400 names touched nearly every page of the 384 KB identifier cache and of
@@ -4363,28 +4363,28 @@ What changed:
 - **A unit whose main file is under 1 MiB takes base pages** for both arenas (`c_direct_unit_is_small`,
   `BUSTER_FDIRECT_LARGE_UNIT_BYTES`). A larger one takes the pages the host gives, as before: for `sqlite3.c` huge
   pages are worth 2% (17.68 against 17.98 ms).
-- **Its identifier tables start small and grow with the names:** the hash table at 16 groups (it always grew), the
+- **Its identifier tables start small and grow with the names:** the hash table at 64 groups (it always grew), the
   cache at 2,048 slots. The cache grows four times as large once the names are four times its slots, into a new
   block of the arena, each slot moved to its hash's place (`fast_ident_cache_grow`). A large unit starts with the
   full tables.
 
 | 9700X, a process a unit, CPU 2, 21 rotated runs | main `56490ed9` | this | |
 | --- | ---: | ---: | ---: |
-| one function | 0.76 ms, 3.54 M kernel cycles | **0.27 ms**, 0.79 M | 2.8 times |
+| one function | 0.76 ms, 3.49 M kernel cycles | **0.27 ms**, 0.79 M | 2.8 times |
 | `stdio.h` and a `printf` | 1.19 ms | **0.68 ms** | 1.75 times |
-| six standard headers and a `main` | 1.83 ms | **1.35 ms** | 1.36 times |
+| six standard headers and a `main` | 1.82 ms | **1.33 ms** | 1.37 times |
 | musl's `wcwidth.c` | 0.99 ms | **0.47 ms** | 2.1 times |
-| `sqlite3.c` | 17.61 ms | 17.62 ms | |
-| musl's 1,336 units by `-std=gnu99`, 663 of them direct | 1,764.4 ms | **1,521.2 ms** | -13.8% |
-| Lua's 34 units without its warning options, 29 of them direct | 85.49 ms | **81.66 ms** | -4.5% |
+| `sqlite3.c` | 17.58 ms | 17.61 ms | |
+| musl's 1,336 units by `-std=gnu99`, 663 of them direct | 1,789.3 ms | **1,534.9 ms** | -14.2% |
+| Lua's 34 units without its warning options, 29 of them direct | 85.61 ms | **80.91 ms** | -5.5% |
 
 - Every object is the same: the units above, and the 7,556 units of the record's corpus (1,892 of them the direct
   path's).
-- `sqlite3.c`'s lexing and preprocessing stage reads 7.340, 7.333 and 7.328 ms in three builds of the change whose
-  code is placed differently, against main's 7.351, 7.328 and 7.325. One more placement of the change read 7.453:
-  a build's placement moves that stage by more than this change does.
-- Lua's units pay for their base pages in user cycles (284.7 M to 293.0 M) and gain more in the kernel (186.9 M to
-  157.8 M). A unit of that size would rather have one huge page than hundreds of base pages or eleven huge ones,
+- `sqlite3.c`'s lexing and preprocessing stage reads 7.324 ms against main's 7.346, and 7.319 and 7.334 in two
+  copies of main whose code is placed differently. An earlier build of the change, the same but for a constant
+  the unit never reads, read 7.453: a build's placement moves that stage by more than this change does.
+- Lua's units pay for their base pages in user cycles (285.5 M to 290.9 M) and gain more in the kernel (187.5 M to
+  156.4 M). A unit of that size would rather have one huge page than hundreds of base pages or eleven huge ones,
   which needs the tables' first pages together: not done.
 - What a small unit still pays is #3592's: the process's own start (0.10 ms of the 0.27), the predefines lexed in
   every process, a header's system calls, and the options and constructs that keep a build's units off the direct
