@@ -289,12 +289,21 @@ static inline void fast_cc_ready_task(FastCCState* cc, uint32_t task)
 
 static inline void fast_cc_reference(FastCCState* cc, FastSym* sym)
 {
-    if (!sym->referenced)
+    if (sym->referenced != 1u)
     {
-        sym->referenced = 1u;
-        for (uint32_t link = sym->deferred_task; link != 0; link = cc->deferred[link - 1u].previous_task)
+        // #3577: a use in an inline body compiled to be checked alone (fast_cc_check_body) is a use for the unit's end
+        // (-Wundefined-internal), but readies no body to emit.
+        if (cc->checking != 0)
         {
-            fast_cc_ready_task(cc, link - 1u);
+            sym->referenced = 2u;
+        }
+        else
+        {
+            sym->referenced = 1u;
+            for (uint32_t link = sym->deferred_task; link != 0; link = cc->deferred[link - 1u].previous_task)
+            {
+                fast_cc_ready_task(cc, link - 1u);
+            }
         }
     }
 }
@@ -326,6 +335,18 @@ static uint32_t fast_cc_ensure_obj_sym(FastCCState* cc, uint32_t sym_idx)
         cc->obj->syms[obj_idx].visibility = s->visibility;
     }
     s->obj_sym = obj_idx;
+    // #3577: a checked inline body's object symbols go with it (fast_cc_check_body).
+    if (cc->checking != 0)
+    {
+        if (cc->checked_obj_sym_count < BUSTER_FCHECKED_OBJ_SYMS)
+        {
+            cc->checked_obj_syms[cc->checked_obj_sym_count++] = sym_idx;
+        }
+        else
+        {
+            fast_cc_bail(cc, "too many symbols in a checked inline body");
+        }
+    }
     return obj_idx;
 }
 
@@ -1119,6 +1140,11 @@ static void fast_cc_write_static_scalar(FastCCState* cc, FastSecId sec, uint32_t
     }
 }
 
+// #3577: the bit of position IDX (a member's index or an element's) in an initializer frame's touched mask, 0 past 64. A
+// positional element whose bit a designator set before it overrides that initialization, the full pipeline's
+// -Winitializer-overrides: each initializer collects them, branch-free, and is refused at its end.
+#define BUSTER_FAST_INIT_BIT(idx) ((UINT64_C(1) << ((idx) & 63u)) & (UINT64_C(0) - (uint64_t)((idx) < 64u)))
+
 // #3577: where an initializer's frame has reached, in bits from its object's start: the next positional element's start
 // (an array's index times its element's size; a record's member, a bit-field's bit, past a flattened anonymous union's
 // siblings, or its end past the last one, or past a union's first). A designator whose target starts before it may
@@ -1356,6 +1382,7 @@ static __attribute__((noinline)) uint32_t fast_cc_init_static(FastCCState* cc, F
 
     SInitFrame st[32];
     uint32_t sp = 0;
+    uint64_t overridden = 0;
     cc->pos += 1u; // '{'
     st[sp++] = (SInitFrame){
         .type = root_t,
@@ -1509,6 +1536,13 @@ static __attribute__((noinline)) uint32_t fast_cc_init_static(FastCCState* cc, F
                     const uint32_t count = fast_cc_init_int_run(cc, ar->inner, esz, buf, offset, ar->count - f->idx);
                     if (count != 0)
                     {
+                        // #3577: the run's elements are positional ones too, below 64 (BUSTER_FAST_INIT_BIT).
+                        const uint32_t run_end = f->idx + count;
+                        const uint32_t run_low = f->idx ^ ((f->idx ^ 64u) & (UINT32_C(0) - (uint32_t)(f->idx > 64u)));
+                        const uint32_t run_high = run_end ^ ((run_end ^ 64u) & (UINT32_C(0) - (uint32_t)(run_end > 64u)));
+                        const uint64_t run_bits = _bzhi_u64(UINT64_MAX, run_high) & ~_bzhi_u64(UINT64_MAX, run_low);
+                        overridden |= f->touched & run_bits;
+                        f->touched |= run_bits;
                         f->idx += count;
                         if (f->is_incomplete_arr && f->idx > f->max_elem)
                         {
@@ -1526,7 +1560,8 @@ static __attribute__((noinline)) uint32_t fast_cc_init_static(FastCCState* cc, F
                 }
                 elem_t = ar->inner;
                 elem_off = f->base_off + f->idx * esz;
-                f->touched |= (UINT64_C(1) << (f->idx & 63u)) & (UINT64_C(0) - (uint64_t)(f->idx < 64u));
+                overridden |= f->touched & BUSTER_FAST_INIT_BIT(f->idx);
+                f->touched |= BUSTER_FAST_INIT_BIT(f->idx);
                 f->idx += 1u;
             }
         }
@@ -1543,7 +1578,8 @@ static __attribute__((noinline)) uint32_t fast_cc_init_static(FastCCState* cc, F
                 elem_t = mi->type;
                 elem_off = f->base_off + mi->byte_offset;
                 elem_bf = mi->bit_width != 0 ? mi : NULL;
-                f->touched |= (UINT64_C(1) << (f->idx & 63u)) & (UINT64_C(0) - (uint64_t)(f->idx < 64u));
+                overridden |= f->touched & BUSTER_FAST_INIT_BIT(f->idx);
+                f->touched |= BUSTER_FAST_INIT_BIT(f->idx);
                 f->idx += 1u;
                 // Skip flattened anonymous-union siblings sharing the same byte_offset in a struct!
                 if (rec->kind == FCTYPE_STRUCT && mi->bit_width == 0)
@@ -1551,7 +1587,8 @@ static __attribute__((noinline)) uint32_t fast_cc_init_static(FastCCState* cc, F
                     while (f->idx < rec->count && cc->member_info[rec->start + f->idx].byte_offset == mi->byte_offset &&
                            cc->member_info[rec->start + f->idx].bit_width == 0)
                     {
-                        f->touched |= (UINT64_C(1) << (f->idx & 63u)) & (UINT64_C(0) - (uint64_t)(f->idx < 64u));
+                        overridden |= f->touched & BUSTER_FAST_INIT_BIT(f->idx);
+                        f->touched |= BUSTER_FAST_INIT_BIT(f->idx);
                         f->idx += 1u;
                     }
                 }
@@ -1610,6 +1647,11 @@ static __attribute__((noinline)) uint32_t fast_cc_init_static(FastCCState* cc, F
         }
     }
 
+    // #3577: a positional element over one a designator initialized (BUSTER_FAST_INIT_BIT).
+    if (overridden != 0)
+    {
+        fast_cc_bail(cc, "initializer overrides prior initialization");
+    }
     if (inc_arr && !cc->bailout)
     {
         FastComplexType* ar = cc->ctypes + (root_t & BUSTER_FTYPE_CIDX_MASK);
@@ -4872,6 +4914,7 @@ static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, F
     if (ftype_is_record(ret_t))
     {
         const FastComplexType* rct = cc->ctypes + (ret_t & BUSTER_FTYPE_CIDX_MASK);
+        if (BUSTER_FAST_RECORD_OVERALIGNED(rct)) { fast_cc_bail(cc, "an aligned typedef's record by value"); }
         if (rct->abi_lo == FABI_MEM)
         {
             has_sret = true;
@@ -4897,6 +4940,7 @@ static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, F
         if (ftype_is_record(at))
         {
             const FastComplexType* rct = cc->ctypes + (at & BUSTER_FTYPE_CIDX_MASK);
+            if (BUSTER_FAST_RECORD_OVERALIGNED(rct)) { fast_cc_bail(cc, "an aligned typedef's record by value"); }
             locs[i].sz = rct->size;
             if (rct->abi_lo != FABI_MEM)
             {
@@ -5286,6 +5330,7 @@ static __attribute__((noinline)) void fval_emit_va_arg(FastExprCtx* ex, FastVal*
     if (ftype_is_record(arg_t))
     {
         const FastComplexType* rct = cc->ctypes + (arg_t & BUSTER_FTYPE_CIDX_MASK);
+        if (BUSTER_FAST_RECORD_OVERALIGNED(rct)) { fast_cc_bail(cc, "an aligned typedef's record by value"); }
         const int32_t rslot = fast_cc_alloc_tmp(cc, rct->size < 16u ? 16u : rct->size, rct->align < 8u ? 8u : rct->align);
         if (rct->abi_lo == FABI_MEM)
         {
@@ -7170,6 +7215,7 @@ static __attribute__((noinline)) int32_t fast_cc_init_local(FastCCState* cc, Fas
 
     LInitFrame st[32];
     uint32_t sp = 0;
+    uint64_t overridden = 0;
     cc->pos += 1u; // '{'
     st[sp++] = (LInitFrame){ .type = root_t, .base_off = root_off, .idx = 0, .braced = true };
 
@@ -7294,7 +7340,8 @@ static __attribute__((noinline)) int32_t fast_cc_init_local(FastCCState* cc, Fas
             {
                 elem_t = ar->inner;
                 elem_off = f->base_off + (int32_t)(f->idx * ftype_size(cc, ar->inner));
-                f->touched |= (UINT64_C(1) << (f->idx & 63u)) & (UINT64_C(0) - (uint64_t)(f->idx < 64u));
+                overridden |= f->touched & BUSTER_FAST_INIT_BIT(f->idx);
+                f->touched |= BUSTER_FAST_INIT_BIT(f->idx);
                 f->idx += 1u;
             }
         }
@@ -7308,7 +7355,8 @@ static __attribute__((noinline)) int32_t fast_cc_init_local(FastCCState* cc, Fas
                 elem_t = mi->type;
                 elem_off = f->base_off + (int32_t)mi->byte_offset;
                 elem_bf = mi->bit_width != 0 ? mi : NULL;
-                f->touched |= (UINT64_C(1) << (f->idx & 63u)) & (UINT64_C(0) - (uint64_t)(f->idx < 64u));
+                overridden |= f->touched & BUSTER_FAST_INIT_BIT(f->idx);
+                f->touched |= BUSTER_FAST_INIT_BIT(f->idx);
                 f->idx += 1u;
                 // Skip flattened anonymous-union siblings sharing the same byte_offset in a struct!
                 if (rec->kind == FCTYPE_STRUCT && mi->bit_width == 0)
@@ -7316,7 +7364,8 @@ static __attribute__((noinline)) int32_t fast_cc_init_local(FastCCState* cc, Fas
                     while (f->idx < rec->count && cc->member_info[rec->start + f->idx].byte_offset == mi->byte_offset &&
                            cc->member_info[rec->start + f->idx].bit_width == 0)
                     {
-                        f->touched |= (UINT64_C(1) << (f->idx & 63u)) & (UINT64_C(0) - (uint64_t)(f->idx < 64u));
+                        overridden |= f->touched & BUSTER_FAST_INIT_BIT(f->idx);
+                        f->touched |= BUSTER_FAST_INIT_BIT(f->idx);
                         f->idx += 1u;
                     }
                 }
@@ -7393,6 +7442,11 @@ static __attribute__((noinline)) int32_t fast_cc_init_local(FastCCState* cc, Fas
             if (sp >= 32u) { fast_cc_bail(cc, "local init depth"); break; }
             st[sp++] = (LInitFrame){ .type = elem_t, .base_off = elem_off, .idx = 0, .braced = false };
         }
+    }
+    // #3577: a positional element over one a designator initialized (BUSTER_FAST_INIT_BIT).
+    if (overridden != 0)
+    {
+        fast_cc_bail(cc, "initializer overrides prior initialization");
     }
     return root_off;
 }
@@ -7756,12 +7810,40 @@ static inline bool fast_cc_tag_declaration_quiet(const FastDeclSpecs* ds)
 // part by part (a function's result and parameters, an array's element and count, a pointer's target), an incomplete
 // array completed by the other; anything else is its "conflicting types" or "redeclaration with a different type".
 // Parameters compare without their top-level qualifiers. A function without a prototype matches only one of none.
-// Whether a typedef's aligned attributes (0 for none) leave its type's own alignment (#3577): this path keeps no
-// alignment for a typedef, so another one (Linux's `__s128 __attribute__((aligned(16)))` is its own) is refused.
+// Whether a typedef's aligned attributes (0 for none) leave its type's own alignment (#3577): another one (Linux's
+// `__s128 __attribute__((aligned(16)))` is its own) is fast_cc_aligned_typedef's.
 static inline bool fast_cc_typedef_alignment_natural(const FastCCState* cc, uint32_t before, uint32_t after, FastType t)
 {
     const uint32_t natural = ftype_align(cc, t);
     return ((uint32_t)(before != 0 && before != natural) | (uint32_t)(after != 0 && after != natural)) == 0;
+}
+
+// #3577: the type of a typedef aligned other than its type (BEFORE and AFTER its aligned attributes, 0 for none). The
+// full pipeline keeps the alignment as the typedef's type's and its size as it was (glibc's <pthread.h> aligns
+// __pthread_unwind_buf_t to 16): a complete struct or union aligned above its own becomes a copy of the record with that
+// alignment, which objects, members and _Alignof then take (BUSTER_FAST_RECORD_OVERALIGNED refuses it by value, and
+// BUSTER_FAST_ELEMENT_MISALIGNED an array of it whose size isn't a multiple). Any other is refused where the typedef is
+// used: *FLAGS gets BUSTER_FSYM_ALIGNED.
+static __attribute__((cold, noinline)) FastType fast_cc_aligned_typedef(FastCCState* cc, uint32_t before, uint32_t after, FastType t, uint8_t* flags)
+{
+    const uint32_t want = after != 0 ? after : before;
+    const uint32_t cidx = t & BUSTER_FTYPE_CIDX_MASK;
+    const bool usable = ftype_is_record(t) && cc->ctypes[cidx].complete != 0 && (before == 0 || after == 0 || before == after) &&
+                        want > ftype_align(cc, t);
+    const uint32_t copy = usable ? fast_cc_alloc_ctype(cc, cc->ctypes[cidx].kind) : 0u;
+    FastType result = t;
+    if (copy != 0)
+    {
+        cc->ctypes[copy] = cc->ctypes[cidx];
+        cc->ctypes[copy].align = want;
+        cc->ctypes[copy].is_variadic = 1u;
+        result = ftype_from_index(cc, copy) | (t & (BUSTER_FTYPE_CONST | BUSTER_FTYPE_VOL));
+    }
+    else
+    {
+        *flags = BUSTER_FSYM_ALIGNED;
+    }
+    return result;
 }
 
 // Whether two types are one (#3577: a typedef's redefinition): redeclarable, and no array of unknown size made
@@ -7934,9 +8016,11 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
     uint32_t fp_idx = 0;
     int32_t stk_off = 16; // first stack parameter at [rbp + 16]
 
-    // Hidden sret pointer for >16B struct return
-    if (ftype_is_record(ret_t) && cc->ctypes[ret_t & BUSTER_FTYPE_CIDX_MASK].abi_lo == FABI_MEM)
+    // Hidden sret pointer for >16B struct return (#3577: an aligned typedef's record is refused, BUSTER_FAST_RECORD_OVERALIGNED).
+    if (ftype_is_record(ret_t) &&
+        ((uint32_t)(cc->ctypes[ret_t & BUSTER_FTYPE_CIDX_MASK].abi_lo == FABI_MEM) | (uint32_t)BUSTER_FAST_RECORD_OVERALIGNED(cc->ctypes + (ret_t & BUSTER_FTYPE_CIDX_MASK))) != 0)
     {
+        if (BUSTER_FAST_RECORD_OVERALIGNED(cc->ctypes + (ret_t & BUSTER_FTYPE_CIDX_MASK))) { fast_cc_bail(cc, "an aligned typedef's record by value"); }
         cc->cur_sret_off = fast_cc_alloc_local(cc, 8u, 8u);
         x86_store(obj, FREG_RBP, cc->cur_sret_off, FREG_RDI, 8u);
         gp_idx = 1u;
@@ -7987,6 +8071,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
         if (ftype_is_record(pt))
         {
             const FastComplexType* rct = cc->ctypes + (pt & BUSTER_FTYPE_CIDX_MASK);
+            if (BUSTER_FAST_RECORD_OVERALIGNED(rct)) { fast_cc_bail(cc, "an aligned typedef's record by value"); }
             bool in_regs = false;
             if (rct->abi_lo != FABI_MEM)
             {
@@ -8724,10 +8809,20 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                         const uint32_t prev = cc->sym_cur[dr.name_id];
                         const bool again = prev != 0 && cc->syms[prev].kind == FSYM_TYPEDEF && cc->syms[prev].scope_depth == cc->scope_depth &&
                                            fast_cc_types_identical(cc, cc->syms[prev].type, dr.type);
-                        if (!fast_cc_typedef_alignment_natural(cc, ds.attr.aligned, dr.attr.aligned, dr.type)) { fast_cc_bail(cc, "aligned typedef"); break; }
+                        // #3577: one with an alignment of its own (fast_cc_aligned_typedef).
+                        uint8_t aligned = 0;
+                        FastType typedef_type = dr.type;
+                        if (!fast_cc_typedef_alignment_natural(cc, ds.attr.aligned, dr.attr.aligned, dr.type))
+                        {
+                            typedef_type = fast_cc_aligned_typedef(cc, ds.attr.aligned, dr.attr.aligned, dr.type, &aligned);
+                        }
                         if (!again)
                         {
-                            fast_cc_sym_bind(cc, dr.name_id, (FastSym){ .kind = FSYM_TYPEDEF, .type = dr.type });
+                            fast_cc_sym_bind(cc, dr.name_id, (FastSym){ .kind = FSYM_TYPEDEF, .type = typedef_type, .use_flags = aligned });
+                        }
+                        else
+                        {
+                            cc->syms[prev].use_flags |= aligned;
                         }
                     }
                 }
@@ -8910,6 +9005,50 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
     cc->scratch->used = scratch_mark;
 }
 
+// #3577: checks an inline function's body where it is defined, as the full pipeline does: in the scope there (a
+// declaration later in the unit isn't visible to it yet), and whether or not anything uses the function. The check
+// compiles the body, and then drops what the compile added: the object's code, data, relocations, unwind records and
+// symbols (the object's state, saved whole, and the symbols the compile gave their first object symbol), the function's
+// own symbol's definition, and the constants and static-local names it cached. Its symbol is left defined, not emitted
+// (2): where something references it, the ready queue compiles it again at the unit's end, as before. Uses in the body
+// count for the unit's end alone (fast_cc_reference).
+static __attribute__((noinline)) void fast_cc_check_body(FastCCState* cc, uint32_t sym_idx, uint32_t param_names_start, uint16_t param_count)
+{
+    FastObj* obj = cc->obj;
+    const FastObj saved = *obj;
+    const uint32_t own = cc->syms[sym_idx].obj_sym < obj->sym_count ? cc->syms[sym_idx].obj_sym : 0u;
+    const FastObjSym own_symbol = obj->syms[own];
+    const uint32_t cached[] = {
+        cc->ro_sign_f32_off,
+        cc->ro_sign_f64_off,
+        cc->ro_u64_to_f64_off,
+        cc->ro_f64_to_u64_off,
+        cc->ro_f32_to_u64_off,
+        cc->ro_one_f32_off,
+        cc->ro_one_f64_off,
+        cc->static_local_seq,
+    };
+    cc->checking = 1u;
+    cc->checked_obj_sym_count = 0;
+    fast_cc_compile_func(cc, sym_idx, param_names_start, param_count);
+    cc->checking = 0u;
+    *obj = saved;
+    obj->syms[own] = own_symbol;
+    for (uint32_t i = 0; i < cc->checked_obj_sym_count; i += 1u)
+    {
+        cc->syms[cc->checked_obj_syms[i]].obj_sym = 0;
+    }
+    cc->syms[sym_idx].defined = 2u;
+    cc->ro_sign_f32_off = cached[0];
+    cc->ro_sign_f64_off = cached[1];
+    cc->ro_u64_to_f64_off = cached[2];
+    cc->ro_f64_to_u64_off = cached[3];
+    cc->ro_f32_to_u64_off = cached[4];
+    cc->ro_one_f32_off = cached[5];
+    cc->ro_one_f64_off = cached[6];
+    cc->static_local_seq = cached[7];
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Level 14: Translation unit driver (file-scope decls, deferred static inline fixed-point, tentative .bss!)
 
@@ -9032,8 +9171,19 @@ static bool fast_cc_compile_unit(FastCCState* cc)
                     if (cc->bailout) { break; }
                 }
 
-                // Defer `static inline` or pure C99 `inline` functions: only compile them if actually referenced!
-                if (stor == 4u || stor == 3u)
+                // #3577: a C99 inline definition of external linkage (`inline`, neither `static` nor `extern`, nor an
+                // earlier `static`) is the unit's external definition only where another declaration in it makes it one;
+                // else the full pipeline's calls name the external symbol, which its object doesn't define. Refused.
+                if ((uint32_t)(stor == 3u) & (uint32_t)(cc->syms[si].storage != 1u) & (uint32_t)(cc->syms[si].storage != 4u))
+                {
+                    fast_cc_bail(cc, "inline definition of external linkage");
+                    break;
+                }
+                // An inline function an included file defines is deferred: compiled at the unit's end where something
+                // references it, so that a header's unused helpers emit nothing. #3577: one the main file defines is
+                // compiled here, as any other function there is; and a deferred one is checked here (fast_cc_check_body),
+                // in the scope it has here, whether used or not.
+                if ((stor == 4u || stor == 3u) && !fast_pp_token_in_main(cc->pp, cc->pos))
                 {
                     const FastBodyScan bscan = fast_cc_prescan_body(cc, cc->pos);
                     if (bscan.end_pos == UINT32_MAX) { fast_cc_bail(cc, "unclosed inline body"); break; }
@@ -9044,11 +9194,13 @@ static bool fast_cc_compile_unit(FastCCState* cc)
                             .param_names_start = dr.param_names_start, .param_count = dr.param_count,
                             .previous_task = cc->syms[si].deferred_task,
                         };
-                        // #3577: a `static inline` body is compiled referenced or not: the full pipeline checks it.
-                        if (cc->syms[si].referenced || stor == 4u) { fast_cc_ready_task(cc, deferred_count); }
+                        if (cc->syms[si].referenced == 1u) { fast_cc_ready_task(cc, deferred_count); }
                         cc->syms[si].deferred_task = (uint16_t)(++deferred_count);
                     }
                     else { fast_cc_bail(cc, "too many inline functions"); break; }
+                    // #3577: checked here, in its own scope, whether used or not.
+                    if ((use_flags & BUSTER_FSYM_UNSUPPORTED) != 0) { fast_cc_bail(cc, "unsupported type in an inline definition"); break; }
+                    fast_cc_check_body(cc, si, dr.param_names_start, dr.param_count);
                     cc->pos = bscan.end_pos + 1u;
                 }
                 else
@@ -9067,17 +9219,26 @@ static bool fast_cc_compile_unit(FastCCState* cc)
                 if (dr.name_id != 0)
                 {
                     // A typedef may name its type again (C11); another type, or another kind of symbol, is an error.
-                    // #3577: an alignment of its own, other than its type's, is this path's to refuse (it keeps none for
-                    // a typedef).
+                    // #3577: an alignment of its own, other than its type's, is this path's to refuse where the typedef
+                    // is used (it keeps none for a typedef): glibc's <pthread.h> declares one nothing uses.
                     const uint32_t prev = dr.name_id < cc->env_cap ? cc->sym_cur[dr.name_id] : 0u;
                     const bool again = prev != 0 && cc->syms[prev].kind == FSYM_TYPEDEF && cc->syms[prev].scope_depth == 0 &&
                                        fast_cc_types_identical(cc, cc->syms[prev].type, dr.type);
-                    if (!fast_cc_typedef_alignment_natural(cc, ds.attr.aligned, dr.attr.aligned, dr.type)) { fast_cc_bail(cc, "aligned typedef"); break; }
+                    uint8_t aligned = 0;
+                    FastType typedef_type = dr.type;
+                    if (!fast_cc_typedef_alignment_natural(cc, ds.attr.aligned, dr.attr.aligned, dr.type))
+                    {
+                        typedef_type = fast_cc_aligned_typedef(cc, ds.attr.aligned, dr.attr.aligned, dr.type, &aligned);
+                    }
                     if (!again)
                     {
                         fast_cc_sym_bind(cc, dr.name_id, (FastSym){
-                            .kind = FSYM_TYPEDEF, .type = dr.type, .use_flags = use_flags,
+                            .kind = FSYM_TYPEDEF, .type = typedef_type, .use_flags = (uint8_t)(use_flags | aligned),
                         });
+                    }
+                    else
+                    {
+                        cc->syms[prev].use_flags |= aligned;
                     }
                 }
             }
@@ -9225,8 +9386,7 @@ static bool fast_cc_compile_unit(FastCCState* cc)
 
     // Visit newly reachable bodies in the same order as a forward scan: a reference to an earlier
     // definition waits until the scan wraps. This preserves .text, symbol and relocation order.
-    // #3577: every `static inline` body is ready from its definition, whose body the full pipeline checks referenced or
-    // not (dead local code); a C99 inline definition nothing references would have a global symbol here, refused below.
+    // #3577: each body was checked where it was defined (fast_cc_check_body); these compiles emit the ones referenced.
     uint32_t cursor = 0;
     while (cc->ready_groups != 0 && !cc->bailout)
     {
@@ -9245,17 +9405,12 @@ static bool fast_cc_compile_unit(FastCCState* cc)
 
         const FastBodyTask* task = deferred + index;
         const FastSym* sym = cc->syms + task->sym_idx;
-        if (!sym->defined)
+        if (sym->defined != 1u)
         {
             if ((sym->use_flags & BUSTER_FSYM_UNSUPPORTED) != 0) { fast_cc_bail(cc, "called unsupported static inline"); break; }
             cc->pos = task->body_start;
             fast_cc_compile_func(cc, task->sym_idx, task->param_names_start, task->param_count);
         }
-    }
-
-    for (uint32_t i = 0; i < deferred_count && !cc->bailout; i += 1)
-    {
-        if (cc->syms[deferred[i].sym_idx].defined == 0) { fast_cc_bail(cc, "C99 inline definition nothing uses"); }
     }
 
     // Finalize all tentative file-scope definitions into `.bss`!

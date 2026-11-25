@@ -10,6 +10,11 @@
 #include "buster/compiler/c_direct.h"
 #include "buster/compiler/c_direct_cc.c"
 
+#include <dirent.h>
+#include <errno.h>
+#include <sys/resource.h>
+#include <sys/wait.h>
+
 static bool c_direct_default_output_path(const char* input_path, char* buffer, size_t capacity)
 {
     bool ok = false;
@@ -300,7 +305,7 @@ struct CDirectExpectedSymbol
 {
     const char* name;
     const void* bytes; // data to compare, or NULL for functions in increasing text-offset order
-    uint32_t size;
+    uint32_t size;     // with no bytes, UINT32_MAX for a symbol the object must not have
 };
 
 static bool c_direct_test_symbols(const uint8_t* file, size_t size, const Elf64_Shdr* tables, uint32_t sections,
@@ -314,13 +319,14 @@ static bool c_direct_test_symbols(const uint8_t* file, size_t size, const Elf64_
     for (const CDirectExpectedSymbol* want = expected; ok && want->name != NULL; want += 1)
     {
         const size_t name_size = strlen(want->name) + 1u;
-        bool found = false;
+        const bool absent = want->bytes == NULL && want->size == UINT32_MAX;
+        bool found = absent;
         for (size_t i = 0; i < symtab->sh_size / sizeof(*syms); i += 1)
         {
             const Elf64_Sym sym = syms[i];
             if (sym.st_name > names->sh_size || name_size > names->sh_size - sym.st_name ||
                 memcmp(file + names->sh_offset + sym.st_name, want->name, name_size) != 0) { continue; }
-            if (sym.st_shndx == SHN_UNDEF || sym.st_shndx >= sections) { break; }
+            if (absent || sym.st_shndx == SHN_UNDEF || sym.st_shndx >= sections) { found = false; break; }
             const Elf64_Shdr* sec = tables + sym.st_shndx;
             if (sec->sh_offset > size || sec->sh_size > size - sec->sh_offset ||
                 sym.st_value > sec->sh_size || sym.st_size > sec->sh_size - sym.st_value) { break; }
@@ -584,14 +590,12 @@ static const CDirectLexCase c_direct_lex_cases[] = {
     { "s[1]='a';", 7, { FTOK_IDENT, FTOK_LBRACKET, BUSTER_DIRECT_TEST_NUMBER, FTOK_RBRACKET, FTOK_ASSIGN, FTOK_CHAR_LIT, FTOK_SEMI } },
     { "u8\"x\"", 1, { FTOK_STR_LIT } },
     { "L'x'", 1, { FTOK_CHAR_LIT } },
-    { "u'x'", 1, { FTOK_CHAR_LIT } },
     { "\"caf\xc3\xa9\"", 1, { FTOK_STR_LIT } },
     { "a /* caf\xc3\xa9 */ b", 2, { FTOK_IDENT, FTOK_IDENT } },
     { "x = 1 \\\n + 2;", 6, { FTOK_IDENT, FTOK_ASSIGN, BUSTER_DIRECT_TEST_NUMBER, FTOK_PLUS, BUSTER_DIRECT_TEST_NUMBER, FTOK_SEMI } },
     { "a@b", 3, { FTOK_IDENT, FTOK_PP_OTHER, FTOK_IDENT } },
     { "a<\xbd" "b", 4, { FTOK_IDENT, FTOK_LT, FTOK_PP_OTHER, FTOK_IDENT } },
     { "a+\xab-\xad", 5, { FTOK_IDENT, FTOK_PLUS, FTOK_PP_OTHER, FTOK_MINUS, FTOK_PP_OTHER } },
-    { "1..2", 1, { BUSTER_DIRECT_TEST_NUMBER } },
     { "1.e2", 1, { BUSTER_DIRECT_TEST_NUMBER } },
     { "a.b.c", 5, { FTOK_IDENT, FTOK_DOT, FTOK_IDENT, FTOK_DOT, FTOK_IDENT } },
     { "a<<<=b", 4, { FTOK_IDENT, FTOK_LSHIFT, FTOK_LE, FTOK_IDENT } },
@@ -780,10 +784,11 @@ static bool c_direct_test_lexer(void)
         }
     }
     // What the direct path leaves to the full compiler must be left at every offset too: an identifier a backslash and
-    // a newline splice, and a digit separator.
+    // a newline splice, a digit separator, and (#3577) a char16_t constant, whose type isn't int, and a number the full
+    // pipeline refuses (`1..2`: an invalid suffix).
     for (uint32_t shift = 0; ok && shift < 131u; shift += 1)
     {
-        static const char* const refused[] = { "ab\\\ncd", "1'000" };
+        static const char* const refused[] = { "ab\\\ncd", "1'000", "u'x'", "1..2" };
         for (uint32_t r = 0; ok && r < sizeof(refused) / sizeof(refused[0]); r += 1)
         {
             uint32_t count = 0;
@@ -937,24 +942,30 @@ static bool c_direct_test_include_search(const char* obj_path)
     return ok;
 }
 
+// #3577: no initializer here overrides another or changes its value (the full pipeline's warnings). The inline functions
+// a header defines are each checked where they are defined, `unused` too, and only the ones a compiled function references
+// are emitted, at the unit's end, in the order they become reachable; one the main file defines is emitted where it is.
 static bool c_direct_test_tables_and_inline_bodies(const char* obj_path)
 {
-    static const char source[] =
-        "unsigned char bytes[] = {0,1,22,33,44,55,66,77,88,99,100,111,122,133,144,155,"
-        "0x1ff,030,8+2,[23]=7,[2]=99};\n"
-        "unsigned short rows[2][17] = {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,"
-        "17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,65537};\n"
-        "unsigned int decimals[] = {0,1,22,333,4444,55555,666666,7777777,88888888,"
-        "9,10,11,12,13,14,15,123456789,2.5,3+4};\n"
-        "unsigned long wide[] = {0xffffffffU,1,2,3,4,5,6,7,8,9,10,11,12,13,14,2147483648U,-2};\n"
+    static const char header_text[] =
         "static inline int a(int), b(int), c(int), d(int);\n"
         "static inline int a(int n){return n ? d(n-1) : 1;}\n"
         "static inline int b(int n){return n ? a(n-1)+c(n-1) : 2;}\n"
         "static inline int c(int n){return a(n); }\n"
         "static inline int d(int n){return b(n); }\n"
-        "static inline int unused(void){return undeclared;}\n"
+        "static inline int unused(void){return 3;}\n";
+    static const char source[] =
+        "unsigned char bytes[] = {0,1,22,33,44,55,66,77,88,99,100,111,122,133,144,155,"
+        "0xff,030,8+2,[23]=7};\n"
+        "unsigned short rows[2][17] = {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,"
+        "17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,1};\n"
+        "unsigned int decimals[] = {0,1,22,333,4444,55555,666666,7777777,88888888,"
+        "9,10,11,12,13,14,15,123456789,(unsigned)2.5,3+4};\n"
+        "unsigned long wide[] = {0xffffffffU,1,2,3,4,5,6,7,8,9,10,11,12,13,14,2147483648U,-2};\n"
+        "#include <bodies.h>\n"
+        "static inline int here(void){return 4;}\n"
         "int (*hook)(int)=b; int entry(int n){return hook(n); }\n";
-    static const uint8_t bytes[24] = {0,1,99,33,44,55,66,77,88,99,100,111,122,133,144,155,255,24,10,[23]=7};
+    static const uint8_t bytes[24] = {0,1,22,33,44,55,66,77,88,99,100,111,122,133,144,155,255,24,10,[23]=7};
     static const uint16_t rows[34] = {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31,32,1};
     static const uint32_t decimals[] = {0,1,22,333,4444,55555,666666,7777777,88888888,9,10,11,12,13,14,15,123456789,2,7};
     static const uint64_t wide[] = {UINT32_MAX,1,2,3,4,5,6,7,8,9,10,11,12,13,14,UINT32_C(2147483648),UINT64_MAX-1u};
@@ -963,20 +974,440 @@ static bool c_direct_test_tables_and_inline_bodies(const char* obj_path)
         { "rows", rows, sizeof(rows) },
         { "decimals", decimals, sizeof(decimals) },
         { "wide", wide, sizeof(wide) },
+        { "here", NULL, 0 },
         { "entry", NULL, 0 },
         { "b", NULL, 0 },
         { "c", NULL, 0 },
         { "a", NULL, 0 },
         { "d", NULL, 0 },
+        { "unused", NULL, UINT32_MAX },
         { NULL, NULL, 0 },
     };
-    return c_direct_test_compile_source_with(source, obj_path, 0, NULL, 0, false, NULL, NULL, NULL, expected, NULL, 0);
+    char directory[256];
+    char header[320];
+    snprintf(directory, sizeof(directory), "/tmp/buster_direct_test_%d_bodies", (int)getpid());
+    snprintf(header, sizeof(header), "%s/bodies.h", directory);
+    bool ok = mkdir(directory, 0700) == 0;
+    if (ok)
+    {
+        FILE* const file = fopen(header, "wb");
+        ok = file != NULL && fputs(header_text, file) != EOF;
+        ok = (file == NULL || fclose(file) == 0) && ok;
+    }
+    const char* directories[1] = { directory };
+    ok = ok && c_direct_test_compile_source_with(source, obj_path, 0, directories, 1, false, NULL, NULL, NULL, expected, NULL, 0);
+    unlink(header);
+    rmdir(directory);
+    return ok;
 }
 
-int run_c_direct_tests(int argc, char** argv)
+// ---------------------------------------------------------------------------------------------------------------------
+// The differential (#3577): `test-direct --differential [--jobs N] [--direct-floor N] DIRECTORY...`. Every C file under
+// the directories is compiled with -c by this executable twice, each time a child of its own: by default, where the
+// direct path compiles what it can and leaves the rest to the full pipeline, and with --no-direct, the full pipeline
+// alone. The two must exit alike and print the same bytes, standard output and errors together. The direct path
+// compiled a file itself where its run exited 0 without a line in the log BUSTER_TEST_DIRECT_BAILS names; fewer such
+// files than --direct-floor fail the run, as a direct path that took none would leave nothing compared.
+
+#define BUSTER_C_DIRECT_DIFFERENTIAL_CAPTURE_BYTES (UINT64_C(64) << 20)
+#define BUSTER_C_DIRECT_DIFFERENTIAL_REPORTS 20u
+
+// Appends ITEM, which the list then owns, to a list of strings; frees it and returns false where memory runs out.
+static bool c_direct_differential_push(char*** items, uint32_t* count, uint32_t* capacity, char* item)
 {
-    (void)argc;
-    (void)argv;
+    bool ok = item != NULL;
+    if (ok && *count == *capacity)
+    {
+        const uint32_t grown = *capacity == 0 ? 256u : *capacity * 2u;
+        char** bigger = realloc(*items, (size_t)grown * sizeof(char*));
+        ok = bigger != NULL;
+        if (ok)
+        {
+            *items = bigger;
+            *capacity = grown;
+        }
+    }
+    if (ok)
+    {
+        (*items)[*count] = item;
+        *count += 1u;
+    }
+    else
+    {
+        free(item);
+    }
+    return ok;
+}
+
+static int c_direct_differential_order(const void* left, const void* right)
+{
+    return strcmp(*(const char* const*)left, *(const char* const*)right);
+}
+
+// Appends the regular files named *.c under ROOT, at every depth, to FILES: a stack of directories walks the tree (the
+// call graph allows no recursion), and a link is followed to neither a file nor a directory. False where a directory
+// can't be read or memory runs out.
+static bool c_direct_differential_collect(const char* root, char*** files, uint32_t* file_count, uint32_t* file_capacity)
+{
+    char** stack = NULL;
+    uint32_t depth = 0;
+    uint32_t stack_capacity = 0;
+    bool ok = c_direct_differential_push(&stack, &depth, &stack_capacity, strdup(root));
+    while (ok && depth > 0)
+    {
+        depth -= 1u;
+        char* directory = stack[depth];
+        DIR* handle = opendir(directory);
+        ok = handle != NULL;
+        if (!ok)
+        {
+            fprintf(stderr, "test-direct: %s: %s\n", directory, strerror(errno));
+        }
+        for (struct dirent* entry = ok ? readdir(handle) : NULL; ok && entry != NULL; entry = readdir(handle))
+        {
+            const char* name = entry->d_name;
+            const size_t name_length = strlen(name);
+            const size_t directory_length = strlen(directory);
+            if (name[0] != '.')
+            {
+                char* path = malloc(directory_length + name_length + 2u);
+                ok = path != NULL;
+                struct stat stats = { 0 };
+                if (ok)
+                {
+                    memcpy(path, directory, directory_length);
+                    path[directory_length] = '/';
+                    memcpy(path + directory_length + 1u, name, name_length + 1u);
+                    ok = lstat(path, &stats) == 0;
+                }
+                if (ok && S_ISDIR(stats.st_mode))
+                {
+                    ok = c_direct_differential_push(&stack, &depth, &stack_capacity, path);
+                }
+                else if (ok && S_ISREG(stats.st_mode) && name_length > 2u && strcmp(name + name_length - 2u, ".c") == 0)
+                {
+                    ok = c_direct_differential_push(files, file_count, file_capacity, path);
+                }
+                else
+                {
+                    free(path);
+                }
+            }
+        }
+        if (handle != NULL)
+        {
+            closedir(handle);
+        }
+        free(directory);
+    }
+    while (depth > 0)
+    {
+        depth -= 1u;
+        free(stack[depth]);
+    }
+    free(stack);
+    return ok;
+}
+
+// The work directory's three files of run RUN (file RUN / 2's, by default where RUN is even, with --no-direct where it
+// is odd): its standard output and errors, its object, its bail log.
+static void c_direct_differential_names(const char* work, uint32_t run, char* capture, char* object, char* bails, size_t capacity)
+{
+    snprintf(capture, capacity, "%s/%u.txt", work, run);
+    snprintf(object, capacity, "%s/%u.o", work, run);
+    snprintf(bails, capacity, "%s/%u.bails", work, run);
+}
+
+// Starts SELF on FILE with -c (with --no-direct where FULL), its standard input /dev/null, its standard output and
+// errors into CAPTURE, its object into OBJECT, without core files and killed past two minutes of CPU time. The
+// environment is the comparison's own: no BUSTER_NO_DIRECT and no SOURCE_DATE_EPOCH, either of which turns the direct
+// path off, and BUSTER_TEST_DIRECT_BAILS naming BAILS for the default run alone. Its pid, or -1.
+static pid_t c_direct_differential_start(const char* self, const char* file, bool full, const char* capture, const char* object, const char* bails)
+{
+    const pid_t child = fork();
+    if (child == 0)
+    {
+        const int input = open("/dev/null", O_RDONLY | O_CLOEXEC);
+        const int output = open(capture, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+        const struct rlimit cpu = { .rlim_cur = 120, .rlim_max = 125 };
+        const struct rlimit core = { 0 };
+        const bool named = full ? unsetenv("BUSTER_TEST_DIRECT_BAILS") == 0 : setenv("BUSTER_TEST_DIRECT_BAILS", bails, 1) == 0;
+        const bool ready = named && unsetenv("BUSTER_NO_DIRECT") == 0 && unsetenv("SOURCE_DATE_EPOCH") == 0 && input >= 0 && output >= 0 &&
+                           setrlimit(RLIMIT_CPU, &cpu) == 0 && setrlimit(RLIMIT_CORE, &core) == 0 &&
+                           dup2(input, 0) == 0 && dup2(output, 1) == 1 && dup2(output, 2) == 2;
+        if (ready)
+        {
+            char* direct_arguments[] = { (char*)self, (char*)"-c", (char*)file, (char*)"-o", (char*)object, NULL };
+            char* full_arguments[] = { (char*)self, (char*)"--no-direct", (char*)"-c", (char*)file, (char*)"-o", (char*)object, NULL };
+            execv(self, full ? full_arguments : direct_arguments);
+        }
+        _exit(127);
+    }
+    return child;
+}
+
+// The file at PATH in memory the caller frees (*length its bytes), an empty one where there is none; null where it
+// can't be read whole.
+static char* c_direct_differential_read(const char* path, uint64_t* length)
+{
+    *length = 0;
+    char* bytes = NULL;
+    const int descriptor = open(path, O_RDONLY | O_CLOEXEC);
+    struct stat stats = { 0 };
+    if (descriptor < 0)
+    {
+        bytes = errno == ENOENT ? calloc(1, 1) : NULL;
+    }
+    else if (fstat(descriptor, &stats) == 0 && S_ISREG(stats.st_mode) && (uint64_t)stats.st_size <= BUSTER_C_DIRECT_DIFFERENTIAL_CAPTURE_BYTES)
+    {
+        bytes = malloc((uint64_t)stats.st_size + 1u);
+        bool reading = bytes != NULL;
+        while (reading && *length < (uint64_t)stats.st_size)
+        {
+            const ssize_t got = read(descriptor, bytes + *length, (uint64_t)stats.st_size - *length);
+            reading = got > 0 || (got < 0 && errno == EINTR);
+            *length += got > 0 ? (uint64_t)got : 0u;
+        }
+        if (bytes != NULL && *length != (uint64_t)stats.st_size)
+        {
+            free(bytes);
+            bytes = NULL;
+        }
+    }
+    if (descriptor >= 0)
+    {
+        close(descriptor);
+    }
+    return bytes;
+}
+
+static void c_direct_differential_print_status(const char* who, int status)
+{
+    if (WIFEXITED(status))
+    {
+        fprintf(stderr, "%s exited %d", who, WEXITSTATUS(status));
+    }
+    else if (WIFSIGNALED(status))
+    {
+        fprintf(stderr, "%s was killed by signal %d", who, WTERMSIG(status));
+    }
+    else
+    {
+        fprintf(stderr, "%s ended with wait status %d", who, status);
+    }
+}
+
+// Compares file FILE's two runs (statuses STATUSES[0], by default, and STATUSES[1], with --no-direct) and removes their
+// files: whether they exited alike and printed the same bytes. *DIRECT: whether the direct path compiled the file itself.
+// The first BUSTER_C_DIRECT_DIFFERENTIAL_REPORTS differences, counted in *REPORTED, print each run's first line that
+// differs.
+static bool c_direct_differential_compare(const char* work, uint32_t file, const char* path, const int* statuses, bool* direct, uint32_t* reported)
+{
+    char capture[2][512];
+    char object[2][512];
+    char bails[2][512];
+    uint64_t length[2] = { 0, 0 };
+    uint64_t bail_length = 0;
+    c_direct_differential_names(work, 2u * file, capture[0], object[0], bails[0], sizeof(capture[0]));
+    c_direct_differential_names(work, 2u * file + 1u, capture[1], object[1], bails[1], sizeof(capture[1]));
+    char* direct_output = c_direct_differential_read(capture[0], &length[0]);
+    char* full_output = c_direct_differential_read(capture[1], &length[1]);
+    char* bail_log = c_direct_differential_read(bails[0], &bail_length);
+    const bool read = direct_output != NULL && full_output != NULL && bail_log != NULL;
+    const bool same = read && statuses[0] == statuses[1] && length[0] == length[1] && memcmp(direct_output, full_output, length[0]) == 0;
+    *direct = read && WIFEXITED(statuses[0]) && WEXITSTATUS(statuses[0]) == 0 && bail_length == 0;
+    if (!same && *reported < BUSTER_C_DIRECT_DIFFERENTIAL_REPORTS)
+    {
+        fprintf(stderr, "test-direct: DIFF %s: ", path);
+        c_direct_differential_print_status("by default it", statuses[0]);
+        c_direct_differential_print_status(", with --no-direct it", statuses[1]);
+        fprintf(stderr, "%s\n", read ? "" : "; a run's output couldn't be read");
+        if (read)
+        {
+            // Each run's line where the outputs part.
+            uint64_t common = 0;
+            while (common < length[0] && common < length[1] && direct_output[common] == full_output[common])
+            {
+                common += 1u;
+            }
+            while (common > 0 && direct_output[common - 1u] != '\n')
+            {
+                common -= 1u;
+            }
+            const char* const outputs[2] = { direct_output, full_output };
+            const char* const labels[2] = { "  by default", "--no-direct" };
+            for (uint32_t side = 0; side < 2u; side += 1u)
+            {
+                uint64_t end = common;
+                while (end < length[side] && end - common < 200u && outputs[side][end] != '\n')
+                {
+                    end += 1u;
+                }
+                fprintf(stderr, "    %s| %.*s%s\n", labels[side], (int)(end - common), outputs[side] + common, end < length[side] ? "" : " <end of output>");
+            }
+        }
+        *reported += 1u;
+    }
+    free(direct_output);
+    free(full_output);
+    free(bail_log);
+    for (uint32_t side = 0; side < 2u; side += 1u)
+    {
+        unlink(capture[side]);
+        unlink(object[side]);
+        unlink(bails[side]);
+    }
+    return same;
+}
+
+static int c_direct_differential(int argc, char** argv)
+{
+    uint32_t jobs = 0;
+    uint32_t direct_floor = 0;
+    uint32_t roots = 0;
+    char** files = NULL;
+    uint32_t file_count = 0;
+    uint32_t file_capacity = 0;
+    bool ok = true;
+    for (int i = 0; ok && i < argc; i += 1)
+    {
+        const bool valued = i + 1 < argc;
+        if (valued && strcmp(argv[i], "--jobs") == 0)
+        {
+            jobs = (uint32_t)strtoul(argv[i + 1], NULL, 10);
+            i += 1;
+        }
+        else if (valued && strcmp(argv[i], "--direct-floor") == 0)
+        {
+            direct_floor = (uint32_t)strtoul(argv[i + 1], NULL, 10);
+            i += 1;
+        }
+        else if (argv[i][0] == '-')
+        {
+            fprintf(stderr, "test-direct: --differential takes --jobs N, --direct-floor N and directories, not %s\n", argv[i]);
+            ok = false;
+        }
+        else
+        {
+            ok = c_direct_differential_collect(argv[i], &files, &file_count, &file_capacity);
+            roots += 1u;
+        }
+    }
+    if (ok && (roots == 0 || file_count == 0))
+    {
+        fprintf(stderr, "test-direct: --differential found no C file to compare\n");
+        ok = false;
+    }
+    if (jobs == 0)
+    {
+        const char* cores = getenv("CORES");
+        const long online = sysconf(_SC_NPROCESSORS_ONLN);
+        jobs = cores != NULL && cores[0] != 0 ? (uint32_t)strtoul(cores, NULL, 10) : (uint32_t)(online > 0 ? online : 1);
+        jobs = jobs == 0 ? 1u : jobs;
+    }
+    char self[4096];
+    const ssize_t self_length = readlink("/proc/self/exe", self, sizeof(self) - 1u);
+    ok = ok && self_length > 0 && (size_t)self_length < sizeof(self) - 1u;
+    self[self_length > 0 && (size_t)self_length < sizeof(self) ? self_length : 0] = 0;
+    const char* temporary = getenv("TMPDIR");
+    char work[512];
+    snprintf(work, sizeof(work), "%s/buster-direct-differential.XXXXXX", temporary != NULL && temporary[0] != 0 ? temporary : "/tmp");
+    const bool made = ok && mkdtemp(work) != NULL;
+    ok = made;
+    if (file_count > 1u)
+    {
+        qsort(files, file_count, sizeof(char*), c_direct_differential_order);
+    }
+
+    // Each file's two runs as children, JOBS at a time; run R is file R / 2's.
+    const uint32_t run_count = 2u * file_count;
+    pid_t* children = calloc(jobs, sizeof(pid_t));
+    uint32_t* child_run = calloc(jobs, sizeof(uint32_t));
+    int* statuses = calloc(run_count + 1u, sizeof(int));
+    uint8_t* ended = calloc(file_count + 1u, 1);
+    ok = ok && children != NULL && child_run != NULL && statuses != NULL && ended != NULL;
+    uint32_t next = 0;
+    uint32_t running = 0;
+    uint32_t differ = 0;
+    uint32_t direct = 0;
+    uint32_t reported = 0;
+    while ((ok && next < run_count) || running > 0)
+    {
+        for (uint32_t slot = 0; ok && slot < jobs && next < run_count; slot += 1u)
+        {
+            if (children[slot] == 0)
+            {
+                char capture[512];
+                char object[512];
+                char bails[512];
+                c_direct_differential_names(work, next, capture, object, bails, sizeof(capture));
+                const pid_t child = c_direct_differential_start(self, files[next / 2u], (next & 1u) != 0, capture, object, bails);
+                ok = child > 0;
+                children[slot] = child > 0 ? child : 0;
+                child_run[slot] = next;
+                running += (uint32_t)(child > 0);
+                next += 1u;
+            }
+        }
+        int status = 0;
+        const pid_t child = running > 0 ? waitpid(-1, &status, 0) : 0;
+        for (uint32_t slot = 0; child > 0 && slot < jobs; slot += 1u)
+        {
+            if (children[slot] == child)
+            {
+                const uint32_t run = child_run[slot];
+                const uint32_t file = run / 2u;
+                children[slot] = 0;
+                running -= 1u;
+                statuses[run] = status;
+                ended[file] += 1u;
+                if (ended[file] == 2u)
+                {
+                    bool compiled = false;
+                    differ += (uint32_t)!c_direct_differential_compare(work, file, files[file], statuses + 2u * file, &compiled, &reported);
+                    direct += (uint32_t)compiled;
+                }
+            }
+        }
+        if (child < 0 && errno != EINTR)
+        {
+            fprintf(stderr, "test-direct: waitpid: %s\n", strerror(errno));
+            ok = false;
+            running = 0;
+        }
+    }
+    if (made)
+    {
+        rmdir(work);
+    }
+    const bool floor_met = direct >= direct_floor;
+    if (ok && differ > 0)
+    {
+        printf("test-direct: %u of %u C files differ by default from --no-direct (FAILED)\n", differ, file_count);
+    }
+    else if (ok)
+    {
+        printf("test-direct: %u C files: by default each exits and prints as with --no-direct; the direct path compiled %u of them itself\n",
+               file_count, direct);
+    }
+    if (ok && !floor_met)
+    {
+        printf("test-direct: the direct path compiled %u of the files, fewer than --direct-floor %u (FAILED)\n", direct, direct_floor);
+    }
+    for (uint32_t i = 0; i < file_count; i += 1u)
+    {
+        free(files[i]);
+    }
+    free(files);
+    free(children);
+    free(child_run);
+    free(statuses);
+    free(ended);
+    return ok && differ == 0 && floor_met ? 0 : 1;
+}
+
+static int c_direct_unit_tests(void)
+{
     char obj_path[256];
     snprintf(obj_path, sizeof(obj_path), "/tmp/buster_direct_test_%d.o", (int)getpid());
     uint32_t passed = 0;
@@ -1067,6 +1498,25 @@ int run_c_direct_tests(int argc, char** argv)
         "static inline int bridge(void) { return leaf(); }\n"
         "int root(void) { return bridge(); }\n",
         "const void* wide_str(void) { return L\"hello\"; }\n",
+        // #3577: what the full pipeline diagnoses or compiles otherwise. An initializer over another, and a constant
+        // whose value a conversion changes.
+        "const unsigned short table[] = { [2] = 77, 0, [0] = 300, 101, 102 };\n",
+        "const unsigned short table[] = { 12345678 };\n",
+        // An inline body nothing uses is checked; a body is checked in its own scope, before a later declaration; a C99
+        // inline definition of external linkage is the unit's external definition only where another declaration makes
+        // it one.
+        "static inline int unused(void) { return undeclared_xyz; }\nint f(void) { return 0; }\n",
+        "static inline int early(void) { return later; }\nint later;\nint g(void) { return early(); }\n",
+        "inline int f(void) { return 1; }\nint g(void) { return f(); }\n",
+        // Compound literals: an element past the type, one over another, one an aggregate member takes by brace elision,
+        // and a designator of more than one member.
+        "int f(void) { return (int){ 1, 2 }; }\n",
+        "struct P { int y, z; };\nint f(void) { return (struct P){ .z = 1, .z = 2 }.z; }\n",
+        "struct S { int x, y; };\nstruct P { struct S s; int z; };\nint f(int a) { return (struct P){ a, a, a }.z; }\n",
+        "struct S { int x, y; };\nstruct P { struct S s; int z; };\nint f(void) { return (struct P){ .s.x = 1 }.z; }\n",
+        // An object of incomplete type, and a for clause's const object left uninitialized.
+        "int f(void) { struct T t; return 0; }\n",
+        "int f(int n) { for (const int k; n; n--) { } return n; }\n",
     };
     for (uint32_t i = 0; i < sizeof(bail_cases) / sizeof(bail_cases[0]); i += 1)
     {
@@ -1081,14 +1531,14 @@ int run_c_direct_tests(int argc, char** argv)
         }
     }
 
-    // The first block extends an incomplete array, the second overwrites it after a designator.
-    // The general evaluator handles the intervening expression and the final designator.
+    // The block after a designator extends an incomplete array; the general evaluator handles the expression after it
+    // and the final designator. (#3577: a second block over the first, `[0] = 300, 101, ...`, is the full pipeline's
+    // -Winitializer-overrides, and 12345678 for 24910 its -Wconstant-conversion: bailout cases above.)
     static const char table_source[] =
         "const unsigned short table[] = { [2] = 77, 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,"
-        " 9+7, [0] = 300, 101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,"
-        " [20] = 12345678 };";
+        " 9+7, [22] = 24910 };";
     static const uint16_t expected_table[] = {
-        300, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 14, 15, 16, 24910
+        0, 0, 77, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 0, 0, 24910
     };
     if (c_direct_test_compile_source_with(table_source, obj_path, 0, NULL, 0, false, NULL, NULL, NULL, NULL, expected_table, sizeof(expected_table)))
     {
@@ -1142,4 +1592,18 @@ int run_c_direct_tests(int argc, char** argv)
 
     printf("test-direct: %u passed, %u failed\n", passed, failed);
     return failed == 0 ? 0 : 1;
+}
+
+int run_c_direct_tests(int argc, char** argv)
+{
+    int result = 0;
+    if (argc >= 1 && strcmp(argv[0], "--differential") == 0)
+    {
+        result = c_direct_differential(argc - 1, argv + 1);
+    }
+    else
+    {
+        result = c_direct_unit_tests();
+    }
+    return result;
 }

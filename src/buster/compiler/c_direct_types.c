@@ -103,7 +103,7 @@ struct FastComplexType
     uint8_t kind;          // FastComplexKind
     uint8_t complete;      // 1 if struct/union/enum defined or array sized
     uint8_t packed;        // __attribute__((packed))
-    uint8_t is_variadic;   // for FCTYPE_FUNC
+    uint8_t is_variadic;   // for FCTYPE_FUNC; a struct or union's: 1 for an aligned typedef's copy (#3577, below)
     uint8_t abi_lo;        // FastAbiClass for bytes 0..7
     uint8_t abi_hi;        // FastAbiClass for bytes 8..15
     uint8_t is_oldstyle;   // for FCTYPE_FUNC with empty ()
@@ -139,6 +139,7 @@ typedef enum FastSymKind
 #define BUSTER_FSYM_UNUSED_RESULT 0x10u // __attribute__((warn_unused_result)): a discarded call is -Wunused-result
 #define BUSTER_FSYM_REGISTER    0x20u // a register variable: taking its address is an error
 #define BUSTER_FSYM_PURE        0x40u // __attribute__((const)) or ((pure)): a discarded call is -Wunused-value
+#define BUSTER_FSYM_ALIGNED     0x80u // a typedef with an alignment of its own, which this path keeps none of: a use is refused
 // A parameter's name in cc->param_names, whose high bit marks one declared an array (#3577).
 #define BUSTER_FPARAM_NAME_MASK 0x7fffffffu
 
@@ -150,13 +151,16 @@ typedef enum FastSymKind
 #define BUSTER_FFOLD_ZERO    1u
 #define BUSTER_FFOLD_NONZERO 2u
 
+// The symbols a checked inline body may give their first object symbols (fast_cc_check_body); more are refused.
+#define BUSTER_FCHECKED_OBJ_SYMS 512u
+
 typedef struct FastSym FastSym;
 struct FastSym
 {
     uint8_t kind;          // FastSymKind
     uint8_t storage;       // 0=default, 1=static, 2=extern, 3=inline, 4=static_inline
-    uint8_t defined;       // 1 if body/initializer defined
-    uint8_t referenced;    // 1 if referenced (for dead static elimination / diagnostics)
+    uint8_t defined;       // 1 if body/initializer defined; 2 an inline body checked, not (yet) emitted (#3577)
+    uint8_t referenced;    // 1 if referenced (for dead static elimination / diagnostics); 2 used in a checked body alone
     uint8_t is_tentative;  // 1 if uninitialized file-scope tentative definition
     uint8_t is_const_var;  // 1 if const-qualified
     uint8_t is_noreturn;
@@ -337,6 +341,12 @@ struct FastCCState
     uint32_t ro_f32_to_u64_off; // 0x5f000000 (2^63f) for float -> u64
     uint32_t ro_one_f32_off;
     uint32_t ro_one_f64_off;
+
+    // #3577: an inline body compiled to be checked where it is defined (fast_cc_check_body), and the symbols whose first
+    // object symbol that compile created, which go with it.
+    uint8_t checking;
+    uint32_t checked_obj_sym_count;
+    uint32_t checked_obj_syms[BUSTER_FCHECKED_OBJ_SYMS];
 };
 
 static __attribute__((cold, noinline)) void fast_cc_bail(FastCCState* cc, const char* reason)
@@ -550,6 +560,10 @@ static const uint8_t fast_operand_complex_class[8] = { 3, 3, 3, 0, 2, 2, 2, 3 };
       (uint32_t)(((uint32_t)(t) & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK)) == FTYPE_VOID)))
 #define BUSTER_FAST_OPERAND_CLASS(cc, t) \
     ((BUSTER_FAST_OPERAND_BASE(cc, t) & (BUSTER_FAST_OPERAND_POINTER(t) - 1u)) | (BUSTER_FOPERAND_POINTER & (UINT32_C(0) - BUSTER_FAST_OPERAND_POINTER(t))))
+
+// #3577: a struct or union an aligned typedef copied with its own alignment (fast_cc_aligned_typedef), which this path's
+// calls don't place (no argument goes above 8-byte alignment): passing or returning one by value is refused.
+#define BUSTER_FAST_RECORD_OVERALIGNED(ct) ((ct)->is_variadic != 0)
 
 // Whether a type is one sizeof can't measure (#3577): a struct, union, enum or array not (yet) complete, which the full
 // pipeline refuses; void and a function type are GNU's 1. Branch-free.
@@ -1373,7 +1387,10 @@ static FastType fast_cc_parse_simple_typename_leaf(FastCCState* cc, bool* out_ok
                  fast_cc_is_typedef_name(cc, fast_cc_data(cc)))
         {
             has_explicit = true;
-            base = cc->syms[cc->sym_cur[fast_cc_data(cc)]].type;
+            const FastSym* typedef_sym = cc->syms + cc->sym_cur[fast_cc_data(cc)];
+            base = typedef_sym->type;
+            // #3577: a typedef with an alignment of its own (BUSTER_FSYM_ALIGNED).
+            if ((typedef_sym->use_flags & BUSTER_FSYM_ALIGNED) != 0) { fast_cc_bail(cc, "use of an aligned typedef"); }
             cc->pos += 1u;
         }
         else
@@ -1500,10 +1517,13 @@ static FastType fast_cc_parse_simple_typename_leaf(FastCCState* cc, bool* out_ok
         }
         for (int32_t i = (int32_t)nd - 1; i >= 0 && !cc->bailout; i -= 1)
         {
-            const uint64_t total_sz = (uint64_t)dims[i] * (uint64_t)ftype_size(cc, base);
-            if (total_sz > (uint64_t)INT32_MAX)
+            const uint32_t esz = ftype_size(cc, base);
+            const uint32_t eal = ftype_align(cc, base);
+            const uint64_t total_sz = (uint64_t)dims[i] * (uint64_t)esz;
+            // #3577: and an element whose size isn't a multiple of its alignment (an aligned typedef's), an error.
+            if (((uint32_t)(total_sz > (uint64_t)INT32_MAX) | (uint32_t)(esz % eal != 0)) != 0)
             {
-                fast_cc_bail(cc, "array size overflow");
+                fast_cc_bail(cc, "array size overflow or misaligned element");
                 break;
             }
             const uint32_t ac = fast_cc_alloc_ctype(cc, FCTYPE_ARRAY);
@@ -1512,7 +1532,7 @@ static FastType fast_cc_parse_simple_typename_leaf(FastCCState* cc, bool* out_ok
                 cc->ctypes[ac].inner = base;
                 cc->ctypes[ac].count = dims[i];
                 cc->ctypes[ac].size = (uint32_t)total_sz;
-                cc->ctypes[ac].align = ftype_align(cc, base);
+                cc->ctypes[ac].align = eal;
                 cc->ctypes[ac].complete = 1u;
                 base = ftype_from_index(cc, ac);
             }
@@ -2252,7 +2272,10 @@ static BUSTER_DIRECT_HOT FastType fast_cc_parse_scalar_or_tag_specs(FastCCState*
                  fast_cc_is_typedef_name(cc, fast_cc_data(cc)))
         {
             has_explicit_type = true;
-            explicit_type = cc->syms[cc->sym_cur[fast_cc_data(cc)]].type;
+            const FastSym* typedef_sym = cc->syms + cc->sym_cur[fast_cc_data(cc)];
+            explicit_type = typedef_sym->type;
+            // #3577: a typedef with an alignment of its own (BUSTER_FSYM_ALIGNED).
+            if ((typedef_sym->use_flags & BUSTER_FSYM_ALIGNED) != 0) { fast_cc_bail(cc, "use of an aligned typedef"); }
             cc->pos += 1u;
         }
         else
@@ -2676,10 +2699,13 @@ static BUSTER_DIRECT_HOT bool fast_cc_parse_declarator(FastCCState* cc, FastType
                             }
                             for (int32_t di = (int32_t)ndim - 1; di >= 1 && !cc->bailout; di -= 1)
                             {
-                                const uint64_t total_sz = dims[di] == UINT32_MAX ? 0u : (uint64_t)dims[di] * (uint64_t)ftype_size(cc, pt);
-                                if (total_sz > (uint64_t)INT32_MAX)
+                                const uint32_t esz = ftype_size(cc, pt);
+                                const uint32_t eal = ftype_align(cc, pt);
+                                const uint64_t total_sz = dims[di] == UINT32_MAX ? 0u : (uint64_t)dims[di] * (uint64_t)esz;
+                                // #3577: and an element whose size isn't a multiple of its alignment, an error.
+                                if (((uint32_t)(total_sz > (uint64_t)INT32_MAX) | (uint32_t)(esz % eal != 0)) != 0)
                                 {
-                                    fast_cc_bail(cc, "array size overflow");
+                                    fast_cc_bail(cc, "array size overflow or misaligned element");
                                     break;
                                 }
                                 const uint32_t ac = fast_cc_alloc_ctype(cc, FCTYPE_ARRAY);
@@ -2688,7 +2714,7 @@ static BUSTER_DIRECT_HOT bool fast_cc_parse_declarator(FastCCState* cc, FastType
                                     cc->ctypes[ac].inner = pt;
                                     cc->ctypes[ac].count = dims[di];
                                     cc->ctypes[ac].size = (uint32_t)total_sz;
-                                    cc->ctypes[ac].align = ftype_align(cc, pt);
+                                    cc->ctypes[ac].align = eal;
                                     cc->ctypes[ac].complete = dims[di] != UINT32_MAX ? 1u : 0u;
                                     pt = ftype_from_index(cc, ac);
                                 }
@@ -2816,16 +2842,17 @@ static BUSTER_DIRECT_HOT bool fast_cc_parse_declarator(FastCCState* cc, FastType
             if (sm.kind == FDMOD_ARRAY)
             {
                 const uint32_t esz = ftype_size(cc, cur);
+                const uint32_t eal = ftype_align(cc, cur);
                 const uint64_t total_sz = sm.count == UINT32_MAX ? 0u : (uint64_t)sm.count * (uint64_t)esz;
-                if (total_sz > (uint64_t)INT32_MAX)
+                // #3577: and an element whose size isn't a multiple of its alignment (an aligned typedef's), an error.
+                if (((uint32_t)(total_sz > (uint64_t)INT32_MAX) | (uint32_t)(esz % eal != 0)) != 0)
                 {
-                    fast_cc_bail(cc, "array size overflow");
+                    fast_cc_bail(cc, "array size overflow or misaligned element");
                     break;
                 }
                 const uint32_t ac = fast_cc_alloc_ctype(cc, FCTYPE_ARRAY);
                 if (ac != 0)
                 {
-                    const uint32_t eal = ftype_align(cc, cur);
                     cc->ctypes[ac].inner = cur;
                     cc->ctypes[ac].count = sm.count;
                     cc->ctypes[ac].size = (uint32_t)total_sz;
@@ -3478,7 +3505,10 @@ static BUSTER_DIRECT_HOT FastType fast_cc_parse_decl_specs(FastCCState* cc, Fast
                  fast_cc_is_typedef_name(cc, fast_cc_data(cc)))
         {
             has_explicit_type = true;
-            explicit_type = cc->syms[cc->sym_cur[fast_cc_data(cc)]].type;
+            const FastSym* typedef_sym = cc->syms + cc->sym_cur[fast_cc_data(cc)];
+            explicit_type = typedef_sym->type;
+            // #3577: a typedef with an alignment of its own (BUSTER_FSYM_ALIGNED).
+            if ((typedef_sym->use_flags & BUSTER_FSYM_ALIGNED) != 0) { fast_cc_bail(cc, "use of an aligned typedef"); }
             cc->pos += 1u;
         }
         else
