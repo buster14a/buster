@@ -4483,11 +4483,11 @@ Now:
 - **At `#define`** the body's plain parameters are listed (the prescan list), and for a body without `#` and `##`,
   where each name stands: a call prescans from the list and substitutes by copies.
 
-| 9700X, `sqlite3.c`, CPU 2 | main `3f1bfb5a` | this | |
+| 9700X, `sqlite3.c`, CPU 2 | main `7344577f` | this | |
 | --- | ---: | ---: | ---: |
-| the product's `-c`, wall (21 rotated runs) | 16.400 ms | **16.230 ms** | -1.0% |
-| user cycles | 81.48 M | **80.38 M** | -1.3% |
-| user instructions | 220.55 M | **211.49 M** | -4.1% |
+| the product's `-c`, wall (21 rotated runs) | 16.400 ms | **16.280 ms** | -0.7% |
+| user cycles | 81.23 M | **80.50 M** | -0.9% |
+| user instructions | 219.45 M | **209.87 M** | -4.4% |
 | lexing and preprocessing (the harness's stage at main `20f3573e`, median of three code placements) | 6.953 ms | **6.756 ms** | -2.8% |
 | object | `f558aaf5...` | the same | |
 
