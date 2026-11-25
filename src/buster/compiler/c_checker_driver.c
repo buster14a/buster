@@ -15278,6 +15278,36 @@ static void check_driver_direct_mark_stage(void* context, uint32_t stage_id)
     check_clock_mark((CheckClock*)context, (CheckStage)stage_id);
 }
 
+// A unit's dependency rule from the direct path's records of the files it read (#3592), made as the full pipeline makes
+// its own (pp_dependencies), into `arena`; the driver publishes it once the object is written.
+typedef struct CheckDriverDirectDependencies CheckDriverDirectDependencies;
+struct CheckDriverDirectDependencies
+{
+    const DependencyOptions* options;
+    const char* source;
+    const char* primary;
+    Arena* arena;
+    DependencyOutput output;
+};
+
+// CDirectRequest.dependencies: false (without a word) when the rule can't be made, and the full pipeline then compiles the
+// unit and reports why.
+static bool check_driver_direct_dependencies(void* context, const CDirectDependency* files, uint32_t count)
+{
+    CheckDriverDirectDependencies* const state = (CheckDriverDirectDependencies*)context;
+    DependencyFile* const records = arena_push(state->arena, (uint64_t)count * sizeof(DependencyFile) + 1, _Alignof(DependencyFile));
+    bool result = records != NULL;
+    for (uint32_t i = 0; result && i < count; i += 1)
+    {
+        records[i] = (DependencyFile){
+            .path = dependency_prerequisite(files[i].path),
+            .used = files[i].used,
+            .system = files[i].system,
+        };
+    }
+    return result && dependency_prepare(&state->output, state->options, records, count, state->source, state->primary, state->arena, NULL);
+}
+
 static int check_driver_command(int count, char** arguments, bool executable, bool release, bool* announced)
 {
     arena_failure = (ArenaFailure){ 0 };
@@ -16326,6 +16356,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
         // Fused AVX-512 direct-to-ELF64 fast path (#2850) for clean single-TU -c object builds.
         // Bails out cleanly (writing nothing) on any diagnostic, warning-sensitive construct, or unsupported flag/extension.
         int direct_status = 1;
+        CheckDriverDirectDependencies direct_dependencies = { 0 };
         const bool direct_eligible =
             emit_object && !link && !emit_assembly && !no_direct &&
             getenv("BUSTER_NO_DIRECT") == NULL && getenv("SOURCE_DATE_EPOCH") == NULL &&
@@ -16336,7 +16367,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             !lanes->tier1 && !lazy_system_headers && !deferred_bodies && !node_bodies &&
             !node_window && !node_window_constants && !node_window_assignments && !default_path_checked &&
             attested_memo == NULL && command_attested != CHECK_ATTESTED_MODE_VERIFY &&
-            !options.dependencies.enabled && !options.no_builtin &&
+            !options.dependencies.only && !options.show_includes && !options.no_builtin &&
             options.no_builtin_function_count == 0 && !options.no_external_files && !options.assembly &&
             !options.system_header_warnings && check_driver_direct_warnings(&options) &&
             !command.warning_errors && command.return_error == 0 && !id_ordered &&
@@ -16370,6 +16401,12 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             {
                 direct_ready = pp_build_predefines(&options, &scratch, &predef_buf, &predef_len, &flt_eval_method);
             }
+            direct_dependencies = (CheckDriverDirectDependencies){
+                .options = &options.dependencies,
+                .source = path,
+                .primary = output,
+                .arena = &arena,
+            };
             if (direct_ready)
             {
                 const bool direct_pic = options.predefines.pic != BUSTER_PREDEFINES_PIC_OFF;
@@ -16408,6 +16445,8 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
                     .stage_codegen = CHECK_STAGE_TIER0,
                     .stage_object_write = CHECK_STAGE_OBJECT_WRITE,
                     .out_token_count = &direct_tokens,
+                    .dependencies = options.dependencies.enabled ? check_driver_direct_dependencies : NULL,
+                    .dependency_context = &direct_dependencies,
                 };
                 direct_status = c_direct_try_compile(&direct_req);
                 if (direct_status == 0 && stage_clock != NULL)
@@ -16418,7 +16457,9 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             if (direct_status == 0)
             {
                 check_clock_lanes(stage_clock, 1, 1);
-                result = 0;
+                // The unit's dependency rule, published after its object as the full pipeline publishes its own
+                // (check_driver_one_unit); without -MD and its kin there is none.
+                result = dependency_publish(&direct_dependencies.output, stderr) ? 0 : 1;
             }
             else if (direct_status < 0)
             {
