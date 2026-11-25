@@ -1,0 +1,1 @@
+-10.27 The direct compiler reduces SQLite's macro expansion, type and symbol lookups, and expression-stack work.

@@ -4275,7 +4275,7 @@ single-TU `-c` C17/C23 object builds directly from `mmap`'d source bytes to an E
   literal, a splice), and a token the masks cannot decide (`<<=`, a `.` before a digit, a number that goes on past its
   digits) stays in the window marked for `fast_lex_one`. The emitter (`fast_pp_emit_window`) stores 64 kinds at a time
   and visits the identifiers, numbers and literals: a 16 K-slot L2 identifier cache backed by a 64-way AVX-512
-  SwissTable, inline 2-to-4-digit integers, and in-place expansion for empty, 1-token, 0-param-use
+  SwissTable, inline 1-to-8-digit decimal integers, and in-place expansion for empty, 1-token, 0-param-use
   (`assert`/`testcase`), 1-param identity-wrapper (`ALWAYS`/`NEVER`) and short constant macros. Directives and macro
   arguments read the same window (`fast_pp_read_tok`). An inactive group is skipped by masks too
   (`fast_pp_skip_inactive`): each line's first character, a comment's start and what a literal may hide, 64 bytes a
@@ -4343,6 +4343,21 @@ are in
   skipper (2.5%), interning new names (2.2%). The code generator's stage reads 1% slower here than on main although
   its source is the same but for the specifiers: its code lands at other addresses, and its time follows by that much
   between any two builds.
+
+### Integer tables, inline functions and switches
+
+The lexer decodes eight comma-separated decimal literals together. The static initializer writes runs of 16 integer
+elements and preserves each literal's signedness when widening it to 64 bits. Expressions and designators resume at the
+first unconsumed token. A two-level bitmap visits reachable inline bodies in their original emission order. Switch
+cases are hashed by value, and leaving a function releases its local symbol slots.
+
+The preprocessor checks the current binding of a macro used as a `(void)` cast before simplifying a disabled assert.
+It elides a complete expression statement only at a known statement boundary. In a comma or conditional expression
+it emits the void value. The direct ELF writer reuses an existing output file and truncates it to the new object size.
+
+On the Ryzen 7 9700X these changes cut a fresh SQLite compile from 17.95 to 17.13 ms, a 4,000-function inline chain
+from 8.90 to 1.64 ms, and a 4,000-case switch from 2.70 to 1.14 ms. A unit with 50,000 locals stayed on the direct
+path and fell from 52.16 to 4.58 ms. [Head-to-head measurements and macro probes](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/direct-integrated-9700x-2026-11-25)
 
 ### A small unit's start (2026-11-25, #3592)
 
