@@ -158,7 +158,7 @@ int c_direct_try_compile(const CDirectRequest* request)
     if (ok)
     {
         pp->unsigned_char = request->unsigned_char;
-        fast_pp_set_language(pp, request->c23, request->strict_iso, request->no_gnu_keywords, request->trigraphs);
+        fast_pp_set_language(pp, request->c23, request->strict_iso, request->no_gnu_keywords, request->trigraphs, request->raw_strings);
         for (uint32_t i = 0; i < request->directory_count; i += 1)
         {
             fast_pp_add_dir(pp, request->directories[i], request->directory_system != NULL && request->directory_system[i] != 0);
@@ -336,6 +336,7 @@ struct CDirectTestMode
     bool strict_iso;
     bool no_gnu_keywords;
     bool trigraphs;
+    uint8_t raw_strings;
 };
 
 static bool c_direct_test_compile_source_with(const char* source, const char* obj_path, int expected_status, const char* const* directories,
@@ -407,6 +408,7 @@ static bool c_direct_test_compile_source_with(const char* source, const char* ob
         .strict_iso = mode.strict_iso,
         .no_gnu_keywords = mode.no_gnu_keywords,
         .trigraphs = mode.trigraphs,
+        .raw_strings = mode.raw_strings,
         .quiet = true,
         .release = true,
     };
@@ -637,7 +639,7 @@ static bool c_direct_test_tokens_mode(const char* text, uint64_t length, uint8_t
         ok = pp != NULL && fast_pp_init(pp, &arena, &scratch, small);
         if (ok)
         {
-            fast_pp_set_language(pp, mode.c23, mode.strict_iso, mode.no_gnu_keywords, mode.trigraphs);
+            fast_pp_set_language(pp, mode.c23, mode.strict_iso, mode.no_gnu_keywords, mode.trigraphs, mode.raw_strings);
         }
         ok = ok && fast_pp_run_buffer(pp, "<test>", text, length) && pp->out_count <= capacity;
         if (ok)
@@ -1277,22 +1279,25 @@ static bool c_direct_test_admission(void)
     char keyword[256];
     char comma[256];
     char main_void[256];
+    char raw[256];
     char object[256];
     snprintf(plain, sizeof(plain), "/tmp/buster_direct_admit_%d.c", (int)getpid());
     snprintf(trigraph, sizeof(trigraph), "/tmp/buster_direct_admit_tri_%d.c", (int)getpid());
     snprintf(keyword, sizeof(keyword), "/tmp/buster_direct_admit_asm_%d.c", (int)getpid());
     snprintf(comma, sizeof(comma), "/tmp/buster_direct_admit_comma_%d.c", (int)getpid());
     snprintf(main_void, sizeof(main_void), "/tmp/buster_direct_admit_main_%d.c", (int)getpid());
+    snprintf(raw, sizeof(raw), "/tmp/buster_direct_admit_raw_%d.c", (int)getpid());
     snprintf(object, sizeof(object), "/tmp/buster_direct_admit_%d.o", (int)getpid());
     static const char plain_text[] = "int add(int a, int b) { return a + b; }\n";
     static const char trigraph_text[] = "/* ?" "?= */\nint add(int a, int b) { return a + b; }\n";
     static const char keyword_text[] = "int asm = 1;\nint get(void) { return asm; }\n";
     static const char comma_text[] = "#define G(...) f(0, ## __VA_ARGS__)\nint f(int a, ...) { return a; }\nint get(void) { return G(); }\n";
     static const char main_text[] = "void main(void) { }\n";
-    const char* const paths[5] = { plain, trigraph, keyword, comma, main_void };
-    const char* const texts[5] = { plain_text, trigraph_text, keyword_text, comma_text, main_text };
+    static const char raw_text[] = "#if 0\nR\"(\n#endif\nint y;\n#if 0\n)\"\n#endif\nint x;\n";
+    const char* const paths[6] = { plain, trigraph, keyword, comma, main_void, raw };
+    const char* const texts[6] = { plain_text, trigraph_text, keyword_text, comma_text, main_text, raw_text };
     bool ok = true;
-    for (uint32_t i = 0; ok && i < 5u; i += 1)
+    for (uint32_t i = 0; ok && i < 6u; i += 1)
     {
         FILE* file = fopen(paths[i], "wb");
         ok = file != NULL && fputs(texts[i], file) >= 0;
@@ -1317,7 +1322,10 @@ static bool c_direct_test_admission(void)
     // G() is g(0) in GNU's modes and the error g(0,) in -std=c17's, as is a main that returns void.
     ok = ok && c_direct_test_driver_path(comma, object, gnu17, 1) == 1 && c_direct_test_driver_path(comma, object, c17, 1) == -1 &&
          c_direct_test_driver_path(main_void, object, gnu17, 1) == 1 && c_direct_test_driver_path(main_void, object, c17, 1) == -1;
-    for (uint32_t i = 0; i < 5u; i += 1)
+    // A raw string literal in a skipped group (#3600): GNU's modes have them, so the full pipeline compiles the unit;
+    // -std=c17's don't, so the direct path does.
+    ok = ok && c_direct_test_driver_path(raw, object, gnu17, 1) == 0 && c_direct_test_driver_path(raw, object, c17, 1) == 1;
+    for (uint32_t i = 0; i < 6u; i += 1)
     {
         unlink(paths[i]);
     }
@@ -1942,6 +1950,113 @@ static bool c_direct_test_specifiers(const char* obj_path)
     return ok;
 }
 
+// ---------------------------------------------------------------------------------------------------------------------
+// Raw string literals (#3600) and the literals of a directive's line the direct path doesn't lex (#3603)
+
+typedef struct CDirectRawCase CDirectRawCase;
+struct CDirectRawCase
+{
+    const char* source;
+    uint8_t raw_strings;   // CDirectTestMode.raw_strings
+    int expected;          // 1: leaves the direct path; 0: its object defines `defined`
+    const char* defined;   // the symbols the object defines, separated by spaces
+};
+
+// Each case's status and symbols, and then a raw string literal's prefix, an "R" that ends an ordinary string and a
+// raw string after `#define R` or `#define LR`, at each offset of a block of the skipped group's scan and of the lexer's
+// windows. A window starts where 80 bytes are left, so the sources end in a comment of more.
+static bool c_direct_test_raw_strings(const char* obj_path)
+{
+    static const CDirectRawCase cases[] = {
+        { "#if 0\nR\"(\n#endif\nint y;\n#if 0\n)\"\n#endif\nint x;\n", 1, 1, NULL },
+        { "#if 0\nR\"(\n#endif\nint y;\n#if 0\n)\"\n#endif\nint x;\n", 0, 0, "x y" },
+        { "const char* s = R\"(x)\";\n", 1, 1, NULL },
+        { "#define R\nconst char* s = R\"(x)\";\n", 0, 0, "s" },
+        { "#define R\nconst char* s = R\"(x)\";\n", 1, 1, NULL },
+        { "const char* s = LR\"(x)\";\n", 1, 1, NULL },
+        { "const char* s = u8R\"(x)\";\n", 2, 1, NULL },
+        { "#define S R\"(x)\"\nint y;\n", 1, 1, NULL },
+        { "#if 0\nx = c ? \"R\" : \"W\";\n#endif\nint x;\n", 1, 0, "x" },
+        { "const char* p = \"R\"; const char* q = \"BAR\";\n", 1, 0, "p q" },
+        { "#if 0\nconst char* a = \"x\"; const char* b = \"R\";\n#endif\nint y;\n", 1, 0, "y" },
+        { "#if 0\nprintf(\"%s\", \"ERROR\"); f(\"R\",(int)x);\n#endif\nint z;\n", 1, 0, "z" },
+        { "#if 0\nchar c = 'R'; const char* d = \"\\\"R\\\"\";\n#endif\nint z;\n", 1, 0, "z" },
+        { "#if 0\na = \"x\" R\"(y)\";\n#endif\nint z;\n", 1, 1, NULL },
+        { "#if 0\na = xR\"(y)\";\n#endif\nint z;\n", 1, 0, "z" },
+        { "#if 0\na = 1R\"(y)\";\n#endif\nint z;\n", 1, 0, "z" },
+        { "#if 0\nLR\"(\n#endif\nint y;\n#if 0\n)\"\n#endif\nint x;\n", 1, 1, NULL },
+        { "#if 0\nu8R\"(\n#endif\nint y;\n#if 0\n)\"\n#endif\nint x;\n", 1, 0, "x y" },
+        { "#if 0\na = uR\"(y)\";\n#endif\nint z;\n", 1, 0, "z" },
+        { "#if 0\na = uR\"(y)\";\n#endif\nint z;\n", 2, 1, NULL },
+        { "#if 0\na = u8R\"(y)\";\n#endif\nint z;\n", 2, 1, NULL },
+        { "#if 0\n/* R\"( */ int a;\n#endif\nint z;\n", 1, 0, "z" },
+        { "#if 0\n// R\"(\n#endif\nint z;\n", 1, 0, "z" },
+        { "#pragma message(\"/* look\")\nint x = 1;\n", 1, 1, NULL },
+        { "#pragma foo \"/*\"\nint y = 2;\n/* */ int z = 3;\n", 1, 0, "y z" },
+        { "#pragma foo '/*'\nint y = 2;\n", 0, 0, "y" },
+        { "#line 5 \"a/*b.c\"\nint y = 2;\nint z = 3;\n", 0, 0, "y z" },
+        { "#pragma foo don't\nint y = 2;\n", 0, 1, NULL },
+        { "#if 1\nint y = 2;\n#endif // it's\nint z = 3;\n", 0, 0, "y z" },
+        { "#pragma foo R\"(x)\"\nint y = 2;\n", 1, 1, NULL },
+        { "#pragma foo R\"(x)\"\nint y = 2;\n", 0, 0, "y" },
+        { "#if 0\n#else // \"/*\"\nint y = 2;\n#endif\nint z = 3;\n", 0, 0, "y z" },
+        { "#if 0\na = \xc3\xa9R\"(y)\";\n#endif\nint z;\n", 1, 0, "z" },
+        { "#if 0\na = R'x'; /* c */\n#endif\nint z;\n", 1, 0, "z" },
+        { "#define LR\nconst char* s = LR\"(x)\";\n", 1, 1, NULL },
+        { "#define uR\nconst char* s = uR\"(x)\";\n", 1, 0, "s" },
+        { "#define u8R\nconst char* s = u8R\"(x)\";\n", 1, 0, "s" },
+        { "#define u8R\nconst char* s = u8R\"(x)\";\n", 2, 1, NULL },
+        { "int R = 1;\nint LR = 2;\nint f(void) { return R + LR; }\n", 2, 0, "R LR f" },
+        { "#pragma foo \"\\\"/*\"\nint y = 2;\n", 1, 0, "y" },
+    };
+    bool ok = true;
+    for (uint32_t i = 0; ok && i < (uint32_t)(sizeof(cases) / sizeof(cases[0])); i += 1)
+    {
+        const CDirectTestMode mode = { .raw_strings = cases[i].raw_strings };
+        ok = c_direct_test_compile_source_with(cases[i].source, obj_path, cases[i].expected, NULL, 0, true, NULL, NULL, NULL, NULL, NULL, 0, mode);
+        char names[64];
+        snprintf(names, sizeof(names), "%s", cases[i].defined != NULL ? cases[i].defined : "");
+        char* save = NULL;
+        for (char* name = strtok_r(names, " ", &save); ok && name != NULL; name = strtok_r(NULL, " ", &save))
+        {
+            const CDirectTestSymbol sym = c_direct_test_symbol(obj_path, name);
+            ok = sym.count == 1u && sym.section != SHN_UNDEF;
+        }
+        unlink(obj_path);
+        if (!ok)
+        {
+            fprintf(stderr, "test-direct: raw strings' case %u, raw %u\n", i, (unsigned)cases[i].raw_strings);
+        }
+    }
+    // A literal's line splice on a directive's line is a line: __LINE__ after it counts it, as it counts the lines of
+    // directives that end at their newline.
+    static const int32_t expected_line[] = { 3 };
+    ok = ok && c_direct_test_compile_source_with("#pragma foo \"a\\\nb\"\nconst int line = __LINE__;\n", obj_path, 0, NULL, 0, false, NULL, NULL, NULL,
+                                                 NULL, expected_line, sizeof(expected_line), (CDirectTestMode){ 0 });
+    static const int32_t expected_directive_line[] = { 4 };
+    ok = ok && c_direct_test_compile_source_with("#define X 1\n#ifdef X\n#endif\nconst int line = __LINE__;\n", obj_path, 0, NULL, 0, false, NULL, NULL,
+                                                 NULL, NULL, expected_directive_line, sizeof(expected_directive_line), (CDirectTestMode){ 0 });
+    const CDirectTestMode raw = { .raw_strings = 1u };
+    static const char tail[] = "/* ........................................................................................ */\n";
+    for (uint32_t k = 0; ok && k < 140u; k += 1)
+    {
+        char source[512];
+        snprintf(source, sizeof(source), "#if 0\n%*sR\"(\n#endif\nint y;\n#if 0\n)\"\n#endif\nint x;\n%s", (int)k, "", tail);
+        ok = c_direct_test_compile_mode(source, obj_path, 1, NULL, NULL, raw);
+        snprintf(source, sizeof(source), "#if 0\n%*sx = \"R\";\n#endif\nint z;\n%s", (int)k, "", tail);
+        ok = ok && c_direct_test_compile_mode(source, obj_path, 0, NULL, NULL, raw);
+        snprintf(source, sizeof(source), "#define R\n%*sconst char* s = R\"(x)\";\n%s", (int)k, "", tail);
+        ok = ok && c_direct_test_compile_mode(source, obj_path, 1, NULL, NULL, raw);
+        snprintf(source, sizeof(source), "#define LR\n%*sconst char* s = LR\"(x)\";\n%s", (int)k, "", tail);
+        ok = ok && c_direct_test_compile_mode(source, obj_path, 1, NULL, NULL, raw);
+        if (!ok)
+        {
+            fprintf(stderr, "test-direct: raw strings at offset %u\n", k);
+        }
+    }
+    return ok;
+}
+
 int run_c_direct_tests(int argc, char** argv)
 {
     (void)argc;
@@ -2166,6 +2281,16 @@ int run_c_direct_tests(int argc, char** argv)
     else
     {
         fprintf(stderr, "test-direct: FAIL a declaration's specifiers\n");
+        failed += 1u;
+    }
+
+    if (c_direct_test_raw_strings(obj_path))
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL raw string literals and a directive's literals\n");
         failed += 1u;
     }
 

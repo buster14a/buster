@@ -1015,6 +1015,39 @@ static const uint8_t fast_char_class[256] = {
     ['u'] = 3, ['v'] = 3, ['w'] = 3, ['x'] = 3, ['y'] = 3, ['z'] = 3,
 };
 
+// Raw string literals (#3600): R"d(...)d", in clang's GNU modes from C99 and the full pipeline's (pp_raw_strings), and
+// also with C11's prefixes. The direct path doesn't lex one: a unit that has one leaves it, wherever the literal is,
+// active text, a directive's line or a group the conditionals skip.
+
+// Whether the identifier of `len` characters at `p`, a '"' after it, is a raw string literal's prefix: R or LR, and
+// where `raw_strings` is 2 also u8R, uR and UR. Never where `raw_strings` is 0.
+static bool fast_raw_prefix(const uint8_t* p, uint32_t len, uint8_t raw_strings)
+{
+    const bool utf = raw_strings == 2u;
+    return raw_strings != 0 && ((len == 1u && p[0] == 'R') ||
+                                (len == 2u && p[1] == 'R' && (p[0] == 'L' || (utf && (p[0] == 'u' || p[0] == 'U')))) ||
+                                (len == 3u && utf && p[0] == 'u' && p[1] == '8' && p[2] == 'R'));
+}
+
+// Whether the '"' at `quote`, which opens a literal, opens a raw string literal: a raw prefix right before it, at a
+// token's start (no identifier or number character, nor a byte past ASCII, before the prefix). Its callers ask only
+// where the mode has raw string literals; `raw_strings` 2 takes C11's prefixes too.
+static bool fast_raw_string_before(const uint8_t* base, const uint8_t* quote, uint8_t raw_strings)
+{
+    const uint8_t* start = quote - 1;
+    bool result = quote > base && start[0] == 'R';
+    if (result && raw_strings == 2u && start - base >= 2 && start[-2] == 'u' && start[-1] == '8')
+    {
+        start -= 2;
+    }
+    else if (result && start > base && (start[-1] == 'L' || (raw_strings == 2u && (start[-1] == 'u' || start[-1] == 'U'))))
+    {
+        start -= 1;
+    }
+    result = result && (start == base || ((fast_char_class[start[-1]] & 1u) == 0 && start[-1] < 0x80u));
+    return result;
+}
+
 // AVX-512 identifier continuation length using vpshufb range test across 64 bytes
 static inline uint32_t fast_scan_ident_len(const uint8_t* p, const uint8_t* end)
 {
@@ -1318,6 +1351,7 @@ struct FastPP
     bool c23;
     bool strict_iso;          // CDirectRequest.strict_iso: no GNU extensions (-std=cNN)
     bool trigraphs;           // CDirectRequest.trigraphs: a file with a trigraph leaves the direct path
+    uint8_t raw_strings;      // CDirectRequest.raw_strings: a raw string literal leaves the direct path (#3600)
 };
 
 static void fast_pp_read_tok(FastPP* pp, FastIncludeFile* f, bool stop_at_eol, FastTok* out_tok);
@@ -1930,8 +1964,16 @@ static BUSTER_DIRECT_HOT const uint8_t* fast_lex_one(FastPP* pp, const uint8_t* 
                 break;
             }
             const uint32_t len = fast_scan_ident_len(p, end);
+            const uint8_t after = p + len < end ? p[len] : 0u;
+            // A raw string literal where the mode has them (#3600): its prefix is an identifier with a '"' right after it.
+            if (__builtin_expect(after == '"', 0) && fast_raw_prefix(p, len, pp->raw_strings))
+            {
+                fast_pp_bail(pp, "raw string literal");
+                p = end;
+                break;
+            }
             // Check for backslash-newline splice continuing identifier
-            if (__builtin_expect(p + len < end && p[len] == '\\', 0))
+            if (__builtin_expect(after == '\\', 0))
             {
                 fast_pp_bail(pp, "spliced identifier");
                 p = end;
@@ -2101,10 +2143,14 @@ static BUSTER_DIRECT_HOT const uint8_t* fast_lex_one(FastPP* pp, const uint8_t* 
 //   block before, so no byte past the block is read);
 // - what a literal may hide: a quote taints the bytes after it up to a newline that no backslash precedes, by the
 //   same carry. A '#' or a comment's start in tainted bytes is rare, and is decided by scanning that line's literal the
-//   way this function always did (to its closing quote or its line's end, a backslash taking the next character).
+//   way this function always did (to its closing quote or its line's end, a backslash taking the next character);
+// - where the mode has raw string literals (#3600), a '"' right after an 'R' that a raw prefix at a token's start may
+//   end (the rare block with an R before a '"' tests each, so "ERROR" makes none): decided the same way, one literal
+//   of its line at a time, until it is inside one or opens one. A literal that a raw prefix opens leaves the direct
+//   path. Without raw string literals the blocks don't look for them.
 // Everything else (a '#' inside a line, a lone '/', quotes with nothing after them to hide) is passed in bulk.
 // f->at_bol is false after a directive; where the file ends first the compile fails and nothing reads it.
-static BUSTER_DIRECT_HOT uint8_t fast_pp_skip_inactive(FastPP* pp, FastIncludeFile* f)
+static inline __attribute__((always_inline)) uint8_t fast_pp_skip_inactive_in(FastPP* pp, FastIncludeFile* f, const bool raw_on)
 {
     const uint8_t* p = f->ptr;
     const uint8_t* const end = f->end;
@@ -2118,6 +2164,7 @@ static BUSTER_DIRECT_HOT uint8_t fast_pp_skip_inactive(FastPP* pp, FastIncludeFi
     uint64_t slash_in = 0;                   // the byte before p is a '/'
     uint64_t slash_first = 0;                // ... which is its line's first character
     uint64_t slash_tainted = 0;              // ... and is tainted
+    uint64_t r_in = 0;                       // the byte before p is an 'R' (only where the mode has raw strings)
     const uint8_t* clean_from = p;           // no literal is open here: where the last decision left the text
     bool done = false;
 
@@ -2131,6 +2178,7 @@ static BUSTER_DIRECT_HOT uint8_t fast_pp_skip_inactive(FastPP* pp, FastIncludeFi
     const __m512i v_space = _mm512_set1_epi8(' ');
     const __m512i v_tab = _mm512_set1_epi8('\t');
     const __m512i v_four = _mm512_set1_epi8(4);
+    const __m512i v_upper_r = _mm512_set1_epi8('R');
 
     while (p < end && !done)
     {
@@ -2141,7 +2189,8 @@ static BUSTER_DIRECT_HOT uint8_t fast_pp_skip_inactive(FastPP* pp, FastIncludeFi
         const __mmask64 hash = _mm512_cmpeq_epi8_mask(v, v_hash);
         const __mmask64 slash = _mm512_cmpeq_epi8_mask(v, v_slash);
         const __mmask64 star = _mm512_cmpeq_epi8_mask(v, v_star);
-        const __mmask64 quote = _mm512_cmpeq_epi8_mask(v, v_dq) | _mm512_cmpeq_epi8_mask(v, v_sq);
+        const __mmask64 dq = _mm512_cmpeq_epi8_mask(v, v_dq);
+        const __mmask64 quote = dq | _mm512_cmpeq_epi8_mask(v, v_sq);
         const __mmask64 backslash = _mm512_cmpeq_epi8_mask(v, v_bs);
         // Blanks are fast_char_class's 8: ' ', and '\t' '\v' '\f' '\r' (9 to 13 without the newline). The bytes past
         // the file's end count as blanks, so that what is carried out of the block is the state at the file's end.
@@ -2160,7 +2209,21 @@ static BUSTER_DIRECT_HOT uint8_t fast_pp_skip_inactive(FastPP* pp, FastIncludeFi
         const __mmask64 tainted = passes & ~taint_sum;
 
         const __mmask64 directives = hash & first;
-        const __mmask64 events = (directives | opens) & valid;
+        __mmask64 raws = 0;
+        uint64_t r_out = 0;
+        if (raw_on)
+        {
+            const __mmask64 upper_r = _mm512_cmpeq_epi8_mask(v, v_upper_r);
+            uint64_t candidates = dq & ((upper_r << 1) | r_in);
+            r_out = upper_r >> 63;
+            while (__builtin_expect(candidates != 0, 0))
+            {
+                const uint32_t at = (uint32_t)__builtin_ctzll(candidates);
+                candidates &= candidates - 1u;
+                raws |= fast_raw_string_before(f->base, p + at, pp->raw_strings) ? UINT64_C(1) << at : 0u;
+            }
+        }
+        const __mmask64 events = (directives | opens | raws) & valid;
         if (__builtin_expect(events == 0, 1))
         {
             line += (uint32_t)__builtin_popcountll(nl);
@@ -2170,17 +2233,19 @@ static BUSTER_DIRECT_HOT uint8_t fast_pp_skip_inactive(FastPP* pp, FastIncludeFi
             slash_in = slash >> 63;
             slash_first = first >> 63;
             slash_tainted = tainted >> 63;
+            r_in = r_out;
             p += avail;
         }
         else
         {
             const uint32_t pos = (uint32_t)__builtin_ctzll(events);
             const bool directive = ((directives >> pos) & 1u) != 0;
+            const bool raw = ((raws >> pos) & 1u) != 0;
             // A comment's event is at its second character.
             const uint32_t slash_pos = pos - 1u;
-            const uint8_t* const at = directive ? p + pos : p + pos - 1;
+            const uint8_t* const at = directive || raw ? p + pos : p + pos - 1;
             const bool at_first = directive || (pos != 0 ? ((first >> slash_pos) & 1u) != 0 : slash_first != 0);
-            const bool at_tainted = directive ? ((tainted >> pos) & 1u) != 0 : (pos != 0 ? ((tainted >> slash_pos) & 1u) != 0 : slash_tainted != 0);
+            const bool at_tainted = raw || (directive ? ((tainted >> pos) & 1u) != 0 : (pos != 0 ? ((tainted >> slash_pos) & 1u) != 0 : slash_tainted != 0));
             line += (uint32_t)__builtin_popcountll(nl & _bzhi_u64(~UINT64_C(0), pos));
             // What the decision leaves: no literal open, and nothing carried.
             const uint8_t* next = at;
@@ -2196,11 +2261,20 @@ static BUSTER_DIRECT_HOT uint8_t fast_pp_skip_inactive(FastPP* pp, FastIncludeFi
                 {
                     s -= 1;
                 }
-                while (s < at && *s != '"' && *s != '\'')
+                // A raw event's own quote may be the first.
+                const uint8_t* const stop = raw ? at + 1 : at;
+                while (s < stop && *s != '"' && *s != '\'')
                 {
                     s += 1;
                 }
-                if (s < at)
+                if (raw_on && s < stop && *s == '"' && fast_raw_string_before(f->base, s, pp->raw_strings))
+                {
+                    fast_pp_bail(pp, "raw string literal in a skipped group");
+                    next = end;
+                    done = true;
+                    decided = true;
+                }
+                else if (s < stop)
                 {
                     // The newlines between the quote and here are counted again by the literal's scan.
                     for (const uint8_t* c = s; c < at; c += 1)
@@ -2288,6 +2362,7 @@ static BUSTER_DIRECT_HOT uint8_t fast_pp_skip_inactive(FastPP* pp, FastIncludeFi
             taint_in = 0;
             backslash_in = 0;
             slash_in = 0;
+            r_in = 0;
         }
     }
 
@@ -2299,6 +2374,13 @@ static BUSTER_DIRECT_HOT uint8_t fast_pp_skip_inactive(FastPP* pp, FastIncludeFi
     f->line = line;
     f->at_bol = bol_in != 0 && found_kw == 0;
     return found_kw;
+}
+
+// fast_pp_skip_inactive_in with the mode's raw string literals a constant: the loop is compiled once for each, so a
+// mode without them does none of their work a block (#3600).
+static BUSTER_DIRECT_HOT uint8_t fast_pp_skip_inactive(FastPP* pp, FastIncludeFile* f)
+{
+    return pp->raw_strings != 0 ? fast_pp_skip_inactive_in(pp, f, true) : fast_pp_skip_inactive_in(pp, f, false);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -3841,7 +3923,10 @@ static bool fast_pp_eval_if_expr(FastPP* pp, const FastTok* toks, uint32_t count
 // ---------------------------------------------------------------------------------------------------------------------
 // Directive handling
 
-static void fast_pp_skip_to_eol(FastIncludeFile* f)
+// The rest of a directive's line, lexed as clang lexes it (#3603): a comment may go on past the line's end, and a
+// literal holds no comment. A literal that the line's end cuts leaves the direct path, as clang warns of it, and so
+// does a raw string literal (#3600). fast_pp_skip_to_eol's out-of-line part: its registers are saved only here.
+static __attribute__((noinline)) void fast_pp_skip_rest_of_line(FastPP* pp, FastIncludeFile* f)
 {
     const uint8_t* p = f->ptr;
     const uint8_t* const end = f->end;
@@ -3866,11 +3951,63 @@ static void fast_pp_skip_to_eol(FastIncludeFile* f)
             p = next != NULL ? next : end;
             continue;
         }
+        if (*p == '/' && p + 1 < end && p[1] == '/')
+        {
+            uint32_t comment_lines = 0;
+            p = fast_skip_line_comment(p + 2, end, &comment_lines);
+            line += comment_lines;
+            continue;
+        }
+        if (*p == '"' || *p == '\'')
+        {
+            const uint8_t quote = *p;
+            bool closed = !(pp->raw_strings != 0 && quote == '"' && fast_raw_string_before(f->base, p, pp->raw_strings));
+            p += 1;
+            while (closed && p < end && *p != quote && *p != '\n')
+            {
+                if (*p == '\\' && p + 1 < end)
+                {
+                    line += p[1] == '\n' ? 1u : 0u;
+                    p += 2;
+                }
+                else
+                {
+                    p += 1;
+                }
+            }
+            closed = closed && p < end && *p == quote;
+            if (!closed)
+            {
+                fast_pp_bail(pp, "a literal on a directive's line that the direct path doesn't take");
+                p = end;
+            }
+            else
+            {
+                p += 1;
+            }
+            continue;
+        }
         p += 1;
     }
     f->ptr = p;
     f->line = line;
     f->at_bol = true;
+}
+
+// The rest of a directive's line. Most directives end where their tokens do, at the newline, and pay a test of it.
+static inline void fast_pp_skip_to_eol(FastPP* pp, FastIncludeFile* f)
+{
+    const uint8_t* const p = f->ptr;
+    if (__builtin_expect(p < f->end && *p == '\n', 1))
+    {
+        f->ptr = p + 1;
+        f->line += 1u;
+        f->at_bol = true;
+    }
+    else
+    {
+        fast_pp_skip_rest_of_line(pp, f);
+    }
 }
 
 static __attribute__((noinline)) void fast_pp_handle_define(FastPP* pp, FastIncludeFile* f)
@@ -4004,7 +4141,7 @@ static __attribute__((noinline)) void fast_pp_handle_define(FastPP* pp, FastIncl
             break;
         }
     }
-    fast_pp_skip_to_eol(f);
+    fast_pp_skip_to_eol(pp, f);
 
     const uint32_t midx = ++pp->macro_count;
     const uint32_t bcnt = pp->macro_tok_count - body_start;
@@ -4159,7 +4296,7 @@ static bool fast_pp_eval_if_line(FastPP* pp, FastIncludeFile* f)
         if (rc < 512u) { raw[rc++] = t; }
         else { fast_pp_bail(pp, "long #if line"); break; }
     }
-    fast_pp_skip_to_eol(f);
+    fast_pp_skip_to_eol(pp, f);
     uint32_t ec = 0;
     fast_pp_expand_buffer(pp, raw, rc, expanded, 1024u, &ec, true);
     return !pp->bailout && fast_pp_eval_if_expr(pp, expanded, ec);
@@ -4196,7 +4333,7 @@ static __attribute__((noinline)) void fast_pp_handle_include(FastPP* pp, FastInc
         memcpy(name_buf, start, name_len);
         name_buf[name_len] = '\0';
         f->ptr += 1;
-        fast_pp_skip_to_eol(f);
+        fast_pp_skip_to_eol(pp, f);
     }
     else
     {
@@ -4211,7 +4348,7 @@ static __attribute__((noinline)) void fast_pp_handle_include(FastPP* pp, FastInc
             if (t.kind == FTOK_EOF) { break; }
             if (rc < 128u) { raw[rc++] = t; }
         }
-        fast_pp_skip_to_eol(f);
+        fast_pp_skip_to_eol(pp, f);
         uint32_t ec = 0;
         fast_pp_expand_buffer(pp, raw, rc, exp, 256u, &ec, false);
         if (ec == 1u && exp[0].kind == FTOK_STR_LIT)
@@ -4259,7 +4396,7 @@ static __attribute__((noinline)) void fast_pp_handle_directive(FastPP* pp, FastI
     fast_pp_read_tok(pp, f, true, &kw_tok);
     if (kw_tok.kind == FTOK_EOF)
     {
-        fast_pp_skip_to_eol(f);
+        fast_pp_skip_to_eol(pp, f);
         return; // null directive '#'
     }
     if (kw_tok.kind != FTOK_IDENT && !(kw_tok.kind >= 64u && kw_tok.kind < 126u))
@@ -4268,7 +4405,7 @@ static __attribute__((noinline)) void fast_pp_handle_directive(FastPP* pp, FastI
         if (kw_tok.kind == FTOK_INT_LIT)
         {
             f->line = kw_tok.data;
-            fast_pp_skip_to_eol(f);
+            fast_pp_skip_to_eol(pp, f);
             return;
         }
         fast_pp_bail(pp, "invalid directive");
@@ -4294,7 +4431,7 @@ static __attribute__((noinline)) void fast_pp_handle_directive(FastPP* pp, FastI
                 pp->idents.entries[nt.data].macro_idx = 0;
                 fast_ident_set_macro_bit(&pp->idents, nt.data, false);
             }
-            fast_pp_skip_to_eol(f);
+            fast_pp_skip_to_eol(pp, f);
         } break;
         case FPP_KW_INCLUDE:
             fast_pp_handle_include(pp, f, false);
@@ -4334,7 +4471,7 @@ static __attribute__((noinline)) void fast_pp_handle_directive(FastPP* pp, FastI
                     f->guard_state = 1u;
                     is_guard = true;
                 }
-                fast_pp_skip_to_eol(f);
+                fast_pp_skip_to_eol(pp, f);
             }
             pp->conds[pp->cond_depth++] = (FastCondFrame){
                 .active = cond ? 1u : 0u,
@@ -4359,7 +4496,7 @@ static __attribute__((noinline)) void fast_pp_handle_directive(FastPP* pp, FastI
             if (pkw == FPP_KW_ELSE) { cf->saw_else = 1u; }
             // Since we were in an active branch, the new branch is definitely inactive!
             cf->active = 0;
-            fast_pp_skip_to_eol(f);
+            fast_pp_skip_to_eol(pp, f);
         } break;
         case FPP_KW_ENDIF:
         {
@@ -4373,14 +4510,14 @@ static __attribute__((noinline)) void fast_pp_handle_directive(FastPP* pp, FastI
             {
                 f->guard_state = 4u; // Closed outer include guard!
             }
-            fast_pp_skip_to_eol(f);
+            fast_pp_skip_to_eol(pp, f);
         } break;
         case FPP_KW_LINE:
         {
             FastTok lt = { 0 };
             fast_pp_read_tok(pp, f, true, &lt);
             if (lt.kind == FTOK_INT_LIT) { f->line = lt.data; }
-            fast_pp_skip_to_eol(f);
+            fast_pp_skip_to_eol(pp, f);
         } break;
         case FPP_KW_PRAGMA:
         {
@@ -4390,12 +4527,16 @@ static __attribute__((noinline)) void fast_pp_handle_directive(FastPP* pp, FastI
             {
                 FastGuardEntry* ge = fast_guard_lookup(pp, f->path, f->path_len, true);
                 if (ge != NULL) { ge->once = 1u; }
-                fast_pp_skip_to_eol(f);
+                fast_pp_skip_to_eol(pp, f);
             }
             else if (pt.kind == FTOK_IDENT)
             {
                 const char* s = pp->idents.strings + pp->idents.entries[pt.data].str_offset;
-                if (strcmp(s, "GCC") == 0 || strcmp(s, "clang") == 0 || strcmp(s, "pack") == 0 ||
+                if (strcmp(s, "message") == 0)
+                {
+                    fast_pp_bail(pp, "pragma message");
+                }
+                else if (strcmp(s, "GCC") == 0 || strcmp(s, "clang") == 0 || strcmp(s, "pack") == 0 ||
                     strcmp(s, "weak") == 0 || strcmp(s, "redefine_extname") == 0 ||
                     strcmp(s, "push_macro") == 0 || strcmp(s, "pop_macro") == 0 || strcmp(s, "STDC") == 0)
                 {
@@ -4407,11 +4548,11 @@ static __attribute__((noinline)) void fast_pp_handle_directive(FastPP* pp, FastI
                     if (strcmp(s, "GCC") == 0 && strcmp(s2, "system_header") == 0)
                     {
                         f->is_system = true;
-                        fast_pp_skip_to_eol(f);
+                        fast_pp_skip_to_eol(pp, f);
                     }
                     else if (strcmp(s, "push_macro") == 0 && f->path != NULL && strcmp(f->path, "<predefines>") == 0)
                     {
-                        fast_pp_skip_to_eol(f);
+                        fast_pp_skip_to_eol(pp, f);
                     }
                     else
                     {
@@ -4420,12 +4561,12 @@ static __attribute__((noinline)) void fast_pp_handle_directive(FastPP* pp, FastI
                 }
                 else
                 {
-                    fast_pp_skip_to_eol(f);
+                    fast_pp_skip_to_eol(pp, f);
                 }
             }
             else
             {
-                fast_pp_skip_to_eol(f);
+                fast_pp_skip_to_eol(pp, f);
             }
         } break;
         case FPP_KW_ERROR:
@@ -4484,14 +4625,16 @@ static bool fast_pp_init(FastPP* pp, FastArena* arena, FastArena* scratch, bool 
 }
 
 // The language mode's part of the preprocessor (#3592): `c23` (C23's `true` in #if, typeof a keyword), `strict_iso`
-// (-std=cNN: clang's comma rule without GNU's extensions), `trigraphs` (a file with one leaves the direct path), and
+// (-std=cNN: clang's comma rule without GNU's extensions), `trigraphs` (a file with one leaves the direct path),
+// `raw_strings` (a raw string literal leaves it, #3600: 1 its R and LR forms, 2 also u8R, uR and UR), and
 // without GNU's keywords asm, and typeof before C23, as identifiers (c_intern.c's c_name_is_keyword). Before any
 // lookup: the identifier cache keeps a name's kind from its first one.
-static void fast_pp_set_language(FastPP* pp, bool c23, bool strict_iso, bool no_gnu_keywords, bool trigraphs)
+static void fast_pp_set_language(FastPP* pp, bool c23, bool strict_iso, bool no_gnu_keywords, bool trigraphs, uint8_t raw_strings)
 {
     pp->c23 = c23;
     pp->strict_iso = strict_iso;
     pp->trigraphs = trigraphs;
+    pp->raw_strings = raw_strings;
     if (no_gnu_keywords)
     {
         pp->idents.entries[fast_ident_intern_cstr(&pp->idents, "asm")].kw_kind = 0;
@@ -5037,7 +5180,8 @@ static BUSTER_DIRECT_HOT void fast_pp_lex_window(FastPP* pp, const FastIncludeFi
         {
             const uint32_t run_len = (uint32_t)(p - run);
             const bool prefix = (run_len == 1u && (run[0] == 'L' || run[0] == 'u' || run[0] == 'U')) ||
-                                (run_len == 2u && run[0] == 'u' && run[1] == '8');
+                                (run_len == 2u && run[0] == 'u' && run[1] == '8') ||
+                                (pp->raw_strings != 0 && ch == '"' && run_len <= 3u && run[run_len - 1u] == 'R');
             const bool number = (fast_char_class[run[0]] & 4u) != 0;
             if (ch == '\\' || (ch == '\'' && number) || ((ch == '"' || ch == '\'') && prefix))
             {
@@ -5787,7 +5931,7 @@ static BUSTER_DIRECT_HOT bool fast_pp_drain(FastPP* pp)
             {
                 if (cf->is_guard && f->guard_state == 2u) { f->guard_state = 4u; }
                 pp->cond_depth -= 1u;
-                fast_pp_skip_to_eol(f);
+                fast_pp_skip_to_eol(pp, f);
             }
             else if (kw == FPP_KW_ELSE)
             {
@@ -5795,7 +5939,7 @@ static BUSTER_DIRECT_HOT bool fast_pp_drain(FastPP* pp)
                 if (cf->saw_else) { fast_pp_bail(pp, "duplicate #else"); break; }
                 cf->saw_else = 1u;
                 if (!cf->taken) { cf->active = 1u; cf->taken = 1u; }
-                fast_pp_skip_to_eol(f);
+                fast_pp_skip_to_eol(pp, f);
             }
             else if (kw == FPP_KW_ELIF || kw == FPP_KW_ELIFDEF || kw == FPP_KW_ELIFNDEF)
             {
@@ -5811,13 +5955,13 @@ static BUSTER_DIRECT_HOT bool fast_pp_drain(FastPP* pp)
                         fast_pp_read_tok(pp, f, true, &nt);
                         const bool def = (nt.kind == FTOK_IDENT || nt.kind >= 64u) && fast_ident_is_macro(&pp->idents, nt.data);
                         cond = kw == FPP_KW_ELIFDEF ? def : !def;
-                        fast_pp_skip_to_eol(f);
+                        fast_pp_skip_to_eol(pp, f);
                     }
                     if (cond) { cf->active = 1u; cf->taken = 1u; }
                 }
                 else
                 {
-                    fast_pp_skip_to_eol(f);
+                    fast_pp_skip_to_eol(pp, f);
                 }
             }
             continue;

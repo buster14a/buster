@@ -4309,6 +4309,14 @@ single-TU `-c` C17/C23 object builds directly from `mmap`'d source bytes to an E
   At main `f74b0b28` each compiled. Under `-std=c23` `auto x = 1.5;` was an `int`; `for (static int i = 0; …)` made
   `i` automatic; `__auto_type` after `_Alignas` compiled wrongly; and `__private_extern__ int x;` declared an `int`
   named `__private_extern__`, then a default `x` where the full pipeline's is hidden.
+- **Raw string literals and a directive's rest (#3600, #3603):** where the mode has raw string literals (GNU's from
+  C99, as the full pipeline's `pp_raw_strings` has them), a unit with one leaves. The scalar lexer leaves at a raw
+  prefix with its `"`; the windowed lexer hands such a run to it; and the scan of a skipped group decides, one literal
+  at a time, each line where an `R` comes right before a `"`, so that `"R"` stays an ordinary string. The rest of a
+  directive's line that the direct path doesn't lex (`fast_pp_skip_to_eol`) is lexed for its literals and comments: a
+  `/*` in a literal starts no comment, and a literal the line's end cuts leaves, as clang warns of one. At main
+  `20f3573e`, `#pragma message("/* look")` and the code after it compiled to an object with no symbols. A
+  `#pragma message` leaves, as clang warns of its text.
 - **Fail-closed fallback (`--no-direct` / `BUSTER_NO_DIRECT`):** any diagnostic, warning-sensitive construct, or
   unsupported flag/extension bails out silently without writing output so `c_checker_driver.c` runs the full pipeline.
 

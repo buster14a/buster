@@ -36,6 +36,8 @@ struct CDirectRequest
     bool strict_iso;                 // -std=cNN without GNU's extensions: `, ## __VA_ARGS__` and main as clang has them there
     bool no_gnu_keywords;            // asm, and typeof before C23, are identifiers (-std=cNN, -fno-gnu-keywords, -fno-asm)
     bool trigraphs;                  // trigraphs are replaced (-std=c99/c11/c17, -trigraphs): a unit that has one leaves
+    uint8_t raw_strings;             // raw string literals (#3600): 1 their R and LR forms (GNU's modes from C99, as the full
+                                     // pipeline's pp_raw_strings), 2 also u8R, uR and UR (from C11); a unit with one leaves
     bool quiet;                      // -w (suppress warnings)
     bool release;                    // release arenas before return (false for terminal CLI exit)
     bool avoid_huge_pages;           // busy host (#672/#1561): advise MADV_NOHUGEPAGE to avoid 8-core THP lock contention

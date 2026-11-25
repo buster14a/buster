@@ -16396,6 +16396,8 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
                     .strict_iso = !options.language.gnu,
                     .no_gnu_keywords = !c_language_gnu_keywords(options.language),
                     .trigraphs = options.trigraphs,
+                    .raw_strings = (uint8_t)(((pp_raw_strings(&options) & C_TOKENIZER_RAW_STRINGS) != 0 ? 1u : 0u) +
+                                             ((pp_raw_strings(&options) & C_TOKENIZER_UTF_RAW_STRINGS) != 0 ? 1u : 0u)),
                     .quiet = quiet || options.suppress_warnings,
                     .release = release,
                     .avoid_huge_pages = arena_pages_busy,
