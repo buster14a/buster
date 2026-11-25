@@ -1403,8 +1403,12 @@ struct FastVal
     uint8_t bf_signed;
     uint8_t is_func_sym;   // 1 if FVAL_GLOBAL refers directly to a function symbol (enables direct `call sym`)
     uint8_t is_lvalue;     // 1 if modifiable/addressable lvalue
-    uint8_t pad[2];
+    // The last eight bytes are members to their end. With two bytes here and four of padding after them, a value was
+    // written with a store of four bytes there and copied with a load of eight, which no store covers: the load waited
+    // for the store to leave the store buffer, 40 cycles of every binary operator's result (#2850's profile, the 9700X).
+    uint8_t pad[6];
 };
+_Static_assert(sizeof(FastVal) == 40, "FastVal is five words with no padding");
 
 // Scratch register allocation order (RAX, R10, R11 first so ABI arg regs stay free longer!)
 static const uint8_t fast_gp_pool[9] = {
@@ -4189,38 +4193,43 @@ static BUSTER_DIRECT_HOT void fast_expr_reduce_top(FastExprCtx* ex, FastExprOp* 
     }
 
     if (ex->vsp < 2u) { fast_cc_bail(cc, "binary stack underflow"); return; }
-    FastVal rhs = ex->vstack[ex->vsp - 1u];
-    FastVal lhs = ex->vstack[ex->vsp - 2u];
+    // The operands where they stand, above the stack's new top: a copy of a value just written a field at a time
+    // waits for its stores (#2850).
+    FastVal* const rhs = ex->vstack + (ex->vsp - 1u);
+    FastVal* const lhs = ex->vstack + (ex->vsp - 2u);
     ex->vsp -= 2u;
 
     if (tok == FTOK_COMMA)
     {
-        fval_release(ex, &lhs);
-        ex->vstack[ex->vsp++] = rhs;
+        fval_release(ex, lhs);
+        ex->vstack[ex->vsp++] = *rhs;
         return;
     }
     if (tok == FTOK_ASSIGN)
     {
-        if (!lhs.is_lvalue || ftype_is_const(lhs.type))
+        if (!lhs->is_lvalue || ftype_is_const(lhs->type))
         {
             fast_cc_bail(cc, "assign to const or non-lvalue");
             return;
         }
         FastVal res = { 0 };
-        fval_store(ex, &lhs, &rhs, true, &res);
+        fval_store(ex, lhs, rhs, true, &res);
         ex->vstack[ex->vsp++] = res;
         return;
     }
     if (tok >= FTOK_ADD_ASSIGN && tok <= FTOK_SHR_ASSIGN)
     {
         FastVal res = { 0 };
-        fval_emit_compound_assign(ex, tok, &lhs, &rhs, &res);
+        fval_emit_compound_assign(ex, tok, lhs, rhs, &res);
         ex->vstack[ex->vsp++] = res;
         return;
     }
-    FastVal res = { 0 };
-    fval_emit_binary(ex, tok, &lhs, &rhs, &res);
-    ex->vstack[ex->vsp++] = res;
+    // The result where the left operand stands, which is where it goes. fval_emit_binary writes it once, as the last
+    // thing it does, or bails out. A result in a local of this function was 40 cycles of waiting: the local is zeroed
+    // through the stack pointer, written through fval_emit_binary's pointer and loaded through the stack pointer,
+    // and the load is paired with the wrong store (#2850's profile on the 9700X: half of this function's cycles).
+    fval_emit_binary(ex, tok, lhs, rhs, lhs);
+    ex->vsp += 1u;
 }
 
 // Main iterative C17 expression compiler (ZERO recursion!).
@@ -4254,32 +4263,37 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
                 const uint32_t si = id < cc->env_cap ? cc->sym_cur[id] : 0u;
                 if (__builtin_expect(si != 0, 1))
                 {
+                    // The symbol's value by its kind without a branch on the kind: a local, an enumeration constant,
+                    // an object and a function follow each other as the program has them, and the branch that told
+                    // them apart was mispredicted 13 K times a compile of sqlite3.c (#2850). What stays is the first
+                    // reference of an object or a function, which makes its ELF symbol.
+                    static const uint8_t value_kinds[8] = { [FSYM_ENUM_CONST] = FVAL_IMM, [FSYM_LOCAL] = FVAL_LOCAL, [FSYM_GLOBAL] = FVAL_GLOBAL, [FSYM_FUNC] = FVAL_GLOBAL };
+                    static const uint8_t value_lvalues[8] = { [FSYM_LOCAL] = 1u, [FSYM_GLOBAL] = 1u };
                     FastSym* sym = cc->syms + si;
-                    if (__builtin_expect(sym->is_unsupported != 0, 0)) { fast_cc_bail(cc, "use of unsupported-type symbol"); break; }
-                    if (sym->kind == FSYM_LOCAL)
+                    const uint32_t symbol_kind = sym->kind & 7u;
+                    if (__builtin_expect((sym->is_unsupported != 0) | (symbol_kind < FSYM_ENUM_CONST) | (symbol_kind > FSYM_FUNC), 0))
                     {
-                        if (ex.vsp < 128u) { ex.vstack[ex.vsp++] = (FastVal){ .type = sym->type, .kind = FVAL_LOCAL, .off = sym->stack_off, .is_lvalue = 1u }; }
-                    }
-                    else if (sym->kind == FSYM_ENUM_CONST)
-                    {
-                        if (ex.vsp < 128u) { ex.vstack[ex.vsp++] = (FastVal){ .type = sym->type, .kind = FVAL_IMM, .imm = sym->const_val }; }
-                    }
-                    else if (sym->kind == FSYM_FUNC)
-                    {
-                        if (ex.eval_only == 0) { sym->referenced = 1u; }
-                        const uint32_t osym = ex.eval_only > 0 ? 0u : fast_cc_ensure_obj_sym(cc, si);
-                        if (ex.vsp < 128u) { ex.vstack[ex.vsp++] = (FastVal){ .type = sym->type, .kind = FVAL_GLOBAL, .sym_idx = osym, .imm = 0, .is_func_sym = 1u }; }
-                    }
-                    else if (sym->kind == FSYM_GLOBAL)
-                    {
-                        if (ex.eval_only == 0) { sym->referenced = 1u; }
-                        const uint32_t osym = ex.eval_only > 0 ? 0u : fast_cc_ensure_obj_sym(cc, si);
-                        if (ex.vsp < 128u) { ex.vstack[ex.vsp++] = (FastVal){ .type = sym->type, .kind = FVAL_GLOBAL, .sym_idx = osym, .imm = 0, .is_lvalue = 1u }; }
-                    }
-                    else
-                    {
-                        fast_cc_bail(cc, "unexpected symbol kind in expr");
+                        fast_cc_bail(cc, sym->is_unsupported != 0 ? "use of unsupported-type symbol" : "unexpected symbol kind in expr");
                         break;
+                    }
+                    const uint32_t emitted = (uint32_t)(symbol_kind >= FSYM_GLOBAL) & (uint32_t)(ex.eval_only == 0);
+                    sym->referenced |= (uint8_t)emitted;
+                    uint32_t osym = sym->obj_sym & (0u - emitted);
+                    if (__builtin_expect((emitted != 0) & (osym == 0), 0))
+                    {
+                        osym = fast_cc_ensure_obj_sym(cc, si);
+                    }
+                    if (ex.vsp < 128u)
+                    {
+                        ex.vstack[ex.vsp++] = (FastVal){
+                            .type = sym->type,
+                            .kind = value_kinds[symbol_kind],
+                            .imm = sym->const_val & (0 - (int64_t)(symbol_kind == FSYM_ENUM_CONST)),
+                            .sym_idx = osym,
+                            .off = sym->stack_off & (0 - (int32_t)(symbol_kind == FSYM_LOCAL)),
+                            .is_func_sym = (uint8_t)(symbol_kind == FSYM_FUNC),
+                            .is_lvalue = value_lvalues[symbol_kind],
+                        };
                     }
                     expect_val = false;
                     continue;
