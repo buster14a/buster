@@ -268,6 +268,8 @@ struct FastCCState
     uint32_t id_builtin_ctzll;
     uint32_t id_builtin_ctz;
     uint32_t id_builtin_inff;
+    uint32_t id_builtin_huge_val;  // HUGE_VAL, __builtin_inf's value (#3592)
+    uint32_t id_builtin_huge_valf;
     uint32_t id_builtin_inf;
     uint32_t id_builtin_nanf;
     uint32_t id_builtin_nan;
@@ -288,6 +290,7 @@ struct FastCCState
     uint32_t id_atomic_load_n;
     uint32_t id_atomic_store_n;
     uint32_t id_main;
+    uint32_t id_pretty_function; // __PRETTY_FUNCTION__, which shares __func__'s token kind (#3618)
     FastType va_list_type; // __builtin_va_list (array[1] of struct __va_list_tag)
     FastType va_list_tag_type;
 
@@ -3217,6 +3220,8 @@ static bool fast_cc_init_state(FastCCState* cc, FastArena* arena, FastArena* scr
         cc->id_builtin_ctz = fast_ident_intern_cstr(&pp->idents, "__builtin_ctz");
         cc->id_builtin_inff = fast_ident_intern_cstr(&pp->idents, "__builtin_inff");
         cc->id_builtin_inf = fast_ident_intern_cstr(&pp->idents, "__builtin_inf");
+        cc->id_builtin_huge_val = fast_ident_intern_cstr(&pp->idents, "__builtin_huge_val");
+        cc->id_builtin_huge_valf = fast_ident_intern_cstr(&pp->idents, "__builtin_huge_valf");
         cc->id_builtin_nanf = fast_ident_intern_cstr(&pp->idents, "__builtin_nanf");
         cc->id_builtin_nan = fast_ident_intern_cstr(&pp->idents, "__builtin_nan");
         cc->id_builtin_expect = fast_ident_intern_cstr(&pp->idents, "__builtin_expect");
@@ -3236,6 +3241,7 @@ static bool fast_cc_init_state(FastCCState* cc, FastArena* arena, FastArena* scr
         cc->id_atomic_load_n = fast_ident_intern_cstr(&pp->idents, "__atomic_load_n");
         cc->id_atomic_store_n = fast_ident_intern_cstr(&pp->idents, "__atomic_store_n");
         cc->id_main = fast_ident_intern_cstr(&pp->idents, "main");
+        cc->id_pretty_function = fast_ident_intern_cstr(&pp->idents, "__PRETTY_FUNCTION__");
         cc->ro_sign_f32_off = UINT32_MAX;
         cc->ro_sign_f64_off = UINT32_MAX;
         cc->ro_u64_to_f64_off = UINT32_MAX;

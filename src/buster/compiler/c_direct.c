@@ -2844,6 +2844,75 @@ static bool c_direct_test_atomics(const char* obj_path)
     return ok;
 }
 
+// HUGE_VAL (#3592): glibc's math.h writes it __builtin_huge_val(), an infinity as __builtin_inf() is, in code and in a
+// static initializer; Lua's math and string libraries use it. The constants in .rodata: +inf as a double, the table's
+// +inf and -inf, and +inf as a float.
+static bool c_direct_test_huge_val(const char* obj_path)
+{
+    static const char source[] =
+        "double t_huge(void) { return __builtin_huge_val(); }\n"
+        "static const double table[2] = { __builtin_huge_val(), -__builtin_huge_val() };\n"
+        "double t_table(int i) { return table[i]; }\n"
+        "float t_hugef(void) { return __builtin_huge_valf(); }\n";
+    static const uint8_t rodata[28] = {
+        0, 0, 0, 0, 0, 0, 0xf0, 0x7f, 0, 0, 0, 0, 0, 0, 0xf0, 0x7f, 0, 0, 0, 0, 0, 0, 0xf0, 0xff, 0, 0, 0x80, 0x7f,
+    };
+    const bool ok = c_direct_test_compile_source_with(source, obj_path, 0, NULL, 0, false, NULL, NULL, NULL, NULL, rodata, sizeof(rodata),
+                                                      (CDirectTestMode){ 0 });
+    if (!ok)
+    {
+        fprintf(stderr, "test-direct: HUGE_VAL left the direct path or isn't an infinity\n");
+    }
+    return ok;
+}
+
+typedef int (*CDirectTestNone)(void);
+
+// __PRETTY_FUNCTION__ is the function's signature in C, as clang prints it, and the full pipeline prints it (#3618): a
+// unit that names it leaves, through a macro, in a sizeof and in a dead arm too. __func__ and __FUNCTION__ are the name.
+static bool c_direct_test_pretty_function(const char* obj_path)
+{
+    static const char* const leaves[] = {
+        "const char *f(int x) { return __PRETTY_FUNCTION__; }\n",
+        "unsigned long f(void) { return sizeof(__PRETTY_FUNCTION__); }\n",
+        "#define WHERE __PRETTY_FUNCTION__\nconst char *f(void) { return WHERE; }\n",
+        "const char *f(int x) { return 1 ? __func__ : __PRETTY_FUNCTION__; }\n",
+    };
+    bool ok = true;
+    for (uint32_t i = 0; ok && i < (uint32_t)(sizeof(leaves) / sizeof(leaves[0])); i += 1)
+    {
+        ok = c_direct_test_compile_source(leaves[i], obj_path, 1, NULL, NULL);
+        if (!ok)
+        {
+            fprintf(stderr, "test-direct: __PRETTY_FUNCTION__ took the direct path: %s", leaves[i]);
+        }
+    }
+    static const char names[] =
+        "int t_func(void) { return (int)sizeof(__func__); }\n"
+        "int t_function(void) { return (int)sizeof(__FUNCTION__); }\n";
+    bool named = c_direct_test_compile_source_keep(names, obj_path, NULL, 0, NULL, NULL, NULL);
+#if !__has_feature(memory_sanitizer)
+    void* mappings[2] = { 0 };
+    size_t mapped[2] = { 0 };
+    const void* func = named ? c_direct_test_code(obj_path, "t_func", mappings + 0, mapped + 0) : NULL;
+    const void* function = named ? c_direct_test_code(obj_path, "t_function", mappings + 1, mapped + 1) : NULL;
+    named = func != NULL && function != NULL && ((CDirectTestNone)(uintptr_t)func)() == 7 && ((CDirectTestNone)(uintptr_t)function)() == 11;
+    for (uint32_t i = 0; i < 2u; i += 1)
+    {
+        if (mappings[i] != NULL)
+        {
+            munmap(mappings[i], mapped[i]);
+        }
+    }
+#endif
+    unlink(obj_path);
+    if (!named)
+    {
+        fprintf(stderr, "test-direct: __func__ or __FUNCTION__ isn't the name\n");
+    }
+    return ok && named;
+}
+
 typedef int (*CDirectTestThree)(int, int, int);
 
 // A sizeof operand has no code, and no value of it holds a register (#3616): releasing a call's argument or a comma's
@@ -3654,6 +3723,26 @@ int run_c_direct_tests(int argc, char** argv)
     else
     {
         fprintf(stderr, "test-direct: FAIL musl's atomics' inline assembly\n");
+        failed += 1u;
+    }
+
+    if (c_direct_test_huge_val(obj_path))
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL HUGE_VAL\n");
+        failed += 1u;
+    }
+
+    if (c_direct_test_pretty_function(obj_path))
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL __PRETTY_FUNCTION__\n");
         failed += 1u;
     }
 
