@@ -19,6 +19,40 @@
 // ---------------------------------------------------------------------------------------------------------------------
 // Level 9a: AVX-512 body pre-scanner, stack allocation, .rodata constants, inline copy/zero, ELF symbol binding
 
+// A hosted program's main must return int without GNU's extensions (#3592): clang refuses `void main(void)` in
+// -std=c99, c11, c17 and c23, at file scope or in a block, and only warns in GNU's modes (c_check_input.c's
+// check_input_main). The direct path leaves such a declaration to the full pipeline, freestanding or not.
+static void fast_cc_check_main(FastCCState* cc, uint32_t name_id, FastType type)
+{
+    if (cc->pp->strict_iso && name_id != 0 && name_id == cc->id_main && ftype_is_func(type) &&
+        cc->ctypes[type & BUSTER_FTYPE_CIDX_MASK].inner != (FastType)FTYPE_I32)
+    {
+        fast_cc_bail(cc, "main returns other than int without GNU's extensions");
+    }
+}
+
+// A declaration's declarators name what they declare, and the comma after one is followed by another: `int , x;`,
+// `int x, ;`, `int (*)(void);` and the `, ,` that `__VA_ARGS__ ## __VA_ARGS__` makes of a comma are clang's errors, which
+// the direct path leaves to the full pipeline (#3592). Returns whether the declarator has a name.
+static bool fast_cc_declarator_named(FastCCState* cc, uint32_t name_id)
+{
+    if (name_id == 0)
+    {
+        fast_cc_bail(cc, "declarator without a name");
+    }
+    return name_id != 0;
+}
+
+// The comma between two declarators, and the declarator it promises.
+static void fast_cc_declarator_comma(FastCCState* cc)
+{
+    cc->pos += 1u;
+    if (fast_cc_peek(cc) == FTOK_SEMI)
+    {
+        fast_cc_bail(cc, "comma before the end of a declaration");
+    }
+}
+
 typedef struct FastBodyScan FastBodyScan;
 struct FastBodyScan
 {
@@ -6413,6 +6447,11 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
             {
                 FastDeclSpecs ds = { 0 };
                 const FastType btype = fast_cc_parse_decl_specs(cc, &ds);
+                // A for's declaration is of automatic objects; clang takes static, extern and typedef there too (#3599).
+                if ((ds.written & ~(BUSTER_FSPEC_REGISTER | BUSTER_FSPEC_AUTO)) != 0)
+                {
+                    fast_cc_bail(cc, "a for's declaration of a non-local");
+                }
                 while (cc->pos < cc->tcount && fast_cc_peek(cc) != FTOK_SEMI && !cc->bailout)
                 {
                     FastDeclaratorResult dr = { 0 };
@@ -6636,8 +6675,13 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
             {
                 const uint32_t decl_start = cc->pos;
                 FastDeclaratorResult dr = { 0 };
-                if (!fast_cc_parse_declarator(cc, btype, false, &dr, false)) { break; }
+                if (!fast_cc_parse_declarator(cc, btype, false, &dr, false) || !fast_cc_declarator_named(cc, dr.name_id)) { break; }
                 const uint32_t extra_al = ds.attr.aligned > dr.attr.aligned ? ds.attr.aligned : dr.attr.aligned;
+                if ((ds.written & (BUSTER_FSPEC_INLINE | BUSTER_FSPEC_NORETURN)) != 0 && (ds.is_typedef != 0 || !ftype_is_func(dr.type)))
+                {
+                    fast_cc_bail(cc, "inline or _Noreturn on an object");
+                    break;
+                }
                 if (ds.is_typedef && (ds.attr.visibility_set || dr.attr.visibility_set))
                 {
                     fast_cc_bail(cc, "visibility attribute on a typedef");
@@ -6657,6 +6701,10 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                     // of its own (#3595). One that sees none (the file declares it later or never: symbol 0, of no
                     // kind), or that a local of the name hides, or that brings attributes of its own, is left to the
                     // full pipeline. (An asm label never gets here: a body's statements leave at its __asm__.)
+                    if (ftype_is_func(dr.type))
+                    {
+                        fast_cc_check_main(cc, dr.name_id, dr.type);
+                    }
                     const uint32_t seen = dr.name_id < cc->env_cap ? cc->sym_cur[dr.name_id] : 0u;
                     const uint8_t kind = ftype_is_func(dr.type) ? (uint8_t)FSYM_FUNC : (uint8_t)FSYM_GLOBAL;
                     if (dr.name_id == 0 || cc->syms[seen].kind != kind || (kind == FSYM_GLOBAL && cc->syms[seen].storage == 1u) ||
@@ -6729,7 +6777,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                         cc->syms[lsi].stack_off = loff;
                     }
                 }
-                if (fast_cc_peek(cc) == FTOK_COMMA) { cc->pos += 1u; }
+                if (fast_cc_peek(cc) == FTOK_COMMA) { fast_cc_declarator_comma(cc); }
                 else if (cc->pos == decl_start && !cc->bailout) { fast_cc_bail(cc, "local decl stalled"); break; }
             }
             if (fast_cc_peek(cc) == FTOK_SEMI) { cc->pos += 1u; }
@@ -6849,9 +6897,10 @@ static FastDeclJoin fast_cc_decl_join(const FastDeclSpecs* ds, const FastDeclara
 // A later file-scope declaration of a symbol joins its weak, visibility, asm label and inline spelling, as the full
 // pipeline's does (#3595). Two explicit visibilities or two labels that differ are clang's error; a change to a symbol
 // already in the object (used or defined before this declaration) is left to the full pipeline, whose rule differs by
-// attribute (a function's first linkage stays, its visibility doesn't); and so is a gnu_inline after a pending inline
-// definition, whose rule it would change.
-static void fast_cc_join_declaration(FastCCState* cc, uint32_t si, const FastDeclJoin* join)
+// attribute (a function's first linkage stays, its visibility doesn't), unless the declaration is an alias, which the
+// unit's end defines with its final binding and visibility (fast_cc_alias_define); and so is a gnu_inline after a
+// pending inline definition, whose rule it would change.
+static void fast_cc_join_declaration(FastCCState* cc, uint32_t si, const FastDeclJoin* join, bool alias)
 {
     FastSym* sym = cc->syms + si;
     const bool relabels = join->label != NULL && (sym->asm_name == NULL || sym->asm_name_len != join->label_len ||
@@ -6862,7 +6911,7 @@ static void fast_cc_join_declaration(FastCCState* cc, uint32_t si, const FastDec
     {
         fast_cc_bail(cc, "a declaration's visibility or label against an earlier one");
     }
-    else if (changes && sym->obj_sym != 0)
+    else if (changes && sym->obj_sym != 0 && !alias)
     {
         fast_cc_bail(cc, "an attribute after the symbol's first use");
     }
@@ -6899,6 +6948,90 @@ static void fast_cc_decide_inline_definitions(FastCCState* cc, uint32_t deferred
     }
 }
 
+// GNU's alias attribute (#3592): a file-scope declaration of a function or object with alias("target"), not a definition
+// and not static, is defined at the end of the unit at its target's place. Recorded where it is declared.
+static void fast_cc_alias_add(FastCCState* cc, uint32_t sym_idx, const FastAttrInfo* attr)
+{
+    if (cc->alias_count < BUSTER_FALIAS_LIMIT)
+    {
+        cc->aliases[cc->alias_count] = (FastAlias){ .sym_idx = sym_idx, .target = attr->alias_name, .target_len = attr->alias_len };
+        cc->alias_count += 1u;
+        cc->syms[sym_idx].is_alias = 1u;
+    }
+    else
+    {
+        fast_cc_bail(cc, "too many aliases");
+    }
+}
+
+// Before the reachable bodies are compiled: every alias attribute the parser saw was recorded by a file-scope declaration
+// of a function or object without an initializer (one anywhere else, on a definition, a typedef, an initialized object, in
+// a block, a member or a parameter, is not, and leaves here), and each
+// target is a function or object of its alias's kind, named without an asm label, not an alias itself, and declared by
+// now; the alias references it, so that a static inline target is compiled. clang refuses the rest, or the direct path
+// doesn't take them (a chain of aliases, a target whose ELF name its asm label gives).
+static void fast_cc_alias_targets(FastCCState* cc)
+{
+    if (cc->alias_count != cc->alias_attributes)
+    {
+        fast_cc_bail(cc, "alias attribute outside a file-scope declaration");
+    }
+    for (uint32_t i = 0; i < cc->alias_count && !cc->bailout; i += 1)
+    {
+        FastAlias* alias = cc->aliases + i;
+        const uint32_t id = fast_ident_intern(&cc->pp->idents, (const uint8_t*)alias->target, alias->target_len);
+        const uint32_t target = id != 0 && id < cc->env_cap ? cc->sym_cur[id] : 0u;
+        const uint8_t kind = cc->syms[alias->sym_idx].kind;
+        bool ok = target != 0 && target != alias->sym_idx && cc->syms[target].kind == kind && (kind == FSYM_FUNC || kind == FSYM_GLOBAL) &&
+                  cc->syms[target].asm_name == NULL;
+        for (uint32_t j = 0; ok && j < cc->alias_count; j += 1)
+        {
+            ok = cc->aliases[j].sym_idx != target;
+        }
+        if (ok)
+        {
+            alias->target_idx = target;
+            fast_cc_reference(cc, cc->syms + target);
+        }
+        else
+        {
+            fast_cc_bail(cc, "alias's target");
+        }
+    }
+}
+
+// After the tentative definitions: each alias is defined where its target is, the target's section, value and size,
+// with its own binding (weak with __weak__) and visibility. A target this unit doesn't define is clang's error.
+static void fast_cc_alias_define(FastCCState* cc)
+{
+    for (uint32_t i = 0; i < cc->alias_count && !cc->bailout; i += 1)
+    {
+        const FastAlias* alias = cc->aliases + i;
+        FastSym* target = cc->syms + alias->target_idx;
+        FastSym* sym = cc->syms + alias->sym_idx;
+        const uint32_t target_obj = target->defined != 0 ? fast_cc_ensure_obj_sym(cc, alias->target_idx) : 0u;
+        const uint32_t sym_obj = target_obj != 0 ? fast_cc_ensure_obj_sym(cc, alias->sym_idx) : 0u;
+        if (sym_obj != 0)
+        {
+            const FastObjSym place = cc->obj->syms[target_obj];
+            FastObjSym* out = cc->obj->syms + sym_obj;
+            out->section = place.section;
+            out->value = place.value;
+            out->size = place.size;
+            out->defined = 1u;
+            out->binding = sym->is_weak ? STB_WEAK : STB_GLOBAL;
+            out->visibility = sym->visibility;
+            sym->defined = 1u;
+            sym->section = target->section;
+            sym->sec_off = target->sec_off;
+        }
+        else
+        {
+            fast_cc_bail(cc, "alias of a target the unit doesn't define");
+        }
+    }
+}
+
 static bool fast_cc_compile_unit(FastCCState* cc)
 {
     FastObj* obj = cc->obj;
@@ -6929,6 +7062,7 @@ static bool fast_cc_compile_unit(FastCCState* cc)
 
         FastDeclSpecs ds = { 0 };
         const FastType btype = fast_cc_parse_decl_specs(cc, &ds);
+        if ((ds.written & (BUSTER_FSPEC_REGISTER | BUSTER_FSPEC_AUTO)) != 0) { fast_cc_bail(cc, "register or auto at file scope"); }
         if (cc->bailout) { break; }
         if (fast_cc_peek(cc) == FTOK_SEMI) { cc->pos += 1u; continue; }
 
@@ -6936,11 +7070,26 @@ static bool fast_cc_compile_unit(FastCCState* cc)
         while (cc->pos < cc->tcount && fast_cc_peek(cc) != FTOK_SEMI && !cc->bailout)
         {
             FastDeclaratorResult dr = { 0 };
-            if (!fast_cc_parse_declarator(cc, btype, false, &dr, first)) { break; }
+            if (!fast_cc_parse_declarator(cc, btype, false, &dr, first) || !fast_cc_declarator_named(cc, dr.name_id)) { break; }
+            if ((ds.written & (BUSTER_FSPEC_INLINE | BUSTER_FSPEC_NORETURN)) != 0 && (ds.is_typedef != 0 || !ftype_is_func(dr.type)))
+            {
+                fast_cc_bail(cc, "inline or _Noreturn on an object");
+                break;
+            }
             const uint32_t extra_al = ds.attr.aligned > dr.attr.aligned ? ds.attr.aligned : dr.attr.aligned;
             const bool body = first && ftype_is_func(dr.type) && fast_cc_peek(cc) == FTOK_LBRACE;
             const FastDeclJoin join = fast_cc_decl_join(&ds, &dr, ftype_is_func(dr.type), body);
+            const FastAttrInfo* alias = dr.attr.alias_name != NULL ? &dr.attr : ds.attr.alias_name != NULL ? &ds.attr : NULL;
 
+            if (!ds.is_typedef)
+            {
+                fast_cc_check_main(cc, dr.name_id, dr.type);
+            }
+            if (alias != NULL && (ds.is_static || ds.is_inline || join.label != NULL))
+            {
+                fast_cc_bail(cc, "alias attribute on a static, inline or labelled declaration");
+                break;
+            }
             // Function definition!
             if (body)
             {
@@ -6953,7 +7102,7 @@ static bool fast_cc_compile_unit(FastCCState* cc)
                     // A pending inline definition allows a later one only as GNU's idiom: its extern inline one,
                     // then the external definition, not inline (#3595).
                     const uint8_t pending = cc->syms[si].inline_rules & BUSTER_FINLINE_PENDING;
-                    if (cc->syms[si].defined != 0 || (pending != 0 && (pending != BUSTER_FINLINE_GNU_PENDING || ds.is_inline)))
+                    if (cc->syms[si].defined != 0 || cc->syms[si].is_alias != 0 || (pending != 0 && (pending != BUSTER_FINLINE_GNU_PENDING || ds.is_inline)))
                     {
                         fast_cc_bail(cc, "redefinition of function");
                         break;
@@ -6961,7 +7110,7 @@ static bool fast_cc_compile_unit(FastCCState* cc)
                     cc->syms[si].type = dr.type;
                     if (stor == 1u || stor == 4u) { cc->syms[si].storage = stor; }
                     if (ds.is_unsupported_type) { cc->syms[si].is_unsupported = 1u; }
-                    fast_cc_join_declaration(cc, si, &join);
+                    fast_cc_join_declaration(cc, si, &join, false);
                     if (cc->bailout) { break; }
                 }
                 else
@@ -7040,17 +7189,37 @@ static bool fast_cc_compile_unit(FastCCState* cc)
                         {
                             cc->syms[existing].type = dr.type;
                         }
-                        fast_cc_join_declaration(cc, existing, &join);
+                        // An alias of a function a header declared: not of one defined, static or with an inline
+                        // definition pending, which are clang's errors. An alias is a definition, so another alias, and
+                        // an attribute on a later declaration (the full pipeline's warning), leave too: any declaration
+                        // after an alias does.
+                        const FastSym* declared = cc->syms + existing;
+                        if (declared->is_alias != 0 ||
+                            (alias != NULL && (declared->defined != 0 || declared->storage == 1u || declared->storage == 4u ||
+                                               (declared->inline_rules & BUSTER_FINLINE_PENDING) != 0)))
+                        {
+                            fast_cc_bail(cc, "a declaration of an alias, or an alias of a defined or static function");
+                            break;
+                        }
+                        fast_cc_join_declaration(cc, existing, &join, alias != NULL);
+                        if (alias != NULL)
+                        {
+                            fast_cc_alias_add(cc, existing, alias);
+                        }
                     }
                     else
                     {
                         const uint8_t stor = ds.is_static ? 1u : 2u;
-                        fast_cc_sym_bind(cc, dr.name_id, (FastSym){
+                        const uint32_t si = fast_cc_sym_bind(cc, dr.name_id, (FastSym){
                             .kind = FSYM_FUNC, .storage = stor, .is_weak = join.weak, .visibility = join.visibility,
                             .visibility_set = join.visibility_set, .inline_rules = join.inline_rules,
                             .is_unsupported = ds.is_unsupported_type, .type = dr.type,
                             .asm_name = dr.attr.asm_label, .asm_name_len = dr.attr.asm_label_len,
                         });
+                        if (alias != NULL && si != 0)
+                        {
+                            fast_cc_alias_add(cc, si, alias);
+                        }
                     }
                 }
             }
@@ -7058,6 +7227,14 @@ static bool fast_cc_compile_unit(FastCCState* cc)
             else if (dr.name_id != 0)
             {
                 const bool has_init = fast_cc_peek(cc) == FTOK_ASSIGN;
+                const uint32_t declared = dr.name_id < cc->env_cap ? cc->sym_cur[dr.name_id] : 0u;
+                if ((declared != 0 && cc->syms[declared].kind == FSYM_GLOBAL && cc->syms[declared].is_alias != 0) ||
+                    (alias != NULL && declared != 0 && cc->syms[declared].kind == FSYM_GLOBAL &&
+                     (cc->syms[declared].defined != 0 || cc->syms[declared].is_tentative != 0 || cc->syms[declared].storage == 1u)))
+                {
+                    fast_cc_bail(cc, "a declaration of an alias, or an alias of a defined, tentative or static object");
+                    break;
+                }
                 const uint8_t stor = ds.is_static ? 1u : ds.is_extern ? 2u : 0u;
                 uint32_t si = dr.name_id < cc->env_cap ? cc->sym_cur[dr.name_id] : 0u;
                 if (si != 0 && cc->syms[si].kind == FSYM_GLOBAL)
@@ -7069,7 +7246,7 @@ static bool fast_cc_compile_unit(FastCCState* cc)
                         cc->syms[si].type = dr.type;
                     }
                     if (stor == 1u) { cc->syms[si].storage = 1u; }
-                    fast_cc_join_declaration(cc, si, &join);
+                    fast_cc_join_declaration(cc, si, &join, alias != NULL);
                     if (cc->bailout) { break; }
                 }
                 else
@@ -7109,19 +7286,24 @@ static bool fast_cc_compile_unit(FastCCState* cc)
                         obj->syms[osym].defined = 1u;
                     }
                 }
+                else if (alias != NULL)
+                {
+                    fast_cc_alias_add(cc, si, alias);
+                }
                 else if (!ds.is_extern)
                 {
                     cc->syms[si].is_tentative = 1u;
                 }
             }
 
-            if (fast_cc_peek(cc) == FTOK_COMMA) { cc->pos += 1u; }
+            if (fast_cc_peek(cc) == FTOK_COMMA) { fast_cc_declarator_comma(cc); }
             else { break; }
         }
         if (fast_cc_peek(cc) == FTOK_SEMI) { cc->pos += 1u; }
         if (cc->pos == tu_loop_pos && !cc->bailout) { fast_cc_bail(cc, "top-level decl stalled"); break; }
     }
 
+    fast_cc_alias_targets(cc);
     fast_cc_decide_inline_definitions(cc, deferred_count);
 
     // Visit newly reachable bodies in the same order as a forward scan: a reference to an earlier
@@ -7175,6 +7357,8 @@ static bool fast_cc_compile_unit(FastCCState* cc)
             }
         }
     }
+
+    fast_cc_alias_define(cc);
 
     return !cc->bailout && !obj->overflow;
 }
