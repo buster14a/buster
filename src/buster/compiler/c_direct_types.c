@@ -288,6 +288,7 @@ struct FastCCState
     uint32_t id_atomic_load_n;
     uint32_t id_atomic_store_n;
     uint32_t id_main;
+    uint32_t id_pretty_function; // __PRETTY_FUNCTION__, which shares __func__'s token kind (#3618)
     FastType va_list_type; // __builtin_va_list (array[1] of struct __va_list_tag)
     FastType va_list_tag_type;
 
@@ -3236,6 +3237,7 @@ static bool fast_cc_init_state(FastCCState* cc, FastArena* arena, FastArena* scr
         cc->id_atomic_load_n = fast_ident_intern_cstr(&pp->idents, "__atomic_load_n");
         cc->id_atomic_store_n = fast_ident_intern_cstr(&pp->idents, "__atomic_store_n");
         cc->id_main = fast_ident_intern_cstr(&pp->idents, "main");
+        cc->id_pretty_function = fast_ident_intern_cstr(&pp->idents, "__PRETTY_FUNCTION__");
         cc->ro_sign_f32_off = UINT32_MAX;
         cc->ro_sign_f64_off = UINT32_MAX;
         cc->ro_u64_to_f64_off = UINT32_MAX;

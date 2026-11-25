@@ -4716,6 +4716,13 @@ static BUSTER_DIRECT_HOT void fast_cc_expr(FastCCState* cc, bool stop_at_comma, 
             }
             if (k == FTOK_STR_LIT || k == FTOK_KW_FUNC)
             {
+                // __PRETTY_FUNCTION__ is the function's signature in C, as clang prints it, and not its name (#3618):
+                // the full pipeline prints it. Without code too, since sizeof takes its length.
+                if (k == FTOK_KW_FUNC && fast_cc_data(cc) == cc->id_pretty_function)
+                {
+                    fast_cc_bail(cc, "__PRETTY_FUNCTION__");
+                    break;
+                }
                 const char* sp;
                 uint32_t slen = 0;
                 if (k == FTOK_STR_LIT)
