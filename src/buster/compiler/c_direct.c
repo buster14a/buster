@@ -582,6 +582,9 @@ static const CDirectLexCase c_direct_lex_cases[] = {
     { "a/=b", 3, { FTOK_IDENT, FTOK_DIV_ASSIGN, FTOK_IDENT } },
     { "a/*c*/b", 2, { FTOK_IDENT, FTOK_IDENT } },
     { "a/**/+/***/b", 3, { FTOK_IDENT, FTOK_PLUS, FTOK_IDENT } },
+    { "a/*/ b */c", 2, { FTOK_IDENT, FTOK_IDENT } },
+    { "x/ *y/**/", 4, { FTOK_IDENT, FTOK_SLASH, FTOK_STAR, FTOK_IDENT } },
+    { "a*/**/b", 3, { FTOK_IDENT, FTOK_STAR, FTOK_IDENT } },
     { "\"str\"", 1, { FTOK_STR_LIT } },
     { "\"a\\\"b/*\"", 1, { FTOK_STR_LIT } },
     { "\"\"", 1, { FTOK_STR_LIT } },
@@ -1472,8 +1475,12 @@ static bool c_direct_test_classes(void)
         const bool decided = c == '/' || c == '#' || c == '"' || c == '\'' || c == '\\' || (fast_ascii_to_kind[c] == 0 && !space);
         const uint32_t expected = (space ? BUSTER_FCLASS_SPACE : 0u) | (c == '\n' ? BUSTER_FCLASS_NEWLINE : 0u) |
                                   (decided ? BUSTER_FCLASS_SPECIAL : 0u) | (run ? BUSTER_FCLASS_RUN : 0u) |
-                                  (c == '.' ? BUSTER_FCLASS_DOT : 0u) | (c == '.' || (c >= '0' && c <= '9') ? BUSTER_FCLASS_DOT_NEXT : 0u);
+                                  (c == '.' ? BUSTER_FCLASS_DOT : 0u);
         ok = ok && fast_lex_class[c] == expected;
+        // The class of the byte after another: a punctuator's second character, a run's, what makes a '.' a number's.
+        const uint32_t expected_next = fast_pair_second[c] | (run ? BUSTER_FCLASS_RUN : 0u) |
+                                       (c == '.' || (c >= '0' && c <= '9') ? BUSTER_FCLASS_DOT : 0u);
+        ok = ok && fast_lex_next_class[c] == expected_next && fast_pair_second[c] < 8u;
         // A run's character has an identifier's or a number's kind, and every other character with a kind is a punctuator.
         ok = ok && run == (fast_ascii_to_kind[c] == FTOK_IDENT || fast_ascii_to_kind[c] == FTOK_INT_LIT);
         ok = ok && (fast_ascii_to_kind[c] <= FTOK_STR_LIT || fast_punct_len[fast_ascii_to_kind[c]] == 1u);
@@ -1553,6 +1560,49 @@ static bool c_direct_test_lexer(void)
                 fprintf(stderr, "test-direct: lexer: refused text %u was taken, shift %u\n", r, shift);
             }
         }
+    }
+    if (ok)
+    {
+        // A window's tokens start within 64 KB of its first byte: a comment that ends near that distance, and a stretch
+        // of blanks, a literal and a comment longer than it between tokens, which go on in the next window.
+        enum { long_size = 4 * 70000 + 400 };
+        char* const text = (char*)malloc(long_size);
+        uint32_t count = 0;
+        uint32_t length = 0;
+        ok = text != NULL;
+        if (ok)
+        {
+            memcpy(text, "a /*", 4);
+            length = 4u;
+            // The comment ends just short of 64 KB, so that the tokens after it are past it.
+            memset(text + length, 'x', 65530);
+            length += 65530u;
+            memcpy(text + length, "*/ b + c", 8);
+            length += 8u;
+            memset(text + length, ' ', 70000);
+            length += 70000u;
+            memcpy(text + length, "d \"", 3);
+            length += 3u;
+            memset(text + length, 'z', 70000);
+            length += 70000u;
+            memcpy(text + length, "\" e /*", 6);
+            length += 6u;
+            memset(text + length, '\n', 70000);
+            length += 70000u;
+            memcpy(text + length, "*/ b", 4);
+            length += 4u;
+            memset(text + length, ' ', 100);
+            length += 100u;
+            text[length++] = '\n';
+            ok = c_direct_test_tokens(text, length, kinds, data, capacity, &count) && count == 8u && kinds[0] == FTOK_IDENT &&
+                 kinds[1] == FTOK_IDENT && kinds[2] == FTOK_PLUS && kinds[3] == FTOK_IDENT && kinds[4] == FTOK_IDENT &&
+                 kinds[5] == FTOK_STR_LIT && kinds[6] == FTOK_IDENT && kinds[7] == FTOK_IDENT && data[7] == data[1] && data[1] != data[0];
+        }
+        if (!ok)
+        {
+            fprintf(stderr, "test-direct: lexer: tokens more than 64 KB apart\n");
+        }
+        free(text);
     }
     if (ok)
     {
