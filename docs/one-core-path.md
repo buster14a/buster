@@ -4462,12 +4462,12 @@ The code generator was half of `sqlite3.c`'s compile and had had no redesign. A 
 came first; the census, every step's readings and the scripts are in
 [buster-performance](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/direct-generator-3581-2026-11-25).
 
-| 9700X, `sqlite3.c`, CPU 2 | main `20f3573e` | this | |
+| 9700X, `sqlite3.c`, CPU 2 | main `09c3b79b` | this | |
 | --- | ---: | ---: | ---: |
-| the product's `-c`, wall (21 rotated runs) | 16.42 ms | **15.60 ms** | -5.0% |
-| user cycles | 81.4 M | **76.9 M** | -5.5% |
-| user instructions | 221.1 M | **206.8 M** | -6.4% |
-| parsing and generating code (the harness's stage, medians of three placements) | 8.61 ms | **7.95 ms** | -7.7% |
+| the product's `-c`, wall (21 rotated runs) | 16.44 ms | **15.57 ms** | -5.3% |
+| user cycles | 81.3 M | **76.6 M** | -5.8% |
+| user instructions | 220.6 M | **205.5 M** | -6.8% |
+| parsing and generating code (the harness's stage, medians of three placements, main `20f3573e`) | 8.61 ms | **7.95 ms** | -7.7% |
 | object | `f558aaf5...` | the same | |
 
 - **The census.** 46,973 expressions of 7.5 tokens; 85% of their identifiers are locals. Their cost is a long tail of
