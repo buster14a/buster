@@ -546,16 +546,24 @@ static FastType ftype_deref(const FastCCState* cc, FastType t)
     return FTYPE_VOID;
 }
 
-static inline FastType ftype_decay(FastCCState* cc, FastType t)
+static __attribute__((noinline)) FastType ftype_decay_slow(FastCCState* cc, FastType t)
 {
     if (ftype_is_array(t))
     {
         return ftype_make_ptr(cc, cc->ctypes[t & BUSTER_FTYPE_CIDX_MASK].inner);
     }
-    if (ftype_is_func(t))
-    {
-        return ftype_make_ptr(cc, t);
-    }
+    return ftype_make_ptr(cc, t);
+}
+
+// An array or a function decays to a pointer; every other type is its own. The test is one compare of the kind and
+// pointer bits, inline at each of its ~80 callers: the out-of-line function it was spent more on its call than on its
+// answer (#3581).
+static inline __attribute__((always_inline)) FastType ftype_decay(FastCCState* cc, FastType t)
+{
+    const uint32_t shape = t & (BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_KIND_MASK);
+    const uint32_t decays = (uint32_t)(shape == ((uint32_t)FCTYPE_ARRAY << BUSTER_FTYPE_KIND_SH)) |
+                            (uint32_t)(shape == ((uint32_t)FCTYPE_FUNC << BUSTER_FTYPE_KIND_SH));
+    if (__builtin_expect(decays != 0, 0)) { return ftype_decay_slow(cc, t); }
     return t;
 }
 
@@ -796,30 +804,31 @@ static inline bool fast_cc_is_typedef_name(const FastCCState* cc, uint32_t id)
     return s != 0 && cc->syms[s].kind == FSYM_TYPEDEF;
 }
 
-// Check if current token starts a C type specifier / qualifier / storage class
-static bool fast_cc_is_type_start(const FastCCState* cc, uint32_t at)
+// The keywords that start a C type specifier / qualifier / storage class, as bits of their token kinds (64..127).
+#define BUSTER_FTOK_BIT(k) (UINT64_C(1) << ((uint32_t)(k) - 64u))
+#define BUSTER_FTOK_TYPE_START_KEYWORDS (BUSTER_FTOK_BIT(FTOK_KW_VOID) | BUSTER_FTOK_BIT(FTOK_KW_CHAR) | BUSTER_FTOK_BIT(FTOK_KW_SHORT) | \
+    BUSTER_FTOK_BIT(FTOK_KW_INT) | BUSTER_FTOK_BIT(FTOK_KW_LONG) | BUSTER_FTOK_BIT(FTOK_KW_FLOAT) | BUSTER_FTOK_BIT(FTOK_KW_DOUBLE) | \
+    BUSTER_FTOK_BIT(FTOK_KW_SIGNED) | BUSTER_FTOK_BIT(FTOK_KW_UNSIGNED) | BUSTER_FTOK_BIT(FTOK_KW_BOOL) | BUSTER_FTOK_BIT(FTOK_KW_STRUCT) | \
+    BUSTER_FTOK_BIT(FTOK_KW_UNION) | BUSTER_FTOK_BIT(FTOK_KW_ENUM) | BUSTER_FTOK_BIT(FTOK_KW_CONST) | BUSTER_FTOK_BIT(FTOK_KW_VOLATILE) | \
+    BUSTER_FTOK_BIT(FTOK_KW_RESTRICT) | BUSTER_FTOK_BIT(FTOK_KW_STATIC) | BUSTER_FTOK_BIT(FTOK_KW_EXTERN) | BUSTER_FTOK_BIT(FTOK_KW_TYPEDEF) | \
+    BUSTER_FTOK_BIT(FTOK_KW_REGISTER) | BUSTER_FTOK_BIT(FTOK_KW_AUTO) | BUSTER_FTOK_BIT(FTOK_KW_INLINE) | BUSTER_FTOK_BIT(FTOK_KW_NORETURN) | \
+    BUSTER_FTOK_BIT(FTOK_KW_ALIGNAS) | BUSTER_FTOK_BIT(FTOK_KW_ATTRIBUTE) | BUSTER_FTOK_BIT(FTOK_KW_EXTENSION) | \
+    BUSTER_FTOK_BIT(FTOK_KW_BUILTIN_VA_LIST) | BUSTER_FTOK_BIT(FTOK_KW_ATOMIC) | BUSTER_FTOK_BIT(FTOK_KW_COMPLEX) | \
+    BUSTER_FTOK_BIT(FTOK_KW_INT128) | BUSTER_FTOK_BIT(FTOK_KW_FLOAT128) | BUSTER_FTOK_BIT(FTOK_KW_FLOAT16) | \
+    BUSTER_FTOK_BIT(FTOK_KW_THREAD_LOCAL) | BUSTER_FTOK_BIT(FTOK_KW_TYPEOF))
+
+// Check if current token starts a C type specifier / qualifier / storage class. A keyword is a bit test, inline at each
+// caller; an identifier asks whether it names a typedef (sqlite3.c: 50,000 questions a compile, #3581).
+static inline __attribute__((always_inline)) bool fast_cc_is_type_start(const FastCCState* cc, uint32_t at)
 {
-    if (at >= cc->tcount) { return false; }
-    const uint8_t k = cc->tk[at];
-    if (k == FTOK_IDENT)
+    bool starts = false;
+    if (at < cc->tcount)
     {
-        return fast_cc_is_typedef_name(cc, cc->td[at]);
+        const uint32_t k = cc->tk[at];
+        if (k == FTOK_IDENT) { starts = fast_cc_is_typedef_name(cc, cc->td[at]); }
+        else { starts = ((uint32_t)(k >= 64u) & (uint32_t)(BUSTER_FTOK_TYPE_START_KEYWORDS >> ((k - 64u) & 63u))) != 0; }
     }
-    switch (k)
-    {
-        case FTOK_KW_VOID: case FTOK_KW_CHAR: case FTOK_KW_SHORT: case FTOK_KW_INT:
-        case FTOK_KW_LONG: case FTOK_KW_FLOAT: case FTOK_KW_DOUBLE: case FTOK_KW_SIGNED:
-        case FTOK_KW_UNSIGNED: case FTOK_KW_BOOL: case FTOK_KW_STRUCT: case FTOK_KW_UNION:
-        case FTOK_KW_ENUM: case FTOK_KW_CONST: case FTOK_KW_VOLATILE: case FTOK_KW_RESTRICT:
-        case FTOK_KW_STATIC: case FTOK_KW_EXTERN: case FTOK_KW_TYPEDEF: case FTOK_KW_REGISTER:
-        case FTOK_KW_AUTO: case FTOK_KW_INLINE: case FTOK_KW_NORETURN: case FTOK_KW_ALIGNAS:
-        case FTOK_KW_ATTRIBUTE: case FTOK_KW_EXTENSION: case FTOK_KW_BUILTIN_VA_LIST:
-        case FTOK_KW_ATOMIC: case FTOK_KW_COMPLEX: case FTOK_KW_INT128: case FTOK_KW_FLOAT128:
-        case FTOK_KW_FLOAT16: case FTOK_KW_THREAD_LOCAL: case FTOK_KW_TYPEOF:
-            return true;
-        default:
-            return false;
-    }
+    return starts;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -853,7 +862,7 @@ static inline bool fast_cc_literal_plain(const FastCCState* cc, uint32_t literal
 }
 
 // Skip or parse __attribute__((...)) sequence
-static void fast_cc_parse_attributes(FastCCState* cc, FastAttrInfo* attr)
+static __attribute__((noinline)) void fast_cc_parse_attributes_full(FastCCState* cc, FastAttrInfo* attr)
 {
     while (!cc->bailout && (fast_cc_peek(cc) == FTOK_KW_ATTRIBUTE || fast_cc_peek(cc) == FTOK_KW_EXTENSION))
     {
@@ -1066,6 +1075,14 @@ static void fast_cc_parse_attributes(FastCCState* cc, FastAttrInfo* attr)
             cc->pos += 1u;
         }
     }
+}
+
+// Most declarations and declarators have no __attribute__ and no __extension__: the test is inline, the parser out of
+// line (#3581).
+static inline __attribute__((always_inline)) void fast_cc_parse_attributes(FastCCState* cc, FastAttrInfo* attr)
+{
+    const uint32_t k = fast_cc_peek(cc);
+    if (((uint32_t)(k == FTOK_KW_ATTRIBUTE) | (uint32_t)(k == FTOK_KW_EXTENSION)) != 0) { fast_cc_parse_attributes_full(cc, attr); }
 }
 
 // Parse optional `__asm__("label")` on a declaration (glibc's symbol renaming). The label is its literals joined, as
