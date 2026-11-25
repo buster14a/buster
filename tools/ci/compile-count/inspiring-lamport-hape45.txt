@@ -1,0 +1,1 @@
+-10.94 the direct path's code generator answers its common cases inline and calls its full functions for the rest (#3581)

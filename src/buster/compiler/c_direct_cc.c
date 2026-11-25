@@ -1608,7 +1608,7 @@ static __attribute__((noinline)) void fval_spill_one_full(FastExprCtx* ex, FastV
 }
 
 // The value kinds a spill writes: a register, a register's address, a bit-field through one, the flags. A local, a
-// global, a constant and an address of either stay as they are, which is 62% of sqlite3.c's 61,000 spill requests:
+// global, a constant and an address of either stay as they are, which is 82% of sqlite3.c's 61,000 spill requests:
 // the filter is a bit test inline, and the spill out of line (#3581).
 #define BUSTER_FVAL_SPILL_KINDS ((1u << FVAL_REG) | (1u << FVAL_XMM) | (1u << FVAL_INDIRECT) | (1u << FVAL_FLAGS) | (1u << FVAL_BITFIELD))
 
@@ -1648,8 +1648,8 @@ static __attribute__((noinline, cold)) void fval_flush_flags_full(FastExprCtx* e
     }
 }
 
-// Whether any value below holds the flags, as a leaf scan: sqlite3.c asks 30,000 times and the answer is nearly
-// always no. The materialization is the full function's (#3581).
+// Whether any value below holds the flags, as a leaf scan: sqlite3.c asks 30,000 times and finds flags 7 times. The
+// materialization is the full function's (#3581).
 static __attribute__((noinline)) void fval_flush_flags(FastExprCtx* ex)
 {
     uint32_t found = 0;
@@ -1980,9 +1980,9 @@ static __attribute__((noinline, cold)) uint32_t fval_to_gp_rare(FastExprCtx* ex,
     return fval_alloc_gp(ex);
 }
 
-// The loads sqlite3.c asks for (87,000 of its 130,000 requests): a constant, a local or spill slot, and an object through
-// a register, none of them an array or a function, which decay. The other kinds, and sizeof's operands, which emit
-// nothing, go to the rare function, whose many paths made this one save every register it might use (#3581).
+// The loads sqlite3.c asks for (81,000 of its 130,000 requests): a constant, a local or spill slot, and an object
+// through a register, none of them an array or a function, which decay. The other kinds, and sizeof's operands, which
+// emit nothing, go to the rare function, whose many paths made this one save every register it might use (#3581).
 #define BUSTER_FVAL_LOAD_KINDS ((1u << FVAL_IMM) | (1u << FVAL_LOCAL) | (1u << FVAL_SPILL) | (1u << FVAL_INDIRECT))
 
 static __attribute__((noinline)) BUSTER_DIRECT_HOT uint32_t fval_to_gp_full(FastExprCtx* ex, FastVal* v, bool consume)
@@ -2032,7 +2032,7 @@ static __attribute__((noinline)) BUSTER_DIRECT_HOT uint32_t fval_to_gp_full(Fast
 }
 
 // A value already in a register, taken: its register, with no code. 43,000 of sqlite3.c's 130,000 requests; the rest
-// emit a load and stay out of line (#3581).
+// go out of line (#3581).
 static inline __attribute__((always_inline)) uint32_t fval_to_gp(FastExprCtx* ex, FastVal* v, bool consume)
 {
     uint32_t r = 0;
@@ -2460,7 +2460,7 @@ static __attribute__((noinline)) BUSTER_DIRECT_HOT void fval_convert_full(FastEx
 }
 
 // An integer constant converted to another integer or a pointer is folded: truncated and extended to the target's size
-// and signedness, as the full function's fold does once its other cases are excluded (sqlite3.c: 19,000 a compile).
+// and signedness, as the full function's fold does once its other cases are excluded (sqlite3.c: 10,800 a compile).
 // Floats, bool, 128-bit integers, void, the unsupported types, arrays, functions and sizeof's operands go to it.
 static __attribute__((noinline)) void fval_convert_constant(FastExprCtx* ex, FastVal* v, FastType dst_type)
 {
@@ -2585,7 +2585,7 @@ static __attribute__((noinline)) void fast_cc_check_implicit_conv_full(FastCCSta
     }
 }
 
-// Without a pointer on either side there is nothing to check: 46,000 of sqlite3.c's 62,000 (#3581).
+// Without a pointer on either side there is nothing to check: 31,000 of sqlite3.c's 62,000 (#3581).
 static inline __attribute__((always_inline)) void fast_cc_check_implicit_conv(FastCCState* cc, FastType dst_t, const FastVal* src)
 {
     const FastType st = ftype_decay(cc, src->type);

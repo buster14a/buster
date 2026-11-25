@@ -555,9 +555,8 @@ static __attribute__((noinline)) FastType ftype_decay_slow(FastCCState* cc, Fast
     return ftype_make_ptr(cc, t);
 }
 
-// An array or a function decays to a pointer; every other type is its own. The test is one compare of the kind and
-// pointer bits, inline at each of its ~80 callers: the out-of-line function it was spent more on its call than on its
-// answer (#3581).
+// An array or a function decays to a pointer; every other type is its own. The test is a compare of the kind and
+// pointer bits, inline at each caller: out of line, the function spent more on its call than on its answer (#3581).
 static inline __attribute__((always_inline)) FastType ftype_decay(FastCCState* cc, FastType t)
 {
     const uint32_t shape = t & (BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_KIND_MASK);
@@ -1868,8 +1867,9 @@ static const FastType fast_cc_single_keyword_types[64] = {
     BUSTER_FTOK_BIT(FTOK_KW_SIGNED) | BUSTER_FTOK_BIT(FTOK_KW_UNSIGNED) | BUSTER_FTOK_BIT(FTOK_KW_BOOL))
 
 // Specifiers of one token, a scalar type's keyword or a typedef's name, before a token that isn't a specifier: 12,500
-// of sqlite3.c's 20,300 declarations and most of its parameters. They give the type alone, as both full parsers' loops
-// and their tables of keyword counts would; the token is taken and the specifiers filled when they are found (#3581).
+// of sqlite3.c's 20,300 declarations and 15,000 of its 18,100 parameters. They give the type alone, as both full
+// parsers' loops and their tables of keyword counts would; the token is taken and the specifiers filled when they are
+// found (#3581).
 static inline __attribute__((always_inline)) bool fast_cc_specs_of_one_token(FastCCState* cc, FastDeclSpecs* out_specs, FastType* out_type)
 {
     const uint32_t at = cc->pos;
