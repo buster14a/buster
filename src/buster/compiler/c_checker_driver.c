@@ -16367,7 +16367,7 @@ static int check_driver_command(int count, char** arguments, bool executable, bo
             !lanes->tier1 && !lazy_system_headers && !deferred_bodies && !node_bodies &&
             !node_window && !node_window_constants && !node_window_assignments && !default_path_checked &&
             attested_memo == NULL && command_attested != CHECK_ATTESTED_MODE_VERIFY &&
-            !options.dependencies.only && !options.no_builtin &&
+            !options.dependencies.only && !options.show_includes && !options.no_builtin &&
             options.no_builtin_function_count == 0 && !options.no_external_files && !options.assembly &&
             !options.system_header_warnings && check_driver_direct_warnings(&options) &&
             !command.warning_errors && command.return_error == 0 && !id_ordered &&

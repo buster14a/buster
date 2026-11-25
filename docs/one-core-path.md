@@ -4504,6 +4504,8 @@ alone don't compile.
   - more than 4,096 files;
   - a rule the driver can't make, before any object is written.
 
+  `-H` keeps a unit off the direct path, which doesn't print its list of headers (#3612).
+
 The full pipeline keeps a path's system header level from that path's first lookup, where clang takes each lookup's
 (#3613). There the direct path's `-MMD` rule is clang's, and lists a header the full pipeline's leaves out.
 
