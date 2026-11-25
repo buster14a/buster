@@ -19,6 +19,40 @@
 // ---------------------------------------------------------------------------------------------------------------------
 // Level 9a: AVX-512 body pre-scanner, stack allocation, .rodata constants, inline copy/zero, ELF symbol binding
 
+// A hosted program's main must return int without GNU's extensions (#3592): clang refuses `void main(void)` in
+// -std=c99, c11, c17 and c23, at file scope or in a block, and only warns in GNU's modes (c_check_input.c's
+// check_input_main). The direct path leaves such a declaration to the full pipeline, freestanding or not.
+static void fast_cc_check_main(FastCCState* cc, uint32_t name_id, FastType type)
+{
+    if (cc->pp->strict_iso && name_id != 0 && name_id == cc->id_main && ftype_is_func(type) &&
+        cc->ctypes[type & BUSTER_FTYPE_CIDX_MASK].inner != (FastType)FTYPE_I32)
+    {
+        fast_cc_bail(cc, "main returns other than int without GNU's extensions");
+    }
+}
+
+// A declaration's declarators name what they declare, and the comma after one is followed by another: `int , x;`,
+// `int x, ;`, `int (*)(void);` and the `, ,` that `__VA_ARGS__ ## __VA_ARGS__` makes of a comma are clang's errors, which
+// the direct path leaves to the full pipeline (#3592). Returns whether the declarator has a name.
+static bool fast_cc_declarator_named(FastCCState* cc, uint32_t name_id)
+{
+    if (name_id == 0)
+    {
+        fast_cc_bail(cc, "declarator without a name");
+    }
+    return name_id != 0;
+}
+
+// The comma between two declarators, and the declarator it promises.
+static void fast_cc_declarator_comma(FastCCState* cc)
+{
+    cc->pos += 1u;
+    if (fast_cc_peek(cc) == FTOK_SEMI)
+    {
+        fast_cc_bail(cc, "comma before the end of a declaration");
+    }
+}
+
 typedef struct FastBodyScan FastBodyScan;
 struct FastBodyScan
 {
@@ -6471,7 +6505,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
             {
                 const uint32_t decl_start = cc->pos;
                 FastDeclaratorResult dr = { 0 };
-                if (!fast_cc_parse_declarator(cc, btype, false, &dr, false)) { break; }
+                if (!fast_cc_parse_declarator(cc, btype, false, &dr, false) || !fast_cc_declarator_named(cc, dr.name_id)) { break; }
                 const uint32_t extra_al = ds.attr.aligned > dr.attr.aligned ? ds.attr.aligned : dr.attr.aligned;
                 if (ds.is_typedef && (ds.attr.visibility_set || dr.attr.visibility_set))
                 {
@@ -6492,6 +6526,10 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                     // of its own (#3595). One that sees none (the file declares it later or never: symbol 0, of no
                     // kind), or that a local of the name hides, or that brings attributes of its own, is left to the
                     // full pipeline. (An asm label never gets here: a body's statements leave at its __asm__.)
+                    if (ftype_is_func(dr.type))
+                    {
+                        fast_cc_check_main(cc, dr.name_id, dr.type);
+                    }
                     const uint32_t seen = dr.name_id < cc->env_cap ? cc->sym_cur[dr.name_id] : 0u;
                     const uint8_t kind = ftype_is_func(dr.type) ? (uint8_t)FSYM_FUNC : (uint8_t)FSYM_GLOBAL;
                     if (dr.name_id == 0 || cc->syms[seen].kind != kind || (kind == FSYM_GLOBAL && cc->syms[seen].storage == 1u) ||
@@ -6564,7 +6602,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                         cc->syms[lsi].stack_off = loff;
                     }
                 }
-                if (fast_cc_peek(cc) == FTOK_COMMA) { cc->pos += 1u; }
+                if (fast_cc_peek(cc) == FTOK_COMMA) { fast_cc_declarator_comma(cc); }
                 else if (cc->pos == decl_start && !cc->bailout) { fast_cc_bail(cc, "local decl stalled"); break; }
             }
             if (fast_cc_peek(cc) == FTOK_SEMI) { cc->pos += 1u; }
@@ -6771,11 +6809,15 @@ static bool fast_cc_compile_unit(FastCCState* cc)
         while (cc->pos < cc->tcount && fast_cc_peek(cc) != FTOK_SEMI && !cc->bailout)
         {
             FastDeclaratorResult dr = { 0 };
-            if (!fast_cc_parse_declarator(cc, btype, false, &dr, first)) { break; }
+            if (!fast_cc_parse_declarator(cc, btype, false, &dr, first) || !fast_cc_declarator_named(cc, dr.name_id)) { break; }
             const uint32_t extra_al = ds.attr.aligned > dr.attr.aligned ? ds.attr.aligned : dr.attr.aligned;
             const bool body = first && ftype_is_func(dr.type) && fast_cc_peek(cc) == FTOK_LBRACE;
             const FastDeclJoin join = fast_cc_decl_join(&ds, &dr, ftype_is_func(dr.type), body);
 
+            if (!ds.is_typedef)
+            {
+                fast_cc_check_main(cc, dr.name_id, dr.type);
+            }
             // Function definition!
             if (body)
             {
@@ -6950,7 +6992,7 @@ static bool fast_cc_compile_unit(FastCCState* cc)
                 }
             }
 
-            if (fast_cc_peek(cc) == FTOK_COMMA) { cc->pos += 1u; }
+            if (fast_cc_peek(cc) == FTOK_COMMA) { fast_cc_declarator_comma(cc); }
             else { break; }
         }
         if (fast_cc_peek(cc) == FTOK_SEMI) { cc->pos += 1u; }

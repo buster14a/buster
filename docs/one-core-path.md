@@ -4291,6 +4291,13 @@ single-TU `-c` C17/C23 object builds directly from `mmap`'d source bytes to an E
   preventing 8-core Linux THP compaction contention and cutting 8-worker peak RSS to 29.5 MiB. A unit whose main
   file is under 1 MiB is advised the same way whatever the host, and starts with small identifier tables
   (["A small unit's start"](#a-small-units-start-2026-11-25-3592)).
+- **Language modes (#3592):** `-std=` `c99` to `c23` and their GNU forms, `-trigraphs`, `-fno-asm`, and `-w` alone
+  take the direct path, with what each changes for it as clang has it:
+  - a unit with a trigraph leaves; it is scanned 64 bytes a step in each file the unit reads (`fast_has_trigraph`);
+  - a strict mode makes `asm`, and `typeof` before C23, identifiers;
+  - `, ## __VA_ARGS__` keeps its comma, unless the variadic argument is left out, or the macro's only parameter is
+    variadic outside a strict mode;
+  - a strict mode leaves on a `main` that doesn't return `int`.
 - **Fail-closed fallback (`--no-direct` / `BUSTER_NO_DIRECT`):** any diagnostic, warning-sensitive construct, or
   unsupported flag/extension bails out silently without writing output so `c_checker_driver.c` runs the full pipeline.
 
@@ -4403,7 +4410,7 @@ What changed:
   which needs the tables' first pages together: not done.
 - What a small unit still pays is #3592's: the process's own start (0.10 ms of the 0.27), the predefines lexed in
   every process, a header's system calls, and the options and constructs that keep a build's units off the direct
-  path altogether (`-MD`, `-Wall`, `-g`, a strict `-std=`).
+  path altogether (`-MD`, `-Wall`, `-g`; a strict `-std=` takes it since #3592's step 4).
 
 ### A declaration's symbols (2026-11-25, #3595)
 
