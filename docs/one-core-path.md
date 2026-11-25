@@ -4438,6 +4438,35 @@ differs is only what this section doesn't claim:
 - undefined references that only one side's code makes;
 - unused static functions kept.
 
+### The code generator's common cases (2026-11-25, #3581)
+
+The code generator was half of `sqlite3.c`'s compile and had had no redesign. A census of what its branches decide
+came first; the census, every step's readings and the scripts are in
+[buster-performance](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/direct-generator-3581-2026-11-25).
+
+| 9700X, `sqlite3.c`, CPU 2 | main `20f3573e` | this | |
+| --- | ---: | ---: | ---: |
+| the product's `-c`, wall (21 rotated runs) | 16.42 ms | **15.60 ms** | -5.0% |
+| user cycles | 81.4 M | **76.9 M** | -5.5% |
+| user instructions | 221.1 M | **206.8 M** | -6.4% |
+| parsing and generating code (the harness's stage, medians of three placements) | 8.61 ms | **7.95 ms** | -7.7% |
+| object | `f558aaf5...` | the same | |
+
+- **The census.** 46,973 expressions of 7.5 tokens; 85% of their identifiers are locals. Their cost is a long tail of
+  shapes: the 120 most common hold 59% of the expressions and about a quarter of their time, so selecting code by an
+  expression's whole shape (the smallest form of "typed and selected in rounds") was not built. What is common is a
+  value's case: 82,000 of `fval_convert`'s 116,000 calls are to the value's own type, 43,000 of `fval_to_gp`'s 130,000
+  take a register, 50,000 of `fval_spill_one`'s 61,000 have nothing to spill, half of the implicit conversions have no
+  pointer to check, `fval_flush_flags` finds flags 7 times in 30,000, and half of the declarators and most specifier
+  lists are one name or one keyword.
+- **What changed.** Those cases are answered inline, in a few ops, by the functions' names; the full functions, out of
+  line, take the rest. A quarter of `fval_convert`'s and `fval_to_gp`'s retired ops had been their entries and exits:
+  their rare cases made each of them save every register it might use on every call. `fval_to_gp`'s loads have a
+  lean function of their own. Every object of the 6,201-unit corpus is unchanged.
+- **What is left:** `fast_cc_expr`'s token loop (12.7% of the compile's ops), the statement loop (6.7%),
+  `fval_emit_call`'s four passes over its arguments (4.5%), and 940 K mispredicted branches, most of them on a
+  token's or a value's kind. Splitting `fast_expr_reduce_top` the same way measured nothing and was dropped.
+
 ## Related
 
 - [#2850](https://github.com/buster14a/buster/issues/2850): the design, its
