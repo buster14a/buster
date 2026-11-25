@@ -1,0 +1,1 @@
++0.55 the identifier cache's hash is a function of its own (fast_ident_cache_hash), counted at each of sqlite3.c's 284,124 lookups; the optimized build inlines it (#3592)
