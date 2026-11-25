@@ -16,21 +16,10 @@
 // ---------------------------------------------------------------------------------------------------------------------
 // Bit-packed 32-bit FastType representation
 //
-// Scalar (bit 31 == 0):
-//   bits  0.. 4 : base scalar kind (FTYPE_VOID .. FTYPE_F64)
-//   bits  5.. 6 : ptr_depth (0..3)
-//   bit   7     : is_const (top-level)
-//   bit   8     : pointee_const (for ptr_depth == 1; used by _Generic const void* in glibc 2.43!)
-//   bit   9     : is_volatile
-//   bit  10     : is_char (plain char)
-//   bit  11     : is_long (distinguishes long from long long for ABI/type-compat)
-//
-// Complex (bit 31 == 1):
-//   bits  0..19 : complex_idx (1-based index into FastComplexType[])
-//   bits 20..22 : ptr_depth (0..3)  -> `struct Foo*` requires ZERO type table allocation!
-//   bit  23     : is_const
-//   bit  24     : pointee_const
-//   bit  25     : is_volatile
+// Bits 20..22 hold pointer depth for every type, and bits 23..25 hold qualifiers.
+// A scalar's low bits identify its base kind, plain char and long. A complex type
+// has bit 31 set, its immutable FastComplexKind in bits 26..28, and the table
+// index in bits 0..19. Completing a tag updates its size and members in the table.
 
 typedef uint32_t FastType;
 
@@ -56,20 +45,18 @@ typedef enum FastScalarKind
 
 #define BUSTER_FTYPE_COMPLEX_BIT     UINT32_C(0x80000000)
 #define BUSTER_FTYPE_SCALAR_MASK     UINT32_C(0x0000001f)
-#define BUSTER_FTYPE_SCALAR_PTR_SH   5u
-#define BUSTER_FTYPE_SCALAR_PTR_MASK UINT32_C(0x00000060)
-#define BUSTER_FTYPE_SCALAR_CONST    UINT32_C(0x00000080)
-#define BUSTER_FTYPE_SCALAR_PCONST   UINT32_C(0x00000100)
-#define BUSTER_FTYPE_SCALAR_VOL      UINT32_C(0x00000200)
 #define BUSTER_FTYPE_SCALAR_CHAR     UINT32_C(0x00000400)
 #define BUSTER_FTYPE_SCALAR_LONG     UINT32_C(0x00000800)
 
 #define BUSTER_FTYPE_CIDX_MASK       UINT32_C(0x000fffff)
-#define BUSTER_FTYPE_CPTR_SH         20u
-#define BUSTER_FTYPE_CPTR_MASK       UINT32_C(0x00700000)
-#define BUSTER_FTYPE_CCONST          UINT32_C(0x00800000)
-#define BUSTER_FTYPE_CPCONST         UINT32_C(0x01000000)
-#define BUSTER_FTYPE_CVOL            UINT32_C(0x02000000)
+#define BUSTER_FTYPE_PTR_SH          20u
+#define BUSTER_FTYPE_PTR_MASK        UINT32_C(0x00700000)
+#define BUSTER_FTYPE_CONST           UINT32_C(0x00800000)
+#define BUSTER_FTYPE_PCONST          UINT32_C(0x01000000)
+#define BUSTER_FTYPE_VOL             UINT32_C(0x02000000)
+
+#define BUSTER_FTYPE_KIND_SH         26u
+#define BUSTER_FTYPE_KIND_MASK       UINT32_C(0x1c000000)
 
 typedef enum FastComplexKind
 {
@@ -157,7 +144,7 @@ struct FastSym
     const char* asm_name;  // optional __asm__("label") override
     uint32_t asm_name_len;
     uint8_t visibility;    // STV_DEFAULT / STV_HIDDEN / STV_PROTECTED
-    uint8_t pad_sym[3];
+    uint16_t deferred_task; // one-based index of a deferred definition, zero for other symbols
 };
 
 typedef struct FastScopeUndo FastScopeUndo;
@@ -187,11 +174,12 @@ struct FastBodyTask
 {
     uint32_t sym_idx;
     uint32_t body_start;   // token index of '{'
-    uint32_t body_end;     // token index of matching '}'
     uint32_t param_names_start;
     uint16_t param_count;
-    uint16_t pad;
+    uint16_t previous_task;
 };
+
+#define BUSTER_FDEFERRED_LIMIT 4096u
 
 // Main compiler context shared across c_direct_types.c and c_direct_cc.c
 typedef struct FastCCState FastCCState;
@@ -283,6 +271,10 @@ struct FastCCState
     const char* bailout_reason;
     uint32_t bailout_tok;
 
+    FastBodyTask* deferred;
+    uint64_t ready_tasks[BUSTER_FDEFERRED_LIMIT / 64u];
+    uint64_t ready_groups;
+
     // Current function state (for c_direct_cc.c)
     uint32_t cur_func_sym;
     uint32_t cur_func_name_id;
@@ -297,7 +289,6 @@ struct FastCCState
     uint32_t cur_va_gp_init;   // initial gp_offset (8 * num_gp_params)
     uint32_t cur_va_fp_init;   // initial fp_offset (48 + 16 * num_fp_params)
     int32_t cur_va_overflow_off; // rbp + 16 + overflow_bytes
-    uint32_t cur_func_sym_count_mark;
 
     // Cached .rodata constants (UINT32_MAX = not yet emitted)
     uint32_t ro_sign_f32_off;
@@ -345,6 +336,17 @@ static inline const char* fast_cc_ident_str(const FastCCState* cc, uint32_t id, 
 // ---------------------------------------------------------------------------------------------------------------------
 // FastType inline operations (register-only bit math for scalars & pointers!)
 
+static inline FastType ftype_from_index(const FastCCState* cc, uint32_t idx)
+{
+    return BUSTER_FTYPE_COMPLEX_BIT | ((uint32_t)cc->ctypes[idx].kind << BUSTER_FTYPE_KIND_SH) | idx;
+}
+
+// Pointer depth participates in the comparison: an array and a pointer to that array have different kinds here.
+static inline bool ftype_has_kind(FastType t, FastComplexKind kind)
+{
+    return (t & (BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_KIND_MASK)) == ((uint32_t)kind << BUSTER_FTYPE_KIND_SH);
+}
+
 static inline bool ftype_is_complex(FastType t)
 {
     return (t & BUSTER_FTYPE_COMPLEX_BIT) != 0;
@@ -352,14 +354,12 @@ static inline bool ftype_is_complex(FastType t)
 
 static inline uint32_t ftype_ptr_depth(FastType t)
 {
-    return ftype_is_complex(t) ? ((t & BUSTER_FTYPE_CPTR_MASK) >> BUSTER_FTYPE_CPTR_SH) :
-                                 ((t & BUSTER_FTYPE_SCALAR_PTR_MASK) >> BUSTER_FTYPE_SCALAR_PTR_SH);
+    return (t & BUSTER_FTYPE_PTR_MASK) >> BUSTER_FTYPE_PTR_SH;
 }
 
-static inline bool ftype_is_ptr(const FastCCState* cc, FastType t)
+static inline bool ftype_is_ptr(FastType t)
 {
-    if (ftype_ptr_depth(t) > 0) { return true; }
-    return ftype_is_complex(t) && cc->ctypes[t & BUSTER_FTYPE_CIDX_MASK].kind == FCTYPE_PTR;
+    return ftype_ptr_depth(t) != 0 || ftype_has_kind(t, FCTYPE_PTR);
 }
 
 static inline bool ftype_is_void(FastType t)
@@ -391,7 +391,7 @@ static inline bool ftype_is_i128(FastType t)
     return sk == FTYPE_I128 || sk == FTYPE_U128;
 }
 
-static inline bool ftype_is_int(const FastCCState* cc, FastType t)
+static inline bool ftype_is_int(FastType t)
 {
     if (ftype_ptr_depth(t) > 0) { return false; }
     if (!ftype_is_complex(t))
@@ -399,45 +399,42 @@ static inline bool ftype_is_int(const FastCCState* cc, FastType t)
         const uint32_t sk = t & BUSTER_FTYPE_SCALAR_MASK;
         return (sk >= FTYPE_BOOL && sk <= FTYPE_U64) || sk == FTYPE_I128 || sk == FTYPE_U128;
     }
-    return cc->ctypes[t & BUSTER_FTYPE_CIDX_MASK].kind == FCTYPE_ENUM;
+    return ftype_has_kind(t, FCTYPE_ENUM);
 }
 
-static inline bool ftype_is_scalar(const FastCCState* cc, FastType t)
+static inline bool ftype_is_scalar(FastType t)
 {
-    return ftype_is_ptr(cc, t) || ftype_is_int(cc, t) || ftype_is_float(t);
+    return ftype_is_ptr(t) || ftype_is_int(t) || ftype_is_float(t);
 }
 
-static inline bool ftype_is_array(const FastCCState* cc, FastType t)
+static inline bool ftype_is_array(FastType t)
 {
-    return ftype_is_complex(t) && ftype_ptr_depth(t) == 0 && cc->ctypes[t & BUSTER_FTYPE_CIDX_MASK].kind == FCTYPE_ARRAY;
+    return ftype_has_kind(t, FCTYPE_ARRAY);
 }
 
-static inline bool ftype_is_func(const FastCCState* cc, FastType t)
+static inline bool ftype_is_func(FastType t)
 {
-    return ftype_is_complex(t) && ftype_ptr_depth(t) == 0 && cc->ctypes[t & BUSTER_FTYPE_CIDX_MASK].kind == FCTYPE_FUNC;
+    return ftype_has_kind(t, FCTYPE_FUNC);
 }
 
-static inline bool ftype_is_record(const FastCCState* cc, FastType t)
+static inline bool ftype_is_record(FastType t)
 {
-    if (!ftype_is_complex(t) || ftype_ptr_depth(t) > 0) { return false; }
-    const uint8_t k = cc->ctypes[t & BUSTER_FTYPE_CIDX_MASK].kind;
-    return k == FCTYPE_STRUCT || k == FCTYPE_UNION;
+    return ftype_has_kind(t, FCTYPE_STRUCT) || ftype_has_kind(t, FCTYPE_UNION);
 }
 
 static inline bool ftype_is_const(FastType t)
 {
-    return ftype_is_complex(t) ? ((t & BUSTER_FTYPE_CCONST) != 0) : ((t & BUSTER_FTYPE_SCALAR_CONST) != 0);
+    return (t & BUSTER_FTYPE_CONST) != 0;
 }
 
 static inline FastType ftype_unqual(FastType t)
 {
-    return ftype_is_complex(t) ? (t & ~(BUSTER_FTYPE_CCONST | BUSTER_FTYPE_CVOL)) :
-                                 (t & ~(BUSTER_FTYPE_SCALAR_CONST | BUSTER_FTYPE_SCALAR_VOL));
+    return t & ~(BUSTER_FTYPE_CONST | BUSTER_FTYPE_VOL);
 }
 
 static inline FastType ftype_with_const(FastType t)
 {
-    return ftype_is_complex(t) ? (t | BUSTER_FTYPE_CCONST) : (t | BUSTER_FTYPE_SCALAR_CONST);
+    return t | BUSTER_FTYPE_CONST;
 }
 
 static inline bool ftype_is_signed(const FastCCState* cc, FastType t)
@@ -504,14 +501,8 @@ static FastType ftype_make_ptr(FastCCState* cc, FastType t)
     const bool inner_const = ftype_is_const(t);
     if (d < 3u)
     {
-        if (ftype_is_complex(t))
-        {
-            FastType res = (t & ~(BUSTER_FTYPE_CCONST | BUSTER_FTYPE_CVOL)) + (UINT32_C(1) << BUSTER_FTYPE_CPTR_SH);
-            if (d == 0 && inner_const) { res |= BUSTER_FTYPE_CPCONST; }
-            return res;
-        }
-        FastType res = (t & ~(BUSTER_FTYPE_SCALAR_CONST | BUSTER_FTYPE_SCALAR_VOL)) + (UINT32_C(1) << BUSTER_FTYPE_SCALAR_PTR_SH);
-        if (d == 0 && inner_const) { res |= BUSTER_FTYPE_SCALAR_PCONST; }
+        FastType res = ftype_unqual(t) + (UINT32_C(1) << BUSTER_FTYPE_PTR_SH);
+        if (d == 0 && inner_const) { res |= BUSTER_FTYPE_PCONST; }
         return res;
     }
     const uint32_t idx = fast_cc_alloc_ctype(cc, FCTYPE_PTR);
@@ -522,7 +513,7 @@ static FastType ftype_make_ptr(FastCCState* cc, FastType t)
         cc->ctypes[idx].align = 8u;
         cc->ctypes[idx].complete = 1u;
     }
-    return BUSTER_FTYPE_COMPLEX_BIT | idx;
+    return ftype_from_index(cc, idx);
 }
 
 // Dereference pointer type `t` (1 subtraction for ptr_depth 1..3!!)
@@ -531,17 +522,11 @@ static FastType ftype_deref(const FastCCState* cc, FastType t)
     const uint32_t d = ftype_ptr_depth(t);
     if (d > 0)
     {
-        if (ftype_is_complex(t))
-        {
-            FastType res = (t & ~(BUSTER_FTYPE_CCONST | BUSTER_FTYPE_CVOL)) - (UINT32_C(1) << BUSTER_FTYPE_CPTR_SH);
-            if (d == 1u && (t & BUSTER_FTYPE_CPCONST) != 0) { res = (res & ~BUSTER_FTYPE_CPCONST) | BUSTER_FTYPE_CCONST; }
-            return res;
-        }
-        FastType res = (t & ~(BUSTER_FTYPE_SCALAR_CONST | BUSTER_FTYPE_SCALAR_VOL)) - (UINT32_C(1) << BUSTER_FTYPE_SCALAR_PTR_SH);
-        if (d == 1u && (t & BUSTER_FTYPE_SCALAR_PCONST) != 0) { res = (res & ~BUSTER_FTYPE_SCALAR_PCONST) | BUSTER_FTYPE_SCALAR_CONST; }
+        FastType res = ftype_unqual(t) - (UINT32_C(1) << BUSTER_FTYPE_PTR_SH);
+        if (d == 1u && (t & BUSTER_FTYPE_PCONST) != 0) { res = (res & ~BUSTER_FTYPE_PCONST) | BUSTER_FTYPE_CONST; }
         return res;
     }
-    if (ftype_is_complex(t) && cc->ctypes[t & BUSTER_FTYPE_CIDX_MASK].kind == FCTYPE_PTR)
+    if (ftype_has_kind(t, FCTYPE_PTR))
     {
         return cc->ctypes[t & BUSTER_FTYPE_CIDX_MASK].inner;
     }
@@ -550,11 +535,11 @@ static FastType ftype_deref(const FastCCState* cc, FastType t)
 
 static inline FastType ftype_decay(FastCCState* cc, FastType t)
 {
-    if (ftype_is_array(cc, t))
+    if (ftype_is_array(t))
     {
         return ftype_make_ptr(cc, cc->ctypes[t & BUSTER_FTYPE_CIDX_MASK].inner);
     }
-    if (ftype_is_func(cc, t))
+    if (ftype_is_func(t))
     {
         return ftype_make_ptr(cc, t);
     }
@@ -563,7 +548,7 @@ static inline FastType ftype_decay(FastCCState* cc, FastType t)
 
 static inline FastType ftype_promote_int(const FastCCState* cc, FastType t)
 {
-    if (ftype_is_complex(t) && ftype_ptr_depth(t) == 0 && cc->ctypes[t & BUSTER_FTYPE_CIDX_MASK].kind == FCTYPE_ENUM)
+    if (ftype_has_kind(t, FCTYPE_ENUM))
     {
         t = cc->ctypes[t & BUSTER_FTYPE_CIDX_MASK].inner;
     }
@@ -673,7 +658,7 @@ static void fast_struct_classify_abi(FastCCState* cc, uint32_t cidx)
     FastType wt[64];
     uint32_t wo[64];
     uint32_t wsp = 0;
-    wt[wsp] = BUSTER_FTYPE_COMPLEX_BIT | cidx;
+    wt[wsp] = ftype_from_index(cc, cidx);
     wo[wsp] = 0;
     wsp += 1u;
 
@@ -682,7 +667,7 @@ static void fast_struct_classify_abi(FastCCState* cc, uint32_t cidx)
         wsp -= 1u;
         const FastType cur = wt[wsp];
         const uint32_t off = wo[wsp];
-        if (ftype_is_ptr(cc, cur) || ftype_is_int(cc, cur))
+        if (ftype_is_ptr(cur) || ftype_is_int(cur))
         {
             const uint32_t eb = off >> 3;
             if (eb < 2u) { cls[eb] = FABI_INT; }
@@ -692,7 +677,7 @@ static void fast_struct_classify_abi(FastCCState* cc, uint32_t cidx)
             const uint32_t eb = off >> 3;
             if (eb < 2u && cls[eb] != FABI_INT) { cls[eb] = FABI_SSE; }
         }
-        else if (ftype_is_array(cc, cur))
+        else if (ftype_is_array(cur))
         {
             const FastComplexType* ar = cc->ctypes + (cur & BUSTER_FTYPE_CIDX_MASK);
             const uint32_t esz = ftype_size(cc, ar->inner);
@@ -703,7 +688,7 @@ static void fast_struct_classify_abi(FastCCState* cc, uint32_t cidx)
                 wsp += 1u;
             }
         }
-        else if (ftype_is_record(cc, cur))
+        else if (ftype_is_record(cur))
         {
             const FastComplexType* sub = cc->ctypes + (cur & BUSTER_FTYPE_CIDX_MASK);
             for (uint32_t i = 0; i < sub->count && wsp < 64u; i += 1)
@@ -1136,7 +1121,7 @@ static FastType fast_cc_parse_simple_typename_leaf(FastCCState* cc, bool* out_ok
                 return FTYPE_VOID;
             }
             has_explicit = true;
-            base = BUSTER_FTYPE_COMPLEX_BIT | cidx;
+            base = ftype_from_index(cc, cidx);
         }
         else if (k == FTOK_IDENT && !has_explicit &&
                  (saw_void + saw_char + saw_short + saw_int + saw_long + saw_float + saw_double + saw_signed + saw_unsigned + saw_bool) == 0 &&
@@ -1174,7 +1159,7 @@ static FastType fast_cc_parse_simple_typename_leaf(FastCCState* cc, bool* out_ok
         else { if (out_ok != NULL) { *out_ok = false; } return FTYPE_VOID; }
     }
     if (is_const) { base = ftype_with_const(base); }
-    if (is_vol) { base |= ftype_is_complex(base) ? BUSTER_FTYPE_CVOL : BUSTER_FTYPE_SCALAR_VOL; }
+    if (is_vol) { base |= BUSTER_FTYPE_VOL; }
 
     // Abstract pointers `*`
     while (fast_cc_peek(cc) == FTOK_STAR)
@@ -1260,7 +1245,7 @@ static FastType fast_cc_parse_simple_typename_leaf(FastCCState* cc, bool* out_ok
                 cc->ctypes[ac].size = (uint32_t)total_sz;
                 cc->ctypes[ac].align = ftype_align(cc, base);
                 cc->ctypes[ac].complete = 1u;
-                base = BUSTER_FTYPE_COMPLEX_BIT | ac;
+                base = ftype_from_index(cc, ac);
             }
         }
     }
@@ -1290,12 +1275,12 @@ static uint64_t fast_cc_parse_offsetof(FastCCState* cc)
             cc->pos += 1u;
             if (fast_cc_peek(cc) != FTOK_RBRACKET) { fast_cc_bail(cc, "offsetof ]"); break; }
             cc->pos += 1u;
-            if (!ftype_is_array(cc, cur_t)) { fast_cc_bail(cc, "offsetof non-array"); break; }
+            if (!ftype_is_array(cur_t)) { fast_cc_bail(cc, "offsetof non-array"); break; }
             cur_t = cc->ctypes[cur_t & BUSTER_FTYPE_CIDX_MASK].inner;
             total_off += idx_v * ftype_size(cc, cur_t);
             continue;
         }
-        if (!ftype_is_record(cc, cur_t) || fast_cc_peek(cc) != FTOK_IDENT) { fast_cc_bail(cc, "offsetof field"); break; }
+        if (!ftype_is_record(cur_t) || fast_cc_peek(cc) != FTOK_IDENT) { fast_cc_bail(cc, "offsetof field"); break; }
         const FastMemberInfo* mi = fast_struct_find_member(cc, cur_t & BUSTER_FTYPE_CIDX_MASK, fast_cc_data(cc));
         if (mi == NULL) { fast_cc_bail(cc, "offsetof unknown field"); break; }
         total_off += mi->byte_offset;
@@ -1442,14 +1427,14 @@ static int64_t fast_cc_const_int_expr(FastCCState* cc, bool stop_at_comma)
                                     cc->pos += 1u;
                                     while (cc->pos < cc->tcount && fast_cc_peek(cc) != FTOK_RBRACKET) { cc->pos += 1u; }
                                     if (fast_cc_peek(cc) == FTOK_RBRACKET) { cc->pos += 1u; }
-                                    cur_t = ftype_is_array(cc, cur_t) ? cc->ctypes[cur_t & BUSTER_FTYPE_CIDX_MASK].inner : ftype_deref(cc, cur_t);
+                                    cur_t = ftype_is_array(cur_t) ? cc->ctypes[cur_t & BUSTER_FTYPE_CIDX_MASK].inner : ftype_deref(cc, cur_t);
                                 }
                                 else
                                 {
                                     const bool is_arrow = fast_cc_peek(cc) == FTOK_ARROW;
                                     cc->pos += 1u;
                                     if (is_arrow) { cur_t = ftype_deref(cc, cur_t); }
-                                    if (!ftype_is_record(cc, cur_t) || fast_cc_peek(cc) != FTOK_IDENT) { fast_cc_bail(cc, "sizeof member"); break; }
+                                    if (!ftype_is_record(cur_t) || fast_cc_peek(cc) != FTOK_IDENT) { fast_cc_bail(cc, "sizeof member"); break; }
                                     const FastMemberInfo* mi = fast_struct_find_member(cc, cur_t & BUSTER_FTYPE_CIDX_MASK, fast_cc_data(cc));
                                     if (mi == NULL) { fast_cc_bail(cc, "sizeof unknown member"); break; }
                                     cur_t = mi->type;
@@ -1742,7 +1727,7 @@ static FastType fast_cc_parse_enum(FastCCState* cc)
             cc->ctypes[cidx].complete = 1u;
         }
     }
-    return cidx != 0 ? (BUSTER_FTYPE_COMPLEX_BIT | cidx) : FTYPE_I32;
+    return cidx != 0 ? ftype_from_index(cc, cidx) : FTYPE_I32;
 }
 
 // Declarator modifier entry (applied innermost-outward iteratively!)
@@ -1877,7 +1862,7 @@ static BUSTER_DIRECT_HOT FastType fast_cc_parse_scalar_or_tag_specs(FastCCState*
                 }
             }
             has_explicit_type = true;
-            explicit_type = cidx != 0 ? (BUSTER_FTYPE_COMPLEX_BIT | cidx) : FTYPE_VOID;
+            explicit_type = cidx != 0 ? ftype_from_index(cc, cidx) : FTYPE_VOID;
         }
         else if (k == FTOK_KW_ENUM)
         {
@@ -1932,7 +1917,7 @@ static BUSTER_DIRECT_HOT FastType fast_cc_parse_scalar_or_tag_specs(FastCCState*
     }
 
     if (sp->is_const) { res = ftype_with_const(res); }
-    if (sp->is_volatile) { res |= ftype_is_complex(res) ? BUSTER_FTYPE_CVOL : BUSTER_FTYPE_SCALAR_VOL; }
+    if (sp->is_volatile) { res |= BUSTER_FTYPE_VOL; }
     sp->type = res;
     return res;
 }
@@ -2206,7 +2191,7 @@ static BUSTER_DIRECT_HOT bool fast_cc_parse_declarator(FastCCState* cc, FastType
                                     cc->ctypes[fp_cidx].size = 8u;
                                     cc->ctypes[fp_cidx].align = 8u;
                                     cc->ctypes[fp_cidx].complete = 1u;
-                                    pt = BUSTER_FTYPE_COMPLEX_BIT | fp_cidx;
+                                    pt = ftype_from_index(cc, fp_cidx);
                                     for (uint32_t ep = 0; ep < extra_ptrs; ep += 1) { pt = ftype_make_ptr(cc, pt); }
                                     if (is_arr_fp) { pt = ftype_make_ptr(cc, pt); }
                                 }
@@ -2257,7 +2242,7 @@ static BUSTER_DIRECT_HOT bool fast_cc_parse_declarator(FastCCState* cc, FastType
                                     cc->ctypes[ac].size = (uint32_t)total_sz;
                                     cc->ctypes[ac].align = ftype_align(cc, pt);
                                     cc->ctypes[ac].complete = dims[di] != UINT32_MAX ? 1u : 0u;
-                                    pt = BUSTER_FTYPE_COMPLEX_BIT | ac;
+                                    pt = ftype_from_index(cc, ac);
                                 }
                             }
                             pt = ftype_make_ptr(cc, pt);
@@ -2353,7 +2338,7 @@ static BUSTER_DIRECT_HOT bool fast_cc_parse_declarator(FastCCState* cc, FastType
                     cc->ctypes[ac].size = (uint32_t)total_sz;
                     cc->ctypes[ac].align = eal;
                     cc->ctypes[ac].complete = sm.count != UINT32_MAX ? 1u : 0u;
-                    cur = BUSTER_FTYPE_COMPLEX_BIT | ac;
+                    cur = ftype_from_index(cc, ac);
                 }
             }
             else if (sm.kind == FDMOD_FUNC)
@@ -2369,7 +2354,7 @@ static BUSTER_DIRECT_HOT bool fast_cc_parse_declarator(FastCCState* cc, FastType
                     cc->ctypes[fc].size = 1u;
                     cc->ctypes[fc].align = 1u;
                     cc->ctypes[fc].complete = 1u;
-                    cur = BUSTER_FTYPE_COMPLEX_BIT | fc;
+                    cur = ftype_from_index(cc, fc);
                 }
             }
         }
@@ -2461,7 +2446,7 @@ static FastType fast_cc_parse_record_iter(FastCCState* cc, bool is_union, bool a
     if (fast_cc_peek(cc) != FTOK_LBRACE)
     {
         cc->scratch->used = scratch_mark;
-        return root_cidx != 0 ? (BUSTER_FTYPE_COMPLEX_BIT | root_cidx) : FTYPE_VOID;
+        return root_cidx != 0 ? ftype_from_index(cc, root_cidx) : FTYPE_VOID;
     }
     if (!allow_def)
     {
@@ -2542,7 +2527,7 @@ static FastType fast_cc_parse_record_iter(FastCCState* cc, bool is_union, bool a
             if (sp > 0)
             {
                 RecFrame* pf = stack + (sp - 1u);
-                const FastType sub_t = BUSTER_FTYPE_COMPLEX_BIT | finished_cidx;
+                const FastType sub_t = ftype_from_index(cc, finished_cidx);
                 if (fast_cc_peek(cc) == FTOK_SEMI)
                 {
                     // Anonymous nested struct/union: flatten all its members into parent at aligned offset!
@@ -2673,7 +2658,7 @@ static FastType fast_cc_parse_record_iter(FastCCState* cc, bool is_union, bool a
         {
             // Anonymous struct/union typedef field (e.g. `MyUnion;`)
             cc->pos += 1u;
-            if (ftype_is_record(cc, fbase))
+            if (ftype_is_record(fbase))
             {
                 const FastComplexType* ct = cc->ctypes + (fbase & BUSTER_FTYPE_CIDX_MASK);
                 if (!rf->is_union && rf->cur_bit > 0) { rf->cur_byte += (rf->cur_bit + 7u) >> 3; rf->cur_bit = 0; }
@@ -2807,7 +2792,7 @@ static FastType fast_cc_parse_record_iter(FastCCState* cc, bool is_union, bool a
     }
 
     cc->scratch->used = scratch_mark;
-    return root_cidx != 0 ? (BUSTER_FTYPE_COMPLEX_BIT | root_cidx) : FTYPE_VOID;
+    return root_cidx != 0 ? ftype_from_index(cc, root_cidx) : FTYPE_VOID;
 }
 
 // Level 8: Full declaration specifiers (supports struct/union/enum definitions, storage classes, attributes, _Alignas).
@@ -2956,7 +2941,7 @@ static BUSTER_DIRECT_HOT FastType fast_cc_parse_decl_specs(FastCCState* cc, Fast
     }
 
     if (sp->is_const) { res = ftype_with_const(res); }
-    if (sp->is_volatile) { res |= ftype_is_complex(res) ? BUSTER_FTYPE_CVOL : BUSTER_FTYPE_SCALAR_VOL; }
+    if (sp->is_volatile) { res |= BUSTER_FTYPE_VOL; }
     sp->type = res;
     return res;
 }
@@ -3022,7 +3007,7 @@ static bool fast_cc_init_state(FastCCState* cc, FastArena* arena, FastArena* scr
         cc->ctypes[tag_cidx].complete = 1u;
         cc->ctypes[tag_cidx].abi_lo = FABI_MEM;
         cc->ctypes[tag_cidx].abi_hi = FABI_MEM;
-        cc->va_list_tag_type = BUSTER_FTYPE_COMPLEX_BIT | tag_cidx;
+        cc->va_list_tag_type = ftype_from_index(cc, tag_cidx);
 
         const uint32_t va_arr_cidx = fast_cc_alloc_ctype(cc, FCTYPE_ARRAY);
         cc->ctypes[va_arr_cidx].inner = cc->va_list_tag_type;
@@ -3030,7 +3015,7 @@ static bool fast_cc_init_state(FastCCState* cc, FastArena* arena, FastArena* scr
         cc->ctypes[va_arr_cidx].size = 24u;
         cc->ctypes[va_arr_cidx].align = 8u;
         cc->ctypes[va_arr_cidx].complete = 1u;
-        cc->va_list_type = BUSTER_FTYPE_COMPLEX_BIT | va_arr_cidx;
+        cc->va_list_type = ftype_from_index(cc, va_arr_cidx);
 
         // Intern builtin & special identifier IDs
         cc->id_builtin_clzll = fast_ident_intern_cstr(&pp->idents, "__builtin_clzll");

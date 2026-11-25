@@ -21,6 +21,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/uio.h>
+#include <sys/stat.h>
 #include <elf.h>
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -1405,7 +1406,10 @@ static bool fast_obj_write_elf(FastObj* obj, const char* path)
     iov[iov_n++] = (struct iovec){ .iov_base = shdrs, .iov_len = sizeof(shdrs) };
     const uint64_t total_bytes = foff + sizeof(shdrs);
 
-    const int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    // An object that is there already is written over where it stands and cut to the new length afterwards. Opening it
+    // with O_TRUNC gave its pages back to the kernel first and took as many again for the same bytes: a sixth of the
+    // compile's time in the kernel for sqlite3.c's 2 MB (#2850's profile on the 9700X).
+    const int fd = open(path, O_WRONLY | O_CREAT, 0644);
     bool ok = false;
     if (fd >= 0)
     {
@@ -1433,6 +1437,12 @@ static bool fast_obj_write_elf(FastObj* obj, const char* path)
                 iov[cur].iov_base = (uint8_t*)iov[cur].iov_base + adv;
                 iov[cur].iov_len -= adv;
             }
+        }
+        struct stat status;
+        if (fstat(fd, &status) == 0 && S_ISREG(status.st_mode) && (uint64_t)status.st_size != written)
+        {
+            // What is left of a longer object, or of this one where a write failed.
+            if (ftruncate(fd, (off_t)written) != 0) { ok = false; }
         }
         if (close(fd) != 0) { ok = false; }
         ok = ok && written == total_bytes;
