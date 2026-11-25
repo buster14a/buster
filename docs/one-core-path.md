@@ -4267,20 +4267,23 @@ instruction selection, encoding, branch-sizing, and link-object passes, `c_direc
 with private unity fragments `c_direct_lex.c`, `c_direct_x86.c`, `c_direct_types.c`, `c_direct_cc.c`) compiles clean
 single-TU `-c` C17/C23 object builds directly from `mmap`'d source bytes to an ELF64 `.o` file in one pass:
 
-- **Lexer and preprocessor (`c_direct_lex.c`):** the text becomes raw tokens (kind, first byte, length) a window of
-  2,048 at a time, in blocks of exactly 64 bytes (`fast_pp_lex_window`): one class table's lookup and a bit test a
-  class, the two-character punctuators from the two characters' classes at even places of each run of candidates, and
-  kinds, first bytes and lengths packed by three compresses and an expand. A block does no branch on its tokens and
-  carries what crosses its end in registers; it stops only at a byte that needs a decision (a comment, a directive, a
-  literal, a splice), and a token the masks cannot decide (`<<=`, a `.` before a digit, a number that goes on past its
-  digits) stays in the window marked for `fast_lex_one`. The emitter (`fast_pp_emit_window`) stores 64 kinds at a time
-  and visits the identifiers, numbers and literals: a 16 K-slot L2 identifier cache backed by a 64-way AVX-512
-  SwissTable, inline 1-to-8-digit decimal integers, and in-place expansion for empty, 1-token, 0-param-use
-  (`assert`/`testcase`), 1-param identity-wrapper (`ALWAYS`/`NEVER`) and short constant macros. Directives and macro
-  arguments read the same window (`fast_pp_read_tok`). An inactive group is skipped by masks too
-  (`fast_pp_skip_inactive`): each line's first character, a comment's start and what a literal may hide, 64 bytes a
-  step. Macro expansion is strictly iterative (`call_stack` + `arg_buf`, zero recursion). `test-direct` lexes its
-  cases at every offset of a block.
+- **Lexer and preprocessor (`c_direct_lex.c`):** the text becomes raw tokens (kind, first byte from the window's,
+  length) a window of 2,048 at a time, in blocks of exactly 64 bytes (`fast_pp_lex_window`): a class table's lookup on
+  the block's bytes and another on the bytes one further on (runs' ends, a `.` that goes on as a number, a
+  punctuator's second character, without a shift across the block's end), the two-character punctuators from the two
+  characters' classes, and kinds, first bytes and last bytes packed by three compresses (a token's last byte is the
+  n-th one when its first is). Only where candidates touch (`<<=`, `a+++b`), one is at the block's last byte or a `.`
+  goes on, a rare branch takes them at even places of each run and marks them. A block carries what crosses its end in
+  registers; it stops only at a byte that needs a decision (a comment, a directive, a literal, a splice), and a
+  comment that closes in the same block is passed from the block's own bytes. A token the masks cannot decide (`<<=`,
+  a `.` before a digit, a number that goes on past its digits) stays in the window marked for `fast_lex_one`. The
+  emitter (`fast_pp_emit_window`) stores 64 kinds at a time and visits the identifiers, numbers and literals: a
+  16 K-slot L2 identifier cache backed by a 64-way AVX-512 SwissTable, inline 1-to-8-digit decimal integers, and
+  in-place expansion for empty, 1-token, 0-param-use (`assert`/`testcase`), 1-param identity-wrapper
+  (`ALWAYS`/`NEVER`) and short constant macros. Directives and macro arguments read the same window
+  (`fast_pp_read_tok`). An inactive group is skipped by masks too (`fast_pp_skip_inactive`): each line's first
+  character, a comment's start and what a literal may hide, 64 bytes a step. Macro expansion is strictly iterative
+  (`call_stack` + `arg_buf`, zero recursion). `test-direct` lexes its cases at every offset of a block.
 - **Direct one-pass parser, type checker, and SysV AMD64 emitter (`c_direct_types.c`, `c_direct_cc.c`, `c_direct_x86.c`):**
   uses compact 32-bit `FastType` handles, AVX-512 `vpcmpeqd` 16-wide struct-member search (`<= 64` fields, hash table
   above), iterative operator-precedence expression compilation directly into x86-64 machine bytes, lazy `EFLAGS`
@@ -4309,6 +4312,31 @@ single-TU `-c` C17/C23 object builds directly from `mmap`'d source bytes to an E
   At main `f74b0b28` each compiled. Under `-std=c23` `auto x = 1.5;` was an `int`; `for (static int i = 0; …)` made
   `i` automatic; `__auto_type` after `_Alignas` compiled wrongly; and `__private_extern__ int x;` declared an `int`
   named `__private_extern__`, then a default `x` where the full pipeline's is hidden.
+- **Raw string literals and a directive's rest (#3600, #3603):** where the mode has raw string literals (GNU's from
+  C99, as the full pipeline's `pp_raw_strings` has them), a unit with one leaves. The scalar lexer leaves at a raw
+  prefix with its `"`; the windowed lexer hands such a run to it; and the scan of a skipped group decides, one literal
+  at a time, each line where an `R` comes right before a `"`, so that `"R"` stays an ordinary string. The rest of a
+  directive's line that the direct path doesn't lex (`fast_pp_skip_to_eol`) is lexed for its literals and comments: a
+  `/*` in a literal starts no comment, and a literal the line's end cuts leaves, as clang warns of one. At main
+  `20f3573e`, `#pragma message("/* look")` and the code after it compiled to an object with no symbols. A
+  `#pragma message` leaves, as clang warns of its text.
+- **musl's inline assembly (#3592's step 6b):** an asm statement of two shapes. One is musl's `syscall`: an `"=a"`
+  output; inputs `"a"`, `"D"`, `"S"` and `"d"`, or `"r"` of a local register variable; clobbers `rcx`, `r11`,
+  `memory` and `cc`. The other is its thread pointer, `mov %%fs:0,%0` with an `"=r"` or `"=a"` output
+  (`fast_cc_asm_statement`). Each input is evaluated into a slot of its own and loaded into its register just before
+  the instruction, and the output is stored from `rax`. A local register variable is a `register` 64-bit integer or
+  pointer labelled with a register a function may clobber (`rax`, `rcx`, `rdx`, `rsi`, `rdi`, `r8` to `r11`); it lives
+  in its slot, and its register holds it only as an input. Any other template, operand, constraint, clobber or label
+  leaves, and so does an input in a clobbered register or one register given twice, as clang refuses those.
+- **musl's atomics (#3592's step 6c):** the thirteen shapes of `arch/x86_64/atomic_arch.h` (`a_cas` and `a_cas_p`'s
+  `lock ; cmpxchg`, `a_swap`'s `xchg`, `a_fetch_add`'s `lock ; xadd`, `a_and` and `a_or` in 32 and 64 bits, `a_inc`,
+  `a_dec`, `a_store`'s `mov` and `lock ; orl $0,(%%rsp)`, `a_barrier`'s empty template, `a_spin`'s `pause`, `a_crash`'s
+  `hlt`, `a_ctz_64`'s `bsf` and `a_clz_64`'s `bsr ; xor $63`), and the empty templates of `explicit_bzero` (`"r"`) and
+  `__libc_start_main` (`"+r"`), each with its exact operands (`fast_cc_asm_atomic`). A memory operand is `*p` or
+  `*(T *)p` of a pointer local, whose size, 4 or 8 bytes, is the operation's; its address is loaded into `rdx`, the
+  register operand into `rax` (`cmpxchg`'s source into `rcx`), and a register output is stored at its own size after the
+  instruction. Another constraint or order, sizes that differ, another clobber than `memory`, or `"=m"` of anything but
+  `*p` leaves. 58 more of musl's units take the direct path in each mode (1,100 of 1,336).
 - **Fail-closed fallback (`--no-direct` / `BUSTER_NO_DIRECT`):** any diagnostic, warning-sensitive construct, or
   unsupported flag/extension bails out silently without writing output so `c_checker_driver.c` runs the full pipeline.
 
@@ -4353,9 +4381,10 @@ are in
   flushed after mispredicted branches and 14% backend stalls; the hottest function had 23% of the cycles and the
   twelfth 2%. A token costs about 330 instructions and 1.5 mispredicted branches, through code of about 100 KB.
 - **What did not pay,** measured: a profile-guided build of the unit (-4.4%, all of it in the code generator, and the
-  ceiling of what placing its code can give); `-O2`, `-Os`, alignment and inlining flags (nothing); copying a value a
-  field at a time so that no load waits on a store (360 K fewer such loads, 1.2% slower: they are not on the critical
-  path); directive lines lexed inside the window (a third of the windows, the same time).
+  ceiling of what placing its code can give; `BUSTER_PGO=1` with `BUSTER_PGO_CORPUS` builds it so, #3582); `-O2`,
+  `-Os`, alignment and inlining flags (nothing); copying a value a field at a time so that no load waits on a store
+  (360 K fewer such loads, 1.2% slower: they are not on the critical path); directive lines lexed inside the window (a
+  third of the windows, the same time).
 - **What is left in the front,** by its share of the compile's cycles: the emitter with its identifier lookups
   (13.2%), the window's lexer (8.3%), the expansion engine (5.1%), the directives' and arguments' reader (4.3%), the
   skipper (2.5%), interning new names (2.2%). The code generator's stage reads 1% slower here than on main although
@@ -4421,7 +4450,8 @@ What changed:
   which needs the tables' first pages together: not done.
 - What a small unit still pays is #3592's: the process's own start (0.10 ms of the 0.27), the predefines lexed in
   every process, a header's system calls, and the options and constructs that keep a build's units off the direct
-  path altogether (`-MD`, `-Wall`, `-g`; a strict `-std=` takes it since #3592's step 4).
+  path altogether (`-Wall`, `-g`; a strict `-std=` takes it since #3592's step 4, and `-MD` and its kin since its
+  dependency files below).
 
 ### A declaration's symbols (2026-11-25, #3595)
 
@@ -4455,6 +4485,38 @@ differs is only what this section doesn't claim:
 - objects initialized to zero in `.data` rather than `.bss`;
 - undefined references that only one side's code makes;
 - unused static functions kept.
+
+### Dependency files (2026-11-25, #3592)
+
+`-MD`, `-MMD`, `-MF`, `-MT`, `-MQ` and `-MP` take the direct path, with the rule the full pipeline writes. The direct
+path records the files a unit reads, and the driver makes the rule from those records with the full pipeline's code
+(`dependency_prepare`), before the object is written, and publishes it after (`dependency_publish`). `-M` and `-MM`
+alone don't compile.
+
+- **A record a file**, by its device and inode, under the first path it was read by, in the order of the first
+  readings, as the full pipeline's `pp_dependency_observe` keeps them. The main file's isn't listed. An include that
+  its guard or `#pragma once` skips is a reading too (the guard entry keeps the file's record), and so is a
+  `__has_include` that finds a file. `fast_pp_dependency_find` compares eight records' devices and inodes a step.
+- **A system header's record** is one whose every reading was a system header's. A reading is as much a system
+  header's as the directory the search found it in and its includer are. `#pragma GCC system_header` makes the rest of
+  a header, and the header in its later inclusions, a system header's; in the main file it is ignored, as clang and the
+  full pipeline ignore it. The `--predefines` file is a system header, and an `-include` file is one when the search
+  found it in a system directory.
+- **`__has_include` and `__has_include_next` are defined** to `#ifdef`, `#ifndef`, `#elifdef`, `#elifndef` and
+  `defined`, as clang's builtin macros are. glibc's `<bits/statx.h>` and `<bits/unistd_ext.h>` test them, and include
+  `<linux/stat.h>` and `<linux/close_range.h>` where they are defined. The direct path read other headers than clang in
+  every unit with `_GNU_SOURCE` that includes `<sys/stat.h>` or `<unistd.h>`, `sqlite3.c` among them; their objects
+  are the same either way.
+- **What leaves** in a unit that collects records, where its records could differ from the full pipeline's:
+  - a `__has_include` that finds a directory, or names a macro (#3608);
+  - a line marker's or `#line`'s file name;
+  - more than 4,096 files;
+  - a rule the driver can't make, before any object is written.
+
+  `-H` keeps a unit off the direct path, which doesn't print its list of headers (#3612).
+
+The full pipeline keeps a path's system header level from that path's first lookup, where clang takes each lookup's
+(#3613). There the direct path's `-MMD` rule is clang's, and lists a header the full pipeline's leaves out.
 
 ## Related
 
