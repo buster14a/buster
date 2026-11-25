@@ -1968,9 +1968,9 @@ typedef struct FastExprCtx FastExprCtx;
 struct FastExprCtx
 {
     FastCCState* cc;
-    FastVal vstack[128];
+    // The scalars first, apart from the stacks (#3577): a 32-byte value makes vstack 4096 bytes, so a scalar right past
+    // it would share its 4 KiB offset with vstack[0], the entry every expression writes and reads (4K aliasing).
     uint32_t vsp;
-    FastVal call_args[128];
     uint32_t arg_sp;
     uint16_t gp_used;      // bitmask of live GP scratch regs in vstack/call_args
     uint8_t xmm_used;      // bitmask of live XMM scratch regs (0..7)
@@ -1988,15 +1988,18 @@ struct FastExprCtx
     // of seq_mods marks entry i a modification, seq_own its own operands' first entry + 1 (0 unknown). A variable modified
     // and then named or modified again, or named earlier than its modification's operands, sets seq_hit (by the modified
     // variables' hash bits, seq_bloom), and only then does the end of the expression look at the log, with the regions
-    // that sequence points order (`&&`, `||`, `,`, `?:`: entries [lo, mid) before [mid, hi), each + 1).
+    // that sequence points order (`&&`, `||`, `,`, `?:`: entries [lo, mid) before [mid, hi), each + 1). The arrays sit
+    // between the two stacks, which they keep from sharing offsets (call_args[0]'s is vstack[21]'s).
     uint32_t seq_count;
     uint32_t seq_hit;
     uint32_t seq_regions;
     uint64_t seq_mods;
     uint64_t seq_bloom;
+    FastVal vstack[128];
     uint64_t seq_log[64];
     uint8_t seq_own[64];
     uint8_t seq_region[32][3];
+    FastVal call_args[128];
 };
 
 // #3577: a variable's identity for -Wunsequenced is its name's identifier (never 0): an expression declares nothing, so

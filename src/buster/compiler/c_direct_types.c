@@ -178,21 +178,24 @@ struct FastSym
     uint8_t inline_rules;   // BUSTER_FINLINE_*: what a function's declarations say of its inline definition (#3595)
     uint8_t push_marks;     // the marks a use by name gives its value (#3577): BUSTER_FSYM_PUSH_*
     uint8_t is_alias;       // an alias attribute defines it at the unit's end (#3592)
-    FastType type;
-    uint32_t ident_id;
-    uint32_t obj_sym;      // symbol index in FastObj (for GLOBAL/FUNC)
-    int32_t stack_off;     // rbp-relative offset (for LOCAL, negative for locals, >=16 for stack params)
-    int64_t const_val;     // value (for FSYM_ENUM_CONST)
-    uint32_t section;      // FastSecId if defined global
-    uint32_t sec_off;      // byte offset within section
-    const char* asm_name;  // optional __asm__("label") override
-    uint32_t asm_name_len;
     uint8_t visibility;    // STV_DEFAULT / STV_HIDDEN / STV_PROTECTED
     uint8_t scope_depth;   // the scope it was declared in (0 = file scope), for a redeclaration in the same one (#3577)
     uint8_t pad_sym[2];    // [0] a function's library purity (fast_cc_library_pure_query), a parameter's declared array (1);
                            // [1] a variable's BUSTER_FFOLD_*
     uint16_t deferred_task; // one-based index of a deferred definition, zero for other symbols
+    FastType type;
+    uint32_t ident_id;
+    uint32_t obj_sym;      // symbol index in FastObj (for GLOBAL/FUNC)
+    int32_t stack_off;     // rbp-relative offset (for LOCAL, negative for locals, >=16 for stack params)
+    uint32_t section;      // FastSecId if defined global
+    uint32_t sec_off;      // byte offset within section
+    uint32_t asm_name_len;
+    int64_t const_val;     // value (for FSYM_ENUM_CONST)
+    const char* asm_name;  // optional __asm__("label") override
 };
+
+// A symbol fits a cache line, as before #3577's fields (cc->syms is 64-byte aligned): the push of a name reads most of it.
+_Static_assert(sizeof(FastSym) == 64u, "symbol entry size");
 
 // A function's declarations, for whether its inline definition is emitted as C99's and GNU's rules say, as the full
 // pipeline decides it (#3595). GNU's rules (gnu_inline on a declaration, or -fgnu89-inline, which keeps a unit off the
