@@ -10,6 +10,22 @@
 #include "buster/compiler/c_direct.h"
 #include "buster/compiler/c_direct_cc.c"
 
+#include <sys/wait.h>
+
+// A unit is small unless its main file is this long (#3592). A small unit's arenas take base pages and its identifier
+// tables start small. The arenas' 55 tables each start in a region of their own, and under transparent huge pages a
+// unit that writes the first page of each has the kernel clear 2 MB for most of them: on the 9700X a one-function unit
+// took 0.85 ms, 4.08 M of its 4.67 M cycles the kernel's, and 0.31 ms with base pages. For sqlite3.c's 9.5 MB huge
+// pages are worth 2% (17.68 against 17.98 ms): the two meet at a few megabytes of source, most of which a main file
+// below this has to get from its headers.
+#define BUSTER_FDIRECT_LARGE_UNIT_BYTES (UINT64_C(1) << 20)
+
+static bool c_direct_unit_is_small(const char* input_path)
+{
+    struct stat st;
+    return stat(input_path, &st) != 0 || (uint64_t)st.st_size < BUSTER_FDIRECT_LARGE_UNIT_BYTES;
+}
+
 static bool c_direct_default_output_path(const char* input_path, char* buffer, size_t capacity)
 {
     bool ok = false;
@@ -123,10 +139,11 @@ int c_direct_try_compile(const CDirectRequest* request)
         out_path = default_out;
     }
 
+    const bool small = c_direct_unit_is_small(request->input_path);
     FastArena arena = { 0 };
     FastArena scratch = { 0 };
-    if (!fast_arena_init(&arena, UINT64_C(32) * 1024u * 1024u, request->avoid_huge_pages) ||
-        !fast_arena_init(&scratch, UINT64_C(6) * 1024u * 1024u, request->avoid_huge_pages))
+    if (!fast_arena_init(&arena, UINT64_C(32) * 1024u * 1024u, request->avoid_huge_pages || small) ||
+        !fast_arena_init(&scratch, UINT64_C(6) * 1024u * 1024u, request->avoid_huge_pages || small))
     {
         fast_arena_destroy(&scratch);
         fast_arena_destroy(&arena);
@@ -137,7 +154,7 @@ int c_direct_try_compile(const CDirectRequest* request)
     FastObj* obj = (FastObj*)fast_arena_alloc(&scratch, sizeof(FastObj), 64);
     FastCCState* cc = (FastCCState*)fast_arena_alloc(&scratch, sizeof(FastCCState), 64);
 
-    bool ok = pp != NULL && obj != NULL && cc != NULL && fast_pp_init(pp, &arena, &scratch);
+    bool ok = pp != NULL && obj != NULL && cc != NULL && fast_pp_init(pp, &arena, &scratch, small);
     if (ok)
     {
         pp->unsigned_char = request->unsigned_char;
@@ -490,7 +507,7 @@ static bool c_direct_test_kind_is_number(uint8_t kind)
 }
 
 // The preprocessor's tokens of `text`, at most `capacity` of them.
-static bool c_direct_test_tokens(const char* text, uint64_t length, uint8_t* kinds, uint32_t* data, uint32_t capacity, uint32_t* out_count)
+static bool c_direct_test_tokens_sized(const char* text, uint64_t length, uint8_t* kinds, uint32_t* data, uint32_t capacity, uint32_t* out_count, bool small)
 {
     FastArena arena = { 0 };
     FastArena scratch = { 0 };
@@ -498,7 +515,7 @@ static bool c_direct_test_tokens(const char* text, uint64_t length, uint8_t* kin
     if (ok)
     {
         FastPP* pp = (FastPP*)fast_arena_alloc(&scratch, sizeof(FastPP), 64);
-        ok = pp != NULL && fast_pp_init(pp, &arena, &scratch) && fast_pp_run_buffer(pp, "<test>", text, length) && pp->out_count <= capacity;
+        ok = pp != NULL && fast_pp_init(pp, &arena, &scratch, small) && fast_pp_run_buffer(pp, "<test>", text, length) && pp->out_count <= capacity;
         if (ok)
         {
             memcpy(kinds, pp->out_kind, pp->out_count);
@@ -580,6 +597,302 @@ static uint32_t c_direct_test_layout(char* buffer, uint32_t shift, const char* s
 }
 
 // The class table against the tables it restates.
+static bool c_direct_test_tokens(const char* text, uint64_t length, uint8_t* kinds, uint32_t* data, uint32_t capacity, uint32_t* out_count)
+{
+    return c_direct_test_tokens_sized(text, length, kinds, data, capacity, out_count, false);
+}
+
+// Whether every used slot of the cache is where its key's hash puts it, names an interned name of its key's length
+// and kind, and the cache has `bits`.
+static bool c_direct_test_cache_consistent(const FastIdentTable* t, uint32_t bits)
+{
+    bool ok = t->cache_bits == bits && t->cache_shift == 64u - bits;
+    for (uint32_t i = 0; ok && i < (1u << bits); i += 1)
+    {
+        const FastIdentCacheSlot* slot = t->cache + i;
+        if (slot->id != 0)
+        {
+            const FastIdentEntry* entry = t->entries + slot->id;
+            ok = slot->id <= t->count && entry->length == slot->len && slot->tok_kind == (entry->kw_kind != 0 ? entry->kw_kind : FTOK_IDENT) &&
+                 (fast_ident_cache_hash(slot->w0, slot->w1, slot->len) >> t->cache_shift) == i;
+        }
+    }
+    return ok;
+}
+
+// A small unit's identifier tables (#3592): the cache grows at 8,192 and at 32,768 names and keeps every slot it had,
+// the hash table grows from 16 groups, and a unit's tokens are the same from small tables and from full ones.
+static bool c_direct_test_ident_growth(void)
+{
+    uint32_t long_total = 0;
+    enum { names = 36000, capacity = 2 * names + 64, text_size = 2 * names * 40 };
+    bool ok = true;
+    // Three phases: the name that makes the cache grow is a long one in one of them and a short one in the others.
+    for (uint32_t phase = 0; ok && phase < 3u; phase += 1)
+    {
+        FastArena arena = { 0 };
+        ok = fast_arena_init(&arena, UINT64_C(32) * 1024u * 1024u, true);
+        FastIdentTable table;
+        ok = ok && fast_ident_init(&table, &arena, true);
+        ok = ok && table.group_count == BUSTER_FIDENT_SMALL_GROUPS && c_direct_test_cache_consistent(&table, BUSTER_FIDENT_SMALL_CACHE_BITS);
+        if (ok)
+        {
+            const uint32_t seeded = table.count;
+            uint32_t* ids = (uint32_t*)fast_arena_alloc(&arena, names * sizeof(uint32_t), 64);
+            FastIdentCacheSlot* before = (FastIdentCacheSlot*)fast_arena_alloc(&arena, ((uint64_t)1 << BUSTER_FIDENT_CACHE_BITS) * sizeof(FastIdentCacheSlot), 64);
+            uint32_t growths = 0;
+            uint32_t long_growths = 0;
+            ok = ids != NULL && before != NULL && seeded < 1024u && seeded + names < BUSTER_FIDENT_MAX_IDS;
+            // Short names through fast_ident_lookup_16 and every third one long, through fast_ident_lookup_long.
+            for (uint32_t i = 0; ok && i < names; i += 1)
+            {
+                char name[80] = { 0 };
+                const bool is_long = (i + phase) % 3u == 2u;
+                const uint32_t length = (uint32_t)snprintf(name, 64, is_long ? "a_name_of_more_than_16_bytes_%u" : "n%u", i);
+                uint8_t kind = 0;
+                const uint32_t before_bits = table.cache_bits;
+                const bool grows = table.count + 1u == table.cache_grow_at;
+                uint32_t held = 0;
+                if (grows)
+                {
+                    memcpy(before, table.cache, ((size_t)1 << before_bits) * sizeof(FastIdentCacheSlot));
+                }
+                ids[i] = is_long ? fast_ident_lookup_long(&table, (const uint8_t*)name, length, &kind) : fast_ident_lookup_16(&table, (const uint8_t*)name, length, &kind);
+                ok = ids[i] == seeded + i + 1u && kind == FTOK_IDENT;
+                if (grows)
+                {
+                    // The cache grows as the names reach four times its slots, by two bits, and keeps every slot it had:
+                    // each old key is at its hash's place in the new cache, but for one that the name that made it grow
+                    // may have replaced, and that name is in the new cache too.
+                    ok = ok && table.count == (BUSTER_FIDENT_CACHE_GROW_LOAD << before_bits) && table.cache != before &&
+                         table.cache_bits == (before_bits + BUSTER_FIDENT_CACHE_GROW_BITS < BUSTER_FIDENT_CACHE_BITS ? before_bits + BUSTER_FIDENT_CACHE_GROW_BITS : BUSTER_FIDENT_CACHE_BITS);
+                    uint32_t replaced = 0;
+                    uint32_t moved = 0;
+                    for (uint32_t slot = 0; ok && slot < (1u << before_bits); slot += 1)
+                    {
+                        if (before[slot].id != 0)
+                        {
+                            const FastIdentCacheSlot* now = table.cache + (fast_ident_cache_hash(before[slot].w0, before[slot].w1, before[slot].len) >> table.cache_shift);
+                            const bool same = now->id == before[slot].id && now->w0 == before[slot].w0 && now->w1 == before[slot].w1 && now->len == before[slot].len && now->tok_kind == before[slot].tok_kind;
+                            held += 1u;
+                            moved += same;
+                            replaced += !same && now->id == ids[i];
+                            ok = same || now->id == ids[i];
+                        }
+                    }
+                    uint32_t kept = 0;
+                    for (uint32_t slot = 0; ok && slot < (1u << table.cache_bits); slot += 1)
+                    {
+                        kept += table.cache[slot].id != 0;
+                    }
+                    ok = ok && moved > (1u << before_bits) / 4u && replaced <= 1u && kept == held + 1u - replaced && c_direct_test_cache_consistent(&table, table.cache_bits);
+                    growths += 1u;
+                    long_growths += is_long;
+                }
+                else
+                {
+                    ok = ok && table.cache_bits == before_bits;
+                }
+                ok = ok && table.cache_grow_at == (table.cache_bits < BUSTER_FIDENT_CACHE_BITS ? BUSTER_FIDENT_CACHE_GROW_LOAD << table.cache_bits : UINT32_MAX);
+            }
+            ok = ok && growths == 2u && c_direct_test_cache_consistent(&table, BUSTER_FIDENT_CACHE_BITS) && table.group_count > BUSTER_FIDENT_SMALL_GROUPS;
+            long_total += long_growths;
+            // Every name again: the same id, from the cache or from the table.
+            for (uint32_t i = 0; ok && i < names; i += 1)
+            {
+                char name[80] = { 0 };
+                const bool is_long = (i + phase) % 3u == 2u;
+                const uint32_t length = (uint32_t)snprintf(name, 64, is_long ? "a_name_of_more_than_16_bytes_%u" : "n%u", i);
+                uint8_t kind = 0;
+                const uint32_t id = is_long ? fast_ident_lookup_long(&table, (const uint8_t*)name, length, &kind) : fast_ident_lookup_16(&table, (const uint8_t*)name, length, &kind);
+                ok = id == ids[i] && kind == FTOK_IDENT;
+            }
+            ok = ok && table.count == seeded + names && c_direct_test_cache_consistent(&table, BUSTER_FIDENT_CACHE_BITS);
+        }
+        fast_arena_destroy(&arena);
+    }
+    // Of the six growths, a long name made two.
+    ok = ok && long_total == 2u;
+
+    // Without room for a larger cache the small one stays, and is not asked to grow again.
+    FastArena tight = { 0 };
+    ok = ok && fast_arena_init(&tight, UINT64_C(4) * 1024u * 1024u, true);
+    if (ok)
+    {
+        FastIdentTable stays;
+        ok = fast_ident_init(&stays, &tight, true);
+        tight.used = tight.reserved;
+        const FastIdentCacheSlot* const cache = stays.cache;
+        stays.count = stays.cache_grow_at;
+        ok = ok && !fast_ident_cache_grow(&stays) && stays.cache == cache && stays.cache_grow_at == UINT32_MAX && stays.cache_bits == BUSTER_FIDENT_SMALL_CACHE_BITS;
+    }
+    fast_arena_destroy(&tight);
+
+    // A unit of 72,000 identifier tokens gives the same kinds and ids from both sizes.
+    char* text = (char*)malloc(text_size);
+    uint8_t* kinds = (uint8_t*)malloc(2 * capacity);
+    uint32_t* data = (uint32_t*)malloc(2 * capacity * sizeof(uint32_t));
+    ok = ok && text != NULL && kinds != NULL && data != NULL;
+    if (ok)
+    {
+        uint64_t length = 0;
+        for (uint32_t pass = 0; pass < 2u; pass += 1)
+        {
+            for (uint32_t i = 0; i < names; i += 1)
+            {
+                length += (uint64_t)snprintf(text + length, 40, i % 3u == 2u ? "a_name_of_more_than_16_bytes_%u\n" : "n%u ", i);
+            }
+        }
+        uint32_t small_count = 0;
+        uint32_t full_count = 0;
+        ok = c_direct_test_tokens_sized(text, length, kinds, data, capacity, &small_count, true) &&
+             c_direct_test_tokens_sized(text, length, kinds + capacity, data + capacity, capacity, &full_count, false);
+        ok = ok && small_count == 2u * names && full_count == small_count && memcmp(kinds, kinds + capacity, small_count) == 0 &&
+             memcmp(data, data + capacity, (size_t)small_count * sizeof(uint32_t)) == 0;
+        for (uint32_t i = 0; ok && i < names; i += 1)
+        {
+            ok = kinds[i] == FTOK_IDENT && data[i] == data[i + names];
+        }
+    }
+    free(data);
+    free(kinds);
+    free(text);
+    return ok;
+}
+
+// The kilobytes of this process's mappings that are advised against huge pages (`nh` in /proc/self/smaps), and its
+// resident pages that are no file's (/proc/self/statm: a child's code pages become resident as it runs them).
+static uint64_t c_direct_test_base_page_kilobytes(void)
+{
+    uint64_t total = 0;
+    FILE* maps = fopen("/proc/self/smaps", "r");
+    if (maps != NULL)
+    {
+        char line[1024];
+        uint64_t size = 0;
+        while (fgets(line, sizeof(line), maps) != NULL)
+        {
+            if (strncmp(line, "Size:", 5) == 0)
+            {
+                size = strtoull(line + 5, NULL, 10);
+            }
+            else if (strncmp(line, "VmFlags:", 8) == 0 && strstr(line, " nh") != NULL)
+            {
+                total += size;
+            }
+        }
+        fclose(maps);
+    }
+    return total;
+}
+
+static uint64_t c_direct_test_resident_pages(void)
+{
+    uint64_t resident = 0;
+    FILE* statm = fopen("/proc/self/statm", "r");
+    if (statm != NULL)
+    {
+        unsigned long long size = 0;
+        unsigned long long pages = 0;
+        unsigned long long shared = 0;
+        if (fscanf(statm, "%llu %llu %llu", &size, &pages, &shared) == 3 && pages >= shared)
+        {
+            resident = pages - shared;
+        }
+        fclose(statm);
+    }
+    return resident;
+}
+
+// One unit compiled in a child process that keeps its arenas (`release` false): `padding` bytes of comment, then 600
+// declarations. Returns whether the compile's arenas were advised base pages as `small` says, and for a small unit
+// whether the compile added under 150 resident pages (measured: 72 with the small tables, 194 with the full ones,
+// whose 384 KB cache and 160 KB hash table 600 names touch all over).
+static bool c_direct_test_unit_pages(uint64_t padding, bool small)
+{
+    char src_path[256];
+    char obj_path[256];
+    snprintf(src_path, sizeof(src_path), "/tmp/buster_direct_pages_%d.c", (int)getpid());
+    snprintf(obj_path, sizeof(obj_path), "/tmp/buster_direct_pages_%d.o", (int)getpid());
+    bool ok = false;
+    FILE* source = fopen(src_path, "wb");
+    if (source != NULL)
+    {
+        ok = true;
+        if (padding != 0)
+        {
+            ok = fputs("/*", source) >= 0;
+            for (uint64_t i = 0; ok && i < padding; i += 64)
+            {
+                ok = fputs("                                                               \n", source) >= 0;
+            }
+            ok = ok && fputs("*/\n", source) >= 0;
+        }
+        for (uint32_t i = 0; ok && i < 600u; i += 1)
+        {
+            ok = fprintf(source, "extern int declared_name_%u;\n", i) > 0;
+        }
+        ok = ok && fputs("int add(int a, int b) { return a + b + declared_name_7; }\n", source) >= 0;
+        ok = fclose(source) == 0 && ok;
+    }
+    struct stat st;
+    ok = ok && stat(src_path, &st) == 0 && ((uint64_t)st.st_size < BUSTER_FDIRECT_LARGE_UNIT_BYTES) == small && c_direct_unit_is_small(src_path) == small;
+    if (ok)
+    {
+        fflush(NULL);
+        const pid_t child = fork();
+        if (child == 0)
+        {
+            static const char predefines[] = "#define __x86_64__ 1\n#define __LP64__ 1\n#define __STDC__ 1\n#define __STDC_VERSION__ 201710L\n";
+            const CDirectRequest request = {
+                .input_path = src_path,
+                .output_path = obj_path,
+                .predefines_text = predefines,
+                .predefines_length = (uint32_t)(sizeof(predefines) - 1u),
+                .pic = true,
+                .unwind_tables = true,
+                .quiet = true,
+                .release = false,
+            };
+            const bool advice = access("/sys/kernel/mm/transparent_hugepage/enabled", F_OK) == 0;
+            const uint64_t advised_before = c_direct_test_base_page_kilobytes();
+            const uint64_t resident_before = c_direct_test_resident_pages();
+            const int status = c_direct_try_compile(&request);
+            const uint64_t resident = c_direct_test_resident_pages() - resident_before;
+            const uint64_t advised = c_direct_test_base_page_kilobytes() - advised_before;
+            const uint64_t arenas = (UINT64_C(32) + UINT64_C(6)) * 1024u;
+            bool child_ok = status == 0;
+            child_ok = child_ok && (!advice || advised == (small ? arenas : 0u));
+            child_ok = child_ok && (!small || resident < 150u);
+            if (!child_ok)
+            {
+                fprintf(stderr, "test-direct: a %s unit: status %d, %llu resident pages added, %llu KB advised base pages\n", small ? "small" : "large", status,
+                        (unsigned long long)resident, (unsigned long long)advised);
+            }
+            fflush(NULL);
+            _exit(child_ok ? 0 : 1);
+        }
+        int status = 0;
+        ok = child > 0 && waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    }
+    unlink(src_path);
+    unlink(obj_path);
+    return ok;
+}
+
+// A small unit's start (#3592): a unit below BUSTER_FDIRECT_LARGE_UNIT_BYTES takes base pages and small tables, one at
+// that size takes the pages the host gives and the full tables.
+static bool c_direct_test_small_unit(void)
+{
+    // A sanitizer's runtime maps and advises memory of its own while the unit compiles.
+#if __has_feature(address_sanitizer) || __has_feature(thread_sanitizer) || __has_feature(memory_sanitizer)
+    const bool counted = false;
+#else
+    const bool counted = true;
+#endif
+    return !counted || (c_direct_test_unit_pages(0, true) && c_direct_test_unit_pages(BUSTER_FDIRECT_LARGE_UNIT_BYTES, false));
+}
+
 static bool c_direct_test_classes(void)
 {
     bool ok = true;
@@ -812,6 +1125,26 @@ int run_c_direct_tests(int argc, char** argv)
     else
     {
         fprintf(stderr, "test-direct: FAIL lexer\n");
+        failed += 1u;
+    }
+
+    if (c_direct_test_small_unit())
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL a small unit's start\n");
+        failed += 1u;
+    }
+
+    if (c_direct_test_ident_growth())
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL identifier tables' growth\n");
         failed += 1u;
     }
 

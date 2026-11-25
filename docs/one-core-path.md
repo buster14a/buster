@@ -4288,7 +4288,9 @@ single-TU `-c` C17/C23 object builds directly from `mmap`'d source bytes to an E
   PIC/external symbols). Hot functions are placed in `.text.buster_checker` (2 MB huge-page code segment).
 - **Busy-host memory policy (`#672`/`#1561`):** allocates two `mmap` arenas (32 MiB + 6 MiB) with zero-initialized
   tables (no full-table `memset`s) and advises `MAP_STACK` + `MADV_NOHUGEPAGE` when `arena_pages_busy` is set,
-  preventing 8-core Linux THP compaction contention and cutting 8-worker peak RSS to 29.5 MiB.
+  preventing 8-core Linux THP compaction contention and cutting 8-worker peak RSS to 29.5 MiB. A unit whose main
+  file is under 1 MiB is advised the same way whatever the host, and starts with small identifier tables
+  (["A small unit's start"](#a-small-units-start-2026-11-25-3592)).
 - **Fail-closed fallback (`--no-direct` / `BUSTER_NO_DIRECT`):** any diagnostic, warning-sensitive construct, or
   unsupported flag/extension bails out silently without writing output so `c_checker_driver.c` runs the full pipeline.
 
@@ -4341,6 +4343,52 @@ are in
   skipper (2.5%), interning new names (2.2%). The code generator's stage reads 1% slower here than on main although
   its source is the same but for the specifiers: its code lands at other addresses, and its time follows by that much
   between any two builds.
+
+### A small unit's start (2026-11-25, #3592)
+
+The profile above is one large unit's. A build is many small units, a process each, and measured that way at main
+`56490ed9` the direct path's cost was not in its tokens
+([record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/direct-reach-fixed-cost-2026-11-25)):
+
+- **Huge pages.** The arenas' 55 tables each start in a region of their own, and a small unit writes the first page
+  of each. Under transparent huge pages the kernel cleared 2 MB for most of the mapping's 2 MB regions: a
+  one-function unit took 0.76 ms, 3.54 M of its 4.23 M cycles the kernel's (`clear_page_erms` was 37.6% of the
+  process's samples).
+- **Tables written at hashed places.** With base pages the same unit still took 359 page faults, where a static
+  `return 0` takes 27: the predefines' 400 names touched nearly every page of the 384 KB identifier cache and of
+  the 160 KB hash table.
+
+What changed:
+
+- **A unit whose main file is under 1 MiB takes base pages** for both arenas (`c_direct_unit_is_small`,
+  `BUSTER_FDIRECT_LARGE_UNIT_BYTES`). A larger one takes the pages the host gives, as before: for `sqlite3.c` huge
+  pages are worth 2% (17.68 against 17.98 ms).
+- **Its identifier tables start small and grow with the names:** the hash table at 16 groups (it always grew), the
+  cache at 2,048 slots. The cache grows four times as large once the names are four times its slots, into a new
+  block of the arena, each slot moved to its hash's place (`fast_ident_cache_grow`). A large unit starts with the
+  full tables.
+
+| 9700X, a process a unit, CPU 2, 21 rotated runs | main `56490ed9` | this | |
+| --- | ---: | ---: | ---: |
+| one function | 0.76 ms, 3.54 M kernel cycles | **0.27 ms**, 0.79 M | 2.8 times |
+| `stdio.h` and a `printf` | 1.19 ms | **0.68 ms** | 1.75 times |
+| six standard headers and a `main` | 1.83 ms | **1.35 ms** | 1.36 times |
+| musl's `wcwidth.c` | 0.99 ms | **0.47 ms** | 2.1 times |
+| `sqlite3.c` | 17.61 ms | 17.62 ms | |
+| musl's 1,336 units by `-std=gnu99`, 663 of them direct | 1,764.4 ms | **1,521.2 ms** | -13.8% |
+| Lua's 34 units without its warning options, 29 of them direct | 85.49 ms | **81.66 ms** | -4.5% |
+
+- Every object is the same: the units above, and the 7,556 units of the record's corpus (1,892 of them the direct
+  path's).
+- `sqlite3.c`'s lexing and preprocessing stage reads 7.340, 7.333 and 7.328 ms in three builds of the change whose
+  code is placed differently, against main's 7.351, 7.328 and 7.325. One more placement of the change read 7.453:
+  a build's placement moves that stage by more than this change does.
+- Lua's units pay for their base pages in user cycles (284.7 M to 293.0 M) and gain more in the kernel (186.9 M to
+  157.8 M). A unit of that size would rather have one huge page than hundreds of base pages or eleven huge ones,
+  which needs the tables' first pages together: not done.
+- What a small unit still pays is #3592's: the process's own start (0.10 ms of the 0.27), the predefines lexed in
+  every process, a header's system calls, and the options and constructs that keep a build's units off the direct
+  path altogether (`-MD`, `-Wall`, `-g`, a strict `-std=`).
 
 ## Related
 
