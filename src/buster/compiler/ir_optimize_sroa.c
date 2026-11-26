@@ -18,8 +18,11 @@
 // and their kin as vector compound literals, which the typed stream initializes as objects (each element's store, then
 // one load of the whole vector), so that a splat of bytes was 72 stores and a load no store forwards to. A vector load
 // whose every byte the block's stores before it wrote becomes the value they wrote (ir_sroa_assemble): a vector
-// constant where every byte is a constant's, or a splat where every store wrote the same scalar. The stores then
-// have no load to reach and go with their fields.
+// constant where every byte is a constant's, or a splat where every store wrote the same scalar. #3641 also takes
+// whole runtime integer lanes and constants: independent 16-byte pieces joined by a balanced width-change tree,
+// with a low scalar and zero tail widened directly. The stores then have no load to reach and go with their fields.
+
+typedef struct IrSroaConstruction IrSroaConstruction;
 
 typedef struct IrSroaOptions IrSroaOptions;
 struct IrSroaOptions
@@ -29,6 +32,9 @@ struct IrSroaOptions
     // #3311: the eightbytes of slots read and written at mixed widths (ir_sroa_widen), and a register-class aggregate
     // result's slot returned through a slot of its own. Needs `flagged`.
     bool widen;
+    // #3641: construct distinct runtime integer lanes with the existing EVEX lane/width operations. A target-aware
+    // caller enables this only where those operations are available; constant/splat assembly needs no such opt-in.
+    bool construct;
 };
 
 typedef struct IrSroaResult IrSroaResult;
@@ -38,7 +44,7 @@ struct IrSroaResult
     uint32_t split_slots;
     uint32_t fields;
     uint32_t refused_slots;
-    // The vector loads that became the constant or the splat their block's stores wrote (#1344).
+    // The vector loads that became the value their block's stores wrote (#1344, #3641).
     uint32_t assembled;
     // #3311's slots rewritten as eightbytes, and the returns rewritten through a slot of their own (ir_sroa_widen).
     uint32_t widened_slots;
@@ -78,6 +84,8 @@ struct IrSroaWork
     uint32_t* assembled_values;
     uint32_t* same;
     IrSimdValue* assembled_constants;
+    IrSroaConstruction* constructions;
+    uint32_t construction_count;
     uint32_t assembled_constant_count;
     uint32_t assembled_count;
     // #3311 (ir_sroa_widen): whether a ret's use of a slot's address is understood rather than an escape, and the slots a
@@ -327,6 +335,7 @@ static void ir_sroa_dead_stores(IrSroaWork* work, uint64_t* lows, uint64_t* high
 
 #define BUSTER_IR_SROA_ASSEMBLED_CONSTANT 1
 #define BUSTER_IR_SROA_ASSEMBLED_SPLAT 2
+#define BUSTER_IR_SROA_ASSEMBLED_LANES 3
 // The widest object whose bytes a mask of 64 bits tracks: a vector of 64 bytes.
 #define BUSTER_IR_SROA_ASSEMBLE_BYTES 64
 
@@ -347,7 +356,200 @@ struct IrSroaAssembly
     // An access of the block's that leaves the slot's bytes (ir_sroa_fields refuses its slot): nothing is decided after it.
     uint8_t outside;
     uint8_t image[BUSTER_IR_SROA_ASSEMBLE_BYTES];
+    // Only slots with an eligible vector load have this 64-entry last-store table. A runtime lane is reconstructed
+    // only where all its bytes still name that store; ordinary scalar slots need no new byte-tracking storage.
+    uint32_t* sources;
 };
+
+// A completely defined load's integer lanes (#3641): a scalar value at each runtime lane's first byte, NONE elsewhere;
+// `runtime` marks every byte of those lanes, and `image` holds the constants with runtime bytes zeroed. The input's
+// value numbers are retained until the expansion remaps them. At most one recipe per vector load, at most 64 bytes.
+struct IrSroaConstruction
+{
+    uint32_t values[BUSTER_IR_SROA_ASSEMBLE_BYTES];
+    IrSimdValue image;
+    uint64_t runtime;
+    uint32_t instructions;
+    uint32_t constants;
+};
+
+// Count-only and emitting modes share one bounded construction walk. Existing IR operations carry every value;
+// there is no new variable-operand representation for the optimizer, interpreter or selector to reconstruct.
+typedef struct IrSroaConstructionEmit IrSroaConstructionEmit;
+struct IrSroaConstructionEmit
+{
+    IrUnrollEmit ir;
+    const uint32_t* map;
+    uint32_t at;
+    uint32_t zero;
+};
+
+static uint32_t ir_sroa_construction_put(IrSroaConstructionEmit* emit, uint32_t op, uint32_t type, uint32_t a, uint32_t b, uint32_t c, uint8_t flags)
+{
+    const uint32_t at = emit->at++;
+    if (emit->ir.view != NULL)
+    {
+        ir_unroll_put(&emit->ir, at, op, type, a, b, c);
+        emit->ir.view->flags[at] = flags;
+    }
+    return at;
+}
+
+static uint32_t ir_sroa_construction_constant(IrSroaConstructionEmit* emit, uint32_t type, uint64_t bits)
+{
+    const uint32_t at = emit->at++;
+    if (emit->ir.view != NULL)
+    {
+        ir_unroll_put_constant(&emit->ir, at, type, bits);
+    }
+    else
+    {
+        emit->ir.constant += 1;
+    }
+    return at;
+}
+
+// A 16-byte piece: seed with its low runtime lane's splat when possible, otherwise zero, then replace only different
+// lanes. Constant lanes enter as scalar bits; later folding can use the existing vector literal pool for constant
+// pieces. Narrow scalar inserts stay inside these independent pieces; inserting a lane into a wide vector would
+// extract and reinsert its 16-byte piece.
+static uint32_t ir_sroa_construction_piece(const IrFunction* f, const IrSroaConstruction* plan, uint32_t first, IrSroaConstructionEmit* emit)
+{
+    const uint32_t seed = plan->values[first];
+    const bool splat = seed != BUSTER_IR_NONE;
+    const uint32_t seed_type = splat ? f->type[seed] : IR_VOID;
+    const uint32_t seed_value = splat && emit->map != NULL ? emit->map[seed] : seed;
+    uint32_t result = ir_sroa_construction_put(emit, splat ? IR_INTRINSIC : IR_VCONST, IR_V4I32, splat ? seed_value : emit->zero,
+                                                BUSTER_IR_NONE, splat ? BUSTER_IR_INTRINSIC_SPLAT : BUSTER_IR_NONE, 0);
+    const uint8_t* image = (const uint8_t*)plan->image.words;
+    for (uint32_t offset = first; offset < first + 16;)
+    {
+        const uint32_t source = plan->values[offset];
+        uint32_t bytes = source != BUSTER_IR_NONE ? ir_type_bits[f->type[source]] / 8 : 8;
+        uint32_t value = source != BUSTER_IR_NONE && emit->map != NULL ? emit->map[source] : source;
+        bool needed = source != BUSTER_IR_NONE && !(source == seed && f->type[source] == seed_type);
+        if (source == BUSTER_IR_NONE)
+        {
+            // Largest aligned constant lane at this position, never covering a runtime byte.
+            while ((offset & (bytes - 1)) != 0 || (plan->runtime & (((UINT64_C(1) << bytes) - 1) << offset)) != 0)
+            {
+                bytes /= 2;
+            }
+            uint64_t bits = 0;
+            memcpy(&bits, image + offset, bytes);
+            needed = splat || bits != 0;
+            if (needed)
+            {
+                value = ir_sroa_construction_constant(emit, bytes == 8 ? IR_I64 : IR_I32, bits);
+            }
+        }
+        else if (needed && bytes < 4)
+        {
+            value = ir_sroa_construction_put(emit, IR_ZEXT, IR_I32, value, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+        }
+        if (needed)
+        {
+            const uint8_t flags = (uint8_t)((uint32_t)__builtin_ctz(bytes) | ((offset - first) / bytes) << 2);
+            result = ir_sroa_construction_put(emit, IR_INTRINSIC, IR_V4I32, result, value, BUSTER_IR_INTRINSIC_LANE_INSERT, flags);
+        }
+        offset += bytes;
+    }
+    return result;
+}
+
+// Emit the recipe, with the final value in the last row. A scalar followed by zeros is one carrier widen, including
+// zero-extension before the bitcast for i8/i16. Otherwise join independent pieces in pairs: maximum three levels,
+// and a right half of zeros needs only the widening. The count-only call computes exact row and constant capacities.
+static void ir_sroa_construction_build(const IrFunction* f, const IrSroaConstruction* plan, uint32_t type, IrSroaConstructionEmit* emit)
+{
+    const uint32_t low = plan->values[0];
+    const uint32_t low_bytes = low != BUSTER_IR_NONE ? ir_type_bits[f->type[low]] / 8 : 0;
+    const bool zeros = _mm512_test_epi64_mask(_mm512_loadu_si512(plan->image.words), _mm512_set1_epi64(-1)) == 0;
+    const bool low_only = low_bytes != 0 && plan->runtime == (UINT64_C(1) << low_bytes) - 1 && zeros;
+    if (low_only)
+    {
+        uint32_t value = emit->map != NULL ? emit->map[low] : low;
+        if (low_bytes < 4)
+        {
+            value = ir_sroa_construction_put(emit, IR_ZEXT, IR_I32, value, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+        }
+        const uint32_t carrier = ir_sroa_construction_put(emit, IR_BITCAST, low_bytes == 8 ? IR_F64 : IR_F32, value, BUSTER_IR_NONE, BUSTER_IR_NONE, 0);
+        ir_sroa_construction_put(emit, IR_INTRINSIC, type, carrier, BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_WIDEN, 0);
+    }
+    else
+    {
+        const uint32_t bytes = ir_type_bits[type] / 8;
+        uint32_t values[4];
+        uint8_t empty[4];
+        for (uint32_t k = 0; k < bytes / 16; k += 1)
+        {
+            values[k] = ir_sroa_construction_piece(f, plan, 16 * k, emit);
+            const __m128i bits = _mm_loadu_si128((const __m128i*)((const uint8_t*)plan->image.words + 16 * k));
+            empty[k] = ((plan->runtime >> (16 * k)) & UINT64_C(0xffff)) == 0 && _mm_testz_si128(bits, bits);
+        }
+        for (uint32_t width = 16, count = bytes / 16; count > 1; width *= 2, count /= 2)
+        {
+            const uint32_t wider = width == 16 ? IR_V8I32 : IR_V16I32;
+            for (uint32_t k = 0; k < count / 2; k += 1)
+            {
+                const uint32_t right = values[2 * k + 1];
+                uint32_t value = ir_sroa_construction_put(emit, IR_INTRINSIC, wider, values[2 * k], BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_WIDEN, 0);
+                if (empty[2 * k + 1] == 0)
+                {
+                    value = ir_sroa_construction_put(emit, IR_INTRINSIC, wider, value, right, BUSTER_IR_INTRINSIC_INSERT, 1);
+                }
+                values[k] = value;
+                empty[k] = empty[2 * k] && empty[2 * k + 1];
+            }
+        }
+    }
+}
+
+// Prove every nonconstant byte belongs to a complete, aligned integer store wholly inside the vector load. A torn
+// lane, mixed vector/scalar write, or unsupported scalar leaves the load in memory. Byte comparisons are bounded
+// masked SIMD loads; no read crosses the state's 64 source entries.
+static bool ir_sroa_construction(const IrSroaWork* work, const IrSroaAssembly* state, uint32_t offset, uint32_t bytes, uint32_t type, IrSroaConstruction* result)
+{
+    const IrFunction* f = work->ir.function;
+    IrSroaConstruction plan = { 0 };
+    memset(plan.values, 0xff, sizeof(plan.values));
+    const uint64_t range = bytes == 64 ? UINT64_MAX : (UINT64_C(1) << bytes) - 1;
+    const uint64_t constants = (state->constant >> offset) & range;
+    _mm512_storeu_si512(plan.image.words, _mm512_maskz_loadu_epi8(constants, state->image + offset));
+    plan.runtime = range & ~constants;
+    uint64_t pending = plan.runtime;
+    bool valid = pending != 0;
+    while (valid && pending != 0)
+    {
+        const uint32_t first = (uint32_t)__builtin_ctzll(pending);
+        const uint32_t store = state->sources[offset + first];
+        const uint32_t value = f->b[store];
+        const uint32_t scalar = f->type[value];
+        const uint32_t width = ir_type_bits[scalar] / 8;
+        valid = scalar >= IR_I8 && scalar <= IR_I64 && width != 0 && width <= bytes - first && first % width == 0 && work->offsets[f->a[store]] == offset + first;
+        if (valid)
+        {
+            const uint64_t lanes = ((UINT64_C(1) << width) - 1) << first;
+            const __mmask16 mask = (__mmask16)((UINT32_C(1) << width) - 1);
+            const __m512i sources = _mm512_maskz_loadu_epi32(mask, state->sources + offset + first);
+            valid = (pending & lanes) == lanes && (_mm512_cmpeq_epi32_mask(sources, _mm512_set1_epi32((int32_t)store)) & mask) == mask;
+            if (valid)
+            {
+                plan.values[first] = work->same[value];
+                pending &= ~lanes;
+            }
+        }
+    }
+    if (valid)
+    {
+        IrSroaConstructionEmit count = { 0 };
+        ir_sroa_construction_build(f, &plan, type, &count);
+        plan.instructions = count.at;
+        plan.constants = count.ir.constant;
+        *result = plan;
+    }
+    return valid;
+}
 
 // A scalar's bits where it is a constant, through the conversions the typed stream leaves between a literal and its
 // store (a truncation, an extension, a copy), into *bits; false for any other value.
@@ -419,11 +621,13 @@ static void ir_sroa_assemble(IrSroaWork* work, IrSroaAssembly* states, uint32_t*
             if (tracked && states[root].seen == 0)
             {
                 touched[touched_count++] = root;
+                uint32_t* sources = states[root].sources;
                 states[root] = (IrSroaAssembly){
                     .value = BUSTER_IR_NONE,
                     .load = BUSTER_IR_NONE,
                     .uniform = 1,
                     .seen = 1,
+                    .sources = sources,
                 };
             }
             if (tracked && !inside)
@@ -449,6 +653,12 @@ static void ir_sroa_assemble(IrSroaWork* work, IrSroaAssembly* states, uint32_t*
                     else
                     {
                         state->constant &= ~range;
+                        for (uint32_t first = 0; state->sources != NULL && first < bytes; first += 16)
+                        {
+                            const uint32_t count = bytes - first < 16 ? (uint32_t)bytes - first : 16;
+                            const __mmask16 mask = (__mmask16)((UINT32_C(1) << count) - 1);
+                            _mm512_mask_storeu_epi32(state->sources + offset + first, mask, _mm512_set1_epi32((int32_t)i));
+                        }
                     }
                     const bool lane = ir_splat_scalar_type(type) && offset % bytes == 0 && (state->value == BUSTER_IR_NONE || (state->value == value && state->bytes == bytes));
                     state->uniform = state->uniform != 0 && lane;
@@ -483,6 +693,13 @@ static void ir_sroa_assemble(IrSroaWork* work, IrSroaAssembly* states, uint32_t*
                         work->assembled_values[i] = state->value;
                         work->assembled_count += 1;
                     }
+                    else if (work->constructions != NULL && ir_vector_type(f->type[i]) && (state->covered & range) == range &&
+                             ir_sroa_construction(work, state, (uint32_t)offset, (uint32_t)bytes, f->type[i], &work->constructions[work->construction_count]))
+                    {
+                        work->assembled[i] = BUSTER_IR_SROA_ASSEMBLED_LANES;
+                        work->assembled_values[i] = work->construction_count++;
+                        work->assembled_count += 1;
+                    }
                 }
             }
         }
@@ -490,6 +707,54 @@ static void ir_sroa_assemble(IrSroaWork* work, IrSroaAssembly* states, uint32_t*
         {
             states[touched[k]].seen = 0;
         }
+    }
+}
+
+// A construction's remaining stores read by no load are dead even if their widths overlap (#3641): the C lowering
+// clears a literal by eightbytes before writing its byte/word/dword lanes. Such stores would otherwise make field
+// splitting refuse the slot. Only private slots with at least one mixed construction are considered, every load must
+// already be reconstructed, and every access must stay inside the object. Calls/volatile accesses/escapes were refused
+// by provenance before assembly. Field discovery has not started; its zeroed counts temporarily hold 1 for a candidate
+// and 2 for one an access refuses, and are restored before their ordinary use.
+static void ir_sroa_construction_dead_stores(IrSroaWork* work)
+{
+    const IrFunction* f = work->ir.function;
+    for (uint32_t i = 0; i < f->instruction_count; i += 1)
+    {
+        if (work->assembled[i] == BUSTER_IR_SROA_ASSEMBLED_LANES)
+        {
+            work->field_counts[work->roots[f->a[i]]] = 1;
+        }
+    }
+    for (uint32_t i = 0; i < f->instruction_count; i += 1)
+    {
+        const uint32_t root = f->op[i] == IR_LOAD || f->op[i] == IR_STORE ? work->roots[f->a[i]] : BUSTER_IR_NONE;
+        if (root != BUSTER_IR_NONE && work->field_counts[root] != 0)
+        {
+            const uint64_t size = f->slots[root].size;
+            const uint64_t offset = work->offsets[f->a[i]];
+            const uint32_t bytes = ir_sroa_access_bytes(f, i);
+            if ((f->op[i] == IR_LOAD && work->assembled[i] == 0) || offset > size || bytes > size - offset)
+            {
+                work->field_counts[root] = 2;
+            }
+        }
+    }
+    for (uint32_t i = 0; i < f->instruction_count; i += 1)
+    {
+        if (f->op[i] == IR_STORE && work->dead[i] == 0)
+        {
+            const uint32_t root = work->roots[f->a[i]];
+            if (root != BUSTER_IR_NONE && work->field_counts[root] == 1 && work->refused[root] == 0)
+            {
+                work->dead[i] = 1;
+                work->dead_count += 1;
+            }
+        }
+    }
+    for (uint32_t root = 0; root < f->slot_count; root += 1)
+    {
+        work->field_counts[root] = 0;
     }
 }
 
@@ -686,13 +951,16 @@ static IrError ir_sroa_view(IrSroaWork* work, Arena* scratch, IrFunction* result
             {
                 // The value the block's stores wrote (#1344), whatever becomes of the slot: its uses were all understood
                 // when the load was decided.
-                const bool constant = work->assembled[i] == BUSTER_IR_SROA_ASSEMBLED_CONSTANT;
-                view.op[i] = constant ? IR_VCONST : IR_INTRINSIC;
-                view.flags[i] = 0;
-                view.alignment_log2[i] = 0;
-                view.a[i] = constant ? f->vector_constant_count + work->assembled_values[i] : work->assembled_values[i];
-                view.b[i] = BUSTER_IR_NONE;
-                view.c[i] = constant ? BUSTER_IR_NONE : BUSTER_IR_INTRINSIC_SPLAT;
+                if (work->assembled[i] != BUSTER_IR_SROA_ASSEMBLED_LANES)
+                {
+                    const bool constant = work->assembled[i] == BUSTER_IR_SROA_ASSEMBLED_CONSTANT;
+                    view.op[i] = constant ? IR_VCONST : IR_INTRINSIC;
+                    view.flags[i] = 0;
+                    view.alignment_log2[i] = 0;
+                    view.a[i] = constant ? f->vector_constant_count + work->assembled_values[i] : work->assembled_values[i];
+                    view.b[i] = BUSTER_IR_NONE;
+                    view.c[i] = constant ? BUSTER_IR_NONE : BUSTER_IR_INTRINSIC_SPLAT;
+                }
                 work->statistics.assembled += 1;
             }
             else if (work->dead[i] != 0 && work->refused[work->roots[f->a[i]]] == 0)
@@ -781,6 +1049,126 @@ static IrError ir_sroa_compact_slots(IrFunction* f, Arena* scratch)
     return error;
 }
 
+// Expand #3641's sparse recipes after field splitting, before DCE. Kept runs use the existing SIMD operand remap;
+// structured operands and debug identities follow the same old-to-new map. All new storage is bounded by the recipes'
+// count-only walks. The function's blocks and memory-effect order do not change.
+static IrError ir_sroa_construct_view(const IrFunction* f, const IrSroaWork* work, Arena* scratch, IrFunction* result)
+{
+    uint64_t total = f->instruction_count;
+    uint64_t constants = f->constant_count;
+    for (uint32_t k = 0; k < work->construction_count; k += 1)
+    {
+        total += work->constructions[k].instructions - 1;
+        constants += work->constructions[k].constants;
+    }
+    // The remapper emits one descriptor per call instruction. Valid IR may share a descriptor between calls, so
+    // the input table's length is not the output capacity. Functions without calls need no additional scan.
+    uint32_t calls = 0;
+    for (uint64_t first = 0; f->call_count != 0 && first < f->instruction_count; first += 64)
+    {
+        const uint32_t count = f->instruction_count - first < 64 ? (uint32_t)(f->instruction_count - first) : 64;
+        const __mmask64 active = count == 64 ? UINT64_MAX : (UINT64_C(1) << count) - 1;
+        const __m512i ops = _mm512_maskz_loadu_epi8(active, f->op + first);
+        const __mmask64 selected = _mm512_mask_cmpeq_epi8_mask(active, ops, _mm512_set1_epi8(IR_CALL)) |
+                                   _mm512_mask_cmpeq_epi8_mask(active, ops, _mm512_set1_epi8(IR_CALL_INDIRECT));
+        calls += (uint32_t)__builtin_popcountll(selected);
+    }
+    const uint64_t extras = (uint64_t)f->extra_count + ir_unroll_extra_words(f, 0, f->instruction_count);
+    const uint64_t vectors = (uint64_t)f->vector_constant_count + 1;
+    IrError error = total < UINT32_MAX && constants <= UINT32_MAX && extras <= UINT32_MAX && vectors <= UINT32_MAX ? IR_OK : IR_ERROR_LIMIT;
+    IrFunction view = *f;
+    uint32_t* map = NULL;
+    if (error == IR_OK)
+    {
+        bool ok = true;
+        map = ir_allocate(scratch, f->instruction_count, 4, &ok);
+        view.instruction_count = (uint32_t)total;
+        view.op = ir_allocate(scratch, total, 1, &ok);
+        view.type = ir_allocate(scratch, total, 1, &ok);
+        view.flags = ir_allocate(scratch, total, 1, &ok);
+        view.alignment_log2 = ir_allocate(scratch, total, 1, &ok);
+        view.a = ir_allocate(scratch, total, 4, &ok);
+        view.b = ir_allocate(scratch, total, 4, &ok);
+        view.c = ir_allocate(scratch, total, 4, &ok);
+        view.block_offsets = ir_allocate(scratch, (uint64_t)f->block_count + 1, 4, &ok);
+        view.extra = ir_allocate(scratch, extras, 4, &ok);
+        view.calls = ir_allocate(scratch, calls, sizeof(IrCall), &ok);
+        view.constants = ir_allocate(scratch, constants, sizeof(IrConstant), &ok);
+        view.vector_constants = ir_allocate(scratch, vectors, sizeof(IrSimdValue), &ok);
+        view.vector_constant_count = (uint32_t)vectors;
+        error = ok ? IR_OK : IR_ERROR_MEMORY;
+    }
+    if (error == IR_OK && !ir_debug_create(scratch, &view, f->debug))
+    {
+        error = IR_ERROR_MEMORY;
+    }
+    if (error == IR_OK)
+    {
+        uint32_t out = 0;
+        for (uint32_t block = 0; block < f->block_count; block += 1)
+        {
+            view.block_offsets[block] = out;
+            for (uint32_t i = f->block_offsets[block]; i < f->block_offsets[(uint64_t)block + 1]; i += 1)
+            {
+                out += work->assembled[i] == BUSTER_IR_SROA_ASSEMBLED_LANES ? work->constructions[work->assembled_values[i]].instructions - 1 : 0;
+                map[i] = out++;
+            }
+        }
+        view.block_offsets[f->block_count] = out;
+        if (f->extra_count != 0)
+        {
+            memcpy(view.extra, f->extra, (uint64_t)f->extra_count * 4);
+        }
+        if (f->constant_count != 0)
+        {
+            memcpy(view.constants, f->constants, (uint64_t)f->constant_count * sizeof(IrConstant));
+        }
+        if (f->vector_constant_count != 0)
+        {
+            memcpy(view.vector_constants, f->vector_constants, (uint64_t)f->vector_constant_count * sizeof(IrSimdValue));
+        }
+        view.vector_constants[f->vector_constant_count] = (IrSimdValue){ 0 };
+        ir_debug_remap(f, &view, map, NULL, NULL);
+        IrSroaConstructionEmit emit = {
+            .ir = {
+                .view = &view,
+                .extra = f->extra_count,
+                .constant = f->constant_count,
+            },
+            .map = map,
+            .zero = f->vector_constant_count,
+        };
+        for (uint32_t block = 0; block < f->block_count; block += 1)
+        {
+            uint32_t first = f->block_offsets[block];
+            const uint32_t end = f->block_offsets[(uint64_t)block + 1];
+            for (uint32_t i = first; i <= end; i += 1)
+            {
+                const bool kept = i < end && work->assembled[i] != BUSTER_IR_SROA_ASSEMBLED_LANES;
+                if (!kept && first < i)
+                {
+                    ir_unroll_remap(f, first, i - first, map, &view, map[first]);
+                    ir_unroll_extras(&emit.ir, f, first, i, map[first], map, NULL);
+                }
+                if (!kept && i < end)
+                {
+                    const IrSroaConstruction* plan = &work->constructions[work->assembled_values[i]];
+                    emit.at = map[i] + 1 - plan->instructions;
+                    ir_sroa_construction_build(f, plan, f->type[i], &emit);
+                    assert(emit.at == map[i] + 1);
+                }
+                first = kept ? first : i + 1;
+            }
+        }
+        view.extra_count = emit.ir.extra;
+        view.call_count = emit.ir.call;
+        view.constant_count = emit.ir.constant;
+        view.arena_bytes = 0;
+        *result = view;
+    }
+    return error;
+}
+
 // The split itself (ir_optimize_sroa, after #3311's widening).
 static IrCheck ir_sroa_split(const IrFunction* function, Arena* output, Arena* scratch, IrSroaOptions options, IrSroaResult* result)
 {
@@ -849,17 +1237,45 @@ static IrCheck ir_sroa_split(const IrFunction* function, Arena* output, Arena* s
         // function at most, kept past the walk's own state.
         bool ok = true;
         uint64_t loads = 0;
+        uint32_t construction_slots = 0;
         for (uint32_t i = 0; i < function->instruction_count; i += 1)
         {
-            loads += function->op[i] == IR_LOAD && ir_vector_type(function->type[i]);
+            if (function->op[i] == IR_LOAD && ir_vector_type(function->type[i]))
+            {
+                const uint32_t root = work.roots[function->a[i]];
+                if (root != BUSTER_IR_NONE && work.refused[root] == 0 && function->slots[root].size <= BUSTER_IR_SROA_ASSEMBLE_BYTES)
+                {
+                    loads += 1;
+                    if (options.construct)
+                    {
+                        // Field discovery has not started. Reuse its zeroed per-root count as the candidate-slot mark,
+                        // restoring it below before ir_sroa_fields reads it.
+                        construction_slots += work.field_counts[root] == 0;
+                        work.field_counts[root] = 1;
+                    }
+                }
+            }
         }
         work.assembled_constants = loads != 0 ? ir_allocate(scratch, loads, sizeof(IrSimdValue), &ok) : NULL;
+        // Each accepted mixed load assigns its complete recipe; constant/splat-only functions need no recipe clears.
+        work.constructions = options.construct && loads != 0 && ok ? arena_push_array(scratch, loads, sizeof(IrSroaConstruction), 64) : NULL;
+        ok = ok && (!options.construct || loads == 0 || work.constructions != NULL);
         const uint64_t mark = scratch->length;
         IrSroaAssembly* states = loads != 0 ? ir_allocate(scratch, function->slot_count, sizeof(IrSroaAssembly), &ok) : NULL;
         uint32_t* touched = loads != 0 ? ir_allocate(scratch, function->instruction_count, 4, &ok) : NULL;
+        uint32_t* sources = construction_slots != 0 && ok ? arena_push_array(scratch, (uint64_t)construction_slots * BUSTER_IR_SROA_ASSEMBLE_BYTES, 4, 64) : NULL;
+        ok = ok && (construction_slots == 0 || sources != NULL);
         if (ok && loads != 0)
         {
-            memset(states, 0, (uint64_t)function->slot_count * sizeof(IrSroaAssembly));
+            uint32_t next = 0;
+            for (uint32_t root = 0; root < function->slot_count; root += 1)
+            {
+                if (work.field_counts[root] != 0)
+                {
+                    states[root].sources = sources + (uint64_t)next++ * BUSTER_IR_SROA_ASSEMBLE_BYTES;
+                    work.field_counts[root] = 0;
+                }
+            }
             ir_sroa_assemble(&work, states, touched);
         }
         check.error = ok ? IR_OK : IR_ERROR_MEMORY;
@@ -867,8 +1283,25 @@ static IrCheck ir_sroa_split(const IrFunction* function, Arena* output, Arena* s
     }
     if (check.error == IR_OK)
     {
+        if (work.construction_count != 0)
+        {
+            ir_sroa_construction_dead_stores(&work);
+        }
         ir_sroa_fields(&work);
         check.error = ir_sroa_view(&work, scratch, &view);
+    }
+    if (check.error == IR_OK && work.construction_count != 0)
+    {
+        IrFunction constructed = { 0 };
+        check.error = ir_sroa_construct_view(&view, &work, scratch, &constructed);
+        if (check.error == IR_OK)
+        {
+            view = constructed;
+            // Expansion changes value numbers and their uses. Rebuild this analysis once for the changed function;
+            // the constant/splat-only path retains its original preparation and its instruction count.
+            work.ir = (IrOptimizeWork){ 0 };
+            check = ir_optimize_prepare(&work.ir, &view, output, scratch, options.simd);
+        }
     }
     if (check.error == IR_OK)
     {

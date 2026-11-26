@@ -117,6 +117,7 @@ static void check_corpus_expression_diagnostic(CheckCorpusPath* path, const Pars
         message = check_semantic_expression(parser, pp, &path->input, &path->stream, &path->types, report, &spell, &path->token, &path->character, notes, &path->scratch);
         // Its highlighted ranges (#2376) go with no diagnostic here.
         pp_diagnostic_ranges_clear(pp);
+        pp_diagnostic_fixits_clear(pp);
     }
     snprintf(path->message, sizeof(path->message), "%s", message);
     path->resource |= pp->diagnostic_collection_failed;

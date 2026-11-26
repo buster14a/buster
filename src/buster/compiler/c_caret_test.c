@@ -4,7 +4,8 @@
 // test-carets (#2376): clang's caret display (pp_diagnostic_snippet), compared whole with clang's own. Each case of the
 // catalog, tests/carets/catalog.tsv (runtime data, #2053), is a file and the options to compile it with; this
 // executable and clang run that command line alike, carets on as both have them by default, and their exit statuses
-// and standard errors must be the same, byte for byte. A case flagged `prefix` is a command line both refuse for its
+// and standard errors must be the same, byte for byte, apart from scratch-space allocation line numbers (see below).
+// A case flagged `prefix` is a command line both refuse for its
 // options, where ours prints its usage text after the error clang prints alone: clang's text must start ours.
 // Included by main.c in the driver's unit, which runs the command.
 //
@@ -77,6 +78,100 @@ static CaretTestRun caret_test_run(char* const* arguments)
     return result;
 }
 
+// As pp_test_normalize_scratch does for diagnostic headings, normalize generated-buffer line numbers: their value
+// reflects allocation order, not source. Require the whole generated-note heading so an unnumbered excerpt that
+// merely begins with this prefix stays source. A following source gutter changes only when it names that same line.
+// Keep its width, every real source gutter, diagnostic column, excerpt byte, caret, range and fix-it unchanged.
+static void caret_test_normalize_scratch(CaretTestRun* run)
+{
+    static const char prefix[] = "<scratch space>:";
+    for (char* at = run->errors; at != NULL && (at = strstr(at, prefix)) != NULL;)
+    {
+        char* number = at + sizeof(prefix) - 1;
+        char* end = number;
+        while (*end >= '0' && *end <= '9')
+        {
+            end += 1;
+        }
+        char* column = *end == ':' ? end + 1 : end;
+        char* column_end = column;
+        while (*column_end >= '0' && *column_end <= '9')
+        {
+            column_end += 1;
+        }
+        static const char suffix[] = ": note: expanded from here\n";
+        const bool heading = (at == run->errors || at[-1] == '\n') && end != number && *end == ':' && column_end != column &&
+                             strncmp(column_end, suffix, sizeof(suffix) - 1) == 0;
+        if (heading)
+        {
+            char* next = strchr(end, '\n');
+            char* gutter = next != NULL ? next + 1 : NULL;
+            while (gutter != NULL && *gutter == ' ')
+            {
+                gutter += 1;
+            }
+            char* last = gutter;
+            while (last != NULL && *last >= '0' && *last <= '9')
+            {
+                last += 1;
+            }
+            const bool matching = last != NULL && last - gutter == end - number && strncmp(last, " | ", 3) == 0 &&
+                                  memcmp(gutter, number, (uint64_t)(end - number)) == 0;
+            if (matching)
+            {
+                memset(gutter, ' ', (uint64_t)(last - gutter));
+                last[-1] = '1';
+            }
+            *number = '1';
+            memmove(number + 1, end, strlen(end) + 1);
+            run->length -= (uint64_t)(end - number - 1);
+        }
+        at = *number != 0 ? number + 1 : number;
+    }
+}
+
+// Normalization may remove allocation-dependent line numbers only, including without gutters. Source-like prefixes,
+// real-file gutters, columns, replacement lines and an incomplete trailing prefix retain their exact bytes.
+static bool caret_test_normalization(void)
+{
+    char actual[] =
+        "<scratch space>:123:abc\n"
+        "<scratch space>:123:4: error: source text\n"
+        "    7 | <scratch space>:123:4: note: expanded from here\n"
+        "<scratch space>:123:4: note: expanded from here\n"
+        "  123 | token\n"
+        "      |    ^~~\n"
+        "      |    replacement\n"
+        "<scratch space>:45:2: note: expanded from here\n"
+        "  token\n"
+        "  ^\n"
+        "<scratch space>:45:2: note: expanded from here\n"
+        "   46 | unrelated\n"
+        "<scratch space>:";
+    static const char expected[] =
+        "<scratch space>:123:abc\n"
+        "<scratch space>:123:4: error: source text\n"
+        "    7 | <scratch space>:123:4: note: expanded from here\n"
+        "<scratch space>:1:4: note: expanded from here\n"
+        "    1 | token\n"
+        "      |    ^~~\n"
+        "      |    replacement\n"
+        "<scratch space>:1:2: note: expanded from here\n"
+        "  token\n"
+        "  ^\n"
+        "<scratch space>:1:2: note: expanded from here\n"
+        "   46 | unrelated\n"
+        "<scratch space>:";
+    CaretTestRun run = { .errors = actual, .length = sizeof(actual) - 1 };
+    caret_test_normalize_scratch(&run);
+    const bool exact = run.length == sizeof(expected) - 1 && memcmp(actual, expected, sizeof(expected)) == 0;
+    if (!exact)
+    {
+        printf("test-carets: scratch line normalization changed source, columns or marks\n");
+    }
+    return exact;
+}
+
 // Prints a differing case's command line and both texts.
 static void caret_test_report(const char* id, const char* name, char* const* arguments, const CaretTestRun* ours, const CaretTestRun* theirs)
 {
@@ -117,6 +212,8 @@ static bool caret_test_case(const char* clang, const char* directory, const char
         CaretTestRun theirs = caret_test_run(arguments);
         arguments[0] = "/proc/self/exe";
         CaretTestRun ours = caret_test_run(arguments);
+        caret_test_normalize_scratch(&theirs);
+        caret_test_normalize_scratch(&ours);
         const bool ran = theirs.status >= 0 && ours.status >= 0 && theirs.errors != NULL && ours.errors != NULL;
         const bool texts = ran && (prefix ? ours.length >= theirs.length && memcmp(ours.errors, theirs.errors, theirs.length) == 0 :
                                             ours.length == theirs.length && memcmp(ours.errors, theirs.errors, ours.length) == 0);
@@ -165,7 +262,7 @@ static int run_caret_tests(int argc, char** argv)
 {
     const char* clang = "clang";
     const char* directory = "tests/carets";
-    bool valid = true;
+    bool valid = caret_test_normalization();
     for (int i = 0; valid && i < argc; i += 1)
     {
         const bool value = i + 1 < argc;

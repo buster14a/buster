@@ -79,15 +79,15 @@ Each needed row of the body is then, in order:
   block where LICM would speculate it, else in the vector loop. A uniform load
   is admitted only in a loop without stores; a uniform floating operation never.
 - **an index:** the induction, `sext`/`zext` of an `i32` induction (no wrap where
-  the exit test bounds it), or 64-bit `add`, `sub`, `mul`/`shl` by a constant of
+  the exit test bounds it), unary `neg`, or 64-bit `add`, `sub`, `mul`/`shl` by a constant of
   an index and a uniform: affine modulo 2^64, as the address is; the same 32-bit
   arithmetic of an `i32` induction, whose `sext`/`zext` to 64 bits G tests for a
   wrap (#2808).
 - **a pointer:** an `address` of a uniform base and an index, or of a pointer and
   a uniform, and their integer conversions, advancing by a constant number of
   bytes per iteration.
-- **a vector:** a load or store whose pointer advances by its access's bytes, or
-  a load whose pointer advances by 2 to 8 times them (strided, #2808);
+- **a vector:** a load or store whose pointer advances by a nonzero constant
+  multiple of its access's bytes, in either direction (strided, #2808);
   element-wise integer `add` to `ashr` (not divisions) and floating `fadd` to
   `fdiv` and `fma`, of vectors and uniforms (splatted); `sitofp`, `uitofp`,
   `fptosi` and `fptoui` between i32 and f32 or i64 and f64; `icmp` into a mask
@@ -99,18 +99,22 @@ Each needed row of the body is then, in order:
 Anything else refuses the loop, counted by reason: `shape` (unmatched control
 flow in the body, no dedicated preheader, an outer loop), `induction`, `phi` (a recurrence
 that isn't a reduction, a float sum), `operation` (a call, a division, a fence,
-a volatile or atomic access), `address` (a strided store, a load of a larger or
-negative stride, a gathered access), `use` (the induction as data, a reduction's partial value),
+a volatile or atomic access), `address` (a data-dependent index, overlapping
+elements or a stride that isn't an element multiple), `use` (the induction as data, a reduction's partial value),
 `dependence` and `width`.
 
 **Dependences.** A load of the store's own address is in place, element by
 element, and needs nothing. Two accesses of one base at other addresses (a
 prefix sum's `a[i]` and `a[i - 1]`) refuse: a run-time test would find them
 overlapping on every call. Every other pair of a store and another access gets
-an exact test in the guard: lane 0's pointers at the start, `d = b - a` and
-`a - b` modulo 2^64 against each range's `vector_n` elements' bytes, so that no
-range's end can wrap; with any test, `vector_n` must also be below 2^56. More
-than eight pairs refuse.
+an exact test in the guard: `d = b - a` and `a - b` modulo 2^64 against each
+access's covered range length. Its count N is `vector_n`, or the full trip
+count for a masked tail. A reverse stream's range starts at its lowest
+address. Positive strides of up to eight elements retain the conservative
+`N * stride` length; other streams use
+`(N - 1) * abs(stride) + element_bytes`. With any test, N must be below 2^56,
+and a larger stride further limits N so its range length fits in 64 bits.
+More than eight pairs refuse.
 
 **The rewrite** appends three blocks per loop and leaves every original row in
 place: the guard (G), reached from the preheader instead of the header; the
@@ -174,11 +178,9 @@ appends G, P, VB, T, TM and TX:
   (`vpermt2b` to `vpermt2q`, `IrVectorizeTarget.permute2`), whose index vectors
   G holds (`IR_VCONST`), fold the loads into the lanes, one fewer than the
   loads (a single load is permuted with itself), and the lanes' part of a
-  64-byte result is extracted. At znver5 `aos_sum`'s two fields are two 64-byte
-  loads and one `vpermt2d` each, `rgb_to_gray`'s three channels one masked
-  64-byte load and one `vpermt2b` each. Each access loads its own vectors: the
-  members of one structure aren't grouped. Its overlap test's range is its
-  stride's bytes per iteration, and its tail is the scalar loop's.
+  64-byte result is extracted. Compatible fields now share those loads, as
+  described below; each field keeps its own permutes. Its tail is the scalar
+  loop's.
 - **A 32-bit index** (`3 * i + 1` of an `int` i, then `sext`): its 64-bit
   extension is affine where the 32-bit value doesn't wrap over the vector
   iterations. G clones the index's chain at the first and the last vector
@@ -188,9 +190,90 @@ appends G, P, VB, T, TM and TX:
   move one way with the induction, and equal at both ends it is the same
   between them.
 
-Below AVX-512 the counts and permutes are EVEX's alone, so x86-64 to x86-64-v3
-keep these loops scalar; x86-64-v4 takes all but `rgb_to_gray`, whose byte
-permute is VBMI's.
+**Shared structure loads (#2808).** `ir_vectorize_groups.c` groups ordinary
+loads of the same element width and positive stride of two to eight elements.
+Their address expressions must normalize to the same base and affine index,
+with constant, element-aligned offsets whose spread is smaller than one
+stride. The first load in source order leads the group; the lowest address
+may belong to a later member. Every store closes the active groups, so sharing
+never reuses a value across a write. Different widths, different strides and
+unproved pointer relations retain separate accesses.
+
+Normalization removes constant pointer offsets and index arithmetic. For a
+relation that crosses a 32-bit index's extension, it only proposes the group:
+G also compares the original pointers at the starting induction and requires
+their modular difference to equal the proposed field offset. Both pointer
+chains must be safe to compute in G. The existing no-wrap tests prove that
+each chain advances by the same classified stride throughout the vector
+iterations; the start equality therefore proves the field relation for every
+lane. A failed equality or wrap test uses the original scalar loop.
+
+For L lanes, stride S bytes, element width E bytes, and field offsets from
+Fmin to Fmax, the shared loads cover exactly
+`(L - 1) * S + (Fmax - Fmin) + E` bytes, starting at the leader's pointer plus
+Fmin. The last load ends at the highest field of the last lane; a single
+partial load is masked. Each member's permutes select
+`(field - Fmin + lane * S) / E`. Neither unaccessed structure padding at the
+end nor bytes before the first field are needed. The plan holds at most eight
+groups of eight loads; a bounded SIMD comparison filters candidate widths and
+strides before the structural equality checks.
+
+At the 64-byte target, the `aos-sum` IR fixture's two i32 fields share two
+64-byte loads per eight scalar iterations, where the earlier implementation
+emitted four. `rgb-gray`'s three channels share one 48-byte masked load per
+sixteen scalar iterations, where it emitted three. These are structural load
+counts, checked by `test-ir-vectorize`, without a new execution-time claim.
+
+**Other constant strides (#2808).** `ir_vectorize_memory_kind` chooses the
+memory operation at the loop's selected lane count. The elements packed into
+one vector must be disjoint, the stride must be an element multiple, and the
+largest within-vector offset must fit in signed 64 bits. These limits are checked
+before emission. The original scalar loop handles unsupported targets and
+all strided remainders.
+
+| Access | Emission when the target permits it |
+| --- | --- |
+| Load with stride magnitude up to eight elements, either direction | Bounded dense loads and de-interleaving permutes. A reverse stream starts at its lowest element and selects lanes in reverse order. |
+| Larger i32/i64 or f32/f64 load or store | `IR_GATHER` or `IR_SCATTER`, using integer lane forms to transport the bits. Signed dword indices are preferred; qword indices require a complete index vector of 16 to 64 bytes, reducing the data lane count when necessary. |
+| Strided byte/word access or small-stride store without a legal dense load | Sparse masked vector chunks and permutes, touching only the scalar elements. |
+
+G holds constant gather/scatter indices `lane * stride_in_elements` and an
+all-active mask. The instruction's scale is the element width, so negative
+indices preserve a reverse stream directly. `ir_vectorize_target.c` checks
+the exact gather/scatter forms and the selector's supporting mask moves,
+index moves and gather zeroing instructions. Dword/qword streams with strides
+larger than eight elements require a real indexed form: the lane search
+shrinks the batch when qword indices do not fit at the current width. For
+example, a huge i32 stride uses eight data lanes in 32 bytes with eight qword
+indices in 64 bytes. A target with no legal indexed width keeps that loop
+scalar. Byte/word streams and small-stride stores can use sparse chunks when
+their exact masked moves and permutes are legal.
+
+For sparse chunks of V bytes, the planner computes each scalar element's
+offset, its chunk `offset & -V`, and its bit within that chunk eight elements
+at a time. Adjacent equal chunk keys combine their masks. Empty chunks are
+never emitted, so even a very large stride needs at most one chunk per lane.
+Loads fold the occupied chunks into the result with two-table permutes;
+stores place the original lanes at the enabled positions and mask every
+other position off. A reverse stream uses its lowest address as the chunk
+base and maps each source lane to the corresponding reversed position.
+Inactive bytes are neither read nor written, including gaps and the bytes
+past the last scalar element.
+
+`test-ir-vectorize` compares the new streams with their scalar input and
+their optimized result in the interpreter: positive and reverse strides,
+strides beyond eight, gathers and scatters, byte and word stores, mixed
+widths, pointer overlap, exact first/last-byte boundaries, and repeated reads
+separated by a store. Grouping also has out-of-address-order members and a
+partial structure ending before inaccessible padding. A signed-versus-
+unsigned index-extension fixture checks the starting-pointer equality guard
+independently of the no-wrap tests; disabling that guard must be detected.
+
+Below AVX-512 the counts, permutes and indexed memory forms admitted here are
+EVEX's alone, so x86-64 to x86-64-v3 keep these loops scalar; x86-64-v4 takes
+the dword/qword streams and the original kernels except `rgb_to_gray`, whose
+byte permute is VBMI's. Byte sparse loads and stores likewise require the
+byte permute; word sparse accesses use the target's word permute.
 
 On the 9700X at znver5
 ([the record](https://github.com/buster14a/buster-performance/tree/49570f32f/docs/measurements/tier1-vectorizer-strided-2808-2026-11-23),
@@ -200,7 +283,7 @@ vectorized kernels from 16 to 19 and the 19 loops' geometric mean from 2.05 to
 the controls stay at 1.09. `count_eq_u8` runs at 0.19 times clang's time
 (clang widens the bytes into vector accumulators), `aos_sum` at 1.57 and
 `rgb_to_gray` at 1.41, from 12.9, 6.5 and 16.2 without the rules; most of the
-last two's remainder is that each member loads its own vectors. Compiling sqlite3.c
+last two's remainder was that each member loaded its own vectors. Compiling sqlite3.c
 with the option costs 0.06% more user cycles and 0.11% more instructions than
 main's pass.
 
@@ -499,10 +582,12 @@ vector loop nor its tail may touch an element the scalar loop would not touch.
 ### Memory and dependence
 
 Each load or store must be `base + induction * scale + constant_offset`, with
-an invariant base, an element-sized scale and a width that divides the chosen
-vector width. In the first step, all memory rows in one loop use the same
-element width and stride one. Stencils, negative strides, interleaved groups,
-gathers, scatters and outer-loop vectorization are out of scope.
+an invariant base and a width that divides the chosen vector width. The
+initial design admitted one element width and stride one. The implementation
+now also takes stencils, shared interleaved loads, positive and negative
+constant strides, and their gathers/scatters, under the rules above.
+Data-dependent gather/scatter indices and outer-loop vectorization remain
+outside this affine class.
 
 Read-only loops need no overlap check. For a loop that stores, an exact same
 base and same per-iteration address is admitted for in-place element-wise
@@ -513,8 +598,8 @@ scalar loop on overlap. A load may cross neither end of its proven object
 without a guard, regardless of alignment.
 
 A loop-carried scalar dependence is admitted only as a recognized reduction.
-A loop-carried memory dependence is not: prefix sums, histograms and scatters
-stay scalar. Volatile and ordered accesses, calls, atomics, irreducible
+A loop-carried memory dependence is not: prefix sums, histograms and stores
+with data-dependent collisions stay scalar. Volatile and ordered accesses, calls, atomics, irreducible
 control flow and an address the analysis cannot classify all refuse.
 
 ### Operations and floating point

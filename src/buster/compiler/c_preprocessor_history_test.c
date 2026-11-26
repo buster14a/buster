@@ -713,6 +713,107 @@ static uint32_t pp_test_diagnostic_note_includes(void)
     return failures;
 }
 
+// A diagnostic owns its hints and each note owns its own. Mutation of the producer's stack after collection cannot
+// change publication; an unhinted note or following diagnostic must not inherit them, including after suppression.
+static bool pp_test_diagnostic_hint_ownership(void)
+{
+    uint32_t failures = 0;
+    for (uint32_t mode = 0; mode < 8; mode += 1)
+    {
+        FILE* diagnostics = tmpfile();
+        const PPOptions options =
+        {
+            .language = { .standard = 2017, .gnu = true },
+            .diagnostics = diagnostics,
+            .no_standard_includes = true,
+            .collect_diagnostics = (mode & 1) != 0,
+            .carets = (mode & 2) != 0,
+            .suppress_warnings = (mode & 4) != 0,
+        };
+        InternTable identifiers = { 0 };
+        Preprocessor pp = { 0 };
+        const char source[] = "int value;\nint other;\n";
+        bool ready = diagnostics != NULL && intern_initialize(&identifiers) && pp_initialize(&pp, &options, &identifiers) &&
+                     pp_run_source(&pp, "hints.c", (const uint8_t*)source, sizeof(source) - 1) && pp.output.count == 6;
+        if (ready)
+        {
+            char replacement[] = "renamed";
+            char insertion[] = " = 0";
+            char message[] = "initialize";
+            PPOutputDiagnosticNote notes[] =
+            {
+                {
+                    .token = 4,
+                    .message = message,
+                    .ranges = { { .begin = 3, .end = 4, .pending = PP_RANGE_TOKENS } },
+                    .range_count = 1,
+                    .fixits =
+                    {
+                        { .range = { .begin = 4, .end = 4, .pending = PP_RANGE_INSERT_AFTER }, .text = insertion },
+                    },
+                    .fixit_count = 1,
+                },
+                {
+                    .token = 4,
+                    .message = "plain note",
+                },
+            };
+            pp.diagnostic_source = true;
+            pp_diagnostic_range_tokens(&pp, 1, 1);
+            pp_diagnostic_fixit_tokens(&pp, 1, 1, replacement);
+            pp_diagnose_output_notes_at(&pp, PP_SEVERITY_WARNING, 1, 1, notes, BUSTER_ARRAY_LENGTH(notes), "primary");
+            pp_diagnostic_ranges_clear(&pp);
+            pp_diagnostic_fixits_clear(&pp);
+            memset(replacement, 'X', sizeof(replacement) - 1);
+            memset(insertion, 'Y', sizeof(insertion) - 1);
+            memset(message, 'Z', sizeof(message) - 1);
+            notes[0].token = 0;
+            notes[0].range_count = 0;
+            notes[0].fixit_count = 0;
+            pp_diagnose_output_at(&pp, PP_SEVERITY_ERROR, 1, 5, "following");
+            pp_diagnostic_publish(&pp);
+        }
+        char* text = NULL;
+        size_t length = 0;
+        ready = ready && pp_test_read_output(diagnostics, &text, &length);
+        const char* prefix = options.suppress_warnings ? "" : options.carets ?
+            "hints.c:1:5: warning: primary\n"
+            "    1 | int value;\n"
+            "      |     ^~~~~\n"
+            "      |     renamed\n"
+            "hints.c:2:5: note: initialize\n"
+            "    2 | int other;\n"
+            "      | ~~~~^~~~~\n"
+            "      |           = 0\n"
+            "hints.c:2:5: note: plain note\n" :
+            "hints.c:1:5: warning: primary\n"
+            "hints.c:2:5: note: initialize\n"
+            "hints.c:2:5: note: plain note\n";
+        const char* suffix = options.carets ?
+            "hints.c:1:5: error: following\n"
+            "    1 | int value;\n"
+            "      |     ^\n" :
+            "hints.c:1:5: error: following\n";
+        const uint64_t prefix_length = strlen(prefix);
+        const bool exact = ready && length == prefix_length + strlen(suffix) && memcmp(text, prefix, prefix_length) == 0 &&
+                           strcmp(text + prefix_length, suffix) == 0 && pp.warnings == !options.suppress_warnings && pp.errors == 1 && !pp.fatal;
+        failures += !exact;
+        if (!exact)
+        {
+            printf("diagnostic hint ownership mode=%u: %s\n", mode, text != NULL ? text : "unavailable");
+        }
+        free(text);
+        pp_release(&pp);
+        intern_release(&identifiers);
+        if (diagnostics != NULL)
+        {
+            fclose(diagnostics);
+        }
+    }
+    printf("diagnostic hint ownership: %u of 8 fail (copied text and metadata, note isolation, carets disabled and suppression)\n", failures);
+    return failures == 0;
+}
+
 static bool pp_test_diagnostic_collection(void)
 {
     uint32_t failures = pp_test_diagnostic_note_includes();
@@ -961,7 +1062,8 @@ static bool pp_test_history(const char* directory, bool with_clang)
     const bool diagnostic_buffer = pp_test_diagnostic_buffer();
     const bool publication = pp_test_history_publication();
     const bool collection = pp_test_diagnostic_collection();
-    return runs && copies && lifetimes && places && growth && diagnostic_buffer && publication && collection && failures == 0;
+    const bool hints = pp_test_diagnostic_hint_ownership();
+    return runs && copies && lifetimes && places && growth && diagnostic_buffer && publication && collection && hints && failures == 0;
 }
 
 #endif

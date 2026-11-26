@@ -1,0 +1,30 @@
+function (ptr, i32, i32) -> i32 {
+b0:
+  %0 = param.ptr 0
+  %1 = param.i32 1
+  %2 = param.i32 2
+  %3 = add.i32 %2, %1
+  %4 = const.i32 0x00000000000000000000000000000000
+  %5 = br.void b1
+b1:
+  %6 = phi.i32 [%4, b0], [%20, b2]
+  %7 = phi.i32 [%2, b0], [%21, b2]
+  %8 = icmp.i1 %7, %3 ult
+  %9 = cbr.void %8, b2, b3
+b2:
+  %10 = sext.i64 %7
+  %11 = address.ptr %0 + %10 * 4 offset=0
+  %12 = load.i8 %11 align=1
+  %13 = zext.i32 %12
+  %14 = zext.i64 %7
+  %15 = address.ptr %0 + %14 * 4 offset=1
+  %16 = load.i8 %15 align=1
+  %17 = zext.i32 %16
+  %18 = add.i32 %13, %17
+  %19 = const.i32 0x00000000000000000000000000000001
+  %20 = add.i32 %6, %18
+  %21 = add.i32 %7, %19
+  %22 = br.void b1
+b3:
+  %23 = ret.void %6
+}

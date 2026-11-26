@@ -1965,6 +1965,9 @@ static void tier1_masks_test_path(Tier1MasksTest* test, const Tier1MasksFixture*
     const Tier1EmitOptions options = {
         .certify = true,
         .register_mask = tier1_liveness_register_mask(),
+        // These fixtures specify pressure past fifteen vectors or an exact row-move shape under that allocation.
+        // Keep that input explicit; tier1_upper_vectors_test.c separately qualifies upper-register pressure and rows.
+        .vector_register_mask = fixture->spills || fixture->rows != 0 ? 0x7fffu : 0,
         .rematerialize = rematerialize,
     };
     Tier1EmitResult emitted = { 0 };
@@ -4982,7 +4985,7 @@ static void tier1_masks_test_masked_memory(Tier1MasksTest* test)
 
 // The gathers through the IR to Tier 1 (#1840): vpgatherdd, vpgatherdq, vpgatherqd and vpgatherqq at each width whose
 // index has an element per lane, each at a scale of its own, as the program's only row in 4 statements: from the input
-// buffer's first 128 bytes at the base, by an index vector of the input buffer's last 128 bytes, merged under a mask from
+// buffer's first 128 bytes around a base at byte 64, by positive and negative indices from its last 128 bytes, merged under a mask from
 // the input into a passthrough of the input's, stored into the output's vector s. The third statement's mask is a constant
 // of every lane, its gather's alone; the fourth's index is a second vector whose lanes the mask leaves clear point far past
 // every buffer, so that a masked-off lane is never read (the interpreter checks each access against its binding).
@@ -5042,7 +5045,7 @@ static void tier1_masks_test_gathers(Tier1MasksTest* test)
             tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_OUT, s * bytes / 8);
             tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, (s * 2) % 8);
             tier0_test_mask_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, bytes);
-            tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, 0);
+            tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, 8);
             tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_IN, s < 3 ? 16 : 24);
             tier0_test_mask_emit(program, BUSTER_TYPED_LOAD, BUSTER_TYPED_CLASS_VECTOR, index_bytes);
             if (s == 2)
@@ -5069,14 +5072,17 @@ static void tier1_masks_test_gathers(Tier1MasksTest* test)
             uint8_t* bytes_in = (uint8_t*)in;
             uint8_t* wanted = expected + (uint64_t)input * BUSTER_TIER1_MASKS_TEST_OUT;
             tier0_test_mask_inputs(in, &state);
-            // The indices: each a lane's within the first 128 bytes at the scale, but the fourth statement's masked-off
-            // lanes', far past every buffer.
+            // A centered base exercises negative dword and qword indices at every scale. Lanes 0 and 1 select the
+            // first and last accessible elements, including in the third statement's all-ones mask. The fourth
+            // statement's masked-off lanes still point far past every buffer.
             for (uint32_t i = 0; i < count; i += 1)
             {
                 for (uint32_t v = 0; v < 2; v += 1)
                 {
                     const bool off = v == 1 && ((in[3] >> i) & 1) == 0;
-                    const int64_t chosen = off ? INT64_C(0x10000000) << (8 * index) : (int64_t)(tier0_test_mask_random(&state) % (((128u - element) >> scale) + 1u));
+                    const uint32_t places = ((128u - element) >> scale) + 1u;
+                    const uint32_t place = i == 0 ? 0 : i == 1 ? places - 1 : (uint32_t)(tier0_test_mask_random(&state) % places);
+                    const int64_t chosen = off ? INT64_C(0x10000000) << (8 * index) : (int64_t)place - (int64_t)(64u >> scale);
                     uint8_t* at = bytes_in + 128 + 64 * v + i * index_element;
                     if (index == 0)
                     {
@@ -5111,7 +5117,7 @@ static void tier1_masks_test_gathers(Tier1MasksTest* test)
                     }
                     if ((mask >> i & 1) != 0)
                     {
-                        memcpy(out + i * element, bytes_in + (offset << scale), element);
+                        memcpy(out + i * element, bytes_in + 64 + offset * (int64_t)(1u << scale), element);
                     }
                 }
             }
@@ -5313,8 +5319,8 @@ static void tier1_masks_test_fmas(Tier1MasksTest* test)
 
 // The scatters through the IR to Tier 1 (#1840): vpscatterdd to vpscatterqq of each shape whose index has an element per
 // lane (ir_simd_scatter_forms), each the program's only row in 4 statements: the input's vector at its byte 128 scattered
-// into the output by the input's index vector at its byte 64 under a mask from the input (the third statement's a
-// constant of every lane), each shape at its own scale. The indices repeat, so that of two lanes at one place the higher
+// around the output's midpoint by positive and negative indices at the input's byte 64 under a mask from the input (the third
+// statement's a constant of every lane), each shape at its own scale. The indices repeat, so that of two lanes at one place the higher
 // one's bytes must stay; and in the fourth statement, by the index vector at the input's byte 192, every masked-off
 // lane's index points far past every buffer, so that the interpreter's binding checks prove such a lane is never
 // written. tier1_masks_test_typed_pipeline takes each through the IR as its scatter, which the interpreter runs at every
@@ -5369,7 +5375,7 @@ static void tier1_masks_test_scatters(Tier1MasksTest* test)
         program->objects = false;
         for (uint32_t s = 0; s < 4; s += 1)
         {
-            tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_OUT, 0);
+            tier0_test_mask_address(program, BUSTER_TIER0_TEST_MASK_OUT, BUSTER_TIER1_MASKS_TEST_OUT / 16);
             if (s == 2)
             {
                 tier0_test_mask_emit(program, BUSTER_TYPED_CONST, BUSTER_TYPED_CLASS_U64, UINT64_MAX);
@@ -5402,15 +5408,16 @@ static void tier1_masks_test_scatters(Tier1MasksTest* test)
             {
                 in[k] = tier0_test_mask_random(&state);
             }
-            // The indices: each a lane's place within the output at the scale, few of them so that lanes meet; the fourth
-            // statement's masked-off lanes', far past every buffer.
+            // Six places around the base, separated by at least an element, so duplicate indices overlap exactly.
+            // Lanes 0 and 1 force both signs on even inputs and a repeated negative index on odd inputs, even for the
+            // two-lane shapes. The fourth statement's masked-off lanes still point far past every buffer.
             for (uint32_t i = 0; i < count; i += 1)
             {
                 for (uint32_t v = 0; v < 2; v += 1)
                 {
                     const bool off = v == 1 && ((in[3] >> i) & 1) == 0;
-                    const uint32_t places = ((BUSTER_TIER1_MASKS_TEST_OUT - element) >> scale) + 1u;
-                    const int64_t chosen = off ? INT64_C(0x10000000) << (8 * index) : (int64_t)(tier0_test_mask_random(&state) % (places < 6 ? places : 6)) * (int64_t)(element >> scale > 0 ? element >> scale : 1);
+                    const int64_t place = i == 0 || (i == 1 && (input & 1) != 0) ? -3 : i == 1 ? 2 : (int64_t)(tier0_test_mask_random(&state) % 6) - 3;
+                    const int64_t chosen = off ? INT64_C(0x10000000) << (8 * index) : place * (int64_t)(element >> scale > 0 ? element >> scale : 1);
                     uint8_t* at = bytes_in + (v == 0 ? 64 : 192) + i * index_element;
                     if (index == 0)
                     {
@@ -5443,7 +5450,7 @@ static void tier1_masks_test_scatters(Tier1MasksTest* test)
                     }
                     if ((mask >> i & 1) != 0)
                     {
-                        memcpy(wanted + (offset << scale), bytes_in + 128 + i * element, element);
+                        memcpy(wanted + BUSTER_TIER1_MASKS_TEST_OUT / 2 + offset * (int64_t)(1u << scale), bytes_in + 128 + i * element, element);
                     }
                 }
             }

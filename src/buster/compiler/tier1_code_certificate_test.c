@@ -3094,12 +3094,186 @@ static void tier1_code_certificate_clobbers(Tier1EmitTest* test)
     }
 }
 
+// #2808: the mask saved around a gather or scatter must survive its loop's backedge. Check the emitted records'
+// clobbers with a second live copy of the same value: preserving the low word must keep its identity, while kmovw's
+// zeroed upper bytes cannot retain an incoming dword or qword. A byte view above the low word probes each killed byte.
+static Tier1CertError tier1_code_certificate_mask_checked(Tier1EmitTest* test, bool scatter, uint32_t width, uint32_t byte, uint32_t variant)
+{
+    const X86Instruction kept = { .form = X86_FORM_MOV_R64_RM64, .reg = X86_REGISTER_R10, .rm = X86_REGISTER_R10 };
+    const X86Instruction changed = { .form = X86_FORM_KXORW_K_K_K, .reg = 1, .vvvv = 1, .rm = 1 };
+    X86Instruction records[6] = {
+        kept,
+        { .form = X86_FORM_KMOVW_R32_K, .reg = X86_REGISTER_R11, .rm = 1 },
+        { .form = scatter ? X86_FORM_VPSCATTERDD_VM32Z_Z : X86_FORM_VPGATHERDD_Z_VM32Z, .reg = 3, .rm = X86_REGISTER_RDI,
+          .index = 4, .mode = BUSTER_X86_MEMORY_BASE_INDEX(2), .decorations = 1 },
+        kept,
+        { .form = X86_FORM_KMOVW_K_R32, .reg = 1, .rm = X86_REGISTER_R11 },
+        kept,
+    };
+    switch (variant)
+    {
+        case 1: // The saved word is overwritten before its restore.
+            records[3] = (X86Instruction){ .form = X86_FORM_MOV_RM32_R32, .reg = X86_REGISTER_R10, .rm = X86_REGISTER_R11 };
+            break;
+        case 2: // The mask changes before the save, so the saved word is not its incoming one.
+            records[0] = changed;
+            break;
+        case 3:
+            records[1].rm = 2;
+            break;
+        case 4:
+            records[4].rm = X86_REGISTER_R10;
+            break;
+        case 5:
+            records[5] = changed;
+            break;
+        case 6: // A second save replaces the scratch register's provenance.
+            records[3] = (X86Instruction){ .form = X86_FORM_KMOVW_R32_K, .reg = X86_REGISTER_R11, .rm = 2 };
+            break;
+        case 7: // A mask write after the save is harmless once the saved original is restored.
+            records[3] = changed;
+            break;
+        case 8: // A write of an unrelated general register leaves the saved word intact.
+            records[3] = (X86Instruction){ .form = X86_FORM_MOV_RM32_R32, .reg = X86_REGISTER_RAX, .rm = X86_REGISTER_R10 };
+            break;
+        default:
+            break;
+    }
+    Tier1CertLocation locations[BUSTER_CERT_EMITTED_REGISTERS + 2] = { 0 };
+    for (uint32_t reg = 0; reg < 16; reg += 1)
+    {
+        locations[2 * reg] = (Tier1CertLocation){ .unit = 8 * reg, .width = 8, .extent = 8, .class = TIER1_CERT_GPR, .reg = (uint8_t)reg };
+        locations[2 * reg + 1] = (Tier1CertLocation){ .unit = 8 * reg, .width = 4, .extent = 8, .class = TIER1_CERT_GPR, .reg = (uint8_t)reg };
+    }
+    for (uint32_t reg = 0; reg < 32; reg += 1)
+    {
+        for (uint32_t view = 0; view < 5; view += 1)
+        {
+            locations[BUSTER_CERT_EMITTED_VECTOR + 5 * reg + view] = (Tier1CertLocation){
+                .unit = 128 + 64 * reg, .width = (uint16_t)(64u >> view), .extent = 64, .class = TIER1_CERT_VECTOR, .reg = (uint8_t)reg,
+            };
+        }
+    }
+    for (uint32_t reg = 0; reg < 8; reg += 1)
+    {
+        for (uint32_t view = 0; view < 4; view += 1)
+        {
+            locations[BUSTER_CERT_EMITTED_MASK + 4 * reg + view] = (Tier1CertLocation){
+                .unit = 2176 + 8 * reg, .width = (uint16_t)(1u << view), .extent = 8, .class = TIER1_CERT_MASK, .reg = (uint8_t)reg,
+            };
+        }
+    }
+    uint32_t location_count = BUSTER_CERT_EMITTED_REGISTERS;
+    uint32_t location = tier1_cert_emitted_mask(1, width);
+    if (byte != 0)
+    {
+        location = location_count++;
+        locations[location] = (Tier1CertLocation){ .unit = 2184 + byte, .width = 1, .extent = 1, .class = TIER1_CERT_MASK, .reg = 1 };
+    }
+    Tier1CertSource source[16] = { 0 };
+    Tier1CertInstruction code[16] = { 0 };
+    Tier1CertEmittedStats stats = { 0 };
+    Tier1CertEmittedBuild build = {
+        .stats = &stats,
+        .locations = locations,
+        .location_count = location_count,
+        .location_capacity = BUSTER_ARRAY_LENGTH(locations),
+        .base = X86_REGISTER_RSP,
+        .source = source,
+        .source_capacity = BUSTER_ARRAY_LENGTH(source),
+        .code = code,
+        .code_capacity = BUSTER_ARRAY_LENGTH(code),
+        .frame_pointer = INT64_MIN,
+        .frame_unit = 2240,
+        .wide = true,
+    };
+    const IrAsmBody body = { .masks = 2 };
+    const Tier1CertEmittedKernel kernel = {
+        .uses = { 0 },
+        .use_locations = { location },
+        .use_count = 1,
+        .definition = BUSTER_TIER1_CFG_NONE,
+        .body = variant == 9 ? &body : NULL,
+        .call = variant == 10,
+    };
+    const bool built = tier1_cert_emitted_originals(&build, 0, &kernel, records, BUSTER_ARRAY_LENGTH(records));
+    const Tier1CertValue value = { .width = (uint16_t)width, .class = TIER1_CERT_MASK };
+    const Tier1CertFact facts[2] = {
+        { .value = 0, .location = location },
+        { .value = 0, .location = tier1_cert_emitted_mask(3, width) },
+    };
+    const Tier1CertEdge edges[2] = {
+        { .destination = 0 },
+        { .destination = 1 },
+    };
+    const Tier1CertBlock blocks[2] = {
+        { .source = source, .code = code, .certificate = facts, .edges = edges, .source_count = build.source_count,
+          .code_count = build.code_count, .certificate_count = 2, .edge_count = 2 },
+        { .certificate = facts, .certificate_count = 2 },
+    };
+    const Tier1CertProgram program = {
+        .locations = locations,
+        .values = &value,
+        .blocks = blocks,
+        .entry = facts,
+        .exit = facts,
+        .unit_count = 2240,
+        .location_count = build.location_count,
+        .value_count = 1,
+        .block_count = 2,
+        .entry_count = 2,
+        .exit_count = 2,
+        .flags_location = BUSTER_CERT_NONE,
+    };
+    const uint64_t saved = test->scratch.length;
+    const size_t bytes = built ? tier1_certificate_scratch_size(&program) : 0;
+    void* scratch = bytes != 0 ? arena_push(&test->scratch, bytes, 64) : NULL;
+    Tier1CertReport report = { 0 };
+    const Tier1CertError error = scratch != NULL ? tier1_certificate_check(&program, scratch, bytes, &report) : TIER1_CERT_CAPACITY;
+    arena_pop_to(&test->scratch, saved);
+    return error;
+}
+
+static void tier1_code_certificate_masks(Tier1EmitTest* test)
+{
+    uint32_t certified = 0;
+    uint32_t refused = 0;
+    for (uint32_t scatter = 0; scatter < 2; scatter += 1)
+    {
+        for (uint32_t width = 1; width <= 8; width *= 2)
+        {
+            for (uint32_t variant = 0; variant < 11; variant += 1)
+            {
+                const bool kept = width <= 2 && (variant == 0 || variant == 7 || variant == 8);
+                const Tier1CertError error = tier1_code_certificate_mask_checked(test, scatter != 0, width, 0, variant);
+                const bool passed = error == (kept ? TIER1_CERT_OK : TIER1_CERT_EDGE);
+                if (!passed)
+                {
+                    printf("  %s mask width %u variant %u: certificate error %u, expected %u\n", scatter != 0 ? "scatter" : "gather", width, variant,
+                           error, kept ? TIER1_CERT_OK : TIER1_CERT_EDGE);
+                }
+                tier1_emit_test_expect(test, passed, "only the original saved mask's low word survives the loop backedge, with its other live copy");
+                certified += passed && kept;
+                refused += passed && !kept;
+            }
+        }
+        for (uint32_t byte = 2; byte < 8; byte += 1)
+        {
+            const bool rejected = tier1_code_certificate_mask_checked(test, scatter != 0, 1, byte, 0) == TIER1_CERT_EDGE;
+            tier1_emit_test_expect(test, rejected, "each upper mask byte cleared by kmovw loses its incoming fact");
+            refused += rejected;
+        }
+    }
+    printf("tier1 code certificate: gather and scatter masks %u of 12 low-word preservations certified, %u of 88 overwritten facts refused\n", certified, refused);
+}
+
 static void tier1_code_certificate_tests(Tier1EmitTest* test)
 {
     Tier1CodeCertificateCounts counts = { 0 };
     tier1_code_certificate_clobbers(test);
     tier1_code_certificate_choices(test);
     tier1_code_certificate_choices_held(test);
+    tier1_code_certificate_masks(test);
     tier1_code_certificate_aggregate_copy(test);
     tier1_code_certificate_frame_copy(test);
     for (uint32_t variant = 0; variant < 4; variant += 1)

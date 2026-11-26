@@ -217,8 +217,8 @@ typedef enum Tier1SelectRule
     // operands, which no register holds. Only the CFG consumer takes it.
     TIER1_RULE_X87,
     // The IR's vectors (#141), v4i32, v8i32 and v16i32, in the vector class's registers that the CFG consumer's
-    // allocation gives them as it gives the floating values (xmm0 to xmm14, a node's register its location's low four
-    // bits, xmm15 the class's scratch), by AVX-512's EVEX forms of `width` 16, 32 or 64 bytes, the xmm, ymm or zmm one
+    // allocation gives them qualified vector registers (a node's register is its location's low five bits, xmm15
+    // the class's scratch), by AVX-512's EVEX forms of `width` 16, 32 or 64 bytes, the xmm, ymm or zmm one
     // (tier1_select_vector_forms), or at a target without AVX512VL by AVX's and AVX2's VEX forms of the xmm or ymm one
     // (#1281, Tier1SelectHoles.vex): its kind in `scale` (BUSTER_TIER1_VECTOR_*). A vector's loads and stores are
     // TIER1_RULE_FLOAT_LOAD's and _STORE's, and their _ADDRESS folds, at those widths (vmovdqu32, or vmovdqu), and its
@@ -236,9 +236,10 @@ typedef enum Tier1SelectRule
     // A machine row (#141), an IR row call's (IrCall.row): the typed stream's X86 row, x86 records whose registers are Tier
     // 0's roles, which the CFG consumer places (tier1_emit_cfg_row) as Tier 0 does (Tier0Placement) but for its vector
     // roles, placed one at a time (#1283): a vector result in its destination and a vector operand in its own register
-    // where nothing else there is read after they are written, else in zmm16 and on, which no value takes, or in a run of
-    // free registers below 16 for a row of VEX or legacy forms and at a target without AVX512VL (#1281), moved there and
-    // out of there; its integer, mask and floating operands in their own registers where its records don't write them,
+    // where nothing else there is read after they are written, else in a span starting at zmm16 that the function
+    // reserves before allocation (#3625), or in free registers below 16 for a row of VEX or legacy forms and at a
+    // target without AVX512VL (#1281), moved there and out of there; its integer, mask and floating operands in their own
+    // registers where its records don't write them,
     // else moved into free registers of their classes (below 16 for a floating role a VEX or legacy form names, and at a
     // target without AVX512VL); its scratch roles and its integer or mask result in free registers, the result in its
     // destination where no operand is. `immediate` is the row's index in
@@ -479,6 +480,13 @@ typedef enum Tier1SelectRule
 // The vector class's scratch register, which holds no value: a non-commutative operation's right operand where the
 // allocation gave it the destination.
 #define BUSTER_TIER1_SELECT_FLOAT_SCRATCH 15
+
+// A vector location is either its physical register or the CFG class tag plus that register (32 + n).
+// Preserve all five register bits; an unused destination alone takes the reserved scratch.
+static uint8_t tier1_select_vector_register(uint8_t location)
+{
+    return location == BUSTER_TIER1_SELECT_NO_REGISTER ? BUSTER_TIER1_SELECT_FLOAT_SCRATCH : location & 31;
+}
 #define BUSTER_TIER1_FMA_MEMORY_ADDEND 1
 #define BUSTER_TIER1_FMA_COMMUTATIVE_ADDEND 2
 
@@ -1362,11 +1370,12 @@ static X86Instruction tier1_select_float_move(uint8_t destination, uint8_t sourc
 }
 
 // A copy of the vector class's value of `width` bytes between two of its registers (#141): a floating value's and a
-// 16-byte vector's movaps, and a wider vector's vmovdqa64 of its ymm or zmm register; where `vex` (a target without
-// AVX512VL, #1281) a 32-byte vector's vmovdqa of its ymm register.
+// 16-byte low-register vector's movaps, and a wider or upper-register vector's target-qualified move. AVX-512VL
+// admits upper xmm/ymm registers; a 64-byte move needs AVX-512F alone.
 static X86Instruction tier1_select_class_move(uint8_t destination, uint8_t source, uint32_t width, uint32_t encoding)
 {
-    return width <= 16 ? tier1_select_float_move(destination, source) : tier1_select_register_record(tier1_select_vector_forms(width, encoding)->move, destination, source);
+    return width < 16 || (width == 16 && destination < 16 && source < 16) ? tier1_select_float_move(destination, source) :
+           tier1_select_register_record(tier1_select_vector_forms(width, encoding)->move, destination, source);
 }
 
 // A copy of an SSE carrier (#1280), a vector of 4 or 8 bytes, between two of the 32 vector registers, zeros past its
@@ -1460,9 +1469,9 @@ static void tier1_select_overflow(Tier1SelectRecords* result, const Tier1SelectH
 static void tier1_select_width_change(Tier1SelectRecords* result, const Tier1SelectHoles* holes)
 {
     const uint32_t kind = (uint32_t)holes->operation;
-    const uint8_t x = holes->destination & 15;
-    const uint8_t left = holes->left & 15;
-    const uint8_t right = holes->right & 15;
+    const uint8_t x = tier1_select_vector_register(holes->destination);
+    const uint8_t left = tier1_select_vector_register(holes->left);
+    const uint8_t right = tier1_select_vector_register(holes->right);
     const uint32_t width = holes->width;
     const uint32_t other = holes->source_width;
     const uint32_t part = (uint32_t)holes->immediate;
@@ -1543,8 +1552,8 @@ static void tier1_select_vector_shift(Tier1SelectRecords* result, const Tier1Sel
     const uint32_t lanes = (uint32_t)holes->operation & 3;
     const uint32_t kind = ((uint32_t)holes->operation >> 2) & 3;
     const uint32_t width = holes->width == 16 ? 0 : holes->width == 32 ? 1 : 2;
-    const uint8_t x = holes->destination & 15;
-    const uint8_t left = holes->left & 15;
+    const uint8_t x = tier1_select_vector_register(holes->destination);
+    const uint8_t left = tier1_select_vector_register(holes->left);
     if (holes->condition != 0)
     {
         const X86Instruction record = {
@@ -1589,8 +1598,8 @@ static void tier1_select_mask_vector(Tier1SelectRecords* result, const Tier1Sele
     const uint32_t size = holes->source_width < IR_SIMD_LANE_COUNT ? sizes[holes->source_width] : 2;
     const uint32_t width = holes->width == 16 ? 0 : holes->width == 32 ? 1 : 2;
     const bool expand = holes->scale == BUSTER_TIER1_VECTOR_MASK_EXPAND;
-    const X86Instruction record = expand ? tier1_select_register_record(expansions[size][width], holes->destination & 15, holes->left & 7) :
-                                           tier1_select_register_record(signs[size][width], holes->destination & 7, holes->left & 15);
+    const X86Instruction record = expand ? tier1_select_register_record(expansions[size][width], tier1_select_vector_register(holes->destination), holes->left & 7) :
+                                           tier1_select_register_record(signs[size][width], holes->destination & 7, tier1_select_vector_register(holes->left));
     tier1_select_append(result, record);
 }
 
@@ -1635,9 +1644,9 @@ static void tier1_select_permute(Tier1SelectRecords* result, const Tier1SelectHo
 {
     const uint32_t kind = (uint32_t)holes->operation;
     const uint32_t flags = (uint32_t)holes->immediate;
-    const uint8_t left = holes->left & 15;
-    const uint8_t right = holes->right & 15;
-    const uint8_t x = holes->destination & 15;
+    const uint8_t left = tier1_select_vector_register(holes->left);
+    const uint8_t right = tier1_select_vector_register(holes->right);
+    const uint8_t x = tier1_select_vector_register(holes->destination);
     if (kind == BUSTER_TIER1_PERMUTE_SHUFFLE_IMMEDIATE)
     {
         const uint32_t shuffle = holes->condition < BUSTER_IR_SHUFFLE_IMMEDIATE_KINDS ? holes->condition : 0;
@@ -1672,10 +1681,10 @@ static void tier1_select_permute(Tier1SelectRecords* result, const Tier1SelectHo
 // first, the vector class's scratch register keeping the second table across it where the destination holds that.
 static void tier1_select_permute2(Tier1SelectRecords* result, const Tier1SelectHoles* holes, uint8_t destination)
 {
-    const uint8_t x = destination & 15;
-    const uint8_t first = holes->left & 15;
-    const uint8_t indices = holes->right & 15;
-    uint8_t table = holes->third & 15;
+    const uint8_t x = tier1_select_vector_register(destination);
+    const uint8_t first = tier1_select_vector_register(holes->left);
+    const uint8_t indices = tier1_select_vector_register(holes->right);
+    uint8_t table = tier1_select_vector_register(holes->third);
     const uint32_t width = holes->width;
     const uint32_t at = width == 16 ? 0 : width == 32 ? 1 : 2;
     if (x != first && x == indices)
@@ -1720,10 +1729,10 @@ static void tier1_select_permute2(Tier1SelectRecords* result, const Tier1SelectH
 static void tier1_select_dot(Tier1SelectRecords* result, const Tier1SelectHoles* holes, uint8_t destination)
 {
     const uint8_t scratch = BUSTER_TIER1_SELECT_FLOAT_SCRATCH;
-    const uint8_t x = destination & 15;
-    const uint8_t accumulator = holes->left & 15;
-    uint8_t first = holes->right & 15;
-    uint8_t second = holes->third & 15;
+    const uint8_t x = tier1_select_vector_register(destination);
+    const uint8_t accumulator = tier1_select_vector_register(holes->left);
+    uint8_t first = tier1_select_vector_register(holes->right);
+    uint8_t second = tier1_select_vector_register(holes->third);
     if (x != accumulator)
     {
         if (first == x || second == x)
@@ -1746,8 +1755,8 @@ static void tier1_select_dot(Tier1SelectRecords* result, const Tier1SelectHoles*
 
 static void tier1_select_ternlog(Tier1SelectRecords* result, const Tier1SelectHoles* holes, uint8_t destination)
 {
-    const uint8_t x = destination & 15;
-    const uint8_t registers[3] = { (uint8_t)(holes->left & 15), (uint8_t)(holes->right & 15), (uint8_t)(holes->third & 15) };
+    const uint8_t x = tier1_select_vector_register(destination);
+    const uint8_t registers[3] = { tier1_select_vector_register(holes->left), tier1_select_vector_register(holes->right), tier1_select_vector_register(holes->third) };
     // The operands in reg, vvvv and rm, by their places in the IR (a, b, c).
     uint32_t order[3] = { 0, 1, 2 };
     if (x != registers[0] && x == registers[1])
@@ -1797,8 +1806,8 @@ static void tier1_select_funnel(Tier1SelectRecords* result, const Tier1SelectHol
     const uint32_t size = (flags & 3) != 0 ? flags & 3 : 2;
     const uint32_t right = (flags >> 2) & 1;
     const uint32_t width = holes->width == 16 ? 0 : holes->width == 32 ? 1 : 2;
-    const uint8_t x = destination & 15;
-    const uint8_t high = holes->left & 15;
+    const uint8_t x = tier1_select_vector_register(destination);
+    const uint8_t high = tier1_select_vector_register(holes->left);
     if (holes->condition != 0 && size == 1)
     {
         const X86Instruction record = { .form = ir_simd_word_rotate_forms[right][width], .reg = x, .vvvv = high, .rm = high, .mode = BUSTER_X86_REGISTER_DIRECT,
@@ -1814,9 +1823,9 @@ static void tier1_select_funnel(Tier1SelectRecords* result, const Tier1SelectHol
     else
     {
         const uint8_t scratch = BUSTER_TIER1_SELECT_FLOAT_SCRATCH;
-        const uint8_t tied = right != 0 ? holes->right & 15 : high;
-        uint8_t other = right != 0 ? high : holes->right & 15;
-        uint8_t counts = holes->third & 15;
+        const uint8_t tied = right != 0 ? tier1_select_vector_register(holes->right) : high;
+        uint8_t other = right != 0 ? high : tier1_select_vector_register(holes->right);
+        uint8_t counts = tier1_select_vector_register(holes->third);
         if (x != tied)
         {
             if (other == x || counts == x)
@@ -1853,9 +1862,9 @@ static bool tier1_select_lane_splat(const IrFunction* function, uint32_t value, 
 // register; where it holds the source instead, the vector class's scratch register keeps the source across that move.
 static void tier1_select_compress(Tier1SelectRecords* result, const Tier1SelectHoles* holes, uint8_t destination)
 {
-    const uint8_t x = destination & 15;
-    uint8_t source = holes->left & 15;
-    const uint8_t passthrough = holes->third & 15;
+    const uint8_t x = tier1_select_vector_register(destination);
+    uint8_t source = tier1_select_vector_register(holes->left);
+    const uint8_t passthrough = tier1_select_vector_register(holes->third);
     const uint32_t width = holes->width;
     const uint32_t at = width == 16 ? 0 : width == 32 ? 1 : 2;
     if (x != passthrough)
@@ -1884,10 +1893,10 @@ static void tier1_select_compress(Tier1SelectRecords* result, const Tier1SelectH
 static void tier1_select_masked_binary(Tier1SelectRecords* result, const Tier1SelectHoles* holes, uint8_t destination)
 {
     const uint32_t width = holes->width;
-    const uint8_t x = destination & 15;
-    uint8_t left = holes->left & 15;
-    uint8_t right = holes->right & 15;
-    const uint8_t passthrough = holes->fourth & 15;
+    const uint8_t x = tier1_select_vector_register(destination);
+    uint8_t left = tier1_select_vector_register(holes->left);
+    uint8_t right = tier1_select_vector_register(holes->right);
+    const uint8_t passthrough = tier1_select_vector_register(holes->fourth);
     if (holes->has_fourth && x != passthrough)
     {
         if (x == left || x == right)
@@ -1920,8 +1929,8 @@ static void tier1_select_masked_move(Tier1SelectRecords* result, const Tier1Sele
     const uint32_t width = holes->width;
     const uint32_t at = width == 16 ? 0 : width == 32 ? 1 : 2;
     const bool store = holes->rule == TIER1_RULE_FLOAT_STORE;
-    const uint8_t x = destination & 15;
-    const uint8_t passthrough = holes->third & 15;
+    const uint8_t x = tier1_select_vector_register(destination);
+    const uint8_t passthrough = tier1_select_vector_register(holes->third);
     if (!store && x != passthrough)
     {
         tier1_select_append(result, tier1_select_class_move(x, passthrough, width, false));
@@ -1948,17 +1957,17 @@ static void tier1_select_gather(Tier1SelectRecords* result, const Tier1SelectHol
     const uint32_t lane = (uint32_t)holes->operation == (uint32_t)IR_SIMD_LANE_I64 ? 1 : 0;
     const uint32_t count = width >> (2 + lane);
     const uint32_t index_size = count != 0 && holes->source_width == count * 8 ? 1 : 0;
-    const uint8_t x = destination & 15;
+    const uint8_t x = tier1_select_vector_register(destination);
     const uint8_t mask = holes->third & BUSTER_X86_DECORATION_MASK;
-    uint8_t index = holes->right & 15;
+    uint8_t index = tier1_select_vector_register(holes->right);
     if (index == x)
     {
         tier1_select_append(result, tier1_select_class_move(BUSTER_TIER1_SELECT_FLOAT_SCRATCH, index, holes->source_width, false));
         index = BUSTER_TIER1_SELECT_FLOAT_SCRATCH;
     }
-    if (holes->has_fourth && x != (holes->fourth & 15))
+    if (holes->has_fourth && x != tier1_select_vector_register(holes->fourth))
     {
-        tier1_select_append(result, tier1_select_class_move(x, holes->fourth & 15, width, false));
+        tier1_select_append(result, tier1_select_class_move(x, tier1_select_vector_register(holes->fourth), width, false));
     }
     else if (!holes->has_fourth)
     {
@@ -1992,9 +2001,9 @@ static void tier1_select_scatter(Tier1SelectRecords* result, const Tier1SelectHo
     tier1_select_append(result, tier1_select_register_record(X86_FORM_KMOVW_R32_K, BUSTER_TIER1_SELECT_SCRATCH, mask));
     const X86Instruction record = {
         .form = ir_simd_scatter_forms[0][lane][index_size][at],
-        .reg = (uint8_t)(holes->fourth & 15),
+        .reg = tier1_select_vector_register(holes->fourth),
         .rm = holes->left,
-        .index = (uint8_t)(holes->right & 15),
+        .index = tier1_select_vector_register(holes->right),
         .mode = (uint8_t)BUSTER_X86_MEMORY_BASE_INDEX(holes->immediate & 3),
         .decorations = mask,
     };
@@ -2012,26 +2021,26 @@ static void tier1_select_lane(Tier1SelectRecords* result, const Tier1SelectHoles
     const uint32_t per = 16u >> size;
     const uint32_t part = index / per;
     const uint32_t sub = index % per;
-    const uint8_t x = destination & 15;
+    const uint8_t x = tier1_select_vector_register(destination);
     const uint8_t scratch = BUSTER_TIER1_SELECT_FLOAT_SCRATCH;
     const uint32_t kind = holes->scale;
     if (kind == BUSTER_TIER1_VECTOR_MOVEMASK)
     {
-        tier1_select_append(result, tier1_select_register_record(ir_simd_movemask_forms[size][width == 32], x, holes->left & 15));
+        tier1_select_append(result, tier1_select_register_record(ir_simd_movemask_forms[size][width == 32], x, tier1_select_vector_register(holes->left)));
     }
     else if (kind == BUSTER_TIER1_VECTOR_LANE_EXTRACT && holes->source_width != 0)
     {
         // Lane 0 into an SSE carrier (#1840, `source_width` its bytes, 4 or 8): the vector's low bytes in the carrier's
         // register, which may hold anything past them (every row reads a carrier zero-extended); moved zero-extended into
         // another register, and nothing in its own.
-        if (x != (holes->left & 15))
+        if (x != tier1_select_vector_register(holes->left))
         {
-            tier1_select_append(result, tier1_select_carrier_move(x, holes->left & 15, holes->source_width, holes->vex ? BUSTER_TIER1_ENCODING_VEX : BUSTER_TIER1_ENCODING_EVEX));
+            tier1_select_append(result, tier1_select_carrier_move(x, tier1_select_vector_register(holes->left), holes->source_width, holes->vex ? BUSTER_TIER1_ENCODING_VEX : BUSTER_TIER1_ENCODING_EVEX));
         }
     }
     else if (kind == BUSTER_TIER1_VECTOR_LANE_EXTRACT)
     {
-        uint8_t source = holes->left & 15;
+        uint8_t source = tier1_select_vector_register(holes->left);
         if (part != 0)
         {
             const X86Instruction extract = { .form = ir_simd_part_extract_forms[width == 64], .reg = source, .rm = scratch, .mode = BUSTER_X86_REGISTER_DIRECT, .immediate = part };
@@ -2046,10 +2055,10 @@ static void tier1_select_lane(Tier1SelectRecords* result, const Tier1SelectHoles
     }
     else
     {
-        const uint8_t general = holes->right & 15;
-        if (x != (holes->left & 15))
+        const uint8_t general = tier1_select_vector_register(holes->right);
+        if (x != tier1_select_vector_register(holes->left))
         {
-            tier1_select_append(result, tier1_select_class_move(x, holes->left & 15, width, false));
+            tier1_select_append(result, tier1_select_class_move(x, tier1_select_vector_register(holes->left), width, false));
         }
         const bool low = width == 16 && part == 0;
         const uint8_t target = low ? x : scratch;
@@ -2075,9 +2084,9 @@ static void tier1_select_reduce(Tier1SelectRecords* result, const Tier1SelectHol
     const uint32_t flags = (uint32_t)holes->immediate;
     const uint32_t size = flags & 3;
     const uint32_t operation = flags >> 2;
-    const uint8_t x = destination & 15;
+    const uint8_t x = tier1_select_vector_register(destination);
     const uint8_t scratch = BUSTER_TIER1_SELECT_FLOAT_SCRATCH;
-    uint8_t from = holes->left & 15;
+    uint8_t from = tier1_select_vector_register(holes->left);
     for (uint32_t span = holes->source_width / 2u; span >= (1u << size); span /= 2)
     {
         const X86Instruction halve = span >= 16 ? (X86Instruction){ .form = span == 32 ? X86_FORM_VEXTRACTI64X4_YM256_Z_IMM8 : X86_FORM_VEXTRACTI32X4_XM128_Y_IMM8,
@@ -2117,9 +2126,9 @@ static void tier1_select_scalar_splat(Tier1SelectRecords* result, const Tier1Sel
 {
     const uint32_t type = holes->source_width;
     const uint32_t bytes = ir_splat_scalar_type(type) ? ir_type_bits[type] / 8 : 0;
-    const uint8_t destination = holes->destination & 15;
+    const uint8_t destination = tier1_select_vector_register(holes->destination);
     const bool floating = type == IR_F32 || type == IR_F64;
-    const uint8_t source = floating ? holes->left & 15 : holes->left;
+    const uint8_t source = floating ? tier1_select_vector_register(holes->left) : holes->left;
     if (holes->width < 64 && (holes->sse || holes->vex))
     {
         const bool vex = !holes->sse;
@@ -2185,9 +2194,9 @@ static void tier1_select_scalar_splat(Tier1SelectRecords* result, const Tier1Sel
 // (TIER1_EMIT_TARGET), as at a VEX target.
 static void tier1_select_sse_vector(Tier1SelectRecords* result, const Tier1SelectHoles* holes, uint8_t destination)
 {
-    const uint8_t x = destination & 15;
-    uint8_t left = holes->left & 15;
-    uint8_t right = holes->right & 15;
+    const uint8_t x = tier1_select_vector_register(destination);
+    uint8_t left = tier1_select_vector_register(holes->left);
+    uint8_t right = tier1_select_vector_register(holes->right);
     const uint32_t kind = holes->scale;
     if (kind == BUSTER_TIER1_VECTOR_ZERO || kind == BUSTER_TIER1_VECTOR_ONES)
     {
@@ -2270,9 +2279,9 @@ static void tier1_select_segment(Tier1SelectRecords* records, uint32_t segment)
 static void tier1_select_float_blend(Tier1SelectRecords* result, const Tier1SelectHoles* holes, uint8_t destination, uint32_t width)
 {
     const bool compare = holes->rule == TIER1_RULE_FLOAT_BLEND_COMPARE;
-    const uint8_t x = destination & 15;
-    const uint8_t t = (compare ? holes->third : holes->right) & 15;
-    const uint8_t f = (compare ? holes->fourth : holes->third) & 15;
+    const uint8_t x = tier1_select_vector_register(destination);
+    const uint8_t t = tier1_select_vector_register(compare ? holes->third : holes->right);
+    const uint8_t f = tier1_select_vector_register(compare ? holes->fourth : holes->third);
     const uint8_t mask = BUSTER_TIER1_SELECT_FLOAT_SCRATCH;
     if (!compare && holes->opmask != 0)
     {
@@ -2295,9 +2304,9 @@ static void tier1_select_float_blend(Tier1SelectRecords* result, const Tier1Sele
         const uint8_t other = inverted ? t : f;
         if (compare)
         {
-            X86Instruction lanes = tier1_select_register_record(width == 8 ? X86_FORM_CMPSD_X_XM64_IMM8 : X86_FORM_CMPSS_X_XM32_IMM8, mask, holes->right & 15);
+            X86Instruction lanes = tier1_select_register_record(width == 8 ? X86_FORM_CMPSD_X_XM64_IMM8 : X86_FORM_CMPSS_X_XM32_IMM8, mask, tier1_select_vector_register(holes->right));
             lanes.immediate = (int32_t)(holes->condition ^ (inverted ? 4u : 0u));
-            tier1_select_append(result, tier1_select_float_move(mask, holes->left & 15));
+            tier1_select_append(result, tier1_select_float_move(mask, tier1_select_vector_register(holes->left)));
             tier1_select_append(result, lanes);
         }
         else if (blended)
@@ -2803,9 +2812,9 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         // multiplications have no AVX form: the IR has them of AVX2's rows alone (ir_simd_typed_operation).
         const bool avx = vex && width == 32 && !holes->avx2;
         static const uint16_t avx_bitwise[3] = { X86_FORM_VANDPS_Y_Y_YM256, X86_FORM_VORPS_Y_Y_YM256, X86_FORM_VXORPS_Y_Y_YM256 };
-        const uint8_t x = destination & 15;
-        const uint8_t left = holes->left & 15;
-        const uint8_t right = holes->right & 15;
+        const uint8_t x = tier1_select_vector_register(destination);
+        const uint8_t left = tier1_select_vector_register(holes->left);
+        const uint8_t right = tier1_select_vector_register(holes->right);
         const uint32_t kind = holes->scale;
         if (kind == BUSTER_TIER1_VECTOR_SCALAR_SPLAT)
         {
@@ -2926,7 +2935,7 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
                 .vvvv = left,
                 .rm = right,
                 .mode = BUSTER_X86_REGISTER_DIRECT,
-                .immediate = (int32_t)((holes->third & 15) << 4),
+                .immediate = (int32_t)(tier1_select_vector_register(holes->third) << 4),
             };
             tier1_select_append(&result, record);
         }
@@ -3048,7 +3057,7 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
             const X86Instruction record = {
                 .form = tier1_select_lane_blends[lane][width == 16 ? 0 : width == 32 ? 1 : 2],
                 .reg = x,
-                .vvvv = (uint8_t)(holes->third & 15),
+                .vvvv = tier1_select_vector_register(holes->third),
                 .rm = right,
                 .mode = BUSTER_X86_REGISTER_DIRECT,
                 .decorations = (uint8_t)(holes->left & BUSTER_X86_DECORATION_MASK),
@@ -3059,7 +3068,7 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     }
     case TIER1_RULE_FLOAT_CONSTANT:
     {
-        const uint8_t x = destination & 15;
+        const uint8_t x = tier1_select_vector_register(destination);
         if (holes->immediate == 0)
         {
             tier1_select_append(&result, tier1_select_register_record(X86_FORM_XORPS_X_XM128, x, x));
@@ -3072,18 +3081,18 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         break;
     }
     case TIER1_RULE_FLOAT_COPY:
-        if ((destination & 15) != (holes->left & 15))
+        if (tier1_select_vector_register(destination) != tier1_select_vector_register(holes->left))
         {
-            tier1_select_append(&result, tier1_select_float_move(destination & 15, holes->left & 15));
+            tier1_select_append(&result, tier1_select_float_move(tier1_select_vector_register(destination), tier1_select_vector_register(holes->left)));
         }
         break;
     case TIER1_RULE_FLOAT_BINARY:
     {
         // Two operands, the destination's the left one, as TIER1_RULE_REGISTER's: a commutative operation's (add and
         // multiply) swapped where the right one is in the destination, or the right one copied into the scratch register.
-        const uint8_t x = destination & 15;
-        uint8_t left = holes->left & 15;
-        uint8_t right = holes->right & 15;
+        const uint8_t x = tier1_select_vector_register(destination);
+        uint8_t left = tier1_select_vector_register(holes->left);
+        uint8_t right = tier1_select_vector_register(holes->right);
         const uint32_t operation = (uint32_t)holes->operation & 3;
         if (x == right && left != right)
         {
@@ -3110,10 +3119,10 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         // The right operand from memory: the address's registers are general ones, which the left operand's copy into the
         // destination can't overwrite.
         X86Instruction memory = holes->memory;
-        const uint8_t x = destination & 15;
-        if (x != (holes->left & 15))
+        const uint8_t x = tier1_select_vector_register(destination);
+        if (x != tier1_select_vector_register(holes->left))
         {
-            tier1_select_append(&result, tier1_select_float_move(x, holes->left & 15));
+            tier1_select_append(&result, tier1_select_float_move(x, tier1_select_vector_register(holes->left)));
         }
         memory.reg = x;
         memory.form = tier1_select_float_forms(width)->arithmetic[(uint32_t)holes->operation & 3];
@@ -3131,17 +3140,17 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
             { X86_FORM_VFMADD213SS_X_X_XM32, X86_FORM_VFMADD231SS_X_X_XM32, X86_FORM_VFMADD132SS_X_X_XM32 },
             { X86_FORM_VFMADD213SD_X_X_XM64, X86_FORM_VFMADD231SD_X_X_XM64, X86_FORM_VFMADD132SD_X_X_XM64 },
         };
-        const uint8_t x = destination & 15;
-        const uint8_t a = holes->left & 15;
+        const uint8_t x = tier1_select_vector_register(destination);
+        const uint8_t a = tier1_select_vector_register(holes->left);
         const bool memory = holes->rule == TIER1_RULE_FLOAT_FMA_LOAD;
-        const uint8_t b = memory ? BUSTER_TIER1_SELECT_NO_REGISTER : holes->right & 15;
-        const uint8_t c = (memory ? holes->right : holes->third) & 15;
+        const uint8_t b = memory ? BUSTER_TIER1_SELECT_NO_REGISTER : tier1_select_vector_register(holes->right);
+        const uint8_t c = tier1_select_vector_register(memory ? holes->right : holes->third);
         const uint32_t d = width == 8 ? 1 : 0;
         if (memory && holes->condition != 0)
         {
             // 213 takes its addend in r/m. When x holds a, exchanging the multiplicands would select
             // a different NaN if both carry one. Load the addend separately in that case.
-            const uint8_t multiplier = holes->right & 15;
+            const uint8_t multiplier = tier1_select_vector_register(holes->right);
             const bool keep_a = x == a && a != multiplier && holes->condition == BUSTER_TIER1_FMA_MEMORY_ADDEND;
             X86Instruction record = holes->memory;
             if (keep_a)
@@ -3185,21 +3194,17 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     {
         // vfmadd213: dest = a * dest + c, so dest starts as b. A copy into dest saves a or c first when dest is one of them.
         const uint32_t encoding = tier1_select_holes_encoding(holes);
-        const uint8_t x = destination & 15;
-        uint8_t a = holes->left & 15;
-        const uint8_t b = holes->right & 15;
-        uint8_t c = holes->third & 15;
+        const uint8_t x = tier1_select_vector_register(destination);
+        uint8_t a = tier1_select_vector_register(holes->left);
+        const uint8_t b = tier1_select_vector_register(holes->right);
+        uint8_t c = tier1_select_vector_register(holes->third);
         if (x != b)
         {
-            if (x == a)
+            if (x == a || x == c)
             {
-                tier1_select_append(&result, tier1_select_class_move(BUSTER_TIER1_SELECT_FLOAT_SCRATCH, a, width, encoding));
-                a = BUSTER_TIER1_SELECT_FLOAT_SCRATCH;
-            }
-            else if (x == c)
-            {
-                tier1_select_append(&result, tier1_select_class_move(BUSTER_TIER1_SELECT_FLOAT_SCRATCH, c, width, encoding));
-                c = BUSTER_TIER1_SELECT_FLOAT_SCRATCH;
+                tier1_select_append(&result, tier1_select_class_move(BUSTER_TIER1_SELECT_FLOAT_SCRATCH, x, width, encoding));
+                a = x == a ? BUSTER_TIER1_SELECT_FLOAT_SCRATCH : a;
+                c = x == c ? BUSTER_TIER1_SELECT_FLOAT_SCRATCH : c;
             }
             tier1_select_append(&result, tier1_select_class_move(x, b, width, encoding));
         }
@@ -3217,8 +3222,8 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         const uint32_t encoding = tier1_select_holes_encoding(holes);
         tier1_select_append(&result, (X86Instruction){
             .form = tier1_select_packed_convert_form(holes->operation, width, encoding),
-            .reg = destination & 15,
-            .rm = holes->left & 15,
+            .reg = tier1_select_vector_register(destination),
+            .rm = tier1_select_vector_register(holes->left),
             .mode = BUSTER_X86_REGISTER_DIRECT,
         });
         break;
@@ -3227,8 +3232,8 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     {
         // When the source stays live in another register the destination can hold the sign mask itself. For an
         // in-place negate the vector scratch holds the mask. XOR leaves every other bit of the source unchanged.
-        const uint8_t x = destination & 15;
-        const uint8_t source = holes->left & 15;
+        const uint8_t x = tier1_select_vector_register(destination);
+        const uint8_t source = tier1_select_vector_register(holes->left);
         const uint8_t mask = x == source ? BUSTER_TIER1_SELECT_FLOAT_SCRATCH : x;
         tier1_select_request(&result, X86_OPERATION_MOV, width, BUSTER_TIER1_SELECT_SCRATCH, (int64_t)(UINT64_C(1) << (width * 8 - 1)), 0);
         tier1_select_append(&result, tier1_select_register_record(tier1_select_float_forms(width)->from_general, mask, BUSTER_TIER1_SELECT_SCRATCH));
@@ -3247,7 +3252,7 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         if (holes->rule == TIER1_RULE_FLOAT_STORE)
         {
             X86Instruction record = holes->memory;
-            record.reg = holes->right & 15;
+            record.reg = tier1_select_vector_register(holes->right);
             record.form = tier1_select_class_forms(width, tier1_select_holes_encoding(holes))->store;
             tier1_select_append(&result, record);
             break;
@@ -3256,7 +3261,7 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     case TIER1_RULE_FLOAT_LOAD_ADDRESS:
     {
         X86Instruction record = holes->memory;
-        record.reg = destination & 15;
+        record.reg = tier1_select_vector_register(destination);
         if (width == 16 && holes->source_width == 8)
         {
             // The CFG consumer's vector locations are 32 + xmm0..15; direct callers can name the physical register.
@@ -3290,7 +3295,7 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     case TIER1_RULE_FLOAT_STORE_ADDRESS:
     {
         X86Instruction record = holes->memory;
-        record.reg = holes->right & 15;
+        record.reg = tier1_select_vector_register(holes->right);
         record.form = tier1_select_class_forms(width, tier1_select_holes_encoding(holes))->store;
         tier1_select_append(&result, record);
         break;
@@ -3301,8 +3306,8 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         // a > b is seta and a >= b setae; a < b and a <= b are b > a and b >= a. a == b is ZF without PF, a != b either.
         const uint32_t condition = holes->condition;
         const bool swapped = condition == IR_LT || condition == IR_LE;
-        const uint8_t first = (swapped ? holes->right : holes->left) & 15;
-        const uint8_t second = (swapped ? holes->left : holes->right) & 15;
+        const uint8_t first = tier1_select_vector_register(swapped ? holes->right : holes->left);
+        const uint8_t second = tier1_select_vector_register(swapped ? holes->left : holes->right);
         // Floating inputs are in the vector class, so clearing this general-register result cannot alias either one.
         tier1_select_append(&result, tier1_select_register_record(X86_FORM_XOR_R32_RM32, destination, destination));
         tier1_select_append(&result, tier1_select_register_record(tier1_select_float_forms(width)->compare, first, second));
@@ -3321,7 +3326,7 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         break;
     }
     case TIER1_RULE_FLOAT_BRANCH_COMPARE:
-        tier1_select_append(&result, tier1_select_register_record(tier1_select_float_forms(width)->compare, holes->left & 15, holes->right & 15));
+        tier1_select_append(&result, tier1_select_register_record(tier1_select_float_forms(width)->compare, tier1_select_vector_register(holes->left), tier1_select_vector_register(holes->right)));
         tier1_select_append(&result, (X86Instruction){ .form = tier1_select_condition_branches[holes->condition] });
         tier1_select_append(&result, (X86Instruction){ .form = X86_FORM_JMP_REL8 });
         break;
@@ -3332,7 +3337,7 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         // (#2922) take their equal value only where ZF is set and PF clear: the select's true value for ==, its false value
         // for !=, then cmovne and cmovp of the other one, as clang's select of an `fcmp oeq`. Where the destination holds
         // that other value, the scratch register keeps it for the cmovp past the cmove of the equal value.
-        tier1_select_append(&result, tier1_select_register_record(tier1_select_float_forms(holes->source_width)->compare, holes->left & 15, holes->right & 15));
+        tier1_select_append(&result, tier1_select_register_record(tier1_select_float_forms(holes->source_width)->compare, tier1_select_vector_register(holes->left), tier1_select_vector_register(holes->right)));
         const uint32_t condition = holes->condition;
         if (condition == IR_EQ || condition == IR_NE)
         {
@@ -3369,7 +3374,7 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     case TIER1_RULE_FLOAT_CONVERT:
     {
         const uint32_t source_width = holes->source_width;
-        const uint8_t x = destination & 15;
+        const uint8_t x = tier1_select_vector_register(destination);
         switch (holes->scale)
         {
         case BUSTER_TIER1_FLOAT_FROM_SIGNED:
@@ -3396,7 +3401,7 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         {
             // An unsigned 32-bit result is the low half of the 64-bit conversion, whose range holds it.
             const bool wide = width == 8 || (holes->scale == BUSTER_TIER1_FLOAT_TO_UNSIGNED && width == 4);
-            tier1_select_append(&result, tier1_select_register_record(tier1_select_float_forms(source_width)->to_integer[wide], destination, holes->left & 15));
+            tier1_select_append(&result, tier1_select_register_record(tier1_select_float_forms(source_width)->to_integer[wide], destination, tier1_select_vector_register(holes->left)));
             if (width < 4)
             {
                 tier1_select_append(&result, tier1_select_register_record(width == 1 ? X86_FORM_MOVZX_R32_RM8 : X86_FORM_MOVZX_R32_RM16, destination, destination));
@@ -3406,17 +3411,17 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         case BUSTER_TIER1_FLOAT_RESIZE:
             // Legacy cvtss2sd and cvtsd2ss merge into their destination's upper lanes: break that dependency where the
             // destination isn't the operand's own register (#3308), whose zero would clobber the operand.
-            if (x != (holes->left & 15))
+            if (x != tier1_select_vector_register(holes->left))
             {
                 tier1_select_append(&result, tier1_select_register_record(X86_FORM_XORPS_X_XM128, x, x));
             }
-            tier1_select_append(&result, tier1_select_register_record(tier1_select_float_forms(source_width)->resize, x, holes->left & 15));
+            tier1_select_append(&result, tier1_select_register_record(tier1_select_float_forms(source_width)->resize, x, tier1_select_vector_register(holes->left)));
             break;
         case BUSTER_TIER1_FLOAT_FROM_BITS:
             tier1_select_append(&result, tier1_select_register_record(tier1_select_float_forms(width)->from_general, x, holes->left));
             break;
         case BUSTER_TIER1_FLOAT_TO_BITS:
-            tier1_select_append(&result, tier1_select_register_record(tier1_select_float_forms(source_width)->to_general, holes->left & 15, destination));
+            tier1_select_append(&result, tier1_select_register_record(tier1_select_float_forms(source_width)->to_general, tier1_select_vector_register(holes->left), destination));
             break;
         default:
             tier1_select_append(&result, (X86Instruction){0});
@@ -3427,7 +3432,7 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
     case TIER1_RULE_FLOAT_CONVERT_LOAD:
     {
         X86Instruction record = holes->memory;
-        record.reg = destination & 15;
+        record.reg = tier1_select_vector_register(destination);
         if (holes->condition == BUSTER_TIER1_FLOAT_FROM_SIGNED)
         {
             record.form = tier1_select_float_forms(width)->from_integer[holes->source_width == 8];
@@ -3436,7 +3441,7 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         }
         else if (holes->condition == BUSTER_TIER1_FLOAT_FROM_UNSIGNED)
         {
-            const uint8_t x = destination & 15;
+            const uint8_t x = tier1_select_vector_register(destination);
             if ((holes->unsigned_dword_memory_forms & (width == 4 ? 1u : 2u)) == 0)
             {
                 // A dword load zero-extends into the reserved scratch. Its qword is safe to convert as signed.
@@ -3463,9 +3468,9 @@ static Tier1SelectRecords tier1_select_expand(const Tier1SelectHoles* holes)
         break;
     }
     case TIER1_RULE_FLOAT_RETURN:
-        if ((holes->left & 15) != 0)
+        if (tier1_select_vector_register(holes->left) != 0)
         {
-            tier1_select_append(&result, tier1_select_float_move(0, holes->left & 15));
+            tier1_select_append(&result, tier1_select_float_move(0, tier1_select_vector_register(holes->left)));
         }
         tier1_select_append(&result, (X86Instruction){ .form = X86_FORM_RET });
         break;
@@ -3681,7 +3686,7 @@ static uint32_t tier1_select_fixed(const Tier1SelectHoles* holes, X86Instruction
     {
         // A zero merge source breaks the destination dependency and clears the other scalar lanes.
         // The register form uses MXCSR rounding, including when a large positive integer rounds up.
-        const uint8_t x = holes->destination & 15;
+        const uint8_t x = tier1_select_vector_register(holes->destination);
         const uint16_t form = width == 4 ? X86_FORM_VCVTUSI2SS_X_X_RM64 : X86_FORM_VCVTUSI2SD_X_X_RM64;
         records[count++] = tier1_select_register_record(X86_FORM_XORPS_X_XM128, x, x);
         X86Instruction conversion = tier1_select_register_record(form, x, holes->left);
@@ -3694,7 +3699,7 @@ static uint32_t tier1_select_fixed(const Tier1SelectHoles* holes, X86Instruction
         // bit is clear; else v = (s | (s & 1) << 1) >> 1, s halved with its last bit kept as a sticky one so that rounding
         // v rounds s, converted and doubled by adding 1 to the result's exponent (s's sign bit shifted to the exponent's
         // lowest, by paddq or paddd through the vector class's scratch register).
-        const uint8_t x = holes->destination & 15;
+        const uint8_t x = tier1_select_vector_register(holes->destination);
         const uint8_t xs = BUSTER_TIER1_SELECT_FLOAT_SCRATCH;
         const Tier1SelectFloatForms* forms = tier1_select_float_forms(width);
         records[count++] = (X86Instruction){ .form = X86_FORM_LEA_R64_M, .reg = scratch, .rm = holes->left, .index = holes->left, .mode = (uint8_t)BUSTER_X86_MEMORY_BASE_INDEX(0) };
@@ -3721,7 +3726,7 @@ static uint32_t tier1_select_fixed(const Tier1SelectHoles* holes, X86Instruction
         // writes: cmovb keeps x's own bits, movq or movd, cvtts*2si and lea leave them, and cmovae takes the double. No
         // floating arithmetic runs, so the truncation's are the only flags: a subtraction of 2^63 from x would raise
         // inexact below it, and a second truncation invalid (#2562's spurious flags, and SIGFPE with invalid unmasked).
-        const uint8_t x = holes->left & 15;
+        const uint8_t x = tier1_select_vector_register(holes->left);
         const uint8_t xs = BUSTER_TIER1_SELECT_FLOAT_SCRATCH;
         const uint8_t d = holes->destination;
         const uint32_t source_width = holes->source_width;
@@ -4681,9 +4686,9 @@ static uint32_t tier1_select_part_slots(uint32_t bytes)
 }
 
 // A call argument's whole 64-byte vector register part (#141) waits in zmm16 and on rather than in the red zone, whose 14
-// staging slots two such parts would overflow: Tier 1 allocates nothing to registers past xmm15, a call clobbers them all,
-// and only a target with AVX-512F, which has them, passes a vector in a zmm register. And so does a payload a zmm register
-// carries (#2798: 40, 48 or 56 bytes). The first of them, by the call's parts in order.
+// staging slots two such parts would overflow: the function reserves the call's staging span before allocation
+// (#3625), and only a target with AVX-512F, which has those registers, passes a vector in a zmm register. The same holds
+// for a payload a zmm register carries (#2798: 40, 48 or 56 bytes). The first of them, by the call's parts in order.
 #define BUSTER_TIER1_SELECT_PART_ZMM 16u
 
 static bool tier1_select_part_in_zmm(uint32_t bytes)
@@ -5236,9 +5241,10 @@ static bool tier1_select_row_low_floating(const Tier0Operation* row)
 }
 
 // Whether the CFG consumer places a row call's machine row (#141, TIER1_RULE_ROW): a row Tier 0 places (tier0_operation_valid,
-// which needs x86_semantics.c's tables). Its vector roles are zmm16 and on, which no value takes, and its floating ones
-// past them, below 32, where every record that names a vector register is an EVEX form's; a row with a VEX or legacy
-// form's vector register (tier0_operation_reach's vex_vectors) takes free xmm registers below 16 for its vector roles
+// which needs x86_semantics.c's tables). Its temporary vector roles are zmm16 and on, and its floating ones past them,
+// below 32: the function reserves that span before allocating values (#3625). Every record that names those registers
+// must use an EVEX form; a row with a VEX or legacy form's vector register (tier0_operation_reach's vex_vectors) takes
+// free xmm registers below 16 for its vector roles
 // that don't stay in place where it runs (tier1_emit_cfg_row). A row with a floating role in such a form (#1281,
 // tier1_select_row_low_floating) takes free xmm registers below 16 for its written floating operands and its result, and
 // so does every row at a target without AVX512VL: its vector roles and its floating ones fit in 16 registers. Whether as
@@ -8953,6 +8959,8 @@ static Tier1SelectHoles tier1_select_holes(const Tier1SelectPlan* plan, const ui
     }
     return holes;
 }
+
+#include "buster/compiler/tier1_select_upper.c"
 
 // A leaf body's incoming System V integer arguments. Register assignment must pin these values from function entry;
 // an IR_PARAM does not emit a late copy from a register that earlier instructions may already have overwritten.
