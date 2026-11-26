@@ -342,7 +342,11 @@ of the class they name, none left over or missing), in a dead branch's or
 sizeof's call too, and leaves at anything past that (positions, `%n`, the wide
 and binary forms, `%Lf`); a non-literal format is quiet with arguments and
 `-Wformat-security`'s without. A function with a `format` attribute of its own
-still leaves at a call. One
+still leaves at a call. A pointer to `long` and one to `long long` (or their
+unsigned kinds, at any depth) are incompatible, the full pipeline's
+`-Wincompatible-pointer-types` error, which main's direct path compiled
+quietly in an initializer, an assignment, an argument or a return: the implicit
+conversion's check compares the pointees' `BUSTER_FTYPE_SCALAR_LONG` too. One
 gap is left: a loop's empty body (`for (...);`) is `-Wempty-body` only where the
 next statement is a block or is indented past the loop, as clang decides, and
 the direct path's tokens keep no columns, so it compiles such loops quietly as

@@ -3208,7 +3208,8 @@ static __attribute__((noinline)) void fast_cc_check_implicit_conv(FastCCState* c
         {
             return;
         }
-        // Check scalar vs scalar pointer compatibility (must match size, signedness, floatness, and char-ness!)
+        // Check scalar vs scalar pointer compatibility (must match size, signedness, floatness, and char-ness!). #3577: and
+        // long-ness: a `long *` and a `long long *` are the full pipeline's -Wincompatible-pointer-types error.
         const bool dc = (du & BUSTER_FTYPE_COMPLEX_BIT) != 0;
         const bool sc = (su & BUSTER_FTYPE_COMPLEX_BIT) != 0;
         if (!dc && !sc)
@@ -3217,8 +3218,7 @@ static __attribute__((noinline)) void fast_cc_check_implicit_conv(FastCCState* c
             const uint32_t sb = su & BUSTER_FTYPE_SCALAR_MASK;
             const uint32_t ddepth = ftype_ptr_depth(du);
             const uint32_t sdepth = ftype_ptr_depth(su);
-            if (ddepth != sdepth || db != sb ||
-                ((du & BUSTER_FTYPE_SCALAR_CHAR) != (su & BUSTER_FTYPE_SCALAR_CHAR)))
+            if (ddepth != sdepth || db != sb || ((du ^ su) & (BUSTER_FTYPE_SCALAR_CHAR | BUSTER_FTYPE_SCALAR_LONG)) != 0)
             {
                 fast_cc_bail(cc, "incompatible pointer conversion");
             }

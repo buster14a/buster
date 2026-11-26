@@ -4556,6 +4556,12 @@ static int c_direct_unit_tests(void)
         "    n += fprintf(o, \"%-5d \" \"%+.2f\\n\", i, d) + sprintf(a, (\"%lx\"), z) + snprintf(a, sizeof a, \"%lu\", z);\n"
         "    return n + printf(fmt, i);\n"
         "}\n",
+        // 22. Pointers to long and to long long, each converted to its own kind (a const one's, a void pointer's).
+        "long long gll;\nlong* glp;\nlong long* gllp = &gll;\n"
+        "long kinds(long* p, long long* q, void* v) {\n"
+        "    long* a = p; long long* b = q; const long* c = p; const long long* d = &gll; long* e = v; glp = p;\n"
+        "    return *a + *b + *c + *d + *e + *gllp;\n"
+        "}\n",
     };
 
     for (uint32_t i = 0; i < sizeof(valid_cases) / sizeof(valid_cases[0]); i += 1)
@@ -4769,6 +4775,16 @@ static int c_direct_unit_tests(void)
         "int snprintf(char*, unsigned long, const char*, ...);\nint f(char* b, long long ll) { return snprintf(b, 8, \"%ld\", ll); }\n",
         "int printf(const char*, ...);\nint f(_Bool b) { return printf(\"%c\", b); }\n",
         "int printf(const char*, ...);\nint f(long w, int i) { return printf(\"%*d\", w, i); }\n",
+        // A `long *` and a `long long *` (-Wincompatible-pointer-types, an error): an initializer, an assignment, an
+        // argument, a return, a pointer to one, an unsigned one's, a file-scope address and an array's decay.
+        "void f(long* p) { long long* q = p; (void)q; }\n",
+        "void f(long long* p) { long* q; q = p; (void)q; }\n",
+        "void g(long long*);\nvoid f(long* p) { g(p); }\n",
+        "long* f(long long* p) { return p; }\n",
+        "void f(long** p) { long long** q = p; (void)q; }\n",
+        "void f(unsigned long* p) { unsigned long long* q = p; (void)q; }\n",
+        "long long x;\nlong* p = &x;\n",
+        "long long a[2];\nlong* p = a;\n",
     };
     for (uint32_t i = 0; i < sizeof(bail_cases) / sizeof(bail_cases[0]); i += 1)
     {
