@@ -1195,7 +1195,13 @@ regressions in `c_check_pic_driver_test.c`, included by `test-checker-driver`,
 cover these boundaries, both option orders, the effective visibility spelling,
 `-fvisibility-ms-compat`, scalar/default paths, both tiers, output preservation
 and the original two-unit tentative-definition example; `--visibility-only`
-compares the visibility options' objects and libraries with clang's.
+compares the visibility options' objects and libraries with clang's. It also
+checks every global and weak symbol of `target`, `target_clones` and
+`cpu_specific`/`cpu_dispatch` groups inside nested hidden, protected and default
+pragma scopes (#3578), at both tiers, with and without `-fPIC`, and under each
+default visibility. The synthetic objects inherit their source declaration's
+visibility; ordinary declarations after each pop keep the restored visibility.
+Each resulting object is linked and executes every group.
 
 ## Unsupported hardening requests
 

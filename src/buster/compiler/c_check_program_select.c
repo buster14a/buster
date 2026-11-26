@@ -272,7 +272,15 @@ static bool check_program_object_size_inline(const CheckInput* input, uint32_t d
 static uint8_t check_program_visibility(const CheckProgram* program, uint32_t object, bool defined)
 {
     const CheckInput* input = program->input;
-    const uint8_t given = input->object_visibility != NULL ? input->object_visibility[object] : 0;
+    uint8_t given = 0;
+    if (input->object_visibility != NULL)
+    {
+        // A multiversioned function's reference or clone body is a synthetic object. Its declaration still names
+        // the reader's original object, where the attributes and visibility pragmas were recorded (#3578).
+        const uint32_t declaration = program->object_declarations[object];
+        const uint32_t origin = declaration < input->token_count ? input->objects[declaration] : object;
+        given = input->object_visibility[origin];
+    }
     return given != 0 ? (uint8_t)((given - 1) << BUSTER_LINK_SYMBOL_VISIBILITY_SHIFT) : defined ? program->visibility : BUSTER_LINK_SYMBOL_DEFAULT;
 }
 

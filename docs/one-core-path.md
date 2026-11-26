@@ -4486,6 +4486,47 @@ What changed:
   path altogether (`-Wall`, `-g`; a strict `-std=` takes it since #3592's step 4, and `-MD` and its kin since its
   dependency files below).
 
+### The kernel's cycles (2026-11-25, #3586)
+
+At main `20f3573e` the kernel took 9.3 M cycles of a `-c sqlite3.c` process's 90 M on the 9700X
+([record](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/direct-kernel-3586-2026-11-25)).
+By `perf record -g`: the huge pages' first touch 21%, the `munmap` of each source file and header as it ended 14%,
+the object's `writev` 14%, RCU's frees 8%, the files' `mmap` 6%, the include search's path walks 8%. A compile made
+1,729 system calls: 614 `access` (401 found nothing), and an open, a map and an unmap for each of 216 includes of 155
+files, since a header with no guard (`<stddef.h>`, `<bits/mathcalls.h>`) was mapped again at each include.
+
+What changed:
+
+- **A file's mapping is kept for the compile.** Its path and mapping are a record in the persistent arena
+  (`FastFileRecord`), found from the guard table's entry: a header included again is pushed from its mapping with
+  no system call, and no file is unmapped as it ends. `fast_pp_release_files` unmaps them and closes the search
+  directories' descriptors when the compile bails out (the full pipeline runs next in the process) or its caller
+  releases its memory; a terminal command leaves them to its exit, as it leaves its arenas.
+- **A name is looked up from its directory's descriptor:** each search directory is opened (`O_PATH`) by its first
+  search, and one `openat` walks the name alone and gives the descriptor the file is mapped from, where `access`
+  and then `open` each walked the whole path.
+
+| 9700X, a process a unit, CPU 2, 31 rotated runs | main | this | kernel cycles, CPU 2 with the exit's teardown |
+| --- | ---: | ---: | ---: |
+| one function | 0.30 ms | 0.29 ms | 1.84 M to 1.80 M |
+| `stdio.h` and a `printf` | 0.65 ms | **0.58 ms** | 2.57 M to 2.27 M |
+| seven standard headers and a `main` | 1.66 ms | **1.42 ms** | 4.35 M to 3.18 M |
+| musl's `wcwidth.c` | 0.39 ms | 0.37 ms | 2.04 M to 1.99 M |
+| `sqlite3.c` | 16.64 ms | **16.16 ms** | 11.62 M to 9.88 M |
+
+- The process's own kernel cycles on `sqlite3.c` fell 22%, 10.02 M to 7.81 M, and the CPU's 15%: the kernel
+  cycles counted on the CPU include the teardown the exit helper makes after the process (#1444), where the
+  unmapping still happens. A compile makes 1,051 system calls. Every object is the same, on these units and on the
+  record's 7,556 units (1,860 of them the direct path's).
+- `FastPP` is still cleared by `fast_pp_init`. Left to the arena's zero pages, a unit took more faults
+  (`stdio.h`'s 188 became 216): the guard and missing-path tables are read before they are written, two faults a
+  page. The record is why the guard entry stays 16 bytes: in the entry, the mapping made `FastPP` 8 pages larger.
+- **Not done: the arenas' clearing**, now a third of the kernel's cycles on `sqlite3.c`. The arena's tables have
+  capacities for any unit, and each is written from its start: `sqlite3.c` writes 8.2 MB of a 22.4 MB extent, but
+  touches all eleven of its 2 MB regions, so the kernel clears 22 MB. Simulated on that page map, no order of the
+  42 tables touches fewer than nine regions; only tables sized by what a unit writes, growing when full, would clear
+  about the 8 MB used.
+
 ### A declaration's symbols (2026-11-25, #3595)
 
 The direct path's code is its own. A unit's symbols, though, must be the full pipeline's: their names, bindings,
@@ -4518,6 +4559,35 @@ differs is only what this section doesn't claim:
 - objects initialized to zero in `.data` rather than `.bss`;
 - undefined references that only one side's code makes;
 - unused static functions kept.
+
+### The code generator's common cases (2026-11-25, #3581)
+
+The code generator was half of `sqlite3.c`'s compile and had had no redesign. A census of what its branches decide
+came first; the census, every step's readings and the scripts are in
+[buster-performance](https://github.com/buster14a/buster-performance/tree/main/docs/measurements/direct-generator-3581-2026-11-25).
+
+| 9700X, `sqlite3.c`, CPU 2 | main `09c3b79b` | this | |
+| --- | ---: | ---: | ---: |
+| the product's `-c`, wall (21 rotated runs) | 16.44 ms | **15.57 ms** | -5.3% |
+| user cycles | 81.3 M | **76.6 M** | -5.8% |
+| user instructions | 220.6 M | **205.5 M** | -6.8% |
+| parsing and generating code (the harness's stage, medians of three placements, main `20f3573e`) | 8.61 ms | **7.95 ms** | -7.7% |
+| object | `f558aaf5...` | the same | |
+
+- **The census.** 46,973 expressions of 7.5 tokens; 85% of their identifiers are locals. Their cost is a long tail of
+  shapes: the 120 most common hold 59% of the expressions and about a quarter of their time, so selecting code by an
+  expression's whole shape (the smallest form of "typed and selected in rounds") was not built. What is common is a
+  value's case: 82,000 of `fval_convert`'s 116,000 calls are to the value's own type, 43,000 of `fval_to_gp`'s 130,000
+  take a register, 50,000 of `fval_spill_one`'s 61,000 have nothing to spill, half of the implicit conversions have no
+  pointer to check, `fval_flush_flags` finds flags 7 times in 30,000, and half of the declarators and most specifier
+  lists are one name or one keyword.
+- **What changed.** Those cases are answered inline, in a few ops, by the functions' names; the full functions, out of
+  line, take the rest. A quarter of `fval_convert`'s and `fval_to_gp`'s retired ops had been their entries and exits:
+  their rare cases made each of them save every register it might use on every call. `fval_to_gp`'s loads have a
+  lean function of their own. Every object of the 6,201-unit corpus is unchanged.
+- **What is left:** `fast_cc_expr`'s token loop (12.7% of the compile's ops), the statement loop (6.7%),
+  `fval_emit_call`'s four passes over its arguments (4.5%), and 940 K mispredicted branches, most of them on a
+  token's or a value's kind. Splitting `fast_expr_reduce_top` the same way measured nothing and was dropped.
 
 ### Macro calls and directives in bulk (2026-11-25, #3584)
 
