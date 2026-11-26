@@ -49,6 +49,8 @@
 #define BUSTER_TIER0_INLINE_BIND_VALUE 1u
 #define BUSTER_TIER0_INLINE_BIND_VECTOR 2u
 #define BUSTER_TIER0_INLINE_BIND_COPY 4u
+// One local home per general or XMM register. The sparse loop-home list uses their combined register set.
+#define BUSTER_TIER0_INLINE_REGISTER_HOMES (BUSTER_TIER0_XMM(0) + BUSTER_TIER0_FLOATING_DEPTHS)
 
 // What an entry's value means, which the copy of a callee's entry rebases: nothing, a local, an entry (a target), a call
 // row, an operation, an x87 constant, a vector constant, or an ATOMIC_CAS's local in its high bits.
@@ -137,6 +139,34 @@ static bool tier0_inline_branch(uint32_t kind)
     _Static_assert(BUSTER_TYPED_BRANCH_TRUE == BUSTER_TYPED_BRANCH_FALSE + 1 && BUSTER_TYPED_JUMP == BUSTER_TYPED_BRANCH_FALSE + 2 && BUSTER_TYPED_JUMP_VALUE == BUSTER_TYPED_BRANCH_FALSE + 3,
                    "the branches' kinds are one range");
     return kind - BUSTER_TYPED_BRANCH_FALSE < 4u;
+}
+
+// The branch entries in the next at most 64 entries from first, bounded by end. The kinds' range is tier0_inline_branch's.
+static uint64_t tier0_inline_branches(const Tier0Function* function, uint32_t first, uint32_t end)
+{
+    const __mmask64 lanes = tier0_lanes(first, end);
+    const __m512i kinds = _mm512_maskz_loadu_epi8(lanes, function->kinds + first);
+    return lanes & _mm512_cmplt_epu8_mask(_mm512_sub_epi8(kinds, _mm512_set1_epi8(BUSTER_TYPED_BRANCH_FALSE)), _mm512_set1_epi8(4));
+}
+
+// A back edge, including a self edge, makes a callee subject to the experimental shapes' home check (#2841).
+// Expanded scalar-return wrappers may contain a memory-result callee's loop, so this is independent of the ABI.
+static bool tier0_inline_has_loop(const Tier0Function* function)
+{
+    const uint32_t count = function->count;
+    const uint64_t* values = function->values;
+    bool loop = false;
+    for (uint32_t first = 0; !loop && first < count; first += 64)
+    {
+        uint64_t branches = tier0_inline_branches(function, first, count);
+        while (!loop && branches != 0)
+        {
+            const uint32_t entry = first + (uint32_t)__builtin_ctzll(branches);
+            branches &= branches - 1;
+            loop = values[entry] <= entry;
+        }
+    }
+    return loop;
 }
 
 // Whether `function`'s stream can be a callee's (docs/tier0-inlining.md, "Eligibility"): nothing about its own frame or
@@ -507,7 +537,7 @@ static bool tier0_inline_site_valid(const Tier0Function* caller, const Tier0Func
 #define BUSTER_TIER0_INLINE_PUSH(arena, Type, count) BUSTER_ARENA_PUSH_ARRAY((arena), Type, (uint64_t)(count) + 1)
 
 // The plan of the splice of `input` (Tier0InlinePlan), in `arena`: false where there is no site, or no room.
-static bool tier0_inline_plan(const Tier0InlineInput* input, Arena* arena, Tier0InlinePlan* plan)
+static bool tier0_inline_plan(const Tier0InlineInput* input, bool keep_loops, Arena* arena, Tier0InlinePlan* plan)
 {
     const Tier0Function* caller = input->caller;
     const uint32_t count = caller->count;
@@ -556,7 +586,8 @@ static bool tier0_inline_plan(const Tier0InlineInput* input, Arena* arena, Tier0
         const Tier0Function* callee = index < input->callee_count ? input->callees[index] : 0;
         uint32_t body = 0;
         Tier0InlineSite site = { .entry = entry, .row = row, .argument = argument };
-        bool taken = callee != 0 && tier0_inline_callee_valid(callee, input->shapes, &body) && tier0_inline_site_valid(caller, callee, &site, body, plan->arguments + argument);
+        bool taken = callee != 0 && tier0_inline_callee_valid(callee, input->shapes, &body) &&
+                     (!keep_loops || !tier0_inline_has_loop(callee)) && tier0_inline_site_valid(caller, callee, &site, body, plan->arguments + argument);
         // A callee's vectors on the caller's transport: the EVEX path takes every one's, another only its own.
         const uint8_t transport = caller->vectors ? caller->vector_bytes : input->vector_bytes;
         taken = taken && (!callee->vectors || transport == 0 || transport == callee->vector_bytes) && (!callee->masks || transport == 0);
@@ -1433,6 +1464,158 @@ static bool tier0_inline_forward(Tier0Function* g, Tier0InlineColumns* columns, 
     return valid;
 }
 
+// Plan the real homes without measuring or emitting code. The normalized function and every job column stay in
+// scratch for the comparison; decorated accesses are stripped exactly as tier0_compile_segments strips them.
+static bool tier0_inline_home_plan(const Tier0Function* function, Arena* scratch, Tier0Function* normalized, Tier0Job* job)
+{
+    *normalized = *function;
+    uint8_t* segments = 0;
+    bool valid = tier0_initialize();
+    if (valid && (function->segments || function->volatiles))
+    {
+        uint64_t* values = BUSTER_TIER0_INLINE_PUSH(scratch, uint64_t, function->count);
+        segments = BUSTER_TIER0_INLINE_PUSH(scratch, uint8_t, function->count);
+        valid = values != 0 && segments != 0;
+        if (valid)
+        {
+            tier0_segments_strip(function, values, segments);
+            normalized->values = values;
+            normalized->segments = false;
+            normalized->volatiles = false;
+        }
+    }
+    tier0_job_begin(job, normalized, function->segments || function->x87 ? segments : 0, scratch);
+    if (valid)
+    {
+        tier0_job_front(job, scratch);
+        tier0_job_homes(job, scratch);
+        valid = job->error == TIER0_OK;
+    }
+    else
+    {
+        job->error = TIER0_ERROR_MEMORY;
+    }
+    return valid;
+}
+
+// Collect register-homed locals referenced in [first, end). Homes are unique per register and register bank, so a
+// 32-bit set deduplicates the sparse list (at most 32 locals), without a local-count-sized annotation column.
+static void tier0_inline_range_homes(const Tier0Function* function, const Tier0Job* job, uint32_t first, uint32_t end, uint32_t* seen, uint32_t* locals, uint32_t* count)
+{
+    const uint64_t kinds_referring = UINT64_C(1) << BUSTER_TYPED_LOCAL | UINT64_C(1) << BUSTER_TYPED_LOCAL_ADDRESS |
+                                     UINT64_C(1) << BUSTER_TYPED_STORE_LOCAL | UINT64_C(1) << BUSTER_TYPED_SET_LOCAL |
+                                     UINT64_C(1) << BUSTER_TYPED_ATOMIC_CAS | UINT64_C(1) << BUSTER_TYPED_CALL;
+    const __m512i referring = _mm512_set1_epi64((int64_t)kinds_referring);
+    const uint8_t* kinds = function->kinds;
+    const uint64_t* values = function->values;
+    const Tier0Home* homes = job->homes;
+    const uint32_t* references = job->references;
+    const uint8_t* classes = function->local_classes;
+    for (uint32_t at = first; at < end; at += 64)
+    {
+        const __mmask64 lanes = tier0_lanes(at, end);
+        uint64_t bits = _mm512_mask_bitshuffle_epi64_mask(lanes, referring, _mm512_maskz_loadu_epi8(lanes, kinds + at));
+        while (bits != 0)
+        {
+            const uint32_t entry = at + (uint32_t)__builtin_ctzll(bits);
+            bits &= bits - 1;
+            const uint32_t kind = kinds[entry];
+            const uint64_t value = values[entry];
+            const bool call = kind == BUSTER_TYPED_CALL;
+            const bool hidden = call && function->call_result_objects != 0 && function->call_result_objects[value] == BUSTER_TIER0_RESULT_HIDDEN;
+            const uint32_t local = call ? 0 : (uint32_t)(value >> (kind == BUSTER_TYPED_ATOMIC_CAS ? BUSTER_TYPED_CAS_LOCAL_SHIFT : 0));
+            if ((!call || hidden) && local < function->local_count && references[local] != 0 && homes[local].is_register)
+            {
+                const uint32_t reg = homes[local].reg + (tier0_class_floating(classes[local]) ? BUSTER_TIER0_XMM(0) : 0);
+                const uint32_t bit = 1u << reg;
+                if ((*seen & bit) == 0)
+                {
+                    locals[*count] = local;
+                    *count += 1;
+                    *seen |= bit;
+                }
+            }
+        }
+    }
+}
+
+// The register homes used inside the union of backward-edge ranges. Descending edge ends let each range visit only
+// the prefix not already covered by a later edge, so nested and overlapping loops scan each covered entry once.
+// This protects existing homes; it assigns no loop weights and makes no assumption about a loop's frequency.
+static uint32_t tier0_inline_loop_homes(const Tier0Function* function, const Tier0Job* job, uint32_t* locals)
+{
+    uint32_t covered_first = function->count;
+    uint32_t seen = 0;
+    uint32_t count = 0;
+    for (uint32_t end = function->count; end != 0;)
+    {
+        const uint32_t first = (end - 1) & ~63u;
+        uint64_t branches = tier0_inline_branches(function, first, end);
+        while (branches != 0)
+        {
+            const uint32_t lane = 63u - (uint32_t)__builtin_clzll(branches);
+            branches &= ~(UINT64_C(1) << lane);
+            const uint32_t entry = first + lane;
+            const uint64_t target = function->values[entry];
+            if (target <= entry)
+            {
+                const uint32_t past = entry + 1 < covered_first ? entry + 1 : covered_first;
+                tier0_inline_range_homes(function, job, (uint32_t)target, past, &seen, locals, &count);
+                covered_first = target < covered_first ? (uint32_t)target : covered_first;
+            }
+        }
+        end = first;
+    }
+    return count;
+}
+
+// The shapes' loop-home guard (#2841). Compare the actual allocation after forwarding with each expanded callee's
+// standalone allocation. Local IDs survive forwarding; a zero reference count permits an eliminated local. The
+// plan shares locals per distinct callee and argument-nesting level, and every retained level must preserve them.
+static bool tier0_inline_homes_preserved(const Tier0InlineInput* input, const Tier0InlinePlan* plan, const Tier0Function* function, Arena* arena)
+{
+    bool loops = false;
+    for (uint32_t d = 0; !loops && d < plan->distinct_count; d += 1)
+    {
+        const Tier0InlineCallee* distinct = plan->distinct + d;
+        loops = distinct->levels != 0 && tier0_inline_has_loop(input->callees[distinct->index]);
+    }
+    bool preserved = true;
+    if (loops)
+    {
+        Scratch scratch = scratch_begin(arena);
+        Tier0Function normalized;
+        Tier0Job spliced;
+        preserved = tier0_inline_home_plan(function, scratch.arena, &normalized, &spliced);
+        for (uint32_t d = 0; preserved && d < plan->distinct_count; d += 1)
+        {
+            const Tier0InlineCallee* distinct = plan->distinct + d;
+            const Tier0Function* callee = input->callees[distinct->index];
+            if (distinct->levels != 0 && tier0_inline_has_loop(callee))
+            {
+                const uint64_t mark = scratch.arena->length;
+                Tier0Function own;
+                Tier0Job outlined;
+                preserved = tier0_inline_home_plan(callee, scratch.arena, &own, &outlined);
+                uint32_t locals[BUSTER_TIER0_INLINE_REGISTER_HOMES];
+                const uint32_t count = preserved ? tier0_inline_loop_homes(&own, &outlined, locals) : 0;
+                for (uint32_t level = 0; preserved && level < distinct->levels; level += 1)
+                {
+                    const uint32_t base = distinct->local_base + level * callee->local_count;
+                    for (uint32_t k = 0; preserved && k < count; k += 1)
+                    {
+                        const uint32_t local = base + locals[k];
+                        preserved = spliced.references[local] == 0 || spliced.homes[local].is_register;
+                    }
+                }
+                arena_pop_to(scratch.arena, mark);
+            }
+        }
+        scratch_end(scratch);
+    }
+    return preserved;
+}
+
 // What a splice made: G (`function`), the starts in G of the caller's entries and its end (count + 1 of them), and how
 // many calls it inlined.
 typedef struct Tier0Inlined Tier0Inlined;
@@ -1446,12 +1629,12 @@ struct Tier0Inlined
 // The splice of `input` into *result in `arena` (G's columns, which the result's function points into, and the starts),
 // and tier0_validate's check of G: false, and `arena` as it was, where there is no site, no room, or G breaks the
 // stream's rules (the caller then keeps its calls).
-static bool tier0_inline(const Tier0InlineInput* input, Arena* arena, Tier0Inlined* result)
+static bool tier0_inline_attempt(const Tier0InlineInput* input, bool keep_loops, Arena* arena, Tier0Inlined* result, bool* retry)
 {
     const uint64_t mark = arena->length;
     const Tier0Function* caller = input->caller;
     Tier0InlinePlan plan;
-    bool valid = tier0_inline_plan(input, arena, &plan);
+    bool valid = tier0_inline_plan(input, keep_loops, arena, &plan);
     Tier0Function g = valid ? *caller : (Tier0Function){ 0 };
     uint8_t* kinds = valid ? BUSTER_TIER0_INLINE_PUSH(arena, uint8_t, plan.count) : 0;
     uint8_t* classes = valid ? BUSTER_TIER0_INLINE_PUSH(arena, uint8_t, plan.count) : 0;
@@ -1483,6 +1666,8 @@ static bool tier0_inline(const Tier0InlineInput* input, Arena* arena, Tier0Inlin
                 tier0_inline_forward(&g, &columns, caller->entry_records ? caller->local_count : 0, plan.starts, caller->count + 1, arena) &&
                 tier0_validate(&g).error == TIER0_OK;
     }
+    *retry = valid && input->shapes && !keep_loops && !tier0_inline_homes_preserved(input, &plan, &g, arena);
+    valid = valid && !*retry;
     if (valid)
     {
         *result = (Tier0Inlined){ .function = g, .starts = plan.starts, .sites = plan.site_count };
@@ -1490,6 +1675,20 @@ static bool tier0_inline(const Tier0InlineInput* input, Arena* arena, Tier0Inlin
     else
     {
         arena_pop_to(arena, mark);
+    }
+    return valid;
+}
+
+// A failed home check retries once with loop-bearing callees outlined, retaining straight-line wrapper inlining.
+// Restoring a call can itself consume registers another loop needed; holding all loop callees avoids an unbounded
+// allocation/retry fixpoint. The default (shapes off) does no home analysis and preserves its existing stream.
+static bool tier0_inline(const Tier0InlineInput* input, Arena* arena, Tier0Inlined* result)
+{
+    bool retry = false;
+    bool valid = tier0_inline_attempt(input, false, arena, result, &retry);
+    if (retry)
+    {
+        valid = tier0_inline_attempt(input, true, arena, result, &retry);
     }
     return valid;
 }

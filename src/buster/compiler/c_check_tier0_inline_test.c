@@ -14,7 +14,8 @@
 // frozen digest of their run (with and without the shapes). --tier0-inline-shapes splices callees with several returns or
 // a result in memory too, as -c's option does (#1398 step 5). The driver fixture (test-checker-driver) runs the programs.
 // Before the files, the splice's fills and the unit stage's scan for the candidates whose address code takes are checked
-// against their definitions on random columns (tier0_inline_test_fills, tier0_inline_test_addressed).
+// against their definitions on random columns (tier0_inline_test_fills, tier0_inline_test_addressed). Loop-home
+// regressions compare the speculative allocation with emitted homes (tier0_inline_homes_test.c, #2841).
 
 typedef struct Tier0InlineTestTally Tier0InlineTestTally;
 struct Tier0InlineTestTally
@@ -32,8 +33,9 @@ struct Tier0InlineTestTally
 
 // The driver fixture's spliced streams at x86-64-v4, without and with --tier0-inline-shapes. Both splice ping into
 // pong and its outside caller. The driver also checks the resulting symbols and runs each build against clang -O0.
+// With shapes, sgn's returns splice, while the home check keeps sum_to and widen outlined in scalars (#2841).
 #define BUSTER_TIER0_INLINE_TEST_DIGEST UINT64_C(0x7bbcb0712d3152a4)
-#define BUSTER_TIER0_INLINE_TEST_SHAPES_DIGEST UINT64_C(0x76ae9999c2a427d6)
+#define BUSTER_TIER0_INLINE_TEST_SHAPES_DIGEST UINT64_C(0x4a950a7e02bea723)
 
 static void tier0_inline_test_expect(Tier0InlineTestTally* tally, bool condition, const char* file, uint32_t body, const char* message)
 {
@@ -44,6 +46,8 @@ static void tier0_inline_test_expect(Tier0InlineTestTally* tally, bool condition
         fprintf(stderr, "test-tier0-inline: %s: body %u: %s\n", file, body, message);
     }
 }
+
+#include "buster/compiler/tier0_inline_homes_test.c"
 
 // Whether `a` and `b` are the same bytes for `count` elements of `size`, either both absent.
 static uint64_t tier0_inline_test_fold(uint64_t digest, const void* bytes, uint64_t size)
@@ -417,6 +421,7 @@ static int run_tier0_inline_tests(int count, char** arguments)
     {
         tier0_inline_test_fills(&tally);
         tier0_inline_test_addressed(&tally);
+        tier0_inline_test_homes(&tally);
     }
     for (uint32_t f = 0; valid && f < file_count; f += 1)
     {
