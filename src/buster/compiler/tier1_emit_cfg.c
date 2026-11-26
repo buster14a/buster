@@ -5221,7 +5221,7 @@ static Tier1EmitError tier1_emit_cfg_two_calls(const Tier1SelectPlan* plan, cons
         }
     }
     error = tier1_emit_cfg_leaf(options, emitted, output, scratch, input, cfg, error);
-    return error == TIER1_EMIT_OK && (tier1_measure_experiment() & 128u) != 0 ? tier1_emit_cfg_exchange(plan, emitted, output, scratch, input, cfg) : error;
+    return error == TIER1_EMIT_OK && (tier1_measure_experiment() & 384u) == 128u ? tier1_emit_cfg_exchange(plan, emitted, output, scratch, input, cfg) : error;
 }
 
 // The CFG consumer's allocation (#2538): the intervals prepared once for both problems, which have the same ones without
@@ -5293,7 +5293,7 @@ static Tier1EmitError tier1_emit_cfg_one_call(const Tier1SelectPlan* plan, const
         tier1_cfg_release(&order.prepared, scratch);
     }
     error = tier1_emit_cfg_leaf(options, emitted, output, scratch, input, cfg, error);
-    return error == TIER1_EMIT_OK && (tier1_measure_experiment() & 128u) != 0 ? tier1_emit_cfg_exchange(plan, emitted, output, scratch, input, cfg) : error;
+    return error == TIER1_EMIT_OK && (tier1_measure_experiment() & 384u) == 128u ? tier1_emit_cfg_exchange(plan, emitted, output, scratch, input, cfg) : error;
 }
 
 // --verify's check of the one-call order (#2538): today's order, tier1_emit_cfg_two_calls, run after it on the problem as
@@ -5431,6 +5431,10 @@ static __attribute__((noinline)) Tier1EmitError tier1_emit_cfg_function(const Ti
     if (error == TIER1_EMIT_OK && options->certify && problem.fixed.count == 0)
     {
         error = tier1_emit_cfg_order_check(plan, options, emitted, &problem, output, scratch);
+    }
+    if (error == TIER1_EMIT_OK && (tier1_measure_experiment() & 256u) != 0)
+    {
+        error = tier1_emit_cfg_exchange_weighted(plan, emitted, output, scratch, &emitted->cfg_input, &emitted->cfg);
     }
     // A leaf whose values took its callee-saved registers (tier1_emit_cfg_leaf) saves them as a function that calls does.
     emitted->callee_registers |= error == TIER1_EMIT_OK && emitted->cfg_input.avoided_general != 0 ? emitted->leaf_registers : 0;

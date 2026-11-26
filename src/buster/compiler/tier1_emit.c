@@ -893,6 +893,8 @@ static X86Instruction tier1_emit_spill(const Tier1EmitPrepared* prepared, const 
 // by values never live at once (tier1_cfg_share_slots). A range that waits in its slot (#2768) and is evicted again after
 // its reload otherwise stored the value straight back where it had just read it, as Lua's str_gsub did at its loop's
 // head, twice each iteration.
+#include "tier1_emit_transition_state.c"
+
 static Tier1EmitError tier1_emit_phase(const Tier1EmitPrepared* prepared, const Tier1Allocation* allocation, const Tier1Frame* frame, Tier1EmitTransitions* transitions, uint32_t position, Tier1EmitBuffer* buffer, Tier1EmitResult* result)
 {
     Tier1EmitError error = TIER1_EMIT_OK;
@@ -935,16 +937,11 @@ static Tier1EmitError tier1_emit_phase(const Tier1EmitPrepared* prepared, const 
         const uint8_t reg = allocation->registers[f];
         // The fragments' registers are their class's: the emitter's view has them by location.
         const uint32_t base_location = 32 * tier1_emit_class(prepared, value);
-        if (previous == BUSTER_TIER1_ALLOCATE_REGISTER && transitions->owners[base_location + allocation->registers[f - 1]] == value)
-        {
-            transitions->owners[base_location + allocation->registers[f - 1]] = BUSTER_IR_NONE;
-        }
         if (kind == BUSTER_TIER1_ALLOCATE_REGISTER && previous == BUSTER_TIER1_ALLOCATE_REMATERIALIZE)
         {
             // The value's definition again, rather than a reload: it has no slot. No mask (#179) and no floating value
             // (#141) has a recipe: their patterns are their classes' own, none a constant's, an address's or a copy of one.
             error = base_location != 0 ? TIER1_EMIT_ALLOCATION : tier1_emit_copy(result, &prepared->recipes, value, reg, (uint8_t)frame->base_register, buffer);
-            transitions->owners[base_location + reg] = value;
         }
         else if (kind == BUSTER_TIER1_ALLOCATE_REGISTER)
         {
@@ -955,14 +952,13 @@ static Tier1EmitError tier1_emit_phase(const Tier1EmitPrepared* prepared, const 
                 error = TIER1_EMIT_MEMORY;
             }
             result->spill_loads += error == TIER1_EMIT_OK;
-            transitions->owners[base_location + reg] = value;
             if (stamps != 0)
             {
                 stamps[value] = transitions->stamp;
             }
         }
         tier1_emit_mark(buffer, tier1_origin(TIER1_ORIGIN_MOVE, position), value);
-        transitions->registers[value] = kind == BUSTER_TIER1_ALLOCATE_REGISTER ? (uint8_t)(base_location + reg) : UINT8_MAX;
+        tier1_emit_transition_state(prepared, allocation, transitions, f, value);
         result->transition_count += 1;
     }
     return error;

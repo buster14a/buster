@@ -128,6 +128,9 @@ static Tier1EmitError tier1_emit_cfg_exchange_map(const uint8_t permutation[16],
 }
 
 #include "tier1_emit_exchange_cost.c"
+#include "tier1_emit_exchange_epochs.c"
+#include "tier1_emit_exchange_frequency.c"
+#include "tier1_emit_exchange_weighted.c"
 
 static Tier1EmitError tier1_emit_cfg_exchange(const Tier1SelectPlan* plan, const Tier1EmitResult* emitted, Arena* output, Arena* scratch, Tier1CfgInput* input, Tier1CfgAllocation* cfg)
 {
@@ -138,6 +141,21 @@ static Tier1EmitError tier1_emit_cfg_exchange(const Tier1SelectPlan* plan, const
         uint8_t permutation[16];
         const bool ready = tier1_emit_exchange_cost(plan, emitted, input, cfg, scratch, permutation);
         error = ready ? tier1_emit_cfg_exchange_map(permutation, output, input, cfg) : TIER1_EMIT_MEMORY;
+    }
+    arena_pop_to(scratch, saved);
+    return error;
+}
+
+static Tier1EmitError tier1_emit_cfg_exchange_weighted(const Tier1SelectPlan* plan, const Tier1EmitResult* emitted, Arena* output, Arena* scratch, Tier1CfgInput* input, Tier1CfgAllocation* cfg)
+{
+    const uint64_t saved = scratch->length;
+    Tier1EmitError error = TIER1_EMIT_OK;
+    if (emitted->prepared.call_count != 0 && emitted->callee_registers != 0)
+    {
+        uint8_t permutation[16];
+        const bool ready = tier1_emit_exchange_weighted_cost(plan, emitted, input, cfg, scratch, permutation);
+        error = ready ? tier1_emit_cfg_exchange_map(permutation, output, input, cfg) : TIER1_EMIT_OK;
+        error = error == TIER1_EMIT_MEMORY ? TIER1_EMIT_OK : error;
     }
     arena_pop_to(scratch, saved);
     return error;

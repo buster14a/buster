@@ -129,11 +129,11 @@
 // a candidate to one basic block. Bit 64 keeps a fresh preserved register behind an available caller choice until
 // a required definition or use has already paid for that register. Bit 128 exchanges disjoint physical caller/callee
 // register pairs after allocation, with the existing fragments and CFG move topology retained. Neither compiler time
-// nor this switch is benchmarked.
+// nor this switch is benchmarked. Bit 256 uses actual lazy save/restore epochs and uniform CFG flow costs.
 static __attribute__((unused)) uint32_t tier1_measure_experiment(void)
 {
     const char* const value = getenv("BUSTER_TIER1_EXPERIMENT");
-    return value != 0 ? (uint32_t)strtoul(value, 0, 0) & 255u : 0;
+    return value != 0 ? (uint32_t)strtoul(value, 0, 0) & 511u : 0;
 }
 
 #define BUSTER_ARRAY_LENGTH(x) (sizeof(x) / sizeof((x)[0]))
