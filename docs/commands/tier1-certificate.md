@@ -133,6 +133,32 @@ requirements. [Command index](README.md).
   boundary, supported forms, the CFG producer, why the checker is scalar and the
   emitted code's certificate, with what it doesn't decode yet.
 
+## Decoder scratch and register writes
+
+The emitted decoder keeps each node kernel's metadata before its counted scratch
+buffers (`Tier1CertEmittedKernel`, #1337). Resetting a kernel clears the metadata
+and restores its sentinels; the instruction, use and result arrays are left
+uninitialized outside their published prefixes. Every producer assigns complete
+elements before advancing the corresponding count. The reset also runs before
+call-step validation, so a refusal cannot expose an uninitialized kernel field.
+
+`tier1_cert_emitted_clobbers` compacts the written registers' location IDs from
+the effects' bitmasks. Its padded byte table preserves the previous order: each
+register number's GPR, vector and opmask locations, where present. It excludes
+rsp, ignores opmask reads, and admits xmm0–15 in narrow functions or zmm0–31 in
+wide ones. The compacted bytes are widened into bounded batches of at most 16
+locations; only the returned prefix is written. Frame clobbers still precede
+these register clobbers, with unchanged certificate IDs and chunk boundaries.
+
+`test-tier1-emit` checks frozen clobber lists for each resource bit, mixed and
+full masks, narrow/wide boundaries and partial output batches, with canaries
+around the written prefix. Its real call fixture regenerates kernels from two
+differently poisoned scratch buffers and compares their published contents.
+The existing call, frame, aggregate and wide-vector mutation tests continue to
+check the complete certificate. These checks establish correctness; #1337's
+decode/certify performance acceptance still requires the benchmark below on the
+9700X.
+
 ## Benchmark
 
 `benchmark-tier1-certificate [--only VARIANT] [-E's options] file...` times

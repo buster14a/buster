@@ -390,12 +390,6 @@ static uint32_t tier1_cert_emitted_mask(uint32_t reg, uint32_t width)
     return BUSTER_CERT_EMITTED_MASK + 4 * (reg & 7) + (width == 1 ? 0 : width == 2 ? 1 : width == 4 ? 2 : 3);
 }
 
-// A whole vector register's location, which a write to it kills: zmm's 64 bytes in a wide function, else xmm's 16.
-static uint32_t tier1_cert_emitted_vector_whole(const Tier1CertEmittedBuild* build, uint32_t reg)
-{
-    return tier1_cert_emitted_vector(build, reg, build->wide ? 64 : 16);
-}
-
 // A value's width in its certificate: a general one's 8 bytes or 4 (every narrower one is in its 32-bit canonical form), a
 // floating one's 4 or 8, a mask's own.
 static uint16_t tier1_cert_emitted_width(const Tier1EmitResult* emitted, uint32_t value)
@@ -772,7 +766,6 @@ static uint32_t tier1_cert_emitted_definition(const Tier1EmitResult* emitted, ui
 typedef struct Tier1CertEmittedKernel Tier1CertEmittedKernel;
 struct Tier1CertEmittedKernel
 {
-    X86Instruction records[BUSTER_CERT_EMITTED_KERNEL];
     LinkReference reference;
     uint32_t count;
     // The record whose immediate's form a request chooses (tier1_cert_emitted_choices), or UINT32_MAX: its request's row,
@@ -786,15 +779,11 @@ struct Tier1CertEmittedKernel
     uint32_t referenced;
     // A conditional branch's condition's form (its comparison's jcc), else X86_FORM_NONE.
     uint16_t condition;
-    uint32_t uses[BUSTER_CERT_EMITTED_USES];
-    uint32_t use_locations[BUSTER_CERT_EMITTED_USES];
     uint32_t use_count;
     uint32_t definition;
     uint32_t definition_location;
     // A call's aggregate result's parts (#789, #1284), which it defines in their registers after it: up to a split
     // vector's four (#1624, tier1_select_result_parts).
-    uint32_t results[BUSTER_TIER1_SELECT_RESULT_PARTS];
-    uint32_t result_locations[BUSTER_TIER1_SELECT_RESULT_PARTS];
     uint32_t result_count;
     // A call's outgoing area's bytes from rsp, which its callee owns: killed after it.
     uint32_t outgoing;
@@ -803,7 +792,25 @@ struct Tier1CertEmittedKernel
     // An asm body's (#1839, TIER1_RULE_ASM): its records of forms x86 semantics doesn't cover write only memory, and every
     // register it touches (IrAsmBody.touched, .masks) is killed after it, as the front end's account of its template.
     const IrAsmBody* body;
+    // Counted scratch buffers: each producer writes the complete elements it publishes, and consumers read only the
+    // prefixes named by count, use_count and result_count. Keep them after the reset prefix so unused capacity is not
+    // cleared for every node, including the wide call-operand capacity that scalar kernels rarely need (#1337).
+    X86Instruction records[BUSTER_CERT_EMITTED_KERNEL];
+    uint32_t uses[BUSTER_CERT_EMITTED_USES];
+    uint32_t use_locations[BUSTER_CERT_EMITTED_USES];
+    uint32_t results[BUSTER_TIER1_SELECT_RESULT_PARTS];
+    uint32_t result_locations[BUSTER_TIER1_SELECT_RESULT_PARTS];
 };
+
+static void tier1_cert_emitted_kernel_reset(Tier1CertEmittedKernel* kernel)
+{
+    memset(kernel, 0, offsetof(Tier1CertEmittedKernel, records));
+    kernel->referenced = UINT32_MAX;
+    kernel->request = UINT32_MAX;
+    kernel->condition = X86_FORM_NONE;
+    kernel->definition = BUSTER_TIER1_CFG_NONE;
+    kernel->definition_location = BUSTER_CERT_NONE;
+}
 
 // A use of `value` at `location`: one for each distinct pair, so that a value read at two locations (a call's argument
 // passed twice, in two registers) is proved at both.
@@ -1501,13 +1508,9 @@ static bool tier1_cert_emitted_kernel(Tier1CertEmittedBuild* build, uint32_t nod
     const uint32_t value = emitted->node_values[node];
     const bool defines = function->type[node] != IR_VOID && value != BUSTER_TIER1_CFG_NONE;
     const uint32_t destination = defines ? tier1_cert_emitted_definition(emitted, node, use + 1) : UINT32_MAX;
-    *kernel = (Tier1CertEmittedKernel){
-        .referenced = UINT32_MAX,
-        .request = UINT32_MAX,
-        .condition = X86_FORM_NONE,
-        .definition = defines ? value : BUSTER_TIER1_CFG_NONE,
-        .definition_location = defines && destination != UINT32_MAX ? tier1_cert_emitted_register(build, value, destination) : BUSTER_CERT_NONE,
-    };
+    tier1_cert_emitted_kernel_reset(kernel);
+    kernel->definition = defines ? value : BUSTER_TIER1_CFG_NONE;
+    kernel->definition_location = defines && destination != UINT32_MAX ? tier1_cert_emitted_register(build, value, destination) : BUSTER_CERT_NONE;
     bool valid = !defines || kernel->definition_location != BUSTER_CERT_NONE;
     if (valid && (op == IR_CALL || op == IR_CALL_INDIRECT))
     {
@@ -1733,6 +1736,98 @@ static bool tier1_cert_emitted_unchanged(X86Instruction record)
     return x86_effects_immediate_kind(effects) == BUSTER_X86_IMMEDIATE_VALUE && ((zero && value == 0) || (operation == X86_OPERATION_AND && value == all));
 }
 
+// The written registers' whole locations in register order, each register's general, vector and opmask locations in
+// that order. `clobbers` has room for BUSTER_CERT_EMITTED_REGISTER_CLOBBERS entries; only the returned count is written.
+// The 56 candidates fit in one byte vector. Depositing the three write masks into their interleaved positions keeps the
+// certificate's order, while compression emits only selected locations. Narrow functions have no vector past xmm15;
+// their whole vector locations are two entries past the wide layout's, the 16-byte rather than 64-byte locations.
+static uint32_t tier1_cert_emitted_clobbers(bool wide, uint64_t writes, uint16_t masks, uint32_t* clobbers)
+{
+    _Static_assert(BUSTER_CERT_EMITTED_REGISTERS <= UINT8_MAX + 1u, "register locations fit in bytes");
+    _Static_assert(BUSTER_CERT_EMITTED_REGISTER_CLOBBERS >= 16u + 32u + 8u, "register clobbers have room for every class");
+    const uint64_t general_slots = UINT64_C(0x0000005555249249);
+    const uint64_t vector_slots = UINT64_C(0x00ffffaaaa492492);
+    const uint64_t mask_slots = UINT64_C(0x0000000000924924);
+    // Registers 0..7 have three candidates, 8..15 have two, and 16..31 have only a vector candidate. The last eight bytes
+    // pad the readable load and are never selected. rsp has a candidate here but cannot be a register clobber.
+    static const uint8_t whole[64] = {
+        BUSTER_CERT_EMITTED_GPR + 0,
+        BUSTER_CERT_EMITTED_VECTOR + 0,
+        BUSTER_CERT_EMITTED_MASK + 3,
+        BUSTER_CERT_EMITTED_GPR + 2,
+        BUSTER_CERT_EMITTED_VECTOR + 5,
+        BUSTER_CERT_EMITTED_MASK + 7,
+        BUSTER_CERT_EMITTED_GPR + 4,
+        BUSTER_CERT_EMITTED_VECTOR + 10,
+        BUSTER_CERT_EMITTED_MASK + 11,
+        BUSTER_CERT_EMITTED_GPR + 6,
+        BUSTER_CERT_EMITTED_VECTOR + 15,
+        BUSTER_CERT_EMITTED_MASK + 15,
+        BUSTER_CERT_EMITTED_GPR + 8,
+        BUSTER_CERT_EMITTED_VECTOR + 20,
+        BUSTER_CERT_EMITTED_MASK + 19,
+        BUSTER_CERT_EMITTED_GPR + 10,
+        BUSTER_CERT_EMITTED_VECTOR + 25,
+        BUSTER_CERT_EMITTED_MASK + 23,
+        BUSTER_CERT_EMITTED_GPR + 12,
+        BUSTER_CERT_EMITTED_VECTOR + 30,
+        BUSTER_CERT_EMITTED_MASK + 27,
+        BUSTER_CERT_EMITTED_GPR + 14,
+        BUSTER_CERT_EMITTED_VECTOR + 35,
+        BUSTER_CERT_EMITTED_MASK + 31,
+        BUSTER_CERT_EMITTED_GPR + 16,
+        BUSTER_CERT_EMITTED_VECTOR + 40,
+        BUSTER_CERT_EMITTED_GPR + 18,
+        BUSTER_CERT_EMITTED_VECTOR + 45,
+        BUSTER_CERT_EMITTED_GPR + 20,
+        BUSTER_CERT_EMITTED_VECTOR + 50,
+        BUSTER_CERT_EMITTED_GPR + 22,
+        BUSTER_CERT_EMITTED_VECTOR + 55,
+        BUSTER_CERT_EMITTED_GPR + 24,
+        BUSTER_CERT_EMITTED_VECTOR + 60,
+        BUSTER_CERT_EMITTED_GPR + 26,
+        BUSTER_CERT_EMITTED_VECTOR + 65,
+        BUSTER_CERT_EMITTED_GPR + 28,
+        BUSTER_CERT_EMITTED_VECTOR + 70,
+        BUSTER_CERT_EMITTED_GPR + 30,
+        BUSTER_CERT_EMITTED_VECTOR + 75,
+        BUSTER_CERT_EMITTED_VECTOR + 80,
+        BUSTER_CERT_EMITTED_VECTOR + 85,
+        BUSTER_CERT_EMITTED_VECTOR + 90,
+        BUSTER_CERT_EMITTED_VECTOR + 95,
+        BUSTER_CERT_EMITTED_VECTOR + 100,
+        BUSTER_CERT_EMITTED_VECTOR + 105,
+        BUSTER_CERT_EMITTED_VECTOR + 110,
+        BUSTER_CERT_EMITTED_VECTOR + 115,
+        BUSTER_CERT_EMITTED_VECTOR + 120,
+        BUSTER_CERT_EMITTED_VECTOR + 125,
+        BUSTER_CERT_EMITTED_VECTOR + 130,
+        BUSTER_CERT_EMITTED_VECTOR + 135,
+        BUSTER_CERT_EMITTED_VECTOR + 140,
+        BUSTER_CERT_EMITTED_VECTOR + 145,
+        BUSTER_CERT_EMITTED_VECTOR + 150,
+        BUSTER_CERT_EMITTED_VECTOR + 155,
+    };
+    const uint64_t general = writes & BUSTER_X86_RESOURCE_GPRS & ~BUSTER_X86_RESOURCE_GPR(X86_REGISTER_RSP);
+    const uint64_t vectors = (writes >> BUSTER_X86_RESOURCE_VECTOR_SHIFT) & (wide ? UINT64_C(0xffffffff) : UINT64_C(0xffff));
+    const uint64_t selected = _pdep_u64(general, general_slots) | _pdep_u64(vectors, vector_slots) | _pdep_u64(masks >> 8, mask_slots);
+    const uint32_t count = (uint32_t)__builtin_popcountll(selected);
+    if (count != 0)
+    {
+        const __m512i locations = _mm512_loadu_si512(whole);
+        const __m512i adjusted = _mm512_mask_add_epi8(locations, (__mmask64)vector_slots, locations, _mm512_set1_epi8(wide ? 0 : 2));
+        __m512i compact = _mm512_maskz_compress_epi8((__mmask64)selected, adjusted);
+        for (uint32_t at = 0; at < count; at += 16)
+        {
+            const __mmask16 lanes = (__mmask16)_bzhi_u32(UINT32_MAX, count - at);
+            const __m512i expanded = _mm512_cvtepu8_epi32(_mm512_castsi512_si128(compact));
+            _mm512_mask_storeu_epi32(clobbers + at, lanes, expanded);
+            compact = _mm512_alignr_epi32(_mm512_setzero_si512(), compact, 4);
+        }
+    }
+    return count;
+}
+
 // Node `node`'s ORIGINALs, its records [first, first + count) its kernel's: its uses in eights, then every register and
 // frame range its records write, killed in eights, then its definition. A general register its records give back is not
 // killed: one that holds its own value at the run's end, followed through the records' full-width copies between general
@@ -1838,22 +1933,9 @@ static bool tier1_cert_emitted_originals(Tier1CertEmittedBuild* build, uint32_t 
     }
     valid = valid && (kernel->outgoing == 0 || tier1_cert_emitted_span(&spans, 0, kernel->outgoing, false));
     valid = valid && tier1_cert_emitted_kills(build, &spans, clobbers, &clobber_count, BUSTER_ARRAY_LENGTH(clobbers) - BUSTER_CERT_EMITTED_REGISTER_CLOBBERS);
-    for (uint32_t reg = 0; valid && reg < 32; reg += 1)
+    if (valid)
     {
-        if (reg < 16 && reg != X86_REGISTER_RSP && (writes & BUSTER_X86_RESOURCE_GPR(reg)) != 0)
-        {
-            clobbers[clobber_count++] = tier1_cert_emitted_gpr(reg, 8);
-        }
-        // A vector register a wide function's layout has (zmm16 and on its own: a machine row's, a part's staging, #1284).
-        const uint32_t whole = tier1_cert_emitted_vector_whole(build, reg);
-        if (whole != BUSTER_CERT_NONE && (writes & BUSTER_X86_RESOURCE_VECTOR(reg)) != 0)
-        {
-            clobbers[clobber_count++] = whole;
-        }
-        if (reg < 8 && ((masks >> 8 >> reg) & 1) != 0)
-        {
-            clobbers[clobber_count++] = tier1_cert_emitted_mask(reg, 8);
-        }
+        clobber_count += tier1_cert_emitted_clobbers(build->wide, writes, masks, clobbers + clobber_count);
     }
     Tier1CertSource* record = 0;
     Tier1CertInstruction* instruction = 0;
@@ -3150,7 +3232,8 @@ static bool tier1_cert_emitted_run(Tier1CertEmittedBuild* build, uint32_t node, 
         *next = end;
         return tier1_cert_emitted_asm(build, node, r, end);
     }
-    Tier1CertEmittedKernel kernel = { 0 };
+    Tier1CertEmittedKernel kernel;
+    tier1_cert_emitted_kernel_reset(&kernel);
     // A call's by-value aggregates' steps before it, all decoded (#789, #1284).
     bool valid = !calls || (tier1_cert_emitted_steps_begin(build, node) && (build->step_next == build->step_before || tier1_cert_emitted_refuse(build, TIER1_CERT_EMITTED_KERNEL, r)));
     valid = valid && (tier1_cert_emitted_kernel(build, node, &kernel) || tier1_cert_emitted_refuse(build, TIER1_CERT_EMITTED_KERNEL, r));
@@ -3260,7 +3343,8 @@ static bool tier1_cert_emitted_flush(Tier1CertEmittedBuild* build, uint32_t* cur
         const bool body = !plan->covered[n] && plan->patterns[n].rule == TIER1_RULE_ASM;
         bool silent = row || body || tier1_cert_emitted_silent(build->emitted, plan, n);
         const bool branch = function->op[n] == IR_CBR && !plan->covered[n] && degree == 2;
-        Tier1CertEmittedKernel kernel = { 0 };
+        Tier1CertEmittedKernel kernel;
+        tier1_cert_emitted_kernel_reset(&kernel);
         if (!silent || branch)
         {
             valid = tier1_cert_emitted_kernel(build, n, &kernel) && kernel.count == 0;

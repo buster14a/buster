@@ -678,6 +678,91 @@ static uint32_t tier1_code_certificate_prologue(const Tier1EmitResult* emitted, 
     return end;
 }
 
+// Compare the kernels' published contents, not their scratch capacity or structure padding. A request's metadata and
+// a reference's fields belong to the result only when the corresponding record exists.
+static bool tier1_code_certificate_kernel_same(const Tier1CertEmittedKernel* left, const Tier1CertEmittedKernel* right)
+{
+    bool same = left->count == right->count && left->use_count == right->use_count && left->result_count == right->result_count &&
+                left->count <= BUSTER_ARRAY_LENGTH(left->records) && left->use_count <= BUSTER_ARRAY_LENGTH(left->uses) && left->result_count <= BUSTER_ARRAY_LENGTH(left->results) &&
+                left->request == right->request && left->referenced == right->referenced && left->condition == right->condition &&
+                left->definition == right->definition && left->definition_location == right->definition_location &&
+                left->outgoing == right->outgoing && left->call == right->call && left->body == right->body;
+    if (same && left->request != UINT32_MAX)
+    {
+        same = left->request_value == right->request_value && left->request_row == right->request_row && left->request_context == right->request_context &&
+               left->request_destination == right->request_destination;
+    }
+    if (same && left->referenced != UINT32_MAX)
+    {
+        same = left->reference.instruction == right->reference.instruction && left->reference.field == right->reference.field && left->reference.kind == right->reference.kind &&
+               left->reference.target == right->reference.target && left->reference.addend == right->reference.addend;
+    }
+    same = same && memcmp(left->records, right->records, (uint64_t)left->count * sizeof(X86Instruction)) == 0 &&
+           memcmp(left->uses, right->uses, (uint64_t)left->use_count * sizeof(uint32_t)) == 0 &&
+           memcmp(left->use_locations, right->use_locations, (uint64_t)left->use_count * sizeof(uint32_t)) == 0 &&
+           memcmp(left->results, right->results, (uint64_t)left->result_count * sizeof(uint32_t)) == 0 &&
+           memcmp(left->result_locations, right->result_locations, (uint64_t)left->result_count * sizeof(uint32_t)) == 0;
+    return same;
+}
+
+// Reconstruct the real call fixture's emitted nodes with different prior scratch contents (#1337). Its scalar calls
+// have only register arguments and no by-value aggregates, so their step maps are empty and no frame locations are
+// needed. Selection, registers, instruction forms and references come from the fixture's actual certified emission.
+static void tier1_code_certificate_kernel_storage(Tier1EmitTest* test, const Tier1SelectPlan* plan, const Tier1EmitResult* emitted)
+{
+    const uint64_t scratch_mark = test->scratch.length;
+    const IrFunction* function = plan->function;
+    const uint32_t count = function->instruction_count;
+    bool room = function->abi_call_count == 0;
+    for (uint32_t c = 0; room && c < function->call_count; c += 1)
+    {
+        room = function->calls[c].argument_count <= BUSTER_ABI_INTEGER_ARGUMENTS;
+    }
+    uint8_t* claims = ir_allocate(&test->scratch, count, sizeof(uint8_t), &room);
+    Tier1CertEmittedStep** steps = ir_allocate(&test->scratch, count, sizeof(Tier1CertEmittedStep*), &room);
+    uint8_t* step_counts = ir_allocate(&test->scratch, count, sizeof(uint8_t), &room);
+    tier1_emit_test_expect(test, room, "the kernel scratch fixture supplies register claims and empty scalar-call step maps");
+    uint32_t calls = 0;
+    uint32_t ordinary = 0;
+    if (room)
+    {
+        memset(claims, UINT8_MAX, count);
+        memset(steps, 0, (uint64_t)count * sizeof(Tier1CertEmittedStep*));
+        memset(step_counts, 0, count);
+        Tier1CertEmittedBuild build = {
+            .plan = plan,
+            .emitted = emitted,
+            .claims = claims,
+            .base_position = 2 * (emitted->cfg_input.block_count - function->block_count),
+            .wide = tier1_cert_emitted_wide(plan, emitted),
+            .call_steps = steps,
+            .call_step_count = step_counts,
+        };
+        for (uint32_t node = 0; node < count; node += 1)
+        {
+            bool present = false;
+            for (uint32_t r = 0; !present && r < emitted->code.count; r += 1)
+            {
+                present = emitted->origins[r] == tier1_origin(TIER1_ORIGIN_NODE, node);
+            }
+            if (present)
+            {
+                Tier1CertEmittedKernel left;
+                Tier1CertEmittedKernel right;
+                memset(&left, 0xa5, sizeof(left));
+                memset(&right, 0x5a, sizeof(right));
+                const bool rebuilt = tier1_cert_emitted_kernel(&build, node, &left) && tier1_cert_emitted_kernel(&build, node, &right);
+                const bool same = rebuilt && tier1_code_certificate_kernel_same(&left, &right);
+                tier1_emit_test_expect(test, same, "real emitted kernels publish the same records and operands from differently poisoned scratch");
+                calls += same && tier1_select_function_call(function, node);
+                ordinary += same && !tier1_select_function_call(function, node);
+            }
+        }
+    }
+    tier1_emit_test_expect(test, calls == 2 && ordinary != 0, "poisoned kernel scratch covers both real calls and ordinary emitted nodes");
+    arena_pop_to(&test->scratch, scratch_mark);
+}
+
 static void tier1_code_certificate_compile(Tier1EmitTest* test, bool rematerialize, bool pointer, Tier1CodeCertificateCounts* counts)
 {
     IrFunction function;
@@ -704,6 +789,10 @@ static void tier1_code_certificate_compile(Tier1EmitTest* test, bool remateriali
     const bool certified = error == TIER1_EMIT_OK && emitted.general && emitted.code_checked && emitted.code_reason == TIER1_CERT_EMITTED_OK && emitted.frame.frame_pointer == pointer;
     tier1_emit_test_expect(test, certified, "the call fixture's code, through the CFG consumer, passes its certificate");
     counts->certified += certified;
+    if (certified)
+    {
+        tier1_code_certificate_kernel_storage(test, &plan, &emitted);
+    }
     // The call's own moves are marked at its definition phase: its arguments' moves, its saves and its restores.
     const uint32_t position = 2 * (emitted.cfg_input.block_count - function.block_count) + 2 * call + 1;
     const uint32_t moves = tier1_origin(TIER1_ORIGIN_MOVE, position);
@@ -2513,9 +2602,311 @@ static void tier1_code_certificate_choices_held(Tier1EmitTest* test)
     }
 }
 
+// #1337: frozen locations of register writes, independent of the compaction's tables. Every other resource bit and
+// every opmask read is ignored. The full register set crosses every output batch; the mixed set crosses xmm15,
+// zmm16 and zmm31, and includes rsp, whose protocol is checked separately. Canary words protect both sides of the
+// exact output prefix, including zero writes and the partial last batch.
+static void tier1_code_certificate_clobbers_case(Tier1EmitTest* test, bool wide, uint64_t writes, uint16_t masks, const uint32_t* expected, uint32_t expected_count)
+{
+    uint32_t guarded[BUSTER_CERT_EMITTED_REGISTER_CLOBBERS + 2];
+    memset(guarded, 0xa5, sizeof(guarded));
+    const uint32_t count = tier1_cert_emitted_clobbers(wide, writes, masks, guarded + 1);
+    const bool same = count == expected_count && (count == 0 || memcmp(guarded + 1, expected, count * sizeof(*expected)) == 0);
+    bool bounded = count <= BUSTER_CERT_EMITTED_REGISTER_CLOBBERS && guarded[0] == UINT32_C(0xa5a5a5a5);
+    for (uint32_t k = count + 1; bounded && k < BUSTER_ARRAY_LENGTH(guarded); k += 1)
+    {
+        bounded = guarded[k] == UINT32_C(0xa5a5a5a5);
+    }
+    if (!same || !bounded)
+    {
+        printf("  clobbers: wide=%u writes=%016" PRIx64 " masks=%04x expected=%u got=%u bounded=%u\n", wide, writes, (unsigned)masks, expected_count, count, bounded);
+    }
+    tier1_emit_test_expect(test, same && bounded, "register writes have their exact ordered locations and leave the unused output untouched");
+}
+
+static void tier1_code_certificate_clobbers(Tier1EmitTest* test)
+{
+    // Each resource bit's whole-register location in the narrow and wide layouts. UINT32_MAX is no location: rsp,
+    // and the high vector registers in a narrow function. The upper sixteen resource bits name no such register.
+    static const uint32_t single[2][48] = {
+        {
+            0,
+            2,
+            4,
+            6,
+            UINT32_MAX,
+            10,
+            12,
+            14,
+            16,
+            18,
+            20,
+            22,
+            24,
+            26,
+            28,
+            30,
+            34,
+            39,
+            44,
+            49,
+            54,
+            59,
+            64,
+            69,
+            74,
+            79,
+            84,
+            89,
+            94,
+            99,
+            104,
+            109,
+            UINT32_MAX,
+            UINT32_MAX,
+            UINT32_MAX,
+            UINT32_MAX,
+            UINT32_MAX,
+            UINT32_MAX,
+            UINT32_MAX,
+            UINT32_MAX,
+            UINT32_MAX,
+            UINT32_MAX,
+            UINT32_MAX,
+            UINT32_MAX,
+            UINT32_MAX,
+            UINT32_MAX,
+            UINT32_MAX,
+            UINT32_MAX,
+        },
+        {
+            0,
+            2,
+            4,
+            6,
+            UINT32_MAX,
+            10,
+            12,
+            14,
+            16,
+            18,
+            20,
+            22,
+            24,
+            26,
+            28,
+            30,
+            32,
+            37,
+            42,
+            47,
+            52,
+            57,
+            62,
+            67,
+            72,
+            77,
+            82,
+            87,
+            92,
+            97,
+            102,
+            107,
+            112,
+            117,
+            122,
+            127,
+            132,
+            137,
+            142,
+            147,
+            152,
+            157,
+            162,
+            167,
+            172,
+            177,
+            182,
+            187,
+        },
+    };
+    static const uint32_t mask_locations[8] = {
+        195,
+        199,
+        203,
+        207,
+        211,
+        215,
+        219,
+        223,
+    };
+    static const uint32_t full_narrow[] = {
+        0,
+        34,
+        195,
+        2,
+        39,
+        199,
+        4,
+        44,
+        203,
+        6,
+        49,
+        207,
+        54,
+        211,
+        10,
+        59,
+        215,
+        12,
+        64,
+        219,
+        14,
+        69,
+        223,
+        16,
+        74,
+        18,
+        79,
+        20,
+        84,
+        22,
+        89,
+        24,
+        94,
+        26,
+        99,
+        28,
+        104,
+        30,
+        109,
+    };
+    static const uint32_t full_wide[] = {
+        0,
+        32,
+        195,
+        2,
+        37,
+        199,
+        4,
+        42,
+        203,
+        6,
+        47,
+        207,
+        52,
+        211,
+        10,
+        57,
+        215,
+        12,
+        62,
+        219,
+        14,
+        67,
+        223,
+        16,
+        72,
+        18,
+        77,
+        20,
+        82,
+        22,
+        87,
+        24,
+        92,
+        26,
+        97,
+        28,
+        102,
+        30,
+        107,
+        112,
+        117,
+        122,
+        127,
+        132,
+        137,
+        142,
+        147,
+        152,
+        157,
+        162,
+        167,
+        172,
+        177,
+        182,
+        187,
+    };
+    static const uint32_t mixed_narrow[] = {
+        0,
+        34,
+        195,
+        14,
+        69,
+        223,
+        16,
+        74,
+        30,
+        109,
+    };
+    static const uint32_t mixed_wide[] = {
+        0,
+        32,
+        195,
+        14,
+        67,
+        223,
+        16,
+        72,
+        30,
+        107,
+        112,
+        187,
+    };
+    const uint64_t mixed = BUSTER_X86_RESOURCE_GPR(0) | BUSTER_X86_RESOURCE_GPR(4) | BUSTER_X86_RESOURCE_GPR(7) | BUSTER_X86_RESOURCE_GPR(8) | BUSTER_X86_RESOURCE_GPR(15) |
+                           BUSTER_X86_RESOURCE_VECTOR(0) | BUSTER_X86_RESOURCE_VECTOR(7) | BUSTER_X86_RESOURCE_VECTOR(8) | BUSTER_X86_RESOURCE_VECTOR(15) |
+                           BUSTER_X86_RESOURCE_VECTOR(16) | BUSTER_X86_RESOURCE_VECTOR(31);
+    for (uint32_t wide = 0; wide < 2; wide += 1)
+    {
+        for (uint32_t bit = 0; bit < 64; bit += 1)
+        {
+            const uint32_t expected = bit < BUSTER_ARRAY_LENGTH(single[0]) ? single[wide][bit] : UINT32_MAX;
+            tier1_code_certificate_clobbers_case(test, wide != 0, UINT64_C(1) << bit, 0, &expected, expected != UINT32_MAX);
+        }
+        for (uint32_t bit = 0; bit < 16; bit += 1)
+        {
+            const uint32_t expected = mask_locations[bit & 7];
+            tier1_code_certificate_clobbers_case(test, wide != 0, 0, (uint16_t)(1u << bit), &expected, bit >= 8);
+        }
+        // Exact prefixes around every sixteen-location expansion boundary. The narrow layout ends at 39 locations;
+        // the high-vector prefixes are meaningful only in the wide layout.
+        const uint32_t* const full = wide != 0 ? full_wide : full_narrow;
+        tier1_code_certificate_clobbers_case(test, wide != 0, UINT64_C(0x001f002f), UINT16_C(0x1f00), full, 15);
+        tier1_code_certificate_clobbers_case(test, wide != 0, UINT64_C(0x003f002f), UINT16_C(0x1f00), full, 16);
+        tier1_code_certificate_clobbers_case(test, wide != 0, UINT64_C(0x003f002f), UINT16_C(0x3f00), full, 17);
+        tier1_code_certificate_clobbers_case(test, wide != 0, UINT64_C(0x0fff0fef), UINT16_C(0xff00), full, 31);
+        tier1_code_certificate_clobbers_case(test, wide != 0, UINT64_C(0x0fff1fef), UINT16_C(0xff00), full, 32);
+        tier1_code_certificate_clobbers_case(test, wide != 0, UINT64_C(0x1fff1fef), UINT16_C(0xff00), full, 33);
+        if (wide != 0)
+        {
+            tier1_code_certificate_clobbers_case(test, true, UINT64_C(0x000000ffffffffef), UINT16_C(0xff00), full, 47);
+            tier1_code_certificate_clobbers_case(test, true, UINT64_C(0x000001ffffffffef), UINT16_C(0xff00), full, 48);
+            tier1_code_certificate_clobbers_case(test, true, UINT64_C(0x000003ffffffffef), UINT16_C(0xff00), full, 49);
+        }
+        tier1_code_certificate_clobbers_case(test, wide != 0, 0, 0, NULL, 0);
+        tier1_code_certificate_clobbers_case(test, wide != 0, 0, UINT16_C(0x00ff), NULL, 0);
+        tier1_code_certificate_clobbers_case(test, wide != 0, UINT64_C(0xffff000000000010), UINT16_C(0x00ff), NULL, 0);
+        tier1_code_certificate_clobbers_case(test, wide != 0, UINT64_MAX, UINT16_MAX, wide != 0 ? full_wide : full_narrow, wide != 0 ? BUSTER_ARRAY_LENGTH(full_wide) : BUSTER_ARRAY_LENGTH(full_narrow));
+        tier1_code_certificate_clobbers_case(test, wide != 0, UINT64_MAX, UINT16_C(0xff00), wide != 0 ? full_wide : full_narrow, wide != 0 ? BUSTER_ARRAY_LENGTH(full_wide) : BUSTER_ARRAY_LENGTH(full_narrow));
+        tier1_code_certificate_clobbers_case(test, wide != 0, mixed, UINT16_C(0x81ff), wide != 0 ? mixed_wide : mixed_narrow, wide != 0 ? BUSTER_ARRAY_LENGTH(mixed_wide) : BUSTER_ARRAY_LENGTH(mixed_narrow));
+    }
+}
+
 static void tier1_code_certificate_tests(Tier1EmitTest* test)
 {
     Tier1CodeCertificateCounts counts = { 0 };
+    tier1_code_certificate_clobbers(test);
     tier1_code_certificate_choices(test);
     tier1_code_certificate_choices_held(test);
     tier1_code_certificate_aggregate_copy(test);
