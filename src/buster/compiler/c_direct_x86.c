@@ -1109,10 +1109,22 @@ static inline void x86_jmp_label(FastObj* obj, uint32_t label_id)
     }
 }
 
-static inline void x86_jcc_label(FastObj* obj, uint32_t cc, uint32_t label_id)
+static inline void x86_jcc_opcode(FastObj* obj, uint32_t cc)
 {
     x86_u8(obj, 0x0fu);
     x86_u8(obj, (uint8_t)(0x80u + (cc & 0xfu)));
+}
+
+// Switch dispatch follows its case bodies, so their displacements are already known.
+static inline void x86_jcc_offset(FastObj* obj, uint32_t cc, uint32_t target)
+{
+    x86_jcc_opcode(obj, cc);
+    x86_u32(obj, target - (obj->text.len + 4u));
+}
+
+static inline void x86_jcc_label(FastObj* obj, uint32_t cc, uint32_t label_id)
+{
+    x86_jcc_opcode(obj, cc);
     const uint32_t patch = obj->text.len;
     x86_u32(obj, 0u);
     if (__builtin_expect(obj->fixup_count < obj->fixup_cap, 1))

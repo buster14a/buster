@@ -6258,7 +6258,7 @@ typedef struct FastSwitchCase FastSwitchCase;
 struct FastSwitchCase
 {
     int64_t val;
-    uint32_t label_id;
+    uint32_t text_off;
     uint16_t previous;  // one-based index of the previous case in this bucket
     uint16_t bucket;
 };
@@ -6274,33 +6274,31 @@ struct FastSwitchCtx
     uint32_t break_lbl;
 };
 
-typedef struct FastUserLabel FastUserLabel;
-struct FastUserLabel
+// Label names are already interned when preprocessing finishes. The opening brace's token position
+// identifies the function, including deferred bodies, so a new function needs no table clear.
+static uint32_t fast_cc_get_user_label(FastCCState* cc, uint32_t ident_id)
 {
-    uint32_t ident_id;
-    uint32_t label_id;
-    uint8_t defined;
-    uint8_t pad[3];
-};
-
-static uint32_t fast_cc_get_user_label(FastObj* obj, FastUserLabel* ulabels, uint32_t* ucount, uint32_t cap, uint32_t id, bool define, bool* out_ok)
-{
-    for (uint32_t i = 0; i < *ucount; i += 1)
+    if (cc->user_labels == NULL)
     {
-        if (ulabels[i].ident_id == id)
-        {
-            if (define)
-            {
-                if (ulabels[i].defined) { *out_ok = false; return 0; }
-                ulabels[i].defined = 1u;
-            }
-            return ulabels[i].label_id;
-        }
+        const uint32_t count = cc->pp->idents.count + 1u;
+        cc->user_labels = (FastUserLabel*)fast_arena_alloc(cc->arena, (uint64_t)count * sizeof(FastUserLabel), 8);
     }
-    if (*ucount >= cap) { *out_ok = false; return 0; }
-    const uint32_t lid = fast_label_new(obj);
-    ulabels[(*ucount)++] = (FastUserLabel){ .ident_id = id, .label_id = lid, .defined = define ? 1u : 0u };
-    return lid;
+    uint32_t label_id = UINT32_MAX;
+    if (cc->user_labels != NULL)
+    {
+        FastUserLabel* entry = cc->user_labels + ident_id;
+        if (entry->body_pos != cc->cur_func_body_pos)
+        {
+            entry->body_pos = cc->cur_func_body_pos;
+            entry->label_id = fast_label_new(cc->obj);
+        }
+        label_id = entry->label_id;
+    }
+    else
+    {
+        fast_cc_bail(cc, "label table full");
+    }
+    return label_id;
 }
 
 // Emit switch dispatch (dense .rodata R_X86_64_PC32 jump table for large/dense switches like sqlite3VdbeExec,
@@ -6335,13 +6333,7 @@ static __attribute__((noinline)) void fast_cc_emit_switch_dispatch(FastCCState* 
     if (n >= 4u && span_m1 < 1024u && (span_m1 + 1u) <= (uint64_t)n * 4u)
     {
         const uint32_t span = (uint32_t)(span_m1 + 1u);
-        // Reserve a local trampoline label for default if def_lbl is not yet bound (e.g. break_lbl!)
         uint32_t def_text_off = obj->labels[def_lbl];
-        uint32_t def_tramp = UINT32_MAX;
-        if (def_text_off == UINT32_MAX)
-        {
-            def_tramp = fast_label_new(obj);
-        }
 
         // sub rax, min_v; cmp rax, span-1; ja def_lbl
         if (min_v != 0)
@@ -6367,10 +6359,9 @@ static __attribute__((noinline)) void fast_cc_emit_switch_dispatch(FastCCState* 
         x86_alu_rr(obj, true, 0x01u, FREG_RCX, FREG_RDX);
         x86_jmp_reg(obj, FREG_RCX);
 
-        if (def_tramp != UINT32_MAX)
+        if (def_text_off == UINT32_MAX)
         {
-            fast_label_bind(obj, def_tramp);
-            def_text_off = obj->labels[def_tramp];
+            def_text_off = obj->text.len;
             x86_jmp_label(obj, def_lbl);
         }
 
@@ -6380,9 +6371,7 @@ static __attribute__((noinline)) void fast_cc_emit_switch_dispatch(FastCCState* 
         for (uint32_t i = 0; i < n; i += 1)
         {
             const uint32_t idx = (uint32_t)((uint64_t)cases[i].val - (uint64_t)min_v);
-            const uint32_t toff = obj->labels[cases[i].label_id];
-            if (toff == UINT32_MAX) { cc->obj->overflow = true; return; }
-            targets[idx] = toff;
+            targets[idx] = cases[i].text_off;
         }
         for (uint32_t k = 0; k < span; k += 1)
         {
@@ -6405,7 +6394,7 @@ static __attribute__((noinline)) void fast_cc_emit_switch_dispatch(FastCCState* 
             x86_mov_ri(obj, true, FREG_RCX, (uint64_t)cases[i].val);
             x86_alu_rr(obj, true, 0x39u, FREG_RAX, FREG_RCX);
         }
-        x86_jcc_label(obj, FCC_E, cases[i].label_id);
+        x86_jcc_offset(obj, FCC_E, cases[i].text_off);
     }
     x86_jmp_label(obj, def_lbl);
 }
@@ -7079,11 +7068,9 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
     {
         memset(case_heads, 0, sizeof(case_heads));
     }
-    FastUserLabel* ulabels = (FastUserLabel*)fast_arena_alloc(cc->scratch, 512u * sizeof(FastUserLabel), 8);
-    uint32_t ulabel_count = 0;
     bool saw_return_or_exit = false;
 
-    if (sw_cases == NULL || ulabels == NULL)
+    if (sw_cases == NULL)
     {
         fast_cc_bail(cc, "func scratch full");
         fast_cc_scope_leave(cc, func_scope_mark);
@@ -7229,8 +7216,6 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                 const int64_t cv = fast_cc_const_int_expr(cc, false);
                 if (fast_cc_peek(cc) != FTOK_COLON) { fast_cc_bail(cc, "expected : after case"); break; }
                 cc->pos += 1u;
-                const uint32_t clbl = fast_label_new(obj);
-                fast_label_bind(obj, clbl);
                 FastSwitchCtx* cur_sw = sw_stack + (sw_sp - 1u);
                 const uint64_t hash = (uint64_t)cv * UINT64_C(0x9e3779b97f4a7c15);
                 const uint16_t bucket = (uint16_t)(hash >> (64u - BUSTER_FSWITCH_BUCKET_BITS));
@@ -7248,7 +7233,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
                 {
                     sw_cases[sw_case_used++] = (FastSwitchCase){
                         .val = cv,
-                        .label_id = clbl,
+                        .text_off = obj->text.len,
                         .previous = head,
                         .bucket = bucket,
                     };
@@ -7274,9 +7259,9 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
             {
                 const uint32_t lid_name = fast_cc_data(cc);
                 cc->pos += 2u;
-                bool lok = true;
-                const uint32_t ll = fast_cc_get_user_label(obj, ulabels, &ulabel_count, 512u, lid_name, true, &lok);
-                if (!lok) { fast_cc_bail(cc, "duplicate or overflow label"); break; }
+                const uint32_t ll = fast_cc_get_user_label(cc, lid_name);
+                if (cc->bailout) { break; }
+                if (obj->labels[ll] != UINT32_MAX) { fast_cc_bail(cc, "duplicate label"); break; }
                 fast_label_bind(obj, ll);
                 continue;
             }
@@ -7535,9 +7520,8 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
             const uint32_t lid = fast_cc_data(cc);
             cc->pos += 1u;
             if (fast_cc_peek(cc) == FTOK_SEMI) { cc->pos += 1u; }
-            bool lok = true;
-            const uint32_t ll = fast_cc_get_user_label(obj, ulabels, &ulabel_count, 512u, lid, false, &lok);
-            if (!lok) { fast_cc_bail(cc, "label table full"); break; }
+            const uint32_t ll = fast_cc_get_user_label(cc, lid);
+            if (cc->bailout) { break; }
             x86_jmp_label(obj, ll);
             continue;
         }
@@ -7779,11 +7763,7 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
         else { fast_cc_bail(cc, "expected ; after expr stmt"); break; }
     }
 
-    // 6. Verify all goto labels were defined and non-void functions return a value
-    for (uint32_t i = 0; i < ulabel_count && !cc->bailout; i += 1)
-    {
-        if (!ulabels[i].defined) { fast_cc_bail(cc, "undefined goto label"); }
-    }
+    // Every goto has a jump fixup. fast_obj_patch_func_jumps rejects an unbound target.
     if (!cc->bailout && !cc->quiet && !ftype_is_void(ret_t) && cc->cur_func_name_id != cc->id_main && !saw_return_or_exit)
     {
         fast_cc_bail(cc, "non-void function missing return");
