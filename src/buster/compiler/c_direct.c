@@ -4609,6 +4609,8 @@ static int c_direct_unit_tests(void)
     }
 
     // Soundness bailout cases: MUST return 1 and write NOTHING!
+    // A case's tail that puts its tokens before a file's last 80 bytes, which fast_lex_one lexes, not a window.
+#define BUSTER_DIRECT_TEST_TAIL "/* A window lexes the tokens before this comment: more than eighty bytes of the file follow them. */\n"
     static const char* const bail_cases[] = {
         "#pragma push_macro(\"X\")\nint f(void) { return 0; }\n",
         "#error forced error\n",
@@ -4789,6 +4791,13 @@ static int c_direct_unit_tests(void)
         "int f(int x) { while ((x == 1)) { x += 1; } return x; }\n",
         "struct S { int a; };\nint f(struct S* s, int* p) { if ((s->a == 1)) { return 1; } return *p; }\n",
         "int f(int* p) { do { p += 1; } while (((*p == 1))); return 0; }\n",
+        // A punctuator after an empty macro's name (an object's, a function's): the window wrote no punctuator's data,
+        // so it kept the name's id, a macro's `(` to -Wparentheses-equality and a difference between two paths to the
+        // self-comparisons'. A window lexes these: a comment of more than 80 bytes follows them.
+        "#define EMPTY\nint f(int x, int y) { if (EMPTY (x == y)) { return 1; } return 0; }\n" BUSTER_DIRECT_TEST_TAIL,
+        "#define E(v)\nint f(int x, int y) { while (E(1) (x == y)) { x += 1; } return x; }\n" BUSTER_DIRECT_TEST_TAIL,
+        "#define EMPTY\nstruct S { int a; };\nint f(struct S s) { return s EMPTY .a == s.a; }\n" BUSTER_DIRECT_TEST_TAIL,
+        "#define EMPTY\nint f(int* p) { return p EMPTY [0] == p[0]; }\n" BUSTER_DIRECT_TEST_TAIL,
         // -Wformat and its family: printf's int conversion of a long, a string of an int (in a dead branch and in
         // sizeof too, as the full pipeline checks every call's), one conversion short and one over, an invalid
         // specifier, a non-literal format without arguments (-Wformat-security); fprintf's and snprintf's formats,

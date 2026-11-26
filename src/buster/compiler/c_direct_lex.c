@@ -6830,12 +6830,15 @@ static __attribute__((noinline)) bool fast_pp_window_macro(FastPP* pp, FastInclu
             return false;
         }
         // A one-parameter identity wrapper (ALWAYS(x) is (x)): its name goes, and `(x)` is the window's next tokens.
+        // Its `(` is the macro's (data 1, as the #define marks one, for -Wparentheses-equality): the window writes no
+        // punctuator's data, so the slot it takes says so (#3577).
         if (fmode == 5u)
         {
             const uint8_t* q = after_name;
             while (q < end && (*q == ' ' || *q == '\t')) { q += 1; }
             if (q < end && *q == '(')
             {
+                pp->out_data[pp->out_count] = 1u;
                 return false;
             }
         }
@@ -7149,6 +7152,10 @@ static BUSTER_DIRECT_HOT void fast_pp_emit_window(FastPP* pp, FastIncludeFile* f
                     out_count += k;
                     w->pos = t;
                     pp->out_count = out_count;
+                    // #3577: the name's slot is the next token's where the expansion is empty, and a punctuator's data
+                    // isn't written here: it would keep the name's id, which the checks read as a macro's `(` and as
+                    // an access path's difference (`if (EMPTY (x == y))`, `s EMPTY .a == s.a`).
+                    out_data[out_count] = 0u;
                     leave = fast_pp_window_macro(pp, f, id, ident_kind);
                     out_count = pp->out_count;
                     i = w->serial == f->serial ? w->pos : 0u;

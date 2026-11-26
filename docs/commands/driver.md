@@ -346,7 +346,13 @@ than its type and an `inline` main (errors), a string longer than its array
 modifiable left operand (`-Wparentheses-equality`), which a macro's grouping
 quiets: a `(` from a macro's body has data 1 (the `#define`'s loop marks it), so
 `if (IS1(x))` and sqlite's `ALWAYS(X)` stay direct, while one from a macro's
-argument (`ID((x == 1))`) leaves although the full pipeline is quiet.
+argument (`ID((x == 1))`) leaves although the full pipeline is quiet. The
+window's emitter writes no punctuator's data, so a punctuator in the slot of a
+macro name whose expansion was empty kept the name's id: `if (EMPTY (x == y))`
+read as a macro's grouping and `s EMPTY .a == s.a` as two paths, both quiet
+where the full pipeline warns. The slot is cleared before the expansion, and
+an identity wrapper's `(` (`ALWAYS(X)`, whose name goes and whose `(` is the
+file's) is marked as its body's.
 `returns_twice` (a function's), `format_arg(N)` (a prototyped function's whose
 parameter N and value point to a character type) and `may_alias` (anything's)
 are taken as the full pipeline takes them, where musl's `<setjmp.h>`,
