@@ -6368,6 +6368,8 @@ static __attribute__((cold, noinline)) bool fast_cc_array_index_questioned(const
     return !(one_past_addressed && whole) && !(found && member);
 }
 
+static bool fast_cc_sizeof_decays(const FastCCState* cc, uint32_t lparen);
+
 static BUSTER_DIRECT_HOT void fast_expr_reduce_top(FastExprCtx* ex, FastExprOp* ops, uint32_t* osp_ptr)
 {
     FastCCState* cc = ex->cc;
@@ -7435,6 +7437,12 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
                 if (cc->cur_array_params != 0 && !is_al && fast_cc_sizeof_array_param(cc))
                 {
                     fast_cc_bail(cc, "sizeof of an array parameter");
+                    break;
+                }
+                // #3577: an array decaying under a binary operator in sizeof's operand is -Wsizeof-array-decay.
+                if (!is_al && fast_cc_peek(cc) == FTOK_LPAREN && fast_cc_sizeof_decays(cc, cc->pos))
+                {
+                    fast_cc_bail(cc, "sizeof of an operator over an array");
                     break;
                 }
                 ops[osp++] = (FastExprOp){ .op = is_al ? FEOP_ALIGNOF_UNARY : FEOP_SIZEOF_UNARY };
@@ -9922,6 +9930,148 @@ static const uint8_t fast_switch_binary_precedence[FTOK_KIND_COUNT] = {
     [FTOK_PERCENT] = 13u,
 };
 
+// #3577: the loosest binary or conditional operator of tokens [S, E) outside brackets (its precedence into
+// *OUT_PRECEDENCE, fast_switch_binary_precedence's), or UINT32_MAX: the last of a left-associative level, the first of a
+// right one. A conditional's middle, between `?` and its `:`, is a bracket of its own; a cast is a prefix.
+static uint32_t fast_cc_loosest_operator(const FastCCState* cc, uint32_t s, uint32_t e, uint32_t* out_precedence)
+{
+    uint32_t best = UINT32_MAX;
+    uint32_t best_precedence = 99u;
+    bool operand = false;
+    uint32_t p = s;
+    while (p < e)
+    {
+        const uint8_t t = cc->tk[p];
+        const uint32_t precedence = fast_switch_binary_precedence[t];
+        const bool ambiguous = t == FTOK_PLUS || t == FTOK_MINUS || t == FTOK_STAR || t == FTOK_AMP;
+        if (t == FTOK_LPAREN || t == FTOK_LBRACKET || t == FTOK_LBRACE)
+        {
+            // A cast is a prefix; a compound literal, a group, a call or a subscript is an operand.
+            const bool cast = t == FTOK_LPAREN && !operand && fast_cc_is_type_start(cc, p + 1u);
+            p = fast_cc_group_end(cc, p);
+            const bool compound = cast && p < e && cc->tk[p] == FTOK_LBRACE;
+            p = compound ? fast_cc_group_end(cc, p) : p;
+            operand = !cast || compound;
+        }
+        else if ((t == FTOK_KW_SIZEOF || t == FTOK_KW_ALIGNOF) && p + 1u < e && cc->tk[p + 1u] == FTOK_LPAREN &&
+                 fast_cc_is_type_start(cc, p + 2u))
+        {
+            p = fast_cc_group_end(cc, p + 1u);
+            operand = true;
+        }
+        else if (precedence != 0 && (!ambiguous || operand))
+        {
+            const bool right = precedence == 2u || precedence == 3u;
+            if (precedence < best_precedence || (precedence == best_precedence && !right))
+            {
+                best = p;
+                best_precedence = precedence;
+            }
+            p += 1u;
+            if (t == FTOK_QUESTION)
+            {
+                // Past the middle to its `:` (nested conditionals' colons pair first).
+                uint32_t nested = 0;
+                while (p < e && (cc->tk[p] != FTOK_COLON || nested != 0))
+                {
+                    const uint8_t m = cc->tk[p];
+                    nested += (uint32_t)(m == FTOK_QUESTION);
+                    nested -= (uint32_t)(m == FTOK_COLON);
+                    p = (m == FTOK_LPAREN || m == FTOK_LBRACKET || m == FTOK_LBRACE) ? fast_cc_group_end(cc, p) : p + 1u;
+                }
+                p += 1u;
+            }
+            operand = false;
+        }
+        else if (t == FTOK_DOT || t == FTOK_ARROW)
+        {
+            p += 2u;
+            operand = true;
+        }
+        else if (t == FTOK_INC || t == FTOK_DEC)
+        {
+            p += 1u;
+        }
+        else
+        {
+            // A name, a literal, `__func__` (operands), or a prefix operator.
+            operand = t == FTOK_IDENT || t == FTOK_INT_LIT || t == FTOK_INT_U32 || t == FTOK_INT_I64 || t == FTOK_INT_U64 ||
+                      t == FTOK_FLOAT_LIT || t == FTOK_FLOAT32 || t == FTOK_FLOAT80 || t == FTOK_CHAR_LIT ||
+                      t == FTOK_STR_LIT || t == FTOK_KW_FUNC || t == FTOK_KW_GENERIC;
+            p += 1u;
+        }
+    }
+    *out_precedence = best_precedence;
+    return best;
+}
+
+// #3577: whether sizeof's parenthesized operand at LPAREN is the full pipeline's -Wsizeof-array-decay ("sizeof on pointer
+// operation will return size of 'int *' instead of 'int[3]'"), clang's warnOnSizeofOnArrayDecay: a binary operator whose
+// value has the type of an operand that is an array decaying, `+`'s either one, `-`'s left one, a comma's or an
+// assignment's right one (`sizeof(a + 0)`, `sizeof((0, a))`). An operand may be an array where it is one by name, a string
+// literal, or a postfix chain or `*` whose type its tokens don't say; an operator's value, a call, a cast and any other
+// unary operator's aren't.
+static __attribute__((cold, noinline)) bool fast_cc_sizeof_decays(const FastCCState* cc, uint32_t lparen)
+{
+    uint32_t s = lparen;
+    uint32_t e = fast_cc_group_end(cc, lparen);
+    while (s < e && cc->tk[s] == FTOK_LPAREN && fast_cc_group_end(cc, s) == e && !fast_cc_is_type_start(cc, s + 1u))
+    {
+        s += 1u;
+        e -= 1u;
+    }
+    uint32_t precedence = 0;
+    const uint32_t op = s < e ? fast_cc_loosest_operator(cc, s, e, &precedence) : UINT32_MAX;
+    const uint8_t k = op != UINT32_MAX ? cc->tk[op] : FTOK_EOF;
+    // Which sides count: bit 0 the left one, bit 1 the right one.
+    const uint32_t sides = k == FTOK_PLUS ? 3u : k == FTOK_MINUS ? 1u : (k == FTOK_COMMA || k == FTOK_ASSIGN) ? 2u : 0u;
+    bool decays = false;
+    for (uint32_t side = 0; side < 2u && !decays; side += 1u)
+    {
+        uint32_t a = side == 0 ? s : op + 1u;
+        uint32_t b = side == 0 ? op : e;
+        while (((sides >> side) & 1u) != 0 && a < b && cc->tk[a] == FTOK_LPAREN && fast_cc_group_end(cc, a) == b && !fast_cc_is_type_start(cc, a + 1u))
+        {
+            a += 1u;
+            b -= 1u;
+        }
+        uint32_t inner = 0;
+        const bool counted = ((sides >> side) & 1u) != 0 && a < b;
+        const bool operated = counted && fast_cc_loosest_operator(cc, a, b, &inner) != UINT32_MAX;
+        const uint8_t t = counted ? cc->tk[a] : FTOK_EOF;
+        const uint8_t last = counted ? cc->tk[b - 1u] : FTOK_EOF;
+        const bool unary = t == FTOK_MINUS || t == FTOK_PLUS || t == FTOK_BANG || t == FTOK_TILDE || t == FTOK_AMP || t == FTOK_INC ||
+                           t == FTOK_DEC || t == FTOK_KW_SIZEOF || t == FTOK_KW_ALIGNOF || (t == FTOK_LPAREN && fast_cc_is_type_start(cc, a + 1u) &&
+                                                                                           fast_cc_group_end(cc, a) < b && cc->tk[fast_cc_group_end(cc, a)] != FTOK_LBRACE);
+        // A call: its `)` closes a group whose `(` follows a name, a `)` or a `]`.
+        uint32_t open = b - 1u;
+        if (counted && last == FTOK_RPAREN)
+        {
+            uint32_t depth = 0;
+            uint32_t q = b;
+            while (q > a)
+            {
+                q -= 1u;
+                const uint8_t u = cc->tk[q];
+                depth += (uint32_t)(u == FTOK_RPAREN) | (uint32_t)(u == FTOK_RBRACKET) | (uint32_t)(u == FTOK_RBRACE);
+                depth -= (uint32_t)(u == FTOK_LPAREN) | (uint32_t)(u == FTOK_LBRACKET) | (uint32_t)(u == FTOK_LBRACE);
+                if (depth == 0) { break; }
+            }
+            open = q;
+        }
+        const bool call = counted && last == FTOK_RPAREN && open > a &&
+                          (cc->tk[open - 1u] == FTOK_IDENT || cc->tk[open - 1u] == FTOK_RPAREN || cc->tk[open - 1u] == FTOK_RBRACKET);
+        const uint32_t id = t == FTOK_IDENT && b == a + 1u ? cc->td[a] : 0u;
+        const uint32_t si = id != 0 && id < cc->env_cap ? cc->sym_cur[id] : 0u;
+        const bool literal = b == a + 1u && (t == FTOK_INT_LIT || t == FTOK_INT_U32 || t == FTOK_INT_I64 || t == FTOK_INT_U64 || t == FTOK_FLOAT_LIT ||
+                                              t == FTOK_FLOAT32 || t == FTOK_FLOAT80 || t == FTOK_CHAR_LIT);
+        const bool named = id != 0;
+        decays = counted && !operated && !unary && !call && !literal &&
+                 (t == FTOK_STR_LIT || (named && (si == 0 || ftype_is_array(cc->syms[si].type))) || !named);
+    }
+    return decays;
+}
+
 // #3577: whether a switch's controlling expression, tokens [START, END) of type TYPE (not _Bool), may have a boolean
 // value, the full pipeline's -Wswitch-bool (clang's Expr::isKnownToHaveBooleanValue): through parentheses, a comparison,
 // a logical operator or `!`; a `&`, `|`, `^` or conditional whose operands (arms) all are; a comma's right operand, an
@@ -9962,74 +10112,8 @@ static __attribute__((cold, noinline)) bool fast_cc_switch_boolean(const FastCCS
         }
         else
         {
-            // The loosest operator outside brackets: the last of a left-associative level, the first of a right one. A
-            // conditional's middle, between `?` and its `:`, is a bracket of its own.
-            uint32_t best = UINT32_MAX;
             uint32_t best_precedence = 99u;
-            bool operand = false;
-            uint32_t p = s;
-            while (p < e)
-            {
-                const uint8_t t = cc->tk[p];
-                const uint32_t precedence = fast_switch_binary_precedence[t];
-                const bool ambiguous = t == FTOK_PLUS || t == FTOK_MINUS || t == FTOK_STAR || t == FTOK_AMP;
-                if (t == FTOK_LPAREN || t == FTOK_LBRACKET || t == FTOK_LBRACE)
-                {
-                    // A cast is a prefix; a compound literal, a group, a call or a subscript is an operand.
-                    const bool cast = t == FTOK_LPAREN && !operand && fast_cc_is_type_start(cc, p + 1u);
-                    p = fast_cc_group_end(cc, p);
-                    const bool compound = cast && p < e && cc->tk[p] == FTOK_LBRACE;
-                    p = compound ? fast_cc_group_end(cc, p) : p;
-                    operand = !cast || compound;
-                }
-                else if ((t == FTOK_KW_SIZEOF || t == FTOK_KW_ALIGNOF) && p + 1u < e && cc->tk[p + 1u] == FTOK_LPAREN &&
-                         fast_cc_is_type_start(cc, p + 2u))
-                {
-                    p = fast_cc_group_end(cc, p + 1u);
-                    operand = true;
-                }
-                else if (precedence != 0 && (!ambiguous || operand))
-                {
-                    const bool right = precedence == 2u || precedence == 3u;
-                    if (precedence < best_precedence || (precedence == best_precedence && !right))
-                    {
-                        best = p;
-                        best_precedence = precedence;
-                    }
-                    p += 1u;
-                    if (t == FTOK_QUESTION)
-                    {
-                        // Past the middle to its `:` (nested conditionals' colons pair first).
-                        uint32_t nested = 0;
-                        while (p < e && (cc->tk[p] != FTOK_COLON || nested != 0))
-                        {
-                            const uint8_t m = cc->tk[p];
-                            nested += (uint32_t)(m == FTOK_QUESTION);
-                            nested -= (uint32_t)(m == FTOK_COLON);
-                            p = (m == FTOK_LPAREN || m == FTOK_LBRACKET || m == FTOK_LBRACE) ? fast_cc_group_end(cc, p) : p + 1u;
-                        }
-                        p += 1u;
-                    }
-                    operand = false;
-                }
-                else if (t == FTOK_DOT || t == FTOK_ARROW)
-                {
-                    p += 2u;
-                    operand = true;
-                }
-                else if (t == FTOK_INC || t == FTOK_DEC)
-                {
-                    p += 1u;
-                }
-                else
-                {
-                    // A name, a literal, `__func__` (operands), or a prefix operator.
-                    operand = t == FTOK_IDENT || t == FTOK_INT_LIT || t == FTOK_INT_U32 || t == FTOK_INT_I64 || t == FTOK_INT_U64 ||
-                              t == FTOK_FLOAT_LIT || t == FTOK_FLOAT32 || t == FTOK_FLOAT80 || t == FTOK_CHAR_LIT ||
-                              t == FTOK_STR_LIT || t == FTOK_KW_FUNC || t == FTOK_KW_GENERIC;
-                    p += 1u;
-                }
-            }
+            const uint32_t best = fast_cc_loosest_operator(cc, s, e, &best_precedence);
             if (best != UINT32_MAX && count + 2u <= 16u)
             {
                 const uint8_t op = cc->tk[best];

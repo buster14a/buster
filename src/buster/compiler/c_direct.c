@@ -4509,6 +4509,9 @@ static int c_direct_unit_tests(void)
         "    memcpy(p, q, sizeof(r)); memcpy(&p, &q, sizeof(p)); memcpy(p, q, n * sizeof(p)); memcpy(v, w, sizeof(v));\n"
         "    return abs(h) + abs(n) + labs(ll) + (long)fabs(fl) + s.a + a[0];\n"
         "}\n",
+        // 17. Sizeofs the full pipeline's -Wsizeof-array-decay leaves alone: of a conditional of arrays, an int sum, a
+        // comparison with an array, a comma's array on the left.
+        "int sized2(int c, int n, int* p) { int a[3] = { 0 }, b[3] = { 0 }; return (int)sizeof(c ? a : b) + (int)sizeof(n + 1) + (int)sizeof(a == p) + (int)sizeof((a, 0)); }\n",
     };
 
     for (uint32_t i = 0; i < sizeof(valid_cases) / sizeof(valid_cases[0]); i += 1)
@@ -4656,6 +4659,9 @@ static int c_direct_unit_tests(void)
         // -Wempty-body: an if's empty statement on its condition's line, and a switch's.
         "int f(int x) { if (x); return x; }\n",
         "int f(int x) { switch (x); return x; }\n",
+        // -Wsizeof-array-decay: sizeof of an array under + and a comma.
+        "int f(void) { int a[3] = { 0 }; return (int)sizeof(a + 0); }\n",
+        "int f(void) { int a[3] = { 0 }; return (int)sizeof((0, a)); }\n",
     };
     for (uint32_t i = 0; i < sizeof(bail_cases) / sizeof(bail_cases[0]); i += 1)
     {
