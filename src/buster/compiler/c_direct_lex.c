@@ -4601,27 +4601,29 @@ static void fast_pp_apply_op(FastPP* pp, uint16_t op, FastPPVal* vals, uint32_t*
     // converted together, nor && and ||), a signed overflow (+ - *, INT64_MIN / -1, which also traps on x86), a shift
     // count out of range or negative, and a negative value shifted left; the computations below are then defined.
     // (Branch-free: #if lines and constant expressions apply operators by the thousand.)
+    // (A test of the operator first: #if lines apply operators by the thousand, and each asks its own question.)
     const uint32_t shift = (uint32_t)(op == FTOK_LSHIFT) | (uint32_t)(op == FTOK_RSHIFT);
     const uint32_t logical = (uint32_t)(op == FTOK_LAND) | (uint32_t)(op == FTOK_LOR);
     const uint32_t a_negative = (uint32_t)!a.is_unsigned & (uint32_t)((int64_t)a.val < 0);
     const uint32_t b_negative = (uint32_t)!b.is_unsigned & (uint32_t)((int64_t)b.val < 0);
-    const uint32_t negative_made_unsigned = (uint32_t)u & (shift ^ 1u) & (logical ^ 1u) & (a_negative | b_negative);
-    int64_t ignored_sum = 0;
-    int64_t ignored_difference = 0;
-    int64_t ignored_product = 0;
-    const uint32_t add_overflow = (uint32_t)__builtin_add_overflow((int64_t)a.val, (int64_t)b.val, &ignored_sum);
-    const uint32_t sub_overflow = (uint32_t)__builtin_sub_overflow((int64_t)a.val, (int64_t)b.val, &ignored_difference);
-    const uint32_t mul_overflow = (uint32_t)__builtin_mul_overflow((int64_t)a.val, (int64_t)b.val, &ignored_product);
-    const uint32_t division = (uint32_t)(op == FTOK_SLASH) | (uint32_t)(op == FTOK_PERCENT);
-    const uint32_t overflow = (uint32_t)!u & (((uint32_t)(op == FTOK_PLUS) & add_overflow) | ((uint32_t)(op == FTOK_MINUS) & sub_overflow) |
-                                              ((uint32_t)(op == FTOK_STAR) & mul_overflow) |
-                                              (division & (uint32_t)(a.val == (uint64_t)INT64_MIN) & (uint32_t)((int64_t)b.val == -1)));
-    // A left shift of a non-negative signed value by 1 to 63 loses bits when any is at or above bit 63 - count (the
-    // count is masked where it is out of range, which is refused anyway).
-    const uint32_t bits_lost = (uint32_t)(b.val != 0) & (uint32_t)((a.val >> ((63u - b.val) & 63u)) != 0);
-    const uint32_t bad_shift = shift & (b_negative | (uint32_t)(b.val >= 64u) |
-                                        ((uint32_t)(op == FTOK_LSHIFT) & (uint32_t)!a.is_unsigned & ((uint32_t)((int64_t)a.val < 0) | bits_lost)));
-    if ((negative_made_unsigned | overflow | bad_shift) != 0)
+    uint32_t diagnosed = (uint32_t)u & (shift ^ 1u) & (logical ^ 1u) & (a_negative | b_negative);
+    if (!u && (op == FTOK_PLUS || op == FTOK_MINUS || op == FTOK_STAR || op == FTOK_SLASH || op == FTOK_PERCENT))
+    {
+        int64_t ignored = 0;
+        if (op == FTOK_PLUS) { diagnosed |= (uint32_t)__builtin_add_overflow((int64_t)a.val, (int64_t)b.val, &ignored); }
+        else if (op == FTOK_MINUS) { diagnosed |= (uint32_t)__builtin_sub_overflow((int64_t)a.val, (int64_t)b.val, &ignored); }
+        else if (op == FTOK_STAR) { diagnosed |= (uint32_t)__builtin_mul_overflow((int64_t)a.val, (int64_t)b.val, &ignored); }
+        else { diagnosed |= (uint32_t)(a.val == (uint64_t)INT64_MIN) & (uint32_t)((int64_t)b.val == -1); }
+    }
+    else if (shift != 0)
+    {
+        // A left shift of a non-negative signed value by 1 to 63 loses bits when any is at or above bit 63 - count (the
+        // count is masked where it is out of range, which is refused anyway).
+        const uint32_t bits_lost = (uint32_t)(b.val != 0) & (uint32_t)((a.val >> ((63u - b.val) & 63u)) != 0);
+        diagnosed |= b_negative | (uint32_t)(b.val >= 64u) |
+                     ((uint32_t)(op == FTOK_LSHIFT) & (uint32_t)!a.is_unsigned & ((uint32_t)((int64_t)a.val < 0) | bits_lost));
+    }
+    if (diagnosed != 0)
     {
         fast_pp_bail(pp, "pp constant expression the full pipeline diagnoses");
         return;
@@ -4967,7 +4969,14 @@ static void fast_pp_finish_directive(FastPP* pp, FastIncludeFile* f)
     uint32_t line = f->line;
     uint32_t extra = 0;
     uint32_t line_comment = 0;
-    while (p < end)
+    // Most directives end where their operands do, at the newline: fast_pp_skip_to_eol's test, ahead of the walk.
+    const uint32_t ended = (uint32_t)(p < end) && *p == '\n';
+    if (__builtin_expect(ended != 0, 1))
+    {
+        p += 1;
+        line += 1u;
+    }
+    while (ended == 0 && p < end)
     {
         if (*p == '\n')
         {

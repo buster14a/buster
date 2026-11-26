@@ -579,14 +579,19 @@ static inline FastType ftype_with_const(FastType t)
 // to 127 into any; in the int32 range into a 32- or 64-bit integer, _Bool or double; and from 0 to 2^32 - 1 into an
 // integer whose width holds it as a non-negative value. An unsigned 64-bit source's bits of 2^63 or more are none of
 // these. 1 or 0, branch-free: constants are converted by the ten thousand.
+// The three ranges' union is one interval for each target kind, [lo, hi] below (an empty one, 1 to 0, for the kinds none
+// of them takes): two compares and the unsigned 64-bit source's test.
+static const int64_t fast_int_settled_lo[32] = {
+    1, INT32_MIN, -128, -128, -128, -128, INT32_MIN, INT32_MIN, INT32_MIN, INT32_MIN, -128, INT32_MIN, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+};
+static const int64_t fast_int_settled_hi[32] = {
+    0, INT32_MAX, 127, 255, 32767, 65535, INT32_MAX, UINT32_MAX, UINT32_MAX, UINT32_MAX, 127, INT32_MAX, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+};
 #define BUSTER_FAST_INT_SETTLED(value, skind, dkind) \
-    ((uint32_t)(((skind) != FTYPE_U64) | ((value) >= 0)) & \
-     (((uint32_t)((uint64_t)(value) + UINT64_C(128) < UINT64_C(256)) & (uint32_t)((dkind) - FTYPE_BOOL <= FTYPE_F64 - FTYPE_BOOL)) | \
-      ((uint32_t)((uint64_t)(value) + UINT64_C(0x80000000) < UINT64_C(0x100000000)) & \
-       ((uint32_t)((dkind) - FTYPE_I32 <= FTYPE_U64 - FTYPE_I32) | (uint32_t)((dkind) == FTYPE_F64) | (uint32_t)((dkind) == FTYPE_BOOL))) | \
-      ((uint32_t)((uint64_t)(value) < UINT64_C(0x100000000)) & (uint32_t)((dkind) - FTYPE_I8 <= FTYPE_U64 - FTYPE_I8) & \
-       ((uint32_t)(((uint64_t)(value) >> (((8u << ((((dkind) - FTYPE_I8) >> 1) & 3u)) - (((dkind) & 1u) ^ 1u)) & 63u)) == 0) | \
-        (uint32_t)(((((dkind) - FTYPE_I8) >> 1) & 3u) == 3u)))))
+    ((uint32_t)(((skind) != FTYPE_U64) | ((value) >= 0)) & (uint32_t)((int64_t)(value) >= fast_int_settled_lo[(dkind) & 31u]) & \
+     (uint32_t)((int64_t)(value) <= fast_int_settled_hi[(dkind) & 31u]))
 
 // A pointer's own volatile (`int *volatile`), which a deeper pointer records as a qualifier it drops (#3577).
 static inline FastType ftype_with_volatile(FastType t)
@@ -647,19 +652,21 @@ static const uint8_t fast_operand_complex_class[8] = { 3, 3, 3, 0, 2, 2, 2, 3 };
 // Whether a type is one sizeof can't measure (#3577): a struct, union, enum or array not (yet) complete, which the full
 // pipeline refuses; void and a function type are GNU's 1. Branch-free.
 // (A macro, not a function: every subscript and sizeof asks.)
+// (A scalar or a pointer, most types asked, is complete without the table: a test of the type's bits first.)
 #define BUSTER_FAST_TYPE_INCOMPLETE(cc, t) \
-    ((uint32_t)((uint32_t)(t) >> 31) & (uint32_t)(((uint32_t)(t) & BUSTER_FTYPE_PTR_MASK) == 0) & \
-     (uint32_t)((cc)->ctypes[(uint32_t)(t) & BUSTER_FTYPE_CIDX_MASK & BUSTER_FTYPE_COMPLEX_ALL(t)].complete == 0) & \
-     (uint32_t)((cc)->ctypes[(uint32_t)(t) & BUSTER_FTYPE_CIDX_MASK & BUSTER_FTYPE_COMPLEX_ALL(t)].kind != FCTYPE_FUNC) & \
-     (uint32_t)((cc)->ctypes[(uint32_t)(t) & BUSTER_FTYPE_CIDX_MASK & BUSTER_FTYPE_COMPLEX_ALL(t)].kind != FCTYPE_PTR))
+    ((((uint32_t)(t) & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) != BUSTER_FTYPE_COMPLEX_BIT) ? 0u : \
+     ((uint32_t)((cc)->ctypes[(uint32_t)(t) & BUSTER_FTYPE_CIDX_MASK].complete == 0) & \
+      (uint32_t)((cc)->ctypes[(uint32_t)(t) & BUSTER_FTYPE_CIDX_MASK].kind != FCTYPE_FUNC) & \
+      (uint32_t)((cc)->ctypes[(uint32_t)(t) & BUSTER_FTYPE_CIDX_MASK].kind != FCTYPE_PTR)))
 
 // Whether an object can't have a type (#3577), the full pipeline's "variable has incomplete type": void, or a struct,
 // union, enum or array not (yet) complete; an array of unknown size takes its size from an initializer, where SIZED is
 // 1. Branch-free: every declarator asks.
 #define BUSTER_FAST_OBJECT_INCOMPLETE(cc, t, sized) \
-    ((BUSTER_FAST_TYPE_INCOMPLETE(cc, t) & \
-      ~((uint32_t)(sized) & (uint32_t)((cc)->ctypes[(uint32_t)(t) & BUSTER_FTYPE_CIDX_MASK & BUSTER_FTYPE_COMPLEX_ALL(t)].kind == FCTYPE_ARRAY))) | \
-     (uint32_t)(((uint32_t)(t) & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK)) == FTYPE_VOID))
+    ((((uint32_t)(t) & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) != BUSTER_FTYPE_COMPLEX_BIT) ? \
+     (uint32_t)(((uint32_t)(t) & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK)) == FTYPE_VOID) : \
+     (BUSTER_FAST_TYPE_INCOMPLETE(cc, t) & \
+      ~((uint32_t)(sized) & (uint32_t)((cc)->ctypes[(uint32_t)(t) & BUSTER_FTYPE_CIDX_MASK].kind == FCTYPE_ARRAY))))
 
 static inline uint32_t ftype_size(const FastCCState* cc, FastType t)
 {
@@ -710,9 +717,13 @@ static FastType ftype_make_ptr(FastCCState* cc, FastType t)
         FastType res = ftype_unqual(t) + (UINT32_C(1) << BUSTER_FTYPE_PTR_SH);
         if (d == 0 && inner_const) { res |= BUSTER_FTYPE_PCONST; }
         // #3577: a volatile pointee is kept as a const one is (PVOL), and a qualifier of an inner pointer that a deeper
-        // one can't keep marks the type (QDEEP), so that a conversion that would drop either finds it. Branch-free.
-        res |= BUSTER_FTYPE_PVOL * ((uint32_t)(d == 0) & (uint32_t)((t & BUSTER_FTYPE_VOL) != 0));
-        res |= BUSTER_FTYPE_QDEEP * ((uint32_t)(d != 0) & (uint32_t)((t & (BUSTER_FTYPE_CONST | BUSTER_FTYPE_VOL)) != 0));
+        // one can't keep marks the type (QDEEP), so that a conversion that would drop either finds it. Asked of a
+        // qualified pointee alone, which few are.
+        if ((t & (BUSTER_FTYPE_CONST | BUSTER_FTYPE_VOL)) != 0)
+        {
+            res |= BUSTER_FTYPE_PVOL * ((uint32_t)(d == 0) & (uint32_t)((t & BUSTER_FTYPE_VOL) != 0));
+            res |= BUSTER_FTYPE_QDEEP * (uint32_t)(d != 0);
+        }
         return res;
     }
     const uint32_t idx = fast_cc_alloc_ctype(cc, FCTYPE_PTR);
@@ -735,11 +746,15 @@ static FastType ftype_deref(const FastCCState* cc, FastType t)
         FastType res = ftype_unqual(t) - (UINT32_C(1) << BUSTER_FTYPE_PTR_SH);
         if (d == 1u && (t & BUSTER_FTYPE_PCONST) != 0) { res = (res & ~BUSTER_FTYPE_PCONST) | BUSTER_FTYPE_CONST; }
         // #3577: a volatile pointee becomes the value's volatile; a dropped qualifier of the level a depth-2 pointer reaches
-        // is that value's own, which no conversion reads (taken as const, to stay on the safe side).
-        const uint32_t pointee_volatile = (uint32_t)(d == 1u) & (uint32_t)((t & BUSTER_FTYPE_PVOL) != 0);
-        const uint32_t level_qualified = (uint32_t)(d == 2u) & (uint32_t)((t & BUSTER_FTYPE_QDEEP) != 0);
-        res = (res & ~(BUSTER_FTYPE_PVOL * pointee_volatile) & ~(BUSTER_FTYPE_QDEEP * level_qualified)) |
-              (BUSTER_FTYPE_VOL * pointee_volatile) | (BUSTER_FTYPE_CONST * level_qualified);
+        // is that value's own, which no conversion reads (taken as const, to stay on the safe side). Asked of a type
+        // with either mark alone.
+        if ((t & (BUSTER_FTYPE_PVOL | BUSTER_FTYPE_QDEEP)) != 0)
+        {
+            const uint32_t pointee_volatile = (uint32_t)(d == 1u) & (uint32_t)((t & BUSTER_FTYPE_PVOL) != 0);
+            const uint32_t level_qualified = (uint32_t)(d == 2u) & (uint32_t)((t & BUSTER_FTYPE_QDEEP) != 0);
+            res = (res & ~(BUSTER_FTYPE_PVOL * pointee_volatile) & ~(BUSTER_FTYPE_QDEEP * level_qualified)) |
+                  (BUSTER_FTYPE_VOL * pointee_volatile) | (BUSTER_FTYPE_CONST * level_qualified);
+        }
         return res;
     }
     if (ftype_has_kind(t, FCTYPE_PTR))
