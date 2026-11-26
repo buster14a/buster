@@ -10745,6 +10745,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             check_test_driver_shift_counts(&test, clang, executable, directory);
             check_test_driver_conditions(&test, clang, executable, directory);
+            check_test_driver_missing_variable(&test, clang, executable, directory);
         }
         // Each of these checks is a unit of its own, of the weight it took on a 4-CPU Xeon VM (#3399). Grouped in two units,
         // the warnings' sweeps (one added with each warning) made one part the driver's longest by far, past parallel's
@@ -10890,10 +10891,6 @@ static int run_checker_driver_tests(int argc, char** argv)
             {
                 .check = check_test_driver_gnu_line_marker,
                 .weight = 80,
-            },
-            {
-                .check = check_test_driver_missing_variable,
-                .weight = BUSTER_CHECK_DRIVER_UNIT_WEIGHT,
             },
             {
                 .check = check_test_driver_integer_overflow,

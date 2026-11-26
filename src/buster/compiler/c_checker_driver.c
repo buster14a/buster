@@ -2929,6 +2929,14 @@ static CheckWarningSeverity check_driver_legacy_severity(Preprocessor* pp, const
     return severity;
 }
 
+// A tentative candidate awaits the semantic initializer walk (#2222). payload.token is its rejected-definition
+// prerequisite until check_driver_missing_variable_filter resolves it; ordinary events carry NO_SOURCE there.
+static bool check_driver_missing_variable_pending(const CheckWarningEvent* event)
+{
+    return event->kind == CHECK_WARNING_EVENT_MISSING_VARIABLE_DECLARATIONS && event->completion_kind == CHECK_WARNING_COMPLETE_TU_END &&
+           event->payload.token != BUSTER_CHECK_WARNING_NO_SOURCE;
+}
+
 // The reader's warning events to publish on a unit with errors (#1447), as clang leaves out those its errors suppress:
 // - ActOnEndOfTranslationUnit gives no unused file-scope declaration's warning once an error has occurred, so a rejected
 //   unit's unused functions' and file-scope objects' warnings, which complete at the unit's end, are left out;
@@ -2978,7 +2986,8 @@ static bool check_driver_rejected_warnings(const Parser* parser, const CheckWarn
             }
             const bool scoped = errors != NULL && close < count && errors[close + 1] != errors[start];
             kept[total] = *event;
-            total += !(unit_end || scoped);
+            // Recovery rereads do not check the original initializer. Their unresolved candidates cannot publish.
+            total += !(unit_end || scoped || check_driver_missing_variable_pending(event));
         }
         view->events = valid ? kept : events->events;
         view->count = valid ? total : events->count;
@@ -2986,20 +2995,22 @@ static bool check_driver_rejected_warnings(const Parser* parser, const CheckWarn
     return valid;
 }
 
-// A hard rejected initializer leaves no variable definition for FinalizeDeclaration's missing-extern warning (#2222).
-// Keep the reader's published prefix immutable; only a diagnostic recovery with rejected candidates copies the view.
+// A hard rejected initializer leaves no variable definition for FinalizeDeclaration's missing-extern warning (#2222),
+// but can restore the entity's acting tentative definition. Resolve those conditional events before promotion, keeping
+// the reader's published prefix immutable. Only rejected or conditional candidates require a private copied view.
 static bool check_driver_missing_variable_filter(CheckWarningEvents* view, const uint8_t* invalid, uint32_t tokens, Arena* arena)
 {
     bool valid = true;
-    bool rejected = false;
+    bool changed = false;
     const uint32_t count = view->count;
     const CheckWarningEvent* const events = view->events;
-    for (uint32_t i = 0; invalid != NULL && !rejected && i < count; i += 1)
+    for (uint32_t i = 0; !changed && i < count; i += 1)
     {
-        rejected = events[i].kind == CHECK_WARNING_EVENT_MISSING_VARIABLE_DECLARATIONS &&
-                   events[i].completion_kind != CHECK_WARNING_COMPLETE_TU_END && events[i].token < tokens && invalid[events[i].token] != 0;
+        changed = check_driver_missing_variable_pending(events + i) ||
+                  (invalid != NULL && events[i].kind == CHECK_WARNING_EVENT_MISSING_VARIABLE_DECLARATIONS &&
+                   events[i].completion_kind != CHECK_WARNING_COMPLETE_TU_END && events[i].token < tokens && invalid[events[i].token] != 0);
     }
-    if (rejected)
+    if (changed)
     {
         CheckWarningEvent* kept = BUSTER_ARENA_PUSH_ARRAY(arena, CheckWarningEvent, count);
         valid = kept != NULL;
@@ -3007,9 +3018,12 @@ static bool check_driver_missing_variable_filter(CheckWarningEvents* view, const
         for (uint32_t i = 0; valid && i < count; i += 1)
         {
             const CheckWarningEvent* event = events + i;
-            const bool remove = event->kind == CHECK_WARNING_EVENT_MISSING_VARIABLE_DECLARATIONS &&
+            const bool pending = check_driver_missing_variable_pending(event);
+            const bool remove = pending ? invalid == NULL || event->payload.token >= tokens || invalid[event->payload.token] == 0 :
+                                invalid != NULL && event->kind == CHECK_WARNING_EVENT_MISSING_VARIABLE_DECLARATIONS &&
                                 event->completion_kind != CHECK_WARNING_COMPLETE_TU_END && event->token < tokens && invalid[event->token] != 0;
             kept[total] = *event;
+            kept[total].payload.token = pending ? BUSTER_CHECK_WARNING_NO_SOURCE : event->payload.token;
             total += !remove;
         }
         view->events = valid ? kept : events;
@@ -9014,6 +9028,21 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
             const uint64_t key = (uint64_t)at << 32 | events->events[i].kind;
             const bool known_event = check_driver_rejected_event_known(sorted, known_count, key);
             bool errored = false;
+            if (events->events[i].kind == CHECK_WARNING_EVENT_MISSING_VARIABLE_DECLARATIONS && at < count)
+            {
+                // The original declaration's initializer decision owns its warning, including a discarded one.
+                // Removing its failed initializer in a recovery view must not invent a new tentative definition.
+                errored = at < unit_stop && at < first_input->token_count && first_input->declarations != NULL &&
+                          first_input->declarations[at] == at;
+                for (uint32_t j = 0; !errored && j < first_input->report_count; j += 1)
+                {
+                    const CheckInputReport* report = first_input->reports + j;
+                    // This error follows type checking: the rejected block initializer still leaves an extern
+                    // declaration, though recovery omits its body. An invalid type's extern has no such report.
+                    errored = report->message == CHECK_INPUT_BLOCK_EXTERN_INITIALIZER && report->token < at &&
+                              unit->tokens.names[report->token] == unit->tokens.names[at];
+                }
+            }
             // Omitting a first call can make a later use look like the first undeclared use of the same builtin.
             // The header warning belongs to the original lookup, including when policy silenced it there.
             if (!known_event && events->events[i].kind == CHECK_WARNING_EVENT_BUILTIN_HEADER)
@@ -14328,7 +14357,7 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                             }
                         }
                     }
-                    if (!check_driver_missing_variable_filter(&input.warning_events, invalid_variable_definitions, input.token_count, output_arena))
+                    if (input.missing_variable_warnings && !check_driver_missing_variable_filter(&input.warning_events, invalid_variable_definitions, input.token_count, output_arena))
                     {
                         check_common_exhausted(pp);
                     }
@@ -14888,6 +14917,12 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
             }
             else
             {
+                // No initializer walk ran for this rejected reader. Its conditional tentative candidates remain
+                // unproved and cannot be promoted or rendered as completed definitions.
+                if (input.missing_variable_warnings && !check_driver_missing_variable_filter(&input.warning_events, NULL, input.token_count, output_arena))
+                {
+                    check_common_exhausted(pp);
+                }
                 // (With a statement start's typo corrections' errors, check_driver_typo_errors.)
                 CheckDriverDiagnostic* typo_errors = typo_edits.count != 0 ? BUSTER_ARENA_PUSH_ARRAY(output_arena, CheckDriverDiagnostic, 2 * typo_edits.count) : NULL;
                 const uint32_t typo_count = typo_errors != NULL ? check_driver_typo_errors(&typo_edits, parser, checking, pp, typo_errors, 0, output_arena) : 0;

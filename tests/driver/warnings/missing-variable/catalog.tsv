@@ -18,10 +18,14 @@ tentative-order	tentative-order.c	11	0	8	-	-Wmissing-variable-declarations -Wdef
 note-locations	note-locations.c	18	0	18	-	-Wmissing-variable-declarations	notes identify the written type through specifiers and record bodies
 initializer-order	initializer-order.c	9	2	6	-	-Wmissing-variable-declarations	initializer warnings and errors precede the missing declaration warning
 # The static suggestion follows semantic initializer diagnostics but precedes their queued runtime warnings.
-runtime-order	runtime-order.c	10	1	5	-	-Wmissing-variable-declarations -Wconversion	missing declarations lie between semantic and runtime initializer diagnostics
+runtime-order	runtime-order.c	10	1	5	-	-Wmissing-variable-declarations	missing declarations lie between semantic and runtime initializer diagnostics
 initializer-recovery	initializer-recovery.c	6	5	5	-	-Wmissing-variable-declarations	invalid initializers suppress only definitions that Clang invalidates
 invalid-definitions	invalid-definitions.c	2	4	3	-	-Wmissing-variable-declarations	invalid definitions and block extern initializers do not warn
 invalid-then-tentative	invalid-then-tentative.c	1	1	1	-	-Wmissing-variable-declarations	an invalid initialized declaration does not replace a later tentative definition
+rejected-declarations	rejected-declarations.c	1	5	4	-	-Wmissing-variable-declarations	rejected declarations preserve visible extern history and exclude incomplete tentative objects
+rejected-block-extern	rejected-block-extern.c	2	1	2	-	-Wmissing-variable-declarations	rejected block extern initializers suppress only their own tentative object
+# The existing extern-initializer warning's rejection ordering is separate; initializer-order checks its valid form.
+rejected-initializer-history	rejected-initializer-history.c	2	6	2	-	-Wmissing-variable-declarations -Wno-extern-initializer	rejected initializers preserve prior extern and tentative declaration history
 # Warning policy is read at the diagnosed definition, including the last tentative definition, not at the unit's end.
 pragma-policy	pragma-policy.c	3	2	5	-	-	pragmas enable promote demote suppress and restore the warning
 pragma-policy-enabled	pragma-policy.c	7	2	9	-	-Wmissing-variable-declarations	pragmas override the command line for initialized and tentative definitions

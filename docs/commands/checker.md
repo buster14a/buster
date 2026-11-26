@@ -1413,14 +1413,17 @@ declarations from the binding stream in masked 64-event blocks and joins them by
 canonical object identity. Two temporary token-indexed `uint32_t` columns retain
 the first extern declaration and the accepted binding handle; they remain private
 to this reader and its existing tentative-definition pass. Ordinary compilations
-allocate neither column. Failed initializer checking can return a separate sparse-use
-byte mask to suppress invalid definitions while retaining warnings after nonconstant
-initializers and recoverable pointer/integer conversions.
+allocate neither column. Failed initializer checking allocates a separate byte mask
+only for rejected definitions. The driver uses it before warning promotion to suppress
+invalid definitions and resolve provisional tentative definitions, while retaining
+warnings after nonconstant initializers and recoverable pointer/integer conversions.
+Recovery reads preserve the original declaration's warning decision and a type-valid
+block extern declaration whose initializer was rejected.
 
 `test-checker-driver --missing-variable-only --in-process` runs the original
 `tests/driver/warnings/missing-variable/` catalog through the shared warning harness.
 It compares complete Clang diagnostics and exit status, source-policy changes,
 system headers, macro notes, syntax/object modes and requested lane counts, including
-preservation of an existing output after rejection. The suite also runs in the
-ordinary checker-driver inventory. Clang is an external oracle; no implementation
-or fixture was imported.
+preservation of an existing output after rejection. The ordinary checker-driver
+inventory distributes the suite's individual fixtures across its test parts. Clang
+is an external oracle; no implementation or fixture was imported.

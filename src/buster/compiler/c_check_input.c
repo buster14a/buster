@@ -17190,6 +17190,33 @@ static void check_input_expressions(CheckInputReader* reader)
     }
 }
 
+// The tentative object's first declaration orders its end-of-unit diagnostics, including a recovery reread's.
+// Pack, weak and undefined-internal diagnostics already use 1, 2 and 3; unused declarations keep zero, ordered last.
+static uint64_t check_input_tentative_suborder(const Parser* parser, uint32_t first, uint32_t rank)
+{
+    return UINT64_C(4) + UINT64_C(3) * parse_source_index(&parser->tokens, first) + rank;
+}
+
+// Completeness errors can name a later tentative declaration. On this cold error path, find its object's first
+// tentative declaration with the same bounded vector selection the warning pass uses, without another token map.
+static uint32_t check_input_first_tentative(const CheckInputReader* reader, uint32_t token)
+{
+    uint32_t result = token;
+    const uint32_t object = reader->objects[token];
+    bool found = object == 0;
+    for (uint32_t first = 0; !found && first < token; first += 64)
+    {
+        uint64_t selected = check_input_scan_bit(reader->output->declaration_bits, first, token, BUSTER_CHECK_BITS_TENTATIVE);
+        for (; !found && selected != 0; selected &= selected - 1)
+        {
+            const uint32_t earlier = first + (uint32_t)__builtin_ctzll(selected);
+            found = reader->objects[earlier] == object;
+            result = found ? earlier : result;
+        }
+    }
+    return result;
+}
+
 // At translation-unit end a tentative object must have acquired a complete type, except an incomplete array
 // which the static-data finalizer completes to one element. Expression completeness is checked by each action
 // using the retained source-position history, so a pointer to an opaque type is itself a valid complete object.
@@ -17205,6 +17232,10 @@ static void check_input_complete_use(CheckInputReader* reader, uint32_t token)
         if (reader->output->report_count > first)
         {
             reader->output->reports[first].completion = reader->parser->tokens.count + 1u;
+            if (reader->output->missing_variable_warnings)
+            {
+                reader->output->reports[first].suborder = check_input_tentative_suborder(reader->parser, check_input_first_tentative(reader, token), 0);
+            }
         }
     }
 }
@@ -17247,7 +17278,8 @@ static uint64_t check_input_variable_declaration_events(const CBindings* binding
 
 // A file-scope variable's completed definition (#2222). The canonical object's first non-defining declaration must
 // precede this definition, not merely exist at the unit's end. The cold map includes declarations in expired blocks.
-static void check_input_missing_variable_warning(CheckInputReader* reader, uint32_t token, const CheckMissingVariableDeclarations* history, uint32_t completion)
+static void check_input_missing_variable_warning(CheckInputReader* reader, uint32_t token, const CheckMissingVariableDeclarations* history, uint32_t completion,
+                                                  uint32_t rejected_initializer)
 {
     const CheckInput* input = reader->output;
     const uint32_t object = reader->objects[token];
@@ -17297,7 +17329,9 @@ static void check_input_missing_variable_warning(CheckInputReader* reader, uint3
             .flags = BUSTER_CHECK_WARNING_DEFAULT_IGNORED,
             .completion_kind = completion == BUSTER_CHECK_NONE ? CHECK_WARNING_COMPLETE_TU_END : CHECK_WARNING_COMPLETE_AT_TOKEN,
             .completion = completion,
-            .payload = { .name = parser->tokens.names[token], .token = BUSTER_CHECK_WARNING_NO_SOURCE },
+            // A conditional tentative candidate is kept only if the driver rejects this definition's initializer.
+            // That decision resets the private prerequisite before promotion or rendering; it is no note anchor.
+            .payload = { .name = parser->tokens.names[token], .token = rejected_initializer },
         };
         const CheckWarningNote note =
         {
@@ -17366,7 +17400,7 @@ static CheckMissingVariableDeclarations check_input_missing_variables(CheckInput
                         // A loader_uninitialized declaration or an alias has no initializer and gives no warning.
                         if (begin < end && end <= limit)
                         {
-                            check_input_missing_variable_warning(reader, token, &result, end);
+                            check_input_missing_variable_warning(reader, token, &result, end, BUSTER_CHECK_WARNING_NO_SOURCE);
                         }
                     }
                 }
@@ -17374,6 +17408,48 @@ static CheckMissingVariableDeclarations check_input_missing_variables(CheckInput
         }
     }
     return result;
+}
+
+// A later initializer can leave the entity without a definition only after expression checking. Keep the candidate
+// in the tentative object's original position in the end-of-unit order, conditional on that initializer's rejection.
+// An extern whose initializer fails becomes a declaration: it suppresses a later candidate, not an earlier one.
+static void check_input_missing_variable_recovery(CheckInputReader* reader, uint32_t token, const CheckMissingVariableDeclarations* history)
+{
+    const uint32_t definition = reader->definition_origins[token];
+    const uint32_t initialized = definition != 0 ? definition - 1 : BUSTER_CHECK_NONE;
+    const uint32_t begin = initialized < history->limit ? check_sparse_get(reader->output->initializer_begins, initialized) : BUSTER_CHECK_NONE;
+    const uint32_t end = initialized < history->limit ? check_sparse_get(reader->output->initializer_ends, initialized) : BUSTER_CHECK_NONE;
+    if (begin < end && end <= history->limit)
+    {
+        const Parser* parser = reader->parser;
+        uint32_t acting = token;
+        if (check_input_redeclaration_extern(parser, acting))
+        {
+            // The rejected extern itself cannot act as a tentative definition. Its visible predecessors retain the
+            // last file-scope tentative declaration, including a non-extern initializer whose own value is rejected.
+            const CBindings* bindings = &reader->bindings;
+            const uint32_t binding = history->bindings[acting];
+            uint32_t prior = binding != 0 ? bindings->previous[binding - 1] : 0;
+            acting = BUSTER_CHECK_NONE;
+            for (uint32_t steps = 0; acting == BUSTER_CHECK_NONE && prior != 0 && prior <= bindings->count && steps < bindings->count; steps += 1)
+            {
+                const uint32_t previous = bindings->declaration[prior - 1];
+                if (previous < history->limit && bindings->depth[prior - 1] == 0 && bindings->kind[prior - 1] == C_BINDING_OBJECT &&
+                    reader->objects[previous] == reader->objects[token] &&
+                    check_input_bit(reader->declaration_bits, previous, BUSTER_CHECK_BITS_DEFINED | BUSTER_CHECK_BITS_TENTATIVE) &&
+                    !check_input_redeclaration_extern(parser, previous))
+                {
+                    acting = previous;
+                }
+                prior = bindings->previous[prior - 1];
+            }
+        }
+        const bool declared = acting != BUSTER_CHECK_NONE && initialized < acting && check_input_redeclaration_extern(parser, initialized);
+        if (acting != BUSTER_CHECK_NONE && !declared)
+        {
+            check_input_missing_variable_warning(reader, acting, history, BUSTER_CHECK_NONE, initialized);
+        }
+    }
 }
 
 // An object whose acting definition at the unit's end is a tentative one of an array of unknown bound (#2238, clang's
@@ -17400,8 +17476,8 @@ static void check_input_tentative_arrays(CheckInputReader* reader, uint32_t limi
                           (missing->externs != NULL && check_input_linkage(bits, token) == 2));
         }
     }
-    // Per object (its first declaration's token), its last definition, the top bit set once one defines it or once the
-    // third scan has decided it. Only the entries of objects with a definition are written and read.
+    // Per object (its first declaration's token), its last definition, with the top bit set for an initializer. The
+    // third scan replaces the entry with NONE once decided. Only objects with a definition are written and read.
     uint32_t* latest = candidate ? BUSTER_ARENA_PUSH_ARRAY(reader->scratch, uint32_t, limit) : NULL;
     reader->output->resource |= candidate && latest == NULL;
     const uint32_t defined_flag = 0x80000000u;
@@ -17429,14 +17505,17 @@ static void check_input_tentative_arrays(CheckInputReader* reader, uint32_t limi
             const uint32_t object = reader->objects[token];
             if (check_input_bit(bits, token, BUSTER_CHECK_BITS_TENTATIVE) && reader->declaration_kinds[token] == C_BINDING_OBJECT && object != 0 && object - 1 < limit)
             {
-                // The object's first tentative definition decides; its later ones find the flag set.
+                const uint32_t warning_begin = reader->warning_events.count;
+                // The object's first tentative definition decides; its later ones find the sentinel. The definition
+                // flag alone cannot mark a decision: a rejected initializer may leave a conditional tentative warning.
                 const uint32_t last = latest[object - 1];
-                const uint32_t acting = last & ~defined_flag;
-                latest[object - 1] = last | defined_flag;
+                const bool decided = last == BUSTER_CHECK_NONE;
+                const uint32_t acting = decided ? token : last & ~defined_flag;
+                latest[object - 1] = BUSTER_CHECK_NONE;
                 const bool invalid = reader->output->invalid_declarations != NULL && reader->output->invalid_declarations[acting] != 0;
                 const TypeId declared = reader->declared_types[acting];
                 const bool unbounded = type_kind(reader->types, declared) == BUSTER_TYPE_KIND_INCOMPLETE_ARRAY;
-                const bool acts = (last & defined_flag) == 0 && reader->definition_origins[acting] == 0 && !invalid;
+                const bool acts = !decided && (last & defined_flag) == 0 && reader->definition_origins[acting] == 0 && !invalid;
                 if (acts && unbounded)
                 {
                     const CheckWarningEvent event =
@@ -17453,7 +17532,11 @@ static void check_input_tentative_arrays(CheckInputReader* reader, uint32_t limi
                 }
                 if (acts && missing->externs != NULL)
                 {
-                    check_input_missing_variable_warning(reader, acting, missing, BUSTER_CHECK_NONE);
+                    check_input_missing_variable_warning(reader, acting, missing, BUSTER_CHECK_NONE, BUSTER_CHECK_WARNING_NO_SOURCE);
+                }
+                else if (!decided && !invalid && missing->externs != NULL)
+                {
+                    check_input_missing_variable_recovery(reader, acting, missing);
                 }
                 if (acts && (type_qualifiers(declared) & BUSTER_TYPE_CONST) != 0)
                 {
@@ -17461,6 +17544,15 @@ static void check_input_tentative_arrays(CheckInputReader* reader, uint32_t limi
                     const TypeId element = unbounded ? type_element(reader->types, type_strip_aligned(reader->types, declared)) : 0;
                     const TypeId completed = element != 0 ? type_qualify(reader->types, type_array(reader->types, element, 1), type_qualifiers(declared)) : declared;
                     check_input_default_const(reader, acting, completed != 0 ? completed : declared, false, true);
+                }
+                if (reader->output->missing_variable_warnings)
+                {
+                    // These three families share one order even when recovery publishes a later object's first:
+                    // array completion, missing extern, then const initialization. Notes keep their owner's key.
+                    for (uint32_t warning = warning_begin; warning < reader->warning_events.count; warning += 1)
+                    {
+                        reader->warning_events.events[warning].suborder = check_input_tentative_suborder(reader->parser, token, warning - warning_begin);
+                    }
                 }
             }
         }
