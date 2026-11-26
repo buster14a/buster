@@ -116,6 +116,15 @@ unused-warning fixtures also check exact scope-completion tokens.
   `--in-process` runs buster's source commands as this process's
   `main_source_command_reusable` (main.c's routing by the commands that
   release what they map), with the captured stream in a `memfd`;
+  sanitizer builds snapshot the current address-space and commit limits for
+  each command, as the production source command does, and restore the caller's
+  limit policy when it returns. This avoids querying unchanged limits for each
+  arena reservation and uses production's larger commit increments when commit
+  is unbounded. Plain tests retain their original allocation policy:
+  fixing their limits would also enable a process-wide address-space reservation
+  that later forked resource-limit tests would inherit. `--run-modes-only`
+  checks fresh-child results, stale snapshots, successful and rejected commands,
+  and restoration when a response-file command is left to a child;
   `--clang-server PATH` sends the oracle clang's runs (`--clang`'s name) to
   `tools/clang-server` (`oracle_cache.c`'s client, `OracleServer`; built by
   `tools/clang-server/build.sh` against that clang's libraries with one copy

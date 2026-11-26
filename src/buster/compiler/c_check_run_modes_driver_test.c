@@ -90,6 +90,55 @@ static bool check_test_run_mode_peer(CheckRunModeReply reply, int32_t status, co
     return child > 0;
 }
 
+// A reusable source command gets the same current-limit snapshot as a new compiler process. It must not inherit a
+// prior command's snapshot or leave its own behind: resource-limit tests also run in this process and its children.
+#if !BUSTER_ARENA_REGIONS
+static void check_test_run_mode_limits(CheckTest* test, const char* source)
+{
+    const ArenaLimits saved = arena_limits;
+    for (uint32_t rejected = 0; rejected < 2; rejected += 1)
+    {
+        char* const arguments[] = { "/proc/self/exe", "-fsyntax-only", "-fno-caret-diagnostics", (char*)source,
+                                    rejected != 0 ? "-DBUSTER_RUN_MODE_REJECT" : NULL, NULL };
+        char* expected = NULL;
+        const int expected_status = check_test_driver_child(arguments, &expected, false, true);
+        const bool ready = expected_status == (int)rejected && expected != NULL;
+        check_test_expect(test, ready, "run modes: the fresh compiler supplies the current-limit result");
+        for (uint32_t fixed = 0; ready && fixed < 2; fixed += 1)
+        {
+            // The deliberately stale one-page share cannot compile this unit. Each command must read the live
+            // process limits before reserving, even where the caller already had a fixed snapshot.
+            const ArenaLimits prior = {
+                .fixed = fixed != 0,
+                .address_share = BUSTER_ARENA_PAGE_BYTES,
+                .commit_unbounded = false,
+            };
+            arena_limits = prior;
+            char* actual = NULL;
+            int status = -1;
+            const bool taken = check_test_driver_run_in_process(arguments, &actual, false, &status);
+            check_test_expect(test, taken && status == expected_status && actual != NULL && strcmp(actual, expected) == 0,
+                              "run modes: each reusable command reads current limits, as its fresh child does");
+            check_test_expect(test, arena_limits.fixed == prior.fixed && arena_limits.address_share == prior.address_share &&
+                                   arena_limits.commit_unbounded == prior.commit_unbounded,
+                              "run modes: a successful or rejected command restores the caller's limit policy");
+            arena_limits = saved;
+            free(actual);
+        }
+        free(expected);
+    }
+    char* const response[] = { "/proc/self/exe", "@run-mode-response", NULL };
+    char* text = NULL;
+    int status = -1;
+    const bool taken = check_test_driver_run_in_process(response, &text, false, &status);
+    check_test_expect(test, !taken && text == NULL && arena_limits.fixed == saved.fixed && arena_limits.address_share == saved.address_share &&
+                           arena_limits.commit_unbounded == saved.commit_unbounded,
+                      "run modes: a response-file command left to a child restores the caller's limit policy");
+    free(text);
+    arena_limits = saved;
+}
+#endif
+
 static void check_test_driver_run_modes(CheckTest* test, const char* clang, const char* directory)
 {
     const CheckDriverRunModes saved = check_driver_run_modes;
@@ -98,6 +147,12 @@ static void check_test_driver_run_modes(CheckTest* test, const char* clang, cons
     snprintf(missing, sizeof(missing), "%s/no-clang-server", directory);
     const bool available = access(source, R_OK) == 0;
     check_test_expect(test, available, "run modes: runtime fixture is available");
+#if !BUSTER_ARENA_REGIONS
+    if (available)
+    {
+        check_test_run_mode_limits(test, source);
+    }
+#endif
     for (uint32_t rejected = 0; available && rejected < 2; rejected += 1)
     {
         for (uint32_t stream = 0; stream < 2; stream += 1)
