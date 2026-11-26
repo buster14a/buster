@@ -581,6 +581,9 @@ static __attribute__((unused)) int run_ir_vectorize_tests(int argc, char** argv)
             { .name = "aos-mixed-width", .roles = "hn", .vectorized = { 1, 1, 0 }, .refusal = IR_VECTORIZE_REFUSALS, .strided = true,
               .memory_bytes = BUSTER_IR_VECTORIZE_TEST_STRIDED_BUFFER, .access_step = { 16 }, .access_size = { 8 }, .vector_loads = 8 },
             { .name = "strided-extension-domains", .roles = "ynj", .vectorized = { 1, 0, 0 }, .refusal = IR_VECTORIZE_REFUSALS, .strided = true, .faults = true },
+            // Unary negation is an affine reverse index too. Its unsigned 32-bit extension wraps after the ninth
+            // element; the vector guard must preserve the scalar fault after the initial valid accesses.
+            { .name = "narrow-negation-wrap", .roles = "pnw", .vectorized = { 1, 1, 1 }, .refusal = IR_VECTORIZE_REFUSALS, .strided = true, .faults = true },
             // 2^31 + 1 elements per step requires qword indices. With i32 data, the lanes shrink until the index
             // vector fits; a 16-byte-only target has no legal shape. Both functions fault at their second element.
             { .name = "qword-index-i32", .roles = "pn", .vectorized = { 1, 1, 0 }, .refusal = IR_VECTORIZE_REFUSALS, .strided = true, .faults = true,

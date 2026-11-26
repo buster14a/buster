@@ -357,6 +357,7 @@ static const uint8_t ir_vectorize_kind_table[BUSTER_IR_OP_TABLE] = {
     [IR_ADD] = BUSTER_IR_VECTORIZE_KIND_PURE | BUSTER_IR_VECTORIZE_KIND_SAFE,
     [IR_SUB] = BUSTER_IR_VECTORIZE_KIND_PURE | BUSTER_IR_VECTORIZE_KIND_SAFE,
     [IR_MUL] = BUSTER_IR_VECTORIZE_KIND_PURE | BUSTER_IR_VECTORIZE_KIND_SAFE,
+    [IR_NEG] = BUSTER_IR_VECTORIZE_KIND_PURE | BUSTER_IR_VECTORIZE_KIND_SAFE,
     [IR_AND] = BUSTER_IR_VECTORIZE_KIND_PURE | BUSTER_IR_VECTORIZE_KIND_SAFE,
     [IR_OR] = BUSTER_IR_VECTORIZE_KIND_PURE | BUSTER_IR_VECTORIZE_KIND_SAFE,
     [IR_XOR] = BUSTER_IR_VECTORIZE_KIND_PURE | BUSTER_IR_VECTORIZE_KIND_SAFE,
@@ -1272,6 +1273,20 @@ static uint32_t ir_vectorize_classify(IrVectorizeWork* work, uint32_t loop, IrVe
         if (admitted)
         {
             ir_vectorize_set(work, i, IR_VECTORIZE_CLASS_POINTER, work->coefficients[a], 0, false);
+        }
+    }
+    else if (op == IR_NEG && ca == IR_VECTORIZE_CLASS_INDEX)
+    {
+        // C's negative subscripts may negate the induction before multiplying it. This is the same modular
+        // affine index as subtraction from zero; a narrow index keeps the extension's existing no-wrap proof.
+        const int64_t coefficient = work->coefficients[a];
+        const bool narrow = type == IR_I32;
+        const bool bounded = coefficient > -BUSTER_IR_VECTORIZE_NARROW_COEFFICIENT && coefficient < BUSTER_IR_VECTORIZE_NARROW_COEFFICIENT;
+        const bool admitted = type == IR_I64 || (narrow && bounded);
+        refusal = admitted ? refusal : IR_VECTORIZE_REFUSE_USE;
+        if (admitted)
+        {
+            ir_vectorize_set(work, i, IR_VECTORIZE_CLASS_INDEX, (int64_t)(0 - (uint64_t)coefficient), 0, false);
         }
     }
     else if ((ca == IR_VECTORIZE_CLASS_INDEX || cb == IR_VECTORIZE_CLASS_INDEX || ca == IR_VECTORIZE_CLASS_POINTER || cb == IR_VECTORIZE_CLASS_POINTER) &&

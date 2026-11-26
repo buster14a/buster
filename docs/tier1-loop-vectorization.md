@@ -79,7 +79,7 @@ Each needed row of the body is then, in order:
   block where LICM would speculate it, else in the vector loop. A uniform load
   is admitted only in a loop without stores; a uniform floating operation never.
 - **an index:** the induction, `sext`/`zext` of an `i32` induction (no wrap where
-  the exit test bounds it), or 64-bit `add`, `sub`, `mul`/`shl` by a constant of
+  the exit test bounds it), unary `neg`, or 64-bit `add`, `sub`, `mul`/`shl` by a constant of
   an index and a uniform: affine modulo 2^64, as the address is; the same 32-bit
   arithmetic of an `i32` induction, whose `sext`/`zext` to 64 bits G tests for a
   wrap (#2808).

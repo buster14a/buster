@@ -1211,6 +1211,15 @@ for target in x86-64 x86-64-v3 x86-64-v4 znver5; do
         grep -q 'vpgatherqq' "$objects/huge-i64.s"
         grep -q 'vpscatterqq' "$objects/huge-i64.s"
     fi
+    if [ "$target" = znver5 ]; then
+        # VBMI is required for byte permutes. Prove both protected-page kernels reach the sparse vector path.
+        for function in checked_page_stride_u8 checked_page_reverse_u8; do
+            objdump -d --disassemble="$function" "$objects/subject.o" > "$objects/sparse-byte.s"
+            grep -Eq 'vperm[ti]2b' "$objects/sparse-byte.s"
+            grep -Eq 'vmovdqu8[[:space:]].*\),[[:space:]]*%[xyz]mm[0-9]+\{%k[1-7]\}' "$objects/sparse-byte.s"
+            grep -Eq 'vmovdqu8[[:space:]]+%[xyz]mm[0-9]+,[[:space:]]*.*\)\{%k[1-7]\}' "$objects/sparse-byte.s"
+        done
+    fi
 done
 rm -r "$objects"
 trap - EXIT
