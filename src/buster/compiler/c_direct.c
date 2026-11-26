@@ -4472,6 +4472,18 @@ static int c_direct_unit_tests(void)
         // 11. Conditionals of pointers the full pipeline's -Wpointer-type-mismatch leaves alone: one to void, one more
         // qualified, a null pointer constant.
         "const int* chosen(int c, int* p, const int* q, void* v) { return c ? p : (c > 1 ? q : (c > 2 ? (const int*)v : (void*)0)); }\n",
+        // 12. Packed records' layouts as clang's (#3577), which main's direct path laid out otherwise: an aligned(4)
+        // before the braces, and a record defined inside a packed one, which isn't packed itself (a static assertion
+        // that fails leaves the direct path, and fails this case).
+        "struct __attribute__((packed, aligned(4))) Q { char c; int j; };\n"
+        "struct R { char c; int j; } __attribute__((packed, aligned(4)));\n"
+        "struct __attribute__((packed)) P { char c; struct In { char a; int x; } sub; struct { short s; } anon; };\n"
+        "struct X { char c; struct In i; };\n"
+        "struct __attribute__((packed)) A { char c; struct { int x; }; };\n"
+        "_Static_assert(sizeof(struct Q) == 8 && _Alignof(struct Q) == 4 && sizeof(struct R) == 8 && _Alignof(struct R) == 4, \"aligned\");\n"
+        "_Static_assert(sizeof(struct In) == 8 && _Alignof(struct In) == 4 && sizeof(struct X) == 12 && sizeof(struct P) == 11, \"nested\");\n"
+        "_Static_assert(sizeof(struct A) == 5 && __builtin_offsetof(struct A, x) == 1, \"anonymous\");\n"
+        "int laid(struct P* p, struct X* x) { return p->sub.x + p->anon.s + x->i.x; }\n",
     };
 
     for (uint32_t i = 0; i < sizeof(valid_cases) / sizeof(valid_cases[0]); i += 1)

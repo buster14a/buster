@@ -3232,6 +3232,7 @@ static FastType fast_cc_parse_record_iter(FastCCState* cc, bool is_union, bool a
         uint32_t cur_byte;
         uint32_t cur_bit;         // bit position within cur_byte*8 for bitfields
         uint32_t max_align;
+        uint32_t attr_align;      // #3577: the alignment its own attributes ask (a packed record's is theirs alone)
         uint32_t max_size;
         uint32_t field_start;     // temp buffer start in scratch member arrays
         uint32_t field_count;
@@ -3312,6 +3313,7 @@ static FastType fast_cc_parse_record_iter(FastCCState* cc, bool is_union, bool a
         .cur_byte = 0,
         .cur_bit = 0,
         .max_align = hattr.aligned > 1u ? hattr.aligned : 1u,
+        .attr_align = hattr.aligned > 1u ? hattr.aligned : 1u,
         .max_size = 0,
         .field_start = tmp_used,
         .field_count = 0,
@@ -3334,7 +3336,11 @@ static FastType fast_cc_parse_record_iter(FastCCState* cc, bool is_union, bool a
                 rf->cur_bit = 0;
             }
             const uint32_t raw_sz = rf->is_union ? rf->max_size : rf->cur_byte;
-            const uint32_t al = rf->packed ? (tattr.aligned > 1u ? tattr.aligned : 1u) : rf->max_align;
+            // #3577: a packed record's alignment is its attributes', before the braces or after (main's direct path read
+            // only the ones after: `struct __attribute__((packed, aligned(4))) Q { char c; int j; }` was 5 bytes aligned
+            // to 1, where it is 8 aligned to 4).
+            const uint32_t attr_al = tattr.aligned > rf->attr_align ? tattr.aligned : rf->attr_align;
+            const uint32_t al = rf->packed ? attr_al : rf->max_align;
             const uint32_t final_sz = (raw_sz + al - 1u) & ~(al - 1u);
 
             // Commit members contiguously into cc->member_ids / cc->member_info
@@ -3532,13 +3538,16 @@ static FastType fast_cc_parse_record_iter(FastCCState* cc, bool is_union, bool a
                 if (sub_tag != 0) { fast_cc_tag_bind(cc, sub_tag, sub_cidx); }
             }
             cc->pos += 1u; // '{'
+            // #3577: a record defined inside a packed one isn't packed (main's direct path packed it: its members at their
+            // natural offsets, its alignment 1); only its place as the outer record's member is.
             stack[sp++] = (RecFrame){
                 .cidx = sub_cidx,
                 .is_union = sub_union,
-                .packed = rf->packed,
+                .packed = 0,
                 .cur_byte = 0,
                 .cur_bit = 0,
                 .max_align = 1u,
+                .attr_align = 1u,
                 .max_size = 0,
                 .field_start = tmp_used,
                 .field_count = 0,
