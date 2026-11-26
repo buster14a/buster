@@ -1706,6 +1706,35 @@ same bytes. What the executable still takes is its data: of `-c sqlite3.c`'s
 80 faults in it, 20 are in `.data.rel.ro`, 21 in the baked tables and 22 in
 `.bss`, where the text took 121 and the read-only data 29 before.
 
+## Compact writable startup state
+
+The small globals a compile reads or writes belong together, away from the
+driver's and tests' large arrays (#2886). `BUSTER_START_DATA` (`lane.c`) puts
+the driver and checker units' zero-initialized arena policy, reservation and
+exit-helper state and small driver controls in `.bss.buster_start`. The static
+lld start-order script places that section after `.bss`, on a 4 KB boundary,
+and refuses a link whose collected state exceeds one page. It is `NOBITS`:
+the executable gains no file-backed zero array. Both sections remain inside
+`__bss_start` and `_end`, so `arena_static_base_pages` gives the new page the
+same base-page advice as the rest. Each marked object begins on a cache line,
+so the mutable atomic objects share no line with another object's controls.
+
+`CheckProgramLanes` also keeps every control field before its large array of
+per-lane arenas. The driver page-aligns its static instance, and a compile-time
+assertion keeps the controls within its first page. A command that needs no
+lane arena can initialize its controls without touching a page beyond the
+unused array. The record's size, the arenas' ownership and the reset for a
+reused command stay the same.
+
+The marker applies only to the static driver and checker units. Other units'
+private test/benchmark state stays in ordinary `.bss`; dynamic and sanitizer
+builds use ordinary declarations. A static link by another linker collects
+the inputs as ordinary `.bss` subsections, without the one-page guarantee.
+`test-lanes` checks the marked objects' placement and base-page advice when
+the lld script's bounds are present. `test-baked-tables` still checks the
+separate read-only tables and their bake. This layout does not change the
+exit helper's huge-page threshold or ask for more huge pages.
+
 ## Experiments
 
 `./build.sh lexer-variant NAME=SOURCE...` builds `build/compiler` with other

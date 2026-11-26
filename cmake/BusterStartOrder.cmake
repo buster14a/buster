@@ -37,6 +37,10 @@
 # (BusterCodegen.cmake), in every static build, whatever its linker, buster_start_order_unit below writes the names the
 # split (tools/codegen/presplit.c or split.c, --first) puts first in that section. Each file is written only when its text changes, so
 # that an unchanged list relinks nothing.
+#
+# The small writable state of a compile (lane.c's BUSTER_START_DATA) shares one page after .bss, separate from the
+# large arrays of the driver, tests and benchmarks. It stays NOBITS and between __bss_start and _end, so the compile's
+# existing advice keeps it in base pages too. A new object that overfills that page fails the link.
 
 function(buster_start_order_write path text)
     set(current "")
@@ -107,7 +111,11 @@ function(buster_start_order_files list script symbols shift_source checker_shift
         "    .text.buster_start : ALIGN(0x200000)\n    {\n        buster_start_probe = .;\n        . += 0x20000;\n${sections}    }\n"
         "    ASSERT(SIZEOF(.text.buster_start) > 0x20000, \"the start's code order placed no function: the units' objects or sections aren't the link's\")\n"
         "    .text.buster_checker :${checker_alignment}\n    {\n${checker_sections}        buster_start_end = .;\n    }\n"
-        "}\nINSERT BEFORE .text;\n")
+        "}\nINSERT BEFORE .text;\n"
+        "SECTIONS\n{\n"
+        "    .bss.buster_start (NOLOAD) : ALIGN(4096)\n    {\n        buster_start_data_begin = .;\n        *(.bss.buster_start)\n        buster_start_data_end = .;\n    }\n"
+        "    ASSERT(SIZEOF(.bss.buster_start) <= 4096, \"the compile's small writable state no longer fits in one page\")\n"
+        "}\nINSERT AFTER .bss;\n")
     buster_start_order_write("${script}" "${text}")
     # A shifted link's padding before .text's code: the first section lld places there (absent elsewhere, which
     # --no-warn-symbol-ordering lets pass).

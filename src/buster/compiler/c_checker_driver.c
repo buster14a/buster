@@ -12152,7 +12152,7 @@ static bool check_driver_id_order(InternTable* table, const PPOptions* options, 
 
 // Fault injection for test-check-units' reusable-driver child, set before any workers start and immutable until its
 // command returns. Normal commands leave it null. Fail the named unit's type-table reservation, not its preprocessing.
-static const char* check_driver_test_failed_types;
+static BUSTER_START_DATA const char* check_driver_test_failed_types;
 
 // What every translation unit of a command reads, and none writes: run_check_command_mode's options.
 typedef struct CheckDriverCommand CheckDriverCommand;
@@ -13324,7 +13324,7 @@ static void check_driver_discard_scratch(Arena* scratch, CheckProgramLanes* lane
 // reader beside the design's passes (check_input_run as check_input_compile calls it, with its environment published),
 // and each declaration's record at the unit's end. Null in every other command, which tests it once at each place.
 typedef struct CheckAttested CheckAttested;
-static CheckAttested* check_driver_attested;
+static BUSTER_START_DATA CheckAttested* check_driver_attested;
 static bool check_attested_input(CheckAttested* census, CheckInput* input, const Parser* parser, Preprocessor* pp, TypeTable* types, Arena* arena, Arena* scratch,
                                  bool complete_translation_unit, uint32_t original_end, const uint8_t* deferred_tokens, const char* path);
 static void check_attested_after(CheckAttested* census, const Parser* parser, Preprocessor* pp, const CheckInput* input, const TypeTable* types, bool valid,
@@ -13349,7 +13349,7 @@ static bool check_attested_again(const CheckAttested* attested, bool failed);
 static void check_attested_summary(const CheckAttested* attested, uint64_t* counts);
 // The last command's counts of attested declarations (c_checker_units.c), which a command of one source file with a memo
 // kept across processes gives too, for the tests.
-static uint64_t check_units_attested_last[CHECK_ATTESTED_SUMMARY];
+static BUSTER_START_DATA uint64_t check_units_attested_last[CHECK_ATTESTED_SUMMARY];
 
 // The type table initializes its builtin columns, sentinels and buckets, and writes each new record before
 // publishing its index. It can reuse dirty storage. Fit a small table or index in the lane arena's base pages:
@@ -15240,13 +15240,14 @@ static int check_driver_run(CheckDriverRun* run, bool* announced)
     return run->result;
 }
 
-// The driver's lanes (check_driver_command): 98 KB, almost all of it the lanes' arenas (CheckProgramLanes.arenas), in .bss
-// as the unit's preprocessor and parser are (check_driver_one_unit), so that a compile touches only the pages it uses: a
-// zeroed local touched them all, 24 pages of stack, each a page fault, even for an empty file's -fsyntax-only (#652). A
-// command after the process's first zeroes them again; only the tests' reusable routes run more than one, and only lane
-// 0 runs the command (run_check_command_mode).
-static CheckProgramLanes check_driver_lanes;
-static bool check_driver_lanes_taken;
+// The driver's lanes (check_driver_command), almost all of it the lanes' arena array, in .bss as the unit's
+// preprocessor and parser are (check_driver_one_unit), so that a compile touches only the pages it uses: a zeroed
+// local touched them all, even for an empty file's -fsyntax-only (#652). The controls precede the array and fit in
+// the first page (#2886), aligned here so a command that needs no lane's arena touches only that page. A command
+// after the process's first zeroes them again; only the tests' reusable routes run more than one, and only lane 0
+// runs the command (run_check_command_mode).
+static CheckProgramLanes check_driver_lanes __attribute__((aligned(BUSTER_ARENA_PAGE_BYTES)));
+static BUSTER_START_DATA bool check_driver_lanes_taken;
 
 // The command's warm arenas' slots (arena_reserve_warm), the same in every process, so that each finds its own pages.
 typedef enum CheckDriverWarm
