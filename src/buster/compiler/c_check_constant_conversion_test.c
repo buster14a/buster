@@ -32,6 +32,13 @@ static bool check_test_constant_conversion_has(const Tier0Function* function, ui
 // movslq left is `x == 0`'s int result's, returned as a long, which clang -O0 extends too (cltq).
 static void check_test_constant_conversion_code(CheckTest* test, const CheckProgramLowered* lowered, const char* way, Arena* scratch)
 {
+    // This check compiles before the fixture's ordinary program emission initializes unbaked tables.
+    const bool initialized = x86_encoder_initialize() && tier0_initialize();
+    check_test_expect(test, initialized, "constant-conversion-code initializes the encoder and Tier 0 tables");
+    if (!initialized)
+    {
+        return;
+    }
     static const uint8_t classes[4] = { BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_I64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_F64 };
     static const uint64_t values[4] = { 1, 0, 8, UINT64_C(0x3ff0000000000000) };
     char description[256];
@@ -156,8 +163,15 @@ static void check_test_constant_conversions(CheckTest* test, const char* clang)
     const bool loaded = check_test_fixtures_load(&catalog, "checker/constant-conversions");
     char problem[sizeof(catalog.problem) + 128];
     snprintf(problem, sizeof(problem), "checker/constant-conversions fixtures (#2053): %s", catalog.problem);
-    check_test_expect(test, loaded && catalog.count == 3, problem);
-    for (uint32_t i = 0; loaded && i < catalog.count; i += 1)
+    check_test_expect(test, loaded, problem);
+    static const char* const required[] =
+    {
+        "constant-conversion-code",
+        "constant-conversions",
+        "constant-conversion-controls",
+    };
+    const bool complete = loaded && check_test_fixtures_require(test, &catalog, required, BUSTER_ARRAY_LENGTH(required));
+    for (uint32_t i = 0; complete && i < catalog.count; i += 1)
     {
         check_test_program_source(test, catalog.cases[i].source, catalog.cases[i].name, clang);
     }

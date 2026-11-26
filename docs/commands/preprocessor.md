@@ -137,8 +137,23 @@ or `test-preprocessor --tables path...`:
   - `option-refusals`: the expected refusal substring (or `-` for acceptance)
     and space-separated option arguments, with `%d` for the temporary directory.
     All rows preprocess the same `probe.c`.
+  - `named-ucns`: standard, flags (`warnings` or `-`), option arguments (or
+    `-`) and name. `ID.c` supplies the exact input bytes and `ID.expected` the
+    normalized diagnostic lines, including an empty file when none is expected.
+    The runner rejects more than 30 option arguments or expanded argument text
+    that does not fit its 16 KiB buffer; it never truncates option metadata.
+    The original 15 cases retain their order, `case.c` staging name and Clang
+    comparison. Generated Unicode boundary and scaling checks remain in C.
+    `test-preprocessor --named-ucns-only [--clang] [--fixtures DIR]` runs this
+    catalog through the same oracle loop for focused data and loader controls.
   Add ordinary cases to these catalogs. Generated stress inputs, lifetime tests
   and kernel comparisons stay in their C runners.
+
+  Frozen preprocessor expectations are read from
+  `preprocessor-kernels/digests.tsv` under the same selected fixture root.
+  An absolute `--fixtures` root therefore selects both cases and frozen
+  expectations outside the checkout. A later in-process run reloads its data;
+  it cannot reuse the previous root's catalog or digest cache.
 
 - without files, the 419 built-in cases (`pp_test_cases`), runtime data
   (#2053): `tests/preprocessor/cases/catalog.tsv` (`buster-fixtures v1

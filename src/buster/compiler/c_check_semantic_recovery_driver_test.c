@@ -66,9 +66,9 @@ static uint64_t check_test_builtin_typo_stress(char* text, uint64_t capacity)
 // duplicates and notes, and the later independent error under both language modes, readers and deferred-body lanes.
 static void check_test_driver_attribute_recovery(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
-    const char* source = "tests/driver/attribute_recovery.c";
-    const bool available = access(source, R_OK) == 0;
-    check_test_expect(test, available, "attribute recovery fixture is available (run from the repository root)");
+    char source[PATH_MAX];
+    const bool available = check_test_fixture_path(source, sizeof(source), "driver/attribute_recovery.c") && access(source, R_OK) == 0;
+    check_test_expect(test, available, "attribute recovery fixture is available");
     static const char* const standards[] = { "-std=gnu17", "-std=gnu23" };
     static const char* const options[] = { "-ferror-limit=0", "-ferror-limit=2", "-w", "-Werror=ignored-attributes" };
     static const char sentinel[] = "preserve the existing object\n";
@@ -157,9 +157,9 @@ static void check_test_driver_attribute_recovery(CheckTest* test, const char* cl
 // bodies, while the valid alias still compiles.
 static void check_test_driver_alias_redefinition(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
-    const char* source = "tests/driver/alias_redefinition.c";
-    const bool available = access(source, R_OK) == 0;
-    check_test_expect(test, available, "alias redefinition fixture is available (run from the repository root)");
+    char source[PATH_MAX];
+    const bool available = check_test_fixture_path(source, sizeof(source), "driver/alias_redefinition.c") && access(source, R_OK) == 0;
+    check_test_expect(test, available, "alias redefinition fixture is available");
     static const char* const standards[] = { "-std=gnu17", "-std=gnu23" };
     static const char* const options[] = { "-ferror-limit=0", "-ferror-limit=2", "-w", "-Werror=gcc-compat", "-Werror=ignored-attributes" };
     static const char sentinel[] = "preserve the existing alias object\n";

@@ -80,7 +80,7 @@ static bool check_test_driver_quiet_roots_pair(const char* executable, const cha
     return same && counted;
 }
 
-// A unit of each kind of root. The quiet ones: an initialization, an assignment, a compound assignment and an increment as
+// The fixed unit in tests/driver/programs/quiet-roots has each kind of root. The quiet ones: an initialization, an assignment, a compound assignment and an increment as
 // statements, braced or not, a for clause's, a condition, a returned value, a call of a function of no mark, a cast to
 // void, and a brace initializer's values under their declaration's `;`. The loud ones, each for one term of the classes:
 // a call of a pure function, of one declared warn_unused_result and of a library builtin (the callee's name says its
@@ -88,50 +88,6 @@ static bool check_test_driver_quiet_roots_pair(const char* executable, const cha
 // width (a reach), two modifications of one variable and an assignment inside a condition (-Wunsequenced's candidates),
 // a statement in unreachable code (unevaluated), and the roots at the brace initializers' and a compound literal's
 // plans, which emit between the roots.
-static const char check_driver_quiet_roots_unit[] =
-    "struct pair { char low; int high; };\n"
-    "int g(int);\n"
-    "int abs(int);\n"
-    "__attribute__((pure)) int p(int);\n"
-    "__attribute__((warn_unused_result)) int w(int);\n"
-    "int f(int a, int b, unsigned u)\n"
-    "{\n"
-    "    int r = 0;\n"
-    "    r = a;\n"
-    "    r += b;\n"
-    "    r++;\n"
-    "    if (a) r = b;\n"
-    "    if (b) { r -= a; }\n"
-    "    for (r = 0; r < a; r++) { b += r; }\n"
-    "    while (b > 100) b -= 100;\n"
-    "    g(a);\n"
-    "    p(a);\n"
-    "    w(b);\n"
-    "    abs(b);\n"
-    "    (void)a;\n"
-    "    a < b;\n"
-    "    a;\n"
-    "    a, b;\n"
-    "    r = a / 0;\n"
-    "    r = a << 40;\n"
-    "    r = a++ + a;\n"
-    "    if ((r = b) != 0) { r = 1; }\n"
-    // A condition's root stands after its body: its modification and its access are its operand's, not the body's.
-    "    while (b-- > b) { r += a; }\n"
-    "    if (0) { r = a << 41; }\n"
-    "    struct pair s = { 300, 2.5 };\n"
-    "    r = s.high;\n"
-    "    struct pair t = { a = 1, a };\n"
-    "    r += t.high;\n"
-    // A loud root after each plan and a quiet root: a plan emits before it, where every root's visit puts it.
-    "    r = b % 0;\n"
-    "    r += (struct pair){ 400, 3 }.high;\n"
-    "    r = a;\n"
-    "    r -= a % 0;\n"
-    "    u += (unsigned)r;\n"
-    "    return r + (int)u;\n"
-    "}\n";
-
 // The generated units' statements: each a root or several, quiet and loud, with the warnings whose order the loop keeps:
 // plans (brace initializers and a compound literal) between roots, displaced roots (conditions and for clauses), a
 // statement expression's inner roots, unsequenced modifications and unreachable code.
@@ -218,11 +174,6 @@ static uint64_t check_test_driver_quiet_roots_generate(char* text, uint64_t capa
 }
 
 #define BUSTER_TEST_QUIET_ROOTS_UNITS 48u
-// The unit of each kind's roots and the quiet ones of them, as it is and behind the filler.
-#define BUSTER_TEST_QUIET_ROOTS_UNIT_ROOTS 45u
-#define BUSTER_TEST_QUIET_ROOTS_UNIT_QUIET 23u
-#define BUSTER_TEST_QUIET_ROOTS_FILLED_ROOTS 45u
-#define BUSTER_TEST_QUIET_ROOTS_FILLED_QUIET 23u
 // A unit's filler: a table of this many values ahead of it. The reader leaves a statement's discard wrapper out where
 // its expression says as much (CheckInput.discard_roots), in a unit of 8,192 tokens or more: behind the filler a
 // statement's root is its assignment, its call or its cast to void itself, as most of a large unit's are, and without
@@ -247,7 +198,8 @@ static uint64_t check_test_driver_quiet_roots_filler(char* text, uint64_t capaci
 // The unit of each kind, as it is or behind the filler (`text`, `length` bytes): its counts are frozen, so that a root
 // that turns loud or quiet shows, and its diagnostics are clang's.
 static void check_test_driver_quiet_roots_unit(CheckTest* test, const char* clang, const char* executable, const char* directory, const char* source,
-                                               const char* text, uint64_t length, uint64_t expected_roots, uint64_t expected_quiet)
+                                               const char* text, uint64_t length, uint64_t expected_roots, uint64_t expected_quiet,
+                                               const char* const* expected, uint32_t expected_count)
 {
     static const char* const defaults[] = { "-std=gnu17", NULL };
     uint64_t roots = 0;
@@ -260,22 +212,7 @@ static void check_test_driver_quiet_roots_unit(CheckTest* test, const char* clan
     check_test_expect(test, held && roots == expected_roots && quiet == expected_quiet && acted == 0,
                       "quiet-roots: the unit's roots, the quiet ones of them, and none of those whose visit acted");
     // What its loud roots give, each once: the walks', the statements' markers, a call's result, the plans' and -Wunsequenced's.
-    static const char* const expected[] =
-    {
-        "ignoring return value of function declared with pure attribute",
-        "ignoring return value of function declared with 'warn_unused_result' attribute",
-        "ignoring return value of function declared with const attribute",
-        "relational comparison result unused",
-        "division by zero is undefined",
-        "shift count >= width of type",
-        "unsequenced modification and access to 'a'",
-        "unsequenced modification and access to 'b'",
-        "implicit conversion from 'int' to 'char' changes value from 300 to 44",
-        "implicit conversion from 'double' to 'int' changes value from 2.5 to 2",
-        "implicit conversion from 'int' to 'char' changes value from 400 to -112",
-        "remainder by zero is undefined",
-    };
-    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(expected); i += 1)
+    for (uint32_t i = 0; i < expected_count; i += 1)
     {
         char description[160];
         snprintf(description, sizeof(description), "quiet-roots: the unit's loud roots still warn: %s", expected[i]);
@@ -296,8 +233,58 @@ static void check_test_driver_quiet_roots_unit(CheckTest* test, const char* clan
     free(diagnostics);
 }
 
+static void check_test_driver_quiet_roots_fixed(CheckTest* test, const char* clang, const char* executable, const char* directory,
+                                                const CheckDriverProgramInput* inputs)
+{
+    char* fields[4];
+    uint32_t counts[4] = { 0 };
+    bool valid = check_test_driver_input_fields(test, inputs + 1, fields, BUSTER_ARRAY_LENGTH(fields));
+    for (uint32_t i = 0; valid && i < BUSTER_ARRAY_LENGTH(counts); i += 1)
+    {
+        valid = check_test_driver_input_count(fields[i], counts + i);
+    }
+    enum { BUSTER_CHECK_QUIET_EXPECTED_LINES = 256 };
+    const char* expected[BUSTER_CHECK_QUIET_EXPECTED_LINES];
+    uint32_t expected_count = 0;
+    char* messages = (char*)inputs[2].bytes;
+    valid = valid && inputs[2].length != 0 && messages[inputs[2].length - 1] == '\n' && memchr(messages, 0, inputs[2].length) == NULL;
+    while (valid && *messages != 0)
+    {
+        const char* line = strsep(&messages, "\n");
+        valid = line[0] != 0 && expected_count < BUSTER_CHECK_QUIET_EXPECTED_LINES;
+        if (valid)
+        {
+            expected[expected_count++] = line;
+        }
+    }
+    valid = valid && expected_count != 0;
+    check_test_expect(test, valid, "quiet-roots: bounded decimal counts and nonempty diagnostic expectations are loaded");
+    char source[PATH_MAX];
+    snprintf(source, sizeof(source), "%s/quiet-roots.c", directory);
+    const uint64_t capacity = UINT64_C(1) << 17;
+    char* text = valid ? malloc(capacity) : NULL;
+    const uint64_t filler = text != NULL ? check_test_driver_quiet_roots_filler(text, capacity) : 0;
+    const bool fits = filler != 0 && filler < capacity && inputs[0].length + 1 < capacity - filler;
+    check_test_expect(test, fits, "quiet-roots: the filler fits its buffer");
+    // The same bytes, first with the discard wrappers and then behind the filler without them.
+    if (valid)
+    {
+        check_test_driver_quiet_roots_unit(test, clang, executable, directory, source, inputs[0].bytes, inputs[0].length,
+                                           counts[0], counts[1], expected, expected_count);
+    }
+    if (fits)
+    {
+        memcpy(text + filler, inputs[0].bytes, inputs[0].length + 1);
+        check_test_driver_quiet_roots_unit(test, clang, executable, directory, source, text, filler + inputs[0].length,
+                                           counts[2], counts[3], expected, expected_count);
+    }
+    free(text);
+    unlink(source);
+}
+
 static void check_test_driver_quiet_roots(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
+    check_test_driver_programs(test, clang, executable, directory, "quiet-roots", "program.c\tcounts.expected\tmessages.expected", check_test_driver_quiet_roots_fixed);
     static const char* const defaults[] = { "-std=gnu17", NULL };
     static const char* const extra[] = { "-std=gnu17", "-Wall", "-Wextra", "-Wunsequenced", "-Wunused-value", "-Wsign-compare", "-Wshift-overflow", NULL };
     char source[PATH_MAX];
@@ -305,16 +292,7 @@ static void check_test_driver_quiet_roots(CheckTest* test, const char* clang, co
     const uint64_t capacity = UINT64_C(1) << 17;
     char* text = malloc(capacity);
     const uint64_t filler = text != NULL ? check_test_driver_quiet_roots_filler(text, capacity) : 0;
-    check_test_expect(test, filler != 0 && filler + sizeof(check_driver_quiet_roots_unit) < capacity, "quiet-roots: the filler fits its buffer");
-    // The unit of each kind, with the discard wrappers and, behind the filler, without them.
-    check_test_driver_quiet_roots_unit(test, clang, executable, directory, source, check_driver_quiet_roots_unit, sizeof(check_driver_quiet_roots_unit) - 1,
-                                       BUSTER_TEST_QUIET_ROOTS_UNIT_ROOTS, BUSTER_TEST_QUIET_ROOTS_UNIT_QUIET);
-    if (filler != 0 && filler + sizeof(check_driver_quiet_roots_unit) < capacity)
-    {
-        memcpy(text + filler, check_driver_quiet_roots_unit, sizeof(check_driver_quiet_roots_unit));
-        check_test_driver_quiet_roots_unit(test, clang, executable, directory, source, text, filler + sizeof(check_driver_quiet_roots_unit) - 1,
-                                           BUSTER_TEST_QUIET_ROOTS_FILLED_ROOTS, BUSTER_TEST_QUIET_ROOTS_FILLED_QUIET);
-    }
+    check_test_expect(test, filler != 0, "quiet-roots: the generated units' filler fits its buffer");
     // The generated units, every other one behind the filler, with the default warnings as an object and with the
     // walks' other warnings on.
     uint64_t roots = 0;

@@ -1,0 +1,6 @@
+function () -> void {
+b0:
+%0 = undef.i32
+%1 = intrinsic.i32 %0, %0 mulhu
+%2 = ret.void
+}

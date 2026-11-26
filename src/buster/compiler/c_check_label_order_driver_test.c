@@ -7,9 +7,10 @@
 
 static void check_test_driver_label_order(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
-    const char* source = "tests/driver/suppress_label_order.c";
-    FILE* cases = fopen("tests/driver/suppress_label_order.cases", "r");
-    const bool available = cases != NULL && access(source, R_OK) == 0;
+    char source[PATH_MAX];
+    char catalog[PATH_MAX];
+    FILE* cases = check_test_fixture_path(catalog, sizeof(catalog), "driver/suppress_label_order.cases") ? fopen(catalog, "r") : NULL;
+    const bool available = cases != NULL && check_test_fixture_path(source, sizeof(source), "driver/suppress_label_order.c") && access(source, R_OK) == 0;
     check_test_expect(test, available, "label attribute order: runtime source and case table are available");
     static const char* const standards[] = { "-std=gnu17", "-std=gnu23" };
     static const char* const options[] = { "-ferror-limit=0", "-ferror-limit=1", "-Werror", "-w" };

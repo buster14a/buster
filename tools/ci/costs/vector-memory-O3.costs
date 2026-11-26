@@ -20,6 +20,7 @@
 #: cpu 3 0.82 AMD EPYC 9V45 96-Core Processor
 #: cpu 6 1.00 AMD EPYC 9V74 80-Core Processor
 #: cpu 3 0.98 INTEL(R) XEON(R) PLATINUM 8573C
+#: unmeasured Test runtime fixture roots and catalog contracts [1 CPU]
 #: peak 68 Test the early driver feedback corpus
 #: peak 261 Test deterministic work and growth contracts [1 CPU]
 #: peak 23 Check unity fixture ownership without rebuilding
@@ -189,6 +190,7 @@
 #: peak 95 Test Tier 1's loop store motion against Clang's output, its report and the unit's distinct objects
 0.3 Test the early driver feedback corpus
 10.1 Test deterministic work and growth contracts [1 CPU]
+23.2 Test runtime fixture roots and catalog contracts [1 CPU]
 0.0 Check unity fixture ownership without rebuilding
 178.0 Test the foreign inputs [8 CPUs]
 187.8 Check the no-recursion rule on the call graph [8 CPUs]

@@ -1,0 +1,5 @@
+function () -> void {
+b0:
+%0 = ret.void
+%1 = ret.void
+}

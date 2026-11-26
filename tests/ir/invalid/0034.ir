@@ -1,0 +1,6 @@
+function () -> void {
+b0:
+%0 = copy.i64 %1
+%1 = undef.i64
+%2 = ret.void
+}

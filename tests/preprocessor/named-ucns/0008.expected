@@ -1,0 +1,7 @@
+1:1: warning: named escape sequences are a Clang extension
+1:61: warning: named escape sequences are a Clang extension
+1:61: error: character 'A' cannot be specified by a universal character name
+1:91: error: 'FOO' is not a valid Unicode character name
+2:11: warning: named escape sequences are a Clang extension
+7:4: error: 'greek small letter alpha' is not a valid Unicode character name
+7:4: note: character names in Unicode escape sequences are sensitive to case and whitespaces

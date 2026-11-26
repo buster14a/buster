@@ -1,0 +1,9 @@
+buster-fixtures v2 checker-warnings
+0001	0001.c	27	0	9	c23,node-window	-Wall	default and Wall warning families reported together in issue 1394
+0002	0002.c	21	0	0	syntax-only	-	structural self comparisons
+0003	0003.c	32	0	26	syntax-only	-	strong pointer conversions and comparisons
+0004	0004.c	12	0	0	-	-	string comparison contexts
+0005	0005.c	1	0	0	-	-Wno-address	address family suppression
+0006	0006.c	2	0	1	-	-Wno-tautological-compare	tautological family suppression
+0007	0007.c	3	0	2	-	-Wno-bool-conversion	bool conversion family suppression
+0008	0008.c	3	0	3	-	-Wno-everything -Waddress	address family enables descendants

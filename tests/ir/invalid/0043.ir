@@ -1,0 +1,7 @@
+function () -> void {
+b0:
+%0 = undef.i64
+%1 = cbr.void %0, b1, b1
+b1:
+%2 = ret.void
+}

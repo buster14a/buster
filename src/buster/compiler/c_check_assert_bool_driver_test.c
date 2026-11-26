@@ -20,7 +20,7 @@ static void check_test_driver_assert_bool(CheckTest* test, const char* clang, co
     static const CheckDriverAssertFile failed[] =
     {
         {
-            .path = "tests/driver/assert_bool_comma.c",
+            .path = "driver/assert_bool_comma.c",
             .fixture =
             {
                 .name = "failed assertions retain comma warnings in source and deferred order",
@@ -31,7 +31,7 @@ static void check_test_driver_assert_bool(CheckTest* test, const char* clang, co
             },
         },
         {
-            .path = "tests/driver/assert_bool_comma.c",
+            .path = "driver/assert_bool_comma.c",
             .fixture =
             {
                 .name = "failed assertion comma warnings retain C23 behavior",
@@ -43,7 +43,7 @@ static void check_test_driver_assert_bool(CheckTest* test, const char* clang, co
             },
         },
         {
-            .path = "tests/driver/assert_bool_comma.c",
+            .path = "driver/assert_bool_comma.c",
             .fixture =
             {
                 .name = "failed assertion comma warnings precede the error limit",
@@ -53,7 +53,7 @@ static void check_test_driver_assert_bool(CheckTest* test, const char* clang, co
             },
         },
         {
-            .path = "tests/driver/assert_bool_comma.c",
+            .path = "driver/assert_bool_comma.c",
             .fixture =
             {
                 .name = "failed assertion comma warnings precede fatal errors",
@@ -63,7 +63,7 @@ static void check_test_driver_assert_bool(CheckTest* test, const char* clang, co
             },
         },
         {
-            .path = "tests/driver/assert_bool_comma_block.c",
+            .path = "driver/assert_bool_comma_block.c",
             .fixture =
             {
                 .name = "failed assertion comma warnings keep lexical and function-end phases",
@@ -73,7 +73,7 @@ static void check_test_driver_assert_bool(CheckTest* test, const char* clang, co
             },
         },
         {
-            .path = "tests/driver/assert_bool_comma_block.c",
+            .path = "driver/assert_bool_comma_block.c",
             .fixture =
             {
                 .name = "fatal assertion errors suppress later deferred comma warnings",
@@ -82,7 +82,7 @@ static void check_test_driver_assert_bool(CheckTest* test, const char* clang, co
             },
         },
         {
-            .path = "tests/driver/assert_bool_comma_policy.c",
+            .path = "driver/assert_bool_comma_policy.c",
             .fixture =
             {
                 .name = "failed assertion comma warnings retain pragma and macro policy",
@@ -92,7 +92,7 @@ static void check_test_driver_assert_bool(CheckTest* test, const char* clang, co
             },
         },
         {
-            .path = "tests/driver/assert_bool_detached.c",
+            .path = "driver/assert_bool_detached.c",
             .fixture =
             {
                 .name = "failed assertions retain detached selection condition warnings",
@@ -102,7 +102,7 @@ static void check_test_driver_assert_bool(CheckTest* test, const char* clang, co
             },
         },
         {
-            .path = "tests/driver/assert_bool_detached.c",
+            .path = "driver/assert_bool_detached.c",
             .fixture =
             {
                 .name = "failed detached condition warnings retain C23 behavior",
@@ -113,7 +113,7 @@ static void check_test_driver_assert_bool(CheckTest* test, const char* clang, co
             },
         },
         {
-            .path = "tests/driver/assert_bool_detached.c",
+            .path = "driver/assert_bool_detached.c",
             .fixture =
             {
                 .name = "detached condition warnings precede the assertion error limit",
@@ -123,7 +123,7 @@ static void check_test_driver_assert_bool(CheckTest* test, const char* clang, co
             },
         },
         {
-            .path = "tests/driver/assert_bool_detached.c",
+            .path = "driver/assert_bool_detached.c",
             .fixture =
             {
                 .name = "detached condition warnings precede a fatal assertion error",
@@ -133,7 +133,7 @@ static void check_test_driver_assert_bool(CheckTest* test, const char* clang, co
             },
         },
         {
-            .path = "tests/driver/assert_bool_detached_nested.c",
+            .path = "driver/assert_bool_detached_nested.c",
             .fixture =
             {
                 .name = "a nested failed assertion owns its condition and comma warnings",
@@ -142,7 +142,7 @@ static void check_test_driver_assert_bool(CheckTest* test, const char* clang, co
             },
         },
         {
-            .path = "tests/driver/assert_bool_detached_policy.c",
+            .path = "driver/assert_bool_detached_policy.c",
             .fixture =
             {
                 .name = "detached condition warnings retain pragma and macro policy",
@@ -152,7 +152,7 @@ static void check_test_driver_assert_bool(CheckTest* test, const char* clang, co
             },
         },
         {
-            .path = "tests/driver/assert_bool_nested.c",
+            .path = "driver/assert_bool_nested.c",
             .fixture =
             {
                 .name = "failed assertions retain nested boolean conversions in order",
@@ -164,7 +164,7 @@ static void check_test_driver_assert_bool(CheckTest* test, const char* clang, co
             },
         },
         {
-            .path = "tests/driver/assert_bool_nested.c",
+            .path = "driver/assert_bool_nested.c",
             .fixture =
             {
                 .name = "failed nested assertion conversions retain C23 and enabled signed shifts",
@@ -176,7 +176,7 @@ static void check_test_driver_assert_bool(CheckTest* test, const char* clang, co
             },
         },
         {
-            .path = "tests/driver/assert_bool_nested.c",
+            .path = "driver/assert_bool_nested.c",
             .fixture =
             {
                 .name = "failed nested assertion warnings precede the error limit",
@@ -186,7 +186,7 @@ static void check_test_driver_assert_bool(CheckTest* test, const char* clang, co
             },
         },
         {
-            .path = "tests/driver/assert_bool_nested.c",
+            .path = "driver/assert_bool_nested.c",
             .fixture =
             {
                 .name = "failed nested assertion warnings precede fatal errors",
@@ -196,7 +196,7 @@ static void check_test_driver_assert_bool(CheckTest* test, const char* clang, co
             },
         },
         {
-            .path = "tests/driver/assert_bool_nested_controls.c",
+            .path = "driver/assert_bool_nested_controls.c",
             .fixture =
             {
                 .name = "failed assertion traversal respects explicit casts and unevaluated operands",
@@ -205,7 +205,7 @@ static void check_test_driver_assert_bool(CheckTest* test, const char* clang, co
             },
         },
         {
-            .path = "tests/driver/assert_bool_nested_deep.c",
+            .path = "driver/assert_bool_nested_deep.c",
             .fixture =
             {
                 .name = "failed assertion traversal grows its frontier and follows builtin arguments",
@@ -215,7 +215,7 @@ static void check_test_driver_assert_bool(CheckTest* test, const char* clang, co
             },
         },
         {
-            .path = "tests/driver/assert_bool_nested_policy.c",
+            .path = "driver/assert_bool_nested_policy.c",
             .fixture =
             {
                 .name = "failed nested assertion warnings keep pragma and macro policy",
@@ -225,7 +225,7 @@ static void check_test_driver_assert_bool(CheckTest* test, const char* clang, co
             },
         },
         {
-            .path = "tests/driver/assert_bool_failed.c",
+            .path = "driver/assert_bool_failed.c",
             .fixture =
             {
                 .name = "failed assertions retain boolean warnings in every scope",
@@ -235,7 +235,7 @@ static void check_test_driver_assert_bool(CheckTest* test, const char* clang, co
             },
         },
         {
-            .path = "tests/driver/assert_bool_failed.c",
+            .path = "driver/assert_bool_failed.c",
             .fixture =
             {
                 .name = "failed assertions retain boolean warnings in C23",
@@ -246,7 +246,7 @@ static void check_test_driver_assert_bool(CheckTest* test, const char* clang, co
             },
         },
         {
-            .path = "tests/driver/assert_bool_failed.c",
+            .path = "driver/assert_bool_failed.c",
             .fixture =
             {
                 .name = "failed assertion warnings precede the error limit",
@@ -259,7 +259,7 @@ static void check_test_driver_assert_bool(CheckTest* test, const char* clang, co
             },
         },
         {
-            .path = "tests/driver/assert_bool_failed.c",
+            .path = "driver/assert_bool_failed.c",
             .fixture =
             {
                 .name = "failed assertion warnings precede fatal errors",
@@ -272,7 +272,7 @@ static void check_test_driver_assert_bool(CheckTest* test, const char* clang, co
             },
         },
         {
-            .path = "tests/driver/assert_bool_policy.c",
+            .path = "driver/assert_bool_policy.c",
             .fixture =
             {
                 .name = "failed assertion warnings follow source policy",
@@ -281,7 +281,7 @@ static void check_test_driver_assert_bool(CheckTest* test, const char* clang, co
             },
         },
         {
-            .path = "tests/driver/assert_bool_default_ignored.c",
+            .path = "driver/assert_bool_default_ignored.c",
             .fixture =
             {
                 .name = "failed assertion signed shift warnings are ignored by default",
@@ -289,7 +289,7 @@ static void check_test_driver_assert_bool(CheckTest* test, const char* clang, co
             },
         },
         {
-            .path = "tests/driver/assert_bool_default_ignored.c",
+            .path = "driver/assert_bool_default_ignored.c",
             .fixture =
             {
                 .name = "failed assertion signed shift warnings can be enabled",
@@ -302,7 +302,7 @@ static void check_test_driver_assert_bool(CheckTest* test, const char* clang, co
             },
         },
         {
-            .path = "tests/driver/assert_bool_macro.c",
+            .path = "driver/assert_bool_macro.c",
             .fixture =
             {
                 .name = "failed assertion warnings keep macro expansion notes",
@@ -312,7 +312,7 @@ static void check_test_driver_assert_bool(CheckTest* test, const char* clang, co
             },
         },
         {
-            .path = "tests/driver/assert_bool_recovery.c",
+            .path = "driver/assert_bool_recovery.c",
             .fixture =
             {
                 .name = "failed assertion warnings coexist with unrelated errors",
@@ -323,10 +323,11 @@ static void check_test_driver_assert_bool(CheckTest* test, const char* clang, co
     };
     for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(failed); f += 1)
     {
-        const int file = open(failed[f].path, O_RDONLY | O_CLOEXEC);
+        char path[PATH_MAX];
+        const int file = check_test_fixture_path(path, sizeof(path), failed[f].path) ? open(path, O_RDONLY | O_CLOEXEC) : -1;
         char* source = NULL;
         const bool read = file >= 0 && check_test_driver_read_file(file, &source);
-        check_test_expect(test, read, "failed assertion runtime fixture is read (run from the repository root)");
+        check_test_expect(test, read, "failed assertion runtime fixture is read");
         if (read)
         {
             CheckDriverDefaultWarningFixture fixture = failed[f].fixture;

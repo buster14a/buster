@@ -1,0 +1,21 @@
+buster-fixtures v1 preprocessor-named-ucns
+0001	gnu17	-	-	a named UCN beside the character's other spellings
+0002	gnu17	-	-	named UCNs in tokens, directives and macros
+0003	c17	-	-	named UCNs whose backslashes are trigraphs
+0004	gnu17	-	-	names Unicode doesn't have, and basic and control characters
+# -Wunicode: an incomplete named UCN retains its backslash; definitions warn once, skipped groups never.
+0005	gnu17	warnings	-	a \N clang reads as no universal character name
+# Incomplete or empty numeric UCNs retain their letter, including at line splices and in skipped groups.
+0006	gnu17	warnings	-	a \u or \U clang reads as no universal character name
+# Complete numeric UCNs for basic/control characters and surrogates diagnose at the backslash.
+0007	gnu17	-	-	a \u or \U of a basic or control character, or a surrogate
+# -pedantic reports a named UCN extension before its character error, once per macro definition.
+0008	gnu17	warnings	-pedantic	named UCNs under -pedantic
+0009	gnu17	warnings	-pedantic-errors	named UCNs under -pedantic-errors
+0010	gnu17	warnings	-pedantic -Wno-delimited-escape-sequence-extension	named UCNs under -pedantic without the extension's warning
+# -Wunicode options, -w and pragmas: suppression, promotion, silence and source-ordered mapping.
+0011	gnu17	warnings	-Wno-unicode	-Wno-unicode
+0012	gnu17	warnings	-Werror=unicode	-Werror=unicode
+0013	gnu17	warnings	-w -Werror	-w over -Werror
+0014	gnu17	warnings	-	-Wunicode's pragmas
+0015	gnu17	warnings	-pedantic	-pedantic's warning under a pragma

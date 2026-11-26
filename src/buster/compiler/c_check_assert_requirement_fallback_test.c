@@ -6,12 +6,14 @@
 
 static void check_test_driver_assert_requirement_fallback(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
-    static const char source[] = "tests/driver/assert_requirement_fallback.c";
+    char source[PATH_MAX];
+    const bool located = check_test_fixture_path(source, sizeof(source), "driver/assert_requirement_fallback.c");
+    check_test_expect(test, located, "assertion requirement fallback: fixture path fits");
     static const char sentinel[] = "preserved-requirement-output";
     static const char* const lanes[] = { "1", "3" };
     char object[PATH_MAX];
     snprintf(object, sizeof(object), "%s/requirement-fallback.o", directory);
-    for (uint32_t language = 0; language < 2; language += 1)
+    for (uint32_t language = 0; located && language < 2; language += 1)
     {
         for (uint32_t mode = 0; mode < 2; mode += 1)
         {

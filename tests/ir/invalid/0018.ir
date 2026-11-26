@@ -1,0 +1,5 @@
+function () -> void {
+b0:
+%0 = const.v8i32 0x1
+%1 = ret.void
+}

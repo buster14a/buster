@@ -7,6 +7,8 @@
 // paired, including repeated macro expansions and the calls outside a prefix. Other runtime sources guard the scope.
 static void check_test_malformed_call_views(CheckTest* test)
 {
+    char source[PATH_MAX];
+    const bool named = check_test_fixture_path(source, sizeof(source), "checker/parse-recovery/malformed-calls/malformed-calls.c");
     static const uint32_t cases[] =
     {
         14,
@@ -55,8 +57,8 @@ static void check_test_malformed_call_views(CheckTest* test)
         const PPOptions options = { .language = { .standard = 2017, .gnu = true }, .no_standard_includes = true, .macros = macros, .macro_count = 1 };
         Arena output = arena_reserve(UINT64_C(1) << 22);
         Arena scratch = arena_reserve(UINT64_C(1) << 22);
-        const bool ready = output.base != NULL && scratch.base != NULL && intern_initialize(&identifiers) && pp_initialize(&pp, &options, &identifiers) &&
-                           pp_run(&pp, "tests/checker/parse-recovery/malformed-calls.c");
+        const bool ready = named && output.base != NULL && scratch.base != NULL && intern_initialize(&identifiers) && pp_initialize(&pp, &options, &identifiers) &&
+                           pp_run(&pp, source);
         check_test_expect(test, ready, "malformed calls: view and boundary fixture initializes");
         for (uint32_t scalar = 0; ready && scalar < 2; scalar += 1)
         {
@@ -145,6 +147,89 @@ static void check_test_malformed_call_views(CheckTest* test)
     }
 }
 
+typedef struct CheckMalformedCallCase CheckMalformedCallCase;
+struct CheckMalformedCallCase
+{
+    const char* source;
+    uint32_t id;
+    uint32_t later_errors;
+    uint32_t accepted;
+    uint32_t languages;
+};
+
+// This suite keeps its independent later-error counts and language masks as data too. Validate every row/file before
+// sharding, so a malformed row or an unregistered source cannot disappear in a part that would not execute it.
+static bool check_test_malformed_calls_load(CheckTestFixtures* files, CheckMalformedCallCase** cases)
+{
+    *files = (CheckTestFixtures){ .storage = arena_reserve(UINT64_C(1) << 25) };
+    *cases = arena_push(&files->storage, sizeof(**cases) * CHECK_TEST_FIXTURE_CASES, 8);
+    files->files = arena_push(&files->storage, sizeof(*files->files) * CHECK_TEST_FIXTURE_CASES, 8);
+    char folder[PATH_MAX];
+    char path[PATH_MAX + 132];
+    const bool named = check_test_fixture_path(folder, sizeof(folder), "checker/parse-recovery/malformed-calls") &&
+                       test_fixture_path(path, sizeof(path), folder, "catalog.tsv");
+    uint64_t length = 0;
+    char* catalog = named ? check_test_fixture_read(files, path, &length) : NULL;
+    bool valid = *cases != NULL && files->files != NULL && catalog != NULL && length != 0 && catalog[length - 1] == '\n';
+    const char* header = valid ? strsep(&catalog, "\n") : "";
+    valid = valid && strcmp(header, "buster-fixtures v1 malformed-calls") == 0;
+    uint32_t line = 1;
+    while (valid && *catalog != 0)
+    {
+        char* row = strsep(&catalog, "\n");
+        line += 1;
+        if (row[0] == '#')
+        {
+            continue;
+        }
+        char* fields[5] = { 0 };
+        valid = check_test_fixture_columns(row, fields, BUSTER_ARRAY_LENGTH(fields)) && files->count < CHECK_TEST_FIXTURE_CASES;
+        CheckMalformedCallCase* fixture = valid ? *cases + files->count : NULL;
+        if (valid)
+        {
+            *fixture = (CheckMalformedCallCase){ 0 };
+            const size_t size = strlen(fields[1]);
+            valid = check_test_fixture_u32(fields[0], &fixture->id) && check_test_fixture_word(fields[1], 128) &&
+                    size > 2 && strcmp(fields[1] + size - 2, ".c") == 0 &&
+                    check_test_fixture_u32(fields[2], &fixture->later_errors) &&
+                    check_test_fixture_u32(fields[3], &fixture->accepted) && fixture->accepted <= 1 &&
+                    check_test_fixture_u32(fields[4], &fixture->languages) && fixture->languages > 0 && fixture->languages < 8;
+            for (uint32_t i = 0; valid && i < files->count; i += 1)
+            {
+                valid = fixture->id != (*cases)[i].id;
+                if (strcmp(fields[1], files->files[i]) == 0)
+                {
+                    fixture->source = (*cases)[i].source;
+                }
+            }
+            if (valid && fixture->source == NULL)
+            {
+                valid = test_fixture_path(path, sizeof(path), folder, fields[1]);
+                uint64_t source_length = 0;
+                valid = valid && check_test_fixture_read_bytes(files, path, true, &source_length) != NULL;
+                const size_t path_length = strlen(path) + 1;
+                char* stored = valid ? arena_push(&files->storage, path_length, 1) : NULL;
+                valid = stored != NULL;
+                if (valid)
+                {
+                    memcpy(stored, path, path_length);
+                    fixture->source = stored;
+                }
+            }
+            if (valid)
+            {
+                files->files[files->count++] = fields[1];
+            }
+        }
+    }
+    valid = valid && files->count != 0 && check_test_fixture_orphans(files, folder);
+    if (!valid)
+    {
+        fprintf(stderr, "malformed-calls/catalog.tsv line %u: %s\n", line, files->problem[0] ? files->problem : "invalid or duplicate case metadata");
+    }
+    return valid;
+}
+
 // A long sweep (32 s on a 4-CPU Xeon VM, #3399): the views' check and each case are units of test-checker-driver's deal
 // (check_test_driver_takes).
 static void check_test_driver_malformed_calls(CheckTest* test, const char* clang, const char* executable, const char* directory)
@@ -153,11 +238,9 @@ static void check_test_driver_malformed_calls(CheckTest* test, const char* clang
     {
         check_test_malformed_call_views(test);
     }
-    CheckTestFixtures files = { .storage = arena_reserve(CHECK_TEST_FIXTURE_BYTES + 4096) };
-    uint64_t length = 0;
-    char* catalog = files.storage.base != NULL ? check_test_fixture_read(&files, "tests/checker/parse-recovery/malformed-calls.cases", &length) : NULL;
-    const char* source = "tests/checker/parse-recovery/malformed-calls.c";
-    const bool available = catalog != NULL && access(source, R_OK) == 0;
+    CheckTestFixtures files;
+    CheckMalformedCallCase* cases = NULL;
+    const bool available = check_test_malformed_calls_load(&files, &cases);
     check_test_expect(test, available, "malformed calls: runtime source and cases available");
     static const char* const standards[] = { "-std=gnu89", "-std=gnu17", "-std=gnu23" };
     static const char* const policies[] = { "-Wall", "-Werror", "-w", "-Wno-implicit-function-declaration", "-fno-builtin", "-ferror-limit=2" };
@@ -171,26 +254,16 @@ static void check_test_driver_malformed_calls(CheckTest* test, const char* clang
     snprintf(saved, sizeof(saved), "%s/malformed-call.saved", directory);
     const bool prepared = parse_test_write(saved, sentinel, sizeof(sentinel) - 1) && expected_lines != NULL && actual_lines != NULL;
     check_test_expect(test, prepared, "malformed calls: output and diagnostic buffers available");
-    char* cursor = NULL;
-    char* line = available ? strtok_r(catalog, "\n", &cursor) : NULL;
-    uint32_t fixtures = 0;
-    bool valid = available && prepared;
-    for (; valid && line != NULL; line = strtok_r(NULL, "\n", &cursor))
+    const bool valid = available && prepared;
+    for (uint32_t fixture = 0; valid && fixture < files.count; fixture += 1)
     {
-        if (line[0] == '#')
-        {
-            continue;
-        }
-        uint32_t id = 0;
-        uint32_t later_errors = 0;
-        uint32_t accepted = 0;
-        uint32_t languages = 0;
-        char extra;
-        valid = sscanf(line, "%u %u %u %u %c", &id, &later_errors, &accepted, &languages, &extra) == 4 && accepted <= 1 && languages > 0 && languages < 8;
-        check_test_expect(test, valid, "malformed calls: runtime case metadata is valid");
+        const uint32_t id = cases[fixture].id;
+        const uint32_t later_errors = cases[fixture].later_errors;
+        const uint32_t accepted = cases[fixture].accepted;
+        const uint32_t languages = cases[fixture].languages;
+        const char* source = cases[fixture].source;
         char define[64];
         snprintf(define, sizeof(define), "-DBUSTER_CASE=%u", id);
-        fixtures += valid;
         if (!check_test_driver_takes())
         {
             continue;
@@ -267,7 +340,6 @@ static void check_test_driver_malformed_calls(CheckTest* test, const char* clang
             }
         }
     }
-    check_test_expect(test, fixtures != 0, "malformed calls: runtime case list is nonempty");
     unlink(object);
     unlink(saved);
     free(expected_lines);

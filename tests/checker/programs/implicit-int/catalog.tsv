@@ -1,0 +1,4 @@
+buster-fixtures v1 checker-sources
+implicit-int	implicit-int.c	gnu89	implicit-int
+implicit-int-program	implicit-int-program.c	gnu89	implicit-int-program
+implicit-int-parameters	implicit-int-parameters.c	gnu89	implicit-int-parameters

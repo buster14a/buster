@@ -1,0 +1,5 @@
+function () -> void {
+slot $0 size=1 align=3 type=i64 flags=0x00
+b0:
+%0 = ret.void
+}

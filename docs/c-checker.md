@@ -5565,7 +5565,7 @@ arguments in normally closed calls, member callees, mismatched delimiters, and s
 nested calls, initializers or return expressions retain the existing recovery.
 
 `test-checker-driver --malformed-calls-only` reads the original runtime source
-and case catalog in `tests/checker/parse-recovery/malformed-calls.*`. It compares
+and case catalog in `tests/checker/parse-recovery/malformed-calls/`. It compares
 complete diagnostics and status with Clang in GNU89, GNU17 and C23, including
 warning promotion/suppression, `-fno-builtin` and error limits, through both
 readers and syntax/object output with one/three requested lanes and deferred

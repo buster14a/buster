@@ -1,0 +1,5 @@
+buster-fixtures v1 driver-programs	program.c	policy.expected
+static-first	0001.c	0001.expected
+label-first	0002.c	0002.expected
+labelled-definition	0003.c	0003.expected
+unrelated-dotted-label	0004.c	0004.expected

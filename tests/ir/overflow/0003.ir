@@ -1,0 +1,5 @@
+function () -> void {
+slot $0 size=18446744073709551616 align=1 type=void flags=0x00
+b0:
+%0 = ret.void
+}

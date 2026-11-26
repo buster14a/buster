@@ -1,0 +1,1 @@
+-fcf-protection=return	1	the shadow stack's fix	__builtin_setjmp is refused under =return

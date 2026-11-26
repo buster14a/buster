@@ -93,10 +93,10 @@ static bool check_test_run_mode_peer(CheckRunModeReply reply, int32_t status, co
 static void check_test_driver_run_modes(CheckTest* test, const char* clang, const char* directory)
 {
     const CheckDriverRunModes saved = check_driver_run_modes;
-    const char* source = "tests/driver/run_modes.c";
+    char source[PATH_MAX];
     char missing[PATH_MAX];
     snprintf(missing, sizeof(missing), "%s/no-clang-server", directory);
-    const bool available = access(source, R_OK) == 0;
+    const bool available = check_test_fixture_path(source, sizeof(source), "driver/run_modes.c") && access(source, R_OK) == 0;
     check_test_expect(test, available, "run modes: runtime fixture is available");
     for (uint32_t rejected = 0; available && rejected < 2; rejected += 1)
     {

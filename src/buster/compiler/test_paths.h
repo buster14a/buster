@@ -9,10 +9,29 @@
 #define BUSTER_TEST_PATHS_INCLUDED
 
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define BUSTER_TEST_TEMPORARY_BYTES 4096
+
+// Runtime test data is relative to the selected fixture root, never to the build's source directory. A failed join
+// leaves no usable partial path: callers must reject it rather than accidentally opening a different fixture.
+static inline __attribute__((unused)) bool test_fixture_path(char* path, size_t capacity, const char* root, const char* relative)
+{
+    bool valid = capacity != 0 && root != NULL && root[0] != 0 && relative != NULL && relative[0] != 0;
+    if (valid)
+    {
+        const size_t length = strlen(root);
+        const int written = snprintf(path, capacity, "%s%s%s", root, root[length - 1] == '/' ? "" : "/", relative);
+        valid = written >= 0 && (size_t)written < capacity;
+    }
+    if (!valid && capacity != 0)
+    {
+        path[0] = 0;
+    }
+    return valid;
+}
 
 // The buffer, one for the whole executable: main.c's unit defines it, and every other object, a unit of main.c or a
 // benchmark's object of its own, declares it. Every object that includes this file is linked with main.c's. A buffer of

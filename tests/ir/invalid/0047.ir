@@ -1,0 +1,6 @@
+function (ptr) -> i64 {
+b0:
+%0 = param.ptr 0
+%1 = load.i64 %0 align=1 atomic seq_cst
+%2 = ret.void %1
+}

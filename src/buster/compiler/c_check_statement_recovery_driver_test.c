@@ -24,12 +24,12 @@ static void check_test_driver_parse_statement_recovery(CheckTest* test, const ch
 {
     static const char* const sources[] =
     {
-        "tests/checker/parse-recovery/stray-else.c",
-        "tests/checker/parse-recovery/missing-head.c",
-        "tests/checker/parse-recovery/missing-declarator.c",
-        "tests/checker/parse-recovery/mixed.c",
-        "tests/checker/parse-recovery/operand-context.c",
-        "tests/checker/parse-recovery/member-operands.c",
+        "checker/parse-recovery/stray-else.c",
+        "checker/parse-recovery/missing-head.c",
+        "checker/parse-recovery/missing-declarator.c",
+        "checker/parse-recovery/mixed.c",
+        "checker/parse-recovery/operand-context.c",
+        "checker/parse-recovery/member-operands.c",
     };
     static const uint32_t later_errors[] = { 4, 6, 3, 4, 0, 1 };
     static const char* const standards[] = { "-std=gnu17", "-std=gnu23" };
@@ -42,13 +42,14 @@ static void check_test_driver_parse_statement_recovery(CheckTest* test, const ch
     check_test_expect(test, expected_lines != NULL && actual_lines != NULL, "parse statement recovery: diagnostic buffers allocated");
     for (uint32_t f = 0; expected_lines != NULL && actual_lines != NULL && f < BUSTER_ARRAY_LENGTH(sources); f += 1)
     {
-        const bool present = access(sources[f], R_OK) == 0;
+        char source[PATH_MAX];
+        const bool present = check_test_fixture_path(source, sizeof(source), sources[f]) && access(source, R_OK) == 0;
         check_test_expect(test, present, "parse statement recovery: runtime fixture available");
         for (uint32_t s = 0; present && s < BUSTER_ARRAY_LENGTH(standards); s += 1)
         {
             for (uint32_t p = 0; p < BUSTER_ARRAY_LENGTH(policies); p += 1)
             {
-                char* reference[] = { (char*)clang, (char*)standards[s], "-fsyntax-only", "-fno-caret-diagnostics", (char*)policies[p], (char*)sources[f], NULL };
+                char* reference[] = { (char*)clang, (char*)standards[s], "-fsyntax-only", "-fno-caret-diagnostics", (char*)policies[p], source, NULL };
                 char* expected = NULL;
                 const int oracle = check_test_driver_spawn(reference, &expected);
                 const bool read = expected != NULL && check_test_diagnostic_lines(expected, expected_lines, LINES);
@@ -70,7 +71,7 @@ static void check_test_driver_parse_statement_recovery(CheckTest* test, const ch
                         compile ? "-c" : "-fsyntax-only",
                         "-fno-caret-diagnostics",
                         (char*)policies[p],
-                        (char*)sources[f],
+                        source,
                     };
                     uint32_t count = 6;
                     if (mode == 1)

@@ -15,105 +15,6 @@
 
 #include <glob.h>
 
-// A condition for each rule and each rejection, one a line: the comment says what the bit must do with it.
-static const char check_driver_truth_rules[] =
-    "enum E { A, B, C = 5 };\n"
-    "struct S { int m; int a[4]; _Bool b; struct S* p; };\n"
-    "int g(void);\n"
-    "extern int table[4];\n"
-    "int f(int x, int y, unsigned u, _Bool b, double d, struct S s, struct S* p, int* q)\n"
-    "{\n"
-    "    int r = 0;\n"
-    "    if (x) r += 1;\n"                           // rejected: a value
-    "    if (p->m == 0) r += 1;\n"                   // rejected: a literal beside no boolean
-    "    if (x != 3 && y) r += 1;\n"                 // rejected
-    "    if ((x & 8) == 0) r += 1;\n"                // rejected: a literal 0 beside `&`
-    "    if (x & 8) r += 1;\n"                       // rejected once asked: no constant 0
-    "    if (!(x & 8)) r += 1;\n"                    // rejected once asked
-    "    if ((x & 8) && y) r += 1;\n"                // rejected once asked, the `&` as a first operand too
-    "    r += (x & 16) ? 1 : 2;\n"                   // rejected once asked by the conditional
-    "    if (x == 1 && y == 2) r += 1;\n"            // rejected: two variables
-    "    if (x == 1 || p->m == 2) r += 1;\n"         // rejected: a value and a member
-    "    if (!x && y) r += 1;\n"                     // rejected: a `!` beside another value's
-    "    if (!x || p->m) r += 1;\n"                  // rejected: a `!` of a value beside a member
-    "    if (q) r += 1;\n"                           // rejected: an lvalue's address constant
-    "    if (s.m) r += 1;\n"                         // rejected: a member's
-    "    if (x == y) r += 1;\n"                      // rejected: no literal
-    "    if (1) r += 1;\n"                           // a constant
-    "    if (0 && x) r += 1;\n"                      // through a logical operator
-    "    if (x || 1) r += 1;\n"
-    "    if (!0) r += 1;\n"                          // through `!`
-    "    if ((_Bool)1) r += 1;\n"                    // through a cast
-    "    if (__builtin_constant_p(x)) r += 1;\n"     // a query
-    "    if (table) r += 1;\n"                       // an array's address
-    "    if (g) r += 1;\n"                           // a function's
-    "    if (\"s\") r += 1;\n"                       // a string literal's
-    "    if (&x) r += 1;\n"                          // an object's
-    "    if (x * 0) r += 1;\n"                       // `x * 0`
-    "    if (0 * x) r += 1;\n"
-    "    if (x & 0) r += 1;\n"
-    "    if ((x & 0) && y) r += 1;\n"
-    "    r += (x & 0) ? 1 : 2;\n"
-    "    if (x | 1) r += 1;\n"                       // `x | 1`
-    "    if (1 | x) r += 1;\n"
-    "    if ((x & 8) == 4) r += 1;\n"                // the bitwise equality
-    "    if (4 == (x & 8)) r += 1;\n"
-    "    if ((x | 8) == 0) r += 1;\n"
-    "    if ((x | 8) != -1) r += 1;\n"               // a literal `-` takes
-    "    if ((x & 8) == ~0) r += 1;\n"
-    "    if ((x < y) == 10) r += 1;\n"               // a boolean value and a literal above 1
-    "    if (b == 2) r += 1;\n"                      // a _Bool's
-    "    if (10 > b) r += 1;\n"                      // the relational check
-    "    if (!x >= 2) r += 1;\n"
-    "    if (x == 1 && x == 2) r += 1;\n"            // two comparisons of one variable
-    "    if (1 < x || 5 > x) r += 1;\n"              // their constants on the left
-    "    if (p->m == A && p->m == B) r += 1;\n"      // a member and enumerators
-    "    if (s.a[1] < 2 && s.a[1] > 3) r += 1;\n"    // an element
-    "    if (d < 1.5 && d > 2.5) r += 1;\n"          // floating constants
-    "    if (x || !x) r += 1;\n"                     // a value and its negation
-    "    if (!x && x) r += 1;\n"
-    "    if (p->m && !p->m) r += 1;\n"               // a member's
-    "    if (s.a[1] || !s.a[1]) r += 1;\n"           // an element's
-    "    if ((x == 1 && x == 2) || y) r += 1;\n"     // a logical operator's operand
-    "    do { r += 1; } while (x * 0);\n"            // a do statement's condition
-    "    while (y && (x | 1)) { r += 1; break; }\n"
-    "    r += (x & 8) == 4 ? 1 : 2;\n"               // a conditional's
-    "    r += x ?: 2;\n"                             // GNU's, rejected
-    "    if (*(int (*)[4])4096) r += 1;\n"           // an lvalue array's address, with no object
-    "    if (0 * (x + y)) r += 1;\n"                 // operators whose operands aren't the nodes before them
-    "    if (x * (char)0) r += 1;\n"
-    "    r += x * (char)0;\n"                        // a product nobody asks
-    "    if (1 | (x + y)) r += 1;\n"
-    "    if (x && (char)0) r += 1;\n"
-    "    if (!(x && (char)0)) r += 1;\n"
-    "    if ((_Bool)(x && (char)0)) r += 1;\n"
-    "    if ((x && (char)0) || y) r += 1;\n"
-    "    if (y && (x && (char)0)) r += 1;\n"
-    "    if (x == -1 && x == -2) r += 1;\n"
-    "    if (x != -2 || x != -1) r += 1;\n"
-    "    if (y && x * (char)0) r += 1;\n"
-    "    return r;\n"
-    "}\n"
-    "_Bool h(int x)\n"                               // through a return's conversion
-    "{\n"
-    "    return x && (char)0;\n"
-    "}\n";
-
-// A unit with a wrapper of _Bool (an aligned one), where a value's type alone doesn't say it is boolean.
-static const char check_driver_truth_wrapped[] =
-    "typedef _Bool __attribute__((aligned(4))) Wide;\n"
-    "int f(Wide w, _Bool b, int x, int y)\n"
-    "{\n"
-    "    int r = 0;\n"
-    "    if (w == 2) r += 1;\n"                     // an aligned _Bool's
-    "    if (3 < w) r += 1;\n"
-    "    if (b == 2) r += 1;\n"
-    "    if (x == 2) r += 1;\n"                     // rejected
-    "    if (x != 3 && y) r += 1;\n"                // rejected
-    "    return r;\n"
-    "}\n";
-
-// xorshift64*.
 static uint32_t check_driver_truth_random(uint64_t* state)
 {
     uint64_t value = *state;
@@ -303,57 +204,52 @@ static CheckDriverTruthCensus check_driver_truth_census(const char* executable, 
     return census;
 }
 
-static void check_test_driver_branch_truth(CheckTest* test, const char* clang, const char* executable, const char* directory)
+static void check_test_driver_branch_truth_fixed(CheckTest* test, const char* clang, const char* executable, const char* directory,
+                                                 const CheckDriverProgramInput* inputs)
 {
     (void)clang;
+    char* fields[5];
+    uint32_t expected[4] = { 0 };
+    bool valid = check_test_driver_input_fields(test, inputs + 1, fields, BUSTER_ARRAY_LENGTH(fields));
+    for (uint32_t i = 0; valid && i < BUSTER_ARRAY_LENGTH(expected); i += 1)
+    {
+        valid = check_test_driver_input_count(fields[i], expected + i);
+    }
+    check_test_expect(test, valid, "branch truth: the frozen case has bounded decimal counts");
+    char path[PATH_MAX];
+    bool ready = valid;
+    if (ready && inputs[0].file[0] == '@')
+    {
+        ready = check_test_fixture_path(path, sizeof(path), inputs[0].file + 1);
+    }
+    else if (ready)
+    {
+        const int size = snprintf(path, sizeof(path), "%s/branch_truth.c", directory);
+        ready = size >= 0 && (size_t)size < sizeof(path) && parse_test_write(path, inputs[0].bytes, inputs[0].length);
+    }
+    const CheckDriverTruthCensus census = ready ? check_driver_truth_census(executable, path) : (CheckDriverTruthCensus){ 0 };
+    const bool same = census.printed && census.bits == 1 && census.unsound == 0 && census.conditions == expected[0] &&
+                      census.condition_kept == expected[1] && census.condition_decided == expected[2] && census.events == expected[3];
+    if (!same)
+    {
+        fprintf(stderr, "branch truth: %s: printed %d bits %u unsound %u conditions %u kept %u decided %u events %u\n",
+                valid ? fields[4] : inputs[1].file, census.printed, census.bits, census.unsound, census.conditions,
+                census.condition_kept, census.condition_decided, census.events);
+    }
+    check_test_expect(test, same, "a branch condition's bit is sound on the frozen unit, and keeps and decides the conditions it did");
+}
+
+static void check_test_driver_branch_truth(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
     char source[PATH_MAX];
     snprintf(source, sizeof(source), "%s/branch_truth.c", directory);
-    // The rules' unit and #2990's fixtures, frozen: conditions, those the bit keeps and those the fold decides.
-    static const struct
-    {
-        const char* file;
-        unsigned conditions;
-        unsigned kept;
-        unsigned decided;
-        unsigned events;
-    } frozen[] = {
-        { NULL, 99, 54, 47, 23 },
-        { "", 6, 3, 3, 0 },
-        { "checker/cfg-pruning/issue.c", 24, 20, 17, 10 },
-        { "checker/cfg-pruning/runtime.c", 2, 2, 1, 0 },
-        { "checker/cfg-pruning/shapes.c", 78, 46, 31, 23 },
-        { "checker/cfg-pruning/tautologies.c", 57, 34, 22, 34 },
-    };
-    for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(frozen); i += 1)
-    {
-        char path[PATH_MAX];
-        bool ready = true;
-        const bool rules = frozen[i].file == NULL;
-        if (rules || frozen[i].file[0] == 0)
-        {
-            ready = parse_test_write(source, rules ? check_driver_truth_rules : check_driver_truth_wrapped,
-                                     rules ? sizeof(check_driver_truth_rules) - 1 : sizeof(check_driver_truth_wrapped) - 1);
-            snprintf(path, sizeof(path), "%s", source);
-        }
-        else
-        {
-            snprintf(path, sizeof(path), "%s/%s", check_test_fixture_root, frozen[i].file);
-        }
-        const CheckDriverTruthCensus census = ready ? check_driver_truth_census(executable, path) : (CheckDriverTruthCensus){ 0 };
-        const bool same = census.printed && census.bits == 1 && census.unsound == 0 && census.conditions == frozen[i].conditions && census.condition_kept == frozen[i].kept &&
-                          census.condition_decided == frozen[i].decided && census.events == frozen[i].events;
-        if (!same)
-        {
-            fprintf(stderr, "branch truth: %s: printed %d bits %u unsound %u conditions %u kept %u decided %u events %u\n", rules ? "the rules' unit" : frozen[i].file[0] == 0 ? "the wrapped _Bool's unit" : frozen[i].file,
-                    census.printed, census.bits, census.unsound, census.conditions, census.condition_kept, census.condition_decided, census.events);
-        }
-        check_test_expect(test, same, "a branch condition's bit is sound on the frozen unit, and keeps and decides the conditions it did");
-    }
+    // The rules' units and #2990's shared fixtures, with their frozen counts, are an ordered runtime inventory.
+    check_test_driver_programs(test, clang, executable, directory, "branch-truth", "program.c\tcounts.expected", check_test_driver_branch_truth_fixed);
     // The warnings' fixtures: every one that compiles alone.
     char pattern[PATH_MAX];
-    snprintf(pattern, sizeof(pattern), "%s/driver/warnings/*/*.c", check_test_fixture_root);
+    const bool named = check_test_fixture_path(pattern, sizeof(pattern), "driver/warnings/*/*.c");
     glob_t found = { 0 };
-    const bool listed = glob(pattern, 0, NULL, &found) == 0;
+    const bool listed = named && glob(pattern, 0, NULL, &found) == 0;
     uint32_t censused = 0;
     uint32_t unsound = 0;
     for (size_t i = 0; listed && i < found.gl_pathc; i += 1)

@@ -29,6 +29,13 @@ static bool check_test_driver_failed_comparison_output(const char* text)
 
 static void check_test_driver_failed_comparisons(CheckTest* test, const char* clang, const char* executable)
 {
+    char source[PATH_MAX];
+    const bool located = check_test_fixture_path(source, sizeof(source), "driver/unused_comparison_failed_assertions.c");
+    check_test_expect(test, located, "failed comparison: fixture path fits");
+    if (!located)
+    {
+        return;
+    }
     // #2915 supplies complete failed-assertion comma-warning recovery. Do not freeze its currently missing warnings:
     // before and after that recovery lands, all ten assertions must fail and no constant comparison may suggest an
     // assignment. The same real source is also suitable for a complete-output comparison with that recovery present.
@@ -48,7 +55,7 @@ static void check_test_driver_failed_comparisons(CheckTest* test, const char* cl
             "-fno-caret-diagnostics",
             "-fno-color-diagnostics",
             "-ferror-limit=0",
-            "tests/driver/unused_comparison_failed_assertions.c",
+            source,
         };
         uint32_t count = 7;
         if (policies[policy] != NULL)
@@ -82,7 +89,7 @@ static void check_test_driver_unused_comparisons(CheckTest* test, const char* cl
     static const CheckDriverUnusedComparisonFile files[] =
     {
         {
-            .path = "tests/driver/unused_comparison_values.c",
+            .path = "driver/unused_comparison_values.c",
             .fixture =
             {
                 .name = "unused comparison notes follow the left operand's source value category",
@@ -92,7 +99,7 @@ static void check_test_driver_unused_comparisons(CheckTest* test, const char* cl
             },
         },
         {
-            .path = "tests/driver/unused_comparison_categories.c",
+            .path = "driver/unused_comparison_categories.c",
             .fixture =
             {
                 .name = "unused comparison notes retain selections and reject duplicate vector components",
@@ -104,7 +111,7 @@ static void check_test_driver_unused_comparisons(CheckTest* test, const char* cl
             },
         },
         {
-            .path = "tests/driver/unused_comparison_comma.c",
+            .path = "driver/unused_comparison_comma.c",
             .fixture =
             {
                 .name = "discarded comma comparisons use the same assignment-note eligibility",
@@ -114,7 +121,7 @@ static void check_test_driver_unused_comparisons(CheckTest* test, const char* cl
             },
         },
         {
-            .path = "tests/driver/unused_comparison_assertions.c",
+            .path = "driver/unused_comparison_assertions.c",
             .fixture =
             {
                 .name = "successful assertions suppress constant comparison notes and retain lvalue notes",
@@ -124,7 +131,7 @@ static void check_test_driver_unused_comparisons(CheckTest* test, const char* cl
             },
         },
         {
-            .path = "tests/driver/unused_comparison_policy.c",
+            .path = "driver/unused_comparison_policy.c",
             .fixture =
             {
                 .name = "unused comparison notes respect macro operands and scoped warning policy",
@@ -134,7 +141,7 @@ static void check_test_driver_unused_comparisons(CheckTest* test, const char* cl
             },
         },
         {
-            .path = "tests/driver/unused_comparison_rejected.c",
+            .path = "driver/unused_comparison_rejected.c",
             .fixture =
             {
                 .name = "failed assertions retain preceding comparison diagnostics and preserve rejected output",
@@ -147,10 +154,11 @@ static void check_test_driver_unused_comparisons(CheckTest* test, const char* cl
     };
     for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(files); f += 1)
     {
-        const int file = open(files[f].path, O_RDONLY | O_CLOEXEC);
+        char path[PATH_MAX];
+        const int file = check_test_fixture_path(path, sizeof(path), files[f].path) ? open(path, O_RDONLY | O_CLOEXEC) : -1;
         char* source = NULL;
         const bool read = file >= 0 && check_test_driver_read_file(file, &source);
-        check_test_expect(test, read, "unused comparison runtime fixture is read (run from the repository root)");
+        check_test_expect(test, read, "unused comparison runtime fixture is read");
         if (read)
         {
             CheckDriverDefaultWarningFixture fixture = files[f].fixture;

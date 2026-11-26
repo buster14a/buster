@@ -18,7 +18,7 @@ static void check_test_driver_constant_logical(CheckTest* test, const char* clan
     static const CheckDriverConstantLogicalFile files[] =
     {
         {
-            .path = "tests/driver/constant_logical_values.c",
+            .path = "driver/constant_logical_values.c",
             .fixture =
             {
                 .name = "logical constants retain integer values and source operand distinctions",
@@ -27,14 +27,14 @@ static void check_test_driver_constant_logical(CheckTest* test, const char* clan
             },
         },
         {
-            .path = "tests/driver/constant_logical_quiet.c",
+            .path = "driver/constant_logical_quiet.c",
             .fixture =
             {
                 .name = "logical constants leave boolean, enum and nonconstant controls quiet",
             },
         },
         {
-            .path = "tests/driver/constant_logical_quiet.c",
+            .path = "driver/constant_logical_quiet.c",
             .fixture =
             {
                 .name = "logical constant quiet controls keep C23 behavior",
@@ -42,7 +42,7 @@ static void check_test_driver_constant_logical(CheckTest* test, const char* clan
             },
         },
         {
-            .path = "tests/driver/constant_logical_eval.c",
+            .path = "driver/constant_logical_eval.c",
             .fixture =
             {
                 .name = "logical constants distinguish foldable object expressions from runtime reads and effects",
@@ -51,7 +51,7 @@ static void check_test_driver_constant_logical(CheckTest* test, const char* clan
             },
         },
         {
-            .path = "tests/driver/constant_logical_eval.c",
+            .path = "driver/constant_logical_eval.c",
             .fixture =
             {
                 .name = "logical constant object evaluation keeps C23 behavior",
@@ -61,7 +61,7 @@ static void check_test_driver_constant_logical(CheckTest* test, const char* clan
             },
         },
         {
-            .path = "tests/driver/constant_logical_erased.c",
+            .path = "driver/constant_logical_erased.c",
             .fixture =
             {
                 .name = "logical constants retain builtin and complex const values in erased operands",
@@ -70,7 +70,7 @@ static void check_test_driver_constant_logical(CheckTest* test, const char* clan
             },
         },
         {
-            .path = "tests/driver/constant_logical_erased.c",
+            .path = "driver/constant_logical_erased.c",
             .fixture =
             {
                 .name = "C23 logical constants retain erased const values and reject runtime builtin operands",
@@ -80,7 +80,7 @@ static void check_test_driver_constant_logical(CheckTest* test, const char* clan
             },
         },
         {
-            .path = "tests/driver/constant_logical_wide.c",
+            .path = "driver/constant_logical_wide.c",
             .fixture =
             {
                 .name = "logical constants inspect every wide integer limb before the boolean exception",
@@ -89,7 +89,7 @@ static void check_test_driver_constant_logical(CheckTest* test, const char* clan
             },
         },
         {
-            .path = "tests/driver/constant_logical_wide.c",
+            .path = "driver/constant_logical_wide.c",
             .fixture =
             {
                 .name = "logical wide integer constants keep C23 behavior",
@@ -99,7 +99,7 @@ static void check_test_driver_constant_logical(CheckTest* test, const char* clan
             },
         },
         {
-            .path = "tests/driver/constant_logical_invalid.c",
+            .path = "driver/constant_logical_invalid.c",
             .fixture =
             {
                 .name = "invalid arithmetic is not a logical constant and valid sign-bit shifts retain diagnostic order",
@@ -108,7 +108,7 @@ static void check_test_driver_constant_logical(CheckTest* test, const char* clan
             },
         },
         {
-            .path = "tests/driver/constant_logical_invalid.c",
+            .path = "driver/constant_logical_invalid.c",
             .fixture =
             {
                 .name = "C23 logical warning evaluation rejects invalid arithmetic in ordinary and query operands",
@@ -118,7 +118,7 @@ static void check_test_driver_constant_logical(CheckTest* test, const char* clan
             },
         },
         {
-            .path = "tests/driver/constant_logical_receipts.c",
+            .path = "driver/constant_logical_receipts.c",
             .fixture =
             {
                 // Existing runtime arithmetic warnings do not fold const-object receipts. Compare the logical
@@ -134,7 +134,7 @@ static void check_test_driver_constant_logical(CheckTest* test, const char* clan
             },
         },
         {
-            .path = "tests/driver/constant_logical_receipts.c",
+            .path = "driver/constant_logical_receipts.c",
             .fixture =
             {
                 // C23 rejects invalid const receipts with static storage, including valid members of an invalid
@@ -154,7 +154,7 @@ static void check_test_driver_constant_logical(CheckTest* test, const char* clan
             },
         },
         {
-            .path = "tests/driver/constant_logical_macros.c",
+            .path = "driver/constant_logical_macros.c",
             .fixture =
             {
                 .name = "logical constants distinguish macro operators from macro operands",
@@ -163,7 +163,7 @@ static void check_test_driver_constant_logical(CheckTest* test, const char* clan
             },
         },
         {
-            .path = "tests/driver/constant_logical_stress.c",
+            .path = "driver/constant_logical_stress.c",
             .fixture =
             {
                 .name = "logical constants retain long dependency chains and shared conditional values",
@@ -172,7 +172,7 @@ static void check_test_driver_constant_logical(CheckTest* test, const char* clan
             },
         },
         {
-            .path = "tests/driver/constant_logical_stress.c",
+            .path = "driver/constant_logical_stress.c",
             .fixture =
             {
                 .name = "C23 logical constants retain long and shared dependency paths",
@@ -182,7 +182,7 @@ static void check_test_driver_constant_logical(CheckTest* test, const char* clan
             },
         },
         {
-            .path = "tests/driver/constant_logical_system.c",
+            .path = "driver/constant_logical_system.c",
             .fixture =
             {
                 .name = "logical warnings ignore system headers and resume in user source",
@@ -195,7 +195,7 @@ static void check_test_driver_constant_logical(CheckTest* test, const char* clan
             },
         },
         {
-            .path = "tests/driver/constant_logical_system.c",
+            .path = "driver/constant_logical_system.c",
             .fixture =
             {
                 .name = "system header opt in retains logical warnings and notes",
@@ -209,7 +209,7 @@ static void check_test_driver_constant_logical(CheckTest* test, const char* clan
             },
         },
         {
-            .path = "tests/driver/constant_logical_system.c",
+            .path = "driver/constant_logical_system.c",
             .fixture =
             {
                 .name = "system header warning suppression obeys the last mapping",
@@ -224,7 +224,7 @@ static void check_test_driver_constant_logical(CheckTest* test, const char* clan
             },
         },
         {
-            .path = "tests/driver/constant_logical_system.c",
+            .path = "driver/constant_logical_system.c",
             .fixture =
             {
                 .name = "C23 system header opt in retains logical warnings and notes",
@@ -239,7 +239,7 @@ static void check_test_driver_constant_logical(CheckTest* test, const char* clan
             },
         },
         {
-            .path = "tests/driver/constant_logical_order.c",
+            .path = "driver/constant_logical_order.c",
             .fixture =
             {
                 .name = "logical warnings retain operand construction and enclosing diagnostic order",
@@ -248,7 +248,7 @@ static void check_test_driver_constant_logical(CheckTest* test, const char* clan
             },
         },
         {
-            .path = "tests/driver/constant_logical_assert.c",
+            .path = "driver/constant_logical_assert.c",
             .fixture =
             {
                 .name = "logical warnings precede failed assertions in every scope",
@@ -258,7 +258,7 @@ static void check_test_driver_constant_logical(CheckTest* test, const char* clan
             },
         },
         {
-            .path = "tests/driver/constant_logical_assert.c",
+            .path = "driver/constant_logical_assert.c",
             .fixture =
             {
                 .name = "logical assertion warnings retain C23 ordering",
@@ -269,7 +269,7 @@ static void check_test_driver_constant_logical(CheckTest* test, const char* clan
             },
         },
         {
-            .path = "tests/driver/constant_logical_assert.c",
+            .path = "driver/constant_logical_assert.c",
             .fixture =
             {
                 .name = "logical assertion notes precede the error limit",
@@ -283,7 +283,7 @@ static void check_test_driver_constant_logical(CheckTest* test, const char* clan
             },
         },
         {
-            .path = "tests/driver/constant_logical_assert.c",
+            .path = "driver/constant_logical_assert.c",
             .fixture =
             {
                 .name = "logical assertion notes precede fatal errors",
@@ -297,7 +297,7 @@ static void check_test_driver_constant_logical(CheckTest* test, const char* clan
             },
         },
         {
-            .path = "tests/driver/constant_logical_assert.c",
+            .path = "driver/constant_logical_assert.c",
             .fixture =
             {
                 .name = "disabled logical warnings leave assertion failures and no orphan notes",
@@ -309,7 +309,7 @@ static void check_test_driver_constant_logical(CheckTest* test, const char* clan
             },
         },
         {
-            .path = "tests/driver/constant_logical_policy.c",
+            .path = "driver/constant_logical_policy.c",
             .fixture =
             {
                 .name = "logical warnings obey source push, pop, suppression and promotion",
@@ -319,7 +319,7 @@ static void check_test_driver_constant_logical(CheckTest* test, const char* clan
             },
         },
         {
-            .path = "tests/driver/constant_logical_policy.c",
+            .path = "driver/constant_logical_policy.c",
             .fixture =
             {
                 .name = "source pragmas reenable a disabled logical warning",
@@ -333,7 +333,7 @@ static void check_test_driver_constant_logical(CheckTest* test, const char* clan
             },
         },
         {
-            .path = "tests/driver/constant_logical_contexts.c",
+            .path = "driver/constant_logical_contexts.c",
             .fixture =
             {
                 .name = "logical warnings survive unevaluated and unselected operands",
@@ -343,7 +343,7 @@ static void check_test_driver_constant_logical(CheckTest* test, const char* clan
             },
         },
         {
-            .path = "tests/driver/constant_logical_contexts.c",
+            .path = "driver/constant_logical_contexts.c",
             .fixture =
             {
                 .name = "C23 logical warnings survive unevaluated and unselected operands",
@@ -354,7 +354,7 @@ static void check_test_driver_constant_logical(CheckTest* test, const char* clan
             },
         },
         {
-            .path = "tests/driver/constant_logical_recovery.c",
+            .path = "driver/constant_logical_recovery.c",
             .fixture =
             {
                 .name = "logical warnings survive later file and block semantic errors",
@@ -364,7 +364,7 @@ static void check_test_driver_constant_logical(CheckTest* test, const char* clan
             },
         },
         {
-            .path = "tests/driver/constant_logical_recovery.c",
+            .path = "driver/constant_logical_recovery.c",
             .fixture =
             {
                 .name = "C23 logical warnings retain semantic recovery order",
@@ -375,7 +375,7 @@ static void check_test_driver_constant_logical(CheckTest* test, const char* clan
             },
         },
         {
-            .path = "tests/driver/constant_logical_prefix.c",
+            .path = "driver/constant_logical_prefix.c",
             .fixture =
             {
                 .name = "logical warnings in a complete prefix survive a later structural parse error",
@@ -385,7 +385,7 @@ static void check_test_driver_constant_logical(CheckTest* test, const char* clan
             },
         },
         {
-            .path = "tests/driver/constant_logical_c23.c",
+            .path = "driver/constant_logical_c23.c",
             .fixture =
             {
                 .name = "C23 logical warnings distinguish constexpr integers and booleans",
@@ -396,7 +396,7 @@ static void check_test_driver_constant_logical(CheckTest* test, const char* clan
             },
         },
         {
-            .path = "tests/driver/constant_logical_group.c",
+            .path = "driver/constant_logical_group.c",
             .fixture =
             {
                 .name = "logical constant warnings are enabled by default in enum initializers",
@@ -405,7 +405,7 @@ static void check_test_driver_constant_logical(CheckTest* test, const char* clan
             },
         },
         {
-            .path = "tests/driver/constant_logical_group.c",
+            .path = "driver/constant_logical_group.c",
             .fixture =
             {
                 .name = "common warning groups do not suppress the independent logical family",
@@ -421,7 +421,7 @@ static void check_test_driver_constant_logical(CheckTest* test, const char* clan
             },
         },
         {
-            .path = "tests/driver/constant_logical_group.c",
+            .path = "driver/constant_logical_group.c",
             .fixture =
             {
                 .name = "conversion warnings do not control the logical family",
@@ -434,7 +434,7 @@ static void check_test_driver_constant_logical(CheckTest* test, const char* clan
             },
         },
         {
-            .path = "tests/driver/constant_logical_group.c",
+            .path = "driver/constant_logical_group.c",
             .fixture =
             {
                 .name = "common warning groups do not enable a disabled logical family",
@@ -448,7 +448,7 @@ static void check_test_driver_constant_logical(CheckTest* test, const char* clan
             },
         },
         {
-            .path = "tests/driver/constant_logical_group.c",
+            .path = "driver/constant_logical_group.c",
             .fixture =
             {
                 .name = "everything does not override explicit logical warning suppression",
@@ -460,7 +460,7 @@ static void check_test_driver_constant_logical(CheckTest* test, const char* clan
             },
         },
         {
-            .path = "tests/driver/constant_logical_group.c",
+            .path = "driver/constant_logical_group.c",
             .fixture =
             {
                 .name = "explicit logical warning selection reenables everything suppression",
@@ -474,7 +474,7 @@ static void check_test_driver_constant_logical(CheckTest* test, const char* clan
             },
         },
         {
-            .path = "tests/driver/constant_logical_group.c",
+            .path = "driver/constant_logical_group.c",
             .fixture =
             {
                 .name = "logical warning options keep the last exact mapping",
@@ -488,7 +488,7 @@ static void check_test_driver_constant_logical(CheckTest* test, const char* clan
             },
         },
         {
-            .path = "tests/driver/constant_logical_group.c",
+            .path = "driver/constant_logical_group.c",
             .fixture =
             {
                 .name = "logical warning promotion retains both operators' notes",
@@ -501,7 +501,7 @@ static void check_test_driver_constant_logical(CheckTest* test, const char* clan
             },
         },
         {
-            .path = "tests/driver/constant_logical_group.c",
+            .path = "driver/constant_logical_group.c",
             .fixture =
             {
                 .name = "logical warning demotion survives a later global Werror",
@@ -516,10 +516,11 @@ static void check_test_driver_constant_logical(CheckTest* test, const char* clan
     };
     for (uint32_t f = 0; f < BUSTER_ARRAY_LENGTH(files); f += 1)
     {
-        const int file = open(files[f].path, O_RDONLY | O_CLOEXEC);
+        char path[PATH_MAX];
+        const int file = check_test_fixture_path(path, sizeof(path), files[f].path) ? open(path, O_RDONLY | O_CLOEXEC) : -1;
         char* source = NULL;
         const bool read = file >= 0 && check_test_driver_read_file(file, &source);
-        check_test_expect(test, read, "constant logical operand runtime fixture is read (run from the repository root)");
+        check_test_expect(test, read, "constant logical operand runtime fixture is read");
         if (read)
         {
             CheckDriverDefaultWarningFixture fixture = files[f].fixture;

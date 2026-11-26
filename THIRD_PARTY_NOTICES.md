@@ -631,6 +631,15 @@ referenced interface and inspected implementation have the same MIT grant.
 
 ## Encoder, tools and other generated material
 
+The runtime-fixture follow-up (#3629) relocates original test literals and
+metadata from the compiler's checker, driver, preprocessor and IR parser tests
+at `8e4d32879e17b7d9548cad54257a2f8461328366` into `tests/`. The extracted sources,
+expected text and catalogs keep the project's `Apache-2.0 WITH LLVM-exception`
+terms. Host Clang 23.1.4 was used to dump the existing C literals for byte
+comparison, and remains an external test oracle. No upstream implementation,
+fixture or new external corpus was imported. Existing notices and provenance
+for other runtime fixtures remain unchanged.
+
 [PR #14](https://github.com/buster14a/buster/pull/14), introducing the
 encoder in `55f05ac`, explicitly records that no code was copied from
 `buster14a/bloat-buster`'s historical encoder at

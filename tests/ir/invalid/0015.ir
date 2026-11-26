@@ -1,0 +1,5 @@
+function () -> void {
+b0:
+%0 = vconst.v4i32 0x1g
+%1 = ret.void
+}

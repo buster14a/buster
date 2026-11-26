@@ -1,0 +1,9 @@
+function () -> i64 {
+b0:
+%0 = br.void b2
+b1:
+%1 = const.i64 0x7
+%2 = br.void b2
+b2:
+%3 = ret.void %1
+}

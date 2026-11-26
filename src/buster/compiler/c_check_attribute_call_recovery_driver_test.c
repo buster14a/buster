@@ -15,16 +15,16 @@ static void check_test_driver_attribute_calls(CheckTest* test, const char* clang
         bool accepted;
     } fixtures[] =
     {
-        { "tests/checker/parse-recovery/attributed-calls.c", 2, false, false },
-        { "tests/checker/parse-recovery/attributed-call-attributes.c", 1, false, false },
-        { "tests/checker/parse-recovery/attributed-call-macros.c", 2, false, false },
-        { "tests/checker/parse-recovery/attributed-call-rounds.c", 3, false, false },
-        { "tests/checker/parse-recovery/attributed-call-nesting.c", 1, false, false },
-        { "tests/checker/parse-recovery/attributed-call-views.c", 2, false, false },
-        { "tests/checker/parse-recovery/attribute-recovery-integration.c", 2, true, false },
-        { "tests/checker/parse-recovery/attributed-call-builtin-control.c", 0, false, false },
-        { "tests/checker/parse-recovery/attributed-call-c23-control.c", 0, true, false },
-        { "tests/checker/parse-recovery/attributed-call-valid-control.c", 0, true, true },
+        { "checker/parse-recovery/attributed-calls.c", 2, false, false },
+        { "checker/parse-recovery/attributed-call-attributes.c", 1, false, false },
+        { "checker/parse-recovery/attributed-call-macros.c", 2, false, false },
+        { "checker/parse-recovery/attributed-call-rounds.c", 3, false, false },
+        { "checker/parse-recovery/attributed-call-nesting.c", 1, false, false },
+        { "checker/parse-recovery/attributed-call-views.c", 2, false, false },
+        { "checker/parse-recovery/attribute-recovery-integration.c", 2, true, false },
+        { "checker/parse-recovery/attributed-call-builtin-control.c", 0, false, false },
+        { "checker/parse-recovery/attributed-call-c23-control.c", 0, true, false },
+        { "checker/parse-recovery/attributed-call-valid-control.c", 0, true, true },
     };
     static const char* const standards[] = { "-std=gnu89", "-std=gnu17", "-std=gnu23" };
     static const char* const policies[] = { "-Wall", "-Werror", "-w", "-Wno-implicit-function-declaration", "-ferror-limit=2" };
@@ -40,14 +40,15 @@ static void check_test_driver_attribute_calls(CheckTest* test, const char* clang
     check_test_expect(test, prepared && expected_lines != NULL && actual_lines != NULL, "attribute calls: output and diagnostic buffers available");
     for (uint32_t f = 0; prepared && expected_lines != NULL && actual_lines != NULL && f < BUSTER_ARRAY_LENGTH(fixtures); f += 1)
     {
-        const bool present = access(fixtures[f].path, R_OK) == 0;
+        char path[PATH_MAX];
+        const bool present = check_test_fixture_path(path, sizeof(path), fixtures[f].path) && access(path, R_OK) == 0;
         check_test_expect(test, present, "attribute calls: runtime fixture available");
         const uint32_t languages = fixtures[f].c23 ? 3u : 2u;
         for (uint32_t s = 0; present && s < languages; s += 1)
         {
             for (uint32_t p = 0; p < BUSTER_ARRAY_LENGTH(policies); p += 1)
             {
-                char* reference[] = { (char*)clang, (char*)standards[s], "-fsyntax-only", "-fno-caret-diagnostics", (char*)policies[p], (char*)fixtures[f].path, NULL };
+                char* reference[] = { (char*)clang, (char*)standards[s], "-fsyntax-only", "-fno-caret-diagnostics", (char*)policies[p], path, NULL };
                 char* expected = NULL;
                 const int oracle = check_test_driver_spawn(reference, &expected);
                 const bool read = expected != NULL && check_test_diagnostic_lines(expected, expected_lines, LINES);
@@ -65,7 +66,7 @@ static void check_test_driver_attribute_calls(CheckTest* test, const char* clang
                 {
                     const bool compile = mode >= 2;
                     char* arguments[20] = { (char*)executable, (char*)standards[s], compile ? "-c" : "-fsyntax-only",
-                                            "-fno-caret-diagnostics", (char*)policies[p], (char*)fixtures[f].path };
+                                            "-fno-caret-diagnostics", (char*)policies[p], path };
                     uint32_t count = 6;
                     if ((mode & 1) != 0)
                     {

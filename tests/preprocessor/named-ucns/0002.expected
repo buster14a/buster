@@ -1,0 +1,5 @@
+2:2: error: character '1' cannot be specified by a universal character name
+8:11: error: character 'A' cannot be specified by a universal character name
+11:6: error: universal character name refers to a control character
+13:10: error: 'LATIN SMALL LETTER NOT A THING' is not a valid Unicode character name
+13:7: error: invalid token at start of a preprocessor expression

@@ -1,0 +1,1 @@
+-fcf-protection	1	the shadow stack's fix	__builtin_longjmp is refused under =full
