@@ -466,7 +466,13 @@ static inline const char* fast_cc_ident_str(const FastCCState* cc, uint32_t id, 
 
 static inline FastType ftype_from_index(const FastCCState* cc, uint32_t idx)
 {
-    return BUSTER_FTYPE_COMPLEX_BIT | ((uint32_t)cc->ctypes[idx].kind << BUSTER_FTYPE_KIND_SH) | idx;
+    // The kind's byte alone: Clang widened its load to the record's first four bytes, whose shift drops the other
+    // three, and a record just made (fast_cc_alloc_ctype: the kind's byte, eight zero bytes from offset 1, then the
+    // complete flag's) holds those four bytes in no one store, so the load waited for them to retire (#3577: 0.38 M
+    // cycles a compile of sqlite3.c on the 9700X). The empty asm takes the zero-extended byte.
+    uint32_t kind = cc->ctypes[idx].kind;
+    __asm__("" : "+r"(kind));
+    return BUSTER_FTYPE_COMPLEX_BIT | (kind << BUSTER_FTYPE_KIND_SH) | idx;
 }
 
 // Pointer depth participates in the comparison: an array and a pointer to that array have different kinds here.

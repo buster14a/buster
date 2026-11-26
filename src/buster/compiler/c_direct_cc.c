@@ -8006,23 +8006,24 @@ static BUSTER_DIRECT_HOT void fast_expr_reduce_top(FastExprCtx* ex, FastExprOp* 
         }
         const uint32_t seq_result = BUSTER_FSEQ_RESULT(lhs);
         BUSTER_FSEQ_MODIFY(ex, lhs)
-        FastVal res = { 0 };
-        fval_store(ex, lhs, rhs, true, &res);
-        res.marks = BUSTER_FVAL_MARK_EFFECT;
-        res.op = FTOK_ASSIGN;
-        res.seq_ident = seq_result;
-        ex->vstack[ex->vsp++] = res;
+        // The result where the left operand stands, as the binary operators' below: fval_store writes it last, after
+        // its last read of the operand, or bails out. A local copied to the stack waited for its stores, none of which
+        // holds the copy's 32 bytes (0.9 M cycles a compile of sqlite3.c on the 9700X, #3577).
+        fval_store(ex, lhs, rhs, true, lhs);
+        lhs->marks = BUSTER_FVAL_MARK_EFFECT;
+        lhs->op = FTOK_ASSIGN;
+        lhs->seq_ident = seq_result;
+        ex->vsp += 1u;
         return;
     }
     if (tok >= FTOK_ADD_ASSIGN && tok <= FTOK_SHR_ASSIGN)
     {
         const uint32_t seq_result = BUSTER_FSEQ_RESULT(lhs);
-        FastVal res = { 0 };
-        fval_emit_compound_assign(ex, tok, lhs, rhs, &res);
-        res.marks = BUSTER_FVAL_MARK_EFFECT;
-        res.op = tok;
-        res.seq_ident = seq_result;
-        ex->vstack[ex->vsp++] = res;
+        fval_emit_compound_assign(ex, tok, lhs, rhs, lhs);
+        lhs->marks = BUSTER_FVAL_MARK_EFFECT;
+        lhs->op = tok;
+        lhs->seq_ident = seq_result;
+        ex->vsp += 1u;
         return;
     }
     // #3577: an operand whose own operator C's precedence would question (-Wparentheses' family): a shift's `+` or
@@ -8945,26 +8946,30 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
             const uint32_t lbracket = ops[osp].lbl0;
             cc->pos += 1u;
             if (ex.vsp < 2u) { fast_cc_bail(cc, "subscript stack"); break; }
-            FastVal idx_v = ex.vstack[--ex.vsp];
-            FastVal base_v = ex.vstack[--ex.vsp];
+            // The operands where they stand, above the stack's new top, as the binary operators' (#2850): a copy of a value
+            // just written a field at a time waits for its stores (0.3 M cycles a compile of sqlite3.c, #3577). The
+            // result goes where the base stood, once nothing reads either.
+            FastVal* idx_v = ex.vstack + (ex.vsp - 1u);
+            FastVal* base_v = ex.vstack + (ex.vsp - 2u);
+            ex.vsp -= 2u;
             // Support C commutative `i[a]`!
             bool reversed = false;
-            if (!ftype_is_ptr(ftype_decay(cc, base_v.type)) && ftype_is_ptr(ftype_decay(cc, idx_v.type)))
+            if (!ftype_is_ptr(ftype_decay(cc, base_v->type)) && ftype_is_ptr(ftype_decay(cc, idx_v->type)))
             {
-                FastVal tmp = base_v; base_v = idx_v; idx_v = tmp;
+                FastVal* tmp = base_v; base_v = idx_v; idx_v = tmp;
                 reversed = true;
             }
-            const FastType bt = ftype_decay(cc, base_v.type);
+            const FastType bt = ftype_decay(cc, base_v->type);
             if (!ftype_is_ptr(bt)) { fast_cc_bail(cc, "subscript non-pointer"); break; }
             const FastType elem = ftype_deref(cc, bt);
             // #3577: an integer index, and a complete element type, or the full pipeline's error; void's (GNU's), which the
             // full pipeline stops on.
             // (An integer scalar index and a scalar or pointer element, the common subscript, need no table: a test.)
             const uint32_t void_elem = (uint32_t)((elem & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_SCALAR_MASK)) == FTYPE_VOID);
-            const uint32_t plain_index = (uint32_t)((idx_v.type & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) == 0) &
-                                         (BUSTER_FAST_INTEGER_KINDS >> (idx_v.type & BUSTER_FTYPE_SCALAR_MASK));
+            const uint32_t plain_index = (uint32_t)((idx_v->type & (BUSTER_FTYPE_COMPLEX_BIT | BUSTER_FTYPE_PTR_MASK)) == 0) &
+                                         (BUSTER_FAST_INTEGER_KINDS >> (idx_v->type & BUSTER_FTYPE_SCALAR_MASK));
             if ((((elem >> 31) | void_elem | (plain_index ^ 1u)) & 1u) != 0 &&
-                (BUSTER_FAST_TYPE_INCOMPLETE(cc, elem) | void_elem | (uint32_t)(BUSTER_FAST_OPERAND_CLASS(cc, idx_v.type) != BUSTER_FOPERAND_INTEGER)) != 0)
+                (BUSTER_FAST_TYPE_INCOMPLETE(cc, elem) | void_elem | (uint32_t)(BUSTER_FAST_OPERAND_CLASS(cc, idx_v->type) != BUSTER_FOPERAND_INTEGER)) != 0)
             {
                 fast_cc_bail(cc, "subscript the full pipeline refuses");
                 break;
@@ -8976,15 +8981,15 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
                 continue;
             }
             // Zero-instruction constant-index folding for local/global arrays & pointer offsets!
-            if (idx_v.kind == FVAL_IMM)
+            if (idx_v->kind == FVAL_IMM)
             {
                 // #3577: a constant index out of a complete array's bounds (one past is its end, but as `&`'s whole
                 // operand) is the full pipeline's -Warray-bounds where the array is a named object's or a string
                 // literal's; `5[a]` and a member's array are quiet there (fast_cc_array_index_questioned).
-                if (ftype_is_array(base_v.type) && !reversed)
+                if (ftype_is_array(base_v->type) && !reversed)
                 {
-                    const FastComplexType* at = cc->ctypes + (base_v.type & BUSTER_FTYPE_CIDX_MASK);
-                    const uint64_t index = (uint64_t)idx_v.imm;
+                    const FastComplexType* at = cc->ctypes + (base_v->type & BUSTER_FTYPE_CIDX_MASK);
+                    const uint64_t index = (uint64_t)idx_v->imm;
                     if (at->complete != 0 && index >= (uint64_t)at->count &&
                         fast_cc_array_index_questioned(cc, lbracket, index == (uint64_t)at->count && osp != 0 && ops[osp - 1u].op == FEOP_ADDR))
                     {
@@ -8992,26 +8997,26 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
                         break;
                     }
                 }
-                const int64_t boff = idx_v.imm * (int64_t)esz;
-                if (ftype_is_array(base_v.type) && base_v.kind == FVAL_LOCAL && boff >= INT32_MIN && boff <= INT32_MAX)
+                const int64_t boff = idx_v->imm * (int64_t)esz;
+                if (ftype_is_array(base_v->type) && base_v->kind == FVAL_LOCAL && boff >= INT32_MIN && boff <= INT32_MAX)
                 {
-                    ex.vstack[ex.vsp++] = (FastVal){ .type = elem, .kind = FVAL_LOCAL, .off = base_v.off + (int32_t)boff, .is_lvalue = 1u };
+                    ex.vstack[ex.vsp++] = (FastVal){ .type = elem, .kind = FVAL_LOCAL, .off = base_v->off + (int32_t)boff, .is_lvalue = 1u };
                     continue;
                 }
-                if (ftype_is_array(base_v.type) && base_v.kind == FVAL_GLOBAL)
+                if (ftype_is_array(base_v->type) && base_v->kind == FVAL_GLOBAL)
                 {
-                    ex.vstack[ex.vsp++] = (FastVal){ .type = elem, .kind = FVAL_GLOBAL, .sym_idx = base_v.sym_idx, .imm = base_v.imm + boff, .is_lvalue = 1u };
+                    ex.vstack[ex.vsp++] = (FastVal){ .type = elem, .kind = FVAL_GLOBAL, .sym_idx = base_v->sym_idx, .imm = base_v->imm + boff, .is_lvalue = 1u };
                     continue;
                 }
                 if (boff >= INT32_MIN && boff <= INT32_MAX)
                 {
-                    const uint32_t pr = fval_to_gp(&ex, &base_v, true);
+                    const uint32_t pr = fval_to_gp(&ex, base_v, true);
                     ex.vstack[ex.vsp++] = (FastVal){ .type = elem, .kind = FVAL_INDIRECT, .reg = (uint8_t)pr, .off = (int32_t)boff, .is_lvalue = 1u };
                     continue;
                 }
             }
             FastVal ptr_v = { 0 };
-            fval_emit_binary(&ex, FTOK_PLUS, &base_v, &idx_v, &ptr_v);
+            fval_emit_binary(&ex, FTOK_PLUS, base_v, idx_v, &ptr_v);
             const uint32_t pr = fval_to_gp(&ex, &ptr_v, true);
             ex.vstack[ex.vsp++] = (FastVal){ .type = elem, .kind = FVAL_INDIRECT, .reg = (uint8_t)pr, .off = 0, .is_lvalue = 1u };
             continue;

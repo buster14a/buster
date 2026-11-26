@@ -196,6 +196,7 @@ struct FastTok
     uint16_t extra;   // string/literal flags or wide/prefix kind or param index in macro body
     uint32_t data;    // ident_id (IDENT/KW), inline u32 or num_pool index (INT/FLOAT), lit_pool index (STR)
 };
+_Static_assert(sizeof(FastTok) == 8u && offsetof(FastTok, kind) == 0u && offsetof(FastTok, flags) == 1u, "a token's word: its kind's byte, then its flags'");
 
 // A token made in a register and given back whole. A token written a field at a time and then loaded whole waits for
 // its stores to leave the store buffer: Zen 5 forwards a store to a load only when the load lies inside that one store
@@ -5190,12 +5191,20 @@ static __attribute__((noinline)) void fast_pp_handle_define(FastPP* pp, FastIncl
     // ##, and __VA_OPT__ in any but a variadic macro's (which leaves below): the full pipeline's.
     uint32_t body_bad = 0;
     const uint32_t va_opt_id = pp->idents.va_opt_id;
-    // The first token without the space before it. Its one-byte store doesn't forward to the loop's load of the whole
-    // token, but writing every token again whole measured 0.04 ms slower on sqlite3.c's 5,757 defines (#3584).
+    // The first token without the space before it, written again whole: the loop below loads its kind and flags as one
+    // word, which a one-byte store of the flags alone doesn't forward to (#3577: 0.4 M cycles a compile of sqlite3.c on
+    // the 9700X; writing every token again whole measured 0.04 ms slower on its 5,757 defines, #3584). The empty asm
+    // keeps Clang from narrowing the store back to the flags' byte.
     if (body_count != 0)
     {
-        body_bad = ((uint32_t)!is_func & (uint32_t)((body[0].flags & BUSTER_FTOK_SPACE) == 0)) | (uint32_t)(body[0].kind == FTOK_HASHHASH);
-        body[0].flags &= (uint8_t)~(BUSTER_FTOK_SPACE | BUSTER_FTOK_BOL);
+        uint64_t first;
+        memcpy(&first, body, sizeof(first));
+        __asm__("" : "+r"(first));
+        const uint32_t first_kind = (uint32_t)(first & 0xffu);
+        const uint32_t first_flags = (uint32_t)((first >> 8) & 0xffu);
+        body_bad = ((uint32_t)!is_func & (uint32_t)((first_flags & BUSTER_FTOK_SPACE) == 0)) | (uint32_t)(first_kind == FTOK_HASHHASH);
+        first &= ~((uint64_t)(BUSTER_FTOK_SPACE | BUSTER_FTOK_BOL) << 8);
+        memcpy(body, &first, sizeof(first));
     }
     for (uint32_t i = 0; i < body_count; i += 1)
     {
