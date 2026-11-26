@@ -3263,6 +3263,26 @@ static void tier1_cfg_problem_registers(const Tier1CfgInput* input, Tier1Allocat
     intervals->clobber_count = input->clobber_count;
 }
 
+// The private guarded variants: a merged interval must not give a several-predecessor join the preceding handler's
+// convention. The stricter alternative permits no internal basic-block boundary. Endpoints belong to separate ranges.
+static bool tier1_cfg_interval_crosses_join(const Tier1CfgInput* input, uint32_t start, uint32_t end, bool single_block)
+{
+    uint32_t first = 0;
+    uint32_t past = input->block_count;
+    while (first < past)
+    {
+        const uint32_t middle = first + (past - first) / 2;
+        first = input->block_starts[middle] <= start ? middle + 1 : first;
+        past = input->block_starts[middle] <= start ? past : middle;
+    }
+    bool joined = false;
+    for (uint32_t b = first; !joined && b < input->block_count && input->block_starts[b] < end; b += 1)
+    {
+        joined = single_block || input->predecessor_offsets[b + 1] - input->predecessor_offsets[b] > 1;
+    }
+    return joined;
+}
+
 // A nonrecomputable interval that crosses a clobber takes a preserved register where one is free (#2610). This is
 // an avoidance, not a restriction: a bound definition keeps its incoming register, and pressure may keep that same
 // register beyond the definition. Only intervals with both clobbered and preserved choices need a decision. Sixteen
@@ -3270,6 +3290,7 @@ static void tier1_cfg_problem_registers(const Tier1CfgInput* input, Tier1Allocat
 // sorted positions. The prepared avoidance column belongs to both problems, so copy it only for an actual addition.
 static bool tier1_cfg_clobber_avoidance(const Tier1CfgInput* input, Arena* output, Tier1AllocationInput* intervals)
 {
+    const uint32_t experiment = tier1_measure_experiment();
     const uint32_t count = intervals->count;
     const __m512i table = _mm512_setr_epi32(input->clobber_registers[0], input->clobber_registers[1], input->clobber_registers[2], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     const __m512i zero = _mm512_setzero_si512();
@@ -3298,8 +3319,9 @@ static bool tier1_cfg_clobber_avoidance(const Tier1CfgInput* input, Arena* outpu
                 first = input->clobbers[middle] <= start ? middle + 1 : first;
                 past = input->clobbers[middle] <= start ? past : middle;
             }
-            const uint32_t later = (tier1_measure_experiment() & 8u) != 0 ? 1u : 0u;
-            if (first + later < input->clobber_count && input->clobbers[first + later] < intervals->ends[interval])
+            const uint32_t later = (experiment & 8u) != 0 ? 1u : 0u;
+            if (first + later < input->clobber_count && input->clobbers[first + later] < intervals->ends[interval] &&
+                ((experiment & 48u) == 0 || !tier1_cfg_interval_crosses_join(input, start, intervals->ends[interval], (experiment & 32u) != 0)))
             {
                 if (avoided == 0)
                 {
