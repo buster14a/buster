@@ -1,0 +1,6 @@
+_Pragma("GCC warning \"direct\"")
+#define PRAGMA(x) _Pragma(#x)
+PRAGMA(GCC warning "through macro")
+_Pragma("GCC warning \"another\"")
+#define WRAP(x) PRAGMA(x)
+WRAP(GCC error "nested")

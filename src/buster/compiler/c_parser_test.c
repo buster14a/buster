@@ -1286,6 +1286,7 @@ static uint32_t parse_test_check_resumed(const char* directory)
     {
         const char* source;
         const char* diagnostics;
+        uint32_t type_tokens;
     } cases[] = {
         { "int x _Alignas(3);\nint y;\n", "1:6 resumed expected ';' after top level declarator\n" },
         { "int x const y z;\nint w;\n", "1:6 resumed expected ';' after top level declarator\n1:13 unknown type name 'y'\n" },
@@ -1319,6 +1320,13 @@ static uint32_t parse_test_check_resumed(const char* directory)
         { "int u[1, 2];\nint d[3] = { [1, (2, 3)] = 3 };\n", "1:8 resumed deleting 2 expected ']'\n2:16 resumed deleting 6 expected ']'\n" },
         { "int z[1, 2;\n", "1:8 expected ']'\n" },
         { "int x __attribute__((unused, __clang__::x));\n", "1:29 resumed deleting 4 expected ')'\n" },
+        // The ordinary type reader proves a missing sizeof/alignof pair's last token. An incomplete abstract
+        // declarator retains the original error but offers no edit without a complete type range (#2376).
+        { "int f(void) { return sizeof int; }\n", "1:28 expected parentheses around type name in sizeof expression\n", 1 },
+        { "int f(void) { return sizeof unsigned long *; }\n", "1:28 expected parentheses around type name in sizeof expression\n", 3 },
+        { "typedef int T;\nint f(void) { return sizeof T; }\n", "2:28 expected parentheses around type name in sizeof expression\n", 1 },
+        { "int f(void) { return sizeof int (*)(int); }\n", "1:28 expected parentheses around type name in sizeof expression\n", 7 },
+        { "int f(void) { return sizeof int [2; }\n", "1:28 expected parentheses around type name in sizeof expression\n", 0 },
     };
     uint32_t failures = 0;
     char path[4096];
@@ -1340,9 +1348,11 @@ static uint32_t parse_test_check_resumed(const char* directory)
         }
         char text[1024] = "";
         uint32_t length = 0;
+        uint32_t type_tokens = 0;
         for (uint32_t d = 0; ran && d < parser.diagnostic_count; d += 1)
         {
             const ParseDiagnostic* diagnostic = &parser.diagnostics[d];
+            type_tokens += diagnostic->fixit_type_end > diagnostic->token ? diagnostic->fixit_type_end - diagnostic->token : 0;
             const uint32_t location = parse_diagnostic_location(&parser, &pp, diagnostic);
             const uint32_t range = pp_find_range(&pp, location);
             uint32_t column = 0;
@@ -1359,10 +1369,14 @@ static uint32_t parse_test_check_resumed(const char* directory)
                                          diagnostic->parameter_type ? "parameter " : "", message);
             length += printed > 0 && (uint32_t)printed < sizeof(text) - length ? (uint32_t)printed : 0;
         }
-        if (!ran || strcmp(text, cases[i].diagnostics) != 0)
+        if (!ran || strcmp(text, cases[i].diagnostics) != 0 || type_tokens != cases[i].type_tokens)
         {
             failures += 1;
             printf("resumed %u: diagnostics\n%s  not\n%s    %s", i, text, cases[i].diagnostics, cases[i].source);
+            if (type_tokens != cases[i].type_tokens)
+            {
+                printf("    retained type tokens %u, expected %u\n", type_tokens, cases[i].type_tokens);
+            }
         }
         parse_release(&parser);
         pp_release(&pp);
@@ -4384,10 +4398,9 @@ static const ParseTestDriverCase parse_test_driver_cases[] =
 {
     { PARSE_TEST_DRIVER_TEXT, "int x;\n", 0, 0, "", false },
     { PARSE_TEST_DRIVER_TEXT, "", 0, 0, "", false },
-    // Each located diagnostic with its source line, caret and highlighted range (#2376); clang's fix-it line comes with
-    // #2376's later piece.
-    { PARSE_TEST_DRIVER_TEXT, "int x\n", 0, 1, "%s:1:6: error: expected ';' after top level declarator\n    1 | int x\n      |      ^\n", false },
-    { PARSE_TEST_DRIVER_TEXT, "int x\n", "--scalar", 1, "%s:1:6: error: expected ';' after top level declarator\n    1 | int x\n      |      ^\n", false },
+    // Each located diagnostic with its source line, caret, highlighted range and fix-it insertion (#2376).
+    { PARSE_TEST_DRIVER_TEXT, "int x\n", 0, 1, "%s:1:6: error: expected ';' after top level declarator\n    1 | int x\n      |      ^\n      |      ;\n", false },
+    { PARSE_TEST_DRIVER_TEXT, "int x\n", "--scalar", 1, "%s:1:6: error: expected ';' after top level declarator\n    1 | int x\n      |      ^\n      |      ;\n", false },
     { PARSE_TEST_DRIVER_TEXT, "#error stop\n", 0, 1, "%s:1:2: error: stop\n    1 | #error stop\n      |  ^\n", false },
     { PARSE_TEST_DRIVER_TEXT, "#include \"driver-none.h\"\n", 0, 1, "%s:1:10: fatal error: 'driver-none.h' file not found\n    1 | #include \"driver-none.h\"\n      |          ^~~~~~~~~~~~~~~\n",
       false },
@@ -4400,8 +4413,8 @@ static const ParseTestDriverCase parse_test_driver_cases[] =
     { PARSE_TEST_DRIVER_TEXT, "int asm, typeof; __typeof__(int) x; __asm__(\"\");\n", "-fno-asm", 0, "", false },
     // Errors after a macro's expansion, placed after the invocation by its expansion history, which the driver records
     // only for its diagnostics (PPOptions.defer_history).
-    { PARSE_TEST_DRIVER_TEXT, "#define DECL int x\nDECL\n", 0, 1, "%s:2:5: error: expected ';' after top level declarator\n    2 | DECL\n      |     ^\n", false },
-    { PARSE_TEST_DRIVER_TEXT, "#define END(a) a\nint y = END(1)\n", 0, 1, "%s:2:15: error: expected ';' after top level declarator\n    2 | int y = END(1)\n      |               ^\n",
+    { PARSE_TEST_DRIVER_TEXT, "#define DECL int x\nDECL\n", 0, 1, "%s:2:5: error: expected ';' after top level declarator\n    2 | DECL\n      |     ^\n      |     ;\n", false },
+    { PARSE_TEST_DRIVER_TEXT, "#define END(a) a\nint y = END(1)\n", 0, 1, "%s:2:15: error: expected ';' after top level declarator\n    2 | int y = END(1)\n      |               ^\n      |               ;\n",
       false },
     // A warning, which the driver prints by preprocessing the unit again for its history: with code after it; and in a
     // unit of directives alone, whose output is empty, after a #if line of 300 expansions, for which the replay's history

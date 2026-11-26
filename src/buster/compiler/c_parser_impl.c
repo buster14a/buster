@@ -5600,6 +5600,42 @@ static uint32_t parse_scalar_resume_member(ParseScalar* parser, const ParseFrame
     return begin;
 }
 
+// The type following sizeof/alignof without parentheses, on an item recovery has already abandoned. Reuse the
+// ordinary abstract-type states with the still-live typedef meanings; no names bind and no diagnostic is published.
+// Only a completed outer type frame proves its end. An error in a nested declarator supplies no insertion hint.
+// The caller next clears this item's tree and restores its names, so these scratch frames need no separate copy.
+static uint32_t parse_scalar_missing_type_end(ParseScalar* parser, uint32_t first, uint32_t limit)
+{
+    const uint32_t diagnostics = parser->diagnostic_count;
+    const uint32_t errors = parser->errors;
+    const bool undecided = parser->undecided;
+    ParseBindingTrace* trace = parser->binding_trace;
+    parser->binding_trace = NULL;
+    parse_scalar_reset(parser);
+    parser->frames[0].flags = BUSTER_PARSE_FRAME_NO_BIND;
+    ParseFrame* type = parse_scalar_push(parser, first - 1, PARSE_ROLE_OPEN_SIZEOF, PARSE_MODE_SPECIFIERS, PARSE_MODE_OPERATOR, false);
+    type->flags = BUSTER_PARSE_FRAME_DECLARATION | BUSTER_PARSE_FRAME_ABSTRACT | BUSTER_PARSE_FRAME_NO_BIND;
+    type->keyword = PARSE_KIND_SIZEOF;
+    uint32_t result = 0;
+    const uint32_t end = limit + 1 == parser->count ? parser->count : limit;
+    for (uint32_t token = first; token <= end && parser->error_token == BUSTER_PARSE_NONE; token += 1)
+    {
+        parse_scalar_token(parser, token);
+        const bool complete = parser->frame_count == 2 &&
+                              (type->mode == PARSE_MODE_DECLARATOR || type->mode == PARSE_MODE_AFTER_DECLARATOR) &&
+                              (type->flags & BUSTER_PARSE_FRAME_TYPE_SEEN) != 0;
+        if (parser->error_token != BUSTER_PARSE_NONE && complete && token > first)
+        {
+            result = token;
+        }
+    }
+    parser->diagnostic_count = diagnostics;
+    parser->errors = errors;
+    parser->undecided = undecided;
+    parser->binding_trace = trace;
+    return result;
+}
+
 // The first error of the current top-level declaration, stopped at token `stopped`: its diagnostic, then the rest of
 // the declaration skipped. Its tokens become ERROR leaves of the root, the parse goes on at file scope, and the names
 // it bound are unbound. Returns the declaration's last token. A file-scope declaration's missing `;` before a declaration
@@ -5716,6 +5752,7 @@ static uint32_t parse_scalar_recover(ParseScalar* parser, uint32_t stopped)
     parse_scalar_resume_block_item(parser);
     const bool resumed = parser->error_resumed && parser->error_resume_end == 0 && parser->frame_count == 1 &&
                          stopped == parser->error_token && stopped > parser->item_begin;
+    const uint32_t diagnostic_index = parser->diagnostic_count;
     if (parser->diagnostic_count < parser->diagnostic_capacity)
     {
         parser->diagnostics[parser->diagnostic_count] = (ParseDiagnostic){
@@ -5792,6 +5829,14 @@ static uint32_t parse_scalar_recover(ParseScalar* parser, uint32_t stopped)
     }
     const uint32_t end = resumed ? stopped - 1 : parse_scalar_skip(parser, stopped, parser->brackets);
     parse_scalar_attribute_tail(parser, stopped, end);
+    if (diagnostic_index < parser->diagnostic_count)
+    {
+        ParseDiagnostic* diagnostic = parser->diagnostics + diagnostic_index;
+        if (diagnostic->message == PARSE_MESSAGE_EXPECTED_PARENTHESES_AROUND_TYPE_NAME && diagnostic->token != 0)
+        {
+            diagnostic->fixit_type_end = parse_scalar_missing_type_end(parser, diagnostic->token, end);
+        }
+    }
     for (uint32_t t = parser->item_begin; t <= end && t < parser->count; t += 1)
     {
         parser->roles[t] = PARSE_ROLE_ERROR;
@@ -12239,6 +12284,54 @@ BUSTER_PARSER_ENTRY bool parse_translation_unit(Parser* parser, Preprocessor* pp
 }
 
 
+// The parser's local repairs, attached only when its diagnostic is published. Expected closing brackets deliberately
+// have no edit: clang points to their opener but does not propose a missing closer.
+static void parse_diagnostic_fixits(const Parser* parser, Preprocessor* pp, const ParseDiagnostic* diagnostic)
+{
+    const uint32_t token = diagnostic->token;
+    const uint32_t count = parser->tokens.count;
+    const uint8_t message = diagnostic->message;
+    const bool semicolon = message >= PARSE_MESSAGE_EXPECTED_SEMI_AFTER_EXPRESSION && message <= PARSE_MESSAGE_EXPECTED_SEMI_IN_FOR;
+    const bool colon = message == PARSE_MESSAGE_EXPECTED_COLON_AFTER_CASE || message == PARSE_MESSAGE_EXPECTED_COLON_AFTER_DEFAULT;
+    const bool comma = message == PARSE_MESSAGE_MISSING_COMMA_BETWEEN_ENUMERATORS;
+    if ((semicolon || colon || comma) && count != 0)
+    {
+        const bool after = diagnostic->place == BUSTER_PARSE_AFTER_PREVIOUS || token >= count;
+        const uint32_t at = after && token != 0 ? (token <= count ? token - 1 : count - 1) : token;
+        if (at < count)
+        {
+            const uint32_t source = parse_source_index(&parser->tokens, at);
+            const bool typo = semicolon && !after && (parser->tokens.kinds[at] == PARSE_KIND_COLON || parser->tokens.kinds[at] == PARSE_KIND_COMMA);
+            if (typo)
+            {
+                pp_diagnostic_fixit_tokens(pp, source, source, ";");
+            }
+            else
+            {
+                pp_diagnostic_fixit_insert(pp, source, after, semicolon ? ";" : colon ? ":" : ",");
+            }
+        }
+    }
+    else if (token < count && (message == PARSE_MESSAGE_MUST_USE_STRUCT_TAG || message == PARSE_MESSAGE_MUST_USE_UNION_TAG ||
+                              message == PARSE_MESSAGE_MUST_USE_ENUM_TAG))
+    {
+        pp_diagnostic_fixit_insert(pp, parse_source_index(&parser->tokens, token), false,
+                                   message == PARSE_MESSAGE_MUST_USE_STRUCT_TAG ? "struct " : message == PARSE_MESSAGE_MUST_USE_UNION_TAG ? "union " : "enum ");
+    }
+    else if (message == PARSE_MESSAGE_EXPECTED_PARENTHESES_AROUND_TYPE_NAME && diagnostic->argument < token &&
+             diagnostic->fixit_type_end > token && diagnostic->fixit_type_end <= count)
+    {
+        pp_diagnostic_fixit_insert(pp, parse_source_index(&parser->tokens, diagnostic->argument), true, "(");
+        pp_diagnostic_fixit_insert(pp, parse_source_index(&parser->tokens, diagnostic->fixit_type_end - 1), true, ")");
+    }
+    else if (token < count && (message == PARSE_MESSAGE_EXTRANEOUS_CLOSING_BRACE || message == PARSE_MESSAGE_EXTRANEOUS_BEFORE_SEMI ||
+                              message == PARSE_MESSAGE_UNEXPECTED_SEMI_BEFORE || message == PARSE_MESSAGE_EXTRANEOUS_AFTER_CONDITION))
+    {
+        const uint32_t source = parse_source_index(&parser->tokens, token);
+        pp_diagnostic_fixit_tokens(pp, source, source, "");
+    }
+}
+
 // Prints the parse's diagnostics, as clang does: "file:line:column: error: message", then what stopped it, if anything did.
 // Their places come from the expansion history, recorded first if it was deferred (pp_history_ensure).
 BUSTER_PARSER_ENTRY void parse_print_diagnostics(const Parser* parser, Preprocessor* pp)
@@ -12253,6 +12346,7 @@ BUSTER_PARSER_ENTRY void parse_print_diagnostics(const Parser* parser, Preproces
         const PPDiagnosticRecord* previous_record = pp->diagnostic_last;
         char text[256];
         parse_diagnostic_message(parser, pp, diagnostic, text, sizeof(text));
+        parse_diagnostic_fixits(parser, pp, diagnostic);
         const uint32_t token = diagnostic->token;
         // Inside one expansion, an after-previous diagnostic is already located at the next token
         // (parse_diagnostic_location). Keep that token's macro-note chain instead of reducing it to a byte location.
@@ -12326,6 +12420,9 @@ BUSTER_PARSER_ENTRY void parse_print_diagnostics(const Parser* parser, Preproces
                 .location = opener < parser->tokens.count ? parse_primary_location(pp, parse_source_index(&parser->tokens, opener)) : 0,
                 .message = opener_kind == PARSE_KIND_L_SQUARE ? "to match this '['" : opener_kind == PARSE_KIND_L_BRACE ? "to match this '{'" : "to match this '('",
             };
+            // This path publishes a byte location through the lexical entry point. Its token edits still belong to
+            // the parser's output, whose history was ensured above; resolve them before that entry keeps only places.
+            pp_diagnostic_resolve_ranges(pp, true);
             pp_diagnose_note(pp, diagnostic->error ? PP_SEVERITY_ERROR : PP_SEVERITY_WARNING, parse_diagnostic_location(parser, pp, diagnostic),
                              opener_kind != PARSE_KIND_END ? &note : NULL, "%s", text);
             pp->diagnostic_position = saved;
@@ -12343,6 +12440,7 @@ BUSTER_PARSER_ENTRY void parse_print_diagnostics(const Parser* parser, Preproces
             pp_diagnostic_queued(pp, previous_record, parse_source_index(&parser->tokens, token));
             pp_diagnostic_source_order(pp, previous_record);
         }
+        pp_diagnostic_fixits_clear(pp);
     }
     if (parser->fatal != PARSE_MESSAGE_NONE)
     {

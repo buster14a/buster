@@ -6,6 +6,21 @@
 
 // c_check_semantic_diagnostic.c's, included after this file: an expression's tokens as a highlighted range (#2376).
 static void check_semantic_range(const Parser* parser, Preprocessor* pp, uint32_t node, bool parentheses);
+static PPDiagnosticRange check_semantic_token_range(const Parser* parser, uint32_t node, bool parentheses);
+
+// An operator's left or right parse child, including a parenthesized operand. Query operands may have no retained graph
+// node; their original parse subtree still supplies the exact source range of a warning and its remove-operand note.
+static uint32_t check_warning_operand(const Parser* parser, uint32_t token, bool right)
+{
+    const uint32_t count = parser->tokens.count;
+    uint32_t operand = token < count && (right || token != 0) ? right ? token + 1 : token - 1 : count;
+    for (uint32_t steps = 0; operand < count && parser->tree.parents[operand] != token && steps < count; steps += 1)
+    {
+        const uint32_t parent = parser->tree.parents[operand];
+        operand = parent != operand ? parent : count;
+    }
+    return operand < count && operand != token && parser->tree.parents[operand] == token ? operand : BUSTER_CHECK_NONE;
+}
 
 // The highlighted ranges clang's diagnostic of a warning event has (#2376), before its publication; the caller clears
 // them. A folded shift's count: the shift's right operand. An unknown attribute: its name, from its scope where it has
@@ -13,6 +28,10 @@ static void check_semantic_range(const Parser* parser, Preprocessor* pp, uint32_
 static void check_warning_event_ranges(const Parser* parser, Preprocessor* pp, const CheckInput* input, const CheckWarningEvent* event)
 {
     const uint32_t count = parser->tokens.count;
+    if (event->range_begin < event->range_end && event->range_end <= count)
+    {
+        pp_diagnostic_range_tokens(pp, parse_source_index(&parser->tokens, event->range_begin), parse_source_index(&parser->tokens, event->range_end - 1));
+    }
     if (event->kind == CHECK_WARNING_EVENT_UNKNOWN_ATTRIBUTE && event->token < count)
     {
         const uint32_t first = event->token;
@@ -31,6 +50,108 @@ static void check_warning_event_ranges(const Parser* parser, Preprocessor* pp, c
     if (right < graph->count)
     {
         check_semantic_range(parser, pp, graph->tokens[right], true);
+    }
+    if (event->kind == CHECK_WARNING_EVENT_CONSTANT_LOGICAL_OPERAND || event->kind == CHECK_WARNING_EVENT_DIVISION_BY_ZERO)
+    {
+        check_semantic_range(parser, pp, check_warning_operand(parser, event->token, true), true);
+    }
+    else if (event->kind == CHECK_WARNING_EVENT_UNUSED_RESULT && event->payload.data >= BUSTER_CHECK_UNUSED_EQUALITY)
+    {
+        check_semantic_range(parser, pp, event->token, false);
+    }
+    else if (event->kind == CHECK_WARNING_EVENT_VOID_PTR_DEREFERENCE)
+    {
+        check_semantic_range(parser, pp, event->token, false);
+    }
+    else if (event->kind == CHECK_WARNING_EVENT_ORDERED_POINTER_INTEGER)
+    {
+        check_semantic_range(parser, pp, check_warning_operand(parser, event->token, false), true);
+        check_semantic_range(parser, pp, check_warning_operand(parser, event->token, true), true);
+    }
+    else if (event->token < count && (event->kind == CHECK_WARNING_EVENT_UNUSED_FUNCTION ||
+             (event->kind == CHECK_WARNING_EVENT_UNUSED_VARIABLE && event->payload.data == 0) || event->kind == CHECK_WARNING_EVENT_UNUSED_LABEL))
+    {
+        const bool colon = event->kind == CHECK_WARNING_EVENT_UNUSED_LABEL && event->token + 1 < count &&
+                           parser->tokens.kinds[event->token + 1] == PARSE_KIND_COLON;
+        pp_diagnostic_range_tokens(pp, parse_source_index(&parser->tokens, event->token), parse_source_index(&parser->tokens, event->token + (colon ? 1u : 0u)));
+    }
+    else if (event->kind == CHECK_WARNING_EVENT_CHAR_SUBSCRIPT)
+    {
+        check_semantic_range(parser, pp, event->payload.token, true);
+    }
+    else if (event->kind == CHECK_WARNING_EVENT_EMPTY_DECLARATION && event->token < event->completion && event->completion < count &&
+             parser->tokens.kinds[event->completion] == PARSE_KIND_SEMI)
+    {
+        pp_diagnostic_range_tokens(pp, parse_source_index(&parser->tokens, event->token), parse_source_index(&parser->tokens, event->completion - 1));
+    }
+    else if (event->token < count && (event->kind == CHECK_WARNING_EVENT_INT_TO_POINTER_CAST || event->kind == CHECK_WARNING_EVENT_POINTER_TO_INT_CAST ||
+             event->kind == CHECK_WARNING_EVENT_NONSCALAR_SAME_CAST))
+    {
+        const uint32_t close = parser->tree.parents[event->token];
+        if (close < count && parser->tree.roles[close] == PARSE_ROLE_CLOSE_CAST)
+        {
+            const bool operand = event->kind == CHECK_WARNING_EVENT_NONSCALAR_SAME_CAST;
+            check_semantic_range(parser, pp, operand ? check_warning_operand(parser, close, true) : close, operand);
+        }
+    }
+}
+
+// Notes own their edits: they must neither inherit the primary's ranges nor give their replacements to a following
+// note. Pending token coordinates let the collector decide whether a macro's complete invocation is editable.
+static void check_warning_note_edits(const Parser* parser, const CheckWarningNote* note, PPOutputDiagnosticNote* output)
+{
+    const uint32_t source = output->token;
+    PPDiagnosticFixIt fixit = { .range = { .begin = source, .end = source, .pending = PP_RANGE_TOKENS } };
+    if (note->kind == CHECK_WARNING_NOTE_INLINE_LINKAGE)
+    {
+        fixit.range.pending = PP_RANGE_INSERT_BEFORE;
+        fixit.text = "static ";
+    }
+    else if (note->kind == CHECK_WARNING_NOTE_COMPARISON_ASSIGNMENT)
+    {
+        fixit.text = note->payload.data == BUSTER_CHECK_UNUSED_EQUALITY ? "=" : "|=";
+    }
+    else if (note->kind == CHECK_WARNING_NOTE_LOGICAL_BITWISE)
+    {
+        fixit.text = note->payload.data != 0 ? "|" : "&";
+    }
+    else if (note->kind == CHECK_WARNING_NOTE_LOGICAL_REMOVE_CONSTANT)
+    {
+        const uint32_t operand = check_warning_operand(parser, note->token, true);
+        const PPDiagnosticRange range = check_semantic_token_range(parser, operand, true);
+        if (range.pending == PP_RANGE_TOKENS)
+        {
+            fixit.range.end = range.end;
+            fixit.text = "";
+        }
+    }
+    else if (note->kind == CHECK_WARNING_NOTE_ABSOLUTE_REMOVE)
+    {
+        fixit.text = "";
+    }
+    else if (note->kind == CHECK_WARNING_NOTE_ABSOLUTE_REPLACE)
+    {
+        const uint32_t index = note->payload.data & BUSTER_CHECK_ABSOLUTE_FUNCTION;
+        if (index < BUSTER_ARRAY_LENGTH(check_absolute_functions))
+        {
+            const CheckAbsoluteFunction* function = check_absolute_functions + index;
+            fixit.text = (note->payload.data & BUSTER_CHECK_ABSOLUTE_BUILTIN) != 0 ? function->builtin : function->name;
+        }
+    }
+    if (note->kind == CHECK_WARNING_NOTE_ABSOLUTE_REMOVE || note->kind == CHECK_WARNING_NOTE_ABSOLUTE_REPLACE)
+    {
+        const uint32_t count = parser->tokens.count;
+        const uint32_t callee = note->token < count && parser->tree.roles[note->token] == PARSE_ROLE_OPEN_GROUP ?
+                                parser->tree.parents[note->token] : note->token;
+        const PPDiagnosticRange range = check_semantic_token_range(parser, callee, false);
+        if (range.pending == PP_RANGE_TOKENS)
+        {
+            fixit.range = range;
+        }
+    }
+    if (fixit.text != NULL)
+    {
+        output->fixits[output->fixit_count++] = fixit;
     }
 }
 
@@ -112,6 +233,36 @@ static String8 check_driver_warning_name(const Preprocessor* pp, uint32_t name)
     const String8 result = name < pp->table->count ? (String8){ .pointer = (char*)intern_bytes(pp->table, name), .length = intern_length(pp->table, name) } :
                                                                   (String8){ 0 };
     return result;
+}
+
+// The event's own edits. Qualifier duplication has no removal in clang, unlike a duplicate storage/type specifier;
+// a GNU designation either replaces its old-style name and colon or inserts the missing equals before its value.
+static void check_warning_event_fixits(const Parser* parser, Preprocessor* pp, const CheckWarningEvent* event, Arena* scratch)
+{
+    const uint32_t count = parser->tokens.count;
+    const uint32_t token = event->token;
+    const uint32_t source = event->source != BUSTER_CHECK_WARNING_NO_SOURCE ? event->source : parse_source_index(&parser->tokens, token);
+    if (event->kind == CHECK_WARNING_EVENT_DUPLICATE_DECLSPEC)
+    {
+        const uint32_t name = event->payload.name;
+        const bool qualifier = name == C_NAME_CONST || name == C_NAME_VOLATILE || name == C_NAME_RESTRICT || name == C_NAME_ATOMIC;
+        if (!qualifier)
+        {
+            pp_diagnostic_fixit_tokens(pp, source, source, "");
+        }
+    }
+    else if (event->kind == CHECK_WARNING_EVENT_GNU_DESIGNATOR && event->payload.data == BUSTER_CHECK_GNU_DESIGNATOR_MISSING_EQUAL)
+    {
+        pp_diagnostic_fixit_insert(pp, source, false, "= ");
+    }
+    else if (event->kind == CHECK_WARNING_EVENT_GNU_DESIGNATOR && event->payload.data == BUSTER_CHECK_GNU_DESIGNATOR_OLD_STYLE &&
+             token + 1 < count && parser->tokens.kinds[token + 1] == PARSE_KIND_COLON)
+    {
+        const String8 name = check_driver_warning_name(pp, parser->tokens.names[token]);
+        const char* text = check_warning_text(scratch, ".%.*s = ", (int)name.length, name.pointer);
+        pp->diagnostic_collection_failed |= text == NULL;
+        pp_diagnostic_fixit_tokens(pp, source, parse_source_index(&parser->tokens, token + 1), text);
+    }
 }
 
 // The name a use at `token` took, where its spelling `name` is a typo's that the reader corrected (#1447,
@@ -3214,6 +3365,7 @@ static bool check_driver_warning_events_from(const Parser* parser, Preprocessor*
                     if (valid && text[0] != 0)
                     {
                         notes[note_total] = (PPOutputDiagnosticNote){ .token = note->source != BUSTER_CHECK_WARNING_NO_SOURCE ? note->source : parse_source_index(&parser->tokens, note->token), .message = text };
+                        check_warning_note_edits(parser, note, notes + note_total);
                         note_total += 1;
                     }
                 }
@@ -3241,6 +3393,8 @@ static bool check_driver_warning_events_from(const Parser* parser, Preprocessor*
                         check_driver_publication_position(publication_parser, pp, event->completion + (event->completion_kind == CHECK_WARNING_COMPLETE_AFTER_DELIMITER ? 1u : 0u), publication_end);
                     const PPSeverity disposition = severity == CHECK_WARNING_FATAL ? PP_SEVERITY_MAPPED_FATAL :
                                                    severity == CHECK_WARNING_ERROR ? PP_SEVERITY_MAPPED_ERROR : PP_SEVERITY_WARNING;
+                    check_warning_event_ranges(parser, pp, input, event);
+                    check_warning_event_fixits(parser, pp, event, scratch);
                     if (event->kind == CHECK_WARNING_EVENT_CLANG_MACRO_SCOPE || event->kind == CHECK_WARNING_EVENT_BIT_INT_SUFFIX)
                     {
                         // A literal suffix is diagnosed before its enclosing semantic action at the same boundary.
@@ -3406,10 +3560,10 @@ static bool check_driver_warning_events_from(const Parser* parser, Preprocessor*
                     }
                     else
                     {
-                        check_warning_event_ranges(parser, pp, input, event);
                         pp_diagnose_output_notes_at(pp, disposition, source, boundary, notes, note_total, "%s%s", message, suffix);
-                        pp_diagnostic_ranges_clear(pp);
                     }
+                    pp_diagnostic_ranges_clear(pp);
+                    pp_diagnostic_fixits_clear(pp);
                     pp_diagnostic_suborder(pp, previous, event->suborder);
                     valid = !pp->diagnostic_collection_failed;
                 }

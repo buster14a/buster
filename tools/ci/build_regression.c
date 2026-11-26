@@ -1561,6 +1561,7 @@ static void ownership_check_nonstandard(const OwnershipUnits* units, const Owner
         { "src/buster/compiler/tier1_schedule.c", backend, false },
         { "src/buster/compiler/tier1_allocate.c", backend, false },
         { "src/buster/compiler/tier1_frame.c", backend, false },
+        { "src/buster/compiler/tier1_select_upper.c", backend, false },
         // DRIVER still owns the shared IR scan counter and baked BURS data, without their implementation bodies.
         { "src/buster/compiler/ir.c", "main.c main_unit_backend.c main_unit_checker.c", false },
         { "src/buster/compiler/tier1_select_burs.c", "main.c main_unit_backend.c main_unit_checker.c", false },
