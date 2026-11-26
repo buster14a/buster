@@ -1495,6 +1495,12 @@ rbp for the rare deeper expressions. The floating one is xmm0 to xmm15.
 This is what beats clang -O0, which loads and stores every local at every use. The counting loop for `s += i` compiles
 to `xor edx, edx; xor ecx, ecx; mov eax, ecx; cmp eax, edi; jge; add edx, ecx; inc ecx; jmp`.
 
+With the experimental `--tier0-inline-shapes`, the inliner checks these same home-assignment passes on its speculative
+result and its expanded loop callees before accepting a splice (#2841). A surviving callee local referenced in a
+backward-edge range must retain a register home if it had one outlined. Otherwise it retries with loop callees kept
+out of line, still inlining straight-line wrappers. This leaves the allocator's ranking and the default splice
+unchanged; [the inlining design](tier0-inlining.md) records the check and the remaining runtime acceptance.
+
 **The frame pointer.** A function with any of the stack's kinds has one, which selection derives from its entries:
 
 - the prologue pushes rbp first and sets it to rsp, and rbp leaves the depth table (14 integer depths) and the homes;

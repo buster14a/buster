@@ -376,10 +376,13 @@ does are there.
 - With `--tier0-inline-shapes` (step 5, off by default), a callee may have
   several returns, each a jump to its copy's end, and a result in memory, the
   hidden pointer bound to the call's result object (`tier0_inline_site_valid`).
-  On the 9700X the shapes cost the self-built lexer 1.7% more instructions:
-  spliced loops lose their locals' registers to a large caller's
-  ([the design](../tier0-inlining.md)'s "Several returns and results in
-  memory", #2841).
+  A loop-bearing expanded callee is accepted only if its surviving loop
+  locals keep their register homes in the actual spliced allocation (#2841,
+  `tier0_inline_homes_preserved`). A failed check retries once with loops
+  outlined and straight-line wrappers still eligible. This protects nested
+  expanded wrappers too. The shapes remain opt-in pending runtime acceptance;
+  [the design](../tier0-inlining.md)'s "Preserving loop homes with the shapes"
+  describes the check and its limits.
 - `--tier0-no-inline` keeps every call: the control, as `--tier1-no-inline` is
   Tier 1's.
 - **Callees nothing refers to are left out** (step 3), by Tier 1's dead
@@ -406,6 +409,11 @@ into a digest that must equal the frozen one of its run
 (`BUSTER_TIER0_INLINE_TEST_DIGEST` and `_SHAPES_DIGEST`). The driver fixture
 also checks which recursive callees survive in the object and compares program
 output with clang -O0.
+The loop-home regressions (`tier0_inline_homes_test.c`) cover competing caller
+locals, expression-depth clobbers, safe splices, straight-line wrappers retained
+by the retry, forwarded-away locals, every argument-nesting level and an
+already-expanded scalar wrapper. They also compare the preflight homes with
+the actual emitted homes of each selected stream.
 Before the files it checks the splice's fills and Tier 1's unit-stage scan for
 the candidates whose address code takes (`check_tier1_inline_addressed_entries`)
 against their definitions on random columns, the scan at every count to 200
@@ -417,8 +425,8 @@ splice's shapes by default, with `--scalar` (the twins it still selects),
 `--tier0-no-inline` and `--tier0-inline-shapes` with and without `--scalar`:
 each runs as clang -O0's build does, the builds with and without `--scalar`
 are the same bytes, and the control's differs; the object
-leaves out the callees spliced at every call (with the shapes, the two returns'
-and the result in memory's too) and keeps those a call or an address refers to,
+leaves out the callees spliced at every call and keeps those a call or an
+address refers to, including loop callees retained by the shapes' home check,
 the same bytes by 1 and 4 lanes, with `--tier0-no-hold`, and by windows of one
 token.
 
