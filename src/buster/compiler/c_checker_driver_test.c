@@ -9407,6 +9407,7 @@ static void check_test_driver_optimize_pragmas(CheckTest* test, const char* clan
 #include "c_check_reserved_macro_driver_test.c"
 #include "c_check_unused_macros_driver_test.c"
 #include "c_check_gnu_line_marker_driver_test.c"
+#include "c_check_missing_variable_driver_test.c"
 #include "c_check_integer_overflow_driver_test.c"
 #include "c_check_gnu_empty_struct_driver_test.c"
 #include "c_check_unused_but_set_driver_test.c"
@@ -9639,6 +9640,8 @@ static int run_checker_driver_tests(int argc, char** argv)
     bool lazy = false;
     bool sign_compare_only = false;
     bool common_warnings_only = false;
+    // --missing-variable-only: #2222's file-scope definitions, prior extern declarations and source-policy fixtures.
+    bool missing_variable_only = false;
     // --uninitialized-only: loop initialization diagnostics with an admitted two-lane reader (#1391).
     bool uninitialized_only = false;
     // --cpu-dispatch-only: the cpu_specific and cpu_dispatch section alone (#1447).
@@ -9720,6 +9723,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         else if (strcmp(argv[i], "--common-warnings-only") == 0)
         {
             common_warnings_only = true;
+        }
+        else if (strcmp(argv[i], "--missing-variable-only") == 0)
+        {
+            missing_variable_only = true;
         }
         else if (strcmp(argv[i], "--sign-compare-only") == 0)
         {
@@ -9895,7 +9902,7 @@ static int run_checker_driver_tests(int argc, char** argv)
                              (uint32_t)run_modes_only + (uint32_t)correctness_edges_only + (uint32_t)imaginary_bit_int_only + (uint32_t)unused_comparison_only + (uint32_t)assert_diagnostics_only +
                              (uint32_t)float_precision_only + (uint32_t)reach_filter_only + (uint32_t)branch_truth_only +
                              (uint32_t)constant_logical_only + (uint32_t)quiet_roots_only + (uint32_t)pic_only + (uint32_t)string_plus_only + (uint32_t)initializer_diagnostics_only +
-                             (uint32_t)stack_protector_only + (uint32_t)cf_protection_only + (uint32_t)visibility_only;
+                             (uint32_t)stack_protector_only + (uint32_t)cf_protection_only + (uint32_t)visibility_only + (uint32_t)missing_variable_only;
     options &= focuses <= 1 && (focuses == 0 || (!lazy && check_driver_part.count == 1));
     // One focused section's alone: the others' gates take `focused` as --sign-compare-only's did.
     const bool focused = focuses != 0;
@@ -10400,6 +10407,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         check_test_driver_call_warnings(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
         check_test_driver_syntax_warnings(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
     }
+    if (temporary && missing_variable_only)
+    {
+        check_test_driver_missing_variable(&test, clang, executable, directory);
+    }
     if (temporary && sign_compare_only)
     {
         check_test_driver_sign_compare(&test, clang, executable, directory);
@@ -10735,6 +10746,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             check_test_driver_shift_counts(&test, clang, executable, directory);
             check_test_driver_conditions(&test, clang, executable, directory);
+            check_test_driver_missing_variable(&test, clang, executable, directory);
         }
         // Each of these checks is a unit of its own, of the weight it took on a 4-CPU Xeon VM (#3399). Grouped in two units,
         // the warnings' sweeps (one added with each warning) made one part the driver's longest by far, past parallel's

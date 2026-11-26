@@ -244,6 +244,7 @@ static const CheckWarningDescription check_warning_descriptions[] =
     [CHECK_WARNING_ID_SWITCH_BOOL] = { "-Wswitch-bool", NULL, "switch condition has boolean value" },
     [CHECK_WARNING_ID_CHAR_SUBSCRIPTS] = { "-Wchar-subscripts", NULL, "array subscript is of type 'char'" },
     [CHECK_WARNING_ID_SIZEOF_ARRAY_ARGUMENT] = { "-Wsizeof-array-argument", NULL, "sizeof on array function parameter will return size of a pointer" },
+    [CHECK_WARNING_ID_MISSING_VARIABLE_DECLARATIONS] = { "-Wmissing-variable-declarations", NULL, "no previous extern declaration for non-static variable" },
 };
 
 _Static_assert(BUSTER_ARRAY_LENGTH(check_warning_descriptions) == CHECK_WARNING_ID_COUNT, "every sparse policy ID has a description");
