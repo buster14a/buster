@@ -24,6 +24,11 @@ requirements. [Command index](README.md).
   and runs one natively, and `test-checker-driver`'s frame fixture
   (`check_test_driver_tier1_frame`) compiles four functions that recompute one
   after a call by `--tier1 --verify`, against clang.
+  Folded frame-address leas also retain their recipes when selection covers the
+  original address node (#2610). `test-tier1-emit` checks their constant offsets,
+  indexed and incoming-address exclusions, and native recomputation under pressure
+  across a hostile call, with rsp, a kept frame pointer and a realigned dynamic
+  frame as the stable base (`tier1_frame_recipe_test.c`).
   [The allocation guide](../../docs/tier1-allocation.md)
   records producer constraints and the corpora's spills with and without
   rematerialization. Its clobbers (#2574), where a call evicts a recomputable
