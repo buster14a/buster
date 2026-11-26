@@ -4217,6 +4217,114 @@ static const char check_test_tier1_asm_source[] =
     "    return 0;\n"
     "}\n";
 
+// #2144's register results, including several in one body and mixed GPR/XMM classes, run at both tiers against
+// Clang. Simple kernels must have no frame traffic; the pressure kernel must spill, exercising the same result
+// transfer while other values live in spill slots. Both always_inline wrappers are spliced twice into their caller,
+// including one whose last result is immediately returned, with the pre- and postallocation schedulers as well.
+static void check_test_driver_tier1_asm_results(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    char source[512];
+    char reference[512];
+    char program[512];
+    char object[512];
+    snprintf(source, sizeof(source), "%s/driver/asm-body-results.c", check_test_fixture_root);
+    snprintf(reference, sizeof(reference), "%s/asm-results-clang", directory);
+    snprintf(program, sizeof(program), "%s/asm-results-buster", directory);
+    snprintf(object, sizeof(object), "%s/asm-results.o", directory);
+    const bool available = access(source, R_OK) == 0;
+    char* reference_arguments[] = { (char*)clang, "-O0", "-w", "-o", reference, source, NULL };
+    char* text = NULL;
+    const bool referenced = available && check_test_driver_spawn(reference_arguments, &text) == 0;
+    if (!referenced && text != NULL)
+    {
+        fprintf(stderr, "%s", text);
+    }
+    free(text);
+    char expected[4096] = { 0 };
+    const bool ran = referenced && check_test_driver_capture(reference, expected, sizeof(expected)) && expected[0] != 0;
+    check_test_expect(test, ran, "asm register results: Clang's external fixture builds and runs");
+    static const struct {
+        bool tier1;
+        bool rematerialize;
+        const char* schedule;
+    } variants[] = {
+        { false, false, NULL },
+        { true, false, NULL },
+        { true, true, NULL },
+        { true, true, "--tier1-schedule=post" },
+        { true, true, "--tier1-schedule=pre" },
+    };
+    for (uint32_t v = 0; ran && v < BUSTER_ARRAY_LENGTH(variants); v += 1)
+    {
+        bool compiled;
+        if (variants[v].tier1)
+        {
+            CheckTestTier1Build build;
+            compiled = check_test_tier1_build(executable, source, "", program, variants[v].rematerialize, false, false, false, variants[v].schedule, &build);
+            // Twelve required functions (the eleven noinline kernels and main), plus any separately emitted
+            // always_inline bodies: every emitted function has to receive the code certificate.
+            check_test_expect(test, compiled && build.code_certified >= 12 && build.code_uncertified == 0,
+                              "asm register results: every Tier 1 function is certified");
+        }
+        else
+        {
+            char* arguments[] = { (char*)executable, "--verify", "-o", program, source, NULL };
+            char* diagnostic = NULL;
+            compiled = check_test_driver_spawn(arguments, &diagnostic) == 0;
+            if (!compiled && diagnostic != NULL)
+            {
+                fprintf(stderr, "%s", diagnostic);
+            }
+            free(diagnostic);
+        }
+        char actual[4096] = { 0 };
+        char message[256];
+        snprintf(message, sizeof(message), "asm register results: Tier %u, rematerialize %u, schedule %s agrees with Clang", variants[v].tier1 ? 1u : 0u,
+                 variants[v].rematerialize ? 1u : 0u, variants[v].schedule != NULL ? variants[v].schedule : "none");
+        check_test_expect(test, compiled && check_test_driver_capture(program, actual, sizeof(actual)) && strcmp(actual, expected) == 0, message);
+        unlink(program);
+    }
+    const bool decoder_ready = x86_disassembler_initialize();
+    check_test_expect(test, decoder_ready, "asm register results: object decoder initializes");
+    static const char* const register_only[] = {
+        "asm_result_shift",
+        "asm_result_swap",
+        "asm_result_cpuid",
+        "asm_result_floating",
+        "asm_result_mixed",
+        "asm_result_flags",
+        "asm_result_flag_value",
+    };
+    if (ran && decoder_ready)
+    {
+        CheckTestTier1Build build;
+        const bool compiled = check_test_tier1_build(executable, source, "", object, true, false, true, false, NULL, &build);
+        for (uint32_t kernel = 0; kernel < BUSTER_ARRAY_LENGTH(register_only) + 1; kernel += 1)
+        {
+            const bool pressure = kernel == BUSTER_ARRAY_LENGTH(register_only);
+            const char* name = pressure ? "asm_result_pressure" : register_only[kernel];
+            X86Decoded records[2048];
+            uint32_t offsets[2048];
+            uint32_t types[2048];
+            uint32_t relocations = 0;
+            const uint32_t decoded = compiled ? check_test_tier1_function(object, name, records, BUSTER_ARRAY_LENGTH(records), offsets, types, &relocations) : 0;
+            uint32_t frame_accesses = 0;
+            for (uint32_t r = 0; r < decoded; r += 1)
+            {
+                const X86Instruction* record = &records[r].instruction;
+                const bool memory = (record->mode & BUSTER_X86_MODE_MEMORY) != 0 && (record->mode & BUSTER_X86_MODE_BASE) != 0;
+                const bool address = record->form == X86_FORM_LEA_R64_M || record->form == X86_FORM_LEA_R32_M;
+                frame_accesses += memory && !address && (record->rm == X86_REGISTER_RSP || record->rm == X86_REGISTER_RBP);
+            }
+            char message[256];
+            snprintf(message, sizeof(message), "asm register results: %s has %u frame accesses", name, frame_accesses);
+            check_test_expect(test, compiled && decoded != 0 && (pressure ? frame_accesses != 0 : frame_accesses == 0), message);
+        }
+        unlink(object);
+    }
+    unlink(reference);
+}
+
 // The asm bodies' fixture (#1839) compiled by --tier1 --verify into an executable by each path, with and without
 // rematerialization, with no function refused: it must print what clang -O0's build prints. Its -c object's
 // tier1_cpuid holds its cpuid among its own records, with no call, and pushes rbx in its prologue.
@@ -4285,8 +4393,8 @@ static void check_test_driver_tier1_asm(CheckTest* test, const char* clang, cons
                  calls, pushed ? "pushed" : "not pushed");
         check_test_expect(test, compiled && decoded != 0 && cpuids == 2 && calls == 0 && pushed, message);
         // tier1_mulq's operands are its body call's arguments, moved into rax and their register (#2144), and its loop's
-        // values keep out of rax, rcx and rdx: of its frame stores, only the outputs' addresses into the operand block
-        // are left, none of an input's and none of a save's.
+        // values keep out of rax, rcx and rdx. Both outputs return in registers too: no operand-block addresses or
+        // values and no call saves remain in its frame stores.
         const uint32_t mulq_decoded = compiled ? check_test_tier1_function(object, "tier1_mulq", records, 512, offsets, types, &relocations) : 0;
         uint32_t muls = 0;
         uint32_t frame_stores = 0;
@@ -4298,11 +4406,12 @@ static void check_test_driver_tier1_asm(CheckTest* test, const char* clang, cons
             frame_stores += memory && record->form == X86_FORM_MOV_RM64_R64 && (record->rm == X86_REGISTER_RSP || record->rm == X86_REGISTER_RBP);
         }
         snprintf(message, sizeof(message), "asm bodies (%s path, --tier1): tier1_mulq holds %u mul and %u frame stores", path != 0 ? "scalar" : "vector", muls, frame_stores);
-        check_test_expect(test, compiled && mulq_decoded != 0 && muls == 1 && frame_stores <= 2, message);
+        check_test_expect(test, compiled && mulq_decoded != 0 && muls == 1 && frame_stores == 0, message);
         unlink(object);
     }
     unlink(unit);
     unlink(reference);
+    check_test_driver_tier1_asm_results(test, clang, executable, directory);
 }
 
 // The asm bodies' opmask fixture (#1839): two masks live across a template that writes k1 to k7, its clobbers, in a

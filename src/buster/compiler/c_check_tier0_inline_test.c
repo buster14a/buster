@@ -16,6 +16,8 @@
 // Before the files, the splice's fills and the unit stage's scan for the candidates whose address code takes are checked
 // against their definitions on random columns (tier0_inline_test_fills, tier0_inline_test_addressed).
 
+#include <stddef.h>
+
 typedef struct Tier0InlineTestTally Tier0InlineTestTally;
 struct Tier0InlineTestTally
 {
@@ -93,7 +95,12 @@ static uint64_t tier0_inline_test_fold_function(uint64_t digest, const Tier0Func
     digest = tier0_inline_test_fold(digest, a->argument_locations, (uint64_t)a->argument_count * sizeof(AbiLocation));
     digest = tier0_inline_test_fold(digest, a->argument_classes, a->argument_count);
     digest = tier0_inline_test_fold(digest, a->argument_sizes, (uint64_t)a->argument_count * sizeof(uint32_t));
-    digest = tier0_inline_test_fold(digest, a->operations, (uint64_t)a->operation_count * sizeof(Tier0Operation));
+    // The frozen corpus predates asm-result projection rows (#2144). Keep its serialization to the original
+    // operation fields, without the new byte or trailing padding. The splice and validation still use complete rows.
+    for (uint32_t row = 0; row < a->operation_count; row += 1)
+    {
+        digest = tier0_inline_test_fold(digest, &a->operations[row], offsetof(Tier0Operation, asm_result));
+    }
     digest = tier0_inline_test_fold(digest, a->x87_constants, 2 * (uint64_t)a->x87_constant_count * sizeof(uint64_t));
     digest = tier0_inline_test_fold(digest, a->vector_constants, 8 * (uint64_t)a->vector_constant_count * sizeof(uint64_t));
     digest = tier0_inline_test_fold(digest, a->vector_constant_bytes, a->vector_constant_count);

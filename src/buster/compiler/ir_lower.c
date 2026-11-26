@@ -2511,7 +2511,7 @@ static bool ir_typed_aggregate_call(const Tier0Function* input, uint32_t call, b
 // reads no block), and whose others are its call row's, its register operands' values (#2144), each in its register
 // (IrAsmBody.locations), a narrow integer extended as a call's argument is. Every pass takes the call as an unknown
 // callee's of that pointer: the block escapes into it, its stores stay before it, and no access moves across it.
-static __attribute__((always_inline)) inline uint32_t ir_typed_asm_body(IrTypedSink* sink, const Tier0Function* input, uint32_t call, uint32_t* arguments)
+static __attribute__((always_inline)) inline uint32_t ir_typed_asm_body(IrTypedSink* sink, const Tier0Function* input, uint32_t call, IrType result_type, uint32_t* arguments)
 {
     const Tier0AsmBody* body = &input->asm_bodies[input->call_asm[call] - 1];
     const uint32_t descriptor = (uint32_t)sink->sizes.call_count;
@@ -2521,6 +2521,10 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_asm_body(IrTypedS
     const uint32_t block = body->block != BUSTER_TIER0_ASM_NO_BLOCK ? 1 : 0;
     const uint32_t passed = input->call_argument_counts[call];
     const uint32_t count = block + passed;
+    // Older single-result producers name only result. Normalize their descriptor here; every IR body has explicit
+    // masks, and the call's semantic type supplies that one result's width.
+    const uint32_t results = body->result_registers != 0 ? body->result_registers : body->result != 0 ? 1u << (body->result - 1u) : 0;
+    const uint32_t wide = body->result_registers != 0 ? body->result_wide : result_type == IR_I64 || result_type == IR_F64 ? results : 0;
     for (uint32_t a = 0; a < passed; a += 1)
     {
         const uint8_t class = input->argument_classes[input->call_first[call] + a];
@@ -2540,13 +2544,16 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_asm_body(IrTypedS
             .stack = body->stack,
             .locations = passed != 0 ? input->argument_locations + input->call_first[call] : 0,
             .passed = passed,
+            .result = body->result,
+            .result_registers = results,
+            .result_wide = wide,
         };
         output->calls[descriptor] = (IrCall){
             .argument_first = first,
             .argument_count = count,
             .type_first = type_first,
             .parameter_count = count,
-            .result_type = IR_VOID,
+            .result_type = (uint8_t)result_type,
             .body = index + 1,
         };
         if (block != 0)
@@ -2564,7 +2571,7 @@ static __attribute__((always_inline)) inline uint32_t ir_typed_asm_body(IrTypedS
     sink->sizes.extra_count += count;
     sink->sizes.call_type_count += count;
     sink->sizes.asm_body_count += 1;
-    return ir_typed_emit(sink, IR_CALL, IR_VOID, 0, descriptor, BUSTER_IR_NONE, 0);
+    return ir_typed_emit(sink, IR_CALL, result_type, 0, descriptor, BUSTER_IR_NONE, 0);
 }
 
 // Call `call` of the calls table: a direct one of its target's symbol, or with `callee` a pointer value (not
@@ -3249,9 +3256,9 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
     bool leaves = false;
     for (uint32_t k = 0; check.error == IR_OK && k < input->asm_body_count && input->asm_bodies != 0; k += 1)
     {
-        // A body's labels (#1839), which the IR's body call doesn't carry, are Tier 0's too, and so is a body call's result
-        // in its body's register (#2144, Tier0AsmBody.result), which only a lowering for Tier 0 makes.
-        leaves |= input->asm_bodies[k].leaves || input->asm_bodies[k].label_count != 0 || input->asm_bodies[k].result != 0;
+        // A body's labels (#1839), which the IR's body call doesn't carry, are Tier 0's too. Scalar register results
+        // are carried by the body call and its IR_ASM_RESULT projections (#2144).
+        leaves |= input->asm_bodies[k].leaves || input->asm_bodies[k].label_count != 0;
     }
     if (check.error == IR_OK && (input->unwind_init || input->returns_twice || tier0_preserving(input) || input->realign_stack || leaves))
     {
@@ -3314,7 +3321,7 @@ static IrCheck ir_lower_typed_target_path(const Tier0Function* input, IrType res
             check.error = IR_ERROR_UNSUPPORTED;
             check.instruction = i;
         }
-        else if (kind == BUSTER_TYPED_X86)
+        else if (kind == BUSTER_TYPED_X86 && input->operations[value].asm_result == 0)
         {
             if (operations == 0)
             {

@@ -832,7 +832,7 @@ An asm statement the C driver places in its caller as an asm body
 ([the inline assembly guide](c-inline-assembly.md)'s "Asm bodies") is a body call:
 an `IR_CALL` whose descriptor names the body (`IrCall.body`, 1 plus its index in
 `IrFunction.asm_bodies`) in place of a callee, its symbol `a` 0 and its row 0,
-void, of no ABI records and not variadic. An `IrAsmBody` holds the statement's
+of no ABI records and not variadic. An `IrAsmBody` holds the statement's
 records (borrowed from the producer, `Tier0AsmBody`'s), its own branches and their
 targets relative to its first record (a target may be the body's end), and the
 registers it writes (`touched`, rax to r15 in bits 0 to 15 and xmm0 to xmm15 in 16
@@ -847,6 +847,36 @@ number, or `BUSTER_ABI_REGISTER_VECTOR | n` for xmm n), as Tier 0's call row
 passes them (`CheckProgramAsm.inline_passed`), so that they need no round trip
 through the block. `ir_asm_body_block` names the block argument.
 
+Scalar register outputs use the same register numbering. `IrAsmBody.result`
+is the primary register plus one, or zero for a void body; `result_registers`
+names every output, including the primary, and `result_wide` selects 8-byte
+outputs from that mask (the others occupy 4 bytes). A GPR output is `i32` or
+`i64`, an XMM output `f32` or `f64`. The body's `IR_CALL` returns the primary
+value in that type. An `IR_ASM_RESULT` returns a secondary: `a` names the
+body call and `b` its fixed register number, printed as
+`%n = asm_result.i64 %call register=2` for an `rdx` result.
+
+Each projection describes a value captured when its body finishes, together
+with all the other outputs. It does not defer a physical register read to the
+projection's instruction position. It follows its producer in the same block;
+each secondary register has at most one projection, and the primary cannot be
+projected again. Its ordinary consumers obey SSA dominance, including uses in
+other blocks. The parent is its only SSA operand, so rewrites remap it through
+the usual value masks. Dead projections may disappear independently; the body
+call remains an effect. CFG inlining leaves a call in place if splitting its
+block would separate a producer and projection; straight-line expansion is
+still allowed there. Tier 1 defines and captures all surviving outputs at the
+body call before restoring live registers, including outputs allocated to
+spill slots.
+
+The typed-stream adapter accepts Tier 0's contiguous result bundle: the primary
+call and its `SET_LOCAL`, followed by each secondary `X86` projection and its
+`SET_LOCAL`. A projection's `Tier0Operation.asm_result` is the register plus
+one, with no records or operands; it has no call identity to remap when a
+typed helper is inlined several times. Lowering binds it to the bundle's one
+body call. The adapter also normalizes the earlier single-result descriptor
+(`result` alone) to explicit masks using the call's result type.
+
 So every pass takes a body call as an unknown callee's of that pointer: the block
 escapes into it (neither SSA promotion nor SROA's `flagged` mode makes its slot
 values), its stores stay before the call, no load or store moves across it, and
@@ -854,12 +884,17 @@ the operands' objects, whose addresses the block holds, are memory the call may
 read and write. The inliner copies a callee's bodies with it (appended to the
 caller's, `IrCall.body` rebased), its block argument the rebased slot's address,
 as a row call's row is copied. The verifier checks a body call's descriptor
-against its body (`ir_body_call_valid`): within the column, of no row, void, one
+against its body (`ir_body_call_valid`): within the column, of no row, one
 `ptr` argument or none, then a register operand's per location, each in
-registers, and the branch columns in order within the records.
+registers, and the branch columns in order within the records. Its primary
+result type must match its register and width; every output must be touched,
+none may be `rsp`, and the width mask must be a subset of the result mask.
+Both verifier entry points check projection identity, type, block and
+uniqueness.
 
 The text form has no syntax for a body: the printer writes `asm #k(...)` and a
-line per body (`asm #k records=<count> branches=<count> touched=<mask>`) for
+line per body (`asm #k records=<count> branches=<count> touched=<mask>
+result=<primary-plus-one> results=<mask> wide=<mask>`) for
 diagnostics, which the parser doesn't read, so the source tools whose round trips
 print and parse the text (`test-ir-source`, `test-tier1-cfg-source`) keep the
 statements' helpers (`CheckSourceRequest.asm_helpers`), and the structural

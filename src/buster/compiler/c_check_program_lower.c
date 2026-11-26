@@ -1411,7 +1411,7 @@ static uint32_t check_lower_vector_register_bytes(uint64_t features)
 }
 
 // The non-asm machine-operation allowance (CheckLowerWriter.operations), and vector constants. Each lane also
-// reserves one operation per placed asm statement in the largest body (CheckProgramAsms.row_capacity, #1359).
+// reserves placed asm rows and secondary result projections in the largest body (CheckProgramAsms.row_capacity).
 #define BUSTER_CHECK_LOWER_OPERATIONS 4096u
 #define BUSTER_CHECK_LOWER_VECTOR_CONSTANTS 4096u
 
@@ -19342,9 +19342,17 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
             uint8_t classes[BUSTER_CHECK_ASM_OPERANDS];
             uint8_t registers[BUSTER_CHECK_ASM_OPERANDS];
             uint32_t passed = 0;
+            uint32_t result_registers = 0;
+            uint32_t result_wide = 0;
             for (uint32_t k = 0; plan->inline_passed && k < count; k += 1)
             {
                 const CheckAsmPlace* place = plan->places + k;
+                if (place->returned)
+                {
+                    const uint32_t bit = 1u << check_asm_result_register(place);
+                    result_registers |= bit;
+                    result_wide |= place->size == 8 ? bit : 0;
+                }
                 if (check_lower_asm_passed(place))
                 {
                     classes[passed] = check_lower_asm_class(writer, plan, k);
@@ -19373,7 +19381,9 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
                     .label_count = plan->presentation != NULL ? 1 : plan->label_count,
                     .exits = plan->inline_exits,
                     .goto_labels = plan->inline_goto_labels,
-                    .result = returned != 0 ? (uint8_t)(returned->reg + 1) : 0,
+                    .result = returned != 0 ? (uint8_t)(check_asm_result_register(returned) + 1) : 0,
+                    .result_registers = result_registers,
+                    .result_wide = result_wide,
                     .leaves = plan->inline_leaves,
                     .stack = plan->inline_stack,
                 };
@@ -19385,9 +19395,34 @@ static void check_lower_asm(CheckLowerWriter* writer, CheckControl control)
         {
             call = check_lower_native_call(writer, helper->symbol, result, &argument, plan->block != 0 ? 1 : 0);
         }
-        if (returned != 0)
+        for (uint32_t k = statement->output_count; returned != NULL && k-- > 0 && writer->output->status == CHECK_PROGRAM_OK;)
         {
-            check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, check_lower_class(writer, returned->type), returned_local);
+            const CheckAsmPlace* place = plan->places + k;
+            if (place->returned)
+            {
+                const uint32_t object = check_stream_value(program->stream, statement->operands[k].node).object;
+                const uint32_t local = object < program->object_count ? check_lower_local_of(writer, object) : BUSTER_CHECK_NONE;
+                const uint8_t class = check_lower_class(writer, place->type);
+                if (local == BUSTER_CHECK_NONE)
+                {
+                    check_lower_fail(writer, CHECK_PROGRAM_INVALID);
+                }
+                else
+                {
+                    check_lower_instruction(writer, BUSTER_TYPED_SET_LOCAL, class, local);
+                    if (k + 1 != plan->inline_result)
+                    {
+                        // A snapshot of another result of this same call, not a second invocation of the template.
+                        // Keeping the group explicit lets the IR promote every output independently into SSA.
+                        const Tier0Operation projection = {
+                            .result_class = class,
+                            .asm_result = (uint8_t)(check_asm_result_register(place) + 1),
+                        };
+                        check_lower_instruction(writer, BUSTER_TYPED_X86, class, check_lower_operation_add(writer, &projection));
+                        writer->vectors = true;
+                    }
+                }
+            }
         }
         check_lower_instruction(writer, BUSTER_TYPED_CALL,
                                 returned != 0 ? check_lower_class(writer, returned->type) : jumps ? BUSTER_TYPED_CLASS_I32 : BUSTER_TYPED_CLASS_VOID, call);

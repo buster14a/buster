@@ -112,6 +112,7 @@ static Tier1LivenessError tier1_liveness_validate_plan(const Tier1SelectPlan* pl
             error = TIER1_LIVENESS_INVALID;
         }
         else if ((op == IR_PHI && !phis) || (op == IR_CALL_INDIRECT && !phis) ||
+                 (op == IR_ASM_RESULT && (!phis || !tier1_select_asm_supported(function, function->a[node]))) ||
                  (tier1_select_function_call(function, node) && !tier1_select_call_supported(function, node)) ||
                  // A row call (#141) is the CFG consumer's alone (tier1_emit_cfg_row), and so is a body call (#1839,
                  // tier1_emit_cfg_asm).
@@ -147,6 +148,18 @@ static Tier1LivenessError tier1_liveness_validate_plan(const Tier1SelectPlan* pl
             for (uint32_t k = 0; error == TIER1_LIVENESS_OK && k < passed; k += 1)
             {
                 error = plan->effective_use_values[first + k] == function->extra[call.argument_first + skipped + k] ? error : TIER1_LIVENESS_INVALID;
+            }
+        }
+        else if (op == IR_ASM_RESULT)
+        {
+            // The producer defines this snapshot at its own definition phase. The parent edge is semantic ordering,
+            // not an effective machine use of the primary result.
+            const Tier1SelectPattern* pattern = &plan->patterns[node];
+            error = !plan->covered[node] && pattern->rule == TIER1_RULE_ASM_RESULT && pattern->immediate == function->b[node] &&
+                    pattern->fold_count == 0 && first == end ? error : TIER1_LIVENESS_INVALID;
+            for (uint32_t operand = 0; error == TIER1_LIVENESS_OK && operand < BUSTER_TIER1_SELECT_VALUES; operand += 1)
+            {
+                error = pattern->values[operand] == BUSTER_IR_NONE ? error : TIER1_LIVENESS_INVALID;
             }
         }
         else if (op == IR_CALL && !tier1_select_function_call(function, node))
@@ -213,7 +226,7 @@ static Tier1LivenessError tier1_liveness_validate_plan(const Tier1SelectPlan* pl
             }
         }
         else if (plan->patterns[node].rule == TIER1_RULE_CALL || plan->patterns[node].rule == TIER1_RULE_UNREACHABLE || plan->patterns[node].rule == TIER1_RULE_ROW ||
-                 plan->patterns[node].rule == TIER1_RULE_ASM)
+                 plan->patterns[node].rule == TIER1_RULE_ASM || plan->patterns[node].rule == TIER1_RULE_ASM_RESULT)
         {
             error = TIER1_LIVENESS_INVALID;
         }

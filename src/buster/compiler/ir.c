@@ -222,6 +222,11 @@ typedef enum IrOp
     // i) * scale, the lanes in order from lane 0, so that of two set lanes at one address the higher lane's bytes stay; a
     // clear lane writes nothing (vpscatterdd to vpscatterqq [a + zmm * scale]{k}, zmm). A store's effect, of any memory.
     IR_SCATTER,
+    // A secondary result of an asm body (#2144): a is the body's IR_CALL, and b its register code (GPR 0..15,
+    // XMM 16..31). The value is captured when the body finishes, together with the call's primary result, not when
+    // this projection is visited. It stays after that call in the same block; each secondary register has at most
+    // one projection. Ordinary value uses may read it in any block dominated by that definition.
+    IR_ASM_RESULT,
     IR_OP_COUNT,
 } IrOp;
 
@@ -529,6 +534,12 @@ struct IrAsmBody
     // Its register operands' registers (#2144), one location per argument past the block, `passed` of them.
     const AbiLocation* locations;
     uint32_t passed;
+    // Scalar register results (#2144): the primary register code plus one, or zero for a void call. Both masks use
+    // touched's GPR/XMM layout; result_registers includes the primary, and result_wide selects 8 rather than 4 bytes.
+    // GPR results are I32/I64 and XMM results F32/F64. IR_ASM_RESULT projects the other registers from this call.
+    uint8_t result;
+    uint32_t result_registers;
+    uint32_t result_wide;
 };
 
 
@@ -971,7 +982,8 @@ static const char* const ir_lane_type_names[3][IR_SIMD_LANE_COUNT] = {
     X("compress_store") \
     X("gather") \
     X("fma") \
-    X("scatter")
+    X("scatter") \
+    X("asm_result")
 static const char* const ir_op_names[IR_OP_COUNT] = { BUSTER_IR_OP_SPELLINGS(BUSTER_IR_NAME_TEXT) };
 static const uint8_t ir_op_name_lengths[IR_OP_COUNT] = { BUSTER_IR_OP_SPELLINGS(BUSTER_IR_NAME_LENGTH) };
 #undef BUSTER_IR_OP_SPELLINGS
@@ -1422,6 +1434,7 @@ typedef enum IrRule
     IR_RULE_GATHER,
     IR_RULE_FMA,
     IR_RULE_SCATTER,
+    IR_RULE_ASM_RESULT,
     IR_RULE_COUNT,
 } IrRule;
 
@@ -1501,7 +1514,8 @@ typedef enum IrRule
     X(IR_COMPRESS_STORE, 7, 7, 1u << IR_VOID, IR_RULE_MASKED_STORE, 0) \
     X(IR_GATHER,        7, 7, BUSTER_IR_VECTORS, IR_RULE_GATHER, 0) \
     X(IR_FMA,           7, 7, (1u << IR_F32) | (1u << IR_F64) | BUSTER_IR_VECTORS, IR_RULE_FMA, 0) \
-    X(IR_SCATTER,       3, 7, 1u << IR_VOID, IR_RULE_SCATTER, 0)
+    X(IR_SCATTER,       3, 7, 1u << IR_VOID, IR_RULE_SCATTER, 0) \
+    X(IR_ASM_RESULT,    1, 3, (1u << IR_I32) | (1u << IR_I64) | (1u << IR_F32) | (1u << IR_F64), IR_RULE_ASM_RESULT, 0)
 
 #define BUSTER_IR_OPERAND_ROW(op, uses, fields, types, rule, term) [op] = uses,
 static const uint8_t ir_operand_table[BUSTER_IR_OP_TABLE] = { BUSTER_IR_ROWS(BUSTER_IR_OPERAND_ROW) };
@@ -1947,7 +1961,7 @@ static uint32_t ir_row_type(uint32_t class, uint32_t bytes)
 static bool ir_row_call_valid(const IrFunction* f, const IrCall* call)
 {
     const Tier0Operation* row = call->row <= f->row_count ? &f->rows[call->row - 1] : 0;
-    bool valid = row != 0 && row->record_count <= BUSTER_TIER0_OPERATION_RECORDS && row->operand_count <= BUSTER_TIER0_OPERATION_OPERANDS && call->abi == 0 && !call->variadic &&
+    bool valid = row != 0 && row->asm_result == 0 && row->record_count <= BUSTER_TIER0_OPERATION_RECORDS && row->operand_count <= BUSTER_TIER0_OPERATION_OPERANDS && call->abi == 0 && !call->variadic &&
                  call->argument_count == row->operand_count && call->parameter_count == row->operand_count &&
                  ir_row_type(row->result_class, row->result_bytes) == call->result_type;
     for (uint32_t j = 0; valid && j < row->operand_count; j += 1)
@@ -1965,16 +1979,31 @@ static uint32_t ir_asm_body_block(const IrFunction* f, const IrCall* call, const
     return call->argument_count > body->passed ? f->extra[call->argument_first] : BUSTER_IR_NONE;
 }
 
+// A declared result's semantic type; an absent or out-of-range register is not a result. Result masks and types are
+// immutable producer metadata, with no instruction identities for ordinary IR rewrites to fix up.
+static uint8_t ir_asm_result_type(const IrAsmBody* body, uint32_t reg)
+{
+    const bool present = reg < 32 && ((body->result_registers >> reg) & 1u) != 0;
+    const bool wide = present && ((body->result_wide >> reg) & 1u) != 0;
+    return !present ? IR_VOID : reg < 16 ? (wide ? IR_I64 : IR_I32) : (wide ? IR_F64 : IR_F32);
+}
+
 // Whether a body call's descriptor fits its asm body (#1839): within the bodies, of no row, no ABI records and no variadic
-// arguments, void, and of one ptr argument, its block's address, or of none, then one argument of a scalar type per
+// arguments, and of one ptr argument, its block's address, or of none, then one argument of a scalar type per
 // register operand (#2144), each in a register; and the body's branch columns in order, each branch a record of it and
-// each target one of its records or its end.
+// each target one of its records or its end. A non-void call returns its primary register's declared scalar type;
+// every declared result is in a touched register, and only declared results have a width bit.
 static bool ir_body_call_valid(const IrFunction* f, const IrCall* call)
 {
     const IrAsmBody* body = call->body <= f->asm_body_count ? &f->asm_bodies[call->body - 1] : 0;
     const bool block = body != 0 && call->argument_count > body->passed;
-    bool valid = body != 0 && call->row == 0 && call->abi == 0 && !call->variadic && call->result_type == IR_VOID && call->argument_count - body->passed <= 1 &&
+    const bool result = body != 0 && body->result != 0;
+    bool valid = body != 0 && call->row == 0 && call->abi == 0 && !call->variadic && call->argument_count - body->passed <= 1 &&
                  call->argument_count >= body->passed && call->parameter_count == call->argument_count && (!block || f->call_types[call->type_first] == IR_PTR) &&
+                 (result ? body->result <= 32 && call->result_type != IR_VOID && call->result_type == ir_asm_result_type(body, body->result - 1u) :
+                           call->result_type == IR_VOID && body->result_registers == 0) &&
+                 (body->result_registers & ~body->touched) == 0 && (body->result_wide & ~body->result_registers) == 0 &&
+                 (body->result_registers & (1u << X86_REGISTER_RSP)) == 0 &&
                  (body->passed == 0 || body->locations != 0) &&
                  (body->count == 0 || body->records != 0) && body->branch_count <= body->count && (body->branch_count == 0 || (body->branches != 0 && body->targets != 0));
     for (uint32_t k = 0; valid && k < body->passed; k += 1)
@@ -2618,6 +2647,12 @@ static IrCheck ir_check_instruction(const IrFunction* f, uint32_t i, bool fields
                                 (abi == 0 || f->passed[abi->passed + p].size == 0 || f->type[value] == IR_PTR);
                     }
                 }
+            } break;
+            case IR_RULE_ASM_RESULT:
+            {
+                const IrCall* call = a < i && f->op[a] == IR_CALL && f->b[a] < f->call_count ? &f->calls[f->b[a]] : NULL;
+                const IrAsmBody* body = call != NULL && call->body != 0 && call->body <= f->asm_body_count ? &f->asm_bodies[call->body - 1] : NULL;
+                valid = body != NULL && b + 1u != body->result && type == ir_asm_result_type(body, b);
             } break;
             case IR_RULE_PHI: valid = b != 0 && b <= UINT32_MAX - 3 && ir_slice(a, (uint64_t)b * 2, f->extra_count); break;
             case IR_RULE_BRANCH: valid = a < f->block_count; break;
@@ -3472,6 +3507,7 @@ static IrCheck ir_check_joins(const IrFunction* f, const IrCfg* cfg, Arena* scra
     IrCheck check = ir_check(IR_OK, BUSTER_IR_NONE, 0);
     bool ok = true;
     uint32_t* seen = ir_allocate(scratch, f->block_count, 4, &ok);
+    uint32_t* projected = NULL;
     if (!ok)
     {
         check.error = IR_ERROR_MEMORY;
@@ -3486,18 +3522,47 @@ static IrCheck ir_check_joins(const IrFunction* f, const IrCfg* cfg, Arena* scra
     {
         check = ir_check_dominance_view(f, dominance);
     }
-    // The phis and switches, found 64 operations at a time.
+    // The phis, switches and asm result projections, found 64 operations at a time. Projection masks are allocated
+    // only when the first projection is found: one word per call's instruction identity, not per reusable descriptor.
     for (uint32_t first = 0; check.error == IR_OK && first < f->instruction_count; first += 64)
     {
         const uint32_t remaining = f->instruction_count - first;
         const __mmask64 active = remaining >= 64 ? (__mmask64)-1 : ((__mmask64)1 << remaining) - 1;
         const __m512i op = _mm512_maskz_loadu_epi8(active, f->op + first);
-        uint64_t pending = _mm512_mask_cmpeq_epi8_mask(active, op, _mm512_set1_epi8(IR_PHI)) | _mm512_mask_cmpeq_epi8_mask(active, op, _mm512_set1_epi8(IR_SWITCH));
+        uint64_t pending = _mm512_mask_cmpeq_epi8_mask(active, op, _mm512_set1_epi8(IR_PHI)) | _mm512_mask_cmpeq_epi8_mask(active, op, _mm512_set1_epi8(IR_SWITCH)) |
+                           _mm512_mask_cmpeq_epi8_mask(active, op, _mm512_set1_epi8(IR_ASM_RESULT));
         while (check.error == IR_OK && pending != 0)
         {
             const uint32_t lane = (uint32_t)__builtin_ctzll(pending);
             pending &= pending - 1;
-            check = ir_check_join(f, cfg, scratch, seen, first + lane);
+            const uint32_t node = first + lane;
+            if (f->op[node] == IR_ASM_RESULT)
+            {
+                if (projected == NULL)
+                {
+                    projected = ir_allocate(scratch, f->instruction_count, 4, &ok);
+                }
+                // Row validation established the parent call and register's bounds. Projections are definitions at
+                // that call's position for allocation, so they stay in its block and name each output at most once.
+                const uint32_t parent = f->a[node];
+                const uint32_t bit = 1u << f->b[node];
+                if (!ok)
+                {
+                    check = ir_check(IR_ERROR_MEMORY, node, 0);
+                }
+                else if (cfg->instruction_blocks[parent] != cfg->instruction_blocks[node] || (projected[parent] & bit) != 0)
+                {
+                    check = ir_check(IR_ERROR_METADATA, node, f->b[node]);
+                }
+                else
+                {
+                    projected[parent] |= bit;
+                }
+            }
+            else
+            {
+                check = ir_check_join(f, cfg, scratch, seen, node);
+            }
         }
     }
     if (check.error == IR_OK)
@@ -3581,7 +3646,8 @@ static bool ir_lowered_ordered(const IrFunction* f, Arena* scratch)
         const uint32_t count = remaining < BUSTER_IR_VECTOR_COUNT ? remaining : BUSTER_IR_VECTOR_COUNT;
         const __mmask16 active = (__mmask16)((1u << count) - 1u);
         const __m128i op = _mm_maskz_loadu_epi8(active, f->op + first);
-        ordered = _mm_cmpeq_epi8_mask(op, _mm_set1_epi8(IR_PHI)) == 0;
+        ordered = _mm_cmpeq_epi8_mask(op, _mm_set1_epi8(IR_PHI)) == 0 &&
+                  (f->asm_body_count == 0 || _mm_cmpeq_epi8_mask(op, _mm_set1_epi8(IR_ASM_RESULT)) == 0);
         uint32_t branches = _mm_cmpeq_epi8_mask(op, _mm_set1_epi8(IR_SWITCH)) | _mm_cmpeq_epi8_mask(op, _mm_set1_epi8(IR_BR_INDIRECT));
         while (ordered && branches != 0)
         {
@@ -3918,7 +3984,8 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
         for (uint32_t k = 0; k < f->asm_body_count; k += 1)
         {
             const IrAsmBody* body = &f->asm_bodies[k];
-            fprintf(output, "  asm #%" PRIu32 " records=%" PRIu32 " branches=%" PRIu32 " touched=0x%08" PRIx32 "\n", k, body->count, body->branch_count, body->touched);
+            fprintf(output, "  asm #%" PRIu32 " records=%" PRIu32 " branches=%" PRIu32 " touched=0x%08" PRIx32 " result=%u results=0x%08" PRIx32 " wide=0x%08" PRIx32 "\n",
+                    k, body->count, body->branch_count, body->touched, body->result, body->result_registers, body->result_wide);
         }
         for (uint32_t s = 0; s < f->slot_count; s += 1)
         {
@@ -4014,6 +4081,7 @@ static IrError ir_print(const IrFunction* f, Arena* scratch, FILE* output)
                             fprintf(output, " into=%%%" PRIu32, c);
                         }
                     } break;
+                    case IR_ASM_RESULT: fprintf(output, " %%%" PRIu32 " register=%" PRIu32, a, b); break;
                     case IR_PHI:
                     {
                         for (uint32_t p = 0; p < b; p += 1)

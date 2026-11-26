@@ -190,10 +190,11 @@ struct IrIfConvertWork
     bool paired;
 };
 
-_Static_assert(IR_OP_COUNT == 70, "a new operation needs its class in ir_if_convert_barriers");
+_Static_assert(IR_OP_COUNT == 71, "a new operation needs its class in ir_if_convert_barriers");
 // Everything not listed is neither: pure operations, constants, loads (plain, masked and gathered; an observable plain
 // one is a write, below), phis, allocation and the stack save. A call may free or unmap memory; a stack restore and a lifetime's end release a
-// frame's; IR_INVALID never verifies but stays conservative.
+// frame's; IR_INVALID never verifies but stays conservative. IR_ASM_RESULT is an immutable snapshot, with no memory
+// effect; it is absent from the speculation costs so it stays in its producer call's block (#2144).
 static const uint8_t ir_if_convert_barriers[BUSTER_IR_OP_TABLE] = {
     [IR_INVALID] = BUSTER_IR_IF_CONVERT_WRITE | BUSTER_IR_IF_CONVERT_RELEASE,
     [IR_STORE] = BUSTER_IR_IF_CONVERT_WRITE,

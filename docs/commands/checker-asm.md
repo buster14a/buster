@@ -60,7 +60,11 @@ requirements. [Command index](README.md).
   boundary and compares both kernels with Clang and independent unsigned
   models (#1359).
   `test-checker --program-asm` runs the inline-assembly source fixtures alone;
-  the full `test-checker` command continues to include them. A `target_clones`
+  the full `test-checker` command continues to include them.
+  `test-checker-driver --tier1-asm-only` runs asm bodies and the multi-result fixture
+  `tests/driver/asm-body-results.c` at both tiers against Clang, checks emitted
+  frame accesses and code certificates, and exercises both Tier 1 schedulers (#2144).
+  A `target_clones`
   body's copies, a naked one's among them, each plan their statements for
   their version's instruction set (#2247); `test-checker-driver
   --target-versions-only` runs such bodies at both tiers against clang's build

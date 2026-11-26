@@ -6,6 +6,7 @@
 // tests use transitive closure as an independent SCC oracle. Include after ir_optimize_inline.c.
 
 #include <inttypes.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/mman.h>
@@ -760,9 +761,16 @@ static void ir_inline_test_fold_result(IrInlineTest* test, const IrInlineUnit* i
         const void* columns[BUSTER_IR_INLINE_TEST_COLUMNS];
         uint64_t bytes[BUSTER_IR_INLINE_TEST_COLUMNS];
         ir_inline_test_columns(function, columns, bytes);
-        for (uint32_t k = 0; k < BUSTER_IR_INLINE_TEST_COLUMNS; k += 1)
+        for (uint32_t k = 0; k + 1 < BUSTER_IR_INLINE_TEST_COLUMNS; k += 1)
         {
             ir_inline_test_fold(&test->digest, columns[k], bytes[k]);
+        }
+        // The frozen corpus predates Tier0Operation.asm_result (#2144). It is typed-stream metadata, forbidden on
+        // IR machine rows; fold their unchanged fields without the new byte and trailing structure padding. The
+        // independent caller-run comparison above still checks every byte of the current row representation.
+        for (uint32_t row = 0; row < function->row_count; row += 1)
+        {
+            ir_inline_test_fold(&test->digest, &function->rows[row], offsetof(Tier0Operation, asm_result));
         }
         ir_inline_test_fold_value(&test->digest, result->components[f]);
         ir_inline_test_fold_value(&test->digest, result->recursive[f]);
@@ -2381,6 +2389,84 @@ static void ir_inline_test_failures(IrInlineTest* test, Arena* input, Arena* out
     arena_pop_to(twin, 0);
 }
 
+// A block splice before or after a snapshot group is safe; one between the body call and its projection would split
+// their definition. Straight-line expansion remains allowed there. These new semantic checks leave the historical
+// corpus's digest untouched, and verify remapping when an earlier expansion moves both snapshot nodes.
+static void ir_inline_test_asm_results(IrInlineTest* test, Arena* input, Arena* output, Arena* scratch)
+{
+    IrFunction functions[2] = {
+        ir_inline_test_function(test, input, (IrSizes){ .instruction_count = 7, .block_count = 1, .call_count = 2, .asm_body_count = 1 }, IR_I64),
+        ir_inline_test_function(test, input, (IrSizes){ .instruction_count = 6, .block_count = 3, .constant_count = 3 }, IR_I64),
+    };
+    if (functions[0].op != NULL && functions[1].op != NULL)
+    {
+        IrFunction* caller = &functions[0];
+        IrFunction* callee = &functions[1];
+        ir_inline_test_call(caller, 0, 1, 2, 0, 0, IR_I64);
+        ir_inline_test_call(caller, 1, 0, 0, 0, 0, IR_I64);
+        caller->calls[0].body = 1;
+        caller->asm_bodies[0] = (IrAsmBody){
+            .touched = 1u << X86_REGISTER_RAX | 1u << X86_REGISTER_RDX,
+            .result = X86_REGISTER_RAX + 1,
+            .result_registers = 1u << X86_REGISTER_RAX | 1u << X86_REGISTER_RDX,
+            .result_wide = 1u << X86_REGISTER_RAX | 1u << X86_REGISTER_RDX,
+        };
+        ir_inline_test_call(caller, 2, 1, 2, 0, 0, IR_I64);
+        ir_inline_test_node(caller, 3, IR_ASM_RESULT, IR_I64, 1, X86_REGISTER_RDX, BUSTER_IR_NONE);
+        ir_inline_test_call(caller, 4, 1, 2, 0, 0, IR_I64);
+        ir_inline_test_node(caller, 5, IR_ADD, IR_I64, 3, 4, BUSTER_IR_NONE);
+        ir_inline_test_node(caller, 6, IR_RET, IR_VOID, 5, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        callee->block_offsets[1] = 2;
+        callee->block_offsets[2] = 4;
+        ir_inline_test_node(callee, 0, IR_CONST, IR_I1, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_inline_test_node(callee, 1, IR_CBR, IR_VOID, 0, 1, 2);
+        ir_inline_test_node(callee, 2, IR_CONST, IR_I64, 1, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_inline_test_node(callee, 3, IR_RET, IR_VOID, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_inline_test_node(callee, 4, IR_CONST, IR_I64, 2, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        ir_inline_test_node(callee, 5, IR_RET, IR_VOID, 4, BUSTER_IR_NONE, BUSTER_IR_NONE);
+        const uint32_t symbols[2] = { 1, 2 };
+        const uint8_t flags[2] = { BUSTER_IR_INLINE_INTERNAL, BUSTER_IR_INLINE_INTERNAL };
+        const IrInlineUnit unit = { .functions = functions, .symbols = symbols, .flags = flags, .count = 2, .symbol_count = 128 };
+        IrInlineOptions options = ir_inline_options();
+        options.control_flow = true;
+        for (uint32_t straight = 0; straight < 2; straight += 1)
+        {
+            if (straight != 0)
+            {
+                callee->block_count = 1;
+                callee->instruction_count = 2;
+                callee->block_offsets[1] = 2;
+                ir_inline_test_node(callee, 0, IR_CONST, IR_I64, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+                ir_inline_test_node(callee, 1, IR_RET, IR_VOID, 0, BUSTER_IR_NONE, BUSTER_IR_NONE);
+            }
+            IrInlineResult result = { 0 };
+            uint32_t failed = BUSTER_IR_NONE;
+            const IrCheck check = ir_optimize_inline(&unit, output, scratch, options, &result, &failed);
+            ir_inline_test_expect(test, check.error == IR_OK && scratch->length == 0, "asm snapshot inlining succeeds and restores scratch");
+            if (check.error == IR_OK)
+            {
+                const IrFunction* rewritten = &result.functions[0];
+                ir_inline_test_expect(test, result.inlined_calls == (straight ? 3 : 2) && result.decisions[1] == (straight ? IR_INLINE_SELECTED : IR_INLINE_BODY),
+                                      "only a block splice between an asm producer and projection is refused");
+                bool snapshot = false;
+                for (uint32_t i = 0; i < rewritten->instruction_count; i += 1)
+                {
+                    if (rewritten->op[i] == IR_ASM_RESULT)
+                    {
+                        const uint32_t parent = rewritten->a[i];
+                        snapshot = parent > 1 && parent < i && rewritten->op[parent] == IR_CALL && rewritten->calls[rewritten->b[parent]].body == 1 &&
+                                   rewritten->b[i] == X86_REGISTER_RDX;
+                    }
+                }
+                ir_inline_test_expect(test, snapshot && ir_verify(rewritten, scratch, NULL).error == IR_OK,
+                                      "inlining remaps the asm snapshot producer and retains its block");
+            }
+            arena_pop_to(output, 0);
+        }
+    }
+    arena_pop_to(input, 0);
+}
+
 // #1282's SIMD and by-value fixtures (ir_optimize_inline_simd_test.c, after SROA and the interpreter).
 static void ir_inline_test_simd(IrInlineTest* test, Arena* input, Arena* output, Arena* twin, Arena* scratch);
 // #2541's general splice fixtures (ir_optimize_inline_cfg_test.c, after the SIMD ones, whose helpers they use).
@@ -2417,6 +2503,7 @@ static __attribute__((unused)) int run_ir_optimize_inline_tests(int argc, char**
         ir_inline_test_failures(&test, &input, &output, &twin, &scratch);
         ir_inline_test_simd(&test, &input, &output, &twin, &scratch);
         ir_inline_test_general(&test, &input, &output, &twin, &scratch);
+        ir_inline_test_asm_results(&test, &input, &output, &scratch);
         ir_inline_test_expect(&test, test.digest == BUSTER_IR_INLINE_TEST_DIGEST, "every unit's result has its frozen digest");
         if (test.digest != BUSTER_IR_INLINE_TEST_DIGEST)
         {

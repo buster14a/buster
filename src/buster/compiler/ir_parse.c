@@ -895,6 +895,13 @@ static void ir_parse_instruction(IrParseState* state)
             case IR_ADDRESS: ir_parse_address(state, &row); break;
             case IR_CALL:
             case IR_CALL_INDIRECT: ir_parse_call(state, &row); break;
+            case IR_ASM_RESULT:
+            {
+                row.a = ir_parse_id(state, '%');
+                ir_parse_keyword(state, "register");
+                ir_parse_expect(state, '=');
+                row.b = (uint32_t)ir_parse_unsigned(state, UINT32_MAX, false);
+            } break;
             case IR_PHI: ir_parse_phi(state, &row); break;
             case IR_BR: row.a = ir_parse_id(state, 'b'); break;
             case IR_CBR:
