@@ -362,6 +362,92 @@ static void check_test_driver_default_visibility(CheckTest* test, const char* cl
     }
 }
 
+// #3578: compare every global/weak symbol, including the synthetic reference, resolver and clone bodies, with clang.
+// The fixture nests all three pragma visibilities and leaves ordinary declarations at each pop, so -fvisibility='s
+// default must apply only outside them. Its CPU versions return the same answers on every host.
+static void check_test_driver_multiversion_visibility(CheckTest* test, const char* clang, const char* executable, const char* directory)
+{
+    static const char* const options[] =
+    {
+        "-fvisibility=default",
+        "-fvisibility=hidden",
+        "-fvisibility=protected",
+    };
+    static const char* const modes[] =
+    {
+        "-fno-pic",
+        "-fPIC",
+    };
+    const char* source = "tests/driver/visibility_multiversion.c";
+    char object[512];
+    char program[512];
+    char description[192];
+    char* expected = malloc(BUSTER_CHECK_VISIBILITY_LISTING);
+    char* actual = malloc(BUSTER_CHECK_VISIBILITY_LISTING);
+    const bool room = expected != NULL && actual != NULL;
+    check_test_expect(test, room, "multiversion visibility: the symbol listings have room");
+    snprintf(object, sizeof(object), "%s/multiversion-visibility.o", directory);
+    snprintf(program, sizeof(program), "%s/multiversion-visibility", directory);
+    for (uint32_t o = 0; room && o < BUSTER_ARRAY_LENGTH(options); o += 1)
+    {
+        for (uint32_t m = 0; m < BUSTER_ARRAY_LENGTH(modes); m += 1)
+        {
+            bool reference = false;
+            for (uint32_t p = 0; p < 3; p += 1)
+            {
+                char* diagnostics = NULL;
+                char* arguments[] =
+                {
+                    (char*)(p == 0 ? clang : executable),
+                    "-std=gnu17",
+                    "-O0",
+                    "-c",
+                    (char*)source,
+                    "-o",
+                    object,
+                    (char*)options[o],
+                    (char*)modes[m],
+                    p == 2 ? "--tier1" : NULL,
+                    NULL,
+                };
+                unlink(object);
+                const bool compiled = check_test_driver_spawn(arguments, &diagnostics) == 0 && diagnostics != NULL && diagnostics[0] == 0;
+                free(diagnostics);
+                const bool listed = compiled && check_test_visibility_listing(object, false, p == 0 ? expected : actual, BUSTER_CHECK_VISIBILITY_LISTING);
+                reference = p == 0 ? listed : reference;
+                snprintf(description, sizeof(description), "multiversion visibility: %s %s by %s has clang's symbols", options[o], modes[m],
+                         p == 0 ? "clang" : p == 1 ? "Tier 0" : "Tier 1");
+                check_test_expect(test, listed && reference && (p == 0 || strcmp(actual, expected) == 0), description);
+                if (listed && p != 0 && reference && strcmp(actual, expected) != 0)
+                {
+                    fprintf(stderr, "multiversion visibility expected:\n%sactual:\n%s", expected, actual);
+                }
+                char* link_arguments[] =
+                {
+                    (char*)clang,
+                    "-no-pie",
+                    object,
+                    "-o",
+                    program,
+                    NULL,
+                };
+                diagnostics = NULL;
+                unlink(program);
+                const bool linked = compiled && check_test_driver_spawn(link_arguments, &diagnostics) == 0;
+                free(diagnostics);
+                char captured[64] = { 0 };
+                snprintf(description, sizeof(description), "multiversion visibility: %s %s by %s executes every group", options[o], modes[m],
+                         p == 0 ? "clang" : p == 1 ? "Tier 0" : "Tier 1");
+                check_test_expect(test, linked && check_test_driver_capture(program, captured, sizeof(captured)) && captured[0] == 0, description);
+            }
+        }
+    }
+    unlink(object);
+    unlink(program);
+    free(expected);
+    free(actual);
+}
+
 static void check_test_driver_visibility(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     static const char source[] = "#pragma clang diagnostic ignored \"-Wimplicit-function-declaration\"\n"
@@ -482,4 +568,5 @@ static void check_test_driver_visibility(CheckTest* test, const char* clang, con
     }
     unlink(path);
     check_test_driver_default_visibility(test, clang, executable, directory);
+    check_test_driver_multiversion_visibility(test, clang, executable, directory);
 }

@@ -136,6 +136,7 @@ struct FastSym
     uint8_t is_unsupported;
     uint8_t visibility_set; // a declaration gave the visibility, so another one that differs is clang's error (#3595)
     uint8_t inline_rules;   // BUSTER_FINLINE_*: what a function's declarations say of its inline definition (#3595)
+    uint8_t is_alias;       // an alias attribute defines it at the unit's end (#3592)
     FastType type;
     uint32_t ident_id;
     uint32_t obj_sym;      // symbol index in FastObj (for GLOBAL/FUNC)
@@ -186,13 +187,28 @@ typedef struct FastBodyTask FastBodyTask;
 struct FastBodyTask
 {
     uint32_t sym_idx;
+    uint32_t decl_start;   // token index of the definition's specifiers (__PRETTY_FUNCTION__, #3592)
     uint32_t body_start;   // token index of '{'
     uint32_t param_names_start;
     uint16_t param_count;
     uint16_t previous_task;
+    uint8_t declared;      // a declaration came before the definition (__PRETTY_FUNCTION__)
 };
 
 #define BUSTER_FDEFERRED_LIMIT 4096u
+
+// A declaration with GNU's alias attribute (#3592): its symbol, defined at the end of the unit at its target's place,
+// and the target's name as the attribute spells it (the target's ELF name, which a C name without an asm label is).
+typedef struct FastAlias FastAlias;
+struct FastAlias
+{
+    uint32_t sym_idx;
+    uint32_t target_idx;   // the target's FastSym, found before the reachable bodies are compiled
+    const char* target;
+    uint32_t target_len;
+};
+
+#define BUSTER_FALIAS_LIMIT 1024u
 
 // Main compiler context shared across c_direct_types.c and c_direct_cc.c
 typedef struct FastCCState FastCCState;
@@ -254,7 +270,13 @@ struct FastCCState
     uint32_t id_builtin_ctzll;
     uint32_t id_builtin_ctz;
     uint32_t id_builtin_inff;
+    uint32_t id_builtin_huge_val;  // HUGE_VAL, __builtin_inf's value (#3592)
+    uint32_t id_builtin_huge_valf;
     uint32_t id_builtin_inf;
+    uint32_t id_builtin_ceil;      // computed inline, as the full pipeline does (#3592)
+    uint32_t id_builtin_floor;
+    uint32_t id_builtin_ceilf;
+    uint32_t id_builtin_floorf;
     uint32_t id_builtin_nanf;
     uint32_t id_builtin_nan;
     uint32_t id_builtin_expect;
@@ -274,6 +296,9 @@ struct FastCCState
     uint32_t id_atomic_load_n;
     uint32_t id_atomic_store_n;
     uint32_t id_main;
+    uint32_t id_pretty_function; // __PRETTY_FUNCTION__, which shares __func__'s token kind (#3618)
+    uint32_t id_assert_fail;     // glibc's assert's (#3592)
+    uint32_t id_void;
     FastType va_list_type; // __builtin_va_list (array[1] of struct __va_list_tag)
     FastType va_list_tag_type;
 
@@ -291,6 +316,11 @@ struct FastCCState
     // Current function state (for c_direct_cc.c)
     uint32_t cur_func_sym;
     uint32_t cur_func_name_id;
+    uint32_t cur_func_decl_pos;    // the definition's first token, its specifiers' (__PRETTY_FUNCTION__, #3592)
+    uint32_t cur_func_body_pos;    // its body's `{`
+    const char* cur_func_pretty;   // its __PRETTY_FUNCTION__ once printed (c_direct_pretty.c), else NULL
+    uint32_t cur_func_pretty_length;
+    uint8_t cur_func_declared;     // a declaration came before the definition
     FastType cur_ret_type;
     uint32_t cur_ret_label;
     int32_t cur_sret_off;      // [rbp + cur_sret_off] hidden pointer for >16B struct return (0 if none)
@@ -302,6 +332,17 @@ struct FastCCState
     uint32_t cur_va_gp_init;   // initial gp_offset (8 * num_gp_params)
     uint32_t cur_va_fp_init;   // initial fp_offset (48 + 16 * num_fp_params)
     int32_t cur_va_overflow_off; // rbp + 16 + overflow_bytes
+
+    // Dead code (#3592): how many `if` branches around the statement are checked without code, and what the last
+    // branch condition folded to (BUSTER_FCONSTANT_*).
+    uint32_t dead;
+    uint8_t branch_constant;
+
+    // GNU's alias attribute (#3592): the declarations that have one, and how many the attribute parser saw, so that one
+    // anywhere else (a block, a parameter, a definition) leaves the direct path.
+    FastAlias* aliases;
+    uint32_t alias_count;
+    uint32_t alias_attributes;
 
     // Cached .rodata constants (UINT32_MAX = not yet emitted)
     uint32_t ro_sign_f32_off;
@@ -546,16 +587,24 @@ static FastType ftype_deref(const FastCCState* cc, FastType t)
     return FTYPE_VOID;
 }
 
-// Only arrays and function designators decay. Keep pointer construction off the scalar path.
-static __attribute__((noinline)) FastType ftype_decay_designator(FastCCState* cc, FastType t)
+static __attribute__((noinline)) FastType ftype_decay_slow(FastCCState* cc, FastType t)
 {
-    const FastType element = ftype_is_array(t) ? cc->ctypes[t & BUSTER_FTYPE_CIDX_MASK].inner : t;
-    return ftype_make_ptr(cc, element);
+    if (ftype_is_array(t))
+    {
+        return ftype_make_ptr(cc, cc->ctypes[t & BUSTER_FTYPE_CIDX_MASK].inner);
+    }
+    return ftype_make_ptr(cc, t);
 }
 
-static inline FastType ftype_decay(FastCCState* cc, FastType t)
+// An array or a function decays to a pointer; every other type is its own. The test is a compare of the kind and
+// pointer bits, inline at each caller: out of line, the function spent more on its call than on its answer (#3581).
+static inline __attribute__((always_inline)) FastType ftype_decay(FastCCState* cc, FastType t)
 {
-    return ftype_is_array(t) || ftype_is_func(t) ? ftype_decay_designator(cc, t) : t;
+    const uint32_t shape = t & (BUSTER_FTYPE_PTR_MASK | BUSTER_FTYPE_KIND_MASK);
+    const uint32_t decays = (uint32_t)(shape == ((uint32_t)FCTYPE_ARRAY << BUSTER_FTYPE_KIND_SH)) |
+                            (uint32_t)(shape == ((uint32_t)FCTYPE_FUNC << BUSTER_FTYPE_KIND_SH));
+    if (__builtin_expect(decays != 0, 0)) { return ftype_decay_slow(cc, t); }
+    return t;
 }
 
 static inline FastType ftype_promote_int(const FastCCState* cc, FastType t)
@@ -795,30 +844,31 @@ static inline bool fast_cc_is_typedef_name(const FastCCState* cc, uint32_t id)
     return s != 0 && cc->syms[s].kind == FSYM_TYPEDEF;
 }
 
-// Check if current token starts a C type specifier / qualifier / storage class
-static bool fast_cc_is_type_start(const FastCCState* cc, uint32_t at)
+// The keywords that start a C type specifier / qualifier / storage class, as bits of their token kinds (64..127).
+#define BUSTER_FTOK_BIT(k) (UINT64_C(1) << ((uint32_t)(k) - 64u))
+#define BUSTER_FTOK_TYPE_START_KEYWORDS (BUSTER_FTOK_BIT(FTOK_KW_VOID) | BUSTER_FTOK_BIT(FTOK_KW_CHAR) | BUSTER_FTOK_BIT(FTOK_KW_SHORT) | \
+    BUSTER_FTOK_BIT(FTOK_KW_INT) | BUSTER_FTOK_BIT(FTOK_KW_LONG) | BUSTER_FTOK_BIT(FTOK_KW_FLOAT) | BUSTER_FTOK_BIT(FTOK_KW_DOUBLE) | \
+    BUSTER_FTOK_BIT(FTOK_KW_SIGNED) | BUSTER_FTOK_BIT(FTOK_KW_UNSIGNED) | BUSTER_FTOK_BIT(FTOK_KW_BOOL) | BUSTER_FTOK_BIT(FTOK_KW_STRUCT) | \
+    BUSTER_FTOK_BIT(FTOK_KW_UNION) | BUSTER_FTOK_BIT(FTOK_KW_ENUM) | BUSTER_FTOK_BIT(FTOK_KW_CONST) | BUSTER_FTOK_BIT(FTOK_KW_VOLATILE) | \
+    BUSTER_FTOK_BIT(FTOK_KW_RESTRICT) | BUSTER_FTOK_BIT(FTOK_KW_STATIC) | BUSTER_FTOK_BIT(FTOK_KW_EXTERN) | BUSTER_FTOK_BIT(FTOK_KW_TYPEDEF) | \
+    BUSTER_FTOK_BIT(FTOK_KW_REGISTER) | BUSTER_FTOK_BIT(FTOK_KW_AUTO) | BUSTER_FTOK_BIT(FTOK_KW_INLINE) | BUSTER_FTOK_BIT(FTOK_KW_NORETURN) | \
+    BUSTER_FTOK_BIT(FTOK_KW_ALIGNAS) | BUSTER_FTOK_BIT(FTOK_KW_ATTRIBUTE) | BUSTER_FTOK_BIT(FTOK_KW_EXTENSION) | \
+    BUSTER_FTOK_BIT(FTOK_KW_BUILTIN_VA_LIST) | BUSTER_FTOK_BIT(FTOK_KW_ATOMIC) | BUSTER_FTOK_BIT(FTOK_KW_COMPLEX) | \
+    BUSTER_FTOK_BIT(FTOK_KW_INT128) | BUSTER_FTOK_BIT(FTOK_KW_FLOAT128) | BUSTER_FTOK_BIT(FTOK_KW_FLOAT16) | \
+    BUSTER_FTOK_BIT(FTOK_KW_THREAD_LOCAL) | BUSTER_FTOK_BIT(FTOK_KW_TYPEOF))
+
+// Check if current token starts a C type specifier / qualifier / storage class. A keyword is a bit test, inline at each
+// caller; an identifier asks whether it names a typedef (sqlite3.c: 50,000 questions a compile, #3581).
+static inline __attribute__((always_inline)) bool fast_cc_is_type_start(const FastCCState* cc, uint32_t at)
 {
-    if (at >= cc->tcount) { return false; }
-    const uint8_t k = cc->tk[at];
-    if (k == FTOK_IDENT)
+    bool starts = false;
+    if (at < cc->tcount)
     {
-        return fast_cc_is_typedef_name(cc, cc->td[at]);
+        const uint32_t k = cc->tk[at];
+        if (k == FTOK_IDENT) { starts = fast_cc_is_typedef_name(cc, cc->td[at]); }
+        else { starts = ((uint32_t)(k >= 64u) & (uint32_t)(BUSTER_FTOK_TYPE_START_KEYWORDS >> ((k - 64u) & 63u))) != 0; }
     }
-    switch (k)
-    {
-        case FTOK_KW_VOID: case FTOK_KW_CHAR: case FTOK_KW_SHORT: case FTOK_KW_INT:
-        case FTOK_KW_LONG: case FTOK_KW_FLOAT: case FTOK_KW_DOUBLE: case FTOK_KW_SIGNED:
-        case FTOK_KW_UNSIGNED: case FTOK_KW_BOOL: case FTOK_KW_STRUCT: case FTOK_KW_UNION:
-        case FTOK_KW_ENUM: case FTOK_KW_CONST: case FTOK_KW_VOLATILE: case FTOK_KW_RESTRICT:
-        case FTOK_KW_STATIC: case FTOK_KW_EXTERN: case FTOK_KW_TYPEDEF: case FTOK_KW_REGISTER:
-        case FTOK_KW_AUTO: case FTOK_KW_INLINE: case FTOK_KW_NORETURN: case FTOK_KW_ALIGNAS:
-        case FTOK_KW_ATTRIBUTE: case FTOK_KW_EXTENSION: case FTOK_KW_BUILTIN_VA_LIST:
-        case FTOK_KW_ATOMIC: case FTOK_KW_COMPLEX: case FTOK_KW_INT128: case FTOK_KW_FLOAT128:
-        case FTOK_KW_FLOAT16: case FTOK_KW_THREAD_LOCAL: case FTOK_KW_TYPEOF:
-            return true;
-        default:
-            return false;
-    }
+    return starts;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -852,7 +902,7 @@ static inline bool fast_cc_literal_plain(const FastCCState* cc, uint32_t literal
 }
 
 // Skip or parse __attribute__((...)) sequence
-static void fast_cc_parse_attributes(FastCCState* cc, FastAttrInfo* attr)
+static __attribute__((noinline)) void fast_cc_parse_attributes_full(FastCCState* cc, FastAttrInfo* attr)
 {
     while (!cc->bailout && (fast_cc_peek(cc) == FTOK_KW_ATTRIBUTE || fast_cc_peek(cc) == FTOK_KW_EXTENSION))
     {
@@ -985,8 +1035,26 @@ static void fast_cc_parse_attributes(FastCCState* cc, FastAttrInfo* attr)
                 }
                 else if (len == 5u && memcmp(s, "alias", 5) == 0 && fast_cc_peek(cc) == FTOK_LPAREN)
                 {
-                    fast_cc_bail(cc, "alias attribute");
-                    break;
+                    // alias("name"), a single literal spelled as its bytes (#3595); the declaration that has it is
+                    // fast_cc_compile_unit's to take, and cc->alias_attributes counts it so that no other place can.
+                    cc->pos += 1u;
+                    bool named = attr != NULL && fast_cc_peek(cc) == FTOK_STR_LIT && fast_cc_peek_at(cc, 1u) == FTOK_RPAREN &&
+                                 fast_cc_literal_plain(cc, fast_cc_data(cc));
+                    if (named)
+                    {
+                        // Any bytes: one that names no declared function or object leaves at fast_cc_alias_targets.
+                        const FastLitSlice sl = cc->pp->lit_slices[fast_cc_data(cc)];
+                        named = sl.length != 0;
+                        attr->alias_name = cc->pp->lit_bytes + sl.offset;
+                        attr->alias_len = sl.length;
+                    }
+                    cc->alias_attributes += 1u;
+                    if (!named)
+                    {
+                        fast_cc_bail(cc, "alias attribute's operand");
+                        break;
+                    }
+                    cc->pos += 2u;
                 }
                 else if (len == 7u && memcmp(s, "section", 7) == 0)
                 {
@@ -1065,6 +1133,14 @@ static void fast_cc_parse_attributes(FastCCState* cc, FastAttrInfo* attr)
             cc->pos += 1u;
         }
     }
+}
+
+// Most declarations and declarators have no __attribute__ and no __extension__: the test is inline, the parser out of
+// line (#3581).
+static inline __attribute__((always_inline)) void fast_cc_parse_attributes(FastCCState* cc, FastAttrInfo* attr)
+{
+    const uint32_t k = fast_cc_peek(cc);
+    if (((uint32_t)(k == FTOK_KW_ATTRIBUTE) | (uint32_t)(k == FTOK_KW_EXTENSION)) != 0) { fast_cc_parse_attributes_full(cc, attr); }
 }
 
 // Parse optional `__asm__("label")` on a declaration (glibc's symbol renaming). The label is its literals joined, as
@@ -1717,8 +1793,33 @@ struct FastDeclSpecs
     uint8_t is_noreturn;
     uint8_t is_long_double;
     uint8_t is_unsupported_type; // __int128, _Float128, _Complex, _Atomic (allowed in unused extern prototypes!)
+    uint8_t written;             // BUSTER_FSPEC_*: the storage classes and function specifiers written (#3599)
     FastAttrInfo attr;
 };
+
+// The storage classes and function specifiers a declaration's specifiers wrote (FastDeclSpecs.written), for the places
+// that refuse some (#3599): a parameter takes register alone, a for's declaration register and auto, a member or a type
+// name none.
+#define BUSTER_FSPEC_TYPEDEF 1u
+#define BUSTER_FSPEC_STATIC 2u
+#define BUSTER_FSPEC_EXTERN 4u
+#define BUSTER_FSPEC_REGISTER 8u
+#define BUSTER_FSPEC_AUTO 16u
+#define BUSTER_FSPEC_INLINE 32u
+#define BUSTER_FSPEC_NORETURN 64u
+#define BUSTER_FSPEC_STORAGE (BUSTER_FSPEC_TYPEDEF | BUSTER_FSPEC_STATIC | BUSTER_FSPEC_EXTERN | BUSTER_FSPEC_REGISTER | BUSTER_FSPEC_AUTO)
+
+// One storage class of a declaration's specifiers, `bit` among BUSTER_FSPEC_STORAGE's, and its keyword read. A second
+// leaves (#3599): clang refuses two, and warns of one written twice.
+static void fast_cc_storage_class(FastCCState* cc, FastDeclSpecs* sp, uint8_t bit)
+{
+    if ((sp->written & BUSTER_FSPEC_STORAGE) != 0)
+    {
+        fast_cc_bail(cc, "two storage classes");
+    }
+    sp->written |= bit;
+    cc->pos += 1u;
+}
 
 // Parse enum { A, B = 5, ... } (strictly leaf, calls fast_cc_const_int_expr only)
 static FastType fast_cc_parse_enum(FastCCState* cc)
@@ -1831,9 +1932,63 @@ struct FastDeclaratorResult
     FastAttrInfo attr;
 };
 
+// The type of a declaration whose specifiers are one keyword of a scalar type, by keyword (64..127), and whether the
+// keyword is one. Char is signed here; -funsigned-char sets its low bit (FTYPE_I8 to FTYPE_U8).
+static const FastType fast_cc_single_keyword_types[64] = {
+    [FTOK_KW_VOID - 64] = FTYPE_VOID,
+    [FTOK_KW_CHAR - 64] = FTYPE_I8 | BUSTER_FTYPE_SCALAR_CHAR,
+    [FTOK_KW_SHORT - 64] = FTYPE_I16,
+    [FTOK_KW_INT - 64] = FTYPE_I32,
+    [FTOK_KW_LONG - 64] = FTYPE_I64 | BUSTER_FTYPE_SCALAR_LONG,
+    [FTOK_KW_FLOAT - 64] = FTYPE_F32,
+    [FTOK_KW_DOUBLE - 64] = FTYPE_F64,
+    [FTOK_KW_SIGNED - 64] = FTYPE_I32,
+    [FTOK_KW_UNSIGNED - 64] = FTYPE_U32,
+    [FTOK_KW_BOOL - 64] = FTYPE_BOOL,
+};
+#define BUSTER_FTOK_SCALAR_KEYWORDS (BUSTER_FTOK_BIT(FTOK_KW_VOID) | BUSTER_FTOK_BIT(FTOK_KW_CHAR) | BUSTER_FTOK_BIT(FTOK_KW_SHORT) | \
+    BUSTER_FTOK_BIT(FTOK_KW_INT) | BUSTER_FTOK_BIT(FTOK_KW_LONG) | BUSTER_FTOK_BIT(FTOK_KW_FLOAT) | BUSTER_FTOK_BIT(FTOK_KW_DOUBLE) | \
+    BUSTER_FTOK_BIT(FTOK_KW_SIGNED) | BUSTER_FTOK_BIT(FTOK_KW_UNSIGNED) | BUSTER_FTOK_BIT(FTOK_KW_BOOL))
+
+// Specifiers of one token, a scalar type's keyword or a typedef's name, before a token that isn't a specifier: 12,500
+// of sqlite3.c's 20,300 declarations and 15,000 of its 18,100 parameters. They give the type alone, as both full
+// parsers' loops and their tables of keyword counts would; the token is taken and the specifiers filled when they are
+// found (#3581).
+static inline __attribute__((always_inline)) bool fast_cc_specs_of_one_token(FastCCState* cc, FastDeclSpecs* out_specs, FastType* out_type)
+{
+    const uint32_t at = cc->pos;
+    uint32_t found = 0;
+    FastType type = FTYPE_I32;
+    if (at + 1u < cc->tcount)
+    {
+        const uint32_t k = cc->tk[at];
+        const uint32_t next = cc->tk[at + 1u];
+        const uint32_t next_specifies = (uint32_t)(next >= 64u) & (uint32_t)(BUSTER_FTOK_TYPE_START_KEYWORDS >> ((next - 64u) & 63u));
+        if (k == FTOK_IDENT)
+        {
+            const uint32_t id = cc->td[at];
+            found = (uint32_t)fast_cc_is_typedef_name(cc, id);
+            if (found != 0) { type = cc->syms[cc->sym_cur[id]].type; }
+        }
+        else
+        {
+            found = (uint32_t)(k >= 64u) & (uint32_t)(BUSTER_FTOK_SCALAR_KEYWORDS >> ((k - 64u) & 63u));
+            type = fast_cc_single_keyword_types[(k - 64u) & 63u] | ((uint32_t)(k == FTOK_KW_CHAR) & (uint32_t)cc->unsigned_char);
+        }
+        found &= (uint32_t)(next_specifies == 0) & (uint32_t)!cc->bailout;
+    }
+    if (found != 0)
+    {
+        if (out_specs != NULL) { *out_specs = (FastDeclSpecs){ .type = type }; }
+        cc->pos = at + 1u;
+        *out_type = type;
+    }
+    return found != 0;
+}
+
 // Level 5: Leaf declaration specifiers (handles scalars, typedefs, enums, attributes, _Alignas, and existing/forward
 // struct/union tags — NEVER calls fast_cc_parse_record_iter so the call graph stays strictly acyclic!).
-static BUSTER_DIRECT_HOT FastType fast_cc_parse_scalar_or_tag_specs(FastCCState* cc, FastDeclSpecs* out_specs)
+static __attribute__((noinline)) BUSTER_DIRECT_HOT FastType fast_cc_parse_scalar_or_tag_specs_full(FastCCState* cc, FastDeclSpecs* out_specs)
 {
     // Filled where the caller reads it: a copy of a record written a field at a time waits on those stores.
     FastDeclSpecs local_specs;
@@ -1847,12 +2002,14 @@ static BUSTER_DIRECT_HOT FastType fast_cc_parse_scalar_or_tag_specs(FastCCState*
     while (cc->pos < cc->tcount && !cc->bailout)
     {
         const uint8_t k = fast_cc_peek(cc);
-        if (k == FTOK_KW_TYPEDEF) { sp->is_typedef = 1u; cc->pos += 1u; }
-        else if (k == FTOK_KW_STATIC) { sp->is_static = 1u; cc->pos += 1u; }
-        else if (k == FTOK_KW_EXTERN) { sp->is_extern = 1u; cc->pos += 1u; }
-        else if (k == FTOK_KW_INLINE) { sp->is_inline = 1u; cc->pos += 1u; }
-        else if (k == FTOK_KW_REGISTER || k == FTOK_KW_AUTO || k == FTOK_KW_EXTENSION) { cc->pos += 1u; }
-        else if (k == FTOK_KW_NORETURN) { sp->is_noreturn = 1u; cc->pos += 1u; }
+        if (k == FTOK_KW_TYPEDEF) { sp->is_typedef = 1u; fast_cc_storage_class(cc, sp, BUSTER_FSPEC_TYPEDEF); }
+        else if (k == FTOK_KW_STATIC) { sp->is_static = 1u; fast_cc_storage_class(cc, sp, BUSTER_FSPEC_STATIC); }
+        else if (k == FTOK_KW_EXTERN) { sp->is_extern = 1u; fast_cc_storage_class(cc, sp, BUSTER_FSPEC_EXTERN); }
+        else if (k == FTOK_KW_INLINE) { sp->is_inline = 1u; sp->written |= BUSTER_FSPEC_INLINE; cc->pos += 1u; }
+        else if (k == FTOK_KW_REGISTER) { fast_cc_storage_class(cc, sp, BUSTER_FSPEC_REGISTER); }
+        else if (k == FTOK_KW_AUTO) { fast_cc_storage_class(cc, sp, BUSTER_FSPEC_AUTO); }
+        else if (k == FTOK_KW_EXTENSION) { cc->pos += 1u; }
+        else if (k == FTOK_KW_NORETURN) { sp->is_noreturn = 1u; sp->written |= BUSTER_FSPEC_NORETURN; cc->pos += 1u; }
         else if (k == FTOK_KW_CONST) { sp->is_const = 1u; cc->pos += 1u; }
         else if (k == FTOK_KW_VOLATILE) { sp->is_volatile = 1u; cc->pos += 1u; }
         else if (k == FTOK_KW_RESTRICT) { cc->pos += 1u; }
@@ -1975,7 +2132,12 @@ static BUSTER_DIRECT_HOT FastType fast_cc_parse_scalar_or_tag_specs(FastCCState*
     else if (saw_long >= 2u) { res = saw_unsigned ? FTYPE_U64 : FTYPE_I64; }
     else if (saw_long == 1u) { res = (saw_unsigned ? FTYPE_U64 : FTYPE_I64) | BUSTER_FTYPE_SCALAR_LONG; }
     else if (saw_unsigned) { res = FTYPE_U32; }
-    else { res = FTYPE_I32; }
+    else
+    {
+        // No type specifier is implicit int, which C99 refused, or C23's auto, whose type is its initializer's (#3599).
+        res = FTYPE_I32;
+        if (saw_int + saw_signed == 0u) { fast_cc_bail(cc, "a declaration without a type specifier"); }
+    }
 
     if (sp->attr.mode_size != 0)
     {
@@ -1994,9 +2156,16 @@ static BUSTER_DIRECT_HOT FastType fast_cc_parse_scalar_or_tag_specs(FastCCState*
     return res;
 }
 
+static inline __attribute__((always_inline)) FastType fast_cc_parse_scalar_or_tag_specs(FastCCState* cc, FastDeclSpecs* out_specs)
+{
+    FastType res = FTYPE_I32;
+    if (!fast_cc_specs_of_one_token(cc, out_specs, &res)) { res = fast_cc_parse_scalar_or_tag_specs_full(cc, out_specs); }
+    return res;
+}
+
 // Level 6: Parse ONE declarator (abstract or named) iteratively with ZERO recursion!
 // Handles nested `(*fp)(int, char*)`, `int *(*a[4])(void)`, `void (*signal(int, void(*)(int)))(int)`, etc.!
-static BUSTER_DIRECT_HOT bool fast_cc_parse_declarator(FastCCState* cc, FastType base_type, bool allow_abstract,
+static __attribute__((noinline)) BUSTER_DIRECT_HOT bool fast_cc_parse_declarator_full(FastCCState* cc, FastType base_type, bool allow_abstract,
                                      FastDeclaratorResult* out_res, bool record_param_names)
 {
     typedef struct DeclGroup DeclGroup;
@@ -2150,6 +2319,10 @@ static BUSTER_DIRECT_HOT bool fast_cc_parse_declarator(FastCCState* cc, FastType
                         }
                         FastDeclSpecs pspecs = { 0 };
                         FastType pt = fast_cc_parse_scalar_or_tag_specs(cc, &pspecs);
+                        if ((pspecs.written & ~BUSTER_FSPEC_REGISTER) != 0)
+                        {
+                            fast_cc_bail(cc, "a parameter's storage class or function specifier");
+                        }
                         if (cc->bailout) { break; }
 
                         // Inline mini-declarator for parameter (handles `*`, `(*fp)(...)`, `[]`, name, `__attribute__`)!
@@ -2211,6 +2384,11 @@ static BUSTER_DIRECT_HOT bool fast_cc_parse_declarator(FastCCState* cc, FastType
                                         if (fast_cc_peek(cc) == FTOK_ELLIPSIS) { fp_var = true; cc->pos += 1u; break; }
                                         FastDeclSpecs fps = { 0 };
                                         FastType fpt = fast_cc_parse_scalar_or_tag_specs(cc, &fps);
+                                        if ((fps.written & ~BUSTER_FSPEC_REGISTER) != 0)
+                                        {
+                                            fast_cc_bail(cc, "a parameter's storage class or function specifier");
+                                        }
+                                        if (cc->bailout) { break; }
                                         while (fast_cc_peek(cc) == FTOK_STAR)
                                         {
                                             cc->pos += 1u;
@@ -2449,6 +2627,39 @@ static BUSTER_DIRECT_HOT bool fast_cc_parse_declarator(FastCCState* cc, FastType
     out_res->param_count = top_param_count;
     out_res->attr = attr;
     return !cc->bailout;
+}
+
+// A name with up to two plain `*` before it and nothing after it that the declarator would take (no `[`, `(`, asm
+// label or attribute): half of sqlite3.c's 23,000 declarators. Its type is the base's pointers, without the full
+// parser's groups and modifier lists (#3581).
+static inline __attribute__((always_inline)) bool fast_cc_parse_declarator(FastCCState* cc, FastType base_type, bool allow_abstract,
+                                                                          FastDeclaratorResult* out_res, bool record_param_names)
+{
+    const uint32_t at = cc->pos;
+    bool ok = false;
+    uint32_t stars = 0;
+    if (at + 4u < cc->tcount)
+    {
+        const uint8_t* const tk = cc->tk;
+        stars = (uint32_t)(tk[at] == FTOK_STAR);
+        stars += (uint32_t)(stars != 0) & (uint32_t)(tk[at + 1u] == FTOK_STAR);
+        const uint32_t name = at + stars;
+        const uint32_t after = tk[name + 1u];
+        const uint32_t plain = (uint32_t)(tk[name] == FTOK_IDENT) & (uint32_t)(after != FTOK_LBRACKET) & (uint32_t)(after != FTOK_LPAREN) &
+                               (uint32_t)(after != FTOK_KW_ASM) & (uint32_t)(after != FTOK_KW_ATTRIBUTE) & (uint32_t)(after != FTOK_KW_EXTENSION) &
+                               (uint32_t)!cc->bailout;
+        if (plain != 0)
+        {
+            FastType type = base_type;
+            for (uint32_t i = 0; i < stars; i += 1) { type = ftype_make_ptr(cc, type); }
+            *out_res = (FastDeclaratorResult){ .type = type, .name_id = cc->td[name] };
+            cc->pos = name + 1u;
+            ok = !cc->bailout;
+            stars = UINT32_MAX;
+        }
+    }
+    if (stars != UINT32_MAX) { ok = fast_cc_parse_declarator_full(cc, base_type, allow_abstract, out_res, record_param_names); }
+    return ok;
 }
 
 // Parse struct/union definition iteratively (supports arbitrarily nested anonymous & named structs/unions!)
@@ -2725,6 +2936,7 @@ static FastType fast_cc_parse_record_iter(FastCCState* cc, bool is_union, bool a
         // Ordinary field declaration inside struct/union
         FastDeclSpecs fspecs = { 0 };
         const FastType fbase = fast_cc_parse_scalar_or_tag_specs(cc, &fspecs);
+        if (fspecs.written != 0) { fast_cc_bail(cc, "a member's storage class or function specifier"); }
         if (cc->bailout) { break; }
         if (fast_cc_peek(cc) == FTOK_SEMI)
         {
@@ -2868,7 +3080,7 @@ static FastType fast_cc_parse_record_iter(FastCCState* cc, bool is_union, bool a
 }
 
 // Level 8: Full declaration specifiers (supports struct/union/enum definitions, storage classes, attributes, _Alignas).
-static BUSTER_DIRECT_HOT FastType fast_cc_parse_decl_specs(FastCCState* cc, FastDeclSpecs* out_specs)
+static __attribute__((noinline)) BUSTER_DIRECT_HOT FastType fast_cc_parse_decl_specs_full(FastCCState* cc, FastDeclSpecs* out_specs)
 {
     // Filled where the caller reads it: a copy of a record written a field at a time waits on those stores.
     FastDeclSpecs local_specs;
@@ -2877,17 +3089,20 @@ static BUSTER_DIRECT_HOT FastType fast_cc_parse_decl_specs(FastCCState* cc, Fast
     uint32_t saw_void = 0, saw_char = 0, saw_short = 0, saw_int = 0, saw_long = 0;
     uint32_t saw_float = 0, saw_double = 0, saw_signed = 0, saw_unsigned = 0, saw_bool = 0;
     bool has_explicit_type = false;
+    bool saw_typeof = false;
     FastType explicit_type = FTYPE_I32;
 
     while (cc->pos < cc->tcount && !cc->bailout)
     {
         const uint8_t k = fast_cc_peek(cc);
-        if (k == FTOK_KW_TYPEDEF) { sp->is_typedef = 1u; cc->pos += 1u; }
-        else if (k == FTOK_KW_STATIC) { sp->is_static = 1u; cc->pos += 1u; }
-        else if (k == FTOK_KW_EXTERN) { sp->is_extern = 1u; cc->pos += 1u; }
-        else if (k == FTOK_KW_INLINE) { sp->is_inline = 1u; cc->pos += 1u; }
-        else if (k == FTOK_KW_REGISTER || k == FTOK_KW_AUTO || k == FTOK_KW_EXTENSION) { cc->pos += 1u; }
-        else if (k == FTOK_KW_NORETURN) { sp->is_noreturn = 1u; cc->pos += 1u; }
+        if (k == FTOK_KW_TYPEDEF) { sp->is_typedef = 1u; fast_cc_storage_class(cc, sp, BUSTER_FSPEC_TYPEDEF); }
+        else if (k == FTOK_KW_STATIC) { sp->is_static = 1u; fast_cc_storage_class(cc, sp, BUSTER_FSPEC_STATIC); }
+        else if (k == FTOK_KW_EXTERN) { sp->is_extern = 1u; fast_cc_storage_class(cc, sp, BUSTER_FSPEC_EXTERN); }
+        else if (k == FTOK_KW_INLINE) { sp->is_inline = 1u; sp->written |= BUSTER_FSPEC_INLINE; cc->pos += 1u; }
+        else if (k == FTOK_KW_REGISTER) { fast_cc_storage_class(cc, sp, BUSTER_FSPEC_REGISTER); }
+        else if (k == FTOK_KW_AUTO) { fast_cc_storage_class(cc, sp, BUSTER_FSPEC_AUTO); }
+        else if (k == FTOK_KW_EXTENSION) { cc->pos += 1u; }
+        else if (k == FTOK_KW_NORETURN) { sp->is_noreturn = 1u; sp->written |= BUSTER_FSPEC_NORETURN; cc->pos += 1u; }
         else if (k == FTOK_KW_CONST) { sp->is_const = 1u; cc->pos += 1u; }
         else if (k == FTOK_KW_VOLATILE) { sp->is_volatile = 1u; cc->pos += 1u; }
         else if (k == FTOK_KW_RESTRICT) { cc->pos += 1u; }
@@ -2945,6 +3160,25 @@ static BUSTER_DIRECT_HOT FastType fast_cc_parse_decl_specs(FastCCState* cc, Fast
             explicit_type = k == FTOK_KW_FLOAT16 ? FTYPE_UNSUP2 : FTYPE_UNSUP16;
             cc->pos += 1u;
         }
+        else if (k == FTOK_KW_TYPEOF && !has_explicit_type && fast_cc_peek_at(cc, 1u) == FTOK_LPAREN &&
+                 fast_cc_peek_at(cc, 2u) == FTOK_IDENT && fast_cc_peek_at(cc, 3u) == FTOK_RPAREN)
+        {
+            // typeof(name) of a declared function, object or typedef name: its type, qualifiers and all, as GNU's
+            // weak_alias(old, new) asks of it (#3592). Any other operand leaves, as before.
+            const uint32_t id = cc->td[cc->pos + 2u];
+            const uint32_t si = id < cc->env_cap ? cc->sym_cur[id] : 0u;
+            const uint8_t kind = si != 0 ? cc->syms[si].kind : (uint8_t)FSYM_NONE;
+            if (kind != FSYM_FUNC && kind != FSYM_GLOBAL && kind != FSYM_LOCAL && kind != FSYM_TYPEDEF)
+            {
+                fast_cc_bail(cc, "unsupported type specifier");
+                break;
+            }
+            has_explicit_type = true;
+            saw_typeof = true;
+            explicit_type = cc->syms[si].type;
+            if (cc->syms[si].is_unsupported) { sp->is_unsupported_type = 1u; }
+            cc->pos += 4u;
+        }
         else if (k == FTOK_KW_ATOMIC || k == FTOK_KW_THREAD_LOCAL || k == FTOK_KW_TYPEOF)
         {
             fast_cc_bail(cc, "unsupported type specifier");
@@ -2976,6 +3210,12 @@ static BUSTER_DIRECT_HOT FastType fast_cc_parse_decl_specs(FastCCState* cc, Fast
         }
     }
 
+    // typeof(name) is the whole type: another type specifier or a mode attribute with it leaves.
+    if (saw_typeof && ((saw_void + saw_char + saw_short + saw_int + saw_long + saw_float + saw_double + saw_signed + saw_unsigned + saw_bool) != 0 ||
+                       sp->attr.mode_size != 0))
+    {
+        fast_cc_bail(cc, "type specifiers beside typeof");
+    }
     FastType res = FTYPE_I32;
     if (has_explicit_type)
     {
@@ -2998,7 +3238,12 @@ static BUSTER_DIRECT_HOT FastType fast_cc_parse_decl_specs(FastCCState* cc, Fast
     else if (saw_long >= 2u) { res = saw_unsigned ? FTYPE_U64 : FTYPE_I64; }
     else if (saw_long == 1u) { res = (saw_unsigned ? FTYPE_U64 : FTYPE_I64) | BUSTER_FTYPE_SCALAR_LONG; }
     else if (saw_unsigned) { res = FTYPE_U32; }
-    else { res = FTYPE_I32; }
+    else
+    {
+        // No type specifier is implicit int, which C99 refused, or C23's auto, whose type is its initializer's (#3599).
+        res = FTYPE_I32;
+        if (saw_int + saw_signed == 0u) { fast_cc_bail(cc, "a declaration without a type specifier"); }
+    }
 
     // Apply __attribute__((__mode__(...))) overrides (used by glibc stdint/math headers!)
     if (sp->attr.mode_size != 0)
@@ -3018,12 +3263,21 @@ static BUSTER_DIRECT_HOT FastType fast_cc_parse_decl_specs(FastCCState* cc, Fast
     return res;
 }
 
+
+static inline __attribute__((always_inline)) FastType fast_cc_parse_decl_specs(FastCCState* cc, FastDeclSpecs* out_specs)
+{
+    FastType res = FTYPE_I32;
+    if (!fast_cc_specs_of_one_token(cc, out_specs, &res)) { res = fast_cc_parse_decl_specs_full(cc, out_specs); }
+    return res;
+}
+
 // Level 8: Full typename parser for casts `(T)`, `sizeof(T)`, `_Alignof(T)`, `offsetof(T, ...)`, `_Generic`, compound literals.
 static FastType fast_cc_parse_typename(FastCCState* cc, bool* out_ok)
 {
     FastDeclSpecs sp = { 0 };
     const FastType base = fast_cc_parse_decl_specs(cc, &sp);
     if (sp.is_unsupported_type) { fast_cc_bail(cc, "unsupported type in typename"); }
+    if (sp.written != 0) { fast_cc_bail(cc, "a type name's storage class or function specifier"); }
     FastDeclaratorResult dr = { 0 };
     const bool ok = !cc->bailout && fast_cc_parse_declarator(cc, base, true, &dr, false);
     if (out_ok != NULL) { *out_ok = ok; }
@@ -3062,10 +3316,11 @@ static bool fast_cc_init_state(FastCCState* cc, FastArena* arena, FastArena* scr
     cc->tag_cur = (uint32_t*)fast_arena_alloc(arena, (uint64_t)cc->env_cap * sizeof(uint32_t), 64);
     cc->syms = (FastSym*)fast_arena_alloc(arena, (uint64_t)cc->sym_cap * sizeof(FastSym), 64);
     cc->undo = (FastScopeUndo*)fast_arena_alloc(arena, (uint64_t)cc->undo_cap * sizeof(FastScopeUndo), 64);
+    cc->aliases = (FastAlias*)fast_arena_alloc(arena, (uint64_t)BUSTER_FALIAS_LIMIT * sizeof(FastAlias), 64);
 
     bool ok = cc->ctypes != NULL && cc->member_ids != NULL && cc->member_info != NULL && cc->member_hash != NULL &&
               cc->param_types != NULL && cc->param_names != NULL && cc->sym_cur != NULL && cc->tag_cur != NULL &&
-              cc->syms != NULL && cc->undo != NULL;
+              cc->syms != NULL && cc->undo != NULL && cc->aliases != NULL;
     if (ok)
     {
         // Reserve index 0 as sentinel in ctypes and syms (member_hash uses key == 0 from zero-filled mmap)
@@ -3096,6 +3351,12 @@ static bool fast_cc_init_state(FastCCState* cc, FastArena* arena, FastArena* scr
         cc->id_builtin_ctz = fast_ident_intern_cstr(&pp->idents, "__builtin_ctz");
         cc->id_builtin_inff = fast_ident_intern_cstr(&pp->idents, "__builtin_inff");
         cc->id_builtin_inf = fast_ident_intern_cstr(&pp->idents, "__builtin_inf");
+        cc->id_builtin_ceil = fast_ident_intern_cstr(&pp->idents, "__builtin_ceil");
+        cc->id_builtin_floor = fast_ident_intern_cstr(&pp->idents, "__builtin_floor");
+        cc->id_builtin_ceilf = fast_ident_intern_cstr(&pp->idents, "__builtin_ceilf");
+        cc->id_builtin_floorf = fast_ident_intern_cstr(&pp->idents, "__builtin_floorf");
+        cc->id_builtin_huge_val = fast_ident_intern_cstr(&pp->idents, "__builtin_huge_val");
+        cc->id_builtin_huge_valf = fast_ident_intern_cstr(&pp->idents, "__builtin_huge_valf");
         cc->id_builtin_nanf = fast_ident_intern_cstr(&pp->idents, "__builtin_nanf");
         cc->id_builtin_nan = fast_ident_intern_cstr(&pp->idents, "__builtin_nan");
         cc->id_builtin_expect = fast_ident_intern_cstr(&pp->idents, "__builtin_expect");
@@ -3115,6 +3376,9 @@ static bool fast_cc_init_state(FastCCState* cc, FastArena* arena, FastArena* scr
         cc->id_atomic_load_n = fast_ident_intern_cstr(&pp->idents, "__atomic_load_n");
         cc->id_atomic_store_n = fast_ident_intern_cstr(&pp->idents, "__atomic_store_n");
         cc->id_main = fast_ident_intern_cstr(&pp->idents, "main");
+        cc->id_assert_fail = fast_ident_intern_cstr(&pp->idents, "__assert_fail");
+        cc->id_void = fast_ident_intern_cstr(&pp->idents, "void");
+        cc->id_pretty_function = fast_ident_intern_cstr(&pp->idents, "__PRETTY_FUNCTION__");
         cc->ro_sign_f32_off = UINT32_MAX;
         cc->ro_sign_f64_off = UINT32_MAX;
         cc->ro_u64_to_f64_off = UINT32_MAX;

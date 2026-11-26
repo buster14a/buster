@@ -71,5 +71,8 @@ jobs:
           # A fuzzing build is an address sanitizer build unless it names another.
           check 'not a sanitizer build' BUSTER_PGO=1 BUSTER_FUZZ_AVAILABLE=1 bash build.sh
           check 'BUSTER_PGO_TRAIN must name a file' BUSTER_PGO=1 BUSTER_PGO_TRAIN=/nonexistent bash build.sh
+          check 'BUSTER_PGO_CORPUS requires BUSTER_PGO=1' BUSTER_PGO_CORPUS=/tmp bash build.sh
+          # A directory, but not tools/ci/fetch-corpus.sh's: no sqlite/sqlite3.c.
+          check 'BUSTER_PGO_CORPUS must name a corpus' BUSTER_PGO=1 BUSTER_PGO_CORPUS=/tmp bash build.sh
           check 'lexer-variant: BUSTER_PGO builds' BUSTER_PGO=1 bash build.sh lexer-variant name=source.c
           exit "$fails"
