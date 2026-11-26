@@ -10650,6 +10650,10 @@ static int run_checker_driver_tests(int argc, char** argv)
             check_test_driver_cleanup_alignment(&test, clang, executable, directory);
             check_test_driver_cleanup_chains(&test, clang, executable, directory);
         }
+        if (!lazy)
+        {
+            check_test_driver_warning_suite(&test, clang, executable, directory, "driver/warnings/cleanup-recovery", true);
+        }
         if (!lazy && check_test_driver_takes_weighing(610))
         {
             check_test_driver_fp_contract(&test, clang, executable, directory);

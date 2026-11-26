@@ -2399,7 +2399,7 @@ static IrType ir_typed_vector_whole(AbiLocation location, uint64_t size, uint8_t
 {
     const bool whole = location.kind == BUSTER_ABI_LOCATION_REGISTERS && location.registers[0] != BUSTER_ABI_REGISTER_NONE &&
                        (location.registers[0] & 0xe0) == BUSTER_ABI_REGISTER_VECTOR && location.registers[1] == BUSTER_ABI_REGISTER_NONE &&
-                       (location.flags & (BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW)) == 0;
+                       (abi_location_flags(location) & (BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW)) == 0;
     const uint32_t width = size == 16 ? 0 : size == 32 ? 1 : size == 64 ? 2 : 3;
     const IrType types[4] = { IR_V4I32, IR_V8I32, IR_V16I32, IR_VOID };
     return whole && width < 3 && ((allowed >> width) & 1) != 0 ? types[width] : IR_VOID;

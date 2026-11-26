@@ -182,13 +182,16 @@ static void interpreter_native_store(uint8_t* bytes, uint8_t* bytes_defined, con
 // location's registers (a vector register's upper half), a slot past the area.
 static bool interpreter_native_put(const InterpreterNativeArea* area, AbiLocation location, const uint8_t* bytes, const uint8_t* defined, uint64_t size)
 {
+    const uint8_t flags = abi_location_flags(location);
+    const bool prefix_valid = size <= UINT32_MAX && abi_location_prefix_valid(location, (uint32_t)size);
+    size = size <= UINT32_MAX ? abi_location_size(location, (uint32_t)size) : size;
     bool result = location.kind == BUSTER_ABI_LOCATION_IGNORE;
-    if (location.kind == BUSTER_ABI_LOCATION_STACK)
+    if (prefix_valid && location.kind == BUSTER_ABI_LOCATION_STACK)
     {
         // The whole value at its offset; or a part alone in its 8-byte slot (an eightbyte at a time, #765), the value's
         // high eightbyte (HIGH) or its low one (LOW), the other one not passed.
-        const bool high = (location.flags & BUSTER_ABI_FLAG_HIGH) != 0;
-        const bool low = (location.flags & BUSTER_ABI_FLAG_LOW) != 0;
+        const bool high = (flags & BUSTER_ABI_FLAG_HIGH) != 0;
+        const bool low = (flags & BUSTER_ABI_FLAG_LOW) != 0;
         const uint64_t first = high ? 8 : 0;
         const uint64_t take = !high && !low ? size : first < size ? (size - first < 8 ? size - first : 8) : 0;
         result = !(high && low) && take != 0 && location.stack_offset <= area->stack_capacity && take <= area->stack_capacity - location.stack_offset;
@@ -198,9 +201,9 @@ static bool interpreter_native_put(const InterpreterNativeArea* area, AbiLocatio
                                      defined == 0 ? 0 : defined + first, take);
         }
     }
-    else if (location.kind == BUSTER_ABI_LOCATION_REGISTERS || location.kind == BUSTER_ABI_LOCATION_SPLIT)
+    else if (prefix_valid && (location.kind == BUSTER_ABI_LOCATION_REGISTERS || location.kind == BUSTER_ABI_LOCATION_SPLIT))
     {
-        const uint64_t first = (location.flags & BUSTER_ABI_FLAG_HIGH) != 0 ? 8 : 0;
+        const uint64_t first = (flags & BUSTER_ABI_FLAG_HIGH) != 0 ? 8 : 0;
         const bool split = location.kind == BUSTER_ABI_LOCATION_SPLIT;
         result = size <= first + 16 && (size <= first + 8 || location.registers[1] != BUSTER_ABI_REGISTER_NONE || split);
         for (uint32_t part = 0; result && part < 2; part += 1)
@@ -227,7 +230,7 @@ static bool interpreter_native_put(const InterpreterNativeArea* area, AbiLocatio
             }
         }
     }
-    return result;
+    return result && prefix_valid;
 }
 
 // Whether the bridge captures every part of an aggregate result in registers: rax, rdx and xmm0's and xmm1's low
@@ -592,7 +595,7 @@ static bool interpreter_native_invoke(const InterpreterNativeRequest* request, I
             const bool wide = type == IR_I128 || type == IR_F80;
             const uint32_t size = abi != 0 ? request->passed[i].size : 0;
             const AbiLocation location = abi != 0 ? request->passed[i].location : interpreter_native_place(type, &integers, &vectors, &stack_bytes, &stack_alignment);
-            const bool sign = abi != 0 ? (location.flags & BUSTER_ABI_FLAG_SIGN) != 0 : request->extensions != 0 && request->extensions[i] != 0;
+            const bool sign = abi != 0 ? (abi_location_flags(location) & BUSTER_ABI_FLAG_SIGN) != 0 : request->extensions != 0 && request->extensions[i] != 0;
             ok = interpreter_native_type(type, false);
             ok = ok && (abi != 0 || request->extensions != 0 || (type != IR_I8 && type != IR_I16));
             ok = ok && (!request->variadic || i < request->named_count || (type != IR_F32 && (type < IR_I1 || type > IR_I16)));

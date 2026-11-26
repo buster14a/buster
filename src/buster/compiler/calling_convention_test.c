@@ -2837,6 +2837,172 @@ static void abi_test_kernel_rules(AbiTestTally* tally)
     }
 }
 
+// Transparent members' values keep their own payload when their union is larger (#1844). Clang 23.1.4's IR and
+// assembly give these locations: 32/64-byte vectors and 24/40/48/56-byte SSE payloads, atomic scalars and atomic vectors;
+// registers, exhausted registers, named variadic values and unnamed byval copies. Both assignment routes see each.
+static void abi_test_transparent_values(AbiTestTally* tally)
+{
+    for (uint32_t width = 16; width <= 64; width *= 2)
+    {
+        AbiTestTables tables;
+        if (abi_test_expect(tally, abi_test_tables_open(&tables, 4096), "fixtures", "transparent values: the tables can't be made"))
+        {
+            TypeTable* table = &tables.types.table;
+            AbiTestBuilder builder = { .table = table, .next_name = 40000, .vector_bytes = width };
+            bool made = abi_test_tables_start(&tables, width);
+            const uint32_t sizes[] = { 32, 64, 24, 40, 48, 56, 8, 8, 16, 32, 64, 16 };
+            TypeId members[BUSTER_ARRAY_LENGTH(sizes)];
+            TypeId unions[2 * BUSTER_ARRAY_LENGTH(sizes)];
+            const TypeId vector16 = abi_test_vector(&builder, BUSTER_TYPE_LONG, 16);
+            const TypeId vector32 = abi_test_vector(&builder, BUSTER_TYPE_LONG, 32);
+            const TypeId vector64 = abi_test_vector(&builder, BUSTER_TYPE_LONG, 64);
+            for (uint32_t i = 0; i < 6; i += 1)
+            {
+                TypeMember fields[2];
+                fields[0] = abi_test_member(&builder, i == 0 ? vector32 : i == 1 ? vector64 : vector16);
+                fields[1] = abi_test_member(&builder, type_array(table, BUSTER_TYPE_CHAR, sizes[i]));
+                members[i] = abi_test_record(&builder, i < 2 ? BUSTER_TYPE_KIND_STRUCT : BUSTER_TYPE_KIND_UNION, fields, i < 2 ? 1 : 2, i >= 2, 0);
+            }
+            members[6] = type_atomic(table, BUSTER_TYPE_LONG);
+            members[7] = type_atomic(table, BUSTER_TYPE_DOUBLE);
+            members[8] = type_atomic(table, BUSTER_TYPE_LONG_DOUBLE);
+            members[9] = type_atomic(table, vector32);
+            members[10] = type_atomic(table, vector64);
+            members[11] = type_atomic(table, BUSTER_TYPE_INT128);
+            for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(unions); i += 1)
+            {
+                const bool packed = i >= BUSTER_ARRAY_LENGTH(members);
+                const TypeMember member = abi_test_member(&builder, members[i % BUSTER_ARRAY_LENGTH(members)]);
+                unions[i] = abi_test_record(&builder, BUSTER_TYPE_KIND_UNION, &member, 1, packed, packed ? 2 : 8);
+                made &= unions[i] != 0 && type_mark_transparent_union(table, unions[i]).status == TYPE_TRANSPARENT_UNION_APPLIED;
+            }
+            abi_test_expect(tally, made, "fixtures", "transparent values: the fixtures can't be made");
+            if (made)
+            {
+                abi_classify_all(&tables.abi, table);
+                for (uint32_t u = 0; u < BUSTER_ARRAY_LENGTH(unions); u += 1)
+                {
+                    const uint32_t i = u % BUSTER_ARRAY_LENGTH(members);
+                    const uint32_t own = u < BUSTER_ARRAY_LENGTH(members) ? 128 : sizes[i];
+                    // LLVM splits an atomic vector wider than the target's register: the existing named refusal.
+                    if ((i == 9 || i == 10) && sizes[i] > width)
+                    {
+                        continue;
+                    }
+                    const uint32_t entry = tables.abi.transparent[unions[u] >> BUSTER_TYPE_INDEX_SHIFT];
+                    abi_test_expect(tally, entry == members[i] >> BUSTER_TYPE_INDEX_SHIFT, "fixtures", "transparent values: the union retains its member");
+                    for (uint32_t mode = 0; mode < 4; mode += 1)
+                    {
+                        const bool exhausted = mode == 2;
+                        const bool variadic = mode == 1 || mode == 3;
+                        const uint32_t at = exhausted ? 14 : mode == 3 ? 1 : 0;
+                        const uint32_t count = at + 2;
+                        TypeId arguments[16];
+                        for (uint32_t p = 0; p < at; p += 1)
+                        {
+                            arguments[p] = exhausted && p >= 6 ? BUSTER_TYPE_DOUBLE : BUSTER_TYPE_LONG;
+                        }
+                        arguments[at] = unions[u];
+                        arguments[at + 1] = BUSTER_TYPE_LONG;
+                        const TypeId result = BUSTER_TYPE_VOID;
+                        const uint32_t named = mode == 3 ? 1 : count;
+                        const uint8_t is_variadic = variadic;
+                        const AbiSignatures signature = { .results = &result, .counts = &count, .named = &named, .variadic = &is_variadic, .count = 1, .arguments = arguments };
+                        const bool record_memory = i < 6 && (sizes[i] > width || exhausted || mode == 3);
+                        const bool value_stack = i == 8 || exhausted || (variadic && sizes[i] > 16);
+                        const bool stacked = record_memory || value_stack;
+                        const uint32_t slot = record_memory ? own : sizes[i] <= 16 ? sizes[i] : sizes[i] <= 32 ? 32 : 64;
+                        const uint8_t flags = record_memory || own <= sizes[i] ? 0 : i == 11 ? BUSTER_ABI_FLAG_FIRST : (uint8_t)(BUSTER_ABI_FLAG_PREFIX | sizes[i]);
+                        const uint8_t first = stacked ? BUSTER_ABI_REGISTER_NONE : i == 6 || i == 11 ? (mode == 3 ? BUSTER_ABI_RSI : BUSTER_ABI_RDI) : BUSTER_ABI_REGISTER_VECTOR;
+                        const uint8_t second = !stacked && i == 11 ? (mode == 3 ? BUSTER_ABI_RDX : BUSTER_ABI_RSI) : BUSTER_ABI_REGISTER_NONE;
+                        for (uint32_t route = 0; route < 2; route += 1)
+                        {
+                            AbiLocation locations[16];
+                            AbiCall call;
+                            if (route == 0)
+                            {
+                                abi_assign(&tables.abi, signature, locations, &call);
+                            }
+                            else
+                            {
+                                abi_test_assign_starved(&tables.abi, signature, locations, &call);
+                            }
+                            const AbiLocation got = locations[at];
+                            const bool location = got.kind == (stacked ? BUSTER_ABI_LOCATION_STACK : BUSTER_ABI_LOCATION_REGISTERS) && got.registers[0] == first &&
+                                                  got.registers[1] == second && got.flags == flags && got.stack_offset == 0;
+                            const bool stack = call.stack_bytes == (stacked ? slot : 0) + (exhausted ? 8 : 0) && (!exhausted || locations[at + 1].stack_offset == slot);
+                            char detail[256];
+                            snprintf(detail, sizeof(detail), "transparent values: width %u member %u own %u mode %u route %u: kind %u registers %02x/%02x flags %02x stack %u/%u", width,
+                                     i, own, mode, route, got.kind, got.registers[0], got.registers[1], got.flags, got.stack_offset, call.stack_bytes);
+                            abi_test_expect(tally, location && stack, "fixtures", detail);
+                        }
+                    }
+                }
+            }
+            abi_test_tables_close(&tables);
+        }
+    }
+}
+
+// A GROWN member's LLVM copy is 24 bytes, but getIndirectResult passes its one-byte C value as i8. A union of 32
+// still needs FIRST for that general register or LOW slot; the wide-vector prefix rule must not drop it (#1844).
+static void abi_test_transparent_grown_prefix(AbiTestTally* tally)
+{
+    AbiTestTables tables;
+    if (abi_test_expect(tally, abi_test_tables_open(&tables, 128), "fixtures", "transparent GROWN prefix: the tables can't be made"))
+    {
+        TypeTable* table = &tables.types.table;
+        AbiTestBuilder builder = { .table = table, .next_name = 41000, .vector_bytes = 32 };
+        TypeMember field = abi_test_member(&builder, type_array(table, BUSTER_TYPE_INT128, 0));
+        const TypeId empty = abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, &field, 1, false, 0);
+        field = abi_test_member(&builder, type_atomic(table, empty));
+        const TypeId grown = abi_test_record(&builder, BUSTER_TYPE_KIND_STRUCT, &field, 1, true, 0);
+        field = abi_test_member(&builder, grown);
+        const TypeId own = abi_test_record(&builder, BUSTER_TYPE_KIND_UNION, &field, 1, false, 6);
+        const TypeId atomic_long = type_atomic(table, BUSTER_TYPE_LONG);
+        const bool made = own != 0 && atomic_long != 0 && type_mark_transparent_union(table, own).status == TYPE_TRANSPARENT_UNION_APPLIED &&
+                          abi_test_tables_start(&tables, 32);
+        abi_test_expect(tally, made, "fixtures", "transparent GROWN prefix: the fixtures can't be made");
+        if (made)
+        {
+            abi_classify_all(&tables.abi, table);
+            const uint32_t index = grown >> BUSTER_TYPE_INDEX_SHIFT;
+            abi_test_expect(tally, tables.abi.stack_bytes[index] == 24 && (tables.abi.pass[index] & BUSTER_ABI_PASS_GROWN) != 0,
+                            "fixtures", "transparent GROWN prefix: the member has a 24-byte LLVM copy");
+            const TypeId arguments[] = {
+                BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, atomic_long, BUSTER_TYPE_INT128, own, BUSTER_TYPE_LONG,
+                BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, BUSTER_TYPE_LONG, own, BUSTER_TYPE_LONG,
+            };
+            const TypeId results[] = { BUSTER_TYPE_VOID, BUSTER_TYPE_VOID };
+            const uint32_t counts[] = { 8, 9 };
+            const uint8_t variadic[] = { 0, 0 };
+            const AbiSignatures signatures = { .results = results, .counts = counts, .named = counts, .variadic = variadic, .count = 2, .arguments = arguments };
+            for (uint32_t route = 0; route < 2; route += 1)
+            {
+                AbiLocation locations[BUSTER_ARRAY_LENGTH(arguments)];
+                AbiCall calls[BUSTER_ARRAY_LENGTH(counts)];
+                if (route == 0)
+                {
+                    abi_assign(&tables.abi, signatures, locations, calls);
+                }
+                else
+                {
+                    abi_test_assign_starved(&tables.abi, signatures, locations, calls);
+                }
+                const AbiLocation reg = locations[6];
+                const AbiLocation slot = locations[15];
+                abi_test_expect(tally, reg.kind == BUSTER_ABI_LOCATION_REGISTERS && reg.registers[0] == BUSTER_ABI_R9 &&
+                                reg.registers[1] == BUSTER_ABI_REGISTER_NONE && reg.flags == BUSTER_ABI_FLAG_FIRST && calls[0].stack_bytes == 24 && locations[7].stack_offset == 16,
+                                "fixtures", "transparent GROWN prefix: i8 in r9 keeps FIRST");
+                abi_test_expect(tally, slot.kind == BUSTER_ABI_LOCATION_STACK && slot.stack_offset == 8 && slot.flags == (BUSTER_ABI_FLAG_FIRST | BUSTER_ABI_FLAG_LOW) &&
+                                calls[1].stack_bytes == 24 && locations[16].stack_offset == 16,
+                                "fixtures", "transparent GROWN prefix: i8 on the stack keeps FIRST and LOW");
+            }
+        }
+        abi_test_tables_close(&tables);
+    }
+}
+
 // The walk without scratch memory for its stack (abi_wide_alignment): with the thread's first scratch arena replaced by
 // one of `room` bytes, from 64 up, 512 more at a time, until both paths' walks have room, every classifiable type must be
 // classified all the same (none waiting forever), and an _Atomic of a struct of no size that an array of none of a
@@ -4190,7 +4356,7 @@ static bool abi_test_builtin_rows(void)
                     reference.length = 64;
                     AbiTable got = { 0 };
                     AbiTable oracle = { 0 };
-                    const bool valid = requested >= view.types.count && requested <= view.types.capacity &&
+                    const bool valid = requested >= view.types.count && requested <= BUSTER_TYPE_MAX_INDEX + 1u &&
                                        (widths[w] == 16 || widths[w] == 32 || widths[w] == 64);
                     const bool initialized = abi_initialize_types(&got, &actual, &view, widths[w], requested);
                     abi_test_expect(&tally, initialized == valid, "builtins", "prefix/count/width acceptance matches the contract");
@@ -4611,6 +4777,8 @@ static bool abi_test_fixtures(void)
     abi_test_ordering(&tally);
     abi_test_short_scratch(&tally);
     abi_test_kernel_rules(&tally);
+    abi_test_transparent_values(&tally);
+    abi_test_transparent_grown_prefix(&tally);
     abi_test_reversed_chain(&tally);
     abi_test_shared_records(&tally);
     abi_test_char_signedness(&tally);

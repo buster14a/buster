@@ -176,8 +176,8 @@ static bool check_test_cleanup_diagnostics(const char* text, char* lines, uint64
 
 // clang's -Walign-mismatch of a cleanup's call (#1844): a pointer parameter more aligned than the variable's type, an
 // aligned(1) typedef's among them, before the parameter's type's error at the same place, and under its options; whole
-// diagnostics against clang's, with the exit status, by both paths of -fsyntax-only. (After a unit's first error, the
-// driver's later rounds give its errors without the warnings beside them, which these leave out.)
+// diagnostics against clang's, with the exit status, by both paths of -fsyntax-only. The cleanup-recovery runtime
+// catalog also checks later errors and their adjacent warnings through the shared full-output driver harness.
 static void check_test_driver_cleanup_alignment(CheckTest* test, const char* clang, const char* executable, const char* directory)
 {
     static const struct
