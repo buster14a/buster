@@ -1375,6 +1375,7 @@ static InterpreterStatus interpreter_typed_enter(const Tier0Function* function, 
 {
     const uint64_t mark = arena->length;
     const uint32_t local_count = function->local_count;
+    const bool check_undefined = runtime->check_undefined;
     InterpreterStatus result = count == function->parameter_count && (function->incoming_variadic == 0 || incoming != 0) ? INTERPRETER_OK : INTERPRETER_INVALID;
     for (uint32_t l = 0; result == INTERPRETER_OK && l < local_count; l += 1)
     {
@@ -1406,8 +1407,8 @@ static InterpreterStatus interpreter_typed_enter(const Tier0Function* function, 
             break;
         }
         uint8_t* bytes = storage ? arena_push(arena, size, UINT64_C(1) << alignment) : (uint8_t*)&locals[index];
-        uint8_t* initialized = storage ? arena_push(arena, size, 1) : defined + (uint64_t)index * sizeof(InterpreterValue);
-        if (bytes == 0 || initialized == 0)
+        uint8_t* initialized = check_undefined ? (storage ? arena_push(arena, size, 1) : defined + (uint64_t)index * sizeof(InterpreterValue)) : 0;
+        if (bytes == 0 || (check_undefined && initialized == 0))
         {
             result = INTERPRETER_RESOURCE;
         }
@@ -1419,7 +1420,10 @@ static InterpreterStatus interpreter_typed_enter(const Tier0Function* function, 
             {
                 memset(bytes, 0, size);
                 locals[index] = (InterpreterValue){ .low = (uintptr_t)bytes + named };
-                memset(initialized, 0, size);
+                if (initialized != 0)
+                {
+                    memset(initialized, 0, size);
+                }
             }
             else
             {
@@ -1427,16 +1431,19 @@ static InterpreterStatus interpreter_typed_enter(const Tier0Function* function, 
                 // each that depend on the local: every call sets its locals up, and a sanitizer's build makes a memset,
                 // which the compiler makes of constant words, a call into its runtime (#2758).
                 const InterpreterValue initial = l < count ? interpreter_typed_value(function->local_classes[l], arguments[l]) : (InterpreterValue){ 0 };
-                const uint64_t defined_bytes = l < count ? interpreter_typed_bytes(function->local_classes[l]) : 0;
-                const uint64_t ones = UINT64_C(0x0101010101010101);
-                const uint64_t low = defined_bytes >= 8 ? ones : defined_bytes == 0 ? 0 : ones >> (64 - 8 * defined_bytes);
-                const uint64_t high = defined_bytes > 8 ? ones >> (8 * (16 - defined_bytes)) : 0;
                 locals[index].low = initial.low;
                 locals[index].high = initial.high;
-                memcpy(initialized, &low, sizeof(low));
-                memcpy(initialized + sizeof(low), &high, sizeof(high));
+                if (initialized != 0)
+                {
+                    const uint64_t defined_bytes = l < count ? interpreter_typed_bytes(function->local_classes[l]) : 0;
+                    const uint64_t ones = UINT64_C(0x0101010101010101);
+                    const uint64_t low = defined_bytes >= 8 ? ones : defined_bytes == 0 ? 0 : ones >> (64 - 8 * defined_bytes);
+                    const uint64_t high = defined_bytes > 8 ? ones >> (8 * (16 - defined_bytes)) : 0;
+                    memcpy(initialized, &low, sizeof(low));
+                    memcpy(initialized + sizeof(low), &high, sizeof(high));
+                }
             }
-            if (!interpreter_memory_add(runtime, bytes + named, size - named, initialized + named, true, owner))
+            if (!interpreter_memory_add(runtime, bytes + named, size - named, initialized != 0 ? initialized + named : 0, true, owner))
             {
                 result = INTERPRETER_RESOURCE;
             }
@@ -1560,10 +1567,12 @@ static bool interpreter_typed_run(const InterpreterProgram* program, SymbolId en
         stack = BUSTER_ARENA_PUSH_ARRAY(scratch, InterpreterValue, limits.max_values);
         classes = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, limits.max_values);
         locals = arena_push(scratch, (uint64_t)limits.max_locals * sizeof(InterpreterValue), sizeof(InterpreterValue));
-        defined = BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)limits.max_locals * sizeof(InterpreterValue));
+        // No byte-definedness observer runs in an unchecked execution. Keep every local's storage and registration,
+        // but omit its map, as dynamic stack and heap storage already do (#2758).
+        defined = limits.check_undefined ? BUSTER_ARENA_PUSH_ARRAY(scratch, uint8_t, (uint64_t)limits.max_locals * sizeof(InterpreterValue)) : 0;
         runtime.memories = BUSTER_ARENA_PUSH_ARRAY(scratch, InterpreterMemory, limits.max_memories);
         symbols = BUSTER_ARENA_PUSH_ARRAY(scratch, InterpreterTypedSymbol, UINT64_C(1) << BUSTER_INTERPRETER_TYPED_SYMBOLS_LOG2);
-        if (frames == 0 || stack == 0 || classes == 0 || locals == 0 || defined == 0 || runtime.memories == 0 || symbols == 0)
+        if (frames == 0 || stack == 0 || classes == 0 || locals == 0 || (limits.check_undefined && defined == 0) || runtime.memories == 0 || symbols == 0)
         {
             result->status = INTERPRETER_RESOURCE;
         }

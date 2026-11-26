@@ -354,6 +354,7 @@ static InterpreterStatus ir_interpreter_frame(IrInterpreterFrame* frame, const I
 {
     const IrFunction* function = program->functions[function_index].function;
     const uint64_t mark = arena->length;
+    const bool check_undefined = runtime->check_undefined;
     InterpreterStatus status = INTERPRETER_OK;
     IrCheck verified = { .error = IR_ERROR_STRUCTURE };
     if (function != 0)
@@ -436,8 +437,8 @@ static InterpreterStatus ir_interpreter_frame(IrInterpreterFrame* frame, const I
         uint8_t* overflow_bytes = 0;
         uint8_t* overflow_defined = 0;
         uint64_t overflow_capacity = 0;
-        // The slots' bytes and their defined bytes, each pushed after the one before, cleared at once past the loop:
-        // one memset a frame rather than two a slot (#2758).
+        // The slots' bytes and, only when checked, their defined bytes, cleared at once past the loop. An unchecked
+        // run still starts with zero payloads, but needs no maps for its stores to maintain (#2758).
         uint8_t* const slots_begin = (uint8_t*)arena->base + arena->length;
         for (uint32_t s = 0; s < function->slot_count && status == INTERPRETER_OK; s += 1)
         {
@@ -450,15 +451,15 @@ static InterpreterStatus ir_interpreter_frame(IrInterpreterFrame* frame, const I
             const uint64_t size = overflow ? incoming->stack_bytes : slot.size;
             const uint64_t named = overflow ? function->incoming.stack_bytes : 0;
             uint8_t* bytes = arena_push(arena, size, overflow ? UINT64_C(1) << incoming->stack_alignment_log2 : slot.alignment);
-            uint8_t* defined = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, size);
-            if (bytes == 0 || defined == 0)
+            uint8_t* defined = check_undefined ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, size) : 0;
+            if (bytes == 0 || (check_undefined && defined == 0))
             {
                 status = INTERPRETER_RESOURCE;
             }
             else
             {
                 frame->slots[s] = (uintptr_t)bytes + named;
-                const bool added = interpreter_memory_add(runtime, bytes + named, size - named, defined + named, true, owner);
+                const bool added = interpreter_memory_add(runtime, bytes + named, size - named, defined != 0 ? defined + named : 0, true, owner);
                 if (!added)
                 {
                     status = INTERPRETER_RESOURCE;
@@ -490,17 +491,19 @@ static InterpreterStatus ir_interpreter_frame(IrInterpreterFrame* frame, const I
                 .stack_capacity = overflow_capacity,
             };
             // Anchors the function doesn't have take nothing: their bytes go to scratch the frame releases.
-            uint8_t* scratch = arena_push(arena, (uint64_t)BUSTER_ABI_SAVE_AREA_BYTES * 2 + incoming->stack_bytes * 2, 16);
+            const uint64_t columns = check_undefined ? 2 : 1;
+            const uint64_t save_extent = (uint64_t)BUSTER_ABI_SAVE_AREA_BYTES * columns;
+            uint8_t* scratch = arena_push(arena, save_extent + incoming->stack_bytes * columns, 16);
             status = scratch == 0 ? INTERPRETER_RESOURCE : INTERPRETER_OK;
             if (status == INTERPRETER_OK && anchors.registers == 0)
             {
                 anchors.registers = scratch;
-                anchors.registers_defined = scratch + BUSTER_ABI_SAVE_AREA_BYTES;
+                anchors.registers_defined = check_undefined ? scratch + BUSTER_ABI_SAVE_AREA_BYTES : 0;
             }
             if (status == INTERPRETER_OK && anchors.stack == 0)
             {
-                anchors.stack = scratch + BUSTER_ABI_SAVE_AREA_BYTES * 2;
-                anchors.stack_defined = anchors.stack + incoming->stack_bytes;
+                anchors.stack = scratch + save_extent;
+                anchors.stack_defined = check_undefined ? anchors.stack + incoming->stack_bytes : 0;
                 anchors.stack_capacity = incoming->stack_bytes;
             }
             if (status == INTERPRETER_OK)
@@ -554,6 +557,7 @@ static inline __attribute__((always_inline)) IrCall ir_interpreter_unchained(con
 static InterpreterStatus ir_interpreter_arguments(const IrFunction* function, IrCall call, uint32_t skipped, const IrFunction* target, const InterpreterValue* passed, const uint16_t* types, uint64_t destination, uint32_t owner, InterpreterRuntime* runtime, Arena* arena, InterpreterValue* parameters, IrInterpreterIncoming* incoming)
 {
     const IrAbiCall* records = call.abi != 0 ? &function->abi_calls[call.abi - 1] : 0;
+    const bool check_undefined = runtime->check_undefined;
     // The arguments' records past a static chain's (ir_interpreter_unchained's `skipped`).
     const uint32_t records_first = records != 0 ? records->passed + skipped : 0;
     const uint32_t own = target->parameter_passed;
@@ -603,12 +607,15 @@ static InterpreterStatus ir_interpreter_arguments(const IrFunction* function, Ir
             // aggregate is 16 bytes at most, a stack argument's offset its alignment's multiple); an IGNOREd aggregate's
             // undefined.
             uint8_t* bytes = arena_push(arena, parameter.size, UINT64_C(1) << (alignment_log2 > 6 ? alignment_log2 : 6));
-            uint8_t* defined = BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, parameter.size);
-            status = bytes == 0 || defined == 0 ? INTERPRETER_RESOURCE : INTERPRETER_OK;
+            uint8_t* defined = check_undefined ? BUSTER_ARENA_PUSH_ARRAY(arena, uint8_t, parameter.size) : 0;
+            status = bytes == 0 || (check_undefined && defined == 0) ? INTERPRETER_RESOURCE : INTERPRETER_OK;
             if (status == INTERPRETER_OK)
             {
                 memset(bytes, 0, parameter.size);
-                memset(defined, 0, parameter.size);
+                if (defined != 0)
+                {
+                    memset(defined, 0, parameter.size);
+                }
                 status = interpreter_memory_add(runtime, bytes, parameter.size, defined, true, owner) ? INTERPRETER_OK : INTERPRETER_RESOURCE;
             }
             if (status == INTERPRETER_OK && parameter.location.kind != BUSTER_ABI_LOCATION_IGNORE)

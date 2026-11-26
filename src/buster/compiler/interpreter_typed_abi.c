@@ -40,6 +40,7 @@ static bool interpreter_typed_native(const InterpreterNativeRequest* request, co
 
 static InterpreterStatus interpreter_typed_variadic(const Tier0Function* function, const InterpreterTypedIncoming* incoming, InterpreterValue* locals, uint32_t base, InterpreterRuntime* runtime, Arena* arena)
 {
+    const bool check_undefined = runtime->check_undefined;
     const Tier0Function* caller = incoming->caller;
     const AbiCall call = caller->calls[incoming->call];
     const AbiCall named = *function->incoming_variadic;
@@ -73,15 +74,15 @@ static InterpreterStatus interpreter_typed_variadic(const Tier0Function* functio
     if (status == INTERPRETER_OK && area.registers == 0)
     {
         area.registers = arena_push(arena, BUSTER_ABI_SAVE_AREA_BYTES, 16);
-        area.registers_defined = arena_push(arena, BUSTER_ABI_SAVE_AREA_BYTES, 1);
-        status = area.registers != 0 && area.registers_defined != 0 ? INTERPRETER_OK : INTERPRETER_RESOURCE;
+        area.registers_defined = check_undefined ? arena_push(arena, BUSTER_ABI_SAVE_AREA_BYTES, 1) : 0;
+        status = area.registers != 0 && (!check_undefined || area.registers_defined != 0) ? INTERPRETER_OK : INTERPRETER_RESOURCE;
     }
     if (status == INTERPRETER_OK && area.stack == 0)
     {
         area.stack = arena_push(arena, call.stack_bytes, UINT64_C(1) << call.stack_alignment_log2);
-        area.stack_defined = arena_push(arena, call.stack_bytes, 1);
+        area.stack_defined = check_undefined ? arena_push(arena, call.stack_bytes, 1) : 0;
         area.stack_capacity = call.stack_bytes;
-        status = area.stack != 0 && area.stack_defined != 0 ? INTERPRETER_OK : INTERPRETER_RESOURCE;
+        status = area.stack != 0 && (!check_undefined || area.stack_defined != 0) ? INTERPRETER_OK : INTERPRETER_RESOURCE;
     }
     if (status == INTERPRETER_OK)
     {
@@ -123,7 +124,7 @@ static InterpreterStatus interpreter_typed_variadic(const Tier0Function* functio
         const InterpreterValue value = incoming->values[a];
         const uint8_t* bytes = (const uint8_t*)&value;
         const uint8_t* defined = 0;
-        uint8_t scalar_defined[16] = { 0 };
+        uint8_t scalar_defined[16];
         uint32_t extent = tier0_class_int128(caller->argument_classes[index]) || caller->argument_classes[index] == BUSTER_TYPED_CLASS_F80 ? 16 : 8;
         if (size != 0)
         {
@@ -135,8 +136,9 @@ static InterpreterStatus interpreter_typed_variadic(const Tier0Function* functio
             defined = memory != 0 && memory->defined != 0 ? memory->defined + offset : 0;
             extent = size;
         }
-        else
+        else if (check_undefined)
         {
+            memset(scalar_defined, 0, sizeof(scalar_defined));
             memset(scalar_defined, 1, interpreter_typed_bytes(caller->argument_classes[index]));
             defined = scalar_defined;
         }

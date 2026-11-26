@@ -367,7 +367,7 @@ static void interpreter_test_memory(InterpreterTestTally* tally, Arena* scratch)
     InterpreterOptions options = interpreter_default_options();
     options.check_undefined = false;
     result = interpreter_test_run(&function, scratch, &options);
-    interpreter_test_expect(tally, result.status == INTERPRETER_OK, "undefined checking can be disabled");
+    interpreter_test_expect(tally, result.status == INTERPRETER_OK && result.value.low == 0 && result.value.high == 0, "undefined checking can be disabled without changing an unwritten local's zero value");
     const uint8_t load_kinds[] = {
         BUSTER_TYPED_CONST,
         BUSTER_TYPED_LOAD,
@@ -416,6 +416,170 @@ static void interpreter_test_memory(InterpreterTestTally* tally, Arena* scratch)
     interpreter_test_expect(tally, interpreter_memory_access(&runtime, address, 4, true) == INTERPRETER_OK, "a reused address has its new registration's permissions");
     interpreter_memory_remove(&runtime, (uint8_t*)&bytes);
     interpreter_test_expect(tally, added && runtime.memory_count == 0, "heap allocation removal");
+}
+
+// Both execution modes retain the same objects, bytes and memory permissions. Only checked execution retains the
+// byte maps: its representation copies must still transport undefined padding, and an unchecked frame must accept
+// a null scalar map without deriving an address from it (#2758).
+static void interpreter_test_optional_maps(InterpreterTestTally* tally, Arena* scratch)
+{
+    const uint8_t local_classes[] = {
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_VOID,
+    };
+    const uint8_t local_flags[] = {
+        0,
+        0,
+        BUSTER_TYPED_LOCAL_ADDRESS_TAKEN,
+    };
+    const uint32_t local_sizes[] = {
+        0,
+        0,
+        17,
+    };
+    const uint8_t local_alignments[] = {
+        0,
+        0,
+        4,
+    };
+    const Tier0Function function = {
+        .local_classes = local_classes,
+        .local_flags = local_flags,
+        .local_sizes = local_sizes,
+        .local_alignments = local_alignments,
+        .local_count = BUSTER_ARRAY_LENGTH(local_classes),
+        .parameter_count = 1,
+    };
+    const InterpreterValue argument = {
+        .low = UINT64_C(0x123456789abcdef0),
+    };
+    const InterpreterValue stored = {
+        .low = 0x5a,
+    };
+    uint64_t used[2] = { 0 };
+    for (uint32_t checked = 0; checked < 2; checked += 1)
+    {
+        const uint64_t mark = scratch->length;
+        InterpreterValue locals[3] = { 0 };
+        uint8_t defined[sizeof(locals)];
+        InterpreterMemory memories[4];
+        uint64_t read_only = 13;
+        InterpreterRuntime runtime = {
+            .memories = memories,
+            .memory_capacity = BUSTER_ARRAY_LENGTH(memories),
+            .check_memory = true,
+            .check_undefined = checked != 0,
+        };
+        const bool added = interpreter_memory_add(&runtime, (uint8_t*)&read_only, sizeof(read_only), 0, false, 0);
+        const InterpreterStatus status = interpreter_typed_enter(&function, locals, checked != 0 ? defined : 0, 0, &argument, 1, 0, &runtime, 1, scratch);
+        interpreter_test_expect(tally, added && status == INTERPRETER_OK && runtime.memory_count == 4, "optional maps: frame registration succeeds in both modes");
+        if (status == INTERPRETER_OK)
+        {
+            used[checked] = scratch->length - mark;
+            const uint64_t parameter = (uintptr_t)&locals[0];
+            const uint64_t scalar = (uintptr_t)&locals[1];
+            const uint64_t object = locals[2].low;
+            bool maps = true;
+            for (uint32_t m = 1; m < runtime.memory_count; m += 1)
+            {
+                maps = maps && ((memories[m].defined != 0) == (checked != 0));
+            }
+            bool zeroed = locals[1].low == 0 && locals[1].high == 0 && locals[2].high == 0;
+            for (uint32_t b = 0; b < local_sizes[2]; b += 1)
+            {
+                zeroed = zeroed && ((const uint8_t*)(uintptr_t)object)[b] == 0;
+            }
+            interpreter_test_expect(tally, maps && zeroed && locals[0].low == argument.low && locals[0].high == 0,
+                                    "optional maps: parameters and zeroed storage agree, maps exist only with undefined checks");
+            const InterpreterStatus unread = checked != 0 ? INTERPRETER_UNDEFINED : INTERPRETER_OK;
+            interpreter_test_expect(tally, interpreter_memory_access(&runtime, parameter, 8, false) == INTERPRETER_OK &&
+                                          interpreter_memory_access(&runtime, scalar, 8, false) == unread &&
+                                          interpreter_memory_access(&runtime, object, 8, false) == unread,
+                                    "optional maps: only checked reads diagnose unwritten scalar and object bytes");
+            const InterpreterStatus write = interpreter_memory_access(&runtime, object, 1, true);
+            interpreter_store_value(object, stored, 1, false);
+            const InterpreterStatus copied = interpreter_representation_copy(&runtime, scalar, object, 8, false);
+            interpreter_test_expect(tally, write == INTERPRETER_OK && copied == INTERPRETER_OK && locals[1].low == 0x5a &&
+                                          interpreter_memory_access(&runtime, scalar, 1, false) == INTERPRETER_OK &&
+                                          interpreter_memory_access(&runtime, scalar, 8, false) == unread,
+                                    "optional maps: representation copies retain bytes and checked undefined padding");
+            interpreter_test_expect(tally, interpreter_memory_access(&runtime, object + 17, 1, false) == INTERPRETER_MEMORY &&
+                                          interpreter_memory_access(&runtime, object + 16, 2, true) == INTERPRETER_MEMORY &&
+                                          interpreter_memory_access(&runtime, (uintptr_t)&read_only, 8, true) == INTERPRETER_MEMORY && read_only == 13,
+                                    "optional maps: exact bounds and read-only permissions remain enforced in both modes");
+            interpreter_memory_remove_owner(&runtime, 1);
+            interpreter_test_expect(tally, runtime.memory_count == 1 && interpreter_memory_access(&runtime, object, 1, false) == INTERPRETER_MEMORY,
+                                    "optional maps: returned-frame storage is inaccessible in both modes");
+        }
+        arena_pop_to(scratch, mark);
+    }
+    interpreter_test_expect(tally, used[1] == used[0] + local_sizes[2], "optional maps: unchecked object storage omits exactly its byte map");
+}
+
+static void interpreter_test_optional_map_capacity(InterpreterTestTally* tally)
+{
+    const uint8_t kinds[] = {
+        BUSTER_TYPED_CONST,
+        BUSTER_TYPED_SET_LOCAL,
+        BUSTER_TYPED_LOCAL,
+        BUSTER_TYPED_RETURN,
+    };
+    const uint8_t classes[] = {
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+        BUSTER_TYPED_CLASS_U64,
+    };
+    const uint64_t values[] = {
+        7,
+        0,
+        0,
+        0,
+    };
+    const uint8_t local_class = BUSTER_TYPED_CLASS_U64;
+    const Tier0Function function = {
+        .kinds = kinds,
+        .classes = classes,
+        .values = values,
+        .count = BUSTER_ARRAY_LENGTH(kinds),
+        .local_classes = &local_class,
+        .local_count = 1,
+    };
+    InterpreterOptions limits = interpreter_default_options();
+    limits.max_frames = 1;
+    limits.max_values = 1;
+    limits.max_locals = 1024;
+    limits.max_memories = 1;
+    uint64_t peaks[2] = { 0 };
+    for (uint32_t checked = 0; checked < 2; checked += 1)
+    {
+        Arena scratch = arena_reserve(64ull << 10);
+        limits.check_undefined = checked != 0;
+        const InterpreterResult result = interpreter_test_run(&function, &scratch, &limits);
+        peaks[checked] = scratch.peak;
+        interpreter_test_expect(tally, result.status == INTERPRETER_OK && result.value.low == 7 && result.value.high == 0 && result.steps == 4,
+                                "optional maps: checked and unchecked typed runs agree on value and steps");
+        arena_release(&scratch);
+    }
+    interpreter_test_expect(tally, peaks[1] == peaks[0] + (uint64_t)limits.max_locals * sizeof(InterpreterValue),
+                            "optional maps: unchecked typed run omits the scalar locals' byte map");
+    Arena bounded = arena_reserve(64ull << 10);
+    bounded.capacity = peaks[0];
+    limits.check_undefined = false;
+    InterpreterResult result = interpreter_test_run(&function, &bounded, &limits);
+    interpreter_test_expect(tally, result.status == INTERPRETER_OK && result.value.low == 7 && bounded.length == 0,
+                            "optional maps: unchecked execution fits at its measured arena peak");
+    limits.check_undefined = true;
+    result = interpreter_test_run(&function, &bounded, &limits);
+    interpreter_test_expect(tally, result.status == INTERPRETER_RESOURCE && bounded.length == 0,
+                            "optional maps: checked execution still requires its map and releases failed allocations");
+    bounded.capacity = peaks[0] != 0 ? peaks[0] - 1 : 0;
+    limits.check_undefined = false;
+    result = interpreter_test_run(&function, &bounded, &limits);
+    interpreter_test_expect(tally, result.status == INTERPRETER_RESOURCE && bounded.length == 0,
+                            "optional maps: unchecked execution still obeys its arena bound");
+    arena_release(&bounded);
 }
 
 // #1059's atomic read/modify/writes as one thread runs them: an addition and an exchange of an int return its old values
@@ -1932,6 +2096,8 @@ static int run_interpreter_tests(int argc, char** argv)
         interpreter_test_conversions(&tally, &scratch);
         interpreter_test_recursion(&tally, &scratch);
         interpreter_test_memory(&tally, &scratch);
+        interpreter_test_optional_maps(&tally, &scratch);
+        interpreter_test_optional_map_capacity(&tally);
         interpreter_test_scalar_bytes(&tally);
         interpreter_test_atomic_rmw(&tally, &scratch);
         interpreter_test_atomic_cas(&tally, &scratch);
