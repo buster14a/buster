@@ -85,8 +85,11 @@ struct FastMemberInfo
     uint8_t bit_offset;    // 0..63 within storage unit if bit_width != 0
     uint8_t bit_width;     // 0 if normal field, else 1..64
     uint8_t bit_unit_size; // 1, 2, 4, or 8 bytes storage unit for bitfield
-    uint8_t bit_signed;    // 1 if signed bitfield
+    uint8_t bit_signed;    // 1 if signed bitfield; a member that isn't one: BUSTER_FMEMBER_UNALIGNED (#3577)
 };
+
+// #3577: in a member's bit_signed, a member that isn't a bit-field and sits below its type's alignment.
+#define BUSTER_FMEMBER_UNALIGNED 2u
 
 // SysV AMD64 eightbyte classification for structs <= 16 bytes
 typedef enum FastAbiClass
@@ -3415,6 +3418,16 @@ static FastType fast_cc_parse_record_iter(FastCCState* cc, bool is_union, bool a
             ct->packed = rf->packed;
             ct->complete = 1u;
             fast_struct_classify_abi(cc, rf->cidx);
+            // #3577: a member below its type's alignment (a packed record's, or one packed itself), whose address is the
+            // full pipeline's -Waddress-of-packed-member, is marked in its bit_signed's second bit (BUSTER_FMEMBER_UNALIGNED),
+            // which a member that isn't a bit-field doesn't use otherwise.
+            for (uint32_t k = 0; k < fcnt; k += 1)
+            {
+                FastMemberInfo* m = cc->member_info + mstart + k;
+                const uint32_t offset_align = m->byte_offset == 0 ? al : (m->byte_offset & (0u - m->byte_offset));
+                const uint32_t actual = offset_align < al ? offset_align : al;
+                m->bit_signed |= (uint8_t)(BUSTER_FMEMBER_UNALIGNED * ((uint32_t)(m->bit_width == 0) & (uint32_t)(ftype_align(cc, m->type) > actual)));
+            }
 
             const uint32_t finished_cidx = rf->cidx;
             tmp_used = rf->field_start; // pop temp members!

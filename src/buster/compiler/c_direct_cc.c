@@ -1772,6 +1772,8 @@ _Static_assert(sizeof(FastVal) == 32u, "expression stack entry size");
 // and a string literal, in casts too (-Wstring-compare, whose literal the full pipeline finds through them).
 #define BUSTER_FVAL_LASTING_FLOAT_CAST 0x01u
 #define BUSTER_FVAL_LASTING_STRING     0x02u
+// A member below its type's alignment, or one of its members (`.`), whose address is -Waddress-of-packed-member.
+#define BUSTER_FVAL_LASTING_UNALIGNED  0x04u
 
 // A value's marks (#3577), lost where an operator makes a new value: a register variable, whose address is an error; a
 // function whose call's null constant arguments are -Wnonnull; the result of a call whose discarding is -Wunused-result;
@@ -6217,6 +6219,9 @@ static BUSTER_DIRECT_HOT void fast_expr_reduce_top(FastExprCtx* ex, FastExprOp* 
         if (op == FEOP_ADDR)
         {
             if (v->kind == FVAL_BITFIELD) { fast_cc_bail(cc, "address of bitfield"); return; }
+            // #3577: a misaligned member's address is the full pipeline's -Waddress-of-packed-member (which a cast to a
+            // pointer it is aligned for, or a conversion to void *, quiets there: it leaves here all the same).
+            if ((vlasting & BUSTER_FVAL_LASTING_UNALIGNED) != 0) { fast_cc_bail(cc, "the address of a misaligned member"); return; }
             if ((vmarks & BUSTER_FVAL_MARK_REGISTER) != 0) { fast_cc_bail(cc, "address of register variable"); return; }
             const FastType pt = ftype_make_ptr(cc, v->type);
             // An object's address keeps its kind without code too (#3592's dead branches): a comparison's or a
@@ -7391,6 +7396,8 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
                 {
                     *v = (FastVal){ .type = mi->type, .kind = FVAL_INDIRECT, .reg = (uint8_t)pr, .off = (int32_t)mi->byte_offset, .is_lvalue = 1u };
                 }
+                // #3577: a misaligned member (FastMemberInfo's BUSTER_FMEMBER_UNALIGNED), whose address leaves.
+                if (mi->bit_signed > 1u) { v->lasting |= BUSTER_FVAL_LASTING_UNALIGNED; }
             }
             else
             {
@@ -7412,6 +7419,8 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
                 if (bkind == FVAL_GLOBAL) { v->imm += (int64_t)mi->byte_offset; }
                 else if (bkind == FVAL_SPILL_ADDR) { v->addr_disp += (int32_t)mi->byte_offset; }
                 else { v->off += (int32_t)mi->byte_offset; }
+                // #3577: a misaligned member, or a member of one (the object keeps its mark).
+                if (mi->bit_signed > 1u) { v->lasting |= BUSTER_FVAL_LASTING_UNALIGNED; }
             }
             continue;
         }

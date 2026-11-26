@@ -4472,7 +4472,12 @@ static int c_direct_unit_tests(void)
         // 11. Conditionals of pointers the full pipeline's -Wpointer-type-mismatch leaves alone: one to void, one more
         // qualified, a null pointer constant.
         "const int* chosen(int c, int* p, const int* q, void* v) { return c ? p : (c > 1 ? q : (c > 2 ? (const int*)v : (void*)0)); }\n",
-        // 12. Packed records' layouts as clang's (#3577), which main's direct path laid out otherwise: an aligned(4)
+        // 12. Packed records the full pipeline's -Waddress-of-packed-member leaves alone: a char member's address, an array
+        // member's decay and its element's address, an aligned packed record's aligned member, a read of a misaligned one.
+        "struct __attribute__((packed)) P { char c; int i; int arr[2]; };\n"
+        "struct __attribute__((packed, aligned(4))) A { int i; int j; };\n"
+        "int packed(struct P* p, struct A* a) { char* c = &p->c; int* e = p->arr; int* f = &p->arr[1]; int* j = &a->j; return *c + *e + *f + *j + p->i; }\n",
+        // 13. Packed records' layouts as clang's (#3577), which main's direct path laid out otherwise: an aligned(4)
         // before the braces, and a record defined inside a packed one, which isn't packed itself (a static assertion
         // that fails leaves the direct path, and fails this case).
         "struct __attribute__((packed, aligned(4))) Q { char c; int j; };\n"
@@ -4588,6 +4593,14 @@ static int c_direct_unit_tests(void)
         "void* f(int c, char* p, unsigned char* q) { return c ? p : q; }\n",
         "int g(int);\nlong h(long);\nvoid f(int c) { (void)(c ? g : h); }\n",
         "void* f(int* p, long* q) { return 1 ? p : q; }\n",
+        // -Waddress-of-packed-member: the address of a packed record's int, of a member of its member, of a local's,
+        // inside sizeof, of a member packed itself, of an int at an aligned packed record's odd offset.
+        "struct __attribute__((packed)) P { char c; int i; };\nint* f(struct P* p) { return &p->i; }\n",
+        "struct In { int x; };\nstruct __attribute__((packed)) P { char c; struct In sub; };\nint* f(struct P* p) { return &p->sub.x; }\n",
+        "struct __attribute__((packed)) P { char c; int i; };\nint f(void) { struct P s = { 0, 1 }; int* q = &s.i; return *q; }\n",
+        "struct __attribute__((packed)) P { char c; int i; };\nunsigned long f(struct P* p) { return sizeof(&p->i); }\n",
+        "struct Q { char c; int i __attribute__((packed)); };\nint* f(struct Q* q) { return &q->i; }\n",
+        "struct __attribute__((packed, aligned(4))) Q { char c; int j; };\nint* f(struct Q* q) { return &q->j; }\n",
     };
     for (uint32_t i = 0; i < sizeof(bail_cases) / sizeof(bail_cases[0]); i += 1)
     {
