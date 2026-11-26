@@ -32,6 +32,13 @@ static bool check_test_constant_conversion_has(const Tier0Function* function, ui
 // movslq left is `x == 0`'s int result's, returned as a long, which clang -O0 extends too (cltq).
 static void check_test_constant_conversion_code(CheckTest* test, const CheckProgramLowered* lowered, const char* way, Arena* scratch)
 {
+    // This check compiles before the fixture's ordinary program emission initializes unbaked tables.
+    const bool initialized = x86_encoder_initialize() && tier0_initialize();
+    check_test_expect(test, initialized, "constant-conversion-code initializes the encoder and Tier 0 tables");
+    if (!initialized)
+    {
+        return;
+    }
     static const uint8_t classes[4] = { BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_I64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_F64 };
     static const uint64_t values[4] = { 1, 0, 8, UINT64_C(0x3ff0000000000000) };
     char description[256];
