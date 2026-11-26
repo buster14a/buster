@@ -491,7 +491,12 @@ sums, `s += p[i] > 0 ? p[i] : 1` over an `int`, an `unsigned` and an
 extension, each must have a cmov and no register moved into another. #2870's
 `patterns_sector`, SQLite's `pagerWriteLargeSector` cut down, leaves out a
 store into a slot two blocks after its reload, which the code's certificate
-must prove from the run's entries:
+must prove from the run's entries. #1344's compare-to-blend chains at all four
+mask widths, and its byte-compress chain, keep their masks in opmask registers
+without a round trip through a general register. A mask shared by two consumers
+and an integer return retains the one move needed for the return. Independent
+byte-level expectations cover every mask bit, unaligned buffers, integer XOR
+and narrowing followed by zero extension:
 
 
 ```sh

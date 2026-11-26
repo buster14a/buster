@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// #2554: compile this original fixture's SUBJECT by Buster's Tier 1, its ORACLE by Clang, link and run them. The default
+// #2554: compile this original fixture's SUBJECTs by Buster's Tier 1, its ORACLE by Clang, link and run them. The default
 // mode is the process supervisor. Both Tier 1 host paths must compile strictly, verify and pass the oracle's checks,
 // and GNU objdump's disassembly of each named function must have the shape the issue's four patterns leave:
 // - truth values across blocks (`&&`, `||`, `!` and a loop's found flag): no setcc, the comparisons are the branches;
@@ -34,7 +34,10 @@
 // - and #2870's pager, SQLite's pagerWriteLargeSector cut down: a loop's bound reloaded from its slot at the loop's head
 //   and evicted again two blocks later, in that run of single-predecessor blocks, whose store the emitter leaves out as
 //   the slot already holds the value; the code's certificate must prove the slot from the run's entries (checked by
-//   --verify, and natively against the oracle).
+//   --verify, and natively against the oracle);
+// - #1344's same-width masks carried through C integers from a vector comparison to a masked consumer: no GPR-to-k
+//   or k-to-GPR move unless the integer has an observable use. A shared mask can still return its integer bits, and
+//   changed or narrowed masks must keep their distinct semantics.
 
 #if defined(BUSTER_TIER1_PATTERNS_SUBJECT)
 
@@ -578,6 +581,82 @@ __attribute__((noinline)) void patterns_whole_volatile(patterns_wrapper* out, co
     *out = r;
 }
 
+#elif defined(BUSTER_TIER1_PATTERNS_MASK_SUBJECT)
+
+#include <immintrin.h>
+
+// Each comparison's result is a C integer before the blend converts it back to the same mask type. Pointer arguments
+// keep vector ABI transport out of the fixture. These features are part of the compiler's required host ISA.
+#define BUSTER_PATTERNS_MASK_TARGET __attribute__((noinline, target("avx512f,avx512bw,avx512dq,avx512vl,avx512vbmi2")))
+
+BUSTER_PATTERNS_MASK_TARGET void patterns_mask8_blend(void* out, const void* a, const void* b)
+{
+    const __m512i x = _mm512_loadu_si512(a);
+    const __m512i y = _mm512_loadu_si512(b);
+    const __mmask8 mask = _mm512_cmpeq_epi64_mask(x, _mm512_setzero_si512());
+    _mm512_storeu_si512(out, _mm512_mask_blend_epi64(mask, x, y));
+}
+
+BUSTER_PATTERNS_MASK_TARGET void patterns_mask16_blend(void* out, const void* a, const void* b)
+{
+    const __m512i x = _mm512_loadu_si512(a);
+    const __m512i y = _mm512_loadu_si512(b);
+    const __mmask16 mask = _mm512_cmpeq_epi32_mask(x, _mm512_setzero_si512());
+    _mm512_storeu_si512(out, _mm512_mask_blend_epi32(mask, x, y));
+}
+
+BUSTER_PATTERNS_MASK_TARGET void patterns_mask32_blend(void* out, const void* a, const void* b)
+{
+    const __m512i x = _mm512_loadu_si512(a);
+    const __m512i y = _mm512_loadu_si512(b);
+    const __mmask32 mask = _mm512_cmpeq_epi16_mask(x, _mm512_setzero_si512());
+    _mm512_storeu_si512(out, _mm512_mask_blend_epi16(mask, x, y));
+}
+
+BUSTER_PATTERNS_MASK_TARGET void patterns_mask64_blend(void* out, const void* a, const void* b)
+{
+    const __m512i x = _mm512_loadu_si512(a);
+    const __m512i y = _mm512_loadu_si512(b);
+    const __mmask64 mask = _mm512_cmpeq_epi8_mask(x, _mm512_setzero_si512());
+    _mm512_storeu_si512(out, _mm512_mask_blend_epi8(mask, x, y));
+}
+
+BUSTER_PATTERNS_MASK_TARGET void patterns_mask64_compress(void* out, const void* a, const void* b)
+{
+    const __m512i x = _mm512_loadu_si512(a);
+    const __m512i y = _mm512_loadu_si512(b);
+    const __mmask64 mask = _mm512_cmpeq_epi8_mask(x, _mm512_setzero_si512());
+    _mm512_storeu_si512(out, _mm512_maskz_compress_epi8(mask, y));
+}
+
+// The integer result remains live alongside two masked consumers. Removing its conversion would change the return.
+BUSTER_PATTERNS_MASK_TARGET unsigned long long patterns_mask64_shared(void* out, const void* a, const void* b)
+{
+    const __m512i x = _mm512_loadu_si512(a);
+    const __m512i y = _mm512_loadu_si512(b);
+    const __mmask64 mask = _mm512_cmpeq_epi8_mask(x, _mm512_setzero_si512());
+    _mm512_storeu_si512(out, _mm512_mask_blend_epi8(mask, x, y));
+    _mm512_storeu_si512((unsigned char*)out + 64, _mm512_maskz_compress_epi8(mask, y));
+    return mask;
+}
+
+BUSTER_PATTERNS_MASK_TARGET void patterns_mask64_xor(void* out, const void* a, const void* b)
+{
+    const __m512i x = _mm512_loadu_si512(a);
+    const __m512i y = _mm512_loadu_si512(b);
+    const __mmask64 mask = _mm512_cmpeq_epi8_mask(x, _mm512_setzero_si512()) ^ 0x8101000080008001ull;
+    _mm512_storeu_si512(out, _mm512_mask_blend_epi8(mask, x, y));
+}
+
+// The high 56 comparison bits must not survive a C truncation followed by zero extension.
+BUSTER_PATTERNS_MASK_TARGET void patterns_mask64_narrow(void* out, const void* a, const void* b)
+{
+    const __m512i x = _mm512_loadu_si512(a);
+    const __m512i y = _mm512_loadu_si512(b);
+    const __mmask8 mask = (__mmask8)_mm512_cmpeq_epi8_mask(x, _mm512_setzero_si512());
+    _mm512_storeu_si512(out, _mm512_mask_blend_epi8((__mmask64)mask, x, y));
+}
+
 #elif defined(BUSTER_TIER1_PATTERNS_ORACLE)
 
 #include <limits.h>
@@ -669,6 +748,14 @@ void patterns_whole_union(patterns_lanes* out, const patterns_vector* p);
 unsigned long long patterns_whole_member(const patterns_vector* p);
 void patterns_whole_override(patterns_lanes* out, const patterns_vector* p);
 void patterns_whole_volatile(patterns_wrapper* out, const patterns_vector* p);
+void patterns_mask8_blend(void* out, const void* a, const void* b);
+void patterns_mask16_blend(void* out, const void* a, const void* b);
+void patterns_mask32_blend(void* out, const void* a, const void* b);
+void patterns_mask64_blend(void* out, const void* a, const void* b);
+void patterns_mask64_compress(void* out, const void* a, const void* b);
+unsigned long long patterns_mask64_shared(void* out, const void* a, const void* b);
+void patterns_mask64_xor(void* out, const void* a, const void* b);
+void patterns_mask64_narrow(void* out, const void* a, const void* b);
 
 #define BUSTER_PATTERNS_A(i) (((i) >> 2) & 7)
 #define BUSTER_PATTERNS_B(i) (((i) >> 5) & 7)
@@ -999,6 +1086,93 @@ static bool sector_runs(void)
     return valid;
 }
 
+// Clang builds this independent byte-level model. For each mask width, exercise zero, all-ones, alternating, every
+// one-hot and every one-clear mask, including the top bit. Inputs and outputs are deliberately unaligned.
+static bool mask_runs(void)
+{
+    bool valid = true;
+    for (unsigned width = 1; width <= 8; width *= 2)
+    {
+        const unsigned lanes = 64 / width;
+        const unsigned long long limit = lanes == 64 ? ULLONG_MAX : (1ull << lanes) - 1;
+        for (unsigned c = 0; c < 4 + 2 * lanes; c += 1)
+        {
+            const unsigned long long pattern = c == 0 ? 0 : c == 1 ? ULLONG_MAX : c == 2 ? 0xaaaaaaaaaaaaaaaaull : c == 3 ? 0x5555555555555555ull : c < 4 + lanes ? 1ull << (c - 4) : ~(1ull << (c - 4 - lanes));
+            const unsigned long long mask = pattern & limit;
+            unsigned char input[66];
+            unsigned char other[66];
+            unsigned char output[130];
+            unsigned char expected[128];
+            unsigned char* const a = input + 1;
+            unsigned char* const b = other + 1;
+            unsigned char* const result = output + 1;
+            for (unsigned i = 0; i < 64; i += 1)
+            {
+                const bool selected = ((mask >> (i / width)) & 1) != 0;
+                a[i] = selected ? 0 : (unsigned char)((i * 13 + c * 37) % 255 + 1);
+                b[i] = (unsigned char)((i * 7 + c * 11 + 3) | 1);
+                expected[i] = selected ? b[i] : a[i];
+            }
+            memset(output, 0xa5, sizeof(output));
+            if (width == 8)
+            {
+                patterns_mask8_blend(result, a, b);
+            }
+            else if (width == 4)
+            {
+                patterns_mask16_blend(result, a, b);
+            }
+            else if (width == 2)
+            {
+                patterns_mask32_blend(result, a, b);
+            }
+            else
+            {
+                patterns_mask64_blend(result, a, b);
+            }
+            valid = memcmp(result, expected, 64) == 0 && output[0] == 0xa5 && output[65] == 0xa5 && valid;
+            if (width == 1)
+            {
+                memset(expected + 64, 0, 64);
+                unsigned packed = 0;
+                for (unsigned i = 0; i < 64; i += 1)
+                {
+                    if (((mask >> i) & 1) != 0)
+                    {
+                        expected[64 + packed] = b[i];
+                        packed += 1;
+                    }
+                }
+                memset(output, 0xa5, sizeof(output));
+                patterns_mask64_compress(result, a, b);
+                valid = memcmp(result, expected + 64, 64) == 0 && output[0] == 0xa5 && output[65] == 0xa5 && valid;
+                memset(output, 0xa5, sizeof(output));
+                const unsigned long long returned = patterns_mask64_shared(result, a, b);
+                valid = returned == mask && memcmp(result, expected, 128) == 0 && output[0] == 0xa5 && output[129] == 0xa5 && valid;
+                for (unsigned boundary = 0; boundary < 2; boundary += 1)
+                {
+                    const unsigned long long changed = boundary == 0 ? mask ^ 0x8101000080008001ull : mask & 255;
+                    for (unsigned i = 0; i < 64; i += 1)
+                    {
+                        expected[i] = ((changed >> i) & 1) != 0 ? b[i] : a[i];
+                    }
+                    memset(output, 0xa5, sizeof(output));
+                    if (boundary == 0)
+                    {
+                        patterns_mask64_xor(result, a, b);
+                    }
+                    else
+                    {
+                        patterns_mask64_narrow(result, a, b);
+                    }
+                    valid = memcmp(result, expected, 64) == 0 && output[0] == 0xa5 && output[65] == 0xa5 && valid;
+                }
+            }
+        }
+    }
+    return valid;
+}
+
 int main(void)
 {
     const long inputs[] = { LONG_MIN, -2, -1, 0, 1, 2, 3, LONG_MAX };
@@ -1189,6 +1363,7 @@ int main(void)
     memset(&united, 0x5a, sizeof(united));
     patterns_whole_override(&united, &vector);
     valid = memcmp(united.q, overridden, sizeof(overridden)) == 0 && valid;
+    valid = mask_runs() && valid;
     puts(valid ? "Tier 1 patterns native oracle: pass" : "Tier 1 patterns native oracle: FAIL");
     return valid ? 0 : 1;
 }
@@ -1259,6 +1434,9 @@ typedef enum PatternsKind
     PATTERNS_CLEARED,
     PATTERNS_GSUB,
     PATTERNS_ARMS,
+    PATTERNS_MASK,
+    PATTERNS_MASK_SHARED,
+    PATTERNS_MASK_CHANGED,
 } PatternsKind;
 
 typedef struct PatternsFunction PatternsFunction;
@@ -1306,6 +1484,14 @@ static const PatternsFunction patterns_functions[] = {
     { "patterns_arms_signed", PATTERNS_ARMS },
     { "patterns_arms_unsigned", PATTERNS_ARMS },
     { "patterns_arms_half", PATTERNS_ARMS },
+    { "patterns_mask8_blend", PATTERNS_MASK },
+    { "patterns_mask16_blend", PATTERNS_MASK },
+    { "patterns_mask32_blend", PATTERNS_MASK },
+    { "patterns_mask64_blend", PATTERNS_MASK },
+    { "patterns_mask64_compress", PATTERNS_MASK },
+    { "patterns_mask64_shared", PATTERNS_MASK_SHARED },
+    { "patterns_mask64_xor", PATTERNS_MASK_CHANGED },
+    { "patterns_mask64_narrow", PATTERNS_MASK_CHANGED },
 };
 
 #define BUSTER_PATTERNS_COUNT (sizeof(patterns_functions) / sizeof(patterns_functions[0]))
@@ -1361,6 +1547,11 @@ static bool patterns_shape(const PatternsFunction* function, const PatternsBody*
     unsigned zeros = 0;
     // Moves of a register into another (#2843).
     unsigned copies = 0;
+    // #1344: count only GPR/opmask transport, not k-to-k moves or mask saves to memory.
+    unsigned mask_to_integer = 0;
+    unsigned integer_to_mask = 0;
+    unsigned mask_definitions = 0;
+    unsigned masked_consumers = 0;
     for (unsigned i = 0; i < body->count; i += 1)
     {
         const PatternsInstruction* instruction = &body->instructions[i];
@@ -1368,6 +1559,13 @@ static bool patterns_shape(const PatternsFunction* function, const PatternsBody*
         const char* operands = instruction->operands;
         const char* comma = strrchr(operands, ',');
         const char* destination = comma != NULL ? comma + 1 : operands;
+        const bool mask_source = strncmp(operands, "%k", 2) == 0;
+        const bool mask_destination = strncmp(destination, "%k", 2) == 0;
+        const bool mask_move = strncmp(operation, "kmov", 4) == 0 && !patterns_memory(operands);
+        mask_to_integer += mask_move && mask_source && destination[0] == '%' && !mask_destination;
+        integer_to_mask += mask_move && operands[0] == '%' && !mask_source && mask_destination;
+        mask_definitions += operation[0] == 'v' && mask_destination;
+        masked_consumers += strstr(operands, "{%k") != NULL;
         sets += strncmp(operation, "set", 3) == 0;
         moves += strncmp(operation, "cmov", 4) == 0;
         parity += strncmp(operation, "cmovp", 5) == 0 || strncmp(operation, "cmovnp", 6) == 0;
@@ -1445,11 +1643,20 @@ static bool patterns_shape(const PatternsFunction* function, const PatternsBody*
     case PATTERNS_ARMS:
         valid = valid && moves >= 1 && copies == 0;
         break;
+    case PATTERNS_MASK:
+        valid = valid && mask_definitions >= 1 && masked_consumers >= 1 && mask_to_integer == 0 && integer_to_mask == 0;
+        break;
+    case PATTERNS_MASK_SHARED:
+        valid = valid && mask_definitions >= 1 && masked_consumers >= 2 && mask_to_integer == 1 && integer_to_mask == 0;
+        break;
+    case PATTERNS_MASK_CHANGED:
+        valid = valid && mask_definitions >= 1 && masked_consumers >= 1;
+        break;
     }
     if (!valid)
     {
-        fprintf(stderr, "patterns shape %s: definitions=%u setcc=%u cmov=%u parity-cmov=%u shifts-by-zero=%u immediate-stores=%u register-stores=%u register-constants=%u indirect-jumps=%u jumps-to-them=%u clean-jumps=%u increments=%u loaded-jumps=%u zero-stores=%u stored-back=%u register-copies=%u r11=%u\n",
-                function->name, body->definitions, sets, moves, parity, shifts, immediates, registers, constants, indirect, to_indirect, clean, increments, loaded, zeros, stored_back, copies, scratch);
+        fprintf(stderr, "patterns shape %s: definitions=%u setcc=%u cmov=%u parity-cmov=%u shifts-by-zero=%u immediate-stores=%u register-stores=%u register-constants=%u indirect-jumps=%u jumps-to-them=%u clean-jumps=%u increments=%u loaded-jumps=%u zero-stores=%u stored-back=%u register-copies=%u r11=%u mask-to-integer=%u integer-to-mask=%u mask-definitions=%u masked-consumers=%u\n",
+                function->name, body->definitions, sets, moves, parity, shifts, immediates, registers, constants, indirect, to_indirect, clean, increments, loaded, zeros, stored_back, copies, scratch, mask_to_integer, integer_to_mask, mask_definitions, masked_consumers);
 
     }
     return valid;
@@ -1514,11 +1721,13 @@ int main(int argc, char** argv)
     const bool created = valid && mkdtemp(directory) != NULL;
     valid = valid && created;
     char subject[128];
+    char masks[128];
     char oracle[128];
     char program[128];
     char assembly[128];
     // All paths have a fixed, bounded prefix and fixed suffixes, smaller than their buffers.
     snprintf(subject, sizeof(subject), "%s/subject.o", directory);
+    snprintf(masks, sizeof(masks), "%s/masks.o", directory);
     snprintf(oracle, sizeof(oracle), "%s/oracle.o", directory);
     snprintf(program, sizeof(program), "%s/program", directory);
     snprintf(assembly, sizeof(assembly), "%s/assembly.txt", directory);
@@ -1532,18 +1741,23 @@ int main(int argc, char** argv)
     {
         // Fresh outputs: an unsuccessful command must never reuse the preceding path's files.
         unlink(subject);
+        unlink(masks);
         unlink(program);
         unlink(assembly);
         char* compile[] = { argv[1], "--tier1", "--tier1-strict", "--verify", "--lanes", "1", "--tier1-report", "-std=gnu17", "-DBUSTER_TIER1_PATTERNS_SUBJECT", "-c", source, "-o", subject, scalar ? "--scalar" : NULL, NULL };
-        char* link[] = { argv[2], oracle, subject, "-o", program, NULL };
+        // The intrinsic headers' inline helpers inherit the unit's features. Keep this target on a separate object
+        // so that the original scalar and whole-vector fixtures retain their baseline target and instruction shapes.
+        char* compile_masks[] = { argv[1], "--tier1", "--tier1-strict", "--verify", "--lanes", "1", "--tier1-report", "-std=gnu17", "-march=x86-64-v4", "-mavx512vbmi2", "-DBUSTER_TIER1_PATTERNS_MASK_SUBJECT", "-c", source, "-o", masks, scalar ? "--scalar" : NULL, NULL };
+        char* link[] = { argv[2], oracle, subject, masks, "-o", program, NULL };
         char* execute[] = { program, NULL };
-        char* disassemble[] = { "objdump", "-d", "--no-show-raw-insn", subject, NULL };
-        valid = patterns_run(compile, NULL) && patterns_run(link, NULL) && patterns_run(execute, NULL) && patterns_run(disassemble, assembly) && patterns_shapes(assembly);
+        char* disassemble[] = { "objdump", "-d", "--no-show-raw-insn", subject, masks, NULL };
+        valid = patterns_run(compile, NULL) && patterns_run(compile_masks, NULL) && patterns_run(link, NULL) && patterns_run(execute, NULL) && patterns_run(disassemble, assembly) && patterns_shapes(assembly);
         printf("Tier 1 patterns %s: %s\n", scalar ? "scalar" : "default", valid ? "pass" : "FAIL");
     }
     if (valid)
     {
         unlink(subject);
+        unlink(masks);
         unlink(oracle);
         unlink(program);
         unlink(assembly);
