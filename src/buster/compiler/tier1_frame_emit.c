@@ -63,6 +63,11 @@ struct Tier1EmitBuffer
     uint32_t marked;
     // The position of node 0's use phase, which a node's saves' origins count from (the CFG consumer's added blocks').
     uint32_t origin_base;
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+    // Private #1189 measurement: one byte per record, bounded by this buffer's capacity, independent of its certificate.
+    uint8_t* measure_kinds;
+    uint8_t measure_kind;
+#endif
 };
 
 // Where the CFA is as the frame's steps run (#1056): `reg` (an encoder register: rsp, rbp, or r11 inside a probe's loop)
@@ -127,6 +132,12 @@ static uint16_t tier1_frame_emit_form(uint16_t imm8, uint16_t imm32, int64_t val
 static void tier1_frame_emit_add(Tier1EmitBuffer* buffer, X86Instruction record)
 {
     buffer->records[buffer->count] = record;
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+    if (buffer->measure_kinds != NULL)
+    {
+        buffer->measure_kinds[buffer->count] = 'f';
+    }
+#endif
     buffer->count += 1;
 }
 
@@ -549,6 +560,12 @@ static Tier1FrameEmitError tier1_frame_emit(const Tier1Frame* frame, bool epilog
         if (temporary.count != 0)
         {
             memcpy(buffer->records + buffer->count, temporary.records, (uint64_t)temporary.count * sizeof(X86Instruction));
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+            if (buffer->measure_kinds != NULL)
+            {
+                memset(buffer->measure_kinds + buffer->count, 'f', temporary.count);
+            }
+#endif
         }
         for (uint32_t i = 0; described && i < event_count; i += 1)
         {

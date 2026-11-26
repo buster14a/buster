@@ -22,6 +22,8 @@
 // whose code calls a home's entry point runs in two units' copies of the code, so a home's code must share no static
 // variable with its callers' units: main.c's units have one lane context (lane.c), and ./build.sh check-call-graph
 // checks the rest (call_graph.c).
+// Private #2610 measurement build: tag emitted records without changing their instructions.
+#define BUSTER_TIER1_MEASURE_KINDS 1
 #define BUSTER_UNIT_DRIVER 0
 #define BUSTER_UNIT_X86 1
 #define BUSTER_UNIT_FRONTEND 2
@@ -118,6 +120,24 @@
 #include <limits.h>
 #include <assert.h>
 #include <errno.h>
+#include <stdlib.h>
+
+// Private measurement variants for #2610; zero is current main's behavior. These affect generated programs only
+// when explicitly requested: bit 1 is reserved (main includes folded-frame recipes), bit 2 is clobber avoidance,
+// bit 4 gives every nonphi crossing recipe the existing resident caller-register pool, and bit 8 makes bit 2
+// require two calls. Bit 16 rejects a range crossing an internal join with several predecessors; bit 32 confines
+// a candidate to one basic block. Bit 64 keeps a fresh preserved register behind an available caller choice until
+// a required definition or use has already paid for that register. Bit 128 exchanges disjoint physical caller/callee
+// register pairs after allocation, with the existing fragments and CFG move topology retained. Neither compiler time
+// nor this switch is benchmarked. Bit 256 uses actual lazy save/restore epochs and uniform CFG flow costs.
+// Bit 512 recolors only frozen parameter intervals into free, already-preserved registers. Bit 1024 exchanges
+// contained regional owners, with cached exact epochs and independent transport/total path-cost checks. Bit 2048
+// closes batches over complete target owners and boundary edges before applying those same exact cost checks.
+static __attribute__((unused)) uint32_t tier1_measure_experiment(void)
+{
+    const char* const value = getenv("BUSTER_TIER1_EXPERIMENT");
+    return value != 0 ? (uint32_t)strtoul(value, 0, 0) & 4095u : 0;
+}
 
 #define BUSTER_ARRAY_LENGTH(x) (sizeof(x) / sizeof((x)[0]))
 #define BUSTER_COMPILE_TIME_STRING_LENGTH(strlit) (BUSTER_ARRAY_LENGTH(strlit) - 1)

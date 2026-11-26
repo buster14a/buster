@@ -67,6 +67,10 @@
 
 // Whether the function is a straight-line chain without phis, the straight-line consumer's: every block but the last
 // jumps to the next, and the last returns, traps or is an empty self-loop.
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+// #2553's diagnosis: the last CFG function's preference outcome (bit 0 moved values, bit 1 taken, the second error << 4).
+static _Thread_local uint32_t tier1_measure_preference;
+#endif
 static bool tier1_emit_cfg_chain(const Tier1SelectPlan* plan)
 {
     const IrFunction* function = plan->function;
@@ -389,6 +393,9 @@ static uint32_t tier1_emit_cfg_call_area(const Tier1EmitResult* emitted, uint32_
 // indirect callee still in their allocated registers. Dynamic frames keep the CFA in rbp throughout it.
 static Tier1EmitError tier1_emit_cfg_adjust(uint32_t area, bool release, bool probe, Tier1EmitBuffer* buffer)
 {
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+    const uint32_t measure_first = buffer->count;
+#endif
     const uint16_t form = area <= 127 ? (release ? X86_FORM_ADD_RM64_IMM8 : X86_FORM_SUB_RM64_IMM8) : (release ? X86_FORM_ADD_RM64_IMM32 : X86_FORM_SUB_RM64_IMM32);
     const X86Instruction record = { .form = form, .rm = X86_REGISTER_RSP, .immediate = (int32_t)area };
     const X86Instruction touch = { .form = X86_FORM_OR_RM8_IMM8, .rm = X86_REGISTER_RSP, .mode = BUSTER_X86_MEMORY_BASE };
@@ -410,6 +417,12 @@ static Tier1EmitError tier1_emit_cfg_adjust(uint32_t area, bool release, bool pr
         error = area == 0 || tier1_emit_append(buffer, record) ? error : TIER1_EMIT_MEMORY;
         error = error != TIER1_EMIT_OK || !probed || tier1_emit_append(buffer, touch) ? error : TIER1_EMIT_MEMORY;
     }
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+    if (buffer->measure_kinds != NULL)
+    {
+        memset(buffer->measure_kinds + measure_first, 'a', buffer->count - measure_first);
+    }
+#endif
     return error;
 }
 
@@ -1699,7 +1712,7 @@ static Tier1EmitError tier1_emit_cfg_stack_argument(Tier1EmitResult* emitted, ui
     {
         const uint32_t width = emitted->prepared.sizes[value];
         const X86Instruction load = { .displacement = offset, .reg = source, .rm = base, .mode = BUSTER_X86_MEMORY_BASE, .form = width == 8 ? X86_FORM_MOV_R64_RM64 : X86_FORM_MOV_R32_RM32 };
-        error = tier1_emit_append(buffer, load) ? error : TIER1_EMIT_MEMORY;
+        error = tier1_emit_append_kind(buffer, load, 'L') ? error : TIER1_EMIT_MEMORY;
         emitted->spill_loads += 1;
     }
     else if (error == TIER1_EMIT_OK && kind == BUSTER_TIER1_ALLOCATE_REMATERIALIZE)
@@ -1735,7 +1748,7 @@ static Tier1EmitError tier1_emit_cfg_aggregate_address(Tier1EmitResult* emitted,
     if (error == TIER1_EMIT_OK && !*registered && kind == BUSTER_TIER1_ALLOCATE_SPILL && tier1_emit_cfg_slot(emitted, location, &offset))
     {
         const X86Instruction load = { .displacement = offset, .reg = BUSTER_TIER1_SELECT_SCRATCH, .rm = base, .mode = BUSTER_X86_MEMORY_BASE, .form = X86_FORM_MOV_R64_RM64 };
-        error = tier1_emit_append(buffer, load) ? error : TIER1_EMIT_MEMORY;
+        error = tier1_emit_append_kind(buffer, load, 'L') ? error : TIER1_EMIT_MEMORY;
         emitted->spill_loads += 1;
     }
     else if (error == TIER1_EMIT_OK && !*registered && kind == BUSTER_TIER1_ALLOCATE_REMATERIALIZE)
@@ -1828,6 +1841,10 @@ static Tier1EmitError tier1_emit_cfg_fixed(const Tier1SelectPlan* plan, Tier1Emi
 // register (#141): after the moves, which read the registers the loads may write.
 static Tier1EmitError tier1_emit_cfg_entry(const Tier1SelectPlan* plan, Tier1EmitResult* emitted, Arena* scratch, Tier1EmitBuffer* buffer)
 {
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+    const uint8_t saved_kind = buffer->measure_kind;
+    buffer->measure_kind = 'p';
+#endif
     const IrFunction* function = plan->function;
     const Tier1CfgInput* input = &emitted->cfg_input;
     const Tier1Allocation* allocation = &emitted->cfg.allocation;
@@ -1962,11 +1979,14 @@ static Tier1EmitError tier1_emit_cfg_entry(const Tier1SelectPlan* plan, Tier1Emi
             const uint32_t width = emitted->prepared.sizes[node];
             const X86Instruction store = { .displacement = slot, .reg = target, .rm = (uint8_t)emitted->frame.base_register, .mode = BUSTER_X86_MEMORY_BASE, .form = width == 8 ? X86_FORM_MOV_RM64_R64 : X86_FORM_MOV_RM32_R32 };
             error = !in_vector && !in_register && !in_slot ? TIER1_EMIT_ALLOCATION : tier1_emit_append(buffer, load) ? error : TIER1_EMIT_MEMORY;
-            error = error == TIER1_EMIT_OK && in_slot ? (tier1_emit_append(buffer, store) ? error : TIER1_EMIT_MEMORY) : error;
+            error = error == TIER1_EMIT_OK && in_slot ? (tier1_emit_append_kind(buffer, store, 'S') ? error : TIER1_EMIT_MEMORY) : error;
             emitted->spill_stores += error == TIER1_EMIT_OK && in_slot;
             tier1_emit_mark(buffer, tier1_origin(TIER1_ORIGIN_ENTRY, node), node);
         }
     }
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+    buffer->measure_kind = saved_kind;
+#endif
     return error;
 }
 
@@ -1989,6 +2009,34 @@ static Tier1EmitError tier1_emit_cfg_moves(Tier1EmitResult* emitted, uint32_t ed
         const uint32_t node = emitted->value_nodes[cfg->move_values[m]];
         const uint32_t width = emitted->prepared.sizes[node];
         X86Instruction records[2] = { { 0 }, { 0 } };
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+        // #2553's split of the edge's records: a phi's operand ('e' moves, 'T' stores, 'U' reloads) or a value live
+        // into the successor ('h', 't', 'u'); a move through the scratch register, a cycle's, 'x'.
+        bool measure_phi = false;
+        {
+            const Tier1CfgInput* in = &emitted->cfg_input;
+            uint32_t p = 0;
+            while (p + 1 < in->block_count && in->successor_offsets[p + 1] <= edge)
+            {
+                p += 1;
+            }
+            const uint32_t t = in->successors[edge];
+            uint32_t j = 0;
+            while (in->predecessors[in->predecessor_offsets[t] + j] != p)
+            {
+                j += 1;
+            }
+            for (uint32_t k = in->phi_offsets[t]; k < in->phi_offsets[t + 1]; k += 1)
+            {
+                measure_phi = measure_phi || in->phi_operands[in->phi_operand_offsets[k] + j] == cfg->move_values[m];
+            }
+        }
+        const bool measure_conduit = from == BUSTER_TIER1_SELECT_SCRATCH || to == BUSTER_TIER1_SELECT_SCRATCH;
+        const uint8_t measure_move = measure_conduit ? 'x' : measure_phi ? 'e' : 'h';
+        const uint8_t measure_store = measure_phi ? 'T' : 't';
+        const uint8_t measure_load = measure_phi ? 'U' : 'u';
+        uint8_t record_kinds[2] = { measure_move, measure_move };
+#endif
         uint32_t record_count = 0;
         int32_t offset = 0;
         // A mask (#179) between opmask registers (k0 the class's scratch among them) and slots, by kmov of its width:
@@ -2010,11 +2058,17 @@ static Tier1EmitError tier1_emit_cfg_moves(Tier1EmitResult* emitted, uint32_t ed
         }
         else if (vector && from_vector && tier1_emit_cfg_slot(emitted, to, &offset))
         {
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+            record_kinds[record_count] = measure_store;
+#endif
             records[record_count++] = (X86Instruction){ .displacement = offset, .reg = (uint8_t)(from & 31), .rm = base, .mode = BUSTER_X86_MEMORY_BASE, .form = floats->store };
             emitted->spill_stores += 1;
         }
         else if (vector && to_vector && tier1_emit_cfg_slot(emitted, from, &offset))
         {
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+            record_kinds[record_count] = measure_load;
+#endif
             records[record_count++] = (X86Instruction){ .displacement = offset, .reg = (uint8_t)(to & 31), .rm = base, .mode = BUSTER_X86_MEMORY_BASE, .form = floats->load };
             emitted->spill_loads += 1;
         }
@@ -2028,11 +2082,17 @@ static Tier1EmitError tier1_emit_cfg_moves(Tier1EmitResult* emitted, uint32_t ed
         }
         else if (mask && from_mask && tier1_emit_cfg_slot(emitted, to, &offset))
         {
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+            record_kinds[record_count] = measure_store;
+#endif
             records[record_count++] = (X86Instruction){ .displacement = offset, .reg = (uint8_t)(from & 7), .rm = base, .mode = BUSTER_X86_MEMORY_BASE, .form = forms->store };
             emitted->spill_stores += 1;
         }
         else if (mask && to_mask && tier1_emit_cfg_slot(emitted, from, &offset))
         {
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+            record_kinds[record_count] = measure_load;
+#endif
             records[record_count++] = (X86Instruction){ .displacement = offset, .reg = (uint8_t)(to & 7), .rm = base, .mode = BUSTER_X86_MEMORY_BASE, .form = forms->load };
             emitted->spill_loads += 1;
         }
@@ -2049,6 +2109,9 @@ static Tier1EmitError tier1_emit_cfg_moves(Tier1EmitResult* emitted, uint32_t ed
             emitted->edge_moves += error == TIER1_EMIT_OK;
             if (to >= 16)
             {
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+                record_kinds[record_count] = measure_store;
+#endif
                 records[record_count++] = (X86Instruction){ .displacement = offset, .reg = target, .rm = base, .mode = BUSTER_X86_MEMORY_BASE, .form = width == 8 ? X86_FORM_MOV_RM64_R64 : X86_FORM_MOV_RM32_R32 };
             }
         }
@@ -2058,11 +2121,17 @@ static Tier1EmitError tier1_emit_cfg_moves(Tier1EmitResult* emitted, uint32_t ed
         }
         else if (from < 16 && tier1_emit_cfg_slot(emitted, to, &offset))
         {
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+            record_kinds[record_count] = measure_store;
+#endif
             records[record_count++] = (X86Instruction){ .displacement = offset, .reg = (uint8_t)from, .rm = base, .mode = BUSTER_X86_MEMORY_BASE, .form = width == 8 ? X86_FORM_MOV_RM64_R64 : X86_FORM_MOV_RM32_R32 };
             emitted->spill_stores += 1;
         }
         else if (to < 16 && tier1_emit_cfg_slot(emitted, from, &offset))
         {
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+            record_kinds[record_count] = measure_load;
+#endif
             records[record_count++] = (X86Instruction){ .displacement = offset, .reg = (uint8_t)to, .rm = base, .mode = BUSTER_X86_MEMORY_BASE, .form = width == 8 ? X86_FORM_MOV_R64_RM64 : X86_FORM_MOV_R32_RM32 };
             emitted->spill_loads += 1;
         }
@@ -2073,7 +2142,7 @@ static Tier1EmitError tier1_emit_cfg_moves(Tier1EmitResult* emitted, uint32_t ed
         }
         for (uint32_t r = 0; error == TIER1_EMIT_OK && r < record_count; r += 1)
         {
-            error = tier1_emit_append(buffer, records[r]) ? error : TIER1_EMIT_MEMORY;
+            error = tier1_emit_append_kind(buffer, records[r], record_kinds[r]) ? error : TIER1_EMIT_MEMORY;
         }
         emitted->edge_moves += error == TIER1_EMIT_OK ? record_count : 0;
         tier1_emit_mark(buffer, tier1_origin(TIER1_ORIGIN_EDGE, edge), node);
@@ -2145,7 +2214,7 @@ static bool tier1_emit_cfg_dead_definition(const Tier1EmitResult* emitted, uint3
 // records are in: its branch slot and goal go in the pending columns.
 static Tier1EmitError tier1_emit_cfg_jump(Tier1EmitBuffer* buffer, uint16_t form, uint32_t goal, uint32_t* pending_branches, uint32_t* pending_goals, uint32_t* pending, Tier1EmitResult* emitted)
 {
-    const bool room = buffer->branch_count < buffer->branch_capacity && tier1_emit_append(buffer, (X86Instruction){ .form = form });
+    const bool room = buffer->branch_count < buffer->branch_capacity && tier1_emit_append_kind(buffer, (X86Instruction){ .form = form }, 'j');
     if (room)
     {
         buffer->branches[buffer->branch_count] = buffer->count - 1;
@@ -3211,7 +3280,8 @@ static Tier1EmitError tier1_emit_cfg_row(const Tier1SelectPlan* plan, Tier1EmitR
         {
             tier1_emit_mark(buffer, tier1_origin(TIER1_ORIGIN_MOVE, use + 1), BUSTER_IR_NONE);
         }
-        error = tier1_emit_append(buffer, records[r]) ? error : TIER1_EMIT_MEMORY;
+        // Borrowed masks' saves are the first records, their restores the last, separate from the machine row.
+        error = tier1_emit_append_kind(buffer, records[r], r < (uint32_t)__builtin_popcount(borrowed) ? 'C' : r >= count - (uint32_t)__builtin_popcount(borrowed) ? 'R' : 'n') ? error : TIER1_EMIT_MEMORY;
     }
     tier1_emit_mark(buffer, tier1_origin(error == TIER1_EMIT_OK && count == row_first ? TIER1_ORIGIN_MOVE : TIER1_ORIGIN_NODE, error == TIER1_EMIT_OK && count == row_first ? use + 1 : node), BUSTER_IR_NONE);
     emitted->machine_rows += error == TIER1_EMIT_OK ? 1 : 0;
@@ -3228,6 +3298,10 @@ static Tier1EmitError tier1_emit_cfg_row(const Tier1SelectPlan* plan, Tier1EmitR
 // holds 8: an edge of more such phis refuses the function (TIER1_EMIT_UNSUPPORTED).
 static Tier1EmitError tier1_emit_cfg_x87_phis(const IrFunction* function, Tier1EmitResult* emitted, uint32_t edge, Tier1EmitBuffer* buffer)
 {
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+    const uint8_t saved_kind = buffer->measure_kind;
+    buffer->measure_kind = 'U';
+#endif
     const Tier1CfgInput* input = &emitted->cfg_input;
     const uint32_t added = input->block_count - function->block_count;
     // The edge's predecessor: the block whose successors' range holds it.
@@ -3275,8 +3349,11 @@ static Tier1EmitError tier1_emit_cfg_x87_phis(const IrFunction* function, Tier1E
     }
     for (uint32_t k = copies; error == TIER1_EMIT_OK && k-- > 0;)
     {
-        error = tier1_emit_append(buffer, tier1_emit_cfg_x87_memory(X86_FORM_FSTP_M80, base, destinations[k])) ? error : TIER1_EMIT_MEMORY;
+        error = tier1_emit_append_kind(buffer, tier1_emit_cfg_x87_memory(X86_FORM_FSTP_M80, base, destinations[k]), 'T') ? error : TIER1_EMIT_MEMORY;
     }
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+    buffer->measure_kind = saved_kind;
+#endif
     return error;
 }
 
@@ -3978,6 +4055,8 @@ static void tier1_emit_cfg_x87_transfers(const Tier1SelectPlan* plan, Tier1EmitR
     arena_pop_to(scratch, mark);
 }
 
+static const uint32_t* tier1_emit_cfg_parameter_rows(const Tier1SelectPlan* plan, const Tier1EmitResult* emitted, Arena* scratch);
+
 static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const uint8_t* allowed_forms, bool certify, bool sources, Arena* output, Arena* scratch, Tier1EmitResult* emitted, uint32_t* error_node)
 {
     const IrFunction* function = plan->function;
@@ -4002,6 +4081,14 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     const uint64_t output_mark = output->length;
     const uint64_t scratch_mark = scratch->length;
     Tier1EmitError error = capacity <= UINT32_MAX && branch_capacity <= UINT32_MAX ? TIER1_EMIT_OK : TIER1_EMIT_LIMIT;
+    const uint32_t* parameter_rows = 0;
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+    const char* row_setting = getenv("BUSTER_TIER1_PARAMETER_ROWS");
+    if (error == TIER1_EMIT_OK && row_setting != 0 && strcmp(row_setting, "1") == 0)
+    {
+        parameter_rows = tier1_emit_cfg_parameter_rows(plan, emitted, scratch);
+    }
+#endif
     Tier1SelectCode* code = &emitted->code;
     Tier1EmitBuffer buffer = { .capacity = (uint32_t)capacity, .branch_capacity = (uint32_t)branch_capacity };
     Tier1SelectRequests requests = { 0 };
@@ -4034,6 +4121,11 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
     bool ok = error == TIER1_EMIT_OK;
     code->records = ok ? ir_allocate(output, capacity, sizeof(X86Instruction), &ok) : 0;
     code->cost_ids = ok ? ir_allocate(output, capacity, 1, &ok) : 0;
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+    emitted->measure_kinds = ok && emitted->measure_kinds_enabled ? ir_allocate(output, capacity + 1, 1, &ok) : NULL;
+    buffer.measure_kinds = emitted->measure_kinds;
+    buffer.measure_kind = 'n';
+#endif
     code->node_first = ok ? ir_allocate(output, (uint64_t)count + 1, 4, &ok) : 0;
     code->branches = ok ? ir_allocate(output, branch_capacity, 4, &ok) : 0;
     code->targets = ok ? ir_allocate(output, branch_capacity, 4, &ok) : 0;
@@ -4156,7 +4248,8 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                 const uint8_t kind = allocation->kinds[f];
                 const uint8_t previous = allocation->kinds[f - 1];
                 const uint32_t q = allocation->starts[f];
-                error = kind != BUSTER_TIER1_ALLOCATE_REGISTER || (previous != BUSTER_TIER1_ALLOCATE_REGISTER && ((q - base) & 1) == 0) ? error : TIER1_EMIT_UNSUPPORTED;
+                error = kind != BUSTER_TIER1_ALLOCATE_REGISTER || (((q - base) & 1) == 0 &&
+                        (previous != BUSTER_TIER1_ALLOCATE_REGISTER || cfg->intervals.classes[i] == BUSTER_TIER1_ALLOCATE_GPR)) ? error : TIER1_EMIT_UNSUPPORTED;
                 error = kind != BUSTER_TIER1_ALLOCATE_SPILL || previous != BUSTER_TIER1_ALLOCATE_REMATERIALIZE ? error : TIER1_EMIT_ALLOCATION;
                 if (pass == 0)
                 {
@@ -4219,7 +4312,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
         {
             const uint8_t reg = (uint8_t)tier1_select_parameter_registers[place.index];
             const X86Instruction extend = { .form = signed_parameter ? X86_FORM_MOVSXD_R64_RM32 : narrow == 1 ? X86_FORM_MOVZX_R32_RM8 : X86_FORM_MOVZX_R32_RM16, .reg = reg, .rm = reg };
-            error = tier1_emit_append(&buffer, extend) ? error : TIER1_EMIT_MEMORY;
+            error = tier1_emit_append_kind(&buffer, extend, 'p') ? error : TIER1_EMIT_MEMORY;
             tier1_emit_mark(&buffer, tier1_origin(TIER1_ORIGIN_ENTRY, node), node);
         }
     }
@@ -4302,6 +4395,14 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
         {
             memcpy(saves.rows, exit_rows + (uint64_t)only * BUSTER_TIER1_EMIT_GENERAL_REGISTERS, sizeof(saves.rows));
         }
+        if (parameter_rows != 0)
+        {
+            const __m512i additional = _mm512_loadu_si512(parameter_rows + (uint64_t)b * 16);
+            const __m512i previous = _mm512_loadu_si512(saves.rows);
+            const __m512i unknown = _mm512_set1_epi32((int)BUSTER_IR_NONE);
+            const __mmask16 known = _mm512_cmpneq_epi32_mask(additional, unknown) & _mm512_cmpeq_epi32_mask(previous, unknown);
+            _mm512_storeu_si512(saves.rows, _mm512_mask_mov_epi32(previous, known, additional));
+        }
         if (emitted->entry_rows != 0)
         {
             memcpy(emitted->entry_rows + (uint64_t)b * BUSTER_TIER1_EMIT_GENERAL_REGISTERS, saves.rows, sizeof(saves.rows));
@@ -4314,6 +4415,10 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
             const bool selected = !plan->covered[node] && op != IR_PHI && op != IR_ASM_RESULT && !tier1_select_entry_parameter(function, node);
             // A row call (#141) is no call of a function's: its records are tier1_emit_cfg_row's.
             const bool calls = tier1_select_function_call(function, node);
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+            // Current ABI setup includes stack and aggregate arguments outside tier1_emit_call itself.
+            buffer.measure_kind = calls ? 'a' : 'n';
+#endif
             code->node_first[node] = buffer.count;
             // The interval a definition starts, looked up once for its owed loads and its register below.
             const uint32_t interval = v != BUSTER_TIER1_CFG_NONE && selected ? tier1_cfg_interval_at(cfg, v, use + 1) : BUSTER_TIER1_CFG_NONE;
@@ -4490,7 +4595,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                                 .form = emitted->prepared.vector_bytes != 0 ? (pass == 0 ? tier1_select_class_forms(emitted->prepared.vector_bytes, tier1_emit_encoding(&emitted->prepared))->store : tier1_select_class_forms(emitted->prepared.vector_bytes, tier1_emit_encoding(&emitted->prepared))->load) :
                                         pass == 0 ? X86_FORM_MOVSD_XM64_X : X86_FORM_MOVSD_X_XM64,
                             };
-                            error = tier1_emit_append(&buffer, record) ? error : TIER1_EMIT_MEMORY;
+                            error = tier1_emit_append_kind(&buffer, record, pass == 0 ? 'C' : 'R') ? error : TIER1_EMIT_MEMORY;
                             emitted->call_stores += pass == 0;
                             emitted->call_loads += pass == 1;
                             tier1_emit_mark(&buffer, tier1_origin(TIER1_ORIGIN_MOVE, use + 1), BUSTER_IR_NONE);
@@ -4512,7 +4617,7 @@ static Tier1EmitError tier1_emit_cfg_records(const Tier1SelectPlan* plan, const 
                                 .mode = BUSTER_X86_MEMORY_BASE,
                                 .form = pass == 0 ? forms->store : forms->load,
                             };
-                            error = tier1_emit_append(&buffer, record) ? error : TIER1_EMIT_MEMORY;
+                            error = tier1_emit_append_kind(&buffer, record, pass == 0 ? 'C' : 'R') ? error : TIER1_EMIT_MEMORY;
                             emitted->call_stores += pass == 0;
                             emitted->call_loads += pass == 1;
                             tier1_emit_mark(&buffer, tier1_origin(TIER1_ORIGIN_MOVE, use + 1), BUSTER_IR_NONE);
@@ -5046,6 +5151,7 @@ static bool tier1_emit_cfg_preference(const Tier1SelectPlan* plan, const Tier1Em
     uint8_t* hot = ok ? ir_allocate(scratch, (uint64_t)input->value_count + 1, 1, &ok) : 0;
     uint32_t candidates = 0;
     uint32_t hot_count = 0;
+    const uint32_t experiment = tier1_measure_experiment();
     for (uint32_t pass = 0; ok && pass < 2; pass += 1)
     {
         if (pass == 1 && candidates != 0)
@@ -5118,15 +5224,16 @@ static bool tier1_emit_cfg_preference(const Tier1SelectPlan* plan, const Tier1Em
             // A recomputable value read on every iteration of a loop (#2574) may hold a caller-saved register past calls too,
             // which evict it: recomputed after one, where it is next needed, rather than evicted first from the callee-saved
             // registers the loop's other values crowd.
-            const uint32_t across = hot[v] == 1 ? callee | (caller & BUSTER_TIER1_EMIT_CFG_RESIDENT) : callee;
+            const bool resident = hot[v] == 1 || ((experiment & 4u) != 0 && recipe);
+            const uint32_t across = resident ? callee | (caller & BUSTER_TIER1_EMIT_CFG_RESIDENT) : callee;
             allowed[v] = general ? (crosses ? across : avoid != 0 ? caller | callee : caller) & ~avoid : input->allowed_registers[v];
             count += pass == 1 && general && (crosses || avoid != 0);
-            hot_count += pass == 1 && hot[v] == 1 && (caller & BUSTER_TIER1_EMIT_CFG_RESIDENT) != 0;
+            hot_count += pass == 1 && resident && (caller & BUSTER_TIER1_EMIT_CFG_RESIDENT) != 0;
         }
     }
     // The calls' definition phases clobber the caller-saved registers in the preferred problem, where a hot value leaves
     // one of them: its recomputation, where it is next needed, stands for a save and a reload around the call.
-    uint32_t* clobbers = ok && hot_count != 0 ? ir_allocate(output, (uint64_t)call_count + 1, 4, &ok) : 0;
+    uint32_t* clobbers = ok && (hot_count != 0 || ((experiment & 2u) != 0 && call_count != 0)) ? ir_allocate(output, (uint64_t)call_count + 1, 4, &ok) : 0;
     if (clobbers != 0 && call_count != 0)
     {
         memcpy(clobbers, calls, (uint64_t)call_count * 4);
@@ -5160,6 +5267,25 @@ static uint32_t tier1_emit_cfg_callee_used(const Tier1CfgAllocation* cfg, uint32
     }
     return used;
 }
+
+#include "tier1_emit_exchange.c"
+#include "tier1_emit_recolor.c"
+#include "tier1_emit_recolor_cost.c"
+#include "tier1_emit_recolor_path.c"
+#include "tier1_emit_recolor_policy.c"
+#include "tier1_emit_region_exchange.c"
+#include "tier1_emit_region_admit.c"
+#include "tier1_emit_region_proposal.c"
+#include "tier1_emit_epoch_cache.c"
+#include "tier1_emit_region_arguments.c"
+#include "tier1_emit_region_score.c"
+#include "tier1_emit_region_path_gain.c"
+#include "tier1_emit_region_policy.c"
+#include "tier1_emit_parameter_rows.c"
+#include "tier1_emit_parameter_partition.c"
+#include "tier1_emit_batch_policy.c"
+#include "tier1_emit_call_windows.c"
+#include "tier1_emit_spill_regions.c"
 
 // An allocation's outcome as the function's: a constraint the allocator met is TIER1_EMIT_ALLOCATION; and without fixed
 // ranges there are no splits, each class's temporary slot a frame row of its own, so an allocation with either is too.
@@ -5279,7 +5405,8 @@ static Tier1EmitError tier1_emit_cfg_two_calls(const Tier1SelectPlan* plan, cons
             *crossing = moved;
         }
     }
-    return tier1_emit_cfg_leaf(options, emitted, output, scratch, input, cfg, error);
+    error = tier1_emit_cfg_leaf(options, emitted, output, scratch, input, cfg, error);
+    return error == TIER1_EMIT_OK && (tier1_measure_experiment() & 384u) == 128u ? tier1_emit_cfg_exchange(plan, emitted, output, scratch, input, cfg) : error;
 }
 
 // The CFG consumer's allocation (#2538): the intervals prepared once for both problems, which have the same ones without
@@ -5324,6 +5451,9 @@ static Tier1EmitError tier1_emit_cfg_one_call(const Tier1SelectPlan* plan, const
         Tier1CfgError second = TIER1_CFG_OK;
         bool taken = false;
         allocated = tier1_cfg_order_run(input, moved != 0 ? &preference : 0, output, scratch, &order, cfg, &preferred, &second, &taken);
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+        tier1_measure_preference = (moved != 0 ? 1u : 0u) | (taken ? 2u : 0u) | ((uint32_t)second << 4);
+#endif
         // The preferred problem only tries to keep values in callee-saved registers. A constraint or exhausted arena
         // discards the preference and keeps the plain allocation; a corrupt input is the allocator's own failure to report.
         if (allocated == TIER1_CFG_OK && tier1_emit_cfg_preference_fatal(second))
@@ -5347,7 +5477,8 @@ static Tier1EmitError tier1_emit_cfg_one_call(const Tier1SelectPlan* plan, const
     {
         tier1_cfg_release(&order.prepared, scratch);
     }
-    return tier1_emit_cfg_leaf(options, emitted, output, scratch, input, cfg, error);
+    error = tier1_emit_cfg_leaf(options, emitted, output, scratch, input, cfg, error);
+    return error == TIER1_EMIT_OK && (tier1_measure_experiment() & 384u) == 128u ? tier1_emit_cfg_exchange(plan, emitted, output, scratch, input, cfg) : error;
 }
 
 // --verify's check of the one-call order (#2538): today's order, tier1_emit_cfg_two_calls, run after it on the problem as
@@ -5383,6 +5514,90 @@ static Tier1EmitError tier1_emit_cfg_order_check(const Tier1SelectPlan* plan, co
     }
     return differs != 0 ? TIER1_EMIT_CERTIFICATE : TIER1_EMIT_OK;
 }
+
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+// #2553's diagnosis, extended for #2610's recipe and parameter investigation. With BUSTER_TIER1_DUMP_BLOCKS=N, a
+// function of N blocks or more appends its blocks, intervals and edge moves to BUSTER_TIER1_DUMP_FILE.
+static void tier1_emit_cfg_dump(const Tier1SelectPlan* plan, const Tier1EmitResult* emitted)
+{
+    const char* setting = getenv("BUSTER_TIER1_DUMP_BLOCKS");
+    const Tier1CfgInput* in = &emitted->cfg_input;
+    const Tier1CfgAllocation* cfg = &emitted->cfg;
+    const char* path = getenv("BUSTER_TIER1_DUMP_FILE");
+    FILE* out = setting != NULL && path != NULL && in->block_count >= (uint32_t)atoi(setting) ? fopen(path, "a") : NULL;
+    if (out != NULL)
+    {
+        const IrFunction* function = plan->function;
+        fprintf(out, "DUMP function instructions=%u blocks=%u values=%u intervals=%u records=%u preference=%u callee=%x\n", function->instruction_count, in->block_count, in->value_count, cfg->intervals.count, emitted->code.count, tier1_measure_preference, emitted->callee_used);
+        for (uint32_t b = 0; b < in->block_count; b += 1)
+        {
+            fprintf(out, "B %u [%u,%u) preds", b, in->block_starts[b], in->block_starts[b + 1]);
+            for (uint32_t p = in->predecessor_offsets[b]; p < in->predecessor_offsets[b + 1]; p += 1)
+            {
+                fprintf(out, " %u", in->predecessors[p]);
+            }
+            fprintf(out, " succs");
+            for (uint32_t e = in->successor_offsets[b]; e < in->successor_offsets[b + 1]; e += 1)
+            {
+                fprintf(out, " %u", in->successors[e]);
+            }
+            fprintf(out, " phis");
+            for (uint32_t k = in->phi_offsets[b]; k < in->phi_offsets[b + 1]; k += 1)
+            {
+                fprintf(out, " v%u(", in->phi_values[k]);
+                for (uint32_t o = in->phi_operand_offsets[k]; o < in->phi_operand_offsets[k + 1]; o += 1)
+                {
+                    fprintf(out, "%s%d", o == in->phi_operand_offsets[k] ? "" : ",", (int)in->phi_operands[o]);
+                }
+                fprintf(out, ")");
+            }
+            fprintf(out, "\n");
+        }
+        for (uint32_t v = 0; v < in->value_count; v += 1)
+        {
+            const uint32_t node = emitted->value_nodes[v];
+            const Tier1SelectPattern* pattern = &plan->patterns[node];
+            fprintf(out, "V v%u node=%u op=%s class=%u def=%u allowed=%x bound=%x uses=%u recipe=%u rule=%u operands=%u,%u object=%u rip=%u", v, node, ir_op_names[function->op[node]], in->classes[v], in->definitions[v], in->allowed_registers[v], in->definition_registers != NULL ? in->definition_registers[v] : 0, in->use_offsets[v + 1] - in->use_offsets[v], emitted->prepared.recipes.operations != NULL ? emitted->prepared.recipes.operations[node] : 0, pattern->rule, pattern->values[0], pattern->values[1], pattern->stack_object, pattern->rip);
+            for (uint32_t i = cfg->value_interval_offsets[v]; i < cfg->value_interval_offsets[v + 1]; i += 1)
+            {
+                fprintf(out, " I%u[%u,%u)", i, cfg->intervals.starts[i], cfg->intervals.ends[i]);
+                for (uint32_t f = cfg->allocation.fragment_offsets[i]; f < cfg->allocation.fragment_offsets[i + 1]; f += 1)
+                {
+                    const uint8_t kind = cfg->allocation.kinds[f];
+                    fprintf(out, "%s%u:%c%d", f == cfg->allocation.fragment_offsets[i] ? "{" : ",", cfg->allocation.starts[f], kind == BUSTER_TIER1_ALLOCATE_REGISTER ? 'r' : kind == BUSTER_TIER1_ALLOCATE_SPILL ? 's' : 'm', kind == BUSTER_TIER1_ALLOCATE_REGISTER ? (int)cfg->allocation.registers[f] : -1);
+                }
+                fprintf(out, "}");
+            }
+            fprintf(out, "\n");
+        }
+        for (uint32_t node = 0; node < function->instruction_count; node += 1)
+        {
+            if (!plan->covered[node] && tier1_select_function_call(function, node))
+            {
+                const uint32_t position = 2 * (in->block_count - function->block_count) + 2 * node;
+                fprintf(out, "CALL node=%u position=%u block=%u first=%u past=%u\n", node, position,
+                        tier1_cfg_block_of(in, position), emitted->code.node_first[node], emitted->code.node_first[node + 1]);
+            }
+        }
+        for (uint32_t b = 0; b < in->block_count; b += 1)
+        {
+            for (uint32_t e = in->successor_offsets[b]; e < in->successor_offsets[b + 1]; e += 1)
+            {
+                if (cfg->edge_move_offsets[e] != cfg->edge_move_offsets[e + 1])
+                {
+                    fprintf(out, "E %u->%u place=%u", b, in->successors[e], cfg->edge_placements[e]);
+                    for (uint32_t m = cfg->edge_move_offsets[e]; m < cfg->edge_move_offsets[e + 1]; m += 1)
+                    {
+                        fprintf(out, " v%u:%d>%d", cfg->move_values[m], (int)cfg->move_sources[m], (int)cfg->move_destinations[m]);
+                    }
+                    fprintf(out, "\n");
+                }
+            }
+        }
+        fclose(out);
+    }
+}
+#endif
 
 // Refine each vector value's mask by its producer and every selected use before allocation. The arrays belong to this
 // just-built problem and no allocation has borrowed them yet. One selected-kernel probe per node qualifies all its
@@ -5445,6 +5660,7 @@ static void tier1_emit_cfg_vector_constraints(const Tier1SelectPlan* plan, const
 // straight-line path compiles as it did without it.
 static __attribute__((noinline)) Tier1EmitError tier1_emit_cfg_function(const Tier1SelectPlan* plan, const IrCfg* verified_cfg, const Tier1EmitOptions* options, const uint8_t* allowed_forms, Arena* output, Arena* scratch, Tier1EmitResult* emitted, uint32_t* error_node)
 {
+    uint32_t retained_window_rows = 0;
     emitted->general = true;
     // A target without AVX512VL (#1281) has no EVEX form of a 16- or 32-byte vector: its moves, spills and kernels take
     // VEX ones, and machine rows their roles below xmm16.
@@ -5472,6 +5688,42 @@ static __attribute__((noinline)) Tier1EmitError tier1_emit_cfg_function(const Ti
     {
         error = tier1_emit_cfg_order_check(plan, options, emitted, &problem, output, scratch);
     }
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+    const char* partition_env = getenv("BUSTER_TIER1_PARTITION_PARAMETERS");
+    if (error == TIER1_EMIT_OK && partition_env != 0 && strcmp(partition_env, "1") == 0)
+    {
+        tier1_emit_cfg_partition_parameters(plan, emitted, output, scratch, &emitted->cfg_input, &emitted->cfg);
+    }
+    const char* spill_env = getenv("BUSTER_TIER1_SPILL_REGIONS");
+    if (error == TIER1_EMIT_OK && spill_env != 0 && strcmp(spill_env, "1") == 0)
+    {
+        tier1_emit_cfg_spill_regions(plan, emitted, output, scratch, &emitted->cfg_input, &emitted->cfg, &retained_window_rows);
+    }
+#endif
+    if (error == TIER1_EMIT_OK && (tier1_measure_experiment() & 256u) != 0)
+    {
+        error = tier1_emit_cfg_exchange_weighted(plan, emitted, output, scratch, &emitted->cfg_input, &emitted->cfg);
+    }
+    if (error == TIER1_EMIT_OK && (tier1_measure_experiment() & 512u) != 0)
+    {
+        error = tier1_emit_cfg_recolor_parameters(plan, emitted, output, scratch, &emitted->cfg_input, &emitted->cfg);
+    }
+    if (error == TIER1_EMIT_OK && (tier1_measure_experiment() & 1024u) != 0)
+    {
+        error = tier1_emit_cfg_cached_regions(plan, emitted, output, scratch, &emitted->cfg_input, &emitted->cfg);
+    }
+    if (error == TIER1_EMIT_OK && (tier1_measure_experiment() & 2048u) != 0)
+    {
+        error = tier1_emit_cfg_batch_regions(plan, emitted, output, scratch, &emitted->cfg_input, &emitted->cfg);
+    }
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+    const char* window_env = getenv("BUSTER_TIER1_CALL_WINDOWS");
+    const uint32_t window_mode = window_env == 0 ? 0 : strcmp(window_env, "1") == 0 ? 1 : strcmp(window_env, "2") == 0 ? 2 : 0;
+    if (error == TIER1_EMIT_OK && window_mode != 0)
+    {
+        tier1_emit_cfg_call_windows(plan, emitted, output, scratch, &emitted->cfg_input, &emitted->cfg, window_mode, &retained_window_rows);
+    }
+#endif
     // A leaf whose values took its callee-saved registers (tier1_emit_cfg_leaf) saves them as a function that calls does.
     emitted->callee_registers |= error == TIER1_EMIT_OK && emitted->cfg_input.avoided_general != 0 ? emitted->leaf_registers : 0;
     emitted->callee_used = error == TIER1_EMIT_OK ? tier1_emit_cfg_callee_used(&emitted->cfg, emitted->callee_registers) : 0;
@@ -5490,6 +5742,7 @@ static __attribute__((noinline)) Tier1EmitError tier1_emit_cfg_function(const Ti
     if (error == TIER1_EMIT_OK)
     {
         error = tier1_emit_cfg_saves(plan, scratch, emitted);
+        emitted->prepared.call_save_mask |= retained_window_rows;
     }
     if (error == TIER1_EMIT_OK)
     {
@@ -5500,6 +5753,12 @@ static __attribute__((noinline)) Tier1EmitError tier1_emit_cfg_function(const Ti
     {
         error = tier1_emit_cfg_records(plan, allowed_forms, options->certify || options->sources, options->sources, output, scratch, emitted, error_node);
     }
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+    if (error == TIER1_EMIT_OK)
+    {
+        tier1_emit_cfg_dump(plan, emitted);
+    }
+#endif
     return error;
 }
 

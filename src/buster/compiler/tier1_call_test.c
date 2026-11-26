@@ -589,9 +589,9 @@ static bool tier1_call_run_fixture(Tier1EmitTest* test, Tier1CallFixture* fixtur
 // - TIER1_CALL_CARRY: B is P's one successor and P is B's one predecessor, before it in layout. P's row still holds the
 //   fourth parameter, so B's call stores nothing. Its certificate proves both register and carried row (#1270).
 // - TIER1_CALL_CARRY_JOIN: P branches on the first result to B or to an empty block C that jumps to B, so B has two
-//   predecessors.
+//   predecessors. The parameter-row meet can prove P's fourth-parameter home on both paths into B.
 // - TIER1_CALL_CARRY_LATER: the entry, with the first call, jumps to P, the last block, which jumps back to B, between
-//   them. B's one predecessor comes after it in layout.
+//   them. B's one predecessor comes after it in layout; the parameter-row meet follows the real entry path to B.
 static bool tier1_call_carry_fixture(Tier1EmitTest* test, Tier1CallFixture* fixture, uint32_t carry)
 {
     const uint32_t count = carry == TIER1_CALL_CARRY ? 9 : carry == TIER1_CALL_CARRY_JOIN ? 12 : 10;
@@ -1283,16 +1283,30 @@ static void tier1_call_compile(Tier1EmitTest* test, const Tier1CallFixture* fixt
             else if (fixture->run || fixture->carry != 0)
             {
                 // The values that live past both calls are stored at the first (some are, in their incoming caller-saved
-                // registers), and the second stores none of them where its code has the first's rows: the run's one
-                // block. In another block, the carry's, the second call stores again (#1116, #939). Each store is loaded
-                // back.
+                // registers), and the second stores none of them where its entry proves the first's rows. The original
+                // carry follows one earlier predecessor; the optional parameter-row meet also proves the join and
+                // later-layout fixtures' immutable fourth parameter. Both retain their physical boundary reloads.
                 const uint32_t first = tier1_call_record(&emitted, 0);
                 const uint32_t second = tier1_call_record(&emitted, 1);
                 const uint32_t before = tier1_emit_test_save_stores(&emitted, 0, first);
                 const uint32_t between = tier1_emit_test_save_stores(&emitted, first, second);
-                const bool carried = fixture->run || fixture->carry == TIER1_CALL_CARRY;
+                bool parameter_rows = false;
+#if defined(BUSTER_TIER1_MEASURE_KINDS)
+                const char* row_setting = getenv("BUSTER_TIER1_PARAMETER_ROWS");
+                parameter_rows = row_setting != 0 && strcmp(row_setting, "1") == 0;
+#endif
+                const bool proven_parameter = parameter_rows && (fixture->carry == TIER1_CALL_CARRY_JOIN || fixture->carry == TIER1_CALL_CARRY_LATER);
+                const bool carried = fixture->run || fixture->carry == TIER1_CALL_CARRY || proven_parameter;
                 tier1_emit_test_expect(test, emitted.general && second < emitted.code.count && before != 0 && (carried ? between == 0 : between != 0),
-                                       "a call doesn't store again a row its block stored its value into, and stores in another block");
+                                       "a call reuses a proven row home and stores again when its entry has no proof");
+                if (proven_parameter)
+                {
+                    const uint32_t added = emitted.cfg_input.block_count - fixture->function.block_count;
+                    const uint32_t block = added + (fixture->carry == TIER1_CALL_CARRY_JOIN ? 2u : 1u);
+                    const bool home = emitted.entry_rows != 0 && emitted.entry_rows[(uint64_t)block * BUSTER_TIER1_EMIT_GENERAL_REGISTERS + X86_REGISTER_RCX] == 3;
+                    tier1_emit_test_expect(test, before == 2 && between == 0 && emitted.call_stores == 2 && emitted.call_loads == 3 && home,
+                                           "the fourth parameter's proven RCX row removes only its repeat store and retains all three reloads");
+                }
                 if (test->failures < 20 && !(second < emitted.code.count && before != 0 && (carried ? between == 0 : between != 0)))
                 {
                     fprintf(stderr, "  run=%u carry=%u: stores before the first call %u, between the calls %u\n", fixture->run, fixture->carry, before, between);
