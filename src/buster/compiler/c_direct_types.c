@@ -1855,8 +1855,9 @@ static void fast_cc_const_apply(FastCCState* cc, uint16_t op, FastConstVal* vals
 }
 
 // Level 2: Pure leaf iterative integer constant expression evaluator (for array bounds, enums, bitfields, case labels,
-// aligned(N), _Static_assert, etc.) — NEVER calls runtime expression compiler or struct definition parser!
-static int64_t fast_cc_const_int_expr(FastCCState* cc, bool stop_at_comma)
+// aligned(N), _Static_assert, etc.) — NEVER calls runtime expression compiler or struct definition parser! #3577: where
+// out_unsigned isn't NULL, whether the value's type is unsigned (a value past INT64_MAX returns negative).
+static int64_t fast_cc_const_int_expr_full(FastCCState* cc, bool stop_at_comma, bool* out_unsigned)
 {
     FastConstVal vals[64];
     uint16_t ops[64];
@@ -2157,7 +2158,17 @@ static int64_t fast_cc_const_int_expr(FastCCState* cc, bool stop_at_comma)
     {
         fast_cc_bail(cc, "empty const_int_expr");
     }
-    return (!cc->bailout && vsp == 1u) ? (int64_t)vals[0].v : 0;
+    const bool valued = !cc->bailout && vsp == 1u;
+    if (out_unsigned != NULL)
+    {
+        *out_unsigned = valued && vals[0].u;
+    }
+    return valued ? (int64_t)vals[0].v : 0;
+}
+
+static int64_t fast_cc_const_int_expr(FastCCState* cc, bool stop_at_comma)
+{
+    return fast_cc_const_int_expr_full(cc, stop_at_comma, NULL);
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -2248,6 +2259,8 @@ static FastType fast_cc_parse_enum(FastCCState* cc)
         int64_t next_val = 0;
         bool need_i64 = false;
         bool has_neg = false;
+        // #3577: the next enumerator's implicit value would be past INT64_MAX.
+        bool implicit_past = false;
         // #3577: the enumerators are consecutive symbols, from here (a switch's -Wswitch reads them).
         const uint32_t first_enumerator = cc->sym_count;
         while (cc->pos < cc->tcount && fast_cc_peek(cc) != FTOK_RBRACE && !cc->bailout)
@@ -2260,10 +2273,19 @@ static FastType fast_cc_parse_enum(FastCCState* cc)
             const uint32_t eid = fast_cc_data(cc);
             cc->pos += 1u;
             fast_cc_parse_attributes(cc, NULL);
+            // #3577: a value past INT64_MAX, written or implicit, which int64_t values don't hold: the full pipeline gives
+            // the enum an unsigned 64-bit type, or warns -Wenum-too-large beside a negative value.
             if (fast_cc_peek(cc) == FTOK_ASSIGN)
             {
                 cc->pos += 1u;
-                next_val = fast_cc_const_int_expr(cc, true);
+                bool value_unsigned = false;
+                next_val = fast_cc_const_int_expr_full(cc, true, &value_unsigned);
+                if (value_unsigned && next_val < 0) { fast_cc_bail(cc, "an enumerator past INT64_MAX"); break; }
+            }
+            else if (implicit_past)
+            {
+                fast_cc_bail(cc, "an enumerator past INT64_MAX");
+                break;
             }
             if (next_val < 0) { has_neg = true; }
             if (next_val > INT32_MAX || next_val < INT32_MIN)
@@ -2277,7 +2299,8 @@ static FastType fast_cc_parse_enum(FastCCState* cc)
                 .const_val = next_val,
                 .sec_off = cidx,
             });
-            next_val += 1;
+            implicit_past = next_val == INT64_MAX;
+            next_val = (int64_t)((uint64_t)next_val + 1u);
             if (fast_cc_peek(cc) == FTOK_COMMA) { cc->pos += 1u; }
         }
         if (fast_cc_peek(cc) == FTOK_RBRACE) { cc->pos += 1u; }

@@ -4497,6 +4497,11 @@ static int c_direct_unit_tests(void)
         // -Wextern-initializer: an extern object's initializer at file scope, the first declarator's or a later one's.
         "extern int x = 1;\nint f(void) { return x; }\n",
         "extern int x, y = 2;\nint f(void) { return x + y; }\n",
+        // An enumerator past INT64_MAX, written or implicit: the full pipeline's unsigned 64-bit enum (main's direct path
+        // took 0xFFFFFFFFFFFFFFFFull for an int -1), or its -Wenum-too-large beside a negative value.
+        "enum E { X = 0xFFFFFFFFFFFFFFFFull };\nint f(void) { return X > 0; }\n",
+        "enum E { X = 0x8000000000000000ull, Y = -1 };\nint f(void) { return 0; }\n",
+        "enum E { X = 0x7FFFFFFFFFFFFFFF, Y };\nint f(void) { return 0; }\n",
     };
     for (uint32_t i = 0; i < sizeof(bail_cases) / sizeof(bail_cases[0]); i += 1)
     {
