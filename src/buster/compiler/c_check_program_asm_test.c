@@ -359,8 +359,8 @@ static void check_test_program_asm_unit_placement(CheckTest* test)
 {
     enum
     {
-        STATEMENTS = 17,
-        UNITS = 14,
+        STATEMENTS = 18,
+        UNITS = 15,
     };
     CheckTestFixtures fixtures;
     const bool loaded = check_test_fixtures_load(&fixtures, "checker/programs/asm-directive-placement") && fixtures.count == 1;

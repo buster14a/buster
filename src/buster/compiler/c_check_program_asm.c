@@ -3373,8 +3373,7 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
     if (valid && reason == NULL && !raw_marker)
     {
         code = asm_assemble_code(text, index, (AsmOptions){ .integrated = true }, output, scratch);
-        if (code.error != NULL && code.directive && !program->asm_helpers && !check_program_helper_forced(program, CHECK_PROGRAM_HELPER_ASM) &&
-            plan->presentation == NULL)
+        if (code.error != NULL && code.directive && !program->asm_helpers && !check_program_helper_forced(program, CHECK_PROGRAM_HELPER_ASM))
         {
             const uint32_t labels = statement->is_goto ? statement->label_count : 0;
             const AsmResult body = check_asm_unit_body(text, index, p, labels, exit, output, scratch);
@@ -3386,6 +3385,10 @@ static bool check_program_asm_plan_one(const CheckProgram* program, uint32_t s, 
                 unit = body;
                 unit_assembled = true;
                 code = (AsmCode){ 0 };
+                if (plan->presentation != NULL)
+                {
+                    plan->presentation->size = (uint32_t)unit.link.atoms.size[unit.entry_atom];
+                }
             }
             else
             {

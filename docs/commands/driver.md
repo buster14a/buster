@@ -551,6 +551,14 @@ The emission keeps each function's records for it (`CheckProgramLanes.assembly`,
 the emission's output arena, after branch sizing) and runs the bodies in one
 window (`--emit-window` is 0 under `-S`). Only assembly output requests these copies.
 
+Inline statements placed as direct rows or asm bodies print with their
+containing function (#2351). A template assembled whole retains its final
+record boundaries and byte spans: ordinary instructions keep their symbolic
+spelling, while the spans print their actual bytes, labels and relocations.
+Matched instructions with symbolic fields retain their records too, so GOT
+loads and signed absolute addresses keep their instruction relocations. The
+listing preserves the alignment and compacted layout that `-c` publishes.
+
 With `-g`, the assembly contains the same DWARF 5 section contributions as
 `-c -g`, including the line program, scopes, address table, ranges and
 variable location lists. Section offsets use symbolic `.long` directives.
@@ -560,8 +568,8 @@ and linking code or data in named sections.
 
 For inline assembly with integer constant inputs, `-S` preserves a single
 `.ascii "…"` directive after operand substitution, including the literal text
-that kernel build scripts extract. It retains the directive in the helper
-where `-c` places its bytes. A single raw `->…` line is also supported.
+that kernel build scripts extract. It retains the directive at the same
+in-function byte span where `-c` places it. A single raw `->…` line is also supported.
 The compiler emits it at the statement's instruction boundary so a script
 can read it directly from the assembly listing. Both forms accept basic asm
 or extended asm with no outputs, clobbers or goto labels.
@@ -569,7 +577,8 @@ or extended asm with no outputs, clobbers or goto labels.
 What it doesn't print yet it refuses by name, before the source is read where
 the options say so, and otherwise naming the source and the symbol:
 
-- other inline assembly statements, naked functions and file-scope assembly;
+- inline assembly statements that still require helpers, naked functions and
+  file-scope assembly;
 - thread-local storage, section groups, multiversioned functions' resolvers,
   and the other refusals of the sink below;
 - assembly and linker inputs beside the C sources.
@@ -658,7 +667,8 @@ The form contract, which its tests hold GNU as to:
 
 What the sink doesn't print yet it refuses with the reason naming it
 (`ASSEMBLY_UNSUPPORTED`): thread-local storage, section groups, other
-linked-order section types and flags, unique symbols, code without records (inline assembly's),
+linked-order section types and flags, unique symbols, code without records or
+explicit placed-byte spans,
 the C runtime's `.init` and `.fini` fragments, and fixups GNU as can't spell
 where they are. A view that contradicts itself (records that don't encode to
 their atom's bytes, a symbol inside an instruction, a branch without a target, a

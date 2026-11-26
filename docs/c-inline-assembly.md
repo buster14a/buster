@@ -1442,7 +1442,8 @@ has the commands, the logs and the default path's numbers against main.
   bytes, 64-byte internal and trailing alignment, a directive-only alignment
   before another statement's label, data in a pushed section, absolute and
   PC-relative fixups, `loop` and `jrcxz` across sized branches, address-size
-  prefixes, explicit rsp inputs and packed vector operands. Dead `if (0)`
+  prefixes, explicit rsp inputs, packed vector operands, and a directive asm
+  goto with outputs on every exit and label-address data in another section. Dead `if (0)`
   and unreachable labeled blocks check that absent anchors publish nothing.
   The planner's arena-capacity sweep includes a nonempty directive unit, so
   exhaustion must roll back its allocations and report failure consistently.

@@ -6890,11 +6890,6 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
             {
                 const uint32_t name = code->asm_label_names[k];
                 const uint32_t p = name - asms->name_count;
-                if (name >= asms->name_count && p < asms->plan_count && asms->plans[p].inline_unit)
-                {
-                    // The unit's own symbols were published at this private placement anchor above.
-                    continue;
-                }
                 if (keep_records && name >= asms->name_count && p < asms->plan_count && asms->plans[p].presentation != NULL)
                 {
                     // A dead body has no record. Its text is absent just as its instructions are.
@@ -6913,6 +6908,11 @@ static bool check_program_emit_timed(CheckProgramCode* result, const CheckProgra
                             kept->templates[kept->template_count++] = piece;
                         }
                     }
+                    continue;
+                }
+                if (name >= asms->name_count && p < asms->plan_count && asms->plans[p].inline_unit)
+                {
+                    // The unit's own symbols were published at this private placement anchor above.
                     continue;
                 }
                 const SymbolId label = name < asms->name_count ? asm_symbols[name] : 0;

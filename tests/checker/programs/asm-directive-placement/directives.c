@@ -133,6 +133,20 @@ static int vector_data(int n)
     return (int)(value[0] + value[1] * 3 + value[2] * 5 + value[3] * 7);
 }
 
+static int directed(int n)
+{
+    int first = n;
+    int second = n + 5;
+    __asm__ goto(".p2align 5\n\taddl $7, %0\n\txorl $19, %1\n\ttestl %2, %2\n\tjs %l[negative]\n\tjz %l[zero]\n"
+                 "\t.pushsection .rodata.buster2351_goto, \"a\"\n\t.balign 8\n\t.quad %l[negative], %l[zero]\n\t.popsection"
+                 : "+&r"(first), "+&r"(second) : "r"(n) : "cc" : negative, zero);
+    return first + second * 3;
+negative:
+    return first + second * 5 + 101;
+zero:
+    return first + second * 7 + 211;
+}
+
 static int unreachable(int n)
 {
     if (0)
@@ -152,7 +166,7 @@ int tested(int n)
     for (int i = 0; i < 5; i += 1)
     {
         result += aligned(n + i) + data_bytes(n - i) + relocated(n + i) + short_branches(n - i) + address32(n + i) + fill(n - i) +
-                  section_data(n + i) + trailing_alignment(n + i) + alignment_only(n - i) + stack_input(n + i) + vector_data(n - i) + unreachable(n + i);
+                  section_data(n + i) + trailing_alignment(n + i) + alignment_only(n - i) + stack_input(n + i) + vector_data(n - i) + directed(n - i) + unreachable(n + i);
     }
     return result;
 }

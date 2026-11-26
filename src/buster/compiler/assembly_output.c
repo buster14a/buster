@@ -1382,12 +1382,22 @@ static AssemblyError assembly_data_range(AssemblyText* text, const Link* link, c
     while (error == ASSEMBLY_OK && !text->full && at <= limit)
     {
         assembly_labels(text, link, names, defined, end, &cursor, at);
-        while (code != NULL && piece < code->template_count && code->templates[piece].offset == at)
+        if (code != NULL && piece < code->template_count && code->templates[piece].offset == at &&
+            (at < limit || code->templates[piece].size == 0))
         {
             const AssemblyInline* marker = code->templates + piece++;
-            error = marker->size == 0 ? error : ASSEMBLY_INVALID;
-            *reason = marker->size != 0 ? "a nonempty marker inside placed assembly bytes" : *reason;
-            assembly_inline_text(text, marker);
+            const uint64_t stop = at + marker->size;
+            const bool covers_symbol = cursor < end && link->symbols.value[defined[cursor]] < stop;
+            const bool covers_fixup = next_fixup < fixup_count && link->fixups.offset[fixup_begin + next_fixup] < stop;
+            const bool covers_instruction = instruction < instruction_count && raw_span->instructions[instruction].offset < stop;
+            error = stop <= limit && !covers_symbol && !covers_fixup && !covers_instruction ? ASSEMBLY_OK : ASSEMBLY_INVALID;
+            *reason = error != ASSEMBLY_OK ? "an inline assembly marker overlapping a label, fixup or instruction" : *reason;
+            if (error == ASSEMBLY_OK)
+            {
+                assembly_inline_text(text, marker);
+                at = stop;
+            }
+            continue;
         }
         const uint64_t symbol = cursor < end ? link->symbols.value[defined[cursor]] : limit;
         const uint64_t symbol_at = symbol < limit ? symbol : limit;
@@ -1698,10 +1708,6 @@ static AssemblyError assembly_code(AssemblyText* text, const Link* link, const A
             assembly_unsigned(text, r);
             assembly_append(text, ":\n");
         }
-        while (piece < code->template_count && code->templates[piece].offset == at)
-        {
-            assembly_inline_text(text, &code->templates[piece++]);
-        }
         if (raw_span < code->raw_span_count && code->raw_spans[raw_span].first == r)
         {
             const AssemblyRawSpan span = code->raw_spans[raw_span++];
@@ -1709,6 +1715,10 @@ static AssemblyError assembly_code(AssemblyText* text, const Link* link, const A
                                         &cursor, &next_fixup, code, &piece, &span, reason);
             r += span.count - 1;
             continue;
+        }
+        while (piece < code->template_count && code->templates[piece].offset == at)
+        {
+            assembly_inline_text(text, &code->templates[piece++]);
         }
         // The record's fixups: on its displacement's field, then its immediate's, each at its distance from the end.
         const X86Instruction* record = &code->records[r];

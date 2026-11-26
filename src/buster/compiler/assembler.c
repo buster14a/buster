@@ -4029,7 +4029,11 @@ static void asm_parse(AsmParser* parser)
     asm_place_commons(parser);
     asm_resolve_linked_section_names(parser);
     asm_resolve_aliases(parser);
-    asm_line_finish(parser);
+    // A failed section-index allocation leaves no table for line finalization's section lookups.
+    if (parser->result.error == 0)
+    {
+        asm_line_finish(parser);
+    }
     asm_cfi_finish(parser);
     if (parser->cfi_active)
     {
