@@ -128,6 +128,25 @@ static __attribute__((unused)) void ir_vectorize_target_tier1(const uint8_t* all
             // A strided load's de-interleave (#2808): vpermt2b to vpermt2q.
             target->permute2[from] |= !legacy && ir_vectorize_target_allows(allowed, ir_simd_permute2_forms[from][w]) ? bit : 0;
         }
+        // Indexed memory uses the integer forms even for floating lanes' bits. The index must have exactly one
+        // dword or qword per data lane; the form tables leave the impossible widths empty. Account for the selector's
+        // kmovw save/restore of the destructive mask, its zeroed gather destination, and its index scratch copy too.
+        for (uint32_t size = 2; moves && size < 4; size += 1)
+        {
+            const uint32_t lanes = width >> size;
+            const Tier1SelectMaskForms* mask_forms = tier1_select_mask_forms(lanes <= 8 ? 1 : 2);
+            const bool mask = ir_vectorize_target_allows(allowed, mask_forms->from_general) && ir_vectorize_target_allows(allowed, mask_forms->xnor_forms) &&
+                              ir_vectorize_target_allows(allowed, X86_FORM_KMOVW_R32_K) && ir_vectorize_target_allows(allowed, X86_FORM_KMOVW_K_R32);
+            for (uint32_t index = 0; mask && index < 2; index += 1)
+            {
+                const uint32_t index_width = lanes << (2 + index);
+                const bool index_moves = ir_vectorize_has(target->moves, index_width);
+                const uint16_t index_move = index_width <= 16 ? X86_FORM_MOVAPS_X_XM : tier1_select_vector_forms(index_width, BUSTER_TIER1_ENCODING_EVEX)->move;
+                const bool gather_moves = index_moves && ir_vectorize_target_allows(allowed, index_move) && ir_vectorize_target_allows(allowed, X86_FORM_VPXOR_X_X_XM128);
+                target->gather[size][index] |= gather_moves && ir_vectorize_target_allows(allowed, ir_simd_gather_forms[0][size - 2][index][w]) ? bit : 0;
+                target->scatter[size][index] |= index_moves && ir_vectorize_target_allows(allowed, ir_simd_scatter_forms[0][size - 2][index][w]) ? bit : 0;
+            }
+        }
         // A reduction: tier1_select_reduce's halvings down to one lane, each with its combining form, then lane 0's move.
         for (uint32_t size = 2; moves && size < 4; size += 1)
         {

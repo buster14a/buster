@@ -1742,7 +1742,9 @@ static bool tier1_cert_emitted_unchanged(X86Instruction record)
 // frame range its records write, killed in eights, then its definition. A general register its records give back is not
 // killed: one that holds its own value at the run's end, followed through the records' full-width copies between general
 // registers (a compare-exchange's save of rax in the scratch register and its restore, tier1_select's
-// TIER1_RULE_ATOMIC_RMW); any other write leaves a register holding nothing known.
+// TIER1_RULE_ATOMIC_RMW); any other write leaves a register holding nothing known. A gather or scatter saves its mask
+// through a general register by kmovw: track those low two bytes too. Its restore clears the mask's upper six bytes,
+// so they remain clobbered even where its incoming byte or word value survives (#2808).
 static bool tier1_cert_emitted_originals(Tier1CertEmittedBuild* build, uint32_t node, const Tier1CertEmittedKernel* kernel, const X86Instruction* records, uint32_t count)
 {
     uint64_t writes = 0;
@@ -1753,9 +1755,17 @@ static bool tier1_cert_emitted_originals(Tier1CertEmittedBuild* build, uint32_t 
     spans.count = 0;
     // Whose value at the run's start each general register holds, or UINT8_MAX for none known.
     uint8_t holds[16];
+    // The original mask whose low word each mask register or a general register's saved word holds.
+    uint8_t mask_holds[8];
+    uint8_t saved_masks[16];
     for (uint32_t reg = 0; reg < 16; reg += 1)
     {
         holds[reg] = (uint8_t)reg;
+        saved_masks[reg] = UINT8_MAX;
+    }
+    for (uint32_t reg = 0; reg < 8; reg += 1)
+    {
+        mask_holds[reg] = (uint8_t)reg;
     }
     bool valid = true;
     // The records' effects with their opmask registers, a batch of BUSTER_CERT_EMITTED_EFFECTS at a time.
@@ -1789,13 +1799,29 @@ static bool tier1_cert_emitted_originals(Tier1CertEmittedBuild* build, uint32_t 
         const bool load = plain && record.form == X86_FORM_MOV_R64_RM64;
         const bool store = plain && record.form == X86_FORM_MOV_RM64_R64;
         const uint8_t copied = load ? holds[record.rm] : store ? holds[record.reg] : UINT8_MAX;
+        const bool mask_save = plain && record.form == X86_FORM_KMOVW_R32_K && record.rm < 8;
+        const bool mask_restore = plain && record.form == X86_FORM_KMOVW_K_R32 && record.reg < 8;
+        const uint8_t mask_copied = mask_save ? mask_holds[record.rm] : mask_restore ? saved_masks[record.rm] : UINT8_MAX;
         for (uint32_t reg = 0; reg < 16; reg += 1)
         {
             holds[reg] = (written & BUSTER_X86_RESOURCE_GPR(reg)) != 0 ? UINT8_MAX : holds[reg];
+            saved_masks[reg] = (written & BUSTER_X86_RESOURCE_GPR(reg)) != 0 ? UINT8_MAX : saved_masks[reg];
+        }
+        for (uint32_t reg = 0; reg < 8; reg += 1)
+        {
+            mask_holds[reg] = ((opmasks >> 8 >> reg) & 1) != 0 ? UINT8_MAX : mask_holds[reg];
         }
         if (load || store)
         {
             holds[load ? record.reg : record.rm] = copied;
+        }
+        if (mask_save)
+        {
+            saved_masks[record.reg] = mask_copied;
+        }
+        if (mask_restore)
+        {
+            mask_holds[record.reg] = mask_copied;
         }
         // No record writes the frame base register but the prologue and the epilogues, nor rsp but a call's and a ret's
         // own push and pop.
@@ -1857,7 +1883,21 @@ static bool tier1_cert_emitted_originals(Tier1CertEmittedBuild* build, uint32_t 
         }
         if (reg < 8 && ((masks >> 8 >> reg) & 1) != 0)
         {
-            clobbers[clobber_count++] = tier1_cert_emitted_mask(reg, 8);
+            uint32_t clobber = tier1_cert_emitted_mask(reg, 8);
+            const bool restored = kernel->body == 0 && !kernel->call && mask_holds[reg] == reg;
+            if (restored)
+            {
+                // A clobber view of bytes [2, 8), not a whole-mask write. Keeping the low word's existing tokens also
+                // keeps its other live copies valid; redefining the value here would give it a new incarnation.
+                valid = build->location_count < build->location_capacity;
+                if (valid)
+                {
+                    const Tier1CertLocation whole = build->locations[clobber];
+                    clobber = build->location_count++;
+                    build->locations[clobber] = (Tier1CertLocation){ .unit = whole.unit + 2, .width = 2, .extent = 6, .class = TIER1_CERT_MASK, .reg = (uint8_t)reg };
+                }
+            }
+            clobbers[clobber_count++] = clobber;
         }
     }
     Tier1CertSource* record = 0;
