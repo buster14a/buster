@@ -6472,7 +6472,8 @@ static __attribute__((cold, noinline)) bool fast_cc_checked_long_double_argument
     return taken;
 }
 
-static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, FastVal* args, uint32_t argc, uint32_t outer_arg_sp, FastVal* out)
+// Emit full SysV AMD64 ABI function call (direct or indirect, 6 GP + 8 XMM + stack args, 1-16B & >16B structs, variadic!)
+static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, FastVal* args, uint32_t argc, uint32_t outer_arg_sp)
 {
     FastCCState* cc = ex->cc;
     FastObj* obj = cc->obj;
@@ -6497,9 +6498,9 @@ static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, F
         else if (bid == cc->id_builtin_strlen)  { libc_name = "strlen";  ret_t = FTYPE_U64; }
         if (libc_name == NULL)
         {
-            fval_emit_builtin_call(ex, bid, args, argc, out);
+            fval_emit_builtin_call(ex, bid, args, argc, callee);
             // A void builtin (__builtin_unreachable, __sync_synchronize, ...) is an effect; a value's is not (#3577).
-            out->marks = (uint8_t)(BUSTER_FVAL_MARK_EFFECT * (uint32_t)(out->kind == FVAL_VOID));
+            callee->marks = (uint8_t)(BUSTER_FVAL_MARK_EFFECT * (uint32_t)(callee->kind == FVAL_VOID));
             return;
         }
         // #3577: these builtins' pointer arguments are nonnull to the full pipeline (-Wnonnull for a null constant).
@@ -6600,9 +6601,9 @@ static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, F
         for (uint32_t i = 0; i < argc; i += 1) { fval_release(ex, &args[i]); }
         fval_release(ex, callee);
         // The marks the code below gives the result: a dead branch's statement discards it (#3592).
-        *out = (FastVal){ .type = ret_t, .kind = ftype_is_void(ret_t) ? FVAL_VOID : FVAL_REG,
-                          .marks = (uint8_t)((callee_marks & BUSTER_FVAL_MARK_UNUSED_RESULT) |
-                                             (BUSTER_FVAL_MARK_EFFECT * (uint32_t)((callee_marks & BUSTER_FVAL_MARK_PURE) == 0))) };
+        *callee = (FastVal){ .type = ret_t, .kind = ftype_is_void(ret_t) ? FVAL_VOID : FVAL_REG,
+                             .marks = (uint8_t)((callee_marks & BUSTER_FVAL_MARK_UNUSED_RESULT) |
+                                                (BUSTER_FVAL_MARK_EFFECT * (uint32_t)((callee_marks & BUSTER_FVAL_MARK_PURE) == 0))) };
         return;
     }
 
@@ -6868,14 +6869,14 @@ static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, F
     // Collect return value per SysV AMD64 ABI!
     if (ftype_is_void(ret_t))
     {
-        *out = (FastVal){ .type = FTYPE_VOID, .kind = FVAL_VOID };
+        *callee = (FastVal){ .type = FTYPE_VOID, .kind = FVAL_VOID };
     }
     else if (ftype_is_record(ret_t))
     {
         const FastComplexType* rct = cc->ctypes + (ret_t & BUSTER_FTYPE_CIDX_MASK);
         if (has_sret)
         {
-            *out = (FastVal){ .type = ret_t, .kind = FVAL_LOCAL, .off = sret_slot };
+            *callee = (FastVal){ .type = ret_t, .kind = FVAL_LOCAL, .off = sret_slot };
         }
         else
         {
@@ -6886,13 +6887,13 @@ static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, F
             else if (rct->abi_lo == FABI_SSE) { x86_sse_store(obj, true, FREG_RBP, rslot, fp_r++); }
             if (rct->abi_hi == FABI_INT) { x86_store(obj, FREG_RBP, rslot + 8, gp_r == 0 ? FREG_RAX : FREG_RDX, 8u); }
             else if (rct->abi_hi == FABI_SSE) { x86_sse_store(obj, true, FREG_RBP, rslot + 8, fp_r); }
-            *out = (FastVal){ .type = ret_t, .kind = FVAL_LOCAL, .off = rslot };
+            *callee = (FastVal){ .type = ret_t, .kind = FVAL_LOCAL, .off = rslot };
         }
     }
     else if (ftype_is_float(ret_t))
     {
         ex->xmm_used |= 1u; // XMM0
-        *out = (FastVal){ .type = ret_t, .kind = FVAL_XMM, .reg = 0u };
+        *callee = (FastVal){ .type = ret_t, .kind = FVAL_XMM, .reg = 0u };
     }
     else
     {
@@ -6900,11 +6901,21 @@ static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, F
         const uint32_t rsz = ftype_size(cc, ret_t);
         if (rsz < 4u) { x86_extend(obj, FREG_RAX, FREG_RAX, rsz, ftype_is_signed(cc, ret_t)); }
         ex->gp_used |= (1u << FREG_RAX);
-        *out = (FastVal){ .type = ret_t, .kind = FVAL_REG, .reg = FREG_RAX };
+        *callee = (FastVal){ .type = ret_t, .kind = FVAL_REG, .reg = FREG_RAX };
     }
     // An effect unless the callee is const or pure (whose discarded call -Wunused-value questions).
-    out->marks = (uint8_t)((callee_marks & BUSTER_FVAL_MARK_UNUSED_RESULT) |
-                           (BUSTER_FVAL_MARK_EFFECT * (uint32_t)((callee_marks & BUSTER_FVAL_MARK_PURE) == 0)));
+    callee->marks = (uint8_t)((callee_marks & BUSTER_FVAL_MARK_UNUSED_RESULT) |
+                              (BUSTER_FVAL_MARK_EFFECT * (uint32_t)((callee_marks & BUSTER_FVAL_MARK_PURE) == 0)));
+}
+
+// While the call is emitted, its callee sits just outside the live value stack.
+// The returned value occupies that same slot.
+static inline void fast_expr_finish_call(FastExprCtx* ex, uint32_t first_arg, uint32_t argc)
+{
+    FastVal* callee = &ex->vstack[--ex->vsp];
+    fval_emit_call(ex, callee, ex->call_args + first_arg, argc, first_arg);
+    ex->arg_sp = first_arg;
+    ex->vsp += 1u;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -8236,6 +8247,10 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
                                                                       bool branch_on_true, uint32_t branch_label, FastVal* out_val,
                                                                       const bool logging)
 {
+    // Rewrites change token contents in place. The buffers and their length stay fixed.
+    const uint8_t* const kinds = cc->tk;
+    const uint32_t* const data = cc->td;
+    const uint32_t token_count = cc->tcount;
     FastExprCtx ex;
     ex.cc = cc;
     ex.vsp = 0;
@@ -8264,15 +8279,15 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
     uint32_t osp = 0;
     bool expect_val = true;
 
-    while (cc->pos < cc->tcount && !cc->bailout)
+    while (cc->pos < token_count && !cc->bailout)
     {
-        const uint8_t k = fast_cc_peek(cc);
+        const uint8_t k = kinds[cc->pos];
         if (expect_val)
         {
             // HOT PATH #1 (>60% of expect_val tokens): Identifier (variable, enum constant, function, or recognized builtin)
             if (__builtin_expect(k == FTOK_IDENT, 1))
             {
-                const uint32_t id = fast_cc_data(cc);
+                const uint32_t id = data[cc->pos];
                 cc->pos += 1u;
                 const uint32_t si = id < cc->env_cap ? cc->sym_cur[id] : 0u;
                 if (__builtin_expect(si != 0, 1))
@@ -8363,7 +8378,7 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
             // HOT PATH #2: inline 32-bit integer literal
             if (k == FTOK_INT_LIT)
             {
-                if (ex.vsp < 128u) { ex.vstack[ex.vsp++] = (FastVal){ .type = FTYPE_I32, .kind = FVAL_IMM, .imm = (int64_t)(int32_t)fast_cc_data(cc) }; }
+                if (ex.vsp < 128u) { ex.vstack[ex.vsp++] = (FastVal){ .type = FTYPE_I32, .kind = FVAL_IMM, .imm = (int64_t)(int32_t)data[cc->pos] }; }
                 cc->pos += 1u; expect_val = false; continue;
             }
 
@@ -8638,12 +8653,8 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
             {
                 const FastExprOp cop = ops[--osp];
                 cc->pos += 1u;
-                FastVal callee = ex.vstack[--ex.vsp];
-                FastVal res = { 0 };
                 ex.call_open = cop.lbl2;
-                fval_emit_call(&ex, &callee, ex.call_args + cop.lbl0, 0u, cop.lbl0, &res);
-                ex.arg_sp = cop.lbl0;
-                ex.vstack[ex.vsp++] = res;
+                fast_expr_finish_call(&ex, cop.lbl0, 0u);
                 expect_val = false;
                 continue;
             }
@@ -8922,12 +8933,8 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
                 if (ex.vsp < 2u || ex.arg_sp >= 128u) { fast_cc_bail(cc, "call arg stack"); break; }
                 ex.call_args[ex.arg_sp++] = ex.vstack[--ex.vsp];
                 const uint32_t argc = ex.arg_sp - cop.lbl0;
-                FastVal callee = ex.vstack[--ex.vsp];
-                FastVal res = { 0 };
                 ex.call_open = cop.lbl2;
-                fval_emit_call(&ex, &callee, ex.call_args + cop.lbl0, argc, cop.lbl0, &res);
-                ex.arg_sp = cop.lbl0;
-                ex.vstack[ex.vsp++] = res;
+                fast_expr_finish_call(&ex, cop.lbl0, argc);
                 continue;
             }
             if (top == FEOP_VA_END)
@@ -9142,7 +9149,7 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
                 uint32_t match_pos = UINT32_MAX;
                 uint32_t def_pos = UINT32_MAX;
                 uint32_t end_pos = UINT32_MAX;
-                while (cc->pos < cc->tcount && !cc->bailout)
+                while (cc->pos < token_count && !cc->bailout)
                 {
                     bool is_def = false;
                     FastType assoc_t = FTYPE_VOID;
@@ -9160,7 +9167,7 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
                     else if (match_pos == UINT32_MAX && ftype_generic_match(cc, ctrl_t, assoc_t)) { match_pos = expr_pos; }
                     // Skip balanced tokens of this association expression up to `,` or `)` at depth 0
                     uint32_t bd = 0;
-                    while (cc->pos < cc->tcount)
+                    while (cc->pos < token_count)
                     {
                         const uint8_t ak = fast_cc_peek(cc);
                         if (bd == 0 && (ak == FTOK_COMMA || ak == FTOK_RPAREN)) { break; }
@@ -9407,7 +9414,7 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
     }
     else if (out_val != NULL)
     {
-        *out_val = final_v;
+        *out_val = ex.vstack[0];
     }
 }
 

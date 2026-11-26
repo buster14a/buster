@@ -4195,7 +4195,7 @@ static FastType fast_cc_parse_typename(FastCCState* cc, bool* out_ok)
 static bool fast_cc_init_state(FastCCState* cc, FastArena* arena, FastArena* scratch, FastPP* pp, FastObj* obj,
                                bool unsigned_char, bool quiet)
 {
-    memset(cc, 0, sizeof(*cc));
+    // The state, including deferred bodies, starts on fresh zero-filled scratch pages.
     cc->arena = arena;
     cc->scratch = scratch;
     cc->pp = pp;
