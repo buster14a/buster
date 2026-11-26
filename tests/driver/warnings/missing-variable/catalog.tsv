@@ -26,6 +26,7 @@ rejected-declarations	rejected-declarations.c	1	5	4	-	-Wmissing-variable-declara
 rejected-block-extern	rejected-block-extern.c	2	1	2	-	-Wmissing-variable-declarations	rejected block extern initializers suppress only their own tentative object
 # The existing extern-initializer warning's rejection ordering is separate; initializer-order checks its valid form.
 rejected-initializer-history	rejected-initializer-history.c	2	6	2	-	-Wmissing-variable-declarations -Wno-extern-initializer	rejected initializers preserve prior extern and tentative declaration history
+mixed-recovery	mixed-recovery.c	1	2	1	-	-Wmissing-variable-declarations	a rejected block extern preserves a later rejected initializer as the acting tentative definition
 # Warning policy is read at the diagnosed definition, including the last tentative definition, not at the unit's end.
 pragma-policy	pragma-policy.c	3	2	5	-	-	pragmas enable promote demote suppress and restore the warning
 pragma-policy-enabled	pragma-policy.c	7	2	9	-	-Wmissing-variable-declarations	pragmas override the command line for initialized and tentative definitions

@@ -13140,7 +13140,9 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                     check_input_target_versions_declaration(reader, attributes, name, type, previous_handle, is_inline, is_static, main_function);
                 }
             }
-            if (valid && !file && storage == C_NAME_EXTERN && initialized)
+            const uint32_t block_extern_reports = reader->output->report_count;
+            const bool block_extern_initializer = valid && !file && storage == C_NAME_EXTERN && initialized;
+            if (block_extern_initializer)
             {
                 check_input_report(reader, name, CHECK_INPUT_BLOCK_EXTERN_INITIALIZER);
                 valid = false;
@@ -13164,7 +13166,15 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
             invalid |= vla_recovered;
             valid &= placed || vla_recovered;
             reader->vla_initializer_dropped |= vla_recovered && vla_drop_initializer;
-            if (__builtin_expect(valid && reader->vla_initializer_dropped, 0))
+            // A type-valid block extern keeps its declaration after this rejected initializer (#2222). Retain the
+            // existing error and skipped initializer, but read later declarations from their original source rather
+            // than an edited diagnostic reread. Invalid types, inferred types and incomplete syntax still stop here.
+            const bool block_extern_recoverable = reader->output->missing_variable_warnings && block_extern_initializer && placed && !invalid && !is_typedef && !function &&
+                                                  !c23_auto && !check_input_auto_type(reader->types, base) && !direct_initializer &&
+                                                  reader->output->report_count == block_extern_reports + 1;
+            check_input_lane_refuse(reader, block_extern_recoverable && reader->lane, "a rejected block extern initializer needs source-order recovery");
+            const bool block_extern_recovery = block_extern_recoverable && !reader->lane;
+            if (__builtin_expect((valid && reader->vla_initializer_dropped) || block_extern_recovery, 0))
             {
                 // Its initializer, which clang doesn't check against the type (#1447): skipped, to the declarator's end.
                 uint32_t right = reader->first_child[i];
@@ -13172,14 +13182,20 @@ static void check_input_declaration(CheckInputReader* reader, uint32_t first)
                 {
                     right = reader->next_child[right];
                 }
-                const uint32_t end = right != BUSTER_CHECK_NONE ? reader->ends[right] + 1 : i + 1;
-                for (uint32_t skipped = i; skipped < end && skipped < count; skipped += 1)
+                const uint32_t end = right < count ? reader->ends[right] + 1 : i + 1;
+                const bool complete = right < count && right > i && end > i + 1 && end < count && end <= reader->resolve_limit &&
+                                      (parser->tokens.kinds[end] == PARSE_KIND_COMMA || parser->tokens.kinds[end] == PARSE_KIND_SEMI);
+                valid |= block_extern_recovery && complete && check_input_recover_reports(reader, block_extern_reports);
+                if (valid)
                 {
-                    reader->ignored[skipped] = true;
+                    for (uint32_t skipped = i; skipped < end && skipped < count; skipped += 1)
+                    {
+                        reader->ignored[skipped] = true;
+                    }
+                    valid = right != BUSTER_CHECK_NONE;
+                    initialized = false;
+                    i = end;
                 }
-                valid = right != BUSTER_CHECK_NONE;
-                initialized = false;
-                i = end;
             }
             if (valid && reader->cleanup_attributes && attributes != 0)
             {
