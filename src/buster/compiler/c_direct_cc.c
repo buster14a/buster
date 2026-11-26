@@ -4258,6 +4258,33 @@ static uint32_t fast_cc_string_plus(const FastCCState* cc, const FastVal* lhs, c
        (uint32_t)((kinds) == (UINT32_C(1) << FVAL_IMM)))) | \
      (uint32_t)((((lhs)->type | (rhs)->type) & BUSTER_FTYPE_COMPLEX_BIT) != 0))
 
+// #3577: a comparison BUSTER_FAST_INT_COMPARE_ASKED asks of that every family fast_cc_binary_operands_quiet and
+// fast_cc_binary_questioned look at is quiet on: a narrow integer (_Bool, a char, a short) by value (no flag value,
+// address, bit-field or function) against a plain integer constant (no enumerator) in its range, no lasting mark and no
+// relational sum, both types plain scalars. The commonest asked comparison (1,900 of sqlite3.c's 2,600 calls of the check, `p->flags == 3`) then
+// takes no call. Both operands are integers (the gate's `integers`).
+static inline bool fast_cc_narrow_constant_quiet(const FastVal* lhs, const FastVal* rhs, FastType lt, FastType rt, uint8_t op)
+{
+    static const int32_t narrow_lo[32] = { [FTYPE_BOOL] = 0, [FTYPE_I8] = -128, [FTYPE_U8] = 0, [FTYPE_I16] = -32768, [FTYPE_U16] = 0 };
+    static const int32_t narrow_hi[32] = { [FTYPE_BOOL] = 1, [FTYPE_I8] = 127, [FTYPE_U8] = 255, [FTYPE_I16] = 32767, [FTYPE_U16] = 65535 };
+    const uint32_t narrow_kinds = (1u << FTYPE_BOOL) | (1u << FTYPE_I8) | (1u << FTYPE_U8) | (1u << FTYPE_I16) | (1u << FTYPE_U16);
+    const uint32_t value_kinds = (UINT32_C(1) << FVAL_REG) | (UINT32_C(1) << FVAL_LOCAL) | (UINT32_C(1) << FVAL_GLOBAL) |
+                                 (UINT32_C(1) << FVAL_INDIRECT) | (UINT32_C(1) << FVAL_SPILL);
+    const bool left_constant = lhs->kind == FVAL_IMM;
+    const FastVal* constant = left_constant ? lhs : rhs;
+    const FastVal* value = left_constant ? rhs : lhs;
+    const uint32_t kind = (left_constant ? rt : lt) & BUSTER_FTYPE_SCALAR_MASK;
+    const uint32_t relational = (uint32_t)(op == FTOK_LT) | (uint32_t)(op == FTOK_GT) | (uint32_t)(op == FTOK_LE) | (uint32_t)(op == FTOK_GE);
+    bool quiet = false;
+    if (constant->kind == FVAL_IMM && constant->sym_idx == 0 && ((value_kinds >> value->kind) & 1u) != 0 && ((narrow_kinds >> kind) & 1u) != 0)
+    {
+        quiet = (lhs->lasting | rhs->lasting | lhs->is_func_sym | rhs->is_func_sym) == 0 && ((lhs->type | rhs->type) & BUSTER_FTYPE_COMPLEX_BIT) == 0 &&
+                constant->imm >= narrow_lo[kind] &&
+                constant->imm <= narrow_hi[kind] && (relational & ((uint32_t)(lhs->op == FTOK_PLUS) | (uint32_t)(rhs->op == FTOK_PLUS))) == 0;
+    }
+    return quiet;
+}
+
 // #3577: whether a binary operator's operands, of types LT and RT, are ones the full pipeline questions, where
 // fval_emit_binary's gate let them past: a comparison of a constant out of a narrower operand's range
 // (-Wtautological-constant-out-of-range-compare), of two enums' values (-Wenum-compare), of an array, a function or an
@@ -4750,7 +4777,7 @@ static BUSTER_DIRECT_HOT void fval_emit_binary(FastExprCtx* ex, uint8_t op, Fast
     {
         if ((kinds & ((UINT32_C(1) << FVAL_IMM) | (UINT32_C(1) << FVAL_FIMM))) != 0)
         {
-            asked = BUSTER_FAST_INT_COMPARE_ASKED(lhs, rhs, lt, rt, kinds) != 0;
+            asked = BUSTER_FAST_INT_COMPARE_ASKED(lhs, rhs, lt, rt, kinds) != 0 && !fast_cc_narrow_constant_quiet(lhs, rhs, lt, rt, op);
         }
         else
         {
