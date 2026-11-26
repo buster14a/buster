@@ -2869,6 +2869,9 @@ static const char* check_driver_warning_message(const Parser* parser, Preprocess
         case CHECK_WARNING_EVENT_TENTATIVE_ARRAY:
             result = "tentative array definition assumed to have one element";
             break;
+        case CHECK_WARNING_EVENT_MISSING_VARIABLE_DECLARATIONS:
+            result = check_warning_text(scratch, "no previous extern declaration for non-static variable '%.*s'", (int)name.length, name.pointer);
+            break;
         case CHECK_WARNING_EVENT_DEFAULT_CONST_INIT:
         {
             // The object's type as declared, with its typedef (#2168): 'volatile CI[2]' (aka 'const volatile int[2]').
@@ -3058,6 +3061,9 @@ static const char* check_driver_warning_note(const Parser* parser, Preprocessor*
             break;
         case CHECK_WARNING_NOTE_CONST_MEMBER:
             result = check_warning_text(scratch, "member '%.*s' declared 'const' here", (int)name.length, name.pointer);
+            break;
+        case CHECK_WARNING_NOTE_DECLARE_STATIC:
+            result = "declare 'static' if the variable is not intended to be used outside of this translation unit";
             break;
         case CHECK_WARNING_NOTE_ATTRIBUTE_HERE:
             result = check_warning_text(scratch, "attribute '%.*s' here", (int)name.length, name.pointer);
@@ -3386,6 +3392,10 @@ static bool check_driver_warning_events_from(const Parser* parser, Preprocessor*
                         pp->diagnostic_arguments |= event->payload.data != 0;
                         pp_diagnose_output_notes_at(pp, disposition, source, boundary, notes, note_total, "%s%s", message, suffix);
                         pp->diagnostic_arguments = arguments;
+                    }
+                    else if (event->kind == CHECK_WARNING_EVENT_MISSING_VARIABLE_DECLARATIONS && event->completion_kind != CHECK_WARNING_COMPLETE_TU_END)
+                    {
+                        pp_diagnose_output_notes_phase(pp, disposition, source, boundary, PP_DIAGNOSTIC_DECLARATION, notes, note_total, "%s%s", message, suffix);
                     }
                     else if (event->kind == CHECK_WARNING_EVENT_CONSTANT_LOGICAL_OPERAND)
                     {

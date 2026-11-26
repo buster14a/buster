@@ -179,6 +179,30 @@ static void asm_test_compatibility(AsmTest* test, const char* directory, bool cr
         ".data\n.type percent_object,%object\npercent_object: .long 7\n.size percent_object,4\n"
         ".type percent_notype,%notype\npercent_notype: .long 3\n"
         ".section .tdata,\"awT\",@progbits\n.type percent_tls,%tls_object\npercent_tls: .long 11\n.size percent_tls,4\n",
+        // GNU unique is a definition's binding. Object type preserves it; other types restore the ordinary binding.
+        ".data\n.type unique_object,@gnu_unique_object\nunique_object: .long 1\n"
+        ".type unique_global,%gnu_unique_object\n.globl unique_global\nunique_global: .long 2\n"
+        ".weak unique_weak\n.type unique_weak,@gnu_unique_object\n.type unique_weak,@object\nunique_weak: .long 3\n"
+        ".globl restored_global\n.type restored_global,@gnu_unique_object\n.type restored_global,@notype\nrestored_global: .long 5\n"
+        ".type restored_weak,@gnu_unique_object\n.weak restored_weak\n.type restored_weak,@notype\nrestored_weak: .long 6\n"
+        ".type restored_local,@gnu_unique_object\n.type restored_local,@notype\nrestored_local: .long 7\n"
+        ".type unique_external,@gnu_unique_object\n.weak weak_external\n.type weak_external,@gnu_unique_object\n.quad unique_external,weak_external\n"
+        ".section .tdata,\"awT\",@progbits\n.type unique_tls,%gnu_unique_object\nunique_tls: .long 8\n"
+        ".text\n.type indirect,%gnu_indirect_function\nindirect: ret\n.data\n.quad indirect\n",
+        // Unique IDs identify ordinary, grouped and linked-order sections, including zero and the largest ID.
+        ".text\n.globl section_target\nsection_target: ret\n"
+        ".section .identity,\"awR\",@progbits,unique,0\n.byte 1\n"
+        ".section .identity,\"awR\",@progbits,unique,4294967295\n.byte 2\n"
+        ".section .identity,\"awR\",@progbits,unique,0\n.byte 3\n"
+        ".section .entries,\"awoG\",@progbits,section_target,entry_group,comdat,unique,0\n.quad section_target\n"
+        ".section .plain,\"aG\",@progbits,plain_group,,unique,0\n.byte 4\n",
+        // Retain is part of GNU's section identity, including when the name is a default section's.
+        ".section .data,\"awR\",@progbits\nretained_bytes: .byte 1\n.data\n.byte 2\n"
+        ".section .data,\"awR\",@progbits\n.byte 3\n"
+        ".section .retained,\"awR\",@progbits\n.byte 4\n.section .retained\n.byte 5\n",
+        // CFI appends to an already selected unwind section, with its alignment measured from that section's start.
+        ".section .eh_frame,\"a\",@unwind\n.p2align 3\n.text\nf: .cfi_startproc\nret\n.cfi_endproc\n",
+        ".section .eh_frame,\"a\",@unwind\n.byte 1\n.text\nf: .cfi_startproc\nret\n.cfi_endproc\n",
         ".data\nexpr: .long 1<<4,64>>3,1+2<<3,(1+2)<<3,3*2<<2,32>>1*2\n"
         ".long 1==1,1!=1,1<>2,1<2,2>1,2<=2,3>=4,0xffffffffffffffff<0\n"
         ".long 1||0&&0,0||2&&3,!0,!9,1!2,4+1==5,1|2+4,1==2+3\n"

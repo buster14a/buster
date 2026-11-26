@@ -1082,7 +1082,7 @@ static void tier1_burs_classify_vector(const Tier1SelectForest* forest, const ui
             const __mmask16 placed = _mm512_mask_cmplt_epu32_mask(load, user, _mm512_set1_epi32((int)count)) & _mm512_cmplt_epu32_mask(node, user);
             const __m512i user_block = _mm512_mask_i32gather_epi32(none, placed, user, forest->blocks, 4);
             const __m512i barrier = _mm512_mask_i32gather_epi32(none, placed, user, forest->barriers, 4);
-            const __mmask16 foldable = placed & _mm512_cmpeq_epi32_mask(flags, _mm512_setzero_si512()) & _mm512_cmpeq_epi32_mask(uses, _mm512_set1_epi32(1)) &
+            const __mmask16 foldable = placed & _mm512_testn_epi32_mask(flags, _mm512_set1_epi32(0xffu & ~BUSTER_IR_COPY_PIECE)) & _mm512_cmpeq_epi32_mask(uses, _mm512_set1_epi32(1)) &
                                        _mm512_cmpeq_epi32_mask(user_block, block) &
                                        _mm512_cmple_epu32_mask(barrier, _mm512_add_epi32(node, _mm512_set1_epi32(1)));
             result = _mm512_mask_mov_epi32(result, load, _mm512_set1_epi32(TIER1_BURS_OP_LOAD_N));

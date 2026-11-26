@@ -3,10 +3,10 @@
 // Assembly section identities survive layout as one atom each. The optional writer descriptors preserve their
 // original names/flags/entry widths without changing the shared Link classes or the writer's default grouping.
 
-static uint64_t asm_section_hash(String8 name, uint32_t group, uint32_t linked_symbol, uint64_t unique)
+static uint64_t asm_section_hash(String8 name, uint32_t group, uint32_t linked_symbol, uint64_t unique, uint64_t flags)
 {
     return link_hash((const uint8_t*)name.pointer, name.length) ^ (group * UINT64_C(0x9e3779b97f4a7c15)) ^
-           (linked_symbol * UINT64_C(0xc2b2ae3d27d4eb4f)) ^ (unique * UINT64_C(0x165667b19e3779f9));
+           (linked_symbol * UINT64_C(0xc2b2ae3d27d4eb4f)) ^ (unique * UINT64_C(0x165667b19e3779f9)) ^ (flags & SHF_GNU_RETAIN);
 }
 
 static void asm_section_index(AsmParser* parser, uint32_t id)
@@ -25,7 +25,7 @@ static void asm_section_index(AsmParser* parser, uint32_t id)
             for (uint32_t i = 1; i < parser->section_count; i += 1)
             {
                 const AsmSection* section = &parser->sections[i];
-                uint32_t slot = asm_section_hash(section->object.name, section->group, section->linked_symbol, section->unique) & (count - 1);
+                uint32_t slot = asm_section_hash(section->object.name, section->group, section->linked_symbol, section->unique, section->object.flags) & (count - 1);
                 while (slots[slot] != 0)
                 {
                     slot = (slot + 1) & (count - 1);
@@ -39,16 +39,17 @@ static void asm_section_index(AsmParser* parser, uint32_t id)
     else
     {
         const AsmSection* section = &parser->sections[id];
-        uint32_t slot = asm_section_hash(section->object.name, section->group, section->linked_symbol, section->unique) & parser->section_mask;
+        uint32_t slot = asm_section_hash(section->object.name, section->group, section->linked_symbol, section->unique, section->object.flags) & parser->section_mask;
         while (parser->section_slots[slot] != 0)
         {
             slot = (slot + 1) & parser->section_mask;
         }
         parser->section_slots[slot] = id;
     }
-    // Grouped and linked-order sections may repeat a name. Record the ambiguity for section-name expressions. Ordinary assembly
-    // pays no extra table allocation.
-    if (parser->result.error == 0 && (parser->section_name_slots != 0 || parser->group_count != 0 || parser->sections[id].linked_symbol != 0))
+    // Grouped, linked-order, retained and unique sections may repeat a name. Record the ambiguity for section-name expressions.
+    // Ordinary assembly pays no extra table allocation.
+    if (parser->result.error == 0 && (parser->section_name_slots != 0 || parser->group_count != 0 ||
+        parser->sections[id].linked_symbol != 0 || parser->sections[id].unique != 0 || (parser->sections[id].object.flags & SHF_GNU_RETAIN) != 0))
     {
         const bool rebuild = parser->section_name_slots == 0 || parser->section_name_mask != parser->section_mask;
         if (rebuild)
@@ -181,15 +182,16 @@ static bool asm_section_prefix(String8 name, const char* prefix)
     return name.length >= length && memcmp(name.pointer, prefix, length) == 0;
 }
 
-static uint32_t asm_find_section_variant(const AsmParser* parser, String8 name, uint32_t group, uint32_t linked_symbol, uint64_t unique)
+static uint32_t asm_find_section_variant(const AsmParser* parser, String8 name, uint32_t group, uint32_t linked_symbol, uint64_t unique, uint64_t flags)
 {
-    uint32_t slot = asm_section_hash(name, group, linked_symbol, unique) & parser->section_mask;
+    uint32_t slot = asm_section_hash(name, group, linked_symbol, unique, flags) & parser->section_mask;
     uint32_t result = parser->section_slots[slot];
     while (result != 0)
     {
         const AsmSection* candidate = &parser->sections[result];
         const String8 candidate_name = candidate->object.name;
         if (candidate->group == group && candidate->linked_symbol == linked_symbol && candidate->unique == unique &&
+            (candidate->object.flags & SHF_GNU_RETAIN) == (flags & SHF_GNU_RETAIN) &&
             candidate_name.length == name.length && memcmp(candidate_name.pointer, name.pointer, name.length) == 0)
         {
             break;
@@ -202,7 +204,7 @@ static uint32_t asm_find_section_variant(const AsmParser* parser, String8 name, 
 
 static uint32_t asm_find_section(const AsmParser* parser, String8 name, uint32_t group)
 {
-    return asm_find_section_variant(parser, name, group, 0, 0);
+    return asm_find_section_variant(parser, name, group, 0, 0, 0);
 }
 
 static uint32_t asm_section_link_target(AsmParser* parser, uint32_t end, uint32_t location)
@@ -277,6 +279,7 @@ static void asm_section_directive(AsmParser* parser, uint32_t token, uint32_t en
                 case 'M': object.flags |= SHF_MERGE; break;
                 case 'S': object.flags |= SHF_STRINGS; break;
                 case 'T': object.flags |= SHF_TLS; break;
+                case 'R': object.flags |= SHF_GNU_RETAIN; break;
                 case 'G': object.flags |= SHF_GROUP; break;
                 case 'o': object.flags |= SHF_LINK_ORDER; break;
                 default: asm_fail(parser, location, "unsupported section flag"); break;
@@ -336,33 +339,17 @@ static void asm_section_directive(AsmParser* parser, uint32_t token, uint32_t en
             }
             if ((object.flags & SHF_LINK_ORDER) != 0)
             {
-                if (parser->code || parser->options.integrated || object.type != SHT_PROGBITS || object.flags != (SHF_ALLOC | SHF_WRITE | SHF_LINK_ORDER))
+                if (parser->code || parser->options.integrated || object.type != SHT_PROGBITS ||
+                    (object.flags & ~(SHF_GROUP | SHF_GNU_RETAIN)) != (SHF_ALLOC | SHF_WRITE | SHF_LINK_ORDER))
                 {
                     asm_fail(parser, location, "only standalone writable linked-order progbits sections are supported");
                 }
                 else
                 {
                     linked_symbol = asm_section_link_target(parser, end, location);
-                    if (asm_take(parser, ','))
-                    {
-                        const bool unique_keyword = asm_is(parser, parser->at, "unique");
-                        parser->at += unique_keyword;
-                        asm_expect(parser, ',', "expected unique section ID");
-                        __int128 number = 0;
-                        if (!unique_keyword || parser->at >= end || parser->tokens[parser->at].kind != BUSTER_ASM_WORD ||
-                            !asm_number(asm_token_text(parser, parser->at), &number) || number > UINT32_MAX)
-                        {
-                            asm_fail(parser, location, "expected unique section ID fitting 32 bits");
-                        }
-                        else
-                        {
-                            parser->at += 1;
-                            unique = (uint64_t)number + 1;
-                        }
-                    }
                 }
             }
-            else if ((object.flags & SHF_GROUP) != 0)
+            if ((object.flags & SHF_GROUP) != 0)
             {
                 asm_expect(parser, ',', "grouped section requires a signature");
                 const uint32_t signature_token = parser->at;
@@ -378,12 +365,15 @@ static void asm_section_directive(AsmParser* parser, uint32_t token, uint32_t en
                     uint32_t flags = 0;
                     if (asm_take(parser, ','))
                     {
-                        if (!asm_is(parser, parser->at, "comdat"))
+                        if (asm_is(parser, parser->at, "comdat"))
+                        {
+                            flags = BUSTER_LINK_GROUP_COMDAT;
+                            parser->at += 1;
+                        }
+                        else if (parser->at < end && parser->tokens[parser->at].kind != ',')
                         {
                             asm_fail(parser, location, "unsupported section group linkage");
                         }
-                        flags = BUSTER_LINK_GROUP_COMDAT;
-                        parser->at += 1;
                     }
                     if (parser->result.error == 0)
                     {
@@ -405,10 +395,27 @@ static void asm_section_directive(AsmParser* parser, uint32_t token, uint32_t en
                     }
                 }
             }
+            if (asm_take(parser, ','))
+            {
+                const bool unique_keyword = asm_is(parser, parser->at, "unique");
+                parser->at += unique_keyword;
+                asm_expect(parser, ',', "expected unique section ID");
+                __int128 number = 0;
+                if (!unique_keyword || parser->at >= end || parser->tokens[parser->at].kind != BUSTER_ASM_WORD ||
+                    !asm_number(asm_token_text(parser, parser->at), &number) || number < 0 || number > UINT32_MAX)
+                {
+                    asm_fail(parser, location, "expected unique section ID fitting 32 bits");
+                }
+                else
+                {
+                    parser->at += 1;
+                    unique = (uint64_t)number + 1;
+                }
+            }
         }
     }
     // A name alone selects the ordinary section. Group instances and linked-order variants keep independent layout.
-    id = asm_find_section_variant(parser, name, group, linked_symbol, unique);
+    id = asm_find_section_variant(parser, name, group, linked_symbol, unique, object.flags);
     const bool executable = (object.flags & SHF_EXECINSTR) != 0;
     const bool zero = object.type == SHT_NOBITS;
     const bool tls = (object.flags & SHF_TLS) != 0;
@@ -420,7 +427,7 @@ static void asm_section_directive(AsmParser* parser, uint32_t token, uint32_t en
     object.entry_size = array && (object.flags & SHF_MERGE) == 0 ? 8 : object.entry_size;
     if (name.length == 0 || (zero && (executable || (object.flags & SHF_MERGE) != 0)) ||
         ((object.flags & SHF_STRINGS) != 0 && ((object.flags & SHF_MERGE) == 0 || !characters)) ||
-        (object.type == SHT_X86_64_UNWIND && (object.flags & ~SHF_GROUP) != SHF_ALLOC) ||
+        (object.type == SHT_X86_64_UNWIND && (object.flags & ~(SHF_GROUP | SHF_GNU_RETAIN)) != SHF_ALLOC) ||
         (array && (object.flags & (SHF_EXECINSTR | SHF_TLS | SHF_MERGE | SHF_STRINGS)) != 0))
     {
         asm_fail(parser, location, "unsupported section attributes");
@@ -593,8 +600,8 @@ static void asm_object_options(AsmParser* parser)
                         asm_fail(parser, symbol->location, "linked-order section requires a defined symbol in an earlier section class");
                     }
                     object.link = target;
-                    object.identity = i;
                 }
+                object.identity = section->linked_symbol != 0 || section->unique != 0 ? i : 0;
                 sections[section->atom] = object;
             }
         }

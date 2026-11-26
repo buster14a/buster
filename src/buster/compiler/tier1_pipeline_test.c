@@ -1686,6 +1686,7 @@ static void tier1_pipeline_clang(Tier1PipelineTest* test, const char* clang)
 }
 
 #include "buster/compiler/tier1_pipeline_boundary_test.c"
+#include "buster/compiler/tier1_copy_source_test.c"
 
 static int run_tier1_pipeline_tests(int argc, char** argv)
 {
@@ -1749,6 +1750,7 @@ static int run_tier1_pipeline_tests(int argc, char** argv)
             if (cross_check && test.failures == 0)
             {
                 tier1_pipeline_clang(&test, clang);
+                tier1_pipeline_copy_source(&test, clang);
             }
             tier1_pipeline_expect(&test, test.native_results == BUSTER_TIER1_PIPELINE_CASES * 2 * BUSTER_TIER1_PIPELINE_INPUTS, "every supported path executes every input");
             tier1_pipeline_expect(&test, test.resolved_calls == BUSTER_TIER1_PIPELINE_CALL_CASES * 2, "every supported call path resolves its original local helper symbol");

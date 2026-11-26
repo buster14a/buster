@@ -54,6 +54,7 @@ static const uint8_t tier1_schedule_ir_barriers[BUSTER_IR_OP_TABLE] = {
     [IR_PARAM] = 1,
     [IR_CALL] = 1,
     [IR_CALL_INDIRECT] = 1,
+    [IR_ASM_RESULT] = 1,
     [IR_ALLOCA] = 1,
     [IR_STACK_SAVE] = 1,
     [IR_STACK_RESTORE] = 1,

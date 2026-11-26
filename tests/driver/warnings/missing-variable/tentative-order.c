@@ -1,0 +1,13 @@
+int first;
+int second;
+int first;
+int initialized_first = 1;
+int third;
+int second;
+extern int third;
+int initialized_second = 2;
+const int incomplete[];
+const int uninitialized;
+int after_const;
+const int incomplete[];
+const int uninitialized;

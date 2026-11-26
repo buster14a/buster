@@ -755,8 +755,50 @@ functions where it defined 37; clang -O0's defines 3.
     each variant with its own 290 KB copy of `tokenize_chunks`. Its `-c` takes
     0.6 to 0.8% more cycles; `sqlite3.c`'s doesn't move.
 
-  #2841 is the gate: homes that weigh a reference by its loop depth, then the
-  shapes by default if the lexer is no slower.
+  The later loop-weight experiment (#3322) did not remove the lexer gap and
+  regressed some Lua workloads. It was closed without merging
+  ([the findings](https://github.com/buster14a/buster/issues/2841#issuecomment-7096130278)).
+
+**Preserving loop homes with the shapes (#2841).** A speculative splice now
+checks the actual register allocation before accepting loop-bearing callees.
+The check runs only with `--tier0-inline-shapes`; the default splice and home
+ranking are unchanged.
+
+`tier0_inline_homes_preserved` runs Tier 0's existing front, selection and home
+passes on the forwarded result and on each distinct expanded callee with a
+back edge. It emits no machine code. The passes include the real expression
+depths, fixed clobbers, frame restrictions, hidden-pointer references and
+direct asm-goto adjustments. A whole function's deepest expression can consume
+registers that no reference weight could make available to its loop locals.
+Segment and volatile decorations are stripped as in the actual compile.
+
+The protected locals are the callee's register homes referenced anywhere in
+the union of backward-edge ranges. Branches and referring entries are found
+64 at a time. Descending edge ends let each range scan only its uncovered
+prefix, visiting each covered entry once, without a loop-depth column or a
+weighting heuristic. At most 32 register homes form the comparison list.
+
+The producer is the existing splice plan: its distinct callee's local base and
+argument-nesting levels map the list into the flattened result. Forwarding
+preserves local IDs. Every level must keep each surviving protected local in
+a register; a local with zero references was eliminated and needs no home.
+The exact register number may change. This also protects a loop already
+expanded into a scalar-return wrapper when that wrapper is inlined again.
+
+If a protected local would acquire a frame home, or its allocation cannot be
+analyzed, the speculative result is discarded. One bounded retry keeps every
+loop-bearing callee out of line and still splices straight-line wrappers.
+Keeping only the first failing callee would need another check: restoring a
+call can consume caller-saved registers that another candidate was using.
+If the retry has no site or cannot be built, the caller keeps its original
+stream, as for any failed optional splice. Only the accepted result's columns
+and caller-entry mapping survive; the home analysis uses temporary scratch.
+
+This preserves existing register homes in spliced callee loops; it does not
+prove a runtime improvement or protect every caller local from changed
+pressure. The shapes remain opt-in. Enabling them by default still requires
+the self-built lexer, SQLite and Lua runtime comparisons and the `sqlite3.c`
+and `main.c` compile-time comparisons on the 9700X specified in #2841.
 
 ### First measurements
 

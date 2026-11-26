@@ -730,7 +730,11 @@ Function and variable addresses use `.quad` directives referring to local
 labels on their definitions. These references survive linking several units
 and linking code or data in named sections.
 
-For inline assembly with integer constant inputs, `-S` preserves a single
+Inline assembly, naked functions and file-scope assembly retain the matched
+instruction records and final layout used by `-c`. Instructions use canonical
+AT&T syntax, interleaved with labels, data, alignment bytes and symbolic
+relocations. The constraint and integrated-assembler limits are the same as
+for object emission. For inline assembly with integer constant inputs, `-S` preserves a single
 `.ascii "…"` directive after operand substitution, including the literal text
 that kernel build scripts extract. It retains the directive in the helper
 where `-c` places its bytes. A single raw `->…` line is also supported.
@@ -738,22 +742,25 @@ The compiler emits it at the statement's instruction boundary so a script
 can read it directly from the assembly listing. Both forms accept basic asm
 or extended asm with no outputs, clobbers or goto labels.
 
-What it doesn't print yet it refuses by name, before the source is read where
-the options say so, and otherwise naming the source and the symbol:
+Thread-local definitions keep their `.tdata` or `.tbss` sections and TLS symbol
+types. Local-exec, initial-exec, general-dynamic and local-dynamic references
+retain their relocation kinds, including the dynamic accessors' relaxation
+prefixes. Multiversioned functions retain their implementations, dispatchers,
+IFUNC symbols and resolver instructions. Section groups and GNU unique object
+symbols keep their ELF identities.
 
-- other inline assembly statements, naked functions and file-scope assembly;
-- thread-local storage, section groups, multiversioned functions' resolvers,
-  and the other refusals of the sink below;
-- assembly and linker inputs beside the C sources.
+Generated unwind tables use `.cfi_startproc`, explicit callee-saved baseline rules, CFA and saved-register
+directives at the final instruction boundaries, and `.cfi_endproc`. The
+assembler may encode or share CIEs differently, so the round-trip comparison
+checks each FDE's function range and unwind rules at every transition. It
+still compares the other sections, symbols and relocations. Source-supplied
+unwind tables retain their bytes and symbolic relocations. With `-fPIC`, their
+references to defined global functions use local labels, as `-c`'s object
+uses section symbols, so the resulting object links into a shared library.
 
-The unwind tables are the `.eh_frame` section's bytes with their symbolic
-relocations (`.long function-.`), as `-c`'s object has them, not CFI
-directives, which are stage 4's. With `-fPIC` (#2101) an FDE of a global
-function names a local label the sink puts at it (`.long .Lbuster.lN-.`), as
-`-c`'s object names its section's symbol, so that GNU as's object links into a
-shared library. A position-independent unit that reaches a thread-local is
-refused by name: its accessors are code without instruction records, and the
-sink doesn't print thread-local storage yet. `-save-temps` is still an unknown argument.
+Assembly and linker inputs beside the C sources remain refused, as do the
+sink's unsupported shapes below. A refusal names the source and relevant
+symbol. `-save-temps` is still an unknown argument.
 
 The acceptance (`test-assembly-output --c-testsuite DIRECTORY --subset FILE`,
 the inventory's row): each program of `tests/c-testsuite/subset.txt`, at Tier 0
@@ -777,13 +784,17 @@ compile.
 
 `src/buster/compiler/assembly_output.c` prints a unit of the link
 representation as GNU as's AT&T assembly: the text `-S` writes ([the
-design](https://github.com/buster14a/buster/issues/1362#issuecomment-6721142506)'s
-stages 1 and 2), which describes the object `-c` writes. It prints from the symbolic emission
+design](https://github.com/buster14a/buster/issues/1362#issuecomment-6721142506)),
+which describes the object `-c` writes. It prints from the symbolic emission
 view (`AssemblyView`), never from the object: the link's atoms, symbols and
 fixups, which hold every relocation's target and addend, and each `TEXT` atom's
 instruction records as the emission sized and encoded them, with their branch
-columns (`AssemblyCode`). It reads the encoder's form table, the matcher's suffix
-widths and the disassembler's register names, and changes none of them.
+columns (`AssemblyCode`). Source assembly retains matched records at their
+final offsets so code and data can share an atom. The existing byte-emitting
+multiversion resolvers have a bounded record capture before object construction;
+their relocation targets remain the link's symbolic fixups. It reads the
+encoder's form table, the matcher's suffix widths and the disassembler's register
+names, and changes none of them.
 
 The form contract, which its tests hold GNU as to:
 
@@ -799,7 +810,9 @@ The form contract, which its tests hold GNU as to:
   record GNU as encodes otherwise whatever it is written as
   (`assembly_escaped`: the encoder tests' `x86_assembler_prefers_another_form`
   in 64-bit mode, such as `81 /0` with an immediate an imm8 holds) is its bytes,
-  `.byte`, after a comment naming it; never another encoding.
+  `.byte`, after a comment naming it. A relocated field in such a record uses
+  its symbolic data directive between the opcode and other literal bytes,
+  preserving the selected instruction length and exact relocation.
 - **Relocations.** A fixup is its target's name and its addend as the source
   writes it, never a field's bytes: a PC-relative field's addend is the link's
   plus the distance from the field to the instruction's end
@@ -807,7 +820,12 @@ The form contract, which its tests hold GNU as to:
   `name@PLT`, a GOT slot `name@GOTPCREL(%rip)`, an absolute immediate `$name`
   (R_X86_64_32, 32S or 64 by the instruction's field), an absolute displacement
   `name(%base,%index,scale)` (32S), and data `.quad name`, `.long name`, `.long
-  name-.`, `.quad name-.` and `@SIZE`.
+  name-.` and `.quad name-.`. TLS references use `@TPOFF`, `@GOTTPOFF`,
+  `@TLSGD`, `@TLSLD` and `@DTPOFF` as required by the field. Data relocation
+  kinds without an equivalent `.long` or `.quad` spelling use
+  `.reloc ., R_X86_64_KIND, symbol+addend` followed by a zero field, retaining
+  the exact ELF kind and addend. Buster's assembler accepts this current-location
+  form, and diagnoses short, overlapping or nonzero fields.
 - **Labels and names.** A symbol's label at its offset, under its own name
   (quoted where GNU as's plain names don't spell it), but an unnamed or
   temporary symbol's and each branch target's under a local `.Lbuster.` name,
@@ -827,12 +845,22 @@ The form contract, which its tests hold GNU as to:
   associated label and `unique` to keep same-name entries distinct. The writer
   quotes section names with dollar signs. Buster's assembler also accepts a
   table whose name matches an ordinary symbol, a spelling GNU as 2.44 refuses.
+  COMDAT and other section groups retain their signatures and member identities;
+  `G`, `R` and `T` preserve group, retain and TLS flags. A `unique` identity
+  separates same-name sections when their descriptors, object classes or groups differ.
+  GNU unique objects use `.type name, @gnu_unique_object`, with the GNU OSABI
+  in the resulting object, and IFUNCs use `@gnu_indirect_function`.
+- **Unwind.** The final emission's frame rows become CFI directives at the
+  corresponding code offsets. Only the generated unwind atom is replaced;
+  imported source tables stay intact. Invalid frame ranges or transitions
+  inside an instruction or relocation are diagnosed before output is published.
 
 What the sink doesn't print yet it refuses with the reason naming it
-(`ASSEMBLY_UNSUPPORTED`): thread-local storage, section groups, other
-linked-order section types and flags, unique symbols, code without records (inline assembly's),
-the C runtime's `.init` and `.fini` fragments, and fixups GNU as can't spell
-where they are. A view that contradicts itself (records that don't encode to
+(`ASSEMBLY_UNSUPPORTED`): section types or flags outside its descriptor contract,
+code without retained records, unknown C runtime fragments, unique symbols
+whose type GNU as cannot represent, and fixups GNU as can't spell where they
+are. Source `.init` and `.fini` fragments with retained records are supported.
+A view that contradicts itself (records that don't encode to
 their atom's bytes, a symbol inside an instruction, a branch without a target, a
 fixup off every field) is `ASSEMBLY_INVALID`, an internal error. An arena too
 small for the text or the tables is `ASSEMBLY_FULL`; each failure leaves both

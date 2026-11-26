@@ -620,7 +620,13 @@ The decoding:
   but those, since the front end placed no record of the stack's or control's
   in a body. The saves and reloads of the values live across it in those
   registers are moves, decoded as any: one left out loses its value and is
-  refused.
+  refused. Scalar results (#2144) are then defined in the registers declared by
+  the body's result masks. The certificate rebuilds the secondary projection
+  lists from the IR, independently of the emitter, and defines each at the
+  producer's body boundary. Their captures and later uses must follow from the
+  decoded moves; a projection's later IR position does not read a register or
+  define the value again. The mixed result pressure fixtures corrupt each
+  initial output store's source register and require refusal.
 - **Machine rows** (`TIER1_RULE_ROW`, #1284). The emitter publishes the
   placement it gave each row (`Tier1RowPlacement`: each role's register, and
   the opmask registers the row names by number, renamed). The certificate
