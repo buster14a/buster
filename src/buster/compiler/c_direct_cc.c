@@ -2074,8 +2074,7 @@ struct FastExprCtx
     // The scalars first, apart from the stacks (#3577): a 32-byte value makes vstack 4096 bytes, so a scalar right past
     // it would share its 4 KiB offset with vstack[0], the entry every expression writes and reads (4K aliasing).
     uint32_t vsp;
-    uint32_t arg_sp;
-    uint16_t gp_used;      // bitmask of live GP scratch regs in vstack/call_args
+    uint16_t gp_used;      // bitmask of live GP scratch regs in vstack
     uint8_t xmm_used;      // bitmask of live XMM scratch regs (0..7)
     uint8_t eval_only;     // >0 inside sizeof(expr) / _Alignof(expr) / _Generic ctrl, a dead branch (#3592) or a compile
                            // again for the log (#3577): emit ZERO machine code!
@@ -2094,8 +2093,7 @@ struct FastExprCtx
     // of seq_mods marks entry i a modification, seq_own its own operands' first entry + 1 (0 unknown). A variable modified
     // and then named or modified again, or named earlier than its modification's operands, sets seq_hit (by the modified
     // variables' hash bits, seq_bloom), and only then does the end of the expression look at the log, with the regions
-    // that sequence points order (`&&`, `||`, `,`, `?:`: entries [lo, mid) before [mid, hi), each + 1). The arrays sit
-    // between the two stacks, which they keep from sharing offsets (call_args[0]'s is vstack[21]'s).
+    // that sequence points order (`&&`, `||`, `,`, `?:`: entries [lo, mid) before [mid, hi), each + 1).
     uint32_t seq_count;
     uint32_t seq_hit;
     uint32_t seq_regions;
@@ -2105,7 +2103,6 @@ struct FastExprCtx
     uint64_t seq_log[64];
     uint8_t seq_own[64];
     uint8_t seq_region[32][3];
-    FastVal call_args[128];
 };
 
 // #3577: a variable's identity for -Wunsequenced is its name's identifier (never 0): an expression declares nothing, so
@@ -2317,7 +2314,7 @@ static inline __attribute__((always_inline)) void fval_spill_one(FastExprCtx* ex
     if (spills != 0) { fval_spill_one_full(ex, v); }
 }
 
-// Materialize any FVAL_FLAGS currently on vstack/call_args before emitting an instruction that modifies EFLAGS!
+// Materialize any FVAL_FLAGS currently on vstack before emitting an instruction that modifies EFLAGS!
 static __attribute__((noinline, cold)) void fval_flush_flags_full(FastExprCtx* ex)
 {
     for (uint32_t i = 0; i < ex->vsp; i += 1)
@@ -2341,10 +2338,6 @@ static __attribute__((noinline, cold)) void fval_flush_flags_full(FastExprCtx* e
             }
         }
     }
-    for (uint32_t i = 0; i < ex->arg_sp; i += 1)
-    {
-        if (ex->call_args[i].kind == FVAL_FLAGS) { fval_spill_one(ex, &ex->call_args[i]); }
-    }
 }
 
 // Whether any value below holds the flags, as a leaf scan: sqlite3.c asks 30,000 times and finds flags 7 times. The
@@ -2353,7 +2346,6 @@ static __attribute__((noinline)) void fval_flush_flags(FastExprCtx* ex)
 {
     uint32_t found = 0;
     for (uint32_t i = 0; i < ex->vsp; i += 1) { found |= (uint32_t)(ex->vstack[i].kind == FVAL_FLAGS); }
-    for (uint32_t i = 0; i < ex->arg_sp; i += 1) { found |= (uint32_t)(ex->call_args[i].kind == FVAL_FLAGS); }
     if ((found & (uint32_t)(ex->eval_only == 0)) != 0) { fval_flush_flags_full(ex); }
 }
 
@@ -2382,15 +2374,13 @@ static inline void fval_materialize_flags(FastExprCtx* ex, FastVal* v)
     }
 }
 
-// Spill all live registers in vstack[0..v_limit) and call_args[0..a_limit)
-static void fval_spill_all(FastExprCtx* ex, uint32_t v_limit, uint32_t a_limit)
+// Spill all live registers in vstack[0..v_limit)
+static void fval_spill_all(FastExprCtx* ex, uint32_t v_limit)
 {
     if (ex->eval_only > 0) { return; }
     // Flush flags first while EFLAGS is still valid!
     for (uint32_t i = 0; i < v_limit; i += 1) { if (ex->vstack[i].kind == FVAL_FLAGS) { fval_spill_one(ex, &ex->vstack[i]); } }
-    for (uint32_t i = 0; i < a_limit; i += 1) { if (ex->call_args[i].kind == FVAL_FLAGS) { fval_spill_one(ex, &ex->call_args[i]); } }
     for (uint32_t i = 0; i < v_limit; i += 1) { fval_spill_one(ex, &ex->vstack[i]); }
-    for (uint32_t i = 0; i < a_limit; i += 1) { fval_spill_one(ex, &ex->call_args[i]); }
 }
 
 // Allocate a free GP scratch register (spilling oldest live GP if all 9 are occupied).
@@ -2408,17 +2398,7 @@ static __attribute__((noinline)) uint32_t fval_alloc_gp_avoid_full(FastExprCtx* 
             return r;
         }
     }
-    // Spill oldest GP holder not in avoid_mask from call_args or vstack
-    for (uint32_t i = 0; i < ex->arg_sp; i += 1)
-    {
-        if (fval_holds_gp(&ex->call_args[i]) && (avoid_mask & (1u << ex->call_args[i].reg)) == 0)
-        {
-            const uint32_t r = ex->call_args[i].reg;
-            fval_spill_one(ex, &ex->call_args[i]);
-            ex->gp_used |= (uint16_t)(1u << r);
-            return r;
-        }
-    }
+    // Spill oldest GP holder not in avoid_mask from vstack
     for (uint32_t i = 0; i < ex->vsp; i += 1)
     {
         if (fval_holds_gp(&ex->vstack[i]) && (avoid_mask & (1u << ex->vstack[i].reg)) == 0)
@@ -2430,7 +2410,7 @@ static __attribute__((noinline)) uint32_t fval_alloc_gp_avoid_full(FastExprCtx* 
         }
     }
     // Fallback: spill all and pick first non-avoided reg
-    fval_spill_all(ex, ex->vsp, ex->arg_sp);
+    fval_spill_all(ex, ex->vsp);
     for (uint32_t i = 0; i < 9u; i += 1)
     {
         const uint32_t r = fast_gp_pool[i];
@@ -2472,16 +2452,6 @@ static uint32_t fval_alloc_xmm(FastExprCtx* ex)
     {
         if ((ex->xmm_used & (1u << r)) == 0)
         {
-            ex->xmm_used |= (uint8_t)(1u << r);
-            return r;
-        }
-    }
-    for (uint32_t i = 0; i < ex->arg_sp; i += 1)
-    {
-        if (ex->call_args[i].kind == FVAL_XMM)
-        {
-            const uint32_t r = ex->call_args[i].reg;
-            fval_spill_one(ex, &ex->call_args[i]);
             ex->xmm_used |= (uint8_t)(1u << r);
             return r;
         }
@@ -3610,7 +3580,7 @@ static BUSTER_DIRECT_HOT void fval_store(FastExprCtx* ex, FastVal* lhs, FastVal*
         if (sz > 64u)
         {
             // Spill outer regs because `rep movsb` uses rdi/rsi/rcx
-            fval_spill_all(ex, ex->vsp, ex->arg_sp);
+            fval_spill_all(ex, ex->vsp);
         }
         const uint32_t dst_a = fval_addr_to_gp(ex, lhs, release_lhs);
         const uint32_t src_a = fval_addr_to_gp(ex, rhs, true);
@@ -4870,7 +4840,7 @@ static BUSTER_DIRECT_HOT void fval_emit_binary(FastExprCtx* ex, uint8_t op, Fast
                 else
                 {
                     // Signed 64-bit idiv by esz
-                    fval_spill_all(ex, ex->vsp, ex->arg_sp);
+                    fval_spill_all(ex, ex->vsp);
                     if (rl != FREG_RAX)
                     {
                         x86_mov_rr(obj, true, FREG_RAX, rl);
@@ -5167,7 +5137,6 @@ static BUSTER_DIRECT_HOT void fval_emit_binary(FastExprCtx* ex, uint8_t op, Fast
         if ((ex->gp_used & (1u << FREG_RCX)) != 0 && !(fval_holds_gp(rhs) && rhs->reg == FREG_RCX))
         {
             for (uint32_t i = 0; i < ex->vsp; i += 1) { if (fval_holds_gp(&ex->vstack[i]) && ex->vstack[i].reg == FREG_RCX) { fval_spill_one(ex, &ex->vstack[i]); } }
-            for (uint32_t i = 0; i < ex->arg_sp; i += 1) { if (fval_holds_gp(&ex->call_args[i]) && ex->call_args[i].reg == FREG_RCX) { fval_spill_one(ex, &ex->call_args[i]); } }
         }
         const uint32_t rr = fval_to_gp(ex, rhs, true);
         if (rr != FREG_RCX) { x86_mov_rr(obj, false, FREG_RCX, rr); }
@@ -5187,7 +5156,7 @@ static BUSTER_DIRECT_HOT void fval_emit_binary(FastExprCtx* ex, uint8_t op, Fast
     // 128-bit integer arithmetic (+, -, *, &, |, ^)!
     if (ftype_is_i128(ct))
     {
-        fval_spill_all(ex, ex->vsp, ex->arg_sp);
+        fval_spill_all(ex, ex->vsp);
         const int32_t slot = fast_cc_alloc_tmp(cc, 16u, 16u);
         const uint32_t la = fval_addr_to_gp(ex, lhs, true);
         if (la != FREG_R8) { x86_mov_rr(obj, true, FREG_R8, la); ex->gp_used &= (uint16_t)~(1u << la); ex->gp_used |= (1u << FREG_R8); }
@@ -5326,19 +5295,12 @@ static BUSTER_DIRECT_HOT void fval_emit_binary(FastExprCtx* ex, uint8_t op, Fast
             fast_cc_bail(cc, "division by zero");
             return;
         }
-        // Save/spill RAX and RDX from outer vstack/call_args if occupied
+        // Save/spill RAX and RDX from the value stack if occupied
         for (uint32_t i = 0; i < ex->vsp; i += 1)
         {
             if (fval_holds_gp(&ex->vstack[i]) && (ex->vstack[i].reg == FREG_RAX || ex->vstack[i].reg == FREG_RDX))
             {
                 fval_spill_one(ex, &ex->vstack[i]);
-            }
-        }
-        for (uint32_t i = 0; i < ex->arg_sp; i += 1)
-        {
-            if (fval_holds_gp(&ex->call_args[i]) && (ex->call_args[i].reg == FREG_RAX || ex->call_args[i].reg == FREG_RDX))
-            {
-                fval_spill_one(ex, &ex->call_args[i]);
             }
         }
         // Load divisor into a register that is neither RAX nor RDX!
@@ -5579,7 +5541,7 @@ static __attribute__((cold, noinline)) void fval_emit_round_builtin(FastExprCtx*
         return;
     }
     fval_convert(ex, &args[0], ft);
-    fval_spill_all(ex, ex->vsp, ex->arg_sp);
+    fval_spill_all(ex, ex->vsp);
     const uint32_t xr = fval_to_xmm(ex, &args[0], true);
     const int32_t mxcsr = fast_cc_alloc_tmp(cc, 4u, 4u);
     const bool w = is_double;
@@ -6582,7 +6544,7 @@ static __attribute__((cold, noinline)) bool fast_cc_checked_long_double_argument
 }
 
 // Emit full SysV AMD64 ABI function call (direct or indirect, 6 GP + 8 XMM + stack args, 1-16B & >16B structs, variadic!)
-static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, FastVal* args, uint32_t argc, uint32_t outer_arg_sp)
+static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, FastVal* args, uint32_t argc)
 {
     FastCCState* cc = ex->cc;
     FastObj* obj = cc->obj;
@@ -6716,8 +6678,9 @@ static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, F
         return;
     }
 
-    // Spill ALL live values below this call (both vstack and outer call_args!)
-    fval_spill_all(ex, ex->vsp, outer_arg_sp);
+    // Spill ALL live values below this call: the stack below the callee, which stands below its arguments, as an
+    // enclosing call's arguments do (fast_expr_finish_call).
+    fval_spill_all(ex, (uint32_t)(callee - ex->vstack));
 
     // Also spill callee if it's in a register, and spill all args that live in registers so ABI reg loading has ZERO conflicts!
     if (callee->kind != FVAL_GLOBAL || !callee->is_func_sym)
@@ -7017,14 +6980,16 @@ static BUSTER_DIRECT_HOT void fval_emit_call(FastExprCtx* ex, FastVal* callee, F
                               (BUSTER_FVAL_MARK_EFFECT * (uint32_t)((callee_marks & BUSTER_FVAL_MARK_PURE) == 0)));
 }
 
-// While the call is emitted, its callee sits just outside the live value stack.
-// The returned value occupies that same slot.
+// The callee stands on the value stack with its arguments above it (FIRST_ARG is the first's place, the stack's top
+// past the last), all live while the call is emitted: the scans for flags and for a register to spill find the
+// arguments after the values below the callee, which fval_emit_call spills first, and the arguments before the last,
+// which each `,` spilled. The returned value occupies the callee's slot. An argument stays where it was computed
+// (#3577): main moved each to a stack of its own, copying a value just written a field at a time, and the copy waited
+// for its stores.
 static inline void fast_expr_finish_call(FastExprCtx* ex, uint32_t first_arg, uint32_t argc)
 {
-    FastVal* callee = &ex->vstack[--ex->vsp];
-    fval_emit_call(ex, callee, ex->call_args + first_arg, argc, first_arg);
-    ex->arg_sp = first_arg;
-    ex->vsp += 1u;
+    fval_emit_call(ex, ex->vstack + (first_arg - 1u), ex->vstack + first_arg, argc);
+    ex->vsp = first_arg;
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -7075,8 +7040,8 @@ typedef struct FastExprOp FastExprOp;
 struct FastExprOp
 {
     uint16_t op;
-    uint16_t extra;        // arg_count (CALL), elem_idx (COMPOUND_LIT), the then value's marks (TERNARY_C)
-    uint32_t lbl0;         // false/true/else_lbl, or arg_start (CALL), or end_pos (GENERIC_SEL)
+    uint16_t extra;        // the commas so far (CALL), elem_idx (COMPOUND_LIT), the then value's marks (TERNARY_C)
+    uint32_t lbl0;         // false/true/else_lbl, or the first argument's place on the value stack (CALL), or end_pos (GENERIC_SEL)
     uint32_t lbl1;         // then_tail_lbl (TERNARY_C)
     uint32_t lbl2;         // end_lbl (TERNARY_C), or a binary operator's token (#3577: ex->cmp_pos)
     FastType type;         // cast target, then_type (TERNARY_C), compound lit type
@@ -8405,7 +8370,6 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
     FastExprCtx ex;
     ex.cc = cc;
     ex.vsp = 0;
-    ex.arg_sp = 0;
     ex.gp_used = 0;
     ex.xmm_used = 0;
     // #3577: an expression compiled again for its -Wunsequenced log (LOGGING, fast_cc_sequenced_again) makes no code and
@@ -8590,7 +8554,7 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
                         {
                             cc->cur_frame_size = cc->cur_tmp_off;
                             slot = fast_cc_alloc_local(cc, csz, cal < 8u ? 8u : cal);
-                            fval_spill_all(&ex, ex.vsp, ex.arg_sp);
+                            fval_spill_all(&ex, ex.vsp);
                             x86_emit_memzero_inline(cc->obj, FREG_RBP, slot, csz);
                         }
                         if (fast_cc_peek(cc) == FTOK_RBRACE)
@@ -8811,6 +8775,7 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
             {
                 const FastExprOp cop = ops[--osp];
                 cc->pos += 1u;
+                if (cop.lbl0 == 0u || ex.vsp != cop.lbl0) { fast_cc_bail(cc, "call arg stack"); break; }
                 ex.call_open = cop.lbl2;
                 fast_expr_finish_call(&ex, cop.lbl0, 0u);
                 expect_val = false;
@@ -8928,7 +8893,7 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
         if (k == FTOK_LPAREN)
         {
             if (osp >= 128u) { fast_cc_bail(cc, "expr op stack full"); break; }
-            fast_expr_op_write(ops + osp, (FastExprOp){ .op = FEOP_CALL, .extra = 0u, .lbl0 = ex.arg_sp, .lbl2 = cc->pos, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) }); osp += 1u;
+            fast_expr_op_write(ops + osp, (FastExprOp){ .op = FEOP_CALL, .extra = 0u, .lbl0 = ex.vsp, .lbl2 = cc->pos, .seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging) }); osp += 1u;
             cc->pos += 1u;
             expect_val = true;
             continue;
@@ -9095,10 +9060,9 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
             {
                 const FastExprOp cop = ops[--osp];
                 cc->pos += 1u;
-                // Push final argument
-                if (ex.vsp < 2u || ex.arg_sp >= 128u) { fast_cc_bail(cc, "call arg stack"); break; }
-                ex.call_args[ex.arg_sp++] = ex.vstack[--ex.vsp];
-                const uint32_t argc = ex.arg_sp - cop.lbl0;
+                // The arguments, one value each, from the first's place up.
+                const uint32_t argc = (uint32_t)cop.extra + 1u;
+                if (cop.lbl0 == 0u || ex.vsp != cop.lbl0 + argc) { fast_cc_bail(cc, "call arg stack"); break; }
                 ex.call_open = cop.lbl2;
                 fast_expr_finish_call(&ex, cop.lbl0, argc);
                 continue;
@@ -9239,10 +9203,10 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
             const uint16_t top = ops[osp - 1u].op;
             if (top == FEOP_CALL)
             {
-                if (ex.vsp < 1u || ex.arg_sp >= 128u) { fast_cc_bail(cc, "call arg overflow"); break; }
-                // Spill argument if it holds a register so subsequent args can use all scratch regs!
+                if (ops[osp - 1u].lbl0 == 0u || ex.vsp != ops[osp - 1u].lbl0 + (uint32_t)ops[osp - 1u].extra + 1u) { fast_cc_bail(cc, "call arg overflow"); break; }
+                // Spill argument if it holds a register so subsequent args can use all scratch regs! It stays on the
+                // value stack, below the next one (fast_expr_finish_call).
                 fval_spill_one(&ex, &ex.vstack[ex.vsp - 1u]);
-                ex.call_args[ex.arg_sp++] = ex.vstack[--ex.vsp];
                 ops[osp - 1u].extra += 1u;
                 ops[osp - 1u].seq_mid = BUSTER_FSEQ_MARK_IF(&ex, logging);
                 cc->pos += 1u;
@@ -9462,7 +9426,7 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
             if (ex.eval_only == 0)
             {
                 // Spill everything below LHS so both branch paths have identical empty reg state!
-                fval_spill_all(&ex, ex.vsp, ex.arg_sp);
+                fval_spill_all(&ex, ex.vsp);
                 sc_lbl = fast_label_new(cc->obj);
                 fval_branch(&ex, &lhs, k == FTOK_LOR, sc_lbl);
                 ex.gp_used = 0;
@@ -9485,7 +9449,7 @@ static inline __attribute__((always_inline)) void fast_cc_expr_compile(FastCCSta
             ex.eval_only = (uint8_t)(ex.eval_only + (constant == BUSTER_FCONSTANT_FALSE));
             if ((ex.eval_only == 0) & (constant == BUSTER_FCONSTANT_NONE))
             {
-                fval_spill_all(&ex, ex.vsp, ex.arg_sp);
+                fval_spill_all(&ex, ex.vsp);
                 else_lbl = fast_label_new(cc->obj);
                 fval_branch(&ex, &cond, false, else_lbl);
                 ex.gp_used = 0;
@@ -9611,7 +9575,6 @@ static inline void fast_expr_ctx_reset(FastExprCtx* ex, FastCCState* cc)
 {
     ex->cc = cc;
     ex->vsp = 0;
-    ex->arg_sp = 0;
     ex->gp_used = 0;
     ex->xmm_used = 0;
     ex->eval_only = (uint8_t)(cc->dead != 0);
