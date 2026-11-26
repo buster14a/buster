@@ -134,7 +134,7 @@
 static __attribute__((unused)) uint32_t tier1_measure_experiment(void)
 {
     const char* const value = getenv("BUSTER_TIER1_EXPERIMENT");
-    return value != 0 ? (uint32_t)strtoul(value, 0, 0) & 1023u : 0;
+    return value != 0 ? (uint32_t)strtoul(value, 0, 0) & 2047u : 0;
 }
 
 #define BUSTER_ARRAY_LENGTH(x) (sizeof(x) / sizeof((x)[0]))
