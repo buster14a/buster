@@ -88,7 +88,7 @@ unused-warning fixtures also check exact scope-completion tokens.
   `test-checker-driver --executable ./build/compiler [--part K/N]
   [--lazy-system-headers | --cpu-dispatch-only | --pic-only | --stack-protector-only | --cf-protection-only | --visibility-only |
   --target-versions-only | --type-sugar-only |
-  --asm-definitions-only | --call-counts-only | --fp-contract-only | --imaginary-bit-int-only | --operand-diagnostics-only | --label-attributes-only |
+  --asm-definitions-only | --tier1-asm-only | --call-counts-only | --fp-contract-only | --imaginary-bit-int-only | --operand-diagnostics-only | --label-attributes-only |
   --attribute-recovery-only | --initializer-diagnostics-only | --malformed-calls-only | --string-plus-only | --assert-bool-only | --assert-diagnostics-only | --query-bool-only | --constant-logical-only | --quiet-roots-only | --unused-comparison-only |
   --float-precision-only | --reach-filter-only | --branch-truth-only |
   --record-extensions-only | --auto-qualifiers-only |
@@ -160,7 +160,11 @@ unused-warning fixtures also check exact scope-completion tokens.
   diagnostics against clang's, and #3576's `-fvisibility=` objects' symbols and
   `-fPIC` accesses at both tiers and a hidden library's exports); `--target-versions-only` runs GNU multiversioning's `target` and
   `target_clones` section alone, #1838 (inline assembly in `target_clones` copies at both tiers among it, #2247); `--asm-definitions-only` runs what
-  inline assembly defines against clang's objects alone, #1848; `--operand-diagnostics-only` runs
+  inline assembly defines against clang's objects alone, #1848; `--tier1-asm-only` runs the
+  Tier 1 asm body suite and `tests/driver/asm-body-results.c` against Clang. It checks
+  multiple register outputs at both tiers, repeated inlining, aliasing, flags, scalar
+  floating-point values, spills, both schedulers, and emitted code certificates and
+  frame accesses (#2144). `--operand-diagnostics-only` runs
   the original runtime sources in `tests/driver/operand_diagnostics/` against Clang's complete
   diagnostics for invalid record and atomic operators, statement conditions, assertions and
   case labels and enumerators (#2441). Enum controls also check implicit successors,

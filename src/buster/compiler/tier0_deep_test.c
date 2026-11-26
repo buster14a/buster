@@ -8,7 +8,7 @@
 
 #define BUSTER_TIER0_TEST_DEEP_ENTRIES 256
 #define BUSTER_TIER0_TEST_DEEP_INPUTS 6
-#define BUSTER_TIER0_TEST_DEEP_CASES 13
+#define BUSTER_TIER0_TEST_DEEP_CASES 15
 // The pages of each case's code.
 #define BUSTER_TIER0_TEST_DEEP_PAGES 16
 
@@ -19,6 +19,7 @@ struct Tier0TestDeep
     uint8_t classes[BUSTER_TIER0_TEST_DEEP_ENTRIES];
     uint64_t values[BUSTER_TIER0_TEST_DEEP_ENTRIES];
     uint32_t count;
+    uint32_t call;
 };
 
 static uint32_t tier0_test_deep_add(Tier0TestDeep* deep, uint8_t kind, uint8_t class, uint64_t value)
@@ -88,8 +89,11 @@ static const char* tier0_test_deep_case(uint32_t c, Tier0TestDeep* deep)
         "a realigned frame's base past the line",
         "a seq_cst store's scratch at the line",
         "seq_cst stores past the line",
+        "integer asm results past both lines",
+        "floating asm results past both lines",
     };
     deep->count = 0;
+    deep->call = UINT32_MAX;
     if (c == 10)
     {
         // The stack's position, which with the object aligned to 4096 gives the function a base, kept in local 1.
@@ -326,6 +330,33 @@ static const char* tier0_test_deep_case(uint32_t c, Tier0TestDeep* deep)
         tier0_test_deep_add(deep, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0);
         folds = 0;
     }
+    else if (c == 13 || c == 14)
+    {
+        // Both stacks are full at the body: 15 integers and 16 doubles. Its primary result crosses the integer line
+        // in case 13 and the floating one in case 14. Capture rax, rdx and xmm0 into locals before the saved depths
+        // restore those registers; both secondary projections are part of the same indivisible group.
+        for (uint32_t k = 0; k < 16; k += 1)
+        {
+            tier0_test_deep_floating(deep, k);
+        }
+        const bool floating = c == 14;
+        const uint8_t primary = floating ? BUSTER_TYPED_CLASS_F64 : BUSTER_TYPED_CLASS_U64;
+        deep->call = tier0_test_deep_add(deep, BUSTER_TYPED_CALL, primary, 0);
+        tier0_test_deep_add(deep, BUSTER_TYPED_SET_LOCAL, primary, floating ? 3 : 1);
+        tier0_test_deep_add(deep, BUSTER_TYPED_X86, BUSTER_TYPED_CLASS_U64, 0);
+        tier0_test_deep_add(deep, BUSTER_TYPED_SET_LOCAL, BUSTER_TYPED_CLASS_U64, floating ? 1 : 2);
+        tier0_test_deep_add(deep, BUSTER_TYPED_X86, floating ? BUSTER_TYPED_CLASS_U64 : BUSTER_TYPED_CLASS_F64, 1);
+        tier0_test_deep_add(deep, BUSTER_TYPED_SET_LOCAL, floating ? BUSTER_TYPED_CLASS_U64 : BUSTER_TYPED_CLASS_F64, floating ? 2 : 3);
+        tier0_test_deep_add(deep, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_F64, 3);
+        tier0_test_deep_fold(deep, BUSTER_TYPED_CLASS_F64, 16);
+        tier0_test_deep_add(deep, BUSTER_TYPED_CONVERT, BUSTER_TYPED_CLASS_U64, 0);
+        for (uint32_t local = 1; local < 3; local += 1)
+        {
+            tier0_test_deep_add(deep, BUSTER_TYPED_LOCAL, BUSTER_TYPED_CLASS_U64, local);
+            tier0_test_deep_add(deep, BUSTER_TYPED_ADD, BUSTER_TYPED_CLASS_U64, 0);
+        }
+        folds += 1;
+    }
     else
     {
         // 16 floating values; x & 0xffff past the integer line, converted past the floating one (its operand dropped back
@@ -395,6 +426,8 @@ static uint64_t tier0_test_deep_model(uint32_t c, uint64_t x)
         x + (x ^ 3),
         2 * (x + 7),
         2 * (x + 7),
+        16 * (x & 0xffff) + 120 + 5 + 17 + 29,
+        16 * (x & 0xffff) + 120 + 5 + 17 + 29,
     };
     return sum + cases[c];
 }
@@ -431,6 +464,8 @@ static __attribute__((no_sanitize("function"))) void tier0_test_deep(Tier0TestTa
     // (double)(x & 0xffff); cases 9's and 10's local 4 their object.
     static const uint8_t local_classes[5] = { BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_VOID };
     static const uint8_t floating_classes[2] = { BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_F64 };
+    static const uint8_t asm_classes[4] = { BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_U64, BUSTER_TYPED_CLASS_F64 };
+    static const uint8_t asm_flags[4] = { 0, BUSTER_TYPED_LOCAL_ADDRESS_TAKEN, BUSTER_TYPED_LOCAL_ADDRESS_TAKEN, BUSTER_TYPED_LOCAL_ADDRESS_TAKEN };
     static const uint8_t local_flags[5] = { 0, 0, 0, 0, BUSTER_TYPED_LOCAL_ADDRESS_TAKEN };
     static const uint8_t atomic_flags[2] = { 0, BUSTER_TYPED_LOCAL_ADDRESS_TAKEN };
     static const uint32_t local_sizes[5] = { 0, 0, 0, 0, 16 };
@@ -440,6 +475,18 @@ static __attribute__((no_sanitize("function"))) void tier0_test_deep(Tier0TestTa
     const AbiReturn result = { .kind = BUSTER_ABI_RESULT_REGISTERS,
                                .part_bytes = 8,
                                .registers = { BUSTER_ABI_RAX, BUSTER_ABI_REGISTER_NONE, BUSTER_ABI_REGISTER_NONE, BUSTER_ABI_REGISTER_NONE } };
+    static const X86Instruction asm_records[] = {
+        { .form = X86_FORM_MOV_R32_IMM32, .rm = X86_REGISTER_RAX, .immediate = 17 },
+        { .form = X86_FORM_MOV_R32_IMM32, .rm = X86_REGISTER_RDX, .immediate = 29 },
+        { .form = X86_FORM_MOV_R32_IMM32, .rm = X86_REGISTER_RCX, .immediate = 5 },
+        { .form = X86_FORM_CVTSI2SD_X_RM32, .reg = 0, .rm = X86_REGISTER_RCX, .mode = BUSTER_X86_REGISTER_DIRECT },
+    };
+    const SymbolId asm_target = BUSTER_TIER0_CALL_ASM_TARGET;
+    const uint32_t asm_first = 0;
+    const uint32_t asm_arguments = 0;
+    const uint32_t asm_index = 1;
+    const uint8_t asm_variadic = 0;
+    const AbiCall asm_call = { 0 };
     // Each case's code, in pages of its own, and what each run returned, the child's.
     uint64_t* shared = mmap(0, sizeof(uint64_t) * BUSTER_TIER0_TEST_DEEP_CASES * BUSTER_TIER0_TEST_DEEP_INPUTS, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     uint8_t* region = mmap(0, BUSTER_TIER0_TEST_DEEP_PAGES * BUSTER_TIER0_TEST_PAGE * BUSTER_TIER0_TEST_DEEP_CASES, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -455,18 +502,56 @@ static __attribute__((no_sanitize("function"))) void tier0_test_deep(Tier0TestTa
         function.classes = deep->classes;
         function.values = deep->values;
         function.count = deep->count;
-        function.local_classes = c == 8 ? floating_classes : local_classes;
-        function.local_flags = c == 11 || c == 12 ? atomic_flags : local_flags;
-        function.local_count = c == 9 || c == 10 ? 5 : c == 7 ? 4 : 2;
+        function.local_classes = c >= 13 ? asm_classes : c == 8 ? floating_classes : local_classes;
+        function.local_flags = c >= 13 ? asm_flags : c == 11 || c == 12 ? atomic_flags : local_flags;
+        function.local_count = c == 9 || c == 10 ? 5 : c == 7 || c >= 13 ? 4 : 2;
         function.local_sizes = c == 9 || c == 10 ? local_sizes : 0;
         function.local_alignments = c == 9 ? alignments_64 : c == 10 ? alignments_4096 : 0;
         function.parameter_count = 1;
         function.parameters = &parameter;
         function.result = result;
+        Tier0Operation operations[2] = {
+            { .result_class = BUSTER_TYPED_CLASS_U64, .asm_result = c == 14 ? X86_REGISTER_RAX + 1 : X86_REGISTER_RDX + 1 },
+            { .result_class = c == 14 ? BUSTER_TYPED_CLASS_U64 : BUSTER_TYPED_CLASS_F64, .asm_result = c == 14 ? X86_REGISTER_RDX + 1 : 17 },
+        };
+        const Tier0AsmBody body = {
+            .records = asm_records,
+            .count = BUSTER_ARRAY_LENGTH(asm_records),
+            .block = BUSTER_TIER0_ASM_NO_BLOCK,
+            .touched = 0x10007u,
+            .result = c == 14 ? 17 : X86_REGISTER_RAX + 1,
+            .result_registers = 0x10005u,
+            .result_wide = 0x10005u,
+        };
+        if (c >= 13)
+        {
+            function.call_targets = &asm_target;
+            function.call_first = &asm_first;
+            function.call_argument_counts = &asm_arguments;
+            function.call_variadic = &asm_variadic;
+            function.calls = &asm_call;
+            function.call_count = 1;
+            function.call_asm = &asm_index;
+            function.asm_bodies = &body;
+            function.asm_body_count = 1;
+            function.operations = operations;
+            function.operation_count = 2;
+            function.vectors = true;
+        }
         const uint64_t mark = arena.length;
         const Tier0Check check = tier0_validate(&function);
+        if (c >= 13 && check.error == TIER0_OK)
+        {
+            Tier0Job job = { .function = &function };
+            tier0_job_front(&job, &arena);
+            const Tier0DeepEntry selected = job.error == TIER0_OK ? tier0_deep_entry(&function, &job.entries, deep->call) : (Tier0DeepEntry){ 0 };
+            ready = tier0_test_expect(tally, job.error == TIER0_OK && job.entries.deep != NULL &&
+                                            (job.entries.deep[deep->call] & BUSTER_TIER0_DEEP_CALL) != 0 && selected.before[0] == 15 && selected.before[1] == 16,
+                                     "deep", "%s: the asm call must use deep capture with both value stacks full", name);
+            arena_pop_to(&arena, mark);
+        }
         const Tier0Code vector = tier0_compile(&function, &arena);
-        ready = tier0_test_expect(tally, check.error == TIER0_OK && vector.error == TIER0_OK, "deep",
+        ready = ready && tier0_test_expect(tally, check.error == TIER0_OK && vector.error == TIER0_OK, "deep",
                                   "%s: rule \"%s\" at %u, error %d at %u", name, check.rule != 0 ? check.rule : "", check.node, vector.error, vector.node);
         // Every case has deep entries, and only the frame pointer's two and the realigned frames' have push rbp; mov rbp,
         // rsp first, the realigned ones published as such (case 10's with its base).

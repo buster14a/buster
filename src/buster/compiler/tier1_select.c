@@ -247,8 +247,9 @@ typedef enum Tier1SelectRule
     TIER1_RULE_ROW,
     // An asm body (#1839), an IR body call's (IrCall.body): an asm statement's records, which the CFG consumer writes in
     // the node's place (tier1_emit_cfg_asm) with no call, its operand block's base (BUSTER_TIER0_ASM_BLOCK) the frame's base
-    // register and its displacement the block's frame object's past it, the block being the IR_STACK_ADDR the call's one
-    // argument is, which no register holds: the node has no operand and no result. Its own branches are the function's,
+    // register and its displacement the block's frame object's past it. The optional operand block is an IR_STACK_ADDR
+    // argument that no register holds; register arguments follow it. Its scalar results (#2144), the call's and its
+    // IR_ASM_RESULT projections', are copied from their declared registers together. Its own branches are the function's,
     // to its records or its end. The general registers it touches are its fixed registers (tier1_select_node_fixed): the
     // values that live past it there are saved in their call-save rows around it, a callee-saved register's too, as a
     // fixed rule's are, and so are the floating values in the xmm registers it touches, in their rows, as a call's are;
@@ -277,6 +278,9 @@ typedef enum Tier1SelectRule
     TIER1_RULE_VECTOR_FMA,
     // A packed same-width integer/float conversion (#2806): `operation` the IR opcode, lanes in `source_width`.
     TIER1_RULE_VECTOR_CONVERT,
+    // A secondary asm result (#2144), captured with the producer's primary result before any touched register is
+    // restored. Its SSA node names the snapshot; it emits no instructions at its later IR position.
+    TIER1_RULE_ASM_RESULT,
     TIER1_RULE_COUNT,
 } Tier1SelectRule;
 
@@ -5021,6 +5025,8 @@ static bool tier1_select_asm_supported(const IrFunction* function, uint32_t node
     // Each register taken once (their moves are one parallel move), and no more of them than a call's arguments.
     uint64_t taken = 0;
     supported = supported && body->passed <= BUSTER_TIER1_SELECT_MAX_ARGUMENTS;
+    const uint32_t unavailable = frame | (1u << BUSTER_TIER1_SELECT_SCRATCH) | (1u << (16 + BUSTER_TIER1_SELECT_FLOAT_SCRATCH));
+    supported = supported && (body->result_registers & unavailable) == 0;
     for (uint32_t k = 0; supported && k < body->passed; k += 1)
     {
         const uint32_t value = function->extra[call->argument_first + skipped + k];
@@ -7954,6 +7960,13 @@ static inline __attribute__((always_inline)) Tier1SelectCandidates tier1_select_
         base.rule = TIER1_RULE_ASM;
         base.immediate = function->calls[b].body - 1;
         base.intrinsic_cost = (uint8_t)(function->asm_bodies[function->calls[b].body - 1].count < 254 ? 1 + function->asm_bodies[function->calls[b].body - 1].count : 255);
+        tier1_select_add_candidate(forest, node, &candidates, base);
+    }
+    else if (op == IR_ASM_RESULT && tier1_select_asm_supported(function, a))
+    {
+        base.rule = TIER1_RULE_ASM_RESULT;
+        base.immediate = b;
+        base.intrinsic_cost = 0;
         tier1_select_add_candidate(forest, node, &candidates, base);
     }
     else if (op == IR_CALL && function->calls[b].row != 0 && tier1_select_row_supported(function, node))

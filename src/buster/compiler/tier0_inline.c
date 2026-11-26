@@ -1346,7 +1346,8 @@ static uint32_t tier0_inline_shape(const Tier0Function* g, const uint64_t* targe
     const uint8_t* classes = g->classes;
     const uint64_t* values = g->values;
     uint32_t shape = 0;
-    if (kinds[e] == BUSTER_TYPED_SET_LOCAL && e + 1 < count && (targets[(e + 1) / 64] >> ((e + 1) % 64) & 1) == 0)
+    // An asm result's SET_LOCAL belongs to its indivisible capture group (#2144), even when the next row returns it.
+    if (kinds[e] == BUSTER_TYPED_SET_LOCAL && e + 1 < count && (targets[(e + 1) / 64] >> ((e + 1) % 64) & 1) == 0 && !tier0_asm_result_interior(g, e))
     {
         const uint64_t x = values[e];
         const bool b = kinds[e + 1] == BUSTER_TYPED_LOCAL && classes[e + 1] == classes[e] && values[e + 1] == x;

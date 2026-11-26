@@ -1837,7 +1837,7 @@ is k0.
 ## Asm bodies (#1839)
 
 A body call ([the IR guide](ir.md)'s "Asm bodies") is `TIER1_RULE_ASM`, its
-`immediate` the body's index, of no result: its block argument is the
+`immediate` the body's index: its optional block argument is the
 `stack_addr` of a frame object, which no register holds (no effective use, so the
 address is computed only where something else reads it), and its register
 operands (#2144, `IrAsmBody.passed`) are its effective uses, each in a register of
@@ -1846,6 +1846,10 @@ block out). The selector takes a body whose block is a `stack_addr`, which touch
 none of rsp, rbp and r15, and whose register operands are an `i32`'s, an `i64`'s
 or a `ptr`'s in a general register but the scratch r11, or a `float`'s or a
 `double`'s in xmm0 to xmm14, each register once (`tier1_select_asm_supported`).
+Its scalar results use the same register classes and widths, excluding r11 and
+xmm15, which the parallel moves need as scratch registers. The call returns the
+primary result and `IR_ASM_RESULT` nodes project the others; these projections
+select `TIER1_RULE_ASM_RESULT`, with no effective machine use or later records.
 Like a row call it is no call of a function's: no outgoing area. Only the CFG
 consumer takes it (`tier1_emit_cfg_asm`), which writes, at the node's definition
 phase:
@@ -1861,8 +1865,18 @@ phase:
 3. the body's records, each that addresses the operand block
    (`BUSTER_TIER0_ASM_BLOCK`) addressing the block's frame object from the frame's
    base register, its own branches the function's branches to their records (one
-   to the body's end the first restore's), sized with the function's;
-4. the loads back.
+   to the body's end the first result capture's), sized with the function's;
+4. every result's capture (`tier1_emit_cfg_asm_results`): stores from its fixed
+   register into a spill slot first, then a parallel copy per register class;
+5. the loads back.
+
+All result intervals start at the producer's definition phase, even when pure
+instructions or another call occur before a projection's IR position. Each
+result hints its own fixed register, but does not require an allocation register
+at definition: the emitter can store it directly into its initial spill slot.
+The other results stay available while the copies resolve cycles, and no restore
+can overwrite a result before it is captured. A result's interval does not count
+as crossing the body that defines it.
 
 The general registers it touches are its fixed registers
 (`tier1_select_node_fixed`), so that the frame gives them call-save rows where a
@@ -1882,8 +1896,12 @@ around itself each time it runs; a phi's web keeps out of every body's registers
 any member crosses. If that allocation fails, the first stands and the saves
 stay. The code's certificate (`--verify`) places and compares the body's records,
 its own branches among them, reads its register operands in their registers, and
-kills the registers it touches ([the certificate guide](tier1-certificate.md)'s "Asm
-bodies").
+kills the registers it touches and defines all the results in their declared
+registers before checking the captures ([the certificate guide](tier1-certificate.md)'s
+"Asm bodies"). `tier1_asm_result_test.c` exercises six mixed integer and floating
+results, both scalar widths and primary register classes, with a division between
+the producer and projections. Constrained masks force initial spills, and native
+execution checks an independent integer oracle.
 
 Registers outside `touched` hold no value across the node: the allocator gives
 values xmm0 to xmm14 alone (xmm15 is the vector class's scratch within a node,

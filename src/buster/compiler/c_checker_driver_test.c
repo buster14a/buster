@@ -9695,6 +9695,8 @@ static int run_checker_driver_tests(int argc, char** argv)
     bool type_sugar_only = false;
     // --asm-definitions-only: what inline assembly defines, against clang's objects and builds, alone (#1848).
     bool asm_definitions_only = false;
+    // --tier1-asm-only: asm bodies and their register results, at both tiers against Clang (#2144).
+    bool tier1_asm_only = false;
     // --call-counts-only: the call argument count section alone (#1860).
     bool call_counts_only = false;
     // --fp-contract-only: scalar contraction's command-line, pragma and native result matrix alone (#1239).
@@ -9840,6 +9842,10 @@ static int run_checker_driver_tests(int argc, char** argv)
         {
             asm_definitions_only = true;
         }
+        else if (strcmp(argv[i], "--tier1-asm-only") == 0)
+        {
+            tier1_asm_only = true;
+        }
         else if (strcmp(argv[i], "--call-counts-only") == 0)
         {
             call_counts_only = true;
@@ -9896,7 +9902,7 @@ static int run_checker_driver_tests(int argc, char** argv)
         }
     }
     const uint32_t focuses = (uint32_t)common_warnings_only + (uint32_t)sign_compare_only + (uint32_t)uninitialized_only + (uint32_t)cpu_dispatch_only + (uint32_t)target_versions_only + (uint32_t)semantic_recovery_only +
-                             (uint32_t)type_sugar_only + (uint32_t)asm_definitions_only + (uint32_t)call_counts_only + (uint32_t)fp_contract_only +
+                             (uint32_t)type_sugar_only + (uint32_t)asm_definitions_only + (uint32_t)tier1_asm_only + (uint32_t)call_counts_only + (uint32_t)fp_contract_only +
                              (uint32_t)operand_diagnostics_only + (uint32_t)label_attributes_only + (uint32_t)attribute_recovery_only + (uint32_t)assert_bool_only +
                              (uint32_t)malformed_calls_only + (uint32_t)record_extensions_only + (uint32_t)auto_qualifiers_only + (uint32_t)query_bool_only +
                              (uint32_t)run_modes_only + (uint32_t)correctness_edges_only + (uint32_t)imaginary_bit_int_only + (uint32_t)unused_comparison_only + (uint32_t)assert_diagnostics_only +
@@ -10540,6 +10546,10 @@ static int run_checker_driver_tests(int argc, char** argv)
     if (temporary && asm_definitions_only)
     {
         check_test_driver_asm_definitions(&test, clang, executable != NULL ? executable : "./build/compiler", directory);
+    }
+    if (temporary && tier1_asm_only)
+    {
+        check_test_driver_tier1_asm(&test, clang, executable, directory);
     }
     if (temporary && fp_contract_only)
     {
