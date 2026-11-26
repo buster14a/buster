@@ -9594,6 +9594,307 @@ static void fast_cc_asm_statement(FastCCState* cc)
     }
 }
 
+// #3577: what fast_cc_switch_boolean finds a range of tokens to be: not boolean, boolean, or maybe.
+#define BUSTER_FBOOL_NO    0u
+#define BUSTER_FBOOL_YES   1u
+#define BUSTER_FBOOL_MAYBE 2u
+
+// #3577: a binary operator's precedence, loosest first, for fast_cc_switch_boolean (0: none). `+`, `-`, `*` and `&` are
+// binary only after an operand; `?` stands for its conditional.
+static const uint8_t fast_switch_binary_precedence[FTOK_KIND_COUNT] = {
+    [FTOK_COMMA] = 1u,
+    [FTOK_ASSIGN] = 2u,
+    [FTOK_ADD_ASSIGN] = 2u,
+    [FTOK_SUB_ASSIGN] = 2u,
+    [FTOK_MUL_ASSIGN] = 2u,
+    [FTOK_DIV_ASSIGN] = 2u,
+    [FTOK_MOD_ASSIGN] = 2u,
+    [FTOK_AND_ASSIGN] = 2u,
+    [FTOK_OR_ASSIGN] = 2u,
+    [FTOK_XOR_ASSIGN] = 2u,
+    [FTOK_SHL_ASSIGN] = 2u,
+    [FTOK_SHR_ASSIGN] = 2u,
+    [FTOK_QUESTION] = 3u,
+    [FTOK_LOR] = 4u,
+    [FTOK_LAND] = 5u,
+    [FTOK_PIPE] = 6u,
+    [FTOK_CARET] = 7u,
+    [FTOK_AMP] = 8u,
+    [FTOK_EQ] = 9u,
+    [FTOK_NE] = 9u,
+    [FTOK_LT] = 10u,
+    [FTOK_LE] = 10u,
+    [FTOK_GT] = 10u,
+    [FTOK_GE] = 10u,
+    [FTOK_LSHIFT] = 11u,
+    [FTOK_RSHIFT] = 11u,
+    [FTOK_PLUS] = 12u,
+    [FTOK_MINUS] = 12u,
+    [FTOK_STAR] = 13u,
+    [FTOK_SLASH] = 13u,
+    [FTOK_PERCENT] = 13u,
+};
+
+// #3577: whether a switch's controlling expression, tokens [START, END) of type TYPE (not _Bool), may have a boolean
+// value, the full pipeline's -Wswitch-bool (clang's Expr::isKnownToHaveBooleanValue): through parentheses, a comparison,
+// a logical operator or `!`; a `&`, `|`, `^` or conditional whose operands (arms) all are; a comma's right operand, an
+// assignment's right operand where its left one isn't _Bool, and unary `+`'s operand; a value of type _Bool. A cast or a
+// call is its type's. Each range is split at its loosest operator outside brackets, without recursion; a leaf whose type
+// its tokens don't say (a member, a subscript, a builtin's call) is maybe, and so is a range past the stack's bound. The
+// answer is the leaves' conjunction; the caller leaves on yes or maybe.
+static __attribute__((cold, noinline)) bool fast_cc_switch_boolean(const FastCCState* cc, uint32_t start, uint32_t end)
+{
+    uint32_t ranges[16][2];
+    uint8_t root[16];
+    uint32_t count = 1u;
+    ranges[0][0] = start;
+    ranges[0][1] = end;
+    root[0] = 1u;
+    uint32_t answer = BUSTER_FBOOL_YES;
+    while (count != 0 && answer != BUSTER_FBOOL_NO)
+    {
+        count -= 1u;
+        uint32_t s = ranges[count][0];
+        const uint32_t e = ranges[count][1];
+        const uint8_t is_root = root[count];
+        s += (uint32_t)(s < e && cc->tk[s] == FTOK_KW_EXTENSION);
+        uint32_t leaf = BUSTER_FBOOL_MAYBE;
+        bool split = false;
+        if (s >= e)
+        {
+            leaf = BUSTER_FBOOL_MAYBE;
+        }
+        else if (cc->tk[s] == FTOK_LPAREN && fast_cc_group_end(cc, s) == e && !fast_cc_is_type_start(cc, s + 1u))
+        {
+            // Parentheses around the whole range: its value, and its type where the range's was the expression's.
+            ranges[count][0] = s + 1u;
+            ranges[count][1] = e - 1u;
+            root[count] = is_root;
+            count += 1u;
+            split = true;
+        }
+        else
+        {
+            // The loosest operator outside brackets: the last of a left-associative level, the first of a right one. A
+            // conditional's middle, between `?` and its `:`, is a bracket of its own.
+            uint32_t best = UINT32_MAX;
+            uint32_t best_precedence = 99u;
+            bool operand = false;
+            uint32_t p = s;
+            while (p < e)
+            {
+                const uint8_t t = cc->tk[p];
+                const uint32_t precedence = fast_switch_binary_precedence[t];
+                const bool ambiguous = t == FTOK_PLUS || t == FTOK_MINUS || t == FTOK_STAR || t == FTOK_AMP;
+                if (t == FTOK_LPAREN || t == FTOK_LBRACKET || t == FTOK_LBRACE)
+                {
+                    // A cast is a prefix; a compound literal, a group, a call or a subscript is an operand.
+                    const bool cast = t == FTOK_LPAREN && !operand && fast_cc_is_type_start(cc, p + 1u);
+                    p = fast_cc_group_end(cc, p);
+                    const bool compound = cast && p < e && cc->tk[p] == FTOK_LBRACE;
+                    p = compound ? fast_cc_group_end(cc, p) : p;
+                    operand = !cast || compound;
+                }
+                else if ((t == FTOK_KW_SIZEOF || t == FTOK_KW_ALIGNOF) && p + 1u < e && cc->tk[p + 1u] == FTOK_LPAREN &&
+                         fast_cc_is_type_start(cc, p + 2u))
+                {
+                    p = fast_cc_group_end(cc, p + 1u);
+                    operand = true;
+                }
+                else if (precedence != 0 && (!ambiguous || operand))
+                {
+                    const bool right = precedence == 2u || precedence == 3u;
+                    if (precedence < best_precedence || (precedence == best_precedence && !right))
+                    {
+                        best = p;
+                        best_precedence = precedence;
+                    }
+                    p += 1u;
+                    if (t == FTOK_QUESTION)
+                    {
+                        // Past the middle to its `:` (nested conditionals' colons pair first).
+                        uint32_t nested = 0;
+                        while (p < e && (cc->tk[p] != FTOK_COLON || nested != 0))
+                        {
+                            const uint8_t m = cc->tk[p];
+                            nested += (uint32_t)(m == FTOK_QUESTION);
+                            nested -= (uint32_t)(m == FTOK_COLON);
+                            p = (m == FTOK_LPAREN || m == FTOK_LBRACKET || m == FTOK_LBRACE) ? fast_cc_group_end(cc, p) : p + 1u;
+                        }
+                        p += 1u;
+                    }
+                    operand = false;
+                }
+                else if (t == FTOK_DOT || t == FTOK_ARROW)
+                {
+                    p += 2u;
+                    operand = true;
+                }
+                else if (t == FTOK_INC || t == FTOK_DEC)
+                {
+                    p += 1u;
+                }
+                else
+                {
+                    // A name, a literal, `__func__` (operands), or a prefix operator.
+                    operand = t == FTOK_IDENT || t == FTOK_INT_LIT || t == FTOK_INT_U32 || t == FTOK_INT_I64 || t == FTOK_INT_U64 ||
+                              t == FTOK_FLOAT_LIT || t == FTOK_FLOAT32 || t == FTOK_FLOAT80 || t == FTOK_CHAR_LIT ||
+                              t == FTOK_STR_LIT || t == FTOK_KW_FUNC || t == FTOK_KW_GENERIC;
+                    p += 1u;
+                }
+            }
+            if (best != UINT32_MAX && count + 2u <= 16u)
+            {
+                const uint8_t op = cc->tk[best];
+                split = true;
+                if (op == FTOK_COMMA)
+                {
+                    ranges[count][0] = best + 1u;
+                    ranges[count][1] = e;
+                    root[count] = is_root;
+                    count += 1u;
+                }
+                else if (op == FTOK_QUESTION)
+                {
+                    // Both arms; GNU's `c ?: d` takes the condition for its first.
+                    uint32_t c = best + 1u;
+                    uint32_t nested = 0;
+                    while (c < e && (cc->tk[c] != FTOK_COLON || nested != 0))
+                    {
+                        const uint8_t m = cc->tk[c];
+                        nested += (uint32_t)(m == FTOK_QUESTION);
+                        nested -= (uint32_t)(m == FTOK_COLON);
+                        c = (m == FTOK_LPAREN || m == FTOK_LBRACKET || m == FTOK_LBRACE) ? fast_cc_group_end(cc, c) : c + 1u;
+                    }
+                    const bool omitted = c == best + 1u;
+                    ranges[count][0] = omitted ? s : best + 1u;
+                    ranges[count][1] = omitted ? best : c;
+                    root[count] = 0;
+                    ranges[count + 1u][0] = c + 1u;
+                    ranges[count + 1u][1] = e;
+                    root[count + 1u] = 0;
+                    count += 2u;
+                }
+                else if (best_precedence == 2u)
+                {
+                    // An assignment's type is its left operand's: a name's is known. `=` is then its right operand's value.
+                    const bool named = best == s + 1u && cc->tk[s] == FTOK_IDENT;
+                    const uint32_t id = named ? cc->td[s] : 0u;
+                    const uint32_t si = id != 0 && id < cc->env_cap ? cc->sym_cur[id] : 0u;
+                    const bool typed = si != 0 && (cc->syms[si].kind == FSYM_LOCAL || cc->syms[si].kind == FSYM_GLOBAL);
+                    if (!typed)
+                    {
+                        split = false;
+                        leaf = BUSTER_FBOOL_MAYBE;
+                    }
+                    else if (ftype_is_bool(cc->syms[si].type))
+                    {
+                        split = false;
+                        leaf = BUSTER_FBOOL_YES;
+                    }
+                    else if (op == FTOK_ASSIGN)
+                    {
+                        ranges[count][0] = best + 1u;
+                        ranges[count][1] = e;
+                        root[count] = 0;
+                        count += 1u;
+                    }
+                    else
+                    {
+                        split = false;
+                        leaf = BUSTER_FBOOL_NO;
+                    }
+                }
+                else if (op == FTOK_PIPE || op == FTOK_CARET || op == FTOK_AMP)
+                {
+                    ranges[count][0] = s;
+                    ranges[count][1] = best;
+                    root[count] = 0;
+                    ranges[count + 1u][0] = best + 1u;
+                    ranges[count + 1u][1] = e;
+                    root[count + 1u] = 0;
+                    count += 2u;
+                }
+                else
+                {
+                    // A logical operator or a comparison is boolean; any other operator isn't.
+                    split = false;
+                    leaf = best_precedence >= 4u && best_precedence <= 10u && best_precedence != 6u && best_precedence != 7u &&
+                           best_precedence != 8u ? BUSTER_FBOOL_YES : BUSTER_FBOOL_NO;
+                }
+            }
+            else if (best != UINT32_MAX)
+            {
+                leaf = BUSTER_FBOOL_MAYBE;
+            }
+            else
+            {
+                // A unary operator, a cast, or a postfix chain from a name or a literal.
+                const uint8_t t = cc->tk[s];
+                const bool literal = t == FTOK_INT_LIT || t == FTOK_INT_U32 || t == FTOK_INT_I64 || t == FTOK_INT_U64 || t == FTOK_FLOAT_LIT ||
+                                     t == FTOK_FLOAT32 || t == FTOK_FLOAT80 || t == FTOK_CHAR_LIT || t == FTOK_STR_LIT;
+                const uint32_t id = t == FTOK_IDENT ? cc->td[s] : 0u;
+                const uint32_t si = id != 0 && id < cc->env_cap ? cc->sym_cur[id] : 0u;
+                const FastSym* sym = si != 0 ? cc->syms + si : NULL;
+                if (t == FTOK_BANG)
+                {
+                    leaf = BUSTER_FBOOL_YES;
+                }
+                else if (t == FTOK_PLUS)
+                {
+                    ranges[count][0] = s + 1u;
+                    ranges[count][1] = e;
+                    root[count] = 0;
+                    count += 1u;
+                    split = true;
+                }
+                else if (t == FTOK_MINUS || t == FTOK_TILDE || t == FTOK_AMP || t == FTOK_KW_SIZEOF || t == FTOK_KW_ALIGNOF || is_root != 0)
+                {
+                    // Not boolean, or the whole expression's type, which isn't _Bool.
+                    leaf = BUSTER_FBOOL_NO;
+                }
+                else if (literal && e == s + 1u)
+                {
+                    leaf = BUSTER_FBOOL_NO;
+                }
+                else if (t == FTOK_LPAREN && fast_cc_is_type_start(cc, s + 1u))
+                {
+                    // A cast: _Bool by its keyword or a typedef of it alone; any other type isn't.
+                    const uint32_t close = fast_cc_group_end(cc, s) - 1u;
+                    bool is_bool = false;
+                    bool known = true;
+                    for (uint32_t q = s + 1u; q < close; q += 1u)
+                    {
+                        const uint8_t c = cc->tk[q];
+                        const uint32_t tid = c == FTOK_IDENT ? cc->td[q] : 0u;
+                        const uint32_t tsi = tid != 0 && tid < cc->env_cap ? cc->sym_cur[tid] : 0u;
+                        is_bool = is_bool || c == FTOK_KW_BOOL || (tsi != 0 && cc->syms[tsi].kind == FSYM_TYPEDEF && ftype_is_bool(cc->syms[tsi].type));
+                        known = known && c != FTOK_KW_TYPEOF && (c != FTOK_IDENT || tsi != 0);
+                        is_bool = is_bool && c != FTOK_STAR && c != FTOK_LBRACKET && c != FTOK_LPAREN;
+                    }
+                    leaf = !known ? BUSTER_FBOOL_MAYBE : is_bool ? BUSTER_FBOOL_YES : BUSTER_FBOOL_NO;
+                }
+                else if (sym != NULL && e == s + 1u && sym->kind != FSYM_TYPEDEF)
+                {
+                    leaf = sym->kind != FSYM_FUNC && ftype_is_bool(sym->type) ? BUSTER_FBOOL_YES : BUSTER_FBOOL_NO;
+                }
+                else if (sym != NULL && sym->kind == FSYM_FUNC && ftype_is_func(sym->type) && e > s + 1u && cc->tk[s + 1u] == FTOK_LPAREN &&
+                         fast_cc_group_end(cc, s + 1u) == e)
+                {
+                    // A named function's call: its result's type.
+                    const FastComplexType* fn = cc->ctypes + (sym->type & BUSTER_FTYPE_CIDX_MASK);
+                    leaf = ftype_is_bool(ftype_unqual(fn->inner)) ? BUSTER_FBOOL_YES : BUSTER_FBOOL_NO;
+                }
+            }
+        }
+        if (!split)
+        {
+            answer = leaf == BUSTER_FBOOL_NO ? BUSTER_FBOOL_NO : (leaf == BUSTER_FBOOL_MAYBE ? BUSTER_FBOOL_MAYBE : answer);
+        }
+    }
+    return answer != BUSTER_FBOOL_NO;
+}
+
 // Compile one complete function body starting at `cc->pos` == '{'!
 static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym_idx, uint32_t param_names_start, uint16_t param_count)
 {
@@ -10279,9 +10580,16 @@ static BUSTER_DIRECT_HOT void fast_cc_compile_func(FastCCState* cc, uint32_t sym
             cc->pos += 1u;
             if (fast_cc_peek(cc) != FTOK_LPAREN) { fast_cc_bail(cc, "expected ( after switch"); break; }
             cc->pos += 1u;
+            const uint32_t sv_start = cc->pos;
             FastVal sv = { 0 };
             fast_cc_expr(cc, false, false, false, false, 0, &sv);
             if (cc->bailout) { break; }
+            // #3577: a controlling expression with a boolean value is the full pipeline's -Wswitch-bool.
+            if (ftype_is_bool(sv.type) || fast_cc_switch_boolean(cc, sv_start, cc->pos))
+            {
+                fast_cc_bail(cc, "a switch's boolean condition");
+                break;
+            }
             // #3577: the controlling expression's enum, its type before promotion (the store below converts it).
             const uint32_t sv_complex = BUSTER_FTYPE_COMPLEX_ALL(sv.type) & (UINT32_C(0) - (uint32_t)((sv.type & BUSTER_FTYPE_PTR_MASK) == 0));
             const uint32_t sv_cidx = sv.type & BUSTER_FTYPE_CIDX_MASK & sv_complex;

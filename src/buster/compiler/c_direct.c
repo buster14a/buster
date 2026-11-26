@@ -4419,6 +4419,21 @@ static int c_direct_unit_tests(void)
         "    r += (int)sizeof(x == x) + (int)sizeof(\"a\" == cp) + (ip + n < end) + (p->a < q->a);\n"
         "    return r + (cp != 0);\n"
         "}\n",
+        // 9. Switches the full pipeline's -Wswitch-bool leaves alone (#3577): a member, a mask, `|` with an int, an
+        // assignment of a call, a conditional of ints, arithmetic over a comparison, a comparison in a call's argument, a
+        // cast of one to int.
+        "struct T { int op; unsigned char *blob; };\nint g(int);\n"
+        "int switched(struct T* t, int n, int c, _Bool b, int i) {\n"
+        "    switch (t->op) { case 1: n += 1; }\n"
+        "    switch (t->blob[i] & 0x0f) { case 2: n += 2; }\n"
+        "    switch (b | n) { case 3: n += 3; }\n"
+        "    switch (c = g(n)) { case 4: n += 4; }\n"
+        "    switch (c ? n : 0) { case 5: n += 5; }\n"
+        "    switch (128 * (c == '$') + n) { case 6: n += 6; }\n"
+        "    switch (g(n == 1)) { case 7: n += 7; }\n"
+        "    switch ((int)(n == 1)) { case 8: n += 8; }\n"
+        "    return n;\n"
+        "}\n",
     };
 
     for (uint32_t i = 0; i < sizeof(valid_cases) / sizeof(valid_cases[0]); i += 1)
@@ -4502,6 +4517,15 @@ static int c_direct_unit_tests(void)
         "enum E { X = 0xFFFFFFFFFFFFFFFFull };\nint f(void) { return X > 0; }\n",
         "enum E { X = 0x8000000000000000ull, Y = -1 };\nint f(void) { return 0; }\n",
         "enum E { X = 0x7FFFFFFFFFFFFFFF, Y };\nint f(void) { return 0; }\n",
+        // -Wswitch-bool: a _Bool, a comparison in parentheses, `^` of two _Bools, a conditional of comparisons, an
+        // assignment's right operand, unary `+` of a _Bool, a dead switch's.
+        "int f(_Bool b) { switch (b) { case 0: return 1; } return 0; }\n",
+        "int f(int x) { switch ((x == 1)) { case 1: return 1; } return 0; }\n",
+        "int f(_Bool a, _Bool b) { switch (a ^ b) { case 1: return 1; } return 0; }\n",
+        "int f(int c, int x, int y) { switch (c ? x == 1 : y < 2) { case 1: return 1; } return 0; }\n",
+        "int f(int x, int y) { switch (y = !x) { case 1: return 1; } return 0; }\n",
+        "int f(_Bool b) { switch (+b) { case 1: return 1; } return 0; }\n",
+        "int f(int x) { if (0) { switch (x < 1) { case 1: return 1; } } return 0; }\n",
     };
     for (uint32_t i = 0; i < sizeof(bail_cases) / sizeof(bail_cases[0]); i += 1)
     {
