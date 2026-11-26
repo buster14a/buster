@@ -211,7 +211,8 @@ static bool ir_switch_table_match(const IrFunction* f, uint32_t terminator, cons
     const uint32_t extended = target != BUSTER_IR_NONE ? f->b[target] : BUSTER_IR_NONE;
     const bool sext = extended < f->instruction_count && f->op[extended] == IR_SEXT && f->type[extended] == IR_I64;
     const uint32_t load = sext ? f->a[extended] : BUSTER_IR_NONE;
-    const bool loaded = load < f->instruction_count && f->op[load] == IR_LOAD && f->type[load] == IR_I32 && (f->flags[load] & BUSTER_IR_ACCESS_FLAGS) == 0;
+    const bool loaded = load < f->instruction_count && f->op[load] == IR_LOAD && f->type[load] == IR_I32 &&
+                        (f->flags[load] & (BUSTER_IR_ACCESS_FLAGS & ~BUSTER_IR_COPY_PIECE)) == 0;
     const uint32_t entry = loaded ? ir_switch_table_address(f, f->a[load], 4) : BUSTER_IR_NONE;
     bool valid = entry != BUSTER_IR_NONE && ir_switch_table_symbol(f, f->a[entry]) == table->symbol && listed != 0 && list != BUSTER_IR_NONE && table->count != 0;
     const uint32_t dispatch = valid ? ir_switch_table_block(f, terminator) : BUSTER_IR_NONE;

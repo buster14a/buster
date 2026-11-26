@@ -44,20 +44,17 @@
 // r9 and in 8-byte slots (FIRST and LOW past 8 and 16 bytes); the program's own definitions, called by the program and
 // by the harness through pointers; and as unnamed arguments, read with va_arg, both ways.
 
-// The reason the lowering refuses a union made transparent after clang's code may have classified a function's type.
-static const char check_test_program_transparent_late[] =
-    "unions made transparent after a function definition or an initializer naming a function, whose first members pass otherwise";
-
 static void check_test_program_transparent(CheckTest* test, const char* clang)
 {
     check_test_program_suite(test, "checker/programs/transparent-union-calls", clang);
+    check_test_program_suite(test, "checker/programs/transparent-union-late", clang);
     check_test_program_boundary_reason(test,
         "union U{struct{float x,y;}p;struct{int a,b;}q;};int f(union U u);int early(union U u){return f(u);}"
         "typedef union U T __attribute__((transparent_union));int tested(int n){return n;}",
-        "transparent-union-made-after-a-definition-apart", true, false, 1, 0, check_test_program_transparent_late);
-    // The same after a static object's initializer that names a function, whose address clang's code takes where it emits
+        "transparent-union-made-after-a-definition-apart", true, true, 1, 0, NULL);
+    // The same after an object's initializer that names a function, whose address clang's code takes where it emits
     // the object, before any definition (#801's review): clang 23.1.4 passes `external`'s and `saved`'s arguments as the
-    // union, in a general register, and an aggregate's initializer names it as well. Refused by name, with 0 to 17
+    // union, in a general register, and an aggregate's initializer names it as well. Accepted, with 0 to 17
     // declarations before them, which put the initializer's declaration in each lane of the vector path's scan and in its
     // tail; the same without a function in the initializers is taken (check_test_program_transparent_first runs it).
     static const struct
@@ -65,12 +62,11 @@ static void check_test_program_transparent(CheckTest* test, const char* clang)
         const char* name;
         const char* source;
         uint32_t references;
-        bool late;
     } initializers[] =
     {
-        { "transparent-union-made-after-an-initializer", "int(*saved)(union U)=external;", 2, true },
-        { "transparent-union-made-after-an-aggregate-initializer", "struct S{int(*f)(union U);}s={&external};int(*saved)(union U);", 2, true },
-        { "transparent-union-made-after-other-initializers", "int x=1;int*saved_address=&x;int(*saved)(union U);", 2, false },
+        { "transparent-union-made-after-an-initializer", "int(*saved)(union U)=external;", 2 },
+        { "transparent-union-made-after-an-aggregate-initializer", "struct S{int(*f)(union U);}s={&external};int(*saved)(union U);", 2 },
+        { "transparent-union-made-after-other-initializers", "int x=1;int*saved_address=&x;int(*saved)(union U);", 2 },
     };
     for (uint32_t i = 0; i < BUSTER_ARRAY_LENGTH(initializers); i += 1)
     {
@@ -88,14 +84,63 @@ static void check_test_program_transparent(CheckTest* test, const char* clang)
                      "int tested(int n){union U u={.q={n,2}};return external(u)+saved(u);}",
                      initializers[i].source);
             snprintf(name, sizeof(name), "%s after %u declarations", initializers[i].name, padding);
-            check_test_program_boundary_reason(test, source, name, true, !initializers[i].late, initializers[i].references, 1,
-                                               initializers[i].late ? check_test_program_transparent_late : NULL);
+            check_test_program_boundary_reason(test, source, name, true, true, initializers[i].references, 1, NULL);
         }
     }
     check_test_program_suite(test, "checker/programs/transparent-union-made-between-initializers", clang);
-    // A member of an _Atomic type, which clang passes uncounted, keeps its refusal.
+    // An atomic first member passes uncounted in a slot of its own value's bytes.
     check_test_program_boundary_reason(test,
         "typedef union __attribute__((transparent_union,aligned(32))){_Atomic long w;_Atomic long v;}A;int take(A);int tested(int n){return take(n);}",
-        "transparent-union-aligned-atomic", true, false, 1, 0,
-        "transparent unions sized or aligned otherwise than their first member, a vector wider than 16 bytes or an _Atomic value");
+        "transparent-union-aligned-atomic", true, true, 1, 0, NULL);
+    // A dump's synthetic printer signatures still have a named boundary; accepting source calls must not silently
+    // pass their late context in the first member's registers after clang has frozen the ordinary union convention.
+    check_test_program_boundary_reason(test,
+        "union U{struct{float x,y;}p;struct{int a,b;}q;};int printer(union U,const char*,...);"
+        "int seed(union U u){return printer(u,\"\");}typedef union U T __attribute__((transparent_union));"
+        "int tested(int n){struct E{}e;union U u={.q={n,n+1}};__builtin_dump_struct(&e,printer,u);return n;}",
+        "transparent-union-late-dump-printer", true, false, 3, 1,
+        "__builtin_dump_struct for a printer's late transparent union");
+    // These function-type attributes have additional clang ABI-cache metadata. Their late, ABI-changing unions keep
+    // a named boundary; an attribute in place before any emission, an ignored attribute, or an unchanged ABI does not.
+    static const struct
+    {
+        const char* name;
+        const char* function;
+        const char* parameter;
+    } metadata[] =
+    {
+        { "regparm", "__attribute__((regparm(3)))", "" },
+        { "noescape", "", "__attribute__((noescape))" },
+        { "pass-object-size", "", "__attribute__((pass_object_size(0)))" },
+        { "pass-dynamic-object-size", "", "__attribute__((pass_dynamic_object_size(0)))" },
+    };
+    for (uint32_t a = 0; a < BUSTER_ARRAY_LENGTH(metadata); a += 1)
+    {
+        for (uint32_t early = 0; early < 2; early += 1)
+        {
+            char source[1024];
+            char name[128];
+            const char* transparent = "typedef union U T __attribute__((transparent_union));";
+            snprintf(source, sizeof(source),
+                     "union U{struct{float x,y;}p;struct{int a,b;}q;};%s"
+                     "int %s take(union U u,char*const p %s){return u.q.a;}%s"
+                     "int tested(int n){union U u={.q={n,2}};return take(u,0);}",
+                     early ? transparent : "", metadata[a].function, metadata[a].parameter, early ? "" : transparent);
+            snprintf(name, sizeof(name), "transparent-union-%s-%s", early ? "early" : "late", metadata[a].name);
+            check_test_program_boundary_reason(test, source, name, true, early != 0, 1, 1,
+                early ? NULL : "late transparent unions with regparm, noescape, object-size or retained-result function attributes");
+        }
+    }
+    check_test_program_boundary_reason(test,
+        "union U{struct{float x,y;}p;struct{int a,b;}q;};int take(union U u,int p){return u.q.a;}"
+        "typedef union U T __attribute__((transparent_union));int tested(int n){union U u={.q={n,2}};return take(u,0);}",
+        "transparent-union-late-default-metadata", true, true, 1, 1, NULL);
+    check_test_program_boundary_reason(test,
+        "union U{struct{float x,y;}p;struct{int a,b;}q;};int take(union U u,int p __attribute__((noescape))){return u.q.a;}"
+        "typedef union U T __attribute__((transparent_union));int tested(int n){union U u={.q={n,2}};return take(u,0);}",
+        "transparent-union-late-ignored-metadata", true, true, 1, 1, NULL);
+    check_test_program_boundary_reason(test,
+        "union U{long p;void*q;};int __attribute__((regparm(3))) take(union U u){return (int)u.p;}"
+        "typedef union U T __attribute__((transparent_union));int tested(int n){union U u={.p=n};return take(u);}",
+        "transparent-union-late-metadata-unchanged-abi", true, true, 1, 1, NULL);
 }

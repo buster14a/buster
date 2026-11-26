@@ -1,0 +1,24 @@
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+// Copyright (c) 2026 David Gonzalez Martin.
+union U { struct { float x, y; } p; struct { int a, b; } q; };
+union __attribute__((aligned(32))) A { struct { float x, y; } p; struct { int a, b; } q; };
+unsigned long external_late_plain(union U);
+unsigned long external_late_own(union A);
+unsigned long (*saved)(union U) = external_late_plain;
+struct Keeper { unsigned long (*f)(union A); } keeper = { &external_late_own };
+typedef union U T __attribute__((transparent_union));
+typedef union A AT __attribute__((transparent_union));
+unsigned long external_late_plain_apply(unsigned long (*)(union U), int);
+unsigned long external_late_own_apply(unsigned long (*)(union A), int);
+long external_late_changed(int, union U);
+long external_late_changed_own(int, union A);
+unsigned long mine(union U u) { return external_late_plain(u) + 3; }
+unsigned long mine_own(union A u) { return external_late_own(u) + 5; }
+int tested(int n)
+{
+    union U u = { .q = { n, n + 1 } };
+    union A a = { .q = { n + 2, n + 3 } };
+    return (int)(saved(u) + saved(u.p) + keeper.f(a) + keeper.f(a.p) +
+                 external_late_plain_apply(mine, n) + external_late_own_apply(mine_own, n) +
+                 external_late_changed(7, u.p) + external_late_changed_own(11, a.p));
+}

@@ -778,7 +778,7 @@ static IrType ir_inline_whole(uint8_t first, uint8_t second, bool alone, uint64_
 
 static IrType ir_inline_argument_whole(AbiLocation location, uint64_t size, uint8_t allowed)
 {
-    return location.kind == BUSTER_ABI_LOCATION_REGISTERS ? ir_inline_whole(location.registers[0], location.registers[1], (location.flags & (BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW)) != 0, size, allowed) :
+    return location.kind == BUSTER_ABI_LOCATION_REGISTERS ? ir_inline_whole(location.registers[0], location.registers[1], (abi_location_flags(location) & (BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW)) != 0, size, allowed) :
                                                             IR_VOID;
 }
 
@@ -915,6 +915,42 @@ static void ir_inline_threshold_limits(const uint32_t* costs, const uint32_t* ma
     }
 }
 
+// A general splice splits its call's block. It must not separate an asm call from a later result projection (#2144).
+// Find the projections 64 nodes at a time, backwards; between them a call is protected exactly when it is after the
+// earliest producer seen. Each call and projection is visited once. The decision sweep reuses its threshold bytes
+// for this temporary mask, and straight-line expansions need no restriction.
+static void ir_inline_asm_splices(const IrFunction* function, const uint32_t* nodes, uint32_t count, uint8_t* protected)
+{
+    uint32_t call = count;
+    uint32_t producer = BUSTER_IR_NONE;
+    for (uint32_t end = function->instruction_count; end != 0;)
+    {
+        const uint32_t first = end > 64 ? end - 64 : 0;
+        const uint32_t remaining = end - first;
+        const __mmask64 active = remaining == 64 ? (__mmask64)-1 : ((__mmask64)1 << remaining) - 1;
+        const __m512i op = _mm512_maskz_loadu_epi8(active, function->op + first);
+        uint64_t pending = _mm512_mask_cmpeq_epi8_mask(active, op, _mm512_set1_epi8(IR_ASM_RESULT));
+        while (pending != 0)
+        {
+            const uint32_t lane = 63u - (uint32_t)__builtin_clzll(pending);
+            const uint32_t node = first + lane;
+            pending &= ~((uint64_t)1 << lane);
+            while (call != 0 && nodes[call - 1] > node)
+            {
+                call -= 1;
+                protected[call] = producer < nodes[call];
+            }
+            producer = function->a[node] < producer ? function->a[node] : producer;
+        }
+        end = first;
+    }
+    while (call != 0)
+    {
+        call -= 1;
+        protected[call] = producer < nodes[call];
+    }
+}
+
 static IrError ir_inline_choose(const IrInlineUnit* unit, uint32_t function, IrInlineOptions options, const IrInlineBody* shapes, Arena* scratch, IrInlineResult* result, uint64_t* charged)
 {
     const uint32_t first = result->call_offsets[function];
@@ -923,6 +959,11 @@ static IrError ir_inline_choose(const IrInlineUnit* unit, uint32_t function, IrI
     uint8_t* fits = ir_allocate(scratch, end - first, 1, &ok);
     uint32_t* maxima = unit->limits != 0 ? ir_allocate(scratch, end - first, 4, &ok) : 0;
     IrError error = ok ? IR_OK : IR_ERROR_MEMORY;
+    const bool asm_splices = unit->functions[function].asm_body_count != 0 && first != end;
+    if (ok && asm_splices)
+    {
+        ir_inline_asm_splices(&unit->functions[function], result->call_nodes + first, end - first, fits);
+    }
     for (uint32_t call = first; ok && call < end; call += 1)
     {
         const uint32_t callee = result->callees[call];
@@ -973,7 +1014,7 @@ static IrError ir_inline_choose(const IrInlineUnit* unit, uint32_t function, IrI
             const IrInlineCopies copies = body.supported ? ir_inline_copies(&unit->functions[function], node, body_function, &body, options.vector_copies) : (IrInlineCopies){ 0 };
             const uint64_t size = (uint64_t)body.size + copies.instructions;
             const uint64_t cost = (uint64_t)body.cost + copies.instructions + copies.addresses + copies.slots;
-            decision = body.supported && size < BUSTER_IR_INLINE_MAX_ITEMS ? IR_INLINE_SELECTED : IR_INLINE_BODY;
+            decision = body.supported && size < BUSTER_IR_INLINE_MAX_ITEMS && !(body.general && asm_splices && fits[call - first]) ? IR_INLINE_SELECTED : IR_INLINE_BODY;
             result->costs[call] = decision == IR_INLINE_SELECTED && cost < UINT32_MAX ? (uint32_t)cost : UINT32_MAX;
             result->expanded_sizes[call] = decision == IR_INLINE_SELECTED ? (uint32_t)size : 0;
         }

@@ -1,16 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 // Copyright (c) 2026 David Gonzalez Martin. See LICENSE and LICENSING.md.
 //
-// test-ir-unroll (#2755): the loop unroller's fixtures. Include after ir_optimize_unroll.c and ir_optimize_test.c, whose
-// independent executor and structural comparison it shares. Each fixture is IR text that a small builder numbers (its
-// lines name their values, `{name}` reads one), parsed by ir_parse. Every fixture runs by both twins, which must give the
-// same function and counts and restore scratch; an unrolled one must verify with dominance, survive Tier 1's optimizer,
+// test-ir-unroll (#2755): the loop unroller's fixtures. Include after ir_optimize_unroll.c, ir_optimize_test.c and
+// ir_vectorize_loops_test.c, whose independent executors and fixture inputs it shares. Each scalar fixture is IR text
+// that a small builder numbers (its lines name their values, `{name}` reads one), parsed by ir_parse. The original
+// fixtures keep their frozen function/count digest and restore scratch; an unrolled one must verify with dominance, survive Tier 1's optimizer,
 // and execute as the original did (return, status and stores) on parameters that give zero, partial and whole main
 // iterations, unknown trip counts and bounds at each type's signed and unsigned limits. A refused one gives the input
 // itself and counts its reason. The generated shapes cover the four loop forms (the test on the induction phi or on its
 // increment, in the header or the latch, a one-block loop, a diamond inside), the four predicates with either operand
 // order and either branch sense, steps, i8 to i64 inductions, each reduction kind and phis that only look like one,
 // and addresses of the induction and its extension. Output arenas of every size up to a fixture's need check rollback.
+// The composed fixtures feed the vectorizer's actual output into the unroller, with integer reductions, widened lanes,
+// alias guards and masked or scalar tails. Their interpreter trials straddle both vector and unrolled-chunk boundaries.
 
 #if BUSTER_IN_UNIT(BUSTER_UNIT_BACKEND)
 
@@ -1209,6 +1211,504 @@ static void ir_unroll_test_scans(IrOptimizeTest* test)
     ir_optimize_test_expect(test, remapped, "the unroller's operand remap, against its definition");
 }
 
+// A conditional entry's other edge still belongs to its original block, including the bypass phi's incoming edge.
+// The recurrence is deliberately not a reduction, so copying its carried value in order matters too.
+static void ir_unroll_test_conditional_entry(IrOptimizeTest* test)
+{
+    for (uint32_t inverted = 0; inverted < 2; inverted += 1)
+    {
+        IrUnrollTestText text = { 0 };
+        snprintf(text.header, sizeof(text.header), "function (i64) -> i64 {");
+        ir_unroll_test_label(&text, 0);
+        ir_unroll_test_line(&text, "p", "param.i64 0");
+        ir_unroll_test_constant(&text, "zero", "i64", 64, 0);
+        ir_unroll_test_constant(&text, "one", "i64", 64, 1);
+        ir_unroll_test_constant(&text, "three", "i64", 64, 3);
+        ir_unroll_test_constant(&text, "mask", "i64", 64, 63);
+        ir_unroll_test_constant(&text, "seed", "i64", 64, 7);
+        ir_unroll_test_constant(&text, "bypass", "i64", 64, 0x5a5a);
+        ir_unroll_test_line(&text, "n", "and.i64 {p}, {mask}");
+        ir_unroll_test_line(&text, "low", "and.i64 {p}, {one}");
+        ir_unroll_test_line(&text, "entry", inverted != 0 ? "icmp.i1 {low}, {zero} eq" : "icmp.i1 {low}, {zero} ne");
+        ir_unroll_test_line(&text, "", inverted != 0 ? "cbr.void {entry}, b3, b1" : "cbr.void {entry}, b1, b3");
+        ir_unroll_test_label(&text, 1);
+        ir_unroll_test_line(&text, "i", "phi.i64 [{zero}, b0], [{next}, b2]");
+        ir_unroll_test_line(&text, "r", "phi.i64 [{seed}, b0], [{sum}, b2]");
+        ir_unroll_test_line(&text, "test", "icmp.i1 {i}, {n} ult");
+        ir_unroll_test_line(&text, "", "cbr.void {test}, b2, b3");
+        ir_unroll_test_label(&text, 2);
+        ir_unroll_test_line(&text, "product", "mul.i64 {r}, {three}");
+        ir_unroll_test_line(&text, "sum", "add.i64 {product}, {i}");
+        ir_unroll_test_line(&text, "next", "add.i64 {i}, {one}");
+        ir_unroll_test_line(&text, "", "br.void b1");
+        ir_unroll_test_label(&text, 3);
+        ir_unroll_test_line(&text, "result", "phi.i64 [{bypass}, b0], [{r}, b1]");
+        ir_unroll_test_line(&text, "", "ret.void {result}");
+        Arena input = arena_reserve(UINT64_C(1) << 24);
+        Arena scratch = arena_reserve(UINT64_C(1) << 24);
+        IrFunction function = { 0 };
+        const bool parsed = ir_unroll_test_parse(&text, &input, &scratch, &function);
+        ir_optimize_test_expect(test, parsed, "a conditional entry with a bypass phi parses");
+        if (parsed)
+        {
+            ir_unroll_test_run(test, &function, ir_unroll_options(), IR_UNROLL_UNROLLED, 64,
+                inverted != 0 ? "conditional false-edge entry and bypass phi" : "conditional true-edge entry and bypass phi");
+        }
+        arena_release(&input);
+        arena_release(&scratch);
+    }
+}
+
+// Both conditional edges can enter an admitted loop. Splitting the second must keep the first one's new edge.
+static void ir_unroll_test_shared_entry(IrOptimizeTest* test)
+{
+    IrUnrollTestText text = { 0 };
+    snprintf(text.header, sizeof(text.header), "function (i64) -> i64 {");
+    ir_unroll_test_label(&text, 0);
+    ir_unroll_test_line(&text, "p", "param.i64 0");
+    ir_unroll_test_constant(&text, "zero", "i64", 64, 0);
+    ir_unroll_test_constant(&text, "one", "i64", 64, 1);
+    ir_unroll_test_constant(&text, "three", "i64", 64, 3);
+    ir_unroll_test_constant(&text, "mask", "i64", 64, 63);
+    ir_unroll_test_constant(&text, "seed", "i64", 64, 7);
+    ir_unroll_test_line(&text, "n", "and.i64 {p}, {mask}");
+    ir_unroll_test_line(&text, "low", "and.i64 {p}, {one}");
+    ir_unroll_test_line(&text, "entry", "icmp.i1 {low}, {zero} ne");
+    ir_unroll_test_line(&text, "", "cbr.void {entry}, b1, b3");
+    for (uint32_t side = 0; side < 2; side += 1)
+    {
+        const uint32_t header = 1 + side * 2;
+        const uint32_t body = header + 1;
+        char name[16];
+        ir_unroll_test_label(&text, header);
+        snprintf(name, sizeof(name), "i%u", side);
+        ir_unroll_test_line(&text, name, "phi.i64 [{zero}, b0], [{next%u}, b%u]", side, body);
+        snprintf(name, sizeof(name), "r%u", side);
+        ir_unroll_test_line(&text, name, side == 0 ? "phi.i64 [{zero}, b0], [{sum%u}, b%u]" : "phi.i64 [{seed}, b0], [{sum%u}, b%u]", side, body);
+        snprintf(name, sizeof(name), "test%u", side);
+        ir_unroll_test_line(&text, name, "icmp.i1 {i%u}, {n} ult", side);
+        ir_unroll_test_line(&text, "", "cbr.void {test%u}, b%u, b5", side, body);
+        ir_unroll_test_label(&text, body);
+        snprintf(name, sizeof(name), "product%u", side);
+        ir_unroll_test_line(&text, name, "mul.i64 {r%u}, {three}", side);
+        snprintf(name, sizeof(name), "sum%u", side);
+        ir_unroll_test_line(&text, name, "add.i64 {product%u}, {i%u}", side, side);
+        snprintf(name, sizeof(name), "next%u", side);
+        ir_unroll_test_line(&text, name, "add.i64 {i%u}, {one}", side);
+        ir_unroll_test_line(&text, "", "br.void b%u", header);
+    }
+    ir_unroll_test_label(&text, 5);
+    ir_unroll_test_line(&text, "result", "phi.i64 [{r0}, b1], [{r1}, b3]");
+    ir_unroll_test_line(&text, "", "ret.void {result}");
+    Arena input = arena_reserve(UINT64_C(1) << 24);
+    Arena output = arena_reserve(UINT64_C(1) << 24);
+    Arena cleanup = arena_reserve(UINT64_C(1) << 24);
+    Arena scratch = arena_reserve(UINT64_C(1) << 26);
+    IrFunction function = { 0 };
+    const bool parsed = ir_unroll_test_parse(&text, &input, &scratch, &function);
+    ir_optimize_test_expect(test, parsed, "two loops with one conditional predecessor parse");
+    IrUnrollResult result = { 0 };
+    const IrCheck check = parsed ? ir_optimize_unroll(&function, &output, &scratch, ir_unroll_options(), &result) : ir_check(IR_ERROR_STRUCTURE, 0, 0);
+    const bool unrolled = check.error == IR_OK && result.outcomes[IR_UNROLL_UNROLLED] == 2;
+    ir_optimize_test_expect(test, unrolled, "both loops sharing a conditional predecessor unroll");
+    if (unrolled)
+    {
+        const IrCheck verified = ir_optimize_verify_result(&result.function, &cleanup, &scratch);
+        arena_pop_to(&cleanup, 0);
+        ir_optimize_test_expect(test, verified.error == IR_OK, "both rewritten conditional edges verify with dominance");
+        IrOptimizeOptions options = ir_optimize_options();
+        options.passes |= BUSTER_IR_OPTIMIZE_MERGE;
+        IrOptimizeResult optimized = { 0 };
+        const IrCheck cleaned = verified.error == IR_OK ? ir_optimize(&result.function, &cleanup, &scratch, options, &optimized) : verified;
+        bool agree = cleaned.error == IR_OK;
+        for (uint64_t p = 0; agree && p < 80; p += 1)
+        {
+            const IrOptimizeExecution before = ir_optimize_test_execute(&function, &scratch, p, 0);
+            const IrOptimizeExecution after = ir_optimize_test_execute(&result.function, &scratch, p, 0);
+            const IrOptimizeExecution clean = ir_optimize_test_execute(&optimized.function, &scratch, p, 0);
+            agree = before.status == 1 && after.status == 1 && clean.status == 1 && before.value == after.value && before.value == clean.value;
+        }
+        ir_optimize_test_expect(test, agree, "both choices preserve their own recurrence and join value");
+    }
+    arena_release(&input);
+    arena_release(&output);
+    arena_release(&cleanup);
+    arena_release(&scratch);
+}
+
+typedef struct IrUnrollVectorFixture IrUnrollVectorFixture;
+struct IrUnrollVectorFixture
+{
+    const char* name;
+    const char* roles;
+    // The widest lane determines how many source iterations a vector executes, including widened reductions.
+    uint32_t lane_bytes;
+    // Bit t says that the fixture vectorizes at target t (64, 32, 16 bytes).
+    uint32_t widths;
+    uint32_t reductions;
+    // Direct vector fixtures store their final accumulator even when no iteration ran.
+    bool empty_store;
+};
+
+static const IrUnrollVectorFixture ir_unroll_vector_fixtures[] = {
+    { .name = "fill-u32", .roles = "pkn", .lane_bytes = 4, .widths = 7 },
+    { .name = "copy-u8", .roles = "ppn", .lane_bytes = 1, .widths = 7 },
+    { .name = "add-i32", .roles = "pppn", .lane_bytes = 4, .widths = 7 },
+    { .name = "sum-uniform-i64", .roles = "kn", .lane_bytes = 8, .widths = 7, .reductions = 1 },
+    { .name = "reductions-i32", .roles = "pn", .lane_bytes = 4, .widths = 7, .reductions = 4 },
+    { .name = "sum-i32", .roles = "pn", .lane_bytes = 8, .widths = 3, .reductions = 1 },
+    { .name = "cond-sum-i32", .roles = "pnk", .lane_bytes = 8, .widths = 3, .reductions = 1 },
+    { .name = "minmax-select", .roles = "pnk", .lane_bytes = 4, .widths = 7, .reductions = 1 },
+    { .name = "start-offset", .roles = "ppsno", .lane_bytes = 2, .widths = 7 },
+    { .name = "axpy-f32", .roles = "ppkn", .lane_bytes = 4, .widths = 7 },
+};
+
+// Compare the source with both forms of the composed result at boundaries of one vector and of an unrolled chunk.
+// Overlapping pointers take the vectorizer's scalar fallback; disjoint ones reach its main loop and either tail.
+// The final placement ends the memory binding at the last element, and an empty input has null pointers.
+static bool ir_unroll_test_vector_agree(IrVectorizeTest* random, const IrUnrollVectorFixture* fixture, const IrFunction* before,
+    const IrFunction* after, const IrFunction* optimized, uint32_t bytes, uint32_t factor, Arena* execution, uint8_t* buffers)
+{
+    const uint32_t lanes = bytes / fixture->lane_bytes;
+    const uint32_t chunk = lanes * factor;
+    const uint32_t lengths[] = {
+        0,
+        1,
+        lanes - 1,
+        lanes,
+        lanes + 1,
+        2 * lanes - 1,
+        2 * lanes + 1,
+        chunk - 1,
+        chunk,
+        chunk + 1,
+        chunk + lanes,
+        2 * chunk - 1,
+        2 * chunk,
+        2 * chunk + 1,
+    };
+    const int64_t deltas[] = {
+        0,
+        1,
+        -1,
+        (int64_t)fixture->lane_bytes,
+        -(int64_t)fixture->lane_bytes,
+        (int64_t)bytes,
+        -(int64_t)bytes,
+        4096,
+        0,
+    };
+    uint8_t* initial = buffers;
+    uint8_t* left = buffers + BUSTER_IR_VECTORIZE_TEST_BUFFER;
+    uint8_t* right = buffers + 2 * BUSTER_IR_VECTORIZE_TEST_BUFFER;
+    const uint32_t count = before->parameter_count;
+    bool agree = count <= 16;
+    for (uint32_t n = 0; agree && n < BUSTER_ARRAY_LENGTH(lengths); n += 1)
+    {
+        const uint32_t length = lengths[n];
+        const uint32_t extent = length == 0 && fixture->empty_store ? 1 : length;
+        for (uint32_t placement = 0; agree && placement < BUSTER_ARRAY_LENGTH(deltas); placement += 1)
+        {
+            for (uint32_t k = 0; k < BUSTER_IR_VECTORIZE_TEST_BUFFER; k += 8)
+            {
+                const uint64_t word = ir_vectorize_test_next(random);
+                memcpy(initial + k, &word, 8);
+            }
+            InterpreterValue arguments[16] = { 0 };
+            InterpreterValue moved[16] = { 0 };
+            const uint64_t start = strchr(fixture->roles, 's') != NULL ? n % 7 : 0;
+            const uint64_t offset = strchr(fixture->roles, 'o') != NULL ? placement % 5 : 0;
+            uint32_t pointers = 0;
+            for (uint32_t k = 0; k < count; k += 1)
+            {
+                const char role = fixture->roles[k];
+                uint64_t value = 0;
+                if (role == 'p')
+                {
+                    const uint64_t place = placement + 1 == BUSTER_ARRAY_LENGTH(deltas) ?
+                        BUSTER_IR_VECTORIZE_TEST_BUFFER - (start + extent + offset) * fixture->lane_bytes :
+                        (uint64_t)(INT64_C(2048) + (pointers == 0 ? 0 : deltas[placement]));
+                    value = length == 0 && !fixture->empty_store ? 0 : (uint64_t)(uintptr_t)(left + place);
+                    pointers += 1;
+                }
+                else if (role == 'n')
+                {
+                    value = start + length;
+                }
+                else if (role == 's')
+                {
+                    value = start;
+                }
+                else if (role == 'o')
+                {
+                    value = offset;
+                }
+                else
+                {
+                    value = ir_vectorize_test_next(random);
+                }
+                arguments[k].low = value & ir_vectorize_type_mask(before->parameter_types[k]);
+                moved[k] = arguments[k];
+                if (role == 'p' && value != 0)
+                {
+                    moved[k].low = value - (uint64_t)(uintptr_t)left + (uint64_t)(uintptr_t)right;
+                }
+            }
+            memcpy(left, initial, BUSTER_IR_VECTORIZE_TEST_BUFFER);
+            memcpy(right, initial, BUSTER_IR_VECTORIZE_TEST_BUFFER);
+            const InterpreterResult original = ir_vectorize_test_run(before, left, arguments, count, execution);
+            const InterpreterResult unrolled = ir_vectorize_test_run(after, right, moved, count, execution);
+            agree = original.status == INTERPRETER_OK && unrolled.status == INTERPRETER_OK &&
+                original.value.low == unrolled.value.low && original.value.high == unrolled.value.high &&
+                memcmp(left, right, BUSTER_IR_VECTORIZE_TEST_BUFFER) == 0;
+            memcpy(right, initial, BUSTER_IR_VECTORIZE_TEST_BUFFER);
+            const InterpreterResult cleaned = ir_vectorize_test_run(optimized, right, moved, count, execution);
+            agree = agree && cleaned.status == INTERPRETER_OK && original.value.low == cleaned.value.low &&
+                original.value.high == cleaned.value.high && memcmp(left, right, BUSTER_IR_VECTORIZE_TEST_BUFFER) == 0;
+            if (!agree)
+            {
+                fprintf(stderr, "ir-unroll: vector %s, %u-byte target, factor %u, length %u, placement %u: interpreter statuses %u/%u/%u\n",
+                    fixture->name, bytes, factor, length, placement, original.status, unrolled.status, cleaned.status);
+            }
+        }
+    }
+    return agree;
+}
+
+static void ir_unroll_test_vectors(IrOptimizeTest* test)
+{
+    Arena source = arena_reserve(UINT64_C(1) << 24);
+    Arena input = arena_reserve(UINT64_C(1) << 24);
+    Arena vector = arena_reserve(UINT64_C(1) << 26);
+    Arena output = arena_reserve(UINT64_C(1) << 26);
+    Arena cleanup = arena_reserve(UINT64_C(1) << 26);
+    Arena scratch = arena_reserve(UINT64_C(1) << 28);
+    Arena execution = arena_reserve(UINT64_C(1) << 28);
+    uint8_t* buffers = malloc(3 * BUSTER_IR_VECTORIZE_TEST_BUFFER);
+    IrVectorizeTest random = { .random = test->random };
+    ir_optimize_test_expect(test, buffers != NULL, "composed vector/unroll interpreter buffers allocate");
+    for (uint32_t k = 0; buffers != NULL && k < BUSTER_ARRAY_LENGTH(ir_unroll_vector_fixtures); k += 1)
+    {
+        const IrUnrollVectorFixture* fixture = &ir_unroll_vector_fixtures[k];
+        char path[256];
+        snprintf(path, sizeof(path), "tests/ir/vectorize/%s.ir", fixture->name);
+        String8 text = { 0 };
+        IrFunction function = { 0 };
+        const bool parsed = ir_optimize_text_read(path, &source, &text) && ir_optimize_text_parse(text, &input, &scratch, &function);
+        ir_optimize_test_expect(test, parsed, "a composed vector/unroll source fixture parses");
+        for (uint32_t t = 0; parsed && t < 4; t += 1)
+        {
+            const uint32_t width_bit = 1u << (t == 3 ? 0 : t);
+            if ((fixture->widths & width_bit) != 0)
+            {
+                IrVectorizeTarget target = { 0 };
+                ir_vectorize_test_target(t, &target);
+                const IrVectorizeOptions vector_options = { .target = &target };
+                IrVectorizeResult vectorized = { 0 };
+                const IrCheck vc = ir_vectorize_loops(&function, &vector_options, &vector, &scratch, &vectorized);
+                char message[256];
+                const uint32_t bytes = ir_vectorize_test_bytes(t);
+                snprintf(message, sizeof(message), "%s: the vectorizer creates one %u-byte loop%s", fixture->name, bytes, t == 3 ? " with a scalar tail" : "");
+                ir_optimize_test_expect(test, vc.error == IR_OK && vectorized.vectorized == 1 && scratch.length == 0, message);
+                // The production handoff still contains if-conversion's unreachable stubs. Validate their structure
+                // and every reachable SSA use here; the optimizer below removes them before its strict final check.
+                const IrCheck handoff = vc.error == IR_OK ? ir_verify_complete(&vectorized.function, &scratch) : vc;
+                snprintf(message, sizeof(message), "%s: the raw vectorizer handoff verifies all reachable SSA uses", fixture->name);
+                ir_optimize_test_expect(test, handoff.error == IR_OK && handoff.dominance_checked && scratch.length == 0, message);
+                for (uint32_t factor = t == 0 ? 2 : 4; handoff.error == IR_OK && vectorized.vectorized == 1 && factor <= (t == 0 ? 8 : 4); factor *= 2)
+                {
+                    IrUnrollOptions options = ir_unroll_options();
+                    options.factor = factor;
+                    options.budget = 4096;
+                    IrUnrollResult result = { 0 };
+                    const IrCheck check = ir_optimize_unroll(&vectorized.function, &output, &scratch, options, &result);
+                    snprintf(message, sizeof(message), "%s: %u-byte vector loop unrolls by %u while its scalar fallback stays (error %u, unrolled %u, copies %u, reductions %u)",
+                        fixture->name, bytes, factor, check.error, result.outcomes[IR_UNROLL_UNROLLED], result.copies, result.reductions);
+                    const bool unrolled = check.error == IR_OK && result.outcomes[IR_UNROLL_UNROLLED] == 1 && result.copies == factor &&
+                        result.reductions == fixture->reductions && scratch.length == 0;
+                    ir_optimize_test_expect(test, unrolled, message);
+                    if (unrolled)
+                    {
+                        bool vector_body = false;
+                        for (uint32_t i = result.function.block_offsets[vectorized.function.block_count]; i < result.function.instruction_count; i += 1)
+                        {
+                            const bool vector_store = result.function.op[i] == IR_STORE && ir_vector_type(result.function.type[result.function.b[i]]);
+                            vector_body = vector_body || ir_vector_type(result.function.type[i]) || vector_store;
+                        }
+                        ir_optimize_test_expect(test, vector_body, "the new unrolled body contains vector values, rather than another copy of the scalar fallback");
+                        const IrCheck verified = ir_verify_complete(&result.function, &scratch);
+                        snprintf(message, sizeof(message), "%s: composed result verifies with reachable SSA dominance (error %u at %u)", fixture->name, verified.error, verified.instruction);
+                        ir_optimize_test_expect(test, verified.error == IR_OK && verified.dominance_checked && scratch.length == 0, message);
+                        IrOptimizeOptions optimize = ir_optimize_options();
+                        optimize.passes |= BUSTER_IR_OPTIMIZE_MERGE;
+                        IrOptimizeResult optimized = { 0 };
+                        const IrCheck cleaned = verified.error == IR_OK ? ir_optimize(&result.function, &cleanup, &scratch, optimize, &optimized) : verified;
+                        snprintf(message, sizeof(message), "%s: the optimizer takes the composed result (error %u at %u)", fixture->name, cleaned.error, cleaned.instruction);
+                        ir_optimize_test_expect(test, cleaned.error == IR_OK, message);
+                        if (cleaned.error == IR_OK)
+                        {
+                            snprintf(message, sizeof(message), "%s: %u-byte vectors unrolled by %u agree around both boundaries, on overlap and at the memory end", fixture->name, bytes, factor);
+                            ir_optimize_test_expect(test, ir_unroll_test_vector_agree(&random, fixture, &function, &result.function, &optimized.function, bytes, factor, &execution, buffers), message);
+                        }
+                    }
+                    arena_pop_to(&output, 0);
+                    arena_pop_to(&cleanup, 0);
+                }
+                arena_pop_to(&vector, 0);
+            }
+        }
+        arena_pop_to(&input, 0);
+        arena_pop_to(&source, 0);
+    }
+    free(buffers);
+    arena_release(&source);
+    arena_release(&input);
+    arena_release(&vector);
+    arena_release(&output);
+    arena_release(&cleanup);
+    arena_release(&scratch);
+    arena_release(&execution);
+}
+
+// The public IR also admits vector reductions whose lanes the scalar loop vectorizer does not produce. Keep full
+// vectors observable through a store, including the initial value when n is zero, and check every lane's bytes.
+static void ir_unroll_test_vector_reduction_text(IrUnrollTestText* text, uint32_t width, uint32_t size, uint32_t operation)
+{
+    const uint32_t bytes = 16u << width;
+    const uint32_t bits = 8u << size;
+    const char* type = ir_type_names[IR_V4I32 + width];
+    const char* scalar = ir_type_names[IR_I8 + size];
+    const uint32_t mask_type = ir_lane_mask(IR_V4I32 + width, operation == 8 ? IR_SIMD_LANE_I8 : IR_SIMD_LANE_I32);
+    const char* mask = ir_type_names[mask_type];
+    snprintf(text->header, sizeof(text->header), "function (ptr, ptr, i64) -> i64 {");
+    ir_unroll_test_label(text, 0);
+    ir_unroll_test_line(text, "out", "param.ptr 0");
+    ir_unroll_test_line(text, "in", "param.ptr 1");
+    ir_unroll_test_line(text, "n", "param.i64 2");
+    ir_unroll_test_constant(text, "zero", "i64", 64, 0);
+    ir_unroll_test_constant(text, "one", "i64", 64, 1);
+    ir_unroll_test_constant(text, "bytes", "i64", 64, bytes);
+    ir_unroll_test_constant(text, "seed", scalar, bits, operation == 7 ? UINT64_C(0x3f800000) : UINT64_C(0x6d2b79f581c35713));
+    ir_unroll_test_line(text, "initial", "intrinsic.%s {seed} splat", type);
+    ir_unroll_test_constant(text, "mask", mask, ir_type_bits[mask_type], UINT64_C(0xaaaaaaaaaaaaaaaa));
+    ir_unroll_test_line(text, "", "br.void b1");
+    ir_unroll_test_label(text, 1);
+    ir_unroll_test_line(text, "i", "phi.i64 [{zero}, b0], [{next}, b2]");
+    ir_unroll_test_line(text, "r", "phi.%s [{initial}, b0], [{update}, b2]", type);
+    ir_unroll_test_line(text, "test", "icmp.i1 {i}, {n} ult");
+    ir_unroll_test_line(text, "", "cbr.void {test}, b2, b3");
+    ir_unroll_test_label(text, 2);
+    ir_unroll_test_line(text, "offset", "mul.i64 {i}, {bytes}");
+    ir_unroll_test_line(text, "address", "address.ptr {in} + {offset} * 1 offset=0");
+    ir_unroll_test_line(text, "x", "load.%s {address} align=1", type);
+    if (operation < 2)
+    {
+        ir_unroll_test_line(text, "update", "%s.v%ui%u {r}, {x}", operation == 0 ? "sub" : "mul", bytes * 8 / bits, bits);
+    }
+    else if (operation < 7)
+    {
+        const uint32_t lane_operation = operation == 6 ? 5 : operation - 2;
+        ir_unroll_test_line(text, "update", "intrinsic.%s {r}, {x} lane_op %u", type, lane_operation * 4 + size);
+    }
+    else if (operation == 7)
+    {
+        ir_unroll_test_line(text, "update", "fadd.v%uf32 {r}, {x}", bytes / 4);
+    }
+    else
+    {
+        ir_unroll_test_line(text, "sum", "add.%s {r}, {x}", type);
+        ir_unroll_test_line(text, "update", "vselect.v%ui8 {mask}, {sum}, {r}", bytes);
+    }
+    ir_unroll_test_line(text, "next", "add.i64 {i}, {one}");
+    ir_unroll_test_line(text, "", "br.void b1");
+    ir_unroll_test_label(text, 3);
+    ir_unroll_test_line(text, "", "store.void {out}, {r} align=1");
+    ir_unroll_test_line(text, "", "ret.void {i}");
+}
+
+static void ir_unroll_test_vector_reductions(IrOptimizeTest* test)
+{
+    Arena input = arena_reserve(UINT64_C(1) << 24);
+    Arena output = arena_reserve(UINT64_C(1) << 26);
+    Arena cleanup = arena_reserve(UINT64_C(1) << 26);
+    Arena scratch = arena_reserve(UINT64_C(1) << 28);
+    Arena execution = arena_reserve(UINT64_C(1) << 28);
+    uint8_t* buffers = malloc(3 * BUSTER_IR_VECTORIZE_TEST_BUFFER);
+    IrVectorizeTest random = { .random = test->random };
+    ir_optimize_test_expect(test, buffers != NULL, "direct vector reduction buffers allocate");
+    for (uint32_t width = 0; buffers != NULL && width < 3; width += 1)
+    {
+        for (uint32_t operation = 0; operation < 9; operation += 1)
+        {
+            const uint32_t first_size = operation >= 7 ? 2 : 0;
+            const uint32_t end_size = operation >= 7 ? 3 : operation == 6 ? 2 : 4;
+            for (uint32_t size = first_size; size < end_size; size += 1)
+            {
+                IrUnrollTestText text = { 0 };
+                ir_unroll_test_vector_reduction_text(&text, width, size, operation);
+                IrFunction function = { 0 };
+                const bool parsed = ir_unroll_test_parse(&text, &input, &scratch, &function);
+                char name[128];
+                snprintf(name, sizeof(name), "direct operation %u, %u-byte vector, %u-bit lanes", operation, 16u << width, 8u << size);
+                ir_optimize_test_expect(test, parsed, name);
+                IrUnrollOptions options = ir_unroll_options();
+                options.factor = 4;
+                IrUnrollResult result = { 0 };
+                const IrCheck check = parsed ? ir_optimize_unroll(&function, &output, &scratch, options, &result) : ir_check(IR_ERROR_STRUCTURE, 0, 0);
+                const bool split = operation < 6;
+                const bool unrolled = check.error == IR_OK && result.outcomes[IR_UNROLL_UNROLLED] == 1 && result.copies == 4 &&
+                    result.reductions == (split ? 1u : 0u) && result.function.instruction_count == function.instruction_count + result.added && scratch.length == 0;
+                char message[256];
+                snprintf(message, sizeof(message), "%s: unrolls with %u split reductions and exact growth (error %u, reductions %u)", name, split ? 1u : 0u, check.error, result.reductions);
+                ir_optimize_test_expect(test, unrolled, message);
+                if (unrolled)
+                {
+                    const IrCheck verified = ir_optimize_verify_result(&result.function, &cleanup, &scratch);
+                    arena_pop_to(&cleanup, 0);
+                    snprintf(message, sizeof(message), "%s: verifies with dominance (error %u at %u)", name, verified.error, verified.instruction);
+                    ir_optimize_test_expect(test, verified.error == IR_OK, message);
+                    IrOptimizeOptions optimize = ir_optimize_options();
+                    optimize.passes |= BUSTER_IR_OPTIMIZE_MERGE;
+                    IrOptimizeResult optimized = { 0 };
+                    const IrCheck cleaned = verified.error == IR_OK ? ir_optimize(&result.function, &cleanup, &scratch, optimize, &optimized) : verified;
+                    snprintf(message, sizeof(message), "%s: raw and cleaned vectors preserve every lane's value", name);
+                    const IrUnrollVectorFixture fixture = { .name = name, .roles = "ppn", .lane_bytes = 16u << width, .empty_store = true };
+                    ir_optimize_test_expect(test, cleaned.error == IR_OK && ir_unroll_test_vector_agree(&random, &fixture, &function, &result.function, &optimized.function, 16u << width, 4, &execution, buffers), message);
+                    if (width == 2 && size == 0 && operation == 1)
+                    {
+                        const uint64_t need = output.length;
+                        bool rolled_back = true;
+                        for (uint64_t capacity = 64; capacity < need; capacity += 64)
+                        {
+                            Arena small = arena_reserve_small(capacity, capacity);
+                            IrUnrollResult limited = { 0 };
+                            const IrCheck short_check = ir_optimize_unroll(&function, &small, &scratch, options, &limited);
+                            rolled_back = rolled_back && (short_check.error == IR_ERROR_MEMORY ? small.length == 0 : short_check.error == IR_OK) && scratch.length == 0;
+                            arena_release(&small);
+                        }
+                        ir_optimize_test_expect(test, rolled_back, "short arenas roll back vector identities and conditional guards without retaining scratch");
+                        arena_pop_to(&cleanup, 0);
+                        options.growth = result.added - 1;
+                        IrUnrollResult refused = { 0 };
+                        const IrCheck too_large = ir_optimize_unroll(&function, &cleanup, &scratch, options, &refused);
+                        ir_optimize_test_expect(test, too_large.error == IR_OK && refused.outcomes[IR_UNROLL_GROWTH_REFUSED] == 1 && refused.function.op == function.op && cleanup.length == 0,
+                            "one row below the exact vector growth refuses and borrows the input");
+                    }
+                }
+                arena_pop_to(&input, 0);
+                arena_pop_to(&output, 0);
+                arena_pop_to(&cleanup, 0);
+            }
+        }
+    }
+    free(buffers);
+    arena_release(&input);
+    arena_release(&output);
+    arena_release(&cleanup);
+    arena_release(&scratch);
+    arena_release(&execution);
+}
+
 static __attribute__((unused)) int run_ir_unroll_tests(int argc, char** argv)
 {
     IrOptimizeTest test = {
@@ -1258,6 +1758,11 @@ static __attribute__((unused)) int run_ir_unroll_tests(int argc, char** argv)
                 fprintf(stderr, "ir-unroll: digest %#018" PRIx64 "\n", test.unroll_digest);
             }
         }
+        // New composition checks stay past the original scalar fixtures' frozen digest.
+        ir_unroll_test_conditional_entry(&test);
+        ir_unroll_test_shared_entry(&test);
+        ir_unroll_test_vectors(&test);
+        ir_unroll_test_vector_reductions(&test);
         printf("ir-unroll: %" PRIu64 " checks, %" PRIu64 " failures\n", test.checks, test.failures);
         result = test.failures == 0 ? 0 : 1;
     }

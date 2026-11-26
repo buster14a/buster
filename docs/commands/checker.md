@@ -88,11 +88,11 @@ unused-warning fixtures also check exact scope-completion tokens.
   `test-checker-driver --executable ./build/compiler [--part K/N]
   [--lazy-system-headers | --cpu-dispatch-only | --pic-only | --stack-protector-only | --cf-protection-only | --visibility-only |
   --target-versions-only | --type-sugar-only |
-  --asm-definitions-only | --call-counts-only | --fp-contract-only | --imaginary-bit-int-only | --operand-diagnostics-only | --label-attributes-only |
+  --asm-definitions-only | --tier1-asm-only | --call-counts-only | --fp-contract-only | --imaginary-bit-int-only | --operand-diagnostics-only | --label-attributes-only |
   --attribute-recovery-only | --initializer-diagnostics-only | --malformed-calls-only | --string-plus-only | --assert-bool-only | --assert-diagnostics-only | --query-bool-only | --constant-logical-only | --quiet-roots-only | --unused-comparison-only |
   --float-precision-only | --reach-filter-only | --branch-truth-only |
   --record-extensions-only | --auto-qualifiers-only |
-  --run-modes-only | --common-warnings-only] [--in-process] [--clang-server PATH]
+  --run-modes-only | --common-warnings-only | --missing-variable-only] [--in-process] [--clang-server PATH]
   [--differential] [--carets | --carets-all]` and `test-checker-asm`
   check the driver and inline assembly against Clang (named UCNs too, #1447,
   `check_test_driver_named_ucns`; a generated unit of about 180,000 tokens as
@@ -160,7 +160,11 @@ unused-warning fixtures also check exact scope-completion tokens.
   diagnostics against clang's, and #3576's `-fvisibility=` objects' symbols and
   `-fPIC` accesses at both tiers and a hidden library's exports); `--target-versions-only` runs GNU multiversioning's `target` and
   `target_clones` section alone, #1838 (inline assembly in `target_clones` copies at both tiers among it, #2247); `--asm-definitions-only` runs what
-  inline assembly defines against clang's objects alone, #1848; `--operand-diagnostics-only` runs
+  inline assembly defines against clang's objects alone, #1848; `--tier1-asm-only` runs the
+  Tier 1 asm body suite and `tests/driver/asm-body-results.c` against Clang. It checks
+  multiple register outputs at both tiers, repeated inlining, aliasing, flags, scalar
+  floating-point values, spills, both schedulers, and emitted code certificates and
+  frame accesses (#2144). `--operand-diagnostics-only` runs
   the original runtime sources in `tests/driver/operand_diagnostics/` against Clang's complete
   diagnostics for invalid record and atomic operators, statement conditions, assertions and
   case labels and enumerators (#2441). Enum controls also check implicit successors,
@@ -1456,3 +1460,35 @@ policy, `-Werror` and `-w`, through both kernels and requested lane counts;
 promoted errors must preserve existing output. This is the bit-precise
 subscope of #1392. Boolean-valued `int` expressions and typedef-sugar spelling
 remain separate work; this change does not advertise complete parity.
+
+## Missing variable declarations (#2222)
+
+`-Wmissing-variable-declarations` diagnoses a file-scope definition with external
+linkage when no non-defining declaration precedes that definition. A block's
+`extern` declaration counts too. Initialized objects warn after their initializer's
+semantic diagnostics and before queued runtime warnings. Tentative objects warn at
+the unit's end, in their first tentative definition's order, at their last tentative
+definition's name. A later `extern` alone does not suppress an earlier definition.
+The attached note points to the written type specifier, including a record or enum
+body's opening keyword and the type inside `_Atomic(T)`.
+
+The reader retains this warning's declaration metadata only when command-line
+policy or a source pragma can enable it. Its cold pass selects accepted object
+declarations from the binding stream in masked 64-event blocks and joins them by
+canonical object identity. Two temporary token-indexed `uint32_t` columns retain
+the first extern declaration and the accepted binding handle; they remain private
+to this reader and its existing tentative-definition pass. Ordinary compilations
+allocate neither column. Failed initializer checking allocates a separate byte mask
+only for rejected definitions. The driver uses it before warning promotion to suppress
+invalid definitions and resolve provisional tentative definitions, while retaining
+warnings after nonconstant initializers and recoverable pointer/integer conversions.
+Recovery reads preserve the original declaration's warning decision and a type-valid
+block extern declaration whose initializer was rejected.
+
+`test-checker-driver --missing-variable-only --in-process` runs the original
+`tests/driver/warnings/missing-variable/` catalog through the shared warning harness.
+It compares complete Clang diagnostics and exit status, source-policy changes,
+system headers, macro notes, syntax/object modes and requested lane counts, including
+preservation of an existing output after rejection. The ordinary checker-driver
+inventory distributes the suite's individual fixtures across its test parts. Clang
+is an external oracle; no implementation or fixture was imported.

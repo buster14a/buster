@@ -15,6 +15,8 @@
 //                                                                     completed runs' rows the ledger lacks (or which)
 //   nightly plan --states FILE --ledger FILE --facts FILE --now EPOCH --main SHA --mode run|dry-run
 //                --coordinator RUN [--pending FILE] [--refs FILE] [--refused FILE] --report FILE
+//   nightly observe --since DATE --now EPOCH --ledger FILE --observations FILE --attempts DIR --records DIR --report FILE
+//                                                                     independent closed-calendar-cycle observation
 //   nightly --self-test [--root DIR]
 //
 // FACTS are tab-separated lines that tools/ci/nightly.sh extracts from the Actions API with jq: `run`, `job` and `pr`
@@ -3132,6 +3134,8 @@ static void nightly_plan(const NightlyPlanInput* input, FILE* output, FILE* repo
     }
 }
 
+#include "nightly_observe.c"
+
 // --- The self-test ---
 
 typedef struct NightlyTest NightlyTest;
@@ -4756,6 +4760,10 @@ static void nightly_test_workflow(NightlyTest* test, const char* root)
     // Pull requests run no native correctness (#1272), so no push reuses a pull request's native run: no job but the
     // 9700X job itself takes the host.
     nightly_expect(test, found && strstr(text.data, "\n  host-identity:\n") == NULL, "no host-identity job confirms a pull request's host for a push");
+    nightly_expect(test, found && strstr(text.data, "  changes:\n    if: github.event_name == 'pull_request' || github.event_name == 'push' || github.event_name == 'merge_group' || (github.event_name == 'workflow_dispatch' && inputs.purpose == 'backlog')\n") != NULL &&
+                   strstr(text.data, "      MEASURE: ${{ needs.changes.outputs.measure || 'all' }}\n") != NULL &&
+                   strstr(text.data, "          RECORD_MEASURE: ${{ needs.changes.outputs.measure }}\n") != NULL,
+                   "snapshot records retain skipped selector's absent measure while native workers measure all");
     free(text.data);
 }
 
@@ -5079,6 +5087,8 @@ static void nightly_test_queue(NightlyTest* test)
     nightly_scenario_free(scenario);
 }
 
+#include "nightly_observe_test.c"
+
 static int nightly_self_test(const char* root)
 {
     NightlyTest test = { 0 };
@@ -5091,6 +5101,7 @@ static int nightly_self_test(const char* root)
     nightly_test_states(&test);
     nightly_test_plan(&test);
     nightly_test_snapshot_report(&test);
+    nightly_test_observe(&test);
     nightly_test_worker_plan(&test);
     nightly_test_metadata(&test, root);
     nightly_test_workflow(&test, root);
@@ -5139,6 +5150,58 @@ static const char* nightly_required(int argc, char** argv, const char* name)
         nightly_fatal("missing option", name);
     }
     return value;
+}
+
+static int nightly_command_observe(int argc, char** argv)
+{
+    NightlyLedger ledger = nightly_ledger_new();
+    NightlyObserverAttempt* attempts = nightly_allocate(BUSTER_NIGHTLY_RUNS, sizeof(NightlyObserverAttempt));
+    NightlyObserverInput input = {
+        .ledger = &ledger,
+        .attempts = attempts,
+        .since = nightly_required(argc, argv, "--since"),
+        .now = nightly_option_epoch(argc, argv, "--now"),
+    };
+    NightlyText manifest = { 0 };
+    const bool receipt = nightly_observer_read(nightly_required(argc, argv, "--observations"), &manifest) && nightly_observer_manifest(manifest, &input, attempts);
+    free(manifest.data);
+    input.collection_complete = input.collection_complete && receipt;
+    NightlyText text = { 0 };
+    const bool parsed = nightly_observer_read(nightly_required(argc, argv, "--ledger"), &text) && text.length != 0 && nightly_ledger_parse(&ledger, text);
+    free(text.data);
+    input.ledger_present = input.ledger_present && parsed;
+    if (!parsed)
+    {
+        ledger.row_count = 0;
+        ledger.cycle_count = 0;
+    }
+    NightlyFacts facts = nightly_facts_new();
+    const char* directory = nightly_required(argc, argv, "--attempts");
+    const char* records = nightly_required(argc, argv, "--records");
+    for (uint32_t i = 0; i < input.attempt_count; i += 1)
+    {
+        nightly_observer_load_attempt(&attempts[i], directory, records, &facts);
+        input.collection_complete = input.collection_complete && attempts[i].facts_valid;
+    }
+    nightly_facts_free(&facts);
+    FILE* report = fopen(nightly_required(argc, argv, "--report"), "wb");
+    if (report == NULL)
+    {
+        nightly_fatal("cannot write observer report", NULL);
+    }
+    int status = nightly_observe_report(&input, report);
+    if (fclose(report) != 0)
+    {
+        status = 2;
+    }
+    printf("observation\t%s\n", status == 0 ? "complete" : status == 1 ? "incomplete" : "evidence-unavailable");
+    for (uint32_t i = 0; i < input.attempt_count; i += 1)
+    {
+        free(attempts[i].record);
+    }
+    free(attempts);
+    nightly_ledger_free(&ledger);
+    return status;
 }
 
 static NightlyFacts nightly_load_facts(const char* path)
@@ -5414,9 +5477,13 @@ int main(int argc, char** argv)
     {
         status = nightly_command_plan(argc, argv);
     }
+    else if (strcmp(command, "observe") == 0)
+    {
+        status = nightly_command_observe(argc, argv);
+    }
     else
     {
-        fputs("usage: nightly --self-test [--root DIR] | window | window-times | worker-window | hosted | coverage | record | harvest | plan (see tools/ci/nightly.c)\n", stderr);
+        fputs("usage: nightly --self-test [--root DIR] | window | window-times | worker-window | hosted | coverage | record | harvest | plan | observe (see tools/ci/nightly.c)\n", stderr);
     }
     return status;
 }

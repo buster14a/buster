@@ -17,6 +17,7 @@ hello	hello.ir	hello
 fences	fences.ir	fences
 atomics	atomics.ir	atomics
 segments	segments.ir	segments
+copy-pieces	copy-pieces.ir	copy pieces
 wide	wide.ir	wide
 intrinsics	intrinsics.ir	intrinsics
 bit-intrinsics	bit-intrinsics.ir	bit intrinsics

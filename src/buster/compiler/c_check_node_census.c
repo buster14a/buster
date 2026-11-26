@@ -392,6 +392,7 @@ static const uint8_t node_census_warning_classes[CHECK_WARNING_ID_COUNT] = {
     [CHECK_WARNING_ID_SWITCH_BOOL] = NODE_CENSUS_WARNING_OUTSIDE,
     [CHECK_WARNING_ID_CHAR_SUBSCRIPTS] = NODE_CENSUS_WARNING_TESTED,
     [CHECK_WARNING_ID_SIZEOF_ARRAY_ARGUMENT] = NODE_CENSUS_WARNING_EVENTS,
+    [CHECK_WARNING_ID_MISSING_VARIABLE_DECLARATIONS] = NODE_CENSUS_WARNING_OUTSIDE,
 };
 
 // Which of the warnings the silence tests stand for the unit enables anywhere (check_common_enabled): the actions' warning

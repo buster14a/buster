@@ -20,12 +20,14 @@
 // against the old value, and signed or unsigned minimum or maximum by an icmp and a select) whose phi and update the
 // loop uses nowhere else takes up to `accumulators` accumulators, the extra ones starting at the operation's identity,
 // which MX combines: exact for wrapping integers in any order. Floating values are never split.
+// Vector integer updates preserve their lane flags and use an identity splatted at that lane width; integer lane
+// min/max also splits, while saturation and masked/select recurrences stay ordered.
 //
 // A header-tested i32 countdown to zero with a unit decrement needs only the unsigned guard i > factor - 1, at P
 // and on the main back edge. All copies then see a positive induction, and next = i - factor cannot underflow.
 //
-// A loop is admitted when it is innermost and reducible, has one outside predecessor ending in `br` to its header (its
-// preheader), one latch, and one exit edge, from a conditional branch in its header or its latch on an icmp of an
+// A loop is admitted when it is innermost and reducible, has one outside predecessor ending in `br` or with one `cbr`
+// edge to its header, one latch, and one exit edge, from a conditional branch in its header or its latch on an icmp of an
 // integer induction phi (or it plus a constant, as its increment) against a value defined outside the loop or a
 // constant; the induction's increment adds a positive constant step; the test continues while ult, ule, slt or sle
 // (either operand order, either branch sense);
@@ -33,6 +35,10 @@
 // refused loop is counted by its first failing rule (IrUnrollRefusal). The factor is the largest power of two up to
 // `factor` whose copies' estimated cost (the instructions live in a copy, minus the free ones) fits `budget`, and a
 // function grows by at most `growth` instructions.
+// A conditional predecessor keeps its condition and bypass edge; its header edge alone goes through a new P. This
+// preserves the vectorizer's alias/zero-trip guards. Its two-entry scalar fallback/remainder stays refused. The
+// vector body's latch tests i + step < end, so the guard requires end - start > factor * step and leaves at least one
+// original vector iteration to produce the original exit's live-outs, followed by its scalar or masked tail.
 //
 // Data-parallel parts: the opcode classes (one byte permute of a 128-entry table per 64 instructions), each loop block's
 // class union (64-byte masked loads, or-reduced) and the operand remap of every copied range (16 instructions at a time:
@@ -48,8 +54,8 @@
 // stay valid; a copy's instructions keep their origins. Nothing admitted gives the input itself. All scratch is
 // returned; on failure, so is `output`'s growth.
 //
-// Layout: ir_unroll_classify, ir_unroll_block_classes (twins); ir_unroll_constant, ir_unroll_reduction,
-// ir_unroll_cost, ir_unroll_loop (recognition); ir_unroll_remap (twins); ir_unroll_rewrite; ir_optimize_unroll.
+// Layout: ir_unroll_classify, ir_unroll_block_classes; ir_unroll_constant, ir_unroll_reduction,
+// ir_unroll_cost, ir_unroll_loop (recognition); ir_unroll_remap; ir_unroll_rewrite; ir_optimize_unroll.
 
 #ifndef BUSTER_IR_UNROLL_C
 #define BUSTER_IR_UNROLL_C
@@ -68,6 +74,9 @@
 // Tier 1 gives a value that crosses no call the caller-saved registers alone (docs/tier1-allocation.md), nine, two of
 // which a copy's own temporaries take. Past it, a reduction takes fewer accumulators.
 #define BUSTER_IR_UNROLL_PRESSURE 7u
+// Every generated target has at least sixteen vector registers. Leave two for a copy's temporaries, independently
+// of the general-register budget; vector reductions must not spend the induction and addresses' registers.
+#define BUSTER_IR_UNROLL_VECTOR_PRESSURE 14u
 
 // An address's index the copies fold (IrUnrollWork.folds): the induction phi itself, or its extension (sext under a
 // signed test, zext under an unsigned one) in a block that dominates the latch.
@@ -165,6 +174,7 @@ struct IrUnrollLoop
     uint32_t block_count;
     uint32_t instructions;
     uint32_t reductions;
+    uint32_t vector_reductions;
     // The main phis, one per header phi and `accumulators` per split reduction, and the instructions combining them.
     uint32_t main_phis;
     uint32_t combines;
@@ -180,6 +190,7 @@ struct IrUnrollLoop
     uint64_t bound_value;
     bool bound_constant;
     bool countdown;
+    bool conditional_entry;
     uint8_t type;
     uint8_t predicate;
     uint8_t factor;
@@ -202,6 +213,7 @@ struct IrUnrollWork
     uint8_t* roles;
     uint8_t* combine_ops;
     uint8_t* combine_predicates;
+    uint8_t* combine_flags;
     uint64_t* identities;
     uint8_t* folds;
     uint32_t* stack;
@@ -225,6 +237,7 @@ static __attribute__((unused)) IrUnrollOptions ir_unroll_options(void)
 
 static const uint8_t ir_unroll_classes[BUSTER_IR_OP_TABLE] = {
     [IR_CONST] = BUSTER_IR_UNROLL_FREE,
+    [IR_VCONST] = BUSTER_IR_UNROLL_FREE,
     [IR_UNDEF] = BUSTER_IR_UNROLL_FREE,
     [IR_PARAM] = BUSTER_IR_UNROLL_FREE,
     [IR_COPY] = BUSTER_IR_UNROLL_FREE,
@@ -432,6 +445,19 @@ static bool ir_unroll_reducible_op(uint32_t op)
     return op == IR_ADD || op == IR_SUB || op == IR_MUL || op == IR_AND || op == IR_OR || op == IR_XOR;
 }
 
+// The scalar type whose bits seed each independent accumulator. Vector types describe bytes; the update, not the
+// phi, supplies their lane width. Bitwise updates use the default i32 lanes, which give the same all-zero/all-one bits.
+static uint32_t ir_unroll_reduction_type(uint32_t type, uint32_t op, uint32_t flags)
+{
+    static const uint8_t types[IR_SIMD_LANE_COUNT] = {
+        [IR_SIMD_LANE_I32] = IR_I32,
+        [IR_SIMD_LANE_I8] = IR_I8,
+        [IR_SIMD_LANE_I16] = IR_I16,
+        [IR_SIMD_LANE_I64] = IR_I64,
+    };
+    return !ir_vector_type(type) ? type : op == IR_INTRINSIC ? IR_I8 + (flags & 3u) : types[flags];
+}
+
 // Whether `v` is an update op(r, x) or op(x, r) of phi `r` (r - x alone for a subtraction), read only by `readers`.
 static bool ir_unroll_update(const IrUnrollWork* work, uint32_t r, uint32_t v, uint32_t readers)
 {
@@ -445,21 +471,39 @@ static bool ir_unroll_update(const IrUnrollWork* work, uint32_t r, uint32_t v, u
 // Header phi `r`, whose latch value is `v`: an integer reduction the copies may split, its combining operation (an
 // arithmetic one, or IR_SELECT for a minimum or maximum by `predicate`), and its identity. The loop reads r and its
 // update nowhere else, so no other value depends on a partial result.
-static bool ir_unroll_reduction(const IrUnrollWork* work, uint32_t r, uint32_t v, uint8_t* combine, uint8_t* predicate, uint64_t* identity)
+static bool ir_unroll_reduction(const IrUnrollWork* work, uint32_t r, uint32_t v, uint8_t* combine, uint8_t* predicate, uint8_t* flags, uint64_t* identity)
 {
     const IrFunction* f = work->function;
     const uint32_t type = f->type[r];
     bool found = false;
     uint32_t op = IR_OP_COUNT;
     uint32_t order = IR_PREDICATE_COUNT;
-    if (ir_unroll_integer(type) && v < f->instruction_count && v != r && f->type[v] == type && work->uses[v] == 1)
+    uint32_t lanes = 0;
+    const bool vector = ir_vector_type(type);
+    if ((ir_unroll_integer(type) || vector) && v < f->instruction_count && v != r && f->type[v] == type && work->uses[v] == 1)
     {
         if (ir_unroll_reducible_op(f->op[v]) && work->uses[r] == 1 && ir_unroll_update(work, r, v, 1))
         {
             found = true;
             op = f->op[v] == IR_SUB ? IR_ADD : f->op[v];
+            lanes = vector ? f->flags[v] : 0;
         }
-        else if (f->op[v] == IR_SELECT && work->uses[r] == 2)
+        else if (vector && work->uses[r] == 1 && f->op[v] == IR_INTRINSIC && f->c[v] == BUSTER_IR_INTRINSIC_LANE_OP &&
+                 (f->flags[v] >> 2) < 4 && (f->a[v] == r) != (f->b[v] == r))
+        {
+            // Only integer min/max, never the saturating arithmetic in this intrinsic's other operation slots.
+            static const uint8_t predicates[4] = {
+                IR_ULT,
+                IR_LT,
+                IR_UGT,
+                IR_GT,
+            };
+            found = true;
+            op = IR_INTRINSIC;
+            lanes = f->flags[v];
+            order = predicates[lanes >> 2];
+        }
+        else if (!vector && f->op[v] == IR_SELECT && work->uses[r] == 2)
         {
             const uint32_t condition = f->a[v];
             const uint32_t taken = f->b[v];
@@ -491,7 +535,8 @@ static bool ir_unroll_reduction(const IrUnrollWork* work, uint32_t r, uint32_t v
     {
         *combine = (uint8_t)op;
         *predicate = (uint8_t)order;
-        *identity = ir_unroll_identity(op, order, type);
+        *flags = (uint8_t)lanes;
+        *identity = ir_unroll_identity(op == IR_INTRINSIC ? IR_SELECT : op, order, ir_unroll_reduction_type(type, op, lanes));
     }
     return found;
 }
@@ -603,10 +648,11 @@ static uint32_t ir_unroll_preheader_size(const IrUnrollLoop* loop)
     return 1u + (loop->bound_constant ? 1u : 0u);
 }
 
-// MP's instructions: K', n - start and its test, the main bound n - K', each split reduction's identity, and its branch.
+// MP's instructions: K', n - start and its test, the main bound n - K', each split reduction's identity (a scalar
+// constant and a splat for a vector), and its branch.
 static uint32_t ir_unroll_main_entry_size(const IrUnrollLoop* loop)
 {
-    return (loop->countdown ? 0u : 4u) + loop->reductions + 1u;
+    return (loop->countdown ? 0u : 4u) + loop->reductions + loop->vector_reductions + 1u;
 }
 
 // The constants a loop's rewrite adds: the bound's, K', the identities, the copies' induction offsets and the main step.
@@ -632,8 +678,8 @@ static IrUnrollRefusal ir_unroll_loop(IrUnrollWork* work, uint32_t loop, bool in
     {
         outcome = IR_UNROLL_IRREDUCIBLE;
     }
-    // The preheader: the one reachable outside predecessor, whose only successor is the header by a `br`; the latch: the
-    // one predecessor inside.
+    // The preheader: one reachable outside predecessor. A conditional entry is split on the header's edge alone,
+    // preserving the vectorizer's trip-count/alias guard and its bypass edge. The latch is the one predecessor inside.
     uint32_t outside = 0;
     uint32_t latches = 0;
     for (uint32_t edge = cfg->predecessor_offsets[header]; outcome == IR_UNROLL_UNROLLED && edge < cfg->predecessor_offsets[(uint64_t)header + 1]; edge += 1)
@@ -650,7 +696,13 @@ static IrUnrollRefusal ir_unroll_loop(IrUnrollWork* work, uint32_t loop, bool in
             result.preheader = predecessor;
         }
     }
-    if (outcome == IR_UNROLL_UNROLLED && (outside != 1 || f->op[f->block_offsets[(uint64_t)result.preheader + 1] - 1] != IR_BR))
+    if (outcome == IR_UNROLL_UNROLLED && outside == 1)
+    {
+        const uint32_t branch = f->block_offsets[(uint64_t)result.preheader + 1] - 1;
+        result.conditional_entry = f->op[branch] == IR_CBR && (f->b[branch] == header) != (f->c[branch] == header);
+        outcome = f->op[branch] == IR_BR || result.conditional_entry ? IR_UNROLL_UNROLLED : IR_UNROLL_PREHEADER;
+    }
+    if (outcome == IR_UNROLL_UNROLLED && outside != 1)
     {
         outcome = IR_UNROLL_PREHEADER;
     }
@@ -833,6 +885,7 @@ static IrUnrollRefusal ir_unroll_loop(IrUnrollWork* work, uint32_t loop, bool in
     // The addresses whose index is the induction (or its extension, which doesn't wrap in the main loop): a copy's
     // offset from the main induction joins their displacement. And the general values the main loop reads from outside.
     uint32_t invariants = 0;
+    uint32_t vector_invariants = 0;
     if (outcome == IR_UNROLL_UNROLLED)
     {
         const uint32_t extension = result.predicate == IR_LT ? IR_SEXT : IR_ZEXT;
@@ -855,12 +908,14 @@ static IrUnrollRefusal ir_unroll_loop(IrUnrollWork* work, uint32_t loop, bool in
                     const uint32_t value = operands[k];
                     const uint32_t op = f->op[value];
                     const bool general = ir_unroll_integer(f->type[value]) || f->type[value] == IR_PTR;
-                    const bool remade = op == IR_CONST || op == IR_SYMBOL_ADDR || op == IR_STACK_ADDR || op == IR_UNDEF;
+                    const bool vector = ir_vector_type(f->type[value]) || f->type[value] == IR_F32 || f->type[value] == IR_F64;
+                    const bool remade = op == IR_CONST || op == IR_VCONST || op == IR_SYMBOL_ADDR || op == IR_STACK_ADDR || op == IR_UNDEF;
                     // Counted at most once: the mark is the live byte's second bit, which nothing in the loop reads.
-                    if (general && !remade && !ir_unroll_value_inside(work, loop, value) && (work->live[value] & 2u) == 0)
+                    if ((general || vector) && !remade && !ir_unroll_value_inside(work, loop, value) && (work->live[value] & 2u) == 0)
                     {
                         work->live[value] |= 2u;
-                        invariants += 1;
+                        invariants += general ? 1u : 0u;
+                        vector_invariants += vector ? 1u : 0u;
                     }
                 }
             }
@@ -885,18 +940,26 @@ static IrUnrollRefusal ir_unroll_loop(IrUnrollWork* work, uint32_t loop, bool in
     {
         uint32_t general_phis = 0;
         uint32_t candidates = 0;
+        uint32_t vector_phis = 0;
+        uint32_t vector_candidates = 0;
         for (uint32_t phi = f->block_offsets[header]; phi < result.phi_end; phi += 1)
         {
             uint8_t combine = 0;
             uint8_t order = 0;
+            uint8_t flags = 0;
             uint64_t identity = 0;
             const bool general = ir_unroll_integer(f->type[phi]) || f->type[phi] == IR_PTR;
+            const bool vector = ir_vector_type(f->type[phi]) || f->type[phi] == IR_F32 || f->type[phi] == IR_F64;
             general_phis += general ? 1u : 0u;
-            candidates += phi != result.induction && ir_unroll_reduction(work, phi, ir_unroll_incoming(f, phi, result.latch), &combine, &order, &identity) ? 1u : 0u;
+            vector_phis += vector ? 1u : 0u;
+            const bool candidate = phi != result.induction && ir_unroll_reduction(work, phi, ir_unroll_incoming(f, phi, result.latch), &combine, &order, &flags, &identity);
+            candidates += candidate && general ? 1u : 0u;
+            vector_candidates += candidate && vector ? 1u : 0u;
         }
         uint32_t accumulators = options.accumulators < result.factor ? options.accumulators : result.factor;
         accumulators = accumulators < 1 ? 1 : accumulators;
-        while (accumulators > 1 && general_phis + candidates * (accumulators - 1u) + invariants + 1u > BUSTER_IR_UNROLL_PRESSURE)
+        while (accumulators > 1 && (general_phis + candidates * (accumulators - 1u) + invariants + 1u > BUSTER_IR_UNROLL_PRESSURE ||
+                                   vector_phis + vector_candidates * (accumulators - 1u) + vector_invariants > BUSTER_IR_UNROLL_VECTOR_PRESSURE))
         {
             accumulators /= 2;
         }
@@ -910,21 +973,24 @@ static IrUnrollRefusal ir_unroll_loop(IrUnrollWork* work, uint32_t loop, bool in
             const uint32_t value = ir_unroll_incoming(f, phi, result.latch);
             uint8_t combine = 0;
             uint8_t order = 0;
+            uint8_t flags = 0;
             uint64_t identity = 0;
             if (phi == result.induction)
             {
                 work->roles[phi] = BUSTER_IR_UNROLL_INDUCTION;
                 result.main_phis += 1;
             }
-            else if (result.accumulators > 1 && ir_unroll_reduction(work, phi, value, &combine, &order, &identity))
+            else if (result.accumulators > 1 && ir_unroll_reduction(work, phi, value, &combine, &order, &flags, &identity))
             {
                 work->roles[phi] = BUSTER_IR_UNROLL_REDUCTION;
                 work->combine_ops[phi] = combine;
                 work->combine_predicates[phi] = order;
+                work->combine_flags[phi] = flags;
                 work->identities[phi] = identity;
                 result.main_phis += result.accumulators;
                 result.combines += (result.accumulators - 1u) * (combine == IR_SELECT ? 2u : 1u);
                 result.reductions += 1;
+                result.vector_reductions += ir_vector_type(f->type[phi]) ? 1u : 0u;
             }
             else
             {
@@ -934,7 +1000,7 @@ static IrUnrollRefusal ir_unroll_loop(IrUnrollWork* work, uint32_t loop, bool in
         }
         // P's bound, guard and identities; the copies; the header copies' induction; copy `factor`'s test; MX.
         const uint32_t phis = result.phi_end - f->block_offsets[header];
-        const uint64_t preheader = (uint64_t)ir_unroll_preheader_size(&result) + ir_unroll_main_entry_size(&result);
+        const uint64_t preheader = (uint64_t)ir_unroll_preheader_size(&result) + ir_unroll_main_entry_size(&result) + (result.conditional_entry ? 1u : 0u);
         const uint64_t copies = (uint64_t)result.factor * (instructions - phis) + result.main_phis + 2u * (result.factor - 1u) + 3u;
         const uint64_t exit = (uint64_t)result.main_phis + result.combines + 1u;
         const uint64_t added = preheader + copies + exit;
@@ -1127,6 +1193,13 @@ static uint32_t ir_unroll_exit_block(const IrUnrollLoop* loop)
     return loop->first_block + 1u + (uint32_t)loop->factor * loop->block_count;
 }
 
+// A conditional predecessor keeps its terminator and bypass edge. Only its edge to H is split, by a guard appended
+// after MX. Different loops may share that predecessor, so each gets its own guard rather than inserting into P.
+static uint32_t ir_unroll_guard_block(const IrUnrollLoop* loop)
+{
+    return loop->conditional_entry ? ir_unroll_exit_block(loop) + 1u : loop->preheader;
+}
+
 // The instructions a new block of `loop` holds: copy `copy`'s block `t`, or MX for copy `factor`.
 static uint32_t ir_unroll_block_size(const IrFunction* f, const IrUnrollLoop* loop, const uint32_t* lists, uint32_t copy, uint32_t t)
 {
@@ -1168,6 +1241,7 @@ static IrError ir_unroll_rewrite_loop(IrUnrollWork* work, const IrUnrollLoop* lo
     const uint32_t entry_block = ir_unroll_entry_block(loop);
     const uint32_t main_block = ir_unroll_copy_block(loop, 0, 0);
     const uint32_t exit_block = ir_unroll_exit_block(loop);
+    const uint32_t guard_block = ir_unroll_guard_block(loop);
     const uint32_t main_latch = ir_unroll_copy_block(loop, loop->factor - 1u, work->positions[loop->latch]);
     const uint32_t type = loop->type;
     const uint64_t step_delta = loop->countdown ? UINT64_MAX : loop->step;
@@ -1199,8 +1273,8 @@ static IrError ir_unroll_rewrite_loop(IrUnrollWork* work, const IrUnrollLoop* lo
         const uint32_t induction = main_phis[loop->induction - phi_first];
         // The preheader's additions: the bound (made again where it is a constant) and the first test, start < n, which a
         // loop of no iteration fails at once, to the original loop.
-        const uint32_t preheader_end = offsets[(uint64_t)loop->preheader + 1] - 1u;
-        uint32_t at = preheader_end - ir_unroll_preheader_size(loop);
+        const uint32_t guard_end = offsets[(uint64_t)guard_block + 1] - 1u;
+        uint32_t at = guard_end - ir_unroll_preheader_size(loop);
         uint32_t bound = BUSTER_IR_NONE;
         if (loop->bound_constant)
         {
@@ -1214,7 +1288,20 @@ static IrError ir_unroll_rewrite_loop(IrUnrollWork* work, const IrUnrollLoop* lo
         const uint32_t start = values[loop->start];
         const uint32_t first_test = at;
         ir_unroll_put(emit, at++, IR_ICMP, IR_I1, start, bound, loop->predicate);
-        ir_unroll_put(emit, preheader_end, IR_CBR, IR_VOID, first_test, entry_block, header);
+        ir_unroll_put(emit, guard_end, IR_CBR, IR_VOID, first_test, entry_block, header);
+        if (loop->conditional_entry)
+        {
+            const uint32_t old_branch = f->block_offsets[(uint64_t)loop->preheader + 1] - 1u;
+            const uint32_t branch = values[old_branch];
+            if (f->b[old_branch] == header)
+            {
+                view->b[branch] = guard_block;
+            }
+            else
+            {
+                view->c[branch] = guard_block;
+            }
+        }
         // MP: with start < n, the `factor` iterations all return exactly when n - start, a true difference, exceeds K';
         // then n - K' doesn't wrap, and the main loop's test is next < n - K'.
         // The test last, right before its branch, which selection then fuses with it.
@@ -1236,8 +1323,17 @@ static IrError ir_unroll_rewrite_loop(IrUnrollWork* work, const IrUnrollLoop* lo
         {
             if (work->roles[phi_first + j] == BUSTER_IR_UNROLL_REDUCTION)
             {
-                identities[j] = at;
-                ir_unroll_put_constant(emit, at++, f->type[phi_first + j], work->identities[phi_first + j]);
+                const uint32_t phi = phi_first + j;
+                const uint32_t phi_type = f->type[phi];
+                const uint32_t scalar = ir_unroll_reduction_type(phi_type, work->combine_ops[phi], work->combine_flags[phi]);
+                const uint32_t constant = at;
+                ir_unroll_put_constant(emit, at++, scalar, work->identities[phi]);
+                identities[j] = constant;
+                if (ir_vector_type(phi_type))
+                {
+                    identities[j] = at;
+                    ir_unroll_put(emit, at++, IR_INTRINSIC, phi_type, constant, BUSTER_IR_NONE, BUSTER_IR_INTRINSIC_SPLAT);
+                }
             }
         }
         if (loop->countdown)
@@ -1399,7 +1495,9 @@ static IrError ir_unroll_rewrite_loop(IrUnrollWork* work, const IrUnrollLoop* lo
                     }
                     else
                     {
-                        ir_unroll_put(emit, exit_at, work->combine_ops[phi], phi_type, combined, operand, BUSTER_IR_NONE);
+                        const uint32_t op = work->combine_ops[phi];
+                        ir_unroll_put(emit, exit_at, op, phi_type, combined, operand, op == IR_INTRINSIC ? BUSTER_IR_INTRINSIC_LANE_OP : BUSTER_IR_NONE);
+                        view->flags[exit_at] = work->combine_flags[phi];
                         combined = exit_at;
                         exit_at += 1u;
                     }
@@ -1416,9 +1514,11 @@ static IrError ir_unroll_rewrite_loop(IrUnrollWork* work, const IrUnrollLoop* lo
             const uint32_t pairs = view->b[out];
             const uint32_t old_first = view->a[out];
             view->a[out] = emit->extra;
-            for (uint32_t p = 0; p < pairs * 2u; p += 1)
+            for (uint32_t p = 0; p < pairs; p += 1)
             {
-                view->extra[emit->extra++] = view->extra[old_first + p];
+                const uint32_t predecessor = view->extra[old_first + p * 2u];
+                view->extra[emit->extra++] = predecessor == loop->preheader ? guard_block : predecessor;
+                view->extra[emit->extra++] = view->extra[old_first + p * 2u + 1u];
             }
             view->extra[emit->extra++] = exit_block;
             view->extra[emit->extra++] = combined;
@@ -1458,10 +1558,10 @@ static IrError ir_unroll_rewrite(IrUnrollWork* work, Arena* output, Arena* scrat
     {
         IrUnrollLoop* loop = &work->accepted[k];
         loop->first_block = (uint32_t)(blocks + new_blocks);
-        new_blocks += (uint64_t)loop->factor * loop->block_count + 2u;
+        new_blocks += (uint64_t)loop->factor * loop->block_count + 2u + (loop->conditional_entry ? 1u : 0u);
         constants += ir_unroll_constant_count(loop);
         addresses += (uint64_t)(loop->factor - 1u) * loop->addresses;
-        inserts[loop->preheader] = ir_unroll_preheader_size(loop);
+        inserts[loop->preheader] = loop->conditional_entry ? 0 : ir_unroll_preheader_size(loop);
     }
     const uint64_t total_blocks = blocks + new_blocks;
     ok = ok && total_blocks < UINT32_MAX && constants + f->constant_count <= UINT32_MAX && addresses + f->address_count <= UINT32_MAX;
@@ -1501,6 +1601,11 @@ static IrError ir_unroll_rewrite(IrUnrollWork* work, Arena* output, Arena* scrat
                 offsets[block] = (uint32_t)total;
                 total += ir_unroll_block_size(f, loop, work->lists, copy, t);
             }
+        }
+        if (loop->conditional_entry)
+        {
+            offsets[ir_unroll_guard_block(loop)] = (uint32_t)total;
+            total += ir_unroll_preheader_size(loop) + 1u;
         }
         ok = total < UINT32_MAX;
     }
@@ -1644,6 +1749,7 @@ static __attribute__((unused)) IrCheck ir_optimize_unroll(const IrFunction* func
         work.roles = ir_allocate(scratch, count, 1, &ok);
         work.combine_ops = ir_allocate(scratch, count, 1, &ok);
         work.combine_predicates = ir_allocate(scratch, count, 1, &ok);
+        work.combine_flags = ir_allocate(scratch, count, 1, &ok);
         work.identities = ir_allocate(scratch, count, 8, &ok);
         work.folds = ir_allocate(scratch, count, 1, &ok);
         work.stack = ir_allocate(scratch, count, 4, &ok);
