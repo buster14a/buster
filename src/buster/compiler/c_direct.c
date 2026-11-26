@@ -3497,6 +3497,34 @@ static bool c_direct_test_round(const char* obj_path)
 
 typedef int (*CDirectTestChain)(int);
 
+// Exercise both directions across the former 512-name limit, with distinct branch targets.
+static bool c_direct_test_user_labels(const char* obj_path)
+{
+    char source[32768] = "int t_labels(int x) { switch (x) { case -1: goto L512; case 7: goto L1; default: goto L0; } L0: return x;\n";
+    size_t length = strlen(source);
+    for (uint32_t i = 1u; i <= 512u; i += 1u)
+    {
+        length += (size_t)sprintf(source + length, "L%u: x += 1; goto L%u;\n", i, i - 1u);
+    }
+    strcpy(source + length, "}\nint reuse(void) { int L512 = 3; goto L512; L512: return L512; }\n");
+    bool ok = c_direct_test_compile_source_keep(source, obj_path, NULL, 0, NULL, NULL, NULL);
+#if !__has_feature(memory_sanitizer)
+    void* mapping = NULL;
+    size_t mapped = 0;
+    if (ok)
+    {
+        const CDirectTestChain run = (CDirectTestChain)(uintptr_t)c_direct_test_code(obj_path, "t_labels", &mapping, &mapped);
+        ok = run != NULL && run(-1) == 511 && run(7) == 8 && run(37) == 37;
+    }
+    if (mapping != NULL)
+    {
+        munmap(mapping, mapped);
+    }
+#endif
+    unlink(obj_path);
+    return ok;
+}
+
 // A function's statements nest up to BUSTER_FSTMT_FRAMES frames (#3592): an `else if` chain takes one a branch, and
 // SQLite's shell.c's do_meta_command has 72. A chain of 200 compiles and runs; one of 300 leaves.
 static bool c_direct_test_statement_depth(const char* obj_path)
@@ -4337,6 +4365,8 @@ int run_c_direct_tests(int argc, char** argv)
         "#error forced error\n",
         "int f(void) { return undeclared_xyz + 1; }\n",
         "int f(int a, int b) { switch (a) { case 7: switch (b) { case 7: return 1; } case 7: return 2; } return 0; }",
+        "int f(void) { done: { done: return 1; } }\n",
+        "int f(void) { done: return 1; } int g(void) { goto done; }\n",
         "static inline int leaf(void) { return undeclared_xyz; }\n"
         "static inline int bridge(void) { return leaf(); }\n"
         "int root(void) { return bridge(); }\n",
@@ -4575,6 +4605,16 @@ int run_c_direct_tests(int argc, char** argv)
     else
     {
         fprintf(stderr, "test-direct: FAIL ceil and floor\n");
+        failed += 1u;
+    }
+
+    if (c_direct_test_user_labels(obj_path))
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL function-scope labels\n");
         failed += 1u;
     }
 

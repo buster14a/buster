@@ -210,6 +210,13 @@ struct FastAlias
 
 #define BUSTER_FALIAS_LIMIT 1024u
 
+typedef struct FastUserLabel FastUserLabel;
+struct FastUserLabel
+{
+    uint32_t body_pos;
+    uint32_t label_id;
+};
+
 // Main compiler context shared across c_direct_types.c and c_direct_cc.c
 typedef struct FastCCState FastCCState;
 struct FastCCState
@@ -248,6 +255,7 @@ struct FastCCState
     // Flat IdentId-indexed symbol/tag environments
     uint32_t* sym_cur;     // ident_id -> current FastSym index (0 = none)
     uint32_t* tag_cur;     // ident_id -> current complex type index (0 = none)
+    FastUserLabel* user_labels;  // indexed by the preprocessed label name's IdentId
     uint32_t env_cap;
 
     // Symbol table
