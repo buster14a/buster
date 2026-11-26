@@ -609,6 +609,9 @@ builtins on vectors, as on structs, call libatomic's generic functions.
   past the value's are then unspecified, as a narrow integer's register's are; a constant of zeros by `vpxord` and a
   store, any other by its words as immediates (`mov qword` of a sign-extended imm32, or two `mov dword`; a constant of
   4 bytes its word whole, of which its bytes are the low half); `DISCARD` and `JUMP_VALUE` nothing.
+- A vector `LOAD`, unary `X86` row and `SET` in sequence share the row's `VECTOR(0)` register when each width fits
+  the target. The load and store each access their own exact width. The entries use their ordinary slots when the
+  row or store is a branch target, or when any of the three entries needs a deep stack window.
 - **Calls pass and return them as aggregates,** as `__int128`'s: an argument is an object passed by its address
   (`argument_sizes` its bytes), a call's result comes back into its result object, and a function returns one by its
   object's address (`result_size`), each in one vector register whole as the convention places it (an XMM, YMM or ZMM
