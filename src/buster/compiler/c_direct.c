@@ -5044,6 +5044,16 @@ static int c_direct_unit_tests(void)
         "struct S { int a : 3 __attribute__((packed)); int b; };\nint f(void) { return sizeof(struct S); }\n",
         "struct S { unsigned a : 3 __attribute__((mode(DI))); int b; };\nint f(void) { return sizeof(struct S); }\n",
         "struct S { int a : 3, b : 4 __attribute__((aligned(8))); };\nint f(void) { return sizeof(struct S); }\n",
+        // `#define NAME digits` lines, which a fast path reads (#3596): a redefinition with other text, by such a line and
+        // by another form, either way round; the predefines' __STDC__ (one such line) undefined and defined again; a
+        // builtin's name.
+        "#define X 1\n#define X 2\nint f(void) { return X; }\n",
+        "#define X 1\n#define X (1)\nint f(void) { return X; }\n",
+        "#define X (1)\n#define X 1\nint f(void) { return X; }\n",
+        "#undef __STDC__\nint f(void) { return 0; }\n",
+        "#define __STDC__ 1\nint f(void) { return 0; }\n",
+        "#define __LINE__ 1\nint f(void) { return 0; }\n",
+        "#define defined 1\nint f(void) { return 0; }\n",
     };
     for (uint32_t i = 0; i < sizeof(bail_cases) / sizeof(bail_cases[0]); i += 1)
     {
@@ -5098,6 +5108,20 @@ static int c_direct_unit_tests(void)
     else
     {
         fprintf(stderr, "test-direct: FAIL hexadecimal initializers and decimal macro definitions\n");
+        failed += 1u;
+    }
+
+    // #3577: a `#define NAME digits` line keeps the text a redefinition compares: the same definition again, by such a
+    // line and by the directive reader (two blanks), and a name defined again after its #undef.
+    static const char same_source[] = "#define X 1\n#define X 1\n#define X  1\n#define Y 2\n#undef Y\n#define Y 3\nconst int v[] = { X, Y };\n";
+    static const int32_t expected_same[] = { 1, 3 };
+    if (c_direct_test_compile_source_with(same_source, obj_path, 0, NULL, 0, false, NULL, NULL, NULL, NULL, expected_same, sizeof(expected_same), (CDirectTestMode){ 0 }))
+    {
+        passed += 1u;
+    }
+    else
+    {
+        fprintf(stderr, "test-direct: FAIL a decimal macro defined again\n");
         failed += 1u;
     }
 

@@ -356,6 +356,12 @@ file's) is marked as its body's. `-Wsizeof-pointer-memaccess` compares the
 destination with `sizeof`'s operand without any of their parentheses, as the
 full pipeline does: `memset(s->buf, 0, sizeof((s)->buf))`, and a macro's
 grouping (`sizeof(FIELD(s))` of `((p)->buf)`), are one expression.
+#3596's reader of `#define NAME digits` lines (`fast_pp_decimal_defines`)
+binds a macro without the directive reader, so it leaves to that reader a name
+defined before (whose redefinition is compared), a builtin's, and in the
+predefines a `__STDC` macro or `__FLT_EVAL_METHOD__` (the full pipeline's own,
+which no `#undef` removes quietly), and keeps the text after the name that a
+later redefinition compares.
 `returns_twice` (a function's), `format_arg(N)` (a prototyped function's whose
 parameter N and value point to a character type) and `may_alias` (anything's)
 are taken as the full pipeline takes them, where musl's `<setjmp.h>`,
