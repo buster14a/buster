@@ -4591,7 +4591,8 @@ static uint32_t tier1_select_parts_of(const uint8_t* registers, bool high, bool 
 // slots are its first 16 bytes' alone.
 static bool tier1_select_location_whole(AbiLocation location)
 {
-    return location.kind == BUSTER_ABI_LOCATION_STACK && (location.flags & (BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW | BUSTER_ABI_FLAG_PAYLOAD | BUSTER_ABI_FLAG_FIRST)) == 0;
+    return location.kind == BUSTER_ABI_LOCATION_STACK && (location.flags & BUSTER_ABI_FLAG_PREFIX) == 0 &&
+           (abi_location_flags(location) & (BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW | BUSTER_ABI_FLAG_PAYLOAD | BUSTER_ABI_FLAG_FIRST)) == 0;
 }
 
 // The bytes of the vector register a part of `bytes` takes whole (#141, #2798): its own 16, 32 or 64, or a payload's
@@ -4619,20 +4620,22 @@ static uint32_t tier1_select_location_parts(AbiLocation location, uint32_t size,
 {
     // A FIRST location's (#1844: a transparent union of a stack slot of its own past 16 bytes, in its member's registers),
     // of the value's first 16 bytes alone.
-    size = (location.flags & BUSTER_ABI_FLAG_FIRST) != 0 && size > BUSTER_ABI_REGISTER_BYTES ? BUSTER_ABI_REGISTER_BYTES : size;
-    const bool high = (location.flags & BUSTER_ABI_FLAG_HIGH) != 0;
-    const bool low = (location.flags & BUSTER_ABI_FLAG_LOW) != 0;
-    const bool payload = (location.flags & BUSTER_ABI_FLAG_PAYLOAD) != 0;
+    size = abi_location_size(location, size);
+    const uint8_t flags = abi_location_flags(location);
+    const bool high = (flags & BUSTER_ABI_FLAG_HIGH) != 0;
+    const bool low = (flags & BUSTER_ABI_FLAG_LOW) != 0;
+    const bool payload = (flags & BUSTER_ABI_FLAG_PAYLOAD) != 0;
     const bool registers = location.kind == BUSTER_ABI_LOCATION_REGISTERS && !low && !payload;
     const bool split = location.kind == BUSTER_ABI_LOCATION_SPLIT && !high && !low && !payload;
     const bool slot = location.kind == BUSTER_ABI_LOCATION_STACK && (high || low) && !payload;
     const bool taken = registers || split || slot;
     const uint32_t payload_bytes = abi_vector_payload_bytes(size);
     const bool payload_slot = location.kind == BUSTER_ABI_LOCATION_STACK && payload && !high && !low && size <= 64 && payload_bytes >= 16 && payload_bytes < size;
+    const bool prefix_slot = location.kind == BUSTER_ABI_LOCATION_STACK && (location.flags & BUSTER_ABI_FLAG_PREFIX) != 0;
     uint32_t count = taken ? tier1_select_parts_of(location.registers, high, low, location.kind != BUSTER_ABI_LOCATION_REGISTERS, size, BUSTER_TIER1_SELECT_ARGUMENT_GENERAL, BUSTER_ABI_VECTOR_ARGUMENTS, parts) : 0;
-    if (payload_slot)
+    if (payload_slot || prefix_slot)
     {
-        parts[0] = (Tier1SelectPart){ .reg = BUSTER_ABI_REGISTER_NONE, .offset = 0, .bytes = (uint8_t)payload_bytes };
+        parts[0] = (Tier1SelectPart){ .reg = BUSTER_ABI_REGISTER_NONE, .offset = 0, .bytes = (uint8_t)(prefix_slot ? size : payload_bytes) };
         count = 1;
     }
     return count;
@@ -4842,7 +4845,8 @@ static bool tier1_select_record_supported(const IrPassed* record, uint32_t type)
         // A PAYLOAD slot (#2798) is a part's, its payload alone (tier1_select_location_parts).
         // So is a FIRST location's (#1844), whose parts are its first 16 bytes' alone; a FIRST location on the stack whole
         // isn't taken (tier1_select_location_whole).
-        supported = type == IR_PTR && (location.flags & ~(BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW | BUSTER_ABI_FLAG_PAYLOAD | BUSTER_ABI_FLAG_FIRST)) == 0 &&
+        supported = type == IR_PTR && abi_location_prefix_valid(location, record->size) &&
+                    (abi_location_flags(location) & ~(BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW | BUSTER_ABI_FLAG_PAYLOAD | BUSTER_ABI_FLAG_FIRST)) == 0 &&
                     (placed || (whole && stacked && record->size <= BUSTER_TIER1_SELECT_MAX_STACK_AGGREGATE));
     }
     return supported;

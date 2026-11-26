@@ -1,0 +1,11 @@
+buster-fixtures v2 checker-warnings
+# ID	FILE	WARNINGS	ERRORS	NOTES	FLAGS	OPTIONS	NAME
+later-functions	later-functions.c	4	3	0	-	-	cleanup alignment warnings beside later functions' errors
+same-body	same-body.c	3	4	0	-	-	cleanup alignment warnings after an earlier error in the same body
+source-policy	source-policy.c	2	6	0	-	-	cleanup recovery retains source warning policy and ordering
+deduced	deduced.c	0	4	0	-	-	cleanup deduction rechecks types without an alignment warning
+macro	macro.c	2	3	0	-	-	cleanup alignment warnings retain macro argument locations
+disabled	later-functions.c	0	3	0	-	-Wno-align-mismatch	cleanup recovery honors command-line warning suppression
+promoted	later-functions.c	0	7	0	-	-Werror=align-mismatch	cleanup recovery honors command-line warning promotion
+error-limit	later-functions.c	3	3	0	-	-ferror-limit=2	cleanup alignment warning precedes the error-limit cutoff
+fatal-first	same-body.c	0	1	0	-	-Wfatal-errors	cleanup recovery publishes nothing past a fatal error

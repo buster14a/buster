@@ -778,7 +778,7 @@ static IrType ir_inline_whole(uint8_t first, uint8_t second, bool alone, uint64_
 
 static IrType ir_inline_argument_whole(AbiLocation location, uint64_t size, uint8_t allowed)
 {
-    return location.kind == BUSTER_ABI_LOCATION_REGISTERS ? ir_inline_whole(location.registers[0], location.registers[1], (location.flags & (BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW)) != 0, size, allowed) :
+    return location.kind == BUSTER_ABI_LOCATION_REGISTERS ? ir_inline_whole(location.registers[0], location.registers[1], (abi_location_flags(location) & (BUSTER_ABI_FLAG_HIGH | BUSTER_ABI_FLAG_LOW)) != 0, size, allowed) :
                                                             IR_VOID;
 }
 

@@ -8929,8 +8929,47 @@ static CheckDriverRound check_driver_rejected_read(const Parser* unit, const Par
                 }
             }
         }
-        // Errors alone: the reading's warnings are the next round's, and its unit-wide records (pragmas, implicit
-        // declarations, K&R's) the first reading's.
+        // A cleanup type error removes its declaration in the next round, including the alignment warning that
+        // precedes it (#1844). Keep that pair together, but only for a report trusted as new above: another view's
+        // warning may be the edit's own, and a report already published must not duplicate its warning.
+        const uint32_t warning_count = input.warning_events.count;
+        const uint32_t first_warning_count = first->count;
+        const CheckWarningEvent* const first_warnings = first->events;
+        bool cleanup_error = false;
+        for (uint32_t i = 0; !cleanup_error && i < published.report_count; i += 1)
+        {
+            cleanup_error = published.reports[i].message == CHECK_INPUT_CLEANUP_TYPE;
+        }
+        CheckWarningEvent* warnings = valid && cleanup_error && warning_count != 0 ? BUSTER_ARENA_PUSH_ARRAY(arena, CheckWarningEvent, warning_count) : NULL;
+        valid = valid && (!cleanup_error || warning_count == 0 || warnings != NULL);
+        CheckWarningEvents alignment =
+        {
+            .events = warnings,
+            .notes = input.warning_events.notes,
+            .note_count = input.warning_events.note_count,
+        };
+        for (uint32_t i = 0; warnings != NULL && i < warning_count; i += 1)
+        {
+            const CheckWarningEvent* event = input.warning_events.events + i;
+            bool paired = false;
+            for (uint32_t j = 0; event->kind == CHECK_WARNING_EVENT_ALIGN_MISMATCH && !paired && j < published.report_count; j += 1)
+            {
+                paired = published.reports[j].message == CHECK_INPUT_CLEANUP_TYPE && published.reports[j].token == event->token;
+            }
+            const uint32_t at = edited && event->token < view_count ? view.to_original[event->token] : event->token;
+            bool known = false;
+            for (uint32_t j = 0; paired && !known && at < unit_stop && j < first_warning_count; j += 1)
+            {
+                known = first_warnings[j].kind == event->kind && first_warnings[j].token == at;
+            }
+            if (paired && !known)
+            {
+                warnings[alignment.count++] = *event;
+            }
+        }
+        valid = valid && check_driver_warning_events_at(parser, pp, &input, &types, &alignment, NULL, publication_end, scratch);
+        // The other warnings are the next round's, and the unit-wide records (pragmas, implicit declarations, K&R's)
+        // the first reading's.
         published.implicit_function_count = 0;
         published.kr_diagnostic_count = 0;
         published.fp_pragma_count = 0;
@@ -10689,6 +10728,9 @@ static bool check_driver_provisional_refresh(CheckProgram* over, const CheckProg
         over->switch_count = program->switch_count;
         over->lifetime_event_count = program->lifetime_event_count;
         over->region_reached = program->region_reached;
+        over->abi_emission_nodes = program->abi_emission_nodes;
+        over->abi_emission_objects = program->abi_emission_objects;
+        over->abi_emission_types = program->abi_emission_types;
     }
     arena_pop_to(scratch, mark);
     return valid;
@@ -14453,7 +14495,8 @@ static int check_driver_unit(const CheckDriverCommand* command, const PPOptions*
                                            check_driver_provisional_select(&provisional, &program, &data, scalar, &select_shared, output_arena, scratch);
                         CheckDriverLoop loop;
                         uint32_t compound_count = 0;
-                        windowed = provisional_made && command->windowed_loop && lanes != NULL &&
+                        // A late transparent union's signature cache needs the complete eager-emission walk (#1844).
+                        windowed = provisional_made && command->windowed_loop && lanes != NULL && !check_program_abi_late(&program, &data) &&
                                    check_driver_statement_assign(&program, &provisional.program, &compound_count, output_arena) &&
                                    check_driver_loop_prepare(&loop, &run, &provisional.program, output_arena);
                         if (windowed)
