@@ -4515,6 +4515,13 @@ static int c_direct_unit_tests(void)
         // 18. Casts the full pipeline's -Wpointer-to-int-cast family leaves alone: a pointer to a long and a _Bool, a long
         // and a constant to a pointer.
         "long casted(void* p, long l) { return (long)p + (_Bool)p + (long)(int*)l + (long)(int*)12; }\n",
+        // 18b. Attributes the full pipeline takes quietly where musl's headers put them: returns_twice on setjmp,
+        // format_arg on gettext (a string parameter and value, any character type), may_alias on a typedef, a struct,
+        // an object and a function.
+        "int setjmp_like(void*) __attribute__((__returns_twice__));\nchar* gettext_like(const char*) __attribute__((__format_arg__(1)));\n"
+        "unsigned char* bytes_like(char*) __attribute__((format_arg(1)));\ntypedef unsigned long __attribute__((__may_alias__)) Word;\n"
+        "struct __attribute__((may_alias)) Alias { int a; };\nint aliased __attribute__((may_alias));\n"
+        "Word attributed(const char* s) { return (Word)gettext_like(s) + (Word)bytes_like(0) + (Word)aliased; }\n",
         // 19. Copies the full pipeline's -Wfortify-source leaves alone: into what is left of an array past a constant (its
         // address in a register, spilled for the call), an object's own size, a pointer's, a variable size, a const
         // object's (no constant to it), a string that fits, a member array within its record, and a dead branch's.
@@ -4695,6 +4702,15 @@ static int c_direct_unit_tests(void)
         // -Wgnu-designator: an array designator without its `=`.
         "int a[3] = { [1] 2 };\nint f(void) { return a[1]; }\n",
         "int f(void) { int a[3] = { [1] 2 }; return a[1]; }\n",
+        // format_arg naming a parameter that isn't a string, past the parameters, on a function that doesn't return a
+        // string or has no prototype; returns_twice on an object; may_alias with an argument (errors and
+        // -Wignored-attributes).
+        "char* f(int x) __attribute__((format_arg(1)));\n",
+        "char* f(const char* s) __attribute__((format_arg(2)));\n",
+        "int f(const char* s) __attribute__((format_arg(1)));\n",
+        "char* f() __attribute__((format_arg(1)));\n",
+        "int v __attribute__((returns_twice));\n",
+        "int x __attribute__((may_alias(1)));\n",
         // -Wfortify-source: memcpy past a local array, a global's sum with a constant, a member array past its record, a
         // scalar's address, a sum spilled for the call; strcpy of a literal, strncpy's size, bcopy's destination, an
         // unused inline body's.

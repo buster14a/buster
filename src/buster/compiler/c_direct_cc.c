@@ -9727,6 +9727,22 @@ static __attribute__((noinline)) bool fast_cc_decl_attributes_valid(const FastCC
                     (f->format_first == 0 || (fn->is_variadic && f->format_first == fn->count + 1u));
         }
     }
+    // #3577: format_arg(INDEX) on a prototyped function, naming a pointer to a character type that it returns too (once
+    // on the two lists, or the same index on both).
+    const uint32_t format_arg = spec->format_arg != 0 ? spec->format_arg : decl->format_arg;
+    if (valid != 0 && format_arg != 0)
+    {
+        const FastComplexType* fn = cc->ctypes + (type & BUSTER_FTYPE_CIDX_MASK);
+        valid = function != 0 && !fn->is_oldstyle && format_arg <= fn->count &&
+                (spec->format_arg == 0 || decl->format_arg == 0 || spec->format_arg == decl->format_arg);
+        if (valid != 0)
+        {
+            const FastType pt = ftype_unqual(cc->param_types[fn->start + format_arg - 1u]);
+            const FastType rt = ftype_unqual(fn->inner);
+            valid = ftype_is_ptr(pt) && ftype_is_char_type(ftype_unqual(ftype_deref(cc, pt))) && ftype_is_ptr(rt) &&
+                    ftype_is_char_type(ftype_unqual(ftype_deref(cc, rt)));
+        }
+    }
     const uint32_t nonnull_mask = spec->nonnull_mask | decl->nonnull_mask;
     if (valid != 0 && nonnull_mask != 0)
     {

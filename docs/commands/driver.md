@@ -329,7 +329,11 @@ than its type and an `inline` main (errors), a string longer than its array
 modifiable left operand (`-Wparentheses-equality`), which a macro's grouping
 quiets: a `(` from a macro's body has data 1 (the `#define`'s loop marks it), so
 `if (IS1(x))` and sqlite's `ALWAYS(X)` stay direct, while one from a macro's
-argument (`ID((x == 1))`) leaves although the full pipeline is quiet. One
+argument (`ID((x == 1))`) leaves although the full pipeline is quiet.
+`returns_twice` (a function's), `format_arg(N)` (a prototyped function's whose
+parameter N and value point to a character type) and `may_alias` (anything's)
+are taken as the full pipeline takes them, where musl's `<setjmp.h>`,
+`<libintl.h>` and its word types put them. One
 gap is left: a loop's empty body (`for (...);`) is `-Wempty-body` only where the
 next statement is a block or is indented past the loop, as clang decides, and
 the direct path's tokens keep no columns, so it compiles such loops quietly as

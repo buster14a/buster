@@ -1058,6 +1058,7 @@ struct FastAttrInfo
     uint8_t format;         // format(printf|scanf, index, first)
     uint8_t format_scanf;
     uint32_t format_index;
+    uint32_t format_arg;    // format_arg(index): the index (#3577), 0 for none
     uint32_t format_first;
     const char* asm_label;
     uint32_t asm_label_len;
@@ -1086,6 +1087,7 @@ typedef enum FastAttrKind
     FATTR_UNUSED_RESULT,
     FATTR_FORMAT,
     FATTR_NONNULL,
+    FATTR_FORMAT_ARG,     // format_arg(index): a function's, whose parameter and value are strings (#3577)
 } FastAttrKind;
 
 // An attribute name's kind, its reserved spelling (`__name__`) already stripped.
@@ -1130,6 +1132,12 @@ static FastAttrKind fast_cc_attribute_kind(const char* s, uint32_t len)
         { "no_sanitize_memory", 18, FATTR_FUNCTION },
         { "no_sanitize_undefined", 21, FATTR_FUNCTION },
         { "no_address_safety_analysis", 26, FATTR_FUNCTION },
+        // #3577: setjmp's and gettext's declarations (musl's headers) and musl's word types: a function's, a
+        // function's with its string parameter checked where it is declared, and anything's, as the full pipeline
+        // takes them quietly.
+        { "returns_twice", 13, FATTR_FUNCTION },
+        { "format_arg", 10, FATTR_FORMAT_ARG },
+        { "may_alias", 9, FATTR_ANYWHERE },
     };
     FastAttrKind kind = FATTR_UNCHECKED;
     for (uint32_t i = 0; i < sizeof(names) / sizeof(names[0]); i += 1)
@@ -1369,6 +1377,20 @@ static void fast_cc_parse_attributes(FastCCState* cc, FastAttrInfo* attr)
                         break;
                     }
                     cc->pos += 7u;
+                }
+                else if (kind == FATTR_FORMAT_ARG)
+                {
+                    // format_arg(INDEX): the declaration checks the index against the function.
+                    attr->function_only = 1u;
+                    const bool shaped = has_args && fast_cc_peek_at(cc, 1u) == FTOK_INT_LIT && fast_cc_peek_at(cc, 2u) == FTOK_RPAREN &&
+                                        cc->td[cc->pos + 1u] != 0;
+                    if (!shaped)
+                    {
+                        fast_cc_bail(cc, "format_arg attribute's argument");
+                        break;
+                    }
+                    attr->format_arg = cc->td[cc->pos + 1u];
+                    cc->pos += 3u;
                 }
                 else if (kind == FATTR_NONNULL)
                 {
