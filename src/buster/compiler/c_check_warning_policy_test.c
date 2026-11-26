@@ -51,6 +51,9 @@ static void check_test_warning_policy(CheckTest* test)
         { CHECK_WARNING_ID_STATIC_LOCAL_INLINE, "-Wno-static-in-inline", NULL, CHECK_WARNING_WARNING },
         { CHECK_WARNING_ID_LITERAL_RANGE, "-w", "-Werror=literal-range", CHECK_WARNING_IGNORE },
         { CHECK_WARNING_ID_PLAIN_COMPLEX, "-Wno-everything", "-Werror=pedantic", CHECK_WARNING_IGNORE },
+        { CHECK_WARNING_ID_FORMAT_SIGNEDNESS, "-Wformat-signedness", NULL, CHECK_WARNING_WARNING },
+        { CHECK_WARNING_ID_FORMAT_NONLITERAL, "-Wformat-nonliteral", NULL, CHECK_WARNING_WARNING },
+        { CHECK_WARNING_ID_MISSING_FORMAT_ATTRIBUTE, "-Wmissing-format-attribute", NULL, CHECK_WARNING_WARNING },
         // The two string-addition warnings are independent, even when both diagnose one operator (#2406).
         { CHECK_WARNING_ID_STRING_PLUS_CHAR, "-Wno-string-plus-int", NULL, CHECK_WARNING_WARNING },
         { CHECK_WARNING_ID_STRING_PLUS_INT, "-Wno-string-plus-char", NULL, CHECK_WARNING_WARNING },
@@ -98,8 +101,11 @@ static void check_test_warning_policy(CheckTest* test)
     {
         const CheckWarningCommandLine enabled = check_warning_command_line(&empty, id, false, false);
         const CheckWarningCommandLine ignored = check_warning_command_line(&empty, id, true, false);
-        check_test_expect(test, enabled.severity == CHECK_WARNING_WARNING && ignored.severity == CHECK_WARNING_IGNORE,
-                          "event defaults remain independent of every high policy ID");
+        const bool format_opt_in = id == CHECK_WARNING_ID_FORMAT_SIGNEDNESS || id == CHECK_WARNING_ID_FORMAT_NONLITERAL ||
+                                   id == CHECK_WARNING_ID_MISSING_FORMAT_ATTRIBUTE;
+        const CheckWarningSeverity expected = format_opt_in ? CHECK_WARNING_IGNORE : CHECK_WARNING_WARNING;
+        check_test_expect(test, enabled.severity == expected && ignored.severity == CHECK_WARNING_IGNORE,
+                          "high policy IDs preserve their default severity and each event's suppression");
     }
     const char* arguments[] = { "-Wsystem-headers", "-Wno-system-headers" };
     PPOptions options = { .semantic_warning_options = arguments, .semantic_warning_option_count = 1 };
